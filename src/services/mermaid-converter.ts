@@ -147,7 +147,7 @@ function buildNodeLabel(
   }
 
   if (parts.length === 0) return title;
-  return `${title}\\n${parts.join(" ")}`;
+  return `${title}<br/>${parts.join(" ")}`;
 }
 
 function extractConnections(workflow: WorkflowJSON): ConnectionEdge[] {

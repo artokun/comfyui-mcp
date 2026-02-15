@@ -6,6 +6,7 @@ import { registerRegistrySearchTools } from "./registry-search.js";
 import { registerModelManagementTools } from "./model-management.js";
 import { registerSkillGeneratorTools } from "./skill-generator.js";
 import { registerDiagnosticsTools } from "./diagnostics.js";
+import { registerWorkflowLibraryTools } from "./workflow-library.js";
 
 export function registerAllTools(server: McpServer): void {
   registerWorkflowExecuteTools(server);
@@ -15,4 +16,5 @@ export function registerAllTools(server: McpServer): void {
   registerModelManagementTools(server);
   registerSkillGeneratorTools(server);
   registerDiagnosticsTools(server);
+  registerWorkflowLibraryTools(server);
 }
