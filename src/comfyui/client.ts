@@ -91,3 +91,41 @@ export async function getUpscaleModels(): Promise<string[]> {
 export function getComfyUIPath(): string | undefined {
   return config.comfyuiPath;
 }
+
+export async function getLogs(): Promise<string[]> {
+  const client = getClient();
+  const res = await client.fetchApi("/internal/logs");
+  const text = await res.text();
+
+  // ComfyUI returns logs as a JSON-encoded string with \n separators,
+  // or as raw text depending on version. Handle both.
+  try {
+    const parsed = JSON.parse(text);
+    if (typeof parsed === "string") {
+      return parsed.split("\n").filter(Boolean);
+    }
+  } catch {
+    // Not JSON — treat as raw text
+  }
+  return text.split("\n").filter(Boolean);
+}
+
+export interface HistoryEntry {
+  prompt: Record<string, unknown>;
+  outputs: Record<string, unknown>;
+  status: {
+    status_str: string;
+    completed: boolean;
+    messages: Array<[string, Record<string, unknown>]>;
+  };
+  meta?: Record<string, unknown>;
+}
+
+export async function getHistory(
+  promptId?: string,
+): Promise<Record<string, HistoryEntry>> {
+  const client = getClient();
+  const path = promptId ? `/history/${promptId}` : "/history";
+  const res = await client.fetchApi(path);
+  return res.json() as Promise<Record<string, HistoryEntry>>;
+}

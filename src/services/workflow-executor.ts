@@ -4,6 +4,8 @@ import {
   getSystemStats as clientGetSystemStats,
   getQueue as clientGetQueue,
   interrupt as clientInterrupt,
+  getHistory,
+  getLogs,
 } from "../comfyui/client.js";
 import type {
   WorkflowJSON,
@@ -106,7 +108,51 @@ export async function executeWorkflow(
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    throw new WorkflowExecutionError(`Workflow execution failed: ${message}`);
+
+    // Try to extract detailed error info from history and logs
+    let details = "";
+    try {
+      // The library embeds prompt_id in certain error types
+      const promptId = (err as { prompt_id?: string }).prompt_id;
+      if (promptId) {
+        const history = await getHistory(promptId);
+        const entry = Object.values(history)[0];
+        if (entry?.status) {
+          const errorMsg = entry.status.messages?.find(
+            (m: [string, Record<string, unknown>]) => m[0] === "execution_error",
+          );
+          if (errorMsg) {
+            const d = errorMsg[1] as Record<string, unknown>;
+            details += `\n\nNode: ${d.node_id} (${d.node_type})`;
+            details += `\nException: ${d.exception_type}: ${d.exception_message}`;
+            if (Array.isArray(d.traceback)) {
+              details += `\n\nTraceback:\n${d.traceback.join("")}`;
+            }
+          }
+        }
+      }
+    } catch {
+      // Best-effort — don't mask the original error
+    }
+
+    // Grab recent error lines from logs if no history details found
+    if (!details) {
+      try {
+        const lines = await getLogs();
+        const errorLines = lines
+          .filter((l) => /error|exception|traceback|failed/i.test(l))
+          .slice(-10);
+        if (errorLines.length > 0) {
+          details += "\n\nRecent error logs:\n" + errorLines.join("\n");
+        }
+      } catch {
+        // Best-effort
+      }
+    }
+
+    throw new WorkflowExecutionError(
+      `Workflow execution failed: ${message}${details}`,
+    );
   }
 }
 
