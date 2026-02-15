@@ -1,0 +1,15 @@
+{
+  "name": "comfyui-mcp",
+  "description": "ComfyUI integration for Claude Code — workflow execution, visualization, model management, and skill generation",
+  "owner": {
+    "name": "artokun"
+  },
+  "plugins": [
+    {
+      "name": "comfyui",
+      "source": "./claude-plugin",
+      "description": "ComfyUI integration: workflow execution, visualization, composition, model management, and skill generation",
+      "version": "0.1.0"
+    }
+  ]
+}
