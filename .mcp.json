@@ -3,8 +3,6 @@
     "command": "npx",
     "args": ["-y", "comfyui-mcp"],
     "env": {
-      "COMFYUI_HOST": "127.0.0.1",
-      "COMFYUI_PORT": "8000",
       "CIVITAI_API_TOKEN": ""
     }
   }

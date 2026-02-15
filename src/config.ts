@@ -84,26 +84,63 @@ function resolveComfyUIPath(envPath?: string): string | undefined {
   return detected[0];
 }
 
+/**
+ * Auto-detect which port ComfyUI is running on.
+ * Tries common ports: 8000 (Desktop app default), 8188 (repo/CLI default).
+ * Returns the first port that responds, or the default if none found.
+ */
+async function detectComfyUIPort(host: string): Promise<number> {
+  const ports = [8188, 8000];
+
+  for (const port of ports) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 1000);
+      const res = await fetch(`http://${host}:${port}/system_stats`, {
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      if (res.ok) {
+        console.error(`[comfyui-mcp] Found ComfyUI on port ${port}`);
+        return port;
+      }
+    } catch {
+      // Port not responding, try next
+    }
+  }
+
+  console.error(
+    `[comfyui-mcp] ComfyUI not detected on ports ${ports.join(", ")}. Defaulting to 8188.`,
+  );
+  return 8188;
+}
+
 const configSchema = z.object({
   comfyuiHost: z.string().default("127.0.0.1"),
-  comfyuiPort: z.coerce.number().int().positive().default(8188),
+  comfyuiPort: z.coerce.number().int().positive().optional(),
   comfyuiPath: z.string().optional(),
   huggingfaceToken: z.string().optional(),
   githubToken: z.string().optional(),
   civitaiApiToken: z.string().optional(),
 });
 
-export type Config = z.infer<typeof configSchema>;
+export type Config = z.infer<typeof configSchema> & { resolvedPort: number };
 
-export const config: Config = configSchema.parse({
+const parsedConfig = configSchema.parse({
   comfyuiHost: process.env.COMFYUI_HOST,
-  comfyuiPort: process.env.COMFYUI_PORT,
+  comfyuiPort: process.env.COMFYUI_PORT || undefined,
   comfyuiPath: resolveComfyUIPath(process.env.COMFYUI_PATH),
   huggingfaceToken: process.env.HUGGINGFACE_TOKEN,
   githubToken: process.env.GITHUB_TOKEN,
   civitaiApiToken: process.env.CIVITAI_API_TOKEN,
 });
 
+// Resolve port: explicit env var wins, otherwise auto-detect
+const resolvedPort = parsedConfig.comfyuiPort
+  ?? await detectComfyUIPort(parsedConfig.comfyuiHost);
+
+export const config: Config = { ...parsedConfig, resolvedPort };
+
 export function getComfyUIApiHost(): string {
-  return `${config.comfyuiHost}:${config.comfyuiPort}`;
+  return `${config.comfyuiHost}:${config.resolvedPort}`;
 }
