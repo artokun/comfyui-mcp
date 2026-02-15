@@ -1,0 +1,12 @@
+src/
+.env
+.env.example
+.gitignore
+.claude/
+.claude-plugin/
+agents/
+commands/
+hooks/
+skills/
+tsconfig.json
+*.tsbuildinfo
