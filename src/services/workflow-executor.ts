@@ -20,6 +20,30 @@ export interface ExecuteWorkflowOptions {
   disable_random_seed?: boolean;
 }
 
+async function fetchImageFromUrl(
+  url: string,
+): Promise<{ data: string; mime: string } | null> {
+  try {
+    const response = await fetch(url);
+    if (!response.ok) {
+      logger.warn("Failed to fetch image from ComfyUI", {
+        url,
+        status: response.status,
+      });
+      return null;
+    }
+    const buffer = await response.arrayBuffer();
+    const mime = response.headers.get("content-type") || "image/png";
+    return { data: arrayBufferToBase64(buffer), mime };
+  } catch (err) {
+    logger.warn("Error fetching image", {
+      url,
+      error: err instanceof Error ? err.message : err,
+    });
+    return null;
+  }
+}
+
 export async function executeWorkflow(
   workflowJson: WorkflowJSON,
   options?: ExecuteWorkflowOptions,
@@ -53,15 +77,22 @@ export async function executeWorkflow(
       },
     );
 
-    const images = result.images
-      .filter(
-        (img): img is { type: "buff"; data: ArrayBuffer; mime: string } =>
-          img.type === "buff",
-      )
-      .map((img) => ({
-        data: arrayBufferToBase64(img.data),
-        mime: img.mime,
-      }));
+    // Handle both "buff" (ArrayBuffer) and "url" (ComfyUI /view endpoint) image types
+    const images: { data: string; mime: string }[] = [];
+
+    for (const img of result.images) {
+      if (img.type === "buff") {
+        const typedImg = img as { type: "buff"; data: ArrayBuffer; mime: string };
+        images.push({
+          data: arrayBufferToBase64(typedImg.data),
+          mime: typedImg.mime,
+        });
+      } else if (img.type === "url") {
+        const typedImg = img as { type: "url"; data: string };
+        const fetched = await fetchImageFromUrl(typedImg.data);
+        if (fetched) images.push(fetched);
+      }
+    }
 
     logger.info("Workflow execution completed", {
       prompt_id: result.prompt_id,

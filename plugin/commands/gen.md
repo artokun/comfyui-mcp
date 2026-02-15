@@ -46,6 +46,13 @@ The user wants to generate an image using ComfyUI. Their prompt is provided as t
 
 6. **Show the result.** The response will include base64 images. Present them to the user. If the generation failed, show the error and suggest fixes.
 
+7. **Open the image.** After generation, open the image so the user can see it immediately without navigating to the output folder. Use the Bash tool with the appropriate command for the OS:
+   - **macOS**: `open /path/to/image.png`
+   - **Linux**: `xdg-open /path/to/image.png`
+   - **Windows**: `start "" "/path/to/image.png"`
+
+   The image will be saved to ComfyUI's output directory (check `get_system_stats` for the `--output-directory` arg, or default to `~/Documents/ComfyUI/output/`). Find the most recently created file there after the workflow completes.
+
 ## Model Selection Logic
 
 When choosing a checkpoint, consider:

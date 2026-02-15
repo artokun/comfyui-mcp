@@ -46,8 +46,11 @@ export async function getObjectInfo(): Promise<ObjectInfo> {
 
 export async function getQueue(): Promise<QueueStatus> {
   const client = getClient();
-  const queue = await client.getQueue();
-  return queue as unknown as QueueStatus;
+  const queue = await client.getQueue() as Record<string, unknown>;
+  return {
+    queue_running: (queue.Running ?? queue.queue_running ?? []) as QueueStatus["queue_running"],
+    queue_pending: (queue.Pending ?? queue.queue_pending ?? []) as QueueStatus["queue_pending"],
+  };
 }
 
 export async function interrupt(): Promise<void> {
