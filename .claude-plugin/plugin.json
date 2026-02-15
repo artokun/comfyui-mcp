@@ -1,5 +1,5 @@
 {
-  "name": "comfy-claude",
+  "name": "comfy",
   "version": "0.1.0",
   "description": "Claude Code plugin for ComfyUI — generate images, visualize workflows, manage models, and explore custom nodes",
   "author": {

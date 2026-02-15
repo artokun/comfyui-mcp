@@ -7,7 +7,7 @@
   },
   "plugins": [
     {
-      "name": "comfy-claude",
+      "name": "comfy",
       "source": "./",
       "description": "Claude Code plugin for ComfyUI — generate images, visualize workflows, manage models, and explore custom nodes",
       "version": "0.1.0"
