@@ -1,0 +1,10 @@
+{
+  "name": "comfyui",
+  "version": "0.1.0",
+  "description": "ComfyUI integration: workflow execution, visualization, composition, model management, and skill generation",
+  "author": {
+    "name": "digitalpine"
+  },
+  "repository": "https://github.com/digitalpine/comfyui-mcp",
+  "keywords": ["comfyui", "stable-diffusion", "image-generation", "mcp"]
+}

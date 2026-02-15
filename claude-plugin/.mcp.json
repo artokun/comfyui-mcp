@@ -1,0 +1,11 @@
+{
+  "comfyui": {
+    "command": "node",
+    "args": ["${CLAUDE_PLUGIN_ROOT}/dist/index.js"],
+    "env": {
+      "COMFYUI_HOST": "127.0.0.1",
+      "COMFYUI_PORT": "8000",
+      "CIVITAI_API_TOKEN": ""
+    }
+  }
+}
