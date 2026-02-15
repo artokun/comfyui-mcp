@@ -1,4 +1,5 @@
 {
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "comfyui-mcp",
   "description": "ComfyUI integration for Claude Code — workflow execution, visualization, model management, and skill generation",
   "owner": {
