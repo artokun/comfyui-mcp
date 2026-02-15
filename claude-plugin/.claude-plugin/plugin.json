@@ -1,10 +1,10 @@
 {
-  "name": "comfyui",
+  "name": "comfy-claude",
   "version": "0.1.0",
-  "description": "ComfyUI integration: workflow execution, visualization, composition, model management, and skill generation",
+  "description": "Claude Code plugin for ComfyUI — generate images, visualize workflows, manage models, and explore custom nodes",
   "author": {
-    "name": "digitalpine"
+    "name": "artokun"
   },
-  "repository": "https://github.com/digitalpine/comfyui-mcp",
+  "repository": "https://github.com/artokun/comfyui-mcp",
   "keywords": ["comfyui", "stable-diffusion", "image-generation", "mcp"]
 }

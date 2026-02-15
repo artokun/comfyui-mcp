@@ -6,9 +6,9 @@
   },
   "plugins": [
     {
-      "name": "comfyui",
+      "name": "comfy-claude",
       "source": "./claude-plugin",
-      "description": "ComfyUI integration: workflow execution, visualization, composition, model management, and skill generation",
+      "description": "Claude Code plugin for ComfyUI — generate images, visualize workflows, manage models, and explore custom nodes",
       "version": "0.1.0"
     }
   ]
