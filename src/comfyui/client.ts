@@ -32,6 +32,38 @@ export async function connectClient(): Promise<Client> {
   }
 }
 
+/**
+ * Ensures WebSocket is connected, auto-reconnecting if stale.
+ * Only needed before WebSocket-dependent operations (enqueue with progress tracking).
+ */
+export async function ensureConnected(): Promise<Client> {
+  const client = getClient();
+
+  // If the socket looks healthy, return immediately
+  if (!client.closed) {
+    return client;
+  }
+
+  // Socket is stale — reset and reconnect
+  logger.info("WebSocket stale (closed=true), reconnecting...");
+  resetClient();
+
+  try {
+    return await connectClient();
+  } catch {
+    // First attempt failed — reset singleton completely and retry once
+    logger.warn("Reconnect failed, resetting client and retrying...");
+    resetClient();
+    try {
+      return await connectClient();
+    } catch (err) {
+      throw new ConnectionError(
+        `Failed to reconnect to ComfyUI after retry: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  }
+}
+
 export async function getSystemStats(): Promise<SystemStats> {
   const client = getClient();
   const stats = await client.getSystemStats();
@@ -53,9 +85,40 @@ export async function getQueue(): Promise<QueueStatus> {
   };
 }
 
-export async function interrupt(): Promise<void> {
+export async function interrupt(promptId?: string): Promise<void> {
   const client = getClient();
-  await client.interrupt();
+  await client.interrupt(promptId ?? null);
+}
+
+/**
+ * Fire-and-forget: enqueue a prompt via HTTP POST (no WebSocket needed).
+ * Returns prompt_id and queue position immediately.
+ */
+export async function enqueuePrompt(
+  workflow: Record<string, unknown>,
+): Promise<{ prompt_id: string; queue_remaining?: number }> {
+  const client = getClient();
+  const result = await client._enqueue_prompt(workflow);
+  return {
+    prompt_id: result.prompt_id,
+    queue_remaining: result.exec_info?.queue_remaining,
+  };
+}
+
+/**
+ * Remove a specific pending job from the queue by prompt_id.
+ */
+export async function deleteQueueItem(id: string): Promise<void> {
+  const client = getClient();
+  await client.deleteItem("queue", id);
+}
+
+/**
+ * Clear all pending jobs from the queue (doesn't affect running job).
+ */
+export async function clearQueue(): Promise<void> {
+  const client = getClient();
+  await client.clearItems("queue");
 }
 
 export async function getSamplers(): Promise<string[]> {

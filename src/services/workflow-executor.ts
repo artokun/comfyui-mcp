@@ -1,19 +1,17 @@
 import {
   getClient,
-  connectClient,
+  ensureConnected,
+  enqueuePrompt as clientEnqueuePrompt,
   getSystemStats as clientGetSystemStats,
-  getQueue as clientGetQueue,
-  interrupt as clientInterrupt,
   getHistory,
   getLogs,
 } from "../comfyui/client.js";
 import type {
   WorkflowJSON,
   SystemStats,
-  QueueStatus,
   JobResult,
 } from "../comfyui/types.js";
-import { WorkflowExecutionError, ConnectionError } from "../utils/errors.js";
+import { WorkflowExecutionError } from "../utils/errors.js";
 import { arrayBufferToBase64 } from "../utils/image.js";
 import { logger } from "../utils/logger.js";
 
@@ -50,17 +48,9 @@ export async function executeWorkflow(
   workflowJson: WorkflowJSON,
   options?: ExecuteWorkflowOptions,
 ): Promise<JobResult> {
+  // Ensure WebSocket is connected (auto-reconnects if stale)
+  await ensureConnected();
   const client = getClient();
-
-  // Ensure WebSocket is connected for enqueue (uses WS internally)
-  try {
-    await connectClient();
-  } catch (err) {
-    if (err instanceof ConnectionError) throw err;
-    throw new ConnectionError(
-      `Failed to connect: ${err instanceof Error ? err.message : err}`,
-    );
-  }
 
   logger.info("Enqueueing workflow for execution");
 
@@ -156,22 +146,53 @@ export async function executeWorkflow(
   }
 }
 
-export async function getJobStatus(
-  promptId: string,
-): Promise<{ running: boolean; pending: boolean; done: boolean }> {
-  const client = getClient();
-  return client.getPromptStatus(promptId);
-}
-
-export async function getQueueStatus(): Promise<QueueStatus> {
-  return clientGetQueue();
-}
-
-export async function cancelCurrentJob(): Promise<void> {
-  await clientInterrupt();
-  logger.info("Current job interrupted");
-}
-
 export async function getSystemInfo(): Promise<SystemStats> {
   return clientGetSystemStats();
+}
+
+export interface EnqueueWorkflowOptions {
+  disable_random_seed?: boolean;
+}
+
+/**
+ * Randomize seed and noise_seed fields in a workflow.
+ * Replicates the behavior that the SDK's `enqueue()` does internally,
+ * since `_enqueue_prompt()` is the raw HTTP POST without seed randomization.
+ */
+function randomizeSeeds(workflow: WorkflowJSON): WorkflowJSON {
+  const copy = JSON.parse(JSON.stringify(workflow)) as WorkflowJSON;
+  for (const node of Object.values(copy)) {
+    if (node.inputs) {
+      for (const key of ["seed", "noise_seed"]) {
+        if (
+          key in node.inputs &&
+          typeof node.inputs[key] === "number"
+        ) {
+          node.inputs[key] = Math.floor(Math.random() * 2 ** 32);
+        }
+      }
+    }
+  }
+  return copy;
+}
+
+/**
+ * Fire-and-forget workflow enqueue. Returns prompt_id immediately
+ * without waiting for execution to complete.
+ */
+export async function enqueueWorkflow(
+  workflowJson: WorkflowJSON,
+  options?: EnqueueWorkflowOptions,
+): Promise<{ prompt_id: string; queue_remaining?: number }> {
+  const workflow = options?.disable_random_seed
+    ? workflowJson
+    : randomizeSeeds(workflowJson);
+
+  logger.info("Enqueueing workflow (fire-and-forget)");
+  const result = await clientEnqueuePrompt(workflow as Record<string, unknown>);
+  logger.info("Workflow enqueued", {
+    prompt_id: result.prompt_id,
+    queue_remaining: result.queue_remaining,
+  });
+  return result;
 }

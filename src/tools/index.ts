@@ -3,6 +3,7 @@ import { registerWorkflowExecuteTools } from "./workflow-execute.js";
 import { registerWorkflowVisualizeTools } from "./workflow-visualize.js";
 import { registerWorkflowComposeTools } from "./workflow-compose.js";
 import { registerWorkflowValidateTools } from "./workflow-validate.js";
+import { registerQueueManagementTools } from "./queue-management.js";
 import { registerRegistrySearchTools } from "./registry-search.js";
 import { registerModelManagementTools } from "./model-management.js";
 import { registerSkillGeneratorTools } from "./skill-generator.js";
@@ -18,6 +19,7 @@ export function registerAllTools(server: McpServer): void {
   registerWorkflowVisualizeTools(server);
   registerWorkflowComposeTools(server);
   registerWorkflowValidateTools(server);
+  registerQueueManagementTools(server);
   registerRegistrySearchTools(server);
   registerModelManagementTools(server);
   registerSkillGeneratorTools(server);

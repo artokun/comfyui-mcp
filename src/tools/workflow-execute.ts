@@ -2,9 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   executeWorkflow,
-  getJobStatus,
-  getQueueStatus,
-  cancelCurrentJob,
+  enqueueWorkflow,
   getSystemInfo,
 } from "../services/workflow-executor.js";
 import { errorToToolResult } from "../utils/errors.js";
@@ -77,70 +75,35 @@ export function registerWorkflowExecuteTools(server: McpServer): void {
   );
 
   server.tool(
-    "get_job_status",
-    "Check the execution status of a ComfyUI prompt/job by its ID.",
+    "enqueue_workflow",
+    "Fire-and-forget: submit a ComfyUI workflow for execution and return immediately with the prompt_id and queue position. Does not wait for completion. Use get_job_status to check progress later.",
     {
-      prompt_id: z.string().describe("The prompt ID returned by run_workflow"),
+      workflow: z
+        .record(z.string(), z.any())
+        .describe("ComfyUI workflow in API format (node ID -> {class_type, inputs})"),
+      disable_random_seed: z
+        .boolean()
+        .optional()
+        .describe("If true, do not randomize seed values"),
     },
     async (args) => {
       try {
-        const status = await getJobStatus(args.prompt_id);
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify(status, null, 2),
-            },
-          ],
-        };
-      } catch (err) {
-        return errorToToolResult(err);
-      }
-    },
-  );
-
-  server.tool(
-    "get_queue",
-    "Get the current ComfyUI execution queue showing running and pending jobs.",
-    {},
-    async () => {
-      try {
-        const queue = await getQueueStatus();
+        const result = await enqueueWorkflow(args.workflow, {
+          disable_random_seed: args.disable_random_seed,
+        });
         return {
           content: [
             {
               type: "text" as const,
               text: JSON.stringify(
                 {
-                  running: queue.queue_running.length,
-                  pending: queue.queue_pending.length,
-                  queue_running: queue.queue_running,
-                  queue_pending: queue.queue_pending,
+                  status: "enqueued",
+                  prompt_id: result.prompt_id,
+                  queue_remaining: result.queue_remaining,
                 },
                 null,
                 2,
               ),
-            },
-          ],
-        };
-      } catch (err) {
-        return errorToToolResult(err);
-      }
-    },
-  );
-
-  server.tool(
-    "cancel_job",
-    "Interrupt/cancel the currently running ComfyUI job.",
-    {},
-    async () => {
-      try {
-        await cancelCurrentJob();
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: "Current job cancelled successfully.",
             },
           ],
         };
