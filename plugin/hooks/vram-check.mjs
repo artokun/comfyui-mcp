@@ -1,15 +1,16 @@
 #!/usr/bin/env node
 /**
  * PreToolUse hook for run_workflow.
- * Checks available VRAM before execution and warns if it's critically low.
+ * 1. Checks if ComfyUI is reachable — blocks with a message to start it if not.
+ * 2. Checks available VRAM and warns if critically low.
  *
  * Exit 0 = allow tool execution.
- * Exit 2 = block with message (returned as JSON on stdout).
+ * JSON stdout with permissionDecision = structured control.
  */
 
 const VRAM_WARNING_MB = 1024; // Warn if less than 1GB free
 
-async function checkVram() {
+async function check() {
   try {
     // Try common ComfyUI ports
     const ports = [8188, 8000];
@@ -32,8 +33,23 @@ async function checkVram() {
       }
     }
 
-    if (!stats?.devices?.[0]) {
-      // Can't reach ComfyUI or no GPU info — allow execution
+    if (!stats) {
+      // ComfyUI is not reachable — block and tell Claude to start it
+      console.log(
+        JSON.stringify({
+          hookSpecificOutput: {
+            hookEventName: "PreToolUse",
+            permissionDecision: "deny",
+            permissionDecisionReason:
+              "ComfyUI is not running. Use start_comfyui to start it first.",
+          },
+        }),
+      );
+      process.exit(0);
+    }
+
+    if (!stats.devices?.[0]) {
+      // No GPU info — allow execution anyway
       process.exit(0);
     }
 
@@ -57,4 +73,4 @@ async function checkVram() {
   }
 }
 
-checkVram();
+check();
