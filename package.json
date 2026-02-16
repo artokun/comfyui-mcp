@@ -11,10 +11,13 @@
     "build": "tsc",
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
-    "test": "vitest run",
+    "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
-    "test:integration": "COMFYUI_INTEGRATION=true vitest run",
-    "lint": "tsc --noEmit"
+    "test:integration": "cross-env COMFYUI_INTEGRATION=true vitest run",
+    "lint": "tsc --noEmit",
+    "release": "npm version patch && git push --follow-tags",
+    "release:minor": "npm version minor && git push --follow-tags",
+    "release:major": "npm version major && git push --follow-tags"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
@@ -24,10 +27,26 @@
   },
   "devDependencies": {
     "@types/node": "^22.13.4",
+    "cross-env": "^10.1.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3",
     "vitest": "^3.0.5"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/artokun/comfyui-mcp.git"
+  },
+  "keywords": [
+    "comfyui",
+    "mcp",
+    "model-context-protocol",
+    "stable-diffusion",
+    "image-generation",
+    "claude-code",
+    "claude-plugin"
+  ],
+  "author": "artokun",
+  "license": "MIT",
   "engines": {
     "node": ">=22.0.0"
   }

@@ -36,29 +36,46 @@ function detectComfyUIPaths(): string[] {
   candidates.push("/opt/ComfyUI");
   candidates.push(join(home, ".local", "share", "ComfyUI"));
 
-  // Windows common paths (via WSL or native)
+  // Windows common paths
   candidates.push(join(home, "AppData", "Local", "ComfyUI"));
   candidates.push(join(home, "Desktop", "ComfyUI"));
 
-  // Also scan ~/Documents for any ComfyUI-named directories
-  const documentsDir = join(home, "Documents");
-  try {
-    if (existsSync(documentsDir)) {
-      const entries = readdirSync(documentsDir, { withFileTypes: true });
+  // Windows: ComfyUI Desktop app installs here
+  candidates.push(
+    join(home, "AppData", "Local", "Programs", "ComfyUI", "resources", "ComfyUI"),
+  );
+
+  // Scan ~/Documents and ~/My Documents for any ComfyUI-named directories
+  const documentsDirs = [
+    join(home, "Documents"),
+    join(home, "My Documents"),
+  ];
+  for (const dir of documentsDirs) {
+    try {
+      if (!existsSync(dir)) continue;
+      const entries = readdirSync(dir, { withFileTypes: true });
       for (const entry of entries) {
         if (entry.isDirectory() && entry.name.toLowerCase().includes("comfyui")) {
-          const fullPath = join(documentsDir, entry.name);
+          const fullPath = join(dir, entry.name);
           if (!candidates.includes(fullPath)) {
             candidates.push(fullPath);
           }
         }
       }
+    } catch {
+      // Ignore permission errors
     }
-  } catch {
-    // Ignore permission errors
   }
 
-  return candidates.filter((p) => existsSync(p));
+  // Filter to paths that exist and look like actual ComfyUI installations
+  // (must have a models/ or custom_nodes/ subdirectory, or be a known install path)
+  return candidates.filter((p) => {
+    if (!existsSync(p)) return false;
+    // Known install paths are trusted without marker check
+    if (!p.includes("Documents")) return true;
+    // For scanned directories, verify it's a real ComfyUI install
+    return existsSync(join(p, "models")) || existsSync(join(p, "custom_nodes"));
+  });
 }
 
 /**
