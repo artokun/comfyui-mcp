@@ -187,8 +187,9 @@ export async function extractSettings(
   let loaderClassType = "CheckpointLoaderSimple";
 
   if (isIntegrated) {
-    // QwenImageIntegratedKSampler has unet, clip, vae inputs directly
-    const unetRef = resolveRef(workflow, inputs.unet);
+    // QwenImageIntegratedKSampler: v1 uses "unet" input, v2 uses "model" input
+    const modelInput = inputs.model ?? inputs.unet;
+    const unetRef = resolveRef(workflow, modelInput);
     if (unetRef && MODEL_LOADER_NODES.has(unetRef.class_type)) {
       loaderClassType = unetRef.class_type;
       modelName =
