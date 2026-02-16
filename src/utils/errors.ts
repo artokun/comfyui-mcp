@@ -62,6 +62,13 @@ export class ModelError extends ComfyUIError {
   }
 }
 
+export class ProcessControlError extends ComfyUIError {
+  constructor(message: string, details?: unknown) {
+    super(message, "PROCESS_CONTROL_ERROR", details);
+    this.name = "ProcessControlError";
+  }
+}
+
 export function errorToToolResult(err: unknown): CallToolResult {
   if (err instanceof ComfyUIError) return err.toToolResult();
   const message = err instanceof Error ? err.message : String(err);

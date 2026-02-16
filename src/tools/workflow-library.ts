@@ -81,4 +81,61 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
       }
     },
   );
+
+  server.tool(
+    "save_workflow",
+    "Save a workflow to the ComfyUI user library so it appears in the web UI. Accepts either API format or UI format JSON.",
+    {
+      filename: z
+        .string()
+        .describe(
+          "Filename to save as (e.g. 'my_workflow.json'). Will overwrite if it already exists.",
+        ),
+      workflow: z
+        .union([z.string(), z.record(z.any())])
+        .describe("Workflow JSON to save (API or UI format)"),
+    },
+    async (args) => {
+      try {
+        const client = getClient();
+        const encoded = encodeURIComponent(args.filename);
+        const body =
+          typeof args.workflow === "string"
+            ? args.workflow
+            : JSON.stringify(args.workflow);
+
+        const res = await client.fetchApi(
+          `/api/userdata/workflows/${encoded}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body,
+          },
+        );
+
+        if (!res.ok) {
+          const errText = await res.text().catch(() => "");
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Failed to save workflow: ${res.status} ${res.statusText}${errText ? `\n${errText}` : ""}`,
+              },
+            ],
+          };
+        }
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Workflow saved as "${args.filename}" in the ComfyUI user library.`,
+            },
+          ],
+        };
+      } catch (err) {
+        return errorToToolResult(err);
+      }
+    },
+  );
 }

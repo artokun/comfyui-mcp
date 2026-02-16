@@ -44,7 +44,7 @@ Claude will find (or download) a checkpoint, build a workflow, execute it, and r
 
 ## Claude Code Plugin
 
-This package also ships as a **Claude Code plugin**, providing slash commands, skills, and an explorer agent on top of the MCP tools.
+This package also ships as a **Claude Code plugin**, providing slash commands, skills, agents, and hooks on top of the MCP tools.
 
 ### Install as a plugin
 
@@ -59,14 +59,37 @@ claude plugin install comfyui-mcp
 | `/comfy:gen <prompt>` | Generate an image from a text description |
 | `/comfy:viz <workflow>` | Visualize a workflow as a Mermaid diagram |
 | `/comfy:node-skill <pack>` | Generate a Claude skill for a custom node pack |
+| `/comfy:debug [prompt_id]` | Diagnose why a workflow failed |
+| `/comfy:batch <prompt, params>` | Parameter sweep generation (cfg, sampler, steps, etc.) |
+| `/comfy:convert <file>` | Convert between UI format and API format |
+| `/comfy:install <pack>` | Install a custom node pack (git clone + pip install) |
+| `/comfy:gallery [filter]` | Browse generated outputs with metadata |
+| `/comfy:compare <a vs b>` | Diff two workflows side by side |
+| `/comfy:recipe <name> <prompt>` | Multi-step recipes (portrait, hires-fix, style-transfer, product-shot) |
 
-### Built-in skill
+### Built-in skills
 
-The **comfyui-core** skill gives Claude deep knowledge of ComfyUI's workflow format, node types, data flow patterns, and pipeline architecture — so it can build and debug workflows without guessing.
+| Skill | Description |
+|-------|-------------|
+| **comfyui-core** | Workflow format, node types, data flow patterns, pipeline architecture |
+| **prompt-engineering** | CLIP weight syntax, BREAK tokens, embeddings, model-specific prompting (SD1.5/SDXL/Flux/SD3) |
+| **troubleshooting** | Common error catalog — OOM, dtype mismatches, missing nodes, NaN, black images, CUDA errors |
+| **model-compatibility** | Compatibility matrix — loaders, resolutions, CFG, samplers, ControlNets, LoRAs, and VAEs per model family |
 
-### Explorer agent
+### Agents
 
-The **comfy-explorer** agent autonomously researches custom node packs: it reads documentation, queries node definitions from your running ComfyUI, finds example workflows, and generates comprehensive skill files.
+| Agent | Description |
+|-------|-------------|
+| **comfy-explorer** | Researches custom node packs, reads docs, queries node definitions, generates skill files |
+| **comfy-debugger** | Autonomously diagnoses workflow failures — gathers logs, traces root cause, proposes fixes |
+| **comfy-optimizer** | Analyzes workflows for performance — redundant nodes, VRAM waste, model-specific misconfigurations |
+
+### Hooks
+
+| Event | Trigger | Action |
+|-------|---------|--------|
+| PreToolUse | `run_workflow` | VRAM watchdog — warns if GPU memory is critically low before execution |
+| PostToolUse | `run_workflow` | Auto-opens the generated image in your system viewer |
 
 ---
 
@@ -126,6 +149,36 @@ The **comfy-explorer** agent autonomously researches custom node packs: it reads
 |------|-------------|
 | `list_workflows` | List saved workflows from ComfyUI's user library |
 | `get_workflow` | Load a specific saved workflow |
+| `save_workflow` | Save a workflow to the ComfyUI user library |
+
+### Workflow Validation
+
+| Tool | Description |
+|------|-------------|
+| `validate_workflow` | Dry-run validation: missing nodes, broken connections, missing models |
+
+### Image Management
+
+| Tool | Description |
+|------|-------------|
+| `upload_image` | Copy a local image into ComfyUI's input/ directory for img2img/inpaint/ControlNet |
+| `workflow_from_image` | Extract embedded workflow metadata from a ComfyUI-generated PNG |
+| `list_output_images` | Browse recently generated images from the output directory |
+
+### Memory Management
+
+| Tool | Description |
+|------|-------------|
+| `clear_vram` | Free GPU VRAM by unloading cached models (calls `/free` endpoint) |
+| `get_embeddings` | List installed textual inversion embeddings |
+
+### Process Control
+
+| Tool | Description |
+|------|-------------|
+| `stop_comfyui` | Stop the running ComfyUI process (saves restart info) |
+| `start_comfyui` | Start ComfyUI using info saved from a previous stop |
+| `restart_comfyui` | Stop and restart ComfyUI, preserving all launch arguments |
 
 ---
 
@@ -216,6 +269,38 @@ flowchart LR
 
 Generates a comprehensive skill file documenting every node, its inputs/outputs, and usage patterns.
 
+### Debug a failed workflow
+
+```
+> /comfy:debug
+```
+
+Automatically reads the last execution history and logs, identifies the failing node, checks for missing models or node packs, and suggests a fix.
+
+### Parameter sweep
+
+```
+> /comfy:batch a cat in a field, cfg:5-10:2, sampler:euler,dpmpp_2m
+```
+
+Generates a grid of images across all parameter combinations and presents the results for comparison.
+
+### Multi-step recipes
+
+```
+> /comfy:recipe hires-fix a dramatic fantasy landscape with castles
+```
+
+Runs a two-pass pipeline: txt2img at 512x768, then img2img upscale to 1024x1536 with detail enhancement.
+
+### Workflow validation
+
+```
+> Validate this workflow before I run it
+```
+
+Checks for missing nodes, broken connections, invalid output indices, and missing model files — without executing.
+
 ---
 
 ## Development
@@ -276,25 +361,28 @@ src/
     client.ts           # ComfyUI WebSocket/HTTP client wrapper
     types.ts            # TypeScript interfaces
   services/
-    workflow-executor.ts # Execute workflows, handle images & errors
-    workflow-composer.ts # Templates (txt2img, img2img, upscale, inpaint)
-    mermaid-converter.ts # Workflow -> Mermaid diagram
-    mermaid-parser.ts    # Mermaid diagram -> Workflow
-    model-resolver.ts    # HuggingFace search, local models, downloads
-    registry-client.ts   # ComfyUI Registry API
-    skill-generator.ts   # Generate node pack skill docs
-  tools/                 # MCP tool registration (one file per group)
+    workflow-executor.ts   # Execute workflows, handle images & errors
+    workflow-composer.ts   # Templates (txt2img, img2img, upscale, inpaint)
+    workflow-validator.ts  # Dry-run validation (missing nodes, models, connections)
+    image-management.ts    # Upload images, extract PNG metadata, list outputs
+    mermaid-converter.ts   # Workflow -> Mermaid diagram
+    mermaid-parser.ts      # Mermaid diagram -> Workflow
+    model-resolver.ts      # HuggingFace search, local models, downloads
+    process-control.ts     # Stop, start, restart ComfyUI process
+    registry-client.ts     # ComfyUI Registry API
+    skill-generator.ts     # Generate node pack skill docs
+  tools/                   # MCP tool registration (one file per group)
   utils/
-    errors.ts            # Custom error hierarchy with MCP integration
-    logger.ts            # stderr-only logging (safe for stdio transport)
-    image.ts             # Base64 encoding utilities
+    errors.ts              # Custom error hierarchy with MCP integration
+    logger.ts              # stderr-only logging (safe for stdio transport)
+    image.ts               # Base64 encoding utilities
 plugin/
-  .claude-plugin/        # Plugin manifest
-  .mcp.json              # MCP server config for plugin
-  commands/              # Slash command definitions
-  skills/                # Built-in knowledge (comfyui-core)
-  agents/                # Explorer agent
-  hooks/                 # Hook configuration
+  .claude-plugin/          # Plugin manifest
+  .mcp.json                # MCP server config for plugin
+  commands/                # Slash commands (gen, viz, debug, batch, convert, install, gallery, compare, recipe, node-skill)
+  skills/                  # Knowledge bases (comfyui-core, prompt-engineering, troubleshooting, model-compatibility)
+  agents/                  # Autonomous agents (explorer, debugger, optimizer)
+  hooks/                   # Pre/post tool-use hooks (VRAM check, auto-open image)
 ```
 
 ---

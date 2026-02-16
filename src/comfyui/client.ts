@@ -88,6 +88,18 @@ export async function getUpscaleModels(): Promise<string[]> {
   return client.getUpscaleModels();
 }
 
+export function resetClient(): void {
+  if (clientInstance) {
+    try {
+      clientInstance.close();
+    } catch {
+      // Ignore close errors — process may already be dead
+    }
+    clientInstance = null;
+    logger.info("ComfyUI client reset");
+  }
+}
+
 export function getComfyUIPath(): string | undefined {
   return config.comfyuiPath;
 }

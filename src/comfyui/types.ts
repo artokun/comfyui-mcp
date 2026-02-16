@@ -45,6 +45,8 @@ export interface SystemStats {
     os: string;
     python_version: string;
     embedded_python: boolean;
+    argv?: string[];
+    comfyui_version?: string;
   };
   devices: Array<{
     name: string;

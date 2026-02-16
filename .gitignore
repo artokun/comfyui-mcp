@@ -3,3 +3,5 @@ dist/
 .env
 *.tsbuildinfo
 .claude/
+model-settings.user.json
+workflows/
