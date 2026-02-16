@@ -120,8 +120,9 @@ SetLatentNoiseMask (samples, mask) → LATENT → KSampler.latent_image
 ### Quick Generation
 
 1. `create_workflow` with template `"txt2img"` and your params
-2. `run_workflow` with the returned JSON
-3. Images come back as base64 in the response
+2. `enqueue_workflow` with the returned JSON — returns `prompt_id` immediately
+3. Poll `get_job_status` with the `prompt_id` until `done` is true
+4. Use `list_output_images` (limit 1) to find the generated image, then `Read` to display it
 
 ### Inspect & Modify
 
@@ -160,15 +161,9 @@ HuggingFace is preferred for official/base models (SDXL, Flux, SD 1.5).
 - `get_node_pack_details` — get details about a specific pack
 - `generate_node_skill` — auto-generate a skill file for a node pack
 
-### Execution Modes
+### Workflow Execution
 
-**Blocking (default):** `run_workflow` — waits for completion, returns images as base64. Best for interactive generation where you need results immediately.
-
-**Fire-and-forget:** `enqueue_workflow` — submits to ComfyUI's queue and returns `prompt_id` + queue position immediately. Best for:
-- Queueing up multiple generations in batch
-- Long-running workflows where you don't want to block
-- Submitting work while another job is already running
-- Use `get_job_status` to poll for completion afterward
+`enqueue_workflow` submits to ComfyUI's queue and returns `prompt_id` + queue position immediately. It does NOT block — use `get_job_status` to poll for completion, then `list_output_images` or `get_history` to retrieve results.
 
 ### Queue Management
 
@@ -179,7 +174,6 @@ HuggingFace is preferred for official/base models (SDXL, Flux, SD 1.5).
 - `clear_queue` — remove all pending jobs (does NOT stop the currently running job)
 
 **When to use queue tools:**
-- Before `run_workflow`: check `get_queue` — if something is already running, consider `enqueue_workflow` instead to avoid blocking
 - After `enqueue_workflow`: use `get_job_status` to poll completion
 - To abort: `cancel_job` stops what's running now; `cancel_queued_job` removes a pending one
 - To start fresh: `clear_queue` then optionally `cancel_job`
@@ -217,5 +211,4 @@ The `mermaid_to_workflow` tool parses mermaid back into workflow JSON, using con
 2. **Web UI format**: Don't pass `{ nodes: [], links: [] }` — use API format
 3. **Missing VAE**: CheckpointLoaderSimple has 3 outputs — MODEL(0), CLIP(1), VAE(2)
 4. **Wrong output index**: Check the node's output list order via `get_node_info`
-5. **Seed handling**: `run_workflow` and `enqueue_workflow` randomize seeds by default unless `disable_random_seed: true`
-6. **Blocking when queue is busy**: If `get_queue` shows a running job, prefer `enqueue_workflow` over `run_workflow` to avoid blocking until the current job finishes
+5. **Seed handling**: `enqueue_workflow` randomizes seeds by default unless `disable_random_seed: true`

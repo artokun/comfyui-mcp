@@ -3,7 +3,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "mcp__plugin_comfy_comfyui__run_workflow",
+        "matcher": "mcp__plugin_comfy_comfyui__enqueue_workflow",
         "hooks": [
           {
             "type": "command",
@@ -17,17 +17,6 @@
           {
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/save-warning.mjs\""
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "mcp__plugin_comfy_comfyui__run_workflow",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/open-latest-image.mjs\""
           }
         ]
       }

@@ -42,7 +42,7 @@ The user wants to generate multiple images while sweeping across different param
 
 6. **Generate each combination.** For each parameter combination:
    - Call `create_workflow` with template `"txt2img"` and the current parameter set including `positive_prompt`
-   - Call `run_workflow` with the created workflow
+   - Call `enqueue_workflow` with the created workflow, then poll `get_job_status` until done
    - Track: parameter values used, success/failure, output filename
 
 7. **Present results.** After all runs complete, show a summary table:

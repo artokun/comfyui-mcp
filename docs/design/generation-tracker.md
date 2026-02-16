@@ -403,7 +403,7 @@ On submit, the worker does an UPSERT keyed on `settings_hash`:
 ## MCP Tools (New)
 
 ### `generation_log`
-Called automatically after `run_workflow` completes successfully.
+Called automatically when `enqueue_workflow` is invoked.
 Extracts settings from the executed workflow and logs to SQLite.
 Not exposed to the user — internal hook.
 

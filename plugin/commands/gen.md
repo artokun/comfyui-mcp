@@ -42,16 +42,18 @@ The user wants to generate an image using ComfyUI. Their prompt is provided as t
    - `template`: `"txt2img"`
    - `params`: Include `positive_prompt` from the user's input. Set `checkpoint` to the model filename. Use sensible defaults (1024x1024 for SDXL, 20 steps, cfg 8).
 
-5. **Run the workflow.** Pass the workflow JSON from step 3 directly to `run_workflow`.
+5. **Enqueue the workflow.** Pass the workflow JSON from step 3 to `enqueue_workflow`. This returns immediately with a `prompt_id`.
 
-6. **Show the result.** The response will include base64 images. Present them to the user. If the generation failed, show the error and suggest fixes.
+6. **Poll for completion.** Use `get_job_status` with the `prompt_id` to check progress. Poll every few seconds until `done` is true. If the job fails, use `get_history` with the `prompt_id` to get detailed error info and suggest fixes.
 
-7. **Open the image.** After generation, open the image so the user can see it immediately without navigating to the output folder. Use the Bash tool with the appropriate command for the OS:
+7. **Show the result.** Once done, use `list_output_images` (limit 1) to find the newest image. Read it with the Read tool to display it to the user.
+
+8. **Open the image.** Open the image so the user can see it immediately without navigating to the output folder. Use the Bash tool with the appropriate command for the OS:
    - **macOS**: `open /path/to/image.png`
    - **Linux**: `xdg-open /path/to/image.png`
    - **Windows**: `start "" "/path/to/image.png"`
 
-   The image will be saved to ComfyUI's output directory (check `get_system_stats` for the `--output-directory` arg, or default to `~/Documents/ComfyUI/output/`). Find the most recently created file there after the workflow completes.
+   The image will be saved to ComfyUI's output directory (check `get_system_stats` for the `--output-directory` arg, or default to `~/Documents/ComfyUI/output/`).
 
 ## Model Selection Logic
 
@@ -83,8 +85,8 @@ Steps:
 - Search HuggingFace for "SDXL" → find `stabilityai/stable-diffusion-xl-base-1.0`
 - Download `sd_xl_base_1.0.safetensors` to checkpoints folder
 - Create txt2img workflow with the prompt and downloaded model
-- Run the workflow
-- Return the generated image
+- Enqueue the workflow, poll for completion
+- Show the generated image
 
 ## Notes
 

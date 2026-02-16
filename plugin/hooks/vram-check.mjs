@@ -1,65 +1,40 @@
 #!/usr/bin/env node
 /**
- * PreToolUse hook for run_workflow.
+ * PreToolUse hook for enqueue_workflow.
  * 1. Checks if ComfyUI is reachable — blocks with a message to start it if not.
  * 2. Checks available VRAM and warns if critically low.
  *
  * Exit 0 = allow tool execution.
- * JSON stdout with permissionDecision = structured control.
+ * JSON stdout with hookSpecificOutput = structured control.
  */
 
-import { appendFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-
-const LOG = join(tmpdir(), "comfyui-hook-debug.log");
-function log(msg) {
-  appendFileSync(LOG, `[vram-check ${new Date().toISOString()}] ${msg}\n`);
-}
-
-log(`CLAUDE_PLUGIN_ROOT=${process.env.CLAUDE_PLUGIN_ROOT}`);
-log(`cwd=${process.cwd()}`);
-log(`argv=${JSON.stringify(process.argv)}`);
-
+const COMFY_PORT = Number(process.env.COMFY_PORT) || 8000;
 const VRAM_WARNING_MB = 1024; // Warn if less than 1GB free
 
 async function check() {
   try {
-    // Try common ComfyUI ports
-    const ports = [8188, 8000];
-    let stats;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3000);
+    const res = await fetch(`http://127.0.0.1:${COMFY_PORT}/system_stats`, {
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
 
-    for (const port of ports) {
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 2000);
-        const res = await fetch(`http://127.0.0.1:${port}/system_stats`, {
-          signal: controller.signal,
-        });
-        clearTimeout(timeout);
-        if (res.ok) {
-          stats = await res.json();
-          break;
-        }
-      } catch {
-        continue;
-      }
-    }
-
-    if (!stats) {
-      // ComfyUI is not reachable — block and tell Claude to start it
+    if (!res.ok) {
       console.log(
         JSON.stringify({
           hookSpecificOutput: {
             hookEventName: "PreToolUse",
             permissionDecision: "deny",
             permissionDecisionReason:
-              "ComfyUI is not running. Use start_comfyui to start it first.",
+              "ComfyUI returned a non-OK status. Check if it is running correctly.",
           },
         }),
       );
       process.exit(0);
     }
+
+    const stats = await res.json();
 
     if (!stats.devices?.[0]) {
       // No GPU info — allow execution anyway
@@ -70,24 +45,26 @@ async function check() {
     const vramFreeMB = gpu.vram_free / 1024 / 1024;
 
     if (vramFreeMB < VRAM_WARNING_MB) {
-      // Output warning as JSON for Claude Code to display
-      console.log(
-        JSON.stringify({
-          decision: "allow",
-          reason: `Warning: Only ${vramFreeMB.toFixed(0)}MB VRAM free. Consider running clear_vram first to avoid OOM errors.`,
-        }),
+      console.error(
+        `Warning: Only ${vramFreeMB.toFixed(0)}MB VRAM free. Consider running clear_vram first to avoid OOM errors.`,
       );
     }
 
     process.exit(0);
-  } catch (e) {
-    // On any error, don't block execution
-    log(`catch error: ${e?.message || e}`);
+  } catch {
+    // Connection failed — ComfyUI is not reachable
+    console.log(
+      JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason:
+            "ComfyUI is not running. Use start_comfyui to start it first.",
+        },
+      }),
+    );
     process.exit(0);
   }
 }
 
-check().catch((e) => {
-  log(`unhandled: ${e?.message || e}`);
-  process.exit(0);
-});
+check();

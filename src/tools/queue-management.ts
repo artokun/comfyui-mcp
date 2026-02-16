@@ -35,7 +35,7 @@ export function registerQueueManagementTools(server: McpServer): void {
     "get_job_status",
     "Check the execution status of a ComfyUI prompt/job by its ID.",
     {
-      prompt_id: z.string().describe("The prompt ID returned by run_workflow"),
+      prompt_id: z.string().describe("The prompt ID returned by enqueue_workflow"),
     },
     async (args) => {
       try {

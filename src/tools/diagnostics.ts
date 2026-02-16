@@ -135,13 +135,13 @@ export function registerDiagnosticsTools(server: McpServer): void {
 
   server.tool(
     "get_history",
-    "Get execution history for a ComfyUI prompt. Returns status, timing, cached nodes, output details, and full error information including Python tracebacks. Use after a failed run_workflow to diagnose what went wrong.",
+    "Get execution history for a ComfyUI prompt. Returns status, timing, cached nodes, output details, and full error information including Python tracebacks. Use after a failed enqueue_workflow to diagnose what went wrong.",
     {
       prompt_id: z
         .string()
         .optional()
         .describe(
-          "Specific prompt ID to look up (returned by run_workflow). If omitted, returns the most recent execution.",
+          "Specific prompt ID to look up (returned by enqueue_workflow). If omitted, returns the most recent execution.",
         ),
     },
     async (args) => {

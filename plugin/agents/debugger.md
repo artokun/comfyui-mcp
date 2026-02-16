@@ -102,7 +102,7 @@ If the user requests it, apply the fix directly:
 
 1. **Modify the workflow**: Use `modify_workflow` to change inputs, add/remove nodes, or rewire connections
 2. **Download missing models**: Use `download_model` to install required files
-3. **Re-run the workflow**: Use `run_workflow` with the fixed workflow
+3. **Re-run the workflow**: Use `enqueue_workflow` with the fixed workflow, then poll `get_job_status` for completion
 4. **Verify success**: Check `get_history` for the new execution
 
 ## Common Debugging Scenarios

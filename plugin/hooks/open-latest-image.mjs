@@ -1,37 +1,28 @@
 #!/usr/bin/env node
 /**
- * PostToolUse hook for run_workflow.
+ * PostToolUse hook (unused — kept for reference).
  * Finds and opens the most recently generated image from ComfyUI's output directory.
  *
- * Environment: Receives TOOL_USE_ID, TOOL_INPUT on stdin.
- * Exit 0 = success (no blocking), non-zero = block (but we never block PostToolUse).
+ * Environment: Receives tool result JSON on stdin.
+ * Exit 0 = success (no blocking).
  */
-import { readdirSync, statSync, appendFileSync } from "node:fs";
-import { join, resolve } from "node:path";
-import { homedir, platform, tmpdir } from "node:os";
+import { readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { homedir, platform } from "node:os";
 import { execSync } from "node:child_process";
-
-const LOG = join(tmpdir(), "comfyui-hook-debug.log");
-function log(msg) {
-  appendFileSync(LOG, `[open-image ${new Date().toISOString()}] ${msg}\n`);
-}
-
-log(`CLAUDE_PLUGIN_ROOT=${process.env.CLAUDE_PLUGIN_ROOT}`);
-log(`cwd=${process.cwd()}`);
 
 // Read stdin (tool result JSON) — but we only care if it succeeded
 let input = "";
 process.stdin.setEncoding("utf-8");
-process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("data", (chunk) => {
+  input += chunk;
+});
 process.stdin.on("end", () => {
-  log(`stdin length: ${input.length}`);
   try {
     const data = JSON.parse(input);
-    log(`parsed stdin ok, isError=${data.isError}`);
     // If tool returned an error, don't try to open anything
     if (data.isError) process.exit(0);
-  } catch (e) {
-    log(`stdin parse error: ${e.message}`);
+  } catch {
     // Can't parse — proceed anyway
   }
 
@@ -56,7 +47,6 @@ process.stdin.on("end", () => {
   }
 
   if (!outputDir) {
-    // Can't find output dir — silently exit
     process.exit(0);
   }
 
@@ -84,11 +74,9 @@ process.stdin.on("end", () => {
     } else {
       execSync(`xdg-open "${newest.path}"`, { stdio: "ignore" });
     }
-  } catch (e) {
-    log(`image open error: ${e.message}`);
+  } catch {
     // Silent failure — don't interrupt the user's workflow
   }
 
-  log("exiting 0");
   process.exit(0);
 });

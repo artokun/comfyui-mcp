@@ -8,7 +8,7 @@
 
 Works on **macOS**, **Linux**, and **Windows**. Auto-detects your ComfyUI installation and port.
 
-**32 MCP tools** | **10 slash commands** | **4 knowledge skills** | **3 autonomous agents** | **3 hooks**
+**31 MCP tools** | **10 slash commands** | **4 knowledge skills** | **3 autonomous agents** | **2 hooks**
 
 ---
 
@@ -90,22 +90,21 @@ claude plugin install comfyui-mcp
 
 | Event | Trigger | Action |
 |-------|---------|--------|
-| PreToolUse | `run_workflow` | **VRAM watchdog** — checks GPU memory via `/system_stats` and warns if < 1GB free before execution |
+| PreToolUse | `enqueue_workflow` | **VRAM watchdog** — checks GPU memory via `/system_stats` and warns if < 1GB free before execution |
 | PreToolUse | `stop_comfyui`, `restart_comfyui` | **Save warning** — prompts user to save unsaved workflow changes before stopping ComfyUI |
-| PostToolUse | `run_workflow` | **Auto-open image** — finds the newest output image and opens it in your system viewer |
 
 ---
 
 ## MCP Tools
 
-32 tools organized into 13 categories:
+31 tools organized into 13 categories:
 
 ### Workflow Execution
 
 | Tool | Description |
 |------|-------------|
-| `run_workflow` | Execute a workflow (API format JSON), returns images as base64 |
-| `get_job_status` | Check execution status of a running job by prompt ID |
+| `enqueue_workflow` | Submit a workflow (API format JSON) — returns `prompt_id` immediately, non-blocking |
+| `get_job_status` | Check execution status of a job by prompt ID |
 | `get_queue` | View the current execution queue (running + pending) |
 | `cancel_job` | Interrupt the currently running job |
 | `get_system_stats` | Get system info — GPU, VRAM, Python version, OS |
@@ -192,7 +191,7 @@ claude plugin install comfyui-mcp
 | `suggest_settings` | Suggest proven sampler/scheduler/steps/CFG settings from local generation history — query by model family, LoRA hash, or text search |
 | `generation_stats` | Show local generation tracking statistics — total runs, unique combos, breakdown by model family |
 
-Every successful `run_workflow` call automatically logs settings to a local SQLite database (`generations.db`). Same settings combos get a `reuse_count` bump instead of duplicates, creating a natural popularity signal. Models and LoRAs are identified by content hash (AutoV2 / SHA256), not filenames — so renamed files still group together.
+Every `enqueue_workflow` call automatically logs settings to a local SQLite database (`generations.db`). Same settings combos get a `reuse_count` bump instead of duplicates, creating a natural popularity signal. Models and LoRAs are identified by content hash (AutoV2 / SHA256), not filenames — so renamed files still group together.
 
 ```bash
 # View local stats from the CLI
@@ -491,7 +490,7 @@ src/
     registry-client.ts     # ComfyUI Registry API
     skill-generator.ts     # Generate node pack skill docs
   tools/                   # MCP tool registration (one file per group)
-    workflow-execute.ts    # run_workflow, get_job_status, get_queue, cancel_job, get_system_stats
+    workflow-execute.ts    # enqueue_workflow, get_system_stats
     workflow-visualize.ts  # visualize_workflow, mermaid_to_workflow
     workflow-compose.ts    # create_workflow, modify_workflow, get_node_info
     workflow-validate.ts   # validate_workflow

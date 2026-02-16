@@ -77,7 +77,7 @@
 ### KSampler
 - **Inputs**: `model` (MODEL), `seed` (int), `steps` (int, default 20), `cfg` (float, default 8.0), `sampler_name` (combo), `scheduler` (combo), `positive` (CONDITIONING), `negative` (CONDITIONING), `latent_image` (LATENT), `denoise` (float, default 1.0)
 - **Outputs**: `LATENT` (0)
-- **Notes**: The core sampling node. `denoise` < 1.0 for img2img. Seeds auto-randomize by run_workflow.
+- **Notes**: The core sampling node. `denoise` < 1.0 for img2img. Seeds auto-randomize by enqueue_workflow.
 
 ### KSamplerAdvanced
 - **Inputs**: Same as KSampler plus `add_noise` (combo: `"enable"`, `"disable"`), `noise_seed` (int), `start_at_step` (int), `end_at_step` (int), `return_with_leftover_noise` (combo: `"disable"`, `"enable"`)
