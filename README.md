@@ -8,7 +8,7 @@
 
 Works on **macOS**, **Linux**, and **Windows**. Auto-detects your ComfyUI installation and port.
 
-**32 MCP tools** | **10 slash commands** | **4 knowledge skills** | **3 autonomous agents** | **2 hooks**
+**32 MCP tools** | **10 slash commands** | **4 knowledge skills** | **3 autonomous agents** | **3 hooks**
 
 ---
 
@@ -91,6 +91,7 @@ claude plugin install comfyui-mcp
 | Event | Trigger | Action |
 |-------|---------|--------|
 | PreToolUse | `run_workflow` | **VRAM watchdog** — checks GPU memory via `/system_stats` and warns if < 1GB free before execution |
+| PreToolUse | `stop_comfyui`, `restart_comfyui` | **Save warning** — prompts user to save unsaved workflow changes before stopping ComfyUI |
 | PostToolUse | `run_workflow` | **Auto-open image** — finds the newest output image and opens it in your system viewer |
 
 ---
@@ -534,6 +535,7 @@ plugin/
   hooks/                   # Pre/post tool-use hooks
     hooks.json             # Hook configuration
     vram-check.mjs         # VRAM watchdog before execution
+    save-warning.mjs       # Save prompt before stop/restart
     open-latest-image.mjs  # Auto-open generated images
 ```
 

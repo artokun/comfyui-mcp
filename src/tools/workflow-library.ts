@@ -92,23 +92,19 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
           "Filename to save as (e.g. 'my_workflow.json'). Will overwrite if it already exists.",
         ),
       workflow: z
-        .union([z.string(), z.record(z.any())])
+        .record(z.any())
         .describe("Workflow JSON to save (API or UI format)"),
     },
     async (args) => {
       try {
         const client = getClient();
-        const encoded = encodeURIComponent(args.filename);
-        const body =
-          typeof args.workflow === "string"
-            ? args.workflow
-            : JSON.stringify(args.workflow);
+        const encoded = encodeURIComponent(`workflows/${args.filename}`);
+        const body = JSON.stringify(args.workflow);
 
         const res = await client.fetchApi(
-          `/api/userdata/workflows/${encoded}`,
+          `/api/userdata/${encoded}`,
           {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
             body,
           },
         );
