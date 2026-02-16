@@ -8,6 +8,9 @@ import {
   getSystemInfo,
 } from "../services/workflow-executor.js";
 import { errorToToolResult } from "../utils/errors.js";
+import { getTracker } from "../services/generation-tracker.js";
+import { extractSettings } from "../services/workflow-settings-extractor.js";
+import { logger } from "../utils/logger.js";
 
 export function registerWorkflowExecuteTools(server: McpServer): void {
   server.tool(
@@ -49,6 +52,20 @@ export function registerWorkflowExecuteTools(server: McpServer): void {
             type: "image",
             data: img.data,
             mimeType: img.mime,
+          });
+        }
+
+        // Log generation settings (best-effort, don't fail the response)
+        try {
+          const tracker = getTracker();
+          const settings = await extractSettings(args.workflow, tracker.fileHasher);
+          if (settings) {
+            const { settingsHash, reuseCount } = tracker.logGeneration(settings);
+            logger.info("Generation tracked", { settingsHash, reuseCount });
+          }
+        } catch (trackErr) {
+          logger.warn("Failed to track generation settings", {
+            error: trackErr instanceof Error ? trackErr.message : trackErr,
           });
         }
 
