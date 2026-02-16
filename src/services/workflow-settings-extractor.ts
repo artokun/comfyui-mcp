@@ -207,24 +207,32 @@ export async function extractSettings(
   if (modelName) {
     modelFamily = inferModelFamily(modelName, loaderClassType, inputs);
 
-    // Hash the model file — resolve correct models/ subdirectory based on loader type
-    try {
-      const modelDir =
-        loaderClassType === "UNETLoader" ? "unet" : "checkpoints";
-      const modelsRoot = config.comfyuiPath
-        ? join(config.comfyuiPath, "models", modelDir)
-        : "";
-      if (modelsRoot) {
-        const hashResult = await hasher.getHash(
-          join(modelsRoot, modelName),
-          loaderClassType === "UNETLoader" ? "unet" : "checkpoint",
-        );
-        modelHash = hashResult.autov2;
+    // Hash the model file — try multiple directories since ComfyUI maps
+    // UNETLoader to both unet/ and diffusion_models/, and CheckpointLoader
+    // to checkpoints/
+    if (config.comfyuiPath) {
+      const candidateDirs =
+        loaderClassType === "UNETLoader"
+          ? ["unet", "diffusion_models", "checkpoints"]
+          : ["checkpoints", "unet", "diffusion_models"];
+      const fileType = loaderClassType === "UNETLoader" ? "unet" : "checkpoint";
+
+      for (const dir of candidateDirs) {
+        try {
+          const hashResult = await hasher.getHash(
+            join(config.comfyuiPath, "models", dir, modelName),
+            fileType,
+          );
+          modelHash = hashResult.autov2;
+          break; // Found it
+        } catch {
+          // Not in this directory, try next
+        }
       }
-    } catch (err) {
-      logger.warn(`Could not hash model file: ${modelName}`, {
-        error: err instanceof Error ? err.message : err,
-      });
+
+      if (modelHash === "UNKNOWN") {
+        logger.warn(`Model file not found in any directory: ${modelName}`);
+      }
     }
   }
 
