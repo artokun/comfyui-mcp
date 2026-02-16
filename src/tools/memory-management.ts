@@ -87,7 +87,7 @@ export function registerMemoryManagementTools(server: McpServer): void {
     async () => {
       try {
         const client = getClient();
-        const res = await client.fetchApi("/embeddings");
+        const res = await client.fetchApi("/api/embeddings");
         const embeddings = (await res.json()) as string[];
 
         if (!Array.isArray(embeddings) || embeddings.length === 0) {

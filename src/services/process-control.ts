@@ -77,6 +77,40 @@ function findPidByPort(port: number): number | null {
   return null;
 }
 
+/**
+ * Find PIDs of the Desktop app's Electron shell (ComfyUI.exe on Windows).
+ * The Python backend is a child of the Electron app, so we need to kill
+ * the parent to fully stop the Desktop app.
+ */
+function findDesktopAppPids(): number[] {
+  const pids: number[] = [];
+  try {
+    if (IS_WIN) {
+      const out = execSync(
+        `tasklist /FI "IMAGENAME eq ComfyUI.exe" /FO CSV /NH`,
+        { encoding: "utf-8", timeout: 5000 },
+      ).trim();
+      for (const line of out.split("\n")) {
+        // CSV format: "ComfyUI.exe","12345","Console","1","206,248 K"
+        const match = line.match(/"ComfyUI\.exe","(\d+)"/i);
+        if (match) pids.push(parseInt(match[1], 10));
+      }
+    } else {
+      const out = execSync(`pgrep -f "ComfyUI.app"`, {
+        encoding: "utf-8",
+        timeout: 5000,
+      }).trim();
+      for (const line of out.split("\n")) {
+        const pid = parseInt(line, 10);
+        if (!isNaN(pid) && pid > 0) pids.push(pid);
+      }
+    }
+  } catch {
+    // No Desktop app processes found
+  }
+  return pids;
+}
+
 function killProcessTree(pid: number): void {
   try {
     if (IS_WIN) {
@@ -107,6 +141,23 @@ function killProcessTree(pid: number): void {
     if (!/not found|no such process|does not exist/i.test(msg)) {
       throw new ProcessControlError(`Failed to kill process ${pid}: ${msg}`);
     }
+  }
+}
+
+/**
+ * Kill the Desktop app entirely — find all Electron shell PIDs and kill each tree.
+ * Falls back to killing just the port PID if no Desktop processes found.
+ */
+function killDesktopApp(portPid: number): void {
+  const desktopPids = findDesktopAppPids();
+  if (desktopPids.length > 0) {
+    logger.info(`Killing Desktop app processes: ${desktopPids.join(", ")}`);
+    for (const pid of desktopPids) {
+      killProcessTree(pid);
+    }
+  } else {
+    // Fallback — just kill the port process
+    killProcessTree(portPid);
   }
 }
 
@@ -239,8 +290,12 @@ export async function stopComfyUI(): Promise<StopResult> {
     argv: info.argv.join(" "),
   });
 
-  // Kill process tree
-  killProcessTree(info.pid);
+  // Kill process tree (for Desktop app, kill the Electron shell too)
+  if (info.isDesktopApp) {
+    killDesktopApp(info.pid);
+  } else {
+    killProcessTree(info.pid);
+  }
 
   // Reset the WebSocket client singleton
   resetClient();

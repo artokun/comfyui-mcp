@@ -10,6 +10,15 @@
             "command": "node \"$HOOK_DIR/vram-check.mjs\""
           }
         ]
+      },
+      {
+        "matcher": "mcp__plugin_comfy_comfyui__(stop|restart)_comfyui",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$HOOK_DIR/save-warning.mjs\""
+          }
+        ]
       }
     ],
     "PostToolUse": [
