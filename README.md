@@ -8,7 +8,7 @@
 
 Works on **macOS**, **Linux**, and **Windows**. Auto-detects your ComfyUI installation and port.
 
-**30 MCP tools** | **10 slash commands** | **4 knowledge skills** | **3 autonomous agents** | **3 hooks**
+**32 MCP tools** | **10 slash commands** | **4 knowledge skills** | **3 autonomous agents** | **3 hooks**
 
 ---
 
@@ -98,7 +98,7 @@ claude plugin install comfyui-mcp
 
 ## MCP Tools
 
-30 tools organized into 12 categories:
+32 tools organized into 13 categories:
 
 ### Workflow Execution
 
@@ -184,6 +184,24 @@ claude plugin install comfyui-mcp
 | `stop_comfyui` | Stop the running ComfyUI process (saves PID and launch args for restart) |
 | `start_comfyui` | Start ComfyUI using info saved from a previous stop |
 | `restart_comfyui` | Stop and restart ComfyUI, preserving all launch arguments |
+
+### Generation Tracker
+
+| Tool | Description |
+|------|-------------|
+| `suggest_settings` | Suggest proven sampler/scheduler/steps/CFG settings from local generation history — query by model family, LoRA hash, or text search |
+| `generation_stats` | Show local generation tracking statistics — total runs, unique combos, breakdown by model family |
+
+Every successful `run_workflow` call automatically logs settings to a local SQLite database (`generations.db`). Same settings combos get a `reuse_count` bump instead of duplicates, creating a natural popularity signal. Models and LoRAs are identified by content hash (AutoV2 / SHA256), not filenames — so renamed files still group together.
+
+```bash
+# View local stats from the CLI
+npm run generations:stats
+```
+
+### Model Settings
+
+Community-maintained preset library (`model-settings.json`) with research-backed sampler, scheduler, steps, and CFG values for 10+ model families. User overrides in `model-settings.user.jsonc` (auto-created from template on install, gitignored).
 
 ---
 
@@ -419,6 +437,7 @@ npm install
 | `npm test` | Run unit tests (vitest) |
 | `npm run test:integration` | Run integration tests (requires running ComfyUI) |
 | `npm run lint` | Type-check without emitting |
+| `npm run generations:stats` | Show local generation tracking statistics |
 
 ### Local testing with Claude Code
 
@@ -445,6 +464,11 @@ claude --plugin-dir ./plugin
 ### Project structure
 
 ```
+model-settings.json            # Community-maintained model presets (shipped)
+model-settings.user.jsonc.example  # User override template (copied on install)
+scripts/
+  postinstall.mjs              # Auto-creates user config from template
+  generation-stats.mjs         # CLI: npm run generations:stats
 src/
   index.ts                 # MCP server entry point (stdio transport)
   config.ts                # Auto-detection & environment config
@@ -459,6 +483,10 @@ src/
     mermaid-converter.ts   # Workflow → Mermaid diagram
     mermaid-parser.ts      # Mermaid diagram → Workflow
     model-resolver.ts      # HuggingFace search, local models, downloads
+    generation-tracker.ts  # SQLite generation log, settings dedup, stats
+    file-hasher.ts         # SHA256 hashing of .safetensors with cache
+    civitai-lookup.ts      # CivitAI API lookup by content hash
+    workflow-settings-extractor.ts  # Extract settings from workflow JSON
     process-control.ts     # Stop, start, restart ComfyUI process
     registry-client.ts     # ComfyUI Registry API
     skill-generator.ts     # Generate node pack skill docs
@@ -473,6 +501,7 @@ src/
     memory-management.ts   # clear_vram, get_embeddings
     registry-search.ts     # search_custom_nodes, get_node_pack_details
     skill-generator.ts     # generate_node_skill
+    generation-tracker.ts  # suggest_settings, generation_stats
     diagnostics.ts         # get_logs, get_history
     process-control.ts     # stop_comfyui, start_comfyui, restart_comfyui
     index.ts               # Registers all tool groups

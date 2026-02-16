@@ -1,0 +1,97 @@
+// =============================================================================
+// ComfyUI MCP — User Model Settings
+// =============================================================================
+//
+// Your personal overrides. Deep-merged ON TOP of model-settings.json defaults.
+// User settings always win. This file is gitignored.
+//
+// Merge rules:
+//   - Keys here override matching keys in defaults
+//   - New keys are added alongside defaults
+//   - To "disable" a default, override it with your preferred value
+//
+// Tip: Copy any preset from model-settings.json, paste here, tweak values.
+// Only include what you want to change — everything else inherits from defaults.
+// =============================================================================
+{
+  // ---------------------------------------------------------------------------
+  // Override existing presets
+  // ---------------------------------------------------------------------------
+  // "model_families": {
+  //
+  //   // Example: Make Qwen 2512 standard faster by default
+  //   "qwen_image": {
+  //     "presets": {
+  //       "standard": {
+  //         "steps": 30,
+  //         "notes": "I prefer 30 steps — good enough quality, 40% faster"
+  //       }
+  //     }
+  //   },
+  //
+  //   // Example: Add a personal preset to an existing family
+  //   "sdxl": {
+  //     "presets": {
+  //       "my_portrait_style": {
+  //         "description": "My go-to for portrait photography",
+  //         "steps": 28,
+  //         "cfg": 6.5,
+  //         "sampler": "dpmpp_2m_sde",
+  //         "scheduler": "karras",
+  //         "denoise": 1.0
+  //       }
+  //     }
+  //   }
+  // },
+
+  // ---------------------------------------------------------------------------
+  // Add models not in the official config
+  // ---------------------------------------------------------------------------
+  // "custom_models": {
+  //
+  //   // Example: A custom SDXL merge you downloaded
+  //   "my_sdxl_merge_v3": {
+  //     "display_name": "My Custom SDXL Merge v3",
+  //     "architecture": "sdxl",
+  //     "loader": "CheckpointLoaderSimple",
+  //     "checkpoint": "my_merge_v3.safetensors",
+  //     "presets": {
+  //       "default": {
+  //         "steps": 22,
+  //         "cfg": 6.5,
+  //         "sampler": "dpmpp_2m",
+  //         "scheduler": "karras"
+  //       }
+  //     }
+  //   },
+  //
+  //   // Example: A Qwen fine-tune from CivitAI
+  //   "my_qwen_finetune": {
+  //     "display_name": "SomeAuthor's Qwen Realistic v2",
+  //     "architecture": "qwen_image",
+  //     "unet_path": "Qwen/custom/someModel_v2.safetensors",
+  //     "clip": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+  //     "vae": "qwen_image_vae.safetensors",
+  //     "source": "https://civitai.com/models/XXXXX",
+  //     "presets": {
+  //       "author_recommended": {
+  //         "steps": 25,
+  //         "cfg": 5.0,
+  //         "sampler": "euler",
+  //         "scheduler": "simple",
+  //         "auraflow_shift": 3.1
+  //       }
+  //     }
+  //   }
+  // },
+
+  // ---------------------------------------------------------------------------
+  // Pin your favorite presets for quick access
+  // ---------------------------------------------------------------------------
+  // "favorite_presets": {
+  //   "txt2img_default": "qwen_image.lightning_4step",
+  //   "portrait_default": "qwen_image.lightning_8step_character",
+  //   "anime_default": "illustrious.default",
+  //   "fast_realistic": "qwen_image_2512.lightning_4step"
+  // }
+}
