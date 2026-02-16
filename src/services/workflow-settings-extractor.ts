@@ -105,6 +105,13 @@ function inferModelFamily(
 ): string {
   const lower = checkpointName.toLowerCase();
 
+  // Specific finetuned models first (before generic "qwen" match)
+  if (lower.includes("copax")) return "qwen_finetuned";
+  if (lower.includes("redcraft")) return "qwen_finetuned";
+  if (lower.includes("ultimaterealism") || lower.includes("imageized")) return "qwen_finetuned";
+  if (lower.includes("z-image") || lower.includes("zimage")) return "z_image";
+
+  // Generic architecture matches
   if (lower.includes("qwen") && lower.includes("edit")) return "qwen_image_edit";
   if (lower.includes("qwen")) return "qwen_image";
   if (lower.includes("flux")) return "flux";
@@ -112,9 +119,6 @@ function inferModelFamily(
   if (lower.includes("illustrious")) return "illustrious";
   if (lower.includes("pony")) return "pony";
   if (lower.includes("sd3") || lower.includes("sd_3")) return "sd35";
-  if (lower.includes("z-image") || lower.includes("zimage")) return "z_image";
-  if (lower.includes("copax")) return "qwen_finetuned";
-  if (lower.includes("redcraft")) return "qwen_finetuned";
 
   // Check by loader type
   if (loaderClassType === "UNETLoader") {
@@ -180,40 +184,39 @@ export async function extractSettings(
 
   const isIntegrated = samplerNode.class_type === "QwenImageIntegratedKSampler";
 
+  let loaderClassType = "CheckpointLoaderSimple";
+
   if (isIntegrated) {
     // QwenImageIntegratedKSampler has unet, clip, vae inputs directly
     const unetRef = resolveRef(workflow, inputs.unet);
     if (unetRef && MODEL_LOADER_NODES.has(unetRef.class_type)) {
+      loaderClassType = unetRef.class_type;
       modelName =
         String(unetRef.inputs.unet_name ?? unetRef.inputs.ckpt_name ?? "");
     }
   } else {
     const loader = findModelLoader(workflow, samplerNode);
     if (loader) {
+      loaderClassType = loader.class_type;
       modelName =
         String(loader.inputs.ckpt_name ?? loader.inputs.unet_name ?? "");
     }
   }
 
   if (modelName) {
-    modelFamily = inferModelFamily(
-      modelName,
-      isIntegrated ? "UNETLoader" : "CheckpointLoaderSimple",
-      inputs,
-    );
+    modelFamily = inferModelFamily(modelName, loaderClassType, inputs);
 
-    // Hash the model file
+    // Hash the model file — resolve correct models/ subdirectory based on loader type
     try {
-      const modelDir = modelName.includes("/")
-        ? "unet"
-        : "checkpoints";
+      const modelDir =
+        loaderClassType === "UNETLoader" ? "unet" : "checkpoints";
       const modelsRoot = config.comfyuiPath
         ? join(config.comfyuiPath, "models", modelDir)
         : "";
       if (modelsRoot) {
         const hashResult = await hasher.getHash(
           join(modelsRoot, modelName),
-          modelDir === "unet" ? "unet" : "checkpoint",
+          loaderClassType === "UNETLoader" ? "unet" : "checkpoint",
         );
         modelHash = hashResult.autov2;
       }
