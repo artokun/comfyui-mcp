@@ -8,6 +8,19 @@
  * JSON stdout with permissionDecision = structured control.
  */
 
+import { appendFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+const LOG = join(tmpdir(), "comfyui-hook-debug.log");
+function log(msg) {
+  appendFileSync(LOG, `[vram-check ${new Date().toISOString()}] ${msg}\n`);
+}
+
+log(`CLAUDE_PLUGIN_ROOT=${process.env.CLAUDE_PLUGIN_ROOT}`);
+log(`cwd=${process.cwd()}`);
+log(`argv=${JSON.stringify(process.argv)}`);
+
 const VRAM_WARNING_MB = 1024; // Warn if less than 1GB free
 
 async function check() {
@@ -67,10 +80,14 @@ async function check() {
     }
 
     process.exit(0);
-  } catch {
+  } catch (e) {
     // On any error, don't block execution
+    log(`catch error: ${e?.message || e}`);
     process.exit(0);
   }
 }
 
-check();
+check().catch((e) => {
+  log(`unhandled: ${e?.message || e}`);
+  process.exit(0);
+});

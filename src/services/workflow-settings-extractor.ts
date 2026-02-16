@@ -52,45 +52,45 @@ function resolveRef(
 }
 
 /**
- * Walk upward from a sampler node to find the model loader.
+ * Walk upward from a sampler node through intermediate model nodes
+ * (LoRA loaders, ModelSamplingAuraFlow, etc.) to find the model loader.
+ * Stops after 10 hops to prevent infinite loops.
  */
 function findModelLoader(
   workflow: WorkflowJSON,
   samplerNode: WorkflowNode,
 ): WorkflowNode | null {
-  // KSampler.model input
-  const modelRef = samplerNode.inputs.model;
-  if (!modelRef) return null;
+  let current: unknown = samplerNode.inputs.model;
 
-  const modelNode = resolveRef(workflow, modelRef);
-  if (!modelNode) return null;
-
-  // Direct loader
-  if (MODEL_LOADER_NODES.has(modelNode.class_type)) return modelNode;
-
-  // LoRA in between — follow through
-  if (LORA_NODES.has(modelNode.class_type)) {
-    const upstream = resolveRef(workflow, modelNode.inputs.model);
-    if (upstream && MODEL_LOADER_NODES.has(upstream.class_type)) return upstream;
+  for (let depth = 0; depth < 10; depth++) {
+    const node = resolveRef(workflow, current);
+    if (!node) return null;
+    if (MODEL_LOADER_NODES.has(node.class_type)) return node;
+    // Follow the "model" input through intermediate nodes (LoRA, ModelSampling*, etc.)
+    current = node.inputs.model;
+    if (!current) return null;
   }
 
   return null;
 }
 
 /**
- * Walk upward from a sampler node to find a LoRA loader.
+ * Walk upward from a sampler node through intermediate model nodes to find a LoRA loader.
  */
 function findLoraLoader(
   workflow: WorkflowJSON,
   samplerNode: WorkflowNode,
 ): WorkflowNode | null {
-  const modelRef = samplerNode.inputs.model;
-  if (!modelRef) return null;
+  let current: unknown = samplerNode.inputs.model;
 
-  const modelNode = resolveRef(workflow, modelRef);
-  if (!modelNode) return null;
-
-  if (LORA_NODES.has(modelNode.class_type)) return modelNode;
+  for (let depth = 0; depth < 10; depth++) {
+    const node = resolveRef(workflow, current);
+    if (!node) return null;
+    if (LORA_NODES.has(node.class_type)) return node;
+    if (MODEL_LOADER_NODES.has(node.class_type)) return null; // Past the loaders, no LoRA found
+    current = node.inputs.model;
+    if (!current) return null;
+  }
 
   return null;
 }
@@ -185,7 +185,21 @@ export async function extractSettings(
   const steps = Number(inputs.steps ?? 0);
   const cfg = Number(inputs.cfg ?? inputs.cfg_scale ?? 0);
   const denoise = Number(inputs.denoise ?? 1.0);
-  const shift = inputs.auraflow_shift != null ? Number(inputs.auraflow_shift) : null;
+
+  // Extract shift from ModelSamplingAuraFlow if present in the model chain
+  let shift: number | null = inputs.auraflow_shift != null ? Number(inputs.auraflow_shift) : null;
+  if (shift == null) {
+    let ref: unknown = inputs.model;
+    for (let depth = 0; depth < 10 && shift == null; depth++) {
+      const node = resolveRef(workflow, ref);
+      if (!node) break;
+      if (node.class_type === "ModelSamplingAuraFlow") {
+        shift = node.inputs.shift != null ? Number(node.inputs.shift) : null;
+        break;
+      }
+      ref = node.inputs.model;
+    }
+  }
 
   // Extract resolution from latent_image input or direct width/height
   let width = Number(inputs.width ?? 0);
