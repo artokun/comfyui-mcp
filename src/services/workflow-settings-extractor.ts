@@ -97,6 +97,12 @@ function findLoraLoader(
 
 /**
  * Determine model family from checkpoint name and node types.
+ *
+ * Base versions confirmed via CivitAI hash lookup + HuggingFace:
+ *  - copaxTimeless_qwenUltraRealistic → Qwen-Image-2512 (CivitAI #118111, user confirmed)
+ *  - qwenUltimateRealism_v11 (Imageized) → original Qwen-Image (CivitAI #2027494, published Oct 2025)
+ *  - qwenImageEditRemix_v10 → Qwen-Image-Edit-2511 (HuggingFace Phr00t/Qwen-Image-Edit-Rapid-AIO)
+ *  - redcraftRedzimage → Z-Image family (NOT Qwen)
  */
 function inferModelFamily(
   checkpointName: string,
@@ -105,22 +111,40 @@ function inferModelFamily(
 ): string {
   const lower = checkpointName.toLowerCase();
 
-  // Specific finetuned models first (before generic "qwen" match)
-  if (lower.includes("copax")) return "qwen_finetuned";
-  if (lower.includes("redcraft")) return "qwen_finetuned";
-  if (lower.includes("ultimaterealism") || lower.includes("imageized")) return "qwen_finetuned";
-  if (lower.includes("z-image") || lower.includes("zimage")) return "z_image";
+  // --- Z-Image family (check BEFORE Qwen — redcraftRedzimage contains both "redcraft" and "redzim") ---
+  if (lower.includes("z-image") || lower.includes("zimage") || lower.includes("redzim")) return "z_image";
 
-  // Generic architecture matches
+  // --- Qwen Image versioned models (order: version in filename → known finetuned → generic) ---
+
+  // Extract Qwen version if present: matches "2512", "2511", "2509", etc.
+  const qwenVersionMatch = lower.match(/(?:qwen[_-]?(?:image)?[_-]?)?(25\d{2})/);
+  const qwenVersion = qwenVersionMatch?.[1]; // e.g. "2512", "2511", "2509"
+
+  // Qwen versioned base models (official releases with version in filename)
+  if (qwenVersion) {
+    const isEdit = lower.includes("edit") || qwenVersion === "2511" || qwenVersion === "2509";
+    return isEdit ? `qwen_image_${qwenVersion}_edit` : `qwen_image_${qwenVersion}`;
+  }
+
+  // Qwen finetuned models with CONFIRMED base versions
+  if (lower.includes("copax") && lower.includes("qwen")) return "qwen_image_2512_finetuned";
+  if (lower.includes("ultimaterealism")) return "qwen_image_finetuned";
+  if (lower.includes("qwen") && lower.includes("editremix")) return "qwen_image_2511_edit_finetuned";
+
+  // Qwen generic (has "qwen" but no version number and not a known finetune)
   if (lower.includes("qwen") && lower.includes("edit")) return "qwen_image_edit";
-  if (lower.includes("qwen")) return "qwen_image";
-  if (lower.includes("flux")) return "flux";
+  if (lower.includes("qwen") && lower.includes("image")) return "qwen_image";
+
+  // --- Non-Qwen architectures ---
+  if (lower.includes("flux") || lower.includes("klein")) return "flux";
+  if (lower.includes("wan2")) return "wan";
+  if (lower.includes("ltx")) return "ltx";
   if (lower.includes("sdxl") || lower.includes("sd_xl")) return "sdxl";
   if (lower.includes("illustrious")) return "illustrious";
   if (lower.includes("pony")) return "pony";
   if (lower.includes("sd3") || lower.includes("sd_3")) return "sd35";
 
-  // Check by loader type
+  // Fallback: infer from loader type + sampler hints
   if (loaderClassType === "UNETLoader") {
     if (samplerInputs.auraflow_shift != null) return "qwen_image";
   }
