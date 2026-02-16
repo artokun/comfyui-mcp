@@ -1,0 +1,509 @@
+{
+  "$schema": "model-settings.schema.json",
+  "_version": "0.2.0",
+  "_description": "Community-maintained best settings for ComfyUI models. Merge order: defaults (this file) → user overrides (model-settings.user.json). PRs welcome!",
+  "_updated": "2026-02-16",
+  "_merge_strategy": "deep_merge_user_wins",
+
+  "model_families": {
+
+    "qwen_image": {
+      "display_name": "Qwen Image (Base Architecture)",
+      "architecture": "qwen_image",
+      "clip_type": "qwen_image",
+      "vae": "qwen_image_vae.safetensors",
+      "prompt_style": "natural_language",
+      "prompt_notes": "Use natural language, 1-3 sentences. Put text to render in quotes. 'photograph' > 'photorealistic'. Negative prompts: use NLP-style descriptions, not keyword spam.",
+      "resolutions": {
+        "_note": "Qwen Image operates at ~1.6 megapixels natively",
+        "square": [1328, 1328],
+        "portrait_3_4": [1104, 1472],
+        "portrait_9_16": [928, 1664],
+        "portrait_2_3": [1056, 1584],
+        "landscape_4_3": [1472, 1104],
+        "landscape_16_9": [1664, 928],
+        "landscape_3_2": [1584, 1056],
+        "ultrawide_portrait": [1536, 2048]
+      },
+
+      "presets": {
+        "lightning_4step": {
+          "description": "Fast 4-step with LightX2V lightning LoRA. Good general-purpose.",
+          "steps": 4,
+          "cfg": 1.0,
+          "sampler": "euler",
+          "scheduler": "simple",
+          "denoise": 1.0,
+          "auraflow_shift": 3.1,
+          "lora": {
+            "name": "Qwen-Image-Lightning-4steps-V1.0.safetensors",
+            "strength": 1.0
+          },
+          "notes": "For 2511 edit models, use 2511-specific lightning LoRA."
+        },
+        "lightning_4step_2511_edit": {
+          "description": "Fast 4-step specifically for 2511 edit model.",
+          "steps": 4,
+          "cfg": 1.0,
+          "sampler": "euler",
+          "scheduler": "simple",
+          "denoise": 1.0,
+          "lora": {
+            "name": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+            "strength": 1.0
+          },
+          "notes": "Cannot combine with distilled model variant."
+        },
+        "lightning_8step": {
+          "description": "Higher quality 8-step lightning. Better detail than 4-step.",
+          "steps": 8,
+          "cfg": 1.0,
+          "sampler": "euler",
+          "scheduler": "simple",
+          "denoise": 1.0,
+          "auraflow_shift": 3.1,
+          "lora": {
+            "name": "Qwen-Image-Lightning-8steps-V1.0.safetensors",
+            "strength": 1.0
+          }
+        },
+        "lightning_8step_character": {
+          "description": "8-step lightning tuned for detailed character/portrait work.",
+          "steps": 8,
+          "cfg": 2.5,
+          "sampler": "euler",
+          "scheduler": "simple",
+          "denoise": 1.0,
+          "auraflow_shift": 3.1,
+          "lora": {
+            "name": "Qwen-Image-Lightning-8steps-V1.0.safetensors",
+            "strength": 1.0
+          },
+          "notes": "CFG 2.5 gives better prompt adherence for character details (Imageized author examples)."
+        },
+        "standard": {
+          "description": "Official full-quality settings from ComfyUI template.",
+          "steps": 50,
+          "cfg": 4.0,
+          "sampler": "euler",
+          "scheduler": "simple",
+          "denoise": 1.0,
+          "auraflow_shift": 3.1,
+          "notes": "Official ComfyUI workflow template values. 30-50 steps work well."
+        },
+        "standard_golden": {
+          "description": "Community-tested 'golden configuration' for best quality.",
+          "steps": 50,
+          "cfg": 4.5,
+          "sampler": "euler",
+          "scheduler": "simple",
+          "denoise": 1.0,
+          "auraflow_shift": 3.1,
+          "notes": "Community consensus: CFG 4.5 + 50 steps for peak quality."
+        },
+        "standard_character_composition": {
+          "description": "Optimized for multi-character scenes and complex compositions.",
+          "steps": 30,
+          "cfg": 4.0,
+          "sampler": "euler_ancestral",
+          "scheduler": "beta",
+          "denoise": 1.0,
+          "auraflow_shift": 3.1,
+          "notes": "euler_ancestral + beta helps with character variety and scene coherence."
+        }
+      }
+    },
+
+    "qwen_image_2512": {
+      "display_name": "Qwen Image 2512 (December 2025)",
+      "inherits": "qwen_image",
+      "unet": "qwen_image_2512_fp8_e4m3fn.safetensors",
+      "clip": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+      "vae": "qwen_image_vae.safetensors",
+      "notes": "Latest official Qwen Image model. fp8 for 24GB VRAM. Inherits all qwen_image presets."
+    },
+
+    "qwen_image_2511_edit": {
+      "display_name": "Qwen Image Edit 2511 (November 2025)",
+      "inherits": "qwen_image",
+      "unet": "qwen_image_edit_2511_bf16.safetensors",
+      "clip": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+      "vae": "qwen_image_vae.safetensors",
+      "notes": "Optimized for image editing. bf16 precision. Use 2511-specific lightning LoRA.",
+
+      "presets": {
+        "edit_standard": {
+          "description": "Full quality img2img editing.",
+          "steps": 40,
+          "cfg": 4.0,
+          "sampler": "euler",
+          "scheduler": "simple",
+          "denoise": 0.75,
+          "notes": "Denoise 0.5-0.8: lower = closer to input. Negative conditioning should be zeroed."
+        }
+      }
+    },
+
+    "qwen_finetuned": {
+      "display_name": "Qwen Image Fine-tuned Models",
+      "architecture": "qwen_image",
+
+      "models": {
+        "qwenUltimateRealism_v11": {
+          "display_name": "Qwen Ultimate Realism v1.1",
+          "author": "Imageized",
+          "source": "https://civitai.com/models/2027494",
+          "unet_path": "Qwen/imageized/qwenUltimateRealism_v11.safetensors",
+          "clip": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+          "vae": "qwen_image_vae.safetensors",
+          "focus": "Product photography, hyper-realistic, e-commerce",
+          "presets": {
+            "author_quality": {
+              "description": "Author's best quality settings.",
+              "steps": 30,
+              "cfg": 7.5,
+              "sampler": "euler",
+              "scheduler": "simple",
+              "denoise": 1.0,
+              "notes": "Steps 20-40, CFG 5-10 (sweet spot 7-8)."
+            },
+            "author_fast": {
+              "steps": 4,
+              "cfg": 1.0,
+              "sampler": "euler",
+              "scheduler": "simple",
+              "lora": {
+                "name": "Qwen-Image-Lightning-4steps-V1.0.safetensors",
+                "strength": 1.01
+              },
+              "notes": "Author uses strength 1.01 specifically."
+            }
+          }
+        },
+
+        "copaxTimeless_qwenUltraRealistic": {
+          "display_name": "CopaxTimeless Qwen Ultra Realistic",
+          "author": "Copax",
+          "source": "https://civitai.com/models/copaxTimeless",
+          "unet_path": "Qwen/realistic/copaxTimeless_qwenUltraRealistic.safetensors",
+          "clip": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+          "vae": "qwen_image_vae.safetensors",
+          "focus": "Ultra-realistic portraits and scenes",
+          "presets": {
+            "author_recommended": {
+              "steps": 30,
+              "cfg": 4.0,
+              "sampler": "res_multistep",
+              "scheduler": "sgm_uniform",
+              "denoise": 1.0,
+              "auraflow_shift": 3.1,
+              "notes": "Consistently uses res_multistep + sgm_uniform. Steps 20/30/50 all work."
+            }
+          },
+          "resolutions": [
+            [1152, 1536], [992, 1776], [928, 1984], [1536, 2048]
+          ]
+        },
+
+        "redcraftRedzimage_DX1": {
+          "display_name": "RedCraft Redzimage DX1",
+          "source": "https://civitai.com/models/958009",
+          "unet_path": "redcraftRedzimageUpdatedJAN30_redzibDX1.safetensors",
+          "loader": "CheckpointLoaderSimple",
+          "focus": "Realistic generation (combined checkpoint)",
+          "presets": {
+            "distilled_fast": {
+              "steps": 10,
+              "cfg": 1.0,
+              "sampler": "euler",
+              "scheduler": "simple"
+            },
+            "standard": {
+              "steps": 30,
+              "cfg": 4.0,
+              "sampler": "euler",
+              "scheduler": "simple"
+            }
+          },
+          "notes": "Combined checkpoint (UNET+CLIP+VAE). Use CheckpointLoaderSimple, not separate loaders."
+        }
+      }
+    },
+
+    "z_image": {
+      "display_name": "Z-Image Family",
+      "architecture": "z_image",
+      "notes": "Must use Qwen tokenizer, not standard CLIP nodes.",
+
+      "models": {
+        "z_image_turbo": {
+          "display_name": "Z-Image Turbo",
+          "unet": "z_image_turbo_bf16.safetensors",
+          "clip": "qwen_3_4b.safetensors",
+          "vae": "flux2-vae.safetensors",
+          "clip_type": "qwen_image",
+          "presets": {
+            "author_recommended": {
+              "steps": 14,
+              "cfg": 1.0,
+              "sampler": "res_2s",
+              "scheduler": "simple",
+              "notes": "From CopaxTimeless author. Distilled CFG 1."
+            },
+            "beauty_fashion": {
+              "steps": 10,
+              "cfg": 1.0,
+              "sampler": "euler_ancestral",
+              "scheduler": "beta",
+              "notes": "Smooth skin, ideal for beauty/fashion (560-image test)."
+            },
+            "sharpest": {
+              "steps": 10,
+              "cfg": 1.0,
+              "sampler": "dpmpp_sde",
+              "scheduler": "beta",
+              "notes": "Sharpest, most natural results from community testing."
+            }
+          },
+          "negative_prompt_template": "over-smooth skin, plastic skin, doll face, anime, CGI, waxy texture, blurry face, fake pores, exaggerated makeup, over-sharpening, unrealistic symmetry, flat lighting, low detail skin, extra fingers, distorted anatomy"
+        }
+      }
+    },
+
+    "sdxl": {
+      "display_name": "SDXL 1.0",
+      "architecture": "sdxl",
+      "clip_type": "sdxl",
+      "prompt_style": "tags_and_natural",
+
+      "presets": {
+        "realistic_photo": {
+          "description": "Gold standard for SDXL photorealism.",
+          "steps": 25,
+          "cfg": 5.0,
+          "sampler": "dpmpp_2m",
+          "scheduler": "karras",
+          "notes": "DPM++ 2M Karras. CFG 5-7. AVOID Euler for SDXL (causes washed-out images)."
+        },
+        "realistic_creative": {
+          "description": "More diverse realistic results.",
+          "steps": 30,
+          "cfg": 6.0,
+          "sampler": "dpmpp_2m_sde",
+          "scheduler": "karras",
+          "notes": "DPM++ 2M SDE Karras for more creative variation."
+        },
+        "realistic_best": {
+          "description": "Highest quality realistic (slow).",
+          "steps": 35,
+          "cfg": 6.0,
+          "sampler": "heun",
+          "scheduler": "normal",
+          "notes": "Heun is 2x compute per step but highest quality. Use for final renders."
+        },
+        "anime_pony": {
+          "description": "Pony Diffusion V6 XL author settings.",
+          "steps": 25,
+          "cfg": 7.0,
+          "sampler": "euler_ancestral",
+          "scheduler": "normal",
+          "clip_skip": 2,
+          "notes": "CLIP SKIP 2 IS CRITICAL for Pony — model outputs blobs without it. No neg prompt needed. Use score_9, score_8_up tags."
+        },
+        "anime_sharp": {
+          "description": "Sharp anime with SDE sampler.",
+          "steps": 25,
+          "cfg": 7.5,
+          "sampler": "dpmpp_sde",
+          "scheduler": "karras",
+          "notes": "DPM++ SDE Karras for sharper anime. Slower than 2M."
+        }
+      },
+      "resolutions": {
+        "square": [1024, 1024],
+        "portrait_3_4": [896, 1152],
+        "portrait_9_16": [768, 1344],
+        "landscape_4_3": [1152, 896],
+        "landscape_16_9": [1344, 768]
+      }
+    },
+
+    "illustrious": {
+      "display_name": "Illustrious XL",
+      "architecture": "sdxl",
+      "clip_type": "sdxl",
+      "prompt_style": "booru_tags",
+      "prompt_notes": "Use danbooru tags: 1girl, solo, long_hair, blue_eyes. Quality: masterpiece, best quality, absurdres. CFG > 7.5 causes oversaturation, < 3 loses color.",
+
+      "presets": {
+        "default": {
+          "description": "Community standard Illustrious settings.",
+          "steps": 25,
+          "cfg": 4.5,
+          "sampler": "euler_ancestral",
+          "scheduler": "simple",
+          "notes": "CFG 4.5-5.0 is the sweet spot. euler_ancestral is community favorite."
+        },
+        "detailed": {
+          "steps": 30,
+          "cfg": 5.0,
+          "sampler": "dpmpp_2m",
+          "scheduler": "karras",
+          "notes": "More consistent/detailed. For complex compositions, increase steps to 40."
+        },
+        "sharp_shading": {
+          "steps": 15,
+          "cfg": 5.0,
+          "sampler": "dpmpp_2s_ancestral",
+          "scheduler": "karras",
+          "notes": "Enhanced shading detail. Watch for noise in flat color areas."
+        }
+      },
+      "resolutions": {
+        "optimal_range": "1024-1536px per side"
+      }
+    },
+
+    "flux": {
+      "display_name": "Flux.1",
+      "architecture": "flux",
+      "clip_type": "flux",
+      "prompt_style": "natural_language",
+      "prompt_notes": "Natural language descriptions. No quality tags needed. Detailed, descriptive prompts work best.",
+      "notes": "Flux uses FluxGuidance node (guidance=3.5), NOT KSampler CFG. Set KSampler CFG=1.0 always.",
+
+      "presets": {
+        "dev": {
+          "description": "Flux.1-dev standard.",
+          "steps": 20,
+          "cfg": 1.0,
+          "sampler": "euler",
+          "scheduler": "simple",
+          "guidance": 3.5,
+          "notes": "Guidance 3.5 via FluxGuidance node. Steps 20-28. Short prompts: guidance 3.5-4.0, long prompts: 1.0-1.5."
+        },
+        "schnell": {
+          "description": "Flux.1-schnell (1-4 steps, no LoRA needed).",
+          "steps": 4,
+          "cfg": 1.0,
+          "sampler": "euler",
+          "scheduler": "simple"
+        },
+        "flux2_turbo": {
+          "description": "Flux 2 with turbo LoRA.",
+          "steps": 4,
+          "cfg": 1.0,
+          "sampler": "euler",
+          "scheduler": "simple",
+          "lora": {
+            "name": "flux2-turbo-lora.safetensors",
+            "strength": 1.0
+          }
+        }
+      },
+      "resolutions": {
+        "square": [1024, 1024],
+        "portrait_3_4": [896, 1152],
+        "landscape_4_3": [1152, 896]
+      }
+    },
+
+    "sd35": {
+      "display_name": "Stable Diffusion 3.5",
+      "architecture": "sd3",
+
+      "presets": {
+        "large": {
+          "steps": 25,
+          "cfg": 4.5,
+          "sampler": "dpmpp_2m",
+          "scheduler": "normal"
+        },
+        "large_turbo": {
+          "steps": 5,
+          "cfg": 1.0,
+          "sampler": "euler",
+          "scheduler": "normal"
+        },
+        "medium": {
+          "steps": 28,
+          "cfg": 4.5,
+          "sampler": "euler",
+          "scheduler": "normal"
+        }
+      }
+    }
+  },
+
+  "lightning_loras": {
+    "_description": "Index of available lightning/turbo LoRAs.",
+
+    "qwen_image_4step": {
+      "file": "Qwen-Image-Lightning-4steps-V1.0.safetensors",
+      "source": "https://huggingface.co/lightx2v/Qwen-Image-2512-Lightning",
+      "steps": 4,
+      "compatible_with": ["qwen_image", "qwen_image_2512", "qwen_finetuned"],
+      "strength": 1.0,
+      "cfg": 1.0,
+      "speedup": "12-25x"
+    },
+    "qwen_image_8step": {
+      "file": "Qwen-Image-Lightning-8steps-V1.0.safetensors",
+      "source": "https://huggingface.co/lightx2v/Qwen-Image-2512-Lightning",
+      "steps": 8,
+      "compatible_with": ["qwen_image", "qwen_image_2512", "qwen_finetuned"],
+      "strength": 1.0,
+      "cfg": 1.0,
+      "notes": "Better quality than 4-step. Use CFG 2.5 for character detail."
+    },
+    "qwen_edit_2511_4step": {
+      "file": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+      "source": "https://huggingface.co/lightx2v/Qwen-Image-Edit-2511-Lightning",
+      "steps": 4,
+      "compatible_with": ["qwen_image_2511_edit"],
+      "strength": 1.0,
+      "cfg": 1.0,
+      "speedup": "~10x",
+      "notes": "Cannot combine with distilled model."
+    },
+    "wuli_turbo_v3": {
+      "file": "NOT_INSTALLED",
+      "source": "https://huggingface.co/Wuli-art/Qwen-Image-2512-Turbo-LoRA",
+      "steps": 4,
+      "compatible_with": ["qwen_image_2512"],
+      "strength": 1.0,
+      "cfg": 1.0,
+      "speedup": "20x",
+      "notes": "Wuli-art V3.0 (Jan 2026). CFG-distilled. Also has 2-step and 8-step variants. May need download."
+    },
+    "flux2_turbo": {
+      "file": "flux2-turbo-lora.safetensors",
+      "steps": 4,
+      "compatible_with": ["flux"],
+      "strength": 1.0,
+      "cfg": 1.0
+    }
+  },
+
+  "sampler_guide": {
+    "_description": "Quick reference for sampler/scheduler by use case.",
+    "general_fast":         { "sampler": "euler",           "scheduler": "simple",      "notes": "Works everywhere. Default." },
+    "sdxl_realistic":       { "sampler": "dpmpp_2m",        "scheduler": "karras",      "notes": "SDXL gold standard. AVOID Euler on SDXL." },
+    "sdxl_anime":           { "sampler": "euler_ancestral",  "scheduler": "normal",      "notes": "Pony/anime SDXL. Clip skip 2 for Pony." },
+    "illustrious":          { "sampler": "euler_ancestral",  "scheduler": "simple",      "notes": "CFG 4.5-5.0 sweet spot." },
+    "character_composition":{ "sampler": "euler_ancestral",  "scheduler": "beta",        "notes": "Multi-character scenes, varied compositions." },
+    "qwen_realistic_hq":    { "sampler": "res_multistep",   "scheduler": "sgm_uniform", "notes": "CopaxTimeless pick for Qwen." },
+    "z_image_sharp":        { "sampler": "dpmpp_sde",       "scheduler": "beta",        "notes": "Sharpest Z-Image results (560-image test)." },
+    "z_image_beauty":       { "sampler": "euler_ancestral",  "scheduler": "beta",        "notes": "Smooth skin, fashion/beauty." },
+    "z_image_turbo":        { "sampler": "res_2s",          "scheduler": "simple",      "notes": "Z-Image Turbo distilled." }
+  },
+
+  "_contributing": {
+    "how_to_contribute": "Fork the repo, add your model/preset, submit a PR.",
+    "required_fields": ["Model name + author", "Source URL", "At least one preset (steps/cfg/sampler/scheduler)", "Resolution if non-standard"],
+    "optional_fields": ["Lightning LoRA compatibility", "Prompt style tips", "Known quirks", "img2img denoise range"],
+    "contributors": [
+      { "name": "artokun", "role": "maintainer", "date": "2026-02-16" }
+    ]
+  }
+}

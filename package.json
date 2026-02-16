@@ -15,6 +15,7 @@
     "test:watch": "vitest",
     "test:integration": "cross-env COMFYUI_INTEGRATION=true vitest run",
     "lint": "tsc --noEmit",
+    "postinstall": "node scripts/postinstall.mjs",
     "release": "npm version patch && git push --follow-tags",
     "release:minor": "npm version minor && git push --follow-tags",
     "release:major": "npm version major && git push --follow-tags"
