@@ -1,12 +1,14 @@
 # comfyui-mcp
 
-**MCP server + Claude Code plugin for [ComfyUI](https://github.com/comfyanonymous/ComfyUI)** — execute workflows, generate images, visualize pipelines, manage models, and explore custom nodes, all from your AI coding assistant.
+**MCP server + Claude Code plugin for [ComfyUI](https://github.com/comfyanonymous/ComfyUI)** — execute workflows, generate images, visualize pipelines, manage models, control VRAM, and explore custom nodes, all from your AI coding assistant.
 
 [![npm version](https://img.shields.io/npm/v/comfyui-mcp)](https://www.npmjs.com/package/comfyui-mcp)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22.0.0-brightgreen)](https://nodejs.org)
 [![License](https://img.shields.io/npm/l/comfyui-mcp)](./LICENSE)
 
 Works on **macOS**, **Linux**, and **Windows**. Auto-detects your ComfyUI installation and port.
+
+**30 MCP tools** | **10 slash commands** | **4 knowledge skills** | **3 autonomous agents** | **2 hooks**
 
 ---
 
@@ -56,161 +58,131 @@ claude plugin install comfyui-mcp
 
 | Command | Description |
 |---------|-------------|
-| `/comfy:gen <prompt>` | Generate an image from a text description |
-| `/comfy:viz <workflow>` | Visualize a workflow as a Mermaid diagram |
-| `/comfy:node-skill <pack>` | Generate a Claude skill for a custom node pack |
-| `/comfy:debug [prompt_id]` | Diagnose why a workflow failed |
-| `/comfy:batch <prompt, params>` | Parameter sweep generation (cfg, sampler, steps, etc.) |
-| `/comfy:convert <file>` | Convert between UI format and API format |
-| `/comfy:install <pack>` | Install a custom node pack (git clone + pip install) |
-| `/comfy:gallery [filter]` | Browse generated outputs with metadata |
-| `/comfy:compare <a vs b>` | Diff two workflows side by side |
-| `/comfy:recipe <name> <prompt>` | Multi-step recipes (portrait, hires-fix, style-transfer, product-shot) |
+| `/comfy:gen <prompt>` | Generate an image from a text description — auto-selects checkpoint, builds workflow, returns image |
+| `/comfy:viz <workflow>` | Visualize a workflow as a Mermaid diagram with nodes grouped by category |
+| `/comfy:node-skill <pack>` | Generate a Claude skill for a custom node pack from Registry ID or GitHub URL |
+| `/comfy:debug [prompt_id]` | Diagnose why a workflow failed — reads history, logs, traces root cause, suggests fixes |
+| `/comfy:batch <prompt, params>` | Parameter sweep generation across cfg, sampler, steps, seed, etc. |
+| `/comfy:convert <file>` | Convert between UI format and API format workflows |
+| `/comfy:install <pack>` | Install a custom node pack — git clone, pip install, optional restart |
+| `/comfy:gallery [filter]` | Browse generated outputs with metadata — filter by date, count, or filename |
+| `/comfy:compare <a vs b>` | Diff two workflows side by side — shows added/removed nodes and changed parameters |
+| `/comfy:recipe <name> <prompt>` | Multi-step recipes: `portrait`, `hires-fix`, `style-transfer`, `product-shot` |
 
 ### Built-in skills
 
 | Skill | Description |
 |-------|-------------|
-| **comfyui-core** | Workflow format, node types, data flow patterns, pipeline architecture |
-| **prompt-engineering** | CLIP weight syntax, BREAK tokens, embeddings, model-specific prompting (SD1.5/SDXL/Flux/SD3) |
-| **troubleshooting** | Common error catalog — OOM, dtype mismatches, missing nodes, NaN, black images, CUDA errors |
-| **model-compatibility** | Compatibility matrix — loaders, resolutions, CFG, samplers, ControlNets, LoRAs, and VAEs per model family |
+| **comfyui-core** | Workflow format, node types, data flow patterns, pipeline architecture, MCP tool usage guide |
+| **prompt-engineering** | CLIP weight syntax `(word:1.3)`, BREAK tokens, embeddings, model-specific prompting for SD1.5/SDXL/Flux/SD3 |
+| **troubleshooting** | Common error catalog — OOM, dtype mismatches, missing nodes, NaN tensors, black images, CUDA errors, with VRAM estimates per model |
+| **model-compatibility** | Compatibility matrix — loaders, resolutions, CFG, samplers, ControlNets, LoRAs, and VAEs per model family (SD1.5/SDXL/Turbo/Lightning/Flux/SD3/LTXV) |
 
 ### Agents
 
-| Agent | Description |
-|-------|-------------|
-| **comfy-explorer** | Researches custom node packs, reads docs, queries node definitions, generates skill files |
-| **comfy-debugger** | Autonomously diagnoses workflow failures — gathers logs, traces root cause, proposes fixes |
-| **comfy-optimizer** | Analyzes workflows for performance — redundant nodes, VRAM waste, model-specific misconfigurations |
+| Agent | Model | Description |
+|-------|-------|-------------|
+| **comfy-explorer** | Sonnet | Researches custom node packs — reads docs, queries `/object_info`, generates comprehensive skill files |
+| **comfy-debugger** | Sonnet | Autonomously diagnoses workflow failures — gathers logs + history, identifies failing node, checks models + custom nodes, proposes and optionally applies fixes |
+| **comfy-optimizer** | Sonnet | Analyzes workflows for performance — detects redundant nodes, VRAM waste, wrong CFG/steps for model family, precision issues, suggests optimizations |
 
 ### Hooks
 
 | Event | Trigger | Action |
 |-------|---------|--------|
-| PreToolUse | `run_workflow` | VRAM watchdog — warns if GPU memory is critically low before execution |
-| PostToolUse | `run_workflow` | Auto-opens the generated image in your system viewer |
+| PreToolUse | `run_workflow` | **VRAM watchdog** — checks GPU memory via `/system_stats` and warns if < 1GB free before execution |
+| PostToolUse | `run_workflow` | **Auto-open image** — finds the newest output image and opens it in your system viewer |
 
 ---
 
 ## MCP Tools
+
+30 tools organized into 12 categories:
 
 ### Workflow Execution
 
 | Tool | Description |
 |------|-------------|
 | `run_workflow` | Execute a workflow (API format JSON), returns images as base64 |
-| `get_job_status` | Check execution status of a running job |
-| `get_queue` | View the current execution queue |
+| `get_job_status` | Check execution status of a running job by prompt ID |
+| `get_queue` | View the current execution queue (running + pending) |
 | `cancel_job` | Interrupt the currently running job |
-| `get_system_stats` | Get system info (GPU, VRAM, Python version, OS) |
+| `get_system_stats` | Get system info — GPU, VRAM, Python version, OS |
 
 ### Workflow Visualization
 
 | Tool | Description |
 |------|-------------|
-| `visualize_workflow` | Convert a workflow to a Mermaid flowchart diagram |
+| `visualize_workflow` | Convert a workflow to a Mermaid flowchart with nodes grouped by category |
 | `mermaid_to_workflow` | Convert a Mermaid diagram back to executable workflow JSON |
 
 ### Workflow Composition
 
 | Tool | Description |
 |------|-------------|
-| `create_workflow` | Generate a workflow from templates (txt2img, img2img, upscale, inpaint) |
-| `modify_workflow` | Apply operations: set_input, add_node, remove_node, connect, insert_between |
-| `get_node_info` | Query available node types from ComfyUI's `/object_info` |
+| `create_workflow` | Generate a workflow from templates: `txt2img`, `img2img`, `upscale`, `inpaint` |
+| `modify_workflow` | Apply operations: `set_input`, `add_node`, `remove_node`, `connect`, `insert_between` |
+| `get_node_info` | Query available node types from ComfyUI's `/object_info` endpoint |
 
-### Model Management
-
-| Tool | Description |
-|------|-------------|
-| `search_models` | Search HuggingFace for compatible models |
-| `download_model` | Download a model to the correct ComfyUI subdirectory |
-| `list_local_models` | List installed models by type (checkpoints, loras, vae, etc.) |
-
-### Registry & Discovery
+### Workflow Validation
 
 | Tool | Description |
 |------|-------------|
-| `search_custom_nodes` | Search the ComfyUI Registry for custom node packs |
-| `get_node_pack_details` | Get full details of a custom node pack |
-| `generate_node_skill` | Generate a Claude skill from a registry ID or GitHub URL |
-
-### Diagnostics
-
-| Tool | Description |
-|------|-------------|
-| `get_logs` | Get ComfyUI server logs (with optional keyword filter) |
-| `get_history` | Get execution history with error details and tracebacks |
+| `validate_workflow` | Dry-run validation — checks missing nodes, broken connections, invalid output indices, missing model files |
 
 ### Workflow Library
 
 | Tool | Description |
 |------|-------------|
 | `list_workflows` | List saved workflows from ComfyUI's user library |
-| `get_workflow` | Load a specific saved workflow |
+| `get_workflow` | Load a specific saved workflow by filename |
 | `save_workflow` | Save a workflow to the ComfyUI user library |
-
-### Workflow Validation
-
-| Tool | Description |
-|------|-------------|
-| `validate_workflow` | Dry-run validation: missing nodes, broken connections, missing models |
 
 ### Image Management
 
 | Tool | Description |
 |------|-------------|
-| `upload_image` | Copy a local image into ComfyUI's input/ directory for img2img/inpaint/ControlNet |
-| `workflow_from_image` | Extract embedded workflow metadata from a ComfyUI-generated PNG |
-| `list_output_images` | Browse recently generated images from the output directory |
+| `upload_image` | Copy a local image into ComfyUI's `input/` directory for img2img, inpaint, or ControlNet |
+| `workflow_from_image` | Extract embedded workflow metadata from a ComfyUI-generated PNG (reads `prompt` and `workflow` tEXt chunks) |
+| `list_output_images` | Browse recently generated images from the output directory, sorted newest-first |
+
+### Model Management
+
+| Tool | Description |
+|------|-------------|
+| `search_models` | Search HuggingFace for compatible models (checkpoints, LoRAs, VAEs, etc.) |
+| `download_model` | Download a model from a URL to the correct ComfyUI subdirectory |
+| `list_local_models` | List installed models by type: checkpoints, loras, vae, upscale_models, controlnet, embeddings, clip, unet |
 
 ### Memory Management
 
 | Tool | Description |
 |------|-------------|
-| `clear_vram` | Free GPU VRAM by unloading cached models (calls `/free` endpoint) |
+| `clear_vram` | Free GPU VRAM by unloading cached models — calls ComfyUI's `/free` endpoint, reports before/after stats |
 | `get_embeddings` | List installed textual inversion embeddings |
+
+### Registry & Discovery
+
+| Tool | Description |
+|------|-------------|
+| `search_custom_nodes` | Search the ComfyUI Registry for custom node packs by keyword |
+| `get_node_pack_details` | Get full details of a custom node pack (description, author, nodes, install info) |
+| `generate_node_skill` | Generate a Claude skill `.md` file from a Registry ID or GitHub URL |
+
+### Diagnostics
+
+| Tool | Description |
+|------|-------------|
+| `get_logs` | Get ComfyUI server logs with optional keyword filter (e.g., `error`, `warning`, a node name) |
+| `get_history` | Get execution history with full error details, Python tracebacks, timing, and cached node info |
 
 ### Process Control
 
 | Tool | Description |
 |------|-------------|
-| `stop_comfyui` | Stop the running ComfyUI process (saves restart info) |
+| `stop_comfyui` | Stop the running ComfyUI process (saves PID and launch args for restart) |
 | `start_comfyui` | Start ComfyUI using info saved from a previous stop |
 | `restart_comfyui` | Stop and restart ComfyUI, preserving all launch arguments |
-
----
-
-## Configuration
-
-The server auto-detects your ComfyUI installation and port. Override with environment variables if needed:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `COMFYUI_HOST` | `127.0.0.1` | ComfyUI server address |
-| `COMFYUI_PORT` | *(auto-detect)* | ComfyUI server port (tries 8188, then 8000) |
-| `COMFYUI_PATH` | *(auto-detect)* | Path to ComfyUI data directory |
-| `CIVITAI_API_TOKEN` | | CivitAI API token for model downloads |
-| `HUGGINGFACE_TOKEN` | | HuggingFace token for higher API rate limits |
-| `GITHUB_TOKEN` | | GitHub token for skill generation (avoids rate limits) |
-| `LOG_LEVEL` | `info` | Logging verbosity: `debug`, `info`, `warn`, `error` |
-
-### Auto-detection
-
-**Port**: Probes `8188` (CLI default) then `8000` (Desktop app default) via `/system_stats`.
-
-**Path**: Checks common locations in order:
-
-- `~/Documents/ComfyUI` (macOS/Windows Desktop app data directory)
-- `~/Library/Application Support/ComfyUI` (macOS)
-- `~/AppData/Local/Programs/ComfyUI/resources/ComfyUI` (Windows Desktop app install)
-- `~/AppData/Local/ComfyUI` (Windows)
-- `~/ComfyUI`, `~/code/ComfyUI`, `~/projects/ComfyUI`, `~/src/ComfyUI`
-- `/opt/ComfyUI`, `~/.local/share/ComfyUI` (Linux)
-- Scans `~/Documents` and `~/My Documents` for any directory containing "ComfyUI"
-
-Set `COMFYUI_PATH` to skip detection and use an explicit path.
 
 ---
 
@@ -253,22 +225,6 @@ flowchart LR
   3 -->|CONDITIONING| 5
 ```
 
-### Manage models
-
-```
-> What checkpoints do I have installed?
-> Search HuggingFace for SDXL turbo models
-> Download this model to my checkpoints folder
-```
-
-### Explore custom nodes
-
-```
-> /comfy:node-skill comfyui-impact-pack
-```
-
-Generates a comprehensive skill file documenting every node, its inputs/outputs, and usage patterns.
-
 ### Debug a failed workflow
 
 ```
@@ -277,13 +233,21 @@ Generates a comprehensive skill file documenting every node, its inputs/outputs,
 
 Automatically reads the last execution history and logs, identifies the failing node, checks for missing models or node packs, and suggests a fix.
 
+```
+> /comfy:debug abc123-def456
+```
+
+Diagnose a specific execution by prompt ID.
+
 ### Parameter sweep
 
 ```
 > /comfy:batch a cat in a field, cfg:5-10:2, sampler:euler,dpmpp_2m
 ```
 
-Generates a grid of images across all parameter combinations and presents the results for comparison.
+Generates a grid of images across all parameter combinations and presents a summary table with results.
+
+Supported sweep parameters: `cfg`, `steps`, `sampler`, `scheduler`, `seed`, `denoise`, `width`, `height`.
 
 ### Multi-step recipes
 
@@ -293,13 +257,139 @@ Generates a grid of images across all parameter combinations and presents the re
 
 Runs a two-pass pipeline: txt2img at 512x768, then img2img upscale to 1024x1536 with detail enhancement.
 
-### Workflow validation
+Available recipes:
+
+| Recipe | Description |
+|--------|-------------|
+| `portrait` | Generate at 1024x1024, then 2x upscale to 2048x2048 |
+| `hires-fix` | Low-res generation → img2img upscale with denoise 0.4-0.5 |
+| `style-transfer` | Apply a style prompt to an existing image via img2img |
+| `product-shot` | Product image with clean white background |
+
+### Convert workflow format
+
+```
+> /comfy:convert ~/workflows/my-ui-workflow.json
+```
+
+Converts between ComfyUI's UI format (nodes + links arrays) and API format (node IDs → {class_type, inputs}).
+
+### Install a custom node pack
+
+```
+> /comfy:install comfyui-impact-pack
+```
+
+Searches the registry, shows details, clones the repo to `custom_nodes/`, installs dependencies, and offers to restart ComfyUI.
+
+### Browse output gallery
+
+```
+> /comfy:gallery last 5
+> /comfy:gallery today
+```
+
+Lists recent outputs with embedded metadata — shows checkpoint, prompt, seed, steps, CFG, sampler for each image.
+
+### Compare workflows
+
+```
+> /comfy:compare workflow-a.json vs workflow-b.json
+```
+
+Shows added/removed nodes, changed parameters (old → new values), and optional Mermaid diagrams for visual comparison.
+
+### Validate before running
 
 ```
 > Validate this workflow before I run it
 ```
 
-Checks for missing nodes, broken connections, invalid output indices, and missing model files — without executing.
+Checks for missing node types, broken connections, invalid output indices, and missing model files — without executing.
+
+### Manage models
+
+```
+> What checkpoints do I have installed?
+> Search HuggingFace for SDXL turbo models
+> Download this model to my checkpoints folder
+```
+
+### Manage VRAM
+
+```
+> Free my VRAM
+> What embeddings do I have?
+```
+
+### Extract workflow from an image
+
+```
+> Extract the workflow from this image: ~/outputs/ComfyUI_00042_.png
+```
+
+Reads the PNG metadata chunks to recover the exact workflow and prompt used to generate the image.
+
+### Explore custom nodes
+
+```
+> /comfy:node-skill comfyui-impact-pack
+```
+
+Generates a comprehensive skill file documenting every node, its inputs/outputs, and usage patterns.
+
+### Process control
+
+```
+> Restart ComfyUI
+> Stop ComfyUI
+> Start ComfyUI back up
+```
+
+---
+
+## Configuration
+
+The server auto-detects your ComfyUI installation and port. Override with environment variables if needed:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `COMFYUI_HOST` | `127.0.0.1` | ComfyUI server address |
+| `COMFYUI_PORT` | *(auto-detect)* | ComfyUI server port (tries 8188, then 8000) |
+| `COMFYUI_PATH` | *(auto-detect)* | Path to ComfyUI data directory |
+| `CIVITAI_API_TOKEN` | | CivitAI API token for model downloads |
+| `HUGGINGFACE_TOKEN` | | HuggingFace token for higher API rate limits |
+| `GITHUB_TOKEN` | | GitHub token for skill generation (avoids rate limits) |
+| `LOG_LEVEL` | `info` | Logging verbosity: `debug`, `info`, `warn`, `error` |
+
+### Auto-detection
+
+**Port**: Probes `8188` (CLI default) then `8000` (Desktop app default) via `/system_stats`.
+
+**Path**: Checks common locations in order:
+
+- `~/Documents/ComfyUI` (macOS/Windows Desktop app data directory)
+- `~/Library/Application Support/ComfyUI` (macOS)
+- `~/AppData/Local/Programs/ComfyUI/resources/ComfyUI` (Windows Desktop app install)
+- `~/AppData/Local/ComfyUI` (Windows)
+- `~/ComfyUI`, `~/code/ComfyUI`, `~/projects/ComfyUI`, `~/src/ComfyUI`
+- `/opt/ComfyUI`, `~/.local/share/ComfyUI` (Linux)
+- Scans `~/Documents` and `~/My Documents` for any directory containing "ComfyUI"
+
+Set `COMFYUI_PATH` to skip detection and use an explicit path.
+
+---
+
+## How It Works
+
+The server communicates with ComfyUI through its REST API and WebSocket interface:
+
+- **WebSocket** — enqueue workflows, receive real-time progress updates, get execution results
+- **REST API** — system stats, node definitions (`/object_info`), logs, history, queue management, workflow library, VRAM control (`/free`), embeddings
+- **File system** — read/write models directory, detect installation paths, upload images, extract PNG metadata, browse outputs
+- **External APIs** — HuggingFace (model search), ComfyUI Registry (custom node discovery), GitHub (skill generation), CivitAI (model downloads)
+
+All communication with the MCP client (Claude Code) happens over **stdio** using the [Model Context Protocol](https://modelcontextprotocol.io). Logs go to stderr to avoid polluting the protocol stream.
 
 ---
 
@@ -355,23 +445,36 @@ claude --plugin-dir ./plugin
 
 ```
 src/
-  index.ts              # MCP server entry point (stdio transport)
-  config.ts             # Auto-detection & environment config
+  index.ts                 # MCP server entry point (stdio transport)
+  config.ts                # Auto-detection & environment config
   comfyui/
-    client.ts           # ComfyUI WebSocket/HTTP client wrapper
-    types.ts            # TypeScript interfaces
+    client.ts              # ComfyUI WebSocket/HTTP client wrapper
+    types.ts               # TypeScript interfaces
   services/
     workflow-executor.ts   # Execute workflows, handle images & errors
     workflow-composer.ts   # Templates (txt2img, img2img, upscale, inpaint)
     workflow-validator.ts  # Dry-run validation (missing nodes, models, connections)
     image-management.ts    # Upload images, extract PNG metadata, list outputs
-    mermaid-converter.ts   # Workflow -> Mermaid diagram
-    mermaid-parser.ts      # Mermaid diagram -> Workflow
+    mermaid-converter.ts   # Workflow → Mermaid diagram
+    mermaid-parser.ts      # Mermaid diagram → Workflow
     model-resolver.ts      # HuggingFace search, local models, downloads
     process-control.ts     # Stop, start, restart ComfyUI process
     registry-client.ts     # ComfyUI Registry API
     skill-generator.ts     # Generate node pack skill docs
   tools/                   # MCP tool registration (one file per group)
+    workflow-execute.ts    # run_workflow, get_job_status, get_queue, cancel_job, get_system_stats
+    workflow-visualize.ts  # visualize_workflow, mermaid_to_workflow
+    workflow-compose.ts    # create_workflow, modify_workflow, get_node_info
+    workflow-validate.ts   # validate_workflow
+    workflow-library.ts    # list_workflows, get_workflow, save_workflow
+    image-management.ts    # upload_image, workflow_from_image, list_output_images
+    model-management.ts    # search_models, download_model, list_local_models
+    memory-management.ts   # clear_vram, get_embeddings
+    registry-search.ts     # search_custom_nodes, get_node_pack_details
+    skill-generator.ts     # generate_node_skill
+    diagnostics.ts         # get_logs, get_history
+    process-control.ts     # stop_comfyui, start_comfyui, restart_comfyui
+    index.ts               # Registers all tool groups
   utils/
     errors.ts              # Custom error hierarchy with MCP integration
     logger.ts              # stderr-only logging (safe for stdio transport)
@@ -379,24 +482,31 @@ src/
 plugin/
   .claude-plugin/          # Plugin manifest
   .mcp.json                # MCP server config for plugin
-  commands/                # Slash commands (gen, viz, debug, batch, convert, install, gallery, compare, recipe, node-skill)
-  skills/                  # Knowledge bases (comfyui-core, prompt-engineering, troubleshooting, model-compatibility)
-  agents/                  # Autonomous agents (explorer, debugger, optimizer)
-  hooks/                   # Pre/post tool-use hooks (VRAM check, auto-open image)
+  commands/                # Slash commands
+    gen.md                 # /comfy:gen — image generation
+    viz.md                 # /comfy:viz — workflow visualization
+    node-skill.md          # /comfy:node-skill — skill generation
+    debug.md               # /comfy:debug — failure diagnosis
+    batch.md               # /comfy:batch — parameter sweeps
+    convert.md             # /comfy:convert — format conversion
+    install.md             # /comfy:install — node pack installation
+    gallery.md             # /comfy:gallery — output browser
+    compare.md             # /comfy:compare — workflow diff
+    recipe.md              # /comfy:recipe — multi-step pipelines
+  skills/                  # Knowledge bases
+    comfyui-core/          # Workflow format, node types, pipeline patterns
+    prompt-engineering/    # CLIP syntax, model-specific prompting
+    troubleshooting/       # Error catalog with patterns and fixes
+    model-compatibility/   # Compatibility matrix per model family
+  agents/                  # Autonomous agents
+    explorer.md            # Research custom node packs, generate skills
+    debugger.md            # Diagnose workflow failures
+    optimizer.md           # Analyze and optimize workflows
+  hooks/                   # Pre/post tool-use hooks
+    hooks.json             # Hook configuration
+    vram-check.mjs         # VRAM watchdog before execution
+    open-latest-image.mjs  # Auto-open generated images
 ```
-
----
-
-## How It Works
-
-The server communicates with ComfyUI through its REST API and WebSocket interface:
-
-- **WebSocket** — enqueue workflows, receive real-time progress updates, get execution results
-- **REST API** — system stats, node definitions (`/object_info`), logs, history, queue management, workflow library
-- **File system** — read/write models directory, detect installation paths
-- **External APIs** — HuggingFace (model search), ComfyUI Registry (custom node discovery), GitHub (skill generation), CivitAI (model downloads)
-
-All communication with the MCP client (Claude Code) happens over **stdio** using the [Model Context Protocol](https://modelcontextprotocol.io). Logs go to stderr to avoid polluting the protocol stream.
 
 ---
 
@@ -415,7 +525,13 @@ This is informational — the server uses the first one found. Set `COMFYUI_PATH
 For HuggingFace gated models, set `HUGGINGFACE_TOKEN`. For CivitAI, set `CIVITAI_API_TOKEN`.
 
 **Workflow execution errors**
-Use `get_history` or `get_logs` to see detailed error messages including Python tracebacks from ComfyUI.
+Use `/comfy:debug` to automatically diagnose failures. Or use `get_history` / `get_logs` directly to see detailed error messages including Python tracebacks from ComfyUI.
+
+**Out of memory (OOM)**
+Use `clear_vram` to free GPU memory before running large workflows. The VRAM watchdog hook will warn you automatically if memory is critically low. See the **troubleshooting** skill for model-specific VRAM estimates.
+
+**Missing custom nodes**
+Use `/comfy:install <pack>` to install missing node packs from the registry. The debug command will detect and suggest missing packs automatically.
 
 ---
 
@@ -430,4 +546,4 @@ Use `get_history` or `get_logs` to see detailed error messages including Python 
 
 ## License
 
-See [LICENSE](./LICENSE) for details.
+MIT — see [LICENSE](./LICENSE) for details.
