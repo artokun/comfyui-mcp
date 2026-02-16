@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$HOOK_DIR/vram-check.mjs\""
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/vram-check.mjs\""
           }
         ]
       },
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$HOOK_DIR/save-warning.mjs\""
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/save-warning.mjs\""
           }
         ]
       }
@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$HOOK_DIR/open-latest-image.mjs\""
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/open-latest-image.mjs\""
           }
         ]
       }
