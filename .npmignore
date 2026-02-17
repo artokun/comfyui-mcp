@@ -10,3 +10,8 @@ hooks/
 skills/
 tsconfig.json
 *.tsbuildinfo
+workflows/
+docs/
+.github/
+tests/
+vitest.config.*

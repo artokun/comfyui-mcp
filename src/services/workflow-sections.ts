@@ -28,20 +28,56 @@ const CATEGORY_ALIASES: Record<string, string> = {
   _for_testing: "utility",
   api: "utility",
   utils: "utility",
+  // Custom node pack categories
+  bootleg: "loading",             // ComfyUI-GGUF (UNET/CLIP loaders)
+  gguf: "loading",                // gguf pack (CLIP loaders)
+  rgthree: "loading",             // rgthree (Lora Loader Stack, etc.)
+  seedvr2: "image",               // SeedVR2 (video upscaler)
+  "video helper suite": "output", // VHS (Video Combine)
 };
 
 // Meta-categories where the second level is more meaningful
 const META_CATEGORIES = new Set(["advanced"]);
 
+// Known core pipeline section names
+const KNOWN_SECTIONS = new Set([
+  "loading", "conditioning", "sampling", "latent",
+  "image", "output", "mask", "utility",
+]);
+
+// Strip emoji and special characters from a category string
+function cleanCategory(category: string): string {
+  return category.replace(/[^\p{L}\p{N}\s/\-_]/gu, "").trim();
+}
+
 // Normalize a ComfyUI category string to a top-level section name
 export function normalizeCategoryName(category: string): string {
-  const parts = category.split("/").map((p) => p.toLowerCase().trim());
+  const cleaned = cleanCategory(category);
+  const parts = cleaned.split("/").map((p) => p.toLowerCase().trim());
   // For meta-categories like "advanced/loaders", use the second level
   let key = parts[0];
   if (META_CATEGORIES.has(key) && parts.length > 1) {
     key = parts[1];
   }
-  return CATEGORY_ALIASES[key] ?? key;
+
+  // Check direct alias
+  const aliased = CATEGORY_ALIASES[key];
+  if (aliased) return aliased;
+
+  // If key is already a known section, use it
+  if (KNOWN_SECTIONS.has(key)) return key;
+
+  // Check if any sub-part of the category path is a known section or has an alias
+  // e.g., "KJNodes/image" → sub-part "image" is known
+  // e.g., "GetSetNode_Pro/loaders" → sub-part "loaders" aliases to "loading"
+  for (let i = 1; i < parts.length; i++) {
+    const part = parts[i];
+    if (CATEGORY_ALIASES[part]) return CATEGORY_ALIASES[part];
+    if (KNOWN_SECTIONS.has(part)) return part;
+  }
+
+  // Fall back to the cleaned key
+  return key;
 }
 
 // Get/Set node class types we recognize
@@ -63,15 +99,16 @@ export function resolveGetSetPairs(workflow: WorkflowJSON): VirtualEdge[] {
 
   for (const [id, node] of Object.entries(workflow)) {
     if (isSetNode(node.class_type)) {
+      // Prefer Constant (the actual wire key) over title (which may have "Set_" prefix)
       const key =
-        (node._meta?.title as string) ??
         (node.inputs.Constant as string) ??
+        (node._meta?.title as string) ??
         "";
       if (key) setters.set(key, id);
     } else if (isGetNode(node.class_type)) {
       const key =
-        (node._meta?.title as string) ??
         (node.inputs.Constant as string) ??
+        (node._meta?.title as string) ??
         "";
       if (key) {
         if (!getters.has(key)) getters.set(key, []);

@@ -501,3 +501,14 @@ When the start and end frames have different subject sizes (e.g., small cat → 
 6. **Optionally upscale** with SeedVR2 to 1080p
 
 Proven timing on RTX 4090: Z-Image (35s) → Qwen Edit (78s) → WAN FLF 81 frames (139s) = **~4 minutes total**.
+
+## Working with Saved Workflows
+
+Use `analyze_workflow` to understand any saved WAN FLF workflow before modifying or executing it. It returns a structured summary with sections, node IDs, key settings, and virtual wire connections — no raw JSON needed.
+
+```
+analyze_workflow("Wan FirstLastFrame Advanced.json")           # summary view (default)
+analyze_workflow("Wan FirstLastFrame Advanced.json", view="flat")  # mermaid diagram
+```
+
+Only use `get_workflow` when you need the raw JSON for `enqueue_workflow` or `modify_workflow`.

@@ -279,3 +279,4 @@ This produces a grid image showing all combinations — useful for finding optim
 3. **Lightning LoRA + denoise 1.0** works well — the model handles structure preservation through conditioning
 4. For **img2img editing** (denoise < 1.0), use `VAEEncode` on the source image instead of `EmptyLatentImage`
 5. The **lrzjason Pro variant** is best for multi-image compositions where you need fine control over which images get VL-resized
+6. **Use `analyze_workflow`** to understand any saved Qwen edit workflow before modifying or executing it — returns a structured summary, not raw JSON. Only use `get_workflow` when you need the actual JSON for `enqueue_workflow` or `modify_workflow`.
