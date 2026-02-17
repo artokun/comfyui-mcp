@@ -1,6 +1,6 @@
 {
   "name": "comfyui-mcp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "MCP server for ComfyUI — workflow execution, visualization, composition, registry, and skill generation",
   "type": "module",
   "main": "dist/index.js",
