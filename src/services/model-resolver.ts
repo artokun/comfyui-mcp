@@ -16,10 +16,12 @@ export const MODEL_SUBDIRS = [
   "embeddings",
   "clip",
   "diffusers",
+  "diffusion_models",
   "gligen",
   "hypernetworks",
   "photomaker",
   "style_models",
+  "text_encoders",
   "unet",
 ] as const;
 
@@ -105,7 +107,7 @@ export async function listLocalModels(
     const dirPath = join(modelsRoot, dir);
     let entries: string[];
     try {
-      entries = await readdir(dirPath);
+      entries = await readdir(dirPath, { recursive: true });
     } catch {
       // Directory doesn't exist -- skip silently
       continue;

@@ -6,6 +6,12 @@ import { parseMermaid, resolveWorkflow } from "../services/mermaid-parser.js";
 import { getObjectInfo } from "../comfyui/client.js";
 import { errorToToolResult, ValidationError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
+import { detectSections } from "../services/workflow-sections.js";
+import {
+  generateOverview,
+  generateSectionDetail,
+  listSections,
+} from "../services/hierarchical-mermaid.js";
 
 function parseWorkflow(input: unknown): WorkflowJSON {
   if (typeof input === "string") {
@@ -135,6 +141,104 @@ export function registerWorkflowVisualizeTools(server: McpServer): void {
         });
 
         return { content };
+      } catch (err) {
+        return errorToToolResult(err);
+      }
+    },
+  );
+
+  server.tool(
+    "visualize_workflow_hierarchical",
+    "Visualize a large ComfyUI workflow as a hierarchical diagram. " +
+      "Detects logical sections using node categories from /object_info, resolves Get/Set virtual wires, " +
+      "and produces either a compact overview (sections as summary nodes), a detailed view of one section, " +
+      "or a text listing of all sections. Best for workflows with 20+ nodes.",
+    {
+      view: z
+        .enum(["overview", "detail", "list"])
+        .optional()
+        .default("overview")
+        .describe(
+          "overview: compact diagram with sections as summary nodes; " +
+            "detail: full diagram for one section; " +
+            "list: text summary of all sections",
+        ),
+      section: z
+        .string()
+        .optional()
+        .describe(
+          "Section name to show in detail view (required when view=detail). " +
+            "Use view=list to see available section names.",
+        ),
+      workflow: z
+        .union([z.string(), z.record(z.any())])
+        .describe("ComfyUI workflow in API format (JSON string or object)"),
+      show_values: z
+        .boolean()
+        .optional()
+        .default(true)
+        .describe("Include widget values in node labels (detail view only)"),
+      direction: z
+        .enum(["LR", "TB"])
+        .optional()
+        .describe(
+          "Flowchart direction (default: TB for overview, LR for detail)",
+        ),
+    },
+    async ({ view, section, workflow, show_values, direction }) => {
+      try {
+        logger.info(`Hierarchical visualization: view=${view}`);
+        const parsed = parseWorkflow(workflow);
+
+        const nodeCount = Object.keys(parsed).length;
+        if (nodeCount === 0) {
+          throw new ValidationError("Workflow contains no nodes");
+        }
+
+        // Fetch object_info for category-based section detection
+        const objectInfo = await getObjectInfo();
+        const { sections } = detectSections(parsed, objectInfo);
+
+        if (view === "list") {
+          const text = listSections(parsed, sections);
+          return {
+            content: [{ type: "text" as const, text }],
+          };
+        }
+
+        if (view === "detail") {
+          if (!section) {
+            const available = [...sections.keys()].join(", ");
+            throw new ValidationError(
+              `section parameter is required for detail view. Available sections: ${available}`,
+            );
+          }
+          const mermaid = generateSectionDetail(parsed, sections, section, {
+            showValues: show_values,
+            direction: direction ?? "LR",
+          });
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `\`\`\`mermaid\n${mermaid}\n\`\`\``,
+              },
+            ],
+          };
+        }
+
+        // Default: overview
+        const mermaid = generateOverview(parsed, sections, {
+          direction: direction ?? "TB",
+        });
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `\`\`\`mermaid\n${mermaid}\n\`\`\``,
+            },
+          ],
+        };
       } catch (err) {
         return errorToToolResult(err);
       }

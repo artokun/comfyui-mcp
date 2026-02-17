@@ -1,6 +1,5 @@
-import type { WorkflowJSON, ObjectInfo } from "../comfyui/types.js";
+import type { WorkflowJSON, ObjectInfo, NodeInputSpec } from "../comfyui/types.js";
 import { getObjectInfo } from "../comfyui/client.js";
-import { listLocalModels } from "./model-resolver.js";
 import { logger } from "../utils/logger.js";
 
 export interface ValidationIssue {
@@ -111,8 +110,8 @@ export async function validateWorkflow(
       }
     }
 
-    // 2d. Check for model references
-    await checkModelReferences(nodeId, classType, node.inputs, issues);
+    // 2d. Check for model references using objectInfo dropdown values
+    checkModelReferences(nodeId, classType, node.inputs, issues, objectInfo);
   }
 
   // 3. Check for cycles (basic: no self-references)
@@ -168,53 +167,45 @@ export async function validateWorkflow(
 }
 
 /**
- * Check if model file references in node inputs actually exist locally.
+ * Check if model file references in node inputs exist in ComfyUI's known models.
+ * Uses /object_info dropdown values (ComfyUI's authoritative model list) instead of
+ * scanning the filesystem directly. This correctly handles all model search paths,
+ * subdirectories, and custom loaders without hardcoded mappings.
  */
-async function checkModelReferences(
+function checkModelReferences(
   nodeId: string,
   classType: string,
   inputs: Record<string, unknown>,
   issues: ValidationIssue[],
-): Promise<void> {
-  // Map of node types to their model input fields and model subdirectories
-  const modelInputs: Record<string, { input: string; type: string }[]> = {
-    CheckpointLoaderSimple: [{ input: "ckpt_name", type: "checkpoints" }],
-    CheckpointLoader: [{ input: "ckpt_name", type: "checkpoints" }],
-    LoraLoader: [{ input: "lora_name", type: "loras" }],
-    LoraLoaderModelOnly: [{ input: "lora_name", type: "loras" }],
-    VAELoader: [{ input: "vae_name", type: "vae" }],
-    UpscaleModelLoader: [{ input: "model_name", type: "upscale_models" }],
-    ControlNetLoader: [{ input: "control_net_name", type: "controlnet" }],
-    CLIPLoader: [{ input: "clip_name", type: "clip" }],
-    UNETLoader: [{ input: "unet_name", type: "unet" }],
-    DualCLIPLoader: [
-      { input: "clip_name1", type: "clip" },
-      { input: "clip_name2", type: "clip" },
-    ],
-    StyleModelLoader: [{ input: "style_model_name", type: "style_models" }],
-    GLIGENLoader: [{ input: "gligen_name", type: "gligen" }],
+  objectInfo: ObjectInfo,
+): void {
+  const nodeDef = objectInfo[classType];
+  if (!nodeDef) return;
+
+  const allInputDefs: Record<string, NodeInputSpec> = {
+    ...nodeDef.input?.required,
+    ...nodeDef.input?.optional,
   };
 
-  const checks = modelInputs[classType];
-  if (!checks) return;
+  for (const [inputName, inputSpec] of Object.entries(allInputDefs)) {
+    const value = inputs[inputName];
+    if (typeof value !== "string") continue;
 
-  for (const { input, type } of checks) {
-    const modelName = inputs[input];
-    if (typeof modelName !== "string") continue;
+    // Only check combo inputs (dropdowns) that have an array of valid values
+    if (!Array.isArray(inputSpec) || !Array.isArray(inputSpec[0])) continue;
 
-    try {
-      const localModels = await listLocalModels(type);
-      const found = localModels.some((m) => m.name === modelName);
-      if (!found) {
-        issues.push({
-          severity: "error",
-          node_id: nodeId,
-          node_type: classType,
-          message: `Model "${modelName}" not found in ${type}/. Use download_model or list_local_models to check available models.`,
-        });
-      }
-    } catch {
-      // Can't check models — skip silently
+    const validValues = inputSpec[0] as string[];
+
+    // Only check values that look like model files (by extension)
+    if (!/\.(safetensors|gguf|ckpt|pt|pth|bin|sft)$/i.test(value)) continue;
+
+    if (!validValues.includes(value)) {
+      issues.push({
+        severity: "warning",
+        node_id: nodeId,
+        node_type: classType,
+        message: `Model "${value}" not found in ${classType}'s "${inputName}" options (${validValues.length} available). The model may need to be downloaded or ComfyUI restarted.`,
+      });
     }
   }
 }

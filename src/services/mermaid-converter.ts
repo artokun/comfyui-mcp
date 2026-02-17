@@ -1,6 +1,6 @@
 import type { WorkflowJSON, WorkflowNode } from "../comfyui/types.js";
 
-type NodeCategory =
+export type NodeCategory =
   | "loading"
   | "conditioning"
   | "sampling"
@@ -13,7 +13,7 @@ interface MermaidOptions {
   direction?: "LR" | "TB";
 }
 
-interface ConnectionEdge {
+export interface ConnectionEdge {
   sourceId: string;
   outputIndex: number;
   targetId: string;
@@ -61,7 +61,7 @@ function categorizeNode(classType: string): NodeCategory {
   return "utility";
 }
 
-const CATEGORY_LABELS: Record<NodeCategory, string> = {
+export const CATEGORY_LABELS: Record<NodeCategory, string> = {
   loading: "Loading",
   conditioning: "Conditioning",
   sampling: "Sampling",
@@ -71,7 +71,7 @@ const CATEGORY_LABELS: Record<NodeCategory, string> = {
 };
 
 // Mermaid shapes per category
-function wrapNodeLabel(id: string, label: string, category: NodeCategory): string {
+export function wrapNodeLabel(id: string, label: string, category: NodeCategory): string {
   switch (category) {
     case "sampling":
       return `${id}{{"${label}"}}`;
@@ -90,7 +90,7 @@ function wrapNodeLabel(id: string, label: string, category: NodeCategory): strin
 }
 
 // Color mapping for connection data types
-const TYPE_COLORS: Record<string, string> = {
+export const TYPE_COLORS: Record<string, string> = {
   MODEL: "blue",
   LATENT: "red",
   CONDITIONING: "orange",
@@ -99,7 +99,7 @@ const TYPE_COLORS: Record<string, string> = {
   VAE: "teal",
 };
 
-function isConnection(value: unknown): value is [string, number] {
+export function isConnection(value: unknown): value is [string, number] {
   return (
     Array.isArray(value) &&
     value.length === 2 &&
@@ -109,7 +109,7 @@ function isConnection(value: unknown): value is [string, number] {
 }
 
 // Values worth showing in node labels
-const DISPLAY_VALUES = new Set([
+export const DISPLAY_VALUES = new Set([
   "seed",
   "steps",
   "cfg",
@@ -124,7 +124,7 @@ const DISPLAY_VALUES = new Set([
   "image",
 ]);
 
-function buildNodeLabel(
+export function buildNodeLabel(
   node: WorkflowNode,
   showValues: boolean,
 ): string {
@@ -150,7 +150,7 @@ function buildNodeLabel(
   return `${title}<br/>${parts.join(" ")}`;
 }
 
-function extractConnections(workflow: WorkflowJSON): ConnectionEdge[] {
+export function extractConnections(workflow: WorkflowJSON): ConnectionEdge[] {
   const edges: ConnectionEdge[] = [];
   for (const [targetId, node] of Object.entries(workflow)) {
     for (const [inputName, value] of Object.entries(node.inputs)) {
@@ -167,7 +167,7 @@ function extractConnections(workflow: WorkflowJSON): ConnectionEdge[] {
   return edges;
 }
 
-function guessOutputType(
+export function guessOutputType(
   classType: string,
   outputIndex: number,
 ): string {
@@ -204,7 +204,7 @@ function guessOutputType(
   return "";
 }
 
-function escapeForMermaid(str: string): string {
+export function escapeForMermaid(str: string): string {
   return str.replace(/"/g, "#quot;");
 }
 
