@@ -291,3 +291,192 @@ export function listSections(
 
   return lines.join("\n");
 }
+
+// Key widget values to show in AI summary (superset of DISPLAY_VALUES)
+const SUMMARY_VALUES = new Set([
+  ...DISPLAY_VALUES,
+  "add_noise",
+  "start_at_step",
+  "end_at_step",
+  "return_with_leftover_noise",
+  "noise_seed",
+  "lora_01",
+  "strength_01",
+  "lora_02",
+  "strength_02",
+  "clip_name",
+  "unet_name",
+  "vae_name",
+  "type",
+  "weight_dtype",
+  "model_name",
+  "shift",
+  "length",
+  "batch_size",
+  "generation_mode",
+  "positive_prompt",
+  "negative_prompt",
+  "crop",
+  "num_frames",
+]);
+
+function formatNodeSummary(
+  id: string,
+  node: { class_type: string; inputs: Record<string, unknown>; _meta?: { title?: string } },
+): string {
+  const title = node._meta?.title;
+  const classType = node.class_type;
+  const nameStr = title && title !== classType ? `${classType} "${title}"` : classType;
+
+  // Collect key settings
+  const settings: string[] = [];
+  for (const [key, value] of Object.entries(node.inputs)) {
+    if (isConnection(value)) continue;
+    if (!SUMMARY_VALUES.has(key)) continue;
+
+    let display: string;
+    if (typeof value === "string") {
+      // Truncate long strings
+      display = value.length > 50 ? value.slice(0, 47) + "..." : value;
+    } else {
+      display = String(value);
+    }
+    settings.push(`${key}=${display}`);
+  }
+
+  const settingsStr = settings.length > 0 ? ` — ${settings.join(", ")}` : "";
+  return `  ${id}: ${nameStr}${settingsStr}`;
+}
+
+export function generateSummary(
+  workflow: WorkflowJSON,
+  sections: Map<string, SectionInfo>,
+  objectInfo: ObjectInfo,
+  virtualEdges: VirtualEdge[],
+  nodeToSection: Map<string, string>,
+  getSetNodeIds: Set<string>,
+): string {
+  const lines: string[] = [];
+  const totalNodes = Object.keys(workflow).length;
+  const getSetCount = getSetNodeIds.size;
+
+  lines.push(
+    `# Workflow: ${totalNodes} nodes (${totalNodes - getSetCount} real + ${getSetCount} Get/Set), ${sections.size} sections`,
+  );
+  lines.push("");
+
+  // Sections with node details
+  for (const [, section] of sections) {
+    lines.push(`## ${section.label} (${section.nodeIds.size} nodes)`);
+
+    // Node list with IDs and key settings
+    for (const id of section.nodeIds) {
+      const node = workflow[id];
+      if (!node) continue;
+      lines.push(formatNodeSummary(id, node));
+    }
+
+    // Cross-section data flow using real output types from object_info
+    const receives: string[] = [];
+    const sends: string[] = [];
+
+    for (const inEdge of section.inEdges) {
+      const types = [...inEdge.dataTypes].join(", ");
+      receives.push(`← ${inEdge.fromSection}: ${types}`);
+    }
+    for (const outEdge of section.outEdges) {
+      const types = [...outEdge.dataTypes].join(", ");
+      sends.push(`→ ${outEdge.toSection}: ${types}`);
+    }
+
+    if (receives.length > 0 || sends.length > 0) {
+      lines.push("  Data flow:");
+      for (const r of receives) lines.push(`    ${r}`);
+      for (const s of sends) lines.push(`    ${s}`);
+    }
+    lines.push("");
+  }
+
+  // Virtual wires (Get/Set)
+  if (virtualEdges.length > 0) {
+    lines.push("## Virtual Wires (Get/Set)");
+
+    // Group by key
+    const wiresByKey = new Map<
+      string,
+      { setterId: string; getterIds: string[] }
+    >();
+    for (const ve of virtualEdges) {
+      if (!wiresByKey.has(ve.key)) {
+        wiresByKey.set(ve.key, { setterId: ve.sourceNodeId, getterIds: [] });
+      }
+      wiresByKey.get(ve.key)!.getterIds.push(ve.targetNodeId);
+    }
+
+    for (const [key, wire] of wiresByKey) {
+      // Find what feeds into the SetNode
+      const setNode = workflow[wire.setterId];
+      let feederInfo = "";
+      if (setNode) {
+        for (const [, value] of Object.entries(setNode.inputs)) {
+          if (isConnection(value)) {
+            const feederId = value[0];
+            const feederNode = workflow[feederId];
+            if (feederNode) {
+              const feederSection = nodeToSection.get(feederId) ?? "?";
+              feederInfo = ` fed by ${feederId}:${feederNode._meta?.title ?? feederNode.class_type} [${feederSection}]`;
+            }
+            break;
+          }
+        }
+      }
+
+      // Find what consumes from each GetNode
+      const consumers: string[] = [];
+      for (const getterId of wire.getterIds) {
+        for (const [nodeId, node] of Object.entries(workflow)) {
+          for (const [inputName, value] of Object.entries(node.inputs)) {
+            if (isConnection(value) && value[0] === getterId) {
+              const consumerSection = nodeToSection.get(nodeId) ?? "?";
+              consumers.push(
+                `${nodeId}:${node._meta?.title ?? node.class_type}.${inputName} [${consumerSection}]`,
+              );
+            }
+          }
+        }
+      }
+
+      lines.push(
+        `  "${key}": Set(${wire.setterId})${feederInfo} → Get(${wire.getterIds.join(", ")})`,
+      );
+      if (consumers.length > 0) {
+        for (const c of consumers) {
+          lines.push(`    → ${c}`);
+        }
+      }
+    }
+    lines.push("");
+  }
+
+  // Connection graph: list all direct node-to-node connections for reference
+  lines.push("## Connection Graph");
+  const allEdges = extractConnections(workflow);
+  for (const edge of allEdges) {
+    const sourceNode = workflow[edge.sourceId];
+    const targetNode = workflow[edge.targetId];
+    if (!sourceNode || !targetNode) continue;
+
+    // Get real output type from object_info
+    const def = objectInfo[sourceNode.class_type];
+    const outputType =
+      def?.output?.[edge.outputIndex] ??
+      guessOutputType(sourceNode.class_type, edge.outputIndex) ??
+      "?";
+
+    lines.push(
+      `  ${edge.sourceId}:${sourceNode.class_type}[${edge.outputIndex}] --${outputType}--> ${edge.targetId}:${targetNode.class_type}.${edge.inputName}`,
+    );
+  }
+
+  return lines.join("\n");
+}

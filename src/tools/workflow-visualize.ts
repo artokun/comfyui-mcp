@@ -11,7 +11,9 @@ import {
   generateOverview,
   generateSectionDetail,
   listSections,
+  generateSummary,
 } from "../services/hierarchical-mermaid.js";
+import { isUiFormat, convertUiToApi } from "../services/workflow-converter.js";
 
 function parseWorkflow(input: unknown): WorkflowJSON {
   if (typeof input === "string") {
@@ -54,7 +56,14 @@ export function registerWorkflowVisualizeTools(server: McpServer): void {
     async ({ workflow, show_values, direction }) => {
       try {
         logger.info("Visualizing workflow");
-        const parsed = parseWorkflow(workflow);
+        let parsed = parseWorkflow(workflow);
+
+        // Auto-detect and convert UI format
+        if (isUiFormat(parsed)) {
+          const objectInfo = await getObjectInfo();
+          const converted = convertUiToApi(parsed as never, objectInfo);
+          parsed = converted.workflow;
+        }
 
         const nodeCount = Object.keys(parsed).length;
         if (nodeCount === 0) {
@@ -155,13 +164,14 @@ export function registerWorkflowVisualizeTools(server: McpServer): void {
       "or a text listing of all sections. Best for workflows with 20+ nodes.",
     {
       view: z
-        .enum(["overview", "detail", "list"])
+        .enum(["overview", "detail", "list", "summary"])
         .optional()
         .default("overview")
         .describe(
           "overview: compact diagram with sections as summary nodes; " +
             "detail: full diagram for one section; " +
-            "list: text summary of all sections",
+            "list: text summary of all sections; " +
+            "summary: structured text optimized for AI ingestion with node IDs, key settings, virtual wires, and full connection graph",
         ),
       section: z
         .string()
@@ -172,7 +182,7 @@ export function registerWorkflowVisualizeTools(server: McpServer): void {
         ),
       workflow: z
         .union([z.string(), z.record(z.any())])
-        .describe("ComfyUI workflow in API format (JSON string or object)"),
+        .describe("ComfyUI workflow in API format or UI format (auto-detected)"),
       show_values: z
         .boolean()
         .optional()
@@ -188,16 +198,37 @@ export function registerWorkflowVisualizeTools(server: McpServer): void {
     async ({ view, section, workflow, show_values, direction }) => {
       try {
         logger.info(`Hierarchical visualization: view=${view}`);
-        const parsed = parseWorkflow(workflow);
+        let parsed = parseWorkflow(workflow);
+
+        // Fetch object_info for category-based section detection
+        const objectInfo = await getObjectInfo();
+
+        // Auto-detect and convert UI format
+        if (isUiFormat(parsed)) {
+          const converted = convertUiToApi(parsed as never, objectInfo);
+          parsed = converted.workflow;
+        }
 
         const nodeCount = Object.keys(parsed).length;
         if (nodeCount === 0) {
           throw new ValidationError("Workflow contains no nodes");
         }
+        const detection = detectSections(parsed, objectInfo);
+        const { sections, virtualEdges, nodeToSection, getSetNodeIds } = detection;
 
-        // Fetch object_info for category-based section detection
-        const objectInfo = await getObjectInfo();
-        const { sections } = detectSections(parsed, objectInfo);
+        if (view === "summary") {
+          const text = generateSummary(
+            parsed,
+            sections,
+            objectInfo,
+            virtualEdges,
+            nodeToSection,
+            getSetNodeIds,
+          );
+          return {
+            content: [{ type: "text" as const, text }],
+          };
+        }
 
         if (view === "list") {
           const text = listSections(parsed, sections);

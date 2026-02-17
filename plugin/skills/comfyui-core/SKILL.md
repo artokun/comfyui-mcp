@@ -50,9 +50,18 @@ ComfyUI workflows are JSON objects mapping **string node IDs** to node definitio
 ### Important: API Format vs Web UI Format
 
 - **API format** (what we use): `{ "1": { class_type, inputs }, "2": { ... } }`
-- **Web UI format** (NOT what we use): `{ "nodes": [...], "links": [...] }`
+- **Web UI format** (saved workflows): `{ "nodes": [...], "links": [...] }` — includes layout positions, visual metadata
 - All MCP tools expect and return API format
-- The web UI can export API format via "Save (API Format)" or the `/prompt` endpoint
+- `get_workflow` defaults to `format="api"` which auto-converts saved UI-format workflows to compact API format
+- Muted/bypassed nodes are preserved with `_meta.mode: "muted"` — these are inactive but visible for understanding the workflow
+- Get/Set virtual wire nodes are preserved with `_meta.title` and `Constant` key for tracing data flow
+
+### Workflow Library Tools
+
+- **`analyze_workflow(filename)`** — **use this first** to understand any saved workflow. Returns a structured text summary with sections, node IDs, key settings, virtual wires, and connection graph. No raw JSON — just what you need to reason about the workflow. Supports views: summary (default), overview (mermaid), detail (section mermaid), list, flat.
+- **`list_workflows`** — list all saved workflows in ComfyUI's user library
+- **`get_workflow(filename)`** — load raw workflow JSON. Only use when you need the actual JSON for `enqueue_workflow`, `modify_workflow`, or `save_workflow`. Use `analyze_workflow` instead for understanding.
+- **`save_workflow(filename, workflow)`** — save a workflow to the user library
 
 ## Data Types
 

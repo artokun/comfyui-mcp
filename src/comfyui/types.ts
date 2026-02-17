@@ -74,3 +74,48 @@ export interface JobProgress {
   node?: string;
   prompt_id?: string;
 }
+
+// UI format types (what ComfyUI web UI saves)
+
+export interface UiNodeInput {
+  name: string;
+  type: string;
+  link: number | null;
+  widget?: { name: string };
+  slot_index?: number;
+}
+
+export interface UiNodeOutput {
+  name: string;
+  type: string;
+  links: number[] | null;
+  slot_index?: number;
+}
+
+export interface UiNode {
+  id: number;
+  type: string;
+  pos: [number, number] | { 0: number; 1: number };
+  size?: [number, number] | { 0: number; 1: number };
+  flags?: Record<string, unknown>;
+  order?: number;
+  mode?: number; // 0=always, 2=muted, 4=bypassed
+  inputs?: UiNodeInput[];
+  outputs?: UiNodeOutput[];
+  properties?: Record<string, unknown>;
+  widgets_values?: unknown[];
+  title?: string;
+  _meta?: { title?: string };
+}
+
+// link: [link_id, source_node_id, source_slot, target_node_id, target_slot, type_name]
+export type UiLink = [number, number, number, number, number, string];
+
+export interface UiWorkflow {
+  nodes: UiNode[];
+  links: UiLink[];
+  version?: number;
+  extra?: Record<string, unknown>;
+  config?: Record<string, unknown>;
+  groups?: unknown[];
+}
