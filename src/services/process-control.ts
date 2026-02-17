@@ -170,6 +170,44 @@ function isDesktopApp(argv: string[]): boolean {
   );
 }
 
+/**
+ * Try to find the ComfyUI Desktop exe from common install locations.
+ * Used as a fallback when no process info was previously captured.
+ */
+function findDesktopExeFromCommonPaths(): string | undefined {
+  if (IS_WIN) {
+    const home = process.env.LOCALAPPDATA || process.env.USERPROFILE || "";
+    const candidates = [
+      `${home}\\Programs\\ComfyUI\\ComfyUI.exe`,
+      `${process.env.LOCALAPPDATA}\\Programs\\ComfyUI\\ComfyUI.exe`,
+      `C:\\Program Files\\ComfyUI\\ComfyUI.exe`,
+    ];
+    for (const p of candidates) {
+      try {
+        const result = execSync(`if exist "${p}" echo found`, { encoding: "utf-8", timeout: 2000 });
+        if (result.includes("found")) return p;
+      } catch {
+        // Not found
+      }
+    }
+  } else {
+    // macOS
+    const candidates = [
+      "/Applications/ComfyUI.app",
+      `${process.env.HOME}/Applications/ComfyUI.app`,
+    ];
+    for (const p of candidates) {
+      try {
+        execSync(`test -d "${p}"`, { timeout: 2000 });
+        return p;
+      } catch {
+        // Not found
+      }
+    }
+  }
+  return undefined;
+}
+
 function findDesktopExePath(argv: string[]): string | undefined {
   const joined = argv.join(" ");
 
@@ -271,14 +309,28 @@ export async function stopComfyUI(): Promise<StopResult> {
   try {
     info = await gatherProcessInfo();
   } catch (err) {
-    return {
-      stopped: false,
-      message:
-        err instanceof ProcessControlError
-          ? err.message
-          : `Failed to find ComfyUI process: ${err}`,
-      has_restart_info: false,
-    };
+    // API and port are dead — try OS-level Desktop app detection
+    const desktopPids = findDesktopAppPids();
+    if (desktopPids.length > 0) {
+      logger.info(`API unreachable but found Desktop app PIDs: ${desktopPids.join(", ")}`);
+      const port = config.resolvedPort;
+      info = {
+        pid: desktopPids[0],
+        port,
+        argv: [],
+        isDesktopApp: true,
+        desktopExePath: findDesktopExeFromCommonPaths(),
+      };
+    } else {
+      return {
+        stopped: false,
+        message:
+          err instanceof ProcessControlError
+            ? err.message
+            : `Failed to find ComfyUI process: ${err}`,
+        has_restart_info: false,
+      };
+    }
   }
 
   // Save for later start
@@ -327,13 +379,26 @@ export async function startComfyUI(): Promise<StartResult> {
     };
   }
 
-  const info = lastProcessInfo;
+  let info = lastProcessInfo;
   if (!info) {
-    return {
-      started: false,
-      message:
-        "No previous process info available. Stop ComfyUI first with stop_comfyui so the restart info can be captured, or start ComfyUI manually.",
-    };
+    // No saved info — try to detect and launch the Desktop app
+    const desktopExe = findDesktopExeFromCommonPaths();
+    if (desktopExe) {
+      logger.info(`No saved process info, but found Desktop app at: ${desktopExe}`);
+      info = {
+        pid: 0,
+        port,
+        argv: [],
+        isDesktopApp: true,
+        desktopExePath: desktopExe,
+      };
+    } else {
+      return {
+        started: false,
+        message:
+          "No previous process info and could not find ComfyUI Desktop app. Start ComfyUI manually.",
+      };
+    }
   }
 
   logger.info("Starting ComfyUI...", {

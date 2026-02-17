@@ -163,7 +163,36 @@ HuggingFace is preferred for official/base models (SDXL, Flux, SD 1.5).
 
 ### Workflow Execution
 
-`enqueue_workflow` submits to ComfyUI's queue and returns `prompt_id` + queue position immediately. It does NOT block — use `get_job_status` to poll for completion, then `list_output_images` or `get_history` to retrieve results.
+`enqueue_workflow` submits to ComfyUI's queue and returns `prompt_id` + queue position immediately. It does NOT block.
+
+### Background Progress Monitoring
+
+After enqueuing one or more workflows, use a **background Bash task** to monitor progress silently:
+
+```bash
+# Single job
+Bash(run_in_background: true):
+node "${CLAUDE_PLUGIN_ROOT}/scripts/monitor-progress.mjs" <prompt_id>
+
+# Multiple jobs (batch)
+Bash(run_in_background: true):
+node "${CLAUDE_PLUGIN_ROOT}/scripts/monitor-progress.mjs" <id1> <id2> <id3>
+```
+
+The script connects to ComfyUI's WebSocket and reports:
+- Step-by-step progress (e.g., `KSampler step 12/20 (60%)`)
+- Success with output filenames and timing
+- Errors with node details and messages
+
+**Standard generation pattern:**
+1. `create_workflow` or build workflow JSON + `enqueue_workflow` (repeat for batch)
+2. Start background monitor with all prompt_ids
+3. Continue conversation — results appear when jobs finish
+4. Use `list_output_images` or `Read` to display the generated images
+
+**Do NOT** poll `get_job_status` in a loop. The background monitor replaces polling entirely.
+
+**Fallback**: If the monitor script is unavailable, use `get_job_status` to poll until `done` is true.
 
 ### Queue Management
 
@@ -174,14 +203,26 @@ HuggingFace is preferred for official/base models (SDXL, Flux, SD 1.5).
 - `clear_queue` — remove all pending jobs (does NOT stop the currently running job)
 
 **When to use queue tools:**
-- After `enqueue_workflow`: use `get_job_status` to poll completion
+- To check status: `get_job_status` for a quick boolean check (prefer background monitor for ongoing tracking)
 - To abort: `cancel_job` stops what's running now; `cancel_queued_job` removes a pending one
 - To start fresh: `clear_queue` then optionally `cancel_job`
 
-### Monitoring
+### Monitoring & Recovery
 
 - `get_system_stats` — GPU, VRAM, Python version, OS details
 - `get_queue` — see running/pending jobs (also listed above under Queue Management)
+
+**When ComfyUI is unresponsive or crashed:**
+1. Try `get_system_stats` — if it fails, ComfyUI is down
+2. Use `restart_comfyui` to restart it (preserves launch args from prior `stop_comfyui`)
+3. If restart fails (no saved process info), use `start_comfyui` or ask the user to start it manually
+4. After ComfyUI is back, re-enqueue any failed/lost workflows
+
+**When a job appears hung (monitor shows `[STALL]`):**
+1. Check `get_system_stats` — look at VRAM usage (OOM causes hangs)
+2. Try `cancel_job` to interrupt the stuck job
+3. If cancel fails, use `restart_comfyui` to force-restart
+4. Use `clear_vram` after restart to free GPU memory before retrying
 
 ## KSampler Parameters
 

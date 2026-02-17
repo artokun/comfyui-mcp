@@ -75,7 +75,7 @@ Steps:
 
 ## Notes
 
-- Each step is a separate `enqueue_workflow` call (poll `get_job_status` for completion) — if a step fails, report the error and ask if the user wants to retry or skip
+- Each step is a separate `enqueue_workflow` call — use a background monitor (`node "${CLAUDE_PLUGIN_ROOT}/scripts/monitor-progress.mjs" <prompt_id>` with `run_in_background: true`) to track completion. If a step fails, report the error and ask if the user wants to retry or skip
 - For the portrait recipe, if no upscale model is installed, search for and download one (e.g., RealESRGAN_x2plus or 4x-UltraSharp)
 - The hires-fix denoise value is critical: too high (>0.6) loses the original composition, too low (<0.3) adds little detail. Default to 0.45.
 - For style-transfer, the user must provide a source image — if they don't, ask for one

@@ -7,6 +7,7 @@ import type {
   SystemStats,
 } from "../comfyui/types.js";
 import { logger } from "../utils/logger.js";
+import { JobWatcher } from "./job-watcher.js";
 
 export interface EnqueueWorkflowOptions {
   disable_random_seed?: boolean;
@@ -52,6 +53,10 @@ export async function enqueueWorkflow(
     prompt_id: result.prompt_id,
     queue_remaining: result.queue_remaining,
   });
+
+  // Start background watcher for completion detection
+  JobWatcher.watch(result.prompt_id);
+
   return result;
 }
 

@@ -44,9 +44,22 @@ The user wants to generate an image using ComfyUI. Their prompt is provided as t
 
 5. **Enqueue the workflow.** Pass the workflow JSON from step 3 to `enqueue_workflow`. This returns immediately with a `prompt_id`.
 
-6. **Poll for completion.** Use `get_job_status` with the `prompt_id` to check progress. Poll every few seconds until `done` is true. If the job fails, use `get_history` with the `prompt_id` to get detailed error info and suggest fixes.
+6. **Monitor progress in background.** Start a background task to track the job:
 
-7. **Show the result.** Once done, use `list_output_images` (limit 1) to find the newest image. Read it with the Read tool to display it to the user.
+   ```
+   Bash(run_in_background: true):
+   node "${CLAUDE_PLUGIN_ROOT}/scripts/monitor-progress.mjs" <prompt_id>
+   ```
+
+   This connects to ComfyUI's WebSocket and prints real-time step progress (e.g., `step 3/14 (21%)`), then reports completion with output filenames. You do NOT need to poll `get_job_status` — the background task handles everything.
+
+   Continue the conversation while waiting. Check the background task output when notified it completed.
+
+   If the job fails, the monitor prints error details (node, message). Use `get_history` for the full traceback if needed.
+
+   **Fallback**: If the background script is unavailable, use `get_job_status` to poll until `done` is true.
+
+7. **Show the result.** Once the background monitor reports completion, use `list_output_images` (limit 1) to find the newest image. Read it with the Read tool to display it to the user.
 
 8. **Open the image.** Open the image so the user can see it immediately without navigating to the output folder. Use the Bash tool with the appropriate command for the OS:
    - **macOS**: `open /path/to/image.png`

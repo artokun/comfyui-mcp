@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { registerAllTools } from "./tools/index.js";
 import { logger } from "./utils/logger.js";
+import { JobWatcher } from "./services/job-watcher.js";
 
 const server = new McpServer(
   {
@@ -17,6 +18,7 @@ const server = new McpServer(
 registerAllTools(server);
 
 async function main() {
+  await JobWatcher.cleanupOldFiles();
   const transport = new StdioServerTransport();
   await server.connect(transport);
   logger.info("ComfyUI MCP server running on stdio");

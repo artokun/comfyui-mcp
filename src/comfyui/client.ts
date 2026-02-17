@@ -10,6 +10,7 @@ export function getClient(): Client {
   if (!clientInstance) {
     clientInstance = new Client({
       api_host: getComfyUIApiHost(),
+      clientId: "comfyui-mcp",
       // Node 22+ provides global WebSocket
     });
     logger.info("ComfyUI client created", {

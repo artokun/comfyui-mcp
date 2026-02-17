@@ -40,17 +40,30 @@ The user wants to generate multiple images while sweeping across different param
 
 5. **Check available models.** Call `list_local_models` with `model_type: "checkpoints"` to find a checkpoint. If none are available, follow the model acquisition steps from the gen command.
 
-6. **Generate each combination.** For each parameter combination:
+6. **Enqueue all combinations.** For each parameter combination:
    - Call `create_workflow` with template `"txt2img"` and the current parameter set including `positive_prompt`
-   - Call `enqueue_workflow` with the created workflow, then poll `get_job_status` until done
-   - Track: parameter values used, success/failure, output filename
+   - Call `enqueue_workflow` with the created workflow
+   - Collect the returned `prompt_id`
 
-7. **Present results.** After all runs complete, show a summary table:
+   Do NOT poll between enqueues. Queue all jobs first, then monitor them together.
+
+7. **Monitor all jobs in background.** After all workflows are enqueued, start a single background task:
+
+   ```
+   Bash(run_in_background: true):
+   node "${CLAUDE_PLUGIN_ROOT}/scripts/monitor-progress.mjs" <prompt_id_1> <prompt_id_2> ... <prompt_id_N>
+   ```
+
+   This monitors all jobs simultaneously via ComfyUI's WebSocket and reports step-by-step progress and completion for each. ComfyUI processes them sequentially from its queue. Continue the conversation while waiting.
+
+   **Fallback**: If the script is unavailable, poll `get_job_status` for each prompt_id until done.
+
+8. **Present results.** After all runs complete, show a summary table:
    - Each row: parameter values used, status (success/error), output file
    - Highlight which combinations succeeded and which failed
    - If any failed, briefly note the error
 
-8. **Suggest best result.** Based on which runs completed without errors, note the successful combinations. If all succeeded, suggest the user compare the outputs visually.
+9. **Suggest best result.** Based on which runs completed without errors, note the successful combinations. If all succeeded, suggest the user compare the outputs visually.
 
 ## Example
 

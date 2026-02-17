@@ -240,7 +240,7 @@
           "display_name": "Z-Image Turbo",
           "unet": "z_image_turbo_bf16.safetensors",
           "clip": "qwen_3_4b.safetensors",
-          "vae": "flux2-vae.safetensors",
+          "vae": "ae.safetensors",
           "clip_type": "qwen_image",
           "presets": {
             "author_recommended": {

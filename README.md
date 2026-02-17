@@ -8,7 +8,7 @@
 
 Works on **macOS**, **Linux**, and **Windows**. Auto-detects your ComfyUI installation and port.
 
-**31 MCP tools** | **10 slash commands** | **4 knowledge skills** | **3 autonomous agents** | **2 hooks**
+**31 MCP tools** | **10 slash commands** | **4 knowledge skills** | **3 autonomous agents** | **3 hooks**
 
 ---
 
@@ -92,6 +92,13 @@ claude plugin install comfyui-mcp
 |-------|---------|--------|
 | PreToolUse | `enqueue_workflow` | **VRAM watchdog** — checks GPU memory via `/system_stats` and warns if < 1GB free before execution |
 | PreToolUse | `stop_comfyui`, `restart_comfyui` | **Save warning** — prompts user to save unsaved workflow changes before stopping ComfyUI |
+| PostToolUse | Any comfyui tool | **Job completion notify** — checks for completed jobs and injects completion summaries into the conversation |
+
+### Background Scripts
+
+| Script | Description |
+|--------|-------------|
+| `monitor-progress.mjs` | **Progress monitor** — connects to ComfyUI's WebSocket for real-time step progress (e.g., `step 5/14 (36%)`). Run as a background Bash task after enqueuing workflows. Reports completion with output filenames, errors with node details. Replaces polling `get_job_status` in a loop. |
 
 ---
 
@@ -402,7 +409,7 @@ Set `COMFYUI_PATH` to skip detection and use an explicit path.
 
 The server communicates with ComfyUI through its REST API and WebSocket interface:
 
-- **WebSocket** — enqueue workflows, receive real-time progress updates, get execution results
+- **WebSocket** — enqueue workflows, receive real-time progress updates (step-by-step via background monitor script), get execution results
 - **REST API** — system stats, node definitions (`/object_info`), logs, history, queue management, workflow library, VRAM control (`/free`), embeddings
 - **File system** — read/write models directory, detect installation paths, upload images, extract PNG metadata, browse outputs
 - **External APIs** — HuggingFace (model search), ComfyUI Registry (custom node discovery), GitHub (skill generation), CivitAI (model downloads)
@@ -535,7 +542,9 @@ plugin/
     hooks.json             # Hook configuration
     vram-check.mjs         # VRAM watchdog before execution
     save-warning.mjs       # Save prompt before stop/restart
-    open-latest-image.mjs  # Auto-open generated images
+    job-complete-notify.mjs # Job completion notification via temp files
+  scripts/                 # Background scripts
+    monitor-progress.mjs   # Real-time WebSocket progress monitor
 ```
 
 ---
