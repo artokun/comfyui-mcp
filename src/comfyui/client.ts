@@ -1,7 +1,7 @@
-import { Client } from "@stable-canvas/comfyui-client";
+import { Client, HttpError } from "@stable-canvas/comfyui-client";
 import { config, getComfyUIApiHost } from "../config.js";
 import { logger } from "../utils/logger.js";
-import { ConnectionError } from "../utils/errors.js";
+import { ConnectionError, WorkflowExecutionError } from "../utils/errors.js";
 import type { ObjectInfo, SystemStats, QueueStatus } from "./types.js";
 
 let clientInstance: Client | null = null;
@@ -99,11 +99,29 @@ export async function enqueuePrompt(
   workflow: Record<string, unknown>,
 ): Promise<{ prompt_id: string; queue_remaining?: number }> {
   const client = getClient();
-  const result = await client._enqueue_prompt(workflow);
-  return {
-    prompt_id: result.prompt_id,
-    queue_remaining: result.exec_info?.queue_remaining,
-  };
+  try {
+    const result = await client._enqueue_prompt(workflow);
+    return {
+      prompt_id: result.prompt_id,
+      queue_remaining: result.exec_info?.queue_remaining,
+    };
+  } catch (err) {
+    // The library's fetchApi throws HttpError with a generic message but
+    // stores ComfyUI's detailed response (node_errors, etc.) in .json
+    if (err instanceof HttpError && err.json) {
+      const details = err.json as Record<string, unknown>;
+      const parts: string[] = [];
+      if (details.error) parts.push(String(details.error));
+      if (details.node_errors && Object.keys(details.node_errors as object).length > 0) {
+        parts.push(`Node errors: ${JSON.stringify(details.node_errors, null, 2)}`);
+      }
+      throw new WorkflowExecutionError(
+        parts.length > 0 ? parts.join("\n") : err.message,
+        details,
+      );
+    }
+    throw err;
+  }
 }
 
 /**

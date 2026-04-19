@@ -14,6 +14,27 @@ import {
 } from "../services/hierarchical-mermaid.js";
 import { convertToMermaid } from "../services/mermaid-converter.js";
 
+/** Load a workflow from the ComfyUI library and convert to API format if needed. */
+export async function loadWorkflowApi(filename: string): Promise<{ workflow: WorkflowJSON; warnings: string[] }> {
+  const client = getClient();
+  const encoded = encodeURIComponent(`workflows/${filename}`);
+  const res = await client.fetchApi(`/api/userdata/${encoded}`);
+
+  if (!res.ok) {
+    throw new ValidationError(`Workflow not found: ${filename} (${res.status})`);
+  }
+
+  const raw = await res.json();
+  const objectInfo = await getObjectInfo();
+
+  if (isUiFormat(raw)) {
+    return convertUiToApi(raw, objectInfo);
+  }
+
+  // Already API format
+  return { workflow: raw as WorkflowJSON, warnings: [] };
+}
+
 export function registerWorkflowLibraryTools(server: McpServer): void {
   server.tool(
     "list_workflows",
@@ -176,27 +197,6 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
       }
     },
   );
-
-  // Helper: load and convert a workflow from the library
-  async function loadWorkflowApi(filename: string): Promise<{ workflow: WorkflowJSON; warnings: string[] }> {
-    const client = getClient();
-    const encoded = encodeURIComponent(`workflows/${filename}`);
-    const res = await client.fetchApi(`/api/userdata/${encoded}`);
-
-    if (!res.ok) {
-      throw new ValidationError(`Workflow not found: ${filename} (${res.status})`);
-    }
-
-    const raw = await res.json();
-    const objectInfo = await getObjectInfo();
-
-    if (isUiFormat(raw)) {
-      return convertUiToApi(raw, objectInfo);
-    }
-
-    // Already API format
-    return { workflow: raw as WorkflowJSON, warnings: [] };
-  }
 
   server.tool(
     "analyze_workflow",

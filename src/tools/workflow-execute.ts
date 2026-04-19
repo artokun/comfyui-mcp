@@ -8,6 +8,7 @@ import { errorToToolResult } from "../utils/errors.js";
 import { getTracker } from "../services/generation-tracker.js";
 import { extractSettings } from "../services/workflow-settings-extractor.js";
 import { logger } from "../utils/logger.js";
+import { loadWorkflowApi } from "./workflow-library.js";
 
 export function registerWorkflowExecuteTools(server: McpServer): void {
   server.tool(
@@ -58,6 +59,72 @@ export function registerWorkflowExecuteTools(server: McpServer): void {
             },
           ],
         };
+      } catch (err) {
+        return errorToToolResult(err);
+      }
+    },
+  );
+
+  server.tool(
+    "start_workflow",
+    "Load a saved workflow by filename and immediately enqueue it for execution. " +
+      "Combines get_workflow + enqueue_workflow into a single call. " +
+      "Returns the prompt_id and queue position. Use get_job_status to check progress.",
+    {
+      filename: z
+        .string()
+        .describe(
+          "Workflow filename (e.g. 'basic_v33_corrected.json'). Use list_workflows to see available files.",
+        ),
+      disable_random_seed: z
+        .boolean()
+        .optional()
+        .describe("If true, do not randomize seed values"),
+    },
+    async (args) => {
+      try {
+        const { workflow, warnings } = await loadWorkflowApi(args.filename);
+
+        const result = await enqueueWorkflow(workflow, {
+          disable_random_seed: args.disable_random_seed,
+        });
+
+        // Log generation settings (best-effort)
+        try {
+          const tracker = getTracker();
+          const settings = await extractSettings(workflow, tracker.fileHasher);
+          if (settings) {
+            const { settingsHash, reuseCount } = tracker.logGeneration(settings);
+            logger.info("Generation tracked", { settingsHash, reuseCount });
+          }
+        } catch (trackErr) {
+          logger.warn("Failed to track generation settings", {
+            error: trackErr instanceof Error ? trackErr.message : trackErr,
+          });
+        }
+
+        const content: Array<{ type: "text"; text: string }> = [];
+        if (warnings.length > 0) {
+          content.push({
+            type: "text",
+            text: `**Conversion warnings (${warnings.length}):**\n${warnings.map((w) => `- ${w}`).join("\n")}`,
+          });
+        }
+        content.push({
+          type: "text",
+          text: JSON.stringify(
+            {
+              status: "enqueued",
+              filename: args.filename,
+              prompt_id: result.prompt_id,
+              queue_remaining: result.queue_remaining,
+            },
+            null,
+            2,
+          ),
+        });
+
+        return { content };
       } catch (err) {
         return errorToToolResult(err);
       }

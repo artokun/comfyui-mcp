@@ -48,6 +48,7 @@ export async function enqueueWorkflow(
     : randomizeSeeds(workflowJson);
 
   logger.info("Enqueueing workflow (fire-and-forget)");
+  logger.debug("Workflow payload", { workflow: JSON.stringify(workflow) });
   const result = await clientEnqueuePrompt(workflow as Record<string, unknown>);
   logger.info("Workflow enqueued", {
     prompt_id: result.prompt_id,

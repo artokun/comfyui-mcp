@@ -511,11 +511,72 @@ export function convertUiToApi(
     });
   }
 
-  // Build a set of node IDs for validating link targets
-  const nodeIdSet = new Set(expanded.nodes.map((n) => n.id));
-
   // Node types that are purely visual/internal and have no API equivalent
   const SKIP_TYPES = new Set(["Reroute", "Note", "PrimitiveNode", "MarkdownNote"]);
+
+  // Build node-by-id lookup
+  const nodeById = new Map(expanded.nodes.map((n) => [n.id, n]));
+
+  // Build set of node IDs that will be included in the output.
+  // Excludes: SKIP_TYPES and muted/bypassed nodes (mode 2 or 4).
+  // The web UI also excludes muted nodes from the API prompt entirely.
+  const outputNodeIds = new Set<number>();
+  for (const n of expanded.nodes) {
+    const isMuted = n.mode === 2 || n.mode === 4;
+    if (SKIP_TYPES.has(n.type) || isMuted) continue;
+    outputNodeIds.add(n.id);
+  }
+
+  // Resolve Reroute chains: follow Reroute → Reroute → ... → actual source.
+  // Returns the final non-Reroute source, or null if the chain is broken.
+  const rerouteCache = new Map<number, { sourceNodeId: number; sourceSlot: number } | null>();
+  function resolveReroute(nodeId: number): { sourceNodeId: number; sourceSlot: number } | null {
+    if (rerouteCache.has(nodeId)) return rerouteCache.get(nodeId)!;
+    const node = nodeById.get(nodeId);
+    if (!node || node.type !== "Reroute") return null;
+    const input = node.inputs?.[0];
+    if (!input || input.link == null) {
+      rerouteCache.set(nodeId, null);
+      return null;
+    }
+    const linkInfo = linkMap.get(input.link);
+    if (!linkInfo) {
+      rerouteCache.set(nodeId, null);
+      return null;
+    }
+    const sourceNode = nodeById.get(linkInfo.sourceNodeId);
+    if (sourceNode?.type === "Reroute") {
+      const resolved = resolveReroute(linkInfo.sourceNodeId);
+      rerouteCache.set(nodeId, resolved);
+      return resolved;
+    }
+    const result = { sourceNodeId: linkInfo.sourceNodeId, sourceSlot: linkInfo.sourceSlot };
+    rerouteCache.set(nodeId, result);
+    return result;
+  }
+
+  /**
+   * Resolve a link's source, following through Reroute chains and skipping
+   * links to nodes that won't be in the output (PrimitiveNode, muted, etc.).
+   * Returns the resolved source or null if the link should be dropped.
+   */
+  function resolveLink(linkInfo: LinkInfo): { sourceNodeId: number; sourceSlot: number } | null {
+    const sourceNode = nodeById.get(linkInfo.sourceNodeId);
+    if (!sourceNode) return null;
+
+    // Follow Reroute chains to the actual source
+    if (sourceNode.type === "Reroute") {
+      const resolved = resolveReroute(linkInfo.sourceNodeId);
+      if (!resolved) return null;
+      // Make sure the resolved source is in the output
+      return outputNodeIds.has(resolved.sourceNodeId) ? resolved : null;
+    }
+
+    // Skip links to nodes not in the output (PrimitiveNode, muted, etc.)
+    if (!outputNodeIds.has(linkInfo.sourceNodeId)) return null;
+
+    return { sourceNodeId: linkInfo.sourceNodeId, sourceSlot: linkInfo.sourceSlot };
+  }
 
   // Get/Set node types that need special handling (not in object_info)
   const GET_SET_TYPES = new Set([
@@ -527,11 +588,8 @@ export function convertUiToApi(
     const nodeId = String(node.id);
     const classType = node.type;
 
-    // Skip internal litegraph node types
-    if (SKIP_TYPES.has(classType)) continue;
-
-    // Determine mode status
-    const isMuted = node.mode === 2 || node.mode === 4;
+    // Skip internal litegraph node types and muted/bypassed nodes
+    if (!outputNodeIds.has(node.id)) continue;
 
     // Handle Get/Set nodes specially — they're not in object_info but are
     // important for understanding data flow. Use the node's title as the key.
@@ -544,8 +602,11 @@ export function convertUiToApi(
         for (const input of node.inputs) {
           if (input.link != null) {
             const linkInfo = linkMap.get(input.link);
-            if (linkInfo && nodeIdSet.has(linkInfo.sourceNodeId)) {
-              inputs[input.name] = [String(linkInfo.sourceNodeId), linkInfo.sourceSlot];
+            if (linkInfo) {
+              const resolved = resolveLink(linkInfo);
+              if (resolved) {
+                inputs[input.name] = [String(resolved.sourceNodeId), resolved.sourceSlot];
+              }
             }
           }
         }
@@ -561,9 +622,6 @@ export function convertUiToApi(
         inputs,
         _meta: { title: title || undefined },
       };
-      if (isMuted) {
-        workflow[nodeId]._meta = { ...workflow[nodeId]._meta, mode: "muted" } as never;
-      }
       continue;
     }
 
@@ -586,13 +644,47 @@ export function convertUiToApi(
       }
     }
 
+    // Detect widgets that were user-converted to input slots in the UI.
+    // When a widget is "Convert to Input", its value is removed from
+    // widgets_values. But some nodes use forceInput which also creates
+    // input slots with widget properties while keeping values in
+    // widgets_values. We distinguish by checking whether widgets_values
+    // is shorter than the full expected widget count.
+    const convertedWidgets = new Set<string>();
+    const widgetValues = node.widgets_values ?? [];
+    if (node.inputs) {
+      const potentialConverted = new Set<string>();
+      for (const input of node.inputs) {
+        if (input.widget) potentialConverted.add(input.widget.name);
+      }
+
+      if (potentialConverted.size > 0) {
+        // Count expected widgets_values entries for the full widget set
+        let expectedCount = 0;
+        for (const name of widgetNames) {
+          expectedCount++;
+          if (hasControlAfterGenerate(name, def)) expectedCount++;
+        }
+
+        // Only treat as converted if widgets_values is actually shorter
+        if (widgetValues.length < expectedCount) {
+          for (const name of potentialConverted) convertedWidgets.add(name);
+        }
+      }
+    }
+
     // Map widgets_values to named widget inputs.
+    // Skip converted widgets — their values are NOT in widgets_values.
     // Some INT inputs with "control_after_generate": true (like seed, noise_seed) have
     // a phantom widget value in widgets_values ("fixed"/"randomize"/"increment"/"decrement")
     // that doesn't correspond to any named input — we must skip those.
-    const widgetValues = node.widgets_values ?? [];
     let widgetIdx = 0;
     for (const name of widgetNames) {
+      if (convertedWidgets.has(name)) {
+        // Widget was promoted to an input slot — value is not in widgets_values.
+        // Will be set from input.widget.value or overwritten by link below.
+        continue;
+      }
       if (widgetIdx >= widgetValues.length) break;
       inputs[name] = widgetValues[widgetIdx];
       widgetIdx++;
@@ -603,13 +695,25 @@ export function convertUiToApi(
       }
     }
 
+    // Set fallback values for converted widgets that have no link connected
+    if (node.inputs) {
+      for (const input of node.inputs) {
+        if (input.widget && input.link == null && input.widget.value !== undefined) {
+          inputs[input.widget.name] = input.widget.value;
+        }
+      }
+    }
+
     // Map linked inputs from node's inputs array
     if (node.inputs) {
       for (const input of node.inputs) {
         if (input.link != null) {
           const linkInfo = linkMap.get(input.link);
-          if (linkInfo && nodeIdSet.has(linkInfo.sourceNodeId)) {
-            inputs[input.name] = [String(linkInfo.sourceNodeId), linkInfo.sourceSlot];
+          if (linkInfo) {
+            const resolved = resolveLink(linkInfo);
+            if (resolved) {
+              inputs[input.name] = [String(resolved.sourceNodeId), resolved.sourceSlot];
+            }
           }
         }
       }
@@ -621,13 +725,10 @@ export function convertUiToApi(
       inputs,
     };
 
-    // Preserve title and mode metadata
+    // Preserve title metadata
     const title = node.title ?? node._meta?.title;
-    const meta: Record<string, unknown> = {};
-    if (title && title !== classType) meta.title = title;
-    if (isMuted) meta.mode = "muted";
-    if (Object.keys(meta).length > 0) {
-      workflow[nodeId]._meta = meta as { title?: string };
+    if (title && title !== classType) {
+      workflow[nodeId]._meta = { title };
     }
   }
 

@@ -130,7 +130,7 @@ export interface UiNodeInput {
   name: string;
   type: string;
   link: number | null;
-  widget?: { name: string };
+  widget?: { name: string; value?: unknown };
   slot_index?: number;
 }
 
