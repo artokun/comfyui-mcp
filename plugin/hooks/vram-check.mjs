@@ -8,7 +8,7 @@
  * JSON stdout with hookSpecificOutput = structured control.
  */
 
-const COMFY_PORT = Number(process.env.COMFY_PORT) || 8000;
+const COMFY_PORT = Number(process.env.COMFYUI_PORT || process.env.COMFY_PORT) || 8000;
 const VRAM_WARNING_MB = 1024; // Warn if less than 1GB free
 
 async function check() {

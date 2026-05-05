@@ -9,11 +9,11 @@
  * Detects stalls (no progress for too long) and unreachable servers.
  * Exits when all tracked jobs complete.
  *
- * Env: COMFY_PORT (default 8000), COMFY_HOST (default 127.0.0.1)
+ * Env: COMFYUI_PORT (or COMFY_PORT, default 8000), COMFYUI_HOST (or COMFY_HOST, default 127.0.0.1)
  */
 
-const HOST = process.env.COMFY_HOST || "127.0.0.1";
-const PORT = Number(process.env.COMFY_PORT) || 8000;
+const HOST = process.env.COMFYUI_HOST || process.env.COMFY_HOST || "127.0.0.1";
+const PORT = Number(process.env.COMFYUI_PORT || process.env.COMFY_PORT) || 8000;
 const TIMEOUT_MS = 10 * 60 * 1000;
 const THROTTLE_MS = 2000;
 const THROTTLE_PCT = 10;
