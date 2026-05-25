@@ -104,18 +104,29 @@ export async function startQuickTunnel(port: number): Promise<QuickTunnel> {
   return await new Promise<QuickTunnel>((resolve, reject) => {
     let settled = false;
 
+    // Detach all listeners so nothing leaks once we've settled the promise
+    // (especially on the pre-ready failure paths, where the caller never gets
+    // a handle to call stop()).
+    const teardownListeners = (): void => {
+      t.off("url", onUrl);
+      t.off("stderr", onStderr);
+      t.off("error", onError);
+      t.off("exit", onExit);
+    };
+
     const stop = (): void => {
       try {
         t.stop();
       } catch {
         // Process already gone — fine.
       }
+      teardownListeners();
       state.status = "stopped";
       state.url = null;
       state.error = null;
     };
 
-    t.on("url", (url) => {
+    function onUrl(url: string): void {
       logger.info(`[tunnel] URL: ${url}`);
       state.status = "running";
       state.url = url;
@@ -129,15 +140,15 @@ export async function startQuickTunnel(port: number): Promise<QuickTunnel> {
           stop,
         });
       }
-    });
+    }
 
-    t.on("stderr", (data) => {
+    function onStderr(data: string): void {
       for (const line of data.split("\n")) {
         if (line.trim()) logger.info(`[tunnel] ${line}`);
       }
-    });
+    }
 
-    t.on("error", (err) => {
+    function onError(err: Error): void {
       const message = err.message;
       logger.error(`[tunnel] error: ${message}`);
       state.status = "error";
@@ -146,11 +157,19 @@ export async function startQuickTunnel(port: number): Promise<QuickTunnel> {
 
       if (!settled) {
         settled = true;
+        // Pre-ready failure: stop the process and detach listeners so a
+        // cloudflared that errors without exiting can't leak.
+        try {
+          t.stop();
+        } catch {
+          // Already gone — fine.
+        }
+        teardownListeners();
         reject(err);
       }
-    });
+    }
 
-    t.on("exit", (code, signal) => {
+    function onExit(code: number | null, signal: NodeJS.Signals | null): void {
       logger.warn(`[tunnel] exited code=${code} signal=${signal}`);
 
       // An exit before the `url` event means the tunnel never came up.
@@ -159,11 +178,17 @@ export async function startQuickTunnel(port: number): Promise<QuickTunnel> {
         state.status = "error";
         state.url = null;
         state.error = `cloudflared exited before tunnel was ready (code=${code})`;
+        teardownListeners();
         reject(new Error(state.error));
       } else if (state.status !== "stopped") {
         state.status = "stopped";
         state.url = null;
       }
-    });
+    }
+
+    t.on("url", onUrl);
+    t.on("stderr", onStderr);
+    t.on("error", onError);
+    t.on("exit", onExit);
   });
 }
