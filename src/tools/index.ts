@@ -23,6 +23,7 @@ import { registerWorkflowDslTools } from "./workflow-dsl.js";
 import { registerNodeSnapshotsTools } from "./node-snapshots.js";
 import { registerNodeBisectTools } from "./node-bisect.js";
 import { registerNodeManagementTools } from "./node-management.js";
+import { registerNodeAuthoringTools } from "./node-authoring.js";
 import { registerWorkflowDepsTools } from "./workflow-deps.js";
 import { registerInstallComfyUITools } from "./install-comfyui.js";
 import { registerUpdateComfyUITools } from "./update-comfyui.js";
@@ -64,5 +65,6 @@ export async function registerAllTools(server: McpServer): Promise<void> {
   registerWorkspaceEnvTools(server);
   registerApiNodesTools(server);
   registerManagerConfigTools(server);
+  registerNodeAuthoringTools(server);
   await registerAutoloadedWorkflows(server);
 }
