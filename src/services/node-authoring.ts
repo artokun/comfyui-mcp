@@ -489,9 +489,12 @@ export function parsePyproject(toml: string): ParsedPyproject {
   };
 
   const readKey = (section: string, key: string): string | undefined => {
-    const re = new RegExp(`^\\s*${key}\\s*=\\s*"([^"]*)"`, "m");
+    // Accept single- OR double-quoted TOML strings (backreference the opening
+    // quote so mismatched quotes don't match). Not a full TOML parser, but it
+    // covers the basic + multi-line table forms Python packaging tools emit.
+    const re = new RegExp(`^\\s*${key}\\s*=\\s*(["'])(.*?)\\1`, "m");
     const m = section.match(re);
-    return m ? m[1] : undefined;
+    return m ? m[2] : undefined;
   };
 
   const project = sectionOf("project");
@@ -521,6 +524,11 @@ export function publishCustomNode(
   // Resolve the pack directory from either an explicit path or a name.
   let packDir: string;
   if (options.path && options.path.trim()) {
+    // Publishing an explicit pack directory is a local filesystem + comfy-cli
+    // operation, independent of which ComfyUI instance is targeted — so it is
+    // intentionally allowed even in remote (--comfyui-url) mode. Resolving by
+    // `name` (below) lives under <COMFYUI_PATH>/custom_nodes and is guarded by
+    // resolvePackDir, which fails clearly when there is no local install.
     packDir = resolve(options.path.trim());
   } else if (options.name && options.name.trim()) {
     packDir = resolvePackDir(validatePackName(options.name));
