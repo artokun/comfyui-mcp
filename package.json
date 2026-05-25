@@ -12,6 +12,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/index.ts",
+    "dev:agent-poc": "tsx src/experimental/run.ts",
     "start": "node dist/index.js",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
@@ -25,9 +26,14 @@
     "release:major": "npm version major && git push --follow-tags"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.79",
+    "@ai-sdk/google": "^3.0.79",
+    "@ai-sdk/openai": "^3.0.65",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "@stable-canvas/comfyui-client": "^1.5.9",
+    "ai": "^6.0.191",
     "better-sqlite3": "^12.6.2",
+    "cloudflared": "^0.7.1",
     "dotenv": "^16.4.7",
     "zod": "^3.24.2"
   },
