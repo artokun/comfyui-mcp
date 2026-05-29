@@ -88,6 +88,18 @@
             ]
           }
         ]
+      },
+      {
+        "tab": "Changelog",
+        "groups": [
+          {
+            "group": "Changelog",
+            "pages": [
+              "changelog/index",
+              "changelog/2026-05-29"
+            ]
+          }
+        ]
       }
     ]
   },

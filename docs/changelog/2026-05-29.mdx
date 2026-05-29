@@ -1,0 +1,158 @@
+---
+title: "Week of May 25: v0.6.0 → v0.8.0"
+description: "Media uploads, hosted docs, model-download hardening, custom-node authoring + verification, declarative setup, image conversion, and cloud storage I/O."
+---
+
+_May 29, 2026_
+
+A big week — four releases (`v0.6.0`, `v0.6.1`, `v0.7.0`, `v0.8.0`) landed
+back to back. Here's what changed for you.
+
+## New features
+
+### Declarative environment setup with `apply_manifest`
+
+Spin up a reproducible ComfyUI environment from a single inline object or a
+JSON / YAML manifest: `pip` packages, custom nodes (registry IDs or git URLs
+with `@ref` pinning), and model downloads. Idempotent, with a per-item
+structured report so you can see exactly what was already installed, what
+just changed, and what failed.
+
+See [Install & environment tools](/tools/install-environment).
+
+### Custom-node authoring lifecycle
+
+A complete write → test → publish loop, callable from your agent:
+
+- **`scaffold_custom_node`** — generate a Python node pack from a template,
+  including `.comfyignore`, `.gitignore`, and (optional) a GitHub Actions
+  workflow that publishes to the Comfy Registry on tag pushes.
+- **`verify_custom_node`** — restart ComfyUI with a bounded readiness wait
+  and confirm the pack's `NODE_CLASS_MAPPINGS` actually registered. Catches
+  the silent "failed import → tool just doesn't appear" trap.
+- **`publish_custom_node`** — publish to the Comfy Registry via `comfy-cli`.
+  Your `REGISTRY_ACCESS_TOKEN` is never logged.
+
+See [Custom-node tools](/tools/custom-nodes).
+
+### Cloud storage in and out
+
+- `download_model` now accepts `s3://` and Azure Blob URLs in addition to
+  HTTPS / Hugging Face, with a new `s3` auth mode.
+- New **`upload_output`** pushes a generated image to S3, Azure, an HTTP
+  endpoint, or Hugging Face and returns the URL(s).
+
+See [Models](/tools/models) and [Assets & images](/tools/assets-images).
+
+### Server-side image conversion
+
+New **`convert_image`** re-encodes a generated image (by `asset_id` or
+output-dir path) to PNG, JPEG, or WebP via `sharp`. Returns inline base64
+plus an optional file write, and reports bytes saved — useful for trimming
+4 MB PNGs down to ~300 KB WebPs before they leave your machine.
+
+See [Assets & images](/tools/assets-images).
+
+### Node discovery agent
+
+A new **`comfy-researcher`** agent turns a problem statement ("I need a
+controllable upscaler that runs on 8 GB VRAM") into ranked custom-node pack
+recommendations. It searches the Comfy Registry, evaluates candidates, and
+delegates deep dives to `comfy-explorer`.
+
+`generate_node_skill` now ships with a read-through cache keyed by
+`source@version` (`COMFYUI_SKILL_CACHE_DIR`), so repeat analyses are
+instant. Pass `refresh` to bypass.
+
+See [Defaults, stats, and skills](/tools/defaults-stats-skills).
+
+### Media uploads
+
+`upload_video` and `upload_audio` copy local video/audio files into
+ComfyUI's input directory so workflows can reference them as inputs —
+mirroring `upload_image` (closes #12).
+
+See [Assets & images](/tools/assets-images).
+
+### Hosted documentation
+
+The full tool reference now lives at
+[comfyui-mcp.artokun.io/docs](https://comfyui-mcp.artokun.io/docs),
+schema-generated from the source so it stays in lockstep with the server.
+
+## Updates
+
+### Model downloads — auth, caching, deduplication
+
+- **Per-request auth** for gated and private hosts:
+  `bearer` / `basic` / `header` / `query`. Secrets are validated, redacted
+  from logs, and stripped on cross-origin redirects.
+- **Content-addressed download cache** with concurrent-download coalescing
+  (no more double-downloading the same checkpoint) and optional LRU eviction.
+  Configure via `COMFYUI_DOWNLOAD_CACHE_DIR` and `COMFYUI_LRU_CACHE_SIZE_GB`.
+
+See [Models](/tools/models).
+
+### Custom-node install — pin to a ref
+
+`install_custom_node` now accepts a commit, branch, or tag — parsed from
+the URL (`https://github.com/user/repo@v1.2.0`), an explicit `ref` argument,
+or a `repo@ref` shorthand. Reproducible installs, no more "works on my
+machine" because `main` moved.
+
+See [Custom-node tools](/tools/custom-nodes).
+
+### Process supervision
+
+- **Bounded startup readiness checks**
+  (`COMFYUI_STARTUP_CHECK_INTERVAL_S` / `_MAX_TRIES`) so a slow boot doesn't
+  hang the agent indefinitely.
+- **Opt-in crash auto-restart** with a bounded budget
+  (`COMFYUI_ALWAYS_RESTART`, `COMFYUI_RESTART_MAX_ATTEMPTS`,
+  `COMFYUI_RESTART_WINDOW_S`) — recover from transient OOMs without spinning
+  forever on a real bug.
+
+See [Process control](/tools/process-control).
+
+### Better job error reporting
+
+`get_job_status` and completion notifications now surface ComfyUI execution
+errors with the failing node ID and type, exception type/message, a
+truncated traceback, `current_inputs`, and an OOM flag — plus optional
+per-node and total execution timing. Fully additive.
+
+See [Workflow execution](/tools/workflow-execution).
+
+### Plugin skills
+
+Two new skills bundled for AI assistants:
+
+- `comfyui-frontend-extensions` — authoring against the v2
+  `@comfyorg/extension-api`, including a v1 → v2 migration guide.
+- `comfyui-node-registry` — node authoring and publishing patterns.
+
+## Fixes
+
+- `generate_node_skill`'s cache now resolves the current pack version before
+  lookup, so you never get stale docs after a pack updates. Writes are
+  atomic (temp file + rename with content-hash check).
+- Spawned ComfyUI child processes now have `error` listeners, so a missing
+  or unexecutable ComfyUI binary can't crash the MCP server itself.
+- `install_custom_node` git refs are validated and passed via
+  `git checkout --end-of-options <ref>`, closing an argv-option-injection
+  vector.
+- Native dependency build scripts (`better-sqlite3`, `sharp`) are now
+  permitted under pnpm 10's stricter default, so fresh installs no longer
+  silently skip them.
+
+## Experimental
+
+An **embedded-agent backend POC** is available behind
+`COMFYUI_MCP_AGENT_POC`: a `cloudflared` quick-tunnel helper plus an AI SDK
+`/api/chat` endpoint with bearer auth, a request body cap, and a
+server-side model allowlist. Not part of default startup. Feedback welcome.
+
+---
+
+Questions, bugs, or wishlist items? Drop an issue at
+[artokun/comfyui-mcp](https://github.com/artokun/comfyui-mcp/issues).
