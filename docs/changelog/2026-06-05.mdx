@@ -1,0 +1,116 @@
+---
+title: "Week of June 1: v0.8.1 → v0.9.4"
+description: "Comfy Cloud + explicit remote mode, embedded agent sidebar, health checks, slimmer installs, and a stack of stability fixes."
+---
+
+_June 5, 2026_
+
+Six releases (`v0.8.1` through `v0.9.4`) shipped this week. Headline: a
+new three-mode dispatch so a single MCP server can target local, remote,
+or Comfy Cloud — plus a v1 agent sidebar inside ComfyUI itself.
+
+## New features
+
+### Comfy Cloud + explicit remote mode
+
+`comfyui-mcp` now ships a three-mode dispatcher:
+
+- **Local** — the default, spawning ComfyUI on your machine.
+- **Remote** — point `--comfyui-url` at any non-loopback host and the
+  server skips local auto-detection, so a stale local install can no
+  longer absorb uploads/downloads meant for a remote box.
+- **Cloud** — set `COMFYUI_API_KEY` and HTTP-backed tools route to
+  `cloud.comfy.org` with `X-API-Key` auth. WebSocket and local-filesystem
+  tools surface a clear `CLOUD_UNSUPPORTED` message instead of failing
+  silently.
+
+A new `COMFYUI_CLOUD_URL` env var lets you override the cloud endpoint.
+See [Configuration → Deployment modes](/configuration) and
+[Installation](/installation) for setup recipes per mode.
+
+### `health_check` tool
+
+A new mode-aware **`health_check`** reports whether ComfyUI is
+reachable, what models/custom nodes are visible, and (in local/remote
+modes) recent log tail. Useful as the first call from an agent before it
+starts a long-running job.
+
+Also includes an upstream fix for `search_custom_nodes` so registry
+searches return results again.
+
+### Embedded agent sidebar (experimental)
+
+The `COMFYUI_MCP_AGENT_POC` backend now has a frontend half: a v1
+ComfyUI sidebar tab that streams chat responses and renders tool cards
+end-to-end for `generate_image`. Drop the extension file into
+`ComfyUI/web/extensions/`, point it at your tunnel URL + bearer token,
+and chat to your local ComfyUI from inside the canvas. Still
+experimental — not part of default startup.
+
+## Updates
+
+### `get_job_status` works in cloud mode
+
+`get_job_status` now dispatches through the cloud client when
+`COMFYUI_API_KEY` is set, mapping cloud job states
+(`pending` / `in_progress` / `completed` / `failed`) to the same shape
+local jobs return. Completed jobs are still enriched from history;
+failed jobs surface the cloud's error via `exception_message`.
+
+See [Workflow execution](/tools/workflow-execution).
+
+### Slimmer default install
+
+Seven heavy packages moved to `optionalDependencies` and are now
+lazy-loaded:
+
+- `@aws-sdk/client-s3`, `@azure/storage-blob` — only loaded when you
+  actually use S3 / Azure storage.
+- `cloudflared`, `ai`, `@ai-sdk/anthropic` / `google` / `openai` — only
+  loaded by the experimental agent panel.
+
+`npm install --no-optional` now yields a working core server. Calling a
+feature whose optional dep is missing surfaces the exact
+`npm install <pkg>` hint instead of crashing on import.
+
+### Repositioning vs. official Comfy Cloud MCP
+
+Comfy-Org announced an official Comfy Cloud MCP (closed beta). The
+README, [home page](/), [configuration](/configuration), and
+[installation](/installation) now frame `comfyui-mcp` as the community
+MCP for **local + remote** ComfyUI, with cloud mode positioned as a
+complementary option when you want a single MCP across all three.
+
+### AI-agent install guide
+
+A new `llms-install.md` at the repo root gives Cline (and similar
+agents) a focused, bot-facing setup recipe covering Node 22, the three
+deployment modes, Claude Code / Cline / Cursor settings, and common
+issues.
+
+## Fixes
+
+- **Docker image builds unblocked.** The `cloudflared` postinstall was
+  hanging Docker builds on rate-limited networks (notably the Glama
+  build sandbox, which had pinned us at v0.7.1). The binary is now
+  fetched lazily on first use, and image builds complete in ~95s.
+- **`upload_image` / `upload_video` / `upload_audio`** are now strictly
+  HTTP-only, so they no longer write to a stale local install when
+  you're targeting a remote ComfyUI.
+- **pnpm builds pass cleanly** again — TypeScript declaration emission
+  was tripping `TS2742` on pnpm's nested store paths. `dist/` now
+  contains only `.js` + `.js.map`, which is all CLI consumers ever
+  needed.
+- **Vitest bumped to 4.1.x** to clear `GHSA-5xrq-8626-4rwp`.
+
+## Infra
+
+The hosted docs site briefly went down mid-week when the
+`comfyui-mcp.artokun.io` DNS record was deleted on the Cloudflare zone.
+Service is restored, and there's now a written runbook so the next
+operator can recover in minutes instead of re-deriving the diagnosis.
+
+---
+
+Questions, bugs, or wishlist items? Drop an issue at
+[artokun/comfyui-mcp](https://github.com/artokun/comfyui-mcp/issues).
