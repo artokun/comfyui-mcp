@@ -123,17 +123,37 @@ Applies to `start_comfyui` / `restart_comfyui` when comfyui-mcp manages a local 
   Sliding window (seconds) over which auto-restart attempts are counted.
 </ParamField>
 
-## Channels — drive the ComfyUI sidebar panel from your own agent session
+## Panel orchestrator & the bridge
 
-Start the server with `--channels` (or `COMFYUI_MCP_CHANNELS=1`) and install the
-[comfyui-mcp-panel](https://github.com/artokun/comfyui-mcp-panel) pack in ComfyUI.
-The server hosts a loopback WebSocket bridge the panel connects to, and registers
-eight `panel_*` MCP tools (`panel_status`, `panel_get_graph`, `panel_add_node`,
-`panel_remove_node`, `panel_connect`, `panel_disconnect`, `panel_set_widget`,
-`panel_say`, `panel_inbox`) — **your own Claude Code session is the agent**, editing
-the live graph through its MCP connection. No LLM API keys are involved; every
-graph mutation is undoable with Ctrl+Z. Messages typed into the panel queue for
-`panel_inbox` and are pushed as channel events on hosts that support them.
+The [comfyui-mcp-panel](https://github.com/artokun/comfyui-mcp-panel) sidebar is
+driven by the **panel orchestrator** — a background process that owns a loopback
+WebSocket bridge and runs an autonomous Claude Agent SDK session per panel tab on
+your **Claude subscription** (no API keys). The panel pack auto-starts it on
+ComfyUI load, so you normally don't run anything by hand — see
+[Sidebar Panel](/panel). To run it yourself:
+
+```bash
+npx -y comfyui-mcp --panel-orchestrator
+```
+
+<ParamField path="COMFYUI_MCP_PANEL_ORCHESTRATOR" type="boolean" default="false">
+  Run the panel orchestrator instead of an MCP server (same as `--panel-orchestrator`).
+</ParamField>
+<ParamField path="COMFYUI_MCP_PANEL_MODEL" type="string" default="claude-opus-4-8">
+  Model for the background panel agents.
+</ParamField>
+<ParamField path="COMFYUI_MCP_BRIDGE_PORT" type="number" default="9101">
+  Loopback port for the panel WebSocket bridge.
+</ParamField>
+
+### Channels mode (interactive / advanced)
+
+`--channels` (or `COMFYUI_MCP_CHANNELS=1`) starts the same bridge **and**
+registers the `panel_*` MCP tools in the current session, so *your own* Claude
+Code session can drive the live graph the panel shows — the interactive
+alternative to the orchestrator. Because it binds the same bridge port, run
+**one or the other**: a `--channels` session and the orchestrator will fight over
+port `9101`.
 
 ```bash
 claude mcp add comfyui -- npx -y comfyui-mcp --channels
@@ -141,9 +161,6 @@ claude mcp add comfyui -- npx -y comfyui-mcp --channels
 
 <ParamField path="COMFYUI_MCP_CHANNELS" type="boolean" default="false">
   Enable channels mode without the CLI flag.
-</ParamField>
-<ParamField path="COMFYUI_MCP_BRIDGE_PORT" type="number" default="9101">
-  Loopback port for the panel WebSocket bridge.
 </ParamField>
 
 ## Job watching

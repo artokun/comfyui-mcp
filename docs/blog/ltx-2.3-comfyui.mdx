@@ -306,13 +306,11 @@ and the "sulphur" finetune is a separate third-party project with its own licens
 
 ## Get it running in one command
 
-1. Install [comfyui-mcp](https://github.com/artokun/comfyui-mcp)
-   (`claude mcp add comfyui -- npx -y comfyui-mcp --channels`) and the
-   [plugin](/plugin).
+1. Install [comfyui-mcp](https://github.com/artokun/comfyui-mcp) and the [Panel](/panel) — the panel auto-starts a background agent on your Claude subscription (no API keys; sign in with `claude` once).
 2. Apply the **`ltx-2.3` pack** — GGUF UNet, both VAEs, the Gemma encoder, text
    projection, upscaler, and LoRAs land in the right folders, validated.
 3. Run the bundled **kornia fix**, restart, then open the [Panel](/panel) and let
-   your Claude session wire the GGUF graph and build prompts for you.
+   the panel's agent wire the GGUF graph and build prompts for you.
 
 That's the whole point of the project: expert ComfyUI setups that install in one
 step and drive themselves from your own agent session. **Next in the series:**

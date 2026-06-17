@@ -1,53 +1,69 @@
 ---
 title: "Sidebar Panel"
-description: "ComfyUI MCP Panel — your Claude Code session inside ComfyUI's sidebar, editing the live graph over MCP. No API keys. Live on ComfyUI-Manager and the Comfy Registry."
+description: "ComfyUI MCP Panel — an autonomous agent in ComfyUI's sidebar that runs on your Claude subscription. No API keys. Live on ComfyUI-Manager and the Comfy Registry."
 icon: "comments"
 ---
 
 <Note>
-  **✅ v0.3 is live on ComfyUI-Manager & the [Comfy Registry](https://registry.comfy.org/nodes/comfyui-mcp-panel).**
-  The polished public release — native ComfyUI design system, live activity cards
-  for every agent edit, multi-tab support. Search **`comfyui-mcp-panel`** in
-  ComfyUI-Manager to install.
+  **✅ Live on ComfyUI-Manager & the [Comfy Registry](https://registry.comfy.org/nodes/comfyui-mcp-panel).**
+  Search **`comfyui-mcp-panel`** in ComfyUI-Manager to install. See the
+  [changelog](/changelog) for what's new.
 </Note>
 
-**[comfyui-mcp-panel](https://github.com/artokun/comfyui-mcp-panel)** puts your
-Claude Code session inside ComfyUI's sidebar. Type "add a KSampler and wire it
-to my checkpoint" — in the panel or in your terminal — and watch nodes appear
-on the canvas. Every edit is undoable with **Ctrl+Z**.
+**[comfyui-mcp-panel](https://github.com/artokun/comfyui-mcp-panel)** puts an
+autonomous agent in ComfyUI's sidebar. Ask it for an image, a workflow, or a
+change — it works against your ComfyUI and replies right there. The agent runs
+**in the background on your Claude subscription**, so your own Claude Code
+session stays free.
 
 ```
-you ⇄ Claude Code ⇄ comfyui-mcp (--channels) ⇄ ws://127.0.0.1:9101 ⇄ panel ⇄ your graph
+you ⇄ panel ⇄ ws://127.0.0.1:9101 (bridge) ⇄ panel orchestrator ⇄ background Claude agent (your subscription)
 ```
 
-**No API keys, no per-token billing.** Your existing Claude subscription is the
-agent; the panel is its window into your graph. The MCP server hosts a
-loopback-only WebSocket bridge; the panel executes a **fixed allowlist** of
-graph commands (no arbitrary JavaScript).
+**No API keys, no per-token billing.** The agent authenticates with your on-disk
+Claude login. The bridge is loopback-only, and the panel executes a **fixed
+allowlist** of graph commands (no arbitrary JavaScript).
 
-## Setup
+## Setup — it just works
 
-1. Install the pack — **via ComfyUI-Manager** (search `comfyui-mcp-panel`) or git:
+1. **Install the pack** — via ComfyUI-Manager (search `comfyui-mcp-panel`) or git:
 
    ```bash
    cd ComfyUI/custom_nodes
    git clone https://github.com/artokun/comfyui-mcp-panel
    ```
 
-2. Add comfyui-mcp to Claude Code with channels mode:
+2. **Sign in to Claude** once, so the background agent can use your subscription:
 
    ```bash
-   claude mcp add comfyui -- npx -y comfyui-mcp --channels
+   claude   # or: claude setup-token
    ```
 
-3. Restart ComfyUI. The **Agent** tab appears in the sidebar and auto-connects
-   to the bridge (`ws://127.0.0.1:9101`, configurable via
-   `COMFYUI_MCP_BRIDGE_PORT`).
+3. **Restart ComfyUI.** The pack auto-starts the panel orchestrator
+   (`npx -y comfyui-mcp --panel-orchestrator`), the **Agent** tab appears in the
+   sidebar, and it connects to the bridge (`ws://127.0.0.1:9101`). Type a request
+   and the agent responds.
 
-## The `panel_*` tools
+That's it — no `claude mcp add`, no API key. Prerequisites are Node.js/`npx` on
+your PATH and the Claude login above. To run the orchestrator yourself instead,
+set `COMFYUI_MCP_NO_AUTOSPAWN=1` and launch `npx -y comfyui-mcp --panel-orchestrator`;
+change the bridge port with `COMFYUI_MCP_BRIDGE_PORT`.
 
-Registered only in channels mode (they don't appear in the standard
-[Tool Reference](/tools/image-generation), which documents the always-on set):
+## What it can do
+
+The agent loads comfyui-mcp's model skills (IDEOGRAM, WAN, LTX, Qwen, and more),
+so it already knows the models you run. It can generate images, video and audio,
+inspect and manage your ComfyUI, and reason about your setup — then reply in the
+panel chat.
+
+## Driving the live graph
+
+The bridge exposes a **fixed allowlist** of graph commands — read the graph,
+add / remove / wire nodes, set widgets, run the workflow, save — each undoable
+with **Ctrl+Z**. These `panel_*` tools are available to a Claude Code session you
+connect with `comfyui-mcp --channels` (the interactive path, where *your* session
+edits the graph you're viewing), and are being wired into the autonomous
+orchestrator agent.
 
 | Tool | Effect |
 |---|---|
@@ -68,20 +84,11 @@ Registered only in channels mode (they don't appear in the standard
 | `panel_inbox` | Drain messages the user typed into the panel |
 
 Every tool accepts an optional `tab_id` — each browser tab holds its own
-connection, and routing defaults to the only tab or the tab the user last
-typed in.
-
-## Two-way conversation
-
-Messages typed into the panel are **pushed straight into your Claude Code
-session** as channel events — no polling, no "watch the panel" loop. The
-server declares the `claude/channel` capability and forwards each panel
-message as a `notifications/claude/channel` notification; Claude Code
-injects it into the conversation and Claude replies with `panel_say`.
-On MCP hosts without channel support, `panel_inbox` is the pull fallback.
+connection, and routing defaults to the only tab or the tab the user last typed
+in.
 
 ## See also
 
-- [Channels mode configuration](/configuration#channels--drive-the-comfyui-sidebar-panel-from-your-own-agent-session)
-- [The Claude Code plugin](/plugin) — 15 skills, slash commands, agents
+- [Bridge / channels configuration](/configuration)
+- [The Claude Code plugin](/plugin) — model skills, slash commands, agents
 - [comfyui-mcp on GitHub](https://github.com/artokun/comfyui-mcp) · [comfyui-mcp-panel on GitHub](https://github.com/artokun/comfyui-mcp-panel)

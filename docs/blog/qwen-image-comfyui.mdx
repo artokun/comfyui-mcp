@@ -304,13 +304,11 @@ English layouts.
 
 ## Get it running in one command
 
-1. Install [comfyui-mcp](https://github.com/artokun/comfyui-mcp)
-   (`claude mcp add comfyui -- npx -y comfyui-mcp --channels`) and the
-   [plugin](/plugin).
+1. Install [comfyui-mcp](https://github.com/artokun/comfyui-mcp) and the [Panel](/panel) — the panel auto-starts a background agent on your Claude subscription (no API keys; sign in with `claude` once).
 2. Apply the **[`qwen-image`](https://github.com/artokun/comfyui-mcp)** pack (20B
    T2I + WAN combo) and/or **`qwen-image-edit`** (instruction editing + mask
    inpainting) — nodes and models land in the right folders, validated.
-3. Open the [Panel](/panel) and let your Claude session load images, paint masks,
+3. Open the [Panel](/panel) and let the panel's agent load images, paint masks,
    and wire the graph for you.
 
 That's the whole point of the project: expert ComfyUI setups that install in one

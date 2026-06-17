@@ -291,12 +291,11 @@ published on the Aitrepreneur/FLX mirror — use Q5_K_S or Q8_0.
 
 ## Get it running in one command
 
-1. Install [comfyui-mcp](https://github.com/artokun/comfyui-mcp)
-   (`claude mcp add comfyui -- npx -y comfyui-mcp --channels`) and the [plugin](/plugin).
+1. Install [comfyui-mcp](https://github.com/artokun/comfyui-mcp) and the [Panel](/panel) — the panel auto-starts a background agent on your Claude subscription (no API keys; sign in with `claude` once).
 2. Apply the [`z-image-turbo`](/packs/z-image-turbo) pack (fast) or
    [`z-image-base`](/packs/z-image-base) pack (trainable) — nodes + GGUF models land
    in the right folders, validated.
-3. Open the [Panel](/panel) and let your Claude session wire the ControlNet, swap
+3. Open the [Panel](/panel) and let the panel's agent wire the ControlNet, swap
    quant tiers, and iterate on prompts for you.
 
 That's the whole point of the project: expert ComfyUI setups that install in one

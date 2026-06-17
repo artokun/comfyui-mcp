@@ -87,17 +87,18 @@ Mermaid), `/comfy:batch`, `/comfy:compare`, `/comfy:convert`, `/comfy:gallery`,
 - **comfy-debugger** — root-causes failed workflows from history + logs
 - **comfy-optimizer** — VRAM and speed tuning for a given GPU
 
-## Live graph editing — no API keys
+## The sidebar panel — no API keys
 
 <Note>
   The sidebar panel ships as its own pack — **live on ComfyUI-Manager / the [Comfy Registry](https://registry.comfy.org/nodes/comfyui-mcp-panel)** (search `comfyui-mcp-panel`). Full guide: [Sidebar Panel](/panel).
 </Note>
 
-With [channels mode](/configuration#channels--drive-the-comfyui-sidebar-panel-from-your-own-agent-session)
-and the [comfyui-mcp-panel](https://github.com/artokun/comfyui-mcp-panel)
-sidebar pack, your Claude session edits the live ComfyUI graph: add nodes,
-wire slots, set widgets — all Ctrl+Z-undoable, all driven by your existing
-Claude subscription rather than per-token API billing.
+The [comfyui-mcp-panel](https://github.com/artokun/comfyui-mcp-panel) sidebar runs
+an autonomous agent on your **Claude subscription** (no per-token API billing).
+Install the pack and it auto-starts the [panel orchestrator](/configuration); ask
+it for an image, a workflow, or a change and it works against your ComfyUI. To
+drive the live graph from *your own* Claude Code session instead, use
+[channels mode](/configuration):
 
 ```bash
 claude mcp add comfyui -- npx -y comfyui-mcp --channels
