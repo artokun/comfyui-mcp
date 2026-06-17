@@ -1,0 +1,176 @@
+---
+title: "The panel that talks back: an autonomous agent on your Claude subscription"
+description: "Getting the ComfyUI sidebar panel driven by a real background agent — one that runs on your Claude subscription with no API key, takes messages over a live channel, and can be interrupted mid-task — took three tries. Push notifications can't wake an idle session. The --sdk-url transport that did everything we wanted got locked down. The thing that finally worked, the Claude Agent SDK's streaming input, turned out to be the gold standard."
+---
+
+_by [artokun](https://github.com/artokun) · June 16, 2026 · Claude Agent SDK · background agents · architecture_
+
+The [Panel](/panel) is comfyui-mcp's sidebar inside ComfyUI: you type a request,
+and an agent builds the graph, runs it, and replies — right there next to your
+canvas. The dream was always that this agent runs **in the background**, on its
+own, the way the Linear app quietly works a ticket while you do something else.
+Your interactive Claude session stays free; the panel has its own driver.
+
+Getting there meant finding a way to run a *persistent background agent* that (a)
+bills your **Claude subscription** with no API key, (b) accepts new messages over
+a live "channel in" while it's already running, and (c) can be **interrupted**
+mid-task. That's a specific shopping list, and we struck out twice before we got
+it. Here's the whole arc, because the dead ends are instructive.
+
+## Try 1: channels can't push to an idle session
+
+The panel speaks to comfyui-mcp over a loopback bridge, and the obvious idea was
+to surface each panel message to Claude Code as a **channel notification** — the
+`notifications/claude/channel` mechanism. It even sounds right: "your session
+talks back."
+
+Two problems, both fatal:
+
+- **It needs a flag that isn't in stable Claude Code.** Surfacing those pushes
+  requires a development-only switch the shipped CLI doesn't expose.
+- **A push can't wake an idle session.** Even with the flag, a channel
+  notification only injects into a turn that's *already running*. If your session
+  is sitting idle — which it is, almost always — the message lands in a mailbox
+  nobody is looking at.
+
+So the panel would say "connected," because the socket was open, but nothing was
+*attending*. "Connected" is not "someone's home."
+
+## Try 2: --sdk-url did everything — then got locked down
+
+The next approach came from a sibling project that drives headless agents
+perfectly. The trick was `--sdk-url`: you point a spawned `claude` at a local
+transport you control, and you get a two-way channel. You can inject a user
+message into a live turn, interrupt it, auto-approve tools — and, crucially, it
+authenticates against your **subscription** via the on-disk login rather than an
+API key. It checked every box on the list.
+
+It was also the right amount of magic to be nervous about. And sure enough, on
+current Claude Code, `--sdk-url` is **guarded**: point it at localhost and you get
+
+```
+--sdk-url rejected: host "127.0.0.1" is not an approved Anthropic endpoint
+```
+
+The only way to get past that gate is to patch the Claude binary. We're not going
+to ship a tool that patches your Claude install — that's exactly the kind of
+fragile, trust-eroding move this project tries to avoid. So `--sdk-url`, for all
+its power, was off the table. Losing it genuinely stung: it was the one thing that
+did all three jobs at once.
+
+## Try 3: the Claude Agent SDK, in streaming mode
+
+The thing we'd been reaching around the whole time turned out to be the supported,
+front-door version of it: the **Claude Agent SDK** (`@anthropic-ai/claude-agent-sdk`).
+
+Its `query()` function takes a `prompt` that can be a **string** (one-shot) — or
+an **async generator** of user messages. That second form is the entire ballgame.
+A generator that stays open *is* a persistent session with a channel in: keep it
+alive, and you push new messages into the running agent simply by yielding more.
+
+```ts
+import { query } from "@anthropic-ai/claude-agent-sdk";
+
+// A push-driven generator: the orchestrator drops panel messages into `inbox`,
+// and each one becomes the agent's next turn. The session never closes.
+async function* panelChannel() {
+  while (true) {
+    const text = await inbox.next();          // resolves when a panel message arrives
+    yield { type: "user", message: { role: "user", content: text } };
+  }
+}
+
+const agent = query({
+  prompt: panelChannel(),
+  options: {
+    model: "claude-opus-4-8",
+    permissionMode: "bypassPermissions",      // the panel agent acts on its own
+    mcpServers: { comfyui: { command: "npx", args: ["-y", "comfyui-mcp"] } },
+    // resume: savedSessionId,                 // pick up the same tab across restarts
+  },
+});
+
+for await (const msg of agent) {
+  if (msg.type === "assistant") routeToPanel(msg);   // reply in the sidebar
+  if (msg.type === "result") markTurnDone(msg);
+}
+
+// And the part we thought we'd lost:
+await agent.interrupt();                       // stop a running turn on demand
+```
+
+That `agent.interrupt()` is the capability `--sdk-url` gave us, handed back
+through a supported API. New messages while the agent is mid-turn queue and run in
+order; "stop / never mind" is a single call.
+
+### It runs on your subscription, no key
+
+The piece we most expected to fight was authentication. It just worked. With
+`ANTHROPIC_API_KEY` unset, the SDK reads your on-disk Claude login — the same
+`claude.ai` OAuth credential `claude` itself uses. A throwaway probe, run with no
+key set, printed exactly what we wanted to see:
+
+```
+init: model=claude-opus-4-8  session=0c313d91  apiKeySource=none
+assistant: pong-sdk-7788
+result (subtype=success, is_error=false)
+```
+
+`apiKeySource=none` is the whole story: the background agent authenticated against
+the subscription, not a key. (This is for **your** machine and **your**
+subscription — the agent runs locally next to ComfyUI, exactly like the rest of
+comfyui-mcp. If you'd rather mint a durable token than rely on the interactive
+login, `claude setup-token` does that.)
+
+## What the panel orchestrator actually is now
+
+The best part: the gold-standard answer is also the *simplest*. The `--sdk-url`
+design needed a local HTTP/SSE server impersonating Claude's worker protocol, a
+process manager to spawn and reap headless `claude` instances, heartbeats, the
+works. The Agent SDK owns all of that. What's left is small:
+
+```
+orchestrator
+  ├── UI bridge (loopback)         # receives panel messages
+  └── tab_id → Agent SDK session   # one persistent streaming session per workflow tab
+```
+
+A message arrives from a panel tab; the orchestrator pushes it into that tab's
+generator; the agent works and replies through the bridge; the agent's session id
+is captured (the groundwork for resuming a tab across restarts). One agent per
+tab, each a plain background process, none of them touching your interactive
+session.
+
+## Making it disappear
+
+A transport that works is only half of "it just works." Three more touches close
+the gap:
+
+- **It auto-starts.** The ComfyUI panel pack launches the orchestrator on load —
+  idempotent, so it no-ops if the bridge port is already owned. Install the pack,
+  open ComfyUI, type in the sidebar. The only prerequisite is being signed in to
+  Claude.
+- **It's an expert.** The agent loads comfyui-mcp's bundled skills on startup, so
+  it already knows the models you run — IDEOGRAM, WAN, LTX, Qwen, and the rest —
+  instead of guessing. "Install the package" gets you an expert, not a blank
+  slate.
+- **It cleans up after itself.** The orchestrator watches ComfyUI's process and
+  shuts down when ComfyUI exits — including a crash or hard kill — so nothing is
+  left orphaned holding the port.
+
+## The lesson
+
+Two of the three approaches were *more* clever than the one that won. Channel
+pushes and a hand-built `--sdk-url` transport were both trying to reconstruct,
+from the outside, something the platform already offers from the inside. The
+Agent SDK's streaming input is persistent, injectable, interruptible, and
+subscription-authenticated out of the box — no flags that aren't shipped, no
+binary to patch, no key to manage. That's the new gold standard, and it's what
+the panel runs on.
+
+---
+
+Drive ComfyUI from a background agent on your own subscription: install
+[comfyui-mcp](https://github.com/artokun/comfyui-mcp) and add the
+[Panel](/panel). Star the repo or file an idea at
+[artokun/comfyui-mcp](https://github.com/artokun/comfyui-mcp/issues).

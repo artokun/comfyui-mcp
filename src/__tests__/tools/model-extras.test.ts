@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, vi } from "vitest";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 // --- Mocks (declared before importing the module under test) ---
 
@@ -45,7 +45,10 @@ vi.mock("../../services/civitai-resolver.js", () => ({
 import { config } from "../../config.js";
 import { registerModelExtrasTools } from "../../tools/model-extras.js";
 
-const MODELS_ROOT = join("/comfy", "models");
+// Build the models root the same way the product does (resolve against
+// config.comfyuiPath) so paths match on Windows (drive-qualified, backslashes)
+// as well as POSIX.
+const MODELS_ROOT = resolve("/comfy", "models");
 
 type ToolHandler = (args: Record<string, unknown>) => Promise<{
   isError?: boolean;

@@ -6,7 +6,20 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.14.0] - 2026-06-17
+
 ### Added
+
+- **Autonomous panel orchestrator — drive the ComfyUI sidebar with a background
+  agent on your Claude subscription (no API key).** `comfyui-mcp --panel-orchestrator`
+  owns the loopback bridge and spawns one persistent Claude Agent SDK session per
+  panel tab, so the sidebar works on its own and your interactive Claude session
+  stays free. Agents authenticate via the on-disk Claude login (`apiKeySource=none`)
+  and load the bundled plugin's skills, so they're ComfyUI experts out of the box.
+  Replaces the unshippable `--sdk-url`/CCR-v2 path (guarded on current Claude
+  Code). The panel pack auto-starts the orchestrator on ComfyUI load, and a
+  parent-PID beacon shuts it down when ComfyUI exits. See
+  `docs/blog/panel-agent-subscription`.
 
 - **`installer-packs` skill.** Teaches agents how to use, build, and derive
   packs (manifest → generated install scripts) and to **proactively invite users
@@ -56,6 +69,15 @@ All notable changes to this project are documented here. This project adheres to
 
 ### Changed
 
+- **Migrated to zod 4.** Lets the Claude Agent SDK be a clean optional
+  dependency (its zod 4 peer is now satisfied); `gen-tool-docs` uses zod's native
+  `toJSONSchema`, and tool schemas use the two-arg `z.record(key, value)` form.
+
+- **The plugin now ships in the npm package.** A stale `.npmignore` rule was
+  excluding `plugin/` (skills, agents, commands, hooks); anchored those patterns
+  to repo root so the bundled plugin is published — which is what lets the
+  orchestrator's agents load skills and be experts out of the box.
+
 - **`ltxv2-video` skill upgraded to LTX-2.3.** GGUF UNet via `UnetLoaderGGUF`,
   separate video/audio VAEs + text-projection, the spatial upscaler and new
   LoRAs, the kornia 0.8.3+ import fix (`fix-ltxvideo-kornia.{bat,sh}`), and
@@ -63,6 +85,10 @@ All notable changes to this project are documented here. This project adheres to
   "sulphur" LTX-2.3 finetune).
 
 ### Fixed
+
+- **Windows dev: the full test suite is green.** Fixed 27 tests that assumed
+  POSIX paths/commands (`/fake` separators, `which` vs `where`) — test-only
+  changes; the product itself was already cross-platform.
 
 - **UI bridge survives fast `/mcp` reconnects.** The `--channels` WebSocket
   bridge now retries binding `127.0.0.1:9101` with exponential backoff

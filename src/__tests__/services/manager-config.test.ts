@@ -1,4 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
+import { join } from "node:path";
 
 // Mock node:fs so config.ini fallback has no real side effects.
 vi.mock("node:fs", () => ({
@@ -155,9 +156,10 @@ describe("configureManager (config.ini fallback actions)", () => {
   });
 
   it("set_network_mode updates an existing key in [default]", () => {
-    // First candidate path exists.
+    // First candidate path exists. Use path.join so the suffix uses the
+    // platform separator the product computes (backslash on Windows).
     mockedExistsSync.mockImplementation((p) =>
-      String(p).endsWith("user/__manager/config.ini"),
+      String(p).endsWith(join("user", "__manager", "config.ini")),
     );
     mockedReadFileSync.mockReturnValue("[default]\nnetwork_mode = public\ndb_mode = cache\n");
 
@@ -174,7 +176,7 @@ describe("configureManager (config.ini fallback actions)", () => {
 
   it("set_security_level appends the key when missing", async () => {
     mockedExistsSync.mockImplementation((p) =>
-      String(p).endsWith("user/__manager/config.ini"),
+      String(p).endsWith(join("user", "__manager", "config.ini")),
     );
     mockedReadFileSync.mockReturnValue("[default]\npreview_method = auto\n");
 
@@ -187,18 +189,18 @@ describe("configureManager (config.ini fallback actions)", () => {
 
   it("falls back to the legacy config.ini location", async () => {
     mockedExistsSync.mockImplementation((p) =>
-      String(p).endsWith("user/default/ComfyUI-Manager/config.ini"),
+      String(p).endsWith(join("user", "default", "ComfyUI-Manager", "config.ini")),
     );
     mockedReadFileSync.mockReturnValue("[default]\n");
     await configureManager("set_network_mode", "private");
     expect(mockedWriteFileSync.mock.calls[0][0]).toContain(
-      "user/default/ComfyUI-Manager/config.ini",
+      join("user", "default", "ComfyUI-Manager", "config.ini"),
     );
   });
 
   it("sanitizes CRLF/NUL out of written values", async () => {
     mockedExistsSync.mockImplementation((p) =>
-      String(p).endsWith("user/__manager/config.ini"),
+      String(p).endsWith(join("user", "__manager", "config.ini")),
     );
     mockedReadFileSync.mockReturnValue("[default]\nsecurity_level = normal\n");
     // network_mode is enum-validated, so test sanitization via the ini writer

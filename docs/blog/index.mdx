@@ -64,6 +64,17 @@ open-weight champ, Ideogram 4.
 ## Posts
 
 <Card
+  title="The panel that talks back: an autonomous agent on your Claude subscription"
+  href="/blog/panel-agent-subscription"
+>
+  Three tries to get the ComfyUI panel driven by a real background agent: channel
+  pushes can't wake an idle session, the `--sdk-url` transport that did everything
+  got locked down, and the Claude Agent SDK's streaming input — persistent,
+  injectable, interruptible, subscription-authenticated, no API key — turned out
+  to be the gold standard. _June 16, 2026_
+</Card>
+
+<Card
   title="Installer packs that can't rot: one manifest, every install"
   href="/blog/installer-packs-that-cant-rot"
 >
@@ -72,16 +83,6 @@ open-weight champ, Ideogram 4.
   silently. How a single manifest drives both the double-click scripts and an
   MCP-native install, with CI that fails the build the moment a model link dies.
   _June 16, 2026_
-</Card>
-
-<Card
-  title="The channel that talks back: pushing panel messages into a Claude session"
-  href="/blog/the-channel-that-talks-back"
->
-  MCP is request/response — the agent calls your tools. The ComfyUI panel needed
-  the opposite: a user types in the panel and the words have to land in the
-  agent's conversation. How the `claude/channel` capability does it, and the
-  silent-failure bug that taught us to get the shape exactly right. _June 16, 2026_
 </Card>
 
 <Card

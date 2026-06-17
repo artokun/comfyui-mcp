@@ -1,0 +1,61 @@
+---
+title: "June 17: v0.14.0 — the panel drives itself"
+description: "The ComfyUI sidebar panel now runs an autonomous background agent on your Claude subscription — no API keys, no interactive session needed. Plus a zod 4 migration, a green Windows test suite, and the plugin now shipping in the npm package."
+---
+
+_June 17, 2026_
+
+**v0.14.0** turns the sidebar [Panel](/panel) into something that runs itself: an
+autonomous background agent drives it, on your Claude subscription, with no API
+keys — and your interactive Claude session stays free.
+
+## The panel runs an autonomous background agent
+
+`comfyui-mcp --panel-orchestrator` is a standalone process that owns the loopback
+bridge and spawns one persistent **Claude Agent SDK** session per panel tab. A
+message you type in the sidebar wakes that agent; it works and replies right
+there. It authenticates against your on-disk Claude login (no API key —
+`apiKeySource=none`), and it loads the bundled plugin's skills, so it already
+knows IDEOGRAM, WAN, LTX, Qwen and the rest.
+
+Why a new path: the previous `--channels` model relied on a channel notification
+to wake your interactive session, which can't happen while that session is idle;
+and the `--sdk-url` transport that *could* do it is guarded on current Claude
+Code (and we won't ship a patched binary). The Agent SDK's streaming-input mode
+gives the same persistent, injectable, interruptible session through a supported
+API. The full story is in [the blog](/blog/panel-agent-subscription).
+
+### It just works
+
+The [panel pack](https://registry.comfy.org/nodes/comfyui-mcp-panel) (**v0.4.0**)
+auto-starts the orchestrator when ComfyUI loads — idempotent, so it no-ops if
+something already owns the bridge port — and a parent-PID beacon shuts it down
+when ComfyUI exits (including crashes). Install the pack, open ComfyUI, type in
+the Agent sidebar. The only prerequisite is being signed in to Claude
+(`claude` once).
+
+## Updates
+
+### zod 4
+
+The project moved to **zod 4**, which lets the Claude Agent SDK be a clean
+optional dependency. Tool schemas use the two-arg `z.record(key, value)` form and
+doc generation uses zod's native `toJSONSchema`.
+
+### The plugin ships in the npm package
+
+A stale `.npmignore` rule had been excluding `plugin/` (skills, agents, commands,
+hooks) from the published package. It's fixed — the bundled plugin now ships,
+which is what lets the orchestrator's agents load skills and be experts out of
+the box.
+
+## Fixes
+
+- **The full test suite is green on Windows.** 27 tests assumed POSIX paths and
+  commands (`/fake` separators, `which` vs `where`); they're now cross-platform.
+  Test-only — the product was already correct on Windows.
+
+---
+
+Questions, bugs, or wishlist items? Drop an issue at
+[artokun/comfyui-mcp](https://github.com/artokun/comfyui-mcp/issues).

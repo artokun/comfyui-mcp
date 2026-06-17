@@ -40,7 +40,7 @@ const operationSchema = z.discriminatedUnion("op", [
   z.object({
     op: z.literal("add_node"),
     class_type: z.string(),
-    inputs: z.record(z.any()).optional(),
+    inputs: z.record(z.string(), z.any()).optional(),
     id: z.string().optional(),
   }),
   z.object({
@@ -61,7 +61,7 @@ const operationSchema = z.discriminatedUnion("op", [
     target_id: z.string(),
     input_name: z.string(),
     new_class_type: z.string(),
-    new_inputs: z.record(z.any()).optional(),
+    new_inputs: z.record(z.string(), z.any()).optional(),
   }),
 ]);
 
@@ -75,7 +75,7 @@ export function registerWorkflowComposeTools(server: McpServer): void {
         .enum(TEMPLATE_NAMES as [string, ...string[]])
         .describe("Template name: txt2img, img2img, upscale, or inpaint"),
       params: z
-        .record(z.any())
+        .record(z.string(), z.any())
         .optional()
         .default({})
         .describe(
@@ -107,7 +107,7 @@ export function registerWorkflowComposeTools(server: McpServer): void {
     "Apply modification operations to an existing ComfyUI workflow. Supports: set_input, add_node, remove_node, connect, insert_between. Returns the modified workflow JSON and IDs of any newly added nodes.",
     {
       workflow: z
-        .union([z.string(), z.record(z.any())])
+        .union([z.string(), z.record(z.string(), z.any())])
         .describe("ComfyUI workflow JSON (as a JSON string or object)"),
       operations: z
         .array(operationSchema)

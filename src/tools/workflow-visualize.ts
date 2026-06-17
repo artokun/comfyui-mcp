@@ -40,7 +40,7 @@ export function registerWorkflowVisualizeTools(server: McpServer): void {
     "Convert a ComfyUI workflow JSON into a Mermaid flowchart diagram. Returns mermaid syntax showing nodes grouped by category (loading, conditioning, sampling, image, output) with connections labeled by data type.",
     {
       workflow: z
-        .union([z.string(), z.record(z.any())])
+        .union([z.string(), z.record(z.string(), z.any())])
         .describe("ComfyUI workflow JSON (as a JSON string or object)"),
       show_values: z
         .boolean()
@@ -181,7 +181,7 @@ export function registerWorkflowVisualizeTools(server: McpServer): void {
             "Use view=list to see available section names.",
         ),
       workflow: z
-        .union([z.string(), z.record(z.any())])
+        .union([z.string(), z.record(z.string(), z.any())])
         .describe("ComfyUI workflow in API format or UI format (auto-detected)"),
       show_values: z
         .boolean()

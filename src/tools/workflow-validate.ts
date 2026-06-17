@@ -29,7 +29,7 @@ export function registerWorkflowValidateTools(server: McpServer): void {
     "Validate a ComfyUI workflow without executing it. Checks for missing node types, broken connections, invalid output indices, missing models, and other issues. Returns a list of errors and warnings.",
     {
       workflow: z
-        .union([z.string(), z.record(z.any())])
+        .union([z.string(), z.record(z.string(), z.any())])
         .describe("ComfyUI workflow in API format (JSON string or object)"),
     },
     async (args) => {

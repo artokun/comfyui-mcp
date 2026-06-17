@@ -3,11 +3,15 @@ src/
 .env.example
 .gitignore
 .claude/
-.claude-plugin/
-agents/
-commands/
-hooks/
-skills/
+# Anchored to repo root (leading /) so these drop any TOP-LEVEL legacy dirs but
+# do NOT exclude the bundled plugin's own plugin/.claude-plugin, plugin/skills,
+# plugin/agents, plugin/commands, plugin/hooks — those must ship so the panel
+# orchestrator can load the plugin (skills = expert background agent).
+/.claude-plugin/
+/agents/
+/commands/
+/hooks/
+/skills/
 tsconfig.json
 *.tsbuildinfo
 workflows/

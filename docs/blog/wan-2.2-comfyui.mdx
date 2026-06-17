@@ -62,6 +62,87 @@ echoed by reviewers, not a single audited benchmark. Speed-first rivals beat it 
 raw throughput (see the comparison below). We scope the win to **cinematic I2V/T2V
 quality on consumer hardware**.
 
+## WAN 2.2 vs LTX-2.3 and the alternatives
+
+There's no single "best" — pick by the job:
+
+| Pick… | When you need… |
+|-------|----------------|
+| **WAN 2.2** | **Cinematic motion realism**, image-to-video from a reference still, flexible VRAM (FP8/GGUF down to consumer cards), the largest LoRA/remix ecosystem |
+| **LTX-2.3** | **Raw speed and volume** — reviewers cite it as dramatically faster per clip, stable at 720p, with one-pass audio for quick drafts |
+| **WAN 2.2 TI2V-5B** | A lighter dense model for **lower-VRAM rigs** and faster iteration when you don't need the full A14B quality |
+
+The recurring take from 2026 round-ups: **LTX-2.3 wins throughput and built-in
+audio; WAN 2.2 wins cinematic motion and image-to-video fidelity**, and its MoE +
+FP8/GGUF path fits 16 GB cards where a dense model can't. ([WaveSpeed: LTX-2.3 vs WAN 2.2](https://wavespeed.ai/blog/posts/ltx-2-3-vs-wan-2-2-comparison-2026/), [Thunder Compute: WAN 2.2 in ComfyUI](https://www.thundercompute.com/blog/wan-2-2-comfyui-ai-video-model)) Treat the "18x faster" style figures as
+**vendor/blog benchmarks, not independently audited** — they vary wildly with
+resolution, steps, and hardware. Each rival gets its own post:
+[LTX-2.3](/blog/ltx-2.3-comfyui) and [WAN Animate](/blog/wan-animate-comfyui) are
+elsewhere in the series.
+
+## System & VRAM requirements
+
+WAN 2.2 A14B is VRAM-hungry — two 14B experts plus a UMT5-XXL encoder, a VAE
+decode, and (in the longer-video chain) RIFE interpolation running back to back.
+The fix is **GGUF quantization**, and the pack's installer is interactive: it
+offers three tiers so you match the quant to your card.
+
+| GGUF tier | VRAM target | Notes |
+|-----------|-------------|-------|
+| **Q4_K_S** | under 12 GB | Smallest quant for entry GPUs; some quality trade |
+| **Q5_K_S** | 12–24 GB | Balanced middle tier |
+| **Q8_0** | 24 GB+ | Best quality; **what this pack ships and the workflow references** |
+
+The pack pins **Q8_0** because that's exactly what `workflow.json` points at. To go
+lower, swap the `unet/Wan2.2-*-Q8_0.gguf` files for the `-Q5_K_S` or `-Q4_K_S`
+variants from the same `Aitrepreneur/FLX` repo and re-point the `UnetLoaderGGUF`
+nodes. To reduce OOM risk, the pack also launches ComfyUI with
+`--reserve-vram 2` so the GGUF UNet, VAE decode, and RIFE pass don't collide.
+
+## Install WAN 2.2 in ComfyUI
+
+The manual route works: update ComfyUI, clone the needed custom nodes
+(ComfyUI-GGUF, VideoHelperSuite, Frame-Interpolation, KJNodes, rgthree, Easy-Use),
+and download every GGUF, the UMT5-XXL encoder, the WAN 2.1 VAE, the Lightning +
+FusionX LoRAs, and the ClearReality upscaler into the right folders. That's a lot
+of files in a lot of exact places.
+
+| File | Folder |
+|------|--------|
+| `Wan2.2-I2V-A14B-HighNoise-Q8_0.gguf` / `-LowNoise-Q8_0.gguf` | `models/unet/` |
+| `Wan2.2-T2V-A14B-HighNoise-Q8_0.gguf` / `-LowNoise-Q8_0.gguf` | `models/unet/` |
+| `umt5-xxl-encoder-Q5_K_S.gguf` (text encoder) | `models/text_encoders/` |
+| `wan_2.1_vae.safetensors` | `models/vae/` |
+| `Wan2.2-Lightning_*-4steps-lora_HIGH/LOW` + `Wan2.1_T2V_14B_FusionX_LoRA` | `models/loras/` |
+| `4x-ClearRealityV1.pth` | `models/upscale_models/` |
+
+### The fast way — comfyui-mcp + the Panel
+
+Pulling all of that to the right folders and wiring two samplers by hand is exactly
+the busywork the [comfyui-mcp](https://github.com/artokun/comfyui-mcp)
+**[`wan-longer-videos` pack](https://github.com/artokun/comfyui-mcp/tree/main/packs/wan-longer-videos)**
+removes. One declarative manifest installs the custom nodes and pulls every model
+to the correct folder — and the same manifest drives both an MCP-native install and
+the generated installer script:
+
+```bash
+# MCP-native (from a Claude Code session, with COMFYUI_PATH set)
+apply_manifest --path packs/wan-longer-videos/manifest.yaml
+
+# or run the generated interactive installer from your ComfyUI root
+# (the folder containing custom_nodes/ and models/) — it offers the
+# Q4_K_S / Q5_K_S / Q8_0 quant choice
+WAN2_2-ULTRA-MODELS-NODES_INSTALL.bat
+```
+
+Then restart ComfyUI and load `packs/wan-longer-videos/workflow.json` (the first
+RIFE run auto-downloads `rife49.pth`). Because the pack ships with the
+[plugin](/plugin), your **own Claude session can drive the live graph through the
+[Panel](/panel)** — add/wire nodes, set the hi/lo split, swap LoRAs, and iterate on
+prompts conversationally, with full Ctrl+Z undo and no extra API keys. Every model
+URL in the pack is CI-validated for reachability and size, so a link never quietly
+rots ([here's why that matters](/blog/installer-packs-that-cant-rot)).
+
 ## How the high-noise and low-noise experts work
 
 This is the part worth slowing down for, because it's *the* thing that makes WAN
@@ -130,7 +211,7 @@ The `wan-longer-videos` pack ships the matched pairs already:
 `Wan2.1_T2V_14B_FusionX_LoRA`. Mismatch the halves and you'll get muddy structure
 or mushy detail — the symptom maps directly to which expert got the wrong LoRA.
 
-## I2V, T2V, and longer-video extend
+### I2V, T2V, and longer-video extend
 
 WAN 2.2 A14B ships as **two separate expert pairs** — one for image-to-video, one
 for text-to-video — and the `wan-longer-videos` pack installs all four GGUFs so you
@@ -154,86 +235,18 @@ can do either without re-downloading.
   whole point of `wan-longer-videos`: get past the 5-second wall without ghosting
   at the seams.
 
-## WAN 2.2 vs LTX-2.3 and the alternatives
+## What to make with it
 
-There's no universal winner — pick by the job:
-
-| Pick… | When you need… |
-|-------|----------------|
-| **WAN 2.2** | **Cinematic motion realism**, image-to-video from a reference still, flexible VRAM (FP8/GGUF down to consumer cards), the largest LoRA/remix ecosystem |
-| **LTX-2.3** | **Raw speed and volume** — reviewers cite it as dramatically faster per clip, stable at 720p, with one-pass audio for quick drafts |
-| **WAN 2.2 TI2V-5B** | A lighter dense model for **lower-VRAM rigs** and faster iteration when you don't need the full A14B quality |
-
-The recurring take from 2026 round-ups: **LTX-2.3 wins throughput and built-in
-audio; WAN 2.2 wins cinematic motion and image-to-video fidelity**, and its MoE +
-FP8/GGUF path fits 16 GB cards where a dense model can't. ([WaveSpeed: LTX-2.3 vs WAN 2.2](https://wavespeed.ai/blog/posts/ltx-2-3-vs-wan-2-2-comparison-2026/), [Thunder Compute: WAN 2.2 in ComfyUI](https://www.thundercompute.com/blog/wan-2-2-comfyui-ai-video-model)) Treat the "18x faster" style figures as
-**vendor/blog benchmarks, not independently audited** — they vary wildly with
-resolution, steps, and hardware. Each rival gets its own post:
-[LTX-2.3](/blog/ltx-2.3-comfyui) and [WAN Animate](/blog/wan-animate-comfyui) are
-next in the series.
-
-## VRAM and GGUF tiers
-
-WAN 2.2 A14B is VRAM-hungry — two 14B experts plus a UMT5-XXL encoder, a VAE
-decode, and (in the longer-video chain) RIFE interpolation running back to back.
-The fix is **GGUF quantization**, and the pack's installer is interactive: it
-offers three tiers so you match the quant to your card.
-
-| GGUF tier | VRAM target | Notes |
-|-----------|-------------|-------|
-| **Q4_K_S** | under 12 GB | Smallest quant for entry GPUs; some quality trade |
-| **Q5_K_S** | 12–24 GB | Balanced middle tier |
-| **Q8_0** | 24 GB+ | Best quality; **what this pack ships and the workflow references** |
-
-The pack pins **Q8_0** because that's exactly what `workflow.json` points at. To go
-lower, swap the `unet/Wan2.2-*-Q8_0.gguf` files for the `-Q5_K_S` or `-Q4_K_S`
-variants from the same `Aitrepreneur/FLX` repo and re-point the `UnetLoaderGGUF`
-nodes. To reduce OOM risk, the pack also launches ComfyUI with
-`--reserve-vram 2` so the GGUF UNet, VAE decode, and RIFE pass don't collide.
-
-## Install WAN 2.2 in ComfyUI
-
-The manual route works: update ComfyUI, clone the needed custom nodes
-(ComfyUI-GGUF, VideoHelperSuite, Frame-Interpolation, KJNodes, rgthree, Easy-Use),
-and download every GGUF, the UMT5-XXL encoder, the WAN 2.1 VAE, the Lightning +
-FusionX LoRAs, and the ClearReality upscaler into the right folders. That's a lot
-of files in a lot of exact places.
-
-| File | Folder |
-|------|--------|
-| `Wan2.2-I2V-A14B-HighNoise-Q8_0.gguf` / `-LowNoise-Q8_0.gguf` | `models/unet/` |
-| `Wan2.2-T2V-A14B-HighNoise-Q8_0.gguf` / `-LowNoise-Q8_0.gguf` | `models/unet/` |
-| `umt5-xxl-encoder-Q5_K_S.gguf` (text encoder) | `models/text_encoders/` |
-| `wan_2.1_vae.safetensors` | `models/vae/` |
-| `Wan2.2-Lightning_*-4steps-lora_HIGH/LOW` + `Wan2.1_T2V_14B_FusionX_LoRA` | `models/loras/` |
-| `4x-ClearRealityV1.pth` | `models/upscale_models/` |
-
-### The fast way — comfyui-mcp + the Panel
-
-Pulling all of that to the right folders and wiring two samplers by hand is exactly
-the busywork the [comfyui-mcp](https://github.com/artokun/comfyui-mcp)
-**[`wan-longer-videos` pack](https://github.com/artokun/comfyui-mcp/tree/main/packs/wan-longer-videos)**
-removes. One declarative manifest installs the custom nodes and pulls every model
-to the correct folder — and the same manifest drives both an MCP-native install and
-the generated installer script:
-
-```bash
-# MCP-native (from a Claude Code session, with COMFYUI_PATH set)
-apply_manifest --path packs/wan-longer-videos/manifest.yaml
-
-# or run the generated interactive installer from your ComfyUI root
-# (the folder containing custom_nodes/ and models/) — it offers the
-# Q4_K_S / Q5_K_S / Q8_0 quant choice
-WAN2_2-ULTRA-MODELS-NODES_INSTALL.bat
-```
-
-Then restart ComfyUI and load `packs/wan-longer-videos/workflow.json` (the first
-RIFE run auto-downloads `rife49.pth`). Because the pack ships with the
-[plugin](/plugin), your **own Claude session can drive the live graph through the
-[Panel](/panel)** — add/wire nodes, set the hi/lo split, swap LoRAs, and iterate on
-prompts conversationally, with full Ctrl+Z undo and no extra API keys. Every model
-URL in the pack is CI-validated for reachability and size, so a link never quietly
-rots ([here's why that matters](/blog/installer-packs-that-cant-rot)).
+- **Image-to-video** — bring a single illustration, photo, or render to life with a
+  controllable camera move.
+- **First-last-frame transitions & morphs** — animate cleanly between two stills
+  (add a morph LoRA on both passes for true metamorphosis).
+- **Text-to-video b-roll** — cinematic establishing shots, product motion,
+  atmospheric loops.
+- **Longer sequences** — stitch multiple clips past the 5-second wall, then RIFE +
+  upscale for a smooth finish.
+- **Stylized scenes** — the aesthetic-labeled training makes lighting/color
+  direction in the prompt actually land.
 
 ## Settings that matter
 
@@ -252,19 +265,6 @@ The pack's workflow is tuned already, but for reference:
   `4x-ClearRealityV1` upscales. Both run after decode in the longer-video chain.
 - **Frame math.** Width/height divisible by 16; frame count `4n + 1` (81 ≈ 5s at
   16 fps). Always include the quality negative prompt the skills ship.
-
-## What to make with it
-
-- **Image-to-video** — bring a single illustration, photo, or render to life with a
-  controllable camera move.
-- **First-last-frame transitions & morphs** — animate cleanly between two stills
-  (add a morph LoRA on both passes for true metamorphosis).
-- **Text-to-video b-roll** — cinematic establishing shots, product motion,
-  atmospheric loops.
-- **Longer sequences** — stitch multiple clips past the 5-second wall, then RIFE +
-  upscale for a smooth finish.
-- **Stylized scenes** — the aesthetic-labeled training makes lighting/color
-  direction in the prompt actually land.
 
 ## Troubleshooting
 
@@ -327,5 +327,5 @@ vendor/blog benchmarks, not independently audited.)
 
 That's the whole point of the project: expert ComfyUI setups that install in one
 step and drive themselves from your own agent session. **Next in the series:**
-[WAN Animate](/blog/wan-animate-comfyui) for driving characters from a reference
-performance, and [LTX-2.3](/blog/ltx-2.3-comfyui) — the speed-first challenger.
+[Qwen-Image & Qwen-Image-Edit](/blog/qwen-image-comfyui) — the local edit-anything
+model, and the T2I base that powers WAN's refine combo.

@@ -33,27 +33,6 @@ it, and the one import bug everyone hits.
 > **kornia fix**, and drive the graph from your own Claude session via the
 > [Panel](/panel). Jump to [Install](#install-ltx-2-3-in-comfyui).
 
-## A quick word on the name (it is not "LTX 3.2")
-
-You will see this model called "LTX 3.2," "LTXV2.3," and a dozen other scrambles.
-There is no LTX 3.2. The correct name is **LTX-2.3** — a point release in the
-**LTX-2** family. The lineage:
-
-- **LTX-Video** (2024) — Lightricks' first open text-to-video model.
-- **LTX-2 / LTX-V2** (early 2026) — the ~19B-class DiT audio-video foundation
-  model: the first production-ready **open-weight** model to generate synchronized
-  audio and video in one pass, up to native **4K @ 50fps** and ~20s clips,
-  Apache 2.0.
-- **LTX-2.3** (~March 2026) — a **~22B** DiT update with a rebuilt VAE (sharper
-  textures, faces, hair, and on-screen text), a much larger text-projection
-  connector for better prompt adherence, improved 9:16 portrait, cleaner
-  synchronized audio, and LoRA support. The big distribution change: **2.3 ships
-  primarily as GGUF UNets** plus separate VAE / text-encoder / text-projection
-  files — not one bundled checkpoint.
-
-When someone says "LTX 3.2" or "LTX2.3," they mean **LTX-2.3**. We'll use the
-correct name throughout.
-
 ## What is LTX-2.3?
 
 LTX-2.3 is a DiT-based video foundation model from Lightricks that does
@@ -83,6 +62,108 @@ that matter for running it locally:
 > (`huggingface.co/Lightricks`) are worth confirming before commercial use; some
 > community write-ups treat 2.3's terms as identical to LTX-2's, which we have not
 > independently verified. Flagging it so you check rather than assume.
+
+### A quick word on the name (it is not "LTX 3.2")
+
+You will see this model called "LTX 3.2," "LTXV2.3," and a dozen other scrambles.
+There is no LTX 3.2. The correct name is **LTX-2.3** — a point release in the
+**LTX-2** family. The lineage:
+
+- **LTX-Video** (2024) — Lightricks' first open text-to-video model.
+- **LTX-2 / LTX-V2** (early 2026) — the ~19B-class DiT audio-video foundation
+  model: the first production-ready **open-weight** model to generate synchronized
+  audio and video in one pass, up to native **4K @ 50fps** and ~20s clips,
+  Apache 2.0.
+- **LTX-2.3** (~March 2026) — a **~22B** DiT update with a rebuilt VAE (sharper
+  textures, faces, hair, and on-screen text), a much larger text-projection
+  connector for better prompt adherence, improved 9:16 portrait, cleaner
+  synchronized audio, and LoRA support. The big distribution change: **2.3 ships
+  primarily as GGUF UNets** plus separate VAE / text-encoder / text-projection
+  files — not one bundled checkpoint.
+
+When someone says "LTX 3.2" or "LTX2.3," they mean **LTX-2.3**. We'll use the
+correct name throughout.
+
+## LTX-2.3 vs WAN 2.2
+
+The other open-video model everyone benchmarks against is **WAN 2.2**. The short
+version:
+
+| Pick… | When you want… |
+|-------|----------------|
+| **LTX-2.3** | **Speed** + low VRAM via GGUF, **native synchronized audio**, the LTX Director timeline, fast 8-step distilled drafts |
+| **WAN 2.2** | Maximum motion fidelity from its high/low-noise expert split; a large LoRA ecosystem; strongest when you have VRAM and time to spend |
+
+LTX-2.3's pitch is throughput and the audio track; WAN 2.2's is raw quality from its
+two-expert design. WAN 2.2 gets its own deep-dive on how the high/low-noise experts
+actually work — see [the WAN 2.2 post](/blog/wan-2.2-comfyui). For now: if you want
+fast local clips with sound, LTX-2.3; if you want to push motion quality and don't
+mind the cost, WAN 2.2.
+
+## VRAM and GGUF tiers
+
+The whole point of the GGUF distribution is fitting LTX-2.3's 22B UNet on consumer
+cards. Pick the quant that matches your GPU:
+
+| GGUF quant | VRAM | Notes |
+|------------|------|-------|
+| **Q4_K_S** | **under 12 GB** | Smallest footprint; best for 8–12 GB cards |
+| **Q5_K_S** | **12–16 GB** | Balanced quality/VRAM |
+| **Q8_0** | **24 GB+** | Highest quality quant; for 24 GB cards like the 4090 |
+
+Keep only the quant you'll use — the pack lists all three so it's self-contained,
+but you don't need to download every one. The separate VAEs and the FP4 Gemma
+encoder add a few more GB on top. Plan for **8 GB as a realistic floor** (Q4_K_S,
+small resolution, short clips) and 24 GB for comfortable Q8_0 work with the
+two-stage upscale.
+
+## Install LTX-2.3 in ComfyUI
+
+The manual route works: update ComfyUI, install the custom nodes (ComfyUI-GGUF,
+ComfyUI-LTXVideo, KJNodes, RES4LYF, VideoHelperSuite, and friends), and download
+each model into the right folder:
+
+| File | Folder |
+|------|--------|
+| `ltx-2.3-22b-dev-Q4_K_S.gguf` (or Q5_K_S / Q8_0; UNet) | `models/unet/` |
+| `LTX23_video_vae_bf16.safetensors` | `models/vae/` |
+| `LTX23_audio_vae_bf16.safetensors` (audio sync) | `models/vae/` |
+| `gemma_3_12B_it_fp4_mixed.safetensors` (text encoder) | `models/text_encoders/` |
+| `ltx-2.3_text_projection_bf16.safetensors` | `models/text_encoders/` |
+| `ltx-2.3-spatial-upscaler-x2-1.1.safetensors` | `models/latent_upscale_models/` |
+| `ltx-2.3-22b-distilled-lora-384-1.1.safetensors` (fast path) | `models/loras/` |
+
+(Official weights live in the **Lightricks** HF org; the pack's installer pulls
+matching files from a third-party mirror — verify against the official repo if
+licensing matters to you.)
+
+### The fast way — comfyui-mcp + the Panel
+
+Cloning a dozen custom nodes and downloading the right GGUF quant plus two VAEs to
+the right folders is exactly the busywork the
+[comfyui-mcp](https://github.com/artokun/comfyui-mcp) **`ltx-2.3` pack** removes.
+One declarative manifest installs the nodes and pulls every model to the correct
+folder — and the same manifest drives both an MCP-native install and the generated
+double-click scripts:
+
+```bash
+# MCP-native (from a Claude Code session, with COMFYUI_PATH set)
+apply_manifest --path packs/ltx-2.3/manifest.yaml
+
+# or one-click — run from your ComfyUI root
+packs/ltx-2.3/install-windows.bat      # Windows
+packs/ltx-2.3/install-runpod.sh        # RunPod / Linux
+```
+
+After install, **run the bundled kornia fix** (see Troubleshooting) and restart
+ComfyUI. Because the pack ships with the [plugin](/plugin), your **own Claude
+session can drive the live graph through the [Panel](/panel)** — add and wire the
+GGUF loader, VAE loaders, scheduler, and sampler, set widgets, and iterate on
+prompts conversationally, with full undo and no extra API keys. No `workflow.json`
+ships with this pack yet; import one from the LTX Director / ComfyUI-LTXVideo
+examples and let your agent adapt it. Every model URL in the pack is CI-validated
+for reachability and size, so a link never quietly rots
+([here's why that matters](/blog/installer-packs-that-cant-rot)).
 
 ## The LTX Director timeline editor
 
@@ -138,84 +219,16 @@ General rule for any alternate LTX base: confirm the **version it was trained on
 if you only have a LoRA, apply it with `LoraLoaderModelOnly` instead of swapping the
 whole UNet.
 
-## LTX-2.3 vs WAN 2.2
+## What to make with it
 
-The other open-video model everyone benchmarks against is **WAN 2.2**. The short
-version:
-
-| Pick… | When you want… |
-|-------|----------------|
-| **LTX-2.3** | **Speed** + low VRAM via GGUF, **native synchronized audio**, the LTX Director timeline, fast 8-step distilled drafts |
-| **WAN 2.2** | Maximum motion fidelity from its high/low-noise expert split; a large LoRA ecosystem; strongest when you have VRAM and time to spend |
-
-LTX-2.3's pitch is throughput and the audio track; WAN 2.2's is raw quality from its
-two-expert design. We're giving WAN 2.2 its own deep-dive on how the high/low-noise
-experts actually work — that post is coming in this series. For now: if you want fast
-local clips with sound, LTX-2.3; if you want to push motion quality and don't mind
-the cost, WAN 2.2.
-
-## VRAM and GGUF tiers
-
-The whole point of the GGUF distribution is fitting LTX-2.3's 22B UNet on consumer
-cards. Pick the quant that matches your GPU:
-
-| GGUF quant | VRAM | Notes |
-|------------|------|-------|
-| **Q4_K_S** | **<12 GB** | Smallest footprint; best for 8–12 GB cards |
-| **Q5_K_S** | **12–16 GB** | Balanced quality/VRAM |
-| **Q8_0** | **24 GB+** | Highest quality quant; for 24 GB cards like the 4090 |
-
-Keep only the quant you'll use — the pack lists all three so it's self-contained,
-but you don't need to download every one. The separate VAEs and the FP4 Gemma
-encoder add a few more GB on top. Plan for **8 GB as a realistic floor** (Q4_K_S,
-small resolution, short clips) and 24 GB for comfortable Q8_0 work with the
-two-stage upscale.
-
-## Install LTX-2.3 in ComfyUI
-
-The manual route works: update ComfyUI, install the custom nodes (ComfyUI-GGUF,
-ComfyUI-LTXVideo, KJNodes, RES4LYF, VideoHelperSuite, and friends), and download
-each model into the right folder:
-
-| File | Folder |
-|------|--------|
-| `ltx-2.3-22b-dev-Q4_K_S.gguf` (or Q5_K_S / Q8_0; UNet) | `models/unet/` |
-| `LTX23_video_vae_bf16.safetensors` | `models/vae/` |
-| `LTX23_audio_vae_bf16.safetensors` (audio sync) | `models/vae/` |
-| `gemma_3_12B_it_fp4_mixed.safetensors` (text encoder) | `models/text_encoders/` |
-| `ltx-2.3_text_projection_bf16.safetensors` | `models/text_encoders/` |
-| `ltx-2.3-spatial-upscaler-x2-1.1.safetensors` | `models/latent_upscale_models/` |
-| `ltx-2.3-22b-distilled-lora-384-1.1.safetensors` (fast path) | `models/loras/` |
-
-(Official weights live in the **Lightricks** HF org; the pack's installer pulls
-matching files from a third-party mirror — verify against the official repo if
-licensing matters to you.)
-
-### The fast way — comfyui-mcp + the Panel
-
-Cloning a dozen custom nodes and downloading the right GGUF quant plus two VAEs to
-the right folders is exactly the busywork the
-[comfyui-mcp](https://github.com/artokun/comfyui-mcp) **`ltx-2.3` pack** removes.
-One declarative manifest installs the nodes and pulls every model to the correct
-folder — and the same manifest drives both an MCP-native install and the generated
-double-click scripts:
-
-```bash
-# MCP-native (from a Claude Code session, with COMFYUI_PATH set)
-apply_manifest --path packs/ltx-2.3/manifest.yaml
-
-# or one-click — run from your ComfyUI root
-packs/ltx-2.3/install-windows.bat      # Windows
-packs/ltx-2.3/install-runpod.sh        # RunPod / Linux
-```
-
-After install, **run the bundled kornia fix** (see Troubleshooting) and restart
-ComfyUI. Because the pack ships with the [plugin](/plugin), your **own Claude
-session can drive the live graph through the [Panel](/panel)** — add and wire the
-GGUF loader, VAE loaders, scheduler, and sampler, set widgets, and iterate on
-prompts conversationally, with full undo and no extra API keys. No `workflow.json`
-ships with this pack yet; import one from the LTX Director / ComfyUI-LTXVideo
-examples and let your agent adapt it.
+- **Text-to-video with sound** — cinematic clips where the matching audio is
+  generated in the same pass, no separate scoring step.
+- **Image-to-video** — bring a single still to life, with image resize handled by
+  the LTX Director nodes.
+- **Multi-segment sequences** — compose a timeline, relay the prompt across the
+  clip, and pin first/middle/last keyframes for a directed shot.
+- **Fast 8-step drafts** — iterate on concepts with the distilled LoRA, then
+  re-render the keepers on the ~20-step dev path with a two-stage latent upscale.
 
 ## Settings that matter
 
@@ -302,7 +315,6 @@ and the "sulphur" finetune is a separate third-party project with its own licens
    your Claude session wire the GGUF graph and build prompts for you.
 
 That's the whole point of the project: expert ComfyUI setups that install in one
-step and drive themselves from your own agent session. **Next in the series:** the
-[WAN 2.2 video stack](/blog/wan-2.2-comfyui) — how the high/low-noise experts
-actually work. Want the design counterpart instead? See
-[Ideogram 4 in ComfyUI](/blog/ideogram-4-comfyui).
+step and drive themselves from your own agent session. **Next in the series:**
+[Ideogram 4](/blog/ideogram-4-comfyui) — the open-weight text-and-layout king, and
+the finale of the model-highlight run.

@@ -69,6 +69,9 @@ export class UiBridge {
   private port: number;
   /** Tab the user most recently typed in — the default command target. */
   private lastActiveTabId: string | null = null;
+  /** Resolves true once the port is bound, false if binding ultimately fails. */
+  private readyPromise: Promise<boolean> | null = null;
+  private readyResolve: ((ok: boolean) => void) | null = null;
 
   /** Called for panel-initiated frames (no rid): user messages, hellos. */
   onPanelMessage: ((event: PanelEvent) => void) | null = null;
@@ -79,7 +82,19 @@ export class UiBridge {
 
   start(): void {
     this.portInUse = false;
+    this.readyPromise = new Promise<boolean>((resolve) => {
+      this.readyResolve = resolve;
+    });
     this.attemptListen(0);
+  }
+
+  /**
+   * Resolves true once the bridge port is bound, false if it ultimately can't
+   * bind (port held by another process). Lets a caller that *must* own the port
+   * — the panel orchestrator — fail loudly instead of running uselessly.
+   */
+  whenReady(): Promise<boolean> {
+    return this.readyPromise ?? Promise.resolve(this.wss !== null);
   }
 
   /**
@@ -98,6 +113,8 @@ export class UiBridge {
       this.portInUse = false;
       this.wss = wss;
       logger.info(`[ui-bridge] listening on ws://127.0.0.1:${this.port}`);
+      this.readyResolve?.(true);
+      this.readyResolve = null;
     });
 
     wss.on("error", (err: NodeJS.ErrnoException) => {
@@ -123,8 +140,13 @@ export class UiBridge {
         logger.warn(
           `[ui-bridge] port ${this.port} still in use after ${UiBridge.MAX_BIND_ATTEMPTS} attempts — another comfyui-mcp session likely owns the panel. This session's MCP tools still work, but panel_* commands are unavailable until that session exits.`,
         );
+        this.readyResolve?.(false);
+        this.readyResolve = null;
       } else {
         logger.error(`[ui-bridge] server error: ${err.message}`);
+        // If we never reached "listening", unblock any whenReady() waiter.
+        this.readyResolve?.(false);
+        this.readyResolve = null;
       }
     });
 

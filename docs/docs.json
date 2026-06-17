@@ -86,8 +86,8 @@
             "group": "Blog",
             "pages": [
               "blog/index",
+              "blog/panel-agent-subscription",
               "blog/installer-packs-that-cant-rot",
-              "blog/the-channel-that-talks-back",
               "blog/comfyui-mcp-tdqs-case-study"
             ]
           },
@@ -114,6 +114,7 @@
             "group": "Changelog",
             "pages": [
               "changelog/index",
+              "changelog/2026-06-17",
               "changelog/2026-06-16",
               "changelog/2026-06-05",
               "changelog/2026-05-29"

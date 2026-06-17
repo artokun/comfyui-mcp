@@ -134,7 +134,7 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
           "Filename to save as (e.g. 'my_workflow.json'). Will overwrite if it already exists.",
         ),
       workflow: z
-        .record(z.any())
+        .record(z.string(), z.any())
         .describe("Workflow JSON to save (API or UI format). Stored verbatim; not validated before saving."),
     },
     async (args) => {

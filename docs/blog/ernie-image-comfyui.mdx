@@ -48,44 +48,10 @@ which is open *weight* but under a **Non-Commercial** agreement (commercial use
 needs a paid license). With ERNIE you can put it in a product on day one. No gated
 download drama, no "for research only" footnote.
 
-### Why text and layout are its superpower
-
-This is the part that holds up to scrutiny. Per Baidu's published benchmarks,
-ERNIE-Image hits:
-
-- **LongTextBench ~0.9733** — state-of-the-art for long, layout-sensitive text
-  rendering among open models.
-- **GenEval ~0.8856 overall** — strong compositional accuracy, with a notable lead
-  on **position understanding** and **attribute binding**.
-
-A character-aware encoder trained on Baidu's web-scale **CJK** text-image corpus is
-the reason Chinese (and Japanese) glyphs come out clean — stroke order and radical
-composition, not mangled approximations. *(Benchmark figures are vendor-reported;
-treat the "state-of-the-art" framing as scoped to text rendering and structured
-layout, not general photorealism.)*
-
-The practical version: if the image has to **carry words** — a poster headline, a
-sign, a manga speech bubble, a UI mockup, multilingual packaging — ERNIE is the
-open model to reach for. Write the exact string you want in quotes and it renders
-it.
-
 There are two builds. **ERNIE-Image** (base) takes ~50 steps for peak quality.
 **ERNIE-Image-Turbo** is distilled (Distribution Matching Distillation + RL) and is
 high-fidelity in **~8 steps at cfg 1** — that's the one the pack ships, and the one
 that fits under 8 GB.
-
-## It is TEXT-TO-IMAGE — not an editor (read this)
-
-The single most common ERNIE confusion: people expect it to **edit a photo**. It
-doesn't. **ERNIE-Image is a text-to-image generator.** You describe an image and it
-paints one from scratch. It does **not** follow grounded edit instructions like
-"change the shirt to red" or "remove the person on the left."
-
-The shipped workflow *does* have an "image-to-image" path, and that's where the
-confusion starts — but that path is **denoise-based refinement** (a style/detail
-pass over one source image at low denoise), **not** instruction editing. If your
-job is "change X in this photo," reach for **Qwen-Image-Edit** or **Flux Kontext**
-instead. ERNIE's lane is generation, especially text- and layout-heavy generation.
 
 ## ERNIE-Image vs Ideogram 4 vs Z-Image
 
@@ -96,7 +62,7 @@ There's no single "best" — pick by the job:
 | **ERNIE-Image** | **Truly permissive (Apache-2.0)** commercial use, **multilingual EN/CN/JP text**, posters/signage/manga layouts, runs **under 8 GB** |
 | **Ideogram 4** | **Area-prompting** with structured JSON bounding boxes, fine-grained poster/logo **layout control**, brand-color accuracy |
 | **Z-Image Turbo** | **Raw speed + low VRAM** general-purpose ideation (~2.5s), LoRA-training stability on the base |
-| **Qwen-Image** | A larger, popular dev model also strong on long text |
+| **Qwen-Image** | A larger, popular dev model also strong on long text — see our [Qwen-Image post](/blog/qwen-image-comfyui) |
 
 Where rivals win: **[Ideogram 4](/blog/ideogram-4-comfyui)** gives you explicit
 spatial control — draw bounding boxes, place text and objects by region — which
@@ -174,6 +140,56 @@ conversationally, with full Ctrl+Z undo and no extra API keys. Every model URL i
 the pack is CI-validated for reachability and size, so a link never quietly rots
 ([here's why that matters](/blog/installer-packs-that-cant-rot)).
 
+## Why text and layout are its superpower
+
+This is the part that holds up to scrutiny. Per Baidu's published benchmarks,
+ERNIE-Image hits:
+
+- **LongTextBench ~0.9733** — state-of-the-art for long, layout-sensitive text
+  rendering among open models.
+- **GenEval ~0.8856 overall** — strong compositional accuracy, with a notable lead
+  on **position understanding** and **attribute binding**.
+
+A character-aware encoder trained on Baidu's web-scale **CJK** text-image corpus is
+the reason Chinese (and Japanese) glyphs come out clean — stroke order and radical
+composition, not mangled approximations. *(Benchmark figures are vendor-reported;
+treat the "state-of-the-art" framing as scoped to text rendering and structured
+layout, not general photorealism.)*
+
+The practical version: if the image has to **carry words** — a poster headline, a
+sign, a manga speech bubble, a UI mockup, multilingual packaging — ERNIE is the
+open model to reach for. Write the exact string you want in quotes and it renders
+it.
+
+### It is TEXT-TO-IMAGE — not an editor (read this)
+
+The single most common ERNIE confusion: people expect it to **edit a photo**. It
+doesn't. **ERNIE-Image is a text-to-image generator.** You describe an image and it
+paints one from scratch. It does **not** follow grounded edit instructions like
+"change the shirt to red" or "remove the person on the left."
+
+The shipped workflow *does* have an "image-to-image" path, and that's where the
+confusion starts — but that path is **denoise-based refinement** (a style/detail
+pass over one source image at low denoise), **not** instruction editing. If your
+job is "change X in this photo," reach for **Qwen-Image-Edit** or **Flux Kontext**
+instead. ERNIE's lane is generation, especially text- and layout-heavy generation.
+
+## What to make with it
+
+ERNIE's sweet spots all share one trait — the image has to say something:
+
+- **Multilingual posters & key visuals** — EN/CN/JP headlines that render cleanly.
+- **Text-heavy designs** — signage, packaging, menus, UI mockups, ad creatives.
+- **Manga / anime layouts** — multi-panel pages and storyboards with legible speech
+  bubbles (write the literal string in quotes).
+- **Structured multi-object scenes** — ERNIE's strong instruction following handles
+  complex, knowledge-heavy prompts.
+- **Fast ideation** — Turbo's 8-step generation makes iterating on concepts cheap.
+
+Prompting tip: lead with the **exact text** you want, in quotes — e.g. *a vintage
+travel poster, bold title reading "KYOTO" at the top* — then describe style and
+layout in plain, structured prose. That's ERNIE's headline strength.
+
 ## Settings that matter
 
 The pack's workflow is tuned already, but for reference — these are the Turbo
@@ -199,22 +215,6 @@ A few notes that save grief:
   since it isn't distilled.
 - **Use the Prompt Enhancer for short prompts**, turn it off (`ComfySwitchNode`
   false) once you've written a detailed prompt yourself.
-
-## What to make with it
-
-ERNIE's sweet spots all share one trait — the image has to say something:
-
-- **Multilingual posters & key visuals** — EN/CN/JP headlines that render cleanly.
-- **Text-heavy designs** — signage, packaging, menus, UI mockups, ad creatives.
-- **Manga / anime layouts** — multi-panel pages and storyboards with legible speech
-  bubbles (write the literal string in quotes).
-- **Structured multi-object scenes** — ERNIE's strong instruction following handles
-  complex, knowledge-heavy prompts.
-- **Fast ideation** — Turbo's 8-step generation makes iterating on concepts cheap.
-
-Prompting tip: lead with the **exact text** you want, in quotes — e.g. *a vintage
-travel poster, bold title reading "KYOTO" at the top* — then describe style and
-layout in plain, structured prose. That's ERNIE's headline strength.
 
 ## Troubleshooting
 
@@ -273,5 +273,5 @@ designed for layout-sensitive, multilingual text rendering, not as an afterthoug
 
 That's the whole point of the project: expert ComfyUI setups that install in one
 step and drive themselves from your own agent session. **Next in the series:**
-[Z-Image](/blog/z-image-comfyui) — the speed-and-low-VRAM champion, and how its
-Turbo distillation gets you a usable image in a couple of seconds.
+[ANIMA 1.0](/blog/anima-comfyui) — the tiny anime model that generates and trains
+LoRAs under 6 GB.

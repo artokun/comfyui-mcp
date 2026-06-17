@@ -1,5 +1,11 @@
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+// The product resolves COMFYUI_SKILL_CACHE_DIR via path.resolve(), which on
+// Windows adds a drive prefix (e.g. "/cache" -> "C:\\cache"). Build the test's
+// cache root the same way so mock keys and assertions match the product's
+// computed paths on the current OS.
+const CACHE_ROOT = resolve("/cache");
 
 const fsMock = vi.hoisted(() => ({
   dirs: new Set<string>(),
@@ -54,7 +60,9 @@ function ensureDir(path: string): void {
 function resetFs(): void {
   fsMock.dirs.clear();
   fsMock.files.clear();
-  fsMock.dirs.add("/");
+  // Seed the platform filesystem root (e.g. "C:\\" on Windows) so dirname()
+  // chains from CACHE_ROOT terminate at a known directory.
+  fsMock.dirs.add(resolve("/"));
   fsMock.mkdir.mockImplementation(async (path: string) => {
     ensureDir(path);
   });
@@ -90,7 +98,7 @@ function resetFs(): void {
 }
 
 beforeEach(() => {
-  process.env.COMFYUI_SKILL_CACHE_DIR = "/cache";
+  process.env.COMFYUI_SKILL_CACHE_DIR = CACHE_ROOT;
   vi.clearAllMocks();
   resetFs();
   generateSkillMock.mockResolvedValue("# Generated Skill");
@@ -107,8 +115,8 @@ describe("generateSkillCached", () => {
     expect(first.metadata.version).toBe("1.2.3");
     expect(generateSkillMock).toHaveBeenCalledTimes(1);
     expect(getNodePackDetailsMock).toHaveBeenCalledTimes(1);
-    expect(fsMock.files.has(join("/cache", first.safeKey, "SKILL.md"))).toBe(true);
-    expect(fsMock.files.has(join("/cache", first.safeKey, "metadata.json"))).toBe(true);
+    expect(fsMock.files.has(join(CACHE_ROOT, first.safeKey, "SKILL.md"))).toBe(true);
+    expect(fsMock.files.has(join(CACHE_ROOT, first.safeKey, "metadata.json"))).toBe(true);
 
     generateSkillMock.mockResolvedValue("# Should Not Regenerate");
     const second = await generateSkillCached("comfyui-impact-pack");
@@ -141,7 +149,7 @@ describe("generateSkillCached", () => {
 
   it("ignores cached entries whose markdown does not match metadata hash", async () => {
     const first = await generateSkillCached("comfyui-impact-pack");
-    fsMock.files.set(join("/cache", first.safeKey, "SKILL.md"), "# Partial Skill");
+    fsMock.files.set(join(CACHE_ROOT, first.safeKey, "SKILL.md"), "# Partial Skill");
     generateSkillMock.mockResolvedValueOnce("# Regenerated Skill");
 
     const second = await generateSkillCached("comfyui-impact-pack");

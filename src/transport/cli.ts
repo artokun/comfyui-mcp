@@ -7,6 +7,10 @@ export interface CliOptions {
   /** --channels: start the UI bridge + register panel_* tools so the user's
    *  own agent session drives the ComfyUI sidebar panel (no LLM API keys). */
   channels: boolean;
+  /** --panel-orchestrator: run the standalone background orchestrator that owns
+   *  the UI bridge and drives the panel with autonomous Agent SDK sessions
+   *  (subscription auth, no API key). Mutually exclusive with the MCP server. */
+  panelOrchestrator: boolean;
 }
 
 const DEFAULT_HOST = "127.0.0.1";
@@ -29,6 +33,9 @@ export function parseCliArgs(
   let host = env.MCP_HOST ?? DEFAULT_HOST;
   let port = env.MCP_PORT ? Number(env.MCP_PORT) : DEFAULT_PORT;
   let channels = env.COMFYUI_MCP_CHANNELS === "1" || env.COMFYUI_MCP_CHANNELS === "true";
+  let panelOrchestrator =
+    env.COMFYUI_MCP_PANEL_ORCHESTRATOR === "1" ||
+    env.COMFYUI_MCP_PANEL_ORCHESTRATOR === "true";
 
   const valueOf = (current: string, inline: string, i: number): [string, number] => {
     if (current.includes("=")) return [current.slice(current.indexOf("=") + 1), i];
@@ -57,8 +64,10 @@ export function parseCliArgs(
       channels = true;
     } else if (a === "--no-channels") {
       channels = false;
+    } else if (a === "--panel-orchestrator") {
+      panelOrchestrator = true;
     }
   }
 
-  return { transport, host, port, channels };
+  return { transport, host, port, channels, panelOrchestrator };
 }

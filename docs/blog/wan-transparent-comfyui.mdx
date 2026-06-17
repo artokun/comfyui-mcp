@@ -61,47 +61,10 @@ to make, because the pipeline is fiddly: video model + per-frame matting +
 correct lossless export + the right filenames. Wire it once and you've got a
 repeatable little factory for living character sprites.
 
-## How it works (the pipeline)
-
-There are two honest ways to get transparent AI video, and this recipe uses the
-second:
-
-1. **Native alpha models** (e.g. [Wan-Alpha](https://github.com/WeChatCV/Wan-Alpha))
-   jointly generate RGB *and* an alpha channel with a custom VAE. Beautiful for
-   semi-transparency and fine edges — but it's a different model stack.
-2. **Generate opaque, then matte per frame.** Animate normally with stock WAN
-   2.2 I2V, then remove the background from every frame and re-assemble as RGBA.
-
-This pack takes route 2 because it's robust, uses the WAN weights you may
-already have, and the matting model is excellent on illustrated characters.
-Stages:
-
-- **Animate — WAN 2.2 I2V A14B (Q8_0 GGUF).** WAN 2.2's I2V model is a
-  two-expert (high-noise / low-noise) A14B setup, loaded here as **Q8_0 GGUF**
-  via `UnetLoaderGGUF` to keep VRAM sane. **Lightning I2V 4-step LoRAs** (high +
-  low) collapse it to a fast 4-step sample, so you're not waiting minutes per
-  expression. Text encoder is `umt5-xxl` (GGUF), VAE is the WAN 2.1 VAE.
-- **Matte every frame — BiRefNet via ComfyUI-RMBG.** Each generated frame goes
-  through the [ComfyUI-RMBG](https://github.com/1038lab/ComfyUI-RMBG)
-  `BiRefNetRMBG` node in **Alpha** output mode, using the
-  **`BiRefNet_toonout`** matting model. ToonOut is a BiRefNet fork fine-tuned on
-  ~1,200 anime/illustration images; on toon-style art it pushes pixel accuracy
-  from ~95% to ~99.5% versus stock background removers — which is *exactly* the
-  edge quality you want on a face that's animating. Output is **RGBA**.
-- **Export looping RGBA — VHS_VideoCombine.** The
-  [VideoHelperSuite](https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite)
-  `VHS_VideoCombine` node writes a **lossless, pingpong WebP** (plays forward
-  then reverse for a seamless loop) plus a **GIF**, preserving the alpha channel.
-  Pingpong is the trick that hides the "video ends and snaps back" seam.
-- **Normalize filenames — Expression-RENAMER.** ComfyUI saves files with a
-  numeric suffix (`happy_00001.webp`). SillyTavern wants the sprite named for the
-  emotion (`happy.webp`). The bundled `expression-renamer.bat` keeps everything
-  before the first underscore plus the extension — `happy_00001.webp` →
-  `happy.webp` — across a whole output folder in one run.
-
-Drop the renamed files into
-`SillyTavern/public/characters/your-character/`, and the expressions extension
-picks them up. Animated WebP sprites just work there.
+> New to the WAN stack? Start with the base
+> [WAN 2.2 in ComfyUI](/blog/wan-2.2-comfyui) post for how the high/low-noise
+> experts work, and see [WAN Animate](/blog/wan-animate-comfyui) for
+> motion-transfer character animation.
 
 ## System & VRAM requirements
 
@@ -111,7 +74,7 @@ quant + 4-step LoRAs keep it friendly:
 | Build | VRAM | Notes |
 |-------|------|-------|
 | WAN 2.2 I2V **Q8_0 GGUF** (pack default) | **~12–24 GB** | Two A14B experts swapped in/out; Lightning 4-step keeps it fast |
-| Smaller GGUF quant (Q5 / Q4) | **<12 GB** | Drop the I2V quant if you're tight on VRAM (quality trade) |
+| Smaller GGUF quant (Q5 / Q4) | **under 12 GB** | Drop the I2V quant if you're tight on VRAM (quality trade) |
 
 The BiRefNet matting pass adds a little overhead (its resolution defaults to
 1024, tunable 512–2048). Short clips at sprite resolution are the sweet spot —
@@ -167,10 +130,47 @@ and no API keys. Every model URL in the pack is CI-validated for reachability
 and size, so links don't quietly rot
 ([why that matters](/blog/installer-packs-that-cant-rot)).
 
-> New to the WAN stack? Start with the base
-> [WAN 2.2 in ComfyUI](/blog/wan-2.2-comfyui) post for how the high/low-noise
-> experts work, and see [WAN Animate](/blog/wan-animate-comfyui) for
-> motion-transfer character animation.
+## How it works (the pipeline)
+
+There are two honest ways to get transparent AI video, and this recipe uses the
+second:
+
+1. **Native alpha models** (e.g. [Wan-Alpha](https://github.com/WeChatCV/Wan-Alpha))
+   jointly generate RGB *and* an alpha channel with a custom VAE. Beautiful for
+   semi-transparency and fine edges — but it's a different model stack.
+2. **Generate opaque, then matte per frame.** Animate normally with stock WAN
+   2.2 I2V, then remove the background from every frame and re-assemble as RGBA.
+
+This pack takes route 2 because it's robust, uses the WAN weights you may
+already have, and the matting model is excellent on illustrated characters.
+Stages:
+
+- **Animate — WAN 2.2 I2V A14B (Q8_0 GGUF).** WAN 2.2's I2V model is a
+  two-expert (high-noise / low-noise) A14B setup, loaded here as **Q8_0 GGUF**
+  via `UnetLoaderGGUF` to keep VRAM sane. **Lightning I2V 4-step LoRAs** (high +
+  low) collapse it to a fast 4-step sample, so you're not waiting minutes per
+  expression. Text encoder is `umt5-xxl` (GGUF), VAE is the WAN 2.1 VAE.
+- **Matte every frame — BiRefNet via ComfyUI-RMBG.** Each generated frame goes
+  through the [ComfyUI-RMBG](https://github.com/1038lab/ComfyUI-RMBG)
+  `BiRefNetRMBG` node in **Alpha** output mode, using the
+  **`BiRefNet_toonout`** matting model. ToonOut is a BiRefNet fork fine-tuned on
+  ~1,200 anime/illustration images; on toon-style art it pushes pixel accuracy
+  from ~95% to ~99.5% versus stock background removers — which is *exactly* the
+  edge quality you want on a face that's animating. Output is **RGBA**.
+- **Export looping RGBA — VHS_VideoCombine.** The
+  [VideoHelperSuite](https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite)
+  `VHS_VideoCombine` node writes a **lossless, pingpong WebP** (plays forward
+  then reverse for a seamless loop) plus a **GIF**, preserving the alpha channel.
+  Pingpong is the trick that hides the "video ends and snaps back" seam.
+- **Normalize filenames — Expression-RENAMER.** ComfyUI saves files with a
+  numeric suffix (`happy_00001.webp`). SillyTavern wants the sprite named for the
+  emotion (`happy.webp`). The bundled `expression-renamer.bat` keeps everything
+  before the first underscore plus the extension — `happy_00001.webp` →
+  `happy.webp` — across a whole output folder in one run.
+
+Drop the renamed files into
+`SillyTavern/public/characters/your-character/`, and the expressions extension
+picks them up. Animated WebP sprites just work there.
 
 ## What to make with it
 
@@ -261,5 +261,5 @@ use the output. SillyTavern is just the cleanest fit.
 
 That's the whole point of the project: expert ComfyUI setups that install in one
 step and drive themselves from your own agent session. **Next in the series:**
-the [WAN Animate](/blog/wan-animate-comfyui) stack — driving a still character
-with reference motion.
+[Z-Image](/blog/z-image-comfyui) — the low-VRAM speed king that does photoreal
+1024px under 8 GB.

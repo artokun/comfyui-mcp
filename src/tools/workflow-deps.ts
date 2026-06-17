@@ -36,7 +36,7 @@ export function registerWorkflowDepsTools(server: McpServer): void {
       "Works remotely (HTTP only) — mirrors `comfy-cli node deps-in-workflow`.",
     {
       workflow: z
-        .union([z.string(), z.record(z.any())])
+        .union([z.string(), z.record(z.string(), z.any())])
         .describe("ComfyUI workflow in API format (JSON string or object)"),
     },
     async (args) => {
@@ -109,7 +109,7 @@ export function registerWorkflowDepsTools(server: McpServer): void {
       "`comfy-cli node install-deps`.",
     {
       workflow: z
-        .union([z.string(), z.record(z.any())])
+        .union([z.string(), z.record(z.string(), z.any())])
         .describe("ComfyUI workflow in API format (JSON string or object)"),
     },
     async (args) => {

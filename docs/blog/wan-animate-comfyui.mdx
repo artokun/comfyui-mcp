@@ -74,60 +74,6 @@ authors, so treat the "beats everyone" framing as **strongest for character
 animation/replacement specifically**, not as a universal video-quality crown.
 Independent reviewers consistently scope the win the same way — and so do we.
 
-## How WAN Animate works
-
-The pack wires up the full kijai pipeline, but it helps to know what each piece
-does:
-
-- **Pose / detection (ViTPose + YOLO).** A **YOLOv10** detector finds the person,
-  then **ViTPose-L (or -H) WholeBody** extracts 2D whole-body skeleton keypoints
-  per frame. Those skeleton signals are spatially aligned to the character and used
-  to drive body motion. (Runs via
-  [ComfyUI-WanAnimatePreprocess](https://github.com/kijai/ComfyUI-WanAnimatePreprocess).)
-- **Face / expression.** Rather than abstract landmarks, the model feeds the **raw
-  face crop** directly into dedicated "Face Blocks" in the DiT — that's why
-  expression and lip-sync come through so cleanly.
-- **Segmentation masking (SeC).** Replacement mode needs a precise mask of the
-  character to remove. The pack defaults to **SeC** (Segment Concept, `SeC-4B`), a
-  concept-driven video segmenter that uses a vision-language model for robust
-  tracking through scene changes — it reports an **11.8-point gain over SAM 2.1** on
-  the SeCVOS benchmark ([SeC paper](https://arxiv.org/abs/2507.15852)). A SAM2
-  auto-mask path is bundled but muted by default.
-- **Relight LoRA.** An auxiliary LoRA (trained on IC-Light-synthesized lighting
-  pairs) adjusts the new character's lighting and color tone to match the
-  destination scene — the difference between a "pasted-in" swap and a believable one.
-- **lightx2v speed LoRA.** A step-distill LoRA (`lightx2v_I2V_14B_480p_cfg_step_distill`)
-  that collapses sampling to a handful of steps for dramatically faster generation.
-
-The diffusion model itself is the **14B fp8-scaled WAN Animate** checkpoint
-(`Wan2_2-Animate-14B_fp8_scaled_e4m3fn_KJ_v2`), paired with the umT5-XXL text
-encoder, the Wan 2.1 VAE, and CLIP-vision — all pulled to the right folders by the
-pack.
-
-## Where WAN VACE fits
-
-You'll hear **WAN VACE** in the same breath as Animate, so here's the clean split.
-**VACE** ("All-in-One Video Creation and Editing,"
-[ali-vilab/VACE](https://github.com/ali-vilab/VACE)) is the *generalist* — one
-framework for reference-to-video, video-to-video editing, masked editing, and
-free composition of those tasks (Move-Anything, Swap-Anything, Animate-Anything,
-Expand-Anything, etc.). It's the Swiss-army knife.
-
-**WAN Animate is the specialist.** It does one family of jobs — drive/replace a
-character — and does it better than VACE does that *specific* job. The Wan-Animate
-paper explicitly calls out VACE's instability on character tasks. So:
-
-- Reach for **Animate** when the job is "put this character into this performance"
-  or "make this still copy this motion." Best identity, expression, and
-  scene-blending.
-- Reach for **VACE** when you need broad, mix-and-match video editing (inpaint,
-  outpaint, extend, generic reference control) and character fidelity isn't the
-  whole point.
-
-If you're already running our WAN stack, note that the WAN 2.2 T2V pack also ships
-**VACE modules** for reference/pose/depth conditioning on text-to-video — see the
-[WAN 2.2 post](/blog/wan-2.2-comfyui) for that side.
-
 ## WAN Animate vs. the rest of your video stack
 
 There's no single "best" — pick by the job:
@@ -137,7 +83,7 @@ There's no single "best" — pick by the job:
 | **WAN Animate 2.2** | **Character replace** in existing footage, or **motion/expression transfer** to a still — best identity + scene blending, Apache 2.0 |
 | **WAN VACE** | A **general** video edit framework — inpaint/outpaint/extend/reference, mix-and-match tasks |
 | **WAN 2.2 T2V** | Original video **from text** (dual hi/lo experts, lightning LoRAs) — see [the WAN 2.2 post](/blog/wan-2.2-comfyui) |
-| **LTX-Video** | Fast, real-time-ish generation on lower VRAM (its own post is coming) |
+| **LTX-2.3** | Fast, real-time-ish generation on lower VRAM — see [the LTX-2.3 post](/blog/ltx-2.3-comfyui) |
 
 Where rivals win: VACE for breadth of edit types, T2V for from-scratch creation,
 LTX for raw speed. WAN Animate earns the spotlight for the one thing it's built
@@ -193,7 +139,61 @@ drive the live graph through the [Panel](/panel)** — load the reference image,
 point at the driving video, pick the SeC vs. auto-mask path, set widgets, and
 iterate conversationally, with full Ctrl+Z undo and no extra API keys. Every model
 URL in the pack is CI-validated for reachability and size, so a link never quietly
-rots.
+rots ([here's why that matters](/blog/installer-packs-that-cant-rot)).
+
+## How WAN Animate works
+
+The pack wires up the full kijai pipeline, but it helps to know what each piece
+does:
+
+- **Pose / detection (ViTPose + YOLO).** A **YOLOv10** detector finds the person,
+  then **ViTPose-L (or -H) WholeBody** extracts 2D whole-body skeleton keypoints
+  per frame. Those skeleton signals are spatially aligned to the character and used
+  to drive body motion. (Runs via
+  [ComfyUI-WanAnimatePreprocess](https://github.com/kijai/ComfyUI-WanAnimatePreprocess).)
+- **Face / expression.** Rather than abstract landmarks, the model feeds the **raw
+  face crop** directly into dedicated "Face Blocks" in the DiT — that's why
+  expression and lip-sync come through so cleanly.
+- **Segmentation masking (SeC).** Replacement mode needs a precise mask of the
+  character to remove. The pack defaults to **SeC** (Segment Concept, `SeC-4B`), a
+  concept-driven video segmenter that uses a vision-language model for robust
+  tracking through scene changes — it reports an **11.8-point gain over SAM 2.1** on
+  the SeCVOS benchmark ([SeC paper](https://arxiv.org/abs/2507.15852)). A SAM2
+  auto-mask path is bundled but muted by default.
+- **Relight LoRA.** An auxiliary LoRA (trained on IC-Light-synthesized lighting
+  pairs) adjusts the new character's lighting and color tone to match the
+  destination scene — the difference between a "pasted-in" swap and a believable one.
+- **lightx2v speed LoRA.** A step-distill LoRA (`lightx2v_I2V_14B_480p_cfg_step_distill`)
+  that collapses sampling to a handful of steps for dramatically faster generation.
+
+The diffusion model itself is the **14B fp8-scaled WAN Animate** checkpoint
+(`Wan2_2-Animate-14B_fp8_scaled_e4m3fn_KJ_v2`), paired with the umT5-XXL text
+encoder, the Wan 2.1 VAE, and CLIP-vision — all pulled to the right folders by the
+pack.
+
+### Where WAN VACE fits
+
+You'll hear **WAN VACE** in the same breath as Animate, so here's the clean split.
+**VACE** ("All-in-One Video Creation and Editing,"
+[ali-vilab/VACE](https://github.com/ali-vilab/VACE)) is the *generalist* — one
+framework for reference-to-video, video-to-video editing, masked editing, and
+free composition of those tasks (Move-Anything, Swap-Anything, Animate-Anything,
+Expand-Anything, etc.). It's the Swiss-army knife.
+
+**WAN Animate is the specialist.** It does one family of jobs — drive/replace a
+character — and does it better than VACE does that *specific* job. The Wan-Animate
+paper explicitly calls out VACE's instability on character tasks. So:
+
+- Reach for **Animate** when the job is "put this character into this performance"
+  or "make this still copy this motion." Best identity, expression, and
+  scene-blending.
+- Reach for **VACE** when you need broad, mix-and-match video editing (inpaint,
+  outpaint, extend, generic reference control) and character fidelity isn't the
+  whole point.
+
+If you're already running our WAN stack, note that the WAN 2.2 T2V pack also ships
+**VACE modules** for reference/pose/depth conditioning on text-to-video — see the
+[WAN 2.2 post](/blog/wan-2.2-comfyui) for that side.
 
 ## What to make with it
 
@@ -268,7 +268,6 @@ not a universal benchmark.
 4. Open the [Panel](/panel) and let your Claude session load the image, point at the driving video, and iterate.
 
 That's the whole point of the project: expert ComfyUI setups that install in one
-step and drive themselves from your own agent session. **Next in the series:** the
-[WAN 2.2 video stack](/blog/wan-2.2-comfyui) and a fast-and-light counterpoint with
-LTX-Video — or jump back to [Ideogram 4](/blog/ideogram-4-comfyui), the open-weight
-text-and-layout king.
+step and drive themselves from your own agent session. **Next in the series:**
+[WAN Transparent Expressions](/blog/wan-transparent-comfyui) — looping,
+alpha-channel character sprites from WAN 2.2 I2V.

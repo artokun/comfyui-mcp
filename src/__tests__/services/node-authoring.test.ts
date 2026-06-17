@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 // Mock config so importing node-authoring doesn't trigger real port detection
 // and lets us flip comfyuiPath per-test.
@@ -132,7 +132,9 @@ describe("scaffoldCustomNode", () => {
       deps,
     );
 
-    const packDir = join(CUSTOM_NODES, "my-nodes");
+    // The product resolves the pack dir with path.resolve(), which on Windows
+    // prepends the current drive letter; mirror that here rather than join().
+    const packDir = resolve(CUSTOM_NODES, "my-nodes");
     expect(res.path).toBe(packDir);
     expect(res.files).toEqual([
       "pyproject.toml",
@@ -176,7 +178,7 @@ describe("scaffoldCustomNode", () => {
       deps,
     );
     expect(res.withFrontend).toBe(true);
-    const packDir = join(CUSTOM_NODES, "fe-pack");
+    const packDir = resolve(CUSTOM_NODES, "fe-pack");
     expect(res.files).toContain(join("web", "js", "fe-pack.js"));
 
     const init = writes.find((w) => w.path === join(packDir, "__init__.py"))!.contents;
@@ -378,7 +380,7 @@ describe("publishCustomNode", () => {
     const [cmd, args, opts] = runSpy.mock.calls[0];
     expect(cmd).toBe("comfy");
     expect(args).toEqual(["node", "publish"]);
-    expect(opts.cwd).toBe(join(CUSTOM_NODES, "mypack"));
+    expect(opts.cwd).toBe(resolve(CUSTOM_NODES, "mypack"));
     // Token MUST travel via env...
     expect(opts.env).toEqual({ REGISTRY_ACCESS_TOKEN: "secret-token-123" });
     // ...and MUST NOT appear in argv (which is logged).
@@ -394,7 +396,9 @@ describe("publishCustomNode", () => {
       run: runSpy,
     }).deps;
     publishCustomNode({ path: "/elsewhere/mypack" }, deps);
-    expect(runSpy.mock.calls[0][2].cwd).toBe("/elsewhere/mypack");
+    // The product passes the path through path.resolve(), which normalizes
+    // separators and prepends the drive letter on Windows.
+    expect(runSpy.mock.calls[0][2].cwd).toBe(resolve("/elsewhere/mypack"));
   });
 
   it("throws when REGISTRY_ACCESS_TOKEN is missing (and never runs)", () => {

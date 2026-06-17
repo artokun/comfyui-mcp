@@ -59,71 +59,6 @@ This pack ships a **distilled GGUF** build of the 20B model plus **Lightning
 acceleration LoRAs** (8-step and 4-step), so you can trade a little quality for a
 lot of speed and a much smaller VRAM footprint.
 
-## Qwen-Image-Edit: instruction editing that listens
-
-The reason Qwen earns a family post is **Qwen-Image-Edit**. Instead of starting
-from a blank latent, you load an image and tell the model what to change in
-natural language. Because the editor uses the same **Qwen2.5-VL** encoder, it
-"sees" the source through the vision model and applies the instruction while
-preserving the rest of the frame.
-
-It handles both ends of the editing spectrum:
-
-- **Low-level appearance edits** — add, remove, or modify elements; lighting
-  shifts; color tweaks; relighting — while keeping realism and prompt adherence.
-- **High-level semantic edits** — object rotation, style transfer, IP/character
-  creation, background swaps.
-- **Bilingual text editing** — directly add, delete, or change text *inside* an
-  image while preserving the original font, size, and style.
-
-### Better at following instructions than Kontext
-
-The common community read is that **Qwen-Image-Edit follows free-form
-instructions more reliably than FLUX.1 Kontext**, with stronger visual-appearance
-control — natural lighting and color adjustments that hold realism
-([MimicPC](https://www.mimicpc.com/learn/qwen-image-edit-vs-flux-kontext-which-better-for-image-editing),
-[CoreViz](https://coreviz.io/blog/qwen-image-edit-vs-kontext-flux-max-image-editing-with-ai)).
-Kontext still earns wins of its own — it can be more precise *when you hand it a
-very explicit prompt*, and reviewers often give it the nod on character
-consistency and certain text-modification tasks. So this isn't "Qwen always
-beats Kontext"; it's "Qwen is the more forgiving instruction-follower, and it's
-local and Apache-licensed." Treat the comparison as task-dependent and test on
-your own images.
-
-### Manual-mask "super inpainting" for precise local edits
-
-Instruction editing is global by nature — you describe a change and trust the
-model to localize it. When you need **surgical** control, the
-`qwen-image-edit` pack also ships a **manual-mask inpainting** variant
-(`workflow-inpainting.json`). You paint a mask over exactly the region you want
-changed, and the graph restricts the edit there using
-`SetLatentNoiseMask` + `GrowMaskWithBlur` + `ImageCompositeMasked`, so the
-unmasked pixels are composited back untouched. That's the "edit only the jacket /
-only the sky / only this object" workflow — replace backgrounds, insert or remove
-objects, relight a region, all while preserving local detail
-([Stable Diffusion Art](https://stable-diffusion-art.com/qwen-image-edit-inpaint/)).
-
-The standard `workflow.json` is the instruction-edit graph; reach for
-`workflow-inpainting.json` when "describe it and hope" isn't precise enough.
-
-## The Qwen + WAN 2.2 refine combo
-
-The `qwen-image` pack isn't just a T2I model — it's a **two-stage combo
-pipeline.** Qwen-Image generates the base image, then a **WAN 2.2 T2V A14B
-low-noise** stage refines it. WAN 2.2's video models are unusually good at
-high-frequency detail and texture, so running the low-noise expert as a refiner
-cleans up skin, fabric, and fine structure that the distilled Qwen base can leave
-a touch soft. Both stages, plus their VAEs and acceleration LoRAs (WAN 2.1
-FusionX and the WAN 2.2 4-step low-noise Lightning LoRA), are installed by the
-pack.
-
-One important honesty note from the pack itself: **`qwen-image` ships
-`workflow: null`.** The combo graph (`QWEN_COMBO_ULTRA_WORKFLOW.json`) is **not
-bundled** — you load it separately. The pack reliably lands every model and node
-in the right folder; the matching combo workflow is loaded on top. (The
-`qwen-image-edit` pack, by contrast, *does* ship its workflows:
-`workflow.json` and `workflow-inpainting.json`.)
-
 ## Qwen vs Ideogram, Flux, and ERNIE
 
 There's no single "best" — pick by the job:
@@ -133,7 +68,7 @@ There's no single "best" — pick by the job:
 | **Qwen-Image** | Multilingual **text rendering** (EN/中文/日本語/한국어), paragraph-level layouts, **instruction editing + inpainting**, Apache-2.0 commercial use, the WAN refine combo |
 | **Ideogram 4** | The best open-weight **typography + design layout** with structured JSON area-prompting (posters, logos, packaging) — see our [Ideogram 4 post](/blog/ideogram-4-comfyui) |
 | **FLUX.2 / Kontext** | **Photorealism** as a mature default, and precise edits when you write very explicit prompts |
-| **ERNIE-Image** | Another Apache-2.0 option with strong CN/JP/EN text *(post coming in this series)* |
+| **ERNIE-Image** | Another Apache-2.0 option with strong CN/JP/EN text — see our [ERNIE-Image post](/blog/ernie-image-comfyui) |
 
 Where rivals win: **Ideogram 4** edges Qwen on pure typography and spatial layout
 control (it's purpose-built for it, and its English OCR accuracy leads the
@@ -153,7 +88,7 @@ overhead of roughly 8–10 GB):
 
 | Tier | VRAM | Notes |
 |------|------|-------|
-| **Q4_K_S** | **< 12 GB** | Recommended default; the manifest ships this tier active |
+| **Q4_K_S** | **under 12 GB** | Recommended default; the manifest ships this tier active |
 | **Q5_K_S** | **12–24 GB** | Quality/VRAM middle ground |
 | **Q8_0** | **24 GB+** | Best quality; shipped active in the edit pack's workflow |
 
@@ -206,6 +141,84 @@ Ctrl+Z undo and no extra API keys. Every model URL in the packs is CI-validated
 for reachability and size, so a link never quietly rots
 ([why that matters](/blog/installer-packs-that-cant-rot)).
 
+## Qwen-Image-Edit: instruction editing that listens
+
+The reason Qwen earns a family post is **Qwen-Image-Edit**. Instead of starting
+from a blank latent, you load an image and tell the model what to change in
+natural language. Because the editor uses the same **Qwen2.5-VL** encoder, it
+"sees" the source through the vision model and applies the instruction while
+preserving the rest of the frame.
+
+It handles both ends of the editing spectrum:
+
+- **Low-level appearance edits** — add, remove, or modify elements; lighting
+  shifts; color tweaks; relighting — while keeping realism and prompt adherence.
+- **High-level semantic edits** — object rotation, style transfer, IP/character
+  creation, background swaps.
+- **Bilingual text editing** — directly add, delete, or change text *inside* an
+  image while preserving the original font, size, and style.
+
+### Better at following instructions than Kontext
+
+The common community read is that **Qwen-Image-Edit follows free-form
+instructions more reliably than FLUX.1 Kontext**, with stronger visual-appearance
+control — natural lighting and color adjustments that hold realism
+([MimicPC](https://www.mimicpc.com/learn/qwen-image-edit-vs-flux-kontext-which-better-for-image-editing),
+[CoreViz](https://coreviz.io/blog/qwen-image-edit-vs-kontext-flux-max-image-editing-with-ai)).
+Kontext still earns wins of its own — it can be more precise *when you hand it a
+very explicit prompt*, and reviewers often give it the nod on character
+consistency and certain text-modification tasks. So this isn't "Qwen always
+beats Kontext"; it's "Qwen is the more forgiving instruction-follower, and it's
+local and Apache-licensed." Treat the comparison as task-dependent and test on
+your own images.
+
+### Manual-mask "super inpainting" for precise local edits
+
+Instruction editing is global by nature — you describe a change and trust the
+model to localize it. When you need **surgical** control, the
+`qwen-image-edit` pack also ships a **manual-mask inpainting** variant
+(`workflow-inpainting.json`). You paint a mask over exactly the region you want
+changed, and the graph restricts the edit there using
+`SetLatentNoiseMask` + `GrowMaskWithBlur` + `ImageCompositeMasked`, so the
+unmasked pixels are composited back untouched. That's the "edit only the jacket /
+only the sky / only this object" workflow — replace backgrounds, insert or remove
+objects, relight a region, all while preserving local detail
+([Stable Diffusion Art](https://stable-diffusion-art.com/qwen-image-edit-inpaint/)).
+
+The standard `workflow.json` is the instruction-edit graph; reach for
+`workflow-inpainting.json` when "describe it and hope" isn't precise enough.
+
+### The Qwen + WAN 2.2 refine combo
+
+The `qwen-image` pack isn't just a T2I model — it's a **two-stage combo
+pipeline.** Qwen-Image generates the base image, then a **WAN 2.2 T2V A14B
+low-noise** stage refines it. WAN 2.2's video models are unusually good at
+high-frequency detail and texture, so running the low-noise expert as a refiner
+cleans up skin, fabric, and fine structure that the distilled Qwen base can leave
+a touch soft. Both stages, plus their VAEs and acceleration LoRAs (WAN 2.1
+FusionX and the WAN 2.2 4-step low-noise Lightning LoRA), are installed by the
+pack.
+
+One important honesty note from the pack itself: **`qwen-image` ships
+`workflow: null`.** The combo graph (`QWEN_COMBO_ULTRA_WORKFLOW.json`) is **not
+bundled** — you load it separately. The pack reliably lands every model and node
+in the right folder; the matching combo workflow is loaded on top. (The
+`qwen-image-edit` pack, by contrast, *does* ship its workflows:
+`workflow.json` and `workflow-inpainting.json`.)
+
+## What to make with it
+
+- **Edit anything by instruction** — "change the black cat into a girl in a black
+  bodysuit," "make the sky a dramatic sunset," "remove the person on the left and
+  fill the background." Load image → describe → done.
+- **Surgical inpainting** — paint a mask, change only that region: swap a
+  background, relight a face, insert or delete one object, fix a logo, all with
+  local detail preserved.
+- **Multilingual text images** — posters, signage, and layouts with clean EN /
+  中文 / 日本語 / 한국어 text, including multi-line paragraphs.
+- **Combo T2I → refine** — generate the base with Qwen, then let the WAN 2.2
+  low-noise expert sharpen texture and detail.
+
 ## Settings that matter
 
 The packs' workflows are tuned, but for reference (from the bundled skills):
@@ -224,19 +237,6 @@ The packs' workflows are tuned, but for reference (from the bundled skills):
 - **Editing denoise:** Lightning uses denoise **1.0** (the model preserves
   structure via conditioning); for standard img2img editing, **0.5–0.8** keeps it
   closer to the source.
-
-## What to make with it
-
-- **Edit anything by instruction** — "change the black cat into a girl in a black
-  bodysuit," "make the sky a dramatic sunset," "remove the person on the left and
-  fill the background." Load image → describe → done.
-- **Surgical inpainting** — paint a mask, change only that region: swap a
-  background, relight a face, insert or delete one object, fix a logo, all with
-  local detail preserved.
-- **Multilingual text images** — posters, signage, and layouts with clean EN /
-  中文 / 日本語 / 한국어 text, including multi-line paragraphs.
-- **Combo T2I → refine** — generate the base with Qwen, then let the WAN 2.2
-  low-noise expert sharpen texture and detail.
 
 ## Troubleshooting
 
@@ -274,7 +274,7 @@ permits commercial use. That's a real differentiator versus non-commercial
 **How big is the model?** The full BF16 build is **40+ GB**. This pack uses
 distilled GGUF quants (Q4 / Q5 / Q8) plus Lightning LoRAs to fit consumer GPUs.
 
-**How much VRAM do I need?** Roughly **< 12 GB** for the Q4_K_S tier, **12–24 GB**
+**How much VRAM do I need?** Roughly **under 12 GB** for the Q4_K_S tier, **12–24 GB**
 for Q5, and **24 GB+** for Q8. With the Lightning LoRA, community setups run on as
 little as ~8 GB plus enough system RAM.
 
@@ -315,5 +315,5 @@ English layouts.
 
 That's the whole point of the project: expert ComfyUI setups that install in one
 step and drive themselves from your own agent session. **Next in the series:**
-ERNIE-Image — another Apache-2.0 text powerhouse — and the WAN 2.2 video stack
-that powers Qwen's refine combo.
+[WAN Animate 2.2](/blog/wan-animate-comfyui) — replace or drive a character from a
+single reference image.

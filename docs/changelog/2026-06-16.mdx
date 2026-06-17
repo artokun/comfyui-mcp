@@ -120,7 +120,8 @@ skill/command/agent/hook surface.
   so the host silently dropped every panel message and only `panel_inbox`
   polling worked. It now declares the capability and sends
   `notifications/claude/channel` with the expected `{ content, meta }` shape.
-  (The story behind this one is the week's [blog post](/blog/the-channel-that-talks-back).)
+  (The fuller story — and how the panel later moved to an autonomous background
+  agent — is in [this post](/blog/panel-agent-subscription).)
 - **`list_local_models` sees `extra_model_paths.yaml` redirects** and works
   against remote/cloud ComfyUI — it now queries ComfyUI's `/models/<dir>` REST
   endpoint first instead of only scanning `${COMFYUI_PATH}/models/`.

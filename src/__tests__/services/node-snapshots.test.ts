@@ -1,4 +1,18 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { join } from "node:path";
+
+// The product builds snapshot paths with node:path.join, so separators differ
+// per-platform. Mirror the exact construction here instead of hardcoding POSIX
+// paths so the string compares hold on both Windows and POSIX.
+const COMFY = "/fake/comfyui";
+const managerSnapshotDir = join(COMFY, "user", "__manager", "snapshots");
+const legacySnapshotDir = join(
+  COMFY,
+  "user",
+  "default",
+  "ComfyUI-Manager",
+  "snapshots",
+);
 
 // ---------------------------------------------------------------------------
 // Mocks. config and node:fs are mocked so the file-write path has no real
@@ -147,26 +161,23 @@ describe("saveNodeSnapshot (named — file path)", () => {
     // Wrote to the newest-layout dir (none existed, so candidate[0]).
     expect(fsMocks.writeFileSync).toHaveBeenCalledTimes(1);
     const [writtenPath, contents] = fsMocks.writeFileSync.mock.calls[0];
-    expect(writtenPath).toBe(
-      "/fake/comfyui/user/__manager/snapshots/prod-baseline.json",
-    );
+    expect(writtenPath).toBe(join(managerSnapshotDir, "prod-baseline.json"));
     expect(JSON.parse(contents as string)).toEqual(state);
     // Dir was created since existsSync returned false.
     expect(fsMocks.mkdirSync).toHaveBeenCalled();
   });
 
   it("writes into an existing Manager snapshots dir when one is present", async () => {
-    // Make the legacy default-layout dir "exist".
+    // Make the legacy default-layout dir "exist". The product builds the path
+    // with node:path.join (OS separators), so normalize before substring match.
     fsMocks.existsSync.mockImplementation((p: unknown) =>
-      String(p).includes("user/default/ComfyUI-Manager/snapshots"),
+      String(p).replace(/\\/g, "/").includes("user/default/ComfyUI-Manager/snapshots"),
     );
     fetchMock.mockResolvedValueOnce(jsonResponse({ comfyui: "x" }));
 
     await saveNodeSnapshot("named");
     const [writtenPath] = fsMocks.writeFileSync.mock.calls[0];
-    expect(writtenPath).toBe(
-      "/fake/comfyui/user/default/ComfyUI-Manager/snapshots/named.json",
-    );
+    expect(writtenPath).toBe(join(legacySnapshotDir, "named.json"));
     // Dir existed, so no mkdir.
     expect(fsMocks.mkdirSync).not.toHaveBeenCalled();
   });
@@ -182,9 +193,7 @@ describe("saveNodeSnapshot (named — file path)", () => {
     expect(result.name).toBe("prod.yaml");
 
     const [writtenPath, contents] = fsMocks.writeFileSync.mock.calls[0];
-    expect(writtenPath).toBe(
-      "/fake/comfyui/user/__manager/snapshots/prod.yaml",
-    );
+    expect(writtenPath).toBe(join(managerSnapshotDir, "prod.yaml"));
     // comfy-cli/cm-cli YAML contract: body wrapped under `custom_nodes:`.
     expect(contents).toMatch(/^custom_nodes:/);
     expect(contents).toContain('"comfyui-impact-pack": "1.0.0"');
@@ -194,9 +203,7 @@ describe("saveNodeSnapshot (named — file path)", () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ comfyui: "x" }));
     await saveNodeSnapshot("prod.json");
     const [writtenPath] = fsMocks.writeFileSync.mock.calls[0];
-    expect(writtenPath).toBe(
-      "/fake/comfyui/user/__manager/snapshots/prod.json",
-    );
+    expect(writtenPath).toBe(join(managerSnapshotDir, "prod.json"));
   });
 
   it("errors clearly when comfyuiPath is undefined (remote mode)", async () => {

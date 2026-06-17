@@ -22,7 +22,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import { zodToJsonSchema } from "zod-to-json-schema";
+// zod 4 ships JSON Schema conversion natively (z.toJSONSchema) — no zod-to-json-schema.
 import { registerAllTools } from "../src/tools/index.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -249,7 +249,9 @@ function firstSentence(desc: string): string {
 }
 
 function renderTool(t: CapturedTool): string {
-  const json = zodToJsonSchema(z.object(t.shape), { $refStrategy: "none" }) as JsonSchema;
+  const json = z.toJSONSchema(z.object(t.shape), {
+    reused: "inline",
+  }) as unknown as JsonSchema;
   const props = json.properties ?? {};
   const required = new Set(json.required ?? []);
   const paramNames = Object.keys(props);

@@ -56,85 +56,6 @@ in **under 8 GB**, and Turbo needs only ~8 steps. People are running it on
 6 GB cards. That's the pitch — flagship-ish quality on hardware that can't touch
 Flux.2 or a 9.3B [Ideogram 4](/blog/ideogram-4-comfyui).
 
-## Turbo vs Base — pick by the job
-
-Z-Image ships in two flavors, and the difference is the whole story:
-
-| | **Z-Image Turbo** | **Z-Image Base** |
-|---|---|---|
-| Built for | **Speed** | **Quality + training** |
-| Distillation | Decoupled-DMD distilled | Non-distilled foundation model |
-| Steps | **~4–8** (sub-second on data-center GPUs) | **~30–50**, CFG 3–5 |
-| Negative prompt | Not effective (CFG baked in) | **Supported** at CFG > 1 |
-| Best at | Fast ideation, batch iteration | Diverse styles, finetuning, LoRA training |
-| Pick the pack | [`z-image-turbo`](/packs/z-image-turbo) | [`z-image-base`](/packs/z-image-base) |
-
-**Turbo** is the one you reach for first: ~4–8-step sampling, sub-second latency on
-beefy GPUs, ~2.3s for 1024px on a 4090. It's distilled, so it bakes CFG in — meaning
-**negative prompts don't really work**; you steer with the positive prompt instead.
-
-**Base** is the non-distilled foundation model. It costs you steps (30–50) and time,
-but it gives back a **higher artistic ceiling, more diverse styles, real negative
-prompts, and — critically — it's the finetuning-friendly variant**. If you're
-training LoRAs, you train on Base. The handy part: **a LoRA trained on Base
-generally applies to the Turbo workflow too** (verify on your own LoRA), so you can
-train once and deploy on the fast path.
-
-## The V2 ULTRA workflow extras
-
-Both packs ship a tuned **V2 ULTRA** workflow that's a lot more than a bare KSampler.
-Highlights:
-
-- **Fun-ControlNet-Union** — one ControlNet patch covering Canny, HED, Depth, Pose,
-  and MLSD (loaded via `ModelPatchLoader` → the Z-Image Fun ControlNet node).
-  Recommended strength ~0.65–0.80. Base uses the `Z-Image-Fun-Controlnet-Union-2.1`
-  weights; Turbo uses `Z-Image-Turbo-Fun-Controlnet-Union` fp8.
-- **Detail Daemon** ([ComfyUI-Detail-Daemon](https://github.com/Jonseed/ComfyUI-Detail-Daemon))
-  — a detailer pass that adds fine texture and skin/fabric detail without re-rolling
-  the composition.
-- **8-step distill LoRA** (Base pack) —
-  `Z-Image-Fun-Lora-Distill-8-Steps` lets the Base model run at Turbo-like step
-  counts when you want speed from the trainable model.
-- **SeedVarianceEnhancer** (Turbo pack) — the fix for Z-Image's most-complained-about
-  quirk. Turbo's early sampling step **over-determines** the image, so different
-  seeds produce near-identical results ("same seed, same image" — really "every seed,
-  same image"). SeedVarianceEnhancer injects controlled, prompt-related noise into
-  the text embeddings between the encoder and the sampler, restoring real
-  seed-to-seed diversity. (Per the
-  [upstream issue](https://github.com/Tongyi-MAI/Z-Image/issues/16) this is a known
-  trait of the distilled model, not a bug in your graph.)
-- txt2img / img2img / inpainting branches with **rgthree group toggles**, plus a
-  `4x-ClearRealityV1` upscale path.
-
-## Train your own Z-Image LoRAs
-
-Z-Image's low-VRAM advantage carries straight into **training**. Because it's a
-~6B **single-stream** model (no WAN-style hi/lo expert split), it's the lightest
-LoRA-training target in our stack — a 4090 is comfortable, and smaller cards work
-with float8 quantization at 512–768 resolution.
-
-Use the **[`ai-toolkit-trainer`](/plugin) skill** (ostris **AI-Toolkit**, MIT — a
-standalone web-UI trainer, not a ComfyUI node) to train. Sensible starting points
-for Z-Image:
-
-| Param | Starting point |
-|-------|----------------|
-| Linear rank / dim | 16–32 (32 for detailed characters/styles) |
-| Learning rate | 1e-4 (5e-5 for tighter identity) |
-| Steps | 1500–3000 (dataset-dependent) |
-| Resolution | 768 (or 1024 — Z-Image's native range) |
-| Multi-stage | **OFF** (single-stream model, not WAN's MoE) |
-| Optimizer / Quant | AdamW8bit / float8 (enables sub-12 GB training) |
-
-*(These are aggregated community starting points, not read from AI-Toolkit's
-`config/examples/*.yml` — open the actual example config in your clone and tune.)*
-
-**Train on Base, deploy anywhere.** Then drop the resulting `.safetensors` into
-`models/loras/` and compare your candidates side by side with the
-[`z-image-xy-plot`](/packs/z-image-xy-plot) pack — a utility workflow that renders a
-labelled XY grid of multiple trained LoRAs (and/or checkpoints) at once. Bring your
-own LoRAs; that pack installs none.
-
 ## Z-Image vs the alternatives
 
 There's no single "best" — pick by the job:
@@ -145,15 +66,15 @@ There's no single "best" — pick by the job:
 | **Z-Image Base** | **Trainable** photoreal base, diverse styles, LoRA finetuning |
 | **Ideogram 4** | Readable **in-image text**, posters, logos, layout control |
 | **Flux.2** | Top-tier **photorealism** and a mature production default |
-| **Qwen-Image** | Text + multilingual on a larger dev model |
+| **Qwen-Image** | Text + multilingual on a larger dev model — see our [Qwen-Image post](/blog/qwen-image-comfyui) |
 
 Where Z-Image wins: **VRAM and speed**, full stop — nothing else here runs flagship-
 ish quality in 6–8 GB at this pace, and Base is genuinely cheap to finetune. Where
 it loses: in-image **typography and layout** go to [Ideogram 4](/blog/ideogram-4-comfyui)
 (a 9.3B model purpose-built for text), and the last 5% of large-scene
-**photorealism** still favors Flux.2. Both of those get their own posts in this
-series — *teaser:* the Flux photoreal deep-dive and the Ideogram text breakdown are
-next up.
+**photorealism** still favors Flux.2. The text-and-layout deep-dive lives in the
+[Ideogram 4 post](/blog/ideogram-4-comfyui); Z-Image earns this spotlight for
+flagship-ish output on hardware the others can't touch.
 
 ## System & VRAM requirements (GGUF)
 
@@ -211,7 +132,96 @@ Because the packs ship with the [plugin](/plugin), your **own Claude session can
 drive the live graph through the [Panel](/panel)** — swap quant tiers, wire the
 ControlNet, toggle the Detail Daemon, and iterate on prompts conversationally, with
 full Ctrl+Z undo and no API keys. Every model URL is CI-validated for reachability
-and size, so a link never quietly rots.
+and size, so a link never quietly rots
+([here's why that matters](/blog/installer-packs-that-cant-rot)).
+
+## Turbo vs Base — pick by the job
+
+Z-Image ships in two flavors, and the difference is the whole story:
+
+| | **Z-Image Turbo** | **Z-Image Base** |
+|---|---|---|
+| Built for | **Speed** | **Quality + training** |
+| Distillation | Decoupled-DMD distilled | Non-distilled foundation model |
+| Steps | **~4–8** (sub-second on data-center GPUs) | **~30–50**, CFG 3–5 |
+| Negative prompt | Not effective (CFG baked in) | **Supported** at CFG > 1 |
+| Best at | Fast ideation, batch iteration | Diverse styles, finetuning, LoRA training |
+| Pick the pack | [`z-image-turbo`](/packs/z-image-turbo) | [`z-image-base`](/packs/z-image-base) |
+
+**Turbo** is the one you reach for first: ~4–8-step sampling, sub-second latency on
+beefy GPUs, ~2.3s for 1024px on a 4090. It's distilled, so it bakes CFG in — meaning
+**negative prompts don't really work**; you steer with the positive prompt instead.
+
+**Base** is the non-distilled foundation model. It costs you steps (30–50) and time,
+but it gives back a **higher artistic ceiling, more diverse styles, real negative
+prompts, and — critically — it's the finetuning-friendly variant**. If you're
+training LoRAs, you train on Base. The handy part: **a LoRA trained on Base
+generally applies to the Turbo workflow too** (verify on your own LoRA), so you can
+train once and deploy on the fast path.
+
+### The V2 ULTRA workflow extras
+
+Both packs ship a tuned **V2 ULTRA** workflow that's a lot more than a bare KSampler.
+Highlights:
+
+- **Fun-ControlNet-Union** — one ControlNet patch covering Canny, HED, Depth, Pose,
+  and MLSD (loaded via `ModelPatchLoader` → the Z-Image Fun ControlNet node).
+  Recommended strength ~0.65–0.80. Base uses the `Z-Image-Fun-Controlnet-Union-2.1`
+  weights; Turbo uses `Z-Image-Turbo-Fun-Controlnet-Union` fp8.
+- **Detail Daemon** ([ComfyUI-Detail-Daemon](https://github.com/Jonseed/ComfyUI-Detail-Daemon))
+  — a detailer pass that adds fine texture and skin/fabric detail without re-rolling
+  the composition.
+- **8-step distill LoRA** (Base pack) —
+  `Z-Image-Fun-Lora-Distill-8-Steps` lets the Base model run at Turbo-like step
+  counts when you want speed from the trainable model.
+- **SeedVarianceEnhancer** (Turbo pack) — the fix for Z-Image's most-complained-about
+  quirk. Turbo's early sampling step **over-determines** the image, so different
+  seeds produce near-identical results ("same seed, same image" — really "every seed,
+  same image"). SeedVarianceEnhancer injects controlled, prompt-related noise into
+  the text embeddings between the encoder and the sampler, restoring real
+  seed-to-seed diversity. (Per the
+  [upstream issue](https://github.com/Tongyi-MAI/Z-Image/issues/16) this is a known
+  trait of the distilled model, not a bug in your graph.)
+- txt2img / img2img / inpainting branches with **rgthree group toggles**, plus a
+  `4x-ClearRealityV1` upscale path.
+
+### Train your own Z-Image LoRAs
+
+Z-Image's low-VRAM advantage carries straight into **training**. Because it's a
+~6B **single-stream** model (no WAN-style hi/lo expert split), it's the lightest
+LoRA-training target in our stack — a 4090 is comfortable, and smaller cards work
+with float8 quantization at 512–768 resolution.
+
+Use the **[`ai-toolkit-trainer`](/plugin) skill** (ostris **AI-Toolkit**, MIT — a
+standalone web-UI trainer, not a ComfyUI node) to train. Sensible starting points
+for Z-Image:
+
+| Param | Starting point |
+|-------|----------------|
+| Linear rank / dim | 16–32 (32 for detailed characters/styles) |
+| Learning rate | 1e-4 (5e-5 for tighter identity) |
+| Steps | 1500–3000 (dataset-dependent) |
+| Resolution | 768 (or 1024 — Z-Image's native range) |
+| Multi-stage | **OFF** (single-stream model, not WAN's MoE) |
+| Optimizer / Quant | AdamW8bit / float8 (enables sub-12 GB training) |
+
+*(These are aggregated community starting points, not read from AI-Toolkit's
+`config/examples/*.yml` — open the actual example config in your clone and tune.)*
+
+**Train on Base, deploy anywhere.** Then drop the resulting `.safetensors` into
+`models/loras/` and compare your candidates side by side with the
+[`z-image-xy-plot`](/packs/z-image-xy-plot) pack — a utility workflow that renders a
+labelled XY grid of multiple trained LoRAs (and/or checkpoints) at once. Bring your
+own LoRAs; that pack installs none.
+
+## What to make with it
+
+- **Photoreal portraits & fashion** — Z-Image's standout strength; the go-to for
+  faces, headshots, and editorial looks at low VRAM.
+- **Fast batch ideation** — Turbo's speed makes it ideal for spinning dozens of
+  concepts, then refining the keepers on Base.
+- **Custom characters & styles** — train a LoRA on Base, deploy on Turbo.
+- **Guided composition** — Fun-ControlNet for pose/depth/canny-driven scenes.
 
 ## Settings that matter
 
@@ -231,15 +241,6 @@ The packs ship tuned, but for reference (community-tested presets):
 - **Native resolutions:** 1024×1024 (or 1328×1328 native), 896×1152, 832×1216,
   1280×720. **Dimensions must be divisible by 16.**
 - **ControlNet** pairs best with `res_2s` / `res_5s` + a `beta57` scheduler.
-
-## What to make with it
-
-- **Photoreal portraits & fashion** — Z-Image's standout strength; the go-to for
-  faces, headshots, and editorial looks at low VRAM.
-- **Fast batch ideation** — Turbo's speed makes it ideal for spinning dozens of
-  concepts, then refining the keepers on Base.
-- **Custom characters & styles** — train a LoRA on Base, deploy on Turbo.
-- **Guided composition** — Fun-ControlNet for pose/depth/canny-driven scenes.
 
 ## Troubleshooting
 
@@ -299,7 +300,6 @@ published on the Aitrepreneur/FLX mirror — use Q5_K_S or Q8_0.
    quant tiers, and iterate on prompts for you.
 
 That's the whole point of the project: expert ComfyUI setups that install in one
-step and drive themselves from your own agent session. **Next in the series:** the
-Flux photoreal deep-dive — and how it stacks up against everything here. For
-information-carrying images with readable text, see
-[Ideogram 4 in ComfyUI](/blog/ideogram-4-comfyui).
+step and drive themselves from your own agent session. **Next in the series:**
+[ERNIE-Image](/blog/ernie-image-comfyui) — the Apache-2.0 text powerhouse with
+clean multilingual EN/CN/JP type.

@@ -76,6 +76,45 @@ fine-tune may still edge it — see [the comparison below](#anima-vs-the-sdxl-an
 > the current text on the [model card](https://huggingface.co/circlestone-labs/Anima)
 > before relying on it.
 
+## ANIMA vs the SDXL anime giants
+
+There's no single "best" anime model in 2026 — the community consensus is
+division of labor. Here's where ANIMA fits:
+
+| Pick… | When you need… |
+|-------|----------------|
+| **ANIMA 1.0** | **Lowest VRAM** (under 6 GB), **natural language + tags together**, **local LoRA training on the same card**, a modern DiT base, generous output license |
+| **Illustrious / WAI** | A polished daily driver with a massive community LoRA ecosystem |
+| **NoobAI-XL** | The widest character/artist/concept coverage (Danbooru + e621, ~13M images) |
+| **Animagine XL 4.0** | Maximum out-of-the-box detail and character consistency on a bigger card |
+
+The SDXL-lineage models are larger, more mature, and have years of community
+fine-tunes behind them — if you have the VRAM and want plug-and-play polish,
+they're strong. ANIMA's argument is different: it's a **dedicated anime model
+that's small enough to run and *train* on hardware those models strain**, with a
+text encoder that understands sentences. If your bottleneck is a 6–8 GB card, or
+you want to fine-tune without renting a GPU, ANIMA is the easy call.
+
+For non-anime work, this series covers the other specialists: the open-weight
+text-and-layout champion in [our Ideogram 4 post](/blog/ideogram-4-comfyui), and
+the speed/low-VRAM generalist in [our Z-Image post](/blog/z-image-comfyui).
+
+## System & VRAM requirements
+
+ANIMA's whole selling point is that it's light:
+
+| Component | Size | Note |
+|-----------|------|------|
+| DiT (`anima-base-v1.0`) | ~4 GB fp | The model itself |
+| Text encoder (Qwen3-0.6B) | ~1.2 GB | Small |
+| VAE (Qwen-Image) | ~254 MB | Tiny |
+| **Generation** | **under 6 GB VRAM** | Runs anywhere SDXL/Illustrious runs |
+| **LoRA training** | **~6 GB VRAM** | Same low-VRAM profile |
+
+A community **GGUF** quant (`Abiray/Anima-base-v1.0-GGUF`) exists for even lower
+memory, but it needs a GGUF loader node and is **not** included in this pack —
+*unverified against this workflow*.
+
 ## Install ANIMA in ComfyUI
 
 ANIMA loads with **standard split-file loaders** — not a single checkpoint. You
@@ -167,68 +206,6 @@ A GTX 1060 6 GB can train (slowly); pre-Pascal GPUs are unsupported. Full
 parameters, the `accelerate launch` command, and dataset rules are in the
 `anima-lora-trainer` skill.
 
-## ANIMA vs the SDXL anime giants
-
-There's no single "best" anime model in 2026 — the community consensus is
-division of labor. Here's where ANIMA fits:
-
-| Pick… | When you need… |
-|-------|----------------|
-| **ANIMA 1.0** | **Lowest VRAM** (under 6 GB), **natural language + tags together**, **local LoRA training on the same card**, a modern DiT base, generous output license |
-| **Illustrious / WAI** | A polished daily driver with a massive community LoRA ecosystem |
-| **NoobAI-XL** | The widest character/artist/concept coverage (Danbooru + e621, ~13M images) |
-| **Animagine XL 4.0** | Maximum out-of-the-box detail and character consistency on a bigger card |
-
-The SDXL-lineage models are larger, more mature, and have years of community
-fine-tunes behind them — if you have the VRAM and want plug-and-play polish,
-they're strong. ANIMA's argument is different: it's a **dedicated anime model
-that's small enough to run and *train* on hardware those models strain**, with a
-text encoder that understands sentences. If your bottleneck is a 6–8 GB card, or
-you want to fine-tune without renting a GPU, ANIMA is the easy call.
-
-For non-anime work, this series covers the other specialists: the open-weight
-text-and-layout champion in [our Ideogram 4 post](/blog/ideogram-4-comfyui), and
-the speed/low-VRAM generalist in [our Z-Image post](/blog/z-image-comfyui).
-
-## System & VRAM requirements
-
-ANIMA's whole selling point is that it's light:
-
-| Component | Size | Note |
-|-----------|------|------|
-| DiT (`anima-base-v1.0`) | ~4 GB fp | The model itself |
-| Text encoder (Qwen3-0.6B) | ~1.2 GB | Small |
-| VAE (Qwen-Image) | ~254 MB | Tiny |
-| **Generation** | **under 6 GB VRAM** | Runs anywhere SDXL/Illustrious runs |
-| **LoRA training** | **~6 GB VRAM** | Same low-VRAM profile |
-
-A community **GGUF** quant (`Abiray/Anima-base-v1.0-GGUF`) exists for even lower
-memory, but it needs a GGUF loader node and is **not** included in this pack —
-*unverified against this workflow*.
-
-## Settings that matter
-
-ANIMA has two distinct modes, and they want **different** settings:
-
-| Mode | Steps | CFG | Sampler | Scheduler | Denoise |
-|------|-------|-----|---------|-----------|---------|
-| **Turbo LoRA** (shipped default) | **12** | **1.0** | `er_sde` | `simple` | 1.0 |
-| **Base** (max quality) | **30–50** | **4–5** | `er_sde` | `simple` | 1.0 |
-| Upscale pass (UltimateSDUpscale) | 12 | 1.0 | `er_sde` | `simple` | 0.28 |
-
-The pack's default enables `anima-turbo-lora-v0.1` for fast 12-step previews. For
-maximum quality, drop the turbo LoRA, switch to 30–50 steps at CFG 4–5, and
-optionally enable the three bundled aesthetic LoRAs (`anima-highres-aesthetic-boost`,
-`anima-preview-3-masterpieces-v5`, `anima_p3_rdbt_v0.29.b.122`).
-
-**Sampler character (from the model card):** `er_sde` gives neutral style, flat
-colors, sharp lines; `euler_ancestral` softens/thins lines;
-`dpmpp_2m_sde_gpu` adds variety. A `beta57` scheduler (via RES4LYF) leans
-painterly.
-
-**Use a recommended resolution** to avoid distortion: 1024x1024 (1:1),
-896x1152 (3:4), 832x1216 (5:8), 768x1344 (9:16), or 640x1536 (9:21).
-
 ## Prompt style
 
 ANIMA's recommended formula stacks tags and prose:
@@ -268,6 +245,29 @@ bad hands, extra fingers, text, watermark, signature, simple background
 - **Concept and VN/game assets** — generous output license makes this practical
 - **Custom-style LoRAs** — train a personal art style on a 6 GB card
 - **Edits & fixes** — anime inpainting to repaint hands, faces, or backgrounds
+
+## Settings that matter
+
+ANIMA has two distinct modes, and they want **different** settings:
+
+| Mode | Steps | CFG | Sampler | Scheduler | Denoise |
+|------|-------|-----|---------|-----------|---------|
+| **Turbo LoRA** (shipped default) | **12** | **1.0** | `er_sde` | `simple` | 1.0 |
+| **Base** (max quality) | **30–50** | **4–5** | `er_sde` | `simple` | 1.0 |
+| Upscale pass (UltimateSDUpscale) | 12 | 1.0 | `er_sde` | `simple` | 0.28 |
+
+The pack's default enables `anima-turbo-lora-v0.1` for fast 12-step previews. For
+maximum quality, drop the turbo LoRA, switch to 30–50 steps at CFG 4–5, and
+optionally enable the three bundled aesthetic LoRAs (`anima-highres-aesthetic-boost`,
+`anima-preview-3-masterpieces-v5`, `anima_p3_rdbt_v0.29.b.122`).
+
+**Sampler character (from the model card):** `er_sde` gives neutral style, flat
+colors, sharp lines; `euler_ancestral` softens/thins lines;
+`dpmpp_2m_sde_gpu` adds variety. A `beta57` scheduler (via RES4LYF) leans
+painterly.
+
+**Use a recommended resolution** to avoid distortion: 1024x1024 (1:1),
+896x1152 (3:4), 832x1216 (5:8), 768x1344 (9:16), or 640x1536 (9:21).
 
 ## Troubleshooting
 
@@ -328,5 +328,5 @@ isn't tuned for photorealistic output.
 
 That's the whole point of the project: expert ComfyUI setups that install in one
 step and drive themselves from your own agent session. **Next in the series:**
-[Z-Image](/blog/z-image-comfyui) — the speed-and-low-VRAM generalist — and a
-deeper dive on training ANIMA LoRAs from scratch.
+[LTX-2.3](/blog/ltx-2.3-comfyui) — the fast GGUF video model with synchronized
+audio and the LTX Director timeline.

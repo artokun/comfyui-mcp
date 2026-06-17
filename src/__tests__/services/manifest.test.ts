@@ -1,4 +1,13 @@
+import { join, resolve } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const IS_WIN = process.platform === "win32";
+// The product (manifest.ts) detects an executable on Windows with
+// `where <cmd>` and on POSIX with `<cmd> --version`. Mirror that here so the
+// detection assertion passes on both platforms.
+const detectCmd = IS_WIN ? "where" : "uv";
+const detectArgs = IS_WIN ? ["uv"] : ["--version"];
+const COMFY = "/fake/ComfyUI";
 
 const mockConfig = vi.hoisted(() => ({
   comfyuiPath: "/fake/ComfyUI" as string | undefined,
@@ -192,20 +201,25 @@ describe("applyManifest", () => {
 
     expect(result.summary).toEqual({ applied: 1, skipped: 0, failed: 0 });
     expect(execFileSyncMock).toHaveBeenCalledWith(
-      "uv",
-      ["--version"],
+      detectCmd,
+      detectArgs,
       expect.objectContaining({ stdio: "ignore" }),
     );
     expect(execFileSyncMock).toHaveBeenCalledWith(
       "uv",
       ["pip", "install", "--python", expect.stringMatching(/python/), "torch==2.4.0"],
-      expect.objectContaining({ cwd: "/fake/ComfyUI" }),
+      expect.objectContaining({ cwd: COMFY }),
     );
   });
 
   it("falls back to python -m pip when uv is unavailable", async () => {
     execFileSyncMock.mockImplementation((cmd: string, args: string[]) => {
-      if (cmd === "uv" && args[0] === "--version") throw new Error("no uv");
+      // Make `uv` detection fail on both platforms: POSIX probes with
+      // `uv --version`; Windows probes with `where uv`.
+      const probesUv = IS_WIN
+        ? cmd === "where" && args[0] === "uv"
+        : cmd === "uv" && args[0] === "--version";
+      if (probesUv) throw new Error("no uv");
       return "ok";
     });
 
@@ -214,7 +228,7 @@ describe("applyManifest", () => {
     expect(execFileSyncMock).toHaveBeenCalledWith(
       expect.stringMatching(/python/),
       ["-m", "pip", "install", "numpy"],
-      expect.objectContaining({ cwd: "/fake/ComfyUI" }),
+      expect.objectContaining({ cwd: COMFY }),
     );
   });
 
@@ -237,9 +251,15 @@ describe("applyManifest", () => {
   });
 
   it("rejects model local_path when a symlinked parent escapes models", async () => {
+    // The product resolves these paths with node:path, yielding
+    // backslash-separated absolute paths on Windows. Build the mock keys the
+    // same way so they match what the product passes to realpath.
+    const modelsDir = resolve(COMFY, "models");
+    const linkDir = join(modelsDir, "link");
+    const outside = resolve("/tmp/outside");
     realpathMock.mockImplementation((path: string) => {
-      if (path === "/fake/ComfyUI/models") return Promise.resolve("/fake/ComfyUI/models");
-      if (path === "/fake/ComfyUI/models/link") return Promise.resolve("/tmp/outside");
+      if (path === modelsDir) return Promise.resolve(modelsDir);
+      if (path === linkDir) return Promise.resolve(outside);
       return Promise.resolve(path);
     });
 

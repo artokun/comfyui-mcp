@@ -1,4 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { resolve } from "node:path";
+
+// Mirror how the product builds paths (resolve against config.comfyuiPath),
+// so expectations/mock keys match on Windows (drive-qualified, backslashes)
+// as well as POSIX.
+const OUTPUT_DIR = resolve("/comfy", "output");
+const outPath = (...segments: string[]): string => resolve(OUTPUT_DIR, ...segments);
 
 vi.mock("../../config.js", () => ({
   config: {
@@ -122,19 +129,19 @@ describe("convertImage", () => {
       out_path: "converted/source.webp",
     });
 
-    expect(statMock).toHaveBeenCalledWith("/comfy/output/nested/source.png");
-    expect(readFileMock).toHaveBeenCalledWith("/comfy/output/nested/source.png");
+    expect(statMock).toHaveBeenCalledWith(outPath("nested", "source.png"));
+    expect(readFileMock).toHaveBeenCalledWith(outPath("nested", "source.png"));
     expect(webpMock).toHaveBeenCalledWith({ quality: 60, lossless: undefined, effort: undefined });
-    expect(mkdirMock).toHaveBeenCalledWith("/comfy/output/converted", { recursive: true });
-    expect(writeFileMock).toHaveBeenCalledWith("/comfy/output/converted/source.webp", Buffer.from("small"));
-    expect(result.outPath).toBe("/comfy/output/converted/source.webp");
+    expect(mkdirMock).toHaveBeenCalledWith(outPath("converted"), { recursive: true });
+    expect(writeFileMock).toHaveBeenCalledWith(outPath("converted", "source.webp"), Buffer.from("small"));
+    expect(result.outPath).toBe(outPath("converted", "source.webp"));
     expect(result.sourceBytes).toBe(Buffer.byteLength("large-source"));
     expect(result.bytesSaved).toBe(Buffer.byteLength("large-source") - 5);
     const text = result.content.find((c) => c.type === "text") as { text: string };
     expect(JSON.parse(text.text)).toMatchObject({
       output_bytes: 5,
       bytes_saved: Buffer.byteLength("large-source") - 5,
-      out_path: "/comfy/output/converted/source.webp",
+      out_path: outPath("converted", "source.webp"),
     });
   });
 
@@ -148,8 +155,8 @@ describe("convertImage", () => {
 
   it("rejects source symlinks that escape the output directory", async () => {
     realpathMock.mockImplementation((path: string) => {
-      if (path === "/comfy/output") return Promise.resolve("/comfy/output");
-      if (path === "/comfy/output/link/secret.png") return Promise.resolve("/tmp/secret.png");
+      if (path === OUTPUT_DIR) return Promise.resolve(OUTPUT_DIR);
+      if (path === outPath("link", "secret.png")) return Promise.resolve("/tmp/secret.png");
       return Promise.resolve(path);
     });
 
@@ -171,8 +178,8 @@ describe("convertImage", () => {
   it("rejects out_path symlinked parents that escape the output directory", async () => {
     readFileMock.mockResolvedValueOnce(Buffer.from("large-source"));
     realpathMock.mockImplementation((path: string) => {
-      if (path === "/comfy/output") return Promise.resolve("/comfy/output");
-      if (path === "/comfy/output/link") return Promise.resolve("/tmp/outside");
+      if (path === OUTPUT_DIR) return Promise.resolve(OUTPUT_DIR);
+      if (path === outPath("link")) return Promise.resolve("/tmp/outside");
       return Promise.resolve(path);
     });
 

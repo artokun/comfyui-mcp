@@ -40,6 +40,7 @@ vi.mock("node:fs", () => ({
   existsSync: vi.fn(() => true),
 }));
 
+import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { config } from "../../config.js";
@@ -58,6 +59,13 @@ import { ProcessControlError, ValidationError } from "../../utils/errors.js";
 
 const mockedExec = vi.mocked(execFileSync);
 const mockedExists = vi.mocked(existsSync);
+
+// The product builds these paths with node:path (join), so they use the
+// platform separator (backslashes on Windows). Build the expected values the
+// same way instead of hardcoding POSIX paths.
+const COMFY = "/fake/comfy";
+const CM_CLI = join(COMFY, "custom_nodes", "ComfyUI-Manager", "cm-cli.py");
+const BAR_DIR = join(COMFY, "custom_nodes", "bar");
 
 interface Call {
   url: string;
@@ -409,7 +417,7 @@ describe("node-management service", () => {
       const [bin, args] = mockedExec.mock.calls[0];
       expect(bin).toBe("python");
       expect(args).toEqual([
-        "/fake/comfy/custom_nodes/ComfyUI-Manager/cm-cli.py",
+        CM_CLI,
         "install",
         "some-pack",
         "--mode",
@@ -430,7 +438,7 @@ describe("node-management service", () => {
       expect(res.mechanism).toBe("cm-cli");
       expect(mockedExec).toHaveBeenCalledTimes(3);
       expect(mockedExec.mock.calls[0][1]).toEqual([
-        "/fake/comfy/custom_nodes/ComfyUI-Manager/cm-cli.py",
+        CM_CLI,
         "install",
         "https://github.com/foo/bar",
         "--mode",
@@ -441,7 +449,7 @@ describe("node-management service", () => {
       expect(mockedExec.mock.calls[1][0]).toBe("git");
       expect(mockedExec.mock.calls[1][1]).toEqual([
         "-C",
-        "/fake/comfy/custom_nodes/bar",
+        BAR_DIR,
         "fetch",
         "--all",
         "--tags",
@@ -449,7 +457,7 @@ describe("node-management service", () => {
       expect(mockedExec.mock.calls[2][0]).toBe("git");
       expect(mockedExec.mock.calls[2][1]).toEqual([
         "-C",
-        "/fake/comfy/custom_nodes/bar",
+        BAR_DIR,
         "checkout",
         "--detach",
         "--end-of-options",
@@ -579,7 +587,7 @@ describe("node-management service", () => {
       expect(res.mechanism).toBe("cm-cli");
       const [, args] = mockedExec.mock.calls[0];
       expect(args).toEqual([
-        "/fake/comfy/custom_nodes/ComfyUI-Manager/cm-cli.py",
+        CM_CLI,
         "restore-dependencies",
       ]);
     });

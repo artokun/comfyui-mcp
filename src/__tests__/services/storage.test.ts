@@ -1,5 +1,11 @@
 import { Readable } from "node:stream";
+import { resolve } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+// Mirror how the product builds the output dir (resolve against
+// config.comfyuiPath) so realpath mock keys match on Windows as well as POSIX.
+const OUTPUT_DIR = resolve("/comfy", "output");
+const outPath = (...segments: string[]): string => resolve(OUTPUT_DIR, ...segments);
 
 const awsMocks = vi.hoisted(() => ({
   send: vi.fn(),
@@ -382,8 +388,8 @@ describe("cloud storage uploads", () => {
 
   it("rejects source paths that escape the ComfyUI output directory after realpath", async () => {
     fsPromisesMocks.realpath.mockImplementation((path: string) => {
-      if (path === "/comfy/output") return Promise.resolve("/comfy/output");
-      if (path === "/comfy/output/link/secret.png") return Promise.resolve("/tmp/secret.png");
+      if (path === OUTPUT_DIR) return Promise.resolve(OUTPUT_DIR);
+      if (path === outPath("link", "secret.png")) return Promise.resolve("/tmp/secret.png");
       return Promise.resolve(path);
     });
 

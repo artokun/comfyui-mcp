@@ -114,6 +114,15 @@ async function createConfiguredServer(channels = false): Promise<McpServer> {
 
 async function main() {
   const cli = parseCliArgs(process.argv);
+
+  // Standalone background orchestrator: owns the UI bridge and drives the panel
+  // with autonomous Agent SDK sessions. Not an MCP server — it never returns.
+  if (cli.panelOrchestrator) {
+    const { runPanelOrchestrator } = await import("./orchestrator/index.js");
+    await runPanelOrchestrator();
+    return;
+  }
+
   await JobWatcher.cleanupOldFiles();
 
   if (cli.transport === "http") {
