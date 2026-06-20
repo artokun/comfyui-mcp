@@ -10,7 +10,8 @@
     "comfyui-mcp": "dist/index.js"
   },
   "scripts": {
-    "build": "tsc",
+    "sync-agents": "node scripts/sync-agents.mjs",
+    "build": "tsc && npm run sync-agents",
     "dev": "tsx src/index.ts",
     "dev:agent-poc": "tsx src/experimental/run.ts",
     "start": "node dist/index.js",
@@ -26,7 +27,7 @@
     "packs:check-urls": "node scripts/check-model-urls.mjs",
     "packs:check-models": "node scripts/check-pack-models.mjs",
     "packs:verify-render": "node scripts/verify-render.mjs",
-    "postinstall": "node scripts/postinstall.mjs",
+    "postinstall": "node scripts/postinstall.mjs && npm run sync-agents",
     "generations:stats": "node scripts/generation-stats.mjs",
     "release": "npm version patch && git push --follow-tags",
     "release:minor": "npm version minor && git push --follow-tags",

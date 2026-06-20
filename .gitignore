@@ -14,3 +14,7 @@ workflows/
 .dolt/
 *.db
 .beads-credential-key
+
+# Generated agent directories
+.agents/
+.gemini/commands/
