@@ -123,8 +123,8 @@ const mcpConfigPath = path.join(AGENTS_DIR, 'mcp_config.json');
 const mcpConfig = {
   mcpServers: {
     comfyui: {
-      command: "node",
-      args: ["dist/index.js"],
+      command: "npx",
+      args: ["-y", "comfyui-mcp"],
       env: {
         CIVITAI_API_TOKEN: ""
       }

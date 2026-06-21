@@ -9,6 +9,7 @@ generations.db-wal
 generations.db-shm
 workflows/
 .DS_Store
+*.code-workspace
 
 # Beads / Dolt files (added by bd init)
 .dolt/
