@@ -17,175 +17,26 @@
 // the bridge port the orchestrator owns.
 
 import type {
-  Query,
-  SDKMessage,
-  SDKUserMessage,
   Options,
   ModelInfo,
   SlashCommand,
   McpSdkServerConfigWithInstance,
 } from "@anthropic-ai/claude-agent-sdk";
 import { logger } from "../utils/logger.js";
+import type { AgentBackend, AgentEvent, NeutralTurn } from "./agent-backend.js";
+import {
+  ClaudeBackend,
+  fetchSupportedModels,
+  fetchSupportedCommands,
+} from "./claude-backend.js";
 
 export type { ModelInfo, SlashCommand };
-
-// The Agent SDK is an OPTIONAL dependency (it pulls in ~100 packages and is only
-// needed for the panel orchestrator), so load it lazily and fail with a clear
-// message rather than at import time for everyone.
-let queryFn: typeof import("@anthropic-ai/claude-agent-sdk").query | null = null;
-async function loadQuery(): Promise<NonNullable<typeof queryFn>> {
-  if (queryFn) return queryFn;
-  try {
-    const mod = await import("@anthropic-ai/claude-agent-sdk");
-    queryFn = mod.query;
-  } catch {
-    throw new Error(
-      "The panel orchestrator requires the optional dependency @anthropic-ai/claude-agent-sdk. Install it with: npm i @anthropic-ai/claude-agent-sdk",
-    );
-  }
-  return queryFn;
-}
+// The provider-specific Claude probes live in claude-backend.ts now; re-export
+// them so the orchestrator (index.ts) keeps importing them from here.
+export { fetchSupportedModels, fetchSupportedCommands };
 
 function msgOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
-}
-
-/**
- * Ask the SDK which models the current account can actually use — so the panel's
- * picker reflects the live subscription instead of a hardcoded list. This is the
- * only model-enumeration path that works on the subscription/OAuth lane:
- * `query.supportedModels()` (the public Models API and `claude` CLI both require
- * an API key, which we deliberately don't have here).
- *
- * Runs a minimal throwaway session — no MCP servers, no plugins/skills — so it's
- * cheap; the control request resolves right after init, then we tear it down.
- * Returns [] on any failure so the panel can fall back gracefully.
- */
-export async function fetchSupportedModels(model: string): Promise<ModelInfo[]> {
-  const query = await loadQuery();
-  let stop = false;
-  let wake: (() => void) | null = null;
-  // An idle channel: keeps the control connection open without ever consuming a
-  // turn, until we tear it down.
-  async function* idle(): AsyncGenerator<SDKUserMessage> {
-    while (!stop) {
-      await new Promise<void>((resolve) => {
-        wake = resolve;
-      });
-    }
-  }
-  const q = query({
-    prompt: idle(),
-    options: {
-      model,
-      permissionMode: "bypassPermissions",
-      allowDangerouslySkipPermissions: true,
-      strictMcpConfig: true,
-      mcpServers: {},
-    } as Options,
-  });
-  // The transport is pumped by iterating the query — do it in the background so
-  // the control request (supportedModels) gets its response.
-  const drain = (async () => {
-    try {
-      for await (const _ of q) {
-        void _;
-      }
-    } catch {
-      // torn down below
-    }
-  })();
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    // Never hang forever: a stuck probe would leave a permanently-pending
-    // cached promise and the panel would never get its model list.
-    const models = await Promise.race([
-      q.supportedModels(),
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error("supportedModels timed out")), 20000);
-      }),
-    ]);
-    logger.info(`[panel-orchestrator] supportedModels: ${models.map((m) => m.value).join(", ") || "(none)"}`);
-    return models;
-  } catch (err) {
-    logger.warn(`[panel-orchestrator] supportedModels probe failed: ${msgOf(err)}`);
-    return [];
-  } finally {
-    if (timer) clearTimeout(timer);
-    stop = true;
-    // Cast re-widens: TS narrows the closure-mutated local back to its init value.
-    (wake as (() => void) | null)?.();
-    try {
-      await q.interrupt();
-    } catch {
-      // already winding down
-    }
-    void drain;
-  }
-}
-
-/**
- * Probe the SDK for the slash commands this account/session exposes (built-ins
- * like /compact, plus any loaded skills) so the panel can surface them in the
- * composer's completion menu. Same throwaway-session pattern as
- * fetchSupportedModels; returns [] on any failure so the panel degrades cleanly.
- */
-export async function fetchSupportedCommands(model: string): Promise<SlashCommand[]> {
-  const query = await loadQuery();
-  let stop = false;
-  let wake: (() => void) | null = null;
-  async function* idle(): AsyncGenerator<SDKUserMessage> {
-    while (!stop) {
-      await new Promise<void>((resolve) => {
-        wake = resolve;
-      });
-    }
-  }
-  const q = query({
-    prompt: idle(),
-    options: {
-      model,
-      permissionMode: "bypassPermissions",
-      allowDangerouslySkipPermissions: true,
-      strictMcpConfig: true,
-      mcpServers: {},
-    } as Options,
-  });
-  const drain = (async () => {
-    try {
-      for await (const _ of q) {
-        void _;
-      }
-    } catch {
-      // torn down below
-    }
-  })();
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    const commands = await Promise.race([
-      q.supportedCommands(),
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error("supportedCommands timed out")), 20000);
-      }),
-    ]);
-    logger.info(
-      `[panel-orchestrator] supportedCommands: ${commands.map((c) => "/" + c.name).join(", ") || "(none)"}`,
-    );
-    return commands;
-  } catch (err) {
-    logger.warn(`[panel-orchestrator] supportedCommands probe failed: ${msgOf(err)}`);
-    return [];
-  } finally {
-    if (timer) clearTimeout(timer);
-    stop = true;
-    (wake as (() => void) | null)?.();
-    try {
-      await q.interrupt();
-    } catch {
-      // already winding down
-    }
-    void drain;
-  }
 }
 
 /** Reasoning effort levels the SDK accepts (passed via Options.effort). */
@@ -291,7 +142,10 @@ export interface PanelAgentDeps {
 export class PanelAgent {
   readonly tabId: string;
   private deps: PanelAgentDeps;
-  private q: Query | null = null;
+  /** The injected provider adapter (Claude today). PanelAgent owns the queue,
+   *  turn-gate, rewind tracking and self-restart; the backend owns the SDK call,
+   *  option building, and SDKMessage→AgentEvent normalization. */
+  private backend: AgentBackend;
   private queue: Array<{ text: string; images?: ImageRef[]; mid?: string }> = [];
   private waiting: (() => void) | null = null;
   private closed = false;
@@ -334,11 +188,21 @@ export class PanelAgent {
   /** Last status pushed — re-sent on reconnect so the meter isn't blank. */
   lastStatus: UsageStatus | null = null;
 
-  constructor(tabId: string, deps: PanelAgentDeps) {
+  constructor(tabId: string, deps: PanelAgentDeps, backend?: AgentBackend) {
     this.tabId = tabId;
     this.deps = deps;
     this.model = deps.model;
     this.effort = deps.effort;
+    // Default to the Claude adapter; injectable so a future toggle can swap it.
+    this.backend =
+      backend ??
+      new ClaudeBackend({
+        mcpServers: deps.mcpServers,
+        comfyuiUrl: deps.comfyuiUrl,
+        systemAppend: deps.systemAppend,
+        panelServer: deps.panelServer,
+        pluginPath: deps.pluginPath,
+      });
   }
 
   private short(): string {
@@ -364,7 +228,7 @@ export class PanelAgent {
     this.pendingRewind = { anchor };
     if (anchor === null) this.sessionId = null; // fresh fork → don't resume
     // Break the current stream so start()'s loop re-enters and forks.
-    void this.q?.interrupt().catch(() => {});
+    void this.backend.interrupt().catch(() => {});
     const wake = this.waiting;
     this.waiting = null;
     wake?.();
@@ -425,36 +289,13 @@ export class PanelAgent {
     wake?.();
   }
 
-  /** Fetch a ComfyUI image and wrap it as an Anthropic base64 image block, or
-   *  null on any failure (the text reference still names it as a fallback). */
-  private async fetchImageBlock(ref: ImageRef): Promise<unknown | null> {
-    if (!this.deps.comfyuiUrl || !ref?.filename) return null;
-    try {
-      const u = new URL("/view", this.deps.comfyuiUrl);
-      u.searchParams.set("filename", ref.filename);
-      u.searchParams.set("type", ref.type || "input");
-      if (ref.subfolder) u.searchParams.set("subfolder", ref.subfolder);
-      const res = await fetch(u, { signal: AbortSignal.timeout(15000) });
-      if (!res.ok) return null;
-      let mt = (res.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
-      if (!["image/png", "image/jpeg", "image/gif", "image/webp"].includes(mt)) {
-        mt = "image/png"; // Anthropic-supported set; ComfyUI outputs are PNG by default
-      }
-      const buf = Buffer.from(await res.arrayBuffer());
-      if (buf.length > 12 * 1024 * 1024) return null; // keep context sane
-      return { type: "image", source: { type: "base64", media_type: mt, data: buf.toString("base64") } };
-    } catch {
-      return null;
-    }
-  }
-
   /** Switch the model live (the SDK applies it to the next turn). */
   async setModel(model: string): Promise<void> {
     if (model === this.model) return;
     this.model = model;
     try {
       // setModel is live: no session restart, the next turn uses it.
-      await (this.q as unknown as { setModel?: (m: string) => Promise<void> })?.setModel?.(model);
+      await this.backend.setModel?.(model);
       logger.info(`[panel-agent ${this.short()}] model → ${model}`);
     } catch (err) {
       logger.debug(`[panel-agent ${this.short()}] setModel: ${msgOf(err)}`);
@@ -508,7 +349,7 @@ export class PanelAgent {
    *  next pending turn (and only stops cold when nothing is queued). */
   async interrupt(): Promise<void> {
     try {
-      await this.q?.interrupt();
+      await this.backend.interrupt();
     } catch (err) {
       logger.debug(`[panel-agent ${this.short()}] interrupt: ${msgOf(err)}`);
     } finally {
@@ -524,7 +365,7 @@ export class PanelAgent {
     wake?.(); // let the generator observe `closed` and return
     this.releaseTurns(); // and unblock it if it's parked at the turn gate
     try {
-      await this.q?.interrupt();
+      await this.backend.interrupt();
     } catch {
       // already winding down
     }
@@ -552,8 +393,10 @@ export class PanelAgent {
   // The streaming "channel in": an async generator that stays open and yields a
   // user turn whenever the panel sends one. The session idles between messages
   // and wakes the moment send() pushes — solving "can't wake an idle session".
-  // ONE batch is released per turn (counter gate) so the SDK can't read ahead.
-  private async *channel(): AsyncGenerator<SDKUserMessage> {
+  // ONE batch is released per turn (counter gate) so the backend can't read ahead.
+  // Yields PROVIDER-NEUTRAL turns ({text, images}); the backend shapes them into
+  // its native user message (Claude resolves the image refs to inline blocks).
+  private async *channel(): AsyncGenerator<NeutralTurn> {
     while (!this.closed) {
       if (this.queue.length === 0) {
         // Idle & settled (we only reach here after the prior turn's gate opened):
@@ -577,24 +420,9 @@ export class PanelAgent {
       }
       const text = batch.map((it) => it.text).join("\n\n");
       const images = batch.flatMap((it) => it.images ?? []);
-      // Resolve image refs to inline base64 blocks so the agent SEES them in this
-      // turn (no view_image/get_image round-trip).
-      let content: unknown = text;
-      if (images.length) {
-        const blocks: unknown[] = [];
-        for (const ref of images) {
-          const b = await this.fetchImageBlock(ref);
-          if (b) blocks.push(b);
-        }
-        if (blocks.length) content = [{ type: "text", text }, ...blocks];
-      }
       if (this.closed) return;
       this.yieldedTurns += 1; // this batch is turn N
-      yield {
-        type: "user",
-        message: { role: "user", content } as SDKUserMessage["message"],
-        parent_tool_use_id: null,
-      };
+      yield { text, ...(images.length ? { images } : {}) };
       // Hold the next batch until THIS turn completes. Race-free: if the result
       // already fired (completedTurns caught up) we don't park at all, so the
       // channel can never deadlock and strand later messages.
@@ -604,53 +432,6 @@ export class PanelAgent {
         });
       }
     }
-  }
-
-  private buildOptions(resume?: string, rewind?: { anchor: string | null } | null): Options {
-    // Rewind: fork the conversation at the anchor (resume up to that message, then
-    // branch into a new session id) so everything after it is dropped. A null
-    // anchor means "fresh session" (handled by clearing resume below).
-    const rewindOpts =
-      rewind && rewind.anchor
-        ? { resume: this.sessionId ?? resume, resumeSessionAt: rewind.anchor, forkSession: true }
-        : null;
-    return {
-      model: this.model,
-      permissionMode: "bypassPermissions",
-      // Required alongside bypassPermissions (intentional, isolated background agent).
-      allowDangerouslySkipPermissions: true,
-      // Stream partial assistant messages so the panel can show thinking + reply
-      // text live (token-by-token) instead of only the final block. route() turns
-      // these into onStream deltas; the final assistant message still commits the
-      // authoritative text via onSay (reconciled by message id).
-      includePartialMessages: true,
-      mcpServers: {
-        ...this.deps.mcpServers,
-        // Live-graph control of THIS tab's open workflow (in-process; talks to
-        // the bridge). Lets the agent build on what the user sees.
-        ...(this.deps.panelServer ? { panel: this.deps.panelServer } : {}),
-      },
-      // Only our comfyui MCP — never inherit the user's project/user MCP config
-      // (which may run a second comfyui that grabs the bridge port).
-      strictMcpConfig: true,
-      systemPrompt: {
-        type: "preset",
-        preset: "claude_code",
-        append: this.deps.systemAppend,
-      },
-      // Reasoning effort, when the picker has set one.
-      ...(this.effort ? { effort: this.effort } : {}),
-      // Load the bundled comfyui-mcp plugin so the agent has model expertise
-      // (IDEOGRAM/WAN/LTX/Qwen/… skills) out of the box — "install the package
-      // = expert agent". Omitted if the plugin dir can't be found.
-      ...(this.deps.pluginPath
-        ? {
-            plugins: [{ type: "local" as const, path: this.deps.pluginPath }],
-            skills: "all" as const,
-          }
-        : {}),
-      ...(rewindOpts ?? (resume ? { resume } : {})),
-    } as Options;
   }
 
   /**
@@ -663,14 +444,22 @@ export class PanelAgent {
    * failures (gives up + tells the user). Safe to call once.
    */
   async start(resumeSessionId?: string): Promise<void> {
-    const query = await loadQuery();
     let quickRestarts = 0;
+    // Preflight the backend (e.g. lazy-load the optional SDK) OUTSIDE the restart
+    // loop so a HARD startup failure (missing dependency, bad runtime) surfaces
+    // immediately as a clear reject — instead of being caught as a "dropped
+    // session", retried four times, and reported as "session keeps ending".
+    await this.backend.prepare?.();
     while (!this.closed) {
       // A pending rewind (one-shot) forks the session at its anchor; otherwise
       // resume normally.
       const rewind = this.pendingRewind;
       this.pendingRewind = null;
-      const resume = this.sessionId ?? resumeSessionId;
+      // A fresh fork (anchor === null) must NOT resume anything — not even the
+      // resumeSessionId start() was called with — or it silently continues the old
+      // session instead of starting clean. (requestRewind(null) clears sessionId;
+      // this also suppresses the resumeSessionId fallback.)
+      const resume = rewind?.anchor === null ? undefined : (this.sessionId ?? resumeSessionId);
       const startedAt = Date.now();
       // Fresh channel → reset the turn-gate counters so a restart/resume never
       // inherits a stale offset that would mis-gate the first batch.
@@ -680,9 +469,19 @@ export class PanelAgent {
       // Drop the prior session's last assistant UUID so a fork can't report a
       // stale (pre-fork) anchor for the first turn of the new session.
       this.lastAssistantUuid = null;
-      this.q = query({ prompt: this.channel(), options: this.buildOptions(resume, rewind) });
       try {
-        for await (const message of this.q) this.route(message);
+        // Drive the injected backend: it builds the provider session (resume/fork),
+        // shapes the neutral channel into native turns, and yields canonical events.
+        for await (const ev of this.backend.run({
+          channel: this.channel(),
+          model: this.model,
+          ...(this.effort ? { effort: this.effort } : {}),
+          ...(resume ? { resume } : {}),
+          sessionId: this.sessionId,
+          rewindAnchor: rewind?.anchor ?? null,
+        })) {
+          this.handleEvent(ev);
+        }
       } catch (err) {
         if (this.closed) break;
         logger.error(`[panel-agent ${this.short()}] stream error: ${msgOf(err)}`);
@@ -708,52 +507,48 @@ export class PanelAgent {
     logger.info(`[panel-agent ${this.short()}] stopped`);
   }
 
-  private route(message: SDKMessage): void {
-    switch (message.type) {
-      case "system":
-        if (message.subtype === "init") {
-          this.sessionId = message.session_id;
-          if (message.model) this.model = message.model;
-          this.deps.onSession?.(this.tabId, message.session_id);
-          logger.info(
-            `[panel-agent ${this.short()}] init model=${message.model} session=${message.session_id.slice(0, 8)} apiKeySource=${message.apiKeySource} effort=${this.effort ?? "default"} skills=${message.skills?.length ?? 0}`,
-          );
-        } else if (message.subtype === "thinking_tokens") {
-          // Live extended-thinking token count → drives a "thinking… (N)" meter
-          // so the user can see the agent reasoning (not stuck) before any text.
-          const t = (message as unknown as { estimated_tokens?: number }).estimated_tokens;
-          if (typeof t === "number") {
-            this.busy = true;
-            this.deps.onTurn?.(this.tabId, "working");
-            this.deps.onThinking?.(this.tabId, t);
-          }
-        }
+  // Handle a canonical AgentEvent from the backend. This is the provider-agnostic
+  // half of what used to be route(SDKMessage): all the panel orchestration (turn
+  // gate, busy/working indicator, anchor tracking, usage meter, onSay commit)
+  // lives here; the backend already normalized the provider's native messages.
+  private handleEvent(ev: AgentEvent): void {
+    switch (ev.type) {
+      case "session": {
+        this.sessionId = ev.sessionId;
+        if (ev.model) this.model = ev.model;
+        this.deps.onSession?.(this.tabId, ev.sessionId);
+        logger.info(
+          `[panel-agent ${this.short()}] init model=${ev.model} session=${ev.sessionId.slice(0, 8)} effort=${this.effort ?? "default"}`,
+        );
         break;
-      case "stream_event": {
-        // Live partial output (includePartialMessages). Turn the raw Anthropic
-        // stream events into thinking/reply deltas the panel renders token-by-
-        // token. The authoritative text still commits via the `assistant` case.
-        const ev = (message as unknown as { event?: Record<string, unknown> }).event;
-        if (!ev || !this.deps.onStream) break;
-        const evType = ev.type as string | undefined;
-        if (evType === "message_start") {
-          const mid = (ev.message as { id?: string } | undefined)?.id;
-          this.streamMsgId = typeof mid === "string" ? mid : null;
-        } else if (evType === "content_block_delta") {
-          const d = ev.delta as { type?: string; text?: string; thinking?: string } | undefined;
-          const id = this.streamMsgId;
-          if (!d || !id) break;
-          if (d.type === "thinking_delta" && typeof d.thinking === "string" && d.thinking) {
-            this.deps.onTurn?.(this.tabId, "working");
-            this.deps.onStream(this.tabId, { phase: "think", id, delta: d.thinking });
-          } else if (d.type === "text_delta" && typeof d.text === "string" && d.text) {
-            this.deps.onTurn?.(this.tabId, "working");
-            this.deps.onStream(this.tabId, { phase: "text", id, delta: d.text });
-          }
-        } else if (evType === "message_stop") {
-          if (this.streamMsgId) this.deps.onStream(this.tabId, { phase: "end", id: this.streamMsgId });
-          this.streamMsgId = null;
-        }
+      }
+      case "thinking": {
+        // Live extended-thinking token count → drives a "thinking… (N)" meter
+        // so the user can see the agent reasoning (not stuck) before any text.
+        this.busy = true;
+        this.deps.onTurn?.(this.tabId, "working");
+        this.deps.onThinking?.(this.tabId, ev.tokens);
+        break;
+      }
+      case "stream_start": {
+        // Live partial output (includePartialMessages). The backend already
+        // decoded the raw stream events; group deltas + the final commit by id.
+        if (!this.deps.onStream) break;
+        this.streamMsgId = ev.id;
+        break;
+      }
+      case "assistant_delta": {
+        if (!this.deps.onStream) break;
+        const id = this.streamMsgId;
+        if (!id) break;
+        this.deps.onTurn?.(this.tabId, "working");
+        this.deps.onStream(this.tabId, { phase: ev.thinking ? "think" : "text", id, delta: ev.text });
+        break;
+      }
+      case "stream_end": {
+        if (!this.deps.onStream) break;
+        if (this.streamMsgId) this.deps.onStream(this.tabId, { phase: "end", id: this.streamMsgId });
+        this.streamMsgId = null;
         break;
       }
       case "assistant": {
@@ -761,47 +556,29 @@ export class PanelAgent {
         this.busy = true;
         this.deps.onTurn?.(this.tabId, "working");
         // Remember this message's UUID — it's the rewind anchor for the turn.
-        const auid = (message as unknown as { uuid?: string }).uuid;
-        if (typeof auid === "string") this.lastAssistantUuid = auid;
+        if (typeof ev.uuid === "string") this.lastAssistantUuid = ev.uuid;
         // Each assistant API response carries the CURRENT context size — report
         // it live so the meter updates throughout the turn, not just at the end.
-        const u = (message.message as unknown as { usage?: Record<string, number> })?.usage;
-        if (u) {
-          this.lastUsage = u;
-          this.reportStatus(u);
+        if (ev.usage) {
+          this.lastUsage = ev.usage;
+          this.reportStatus(ev.usage);
         }
         // Commit the authoritative reply text as ONE message. With streaming on,
         // the panel already showed a live preview (matched by this message id);
         // the commit replaces it with the final text. Without streaming (or for
         // injected events), it just renders a normal bubble.
-        const content = (message.message?.content ?? []) as Array<{
-          type: string;
-          text?: string;
-        }>;
-        const text = content
-          .filter((b) => b.type === "text" && typeof b.text === "string")
-          .map((b) => b.text as string)
-          .join("\n\n")
-          .trim();
-        if (text) {
-          const id = (message.message as unknown as { id?: string })?.id;
-          this.deps.onSay(this.tabId, text, { id, streamed: true });
+        if (ev.text) {
+          this.deps.onSay(this.tabId, ev.text, { id: ev.id, streamed: true });
         }
         break;
       }
       case "result": {
         // Cache the context window + cost from the result, then re-report using
         // the last assistant usage (the true current context).
-        const m = message as unknown as {
-          modelUsage?: Record<string, { contextWindow?: number }>;
-          total_cost_usd?: number;
-        };
-        for (const mu of Object.values(m.modelUsage ?? {})) {
-          if (mu?.contextWindow && mu.contextWindow > this.contextWindow) {
-            this.contextWindow = mu.contextWindow;
-          }
+        if (ev.contextWindow && ev.contextWindow > this.contextWindow) {
+          this.contextWindow = ev.contextWindow;
         }
-        if (this.lastUsage) this.reportStatus(this.lastUsage, m.total_cost_usd);
+        if (this.lastUsage) this.reportStatus(this.lastUsage, ev.costUsd);
         this.busy = false;
         this.completeTurn(); // turn finished → release the next queued batch
         // Report this turn's anchor (last assistant UUID) so the panel can later
@@ -809,7 +586,7 @@ export class PanelAgent {
         if (this.lastAssistantUuid) this.deps.onTurnAnchor?.(this.tabId, this.lastAssistantUuid);
         this.deps.onTurn?.(this.tabId, "done");
         logger.info(
-          `[panel-agent ${this.short()}] turn done (subtype=${message.subtype})`,
+          `[panel-agent ${this.short()}] turn done (subtype=${ev.subtype})`,
         );
         break;
       }

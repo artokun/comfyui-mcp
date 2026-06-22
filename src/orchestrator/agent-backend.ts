@@ -12,6 +12,19 @@ import type { ImageRef } from "./panel-agent.js";
 export type BackendId = "claude" | "codex";
 
 /**
+ * A user turn in PROVIDER-NEUTRAL form. PanelAgent owns the queue/turn-gate and
+ * yields these; the backend shapes them into its provider's native user message
+ * (e.g. Claude `SDKUserMessage`, resolving image refs to inline blocks). This is
+ * the "channel in" seam — PanelAgent never deals in `SDKUserMessage`.
+ */
+export interface NeutralTurn {
+  /** The combined user text for this turn. */
+  text: string;
+  /** ComfyUI image refs to deliver inline (vision), resolved by the backend. */
+  images?: ImageRef[];
+}
+
+/**
  * What a backend can do. The panel degrades gracefully on the flags it can't honor
  * (e.g. hide the conversation-rollback scope when `forkAtAnchor` is false).
  */
@@ -38,14 +51,37 @@ export interface AgentCapabilities {
  * Canonical event stream. Every adapter normalizes its provider's native messages
  * (Claude `SDKMessage`, Codex app-server notifications) onto these so the
  * orchestration layer is provider-agnostic.
+ *
+ * NOTE: this is a superset of the minimal design sketch — it carries the extra
+ * fields PanelAgent needs to drive the panel UI losslessly (the streamed-message
+ * id for delta/commit reconciliation, per-response usage for the live context
+ * meter, the result subtype/contextWindow/cost, live thinking-token counts). A
+ * non-Claude backend simply omits the optional fields it can't supply.
  */
 export type AgentEvent =
-  | { type: "session"; sessionId: string }
+  /** Session opened/continued; `model` is the SDK-reported active model, if any. */
+  | { type: "session"; sessionId: string; model?: string }
+  /** Incremental assistant/thinking text (token-by-token streaming). */
   | { type: "assistant_delta"; text: string; thinking?: boolean }
-  /** A turn-ending assistant message; `uuid` (when present) is the rewind anchor. */
-  | { type: "assistant"; text: string; uuid?: string }
+  /** A streamed message began; `id` groups its deltas + the final commit. */
+  | { type: "stream_start"; id: string | null }
+  /** The streamed message finished (close the live preview bubble). */
+  | { type: "stream_end" }
+  /** Live extended-thinking token count, for a "thinking… (N)" indicator. */
+  | { type: "thinking"; tokens: number }
+  /** A turn-ending assistant message; `uuid` (when present) is the rewind anchor.
+   *  `id` matches the streamed preview; `usage` is that response's prompt usage. */
+  | { type: "assistant"; text: string; uuid?: string; id?: string; usage?: Record<string, number> }
   | { type: "tool_call"; name: string; phase: "start" | "end"; detail?: unknown }
-  | { type: "result"; ok: boolean; usage?: unknown }
+  /** A turn completed. `contextWindow`/`costUsd`/`subtype` are provider extras. */
+  | {
+      type: "result";
+      ok: boolean;
+      usage?: unknown;
+      subtype?: string;
+      contextWindow?: number;
+      costUsd?: number;
+    }
   | { type: "rate_limit"; resetsAt?: number; kind?: string }
   | { type: "error"; message: string };
 
@@ -62,7 +98,20 @@ export interface BackendStartOptions {
   /** Model id (provider-specific). */
   model?: string;
   /** Working directory for the agent. */
-  cwd: string;
+  cwd?: string;
+  /**
+   * The current captured session id (Claude forks from `sessionId ?? resume`).
+   * PanelAgent tracks this across restarts; the backend reads it when forking.
+   */
+  sessionId?: string | null;
+  /** Reasoning effort for the session (provider-specific; ignored if unsupported). */
+  effort?: string;
+  /**
+   * The provider-neutral "channel in": an async iterable of user turns. The
+   * backend shapes each into its native user message and pushes it into the live
+   * session. PanelAgent gates this so exactly one batch is released per turn.
+   */
+  channel: AsyncIterable<NeutralTurn>;
 }
 
 export interface SendMeta {
@@ -78,12 +127,18 @@ export interface SendMeta {
 export interface AgentBackend {
   readonly id: BackendId;
   readonly capabilities: AgentCapabilities;
-  /** Open/continue a session; the returned iterable yields canonical events. */
+  /** One-time preflight (e.g. lazy-load the SDK / warm a connection), run OUTSIDE
+   *  the self-restart loop so a hard startup failure surfaces immediately rather
+   *  than being retried as a dropped session. Idempotent; optional. */
+  prepare?(): Promise<void>;
+  /** Open/continue a session; the returned iterable yields canonical events. The
+   *  user "channel in" is supplied via `opts.channel` (PanelAgent owns the queue
+   *  and turn-gate), so the provider-specific message shaping lives in the backend. */
   run(opts: BackendStartOptions): AsyncIterable<AgentEvent>;
-  /** Push a user turn into the live session (channel-in). */
-  send(text: string, meta?: SendMeta): void;
   /** Stop the current turn without ending the session (if supported). */
   interrupt(): Promise<void>;
+  /** Switch the model on the LIVE session (next turn uses it), if supported. */
+  setModel?(model: string): Promise<void>;
   /** Models the current account can use (empty if `modelEnumeration` is false). */
   listModels(): Promise<ModelChoice[]>;
 }
