@@ -2,13 +2,13 @@
 
 ## Local Testing
 
-The repo contains a script `scripts/sync-agents.mjs` that automatically translates Claude Code plugins into Google Antigravity compatible skills, commands, and hooks. This runs automatically during `npm install` and `npm run build`.
+The repo contains a script `scripts/sync-agents.mjs` that automatically translates Claude Code plugins into Google Antigravity compatible skills, commands, and hooks.
 
 The generated files live in:
 - `.agents/` (for skills, hooks, and mcp configuration)
 - `.gemini/commands/` (for custom slash commands)
 
-If you modify anything under `plugin/`, you must run `npm run sync-agents` or `npm run build` to update the Antigravity definitions.
+If you modify anything under `plugin/`, you must run `npm run sync-agents` to update the Antigravity definitions.
 
 ## Agent Architecture
 
