@@ -356,6 +356,24 @@ export class ClaudeBackend implements AgentBackend {
     await this.q?.interrupt();
   }
 
+  /** Permanently dispose of the live SDK query. The Agent SDK has no explicit
+   *  "dispose" beyond interrupt(), which both stops the in-flight turn and lets
+   *  the underlying transport wind down once the prompt generator is no longer
+   *  iterated (PanelAgent.stop() closes the channel before calling this). We then
+   *  drop our reference so the query can be GC'd. Idempotent + safe when never
+   *  started (q is null) — and a true no-op for Claude's behavior: stop() already
+   *  called interrupt(), so this only releases the reference. */
+  async close(): Promise<void> {
+    const q = this.q;
+    this.q = null;
+    if (!q) return;
+    try {
+      await q.interrupt();
+    } catch {
+      // already winding down / never fully started
+    }
+  }
+
   async listModels(): Promise<ModelChoice[]> {
     return [];
   }

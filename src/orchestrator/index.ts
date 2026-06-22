@@ -28,6 +28,8 @@ import {
 } from "./panel-agent.js";
 import { createPanelMcpServer } from "./panel-tools.js";
 import { readUserMcpServers } from "../services/user-mcp-config.js";
+import { CodexBackend } from "./codex-backend.js";
+import type { AgentBackend } from "./agent-backend.js";
 
 const PANEL_SYSTEM_APPEND = `You are the autonomous assistant embedded directly in a ComfyUI sidebar panel. The person is working in ComfyUI and talks to you through that panel: their messages arrive as your prompts, and everything you write is shown to them in the panel chat. Write for that reader — lead with the result, keep replies short and concrete, and don't narrate routine internal steps.
 
@@ -274,9 +276,42 @@ export async function runPanelOrchestrator(): Promise<void> {
     logger.info(`[panel-orchestrator] inheriting user MCP servers: ${userMcpNames.join(", ")}`);
   }
 
+  // ---- agent backend toggle ----
+  // Select the provider backend from PANEL_AGENT_BACKEND ("claude" default |
+  // "codex"). Claude stays the default so existing behavior is 100% unchanged
+  // when the env is unset. When "codex" is selected we inject a per-tab
+  // CodexBackend (codex app-server JSON-RPC); otherwise makeBackend is omitted
+  // and PanelAgent falls back to its built-in ClaudeBackend.
+  //
+  // KNOWN GAP (Phase 2d): the Codex backend currently runs WITHOUT the live-graph
+  // panel_* tools — the app-server can't host the in-process SDK MCP server, so
+  // the shared "panel tools as a real MCP server" refactor is required first.
+  const backendId = (process.env.PANEL_AGENT_BACKEND ?? "claude").toLowerCase();
+  // The panel's `model` is a Claude id (e.g. claude-opus-4-8) and is NOT a valid
+  // Codex model — so for codex we only pass a model when COMFYUI_MCP_CODEX_MODEL
+  // is set explicitly; otherwise Codex uses the account's default (e.g. gpt-5.5).
+  const codexModel = process.env.COMFYUI_MCP_CODEX_MODEL;
+  const isCodex = backendId === "codex";
+  const makeBackend: ((tabId: string) => AgentBackend) | undefined = isCodex
+    ? () => new CodexBackend({ cwd: comfyuiPath ?? process.cwd(), model: codexModel })
+    : undefined;
+  if (isCodex) {
+    logger.info(`[panel-orchestrator] agent backend = codex (codex app-server); panel_* live-graph tools deferred (Phase 2d)`);
+  } else if (backendId !== "claude") {
+    logger.warn(`[panel-orchestrator] unknown PANEL_AGENT_BACKEND "${backendId}" — defaulting to claude`);
+  }
+  // Readiness/model probing must route through the SELECTED backend (P1-2): in
+  // Codex mode the panel's "ready" must NOT depend on Claude SDK/login health.
+  // A dedicated probe backend (not tied to a tab) supplies the Codex model list
+  // and proves the app-server can start; Claude mode keeps its SDK probes.
+  const probeBackend: CodexBackend | null = isCodex
+    ? new CodexBackend({ cwd: comfyuiPath ?? process.cwd(), model: codexModel })
+    : null;
+
   const manager = new PanelAgentManager({
     model,
     effort,
+    makeBackend,
     comfyuiUrl, // for fetching image bytes to inline into agent turns
     systemAppend: PANEL_SYSTEM_APPEND,
     pluginPath: pluginAvailable ? pluginPath : undefined,
@@ -349,7 +384,22 @@ export async function runPanelOrchestrator(): Promise<void> {
   let modelsPromise: Promise<ModelInfo[]> | null = null;
   function ensureModels(): Promise<ModelInfo[]> {
     if (!modelsPromise) {
-      modelsPromise = fetchSupportedModels(model).then((list) => {
+      // Codex mode (P1-2): enumerate via the Codex backend (which also proves the
+      // app-server can start = readiness) — NEVER the Claude SDK probe. Shape the
+      // Codex ModelChoice[] into the panel's ModelInfo[] form (value/displayName).
+      const probe: Promise<ModelInfo[]> = probeBackend
+        ? probeBackend
+            .prepare()
+            .then(() => probeBackend.listModels())
+            .then((list) =>
+              list.map((m) => ({ value: m.id, displayName: m.label ?? m.id }) as unknown as ModelInfo),
+            )
+            .catch((err) => {
+              logger.warn(`[panel-orchestrator] codex model probe failed: ${err instanceof Error ? err.message : String(err)}`);
+              return [] as ModelInfo[];
+            })
+        : fetchSupportedModels(model);
+      modelsPromise = probe.then((list) => {
         // Don't cache an empty/failed probe forever — let the next hello retry.
         if (!list.length) modelsPromise = null;
         return list;
@@ -386,6 +436,9 @@ export async function runPanelOrchestrator(): Promise<void> {
   // the built-ins that make sense inside the ComfyUI panel chat.
   const PANEL_SLASH_ALLOWLIST = new Set(["compact", "context", "usage", "loop", "goal", "clear"]);
   function pushCommands(tabId: string): void {
+    // Codex mode (P1-2): no Claude slash-commands — skip the Claude SDK probe
+    // entirely (CODEX_CAPABILITIES.slashCommands === false).
+    if (isCodex) return;
     void ensureCommands()
       .then((commands) => {
         const useful = commands.filter((c) => PANEL_SLASH_ALLOWLIST.has(c.name));
@@ -427,22 +480,23 @@ export async function runPanelOrchestrator(): Promise<void> {
             // Greet only on a FRESH session. On a reconnect/resume — a panel swap,
             // a WS blip, or a real restart (all carry `resume`) — the user already
             // has their thread, so re-greeting is just noise. The ack still fires.
+            // Backend-appropriate messaging (P1-2): Codex mode must not claim a
+            // Claude subscription, and the agent label is the Codex model (or the
+            // account default when COMFYUI_MCP_CODEX_MODEL is unset).
+            const agentLabel = isCodex ? (codexModel ?? (models[0] as { value?: string }).value ?? "Codex") : model;
             if (!resume) {
-              bridge.push(
-                { type: "say", text: `🟢 comfyui-mcp agent ready — ${model} on your Claude subscription. Ask away.` },
-                tabId,
-              );
+              const readyText = isCodex
+                ? `🟢 comfyui-mcp agent ready — ${agentLabel} on your Codex (ChatGPT) account. Ask away.`
+                : `🟢 comfyui-mcp agent ready — ${agentLabel} on your Claude subscription. Ask away.`;
+              bridge.push({ type: "say", text: readyText }, tabId);
             }
-            bridge.push({ type: "ack", ok: true, kind: "ready", agent: model }, tabId);
+            bridge.push({ type: "ack", ok: true, kind: "ready", agent: agentLabel }, tabId);
             logger.info(`[panel-orchestrator] tab ${tabId.slice(0, 8)} connected — agent healthy, sent ready ack`);
           } else {
-            bridge.push(
-              {
-                type: "say",
-                text: "⚠️ The background agent isn't responding — the Claude Agent SDK couldn't start. Make sure you're signed in (run `claude` once), then Disconnect → Connect to retry.",
-              },
-              tabId,
-            );
+            const degradedText = isCodex
+              ? "⚠️ The background agent isn't responding — the Codex app-server couldn't start. Make sure Codex is installed and signed in (run `codex login`), then Disconnect → Connect to retry."
+              : "⚠️ The background agent isn't responding — the Claude Agent SDK couldn't start. Make sure you're signed in (run `claude` once), then Disconnect → Connect to retry.";
+            bridge.push({ type: "say", text: degradedText }, tabId);
             bridge.push({ type: "ack", ok: false, kind: "degraded" }, tabId);
             logger.warn(`[panel-orchestrator] tab ${tabId.slice(0, 8)} connected but model probe empty — sent degraded ack`);
           }
@@ -676,6 +730,8 @@ export async function runPanelOrchestrator(): Promise<void> {
     logger.info("[panel-orchestrator] shutting down — stopping agents…");
     clearInterval(downloadTimer);
     await manager.stopAll();
+    // Dispose the Codex readiness-probe backend (kills its app-server child).
+    if (probeBackend) await probeBackend.close().catch(() => {});
     await bridge.stop();
     // Only remove the lockfile if it still names us — avoid clobbering a fresh
     // orchestrator that may have replaced us.

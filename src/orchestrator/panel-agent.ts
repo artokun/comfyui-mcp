@@ -369,6 +369,15 @@ export class PanelAgent {
     } catch {
       // already winding down
     }
+    // Permanently dispose of the backend's resources (kill any child process
+    // tree, drop the live connection). interrupt() alone is a no-op when idle, so
+    // a backend that owns a child process (Codex app-server) would otherwise be
+    // orphaned across stop/reset/effort-restart/stopAll/shutdown. Idempotent.
+    try {
+      await this.backend.close?.();
+    } catch {
+      // best-effort teardown
+    }
   }
 
   /** A turn finished (result) → let the channel release the next batch. Capped at
@@ -643,6 +652,13 @@ export interface PanelAgentManagerOptions {
   makePanelServer?: (tabId: string) => McpSdkServerConfigWithInstance;
   /** Bundled plugin dir whose skills make the agent an expert (optional). */
   pluginPath?: string;
+  /**
+   * Optional backend factory (per tab). When set, the manager injects this
+   * backend into each PanelAgent instead of the default Claude adapter — this is
+   * the PANEL_AGENT_BACKEND toggle's seam (index.ts builds a CodexBackend here).
+   * Omitted = default ClaudeBackend (existing behavior, 100% unchanged).
+   */
+  makeBackend?: (tabId: string) => AgentBackend;
 }
 
 /** Owns one PanelAgent per tab id, spawned lazily on the tab's first message. */
@@ -665,6 +681,9 @@ export class PanelAgentManager {
   }
 
   private makeAgent(tabId: string): PanelAgent {
+    // Inject the toggle-selected backend (Codex) when provided; otherwise the
+    // PanelAgent constructor defaults to ClaudeBackend (existing behavior).
+    const backend = this.opts.makeBackend?.(tabId);
     return new PanelAgent(tabId, {
       mcpServers: this.opts.mcpServers,
       comfyuiUrl: this.opts.comfyuiUrl,
@@ -686,7 +705,7 @@ export class PanelAgentManager {
       onSeen: this.opts.onSeen,
       panelServer: this.opts.makePanelServer?.(tabId),
       pluginPath: this.opts.pluginPath,
-    });
+    }, backend);
   }
 
   /** Cancel a still-queued message for a tab (user edited/deleted it before the

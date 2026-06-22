@@ -141,6 +141,13 @@ export interface AgentBackend {
   setModel?(model: string): Promise<void>;
   /** Models the current account can use (empty if `modelEnumeration` is false). */
   listModels(): Promise<ModelChoice[]>;
+  /** Permanently dispose of the backend's resources: kill any child process tree,
+   *  remove listeners, drop the live connection. Called by PanelAgent.stop() and on
+   *  every path that retires/replaces an agent (reset, effort restart, stopAll).
+   *  MUST be idempotent and safe to call when never started. Optional — a backend
+   *  with nothing to tear down can omit it (interrupt() alone is not enough: a
+   *  backend that owns a child process orphans it if only interrupt() runs). */
+  close?(): Promise<void>;
 }
 
 /** Capability descriptor for the Claude Agent SDK backend. */
