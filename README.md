@@ -544,7 +544,6 @@ npm install
 
 | Script | Description |
 |--------|-------------|
-| `npm run sync-agents` | Sync Claude skills/commands/hooks to Google Antigravity, OpenCode, and other AI IDE formats that supports .agents files |
 | `npm run dev` | Run from source with tsx (hot reload) |
 | `npm run build` | Compile TypeScript to `dist/` |
 | `npm start` | Run compiled output |
@@ -552,7 +551,7 @@ npm install
 | `npm run test:integration` | Run integration tests (requires running ComfyUI) |
 | `npm run lint` | Type-check without emitting |
 | `npm run generations:stats` | Show local generation tracking statistics |
-
+| `npm run sync-agents` | Sync Claude skills/commands/hooks to Google Antigravity, OpenCode, and other AI IDE formats that supports .agents files |
 
 ### Local testing with Claude Code
 
@@ -777,7 +776,7 @@ The full, structured changelog lives in [CHANGELOG.md](./CHANGELOG.md). Recent h
 
 - **Custom nodes** — `install_custom_node`, `update_custom_node`, `reinstall_custom_node`, `fix_custom_node`, `list_installed_nodes`, `sync_node_dependencies`.
 - **Node snapshots** — `save_node_snapshot`, `restore_node_snapshot`, `list_node_snapshots`.
-- **Node bisection** — `bisect_start`, `bisect_good`, `bisect_bad`, `bisect_reset`, `bisect_status` to isolate a faulty custom node.
+- **Node bisect** — `bisect_start`, `bisect_good`, `bisect_bad`, `bisect_reset`, `bisect_status` to isolate a faulty custom node.
 - **Workflow dependencies** — `extract_workflow_dependencies`, `install_workflow_dependencies` (API- and UI-format workflows).
 - **Install / update** — `install_comfyui`, `update_comfyui`, `update_all`.
 - **Models** — `remove_model` (path-safe) and `download_civitai_model`.
