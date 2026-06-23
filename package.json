@@ -13,6 +13,7 @@
     "dist",
     "plugin",
     "packs",
+    "scripts",
     "model-settings.json",
     "model-settings.user.jsonc.example"
   ],
