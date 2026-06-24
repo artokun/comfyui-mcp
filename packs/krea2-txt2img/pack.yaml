@@ -1,0 +1,32 @@
+name: krea2-txt2img
+display_name: KREA 2 — Text to Image
+family: krea2
+kind: txt2img
+description: >-
+  KREA 2 (krea2_turbo) text-to-image — a fast, ultra-sharp turbo model with
+  strong prompt-following and an Ideogram-4-style JSON prompt-builder option.
+  Runs on native ComfyUI krea2 support (CLIPLoader type=krea2) with a Qwen3-VL 4B
+  text encoder and the Qwen image VAE. Single-purpose txt2img graph sliced from
+  the KREA2 ULTRA monolith (one pipeline, no group toggles); the JSON
+  prompt-builder, seed-variance, and laplacian-sharpen post-proc ship bypassed
+  (opt-in).
+vram: "<24GB"
+workflow: workflow.json
+skill: krea2-txt2img
+launch_args: []
+sources:
+  mirror: https://huggingface.co/Aitrepreneur/FLX
+notes:
+  - Needs ComfyUI with native KREA 2 support (comfy/text_encoders/krea2.py,
+    ComfyUI >= v0.26.0) — the CLIPLoader uses type=krea2.
+  - Run the generated installer from your ComfyUI root (folder with custom_nodes/
+    and models/).
+  - Sliced + un-bypassed from the monolith's "TEXT TO IMAGE" pipeline.
+  - Default diffusion model is krea2_turbo_fp8 (RTX 4000/3000/2000). On RTX 5000
+    (Blackwell) swap in krea2_turbo_mxfp8.safetensors for native fp8.
+  - The ConditioningKrea2Rebalance node (KREA 2 safety-filter bypass) is included
+    but ships BYPASSED — the model's safety filter is intact by default.
+post_install:
+  - Restart ComfyUI (or ComfyUI-Manager -> Install missing custom nodes for any
+    node Python deps).
+  - Load workflow.json.

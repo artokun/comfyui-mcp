@@ -1,0 +1,29 @@
+# KREA 2 (krea2_turbo) txt2img install manifest — consumable by apply_manifest.
+# Sliced from the KREA2 ULTRA monolith's "TEXT TO IMAGE" pipeline (un-bypassed
+# into a standalone graph). Needs native ComfyUI KREA 2 support
+# (comfy/text_encoders/krea2.py, ComfyUI >= v0.26.0) — CLIPLoader type=krea2.
+# Mirror base: https://huggingface.co/Aitrepreneur/FLX/resolve/main  (third-party)
+
+pip: []
+
+custom_nodes:
+  - https://github.com/ltdrdata/ComfyUI-Manager.git
+  - https://github.com/rgthree/rgthree-comfy            # Power Lora Loader / Any Switch / Label / Fast Groups
+  - https://github.com/kijai/ComfyUI-KJNodes            # Set/Get bus, Ideogram4PromptBuilderKJ, ImageSharpenKJ
+  - https://github.com/cubiq/ComfyUI_essentials
+  - https://github.com/RamonGuthrie/ComfyUI-RBG-SmartSeedVariance      # RBG_Smart_Seed_Variance (opt-in, bypassed)
+  - https://github.com/nova452/ComfyUI-ConditioningKrea2Rebalance      # ConditioningKrea2Rebalance (safety-filter bypass, ships bypassed)
+
+models:
+  # --- Diffusion model (krea2_turbo) — fp8 for RTX 4000/3000/2000.
+  #     On RTX 5000 (Blackwell) use krea2_turbo_mxfp8.safetensors instead. ---
+  - url: https://huggingface.co/Aitrepreneur/FLX/resolve/main/krea2_turbo_fp8.safetensors
+    local_path: diffusion_models/krea2_turbo_fp8.safetensors
+
+  # --- Text encoder (Qwen3-VL 4B, fp8_scaled) ---
+  - url: https://huggingface.co/Aitrepreneur/FLX/resolve/main/qwen3vl_4b_fp8_scaled.safetensors
+    local_path: text_encoders/qwen3vl_4b_fp8_scaled.safetensors
+
+  # --- VAE (Qwen image VAE) ---
+  - url: https://huggingface.co/Aitrepreneur/FLX/resolve/main/qwen_image_vae.safetensors
+    local_path: vae/qwen_image_vae.safetensors
