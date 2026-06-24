@@ -95,6 +95,7 @@
           {
             "group": "Model Highlights",
             "pages": [
+              "blog/krea2-comfyui",
               "blog/wan-2.2-comfyui",
               "blog/qwen-image-comfyui",
               "blog/wan-animate-comfyui",
@@ -115,6 +116,8 @@
             "group": "Changelog",
             "pages": [
               "changelog/index",
+              "changelog/2026-06-24",
+              "changelog/2026-06-19",
               "changelog/2026-06-17",
               "changelog/2026-06-16",
               "changelog/2026-06-05",

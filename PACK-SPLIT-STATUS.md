@@ -39,6 +39,7 @@ group-toggling.
 | Pack | Source | Pipeline | Status | Notes |
 |------|--------|----------|:------:|-------|
 | `ernie-txt2img` | ernie | text→image | ✅ | 1920×1088 |
+| `krea2-txt2img` | krea2 | text->image | 🟡 | **NEW** — Krea 2 Turbo (Krea.ai 12B DiT, distilled). Native ComfyUI krea2 support (CLIPLoader type=krea2) + Qwen3-VL 4B encoder + Qwen image VAE, 8 steps cfg 1. Sliced from KREA2 ULTRA; JSON prompt-builder/seed-variance/sharpen bypassed; safety-filter-bypass node included but bypassed. Render-verify pending (models downloading + ComfyUI restart for 2 new nodes) |
 | `ernie-img2img` | ernie | img→image | ✅ | refines a source image |
 | `ernie-combo` | ernie | ERNIE×Z-Image-Turbo | ✅ | 6 images |
 | `z-image-turbo-txt2img` | z-image-turbo | text→image | ✅ | |

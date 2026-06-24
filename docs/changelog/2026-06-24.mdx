@@ -1,0 +1,26 @@
+---
+title: "June 24: Krea 2 Turbo pack"
+description: "Day-one ComfyUI pack for Krea 2 Turbo — Krea.ai's new 12B open-weight text-to-image model. 8-step turbo speed, Qwen3-VL prompting, JSON area prompts, one-command install."
+---
+
+_June 24, 2026_
+
+[Krea 2](/blog/krea2-comfyui) shipped its open weights on June 23, and the
+`krea2-txt2img` pack lands the next day.
+
+## Krea 2 Turbo, packaged
+
+- **`krea2-txt2img`** — Krea 2 Turbo (Krea.ai's 12B Diffusion Transformer,
+  distilled) text-to-image. Runs on **native ComfyUI krea2 support**
+  (`CLIPLoader type=krea2`, ComfyUI ≥ v0.26.0) with a **Qwen3-VL 4B** text encoder
+  and the **Qwen image VAE**. Generates in **~8 steps at cfg 1**.
+- Sliced from the KREA2 ULTRA monolith into a standalone single-pipeline pack.
+  The Ideogram-style **JSON prompt-builder**, seed-variance, and laplacian-sharpen
+  post-proc ship **bypassed** (opt-in); the manual-prompt path is the default.
+- The `ConditioningKrea2Rebalance` safety-filter-bypass node is included but
+  **bypassed** — Krea 2's safety filter stays intact by default.
+- fp8 build for RTX 4000/3000/2000; swap in `krea2_turbo_mxfp8` on RTX 5000.
+
+Released under the [Krea 2 Community License](https://www.krea.ai/krea-2-licensing)
+(free commercial use up to 50 seats). See the
+[Krea 2 in ComfyUI guide](/blog/krea2-comfyui).

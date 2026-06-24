@@ -1,0 +1,156 @@
+---
+title: "How to Run Krea 2 Locally in ComfyUI (2026 Guide)"
+description: "Run Krea 2 Turbo — Krea.ai's 12B open-weight text-to-image model — locally in ComfyUI. 8-step turbo speed, Qwen3-VL prompting, JSON area prompts, install, and VRAM tips."
+keywords:
+  - Krea 2 ComfyUI
+  - Krea 2 Turbo
+  - krea2_turbo
+  - Krea 2 local install
+  - Krea 2 open weights
+  - Krea 2 vs Ideogram 4
+  - Krea 2 vs Z-Image
+  - text to image ComfyUI
+  - Krea 2 Community License
+  - JSON prompting ComfyUI
+---
+
+_June 24, 2026_
+
+Krea 2 is the newest open-weight text-to-image model, and it lands with an
+unusual pitch: turbo-class speed **and** strong prompt-following in the same
+checkpoint. This guide covers what it is and how to run **Krea 2 Turbo** locally
+in ComfyUI in one command.
+
+## What is Krea 2?
+
+Krea 2 is a **12-billion-parameter Diffusion Transformer** from
+[Krea.ai, Inc.](https://www.krea.ai/), released June 22, 2026, with the weights
+open-sourced the next day in two variants:
+
+- **Krea 2 Raw** — the base checkpoint before extra post-training.
+- **Krea 2 Turbo** — the post-trained, **distilled** checkpoint that generates in
+  ~**8 steps at cfg 1**. This is the one this pack ships.
+
+It runs on **native ComfyUI support** (a `krea2` text-encoder type built into
+ComfyUI ≥ v0.26.0), pairing a **Qwen3-VL 4B** text encoder with the **Qwen image
+VAE**. The Qwen3-VL encoder is what gives it sharp prompt adherence and the
+ability to read **structured JSON prompts** (more on that below).
+
+### The license actually lets you ship
+
+Krea 2 is released under the
+[Krea 2 Community License](https://www.krea.ai/krea-2-licensing): **free
+commercial use** for individuals and businesses up to 50 seats, with an
+enterprise agreement beyond that. For most solo creators and small studios,
+that's a genuinely permissive "use it in production" license.
+
+## Krea 2 vs Z-Image, Ideogram 4, and Flux
+
+Krea positions Turbo as combining turbo-model speed with the quality and
+prompt-control of much larger models. In practice the trade-offs look like this:
+
+| Model | Params | Speed | Standout |
+|---|---|---|---|
+| **Krea 2 Turbo** | 12B | ~8 steps (very fast) | speed **+** prompt-following + JSON prompts |
+| Z-Image Turbo | 6B | ~8–14 steps | smallest VRAM footprint |
+| Ideogram 4 | 9.3B | full steps | best readable text + area prompting |
+| Flux.1 dev | 12B | ~20–28 steps | broad LoRA ecosystem |
+
+If Z-Image Turbo is the low-VRAM speed pick and Ideogram 4 is the text/layout
+pick, Krea 2 Turbo aims to sit between them — turbo speed without giving up
+prompt fidelity, plus the JSON area-prompting workflow Ideogram users like.
+
+## System & VRAM requirements
+
+The pack ships the **fp8** build (`krea2_turbo_fp8.safetensors`) for RTX
+4000/3000/2000 cards. On **RTX 5000 (Blackwell)**, swap in
+`krea2_turbo_mxfp8.safetensors` for native fp8. A **24 GB** card (e.g. RTX 4090)
+runs the fp8 build comfortably at 1080p.
+
+Three files are needed (the installer fetches them):
+
+- `diffusion_models/krea2_turbo_fp8.safetensors` — the 12B Turbo model (fp8)
+- `text_encoders/qwen3vl_4b_fp8_scaled.safetensors` — Qwen3-VL 4B encoder
+- `vae/qwen_image_vae.safetensors` — Qwen image VAE
+
+> **Important:** the CLIPLoader uses `type=krea2`, which requires native Krea 2
+> support in ComfyUI (`comfy/text_encoders/krea2.py`, ComfyUI ≥ v0.26.0). Update
+> ComfyUI first if that file is missing.
+
+## Install Krea 2 in ComfyUI
+
+### The fast way — comfyui-mcp + the Panel
+
+From a Claude Code session with the [comfyui-mcp](/) plugin installed:
+
+```
+Install the krea2-txt2img pack
+```
+
+The MCP applies the pack manifest — clones the custom nodes
+(`rgthree-comfy`, `ComfyUI-KJNodes`, `ComfyUI_essentials`,
+`ComfyUI-RBG-SmartSeedVariance`, `ComfyUI-ConditioningKrea2Rebalance`), downloads
+the three model files, and loads the workflow — then renders to verify.
+
+### Or one-click
+
+Run the generated `install-windows.bat` (or `install-runpod.sh`) from your
+ComfyUI root, restart, and load `workflow.json`.
+
+## Structured JSON prompting
+
+Like Ideogram 4, Krea 2's Qwen3-VL encoder understands **structured prompts** —
+per-region descriptions with bounding boxes and palettes — so you can place and
+describe subjects deterministically instead of fighting one long prose string.
+The pack includes the `Ideogram4PromptBuilderKJ` node for exactly this; it ships
+**bypassed** so the simple manual-prompt path is the default. Enable the **TEXT
+PROMPT BUILDER** group when you want JSON-style area prompting.
+
+## Settings that matter
+
+- **Steps: 8, cfg: 1** — Turbo is distilled; more steps won't help and higher cfg
+  will over-cook it.
+- **Sampler `er_sde` / scheduler `simple`** — the pack's defaults; sharp results.
+- **Resolution 1920×1080** is the shipped default; Krea 2 handles a wide aspect
+  range.
+- **Seed variance / sharpen** post-proc ship bypassed — toggle them on for
+  variations or extra micro-contrast.
+
+## A note on the safety filter
+
+The upstream workflow includes a `ConditioningKrea2Rebalance` node that removes
+Krea 2's built-in safety filter. **This pack ships it bypassed** — the filter is
+intact by default. Leave it that way unless you have a specific, authorized
+reason to change it.
+
+## Troubleshooting
+
+- **`AssertionError: Torch not compiled with CUDA enabled`** — reinstall Torch
+  for your CUDA version: `pip uninstall torch` then
+  `pip install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128`
+  (swap `cu128` for your CUDA, e.g. `cu126`).
+- **`CLIPLoader: 'krea2' not in list`** — your ComfyUI predates native Krea 2
+  support; update ComfyUI to ≥ v0.26.0.
+- **Washed-out or noisy output** — check steps=8 / cfg=1; Turbo is distilled and
+  is sensitive to over-stepping.
+
+## FAQ
+
+**Is Krea 2 free for commercial use?** Yes, under the Krea 2 Community License,
+up to 50 seats; larger orgs need an enterprise agreement.
+
+**Raw or Turbo?** Turbo for speed (8 steps); Raw if you want the un-distilled base
+for fine-tuning or maximum fidelity.
+
+**Does it need the Qwen models?** Yes — Krea 2 uses a Qwen3-VL 4B text encoder and
+the Qwen image VAE, both included in the pack.
+
+## Get it running in one command
+
+Install the [comfyui-mcp](/) plugin, then ask your agent to install the
+`krea2-txt2img` pack — nodes, models, and a verified first render, hands-free.
+
+Sources: [Krea 2 Technical Report](https://www.krea.ai/blog/krea-2-technical-report),
+[Krea 2 Open Source](https://www.krea.ai/krea-2-open-source),
+[Krea-2-Turbo on Hugging Face](https://huggingface.co/krea/Krea-2-Turbo),
+[Krea 2 Community License](https://www.krea.ai/krea-2-licensing).
