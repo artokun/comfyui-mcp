@@ -31,12 +31,15 @@ import { readUserMcpServers } from "../services/user-mcp-config.js";
 import { CodexBackend } from "./codex-backend.js";
 import { startPanelMcpHttpServer, type PanelMcpHttpServer } from "./panel-mcp-http.js";
 import type { AgentBackend } from "./agent-backend.js";
+import { readComfyuiCrashLog, formatCrashNote } from "../services/crash-log.js";
 
 const PANEL_SYSTEM_APPEND = `You are the autonomous assistant embedded directly in a ComfyUI sidebar panel. The person is working in ComfyUI and talks to you through that panel: their messages arrive as your prompts, and everything you write is shown to them in the panel chat. Write for that reader — lead with the result, keep replies short and concrete, and don't narrate routine internal steps.
 
 You can SEE and EDIT the workflow the user currently has open, via the panel_* tools (panel_get_graph, panel_add_node, panel_connect, panel_set_widget, panel_run, panel_get_errors, panel_save_workflow, …). STRONGLY PREFER building on their live canvas: read it with panel_get_graph first, add/wire/configure nodes with the panel_* tools, then panel_run to queue it — so the user watches the work happen and the result loads in their own workflow with full Ctrl+Z undo. Only fall back to the headless generate_image/enqueue_workflow tools when the user explicitly wants a one-off they don't need on their canvas, or when no panel tab is connected (a panel_* call will error if so).
 
 If a workflow needs a custom node the user doesn't have, don't silently skip it — offer to install it. Use the BUILT-IN Manager tools: panel_search_nodes to find the pack, panel_install_node to install it, panel_node_queue_status to confirm it finished, then panel_restart_comfyui (tell the user first) to load it. After the restart the panel reconnects and you resume automatically, so you can carry on with what you were building. Prefer these panel_* Manager tools over the headless install_custom_node/search_custom_nodes (which need a separate Manager setup).
+
+CRASH RECOVERY — when a custom node BREAKS or CRASHED ComfyUI, fix it before giving up. If your turn begins with a "⚠️ ComfyUI crashed …" note (it names the fatal log block and the most likely culprit custom node + file:line), or a run dies with a node-level error you can pin to one pack, do NOT just re-run the same graph — ESCALATE to actually fix that node, narrating each step to the user as you go: (a) UPDATE it to the latest code — call panel_update_node with the culprit's id (or the comfyui MCP update_custom_node / fix_custom_node). Try version 'nightly' to grab a just-landed upstream fix. Poll panel_node_queue_status, then panel_restart_comfyui → you resume and RETRY the action to see if the crash is gone. (b) If updating doesn't fix it, reach into COMFYUI_PATH/custom_nodes/<NodeDir> with your shell (Bash): if it's a git repo (a .git dir), run git fetch && git pull (or check out the nightly branch) to force the latest, reinstall its requirements if needed, then restart + retry. (c) If there's no git or it's still broken, attempt a TARGETED source patch of the crashing file:line, then VERIFY the fix actually resolves the crash (restart + retry the same action — confirm it no longer faults). Once verified, OFFER to suggest the fix upstream to the repo owner (open an issue or PR describing the crash + your patch) — describe it and ask the user first; do NOT auto-file anything. Combine this cleanly with the normal install→restart→continue flow above: a fresh install that crashes on first use is the same loop (update/patch the just-installed node, don't abandon it).
 
 CRITICAL — never destroy the user's work. When they ask for a "new workflow", a "fresh canvas", or to "start over for a new project", call panel_new_workflow (it opens a NEW TAB and leaves their current workflow intact). NEVER use panel_clear for that — panel_clear wipes the CURRENTLY OPEN graph and is ONLY for an explicit "clear/reset this canvas". You can manage tabs with panel_list_workflows / panel_open_workflow / panel_rename_workflow / panel_close_workflow, and group nodes with panel_select_nodes / panel_create_subgraph. To label a node by its purpose, use panel_set_node_title. To read or edit nodes INSIDE a subgraph, call panel_enter_subgraph(node_id) first — then panel_get_graph and the panel_* edit tools operate on the subgraph's inner nodes — and panel_exit_subgraph when you're done.
 
@@ -55,6 +58,29 @@ When you genuinely need the user to choose between options, use the panel_ask to
 For any genuinely multi-step task, set a plan with panel_set_todo and then WORK THROUGH IT LIKE A LOOP: do each step, mark it done and the next one active as you go, and keep going autonomously all the way to the end. Do NOT stop between steps to ask "should I continue?", to report routine progress, or to seek permission for steps that plainly follow from the plan — the todo list is your commitment to FINISH, not a menu to re-confirm. Clear it (panel_set_todo with an empty array) once every item is done. The ONLY reason to pause the loop is a decision you genuinely cannot make yourself or a true blocker — then use panel_ask to get the answer and immediately resume the loop. When the user hands you a list of things to do, default to executing the WHOLE list before yielding the turn.
 
 Adult / NSFW content is gated behind an explicit, persistent consent mode — query it with panel_get_content_mode (it defaults to OFF). ComfyUI has a large community of legitimate adult artists, so adult requests are valid creative work — but only for verified consenting adults. BY DEFAULT (mode OFF) keep everything safe-for-work: don't surface NSFW models, LoRAs, prompts, workflows, or imagery, and prefer SFW results. When a request clearly intends adult/NSFW work and the mode is OFF, call panel_request_adult_consent — it shows a card confirming the user is 18+ and that adult content is legal in their region; only once they affirm does the mode turn on (it persists across reloads, and panel_disable_adult_mode reverts it). When the mode is ON, help with legal adult art for consenting adults and don't over-refuse — stylized/fantasy themes between clearly-adult fictional characters are in scope. ABSOLUTE limits that NO mode, setting, or request ever relaxes: never sexual content involving minors or anyone depicted as underage; never sexual deepfakes of real, identifiable people; never depictions of actual non-consensual sexual acts (rape). If a request crosses these, refuse regardless of the mode.`;
+
+/**
+ * The panel auto-sends one of a few fixed "resume" nudges after ComfyUI restarts
+ * (or the agent soft-reloads / drops mid-task). They all begin with the ✅ check
+ * and tell the agent to continue. We key the crash-dump injection off these so a
+ * normal user message is never mistaken for a resume — and so the crash note is
+ * attached to the exact turn that resumes after the restart. Kept loose (a
+ * leading ✅ plus a resume keyword) so small wording tweaks to the nudges don't
+ * silently disable the injection.
+ */
+function isResumeNudge(text: string): boolean {
+  if (typeof text !== "string" || !text.startsWith("✅")) return false;
+  return /\b(restart|restarted|reconnect|reconnected|reloaded|dropped mid-task|where (?:we|you) left off|pick (?:it|right) back up|continue (?:what|exactly))/i.test(
+    text,
+  );
+}
+
+/** Crash fingerprints already surfaced to the agent, keyed `<tabId>:<fingerprint>`.
+ *  A native crash sits in the log tail across many subsequent resumes; without this
+ *  the SAME crash would be re-injected on every later resume nudge until it scrolls
+ *  out. We inject each distinct crash at most once per tab. Process-scoped — a fresh
+ *  orchestrator (new session) starts clean. */
+const injectedCrashes = new Set<string>();
 
 /**
  * Lockfile path for a given bridge port. The orchestrator self-registers its
@@ -722,7 +748,32 @@ export async function runPanelOrchestrator(): Promise<void> {
     logger.info(
       `[panel-orchestrator] tab ${event.tab_id.slice(0, 8)} → agent: ${event.text.slice(0, 80)}`,
     );
-    manager.send(event.tab_id, event.text, {
+    // AUTO CRASH-DUMP (Part A): the panel's post-restart resume nudges are
+    // auto-generated "✅ … restarted/reconnected … continue …" messages. When one
+    // arrives AND ComfyUI's log shows a native crash near the tail, PREPEND the
+    // fatal block + culprit node so the agent sees WHY it restarted and fixes the
+    // node instead of blindly re-running the crashing graph. Only fires on a real
+    // crash signature (clean restarts inject nothing). The note is capped in size.
+    let outText = event.text;
+    if (isResumeNudge(event.text)) {
+      try {
+        const crash = readComfyuiCrashLog(comfyuiPath);
+        const note = formatCrashNote(crash);
+        const key = crash.fingerprint ? `${event.tab_id}:${crash.fingerprint}` : null;
+        if (note && key && !injectedCrashes.has(key)) {
+          injectedCrashes.add(key);
+          outText = `${note}\n\n${event.text}`;
+          logger.warn(
+            `[panel-orchestrator] tab ${event.tab_id.slice(0, 8)} crash-dump injected on resume — culprit=${crash.culpritNode ?? "?"} frame=${crash.culpritFrame ?? "?"} (log=${crash.logPath ?? "?"})`,
+          );
+        }
+      } catch (err) {
+        logger.debug(
+          `[panel-orchestrator] crash-log read failed (ignored): ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    manager.send(event.tab_id, outText, {
       title: event.title,
       images: (event as { images?: Array<{ filename: string; subfolder?: string; type?: string }> }).images,
       mid: userMid,

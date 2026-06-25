@@ -879,6 +879,21 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         ),
     ),
     def(
+      "panel_update_node",
+      "Update an ALREADY-INSTALLED custom-node pack to its latest (or nightly) code via the BUILT-IN Manager — the first thing to try when a node is broken or CRASHED ComfyUI (e.g. from a crash dump injected on resume). Pass `id` = the installed pack's name/dir (e.g. 'ComfyUI-WanVideoWrapper' from the crash culprit, or an id from panel_list_nodes). Use version 'nightly' to pull the very latest commit (good when a fix just landed upstream), else 'latest' for the newest release. Queues the update; poll panel_node_queue_status, then panel_restart_comfyui to load it. If updating doesn't fix the crash, escalate (git pull / source patch) per your steering.",
+      {
+        id: z.string().describe("Installed pack name or dir (e.g. 'ComfyUI-WanVideoWrapper'), or a registry id from panel_list_nodes."),
+        version: z.string().optional().describe("'latest' (default) or 'nightly' to pull the newest commit."),
+        channel: z.string().optional().describe("Manager channel (default 'default')."),
+        mode: z.enum(["remote", "local", "cache"]).optional().describe("DB source (default 'remote')."),
+      },
+      async (args: A, ctx) =>
+        ctx.call(
+          { cmd: "graph_update_node", id: args.id, version: args.version, channel: args.channel, mode: args.mode },
+          30000,
+        ),
+    ),
+    def(
       "panel_node_queue_status",
       "Check the built-in Manager's install/update queue status (to see if a queued install finished). Read-only.",
       {},
