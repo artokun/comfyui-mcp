@@ -12,7 +12,8 @@ real node sizes and rail positions first, then compute positions from them.
 ## Primitives (panel tools)
 
 - **`panel_get_graph`** — READ FIRST, every time. Returns, for the graph you're viewing:
-  - each node's **`pos` [x,y]** and **`size` [w,h]**,
+  - each node's **`pos` [x,y]**, **`size` [w,h]** (body only), and **`full_height`** (the
+    TRUE rendered footprint = title bar + body; use this for vertical stacking),
   - all **`groups`** (`id`, `title`, `color`, `bounding [x,y,w,h]`),
   - and — only when inside a subgraph — the **`rails`**: the `input` / `output` boundary
     node positions. Everything below is computed from these numbers.
@@ -38,14 +39,22 @@ real node sizes and rail positions first, then compute positions from them.
    Layers become columns, left → right.
 3. **X by layer:** `x = X0 + layer * COL_PITCH`, where `COL_PITCH ≈ widest node.size[0] in
    that column + ~80`.
-4. **Y by real height (this is what stops overlaps):** stack a column top→down with
-   `y[i+1] = y[i] + node[i].size[1] + ROW_GAP`. **Never** use a fixed row pitch — tall nodes
+4. **Y by FULL height (this is what stops overlaps):** stack a column top→down with
+   `y[i+1] = y[i] + node[i].full_height + ROW_GAP`. Use **`full_height`** (from
+   `panel_get_graph`), NOT `size[1]`. `size[1]` is the BODY only (slots + widgets); the
+   **title bar renders ~30px ABOVE `pos`** and is NOT in `size[1]`, so stacking by `size[1]`
+   overlaps every node by a header (the classic "headers eating the node above" bug).
+   `full_height` already includes that header (and is just the title height for a collapsed
+   node), so `y += full_height + ROW_GAP` lands an exact `ROW_GAP` gap between the previous
+   node's bottom and the next node's title. **Never** use a fixed row pitch — tall nodes
    (KSampler, WanVideo Sampler, LoRA-select) are 480–600px and *will* overlap a 320 pitch.
+   (If `full_height` is ever absent, fall back to `size[1] + ~30` for the header.)
 5. **Order within a column** to cut wire crossings: place each node near the average Y of its
    connected nodes (a median/barycenter pass is plenty).
 
-Reads-well constants: `COL_PITCH` 360–480, `ROW_GAP` 40. Node titles render ~30px **above**
-`pos`, so leave headroom at the top of a column.
+Reads-well constants: `COL_PITCH` 360–480, `ROW_GAP` 40. Because `full_height` already
+accounts for the title bar, you don't add extra top headroom per node — `ROW_GAP` is the
+clean gap you'll actually see.
 
 ## Subgraph interiors — move the rails!
 
