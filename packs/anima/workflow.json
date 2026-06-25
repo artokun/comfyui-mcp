@@ -140,7 +140,7 @@
       "title": "Get_MODEL",
       "properties": {
         "Node name for S&R": "GetNode",
-        "aux_id": "GetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
         "ue_properties": {
           "widget_ue_connectable": {},
           "version": "7.5.2",
@@ -215,7 +215,7 @@
       "title": "Get_CLIP",
       "properties": {
         "Node name for S&R": "GetNode",
-        "aux_id": "GetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
         "ue_properties": {
           "widget_ue_connectable": {},
           "version": "7.5.2",
@@ -253,7 +253,7 @@
       "title": "Get_VAE",
       "properties": {
         "Node name for S&R": "GetNode",
-        "aux_id": "GetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
         "ue_properties": {
           "widget_ue_connectable": {},
           "version": "7.5.2",
@@ -437,7 +437,7 @@
       "title": "Set_CLIP",
       "properties": {
         "Node name for S&R": "SetNode",
-        "aux_id": "SetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
         "previousName": "CLIP",
         "ue_properties": {
           "widget_ue_connectable": {},
@@ -482,7 +482,7 @@
       "title": "Set_MODEL",
       "properties": {
         "Node name for S&R": "SetNode",
-        "aux_id": "SetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
         "previousName": "MODEL",
         "ue_properties": {
           "widget_ue_connectable": {},
@@ -526,7 +526,7 @@
       "title": "Get_VAE",
       "properties": {
         "Node name for S&R": "GetNode",
-        "aux_id": "GetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
         "ue_properties": {
           "widget_ue_connectable": {},
           "version": "7.5.2",
@@ -566,7 +566,7 @@
       "title": "Get_CLIP",
       "properties": {
         "Node name for S&R": "GetNode",
-        "aux_id": "GetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
         "ue_properties": {
           "widget_ue_connectable": {},
           "version": "7.5.2",
@@ -606,7 +606,7 @@
       "title": "Get_MODEL",
       "properties": {
         "Node name for S&R": "GetNode",
-        "aux_id": "GetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
         "ue_properties": {
           "widget_ue_connectable": {},
           "version": "7.5.2",
@@ -1031,7 +1031,7 @@
       "title": "Get_CLIP",
       "properties": {
         "Node name for S&R": "GetNode",
-        "aux_id": "GetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
         "ue_properties": {
           "widget_ue_connectable": {},
           "version": "7.5.2",
@@ -1195,7 +1195,7 @@
       "title": "Get_VAE",
       "properties": {
         "Node name for S&R": "GetNode",
-        "aux_id": "GetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
         "ue_properties": {
           "widget_ue_connectable": {},
           "version": "7.5.2",
@@ -3243,7 +3243,7 @@
       "title": "Get_MODEL",
       "properties": {
         "Node name for S&R": "GetNode",
-        "aux_id": "GetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
         "ue_properties": {
           "widget_ue_connectable": {},
           "version": "7.5.2",
@@ -3283,7 +3283,7 @@
       "title": "Get_CLIP",
       "properties": {
         "Node name for S&R": "GetNode",
-        "aux_id": "GetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
         "ue_properties": {
           "widget_ue_connectable": {},
           "version": "7.5.2",
@@ -3324,7 +3324,7 @@
       "title": "Get_VAE",
       "properties": {
         "Node name for S&R": "GetNode",
-        "aux_id": "GetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
         "ue_properties": {
           "widget_ue_connectable": {},
           "version": "7.5.2",
@@ -3619,7 +3619,7 @@
       "title": "Get_MODEL",
       "properties": {
         "Node name for S&R": "GetNode",
-        "aux_id": "GetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
         "ue_properties": {
           "widget_ue_connectable": {},
           "version": "7.5.2",
@@ -7228,7 +7228,7 @@
             "widgets_values": [
               "[CONCAT] {face|face,detailed face}",
               "Select the LoRA to add to the text",
-              "Select Wildcard \ud83d\udfe2 Full Cache"
+              "Select Wildcard 🟢 Full Cache"
             ],
             "color": "#223",
             "bgcolor": "#335",
@@ -7340,7 +7340,7 @@
             "widgets_values": [
               "[LAB]\n[ALL] nsfw\n[NIPPLES] nsfw, nipples\n[PUSSY] nsfw, pussy\n[ANUS] nsfw, (anus)\n[PENIS] nsfw, penis\n[TESTICLES] nsfw, testicles",
               "Select the LoRA to add to the text",
-              "Select Wildcard \ud83d\udfe2 Full Cache"
+              "Select Wildcard 🟢 Full Cache"
             ],
             "color": "#223",
             "bgcolor": "#335",
@@ -7452,7 +7452,7 @@
             "widgets_values": [
               "[CONCAT] body",
               "Select the LoRA to add to the text",
-              "Select Wildcard \ud83d\udfe2 Full Cache"
+              "Select Wildcard 🟢 Full Cache"
             ],
             "color": "#223",
             "bgcolor": "#335",
@@ -7564,7 +7564,7 @@
             "widgets_values": [
               "[CONCAT] hand, perfect hands",
               "Select the LoRA to add to the text",
-              "Select Wildcard \ud83d\udfe2 Full Cache"
+              "Select Wildcard 🟢 Full Cache"
             ],
             "color": "#223",
             "bgcolor": "#335",
@@ -7912,7 +7912,7 @@
             "widgets_values": [
               "[CONCAT] {eyes|eyes,detailed eyes}",
               "Select the LoRA to add to the text",
-              "Select Wildcard \ud83d\udfe2 Full Cache"
+              "Select Wildcard 🟢 Full Cache"
             ],
             "color": "#223",
             "bgcolor": "#335",
@@ -8242,7 +8242,7 @@
             "widgets_values": [
               "",
               "Select the LoRA to add to the text",
-              "Select Wildcard \ud83d\udfe2 Full Cache"
+              "Select Wildcard 🟢 Full Cache"
             ],
             "shape": "default"
           },
@@ -12889,7 +12889,7 @@
             "widgets_values": [
               "[CONCAT] {face|face,detailed face}",
               "Select the LoRA to add to the text",
-              "Select Wildcard \ud83d\udfe2 Full Cache"
+              "Select Wildcard 🟢 Full Cache"
             ],
             "color": "#223",
             "bgcolor": "#335",
@@ -13001,7 +13001,7 @@
             "widgets_values": [
               "[LAB]\n[ALL] nsfw\n[NIPPLES] nsfw, nipples\n[PUSSY] nsfw, pussy\n[ANUS] nsfw, (anus)\n[PENIS] nsfw, penis\n[TESTICLES] nsfw, testicles",
               "Select the LoRA to add to the text",
-              "Select Wildcard \ud83d\udfe2 Full Cache"
+              "Select Wildcard 🟢 Full Cache"
             ],
             "color": "#223",
             "bgcolor": "#335",
@@ -13113,7 +13113,7 @@
             "widgets_values": [
               "[CONCAT] body",
               "Select the LoRA to add to the text",
-              "Select Wildcard \ud83d\udfe2 Full Cache"
+              "Select Wildcard 🟢 Full Cache"
             ],
             "color": "#223",
             "bgcolor": "#335",
@@ -13225,7 +13225,7 @@
             "widgets_values": [
               "[CONCAT] hand, perfect hands",
               "Select the LoRA to add to the text",
-              "Select Wildcard \ud83d\udfe2 Full Cache"
+              "Select Wildcard 🟢 Full Cache"
             ],
             "color": "#223",
             "bgcolor": "#335",
@@ -13525,7 +13525,7 @@
             "widgets_values": [
               "[CONCAT] {eyes|eyes,detailed eyes}",
               "Select the LoRA to add to the text",
-              "Select Wildcard \ud83d\udfe2 Full Cache"
+              "Select Wildcard 🟢 Full Cache"
             ],
             "color": "#223",
             "bgcolor": "#335",
@@ -13855,7 +13855,7 @@
             "widgets_values": [
               "",
               "Select the LoRA to add to the text",
-              "Select Wildcard \ud83d\udfe2 Full Cache"
+              "Select Wildcard 🟢 Full Cache"
             ],
             "shape": "default"
           },
