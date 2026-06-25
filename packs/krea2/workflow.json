@@ -154,7 +154,7 @@
       "title": "Set_CLIP",
       "properties": {
         "Node name for S&R": "SetNode",
-        "aux_id": "SetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
         "previousName": "CLIP",
         "ue_properties": {
           "widget_ue_connectable": {},
@@ -199,7 +199,7 @@
       "title": "Set_MODEL",
       "properties": {
         "Node name for S&R": "SetNode",
-        "aux_id": "SetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
         "previousName": "MODEL",
         "ue_properties": {
           "widget_ue_connectable": {},
@@ -238,7 +238,7 @@
       "title": "Get_MODEL",
       "properties": {
         "Node name for S&R": "GetNode",
-        "aux_id": "GetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
         "ue_properties": {
           "widget_ue_connectable": {},
           "version": "7.5.2",
@@ -276,7 +276,7 @@
       "title": "Get_CLIP",
       "properties": {
         "Node name for S&R": "GetNode",
-        "aux_id": "GetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
         "ue_properties": {
           "widget_ue_connectable": {},
           "version": "7.5.2",
@@ -314,7 +314,7 @@
       "title": "Get_VAE",
       "properties": {
         "Node name for S&R": "GetNode",
-        "aux_id": "GetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
         "ue_properties": {
           "widget_ue_connectable": {},
           "version": "7.5.2",
@@ -851,7 +851,7 @@
       "title": "Get_MODEL",
       "properties": {
         "Node name for S&R": "GetNode",
-        "aux_id": "GetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
         "ue_properties": {
           "widget_ue_connectable": {},
           "version": "7.5.2",
@@ -891,7 +891,7 @@
       "title": "Get_CLIP",
       "properties": {
         "Node name for S&R": "GetNode",
-        "aux_id": "GetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
         "ue_properties": {
           "widget_ue_connectable": {},
           "version": "7.5.2",
@@ -931,7 +931,7 @@
       "title": "Get_VAE",
       "properties": {
         "Node name for S&R": "GetNode",
-        "aux_id": "GetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
         "ue_properties": {
           "widget_ue_connectable": {},
           "version": "7.5.2",
@@ -1690,7 +1690,7 @@
       "title": "Get_MODEL",
       "properties": {
         "Node name for S&R": "GetNode",
-        "aux_id": "GetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
         "ue_properties": {
           "widget_ue_connectable": {},
           "version": "7.5.2",
@@ -1730,7 +1730,7 @@
       "title": "Get_CLIP",
       "properties": {
         "Node name for S&R": "GetNode",
-        "aux_id": "GetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
         "ue_properties": {
           "widget_ue_connectable": {},
           "version": "7.5.2",
@@ -1770,7 +1770,7 @@
       "title": "Get_VAE",
       "properties": {
         "Node name for S&R": "GetNode",
-        "aux_id": "GetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
         "ue_properties": {
           "widget_ue_connectable": {},
           "version": "7.5.2",
