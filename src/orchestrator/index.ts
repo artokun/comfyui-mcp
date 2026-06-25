@@ -212,6 +212,10 @@ export async function runPanelOrchestrator(): Promise<void> {
         parent: Number(process.env.COMFYUI_MCP_PARENT_PID) || null,
         parentStartedAt: Number(process.env.COMFYUI_MCP_PARENT_STARTED_AT_MS) || null,
         port: lockPort,
+        // The selected agent backend ("claude" default | "codex"). Lets the panel
+        // pack's /backends route report which provider each running orchestrator is
+        // without opening the bridge. Mirrors PANEL_AGENT_BACKEND.
+        backend: (process.env.PANEL_AGENT_BACKEND ?? "claude").toLowerCase(),
         startedAt: new Date().toISOString(),
       }),
     );
@@ -411,7 +415,9 @@ export async function runPanelOrchestrator(): Promise<void> {
     void ensureModels()
       .then((models) => {
         if (models.length) {
-          bridge.push({ type: "models", models, current: model }, tabId);
+          // `backend` rides on the models frame so the panel's backend picker can
+          // reflect which provider this orchestrator is actually running as.
+          bridge.push({ type: "models", models, current: model, backend: backendId }, tabId);
         }
       })
       .catch(() => {
@@ -490,7 +496,7 @@ export async function runPanelOrchestrator(): Promise<void> {
                 : `🟢 comfyui-mcp agent ready — ${agentLabel} on your Claude subscription. Ask away.`;
               bridge.push({ type: "say", text: readyText }, tabId);
             }
-            bridge.push({ type: "ack", ok: true, kind: "ready", agent: agentLabel }, tabId);
+            bridge.push({ type: "ack", ok: true, kind: "ready", agent: agentLabel, backend: backendId }, tabId);
             logger.info(`[panel-orchestrator] tab ${tabId.slice(0, 8)} connected — agent healthy, sent ready ack`);
           } else {
             const degradedText = isCodex
