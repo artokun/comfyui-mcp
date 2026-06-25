@@ -6,6 +6,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { parse as parseYaml } from "yaml";
 import { errorToToolResult } from "../utils/errors.js";
 import { getComfyUIApiHost, getComfyUIProtocol } from "../config.js";
+import { checkWorkflowRuntime, extractWorkflowClassTypes } from "../services/api-nodes.js";
 
 // Optional, opt-in observability hook for the knowledge-parity smoke test: when
 // COMFYUI_MCP_TOOL_TRACE points at a file, each of these tools appends a JSONL
@@ -147,6 +148,10 @@ function enumeratePacks(): Array<Record<string, unknown>> {
       description: typeof meta.description === "string" ? meta.description.trim() : "",
       vram: meta.vram ?? null,
       skill: meta.skill ?? null,
+      // Installer packs run on the user's OWN GPU (free) — none ship API-node
+      // graphs. pack.yaml may override with an explicit `runtime`, but the
+      // default is local/free. (Use check_workflow_runtime to verify a graph.)
+      runtime: typeof meta.runtime === "string" ? meta.runtime : "local",
       has_workflow: existsSync(join(packDir, workflowName)),
       has_manifest: existsSync(join(packDir, "manifest.yaml")),
       manifest_path: existsSync(join(packDir, "manifest.yaml"))
@@ -156,6 +161,34 @@ function enumeratePacks(): Array<Record<string, unknown>> {
   }
   out.sort((a, b) => String(a.name).localeCompare(String(b.name)));
   return out;
+}
+
+/** Locate a pack's workflow.json file path (name-guarded, must exist). Returns
+ *  null when the pack or its workflow is missing. Shared by read_pack_workflow
+ *  and check_workflow_runtime so they resolve the file identically. */
+function resolvePackWorkflowFile(packName: string): string | null {
+  const name = packName.trim();
+  if (!SAFE_NAME.test(name)) return null;
+  const packDir = join(packsDir(), name);
+  if (!packDir.startsWith(packsDir()) || !existsSync(packDir) || !statSync(packDir).isDirectory()) {
+    return null;
+  }
+  let workflowName = "workflow.json";
+  const metaFile = join(packDir, "pack.yaml");
+  if (existsSync(metaFile)) {
+    try {
+      const meta = parseYaml(readFileSync(metaFile, "utf8")) as Record<string, unknown>;
+      if (meta && typeof meta.workflow === "string") workflowName = meta.workflow;
+    } catch {
+      // keep default
+    }
+  }
+  if (!SAFE_NAME.test(workflowName) && workflowName !== "workflow.json") {
+    workflowName = "workflow.json";
+  }
+  const wfFile = join(packDir, workflowName);
+  if (!wfFile.startsWith(packDir) || !existsSync(wfFile)) return null;
+  return wfFile;
 }
 
 export function registerSkillsAccessTools(server: McpServer): void {
@@ -238,7 +271,7 @@ export function registerSkillsAccessTools(server: McpServer): void {
 
   server.tool(
     "list_packs",
-    "List the bundled installer packs under packs/ — one-command setups for a model family: custom nodes + model weights (manifest.yaml) PLUS a ready workflow.json graph. Each entry reports its family/kind, whether it has a ready workflow + manifest, and the manifest path for apply_manifest. When asked to 'set up / build a <model-family> workflow', PREFER applying the matching pack (apply_manifest --path <manifest_path>) and loading its ready workflow over building a generic graph from scratch. Read the ready graph with read_pack_workflow(name).",
+    "List the bundled installer packs under packs/ — one-command setups for a model family: custom nodes + model weights (manifest.yaml) PLUS a ready workflow.json graph. Each entry reports its family/kind, its runtime (these packs are LOCAL-GPU / FREE — they run on the user's own GPU and never spend paid API credits), whether it has a ready workflow + manifest, and the manifest path for apply_manifest. When asked to 'set up / build a <model-family> workflow', PREFER applying the matching pack (apply_manifest --path <manifest_path>) and loading its ready workflow (panel_load_workflow pack:<name>) over building a generic graph from scratch. Read the ready graph with read_pack_workflow(name). To check whether some OTHER (non-pack) workflow uses paid API nodes, use check_workflow_runtime.",
     {},
     async () => {
       try {
@@ -248,7 +281,15 @@ export function registerSkillsAccessTools(server: McpServer): void {
           content: [
             {
               type: "text" as const,
-              text: JSON.stringify({ count: packs.length, packs }, null, 2),
+              text: JSON.stringify(
+                {
+                  count: packs.length,
+                  note: "All bundled installer packs are LOCAL-GPU / FREE (no API nodes, no paid credits). Loading or running a pack workflow runs entirely on the user's GPU.",
+                  packs,
+                },
+                null,
+                2,
+              ),
             },
           ],
         };
@@ -370,6 +411,98 @@ export function registerSkillsAccessTools(server: McpServer): void {
         }
         const text = readFileSync(wfFile, "utf8");
         return { content: [{ type: "text" as const, text }] };
+      } catch (err) {
+        return errorToToolResult(err);
+      }
+    },
+  );
+
+  server.tool(
+    "check_workflow_runtime",
+    "Determine whether a workflow runs on the user's OWN GPU (LOCAL — free) or uses hosted API NODES (PAID api credits). Pass `pack` (a bundled pack name — always local/free) OR `graph` (a UI or API/prompt workflow JSON, as object or string). It scans the workflow's node class_types against the connected ComfyUI's API-node set (the same signal list_api_nodes uses) and returns { runtime: 'local'|'api'|'mixed'|'unknown', usesApiNodes, apiNodes[], unknownNodes[] } — 'unknown' means some nodes couldn't be classified (could be paid), so treat it (and 'api'/'mixed') as POSSIBLY PAID; only 'local' is confirmed free. ALWAYS call this before building OR loading a non-pack/ad-hoc workflow so you can ASK the user before spending paid API credits — never silently use API nodes.",
+    {
+      pack: z
+        .string()
+        .optional()
+        .describe("A bundled pack name (from list_packs). Packs are local/free; this confirms it from the actual graph."),
+      graph: z
+        .union([z.string(), z.record(z.string(), z.unknown())])
+        .optional()
+        .describe("A workflow graph to classify (UI or API/prompt format), as an object or a JSON string. Use this for ad-hoc/generated workflows."),
+    },
+    async (args) => {
+      try {
+        traceToolCall("check_workflow_runtime", { pack: args.pack });
+        let graph: unknown;
+        if (args.pack) {
+          const wfFile = resolvePackWorkflowFile(args.pack);
+          if (!wfFile) {
+            const known = enumeratePacks().map((p) => p.name);
+            return {
+              isError: true,
+              content: [
+                {
+                  type: "text" as const,
+                  text: `No pack named "${args.pack}" with a ready workflow. Available packs: ${known.join(", ") || "(none bundled)"}.`,
+                },
+              ],
+            };
+          }
+          graph = JSON.parse(readFileSync(wfFile, "utf8"));
+        } else if (args.graph != null) {
+          graph = typeof args.graph === "string" ? JSON.parse(args.graph) : args.graph;
+        } else {
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text" as const,
+                text: "Provide either `pack` (a bundled pack name) or `graph` (a workflow JSON).",
+              },
+            ],
+          };
+        }
+
+        // Cheap, server-independent class_type extraction first — so we always
+        // return SOMETHING useful even if the live /object_info is unreachable.
+        const classTypes = extractWorkflowClassTypes(graph);
+        try {
+          const runtime = await checkWorkflowRuntime(graph);
+          const guidance =
+            runtime.runtime === "local"
+              ? "Local-GPU / free — every node runs on the user's own GPU, no paid credits."
+              : runtime.runtime === "unknown"
+                ? "UNKNOWN — some nodes aren't in this server's /object_info (uninstalled custom nodes, or possibly hosted API/partner nodes). Cannot confirm it's free. Treat as POSSIBLY PAID: ASK the user (free local GPU vs paid api credits) before building or loading it; prefer a local pack."
+                : "This workflow uses hosted API nodes that consume PAID api credits. ASK the user (free local GPU vs paid api credits) BEFORE building or loading it; prefer a local pack unless they opt in.";
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify({ ...runtime, guidance }, null, 2),
+              },
+            ],
+          };
+        } catch (probeErr) {
+          // No live server (or /object_info failed): we can't authoritatively
+          // classify, but still surface the node list so the agent can reason.
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify(
+                  {
+                    runtime: "unknown",
+                    usesApiNodes: null,
+                    classTypes,
+                    note: `Could not reach the ComfyUI server to classify nodes (${(probeErr as Error).message}). API-node detection needs a running ComfyUI. If unsure, treat ad-hoc workflows as POSSIBLY paid and ask the user before spending credits.`,
+                  },
+                  null,
+                  2,
+                ),
+              },
+            ],
+          };
+        }
       } catch (err) {
         return errorToToolResult(err);
       }

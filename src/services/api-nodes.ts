@@ -107,6 +107,92 @@ export async function listApiNodes(
   return results;
 }
 
+/**
+ * Extract the set of node class_types referenced by a workflow, accepting BOTH
+ * UI/litegraph format (top-level `nodes` array, each with a `type`) and
+ * API/prompt format (top-level numeric keys, each an object with `class_type`).
+ */
+export function extractWorkflowClassTypes(graph: unknown): string[] {
+  const out = new Set<string>();
+  if (!graph || typeof graph !== "object") return [];
+  const g = graph as Record<string, unknown>;
+  // UI/litegraph format.
+  if (Array.isArray(g.nodes)) {
+    for (const n of g.nodes) {
+      const t = (n as Record<string, unknown> | null)?.type;
+      // Skip litegraph reroute / note primitives that aren't real ComfyUI nodes.
+      if (typeof t === "string" && t.length > 0) out.add(t);
+    }
+    return [...out];
+  }
+  // API/prompt format.
+  for (const v of Object.values(g)) {
+    const ct = (v as Record<string, unknown> | null)?.class_type;
+    if (typeof ct === "string" && ct.length > 0) out.add(ct);
+  }
+  return [...out];
+}
+
+export interface WorkflowRuntime {
+  /** "local" = every node was classified and runs on the user's GPU (free);
+   *  "api" = every real node is a hosted API node (paid credits); "mixed" = some
+   *  of each; "unknown" = some class_types couldn't be classified (not in the
+   *  server's /object_info) and none of the rest are API nodes, so we CAN'T
+   *  promise it's free — treat as possibly paid and ask. */
+  runtime: "local" | "api" | "mixed" | "unknown";
+  /** True if any recognized API node is present; null when runtime is "unknown"
+   *  (unclassifiable nodes mean we can't rule API usage in or out). */
+  usesApiNodes: boolean | null;
+  /** The class_types in the workflow that are hosted API/partner nodes. */
+  apiNodes: string[];
+  /** All class_types found in the workflow. */
+  classTypes: string[];
+  /** class_types not present in the connected server's /object_info (can't be
+   *  classified — e.g. uninstalled custom nodes). */
+  unknownNodes: string[];
+}
+
+/**
+ * Classify a workflow's runtime (local-GPU vs paid API nodes) by scanning its
+ * node class_types against the connected ComfyUI's /object_info (the same signal
+ * isApiNode uses). Works on UI or API/prompt format graphs.
+ */
+export async function checkWorkflowRuntime(
+  graph: unknown,
+  deps: ApiNodesDeps = defaultDeps,
+): Promise<WorkflowRuntime> {
+  const classTypes = extractWorkflowClassTypes(graph);
+  const objectInfo = await deps.getObjectInfo();
+  const apiNodes: string[] = [];
+  const unknownNodes: string[] = [];
+  for (const ct of classTypes) {
+    const def = objectInfo[ct];
+    if (!def) {
+      unknownNodes.push(ct);
+      continue;
+    }
+    if (isApiNode(def)) apiNodes.push(ct);
+  }
+  const hasApiNodes = apiNodes.length > 0;
+  // "api" only if EVERY classifiable node is an API node; "mixed" if some are.
+  const classifiable = classTypes.length - unknownNodes.length;
+  let runtime: "local" | "api" | "mixed" | "unknown";
+  let usesApiNodes: boolean | null;
+  if (hasApiNodes) {
+    runtime = apiNodes.length >= classifiable && classifiable > 0 ? "api" : "mixed";
+    usesApiNodes = true;
+  } else if (unknownNodes.length > 0) {
+    // No recognized API nodes, but some class_types aren't in /object_info — they
+    // COULD be paid API/partner nodes the server doesn't expose. Don't claim free.
+    runtime = "unknown";
+    usesApiNodes = null;
+  } else {
+    runtime = "local";
+    usesApiNodes = false;
+  }
+  return { runtime, usesApiNodes, apiNodes, classTypes, unknownNodes };
+}
+
 export interface ApiNodeInputDescriptor {
   name: string;
   type: string | string[];

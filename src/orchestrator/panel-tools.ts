@@ -24,7 +24,11 @@
 // so parity is automatic — neither path reimplements a tool.
 
 import { z } from "zod";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
+import { parse as parseYaml } from "yaml";
 import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { UiBridge } from "../services/ui-bridge.js";
@@ -66,6 +70,62 @@ function fail(err: unknown): ToolResult {
 }
 
 const slotRef = z.union([z.string(), z.number().int().min(0)]);
+
+// ---- server-side pack workflow resolution (for panel_load_workflow) --------
+// Read a bundled pack's UI workflow.json on the SERVER so the (large) graph
+// never has to shuttle through the agent's conversation. Mirrors the package-
+// root resolution in src/tools/skills-access.ts: this file compiles to
+// dist/orchestrator/panel-tools.js, so the package root (shipping packs/) is two
+// levels up.
+
+/** A safe single path segment — a pack directory name, no traversal/separators. */
+const SAFE_PACK_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/** packs/ dir: dist/orchestrator/panel-tools.js → ../../packs */
+function packsDir(): string {
+  return fileURLToPath(new URL("../../packs", import.meta.url));
+}
+
+/** Read + parse a bundled pack's UI workflow.json. Name-guarded and must exist. */
+function readPackWorkflow(packName: string): Record<string, unknown> {
+  const name = packName.trim();
+  if (!SAFE_PACK_NAME.test(name)) {
+    throw new Error(`Invalid pack name "${packName}". Use a plain pack directory name from list_packs.`);
+  }
+  const root = packsDir();
+  const packDir = join(root, name);
+  if (!packDir.startsWith(root) || !existsSync(packDir) || !statSync(packDir).isDirectory()) {
+    throw new Error(`No pack named "${name}". Discover valid packs with list_packs.`);
+  }
+  // Resolve the workflow filename from pack.yaml (default workflow.json).
+  let workflowName = "workflow.json";
+  const metaFile = join(packDir, "pack.yaml");
+  if (existsSync(metaFile)) {
+    try {
+      const meta = parseYaml(readFileSync(metaFile, "utf8")) as Record<string, unknown>;
+      if (meta && typeof meta.workflow === "string") workflowName = meta.workflow;
+    } catch {
+      // keep default
+    }
+  }
+  if (!SAFE_PACK_NAME.test(workflowName) && workflowName !== "workflow.json") {
+    workflowName = "workflow.json";
+  }
+  const wfFile = join(packDir, workflowName);
+  if (!wfFile.startsWith(packDir) || !existsSync(wfFile)) {
+    throw new Error(`Pack "${name}" has no ready workflow (${workflowName} not found).`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(wfFile, "utf8"));
+  } catch (err) {
+    throw new Error(`Pack "${name}" workflow.json is not valid JSON: ${(err as Error).message}`);
+  }
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error(`Pack "${name}" workflow.json did not parse to an object.`);
+  }
+  return parsed as Record<string, unknown>;
+}
 
 // IMPORTANT (Codex parity): use `z.array(z.number())` — NOT `z.tuple([...])` — for
 // fixed-length coordinate vectors. zod's `.tuple()` emits JSON-Schema draft-04
@@ -209,6 +269,37 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           return ok("Cancelled — the canvas was left as-is.");
         }
         return ctx.call({ cmd: "graph_clear" });
+      },
+    ),
+    def(
+      "panel_load_workflow",
+      "Load a full ComfyUI workflow onto the live canvas in one shot (replaces the current graph). Prefer `pack:<name>` to load a bundled installer pack's local-GPU workflow without shuttling the JSON through the conversation. The replaced graph is captured as an undo point (double-Esc / revert). Pack workflows are LOCAL/free; for an ad-hoc `graph` that may use API nodes, check the runtime first (check_workflow_runtime) and ASK the user before spending paid api credits.",
+      {
+        pack: z
+          .string()
+          .optional()
+          .describe("Bundled pack name (from list_packs, e.g. 'krea2-txt2img'). Its UI workflow.json is read server-side and loaded onto the canvas. These are local-GPU/free."),
+        graph: z
+          .union([z.string(), z.record(z.string(), z.unknown())])
+          .optional()
+          .describe("A UI workflow graph (object or JSON string) to load instead of a pack. Must be UI/litegraph format (a `nodes` array), NOT API/prompt format."),
+      },
+      async (args: A, ctx) => {
+        try {
+          let data: unknown;
+          if (args.pack) {
+            // Read the (large) pack graph SERVER-SIDE so it never enters the agent's context.
+            data = readPackWorkflow(args.pack as string);
+          } else if (args.graph != null) {
+            data = typeof args.graph === "string" ? JSON.parse(args.graph as string) : args.graph;
+          } else {
+            throw new Error("Provide either `pack` (a bundled pack name) or `graph` (a UI workflow).");
+          }
+          // Generous timeout — loading a large graph onto the live canvas can take a moment.
+          return await ctx.call({ cmd: "graph_load", graph: data }, 30000);
+        } catch (err) {
+          return fail(err);
+        }
       },
     ),
     def(
