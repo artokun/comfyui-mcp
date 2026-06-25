@@ -55,8 +55,26 @@ adherence and structured-JSON prompts.
 ## JSON / area prompting
 
 Like Ideogram 4, Krea 2's Qwen3-VL encoder reads structured prompts (per-region
-desc + bounding boxes + palettes). Enable the **TEXT PROMPT BUILDER** group to
-use `Ideogram4PromptBuilderKJ` instead of the plain prose prompt.
+desc + bounding boxes + palettes). To use it: **un-bypass `Ideogram4PromptBuilderKJ`
+(node 14) and bypass the manual prompt (node 143)** — the rgthree `Any Switch`
+feeds whichever is active into the encoder. Gotchas learned the hard way:
+
+- **Set ALL the builder fields**, not just the prompt/boxes — `background`,
+  `technical`, `style`, `lighting` (widgets 3/5/6/7). Leaving stale values leaks
+  content (a leftover celebrity portrait bled into a tea still-life).
+- **Keep palettes minimal or empty.** A rich top-level palette can render as a
+  literal color-swatch strip down the edge of the image. Empty `palette: []`
+  (top-level and per-box) gives a clean full-frame result.
+- Add "no people / single full-frame photograph" to `style` for object/landscape
+  scenes — Krea 2 follows it well.
+
+## Render-verified
+
+5 images render crisp at 1920×1080 / 8 steps / cfg 1 / er_sde — 3 prose (wildlife,
+urban night, still-life) + 2 Ideogram-JSON (still-life, landscape). **Note:** the
+`ImageSharpenKJ` (rcas 0.55) before `SaveImage` ships **active** — bypassing it
+drops the image link (a converter gap: bypass-passthrough doesn't cross a subgraph
+IMAGE output), and the contrast-adaptive sharpen suits Krea 2's crisp look anyway.
 
 ## Gotchas
 
