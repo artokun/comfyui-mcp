@@ -339,6 +339,9 @@ export async function runPanelOrchestrator(): Promise<void> {
           cwd: comfyuiPath ?? process.cwd(),
           model: codexModel,
           systemAppend: PANEL_SYSTEM_APPEND,
+          // Base ComfyUI URL so the backend can fetch image bytes from /view and
+          // deliver them to a turn as `localImage` input items (vision parity).
+          comfyuiUrl,
           mcpServers: {
             // Headless comfyui MCP (this build) over stdio — same as Claude.
             comfyui: {

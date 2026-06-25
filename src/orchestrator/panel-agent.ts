@@ -39,6 +39,12 @@ function msgOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** Idle window for the per-turn freeze watchdog: if a turn that's in flight
+ *  receives NO events at all for this long, treat it as stalled. Generous (legit
+ *  tool work is slow but still streams progress) and overridable for tests via
+ *  COMFYUI_MCP_TURN_IDLE_MS. Default 3.5 min. */
+const TURN_IDLE_MS = Number(process.env.COMFYUI_MCP_TURN_IDLE_MS) || 210_000;
+
 /** Reasoning effort levels. This is the PROVIDER-NEUTRAL union of every backend's
  *  scale so a value chosen for one provider survives a switch to another:
  *    • Claude scale: low | medium | high | xhigh | max
@@ -161,6 +167,19 @@ export class PanelAgent {
    *  session-restarting option change (effort) until the turn finishes, instead
    *  of interrupting and silently dropping the in-flight reply. */
   private busy = false;
+  // ---- turn idle watchdog (freeze safety net) ----
+  // A stalled turn (the backend stops emitting ANY events — e.g. a wedged Codex
+  // app-server) would otherwise leave the panel "working" forever. This is an
+  // IDLE timer (reset on every received event), NOT a hard turn cap: legit tool
+  // work is slow but still streams progress/tool events, so only a TRUE stall
+  // (no events at all for the whole window) trips it. On trip we surface a clear
+  // terminal error, advance the turn-gate (so the next queued batch runs), and
+  // best-effort interrupt the backend. Composes with the backend's own terminal
+  // result: completeTurn() is capped at yieldedTurns, so a late real result after
+  // a trip can't double-advance the gate.
+  private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Guards against a trip firing twice / racing a real result for one turn. */
+  private idleTripped = false;
   // ---- turn gate (race-free) ----
   // The channel releases ONE batch per turn so the SDK can't read ahead (which
   // prematurely "read" queued messages and lost them on interrupt). Implemented
@@ -368,6 +387,7 @@ export class PanelAgent {
   /** End the session and release the agent (tab closed / orchestrator shutdown). */
   async stop(): Promise<void> {
     this.closed = true;
+    this.clearIdleWatchdog(); // don't let a turn watchdog fire after teardown
     const wake = this.waiting;
     this.waiting = null;
     wake?.(); // let the generator observe `closed` and return
@@ -439,6 +459,18 @@ export class PanelAgent {
       const images = batch.flatMap((it) => it.images ?? []);
       if (this.closed) return;
       this.yieldedTurns += 1; // this batch is turn N
+      // Mark the turn in flight AT DISPATCH (not on the first event). Without this
+      // the watchdog's `busy` guard would be false for the exact zero-event freeze
+      // it's meant to catch, so onTurnStalled() would no-op. (handleEvent's later
+      // `busy = true` becomes a harmless no-op.) Also shows "working" immediately.
+      this.busy = true;
+      this.deps.onTurn?.(this.tabId, "working");
+      // Arm the freeze watchdog AT DISPATCH: a turn that produces NO events at all
+      // (the exact ROOT CAUSE B freeze — turn/start sent, no notifications ever
+      // returned) never reaches handleEvent, so arming here is what catches it.
+      // Subsequent events re-arm it (handleEvent → bumpIdleWatchdog); a clean
+      // result disarms it.
+      this.bumpIdleWatchdog();
       yield { text, ...(images.length ? { images } : {}) };
       // Hold the next batch until THIS turn completes. Race-free: if the result
       // already fired (completedTurns caught up) we don't park at all, so the
@@ -503,6 +535,10 @@ export class PanelAgent {
         if (this.closed) break;
         logger.error(`[panel-agent ${this.short()}] stream error: ${msgOf(err)}`);
       }
+      // Session ended (cleanly or via error) — disarm any armed watchdog so a stale
+      // timer from the dead session can't fire into the restarted one. The gate
+      // counters are reset at the top of the next iteration.
+      this.clearIdleWatchdog();
       if (this.closed) break;
       // Session ended on its own — bound rapid failure loops so a persistently
       // broken SDK doesn't spin forever or black-hole each message.
@@ -524,11 +560,59 @@ export class PanelAgent {
     logger.info(`[panel-agent ${this.short()}] stopped`);
   }
 
+  /** (Re)arm the per-turn idle watchdog. Called on every event received while a
+   *  turn could be in flight, so the timer only fires after a FULL idle window
+   *  with no events — a true stall. A no-op once a turn has already tripped (until
+   *  the next turn re-arms via a fresh event after clearIdleWatchdog). */
+  private bumpIdleWatchdog(): void {
+    if (this.closed || this.idleTripped) return;
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = setTimeout(() => this.onTurnStalled(), TURN_IDLE_MS);
+    this.idleTimer.unref?.();
+  }
+
+  /** Disarm the idle watchdog (turn ended cleanly, or session restarting). */
+  private clearIdleWatchdog(): void {
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
+    this.idleTripped = false;
+  }
+
+  /** The current turn produced NO events for the whole idle window → it's frozen.
+   *  Surface a clear error, clear the "working" indicator, advance the turn-gate
+   *  so the next queued batch can run, and best-effort interrupt the backend so a
+   *  wedged child stops. Idempotent per turn via idleTripped; completeTurn() is
+   *  capped at yieldedTurns so a late real result can't double-advance the gate. */
+  private onTurnStalled(): void {
+    if (this.closed || this.idleTripped || !this.busy) return;
+    this.idleTripped = true;
+    this.idleTimer = null;
+    logger.error(
+      `[panel-agent ${this.short()}] turn stalled — no events for ${Math.round(TURN_IDLE_MS / 1000)}s; surfacing error and releasing the gate`,
+    );
+    this.deps.onSay(
+      this.tabId,
+      "⚠️ The agent stopped responding (the turn stalled with no activity). I've cleared it — please try again.",
+    );
+    this.busy = false;
+    this.completeTurn(); // release the next queued batch instead of hanging
+    this.deps.onTurn?.(this.tabId, "done");
+    // Best-effort: stop the wedged turn so the backend doesn't keep a dead child
+    // half-alive. The self-restart loop in start() recovers the session.
+    void this.backend.interrupt().catch(() => {});
+  }
+
   // Handle a canonical AgentEvent from the backend. This is the provider-agnostic
   // half of what used to be route(SDKMessage): all the panel orchestration (turn
   // gate, busy/working indicator, anchor tracking, usage meter, onSay commit)
   // lives here; the backend already normalized the provider's native messages.
   private handleEvent(ev: AgentEvent): void {
+    // Any event means the turn is alive — reset the idle watchdog. The `result`
+    // case below disarms it entirely (turn ended). Placed before the switch so it
+    // covers every event type without per-case bumps.
+    this.bumpIdleWatchdog();
     switch (ev.type) {
       case "session": {
         this.sessionId = ev.sessionId;
@@ -597,6 +681,9 @@ export class PanelAgent {
         }
         if (this.lastUsage) this.reportStatus(this.lastUsage, ev.costUsd);
         this.busy = false;
+        // Turn ended cleanly → disarm the freeze watchdog. (If it already tripped,
+        // completeTurn() is a capped no-op, so the gate can't double-advance.)
+        this.clearIdleWatchdog();
         this.completeTurn(); // turn finished → release the next queued batch
         // Report this turn's anchor (last assistant UUID) so the panel can later
         // fork the conversation here for a rewind.

@@ -45,6 +45,9 @@ export interface AgentCapabilities {
   slashCommands: boolean;
   /** Supports lifecycle hooks. */
   hooks: boolean;
+  /** Accepts inline image input in a user turn (vision). When false, image refs
+   *  the panel sends are ignored by the backend (text-only). */
+  vision: boolean;
 }
 
 /**
@@ -160,6 +163,7 @@ export const CLAUDE_CAPABILITIES: AgentCapabilities = {
   modelEnumeration: true,
   slashCommands: true,
   hooks: true,
+  vision: true, // resolves image refs to inline base64 blocks (shapeTurn)
 };
 
 /** Capability descriptor for the Codex app-server backend (Phase 2). */
@@ -172,4 +176,5 @@ export const CODEX_CAPABILITIES: AgentCapabilities = {
   modelEnumeration: true, // config/read
   slashCommands: false,
   hooks: false,
+  vision: true, // gpt-5.5 sees images; delivered as `localImage` turn input items
 };

@@ -11,7 +11,8 @@
 //
 // PROTOCOL MAPPING (port → app-server):
 //   - session            = a Codex THREAD (`thread/start` new | `thread/resume` by id)
-//   - run() loop turn     = `turn/start` (one turn per neutral channel batch)
+//   - run() loop turn     = `turn/start` (one turn per neutral channel batch);
+//                           images ride as `localImage` input items (file paths)
 //   - assistant_delta     ← `item/agentMessage/delta` ({itemId, delta})
 //   - assistant_delta(th) ← `item/reasoning/{text,summaryText}Delta` (thinking)
 //   - assistant (commit)  ← `item/completed` for an `agentMessage` item
@@ -36,6 +37,9 @@
 
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createRequire } from "node:module";
+import { promises as fsp } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import readline from "node:readline";
 import { logger } from "../utils/logger.js";
 import {
@@ -46,6 +50,7 @@ import {
   type NeutralTurn,
   CODEX_CAPABILITIES,
 } from "./agent-backend.js";
+import type { ImageRef } from "./panel-agent.js";
 
 function msgOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -397,6 +402,12 @@ export interface CodexBackendDeps {
   /** Default model for new threads (e.g. gpt-5.4-codex). */
   model?: string;
   /**
+   * Base URL of the ComfyUI instance, for fetching image bytes (/view). When set,
+   * NeutralTurn image refs are fetched and written to temp files, then delivered
+   * to the turn as `localImage` input items (vision parity with the Claude path).
+   */
+  comfyuiUrl?: string;
+  /**
    * MCP servers to declare to `codex app-server` via `-c mcp_servers.<name>.*`
    * overrides at launch — gives Codex the same tool surface as Claude (the
    * headless `comfyui` stdio MCP + the `panel` HTTP MCP for live-graph tools).
@@ -465,6 +476,11 @@ export class CodexBackend implements AgentBackend {
    *  app-server's thread/start has no instructions field, so the persona rides on
    *  the FIRST turn's input; reset whenever a NEW thread starts (run()). */
   private needsSystemPreamble = false;
+  /** Temp image files written for delivered turn images (the app-server's
+   *  `localImage` input item takes a PATH, so /view bytes are spilled to disk).
+   *  Tracked so each turn cleans up its own files, and close() sweeps any
+   *  stragglers. */
+  private tempImageFiles = new Set<string>();
 
   constructor(deps: CodexBackendDeps = {}) {
     this.deps = deps;
@@ -495,6 +511,65 @@ export class CodexBackend implements AgentBackend {
     }
     if (!this.bin) this.bin = "codex"; // PATH fallback (a `codex` on PATH)
     return this.bin;
+  }
+
+  /**
+   * Fetch a ComfyUI image (/view) and spill the bytes to a temp file, returning
+   * its absolute path — or null on any failure (the text reference still names the
+   * image as a fallback). The app-server `turn/start` `localImage` input item takes
+   * a FILE PATH (mirrors the codex CLI `-i, --image <FILE>`), so unlike Claude
+   * (inline base64) we must write the bytes to disk. Mirrors
+   * ClaudeBackend.fetchImageBlock's source/size guards. Each written path is
+   * tracked in tempImageFiles for per-turn + close() cleanup.
+   */
+  private async fetchImageFile(ref: ImageRef): Promise<string | null> {
+    if (!this.deps.comfyuiUrl || !ref?.filename) return null;
+    try {
+      const u = new URL("/view", this.deps.comfyuiUrl);
+      u.searchParams.set("filename", ref.filename);
+      u.searchParams.set("type", ref.type || "input");
+      if (ref.subfolder) u.searchParams.set("subfolder", ref.subfolder);
+      const res = await fetch(u, { signal: AbortSignal.timeout(15000) });
+      if (!res.ok) return null;
+      const mt = (res.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (buf.length > 12 * 1024 * 1024) return null; // keep context sane (parity with Claude)
+      // Preserve a recognizable extension so the model/app-server treat it as the
+      // right image type; default to .png (ComfyUI outputs are PNG by default).
+      const extFromMime: Record<string, string> = {
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/gif": ".gif",
+        "image/webp": ".webp",
+      };
+      // Recognized content-type → its extension; otherwise only trust the source
+      // filename extension if it's a known image type, else default to .png (don't
+      // preserve an arbitrary suffix — parity with Claude mapping unknowns to png).
+      const allowedExt = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
+      const fileExt = path.extname(ref.filename).toLowerCase();
+      const ext = extFromMime[mt] ?? (allowedExt.has(fileExt) ? fileExt : ".png");
+      const file = path.join(
+        os.tmpdir(),
+        `comfyui-codex-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`,
+      );
+      await fsp.writeFile(file, buf);
+      this.tempImageFiles.add(file);
+      return file;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Delete the given temp image files (best-effort) and drop them from tracking. */
+  private async cleanupTempImages(files: Iterable<string>): Promise<void> {
+    for (const f of files) {
+      this.tempImageFiles.delete(f);
+      try {
+        await fsp.unlink(f);
+      } catch {
+        // already gone / never created — best-effort
+      }
+    }
   }
 
   /**
@@ -840,13 +915,31 @@ export class CodexBackend implements AgentBackend {
       this.needsSystemPreamble = false;
     }
 
+    // IMAGE DELIVERY (vision parity with Claude): fetch each ComfyUI image ref's
+    // bytes from /view, spill to a temp file, and add a `localImage` input item
+    // (which takes a FILE PATH — the app-server's path-based image variant, mirror
+    // of the codex CLI `-i, --image <FILE>`). The text item stays first so the
+    // prompt context is preserved; images follow. Falls back to text-only when
+    // there are no images (or none resolve). The files written for THIS turn are
+    // tracked locally so the finally block cleans them up after the turn ends.
+    const turnInput: Array<Record<string, unknown>> = [
+      { type: "text", text: turnText, text_elements: [] },
+    ];
+    const turnTempFiles: string[] = [];
+    for (const ref of turn.images ?? []) {
+      const file = await this.fetchImageFile(ref);
+      if (file) {
+        turnTempFiles.push(file);
+        turnInput.push({ type: "localImage", path: file });
+      }
+    }
+
     try {
-      // turn/start delivers the user text (text-only for v1; images are a known
-      // gap — Codex app-server input items would need a different shaping).
+      // turn/start delivers the user text plus any resolved image input items.
       client
         .request<{ turn?: { id?: string } }>("turn/start", {
           threadId,
-          input: [{ type: "text", text: turnText, text_elements: [] }],
+          input: turnInput,
           model: this.model ?? null,
           // Forward the session's mapped Codex effort (null = app-server default).
           effort: this.effort,
@@ -905,6 +998,10 @@ export class CodexBackend implements AgentBackend {
       // it during shutdown — don't resurrect a stale handler onto a dead client).
       if (client.notificationHandler && !client.exitError) client.notificationHandler = prev ?? null;
       this.turnId = null;
+      // Sweep this turn's temp image files now that the app-server has consumed
+      // them (the bytes were read at turn/start). Best-effort + non-blocking on the
+      // generator's teardown.
+      if (turnTempFiles.length) void this.cleanupTempImages(turnTempFiles);
     }
   }
 
@@ -954,6 +1051,11 @@ export class CodexBackend implements AgentBackend {
     if (preparing && preparing !== client) {
       preparing.notificationHandler = null;
       await preparing.close().catch(() => {});
+    }
+    // Sweep any temp image files a turn didn't get to clean up (e.g. close() raced
+    // an in-flight turn). Snapshot first — cleanupTempImages mutates the set.
+    if (this.tempImageFiles.size) {
+      await this.cleanupTempImages([...this.tempImageFiles]).catch(() => {});
     }
   }
 }
