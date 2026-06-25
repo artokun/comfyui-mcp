@@ -39,6 +39,7 @@ import { registerImageConvertTools } from "./image-convert.js";
 import { registerStorageUploadTools } from "./storage-upload.js";
 import { registerHealthCheckTools } from "./health-check.js";
 import { registerWorkflowLockTools } from "./workflow-lock.js";
+import { registerSkillsAccessTools } from "./skills-access.js";
 import { DefaultsManager } from "../services/defaults-manager.js";
 
 export async function registerAllTools(server: McpServer): Promise<void> {
@@ -84,5 +85,6 @@ export async function registerAllTools(server: McpServer): Promise<void> {
   registerStorageUploadTools(server);
   registerHealthCheckTools(server);
   registerWorkflowLockTools(server);
+  registerSkillsAccessTools(server);
   await registerAutoloadedWorkflows(server);
 }
