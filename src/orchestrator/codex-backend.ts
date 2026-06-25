@@ -20,12 +20,19 @@
 //   - interrupt()         → `turn/interrupt` ({threadId, turnId})
 //   - listModels()        ← `config/read` (or a sensible static fallback)
 //
-// KNOWN GAP (Phase 2d, deferred): the live-graph `panel_*` tools are NOT wired
-// for Codex. The app-server can only host config-declared MCP servers, not an
-// in-process SDK MCP server, so the shared "panel tools as a real MCP server"
-// refactor (design doc Phase 4) is required before Codex can edit the live
-// canvas. For v1 the Codex backend runs WITHOUT panel_* tools (text + the
-// headless comfyui MCP only, once that MCP wiring lands).
+// FULL PARITY with Claude: the Codex backend now drives the live ComfyUI canvas
+// AND the headless comfyui MCP, with the panel system prompt — everything Claude
+// can do. Two MCP servers are declared to the app-server at launch via `-c`
+// overrides:
+//   - `comfyui` (stdio): the headless comfyui MCP (this build's dist/index.js),
+//     mirroring the env the Claude path passes (COMFYUI_URL / COMFYUI_PATH / …).
+//   - `panel`   (http) : the orchestrator-hosted loopback HTTP MCP that exposes
+//     the SHARED panel_* live-graph tools, routed by tab id
+//     (http://127.0.0.1:<port>/<tabId>). See panel-mcp-http.ts + panel-tools.ts.
+// The app-server can only host CONFIG-DECLARED MCP servers (not an in-process SDK
+// server), which is exactly why panel_* is exposed over HTTP for this backend.
+// The panel system prompt is prepended to the FIRST turn (the app-server's
+// thread/start has no instructions field).
 
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createRequire } from "node:module";
@@ -120,6 +127,9 @@ class AppServerClient {
     private readonly bin: string,
     private readonly cwd: string,
     private readonly env: NodeJS.ProcessEnv,
+    // Extra `-c key=value` config overrides appended after `app-server` (used to
+    // declare the comfyui + panel MCP servers — full Codex/Claude tool parity).
+    private readonly extraArgs: string[] = [],
   ) {
     this.exitPromise = new Promise<void>((resolve) => {
       this.resolveExit = resolve;
@@ -133,7 +143,10 @@ class AppServerClient {
     // is a plain "codex" (PATH fallback) we still spawn it directly.
     const isJs = /\.(c|m)?js$/i.test(this.bin);
     const cmd = isJs ? process.execPath : this.bin;
-    const args = isJs ? [this.bin, "app-server"] : ["app-server"];
+    // `-c` overrides go AFTER the `app-server` subcommand (they're app-server
+    // flags). They declare the comfyui (stdio) + panel (http) MCP servers.
+    const baseArgs = isJs ? [this.bin, "app-server"] : ["app-server"];
+    const args = [...baseArgs, ...this.extraArgs];
     // When falling back to a `codex` on PATH on Windows, the resolvable entry is a
     // `.cmd`/`.ps1` shim — spawn without a shell can't find it (ENOENT). Use a
     // shell in that case (mirrors the plugin's client). The bundled-dep lane runs
@@ -227,6 +240,36 @@ class AppServerClient {
     }
   }
 
+  /**
+   * The auto-approve RESULT for a server→client approval/permission/elicitation
+   * request, or null if the request isn't an approval we should auto-grant.
+   *
+   * Decision shapes differ per request method (from the app-server protocol):
+   *   - execCommandApproval / applyPatchApproval → { decision: ReviewDecision }
+   *     where ReviewDecision = "approved" | "denied" | …
+   *   - item/commandExecution/requestApproval, item/fileChange/requestApproval,
+   *     item/permissions/requestApproval → { decision: "accept" | … }
+   *   - mcpServer/elicitation/request → an MCP elicitation result
+   *     ({ action: "accept", content: {} }).
+   * We grant the affirmative for each so the headless background agent (same
+   * isolation posture as Claude's bypassPermissions) is never blocked.
+   */
+  private autoApproveDecision(method: string): Record<string, unknown> | null {
+    switch (method) {
+      case "execCommandApproval":
+      case "applyPatchApproval":
+        return { decision: "approved" };
+      case "item/commandExecution/requestApproval":
+      case "item/fileChange/requestApproval":
+      case "item/permissions/requestApproval":
+        return { decision: "accept" };
+      case "mcpServer/elicitation/request":
+        return { action: "accept", content: {} };
+      default:
+        return null;
+    }
+  }
+
   private handleLine(line: string): void {
     if (!line.trim()) return;
     let message: RpcMessage;
@@ -236,10 +279,22 @@ class AppServerClient {
       this.handleExit(new Error(`Failed to parse codex app-server JSONL: ${msgOf(error)}`));
       return;
     }
-    // Server→client request (e.g. an approval prompt): we don't support any, so
-    // reply with method-not-found to keep the protocol moving.
+    // Server→client request. The app-server asks the client to approve commands,
+    // file edits, MCP tool elicitations, and permission requests. The panel agent
+    // is an ISOLATED background agent (same posture as the Claude path's
+    // bypassPermissions), so we AUTO-APPROVE these to keep the live-graph work
+    // flowing — otherwise a panel_* MCP tool call hangs on an approval prompt the
+    // headless orchestrator can't surface. Anything we don't recognize still gets
+    // a method-not-found so the protocol keeps moving.
     if (message.id !== undefined && message.method) {
-      this.send({ id: message.id, error: { code: -32601, message: `Unsupported server request: ${message.method}` } });
+      const decision = this.autoApproveDecision(message.method);
+      if (decision) {
+        logger.debug(`[codex-backend] auto-approving server request ${message.method}`);
+        this.send({ id: message.id, result: decision });
+      } else {
+        logger.debug(`[codex-backend] unsupported server request ${message.method} — replying method-not-found`);
+        this.send({ id: message.id, error: { code: -32601, message: `Unsupported server request: ${message.method}` } });
+      }
       return;
     }
     // Response to one of our requests.
@@ -329,12 +384,55 @@ function toCodexEffort(effort: string | undefined): string | null {
   return null; // unknown level → let the app-server pick its default
 }
 
+/** A declared MCP server for the Codex app-server. Either a stdio command (the
+ *  headless comfyui MCP) or a streamable-HTTP url (the panel_* loopback server). */
+export type CodexMcpServerSpec =
+  | { transport: "stdio"; command: string; args?: string[]; env?: Record<string, string> }
+  | { transport: "http"; url: string };
+
 /** Provider config the Codex backend needs. A small subset of PanelAgentDeps. */
 export interface CodexBackendDeps {
   /** Working directory for the Codex thread (defaults to opts.cwd / process cwd). */
   cwd?: string;
   /** Default model for new threads (e.g. gpt-5.4-codex). */
   model?: string;
+  /**
+   * MCP servers to declare to `codex app-server` via `-c mcp_servers.<name>.*`
+   * overrides at launch — gives Codex the same tool surface as Claude (the
+   * headless `comfyui` stdio MCP + the `panel` HTTP MCP for live-graph tools).
+   */
+  mcpServers?: Record<string, CodexMcpServerSpec>;
+  /**
+   * Panel system prompt (persona). The app-server's thread/start has no
+   * instructions field, so this is PREPENDED to the first turn's input as a
+   * clearly-marked system/context preamble; later turns send plain text.
+   */
+  systemAppend?: string;
+}
+
+/**
+ * Build the `-c key=value` CLI overrides that declare the given MCP servers to
+ * `codex app-server`. Values are TOML literals: strings are JSON-quoted, arrays
+ * are JSON arrays (valid TOML). Mirrors `codex mcp add` / the config.toml format.
+ */
+export function buildMcpConfigArgs(servers: Record<string, CodexMcpServerSpec>): string[] {
+  const args: string[] = [];
+  const lit = (s: string) => JSON.stringify(s); // safe TOML string literal
+  for (const [name, spec] of Object.entries(servers)) {
+    if (spec.transport === "stdio") {
+      args.push("-c", `mcp_servers.${name}.command=${lit(spec.command)}`);
+      if (spec.args && spec.args.length) {
+        args.push("-c", `mcp_servers.${name}.args=${JSON.stringify(spec.args)}`);
+      }
+      for (const [k, v] of Object.entries(spec.env ?? {})) {
+        args.push("-c", `mcp_servers.${name}.env.${k}=${lit(v)}`);
+      }
+    } else {
+      // Streamable HTTP MCP server — `url` is what `codex mcp add --url` sets.
+      args.push("-c", `mcp_servers.${name}.url=${lit(spec.url)}`);
+    }
+  }
+  return args;
 }
 
 /**
@@ -363,6 +461,10 @@ export class CodexBackend implements AgentBackend {
   /** The Codex reasoning effort for new turns, already mapped to a valid Codex
    *  level (null = let the app-server choose). Captured from run(opts.effort). */
   private effort: string | null = null;
+  /** True until the panel system prompt has been prepended to a turn. The
+   *  app-server's thread/start has no instructions field, so the persona rides on
+   *  the FIRST turn's input; reset whenever a NEW thread starts (run()). */
+  private needsSystemPreamble = false;
 
   constructor(deps: CodexBackendDeps = {}) {
     this.deps = deps;
@@ -407,7 +509,10 @@ export class CodexBackend implements AgentBackend {
     if (this.client) return;
     const bin = this.resolveBin();
     const cwd = this.deps.cwd ?? process.cwd();
-    const client = new AppServerClient(bin, cwd, process.env);
+    // Declare the comfyui + panel MCP servers as `-c` overrides so Codex has the
+    // same tool surface as Claude (full parity).
+    const extraArgs = this.deps.mcpServers ? buildMcpConfigArgs(this.deps.mcpServers) : [];
+    const client = new AppServerClient(bin, cwd, process.env, extraArgs);
     // Publish the in-flight client BEFORE the startup awaits so a concurrent
     // close() can find and kill it instead of seeing this.client === null and
     // returning early — which would orphan the spawning app-server child (P0-A).
@@ -501,6 +606,9 @@ export class CodexBackend implements AgentBackend {
       });
       this.threadId = res.thread.id;
       threadModel = res.model;
+      // A resumed thread already received the persona on its original first turn —
+      // don't repeat it.
+      this.needsSystemPreamble = false;
     } else {
       // thread/start opens a fresh conversation.
       const res = await client.request<{ thread: { id: string }; model?: string }>("thread/start", {
@@ -512,6 +620,8 @@ export class CodexBackend implements AgentBackend {
       });
       this.threadId = res.thread.id;
       threadModel = res.model;
+      // Fresh thread → prepend the panel persona to the first turn's input.
+      this.needsSystemPreamble = !!this.deps.systemAppend;
     }
     // The thread id is our session id (PanelAgent persists it for resume).
     yield {
@@ -719,13 +829,24 @@ export class CodexBackend implements AgentBackend {
       emitTerminalError(client.exitError ? msgOf(client.exitError) : "codex app-server connection closed.");
     });
 
+    // FIRST-TURN PERSONA: the app-server has no thread-level instructions field,
+    // so the panel system prompt is prepended to the first turn's input as a
+    // clearly-marked system/context preamble (later turns send plain text).
+    let turnText = turn.text;
+    if (this.needsSystemPreamble && this.deps.systemAppend) {
+      turnText =
+        `<system>\n${this.deps.systemAppend}\n</system>\n\n` +
+        `The user's first message follows.\n\n${turn.text}`;
+      this.needsSystemPreamble = false;
+    }
+
     try {
       // turn/start delivers the user text (text-only for v1; images are a known
       // gap — Codex app-server input items would need a different shaping).
       client
         .request<{ turn?: { id?: string } }>("turn/start", {
           threadId,
-          input: [{ type: "text", text: turn.text, text_elements: [] }],
+          input: [{ type: "text", text: turnText, text_elements: [] }],
           model: this.model ?? null,
           // Forward the session's mapped Codex effort (null = app-server default).
           effort: this.effort,

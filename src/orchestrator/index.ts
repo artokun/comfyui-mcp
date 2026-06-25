@@ -29,6 +29,7 @@ import {
 import { createPanelMcpServer } from "./panel-tools.js";
 import { readUserMcpServers } from "../services/user-mcp-config.js";
 import { CodexBackend } from "./codex-backend.js";
+import { startPanelMcpHttpServer, type PanelMcpHttpServer } from "./panel-mcp-http.js";
 import type { AgentBackend } from "./agent-backend.js";
 
 const PANEL_SYSTEM_APPEND = `You are the autonomous assistant embedded directly in a ComfyUI sidebar panel. The person is working in ComfyUI and talks to you through that panel: their messages arrive as your prompts, and everything you write is shown to them in the panel chat. Write for that reader — lead with the result, keep replies short and concrete, and don't narrate routine internal steps.
@@ -287,20 +288,70 @@ export async function runPanelOrchestrator(): Promise<void> {
   // CodexBackend (codex app-server JSON-RPC); otherwise makeBackend is omitted
   // and PanelAgent falls back to its built-in ClaudeBackend.
   //
-  // KNOWN GAP (Phase 2d): the Codex backend currently runs WITHOUT the live-graph
-  // panel_* tools — the app-server can't host the in-process SDK MCP server, so
-  // the shared "panel tools as a real MCP server" refactor is required first.
+  // FULL PARITY: the Codex backend now drives the live canvas too — it gets the
+  // panel_* tools over a loopback HTTP MCP the orchestrator hosts (started below),
+  // declared to the app-server alongside the headless comfyui (stdio) MCP. Claude
+  // keeps its in-process SDK panel server unchanged.
   const backendId = (process.env.PANEL_AGENT_BACKEND ?? "claude").toLowerCase();
   // The panel's `model` is a Claude id (e.g. claude-opus-4-8) and is NOT a valid
   // Codex model — so for codex we only pass a model when COMFYUI_MCP_CODEX_MODEL
   // is set explicitly; otherwise Codex uses the account's default (e.g. gpt-5.5).
   const codexModel = process.env.COMFYUI_MCP_CODEX_MODEL;
   const isCodex = backendId === "codex";
+
+  // The comfyui stdio MCP env the Codex backend declares — MIRRORS what the
+  // Claude path's mcpServers.comfyui passes (COMFYUI_URL + progress dir + local
+  // mode), so the headless tool surface is identical across providers.
+  const codexComfyuiEnv: Record<string, string> = {
+    COMFYUI_URL: comfyuiUrl,
+    COMFYUI_MCP_PROGRESS_DIR: progressDir,
+    ...(comfyuiPath ? { COMFYUI_PATH: comfyuiPath } : {}),
+    // Pass through optional credentials the comfyui MCP honors, when set in the
+    // orchestrator's env — so Codex can do everything Claude can (Civitai, HF).
+    ...(process.env.CIVITAI_API_TOKEN ? { CIVITAI_API_TOKEN: process.env.CIVITAI_API_TOKEN } : {}),
+    ...(process.env.HF_TOKEN ? { HF_TOKEN: process.env.HF_TOKEN } : {}),
+  };
+
+  // The orchestrator-hosted loopback HTTP MCP for panel_* tools (Codex). Started
+  // only in codex mode (Claude uses the in-process server). Port:
+  // COMFYUI_MCP_PANEL_MCP_PORT, default bridgePort+1 (loopback only).
+  let panelMcpHttp: PanelMcpHttpServer | null = null;
+  if (isCodex) {
+    const panelMcpPort = Number(process.env.COMFYUI_MCP_PANEL_MCP_PORT) || bridgePort + 1;
+    try {
+      panelMcpHttp = await startPanelMcpHttpServer(bridge, panelMcpPort);
+    } catch (err) {
+      logger.error(
+        `[panel-orchestrator] could not start the panel HTTP MCP on :${panelMcpPort} — Codex will lack live-graph tools: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
   const makeBackend: ((tabId: string) => AgentBackend) | undefined = isCodex
-    ? () => new CodexBackend({ cwd: comfyuiPath ?? process.cwd(), model: codexModel })
+    ? (tabId: string) =>
+        new CodexBackend({
+          cwd: comfyuiPath ?? process.cwd(),
+          model: codexModel,
+          systemAppend: PANEL_SYSTEM_APPEND,
+          mcpServers: {
+            // Headless comfyui MCP (this build) over stdio — same as Claude.
+            comfyui: {
+              transport: "stdio",
+              command: process.execPath, // node
+              args: [mcpEntry], // dist/index.js
+              env: codexComfyuiEnv,
+            },
+            // Live-graph panel_* tools for THIS tab over the loopback HTTP MCP.
+            ...(panelMcpHttp
+              ? { panel: { transport: "http" as const, url: panelMcpHttp.urlFor(tabId) } }
+              : {}),
+          },
+        })
     : undefined;
   if (isCodex) {
-    logger.info(`[panel-orchestrator] agent backend = codex (codex app-server); panel_* live-graph tools deferred (Phase 2d)`);
+    logger.info(
+      `[panel-orchestrator] agent backend = codex (codex app-server); panel_* live-graph tools via loopback HTTP MCP${panelMcpHttp ? ` on :${panelMcpHttp.port}` : " UNAVAILABLE"} + headless comfyui MCP`,
+    );
   } else if (backendId !== "claude") {
     logger.warn(`[panel-orchestrator] unknown PANEL_AGENT_BACKEND "${backendId}" — defaulting to claude`);
   }
@@ -738,6 +789,8 @@ export async function runPanelOrchestrator(): Promise<void> {
     await manager.stopAll();
     // Dispose the Codex readiness-probe backend (kills its app-server child).
     if (probeBackend) await probeBackend.close().catch(() => {});
+    // Tear down the loopback panel HTTP MCP (codex mode only).
+    if (panelMcpHttp) await panelMcpHttp.stop().catch(() => {});
     await bridge.stop();
     // Only remove the lockfile if it still names us — avoid clobbering a fresh
     // orchestrator that may have replaced us.

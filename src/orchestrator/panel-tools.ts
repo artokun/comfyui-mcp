@@ -11,10 +11,22 @@
 //
 // Each agent gets its own server bound to its tab id, so commands always target
 // the workflow in that browser tab — no tab_id juggling for the model.
+//
+// PARITY (Codex): the tool definitions live in ONE shared list
+// (`buildPanelToolDefs`) so they can be registered onto BOTH:
+//   (a) the in-process Anthropic Agent SDK server (`createPanelMcpServer`,
+//       used by the Claude backend), AND
+//   (b) a `@modelcontextprotocol/sdk` `McpServer` over HTTP
+//       (`registerPanelTools`, used by the Codex backend via an orchestrator-
+//       hosted loopback HTTP MCP — see panel-mcp-http.ts).
+// Sharing the list means the panel_* surface (including the destructive-confirm
+// gating for panel_clear/panel_restart_comfyui) is IDENTICAL across providers,
+// so parity is automatic — neither path reimplements a tool.
 
 import { z } from "zod";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { UiBridge } from "../services/ui-bridge.js";
 import {
   addUserMcpServer,
@@ -55,15 +67,38 @@ function fail(err: unknown): ToolResult {
 
 const slotRef = z.union([z.string(), z.number().int().min(0)]);
 
+// IMPORTANT (Codex parity): use `z.array(z.number())` — NOT `z.tuple([...])` — for
+// fixed-length coordinate vectors. zod's `.tuple()` emits JSON-Schema draft-04
+// "tuple validation" (`items` as an ARRAY of schemas), which Codex's strict
+// function-schema validator REJECTS — it silently DROPS any MCP tool whose schema
+// uses array-form `items` (so panel_add_node etc. vanished from Codex's tool
+// list). A plain number array (single-object `items` + minItems/maxItems) is
+// accepted by both Codex and the Claude SDK, and is behaviorally identical
+// (the panel executors already read pos/bounds as [x, y] / [x, y, w, h] arrays).
+const xy = () =>
+  z.array(z.number()).min(2).max(2).describe("[x, y] (two numbers).");
+const rect = () =>
+  z.array(z.number()).min(4).max(4).describe("[x, y, width, height] (four numbers).");
+
 /**
- * Build the per-tab live-graph MCP server. `tabId` binds every command to the
- * panel tab this agent serves.
+ * The execution context every tool handler receives. Both transports (Anthropic
+ * SDK in-process, MCP-SDK over HTTP) build the SAME context bound to a tab, so a
+ * handler is transport-agnostic — it only ever talks to the bridge via `call` /
+ * `confirm` / `bridge` and never knows which server invoked it.
  */
-export function createPanelMcpServer(
-  bridge: UiBridge,
-  tabId: string,
-): McpSdkServerConfigWithInstance {
-  // Forward a command to the panel and wrap the reply as a tool result.
+export interface PanelToolCtx {
+  /** Forward a command to the panel and wrap the reply as a tool result. */
+  call: (cmd: Record<string, unknown>, timeoutMs?: number) => Promise<ToolResult>;
+  /** Human-in-the-loop yes/no confirm card (false on decline/timeout/no-panel). */
+  confirm: (question: string, header: string) => Promise<boolean>;
+  /** The raw bridge + tab id, for the handful of tools that need bespoke wiring
+   *  (image screenshots, secret collection). */
+  bridge: UiBridge;
+  tabId: string;
+}
+
+/** Build a tab-bound execution context shared by both transports. */
+export function makePanelToolCtx(bridge: UiBridge, tabId: string): PanelToolCtx {
   const call = async (cmd: Record<string, unknown>, timeoutMs?: number): Promise<ToolResult> => {
     try {
       return ok(await bridge.send(cmd as { cmd: string }, { tabId, timeoutMs }));
@@ -71,12 +106,12 @@ export function createPanelMcpServer(
       return fail(err);
     }
   };
-
   // Human-in-the-loop confirmation for a DESTRUCTIVE op: render a yes/no card in
   // the panel and block on the user's pick. Returns false on decline, timeout, or
   // no panel — so the op is SKIPPED, never performed without an explicit yes.
   // (We gate inside the tool because the SDK's canUseTool is bypassed under
-  // bypassPermissions, which the panel agent runs in.)
+  // bypassPermissions, which the panel agent runs in; the Codex HTTP path runs
+  // approvalPolicy "never", so the same in-tool gate is the only safeguard.)
   const confirm = async (question: string, header: string): Promise<boolean> => {
     try {
       const reply = await bridge.send(
@@ -96,649 +131,736 @@ export function createPanelMcpServer(
       return false;
     }
   };
+  return { call, confirm, bridge, tabId };
+}
 
+/** One shared tool definition: name, description, zod raw-shape schema, and a
+ *  transport-agnostic handler that receives parsed args + the tab-bound context. */
+export interface PanelToolDef {
+  name: string;
+  description: string;
+  // A zod raw shape (object map of zod schemas), as accepted by BOTH the Anthropic
+  // SDK `tool()` and the MCP SDK `registerTool({ inputSchema })`.
+  schema: z.ZodRawShape;
+  handler: (args: Record<string, unknown>, ctx: PanelToolCtx) => Promise<ToolResult>;
+}
+
+/**
+ * The SINGLE source of truth for the panel_* tool surface. Both transports
+ * register these exact definitions, so the Claude (in-process) and Codex (HTTP)
+ * backends expose an identical panel toolset.
+ */
+export function buildPanelToolDefs(): PanelToolDef[] {
+  // Local helper so each def reads like the original `tool(...)` call.
+  const def = (
+    name: string,
+    description: string,
+    schema: z.ZodRawShape,
+    handler: (args: Record<string, unknown>, ctx: PanelToolCtx) => Promise<ToolResult>,
+  ): PanelToolDef => ({ name, description, schema, handler });
+
+  // Args are validated by zod before the handler runs (both transports parse with
+  // the same shape), so handlers read fields off a loosely-typed bag.
+  type A = Record<string, unknown>;
+
+  return [
+    def(
+      "panel_get_graph",
+      "Read the workflow the user is CURRENTLY VIEWING on their canvas (root graph or an opened subgraph — 'viewing' says which): node ids, types, titles, widget values, and connections. Subgraph nodes are summarized shallowly — drill in with panel_get_subgraph. ALWAYS call this before your first edit so ids and slot names are accurate. This is the user's live graph — they watch your edits happen. Read-only.",
+      {},
+      async (_args, ctx) => ctx.call({ cmd: "graph_get_state" }),
+    ),
+    def(
+      "panel_get_subgraph",
+      "Read INSIDE a subgraph node on the user's open graph: ids, types, widget values, and connections of its inner nodes. Use after panel_get_graph shows a node with is_subgraph=true. Read-only.",
+      { node_id: z.number().int().describe("Subgraph node id (is_subgraph=true).") },
+      async (args: A, ctx) => ctx.call({ cmd: "graph_get_subgraph", node_id: args.node_id }),
+    ),
+    def(
+      "panel_add_node",
+      "Add a node to the user's OPEN ComfyUI graph by class_type (e.g. 'KSampler', 'CheckpointLoaderSimple'). The user sees it appear live; Ctrl+Z undoes it. Returns the created node's id, slots, and default widget values.",
+      {
+        class_type: z.string().describe("Exact ComfyUI node class_type to create."),
+        pos: xy()
+          .optional()
+          .describe("Canvas [x, y] (two numbers). Auto-placed beside existing nodes when omitted."),
+        title: z.string().optional().describe("Optional custom node title."),
+      },
+      async (args: A, ctx) =>
+        ctx.call({ cmd: "graph_add_node", class_type: args.class_type, pos: args.pos, title: args.title }),
+    ),
+    def(
+      "panel_remove_node",
+      "Remove a node (and its connections) from the user's open graph by id. Undoable with Ctrl+Z.",
+      { node_id: z.number().int().describe("Node id from panel_get_graph.") },
+      async (args: A, ctx) => ctx.call({ cmd: "graph_remove_node", node_id: args.node_id }),
+    ),
+    def(
+      "panel_clear",
+      "Remove EVERY node from the user's open graph — only for an explicit 'clear/reset the canvas'. Just CALL THIS DIRECTLY when they ask to clear: the tool itself pops a confirm card and only wipes on a yes (don't ask separately first). The wipe is a single Ctrl+Z undo. NEVER use this for a 'new workflow' — that's panel_new_workflow (a new tab, leaves this graph intact).",
+      {},
+      async (_args, ctx) => {
+        if (
+          !(await ctx.confirm(
+            "Clear the canvas? This removes every node from the open workflow. (One Ctrl+Z undoes it.)",
+            "Clear canvas",
+          ))
+        ) {
+          return ok("Cancelled — the canvas was left as-is.");
+        }
+        return ctx.call({ cmd: "graph_clear" });
+      },
+    ),
+    def(
+      "panel_connect",
+      "Connect an output slot of one node to an input slot of another in the user's open graph. Slots accept a name ('MODEL', 'samples') or numeric index. On a name mismatch the error lists available slots — re-check with panel_get_graph. Undoable.",
+      {
+        from_node_id: z.number().int().describe("Source node id."),
+        from_output: slotRef.optional().describe("Source output slot name or index (default 0)."),
+        to_node_id: z.number().int().describe("Target node id."),
+        to_input: slotRef.optional().describe("Target input slot name or index (default 0)."),
+      },
+      async (args: A, ctx) =>
+        ctx.call({
+          cmd: "graph_connect",
+          from_node_id: args.from_node_id,
+          from_output: args.from_output,
+          to_node_id: args.to_node_id,
+          to_input: args.to_input,
+        }),
+    ),
+    def(
+      "panel_disconnect",
+      "Disconnect an input slot of a node in the user's open graph. Undoable with Ctrl+Z.",
+      {
+        node_id: z.number().int().describe("Node id whose input to disconnect."),
+        input: slotRef.optional().describe("Input slot name or index (default 0)."),
+      },
+      async (args: A, ctx) => ctx.call({ cmd: "graph_disconnect", node_id: args.node_id, input: args.input }),
+    ),
+    def(
+      "panel_set_widget",
+      "Set a widget value on a node in the user's open graph (steps, cfg, seed, ckpt_name, text prompts, …). Returns the previous and new value. Undoable with Ctrl+Z.",
+      {
+        node_id: z.number().int().describe("Node id from panel_get_graph."),
+        widget: z.string().describe("Widget name (e.g. 'steps', 'cfg', 'text')."),
+        value: z
+          .union([z.string(), z.number(), z.boolean()])
+          .describe("New value. Must match the widget's expected type."),
+      },
+      async (args: A, ctx) =>
+        ctx.call({ cmd: "graph_set_widget", node_id: args.node_id, widget: args.widget, value: args.value }),
+    ),
+    def(
+      "panel_move_node",
+      "Move a node to a new canvas position [x, y] in the user's open graph. Undoable.",
+      {
+        node_id: z.number().int().describe("Node id from panel_get_graph."),
+        pos: xy().describe("New canvas [x, y] (two numbers)."),
+      },
+      async (args: A, ctx) => ctx.call({ cmd: "graph_move_node", node_id: args.node_id, pos: args.pos }),
+    ),
+    def(
+      "panel_canvas",
+      "Control the user's canvas view: 'fit' frames the whole graph, 'center_on_node' jumps to a node (give node_id), 'pan' shifts by dx/dy, 'zoom' sets an absolute scale. View-only.",
+      {
+        action: z.enum(["fit", "center_on_node", "pan", "zoom"]),
+        node_id: z.number().int().optional().describe("Required for center_on_node."),
+        dx: z.number().optional().describe("Pan delta x."),
+        dy: z.number().optional().describe("Pan delta y."),
+        scale: z.number().optional().describe("Absolute zoom for 'zoom' (0.05–4, 1 = 100%)."),
+      },
+      async (args: A, ctx) =>
+        ctx.call({
+          cmd: "graph_canvas",
+          action: args.action,
+          node_id: args.node_id,
+          dx: args.dx,
+          dy: args.dy,
+          scale: args.scale,
+        }),
+    ),
+    def(
+      "panel_run",
+      "Queue the workflow the user has OPEN — exactly like them pressing Queue Prompt (current widget values, the live graph they can see). Returns queued:true, or queued:false with node_errors when frontend validation fails. Use this so the render runs on THEIR canvas and they see the result.",
+      {
+        batch_count: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .optional()
+          .describe("Times to queue (default 1)."),
+      },
+      async (args: A, ctx) => ctx.call({ cmd: "graph_run", batch_count: args.batch_count }, 20000),
+    ),
+    def(
+      "panel_get_errors",
+      "Read the most recent execution error and per-node validation errors from the user's open ComfyUI tab. Check this when a run fails or after panel_run reports node_errors. Read-only.",
+      {},
+      async (_args, ctx) => ctx.call({ cmd: "graph_get_errors" }),
+    ),
+    def(
+      "panel_reload",
+      "Soft-reload yourself to pick up code changes WITHOUT restarting ComfyUI — your chat session resumes automatically and you'll be nudged to continue. Use scope 'orchestrator' (default) after backend/orchestrator code changed (new tools, system prompt, services); use scope 'frontend' after the panel UI (web JS/CSS) changed. This ENDS the current turn — your tools/prompt are reloaded and you continue fresh. For custom-node or model changes that need a full ComfyUI restart, use panel_restart_comfyui instead. Only call this when code has actually changed and needs to take effect now.",
+      {
+        scope: z
+          .enum(["orchestrator", "frontend"])
+          .optional()
+          .describe("'orchestrator' (default): respawn the agent for new backend code. 'frontend': reload the panel UI for new web code."),
+      },
+      async (args: A, ctx) =>
+        ctx.call({ cmd: "soft_reload", scope: (args.scope as string) ?? "orchestrator" }, 15000),
+    ),
+    def(
+      "panel_list_mcp",
+      "List the MCP servers available to you. Returns the user's inherited servers (from their Claude config) plus your always-present built-ins (comfyui, the live-graph panel server). Use this to check whether a capability (e.g. CivitAI model search) is already connected before offering to add it.",
+      {},
+      async () => {
+        try {
+          const inherited = Object.keys(readUserMcpServers());
+          return ok({
+            inherited,
+            builtin: ["comfyui", "panel"],
+            note: "After panel_add_mcp / panel_remove_mcp, call panel_reload to apply the change to this session.",
+          });
+        } catch (err) {
+          return fail(err);
+        }
+      },
+    ),
+    def(
+      "panel_add_mcp",
+      "Connect a new MCP server by writing it to the user's Claude config (~/.claude.json) — it then loads into THIS session after you call panel_reload, and also becomes available to the user's normal Claude session. Use for capabilities you don't have yet, e.g. the official CivitAI MCP: name 'civitai', transport 'http', url 'https://mcp.civitai.com/mcp'. ALWAYS ask the user before connecting a remote (http/sse) MCP — it's an external service connection. Some servers need an auth token: pass it via headers (http/sse) or env (stdio).",
+      {
+        name: z.string().describe("Server name/key, e.g. 'civitai'. Letters, digits, dot, dash, underscore."),
+        transport: z.enum(["http", "sse", "stdio"]).describe("'http'/'sse' for a hosted URL server; 'stdio' for a local command."),
+        url: z.string().optional().describe("Server URL (required for http/sse), e.g. 'https://mcp.civitai.com/mcp'."),
+        command: z.string().optional().describe("Executable (required for stdio), e.g. 'npx'."),
+        args: z.array(z.string()).optional().describe("Args for the stdio command."),
+        headers: z.record(z.string(), z.string()).optional().describe("HTTP headers for http/sse (e.g. an Authorization token)."),
+        env: z.record(z.string(), z.string()).optional().describe("Environment variables for a stdio server."),
+      },
+      async (args: A) => {
+        try {
+          const transport = args.transport as string;
+          let config: Record<string, unknown>;
+          if (transport === "stdio") {
+            if (!args.command) throw new Error("stdio transport requires `command`.");
+            config = {
+              type: "stdio",
+              command: args.command,
+              ...(args.args ? { args: args.args } : {}),
+              ...(args.env ? { env: args.env } : {}),
+            };
+          } else {
+            if (!args.url) throw new Error(`${transport} transport requires \`url\`.`);
+            config = {
+              type: transport,
+              url: args.url,
+              ...(args.headers ? { headers: args.headers } : {}),
+            };
+          }
+          addUserMcpServer(args.name as string, config);
+          return ok(
+            `Connected MCP server "${args.name}" (written to your Claude config). Call panel_reload to load it into this session — then its tools become available.`,
+          );
+        } catch (err) {
+          return fail(err);
+        }
+      },
+    ),
+    def(
+      "panel_remove_mcp",
+      "Remove an MCP server from the user's Claude config by name. Call panel_reload afterward to drop it from this session. Cannot remove the built-in comfyui/panel servers.",
+      { name: z.string().describe("Server name to remove (from panel_list_mcp).") },
+      async (args: A) => {
+        try {
+          const removed = removeUserMcpServer(args.name as string);
+          return ok(
+            removed
+              ? `Removed MCP server "${args.name}". Call panel_reload to apply.`
+              : `No MCP server named "${args.name}" in the user config.`,
+          );
+        } catch (err) {
+          return fail(err);
+        }
+      },
+    ),
+    def(
+      "panel_request_secret",
+      "Securely collect an API token / secret from the user and write it straight to config — you NEVER see the value and it is never saved to chat history. The panel shows a masked input; the pasted value goes directly to the orchestrator, which stores it on the target MCP server (a header for http/sse servers, or an env var for stdio), then you call panel_reload to apply it. Use this for tokens like a CivitAI key (target the 'civitai' server, header 'Authorization', value_prefix 'Bearer ') or a HuggingFace token. Returns only a redacted confirmation.",
+      {
+        label: z.string().describe("Prompt shown above the masked input, e.g. 'Paste your CivitAI API token'."),
+        target_kind: z.enum(["header", "env"]).describe("'header' for http/sse servers (e.g. Authorization); 'env' for stdio servers."),
+        mcp_server: z.string().describe("Existing MCP server name to attach the secret to, e.g. 'civitai'."),
+        key: z.string().describe("Header name (e.g. 'Authorization') or env var name (e.g. 'HF_TOKEN')."),
+        value_prefix: z.string().optional().describe("Optional string prepended to the token, e.g. 'Bearer '."),
+        hint: z.string().optional().describe("Optional reassurance/help text shown under the input."),
+      },
+      async (args: A, ctx) => {
+        try {
+          const secret = await ctx.bridge.send(
+            { cmd: "request_secret", label: args.label, hint: args.hint },
+            { tabId: ctx.tabId, timeoutMs: 300000 },
+          );
+          if (typeof secret !== "string" || secret.length === 0) {
+            return ok("No token entered — nothing was saved.");
+          }
+          setUserMcpServerSecret(
+            {
+              kind: args.target_kind as "header" | "env",
+              server: args.mcp_server as string,
+              key: args.key as string,
+              prefix: args.value_prefix as string | undefined,
+            },
+            secret,
+          );
+          // Redacted ack ONLY — the secret never enters the agent's context.
+          return ok(
+            `🔒 Token saved to MCP server "${args.mcp_server}" (${args.target_kind} "${args.key}"). Call panel_reload to load it.`,
+          );
+        } catch (err) {
+          return fail(err);
+        }
+      },
+    ),
+    def(
+      "panel_get_content_mode",
+      "Query the persistent adult-content (NSFW) consent state for this user. Returns { nsfw_allowed, decided_at }. ALWAYS check this before surfacing any adult/NSFW models, prompts, workflows, or imagery. It defaults to FALSE (SFW-only) until the user passes the consent gate (panel_request_adult_consent). Read-only.",
+      {},
+      async () => {
+        try {
+          const c = getNsfwConsent();
+          return ok({ nsfw_allowed: c.allowed, decided_at: c.decidedAt ?? null });
+        } catch (err) {
+          return fail(err);
+        }
+      },
+    ),
+    def(
+      "panel_request_adult_consent",
+      "Show the user the adult-content consent gate and persist their decision. Call this ONLY when a request clearly intends NSFW/adult work AND panel_get_content_mode shows it's not already allowed. It renders a card asking the user to confirm they are 18+ AND that adult content is legal in their region; an affirmative answer turns the mode ON persistently (across reloads), a negative keeps it SFW. Returns the resulting { nsfw_allowed } state. Never assume consent — this tool is the only way to enable it.",
+      {
+        reason: z
+          .string()
+          .optional()
+          .describe("Optional one-line context shown to the user about why you're asking (e.g. 'to search Civitai for mature LoRAs')."),
+      },
+      async (args: A, ctx) => {
+        try {
+          const question =
+            "Adult-content gate — to enable NSFW work in this session, please confirm BOTH that you are at least 18 years old AND that creating/viewing adult content is legal in your country/region." +
+            (args.reason ? `\n\nContext: ${args.reason}` : "") +
+            "\n\nThis is recorded as your consent and can be turned off anytime.";
+          const reply = await ctx.bridge.send(
+            {
+              cmd: "ask_user",
+              question,
+              header: "18+ consent",
+              options: [
+                { label: "Yes — I'm 18+ and it's legal in my region", description: "Enable adult content for this session" },
+                { label: "No — keep it SFW", description: "Stay in safe-for-work mode" },
+              ],
+            },
+            { tabId: ctx.tabId, timeoutMs: 300000 },
+          );
+          const allowed = isAffirmative(reply);
+          const state = setNsfwConsent(allowed);
+          return ok({
+            nsfw_allowed: state.allowed,
+            decided_at: state.decidedAt,
+            note: allowed
+              ? "Adult mode enabled. Hard limits still apply: no minors, no sexual deepfakes of real people, no depictions of actual non-consensual acts."
+              : "Kept SFW. Don't surface adult content.",
+          });
+        } catch (err) {
+          return fail(err);
+        }
+      },
+    ),
+    def(
+      "panel_disable_adult_mode",
+      "Turn the adult-content (NSFW) consent OFF — revert to SFW-only. Use when the user asks to disable it. No gate needed to turn it off.",
+      {},
+      async () => {
+        try {
+          const state = setNsfwConsent(false);
+          return ok({ nsfw_allowed: state.allowed, note: "Adult mode disabled — back to SFW-only." });
+        } catch (err) {
+          return fail(err);
+        }
+      },
+    ),
+    def(
+      "panel_set_todo",
+      "Show/update a live TODO checklist in the panel's footer tray — a running view of your plan that the user watches as you work a multi-step task. Pass the FULL ordered list each call (it replaces the tray); update each step's status as you progress (pending → active → done). Pass an empty array to clear it. Use for genuinely multi-step work (3+ steps); skip it for quick one-shot replies. Mark exactly one step 'active' at a time.",
+      {
+        items: z
+          .array(
+            z.object({
+              text: z.string().describe("Short step description (a few words)."),
+              status: z
+                .enum(["pending", "active", "done"])
+                .optional()
+                .describe("Step state (default 'pending'). Mark the one you're on 'active'."),
+            }),
+          )
+          .describe("The full ordered checklist (replaces the current one). Empty array clears the tray."),
+      },
+      async (args: A, ctx) => ctx.call({ cmd: "set_todo", items: args.items }, 5000),
+    ),
+    def(
+      "panel_ask",
+      "Ask the user to choose between options — renders an interactive question card in the panel chat and BLOCKS until they pick, returning their choice as text. Use this (NOT the AskUserQuestion tool, which never renders here) whenever you need the user to decide between options. Each option may carry a short description. The card always includes an 'Other…' free-text field, so the returned string may be a listed label or whatever the user typed (comma-joined for multi_select). Ask only when the answer genuinely changes what you do.",
+      {
+        question: z.string().describe("The question to ask, e.g. 'Which sampler should I use?'"),
+        options: z
+          .array(
+            z.object({
+              label: z.string().describe("Short choice text shown on the button."),
+              description: z.string().optional().describe("Optional one-line explanation of this choice."),
+            }),
+          )
+          .min(2)
+          .describe("The choices (at least 2). An 'Other' free-text field is added automatically."),
+        header: z.string().optional().describe("Very short label/chip for the card (e.g. 'Sampler')."),
+        multi_select: z.boolean().optional().describe("Allow selecting multiple options (default false)."),
+      },
+      async (args: A, ctx) =>
+        ctx.call(
+          {
+            cmd: "ask_user",
+            question: args.question,
+            options: args.options,
+            header: args.header,
+            multi_select: args.multi_select,
+          },
+          // Human-in-the-loop: wait up to 10 minutes for a pick.
+          600000,
+        ),
+    ),
+    def(
+      "panel_save_workflow",
+      "Save the user's open workflow PROGRAMMATICALLY — no Save/Rename dialog ever pops. A never-saved workflow is auto-named and persisted; pass `name` to give it (or rename it to) a specific name. Use this freely (e.g. after building a graph) — it won't interrupt the user.",
+      { name: z.string().optional().describe("Name to save/rename to (no .json needed). Omit to save in place / auto-name an unsaved workflow.") },
+      async (args: A, ctx) =>
+        args.name
+          ? ctx.call({ cmd: "workflow_save_as", name: args.name }, 15000)
+          : ctx.call({ cmd: "workflow_save" }, 15000),
+    ),
+    def(
+      "panel_list_workflows",
+      "List the user's OPEN workflow tabs and which one is active (path, filename, modified, persisted). Use this to know what's open before switching/renaming/closing. Read-only.",
+      {},
+      async (_args, ctx) => ctx.call({ cmd: "workflow_list" }),
+    ),
+    def(
+      "panel_new_workflow",
+      "Open a brand-new BLANK workflow in a NEW TAB. Use this whenever the user wants a 'new workflow' / 'fresh canvas' / 'start over for a new project'. This does NOT touch their current workflow — it opens a separate tab. NEVER use panel_clear for a new workflow (panel_clear wipes the CURRENT graph and is only for 'clear/reset this canvas').",
+      {},
+      async (_args, ctx) => ctx.call({ cmd: "workflow_new" }, 15000),
+    ),
+    def(
+      "panel_open_workflow",
+      "Open / switch to a workflow by path or filename (from panel_list_workflows). Switches the active tab to it.",
+      { path: z.string().describe("Workflow path, filename, or key from panel_list_workflows.") },
+      async (args: A, ctx) => ctx.call({ cmd: "workflow_open", path: args.path }, 15000),
+    ),
+    def(
+      "panel_rename_workflow",
+      "Rename a workflow (the active one, or the one matching `path`).",
+      {
+        name: z.string().describe("New name (no .json needed)."),
+        path: z.string().optional().describe("Which workflow to rename; omit for the active one."),
+      },
+      async (args: A, ctx) => ctx.call({ cmd: "workflow_rename", name: args.name, path: args.path }, 15000),
+    ),
+    def(
+      "panel_close_workflow",
+      "Close a workflow tab (the active one, or the one matching `path`). Refuses if it has unsaved changes unless force:true — save first to avoid losing the user's work.",
+      {
+        path: z.string().optional().describe("Which workflow to close; omit for the active one."),
+        force: z.boolean().optional().describe("Close even with unsaved changes (discards them). Default false."),
+      },
+      async (args: A, ctx) => ctx.call({ cmd: "workflow_close", path: args.path, force: args.force }, 15000),
+    ),
+    def(
+      "panel_select_nodes",
+      "Select nodes on the user's canvas by id (highlights them, sets the multi-selection). Useful before panel_create_subgraph.",
+      { node_ids: z.array(z.number().int()).describe("Node ids to select.") },
+      async (args: A, ctx) => ctx.call({ cmd: "graph_select_nodes", node_ids: args.node_ids }),
+    ),
+    def(
+      "panel_create_subgraph",
+      "Group the given nodes into a SUBGRAPH (ComfyUI 'Convert to Subgraph') on the user's canvas — collapses them into one subgraph node. Returns the new subgraph node id. Undoable with Ctrl+Z.",
+      { node_ids: z.array(z.number().int()).describe("Node ids to group into a subgraph.") },
+      async (args: A, ctx) => ctx.call({ cmd: "graph_create_subgraph", node_ids: args.node_ids }, 15000),
+    ),
+    def(
+      "panel_create_group",
+      "Create a labeled GROUP box (the colored rectangle that visually frames a region) on the user's open graph. This is the lightweight organizer, DISTINCT from a subgraph (which nests/hides nodes) — a group just draws a titled box around nodes, leaving them in place. Pass node_ids to auto-size the box around those nodes, or bounds [x, y, width, height] for an explicit box. Optional color (hex like '#3f789e') and title. Returns the new group's id. Undoable with Ctrl+Z.",
+      {
+        title: z.string().optional().describe("Group label shown on the box header."),
+        node_ids: z
+          .array(z.number().int())
+          .optional()
+          .describe("Wrap these nodes — the box is auto-sized (with padding) around them."),
+        bounds: rect()
+          .optional()
+          .describe("Explicit [x, y, width, height] (four numbers). Ignored if node_ids is given."),
+        color: z.string().optional().describe("Box/header color, e.g. '#3f789e'."),
+        font_size: z.number().optional().describe("Title font size (default 24)."),
+      },
+      async (args: A, ctx) =>
+        ctx.call(
+          {
+            cmd: "graph_create_group",
+            title: args.title,
+            node_ids: args.node_ids,
+            bounds: args.bounds,
+            color: args.color,
+            font_size: args.font_size,
+          },
+          15000,
+        ),
+    ),
+    def(
+      "panel_move_group",
+      "Move a group box to a new top-left [x, y] on the user's open graph. By default the nodes inside the group move with it (like dragging the group header); pass move_nodes:false to move only the box. Group id comes from panel_get_graph (the `groups` array) or panel_create_group. Undoable.",
+      {
+        group_id: z.number().int().describe("Group id from panel_get_graph / panel_create_group."),
+        pos: xy().describe("New top-left [x, y] (two numbers)."),
+        move_nodes: z.boolean().optional().describe("Move the contained nodes too (default true)."),
+      },
+      async (args: A, ctx) =>
+        ctx.call({ cmd: "graph_move_group", group_id: args.group_id, pos: args.pos, move_nodes: args.move_nodes }),
+    ),
+    def(
+      "panel_edit_group",
+      "Edit a group box: its title, color, font_size, and/or bounds [x, y, width, height]. Only the fields you pass are changed. Undoable.",
+      {
+        group_id: z.number().int().describe("Group id from panel_get_graph / panel_create_group."),
+        title: z.string().optional().describe("New label."),
+        color: z.string().optional().describe("New box/header color, e.g. '#3f789e'."),
+        font_size: z.number().optional().describe("New title font size."),
+        bounds: rect()
+          .optional()
+          .describe("Resize/reposition the box: [x, y, width, height] (four numbers)."),
+      },
+      async (args: A, ctx) =>
+        ctx.call(
+          {
+            cmd: "graph_edit_group",
+            group_id: args.group_id,
+            title: args.title,
+            color: args.color,
+            font_size: args.font_size,
+            bounds: args.bounds,
+          },
+          15000,
+        ),
+    ),
+    def(
+      "panel_remove_group",
+      "Remove a group box from the user's open graph. The nodes inside the group are NOT deleted — only the box. Undoable.",
+      { group_id: z.number().int().describe("Group id from panel_get_graph / panel_create_group.") },
+      async (args: A, ctx) => ctx.call({ cmd: "graph_remove_group", group_id: args.group_id }, 15000),
+    ),
+    def(
+      "panel_set_node_title",
+      "Rename a node's TITLE (the label on its header) — e.g. to label a node by its purpose. Different from panel_set_widget (which changes a value). Undoable with Ctrl+Z.",
+      {
+        node_id: z.number().int().describe("Node id from panel_get_graph."),
+        title: z.string().describe("New title text."),
+      },
+      async (args: A, ctx) => ctx.call({ cmd: "graph_set_title", node_id: args.node_id, title: args.title }, 15000),
+    ),
+    def(
+      "panel_set_node_collapsed",
+      "Collapse (minimize) or expand a node on the user's open graph. Collapsed nodes shrink to just their title bar — handy for tidying loaders or rarely-touched nodes. Undoable.",
+      {
+        node_id: z.number().int().describe("Node id from panel_get_graph."),
+        collapsed: z.boolean().optional().describe("true = collapse/minimize (default), false = expand."),
+      },
+      async (args: A, ctx) =>
+        ctx.call({ cmd: "graph_set_node_collapsed", node_id: args.node_id, collapsed: args.collapsed }),
+    ),
+    def(
+      "panel_set_node_color",
+      "Set a node's title-bar and/or body color on the user's open graph. Easiest: pass a `preset` from ComfyUI's palette (red, brown, green, blue, pale_blue, cyan, purple, yellow, black) for matched colors. Or set explicit `color` (title bar) and/or `bgcolor` (body) as hex like '#3f789e'. Pass null for a field to reset it to the theme default. Great for colour-coding stages. Undoable.",
+      {
+        node_id: z.number().int().describe("Node id from panel_get_graph."),
+        preset: z
+          .enum(["red", "brown", "green", "blue", "pale_blue", "cyan", "purple", "yellow", "black"])
+          .optional()
+          .describe("Named LiteGraph color preset (sets both title + body)."),
+        color: z.string().nullable().optional().describe("Title-bar color hex, or null to clear. Ignored if preset given."),
+        bgcolor: z.string().nullable().optional().describe("Body color hex, or null to clear. Ignored if preset given."),
+      },
+      async (args: A, ctx) =>
+        ctx.call({
+          cmd: "graph_set_node_color",
+          node_id: args.node_id,
+          preset: args.preset,
+          color: args.color,
+          bgcolor: args.bgcolor,
+        }),
+    ),
+    def(
+      "panel_screenshot",
+      "Render the workflow the user is currently viewing (root graph, or the open subgraph) to a PNG and return it as an IMAGE so you can SEE the layout. It frames the whole graph (nodes + groups), captures, then restores the user's view. Use this to visually verify a layout you just built — overlaps, alignment, rails, colors, group bands — instead of reasoning from coordinates alone.",
+      { padding: z.number().optional().describe("Margin around the graph in px (default 60).") },
+      async (args: A, ctx) => {
+        try {
+          const res = (await ctx.bridge.send(
+            { cmd: "graph_screenshot", padding: args.padding },
+            { tabId: ctx.tabId },
+          )) as {
+            image?: string;
+            mimeType?: string;
+          };
+          if (!res?.image) return fail("screenshot returned no image");
+          return { content: [{ type: "image", data: res.image, mimeType: res.mimeType ?? "image/png" }] };
+        } catch (err) {
+          return fail(err);
+        }
+      },
+    ),
+    def(
+      "panel_enter_subgraph",
+      "Navigate INTO a subgraph node so you can read and EDIT its inner nodes — after this, panel_get_graph and all panel_* edit tools target the subgraph's inner graph (the user sees the canvas drill in). This is how you edit inside a subgraph (e.g. tweak a widget on an inner node). Call panel_exit_subgraph when done. Returns the new viewing scope.",
+      { node_id: z.number().int().describe("Subgraph node id (is_subgraph=true).") },
+      async (args: A, ctx) => ctx.call({ cmd: "graph_enter_subgraph", node_id: args.node_id }, 15000),
+    ),
+    def(
+      "panel_exit_subgraph",
+      "Leave the current subgraph and return to the root graph (undo a panel_enter_subgraph). After this, panel_* tools target the root graph again.",
+      {},
+      async (_args, ctx) => ctx.call({ cmd: "graph_exit_subgraph" }, 15000),
+    ),
+    def(
+      "panel_move_rail",
+      "Reposition a subgraph's input or output RAIL (the boundary I/O node that the inner wires connect to). You MUST be INSIDE the subgraph first (panel_enter_subgraph). Read current rail positions from panel_get_graph's `rails` field. Use this to place the input rail just left of the first node column and the output rail just right of the last one, so a tidy interior layout doesn't leave the rails stranded. rail is 'input' or 'output'.",
+      {
+        rail: z.enum(["input", "output"]).describe("Which boundary rail to move."),
+        pos: xy().describe("New top-left [x, y] (two numbers)."),
+      },
+      async (args: A, ctx) => ctx.call({ cmd: "graph_move_rail", rail: args.rail, pos: args.pos }),
+    ),
+    def(
+      "panel_promote_widget",
+      "Expose (promote) an INNER subgraph widget on the PARENT subgraph node, so it can be set from outside without opening the subgraph — e.g. surface an inner KSampler's `seed`/`steps` on the subgraph node. You MUST be inside the subgraph first (call panel_enter_subgraph): `node_id` is an inner node (from panel_get_graph while inside) and `widget` is one of its widget names. Pass demote:true to un-promote. Undoable with Ctrl+Z.",
+      {
+        node_id: z.number().int().describe("Inner node id (from panel_get_graph while inside the subgraph)."),
+        widget: z.string().describe("Name of the widget on that node to promote (e.g. 'seed', 'steps', 'text')."),
+        demote: z.boolean().optional().describe("Set true to UN-promote (remove the widget from the parent node)."),
+      },
+      async (args: A, ctx) =>
+        ctx.call({ cmd: "graph_promote_widget", node_id: args.node_id, widget: args.widget, demote: args.demote }, 15000),
+    ),
+    def(
+      "panel_search_nodes",
+      "Search installable custom-node packs via the user's BUILT-IN ComfyUI Manager (the same source the Manager UI uses). Returns matching packs {id, title, description}. Use the `id` with panel_install_node. Prefer this over the headless search_custom_nodes tool — it works against the user's actual (Desktop) Manager.",
+      { query: z.string().describe("Search text, e.g. 'kjnodes', 'controlnet', 'ipadapter'."), limit: z.number().int().min(1).max(40).optional() },
+      async (args: A, ctx) => ctx.call({ cmd: "nodes_search", query: args.query, limit: args.limit }, 20000),
+    ),
+    def(
+      "panel_list_nodes",
+      "List the custom-node packs currently installed in the user's ComfyUI (via the built-in Manager). Read-only.",
+      {},
+      async (_args, ctx) => ctx.call({ cmd: "nodes_list" }, 20000),
+    ),
+    def(
+      "panel_install_node",
+      "Install a custom-node pack into the user's ComfyUI via the BUILT-IN Manager (queues the install). Pass `id` (registry id like 'comfyui-kjnodes' or 'author/repo') from panel_search_nodes, or `repository` (git URL) for a nightly install. A ComfyUI restart (panel_restart_comfyui) is usually required afterward to load the nodes — poll panel_node_queue_status first. Prefer this over the headless install_custom_node tool.",
+      {
+        id: z.string().optional().describe("Registry id or 'author/repo'."),
+        repository: z.string().optional().describe("Git URL (for a nightly/from-source install)."),
+        version: z.string().optional().describe("Specific version; default 'latest' (or 'nightly' with repository)."),
+        channel: z.string().optional().describe("Manager channel (default 'default')."),
+        mode: z.enum(["remote", "local", "cache"]).optional().describe("DB source (default 'remote')."),
+      },
+      async (args: A, ctx) =>
+        ctx.call(
+          { cmd: "nodes_install", id: args.id, repository: args.repository, version: args.version, channel: args.channel, mode: args.mode },
+          30000,
+        ),
+    ),
+    def(
+      "panel_node_queue_status",
+      "Check the built-in Manager's install/update queue status (to see if a queued install finished). Read-only.",
+      {},
+      async (_args, ctx) => ctx.call({ cmd: "nodes_queue_status" }, 20000),
+    ),
+    def(
+      "panel_restart_comfyui",
+      "Restart the user's ComfyUI server via the built-in Manager — needed to load newly installed custom nodes. Just CALL THIS DIRECTLY when a restart is needed: the tool itself pops a confirm card and only restarts on a yes (don't ask separately first). ComfyUI and this agent go down briefly, then the panel auto-reconnects and you resume. Only call when a restart is actually needed (e.g. right after installing nodes).",
+      {},
+      async (_args, ctx) => {
+        if (
+          !(await ctx.confirm(
+            "Restart ComfyUI now? It (and this agent) will go down briefly, then reconnect and resume automatically.",
+            "Restart ComfyUI",
+          ))
+        ) {
+          return ok("Cancelled — ComfyUI was not restarted.");
+        }
+        return ctx.call({ cmd: "comfy_reboot" }, 15000);
+      },
+    ),
+  ];
+}
+
+/**
+ * Build the per-tab live-graph MCP server for the Claude (in-process Agent SDK)
+ * backend. `tabId` binds every command to the panel tab this agent serves.
+ *
+ * Behaviorally identical to before the parity refactor — it now just wires the
+ * SHARED tool defs (buildPanelToolDefs) onto the Anthropic SDK server instead of
+ * inlining them, so the Codex HTTP path reuses the exact same surface.
+ */
+export function createPanelMcpServer(
+  bridge: UiBridge,
+  tabId: string,
+): McpSdkServerConfigWithInstance {
+  const ctx = makePanelToolCtx(bridge, tabId);
+  const defs = buildPanelToolDefs();
+  // The Anthropic SDK's tool() accepts (name, description, zodRawShape, cb). The
+  // shared handler is transport-agnostic — bind it to this tab's ctx. Each def's
+  // schema is a distinct zod shape, so the produced tool generics differ; widen
+  // to the SDK's tool-list element type so the heterogeneous array type-checks.
+  type SdkTool = ReturnType<typeof tool>;
+  const tools = defs.map((d) =>
+    tool(d.name, d.description, d.schema, (args: Record<string, unknown>) => d.handler(args, ctx)),
+  ) as unknown as SdkTool[];
   return createSdkMcpServer({
     name: "comfyui-panel",
     version: "1.0.0",
-    tools: [
-      tool(
-        "panel_get_graph",
-        "Read the workflow the user is CURRENTLY VIEWING on their canvas (root graph or an opened subgraph — 'viewing' says which): node ids, types, titles, widget values, and connections. Subgraph nodes are summarized shallowly — drill in with panel_get_subgraph. ALWAYS call this before your first edit so ids and slot names are accurate. This is the user's live graph — they watch your edits happen. Read-only.",
-        {},
-        async () => call({ cmd: "graph_get_state" }),
-      ),
-      tool(
-        "panel_get_subgraph",
-        "Read INSIDE a subgraph node on the user's open graph: ids, types, widget values, and connections of its inner nodes. Use after panel_get_graph shows a node with is_subgraph=true. Read-only.",
-        { node_id: z.number().int().describe("Subgraph node id (is_subgraph=true).") },
-        async (args) => call({ cmd: "graph_get_subgraph", node_id: args.node_id }),
-      ),
-      tool(
-        "panel_add_node",
-        "Add a node to the user's OPEN ComfyUI graph by class_type (e.g. 'KSampler', 'CheckpointLoaderSimple'). The user sees it appear live; Ctrl+Z undoes it. Returns the created node's id, slots, and default widget values.",
-        {
-          class_type: z.string().describe("Exact ComfyUI node class_type to create."),
-          pos: z
-            .tuple([z.number(), z.number()])
-            .optional()
-            .describe("Canvas [x, y]. Auto-placed beside existing nodes when omitted."),
-          title: z.string().optional().describe("Optional custom node title."),
-        },
-        async (args) =>
-          call({ cmd: "graph_add_node", class_type: args.class_type, pos: args.pos, title: args.title }),
-      ),
-      tool(
-        "panel_remove_node",
-        "Remove a node (and its connections) from the user's open graph by id. Undoable with Ctrl+Z.",
-        { node_id: z.number().int().describe("Node id from panel_get_graph.") },
-        async (args) => call({ cmd: "graph_remove_node", node_id: args.node_id }),
-      ),
-      tool(
-        "panel_clear",
-        "Remove EVERY node from the user's open graph — only for an explicit 'clear/reset the canvas'. Just CALL THIS DIRECTLY when they ask to clear: the tool itself pops a confirm card and only wipes on a yes (don't ask separately first). The wipe is a single Ctrl+Z undo. NEVER use this for a 'new workflow' — that's panel_new_workflow (a new tab, leaves this graph intact).",
-        {},
-        async () => {
-          if (
-            !(await confirm(
-              "Clear the canvas? This removes every node from the open workflow. (One Ctrl+Z undoes it.)",
-              "Clear canvas",
-            ))
-          ) {
-            return ok("Cancelled — the canvas was left as-is.");
-          }
-          return call({ cmd: "graph_clear" });
-        },
-      ),
-      tool(
-        "panel_connect",
-        "Connect an output slot of one node to an input slot of another in the user's open graph. Slots accept a name ('MODEL', 'samples') or numeric index. On a name mismatch the error lists available slots — re-check with panel_get_graph. Undoable.",
-        {
-          from_node_id: z.number().int().describe("Source node id."),
-          from_output: slotRef.optional().describe("Source output slot name or index (default 0)."),
-          to_node_id: z.number().int().describe("Target node id."),
-          to_input: slotRef.optional().describe("Target input slot name or index (default 0)."),
-        },
-        async (args) =>
-          call({
-            cmd: "graph_connect",
-            from_node_id: args.from_node_id,
-            from_output: args.from_output,
-            to_node_id: args.to_node_id,
-            to_input: args.to_input,
-          }),
-      ),
-      tool(
-        "panel_disconnect",
-        "Disconnect an input slot of a node in the user's open graph. Undoable with Ctrl+Z.",
-        {
-          node_id: z.number().int().describe("Node id whose input to disconnect."),
-          input: slotRef.optional().describe("Input slot name or index (default 0)."),
-        },
-        async (args) => call({ cmd: "graph_disconnect", node_id: args.node_id, input: args.input }),
-      ),
-      tool(
-        "panel_set_widget",
-        "Set a widget value on a node in the user's open graph (steps, cfg, seed, ckpt_name, text prompts, …). Returns the previous and new value. Undoable with Ctrl+Z.",
-        {
-          node_id: z.number().int().describe("Node id from panel_get_graph."),
-          widget: z.string().describe("Widget name (e.g. 'steps', 'cfg', 'text')."),
-          value: z
-            .union([z.string(), z.number(), z.boolean()])
-            .describe("New value. Must match the widget's expected type."),
-        },
-        async (args) =>
-          call({ cmd: "graph_set_widget", node_id: args.node_id, widget: args.widget, value: args.value }),
-      ),
-      tool(
-        "panel_move_node",
-        "Move a node to a new canvas position [x, y] in the user's open graph. Undoable.",
-        {
-          node_id: z.number().int().describe("Node id from panel_get_graph."),
-          pos: z.tuple([z.number(), z.number()]).describe("New canvas [x, y]."),
-        },
-        async (args) => call({ cmd: "graph_move_node", node_id: args.node_id, pos: args.pos }),
-      ),
-      tool(
-        "panel_canvas",
-        "Control the user's canvas view: 'fit' frames the whole graph, 'center_on_node' jumps to a node (give node_id), 'pan' shifts by dx/dy, 'zoom' sets an absolute scale. View-only.",
-        {
-          action: z.enum(["fit", "center_on_node", "pan", "zoom"]),
-          node_id: z.number().int().optional().describe("Required for center_on_node."),
-          dx: z.number().optional().describe("Pan delta x."),
-          dy: z.number().optional().describe("Pan delta y."),
-          scale: z.number().optional().describe("Absolute zoom for 'zoom' (0.05–4, 1 = 100%)."),
-        },
-        async (args) =>
-          call({
-            cmd: "graph_canvas",
-            action: args.action,
-            node_id: args.node_id,
-            dx: args.dx,
-            dy: args.dy,
-            scale: args.scale,
-          }),
-      ),
-      tool(
-        "panel_run",
-        "Queue the workflow the user has OPEN — exactly like them pressing Queue Prompt (current widget values, the live graph they can see). Returns queued:true, or queued:false with node_errors when frontend validation fails. Use this so the render runs on THEIR canvas and they see the result.",
-        {
-          batch_count: z
-            .number()
-            .int()
-            .min(1)
-            .max(100)
-            .optional()
-            .describe("Times to queue (default 1)."),
-        },
-        async (args) => call({ cmd: "graph_run", batch_count: args.batch_count }, 20000),
-      ),
-      tool(
-        "panel_get_errors",
-        "Read the most recent execution error and per-node validation errors from the user's open ComfyUI tab. Check this when a run fails or after panel_run reports node_errors. Read-only.",
-        {},
-        async () => call({ cmd: "graph_get_errors" }),
-      ),
-      tool(
-        "panel_reload",
-        "Soft-reload yourself to pick up code changes WITHOUT restarting ComfyUI — your chat session resumes automatically and you'll be nudged to continue. Use scope 'orchestrator' (default) after backend/orchestrator code changed (new tools, system prompt, services); use scope 'frontend' after the panel UI (web JS/CSS) changed. This ENDS the current turn — your tools/prompt are reloaded and you continue fresh. For custom-node or model changes that need a full ComfyUI restart, use panel_restart_comfyui instead. Only call this when code has actually changed and needs to take effect now.",
-        {
-          scope: z
-            .enum(["orchestrator", "frontend"])
-            .optional()
-            .describe("'orchestrator' (default): respawn the agent for new backend code. 'frontend': reload the panel UI for new web code."),
-        },
-        async (args) => call({ cmd: "soft_reload", scope: args.scope ?? "orchestrator" }, 15000),
-      ),
-      tool(
-        "panel_list_mcp",
-        "List the MCP servers available to you. Returns the user's inherited servers (from their Claude config) plus your always-present built-ins (comfyui, the live-graph panel server). Use this to check whether a capability (e.g. CivitAI model search) is already connected before offering to add it.",
-        {},
-        async () => {
-          try {
-            const inherited = Object.keys(readUserMcpServers());
-            return ok({
-              inherited,
-              builtin: ["comfyui", "panel"],
-              note: "After panel_add_mcp / panel_remove_mcp, call panel_reload to apply the change to this session.",
-            });
-          } catch (err) {
-            return fail(err);
-          }
-        },
-      ),
-      tool(
-        "panel_add_mcp",
-        "Connect a new MCP server by writing it to the user's Claude config (~/.claude.json) — it then loads into THIS session after you call panel_reload, and also becomes available to the user's normal Claude session. Use for capabilities you don't have yet, e.g. the official CivitAI MCP: name 'civitai', transport 'http', url 'https://mcp.civitai.com/mcp'. ALWAYS ask the user before connecting a remote (http/sse) MCP — it's an external service connection. Some servers need an auth token: pass it via headers (http/sse) or env (stdio).",
-        {
-          name: z.string().describe("Server name/key, e.g. 'civitai'. Letters, digits, dot, dash, underscore."),
-          transport: z.enum(["http", "sse", "stdio"]).describe("'http'/'sse' for a hosted URL server; 'stdio' for a local command."),
-          url: z.string().optional().describe("Server URL (required for http/sse), e.g. 'https://mcp.civitai.com/mcp'."),
-          command: z.string().optional().describe("Executable (required for stdio), e.g. 'npx'."),
-          args: z.array(z.string()).optional().describe("Args for the stdio command."),
-          headers: z.record(z.string(), z.string()).optional().describe("HTTP headers for http/sse (e.g. an Authorization token)."),
-          env: z.record(z.string(), z.string()).optional().describe("Environment variables for a stdio server."),
-        },
-        async (args) => {
-          try {
-            let config: Record<string, unknown>;
-            if (args.transport === "stdio") {
-              if (!args.command) throw new Error("stdio transport requires `command`.");
-              config = {
-                type: "stdio",
-                command: args.command,
-                ...(args.args ? { args: args.args } : {}),
-                ...(args.env ? { env: args.env } : {}),
-              };
-            } else {
-              if (!args.url) throw new Error(`${args.transport} transport requires \`url\`.`);
-              config = {
-                type: args.transport,
-                url: args.url,
-                ...(args.headers ? { headers: args.headers } : {}),
-              };
-            }
-            addUserMcpServer(args.name, config);
-            return ok(
-              `Connected MCP server "${args.name}" (written to your Claude config). Call panel_reload to load it into this session — then its tools become available.`,
-            );
-          } catch (err) {
-            return fail(err);
-          }
-        },
-      ),
-      tool(
-        "panel_remove_mcp",
-        "Remove an MCP server from the user's Claude config by name. Call panel_reload afterward to drop it from this session. Cannot remove the built-in comfyui/panel servers.",
-        { name: z.string().describe("Server name to remove (from panel_list_mcp).") },
-        async (args) => {
-          try {
-            const removed = removeUserMcpServer(args.name);
-            return ok(
-              removed
-                ? `Removed MCP server "${args.name}". Call panel_reload to apply.`
-                : `No MCP server named "${args.name}" in the user config.`,
-            );
-          } catch (err) {
-            return fail(err);
-          }
-        },
-      ),
-      tool(
-        "panel_request_secret",
-        "Securely collect an API token / secret from the user and write it straight to config — you NEVER see the value and it is never saved to chat history. The panel shows a masked input; the pasted value goes directly to the orchestrator, which stores it on the target MCP server (a header for http/sse servers, or an env var for stdio), then you call panel_reload to apply it. Use this for tokens like a CivitAI key (target the 'civitai' server, header 'Authorization', value_prefix 'Bearer ') or a HuggingFace token. Returns only a redacted confirmation.",
-        {
-          label: z.string().describe("Prompt shown above the masked input, e.g. 'Paste your CivitAI API token'."),
-          target_kind: z.enum(["header", "env"]).describe("'header' for http/sse servers (e.g. Authorization); 'env' for stdio servers."),
-          mcp_server: z.string().describe("Existing MCP server name to attach the secret to, e.g. 'civitai'."),
-          key: z.string().describe("Header name (e.g. 'Authorization') or env var name (e.g. 'HF_TOKEN')."),
-          value_prefix: z.string().optional().describe("Optional string prepended to the token, e.g. 'Bearer '."),
-          hint: z.string().optional().describe("Optional reassurance/help text shown under the input."),
-        },
-        async (args) => {
-          try {
-            const secret = await bridge.send(
-              { cmd: "request_secret", label: args.label, hint: args.hint },
-              { tabId, timeoutMs: 300000 },
-            );
-            if (typeof secret !== "string" || secret.length === 0) {
-              return ok("No token entered — nothing was saved.");
-            }
-            setUserMcpServerSecret(
-              { kind: args.target_kind, server: args.mcp_server, key: args.key, prefix: args.value_prefix },
-              secret,
-            );
-            // Redacted ack ONLY — the secret never enters the agent's context.
-            return ok(
-              `🔒 Token saved to MCP server "${args.mcp_server}" (${args.target_kind} "${args.key}"). Call panel_reload to load it.`,
-            );
-          } catch (err) {
-            return fail(err);
-          }
-        },
-      ),
-      tool(
-        "panel_get_content_mode",
-        "Query the persistent adult-content (NSFW) consent state for this user. Returns { nsfw_allowed, decided_at }. ALWAYS check this before surfacing any adult/NSFW models, prompts, workflows, or imagery. It defaults to FALSE (SFW-only) until the user passes the consent gate (panel_request_adult_consent). Read-only.",
-        {},
-        async () => {
-          try {
-            const c = getNsfwConsent();
-            return ok({ nsfw_allowed: c.allowed, decided_at: c.decidedAt ?? null });
-          } catch (err) {
-            return fail(err);
-          }
-        },
-      ),
-      tool(
-        "panel_request_adult_consent",
-        "Show the user the adult-content consent gate and persist their decision. Call this ONLY when a request clearly intends NSFW/adult work AND panel_get_content_mode shows it's not already allowed. It renders a card asking the user to confirm they are 18+ AND that adult content is legal in their region; an affirmative answer turns the mode ON persistently (across reloads), a negative keeps it SFW. Returns the resulting { nsfw_allowed } state. Never assume consent — this tool is the only way to enable it.",
-        {
-          reason: z
-            .string()
-            .optional()
-            .describe("Optional one-line context shown to the user about why you're asking (e.g. 'to search Civitai for mature LoRAs')."),
-        },
-        async (args) => {
-          try {
-            const question =
-              "Adult-content gate — to enable NSFW work in this session, please confirm BOTH that you are at least 18 years old AND that creating/viewing adult content is legal in your country/region." +
-              (args.reason ? `\n\nContext: ${args.reason}` : "") +
-              "\n\nThis is recorded as your consent and can be turned off anytime.";
-            const reply = await bridge.send(
-              {
-                cmd: "ask_user",
-                question,
-                header: "18+ consent",
-                options: [
-                  { label: "Yes — I'm 18+ and it's legal in my region", description: "Enable adult content for this session" },
-                  { label: "No — keep it SFW", description: "Stay in safe-for-work mode" },
-                ],
-              },
-              { tabId, timeoutMs: 300000 },
-            );
-            const allowed = isAffirmative(reply);
-            const state = setNsfwConsent(allowed);
-            return ok({
-              nsfw_allowed: state.allowed,
-              decided_at: state.decidedAt,
-              note: allowed
-                ? "Adult mode enabled. Hard limits still apply: no minors, no sexual deepfakes of real people, no depictions of actual non-consensual acts."
-                : "Kept SFW. Don't surface adult content.",
-            });
-          } catch (err) {
-            return fail(err);
-          }
-        },
-      ),
-      tool(
-        "panel_disable_adult_mode",
-        "Turn the adult-content (NSFW) consent OFF — revert to SFW-only. Use when the user asks to disable it. No gate needed to turn it off.",
-        {},
-        async () => {
-          try {
-            const state = setNsfwConsent(false);
-            return ok({ nsfw_allowed: state.allowed, note: "Adult mode disabled — back to SFW-only." });
-          } catch (err) {
-            return fail(err);
-          }
-        },
-      ),
-      tool(
-        "panel_set_todo",
-        "Show/update a live TODO checklist in the panel's footer tray — a running view of your plan that the user watches as you work a multi-step task. Pass the FULL ordered list each call (it replaces the tray); update each step's status as you progress (pending → active → done). Pass an empty array to clear it. Use for genuinely multi-step work (3+ steps); skip it for quick one-shot replies. Mark exactly one step 'active' at a time.",
-        {
-          items: z
-            .array(
-              z.object({
-                text: z.string().describe("Short step description (a few words)."),
-                status: z
-                  .enum(["pending", "active", "done"])
-                  .optional()
-                  .describe("Step state (default 'pending'). Mark the one you're on 'active'."),
-              }),
-            )
-            .describe("The full ordered checklist (replaces the current one). Empty array clears the tray."),
-        },
-        async (args) => call({ cmd: "set_todo", items: args.items }, 5000),
-      ),
-      tool(
-        "panel_ask",
-        "Ask the user to choose between options — renders an interactive question card in the panel chat and BLOCKS until they pick, returning their choice as text. Use this (NOT the AskUserQuestion tool, which never renders here) whenever you need the user to decide between options. Each option may carry a short description. The card always includes an 'Other…' free-text field, so the returned string may be a listed label or whatever the user typed (comma-joined for multi_select). Ask only when the answer genuinely changes what you do.",
-        {
-          question: z.string().describe("The question to ask, e.g. 'Which sampler should I use?'"),
-          options: z
-            .array(
-              z.object({
-                label: z.string().describe("Short choice text shown on the button."),
-                description: z.string().optional().describe("Optional one-line explanation of this choice."),
-              }),
-            )
-            .min(2)
-            .describe("The choices (at least 2). An 'Other' free-text field is added automatically."),
-          header: z.string().optional().describe("Very short label/chip for the card (e.g. 'Sampler')."),
-          multi_select: z.boolean().optional().describe("Allow selecting multiple options (default false)."),
-        },
-        async (args) =>
-          call(
-            {
-              cmd: "ask_user",
-              question: args.question,
-              options: args.options,
-              header: args.header,
-              multi_select: args.multi_select,
-            },
-            // Human-in-the-loop: wait up to 10 minutes for a pick.
-            600000,
-          ),
-      ),
-      tool(
-        "panel_save_workflow",
-        "Save the user's open workflow PROGRAMMATICALLY — no Save/Rename dialog ever pops. A never-saved workflow is auto-named and persisted; pass `name` to give it (or rename it to) a specific name. Use this freely (e.g. after building a graph) — it won't interrupt the user.",
-        { name: z.string().optional().describe("Name to save/rename to (no .json needed). Omit to save in place / auto-name an unsaved workflow.") },
-        async (args) =>
-          args.name
-            ? call({ cmd: "workflow_save_as", name: args.name }, 15000)
-            : call({ cmd: "workflow_save" }, 15000),
-      ),
-      tool(
-        "panel_list_workflows",
-        "List the user's OPEN workflow tabs and which one is active (path, filename, modified, persisted). Use this to know what's open before switching/renaming/closing. Read-only.",
-        {},
-        async () => call({ cmd: "workflow_list" }),
-      ),
-      tool(
-        "panel_new_workflow",
-        "Open a brand-new BLANK workflow in a NEW TAB. Use this whenever the user wants a 'new workflow' / 'fresh canvas' / 'start over for a new project'. This does NOT touch their current workflow — it opens a separate tab. NEVER use panel_clear for a new workflow (panel_clear wipes the CURRENT graph and is only for 'clear/reset this canvas').",
-        {},
-        async () => call({ cmd: "workflow_new" }, 15000),
-      ),
-      tool(
-        "panel_open_workflow",
-        "Open / switch to a workflow by path or filename (from panel_list_workflows). Switches the active tab to it.",
-        { path: z.string().describe("Workflow path, filename, or key from panel_list_workflows.") },
-        async (args) => call({ cmd: "workflow_open", path: args.path }, 15000),
-      ),
-      tool(
-        "panel_rename_workflow",
-        "Rename a workflow (the active one, or the one matching `path`).",
-        {
-          name: z.string().describe("New name (no .json needed)."),
-          path: z.string().optional().describe("Which workflow to rename; omit for the active one."),
-        },
-        async (args) => call({ cmd: "workflow_rename", name: args.name, path: args.path }, 15000),
-      ),
-      tool(
-        "panel_close_workflow",
-        "Close a workflow tab (the active one, or the one matching `path`). Refuses if it has unsaved changes unless force:true — save first to avoid losing the user's work.",
-        {
-          path: z.string().optional().describe("Which workflow to close; omit for the active one."),
-          force: z.boolean().optional().describe("Close even with unsaved changes (discards them). Default false."),
-        },
-        async (args) => call({ cmd: "workflow_close", path: args.path, force: args.force }, 15000),
-      ),
-      tool(
-        "panel_select_nodes",
-        "Select nodes on the user's canvas by id (highlights them, sets the multi-selection). Useful before panel_create_subgraph.",
-        { node_ids: z.array(z.number().int()).describe("Node ids to select.") },
-        async (args) => call({ cmd: "graph_select_nodes", node_ids: args.node_ids }),
-      ),
-      tool(
-        "panel_create_subgraph",
-        "Group the given nodes into a SUBGRAPH (ComfyUI 'Convert to Subgraph') on the user's canvas — collapses them into one subgraph node. Returns the new subgraph node id. Undoable with Ctrl+Z.",
-        { node_ids: z.array(z.number().int()).describe("Node ids to group into a subgraph.") },
-        async (args) => call({ cmd: "graph_create_subgraph", node_ids: args.node_ids }, 15000),
-      ),
-      tool(
-        "panel_create_group",
-        "Create a labeled GROUP box (the colored rectangle that visually frames a region) on the user's open graph. This is the lightweight organizer, DISTINCT from a subgraph (which nests/hides nodes) — a group just draws a titled box around nodes, leaving them in place. Pass node_ids to auto-size the box around those nodes, or bounds [x, y, width, height] for an explicit box. Optional color (hex like '#3f789e') and title. Returns the new group's id. Undoable with Ctrl+Z.",
-        {
-          title: z.string().optional().describe("Group label shown on the box header."),
-          node_ids: z
-            .array(z.number().int())
-            .optional()
-            .describe("Wrap these nodes — the box is auto-sized (with padding) around them."),
-          bounds: z
-            .tuple([z.number(), z.number(), z.number(), z.number()])
-            .optional()
-            .describe("Explicit [x, y, width, height]. Ignored if node_ids is given."),
-          color: z.string().optional().describe("Box/header color, e.g. '#3f789e'."),
-          font_size: z.number().optional().describe("Title font size (default 24)."),
-        },
-        async (args) =>
-          call(
-            {
-              cmd: "graph_create_group",
-              title: args.title,
-              node_ids: args.node_ids,
-              bounds: args.bounds,
-              color: args.color,
-              font_size: args.font_size,
-            },
-            15000,
-          ),
-      ),
-      tool(
-        "panel_move_group",
-        "Move a group box to a new top-left [x, y] on the user's open graph. By default the nodes inside the group move with it (like dragging the group header); pass move_nodes:false to move only the box. Group id comes from panel_get_graph (the `groups` array) or panel_create_group. Undoable.",
-        {
-          group_id: z.number().int().describe("Group id from panel_get_graph / panel_create_group."),
-          pos: z.tuple([z.number(), z.number()]).describe("New top-left [x, y]."),
-          move_nodes: z.boolean().optional().describe("Move the contained nodes too (default true)."),
-        },
-        async (args) =>
-          call({ cmd: "graph_move_group", group_id: args.group_id, pos: args.pos, move_nodes: args.move_nodes }),
-      ),
-      tool(
-        "panel_edit_group",
-        "Edit a group box: its title, color, font_size, and/or bounds [x, y, width, height]. Only the fields you pass are changed. Undoable.",
-        {
-          group_id: z.number().int().describe("Group id from panel_get_graph / panel_create_group."),
-          title: z.string().optional().describe("New label."),
-          color: z.string().optional().describe("New box/header color, e.g. '#3f789e'."),
-          font_size: z.number().optional().describe("New title font size."),
-          bounds: z
-            .tuple([z.number(), z.number(), z.number(), z.number()])
-            .optional()
-            .describe("Resize/reposition the box: [x, y, width, height]."),
-        },
-        async (args) =>
-          call(
-            {
-              cmd: "graph_edit_group",
-              group_id: args.group_id,
-              title: args.title,
-              color: args.color,
-              font_size: args.font_size,
-              bounds: args.bounds,
-            },
-            15000,
-          ),
-      ),
-      tool(
-        "panel_remove_group",
-        "Remove a group box from the user's open graph. The nodes inside the group are NOT deleted — only the box. Undoable.",
-        { group_id: z.number().int().describe("Group id from panel_get_graph / panel_create_group.") },
-        async (args) => call({ cmd: "graph_remove_group", group_id: args.group_id }, 15000),
-      ),
-      tool(
-        "panel_set_node_title",
-        "Rename a node's TITLE (the label on its header) — e.g. to label a node by its purpose. Different from panel_set_widget (which changes a value). Undoable with Ctrl+Z.",
-        {
-          node_id: z.number().int().describe("Node id from panel_get_graph."),
-          title: z.string().describe("New title text."),
-        },
-        async (args) => call({ cmd: "graph_set_title", node_id: args.node_id, title: args.title }, 15000),
-      ),
-      tool(
-        "panel_set_node_collapsed",
-        "Collapse (minimize) or expand a node on the user's open graph. Collapsed nodes shrink to just their title bar — handy for tidying loaders or rarely-touched nodes. Undoable.",
-        {
-          node_id: z.number().int().describe("Node id from panel_get_graph."),
-          collapsed: z.boolean().optional().describe("true = collapse/minimize (default), false = expand."),
-        },
-        async (args) =>
-          call({ cmd: "graph_set_node_collapsed", node_id: args.node_id, collapsed: args.collapsed }),
-      ),
-      tool(
-        "panel_set_node_color",
-        "Set a node's title-bar and/or body color on the user's open graph. Easiest: pass a `preset` from ComfyUI's palette (red, brown, green, blue, pale_blue, cyan, purple, yellow, black) for matched colors. Or set explicit `color` (title bar) and/or `bgcolor` (body) as hex like '#3f789e'. Pass null for a field to reset it to the theme default. Great for colour-coding stages. Undoable.",
-        {
-          node_id: z.number().int().describe("Node id from panel_get_graph."),
-          preset: z
-            .enum(["red", "brown", "green", "blue", "pale_blue", "cyan", "purple", "yellow", "black"])
-            .optional()
-            .describe("Named LiteGraph color preset (sets both title + body)."),
-          color: z.string().nullable().optional().describe("Title-bar color hex, or null to clear. Ignored if preset given."),
-          bgcolor: z.string().nullable().optional().describe("Body color hex, or null to clear. Ignored if preset given."),
-        },
-        async (args) =>
-          call({
-            cmd: "graph_set_node_color",
-            node_id: args.node_id,
-            preset: args.preset,
-            color: args.color,
-            bgcolor: args.bgcolor,
-          }),
-      ),
-      tool(
-        "panel_screenshot",
-        "Render the workflow the user is currently viewing (root graph, or the open subgraph) to a PNG and return it as an IMAGE so you can SEE the layout. It frames the whole graph (nodes + groups), captures, then restores the user's view. Use this to visually verify a layout you just built — overlaps, alignment, rails, colors, group bands — instead of reasoning from coordinates alone.",
-        { padding: z.number().optional().describe("Margin around the graph in px (default 60).") },
-        async (args) => {
-          try {
-            const res = (await bridge.send({ cmd: "graph_screenshot", padding: args.padding }, { tabId })) as {
-              image?: string;
-              mimeType?: string;
-            };
-            if (!res?.image) return fail("screenshot returned no image");
-            return { content: [{ type: "image", data: res.image, mimeType: res.mimeType ?? "image/png" }] };
-          } catch (err) {
-            return fail(err);
-          }
-        },
-      ),
-      tool(
-        "panel_enter_subgraph",
-        "Navigate INTO a subgraph node so you can read and EDIT its inner nodes — after this, panel_get_graph and all panel_* edit tools target the subgraph's inner graph (the user sees the canvas drill in). This is how you edit inside a subgraph (e.g. tweak a widget on an inner node). Call panel_exit_subgraph when done. Returns the new viewing scope.",
-        { node_id: z.number().int().describe("Subgraph node id (is_subgraph=true).") },
-        async (args) => call({ cmd: "graph_enter_subgraph", node_id: args.node_id }, 15000),
-      ),
-      tool(
-        "panel_exit_subgraph",
-        "Leave the current subgraph and return to the root graph (undo a panel_enter_subgraph). After this, panel_* tools target the root graph again.",
-        {},
-        async () => call({ cmd: "graph_exit_subgraph" }, 15000),
-      ),
-      tool(
-        "panel_move_rail",
-        "Reposition a subgraph's input or output RAIL (the boundary I/O node that the inner wires connect to). You MUST be INSIDE the subgraph first (panel_enter_subgraph). Read current rail positions from panel_get_graph's `rails` field. Use this to place the input rail just left of the first node column and the output rail just right of the last one, so a tidy interior layout doesn't leave the rails stranded. rail is 'input' or 'output'.",
-        {
-          rail: z.enum(["input", "output"]).describe("Which boundary rail to move."),
-          pos: z.tuple([z.number(), z.number()]).describe("New top-left [x, y]."),
-        },
-        async (args) => call({ cmd: "graph_move_rail", rail: args.rail, pos: args.pos }),
-      ),
-      tool(
-        "panel_promote_widget",
-        "Expose (promote) an INNER subgraph widget on the PARENT subgraph node, so it can be set from outside without opening the subgraph — e.g. surface an inner KSampler's `seed`/`steps` on the subgraph node. You MUST be inside the subgraph first (call panel_enter_subgraph): `node_id` is an inner node (from panel_get_graph while inside) and `widget` is one of its widget names. Pass demote:true to un-promote. Undoable with Ctrl+Z.",
-        {
-          node_id: z.number().int().describe("Inner node id (from panel_get_graph while inside the subgraph)."),
-          widget: z.string().describe("Name of the widget on that node to promote (e.g. 'seed', 'steps', 'text')."),
-          demote: z.boolean().optional().describe("Set true to UN-promote (remove the widget from the parent node)."),
-        },
-        async (args) =>
-          call({ cmd: "graph_promote_widget", node_id: args.node_id, widget: args.widget, demote: args.demote }, 15000),
-      ),
-      tool(
-        "panel_search_nodes",
-        "Search installable custom-node packs via the user's BUILT-IN ComfyUI Manager (the same source the Manager UI uses). Returns matching packs {id, title, description}. Use the `id` with panel_install_node. Prefer this over the headless search_custom_nodes tool — it works against the user's actual (Desktop) Manager.",
-        { query: z.string().describe("Search text, e.g. 'kjnodes', 'controlnet', 'ipadapter'."), limit: z.number().int().min(1).max(40).optional() },
-        async (args) => call({ cmd: "nodes_search", query: args.query, limit: args.limit }, 20000),
-      ),
-      tool(
-        "panel_list_nodes",
-        "List the custom-node packs currently installed in the user's ComfyUI (via the built-in Manager). Read-only.",
-        {},
-        async () => call({ cmd: "nodes_list" }, 20000),
-      ),
-      tool(
-        "panel_install_node",
-        "Install a custom-node pack into the user's ComfyUI via the BUILT-IN Manager (queues the install). Pass `id` (registry id like 'comfyui-kjnodes' or 'author/repo') from panel_search_nodes, or `repository` (git URL) for a nightly install. A ComfyUI restart (panel_restart_comfyui) is usually required afterward to load the nodes — poll panel_node_queue_status first. Prefer this over the headless install_custom_node tool.",
-        {
-          id: z.string().optional().describe("Registry id or 'author/repo'."),
-          repository: z.string().optional().describe("Git URL (for a nightly/from-source install)."),
-          version: z.string().optional().describe("Specific version; default 'latest' (or 'nightly' with repository)."),
-          channel: z.string().optional().describe("Manager channel (default 'default')."),
-          mode: z.enum(["remote", "local", "cache"]).optional().describe("DB source (default 'remote')."),
-        },
-        async (args) =>
-          call(
-            { cmd: "nodes_install", id: args.id, repository: args.repository, version: args.version, channel: args.channel, mode: args.mode },
-            30000,
-          ),
-      ),
-      tool(
-        "panel_node_queue_status",
-        "Check the built-in Manager's install/update queue status (to see if a queued install finished). Read-only.",
-        {},
-        async () => call({ cmd: "nodes_queue_status" }, 20000),
-      ),
-      tool(
-        "panel_restart_comfyui",
-        "Restart the user's ComfyUI server via the built-in Manager — needed to load newly installed custom nodes. Just CALL THIS DIRECTLY when a restart is needed: the tool itself pops a confirm card and only restarts on a yes (don't ask separately first). ComfyUI and this agent go down briefly, then the panel auto-reconnects and you resume. Only call when a restart is actually needed (e.g. right after installing nodes).",
-        {},
-        async () => {
-          if (
-            !(await confirm(
-              "Restart ComfyUI now? It (and this agent) will go down briefly, then reconnect and resume automatically.",
-              "Restart ComfyUI",
-            ))
-          ) {
-            return ok("Cancelled — ComfyUI was not restarted.");
-          }
-          return call({ cmd: "comfy_reboot" }, 15000);
-        },
-      ),
-    ],
+    tools,
   });
+}
+
+/**
+ * Register the SHARED panel_* tools onto a `@modelcontextprotocol/sdk` McpServer
+ * for the HTTP transport (Codex backend). `ctx` is tab-bound, so this server's
+ * tools forward to the bridge for THAT tab — same surface as the Claude path.
+ */
+export function registerPanelTools(server: McpServer, ctx: PanelToolCtx): void {
+  for (const d of buildPanelToolDefs()) {
+    server.registerTool(
+      d.name,
+      {
+        description: d.description,
+        // The MCP SDK accepts a zod raw shape as inputSchema (same shape the
+        // Anthropic SDK tool() takes), so the shared schema drops straight in.
+        inputSchema: d.schema,
+      },
+      (async (args: Record<string, unknown>) => {
+        const res = await d.handler(args ?? {}, ctx);
+        // ToolResult is already the MCP CallToolResult shape (content[] + isError).
+        return res as never;
+      }) as never,
+    );
+  }
 }
