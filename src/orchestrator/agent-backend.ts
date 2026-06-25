@@ -115,6 +115,18 @@ export interface BackendStartOptions {
    * session. PanelAgent gates this so exactly one batch is released per turn.
    */
   channel: AsyncIterable<NeutralTurn>;
+  /**
+   * LIVENESS signal — fired by the backend on ANY sign the provider is alive for
+   * the active turn, even when that signal is NOT translated into an AgentEvent.
+   * PanelAgent wires this to its per-turn idle watchdog so a healthy-but-quiet
+   * turn (e.g. a Codex MCP tool call running a multi-minute ComfyUI generation
+   * that emits only raw app-server notifications, never AgentEvents) keeps the
+   * watchdog armed and does NOT falsely trip. The backend should call it on every
+   * raw notification (Codex app-server) / every SDKMessage (Claude) — cheap and
+   * idempotent. A TRUE freeze (the provider emits nothing at all) never fires it,
+   * so the watchdog still catches a real zero-event hang. Optional.
+   */
+  onActivity?: () => void;
 }
 
 export interface SendMeta {

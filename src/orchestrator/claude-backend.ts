@@ -352,6 +352,12 @@ export class ClaudeBackend implements AgentBackend {
     const q = query({ prompt: prompt(), options: this.buildOptions(opts) });
     this.q = q;
     for await (const message of q) {
+      // LIVENESS: every SDKMessage — including the ones route() doesn't translate
+      // (tool-progress, rate-limit, etc.) — is a sign the session is alive, so
+      // re-arm PanelAgent's idle watchdog. Claude already streams continuously, so
+      // this is effectively a no-op for behavior here; it keeps the watchdog's
+      // re-arm source uniform across both backends via the port.
+      opts.onActivity?.();
       yield* this.route(message);
     }
   }

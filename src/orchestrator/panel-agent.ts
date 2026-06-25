@@ -528,6 +528,15 @@ export class PanelAgent {
           ...(resume ? { resume } : {}),
           sessionId: this.sessionId,
           rewindAnchor: rewind?.anchor ?? null,
+          // LIVENESS: re-arm the freeze watchdog on ANY sign the backend is alive —
+          // not just translated AgentEvents. A long Codex tool call (panel_run →
+          // a multi-minute ComfyUI generation) emits raw app-server notifications
+          // throughout but may translate to NO AgentEvents during the wait; without
+          // this the watchdog would falsely trip on a HEALTHY generation and
+          // interrupt the turn. handleEvent() still bumps on real events; this
+          // covers the silent-but-working gap between them. A genuine zero-event
+          // freeze fires neither path, so the real-stall catch is preserved.
+          onActivity: () => this.bumpIdleWatchdog(),
         })) {
           this.handleEvent(ev);
         }

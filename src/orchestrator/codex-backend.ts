@@ -389,6 +389,38 @@ function toCodexEffort(effort: string | undefined): string | null {
   return null; // unknown level → let the app-server pick its default
 }
 
+/**
+ * Derive a display name for a Codex app-server `item` (from item/started and
+ * item/completed) when it represents a TOOL-like action — an MCP tool call, a
+ * shell command, a file change, a web search, etc. Returns null for non-tool
+ * items (agentMessage / reasoning), which the delta/commit paths already handle,
+ * so the caller skips emitting a tool_call for them. Best-effort + defensive: the
+ * exact item shape varies by app-server version, so we probe the common name
+ * fields and fall back to the item `type`.
+ */
+export function toolNameOf(item: Record<string, unknown> | undefined): string | null {
+  if (!item || typeof item !== "object") return null;
+  const type = typeof item.type === "string" ? item.type : undefined;
+  // These item types are text/reasoning, not tools — they're surfaced via the
+  // assistant_delta / assistant commit paths, so don't double-report them.
+  if (type === "agentMessage" || type === "reasoning") return null;
+  // MCP tool calls carry a tool name (and often a server) — prefer the most
+  // specific identifier available, then fall back to the item type.
+  const pick = (...keys: string[]): string | undefined => {
+    for (const k of keys) {
+      const v = item[k];
+      if (typeof v === "string" && v) return v;
+    }
+    return undefined;
+  };
+  const server = pick("server", "serverName");
+  const tool = pick("tool", "toolName", "name", "command");
+  if (tool) return server ? `${server}.${tool}` : tool;
+  // No explicit name field — use the item type as the label (commandExecution,
+  // fileChange, webSearch, …) so the panel at least shows that a tool ran.
+  return type ?? null;
+}
+
 /** A declared MCP server for the Codex app-server. Either a stdio command (the
  *  headless comfyui MCP) or a streamable-HTTP url (the panel_* loopback server). */
 export type CodexMcpServerSpec =
@@ -705,9 +737,11 @@ export class CodexBackend implements AgentBackend {
       ...(threadModel ? { model: threadModel } : {}),
     };
 
-    // Process the neutral channel one turn at a time.
+    // Process the neutral channel one turn at a time. onActivity is the LIVENESS
+    // signal — every raw app-server notification for the active turn re-arms
+    // PanelAgent's idle watchdog so a long, quiet generation doesn't falsely trip.
     for await (const turn of opts.channel) {
-      yield* this.runTurn(client, turn);
+      yield* this.runTurn(client, turn, opts.onActivity);
     }
   }
 
@@ -716,7 +750,11 @@ export class CodexBackend implements AgentBackend {
    *  app-server child exits mid-turn (P0-2 — never deadlock). Notifications are
    *  buffered until the turnId is known and then filtered by belongsToTurn (P1-3)
    *  so a stale/interleaved same-thread notification can't complete the wrong turn. */
-  private async *runTurn(client: AppServerClient, turn: NeutralTurn): AsyncGenerator<AgentEvent> {
+  private async *runTurn(
+    client: AppServerClient,
+    turn: NeutralTurn,
+    onActivity?: () => void,
+  ): AsyncGenerator<AgentEvent> {
     const threadId = this.threadId!;
     // Event queue bridging the push-based notification handler to this pull-based
     // async generator. The handler enqueues normalized AgentEvents; we drain.
@@ -834,20 +872,37 @@ export class CodexBackend implements AgentBackend {
           }
           break;
         }
+        case "item/started": {
+          // A non-message item began (a tool/command/MCP call or file change). Emit
+          // a tool_call(start) AgentEvent so the panel has TOOL VISIBILITY (the
+          // documented P2 gap — Codex previously surfaced no tool activity at all)
+          // and the watchdog re-arms on a translated event too. agentMessage /
+          // reasoning items aren't "tools" — they're handled by the delta/commit
+          // paths above — so skip them here.
+          const item = params.item as Record<string, unknown> | undefined;
+          const name = toolNameOf(item);
+          if (name) push({ type: "tool_call", name, phase: "start", detail: item });
+          break;
+        }
         case "item/completed": {
           // The authoritative commit for a finished item. Close any open stream
-          // (reasoning OR reply) then, for an agentMessage, emit the canonical
-          // `assistant` event.
-          const item = params.item as { type?: string; text?: string; id?: string } | undefined;
+          // (reasoning OR reply) then emit the canonical event: `assistant` for an
+          // agentMessage, or tool_call(end) for a finished tool/command/MCP item.
+          const item = params.item as Record<string, unknown> | undefined;
+          const itemType = item?.type as string | undefined;
           closeStream();
-          if (item?.type === "agentMessage") {
-            const text = (item.text ?? "").trim();
+          if (itemType === "agentMessage") {
+            const text = ((item?.text as string | undefined) ?? "").trim();
+            const id = item?.id as string | undefined;
             push({
               type: "assistant",
               text,
-              ...(item.id ? { id: item.id } : {}),
+              ...(id ? { id } : {}),
               // No per-turn rewind anchor for Codex (forkAtAnchor=false) — omit uuid.
             });
+          } else {
+            const name = toolNameOf(item);
+            if (name) push({ type: "tool_call", name, phase: "end", detail: item });
           }
           break;
         }
@@ -876,6 +931,21 @@ export class CodexBackend implements AgentBackend {
 
     const prev = client.notificationHandler;
     client.notificationHandler = (msg: RpcMessage) => {
+      // LIVENESS (watchdog re-arm): ANY notification received while this turn is
+      // in flight is a sign the app-server is alive and working — fire onActivity
+      // BEFORE buffering/filtering/translating, so even raw notifications that
+      // produce NO AgentEvent (a long MCP tool call running a multi-minute ComfyUI
+      // generation: item/started, item/updated, tool/exec progress, …) keep
+      // PanelAgent's idle watchdog armed. Without this a HEALTHY long generation
+      // looks idle and the watchdog falsely trips. A genuine zero-event freeze
+      // (the app-server emits nothing at all) never reaches here, so the real
+      // freeze-catch is preserved. Cheap + best-effort — never let it throw into
+      // the JSON-RPC reader.
+      try {
+        onActivity?.();
+      } catch {
+        // a watchdog bump must never break the protocol reader
+      }
       // Until the turnId is known, buffer everything (we can't yet tell which
       // turn a notification belongs to). Replayed after turn/start resolves.
       if (!turnIdKnown) {
