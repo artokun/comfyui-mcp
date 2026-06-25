@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { config, getComfyUIApiHost, getComfyUIProtocol } from "../config.js";
+import { config, getComfyUIBaseUrl } from "../config.js";
+import { comfyuiFetch } from "../comfyui/fetch.js";
 import { NodeSnapshotError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 
@@ -34,7 +35,7 @@ export interface ListSnapshotsResult {
 }
 
 function managerBaseUrl(): string {
-  return `${getComfyUIProtocol()}://${getComfyUIApiHost()}`;
+  return getComfyUIBaseUrl();
 }
 
 /**
@@ -50,7 +51,7 @@ async function managerFetch(
 
   let res: Response;
   try {
-    res = await fetch(url, init);
+    res = await comfyuiFetch(url, init);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new NodeSnapshotError(

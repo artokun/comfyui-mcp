@@ -6,6 +6,19 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### Added
+
+- **Remote self-hosted ComfyUI behind a reverse proxy / API gateway (#52).**
+  `COMFYUI_URL` now **preserves a path prefix** (e.g. `https://host/comfyapi`),
+  so requests route under the prefix instead of hitting `/prompt`,
+  `/system_stats`, … at the root. New `COMFYUI_AUTH_TOKEN` (+ optional
+  `COMFYUI_AUTH_HEADER`, default `Authorization`, and `COMFYUI_AUTH_SCHEME`,
+  default `Bearer`) attaches a generic auth header to **every** ComfyUI request
+  — both the direct HTTP calls and the underlying client/WebSocket library.
+  This is independent of Comfy Cloud mode (`COMFYUI_API_KEY` / `X-API-Key`), so
+  a normal self-hosted instance behind a gateway no longer gets misread as
+  Comfy Cloud. Requested by [@NitishMamadgi](https://github.com/NitishMamadgi).
+
 ## [0.17.1] - 2026-06-23
 
 ### Fixed

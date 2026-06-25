@@ -10,8 +10,8 @@ const mockConfig = vi.hoisted(() => ({
 
 vi.mock("../../config.js", () => ({
   config: mockConfig,
-  getComfyUIApiHost: () => "127.0.0.1:8188",
-  getComfyUIProtocol: () => "http",
+  getComfyUIBaseUrl: () => "http://127.0.0.1:8188",
+  getComfyUIAuthHeaders: () => ({}),
 }));
 
 vi.mock("node:child_process", () => ({

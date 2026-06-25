@@ -1,6 +1,7 @@
 import type { WorkflowJSON, ObjectInfo } from "../comfyui/types.js";
 import { getObjectInfo } from "../comfyui/client.js";
-import { getComfyUIProtocol, getComfyUIApiHost } from "../config.js";
+import { getComfyUIBaseUrl } from "../config.js";
+import { comfyuiFetch } from "../comfyui/fetch.js";
 import { ComfyUIError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 
@@ -117,8 +118,7 @@ export interface WorkflowDepsDeps {
   queueStatus: () => Promise<ManagerQueueStatus>;
 }
 
-const managerBase = (): string =>
-  `${getComfyUIProtocol()}://${getComfyUIApiHost()}`;
+const managerBase = (): string => getComfyUIBaseUrl();
 
 /**
  * Minimal local fetch wrapper for ComfyUI-Manager endpoints.
@@ -132,7 +132,7 @@ async function managerFetch(
   logger.debug("Manager API request", { url, method: init?.method ?? "GET" });
   let res: Response;
   try {
-    res = await fetch(url, init);
+    res = await comfyuiFetch(url, init);
   } catch (err) {
     throw new ComfyUIError(
       `Failed to reach ComfyUI-Manager at ${url}: ${err instanceof Error ? err.message : err}. ` +

@@ -449,12 +449,15 @@ The server auto-detects your ComfyUI installation and port. Override with enviro
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `COMFYUI_URL` | | Full ComfyUI URL, e.g. `https://comfy.example.com:8443` — overrides `COMFYUI_HOST`/`PORT`/`SSL` and skips auto-detection. Non-loopback hosts opt into **remote mode**. |
+| `COMFYUI_URL` | | Full ComfyUI URL, e.g. `https://comfy.example.com:8443` — overrides `COMFYUI_HOST`/`PORT`/`SSL` and skips auto-detection. A **path prefix is preserved** (e.g. `https://host/comfyapi`) for reverse-proxied instances. Non-loopback hosts opt into **remote mode**. |
 | `COMFYUI_HOST` | `127.0.0.1` | ComfyUI server address |
 | `COMFYUI_PORT` | *(auto-detect)* | ComfyUI server port (tries 8188, then 8000) |
 | `COMFYUI_PATH` | *(auto-detect)* | Path to ComfyUI data directory. Auto-detection suppressed in remote/cloud modes. |
 | `COMFYUI_API_KEY` | | Comfy Cloud API key. When set, **cloud mode** is active and the server talks to `cloud.comfy.org`. Never logged. |
 | `COMFYUI_CLOUD_URL` | `https://cloud.comfy.org` | Override the Comfy Cloud endpoint (testing/staging). |
+| `COMFYUI_AUTH_TOKEN` | | Generic auth token for a **self-hosted ComfyUI behind a reverse proxy / API gateway** (distinct from Comfy Cloud). When set, attached to every ComfyUI request. Never logged. |
+| `COMFYUI_AUTH_HEADER` | `Authorization` | Header name for `COMFYUI_AUTH_TOKEN` (e.g. `X-API-Key`). |
+| `COMFYUI_AUTH_SCHEME` | `Bearer` for `Authorization`, else none | Scheme prefix on the token value (e.g. `Bearer`, `Token`). |
 | `CIVITAI_API_TOKEN` | | CivitAI API token for model downloads |
 | `HUGGINGFACE_TOKEN` | | HuggingFace token for higher API rate limits |
 | `GITHUB_TOKEN` | | GitHub token for skill generation (avoids rate limits) |
@@ -492,6 +495,21 @@ Point the server at a ComfyUI running anywhere — no local install required:
 ```bash
 npx -y comfyui-mcp --comfyui-url http://192.168.1.50:8188
 npx -y comfyui-mcp --http --comfyui-url https://comfy.example.com:8443
+```
+
+**Behind a reverse proxy / API gateway** (path prefix + auth header) — for a
+self-hosted ComfyUI exposed under a prefixed route with its own auth layer (this
+is *not* Comfy Cloud, which is `COMFYUI_API_KEY`):
+
+```bash
+COMFYUI_URL=https://gateway.example.com/comfyapi \
+COMFYUI_AUTH_TOKEN=your-token \
+  npx -y comfyui-mcp --http        # → Authorization: Bearer your-token, requests under /comfyapi
+
+# custom header / scheme:
+COMFYUI_URL=https://gateway.example.com/comfyapi \
+COMFYUI_AUTH_HEADER=X-API-Key COMFYUI_AUTH_TOKEN=your-token \
+  npx -y comfyui-mcp --http        # → X-API-Key: your-token
 ```
 
 ### Auto-detection

@@ -9,8 +9,7 @@ import {
 } from "../comfyui/client.js";
 import {
   getCloudUrl,
-  getComfyUIApiHost,
-  getComfyUIProtocol,
+  getComfyUIBaseUrl,
   isCloudMode,
 } from "../config.js";
 import { attachExecutionListeners } from "../comfyui/events.js";
@@ -123,8 +122,7 @@ function buildImageUrl(
     const base = getCloudUrl().replace(/\/+$/, "");
     return `${base}/api/view?${params.toString()}`;
   }
-  const host = getComfyUIApiHost();
-  return `${getComfyUIProtocol()}://${host}/view?${params.toString()}`;
+  return `${getComfyUIBaseUrl()}/view?${params.toString()}`;
 }
 
 export function buildCompletionNotification(

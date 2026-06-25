@@ -7,6 +7,7 @@ describe("parseComfyUIUrl", () => {
       host: "127.0.0.1",
       port: 8188,
       ssl: false,
+      basePath: "",
     });
   });
 
@@ -15,6 +16,7 @@ describe("parseComfyUIUrl", () => {
       host: "comfy.example.com",
       port: 8443,
       ssl: true,
+      basePath: "",
     });
   });
 
@@ -23,6 +25,7 @@ describe("parseComfyUIUrl", () => {
       host: "comfy.example.com",
       port: 443,
       ssl: true,
+      basePath: "",
     });
   });
 
@@ -31,6 +34,7 @@ describe("parseComfyUIUrl", () => {
       host: "comfy.local",
       port: 80,
       ssl: false,
+      basePath: "",
     });
   });
 
@@ -39,6 +43,7 @@ describe("parseComfyUIUrl", () => {
       host: "192.168.1.50",
       port: 8000,
       ssl: false,
+      basePath: "",
     });
   });
 
@@ -48,5 +53,27 @@ describe("parseComfyUIUrl", () => {
 
   it("throws on a non-URL string", () => {
     expect(() => parseComfyUIUrl("not a url")).toThrow();
+  });
+
+  // ── Path prefix (reverse proxy / API gateway, issue #52) ──────────────────
+  it("preserves a path prefix", () => {
+    expect(parseComfyUIUrl("https://host.example.com/comfyapi")).toEqual({
+      host: "host.example.com",
+      port: 443,
+      ssl: true,
+      basePath: "/comfyapi",
+    });
+  });
+
+  it("strips a trailing slash from the prefix", () => {
+    expect(parseComfyUIUrl("https://host:8443/comfyapi/").basePath).toBe("/comfyapi");
+  });
+
+  it("preserves a nested path prefix", () => {
+    expect(parseComfyUIUrl("https://host/api/comfy").basePath).toBe("/api/comfy");
+  });
+
+  it("treats a bare root path as no prefix", () => {
+    expect(parseComfyUIUrl("http://127.0.0.1:8188/").basePath).toBe("");
   });
 });

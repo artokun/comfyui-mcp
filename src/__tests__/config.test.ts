@@ -66,3 +66,73 @@ describe("config mode detection", () => {
     expect(() => mod.getApiKey()).toThrow(/COMFYUI_API_KEY/);
   });
 });
+
+describe("remote self-hosted: path prefix + generic auth (#52)", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    process.env = { ...OLD_ENV };
+    process.argv = [...OLD_ARGV];
+    process.env.COMFYUI_API_KEY = "";
+    process.env.COMFYUI_URL = "";
+    process.env.COMFYUI_PATH = "";
+    process.env.COMFYUI_HOST = "";
+    process.env.COMFYUI_PORT = "8188";
+    process.env.COMFYUI_AUTH_HEADER = "";
+    process.env.COMFYUI_AUTH_SCHEME = "";
+    process.env.COMFYUI_AUTH_TOKEN = "";
+  });
+
+  afterEach(() => {
+    process.env = OLD_ENV;
+    process.argv = OLD_ARGV;
+    vi.restoreAllMocks();
+  });
+
+  it("preserves a path prefix from COMFYUI_URL into the base URL", async () => {
+    process.env.COMFYUI_URL = "https://host.example.com/comfyapi";
+    const mod = await import("../config.js");
+    expect(mod.isRemoteMode()).toBe(true);
+    expect(mod.getComfyUIBasePath()).toBe("/comfyapi");
+    expect(mod.getComfyUIBaseUrl()).toBe("https://host.example.com:443/comfyapi");
+  });
+
+  it("no prefix → base URL has no trailing path", async () => {
+    process.env.COMFYUI_URL = "http://192.168.1.50:8188";
+    const mod = await import("../config.js");
+    expect(mod.getComfyUIBasePath()).toBe("");
+    expect(mod.getComfyUIBaseUrl()).toBe("http://192.168.1.50:8188");
+  });
+
+  it("no auth configured → empty headers", async () => {
+    const mod = await import("../config.js");
+    expect(mod.getComfyUIAuthHeaders()).toEqual({});
+  });
+
+  it("COMFYUI_AUTH_TOKEN defaults to Authorization: Bearer", async () => {
+    process.env.COMFYUI_AUTH_TOKEN = "abc123";
+    const mod = await import("../config.js");
+    expect(mod.getComfyUIAuthHeaders()).toEqual({ Authorization: "Bearer abc123" });
+  });
+
+  it("custom header with no scheme → raw token (X-API-Key)", async () => {
+    process.env.COMFYUI_AUTH_HEADER = "X-API-Key";
+    process.env.COMFYUI_AUTH_TOKEN = "abc123";
+    const mod = await import("../config.js");
+    expect(mod.getComfyUIAuthHeaders()).toEqual({ "X-API-Key": "abc123" });
+  });
+
+  it("custom scheme on Authorization", async () => {
+    process.env.COMFYUI_AUTH_SCHEME = "Token";
+    process.env.COMFYUI_AUTH_TOKEN = "abc123";
+    const mod = await import("../config.js");
+    expect(mod.getComfyUIAuthHeaders()).toEqual({ Authorization: "Token abc123" });
+  });
+
+  it("generic auth does NOT enable Comfy Cloud mode", async () => {
+    process.env.COMFYUI_URL = "https://host.example.com/comfyapi";
+    process.env.COMFYUI_AUTH_TOKEN = "abc123";
+    const mod = await import("../config.js");
+    expect(mod.isCloudMode()).toBe(false);
+    expect(mod.isRemoteMode()).toBe(true);
+  });
+});
