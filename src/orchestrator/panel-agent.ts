@@ -39,9 +39,17 @@ function msgOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/** Reasoning effort levels the SDK accepts (passed via Options.effort). */
-export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
-export const EFFORTS: Effort[] = ["low", "medium", "high", "xhigh", "max"];
+/** Reasoning effort levels. This is the PROVIDER-NEUTRAL union of every backend's
+ *  scale so a value chosen for one provider survives a switch to another:
+ *    • Claude scale: low | medium | high | xhigh | max
+ *    • Codex scale:  none | minimal | low | medium | high | xhigh
+ *  The shared levels (low/medium/high/xhigh) map 1:1; the off-scale ones (Claude
+ *  "max", Codex "none"/"minimal") are mapped to the nearest valid level by the
+ *  TARGET backend (ClaudeBackend / CodexBackend), so PanelAgent stores the user's
+ *  intent verbatim and never has to drop it on a provider switch. */
+export type Effort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+/** The full neutral set, ordered low→high (for nearest-level mapping). */
+export const EFFORTS: Effort[] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 export function isEffort(v: unknown): v is Effort {
   return typeof v === "string" && (EFFORTS as string[]).includes(v);
 }

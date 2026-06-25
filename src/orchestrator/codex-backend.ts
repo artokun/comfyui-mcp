@@ -313,6 +313,22 @@ function isCodexModel(id: string): boolean {
   return /^(gpt-|o\d|codex|chatgpt)/.test(m) || m.includes("codex");
 }
 
+// ---- reasoning effort mapping ----
+// Codex's reasoning-effort scale differs from Claude's: Codex accepts
+// none|minimal|low|medium|high|xhigh (the app-server `turn/start` `effort` field;
+// see the reference openai-codex plugin's codex.mjs), while the panel/Claude
+// scale is low|medium|high|xhigh|max. The shared levels map 1:1; the only
+// off-scale source value is Claude "max", which has no Codex equivalent and maps
+// to the nearest valid level (xhigh). Unknown/empty → null (app-server default).
+const CODEX_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh"] as const;
+function toCodexEffort(effort: string | undefined): string | null {
+  if (!effort) return null;
+  const e = effort.toLowerCase();
+  if ((CODEX_EFFORTS as readonly string[]).includes(e)) return e;
+  if (e === "max") return "xhigh"; // Claude's top level → Codex's nearest valid
+  return null; // unknown level → let the app-server pick its default
+}
+
 /** Provider config the Codex backend needs. A small subset of PanelAgentDeps. */
 export interface CodexBackendDeps {
   /** Working directory for the Codex thread (defaults to opts.cwd / process cwd). */
@@ -344,6 +360,9 @@ export class CodexBackend implements AgentBackend {
   private turnId: string | null = null;
   /** The model requested for new turns (mutable for a future live setModel). */
   private model: string | undefined;
+  /** The Codex reasoning effort for new turns, already mapped to a valid Codex
+   *  level (null = let the app-server choose). Captured from run(opts.effort). */
+  private effort: string | null = null;
 
   constructor(deps: CodexBackendDeps = {}) {
     this.deps = deps;
@@ -460,6 +479,12 @@ export class CodexBackend implements AgentBackend {
     // otherwise ignore it and keep the configured Codex model (or the account
     // default when neither is set — model:null lets the app-server choose).
     if (opts.model && isCodexModel(opts.model)) this.model = opts.model;
+    // Map the panel/Claude effort scale onto Codex's and apply it to every turn in
+    // this session (the panel restarts run() on an effort change, so capturing it
+    // here is enough — each new turn reads this.effort). Without this the session
+    // ran at the app-server default regardless of the picker (the effort was
+    // previously hardcoded to null on turn/start).
+    this.effort = toCodexEffort(opts.effort);
 
     // forkAtAnchor is false (CODEX_CAPABILITIES) → ignore opts.rewindAnchor; we
     // only do whole-thread resume.
@@ -702,7 +727,8 @@ export class CodexBackend implements AgentBackend {
           threadId,
           input: [{ type: "text", text: turn.text, text_elements: [] }],
           model: this.model ?? null,
-          effort: null,
+          // Forward the session's mapped Codex effort (null = app-server default).
+          effort: this.effort,
           outputSchema: null,
         })
         .then((res) => {

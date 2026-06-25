@@ -30,6 +30,20 @@ import {
 } from "./agent-backend.js";
 import type { Effort, ImageRef } from "./panel-agent.js";
 
+// ---- reasoning effort mapping ----
+// Effort is now a provider-neutral union (it must survive a provider switch — see
+// panel-agent.ts Effort). The Agent SDK only accepts the Claude scale
+// (low|medium|high|xhigh|max), so map any off-scale neutral value (Codex's
+// "none"/"minimal") to the nearest valid Claude level. Shared levels pass through.
+const CLAUDE_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
+function toClaudeEffort(effort: string | undefined): Effort | undefined {
+  if (!effort) return undefined;
+  const e = effort.toLowerCase();
+  if (CLAUDE_EFFORTS.has(e)) return e as Effort;
+  if (e === "none" || e === "minimal") return "low"; // Codex's sub-low → Claude's floor
+  return undefined; // unknown → SDK default
+}
+
 // The Agent SDK is an OPTIONAL dependency (it pulls in ~100 packages and is only
 // needed for the panel orchestrator), so load it lazily and fail with a clear
 // message rather than at import time for everyone.
@@ -272,7 +286,7 @@ export class ClaudeBackend implements AgentBackend {
 
   private buildOptions(opts: BackendStartOptions): Options {
     const model = opts.model;
-    const effort = opts.effort as Effort | undefined;
+    const effort = toClaudeEffort(opts.effort);
     const resume = opts.resume;
     const rewindAnchor = opts.rewindAnchor;
     // Rewind: fork the conversation at the anchor (resume up to that message, then
