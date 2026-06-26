@@ -218,6 +218,27 @@ export async function runPanelOrchestrator(): Promise<void> {
     process.exit(1);
   });
 
+  // Self-exit seam. Wired to the real clean shutdown once it's defined below; until
+  // then a fatal just exits the process directly. Idempotent (a flag guards repeat
+  // calls). This is how an agent-fatal (onAgentFatal) or a never-handshaking model
+  // probe collapses the wedged orchestrator so the pack can respawn a clean one.
+  let selfExiting = false;
+  let runShutdown: (() => void) | null = null;
+  const requestSelfExit = (why: string): void => {
+    if (selfExiting) return;
+    selfExiting = true;
+    logger.error(
+      `[panel-orchestrator] self-exit (${why}) — closing the bridge so a fresh orchestrator can take over.`,
+    );
+    if (runShutdown) {
+      runShutdown();
+    } else {
+      // Shutdown not yet wired (very early failure) — exit hard; the pack reclaims
+      // the dead port and respawns.
+      process.exit(1);
+    }
+  };
+
   // Subscription lane: the background agent must authenticate against the user's
   // claude.ai login, never an API key. Unset the key for the SDK subprocess.
   delete process.env.ANTHROPIC_API_KEY;
@@ -515,6 +536,16 @@ export async function runPanelOrchestrator(): Promise<void> {
     onSeen: (tabId, mid) => {
       bridge.push({ type: "ack", ok: true, kind: "seen", mid }, tabId);
     },
+    // ROOT-CAUSE self-exit (the "bridge open but no panel agent responded" wedge):
+    // a tab's agent died fatally (couldn't start, or its bounded self-restart gave
+    // up). The orchestrator is alive and the bridge is up, but no agent will ever
+    // handshake — exactly the wedge. Exit cleanly so the panel pack's bridge-death
+    // → reclaim + sticky-reconnect respawns a FRESH orchestrator, instead of
+    // leaving the user staring at the manual "fully restart ComfyUI" warning.
+    // Mirrors the uncaughtException exit above (Node's own default on a fatal).
+    onAgentFatal: (tabId, reason) => {
+      requestSelfExit(`tab ${tabId.slice(0, 8)} ${reason}`);
+    },
   });
   // Let refreshEnvCapabilities() feed a freshly-gathered env block into agents
   // spawned after a ComfyUI restart/reconnect.
@@ -707,12 +738,21 @@ export async function runPanelOrchestrator(): Promise<void> {
     // tab's live agent so it knows its render landed and can comment/iterate.
     // Dropped silently if no agent is attending the tab (we don't spawn one).
     if (event.type === "agent_event" && event.tab_id) {
-      const delivered = manager.injectEvent(event.tab_id, event as {
+      const ev = event as {
         kind?: string;
         images?: Array<{ filename: string; subfolder?: string; type?: string }>;
         error?: string;
         note?: string;
-      });
+      };
+      // A run error is URGENT: interrupt the live turn + front-queue it ("hey,
+      // look at me") so the agent stops and fixes it instead of running blind.
+      // Everything else (e.g. a finished render's images) is enqueued normally.
+      if (ev.kind === "run_error") {
+        void manager.injectRunError(event.tab_id, ev.error ?? "unknown error");
+        logger.info(`[panel-orchestrator] tab ${event.tab_id.slice(0, 8)} run_error → agent (interrupt)`);
+        return;
+      }
+      const delivered = manager.injectEvent(event.tab_id, ev);
       if (delivered) {
         logger.info(`[panel-orchestrator] tab ${event.tab_id.slice(0, 8)} event → agent: ${event.kind}`);
       }
@@ -934,6 +974,12 @@ export async function runPanelOrchestrator(): Promise<void> {
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
+  // Now that shutdown exists, route self-exit through it (clean teardown: stop
+  // agents, drop the lockfile, close the bridge) so the freed port + bridge-death
+  // let the pack respawn a clean orchestrator.
+  runShutdown = () => {
+    void shutdown();
+  };
 
   // Beacon: when ComfyUI (the launcher) exits — cleanly or by crash/kill —
   // shut down rather than linger as an orphan holding the bridge port.

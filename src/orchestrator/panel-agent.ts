@@ -220,6 +220,12 @@ export class PanelAgent {
   private contextWindow = 0;
   /** Last status pushed — re-sent on reconnect so the meter isn't blank. */
   lastStatus: UsageStatus | null = null;
+  /** Set true when start()'s bounded self-restart loop GAVE UP (the session kept
+   *  dropping immediately) — as opposed to an intentional stop(). The manager
+   *  reads this to distinguish a fatal "agent backend is dead" settle (which must
+   *  bubble up so the orchestrator can self-exit + let the pack respawn a clean
+   *  one) from an ordinary retire. */
+  gaveUp = false;
 
   constructor(tabId: string, deps: PanelAgentDeps, backend?: AgentBackend) {
     this.tabId = tabId;
@@ -329,6 +335,31 @@ export class PanelAgent {
     this.busy = true;
     this.deps.onTurn?.(this.tabId, "working"); // event triggers a turn — show working
     this.queue.push({ text, images });
+    const wake = this.waiting;
+    this.waiting = null;
+    wake?.();
+  }
+
+  /** Push a ComfyUI EXECUTION error into the session with urgency — the "hey,
+   *  look at me" path. Renders fail ASYNC (minutes after the agent queued them via
+   *  panel_run), so without this the agent never learns and carries on as if the
+   *  run succeeded. INTERRUPT any live turn (re-queued so it resumes AFTER the
+   *  error), then put the error at the FRONT of the queue so the agent addresses
+   *  it before anything else. */
+  async injectRunError(error: string): Promise<void> {
+    if (this.closed) return;
+    const text =
+      `[panel event] ⚠️ The workflow run you just queued ERRORED on the user's canvas: ${error}. ` +
+      `STOP — do not carry on as if it succeeded. If it relates to what you were doing, diagnose it ` +
+      `(panel_get_errors has the full node-level details) and fix it; otherwise tell the user briefly.`;
+    if (this.inFlight) {
+      // Stop the live turn and re-queue it so the agent handles the error FIRST,
+      // then resumes whatever it was doing.
+      await this.interrupt({ requeueInFlight: true });
+    }
+    this.busy = true;
+    this.deps.onTurn?.(this.tabId, "working");
+    this.queue.unshift({ text }); // front: ahead of any re-queued interrupted turn
     const wake = this.waiting;
     this.waiting = null;
     wake?.();
@@ -601,10 +632,13 @@ export class PanelAgent {
       if (quickRestarts >= 4) {
         logger.error(`[panel-agent ${this.short()}] session keeps ending immediately — giving up`);
         this.sessionId = null; // don't resume a session that won't stay up
-        this.deps.onSay(
-          this.tabId,
-          "⚠️ The agent session keeps dropping. Click Disconnect → Connect, and make sure you're signed in (run `claude` once).",
-        );
+        // Flag the fatal give-up so the manager → orchestrator can self-exit and
+        // let the pack respawn a clean orchestrator (root-cause fix for the
+        // "bridge open but no panel agent responded" wedge: a live orchestrator
+        // serving a permanently-dead agent). We DON'T onSay the old "Disconnect →
+        // Connect" nudge here — the orchestrator is about to exit and the panel's
+        // sticky reconnect respawns automatically.
+        this.gaveUp = true;
         break;
       }
       logger.warn(
@@ -815,6 +849,17 @@ export interface PanelAgentManagerOptions {
    * Omitted = default ClaudeBackend (existing behavior, 100% unchanged).
    */
   makeBackend?: (tabId: string) => AgentBackend;
+  /**
+   * Fired when a tab's agent dies FATALLY — either it failed to start (hard
+   * reject from backend.prepare/run) or its bounded self-restart loop gave up
+   * (the session kept dropping immediately). This is the "agent backend is dead"
+   * signal: the orchestrator is alive and the bridge is up, but no agent will
+   * ever handshake. The orchestrator wires this to a clean self-exit so the panel
+   * pack's bridge-death → reclaim + sticky-reconnect path respawns a FRESH
+   * orchestrator, instead of leaving the user wedged on "bridge open but no panel
+   * agent responded". `reason` is a short human label for the log.
+   */
+  onAgentFatal?: (tabId: string, reason: string) => void;
 }
 
 /** Owns one PanelAgent per tab id, spawned lazily on the tab's first message. */
@@ -925,6 +970,15 @@ export class PanelAgentManager {
     return true;
   }
 
+  /** Push a ComfyUI execution error to a tab's agent — interrupt the live turn
+   *  and front-queue the error so the agent stops and addresses it. */
+  async injectRunError(tabId: string, error: string): Promise<boolean> {
+    const agent = this.agents.get(tabId);
+    if (!agent || agent.isStopped) return false;
+    await agent.injectRunError(error);
+    return true;
+  }
+
   private spawn(tabId: string, resume?: string): PanelAgent {
     const agent = this.makeAgent(tabId);
     this.agents.set(tabId, agent);
@@ -938,11 +992,20 @@ export class PanelAgentManager {
     // user message spawns a fresh one.
     const settle = (err?: unknown) => {
       if (this.agents.get(tabId) !== agent || agent.isStopped) return;
+      const gaveUp = agent.gaveUp;
       this.agents.delete(tabId);
       if (err) {
         const m = msgOf(err);
         logger.error(`[panel-agent ${tabId.slice(0, 8)}] failed to start: ${m}`);
         this.opts.onSay(tabId, `⚠️ The panel agent could not start: ${m}`);
+        // Hard start failure (e.g. the codex app-server can't spawn/handshake, the
+        // Claude SDK can't init) → fatal: the orchestrator should exit so a fresh
+        // one is respawned rather than serving a dead agent.
+        this.opts.onAgentFatal?.(tabId, `agent failed to start: ${m}`);
+      } else if (gaveUp) {
+        // The bounded self-restart loop gave up — the session keeps dropping. Same
+        // fatal signal: let the orchestrator self-exit + respawn.
+        this.opts.onAgentFatal?.(tabId, "agent session kept dropping (self-restart gave up)");
       }
     };
     void agent.start(resume).then(
