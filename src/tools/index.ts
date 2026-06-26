@@ -41,6 +41,7 @@ import { registerHealthCheckTools } from "./health-check.js";
 import { registerWorkflowLockTools } from "./workflow-lock.js";
 import { registerSkillsAccessTools } from "./skills-access.js";
 import { registerInstallPanelTools } from "./install-panel.js";
+import { registerSelfUpdateTools } from "./self-update.js";
 import { DefaultsManager } from "../services/defaults-manager.js";
 
 export async function registerAllTools(server: McpServer): Promise<void> {
@@ -88,5 +89,6 @@ export async function registerAllTools(server: McpServer): Promise<void> {
   registerWorkflowLockTools(server);
   registerSkillsAccessTools(server);
   registerInstallPanelTools(server);
+  registerSelfUpdateTools(server);
   await registerAutoloadedWorkflows(server);
 }

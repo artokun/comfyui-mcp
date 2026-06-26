@@ -13,6 +13,7 @@ import { parseCliArgs } from "./transport/cli.js";
 import { startHttpServer } from "./transport/http.js";
 import { isLocalMode } from "./config.js";
 import { ensurePanelInstalled } from "./services/panel-installer.js";
+import { checkAndSelfUpdate } from "./services/self-update.js";
 
 /**
  * Fire-and-forget: ensure the ComfyUI sidebar panel is installed (install-if-
@@ -45,6 +46,42 @@ function ensurePanelOnLoad(): void {
           break;
         default:
           logger.debug("Panel auto-install: unavailable.", res);
+      }
+    })
+    .catch(() => {});
+}
+
+/**
+ * Fire-and-forget: on MCP load, check the npm registry and (for global/local
+ * installs) auto-update the package on disk, then surface a "reconnect to load
+ * vX" note — the running process can't hot-swap its own code. NEVER updates a
+ * dev (npm link) install, hard-timed-out, and never throws. Opt out with
+ * COMFYUI_MCP_AUTOUPDATE=0. Mirrors the panel auto-install ensure pattern.
+ */
+function selfUpdateOnLoad(): void {
+  void checkAndSelfUpdate()
+    .then((res) => {
+      switch (res.action) {
+        case "updated":
+          logger.info(
+            `Self-update: updated comfyui-mcp ${res.from} → ${res.to} (${res.mode}). ${res.note ?? ""}`,
+            res,
+          );
+          break;
+        case "notify":
+          logger.info(`Self-update: ${res.note ?? `v${res.to} available.`}`, res);
+          break;
+        case "up-to-date":
+          logger.debug("Self-update: already on the latest version.", res);
+          break;
+        case "skipped-dev":
+          logger.info("Self-update: skipped — dev install (npm link / checkout).", res);
+          break;
+        case "skipped-disabled":
+          logger.debug("Self-update: disabled via COMFYUI_MCP_AUTOUPDATE.", res);
+          break;
+        default:
+          logger.debug("Self-update: unavailable.", res);
       }
     })
     .catch(() => {});
@@ -116,6 +153,8 @@ async function main() {
 
   // After the server is up: auto-ensure the sidebar panel (non-blocking).
   ensurePanelOnLoad();
+  // ...and self-check the npm registry for a newer published version (non-blocking).
+  selfUpdateOnLoad();
 }
 
 main().catch((err) => {
