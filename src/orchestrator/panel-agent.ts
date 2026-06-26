@@ -917,10 +917,11 @@ export class PanelAgentManager {
       // apply a deferred, session-restarting effort change.
       onTurn: (id, state) => {
         this.opts.onTurn?.(id, state);
-        if (state === "done") {
-          this.applyDeferredRestart(id);
-          this.applyPendingMcpRestart(id);
-        }
+        // The safe point to apply any deferred session-restart (effort change
+        // and/or comfyui-MCP-env respawn). COALESCED into a single replacement so
+        // an agent is never restarted twice in a row (which would lose the resume
+        // id of the just-spawned, not-yet-session'd agent).
+        if (state === "done") this.applyPendingRestarts(id);
       },
       onThinking: this.opts.onThinking,
       onSeen: this.opts.onSeen,
@@ -956,26 +957,48 @@ export class PanelAgentManager {
     for (const tabId of this.agents.keys()) {
       this.pendingMcpRestart.set(tabId, nudge ?? null);
       // Apply immediately when the tab is already idle; otherwise it fires on the
-      // next turn-done via applyPendingMcpRestart().
-      this.applyPendingMcpRestart(tabId);
+      // next turn-done via applyPendingRestarts().
+      this.applyPendingRestarts(tabId);
     }
   }
 
-  /** Apply a pending comfyui-MCP-env respawn for a tab once it's idle. No-op if
-   *  none pending or the agent is still mid-turn. */
-  private applyPendingMcpRestart(tabId: string): void {
-    if (!this.pendingMcpRestart.has(tabId)) return;
+  /**
+   * Apply any deferred session-restart for a tab once it's idle — COALESCING a
+   * pending effort change and a pending comfyui-MCP-env respawn into ONE
+   * replacement. Both are session-construction changes (effort + mcpServers) that
+   * the manager has already stored on itself, so a single spawn picks up both.
+   *
+   * Doing them separately would restart the agent twice in a row: the first spawn
+   * resumes from the OLD agent's session id, but the SECOND would resume from the
+   * just-spawned agent whose session id hasn't been emitted yet (null) — silently
+   * dropping the conversation. Coalescing replaces the original agent exactly once
+   * with the correct resume id and fires the retry nudge a single time.
+   *
+   * No-op unless something is pending and the agent has fully settled (idle).
+   */
+  private applyPendingRestarts(tabId: string): void {
+    const wantEffort = this.pendingEffortRestart.has(tabId);
+    const wantMcp = this.pendingMcpRestart.has(tabId);
+    if (!wantEffort && !wantMcp) return;
     const agent = this.agents.get(tabId);
     if (!agent || agent.isStopped) {
+      this.pendingEffortRestart.delete(tabId);
       this.pendingMcpRestart.delete(tabId);
       return;
     }
-    if (agent.isBusy || agent.hasPending) return; // wait for idle
-    const nudge = this.pendingMcpRestart.get(tabId) ?? undefined;
+    // Still mid-work (a queued message will start the next turn) — wait for the
+    // next idle so we don't restart between back-to-back turns.
+    if (agent.isBusy || agent.hasPending) return;
+    // Only the MCP respawn carries a retry nudge.
+    const nudge = wantMcp ? (this.pendingMcpRestart.get(tabId) ?? undefined) : undefined;
+    this.pendingEffortRestart.delete(tabId);
     this.pendingMcpRestart.delete(tabId);
-    this.restartAgentResume(tabId, agent, nudge);
+    const carried = this.restartAgentResume(tabId, agent, nudge);
+    const reasons = [wantEffort ? "effort" : null, wantMcp ? "comfyui-mcp-env" : null]
+      .filter(Boolean)
+      .join("+");
     logger.info(
-      `[panel-orchestrator] tab ${tabId.slice(0, 8)} comfyui MCP env respawn applied (idle)${nudge ? " + retry nudge" : ""}`,
+      `[panel-orchestrator] tab ${tabId.slice(0, 8)} restart applied (idle, reason=${reasons}, ${carried} queued carried over${nudge ? " + retry nudge" : ""})`,
     );
   }
 
@@ -983,25 +1006,6 @@ export class PanelAgentManager {
    *  agent read it). Returns true if it was removed from the queue. */
   cancelQueued(tabId: string, mid: string): boolean {
     return this.agents.get(tabId)?.cancelQueued(mid) ?? false;
-  }
-
-  /** Effort is a session-construction option (no live setter), so changing it
-   *  needs a fresh resumed session. Do it ONLY when the tab is idle — restart
-   *  with resume, and hand any queued-but-unsent messages to the new agent so
-   *  nothing is lost. Called on every turn-done; a no-op unless a restart is
-   *  pending and the agent has fully settled. */
-  private applyDeferredRestart(tabId: string): void {
-    if (!this.pendingEffortRestart.has(tabId)) return;
-    const agent = this.agents.get(tabId);
-    if (!agent || agent.isStopped) {
-      this.pendingEffortRestart.delete(tabId);
-      return;
-    }
-    // Still mid-work (a queued message will start the next turn) — wait for the
-    // next idle so we don't restart between back-to-back turns.
-    if (agent.isBusy || agent.hasPending) return;
-    this.pendingEffortRestart.delete(tabId);
-    this.restartForEffort(tabId, agent);
   }
 
   /** Replace a tab's agent with a fresh one (picks up the manager's current
@@ -1016,15 +1020,6 @@ export class PanelAgentManager {
     if (nudge) fresh.send(nudge);
     void oldAgent.stop(); // retire the old one; it's no longer mapped
     return pending.length;
-  }
-
-  /** Replace a tab's agent with a fresh one (new model/effort), resuming the
-   *  conversation and carrying over any unsent queued messages. */
-  private restartForEffort(tabId: string, oldAgent: PanelAgent): void {
-    const carried = this.restartAgentResume(tabId, oldAgent);
-    logger.info(
-      `[panel-orchestrator] tab ${tabId.slice(0, 8)} effort restart applied (idle, ${carried} queued carried over)`,
-    );
   }
 
   /** Last usage snapshot for a tab's agent (for re-pushing the meter on connect). */
@@ -1138,7 +1133,7 @@ export class PanelAgentManager {
    * Effort has no live setter, so it needs a fresh resumed session — but we NEVER
    * do that mid-turn (it would interrupt and silently drop the in-flight reply,
    * which read as "the agent stopped responding"). If a turn is running, the
-   * restart is deferred to the next idle moment (applyDeferredRestart); if idle,
+   * restart is deferred to the next idle moment (applyPendingRestarts); if idle,
    * it happens now. Either way the model change is applied live immediately.
    * `restarted` is true only when the session was actually recreated in this call.
    */
@@ -1174,14 +1169,16 @@ export class PanelAgentManager {
         await agent.setModel(next.model);
       }
       if (effortChanged) {
-        if (agent.isBusy || agent.hasPending) {
-          // Mid-turn → defer; applyDeferredRestart fires on the next turn-done.
-          this.pendingEffortRestart.add(tabId);
+        // Mark the restart pending, then let the COALESCING applier decide: if the
+        // agent is idle it restarts now (folding in any pending comfyui-MCP-env
+        // respawn + its nudge as a single replacement); if mid-turn it defers to
+        // the next turn-done. This guarantees the agent is never restarted twice.
+        this.pendingEffortRestart.add(tabId);
+        const busy = agent.isBusy || agent.hasPending;
+        this.applyPendingRestarts(tabId);
+        if (busy) {
           deferred = true;
         } else {
-          // Idle → restart now (resume + carry over any queued messages).
-          this.pendingEffortRestart.delete(tabId);
-          this.restartForEffort(tabId, agent);
           restarted = true;
         }
       }

@@ -27,6 +27,28 @@ interface PanelSecrets {
   comfyuiEnv?: Record<string, string>;
 }
 
+// STRICT ALLOWLIST of env keys a panel-collected secret may set on the comfyui
+// MCP child process. The child is a Node subprocess (process.execPath), so an
+// arbitrary key (NODE_OPTIONS, PATH, COMFYUI_PATH, LD_PRELOAD, …) could hijack or
+// clobber it. We therefore permit ONLY known credential vars the comfyui tools
+// read — both on SAVE (reject otherwise) and on LOAD (filter), so even a hand-
+// edited or corrupt panel-secrets.json can never inject anything else.
+//   CIVITAI_API_TOKEN  → download_civitai_model (config.civitaiApiToken)
+//   HUGGINGFACE_TOKEN  → HuggingFace downloads   (config.huggingfaceToken)
+//   HF_TOKEN           → HuggingFace alias some tooling/hub libs honor
+export const COMFYUI_SECRET_ENV_ALLOWLIST = [
+  "CIVITAI_API_TOKEN",
+  "HUGGINGFACE_TOKEN",
+  "HF_TOKEN",
+] as const;
+
+const ALLOWLIST_SET = new Set<string>(COMFYUI_SECRET_ENV_ALLOWLIST);
+
+/** Is `key` a permitted comfyui tool-secret env var? */
+export function isAllowedComfyuiSecretKey(key: string): boolean {
+  return ALLOWLIST_SET.has(key);
+}
+
 /** Secrets file path. Overridable for tests. */
 export function panelSecretsPath(): string {
   return (
@@ -75,10 +97,17 @@ function write(secrets: PanelSecrets): void {
   }
 }
 
-/** The persisted env vars to inject into the comfyui MCP server. Never logged. */
+/** The persisted env vars to inject into the comfyui MCP server. Never logged.
+ *  FILTERED through the allowlist (defense in depth): even a hand-edited/corrupt
+ *  panel-secrets.json can only ever contribute allowlisted credential keys. */
 export function loadComfyuiSecretEnv(): Record<string, string> {
   const env = read().comfyuiEnv;
-  return env && typeof env === "object" ? { ...env } : {};
+  if (!env || typeof env !== "object") return {};
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(env)) {
+    if (isAllowedComfyuiSecretKey(k) && typeof v === "string") out[k] = v;
+  }
+  return out;
 }
 
 /** The env-var KEYS currently stored (e.g. for a redacted log line). No values. */
@@ -95,6 +124,12 @@ export function setComfyuiSecret(key: string, value: string): void {
   const trimmed = key.trim();
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmed)) {
     throw new Error(`Invalid env var name "${key}" — use a valid shell identifier (letters, digits, underscore).`);
+  }
+  if (!isAllowedComfyuiSecretKey(trimmed)) {
+    // SECURITY: never let an arbitrary key reach the comfyui Node child's env.
+    throw new Error(
+      `Env var "${trimmed}" is not an accepted comfyui tool secret. Allowed: ${COMFYUI_SECRET_ENV_ALLOWLIST.join(", ")}.`,
+    );
   }
   const secrets = read();
   const env = secrets.comfyuiEnv && typeof secrets.comfyuiEnv === "object" ? secrets.comfyuiEnv : {};

@@ -457,6 +457,23 @@ export interface CodexBackendDeps {
  * Build the `-c key=value` CLI overrides that declare the given MCP servers to
  * `codex app-server`. Values are TOML literals: strings are JSON-quoted, arrays
  * are JSON arrays (valid TOML). Mirrors `codex mcp add` / the config.toml format.
+ *
+ * SECURITY LIMITATION (known, accepted — Codex lane only): the comfyui stdio
+ * server's `env` is emitted as `-c mcp_servers.comfyui.env.KEY="value"` argv, so
+ * any value here — including a panel-saved secret (CIVITAI_API_TOKEN, …) — lands
+ * in the spawned process's argv, visible to local process inspection (ps,
+ * /proc/<pid>/cmdline) and any external crash/telemetry tooling that captures
+ * argv. This is inherent to how the bundled `codex app-server` accepts MCP config:
+ * the ONLY out-of-band channel is `$CODEX_HOME/config.toml`, but CODEX_HOME also
+ * holds the user's Codex login/auth and real config, so pointing the app-server at
+ * a private temp CODEX_HOME to hide the secret would break the user's sign-in and
+ * settings — not a safe trade. We therefore accept the argv exposure for now and
+ * mitigate it by NEVER logging these args (they are passed straight to spawn() and
+ * to no logger; do not add any logging of the returned array or `extraArgs`).
+ *   - The DEFAULT panel transport is the Claude Agent SDK (in-process MCP), which
+ *     has no argv exposure; the Codex backend is opt-in (PANEL_AGENT_BACKEND=codex).
+ *   - Follow-up: revisit if codex app-server gains an env/file/stdin channel for
+ *     per-server MCP env that doesn't clobber CODEX_HOME.
  */
 export function buildMcpConfigArgs(servers: Record<string, CodexMcpServerSpec>): string[] {
   const args: string[] = [];

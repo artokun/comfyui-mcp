@@ -1,10 +1,11 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   buildComfyuiMcpEnv,
   comfyuiSecretKeys,
+  isAllowedComfyuiSecretKey,
   loadComfyuiSecretEnv,
   onComfyuiSecretsChanged,
   removeComfyuiSecret,
@@ -95,5 +96,48 @@ describe("panel-secrets", () => {
   it("rejects an invalid env var name without writing", () => {
     expect(() => setComfyuiSecret("bad name", "x")).toThrow(/Invalid env var name/);
     expect(existsSync(secretsPath)).toBe(false);
+  });
+
+  // P1a — arbitrary env injection guard. The comfyui MCP child is a Node
+  // subprocess; a non-allowlisted key (NODE_OPTIONS, PATH, COMFYUI_PATH, …) must
+  // never reach its env — neither on SAVE nor on LOAD.
+  describe("env-key allowlist (P1a)", () => {
+    it("exposes the allowlist membership helper", () => {
+      expect(isAllowedComfyuiSecretKey("CIVITAI_API_TOKEN")).toBe(true);
+      expect(isAllowedComfyuiSecretKey("HUGGINGFACE_TOKEN")).toBe(true);
+      expect(isAllowedComfyuiSecretKey("HF_TOKEN")).toBe(true);
+      expect(isAllowedComfyuiSecretKey("NODE_OPTIONS")).toBe(false);
+      expect(isAllowedComfyuiSecretKey("PATH")).toBe(false);
+    });
+
+    it("REJECTS a non-allowlisted key on save and writes nothing", () => {
+      expect(() => setComfyuiSecret("NODE_OPTIONS", "--inspect-brk")).toThrow(/not an accepted comfyui tool secret/);
+      expect(existsSync(secretsPath)).toBe(false);
+      // A valid one still goes through.
+      setComfyuiSecret("CIVITAI_API_TOKEN", "ok");
+      expect(loadComfyuiSecretEnv()).toEqual({ CIVITAI_API_TOKEN: "ok" });
+    });
+
+    it("IGNORES a non-allowlisted key on load (corrupt/hand-edited file)", () => {
+      // Simulate a tampered panel-secrets.json that smuggles NODE_OPTIONS/PATH in.
+      writeFileSync(
+        secretsPath,
+        JSON.stringify({
+          comfyuiEnv: {
+            CIVITAI_API_TOKEN: "legit",
+            NODE_OPTIONS: "--inspect-brk",
+            PATH: "/evil/bin",
+            COMFYUI_PATH: "/evil",
+          },
+        }),
+      );
+      const env = loadComfyuiSecretEnv();
+      expect(env).toEqual({ CIVITAI_API_TOKEN: "legit" });
+      // And it can never leak into the spawn env either.
+      const spawnEnv = buildComfyuiMcpEnv({ COMFYUI_URL: "http://x" });
+      expect(spawnEnv.NODE_OPTIONS).toBeUndefined();
+      expect(spawnEnv.PATH).toBeUndefined();
+      expect(spawnEnv.CIVITAI_API_TOKEN).toBe("legit");
+    });
   });
 });
