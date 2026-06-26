@@ -25,7 +25,7 @@
 
 import { z } from "zod";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { extname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { parse as parseYaml } from "yaml";
@@ -589,7 +589,20 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           .optional()
           .describe("Times to queue (default 1)."),
       },
-      async (args: A, ctx) => ctx.call({ cmd: "graph_run", batch_count: args.batch_count }, 20000),
+      async (args: A, ctx) => {
+        const res = await ctx.call({ cmd: "graph_run", batch_count: args.batch_count }, 20000);
+        // Append anti-poll guidance: the agent should go idle after queuing so the
+        // executed event auto-injects the output image, rather than busy-polling.
+        const note =
+          "\n\n[IMPORTANT] You will be notified automatically with the output image(s)/video when the render finishes — do NOT poll get_queue, get_history, or list_output_images. Just end your turn now and wait for the result to be delivered to you.";
+        if (res.content?.[0]?.type === "text") {
+          return {
+            ...res,
+            content: [{ type: "text", text: res.content[0].text + note }, ...res.content.slice(1)],
+          };
+        }
+        return res;
+      },
     ),
     def(
       "panel_get_errors",
@@ -1168,6 +1181,102 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           return ok("Cancelled — ComfyUI was not restarted.");
         }
         return ctx.call({ cmd: "comfy_reboot", force: force === true }, 15000);
+      },
+    ),
+    def(
+      "panel_free_vram",
+      "Unload all loaded models and free VRAM (ComfyUI /free). Use to unwedge a stuck/OOM ComfyUI when a cancel didn't free memory — before retrying or, last resort, restarting (panel_restart_comfyui). Does NOT restart ComfyUI; it just drops resident models and frees cached memory.",
+      {},
+      async (_args, ctx) => ctx.call({ cmd: "free_vram" }, 15000),
+    ),
+    def(
+      "panel_show_media",
+      "Display one or more images or videos directly in the panel chat. Use this whenever the user asks to SEE or SHOW a file — a disk path you composited/downloaded/generated (absolute path on the orchestrator host) OR a ComfyUI output ref ({ filename, subfolder?, type? }). Items are rendered as media cards in the agent chat area; supply optional captions. Max 8 items per call. NEVER describe an image with emoji or text placeholders — call this tool instead.",
+      {
+        items: z
+          .array(
+            z.object({
+              source: z.union([
+                // Absolute file path on the orchestrator host
+                z.object({ path: z.string().min(1) }),
+                // ComfyUI /view ref
+                z.object({
+                  filename: z.string().min(1),
+                  subfolder: z.string().optional(),
+                  type: z.string().optional(),
+                }),
+              ]),
+              caption: z.string().optional(),
+            }),
+          )
+          .min(1)
+          .max(8),
+      },
+      async (args: A, ctx) => {
+        const items = args.items as Array<{
+          source:
+            | { path: string }
+            | { filename: string; subfolder?: string; type?: string };
+          caption?: string;
+        }>;
+
+        const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
+        const VIDEO_EXTS = new Set([".mp4", ".webm"]);
+        const MAX_BYTES = 20 * 1024 * 1024; // 20 MB
+
+        const resolved: Array<Record<string, unknown>> = [];
+        for (const item of items) {
+          const src = item.source;
+          if ("path" in src) {
+            // Absolute disk path — orchestrator reads + base64-encodes it.
+            const p = src.path;
+            if (!isAbsolute(p)) {
+              return fail("path must be absolute: " + p);
+            }
+            if (!existsSync(p)) {
+              return fail("file not found: " + p);
+            }
+            const stat = statSync(p);
+            if (!stat.isFile()) {
+              return fail("not a regular file: " + p);
+            }
+            if (stat.size > MAX_BYTES) {
+              return fail(
+                "file too large (" + (stat.size / 1024 / 1024).toFixed(1) + " MB > 20 MB): " + p,
+              );
+            }
+            const ext = extname(p).toLowerCase();
+            let mime: string;
+            if (IMAGE_EXTS.has(ext)) {
+              mime = ext === ".jpg" ? "image/jpeg" : "image/" + ext.slice(1);
+            } else if (VIDEO_EXTS.has(ext)) {
+              mime = "video/" + ext.slice(1);
+            } else {
+              return fail(
+                "unsupported file type \"" + ext + "\" (allowed: " + [...IMAGE_EXTS, ...VIDEO_EXTS].join(", ") + "): " + p,
+              );
+            }
+            const buf = readFileSync(p);
+            const dataUrl = "data:" + mime + ";base64," + buf.toString("base64");
+            const kind = IMAGE_EXTS.has(ext) ? "image" : "video";
+            const filename = p.replace(/.*[\/]/, "");
+            resolved.push({ kind, dataUrl, filename, caption: item.caption });
+          } else {
+            // ComfyUI /view ref — forward to panel; panel builds the URL.
+            resolved.push({
+              kind: "viewRef",
+              viewRef: {
+                filename: src.filename,
+                subfolder: src.subfolder,
+                type: src.type,
+              },
+              filename: src.filename,
+              caption: item.caption,
+            });
+          }
+        }
+
+        return ctx.call({ cmd: "show_media", items: resolved }, 60000);
       },
     ),
   ];
