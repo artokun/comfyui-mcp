@@ -23,6 +23,7 @@ import type {
   McpSdkServerConfigWithInstance,
 } from "@anthropic-ai/claude-agent-sdk";
 import { logger } from "../utils/logger.js";
+import type { SessionStore } from "./session-store.js";
 import type { AgentBackend, AgentEvent, NeutralTurn } from "./agent-backend.js";
 import {
   ClaudeBackend,
@@ -860,6 +861,13 @@ export interface PanelAgentManagerOptions {
    * agent responded". `reason` is a short human label for the log.
    */
   onAgentFatal?: (tabId: string, reason: string) => void;
+  /**
+   * Durable per-tab session store. When set, the manager persists each tab's SDK
+   * session id here and uses it as the resume fallback when a tab first spawns —
+   * so the conversation survives the orchestrator PROCESS being killed (a wedge
+   * auto-restart), independent of whether the panel re-sends `hello.resume`.
+   */
+  sessionStore?: SessionStore;
 }
 
 /** Owns one PanelAgent per tab id, spawned lazily on the tab's first message. */
@@ -894,7 +902,12 @@ export class PanelAgentManager {
       onSay: this.opts.onSay,
       onStream: this.opts.onStream,
       onStatus: this.opts.onStatus,
-      onSession: this.opts.onSession,
+      // Persist the session id to our durable store (resume-after-restart) BEFORE
+      // forwarding it to the panel — so it's on disk the moment the SDK reports it.
+      onSession: (id, sid) => {
+        this.opts.sessionStore?.set(id, sid);
+        this.opts.onSession?.(id, sid);
+      },
       onTurnAnchor: this.opts.onTurnAnchor,
       // Wrap onTurn so the manager learns when a turn ends — the safe point to
       // apply a deferred, session-restarting effort change.
@@ -1049,7 +1062,13 @@ export class PanelAgentManager {
       agent = undefined;
     }
     if (!agent) {
-      const resume = this.pendingResume.get(tabId);
+      // Resume order: the panel's `hello.resume` (freshest, this reconnect) wins;
+      // otherwise fall back to our durable disk copy — which is the ONLY survivor
+      // when the orchestrator process was killed and respawned (a wedge restart)
+      // and the panel hasn't (or can't) re-send the session id. Without this the
+      // agent silently forgets the whole conversation after an auto-restart.
+      const resume =
+        this.pendingResume.get(tabId) ?? this.opts.sessionStore?.get(tabId);
       this.pendingResume.delete(tabId);
       agent = this.spawn(tabId, resume);
     }
@@ -1126,6 +1145,11 @@ export class PanelAgentManager {
     const agent = this.agents.get(tabId);
     this.agents.delete(tabId);
     this.pendingResume.delete(tabId);
+    // Forget the durable session too — a NEW chat must start fresh, so the disk
+    // fallback in send() can't resurrect the conversation the user just cleared.
+    // (resume_session calls reset() then setResume() with the chosen id, so the
+    // historical session is re-armed right after and re-persisted on next onSession.)
+    this.opts.sessionStore?.clear(tabId);
     this.pendingEffortRestart.delete(tabId); // a reset supersedes any deferred restart
     if (agent) {
       logger.info(`[panel-orchestrator] tab ${tabId.slice(0, 8)} reset — new session next message`);
