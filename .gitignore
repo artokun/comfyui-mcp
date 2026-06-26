@@ -26,3 +26,4 @@ panel-load-smoke-orch.log
 .agents/
 .gemini/commands/
 >>>>>>> origin/main
+test-orch-debug.log

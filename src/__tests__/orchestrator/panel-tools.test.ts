@@ -8,6 +8,9 @@
 // identical set.
 
 import { describe, expect, it, vi } from "vitest";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   buildPanelToolDefs,
@@ -107,6 +110,56 @@ describe("panel-tools: copy/paste + subgraph blueprints", () => {
       name: "MyBlock",
       pos: [5, 5],
     });
+  });
+});
+
+describe("panel-tools: panel_load_workflow path (server-side disk read)", () => {
+  it("reads an ABSOLUTE workflow .json off disk and fires graph_load with its graph", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wf-load-"));
+    const file = join(dir, "pusa_extend.json");
+    const graph = { nodes: [{ id: 1, type: "KSampler" }, { id: 2, type: "VAEDecode" }] };
+    writeFileSync(file, JSON.stringify(graph), "utf8");
+
+    const { ctx, calls } = makeFakeCtx();
+    const res = await defByName("panel_load_workflow").handler({ path: file }, ctx);
+
+    expect(res.isError).toBeUndefined();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ cmd: "graph_load" });
+    // The big JSON was read SERVER-SIDE and handed to graph_load verbatim.
+    expect(calls[0].graph).toMatchObject(graph);
+  });
+
+  it("rejects a non-existent path WITHOUT firing graph_load", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    const res = await defByName("panel_load_workflow").handler(
+      { path: join(tmpdir(), "does-not-exist-12345.json") },
+      ctx,
+    );
+    expect(res.isError).toBe(true);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("rejects a .json that is not a UI workflow (no nodes array)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wf-load-"));
+    const file = join(dir, "api-format.json");
+    // API/prompt format (numeric keys) — NOT a UI workflow.
+    writeFileSync(file, JSON.stringify({ "1": { class_type: "KSampler" } }), "utf8");
+
+    const { ctx, calls } = makeFakeCtx();
+    const res = await defByName("panel_load_workflow").handler({ path: file }, ctx);
+    expect(res.isError).toBe(true);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("rejects a non-.json path", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    const res = await defByName("panel_load_workflow").handler(
+      { path: join(tmpdir(), "not-a-workflow.txt") },
+      ctx,
+    );
+    expect(res.isError).toBe(true);
+    expect(calls).toHaveLength(0);
   });
 });
 

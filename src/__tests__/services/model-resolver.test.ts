@@ -76,6 +76,48 @@ describe("downloadModel — filename path safety", () => {
   });
 });
 
+describe("downloadModel — target subfolder (arbitrary + nested, guarded)", () => {
+  function failingFetch() {
+    fetchMock.mockResolvedValueOnce({ ok: false, status: 500, statusText: "err" });
+  }
+
+  it("accepts a NESTED subfolder and mkdir's it under models/", async () => {
+    failingFetch();
+    // Reaches the network (subfolder accepted) — fails only at the fetch.
+    await expect(
+      downloadModel("https://example.com/lora.safetensors", "loras/pusa", "lora.safetensors"),
+    ).rejects.toBeInstanceOf(ModelError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // The target dir mkdir'd is models/loras/pusa.
+    const mkdirArg = String(mkdirMock.mock.calls[0][0]);
+    expect(mkdirArg.replace(/\\/g, "/")).toContain("/comfy/models/loras/pusa");
+  });
+
+  it("accepts a NON-standard (not-in-enum) subfolder name", async () => {
+    failingFetch();
+    await expect(
+      downloadModel("https://example.com/m.safetensors", "some_new_model_type", "m.safetensors"),
+    ).rejects.toBeInstanceOf(ModelError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const mkdirArg = String(mkdirMock.mock.calls[0][0]);
+    expect(mkdirArg.replace(/\\/g, "/")).toContain("/comfy/models/some_new_model_type");
+  });
+
+  it("REJECTS a traversal-escaping subfolder and never fetches", async () => {
+    await expect(
+      downloadModel("https://example.com/m.safetensors", "../../etc", "m.safetensors"),
+    ).rejects.toBeInstanceOf(ModelError);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("REJECTS an absolute subfolder and never fetches", async () => {
+    await expect(
+      downloadModel("https://example.com/m.safetensors", "/abs/path", "m.safetensors"),
+    ).rejects.toBeInstanceOf(ModelError);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
 describe("downloadModel — auth headers (token never in URL)", () => {
   // fetch returns not-ok so downloadModel stops right after the request (before
   // streaming) — enough to assert the headers/URL the request was made with.

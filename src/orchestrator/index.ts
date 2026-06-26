@@ -32,6 +32,11 @@ import { CodexBackend } from "./codex-backend.js";
 import { startPanelMcpHttpServer, type PanelMcpHttpServer } from "./panel-mcp-http.js";
 import type { AgentBackend } from "./agent-backend.js";
 import { readComfyuiCrashLog, formatCrashNote } from "../services/crash-log.js";
+import {
+  gatherEnvCapabilities,
+  buildPanelSystemAppend,
+  type EnvCapabilities,
+} from "../services/env-capabilities.js";
 
 const PANEL_SYSTEM_APPEND = `You are the autonomous assistant embedded directly in a ComfyUI sidebar panel. The person is working in ComfyUI and talks to you through that panel: their messages arrive as your prompts, and everything you write is shown to them in the panel chat. Write for that reader — lead with the result, keep replies short and concrete, and don't narrate routine internal steps.
 
@@ -339,6 +344,46 @@ export async function runPanelOrchestrator(): Promise<void> {
   const codexModel = process.env.COMFYUI_MCP_CODEX_MODEL;
   const isCodex = backendId === "codex";
 
+  // ---- live ENVIRONMENT-CAPABILITIES block ----
+  // Gather the machine's facts ONCE at startup (CACHED) — OS/CPU/RAM from node,
+  // GPU/VRAM/CUDA/torch/python/ComfyUI from /system_stats, Triton/SageAttention by
+  // import-probing the ComfyUI python, plus active/other backend availability — and
+  // PREPEND a compact one-line block to the static panel prompt so the agent knows
+  // the machine without probing. Every probe is hard-timed-out and degrades to
+  // "unknown", so this can NEVER hang session start: on total failure the prompt is
+  // just the static text (no env block). Built once; refreshed after a ComfyUI
+  // restart/reconnect via refreshEnvCapabilities() below.
+  let envCaps: EnvCapabilities | undefined;
+  let panelSystemAppend = PANEL_SYSTEM_APPEND;
+  // Set once the manager exists so a later refresh (after a ComfyUI restart) feeds
+  // the freshly-gathered env into newly-spawned agents too — Claude reads
+  // manager.opts.systemAppend at each spawn; Codex reads the closed-over
+  // panelSystemAppend at each makeBackend(). Updating both keeps the providers in
+  // sync without rebuilding the manager.
+  let liveManager: PanelAgentManager | undefined;
+  async function refreshEnvCapabilities(): Promise<void> {
+    try {
+      envCaps = await gatherEnvCapabilities({ comfyuiUrl, comfyuiPath, backendId });
+      panelSystemAppend = buildPanelSystemAppend(PANEL_SYSTEM_APPEND, envCaps);
+      if (liveManager) liveManager.setSystemAppend(panelSystemAppend);
+    } catch (err) {
+      // Belt-and-suspenders: gather is internally guarded, but never let a stray
+      // throw break the prompt — fall back to the static append.
+      panelSystemAppend = PANEL_SYSTEM_APPEND;
+      logger.debug(
+        `[panel-orchestrator] env-capabilities probe failed (using static prompt): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+  // Build it before any agent could spawn. Guarded so a probe stall can't block
+  // orchestrator startup beyond the probes' own (short) timeouts.
+  await refreshEnvCapabilities();
+  if (envCaps) {
+    logger.info(
+      `[panel-orchestrator] env: OS=${envCaps.os ?? "?"} GPU=${envCaps.gpu ?? "?"}${typeof envCaps.vramTotalGb === "number" ? ` ${envCaps.vramTotalGb}GB` : ""} torch=${envCaps.torch ?? "?"} cuda=${envCaps.cuda ?? "?"} py=${envCaps.python ?? "?"} comfyui=${envCaps.comfyui ?? "?"} (${envCaps.location ?? "?"}) triton=${envCaps.triton ?? "?"} sage=${envCaps.sageattention ?? "?"} backend=${envCaps.backend ?? "?"}`,
+    );
+  }
+
   // The comfyui stdio MCP env the Codex backend declares — MIRRORS what the
   // Claude path's mcpServers.comfyui passes (COMFYUI_URL + progress dir + local
   // mode), so the headless tool surface is identical across providers.
@@ -374,7 +419,7 @@ export async function runPanelOrchestrator(): Promise<void> {
         new CodexBackend({
           cwd: comfyuiPath ?? process.cwd(),
           model: codexModel,
-          systemAppend: PANEL_SYSTEM_APPEND,
+          systemAppend: panelSystemAppend,
           // Base ComfyUI URL so the backend can fetch image bytes from /view and
           // deliver them to a turn as `localImage` input items (vision parity).
           comfyuiUrl,
@@ -413,7 +458,7 @@ export async function runPanelOrchestrator(): Promise<void> {
     effort,
     makeBackend,
     comfyuiUrl, // for fetching image bytes to inline into agent turns
-    systemAppend: PANEL_SYSTEM_APPEND,
+    systemAppend: panelSystemAppend,
     pluginPath: pluginAvailable ? pluginPath : undefined,
     // Live-graph control of the user's open workflow, per tab (in-process).
     makePanelServer: (tabId) => createPanelMcpServer(bridge, tabId),
@@ -471,6 +516,9 @@ export async function runPanelOrchestrator(): Promise<void> {
       bridge.push({ type: "ack", ok: true, kind: "seen", mid }, tabId);
     },
   });
+  // Let refreshEnvCapabilities() feed a freshly-gathered env block into agents
+  // spawned after a ComfyUI restart/reconnect.
+  liveManager = manager;
 
   // Debounce the connect ack: the panel re-sends `hello` on reconnect and on
   // workflow-title changes, which would otherwise stack duplicate greetings.
@@ -675,9 +723,15 @@ export async function runPanelOrchestrator(): Promise<void> {
     // the panel). The session stays open for the next message.
     if (event.type === "interrupt" && event.tab_id) {
       const tabId = event.tab_id;
-      void manager.interrupt(tabId);
+      // Only "send now" (requeue:true from the pending tray) re-queues the
+      // interrupted turn so BOTH messages get answered; a plain Stop/Ctrl+C/Esc
+      // sends a bare interrupt and must NOT re-run the stopped turn.
+      const requeueInFlight = (event as { requeue?: boolean }).requeue === true;
+      void manager.interrupt(tabId, { requeueInFlight });
       bridge.push({ type: "ack", ok: true, kind: "interrupt" }, tabId);
-      logger.info(`[panel-orchestrator] tab ${tabId.slice(0, 8)} interrupted`);
+      logger.info(
+        `[panel-orchestrator] tab ${tabId.slice(0, 8)} interrupted${requeueInFlight ? " (send-now: re-queue)" : ""}`,
+      );
       return;
     }
 
@@ -767,6 +821,11 @@ export async function runPanelOrchestrator(): Promise<void> {
     // crash signature (clean restarts inject nothing). The note is capped in size.
     let outText = event.text;
     if (isResumeNudge(event.text)) {
+      // A resume nudge is the post-restart/reconnect signal — cheaply re-gather the
+      // live env in the background so agents spawned after this restart pick up any
+      // changes (e.g. Triton/SageAttention just installed, a new torch). Fire-and-
+      // forget; it never blocks the turn and its probes are all timed out.
+      void refreshEnvCapabilities();
       try {
         const crash = readComfyuiCrashLog(comfyuiPath);
         const note = formatCrashNote(crash);

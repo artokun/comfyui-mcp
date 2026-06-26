@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readdir, stat, mkdir } from "node:fs/promises";
-import { join, basename, resolve, sep } from "node:path";
+import { join, basename, resolve, sep, isAbsolute } from "node:path";
 import { config } from "../config.js";
 import { getClient } from "../comfyui/client.js";
 import { ModelError } from "../utils/errors.js";
@@ -185,14 +185,41 @@ function isCivitaiUrl(url: string): boolean {
   }
 }
 
+/**
+ * Validate a target subfolder under models/ and resolve it to an absolute dir
+ * that is guaranteed to stay INSIDE models/. Accepts a known MODEL_SUBDIRS name
+ * OR an arbitrary (possibly nested, e.g. "loras/pusa") relative subfolder, while
+ * rejecting absolute paths and traversal escapes. Exported so callers can resolve
+ * an arbitrary target without duplicating the guard.
+ */
+export function resolveModelSubfolder(targetSubfolder: string): string {
+  const raw = (targetSubfolder ?? "").trim();
+  if (!raw) {
+    throw new ModelError("target_subfolder is required (e.g. 'loras', 'checkpoints').");
+  }
+  if (isAbsolute(raw)) {
+    throw new ModelError(
+      `target_subfolder must be relative to models/, not absolute: ${raw}`,
+    );
+  }
+  const modelsRoot = resolve(getModelsRoot());
+  const targetDir = resolve(modelsRoot, raw);
+  // Confirm the resolved dir stays strictly inside models/ (blocks ".." escapes).
+  if (targetDir !== modelsRoot && !targetDir.startsWith(modelsRoot + sep)) {
+    throw new ModelError(
+      `Refusing to write outside the models directory: ${raw}`,
+    );
+  }
+  return targetDir;
+}
+
 export async function downloadModel(
   url: string,
   targetSubfolder: string,
   filename?: string,
   auth?: DownloadAuth,
 ): Promise<string> {
-  const modelsRoot = getModelsRoot();
-  const targetDir = join(modelsRoot, targetSubfolder);
+  const targetDir = resolveModelSubfolder(targetSubfolder);
 
   // Ensure target directory exists
   await mkdir(targetDir, { recursive: true });

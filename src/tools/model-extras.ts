@@ -10,8 +10,6 @@ import {
 } from "../services/civitai-resolver.js";
 import { ModelError, ValidationError, errorToToolResult } from "../utils/errors.js";
 
-const modelTypeEnum = z.enum(MODEL_SUBDIRS);
-
 /**
  * Resolve the local ComfyUI models directory.
  * Mirrors the (unexported) helper in model-resolver.ts; throws a clear error
@@ -123,9 +121,14 @@ export function registerModelExtrasTools(server: McpServer): void {
       "at least one of model_id or model_version_id. Gated/early-access models require " +
       "CIVITAI_API_TOKEN (sent as a bearer header, never in the URL); without it they fail.",
     {
-      target_subfolder: modelTypeEnum.describe(
-        "Target subfolder under ComfyUI models/ (e.g. 'checkpoints', 'loras', 'vae').",
-      ),
+      target_subfolder: z
+        .string()
+        .min(1)
+        .describe(
+          `Target subfolder under ComfyUI models/. Standard names: ${MODEL_SUBDIRS.join(", ")}. ` +
+            `Any other relative subfolder (incl. nested like 'loras/<subdir>') is allowed; ` +
+            `absolute paths and '..' escapes are rejected.`,
+        ),
       model_version_id: z
         .number()
         .int()

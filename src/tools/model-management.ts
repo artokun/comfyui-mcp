@@ -10,6 +10,19 @@ import { errorToToolResult } from "../utils/errors.js";
 
 const modelTypeEnum = z.enum(MODEL_SUBDIRS);
 
+// Download target subfolder: accept ANY relative subfolder under models/ (not
+// just the standard MODEL_SUBDIRS), since custom nodes expect models in arbitrary
+// or nested dirs (e.g. 'loras/<subdir>', a brand-new model type). The service
+// (resolveModelSubfolder) guards against absolute paths and traversal escapes.
+const downloadTargetSchema = z
+  .string()
+  .min(1)
+  .describe(
+    `Target subfolder under ComfyUI models/. Standard names: ${MODEL_SUBDIRS.join(", ")}. ` +
+      `Any other relative subfolder (incl. nested like 'loras/<subdir>') is allowed; ` +
+      `absolute paths and '..' escapes are rejected.`,
+  );
+
 const downloadAuthSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("bearer"),
@@ -85,12 +98,10 @@ export function registerModelManagementTools(server: McpServer): void {
 
   server.tool(
     "download_model",
-    "Download a model file to the ComfyUI models directory from a URL (HuggingFace, direct HTTP(S), s3://, or Azure Blob)",
+    "Download a model file to the ComfyUI models directory from a URL (HuggingFace, direct HTTP(S), s3://, or Azure Blob). PREFER this over a raw shell download (curl/wget) for model weights: it lands the file in the right models/ subfolder and surfaces live progress in the panel download tray. target_subfolder accepts any relative subfolder (incl. nested, e.g. 'loras/<subdir>').",
     {
       url: z.string().url().describe("Direct download URL for the model file"),
-      target_subfolder: modelTypeEnum.describe(
-        "Target subfolder under ComfyUI models/ (e.g. 'checkpoints', 'loras', 'vae')",
-      ),
+      target_subfolder: downloadTargetSchema,
       filename: z
         .string()
         .optional()
