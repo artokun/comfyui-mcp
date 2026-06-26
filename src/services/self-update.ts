@@ -75,8 +75,12 @@ export interface SelfUpdateDeps {
   existsSync: (p: string) => boolean;
   /** True when `p` is a symlink/junction. Never throws. */
   isSymlink: (p: string) => boolean;
-  /** fs.realpathSync, used to resolve `npm link` symlinks. Never throws. */
-  realpath: (p: string) => string;
+  /**
+   * fs.realpathSync, used to resolve `npm link` symlinks. Returns `undefined`
+   * when resolution FAILS — callers must safe-fail to "unknown" rather than
+   * trust the raw (unresolved) path for an updatable classification. Never throws.
+   */
+  realpath: (p: string) => string | undefined;
   /** Read a UTF-8 file. May throw; callers guard. */
   readFile: (p: string) => string;
   /** Fetch the latest published version from the npm registry, or undefined. */
@@ -144,7 +148,7 @@ export const defaultDeps: SelfUpdateDeps = {
     try {
       return realpathSync(p);
     } catch {
-      return p;
+      return undefined;
     }
   },
   readFile: (p) => readFileSync(p, "utf-8"),
@@ -214,9 +218,18 @@ function segmentsOf(p: string): string[] {
  *   - linked  → `npm link` / run-from-checkout (NOT under node_modules, or the
  *     dir is itself a symlink). DEV install — never auto-update.
  *   - npx     → resolved inside an `_npx` cache dir (npx -y comfyui-mcp).
- *   - local   → under a project's node_modules whose parent has a package.json.
- *   - global  → under a global node_modules (no project package.json above it).
- *   - unknown → couldn't classify confidently → caller must NOT auto-update.
+ *   - local   → under a project's node_modules; the OUTERMOST host dir with a
+ *     package.json is the project root (correctly handles pnpm/yarn nested
+ *     `node_modules/.pnpm/<pkg>/node_modules/<pkg>` virtual-store layouts).
+ *   - global  → the canonical single-`node_modules` global layout (package sits
+ *     directly inside node_modules, no project package.json above it).
+ *   - unknown → couldn't classify confidently → caller MUST NOT auto-update.
+ *
+ * SAFE-FAIL: any uncertainty (realpath resolution failed, nested/ambiguous
+ * virtual-store layout with no identifiable project root) returns "unknown"
+ * (notify only) — NEVER "global". The dangerous wrong-direction failure is
+ * classifying a local install as global and running `npm i -g` against it, so
+ * the classifier only ever errs toward "unknown".
  *
  * Uses realpath to follow an `npm link` symlink to the developer's checkout, and
  * lstat to catch the --preserve-symlinks case where the dir is the symlink.
@@ -233,35 +246,64 @@ export function detectInstallMode(deps: SelfUpdateDeps = defaultDeps): InstallIn
   const dirIsSymlink = deps.isSymlink(rawDir);
   // Default Node resolves symlinks for import.meta.url, so a linked package's
   // dir already points at the real checkout; realpath is a harmless no-op there.
-  const real = deps.realpath(rawDir);
+  // `undefined` means resolution FAILED — we must not trust the raw path for an
+  // updatable classification (safe-fail to "unknown" below).
+  const resolved = deps.realpath(rawDir);
+  const realpathFailed = resolved === undefined;
+  const real = resolved ?? rawDir;
   const currentVersion = readVersion(deps, real) ?? readVersion(deps, rawDir);
 
   const segs = segmentsOf(real);
   const lower = segs.map((s) => s.toLowerCase());
 
-  // npx cache (npm's `_npx` directory).
+  // npx cache (npm's `_npx` directory) — always notify-only, so realpath
+  // uncertainty is harmless here.
   if (lower.includes("_npx")) {
     return { mode: "npx", packageDir: real, currentVersion, isDevLink: false };
   }
 
-  // Last `node_modules` segment → the install lives under it.
-  const nmIdx = lower.lastIndexOf("node_modules");
+  // All `node_modules` segment indices (outermost → innermost).
+  const nmIndices: number[] = [];
+  for (let i = 0; i < lower.length; i++) {
+    if (lower[i] === "node_modules") nmIndices.push(i);
+  }
 
-  if (dirIsSymlink || nmIdx === -1) {
+  if (dirIsSymlink || nmIndices.length === 0) {
     // Not under node_modules (or it's a raw symlink): a working checkout, i.e.
     // `npm link` / `npm run dev` / a git clone. DEV — never auto-update.
     return { mode: "linked", packageDir: real, currentVersion, isDevLink: true };
   }
 
-  // Under node_modules. The dir CONTAINING node_modules is the install host:
-  // for a local dependency it's the project root (has its own package.json);
-  // for a global install it's the npm prefix (no package.json there).
-  const hostSegs = segs.slice(0, nmIdx);
-  const hostDir = hostSegs.join("/") || "/";
-  if (deps.existsSync(join(hostDir, "package.json"))) {
-    return { mode: "local", packageDir: real, currentVersion, isDevLink: false, projectRoot: hostDir };
+  // Under node_modules but realpath FAILED → we can't trust the on-disk
+  // location → safe-fail to unknown (notify only, never an update).
+  if (realpathFailed) {
+    return { mode: "unknown", packageDir: real, currentVersion, isDevLink: false };
   }
-  return { mode: "global", packageDir: real, currentVersion, isDevLink: false };
+
+  // LOCAL: walk OUTWARD — the outermost node_modules whose containing dir has a
+  // package.json is the real project root. This makes a pnpm/yarn nested path
+  //   <proj>/node_modules/.pnpm/<pkg>@x/node_modules/<pkg>
+  // resolve to <proj> (local), instead of the virtual-store folder (which has no
+  // package.json and would otherwise be misread as a global prefix).
+  for (const i of nmIndices) {
+    const host = segs.slice(0, i).join("/") || "/";
+    if (deps.existsSync(join(host, "package.json"))) {
+      return { mode: "local", packageDir: real, currentVersion, isDevLink: false, projectRoot: host };
+    }
+  }
+
+  // GLOBAL: only the canonical layout — a SINGLE node_modules with the package
+  // sitting directly inside it (`<prefix>/.../node_modules/comfyui-mcp`) and no
+  // project package.json above it (the npm prefix has none).
+  const lastNm = nmIndices[nmIndices.length - 1];
+  const packageIsDirectChild = lastNm === segs.length - 2;
+  if (nmIndices.length === 1 && packageIsDirectChild) {
+    return { mode: "global", packageDir: real, currentVersion, isDevLink: false };
+  }
+
+  // Ambiguous (nested/virtual-store layout with no identifiable project root)
+  // → safe-fail to unknown. NEVER "global".
+  return { mode: "unknown", packageDir: real, currentVersion, isDevLink: false };
 }
 
 /** Public, error-swallowing wrapper around the npm-registry probe. */
@@ -287,6 +329,20 @@ function isAutoUpdateDisabled(env: NodeJS.ProcessEnv): boolean {
 const RECONNECT_NOTE =
   "The running MCP server is still on the OLD code — RECONNECT (/mcp) or restart " +
   "the orchestrator to load the new version.";
+
+/**
+ * Build the `npm install` argv for a self-update. Every token is a CONSTANT —
+ * no user/dynamic value is ever interpolated into the command (the Windows path
+ * runs npm.cmd via shell:true, so injection-safety relies on this). `--no-audit
+ * --no-fund` keep it non-interactive and cut extra network/output.
+ */
+function npmInstallArgs(mode: "global" | "local"): string[] {
+  const base =
+    mode === "global"
+      ? ["i", "-g", `${PACKAGE_NAME}@latest`]
+      : ["i", `${PACKAGE_NAME}@latest`];
+  return [...base, "--no-audit", "--no-fund"];
+}
 
 export interface SelfUpdateOptions {
   deps?: SelfUpdateDeps;
@@ -339,10 +395,7 @@ async function checkInner(deps: SelfUpdateDeps): Promise<SelfUpdateResult> {
 
   // 5) Newer available. Only global/local can be safely self-replaced on disk.
   if (info.mode === "global" || info.mode === "local") {
-    const args =
-      info.mode === "global"
-        ? ["i", "-g", `${PACKAGE_NAME}@latest`]
-        : ["i", `${PACKAGE_NAME}@latest`];
+    const args = npmInstallArgs(info.mode);
     const { ok } = await deps.runNpm(args, info.mode === "local" ? info.projectRoot : undefined);
     if (!ok) {
       return {
@@ -500,10 +553,7 @@ export async function runSelfUpdate(
     return { action: "up-to-date", mode: info.mode, from: info.currentVersion, to: latest };
   }
   if (info.mode === "global" || info.mode === "local") {
-    const args =
-      info.mode === "global"
-        ? ["i", "-g", `${PACKAGE_NAME}@latest`]
-        : ["i", `${PACKAGE_NAME}@latest`];
+    const args = npmInstallArgs(info.mode);
     const { ok } = await deps.runNpm(args, info.mode === "local" ? info.projectRoot : undefined);
     return ok
       ? {

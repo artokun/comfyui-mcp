@@ -32,6 +32,7 @@ function makeDeps(opts: {
   latest?: string | undefined; // registry latest; undefined → offline
   symlink?: boolean; // packageDir is a raw symlink
   realpath?: string; // override realpath(packageDir)
+  realpathFails?: boolean; // realpath() returns undefined (resolution failed)
   env?: NodeJS.ProcessEnv;
   existing?: string[]; // extra paths that exist (e.g. project package.json)
   npmOk?: boolean; // result of runNpm
@@ -51,7 +52,7 @@ function makeDeps(opts: {
     env: () => opts.env ?? {},
     existsSync: (p) => p in files || existing.has(p),
     isSymlink: () => opts.symlink ?? false,
-    realpath: () => realDir,
+    realpath: () => (opts.realpathFails ? undefined : realDir),
     readFile: (p) => {
       if (p in files) return files[p];
       throw new Error(`ENOENT: ${p}`);
@@ -74,6 +75,20 @@ const LOCAL_PROJECT = "/home/me/proj";
 const LOCAL_DIR = join(LOCAL_PROJECT, "node_modules", "comfyui-mcp");
 const NPX_DIR = "/home/me/.npm/_npx/abc123/node_modules/comfyui-mcp";
 const DEV_DIR = "/home/me/code/comfyui-mcp";
+
+// pnpm virtual store: <proj>/node_modules/.pnpm/<pkg>@x/node_modules/<pkg>
+const PNPM_PROJECT = "/home/me/pnpmproj";
+const PNPM_DIR = join(
+  PNPM_PROJECT,
+  "node_modules",
+  ".pnpm",
+  "comfyui-mcp@0.19.1",
+  "node_modules",
+  "comfyui-mcp",
+);
+// yarn (un-hoisted nested dep-of-dep): <proj>/node_modules/<other>/node_modules/<pkg>
+const YARN_PROJECT = "/home/me/yarnproj";
+const YARN_DIR = join(YARN_PROJECT, "node_modules", "some-dep", "node_modules", "comfyui-mcp");
 
 // ---------------------------------------------------------------------------
 // semver
@@ -166,6 +181,61 @@ describe("detectInstallMode", () => {
     };
     expect(detectInstallMode(deps).mode).toBe("unknown");
   });
+
+  // --- P1: nested node_modules (pnpm / yarn) must be LOCAL, never global ------
+
+  it("local: pnpm virtual-store nested layout resolves to the project root", () => {
+    const { deps } = makeDeps({
+      packageDir: PNPM_DIR,
+      currentVersion: "0.19.1",
+      existing: [join(PNPM_PROJECT, "package.json")],
+    });
+    const info = detectInstallMode(deps);
+    expect(info.mode).toBe("local");
+    expect(info.projectRoot).toBe(PNPM_PROJECT.replace(/\\/g, "/"));
+  });
+
+  it("local: yarn un-hoisted nested dep resolves to the OUTERMOST project root", () => {
+    const { deps } = makeDeps({
+      packageDir: YARN_DIR,
+      currentVersion: "0.19.1",
+      existing: [join(YARN_PROJECT, "package.json")],
+    });
+    const info = detectInstallMode(deps);
+    expect(info.mode).toBe("local");
+    expect(info.projectRoot).toBe(YARN_PROJECT.replace(/\\/g, "/"));
+  });
+
+  it("unknown (NEVER global): nested node_modules with no identifiable project root", () => {
+    // Two node_modules segments, no package.json above either → ambiguous.
+    const { deps } = makeDeps({ packageDir: PNPM_DIR, currentVersion: "0.19.1" });
+    const info = detectInstallMode(deps);
+    expect(info.mode).toBe("unknown");
+    expect(info.mode).not.toBe("global");
+  });
+
+  // --- P2a: realpath failure must safe-fail to unknown ------------------------
+
+  it("unknown: realpath resolution fails while under node_modules", () => {
+    const { deps } = makeDeps({
+      packageDir: GLOBAL_DIR,
+      currentVersion: "0.19.1",
+      realpathFails: true,
+    });
+    const info = detectInstallMode(deps);
+    expect(info.mode).toBe("unknown");
+    // version still read from the raw path so status can report it
+    expect(info.currentVersion).toBe("0.19.1");
+  });
+
+  it("realpath failure still classifies a not-under-node_modules checkout as linked", () => {
+    const { deps } = makeDeps({
+      packageDir: DEV_DIR,
+      currentVersion: "0.19.1",
+      realpathFails: true,
+    });
+    expect(detectInstallMode(deps).mode).toBe("linked");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -217,7 +287,7 @@ describe("checkAndSelfUpdate policy", () => {
     expect(res.to).toBe("0.20.0");
     expect(res.note).toMatch(/RECONNECT/i);
     expect(h.npmCalls).toEqual([
-      { args: ["i", "-g", `${PACKAGE_NAME}@latest`], cwd: undefined },
+      { args: ["i", "-g", `${PACKAGE_NAME}@latest`, "--no-audit", "--no-fund"], cwd: undefined },
     ]);
   });
 
@@ -231,7 +301,10 @@ describe("checkAndSelfUpdate policy", () => {
     const res = await checkAndSelfUpdate({ deps: h.deps });
     expect(res.action).toBe("updated");
     expect(h.npmCalls).toEqual([
-      { args: ["i", `${PACKAGE_NAME}@latest`], cwd: LOCAL_PROJECT.replace(/\\/g, "/") },
+      {
+        args: ["i", `${PACKAGE_NAME}@latest`, "--no-audit", "--no-fund"],
+        cwd: LOCAL_PROJECT.replace(/\\/g, "/"),
+      },
     ]);
   });
 
@@ -251,6 +324,27 @@ describe("checkAndSelfUpdate policy", () => {
     const h = makeDeps({ packageDir: NPX_DIR, currentVersion: "0.19.1", latest: "0.20.0" });
     const res = await checkAndSelfUpdate({ deps: h.deps });
     expect(res.action).toBe("notify");
+    expect(h.npmCalls).toEqual([]);
+  });
+
+  it("newer + unknown (ambiguous nested) → notify, NEVER an npm -g update", async () => {
+    const h = makeDeps({ packageDir: PNPM_DIR, currentVersion: "0.19.1", latest: "0.20.0" });
+    const res = await checkAndSelfUpdate({ deps: h.deps });
+    expect(res.action).toBe("notify");
+    expect(res.mode).toBe("unknown");
+    expect(h.npmCalls).toEqual([]);
+  });
+
+  it("newer + realpath-failure → notify (unknown), NEVER an npm update", async () => {
+    const h = makeDeps({
+      packageDir: GLOBAL_DIR,
+      currentVersion: "0.19.1",
+      latest: "0.20.0",
+      realpathFails: true,
+    });
+    const res = await checkAndSelfUpdate({ deps: h.deps });
+    expect(res.action).toBe("notify");
+    expect(res.mode).toBe("unknown");
     expect(h.npmCalls).toEqual([]);
   });
 
@@ -302,7 +396,7 @@ describe("runSelfUpdate", () => {
     const res = await runSelfUpdate(h.deps);
     expect(res.action).toBe("updated");
     expect(h.npmCalls).toEqual([
-      { args: ["i", "-g", `${PACKAGE_NAME}@latest`], cwd: undefined },
+      { args: ["i", "-g", `${PACKAGE_NAME}@latest`, "--no-audit", "--no-fund"], cwd: undefined },
     ]);
   });
 
