@@ -625,7 +625,18 @@ export async function runPanelOrchestrator(): Promise<void> {
             .prepare()
             .then(() => probeBackend.listModels())
             .then((list) =>
-              list.map((m) => ({ value: m.id, displayName: m.label ?? m.id }) as unknown as ModelInfo),
+              // Carry the effort metadata through to the panel's ModelInfo — without
+              // this the supportsEffort/supportedEffortLevels the Codex backend
+              // advertises get dropped here and the panel hides the effort dropdown.
+              list.map(
+                (m) =>
+                  ({
+                    value: m.id,
+                    displayName: m.label ?? m.id,
+                    ...(m.supportsEffort != null ? { supportsEffort: m.supportsEffort } : {}),
+                    ...(m.supportedEffortLevels ? { supportedEffortLevels: m.supportedEffortLevels } : {}),
+                  }) as unknown as ModelInfo,
+              ),
             )
             .catch((err) => {
               logger.warn(`[panel-orchestrator] codex model probe failed: ${err instanceof Error ? err.message : String(err)}`);

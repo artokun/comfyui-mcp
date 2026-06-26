@@ -91,6 +91,20 @@ export type AgentEvent =
 export interface ModelChoice {
   id: string;
   label?: string;
+  /**
+   * Whether this model exposes a reasoning-effort control. The panel's
+   * `normalizeModels` reads this (and/or `supportedEffortLevels`): if NEITHER is
+   * present it treats the model as having no effort control and hides the picker.
+   * Mirrors the Agent SDK `ModelInfo.supportsEffort` shape.
+   */
+  supportsEffort?: boolean;
+  /**
+   * The reasoning-effort levels this model accepts (provider-specific scale). The
+   * panel uses these to populate the effort dropdown. Mirrors the Agent SDK
+   * `ModelInfo.supportedEffortLevels` shape (kept as a plain `string[]` so the
+   * Codex scale — none|minimal|…|xhigh — fits, not just the Claude scale).
+   */
+  supportedEffortLevels?: string[];
 }
 
 export interface BackendStartOptions {

@@ -354,13 +354,26 @@ class AppServerClient {
   }
 }
 
+// ---- reasoning-effort scale (advertised + applied) ----
+// The authoritative Codex reasoning-effort scale (none < minimal < low < medium <
+// high < xhigh — the app-server `turn/start` `effort` field). Defined ONCE here
+// and reused by BOTH the model advertisement below (so every Codex ModelChoice
+// tells the panel it has an effort control — the panel's normalizeModels reads
+// `supportedEffortLevels`/`supportsEffort`, and hides the picker if neither is
+// present) AND toCodexEffort() further down (the validity check), to avoid drift.
+// The backend ALREADY applies effort to every turn via toCodexEffort regardless
+// of model, so advertising it for all Codex models matches current behavior.
+const CODEX_EFFORT_LEVELS = ["none", "minimal", "low", "medium", "high", "xhigh"] as const;
+
 // ---- model fallback ----
 // config/read does not enumerate a model CATALOG (it reports the active provider
 // + model), so when we can't derive a list we fall back to the current Codex
-// model family. The panel picker degrades gracefully on an empty list.
+// model family. The panel picker degrades gracefully on an empty list. Each entry
+// advertises the Codex effort scale so the panel enables the reasoning-effort
+// dropdown for these models (the backend applies effort to every turn anyway).
 const CODEX_FALLBACK_MODELS: ModelChoice[] = [
-  { id: "gpt-5.5", label: "GPT-5.5" },
-  { id: "gpt-5.5-codex", label: "GPT-5.5 Codex" },
+  { id: "gpt-5.5", label: "GPT-5.5", supportsEffort: true, supportedEffortLevels: [...CODEX_EFFORT_LEVELS] },
+  { id: "gpt-5.5-codex", label: "GPT-5.5 Codex", supportsEffort: true, supportedEffortLevels: [...CODEX_EFFORT_LEVELS] },
 ];
 
 /** Does this id look like an OpenAI/Codex model (vs. a Claude panel model)? Used
@@ -380,7 +393,7 @@ function isCodexModel(id: string): boolean {
 // scale is low|medium|high|xhigh|max. The shared levels map 1:1; the only
 // off-scale source value is Claude "max", which has no Codex equivalent and maps
 // to the nearest valid level (xhigh). Unknown/empty → null (app-server default).
-const CODEX_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh"] as const;
+const CODEX_EFFORTS = CODEX_EFFORT_LEVELS; // single source of truth (advertised == accepted)
 function toCodexEffort(effort: string | undefined): string | null {
   if (!effort) return null;
   const e = effort.toLowerCase();
@@ -1109,6 +1122,10 @@ export class CodexBackend implements AgentBackend {
    * family). Returns [] only if even that can't be determined.
    */
   async listModels(): Promise<ModelChoice[]> {
+    // Every Codex ModelChoice MUST carry CODEX_EFFORT_LEVELS so the panel enables
+    // the reasoning-effort dropdown (the backend applies effort to every turn).
+    // The fallback already does; if a future live config/read path builds its own
+    // ModelChoice(s) here, attach `supportedEffortLevels: [...CODEX_EFFORT_LEVELS]`.
     return CODEX_FALLBACK_MODELS;
   }
 
