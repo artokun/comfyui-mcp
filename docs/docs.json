@@ -2,7 +2,7 @@
   "$schema": "https://mintlify.com/docs.json",
   "theme": "mint",
   "name": "ComfyUI MCP",
-  "description": "Claude Code plugin + MCP server for ComfyUI - 96 tools, 22 AI skills, 13 installer packs, live graph editing from your Claude session. Generate images and video, manage models and custom nodes.",
+  "description": "Autonomous AI agent + MCP server for ComfyUI — drive your live graph in natural language from a sidebar agent on Claude OR ChatGPT (your own subscription, no API key). Generate images and video, author and run workflows, manage models and custom nodes. Includes a Claude Code plugin with skills, slash commands, and installer packs.",
   "colors": {
     "primary": "#2563EB",
     "light": "#60A5FA",
@@ -53,7 +53,8 @@
               "configuration",
               "concepts",
               "plugin",
-              "panel"
+              "panel",
+              "backends"
             ]
           }
         ]
@@ -74,7 +75,8 @@
               "tools/api-nodes",
               "tools/install-environment",
               "tools/process-control",
-              "tools/defaults-stats-skills"
+              "tools/defaults-stats-skills",
+              "tools/skills-knowledge"
             ]
           }
         ]
@@ -116,6 +118,7 @@
             "group": "Changelog",
             "pages": [
               "changelog/index",
+              "changelog/2026-06-25",
               "changelog/2026-06-24",
               "changelog/2026-06-19",
               "changelog/2026-06-17",
@@ -158,11 +161,21 @@
   },
   "keywords": [
     "ComfyUI",
+    "ComfyUI AI agent",
+    "ComfyUI Claude",
+    "ComfyUI ChatGPT",
+    "ComfyUI GPT-5",
+    "ComfyUI Copilot",
+    "ComfyUI assistant",
+    "autonomous ComfyUI",
+    "ComfyUI MCP",
+    "natural language ComfyUI workflow",
     "MCP",
     "Model Context Protocol",
     "Claude Code",
     "Claude plugin",
     "Claude skills",
+    "Codex",
     "Stable Diffusion",
     "image generation",
     "video generation",

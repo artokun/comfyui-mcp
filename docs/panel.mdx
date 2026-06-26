@@ -1,6 +1,6 @@
 ---
 title: "Sidebar Panel"
-description: "ComfyUI Agent Panel — an autonomous agent in ComfyUI's sidebar that runs on your Claude subscription. No API keys. Available on the Comfy Registry as comfyui-agent-panel."
+description: "ComfyUI Agent Panel — an autonomous AI agent in ComfyUI's sidebar that drives your canvas, now on EITHER Claude or ChatGPT (your own subscription, no API key). Available on the Comfy Registry as comfyui-agent-panel."
 icon: "comments"
 ---
 
@@ -12,57 +12,78 @@ icon: "comments"
 
 **[comfyui-mcp-panel](https://github.com/artokun/comfyui-mcp-panel)** puts an
 autonomous agent in ComfyUI's sidebar. Ask it for an image, a workflow, or a
-change — it works against your ComfyUI and replies right there. The agent runs
-**in the background on your Claude subscription**, so your own Claude Code
-session stays free.
+change — it works against your ComfyUI and replies right there. Pick a provider —
+**Claude** or **ChatGPT** — and the matching agent runs **in the background on
+your own subscription**, at [full feature parity](/backends).
 
 ```
-you ⇄ panel ⇄ ws://127.0.0.1:9180 (bridge) ⇄ panel orchestrator ⇄ background Claude agent (your subscription)
+you ⇄ panel (pick a provider) ⇄ loopback bridge ⇄ panel orchestrator ⇄ background agent: Claude OR ChatGPT (your subscription)
 ```
 
 **No API keys, no per-token billing.** The agent authenticates with your on-disk
-Claude login. The bridge is loopback-only, and the panel executes a **fixed
-allowlist** of graph commands (no arbitrary JavaScript).
+Claude *or* ChatGPT login. Each provider runs its own orchestrator on its own
+loopback bridge port (Claude defaults to `ws://127.0.0.1:9180`), so you pick a
+provider rather than a port. The bridge is loopback-only, and the panel executes a
+**fixed allowlist** of graph commands (no arbitrary JavaScript).
+
+<Note>
+  New here: [Backends / providers](/backends) explains the picker, the provider-neutral
+  `AgentBackend` port, and the capability matrix (what's identical across Claude and
+  ChatGPT, and the few things that differ).
+</Note>
 
 ## Setup
 
-1. **Install the pack** from git (while we're between Registry releases):
+1. **Install the pack** — search `comfyui-agent-panel` in ComfyUI-Manager, or from git:
 
    ```bash
    cd ComfyUI/custom_nodes
    git clone https://github.com/artokun/comfyui-mcp-panel
    ```
 
-2. **Sign in to Claude** once, so the background agent can use your subscription:
+2. **Sign in to the provider you want** once, so the background agent can use your
+   subscription:
 
    ```bash
-   claude   # or: claude setup-token
+   claude        # Claude — or: claude setup-token
+   codex login   # ChatGPT (Codex)
    ```
 
-3. **Restart ComfyUI**, open the **Agent** tab, and click **Connect**. The panel
-   starts the orchestrator (`npx -y comfyui-mcp --panel-orchestrator`) on your
-   Claude subscription and links to the bridge (`ws://127.0.0.1:9180`). Type a
-   request and the agent responds. **Disconnect** stops it.
+3. **Restart ComfyUI**, open the **Agent** tab, **pick a provider** (Claude /
+   ChatGPT chips), and click **Connect**. The panel starts that provider's
+   orchestrator (`npx -y comfyui-mcp --panel-orchestrator`) on your subscription and
+   links to its loopback bridge. Type a request and the agent responds.
+   **Disconnect** stops it.
 
 No `claude mcp add`, no API key. The orchestrator is started **only when you click
 Connect** — never silently on load — and the panel auto-connects if a bridge is
-already running. Prerequisites are Node.js/`npx` on your PATH and the Claude login
-above. To run the orchestrator yourself, set `COMFYUI_MCP_NO_AUTOSPAWN=1` and launch
+already running. Prerequisites are Node.js/`npx` on your PATH and the provider login
+above. To run an orchestrator yourself, set `COMFYUI_MCP_NO_AUTOSPAWN=1` and launch
 `npx -y comfyui-mcp --panel-orchestrator`, then click Connect; change the bridge
 port with `COMFYUI_MCP_BRIDGE_PORT`.
 
 ## What it can do
 
-The agent loads comfyui-mcp's model skills (IDEOGRAM, WAN, LTX, Qwen, and more),
-so it already knows the models you run. It can generate images, video and audio,
-inspect and manage your ComfyUI, and reason about your setup — then reply in the
-panel chat.
+The agent (Claude *or* ChatGPT) loads comfyui-mcp's model skills (IDEOGRAM, WAN,
+LTX, Qwen, and more), so it already knows the models you run — Claude natively, and
+ChatGPT via the same knowledge exposed as MCP tools
+([knowledge parity](/tools/skills-knowledge)). It can generate images, video and
+audio, inspect and manage your ComfyUI, and reason about your setup — then reply in
+the panel chat.
+
+It can also **load a whole workflow or installer pack in one shot**
+(`panel_load_workflow pack:<name>`) and is **cost-aware**: bundled packs are
+local-GPU / free, and for an ad-hoc graph the agent checks the runtime
+(`check_workflow_runtime`) and **asks before spending paid API credits**. See
+[Skills, Packs & Runtime Cost](/tools/skills-knowledge).
 
 ## Driving the live graph
 
 The autonomous agent works your live ComfyUI through a **fixed allowlist** of
 `panel_*` commands — no arbitrary JavaScript. Every graph mutation goes through
-LiteGraph's change tracking, so each is undoable with **Ctrl+Z**.
+LiteGraph's change tracking, so each is undoable with **Ctrl+Z**. The same
+`panel_*` surface is exposed identically to both backends (in-process for Claude,
+over a loopback HTTP MCP for ChatGPT/Codex), so [parity](/backends) is automatic.
 
 ### Read
 
@@ -125,6 +146,25 @@ straight in.
 | `panel_close_workflow` | Close a tab (refuses unsaved changes unless forced) |
 | `panel_save_workflow` | Save / save-as programmatically — no dialog pops |
 
+### Load a workflow in one shot
+
+| Tool | Effect |
+|---|---|
+| `panel_load_workflow` | Replace the live graph with a full workflow in one call — prefer `pack:<name>` to load a bundled installer pack's local-GPU workflow without shuttling the JSON through chat. The replaced graph becomes an undo point (double-Esc / `/revert`). |
+
+### Knowledge & cost awareness
+
+The agent discovers bundled expertise and checks runtime cost before spending
+credits (same tools on both backends — see
+[Skills, Packs & Runtime Cost](/tools/skills-knowledge)):
+
+| Tool | Effect |
+|---|---|
+| `list_skills` / `read_skill` | Discover and read bundled model-family + workflow skills |
+| `list_packs` / `read_pack_workflow` | List one-command installer packs (local-GPU / free) and read a pack's graph |
+| `list_workflow_templates` | List the connected server's official ComfyUI workflow templates |
+| `check_workflow_runtime` | Classify a graph as **local** (free) or **api/mixed/unknown** (paid) — the agent asks before spending paid API credits |
+
 ### Run & view
 
 | Tool | Effect |
@@ -177,6 +217,14 @@ Two shortcuts cover the common cases:
 - **Double-Esc** — a quick last-turn rewind: revert the graph and recall the
   message into the composer to edit and resend.
 
+<Note>
+  **Code** (graph) rollback works on **both** providers — it lives in the
+  orchestrator via per-turn snapshots. **Conversation** rollback (forking the chat
+  back to a past turn) is currently **Claude-only**; the ChatGPT/Codex backend
+  resumes whole threads only, so the panel gates that scope off for it. See the
+  [capability matrix](/backends#capability-matrix).
+</Note>
+
 ## Pending-message tray
 
 Type while the agent is busy and your message doesn't get lost in the chat — it
@@ -208,6 +256,8 @@ directly.
 
 ## See also
 
+- [Backends / providers](/backends) — Claude vs ChatGPT, the picker, capability parity
+- [Skills, Packs & Runtime Cost](/tools/skills-knowledge) — knowledge parity + the cost guardrail
 - [Bridge configuration](/configuration)
 - [The Claude Code plugin](/plugin) — model skills, slash commands, agents
 - [comfyui-mcp on GitHub](https://github.com/artokun/comfyui-mcp) · [comfyui-mcp-panel on GitHub](https://github.com/artokun/comfyui-mcp-panel)

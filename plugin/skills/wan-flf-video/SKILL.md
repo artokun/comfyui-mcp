@@ -348,7 +348,7 @@ WanVideoDecode (vae, samples) → IMAGE → VHS_VideoCombine → MP4
 |---------|--------|-----------------|
 | Simplicity | Simpler | More complex |
 | Dual Hi-Lo | Manual two-pass | May handle internally |
-| LoRA loading | Lora Loader Stack (rgthree) | WanVideoLoraSelect / WanVideoSetLoRAs |
+| LoRA loading | Lora Loader Stack (rgthree) | WanVideoLoraSelect → WanVideoModelLoader `lora` (see merge_loras caveat) |
 | Caching (TeaCache) | Not available | Built-in |
 | Context windows | Not available | WanVideoContextOptions |
 | Block swap (VRAM) | Not available | WanVideoBlockSwap |
@@ -356,6 +356,31 @@ WanVideoDecode (vae, samples) → IMAGE → VHS_VideoCombine → MP4
 | Long video (>81 frames) | Limited | InfiniteTalk / context windows |
 
 **Recommendation**: Use **Native dual hi-lo** for standard FLF transitions. Use **WanVideoWrapper** when you need caching, context windows, VRAM management, or advanced conditioning.
+
+### ⚠️ CRITICAL: `merge_loras=false` with fp8-scaled models
+
+When loading a LoRA through `WanVideoLoraSelect` → `WanVideoModelLoader`'s `lora`
+input on an **fp8-quantized** model (`quantization=fp8_e4m3fn_scaled`, e.g. the
+official `wan2.2_i2v_high/low_noise_14B_fp8_scaled` weights), you **MUST set the
+`WanVideoLoraSelect` widget `merge_loras=false`.**
+
+- `merge_loras=true` (the node **default**) tries to bake the LoRA deltas into the
+  already-quantized fp8 weights. That merge path **hard-crashes ComfyUI during
+  LoRA loading** — the process dies with **no Python traceback** (so
+  `panel_get_errors` / the frontend show nothing; only a process restart/OOM-style
+  symptom). This is the #1 cause of a "crashed on lora loading" report with the
+  wrapper.
+- `merge_loras=false` applies the LoRA as a **runtime patch** during the forward
+  pass instead of merging — fully fp8-safe, negligible speed cost. This is the
+  correct setting for the `lightx2v` 4-step lightning LoRAs (hi + lo) on the fp8
+  hi/lo I2V models.
+- It also pairs cleanly with block swap: `WanVideoBlockSwap` (e.g. 20–30 of 40
+  blocks → RAM) + `merge_loras=false` is the verified combo for fp8 14B I2V at
+  720p/81f on a 24GB card. (If you instead use a non-quantized bf16/fp16 model,
+  `merge_loras=true` is fine.)
+
+Separately, at 720p/81f enable **`enable_vae_tiling=true`** on `WanVideoDecode` —
+the full-frame decode is the other common uncaught-OOM crash point.
 
 ## Resolution & Frame Count
 

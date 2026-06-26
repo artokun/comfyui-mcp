@@ -1,0 +1,41 @@
+---
+title: "June 25: Multi-provider agent — Claude + ChatGPT"
+description: "The ComfyUI Agent Panel now runs on EITHER Claude or ChatGPT/Codex at full feature parity — pick a provider, drive your live canvas, load packs in one shot, and stay cost-aware about paid API nodes."
+---
+
+_June 25, 2026_
+
+The sidebar panel agent is no longer Claude-only. **Pick a provider — Claude or
+ChatGPT — and the agent runs on your own subscription** (no API keys), driving
+your live canvas at **full feature parity**.
+
+## Multi-provider agent: Claude + ChatGPT/Codex at full parity
+
+- **Pick a provider, not a port.** A backend picker (Claude / ChatGPT chips) starts
+  the matching background orchestrator, each on its own loopback bridge port.
+  Switching providers starts a fresh chat (sessions aren't shared) with a per-backend
+  composer placeholder. Sign in once per provider: `claude` or `codex login`.
+- **Provider-neutral `AgentBackend` port.** The orchestrator is decoupled from the
+  provider via dependency injection, with two adapters: **`ClaudeBackend`** (Claude
+  Agent SDK) and **`CodexBackend`** (OpenAI Codex over the `codex app-server`
+  JSON-RPC protocol). A capability matrix degrades the panel gracefully — e.g.
+  conversation-rollback is Claude-only for now; the code/graph rollback works on both.
+- **Full Codex tool parity.** The `panel_*` live-canvas tools live in one shared list,
+  registered onto both the in-process Claude SDK server and a loopback streamable-HTTP
+  MCP the orchestrator hosts for Codex. The headless `comfyui` MCP is injected into both
+  backends. The surface — including the destructive-confirm gating — is identical.
+- **Knowledge parity.** `list_skills` / `read_skill` / `list_packs` /
+  `read_pack_workflow` / `list_workflow_templates` expose the bundled model-family
+  skills, installer packs, and the connected server's official templates to any backend,
+  so ChatGPT has the same expertise Claude loads natively.
+- **One-shot `panel_load_workflow`.** Load a full workflow onto the live canvas in a
+  single call — by bundled `pack` name (read server-side, never shuttled through chat)
+  or by graph JSON — captured as an undo point.
+- **Local-GPU vs paid-API guardrail (`check_workflow_runtime`).** Classifies a workflow
+  as local (free) or api/mixed/unknown (paid). Bundled packs are local/free; for ad-hoc
+  graphs the agent **asks before spending paid API credits**.
+
+Read more: [Backends / providers](/backends) ·
+[Skills, Packs & Runtime Cost](/tools/skills-knowledge) ·
+[Sidebar Panel](/panel) ·
+design doc [`agent-backend-injection.md`](https://github.com/artokun/comfyui-mcp/blob/main/docs/design/agent-backend-injection.md).

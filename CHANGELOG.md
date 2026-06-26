@@ -6,6 +6,50 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### Added
+
+- **Multi-provider panel agent: Claude + ChatGPT/Codex at full parity.** The panel
+  orchestrator is now driven through a provider-neutral **`AgentBackend`** port
+  (dependency injection), so the same panel/orchestrator runs on **either** the
+  Claude Agent SDK **or** OpenAI Codex — selected by the panel's backend picker
+  ("pick a provider, not a port"), each on its own loopback bridge port. Both run
+  on the user's own subscription (claude.ai OAuth / ChatGPT login), no API keys.
+  - **`ClaudeBackend`** — the Agent SDK over a persistent streaming session
+    (`@anthropic-ai/claude-agent-sdk`, optional dep).
+  - **`CodexBackend`** — Codex over the `codex app-server` JSON-RPC protocol
+    (`@openai/codex`, optional dep), with interrupt via `turn/interrupt` and models
+    via `config/read`. A capability matrix degrades the panel gracefully
+    (conversation-rollback is Claude-only for now — the app-server resumes whole
+    threads only).
+  - **Provider switch + effort persistence** — switching providers starts a fresh
+    session; the chosen reasoning effort is preserved by mapping to the nearest
+    valid level for the target backend.
+- **Full Codex tool parity with Claude.** The `panel_*` live-canvas tools live in
+  one shared definition list, registered onto both the in-process Claude SDK MCP
+  server **and** a `@modelcontextprotocol/sdk` server over a loopback
+  **streamable-HTTP MCP** the orchestrator hosts for Codex (routed by tab id). The
+  headless `comfyui` MCP is injected into both backends (in-process for Claude;
+  declared via `codex app-server -c mcp_servers` for Codex). The shared list means
+  the surface — including the destructive-confirm gating for `panel_clear` /
+  `panel_restart_comfyui` — is identical across providers.
+- **Knowledge parity across backends.** New `list_skills` / `read_skill` /
+  `list_packs` / `read_pack_workflow` / `list_workflow_templates` tools expose the
+  bundled model-family + workflow skills, one-command installer packs, and the
+  connected server's official workflow templates to any MCP client (so the Codex
+  backend has the same expertise Claude loads natively), with steering toward
+  packs over hand-built graphs.
+- **One-shot `panel_load_workflow` + `graph_load`.** Load a full workflow onto the
+  live canvas in a single call — by bundled `pack` name (read server-side, so the
+  large graph never shuttles through the conversation) or by graph JSON — replacing
+  the current graph and capturing it as an undo point.
+- **API-node-vs-local-GPU awareness (`check_workflow_runtime`).** Classifies a
+  workflow as **local** (the user's own GPU, free) or **api** / **mixed** /
+  **unknown** (hosted API nodes that consume **paid** credits), using the same
+  signal as `list_api_nodes`. Bundled packs are local/free; the agent is steered to
+  **ASK before spending paid API credits** on any ad-hoc or generated workflow.
+
+See the design doc: [docs/design/agent-backend-injection.md](docs/design/agent-backend-injection.md).
+
 ## [0.16.0] - 2026-06-19
 
 ### Added

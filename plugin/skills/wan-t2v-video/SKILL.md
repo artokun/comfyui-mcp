@@ -230,6 +230,18 @@ For more control, use the WanVideoWrapper custom node pack. Key differences from
 - Uses `WanVideoModelLoader` → `WANVIDEOMODEL` type
 - Uses `WanVideoSampler` with built-in shift parameter
 - Supports TeaCache, context windows, block swap for VRAM management
+- LoRAs load via `WanVideoLoraSelect` → `WanVideoModelLoader` `lora` input
+
+### ⚠️ CRITICAL: `merge_loras=false` with fp8-scaled models
+
+When a LoRA (e.g. the `lightx2v` 4-step lightning hi/lo LoRAs) is loaded onto an
+**fp8-quantized** model (`quantization=fp8_e4m3fn_scaled`) via `WanVideoLoraSelect`,
+**set the node's `merge_loras` widget to `false`.** The default `merge_loras=true`
+tries to bake the LoRA into the already-quantized fp8 weights and **hard-crashes
+ComfyUI during LoRA loading with no Python traceback** (process dies — looks like
+an unexplained restart/OOM). `merge_loras=false` applies the LoRA as a runtime
+patch instead, which is fp8-safe. Use `merge_loras=true` only on non-quantized
+bf16/fp16 models. Pairs cleanly with `WanVideoBlockSwap` for fp8 14B on 24GB cards.
 
 ### WanVideoWrapper T2V Pipeline
 

@@ -1,0 +1,95 @@
+---
+title: "Backends / providers"
+description: "The panel agent runs on EITHER Claude or ChatGPT (your own subscription, no API key) at full feature parity. How the provider-neutral AgentBackend port, the picker, and the capability matrix work."
+icon: "shuffle"
+---
+
+The [sidebar panel](/panel) agent is **multi-provider**. Pick **Claude** or
+**ChatGPT** and the matching agent runs in the background on **your own
+subscription** — no API keys, no per-token billing. Both providers reach **full
+feature parity**: the same live-canvas tools, the same model knowledge, the same
+one-shot workflow loads, the same cost guardrail.
+
+```
+panel (pick a provider) ⇄ loopback bridge ⇄ orchestrator (Claude OR ChatGPT) ⇄ your graph
+```
+
+## Pick a provider, not a port
+
+The panel's settings show a **backend picker** — Claude / ChatGPT chips. Clicking
+one starts (or reuses) that provider's background orchestrator and connects to it.
+Each backend runs its **own orchestrator on its own loopback bridge port**, so you
+choose a provider and the panel handles the port for you. (The Bridge URL lives
+under **Advanced** for user-managed orchestrators.)
+
+Switching providers **starts a fresh chat** — conversations aren't shared across
+Claude and ChatGPT — and the panel posts a system note saying so. The composer
+placeholder follows the active backend ("Ask Claude…" / "Ask ChatGPT…").
+
+## Sign in (once per provider)
+
+Each provider authenticates with **your subscription**, not an API key:
+
+- **Claude** — `claude` (or `claude setup-token`) — claude.ai OAuth.
+- **ChatGPT** — `codex login` — ChatGPT login.
+
+## How each provider is driven
+
+The orchestrator depends on a provider-neutral **`AgentBackend`** port
+(dependency injection). Each provider is an adapter:
+
+| | Claude | ChatGPT (Codex) |
+|---|---|---|
+| Package | `@anthropic-ai/claude-agent-sdk` (optional dep) | `@openai/codex` (optional dep) |
+| Driver | Claude Agent SDK — persistent streaming session | `codex app-server` JSON-RPC protocol |
+| Auth | claude.ai OAuth (subscription) | ChatGPT login (subscription) |
+| Live-canvas tools | in-process SDK MCP server | loopback streamable-HTTP MCP (orchestrator-hosted) |
+| Headless `comfyui` MCP | in-process | declared via `codex app-server -c mcp_servers` |
+
+The `panel_*` tool definitions live in **one shared list**, registered onto both
+paths, so the live-canvas surface (including the destructive-confirm gating for
+`panel_clear` / `panel_restart_comfyui`) is identical across providers. Parity is
+automatic — neither path reimplements a tool.
+
+## Capability matrix
+
+A capability descriptor per backend lets the panel **degrade gracefully** on the
+features a provider can't do:
+
+| Capability | Claude | ChatGPT (Codex) |
+|---|---|---|
+| Persistent channel (push turns over time) | ✅ | ✅ (thread + `turn/start`) |
+| Streaming deltas | ✅ | ✅ |
+| Interrupt mid-turn | ✅ | ✅ (`turn/interrupt`) |
+| Conversation rollback (fork at a turn) | ✅ `forkSession` | ⚠️ resumes whole thread only — **rollback gated off** |
+| In-process MCP tools | ✅ | ❌ (config-declared MCP servers only) |
+| Model enumeration | ✅ | ✅ (`config/read`) |
+| Provider slash commands | ✅ | ❌ |
+
+So today **conversation-rollback** (forking the chat back to a past turn) is
+Claude-only; the **code/graph** rollback (`/revert`, double-Esc, per-turn snapshots)
+works on both backends because it lives in the orchestrator, not the provider.
+
+## Reasoning effort across a switch
+
+The effort/model picker is **per-provider**. A chosen effort survives a provider
+switch by mapping to the nearest valid level for the target backend (the panel and
+the orchestrator backends do the same mapping), so the picker stays honest about
+what's selectable:
+
+- **Claude:** `low` · `medium` · `high` · `max`
+- **ChatGPT (Codex):** `none` · `minimal` · `low` · `medium` · `high` · `xhigh`
+
+## Knowledge & cost parity
+
+Because the Codex backend can't load Claude's native skills, the bundled expertise
+is published as MCP tools any backend can call — `list_skills`, `read_skill`,
+`list_packs`, `read_pack_workflow`, `list_workflow_templates` — plus the
+local-GPU-vs-paid-API guardrail (`check_workflow_runtime`) and one-shot
+`panel_load_workflow`. See [Skills, Packs & Runtime Cost](/tools/skills-knowledge).
+
+## See also
+
+- [Sidebar Panel](/panel) — the full panel UX
+- [Skills, Packs & Runtime Cost](/tools/skills-knowledge) — the parity + cost tools
+- Design doc: [`docs/design/agent-backend-injection.md`](https://github.com/artokun/comfyui-mcp/blob/main/docs/design/agent-backend-injection.md)

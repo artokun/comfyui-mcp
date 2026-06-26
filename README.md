@@ -17,7 +17,7 @@ Works on **macOS**, **Linux**, and **Windows**. Auto-detects your ComfyUI instal
 The plugin ships **expert skills that grow with every release** — model-specific generation guides with curated download URLs, workflow recipes, troubleshooting, and custom-node authoring — so Claude knows the right sampler, CFG, resolution, and model files for each architecture without trial and error.
 
 > ### ✅ Now available: the [ComfyUI Agent Panel](https://registry.comfy.org/nodes/comfyui-agent-panel) on ComfyUI-Manager & the Comfy Registry
-> Claude in your ComfyUI sidebar — live graph edits, spatial canvas layout, rewind/rollback, a pending-message tray, activity cards, multi-tab, zero API keys.
+> An autonomous AI agent in your ComfyUI sidebar — **now on Claude OR ChatGPT** (your own subscription, no API key), at full feature parity. Pick a provider and it drives your live graph: edits, spatial layout, one-shot workflow/pack loads, rewind/rollback, a pending-message tray, activity cards, multi-tab — and it asks before spending paid API credits.
 > Search **`comfyui-agent-panel`** in ComfyUI-Manager to install. [Read more →](https://comfyui-mcp.artokun.io/docs/panel)
 
 📖 **Full documentation: [comfyui-mcp.artokun.io/docs](https://comfyui-mcp.artokun.io/docs)**
@@ -123,6 +123,57 @@ This package also ships as a **Claude Code plugin**, providing slash commands, s
 | Script | Description |
 |--------|-------------|
 | `monitor-progress.mjs` | **Progress monitor** — connects to ComfyUI's WebSocket for real-time step progress (e.g., `step 5/14 (36%)`). Run as a background Bash task after enqueuing workflows. Reports completion with output filenames, errors with node details. Replaces polling `get_job_status` in a loop. |
+
+---
+
+## Panel agent (Claude or ChatGPT)
+
+Beyond the headless MCP server, this package ships the **panel orchestrator** that
+powers the **[ComfyUI Agent Panel](https://github.com/artokun/comfyui-mcp-panel)** —
+an autonomous agent embedded in ComfyUI's sidebar that drives the live canvas. It
+runs in the background on **your own subscription** (Claude *or* ChatGPT), started
+on demand by the panel's **Connect** button:
+
+```bash
+npx -y comfyui-mcp --panel-orchestrator
+```
+
+**Multi-provider, full parity.** The orchestrator depends on a provider-neutral
+**`AgentBackend`** port (dependency injection), with two adapters:
+
+- **`ClaudeBackend`** — the [Claude Agent SDK](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk)
+  (`@anthropic-ai/claude-agent-sdk`), a persistent streaming session over the
+  claude.ai subscription (OAuth, no key).
+- **`CodexBackend`** — OpenAI Codex over the **`codex app-server`** JSON-RPC
+  protocol (`@openai/codex`), on the ChatGPT subscription (`codex login`, no key).
+
+Both are optional dependencies, and the panel picks a **provider, not a port** —
+each backend runs its own orchestrator on its own loopback bridge port. A
+capability matrix lets the panel degrade gracefully (e.g. conversation-rollback is
+Claude-only today, since the Codex app-server resumes whole threads only).
+
+**The live-canvas tools and model knowledge are identical across providers.** The
+`panel_*` tool definitions live in **one shared list**, registered onto both the
+in-process Claude SDK MCP server *and* a `@modelcontextprotocol/sdk` server over a
+loopback **streamable-HTTP MCP** that the orchestrator hosts for Codex (which can
+only host config-declared MCP servers). The headless `comfyui` MCP is likewise
+injected into both — in-process for Claude, declared via `codex app-server -c
+mcp_servers` for ChatGPT — so generation, models, and workflow tools are the same
+everywhere.
+
+New tools that give every backend the same expertise and a cost guardrail:
+
+| Tool | Description |
+|------|-------------|
+| `list_skills` / `read_skill` | Discover and read bundled model-family + workflow skills — the knowledge Claude loads natively, exposed to any MCP client (e.g. the Codex backend) |
+| `list_packs` / `read_pack_workflow` | List one-command installer packs (custom nodes + weights + ready workflow; all local-GPU / free) and read a pack's graph |
+| `list_workflow_templates` | List the connected ComfyUI's official workflow templates (the templates package + custom-node-provided templates) |
+| `check_workflow_runtime` | Classify a workflow as **local** (your GPU, free) or **api** / **mixed** / **unknown** (hosted API nodes = paid credits) so the agent asks before spending paid API credits |
+| `panel_load_workflow` | (panel tool) Load a full workflow onto the live canvas in one shot — by bundled `pack` name (read server-side, never shuttled through chat) or by graph JSON |
+
+See the design doc — **[docs/design/agent-backend-injection.md](docs/design/agent-backend-injection.md)** —
+for the port, the capability matrix, and the per-provider "clink" points, and the
+**[panel docs](https://comfyui-mcp.artokun.io/docs/panel)** for the full sidebar UX.
 
 ---
 

@@ -1,0 +1,125 @@
+---
+title: "Skills, Packs & Runtime Cost"
+description: "Knowledge-discovery tools that give any agent backend (Claude or ChatGPT) the bundled ComfyUI expertise — skills, installer packs, official templates — plus the local-GPU-vs-paid-API cost guardrail and one-shot workflow loading."
+icon: "book-open"
+---
+
+<Info>
+  These knowledge tools are exposed on the headless `comfyui` MCP server, so
+  **any MCP client** has them — including the panel's **ChatGPT/Codex** backend,
+  which can't load Claude's native skills. That's what gives both providers the
+  same expertise (knowledge parity). See [Backends / providers](/backends).
+</Info>
+
+## Why these exist
+
+Claude loads the bundled model-family skills natively. The Codex backend can't —
+so the same knowledge is published as MCP tools any backend can call. The cost
+tools (`check_workflow_runtime`, and the `pack:` modes below) keep the agent from
+silently spending **paid API credits** when a free local-GPU path exists.
+
+## list_skills
+
+List the bundled ComfyUI model-family + workflow skills shipped with comfyui-mcp
+(name + description for each). Call this **before** hand-building a model-family
+workflow — if a matching skill exists, read its full guidance with `read_skill`
+and prefer a ready installer pack (`list_packs`) over a generic graph.
+
+<Note>This tool takes no parameters.</Note>
+
+## read_skill
+
+Return the full body of a bundled skill's `SKILL.md` by name (discover names with
+`list_skills`) — model slots, node graph, recommended settings, and gotchas.
+
+<ParamField path="name" type="string" required>
+  The skill name (a bundled skill directory, e.g. `krea2-txt2img`). Validated against
+  path traversal; must match an existing skill.
+</ParamField>
+
+## list_packs
+
+List the bundled **installer packs** — one-command setups for a model family:
+custom nodes + model weights (`manifest.yaml`) **plus** a ready `workflow.json`.
+Each entry reports its family/kind, its runtime, whether it has a ready workflow +
+manifest, and the manifest path for `apply_manifest`.
+
+<Note>
+  All bundled installer packs are **local-GPU / free** — they run on the user's own
+  GPU and never spend paid API credits. Prefer applying the matching pack
+  (`apply_manifest`) and loading its ready workflow (`panel_load_workflow pack:<name>`)
+  over building a generic graph from scratch.
+</Note>
+
+<Note>This tool takes no parameters.</Note>
+
+## read_pack_workflow
+
+Return a bundled pack's ready `workflow.json` graph (discover names with `list_packs`).
+
+<ParamField path="name" type="string" required>
+  The pack name (from `list_packs`).
+</ParamField>
+
+## list_workflow_templates
+
+List the **official** ComfyUI workflow templates available on the connected ComfyUI
+(the `comfyui-workflow-templates` package + any custom-node-provided templates),
+grouped by source, via the live server's `/api/workflow_templates` index. Check here
+for a matching official starter **after** checking the bundled skills + installer
+packs.
+
+<Note>
+  This lists what's available; loading a template graph onto the canvas is done in
+  the ComfyUI frontend's Templates browser (the panel agent surfaces the matching
+  template name rather than loading it headlessly).
+</Note>
+
+<Note>This tool takes no parameters.</Note>
+
+## check_workflow_runtime
+
+Determine whether a workflow runs on the user's **own GPU** (LOCAL — free) or uses
+hosted **API nodes** (PAID api credits). Scans the workflow's node `class_type`s
+against the connected ComfyUI's API-node set (the same signal `list_api_nodes` uses)
+and returns `{ runtime: 'local' | 'api' | 'mixed' | 'unknown', usesApiNodes, apiNodes[], unknownNodes[] }`.
+
+<ParamField path="pack" type="string">
+  A bundled pack name (from `list_packs`). Packs are local/free; this confirms it from
+  the actual graph.
+</ParamField>
+<ParamField path="graph" type="object | string">
+  A workflow graph to classify (UI or API/prompt format), as an object or JSON string.
+  Use this for ad-hoc / generated workflows.
+</ParamField>
+
+<Warning>
+  Only `local` is confirmed free. Treat `api`, `mixed`, **and** `unknown` (some nodes
+  couldn't be classified — could be paid) as **possibly paid**. The agent always calls
+  this before building or loading a non-pack workflow and **asks before spending paid
+  API credits** — never silently using API nodes.
+</Warning>
+
+## panel_load_workflow
+
+<Info>A **panel** tool (orchestrator-hosted), available to both the Claude and ChatGPT backends.</Info>
+
+Load a full ComfyUI workflow onto the live canvas in one shot, replacing the current
+graph. The replaced graph is captured as an undo point (double-Esc / `/revert`).
+
+<ParamField path="pack" type="string">
+  Bundled pack name (from `list_packs`, e.g. `krea2-txt2img`). Its UI `workflow.json` is
+  read **server-side** and loaded onto the canvas — so the (large) graph never shuttles
+  through the conversation. These are local-GPU / free.
+</ParamField>
+<ParamField path="graph" type="object | string">
+  A UI/litegraph workflow graph (a `nodes` array; **not** API/prompt format) to load
+  instead of a pack. For an ad-hoc graph that may use API nodes, check the runtime first
+  (`check_workflow_runtime`) and ask before spending paid credits.
+</ParamField>
+
+## See also
+
+- [Backends / providers](/backends) — Claude vs ChatGPT, the picker, capability parity
+- [API / partner nodes](/tools/api-nodes) — `list_api_nodes` and the paid-credit surface
+- [Sidebar Panel](/panel) — the full panel UX
