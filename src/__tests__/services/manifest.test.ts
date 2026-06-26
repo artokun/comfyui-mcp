@@ -23,6 +23,8 @@ const execFileSyncMock = vi.hoisted(() => vi.fn());
 const installCustomNodeMock = vi.hoisted(() => vi.fn());
 const listInstalledNodesMock = vi.hoisted(() => vi.fn());
 const downloadModelMock = vi.hoisted(() => vi.fn());
+const resolveExistingModelFileMock = vi.hoisted(() => vi.fn());
+const listLocalModelsMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../../config.js", () => ({
   config: mockConfig,
@@ -68,6 +70,8 @@ vi.mock("../../services/model-resolver.js", () => ({
     "unet",
   ],
   downloadModel: (...a: unknown[]) => downloadModelMock(...a),
+  resolveExistingModelFile: (...a: unknown[]) => resolveExistingModelFileMock(...a),
+  listLocalModels: (...a: unknown[]) => listLocalModelsMock(...a),
 }));
 
 vi.mock("../../utils/logger.js", () => ({
@@ -92,6 +96,10 @@ beforeEach(() => {
   installCustomNodeMock.mockReset().mockResolvedValue({ message: "installed node" });
   listInstalledNodesMock.mockReset().mockResolvedValue([]);
   downloadModelMock.mockReset().mockResolvedValue("/fake/ComfyUI/models/checkpoints/m.safetensors");
+  // Default: the model is found in NO root (multi-root resolver rejects, HTTP
+  // listing is empty). Individual tests override to simulate an existing model.
+  resolveExistingModelFileMock.mockReset().mockRejectedValue(new Error("not found"));
+  listLocalModelsMock.mockReset().mockResolvedValue([]);
 });
 
 describe("loadManifestFile", () => {
@@ -189,6 +197,90 @@ describe("applyManifest", () => {
       "https://example.com/model.safetensors",
       "loras",
       "model.safetensors",
+    );
+  });
+
+  it("skips a model already present in an ALTERNATE model root (extra_model_paths)", async () => {
+    // The computed target under <COMFYUI_PATH>/models does NOT exist (statMock
+    // rejects by default), but the user already has the file under an extra root
+    // declared in extra_model_paths.yaml (e.g. another drive). The multi-root
+    // resolver finds it, so we must skip — not re-download.
+    const altPath = "E:/AImodels/checkpoints/big.safetensors";
+    resolveExistingModelFileMock.mockResolvedValueOnce({
+      path: altPath,
+      root: "E:/AImodels",
+      info: { isFile: () => true },
+    });
+
+    const result = await applyManifest({
+      manifest: {
+        models: [
+          {
+            url: "https://example.com/big.safetensors",
+            model_type: "checkpoints",
+            filename: "big.safetensors",
+          },
+        ],
+      },
+    });
+
+    expect(result.summary).toEqual({ applied: 0, skipped: 1, failed: 0 });
+    expect(result.results).toMatchObject([
+      { action: "model", status: "skipped", item: "big.safetensors" },
+    ]);
+    expect(result.results[0].message).toContain(altPath);
+    expect(resolveExistingModelFileMock).toHaveBeenCalledWith(
+      "checkpoints/big.safetensors",
+    );
+    expect(downloadModelMock).not.toHaveBeenCalled();
+  });
+
+  it("skips a model found by filename in a nested/HTTP-served root (list_local_models)", async () => {
+    // Not at the computed path and not at the exact relative path in any root,
+    // but ComfyUI serves it from a nested subfolder within the category. The
+    // category listing finds it by filename, so we skip the download.
+    listLocalModelsMock.mockResolvedValueOnce([
+      { name: "sdxl/big.safetensors", path: "checkpoints/sdxl/big.safetensors", type: "checkpoints" },
+    ]);
+
+    const result = await applyManifest({
+      manifest: {
+        models: [
+          {
+            url: "https://example.com/big.safetensors",
+            model_type: "checkpoints",
+            filename: "big.safetensors",
+          },
+        ],
+      },
+    });
+
+    expect(result.summary).toEqual({ applied: 0, skipped: 1, failed: 0 });
+    expect(result.results[0].status).toBe("skipped");
+    expect(listLocalModelsMock).toHaveBeenCalledWith("checkpoints");
+    expect(downloadModelMock).not.toHaveBeenCalled();
+  });
+
+  it("downloads when the model exists in NO root (multi-root check graceful miss)", async () => {
+    // resolveExistingModelFile rejects and listLocalModels is empty (defaults):
+    // the model is genuinely absent everywhere, so we must download it.
+    const result = await applyManifest({
+      manifest: {
+        models: [
+          {
+            url: "https://example.com/new.safetensors",
+            model_type: "loras",
+            filename: "new.safetensors",
+          },
+        ],
+      },
+    });
+
+    expect(result.summary).toEqual({ applied: 1, skipped: 0, failed: 0 });
+    expect(downloadModelMock).toHaveBeenCalledWith(
+      "https://example.com/new.safetensors",
+      "loras",
+      "new.safetensors",
     );
   });
 
