@@ -183,6 +183,26 @@ const CATEGORIES: Array<{
   },
 ];
 
+// Hand-written reference pages (custom prose, NOT generated from the tool schemas).
+// docs:gen appends them to the nav and treats their tools as "covered" (so they
+// don't trip the uncategorized warning), but NEVER overwrites their .mdx. Use this
+// for narrative pages that document a set of tools more richly than the generated
+// skeletons — e.g. skills-knowledge, which explains the skills/packs/templates +
+// cost-guardrail tools together.
+const HAND_WRITTEN_PAGES: Array<{ slug: string; tools: string[] }> = [
+  {
+    slug: "skills-knowledge",
+    tools: [
+      "list_skills",
+      "read_skill",
+      "list_packs",
+      "read_pack_workflow",
+      "list_workflow_templates",
+      "check_workflow_runtime",
+    ],
+  },
+];
+
 // ---------------------------------------------------------------------------
 // JSON Schema → MDX rendering helpers
 // ---------------------------------------------------------------------------
@@ -318,6 +338,17 @@ async function main() {
 
     writeFileSync(join(toolsDir, `${cat.slug}.mdx`), page.join("\n"));
     navPages.push(`tools/${cat.slug}`);
+  }
+
+  // Append hand-written reference pages to the nav and mark their tools as covered
+  // (so they don't trip the warning). Their .mdx is hand-maintained, never written.
+  for (const hw of HAND_WRITTEN_PAGES) {
+    hw.tools.forEach((n) => mapped.add(n));
+    if (existsSync(join(toolsDir, `${hw.slug}.mdx`))) {
+      navPages.push(`tools/${hw.slug}`);
+    } else {
+      console.warn(`[gen-tool-docs] hand-written page missing: docs/tools/${hw.slug}.mdx`);
+    }
   }
 
   // Warn about any tool not assigned to a category.
