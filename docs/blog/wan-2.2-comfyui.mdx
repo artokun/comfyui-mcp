@@ -89,15 +89,17 @@ offers three tiers so you match the quant to your card.
 
 | GGUF tier | VRAM target | Notes |
 |-----------|-------------|-------|
-| **Q4_K_S** | under 12 GB | Smallest quant for entry GPUs; some quality trade |
+| **Q4_K_S** | under 12 GB | **What this pack ships and the workflow references**; smallest quant, some quality trade |
 | **Q5_K_S** | 12–24 GB | Balanced middle tier |
-| **Q8_0** | 24 GB+ | Best quality; **what this pack ships and the workflow references** |
+| **Q8_0** | 24 GB+ | Best quality; what the `-96gb` pack variant ships |
 
-The pack pins **Q8_0** because that's exactly what `workflow.json` points at. To go
-lower, swap the `unet/Wan2.2-*-Q8_0.gguf` files for the `-Q5_K_S` or `-Q4_K_S`
-variants from the same `Aitrepreneur/FLX` repo and re-point the `UnetLoaderGGUF`
-nodes. To reduce OOM risk, the pack also launches ComfyUI with
-`--reserve-vram 2` so the GGUF UNet, VAE decode, and RIFE pass don't collide.
+The pack pins **Q4_K_S** because that's exactly what `workflow.json` points at — it
+keeps the two experts inside entry-GPU VRAM. To go higher-quality on a big card,
+install the **`-96gb` pack variant** (or swap the `unet/Wan2.2-*-Q4_K_S.gguf` files
+for the `-Q5_K_S` or `-Q8_0` variants from the same `Aitrepreneur/FLX` repo and
+re-point the `UnetLoaderGGUF` nodes). To reduce OOM risk, the pack also launches
+ComfyUI with `--reserve-vram 2` so the GGUF UNet, VAE decode, and RIFE pass don't
+collide.
 
 ## Install WAN 2.2 in ComfyUI
 
@@ -109,11 +111,11 @@ of files in a lot of exact places.
 
 | File | Folder |
 |------|--------|
-| `Wan2.2-I2V-A14B-HighNoise-Q8_0.gguf` / `-LowNoise-Q8_0.gguf` | `models/unet/` |
-| `Wan2.2-T2V-A14B-HighNoise-Q8_0.gguf` / `-LowNoise-Q8_0.gguf` | `models/unet/` |
+| `Wan2.2-I2V-A14B-HighNoise-Q4_K_S.gguf` / `-LowNoise-Q4_K_S.gguf` | `models/unet/` |
+| `Wan2.2-T2V-A14B-HighNoise-Q4_K_S.gguf` / `-LowNoise-Q4_K_S.gguf` | `models/unet/` |
 | `umt5-xxl-encoder-Q5_K_S.gguf` (text encoder) | `models/text_encoders/` |
 | `wan_2.1_vae.safetensors` | `models/vae/` |
-| `Wan2.2-Lightning_*-4steps-lora_HIGH/LOW` + `Wan2.1_T2V_14B_FusionX_LoRA` | `models/loras/` |
+| `wan2.2_{t2v,i2v}_lightx2v_4steps_lora_*_{high,low}_noise` + `Wan2.1_T2V_14B_FusionX_LoRA` | `models/loras/` |
 | `4x-ClearRealityV1.pth` | `models/upscale_models/` |
 
 ### The fast way — comfyui-mcp + the Panel
@@ -205,9 +207,10 @@ variant on the Lo path. That's true for:
   Lo LoRA → Lo model.
 - **FusionX, style, and concept LoRAs** — same rule, match the variant to the pass.
 
-The `wan-longer-videos` pack ships the matched pairs already:
-`Wan2.2-Lightning_I2V-A14B-4steps-lora_HIGH/LOW` for I2V and the
-`Wan2.2-Lightning_T2V-v1.1-A14B-4steps-lora_HIGH/LOW` pair for T2V, plus the
+The `wan-longer-videos` pack ships the matched pairs already — the official
+**lightx2v** 4-step LoRAs from `Comfy-Org/Wan_2.2_ComfyUI_Repackaged`:
+`wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise` / `_low_noise` for I2V and the
+`wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise` / `_low_noise` pair for T2V, plus the
 `Wan2.1_T2V_14B_FusionX_LoRA`. Mismatch the halves and you'll get muddy structure
 or mushy detail — the symptom maps directly to which expert got the wrong LoRA.
 
@@ -299,8 +302,7 @@ two-pass sampler chain and must use both.
 **Do I really need both models?** Yes. It was trained split-noise; a single model
 for all steps gives broken output. This is the most common WAN 2.1 → 2.2 mistake.
 
-**How much VRAM do I need?** With GGUF: under 12 GB on Q4_K_S, 12–24 GB on Q5_K_S,
-and 24 GB+ for the Q8_0 the pack ships.
+**How much VRAM do I need?** With GGUF: under 12 GB on Q4_K_S (what the base pack ships), 12–24 GB on Q5_K_S, and 24 GB+ for Q8_0 (the `-96gb` variant).
 
 **Can I run it locally / offline?** Yes — fully local in ComfyUI, no API key and no
 network call at generation time (after the one-time model download).
