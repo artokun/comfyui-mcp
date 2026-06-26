@@ -6,6 +6,31 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.19.1] - 2026-06-25
+
+### Fixed
+
+- **Tool robustness** (live-tested): `convert_image` / `list_output_images` now honor
+  ComfyUI's `--output-directory` / `--base-directory` redirect (resolved from
+  `/system_stats` argv) instead of assuming `<COMFYUI_PATH>/output`;
+  `verify_workflow_lock` reports "no lock" gracefully instead of crashing; the whole
+  Manager snapshot family (`list`/`save`/`restore_node_snapshot`) degrades gracefully
+  on builds without the `/snapshot/*` endpoints; registry versions render as strings
+  (no more `[object Object]`); `generate_node_skill` works on a bare registry id.
+- **Models / queue**: `remove_model` resolves across `extra_model_paths` roots (e.g.
+  a model on another drive), with a cross-platform absolute-path guard (rejects
+  posix-absolute, Windows drive-letter `E:\`, and UNC paths on all hosts);
+  `verify_custom_node` infers class types for re-exporting packs; `move_queued_job`
+  reports a real (non-negative) queue count.
+- **v3 dynamic-combo API nodes** (e.g. Nano Banana 2) serialize their dotted
+  `model.<nested>` widgets into the API/prompt format, so `generate_with_api_node`
+  and the UI→API conversion no longer 400.
+- **`request_secret` reaches the built-in comfyui MCP server**: tool secrets
+  (`CIVITAI_API_TOKEN` / `HUGGINGFACE_TOKEN` / `HF_TOKEN`, allowlisted) persist to a
+  0600 store and inject into the server's spawn env on both backends, with an
+  in-process respawn so a saved token applies without fighting reloads (downloads no
+  longer stay 401).
+
 ## [0.19.0] - 2026-06-25
 
 ### Added
