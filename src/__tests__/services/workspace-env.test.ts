@@ -24,8 +24,8 @@ const h = vi.hoisted(() => {
 
 vi.mock("../../config.js", () => ({
   config: h.mockConfig,
-  getComfyUIApiHost: () => "127.0.0.1:8188",
-  getComfyUIProtocol: () => "http",
+  getComfyUIBaseUrl: () => "http://127.0.0.1:8188",
+  getComfyUIAuthHeaders: () => ({}),
 }));
 
 vi.mock("../../comfyui/client.js", () => ({

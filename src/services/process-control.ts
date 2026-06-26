@@ -1,7 +1,8 @@
 import { execSync, spawn, type ChildProcess } from "node:child_process";
 import { platform } from "node:os";
 import { getSystemStats, resetClient, resetObjectInfoCache } from "../comfyui/client.js";
-import { config, getComfyUIApiHost, getComfyUIProtocol, isRemoteMode } from "../config.js";
+import { config, getComfyUIBaseUrl, isRemoteMode } from "../config.js";
+import { comfyuiFetch } from "../comfyui/fetch.js";
 import { ProcessControlError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 
@@ -322,9 +323,8 @@ function getRestartPolicy(): RestartPolicy {
 }
 
 async function waitForApiReady(): Promise<StartupReadinessResult> {
-  const host = getComfyUIApiHost();
   const { intervalMs, maxTries } = getStartupReadinessConfig();
-  const probeUrl = `${getComfyUIProtocol()}://${host}/system_stats`;
+  const probeUrl = `${getComfyUIBaseUrl()}/system_stats`;
   const start = Date.now();
   let attempts = 0;
 
@@ -334,7 +334,7 @@ async function waitForApiReady(): Promise<StartupReadinessResult> {
       const timeout = setTimeout(() => controller.abort(), 2000);
       let res: Response;
       try {
-        res = await fetch(probeUrl, { signal: controller.signal });
+        res = await comfyuiFetch(probeUrl, { signal: controller.signal });
       } finally {
         clearTimeout(timeout);
       }

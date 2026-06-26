@@ -11,8 +11,8 @@ vi.mock("node:fs", () => ({
 // Mock config so we control comfyuiPath and the API host/protocol.
 vi.mock("../../config.js", () => ({
   config: { comfyuiPath: "/fake/ComfyUI" as string | undefined },
-  getComfyUIApiHost: () => "127.0.0.1:8188",
-  getComfyUIProtocol: () => "http" as const,
+  getComfyUIBaseUrl: () => "http://127.0.0.1:8188",
+  getComfyUIAuthHeaders: () => ({}),
 }));
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";

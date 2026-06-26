@@ -208,9 +208,16 @@ const configSchema = z.object({
   comfyuiHost: z.string().default("127.0.0.1"),
   comfyuiPort: z.coerce.number().int().positive().optional(),
   comfyuiSsl: z.coerce.boolean().default(false),
+  comfyuiBasePath: z.string().default(""),
   comfyuiPath: z.string().optional(),
   comfyuiApiKey: z.string().optional(),
   comfyuiCloudUrl: z.string().default("https://cloud.comfy.org"),
+  // Generic auth for self-hosted ComfyUI behind a reverse proxy / API gateway
+  // (distinct from Comfy Cloud's COMFYUI_API_KEY). Applied to every ComfyUI
+  // HTTP request in local/remote modes when a token is set.
+  comfyuiAuthHeader: z.string().optional(),
+  comfyuiAuthScheme: z.string().optional(),
+  comfyuiAuthToken: z.string().optional(),
   huggingfaceToken: z.string().optional(),
   githubToken: z.string().optional(),
   civitaiApiToken: z.string().optional(),
@@ -234,6 +241,7 @@ const parsedConfig = configSchema.parse({
   comfyuiHost: urlOverride?.host ?? process.env.COMFYUI_HOST,
   comfyuiPort: urlOverride?.port ?? (process.env.COMFYUI_PORT || undefined),
   comfyuiSsl: urlOverride?.ssl ?? process.env.COMFYUI_SSL,
+  comfyuiBasePath: urlOverride?.basePath ?? "",
   comfyuiPath: resolveComfyUIPath(process.env.COMFYUI_PATH, {
     remoteUrl: remoteUrlActive,
     cloud: cloudActive,
@@ -241,6 +249,9 @@ const parsedConfig = configSchema.parse({
   }),
   comfyuiApiKey: cloudApiKey,
   comfyuiCloudUrl: process.env.COMFYUI_CLOUD_URL,
+  comfyuiAuthHeader: process.env.COMFYUI_AUTH_HEADER,
+  comfyuiAuthScheme: process.env.COMFYUI_AUTH_SCHEME,
+  comfyuiAuthToken: process.env.COMFYUI_AUTH_TOKEN,
   huggingfaceToken: process.env.HUGGINGFACE_TOKEN,
   githubToken: process.env.GITHUB_TOKEN,
   civitaiApiToken: process.env.CIVITAI_API_TOKEN,
@@ -301,4 +312,39 @@ export function getComfyUIApiHost(): string {
 
 export function getComfyUIProtocol(): "http" | "https" {
   return config.comfyuiSsl ? "https" : "http";
+}
+
+/** The URL path prefix ComfyUI is mounted under (e.g. "/comfyapi"), or "". */
+export function getComfyUIBasePath(): string {
+  return config.comfyuiBasePath;
+}
+
+/**
+ * Canonical base URL for ComfyUI HTTP requests: protocol + host:port + path
+ * prefix, no trailing slash. Append endpoint paths (e.g. `/system_stats`) to
+ * this so reverse-proxied / path-prefixed instances route correctly.
+ */
+export function getComfyUIBaseUrl(): string {
+  return `${getComfyUIProtocol()}://${getComfyUIApiHost()}${config.comfyuiBasePath}`;
+}
+
+/**
+ * Generic auth header(s) for a self-hosted ComfyUI behind a gateway/proxy.
+ * Empty when no token is configured. Examples:
+ *   COMFYUI_AUTH_TOKEN=abc                       → Authorization: Bearer abc
+ *   COMFYUI_AUTH_HEADER=X-API-Key TOKEN=abc      → X-API-Key: abc
+ *   COMFYUI_AUTH_SCHEME=Token TOKEN=abc          → Authorization: Token abc
+ * This is independent of Comfy Cloud mode (COMFYUI_API_KEY / X-API-Key).
+ */
+export function getComfyUIAuthHeaders(): Record<string, string> {
+  const token = config.comfyuiAuthToken?.trim();
+  if (!token) return {};
+  const header = config.comfyuiAuthHeader?.trim() || "Authorization";
+  // An unset/empty scheme defaults to "Bearer" for the Authorization header and
+  // to none (raw token) for any custom header. Set COMFYUI_AUTH_SCHEME to force
+  // a specific scheme (e.g. "Token").
+  const scheme =
+    config.comfyuiAuthScheme?.trim() ||
+    (header.toLowerCase() === "authorization" ? "Bearer" : "");
+  return { [header]: scheme ? `${scheme} ${token}` : token };
 }

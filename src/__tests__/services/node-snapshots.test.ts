@@ -21,8 +21,8 @@ const legacySnapshotDir = join(
 
 vi.mock("../../config.js", () => ({
   config: { comfyuiPath: "/fake/comfyui" as string | undefined },
-  getComfyUIApiHost: () => "127.0.0.1:8188",
-  getComfyUIProtocol: () => "http",
+  getComfyUIBaseUrl: () => "http://127.0.0.1:8188",
+  getComfyUIAuthHeaders: () => ({}),
 }));
 
 const fsMocks = vi.hoisted(() => ({

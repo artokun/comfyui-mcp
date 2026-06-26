@@ -25,3 +25,22 @@ jobs:
       - run: npm run lint
       - run: npm run build
       - run: npm test
+
+  pack-smoke:
+    runs-on: ubuntu-latest
+    name: Pack & install smoke
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build
+      # Packs the tarball exactly as `npm publish` would, installs it into a
+      # clean project (running the postinstall hook), and boots the entrypoint —
+      # catches packaging regressions (e.g. a files allowlist dropping a file the
+      # postinstall hook needs) that unit tests can't see.
+      - run: node scripts/smoke-install.mjs

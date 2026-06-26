@@ -29,8 +29,9 @@ mix-and-match.
 <ParamField path="COMFYUI_URL" type="string">
   Full URL of the ComfyUI instance, e.g. `https://my-comfy.example.com`. Equivalent to the
   `--comfyui-url` CLI flag. Takes precedence over host/port and skips port auto-detection.
-  When the host is non-loopback (anything other than `127.0.0.1` / `localhost` / `::1` / `0.0.0.0`),
-  the server enters **remote mode** and skips `COMFYUI_PATH` auto-detection.
+  A **path prefix is preserved** (e.g. `https://host/comfyapi`) so reverse-proxied instances
+  route correctly. When the host is non-loopback (anything other than `127.0.0.1` / `localhost` /
+  `::1` / `0.0.0.0`), the server enters **remote mode** and skips `COMFYUI_PATH` auto-detection.
 </ParamField>
 <ParamField path="COMFYUI_HOST" type="string" default="127.0.0.1">
   Host of the ComfyUI server.
@@ -46,6 +47,35 @@ mix-and-match.
   (suppressed in remote/cloud modes). Required by local-only tools (install/manage nodes, remove
   models, read logs, list output files).
 </ParamField>
+
+## Remote behind a reverse proxy / API gateway
+
+For a self-hosted ComfyUI exposed under a path prefix and/or its own auth layer (an nginx
+route, an API gateway, an SSO edge) — this is **not** Comfy Cloud:
+
+- `COMFYUI_URL` **preserves a path prefix** (e.g. `https://host/comfyapi`), so requests route
+  under it instead of hitting `/prompt`, `/system_stats`, … at the root.
+- The `COMFYUI_AUTH_*` variables attach a generic auth header to **every** ComfyUI request
+  (the direct HTTP calls and the underlying client/WebSocket library). This is independent of
+  cloud mode, so a gateway-auth'd instance is never misread as Comfy Cloud.
+
+<ParamField path="COMFYUI_AUTH_TOKEN" type="string">
+  Auth token for a self-hosted ComfyUI behind a gateway. When set, sent on every ComfyUI
+  request. Never logged.
+</ParamField>
+<ParamField path="COMFYUI_AUTH_HEADER" type="string" default="Authorization">
+  Header name that carries the token, e.g. `X-API-Key`.
+</ParamField>
+<ParamField path="COMFYUI_AUTH_SCHEME" type="string" default="Bearer for Authorization, else none">
+  Scheme prefix on the token value, e.g. `Bearer`, `Token`.
+</ParamField>
+
+```bash
+# Authorization: Bearer <token>, requests under /comfyapi
+COMFYUI_URL=https://gateway.example.com/comfyapi COMFYUI_AUTH_TOKEN=<token> npx -y comfyui-mcp
+# custom header: X-API-Key: <token>
+COMFYUI_URL=https://gateway.example.com/comfyapi COMFYUI_AUTH_HEADER=X-API-Key COMFYUI_AUTH_TOKEN=<token> npx -y comfyui-mcp
+```
 
 ## Comfy Cloud
 

@@ -1,7 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { config, getComfyUIApiHost, getComfyUIProtocol } from "../config.js";
+import { config, getComfyUIBaseUrl } from "../config.js";
+import { comfyuiFetch } from "../comfyui/fetch.js";
 import { restartComfyUI } from "./process-control.js";
 import { ComfyUIError, ProcessControlError, ValidationError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
@@ -51,8 +52,8 @@ const defaultDeps: VerifyDeps = {
     return { ready: result.readiness?.ready ?? false, message: result.message };
   },
   fetchObjectInfoKeys: async () => {
-    const url = `${getComfyUIProtocol()}://${getComfyUIApiHost()}/object_info`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+    const url = `${getComfyUIBaseUrl()}/object_info`;
+    const res = await comfyuiFetch(url, { signal: AbortSignal.timeout(30_000) });
     if (!res.ok) {
       throw new ComfyUIError(
         `Failed to fetch /object_info: ${res.status} ${res.statusText}`,

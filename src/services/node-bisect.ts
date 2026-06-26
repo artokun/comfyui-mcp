@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
-import { config, getComfyUIApiHost, getComfyUIProtocol } from "../config.js";
+import { config, getComfyUIBaseUrl } from "../config.js";
+import { comfyuiFetch } from "../comfyui/fetch.js";
 import { NodeBisectError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 
@@ -145,7 +146,7 @@ function advance(state: BisectState, newRange: string[]): BisectState {
 // ---------------------------------------------------------------------------
 
 function managerBase(): string {
-  return `${getComfyUIProtocol()}://${getComfyUIApiHost()}`;
+  return getComfyUIBaseUrl();
 }
 
 /** Small local fetch helper for the ComfyUI-Manager API. */
@@ -157,7 +158,7 @@ async function managerFetch(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(`${managerBase()}${path}`, {
+    const res = await comfyuiFetch(`${managerBase()}${path}`, {
       ...init,
       signal: controller.signal,
       headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },

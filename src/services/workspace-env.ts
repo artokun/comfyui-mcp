@@ -4,7 +4,7 @@ import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { homedir, platform } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
-import { config, getComfyUIApiHost, getComfyUIProtocol } from "../config.js";
+import { config, getComfyUIBaseUrl } from "../config.js";
 import { getSystemStats } from "../comfyui/client.js";
 import { logger } from "../utils/logger.js";
 import { ValidationError } from "../utils/errors.js";
@@ -154,7 +154,7 @@ export interface WorkspaceInfo {
 
 export async function getWorkspace(): Promise<WorkspaceInfo> {
   const cfg = await readWorkspaceConfig();
-  const apiTarget = `${getComfyUIProtocol()}://${getComfyUIApiHost()}`;
+  const apiTarget = getComfyUIBaseUrl();
 
   let source: WorkspaceInfo["workspace_source"];
   if (config.comfyuiPath) {
@@ -406,7 +406,7 @@ const KEY_PACKAGES = [
 ];
 
 export async function getEnvironment(): Promise<EnvironmentInfo> {
-  const apiTarget = `${getComfyUIProtocol()}://${getComfyUIApiHost()}`;
+  const apiTarget = getComfyUIBaseUrl();
 
   // 1. Running instance via /system_stats (works for remote targets too)
   const running: EnvironmentInfo["running_instance"] = {

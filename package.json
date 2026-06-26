@@ -1,6 +1,6 @@
 {
   "name": "comfyui-mcp",
-  "version": "0.16.0",
+  "version": "0.18.0",
   "mcpName": "io.github.artokun/comfyui-mcp",
   "description": "MCP server + autonomous AI agent for ComfyUI — drive your live graph in natural language from a sidebar agent on Claude OR ChatGPT (your own subscription, no API key). Generate images, video & audio, author and run workflows, manage models and custom nodes. Also a Claude Code plugin with skills, slash commands, and installer packs.",
   "homepage": "https://comfyui-mcp.artokun.io/docs",
@@ -9,12 +9,22 @@
   "bin": {
     "comfyui-mcp": "dist/index.js"
   },
+  "files": [
+    "dist",
+    "plugin",
+    "packs",
+    "scripts",
+    "model-settings.json",
+    "model-settings.user.jsonc.example"
+  ],
   "scripts": {
+    "sync-agents": "node scripts/sync-agents.mjs",
     "build": "tsc",
     "dev": "tsx src/index.ts",
     "dev:agent-poc": "tsx src/experimental/run.ts",
     "start": "node dist/index.js",
     "test": "vitest run --passWithNoTests",
+    "smoke": "npm run build && node scripts/smoke-install.mjs",
     "test:watch": "vitest",
     "test:integration": "cross-env COMFYUI_INTEGRATION=true vitest run",
     "test:agent": "npm run build && node scripts/test-agent.mjs",

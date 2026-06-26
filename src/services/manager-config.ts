@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { config, getComfyUIApiHost, getComfyUIProtocol } from "../config.js";
+import { config, getComfyUIBaseUrl } from "../config.js";
+import { comfyuiFetch } from "../comfyui/fetch.js";
 import { ComfyUIError, ValidationError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 
@@ -30,11 +31,11 @@ async function managerFetch(
   path: string,
   init?: RequestInit,
 ): Promise<Response> {
-  const url = `${getComfyUIProtocol()}://${getComfyUIApiHost()}${path}`;
+  const url = `${getComfyUIBaseUrl()}${path}`;
   logger.debug("ComfyUI-Manager API request", { url, method: init?.method ?? "GET" });
   let res: Response;
   try {
-    res = await fetch(url, init);
+    res = await comfyuiFetch(url, init);
   } catch (err) {
     throw new ManagerConfigError(
       `Could not reach ComfyUI-Manager at ${url}. Is ComfyUI running with ComfyUI-Manager installed?`,

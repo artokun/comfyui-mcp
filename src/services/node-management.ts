@@ -2,7 +2,8 @@ import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { basename, join } from "node:path";
-import { config, getComfyUIApiHost, getComfyUIProtocol } from "../config.js";
+import { config, getComfyUIBaseUrl } from "../config.js";
+import { comfyuiFetch } from "../comfyui/fetch.js";
 import { ComfyUIError, ProcessControlError, ValidationError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 
@@ -110,7 +111,7 @@ type ManagerTaskKind =
 // ---------------------------------------------------------------------------
 
 function managerBaseUrl(): string {
-  return `${getComfyUIProtocol()}://${getComfyUIApiHost()}`;
+  return getComfyUIBaseUrl();
 }
 
 interface ManagerFetchOptions {
@@ -133,7 +134,7 @@ async function managerFetch<T>(
 
   let res: Response;
   try {
-    res = await fetch(url, {
+    res = await comfyuiFetch(url, {
       method,
       headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,

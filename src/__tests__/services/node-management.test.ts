@@ -25,8 +25,9 @@ vi.mock("../../config.js", () => {
   };
   return {
     config,
-    getComfyUIApiHost: () => `${config.comfyuiHost}:${config.resolvedPort}`,
-    getComfyUIProtocol: () => (config.comfyuiSsl ? "https" : "http"),
+    getComfyUIBaseUrl: () =>
+      `${config.comfyuiSsl ? "https" : "http"}://${config.comfyuiHost}:${config.resolvedPort}`,
+    getComfyUIAuthHeaders: () => ({}),
   };
 });
 

@@ -133,3 +133,9 @@ stateless-server / Salad-specific bits (replicas, deletion-cost, k8s proxy).
 
 Phase 0 ships value immediately (skills + node tooling) and de-risks the panel (tunnel + streaming)
 before any frontend work. Phase 1 needs the v2 package closer to publish for the panel UI.
+
+## Google Antigravity Setup
+
+Google Antigravity support is integrated via the `.agents` and `.gemini` setup.
+Run `npm run sync-agents` to transpile Claude Code plugins into Google Antigravity compatible skills, commands, and hooks.
+See [GEMINI.md](./GEMINI.md) for development notes.

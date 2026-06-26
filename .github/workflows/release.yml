@@ -25,6 +25,13 @@ jobs:
       - run: npm run build
       - run: npm test
 
+      # Gate the publish on a real install of the packed tarball: catches a
+      # broken postinstall / missing-file packaging regression (e.g. 0.17.0,
+      # where the files allowlist dropped scripts/ but postinstall still ran
+      # node scripts/postinstall.mjs) BEFORE it reaches npm.
+      - name: Pack & install smoke
+        run: node scripts/smoke-install.mjs
+
       - name: Publish to npm
         run: npm publish --provenance --access public
 

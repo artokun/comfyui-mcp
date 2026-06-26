@@ -2,12 +2,14 @@ import { Client } from "@stable-canvas/comfyui-client";
 import {
   config,
   getComfyUIApiHost,
-  getComfyUIProtocol,
+  getComfyUIBasePath,
+  getComfyUIBaseUrl,
   isCloudMode,
   isRemoteMode,
 } from "../config.js";
 import { logger } from "../utils/logger.js";
 import { ComfyUIError, ConnectionError } from "../utils/errors.js";
+import { comfyuiFetch } from "./fetch.js";
 import * as cloudClient from "./cloud-client.js";
 import type { ObjectInfo, SystemStats, QueueStatus } from "./types.js";
 
@@ -59,9 +61,13 @@ export function getClient(): Client {
   if (!clientInstance) {
     clientInstance = new Client({
       api_host: getComfyUIApiHost(),
+      // Path prefix for reverse-proxied / gateway'd ComfyUI (e.g. "/comfyapi").
+      api_base: getComfyUIBasePath(),
       ssl: config.comfyuiSsl,
       clientId: "comfyui-mcp",
-      // Node 22+ provides global WebSocket
+      // Inject generic auth headers (COMFYUI_AUTH_*) on the library's own HTTP
+      // calls; a no-op when unset. Node 22+ provides global WebSocket.
+      fetch: comfyuiFetch,
     });
     logger.info("ComfyUI client created", {
       host: getComfyUIApiHost(),
@@ -177,12 +183,12 @@ export async function backfillObjectInfo(
   const missing = [...new Set(nodeTypes)].filter((t) => t && !(t in oi));
   if (missing.length === 0) return objectInfo;
 
-  const base = `${getComfyUIProtocol()}://${getComfyUIApiHost()}/object_info`;
+  const base = `${getComfyUIBaseUrl()}/object_info`;
   const merged = { ...oi };
   await Promise.all(
     missing.map(async (t) => {
       try {
-        const res = await fetch(`${base}/${encodeURIComponent(t)}`);
+        const res = await comfyuiFetch(`${base}/${encodeURIComponent(t)}`);
         if (!res.ok) return;
         const def = (await res.json()) as Record<string, unknown>;
         if (def && def[t]) {
@@ -230,8 +236,8 @@ export async function enqueuePrompt(
   // must travel to the server. It also cannot enqueue at the front. When either
   // is needed, POST /prompt directly.
   if ((extraData && Object.keys(extraData).length > 0) || opts?.front) {
-    const url = `${getComfyUIProtocol()}://${getComfyUIApiHost()}/prompt`;
-    const res = await fetch(url, {
+    const url = `${getComfyUIBaseUrl()}/prompt`;
+    const res = await comfyuiFetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({

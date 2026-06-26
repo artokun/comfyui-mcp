@@ -2,7 +2,8 @@ import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { platform } from "node:os";
-import { config, getComfyUIApiHost, getComfyUIProtocol } from "../config.js";
+import { config, getComfyUIBaseUrl } from "../config.js";
+import { comfyuiFetch } from "../comfyui/fetch.js";
 import { ProcessControlError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 
@@ -138,7 +139,7 @@ function requireComfyUIPath(): string {
 // ---------------------------------------------------------------------------
 
 function managerBaseUrl(): string {
-  return `${getComfyUIProtocol()}://${getComfyUIApiHost()}`;
+  return getComfyUIBaseUrl();
 }
 
 interface ManagerFetchResult {
@@ -156,7 +157,7 @@ async function managerFetch(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(url, { ...init, signal: controller.signal });
+    const res = await comfyuiFetch(url, { ...init, signal: controller.signal });
     let body: unknown = null;
     const text = await res.text();
     if (text) {

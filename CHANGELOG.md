@@ -49,6 +49,57 @@ All notable changes to this project are documented here. This project adheres to
   **ASK before spending paid API credits** on any ad-hoc or generated workflow.
 
 See the design doc: [docs/design/agent-backend-injection.md](docs/design/agent-backend-injection.md).
+## [0.18.0] - 2026-06-25
+
+### Added
+
+- **Remote self-hosted ComfyUI behind a reverse proxy / API gateway (#52).**
+  `COMFYUI_URL` now **preserves a path prefix** (e.g. `https://host/comfyapi`),
+  so requests route under the prefix instead of hitting `/prompt`,
+  `/system_stats`, … at the root. New `COMFYUI_AUTH_TOKEN` (+ optional
+  `COMFYUI_AUTH_HEADER`, default `Authorization`, and `COMFYUI_AUTH_SCHEME`,
+  default `Bearer`) attaches a generic auth header to **every** ComfyUI request
+  — both the direct HTTP calls and the underlying client/WebSocket library.
+  This is independent of Comfy Cloud mode (`COMFYUI_API_KEY` / `X-API-Key`), so
+  a normal self-hosted instance behind a gateway no longer gets misread as
+  Comfy Cloud. Requested by [@NitishMamadgi](https://github.com/NitishMamadgi).
+
+## [0.17.1] - 2026-06-23
+
+### Fixed
+
+- **Broken install on 0.17.0.** The 0.17.0 `files` allowlist dropped `scripts/`
+  while `package.json` still declared `postinstall: node scripts/postinstall.mjs`,
+  so `npm install` / `npx -y comfyui-mcp` crashed on a missing file. Restore
+  `scripts/` to the published tarball (also ships `sync-agents.mjs` so
+  `npm run sync-agents` works from an install). Thanks
+  [@NeoAnthropocene](https://github.com/NeoAnthropocene) (#51).
+
+### Changed
+
+- **Release smoke test.** CI and the release workflow now pack the tarball,
+  install it into a clean project (running the postinstall hook), and boot the
+  entrypoint — so a packaging regression like the above is caught before publish
+  instead of after. Run locally with `npm run smoke`.
+
+## [0.17.0] - 2026-06-22
+
+### Added
+
+- **Google Antigravity / `.agents` support.** A new `npm run sync-agents` script
+  transpiles the Claude Code plugin — skills, agents, commands, and hooks — into
+  Google Antigravity's `.agents` + `.gemini` formats (and other AI IDEs that read
+  `.agents`), with a `GEMINI.md` developer guide. It's a manual dev step (no
+  install/build-time side effects). Contributed by
+  [@NeoAnthropocene](https://github.com/NeoAnthropocene) (#50).
+
+### Changed
+
+- **Leaner npm package.** Publishing now uses an explicit `files` allowlist
+  (`dist`, `plugin`, `packs`, `model-settings.json` + its override template),
+  dropping dev/CI/docs cruft (`scripts/`, `blog/`, `docs/`, the legacy
+  `web/extensions` drop-in, dotfiles) from the tarball while keeping everything
+  the server and agent actually use.
 
 ## [0.16.0] - 2026-06-19
 
