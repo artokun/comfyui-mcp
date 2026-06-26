@@ -115,15 +115,26 @@ function orchLockPath(port: number): string {
 }
 
 function readWindowsProcessStartedAtMs(pid: number): number | null {
+  // Get-CimInstance already returns CreationDate as a .NET DateTime (CIM converts
+  // the raw WMI DMTF string for us), so use it directly — feeding it back through
+  // ManagementDateTimeConverter::ToDateTime (which expects a DMTF *string*) threw
+  // "Specified argument was out of the range of valid values" on EVERY call, which
+  // (a) always returned null, silently disabling the creation-time identity check,
+  // and (b) flooded ComfyUI's log via the child's stderr. ToUniversalTime()+"o"
+  // yields a UTC ISO-8601 string that matches the pack's psutil create_time()
+  // (same kernel value) within the 2s tolerance used by parentIdentityMatches.
   const script =
     `$p = Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}"; ` +
-    `if ($p) { ([Management.ManagementDateTimeConverter]::ToDateTime($p.CreationDate)).ToUniversalTime().ToString("o") }`;
+    `if ($p) { $p.CreationDate.ToUniversalTime().ToString("o") }`;
   for (const exe of ["powershell.exe", "powershell"]) {
     try {
       const out = execFileSync(exe, ["-NoProfile", "-NonInteractive", "-Command", script], {
         encoding: "utf8",
         timeout: 2000,
         windowsHide: true,
+        // Never let PowerShell's stderr reach our parent's (ComfyUI's) console/log;
+        // a transient error must stay silent, not flood the log.
+        stdio: ["ignore", "pipe", "ignore"],
       }).trim();
       if (!out) return null;
       const ms = Date.parse(out);
