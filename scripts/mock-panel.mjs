@@ -23,6 +23,9 @@ const ms = () => `${((Date.now() - t0) / 1000).toFixed(1)}s`;
 // --- in-memory graph ---
 let seq = 0;
 const nodes = new Map(); // id -> {id,type,title,widgets,inputs,outputs}
+const blueprints = new Map(); // saved subgraph blueprints: name -> { name, type }
+let clipboard = []; // copied node descriptors (persists across switches)
+let selection = []; // currently-selected node ids
 function addNode(type, title) {
   const id = ++seq;
   // Give every node a couple of generic typed slots so connect() can succeed.
@@ -48,7 +51,7 @@ const commands = []; // { cmd, args }
 const says = [];
 
 function summarize(n) {
-  return { id: n.id, type: n.type, title: n.title, widgets: n.widgets, inputs: n.inputs, outputs: n.outputs };
+  return { id: n.id, type: n.type, title: n.title, is_subgraph: !!n.is_subgraph, widgets: n.widgets, inputs: n.inputs, outputs: n.outputs };
 }
 
 const EXEC = {
@@ -99,8 +102,36 @@ const EXEC = {
   workflow_open: ({ path }) => ({ opened: { path, filename: path } }),
   workflow_rename: ({ name }) => ({ renamed: { to: `${name}.json` } }),
   workflow_close: ({ path }) => ({ closed: { path } }),
-  graph_select_nodes: ({ node_ids }) => ({ selected: node_ids }),
-  graph_create_subgraph: ({ node_ids }) => ({ subgraph: { node_id: ++seq, name: "Subgraph", from_nodes: node_ids } }),
+  graph_select_nodes: ({ node_ids }) => { selection = (node_ids || []).map(Number); return { selected: node_ids }; },
+  graph_create_subgraph: ({ node_ids }) => { const id = ++seq; nodes.set(id, { id, type: "Subgraph", title: "Subgraph", is_subgraph: true, widgets: {}, inputs: [], outputs: [] }); selection = [id]; return { subgraph: { node_id: id, name: "Subgraph", from_nodes: node_ids } }; },
+  graph_copy_nodes: ({ node_ids }) => {
+    const ids = (Array.isArray(node_ids) && node_ids.length ? node_ids.map(Number) : selection);
+    const src = ids.map((id) => nodes.get(Number(id))).filter(Boolean);
+    if (!src.length) throw new Error("nothing selected to copy");
+    clipboard = src.map((n) => ({ type: n.type, title: n.title, widgets: { ...n.widgets } }));
+    return { copied: clipboard.length };
+  },
+  graph_paste_nodes: () => {
+    if (!clipboard.length) throw new Error("clipboard empty");
+    const pasted = clipboard.map((c) => addNode(c.type, c.title));
+    return { pasted_count: pasted.length, pasted_node_ids: pasted.map((n) => n.id), pasted: pasted.map(summarize) };
+  },
+  graph_save_subgraph: ({ node_id, name }) => {
+    const id = node_id != null ? Number(node_id) : selection[0];
+    const n = id != null ? nodes.get(id) : null;
+    if (!n || !n.is_subgraph) throw new Error("select a subgraph node first");
+    const finalName = (typeof name === "string" && name.trim()) ? name.trim() : (n.title || "Subgraph");
+    blueprints.set(finalName, { name: finalName, type: `SubgraphBlueprint.${finalName}` });
+    return { saved: { name: finalName, from_node_id: id, type: `SubgraphBlueprint.${finalName}` } };
+  },
+  graph_list_subgraphs: () => ({ count: blueprints.size, blueprints: [...blueprints.values()].map((b) => ({ ...b, display_name: b.name, description: null, is_global: false })) }),
+  graph_add_subgraph: ({ name }) => {
+    const key = String(name).replace(/^SubgraphBlueprint\./, "");
+    if (!blueprints.has(key)) throw new Error(`No blueprint "${name}"`);
+    const id = ++seq;
+    nodes.set(id, { id, type: `SubgraphBlueprint.${key}`, title: key, is_subgraph: true, widgets: {}, inputs: [], outputs: [] });
+    return { added: summarize(nodes.get(id)), from_blueprint: `SubgraphBlueprint.${key}` };
+  },
 };
 
 const sock = new WebSocket(url);

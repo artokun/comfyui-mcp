@@ -30,6 +30,9 @@ function makeGraph(seed) {
   let seq = 0;
   const nodes = new Map();        // root graph
   const subgraphs = new Map();    // subgraph node id -> inner nodes Map
+  const blueprints = new Map();   // saved subgraph blueprints: name -> { name, type }
+  let clipboard = [];             // copied node descriptors (persists across switches)
+  let selection = [];             // currently-selected node ids
   let viewing = "root";           // "root" or a subgraph node id (number)
   const mk = (map, type, title, widgets) => {
     const id = ++seq;
@@ -83,8 +86,40 @@ function makeGraph(seed) {
     workflow_open: ({ path }) => ({ opened: { path, filename: path } }),
     workflow_rename: ({ name }) => ({ renamed: { to: `${name}.json` } }),
     workflow_close: ({ path }) => ({ closed: { path } }),
-    graph_select_nodes: ({ node_ids }) => ({ selected: node_ids }),
-    graph_create_subgraph: ({ node_ids }) => { const id = ++seq; subgraphs.set(id, new Map()); return { subgraph: { node_id: id, name: "Subgraph", from_nodes: node_ids } }; },
+    graph_select_nodes: ({ node_ids }) => { selection = (node_ids || []).map(Number); return { selected: node_ids }; },
+    graph_create_subgraph: ({ node_ids }) => { const id = ++seq; subgraphs.set(id, new Map()); nodes.set(id, { id, type: "Subgraph", title: "Subgraph", is_subgraph: true, widgets: {}, inputs: [], outputs: [] }); selection = [id]; return { subgraph: { node_id: id, name: "Subgraph", from_nodes: node_ids } }; },
+    // Copy/paste — clipboard PERSISTS across workflow switches (cross-workflow merge).
+    graph_copy_nodes: ({ node_ids }) => {
+      const ids = (Array.isArray(node_ids) && node_ids.length ? node_ids.map(Number) : selection);
+      const src = ids.map((id) => cur().get(Number(id))).filter(Boolean);
+      if (!src.length) throw new Error("nothing selected to copy — pass node_ids or select nodes first");
+      clipboard = src.map((n) => ({ type: n.type, title: n.title, widgets: { ...n.widgets } }));
+      return { copied: clipboard.length };
+    },
+    graph_paste_nodes: () => {
+      if (!clipboard.length) throw new Error("clipboard is empty — graph_copy_nodes first");
+      const pasted = clipboard.map((c) => mk(cur(), c.type, c.title, { ...c.widgets }));
+      return { pasted_count: pasted.length, pasted_node_ids: pasted.map((n) => n.id), pasted: pasted.map(brief) };
+    },
+    // Subgraph blueprints — save/list/add reusable subgraphs.
+    graph_save_subgraph: ({ node_id, name }) => {
+      const id = node_id != null ? Number(node_id) : selection[0];
+      const n = id != null ? nodes.get(id) : null;
+      if (!n || !n.is_subgraph) throw new Error("select a single subgraph node (or pass node_id) before saving");
+      const finalName = (typeof name === "string" && name.trim()) ? name.trim() : (n.title || "Subgraph");
+      blueprints.set(finalName, { name: finalName, type: `SubgraphBlueprint.${finalName}` });
+      return { saved: { name: finalName, from_node_id: id, type: `SubgraphBlueprint.${finalName}` } };
+    },
+    graph_list_subgraphs: () => ({ count: blueprints.size, blueprints: [...blueprints.values()].map((b) => ({ ...b, display_name: b.name, description: null, is_global: false })) }),
+    graph_add_subgraph: ({ name, pos }) => {
+      const key = String(name).replace(/^SubgraphBlueprint\./, "");
+      if (!blueprints.has(key)) throw new Error(`No saved subgraph blueprint "${name}"`);
+      const id = ++seq;
+      const inner = new Map();
+      nodes.set(id, { id, type: `SubgraphBlueprint.${key}`, title: key, is_subgraph: true, widgets: {}, inputs: [], outputs: [] });
+      subgraphs.set(id, inner);
+      return { added: brief(nodes.get(id)), from_blueprint: `SubgraphBlueprint.${key}` };
+    },
     // Built-in Manager (v2) mock
     nodes_search: ({ query }) => ({
       count: 1,
@@ -92,6 +127,7 @@ function makeGraph(seed) {
     }),
     nodes_list: () => ({ installed: { node_packs: {} } }),
     nodes_install: ({ id, repository }) => ({ queued: true, ui_id: "test-ui", id: id ?? repository }),
+    graph_update_node: ({ id }) => ({ queued: true, ui_id: "test-ui", id, version: "latest" }),
     nodes_queue_status: () => ({ status: { done_count: 1, total_count: 1, in_progress_count: 0 } }),
     comfy_reboot: () => ({ rebooting: true }),
     // Destructive-op confirmation card → always answer with the affirmative
@@ -211,6 +247,24 @@ const SCENARIOS = [
     check: (r) => ({
       pass: (r.counts.graph_create_subgraph || 0) >= 1,
       detail: `create_subgraph=${r.counts.graph_create_subgraph || 0} select=${r.counts.graph_select_nodes || 0}`,
+    }),
+  },
+  {
+    name: "merges nodes via copy → paste",
+    seed: 3,
+    task: "Copy all the nodes on my current canvas and paste a second copy of them onto the canvas, so I have two sets. Just copy and paste — don't rebuild them by hand.",
+    check: (r) => ({
+      pass: (r.counts.graph_copy_nodes || 0) >= 1 && (r.counts.graph_paste_nodes || 0) >= 1 && !r.counts.graph_clear,
+      detail: `copy=${r.counts.graph_copy_nodes || 0} paste=${r.counts.graph_paste_nodes || 0} add=${r.counts.graph_add_node || 0} nodesLeft=${r.finalNodes}`,
+    }),
+  },
+  {
+    name: "saves a subgraph to the library",
+    seed: "subgraph",
+    task: "There's a subgraph node on my canvas. Save it to my reusable subgraph library under the name 'MyBlock' so I can drop it into other workflows later.",
+    check: (r) => ({
+      pass: (r.counts.graph_save_subgraph || 0) >= 1,
+      detail: `save_subgraph=${r.counts.graph_save_subgraph || 0} list=${r.counts.graph_list_subgraphs || 0} add=${r.counts.graph_add_subgraph || 0}`,
     }),
   },
   {

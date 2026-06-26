@@ -23,6 +23,8 @@ const CAP_MS = Number(process.env.SCENARIO_CAP_MS || 180000);
 function makeGraph(seed) {
   let seq = 0;
   const nodes = new Map();
+  let clipboard = [];
+  let selection = [];
   const add = (type, title) => {
     const id = ++seq;
     nodes.set(id, {
@@ -53,7 +55,20 @@ function makeGraph(seed) {
     workflow_save_as: ({ name }) => ({ saved_as: `workflows/${name}.json` }),
     workflow_new: () => ({ created: true }),
     workflow_list: () => ({ active: { path: "workflows/current.json", filename: "current.json", key: "cur" }, open: [] }),
-    graph_select_nodes: ({ node_ids }) => ({ selected: node_ids }),
+    graph_select_nodes: ({ node_ids }) => { selection = (node_ids || []).map(Number); return { selected: node_ids }; },
+    graph_copy_nodes: ({ node_ids }) => {
+      const ids = (Array.isArray(node_ids) && node_ids.length ? node_ids.map(Number) : selection);
+      const src = ids.map((id) => nodes.get(Number(id))).filter(Boolean);
+      if (!src.length) throw new Error("nothing to copy");
+      clipboard = src.map((n) => ({ type: n.type, title: n.title }));
+      return { copied: clipboard.length };
+    },
+    graph_paste_nodes: () => {
+      if (!clipboard.length) throw new Error("clipboard empty");
+      const pasted = clipboard.map((c) => add(c.type, c.title));
+      return { pasted_count: pasted.length, pasted_node_ids: pasted.map((n) => n.id), pasted: pasted.map(brief) };
+    },
+    graph_list_subgraphs: () => ({ count: 0, blueprints: [] }),
     set_todo: ({ items }) => ({ ok: true, count: (items || []).length }),
     ask_user: (m) => (m.options && m.options[0] && m.options[0].label) || "yes",
   };

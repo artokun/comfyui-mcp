@@ -689,6 +689,55 @@ export function buildPanelToolDefs(): PanelToolDef[] {
       async (args: A, ctx) => ctx.call({ cmd: "graph_create_subgraph", node_ids: args.node_ids }, 15000),
     ),
     def(
+      "panel_copy_nodes",
+      "Copy nodes from the user's open graph to the clipboard. Pass node_ids to copy those nodes (they're selected first), or omit to copy the current canvas selection. The clipboard PERSISTS across workflow switches, so this is how you MERGE one workflow into another: copy here, then panel_open_workflow/panel_new_workflow to the destination, then panel_paste_nodes. Returns {copied: count}.",
+      {
+        node_ids: z
+          .array(z.number().int())
+          .optional()
+          .describe("Node ids to copy. Omit to copy the current selection."),
+      },
+      async (args: A, ctx) => ctx.call({ cmd: "graph_copy_nodes", node_ids: args.node_ids }, 15000),
+    ),
+    def(
+      "panel_paste_nodes",
+      "Paste the clipboard (from a prior panel_copy_nodes) onto the user's CURRENTLY OPEN graph — including a graph in a DIFFERENT workflow, which is how you merge/compose workflows. Returns the NEW node ids so you can wire or organize them. connect_inputs:false (default) pastes a disconnected copy; pos sets where the paste lands. Undoable with Ctrl+Z.",
+      {
+        pos: xy().optional().describe("Canvas [x, y] anchor for the paste. Auto-placed when omitted."),
+        connect_inputs: z
+          .boolean()
+          .optional()
+          .describe("Reconnect pasted nodes' inputs to existing nodes where they line up (default false)."),
+      },
+      async (args: A, ctx) =>
+        ctx.call({ cmd: "graph_paste_nodes", pos: args.pos, connect_inputs: args.connect_inputs }, 15000),
+    ),
+    def(
+      "panel_save_subgraph",
+      "Save a SUBGRAPH node to the user's reusable blueprint LIBRARY (publish), so it can be dropped into any workflow later. Pass node_id to pick the subgraph node (else a single selected subgraph node is used) and name to title the blueprint (defaults to the node's title). Runs programmatically — NO save dialog pops. The blueprint becomes the addable type 'SubgraphBlueprint.<name>' (use panel_add_subgraph or panel_list_subgraphs). Returns {saved: {name, type}}.",
+      {
+        node_id: z.number().int().optional().describe("Subgraph node id to publish (is_subgraph=true). Omit to use the selected subgraph node."),
+        name: z.string().optional().describe("Blueprint name. Defaults to the subgraph node's title."),
+      },
+      async (args: A, ctx) =>
+        ctx.call({ cmd: "graph_save_subgraph", node_id: args.node_id, name: args.name }, 20000),
+    ),
+    def(
+      "panel_list_subgraphs",
+      "List the saved subgraph BLUEPRINTS in the user's library (from panel_save_subgraph, plus any global/bundled ones). Each entry has {name, type, display_name, description, is_global} — use name/type with panel_add_subgraph to drop it onto the canvas. Read-only.",
+      {},
+      async (_args, ctx) => ctx.call({ cmd: "graph_list_subgraphs" }, 15000),
+    ),
+    def(
+      "panel_add_subgraph",
+      "Add a saved subgraph blueprint (from panel_list_subgraphs) onto the user's open graph by name (or full 'SubgraphBlueprint.<name>' type). This is how you REUSE a built subgraph in another workflow. pos places it; auto-placed when omitted. Returns the added subgraph node. Undoable with Ctrl+Z.",
+      {
+        name: z.string().describe("Blueprint name or type from panel_list_subgraphs."),
+        pos: xy().optional().describe("Canvas [x, y]. Auto-placed beside existing nodes when omitted."),
+      },
+      async (args: A, ctx) => ctx.call({ cmd: "graph_add_subgraph", name: args.name, pos: args.pos }, 20000),
+    ),
+    def(
       "panel_create_group",
       "Create a labeled GROUP box (the colored rectangle that visually frames a region) on the user's open graph. This is the lightweight organizer, DISTINCT from a subgraph (which nests/hides nodes) — a group just draws a titled box around nodes, leaving them in place. Pass node_ids to auto-size the box around those nodes, or bounds [x, y, width, height] for an explicit box. Optional color (hex like '#3f789e') and title. Returns the new group's id. Undoable with Ctrl+Z.",
       {
