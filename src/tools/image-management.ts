@@ -9,6 +9,7 @@ import {
   uploadImageAuto,
   uploadVideoAuto,
   uploadAudioAuto,
+  stageOutputAsInput,
 } from "../services/image-management.js";
 import { errorToToolResult } from "../utils/errors.js";
 
@@ -155,6 +156,92 @@ export function registerImageManagementTools(server: McpServer): void {
       "for images or upload_video for video.",
     uploadAudioAuto,
     "as the audio file input in LoadAudio (or similar) nodes",
+  );
+
+  // ── stage_output_as_input ─────────────────────────────────────────────────
+  // The correct, dir-agnostic way to pipe one pipeline stage's output into the
+  // next stage's loader. Fetches the output via /view and re-registers it as an
+  // input via /upload/image — never touches the filesystem, so it works with
+  // custom --input-directory / --output-directory.
+  server.tool(
+    "stage_output_as_input",
+    "Stage an EXISTING ComfyUI output (or temp/preview) as an INPUT so the next " +
+      "stage's loader (LoadImage / VHS_LoadVideo / LoadAudio) can read it. This " +
+      "is the CORRECT way to chain a multi-stage pipeline (e.g. Krea2 image → " +
+      "LTX video → WAN extend): it fetches the output's bytes from the server " +
+      "via /view and re-registers them as an input via /upload/image — the same " +
+      "endpoints get_image and upload_image use. Because it goes entirely " +
+      "through the server API, it works even when ComfyUI was launched with a " +
+      "CUSTOM input/output directory. Do NOT instead copy the output file or " +
+      "guess a filesystem `input/` path — the server's input dir may be custom " +
+      "and it will reject the file (\"Invalid image file\"), wasting the render. " +
+      "Pass an existing output reference ({ filename, subfolder?, type? }); the " +
+      "media kind (image/video/audio) is inferred from the extension unless you " +
+      "set `kind`. Returns the registered input { filename, subfolder, type: " +
+      "\"input\", kind } — drop the returned `filename` straight into the " +
+      "loader's image/video/audio widget.",
+    {
+      filename: z
+        .string()
+        .describe(
+          "Filename of the existing output/temp asset (from get_history or list_output_images), e.g. LTX_video_00001.mp4",
+        ),
+      subfolder: z
+        .string()
+        .optional()
+        .describe("Subfolder the asset currently lives in, if any"),
+      type: z
+        .enum(["output", "temp"])
+        .optional()
+        .default("output")
+        .describe(
+          "Source directory the asset lives in: output (default) or temp (previews)",
+        ),
+      kind: z
+        .enum(["image", "video", "audio"])
+        .optional()
+        .describe(
+          "Force the media kind instead of inferring it from the file extension",
+        ),
+      as_filename: z
+        .string()
+        .optional()
+        .describe(
+          "Override the filename it is registered under in the input/ directory (defaults to the source filename)",
+        ),
+    },
+    async (args) => {
+      try {
+        const staged = await stageOutputAsInput({
+          filename: args.filename,
+          subfolder: args.subfolder,
+          type: args.type ?? "output",
+          kind: args.kind,
+          asFilename: args.as_filename,
+        });
+        const loaderHint =
+          staged.kind === "video"
+            ? "the video file input in VHS_LoadVideo (or similar)"
+            : staged.kind === "audio"
+              ? "the audio input in LoadAudio (or similar)"
+              : "the `image` input in LoadImage";
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text:
+                `Staged ${staged.kind} output as input via the server API.\n\n` +
+                `Input filename: ${staged.filename}\n` +
+                `subfolder: ${staged.subfolder || "(none)"}\n` +
+                `type: ${staged.type}\n\n` +
+                `Use "${staged.filename}" as ${loaderHint}.`,
+            },
+          ],
+        };
+      } catch (err) {
+        return errorToToolResult(err);
+      }
+    },
   );
 
   // ── workflow_from_image ───────────────────────────────────────────────────

@@ -3,15 +3,15 @@ import { join, basename, extname } from "node:path";
 import { config } from "../config.js";
 import { ValidationError, ModelError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
-import { resolveOutputDir } from "./output-dir.js";
+import { resolveOutputDir, resolveInputDir } from "./output-dir.js";
 
-function getInputDir(): string {
-  if (!config.comfyuiPath) {
-    throw new ValidationError(
-      "COMFYUI_PATH is not configured. Set the COMFYUI_PATH environment variable.",
-    );
-  }
-  return join(config.comfyuiPath, "input");
+/**
+ * Resolve ComfyUI's REAL input directory (honors a custom --input-directory /
+ * --base-directory). Used only for genuine local filesystem copies; HTTP uploads
+ * go through the server API and don't need a path.
+ */
+async function getInputDir(): Promise<string> {
+  return resolveInputDir();
 }
 
 /**
@@ -22,7 +22,7 @@ export async function uploadImage(
   sourcePath: string,
   filename?: string,
 ): Promise<{ filename: string; path: string }> {
-  const inputDir = getInputDir();
+  const inputDir = await getInputDir();
   const resolvedFilename = filename ?? basename(sourcePath);
 
   // Validate extension
@@ -247,19 +247,13 @@ export async function uploadImageAuto(
 ): Promise<{ filename: string }> {
   const resolvedFilename = filename ?? basename(sourcePath);
   const ext = extname(resolvedFilename).toLowerCase();
-  const allowed = [".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff", ".tif"];
-  if (!allowed.includes(ext)) {
+  if (!(ext in IMAGE_MIME)) {
     throw new ValidationError(
-      `Unsupported image format "${ext}". Supported: ${allowed.join(", ")}`,
+      `Unsupported image format "${ext}". Supported: ${Object.keys(IMAGE_MIME).join(", ")}`,
     );
   }
   const data = await nodeReadFile(sourcePath);
-  const mimeMap: Record<string, string> = {
-    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-    ".webp": "image/webp", ".bmp": "image/bmp", ".gif": "image/gif",
-    ".tiff": "image/tiff", ".tif": "image/tiff",
-  };
-  const mimeType = mimeMap[ext] ?? "application/octet-stream";
+  const mimeType = IMAGE_MIME[ext] ?? "application/octet-stream";
   logger.info("Uploading image to ComfyUI via HTTP", { sourcePath, resolvedFilename });
   const result = await uploadImageHttp(resolvedFilename, data, mimeType);
   return { filename: result.name };
@@ -270,6 +264,17 @@ export async function uploadImageAuto(
 // (and the input/ directory) accept arbitrary media, which video/audio loader
 // nodes (e.g. VHS_LoadVideo, LoadAudio) then read by filename.
 // ---------------------------------------------------------------------------
+
+const IMAGE_MIME: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".bmp": "image/bmp",
+  ".gif": "image/gif",
+  ".tiff": "image/tiff",
+  ".tif": "image/tiff",
+};
 
 const VIDEO_MIME: Record<string, string> = {
   ".mp4": "video/mp4",
@@ -326,7 +331,7 @@ async function uploadMediaLocal(
   mimeMap: Record<string, string>,
   kind: "video" | "audio",
 ): Promise<{ filename: string; path: string }> {
-  const inputDir = getInputDir();
+  const inputDir = await getInputDir();
   const resolvedFilename = filename ?? basename(sourcePath);
   resolveMediaMime(resolvedFilename, mimeMap, kind);
   const targetPath = join(inputDir, resolvedFilename);
@@ -349,3 +354,113 @@ export const uploadAudioAuto = (sourcePath: string, filename?: string) =>
   uploadMediaHttp(sourcePath, filename, AUDIO_MIME, "audio");
 export const uploadAudioLocal = (sourcePath: string, filename?: string) =>
   uploadMediaLocal(sourcePath, filename, AUDIO_MIME, "audio");
+
+// ---------------------------------------------------------------------------
+// stage_output_as_input — pipe one pipeline stage's OUTPUT into the next stage's
+// loader (LoadImage / VHS_LoadVideo / LoadAudio) the CORRECT way: fetch the bytes
+// from the ComfyUI server (/view) and re-register them as an INPUT via the same
+// /upload/image endpoint the upload_* tools use. Because both legs go through the
+// server API, this works even when ComfyUI was launched with a CUSTOM
+// --input-directory / --output-directory — unlike copying or guessing a
+// filesystem input/ path, which the server then rejects ("Invalid image file").
+// ---------------------------------------------------------------------------
+
+export type MediaKind = "image" | "video" | "audio";
+
+const MIME_BY_KIND: Record<MediaKind, Record<string, string>> = {
+  image: IMAGE_MIME,
+  video: VIDEO_MIME,
+  audio: AUDIO_MIME,
+};
+
+/** Infer image/video/audio from a filename's extension. */
+export function inferMediaKind(filename: string): MediaKind {
+  const ext = extname(filename).toLowerCase();
+  if (ext in IMAGE_MIME) return "image";
+  if (ext in VIDEO_MIME) return "video";
+  if (ext in AUDIO_MIME) return "audio";
+  throw new ValidationError(
+    `Cannot infer media kind from extension "${ext}". ` +
+      `Pass an explicit kind ("image" | "video" | "audio").`,
+  );
+}
+
+/** Resolve the upload MIME type for a filename within a given media kind. */
+function mimeForKind(filename: string, kind: MediaKind): string {
+  const ext = extname(filename).toLowerCase();
+  const mime = MIME_BY_KIND[kind][ext];
+  if (!mime) {
+    throw new ValidationError(
+      `Extension "${ext}" is not a supported ${kind} format. ` +
+        `Supported: ${Object.keys(MIME_BY_KIND[kind]).join(", ")}`,
+    );
+  }
+  return mime;
+}
+
+export interface StageOutputAsInputArgs {
+  /** Filename of the existing output/temp asset (from get_history / list_output_images). */
+  filename: string;
+  /** Subfolder the asset lives in, if any. */
+  subfolder?: string;
+  /** Source directory the asset currently lives in. "output" (default) or "temp" (previews). */
+  type?: "output" | "temp";
+  /** Force the media kind instead of inferring from the extension. */
+  kind?: MediaKind;
+  /** Override the filename it is registered under in the input/ directory. */
+  asFilename?: string;
+}
+
+export interface StagedInput {
+  /** Filename to drop into the loader's image/video/audio widget. */
+  filename: string;
+  /** Subfolder ComfyUI stored it under (usually ""). */
+  subfolder: string;
+  /** ComfyUI directory it now lives in (always "input"). */
+  type: string;
+  /** Detected/forced media kind. */
+  kind: MediaKind;
+}
+
+/**
+ * Stage an EXISTING ComfyUI output (or temp preview) as an INPUT, ready to feed
+ * into the next stage's LoadImage / VHS_LoadVideo / LoadAudio loader.
+ *
+ * Fetches the bytes from the server via /view (the same path get_image uses) and
+ * re-registers them as an input via /upload/image (the same path upload_image /
+ * upload_video / upload_audio use). Goes entirely through the server API, so it
+ * is correct even when ComfyUI runs with a custom input/output directory.
+ */
+export async function stageOutputAsInput(
+  args: StageOutputAsInputArgs,
+): Promise<StagedInput> {
+  const sourceType = args.type ?? "output";
+  const kind = args.kind ?? inferMediaKind(args.filename);
+  const targetName = args.asFilename ?? basename(args.filename);
+  const mimeType = mimeForKind(targetName, kind);
+
+  // Fetch the existing asset's bytes via the same /view mechanism the asset
+  // tools use (fetchImage handles cloud vs local). Despite the name, /view
+  // returns raw bytes for any media type, not just images.
+  const { base64 } = await fetchImage(
+    args.filename,
+    sourceType,
+    args.subfolder ?? "",
+  );
+  const data = Buffer.from(base64, "base64");
+
+  logger.info("Staging ComfyUI output as input via server API", {
+    source: args.filename,
+    sourceType,
+    kind,
+    targetName,
+  });
+
+  const result = await uploadImageHttp(targetName, data, mimeType);
+  return {
+    filename: result.name,
+    subfolder: result.subfolder,
+    type: result.type,
+    kind,
+  };
+}

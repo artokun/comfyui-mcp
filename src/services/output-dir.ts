@@ -66,6 +66,72 @@ export function localOutputDirFallback(): string {
   return resolve(config.comfyuiPath, "output");
 }
 
+// ---------------------------------------------------------------------------
+// Resolve ComfyUI's REAL input directory — the exact mirror of the output-dir
+// logic above. ComfyUI can be launched with --input-directory (or
+// --base-directory) which redirects the LoadImage / VHS_LoadVideo / LoadAudio
+// search path away from the default <COMFYUI_PATH>/input. Filesystem-path tools
+// that write or check files in the input directory must therefore NOT assume
+// <COMFYUI_PATH>/input, or a server with a custom --input-directory rejects the
+// file ("Invalid image file") while the tool reports success. Prefer the server
+// API (/upload/image, see stage_output_as_input) when possible; use this only
+// for genuine local filesystem operations.
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse the configured input directory out of ComfyUI's launch argv.
+ * --input-directory wins; otherwise --base-directory implies <base>/input.
+ * Returns undefined when neither flag is present.
+ */
+export function parseInputDirFromArgv(argv: string[] | undefined): string | undefined {
+  if (!argv || argv.length === 0) return undefined;
+
+  let inputDir: string | undefined;
+  let baseDir: string | undefined;
+  for (let i = 0; i < argv.length; i++) {
+    inputDir = flagValue(argv, i, "--input-directory") ?? inputDir;
+    baseDir = flagValue(argv, i, "--base-directory") ?? baseDir;
+  }
+
+  const resolvedBase = baseDir ? resolveDir(baseDir) : undefined;
+  if (inputDir) return resolveDir(inputDir, resolvedBase);
+  if (resolvedBase) return join(resolvedBase, "input");
+  return undefined;
+}
+
+/** <COMFYUI_PATH>/input fallback. Throws if COMFYUI_PATH is unset. */
+export function localInputDirFallback(): string {
+  if (!config.comfyuiPath) {
+    throw new ValidationError(
+      "COMFYUI_PATH is not configured. Set the COMFYUI_PATH environment variable.",
+    );
+  }
+  return resolve(config.comfyuiPath, "input");
+}
+
+/**
+ * Resolve the directory ComfyUI actually reads inputs from. Asks the running
+ * ComfyUI (/system_stats argv) first; falls back to <COMFYUI_PATH>/input.
+ */
+export async function resolveInputDir(): Promise<string> {
+  try {
+    const stats = await getSystemStats();
+    const fromArgv = parseInputDirFromArgv(stats.system?.argv);
+    if (fromArgv) {
+      logger.debug("Resolved ComfyUI input directory from launch argv", {
+        inputDir: fromArgv,
+      });
+      return fromArgv;
+    }
+  } catch (err) {
+    logger.debug(
+      "Could not resolve input dir from /system_stats; using COMFYUI_PATH/input",
+      { error: err instanceof Error ? err.message : String(err) },
+    );
+  }
+  return localInputDirFallback();
+}
+
 /**
  * Resolve the directory ComfyUI actually writes outputs to. Asks the running
  * ComfyUI (/system_stats argv) first; falls back to <COMFYUI_PATH>/output.

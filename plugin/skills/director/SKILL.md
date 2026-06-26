@@ -226,11 +226,15 @@ Show hero frame and all character refs. User approves or requests regeneration w
 
 Edits are **sequential** — each depends on the previous output:
 1. Run edit, wait for completion
-2. `upload_image` the output
-3. Use uploaded output as source for next edit
+2. **Stage the output as the next stage's input with `stage_output_as_input`** (pass the output's `{ filename, subfolder?, type? }`); it returns the registered input filename
+3. Use that returned filename as the `image` in the next edit's `LoadImage`
 4. Update state file after each edit
 
 Independent edits (both from hero) can run in parallel.
+
+### CRITICAL: feeding an output into the next loader (don't guess paths)
+
+To pipe ANY stage's output into the next stage's loader (`LoadImage` here, `VHS_LoadVideo` / `LoadAudio` in the video phases), call **`stage_output_as_input`** with the output's `{ filename, subfolder?, type? }` and drop the returned input filename into the loader's `image`/`video`/`audio` widget. For a file already on local disk, use `upload_image` / `upload_video` / `upload_audio`. **NEVER copy the output file into, or guess, a filesystem `input/` path** — ComfyUI's input and output directories may be CUSTOM (`--input-directory` / `--output-directory`), so a guessed path makes the loader reject the file (`Invalid image file`) and wastes the render. `stage_output_as_input` goes through the server API (`/view` → `/upload/image`), which resolves the real dirs correctly.
 
 ### Timing
 

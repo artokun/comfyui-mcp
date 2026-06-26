@@ -372,6 +372,15 @@ This also matters for **chaining** — color-match every new segment to the
 Pusa adds a bounded window (~4 s) per run. To go longer, **feed the output back
 in**:
 
+0. **Stage the output clip as the next run's input** with
+   **`stage_output_as_input`** (pass the rendered clip's
+   `{ filename, subfolder?, type? }`); use the returned input filename in
+   `VHS_LoadVideo`. **NEVER copy the output .mp4 into, or guess, a filesystem
+   `input/` path** — ComfyUI's input/output dirs may be CUSTOM
+   (`--input-directory` / `--output-directory`), so a guessed path makes
+   `VHS_LoadVideo` fail to find/decode the file and wastes the run. The tool
+   routes through the server API (`/view` → `/upload/image`), which resolves the
+   real dirs correctly. (For a clip already on local disk, `upload_video`.)
 1. Run the extension → decode → save (or keep the frames in-graph).
 2. Take the **tail of the *new* output** (the last ~13 frames) as the next
    `WanVideoEncode` input.

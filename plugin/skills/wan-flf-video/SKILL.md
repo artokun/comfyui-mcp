@@ -521,7 +521,7 @@ When the start and end frames have different subject sizes (e.g., small cat → 
 1. **Generate anchor frame** with Z-Image/SDXL/Flux (portrait orientation for standing subjects)
 2. **Qwen Edit to create second frame** — the edit preserves scene context
 3. **Clear VRAM** between model families
-4. **Upload both frames** with `upload_image`
+4. **Stage both frames as inputs.** When the frames are ComfyUI OUTPUTS from a prior stage (the generated/edited frames above), use **`stage_output_as_input`** with each output's `{ filename, subfolder?, type? }` and feed the returned input filename into each `LoadImage`. (For a frame already on local disk, use `upload_image`.) **NEVER copy the output file into, or guess, a filesystem `input/` path** — ComfyUI's input/output dirs may be CUSTOM (`--input-directory` / `--output-directory`), so a guessed path makes `LoadImage` reject the file (`Invalid image file`) and wastes the render. `stage_output_as_input` routes through the server API (`/view` → `/upload/image`), which resolves the real dirs correctly.
 5. **Run dual hi-lo FLF** with morph LoRA if morphing is desired
 6. **Optionally upscale** with SeedVR2 to 1080p
 

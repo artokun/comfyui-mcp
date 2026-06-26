@@ -219,6 +219,18 @@ Dedicated sigma schedule for LTX-V2 latent space:
 
 Connect the optional `latent` input for latent-aware shift scaling.
 
+> **Feeding a prior stage's output into I2V (e.g. Krea2 image → LTX video).** The
+> `LoadImage` that feeds `LTXVImgToVideo.image` needs the source frame registered
+> as a ComfyUI INPUT. When that frame is an OUTPUT from an earlier stage, call
+> **`stage_output_as_input`** with its `{ filename, subfolder?, type? }` and drop
+> the returned input filename into `LoadImage`. (For a file already on local
+> disk, `upload_image`.) **NEVER copy the output file into, or guess, a
+> filesystem `input/` path** — ComfyUI's input/output dirs may be CUSTOM
+> (`--input-directory` / `--output-directory`), so a guessed path makes
+> `LoadImage` reject the file (`Invalid image file`) and wastes the render.
+> `stage_output_as_input` goes through the server API (`/view` → `/upload/image`)
+> and resolves the real dirs correctly.
+
 ### LTXVImgToVideo (For I2V)
 
 All-in-one node that encodes image, creates latent, and wraps conditioning:
