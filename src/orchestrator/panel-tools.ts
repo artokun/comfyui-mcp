@@ -950,9 +950,9 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_restart_comfyui",
-      "Restart the user's ComfyUI server via the built-in Manager — needed to load newly installed custom nodes. Just CALL THIS DIRECTLY when a restart is needed: the tool itself pops a confirm card and only restarts on a yes (don't ask separately first). ComfyUI and this agent go down briefly, then the panel auto-reconnects and you resume. Only call when a restart is actually needed (e.g. right after installing nodes).",
-      {},
-      async (_args, ctx) => {
+      "Restart the user's ComfyUI server via the built-in Manager — needed to load newly installed/updated custom nodes. CALL THIS DIRECTLY when a restart is needed: it pops a confirm card and only restarts on a yes (don't ask separately first). ComfyUI and this agent go down briefly, then the panel auto-reconnects and you resume. ⚠️ BUSY GUARD: a restart ABORTS any in-progress or queued generation — if ComfyUI is generating, this tool REFUSES and tells you (it does NOT restart). When that happens, tell the user a render is running and WAIT for it (poll panel_node_queue_status), or pass force:true ONLY if the user explicitly confirms they want to kill the running generation. Best practice: before restarting after an install, check the queue is idle first. Only call when a restart is actually needed.",
+      { force: z.boolean().optional() },
+      async ({ force }, ctx) => {
         if (
           !(await ctx.confirm(
             "Restart ComfyUI now? It (and this agent) will go down briefly, then reconnect and resume automatically.",
@@ -961,7 +961,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         ) {
           return ok("Cancelled — ComfyUI was not restarted.");
         }
-        return ctx.call({ cmd: "comfy_reboot" }, 15000);
+        return ctx.call({ cmd: "comfy_reboot", force: force === true }, 15000);
       },
     ),
   ];
