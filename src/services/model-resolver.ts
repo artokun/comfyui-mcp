@@ -284,7 +284,12 @@ export async function resolveExistingModelFile(
   if (!raw) {
     throw new ValidationError("Model path is required.");
   }
-  if (isAbsolute(raw)) {
+  // Reject absolute paths cross-platform: posix-absolute (isAbsolute), a Windows
+  // drive-letter root (E:\ / E:/), or a UNC path (\\server\share). isAbsolute()
+  // alone is host-OS-dependent — it wouldn't flag "E:/…" on Linux/macOS — but this
+  // guard must hold regardless of where the orchestrator runs (the host may be
+  // Windows, where E:\ is a real model drive a caller could try to escape to).
+  if (isAbsolute(raw) || /^[a-zA-Z]:[\\/]/.test(raw) || raw.startsWith("\\\\")) {
     throw new ValidationError(
       `Path must be relative to the models directory, not absolute: ${relativePath}`,
     );
