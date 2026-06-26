@@ -1,0 +1,358 @@
+---
+title: "Video Extension in ComfyUI: Pusa 2.2 Temporal Flowmatching"
+description: "Extend AI video in ComfyUI with Pusa 2.2 — temporal flowmatching that continues a WAN 2.2 clip instead of regenerating it. Pipeline, models, LoRAs, settings, and the fp8 gotcha."
+keywords:
+  - Pusa ComfyUI
+  - Wan video extension
+  - extend AI video ComfyUI
+  - temporal flowmatching
+  - longer AI video
+  - Pusa 2.2
+  - WanVideoWrapper extend
+---
+
+_by [artokun](https://github.com/artokun) · June 25, 2026 · pusa · wan · video · ComfyUI · workflow_
+
+Every open video model hits the same wall: a single clip is about **5 seconds**, and
+the obvious fix — generate a *new* clip and hope it matches — produces a hard cut,
+a color jump, and a subject that quietly becomes a different person. **Pusa 2.2**
+solves the actual problem. It **extends a video temporally** — it *continues* an
+existing clip rather than regenerating it from scratch — by riding on the
+**WAN 2.2 T2V A14B** stack you already have and adding a per-frame noise schedule
+that holds your existing footage clean while it flow-matches new frames onto the
+end.
+
+This is the practical companion to the [WAN 2.2 deep-dive](/blog/wan-2.2-comfyui):
+that post covers the base model and the hi/lo expert split; this one covers how to
+take a clip you've already made and **keep it going** without ghosting at the seam.
+Below: what temporal flowmatching actually is, the node graph, the models and LoRAs
+you need (mostly already installed), the settings, how to chain extensions into a
+genuinely long video, and the one fp8 setting that silently kills the process if
+you get it wrong.
+
+> **TL;DR.** Pusa rides the **same WanVideoWrapper stack** as WAN 2.2 T2V — same
+> A14B HIGH/LOW fp8 models, same UMT5 encoder, same WAN VAE. The *only* new
+> download is the two **Pusa V1 LoRAs** (~1.9 GB). Add the **`flowmatch_pusa`**
+> scheduler + **`WanVideoAddPusaNoise`**, condition on the tail of your clip via
+> **`WanVideoEncode`**, and the continuation inherits the existing motion. Jump to
+> [the pipeline](#the-pipeline-kijais-extension-graph).
+
+## What "temporal flowmatching" means here
+
+WAN is a **flow-matching** video model: sampling integrates a velocity field from
+noise to a clean latent, and **every frame normally shares the same denoising
+timestep**. Pusa's contribution (Vectorized Timestep Adaptation) is to make the
+timestep **per-frame** — the frames you already have can be held at (or near)
+*t = 0 (clean)* while the new frames start from *t = 1 (noise)*, and the model
+flow-matches the noisy tail **conditioned on the clean head**.
+
+That is the whole difference from the two paths you already know:
+
+- **Plain T2V** has no memory of any clip — it starts from pure noise.
+- **I2V** conditions on a single still frame only.
+- **Pusa** conditions on **real clip latents** — actual footage placed at the front
+  of the generation window — so the continuation inherits the existing **motion,
+  subject, camera, and color**, then keeps going.
+
+Concretely in the graph:
+
+1. **`WanVideoEncode`** turns the tail of your loaded clip into a clean latent.
+2. That latent is placed at the **front** of an otherwise-empty embed
+   (`WanVideoEmptyEmbeds` + `WanVideoAddExtraLatent`), so the generation's first
+   latents *are* your real footage.
+3. **`WanVideoAddPusaNoise`** assigns **small, ramping per-latent noise
+   multipliers** to those conditioning latents (so they stay mostly clean) and full
+   noise to the new latents — this per-frame noise schedule is the "vectorized
+   timestep."
+4. **`flowmatch_pusa`** on `WanVideoSampler` integrates that mixed-timestep field.
+
+Because the conditioning latents are real, the sampler only has to *generate the
+tail* flow-matched onto the clean head. That's the entire trick — no `CLIPVision`,
+no `WanFirstLastFrameToVideo`.
+
+## The pipeline (kijai's extension graph)
+
+The official reference is kijai's
+**`wanvideo_2_2_14B_Pusa_extension_example_01.json`** (in
+`ComfyUI-WanVideoWrapper/example_workflows/`). The shape of it:
+
+```text
+VHS_LoadVideo (your clip)
+      │ IMAGE (all frames)
+      ▼
+ImageResizeKJv2  ◄── resize to 832×480 (divisible by 16)
+      │
+      ├─► GetImageRangeFromBatch (tail N frames) ─► WanVideoEncode (vae, image)
+      │                                                   │ LATENT = clean
+      │                                                   ▼  conditioning latents
+WanVideoEmptyEmbeds (W,H, num_frames=81)                  │
+      │ WANVIDIMAGE_EMBEDS                                ▼
+      └────────► WanVideoAddExtraLatent ◄──── CreateScheduleFloatList
+                       │  (encoded clip latent at front)  (per-latent noise ramp)
+                       ▼ WANVIDIMAGE_EMBEDS
+              WanVideoAddPusaNoise  ◄── noise_multipliers (list), noisy_steps
+                       │
+        ┌──────────────┴───────────────┐
+        ▼ (pass 1, HIGH)               ▼ (pass 2, LOW)
+ WanVideoSampler (HIGH model           WanVideoSampler (LOW model
+   + Pusa HIGH LoRA + distill,           + Pusa LOW LoRA + distill,
+   flowmatch_pusa, steps 6, cfg 1,       flowmatch_pusa, steps 6, cfg 1,
+   shift 5, start 0 / end 3)             shift 5, start 3 / end -1)
+        └──────────────┬───────────────┘
+                       ▼ LATENT
+                 WanVideoDecode (WAN VAE) ─► VHS_VideoCombine ─► MP4 (16 fps)
+```
+
+The two load-bearing nodes are worth knowing exactly:
+
+- **`WanVideoAddPusaNoise`** — *"Adds latent and timestep noise multipliers when
+  using flowmatch_pusa."* Its `noise_multipliers` input is a per-input-latent FLOAT
+  list where **0 = keep that latent fully clean** and higher = let the model change
+  it. The example feeds a **ramp** `[0.0, 0.07, 0.13, 0.17, 0.19, 0.2]` from
+  `CreateScheduleFloatList` (one value per conditioning latent), so the oldest
+  frame stays cleanest and the **seam frame** gets a touch of noise for a smooth
+  blend. Its `noisy_steps` input controls how many sampling steps the extra noise
+  applies for — **0 on the HIGH pass, 2 on the LOW pass** in the example.
+- **`flowmatch_pusa`** — a value in `WanVideoSampler.scheduler`. It **must** be
+  selected for the Pusa noise schedule to be interpreted correctly. Leave it on
+  `unipc`/`euler` and the conditioning latents stop behaving as clean anchors — you
+  get a hard cut / regeneration instead of a continuation.
+
+`VHS_LoadVideo` / `VHS_VideoCombine` come from **ComfyUI-VideoHelperSuite**;
+everything `WanVideo*` is **ComfyUI-WanVideoWrapper** (kijai); the helper nodes
+(`ImageResizeKJv2`, `GetImageRangeFromBatch`, `GetLatentSizeAndCount`,
+`CreateScheduleFloatList`) are **ComfyUI-KJNodes**. All three are already part of a
+WAN 2.2 install.
+
+## Models and LoRAs — almost nothing new to download
+
+This is the best part of the Pusa path: it **reuses the WAN 2.2 T2V A14B stack**.
+The UNET, text encoder, and VAE are the exact files `wan-t2v-video` already uses.
+
+| Slot | File | Notes |
+|------|------|-------|
+| `WanVideoModelLoader` **HIGH** | `Wan2_2-T2V-A14B_HIGH_fp8_e4m3fn_scaled_KJ.safetensors` | HighNoise expert, fp8 (note the **underscore** before HIGH) |
+| `WanVideoModelLoader` **LOW** | `Wan2_2-T2V-A14B-LOW_fp8_e4m3fn_scaled_KJ.safetensors` | LowNoise expert, fp8 (note the **dash** before LOW) |
+| `WanVideoVAELoader` | `wan_2.1_vae.safetensors` | Full WAN VAE for final-quality decode |
+| Text encoder | `umt5_xxl_fp8_e4m3fn_scaled` / `umt5_xxl_fp16` | Via the wrapper's text-embed path |
+
+The **only new download is the two Pusa V1 LoRAs (~1.9 GB total)**, from kijai's HF
+repo **`Kijai/WanVideo_comfy`, folder `Pusa/`** (upstream weights / paper:
+`RaphaelLiu/PusaV1`). Place them in `models/loras/` (the example expects
+`loras/WanVideo/Pusa/`):
+
+| LoRA file | ~Size | Applies to | Strength (example) |
+|-----------|-------|------------|--------------------|
+| `Wan22_PusaV1_lora_HIGH_resized_dynamic_avg_rank_98_bf16.safetensors` | ~956 MB | **HIGH** model | **1.5** |
+| `Wan22_PusaV1_lora_LOW_resized_dynamic_avg_rank_98_bf16.safetensors` | ~968 MB | **LOW** model | **1.4** |
+
+Match the Pusa LoRA to its expert — `...HIGH...` → HIGH model, `...LOW...` → LOW
+model. Crossing them degrades quality. There's also a single-file
+`Wan21_PusaV1_LoRA_14B_rank512_bf16` (~4.9 GB) in the same folder — that's the
+**Wan 2.1** single-model LoRA; **don't** substitute it into the 2.2 dual graph.
+
+The example also stacks the **lightx2v T2V distill LoRA**
+(`lightx2v_T2V_14B_cfg_step_distill_v2_lora_rank64_bf16`, from
+`Kijai/WanVideo_comfy/Lightx2v/`, strength 1.0) on each model so 6-step, cfg-1
+sampling works. LoRAs are selected with **`WanVideoLoraSelectMulti`** (one feeds
+HIGH: Pusa HIGH + distill; one feeds LOW: Pusa LOW + distill).
+
+### CRITICAL — `merge_loras=false` on fp8 models
+
+This is the gotcha that costs people an afternoon. Pusa loads LoRAs **onto the
+fp8-quantized** A14B models (`quantization=fp8_e4m3fn_scaled`). When a LoRA is
+applied to an fp8 model via the wrapper's LoRA select, you must **set `merge_loras`
+to `false`**. The default `merge_loras=true` tries to bake the LoRA into the
+already-quantized fp8 weights and **hard-crashes ComfyUI during LoRA loading with
+no Python traceback** — it looks like an unexplained restart or OOM. `false`
+applies the LoRA as a runtime patch, which is fp8-safe. This applies to **both** the
+Pusa LoRAs and the distill LoRA. Only use `merge_loras=true` on non-quantized
+bf16/fp16 models.
+
+## Don't hand-build it — load, strip, re-point
+
+The kijai example is a **56-node** graph thick with `GetNode`/`SetNode` buses,
+reroutes, and a dead alternate text branch. Hand-wiring the noise / extra-latent /
+frame-stitch path is slow and error-prone. The reliable flow is **load the real
+graph, then adapt ~7 widgets**. The traps that bite on load:
+
+- **Model paths reset to the wrong file.** The example references models by
+  subfolder (`WanVideo\2_2\…`). On a flat local `models/` layout those don't
+  resolve, so ComfyUI **silently falls each dropdown back to the first entry** — you
+  can end up with both model loaders on `Qwen_Image_Edit-Q8_0.gguf` and the VAE on
+  `LTX23_audio_vae_bf16`. It *looks* wired but errors or renders garbage. Set HIGH,
+  LOW, and the VAE explicitly after loading. (Mind the HIGH-**underscore** /
+  LOW-**dash** filename inconsistency — verify each rather than copy-pasting.)
+- **The distill LoRA drops to `none`.** The example's lightx2v path is a `rank64`
+  filename with a trailing underscore; if you have `rank128` locally the slot
+  resets to `none`, removing the speed LoRA — and 6-step / cfg-1 sampling then
+  produces mush. Re-add it at strength 1.0 on both `WanVideoLoraSelectMulti` nodes,
+  `merge_loras=false`.
+- **The active prompt is on `WanVideoTextEncodeCached`, not `CLIPTextEncode`.** The
+  example contains a `CLIPLoader → CLIPTextEncode → WanVideoTextEmbedBridge` branch
+  that is **not** wired to the samplers — it's a decoy. Edit your continuation
+  prompt on `WanVideoTextEncodeCached` (umt5-xxl-enc).
+- **Match the conditioning fps to WAN-native (16).** If your source was
+  frame-interpolated (RIFE'd to 32/50 fps), set **`VHS_LoadVideo.force_rate = 16`**
+  so the conditioning carries motion at WAN's native cadence — otherwise the
+  encoded "past" runs at 2–3× the model's pace and you get a **velocity jump at the
+  seam**, the exact artifact Pusa exists to avoid. Best practice: extend the
+  **pre-interpolation 16 fps master**, then interpolate/upscale the combined result.
+- **The example assumes SageAttention + torch.compile.** It sets
+  `attention_mode: sageattn` and wires `WanVideoTorchCompileSettings` (inductor).
+  Both need extra deps a stock Windows ComfyUI usually lacks — `sageattn` hard-fails
+  the loader with *"No module named 'sageattention'"* before any sampling, and
+  inductor compile needs triton (no official Windows build). Fix: set
+  `attention_mode` → **`sdpa`** on both model loaders, and disconnect
+  `WanVideoTorchCompileSettings` from each `compile_args`. Re-enable only if you've
+  actually installed them.
+
+## Settings that matter
+
+The example runs the **distilled 6-step, two-pass HIGH→LOW** profile:
+
+| Param | HIGH pass | LOW pass | Notes |
+|-------|-----------|----------|-------|
+| model | HIGH + Pusa HIGH (1.5) + distill (1.0) | LOW + Pusa LOW (1.4) + distill (1.0) | |
+| scheduler | `flowmatch_pusa` | `flowmatch_pusa` | **required** for Pusa |
+| steps | 6 | 6 | distilled; ~20–30 without distill |
+| cfg | 1.0 | 1.0 | distilled low-CFG; ~5–6 without distill |
+| shift | 5.0 | 5.0 | flow-matching shift |
+| start_step / end_step | 0 / 3 | 3 / −1 | HIGH does early steps, LOW finishes |
+| `noisy_steps` | 0 | 2 | extra-noise duration per pass |
+
+**The `noise_multipliers` ramp is the main creative dial** — it controls how
+strictly the continuation honors the input clip versus how free it is to diverge:
+
+- **Lower (→ 0)** = conditioning latents stay clean = the continuation **clings
+  tightly** to the source (less drift, but can look "stuck" / repeat).
+- **Higher** = more noise on the conditioning latents = the model is freer to
+  **evolve** the scene (more new motion, more drift risk).
+- The example ramps `[0.0 … 0.2]` so the oldest frame is locked and the seam frame
+  gets a little noise. Start there; nudge the top of the ramp up (~0.3) if
+  continuations feel frozen, down if they drift.
+
+**Length and frame math.** `WanVideoEmptyEmbeds.num_frames` is the **total** window
+(conditioning frames + new frames); the example uses **81** total (the WAN-native
+`4n+1` length, ~5 s @ 16 fps). New frames added = total − conditioning frames, so
+with ~13 tail frames conditioned you add ~68 new frames (~4 s) per pass. Keep
+totals on the **`4n+1`** grid (49 / 81 / 121…) — the `num_frames` UI step is 4.
+Resolution defaults to **832×480** (divisible by 16); `ImageResizeKJv2` with divisor
+16 keeps the loaded clip on-grid. Output `frame_rate` is **16 fps**.
+
+If you drop the distill LoRA, use steps ~20–30, cfg ~5–6, and keep `flowmatch_pusa`
+and shift 5.
+
+## Chaining extensions into a long video
+
+Pusa adds a bounded window (~4 s) per run. To go longer, **feed the output back
+in**:
+
+1. Run the extension → decode → save (or keep the frames in-graph).
+2. Take the **tail of the *new* output** (the last ~13 frames) as the next
+   `WanVideoEncode` input.
+3. Re-run the same graph; the fresh tail becomes the new conditioning head.
+4. Repeat. `ImageConcatMulti` / `ImageBatchMulti` (KJNodes) stitch the segments into
+   one continuous clip.
+
+The rules that keep a long chain from falling apart:
+
+- **Always condition on the newest frames**, never the original clip, or you'll
+  "rewind."
+- **Drift compounds** across hops — color/identity slowly wander. Keep
+  `noise_multipliers` modest and **restate the subject in the prompt each hop**.
+  Color/exposure drift is the most common long-video artifact; optionally
+  color-match each new segment to the previous before concat.
+- **Overlap a few frames** between segments and drop duplicates at concat to hide
+  the seam.
+- `clear_vram` isn't needed between hops, but **decode/cache long chains to disk** so
+  you don't hold every segment in VRAM.
+
+## VRAM tiers
+
+Same envelope as `wan-t2v-video` (dual A14B fp8 + UMT5) — Pusa adds only ~1.9 GB of
+LoRA on top.
+
+| VRAM | Setup |
+|------|-------|
+| **24 GB+** | Dual fp8 A14B + Pusa LoRAs + distill. `WanVideoBlockSwap` for headroom; 81 frames @ 832×480 fits. |
+| **12–16 GB** | More aggressive `WanVideoBlockSwap`; enable **VAE tiling** on `WanVideoEncode` (`enable_vae_tiling=true`) *and* `WanVideoDecode`; drop total frames to 49; consider single-pass. |
+| **8 GB** | Tight — heavy block swap + tiled VAE + 49 frames + tiny VAE preview decode. Expect slow. |
+
+VAE tiling on the **encoder** matters here specifically because you're VAE-encoding
+real footage in addition to decoding the output. Always `clear_vram` before
+switching to Pusa from another model family.
+
+## Troubleshooting
+
+- **Hard cut / regeneration instead of a smooth continuation.** The scheduler isn't
+  `flowmatch_pusa` — set it on the sampler(s). Without it the conditioning latents
+  don't behave as clean anchors.
+- **Unexplained ComfyUI restart / OOM with no traceback during LoRA load.**
+  `merge_loras=true` on an fp8 model. Set it to `false` on every Pusa and distill
+  LoRA select.
+- **Errors or garbage on a freshly loaded example.** The model/VAE/distill-LoRA
+  dropdowns silently reset to the wrong first entry (subfolder paths don't resolve).
+  Re-point HIGH, LOW, VAE, and the distill LoRA explicitly.
+- **Velocity jump at the seam.** Interpolated source. Set
+  `VHS_LoadVideo.force_rate = 16` or condition on the pre-interpolation 16 fps
+  master.
+- **`No module named 'sageattention'` before sampling, or compile errors later.**
+  Set `attention_mode=sdpa` and disconnect `WanVideoTorchCompileSettings` from both
+  model loaders.
+- **Continuation feels frozen / repeats, or drifts off-subject.** Tune
+  `noise_multipliers` — too low = stuck, too high = wanders. The `0 → 0.2` ramp is
+  the safe middle.
+- **No audio in the new section.** WAN/Pusa generate **silent** video, and the
+  original clip's audio is *not* extended. Re-attach/curate audio at the end with
+  `VHS_VideoCombine` (pass the source `audio` through) or in an editor.
+- **`VHS_VideoCombine` errors "ffmpeg ... could not be found."** Install ffmpeg into
+  the ComfyUI venv: `<comfy-venv>/python -m pip install imageio-ffmpeg`, then reboot.
+
+## FAQ
+
+**How is this different from generating a new clip?** Pusa conditions on the **real
+latents** of your existing footage placed at the front of the generation window, so
+the continuation inherits the existing motion, subject, camera, and color. A fresh
+T2V/I2V clip has no memory of the original and produces a hard cut.
+
+**Do I need new models?** Almost none. Pusa reuses the WAN 2.2 T2V A14B HIGH/LOW
+fp8 models, UMT5 encoder, and WAN VAE you already have. The only new download is the
+two Pusa V1 LoRAs (~1.9 GB).
+
+**What's the scheduler?** `flowmatch_pusa` on `WanVideoSampler` — it's required, and
+it's what interprets the per-latent noise schedule from `WanVideoAddPusaNoise`.
+
+**How long can the extension be?** Each run adds a bounded window (~4 s of new
+frames within an 81-frame `4n+1` total). Chain runs — feed each output's tail back
+in — to go arbitrarily long, watching for compounding color/identity drift.
+
+**Why did ComfyUI just die during LoRA loading?** Almost certainly
+`merge_loras=true` on the fp8 models. Set it to `false`.
+
+**Extend first or upscale first?** Extend first. Generate/extend at 832×480 / 16 fps,
+then upscale and interpolate the *combined* result. Upscaling before extending wastes
+the work and feeds Pusa an off-cadence, harder-to-match conditioning clip.
+
+---
+
+## Get it running
+
+Pusa doesn't ship a dedicated installer pack yet — but it doesn't need one. It
+reuses the WanVideoWrapper + KJNodes + VideoHelperSuite stack and the WAN 2.2 T2V
+A14B models that the **[`wan-longer-videos` pack](https://github.com/artokun/comfyui-mcp/tree/main/packs/wan-longer-videos)**
+already installs. So the path is:
+
+1. Install [comfyui-mcp](https://github.com/artokun/comfyui-mcp) and the
+   [Panel](/panel), and apply the `wan-longer-videos` pack — that lands the nodes
+   and the shared T2V A14B stack. **Don't re-download the big models.**
+2. Grab the **two Pusa V1 LoRAs** from `Kijai/WanVideo_comfy/Pusa/` into
+   `models/loras/`.
+3. Open the [Panel](/panel) and let the panel's agent load kijai's extension graph,
+   re-point the model/VAE/LoRA dropdowns, set `merge_loras=false`, and tune the
+   noise ramp for you — conversationally, with full undo and no extra API keys.
+
+That's the whole point of the project: expert ComfyUI setups that drive themselves
+from your own agent session. For the model underneath this whole pipeline, read the
+[WAN 2.2 deep-dive](/blog/wan-2.2-comfyui); for the natural next step, **extend
+first, then upscale**.

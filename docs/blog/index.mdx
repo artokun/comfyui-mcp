@@ -61,7 +61,43 @@ open-weight champ, Ideogram 4.
 
 </CardGroup>
 
+## Video post-production
+
+<CardGroup cols={2}>
+
+<Card title="Upscaling video in ComfyUI" href="/blog/video-upscale-comfyui">
+  SeedVR2 & FlashVSR temporal restore, the downscale-first trick, the quick
+  per-frame ESRGAN path, and RIFE/FILM interpolation (built into ComfyUI 0.26).
+</Card>
+
+<Card title="Extending video with Pusa" href="/blog/video-extend-pusa-comfyui">
+  Pusa 2.2 temporal flowmatching on the WAN 2.2 stack — continue a clip instead
+  of regenerating it, chain extensions, all on your own GPU.
+</Card>
+
+</CardGroup>
+
 ## Posts
+
+<Card
+  title="Two brains, one canvas: ComfyUI on Claude or ChatGPT"
+  href="/blog/comfyui-agent-claude-or-chatgpt"
+>
+  The ComfyUI sidebar agent now runs on EITHER your Claude or your ChatGPT
+  subscription — pick a provider, no API keys, full canvas-driving parity. How we
+  got there: an AgentBackend port, Codex over its app-server, panel tools as a
+  loopback MCP, and the schema gotcha that kept eating a tool. _June 25, 2026_
+</Card>
+
+<Card
+  title="The self-healing ComfyUI agent: it fixes the node that crashed it"
+  href="/blog/self-healing-comfyui-agent"
+>
+  A Wan2.2 render hard-crashes ComfyUI at 99% with a native access violation. The
+  agent reads the crash dump on reload, names the culprit node, and escalates —
+  update → git pull → patch → offer a PR — plus install→restart→continue and
+  video-vision so it can judge its own output. _June 25, 2026_
+</Card>
 
 <Card
   title="The panel that talks back: an autonomous agent on your Claude subscription"

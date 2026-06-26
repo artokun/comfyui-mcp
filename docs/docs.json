@@ -88,6 +88,8 @@
             "group": "Blog",
             "pages": [
               "blog/index",
+              "blog/comfyui-agent-claude-or-chatgpt",
+              "blog/self-healing-comfyui-agent",
               "blog/panel-agent-subscription",
               "blog/panel-workflow-layout",
               "blog/installer-packs-that-cant-rot",
@@ -106,6 +108,8 @@
               "blog/ernie-image-comfyui",
               "blog/anima-comfyui",
               "blog/ltx-2.3-comfyui",
+              "blog/video-upscale-comfyui",
+              "blog/video-extend-pusa-comfyui",
               "blog/ideogram-4-comfyui"
             ]
           }

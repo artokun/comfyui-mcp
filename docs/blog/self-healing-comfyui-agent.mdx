@@ -1,0 +1,190 @@
+---
+title: "The self-healing ComfyUI agent: it crashed at 99%, then fixed the node that crashed it"
+description: "A Wan2.2 render hard-crashed ComfyUI with a native access violation (0xC0000005) at 99% — a fp8 LoRA merge inside ComfyUI-WanVideoWrapper. The autonomous ComfyUI agent read the faulthandler dump on restart, named the culprit node and file:line, updated it, retried, patched it, and offered the fix upstream. Here's how ComfyUI crash recovery, auto-installing custom nodes, and video self-vision actually work."
+keywords:
+  - autonomous ComfyUI agent
+  - ComfyUI crash recovery
+  - ComfyUI auto-install custom nodes
+  - self-healing AI agent
+  - ComfyUI agent fixes errors
+  - ComfyUI access violation 0xC0000005
+  - WanVideoWrapper crash
+  - ComfyUI agent video vision
+---
+
+_by [artokun](https://github.com/artokun) · June 25, 2026 · autonomous agents · crash recovery · architecture_
+
+The render was at **99%**. A Wan2.2 image-to-video job, fp8, a stack of LoRAs —
+the kind of thing that takes long enough that you go make coffee. Then ComfyUI
+didn't slow down or throw a Python error. It **vanished**. Process gone, port
+dead, no traceback in the chat. A native fault:
+
+```
+Windows fatal exception: access violation
+```
+
+That's `0xC0000005` — memory the C side touched and shouldn't have. Python can't
+catch it; the interpreter is already a corpse by the time anything is written to
+disk. The culprit, buried in ComfyUI's on-disk log, was an fp8 `merge_loras` path
+inside **ComfyUI-WanVideoWrapper**: `apply_lora` at `utils.py:338`.
+
+Here's the part that matters. The [Panel](/panel) agent — the autonomous
+assistant living in the ComfyUI sidebar — **did not** shrug and say "ComfyUI
+restarted, want me to run it again?" It read the corpse, named the killer, and
+fixed it. This post is how that loop works, end to end, because every piece of it
+is real code you can read in the repo.
+
+## The blind spot: a native crash the agent never sees
+
+When a normal node throws, the agent sees the error and can reason about it. A
+**native** fault is different. ComfyUI dies; the panel's only signal is the socket
+dropping and, moments later, "reconnected." From the agent's point of view the
+render simply… didn't finish. It has no idea *why*, so its instinct is the worst
+possible move: re-run the exact same graph and crash again.
+
+The faulthandler dump that explains everything is sitting right there in
+`logs/comfyui.log` — the agent just isn't looking at it. So we made it look.
+
+## Reading the corpse: crash-log parsing on resume
+
+The panel auto-sends a fixed "resume" nudge after ComfyUI comes back ("✅ …
+restarted … continue where we left off"). The orchestrator keys off that nudge
+([`isResumeNudge`](https://github.com/artokun/comfyui-mcp)) to do one thing before
+handing the turn to the agent: read the tail of ComfyUI's log and look for a crash
+signature.
+
+That's [`src/services/crash-log.ts`](https://github.com/artokun/comfyui-mcp). It's
+deliberately boring and pure (no I/O in the parser, fully unit-tested):
+
+- It scans only the last 256 KiB of the log, and only treats **native**
+  signatures as fatal — `Windows fatal exception`, `access violation`,
+  `Segmentation fault`, `Fatal Python error`. A bare Python traceback is an
+  *ordinary* handled error, not a process crash, so it's ignored. (Otherwise a
+  routine node error sitting in the log would get mis-reported as a "crash" on
+  some later restart.)
+- It anchors on the **most recent** signature, so an old crash earlier in the tail
+  can't shadow a clean recent run.
+- It extracts the **culprit custom node and file:line** by walking the traceback
+  for the deepest `custom_nodes/<NodeDir>/<file>.py:<line>` frame. Trace order
+  matters: faulthandler prints "most recent call **first**," so it takes the top
+  frame; a standard Python traceback prints "most recent call **last**," so it
+  takes the bottom one. For our crash that resolves to exactly
+  `ComfyUI-WanVideoWrapper` → `apply_lora` at `utils.py:338` — the frame that
+  actually faulted, not its `loadmodel` caller.
+- It **fingerprints** the crash (signature head + culprit) so a given fault is
+  injected into the agent **once**, not re-surfaced on every later resume while it
+  slowly scrolls out of the log tail.
+
+The result is turned into the note the agent reads *first* on resume:
+
+```
+⚠️ ComfyUI crashed during your last action (a native fault captured in its log).
+Fatal log:
+```
+Windows fatal exception: access violation
+…
+File "…/custom_nodes/ComfyUI-WanVideoWrapper/utils.py", line 338 in apply_lora
+```
+Most likely culprit custom node: ComfyUI-WanVideoWrapper (utils.py:338).
+Update or fix that node before retrying — do NOT just re-run the same graph.
+```
+
+"It restarted" just became "WanVideoWrapper's `apply_lora` access-violated at
+`utils.py:338` — fix it before retrying."
+
+## The escalation ladder
+
+The system prompt the panel agent runs under
+([`PANEL_SYSTEM_APPEND`](https://github.com/artokun/comfyui-mcp)) has a whole
+**CRASH RECOVERY** clause that turns that note into a procedure. When a turn opens
+with a crash note (or a run dies with a node-level error pinned to one pack), the
+agent does **not** re-run the same graph. It escalates, narrating each step in the
+sidebar:
+
+1. **Update the node.** `panel_update_node` on the culprit's id — the built-in
+   Manager pulls the latest code. Crucially, it tries version `nightly` to grab a
+   just-landed upstream fix. Poll `panel_node_queue_status`, then
+   `panel_restart_comfyui`, and on resume **retry the exact action** to see if the
+   crash is gone.
+2. **Go to the source.** If updating didn't help, the agent reaches into
+   `COMFYUI_PATH/custom_nodes/<NodeDir>` with its **shell**. If it's a git repo it
+   runs `git fetch && git pull` (or checks out the nightly branch), reinstalls
+   requirements if needed, restarts, and retries.
+3. **Patch the file:line.** If there's no git or it's still broken, the agent
+   attempts a **targeted source patch** of the crashing frame — for our case, the
+   fp8 merge path in `utils.py` — then **verifies** by restarting and re-running
+   the same action to confirm it no longer faults.
+4. **Offer it upstream.** Once a patch is verified, the agent *offers* to send the
+   fix to the repo owner — an issue or PR describing the crash and the patch. It
+   describes it and **asks first**; it never auto-files anything on your behalf.
+
+The thing that started as "your render disappeared at 99%" ends as a verified
+patch and a drafted upstream PR — without you touching a terminal.
+
+## The same loop powers install → restart → continue
+
+Crash recovery isn't a special case; it's the same autonomy the agent uses to
+**install** nodes in the first place. When a workflow needs a custom node you
+don't have, the agent doesn't silently skip it. Using the built-in Manager tools:
+
+- `panel_search_nodes` to find the pack,
+- `panel_install_node` to install it,
+- `panel_node_queue_status` to confirm it finished,
+- `panel_restart_comfyui` to load it — after which the panel **auto-reconnects and
+  the agent resumes automatically**, carrying on with what it was building.
+
+A fresh install that crashes on first use is literally the same loop:
+update/patch the just-installed node, don't abandon it.
+
+### The busy guard: it won't reboot mid-render
+
+There's one hard rule wired into `panel_restart_comfyui`: a restart **aborts** any
+in-progress or queued generation. So the tool has a **busy guard** — if ComfyUI is
+generating, it *refuses* and tells the agent, rather than killing the render. The
+agent is steered to tell you a render is running and wait for the queue to drain;
+the only way past the guard is `force:true`, and only if you explicitly agree to
+kill the running job. Self-healing, but never at the cost of the work you've got
+in flight.
+
+## Bonus: the agent can watch its own videos
+
+One more piece that makes the loop honest. An agent that makes video has a
+problem: it can *generate* a clip but it can't *see* whether the clip is any good.
+
+So when a run finishes on your canvas, the panel feeds the result back to the
+agent as a turn ([`injectEvent`](https://github.com/artokun/comfyui-mcp) in
+`panel-agent.ts`). For a still image, the output is attached inline as a real
+image block — the agent literally sees the render, no fetch required. For a
+**video**, the panel samples it into a **storyboard contact sheet** and attaches
+*that*, with a `note` that tells the agent accurately what it's looking at — a
+grid of sampled frames from a video, not a single still. The agent replies with a
+one-line read on the result and a sensible next step.
+
+That closes the loop in the other direction: it can judge its own output, notice a
+clip that came out wrong, and offer to iterate — the same way it noticed the crash
+and offered to fix it.
+
+## Why this is the interesting part
+
+Plenty of tools can *install* a ComfyUI node. The hard, rarely-solved problem is
+what happens when a node **crashes the whole process** with a fault Python can't
+even catch — the moment most automation gives up and hands you a stack trace, if
+you're lucky. The self-healing path here is small and legible:
+
+```
+native crash → log parsed on resume → culprit node + file:line injected
+            → update (nightly) → restart → retry
+            → git pull → patch file:line → verify → offer upstream PR
+```
+
+No magic, no hidden model that "just knows" — a faulthandler dump, a careful
+parser, a shell, and an agent steered to **fix the thing instead of repeating
+it**. A render that died at 99% turns into a patched node and a PR draft, and you
+were getting coffee the whole time.
+
+---
+
+Run an autonomous agent that recovers from its own crashes: install
+[comfyui-mcp](https://github.com/artokun/comfyui-mcp) and add the
+[Panel](/panel). Star the repo or file an idea at
+[artokun/comfyui-mcp](https://github.com/artokun/comfyui-mcp/issues).

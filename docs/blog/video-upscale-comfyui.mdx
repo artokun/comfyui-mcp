@@ -1,0 +1,273 @@
+---
+title: "ComfyUI Video Upscaling in 2026: SeedVR2, FlashVSR & RIFE"
+description: "Upscale and restore AI video locally in ComfyUI — SeedVR2 and FlashVSR temporal restorers, the downscale-first trick, the quick per-frame ESRGAN path, and built-in RIFE frame interpolation. Pipeline order, VRAM tiers, and one-command setup."
+keywords:
+  - ComfyUI video upscale
+  - SeedVR2 ComfyUI
+  - FlashVSR
+  - RIFE frame interpolation ComfyUI
+  - upscale AI video
+  - ComfyUI video restoration
+  - video super resolution ComfyUI
+  - 4x_foolhardy_Remacri
+  - downscale first upscale
+  - rife_v4.26
+---
+
+_June 25, 2026_
+
+Most "upscale my video" guides hand you a single image upscaler, run it on every
+frame, and leave you wondering why the result **shimmers**. Upscaling video well
+is a different job from upscaling a still — it has to stay consistent *over time*.
+This guide covers the current 2026 best practice for upscaling and restoring video
+**locally in ComfyUI**: the temporal restorers (**SeedVR2** and the newer
+**FlashVSR**), the downscale-first restore trick, a quick local per-frame path, and
+**RIFE** frame interpolation — in the right order.
+
+> **TL;DR — the pipeline.** Restore/upscale the *real* frames first, **then**
+> interpolate to raise fps, **then** encode. The default recipe:
+> **downscale → SeedVR2 → RIFE → VHS encode**. The comfyui-mcp agent can wire this
+> graph for you from your own Claude session — jump to [one-command setup](#get-it-running-in-one-command).
+
+## The three jobs (and why order matters)
+
+"Upscaling video" in ComfyUI is really three separate tasks, and the quality win
+comes from doing them in this order:
+
+1. **Spatial restore + upscale** — a *temporal-aware* model that raises resolution
+   **and** cleans compression blocks, blur, and AI-gen mush while keeping frames
+   consistent frame-to-frame.
+2. **Frame interpolation (VFI)** — synthesize in-between frames to raise fps
+   (e.g. 24→48/60) for smooth motion. Do this **after** the spatial pass.
+3. **Encode** — mux the frames (plus the original audio) back to an MP4.
+
+The load-bearing rule: **restore/upscale before you interpolate.** Interpolating
+first then upscaling doubles the restorer's workload and can lock in interpolation
+smear. Always do the real frames first.
+
+## SeedVR2 vs FlashVSR vs per-frame ESRGAN
+
+| Approach | Temporal? | Speed | Best for |
+|---|---|---|---|
+| **SeedVR2** | Yes (DiT restorer) | Slower | Strongest restoration of badly-degraded / AI-gen footage |
+| **FlashVSR** | Yes (one-step streaming VSR) | Faster | Long clips, speed-critical jobs, real-time-ish |
+| **Per-frame ESRGAN** | **No** | Fastest | A quick local result on what's already installed |
+
+The two leading **temporal restorers** in 2026 are **SeedVR2** (a
+diffusion-transformer restorer — the proven workhorse) and **FlashVSR** (a newer
+one-step streaming VSR — faster). A plain image upscaler (ESRGAN, UltimateSDUpscale
+per-frame) does this badly: each frame is sharpened independently, so the output
+**flickers** — most visibly on water and fine detail. Reach for a video model when
+quality (or zero flicker) matters.
+
+## The downscale-first trick (the part everyone skips)
+
+The single most counterintuitive step: **downscale the video *before* you restore
+it.** Feeding a restorer a small, clean frame is better than feeding it a big dirty
+one:
+
+- **The restorer wants clean low-res input, not a big noisy one.** SeedVR2 and
+  FlashVSR *regenerate* detail. A small frame forces the model to synthesize sharp,
+  coherent texture instead of faithfully magnifying compression artifacts. Downscaling
+  averages away block noise first.
+- **VRAM + speed headroom.** Cost scales with input pixels × frames. Halving each
+  dimension is ~4× fewer pixels per frame — that headroom buys you a larger temporal
+  batch (the thing that kills flicker) and a bigger target multiple.
+- **It turns "upscale" into "restore-and-upscale."** A 720p source downscaled to
+  360p then SeedVR2'd to 1080p+ looks dramatically better than 720p→1080p straight,
+  because the model rebuilds rather than stretches.
+
+Rule of thumb: downscale to **0.5×** (or to a ~360–480p short side) for messy /
+low-bitrate / AI-gen footage; **skip the downscale** for already-clean, high-bitrate
+sources where you just want more pixels.
+
+## SeedVR2 — the recommended restore stage
+
+**Pack:** `ComfyUI-SeedVR2_VideoUpscaler` (author **numz**) — installable via
+ComfyUI-Manager / the registry by that name. It exposes four nodes:
+
+| Node | Role |
+|---|---|
+| **SeedVR2 (Down)Load DiT Model** | loads the diffusion-transformer restorer (auto-downloads on first use) |
+| **SeedVR2 (Down)Load VAE Model** | loads `ema_vae_fp16.safetensors` |
+| **SeedVR2 Torch Compile Settings** | optional — torch.compile for speed |
+| **SeedVR2 Video Upscaler** | the main node: frames + DiT + VAE → restored frames |
+
+The models come in **3B** (lighter) and **7B** (best quality) tiers, in fp16, fp8,
+and GGUF builds, and **auto-download to `models/SEEDVR2/` on first run** — so the
+first generation stalls while it pulls multi-GB weights. Start with the **3B fp8**
+build; it's the speed/quality sweet spot for most footage. Move to **7B** only when
+you need maximum reconstruction on faces/text and have the VRAM (or run the 7B GGUF
+with block swap).
+
+### The settings that matter
+
+| Param | What it does |
+|---|---|
+| **resolution** | the **target SHORT edge in pixels** (not a ratio). Default 1080. Set the short side of your output. |
+| **batch_size** | frames processed together. **Must be `4n+1`** (1, 5, 9, 13, 17, 21…). **Higher = less temporal flicker**, more VRAM. 5 is default; push to 13–45 if VRAM allows. |
+| **blocks_to_swap** | 0–32 (3B) / 0–36 (7B). >0 offloads transformer blocks to CPU to cut VRAM (slower). Use max on 8 GB. |
+| **VAE tiling** | enable + set encode/decode tile size to fit the VAE step in low VRAM. |
+
+With SeedVR2 you don't pick a literal "2x/4x" — you set the **target short-edge
+`resolution`** and the effective factor falls out of input vs target size.
+
+## FlashVSR — the faster alternative
+
+**Pack:** `ComfyUI-FlashVSR` (author **1038lab**), built on **FlashVSR V1.1** —
+one-step diffusion with locality-constrained sparse attention and a tiny conditional
+decoder. Models auto-download from Hugging Face (`1038lab/FlashVSR`) to
+`models/FlashVSR/` on first run. (Several community forks exist; the `1038lab` pack
+is the cleanest two-node implementation — pick a fork only if you need its specific
+VRAM tricks.)
+
+It has two nodes — **`FlashVSR ⚡`** (preset: Fast / Balanced / High Quality) and
+**`FlashVSR Advanced ⚡`** (`model_version` Tiny / Tiny Long / Full, plus tiling,
+speed optimization, quality boost, and SageAttention). It supports **2x and 4x**
+(4x recommended) and needs **≥21 input frames**. SageAttention adds ~20–30% speed.
+
+**When to prefer FlashVSR:** real-time / long clips / speed-critical jobs, or when
+SeedVR2 is too slow on your hardware. **Prefer SeedVR2** when you want the strongest
+restoration of badly-degraded footage and can spend the time.
+
+## The quick local path — per-frame ESRGAN (no downloads)
+
+When you just want a fast result on **what's already installed** — no multi-GB
+SeedVR2 / FlashVSR download — use the ESRGAN upscale models most setups already
+have. Check first (common ones: **`4x_foolhardy_Remacri`**, best for realistic
+footage / water / skin, and **`4x-ClearRealityV1`** for clean/sharp).
+
+- **Upscale:** `ImageUpscaleWithModel` with a 4× ESRGAN model, then `ImageScale`
+  **back down to a clean 2×** — a 4×→2× **supersample**. That downscale-after step
+  is the single biggest quality lever here: it averages out per-frame noise.
+- **Interpolate:** the built-in `FrameInterpolate` with **RIFE v4.26** (below).
+
+> ⚠️ **The tradeoff is flicker.** ESRGAN upscalers are **per-frame** — no temporal
+> awareness — so they can shimmer on video, most visibly on water and fine detail.
+> The 4×→2× supersample mitigates it; if it still shimmers, that's your signal to
+> switch the upscale stage to a **temporal** model (SeedVR2 / FlashVSR) — the real
+> fix. So: per-frame ESRGAN = quick & local; SeedVR2 = flicker-free & best. **Order
+> is unchanged:** upscale the real frames first, *then* interpolate.
+
+## Frame interpolation — RIFE (and FILM)
+
+### Built-in (ComfyUI 0.26+) — prefer this, no custom node
+
+Current ComfyUI ships a **core** frame interpolator: the nodes
+**`FrameInterpolationModelLoader`** + **`FrameInterpolate`** (RIFE/FILM). On
+**0.26+ you do NOT install a custom node.** It auto-detects checkpoints dropped in
+**`models/frame_interpolation/`** — that folder is **empty by default**, which is
+why the model dropdown looks blank. Core-compatible weights live at HF
+**`Comfy-Org/frame_interpolation`**:
+
+| File | ~Size | Use |
+|---|---|---|
+| **`rife_v4.26.safetensors`** | 22 MB | RIFE, newest/most accurate — default for smooth small-motion fps-doubling |
+| **`film_net_fp16.safetensors`** | 66 MB | FILM — large-motion gaps |
+
+Drop a file into `models/frame_interpolation/` and **restart** so the dropdown
+populates (ComfyUI caches model lists). Pull it **directly** into that folder — a
+generic `download_model` may not target it.
+
+### Custom node (more methods / pre-0.26)
+
+`ComfyUI-Frame-Interpolation` (author **Fannovel16**) adds methods the core node
+lacks — GMFSS, STMFNet, FLAVR, IFRNet, and the original `RIFE VFI (4.0 - 4.9)` node
+(use `rife47` / `rife49`). Reach for it only when you need one of those methods or
+you're on a ComfyUI older than 0.26.
+
+### RIFE vs FILM, and getting the fps right
+
+Default to **RIFE** (smooth, fast, great on normal motion). Reach for **FILM** when
+RIFE smears fast or large-motion gaps. The multiplier is integer:
+**`multiplier = target_fps / source_fps`** — 24→48 is 2; 24→96 is 4. Use **2** for
+the standard "double the smoothness" pass.
+
+> **Then fix the encoder fps.** After interpolation, set the encode node's fps to
+> **`source_fps × multiplier`**, not the source fps — otherwise the video plays in
+> slow motion.
+
+## 2x vs 4x
+
+- **2x** — the safest default; pairs with the downscale-first trick (downscale 0.5×,
+  then 2x back recovers original size but *restored*). Lower VRAM, fewer artifacts.
+- **4x** — for genuinely small sources or a big jump; FlashVSR's recommended factor.
+  Costs ~4× the pixels — expect to enable VAE tiling / block swap.
+
+## VRAM tiers
+
+| VRAM | SeedVR2 | FlashVSR | Interp / encode |
+|---|---|---|---|
+| **8 GB or less** | 3B **GGUF Q4_K_M** + `blocks_to_swap = max` + VAE tiling; batch 1–5 | **Tiny Long** + tiling | RIFE multiplier 2; low `clear_cache_after_n_frames`; encode in chunks |
+| **12–16 GB** | 3B/7B **fp8** + some block swap or VAE tiling; batch 5–13 | **Tiny** or Full + tiling | RIFE 2–4×; ensemble off |
+| **24 GB+** | **7B fp16** (or 3B fp16), no offload; batch 13–45 for max temporal stability | **Full** at 4x | RIFE 2–4× + ensemble; FILM if needed |
+
+General: **downscale first** to buy a bigger batch; always clear VRAM before
+switching model families; reduce frame/batch counts first when you OOM.
+
+## Troubleshooting
+
+- **Output flickers/shimmers.** The #1 video-upscale failure. Cause: per-frame
+  (non-temporal) upscaling, **or** too-small a SeedVR2 `batch_size`. Fix: use a
+  temporal model (SeedVR2 / FlashVSR), raise `batch_size` to the next `4n+1` up, and
+  don't downscale so hard the model has nothing to lock onto frame-to-frame.
+- **Frame-count errors.** SeedVR2 `batch_size` must be **`4n+1`**; FlashVSR needs
+  **≥21 frames**; STMFNet/FLAVR interpolation need **≥4 frames**. A clip shorter
+  than the batch/min will error or degrade.
+- **Color shift / brightness drift after restore.** Common with diffusion restorers.
+  Don't over-downscale; if it persists, do a color-match pass against the source
+  before encode and check pixel format (`yuv420p`) at encode.
+- **Audio is gone.** Core `SaveVideo` / `CreateVideo` drop audio. Use
+  **`VHS_VideoCombine`** (ComfyUI-VideoHelperSuite) and feed it the `audio` from
+  `GetVideoComponents` / `VHS_LoadVideo` to keep the original track.
+- **Video plays in slow motion.** Set the encoder fps to `source_fps × multiplier`,
+  not the source fps.
+- **`CreateVideo` / `SaveVideo` / `VHS_VideoCombine`: "ffmpeg could not be found."**
+  The mux needs ffmpeg in the ComfyUI venv: `<comfy-venv>/python -m pip install
+  imageio-ffmpeg`, then restart.
+- **First generation hangs forever.** SeedVR2 and FlashVSR weights **auto-download
+  on first run** — the first job stalls while it pulls multi-GB weights. Expected.
+- **RIFE dropdown is blank.** `models/frame_interpolation/` is empty by default. Drop
+  `rife_v4.26.safetensors` in and restart.
+
+## FAQ
+
+**What's the best ComfyUI video upscaler in 2026?** For quality, a temporal restorer
+— **SeedVR2** for the strongest restoration, **FlashVSR** when you need speed. A
+per-frame ESRGAN upscaler is the quick local option but flickers.
+
+**Why does my upscaled video flicker?** You're upscaling each frame independently
+(per-frame ESRGAN) or your SeedVR2 `batch_size` is too small. Switch to a temporal
+model and raise the batch to the next `4n+1`.
+
+**Why downscale before upscaling?** Restorers regenerate detail. A clean small frame
+forces the model to synthesize sharp texture instead of magnifying compression
+artifacts — and it buys VRAM/batch headroom. Skip it only for already-clean sources.
+
+**Do I need a custom node for RIFE?** Not on ComfyUI 0.26+ — `FrameInterpolate` is
+built in. Just drop `rife_v4.26.safetensors` into `models/frame_interpolation/`. Use
+the Fannovel16 pack only for extra methods or older ComfyUI.
+
+**RIFE or FILM?** RIFE by default; FILM for large/fast motion gaps RIFE smears.
+
+**Do SeedVR2 / FlashVSR models download automatically?** Yes — both pull weights on
+first run (to `models/SEEDVR2/` and `models/FlashVSR/`). The first generation stalls
+during the download.
+
+## Get it running in one command
+
+Cloning the SeedVR2 / FlashVSR / interpolation nodes and wiring a correct
+downscale → restore → interpolate → encode graph is exactly the busywork
+[comfyui-mcp](/) removes. From a Claude Code session with the plugin installed, ask
+your agent to build the video-upscale pipeline — it installs the nodes
+(`ComfyUI-SeedVR2_VideoUpscaler`, `ComfyUI-Frame-Interpolation`,
+`ComfyUI-VideoHelperSuite`, optionally `ComfyUI-FlashVSR`), drops the right
+interpolation weights in place, and wires the graph in the correct order. SeedVR2 and
+FlashVSR weights auto-download on first run, so there's little to pre-fetch.
+
+Then drive the live graph from your own session via the [Panel](/panel) — downscale
+factor, target resolution, batch size, and RIFE multiplier, tuned conversationally
+with no extra API keys.
+
+That's the whole point of the project: expert ComfyUI setups that install in one step
+and drive themselves from your own agent session.

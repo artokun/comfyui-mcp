@@ -1,0 +1,177 @@
+---
+title: "The ComfyUI agent now runs on Claude OR ChatGPT — pick a provider, not a port"
+description: "The autonomous AI agent in ComfyUI's sidebar that drives your canvas now runs on EITHER Claude or ChatGPT — on your own subscription, no API keys. How an AgentBackend port (dependency injection) gives both providers full parity: live-canvas panel_* tools served as a loopback MCP, Codex driven over codex app-server, vision on both, and effort-level mapping across two different scales."
+keywords:
+  - ComfyUI AI agent
+  - ComfyUI Claude
+  - ComfyUI ChatGPT
+  - ComfyUI GPT-5
+  - ComfyUI copilot
+  - ComfyUI MCP
+  - run ComfyUI with natural language
+  - ComfyUI agent panel
+  - ComfyUI Codex
+---
+
+_by [artokun](https://github.com/artokun) · June 25, 2026 · AgentBackend · provider parity · architecture_
+
+The [Agent Panel](/panel) is an autonomous AI agent embedded in ComfyUI's
+sidebar. You type a request — "add a KSampler and wire it to my checkpoint",
+"build a Flux txt2img graph and run it" — and the agent edits the graph you're
+looking at, runs it, and replies right there next to your canvas. It runs **in
+the background on your own subscription, with no API keys**, and every edit it
+makes is undoable with **Ctrl+Z**.
+
+The new part: that agent now runs on **either Claude or ChatGPT**. The panel's
+settings have a backend picker — Claude / ChatGPT chips — and whichever you pick
+runs the same canvas-driving agent on *your* subscription for that provider. You
+**pick a provider, not a port.**
+
+```
+you ⇄ panel (pick a provider) ⇄ loopback bridge ⇄ orchestrator (Claude OR ChatGPT) ⇄ your graph
+```
+
+Both providers reach **full feature parity**: the same live-canvas tools, the
+same model knowledge, the same one-shot workflow loads, the same
+local-GPU-vs-paid-API cost guardrail. This post is about how that parity actually
+works — and two debugging stories from getting Codex to behave exactly like the
+Claude path.
+
+## One picker, no keys
+
+Sign in once for the provider you want — `claude` (or `claude setup-token`) for
+Claude, `codex login` for ChatGPT — open the **Agent** tab, pick a provider, and
+click **Connect**. The panel starts that provider's background orchestrator
+(`npx -y comfyui-mcp --panel-orchestrator`) on your subscription and links to its
+loopback bridge. Nothing is ever started without your click; **Disconnect** stops
+it.
+
+Each backend runs its **own** orchestrator on its **own** loopback bridge port
+(Claude defaults to `ws://127.0.0.1:9180`), which is why the panel can present a
+provider chooser instead of asking you to think about ports. Switching providers
+starts a fresh chat — conversations aren't shared across Claude and ChatGPT — and
+the panel posts a system note so you're never surprised. The bridge is
+loopback-only; nothing is reachable from your LAN.
+
+## How full parity actually works
+
+The interesting engineering is that two very different providers expose one
+identical surface. It comes down to a single seam.
+
+### One port, two adapters
+
+The orchestrator doesn't know what an LLM is. It depends on a provider-neutral
+**`AgentBackend`** port — classic dependency injection — and each provider is an
+adapter behind it:
+
+| | Claude | ChatGPT (Codex) |
+|---|---|---|
+| Package | `@anthropic-ai/claude-agent-sdk` (optional dep) | `@openai/codex` (optional dep) |
+| Driver | Claude Agent SDK — persistent streaming session | `codex app-server` JSON-RPC over stdio |
+| Auth | claude.ai OAuth (subscription) | ChatGPT login (subscription) |
+| Live-canvas tools | in-process SDK MCP server | loopback streamable-HTTP MCP (orchestrator-hosted) |
+| Headless `comfyui` MCP | in-process | declared via `codex app-server -c mcp_servers` |
+
+Both adapters normalize their provider's native messages into one canonical event
+stream (`session`, `assistant_delta`, `tool_call`, `result`, `rate_limit`,
+`error`), so the orchestrator's queue, turn-gate, bridge push, and rewind
+tracking are written **once** and work for both. The Codex side is driven over
+the structured `codex app-server` JSON-RPC protocol (`thread/start`,
+`turn/start`, `turn/interrupt`, streaming notifications, `config/read`) — not
+string-scraping `codex exec` output — which is what makes interrupt-mid-turn and
+model enumeration real on the ChatGPT backend too.
+
+### Giving Codex the live canvas
+
+The agent drives your graph through a **fixed allowlist** of `panel_*` commands —
+add/wire/move/retitle/color/collapse/group/lay-out nodes, plus one-shot
+`panel_load_workflow` — and there is **no arbitrary JavaScript**. Every mutation
+goes through LiteGraph's change tracking, so Ctrl+Z reverts an agent edit exactly
+like your own.
+
+Those `panel_*` definitions live in **one shared list**. On Claude they register
+onto an in-process SDK MCP server. Codex can't host in-process tools — it only
+talks to MCP servers declared in its config — so the orchestrator stands the
+*same* tool list up as a **loopback streamable-HTTP MCP server** and points
+Codex at it. The headless `comfyui` MCP (queue, models, custom nodes, workflows,
+generation) is injected into both backends the same way: in-process for Claude,
+declared via `codex app-server -c mcp_servers` for ChatGPT. Because neither path
+reimplements a tool — they both consume the shared definitions — parity is
+*automatic*, including the destructive-confirm gating on `panel_clear` and
+`panel_restart_comfyui`.
+
+That same loopback-MCP trick is how **knowledge parity** works. Claude loads
+comfyui-mcp's bundled model-family skills natively (IDEOGRAM, WAN, LTX, Qwen, and
+more). Codex can't, so that expertise is published as MCP tools any backend can
+call — `list_skills`, `read_skill`, `list_packs`, `read_pack_workflow`,
+`list_workflow_templates` — alongside the `check_workflow_runtime` cost guardrail.
+So the ChatGPT agent isn't a blank slate either; it knows the models you run.
+
+### Vision and effort, on both
+
+Both backends take **image input** — attach, drag, or paste images (also video,
+workflow `.json`, and text) into the composer, and the agent can see them. And
+both expose a reasoning-**effort** picker, even though the two providers use
+different scales:
+
+- **Claude:** `low` · `medium` · `high` · `max`
+- **ChatGPT (Codex):** `none` · `minimal` · `low` · `medium` · `high` · `xhigh`
+
+The picker is per-provider, and a chosen effort **survives a provider switch** by
+mapping to the nearest valid level on the target backend — the panel and the
+orchestrator do the same mapping, so the picker stays honest about what's actually
+selectable.
+
+There are a few honest, capability-gated differences. **Code/graph rollback**
+(`/revert`, double-Esc, per-turn snapshots) works on both backends because it
+lives in the orchestrator, not the provider. **Conversation rollback** (forking
+the chat back to a past turn) is currently **Claude-only** — the Codex
+app-server resumes whole threads, so the panel gates that scope off for ChatGPT
+rather than faking it. Provider slash commands (`/compact`, `/loop`, …) are
+Claude-only too. A capability descriptor per backend is what lets the panel
+degrade gracefully here instead of showing a button that wouldn't work.
+
+## Two war stories
+
+Parity sounds clean in a table. Getting there involved two bugs worth keeping.
+
+**The tool that silently vanished.** Early on, `panel_add_node` and several other
+edit tools simply weren't in Codex's tool list — no error, no warning, just
+absent. The cause was a schema detail. We'd typed fixed-length coordinate vectors
+(positions, sizes) with zod's `z.tuple([...])`. Zod emits that as JSON-Schema
+draft-04 *tuple validation* — `items` as an **array** of schemas — and Codex's
+strict function-schema validator **rejects** any tool whose schema uses array-form
+`items`, dropping it from the list entirely. The Claude SDK didn't care, so it
+worked on one provider and the tool "disappeared" on the other. The fix was to
+switch those params to a plain `z.array(z.number())` (single-object `items` with
+`minItems`/`maxItems`), which both validators accept. A tool that vanishes
+silently is worse than one that errors loudly.
+
+**The watchdog that interrupted healthy renders.** Each turn has an idle watchdog:
+if a turn in flight emits **no events at all** for a few minutes, treat it as
+stalled, surface a clear error, and let the next queued batch run — a safety net
+for a genuinely wedged backend. But a long video render is exactly the case that
+looks dead from the outside. A Codex `panel_run` that kicks off a multi-minute
+ComfyUI generation emits raw app-server notifications throughout, yet those can
+translate to **zero** canonical `AgentEvent`s during the wait — so the watchdog
+would false-trip and interrupt a perfectly healthy generation. The fix was a
+**liveness signal**: re-arm the idle timer on *any* sign the backend is alive, not
+just on translated events. A true zero-event freeze still trips it; a slow-but-
+working render no longer does.
+
+## What it enables
+
+The headline is simple: the same canvas-driving, node-installing,
+workflow-building agent now runs on whichever subscription you already have. Pick
+Claude or pick ChatGPT — you get the same `panel_*` live-canvas surface, the same
+one-shot pack loads, the same model knowledge, the same "ask before spending paid
+API credits" guardrail, the same install → restart → continue autonomy. No API
+keys, no per-token billing, no juggling ports. Just a provider chip and Connect.
+
+---
+
+Drive ComfyUI from an autonomous agent on your own Claude **or** ChatGPT
+subscription: install [comfyui-mcp](https://github.com/artokun/comfyui-mcp) and
+add the [Agent Panel](/panel) — see [Backends / providers](/backends) for the
+full capability matrix. Star the repo or file an idea at
+[artokun/comfyui-mcp](https://github.com/artokun/comfyui-mcp/issues).
