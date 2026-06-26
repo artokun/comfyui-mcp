@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // config.ts has top-level await (port auto-detect). Use vi.resetModules() so
 // each test re-evaluates it with a fresh process.env.
@@ -134,5 +137,91 @@ describe("remote self-hosted: path prefix + generic auth (#52)", () => {
     const mod = await import("../config.js");
     expect(mod.isCloudMode()).toBe(false);
     expect(mod.isRemoteMode()).toBe(true);
+  });
+});
+
+describe("COMFYUI_PATH nested/wrapper self-heal (doubled-path bug)", () => {
+  const tmpDirs: string[] = [];
+
+  function makeRoot(dir: string): string {
+    // Minimal markers _looks_like_comfyui_root / looksLikeComfyUIRoot check.
+    writeFileSync(join(dir, "main.py"), "# fake comfyui entrypoint\n");
+    mkdirSync(join(dir, "output"), { recursive: true });
+    return dir;
+  }
+
+  function tmp(prefix: string): string {
+    const d = mkdtempSync(join(tmpdir(), prefix));
+    tmpDirs.push(d);
+    return d;
+  }
+
+  beforeEach(() => {
+    vi.resetModules();
+    process.env = { ...OLD_ENV };
+    process.argv = [...OLD_ARGV];
+    process.env.COMFYUI_API_KEY = "";
+    process.env.COMFYUI_URL = "";
+    process.env.COMFYUI_PATH = "";
+    process.env.COMFYUI_HOST = "";
+    process.env.COMFYUI_PORT = "8188"; // skip port auto-detect
+  });
+
+  afterEach(() => {
+    process.env = OLD_ENV;
+    process.argv = OLD_ARGV;
+    vi.restoreAllMocks();
+    while (tmpDirs.length) {
+      try {
+        rmSync(tmpDirs.pop()!, { recursive: true, force: true });
+      } catch {
+        // best-effort cleanup
+      }
+    }
+  });
+
+  it("(a) a path that IS already a root → returned unchanged (no-op)", async () => {
+    const root = makeRoot(tmp("cfg-root-"));
+    process.env.COMFYUI_PATH = root;
+    const mod = await import("../config.js");
+    expect(mod.config.comfyuiPath).toBe(root);
+  });
+
+  it("(b) a wrapper whose nested ComfyUI/ is the real root → descends", async () => {
+    const wrapper = tmp("cfg-wrap-");
+    const nested = join(wrapper, "ComfyUI");
+    mkdirSync(nested, { recursive: true });
+    makeRoot(nested);
+    process.env.COMFYUI_PATH = wrapper;
+    const mod = await import("../config.js");
+    expect(mod.config.comfyuiPath).toBe(nested);
+  });
+
+  it("(c) a path with neither marker nor nested root → returned as-is (no throw)", async () => {
+    const empty = tmp("cfg-empty-");
+    process.env.COMFYUI_PATH = empty;
+    const mod = await import("../config.js");
+    expect(mod.config.comfyuiPath).toBe(empty);
+  });
+
+  it("looksLikeComfyUIRoot + descendToNestedRoot helpers behave correctly", async () => {
+    const mod = await import("../config.js");
+    const root = makeRoot(tmp("cfg-helper-root-"));
+    expect(mod.looksLikeComfyUIRoot(root)).toBe(true);
+
+    const empty = tmp("cfg-helper-empty-");
+    expect(mod.looksLikeComfyUIRoot(empty)).toBe(false);
+    // No nested root → unchanged.
+    expect(mod.descendToNestedRoot(empty)).toBe(empty);
+    // Already a root → unchanged (strict no-op).
+    expect(mod.descendToNestedRoot(root)).toBe(root);
+
+    const wrapper = tmp("cfg-helper-wrap-");
+    const nested = join(wrapper, "ComfyUI");
+    mkdirSync(nested, { recursive: true });
+    makeRoot(nested);
+    expect(mod.descendToNestedRoot(wrapper)).toBe(nested);
+    // Never doubles past one level.
+    expect(mod.descendToNestedRoot(nested)).toBe(nested);
   });
 });

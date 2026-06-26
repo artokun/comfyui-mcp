@@ -13,6 +13,49 @@ const packageRoot = resolve(__dirname, "..");
 dotenv.config({ path: resolve(packageRoot, ".env") });
 
 /**
+ * Does `p` look like a real ComfyUI install root? A ComfyUI Desktop-installer
+ * wrapper directory has NONE of these markers, while the real (sometimes nested)
+ * root has at least one. Used to detect + self-heal the "doubled COMFYUI_PATH"
+ * layout where the actual install lives under `<wrapper>/ComfyUI/`.
+ */
+export function looksLikeComfyUIRoot(p: string): boolean {
+  try {
+    return (
+      existsSync(join(p, "main.py")) ||
+      existsSync(join(p, "output")) ||
+      existsSync(join(p, "custom_nodes")) ||
+      existsSync(join(p, "models"))
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Self-heal the nested ("doubled") ComfyUI Desktop-installer layout: if `p` is
+ * not itself a valid root but `p/ComfyUI` is, descend exactly ONE level (never
+ * more — guards against re-doubling). Returns `p` unchanged in every other case
+ * (already a valid root, or no nested root found), so this is a strict no-op for
+ * a correctly-installed (non-nested) ComfyUI.
+ */
+export function descendToNestedRoot(p: string, label = "COMFYUI_PATH"): string {
+  try {
+    if (looksLikeComfyUIRoot(p)) return p;
+    const nested = join(p, "ComfyUI");
+    if (looksLikeComfyUIRoot(nested)) {
+      console.error(
+        `[comfyui-mcp] ${label} "${p}" looks like a Desktop-installer wrapper ` +
+          `(no main.py/output/custom_nodes/models); descending to nested root "${nested}".`,
+      );
+      return nested;
+    }
+  } catch {
+    // Best-effort: never throw out of path resolution.
+  }
+  return p;
+}
+
+/**
  * Auto-detect ComfyUI installation directories.
  * Checks common locations on macOS, Linux, and Windows.
  * Returns all found paths sorted by preference.
@@ -70,13 +113,23 @@ function detectComfyUIPaths(): string[] {
 
   // Filter to paths that exist and look like actual ComfyUI installations
   // (must have a models/ or custom_nodes/ subdirectory, or be a known install path)
-  return candidates.filter((p) => {
+  const found = candidates.filter((p) => {
     if (!existsSync(p)) return false;
     // Known install paths are trusted without marker check
     if (!p.includes("Documents")) return true;
     // For scanned directories, verify it's a real ComfyUI install
     return existsSync(join(p, "models")) || existsSync(join(p, "custom_nodes"));
   });
+
+  // Self-heal the Desktop-installer "nested ComfyUI" layout: a trusted install
+  // path may point at the wrapper dir whose real root is one level down. Descend
+  // each hit (no-op for normal installs) and dedupe.
+  const healed: string[] = [];
+  for (const p of found) {
+    const root = descendToNestedRoot(p, "Detected ComfyUI path");
+    if (!healed.includes(root)) healed.push(root);
+  }
+  return healed;
 }
 
 // Loopback hostnames for the smart-detection logic. When --comfyui-url points
@@ -119,7 +172,9 @@ function resolveComfyUIPath(
         `  Unset COMFYUI_PATH if you only intended to target the remote instance.`,
       );
     }
-    return envPath;
+    // Even an explicit env var is descended if it points at the Desktop-installer
+    // wrapper rather than the real (nested) root — but only that case logs a notice.
+    return descendToNestedRoot(envPath, "COMFYUI_PATH (env)");
   }
   if (opts.remoteUrl || opts.cloud) {
     return undefined;
@@ -137,7 +192,9 @@ function resolveComfyUIPath(
     );
   }
 
-  return detected[0];
+  // detectComfyUIPaths() already descends wrapper hits; this is a defensive
+  // no-op so the selected path is guaranteed to be a real root.
+  return descendToNestedRoot(detected[0], "Detected ComfyUI path");
 }
 
 /**
