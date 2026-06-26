@@ -235,10 +235,10 @@ describe("applyManifest", () => {
     expect(downloadModelMock).not.toHaveBeenCalled();
   });
 
-  it("skips a model found by filename in a nested/HTTP-served root (list_local_models)", async () => {
-    // Not at the computed path and not at the exact relative path in any root,
-    // but ComfyUI serves it from a nested subfolder within the category. The
-    // category listing finds it by filename, so we skip the download.
+  it("skips a CATEGORY-ROOT target found by filename anywhere in the served category", async () => {
+    // model_type: checkpoints (category-root target). Not at the computed path
+    // nor the exact relative path in any root, but ComfyUI serves it from a
+    // nested subfolder within the category. Basename-anywhere match → skip.
     listLocalModelsMock.mockResolvedValueOnce([
       { name: "sdxl/big.safetensors", path: "checkpoints/sdxl/big.safetensors", type: "checkpoints" },
     ]);
@@ -259,6 +259,57 @@ describe("applyManifest", () => {
     expect(result.results[0].status).toBe("skipped");
     expect(listLocalModelsMock).toHaveBeenCalledWith("checkpoints");
     expect(downloadModelMock).not.toHaveBeenCalled();
+  });
+
+  it("skips a NESTED local_path model present at the exact category-relative path", async () => {
+    // Nested target asks for checkpoints/foo/model.safetensors and ComfyUI
+    // serves exactly that (foo/model.safetensors within checkpoints) → skip.
+    listLocalModelsMock.mockResolvedValueOnce([
+      { name: "foo/model.safetensors", path: "checkpoints/foo/model.safetensors", type: "checkpoints" },
+    ]);
+
+    const result = await applyManifest({
+      manifest: {
+        models: [
+          {
+            url: "https://example.com/model.safetensors",
+            local_path: "checkpoints/foo/model.safetensors",
+          },
+        ],
+      },
+    });
+
+    expect(result.summary).toEqual({ applied: 0, skipped: 1, failed: 0 });
+    expect(result.results[0].status).toBe("skipped");
+    expect(listLocalModelsMock).toHaveBeenCalledWith("checkpoints");
+    expect(downloadModelMock).not.toHaveBeenCalled();
+  });
+
+  it("downloads a NESTED local_path when only a same-named file in a DIFFERENT subfolder exists", async () => {
+    // Manifest wants checkpoints/foo/model.safetensors but only
+    // checkpoints/bar/model.safetensors exists. A basename match would
+    // false-skip and leave the requested file absent — must still download.
+    listLocalModelsMock.mockResolvedValueOnce([
+      { name: "bar/model.safetensors", path: "checkpoints/bar/model.safetensors", type: "checkpoints" },
+    ]);
+
+    const result = await applyManifest({
+      manifest: {
+        models: [
+          {
+            url: "https://example.com/model.safetensors",
+            local_path: "checkpoints/foo/model.safetensors",
+          },
+        ],
+      },
+    });
+
+    expect(result.summary).toEqual({ applied: 1, skipped: 0, failed: 0 });
+    expect(downloadModelMock).toHaveBeenCalledWith(
+      "https://example.com/model.safetensors",
+      expect.stringMatching(/checkpoints[\\/]foo/),
+      "model.safetensors",
+    );
   });
 
   it("downloads when the model exists in NO root (multi-root check graceful miss)", async () => {

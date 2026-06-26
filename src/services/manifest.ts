@@ -393,16 +393,36 @@ async function findExistingModel(target: {
     // Not found in any root, comfyuiPath unset, or traversal — fall through.
   }
 
-  // 3. Filename match within the category across all roots ComfyUI serves. This
-  //    catches a model stored in a nested subfolder (e.g. checkpoints/sdxl/foo)
-  //    and, when ComfyUI is running, the HTTP-aggregated view of extra/symlinked
-  //    roots (and remote setups). Category-scoped, so cross-category same-name
-  //    files are never mistaken for a match.
-  const category = target.targetSubfolder.split(/[/\\]+/).filter(Boolean)[0];
+  // 3. Match within the category across all roots ComfyUI serves (when running,
+  //    the HTTP-aggregated view of extra/symlinked roots; remote setups; and a
+  //    filesystem fallback). Category-scoped, so cross-category same-name files
+  //    are never mistaken for a match.
+  //
+  //    The match precision depends on where the target lives:
+  //    - CATEGORY ROOT target (e.g. model_type: checkpoints, or local_path
+  //      "checkpoints/foo.safetensors"): the intent is "do I already have this
+  //      file anywhere in the served category?", so match by basename anywhere
+  //      (also catches a model the user stored under a nested subfolder).
+  //    - NESTED target (e.g. local_path "checkpoints/foo/model.safetensors"):
+  //      the manifest asks for that EXACT relative location. Matching by
+  //      basename here would false-skip when only a same-named file under a
+  //      DIFFERENT subfolder exists, leaving the requested file absent. So
+  //      require an exact category-relative path match instead.
+  const subSegments = target.targetSubfolder.split(/[/\\]+/).filter(Boolean);
+  const category = subSegments[0];
   if (category && (MODEL_SUBDIRS as readonly string[]).includes(category)) {
+    const isCategoryRoot = subSegments.length === 1;
+    // The category-relative path implied by the target (strip the leading
+    // category segment), normalized to forward slashes for comparison.
+    const relWithinCategory = [...subSegments.slice(1), target.filename].join("/");
     try {
       const local = await listLocalModels(category);
-      const hit = local.find((m) => basename(m.name) === target.filename);
+      const hit = local.find((m) => {
+        const name = m.name.replace(/\\/g, "/");
+        return isCategoryRoot
+          ? basename(name) === target.filename
+          : name === relWithinCategory;
+      });
       if (hit) return hit.path;
     } catch {
       // Listing unavailable — fall through to download.
