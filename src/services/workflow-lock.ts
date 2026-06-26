@@ -19,7 +19,7 @@ import { join } from "node:path";
 import { getObjectInfo, getSystemStats } from "../comfyui/client.js";
 import type { WorkflowJSON } from "../comfyui/types.js";
 import { config } from "../config.js";
-import { ProcessControlError } from "../utils/errors.js";
+import { ProcessControlError, ValidationError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 
 import { MODEL_SUBDIRS } from "./model-resolver.js";
@@ -251,6 +251,32 @@ export async function generateLock(workflow: WorkflowJSON): Promise<WorkflowLock
     models: lockedModels,
     node_packs: lockedPacks,
   };
+}
+
+/**
+ * Parse a lock file's raw body into a WorkflowLock, tolerating a missing or
+ * empty file. ComfyUI's /api/userdata can return 200 with an empty body for a
+ * file that doesn't exist; feeding that straight to JSON.parse throws
+ * "Unexpected end of JSON input". Returns null when there is no lock present
+ * (empty/whitespace body) so callers can report "no lock" gracefully, and
+ * throws a clear ValidationError only when the body is genuinely malformed.
+ */
+export function parseWorkflowLock(raw: string | null | undefined): WorkflowLock | null {
+  if (raw == null) return null;
+  const trimmed = raw.trim();
+  if (trimmed === "") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch (err) {
+    throw new ValidationError(
+      `Lock file exists but is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return null;
+  }
+  return parsed as WorkflowLock;
 }
 
 export function diffLocks(lock: WorkflowLock, current: WorkflowLock): LockDrift {

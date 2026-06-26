@@ -124,3 +124,26 @@ describe("queue-manager pending job inspection/editing", () => {
     expect(deleteQueueItemMock).not.toHaveBeenCalled();
   });
 });
+
+describe("queue_remaining is the real (non-negative) queue count", () => {
+  it("ignores ComfyUI's negative front-enqueue 'number' and reports the live count", async () => {
+    // ComfyUI returns a NEGATIVE `number` (priority counter) for front:true,
+    // which historically leaked through as queue_remaining: -17.
+    enqueuePromptMock.mockResolvedValue({ prompt_id: "new-id", queue_remaining: -17 });
+
+    const result = await moveQueuedJob("pending-a", "front");
+
+    // queue = 1 running + 2 pending = 3 (from the live /queue read), never -17.
+    expect(result.queue_remaining).toBe(3);
+  });
+
+  it("falls back to a clamped (>= 0) hint when the queue can't be re-read", async () => {
+    // First /queue read (getQueuedWorkflow) succeeds; the post-enqueue read fails.
+    getQueueMock.mockResolvedValueOnce(queue).mockRejectedValueOnce(new Error("boom"));
+    enqueuePromptMock.mockResolvedValue({ prompt_id: "new-id", queue_remaining: -17 });
+
+    const result = await moveQueuedJob("pending-a", "front");
+
+    expect(result.queue_remaining).toBe(0);
+  });
+});

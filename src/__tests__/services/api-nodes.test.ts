@@ -18,6 +18,7 @@ import {
   listApiNodes,
   getApiNodeSchema,
   generateWithApiNode,
+  buildApiNodeInputs,
   isApiNode,
   type ApiNodesDeps,
 } from "../../services/api-nodes.js";
@@ -86,6 +87,58 @@ function sampleObjectInfo(): ObjectInfo {
       category: "utils/api helpers",
       display_name: "API Helpers",
     }),
+    // v3 API node with a COMFY_DYNAMICCOMBO_V3 input ("model") that reveals nested
+    // inputs — the Nano Banana 2 shape. Selecting the option exposes
+    // aspect_ratio/resolution/thinking_level (positional widgets) plus an AUTOGROW
+    // image list and an optional files input (neither a positional widget).
+    GeminiNanoBanana2V2: nodeDef({
+      api_node: true,
+      category: "partner/image/Gemini",
+      display_name: "Nano Banana 2",
+      output: ["IMAGE", "STRING", "IMAGE"],
+      output_name: ["IMAGE", "STRING", "thought_image"],
+      input: {
+        required: {
+          prompt: ["STRING", { default: "", multiline: true }],
+          model: [
+            "COMFY_DYNAMICCOMBO_V3",
+            {
+              options: [
+                {
+                  key: "Nano Banana 2 (Gemini 3.1 Flash Image)",
+                  inputs: {
+                    required: {
+                      aspect_ratio: [
+                        "COMBO",
+                        { default: "auto", options: ["auto", "1:1", "16:9"] },
+                      ],
+                      resolution: ["COMBO", { options: ["1K", "2K", "4K"] }],
+                      thinking_level: ["COMBO", { options: ["MINIMAL", "HIGH"] }],
+                      images: [
+                        "COMFY_AUTOGROW_V3",
+                        { template: { names: ["image_1"] }, min: 0 },
+                      ],
+                    },
+                    optional: {
+                      files: ["GEMINI_INPUT_FILES", {}],
+                    },
+                  },
+                },
+              ],
+            },
+          ],
+          seed: ["INT", { default: 42, control_after_generate: true }],
+          response_modalities: ["COMBO", { options: ["IMAGE", "IMAGE+TEXT"] }],
+        },
+        optional: {
+          system_prompt: ["STRING", { default: "sys", multiline: true }],
+        },
+        hidden: {
+          auth_token_comfy_org: ["AUTH_TOKEN_COMFY_ORG"],
+          api_key_comfy_org: ["API_KEY_COMFY_ORG"],
+        },
+      },
+    }),
   };
 }
 
@@ -122,7 +175,11 @@ describe("listApiNodes", () => {
   it("returns only API nodes, sorted by class_type", async () => {
     const { deps } = makeDeps();
     const nodes = await listApiNodes(undefined, deps);
-    expect(nodes.map((n) => n.class_type)).toEqual(["FluxProImageNode", "KlingVideoNode"]);
+    expect(nodes.map((n) => n.class_type)).toEqual([
+      "FluxProImageNode",
+      "GeminiNanoBanana2V2",
+      "KlingVideoNode",
+    ]);
     expect(nodes.find((n) => n.class_type === "KSampler")).toBeUndefined();
     expect(nodes.find((n) => n.class_type === "SomeOtherNode")).toBeUndefined();
   });
@@ -206,7 +263,8 @@ describe("generateWithApiNode", () => {
 
     const wf = enqueued[0].wf;
     expect(wf["1"].class_type).toBe("FluxProImageNode");
-    expect(wf["1"].inputs).toEqual({ prompt: "a cat", aspect_ratio: "16:9" });
+    // seed (required INT, default 0) is auto-filled; prompt + aspect_ratio as given.
+    expect(wf["1"].inputs).toEqual({ prompt: "a cat", aspect_ratio: "16:9", seed: 0 });
     expect(wf["1"]._meta?.title).toBe("Flux Pro Image");
     // FluxProImageNode outputs IMAGE but is not itself an output node, so a
     // SaveImage is wired to its IMAGE output (index 0) — without a terminal
@@ -229,15 +287,34 @@ describe("generateWithApiNode", () => {
     expect(result.notes.some((n) => /hidden input/i.test(n))).toBe(true);
   });
 
-  it("notes missing required inputs but still enqueues", async () => {
+  it("fills omitted required widget inputs from their schema defaults", async () => {
     const { deps, enqueued } = makeDeps();
     const result = await generateWithApiNode(
       { class_type: "FluxProImageNode", inputs: { prompt: "x" } },
       deps,
     );
     expect(enqueued).toHaveLength(1);
+    // aspect_ratio (combo default "1:1") and seed (INT default 0) are auto-filled,
+    // so they are NOT reported as missing — only inputs with no determinable
+    // default would be.
+    expect(enqueued[0].wf["1"].inputs).toMatchObject({
+      prompt: "x",
+      aspect_ratio: "1:1",
+      seed: 0,
+    });
+    expect(result.notes.some((n) => /Missing required input/i.test(n))).toBe(false);
+  });
+
+  it("notes a required input that has no determinable default", async () => {
+    const { deps, enqueued } = makeDeps();
+    // prompt is a STRING with no default — omitting it leaves it genuinely missing.
+    const result = await generateWithApiNode(
+      { class_type: "FluxProImageNode", inputs: { aspect_ratio: "1:1" } },
+      deps,
+    );
+    expect(enqueued).toHaveLength(1);
     expect(result.notes.some((n) => /Missing required input/i.test(n))).toBe(true);
-    expect(result.notes.some((n) => /aspect_ratio/.test(n))).toBe(true);
+    expect(result.notes.some((n) => /prompt/.test(n))).toBe(true);
   });
 
   it("notes unknown inputs but passes them through", async () => {
@@ -326,5 +403,170 @@ describe("generateWithApiNode", () => {
       generateWithApiNode({ class_type: "KSampler", inputs: {} }, deps),
     ).rejects.toThrow(/not an API\/partner node/i);
     expect(enqueued).toHaveLength(0);
+  });
+
+  // ── v3 dynamic-combo (dotted widget) serialization ────────────────────────
+  // ComfyUI rejects (HTTP 400 "required_input_missing: model.resolution") a flat
+  // form; the canvas serializes the revealed widgets as dotted `model.<nested>`
+  // keys. These prove our builder emits the dotted form the server accepts.
+
+  it("serializes v3 dynamic-combo nested inputs into dotted model.* keys", async () => {
+    const { deps, enqueued } = makeDeps();
+    await generateWithApiNode(
+      {
+        class_type: "GeminiNanoBanana2V2",
+        inputs: {
+          prompt: "a red cube",
+          model: "Nano Banana 2 (Gemini 3.1 Flash Image)",
+          aspect_ratio: "16:9",
+          resolution: "2K",
+          thinking_level: "HIGH",
+          seed: 7,
+          response_modalities: "IMAGE",
+        },
+        disable_random_seed: true,
+      },
+      deps,
+    );
+    const inputs = enqueued[0].wf["1"].inputs;
+    expect(inputs).toMatchObject({
+      prompt: "a red cube",
+      model: "Nano Banana 2 (Gemini 3.1 Flash Image)",
+      "model.aspect_ratio": "16:9",
+      "model.resolution": "2K",
+      "model.thinking_level": "HIGH",
+      seed: 7,
+      response_modalities: "IMAGE",
+    });
+    // The flat nested keys must NOT survive — the server ignores them.
+    expect(inputs).not.toHaveProperty("aspect_ratio");
+    expect(inputs).not.toHaveProperty("resolution");
+    expect(inputs).not.toHaveProperty("thinking_level");
+    // AUTOGROW image list / optional files are not positional widgets → omitted.
+    expect(inputs).not.toHaveProperty("model.images");
+    expect(inputs).not.toHaveProperty("model.files");
+  });
+
+  it("accepts already-dotted nested keys as-is", async () => {
+    const { deps, enqueued } = makeDeps();
+    await generateWithApiNode(
+      {
+        class_type: "GeminiNanoBanana2V2",
+        inputs: {
+          prompt: "x",
+          "model.aspect_ratio": "1:1",
+          "model.resolution": "4K",
+          "model.thinking_level": "MINIMAL",
+          seed: 1,
+          response_modalities: "IMAGE",
+        },
+        disable_random_seed: true,
+      },
+      deps,
+    );
+    expect(enqueued[0].wf["1"].inputs).toMatchObject({
+      "model.aspect_ratio": "1:1",
+      "model.resolution": "4K",
+      "model.thinking_level": "MINIMAL",
+    });
+  });
+
+  it("fills omitted required nested combo inputs from their defaults", async () => {
+    const { deps, enqueued } = makeDeps();
+    await generateWithApiNode(
+      {
+        class_type: "GeminiNanoBanana2V2",
+        inputs: { prompt: "x", response_modalities: "IMAGE" },
+        disable_random_seed: true,
+      },
+      deps,
+    );
+    const inputs = enqueued[0].wf["1"].inputs;
+    expect(inputs).toMatchObject({
+      model: "Nano Banana 2 (Gemini 3.1 Flash Image)", // default option key
+      "model.aspect_ratio": "auto", // combo default
+      "model.resolution": "1K", // first option (no default)
+      "model.thinking_level": "MINIMAL", // first option (no default)
+      seed: 42, // top-level INT default
+    });
+  });
+
+  it("does not flag dotted/flat nested combo inputs as unknown", async () => {
+    const { deps } = makeDeps();
+    const result = await generateWithApiNode(
+      {
+        class_type: "GeminiNanoBanana2V2",
+        inputs: {
+          prompt: "x",
+          aspect_ratio: "1:1",
+          "model.resolution": "1K",
+          response_modalities: "IMAGE",
+        },
+        disable_random_seed: true,
+      },
+      deps,
+    );
+    expect(result.notes.some((n) => /Unknown input/.test(n))).toBe(false);
+  });
+});
+
+describe("buildApiNodeInputs (v3 dynamic-combo serialization)", () => {
+  it("emits the dotted model.* form and drops the flat nested keys", async () => {
+    const { deps } = makeDeps();
+    const schema = await getApiNodeSchema("GeminiNanoBanana2V2", deps);
+    const { inputs, consumed } = buildApiNodeInputs(schema, {
+      prompt: "hello",
+      model: "Nano Banana 2 (Gemini 3.1 Flash Image)",
+      aspect_ratio: "16:9",
+      resolution: "2K",
+      thinking_level: "HIGH",
+      seed: 3,
+      response_modalities: "IMAGE+TEXT",
+    });
+    expect(inputs).toEqual({
+      prompt: "hello",
+      model: "Nano Banana 2 (Gemini 3.1 Flash Image)",
+      "model.aspect_ratio": "16:9",
+      "model.resolution": "2K",
+      "model.thinking_level": "HIGH",
+      seed: 3,
+      response_modalities: "IMAGE+TEXT",
+    });
+    // The flat nested keys were absorbed by the combo expansion.
+    expect(consumed.has("aspect_ratio")).toBe(true);
+    expect(consumed.has("resolution")).toBe(true);
+    expect(consumed.has("thinking_level")).toBe(true);
+  });
+
+  it("supports a nested object for the combo input", async () => {
+    const { deps } = makeDeps();
+    const schema = await getApiNodeSchema("GeminiNanoBanana2V2", deps);
+    const { inputs } = buildApiNodeInputs(schema, {
+      prompt: "hello",
+      model: {
+        key: "Nano Banana 2 (Gemini 3.1 Flash Image)",
+        aspect_ratio: "1:1",
+        resolution: "4K",
+        thinking_level: "HIGH",
+      },
+      response_modalities: "IMAGE",
+    });
+    expect(inputs).toMatchObject({
+      model: "Nano Banana 2 (Gemini 3.1 Flash Image)",
+      "model.aspect_ratio": "1:1",
+      "model.resolution": "4K",
+      "model.thinking_level": "HIGH",
+    });
+  });
+
+  it("drops hidden auth inputs", async () => {
+    const { deps } = makeDeps();
+    const schema = await getApiNodeSchema("GeminiNanoBanana2V2", deps);
+    const { inputs } = buildApiNodeInputs(schema, {
+      prompt: "x",
+      response_modalities: "IMAGE",
+      api_key_comfy_org: "leaked",
+    });
+    expect(inputs).not.toHaveProperty("api_key_comfy_org");
   });
 });

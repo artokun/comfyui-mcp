@@ -145,6 +145,26 @@ function applyInputUpdates(
   return workflow;
 }
 
+/**
+ * Compute the real number of jobs remaining in the queue (running + pending),
+ * clamped to >= 0. We do NOT trust the `number` field ComfyUI returns from
+ * POST /prompt: that is the queue's monotonic priority counter, and it is
+ * NEGATIVE when a job is enqueued at the front (front:true). Reusing it as a
+ * "remaining" count produced nonsensical values like -17. A direct /queue read
+ * is the authoritative count. Falls back to the (clamped) enqueue hint if the
+ * queue can't be read.
+ */
+async function computeQueueRemaining(fallback?: number): Promise<number | undefined> {
+  try {
+    const queue = await clientGetQueue();
+    return queue.queue_running.length + queue.queue_pending.length;
+  } catch (err) {
+    logger.debug("Could not read /queue for remaining count; using enqueue hint", { err });
+    if (typeof fallback !== "number" || !Number.isFinite(fallback)) return undefined;
+    return Math.max(0, fallback);
+  }
+}
+
 async function requeuePendingJob(
   promptId: string,
   workflow: WorkflowJSON,
@@ -158,10 +178,11 @@ async function requeuePendingJob(
     { front: position === "front" },
   );
   JobWatcher.watch(result.prompt_id, workflow);
+  const queue_remaining = await computeQueueRemaining(result.queue_remaining);
   return {
     old_prompt_id: promptId,
     new_prompt_id: result.prompt_id,
-    queue_remaining: result.queue_remaining,
+    queue_remaining,
     position,
     message: `Pending job ${promptId} was requeued at the ${position}; new prompt_id is ${result.prompt_id}.`,
   };

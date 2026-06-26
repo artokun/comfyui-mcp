@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { searchNodes } from "../../services/registry-client.js";
+import {
+  searchNodes,
+  getNodePackDetails,
+  extractVersionString,
+} from "../../services/registry-client.js";
 
 const NODES = [
   {
@@ -89,5 +93,66 @@ describe("searchNodes (upstream-bug client-side filter)", () => {
     expect(results.length).toBeGreaterThan(0);
     // No filter applied — order matches input
     expect(results[0]?.id).toBe(NODES[0]!.id);
+  });
+});
+
+describe("extractVersionString (registry version is an object, not a string)", () => {
+  it("returns a bare string as-is", () => {
+    expect(extractVersionString("1.2.3")).toBe("1.2.3");
+  });
+
+  it("pulls .version out of the registry's object shape", () => {
+    expect(
+      extractVersionString({ version: "8.28.3", changelog: "", createdAt: "x" }),
+    ).toBe("8.28.3");
+  });
+
+  it("returns undefined for shapes with no usable version", () => {
+    expect(extractVersionString(undefined)).toBeUndefined();
+    expect(extractVersionString(null)).toBeUndefined();
+    expect(extractVersionString({})).toBeUndefined();
+    expect(extractVersionString({ version: 5 })).toBeUndefined();
+  });
+});
+
+describe("getNodePackDetails version rendering (no more [object Object])", () => {
+  const originalFetch = global.fetch;
+  afterEach(() => {
+    global.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  it("normalizes the object-shaped latest_version to a version string", async () => {
+    global.fetch = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          id: "comfyui-impact-pack",
+          name: "Impact Pack",
+          description: "d",
+          author: "a",
+          repository: "https://github.com/ltdrdata/ComfyUI-Impact-Pack",
+          // The real registry returns an OBJECT here, which used to stringify
+          // to "[object Object]".
+          latest_version: {
+            version: "8.28.3",
+            changelog: "",
+            createdAt: "2026-04-19T17:08:04Z",
+          },
+          versions: [
+            { version: "8.28.3", changelog: "latest" },
+            { version: "8.0.0" },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    ) as unknown as typeof fetch;
+
+    const details = await getNodePackDetails("comfyui-impact-pack");
+    expect(details.latest_version).toBe("8.28.3");
+    expect(typeof details.latest_version).toBe("string");
+    expect(details.versions).toEqual([
+      { version: "8.28.3", changelog: "latest" },
+      { version: "8.0.0", changelog: undefined },
+    ]);
   });
 });

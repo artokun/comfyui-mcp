@@ -15,7 +15,7 @@ vi.mock("../../comfyui/client.js", () => ({
 }));
 
 const { config } = await import("../../config.js");
-const { generateLock, diffLocks } = await import(
+const { generateLock, diffLocks, parseWorkflowLock } = await import(
   "../../services/workflow-lock.js"
 );
 
@@ -143,6 +143,37 @@ describe("generateLock", () => {
       id: "DetachedPack",
       commit_sha: "deadbeef0000000000000000000000000000beef",
     });
+  });
+});
+
+describe("parseWorkflowLock (graceful no-lock)", () => {
+  it("returns null for an empty body instead of throwing (the 'Unexpected end of JSON input' bug)", () => {
+    expect(parseWorkflowLock("")).toBeNull();
+    expect(parseWorkflowLock("   \n  ")).toBeNull();
+  });
+
+  it("returns null for null/undefined (e.g. missing file)", () => {
+    expect(parseWorkflowLock(null)).toBeNull();
+    expect(parseWorkflowLock(undefined)).toBeNull();
+  });
+
+  it("parses a valid lock body", () => {
+    const lock = {
+      generated_at: "2026-06-01T00:00:00Z",
+      comfyui_version: "0.3.20",
+      models: [],
+      node_packs: [],
+    };
+    expect(parseWorkflowLock(JSON.stringify(lock))).toEqual(lock);
+  });
+
+  it("throws a clear ValidationError on genuinely malformed JSON", () => {
+    expect(() => parseWorkflowLock("{ not json")).toThrow(/not valid JSON/i);
+  });
+
+  it("returns null for non-object JSON (e.g. a bare number or array)", () => {
+    expect(parseWorkflowLock("42")).toBeNull();
+    expect(parseWorkflowLock("[]")).toBeNull();
   });
 });
 

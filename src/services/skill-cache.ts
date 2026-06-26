@@ -88,7 +88,13 @@ async function resolveVersion(
   if (!normalized.includes("github.com")) {
     try {
       const details = await deps.getDetails(normalized);
-      return details.latest_version || details.versions?.[0]?.version || `source-${shortHash(normalized)}`;
+      // The registry's version fields can be objects, not strings; only accept
+      // an actual string so safeSegment()'s .toLowerCase() never sees an object
+      // (the "value.toLowerCase is not a function" crash on a bare registry id).
+      const candidate = details.latest_version ?? details.versions?.[0]?.version;
+      if (typeof candidate === "string" && candidate.trim()) {
+        return candidate;
+      }
     } catch (err) {
       logger.warn("Could not resolve node pack version for skill cache; using source hash", {
         source,

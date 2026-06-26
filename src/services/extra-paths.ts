@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir, platform } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, isAbsolute, resolve } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { config } from "../config.js";
 import { ValidationError } from "../utils/errors.js";
@@ -187,6 +187,51 @@ export async function listExtraPaths(
   const resolved = resolveTargetPath(opts);
   const raw = await readConfigFile(resolved.path);
   return summarize(resolved.target, resolved.path, raw);
+}
+
+/** One model search directory contributed by extra_model_paths configuration. */
+export interface ExtraModelRoot {
+  /** The ComfyUI category key (e.g. "checkpoints", "loras") the dir serves. */
+  category: string;
+  /** Absolute directory on disk that ComfyUI loads this category's models from. */
+  dir: string;
+  /** The owning config group name (for diagnostics). */
+  group: string;
+}
+
+/**
+ * Enumerate every model directory declared in the active extra_model_paths /
+ * extra_models_config file — i.e. the same extra roots (often on other drives
+ * like E:\) that ComfyUI itself loads models from. Each entry pairs a category
+ * key with the absolute directory that serves it (paths are resolved against the
+ * group's base_path when relative). Returns [] when no config exists or no local
+ * ComfyUI path is known. Best-effort: never throws (a malformed/unreadable
+ * config yields []), so callers can treat extra roots as an additive search set.
+ */
+export async function getExtraModelRoots(
+  opts: ExtraPathOptions = {},
+): Promise<ExtraModelRoot[]> {
+  let info: ExtraPathsConfigInfo;
+  try {
+    info = await listExtraPaths(opts);
+  } catch {
+    return [];
+  }
+  const roots: ExtraModelRoot[] = [];
+  for (const group of info.groups) {
+    const base = group.base_path?.trim();
+    for (const category of group.categories) {
+      for (const p of category.paths) {
+        const dir = isAbsolute(p)
+          ? resolve(p)
+          : base
+            ? resolve(base, p)
+            : resolve(p);
+        roots.push({ category: category.category, dir, group: group.name });
+      }
+    }
+  }
+  return roots;
 }
 
 function ensureGroup(raw: Record<string, unknown>, name: string): Record<string, unknown> {

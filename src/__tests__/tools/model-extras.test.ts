@@ -42,6 +42,13 @@ vi.mock("../../services/civitai-resolver.js", () => ({
   resolveCivitaiModelVersion: (...a: unknown[]) => resolveCivitaiModelVersionMock(...a),
 }));
 
+// Isolate these tests from on-disk extra_model_paths config: no extra roots by
+// default. (Multi-root resolution is covered in model-resolver.test.ts.)
+const getExtraModelRootsMock = vi.fn(async () => [] as Array<{ category: string; dir: string; group: string }>);
+vi.mock("../../services/extra-paths.js", () => ({
+  getExtraModelRoots: (...a: unknown[]) => getExtraModelRootsMock(...a),
+}));
+
 import { config } from "../../config.js";
 import { registerModelExtrasTools } from "../../tools/model-extras.js";
 

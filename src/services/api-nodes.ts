@@ -320,6 +320,173 @@ export async function getApiNodeSchema(
   };
 }
 
+// ── V3 dynamic-combo (dotted widget) serialization ──────────────────────────
+//
+// A ComfyUI v3 node can declare a `COMFY_DYNAMICCOMBO_V3` input (e.g. Nano Banana
+// 2's `model`). Selecting an option REVEALS a set of nested inputs. The live
+// canvas serializes those nested widgets into the /prompt API format as DOTTED
+// keys — `model` = the selected option key, and `model.<nested>` = each revealed
+// widget value. The ComfyUI server rebuilds the nested dict from those dotted
+// keys (it 400s with `required_input_missing` for e.g. `model.resolution` if they
+// are absent). Our API-format builders must therefore emit the dotted form rather
+// than the flat one. (Verified against a live server: flat `aspect_ratio` is
+// ignored and `model.aspect_ratio` is the accepted key.)
+
+interface DynamicComboOption {
+  key?: unknown;
+  inputs?: {
+    required?: Record<string, unknown>;
+    optional?: Record<string, unknown>;
+  };
+}
+
+const SIMPLE_WIDGET_TYPES = new Set(["INT", "FLOAT", "STRING", "BOOLEAN", "COMBO"]);
+
+/**
+ * If a node input is a v3 dynamic combo, return its option list (each option has
+ * a `key` plus the nested `inputs` it reveals). Returns null otherwise.
+ */
+function dynamicComboOptions(descriptor: ApiNodeInputDescriptor): DynamicComboOption[] | null {
+  const type = descriptor.type;
+  const opts = (descriptor.config as { options?: unknown }).options;
+  if (!Array.isArray(opts)) return null;
+  const typeIsDyn =
+    typeof type === "string" && type.toUpperCase().includes("DYNAMICCOMBO");
+  // Also detect by shape: options that carry nested `inputs` (not plain strings).
+  const shapeIsDyn = opts.some(
+    (o) => o != null && typeof o === "object" && "inputs" in (o as object),
+  );
+  if (!typeIsDyn && !shapeIsDyn) return null;
+  return opts as DynamicComboOption[];
+}
+
+/**
+ * Classify a nested input spec (from a dynamic combo option) as a POSITIONAL
+ * widget (one that carries a scalar value the caller supplies) and resolve its
+ * default. Non-widget nested inputs (AUTOGROW lists, IMAGE/link types) are not
+ * emitted unless the caller explicitly provides a value.
+ */
+function classifyNestedSpec(spec: unknown): { isWidget: boolean; dflt: unknown } {
+  if (!Array.isArray(spec)) return { isWidget: false, dflt: undefined };
+  const [type, cfg] = spec as [unknown, { default?: unknown; options?: unknown[] }?];
+  if (Array.isArray(type)) {
+    // Inline combo: ["1K","2K",...]
+    return { isWidget: true, dflt: cfg?.default ?? type[0] };
+  }
+  const t = String(type).toUpperCase();
+  if (SIMPLE_WIDGET_TYPES.has(t)) {
+    let dflt = cfg?.default;
+    if (dflt === undefined && Array.isArray(cfg?.options) && cfg.options.length) {
+      dflt = cfg.options[0];
+    }
+    return { isWidget: true, dflt };
+  }
+  return { isWidget: false, dflt: undefined };
+}
+
+/**
+ * Build the `inputs` map for an API-node prompt from caller-provided values,
+ * serializing any v3 dynamic-combo input into its dotted `model.<nested>` form.
+ *
+ * The caller may supply nested values in any of three natural shapes — already
+ * dotted (`"model.aspect_ratio"`), flat (`"aspect_ratio"`), or as a nested object
+ * (`model: { key, aspect_ratio }`). Required nested widgets the caller omits are
+ * filled from their schema default so the server doesn't 400. Hidden inputs
+ * (server-injected auth) are dropped. Exported for unit testing.
+ */
+export function buildApiNodeInputs(
+  schema: ApiNodeSchema,
+  provided: Record<string, unknown>,
+): { inputs: Record<string, unknown>; consumed: Set<string> } {
+  const inputs: Record<string, unknown> = {};
+  const consumed = new Set<string>(); // provided keys absorbed by combo expansion
+
+  // Pass 1 — expand dynamic combos into dotted keys.
+  for (const desc of schema.inputs) {
+    const options = dynamicComboOptions(desc);
+    if (!options) continue;
+    const name = desc.name;
+
+    // The selected option key may arrive as a string or inside a nested object.
+    let selected = provided[name];
+    let selObj: Record<string, unknown> | undefined;
+    if (selected != null && typeof selected === "object" && !Array.isArray(selected)) {
+      selObj = selected as Record<string, unknown>;
+      selected = selObj.key ?? selObj.value;
+    }
+    const cfgDefault = (desc.config as { default?: unknown }).default;
+    if (selected === undefined || selected === null) {
+      selected = cfgDefault ?? options[0]?.key;
+    }
+    const option = options.find((o) => o.key === selected) ?? options[0];
+    if (!option) continue;
+
+    consumed.add(name);
+    inputs[name] = option.key ?? selected;
+
+    const emitNested = (
+      nName: string,
+      nSpec: unknown,
+      requiredFill: boolean,
+    ) => {
+      const dottedKey = `${name}.${nName}`;
+      let val: unknown;
+      if (dottedKey in provided) {
+        val = provided[dottedKey];
+        consumed.add(dottedKey);
+      } else if (selObj && nName in selObj) {
+        val = selObj[nName];
+      } else if (nName in provided) {
+        val = provided[nName];
+        consumed.add(nName);
+      }
+      if (val === undefined) {
+        if (!requiredFill) return; // optional / non-widget — omit when absent
+        const info = classifyNestedSpec(nSpec);
+        if (!info.isWidget || info.dflt === undefined) return;
+        val = info.dflt;
+      }
+      inputs[dottedKey] = val;
+    };
+
+    for (const [nName, nSpec] of Object.entries(option.inputs?.required ?? {})) {
+      const info = classifyNestedSpec(nSpec);
+      emitNested(nName, nSpec, info.isWidget);
+    }
+    for (const [nName, nSpec] of Object.entries(option.inputs?.optional ?? {})) {
+      emitNested(nName, nSpec, false);
+    }
+  }
+
+  // Pass 2 — copy remaining provided inputs (skip consumed + hidden).
+  for (const [key, value] of Object.entries(provided)) {
+    if (consumed.has(key)) continue;
+    if (schema.hidden_inputs.includes(key)) continue;
+    if (key in inputs) continue;
+    inputs[key] = value;
+  }
+
+  // Pass 3 — fill any required top-level WIDGET input the caller omitted with its
+  // schema default, so /prompt validation doesn't reject a missing required combo
+  // /scalar (link-type inputs like IMAGE have no default and are left absent).
+  for (const desc of schema.inputs) {
+    if (!desc.required) continue;
+    if (desc.name in inputs) continue;
+    if (dynamicComboOptions(desc)) continue; // already emitted above
+    const cfg = desc.config as { default?: unknown; options?: unknown[] };
+    const type = desc.type;
+    let dflt: unknown;
+    if (Array.isArray(type)) {
+      dflt = cfg.default ?? type[0];
+    } else if (SIMPLE_WIDGET_TYPES.has(String(type).toUpperCase())) {
+      dflt = cfg.default ?? (Array.isArray(cfg.options) ? cfg.options[0] : undefined);
+    }
+    if (dflt !== undefined) inputs[desc.name] = dflt;
+  }
+
+  return { inputs, consumed };
+}
+
 export interface GenerateWithApiNodeArgs {
   class_type: string;
   inputs: Record<string, unknown>;
@@ -349,40 +516,52 @@ export async function generateWithApiNode(
   const notes: string[] = [];
 
   const provided = args.inputs ?? {};
-  const knownNames = new Set(schema.inputs.map((i) => i.name));
 
-  // Warn about inputs that aren't part of the node's visible schema (typos,
-  // or hidden auth fields the server should fill itself).
-  for (const key of Object.keys(provided)) {
-    if (!knownNames.has(key)) {
-      if (schema.hidden_inputs.includes(key)) {
-        notes.push(
-          `Ignoring "${key}": it is a hidden input filled by the ComfyUI server, not the client.`,
-        );
-      } else {
-        notes.push(`Unknown input "${key}" for ${args.class_type} (passing through anyway).`);
+  // Build the prompt inputs, serializing any v3 dynamic-combo input into its
+  // dotted `model.<nested>` form (the canvas does this; a flat form 400s).
+  const { inputs, consumed } = buildApiNodeInputs(schema, provided);
+
+  // Acceptable input names: visible schema names, plus the nested names a dynamic
+  // combo reveals (in both flat and dotted form) — so we don't warn about them.
+  const knownNames = new Set(schema.inputs.map((i) => i.name));
+  for (const desc of schema.inputs) {
+    const options = dynamicComboOptions(desc);
+    if (!options) continue;
+    for (const opt of options) {
+      for (const nName of Object.keys(opt.inputs?.required ?? {})) {
+        knownNames.add(nName);
+        knownNames.add(`${desc.name}.${nName}`);
+      }
+      for (const nName of Object.keys(opt.inputs?.optional ?? {})) {
+        knownNames.add(nName);
+        knownNames.add(`${desc.name}.${nName}`);
       }
     }
   }
 
-  // Check required inputs are present (skip enum/combo selectors that ComfyUI
-  // can default, but still flag genuinely missing scalars).
+  // Warn about inputs that aren't part of the node's visible schema (typos,
+  // or hidden auth fields the server should fill itself).
+  for (const key of Object.keys(provided)) {
+    if (knownNames.has(key) || consumed.has(key)) continue;
+    if (schema.hidden_inputs.includes(key)) {
+      notes.push(
+        `Ignoring "${key}": it is a hidden input filled by the ComfyUI server, not the client.`,
+      );
+    } else {
+      notes.push(`Unknown input "${key}" for ${args.class_type} (passing through anyway).`);
+    }
+  }
+
+  // Check required inputs are present in the built prompt (after combo expansion
+  // and default-filling), and flag any genuinely missing ones.
   const missingRequired = schema.inputs
-    .filter((i) => i.required && !(i.name in provided))
+    .filter((i) => i.required && !(i.name in inputs))
     .map((i) => i.name);
   if (missingRequired.length > 0) {
     notes.push(
       `Missing required input(s): ${missingRequired.join(", ")}. ` +
         `The server may reject the job. Use get_api_node_schema for details.`,
     );
-  }
-
-  // Drop any hidden-input values the caller mistakenly supplied — the server
-  // injects auth credentials itself.
-  const inputs: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(provided)) {
-    if (schema.hidden_inputs.includes(key)) continue;
-    inputs[key] = value;
   }
 
   const workflow: WorkflowJSON = {
