@@ -11,6 +11,44 @@ import { logger } from "./utils/logger.js";
 import { JobWatcher } from "./services/job-watcher.js";
 import { parseCliArgs } from "./transport/cli.js";
 import { startHttpServer } from "./transport/http.js";
+import { isLocalMode } from "./config.js";
+import { ensurePanelInstalled } from "./services/panel-installer.js";
+
+/**
+ * Fire-and-forget: ensure the ComfyUI sidebar panel is installed (install-if-
+ * missing) on MCP load. LOCAL-only, hard-timed-out, and never throws — it must
+ * never block or crash startup. Opt out with COMFYUI_MCP_PANEL_AUTOINSTALL=0.
+ * The explicit `install_panel(action='update')` tool refreshes nightly on demand.
+ */
+function ensurePanelOnLoad(): void {
+  if (!isLocalMode()) return;
+  void ensurePanelInstalled()
+    .then((res) => {
+      switch (res.action) {
+        case "installed":
+          logger.info(
+            "Panel auto-install: installed the sidebar panel (nightly). RESTART ComfyUI to load it.",
+            res,
+          );
+          break;
+        case "up-to-date":
+          logger.info("Panel auto-install: panel already present.", res);
+          break;
+        case "skipped-dev":
+          logger.info(
+            "Panel auto-install: skipped — dev install (symlink), managed manually.",
+            res,
+          );
+          break;
+        case "skipped":
+          logger.debug("Panel auto-install: disabled via COMFYUI_MCP_PANEL_AUTOINSTALL.", res);
+          break;
+        default:
+          logger.debug("Panel auto-install: unavailable.", res);
+      }
+    })
+    .catch(() => {});
+}
 
 async function createConfiguredServer(): Promise<McpServer> {
   const server = new McpServer(
@@ -75,6 +113,9 @@ async function main() {
     await server.connect(transport);
     logger.info("ComfyUI MCP server running on stdio");
   }
+
+  // After the server is up: auto-ensure the sidebar panel (non-blocking).
+  ensurePanelOnLoad();
 }
 
 main().catch((err) => {
