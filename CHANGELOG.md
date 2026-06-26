@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.19.0] - 2026-06-25
+
 ### Added
 
 - **Multi-provider panel agent: Claude + ChatGPT/Codex at full parity.** The panel
@@ -47,8 +49,47 @@ All notable changes to this project are documented here. This project adheres to
   **unknown** (hosted API nodes that consume **paid** credits), using the same
   signal as `list_api_nodes`. Bundled packs are local/free; the agent is steered to
   **ASK before spending paid API credits** on any ad-hoc or generated workflow.
+- **Live environment block in the system prompt.** The orchestrator gathers the
+  machine once at startup (OS/GPU/VRAM/CUDA/torch/ComfyUI/python · Triton &
+  SageAttention presence · local-vs-cloud · backend) — every probe hard-timed-out
+  so session start never hangs — and prepends it to the prompt for both backends,
+  so the agent picks models/precision and the sdpa-vs-acceleration path knowingly.
+- **`panel_show_media`** — the agent can DISPLAY an image/video on demand (a disk
+  path it made/downloaded, or a ComfyUI output ref) as a media card in chat
+  (guarded disk read), instead of describing it in text.
+- **`panel_free_vram`** — unload models + free VRAM (ComfyUI `/free`) so the agent
+  can unwedge a stuck/OOM ComfyUI before retrying or restarting.
+- **`strip_workflow` / `slice_workflow`** (+ `panel_*` variants) — de-virtualize any
+  workflow file (Get/Set/Reroute, bypassed/muted, subgraphs) and un-chunk rgthree
+  toggled pipelines.
+- **Skills**: `video-extend` (Pusa 2.2 temporal flowmatching) and
+  `triton-sageattention` (per-OS install with pinned wheels + sdpa fallback). Four
+  new SEO blog posts (multi-provider flagship, self-healing agent, video upscale,
+  Pusa extend) + a default Open Graph social card for the docs/blog.
+
+### Fixed
+
+- **Self-heal a Desktop-nested ComfyUI path** (the "doubled `COMFYUI_PATH`" bug):
+  detection now validates a candidate is a real ComfyUI root and descends one level
+  into `/ComfyUI` if it's the empty wrapper — so model downloads, crash recovery,
+  and output scans target the real install. No-op for non-nested installs.
+- **WMI process-creation-time read** was feeding CIM's `DateTime` back through a
+  DMTF-string converter → threw on every call (disabling the pid-reuse identity
+  check and flooding ComfyUI's log). Reads the `DateTime` directly now, stderr
+  suppressed.
+- **Finished renders auto-deliver, no polling.** `panel_run` tells the agent it
+  will be notified with the output when the render finishes — so it ends its turn
+  and the executed-event image injects promptly (was sometimes delayed behind the
+  agent's own busy-poll turns).
+- **ComfyUI run errors interrupt the agent** so it stops running blind after a
+  failed queue, and **session ids persist to disk** so the chat survives an
+  orchestrator restart. **Send-now** re-queues the interrupted message (both get
+  answered) without re-running on a plain Stop. **Reasoning effort** snaps to the
+  nearest level a model supports on a provider/model switch instead of silently
+  dropping.
 
 See the design doc: [docs/design/agent-backend-injection.md](docs/design/agent-backend-injection.md).
+
 ## [0.18.0] - 2026-06-25
 
 ### Added
