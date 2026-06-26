@@ -657,6 +657,7 @@ export async function runPanelOrchestrator(): Promise<void> {
         kind?: string;
         images?: Array<{ filename: string; subfolder?: string; type?: string }>;
         error?: string;
+        note?: string;
       });
       if (delivered) {
         logger.info(`[panel-orchestrator] tab ${event.tab_id.slice(0, 8)} event → agent: ${event.kind}`);

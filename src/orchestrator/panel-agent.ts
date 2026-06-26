@@ -290,15 +290,24 @@ export class PanelAgent {
    * reached the agent." Only meaningful when a session is live (the manager only
    * calls this for an existing agent, so we never spawn one just for an event).
    */
-  injectEvent(ev: { kind?: string; images?: ImageRef[]; error?: string }): void {
+  injectEvent(ev: { kind?: string; images?: ImageRef[]; error?: string; note?: string }): void {
     let text: string | null = null;
     let images: ImageRef[] | undefined;
     if (ev.kind === "executed") {
       const imgs = ev.images ?? [];
       const names = imgs.map((i) => i.filename).filter(Boolean).join(", ") || "(unnamed)";
+      // A custom `note` (e.g. the panel's video-storyboard summary) replaces the
+      // default image-acknowledgement wording so the agent is told accurately
+      // what it's looking at (a contact sheet of a video, not a still image).
+      const note = typeof ev.note === "string" && ev.note.trim() ? ev.note.trim() : null;
       text =
-        `[panel event] A run on the user's canvas just finished and produced ${imgs.length} output image(s): ${names}. ` +
-        `The image(s) are attached below and already shown to the user in the panel. ` +
+        `[panel event] ` +
+        (note
+          ? `${note} `
+          : `A run on the user's canvas just finished and produced ${imgs.length} output image(s): ${names}. `) +
+        // Only claim images are attached when some actually are (a note-only event —
+        // e.g. a video that produced no storyboard — has none).
+        (imgs.length ? `The image(s) are attached below and already shown to the user in the panel. ` : ``) +
         `Reply with ONE short sentence acknowledging the result and suggesting a sensible next step — you do NOT need to call any tools. Don't repeat an earlier comment.`;
       // Attach the outputs inline so the agent SEES the render (no fetch needed).
       images = imgs.filter((i) => i.filename).map((i) => ({ ...i, type: i.type ?? "output" }));
@@ -857,7 +866,7 @@ export class PanelAgentManager {
 
   /** Feed a ComfyUI execution event to an EXISTING agent (no-op if none — we
    *  never spawn an agent just to react to an event). Returns whether delivered. */
-  injectEvent(tabId: string, ev: { kind?: string; images?: ImageRef[]; error?: string }): boolean {
+  injectEvent(tabId: string, ev: { kind?: string; images?: ImageRef[]; error?: string; note?: string }): boolean {
     const agent = this.agents.get(tabId);
     if (!agent || agent.isStopped) return false; // best-effort; don't enqueue into a closed agent
     agent.injectEvent(ev);

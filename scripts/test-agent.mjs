@@ -326,6 +326,35 @@ const SCENARIOS = [
       detail: `reactedToEvent=${r.says.length > r.saysBeforeEvent} (says ${r.saysBeforeEvent}→${r.says.length})`,
     }),
   },
+  {
+    // VIDEO-VISION: the panel can't show the agent a raw video, so on a video
+    // output it builds a frame-storyboard PNG (browser-side), uploads it to
+    // input/, and delivers THAT as an inline image with a `note`. This simulates
+    // the agent_event the panel emits for a storyboard and asserts (a) the agent
+    // reacts and (b) it understood it was looking at a video storyboard (mentions
+    // the video / motion / frames), proving the note+image reached it.
+    name: "video storyboard reaches agent (VIDEO-VISION)",
+    seed: 0,
+    task: "I'm about to render a short video — just stand by, you'll get a storyboard event when it finishes.",
+    followEvent: {
+      type: "agent_event",
+      kind: "executed",
+      images: [{ filename: "storyboard_AnimateDiff_00007.png", subfolder: "", type: "input" }],
+      note:
+        "📽️ 20-frame storyboard (contact sheet) of the video you just generated " +
+        "(file AnimateDiff_00007.mp4) — frames run top-left→bottom-right = start→end. " +
+        "Review motion, sharpness, and temporal consistency.",
+    },
+    check: (r) => {
+      const reacted = r.saysBeforeEvent >= 0 && r.says.length > r.saysBeforeEvent;
+      const after = r.says.slice(r.saysBeforeEvent < 0 ? 0 : r.saysBeforeEvent).join(" ").toLowerCase();
+      const understood = /video|storyboard|motion|frame|clip|animation/.test(after);
+      return {
+        pass: reacted && understood,
+        detail: `reacted=${reacted} understoodVideo=${understood} (says ${r.saysBeforeEvent}→${r.says.length})`,
+      };
+    },
+  },
 ];
 
 async function main() {
