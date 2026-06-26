@@ -41,6 +41,7 @@ import {
 import { getNsfwConsent, setNsfwConsent } from "../services/panel-settings.js";
 import { getObjectInfo, backfillObjectInfo } from "../comfyui/client.js";
 import { convertUiToApi, collectNodeTypes } from "../services/workflow-converter.js";
+import { sliceWorkflow } from "../services/workflow-slicer.js";
 import type { UiWorkflow } from "../comfyui/types.js";
 
 /** Treat these as an affirmative answer to the adult-content consent card. */
@@ -408,6 +409,62 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             (warnings.length
               ? `\nWarnings:\n${warnings.map((w) => `- ${w}`).join("\n")}`
               : "") +
+            `\n\n${JSON.stringify(workflow, null, 2)}`,
+        );
+      },
+    ),
+    def(
+      "panel_slice_workflow",
+      "Slice ONE pipeline out of a toggle-template workflow (built with rgthree 'Fast Groups " +
+        "Bypasser/Muter' — one graph holding many pipelines, only one active at a time). Seeds from the " +
+        "output nodes in the named `groups`, takes their backward closure (real links + virtual Set/Get " +
+        "buses), un-bypasses the kept nodes and their subgraph internals, and RETURNS a standalone, " +
+        "activated UI graph (only the subgraph defs it uses). Reads a `pack`, server-side `path`, or " +
+        "inline `graph`. Pair with panel_strip_workflow to then flatten the Set/Get buses. This returns " +
+        "the sliced graph for inspection — it does NOT load it onto the canvas (feed the result to " +
+        "panel_load_workflow if you want that).",
+      {
+        pack: z.string().optional().describe("Bundled pack name (its UI workflow.json is read server-side)."),
+        path: z
+          .string()
+          .optional()
+          .describe("Path to a workflow .json on the ComfyUI machine's disk — absolute or relative to user/default/workflows."),
+        graph: z
+          .union([z.string(), z.record(z.string(), z.unknown())])
+          .optional()
+          .describe("Inline UI workflow (object or JSON string) to slice instead of a pack/path."),
+        groups: z
+          .union([z.string(), z.array(z.string())])
+          .describe(
+            "Group-title substrings (case-insensitive) whose output nodes seed the slice — CSV string or array, e.g. 'TEXT TO IMAGE' or ['extend','sampler'].",
+          ),
+      },
+      async (args: A) => {
+        let raw: Record<string, unknown>;
+        if (args.pack) {
+          raw = readPackWorkflow(args.pack as string);
+        } else if (args.path) {
+          raw = readWorkflowFromPath(args.path as string);
+        } else if (args.graph != null) {
+          raw = (typeof args.graph === "string"
+            ? JSON.parse(args.graph as string)
+            : args.graph) as Record<string, unknown>;
+        } else {
+          throw new Error("Provide exactly one of: pack, path, or graph.");
+        }
+
+        const groupList = Array.isArray(args.groups)
+          ? (args.groups as string[])
+          : String(args.groups ?? "").split(",");
+        const { workflow, stats } = sliceWorkflow(raw as unknown as UiWorkflow, groupList);
+
+        const flags =
+          stats.badLinks || stats.orphanGets
+            ? ` · ⚠ bad_links=${stats.badLinks} orphan_gets=${stats.orphanGets}`
+            : "";
+        return ok(
+          `Sliced ${stats.nodes} nodes (un-bypassed ${stats.unbypassed}), ${stats.links} links, ` +
+            `${stats.subgraphs} subgraph def(s) · seeds=${stats.seeds}${flags}` +
             `\n\n${JSON.stringify(workflow, null, 2)}`,
         );
       },

@@ -6,6 +6,7 @@ import { getClient, getObjectInfo, backfillObjectInfo } from "../comfyui/client.
 import { errorToToolResult, ValidationError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 import { isUiFormat, convertUiToApi, collectNodeTypes } from "../services/workflow-converter.js";
+import { sliceWorkflow } from "../services/workflow-slicer.js";
 import { detectSections } from "../services/workflow-sections.js";
 import {
   generateOverview,
@@ -210,6 +211,73 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
                 (warnings.length
                   ? `\nWarnings:\n${warnings.map((w) => `- ${w}`).join("\n")}`
                   : ""),
+            },
+            { type: "text", text: JSON.stringify(workflow, null, 2) },
+          ],
+        };
+      } catch (err) {
+        return errorToToolResult(err);
+      }
+    },
+  );
+
+  server.tool(
+    "slice_workflow",
+    "Slice ONE pipeline out of a toggle-template workflow — the kind built with rgthree " +
+      "'Fast Groups Bypasser/Muter' where one graph holds many pipelines and only one is active at a time. " +
+      "Seeds from the output/SaveImage nodes in the named groups, takes their backward dependency closure " +
+      "(through real links AND virtual Set/Get buses), un-bypasses the kept nodes (and the internals of any " +
+      "subgraph defs they use), and returns a STANDALONE, activated UI graph carrying only the subgraph " +
+      "defs it uses. Reads from any server-side path, userdata filename, or inline graph. Pair with " +
+      "strip_workflow afterward to flatten the Set/Get buses into real connections.",
+    {
+      path: z.string().optional().describe("Absolute server-side path to the workflow .json on disk."),
+      filename: z.string().optional().describe("Workflow filename in the ComfyUI userdata library."),
+      graph: z.record(z.string(), z.any()).optional().describe("Inline UI-format workflow JSON."),
+      groups: z
+        .union([z.string(), z.array(z.string())])
+        .describe(
+          "Group-title substrings (case-insensitive) whose output nodes seed the slice — CSV string or " +
+            "array, e.g. 'TEXT TO IMAGE,TXT' or ['extend','sampler']. Shared post-proc is pulled in via the closure.",
+        ),
+    },
+    async ({ path, filename, graph, groups }) => {
+      try {
+        const provided = [path, filename, graph].filter((v) => v != null).length;
+        if (provided !== 1) {
+          throw new ValidationError("Provide exactly one of: path, filename, or graph.");
+        }
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        let raw: any;
+        if (graph) {
+          raw = graph;
+        } else if (path) {
+          raw = JSON.parse(await readFile(path, "utf8"));
+        } else {
+          const client = getClient();
+          const encoded = encodeURIComponent(`workflows/${filename}`);
+          const res = await client.fetchApi(`/api/userdata/${encoded}`);
+          if (!res.ok) {
+            throw new ValidationError(`Workflow not found in library: ${filename} (${res.status})`);
+          }
+          raw = await res.json();
+        }
+
+        const groupList = Array.isArray(groups) ? groups : String(groups).split(",");
+        const { workflow, stats } = sliceWorkflow(raw, groupList);
+
+        const flags =
+          stats.badLinks || stats.orphanGets
+            ? ` · ⚠ bad_links=${stats.badLinks} orphan_gets=${stats.orphanGets}`
+            : "";
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `Sliced ${stats.nodes} nodes (un-bypassed ${stats.unbypassed}), ${stats.links} links, ` +
+                `${stats.subgraphs} subgraph def(s) · seeds=${stats.seeds}${flags}`,
             },
             { type: "text", text: JSON.stringify(workflow, null, 2) },
           ],
