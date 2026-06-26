@@ -35,6 +35,7 @@ interface Harness {
 
 function makeDeps(opts: {
   comfyuiPath?: string;
+  local?: boolean; // isLocalMode() — defaults to true
   env?: NodeJS.ProcessEnv;
   files?: Record<string, string>; // path -> pyproject contents
   dirs?: string[]; // custom_nodes subdir names
@@ -49,6 +50,7 @@ function makeDeps(opts: {
   const reinstalls: Harness["reinstalls"] = [];
 
   const deps: PanelInstallerDeps = {
+    isLocalMode: () => opts.local ?? true,
     comfyuiPath: () => opts.comfyuiPath,
     env: () => opts.env ?? {},
     existsSync: (p) => p === CUSTOM_NODES || p in files,
@@ -122,6 +124,41 @@ describe("detectPanelInstall", () => {
     expect(d.isDevSymlink).toBe(true);
   });
 
+  it("P1a: a known panel dir that is a junction with NO pyproject is still dev", async () => {
+    const dir = join(CUSTOM_NODES, "comfyui-mcp-panel");
+    // No pyproject file at all — only the symlink exists.
+    const { deps } = makeDeps({ comfyuiPath: COMFY, symlinks: [dir] });
+    const d = await detectPanelInstall(deps);
+    expect(d.installed).toBe(true);
+    expect(d.isDevSymlink).toBe(true);
+    expect(d.dir).toBe(dir);
+    expect(d.version).toBeUndefined();
+  });
+
+  it("P1a: a known panel dir that is a junction with CORRUPT pyproject is still dev", async () => {
+    const dir = join(CUSTOM_NODES, "comfyui-agent-panel");
+    const { deps } = makeDeps({
+      comfyuiPath: COMFY,
+      symlinks: [dir],
+      files: { [join(dir, "pyproject.toml")]: "this is not valid toml {{{" },
+    });
+    const d = await detectPanelInstall(deps);
+    expect(d.installed).toBe(true);
+    expect(d.isDevSymlink).toBe(true);
+  });
+
+  it("P1b: not-applicable in remote mode even when COMFYUI_PATH is set", async () => {
+    const dir = join(CUSTOM_NODES, "comfyui-mcp-panel");
+    const { deps } = makeDeps({
+      comfyuiPath: COMFY,
+      local: false,
+      files: { [join(dir, "pyproject.toml")]: pyproject(PANEL_REGISTRY_ID) },
+    });
+    const d = await detectPanelInstall(deps);
+    expect(d.applicable).toBe(false);
+    expect(d.installed).toBe(false);
+  });
+
   it("reports not-installed when no pyproject name matches", async () => {
     const { deps } = makeDeps({
       comfyuiPath: COMFY,
@@ -172,6 +209,21 @@ describe("ensurePanelInstalled policy matrix", () => {
     const h = makeDeps({ comfyuiPath: undefined });
     const res = await ensurePanelInstalled({ deps: h.deps });
     expect(res.action).toBe("unavailable");
+    expect(h.installs).toEqual([]);
+  });
+
+  it("P1b: remote mode with COMFYUI_PATH → unavailable (no mutation)", async () => {
+    const h = makeDeps({ comfyuiPath: COMFY, local: false });
+    const res = await ensurePanelInstalled({ deps: h.deps });
+    expect(res.action).toBe("unavailable");
+    expect(h.installs).toEqual([]);
+  });
+
+  it("P1a: dev junction with NO pyproject → skipped-dev (no install)", async () => {
+    const dir = join(CUSTOM_NODES, "comfyui-mcp-panel");
+    const h = makeDeps({ comfyuiPath: COMFY, symlinks: [dir] });
+    const res = await ensurePanelInstalled({ deps: h.deps });
+    expect(res.action).toBe("skipped-dev");
     expect(h.installs).toEqual([]);
   });
 
@@ -260,6 +312,32 @@ describe("runPanelAction", () => {
     );
     expect(h.installs).toEqual([]);
   });
+
+  it("P1a: REFUSES reinstall over a junction with NO pyproject (no clobber)", async () => {
+    const dir = join(CUSTOM_NODES, "comfyui-mcp-panel");
+    const h = makeDeps({ comfyuiPath: COMFY, symlinks: [dir] });
+    await expect(runPanelAction("reinstall", h.deps)).rejects.toBeInstanceOf(
+      PanelInstallError,
+    );
+    expect(h.reinstalls).toEqual([]);
+    expect(h.installs).toEqual([]);
+  });
+
+  it("P1b: REFUSES mutation in remote mode even with COMFYUI_PATH set", async () => {
+    const h = makeDeps({ comfyuiPath: COMFY, local: false });
+    await expect(runPanelAction("install", h.deps)).rejects.toBeInstanceOf(
+      PanelInstallError,
+    );
+    await expect(runPanelAction("update", h.deps)).rejects.toBeInstanceOf(
+      PanelInstallError,
+    );
+    await expect(runPanelAction("reinstall", h.deps)).rejects.toBeInstanceOf(
+      PanelInstallError,
+    );
+    expect(h.installs).toEqual([]);
+    expect(h.updates).toEqual([]);
+    expect(h.reinstalls).toEqual([]);
+  });
 });
 
 describe("panelStatus", () => {
@@ -269,6 +347,13 @@ describe("panelStatus", () => {
     expect(s.applicable).toBe(false);
     expect(s.installed).toBe(false);
     expect(s.note).toMatch(/local-only/i);
+  });
+
+  it("P1b: remote mode note even with COMFYUI_PATH set (never errors)", async () => {
+    const { deps } = makeDeps({ comfyuiPath: COMFY, local: false });
+    const s = await panelStatus(deps);
+    expect(s.applicable).toBe(false);
+    expect(s.note).toMatch(/remote\/cloud mode/i);
   });
 
   it("reports installed version and dev-symlink note", async () => {

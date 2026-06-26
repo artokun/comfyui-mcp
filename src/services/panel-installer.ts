@@ -19,7 +19,7 @@
 
 import { existsSync, lstatSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { config } from "../config.js";
+import { config, isLocalMode } from "../config.js";
 import { logger } from "../utils/logger.js";
 import { parsePyproject } from "./node-authoring.js";
 import {
@@ -59,6 +59,13 @@ export class PanelInstallError extends Error {
 // ---------------------------------------------------------------------------
 
 export interface PanelInstallerDeps {
+  /**
+   * True only in LOCAL mode. In remote (--comfyui-url) / cloud mode the Manager
+   * mutations target a REMOTE host, so panel install/update/reinstall must be
+   * refused even when COMFYUI_PATH happens to be set (the local FS scan would be
+   * the WRONG filesystem). The on-load ensure also no-ops.
+   */
+  isLocalMode: () => boolean;
   /** Resolved local ComfyUI root, or undefined in remote/cloud mode. */
   comfyuiPath: () => string | undefined;
   /** Process env (for the opt-out flag). */
@@ -76,6 +83,7 @@ export interface PanelInstallerDeps {
 }
 
 export const defaultDeps: PanelInstallerDeps = {
+  isLocalMode: () => isLocalMode(),
   comfyuiPath: () => config.comfyuiPath,
   env: () => process.env,
   existsSync,
@@ -126,11 +134,35 @@ export async function detectPanelInstall(
   deps: PanelInstallerDeps = defaultDeps,
 ): Promise<PanelDetection> {
   const comfyPath = deps.comfyuiPath();
-  if (!comfyPath) {
+  // LOCAL-only: in remote/cloud mode the local FS is the wrong filesystem to
+  // reason about, so detection is not applicable even if COMFYUI_PATH is set.
+  if (!deps.isLocalMode() || !comfyPath) {
     return { applicable: false, installed: false, isDevSymlink: false };
   }
 
   const customNodes = join(comfyPath, "custom_nodes");
+
+  // P1a — DEV-JUNCTION GUARD, FIRST and INDEPENDENT of pyproject parsing.
+  // lstat the KNOWN panel target dirs directly: if either is a symlink/junction
+  // it is a dev install and must be protected from any mutation, EVEN when its
+  // pyproject.toml is missing, corrupt, or unreadable. (A missing/bad pyproject
+  // must never downgrade a junction to "not installed" — that would let
+  // install/reinstall clobber the developer's working repo.)
+  for (const name of FAST_PATH_DIRS) {
+    const dir = join(customNodes, name);
+    if (deps.isSymlink(dir)) {
+      let version: string | undefined;
+      const pyproject = join(dir, "pyproject.toml");
+      if (deps.existsSync(pyproject)) {
+        try {
+          version = parsePyproject(deps.readFile(pyproject)).version;
+        } catch {
+          version = undefined;
+        }
+      }
+      return { applicable: true, installed: true, dir, version, isDevSymlink: true };
+    }
+  }
 
   // Candidate dirs: fast-path names first, then any other subdir.
   const candidates: string[] = FAST_PATH_DIRS.map((n) => join(customNodes, n));
@@ -226,6 +258,13 @@ async function ensureInner(deps: PanelInstallerDeps): Promise<EnsureResult> {
     };
   }
 
+  if (!deps.isLocalMode()) {
+    return {
+      action: "unavailable",
+      reason: "Panel auto-install is local-only (remote/cloud mode active).",
+    };
+  }
+
   if (!deps.comfyuiPath()) {
     return {
       action: "unavailable",
@@ -313,8 +352,9 @@ export async function panelStatus(
 
   let note: string;
   if (!detection.applicable) {
-    note =
-      "Panel management is local-only; no local ComfyUI (COMFYUI_PATH) is configured.";
+    note = !deps.isLocalMode()
+      ? "Remote/cloud mode — panel install is managed on the ComfyUI host, not from here."
+      : "Panel management is local-only; no local ComfyUI (COMFYUI_PATH) is configured.";
   } else if (detection.isDevSymlink) {
     note = "dev install (symlink) — managed manually; install/update/reinstall are refused.";
   } else if (!detection.installed) {
@@ -351,6 +391,17 @@ export async function runPanelAction(
   action: "install" | "update" | "reinstall",
   deps: PanelInstallerDeps = defaultDeps,
 ): Promise<PanelActionResult> {
+  // P1b — truly LOCAL-only. Refuse in remote/cloud mode even when COMFYUI_PATH
+  // is set: installCustomNode/reinstallCustomNode would queue Manager mutations
+  // against the REMOTE host while our symlink guard inspected the LOCAL disk —
+  // the wrong filesystem. The panel must be managed on the ComfyUI host itself.
+  if (!deps.isLocalMode()) {
+    throw new PanelInstallError(
+      `Panel ${action} is local-only and is refused in remote/cloud mode ` +
+        `(a remote COMFYUI_URL / Comfy Cloud is active). Install the panel on ` +
+        `the ComfyUI host itself.`,
+    );
+  }
   if (!deps.comfyuiPath()) {
     throw new PanelInstallError(
       `Panel ${action} is local-only and requires a local ComfyUI install. ` +
