@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { config, getComfyUIBaseUrl } from "../config.js";
@@ -44,6 +44,20 @@ export interface VerifyDeps {
   fetchObjectInfoKeys: () => Promise<string[]>;
   /** Read a pack's __init__.py contents, or undefined if absent. */
   readPackInit: (packName: string) => string | undefined;
+  /**
+   * Read the contents of every Python source file in a pack folder (recursively,
+   * bounded). Lets inference find a NODE_CLASS_MAPPINGS literal defined in a
+   * submodule and merely re-exported from __init__.py (e.g. cg-use-everywhere's
+   * `from .use_everywhere_nodes import NODE_CLASS_MAPPINGS`). Optional.
+   */
+  readPackSources?: (packName: string) => string[];
+  /**
+   * Infer a pack's registered class_types from the LIVE server: query
+   * /object_info and keep entries whose `python_module` belongs to the pack.
+   * Last-resort fallback for packs that build their mappings dynamically (no
+   * static literal to parse). Optional; requires a running server.
+   */
+  inferPackClassTypes?: (packName: string) => Promise<string[]>;
 }
 
 const defaultDeps: VerifyDeps = {
@@ -79,7 +93,79 @@ const defaultDeps: VerifyDeps = {
       return undefined;
     }
   },
+  readPackSources: (packName: string) => {
+    if (!config.comfyuiPath) return [];
+    const packDir = join(config.comfyuiPath, "custom_nodes", packName);
+    if (!existsSync(packDir)) return [];
+    const sources: string[] = [];
+    const MAX_FILES = 200;
+    // Bounded recursive walk: read .py files, skip vendored / hidden dirs.
+    const walk = (dir: string, depth: number): void => {
+      if (depth > 4 || sources.length >= MAX_FILES) return;
+      let entries: import("node:fs").Dirent[];
+      try {
+        entries = readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        if (sources.length >= MAX_FILES) break;
+        const name = entry.name;
+        if (entry.isDirectory()) {
+          if (name.startsWith(".") || name === "__pycache__" || name === "node_modules") continue;
+          walk(join(dir, name), depth + 1);
+        } else if (entry.isFile() && name.endsWith(".py")) {
+          try {
+            sources.push(readFileSync(join(dir, name), "utf-8"));
+          } catch {
+            // Skip unreadable files.
+          }
+        }
+      }
+    };
+    walk(packDir, 0);
+    return sources;
+  },
+  inferPackClassTypes: async (packName: string) => {
+    const url = `${getComfyUIBaseUrl()}/object_info`;
+    const res = await comfyuiFetch(url, { signal: AbortSignal.timeout(30_000) });
+    if (!res.ok) {
+      throw new ComfyUIError(
+        `Failed to fetch /object_info: ${res.status} ${res.statusText}`,
+        "OBJECT_INFO_FAILED",
+      );
+    }
+    const data = await res.json();
+    if (data === null || typeof data !== "object" || Array.isArray(data)) {
+      throw new ComfyUIError(
+        "Unexpected /object_info response (not a JSON object).",
+        "OBJECT_INFO_FAILED",
+      );
+    }
+    return classTypesForPack(data as Record<string, unknown>, packName);
+  },
 };
+
+/**
+ * Given a parsed /object_info map, return the class_types whose `python_module`
+ * belongs to `packName`. ComfyUI tags each node with a python_module like
+ * "custom_nodes.<folder>" (sometimes with extra ".<submodule>" segments), so we
+ * match when the pack folder name appears as a dot-separated segment.
+ */
+export function classTypesForPack(
+  objectInfo: Record<string, unknown>,
+  packName: string,
+): string[] {
+  const out: string[] = [];
+  for (const [classType, value] of Object.entries(objectInfo)) {
+    if (!value || typeof value !== "object") continue;
+    const mod = (value as Record<string, unknown>).python_module;
+    if (typeof mod !== "string") continue;
+    const segments = mod.split(".");
+    if (segments.includes(packName)) out.push(classType);
+  }
+  return out;
+}
 
 /**
  * Parse NODE_CLASS_MAPPINGS keys from an __init__.py. Best-effort regex (Python
@@ -125,29 +211,40 @@ export async function verifyCustomNode(
     );
   }
 
-  // Resolve the expected class_types: explicit list wins, else infer from the pack.
-  let expected = (options.classTypes ?? []).map((s) => s.trim()).filter(Boolean);
-  if (expected.length === 0) {
-    if (!options.name) {
-      throw new ValidationError(
-        "Provide `class_types` (the NODE_CLASS_MAPPINGS keys to check) or a `name` " +
-          "whose __init__.py declares them.",
-      );
-    }
+  // Resolve the expected class_types: explicit list wins, else infer from the
+  // pack. Inference proceeds in escalating order so common packs need no
+  // class_types argument:
+  //   1. NODE_CLASS_MAPPINGS literal in __init__.py
+  //   2. NODE_CLASS_MAPPINGS literal in ANY pack source file (handles packs that
+  //      define mappings in a submodule and re-export them, e.g. cg-use-everywhere)
+  //   3. (after restart, below) the LIVE /object_info, filtered to this pack's
+  //      python_module — covers packs that build mappings dynamically.
+  const explicit = (options.classTypes ?? []).map((s) => s.trim()).filter(Boolean);
+  let expected = explicit;
+  let inferredFromLiveServer = false;
+  const haveName = !!options.name;
+
+  if (expected.length === 0 && !haveName) {
+    throw new ValidationError(
+      "Provide `class_types` (the NODE_CLASS_MAPPINGS keys to check) or a `name` " +
+        "whose node class_types can be inferred.",
+    );
+  }
+
+  if (expected.length === 0 && options.name) {
+    // 1. __init__.py literal.
     const initPy = deps.readPackInit(options.name);
-    if (!initPy) {
-      throw new ValidationError(
-        `Could not read __init__.py for pack "${options.name}" to infer its node ` +
-          `class_types. Pass class_types explicitly.`,
-      );
+    if (initPy) expected = parseClassMappingKeys(initPy);
+
+    // 2. Any pack source file's literal (re-exported mappings).
+    if (expected.length === 0 && deps.readPackSources) {
+      const seen = new Set<string>();
+      for (const src of deps.readPackSources(options.name)) {
+        for (const key of parseClassMappingKeys(src)) seen.add(key);
+      }
+      expected = [...seen];
     }
-    expected = parseClassMappingKeys(initPy);
-    if (expected.length === 0) {
-      throw new ValidationError(
-        `Could not find NODE_CLASS_MAPPINGS keys in "${options.name}"/__init__.py. ` +
-          `Pass class_types explicitly.`,
-      );
-    }
+    // Step 3 (live /object_info) runs after restart, once the server is ready.
   }
 
   // Restart so newly-added packs are (re)loaded, unless the caller opted out.
@@ -173,6 +270,25 @@ export async function verifyCustomNode(
   }
 
   const registered = new Set(await deps.fetchObjectInfoKeys());
+
+  // 3. Live fallback: still no class_types to check, so derive them from the
+  // running server's /object_info, filtered to this pack's python_module. If the
+  // pack registered any nodes, that proves it imported cleanly.
+  if (expected.length === 0 && options.name && deps.inferPackClassTypes) {
+    expected = await deps.inferPackClassTypes(options.name);
+    inferredFromLiveServer = true;
+  }
+
+  if (expected.length === 0) {
+    throw new ValidationError(
+      `Could not determine node class_types for pack "${options.name}". No ` +
+        `NODE_CLASS_MAPPINGS literal was found in its sources, and ComfyUI's ` +
+        `/object_info reports no nodes from this pack (it may have failed to import, ` +
+        `or its folder name differs from its python_module). Pass class_types ` +
+        `explicitly (the NODE_CLASS_MAPPINGS keys you expect to register).`,
+    );
+  }
+
   const loaded = expected.filter((c) => registered.has(c));
   const missing = expected.filter((c) => !registered.has(c));
 
@@ -190,7 +306,10 @@ export async function verifyCustomNode(
     loaded,
     missing,
     message: ok
-      ? `All ${expected.length} node type(s) registered in ComfyUI. The pack loads correctly.`
+      ? `All ${expected.length} node type(s) registered in ComfyUI. The pack loads correctly.` +
+        (inferredFromLiveServer
+          ? ` (class_types were inferred from the live /object_info for "${options.name}".)`
+          : "")
       : `${missing.length} of ${expected.length} node type(s) are NOT registered: ` +
         `${missing.join(", ")}. The pack likely failed to import — check ComfyUI logs ` +
         `(a missing dependency or a syntax error keeps a node out of /object_info).`,

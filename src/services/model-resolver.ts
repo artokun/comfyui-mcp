@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
+import type { Stats } from "node:fs";
 import { readdir, stat, mkdir } from "node:fs/promises";
-import { join, basename, resolve, sep, isAbsolute } from "node:path";
+import { join, basename, resolve, relative, sep, isAbsolute } from "node:path";
 import { config } from "../config.js";
 import { getClient } from "../comfyui/client.js";
-import { ModelError } from "../utils/errors.js";
+import { getExtraModelRoots } from "./extra-paths.js";
+import { ModelError, ValidationError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 import { downloadWithCache } from "./download-cache.js";
 import { reportDownloadProgress } from "./download-progress.js";
@@ -211,6 +213,135 @@ export function resolveModelSubfolder(targetSubfolder: string): string {
     );
   }
   return targetDir;
+}
+
+/**
+ * Resolve a relative-to-models path against a known root, keeping the result
+ * strictly INSIDE that root. Rejects absolute inputs, "" / "." (the root
+ * itself), and ".." traversal escapes. Shared by the primary and extra-root
+ * lookups so every candidate gets the same containment guarantee.
+ */
+function containWithinRoot(rootDir: string, relativePath: string): string {
+  const root = resolve(rootDir);
+  const target = resolve(root, relativePath);
+  const rel = relative(root, target);
+  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
+    throw new ValidationError(
+      `Refusing to operate outside the models directory: ${relativePath}`,
+    );
+  }
+  // Defense-in-depth: the resolved path must be a descendant of the root and
+  // not merely share its string prefix (e.g. "models-evil" vs "models").
+  if (target !== root && !target.startsWith(root + sep)) {
+    throw new ValidationError(
+      `Refusing to operate outside the models directory: ${relativePath}`,
+    );
+  }
+  return target;
+}
+
+export interface ResolvedModelFile {
+  /** Absolute path to the existing entry on disk. */
+  path: string;
+  /** The root directory it was found under (primary models/ or an extra root). */
+  root: string;
+  /** fs.Stats for the entry, so callers don't need to re-stat. */
+  info: Stats;
+}
+
+/**
+ * Locate an existing model file given a path relative to ComfyUI's models/
+ * directory, searching ACROSS every configured root: the primary
+ * `<COMFYUI_PATH>/models` AND every directory declared in
+ * extra_model_paths.yaml / extra_models_config.yaml (e.g. models stored on
+ * another drive such as E:\). This mirrors the set of roots ComfyUI itself
+ * loads from, so a model installed under an extra root can be found (and
+ * removed) the same way as one under the primary install.
+ *
+ * Resolution rules:
+ *  - The primary root is searched with the full relative path.
+ *  - Extra roots are per-category (the first path segment, e.g. "checkpoints"),
+ *    so the remainder of the path is resolved within each matching root.
+ *  - Every candidate is containment-checked against its own root; absolute
+ *    paths and ".." traversal are rejected (security guard preserved).
+ *  - A matching FILE wins; if only a directory matches it is returned so the
+ *    caller can surface a precise "not a file" error.
+ *
+ * Throws ValidationError for absolute/traversal inputs and ModelError when the
+ * entry is not found in any root (the message lists the roots searched).
+ */
+export async function resolveExistingModelFile(
+  relativePath: string,
+): Promise<ResolvedModelFile> {
+  if (!config.comfyuiPath) {
+    throw new ModelError(
+      "COMFYUI_PATH is not configured. Locating/removing a local model operates on " +
+        "the local filesystem and is unavailable when targeting a remote ComfyUI. " +
+        "Set the COMFYUI_PATH environment variable.",
+    );
+  }
+  const raw = (relativePath ?? "").trim();
+  if (!raw) {
+    throw new ValidationError("Model path is required.");
+  }
+  if (isAbsolute(raw)) {
+    throw new ValidationError(
+      `Path must be relative to the models directory, not absolute: ${relativePath}`,
+    );
+  }
+
+  const searched: string[] = [];
+  let dirHit: ResolvedModelFile | undefined;
+
+  // Primary root: <COMFYUI_PATH>/models/<relativePath>. containWithinRoot throws
+  // on traversal/escape, preserving the existing security behavior.
+  const modelsRoot = resolve(getModelsRoot());
+  const primaryTarget = containWithinRoot(modelsRoot, raw);
+  searched.push(modelsRoot);
+  try {
+    const info = await stat(primaryTarget);
+    if (info.isFile()) return { path: primaryTarget, root: modelsRoot, info };
+    dirHit = { path: primaryTarget, root: modelsRoot, info };
+  } catch {
+    // Not present under the primary root; fall through to extra roots.
+  }
+
+  // Extra roots are declared per category, so peel off the first path segment
+  // and resolve the remainder within each matching extra directory.
+  const segments = raw.split(/[/\\]+/).filter(Boolean);
+  const category = segments[0];
+  const remainder = segments.slice(1).join("/");
+  if (category && remainder) {
+    const extraRoots = await getExtraModelRoots();
+    for (const er of extraRoots) {
+      if (er.category !== category) continue;
+      const rootDir = resolve(er.dir);
+      let target: string;
+      try {
+        target = containWithinRoot(rootDir, remainder);
+      } catch {
+        // A remainder that can't safely resolve within this root is skipped
+        // rather than failing the whole lookup.
+        continue;
+      }
+      searched.push(rootDir);
+      try {
+        const info = await stat(target);
+        if (info.isFile()) return { path: target, root: rootDir, info };
+        if (!dirHit) dirHit = { path: target, root: rootDir, info };
+      } catch {
+        // Not present under this extra root; keep searching.
+      }
+    }
+  }
+
+  if (dirHit) return dirHit;
+
+  throw new ModelError(
+    `Model file not found: ${relativePath}. Searched ${searched.length} root(s): ` +
+      `${searched.join(", ")}`,
+    { path: relativePath, searched },
+  );
 }
 
 export async function downloadModel(

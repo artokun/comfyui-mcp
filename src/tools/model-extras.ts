@@ -1,92 +1,39 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { stat, unlink } from "node:fs/promises";
-import { join, resolve, relative, isAbsolute, sep } from "node:path";
-import { config } from "../config.js";
-import { downloadModel, MODEL_SUBDIRS } from "../services/model-resolver.js";
+import { unlink } from "node:fs/promises";
+import {
+  downloadModel,
+  resolveExistingModelFile,
+  MODEL_SUBDIRS,
+} from "../services/model-resolver.js";
 import {
   resolveCivitaiModel,
   resolveCivitaiModelVersion,
 } from "../services/civitai-resolver.js";
-import { ModelError, ValidationError, errorToToolResult } from "../utils/errors.js";
-
-/**
- * Resolve the local ComfyUI models directory.
- * Mirrors the (unexported) helper in model-resolver.ts; throws a clear error
- * when COMFYUI_PATH is unavailable (e.g. when targeting a remote ComfyUI).
- */
-function getModelsRoot(): string {
-  if (!config.comfyuiPath) {
-    throw new ModelError(
-      "COMFYUI_PATH is not configured. remove_model operates on the local " +
-        "filesystem and is unavailable when targeting a remote ComfyUI. " +
-        "Set the COMFYUI_PATH environment variable.",
-    );
-  }
-  return resolve(config.comfyuiPath, "models");
-}
-
-/**
- * Resolve a user-supplied relative model path against the models root and
- * confirm the result stays strictly inside the models directory.
- * Rejects path traversal (`..`) and absolute-path escapes.
- */
-function resolveWithinModels(modelsRoot: string, relativePath: string): string {
-  if (isAbsolute(relativePath)) {
-    throw new ValidationError(
-      `Path must be relative to the models directory, not absolute: ${relativePath}`,
-    );
-  }
-
-  const target = resolve(modelsRoot, relativePath);
-  const rel = relative(modelsRoot, target);
-
-  // `rel` starting with ".." (or being absolute on a different root/drive)
-  // means the resolved path escaped the models directory.
-  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
-    throw new ValidationError(
-      `Refusing to operate outside the models directory: ${relativePath}`,
-    );
-  }
-
-  // Defense-in-depth: ensure the resolved path is a descendant of the root.
-  if (!target.startsWith(modelsRoot + sep)) {
-    throw new ValidationError(
-      `Refusing to operate outside the models directory: ${relativePath}`,
-    );
-  }
-
-  return target;
-}
+import { ValidationError, errorToToolResult } from "../utils/errors.js";
 
 export function registerModelExtrasTools(server: McpServer): void {
   server.tool(
     "remove_model",
-    "Delete a model file from the local ComfyUI models directory. The path must " +
-      "stay within models/ (path traversal and absolute escapes are rejected).",
+    "Delete a model file from the local ComfyUI models directories. Resolves the " +
+      "path across ALL configured roots — the primary <COMFYUI_PATH>/models AND " +
+      "every directory in extra_model_paths.yaml / extra_models_config.yaml (e.g. " +
+      "models stored on another drive like E:\\) — the same roots ComfyUI loads " +
+      "from. The path must stay within a known root (path traversal and absolute " +
+      "escapes are rejected).",
     {
       path: z
         .string()
         .min(1)
         .describe(
           "Model file path relative to the ComfyUI models/ directory " +
-            "(e.g. 'checkpoints/sd_xl_base_1.0.safetensors').",
+            "(e.g. 'checkpoints/sd_xl_base_1.0.safetensors'). The leading segment " +
+            "is the category used to locate the file in extra roots too.",
         ),
     },
     async (args) => {
       try {
-        const modelsRoot = getModelsRoot();
-        const target = resolveWithinModels(modelsRoot, args.path);
-
-        let info;
-        try {
-          info = await stat(target);
-        } catch {
-          throw new ModelError(
-            `Model file not found: ${args.path} (resolved to ${target})`,
-            { path: args.path, resolved: target },
-          );
-        }
+        const { path: target, info } = await resolveExistingModelFile(args.path);
 
         if (!info.isFile()) {
           throw new ValidationError(
