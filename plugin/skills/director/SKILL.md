@@ -21,6 +21,13 @@ The Director skill orchestrates a complete short film production from a text sto
 - Each scene is independently retryable without affecting others
 - `clear_vram` between every model family switch
 
+## CRITICAL: Inspect modes + verify every output
+
+This pipeline drives the user's live canvas across many stages, so two habits are non-negotiable:
+
+- **Inspect node modes before each render.** After loading any pack/template/subgraph and before `panel_run`, call `panel_get_graph` and check each node's `mode`. A `bypass` node is skipped (passes input through); a `mute` node and everything downstream don't execute. If the path/branch/switch you need is bypassed or muted, enable it with `panel_set_node_mode` (set the wanted node `active`, the unwanted one `bypass`/`mute`). Never assume a switch or route is already active.
+- **Verify the output matches before moving on.** Every Phase-N render is a gate: actually LOOK at the produced frame/clip (view it) and confirm it matches the intent BEFORE advancing or reporting progress. If it's wrong, diagnose (wrong prompt path? a bypassed/muted builder or switch? wrong widget? wrong ref image?), fix, and rerun. Do NOT declare a phase done or report progress you haven't verified.
+
 ## CRITICAL: Character Consistency
 
 **Independent Z-Image generations per scene produce different-looking characters.** This was the #1 problem discovered during testing. The solution:

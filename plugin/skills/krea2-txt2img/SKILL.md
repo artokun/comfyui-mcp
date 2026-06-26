@@ -55,9 +55,18 @@ adherence and structured-JSON prompts.
 ## JSON / area prompting
 
 Like Ideogram 4, Krea 2's Qwen3-VL encoder reads structured prompts (per-region
-desc + bounding boxes + palettes). To use it: **un-bypass `Ideogram4PromptBuilderKJ`
-(node 14) and bypass the manual prompt (node 143)** — the rgthree `Any Switch`
-feeds whichever is active into the encoder. Gotchas learned the hard way:
+desc + bounding boxes + palettes). The pack ships with BOTH a manual-prompt node
+and the JSON builder, picked by an rgthree `Any Switch` — and the JSON builder
+ships **bypassed**, so by default the manual prompt wins. To drive it from the
+JSON builder: **set `Ideogram4PromptBuilderKJ` (node 14) to mode 'active' and the
+manual prompt (node 143) to mode 'bypass'** — on the live canvas use
+`panel_set_node_mode` for both, then re-read with `panel_get_graph` to confirm the
+modes actually flipped (the `Any Switch` feeds whichever is active into the
+encoder). Do NOT assume the switch is already on the path you want — a stale
+bypass here silently renders the wrong (old manual) prompt. After the render,
+VERIFY the image matches the JSON you set (view it) BEFORE continuing; if it
+doesn't, the builder is probably still bypassed or a field is stale — fix and
+rerun. Gotchas learned the hard way:
 
 - **Set ALL the builder fields**, not just the prompt/boxes — `background`,
   `technical`, `style`, `lighting` (widgets 3/5/6/7). Leaving stale values leaks

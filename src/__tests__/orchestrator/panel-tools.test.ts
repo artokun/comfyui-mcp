@@ -113,6 +113,34 @@ describe("panel-tools: copy/paste + subgraph blueprints", () => {
   });
 });
 
+describe("panel-tools: panel_set_node_mode (bypass/mute/active)", () => {
+  it("is present in the shared def list", () => {
+    const names = buildPanelToolDefs().map((d) => d.name);
+    expect(names).toContain("panel_set_node_mode");
+  });
+
+  it("exposes a node_id + mode enum schema with exactly active/bypass/mute", () => {
+    const def = defByName("panel_set_node_mode");
+    expect(Object.keys(def.schema).sort()).toEqual(["mode", "node_id"]);
+    // The mode enum must match the executor contract EXACTLY.
+    const mode = def.schema.mode as { options: string[] };
+    expect([...mode.options].sort()).toEqual(["active", "bypass", "mute"]);
+    // node_id rejects non-numbers (typed like the other per-node tools).
+    const nodeId = def.schema.node_id as { safeParse: (v: unknown) => { success: boolean } };
+    expect(nodeId.safeParse(7).success).toBe(true);
+  });
+
+  it("forwards graph_set_node_mode with node_id + mode", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_set_node_mode").handler({ node_id: 143, mode: "bypass" }, ctx);
+    expect(calls[0]).toMatchObject({
+      cmd: "graph_set_node_mode",
+      node_id: 143,
+      mode: "bypass",
+    });
+  });
+});
+
 describe("panel-tools: panel_load_workflow path (server-side disk read)", () => {
   it("reads an ABSOLUTE workflow .json off disk and fires graph_load with its graph", async () => {
     const dir = mkdtempSync(join(tmpdir(), "wf-load-"));

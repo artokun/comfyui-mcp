@@ -303,7 +303,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
   return [
     def(
       "panel_get_graph",
-      "Read the workflow the user is CURRENTLY VIEWING on their canvas (root graph or an opened subgraph — 'viewing' says which): node ids, types, titles, widget values, and connections. Subgraph nodes are summarized shallowly — drill in with panel_get_subgraph. ALWAYS call this before your first edit so ids and slot names are accurate. This is the user's live graph — they watch your edits happen. Read-only.",
+      "Read the workflow the user is CURRENTLY VIEWING on their canvas (root graph or an opened subgraph — 'viewing' says which): node ids, types, titles, widget values, connections, and each node's MODE ('active', 'bypass', or 'mute'). Subgraph nodes are summarized shallowly — drill in with panel_get_subgraph. ALWAYS call this before your first edit so ids and slot names are accurate. CHECK THE MODE of every node on the path you care about: a node with mode 'bypass' is skipped (it just passes its input through) and one with mode 'mute' does not execute (and kills everything downstream) — so a BYPASSED/MUTED node means that part of the graph is OFF and may be why a render uses the wrong prompt/branch. If the path you intend to use is bypassed or muted, enable it with panel_set_node_mode before running. This is the user's live graph — they watch your edits happen. Read-only.",
       {},
       async (_args, ctx) => ctx.call({ cmd: "graph_get_state" }),
     ),
@@ -1063,6 +1063,24 @@ export function buildPanelToolDefs(): PanelToolDef[] {
       },
       async (args: A, ctx) =>
         ctx.call({ cmd: "graph_set_node_collapsed", node_id: args.node_id, collapsed: args.collapsed }),
+    ),
+    def(
+      "panel_set_node_mode",
+      "Set a node's EXECUTION MODE on the user's open graph — active, bypass, or mute — and return { node_id, mode, previous_mode }. This is how you turn a node ON or OFF without deleting it. Modes:\n" +
+        "• 'active' — normal: the node executes.\n" +
+        "• 'bypass' — the node is SKIPPED and PASSES ITS INPUT THROUGH to its output (downstream still runs, just as if this node weren't there). Use to disable a single processing node (an upscaler, a LoRA, a detailer) while keeping the pipeline connected.\n" +
+        "• 'mute' — the node AND everything DOWNSTREAM of it do NOT execute (no pass-through). Use to fully switch off a branch/output.\n" +
+        "CRITICAL — modes silently change what a render produces, so they are a top cause of 'wrong output'. A BYPASSED node contributes nothing of its own and a MUTED node kills its branch. Use this tool to ENABLE the path you actually want and DISABLE the one you don't — e.g. to drive a workflow from its Ideogram/JSON prompt builder you must set the manual-prompt node to 'bypass' and the JSON-builder path to 'active' (or vice-versa); likewise to pick one branch of an rgthree 'Fast Groups Bypasser'/Muter or a prompt-source switch. ALWAYS read modes first with panel_get_graph: if the intended path is bypassed/muted, fix it HERE before running, and never assume a switch/route is already active. Undoable with Ctrl+Z.",
+      {
+        node_id: z.number().int().describe("Node id from panel_get_graph."),
+        mode: z
+          .enum(["active", "bypass", "mute"])
+          .describe(
+            "'active' = runs normally; 'bypass' = skipped, passes input through (downstream still runs); 'mute' = node and everything downstream do not execute.",
+          ),
+      },
+      async (args: A, ctx) =>
+        ctx.call({ cmd: "graph_set_node_mode", node_id: args.node_id, mode: args.mode }),
     ),
     def(
       "panel_set_node_color",
