@@ -170,6 +170,7 @@ New tools that give every backend the same expertise and a cost guardrail:
 | `list_workflow_templates` | List the connected ComfyUI's official workflow templates (the templates package + custom-node-provided templates) |
 | `check_workflow_runtime` | Classify a workflow as **local** (your GPU, free) or **api** / **mixed** / **unknown** (hosted API nodes = paid credits) so the agent asks before spending paid API credits |
 | `panel_load_workflow` | (panel tool) Load a full workflow onto the live canvas in one shot — by bundled `pack` name (read server-side, never shuttled through chat) or by graph JSON |
+| `panel_strip_workflow` / `panel_slice_workflow` | (panel tools) De-virtualize a tangled graph (Get/Set buses, Reroutes, subgraphs, bypass → real connections) or carve one rgthree-toggled pipeline out of a monolith — by `pack`, server-side `path`, or inline graph; for understanding/rebuilding expert workflows without hand-tracing |
 
 See the design doc — **[docs/design/agent-backend-injection.md](docs/design/agent-backend-injection.md)** —
 for the port, the capability matrix, and the per-provider "clink" points, and the
@@ -251,6 +252,8 @@ for the port, the capability matrix, and the per-provider "clink" points, and th
 |------|-------------|
 | `list_workflows` | List saved workflows from ComfyUI's user library |
 | `get_workflow` | Load a specific saved workflow by filename |
+| `strip_workflow` | **De-virtualize** any workflow (absolute path, library filename, or inline graph) — resolve GetNode/SetNode buses, Reroutes, subgraph defs, and bypassed nodes into real connections and return the flat graph. Reads ANY path server-side, so it loads ad-hoc/expert workflows the cached library can't. |
+| `slice_workflow` | **Un-chunk** a toggle-template monolith — slice ONE rgthree Fast-Groups-Bypass-toggled pipeline out into a standalone activated graph (seed from the named groups' output nodes, backward-closure, un-bypass). Pair with `strip_workflow` to then flatten the buses. |
 | `save_workflow` | Save a workflow to the ComfyUI user library |
 
 ### Image Management
@@ -664,6 +667,8 @@ src/
     workflow-validator.ts  # Dry-run validation (missing nodes, models, connections)
     image-management.ts    # Upload images, extract PNG metadata, list outputs
     mermaid-converter.ts   # Workflow → Mermaid diagram
+    workflow-converter.ts  # UI → API: de-virtualize Get/Set buses + Reroutes, expand subgraphs, resolve bypass (powers strip_workflow)
+    workflow-slicer.ts     # sliceWorkflow() — rgthree Fast-Groups-Bypass pipeline un-chunker (shared by the CLI + slice_workflow)
     mermaid-parser.ts      # Mermaid diagram → Workflow
     model-resolver.ts      # HuggingFace search, local models, downloads
     generation-tracker.ts  # SQLite generation log, settings dedup, stats
@@ -678,7 +683,7 @@ src/
     workflow-visualize.ts  # visualize_workflow, mermaid_to_workflow
     workflow-compose.ts    # create_workflow, modify_workflow, get_node_info
     workflow-validate.ts   # validate_workflow
-    workflow-library.ts    # list_workflows, get_workflow, save_workflow
+    workflow-library.ts    # list_workflows, get_workflow, strip_workflow, slice_workflow, save_workflow
     image-management.ts    # upload_image, workflow_from_image, list_output_images
     model-management.ts    # search_models, download_model, list_local_models
     memory-management.ts   # clear_vram, get_embeddings

@@ -111,8 +111,8 @@ const CATEGORIES: Array<{
     group: "Workflow Library",
     slug: "workflow-library",
     icon: "folder-open",
-    description: "Save, load, analyze, and extract workflows.",
-    tools: ["list_workflows", "get_workflow", "save_workflow", "analyze_workflow", "workflow_from_image", "lock_workflow", "verify_workflow_lock"],
+    description: "Save, load, strip/slice, analyze, and extract workflows.",
+    tools: ["list_workflows", "get_workflow", "strip_workflow", "slice_workflow", "save_workflow", "analyze_workflow", "workflow_from_image", "lock_workflow", "verify_workflow_lock"],
   },
   {
     group: "Assets & Images",

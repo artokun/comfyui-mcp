@@ -1,10 +1,10 @@
 ---
 title: "Workflow Library"
-description: "Save, load, analyze, and extract workflows."
+description: "Save, load, strip/slice, analyze, and extract workflows."
 icon: "folder-open"
 ---
 
-<Info>7 tools. Generated from the live MCP tool schemas — do not edit by hand; run `npm run docs:gen`.</Info>
+<Info>9 tools. Generated from the live MCP tool schemas — do not edit by hand; run `npm run docs:gen`.</Info>
 
 ## list_workflows
 
@@ -34,7 +34,7 @@ Load a saved workflow and return its raw JSON. Use analyze_workflow instead if y
 <ParamField path="filename" type="string" required>
   Workflow filename (e.g. 'my_workflow.json'). Use list_workflows to see available files.
 </ParamField>
-<ParamField path="format" type="enum" default="api">
+<ParamField path="format" type="enum" required default="api">
   Output format: 'api' (default, recommended) converts to compact API format with named inputs, connection references, and _meta.mode flags for muted/bypassed nodes. 'ui' returns the raw UI format with layout positions and links arrays. Options: `ui`, `api`.
 </ParamField>
 
@@ -46,7 +46,76 @@ Load a saved workflow and return its raw JSON. Use analyze_workflow instead if y
 {
   "tool": "get_workflow",
   "arguments": {
-    "filename": "<filename>"
+    "filename": "<filename>",
+    "format": "ui"
+  }
+}
+```
+
+---
+
+## strip_workflow
+
+Strip a workflow to a clean, flat API graph — resolving Get/Set buses, Reroutes, subgraph definitions, and bypassed/muted nodes into real connections (the 'de-getter-setter' pass). Unlike get_workflow, this reads from ANY server-side file path on disk (not just the cached workflow library), so it loads ad-hoc / expert workflow files that workflow_list and panel_open_workflow can't resolve. Provide exactly one of: path, filename, or graph. Returns conversion warnings, a node-type summary, and the stripped graph (much smaller than the raw UI JSON).
+
+### Parameters
+
+<ParamField path="path" type="string">
+  Absolute server-side path to a workflow .json on disk (e.g. C:\\Users\\you\\ComfyUI\\user\\default\\workflows\\pusa_extend.json). Read directly from disk — no library lookup.
+</ParamField>
+<ParamField path="filename" type="string">
+  Workflow filename in the ComfyUI userdata library, as an alternative to path.
+</ParamField>
+<ParamField path="graph" type="object">
+  Inline UI-format workflow JSON, as an alternative to path/filename.
+</ParamField>
+<ParamField path="format" type="enum" required default="api">
+  'api' (default) strips to the flat resolved graph; 'raw' returns the file/graph unchanged. Options: `api`, `raw`.
+</ParamField>
+
+### Example
+
+<Note>Example coming soon — the call below is a generated skeleton.</Note>
+
+```json
+{
+  "tool": "strip_workflow",
+  "arguments": {
+    "format": "api"
+  }
+}
+```
+
+---
+
+## slice_workflow
+
+Slice ONE pipeline out of a toggle-template workflow — the kind built with rgthree 'Fast Groups Bypasser/Muter' where one graph holds many pipelines and only one is active at a time. Seeds from the output/SaveImage nodes in the named groups, takes their backward dependency closure (through real links AND virtual Set/Get buses), un-bypasses the kept nodes (and the internals of any subgraph defs they use), and returns a STANDALONE, activated UI graph carrying only the subgraph defs it uses. Reads from any server-side path, userdata filename, or inline graph. Pair with strip_workflow afterward to flatten the Set/Get buses into real connections.
+
+### Parameters
+
+<ParamField path="path" type="string">
+  Absolute server-side path to the workflow .json on disk.
+</ParamField>
+<ParamField path="filename" type="string">
+  Workflow filename in the ComfyUI userdata library.
+</ParamField>
+<ParamField path="graph" type="object">
+  Inline UI-format workflow JSON.
+</ParamField>
+<ParamField path="groups" type="string | string[]" required>
+  Group-title substrings (case-insensitive) whose output nodes seed the slice — CSV string or array, e.g. 'TEXT TO IMAGE,TXT' or ['extend','sampler']. Shared post-proc is pulled in via the closure.
+</ParamField>
+
+### Example
+
+<Note>Example coming soon — the call below is a generated skeleton.</Note>
+
+```json
+{
+  "tool": "slice_workflow",
+  "arguments": {
+    "groups": "<groups>"
   }
 }
 ```
@@ -91,7 +160,7 @@ Load a saved workflow and return a structured analysis — sections, node settin
 <ParamField path="filename" type="string" required>
   Workflow filename (e.g. 'Scene Builder v3.json'). Use list_workflows to see available files.
 </ParamField>
-<ParamField path="view" type="enum" default="summary">
+<ParamField path="view" type="enum" required default="summary">
   summary (default): structured text with sections, node IDs, key settings, virtual wires, and full connection graph — best for AI understanding. overview: mermaid diagram showing sections as summary nodes with cross-section data flow. detail: mermaid diagram for one section (requires section parameter). list: text listing of all sections with data flow summary. flat: single mermaid flowchart of the entire workflow (best for small workflows). Options: `summary`, `overview`, `detail`, `list`, `flat`.
 </ParamField>
 <ParamField path="section" type="string">
@@ -106,7 +175,8 @@ Load a saved workflow and return a structured analysis — sections, node settin
 {
   "tool": "analyze_workflow",
   "arguments": {
-    "filename": "<filename>"
+    "filename": "<filename>",
+    "view": "summary"
   }
 }
 ```

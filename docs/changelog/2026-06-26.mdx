@@ -1,0 +1,42 @@
+---
+title: "June 26: strip_workflow & slice_workflow — load any expert graph"
+description: "Two new workflow tools resolve GetNode/SetNode buses + Reroutes into real connections and un-chunk rgthree Fast-Groups-Bypass-toggled pipelines — so an agent can load an ad-hoc expert workflow from any path and get clean, runnable wiring without hand-tracing."
+---
+
+_June 26, 2026_
+
+Expert and community ComfyUI graphs are often unreadable to an agent: thick with
+**virtual wiring** (GetNode/SetNode buses, Reroutes) and **rgthree "Fast Groups
+Bypasser/Muter" toggled pipelines** (one graph holding several pipelines, only one
+active). Two new tools turn them into clean, runnable wiring.
+
+## `strip_workflow` — the de-virtualizer
+
+`strip_workflow` (and the panel `panel_strip_workflow`) reads a workflow from **any**
+server-side path, library filename, or inline graph and resolves Get/Set buses,
+Reroutes, subgraph definitions, and bypassed/muted nodes into **real connections** —
+returning the flat, runnable graph. Unlike `get_workflow` it isn't gated on the
+cached library, so it loads ad-hoc files the workflow list can't resolve. On a 155KB
+staged expert example it resolved every GetNode/SetNode/Reroute to 37 clean nodes,
+read server-side so the big graph never shuttles through chat.
+
+## `slice_workflow` — the un-chunker
+
+`slice_workflow` (panel `panel_slice_workflow`) carves ONE pipeline out of a
+toggle-template monolith: seed from the output nodes in the named groups, take the
+backward closure through links + Set/Get buses, un-bypass the kept nodes and their
+subgraph internals, and return a standalone activated graph. Pair it with
+`strip_workflow` to then flatten the buses — together they turn an ULTRA-style
+monolith into a single clean pipeline without hand-rebuilding. The
+`scripts/slice-pipeline.mjs` CLI now runs on the same shared `sliceWorkflow()`
+service, so the tool and the pack-building pipeline can't drift.
+
+## Under the hood
+
+Both ride on a hardened UI→API converter — the recurring "graph silently produces
+nothing" class is gone: rgthree Power Lora Loader loras now translate (they were
+being dropped), invalid combo values fall back to the object_info default, and
+type-mismatched links are dropped instead of failing the whole output branch. The
+panel agent's system prompt now says when to reach for each: **`strip`** to read or
+rebuild a tangled graph, **`slice`** first when a monolith bundles several toggled
+pipelines.
