@@ -1,0 +1,43 @@
+# WAN 2.2 Video Extend (Pusa) install manifest — consumable by apply_manifest.
+# Temporal video EXTENSION with Pusa V1 on the ComfyUI-WanVideoWrapper stack:
+# WAN 2.2 T2V A14B (HIGH/LOW) fp8 + Pusa V1 LoRAs + lightx2v distill, the
+# flowmatch_pusa scheduler + WanVideoAddPusaNoise, conditioning on the loaded
+# clip via WanVideoEncode, with a ColorMatchV2 seam-regrade. Skill: video-extend.
+#
+# NOTE: the T2V A14B UNets, UMT5 encoder and WAN VAE are SHARED with
+# wan-t2v-video — if you installed that pack you already have them (apply_manifest
+# skips files that already exist). The only Pusa-specific pulls are the two Pusa
+# V1 LoRAs (~1.9 GB).
+
+pip: []
+
+custom_nodes:
+  - https://github.com/ltdrdata/ComfyUI-Manager.git
+  - https://github.com/kijai/ComfyUI-WanVideoWrapper         # WanVideo* (model loader / sampler / encode / AddPusaNoise / scheduler / text encode)
+  - https://github.com/kijai/ComfyUI-KJNodes                 # ColorMatchV2, ImageResizeKJv2, GetImageRangeFromBatch, CreateScheduleFloatList, GetLatentSizeAndCount, ImageBatchMulti/ImageConcatMulti, Get/SetNode
+  - https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite  # VHS_LoadVideo / VHS_VideoCombine
+
+models:
+  # --- Text encoder (UMT5, bf16 — WanVideoTextEncodeCached REJECTS fp8_scaled) ---
+  - url: https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/umt5-xxl-enc-bf16.safetensors
+    local_path: text_encoders/umt5-xxl-enc-bf16.safetensors
+
+  # --- VAE ---
+  - url: https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors
+    local_path: vae/wan_2.1_vae.safetensors
+
+  # --- UNets: WAN 2.2 T2V A14B fp8 (SHARED with wan-t2v-video — skip if present) ---
+  - url: https://huggingface.co/Kijai/WanVideo_comfy_fp8_scaled/resolve/main/T2V/Wan2_2-T2V-A14B_HIGH_fp8_e4m3fn_scaled_KJ.safetensors
+    local_path: diffusion_models/Wan2_2-T2V-A14B_HIGH_fp8_e4m3fn_scaled_KJ.safetensors
+  - url: https://huggingface.co/Kijai/WanVideo_comfy_fp8_scaled/resolve/main/T2V/Wan2_2-T2V-A14B-LOW_fp8_e4m3fn_scaled_KJ.safetensors
+    local_path: diffusion_models/Wan2_2-T2V-A14B-LOW_fp8_e4m3fn_scaled_KJ.safetensors
+
+  # --- Pusa V1 LoRAs (the ONLY Pusa-specific download, ~1.9 GB) ---
+  - url: https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/Pusa/Wan22_PusaV1_lora_HIGH_resized_dynamic_avg_rank_98_bf16.safetensors
+    local_path: loras/WanVideo/Pusa/Wan22_PusaV1_lora_HIGH_resized_dynamic_avg_rank_98_bf16.safetensors
+  - url: https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/Pusa/Wan22_PusaV1_lora_LOW_resized_dynamic_avg_rank_98_bf16.safetensors
+    local_path: loras/WanVideo/Pusa/Wan22_PusaV1_lora_LOW_resized_dynamic_avg_rank_98_bf16.safetensors
+
+  # --- Speed LoRA (lightx2v T2V distill — enables 6-step / cfg 1) ---
+  - url: https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/Lightx2v/lightx2v_T2V_14B_cfg_step_distill_v2_lora_rank128_bf16.safetensors
+    local_path: loras/lightx2v_T2V_14B_cfg_step_distill_v2_lora_rank128_bf16.safetensors

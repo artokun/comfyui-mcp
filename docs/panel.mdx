@@ -1,6 +1,6 @@
 ---
 title: "Sidebar Panel"
-description: "ComfyUI Agent Panel — an autonomous AI agent in ComfyUI's sidebar that drives your canvas, now on EITHER Claude or ChatGPT (your own subscription, no API key). Available on the Comfy Registry as comfyui-agent-panel."
+description: "ComfyUI Agent Panel — an autonomous AI agent in ComfyUI's sidebar that drives your canvas, now on EITHER Claude or ChatGPT (Codex / GPT-5) on your own subscription, no API key. Available on the Comfy Registry as comfyui-agent-panel."
 icon: "comments"
 ---
 
@@ -185,7 +185,7 @@ credits (same tools on both backends — see
 
 | Tool | Effect |
 |---|---|
-| `panel_add_mcp` / `panel_remove_mcp` | Connect / remove an MCP server in the user's Claude config |
+| `panel_add_mcp` / `panel_remove_mcp` | Connect / remove an MCP server in the user's agent MCP config (Claude or Codex) |
 | `panel_request_secret` | Securely collect an API token — the agent never sees the value |
 | `panel_reload` | Soft-reload the orchestrator (new code/tools) or the panel UI, then resume |
 
@@ -233,7 +233,7 @@ chat flow. Each pending message has **edit**, **send-now**, and **delete**
 buttons, and a drag handle (≡, on the left) to **reorder** how the agent flushes
 them. **Send-now** interrupts the current turn to steer it immediately. When a
 pending message is dequeued it materializes at the **bottom** of the chat, so the
-transcript reads in the exact order Claude processed it.
+transcript reads in the exact order the agent (Claude or ChatGPT) processed it.
 
 ## Destructive-op confirmation
 

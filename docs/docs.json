@@ -162,7 +162,12 @@
     }
   },
   "seo": {
-    "indexing": "all"
+    "indexing": "all",
+    "metatags": {
+      "og:image": "/images/og.png",
+      "twitter:image": "/images/og.png",
+      "twitter:card": "summary_large_image"
+    }
   },
   "keywords": [
     "ComfyUI",

@@ -1,0 +1,51 @@
+name: wan-pusa-extend
+display_name: WAN 2.2 Video Extend — Pusa (temporal)
+family: wan
+kind: video
+description: >-
+  Temporally EXTEND / continue an existing clip with Pusa 2.2 on the
+  ComfyUI-WanVideoWrapper stack. The loaded clip is VAE-encoded
+  (WanVideoEncode) and injected as the FIRST latents; the flowmatch_pusa
+  scheduler + WanVideoAddPusaNoise hold those conditioning frames near-clean
+  while generating the tail, so the existing motion, subject, camera and color
+  carry across the seam (no I2V freeze-then-restart). WAN 2.2 T2V A14B HIGH/LOW
+  fp8 + Pusa V1 hi/lo LoRAs + lightx2v distill (6-step, cfg 1, two-pass). Ships
+  with a ColorMatchV2 seam-regrade so the generated tail doesn't saturate, and
+  attention_mode=sdpa so it runs without SageAttention/triton.
+vram: >-
+  24GB+ (dual A14B fp8 + Pusa LoRAs, block swap on, 81 frames @832x480).
+  12-16GB: heavier WanVideoBlockSwap + tiled VAE encode/decode + 49 frames.
+workflow: workflow.json
+skill: video-extend
+sources:
+  wanvideowrapper: https://github.com/kijai/ComfyUI-WanVideoWrapper
+  reference_graph: ComfyUI-WanVideoWrapper/example_workflows/wanvideo_2_2_14B_Pusa_extension_example_01.json
+  pusa_loras: https://huggingface.co/Kijai/WanVideo_comfy/tree/main/Pusa
+  pusa_upstream: https://huggingface.co/RaphaelLiu/PusaV1
+notes:
+  - The T2V A14B UNets, UMT5 encoder and WAN VAE are SHARED with wan-t2v-video —
+    if you have that pack you already have them (apply_manifest skips existing
+    files). Only the two Pusa V1 LoRAs (~1.9 GB) are Pusa-specific.
+  - Set VHS_LoadVideo to your own clip (the bundled graph points at a placeholder).
+  - "fps seam — if your clip was frame-interpolated (e.g. RIFE'd to 32/50 fps),
+    set VHS_LoadVideo.force_rate=16 so the conditioning cadence matches WAN-native;
+    otherwise the encoded past runs at 2-3x pace and the seam speed-jumps. Best:
+    extend the pre-interpolation 16fps master, then upscale/interpolate the
+    combined result."
+  - "Runs on attention_mode=sdpa with no torch.compile — no SageAttention/triton
+    needed. To accelerate, install them and switch the WanVideoModelLoaders to
+    sageattn + re-attach WanVideoTorchCompileSettings (see triton-sageattention)."
+  - "merge_loras=false on the WanVideoLoraSelectMulti nodes — REQUIRED on fp8
+    models; merge_loras=true hard-crashes ComfyUI during LoRA load."
+  - "Seam color/saturation drift is fixed by a ColorMatchV2 (hm-mkl-hm) that
+    re-grades the generated frames to the source clip's palette, plus base
+    precision bf16 (not fp16_fast)."
+  - "Action latitude vs. fidelity: dial CreateScheduleFloatList end_value (the
+    noise_multipliers ramp top). ~0.2 clings tightly to the source; ~0.35 frees a
+    new action (e.g. turn + smile); too high drifts identity/scene."
+  - "Chain for longer video: feed the tail of the NEW output back into
+    WanVideoEncode and re-run; color-match each hop to the previous to stop
+    drift compounding."
+post_install:
+  - Restart ComfyUI (or ComfyUI-Manager -> Install missing custom nodes).
+  - Load workflow.json, point VHS_LoadVideo at your clip, run.
