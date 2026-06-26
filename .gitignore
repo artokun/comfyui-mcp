@@ -14,3 +14,6 @@ workflows/
 .dolt/
 *.db
 .beads-credential-key
+
+/models/
+panel-load-smoke-orch.log
