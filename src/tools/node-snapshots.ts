@@ -67,8 +67,9 @@ export function registerNodeSnapshotsTools(server: McpServer): void {
     async () => {
       try {
         const result = await listNodeSnapshots();
-        const text =
-          result.snapshots.length === 0
+        const text = result.unsupported
+          ? (result.message ?? "Node snapshots are not supported on this ComfyUI-Manager build.")
+          : result.snapshots.length === 0
             ? "No node snapshots found."
             : `Available node snapshots (${result.snapshots.length}):\n` +
               result.snapshots.map((s) => `- ${s}`).join("\n");

@@ -1,9 +1,9 @@
 import { lstat, mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import sharp from "sharp";
-import { config } from "../config.js";
 import { AssetRegistry } from "./asset-registry.js";
 import { getOutputImage } from "./image-management.js";
+import { resolveOutputDir } from "./output-dir.js";
 import { ValidationError } from "../utils/errors.js";
 
 export type ConvertImageFormat = "png" | "jpeg" | "webp";
@@ -47,13 +47,11 @@ const SUPPORTED_SOURCE_MIME = /^image\/(png|jpe?g|webp)$/i;
 const DEFAULT_MAX_SOURCE_BYTES = 64 * 1024 * 1024;
 const DEFAULT_LIMIT_INPUT_PIXELS = 100_000_000;
 
-function getOutputDir(): string {
-  if (!config.comfyuiPath) {
-    throw new ValidationError(
-      "COMFYUI_PATH is not configured. Set the COMFYUI_PATH environment variable.",
-    );
-  }
-  return resolve(config.comfyuiPath, "output");
+// Resolve ComfyUI's REAL output directory (honors --output-directory /
+// --base-directory redirects via /system_stats), falling back to
+// <COMFYUI_PATH>/output. Async because it may query the running ComfyUI.
+async function getOutputDir(): Promise<string> {
+  return resolveOutputDir();
 }
 
 function parsePositiveIntEnv(name: string, fallback: number): number {
@@ -77,12 +75,12 @@ function limitInputPixels(): number {
   );
 }
 
-function resolveOutputPath(path: string, label: string): string {
+async function resolveOutputPath(path: string, label: string): Promise<string> {
   if (path.trim().length === 0) {
     throw new ValidationError(`${label} must be a non-empty path.`);
   }
 
-  const outputDir = getOutputDir();
+  const outputDir = await getOutputDir();
   const resolved = isAbsolute(path) ? resolve(path) : resolve(outputDir, path);
   if (resolved === outputDir || !resolved.startsWith(outputDir + sep)) {
     throw new ValidationError(`${label} must stay within the ComfyUI output directory.`);
@@ -91,7 +89,7 @@ function resolveOutputPath(path: string, label: string): string {
 }
 
 async function realOutputRoot(): Promise<string> {
-  return realpath(getOutputDir());
+  return realpath(await getOutputDir());
 }
 
 function isInsideOrEqual(root: string, candidate: string): boolean {
@@ -115,7 +113,7 @@ async function validateExistingOutputAncestors(
   parent: string,
   label: string,
 ): Promise<void> {
-  const outputDir = getOutputDir();
+  const outputDir = await getOutputDir();
   let cursor = parent;
   while (cursor !== outputDir && cursor.startsWith(outputDir + sep)) {
     try {
@@ -135,7 +133,7 @@ async function validateExistingOutputAncestors(
 }
 
 async function resolveSourcePath(path: string): Promise<{ path: string; size: number }> {
-  const lexicalPath = resolveOutputPath(path, "path");
+  const lexicalPath = await resolveOutputPath(path, "path");
   const root = await realOutputRoot();
   const sourcePath = await realpath(lexicalPath).catch(() => undefined);
   if (!sourcePath) {
@@ -157,7 +155,7 @@ async function resolveSourcePath(path: string): Promise<{ path: string; size: nu
 }
 
 async function resolveWritableOutputPath(path: string): Promise<string> {
-  const targetPath = resolveOutputPath(path, "out_path");
+  const targetPath = await resolveOutputPath(path, "out_path");
   const root = await realOutputRoot();
   const parent = dirname(targetPath);
   await validateExistingOutputAncestors(root, parent, "out_path");

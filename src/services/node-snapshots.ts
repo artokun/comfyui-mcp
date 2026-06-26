@@ -23,15 +23,39 @@ export interface SaveSnapshotResult {
   name: string;
   method: "http" | "file";
   message: string;
+  unsupported?: boolean;
 }
 
 export interface RestoreSnapshotResult {
   name: string;
   message: string;
+  unsupported?: boolean;
 }
 
 export interface ListSnapshotsResult {
   snapshots: string[];
+  unsupported?: boolean;
+  message?: string;
+}
+
+// Shown when this ComfyUI-Manager build doesn't expose the /snapshot/* HTTP
+// API at all (common on the bundled ComfyUI Desktop Manager): every snapshot
+// endpoint 404s. Report it as an unsupported-capability result, not a crash.
+const SNAPSHOTS_UNSUPPORTED_MESSAGE =
+  "Node snapshots aren't supported on this ComfyUI-Manager build — its HTTP API " +
+  "doesn't expose the /snapshot/* endpoints (common on the bundled ComfyUI Desktop " +
+  "Manager). Update ComfyUI-Manager to a build that supports snapshots, or manage " +
+  "snapshots from the ComfyUI-Manager UI / comfy-cli instead.";
+
+/**
+ * True when an error indicates the Manager build simply lacks the snapshot
+ * endpoint (404), as opposed to a transient/server-side failure (e.g. 500) or
+ * a network error, which should still surface.
+ */
+function isSnapshotEndpointUnsupported(err: unknown): boolean {
+  if (!(err instanceof NodeSnapshotError)) return false;
+  const status = (err.details as { status?: number } | undefined)?.status;
+  return status === 404 || status === 405 || status === 501;
 }
 
 function managerBaseUrl(): string {
@@ -145,15 +169,28 @@ function snapshotToYaml(snapshot: unknown): string {
   return `custom_nodes:${toYaml(snapshot, 1)}\n`;
 }
 
-/** GET /snapshot/getlist */
-export async function listNodeSnapshots(): Promise<ListSnapshotsResult> {
+/** GET /snapshot/getlist — raw fetch + parse; throws on any non-2xx. */
+async function fetchSnapshotList(): Promise<string[]> {
   const res = await managerFetch("/snapshot/getlist");
   const data = (await res.json()) as { items?: unknown };
-  const items = Array.isArray(data.items)
+  return Array.isArray(data.items)
     ? data.items.filter((x): x is string => typeof x === "string")
     : [];
-  logger.info(`Listed ${items.length} node snapshot(s)`);
-  return { snapshots: items };
+}
+
+/** GET /snapshot/getlist */
+export async function listNodeSnapshots(): Promise<ListSnapshotsResult> {
+  try {
+    const items = await fetchSnapshotList();
+    logger.info(`Listed ${items.length} node snapshot(s)`);
+    return { snapshots: items };
+  } catch (err) {
+    if (isSnapshotEndpointUnsupported(err)) {
+      logger.info("Snapshot listing unsupported on this ComfyUI-Manager build");
+      return { snapshots: [], unsupported: true, message: SNAPSHOTS_UNSUPPORTED_MESSAGE };
+    }
+    throw err;
+  }
 }
 
 /**
@@ -172,16 +209,29 @@ export async function saveNodeSnapshot(
 
   if (!trimmed) {
     // HTTP-only path — Manager assigns a timestamped name.
-    const before = new Set((await listNodeSnapshots()).snapshots);
-    await managerFetch("/snapshot/save", { method: "POST" });
-    const after = (await listNodeSnapshots()).snapshots;
-    const created = after.find((n) => !before.has(n));
-    const resolved = created ?? after[0] ?? "(unknown)";
-    return {
-      name: resolved,
-      method: "http",
-      message: `Saved snapshot "${resolved}" via ComfyUI-Manager.`,
-    };
+    try {
+      const before = new Set(await fetchSnapshotList());
+      await managerFetch("/snapshot/save", { method: "POST" });
+      const after = await fetchSnapshotList();
+      const created = after.find((n) => !before.has(n));
+      const resolved = created ?? after[0] ?? "(unknown)";
+      return {
+        name: resolved,
+        method: "http",
+        message: `Saved snapshot "${resolved}" via ComfyUI-Manager.`,
+      };
+    } catch (err) {
+      if (isSnapshotEndpointUnsupported(err)) {
+        logger.info("Snapshot save unsupported on this ComfyUI-Manager build");
+        return {
+          name: "",
+          method: "http",
+          message: SNAPSHOTS_UNSUPPORTED_MESSAGE,
+          unsupported: true,
+        };
+      }
+      throw err;
+    }
   }
 
   // Named snapshot — requires a local install to write the file.
@@ -195,7 +245,21 @@ export async function saveNodeSnapshot(
   }
 
   // Capture current state from the running instance via the Manager API.
-  const res = await managerFetch("/snapshot/get_current");
+  let res: Response;
+  try {
+    res = await managerFetch("/snapshot/get_current");
+  } catch (err) {
+    if (isSnapshotEndpointUnsupported(err)) {
+      logger.info("Snapshot capture unsupported on this ComfyUI-Manager build");
+      return {
+        name: trimmed,
+        method: "file",
+        message: SNAPSHOTS_UNSUPPORTED_MESSAGE,
+        unsupported: true,
+      };
+    }
+    throw err;
+  }
   const snapshot = await res.json();
 
   // Honor the comfy-cli contract: the file FORMAT is chosen by extension.
@@ -237,11 +301,19 @@ export async function restoreNodeSnapshot(
   // The Manager stores names without the .json suffix; tolerate either.
   const target = trimmed.endsWith(".json") ? trimmed.slice(0, -5) : trimmed;
 
-  await managerFetch("/snapshot/restore", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ target }),
-  });
+  try {
+    await managerFetch("/snapshot/restore", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target }),
+    });
+  } catch (err) {
+    if (isSnapshotEndpointUnsupported(err)) {
+      logger.info("Snapshot restore unsupported on this ComfyUI-Manager build");
+      return { name: target, message: SNAPSHOTS_UNSUPPORTED_MESSAGE, unsupported: true };
+    }
+    throw err;
+  }
 
   logger.info(`Requested restore of node snapshot "${target}"`);
   return {

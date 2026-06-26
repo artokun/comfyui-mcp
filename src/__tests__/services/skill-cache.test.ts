@@ -175,6 +175,25 @@ describe("generateSkillCached", () => {
     expect(hit.markdown).toBe("# Refreshed Skill");
   });
 
+  it("does not crash on a bare registry id when latest_version is an object (the 'value.toLowerCase is not a function' bug)", async () => {
+    // Simulate the raw registry shape leaking through: latest_version as an
+    // object. resolveVersion must not pass a non-string into safeSegment().
+    getNodePackDetailsMock.mockResolvedValue({
+      latest_version: { version: "8.28.3", changelog: "" },
+      versions: [{ version: "8.28.3" }],
+    });
+
+    const result = await generateSkillCached("comfyui-impact-pack");
+
+    expect(result.cacheHit).toBe(false);
+    expect(result.markdown).toBe("# Generated Skill");
+    // The key point: a usable string version, never an object stringified to
+    // "[object Object]", and no thrown TypeError.
+    expect(typeof result.metadata.version).toBe("string");
+    expect(result.metadata.version).not.toContain("[object Object]");
+    expect(typeof result.safeKey).toBe("string");
+  });
+
   it("falls back to normal generation when cache reads or writes fail", async () => {
     fsMock.readFile.mockRejectedValueOnce(new Error("read denied"));
     fsMock.writeFile.mockRejectedValue(new Error("write denied"));

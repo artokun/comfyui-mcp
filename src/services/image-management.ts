@@ -3,6 +3,7 @@ import { join, basename, extname } from "node:path";
 import { config } from "../config.js";
 import { ValidationError, ModelError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
+import { resolveOutputDir } from "./output-dir.js";
 
 function getInputDir(): string {
   if (!config.comfyuiPath) {
@@ -11,15 +12,6 @@ function getInputDir(): string {
     );
   }
   return join(config.comfyuiPath, "input");
-}
-
-function getOutputDir(): string {
-  if (!config.comfyuiPath) {
-    throw new ValidationError(
-      "COMFYUI_PATH is not configured. Set the COMFYUI_PATH environment variable.",
-    );
-  }
-  return join(config.comfyuiPath, "output");
 }
 
 /**
@@ -189,7 +181,7 @@ export async function listOutputImages(options?: {
   limit?: number;
   pattern?: string;
 }): Promise<OutputImage[]> {
-  const outputDir = getOutputDir();
+  const outputDir = await resolveOutputDir();
   const limit = options?.limit ?? 20;
   const pattern = options?.pattern?.toLowerCase();
 

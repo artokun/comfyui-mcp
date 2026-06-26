@@ -5,6 +5,7 @@ import type { WorkflowJSON } from "../comfyui/types.js";
 import {
   diffLocks,
   generateLock,
+  parseWorkflowLock,
   type WorkflowLock,
 } from "../services/workflow-lock.js";
 import { errorToToolResult, ValidationError } from "../utils/errors.js";
@@ -19,17 +20,24 @@ async function loadWorkflowFromLibrary(filename: string): Promise<WorkflowJSON> 
   return (await res.json()) as WorkflowJSON;
 }
 
-async function loadLockFromLibrary(filename: string): Promise<WorkflowLock> {
+/**
+ * Load a workflow's lock from the user library. Returns null when no lock is
+ * present — either a 404, or (seen on some builds) a 200 with an empty body.
+ * Only a genuinely malformed JSON body throws.
+ */
+async function loadLockFromLibrary(filename: string): Promise<WorkflowLock | null> {
   const lockName = `${filename}.lock.json`;
   const client = getClient();
   const encoded = encodeURIComponent(`workflows/${lockName}`);
   const res = await client.fetchApi(`/api/userdata/${encoded}`);
+  if (res.status === 404) return null;
   if (!res.ok) {
     throw new ValidationError(
-      `No lock found for "${filename}". Run lock_workflow first to create one.`,
+      `Failed to read lock for "${filename}": ${res.status} ${res.statusText}.`,
     );
   }
-  return (await res.json()) as WorkflowLock;
+  const text = await res.text().catch(() => "");
+  return parseWorkflowLock(text);
 }
 
 async function saveLockToLibrary(filename: string, lock: WorkflowLock): Promise<void> {
@@ -96,6 +104,21 @@ export function registerWorkflowLockTools(server: McpServer): void {
           loadWorkflowFromLibrary(args.filename),
           loadLockFromLibrary(args.filename),
         ]);
+
+        if (!lock) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text:
+                  `No lock present for "${args.filename}" — there is nothing to verify yet. ` +
+                  `Run lock_workflow on "${args.filename}" first to create ` +
+                  `"${args.filename}.lock.json", then verify_workflow_lock will report drift against it.`,
+              },
+            ],
+          };
+        }
+
         const current = await generateLock(workflow);
         const drift = diffLocks(lock, current);
         const driftCount =

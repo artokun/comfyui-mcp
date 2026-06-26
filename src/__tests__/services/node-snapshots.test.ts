@@ -101,6 +101,46 @@ describe("listNodeSnapshots", () => {
     fetchMock.mockRejectedValueOnce(new Error("ECONNREFUSED"));
     await expect(listNodeSnapshots()).rejects.toBeInstanceOf(NodeSnapshotError);
   });
+
+  it("returns a graceful 'unsupported' result on 404 (Manager build lacks /snapshot/*)", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({}, false, 404));
+    const result = await listNodeSnapshots();
+    expect(result.unsupported).toBe(true);
+    expect(result.snapshots).toEqual([]);
+    expect(result.message).toMatch(/aren't supported/i);
+  });
+});
+
+describe("snapshot family graceful 404 (unsupported Manager build)", () => {
+  it("save (no name) returns unsupported instead of throwing on a 404", async () => {
+    // First call is the before-list getlist → 404.
+    fetchMock.mockResolvedValueOnce(jsonResponse({}, false, 404));
+    const result = await saveNodeSnapshot();
+    expect(result.unsupported).toBe(true);
+    expect(result.message).toMatch(/aren't supported/i);
+  });
+
+  it("save (named) returns unsupported when get_current 404s", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({}, false, 404));
+    const result = await saveNodeSnapshot("prod-baseline");
+    expect(result.unsupported).toBe(true);
+    expect(result.method).toBe("file");
+    // No file is written on the unsupported path.
+    expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
+  });
+
+  it("restore returns unsupported instead of throwing on a 404", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({}, false, 404));
+    const result = await restoreNodeSnapshot("prod");
+    expect(result.unsupported).toBe(true);
+    expect(result.name).toBe("prod");
+    expect(result.message).toMatch(/aren't supported/i);
+  });
+
+  it("still throws on a genuine 500 (not an unsupported endpoint)", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({}, false, 500));
+    await expect(restoreNodeSnapshot("prod")).rejects.toBeInstanceOf(NodeSnapshotError);
+  });
 });
 
 describe("saveNodeSnapshot (no name — HTTP path)", () => {
