@@ -25,7 +25,7 @@
 
 import { z } from "zod";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { parse as parseYaml } from "yaml";
@@ -39,6 +39,9 @@ import {
   setUserMcpServerSecret,
 } from "../services/user-mcp-config.js";
 import { getNsfwConsent, setNsfwConsent } from "../services/panel-settings.js";
+import { getObjectInfo, backfillObjectInfo } from "../comfyui/client.js";
+import { convertUiToApi, collectNodeTypes } from "../services/workflow-converter.js";
+import type { UiWorkflow } from "../comfyui/types.js";
 
 /** Treat these as an affirmative answer to the adult-content consent card. */
 function isAffirmative(reply: unknown): boolean {
@@ -123,6 +126,78 @@ function readPackWorkflow(packName: string): Record<string, unknown> {
   }
   if (!parsed || typeof parsed !== "object") {
     throw new Error(`Pack "${name}" workflow.json did not parse to an object.`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
+// ---- server-side ARBITRARY workflow.json resolution (for panel_load_workflow path) ----
+// Read a workflow JSON file off the ORCHESTRATOR's local disk so a large graph
+// (e.g. a 159KB staged example) never has to shuttle through the agent's chat
+// context. The agent passes a path; we read+parse here, then load via graph_load —
+// the same server-side-read pattern as the `pack` option.
+//
+// REMOTE-COMFYUI CAVEAT: this reads the ORCHESTRATOR's filesystem. For the panel
+// the orchestrator runs LOCAL to ComfyUI (same machine), so a path under the
+// ComfyUI workflows dir always resolves. It does NOT work against a remote
+// ComfyUI whose files the orchestrator can't see — use the inline `graph` option
+// for that.
+
+/** Candidate ComfyUI workflows directories (where the frontend saves/stages files). */
+function comfyWorkflowsDirs(): string[] {
+  const base = process.env.COMFYUI_PATH;
+  if (!base) return [];
+  return [
+    join(base, "user", "default", "workflows"),
+    join(base, "user", "workflows"),
+  ];
+}
+
+/** Read + parse a UI workflow JSON from disk by path. Resolves an absolute path,
+ *  OR a path relative to a ComfyUI workflows dir (COMFYUI_PATH/user/default/workflows,
+ *  then user/workflows). Guards: must be .json, must exist/be readable, and must
+ *  parse to a UI workflow (a top-level `nodes` array). */
+function readWorkflowFromPath(rawPath: string): Record<string, unknown> {
+  const p = (rawPath ?? "").trim();
+  if (!p) throw new Error("Provide a non-empty `path` to a workflow .json file.");
+  if (!/\.json$/i.test(p)) {
+    throw new Error(`"${p}" is not a .json file — pass the path to a ComfyUI workflow JSON.`);
+  }
+
+  // Build the candidate absolute paths to try, in order.
+  const candidates: string[] = [];
+  if (isAbsolute(p)) {
+    candidates.push(resolve(p));
+  } else {
+    // Relative to each ComfyUI workflows dir (the common case — a just-staged file).
+    for (const dir of comfyWorkflowsDirs()) candidates.push(resolve(dir, p));
+    // Also relative to the orchestrator's CWD as a last resort.
+    candidates.push(resolve(process.cwd(), p));
+  }
+
+  const resolved = candidates.find((c) => existsSync(c) && statSync(c).isFile());
+  if (!resolved) {
+    const where = isAbsolute(p)
+      ? candidates[0]
+      : `the ComfyUI workflows dir (${comfyWorkflowsDirs().join(" or ") || "COMFYUI_PATH not set"}) or an absolute path`;
+    throw new Error(
+      `No workflow file at "${p}". Looked under ${where}. Pass an absolute path, or a name relative to the ComfyUI workflows folder.`,
+    );
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(resolved, "utf8"));
+  } catch (err) {
+    throw new Error(`"${resolved}" is not valid JSON: ${(err as Error).message}`);
+  }
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error(`"${resolved}" did not parse to a workflow object.`);
+  }
+  if (!Array.isArray((parsed as Record<string, unknown>).nodes)) {
+    throw new Error(
+      `"${resolved}" is not a UI workflow (missing a top-level \`nodes\` array). ` +
+        `Provide a UI/litegraph workflow JSON, not API/prompt format.`,
+    );
   }
   return parsed as Record<string, unknown>;
 }
@@ -272,17 +347,87 @@ export function buildPanelToolDefs(): PanelToolDef[] {
       },
     ),
     def(
+      "panel_strip_workflow",
+      "Strip a workflow to a clean, flat, RESOLVED graph — Get/Set buses, Reroutes, subgraph " +
+        "definitions, and bypassed/muted nodes all collapsed into real connections (the " +
+        "'de-getter-setter' pass). Takes the same input as panel_load_workflow — a `pack`, a server-side " +
+        "`path` (absolute or relative to the ComfyUI workflows folder), or an inline `graph` — but RETURNS " +
+        "the de-virtualized graph plus a node-type summary for INSPECTION / REBUILD instead of loading it " +
+        "onto the canvas. Use this to understand or rebuild an expert workflow's real wiring without the " +
+        "virtual nodes (e.g. a staged 150KB graph full of GetNode/SetNode/Reroute). The resolved graph is " +
+        "much smaller than the raw UI JSON and is read SERVER-SIDE.",
+      {
+        pack: z
+          .string()
+          .optional()
+          .describe("Bundled pack name (from list_packs) — its UI workflow.json is read server-side."),
+        path: z
+          .string()
+          .optional()
+          .describe(
+            "Path to a workflow .json on the ComfyUI machine's disk — absolute, or relative to the ComfyUI workflows folder (user/default/workflows). Local ComfyUI only.",
+          ),
+        graph: z
+          .union([z.string(), z.record(z.string(), z.unknown())])
+          .optional()
+          .describe("Inline UI workflow (object or JSON string) to strip instead of a pack/path."),
+      },
+      async (args: A) => {
+        let raw: Record<string, unknown>;
+        if (args.pack) {
+          raw = readPackWorkflow(args.pack as string);
+        } else if (args.path) {
+          raw = readWorkflowFromPath(args.path as string);
+        } else if (args.graph != null) {
+          raw = (typeof args.graph === "string"
+            ? JSON.parse(args.graph as string)
+            : args.graph) as Record<string, unknown>;
+        } else {
+          throw new Error("Provide exactly one of: pack, path, or graph.");
+        }
+
+        const ui = raw as unknown as UiWorkflow;
+        const bulk = await getObjectInfo();
+        const objectInfo = await backfillObjectInfo(bulk, collectNodeTypes(ui));
+        const { workflow, warnings } = convertUiToApi(ui, objectInfo);
+
+        const hist: Record<string, number> = {};
+        for (const node of Object.values(workflow)) {
+          const t = (node as { class_type?: string }).class_type ?? "?";
+          hist[t] = (hist[t] ?? 0) + 1;
+        }
+        const summary = Object.entries(hist)
+          .sort((a, b) => b[1] - a[1])
+          .map(([t, c]) => `${c}× ${t}`)
+          .join(", ");
+
+        return ok(
+          `Stripped to ${Object.keys(workflow).length} nodes` +
+            (warnings.length ? ` · ${warnings.length} warning(s)` : "") +
+            `\nNode types: ${summary}` +
+            (warnings.length
+              ? `\nWarnings:\n${warnings.map((w) => `- ${w}`).join("\n")}`
+              : "") +
+            `\n\n${JSON.stringify(workflow, null, 2)}`,
+        );
+      },
+    ),
+    def(
       "panel_load_workflow",
-      "Load a full ComfyUI workflow onto the live canvas in one shot (replaces the current graph). Prefer `pack:<name>` to load a bundled installer pack's local-GPU workflow without shuttling the JSON through the conversation. The replaced graph is captured as an undo point (double-Esc / revert). Pack workflows are LOCAL/free; for an ad-hoc `graph` that may use API nodes, check the runtime first (check_workflow_runtime) and ASK the user before spending paid api credits.",
+      "Load a full ComfyUI workflow onto the live canvas in one shot (replaces the current graph). Three ways to specify it: `pack:<name>` for a bundled installer pack's local-GPU workflow; `path:<file>` to read an arbitrary workflow .json off DISK server-side (absolute, or relative to the ComfyUI workflows folder) — use this to open a staged/downloaded example without shuttling its JSON through chat; or an inline `graph` object/JSON string. `pack` and `path` are read SERVER-SIDE so a large graph never enters your context. The replaced graph is captured as an undo point (double-Esc / revert). Pack workflows are LOCAL/free; for a `path`/`graph` that may use API nodes, check the runtime first (check_workflow_runtime) and ASK the user before spending paid api credits.",
       {
         pack: z
           .string()
           .optional()
           .describe("Bundled pack name (from list_packs, e.g. 'krea2-txt2img'). Its UI workflow.json is read server-side and loaded onto the canvas. These are local-GPU/free."),
+        path: z
+          .string()
+          .optional()
+          .describe("Path to a workflow .json on the ComfyUI machine's disk — absolute, or relative to the ComfyUI workflows folder (user/default/workflows). Read + parsed server-side and loaded onto the canvas (keeps a large JSON out of chat). Local ComfyUI only."),
         graph: z
           .union([z.string(), z.record(z.string(), z.unknown())])
           .optional()
-          .describe("A UI workflow graph (object or JSON string) to load instead of a pack. Must be UI/litegraph format (a `nodes` array), NOT API/prompt format."),
+          .describe("A UI workflow graph (object or JSON string) to load instead of a pack/path. Must be UI/litegraph format (a `nodes` array), NOT API/prompt format."),
       },
       async (args: A, ctx) => {
         try {
@@ -290,10 +435,14 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           if (args.pack) {
             // Read the (large) pack graph SERVER-SIDE so it never enters the agent's context.
             data = readPackWorkflow(args.pack as string);
+          } else if (args.path) {
+            // Read an arbitrary workflow JSON off the orchestrator's local disk —
+            // same server-side-read pattern as `pack`, keeping the big JSON out of chat.
+            data = readWorkflowFromPath(args.path as string);
           } else if (args.graph != null) {
             data = typeof args.graph === "string" ? JSON.parse(args.graph as string) : args.graph;
           } else {
-            throw new Error("Provide either `pack` (a bundled pack name) or `graph` (a UI workflow).");
+            throw new Error("Provide one of `pack` (a bundled pack name), `path` (a workflow .json on disk), or `graph` (a UI workflow).");
           }
           // Generous timeout — loading a large graph onto the live canvas can take a moment.
           return await ctx.call({ cmd: "graph_load", graph: data }, 30000);

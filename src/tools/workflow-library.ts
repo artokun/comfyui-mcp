@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { readFile } from "node:fs/promises";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { WorkflowJSON } from "../comfyui/types.js";
 import { getClient, getObjectInfo, backfillObjectInfo } from "../comfyui/client.js";
@@ -119,6 +120,98 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
               type: "text",
               text: JSON.stringify(raw, null, 2),
             },
+          ],
+        };
+      } catch (err) {
+        return errorToToolResult(err);
+      }
+    },
+  );
+
+  server.tool(
+    "strip_workflow",
+    "Strip a workflow to a clean, flat API graph — resolving Get/Set buses, Reroutes, " +
+      "subgraph definitions, and bypassed/muted nodes into real connections (the 'de-getter-setter' pass). " +
+      "Unlike get_workflow, this reads from ANY server-side file path on disk (not just the cached " +
+      "workflow library), so it loads ad-hoc / expert workflow files that workflow_list and " +
+      "panel_open_workflow can't resolve. Provide exactly one of: path, filename, or graph. Returns " +
+      "conversion warnings, a node-type summary, and the stripped graph (much smaller than the raw UI JSON).",
+    {
+      path: z
+        .string()
+        .optional()
+        .describe(
+          "Absolute server-side path to a workflow .json on disk (e.g. " +
+            "C:\\\\Users\\\\you\\\\ComfyUI\\\\user\\\\default\\\\workflows\\\\pusa_extend.json). Read directly from disk — no library lookup.",
+        ),
+      filename: z
+        .string()
+        .optional()
+        .describe("Workflow filename in the ComfyUI userdata library, as an alternative to path."),
+      graph: z
+        .record(z.string(), z.any())
+        .optional()
+        .describe("Inline UI-format workflow JSON, as an alternative to path/filename."),
+      format: z
+        .enum(["api", "raw"])
+        .optional()
+        .default("api")
+        .describe("'api' (default) strips to the flat resolved graph; 'raw' returns the file/graph unchanged."),
+    },
+    async ({ path, filename, graph, format }) => {
+      try {
+        const provided = [path, filename, graph].filter((v) => v != null).length;
+        if (provided !== 1) {
+          throw new ValidationError("Provide exactly one of: path, filename, or graph.");
+        }
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        let raw: any;
+        if (graph) {
+          raw = graph;
+        } else if (path) {
+          raw = JSON.parse(await readFile(path, "utf8"));
+        } else {
+          const client = getClient();
+          const encoded = encodeURIComponent(`workflows/${filename}`);
+          const res = await client.fetchApi(`/api/userdata/${encoded}`);
+          if (!res.ok) {
+            throw new ValidationError(`Workflow not found in library: ${filename} (${res.status})`);
+          }
+          raw = await res.json();
+        }
+
+        if (format === "raw" || !isUiFormat(raw)) {
+          return { content: [{ type: "text", text: JSON.stringify(raw, null, 2) }] };
+        }
+
+        const bulk = await getObjectInfo();
+        const objectInfo = await backfillObjectInfo(bulk, collectNodeTypes(raw));
+        const { workflow, warnings } = convertUiToApi(raw, objectInfo);
+
+        const hist: Record<string, number> = {};
+        for (const node of Object.values(workflow)) {
+          const t = (node as { class_type?: string }).class_type ?? "?";
+          hist[t] = (hist[t] ?? 0) + 1;
+        }
+        const summary = Object.entries(hist)
+          .sort((a, b) => b[1] - a[1])
+          .map(([t, c]) => `${c}× ${t}`)
+          .join(", ");
+
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `Stripped to ${Object.keys(workflow).length} nodes` +
+                (warnings.length ? ` · ${warnings.length} warning(s)` : "") +
+                `\nNode types: ${summary}` +
+                (warnings.length
+                  ? `\nWarnings:\n${warnings.map((w) => `- ${w}`).join("\n")}`
+                  : ""),
+            },
+            { type: "text", text: JSON.stringify(workflow, null, 2) },
           ],
         };
       } catch (err) {
