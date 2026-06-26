@@ -78,9 +78,10 @@ that matter for running it locally:
 - **Separate video and audio VAEs** (`LTX23_video_vae_bf16` and
   `LTX23_audio_vae_bf16`). Because the UNet is a bare GGUF, the VAE no longer
   comes "for free" with a checkpoint — you load it explicitly with `VAELoader`.
-- A **Gemma 3 12B** text encoder (`gemma_3_12B_it_fp4_mixed`, loaded via
-  `CLIPLoader` with `type: ltxv`), plus the enlarged **text-projection** file
-  new in 2.3 (`ltx-2.3_text_projection_bf16`).
+- A **Gemma 3 12B** text encoder (`gemma_3_12B_it_fp8_scaled`), loaded via the core
+  **`LTXAVTextEncoderLoader`** node — which bundles the gemma text encoder with
+  LTX-2.3's audio/text projection, so there's no separate `CLIPLoader` or
+  standalone `text_projection` file to wire.
 - A **distilled fast path**: apply the distilled LoRA
   (`ltx-2.3-22b-distilled-lora-384-1.1`) to the dev UNet for **8-step**
   generation, or run the dev model straight at **~20 steps** for higher quality.
