@@ -65,6 +65,21 @@ function isWidgetInput(
 }
 
 /**
+ * Whether an input spec is a POSITIONAL widget — one that occupies a slot in the
+ * UI's `widgets_values` array. Inline combos (`["a","b"]`), v3 dynamic combos
+ * (a string type carrying an `options` list), and the standard scalar widget
+ * types all qualify; link/list types (IMAGE, COMFY_AUTOGROW_V3, …) do not.
+ */
+function isPositionalWidgetSpec(spec: unknown): boolean {
+  if (!Array.isArray(spec)) return false;
+  const type = spec[0];
+  if (Array.isArray(type)) return true; // inline combo options
+  const cfg = spec[1] as { options?: unknown } | undefined;
+  if (Array.isArray(cfg?.options)) return true; // dynamic combo (options-carrying)
+  return ["INT", "FLOAT", "STRING", "BOOLEAN", "COMBO"].includes(String(type));
+}
+
+/**
  * Check if an input has control_after_generate in its spec config.
  * These inputs (like seed, noise_seed) have a phantom "fixed"/"randomize" widget
  * in the UI's widgets_values array that doesn't correspond to any named input.
@@ -834,8 +849,13 @@ export function convertUiToApi(
         // V3 dynamic-combo nested inputs are keyed with the combo's id as a
         // "<combo>.<nested>" prefix (ComfyUI rebuilds the nested dict from these
         // via dynamic_paths). A flat "<nested>" key is rejected as missing.
-        for (const nName of Object.keys(nested)) {
+        // Only POSITIONAL widget nested inputs consume a widgets_values slot —
+        // non-widget nested inputs (AUTOGROW lists like Nano Banana 2's
+        // "images", or IMAGE/link types) have no saved widget value, so skipping
+        // them keeps the positional mapping aligned.
+        for (const [nName, nSpec] of Object.entries(nested)) {
           if (widgetIdx >= widgetValues.length) break;
+          if (!isPositionalWidgetSpec(nSpec)) continue;
           inputs[`${name}.${nName}`] = widgetValues[widgetIdx];
           widgetIdx++;
         }
