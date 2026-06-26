@@ -1,0 +1,128 @@
+// Persisted TOOL secrets for the orchestrator's BUILT-IN comfyui MCP server.
+//
+// The orchestrator spawns the comfyui MCP server (this build, in normal/stdio
+// mode) as a subprocess with a FIXED env it controls (COMFYUI_URL, progress dir,
+// COMFYUI_PATH…). Tool secrets the user supplies at runtime through the panel —
+// e.g. a CivitAI API token for download_civitai_model, a HuggingFace token for
+// download_model — must reach THAT subprocess's env. They can't go into the
+// user's ~/.claude.json mcpServers map (user-mcp-config.ts), because that map is
+// for the user's OWN, inherited MCP servers; the built-in comfyui server doesn't
+// read it. So we persist them here, the orchestrator merges them into the comfyui
+// server's spawn env (buildComfyuiMcpEnv), and respawns the server so a live one
+// picks up the new value WITHOUT the user fighting reloads.
+//
+// SECURITY: the file holds raw secrets, so it is written 0600 (owner-only). The
+// raw value NEVER enters a log or the agent's chat context — callers pass it
+// straight from the panel's secure input, and only the env-var KEYS are ever
+// logged (see comfyuiSecretKeys()).
+
+import { EventEmitter } from "node:events";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
+import { logger } from "../utils/logger.js";
+
+interface PanelSecrets {
+  /** Env vars injected into the built-in comfyui MCP server's spawn env. */
+  comfyuiEnv?: Record<string, string>;
+}
+
+/** Secrets file path. Overridable for tests. */
+export function panelSecretsPath(): string {
+  return (
+    process.env.COMFYUI_MCP_PANEL_SECRETS ||
+    join(homedir(), ".comfyui-mcp", "panel-secrets.json")
+  );
+}
+
+// In-process change channel: the tool handler that saves a secret runs in the
+// SAME process as the orchestrator (both the in-process Claude panel server and
+// the Codex loopback HTTP MCP are hosted by the orchestrator), so a module-level
+// emitter is enough to tell the orchestrator to re-inject + respawn.
+const emitter = new EventEmitter();
+
+/** Subscribe to "a comfyui tool secret changed". Returns an unsubscribe fn. */
+export function onComfyuiSecretsChanged(cb: () => void): () => void {
+  emitter.on("change", cb);
+  return () => {
+    emitter.off("change", cb);
+  };
+}
+
+function read(): PanelSecrets {
+  const p = panelSecretsPath();
+  if (!existsSync(p)) return {};
+  try {
+    const parsed = JSON.parse(readFileSync(p, "utf-8")) as unknown;
+    return parsed && typeof parsed === "object" ? (parsed as PanelSecrets) : {};
+  } catch (err) {
+    // Never echo file contents (they're secret) — just the parse failure.
+    logger.warn(`[panel-secrets] could not parse ${p}: ${err instanceof Error ? err.message : String(err)}`);
+    return {};
+  }
+}
+
+function write(secrets: PanelSecrets): void {
+  const p = panelSecretsPath();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify(secrets, null, 2), { mode: 0o600 });
+  // mkdirSync may have created the file before the mode took effect on some
+  // platforms; re-assert owner-only. Best-effort (no-op / unsupported on Windows).
+  try {
+    chmodSync(p, 0o600);
+  } catch {
+    /* chmod is a no-op on Windows; ignore */
+  }
+}
+
+/** The persisted env vars to inject into the comfyui MCP server. Never logged. */
+export function loadComfyuiSecretEnv(): Record<string, string> {
+  const env = read().comfyuiEnv;
+  return env && typeof env === "object" ? { ...env } : {};
+}
+
+/** The env-var KEYS currently stored (e.g. for a redacted log line). No values. */
+export function comfyuiSecretKeys(): string[] {
+  return Object.keys(loadComfyuiSecretEnv());
+}
+
+/**
+ * Persist a secret as an env var for the built-in comfyui MCP server, then emit
+ * a change so the orchestrator re-injects it and respawns the server. `value` is
+ * the raw secret (the caller already applied any prefix); it is never logged.
+ */
+export function setComfyuiSecret(key: string, value: string): void {
+  const trimmed = key.trim();
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmed)) {
+    throw new Error(`Invalid env var name "${key}" — use a valid shell identifier (letters, digits, underscore).`);
+  }
+  const secrets = read();
+  const env = secrets.comfyuiEnv && typeof secrets.comfyuiEnv === "object" ? secrets.comfyuiEnv : {};
+  env[trimmed] = value;
+  secrets.comfyuiEnv = env;
+  write(secrets);
+  emitter.emit("change");
+}
+
+/** Remove a stored comfyui secret. Returns false if absent. Emits on removal. */
+export function removeComfyuiSecret(key: string): boolean {
+  const secrets = read();
+  const env = secrets.comfyuiEnv;
+  if (!env || !(key in env)) return false;
+  delete env[key];
+  secrets.comfyuiEnv = env;
+  write(secrets);
+  emitter.emit("change");
+  return true;
+}
+
+/**
+ * Build the comfyui MCP server's spawn env: the orchestrator's `base` env
+ * (COMFYUI_URL, progress dir, COMFYUI_PATH…) MERGED with the persisted tool
+ * secrets. Secrets win over base on a key clash (a user-supplied token overrides
+ * any inherited default). This is THE single env-builder both provider paths
+ * (Claude in-process + Codex stdio) use, so a saved secret reaches either.
+ */
+export function buildComfyuiMcpEnv(base: Record<string, string>): Record<string, string> {
+  return { ...base, ...loadComfyuiSecretEnv() };
+}

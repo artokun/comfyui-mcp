@@ -38,6 +38,7 @@ import {
   removeUserMcpServer,
   setUserMcpServerSecret,
 } from "../services/user-mcp-config.js";
+import { setComfyuiSecret } from "../services/panel-secrets.js";
 import { getNsfwConsent, setNsfwConsent } from "../services/panel-settings.js";
 import { getObjectInfo, backfillObjectInfo } from "../comfyui/client.js";
 import { convertUiToApi, collectNodeTypes } from "../services/workflow-converter.js";
@@ -699,13 +700,13 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_request_secret",
-      "Securely collect an API token / secret from the user and write it straight to config — you NEVER see the value and it is never saved to chat history. The panel shows a masked input; the pasted value goes directly to the orchestrator, which stores it on the target MCP server (a header for http/sse servers, or an env var for stdio), then you call panel_reload to apply it. Use this for tokens like a CivitAI key (target the 'civitai' server, header 'Authorization', value_prefix 'Bearer ') or a HuggingFace token. Returns only a redacted confirmation.",
+      "Securely collect an API token / secret from the user and write it straight to config — you NEVER see the value and it is never saved to chat history. The panel shows a masked input; the pasted value goes directly to the orchestrator, which stores it on the target MCP server, then applies it. Returns only a redacted confirmation.\n\nTWO targets:\n• The BUILT-IN comfyui server (mcp_server 'comfyui', target_kind 'env') — for tokens YOUR OWN comfyui tools need. download_civitai_model needs env CIVITAI_API_TOKEN; HuggingFace downloads (download_model) need HUGGINGFACE_TOKEN. The secret is injected into the comfyui server's env and the server is RESPAWNED automatically — NO panel_reload needed; after this turn ends the tools restart with it and you'll be nudged to retry. THIS is what fixes a download that returned HTTP 401.\n• A user-added MCP server (e.g. the 'civitai' http server you added with panel_add_mcp) — use target_kind 'header' (e.g. Authorization, value_prefix 'Bearer ') for http/sse, or 'env' for stdio; then call panel_reload to load it.\n\nFor a CivitAI DOWNLOAD 401, target 'comfyui' env CIVITAI_API_TOKEN — NOT the 'civitai' MCP server (that's only the search MCP).",
       {
         label: z.string().describe("Prompt shown above the masked input, e.g. 'Paste your CivitAI API token'."),
-        target_kind: z.enum(["header", "env"]).describe("'header' for http/sse servers (e.g. Authorization); 'env' for stdio servers."),
-        mcp_server: z.string().describe("Existing MCP server name to attach the secret to, e.g. 'civitai'."),
-        key: z.string().describe("Header name (e.g. 'Authorization') or env var name (e.g. 'HF_TOKEN')."),
-        value_prefix: z.string().optional().describe("Optional string prepended to the token, e.g. 'Bearer '."),
+        target_kind: z.enum(["header", "env"]).describe("'header' for http/sse servers (e.g. Authorization); 'env' for stdio servers and the built-in comfyui server."),
+        mcp_server: z.string().describe("MCP server to attach the secret to: 'comfyui' for the built-in tools (download_civitai_model etc.), or a user-added server name like 'civitai'."),
+        key: z.string().describe("Env var name (e.g. 'CIVITAI_API_TOKEN', 'HUGGINGFACE_TOKEN') or header name (e.g. 'Authorization')."),
+        value_prefix: z.string().optional().describe("Optional string prepended to the token, e.g. 'Bearer '. Usually empty for env vars."),
         hint: z.string().optional().describe("Optional reassurance/help text shown under the input."),
       },
       async (args: A, ctx) => {
@@ -717,10 +718,28 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           if (typeof secret !== "string" || secret.length === 0) {
             return ok("No token entered — nothing was saved.");
           }
+          const server = (args.mcp_server as string) ?? "";
+          // The BUILT-IN comfyui server is NOT in the user's ~/.claude.json — the
+          // orchestrator spawns it with its own env. Route its secrets to the
+          // dedicated store, which injects them into that env and RESPAWNS the
+          // server (no reload needed). Anything else is a user-config MCP server.
+          if (server.toLowerCase() === "comfyui") {
+            if ((args.target_kind as string) !== "env") {
+              return ok(
+                "The built-in comfyui server takes secrets as env vars — use target_kind 'env' (e.g. key 'CIVITAI_API_TOKEN').",
+              );
+            }
+            setComfyuiSecret(args.key as string, `${(args.value_prefix as string) ?? ""}${secret}`);
+            // Redacted ack ONLY — the secret never enters the agent's context. The
+            // respawn is deferred to this turn's end, so this is accurate.
+            return ok(
+              `🔒 Token saved for the built-in comfyui tools (env "${args.key}"). It's being applied now — the comfyui tools respawn with it as soon as this turn ends, then I'll retry. No reload needed.`,
+            );
+          }
           setUserMcpServerSecret(
             {
               kind: args.target_kind as "header" | "env",
-              server: args.mcp_server as string,
+              server,
               key: args.key as string,
               prefix: args.value_prefix as string | undefined,
             },
@@ -728,7 +747,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           );
           // Redacted ack ONLY — the secret never enters the agent's context.
           return ok(
-            `🔒 Token saved to MCP server "${args.mcp_server}" (${args.target_kind} "${args.key}"). Call panel_reload to load it.`,
+            `🔒 Token saved to MCP server "${server}" (${args.target_kind} "${args.key}"). Call panel_reload to load it.`,
           );
         } catch (err) {
           return fail(err);

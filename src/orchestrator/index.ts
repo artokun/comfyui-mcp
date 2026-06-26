@@ -29,6 +29,11 @@ import {
 } from "./panel-agent.js";
 import { createPanelMcpServer } from "./panel-tools.js";
 import { readUserMcpServers } from "../services/user-mcp-config.js";
+import {
+  buildComfyuiMcpEnv,
+  comfyuiSecretKeys,
+  onComfyuiSecretsChanged,
+} from "../services/panel-secrets.js";
 import { CodexBackend } from "./codex-backend.js";
 import { startPanelMcpHttpServer, type PanelMcpHttpServer } from "./panel-mcp-http.js";
 import type { AgentBackend } from "./agent-backend.js";
@@ -423,10 +428,12 @@ export async function runPanelOrchestrator(): Promise<void> {
     );
   }
 
-  // The comfyui stdio MCP env the Codex backend declares — MIRRORS what the
-  // Claude path's mcpServers.comfyui passes (COMFYUI_URL + progress dir + local
-  // mode), so the headless tool surface is identical across providers.
-  const codexComfyuiEnv: Record<string, string> = {
+  // The BASE comfyui stdio MCP env both providers declare — COMFYUI_URL + progress
+  // dir + local mode + pass-through credentials from the orchestrator's own env.
+  // A panel-saved tool secret (CIVITAI_API_TOKEN, HF_TOKEN, …) is layered on top
+  // by buildComfyuiMcpEnv() at SPAWN time, so the same headless tool surface — and
+  // the same secrets — reach either provider.
+  const comfyuiBaseEnv: Record<string, string> = {
     COMFYUI_URL: comfyuiUrl,
     COMFYUI_MCP_PROGRESS_DIR: progressDir,
     ...(comfyuiPath ? { COMFYUI_PATH: comfyuiPath } : {}),
@@ -468,7 +475,9 @@ export async function runPanelOrchestrator(): Promise<void> {
               transport: "stdio",
               command: process.execPath, // node
               args: [mcpEntry], // dist/index.js
-              env: codexComfyuiEnv,
+              // Merge persisted tool secrets at SPAWN time so a respawn picks up
+              // a just-saved CIVITAI_API_TOKEN / HF_TOKEN without a process restart.
+              env: buildComfyuiMcpEnv(comfyuiBaseEnv),
             },
             // Live-graph panel_* tools for THIS tab over the loopback HTTP MCP.
             ...(panelMcpHttp
@@ -496,6 +505,28 @@ export async function runPanelOrchestrator(): Promise<void> {
   // resumes its conversation even after the orchestrator PROCESS is killed and
   // respawned (a wedge auto-restart) — not just a soft reload.
   const sessionStore = new SessionStore(lockPort);
+  // The Claude-path MCP server set, REBUILT on demand so a just-saved tool secret
+  // (persisted by panel-secrets) lands in the comfyui server's spawn env. The
+  // comfyui server is declared LAST so it always wins over any user entry that
+  // slipped through (defensive — the reader already filters comfyui-mcp entries).
+  const buildMcpServers = () => ({
+    // The user's inherited servers first… (re-read so a panel_add_mcp is picked
+    // up on the same in-process respawn, mirroring a soft reload).
+    ...readUserMcpServers(),
+    comfyui: {
+      type: "stdio" as const,
+      command: process.execPath, // node
+      args: [mcpEntry], // dist/index.js
+      env: buildComfyuiMcpEnv({
+        COMFYUI_URL: comfyuiUrl,
+        // Where download_model writes live progress for the panel tray.
+        COMFYUI_MCP_PROGRESS_DIR: progressDir,
+        // Local mode → enables download_model, apply_manifest (installer packs),
+        // and model scans so the agent installs the right way instead of curl.
+        ...(comfyuiPath ? { COMFYUI_PATH: comfyuiPath } : {}),
+      }),
+    },
+  });
   const manager = new PanelAgentManager({
     model,
     effort,
@@ -505,25 +536,7 @@ export async function runPanelOrchestrator(): Promise<void> {
     pluginPath: pluginAvailable ? pluginPath : undefined,
     // Live-graph control of the user's open workflow, per tab (in-process).
     makePanelServer: (tabId) => createPanelMcpServer(bridge, tabId),
-    mcpServers: {
-      // The user's inherited servers first…
-      ...userMcpServers,
-      // …then our own comfyui server LAST, so it always wins over any user
-      // entry that slipped through (defensive — the reader already filters them).
-      comfyui: {
-        type: "stdio",
-        command: process.execPath, // node
-        args: [mcpEntry], // dist/index.js
-        env: {
-          COMFYUI_URL: comfyuiUrl,
-          // Where download_model writes live progress for the panel tray.
-          COMFYUI_MCP_PROGRESS_DIR: progressDir,
-          // Local mode → enables download_model, apply_manifest (installer packs),
-          // and model scans so the agent installs the right way instead of curl.
-          ...(comfyuiPath ? { COMFYUI_PATH: comfyuiPath } : {}),
-        },
-      },
-    },
+    mcpServers: buildMcpServers(),
     onSay: (tabId, text, meta) => {
       // `id` lets the panel reconcile this committed message with its live
       // streaming preview (same id) instead of rendering a duplicate bubble.
@@ -573,6 +586,24 @@ export async function runPanelOrchestrator(): Promise<void> {
   // Let refreshEnvCapabilities() feed a freshly-gathered env block into agents
   // spawned after a ComfyUI restart/reconnect.
   liveManager = manager;
+
+  // Tool secrets → comfyui MCP env: when the user saves a token via
+  // panel_request_secret (e.g. CIVITAI_API_TOKEN for download_civitai_model), the
+  // secret store persists it and fires this. We rebuild the comfyui server's spawn
+  // env (now carrying the secret) for the Claude path — the Codex path reads the
+  // store per-spawn already — then respawn each tab's agent (resume) at its next
+  // idle so the LIVE comfyui MCP subprocess is recreated WITH the new env, and
+  // nudge it to retry the action the secret unblocked. No process restart, no
+  // reload fight. The value is never logged — only the env-var KEYS.
+  const unsubscribeSecrets = onComfyuiSecretsChanged(() => {
+    manager.setMcpServers(buildMcpServers());
+    manager.restartAllForMcpEnv(
+      "🔑 The API token you just provided is now active for the comfyui tools — retry the action that needed it (e.g. the download that returned 401).",
+    );
+    logger.info(
+      `[panel-orchestrator] tool secret saved → comfyui MCP env updated + agents respawn on idle (keys: ${comfyuiSecretKeys().join(", ") || "none"})`,
+    );
+  });
 
   // Debounce the connect ack: the panel re-sends `hello` on reconnect and on
   // workflow-title changes, which would otherwise stack duplicate greetings.
@@ -979,6 +1010,7 @@ export async function runPanelOrchestrator(): Promise<void> {
     shuttingDown = true;
     logger.info("[panel-orchestrator] shutting down — stopping agents…");
     clearInterval(downloadTimer);
+    unsubscribeSecrets();
     await manager.stopAll();
     // Dispose the Codex readiness-probe backend (kills its app-server child).
     if (probeBackend) await probeBackend.close().catch(() => {});
