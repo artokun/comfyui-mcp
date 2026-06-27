@@ -172,10 +172,30 @@ export interface OutputImage {
   path: string;
   size: number;
   modified: string;
+  /** Media kind derived from the file extension. */
+  kind: "image" | "video";
+}
+
+// Still-image extensions.
+const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".bmp"]);
+// Video / animation extensions written by VHS_VideoCombine, LTX, WAN, etc.
+// NOTE: .webp and .gif can be still OR animated; ComfyUI's video nodes emit
+// them as animations, so they're classified as "video" here.
+const VIDEO_EXTS = new Set([".mp4", ".webm", ".mov", ".mkv", ".m4v", ".avi", ".gif", ".webp"]);
+// Everything we list (images + videos/animations).
+const MEDIA_EXTS = new Set([...IMAGE_EXTS, ...VIDEO_EXTS]);
+
+function mediaKind(ext: string): "image" | "video" {
+  return VIDEO_EXTS.has(ext) ? "video" : "image";
 }
 
 /**
- * List images in the ComfyUI output directory.
+ * List image AND video/animation files in the ComfyUI output directory.
+ *
+ * Covers VHS_VideoCombine / LTX / WAN video outputs (.mp4, .webm, …) in addition
+ * to still images, because ComfyUI's /history often does NOT register VHS-style
+ * video outputs — so a filesystem scan is the reliable way to confirm a finished
+ * video render.
  */
 export async function listOutputImages(options?: {
   limit?: number;
@@ -192,12 +212,11 @@ export async function listOutputImages(options?: {
     return [];
   }
 
-  const imageExts = new Set([".png", ".jpg", ".jpeg", ".webp"]);
   const images: OutputImage[] = [];
 
   for (const entry of entries) {
     const ext = extname(entry).toLowerCase();
-    if (!imageExts.has(ext)) continue;
+    if (!MEDIA_EXTS.has(ext)) continue;
     if (pattern && !entry.toLowerCase().includes(pattern)) continue;
 
     const filePath = join(outputDir, entry);
@@ -209,6 +228,7 @@ export async function listOutputImages(options?: {
         path: filePath,
         size: info.size,
         modified: info.mtime.toISOString(),
+        kind: mediaKind(ext),
       });
     } catch {
       continue;

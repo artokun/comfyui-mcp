@@ -372,6 +372,13 @@ This also matters for **chaining** — color-match every new segment to the
 Pusa adds a bounded window (~4 s) per run. To go longer, **feed the output back
 in**:
 
+0. **Confirm the prior clip actually rendered — via the filesystem, not
+   /history.** `VHS_VideoCombine` writes the .mp4 but frequently does **NOT**
+   register the output in ComfyUI's `/history` (the prompt shows done with no
+   output and no error). Do **NOT** decide the render "silently dropped" from
+   `get_history` / `get_job_status` alone — confirm the file with
+   **`list_output_images`** (it now lists videos, each tagged `kind: "video"`):
+   match the `filename_prefix` and check the mtime is fresh, then stage it.
 0. **Stage the output clip as the next run's input** with
    **`stage_output_as_input`** (pass the rendered clip's
    `{ filename, subfolder?, type? }`); use the returned input filename in
