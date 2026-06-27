@@ -303,7 +303,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
   return [
     def(
       "panel_get_graph",
-      "Read the workflow the user is CURRENTLY VIEWING on their canvas (root graph or an opened subgraph — 'viewing' says which): node ids, types, titles, widget values, connections, and each node's MODE ('active', 'bypass', or 'mute'). Subgraph nodes are summarized shallowly — drill in with panel_get_subgraph. ALWAYS call this before your first edit so ids and slot names are accurate. CHECK THE MODE of every node on the path you care about: a node with mode 'bypass' is skipped (it just passes its input through) and one with mode 'mute' does not execute (and kills everything downstream) — so a BYPASSED/MUTED node means that part of the graph is OFF and may be why a render uses the wrong prompt/branch. If the path you intend to use is bypassed or muted, enable it with panel_set_node_mode before running. This is the user's live graph — they watch your edits happen. Read-only.",
+      "Read the workflow the user is CURRENTLY VIEWING on their canvas (root graph or an opened subgraph — 'viewing' says which): node ids, types, titles, widget values, connections, and each node's MODE ('active', 'bypass', or 'mute'). Subgraph nodes are summarized shallowly — drill in with panel_get_subgraph. ALWAYS call this before your first edit so ids and slot names are accurate. CHECK THE MODE of every node on the path you care about: a node with mode 'bypass' is skipped (it just passes its input through) and one with mode 'mute' does not execute (and kills everything downstream) — so a BYPASSED/MUTED node means that part of the graph is OFF and may be why a render uses the wrong prompt/branch. If the path you intend to use is bypassed or muted, enable it with panel_set_node_mode before running. This is the user's live graph — they watch your edits happen. When you are VIEWING A SUBGRAPH (after panel_enter_subgraph), the response also includes `rails`: the input/output boundary rail node ids and their slots — read these to know exactly what's exposed on the boundary, and which interior outputs/inputs still need exposing (panel_expose_subgraph_output / panel_expose_subgraph_input) or repositioning (panel_move_rail). Read-only.",
       {},
       async (_args, ctx) => ctx.call({ cmd: "graph_get_state" }),
     ),
@@ -1154,6 +1154,50 @@ export function buildPanelToolDefs(): PanelToolDef[] {
       },
       async (args: A, ctx) =>
         ctx.call({ cmd: "graph_promote_widget", node_id: args.node_id, widget: args.widget, demote: args.demote }, 15000),
+    ),
+    def(
+      "panel_expose_subgraph_output",
+      "Wire an interior node's OUTPUT to the subgraph's OUTPUT RAIL — i.e. expose it as a SUBGRAPH OUTPUT on the boundary so the PARENT graph can connect to the subgraph node's new output slot. You MUST be INSIDE the subgraph first (panel_enter_subgraph). This is the correct way to \"wire an internal output to the subgraph's output rail\": do NOT panel_connect to a guessed rail node id — call this with the interior node + the output you want exposed. Read panel_get_graph's `rails` to see the resulting boundary slots. `from_output` is an output slot NAME ('IMAGE', 'LATENT') or numeric index. Optional `name` titles the new boundary output (defaults from the source slot). Undoable with Ctrl+Z.",
+      {
+        from_node_id: z.number().int().describe("Interior (inner) node id whose output to expose (from panel_get_graph while inside the subgraph)."),
+        from_output: slotRef.describe("Output slot name (e.g. 'IMAGE', 'LATENT') or numeric index on that node."),
+        name: z.string().optional().describe("Optional name for the new subgraph output (boundary slot). Defaults from the source slot."),
+      },
+      async (args: A, ctx) =>
+        ctx.call(
+          {
+            cmd: "graph_expose_subgraph_output",
+            from_node_id: args.from_node_id,
+            from_output: args.from_output,
+            name: args.name,
+          },
+          15000,
+        ),
+    ),
+    def(
+      "panel_expose_subgraph_input",
+      "Wire an interior node's INPUT to the subgraph's INPUT RAIL — i.e. expose it as a SUBGRAPH INPUT on the boundary so the PARENT graph can feed the subgraph node's new input slot. You MUST be INSIDE the subgraph first (panel_enter_subgraph). This is the correct way to wire an internal input to the subgraph's input rail: do NOT panel_connect to a guessed rail node id — call this with the interior node + the input you want exposed. Read panel_get_graph's `rails` to see the resulting boundary slots. `to_input` is an input slot NAME ('model', 'pixels') or numeric index. Optional `name` titles the new boundary input (defaults from the target slot). Undoable with Ctrl+Z.",
+      {
+        to_node_id: z.number().int().describe("Interior (inner) node id whose input to expose (from panel_get_graph while inside the subgraph)."),
+        to_input: slotRef.describe("Input slot name (e.g. 'model', 'pixels') or numeric index on that node."),
+        name: z.string().optional().describe("Optional name for the new subgraph input (boundary slot). Defaults from the target slot."),
+      },
+      async (args: A, ctx) =>
+        ctx.call(
+          {
+            cmd: "graph_expose_subgraph_input",
+            to_node_id: args.to_node_id,
+            to_input: args.to_input,
+            name: args.name,
+          },
+          15000,
+        ),
+    ),
+    def(
+      "panel_unpack_subgraph",
+      "EXPAND / DISSOLVE a subgraph node on the user's open graph — inline its interior nodes back into the PARENT graph, rewire all external links to those now-inlined nodes, and remove the subgraph wrapper. This is the frontend's \"Unpack Subgraph\" (litegraph LGraph.unpackSubgraph) and the exact INVERSE of panel_create_subgraph. Use it to flatten a stage that was over-nested, or to edit interior nodes directly at the parent level. The interior nodes reappear on the parent canvas with their connections preserved. Undoable with Ctrl+Z.",
+      { node_id: z.number().int().describe("Subgraph node id to unpack/dissolve (is_subgraph=true, from panel_get_graph).") },
+      async (args: A, ctx) => ctx.call({ cmd: "graph_unpack_subgraph", node_id: args.node_id }, 15000),
     ),
     def(
       "panel_search_nodes",

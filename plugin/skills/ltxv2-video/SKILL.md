@@ -252,6 +252,14 @@ All-in-one node that encodes image, creates latent, and wraps conditioning:
 }
 ```
 
+> **Gotcha — `strength` controls motion; DON'T set it to 1.0.** `LTXVImgToVideo.strength`
+> is how strongly the output adheres to the start image: **higher = more adherence = LESS
+> motion**. Setting it to **1.0 pins every frame to the start image → a FROZEN i2v with
+> ZERO motion** (the storyboard frames come out basically identical). Keep the verified
+> value **~0.6** (as in the example above) for proper motion. If a generated i2v clip
+> shows little/no motion, the FIRST thing to check is that `strength` wasn't bumped toward
+> 1.0.
+
 ### LTXVLatentUpsampler (For Two-Stage Upscale)
 
 ```json

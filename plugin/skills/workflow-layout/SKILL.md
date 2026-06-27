@@ -27,7 +27,10 @@ real node sizes and rail positions first, then compute positions from them.
 - **Subgraphs** (nest nodes into one collapsible node): `panel_create_subgraph(node_ids)`,
   `panel_enter_subgraph` / `panel_exit_subgraph`, `panel_get_subgraph`,
   `panel_promote_widget`, **`panel_move_rail(rail, [x,y])`** (`rail` = `"input"|"output"`,
-  must be inside the subgraph).
+  must be inside the subgraph), **`panel_expose_subgraph_output(from_node_id, from_output)`** /
+  **`panel_expose_subgraph_input(to_node_id, to_input)`** (expose an interior slot on the
+  boundary rail — must be inside the subgraph), and **`panel_unpack_subgraph(node_id)`**
+  (expand/dissolve a subgraph back into the parent — the inverse of `panel_create_subgraph`).
 - `panel_canvas({action:"fit"})` to frame the result; `panel_save_workflow` to persist.
 
 ## The layout algorithm (dependency-layered, overlap-free)
@@ -68,6 +71,16 @@ above) → then pin the rails to the node band:
 
 Keep rails at the same Y as the first row. Read current rail positions from
 `panel_get_graph` (`rails`) before deciding. `panel_exit_subgraph` when done.
+
+**Wiring interior nodes to the boundary (don't connect to a guessed rail id).** To expose
+an interior node's output/input on the boundary so the PARENT graph can wire it, do NOT
+`panel_connect` to a rail node id you guessed — use `panel_expose_subgraph_output(from_node_id,
+from_output)` (interior output → output rail) and `panel_expose_subgraph_input(to_node_id,
+to_input)` (interior input → input rail), both while inside the subgraph. `panel_get_graph`'s
+`rails` shows which boundary slots already exist and which still need exposing. To expand/
+dissolve a subgraph back into the parent (inline its inner nodes + rewire external links,
+removing the wrapper — the inverse of `panel_create_subgraph`), use
+`panel_unpack_subgraph(node_id)`. All undoable with Ctrl+Z.
 
 ## Groups vs subgraphs — choose deliberately
 

@@ -141,6 +141,84 @@ describe("panel-tools: panel_set_node_mode (bypass/mute/active)", () => {
   });
 });
 
+describe("panel-tools: subgraph I/O (expose rails + unpack)", () => {
+  it("registers the three new subgraph I/O tools in the shared def list", () => {
+    const names = buildPanelToolDefs().map((d) => d.name);
+    for (const expected of [
+      "panel_expose_subgraph_output",
+      "panel_expose_subgraph_input",
+      "panel_unpack_subgraph",
+    ]) {
+      expect(names).toContain(expected);
+    }
+  });
+
+  it("panel_expose_subgraph_output exposes from_node_id + from_output + name schema", () => {
+    const def = defByName("panel_expose_subgraph_output");
+    expect(Object.keys(def.schema).sort()).toEqual(["from_node_id", "from_output", "name"]);
+    // from_node_id is an int like the other per-node tools.
+    const fromNode = def.schema.from_node_id as { safeParse: (v: unknown) => { success: boolean } };
+    expect(fromNode.safeParse(3).success).toBe(true);
+    expect(fromNode.safeParse("x").success).toBe(false);
+    // from_output is a string|number slot ref.
+    const fromOut = def.schema.from_output as { safeParse: (v: unknown) => { success: boolean } };
+    expect(fromOut.safeParse("IMAGE").success).toBe(true);
+    expect(fromOut.safeParse(0).success).toBe(true);
+  });
+
+  it("panel_expose_subgraph_output forwards graph_expose_subgraph_output", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_expose_subgraph_output").handler(
+      { from_node_id: 5, from_output: "IMAGE", name: "out0" },
+      ctx,
+    );
+    expect(calls[0]).toMatchObject({
+      cmd: "graph_expose_subgraph_output",
+      from_node_id: 5,
+      from_output: "IMAGE",
+      name: "out0",
+    });
+  });
+
+  it("panel_expose_subgraph_input exposes to_node_id + to_input + name schema", () => {
+    const def = defByName("panel_expose_subgraph_input");
+    expect(Object.keys(def.schema).sort()).toEqual(["name", "to_input", "to_node_id"]);
+    const toNode = def.schema.to_node_id as { safeParse: (v: unknown) => { success: boolean } };
+    expect(toNode.safeParse(3).success).toBe(true);
+    expect(toNode.safeParse("x").success).toBe(false);
+    const toIn = def.schema.to_input as { safeParse: (v: unknown) => { success: boolean } };
+    expect(toIn.safeParse("model").success).toBe(true);
+    expect(toIn.safeParse(1).success).toBe(true);
+  });
+
+  it("panel_expose_subgraph_input forwards graph_expose_subgraph_input", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_expose_subgraph_input").handler(
+      { to_node_id: 9, to_input: 0 },
+      ctx,
+    );
+    expect(calls[0]).toMatchObject({
+      cmd: "graph_expose_subgraph_input",
+      to_node_id: 9,
+      to_input: 0,
+    });
+  });
+
+  it("panel_unpack_subgraph exposes a single node_id int schema", () => {
+    const def = defByName("panel_unpack_subgraph");
+    expect(Object.keys(def.schema)).toEqual(["node_id"]);
+    const nodeId = def.schema.node_id as { safeParse: (v: unknown) => { success: boolean } };
+    expect(nodeId.safeParse(12).success).toBe(true);
+    expect(nodeId.safeParse(1.5).success).toBe(false);
+  });
+
+  it("panel_unpack_subgraph forwards graph_unpack_subgraph with node_id", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_unpack_subgraph").handler({ node_id: 42 }, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "graph_unpack_subgraph", node_id: 42 });
+  });
+});
+
 describe("panel-tools: panel_load_workflow path (server-side disk read)", () => {
   it("reads an ABSOLUTE workflow .json off disk and fires graph_load with its graph", async () => {
     const dir = mkdtempSync(join(tmpdir(), "wf-load-"));
