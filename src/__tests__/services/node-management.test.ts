@@ -67,6 +67,7 @@ const mockedExists = vi.mocked(existsSync);
 const COMFY = "/fake/comfy";
 const CM_CLI = join(COMFY, "custom_nodes", "ComfyUI-Manager", "cm-cli.py");
 const BAR_DIR = join(COMFY, "custom_nodes", "bar");
+const NODE_DIR_UTILS = join(COMFY, "custom_nodes", "comfyui-teskors-utils");
 
 interface Call {
   url: string;
@@ -259,18 +260,37 @@ describe("node-management service", () => {
       ).toThrow(/explicit `ref`/);
     });
 
+    // Registry-install verification: the Manager marks the queue "done" even when
+    // it resolved nothing, so installCustomNode re-queries /customnode/installed.
+    // Tests that exercise a successful Manager install must therefore report the
+    // pack as installed via installedBody.
+    const installedBar = {
+      bar: { ver: "nightly", aux_id: "foo/bar", enabled: true },
+    };
+
     it("installs a registry id via the Manager queue API with latest version", async () => {
-      const { calls } = stubFetch();
+      const { calls } = stubFetch({
+        installedBody: {
+          "comfyui-impact-pack": {
+            ver: "1.0.0",
+            cnr_id: "comfyui-impact-pack",
+            enabled: true,
+          },
+        },
+      });
       const res = await installCustomNode({ id: "comfyui-impact-pack" });
 
       expect(res.mechanism).toBe("manager-http");
       const { body, params } = taskOf(calls, "install");
       expect(body.client_id).toBe("comfyui-mcp");
       expect(typeof body.ui_id).toBe("string");
+      // Registry params align with the frontend UI: channel "dev", mode "cache".
       expect(params).toMatchObject({
         id: "comfyui-impact-pack",
         version: "latest",
         selected_version: "latest",
+        channel: "dev",
+        mode: "cache",
       });
       // Must kick the queue worker.
       expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/start"))).toBe(
@@ -278,35 +298,53 @@ describe("node-management service", () => {
       );
     });
 
-    it("auto-detects a git URL and routes it through the install task with repository set", async () => {
-      const { calls } = stubFetch();
-      await installCustomNode({ id: "https://github.com/foo/bar" });
+    it("throws when a registry id is queued but never lands (silent no-op)", async () => {
+      // The Manager drains "done" without installing an unknown CNR id; a non-URL
+      // id can't be cloned, so this must be a hard error — not a false success.
+      stubFetch({ installedBody: {} });
+      await expect(
+        installCustomNode({ id: "does-not-exist" }),
+      ).rejects.toBeInstanceOf(NodeManagementError);
+    });
 
+    it("auto-detects a git URL and installs it via the Manager using the REPO NAME", async () => {
+      const { calls } = stubFetch({ installedBody: installedBar });
+      const res = await installCustomNode({ id: "https://github.com/foo/bar" });
+
+      expect(res.mechanism).toBe("manager-http");
       const { params } = taskOf(calls, "install");
-      // do_install resolves `${id}@${selected_version}`; with no ref we fall
-      // back to "nightly" (git-HEAD) and pass the repo URL as id + repository.
+      // id is the REPO NAME (not the URL); no ref → "nightly"; UI channel/mode.
+      // The ignored `repository`/`pip` fields are dropped.
       expect(params).toMatchObject({
-        id: "https://github.com/foo/bar",
+        id: "bar",
         version: "nightly",
         selected_version: "nightly",
-        repository: "https://github.com/foo/bar",
+        channel: "dev",
+        mode: "cache",
       });
+      expect(params).not.toHaveProperty("repository");
+      expect(params).not.toHaveProperty("pip");
+      // Manager resolved it → NO direct clone.
+      expect(mockedExec).not.toHaveBeenCalledWith(
+        "git",
+        expect.arrayContaining(["clone"]),
+        expect.anything(),
+      );
     });
 
     it("pins a git URL ref parsed from the URL in the install task", async () => {
-      const { calls } = stubFetch();
+      const { calls } = stubFetch({ installedBody: installedBar });
       await installCustomNode({ id: "https://github.com/foo/bar/tree/dev" });
 
       const { params } = taskOf(calls, "install");
       expect(params).toMatchObject({
-        id: "https://github.com/foo/bar",
+        id: "bar",
         selected_version: "dev",
-        repository: "https://github.com/foo/bar",
       });
     });
 
     it("prefers explicit ref over parsed URL ref and version for git installs", async () => {
-      const { calls } = stubFetch();
+      const { calls } = stubFetch({ installedBody: installedBar });
       await installCustomNode({
         id: "https://github.com/foo/bar/tree/dev",
         version: "v1",
@@ -315,13 +353,13 @@ describe("node-management service", () => {
 
       const { params } = taskOf(calls, "install");
       expect(params).toMatchObject({
+        id: "bar",
         selected_version: "abc123",
-        repository: "https://github.com/foo/bar",
       });
     });
 
     it("allows a valid explicit slash-separated git ref", async () => {
-      const { calls } = stubFetch();
+      const { calls } = stubFetch({ installedBody: installedBar });
       await installCustomNode({
         id: "https://github.com/foo/bar",
         ref: "feature/dev",
@@ -329,9 +367,107 @@ describe("node-management service", () => {
 
       const { params } = taskOf(calls, "install");
       expect(params).toMatchObject({
+        id: "bar",
         selected_version: "feature/dev",
-        repository: "https://github.com/foo/bar",
       });
+    });
+
+    it("falls back to a direct git clone when the Manager can't resolve the repo", async () => {
+      // Manager drains "done" but the pack never appears → unregistered repo.
+      const { calls } = stubFetch({ installedBody: {} });
+      // Simulate clone landing the dir on disk, with no requirements/install.py.
+      let cloned = false;
+      mockedExists.mockImplementation((p: unknown) => {
+        const s = String(p);
+        if (s.includes("requirements.txt") || s.includes("install.py")) {
+          return false;
+        }
+        if (s.includes(".venv")) return false;
+        if (s.includes("cm-cli.py")) return false;
+        if (s.includes(NODE_DIR_UTILS) || s.endsWith("comfyui-teskors-utils")) {
+          return cloned;
+        }
+        return false;
+      });
+      mockedExec.mockImplementation(((bin: string, args: string[]) => {
+        if (bin === "git" && args[0] === "clone") {
+          cloned = true;
+          return "";
+        }
+        return "";
+      }) as never);
+
+      const res = await installCustomNode({
+        id: "https://github.com/teskor-hub/comfyui-teskors-utils",
+      });
+
+      expect(res.mechanism).toBe("git-clone");
+      // Manager was still tried first (registry-first).
+      expect(taskOf(calls, "install").params).toMatchObject({
+        id: "comfyui-teskors-utils",
+      });
+      // git clone was invoked with the URL + the target node dir (shallow, no ref).
+      const cloneCall = mockedExec.mock.calls.find(
+        (c) => c[0] === "git" && (c[1] as string[])[0] === "clone",
+      );
+      expect(cloneCall).toBeDefined();
+      expect(cloneCall![1]).toEqual([
+        "clone",
+        "--depth",
+        "1",
+        "https://github.com/teskor-hub/comfyui-teskors-utils",
+        NODE_DIR_UTILS,
+      ]);
+    });
+
+    it("full-clones (no --depth) and checks out an explicit ref on fallback", async () => {
+      stubFetch({ installedBody: {} });
+      let cloned = false;
+      mockedExists.mockImplementation((p: unknown) => {
+        const s = String(p);
+        if (s.includes("requirements.txt") || s.includes("install.py")) {
+          return false;
+        }
+        if (s.includes(".venv") || s.includes("cm-cli.py")) return false;
+        if (s.includes(NODE_DIR_UTILS)) return cloned;
+        return false;
+      });
+      mockedExec.mockImplementation(((bin: string, args: string[]) => {
+        if (bin === "git" && args[0] === "clone") cloned = true;
+        return "";
+      }) as never);
+
+      const res = await installCustomNode({
+        id: "https://github.com/teskor-hub/comfyui-teskors-utils",
+        ref: "v1.2.3",
+      });
+
+      expect(res.mechanism).toBe("git-clone");
+      const cloneCall = mockedExec.mock.calls.find(
+        (c) => c[0] === "git" && (c[1] as string[])[0] === "clone",
+      );
+      // Full clone (no --depth) so the ref is reachable.
+      expect(cloneCall![1]).toEqual([
+        "clone",
+        "https://github.com/teskor-hub/comfyui-teskors-utils",
+        NODE_DIR_UTILS,
+      ]);
+      // Followed by a checkout of the ref.
+      expect(
+        mockedExec.mock.calls.some(
+          (c) => c[0] === "git" && (c[1] as string[]).includes("checkout"),
+        ),
+      ).toBe(true);
+    });
+
+    it("throws ProcessControlError on clone fallback when comfyuiPath is unset", async () => {
+      config.comfyuiPath = undefined;
+      stubFetch({ installedBody: {} });
+      await expect(
+        installCustomNode({
+          id: "https://github.com/teskor-hub/comfyui-teskors-utils",
+        }),
+      ).rejects.toBeInstanceOf(ProcessControlError);
     });
 
     it("rejects explicit git refs that could be interpreted as git options", async () => {
@@ -351,7 +487,7 @@ describe("node-management service", () => {
     });
 
     it("uses version as the git ref when no explicit ref is present", async () => {
-      const { calls } = stubFetch();
+      const { calls } = stubFetch({ installedBody: installedBar });
       await installCustomNode({
         id: "https://github.com/foo/bar",
         version: "release",
@@ -359,13 +495,15 @@ describe("node-management service", () => {
 
       const { params } = taskOf(calls, "install");
       expect(params).toMatchObject({
+        id: "bar",
         selected_version: "release",
-        repository: "https://github.com/foo/bar",
       });
     });
 
     it("honors an explicit version", async () => {
-      const { calls } = stubFetch();
+      const { calls } = stubFetch({
+        installedBody: { "some-pack": { ver: "1.2.3", cnr_id: "some-pack", enabled: true } },
+      });
       await installCustomNode({ id: "some-pack", version: "1.2.3" });
       const { params } = taskOf(calls, "install");
       expect(params).toMatchObject({
@@ -375,7 +513,9 @@ describe("node-management service", () => {
     });
 
     it("ignores ref for registry installs", async () => {
-      const { calls } = stubFetch();
+      const { calls } = stubFetch({
+        installedBody: { "some-pack": { ver: "latest", cnr_id: "some-pack", enabled: true } },
+      });
       await installCustomNode({ id: "some-pack", ref: "dev" });
       const { params } = taskOf(calls, "install");
       expect(params).toMatchObject({
@@ -390,6 +530,7 @@ describe("node-management service", () => {
       // item is pending (total=1 > done=0). Must NOT be treated as done.
       // Second poll: worker is running. Third: drained.
       const { calls } = stubFetch({
+        installedBody: { pack: { ver: "latest", cnr_id: "pack", enabled: true } },
         statusSequence: [
           { total_count: 1, done_count: 0, in_progress_count: 0, is_processing: false },
           { total_count: 1, done_count: 0, in_progress_count: 1, is_processing: true },
@@ -474,14 +615,20 @@ describe("node-management service", () => {
       expect(params).toMatchObject({ node_name: "my-pack" });
     });
 
-    it("routes 'all' to /v2/manager/queue/update_all", async () => {
+    it("routes 'all' to /v2/manager/queue/update_all with QUERY params (not body)", async () => {
       const { calls } = stubFetch();
       await updateCustomNode({ id: "all", mode: "local" });
       const c = calls.find((x) =>
         x.url.includes("/v2/manager/queue/update_all"),
       );
       expect(c).toBeDefined();
-      expect(c!.body).toMatchObject({ mode: "local", client_id: "comfyui-mcp" });
+      // The backend reads UpdateAllQueryParams from the query string only.
+      const u = new URL(c!.url);
+      expect(u.searchParams.get("mode")).toBe("local");
+      expect(u.searchParams.get("client_id")).toBe("comfyui-mcp");
+      expect(u.searchParams.get("ui_id")).toBeTruthy();
+      // No JSON body.
+      expect(c!.body).toBeUndefined();
     });
   });
 

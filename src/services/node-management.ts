@@ -76,7 +76,7 @@ export interface InstalledNode {
 
 export interface NodeOpResult {
   /** Which mechanism handled the request. */
-  mechanism: "manager-http" | "cm-cli";
+  mechanism: "manager-http" | "cm-cli" | "git-clone";
   /** Human-readable summary. */
   message: string;
   /** Raw queue status (HTTP path) or subprocess output (cm-cli path). */
@@ -502,6 +502,161 @@ function runGitCheckout(baseUrl: string, ref: string): void {
   }
 }
 
+/**
+ * Does an installed node match the wanted id/url? Mirrors manifest.ts's private
+ * nodeAlreadyInstalled, but kept local to this unit. Normalizes (lowercase) and
+ * matches an installed node's module/cnrId/auxId (and the basename of each — aux
+ * ids are typically "owner/repo") against the wanted value and, when the wanted
+ * value is a git URL, its derived repo name. This is how we VERIFY a Manager
+ * install actually landed on disk (Manager marks the queue "done" even when it
+ * resolved nothing).
+ */
+function nodeInstalledMatches(
+  idOrUrl: string,
+  installed: InstalledNode[],
+): boolean {
+  const wanted = idOrUrl.trim().toLowerCase();
+  const repoName = looksLikeGitUrl(idOrUrl)
+    ? gitCheckoutDir(parseGitUrl(idOrUrl).baseUrl).toLowerCase()
+    : wanted;
+  return installed.some((node) => {
+    const candidates: string[] = [];
+    for (const v of [node.module, node.cnrId, node.auxId]) {
+      if (!v) continue;
+      const norm = v.trim().toLowerCase();
+      candidates.push(norm);
+      candidates.push(basename(norm));
+    }
+    return candidates.includes(wanted) || candidates.includes(repoName);
+  });
+}
+
+/**
+ * Resolve the ComfyUI venv python for installing a cloned node's deps. Prefers
+ * the install's own `.venv` (Windows Scripts/ or POSIX bin/), falling back to a
+ * bare "python" on PATH.
+ */
+function resolveVenvPython(): string {
+  if (config.comfyuiPath) {
+    const winPy = join(config.comfyuiPath, ".venv", "Scripts", "python.exe");
+    if (existsSync(winPy)) return winPy;
+    const posixPy = join(config.comfyuiPath, ".venv", "bin", "python");
+    if (existsSync(posixPy)) return posixPy;
+  }
+  return "python";
+}
+
+/**
+ * Direct-clone fallback for an unregistered git repo the Manager can't resolve.
+ * Clones into custom_nodes/<repoName>, checks out a ref if given, then makes a
+ * best-effort attempt at installing python deps (requirements.txt + install.py).
+ * Dep failures DON'T fail the install (clone succeeded) — they're surfaced as
+ * warnings. A clone failure throws NodeManagementError.
+ */
+function cloneCustomNodeFallback(
+  gitId: string,
+  repoName: string,
+  gitRef: string | undefined,
+  managerStatus: unknown,
+): NodeOpResult {
+  if (!config.comfyuiPath) {
+    throw new ProcessControlError(
+      `"${repoName}" is not in the ComfyUI-Manager registry and cloning it ` +
+        `requires a local ComfyUI install, but config.comfyuiPath is not set ` +
+        `(running in remote --comfyui-url mode). Install it on the ComfyUI host, ` +
+        `or pass a registered pack id.`,
+    );
+  }
+
+  const nodeDir = join(config.comfyuiPath, "custom_nodes", repoName);
+  const warnings: string[] = [];
+  const alreadyPresent = existsSync(nodeDir);
+
+  if (!alreadyPresent) {
+    // A concrete ref needs the full history reachable; otherwise shallow-clone.
+    const cloneArgs = gitRef
+      ? ["clone", gitId, nodeDir]
+      : ["clone", "--depth", "1", gitId, nodeDir];
+    logger.info("Cloning unregistered custom node", { gitId, nodeDir, gitRef });
+    try {
+      execFileSync("git", cloneArgs, {
+        cwd: config.comfyuiPath,
+        encoding: "utf-8",
+        timeout: CM_CLI_TIMEOUT,
+        env: {
+          ...process.env,
+          ...(config.githubToken ? { GITHUB_TOKEN: config.githubToken } : {}),
+        },
+      });
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException & {
+        stdout?: Buffer | string;
+        stderr?: Buffer | string;
+      };
+      throw new NodeManagementError(
+        `Failed to clone "${gitId}" into custom_nodes/${repoName}: ${e.message}`,
+        {
+          stdout: e.stdout ? e.stdout.toString() : "",
+          stderr: e.stderr ? e.stderr.toString() : "",
+        },
+      );
+    }
+    if (gitRef) runGitCheckout(gitId, gitRef);
+  }
+
+  // VERIFY the clone landed before attempting deps.
+  if (!existsSync(nodeDir)) {
+    throw new NodeManagementError(
+      `Clone of "${gitId}" reported success but ${nodeDir} is missing.`,
+    );
+  }
+
+  // Best-effort python deps. Don't fail the install if these don't.
+  const requirements = join(nodeDir, "requirements.txt");
+  const installScript = join(nodeDir, "install.py");
+  if (existsSync(requirements) || existsSync(installScript)) {
+    const python = resolveVenvPython();
+    if (existsSync(requirements)) {
+      try {
+        execFileSync(python, ["-m", "pip", "install", "-r", requirements], {
+          cwd: nodeDir,
+          encoding: "utf-8",
+          timeout: CM_CLI_TIMEOUT,
+        });
+      } catch (err) {
+        const e = err as Error;
+        warnings.push(
+          `Python dependencies (requirements.txt) failed to install (${e.message}); install them manually with "${python} -m pip install -r requirements.txt".`,
+        );
+      }
+    }
+    if (existsSync(installScript)) {
+      try {
+        execFileSync(python, [installScript], {
+          cwd: nodeDir,
+          encoding: "utf-8",
+          timeout: CM_CLI_TIMEOUT,
+        });
+      } catch (err) {
+        const e = err as Error;
+        warnings.push(
+          `install.py failed to run (${e.message}); the node may need manual setup.`,
+        );
+      }
+    }
+  }
+
+  const base = alreadyPresent
+    ? `"${repoName}" already exists in custom_nodes (${repoName}) — left it in place.`
+    : `"${repoName}" is not in the ComfyUI-Manager registry — cloned it directly into custom_nodes (${repoName}).`;
+  const warn = warnings.length ? ` ${warnings.join(" ")}` : "";
+  return {
+    mechanism: "git-clone",
+    message: `${base}${warn} RESTART ComfyUI to load it.`,
+    details: { nodeDir, warnings, managerStatus },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Public API — install
 // ---------------------------------------------------------------------------
@@ -550,40 +705,65 @@ export async function installCustomNode(
     };
   }
 
-  let params: Record<string, unknown>;
   if (source === "git") {
-    // Git install via the unified task. do_install only consumes `id` +
-    // `selected_version` (it resolves `${id}@${selected_version}` through
-    // resolve_node_spec), so we pass the repo URL as the id and the ref as the
-    // selected version. `repository` is included because InstallPackParams marks
-    // it required for nightly. A concrete ref pins the branch/tag/commit; with
-    // none we fall back to "nightly" (the registry's git-HEAD channel).
-    // NOTE: live-unverified against this Manager build — registry installs are
-    // verified; flag if a git-URL install regresses.
+    // REGISTRY-FIRST, CLONE FALLBACK. The Manager backend resolves an install
+    // by the pack's REPO NAME / CNR id — NOT a full git URL (do_install splits
+    // `${id}@${selected_version}` and looks the result up in its DB; a full URL
+    // matches nothing and the queue silently marks the task "done"). So we mirror
+    // the frontend UI: id = repo name, selected_version = ref or "nightly" (the
+    // git-HEAD channel for unclaimed packs), channel "dev", mode "cache". The
+    // ignored `repository`/`pip` fields are dropped.
+    const repoName = gitCheckoutDir(gitId);
     const selected = gitRef ?? "nightly";
-    params = {
-      id: gitId,
+    const status = await queueManagerTask("install", {
+      id: repoName,
       version: selected,
       selected_version: selected,
-      repository: gitId,
-      pip: [],
-      channel,
-      mode,
-    };
-  } else {
-    params = {
-      id,
-      version: version ?? "latest",
-      selected_version: version ?? "latest",
-      channel,
-      mode,
-    };
+      channel: opts.channel ?? "dev",
+      mode: opts.mode ?? "cache",
+    });
+
+    // VERIFY: /v2/customnode/installed reflects on-disk custom_nodes, so a
+    // freshly-cloned pack shows up even before a reboot. If the Manager actually
+    // installed it, we're done; otherwise it's unregistered → clone it directly.
+    const installed = await listInstalledNodes().catch(
+      () => [] as InstalledNode[],
+    );
+    if (nodeInstalledMatches(gitId, installed)) {
+      return {
+        mechanism: "manager-http",
+        message: `Installed "${repoName}" via ComfyUI-Manager. Restart may be required to load new nodes.`,
+        details: status,
+      };
+    }
+    return cloneCustomNodeFallback(gitId, repoName, gitRef, status);
   }
 
-  const status = await queueManagerTask("install", params);
+  // Registry (plain CNR id). Align params to the frontend UI (channel "dev",
+  // mode "cache") so resolution matches the proven-working path, then VERIFY the
+  // pack actually landed — a non-URL id can't be cloned, so an absent pack is a
+  // hard error rather than a silent no-op.
+  const status = await queueManagerTask("install", {
+    id,
+    version: version ?? "latest",
+    selected_version: version ?? "latest",
+    channel: opts.channel ?? "dev",
+    mode: opts.mode ?? "cache",
+  });
+  const installed = await listInstalledNodes().catch(
+    () => [] as InstalledNode[],
+  );
+  if (!nodeInstalledMatches(id, installed)) {
+    throw new NodeManagementError(
+      `"${id}" was queued but is not present afterward — it was not found in the ` +
+        `ComfyUI-Manager registry. Check the pack id, or pass a git URL to clone ` +
+        `it directly.`,
+      status,
+    );
+  }
   return {
     mechanism: "manager-http",
-    message: `Queued + installed "${id}" (${source}) via ComfyUI-Manager. A restart may be required to load new nodes.`,
+    message: `Installed "${id}" via ComfyUI-Manager. Restart may be required to load new nodes.`,
     details: status,
   };
 }
@@ -619,10 +799,18 @@ export async function updateCustomNode(
 
   let status: QueueStatus;
   if (all) {
-    // update_all keeps its own dedicated route; its params carry client_id.
-    await managerFetch("/v2/manager/queue/update_all", {
+    // update_all keeps its own dedicated route. The backend reads
+    // UpdateAllQueryParams from the QUERY STRING (manager_server.py), NOT the
+    // JSON body — a body-only request leaves mode defaulting to 'remote' and
+    // drops client_id/ui_id. Send them as URL query params.
+    const uiId = randomUUID();
+    const query = new URLSearchParams({
+      mode,
+      client_id: MANAGER_CLIENT_ID,
+      ui_id: uiId,
+    }).toString();
+    await managerFetch(`/v2/manager/queue/update_all?${query}`, {
       method: "POST",
-      body: { mode, client_id: MANAGER_CLIENT_ID },
     });
     status = await runManagerQueue();
   } else {
