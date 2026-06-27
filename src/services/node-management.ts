@@ -767,6 +767,13 @@ export async function installCustomNode(
       ? validateGitRef(gitRefCandidate)
       : gitRefCandidate;
 
+  // SECURITY: validate a git URL ONCE, up front, before it can reach ANY install
+  // path — cm-cli (`cm-cli install <url>`), the Manager queue, or the clone
+  // fallback. Rejects option-injection (leading "-") / non-git / control chars.
+  // The repo-name + custom_nodes-containment checks live where the on-disk dir is
+  // actually used (runGitCheckout, cloneCustomNodeFallback).
+  if (source === "git") assertSafeGitUrl(gitId);
+
   if (opts.useCmCli) {
     // cm-cli install accepts registry ids and git urls alike.
     const installId = source === "git" ? gitId : id;
