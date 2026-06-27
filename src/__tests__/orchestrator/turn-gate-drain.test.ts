@@ -58,16 +58,69 @@ beforeAll(async () => {
  * produced on an independent queue — exactly how `streamInput` (input) and
  * `readMessages` (output) run as separate fire-and-forget tasks in the real SDK.
  *
- * Critically the pump reads the NEXT turn from the channel as soon as it has
- * written the current one (read-ahead), so when the current turn finishes the
- * channel is already parked inside the pump's pending `channel.next()`.
+ * Two properties make this a DETERMINISTIC guard (no wall-clock sleeps gate the
+ * ordering, so CI jitter can't make the assertion vacuous):
+ *
+ *  • READ-AHEAD: as soon as a turn is read the pump starts reading the NEXT turn
+ *    (`it.next()`) WITHOUT awaiting it before emitting the current turn's result —
+ *    so the panel channel is parked inside the pump's pending `channel.next()`
+ *    (i.e. at the turn gate) while the current turn is "in flight". If a future
+ *    change reintroduces a read-ahead/gate deadlock, that pending read never
+ *    resolves, the next turn never starts, and the test FAILS (times out).
+ *
+ *  • MANUAL RELEASE: each turn's terminal `result` is withheld until the test
+ *    calls `releaseTurn()`. So the test can prove a message was queued DURING the
+ *    turn (before its result) rather than racing a timer. `markStarted` lets the
+ *    test await "turn N has been read by the pump" deterministically.
  */
 class ConcurrentPumpBackend implements AgentBackend {
   readonly id = "claude" as const;
   readonly capabilities = CLAUDE_CAPABILITIES;
   turns: string[] = [];
   interrupted = 0;
-  private breakTurn: (() => void) | null = null;
+  /** One resolver per in-flight turn, FIFO — resolved by `releaseTurn()` to emit
+   *  that turn's `result`. */
+  private releaseResolvers: Array<() => void> = [];
+  /** How many turns the pump has READ so far (in flight), + waiters for a count. */
+  private startedCount = 0;
+  private startedWaiters: Array<{ n: number; resolve: () => void }> = [];
+
+  private markStarted(): void {
+    this.startedCount += 1;
+    this.startedWaiters = this.startedWaiters.filter((w) => {
+      if (this.startedCount >= w.n) {
+        w.resolve();
+        return false;
+      }
+      return true;
+    });
+  }
+
+  /** Resolve once the pump has READ at least `n` turns (each is then in flight,
+   *  with its result withheld). Rejects after `timeoutMs` so a reintroduced gate
+   *  deadlock — where the next turn never starts — fails the test fast instead of
+   *  hanging. No sleeps gate the happy path; the timeout is only a failure cap. */
+  waitStarted(n: number, timeoutMs = 2000): Promise<void> {
+    if (this.startedCount >= n) return Promise.resolve();
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error(`turn ${n} never started (gate did not drain) — ${this.turns.length} read`)),
+        timeoutMs,
+      );
+      this.startedWaiters.push({
+        n,
+        resolve: () => {
+          clearTimeout(timer);
+          resolve();
+        },
+      });
+    });
+  }
+
+  /** Release the OLDEST in-flight turn so its `result` is emitted (opens the gate). */
+  releaseTurn(): void {
+    this.releaseResolvers.shift()?.();
+  }
 
   async *run(opts: BackendStartOptions): AsyncGenerator<AgentEvent> {
     const out: AgentEvent[] = [];
@@ -79,22 +132,27 @@ class ConcurrentPumpBackend implements AgentBackend {
       wakeOut = null;
     };
 
-    // INPUT PUMP — concurrent, read-ahead. Mirrors SDK `streamInput`.
+    // INPUT PUMP — concurrent, read-ahead, manual per-turn result release.
     const pump = (async () => {
-      for await (const turn of opts.channel) {
-        this.turns.push(turn.text);
-        // The turn runs and finishes: emit its terminal events on the OUTPUT
-        // queue, decoupled from this pump. Then the for-await immediately reads
-        // the NEXT turn (read-ahead) — which parks at the panel's turn gate.
-        emit({ type: "assistant", text: `reply to: ${turn.text}` });
-        // Let the turn "hang" a tick so a second message can queue while busy,
-        // then finish it. The result is what must open the gate.
+      const it = opts.channel[Symbol.asyncIterator]();
+      let r = await it.next(); // read turn 1
+      while (!r.done) {
+        this.turns.push(r.value.text);
+        emit({ type: "assistant", text: `reply to: ${r.value.text}` });
+        // DECOUPLED read-ahead: begin reading the NEXT turn now, concurrently,
+        // WITHOUT awaiting it before this turn's result (mirrors the SDK, whose
+        // input pump and output reader are independent). This parks the panel
+        // channel at the turn gate while the current turn is in flight.
+        const readAhead = it.next();
+        // Withhold this turn's result until the test releases it.
         await new Promise<void>((resolve) => {
-          this.breakTurn = resolve;
-          setTimeout(resolve, 10);
+          this.releaseResolvers.push(resolve);
+          this.markStarted();
         });
-        this.breakTurn = null;
         emit({ type: "result", ok: true, subtype: "success" });
+        // Consume the read-ahead: resolves only once the gate opened and the next
+        // batch drained (or the channel closed on stop()).
+        r = await readAhead;
       }
       inputDone = true;
       wakeOut?.();
@@ -119,9 +177,11 @@ class ConcurrentPumpBackend implements AgentBackend {
 
   async interrupt(): Promise<void> {
     this.interrupted += 1;
-    const brk = this.breakTurn;
-    this.breakTurn = null;
-    brk?.();
+    // Release every still-held turn so the pump unblocks and the run loop can wind
+    // down (used by agent.stop() teardown — otherwise the pump parks forever).
+    const held = this.releaseResolvers;
+    this.releaseResolvers = [];
+    for (const r of held) r();
   }
   async listModels(): Promise<ModelChoice[]> {
     return [];
@@ -140,14 +200,6 @@ function makeDeps(turns: Array<"working" | "done">) {
   };
 }
 
-async function waitFor(cond: () => boolean, timeoutMs = 1500): Promise<void> {
-  const start = Date.now();
-  while (!cond()) {
-    if (Date.now() - start > timeoutMs) throw new Error("waitFor timeout");
-    await new Promise((r) => setTimeout(r, 5));
-  }
-}
-
 describe("turn gate drains the next queued batch when a turn ends (no read-ahead deadlock)", () => {
   it("delivers a message queued during turn N right after N's result — with NO later message arriving", async () => {
     const turns: Array<"working" | "done"> = [];
@@ -155,17 +207,22 @@ describe("turn gate drains the next queued batch when a turn ends (no read-ahead
     const agent = new PanelAgent("tab-drain", makeDeps(turns) as never, backend);
     void agent.start();
 
-    // Turn 1 starts.
+    // Turn 1 starts and is held in flight (its result withheld).
     agent.send("first message");
-    await waitFor(() => backend.turns.length === 1);
+    await backend.waitStarted(1);
+    expect(backend.turns).toEqual(["first message"]);
+    expect(agent.isBusy).toBe(true);
 
-    // While turn 1 is in flight, queue a second message. This is the message that
-    // must drain when turn 1 ends — and NOTHING else is ever sent afterwards.
+    // PROVABLY queued DURING turn 1: turn 1's result has not been emitted yet
+    // (we haven't released it), so this message lands behind the gate. Nothing
+    // else is ever sent afterwards.
     agent.send("second message queued behind the first");
 
-    // The invariant: turn 1 ends -> gate opens -> turn 2 is delivered promptly,
-    // with no dependency on a further user message.
-    await waitFor(() => backend.turns.length === 2, 1500);
+    // End turn 1. The invariant: the gate opens and turn 2 is delivered, with no
+    // dependency on any further user message. (If the gate deadlocks, turn 2 never
+    // starts and waitStarted(2) rejects → test fails.)
+    backend.releaseTurn();
+    await backend.waitStarted(2);
     expect(backend.turns[1]).toContain("second message");
 
     await agent.stop();
@@ -178,12 +235,13 @@ describe("turn gate drains the next queued batch when a turn ends (no read-ahead
     void agent.start();
 
     agent.send("A");
-    await waitFor(() => backend.turns.length === 1);
-    // Queue B and C while A is busy; they should batch into the next turn.
+    await backend.waitStarted(1);
+    // Queue B and C while A is held in flight; they must batch into the next turn.
     agent.send("B");
     agent.send("C");
 
-    await waitFor(() => backend.turns.length === 2, 1500);
+    backend.releaseTurn(); // end turn A
+    await backend.waitStarted(2);
     expect(backend.turns[1]).toContain("B");
     expect(backend.turns[1]).toContain("C");
 
