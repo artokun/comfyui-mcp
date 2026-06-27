@@ -66,7 +66,9 @@ const mockedExists = vi.mocked(existsSync);
 // same way instead of hardcoding POSIX paths.
 const COMFY = "/fake/comfy";
 const CM_CLI = join(COMFY, "custom_nodes", "ComfyUI-Manager", "cm-cli.py");
-const BAR_DIR = join(COMFY, "custom_nodes", "bar");
+// runGitCheckout now resolves the target with path.resolve (containment check),
+// so the -C dir carries the drive letter on Windows — match it.
+const BAR_DIR = resolve(COMFY, "custom_nodes", "bar");
 // The clone fallback resolves the target with path.resolve (containment check),
 // which prepends the current drive on Windows — mirror that here.
 const NODE_DIR_UTILS = resolve(COMFY, "custom_nodes", "comfyui-teskors-utils");

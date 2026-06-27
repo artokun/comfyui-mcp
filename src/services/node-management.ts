@@ -472,7 +472,21 @@ function runGitCheckout(baseUrl: string, ref: string): void {
     );
   }
 
-  const nodeDir = join(config.comfyuiPath, "custom_nodes", gitCheckoutDir(baseUrl));
+  // SECURITY: this is also reached by the forced-cm-cli git path, NOT just the
+  // clone fallback, so validate here too before baseUrl / the derived dir reach
+  // git or the filesystem (option injection + path traversal). Mirrors
+  // cloneCustomNodeFallback's checks.
+  assertSafeGitUrl(baseUrl);
+  const repoName = gitCheckoutDir(baseUrl);
+  assertSafeRepoName(repoName);
+  const customNodesRoot = resolve(config.comfyuiPath, "custom_nodes");
+  const nodeDir = resolve(customNodesRoot, repoName);
+  const rel = relative(customNodesRoot, nodeDir);
+  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
+    throw new ValidationError(
+      `Refusing to check out: resolved path "${nodeDir}" escapes ${customNodesRoot}.`,
+    );
+  }
   logger.info("Checking out custom-node git ref", {
     repository: baseUrl,
     ref,
