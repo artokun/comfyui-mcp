@@ -164,7 +164,7 @@ export function registerDiagnosticsTools(server: McpServer): void {
         .string()
         .optional()
         .describe(
-          "Specific prompt ID to look up (returned by enqueue_workflow). If omitted, returns the most recent execution.",
+          "Specific prompt ID to look up (returned by enqueue_workflow). If omitted, returns the most recent COMMITTED execution (chosen by ComfyUI's queue number, not dict order). Note: immediately after a run finishes it can briefly lag by one until ComfyUI commits the new entry — pass the prompt_id from enqueue_workflow to get that exact run, and prefer the run-finished event for naming a just-produced output.",
         ),
     },
     async (args) => {
@@ -185,10 +185,20 @@ export function registerDiagnosticsTools(server: McpServer): void {
           };
         }
 
-        // If no prompt_id, return the most recent entry
+        // If no prompt_id, pick the newest by ComfyUI's MONOTONIC queue number
+        // (history[*].prompt[0]) rather than trusting object iteration order —
+        // /history is keyed by prompt_id and its order is not guaranteed
+        // newest-last, which made get_history return the PRIOR run (off-by-one,
+        // also surfaced as the panel's stale "Run finished" card). `prompt` is
+        // the array [queueNumber, promptId, graph, extra, outputs]; prompt[0] is
+        // the reliable order key.
+        const queueNumberOf = ([, e]: [string, HistoryEntry]): number => {
+          const p = e?.prompt as unknown;
+          return Array.isArray(p) ? Number(p[0]) || 0 : 0;
+        };
         const [promptId, entry] = args.prompt_id
           ? entries[0]
-          : entries[entries.length - 1];
+          : [...entries].sort((a, b) => queueNumberOf(b) - queueNumberOf(a))[0];
 
         const text = formatHistoryEntry(promptId, entry);
         return { content: [{ type: "text", text }] };

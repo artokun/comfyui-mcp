@@ -200,6 +200,54 @@ describe("applyManifest", () => {
     );
   });
 
+  it("reports a custom_node as FAILED when Manager queued it but it isn't present afterward", async () => {
+    // ComfyUI-Manager drains the queue "done" for a git URL not in its registry
+    // even though nothing was cloned. installCustomNode resolves, but the
+    // post-install verification (listInstalledNodes) must catch the no-op.
+    installCustomNodeMock.mockResolvedValueOnce({
+      message: "Queued + installed via ComfyUI-Manager.",
+    });
+    listInstalledNodesMock.mockResolvedValue([]); // never shows up — clone no-op'd
+
+    const result = await applyManifest({
+      manifest: {
+        custom_nodes: ["https://github.com/capitan01R/ComfyUI-Krea2T-Enhancer"],
+        models: [],
+      },
+    });
+
+    expect(result.summary).toMatchObject({ applied: 0, failed: 1 });
+    expect(result.results[0]).toMatchObject({
+      action: "custom_node",
+      status: "failed",
+    });
+    expect(result.results[0].message).toMatch(/not present afterward/i);
+  });
+
+  it("reports a custom_node as APPLIED only after verifying it's actually installed", async () => {
+    installCustomNodeMock.mockResolvedValueOnce({
+      message: "Queued + installed via ComfyUI-Manager.",
+    });
+    listInstalledNodesMock
+      .mockResolvedValueOnce([]) // pre-install skip-check: not yet installed
+      .mockResolvedValueOnce([
+        { module: "comfyui-krea2t-enhancer", enabled: true },
+      ]); // verification: the freshly-cloned node now shows on disk
+
+    const result = await applyManifest({
+      manifest: {
+        custom_nodes: ["https://github.com/capitan01R/ComfyUI-Krea2T-Enhancer"],
+        models: [],
+      },
+    });
+
+    expect(result.summary).toMatchObject({ applied: 1, failed: 0 });
+    expect(result.results[0]).toMatchObject({
+      action: "custom_node",
+      status: "applied",
+    });
+  });
+
   it("skips a model already present in an ALTERNATE model root (extra_model_paths)", async () => {
     // The computed target under <COMFYUI_PATH>/models does NOT exist (statMock
     // rejects by default), but the user already has the file under an extra root

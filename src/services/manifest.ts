@@ -494,11 +494,28 @@ export async function applyManifest(
     }
     try {
       const res = await installCustomNode({ id });
-      installedNodes.push({
-        module: maybeGitModuleName(id) ?? id,
-        enabled: true,
-      });
-      results.push(report("custom_node", id, "applied", res.message));
+      // ComfyUI-Manager marks a git-URL task "done" (queue drained) even when it
+      // cloned NOTHING — e.g. a repo not in its registry resolves to nothing, no
+      // dir is created, but the queue still empties cleanly. So a successful
+      // installCustomNode() call is NOT proof of install. Re-query the installed
+      // list (it reflects on-disk custom_nodes via Manager's
+      // /v2/customnode/installed, so a freshly-cloned node shows up even before a
+      // reboot) and confirm the node is actually present before reporting success.
+      const verified = await installedNodesOrEmpty();
+      if (nodeAlreadyInstalled(id, verified)) {
+        installedNodes.length = 0;
+        installedNodes.push(...verified);
+        results.push(report("custom_node", id, "applied", res.message));
+      } else {
+        results.push(
+          report(
+            "custom_node",
+            id,
+            "failed",
+            `ComfyUI-Manager reported the install as queued/done, but the node is not present afterward — the source likely resolved to nothing (a git URL that isn't in the Manager registry won't clone). Install it directly (git clone into custom_nodes) or use a registry id. ${res.message}`,
+          ),
+        );
+      }
     } catch (err) {
       results.push(
         report(
