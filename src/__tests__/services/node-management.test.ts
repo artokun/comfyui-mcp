@@ -41,7 +41,7 @@ vi.mock("node:fs", () => ({
   existsSync: vi.fn(() => true),
 }));
 
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { config } from "../../config.js";
@@ -67,7 +67,9 @@ const mockedExists = vi.mocked(existsSync);
 const COMFY = "/fake/comfy";
 const CM_CLI = join(COMFY, "custom_nodes", "ComfyUI-Manager", "cm-cli.py");
 const BAR_DIR = join(COMFY, "custom_nodes", "bar");
-const NODE_DIR_UTILS = join(COMFY, "custom_nodes", "comfyui-teskors-utils");
+// The clone fallback resolves the target with path.resolve (containment check),
+// which prepends the current drive on Windows — mirror that here.
+const NODE_DIR_UTILS = resolve(COMFY, "custom_nodes", "comfyui-teskors-utils");
 
 interface Call {
   url: string;
@@ -284,13 +286,13 @@ describe("node-management service", () => {
       const { body, params } = taskOf(calls, "install");
       expect(body.client_id).toBe("comfyui-mcp");
       expect(typeof body.ui_id).toBe("string");
-      // Registry params align with the frontend UI: channel "dev", mode "cache".
+      // Registry keeps the prior defaults: channel "default", mode "remote".
       expect(params).toMatchObject({
         id: "comfyui-impact-pack",
         version: "latest",
         selected_version: "latest",
-        channel: "dev",
-        mode: "cache",
+        channel: "default",
+        mode: "remote",
       });
       // Must kick the queue worker.
       expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/start"))).toBe(
@@ -411,10 +413,12 @@ describe("node-management service", () => {
         (c) => c[0] === "git" && (c[1] as string[])[0] === "clone",
       );
       expect(cloneCall).toBeDefined();
+      // `--end-of-options` guards the URL/dir from being parsed as git options.
       expect(cloneCall![1]).toEqual([
         "clone",
         "--depth",
         "1",
+        "--end-of-options",
         "https://github.com/teskor-hub/comfyui-teskors-utils",
         NODE_DIR_UTILS,
       ]);
@@ -449,6 +453,7 @@ describe("node-management service", () => {
       // Full clone (no --depth) so the ref is reachable.
       expect(cloneCall![1]).toEqual([
         "clone",
+        "--end-of-options",
         "https://github.com/teskor-hub/comfyui-teskors-utils",
         NODE_DIR_UTILS,
       ]);
@@ -468,6 +473,31 @@ describe("node-management service", () => {
           id: "https://github.com/teskor-hub/comfyui-teskors-utils",
         }),
       ).rejects.toBeInstanceOf(ProcessControlError);
+    });
+
+    it("rejects a git URL starting with '-' (option injection) without cloning", async () => {
+      stubFetch({ installedBody: {} });
+      await expect(
+        installCustomNode({ id: "--upload-pack=evil", source: "git" }),
+      ).rejects.toBeInstanceOf(ValidationError);
+      // git clone must NEVER run for an injection attempt.
+      expect(mockedExec).not.toHaveBeenCalledWith(
+        "git",
+        expect.arrayContaining(["clone"]),
+        expect.anything(),
+      );
+    });
+
+    it("rejects a repo name that resolves to '..' (path traversal) without cloning", async () => {
+      stubFetch({ installedBody: {} });
+      await expect(
+        installCustomNode({ id: "https://github.com/foo/.." }),
+      ).rejects.toBeInstanceOf(ValidationError);
+      expect(mockedExec).not.toHaveBeenCalledWith(
+        "git",
+        expect.arrayContaining(["clone"]),
+        expect.anything(),
+      );
     });
 
     it("rejects explicit git refs that could be interpreted as git options", async () => {

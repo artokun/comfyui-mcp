@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { config, getComfyUIBaseUrl } from "../config.js";
 import { comfyuiFetch } from "../comfyui/fetch.js";
 import { ComfyUIError, ProcessControlError, ValidationError } from "../utils/errors.js";
@@ -547,6 +547,51 @@ function resolveVenvPython(): string {
 }
 
 /**
+ * Validate a git URL before it is handed to `git clone` as an argument.
+ * Rejects an arg-injection vector (a URL parsed as a git option) and anything
+ * that isn't a recognized git URL shape.
+ */
+function assertSafeGitUrl(gitId: string): void {
+  if (gitId.startsWith("-")) {
+    throw new ValidationError(
+      `Refusing to clone git URL "${gitId}": it starts with '-' and would be ` +
+        `interpreted as a git option.`,
+    );
+  }
+  if (/[\x00-\x1F\x7F]/.test(gitId)) {
+    throw new ValidationError("Git URL cannot contain ASCII control characters.");
+  }
+  if (!looksLikeGitUrl(gitId)) {
+    throw new ValidationError(
+      `Refusing to clone "${gitId}": not a recognized git URL (expected ` +
+        `https://, ssh://, git@…, git+…, or a .git URL).`,
+    );
+  }
+}
+
+/**
+ * Validate the repo name derived from a git URL before it is used as a
+ * filesystem path segment under custom_nodes. Rejects empty, '.'/'..', names
+ * starting with '-', and names containing path separators or control chars —
+ * any of which could escape custom_nodes or be parsed as a git option.
+ */
+function assertSafeRepoName(repoName: string): void {
+  if (
+    repoName.length === 0 ||
+    repoName === "." ||
+    repoName === ".." ||
+    repoName.startsWith("-") ||
+    /[/\\]/.test(repoName) ||
+    /[\x00-\x1F\x7F]/.test(repoName)
+  ) {
+    throw new ValidationError(
+      `Refusing to use "${repoName}" as a custom_nodes directory name (empty, ` +
+        `'.'/'..', starts with '-', or contains a path separator/control char).`,
+    );
+  }
+}
+
+/**
  * Direct-clone fallback for an unregistered git repo the Manager can't resolve.
  * Clones into custom_nodes/<repoName>, checks out a ref if given, then makes a
  * best-effort attempt at installing python deps (requirements.txt + install.py).
@@ -568,15 +613,32 @@ function cloneCustomNodeFallback(
     );
   }
 
-  const nodeDir = join(config.comfyuiPath, "custom_nodes", repoName);
+  // SECURITY: validate before either value becomes a `git clone` arg or a path
+  // segment. gitId is checked for option-injection; repoName for path traversal.
+  assertSafeGitUrl(gitId);
+  assertSafeRepoName(repoName);
+
+  // Resolve the target and ASSERT it stays inside <comfyuiPath>/custom_nodes,
+  // mirroring manifest.ts's isWithinRoot containment check (defense in depth on
+  // top of the repoName validation above).
+  const customNodesRoot = resolve(config.comfyuiPath, "custom_nodes");
+  const nodeDir = resolve(customNodesRoot, repoName);
+  const rel = relative(customNodesRoot, nodeDir);
+  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
+    throw new ValidationError(
+      `Refusing to clone: resolved path "${nodeDir}" escapes ${customNodesRoot}.`,
+    );
+  }
+
   const warnings: string[] = [];
   const alreadyPresent = existsSync(nodeDir);
 
   if (!alreadyPresent) {
     // A concrete ref needs the full history reachable; otherwise shallow-clone.
+    // `--end-of-options` ensures gitId/nodeDir are never parsed as git options.
     const cloneArgs = gitRef
-      ? ["clone", gitId, nodeDir]
-      : ["clone", "--depth", "1", gitId, nodeDir];
+      ? ["clone", "--end-of-options", gitId, nodeDir]
+      : ["clone", "--depth", "1", "--end-of-options", gitId, nodeDir];
     logger.info("Cloning unregistered custom node", { gitId, nodeDir, gitRef });
     try {
       execFileSync("git", cloneArgs, {
@@ -739,16 +801,18 @@ export async function installCustomNode(
     return cloneCustomNodeFallback(gitId, repoName, gitRef, status);
   }
 
-  // Registry (plain CNR id). Align params to the frontend UI (channel "dev",
-  // mode "cache") so resolution matches the proven-working path, then VERIFY the
-  // pack actually landed — a non-URL id can't be cloned, so an absent pack is a
-  // hard error rather than a silent no-op.
+  // Registry (plain CNR id). Keep the prior defaults channel "default" /
+  // mode "remote" (overridable via opts) — forcing "dev"/"cache" risks resolving
+  // a different build or failing for default-only packs. The UI-style
+  // "dev"/"cache" is used ONLY for the git registry-first lookup above. Then
+  // VERIFY the pack actually landed — a non-URL id can't be cloned, so an absent
+  // pack is a hard error rather than a silent no-op.
   const status = await queueManagerTask("install", {
     id,
     version: version ?? "latest",
     selected_version: version ?? "latest",
-    channel: opts.channel ?? "dev",
-    mode: opts.mode ?? "cache",
+    channel,
+    mode,
   });
   const installed = await listInstalledNodes().catch(
     () => [] as InstalledNode[],
