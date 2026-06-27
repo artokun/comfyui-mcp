@@ -424,6 +424,11 @@ describe("node-management service", () => {
         "https://github.com/teskor-hub/comfyui-teskors-utils",
         NODE_DIR_UTILS,
       ]);
+      // The clone must run non-interactively so a missing/private repo fails fast
+      // instead of hanging on a credential prompt.
+      const cloneEnv = (cloneCall![2] as { env?: Record<string, string> })?.env;
+      expect(cloneEnv?.GIT_TERMINAL_PROMPT).toBe("0");
+      expect(cloneEnv?.GIT_ASKPASS).toBe("echo");
     });
 
     it("full-clones (no --depth) and checks out an explicit ref on fallback", async () => {

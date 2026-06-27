@@ -257,6 +257,24 @@ async function queueManagerTask(
 // ---------------------------------------------------------------------------
 
 const CM_CLI_TIMEOUT = 600_000;
+// A real custom-node repo clones well under this; with prompts disabled a
+// missing/private repo fails in ~1s rather than blocking the whole timeout.
+const GIT_CLONE_TIMEOUT = 180_000;
+
+/** Env for git network ops that must NEVER block on an interactive credential
+ *  prompt. Without this, `git clone`/`fetch` of a missing or private repo waits
+ *  on a stdin username/password prompt and hangs until the timeout (observed as a
+ *  multi-minute "thinking" stall on a bad URL). GIT_ASKPASS=echo + the prompt
+ *  flags make git fail fast instead. GITHUB_TOKEN is passed through when set. */
+function nonInteractiveGitEnv(): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_ASKPASS: "echo",
+    GCM_INTERACTIVE: "never",
+    ...(config.githubToken ? { GITHUB_TOKEN: config.githubToken } : {}),
+  };
+}
 
 function resolveCmCliPath(): string {
   if (!config.comfyuiPath) {
@@ -497,12 +515,14 @@ function runGitCheckout(baseUrl: string, ref: string): void {
     execFileSync("git", ["-C", nodeDir, "fetch", "--all", "--tags"], {
       cwd: config.comfyuiPath,
       encoding: "utf-8",
-      timeout: CM_CLI_TIMEOUT,
+      timeout: GIT_CLONE_TIMEOUT,
+      env: nonInteractiveGitEnv(),
     });
     execFileSync("git", ["-C", nodeDir, "checkout", "--detach", "--end-of-options", ref], {
       cwd: config.comfyuiPath,
       encoding: "utf-8",
-      timeout: CM_CLI_TIMEOUT,
+      timeout: GIT_CLONE_TIMEOUT,
+      env: nonInteractiveGitEnv(),
     });
   } catch (err) {
     const e = err as NodeJS.ErrnoException & { stdout?: Buffer | string; stderr?: Buffer | string };
@@ -658,11 +678,8 @@ function cloneCustomNodeFallback(
       execFileSync("git", cloneArgs, {
         cwd: config.comfyuiPath,
         encoding: "utf-8",
-        timeout: CM_CLI_TIMEOUT,
-        env: {
-          ...process.env,
-          ...(config.githubToken ? { GITHUB_TOKEN: config.githubToken } : {}),
-        },
+        timeout: GIT_CLONE_TIMEOUT,
+        env: nonInteractiveGitEnv(),
       });
     } catch (err) {
       const e = err as NodeJS.ErrnoException & {
