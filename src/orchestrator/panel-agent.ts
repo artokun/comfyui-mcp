@@ -46,6 +46,14 @@ function msgOf(err: unknown): string {
  *  COMFYUI_MCP_TURN_IDLE_MS. Default 3.5 min. */
 const TURN_IDLE_MS = Number(process.env.COMFYUI_MCP_TURN_IDLE_MS) || 210_000;
 
+/** How long after an interrupt to wait for the aborted turn's `result` (which
+ *  releases the turn gate at the correct moment) before force-releasing it as a
+ *  fallback. Short enough to feel immediate if a result somehow never arrives;
+ *  in the normal case the result lands well within this and the gate opens then.
+ *  Overridable (tuning / tests) via COMFYUI_MCP_INTERRUPT_RELEASE_MS. */
+const INTERRUPT_RELEASE_FALLBACK_MS =
+  Number(process.env.COMFYUI_MCP_INTERRUPT_RELEASE_MS) || 1500;
+
 /** Reasoning effort levels. This is the PROVIDER-NEUTRAL union of every backend's
  *  scale so a value chosen for one provider survives a switch to another:
  *    • Claude scale: low | medium | high | xhigh | max
@@ -198,6 +206,14 @@ export class PanelAgent {
   private yieldedTurns = 0;
   private completedTurns = 0;
   private turnWaiter: (() => void) | null = null;
+  /** After an interrupt we DON'T force the turn gate open synchronously — that
+   *  fed the next batch into the backend before the aborted turn had settled, so
+   *  Claude took the message into the session but started no turn on it (wedged
+   *  until the slow idle watchdog or the next message). Instead the aborted
+   *  turn's `result` event drives completeTurn() at the right moment; this is a
+   *  short fallback that opens the gate anyway if no result ever arrives, so an
+   *  interrupt can never stop cold. */
+  private interruptReleaseTimer: ReturnType<typeof setTimeout> | null = null;
   /** Mutable so the model/effort picker can change them at runtime. */
   private model: string;
   private effort?: Effort;
@@ -437,6 +453,11 @@ export class PanelAgent {
     // both clear it and have us re-queue a stale copy.
     const interrupted = this.inFlight;
     this.inFlight = null;
+    // The turn that's in flight RIGHT NOW — the one we're aborting. Captured
+    // before the await so the release fallback below targets exactly this turn's
+    // gate (not a later one the channel may legitimately advance to if the
+    // aborted turn's result lands during the await).
+    const interruptedTurn = this.yieldedTurns;
     // Re-queue the interrupted turn ONLY for "send now" (requeueInFlight) — there
     // the user wants BOTH the interrupted message and the new one answered. A plain
     // Stop / Ctrl+C / Esc (requeueInFlight=false) must NOT re-queue, or it would
@@ -451,7 +472,47 @@ export class PanelAgent {
     } catch (err) {
       logger.debug(`[panel-agent ${this.short()}] interrupt: ${msgOf(err)}`);
     } finally {
-      this.releaseTurns();
+      // Do NOT force the gate open here. Synchronously releasing it fed the next
+      // batch (the re-queued turn + the "send now" message) into Claude before the
+      // aborted turn had settled — the SDK took the message into the session but
+      // started no turn on it, so it sat wedged until the slow idle watchdog (or
+      // the user's next message) nudged it. Instead let the aborted turn's
+      // `result` event drive completeTurn() — that fires once the SDK has finished
+      // tearing the turn down and is ready for the next prompt, so the re-queued
+      // batch is fed at the right moment and answered immediately. The fallback
+      // guarantees we still advance if no result ever arrives.
+      this.armInterruptReleaseFallback(interruptedTurn);
+    }
+  }
+
+  /** Bounded safety net for interrupt(): if the aborted turn's `result` (which
+   *  opens the gate via completeTurn) hasn't arrived shortly, force the gate so an
+   *  interrupt can't stop cold. `guardTurn` is the interrupted turn's number —
+   *  we only force-release while THAT turn is still the one the gate waits on, so
+   *  a result that lands during the await (advancing the channel to a new, legit
+   *  in-flight turn) can't be wrongly cut short. Cancelled by completeTurn(). */
+  private armInterruptReleaseFallback(guardTurn: number): void {
+    if (this.interruptReleaseTimer) clearTimeout(this.interruptReleaseTimer);
+    this.interruptReleaseTimer = setTimeout(() => {
+      this.interruptReleaseTimer = null;
+      if (this.closed) return;
+      // Fire only if the SAME interrupted turn still hasn't completed (no result
+      // arrived). If a result landed, completedTurns has reached guardTurn (and
+      // completeTurn already cleared this timer), so this is a no-op.
+      if (this.completedTurns < guardTurn) {
+        logger.debug(
+          `[panel-agent ${this.short()}] interrupt: no result within ${INTERRUPT_RELEASE_FALLBACK_MS}ms — releasing the gate`,
+        );
+        this.releaseTurns();
+      }
+    }, INTERRUPT_RELEASE_FALLBACK_MS);
+    this.interruptReleaseTimer.unref?.();
+  }
+
+  private clearInterruptReleaseFallback(): void {
+    if (this.interruptReleaseTimer) {
+      clearTimeout(this.interruptReleaseTimer);
+      this.interruptReleaseTimer = null;
     }
   }
 
@@ -484,15 +545,19 @@ export class PanelAgent {
    *  yieldedTurns so an interrupt + a late result for the same turn can't double-
    *  count and let the gate run ahead. */
   private completeTurn(): void {
+    // A real result settled the (interrupted or clean) turn — the post-interrupt
+    // fallback is no longer needed.
+    this.clearInterruptReleaseFallback();
     this.completedTurns = Math.min(this.completedTurns + 1, this.yieldedTurns);
     const w = this.turnWaiter;
     this.turnWaiter = null;
     w?.();
   }
 
-  /** Force the gate open regardless of results (interrupt / shutdown) so an
-   *  interrupt advances to the next pending batch instead of stopping cold. */
+  /** Force the gate open regardless of results (interrupt fallback / shutdown) so
+   *  an interrupt advances to the next pending batch instead of stopping cold. */
   private releaseTurns(): void {
+    this.clearInterruptReleaseFallback();
     this.completedTurns = this.yieldedTurns;
     const w = this.turnWaiter;
     this.turnWaiter = null;
@@ -622,10 +687,13 @@ export class PanelAgent {
         if (this.closed) break;
         logger.error(`[panel-agent ${this.short()}] stream error: ${msgOf(err)}`);
       }
-      // Session ended (cleanly or via error) — disarm any armed watchdog so a stale
-      // timer from the dead session can't fire into the restarted one. The gate
-      // counters are reset at the top of the next iteration.
+      // Session ended (cleanly or via error) — disarm any armed watchdog AND the
+      // interrupt-release fallback so a stale timer from the dead session can't fire
+      // into the restarted one (the restart resets the gate counters to 0, so a
+      // leftover fallback armed for old turn N would force-release the new session's
+      // first turn — gate run-ahead). The gate counters are reset next iteration.
       this.clearIdleWatchdog();
+      this.clearInterruptReleaseFallback();
       if (this.closed) break;
       // Session ended on its own — bound rapid failure loops so a persistently
       // broken SDK doesn't spin forever or black-hole each message.

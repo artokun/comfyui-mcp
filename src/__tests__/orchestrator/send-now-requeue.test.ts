@@ -21,10 +21,11 @@ beforeAll(async () => {
 
 /**
  * A backend that records the text of every turn it receives from the channel.
- * Each turn HANGS (emits a session then waits) until `interrupt()` is called,
- * which ends the in-flight run iteration and lets the channel release the next
- * batch — mirroring how a real interrupt breaks the live stream. After interrupt
- * the generator's for-await resumes and pulls the next turn.
+ * Each turn HANGS (emits a session then waits) until `interrupt()` is called.
+ * On interrupt the aborted turn emits a terminal `result` event — mirroring how
+ * the real Claude SDK emits a result message for an interrupted turn — which is
+ * what releases the turn gate (via completeTurn) at the right moment. The
+ * for-await then pulls the next (re-queued) batch.
  */
 class RecordingBackend implements AgentBackend {
   readonly id = "claude" as const;
@@ -34,6 +35,9 @@ class RecordingBackend implements AgentBackend {
   interrupted = 0;
   /** Resolver for the currently-hanging turn (called by interrupt()). */
   private breakTurn: (() => void) | null = null;
+  /** Set by interrupt() so the resumed turn knows to emit an interrupted result
+   *  (rather than a stop/teardown, where we just exit). */
+  private brokenByInterrupt = false;
   /** When true a turn completes cleanly (emits result) instead of hanging. */
   autoComplete = false;
 
@@ -51,6 +55,12 @@ class RecordingBackend implements AgentBackend {
         this.breakTurn = resolve;
       });
       this.breakTurn = null;
+      if (this.brokenByInterrupt) {
+        // The interrupted turn ends with a result (like the real SDK) — this is
+        // the signal that releases the turn gate for the next batch.
+        this.brokenByInterrupt = false;
+        yield { type: "result", ok: false, subtype: "interrupted" };
+      }
     }
   }
 
@@ -58,6 +68,7 @@ class RecordingBackend implements AgentBackend {
     this.interrupted += 1;
     const brk = this.breakTurn;
     this.breakTurn = null;
+    if (brk) this.brokenByInterrupt = true;
     brk?.();
   }
 
@@ -105,8 +116,10 @@ describe("send-now re-queues the interrupted message", () => {
     // second message. (A plain Stop would NOT re-queue — see the test below.)
     await agent.interrupt({ requeueInFlight: true });
 
-    // The next turn must combine BOTH, interrupted-first.
-    await waitFor(() => backend.turns.length === 2);
+    // The next turn must combine BOTH, interrupted-first — and arrive PROMPTLY
+    // (driven by the interrupted turn's result, not the slow release fallback or
+    // the multi-minute idle watchdog). 500ms guards against regressing to either.
+    await waitFor(() => backend.turns.length === 2, 500);
     const second = backend.turns[1];
     expect(second).toContain("first message"); // interrupted message NOT dropped
     expect(second).toContain("urgent second message"); // new message included
