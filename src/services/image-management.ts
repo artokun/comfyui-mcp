@@ -1,5 +1,5 @@
 import { readFile, copyFile, readdir, stat } from "node:fs/promises";
-import { join, basename, extname } from "node:path";
+import { join, basename, extname, relative, sep } from "node:path";
 import { config } from "../config.js";
 import { ValidationError, ModelError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
@@ -172,6 +172,11 @@ export interface OutputImage {
   path: string;
   size: number;
   modified: string;
+  /** Subfolder relative to the output dir ("" for top level), forward-slash
+   *  normalized. ComfyUI writes to subfolders when a node's filename_prefix
+   *  contains a path (e.g. SaveVideo "video/clip" → output/video/clip_00001.mp4).
+   *  Pass { filename, subfolder } to get_image / stage_output_as_input. */
+  subfolder: string;
   /** Media kind derived from the file extension. */
   kind: "image" | "video";
 }
@@ -205,29 +210,40 @@ export async function listOutputImages(options?: {
   const limit = options?.limit ?? 20;
   const pattern = options?.pattern?.toLowerCase();
 
-  let entries: string[];
+  // RECURSIVE scan: ComfyUI writes to subfolders when a node's filename_prefix
+  // contains a path (SaveVideo / VHS / "video/clip" → output/video/clip_00001.mp4).
+  // A flat readdir of the top level silently misses those — so a finished video can
+  // look "not found" even though the dir resolved correctly. Walk the whole tree.
+  let dirents;
   try {
-    entries = await readdir(outputDir);
+    dirents = await readdir(outputDir, { recursive: true, withFileTypes: true });
   } catch {
     return [];
   }
 
   const images: OutputImage[] = [];
 
-  for (const entry of entries) {
-    const ext = extname(entry).toLowerCase();
+  for (const dirent of dirents) {
+    if (!dirent.isFile()) continue;
+    const ext = extname(dirent.name).toLowerCase();
     if (!MEDIA_EXTS.has(ext)) continue;
-    if (pattern && !entry.toLowerCase().includes(pattern)) continue;
 
-    const filePath = join(outputDir, entry);
+    // Dirent.parentPath (Node ≥20.12) is the absolute dir holding the entry.
+    const parent = dirent.parentPath ?? outputDir;
+    const subfolder = relative(outputDir, parent).split(sep).join("/"); // "" at top level
+    const relPath = subfolder ? `${subfolder}/${dirent.name}` : dirent.name;
+    // Match the pattern against the subfolder-relative path so "video/clip" works.
+    if (pattern && !relPath.toLowerCase().includes(pattern)) continue;
+
+    const filePath = join(parent, dirent.name);
     try {
       const info = await stat(filePath);
-      if (!info.isFile()) continue;
       images.push({
-        filename: entry,
+        filename: dirent.name,
         path: filePath,
         size: info.size,
         modified: info.mtime.toISOString(),
+        subfolder,
         kind: mediaKind(ext),
       });
     } catch {

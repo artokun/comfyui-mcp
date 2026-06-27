@@ -290,7 +290,7 @@ export function registerImageManagementTools(server: McpServer): void {
   // ── list_output_images ────────────────────────────────────────────────────
   server.tool(
     "list_output_images",
-    "List recently generated image AND video files from ComfyUI's local output/ directory (filesystem scan), newest-first, with each file's kind ('image' | 'video'), size, and modification time. Covers stills (.png/.jpg/.jpeg/.bmp) and video/animation outputs (.mp4/.webm/.mov/.mkv/.m4v/.avi/.gif/.webp). Requires COMFYUI_PATH to be set (local installs only) — it does NOT return the media bytes themselves. For remote ComfyUI, use get_history to find filenames, then get_image to fetch the bytes. USE THIS TO CONFIRM A VIDEO RENDER (e.g. VHS_VideoCombine / LTX / WAN output) when get_history shows the prompt done but lists no output: VHS-style video nodes write the file but often do NOT register in ComfyUI's /history, so the filesystem scan is the reliable way to verify the .mp4 exists — then chain it with stage_output_as_input. Read-only.",
+    "List recently generated image AND video files from ComfyUI's local output/ directory (RECURSIVE filesystem scan — includes subfolders like video/ that VHS/SaveVideo write to), newest-first, with each file's kind ('image' | 'video'), subfolder, size, and modification time. Covers stills (.png/.jpg/.jpeg/.bmp) and video/animation outputs (.mp4/.webm/.mov/.mkv/.m4v/.avi/.gif/.webp). Requires COMFYUI_PATH to be set (local installs only) — it does NOT return the media bytes themselves. For remote ComfyUI, use get_history to find filenames, then get_image to fetch the bytes. USE THIS TO CONFIRM A VIDEO RENDER (e.g. VHS_VideoCombine / LTX / WAN output) when get_history shows the prompt done but lists no output: VHS-style video nodes write the file but often do NOT register in ComfyUI's /history, so the filesystem scan is the reliable way to verify the .mp4 exists — then chain it with stage_output_as_input. Read-only.",
     {
       limit: z
         .number()
@@ -325,7 +325,9 @@ export function registerImageManagementTools(server: McpServer): void {
         const lines = images.map((img, i) => {
           const sizeMB = (img.size / 1024 / 1024).toFixed(1);
           const date = new Date(img.modified).toLocaleString();
-          return `${i + 1}. **${img.filename}** [${img.kind}] (${sizeMB} MB) — ${date}`;
+          const loc = img.subfolder ? `${img.subfolder}/${img.filename}` : img.filename;
+          const sub = img.subfolder ? ` _(subfolder: ${img.subfolder})_` : "";
+          return `${i + 1}. **${loc}** [${img.kind}] (${sizeMB} MB) — ${date}${sub}`;
         });
         const videoCount = images.filter((img) => img.kind === "video").length;
         const summary =

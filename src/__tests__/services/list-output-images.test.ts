@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, writeFile, rm, utimes } from "node:fs/promises";
+import { mkdtemp, writeFile, rm, utimes, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -15,6 +15,18 @@ import { listOutputImages } from "../../services/image-management.js";
 
 async function touch(name: string, when: Date, bytes = 1024): Promise<void> {
   const p = join(outputDir, name);
+  await writeFile(p, Buffer.alloc(bytes));
+  await utimes(p, when, when);
+}
+
+async function touchSub(
+  subfolder: string,
+  name: string,
+  when: Date,
+  bytes = 1024,
+): Promise<void> {
+  await mkdir(join(outputDir, subfolder), { recursive: true });
+  const p = join(outputDir, subfolder, name);
   await writeFile(p, Buffer.alloc(bytes));
   await utimes(p, when, when);
 }
@@ -91,5 +103,29 @@ describe("listOutputImages", () => {
 
     const results = await listOutputImages({ pattern: "LTX" });
     expect(results.map((r) => r.filename)).toEqual(["stage2_ltx_00003.mp4"]);
+  });
+
+  it("recurses into subfolders (SaveVideo writes to output/video/) and reports the subfolder", async () => {
+    const now = new Date("2026-06-26T12:00:00Z");
+    await touch("ComfyUI_00001_.png", now); // top-level still
+    await touchSub("video", "LTX_2.3_i2v_00004_.mp4", now); // the file a flat scan would miss
+
+    const results = await listOutputImages({ limit: 100 });
+    const vid = results.find((r) => r.filename === "LTX_2.3_i2v_00004_.mp4");
+    expect(vid).toBeDefined();
+    expect(vid?.kind).toBe("video");
+    expect(vid?.subfolder).toBe("video"); // forward-slash normalized, no leading sep
+    // top-level files carry an empty subfolder
+    expect(results.find((r) => r.filename === "ComfyUI_00001_.png")?.subfolder).toBe("");
+  });
+
+  it("matches the pattern against the subfolder-relative path", async () => {
+    const now = new Date("2026-06-26T12:00:00Z");
+    await touchSub("video", "clip_00001.mp4", now);
+    await touch("clip_00002.png", now);
+
+    // "video/" only matches the file under the video/ subfolder
+    const results = await listOutputImages({ pattern: "video/" });
+    expect(results.map((r) => r.filename)).toEqual(["clip_00001.mp4"]);
   });
 });
