@@ -261,6 +261,63 @@ import { fetchImage, uploadImageHttp } from "../comfyui/client.js";
 import { readFile as nodeReadFile } from "node:fs/promises";
 
 /**
+ * Reject filename / subfolder values that could traverse out of ComfyUI's
+ * output, input or temp directory when forwarded to the /view endpoint.
+ *
+ * ComfyUI's /view handler joins the requested `subfolder` and `filename`
+ * onto the configured base directory; the server has historically been
+ * permissive about ".." segments and absolute paths in those parameters
+ * (see e.g. comfyanonymous/ComfyUI#785), so an attacker who can reach the
+ * MCP tool surface could otherwise pivot through get_image / view_image /
+ * stage_output_as_input to read arbitrary files from the ComfyUI host.
+ *
+ * Legitimate ComfyUI values are a single filename (no separators) and a
+ * relative subfolder produced by listOutputImages (forward-slash joined,
+ * no ".." segments). Anything outside that shape is refused here BEFORE
+ * the request is forwarded.
+ */
+function assertSafeViewRef(filename: string, subfolder: string): void {
+  if (typeof filename !== "string" || filename.length === 0) {
+    throw new ValidationError("filename is required");
+  }
+  if (filename.includes("\0") || (subfolder && subfolder.includes("\0"))) {
+    throw new ValidationError(
+      "filename / subfolder must not contain NUL bytes",
+    );
+  }
+  // Filename must be a single path segment — no separators, no traversal.
+  if (
+    filename.includes("/") ||
+    filename.includes("\\") ||
+    filename === "." ||
+    filename === ".." ||
+    filename.split(/[\\/]/).some((s) => s === "..")
+  ) {
+    throw new ValidationError(
+      `Invalid filename "${filename}": must be a single filename without path separators or '..' segments`,
+    );
+  }
+  if (!subfolder) return;
+  // Subfolder must be a forward-slash-joined relative path with no ".."
+  // segments and no Windows-style drive / absolute prefix.
+  if (
+    subfolder.startsWith("/") ||
+    subfolder.startsWith("\\") ||
+    /^[A-Za-z]:[\\/]/.test(subfolder)
+  ) {
+    throw new ValidationError(
+      `Invalid subfolder "${subfolder}": must be relative to the ComfyUI media directory`,
+    );
+  }
+  const segments = subfolder.split(/[\\/]/);
+  if (segments.some((s) => s === "..")) {
+    throw new ValidationError(
+      `Invalid subfolder "${subfolder}": '..' segments are not allowed`,
+    );
+  }
+}
+
+/**
  * Fetch a generated image from ComfyUI via HTTP /view endpoint.
  * Does NOT require COMFYUI_PATH — works with remote ComfyUI instances.
  */
@@ -269,6 +326,7 @@ export async function getOutputImage(
   type: "output" | "input" | "temp" = "output",
   subfolder = "",
 ): Promise<{ base64: string; mimeType: string; filename: string }> {
+  assertSafeViewRef(filename, subfolder);
   const result = await fetchImage(filename, type, subfolder);
   return { ...result, filename };
 }
@@ -478,10 +536,12 @@ export async function stageOutputAsInput(
   // Fetch the existing asset's bytes via the same /view mechanism the asset
   // tools use (fetchImage handles cloud vs local). Despite the name, /view
   // returns raw bytes for any media type, not just images.
+  const sourceSubfolder = args.subfolder ?? "";
+  assertSafeViewRef(args.filename, sourceSubfolder);
   const { base64 } = await fetchImage(
     args.filename,
     sourceType,
-    args.subfolder ?? "",
+    sourceSubfolder,
   );
   const data = Buffer.from(base64, "base64");
 
