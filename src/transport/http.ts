@@ -1,5 +1,5 @@
 import http from "node:http";
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -12,6 +12,57 @@ export interface HttpServerOptions {
   createServer: () => Promise<McpServer> | McpServer;
   /** Path the MCP endpoint is served on (default /mcp). */
   path?: string;
+  /**
+   * Optional shared-secret token. When set, EVERY request to the MCP endpoint
+   * must present it as `Authorization: Bearer <token>` OR `X-API-Key: <token>`
+   * (the latter matches Comfy Cloud's convention); missing/wrong → 401. When
+   * unset, the endpoint is open (preserves the existing local stdio/http use).
+   */
+  token?: string;
+  /**
+   * Escape hatch for the "non-loopback host without a token" safety gate. By
+   * default, binding a non-loopback host (anything but 127.0.0.1/::1/localhost)
+   * with NO token is a HARD FAIL — an open MCP endpoint reachable off-box is a
+   * footgun next to the tunnel/hosted path. Set this (via
+   * `--allow-unauthenticated-non-loopback` / `COMFYUI_MCP_ALLOW_UNAUTH=1`) to
+   * downgrade the failure to a warning and start anyway.
+   */
+  allowUnauthenticated?: boolean;
+}
+
+// Hostnames that keep traffic on the local machine. Anything else (including
+// 0.0.0.0, which binds all interfaces) is reachable off-box, so an unset token
+// there is a hard failure unless explicitly allowed.
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1"]);
+
+/**
+ * Constant-time comparison of the presented credential against the configured
+ * token. Reads `Authorization: Bearer <token>` first, then `X-API-Key`. Returns
+ * true iff exactly one matches; the length-guard keeps timingSafeEqual from
+ * throwing on mismatched lengths while staying constant-time per-comparison.
+ */
+function isAuthorized(req: http.IncomingMessage, token: string): boolean {
+  const expected = Buffer.from(token);
+  const candidates: string[] = [];
+
+  const authHeader = req.headers["authorization"];
+  const auth = Array.isArray(authHeader) ? authHeader[0] : authHeader;
+  if (auth) {
+    const m = /^Bearer\s+(.+)$/i.exec(auth.trim());
+    if (m) candidates.push(m[1].trim());
+  }
+
+  const apiKeyHeader = req.headers["x-api-key"];
+  const apiKey = Array.isArray(apiKeyHeader) ? apiKeyHeader[0] : apiKeyHeader;
+  if (apiKey) candidates.push(apiKey.trim());
+
+  for (const candidate of candidates) {
+    const provided = Buffer.from(candidate);
+    if (provided.length === expected.length && timingSafeEqual(provided, expected)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function readBody(req: http.IncomingMessage): Promise<unknown> {
@@ -49,13 +100,41 @@ function sendJsonError(res: http.ServerResponse, status: number, message: string
  */
 export async function startHttpServer(opts: HttpServerOptions): Promise<http.Server> {
   const path = opts.path ?? "/mcp";
+  const token = opts.token?.trim() || undefined;
   const transports = new Map<string, StreamableHTTPServerTransport>();
+
+  if (!token && !LOOPBACK_HOSTS.has(opts.host.toLowerCase())) {
+    if (!opts.allowUnauthenticated) {
+      throw new Error(
+        `Refusing to start: HTTP MCP transport bound on non-loopback host ${opts.host} ` +
+          `WITHOUT an auth token — the /mcp endpoint would be OPEN to anyone who can reach ` +
+          `this host. Fix one of:\n` +
+          `  • set COMFYUI_MCP_HTTP_TOKEN=<secret> (recommended), or\n` +
+          `  • use --tunnel (auto-generates a token), or\n` +
+          `  • bind a loopback host (--host 127.0.0.1), or\n` +
+          `  • explicitly opt into an open endpoint with ` +
+          `--allow-unauthenticated-non-loopback (env COMFYUI_MCP_ALLOW_UNAUTH=1).`,
+      );
+    }
+    logger.warn(
+      `HTTP MCP transport bound on non-loopback host ${opts.host} WITHOUT an auth token — ` +
+        `the /mcp endpoint is OPEN to anyone who can reach this host ` +
+        `(allowed via --allow-unauthenticated-non-loopback / COMFYUI_MCP_ALLOW_UNAUTH).`,
+    );
+  }
 
   const httpServer = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
       if (url.pathname !== path) {
         sendJsonError(res, 404, `Not found. MCP endpoint is ${path}`);
+        return;
+      }
+
+      // Auth gate: only enforced when a token is configured. Unset → open
+      // (unchanged legacy behavior). Applies to every method on the endpoint.
+      if (token && !isAuthorized(req, token)) {
+        sendJsonError(res, 401, "Unauthorized: missing or invalid token");
         return;
       }
 

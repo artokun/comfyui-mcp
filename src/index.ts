@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { randomBytes } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -124,6 +125,75 @@ async function createConfiguredServer(): Promise<McpServer> {
   return server;
 }
 
+/**
+ * Open a cloudflared quick tunnel to the local HTTP MCP port and print a clear,
+ * ready-to-paste Claude Desktop Custom Connector block (public https://…/mcp
+ * URL + token + headless X-API-Key usage). Resilient: a missing cloudflared
+ * binary (or any tunnel error) surfaces install guidance and leaves the local
+ * server running instead of crashing.
+ */
+async function openTunnelAndAnnounce(
+  host: string,
+  port: number,
+  token: string,
+): Promise<void> {
+  const { startQuickTunnel } = await import("./services/tunnel.js");
+  logger.info("[tunnel] starting cloudflared quick tunnel…");
+  let publicUrl: string;
+  try {
+    const tunnel = await startQuickTunnel(port);
+    publicUrl = tunnel.url;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error(
+      `[tunnel] could not start cloudflared: ${message}\n` +
+        `  Install it, then re-run with --tunnel:\n` +
+        `    npm install -g cloudflared      # or: brew install cloudflared / winget install cloudflare.cloudflared\n` +
+        `  The local server is still running at http://${host}:${port}/mcp (token auth active).`,
+    );
+    return;
+  }
+
+  const mcpUrl = `${publicUrl}/mcp`;
+  const snippet = JSON.stringify(
+    {
+      mcpServers: {
+        comfyui: {
+          url: mcpUrl,
+          headers: { "X-API-Key": token },
+        },
+      },
+    },
+    null,
+    2,
+  );
+
+  // Single multi-line block to stderr so it survives MCP stdio framing and is
+  // easy to copy from the terminal.
+  process.stderr.write(
+    [
+      "",
+      "════════════════════════════════════════════════════════════════════",
+      " ComfyUI MCP — Remote / Hosted Connector is LIVE",
+      "════════════════════════════════════════════════════════════════════",
+      ` Public MCP URL : ${mcpUrl}`,
+      ` Auth token     : ${token}`,
+      "",
+      " Claude Desktop → Settings → Connectors → Add custom connector:",
+      `   • Name : ComfyUI`,
+      `   • URL  : ${mcpUrl}`,
+      `   • Header: X-API-Key: ${token}   (or Authorization: Bearer ${token})`,
+      "",
+      " Headless / programmatic config snippet:",
+      snippet,
+      "",
+      " Keep this terminal open — the tunnel closes when the process exits.",
+      "════════════════════════════════════════════════════════════════════",
+      "",
+    ].join("\n"),
+  );
+}
+
 async function main() {
   const cli = parseCliArgs(process.argv);
 
@@ -138,12 +208,28 @@ async function main() {
   await JobWatcher.cleanupOldFiles();
 
   if (cli.transport === "http") {
+    // In tunnel mode, require a token even if none was configured: the endpoint
+    // is about to be exposed publicly, so generate a strong one on the fly.
+    const token =
+      cli.token ?? (cli.tunnel ? randomBytes(24).toString("hex") : undefined);
+
     await startHttpServer({
       host: cli.host,
       port: cli.port,
+      token,
+      allowUnauthenticated: cli.allowUnauthenticated,
       createServer: () => createConfiguredServer(),
     });
     logger.info(`ComfyUI MCP server running on http://${cli.host}:${cli.port}/mcp`);
+    if (token) {
+      logger.info(
+        `HTTP MCP auth ENABLED — send 'Authorization: Bearer <token>' or 'X-API-Key: <token>'.`,
+      );
+    }
+
+    if (cli.tunnel) {
+      await openTunnelAndAnnounce(cli.host, cli.port, token!);
+    }
   } else {
     const server = await createConfiguredServer();
     const transport = new StdioServerTransport();

@@ -60,6 +60,28 @@ Claude will find (or download) a checkpoint, build a workflow, execute it, and r
 
 For **Comfy Cloud** users, [Comfy-Org ships an official Comfy Cloud MCP](https://docs.comfy.org/development/cloud/mcp-server) (currently invite-only beta) which is cloud-exclusive and maintained by the Comfy team. `comfyui-mcp` *also* includes a community cloud-mode (set `COMFYUI_API_KEY` — see [Deployment modes](#deployment-modes)) so a single MCP can target all three deployment shapes from one config; pick whichever fits your workflow.
 
+### Remote / hosted connector (one command)
+
+Want to use `comfyui-mcp` from **Claude Desktop's Custom Connectors** or any remote
+client — like Comfy's own `cloud.comfy.org/mcp` connector? Run it as an
+authenticated, publicly-reachable Streamable-HTTP server with one flag:
+
+```bash
+npx -y comfyui-mcp --tunnel
+```
+
+This forces the HTTP transport, generates an auth token, opens a
+[cloudflared](https://github.com/cloudflare/cloudflared) quick tunnel, and prints
+a ready-to-paste `https://…/mcp` URL + token + Claude Desktop connector snippet.
+Auth accepts `Authorization: Bearer <token>` **or** `X-API-Key: <token>` (matching
+Comfy Cloud's convention). See the
+[Remote / hosted connector guide](https://comfyui-mcp.artokun.io/docs/remote-connector)
+for the full walkthrough and headless usage.
+
+> Auth is opt-in: with no `COMFYUI_MCP_HTTP_TOKEN` set and no `--tunnel`, the
+> default stdio (and plain `--http` on loopback) behavior is unchanged — open and
+> local. OAuth (Comfy's browser sign-in flow) is a planned follow-up.
+
 ---
 
 ## Claude Code Plugin

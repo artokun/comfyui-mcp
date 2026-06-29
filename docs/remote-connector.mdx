@@ -1,0 +1,147 @@
+---
+title: "Remote / hosted connector"
+description: "Expose comfyui-mcp as an authenticated, publicly-reachable Streamable-HTTP MCP server — add it to Claude Desktop's Custom Connectors or any remote client, one command."
+icon: "globe"
+---
+
+`comfyui-mcp` speaks the same **Streamable-HTTP** MCP transport that hosted
+connectors use (for example Comfy's own `cloud.comfy.org/mcp` Custom Connector).
+With one command it runs as a token-authenticated server behind a public HTTPS
+tunnel, so you can add it to **Claude Desktop → Connectors** or call it
+headlessly from anywhere.
+
+<Note>
+This is opt-in. The default `stdio` transport (and plain `--http` on loopback)
+behaves exactly as before — open and local. Auth and the tunnel only activate
+when you set a token or pass `--tunnel`.
+</Note>
+
+## One-command tunnel
+
+```bash
+npx -y comfyui-mcp --tunnel
+```
+
+This does four things:
+
+1. Forces the HTTP transport (`MCP_TRANSPORT=http`).
+2. Generates a strong random auth token if you haven't set one.
+3. Starts a [cloudflared](https://github.com/cloudflare/cloudflared) quick tunnel
+   to the local MCP port.
+4. Prints a ready-to-paste block: the public `https://…/mcp` URL, the token, and
+   a Claude Desktop connector snippet.
+
+The output looks like:
+
+```text
+════════════════════════════════════════════════════════════════════
+ ComfyUI MCP — Remote / Hosted Connector is LIVE
+════════════════════════════════════════════════════════════════════
+ Public MCP URL : https://shiny-otter-1234.trycloudflare.com/mcp
+ Auth token     : 9f2c…<redacted>
+ ...
+════════════════════════════════════════════════════════════════════
+```
+
+<Warning>
+Keep the terminal open. A cloudflared **quick tunnel** is ephemeral — its URL
+changes on every run and it closes when the process exits. For a stable hostname,
+run your own [named cloudflared tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)
+pointed at the local HTTP port instead.
+</Warning>
+
+### cloudflared not installed?
+
+`cloudflared` ships as an optional dependency. If the binary can't be found, the
+server keeps running locally and prints install guidance:
+
+```bash
+npm install -g cloudflared          # cross-platform
+brew install cloudflared            # macOS
+winget install cloudflare.cloudflared  # Windows
+```
+
+Then re-run with `--tunnel`.
+
+## Add it to Claude Desktop
+
+Open **Claude Desktop → Settings → Connectors → Add custom connector** and fill in:
+
+| Field  | Value |
+|--------|-------|
+| Name   | `ComfyUI` |
+| URL    | the printed `https://…/mcp` URL |
+| Header | `X-API-Key: <token>` (or `Authorization: Bearer <token>`) |
+
+Save, then enable the connector in a chat. The ComfyUI tools appear just like
+they do for the local stdio server.
+
+## Headless / programmatic config
+
+Any MCP client that supports a remote Streamable-HTTP server works. Provide the
+URL and the auth header:
+
+```json
+{
+  "mcpServers": {
+    "comfyui": {
+      "url": "https://shiny-otter-1234.trycloudflare.com/mcp",
+      "headers": { "X-API-Key": "<token>" }
+    }
+  }
+}
+```
+
+Both header forms are accepted on **every** request to `/mcp`:
+
+```bash
+# X-API-Key (matches Comfy Cloud's convention)
+curl -H "X-API-Key: <token>" https://…/mcp
+
+# Authorization: Bearer
+curl -H "Authorization: Bearer <token>" https://…/mcp
+```
+
+## Manual setup (bring your own tunnel / proxy)
+
+If you'd rather manage the public endpoint yourself, run the HTTP transport with
+a fixed token and put it behind your own reverse proxy, tunnel, or VPN:
+
+```bash
+COMFYUI_MCP_HTTP_TOKEN=my-long-random-secret \
+  npx -y comfyui-mcp --http --host 0.0.0.0 --port 9100
+```
+
+Then point your tunnel/proxy at `http://127.0.0.1:9100/mcp`.
+
+<Warning>
+Binding to a non-loopback host (e.g. `0.0.0.0`) **without** a token is a **hard
+failure** — the server refuses to start rather than expose an open `/mcp`
+endpoint off-box. Set `COMFYUI_MCP_HTTP_TOKEN` (recommended), use `--tunnel`, or
+bind a loopback host. If you genuinely want an open endpoint (e.g. behind your
+own authenticating proxy), opt in explicitly with
+`--allow-unauthenticated-non-loopback` (env `COMFYUI_MCP_ALLOW_UNAUTH=1`), which
+downgrades the failure to a warning.
+</Warning>
+
+## Auth reference
+
+| Setting | Effect |
+|---------|--------|
+| `COMFYUI_MCP_HTTP_TOKEN` | Shared-secret token required on `/mcp`. Unset → endpoint is open. |
+| `--token <value>` | Same as the env var; CLI flag wins over the env var. |
+| `--tunnel` / `MCP_TUNNEL=1` | Force HTTP, auto-generate a token if unset, open a cloudflared tunnel. |
+| `--http` / `MCP_TRANSPORT=http` | HTTP transport without a tunnel (auth still applies if a token is set). |
+| `--host`, `--port` | Bind address (default `127.0.0.1:9100`). |
+| `--allow-unauthenticated-non-loopback` / `COMFYUI_MCP_ALLOW_UNAUTH=1` | Opt into an OPEN `/mcp` on a non-loopback host. Without it, that combination is a hard startup failure. |
+
+Tokens are compared in constant time, and the gate is enforced on every HTTP
+method (`POST`/`GET`/`DELETE`) at the MCP endpoint. Binding a non-loopback host
+with no token is refused at startup unless the escape hatch above is set.
+
+## Roadmap: OAuth
+
+Today's auth is a **manual shared-secret token** (Bearer / `X-API-Key`), which
+covers both the headless and the Claude Desktop Custom Connector paths. A full
+browser-based **OAuth** sign-in flow (like Comfy's hosted connector) is a planned
+follow-up — it's a heavier change and isn't required to connect manually.
