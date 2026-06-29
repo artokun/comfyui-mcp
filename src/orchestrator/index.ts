@@ -35,6 +35,7 @@ import {
   onComfyuiSecretsChanged,
 } from "../services/panel-secrets.js";
 import { CodexBackend } from "./codex-backend.js";
+import { GeminiBackend, GEMINI_DEFAULT_MODEL } from "./gemini-backend.js";
 import { startPanelMcpHttpServer, type PanelMcpHttpServer } from "./panel-mcp-http.js";
 import type { AgentBackend } from "./agent-backend.js";
 import { readComfyuiCrashLog, formatCrashNote } from "../services/crash-log.js";
@@ -386,6 +387,10 @@ export async function runPanelOrchestrator(): Promise<void> {
   const model = process.env.COMFYUI_MCP_PANEL_MODEL ?? "claude-opus-4-8";
   const envEffort = process.env.COMFYUI_MCP_PANEL_EFFORT;
   const effort: Effort | undefined = isEffort(envEffort) ? envEffort : undefined;
+  // Each backend runs its OWN orchestrator on its OWN loopback bridge port so the
+  // providers never share a session or fight for a port. The launcher (panel pack)
+  // sets COMFYUI_MCP_BRIDGE_PORT per the selected backend; the convention is
+  // 9180 = claude (default), 9181 = codex, 9182 = gemini.
   const bridgePort = Number(process.env.COMFYUI_MCP_BRIDGE_PORT) || 9180;
 
   // Cross-process download-progress channel: each tab's comfyui MCP subprocess
@@ -447,7 +452,16 @@ export async function runPanelOrchestrator(): Promise<void> {
   // Codex model — so for codex we only pass a model when COMFYUI_MCP_CODEX_MODEL
   // is set explicitly; otherwise Codex uses the account's default (e.g. gpt-5.5).
   const codexModel = process.env.COMFYUI_MCP_CODEX_MODEL;
+  // Gemini likewise: the panel model is a Claude id, so the Gemini model comes from
+  // COMFYUI_MCP_GEMINI_MODEL (default gemini-2.5-pro). The model is applied at spawn
+  // via the CLI `--model` flag (ACP exposes no per-session model setter).
+  const geminiModel = process.env.COMFYUI_MCP_GEMINI_MODEL ?? GEMINI_DEFAULT_MODEL;
   const isCodex = backendId === "codex";
+  const isGemini = backendId === "gemini";
+  // Codex + Gemini both drive the live canvas through the loopback HTTP panel MCP
+  // (neither can host an in-process SDK MCP server like Claude does), so several
+  // branches below treat them together.
+  const isHttpPanelBackend = isCodex || isGemini;
 
   // ---- live ENVIRONMENT-CAPABILITIES block ----
   // Gather the machine's facts ONCE at startup (CACHED) — OS/CPU/RAM from node,
@@ -512,20 +526,40 @@ export async function runPanelOrchestrator(): Promise<void> {
     ...(process.env.COMFYUI_MCP_TOOL_TRACE ? { COMFYUI_MCP_TOOL_TRACE: process.env.COMFYUI_MCP_TOOL_TRACE } : {}),
   };
 
-  // The orchestrator-hosted loopback HTTP MCP for panel_* tools (Codex). Started
-  // only in codex mode (Claude uses the in-process server). Port:
-  // COMFYUI_MCP_PANEL_MCP_PORT, default bridgePort+1 (loopback only).
+  // The orchestrator-hosted loopback HTTP MCP for panel_* tools. Started for the
+  // non-Claude backends (Codex + Gemini), which can't host an in-process SDK MCP
+  // server the way Claude does. Port: COMFYUI_MCP_PANEL_MCP_PORT, default
+  // bridgePort+1 (loopback only).
   let panelMcpHttp: PanelMcpHttpServer | null = null;
-  if (isCodex) {
+  if (isHttpPanelBackend) {
     const panelMcpPort = Number(process.env.COMFYUI_MCP_PANEL_MCP_PORT) || bridgePort + 1;
     try {
       panelMcpHttp = await startPanelMcpHttpServer(bridge, panelMcpPort);
     } catch (err) {
       logger.error(
-        `[panel-orchestrator] could not start the panel HTTP MCP on :${panelMcpPort} — Codex will lack live-graph tools: ${err instanceof Error ? err.message : String(err)}`,
+        `[panel-orchestrator] could not start the panel HTTP MCP on :${panelMcpPort} — ${backendId} will lack live-graph tools: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }
+
+  // Shared MCP server config for BOTH the Codex and Gemini backends — they take an
+  // identical { transport } spec (the headless comfyui stdio MCP + the panel HTTP
+  // MCP for this tab). Claude keeps its own in-process server set unchanged.
+  const makeHttpBackendMcpServers = (tabId: string) => ({
+    // Headless comfyui MCP (this build) over stdio — same as Claude.
+    comfyui: {
+      transport: "stdio" as const,
+      command: process.execPath, // node
+      args: [mcpEntry], // dist/index.js
+      // Merge persisted tool secrets at SPAWN time so a respawn picks up a
+      // just-saved CIVITAI_API_TOKEN / HF_TOKEN without a process restart.
+      env: buildComfyuiMcpEnv(comfyuiBaseEnv),
+    },
+    // Live-graph panel_* tools for THIS tab over the loopback HTTP MCP.
+    ...(panelMcpHttp
+      ? { panel: { transport: "http" as const, url: panelMcpHttp.urlFor(tabId) } }
+      : {}),
+  });
 
   const makeBackend: ((tabId: string) => AgentBackend) | undefined = isCodex
     ? (tabId: string) =>
@@ -536,37 +570,40 @@ export async function runPanelOrchestrator(): Promise<void> {
           // Base ComfyUI URL so the backend can fetch image bytes from /view and
           // deliver them to a turn as `localImage` input items (vision parity).
           comfyuiUrl,
-          mcpServers: {
-            // Headless comfyui MCP (this build) over stdio — same as Claude.
-            comfyui: {
-              transport: "stdio",
-              command: process.execPath, // node
-              args: [mcpEntry], // dist/index.js
-              // Merge persisted tool secrets at SPAWN time so a respawn picks up
-              // a just-saved CIVITAI_API_TOKEN / HF_TOKEN without a process restart.
-              env: buildComfyuiMcpEnv(comfyuiBaseEnv),
-            },
-            // Live-graph panel_* tools for THIS tab over the loopback HTTP MCP.
-            ...(panelMcpHttp
-              ? { panel: { transport: "http" as const, url: panelMcpHttp.urlFor(tabId) } }
-              : {}),
-          },
+          mcpServers: makeHttpBackendMcpServers(tabId),
         })
-    : undefined;
+    : isGemini
+      ? (tabId: string) =>
+          new GeminiBackend({
+            cwd: comfyuiPath ?? process.cwd(),
+            model: geminiModel,
+            systemAppend: panelSystemAppend,
+            // Base ComfyUI URL so the backend can fetch image bytes from /view and
+            // deliver them inline as base64 image ContentBlocks (vision parity).
+            comfyuiUrl,
+            mcpServers: makeHttpBackendMcpServers(tabId),
+          })
+      : undefined;
   if (isCodex) {
     logger.info(
       `[panel-orchestrator] agent backend = codex (codex app-server); panel_* live-graph tools via loopback HTTP MCP${panelMcpHttp ? ` on :${panelMcpHttp.port}` : " UNAVAILABLE"} + headless comfyui MCP`,
     );
+  } else if (isGemini) {
+    logger.info(
+      `[panel-orchestrator] agent backend = gemini (gemini --acp); model=${geminiModel}; panel_* live-graph tools via loopback HTTP MCP${panelMcpHttp ? ` on :${panelMcpHttp.port}` : " UNAVAILABLE"} + headless comfyui MCP`,
+    );
   } else if (backendId !== "claude") {
     logger.warn(`[panel-orchestrator] unknown PANEL_AGENT_BACKEND "${backendId}" — defaulting to claude`);
   }
-  // Readiness/model probing must route through the SELECTED backend (P1-2): in
-  // Codex mode the panel's "ready" must NOT depend on Claude SDK/login health.
-  // A dedicated probe backend (not tied to a tab) supplies the Codex model list
-  // and proves the app-server can start; Claude mode keeps its SDK probes.
-  const probeBackend: CodexBackend | null = isCodex
+  // Readiness/model probing must route through the SELECTED backend (P1-2): in a
+  // non-Claude mode the panel's "ready" must NOT depend on Claude SDK/login health.
+  // A dedicated probe backend (not tied to a tab) supplies the model list and
+  // proves the CLI can start; Claude mode keeps its SDK probes.
+  const probeBackend: AgentBackend | null = isCodex
     ? new CodexBackend({ cwd: comfyuiPath ?? process.cwd(), model: codexModel })
-    : null;
+    : isGemini
+      ? new GeminiBackend({ cwd: comfyuiPath ?? process.cwd(), model: geminiModel })
+      : null;
 
   // Durable per-tab session ids (keyed by our bridge port), so a tab's agent
   // resumes its conversation even after the orchestrator PROCESS is killed and
@@ -684,12 +721,11 @@ export async function runPanelOrchestrator(): Promise<void> {
   let modelsPromise: Promise<ModelInfo[]> | null = null;
   function ensureModels(): Promise<ModelInfo[]> {
     if (!modelsPromise) {
-      // Codex mode (P1-2): enumerate via the Codex backend (which also proves the
-      // app-server can start = readiness) — NEVER the Claude SDK probe. Shape the
-      // Codex ModelChoice[] into the panel's ModelInfo[] form (value/displayName).
+      // Non-Claude mode (P1-2): enumerate via the selected backend (which also
+      // proves the CLI can start = readiness) — NEVER the Claude SDK probe. Shape
+      // the backend's ModelChoice[] into the panel's ModelInfo[] form.
       const probe: Promise<ModelInfo[]> = probeBackend
-        ? probeBackend
-            .prepare()
+        ? Promise.resolve(probeBackend.prepare?.())
             .then(() => probeBackend.listModels())
             .then((list) =>
               // Carry the effort metadata through to the panel's ModelInfo — without
@@ -749,9 +785,9 @@ export async function runPanelOrchestrator(): Promise<void> {
   // the built-ins that make sense inside the ComfyUI panel chat.
   const PANEL_SLASH_ALLOWLIST = new Set(["compact", "context", "usage", "loop", "goal", "clear"]);
   function pushCommands(tabId: string): void {
-    // Codex mode (P1-2): no Claude slash-commands — skip the Claude SDK probe
-    // entirely (CODEX_CAPABILITIES.slashCommands === false).
-    if (isCodex) return;
+    // Non-Claude mode (P1-2): no Claude slash-commands — skip the Claude SDK probe
+    // entirely (CODEX/GEMINI_CAPABILITIES.slashCommands === false).
+    if (isHttpPanelBackend) return;
     void ensureCommands()
       .then((commands) => {
         const useful = commands.filter((c) => PANEL_SLASH_ALLOWLIST.has(c.name));
@@ -1126,9 +1162,9 @@ export async function runPanelOrchestrator(): Promise<void> {
     QueueMonitor.stop();
     unsubscribeSecrets();
     await manager.stopAll();
-    // Dispose the Codex readiness-probe backend (kills its app-server child).
-    if (probeBackend) await probeBackend.close().catch(() => {});
-    // Tear down the loopback panel HTTP MCP (codex mode only).
+    // Dispose the readiness-probe backend (kills its Codex/Gemini CLI child).
+    if (probeBackend?.close) await probeBackend.close().catch(() => {});
+    // Tear down the loopback panel HTTP MCP (codex/gemini mode only).
     if (panelMcpHttp) await panelMcpHttp.stop().catch(() => {});
     await bridge.stop();
     // Only remove the lockfile if it still names us — avoid clobbering a fresh

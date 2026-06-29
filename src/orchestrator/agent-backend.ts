@@ -9,7 +9,7 @@
 
 import type { ImageRef } from "./panel-agent.js";
 
-export type BackendId = "claude" | "codex";
+export type BackendId = "claude" | "codex" | "gemini";
 
 /**
  * A user turn in PROVIDER-NEUTRAL form. PanelAgent owns the queue/turn-gate and
@@ -203,4 +203,21 @@ export const CODEX_CAPABILITIES: AgentCapabilities = {
   slashCommands: false,
   hooks: false,
   vision: true, // gpt-5.5 sees images; delivered as `localImage` turn input items
+};
+
+/** Capability descriptor for the Gemini CLI ACP backend (Agent Client Protocol).
+ *  Mirrors the Codex posture: a persistent session over a JSON-RPC-over-stdio
+ *  client, streaming deltas + tool calls, interrupt via `session/cancel`, and
+ *  config-declared MCP servers (no in-process SDK MCP). forkAtAnchor is false —
+ *  ACP `session/load` is whole-session only, with no per-turn rewind anchor. */
+export const GEMINI_CAPABILITIES: AgentCapabilities = {
+  persistentChannel: true, // session/new + repeated session/prompt
+  streamingDeltas: true, // session/update agent_message_chunk / agent_thought_chunk
+  interruptMidTurn: true, // session/cancel
+  forkAtAnchor: false, // session/load is whole-session only (no anchor fork)
+  inProcessMcp: false, // ACP session/new declares config MCP servers only
+  modelEnumeration: true, // static catalog (gemini-2.5-pro / -flash) — ACP exposes no catalog
+  slashCommands: false,
+  hooks: false,
+  vision: true, // gemini-2.5 sees images; delivered as inline base64 image ContentBlocks
 };

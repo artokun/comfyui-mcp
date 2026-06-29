@@ -42,7 +42,7 @@ export interface EnvCapabilities {
   location?: "LOCAL" | "REMOTE"; // from COMFYUI_URL host
   triton?: TriState;
   sageattention?: TriState;
-  backend?: "Claude" | "Codex"; // active provider (human label)
+  backend?: "Claude" | "Codex" | "Gemini"; // active provider (human label)
   otherBackendAvailable?: boolean; // is the OTHER provider resolvable?
 }
 
@@ -312,22 +312,29 @@ function canResolve(specifier: string): boolean {
 }
 
 /**
- * Determine the active backend label and whether the other provider is available.
- * activeBackendId is "claude" | "codex" (from PANEL_AGENT_BACKEND).
+ * Determine the active backend label and whether ANY other provider is available.
+ * activeBackendId is "claude" | "codex" | "gemini" (from PANEL_AGENT_BACKEND).
  */
 export function resolveBackends(activeBackendId: string): {
-  backend: "Claude" | "Codex";
+  backend: "Claude" | "Codex" | "Gemini";
   otherBackendAvailable: boolean;
 } {
-  const isCodex = activeBackendId.toLowerCase() === "codex";
+  const id = activeBackendId.toLowerCase();
   const claudeAvailable = canResolve("@anthropic-ai/claude-agent-sdk");
-  // Codex can be the @openai/codex package OR a `codex` CLI on PATH; resolving
-  // the package is the cheap, synchronous signal we use here.
+  // Codex can be the @openai/codex package OR a `codex` CLI on PATH; Gemini the
+  // @google/gemini-cli package OR a `gemini` CLI on PATH. Resolving the package is
+  // the cheap, synchronous signal we use here (a PATH-only CLI reads as absent).
   const codexAvailable = canResolve("@openai/codex");
-  return {
-    backend: isCodex ? "Codex" : "Claude",
-    otherBackendAvailable: isCodex ? claudeAvailable : codexAvailable,
-  };
+  const geminiAvailable = canResolve("@google/gemini-cli");
+  const backend = id === "codex" ? "Codex" : id === "gemini" ? "Gemini" : "Claude";
+  // "Other available" = any provider other than the active one is resolvable.
+  const otherBackendAvailable =
+    backend === "Claude"
+      ? codexAvailable || geminiAvailable
+      : backend === "Codex"
+        ? claudeAvailable || geminiAvailable
+        : claudeAvailable || codexAvailable;
+  return { backend, otherBackendAvailable };
 }
 
 // ---------------------------------------------------------------------------
@@ -459,9 +466,9 @@ export function formatEnvBlock(caps: EnvCapabilities): string {
   if (sage) parts.push(`SageAttention: ${sage}`);
 
   if (caps.backend) {
-    const other =
-      caps.backend === "Claude" ? "Codex" : "Claude";
-    const otherClause = caps.otherBackendAvailable ? `; ${other} also available` : "";
+    // With three providers the specific "other" isn't single-valued, so name them
+    // generically when an alternative is resolvable.
+    const otherClause = caps.otherBackendAvailable ? "; other providers available" : "";
     parts.push(`Backend: ${caps.backend}${otherClause}`);
   }
 

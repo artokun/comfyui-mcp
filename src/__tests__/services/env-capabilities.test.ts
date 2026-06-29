@@ -34,7 +34,7 @@ describe("formatEnvBlock", () => {
     expect(out).toContain("ComfyUI 0.26.1 (LOCAL)");
     expect(out).toContain("Triton: not installed");
     expect(out).toContain("SageAttention: not installed");
-    expect(out).toContain("Backend: Codex; Claude also available");
+    expect(out).toContain("Backend: Codex; other providers available");
     // The guidance tail (acceleration decision) is always appended.
     expect(out).toContain("default to sdpa + no");
     expect(out).toContain("triton-sageattention skill");
