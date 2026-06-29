@@ -255,10 +255,21 @@ function buildRemoveBackground(p: RemoveBackgroundParams): WorkflowJSON {
     },
     "2": {
       class_type: "BiRefNetRMBG",
-      // `background: "Alpha"` forces a transparent RGBA cutout regardless of the
-      // node version's default (matches packs/wan-transparent). The remaining
-      // widgets (mask blur/offset, invert, refine) keep their defaults.
-      inputs: { image: conn("1", 0), model, background: "Alpha" },
+      // `background: "Alpha"` forces a transparent RGBA cutout (matches
+      // packs/wan-transparent). The other widgets are declared "optional" in the
+      // node schema but ComfyUI-RMBG's process_image reads them by key, so omitting
+      // them KeyErrors at runtime over the API (defaults are only injected by the
+      // UI). Pass every one explicitly with the node's documented defaults.
+      inputs: {
+        image: conn("1", 0),
+        model,
+        mask_blur: 0,
+        mask_offset: 0,
+        invert_output: false,
+        refine_foreground: false,
+        background: "Alpha",
+        background_color: "#222222",
+      },
     },
     "3": {
       class_type: "SaveImage",
