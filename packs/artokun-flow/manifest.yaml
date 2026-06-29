@@ -1,8 +1,9 @@
-# Artokun Flow v1 — WAN Animate (replacement + non-replacement modes). PERSONAL pack.
-# Supersedes the old cozy-flow pack. Two modes (per in-graph notes): non-replacement
-# (default animate/drive) and REPLACEMENT MODE (unmute the "REPLACEMENT MODE" group
-# to replace the person in the video), with a ReActor first-frame face-lock
-# (bypassable) and a muted "Upscale4x-RIFE-1080p" subgraph (RIFE + SeedVR2, opt-in).
+# Artokun Flow — WAN Animate. THE go-to pack for "take this person and animate them":
+# give it a character image + a driving video and it makes that character dance/move
+# with the clip's motion. Two modes (per in-graph notes): non-replacement (default
+# animate/drive) and REPLACEMENT MODE (unmute the "REPLACEMENT MODE" group to replace
+# the person in the video), with a ReActor first-frame face-lock (bypassable) and a
+# muted "Upscale4x-RIFE-1080p" subgraph (RIFE + SeedVR2, opt-in).
 #
 # SAM3, frame-interpolation, math, mask, and post-processing nodes are CORE in a
 # recent ComfyUI (comfy_extras) — no custom node needed for those; just keep ComfyUI
@@ -13,10 +14,9 @@
 # graph won't fully load without them; swap to KJNodes ColorMatch / VHS_VideoCombine
 # if you don't have them.
 #
-# MODEL NAMING: model URLs are taken from the OFMHUB gist (hosts the base models
-# under short placeholder names at wdsfdsdf/OFMHUB). The workflow references the REAL
-# Kijai filenames, so base models are downloaded from the gist and SAVED under the
-# workflow's real names (rename-on-download). Same content, matching filenames.
+# MODEL NAMING: the base-model host serves them under short placeholder names. The
+# workflow references the REAL Kijai filenames, so base models are downloaded and SAVED
+# under the workflow's real names (rename-on-download). Same content, matching filenames.
 
 pip: []
 

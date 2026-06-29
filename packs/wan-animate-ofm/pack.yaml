@@ -10,7 +10,8 @@ description: >-
   deep-fake masking branch ships BYPASSED (opt-in). Runs on the Kijai WanVideo
   stack (Wan2.2-Animate-14B fp8 + Wan2.1 VAE + clip_vision_h + umt5) with a LoRA
   stack of lightx2v (4-step distill), WanAnimate relight, Pusa V1 temporal, and
-  Wan2.2-Fun. Distinct from the SeC-based `wan-animate` pack.
+  Wan2.2-Fun. Distinct from the SeC-based `wan-animate` pack. For the
+  maintained/recommended character-animation pipeline, prefer the `artokun-flow` pack.
 vram: 24GB+
 workflow: workflow.json
 skill: video-extend

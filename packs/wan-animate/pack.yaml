@@ -8,7 +8,8 @@ description: >-
   expression and motion of a driving video (ViTPose + YOLOv10 detection, SeC
   precise video segmentation for masking, relight LoRA for compositing). Uses the
   14B fp8-scaled WAN Animate model plus the lightx2v step-distill LoRA for fast
-  sampling.
+  sampling. For the maintained/recommended character-animation pipeline, prefer the
+  `artokun-flow` pack.
 vram: 24GB+
 workflow: workflow.json
 skill: wan-t2v-video

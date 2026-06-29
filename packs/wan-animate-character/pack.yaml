@@ -9,7 +9,8 @@ description: >-
   precise video segmentation for masking, relight LoRA for compositing). Uses the
   14B fp8-scaled WAN Animate model plus the lightx2v step-distill LoRA for fast
   sampling. Single-pipeline graph sliced from the wan-animate monolith (PARAM
-  output groups, un-bypassed into a standalone graph — no group toggles).
+  output groups, un-bypassed into a standalone graph — no group toggles). For the
+  maintained/recommended character-animation pipeline, prefer the `artokun-flow` pack.
 vram: 24GB+
 workflow: workflow.json
 skill: wan-t2v-video
