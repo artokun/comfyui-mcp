@@ -190,8 +190,12 @@ export async function generateVideo(
   const encoderList = await safeList("text_encoders");
   const loraList = await safeList("loras");
 
-  const explicitCheckpoint =
-    args.checkpoint ?? (resolved.checkpoint as string | undefined);
+  // Only a per-call `args.checkpoint` is a deliberate override (presence-checked).
+  // We deliberately do NOT widen the candidate list with an ambient DEFAULT
+  // checkpoint: a global default set to a non-LTX model (e.g. an SD1.5 ckpt) would
+  // otherwise be silently accepted and enqueue a broken LTX graph. With no explicit
+  // arg we require one of the known LTX checkpoints.
+  const explicitCheckpoint = args.checkpoint;
 
   const missing: string[] = [];
   const checkpoint = requireModel(

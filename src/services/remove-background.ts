@@ -52,7 +52,6 @@ export async function removeBackground(
     );
   }
   assertSafeInputFilename(args.image, "image");
-  if (args.filename_prefix !== undefined) assertSafeFilenamePrefix(args.filename_prefix);
 
   if (deps.isNodeInstalled) {
     const installed = await deps.isNodeInstalled(REMBG_NODE);
@@ -73,6 +72,12 @@ export async function removeBackground(
     if (v !== undefined) seed[key] = v;
   }
   const resolved = DefaultsManager.apply(seed);
+
+  // Validate the RESOLVED prefix (post-defaults) — a malicious default
+  // filename_prefix must not reach SaveImage unsanitized.
+  if (resolved.filename_prefix !== undefined) {
+    assertSafeFilenamePrefix(resolved.filename_prefix as string);
+  }
 
   const workflow = createWorkflow("remove_background", {
     image_path: args.image,
