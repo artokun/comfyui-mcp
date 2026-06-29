@@ -22,6 +22,8 @@ import type {
 const hoisted = vi.hoisted(() => ({
   // The spawned fake procs (one per backend prepare()).
   procs: [] as Array<Record<string, unknown>>,
+  // The argv passed to spawn() for each spawned proc (to assert --model pinning).
+  spawnArgs: [] as string[][],
   // Every JSON-RPC message the client SENT to the server (requests + notifications).
   received: [] as Array<Record<string, unknown>>,
   // Per-test server behavior: "complete" auto-finishes the prompt with end_turn;
@@ -165,7 +167,10 @@ vi.mock("node:child_process", async (importOriginal) => {
 
   return {
     ...actual,
-    spawn: () => makeFakeProc(),
+    spawn: (_cmd: string, args: string[]) => {
+      hoisted.spawnArgs.push(Array.isArray(args) ? args : []);
+      return makeFakeProc();
+    },
     // killProcessTree calls spawnSync("taskkill", …) on win32 — make it a no-op.
     spawnSync: () => ({ status: 0, pid: 1, stdout: "", stderr: "", signal: null, output: [] }),
   };
@@ -175,6 +180,7 @@ let GeminiBackend: typeof import("../../orchestrator/gemini-backend.js").GeminiB
 
 beforeEach(async () => {
   hoisted.procs.length = 0;
+  hoisted.spawnArgs.length = 0;
   hoisted.received.length = 0;
   hoisted.config.mode = "complete";
   ({ GeminiBackend } = await import("../../orchestrator/gemini-backend.js"));
@@ -333,5 +339,84 @@ describe("GeminiBackend (ACP over stdio)", () => {
     expect(models.map((m) => m.id)).toEqual(["gemini-2.5-pro", "gemini-2.5-flash"]);
     // Gemini has no discrete effort scale → no effort metadata (panel hides picker).
     expect(models.every((m) => m.supportsEffort === undefined && m.supportedEffortLevels === undefined)).toBe(true);
+  });
+
+  it("applies the panel-selected model to the FIRST spawn (--model) before prepare", async () => {
+    // No construction-time model; the panel-selected Gemini model arrives as
+    // opts.model and must pin the very first `gemini --acp` spawn (P1a).
+    const backend = new GeminiBackend({ cwd: process.cwd() });
+    const channel = makeChannel();
+    const events: AgentEvent[] = [];
+    const run = consume(backend.run({ channel: channel.iterable, model: "gemini-2.5-flash" }), events);
+
+    channel.push({ text: "hi" });
+    await waitFor(() => events.some((e) => e.type === "result"));
+    channel.close();
+    await run;
+
+    expect(hoisted.spawnArgs).toHaveLength(1);
+    expect(hoisted.spawnArgs[0]).toContain("--acp");
+    expect(hoisted.spawnArgs[0]).toContain("--model");
+    expect(hoisted.spawnArgs[0][hoisted.spawnArgs[0].indexOf("--model") + 1]).toBe("gemini-2.5-flash");
+
+    await backend.close();
+  });
+
+  it("a live setModel() respawns the CLI with the new --model and a fresh session", async () => {
+    const backend = new GeminiBackend({ cwd: process.cwd(), model: "gemini-2.5-pro" });
+    const channel = makeChannel();
+    const events: AgentEvent[] = [];
+    const run = consume(backend.run({ channel: channel.iterable }), events);
+
+    // First turn on the initial model.
+    channel.push({ text: "turn one" });
+    await waitFor(() => events.filter((e) => e.type === "result").length >= 1);
+    expect(hoisted.spawnArgs).toHaveLength(1);
+    expect(hoisted.spawnArgs[0][hoisted.spawnArgs[0].indexOf("--model") + 1]).toBe("gemini-2.5-pro");
+
+    // Live model switch (panel picker → PanelAgent.setOptions → agent.setModel).
+    await backend.setModel("gemini-2.5-flash");
+
+    // Next turn must transparently respawn with the new --model + a fresh session.
+    channel.push({ text: "turn two" });
+    await waitFor(() => events.filter((e) => e.type === "result").length >= 2);
+    channel.close();
+    await run;
+
+    // A SECOND `gemini --acp` was spawned, pinned to the new model.
+    expect(hoisted.spawnArgs).toHaveLength(2);
+    expect(hoisted.spawnArgs[1]).toContain("--acp");
+    expect(hoisted.spawnArgs[1][hoisted.spawnArgs[1].indexOf("--model") + 1]).toBe("gemini-2.5-flash");
+
+    // The respawn opened a fresh session → a second `session` event was emitted.
+    expect(events.filter((e) => e.type === "session").length).toBe(2);
+    // Both turns completed cleanly.
+    expect(events.filter((e) => e.type === "result").every((r) => (r as { ok: boolean }).ok)).toBe(true);
+
+    await backend.close();
+  });
+
+  it("ignores a non-Gemini model id passed to setModel (e.g. the Claude panel model)", async () => {
+    const backend = new GeminiBackend({ cwd: process.cwd(), model: "gemini-2.5-pro" });
+    const channel = makeChannel();
+    const events: AgentEvent[] = [];
+    const run = consume(backend.run({ channel: channel.iterable }), events);
+
+    channel.push({ text: "turn one" });
+    await waitFor(() => events.filter((e) => e.type === "result").length >= 1);
+
+    // PanelAgent may relay the Claude panel model — it must NOT respawn Gemini.
+    await backend.setModel("claude-opus-4-8");
+
+    channel.push({ text: "turn two" });
+    await waitFor(() => events.filter((e) => e.type === "result").length >= 2);
+    channel.close();
+    await run;
+
+    // Still only one spawn (no respawn), and only one session.
+    expect(hoisted.spawnArgs).toHaveLength(1);
+    expect(events.filter((e) => e.type === "session").length).toBe(1);
+
+    await backend.close();
   });
 });

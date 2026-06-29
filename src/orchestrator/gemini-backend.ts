@@ -501,6 +501,10 @@ export class GeminiBackend implements AgentBackend {
   private sessionId: string | null = null;
   /** The model requested for new sessions (applied at SPAWN via --model). */
   private model: string | undefined;
+  /** The model the LIVE `gemini --acp` child was actually spawned with. Gemini
+   *  pins the model at spawn, so when this drifts from `this.model` (a live
+   *  setModel) the run loop respawns the CLI before the next turn (P1). */
+  private spawnedModel: string | undefined;
   /** Capabilities the agent advertised at initialize (loadSession / image / http). */
   private agentCaps: AcpInitializeResult["agentCapabilities"] = undefined;
   private authMethods: AcpAuthMethod[] = [];
@@ -620,6 +624,9 @@ export class GeminiBackend implements AgentBackend {
       this.agentCaps = init.agentCapabilities;
       this.authMethods = Array.isArray(init.authMethods) ? init.authMethods : [];
       this.client = client;
+      // Record what the live child was spawned with so a later setModel can detect
+      // the model drifted and respawn (the model is spawn-pinned via --model) (P1).
+      this.spawnedModel = this.model;
       logger.info(
         `[gemini-backend] ACP ready (protocol ${init.protocolVersion ?? "?"}, agent ${init.agentInfo?.name ?? "gemini"}${this.authMethods.length ? `, ${this.authMethods.length} auth method(s)` : ""})`,
       );
@@ -699,21 +706,22 @@ export class GeminiBackend implements AgentBackend {
    * IS the turn-gate).
    */
   async *run(opts: BackendStartOptions): AsyncGenerator<AgentEvent> {
-    await this.prepare();
-    const client = this.client;
-    if (!client) throw new Error("gemini --acp not initialized");
-    const cwd = opts.cwd ?? this.deps.cwd ?? process.cwd();
-    // MODEL PRECEDENCE (P1-1): PanelAgent.start() always passes opts.model = the
-    // CLAUDE panel model, which is NOT a valid Gemini model. The Gemini model
-    // configured at construction (deps.model, from COMFYUI_MCP_GEMINI_MODEL) must
-    // win. Only honor opts.model if it actually looks like a Gemini model.
-    // (The model is applied at SPAWN via --model, so a change only takes effect on
-    // the next prepare()/process — see resolveSpawn; flagged in the PR body.)
+    // MODEL PRECEDENCE (P1): apply the panel-selected model BEFORE prepare() so the
+    // FIRST spawn uses it (the model is spawn-pinned via `--model`; preparing first
+    // would spawn the wrong model). PanelAgent.start() usually passes opts.model =
+    // the CLAUDE panel model, which is NOT a valid Gemini model — so the configured
+    // Gemini model (deps.model, from COMFYUI_MCP_GEMINI_MODEL) wins; only honor
+    // opts.model when it actually looks like a Gemini model (e.g. the user picked
+    // one in the panel, which arrives as opts.model on a fresh spawn).
     if (opts.model && isGeminiModel(opts.model)) this.model = opts.model;
+
+    await this.prepare();
+    if (!this.client) throw new Error("gemini --acp not initialized");
+    const cwd = opts.cwd ?? this.deps.cwd ?? process.cwd();
 
     // forkAtAnchor is false → ignore opts.rewindAnchor; whole-session resume only.
     const resumeId = opts.resume ?? opts.sessionId ?? null;
-    const sessionId = await this.ensureSession(client, cwd, resumeId);
+    let sessionId = await this.ensureSession(this.client, cwd, resumeId);
 
     // The session id is our session id (PanelAgent persists it for resume).
     yield {
@@ -724,8 +732,41 @@ export class GeminiBackend implements AgentBackend {
 
     // Process the neutral channel one turn at a time.
     for await (const turn of opts.channel) {
-      yield* this.runTurn(client, turn, opts.onActivity);
+      // LIVE MODEL SWITCH (P1): PanelAgent treats setModel as live and does NOT
+      // restart run() for a model-only change, so the persistent loop adopts it
+      // here. The model is spawn-pinned, so a switch means respawning the CLI with
+      // the new --model — which necessarily starts a FRESH session (a model swap
+      // can't carry the old session forward). Done transparently before the turn;
+      // we emit a new `session` event so PanelAgent persists the new id.
+      if (this.spawnedModel !== this.model) {
+        await this.respawnForModelChange();
+        if (!this.client) throw new Error("gemini --acp respawn failed");
+        sessionId = await this.ensureSession(this.client, cwd, null);
+        yield {
+          type: "session",
+          sessionId,
+          ...(this.model ? { model: this.model } : {}),
+        };
+      }
+      yield* this.runTurn(this.client, turn, opts.onActivity);
     }
+  }
+
+  /** Tear down the live `gemini --acp` child (process-tree kill) and re-spawn it
+   *  with the current `this.model`'s `--model` flag, so a live setModel takes
+   *  effect. The model is spawn-pinned, so this is the only way to switch it. The
+   *  caller then opens a fresh session on the new child. */
+  private async respawnForModelChange(): Promise<void> {
+    const old = this.client;
+    this.client = null;
+    this.sessionId = null;
+    if (old) {
+      old.notificationHandler = null;
+      await old.close().catch(() => {});
+    }
+    this.spawnSpec = null; // force resolveSpawn to rebuild argv with the new --model
+    logger.info(`[gemini-backend] model switch → respawning gemini --acp with --model ${this.model ?? "(default)"}`);
+    await this.prepare(); // spawns with this.model; records spawnedModel
   }
 
   /** Run ONE turn: send session/prompt + stream its session/update notifications →
@@ -982,16 +1023,17 @@ export class GeminiBackend implements AgentBackend {
     }
   }
 
-  /** Switch the model for the NEXT session. ACP fixes the model at spawn (--model),
-   *  so this only takes effect on the next prepare()/process — the panel restarts
-   *  run() on a model change, but a live in-process switch would need a re-spawn.
-   *  Flagged in the PR body. */
+  /** Switch the model live. ACP pins the model at spawn (`--model`), so this can't
+   *  reconfigure a running child — instead it marks the model dirty (this.model !=
+   *  this.spawnedModel) and invalidates the cached spawn spec. The persistent run()
+   *  loop then RESPAWNS the `gemini --acp` CLI with the new --model (and a fresh
+   *  session) transparently before the next turn (see run()'s live-switch branch).
+   *  If the backend hasn't spawned yet, the first prepare() simply uses the new
+   *  model. Ignores non-Gemini ids (PanelAgent may pass the Claude panel model). */
   async setModel(model: string): Promise<void> {
-    if (isGeminiModel(model)) {
-      this.model = model;
-      // Invalidate the cached spawn spec so the next prepare() picks up --model.
-      this.spawnSpec = null;
-    }
+    if (!isGeminiModel(model)) return;
+    this.model = model;
+    this.spawnSpec = null; // next spawn rebuilds argv with the new --model
   }
 
   /**

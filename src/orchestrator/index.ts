@@ -724,6 +724,12 @@ export async function runPanelOrchestrator(): Promise<void> {
       // Non-Claude mode (P1-2): enumerate via the selected backend (which also
       // proves the CLI can start = readiness) — NEVER the Claude SDK probe. Shape
       // the backend's ModelChoice[] into the panel's ModelInfo[] form.
+      // NOTE (gemini): the Gemini probe is prepare()+listModels, which proves the
+      // CLI launches + the ACP handshake works but does NOT verify Google sign-in
+      // (ACP reports auth only at session/new), so the "ready" ack is PROVISIONAL
+      // for Gemini — a signed-out CLI still acks green here and surfaces a clear
+      // one-shot sign-in error on the first turn (no loop). The panel separately
+      // gates the UI via oauth_creds detection, so this is acceptable.
       const probe: Promise<ModelInfo[]> = probeBackend
         ? Promise.resolve(probeBackend.prepare?.())
             .then(() => probeBackend.listModels())
@@ -829,14 +835,20 @@ export async function runPanelOrchestrator(): Promise<void> {
             // Greet only on a FRESH session. On a reconnect/resume — a panel swap,
             // a WS blip, or a real restart (all carry `resume`) — the user already
             // has their thread, so re-greeting is just noise. The ack still fires.
-            // Backend-appropriate messaging (P1-2): Codex mode must not claim a
-            // Claude subscription, and the agent label is the Codex model (or the
-            // account default when COMFYUI_MCP_CODEX_MODEL is unset).
-            const agentLabel = isCodex ? (codexModel ?? (models[0] as { value?: string }).value ?? "Codex") : model;
+            // Backend-appropriate messaging (P1-2): each provider must name its own
+            // account/auth, and the agent label is that provider's model (Codex/
+            // Gemini account default when the env override is unset).
+            const agentLabel = isCodex
+              ? (codexModel ?? (models[0] as { value?: string }).value ?? "Codex")
+              : isGemini
+                ? (geminiModel ?? (models[0] as { value?: string }).value ?? "Gemini")
+                : model;
             if (!resume) {
               const readyText = isCodex
                 ? `🟢 comfyui-mcp agent ready — ${agentLabel} on your Codex (ChatGPT) account. Ask away.`
-                : `🟢 comfyui-mcp agent ready — ${agentLabel} on your Claude subscription. Ask away.`;
+                : isGemini
+                  ? `🟢 comfyui-mcp agent ready — ${agentLabel} on your Google account (Gemini Code Assist). Ask away.`
+                  : `🟢 comfyui-mcp agent ready — ${agentLabel} on your Claude subscription. Ask away.`;
               bridge.push({ type: "say", text: readyText }, tabId);
             }
             bridge.push({ type: "ack", ok: true, kind: "ready", agent: agentLabel, backend: backendId }, tabId);
@@ -844,7 +856,9 @@ export async function runPanelOrchestrator(): Promise<void> {
           } else {
             const degradedText = isCodex
               ? "⚠️ The background agent isn't responding — the Codex app-server couldn't start. Make sure Codex is installed and signed in (run `codex login`), then Disconnect → Connect to retry."
-              : "⚠️ The background agent isn't responding — the Claude Agent SDK couldn't start. Make sure you're signed in (run `claude` once), then Disconnect → Connect to retry.";
+              : isGemini
+                ? "⚠️ The background agent isn't responding — the Gemini CLI couldn't start. Make sure the Gemini CLI is installed and signed in (run `gemini` once and complete the Google sign-in), then Disconnect → Connect to retry."
+                : "⚠️ The background agent isn't responding — the Claude Agent SDK couldn't start. Make sure you're signed in (run `claude` once), then Disconnect → Connect to retry.";
             bridge.push({ type: "say", text: degradedText }, tabId);
             bridge.push({ type: "ack", ok: false, kind: "degraded" }, tabId);
             logger.warn(`[panel-orchestrator] tab ${tabId.slice(0, 8)} connected but model probe empty — sent degraded ack`);
