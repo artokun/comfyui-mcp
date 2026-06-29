@@ -581,7 +581,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_run",
-      "Queue the workflow the user has OPEN — exactly like them pressing Queue Prompt (current widget values, the live graph they can see). Returns queued:true, or queued:false with node_errors when frontend validation fails. Use this so the render runs on THEIR canvas and they see the result.",
+      "Queue the workflow the user has OPEN — exactly like them pressing Queue Prompt (current widget values, the live graph they can see). Returns queued:true, or queued:false with node_errors when frontend validation fails. Pass to_node_id to RUN ONLY ONE BRANCH ('run to node'): ComfyUI renders just that output node plus everything upstream of it and SKIPS every other output branch — handy for previewing or debugging part of a big graph without rendering the whole thing. to_node_id MUST be an OUTPUT node (SaveImage, PreviewImage, SaveVideo, …) — pick the one at the END of the branch you want; nodes are tagged is_output:true in panel_get_graph. Omit it to run the whole graph. Use this so the render runs on THEIR canvas and they see the result.",
       {
         batch_count: z
           .number()
@@ -590,13 +590,23 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           .max(100)
           .optional()
           .describe("Times to queue (default 1)."),
+        to_node_id: z
+          .number()
+          .int()
+          .optional()
+          .describe(
+            "Output node id to render UP TO (partial execution). Omit to run the whole graph. Must be an OUTPUT node — one with is_output:true in panel_get_graph.",
+          ),
       },
       async (args: A, ctx) => {
         // BACKPRESSURE: the agent can't see ComfyUI's queue, so re-queuing while a
         // render is already running silently stacks behind it (this is how a stuck
         // job once let three more pile up). Snapshot the watchdog BEFORE we queue.
         const pre = QueueMonitor.snapshot();
-        const res = await ctx.call({ cmd: "graph_run", batch_count: args.batch_count }, 20000);
+        const res = await ctx.call(
+          { cmd: "graph_run", batch_count: args.batch_count, to_node_id: args.to_node_id },
+          20000,
+        );
         // Append anti-poll guidance: the agent should go idle after queuing so the
         // executed event auto-injects the output image, rather than busy-polling.
         const note =

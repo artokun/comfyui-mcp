@@ -294,3 +294,31 @@ describe("panel-tools: transport parity", () => {
     }
   });
 });
+
+describe("panel-tools: panel_run (run-to-node partial execution)", () => {
+  it("exposes a batch_count + optional to_node_id schema", () => {
+    const def = defByName("panel_run");
+    expect(Object.keys(def.schema).sort()).toEqual(["batch_count", "to_node_id"]);
+    // to_node_id is an optional int — accepts a node id, rejects non-numbers,
+    // and (being optional) accepts undefined for a normal full run.
+    const toNode = def.schema.to_node_id as {
+      safeParse: (v: unknown) => { success: boolean };
+    };
+    expect(toNode.safeParse(27).success).toBe(true);
+    expect(toNode.safeParse("x").success).toBe(false);
+    expect(toNode.safeParse(undefined).success).toBe(true);
+  });
+
+  it("forwards graph_run with to_node_id undefined for a full run", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_run").handler({ batch_count: 2 }, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "graph_run", batch_count: 2 });
+    expect(calls[0].to_node_id).toBeUndefined();
+  });
+
+  it("forwards graph_run with to_node_id for a run-to-node", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_run").handler({ to_node_id: 27 }, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "graph_run", to_node_id: 27 });
+  });
+});

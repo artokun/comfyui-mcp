@@ -29,6 +29,20 @@ Closes the capability gap with Comfy's official cloud MCP (we stay local-first +
   a hard error (escape hatch: `--allow-unauthenticated-non-loopback`). Browser OAuth is a tracked
   follow-up; `generate_3d` is tracked separately (needs a new 3D pack + mesh output type).
 
+### Added — run-to-node (partial-execution debugging)
+
+- **`panel_run` gains `to_node_id`** — "run to node": render only one output branch
+  (the target output node plus everything upstream of it) via ComfyUI's native partial
+  execution, skipping every other branch. A fast/cheap way to preview or debug part of a
+  big graph; the target must be an output node (tagged `is_output:true` in
+  `panel_get_graph`). Omit it to run the whole graph as before.
+- **`debug-render` skill** — a method for diagnosing renders that *complete but look
+  wrong* (artifacts, wrong subject/pose/color, a ControlNet/IPAdapter/mask/LoRA not
+  taking, a refiner/upscale degrading the result): localize the first bad stage with
+  run-to-node, preview-tap intermediate latents/masks/preprocessor maps, fix, confirm.
+  Cross-linked from the troubleshooting skill (which stays for hard errors/OOM).
+- Orchestrator guidance + tests for the above. (Panel side ships in panel ≥ 0.4.5.)
+
 ### Fixed — live-render verification (RTX 4090, ComfyUI 0.26.2)
 
 Verifying the new generation tools on real hardware surfaced two graph bugs that only
