@@ -330,7 +330,8 @@ function buildLtxVideo(p: LtxVideoParams): WorkflowJSON {
     "1": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: ckpt } },
     "2": {
       class_type: "LTXAVTextEncoderLoader",
-      inputs: { text_encoder: textEncoder, ckpt_name: ckpt },
+      // `device` is a required widget (default = load on the compute device).
+      inputs: { text_encoder: textEncoder, ckpt_name: ckpt, device: "default" },
     },
     // distilled speed LoRA on the checkpoint model @0.5 (this is the model the
     // guider samples with — matches the pack's LoraLoaderModelOnly placement).
@@ -435,7 +436,8 @@ function buildLtxVideo(p: LtxVideoParams): WorkflowJSON {
   wf["26"] = { class_type: "CreateVideo", inputs: { images: conn("25", 0), fps } };
   wf["27"] = {
     class_type: "SaveVideo",
-    inputs: { video: conn("26", 0), filename_prefix: prefix },
+    // `format` and `codec` are required widgets ("auto" lets ComfyUI pick mp4/h264).
+    inputs: { video: conn("26", 0), filename_prefix: prefix, format: "auto", codec: "auto" },
   };
   return wf;
 }
