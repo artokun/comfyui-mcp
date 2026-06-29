@@ -4,7 +4,7 @@ description: "View, convert, and upload generated images; analyze colors; stage 
 icon: "images"
 ---
 
-<Info>12 tools. Generated from the live MCP tool schemas — do not edit by hand; run `npm run docs:gen`.</Info>
+<Info>14 tools. Generated from the live MCP tool schemas — do not edit by hand; run `npm run docs:gen`.</Info>
 
 ## view_image
 
@@ -149,6 +149,68 @@ Measure the color of a rendered image (not by eye): returns black/white points, 
 {
   "tool": "analyze_color",
   "arguments": {}
+}
+```
+
+---
+
+## remove_background
+
+Remove an image's background, returning a transparent (RGBA) cutout — the high-level entry point. Builds a LoadImage → BiRefNetRMBG → SaveImage workflow using the ComfyUI-RMBG (BiRefNet) matting node and enqueues it on your LOCAL GPU. Upload the source first with upload_image (or stage a prior output with stage_output_as_input), then pass its filename. Requires the ComfyUI-RMBG custom node (pack: wan-transparent, or install_custom_node 'comfyui-rmbg'); the BiRefNet model auto-downloads on first run. If the node isn't installed, returns an actionable error telling you how to install it. Returns prompt_id immediately; the cutout asset_id arrives in the completion notification.
+
+### Parameters
+
+<ParamField path="image" type="string" required>
+  Filename of the source image in ComfyUI's input dir (upload it first with upload_image)
+</ParamField>
+<ParamField path="model" type="string">
+  BiRefNet matting model (default 'BiRefNet_toonout'; auto-downloaded by ComfyUI-RMBG)
+</ParamField>
+<ParamField path="filename_prefix" type="string">
+  Output filename prefix (default 'ComfyUI_cutout')
+</ParamField>
+
+### Example
+
+<Note>Example coming soon — the call below is a generated skeleton.</Note>
+
+```json
+{
+  "tool": "remove_background",
+  "arguments": {
+    "image": "<image>"
+  }
+}
+```
+
+---
+
+## upscale_image
+
+Upscale an image with an ESRGAN super-resolution model — the high-level entry point. Builds an UpscaleModelLoader → ImageUpscaleWithModel workflow (scale=2 supersamples the 4x result back down for sharper output) and enqueues it on your LOCAL GPU. Upload the source first with upload_image (or stage a prior output with stage_output_as_input), then pass its filename. Needs an upscale model in models/upscale_models/ (e.g. 4x-ClearRealityV1 / 4x_foolhardy_Remacri, provided by the anima/ernie packs or download_model); returns an actionable error if none is found. Returns prompt_id immediately; the upscaled asset_id arrives in the completion notification.
+
+### Parameters
+
+<ParamField path="image" type="string" required>
+  Filename of the source image in ComfyUI's input dir (upload it first with upload_image)
+</ParamField>
+<ParamField path="scale" type="number">
+  Net upscale factor: 2 or 4 (default 4)
+</ParamField>
+<ParamField path="model" type="string">
+  Upscale model file in models/upscale_models/; auto-selected from local models if omitted
+</ParamField>
+
+### Example
+
+<Note>Example coming soon — the call below is a generated skeleton.</Note>
+
+```json
+{
+  "tool": "upscale_image",
+  "arguments": {
+    "image": "<image>"
+  }
 }
 ```
 

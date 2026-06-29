@@ -82,6 +82,7 @@ const CATEGORIES: Array<{
       "generate_with_ip_adapter",
       "regenerate",
       "generate_audio",
+      "generate_video",
     ],
   },
   {
@@ -121,6 +122,7 @@ const CATEGORIES: Array<{
     description: "View, convert, and upload generated images; analyze colors; stage outputs as inputs; upload media inputs; browse outputs.",
     tools: [
       "view_image", "get_image", "convert_image", "analyze_color",
+      "remove_background", "upscale_image",
       "stage_output_as_input", "upload_output",
       "upload_image", "upload_video", "upload_audio",
       "list_output_images", "list_assets", "get_asset_metadata",

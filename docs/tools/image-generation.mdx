@@ -4,7 +4,7 @@ description: "High-level text-to-image and text-to-audio generation, plus condit
 icon: "image"
 ---
 
-<Info>5 tools. Generated from the live MCP tool schemas — do not edit by hand; run `npm run docs:gen`.</Info>
+<Info>6 tools. Generated from the live MCP tool schemas — do not edit by hand; run `npm run docs:gen`.</Info>
 
 ## generate_image
 
@@ -297,6 +297,64 @@ Generate audio from a text prompt — supports ACE Step 1.5 and Stable Audio 3 m
     "model_family": "ace_step_1.5",
     "prompt": "<prompt>",
     "duration": 0
+  }
+}
+```
+
+---
+
+## generate_video
+
+Generate a short video from a text prompt (text-to-video), or animate a start image (image-to-video when `image` is given) — the high-level entry point. Composes an LTX-2.3 distilled workflow on your LOCAL GPU using the render-verified Comfy-Org node stack (gemma text encoder + abliterated/distilled LoRAs). Needs the LTX-2.3 models (~24-46GB): install with apply_manifest --path packs/ltx-2.3-txt2vid/manifest.yaml (or ltx-2.3-img2vid for i2v); returns an actionable error if the checkpoint is missing. seconds is converted to an 8n+1 frame count. For i2v, higher `strength` means MORE adherence to the start frame but LESS motion (1.0 can freeze the clip) — keep ~0.6. This minimal path omits the synchronized audio + stage-2 spatial upscale that the full ltx-2.3 packs ship. Returns prompt_id immediately; the video is written under output/video/ — find it with list_output_images (VHS/SaveVideo outputs may not appear in /history).
+
+### Parameters
+
+<ParamField path="prompt" type="string" required>
+  Text description of the video (actions over time, visual details)
+</ParamField>
+<ParamField path="image" type="string">
+  For image-to-video: filename of the start image in ComfyUI's input dir (upload it first)
+</ParamField>
+<ParamField path="negative_prompt" type="string">
+  Negative prompt (default: empty / from defaults)
+</ParamField>
+<ParamField path="seconds" type="number">
+  Clip length in seconds (default 4; ~10s max)
+</ParamField>
+<ParamField path="resolution" type="string">
+  'WIDTHxHEIGHT' e.g. '768x512' (rounded to multiples of 32; default 768x512)
+</ParamField>
+<ParamField path="fps" type="number">
+  Frames per second (default 25)
+</ParamField>
+<ParamField path="strength" type="number">
+  i2v only: adherence to the start frame, 0-1 (default 0.6; higher = less motion)
+</ParamField>
+<ParamField path="steps" type="integer">
+  Sampling steps (default 8 for the distilled model)
+</ParamField>
+<ParamField path="cfg" type="number">
+  CFG scale (default 1.0 for the distilled model)
+</ParamField>
+<ParamField path="seed" type="integer">
+  Seed (omit to randomize)
+</ParamField>
+<ParamField path="checkpoint" type="string">
+  LTX checkpoint filename in models/checkpoints/; auto-selected if omitted
+</ParamField>
+<ParamField path="filename_prefix" type="string">
+  Output filename prefix (default 'video/ltx-2.3')
+</ParamField>
+
+### Example
+
+<Note>Example coming soon — the call below is a generated skeleton.</Note>
+
+```json
+{
+  "tool": "generate_video",
+  "arguments": {
+    "prompt": "<prompt>"
   }
 }
 ```
