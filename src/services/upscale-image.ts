@@ -2,6 +2,7 @@ import type { WorkflowJSON } from "../comfyui/types.js";
 import { createWorkflow } from "./workflow-composer.js";
 import { DefaultsManager } from "./defaults-manager.js";
 import { ValidationError } from "../utils/errors.js";
+import { assertSafeInputFilename } from "../utils/input-paths.js";
 
 export interface UpscaleImageArgs {
   /** Filename (in ComfyUI's input dir) of the image to upscale. */
@@ -42,6 +43,7 @@ export async function upscaleImage(
         "(upload it first with upload_image, or stage an output with stage_output_as_input).",
     );
   }
+  assertSafeInputFilename(args.image, "image");
 
   const scale: 2 | 4 = args.scale ?? 4;
   if (scale !== 2 && scale !== 4) {

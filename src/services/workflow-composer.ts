@@ -255,10 +255,10 @@ function buildRemoveBackground(p: RemoveBackgroundParams): WorkflowJSON {
     },
     "2": {
       class_type: "BiRefNetRMBG",
-      // Only `image` (link) and `model` (the matting model) are set; the node's
-      // other widgets (sensitivity, mask blur/offset, output mode, background
-      // color) keep their defaults, which yield a transparent RGBA cutout.
-      inputs: { image: conn("1", 0), model },
+      // `background: "Alpha"` forces a transparent RGBA cutout regardless of the
+      // node version's default (matches packs/wan-transparent). The remaining
+      // widgets (mask blur/offset, invert, refine) keep their defaults.
+      inputs: { image: conn("1", 0), model, background: "Alpha" },
     },
     "3": {
       class_type: "SaveImage",
@@ -289,8 +289,9 @@ interface LtxVideoParams {
   cfg?: number;
   seed?: number;
   sampler_name?: string;
-  /** i2v adherence to the start frame. Higher = more adherence but LESS motion;
-   *  1.0 can freeze the clip. Keep ~0.6. (The "LTX strength gotcha".) */
+  /** i2v adherence to the start frame (LTXVImgToVideoInplace widget). Higher =
+   *  more adherence but LESS motion; 1.0 freezes the clip. Skill/pack-verified
+   *  default 0.6 — the "LTX strength gotcha" (see plugin/skills/ltxv2-video). */
   strength?: number;
   filename_prefix?: string;
 }
@@ -331,30 +332,32 @@ function buildLtxVideo(p: LtxVideoParams): WorkflowJSON {
       class_type: "LTXAVTextEncoderLoader",
       inputs: { text_encoder: textEncoder, ckpt_name: ckpt },
     },
-    // gemma abliterated LoRA on the encoder CLIP (and model passthrough).
+    // distilled speed LoRA on the checkpoint model @0.5 (this is the model the
+    // guider samples with — matches the pack's LoraLoaderModelOnly placement).
     "3": {
+      class_type: "LoraLoaderModelOnly",
+      inputs: { model: conn("1", 0), lora_name: distilledLora, strength_model: 0.5 },
+    },
+    // gemma abliterated LoRA — used for its CLIP output (prompt/eyes accuracy);
+    // the model output is left unused, mirroring the pack.
+    "4": {
       class_type: "LoraLoader",
       inputs: {
-        model: conn("1", 0),
+        model: conn("3", 0),
         clip: conn("2", 0),
         lora_name: abliteratedLora,
         strength_model: 1.0,
         strength_clip: 1.0,
       },
     },
-    // distilled speed LoRA on the model @0.5.
-    "4": {
-      class_type: "LoraLoaderModelOnly",
-      inputs: { model: conn("3", 0), lora_name: distilledLora, strength_model: 0.5 },
-    },
     "5": {
       class_type: "CLIPTextEncode",
-      inputs: { text: prompt, clip: conn("3", 1) },
+      inputs: { text: prompt, clip: conn("4", 1) },
       _meta: { title: "Positive Prompt" },
     },
     "6": {
       class_type: "CLIPTextEncode",
-      inputs: { text: negative, clip: conn("3", 1) },
+      inputs: { text: negative, clip: conn("4", 1) },
       _meta: { title: "Negative Prompt" },
     },
     "7": {
@@ -363,45 +366,42 @@ function buildLtxVideo(p: LtxVideoParams): WorkflowJSON {
     },
   };
 
-  // Latent source + final conditioning differ between t2v and i2v.
-  let condPos: [string, number];
-  let condNeg: [string, number];
+  // Conditioning (positive/negative) is shared by both modes — it comes straight
+  // from LTXVConditioning (#7). Only the LATENT differs: t2v uses an empty video
+  // latent; i2v bakes the start frame into that same empty latent via
+  // LTXVImgToVideoInplace (the node the ltx-2.3 packs actually use — there is no
+  // `LTXVImgToVideo` in any pack). LTXVImgToVideoInplace takes vae+image+latent
+  // and re-emits a LATENT; `strength` and `bypass` are WIDGETS, not outputs.
+  const condPos: [string, number] = conn("7", 0);
+  const condNeg: [string, number] = conn("7", 1);
   let latent: [string, number];
 
+  // Empty video latent (matches the pack's EmptyLTXVLatentVideo widget order).
+  wf["8"] = {
+    class_type: "EmptyLTXVLatentVideo",
+    inputs: { width, height, length, batch_size: 1 },
+  };
+
   if (isI2v) {
-    wf["8"] = { class_type: "LoadImage", inputs: { image: p.image_path } };
-    // LTXVImgToVideo bakes the start frame into the latent and re-emits the
-    // conditioning. `strength` is the gotcha knob (see interface doc).
-    wf["9"] = {
-      class_type: "LTXVImgToVideo",
+    wf["9"] = { class_type: "LoadImage", inputs: { image: p.image_path } };
+    wf["10"] = {
+      class_type: "LTXVImgToVideoInplace",
       inputs: {
-        positive: conn("7", 0),
-        negative: conn("7", 1),
         vae: conn("1", 2),
-        image: conn("8", 0),
-        width,
-        height,
-        length,
-        batch_size: 1,
-        strength,
+        image: conn("9", 0),
+        latent: conn("8", 0),
+        strength, // widget: start-frame adherence (the "LTX strength gotcha")
+        bypass: false, // widget: false = apply the image (true = pure t2v)
       },
     };
-    condPos = conn("9", 0);
-    condNeg = conn("9", 1);
-    latent = conn("9", 2);
+    latent = conn("10", 0);
   } else {
-    wf["8"] = {
-      class_type: "EmptyLTXVLatentVideo",
-      inputs: { width, height, length, batch_size: 1 },
-    };
-    condPos = conn("7", 0);
-    condNeg = conn("7", 1);
     latent = conn("8", 0);
   }
 
-  wf["10"] = { class_type: "RandomNoise", inputs: { noise_seed: seed } };
-  wf["11"] = { class_type: "KSamplerSelect", inputs: { sampler_name: sampler } };
-  wf["12"] = {
+  wf["20"] = { class_type: "RandomNoise", inputs: { noise_seed: seed } };
+  wf["21"] = { class_type: "KSamplerSelect", inputs: { sampler_name: sampler } };
+  wf["22"] = {
     class_type: "LTXVScheduler",
     inputs: {
       steps,
@@ -412,28 +412,30 @@ function buildLtxVideo(p: LtxVideoParams): WorkflowJSON {
       latent,
     },
   };
-  wf["13"] = {
+  wf["23"] = {
+    // Model = distilled-LoRA path (#3); the abliterated LoRA (#4) only conditions
+    // the CLIP that feeds the text encodes — mirrors the pack's guider wiring.
     class_type: "CFGGuider",
-    inputs: { model: conn("4", 0), positive: condPos, negative: condNeg, cfg },
+    inputs: { model: conn("3", 0), positive: condPos, negative: condNeg, cfg },
   };
-  wf["14"] = {
+  wf["24"] = {
     class_type: "SamplerCustomAdvanced",
     inputs: {
-      noise: conn("10", 0),
-      guider: conn("13", 0),
-      sampler: conn("11", 0),
-      sigmas: conn("12", 0),
+      noise: conn("20", 0),
+      guider: conn("23", 0),
+      sampler: conn("21", 0),
+      sigmas: conn("22", 0),
       latent_image: latent,
     },
   };
-  wf["15"] = {
+  wf["25"] = {
     class_type: "VAEDecode",
-    inputs: { samples: conn("14", 0), vae: conn("1", 2) },
+    inputs: { samples: conn("24", 0), vae: conn("1", 2) },
   };
-  wf["16"] = { class_type: "CreateVideo", inputs: { images: conn("15", 0), fps } };
-  wf["17"] = {
+  wf["26"] = { class_type: "CreateVideo", inputs: { images: conn("25", 0), fps } };
+  wf["27"] = {
     class_type: "SaveVideo",
-    inputs: { video: conn("16", 0), filename_prefix: prefix },
+    inputs: { video: conn("26", 0), filename_prefix: prefix },
   };
   return wf;
 }

@@ -2,6 +2,10 @@ import type { WorkflowJSON } from "../comfyui/types.js";
 import { createWorkflow } from "./workflow-composer.js";
 import { DefaultsManager } from "./defaults-manager.js";
 import { ValidationError } from "../utils/errors.js";
+import {
+  assertSafeInputFilename,
+  assertSafeFilenamePrefix,
+} from "../utils/input-paths.js";
 
 export interface GenerateVideoArgs {
   prompt: string;
@@ -16,14 +20,17 @@ export interface GenerateVideoArgs {
   seed?: number;
   steps?: number;
   cfg?: number;
-  /** i2v adherence to the start frame (0-1). Higher = less motion; ~0.6 default. */
+  /** i2v adherence to the start frame (0-1). Higher = less motion; 1.0 freezes it.
+   *  Default 0.6 (the "LTX strength gotcha"). */
   strength?: number;
   checkpoint?: string;
   filename_prefix?: string;
 }
 
 export interface GenerateVideoDeps {
-  resolveFirstModel: (type: string) => Promise<string | undefined>;
+  /** List local model filenames for a category (may be empty; throws when the
+   *  listing can't be obtained, e.g. no running server). */
+  listModels: (type: string) => Promise<string[]>;
   enqueue: (workflow: WorkflowJSON) => Promise<{ prompt_id: string; queue_remaining?: number }>;
 }
 
@@ -43,6 +50,16 @@ const DEFAULT_FPS = 25;
 const DEFAULT_WIDTH = 768;
 const DEFAULT_HEIGHT = 512;
 const MAX_FRAMES = 257; // LTX practical cap (~10s @25fps)
+
+// Canonical LTX-2.3 dependency filenames (render-verified Comfy-Org stack).
+const LTX_CHECKPOINTS = [
+  "ltx-2.3-22b-dev.safetensors",
+  "ltx-2.3-22b-dev-fp8.safetensors",
+];
+const GEMMA_ENCODER = "gemma_3_12B_it_fp8_scaled.safetensors";
+const DISTILLED_LORA =
+  "ltx_2.3_22b_distilled_1.1_lora_dynamic_fro09_avg_rank_111_bf16.safetensors";
+const ABLITERATED_LORA = "gemma-3-12b-it-abliterated_lora_rank64_bf16.safetensors";
 
 const DEFAULTABLE_KEYS = [
   "negative_prompt",
@@ -79,12 +96,44 @@ export function parseResolution(
   return { width, height };
 }
 
+function baseName(p: string): string {
+  return p.split(/[\\/]/).pop() ?? p;
+}
+
+/** True if `name` (by basename, case-insensitive) is in the listing. */
+function hasModel(listing: string[], name: string): boolean {
+  const target = baseName(name).toLowerCase();
+  return listing.some((m) => baseName(m).toLowerCase() === target);
+}
+
+/**
+ * Return the first candidate present in `listing`, or push an actionable entry to
+ * `missing` and return the primary candidate. When `listing` is null the model
+ * roster couldn't be read (e.g. no running server) — we can't verify, so we
+ * assume the primary candidate and skip the check rather than false-block.
+ */
+function requireModel(
+  listing: string[] | null,
+  candidates: string[],
+  label: string,
+  missing: string[],
+): string {
+  const primary = candidates[0];
+  if (listing === null) return primary;
+  for (const c of candidates) {
+    if (hasModel(listing, c)) return c;
+  }
+  missing.push(`${label} (${candidates.join(" or ")})`);
+  return primary;
+}
+
 /**
  * Compose + enqueue an LTX-2.3 distilled video workflow (text-to-video, or
- * image-to-video when `image` is given). Resolves the LTX checkpoint + gemma
- * text encoder from local models, normalizes seconds → an 8n+1 frame count, and
- * throws an actionable error pointing at the ltx-2.3 packs when the models are
- * missing. Reuses the `ltx_video` composer template.
+ * image-to-video when `image` is given). Verifies the SPECIFIC LTX checkpoint,
+ * gemma text encoder, and the two required LoRAs are present before enqueuing —
+ * any missing dependency throws one actionable error pointing at the ltx-2.3
+ * packs. Normalizes seconds → an 8n+1 frame count. Reuses the `ltx_video`
+ * composer template.
  */
 export async function generateVideo(
   args: GenerateVideoArgs,
@@ -100,6 +149,9 @@ export async function generateVideo(
     throw new ValidationError("strength must be between 0 and 1.");
   }
 
+  // Sanitize file-ish inputs before they reach LoadImage / SaveVideo.
+  if (args.image !== undefined) assertSafeInputFilename(args.image, "image");
+
   const argsRecord = args as unknown as Record<string, unknown>;
   const seed: Record<string, unknown> = {};
   for (const key of DEFAULTABLE_KEYS) {
@@ -108,31 +160,66 @@ export async function generateVideo(
   }
   const resolved = DefaultsManager.apply(seed);
 
-  let checkpoint = (resolved.checkpoint as string | undefined) ?? args.checkpoint;
-  if (!checkpoint) checkpoint = await deps.resolveFirstModel("checkpoints");
-  if (!checkpoint) {
-    throw new ValidationError(
-      "No LTX checkpoint specified or found in models/checkpoints/. Install the LTX-2.3 " +
-        "pack with apply_manifest --path packs/ltx-2.3-txt2vid/manifest.yaml (downloads " +
-        "ltx-2.3-22b-dev.safetensors + the gemma text encoder + the distilled/abliterated " +
-        "LoRAs), or pass `checkpoint`.",
-    );
+  const filenamePrefix = resolved.filename_prefix as string | undefined;
+  if (filenamePrefix !== undefined) assertSafeFilenamePrefix(filenamePrefix);
+
+  // Resolution: reject unparseable input rather than silently defaulting.
+  let res: { width: number; height: number };
+  if (args.resolution !== undefined) {
+    const parsed = parseResolution(args.resolution);
+    if (!parsed) {
+      throw new ValidationError(
+        `Invalid resolution "${args.resolution}": use "WIDTHxHEIGHT", e.g. "768x512".`,
+      );
+    }
+    res = parsed;
+  } else {
+    res = { width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT };
   }
 
-  // The gemma text encoder is required by LTXAVTextEncoderLoader; auto-resolve it
-  // but fall back to the canonical filename so the graph is still well-formed.
-  const textEncoder =
-    (await deps.resolveFirstModel("text_encoders")) ??
-    "gemma_3_12B_it_fp8_scaled.safetensors";
+  // Verify every required LTX dependency is actually present. A null listing
+  // means we couldn't read the roster (no server) — verification is skipped.
+  const safeList = async (type: string): Promise<string[] | null> => {
+    try {
+      return await deps.listModels(type);
+    } catch {
+      return null;
+    }
+  };
+  const checkpointList = await safeList("checkpoints");
+  const encoderList = await safeList("text_encoders");
+  const loraList = await safeList("loras");
+
+  const explicitCheckpoint =
+    args.checkpoint ?? (resolved.checkpoint as string | undefined);
+
+  const missing: string[] = [];
+  const checkpoint = requireModel(
+    checkpointList,
+    explicitCheckpoint ? [explicitCheckpoint] : LTX_CHECKPOINTS,
+    "LTX checkpoint",
+    missing,
+  );
+  const textEncoder = requireModel(
+    encoderList,
+    [GEMMA_ENCODER],
+    "Gemma text encoder",
+    missing,
+  );
+  requireModel(loraList, [DISTILLED_LORA], "distilled speed LoRA", missing);
+  requireModel(loraList, [ABLITERATED_LORA], "gemma abliterated LoRA", missing);
+
+  if (missing.length > 0) {
+    throw new ValidationError(
+      `Missing required LTX-2.3 model file(s): ${missing.join("; ")}. Install them with ` +
+        "apply_manifest --path packs/ltx-2.3-txt2vid/manifest.yaml (or ltx-2.3-img2vid " +
+        "for image-to-video), or pass an explicit `checkpoint` you already have.",
+    );
+  }
 
   const fps = (resolved.fps as number | undefined) ?? DEFAULT_FPS;
   const seconds = args.seconds ?? DEFAULT_SECONDS;
   const length = normalizeFrameCount(seconds * fps);
-
-  const res = parseResolution(args.resolution) ?? {
-    width: DEFAULT_WIDTH,
-    height: DEFAULT_HEIGHT,
-  };
 
   const mode: "t2v" | "i2v" = args.image ? "i2v" : "t2v";
 
@@ -150,7 +237,7 @@ export async function generateVideo(
     cfg: resolved.cfg as number | undefined,
     seed: resolved.seed as number | undefined,
     strength: args.strength,
-    filename_prefix: resolved.filename_prefix as string | undefined,
+    filename_prefix: filenamePrefix,
   });
 
   const { prompt_id, queue_remaining } = await deps.enqueue(workflow);

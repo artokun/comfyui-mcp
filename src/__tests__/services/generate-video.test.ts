@@ -8,22 +8,30 @@ import {
 import { DefaultsManager } from "../../services/defaults-manager.js";
 import type { WorkflowJSON } from "../../comfyui/types.js";
 
+// The required LTX deps the service verifies (must be present for the happy path).
+const DISTILLED_LORA =
+  "ltx_2.3_22b_distilled_1.1_lora_dynamic_fro09_avg_rank_111_bf16.safetensors";
+const ABLITERATED_LORA = "gemma-3-12b-it-abliterated_lora_rank64_bf16.safetensors";
+
+// listModels(type) → the per-category roster the service checks (a throw means
+// "can't determine, don't block"; [] means "determined empty" → missing-dep error).
 function makeDeps(
-  models: Record<string, string | undefined> = {
-    checkpoints: "ltx-2.3-22b-dev.safetensors",
-    text_encoders: "gemma_3_12B_it_fp8_scaled.safetensors",
+  models: Record<string, string[]> = {
+    checkpoints: ["ltx-2.3-22b-dev.safetensors"],
+    text_encoders: ["gemma_3_12B_it_fp8_scaled.safetensors"],
+    loras: [DISTILLED_LORA, ABLITERATED_LORA],
   },
 ) {
   const enqueued: WorkflowJSON[] = [];
-  const resolveFirstModel = vi.fn(async (type: string) => models[type]);
+  const listModels = vi.fn(async (type: string) => models[type] ?? []);
   const deps: GenerateVideoDeps = {
-    resolveFirstModel,
+    listModels,
     enqueue: async (wf) => {
       enqueued.push(wf);
       return { prompt_id: "pid-video", queue_remaining: 0 };
     },
   };
-  return { deps, enqueued, resolveFirstModel };
+  return { deps, enqueued, listModels };
 }
 
 function node(wf: WorkflowJSON, type: string) {
@@ -96,15 +104,19 @@ describe("generateVideo", () => {
     expect(res.mode).toBe("i2v");
     const wf = enqueued[0];
     expect(node(wf, "LoadImage")!.inputs.image).toBe("start.png");
-    const i2v = node(wf, "LTXVImgToVideo")!;
+    // i2v uses LTXVImgToVideoInplace (the node the ltx-2.3 packs actually use),
+    // which bakes the start frame into the base EmptyLTXVLatentVideo. strength is
+    // a widget on that node — the "LTX strength gotcha" default of 0.6.
+    const i2v = node(wf, "LTXVImgToVideoInplace")!;
     expect(i2v.inputs.strength).toBe(0.6);
-    expect(node(wf, "EmptyLTXVLatentVideo")).toBeUndefined();
+    expect(i2v.inputs.bypass).toBe(false);
+    expect(node(wf, "LTXVImgToVideo")).toBeUndefined();
   });
 
   it("honors an explicit i2v strength override", async () => {
     const { deps, enqueued } = makeDeps();
     await generateVideo({ prompt: "p", image: "s.png", strength: 0.9 }, deps);
-    expect(node(enqueued[0], "LTXVImgToVideo")!.inputs.strength).toBe(0.9);
+    expect(node(enqueued[0], "LTXVImgToVideoInplace")!.inputs.strength).toBe(0.9);
   });
 
   it("converts seconds + fps into an 8n+1 frame length", async () => {
@@ -122,15 +134,22 @@ describe("generateVideo", () => {
     expect(node(enqueued[0], "EmptyLTXVLatentVideo")!.inputs.width).toBe(960);
   });
 
-  it("auto-resolves the checkpoint + text encoder from local models", async () => {
-    const { deps, resolveFirstModel } = makeDeps();
+  it("verifies the checkpoint, text encoder, and LoRAs from local models", async () => {
+    const { deps, listModels } = makeDeps();
     await generateVideo({ prompt: "p" }, deps);
-    expect(resolveFirstModel).toHaveBeenCalledWith("checkpoints");
-    expect(resolveFirstModel).toHaveBeenCalledWith("text_encoders");
+    expect(listModels).toHaveBeenCalledWith("checkpoints");
+    expect(listModels).toHaveBeenCalledWith("text_encoders");
+    expect(listModels).toHaveBeenCalledWith("loras");
   });
 
   it("throws an actionable error when no LTX checkpoint is found", async () => {
-    const { deps } = makeDeps({ checkpoints: undefined });
+    // Roster is readable but the checkpoint is absent → determined-missing → error
+    // (a throw from listModels would instead mean "can't determine" and proceed).
+    const { deps } = makeDeps({
+      checkpoints: [],
+      text_encoders: ["gemma_3_12B_it_fp8_scaled.safetensors"],
+      loras: [DISTILLED_LORA, ABLITERATED_LORA],
+    });
     await expect(generateVideo({ prompt: "p" }, deps)).rejects.toThrow(
       /ltx-2\.3|apply_manifest|checkpoint/i,
     );

@@ -5,17 +5,19 @@ import { enqueueWorkflow } from "../services/workflow-executor.js";
 import { listLocalModels } from "../services/model-resolver.js";
 import { errorToToolResult } from "../utils/errors.js";
 
-async function resolveFirstModel(type: string): Promise<string | undefined> {
-  try {
-    const models = await listLocalModels(type);
-    return models[0]?.name;
-  } catch {
-    return undefined;
-  }
+// The service requires SPECIFIC LTX deps (checkpoint / gemma encoder / LoRAs) and
+// builds its own actionable "missing dependency" errors from the full per-category
+// listing. It wraps this in safeList (throw → null = "can't determine, don't
+// block"), so DON'T swallow errors here — let listLocalModels throw when there's
+// no server, otherwise an empty list would read as "determined empty" and falsely
+// report every dependency missing.
+async function listModels(type: string): Promise<string[]> {
+  const models = await listLocalModels(type);
+  return models.map((m) => m.name);
 }
 
 const deps: GenerateVideoDeps = {
-  resolveFirstModel,
+  listModels,
   enqueue: (workflow) => enqueueWorkflow(workflow),
 };
 

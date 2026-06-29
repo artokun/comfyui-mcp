@@ -2,6 +2,10 @@ import type { WorkflowJSON } from "../comfyui/types.js";
 import { createWorkflow } from "./workflow-composer.js";
 import { DefaultsManager } from "./defaults-manager.js";
 import { ValidationError } from "../utils/errors.js";
+import {
+  assertSafeInputFilename,
+  assertSafeFilenamePrefix,
+} from "../utils/input-paths.js";
 
 export interface RemoveBackgroundArgs {
   /** Filename (in ComfyUI's input dir) of the image to cut out. Upload it first
@@ -47,6 +51,8 @@ export async function removeBackground(
         "(upload it first with upload_image, or stage an output with stage_output_as_input).",
     );
   }
+  assertSafeInputFilename(args.image, "image");
+  if (args.filename_prefix !== undefined) assertSafeFilenamePrefix(args.filename_prefix);
 
   if (deps.isNodeInstalled) {
     const installed = await deps.isNodeInstalled(REMBG_NODE);
