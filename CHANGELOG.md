@@ -29,6 +29,26 @@ Closes the capability gap with Comfy's official cloud MCP (we stay local-first +
   a hard error (escape hatch: `--allow-unauthenticated-non-loopback`). Browser OAuth is a tracked
   follow-up; `generate_3d` is tracked separately (needs a new 3D pack + mesh output type).
 
+### Fixed — live-render verification (RTX 4090, ComfyUI 0.26.2)
+
+Verifying the new generation tools on real hardware surfaced two graph bugs that only
+appear against the installed node schemas (unit tests don't validate live nodes):
+
+- **`generate_video`** — the composed LTX-2.3 graph was rejected at submit (HTTP 400).
+  Added the required widgets the installed `comfy_extras` nodes demand:
+  `LTXAVTextEncoderLoader.device` (`"default"`) and `SaveVideo.format` / `SaveVideo.codec`
+  (`"auto"`). Matches the render-verified `packs/ltx-2.3-img2vid/workflow.json`; corrected
+  graph renders end-to-end (8 steps, 768×512×49 → `output/video/*.mp4`).
+- **`remove_background`** — `BiRefNetRMBG` raised a runtime `'mask_blur'`: ComfyUI-RMBG
+  declares `mask_blur`/`mask_offset`/`invert_output`/`refine_foreground`/`background_color`
+  as optional but reads them by key, so omitting them over the API KeyErrors. Now passes
+  every widget explicitly with the node's documented defaults; produces a transparent RGBA
+  cutout.
+- Regression-guard unit tests assert these required widgets so they can't silently drop.
+
+All five parity tools (`run_workflow_url`, `rerun_generation`, `upscale_image`,
+`generate_video`, `remove_background`) are now live-verified on a local GPU.
+
 ## [0.20.9] - 2026-06-27
 
 ### Added
