@@ -1,0 +1,44 @@
+name: artokun-flow
+display_name: Artokun Flow v1 — WAN Animate (replace / animate)
+family: wan
+kind: video
+description: >-
+  WAN Animate 2.2 video pipeline (supersedes the old cozy-flow pack). Drives a
+  character with a video's pose/face (ViTPose + YOLOv10), Uni3C controlnet for
+  temporal stability, SAM3 tracking/masking, a ReActor first-frame face-lock, color
+  match, and video output. TWO MODES (per in-graph notes): non-replacement (default
+  animate/drive) and REPLACEMENT MODE — unmute the "REPLACEMENT MODE" group to
+  replace the person in the video. An optional muted "Upscale4x-RIFE-1080p" subgraph
+  (RIFE frame-interp + SeedVR2) can be unmuted for 1080p. Kijai WanVideo stack +
+  lightx2v/relight/Pusa/Fun LoRAs.
+vram: 24GB+
+workflow: workflow.json
+skill: video-extend
+launch_args: []
+sources:
+  gist: https://gist.github.com/T1M00R/318e7955fa73d82e200307179fd8e316
+  ofmhub_models: https://huggingface.co/wdsfdsdf/OFMHUB
+  kijai: https://huggingface.co/Kijai/WanVideo_comfy
+notes:
+  - PERSONAL PACK — requires the private teskor-hub nodes (TSColorMatch,
+    TSPoseDataSmoother, TSVideoCombineNoMetadata), NOT auto-installable. Install
+    manually or swap to KJNodes ColorMatch / VHS_VideoCombine.
+  - SAM3 + frame-interpolation + math/mask/post-processing are CORE in recent
+    ComfyUI (comfy_extras) — keep ComfyUI updated so SAM3_VideoTrack exists.
+  - Base models download from the OFMHUB gist (placeholder names) saved under the
+    workflow's real Kijai filenames (rename-on-download) — same content.
+  - GAPS the gist does NOT cover, source separately. (a) SAM3 checkpoint
+    sam3.1_multiplex_fp16.safetensors in models/checkpoints — ACTIVE, required by
+    the SAM3 subgraph. (b) ReActor inswapper_128.onnx + GPEN-BFR-512.onnx — ReActor
+    auto-fetches these on first use into models/insightface and
+    models/facerestore_models. (c) OPTIONAL upscale only (muted subgraph) —
+    seedvr2_ema_3b_fp8_e4m3fn.safetensors, ema_vae_fp16.safetensors,
+    rife_v4.26.safetensors.
+  - Bypass the ReActor face-lock node to disable first-frame identity locking.
+  - NOT render-verified here (WAN Animate models are tens of GB). Static-validated
+    (clean lint + UI→API convert; only the muted upscale subgraph is skipped).
+post_install:
+  - Install the private teskor-hub nodes (or swap to standard equivalents).
+  - Place the SAM3 checkpoint in models/checkpoints/ (see gaps above).
+  - Restart ComfyUI (or ComfyUI-Manager -> Install missing custom nodes).
+  - Load workflow.json.

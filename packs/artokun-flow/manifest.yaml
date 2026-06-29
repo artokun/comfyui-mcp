@@ -1,0 +1,75 @@
+# Artokun Flow v1 — WAN Animate (replacement + non-replacement modes). PERSONAL pack.
+# Supersedes the old cozy-flow pack. Two modes (per in-graph notes): non-replacement
+# (default animate/drive) and REPLACEMENT MODE (unmute the "REPLACEMENT MODE" group
+# to replace the person in the video), with a ReActor first-frame face-lock
+# (bypassable) and a muted "Upscale4x-RIFE-1080p" subgraph (RIFE + SeedVR2, opt-in).
+#
+# SAM3, frame-interpolation, math, mask, and post-processing nodes are CORE in a
+# recent ComfyUI (comfy_extras) — no custom node needed for those; just keep ComfyUI
+# up to date so SAM3_VideoTrack/SAM3_TrackToMask exist.
+#
+# PRIVATE NODES (NOT auto-installable — user-supplied): TSColorMatch,
+# TSPoseDataSmoother, TSVideoCombineNoMetadata from teskor-hub (private repos). The
+# graph won't fully load without them; swap to KJNodes ColorMatch / VHS_VideoCombine
+# if you don't have them.
+#
+# MODEL NAMING: model URLs are taken from the OFMHUB gist (hosts the base models
+# under short placeholder names at wdsfdsdf/OFMHUB). The workflow references the REAL
+# Kijai filenames, so base models are downloaded from the gist and SAVED under the
+# workflow's real names (rename-on-download). Same content, matching filenames.
+
+pip: []
+
+custom_nodes:
+  - https://github.com/ltdrdata/ComfyUI-Manager.git
+  - https://github.com/kijai/ComfyUI-WanVideoWrapper        # WanVideo* (model/vae/lora/sampler/decode/animate/uni3c/blockswap)
+  - https://github.com/kijai/ComfyUI-WanAnimatePreprocess   # PoseAndFaceDetection, OnnxDetectionModelLoader
+  - https://github.com/kijai/ComfyUI-KJNodes               # ImageResizeKJv2, GetImageSizeAndCount, DrawMaskOnImage, ImageConcatMulti, PreviewAnimation
+  - https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite # VHS_LoadVideo, VHS_VideoInfoLoaded
+  - https://github.com/Gourieff/ComfyUI-ReActor            # ReActorFaceSwap, ReActorBuildFaceModel (first-frame face-lock; auto-fetches inswapper_128 + GPEN-BFR-512)
+  # --- OPTIONAL (only for the muted Upscale4x-RIFE-1080p subgraph) ---
+  # - https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler  # SeedVR2* — un-mute the upscale subgraph to use
+  # --- PRIVATE / user-supplied (NOT cloned) — see header ---
+  # - teskor-hub/NEW-UTILS                 # TSColorMatch
+  # - teskor-hub/comfyui-teskors-utils     # TSPoseDataSmoother, TSVideoCombineNoMetadata
+
+models:
+  # --- WAN base — gist hosts these under placeholder names; saved as the real names
+  #     the workflow references (rename-on-download). ---
+  - url: https://huggingface.co/wdsfdsdf/OFMHUB/resolve/main/WanModel.safetensors
+    local_path: diffusion_models/Wan2_2-Animate-14B_fp8_scaled_e4m3fn_KJ_v2.safetensors
+  - url: https://huggingface.co/wdsfdsdf/OFMHUB/resolve/main/vae.safetensors
+    local_path: vae/Wan2_1_VAE_bf16.safetensors
+  - url: https://huggingface.co/wdsfdsdf/OFMHUB/resolve/main/klip_vision.safetensors
+    local_path: clip_vision/clip_vision_h.safetensors
+  - url: https://huggingface.co/wdsfdsdf/OFMHUB/resolve/main/text_enc.safetensors
+    local_path: text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors
+
+  # --- Uni3C controlnet (gist gives the real Kijai name directly) ---
+  - url: https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/Wan21_Uni3C_controlnet_fp16.safetensors
+    local_path: controlnet/Wan21_Uni3C_controlnet_fp16.safetensors
+
+  # --- LoRA stack (gist names match the workflow's placeholder LoRA names) ---
+  - url: https://huggingface.co/wdsfdsdf/OFMHUB/resolve/main/light.safetensors
+    local_path: loras/light.safetensors
+  - url: https://huggingface.co/wdsfdsdf/OFMHUB/resolve/main/wan.reworked.safetensors
+    local_path: loras/wan.reworked.safetensors
+  - url: https://huggingface.co/wdsfdsdf/OFMHUB/resolve/main/WanPusa.safetensors
+    local_path: loras/WanPusa.safetensors
+  - url: https://huggingface.co/wdsfdsdf/OFMHUB/resolve/main/WanFun.reworked.safetensors
+    local_path: loras/WanFun.reworked.safetensors
+
+  # --- Pose detection (models/detection/) ---
+  - url: https://huggingface.co/Kijai/vitpose_comfy/resolve/main/onnx/vitpose_h_wholebody_model.onnx
+    local_path: detection/vitpose_h_wholebody_model.onnx
+  - url: https://huggingface.co/Kijai/vitpose_comfy/resolve/main/onnx/vitpose_h_wholebody_data.bin
+    local_path: detection/vitpose_h_wholebody_data.bin
+  - url: https://huggingface.co/onnx-community/yolov10m/resolve/main/onnx/model.onnx
+    local_path: detection/yolov10m.onnx
+
+  # --- ReActor face-lock models (ReActor's canonical HF source; the node also
+  #     auto-fetches these on first use). Face-lock is bypassable. ---
+  - url: https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/models/inswapper_128.onnx
+    local_path: insightface/inswapper_128.onnx
+  - url: https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/models/facerestore_models/GPEN-BFR-512.onnx
+    local_path: facerestore_models/GPEN-BFR-512.onnx

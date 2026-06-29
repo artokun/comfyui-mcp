@@ -93,7 +93,7 @@ This package also ships as a **Claude Code plugin**, providing slash commands, s
 
 22 skills total — model-family guides (Flux, WAN, LTX 2.3, Qwen, Z-Image, Ideogram 4, ERNIE, ANIMA + anime / WAN / Z-Image LoRA training), the **model-registry** (curated download URLs), the **civitai** pairing skill, node authoring, and the core four below. Full list on the [plugin docs page](https://comfyui-mcp.artokun.io/docs/plugin).
 
-> **Installer packs.** [`packs/`](packs/) bundles 13 one-command ComfyUI setups — ANIMA, Ideogram 4, LTX-2.3, ERNIE, WAN (animate / longer-videos / transparent), Qwen (image / image-edit), Z-Image (turbo / base / xy-plot) and cozy-flow (AI-influencer video). Each is a manifest of custom nodes + model URLs + workflow that drives both `apply_manifest` and generated `install-windows.bat` / `install-runpod.sh`, with CI that validates every model link + payload size. See [`packs/README.md`](packs/README.md).
+> **Installer packs.** [`packs/`](packs/) bundles 13 one-command ComfyUI setups — ANIMA, Ideogram 4, LTX-2.3, ERNIE, WAN (animate / longer-videos / transparent), Qwen (image / image-edit), Z-Image (turbo / base / xy-plot) and artokun-flow (WAN Animate — replace / animate). Each is a manifest of custom nodes + model URLs + workflow that drives both `apply_manifest` and generated `install-windows.bat` / `install-runpod.sh`, with CI that validates every model link + payload size. See [`packs/README.md`](packs/README.md).
 
 | Skill | Description |
 |-------|-------------|
