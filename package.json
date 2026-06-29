@@ -1,6 +1,6 @@
 {
   "name": "comfyui-mcp",
-  "version": "0.20.9",
+  "version": "0.21.0",
   "mcpName": "io.github.artokun/comfyui-mcp",
   "description": "MCP server + autonomous AI agent for ComfyUI — drive your live graph in natural language from a sidebar agent on Claude OR ChatGPT (your own subscription, no API key). Generate images, video & audio, author and run workflows, manage models and custom nodes. Also a Claude Code plugin with skills, slash commands, and installer packs.",
   "homepage": "https://comfyui-mcp.artokun.io/docs",

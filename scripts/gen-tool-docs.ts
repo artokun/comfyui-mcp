@@ -91,7 +91,7 @@ const CATEGORIES: Array<{
     icon: "play",
     description: "Enqueue workflows and inspect the queue, jobs, history, and system stats.",
     tools: [
-      "enqueue_workflow", "get_system_stats", "get_queue", "get_job_status",
+      "enqueue_workflow", "rerun_generation", "get_system_stats", "get_queue", "get_job_status",
       "get_queued_workflow", "move_queued_job", "edit_queued_job",
       "cancel_job", "cancel_queued_job", "clear_queue", "get_history", "get_logs",
       "health_check",
@@ -113,7 +113,7 @@ const CATEGORIES: Array<{
     slug: "workflow-library",
     icon: "folder-open",
     description: "Save, load, strip/slice, analyze, and extract workflows.",
-    tools: ["list_workflows", "get_workflow", "strip_workflow", "slice_workflow", "save_workflow", "analyze_workflow", "workflow_from_image", "lock_workflow", "verify_workflow_lock"],
+    tools: ["list_workflows", "get_workflow", "run_workflow_url", "strip_workflow", "slice_workflow", "save_workflow", "analyze_workflow", "workflow_from_image", "lock_workflow", "verify_workflow_lock"],
   },
   {
     group: "Assets & Images",

@@ -4,7 +4,7 @@ description: "Save, load, strip/slice, analyze, and extract workflows."
 icon: "folder-open"
 ---
 
-<Info>9 tools. Generated from the live MCP tool schemas — do not edit by hand; run `npm run docs:gen`.</Info>
+<Info>10 tools. Generated from the live MCP tool schemas — do not edit by hand; run `npm run docs:gen`.</Info>
 
 ## list_workflows
 
@@ -48,6 +48,38 @@ Load a saved workflow and return its raw JSON. Use analyze_workflow instead if y
   "arguments": {
     "filename": "<filename>",
     "format": "ui"
+  }
+}
+```
+
+---
+
+## run_workflow_url
+
+Read (and optionally execute) a shared ComfyUI workflow from a URL. Fetches the workflow JSON, accepts API-format prompt graphs or UI-format exports (UI is auto-converted via the same converter as get_workflow), validates it, and summarizes it. Supports raw .json links and GitHub blob/raw URLs (blob is normalized to raw); other share hosts that need a site API return a clear 'paste the raw JSON URL' error. The fetch is bounded (http/https only, timeout + size cap, loopback/private/metadata IPs rejected to prevent SSRF). READ-ONLY unless run=true; when run=true it enqueues the workflow (applying optional `inputs` overrides) and returns the prompt_id.
+
+### Parameters
+
+<ParamField path="url" type="string" required>
+  URL of the workflow JSON. Raw .json links and GitHub blob/raw URLs work directly.
+</ParamField>
+<ParamField path="run" type="boolean" required default="false">
+  If true, enqueue the workflow for execution and return the prompt_id. Default false: only fetch, validate, and summarize (read-only).
+</ParamField>
+<ParamField path="inputs" type="object">
+  Optional parameter overrides applied (only when run=true) to every node that already has a matching input name. Common keys: cfg, steps, sampler_name, seed, text.
+</ParamField>
+
+### Example
+
+<Note>Example coming soon — the call below is a generated skeleton.</Note>
+
+```json
+{
+  "tool": "run_workflow_url",
+  "arguments": {
+    "url": "<url>",
+    "run": true
   }
 }
 ```

@@ -6,6 +6,29 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.21.0] - 2026-06-29
+
+### Added — Comfy MCP parity
+
+Closes the capability gap with Comfy's official cloud MCP (we stay local-first + far broader):
+
+- **`run_workflow_url`** — fetch a workflow from a shared / registry / raw-JSON URL, validate it
+  (API or UI format, auto-converted), then load it or run it (`run: true`). SSRF-hardened: the host
+  is DNS-resolved and every resolved address is checked against private/loopback/link-local/metadata
+  ranges, redirects are rejected, and only http/https with bounded size/timeout is fetched.
+- **`rerun_generation`** — re-enqueue the exact workflow behind a prior generation (newest if no
+  `prompt_id`), with optional input overrides — reproducibility in one call.
+- **`generate_video`** — one-call LTX-2.3 text/image-to-video on our render-verified pack stack
+  (encodes the i2v strength gotcha; needs the LTX pack/models).
+- **`remove_background`** — one-call BiRefNet/RMBG cutout (needs ComfyUI-RMBG).
+- **`upscale_image`** — one-call model upscale (`UpscaleModelLoader` + `ImageUpscaleWithModel`).
+- **Remote / hosted connector** — token auth (`Authorization: Bearer` **or** `X-API-Key`,
+  constant-time) on the Streamable-HTTP `/mcp` transport, plus a one-command public tunnel
+  (`npx -y comfyui-mcp --tunnel`, via the bundled `cloudflared`) that prints a paste-ready Claude
+  Desktop Custom Connector URL + token. Binding `/mcp` to a non-loopback host without a token is now
+  a hard error (escape hatch: `--allow-unauthenticated-non-loopback`). Browser OAuth is a tracked
+  follow-up; `generate_3d` is tracked separately (needs a new 3D pack + mesh output type).
+
 ## [0.20.9] - 2026-06-27
 
 ### Added
