@@ -6,6 +6,17 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.21.1] - 2026-06-29
+
+### Added
+
+- **`wan-animate-ofm` pack** — WAN Animate 2.2 video-to-video character animation, the
+  "OFM hub" variant (ViTPose+YOLO pose/face detection, Uni3C controlnet for temporal
+  stability, color-match, optional bypassed SAM2 face-swap branch) on the Kijai WanVideo
+  stack. **Personal pack:** requires four private teskor-hub nodes (or standard
+  equivalents) and is static-validated only — not render-verified here. Caveats are
+  documented in its `pack.yaml`/`manifest.yaml`. Distinct from the SeC-based `wan-animate`.
+
 ## [0.21.0] - 2026-06-29
 
 ### Added — Comfy MCP parity

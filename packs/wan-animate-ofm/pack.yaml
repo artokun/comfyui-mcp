@@ -1,0 +1,43 @@
+name: wan-animate-ofm
+display_name: WAN Animate 2.2 — OFM hub (Uni3C + face-swap)
+family: wan
+kind: video
+description: >-
+  WAN Animate 2.2 video-to-video character animation — the "OFM hub" variant,
+  decoded and flattened from a teskor-hub workflow. Drives a character image with
+  a driving video (ViTPose + YOLOv10 pose/face detection), adds Uni3C controlnet
+  for temporal stability, color-matches, and saves video. A SAM2 face-swap /
+  deep-fake masking branch ships BYPASSED (opt-in). Runs on the Kijai WanVideo
+  stack (Wan2.2-Animate-14B fp8 + Wan2.1 VAE + clip_vision_h + umt5) with a LoRA
+  stack of lightx2v (4-step distill), WanAnimate relight, Pusa V1 temporal, and
+  Wan2.2-Fun. Distinct from the SeC-based `wan-animate` pack.
+vram: 24GB+
+workflow: workflow.json
+skill: video-extend
+launch_args: []
+sources:
+  kijai: https://huggingface.co/Kijai/WanVideo_comfy
+  kijai_fp8: https://huggingface.co/Kijai/WanVideo_comfy_fp8_scaled
+notes:
+  - PERSONAL PACK — requires FOUR private teskor-hub nodes that are NOT
+    auto-installable (TSColorMatch, TSVideoCombineNoMetadata,
+    TSPreviewImageNoMetadata, TSPoseDataSmoother). Install them manually, or swap
+    to standard equivalents (VHS_VideoCombine / KJNodes ColorMatch / core
+    PreviewImage) — without them the graph won't fully load.
+  - Models download under the workflow's PLACEHOLDER names (WanModel / vae /
+    klip_vision / text_enc + light / wan.reworked / WanPusa / WanFun.reworked) so
+    the graph loads without edits — see manifest.yaml for the real Kijai files.
+  - It IS a Kijai stack end-to-end (model in WanVideo_comfy_fp8_scaled, the rest +
+    LoRAs in WanVideo_comfy). Exact LoRA variant picks (rank/precision) were
+    inferred from the canonical WAN_ANIMATE_ULTRA workflow + the video-extend
+    skill (Pusa); confirm against your own files if a rank differs.
+  - The SAM2 "Face swap" branch (DownloadAndLoadSAM2Model -> Sam2Segmentation ->
+    mask nodes) ships BYPASSED — un-bypass those 7 nodes to enable masked
+    face-swap. SAM2 + the pose ONNX models (vitpose/yolov10m) auto-download via
+    their nodes.
+  - NOT render-verified here (WAN Animate models are ~tens of GB and weren't
+    installed). Static-validated only (clean flatten + structural lint).
+post_install:
+  - Install the private teskor-hub nodes (or swap to standard equivalents).
+  - Restart ComfyUI (or ComfyUI-Manager -> Install missing custom nodes).
+  - Load workflow.json.
