@@ -80,6 +80,9 @@ describe("generateVideo", () => {
     expect(node(wf, "LTXAVTextEncoderLoader")!.inputs.text_encoder).toBe(
       "gemma_3_12B_it_fp8_scaled.safetensors",
     );
+    // `device` is a REQUIRED widget on the installed comfy_extras node — omitting
+    // it 400s at submit (regression guard for the live-render fix).
+    expect(node(wf, "LTXAVTextEncoderLoader")!.inputs.device).toBe("default");
     // Both LoRAs present (abliterated on CLIP, distilled on model).
     expect(node(wf, "LoraLoader")).toBeDefined();
     expect(node(wf, "LoraLoaderModelOnly")!.inputs.strength_model).toBe(0.5);
@@ -89,7 +92,11 @@ describe("generateVideo", () => {
     expect(node(wf, "LTXVImgToVideo")).toBeUndefined();
     // The distilled sampler tail + video output.
     expect(node(wf, "SamplerCustomAdvanced")).toBeDefined();
-    expect(node(wf, "SaveVideo")).toBeDefined();
+    // SaveVideo's `format` + `codec` are REQUIRED widgets — omitting them 400s at
+    // submit (regression guard for the live-render fix).
+    const save = node(wf, "SaveVideo")!;
+    expect(save.inputs.format).toBe("auto");
+    expect(save.inputs.codec).toBe("auto");
     // Positive prompt wired in.
     const pos = Object.values(wf).find(
       (n) => n.class_type === "CLIPTextEncode" && n._meta?.title === "Positive Prompt",

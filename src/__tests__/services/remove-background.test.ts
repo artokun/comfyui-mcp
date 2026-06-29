@@ -40,6 +40,15 @@ describe("removeBackground", () => {
     const rembg = node(wf, REMBG_NODE)!;
     expect(rembg.inputs.image).toEqual(["1", 0]);
     expect(rembg.inputs.model).toBe("BiRefNet_toonout");
+    // background=Alpha gives a transparent cutout; the other widgets are "optional"
+    // in the node schema but ComfyUI-RMBG reads them by key, so they MUST be passed
+    // explicitly or the node KeyErrors at runtime over the API (regression guard).
+    expect(rembg.inputs.background).toBe("Alpha");
+    expect(rembg.inputs.mask_blur).toBe(0);
+    expect(rembg.inputs.mask_offset).toBe(0);
+    expect(rembg.inputs.invert_output).toBe(false);
+    expect(rembg.inputs.refine_foreground).toBe(false);
+    expect(rembg.inputs.background_color).toBe("#222222");
     const save = node(wf, "SaveImage")!;
     expect(save.inputs.images).toEqual(["2", 0]);
   });
