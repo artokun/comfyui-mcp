@@ -10,9 +10,11 @@ description: >-
   "have/make <character> dance this video" / video-to-video character drive or replace
   request. WAN Animate 2.2 + Uni3C controlnet (temporal stability) + ViTPose/YOLOv10
   pose+face detection + SAM3 tracking/masking + a ReActor first-frame face-lock + color
-  match. TWO MODES: non-replacement (default — animate/drive a standalone character)
-  and REPLACEMENT MODE (unmute the "REPLACEMENT MODE" group to swap the person in the
-  video). Optional muted "Upscale4x-RIFE-1080p" subgraph (RIFE + SeedVR2) for 1080p.
+  match. TWO MODES via the "REPLACEMENT MODE" subgraph node: it ships MUTED = OFF
+  (default — animate the whole character + background to the driving motion); set it
+  Active = ON to replace the person in the real video. (Toggle with Mute, not Bypass —
+  OFF needs its bg/mask outputs empty.) Optional bypassed "Upscale4x-RIFE-1080p"
+  subgraph (RIFE + SeedVR2) for 1080p.
   Kijai WanVideo stack + lightx2v/relight/Pusa/Fun LoRAs.
 vram: 24GB+
 workflow: workflow.json
