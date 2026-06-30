@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# /post_start.sh — comfyui-mcp boot hook (FAST-RESTART design).
+# /post_start.sh — comfyui-mcp boot hook (PERSISTENT-ON-VOLUME design).
 # =============================================================================
 # The base image's CMD is /start.sh (from runpod/containers). It:
 #   1. service nginx start          (reads our /etc/nginx/nginx.conf: :3000->:3001)
@@ -11,61 +11,66 @@
 #
 # So by the time we run, nginx + sshd + JupyterLab are already up.
 #
-# FAST RESTART: the ComfyUI install + venv + custom_nodes are BAKED IN THE IMAGE
-# at ${COMFY_HOME} (default /opt/ComfyUI) and run DIRECTLY from there. We do NOT
-# seed/sync/rsync anything onto /workspace. The ONLY volume prep is a fast,
-# idempotent `mkdir -p` of the user-data dirs. ComfyUI is then pointed at those
-# dirs via per-directory launch flags + extra_model_paths.yaml. A warm restart
-# therefore does NO install/sync/seed — just mkdir + launch (~30-60s init).
+# WHAT THIS DOES
+#   FIRST boot (empty volume): rsync the pristine seed ${SEED_HOME} (baked in the
+#     image) to ${COMFY_HOME} on the network volume — the app + venv +
+#     custom_nodes. Slow, one-time.
+#   EVERY boot after: NO copy. `git pull --ff-only` ComfyUI + the panel and
+#     re-pip ONLY if a requirements file changed (sha marker). Then launch.
 #
-# WHAT PERSISTS / WHAT DOESN'T:
-#   * PERSIST (on /workspace): user/ (workflows+settings+Manager config),
-#     models/ (incl. Manager downloads), input/, output/.
-#   * EPHEMERAL (in the container): custom_nodes, the venv, all caches. Nodes the
-#     agent/Manager install at runtime DO NOT survive a restart — bake them into
-#     the Dockerfile to keep them. Models DO survive (they land on the volume).
+# WHAT PERSISTS: EVERYTHING durable is on /workspace —
+#   ComfyUI/ (app+venv+custom_nodes, auto-updated), user/, models/, input/,
+#   output/. Custom nodes the agent/Manager install at runtime AND their pip deps
+#   (in the venv) SURVIVE a restart.
+#
+# RELOCATABLE VENV: built at ${SEED_HOME}/venv, run from ${COMFY_HOME}/venv. We
+# invoke it by ABSOLUTE PATH and use `python -m pip` (never the path-pinned `pip`
+# console-script), so the interpreter self-locates after the copy.
 #
 # IMPORTANT: this script must end alive-and-non-fatal. The base runs it with
-# `set -e`, so if we returned non-zero the pod would die. We launch ComfyUI in
-# the background and `exec tail -F` its log: that streams ComfyUI's output to the
-# RunPod console AND holds the process open (== keeps the pod up) regardless of
-# whether ComfyUI later crashes.
+# `set -e`; we use `set +e` semantics and launch ComfyUI in the background, then
+# `exec tail -F` its log to hold the pod open regardless of later crashes.
 # =============================================================================
-set -uo pipefail   # NOT -e: services are best-effort; we must stay alive.
+set -uo pipefail   # NOT -e: every step is best-effort; we must stay alive.
 
 log() { echo "[comfyui-mcp/post_start] $*"; }
 
 # ---- Config (override via pod Environment) ----------------------------------
-COMFY_HOME="${COMFY_HOME:-/opt/ComfyUI}"               # BAKED ComfyUI (image)
+SEED_HOME="${SEED_HOME:-/opt/ComfyUI-seed}"            # baked pristine tree (image)
+COMFY_HOME="${COMFY_HOME:-/workspace/ComfyUI}"         # runtime tree (VOLUME)
 SEED_MODELS="${SEED_MODELS:-/opt/ComfyUI-seed-models}" # baked spotcheck model(s)
-WORKSPACE="${WORKSPACE:-/workspace}"                   # network volume (USER DATA)
+WORKSPACE="${WORKSPACE:-/workspace}"                   # network volume
 COMFY_PORT="${COMFY_PORT:-3001}"                        # nginx :3000 -> here
 COMFY_NETWORK_MODE="${COMFY_NETWORK_MODE:-personal_cloud}"
 COMFY_SECURITY_LEVEL="${COMFY_SECURITY_LEVEL:-normal-}"
 COMFY_EXTRA_ARGS="${COMFY_EXTRA_ARGS:-}"              # extra ComfyUI flags
-EXTRA_MODEL_PATHS="${EXTRA_MODEL_PATHS:-${COMFY_HOME}/extra_model_paths.yaml}"
+TORCH_INDEX_URL="${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}"
+# Auto-update toggles (per-boot). Git pulls are cheap + offline-safe; the Manager
+# pip bump is OFF by default because comfyui_manager's /v2 API is the contract the
+# Agent Panel depends on — bump it deliberately, not silently.
+COMFY_AUTOUPDATE="${COMFY_AUTOUPDATE:-1}"             # git pull ComfyUI + panel
+COMFY_AUTOUPDATE_MANAGER="${COMFY_AUTOUPDATE_MANAGER:-0}"  # pip -U comfyui_manager
 
-# Volume user-data dirs (the ONLY things on /workspace).
 USER_DIR="${WORKSPACE}/user"
 MODELS_DIR="${WORKSPACE}/models"
 INPUT_DIR="${WORKSPACE}/input"
 OUTPUT_DIR="${WORKSPACE}/output"
+VENV="${COMFY_HOME}/venv"
+VPY="${VENV}/bin/python"
+PANEL_DIR="${COMFY_HOME}/custom_nodes/comfyui-mcp-panel"
+EXTRA_MODEL_PATHS="${COMFY_HOME}/extra_model_paths.yaml"
+MARKERS="${COMFY_HOME}/.autoupdate"   # sha markers for conditional pip
 
-# Logs go to the EPHEMERAL container fs, NOT the volume. The RunPod console
-# streams them live (we `exec tail -F` below), and the fast-restart contract
-# keeps /workspace EXACTLY user/models/input/output — logs are runtime cruft.
+# Logs on the EPHEMERAL container fs (the RunPod console streams them live below).
 LOG_DIR="${COMFY_LOG_DIR:-/var/log/comfyui-mcp}"
 mkdir -p "${LOG_DIR}"
 
 # -----------------------------------------------------------------------------
-# 1. Volume prep — the ONLY boot-time volume work. Fast + idempotent.
-#    Create user/models/input/output + the model category subfolders that
-#    extra_model_paths.yaml maps, so the dirs exist on a cold volume (ComfyUI /
-#    Manager would create them lazily, but pre-creating keeps the UI tidy and
-#    guarantees Manager has a place to download into).
-#    NO caches, NO venv, NO custom_nodes are placed on the volume.
+# 1. Volume user-data dirs (fast, idempotent). ComfyUI runs FROM ${COMFY_HOME}
+#    but its user/models/input/output are pointed at the volume root via launch
+#    flags + extra_model_paths.yaml, so pre-create them.
 # -----------------------------------------------------------------------------
-log "preparing /workspace user-data dirs (mkdir -p; no sync)…"
+log "preparing /workspace user-data dirs…"
 mkdir -p "${USER_DIR}" "${INPUT_DIR}" "${OUTPUT_DIR}"
 for sub in checkpoints configs loras vae text_encoders clip diffusion_models \
            unet clip_vision style_models embeddings diffusers vae_approx \
@@ -77,125 +82,170 @@ for sub in checkpoints configs loras vae text_encoders clip diffusion_models \
 done
 
 # -----------------------------------------------------------------------------
-# 2. Spotcheck model — first-boot only. If the SDXL checkpoint isn't on the
-#    volume yet and a baked copy exists, copy it so it's visible AND persists.
-#    (BAKE_SPOTCHECK_MODEL=0 builds omit the baked copy → this is a no-op.)
+# 2. FIRST BOOT: seed ComfyUI onto the volume. We key off the venv python: if
+#    it's missing/non-executable the volume copy is absent or incomplete, so
+#    rsync the seed (rsync resumes a partial copy idempotently).
 # -----------------------------------------------------------------------------
-if [ ! -f "${MODELS_DIR}/checkpoints/sd_xl_base_1.0.safetensors" ] \
-   && ls "${SEED_MODELS}"/*.safetensors >/dev/null 2>&1; then
-  log "first boot: copying baked spotcheck model(s) into models/checkpoints…"
-  cp -n "${SEED_MODELS}"/*.safetensors "${MODELS_DIR}/checkpoints/" \
-    && log "spotcheck model in place." \
-    || log "WARN: spotcheck copy failed (continuing)."
+FIRST_BOOT=0
+if [ ! -x "${VPY}" ]; then
+  FIRST_BOOT=1
+  if [ ! -x "${SEED_HOME}/venv/bin/python" ]; then
+    log "FATAL: seed venv missing at ${SEED_HOME}/venv — image build problem."
+    log "       Holding pod open for debug."
+    exec sleep infinity
+  fi
+  log "FIRST BOOT: copying seed ${SEED_HOME} -> ${COMFY_HOME} (one-time; multi-GB)…"
+  mkdir -p "${COMFY_HOME}"
+  if rsync -a --info=progress2 "${SEED_HOME}/" "${COMFY_HOME}/"; then
+    log "seed copy complete."
+  else
+    log "WARN: rsync returned non-zero — verifying venv anyway."
+  fi
+  if [ ! -x "${VPY}" ]; then
+    log "FATAL: ${VPY} still missing after seed copy — holding pod open for debug."
+    exec sleep infinity
+  fi
 fi
 
 # -----------------------------------------------------------------------------
-# 3. Manager remote-install gate. The RUNNING ComfyUI reads its Manager config
-#    UNDER the --user-directory (= ${USER_DIR}). Depending on the ComfyUI build,
-#    comfyui_manager looks at either:
-#        ${USER_DIR}/__manager/config.ini              (new: System User API)
-#        ${USER_DIR}/default/ComfyUI-Manager/config.ini (older)
-#    We write/re-assert BOTH on every boot so the gate is correct regardless.
-#    network_mode=personal_cloud + a permissive security_level are REQUIRED for
-#    the /v2 install-model gate the Agent Panel uses.
+# 3. AUTO-UPDATE (skipped on first boot — the freshly-seeded tree is already at
+#    the baked ref). Git pulls are best-effort + offline-safe; pip only re-runs
+#    when a requirements file's sha changes.
 # -----------------------------------------------------------------------------
-write_manager_config() {  # $1 = config.ini absolute path
-  local cfg="$1" dir
-  dir="$(dirname "${cfg}")"
-  mkdir -p "${dir}"
-  if [ ! -f "${cfg}" ]; then
-    # Prefer the baked template if present, else synthesize.
-    if [ -f "${COMFY_HOME}/config.ini.seed" ]; then
-      cp "${COMFY_HOME}/config.ini.seed" "${cfg}"
+git_pull() {  # $1 = repo dir, $2 = label
+  [ -d "$1/.git" ] || { log "${2}: not a git checkout (skip pull)"; return 0; }
+  log "${2}: git pull --ff-only…"
+  if git -C "$1" pull --ff-only >>"${LOG_DIR}/autoupdate.log" 2>&1; then
+    log "${2}: $(git -C "$1" --no-pager log -1 --format='at %h %ci')"
+  else
+    log "WARN: ${2} pull failed (offline or non-fast-forward) — continuing on current checkout."
+  fi
+}
+
+maybe_pip_reqs() {  # $1 = requirements file, $2 = marker name
+  local reqs="$1" marker="${MARKERS}/$2" sum
+  [ -f "${reqs}" ] || return 0
+  mkdir -p "${MARKERS}"
+  sum="$(sha256sum "${reqs}" 2>/dev/null | awk '{print $1}')"
+  if [ "$(cat "${marker}" 2>/dev/null || true)" != "${sum}" ]; then
+    log "requirements changed (${2}) → pip install…"
+    if "${VPY}" -m pip install --extra-index-url "${TORCH_INDEX_URL}" -r "${reqs}" \
+         >>"${LOG_DIR}/autoupdate.log" 2>&1; then
+      echo "${sum}" > "${marker}"
+      log "pip install (${2}) ok."
     else
-      printf '[default]\nnetwork_mode = %s\nsecurity_level = %s\n' \
-        "${COMFY_NETWORK_MODE}" "${COMFY_SECURITY_LEVEL}" > "${cfg}"
+      log "WARN: pip install (${2}) failed — see ${LOG_DIR}/autoupdate.log."
     fi
   fi
-  # Re-assert the two keys from env (idempotent; survives template drift).
+}
+
+if [ "${FIRST_BOOT}" -eq 0 ] && [ "${COMFY_AUTOUPDATE}" = "1" ]; then
+  log "auto-update: pulling ComfyUI + panel (set COMFY_AUTOUPDATE=0 to skip)…"
+  git_pull "${COMFY_HOME}" "ComfyUI"
+  git_pull "${PANEL_DIR}"  "panel"
+  maybe_pip_reqs "${COMFY_HOME}/requirements.txt"            "comfyui-reqs"
+  maybe_pip_reqs "${PANEL_DIR}/requirements.txt"             "panel-reqs"
+  if [ "${COMFY_AUTOUPDATE_MANAGER}" = "1" ]; then
+    log "auto-update: pip -U comfyui_manager (COMFY_AUTOUPDATE_MANAGER=1)…"
+    "${VPY}" -m pip install -U comfyui_manager >>"${LOG_DIR}/autoupdate.log" 2>&1 \
+      && log "comfyui_manager updated." \
+      || log "WARN: comfyui_manager update failed — continuing on installed version."
+  fi
+else
+  [ "${FIRST_BOOT}" -eq 1 ] && log "first boot: skipping auto-update (tree is freshly seeded)."
+fi
+
+# Ensure the conditional-pip markers are seeded on FIRST boot so we don't re-pip
+# unchanged requirements on the 2nd boot.
+if [ "${FIRST_BOOT}" -eq 1 ]; then
+  mkdir -p "${MARKERS}"
+  for pair in "${COMFY_HOME}/requirements.txt:comfyui-reqs" "${PANEL_DIR}/requirements.txt:panel-reqs"; do
+    f="${pair%%:*}"; m="${pair##*:}"
+    [ -f "${f}" ] && sha256sum "${f}" 2>/dev/null | awk '{print $1}' > "${MARKERS}/${m}"
+  done
+fi
+
+# -----------------------------------------------------------------------------
+# 4. Spotcheck model — first-boot only. Copy the baked SDXL checkpoint onto the
+#    volume if absent (BAKE_SPOTCHECK_MODEL=0 builds → no-op).
+# -----------------------------------------------------------------------------
+if [ ! -f "${MODELS_DIR}/checkpoints/sd_xl_base_1.0.safetensors" ] \
+   && ls "${SEED_MODELS}"/*.safetensors >/dev/null 2>&1; then
+  log "copying baked spotcheck model(s) into models/checkpoints…"
+  cp -n "${SEED_MODELS}"/*.safetensors "${MODELS_DIR}/checkpoints/" \
+    && log "spotcheck model in place." || log "WARN: spotcheck copy failed (continuing)."
+fi
+
+# -----------------------------------------------------------------------------
+# 5. Manager remote-install gate. The RUNNING ComfyUI reads its Manager config
+#    UNDER --user-directory (= ${USER_DIR}), at one of:
+#        ${USER_DIR}/__manager/config.ini               (new: System User API)
+#        ${USER_DIR}/default/ComfyUI-Manager/config.ini (older)
+#    Write/re-assert BOTH every boot. network_mode=personal_cloud + a permissive
+#    security_level are REQUIRED for the /v2 install-model gate the Panel uses.
+# -----------------------------------------------------------------------------
+write_manager_config() {  # $1 = config.ini absolute path
+  local cfg="$1" dir; dir="$(dirname "${cfg}")"
+  mkdir -p "${dir}"
+  if [ ! -f "${cfg}" ]; then
+    if [ -f /opt/config.ini.seed ]; then cp /opt/config.ini.seed "${cfg}"; else
+      printf '[default]\nnetwork_mode = %s\nsecurity_level = %s\n' \
+        "${COMFY_NETWORK_MODE}" "${COMFY_SECURITY_LEVEL}" > "${cfg}"; fi
+  fi
   if grep -q '^network_mode' "${cfg}"; then
     sed -i "s/^network_mode.*/network_mode = ${COMFY_NETWORK_MODE}/" "${cfg}"
-  else
-    printf '\nnetwork_mode = %s\n' "${COMFY_NETWORK_MODE}" >> "${cfg}"
-  fi
+  else printf '\nnetwork_mode = %s\n' "${COMFY_NETWORK_MODE}" >> "${cfg}"; fi
   if grep -q '^security_level' "${cfg}"; then
     sed -i "s/^security_level.*/security_level = ${COMFY_SECURITY_LEVEL}/" "${cfg}"
-  else
-    printf 'security_level = %s\n' "${COMFY_SECURITY_LEVEL}" >> "${cfg}"
-  fi
+  else printf 'security_level = %s\n' "${COMFY_SECURITY_LEVEL}" >> "${cfg}"; fi
 }
 write_manager_config "${USER_DIR}/__manager/config.ini"
 write_manager_config "${USER_DIR}/default/ComfyUI-Manager/config.ini"
 log "Manager config asserted: network_mode=${COMFY_NETWORK_MODE} security_level=${COMFY_SECURITY_LEVEL}"
 
 # -----------------------------------------------------------------------------
-# 4. Ancillary services (best-effort — skipped if the binary is absent).
+# 6. Ancillary services (best-effort — skipped if the binary is absent).
 # -----------------------------------------------------------------------------
 service cron start >/dev/null 2>&1 && log "cron started" || log "cron not available (skip)"
-
 if command -v code-server >/dev/null 2>&1; then
   log "starting code-server on :8080 (nginx front :8081)…"
-  nohup code-server --bind-addr 0.0.0.0:8080 --auth none \
-    >"${LOG_DIR}/code-server.log" 2>&1 &
-else
-  log "code-server not installed (skip)"
-fi
-
+  nohup code-server --bind-addr 0.0.0.0:8080 --auth none >"${LOG_DIR}/code-server.log" 2>&1 &
+else log "code-server not installed (skip)"; fi
 if command -v runpod-uploader >/dev/null 2>&1; then
   log "starting runpod-uploader…"
   nohup runpod-uploader >"${LOG_DIR}/runpod-uploader.log" 2>&1 &
-else
-  log "runpod-uploader not present (skip)"
-fi
-
+else log "runpod-uploader not present (skip)"; fi
 if [ -f /app-manager/app.js ] && command -v node >/dev/null 2>&1; then
   log "starting app-manager on :8000 (nginx front :8001)…"
   ( cd /app-manager && nohup node app.js >"${LOG_DIR}/app-manager.log" 2>&1 & )
-else
-  log "app-manager not present or node missing (skip)"
-fi
-
+else log "app-manager not present or node missing (skip)"; fi
 command -v croc >/dev/null 2>&1 && log "croc available (on-demand P2P transfer)"
 
 # -----------------------------------------------------------------------------
-# 5. Launch ComfyUI from the BAKED venv (image), pointed at the volume dirs.
-#    Invoke the venv python by ABSOLUTE PATH (no `activate` needed).
-#    Per-directory flags keep user/input/output on /workspace; models come from
-#    extra_model_paths.yaml (is_default → volume is primary). custom_nodes are
-#    NOT redirected — they stay in the image (fast-restart contract). We do NOT
-#    use --base-directory because it would relocate custom_nodes onto the volume.
+# 7. Launch ComfyUI from the VOLUME venv, pointed at the volume user-data dirs.
+#    custom_nodes are NOT redirected — they live in ${COMFY_HOME}/custom_nodes
+#    (ComfyUI's default), which is on the volume, so they persist.
 # -----------------------------------------------------------------------------
-VPY="${COMFY_HOME}/venv/bin/python"
-if [ ! -x "${VPY}" ]; then
-  log "FATAL: baked venv python not found at ${VPY} — image build problem."
-  log "       Holding pod open for debug (the image software did not bake)."
-  exec sleep infinity
-fi
-
 COMFY_LOG="${LOG_DIR}/comfyui.log"
-
 ARGS=(--listen 0.0.0.0 --port "${COMFY_PORT}"
       --enable-manager --use-pytorch-cross-attention
       --user-directory  "${USER_DIR}"
       --input-directory "${INPUT_DIR}"
       --output-directory "${OUTPUT_DIR}")
-# Load the volume model map only if the file exists (it's baked, but be defensive).
 [ -f "${EXTRA_MODEL_PATHS}" ] && ARGS+=(--extra-model-paths-config "${EXTRA_MODEL_PATHS}")
 # shellcheck disable=SC2206
 [ -n "${COMFY_EXTRA_ARGS}" ] && ARGS+=(${COMFY_EXTRA_ARGS})
 
 cd "${COMFY_HOME}"
 log "launching ComfyUI: ${VPY} main.py ${ARGS[*]}"
-log "  software   : ${COMFY_HOME}        (image; immutable, fast local import)"
+log "  app+venv   : ${COMFY_HOME}        (volume; auto-updated, deps persist)"
 log "  user dir   : ${USER_DIR}          (volume; workflows + settings)"
 log "  models     : ${MODELS_DIR}        (volume; downloads persist here)"
 log "  input/out  : ${INPUT_DIR} / ${OUTPUT_DIR}  (volume)"
 log "  HTTP (nginx): :3000  ->  ComfyUI :${COMFY_PORT}"
-log "  RunPod proxy: https://<pod-id>-3000.proxy.runpod.net"
 nohup "${VPY}" main.py "${ARGS[@]}" >>"${COMFY_LOG}" 2>&1 &
 COMFY_PID=$!
 log "ComfyUI started (pid=${COMFY_PID}); streaming ${COMFY_LOG}"
 
-# Stream ComfyUI's log to the pod console and hold the pod open. If tail is ever
-# killed, the base's `sleep infinity` still keeps the pod alive.
+# Stream ComfyUI's log to the pod console and hold the pod open.
 exec tail -n +1 -F "${COMFY_LOG}"
