@@ -2,9 +2,10 @@ import { createHash } from "node:crypto";
 import type { Stats } from "node:fs";
 import { readdir, stat, mkdir } from "node:fs/promises";
 import { join, basename, resolve, relative, sep, isAbsolute } from "node:path";
-import { config } from "../config.js";
+import { config, isRemoteMode } from "../config.js";
 import { getClient } from "../comfyui/client.js";
 import { getExtraModelRoots } from "./extra-paths.js";
+import { installModelViaManager } from "./node-management.js";
 import { ModelError, ValidationError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 import { downloadWithCache } from "./download-cache.js";
@@ -349,12 +350,85 @@ export async function resolveExistingModelFile(
   );
 }
 
+/**
+ * Remote-mode download: hand the file off to the connected ComfyUI host via
+ * ComfyUI-Manager's `install-model` task. Validates the subfolder/filename with
+ * the same guards as the local path (no traversal, bare filename) before
+ * dispatch, then returns a human-readable descriptor of where it will land.
+ */
+async function downloadModelViaManagerRemote(
+  url: string,
+  targetSubfolder: string,
+  filename?: string,
+): Promise<string> {
+  const raw = (targetSubfolder ?? "").trim();
+  if (!raw) {
+    throw new ModelError("target_subfolder is required (e.g. 'loras', 'checkpoints').");
+  }
+  if (isAbsolute(raw) || /^[a-zA-Z]:[\\/]/.test(raw) || raw.startsWith("\\\\")) {
+    throw new ModelError(
+      `target_subfolder must be relative to models/, not absolute: ${raw}`,
+    );
+  }
+  const segments = raw.split(/[/\\]+/).filter(Boolean);
+  if (segments.length === 0 || segments.includes("..")) {
+    throw new ModelError(`Invalid target_subfolder: ${raw}`);
+  }
+  const normalizedSubfolder = segments.join("/");
+  const modelType = segments[0];
+
+  const rawFilename =
+    filename ?? (basename(new URL(url).pathname) || "model.safetensors");
+  const resolvedFilename = basename(rawFilename);
+  if (
+    resolvedFilename !== rawFilename ||
+    resolvedFilename === "" ||
+    resolvedFilename === "." ||
+    resolvedFilename === ".."
+  ) {
+    throw new ModelError(
+      "Invalid model filename: must be a plain filename without path separators or '..'.",
+      { filename: rawFilename },
+    );
+  }
+
+  logger.info("Dispatching model install to remote ComfyUI via ComfyUI-Manager", {
+    url: redactUrlForLogs(url),
+    type: modelType,
+    save_path: normalizedSubfolder,
+    filename: resolvedFilename,
+  });
+
+  await installModelViaManager({
+    url,
+    filename: resolvedFilename,
+    type: modelType,
+    // Only send an explicit save_path for nested targets; for a top-level
+    // category the `type` alone resolves the directory.
+    save_path: segments.length > 1 ? normalizedSubfolder : undefined,
+  });
+
+  return `${normalizedSubfolder}/${resolvedFilename} (installed on the remote ComfyUI via ComfyUI-Manager)`;
+}
+
 export async function downloadModel(
   url: string,
   targetSubfolder: string,
   filename?: string,
   auth?: DownloadAuth,
 ): Promise<string> {
+  // REMOTE mode: the MCP has no local filesystem, so a local-disk download is
+  // impossible. Dispatch the download to the connected ComfyUI host through
+  // ComfyUI-Manager's `install-model` task instead — it fetches the file
+  // server-side into the right models/ subfolder. The CivitAI/HuggingFace URL
+  // (and any auth-resolved URL) was already resolved by the caller. Note: a
+  // per-request `auth` header can't be forwarded to Manager's server-side
+  // fetch, so gated URLs needing custom headers must rely on the URL itself
+  // (e.g. CivitAI signed links) or tokens configured on the ComfyUI host.
+  if (isRemoteMode()) {
+    return downloadModelViaManagerRemote(url, targetSubfolder, filename);
+  }
+
   const targetDir = resolveModelSubfolder(targetSubfolder);
 
   // Ensure target directory exists

@@ -98,7 +98,7 @@ export function registerModelManagementTools(server: McpServer): void {
 
   server.tool(
     "download_model",
-    "Download a model file to the ComfyUI models directory from a URL (HuggingFace, direct HTTP(S), s3://, or Azure Blob). PREFER this over a raw shell download (curl/wget) for model weights: it lands the file in the right models/ subfolder and surfaces live progress in the panel download tray. target_subfolder accepts any relative subfolder (incl. nested, e.g. 'loras/<subdir>').",
+    "Download a model file to the connected ComfyUI's models directory from a URL (HuggingFace, direct HTTP(S), s3://, or Azure Blob). PREFER this over a raw shell download (curl/wget) for model weights: it lands the file in the right models/ subfolder. LOCAL ComfyUI: streams to disk and surfaces live progress in the panel download tray. REMOTE ComfyUI: dispatches the fetch to the ComfyUI host via the ComfyUI-Manager install-model HTTP API (downloaded server-side; a per-request `auth` header can't be forwarded). target_subfolder accepts any relative subfolder (incl. nested, e.g. 'loras/<subdir>').",
     {
       url: z.string().url().describe("Direct download URL for the model file"),
       target_subfolder: downloadTargetSchema,

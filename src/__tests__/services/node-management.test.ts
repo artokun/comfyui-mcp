@@ -47,6 +47,7 @@ import { existsSync } from "node:fs";
 import { config } from "../../config.js";
 import {
   installCustomNode,
+  installModelViaManager,
   parseGitUrl,
   updateCustomNode,
   reinstallCustomNode,
@@ -777,6 +778,55 @@ describe("node-management service", () => {
         CM_CLI,
         "restore-dependencies",
       ]);
+    });
+  });
+
+  // ---- install model -----------------------------------------------------
+
+  describe("installModelViaManager", () => {
+    it("queues an install-model task with url/filename/type and drains the queue", async () => {
+      const { calls } = stubFetch();
+      const res = await installModelViaManager({
+        url: "https://example.com/model.safetensors",
+        filename: "model.safetensors",
+        type: "checkpoints",
+      });
+
+      expect(res.mechanism).toBe("manager-http");
+      const { body, params } = taskOf(calls, "install-model");
+      // Envelope matches the other tasks: ui_id + client_id + kind + params.
+      expect(body.client_id).toBe("comfyui-mcp");
+      expect(body.kind).toBe("install-model");
+      expect(body.ui_id).toBeTruthy();
+      expect(params).toMatchObject({
+        url: "https://example.com/model.safetensors",
+        filename: "model.safetensors",
+        type: "checkpoints",
+      });
+      // ui_id is threaded into params like the other task kinds.
+      expect(params.ui_id).toBe(body.ui_id);
+      // No save_path sent when not provided.
+      expect(params.save_path).toBeUndefined();
+
+      // The queue worker was started and polled to completion.
+      expect(
+        calls.some((c) => c.url.endsWith("/v2/manager/queue/start")),
+      ).toBe(true);
+      expect(
+        calls.some((c) => c.url.endsWith("/v2/manager/queue/status")),
+      ).toBe(true);
+    });
+
+    it("includes save_path when provided", async () => {
+      const { calls } = stubFetch();
+      await installModelViaManager({
+        url: "https://example.com/lora.safetensors",
+        filename: "lora.safetensors",
+        type: "loras",
+        save_path: "loras/pusa",
+      });
+      const { params } = taskOf(calls, "install-model");
+      expect(params.save_path).toBe("loras/pusa");
     });
   });
 

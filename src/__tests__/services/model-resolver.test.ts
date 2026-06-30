@@ -1,12 +1,22 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 
 // Control config (comfyuiPath + tokens) per test.
-vi.mock("../../config.js", () => ({
-  config: {
+vi.mock("../../config.js", () => {
+  const config = {
     comfyuiPath: "/comfy" as string | undefined,
     huggingfaceToken: undefined as string | undefined,
     civitaiApiToken: undefined as string | undefined,
-  },
+  };
+  // downloadModel routes to the Manager install-model path in remote mode
+  // (comfyuiPath unset). Most tests set comfyuiPath, so this is false for them.
+  return { config, isRemoteMode: () => !config.comfyuiPath };
+});
+
+// Stub the Manager install-model dispatch so remote-mode downloadModel can be
+// asserted without a live ComfyUI-Manager.
+const installModelViaManagerMock = vi.fn();
+vi.mock("../../services/node-management.js", () => ({
+  installModelViaManager: (...a: unknown[]) => installModelViaManagerMock(...a),
 }));
 
 // Avoid touching the real filesystem. createWriteStream / pipeline are only
@@ -43,6 +53,10 @@ beforeEach(() => {
   mkdirMock.mockReset().mockResolvedValue(undefined);
   rmMock.mockReset().mockResolvedValue(undefined);
   statMock.mockReset().mockRejectedValue(new Error("missing"));
+  installModelViaManagerMock.mockReset().mockResolvedValue({
+    mechanism: "manager-http",
+    message: "queued",
+  });
   config.comfyuiPath = "/comfy";
   config.huggingfaceToken = undefined;
   config.civitaiApiToken = undefined;
@@ -260,5 +274,69 @@ describe("downloadModel — auth headers (token never in URL)", () => {
     const logged = JSON.stringify(warnSpy.mock.calls);
     expect(logged).not.toContain("query-secret");
     expect(logged).toContain("token=%5BREDACTED%5D");
+  });
+});
+
+describe("downloadModel — remote mode (Manager install-model dispatch)", () => {
+  beforeEach(() => {
+    config.comfyuiPath = undefined; // remote mode
+  });
+
+  it("dispatches a top-level download via installModelViaManager (no save_path) and never touches disk", async () => {
+    const out = await downloadModel(
+      "https://example.com/model.safetensors",
+      "checkpoints",
+      "model.safetensors",
+    );
+
+    expect(installModelViaManagerMock).toHaveBeenCalledTimes(1);
+    expect(installModelViaManagerMock).toHaveBeenCalledWith({
+      url: "https://example.com/model.safetensors",
+      filename: "model.safetensors",
+      type: "checkpoints",
+      save_path: undefined,
+    });
+    // No local-disk work in remote mode.
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(mkdirMock).not.toHaveBeenCalled();
+    expect(out).toContain("checkpoints/model.safetensors");
+    expect(out).toContain("ComfyUI-Manager");
+  });
+
+  it("passes save_path for a nested subfolder", async () => {
+    await downloadModel(
+      "https://example.com/lora.safetensors",
+      "loras/pusa",
+      "lora.safetensors",
+    );
+
+    expect(installModelViaManagerMock).toHaveBeenCalledWith({
+      url: "https://example.com/lora.safetensors",
+      filename: "lora.safetensors",
+      type: "loras",
+      save_path: "loras/pusa",
+    });
+  });
+
+  it("derives the filename from the URL when omitted", async () => {
+    await downloadModel("https://example.com/path/cool.safetensors", "vae");
+
+    expect(installModelViaManagerMock).toHaveBeenCalledWith(
+      expect.objectContaining({ filename: "cool.safetensors", type: "vae" }),
+    );
+  });
+
+  it("still rejects a traversal-escaping subfolder before dispatch", async () => {
+    await expect(
+      downloadModel("https://example.com/m.safetensors", "../../etc", "m.safetensors"),
+    ).rejects.toBeInstanceOf(ModelError);
+    expect(installModelViaManagerMock).not.toHaveBeenCalled();
+  });
+
+  it("still rejects a filename with a path separator before dispatch", async () => {
+    await expect(
+      downloadModel("https://example.com/m.safetensors", "checkpoints", "sub/evil.safetensors"),
+    ).rejects.toBeInstanceOf(ModelError);
+    expect(installModelViaManagerMock).not.toHaveBeenCalled();
   });
 });

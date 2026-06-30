@@ -39,7 +39,7 @@ Search HuggingFace Hub for models usable in ComfyUI (checkpoints, LoRAs, VAEs, C
 
 ## download_model
 
-Download a model file to the ComfyUI models directory from a URL (HuggingFace, direct HTTP(S), s3://, or Azure Blob). PREFER this over a raw shell download (curl/wget) for model weights: it lands the file in the right models/ subfolder and surfaces live progress in the panel download tray. target_subfolder accepts any relative subfolder (incl. nested, e.g. 'loras/&lt;subdir&gt;').
+Download a model file to the connected ComfyUI's models directory from a URL (HuggingFace, direct HTTP(S), s3://, or Azure Blob). PREFER this over a raw shell download (curl/wget) for model weights: it lands the file in the right models/ subfolder. LOCAL ComfyUI: streams to disk and surfaces live progress in the panel download tray. REMOTE ComfyUI: dispatches the fetch to the ComfyUI host via the ComfyUI-Manager install-model HTTP API (downloaded server-side; a per-request `auth` header can't be forwarded). target_subfolder accepts any relative subfolder (incl. nested, e.g. 'loras/&lt;subdir&gt;').
 
 ### Parameters
 
@@ -74,7 +74,7 @@ Download a model file to the ComfyUI models directory from a URL (HuggingFace, d
 
 ## download_civitai_model
 
-Download a model from CivitAI into the local ComfyUI models/ directory and return the saved absolute path. Resolves a CivitAI model id (latest version) or a model-version id to a download URL via the CivitAI REST API, then streams the file to disk. LOCAL-ONLY: writes under &lt;COMFYUI_PATH&gt;/models/&lt;target_subfolder&gt;/ and errors when COMFYUI_PATH is unset (e.g. a remote --comfyui-url target). Provide at least one of model_id or model_version_id. Gated/early-access models require CIVITAI_API_TOKEN (sent as a bearer header, never in the URL); without it they fail.
+Download a model from CivitAI into the connected ComfyUI's models/ directory. Resolves a CivitAI model id (latest version) or a model-version id to a download URL via the CivitAI REST API. LOCAL ComfyUI (COMFYUI_PATH set): streams the file to disk under &lt;COMFYUI_PATH&gt;/models/&lt;target_subfolder&gt;/ and returns the saved absolute path. REMOTE ComfyUI: dispatches the download to the ComfyUI host via the ComfyUI-Manager install-model HTTP API (fetched server-side). Provide at least one of model_id or model_version_id. Gated/early-access models require CIVITAI_API_TOKEN locally (sent as a bearer header, never in the URL); remote Manager-side fetches rely on tokens configured on the ComfyUI host.
 
 ### Parameters
 
@@ -131,7 +131,7 @@ List model files available to the connected ComfyUI, grouped by type. Read-only.
 
 ## remove_model
 
-Delete a model file from the local ComfyUI models directories. Resolves the path across ALL configured roots — the primary &lt;COMFYUI_PATH&gt;/models AND every directory in extra_model_paths.yaml / extra_models_config.yaml (e.g. models stored on another drive like E:\) — the same roots ComfyUI loads from. The path must stay within a known root (path traversal and absolute escapes are rejected).
+Delete a model file from the local ComfyUI models directories. Resolves the path across ALL configured roots — the primary &lt;COMFYUI_PATH&gt;/models AND every directory in extra_model_paths.yaml / extra_models_config.yaml (e.g. models stored on another drive like E:\) — the same roots ComfyUI loads from. The path must stay within a known root (path traversal and absolute escapes are rejected). LOCAL-ONLY: deletes from the local filesystem, so it is not supported against a remote ComfyUI (remove the file on the host).
 
 ### Parameters
 

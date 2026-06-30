@@ -104,7 +104,8 @@ type ManagerTaskKind =
   | "update"
   | "fix"
   | "enable"
-  | "disable";
+  | "disable"
+  | "install-model";
 
 // ---------------------------------------------------------------------------
 // Manager HTTP helper (local to this unit — do NOT extract to a shared client)
@@ -1067,5 +1068,64 @@ export async function syncNodeDependencies(): Promise<SyncDepsResult> {
     message:
       "Reconciled installed-node Python dependencies via cm-cli restore-dependencies.",
     details: out.trim(),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// install model (ComfyUI-Manager `install-model` task)
+// ---------------------------------------------------------------------------
+
+/**
+ * Parameters for the ComfyUI-Manager `install-model` task. This mirrors the
+ * Manager-side InstallModelParams Pydantic model used by
+ * /v2/manager/queue/task (do_install_model): the backend downloads `url` to
+ * `<models_dir>/<save_path or type>/<filename>` server-side. Because the
+ * download happens ON THE COMFYUI HOST, this is the remote-mode equivalent of
+ * our local downloadModel() — no local filesystem is touched.
+ */
+export interface InstallModelParams {
+  /** Direct download URL for the model file. */
+  url: string;
+  /** Saved filename under the target directory. */
+  filename: string;
+  /**
+   * ComfyUI model directory the file belongs to, e.g. "checkpoints", "loras",
+   * "vae". Manager uses this to pick the destination folder when `save_path`
+   * is not an explicit relative path.
+   */
+  type: string;
+  /**
+   * Optional explicit save path relative to models/ (e.g. "loras/sub"). When
+   * omitted Manager derives the directory from `type`.
+   */
+  save_path?: string;
+}
+
+/**
+ * Install a model on the connected ComfyUI host via ComfyUI-Manager's unified
+ * task queue (`install-model` kind). Wraps the same queue task + drain
+ * (start → poll status) flow that custom-node installs use, so it works against
+ * a REMOTE ComfyUI where the MCP has no local filesystem. The Manager backend
+ * fetches `url` server-side into the target model directory.
+ */
+export async function installModelViaManager(
+  params: InstallModelParams,
+): Promise<NodeOpResult> {
+  const taskParams: Record<string, unknown> = {
+    url: params.url,
+    filename: params.filename,
+    type: params.type,
+  };
+  if (params.save_path && params.save_path.trim().length > 0) {
+    taskParams.save_path = params.save_path;
+  }
+  const status = await queueManagerTask("install-model", taskParams);
+  return {
+    mechanism: "manager-http",
+    message:
+      `Queued model "${params.filename}" for install into ${params.type} on the ` +
+      `connected ComfyUI via ComfyUI-Manager. A restart may be required for ` +
+      `ComfyUI to see the new file.`,
+    details: status,
   };
 }

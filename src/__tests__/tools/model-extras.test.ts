@@ -3,12 +3,17 @@ import { join, resolve } from "node:path";
 
 // --- Mocks (declared before importing the module under test) ---
 
-vi.mock("../../config.js", () => ({
-  config: {
+vi.mock("../../config.js", () => {
+  const config = {
     comfyuiPath: "/comfy" as string | undefined,
     civitaiApiToken: undefined as string | undefined,
-  },
-}));
+  };
+  return {
+    config,
+    isLocalMode: () => Boolean(config.comfyuiPath),
+    isRemoteMode: () => !config.comfyuiPath,
+  };
+});
 
 const statMock = vi.fn();
 const unlinkMock = vi.fn();
@@ -167,13 +172,14 @@ describe("remove_model path safety", () => {
     expect(unlinkMock).not.toHaveBeenCalled();
   });
 
-  it("errors clearly when COMFYUI_PATH is not configured (remote mode)", async () => {
+  it("reports a clear 'not supported remotely' message in remote mode (no isError)", async () => {
     config.comfyuiPath = undefined;
     const { removeModel } = makeServer();
     const res = await removeModel({ path: "checkpoints/x.safetensors" });
 
-    expect(res.isError).toBe(true);
-    expect(res.content[0].text).toContain("COMFYUI_PATH");
+    // Graceful degrade: a clear message rather than an opaque thrown error.
+    expect(res.isError).toBeFalsy();
+    expect(res.content[0].text).toContain("not supported against a remote ComfyUI");
     expect(unlinkMock).not.toHaveBeenCalled();
   });
 });

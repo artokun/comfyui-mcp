@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { unlink } from "node:fs/promises";
+import { isLocalMode } from "../config.js";
 import {
   downloadModel,
   resolveExistingModelFile,
@@ -12,6 +13,12 @@ import {
 } from "../services/civitai-resolver.js";
 import { ValidationError, errorToToolResult } from "../utils/errors.js";
 
+/** Graceful "not supported remotely" tool result (no isError), matching the
+ *  degrade-don't-throw pattern list_local_models uses. */
+function remoteUnsupported(message: string) {
+  return { content: [{ type: "text" as const, text: message }] };
+}
+
 export function registerModelExtrasTools(server: McpServer): void {
   server.tool(
     "remove_model",
@@ -20,7 +27,8 @@ export function registerModelExtrasTools(server: McpServer): void {
       "every directory in extra_model_paths.yaml / extra_models_config.yaml (e.g. " +
       "models stored on another drive like E:\\) — the same roots ComfyUI loads " +
       "from. The path must stay within a known root (path traversal and absolute " +
-      "escapes are rejected).",
+      "escapes are rejected). LOCAL-ONLY: deletes from the local filesystem, so it " +
+      "is not supported against a remote ComfyUI (remove the file on the host).",
     {
       path: z
         .string()
@@ -32,6 +40,14 @@ export function registerModelExtrasTools(server: McpServer): void {
         ),
     },
     async (args) => {
+      if (!isLocalMode()) {
+        return remoteUnsupported(
+          "remove_model is not supported against a remote ComfyUI. It deletes a " +
+            "file on the ComfyUI host's local filesystem, which the MCP cannot " +
+            "reach in remote (--comfyui-url / COMFYUI_URL) mode. Delete the file " +
+            "directly on the ComfyUI host instead.",
+        );
+      }
       try {
         const { path: target, info } = await resolveExistingModelFile(args.path);
 
@@ -60,13 +76,15 @@ export function registerModelExtrasTools(server: McpServer): void {
 
   server.tool(
     "download_civitai_model",
-    "Download a model from CivitAI into the local ComfyUI models/ directory and " +
-      "return the saved absolute path. Resolves a CivitAI model id (latest version) " +
-      "or a model-version id to a download URL via the CivitAI REST API, then streams " +
-      "the file to disk. LOCAL-ONLY: writes under <COMFYUI_PATH>/models/<target_subfolder>/ " +
-      "and errors when COMFYUI_PATH is unset (e.g. a remote --comfyui-url target). Provide " +
-      "at least one of model_id or model_version_id. Gated/early-access models require " +
-      "CIVITAI_API_TOKEN (sent as a bearer header, never in the URL); without it they fail.",
+    "Download a model from CivitAI into the connected ComfyUI's models/ directory. " +
+      "Resolves a CivitAI model id (latest version) or a model-version id to a download " +
+      "URL via the CivitAI REST API. LOCAL ComfyUI (COMFYUI_PATH set): streams the file " +
+      "to disk under <COMFYUI_PATH>/models/<target_subfolder>/ and returns the saved " +
+      "absolute path. REMOTE ComfyUI: dispatches the download to the ComfyUI host via " +
+      "the ComfyUI-Manager install-model HTTP API (fetched server-side). Provide at least " +
+      "one of model_id or model_version_id. Gated/early-access models require " +
+      "CIVITAI_API_TOKEN locally (sent as a bearer header, never in the URL); remote " +
+      "Manager-side fetches rely on tokens configured on the ComfyUI host.",
     {
       target_subfolder: z
         .string()

@@ -6,7 +6,7 @@ import { errorToToolResult } from "../utils/errors.js";
 export function registerManifestTools(server: McpServer): void {
   server.tool(
     "apply_manifest",
-    "Apply a local ComfyUI setup manifest from an inline object or .json/.yaml/.yml file. LOCAL-ONLY: requires COMFYUI_PATH. Composes existing custom-node installs and model downloads, installs pip packages into the ComfyUI Python environment, and reports apt entries as skipped because system packages require manual/root installation.",
+    "Apply a ComfyUI setup manifest from an inline object or .json/.yaml/.yml file. Composes custom-node installs and model downloads, installs pip packages, and reports apt entries as skipped (system packages need manual/root installation). LOCAL ComfyUI (COMFYUI_PATH set): nodes/models land on the local filesystem and pip installs into the ComfyUI Python env. REMOTE ComfyUI: custom_nodes and models are routed through the ComfyUI-Manager HTTP API (handled on the host), while pip and apt entries are reported as skipped (no remote equivalent). Each item reports applied/skipped/failed independently.",
     {
       manifest: manifestSchema
         .optional()

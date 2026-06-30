@@ -21,6 +21,7 @@ const lstatMock = vi.hoisted(() => vi.fn());
 const existsSyncMock = vi.hoisted(() => vi.fn());
 const execFileSyncMock = vi.hoisted(() => vi.fn());
 const installCustomNodeMock = vi.hoisted(() => vi.fn());
+const installModelViaManagerMock = vi.hoisted(() => vi.fn());
 const listInstalledNodesMock = vi.hoisted(() => vi.fn());
 const downloadModelMock = vi.hoisted(() => vi.fn());
 const resolveExistingModelFileMock = vi.hoisted(() => vi.fn());
@@ -28,6 +29,9 @@ const listLocalModelsMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../../config.js", () => ({
   config: mockConfig,
+  // apply_manifest routes models through the Manager in remote mode (no
+  // comfyuiPath). isRemoteMode mirrors that gate for the tests.
+  isRemoteMode: () => !mockConfig.comfyuiPath,
 }));
 
 vi.mock("node:fs/promises", () => ({
@@ -48,6 +52,7 @@ vi.mock("node:child_process", () => ({
 
 vi.mock("../../services/node-management.js", () => ({
   installCustomNode: (...a: unknown[]) => installCustomNodeMock(...a),
+  installModelViaManager: (...a: unknown[]) => installModelViaManagerMock(...a),
   listInstalledNodes: (...a: unknown[]) => listInstalledNodesMock(...a),
 }));
 
@@ -82,7 +87,6 @@ import {
   applyManifest,
   loadManifestFile,
 } from "../../services/manifest.js";
-import { ProcessControlError } from "../../utils/errors.js";
 
 beforeEach(() => {
   mockConfig.comfyuiPath = "/fake/ComfyUI";
@@ -94,6 +98,9 @@ beforeEach(() => {
   existsSyncMock.mockReset().mockReturnValue(false);
   execFileSyncMock.mockReset().mockReturnValue("ok");
   installCustomNodeMock.mockReset().mockResolvedValue({ message: "installed node" });
+  installModelViaManagerMock
+    .mockReset()
+    .mockResolvedValue({ mechanism: "manager-http", message: "queued model" });
   listInstalledNodesMock.mockReset().mockResolvedValue([]);
   downloadModelMock.mockReset().mockResolvedValue("/fake/ComfyUI/models/checkpoints/m.safetensors");
   // Default: the model is found in NO root (multi-root resolver rejects, HTTP
@@ -467,11 +474,71 @@ describe("applyManifest", () => {
     expect(downloadModelMock).not.toHaveBeenCalled();
   });
 
-  it("errors clearly in remote mode", async () => {
-    mockConfig.comfyuiPath = undefined;
+  describe("remote mode (no COMFYUI_PATH) — per-section handling", () => {
+    beforeEach(() => {
+      mockConfig.comfyuiPath = undefined;
+    });
 
-    await expect(
-      applyManifest({ manifest: { custom_nodes: ["x"] } }),
-    ).rejects.toBeInstanceOf(ProcessControlError);
+    it("does not throw up-front; routes each section by mode", async () => {
+      installCustomNodeMock.mockResolvedValueOnce({ message: "installed node" });
+      // First check: not installed yet. After install: present → "applied".
+      listInstalledNodesMock
+        .mockResolvedValueOnce([])
+        .mockResolvedValue([{ module: "x", enabled: true }]);
+
+      const result = await applyManifest({
+        manifest: {
+          apt: ["ffmpeg"],
+          pip: ["numpy"],
+          custom_nodes: ["x"],
+          models: [
+            {
+              url: "https://example.com/model.safetensors",
+              model_type: "checkpoints",
+              filename: "model.safetensors",
+            },
+          ],
+        },
+      });
+
+      const byAction = Object.fromEntries(
+        result.results.map((r) => [r.action, r]),
+      );
+      // apt + pip are unsupported remotely → skipped, never executed.
+      expect(byAction.apt.status).toBe("skipped");
+      expect(byAction.pip.status).toBe("skipped");
+      expect(execFileSyncMock).not.toHaveBeenCalled();
+      // custom_nodes still go through the Manager HTTP install (remote-ok).
+      expect(installCustomNodeMock).toHaveBeenCalledWith({ id: "x" });
+      // models route through installModelViaManager, NOT the local downloadModel.
+      expect(downloadModelMock).not.toHaveBeenCalled();
+      expect(installModelViaManagerMock).toHaveBeenCalledWith({
+        url: "https://example.com/model.safetensors",
+        filename: "model.safetensors",
+        type: "checkpoints",
+        save_path: undefined,
+      });
+      expect(byAction.model.status).toBe("applied");
+    });
+
+    it("derives type + save_path from a nested model local_path", async () => {
+      await applyManifest({
+        manifest: {
+          models: [
+            {
+              url: "https://example.com/lora.safetensors",
+              local_path: "loras/pusa/lora.safetensors",
+            },
+          ],
+        },
+      });
+
+      expect(installModelViaManagerMock).toHaveBeenCalledWith({
+        url: "https://example.com/lora.safetensors",
+        filename: "lora.safetensors",
+        type: "loras",
+        save_path: "loras/pusa",
+      });
+    });
   });
 });

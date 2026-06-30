@@ -1,6 +1,7 @@
 import { readFile, copyFile, readdir, stat } from "node:fs/promises";
 import { join, basename, extname, relative, sep } from "node:path";
 import { config } from "../config.js";
+import { getHistory } from "../comfyui/client.js";
 import { ValidationError, ModelError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 import { resolveOutputDir, resolveInputDir } from "./output-dir.js";
@@ -206,9 +207,26 @@ export async function listOutputImages(options?: {
   limit?: number;
   pattern?: string;
 }): Promise<OutputImage[]> {
-  const outputDir = await resolveOutputDir();
   const limit = options?.limit ?? 20;
   const pattern = options?.pattern?.toLowerCase();
+
+  // REMOTE mode: no local filesystem to scan. Derive the output media from
+  // ComfyUI's /history (HTTP, works against a remote instance) instead. Size and
+  // modification time are unavailable over HTTP, so they come back as 0 / "".
+  if (!config.comfyuiPath) {
+    return listOutputImagesFromHistory(limit, pattern);
+  }
+
+  // Resolve the real local output dir. Asking the running ComfyUI can fail
+  // (unreachable, or a non-local --output-directory we can't read); treat any
+  // failure as "nothing to list" rather than throwing, so the tool degrades to
+  // an empty result instead of an opaque error.
+  let outputDir: string;
+  try {
+    outputDir = await resolveOutputDir();
+  } catch {
+    return [];
+  }
 
   // RECURSIVE scan: ComfyUI writes to subfolders when a node's filename_prefix
   // contains a path (SaveVideo / VHS / "video/clip" → output/video/clip_00001.mp4).
@@ -253,6 +271,87 @@ export async function listOutputImages(options?: {
 
   // Sort newest first
   images.sort((a, b) => b.modified.localeCompare(a.modified));
+
+  return images.slice(0, limit);
+}
+
+/**
+ * Remote-mode source for listOutputImages: derive output media from ComfyUI's
+ * /history (HTTP) when there is no local filesystem to scan. Walks every history
+ * entry's node outputs (images + videos/gifs), keeps only those that landed in
+ * the "output" directory, dedupes by subfolder/filename, and returns them
+ * newest-first (history is roughly insertion-ordered, so we iterate in reverse).
+ * Size/modified are unavailable over HTTP and come back as 0 / "".
+ */
+async function listOutputImagesFromHistory(
+  limit: number,
+  pattern?: string,
+): Promise<OutputImage[]> {
+  let history: Record<string, { outputs?: Record<string, unknown> }>;
+  try {
+    history = await getHistory();
+  } catch (err) {
+    logger.debug("getHistory failed while listing remote output media", { err });
+    return [];
+  }
+
+  const seen = new Set<string>();
+  const images: OutputImage[] = [];
+  const entries = Object.values(history);
+
+  // Newest-first: history is keyed in roughly chronological (insertion) order,
+  // so iterate from the end.
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const outputs = entries[i]?.outputs;
+    if (!outputs || typeof outputs !== "object") continue;
+
+    for (const nodeOutput of Object.values(outputs)) {
+      if (!nodeOutput || typeof nodeOutput !== "object") continue;
+      const out = nodeOutput as Record<string, unknown>;
+      // SaveImage emits under 'images'; SaveVideo/VHS/CreateVideo under
+      // 'videos' | 'video' | 'gifs'. mediaKind() then classifies by extension.
+      for (const key of ["images", "videos", "video", "gifs"] as const) {
+        const arr = out[key];
+        if (!Array.isArray(arr)) continue;
+        for (const m of arr) {
+          if (!m || typeof m !== "object") continue;
+          const media = m as {
+            filename?: unknown;
+            subfolder?: unknown;
+            type?: unknown;
+          };
+          if (typeof media.filename !== "string" || media.filename.length === 0) {
+            continue;
+          }
+          // Only list assets in the output directory (skip temp previews).
+          const type = typeof media.type === "string" ? media.type : "output";
+          if (type !== "output") continue;
+          const ext = extname(media.filename).toLowerCase();
+          if (!MEDIA_EXTS.has(ext)) continue;
+          const subfolder =
+            typeof media.subfolder === "string" ? media.subfolder : "";
+          const relPath = subfolder
+            ? `${subfolder}/${media.filename}`
+            : media.filename;
+          if (pattern && !relPath.toLowerCase().includes(pattern)) continue;
+          const dedupeKey = relPath.toLowerCase();
+          if (seen.has(dedupeKey)) continue;
+          seen.add(dedupeKey);
+          images.push({
+            filename: media.filename,
+            // ComfyUI-relative reference; the absolute path is unknown over HTTP.
+            path: relPath,
+            size: 0,
+            modified: "",
+            subfolder,
+            kind: mediaKind(ext),
+          });
+        }
+      }
+    }
+
+    if (images.length >= limit) break;
+  }
 
   return images.slice(0, limit);
 }

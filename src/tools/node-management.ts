@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { isLocalMode } from "../config.js";
 import {
   installCustomNode,
   updateCustomNode,
@@ -10,6 +11,12 @@ import {
   type InstalledNode,
 } from "../services/node-management.js";
 import { errorToToolResult } from "../utils/errors.js";
+
+/** Graceful "not supported remotely" tool result (no isError), matching the
+ *  degrade-don't-throw pattern list_local_models uses. */
+function remoteUnsupported(message: string) {
+  return { content: [{ type: "text" as const, text: message }] };
+}
 
 const modeSchema = z
   .enum(["remote", "local", "cache"])
@@ -149,6 +156,17 @@ export function registerNodeManagementTools(server: McpServer): void {
       useCmCli: useCmCliSchema,
     },
     async (args) => {
+      // "all" repairs every pack via the cm-cli subprocess, which needs a local
+      // ComfyUI install. Single-pack repair uses the Manager HTTP API and works
+      // remotely, so only guard the "all" case here.
+      if (args.id.trim().toLowerCase() === "all" && !isLocalMode()) {
+        return remoteUnsupported(
+          "fix_custom_node id=\"all\" is not supported against a remote ComfyUI. " +
+            "Repairing every pack runs the cm-cli subprocess, which requires a " +
+            "local ComfyUI install (COMFYUI_PATH). Repair a single pack by id " +
+            "instead (that uses the ComfyUI-Manager HTTP API and works remotely).",
+        );
+      }
       try {
         const result = await fixCustomNode(args);
         return {
@@ -189,6 +207,14 @@ export function registerNodeManagementTools(server: McpServer): void {
     "Reconcile the Python dependencies of all installed custom node packs (comfy-cli `node uv-sync` analogue). Runs cm-cli restore-dependencies as a subprocess and requires a local ComfyUI install (COMFYUI_PATH); errors in remote --comfyui-url mode.",
     {},
     async () => {
+      if (!isLocalMode()) {
+        return remoteUnsupported(
+          "sync_node_dependencies is not supported against a remote ComfyUI. It " +
+            "runs the cm-cli restore-dependencies subprocess, which requires a " +
+            "local ComfyUI install (COMFYUI_PATH). Reconcile dependencies on the " +
+            "ComfyUI host instead.",
+        );
+      }
       try {
         const result = await syncNodeDependencies();
         return {

@@ -14,9 +14,10 @@ import {
 } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
-import { config } from "../config.js";
+import { config, isRemoteMode } from "../config.js";
 import {
   installCustomNode,
+  installModelViaManager,
   listInstalledNodes,
   type InstalledNode,
 } from "./node-management.js";
@@ -27,7 +28,7 @@ import {
   MODEL_SUBDIRS,
   type ModelType,
 } from "./model-resolver.js";
-import { ProcessControlError, ValidationError } from "../utils/errors.js";
+import { ValidationError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 
 const IS_WIN = platform() === "win32";
@@ -85,17 +86,6 @@ export interface ApplyManifestResult {
   success: boolean;
   summary: Record<ManifestItemStatus, number>;
   results: ManifestItemReport[];
-}
-
-function requireComfyUIPath(): string {
-  if (!config.comfyuiPath) {
-    throw new ProcessControlError(
-      "apply_manifest requires a local ComfyUI install. It installs Python packages, " +
-        "custom nodes, and models on the local filesystem, so it is unavailable in " +
-        "remote --comfyui-url / COMFYUI_URL mode. Set COMFYUI_PATH to enable it.",
-    );
-  }
-  return config.comfyuiPath;
 }
 
 function parseManifestText(path: string, text: string): unknown {
@@ -441,6 +431,48 @@ function report(
   return { action, item, status, message };
 }
 
+/**
+ * Derive ComfyUI-Manager install-model params from a manifest model entry for
+ * REMOTE mode (no local filesystem). Honors `local_path` (its first segment is
+ * the model dir, the rest is the relative save path) and `model_type`/`filename`
+ * the same way the local resolver does, with the same anti-traversal guards.
+ */
+function remoteModelTarget(model: ComfyManifest["models"][number]): {
+  type: string;
+  save_path?: string;
+  filename: string;
+} {
+  if (model.local_path) {
+    if (isAbsolute(model.local_path)) {
+      throw new ValidationError(
+        `Model local_path must be relative to models/: ${model.local_path}`,
+      );
+    }
+    const segments = model.local_path.split(/[/\\]+/).filter(Boolean);
+    if (segments.length === 0 || segments.includes("..")) {
+      throw new ValidationError(
+        `Model local_path escapes the models directory: ${model.local_path}`,
+      );
+    }
+    const filename = segments[segments.length - 1];
+    const dirSegments = segments.slice(0, -1);
+    if (dirSegments.length === 0) {
+      throw new ValidationError(
+        `Model local_path must include a category subfolder (e.g. 'checkpoints/foo.safetensors'): ${model.local_path}`,
+      );
+    }
+    return {
+      type: dirSegments[0],
+      save_path: dirSegments.length > 1 ? dirSegments.join("/") : undefined,
+      filename,
+    };
+  }
+
+  const type: ModelType = model.model_type ?? "checkpoints";
+  const filename = model.filename ?? defaultFilenameForUrl(model.url);
+  return { type, filename };
+}
+
 async function installedNodesOrEmpty(): Promise<InstalledNode[]> {
   try {
     return await listInstalledNodes();
@@ -455,9 +487,15 @@ async function installedNodesOrEmpty(): Promise<InstalledNode[]> {
 export async function applyManifest(
   opts: ApplyManifestOptions,
 ): Promise<ApplyManifestResult> {
-  const comfyuiPath = requireComfyUIPath();
   const manifest = await resolveManifest(opts);
   const results: ManifestItemReport[] = [];
+
+  // Per-section mode handling. A LOCAL filesystem is available only when
+  // COMFYUI_PATH is set; otherwise we are targeting a remote (or cloud) ComfyUI
+  // over HTTP. custom_nodes and models can still be handled remotely through
+  // ComfyUI-Manager's HTTP API, but pip/apt have no remote equivalent.
+  const comfyuiPath = config.comfyuiPath;
+  const hasLocalFs = Boolean(comfyuiPath);
 
   for (const pkg of manifest.apt) {
     results.push(
@@ -465,14 +503,27 @@ export async function applyManifest(
         "apt",
         pkg,
         "skipped",
-        "System packages must be installed manually or with root privileges; apply_manifest does not run apt.",
+        hasLocalFs
+          ? "System packages must be installed manually or with root privileges; apply_manifest does not run apt."
+          : "System packages are not supported against a remote ComfyUI (no local shell/root access); install them on the ComfyUI host.",
       ),
     );
   }
 
   for (const pkg of manifest.pip) {
+    if (!hasLocalFs) {
+      results.push(
+        report(
+          "pip",
+          pkg,
+          "skipped",
+          "Python package install is not supported against a remote ComfyUI (no local filesystem/venv); install it on the ComfyUI host.",
+        ),
+      );
+      continue;
+    }
     try {
-      installPipPackage(pkg, comfyuiPath);
+      installPipPackage(pkg, comfyuiPath!);
       results.push(report("pip", pkg, "applied", "Python package installed."));
     } catch (err) {
       results.push(
@@ -531,7 +582,32 @@ export async function applyManifest(
   for (const model of manifest.models) {
     const item = model.local_path ?? model.filename ?? model.url;
     try {
-      const target = await resolveLocalModelPath(comfyuiPath, model);
+      if (!hasLocalFs) {
+        // REMOTE: no local filesystem to scan/write. Route the download to the
+        // ComfyUI host via ComfyUI-Manager's install-model task (server-side
+        // fetch). Cloud mode has no Manager, so report it as unsupported.
+        if (!isRemoteMode()) {
+          results.push(
+            report(
+              "model",
+              item,
+              "skipped",
+              "Model install is not supported against this ComfyUI (no local filesystem and no ComfyUI-Manager HTTP API); install it on the ComfyUI host.",
+            ),
+          );
+          continue;
+        }
+        const { type, save_path, filename } = remoteModelTarget(model);
+        const res = await installModelViaManager({
+          url: model.url,
+          filename,
+          type,
+          save_path,
+        });
+        results.push(report("model", item, "applied", res.message));
+        continue;
+      }
+      const target = await resolveLocalModelPath(comfyuiPath!, model);
       const existing = await findExistingModel(target);
       if (existing) {
         results.push(report("model", item, "skipped", `Model already exists at ${existing}.`));

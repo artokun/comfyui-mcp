@@ -4,13 +4,19 @@ import { join } from "node:path";
 import * as fsPromises from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../../config.js", () => ({
-  config: {
+vi.mock("../../config.js", () => {
+  const config = {
     comfyuiPath: undefined as string | undefined,
     huggingfaceToken: undefined as string | undefined,
     civitaiApiToken: undefined as string | undefined,
-  },
-}));
+  };
+  return {
+    config,
+    // downloadModel branches on this; these tests always run with comfyuiPath
+    // set (local mode), so it returns false.
+    isRemoteMode: () => !config.comfyuiPath,
+  };
+});
 
 import { config } from "../../config.js";
 import { downloadCacheFs } from "../../services/download-cache.js";
