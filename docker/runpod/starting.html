@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<!--
+  Served by nginx as the @starting fallback (/usr/share/nginx/html/readme.html)
+  whenever the upstream service (ComfyUI :3001, code-server, app-manager) is not
+  yet reachable. Auto-refreshes so the page flips to the real UI once it is up.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="refresh" content="5" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ComfyUI is starting…</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0; min-height: 100vh; display: grid; place-items: center;
+      font: 16px/1.6 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: #0b0e14; color: #d7dce5;
+    }
+    .card {
+      max-width: 560px; padding: 2.5rem; text-align: center;
+      background: #131722; border: 1px solid #222838; border-radius: 16px;
+      box-shadow: 0 10px 40px rgba(0,0,0,.4);
+    }
+    h1 { margin: 0 0 .5rem; font-size: 1.4rem; }
+    p  { margin: .4rem 0; color: #9aa4b6; }
+    .spin {
+      width: 38px; height: 38px; margin: 0 auto 1.2rem;
+      border: 3px solid #2a3142; border-top-color: #5b8cff; border-radius: 50%;
+      animation: s 1s linear infinite;
+    }
+    @keyframes s { to { transform: rotate(360deg); } }
+    code { background:#0b0e14; padding:.1rem .4rem; border-radius:6px; color:#c8d2e6; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="spin"></div>
+    <h1>ComfyUI is starting…</h1>
+    <p>The pod is up. ComfyUI (and the Agent Panel) are loading.</p>
+    <p>On a <strong>cold network volume</strong> the first boot copies the
+       ComfyUI install + venv onto <code>/workspace</code> — this can take a few
+       minutes. Later boots are fast.</p>
+    <p>This page refreshes automatically.</p>
+  </div>
+</body>
+</html>
