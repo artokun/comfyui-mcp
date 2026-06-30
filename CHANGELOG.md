@@ -6,6 +6,30 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### Added
+
+- **Panel graph-navigation tools** — read/refactor a large live graph without dumping
+  JSON or shelling out:
+  - `panel_graph_outline` — a compact, dependency-ordered TEXT map of the open graph
+    (topo-sorted, each node with key widgets + `←`/`→` wiring, plus a groups index),
+    built for an LLM to read top-to-bottom.
+  - `panel_find_nodes` — search the live graph by type, title, input/output port, widget
+    name, widget value, `is_output`, `is_subgraph`, or mode (or a free-text query across
+    all), returning enriched matches with a `matched_on` reason.
+  - `panel_subgraph_group` — wrap an existing group's nodes into one toggleable subgraph
+    node in a single step; `panel_get_graph` groups now also report member `node_ids`.
+  - System prompt steers the agent: outline to understand → find to pinpoint →
+    `panel_get_graph` for one node's detail; never grep/jq/python a saved graph.
+  - Requires panel >= 0.4.6 for the frontend executors.
+
+### Changed
+
+- **`artokun-flow` pack** now ships the subgraph-organized WAN Animate workflow (named
+  subgraphs: MODEL LOADERS, PREPROCESS, REACTOR FACE LOCK, REPLACEMENT MODE, DECODE·COLOR,
+  SAM 3, Upscale4x-RIFE-1080p) — far easier to read/navigate. Sanitized for shipping:
+  driving video unset, character refs → `character.png`, save prefix → `wananimate`,
+  personal paths removed. Manifest/model coverage re-verified.
+
 ## [0.21.1] - 2026-06-29
 
 ### Added

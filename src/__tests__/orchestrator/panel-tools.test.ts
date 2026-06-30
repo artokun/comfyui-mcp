@@ -322,3 +322,82 @@ describe("panel-tools: panel_run (run-to-node partial execution)", () => {
     expect(calls[0]).toMatchObject({ cmd: "graph_run", to_node_id: 27 });
   });
 });
+
+describe("panel-tools: panel_find_nodes (live-graph search)", () => {
+  it("is registered in the shared def list", () => {
+    expect(buildPanelToolDefs().map((d) => d.name)).toContain("panel_find_nodes");
+  });
+
+  it("exposes the full filter schema", () => {
+    const def = defByName("panel_find_nodes");
+    expect(Object.keys(def.schema).sort()).toEqual([
+      "input",
+      "is_output",
+      "is_subgraph",
+      "limit",
+      "mode",
+      "output",
+      "query",
+      "title",
+      "type",
+      "widget",
+      "widget_value",
+    ]);
+    // mode is the active/bypass/mute enum, optional (undefined ok); reject others.
+    const mode = def.schema.mode as { safeParse: (v: unknown) => { success: boolean } };
+    expect(mode.safeParse("bypass").success).toBe(true);
+    expect(mode.safeParse("nope").success).toBe(false);
+    expect(mode.safeParse(undefined).success).toBe(true);
+    const query = def.schema.query as { safeParse: (v: unknown) => { success: boolean } };
+    expect(query.safeParse(undefined).success).toBe(true);
+  });
+
+  it("forwards graph_find_nodes with every provided filter", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_find_nodes").handler(
+      { query: "tiktok", type: "LoadVideo", widget_value: ".mp4", is_output: false, mode: "bypass" },
+      ctx,
+    );
+    expect(calls[0]).toMatchObject({
+      cmd: "graph_find_nodes",
+      query: "tiktok",
+      type: "LoadVideo",
+      widget_value: ".mp4",
+      is_output: false,
+      mode: "bypass",
+    });
+  });
+});
+
+describe("panel-tools: panel_graph_outline (compact text map)", () => {
+  it("is registered and takes no args", () => {
+    expect(buildPanelToolDefs().map((d) => d.name)).toContain("panel_graph_outline");
+    expect(Object.keys(defByName("panel_graph_outline").schema)).toEqual([]);
+  });
+
+  it("forwards graph_outline", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_graph_outline").handler({}, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "graph_outline" });
+  });
+});
+
+describe("panel-tools: panel_subgraph_group (wrap a group into a subgraph)", () => {
+  it("is registered and takes a string|number group ref", () => {
+    expect(buildPanelToolDefs().map((d) => d.name)).toContain("panel_subgraph_group");
+    const def = defByName("panel_subgraph_group");
+    expect(Object.keys(def.schema)).toEqual(["group"]);
+    const group = def.schema.group as { safeParse: (v: unknown) => { success: boolean } };
+    expect(group.safeParse("REPLACEMENT MODE").success).toBe(true);
+    expect(group.safeParse(3).success).toBe(true);
+    expect(group.safeParse({}).success).toBe(false);
+  });
+
+  it("forwards graph_subgraph_group with the group ref (title or id)", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_subgraph_group").handler({ group: "REPLACEMENT MODE" }, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "graph_subgraph_group", group: "REPLACEMENT MODE" });
+    await defByName("panel_subgraph_group").handler({ group: 2 }, ctx);
+    expect(calls[1]).toMatchObject({ cmd: "graph_subgraph_group", group: 2 });
+  });
+});

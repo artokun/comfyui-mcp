@@ -309,10 +309,80 @@ export function buildPanelToolDefs(): PanelToolDef[] {
       async (_args, ctx) => ctx.call({ cmd: "graph_get_state" }),
     ),
     def(
+      "panel_graph_outline",
+      "Read a COMPACT, dependency-ordered TEXT MAP of the workflow the user is viewing — the FASTEST way to UNDERSTAND a graph (especially a big loaded pack/template) before you touch it. Returns one `outline` string built for you to read top→down: nodes are topologically sorted (sources first, sinks last), each shown on its own block as `id Type \"title\" [bypass/mute] [OUTPUT] · group:X  widget=value …` with `← inputs` (as source_node.output_name) and `→ outputs` (as target_node.input_name), preceded by a GROUPS index (title → member node ids). Far cheaper and clearer than panel_get_graph's full JSON, and it shows the WIRING you'd otherwise have to reconstruct. Use this FIRST to get oriented; then panel_find_nodes to pinpoint a node, or panel_get_graph for one node's exact slot/widget detail. Read-only.",
+      {},
+      async (_args, ctx) => ctx.call({ cmd: "graph_outline" }),
+    ),
+    def(
       "panel_get_subgraph",
       "Read INSIDE a subgraph node on the user's open graph: ids, types, widget values, and connections of its inner nodes. Use after panel_get_graph shows a node with is_subgraph=true. Read-only.",
       { node_id: z.number().int().describe("Subgraph node id (is_subgraph=true).") },
       async (args: A, ctx) => ctx.call({ cmd: "graph_get_subgraph", node_id: args.node_id }),
+    ),
+    def(
+      "panel_find_nodes",
+      "SEARCH the workflow the user is CURRENTLY VIEWING for nodes matching filters — the right way to PINPOINT a node (a specific loader, sampler, save, switch) in a LARGE graph instead of dumping the whole thing with panel_get_graph and scanning it. This searches the LIVE graph ON THE CANVAS — NOT the installable node registry (that's panel_search_nodes). Unlike panel_get_graph it scans EVERY node (no truncation). Give a free-text `query` (matched case-insensitively across node type, title, description, widget NAMES, widget VALUES, and input/output port names+types — a node hits if ANY of those contain it) and/or targeted filters: type, title, input, output, widget (name), widget_value (contents), is_output, is_subgraph, mode. Targeted filters are ANDed together; the free `query` ORs across fields. Each match is the SAME rich summary as panel_get_graph (id, type, title, widgets, inputs WITH their connected_from sources, outputs, mode, is_output, …) PLUS the node's description and a `matched_on` list saying WHY it matched. Read-only. Examples — the video loader: {query:'tiktok'} or {type:'LoadVideo'} or {input:'video'}; every output node: {is_output:true}; the node whose widget holds a file: {widget_value:'.png'}; a bypassed switch: {type:'Switch', mode:'bypass'}.",
+      {
+        query: z
+          .string()
+          .optional()
+          .describe(
+            "Free text matched (case-insensitive substring) across type, title, description, widget names, widget values, and port names/types. A node matches if ANY field contains it.",
+          ),
+        type: z
+          .string()
+          .optional()
+          .describe("Node class_type contains this (e.g. 'KSampler', 'LoadImage')."),
+        title: z.string().optional().describe("Node title contains this."),
+        input: z
+          .string()
+          .optional()
+          .describe("Has an INPUT port whose name or type contains this (e.g. 'image', 'LATENT')."),
+        output: z
+          .string()
+          .optional()
+          .describe("Has an OUTPUT port whose name or type contains this."),
+        widget: z
+          .string()
+          .optional()
+          .describe("Has a widget whose NAME contains this (e.g. 'seed', 'ckpt_name')."),
+        widget_value: z
+          .string()
+          .optional()
+          .describe("Has a widget whose VALUE contains this (e.g. a filename or prompt fragment)."),
+        is_output: z
+          .boolean()
+          .optional()
+          .describe("true = only output nodes (SaveImage/PreviewImage/…); false = exclude them."),
+        is_subgraph: z.boolean().optional().describe("true = only subgraph nodes."),
+        mode: z
+          .enum(["active", "bypass", "mute"])
+          .optional()
+          .describe("Only nodes in this execution mode."),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(200)
+          .optional()
+          .describe("Max matches to return (default 40)."),
+      },
+      async (args: A, ctx) =>
+        ctx.call({
+          cmd: "graph_find_nodes",
+          query: args.query,
+          type: args.type,
+          title: args.title,
+          input: args.input,
+          output: args.output,
+          widget: args.widget,
+          widget_value: args.widget_value,
+          is_output: args.is_output,
+          is_subgraph: args.is_subgraph,
+          mode: args.mode,
+          limit: args.limit,
+        }),
     ),
     def(
       "panel_add_node",
@@ -945,9 +1015,21 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_create_subgraph",
-      "Group the given nodes into a SUBGRAPH (ComfyUI 'Convert to Subgraph') on the user's canvas — collapses them into one subgraph node. Returns the new subgraph node id. Undoable with Ctrl+Z.",
+      "Group the given nodes into a SUBGRAPH (ComfyUI 'Convert to Subgraph') on the user's canvas — collapses them into one subgraph node. Returns the new subgraph node id. Undoable with Ctrl+Z. To wrap an existing GROUP, prefer panel_subgraph_group (you don't have to list the node_ids yourself).",
       { node_ids: z.array(z.number().int()).describe("Node ids to group into a subgraph.") },
       async (args: A, ctx) => ctx.call({ cmd: "graph_create_subgraph", node_ids: args.node_ids }, 15000),
+    ),
+    def(
+      "panel_subgraph_group",
+      "Wrap an existing GROUP's nodes into ONE subgraph node in a single step — the clean way to refactor a big graph into readable, TOGGLEABLE units. Pass the group by `group` (its title, e.g. 'REPLACEMENT MODE', or its numeric id from panel_get_graph's groups[]). LiteGraph groups don't own nodes — membership is geometric — so this computes which nodes sit inside the group box, selects them, and collapses them via ComfyUI 'Convert to Subgraph', returning the new subgraph node id + the wrapped node ids. After this you can toggle that whole region as ONE unit: panel_set_node_mode(node_id, 'bypass'/'active') on the subgraph node, then panel_run — e.g. queue one run with the region ON and one with it OFF. Undoable with Ctrl+Z. (For an arbitrary set of nodes that isn't a group, use panel_create_subgraph with explicit node_ids.)",
+      {
+        group: z
+          .union([z.string(), z.number()])
+          .describe(
+            "Group to wrap: its title (case-insensitive substring, e.g. 'replacement mode') or its numeric id from panel_get_graph groups[].id.",
+          ),
+      },
+      async (args: A, ctx) => ctx.call({ cmd: "graph_subgraph_group", group: args.group }, 15000),
     ),
     def(
       "panel_copy_nodes",
