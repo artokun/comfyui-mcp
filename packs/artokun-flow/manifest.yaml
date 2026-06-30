@@ -1,12 +1,11 @@
 # Artokun Flow — WAN Animate. THE go-to pack for "take this person and animate them":
 # give it a character image + a driving video and it makes that character dance/move
 # with the clip's motion. Two modes via the "REPLACEMENT MODE" subgraph node, which
-# ships MUTED = OFF (default — animate the whole character + background to the driving
-# motion). Set that node Active = ON to replace the person in the real video. It must be
-# toggled with MUTE (not bypass): OFF needs its bg/mask outputs EMPTY; bypass would pass
-# the driving image through into them. ReActor first-frame face-lock and the
-# "Upscale4x-RIFE-1080p" subgraph are the BYPASS toggles (their OFF = pass frames
-# through unchanged); the upscale ships bypassed (opt-in).
+# ships DISABLED = OFF (default — animate the whole character + background to the driving
+# motion). Set that node's Mode to Active = ON to replace the person in the real video;
+# Mute or Bypass = OFF. ReActor first-frame face-lock and the "Upscale4x-RIFE-1080p"
+# subgraph are bypass toggles (OFF = pass frames through unchanged); the upscale ships
+# off (opt-in).
 #
 # SAM3, frame-interpolation, math, mask, and post-processing nodes are CORE in a
 # recent ComfyUI (comfy_extras) — no custom node needed for those; just keep ComfyUI
