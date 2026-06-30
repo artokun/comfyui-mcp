@@ -24,10 +24,10 @@ sources:
   kijai: https://huggingface.co/Kijai/WanVideo_comfy
 notes:
   - "AUTHOR'S MAINTAINED PACK — this is the recommended/default WAN Animate
-    character-animation pipeline. One-time setup: the teskor-hub nodes (TSColorMatch,
-    TSPoseDataSmoother, TSVideoCombineNoMetadata) are user-supplied — install them, or
-    swap to the standard KJNodes ColorMatch / VHS_VideoCombine equivalents. Once that's
-    done the graph loads and runs normally."
+    character-animation pipeline. The TS utility nodes (TSColorMatch temporal color
+    stabilizer, TSPoseDataSmoother pose-jitter smoother, TSVideoCombineNoMetadata) now
+    auto-install from github.com/artokun/comfyui-teskors-utils (a maintained public fork);
+    no public drop-in equivalents exist for the color/pose nodes."
   - SAM3 + frame-interpolation + math/mask/post-processing are CORE in recent
     ComfyUI (comfy_extras) — keep ComfyUI updated so SAM3_VideoTrack exists.
   - Base models download under placeholder names and are saved under the workflow's
@@ -43,7 +43,6 @@ notes:
   - Static-validated (clean lint + UI→API convert; the muted upscale subgraph is
     skipped). Run locally to confirm on your hardware.
 post_install:
-  - Install the private teskor-hub nodes (or swap to standard equivalents).
   - Place the SAM3 checkpoint in models/checkpoints/ (see gaps above).
   - Restart ComfyUI (or ComfyUI-Manager -> Install missing custom nodes).
   - Load workflow.json.

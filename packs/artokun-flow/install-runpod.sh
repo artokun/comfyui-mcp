@@ -31,6 +31,7 @@ clone "ComfyUI-WanAnimatePreprocess" "https://github.com/kijai/ComfyUI-WanAnimat
 clone "ComfyUI-KJNodes" "https://github.com/kijai/ComfyUI-KJNodes"
 clone "ComfyUI-VideoHelperSuite" "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite"
 clone "ComfyUI-ReActor" "https://github.com/Gourieff/ComfyUI-ReActor"
+clone "comfyui-teskors-utils" "https://github.com/artokun/comfyui-teskors-utils"
 
 echo "-------- models --------"
 grab "models/diffusion_models/Wan2_2-Animate-14B_fp8_scaled_e4m3fn_KJ_v2.safetensors" "https://huggingface.co/wdsfdsdf/OFMHUB/resolve/main/WanModel.safetensors"

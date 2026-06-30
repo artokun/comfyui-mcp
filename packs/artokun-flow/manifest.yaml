@@ -11,10 +11,11 @@
 # recent ComfyUI (comfy_extras) — no custom node needed for those; just keep ComfyUI
 # up to date so SAM3_VideoTrack/SAM3_TrackToMask exist.
 #
-# PRIVATE NODES (NOT auto-installable — user-supplied): TSColorMatch,
-# TSPoseDataSmoother, TSVideoCombineNoMetadata from teskor-hub (private repos). The
-# graph won't fully load without them; swap to KJNodes ColorMatch / VHS_VideoCombine
-# if you don't have them.
+# TS UTILITY NODES (now auto-installed): TSColorMatch (reference-free temporal color
+# stabilizer), TSPoseDataSmoother (pose-jitter smoother), TSVideoCombineNoMetadata
+# (metadata-free video save) — all three from github.com/artokun/comfyui-teskors-utils,
+# a public fork of teskor-hub/comfyui-teskors-utils. The color/pose nodes have no public
+# drop-in equivalents, so the pack ships its own maintained fork.
 #
 # MODEL NAMING: the base-model host serves them under short placeholder names. The
 # workflow references the REAL Kijai filenames, so base models are downloaded and SAVED
@@ -29,11 +30,9 @@ custom_nodes:
   - https://github.com/kijai/ComfyUI-KJNodes               # ImageResizeKJv2, GetImageSizeAndCount, DrawMaskOnImage, ImageConcatMulti, PreviewAnimation
   - https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite # VHS_LoadVideo, VHS_VideoInfoLoaded
   - https://github.com/Gourieff/ComfyUI-ReActor            # ReActorFaceSwap, ReActorBuildFaceModel (first-frame face-lock; auto-fetches inswapper_128 + GPEN-BFR-512)
+  - https://github.com/artokun/comfyui-teskors-utils       # TSColorMatch, TSPoseDataSmoother, TSVideoCombineNoMetadata (public fork of teskor-hub)
   # --- OPTIONAL (only for the muted Upscale4x-RIFE-1080p subgraph) ---
   # - https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler  # SeedVR2* — un-mute the upscale subgraph to use
-  # --- PRIVATE / user-supplied (NOT cloned) — see header ---
-  # - teskor-hub/NEW-UTILS                 # TSColorMatch
-  # - teskor-hub/comfyui-teskors-utils     # TSPoseDataSmoother, TSVideoCombineNoMetadata
 
 models:
   # --- WAN base — gist hosts these under placeholder names; saved as the real names
