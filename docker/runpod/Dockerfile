@@ -1,12 +1,27 @@
 # syntax=docker/dockerfile:1
 #
-# comfyui-mcp RunPod image — LEAN, network-volume-persistent.
+# comfyui-mcp RunPod image — FAST RESTART, image-immutable software.
 # =============================================================================
-# Rewritten FROM SCRATCH (was: a single-stage FROM aitrepreneur/comfyui:2.3.5,
-# which was 63 GB — it baked ~13 GB of SDXL models, a CUDA *devel* base, and a
-# duplicate torch). This image is a SLIM multi-stage build on a recent, lean
-# runpod/pytorch base and keeps the ComfyUI install + venv + caches on the
-# /workspace NETWORK VOLUME so stop/start is FAST.
+# DESIGN: optimize STOP/START speed. The ComfyUI install + its venv + Manager v2
+# + the Agent Panel custom node are BAKED INTO THE IMAGE at a fixed path
+# (/opt/ComfyUI) and RUN DIRECTLY FROM THERE. Nothing is seeded/synced/rsync'd
+# onto the network volume at boot. A warm restart does NO install/sync/seed — it
+# just `mkdir -p` the user-data dirs and launches ComfyUI from the baked venv
+# (~30-60s ComfyUI init).
+#
+# The /workspace NETWORK VOLUME holds ONLY USER DATA:
+#     /workspace/user     workflows + ComfyUI settings + Manager config
+#     /workspace/models   all model categories (Manager downloads land here)
+#     /workspace/input    input images
+#     /workspace/output   generated images
+# Nothing else lives on the volume — no venv, no custom_nodes, no caches.
+#
+# TRADEOFF (documented in README): because custom_nodes are baked into the
+# (immutable) image, custom nodes the agent / Manager install at runtime do NOT
+# survive a restart — they live on the container's ephemeral disk. MODELS the
+# agent / Manager download DO persist (they land on /workspace/models via
+# extra_model_paths.yaml `is_default`). To add a node permanently, add it to this
+# Dockerfile and rebuild.
 #
 # TOPOLOGY (why the image is lean): the panel ORCHESTRATOR (the autonomous agent
 # loop — Claude/Codex Agent SDK, on YOUR subscription) runs on the USER's laptop,
@@ -29,8 +44,8 @@ ARG BASE_IMAGE=runpod/pytorch:1.0.7-cu1281-torch280-ubuntu2404
 # image). NOTE: this is a ~63 GB build-time pull — see README "Build" for how to
 # drop it for a faster/leaner build.
 ARG RUNPOD_SRC_IMAGE=aitrepreneur/comfyui:2.3.5
-# Bake the SDXL base checkpoint (~6.9 GB) for a GPU spotcheck. Set to 0 for a
-# truly slim image (the model layer is then never downloaded — see gate below).
+# Bake the SDXL base checkpoint (~6.9 GB) for a GPU spotcheck. Set to 0 to omit
+# the baked copy entirely (the model layer is then never downloaded).
 ARG BAKE_SPOTCHECK_MODEL=1
 
 # =============================================================================
@@ -65,8 +80,10 @@ FROM spotcheck-${BAKE_SPOTCHECK_MODEL} AS spotcheck-src
 FROM ${BASE_IMAGE} AS final
 
 # ---- Build-time pins (override with --build-arg; confirm in README) ----------
-# ComfyUI ref to bake. master = latest (must be >= 0.26 for --enable-manager +
-# comfyui_manager v2). Pin a tag/commit for reproducible images.
+# ComfyUI ref to bake. master = latest (must be recent enough for: --enable-manager
+# + comfyui_manager v2, AND the per-dir launch flags --user-directory /
+# --input-directory / --output-directory, AND extra_model_paths `is_default`).
+# Pin a tag/commit for reproducible images.
 ARG COMFYUI_REF=master
 # pip Manager v2 — exposes /v2/manager/queue/task (the API comfyui-mcp targets).
 ARG COMFYUI_MANAGER_VERSION=4.2.2
@@ -77,12 +94,12 @@ ARG PANEL_REF=
 # regardless of what the base ships (no cu121 leftovers). See README for the
 # leaner "reuse the base's cu128 torch" alternative.
 ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128
-# Baked SEED paths (NOT on the volume). The entrypoint copies SEED_HOME ->
-# /workspace/ComfyUI on first boot.
-ARG SEED_HOME=/opt/ComfyUI
+# Fixed IMAGE path for the baked ComfyUI + its venv. RUN FROM HERE — never copied
+# to the volume. Immutable software.
+ARG COMFY_HOME=/opt/ComfyUI
+# Baked spotcheck-model dir (NOT on the volume). The entrypoint copies the SDXL
+# checkpoint from here into /workspace/models/checkpoints on first boot.
 ARG SEED_MODELS=/opt/ComfyUI-seed-models
-# Bump to force a version-gated re-seed onto EXISTING volumes (see README caveat).
-ARG SEED_VERSION=1
 # Manager remote-install gate (required for the agent to install models/nodes).
 ARG COMFY_NETWORK_MODE=personal_cloud
 ARG COMFY_SECURITY_LEVEL=normal-
@@ -90,21 +107,20 @@ ARG COMFY_SECURITY_LEVEL=normal-
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONUNBUFFERED=1 \
-    SEED_HOME=${SEED_HOME} \
+    COMFY_HOME=${COMFY_HOME} \
     SEED_MODELS=${SEED_MODELS} \
-    SEED_VERSION=${SEED_VERSION} \
     COMFY_NETWORK_MODE=${COMFY_NETWORK_MODE} \
     COMFY_SECURITY_LEVEL=${COMFY_SECURITY_LEVEL}
 
 # -----------------------------------------------------------------------------
 # 0. OS deps the lean base may not ship.
-#    rsync  — first-boot seed of SEED_HOME -> /workspace/ComfyUI
 #    cron   — replicate the aitrepreneur service set
 #    nodejs — runtime for the copied /app-manager Node app (:8000)
 #    git/curl/ca-certificates — clone + code-server install (base usually has git)
+#    (NOTE: rsync is GONE — we no longer seed/sync the volume.)
 # -----------------------------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      git rsync cron ca-certificates curl nodejs \
+      git cron ca-certificates curl nodejs \
  && rm -rf /var/lib/apt/lists/*
 
 # -----------------------------------------------------------------------------
@@ -116,21 +132,20 @@ RUN curl -fsSL https://code-server.dev/install.sh | sh \
  || echo "WARN: code-server install failed — it will be skipped at boot"
 
 # -----------------------------------------------------------------------------
-# 2. Clone the ComfyUI SEED (baked at ${SEED_HOME}; copied to the volume at boot)
+# 2. Bake ComfyUI at the fixed IMAGE path ${COMFY_HOME} (run from here forever).
 # -----------------------------------------------------------------------------
-RUN git clone https://github.com/comfyanonymous/ComfyUI.git "${SEED_HOME}" \
- && cd "${SEED_HOME}" \
+RUN git clone https://github.com/comfyanonymous/ComfyUI.git "${COMFY_HOME}" \
+ && cd "${COMFY_HOME}" \
  && git checkout "${COMFYUI_REF}" \
- && git --no-pager log -1 --format='ComfyUI seed at %h %ci'
+ && git --no-pager log -1 --format='ComfyUI baked at %h %ci'
 
 # -----------------------------------------------------------------------------
-# 3. Dedicated venv + cu128 torch + ComfyUI requirements + Manager v2
-#    The venv is created at ${SEED_HOME}/venv and copied to
-#    /workspace/ComfyUI/venv on first boot. A venv is relocatable as long as it
-#    is invoked by absolute path (its python derives sys.prefix from its own
-#    location), which the entrypoint does — see post_start.sh.
+# 3. Dedicated venv + cu128 torch + ComfyUI requirements + Manager v2.
+#    The venv lives at ${COMFY_HOME}/venv and is invoked by absolute path. It is
+#    NEVER copied to the volume — ComfyUI runs straight from the image, so import
+#    is a fast local read and boot does zero sync.
 # -----------------------------------------------------------------------------
-ENV VENV=${SEED_HOME}/venv
+ENV VENV=${COMFY_HOME}/venv
 ENV VPIP=${VENV}/bin/pip
 ENV VPY=${VENV}/bin/python
 RUN python3 -m venv "${VENV}" \
@@ -146,42 +161,51 @@ RUN "${VPIP}" install --no-cache-dir \
 # ComfyUI runtime requirements (cu128 index passed as a safety net so nothing
 # re-resolves torch off PyPI).
 RUN "${VPIP}" install --no-cache-dir --extra-index-url "${TORCH_INDEX_URL}" \
-      -r "${SEED_HOME}/requirements.txt"
+      -r "${COMFY_HOME}/requirements.txt"
 
 # Manager v2 (pip). Remove any classic custom_nodes/ComfyUI-Manager checkout —
 # it CONFLICTS with the pip Manager that --enable-manager turns on.
 RUN "${VPIP}" install --no-cache-dir "comfyui_manager==${COMFYUI_MANAGER_VERSION}" \
- && rm -rf "${SEED_HOME}/custom_nodes/ComfyUI-Manager" \
-           "${SEED_HOME}/custom_nodes/comfyui-manager"
+ && rm -rf "${COMFY_HOME}/custom_nodes/ComfyUI-Manager" \
+           "${COMFY_HOME}/custom_nodes/comfyui-manager"
 
 # -----------------------------------------------------------------------------
-# 4. comfyui-mcp Agent Panel custom node (registry id: comfyui-agent-panel)
+# 4. comfyui-mcp Agent Panel custom node (registry id: comfyui-agent-panel).
+#    Baked into the image's custom_nodes — see the custom_nodes tradeoff above.
 # -----------------------------------------------------------------------------
 RUN git clone --depth 1 ${PANEL_REF:+--branch "${PANEL_REF}"} \
-      "${PANEL_REPO}" "${SEED_HOME}/custom_nodes/comfyui-mcp-panel" \
- && if [ -f "${SEED_HOME}/custom_nodes/comfyui-mcp-panel/requirements.txt" ]; then \
+      "${PANEL_REPO}" "${COMFY_HOME}/custom_nodes/comfyui-mcp-panel" \
+ && if [ -f "${COMFY_HOME}/custom_nodes/comfyui-mcp-panel/requirements.txt" ]; then \
       "${VPIP}" install --no-cache-dir --extra-index-url "${TORCH_INDEX_URL}" \
-        -r "${SEED_HOME}/custom_nodes/comfyui-mcp-panel/requirements.txt"; \
+        -r "${COMFY_HOME}/custom_nodes/comfyui-mcp-panel/requirements.txt"; \
     fi
 
 # -----------------------------------------------------------------------------
-# 5. Manager config seed (remote-install gate). Baked into the seed tree; the
-#    entrypoint re-asserts it on the volume (rsync -u can skip it on a warm vol).
+# 5. extra_model_paths.yaml — maps EVERY model category to /workspace/models/*
+#    with `is_default: true` so the volume is the PRIMARY (download) location.
+#    Passed at launch via --extra-model-paths-config (see post_start.sh).
+#    Deliberately NO `custom_nodes:` key — custom_nodes stay in the image.
 # -----------------------------------------------------------------------------
-COPY config.ini ${SEED_HOME}/user/__manager/config.ini
-
-# Seed version marker (the entrypoint compares it to the volume's marker).
-RUN echo "${SEED_VERSION}" > "${SEED_HOME}/.seed_version"
+COPY extra_model_paths.yaml ${COMFY_HOME}/extra_model_paths.yaml
 
 # -----------------------------------------------------------------------------
-# 6. Spotcheck model (ARG-gated — empty dir when BAKE_SPOTCHECK_MODEL=0).
-#    The entrypoint copies any *.safetensors here into the volume's
-#    models/checkpoints on first boot.
+# 6. Manager config TEMPLATE (remote-install gate). The RUNNING ComfyUI reads its
+#    Manager config UNDER the --user-directory (which is /workspace/user), at
+#    user/__manager/config.ini (new ComfyUI) or user/default/ComfyUI-Manager/
+#    config.ini (older). So this baked copy is only a TEMPLATE; the entrypoint
+#    writes/re-asserts it onto the volume on every boot.
+# -----------------------------------------------------------------------------
+COPY config.ini ${COMFY_HOME}/config.ini.seed
+
+# -----------------------------------------------------------------------------
+# 7. Spotcheck model (ARG-gated — empty dir when BAKE_SPOTCHECK_MODEL=0).
+#    The entrypoint copies sd_xl_base_1.0.safetensors from here into the volume's
+#    models/checkpoints on first boot if it is not already present.
 # -----------------------------------------------------------------------------
 COPY --from=spotcheck-src /seed-models/ ${SEED_MODELS}/
 
 # -----------------------------------------------------------------------------
-# 7. RunPod service artifacts copied OUT of the donor image (not in the lean
+# 8. RunPod service artifacts copied OUT of the donor image (not in the lean
 #    base). These let us replicate the aitrepreneur service set without
 #    reinstalling them: a file uploader, croc (P2P transfer) and the app-manager
 #    web app (:8000). The entrypoint launches them best-effort (skipped if
@@ -192,7 +216,7 @@ COPY --from=runpod-src /usr/local/bin/croc            /usr/local/bin/croc
 COPY --from=runpod-src /app-manager                   /app-manager
 
 # -----------------------------------------------------------------------------
-# 8. nginx (public HTTP :3000 -> ComfyUI :3001, websocket-aware, "starting"
+# 9. nginx (public HTTP :3000 -> ComfyUI :3001, websocket-aware, "starting"
 #    fallback) + the entrypoint hook. We ship a SELF-CONTAINED nginx.conf rather
 #    than copying the donor's (no snippet/include dependencies → robust on any
 #    base). The base's /start.sh runs `service nginx start` reading this file,

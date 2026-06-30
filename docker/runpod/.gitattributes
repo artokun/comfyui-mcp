@@ -4,4 +4,5 @@
 *.conf      text eol=lf
 *.ini       text eol=lf
 *.html      text eol=lf
+*.yaml      text eol=lf
 Dockerfile  text eol=lf

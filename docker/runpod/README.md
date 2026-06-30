@@ -1,13 +1,16 @@
-# comfyui-mcp RunPod image — lean + network-volume persistent (DRAFT)
+# comfyui-mcp RunPod image — FAST RESTART (image-immutable software) (DRAFT)
 
-A **slim**, multi-stage RunPod image that boots **ready to be driven by the
+A RunPod image that boots **ready to be driven by the
 [comfyui-mcp](https://github.com/artokun/comfyui-mcp) Agent Panel**. Deploy on
 RunPod, run **one local command** on your laptop, and the agent drives the pod's
 live ComfyUI graph from your Claude/ChatGPT subscription.
 
-It keeps the **ComfyUI install + venv + caches on the `/workspace` network
-volume**, so the slow setup happens **once** (cold boot) and every later
-stop/start is **fast**.
+It is optimized for **fast stop/start**. All the software — ComfyUI + its venv +
+`comfyui_manager` v2 + the Agent Panel custom node — is **baked into the
+(immutable) image** at `/opt/ComfyUI` and **run directly from there**. The
+`/workspace` network volume holds **only your data** (`user/`, `models/`,
+`input/`, `output/`). A warm restart does **no install, no sync, no seed** — it
+just `mkdir -p` the data dirs and launches ComfyUI (~**30-60s** ComfyUI init).
 
 > **Status: DRAFT for owner review.** Authored to be correct and well-documented,
 > but **not** build-tested (no Docker in the authoring env). A few pins still need
@@ -35,31 +38,42 @@ on your own subscription — see [Topology](#topology-where-the-agent-runs).
 
 ---
 
-## Why this was rewritten (the lean rationale)
+## The fast-restart model (what changed and why)
 
-The previous draft was a single-stage `FROM aitrepreneur/comfyui:2.3.5`. That
-image is **~63 GB**: it bakes ~13 GB of SDXL models into every pull, sits on a
-CUDA **devel** base, and carries a duplicate torch. For an image whose job is to
-boot ComfyUI and be driven remotely, that is enormous.
+The previous design **seeded/synced** ComfyUI + its venv onto `/workspace` on the
+first boot and re-synced on upgrades. That made the volume the source of truth for
+software, which is slow to sync, fragile to upgrade (the `rsync -u` venv caveat),
+and couples software to the data volume.
 
-This rewrite is a **multi-stage build on a lean recent `runpod/pytorch` base**:
+This design **inverts** that:
 
-* The base already provides **python3.11 + torch + JupyterLab + sshd + RunPod's
-  `/start.sh` startup chain** — so SSH, key injection and Jupyter come "for free"
-  and stay lean.
-* ComfyUI + its venv are **baked into a seed at `/opt/ComfyUI`** and **copied to
-  the `/workspace` network volume on first boot**, so they persist and restart is
-  fast.
-* The SDXL spotcheck model is **ARG-gated** (off → a truly slim image).
-* The handful of RunPod service artifacts that the lean base lacks
-  (`runpod-uploader`, `croc`, the `app-manager` web app) are **COPYed out of the
-  aitrepreneur image in a throwaway build stage** — they end up in the final
-  image, but the 63 GB donor does **not**.
+| Concern | Where it lives | Persists a restart? |
+|---------|----------------|---------------------|
+| ComfyUI install + venv | **image** `/opt/ComfyUI` (immutable) | n/a (re-pulled with the image) |
+| `custom_nodes` (incl. Agent Panel, Manager) | **image** `/opt/ComfyUI/custom_nodes` | **No** — ephemeral |
+| Caches (HF / pip / torch / npm) | **container** ephemeral disk | **No** — ephemeral |
+| `user/` (workflows + settings + Manager config) | **volume** `/workspace/user` | **Yes** |
+| `models/` (incl. Manager downloads) | **volume** `/workspace/models` | **Yes** |
+| `input/` | **volume** `/workspace/input` | **Yes** |
+| `output/` | **volume** `/workspace/output` | **Yes** |
 
-**Estimated final image size:** ~**22–26 GB** with the spotcheck model baked
-(`BAKE_SPOTCHECK_MODEL=1`), ~**15–19 GB** without it (`=0`). See
-[Image size & the duplicate-torch note](#image-size--the-duplicate-torch-note)
-for how to shave another ~7 GB.
+**Result:** restart is just `mkdir -p /workspace/{user,models,input,output}` (plus
+model subdirs) and `launch ComfyUI from the baked venv`. No install/sync/seed.
+
+### ⚠️ The custom_nodes tradeoff (read this)
+
+Because `custom_nodes` are **baked into the immutable image**, **custom nodes the
+agent or Manager install at runtime do NOT survive a restart** — they live on the
+container's ephemeral disk and are gone on the next start. This is the deliberate
+cost of fast restart.
+
+* **Models DO persist** — Manager's install-model writes to `/workspace/models`
+  (see [Model paths](#model-paths-extra_model_pathsyaml)), so downloaded models
+  survive restarts.
+* **Nodes do NOT persist.** To add a custom node **permanently**, add it to the
+  `Dockerfile` (a `git clone` into `/opt/ComfyUI/custom_nodes` + its
+  `pip install`) and **rebuild the image**. Within a single pod session,
+  Manager-installed nodes work until the next restart.
 
 ---
 
@@ -77,14 +91,15 @@ ARG RUNPOD_SRC_IMAGE = aitrepreneur/comfyui:2.3.5                  (donor only)
 │  spotcheck-1 = ADD sd_xl_base_1.0.safetensors ; spotcheck-0 = empty  │
 └─────────────────────────────────────────────────────────────────────┘
 ┌─ FINAL: FROM ${BASE_IMAGE} ─────────────────────────────────────────┐
-│  apt: git rsync cron nodejs … ; install code-server                 │
-│  git clone ComfyUI (master) -> /opt/ComfyUI  (the SEED)             │
+│  apt: git cron nodejs … ; install code-server                       │
+│  git clone ComfyUI (master) -> /opt/ComfyUI  (BAKED, run from here) │
 │  python -m venv /opt/ComfyUI/venv                                    │
 │    pip cu128 torch/vision/audio  (NO xformers)                      │
 │    pip -r requirements.txt ; pip comfyui_manager==4.2.2           │
 │    rm classic custom_nodes/ComfyUI-Manager                          │
 │  git clone comfyui-mcp-panel -> /opt/ComfyUI/custom_nodes/…         │
-│  COPY config.ini  (Manager remote-install gate)                     │
+│  COPY extra_model_paths.yaml -> /opt/ComfyUI/extra_model_paths.yaml │
+│  COPY config.ini -> /opt/ComfyUI/config.ini.seed  (Manager gate)   │
 │  COPY --from=spotcheck-src  -> /opt/ComfyUI-seed-models             │
 │  COPY --from=runpod-src  runpod-uploader, croc, /app-manager        │
 │  COPY nginx.conf (:3000->:3001), starting.html, post_start.sh       │
@@ -101,58 +116,155 @@ The base image's `CMD` is **`/start.sh`** (from `runpod/containers`). On boot it
 2. runs `/pre_start.sh` if present (we ship none).
 3. `setup_ssh` — injects RunPod's `$PUBLIC_KEY` and starts sshd.
 4. `start_jupyter` — starts JupyterLab on **:8888** if `$JUPYTER_PASSWORD` is set.
-5. runs **our `/post_start.sh`** — persistence + caches + the remaining services
-   + ComfyUI.
+5. runs **our `/post_start.sh`** — `mkdir` the volume data dirs, assert the
+   Manager gate, start the ancillary services, and **launch ComfyUI from the
+   baked venv**.
 6. `sleep infinity` — keeps the pod alive.
 
 So SSH + Jupyter + nginx come from the base; **our hook adds everything else**.
 
 ---
 
-## Network-volume persistence (the key feature)
+## ComfyUI launch command (the exact flags)
 
-`/post_start.sh` makes ComfyUI + venv + caches live on `/workspace` (the
-persistent RunPod network volume):
+`/post_start.sh` launches (from `cd /opt/ComfyUI`, with the baked venv python):
 
-| Volume state | What happens | Speed |
-|--------------|--------------|-------|
-| **Cold** (`/workspace/ComfyUI` absent) | `rsync -a /opt/ComfyUI/ → /workspace/ComfyUI/` (incl. the venv), then copy the spotcheck model into `models/checkpoints/`. | slow (once) |
-| **Warm** (`/workspace/ComfyUI` present) | **skip the seed** → fast start. Optional version-gated re-seed if the image's `SEED_VERSION` is newer than the volume's marker (see caveat). | fast |
-
-**Caches** are redirected to the volume so pip/HF/torch/npm downloads persist:
-
-```
-HF_HOME=/workspace/.cache/huggingface   PIP_CACHE_DIR=/workspace/.cache/pip
-TORCH_HOME=/workspace/.cache/torch      XDG_CACHE_HOME=/workspace/.cache
-npm_config_cache=/workspace/.cache/npm
+```bash
+/opt/ComfyUI/venv/bin/python main.py \
+  --listen 0.0.0.0 --port 3001 \
+  --enable-manager \
+  --use-pytorch-cross-attention \
+  --user-directory   /workspace/user \
+  --input-directory  /workspace/input \
+  --output-directory /workspace/output \
+  --extra-model-paths-config /opt/ComfyUI/extra_model_paths.yaml
 ```
 
-ComfyUI then runs **from `/workspace/ComfyUI/venv` against `/workspace/ComfyUI`**,
-so `models/` (and anything you add) lives on the volume and survives stop/start.
+* **`--user-directory /workspace/user`** — workflows, ComfyUI settings, AND the
+  Manager config (see [Manager gate](#manager-remote-install-gate)) live on the
+  volume.
+* **`--input-directory` / `--output-directory`** — inputs and generated images on
+  the volume.
+* **`--extra-model-paths-config`** — points every model category at
+  `/workspace/models` (see below). MODELS persist on the volume.
+* **We deliberately do NOT use `--base-directory`.** It would relocate
+  `custom_nodes` (and temp) onto the volume too — but we want `custom_nodes` to
+  stay **in the image**. The per-dir flags + `extra_model_paths.yaml` give us
+  exactly the split we want (data on the volume, software in the image).
 
-### Why the moved venv still works
+> **Flag verification.** These flag names were verified against ComfyUI `master`
+> (`comfy/cli_args.py`): `--user-directory`, `--input-directory`,
+> `--output-directory`, `--base-directory`, and `--extra-model-paths-config` all
+> exist with these exact spellings, and `--base-directory`'s own help text states
+> it sets the base for "models, custom_nodes, input, output, temp, and user
+> directories" — confirming why we avoid it. **Assumption to confirm at build:**
+> the *pinned* `COMFYUI_REF` you bake actually ships these flags (they are present
+> on recent `master`; an old pin may not have them). Run
+> `"/opt/ComfyUI/venv/bin/python" /opt/ComfyUI/main.py --help` in the built image
+> to confirm before publishing.
 
-A Python venv is **relocatable as long as you invoke its `python` by absolute
-path** — `python` derives `sys.prefix` from its own location, so
-`/workspace/ComfyUI/venv/bin/python` finds `/workspace/ComfyUI/venv/.../site-packages`
-even though the venv was created under `/opt`. The entrypoint launches ComfyUI
-with that absolute path and does **not** rely on `activate` (whose `VIRTUAL_ENV`
-and console-script shebangs still point at the baked seed path).
+---
 
-### ⚠️ Warm-volume caveat (the existing-volume gotcha)
+## Model paths (`extra_model_paths.yaml`)
 
-The version-gated re-seed uses **`rsync -u`** (skip files whose destination mtime
-is **newer**). So on a **pre-existing** volume an image upgrade **may not fully
-propagate** — in particular the venv. Consequences:
+`extra_model_paths.yaml` is baked at `/opt/ComfyUI/extra_model_paths.yaml` and
+loaded via `--extra-model-paths-config`. It maps **every** model category to a
+subfolder under `/workspace/models`, with `is_default: true` so the volume is the
+**primary** (download) location — i.e. Manager's install-model writes there and
+the files persist.
 
-* **Cold / fresh volume:** everything seeds correctly. ✅
-* **Warm volume + image upgrade:** bump `SEED_VERSION` to trigger the re-sync, but
-  `rsync -u` can still skip individual newer files. For a clean upgrade, **deploy
-  onto a fresh volume**. The Manager `config.ini` is re-asserted at boot
-  regardless, but a venv that didn't sync can't be fixed retroactively.
+```yaml
+comfyui_mcp_volume:
+    base_path: /workspace
+    is_default: true            # insert these paths at the FRONT → default target
 
-If `/post_start.sh` can't find `/workspace/ComfyUI/venv/bin/python` it logs a
-clear error and holds the pod open for debugging instead of crash-looping.
+    checkpoints: models/checkpoints/
+    configs: models/configs/
+    loras: models/loras/
+    vae: models/vae/
+    text_encoders: |            # ComfyUI key "text_encoders" (a.k.a. CLIP)
+        models/text_encoders/
+        models/clip/
+    diffusion_models: |         # a.k.a. UNet
+        models/diffusion_models/
+        models/unet/
+    clip_vision: models/clip_vision/
+    style_models: models/style_models/
+    embeddings: models/embeddings/
+    diffusers: models/diffusers/
+    vae_approx: models/vae_approx/
+    controlnet: |
+        models/controlnet/
+        models/t2i_adapter/
+    gligen: models/gligen/
+    upscale_models: models/upscale_models/
+    latent_upscale_models: models/latent_upscale_models/
+    hypernetworks: models/hypernetworks/
+    photomaker: models/photomaker/
+    classifiers: models/classifiers/
+    model_patches: models/model_patches/
+    audio_encoders: models/audio_encoders/
+    background_removal: models/background_removal/
+    frame_interpolation: models/frame_interpolation/
+    geometry_estimation: models/geometry_estimation/
+    optical_flow: models/optical_flow/
+    detection: models/detection/
+```
+
+Notes:
+
+* **`is_default: true`** is the load-bearing line. ComfyUI's
+  `add_model_folder_path(..., is_default=True)` **inserts** the path at the front
+  of each category's list, so `/workspace/models/<cat>` becomes the default
+  download target. Without it, the image's `/opt/ComfyUI/models/<cat>` (ephemeral)
+  would stay first and Manager downloads would **not** persist.
+* **No `custom_nodes:` key** — on purpose. Mapping `custom_nodes` to the volume
+  would break the fast-restart contract.
+* `base_path: /workspace` with `models/...` relative subpaths mirrors ComfyUI's
+  own `extra_model_paths.yaml.example` convention.
+* The category **keys** match ComfyUI's `folder_names_and_paths` keys (verified
+  against `master`'s `folder_paths.py`). The category list mirrors the example's
+  full set; harmless if a future ComfyUI renames one.
+* `/post_start.sh` pre-creates the matching subfolders under `/workspace/models`
+  so they exist on a cold volume.
+
+---
+
+## Manager (remote-install gate)
+
+* **Manager v2 (pip), gated by `--enable-manager`.** `comfyui_manager==4.2.2`
+  exposes `/v2/manager/queue/task` (the API comfyui-mcp talks to). The classic
+  `custom_nodes/ComfyUI-Manager` checkout **conflicts** with it and is removed.
+* **Where the config lives.** With `--user-directory /workspace/user`,
+  `comfyui_manager` reads its `config.ini` from **under the user dir** — verified
+  against the Manager source (`manager_migration.get_manager_path(user_dir)`):
+  * new ComfyUI (System User API): `…/user/__manager/config.ini`
+  * older ComfyUI: `…/user/default/ComfyUI-Manager/config.ini`
+
+  Because that's on the **volume**, the gate persists. `/post_start.sh` writes/re-
+  asserts **both** locations on every boot (idempotent), so it's correct on either
+  Manager build.
+* **Gate values** (`config.ini`):
+
+  | Key | Value | Why |
+  |-----|-------|-----|
+  | `network_mode` | `personal_cloud` | required — the `/v2` install gate only allows remote installs in this mode |
+  | `security_level` | `normal-` | safe default; set `weak` (env `COMFY_SECURITY_LEVEL=weak`) for no guardrails, trusted pods only |
+
+---
+
+## ComfyUI / torch specifics
+
+* **cu128 torch, no xformers.** The venv gets a clean `torch torchvision
+  torchaudio` from `https://download.pytorch.org/whl/cu128` (sm_120 kernels for
+  Blackwell / RTX 5090). xformers is **omitted** — its prebuilt wheels lag the
+  cu128 ABI — so ComfyUI launches with `--use-pytorch-cross-attention` (PyTorch
+  SDPA).
+* **Caches are ephemeral (in the container), by design.** We do **not** redirect
+  HF/pip/torch/npm caches to `/workspace`. Model downloads via Manager go to
+  `/workspace/models` and persist — that's the only persistence we need. (First
+  use after a restart may re-download small ancillary files into the ephemeral
+  cache; the big model weights stay on the volume.)
 
 ---
 
@@ -161,37 +273,18 @@ clear error and holds the pod open for debugging instead of crash-looping.
 | Service | Port | Source | Notes |
 |---------|------|--------|-------|
 | **nginx** | **3000** (→ ComfyUI 3001) | our `nginx.conf` | websocket-aware; "starting" fallback page |
-| **ComfyUI** | 3001 (internal) | seed venv | `--listen 0.0.0.0 --port 3001 --enable-manager --use-pytorch-cross-attention` |
+| **ComfyUI** | 3001 (internal) | baked image venv | launched from `/opt/ComfyUI`; see [launch flags](#comfyui-launch-command-the-exact-flags) |
 | **sshd** | 22 | base | RunPod `$PUBLIC_KEY` injection |
 | **JupyterLab** | 8888 | base | set `JUPYTER_PASSWORD` |
 | **code-server** | 8081 (→ 8080) | installed at build | best-effort |
 | **app-manager** | 8001 (→ 8000) | COPY from donor | Node app; best-effort (needs `node`) |
 | **runpod-uploader** | — | COPY from donor | file uploader; best-effort |
-| **croc / rclone** | — | COPY from donor / base | on-demand transfer |
+| **croc** | — | COPY from donor | on-demand P2P transfer |
 | **cron** | — | apt | best-effort |
 
 All ancillary services are launched **best-effort** — if a binary is absent (e.g.
 you dropped the donor COPYs) the entrypoint logs `skip` and carries on, so the
 image still boots ComfyUI fine.
-
----
-
-## ComfyUI / Manager specifics
-
-* **cu128 torch, no xformers.** The venv gets a clean `torch torchvision
-  torchaudio` from `https://download.pytorch.org/whl/cu128` (sm_120 kernels for
-  Blackwell / RTX 5090). xformers is **omitted** — its prebuilt wheels lag the
-  cu128 ABI — so ComfyUI launches with `--use-pytorch-cross-attention` (PyTorch
-  SDPA).
-* **Manager v2 (pip), gated by `--enable-manager`.** `comfyui_manager==4.2.2`
-  exposes `/v2/manager/queue/task` (the API comfyui-mcp talks to). The classic
-  `custom_nodes/ComfyUI-Manager` checkout **conflicts** with it and is removed.
-* **Remote-install gate** (`config.ini`, synced to `/workspace/.../user/__manager/config.ini`):
-
-  | Key | Value | Why |
-  |-----|-------|-----|
-  | `network_mode` | `personal_cloud` | required — the `/v2` install gate only allows remote installs in this mode |
-  | `security_level` | `normal-` | safe default; set `weak` (env `COMFY_SECURITY_LEVEL=weak`) for no guardrails, trusted pods only |
 
 ---
 
@@ -222,8 +315,8 @@ Create a **Pod template** (or fill these on a one-off GPU pod):
 | Template field | Value |
 |----------------|-------|
 | **Container image** | `<your-registry>/comfyui-mcp-runpod:<tag>` (after build & push) |
-| **Container disk** | ≥ 25 GB (the layered install) |
-| **Volume disk** | e.g. 100 GB+ (the ComfyUI install + venv + your models live here) |
+| **Container disk** | ≥ 30 GB (the baked ComfyUI + venv + cu128 torch + any runtime-installed nodes/caches, which are ephemeral) |
+| **Volume disk** | e.g. 100 GB+ (your **models + workflows + I/O** live here; size for your models) |
 | **Volume mount path** | **`/workspace`** |
 | **Expose HTTP ports** | **`3000`** (nginx → ComfyUI). Optionally `8081` (code-server), `8001` (app-manager), `8888` (Jupyter). |
 | **Expose TCP ports** | `22` (SSH) |
@@ -235,13 +328,16 @@ Create a **Pod template** (or fill these on a one-off GPU pod):
 |-----|---------|---------|
 | `JUPYTER_PASSWORD` | *(unset)* | set to enable JupyterLab on :8888 (base behavior) |
 | `PUBLIC_KEY` | *(RunPod injects)* | SSH public key (base behavior) |
-| `SEED_VERSION` | `1` | bump to force a version-gated re-seed onto an existing volume (see caveat) |
 | `COMFY_SECURITY_LEVEL` | `normal-` | Manager security level (`weak` = most permissive) |
 | `COMFY_NETWORK_MODE` | `personal_cloud` | must stay `personal_cloud` for remote installs |
 | `COMFY_EXTRA_ARGS` | *(empty)* | extra ComfyUI flags appended verbatim by the entrypoint |
+| `COMFY_HOME` | `/opt/ComfyUI` | baked ComfyUI path (rarely overridden) |
+| `WORKSPACE` | `/workspace` | network-volume mount (rarely overridden) |
 
-> **First boot is slow** (cold volume seed). Watch the pod log / the "starting"
-> page; later boots are fast.
+> **First boot vs warm restart:** both are fast. First boot additionally creates
+> the volume data dirs and copies the spotcheck model (if baked); warm restart
+> skips even those. Watch the pod log / the "starting" page; ComfyUI init is
+> ~30-60s either way.
 
 ---
 
@@ -252,13 +348,13 @@ No GPU is needed at **build** time. On a machine with Docker + BuildKit:
 ```bash
 cd docker/runpod
 
-# Default: lean base + spotcheck model baked.
+# Default: baked software + spotcheck model.
 docker build -t <your-registry>/comfyui-mcp-runpod:cu128 .
 docker push     <your-registry>/comfyui-mcp-runpod:cu128
 
-# Truly slim (no baked model — the 6.9 GB layer is never downloaded):
+# Omit the baked spotcheck model (the 6.9 GB layer is never downloaded):
 docker build --build-arg BAKE_SPOTCHECK_MODEL=0 \
-  -t <your-registry>/comfyui-mcp-runpod:cu128-slim .
+  -t <your-registry>/comfyui-mcp-runpod:cu128-noseed .
 ```
 
 Override pins as needed:
@@ -269,7 +365,6 @@ docker build \
   --build-arg COMFYUI_REF=master \
   --build-arg COMFYUI_MANAGER_VERSION=4.2.2 \
   --build-arg PANEL_REF=<tag-or-branch> \
-  --build-arg SEED_VERSION=2 \
   -t <your-registry>/comfyui-mcp-runpod:cu128 .
 ```
 
@@ -280,31 +375,34 @@ time** purely to COPY out `runpod-uploader`, `croc` and `/app-manager`. It does
 **not** ship in the final image, but it is a heavy one-time pull on your build
 host. If you don't need those extras, **comment out STAGE A and the three
 `COPY --from=runpod-src` lines** — the entrypoint already treats them as
-best-effort, and `croc` can instead be installed from its official release. This
-makes the build much faster and the build host lighter.
+best-effort, and `croc` can instead be installed from its official release.
 
-### Image size & the duplicate-torch note
+### Image size note (the duplicate-torch tradeoff)
 
-The lean base `runpod/pytorch:…-cu1281-torch280-…` **already ships a cu128
-torch**. We still create an **isolated venv and install cu128 torch into it**
-(the spec — guaranteed-correct, isolated, no surprise from base drift), which
-means torch exists twice (~7 GB duplicated). To shave that:
+Because the software is now baked, the image is **larger** than the volume-seed
+design — that's the deliberate fast-restart tradeoff (first-pull/image-size no
+longer matters per the spec). The lean base `runpod/pytorch:…-cu1281-torch280-…`
+**already ships a cu128 torch**, yet we install cu128 torch again into the
+isolated venv (~7 GB duplicated) for a guaranteed-correct, isolated environment.
+To shave that:
 
 * Build the venv with `python -m venv --system-site-packages /opt/ComfyUI/venv`
   and **skip the `pip install torch …` step**, so ComfyUI reuses the base's
   cu128 torch. **Verify first** that the base torch is genuinely `+cu128`
   (`python -c "import torch;print(torch.__version__, torch.version.cuda)"`) —
-  some older `cu1281` tags shipped a cu-default torch. This brings the image
-  toward ~15–18 GB but couples you to the base's torch.
+  some older `cu1281` tags shipped a cu-default torch.
 
 > **DRAFT — not build-tested.** Build once locally and watch for: (a) the base's
 > `/start.sh` actually invokes `/post_start.sh` (it does in `runpod/containers`,
-> but confirm for your exact tag); (b) `--enable-manager` /
-> `--use-pytorch-cross-attention` are accepted by the cloned ComfyUI; (c) the
-> Manager `config.ini` schema for `comfyui_manager 4.2.2`; (d) the donor paths
-> `/usr/local/bin/runpod-uploader`, `/usr/local/bin/croc`, `/app-manager` exist;
-> (e) the moved venv runs from `/workspace`. Then deploy and verify on a **fresh**
-> volume.
+> but confirm for your exact tag); (b) `main.py --help` lists `--user-directory`,
+> `--input-directory`, `--output-directory`, `--extra-model-paths-config`,
+> `--enable-manager`, `--use-pytorch-cross-attention` for your pinned
+> `COMFYUI_REF`; (c) `comfyui_manager 4.2.2` reads the gate from the volume user
+> dir (`user/__manager/config.ini` or `user/default/ComfyUI-Manager/config.ini`);
+> (d) Manager install-model writes to `/workspace/models/<cat>` (i.e. `is_default`
+> took effect); (e) the donor paths `/usr/local/bin/runpod-uploader`,
+> `/usr/local/bin/croc`, `/app-manager` exist. Then deploy and verify a real
+> stop/start is fast.
 
 ---
 
@@ -339,27 +437,31 @@ If the pod sits behind auth, set `COMFYUI_AUTH_TOKEN` (+ `COMFYUI_AUTH_HEADER` /
 Draft pins/assumptions — confirm before building/publishing:
 
 1. **Base tag** — `runpod/pytorch:1.0.7-cu1281-torch280-ubuntu2404` (verified on
-   Docker Hub 2026-06-19). Confirm it's still current / the one you want at build
-   (can't pull from the authoring env).
+   Docker Hub 2026-06-19). Confirm it's still the one you want at build.
 2. **Base `/start.sh` hook** — confirm your exact base tag's `/start.sh` runs
    `/post_start.sh` and `service nginx start` reads `/etc/nginx/nginx.conf`
    (true in `runpod/containers` `main`).
-3. **Donor artifact paths** — `/usr/local/bin/runpod-uploader`,
+3. **Launch flags on the pinned ComfyUI** — `--user-directory`,
+   `--input-directory`, `--output-directory`, `--extra-model-paths-config`,
+   `--enable-manager`, `--use-pytorch-cross-attention`. Verified present on
+   `master`; confirm for whatever `COMFYUI_REF` you bake (`main.py --help`).
+4. **`is_default` write behavior** — confirm Manager install-model actually lands
+   in `/workspace/models/<cat>` (it should, since `is_default` front-inserts the
+   volume paths).
+5. **`comfyui_manager` 4.2.2 config path** — reads
+   `user/__manager/config.ini` (new) or `user/default/ComfyUI-Manager/config.ini`
+   (older) under `--user-directory`. We write both; confirm one is honored.
+6. **Donor artifact paths** — `/usr/local/bin/runpod-uploader`,
    `/usr/local/bin/croc`, `/app-manager` in `aitrepreneur/comfyui:2.3.5`.
-4. **`comfyui_manager` 4.2.2** — exposes `/v2/manager/queue/task` and reads
-   `user/__manager/config.ini` with `[default] network_mode / security_level`.
-5. **Launch flags** — the cloned ComfyUI (master) accepts `--enable-manager`
-   and `--use-pytorch-cross-attention`.
-6. **nginx port convention** — kept **3000 → 3001** (matches your existing
-   `connect` flow). The lean base also ships a native ComfyUI proxy block
-   (`:3001 → :3000`); we override it with our self-contained `nginx.conf`.
-7. **Duplicate torch** — decide whether to keep the isolated cu128 torch
-   (default, ~+7 GB) or reuse the base's via `--system-site-packages` (see size
-   note).
-8. **Panel ref** — cloned from the default branch (nightly HEAD). Pin
-   `PANEL_REF` for reproducible images?
-9. **`node` for app-manager** — apt `nodejs` (Ubuntu 24.04 → v18). Confirm it
-   runs the donor's `app.js`, or drop app-manager.
+7. **nginx port convention** — kept **3000 → 3001** (matches your `connect`
+   flow). We override the base's native ComfyUI proxy block with our
+   self-contained `nginx.conf`.
+8. **Duplicate torch** — keep the isolated cu128 torch (default, ~+7 GB) or reuse
+   the base's via `--system-site-packages` (see size note).
+9. **Panel ref** — cloned from the default branch (nightly HEAD). Pin `PANEL_REF`
+   for reproducible images?
+10. **custom_nodes tradeoff** — confirm you accept that runtime-installed nodes
+    don't survive a restart (models do). Permanent nodes go in the Dockerfile.
 
 ---
 
@@ -367,9 +469,10 @@ Draft pins/assumptions — confirm before building/publishing:
 
 | File | Purpose |
 |------|---------|
-| `Dockerfile` | Multi-stage: lean `runpod/pytorch` final stage; `aitrepreneur` donor stage for service artifacts; ARG-gated SDXL spotcheck stage. Bakes ComfyUI + cu128 venv + Manager v2 + Agent Panel into `/opt/ComfyUI`. |
-| `post_start.sh` | Boot hook (installed as `/post_start.sh`): network-volume seed, cache redirection, Manager gate, ancillary services, ComfyUI launch. |
+| `Dockerfile` | Multi-stage: lean `runpod/pytorch` final stage; `aitrepreneur` donor stage for service artifacts; ARG-gated SDXL spotcheck stage. **Bakes** ComfyUI + cu128 venv + Manager v2 + Agent Panel into `/opt/ComfyUI` (run from there; never synced to the volume). |
+| `post_start.sh` | Boot hook (installed as `/post_start.sh`): `mkdir` the `/workspace` data dirs, first-boot spotcheck-model copy, Manager-gate write, ancillary services, and ComfyUI launch from the baked venv with the per-dir flags. |
+| `extra_model_paths.yaml` | Maps every model category to `/workspace/models/<cat>` with `is_default: true` (volume is the primary/download location). No `custom_nodes:` key (nodes stay in the image). |
 | `nginx.conf` | Self-contained reverse proxy (`:3000 → :3001`, websocket-aware, "starting" fallback) + code-server / app-manager fronts. Installed over the base's. |
 | `starting.html` | The auto-refreshing "ComfyUI is starting…" page nginx serves until upstreams are up. |
-| `config.ini` | Manager v2 seed (`network_mode = personal_cloud`, `security_level = normal-`). |
+| `config.ini` | Manager v2 gate template (`network_mode = personal_cloud`, `security_level = normal-`), copied to the volume user dir at boot. |
 | `README.md` | This document. |
