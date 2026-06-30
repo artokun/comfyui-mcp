@@ -227,6 +227,28 @@ COPY starting.html   /usr/share/nginx/html/readme.html
 COPY post_start.sh   /post_start.sh
 RUN chmod +x /post_start.sh
 
+# -----------------------------------------------------------------------------
+# 10. Volume hygiene (LAST so it doesn't bust the expensive build-layer cache).
+#     The runpod/pytorch base points these caches at /workspace so they "persist"
+#     across restarts. With the fast-restart design ALL software is baked in the
+#     image (no first-install on the volume), so these caches are pure cruft on
+#     the network drive. Force them onto the EPHEMERAL container fs so /workspace
+#     stays EXACTLY user/models/input/output (the "that's it" contract). These
+#     are runtime-only vars; setting them here does not affect earlier RUN steps.
+# -----------------------------------------------------------------------------
+ENV PIP_CACHE_DIR=/root/.cache/pip \
+    HF_HOME=/root/.cache/huggingface \
+    UV_CACHE_DIR=/root/.cache/uv \
+    VIRTUALENV_OVERRIDE_APP_DATA=/root/.cache/virtualenv \
+    XDG_CACHE_HOME=/root/.cache
+
+# The runpod/pytorch base bakes a ~1.1GB pip cache at /workspace/.cache. Docker
+# SEEDS a fresh named/network volume from the image's mount-point contents, so
+# that stale cache would land on every new /workspace AND violate the "that's it"
+# contract. Strip it: the final image's /workspace is then empty, and post_start
+# creates user/models/input/output on first boot.
+RUN rm -rf /workspace/.cache /workspace/.logs && mkdir -p /workspace
+
 # We deliberately do NOT set ENTRYPOINT/CMD: the base's /start.sh chain is kept
 # (nginx + sshd + JupyterLab + RunPod key injection), and it invokes our
 # /post_start.sh hook.

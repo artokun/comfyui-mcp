@@ -51,7 +51,10 @@ MODELS_DIR="${WORKSPACE}/models"
 INPUT_DIR="${WORKSPACE}/input"
 OUTPUT_DIR="${WORKSPACE}/output"
 
-LOG_DIR="${WORKSPACE}/.logs"
+# Logs go to the EPHEMERAL container fs, NOT the volume. The RunPod console
+# streams them live (we `exec tail -F` below), and the fast-restart contract
+# keeps /workspace EXACTLY user/models/input/output — logs are runtime cruft.
+LOG_DIR="${COMFY_LOG_DIR:-/var/log/comfyui-mcp}"
 mkdir -p "${LOG_DIR}"
 
 # -----------------------------------------------------------------------------
