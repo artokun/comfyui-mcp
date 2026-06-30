@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.22.0] - 2026-06-29
+
 ### Added
 
 - **Panel graph-navigation tools** — read/refactor a large live graph without dumping
