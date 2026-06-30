@@ -61,6 +61,11 @@ ARG COMFYUI_MANAGER_VERSION=4.2.2
 ARG PANEL_REPO=https://github.com/artokun/comfyui-mcp-panel.git
 # PyTorch cu128 index -> torch 2.x+cu128 with sm_120 kernels. NOT cu121.
 ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128
+# ComfyUI ref to update the baked tree to. The base (aitrepreneur/comfyui:2.3.5)
+# ships ComfyUI from 2024-08-05 (~v0.0.2-era) which predates --enable-manager +
+# the comfyui_manager v2 integration, so it MUST be updated. "master" = latest;
+# pin to a tag/commit (e.g. the one your pod runs) for reproducibility.
+ARG COMFYUI_REF=master
 # MUST exceed the base template version (2.3.5) so /pre_start.sh re-syncs our
 # baked changes onto a fresh /workspace volume. 2.4.0 is unambiguously higher
 # than 2.3.5 under both lexical and semver comparison.
@@ -84,6 +89,22 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # syncs it to /workspace/ComfyUI/venv at boot (caveat for existing volumes: see
 # README).
 ENV VENV_PIP="${COMFY_HOME}/venv/bin/pip"
+
+# -----------------------------------------------------------------------------
+# 0. Update the baked ComfyUI to a modern release
+# -----------------------------------------------------------------------------
+# The base bakes ComfyUI from 2024-08-05 which does NOT accept --enable-manager
+# and lacks the comfyui_manager v2 integration (main.py never imports/start()s
+# it). Everything below (Manager v2, the cu128/0.26 requirements, the launch
+# flags) needs a recent ComfyUI, so update the tree first. The base repo is a
+# shallow clone — unshallow so any ref is checkout-able, then check out
+# ${COMFYUI_REF}.
+RUN cd "${COMFY_HOME}" \
+ && (git fetch --unshallow origin 2>/dev/null || git fetch origin) \
+ && git fetch --tags --force origin \
+ && git checkout -f "${COMFYUI_REF}" \
+ && (git reset --hard "origin/${COMFYUI_REF}" 2>/dev/null || true) \
+ && git --no-pager log -1 --format='ComfyUI now at %h %ci'
 
 # -----------------------------------------------------------------------------
 # 1. cu128 PyTorch in the baked venv (Blackwell / RTX 5090, sm_120)
