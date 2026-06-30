@@ -1,103 +1,154 @@
 # syntax=docker/dockerfile:1
 #
-# Custom RunPod ComfyUI image for the comfyui-mcp agent.
-# -----------------------------------------------------------------------------
-# Boots a ComfyUI that is READY to be driven by the comfyui-mcp Agent Panel:
-#   * CUDA 12.8 runtime  -> PyTorch cu128 -> Blackwell / RTX 5090 (sm_120) works
-#   * ComfyUI 0.26.x on a Python 3.11 venv
-#   * the modern pip "Manager v2" (comfyui_manager) behind --enable-manager
-#   * the comfyui-mcp Agent Panel custom node, pre-cloned
+# Custom RunPod ComfyUI image for the comfyui-mcp Agent Panel.
+# =============================================================================
+# BASED ON THE OFFICIAL TEMPLATE THE OWNER ACTUALLY RUNS: aitrepreneur/comfyui.
 #
-# TOPOLOGY (important): in the "agent runs locally" model, the panel
-# ORCHESTRATOR (Claude/Codex Agent SDK, on YOUR subscription) runs on the
-# USER's machine, NOT on the pod. So Node.js / Claude / Codex are deliberately
-# NOT installed here — the pod only needs ComfyUI + Manager + the panel node.
-# The user connects from their laptop with a single local command (see README).
+# Why this base (and NOT raw nvidia/cuda):
+#   The aitrepreneur/comfyui image is the proven RunPod template. It already
+#   ships ALL the RunPod plumbing that a raw CUDA base lacks:
+#     * sshd + RunPod public-key injection
+#     * nginx reverse proxy (:3000 -> ComfyUI :3001)
+#     * jupyter lab, code-server, runpodctl
+#     * CUDA 12.1 userspace + a baked ComfyUI install on a Python venv
+#   We do NOT need a cu128 *base* image: the GPU device + driver are provided by
+#   RunPod's HOST nvidia container runtime (works on any CUDA base). We only need
+#   cu128 *PyTorch wheels* in the venv to get Blackwell / RTX 5090 (sm_120)
+#   kernels — and those we install on top (see below).
 #
-# This image bakes the full, hard-won setup so it survives stop/start with no
-# manual steps. See ./README.md for the rationale and deploy instructions.
+# TEMPLATE ARCHITECTURE WE BUILD ON TOP OF (verified on the live pod):
+#   * The base BAKES ComfyUI + a Python venv at /ComfyUI (incl. /ComfyUI/venv).
+#   * On boot /start.sh -> /pre_start.sh SYNCS /ComfyUI -> /workspace/ComfyUI
+#     (rsync -rlptDu on overlay/xfs, tar-pipe on fuse), version-gated by
+#     /workspace/ComfyUI/template.json vs $TEMPLATE_VERSION. So the RUNTIME
+#     ComfyUI is /workspace/ComfyUI (persistent volume), seeded from /ComfyUI.
+#   * /start_comfyui.sh launches: ARGS=("$@" --listen 0.0.0.0 --port 3001) then
+#     cd /workspace/ComfyUI && source venv/bin/activate && python3 main.py ...
 #
-# DRAFT — pin the ARGs below to confirmed tags before building (see README).
-# -----------------------------------------------------------------------------
+# WHAT WE ADD (all hand-verified on the live RTX 5090 pod):
+#   1. cu128 torch/torchvision/torchaudio in the baked venv (sm_120 kernels).
+#   2. ComfyUI 0.26 requirements satisfied in the venv (base may predate them).
+#   3. Manager v2 (pip comfyui_manager==4.2.2); remove any classic
+#      custom_nodes/ComfyUI-Manager checkout (it conflicts with the pip Manager).
+#   4. The comfyui-mcp Agent Panel custom node, pre-cloned.
+#   5. A /start_comfyui.sh SHIM that appends --enable-manager
+#      --use-pytorch-cross-attention to the base launch (everything else the
+#      base entrypoint does — sshd/nginx/jupyter/sync — is left intact).
+#   6. A Manager config.ini seed (network_mode = personal_cloud) so the agent
+#      can install models/nodes remotely.
+#   7. TEMPLATE_VERSION bumped ABOVE 2.3.5 so pre_start.sh re-syncs our baked
+#      changes onto fresh volumes.
+#
+# TOPOLOGY: the panel ORCHESTRATOR (Claude/Codex Agent SDK, on YOUR
+# subscription) runs on the USER's machine, NOT on the pod — so Node.js / Claude
+# / Codex are deliberately absent. The user connects from their laptop with one
+# local command. See ./README.md.
+#
+# DRAFT — this image was NOT build-tested (no Docker in the authoring env).
+# Build + push + deploy instructions are in ./README.md.
+# =============================================================================
 
-# CUDA 12.8 runtime + cuDNN on Ubuntu 22.04. Blackwell (sm_120) needs cu12.8.
-# NOTE (owner-confirm): pick a REAL published tag. Candidates on Docker Hub
-# nvidia/cuda: 12.8.0 / 12.8.1 with the "-cudnn-runtime-ubuntu22.04" suffix.
-ARG CUDA_IMAGE=nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
-FROM ${CUDA_IMAGE}
+# Official RunPod template the owner runs. Pin the exact tag.
+ARG BASE_IMAGE=aitrepreneur/comfyui:2.3.5
+FROM ${BASE_IMAGE}
 
 # ---- Pinned versions (owner-confirm the exact tags — see README) -------------
-ARG COMFYUI_VERSION=v0.26.0
+# Where the base bakes ComfyUI + its venv. Confirm against the base if it ever
+# moves (the published aitrepreneur/comfyui template uses /ComfyUI).
+ARG COMFY_HOME=/ComfyUI
+# pip Manager v2 (exposes /v2/manager/queue/task — the API the MCP targets).
 ARG COMFYUI_MANAGER_VERSION=4.2.2
 ARG PANEL_REPO=https://github.com/artokun/comfyui-mcp-panel.git
-# PyTorch cu128 index (gives torch 2.11+cu128, supports sm_120). NOT cu121.
+# PyTorch cu128 index -> torch 2.x+cu128 with sm_120 kernels. NOT cu121.
 ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128
+# MUST exceed the base template version (2.3.5) so /pre_start.sh re-syncs our
+# baked changes onto a fresh /workspace volume. 2.4.0 is unambiguously higher
+# than 2.3.5 under both lexical and semver comparison.
+ARG TEMPLATE_VERSION=2.4.0
+# Manager remote-install gate. network_mode MUST be personal_cloud for the agent
+# to install models/nodes; security_level normal- is the safe default (weak is
+# more permissive — see README).
+ARG COMFY_NETWORK_MODE=personal_cloud
+ARG COMFY_SECURITY_LEVEL=normal-
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONUNBUFFERED=1 \
-    COMFY_HOME=/ComfyUI \
-    VENV=/opt/venv \
-    COMFY_PORT=3001 \
-    COMFY_SECURITY_LEVEL=normal-
+    COMFY_HOME=${COMFY_HOME} \
+    TEMPLATE_VERSION=${TEMPLATE_VERSION} \
+    COMFY_NETWORK_MODE=${COMFY_NETWORK_MODE} \
+    COMFY_SECURITY_LEVEL=${COMFY_SECURITY_LEVEL}
 
-# ---- System deps + Python 3.11 ----------------------------------------------
-# Ubuntu 22.04 ships Python 3.10; 0.26.x targets 3.11, so pull it from
-# deadsnakes. nginx is included for the optional :3000 -> :3001 mirror.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      software-properties-common ca-certificates curl wget git git-lfs nginx \
- && add-apt-repository -y ppa:deadsnakes/ppa \
- && apt-get update && apt-get install -y --no-install-recommends \
-      python3.11 python3.11-venv python3.11-dev \
- && git lfs install \
- && rm -rf /var/lib/apt/lists/*
+# The base's venv pip. We patch the BAKED venv at ${COMFY_HOME}/venv; pre_start
+# syncs it to /workspace/ComfyUI/venv at boot (caveat for existing volumes: see
+# README).
+ENV VENV_PIP="${COMFY_HOME}/venv/bin/pip"
 
-# ---- Python 3.11 venv --------------------------------------------------------
-RUN python3.11 -m venv "${VENV}"
-ENV PATH=${VENV}/bin:${PATH}
-RUN pip install --upgrade pip wheel setuptools
+# -----------------------------------------------------------------------------
+# 1. cu128 PyTorch in the baked venv (Blackwell / RTX 5090, sm_120)
+# -----------------------------------------------------------------------------
+# The host nvidia runtime exposes the GPU regardless of the base's CUDA 12.1
+# userspace; what matters for sm_120 is the TORCH wheel. cu128 wheels ship
+# sm_120 kernels; the default cu121 wheels do NOT ("no kernel image is available
+# for execution on the device" at first inference). xformers is intentionally
+# NOT installed (its prebuilt wheels lag the cu128 ABI) — we launch ComfyUI with
+# --use-pytorch-cross-attention (PyTorch SDPA) instead (see start_comfyui.sh).
+# If the base shipped xformers, drop it so it can't shadow SDPA / crash on load.
+RUN "${VENV_PIP}" uninstall -y xformers || true
+RUN "${VENV_PIP}" install --upgrade \
+      torch torchvision torchaudio --index-url "${TORCH_INDEX_URL}"
 
-# ---- ComfyUI 0.26.x ----------------------------------------------------------
-RUN git clone --depth 1 --branch "${COMFYUI_VERSION}" \
-      https://github.com/comfyanonymous/ComfyUI.git "${COMFY_HOME}"
-WORKDIR ${COMFY_HOME}
+# -----------------------------------------------------------------------------
+# 2. ComfyUI 0.26 runtime requirements in the venv
+# -----------------------------------------------------------------------------
+# The base may predate ComfyUI 0.26 (sqlalchemy, alembic, comfy-aimdo,
+# comfy-kitchen, blake3, comfy-angle, av, ...). Installed AFTER torch so the
+# requirement resolver does not pull a cu-default torch from PyPI and downgrade
+# our cu128 build. We pass the cu128 index too as a safety net.
+RUN "${VENV_PIP}" install --extra-index-url "${TORCH_INDEX_URL}" \
+      -r "${COMFY_HOME}/requirements.txt"
 
-# ---- PyTorch cu128 (Blackwell / RTX 5090, sm_120) ---------------------------
-# MUST be cu128 — the default cu121 wheels do NOT support sm_120.
-# xformers is intentionally OMITTED (ABI/cu128 mismatch); ComfyUI is launched
-# with --use-pytorch-cross-attention instead (see start.sh).
-RUN pip install torch torchvision torchaudio --index-url "${TORCH_INDEX_URL}"
+# -----------------------------------------------------------------------------
+# 3. Manager v2 (pip) + remove the conflicting classic checkout
+# -----------------------------------------------------------------------------
+# The modern pip Manager exposes /v2/manager/queue/task (what comfyui-mcp uses)
+# and is gated behind --enable-manager (added by the start_comfyui.sh shim).
+# The classic custom_nodes/ComfyUI-Manager git checkout CONFLICTS with it, so if
+# the base ships one we remove it.
+RUN rm -rf "${COMFY_HOME}/custom_nodes/ComfyUI-Manager" \
+           "${COMFY_HOME}/custom_nodes/comfyui-manager" \
+ && "${VENV_PIP}" install "comfyui_manager==${COMFYUI_MANAGER_VERSION}"
 
-# ---- ComfyUI 0.26 runtime stack ----------------------------------------------
-# The modern 0.26 requirements (sqlalchemy, alembic, comfy-aimdo, comfy-kitchen,
-# blake3, comfy-angle, av, ...). Installed AFTER torch so torch is not pulled
-# from PyPI (cu-default) and downgraded.
-RUN pip install -r requirements.txt
-
-# ---- Manager v2 (modern pip Manager) ----------------------------------------
-# This is the pip-installed Manager that exposes the /v2/manager/queue/task API
-# the comfyui-mcp MCP targets. Do NOT also clone the classic
-# custom_nodes/ComfyUI-Manager checkout — the two CONFLICT. ComfyUI 0.26 gates
-# this Manager behind the --enable-manager launch flag (set in start.sh).
-RUN pip install "comfyui_manager==${COMFYUI_MANAGER_VERSION}"
-
-# ---- comfyui-mcp Agent Panel custom node ------------------------------------
-# Cloned so the panel is served when the user opens the pod's ComfyUI. Registry
-# id "comfyui-agent-panel"; repo "comfyui-mcp-panel". Default branch = nightly.
+# -----------------------------------------------------------------------------
+# 4. comfyui-mcp Agent Panel custom node
+# -----------------------------------------------------------------------------
+# Registry id "comfyui-agent-panel"; repo "comfyui-mcp-panel". Default branch
+# (nightly HEAD) — owner may pin a tag for reproducible images (see README).
 RUN git clone --depth 1 "${PANEL_REPO}" \
       "${COMFY_HOME}/custom_nodes/comfyui-mcp-panel" \
  && if [ -f "${COMFY_HOME}/custom_nodes/comfyui-mcp-panel/requirements.txt" ]; then \
-      pip install -r "${COMFY_HOME}/custom_nodes/comfyui-mcp-panel/requirements.txt"; \
+      "${VENV_PIP}" install --extra-index-url "${TORCH_INDEX_URL}" \
+        -r "${COMFY_HOME}/custom_nodes/comfyui-mcp-panel/requirements.txt"; \
     fi
 
-# ---- Entrypoint + optional reverse proxy ------------------------------------
-COPY start.sh /start.sh
-COPY nginx.conf /etc/nginx/nginx.conf
-RUN chmod +x /start.sh
+# -----------------------------------------------------------------------------
+# 6. Manager config seed (remote-install gate)
+# -----------------------------------------------------------------------------
+# Baked into the source tree so pre_start.sh syncs it to /workspace. The
+# start_comfyui.sh shim ALSO re-asserts this at boot (defensive: rsync -u may
+# skip it on a pre-existing volume — see README caveats).
+COPY config.ini ${COMFY_HOME}/user/__manager/config.ini
 
-# 3001 = ComfyUI; 3000 = optional nginx mirror (USE_NGINX=1). Expose whichever
-# one your RunPod template publishes as the HTTP port.
-EXPOSE 3001 3000
+# -----------------------------------------------------------------------------
+# 5. Launch-flag override: shim /start_comfyui.sh
+# -----------------------------------------------------------------------------
+# We REPLACE only the launch leaf, not the RunPod entrypoint chain. The base's
+# /start.sh -> /pre_start.sh still run first (sshd, nginx, jupyter, the
+# /ComfyUI -> /workspace/ComfyUI sync). Our shim appends --enable-manager
+# --use-pytorch-cross-attention to the base's --listen 0.0.0.0 --port 3001.
+COPY start_comfyui.sh /start_comfyui.sh
+RUN chmod +x /start_comfyui.sh
 
-ENTRYPOINT ["/start.sh"]
+# We deliberately DO NOT set ENTRYPOINT/CMD — the base's RunPod entrypoint chain
+# is preserved as-is so all of its services (sshd, nginx, jupyter, sync) come up.
