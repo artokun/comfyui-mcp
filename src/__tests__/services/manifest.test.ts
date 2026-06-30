@@ -81,6 +81,27 @@ vi.mock("../../services/model-resolver.js", () => ({
   downloadModel: (...a: unknown[]) => downloadModelMock(...a),
   resolveExistingModelFile: (...a: unknown[]) => resolveExistingModelFileMock(...a),
   listLocalModels: (...a: unknown[]) => listLocalModelsMock(...a),
+  // Faithful mirror of the real managerModelDestination (pure logic) so the
+  // remote-model path resolves a Manager-valid { type, save_path }.
+  managerModelDestination: (category: string, relPath?: string) => {
+    const map: Record<string, string> = {
+      checkpoints: "checkpoints",
+      loras: "lora",
+      vae: "vae",
+      upscale_models: "upscale",
+      controlnet: "controlnet",
+      embeddings: "embeddings",
+      clip: "clip",
+      diffusion_models: "diffusion_model",
+      gligen: "gligen",
+      text_encoders: "text_encoders",
+      unet: "unet",
+    };
+    const type = map[category] ?? category;
+    if (relPath && relPath !== category) return { type, save_path: relPath };
+    if (map[category]) return { type, save_path: "default" };
+    return { type, save_path: category };
+  },
 }));
 
 vi.mock("../../utils/logger.js", () => ({
@@ -518,10 +539,11 @@ describe("applyManifest", () => {
       // models route through installModelViaManager, NOT the local downloadModel.
       expect(downloadModelMock).not.toHaveBeenCalled();
       expect(installModelViaManagerMock).toHaveBeenCalledWith({
+        name: "model.safetensors",
         url: "https://example.com/model.safetensors",
         filename: "model.safetensors",
         type: "checkpoints",
-        save_path: undefined,
+        save_path: "default",
       });
       expect(byAction.model.status).toBe("applied");
     });
@@ -538,10 +560,13 @@ describe("applyManifest", () => {
         },
       });
 
+      // Nested local_path → explicit save_path verbatim; our "loras" category
+      // maps to Manager's singular "lora" type key; name falls back to filename.
       expect(installModelViaManagerMock).toHaveBeenCalledWith({
+        name: "lora.safetensors",
         url: "https://example.com/lora.safetensors",
         filename: "lora.safetensors",
-        type: "loras",
+        type: "lora",
         save_path: "loras/pusa",
       });
     });
@@ -580,10 +605,11 @@ describe("applyManifest", () => {
       expect(downloadModelMock).not.toHaveBeenCalled();
       expect(resolveExistingModelFileMock).not.toHaveBeenCalled();
       expect(installModelViaManagerMock).toHaveBeenCalledWith({
+        name: "model.safetensors",
         url: "https://example.com/model.safetensors",
         filename: "model.safetensors",
         type: "checkpoints",
-        save_path: undefined,
+        save_path: "default",
       });
       expect(byAction.model.status).toBe("applied");
     });

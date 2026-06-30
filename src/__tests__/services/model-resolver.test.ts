@@ -290,11 +290,14 @@ describe("downloadModel — remote mode (Manager install-model dispatch)", () =>
     );
 
     expect(installModelViaManagerMock).toHaveBeenCalledTimes(1);
+    // name + a "default" save_path are ALWAYS sent (the two fields that were
+    // missing and made the install a silent no-op); checkpoints maps 1:1.
     expect(installModelViaManagerMock).toHaveBeenCalledWith({
+      name: "model.safetensors",
       url: "https://example.com/model.safetensors",
       filename: "model.safetensors",
       type: "checkpoints",
-      save_path: undefined,
+      save_path: "default",
     });
     // No local-disk work in remote mode.
     expect(fetchMock).not.toHaveBeenCalled();
@@ -310,11 +313,47 @@ describe("downloadModel — remote mode (Manager install-model dispatch)", () =>
       "lora.safetensors",
     );
 
+    // Nested target → Manager gets the explicit relative path verbatim; our
+    // "loras" category maps to Manager's singular "lora" type key.
     expect(installModelViaManagerMock).toHaveBeenCalledWith({
+      name: "lora.safetensors",
       url: "https://example.com/lora.safetensors",
       filename: "lora.safetensors",
-      type: "loras",
+      type: "lora",
       save_path: "loras/pusa",
+    });
+  });
+
+  it("maps a top-level 'loras' category to Manager 'lora' with a 'default' save_path", async () => {
+    await downloadModel(
+      "https://example.com/solo.safetensors",
+      "loras",
+      "solo.safetensors",
+    );
+
+    expect(installModelViaManagerMock).toHaveBeenCalledWith({
+      name: "solo.safetensors",
+      url: "https://example.com/solo.safetensors",
+      filename: "solo.safetensors",
+      type: "lora",
+      save_path: "default",
+    });
+  });
+
+  it("sends the folder name as save_path for a category with no Manager type-map key", async () => {
+    await downloadModel(
+      "https://example.com/style.safetensors",
+      "style_models",
+      "style.safetensors",
+    );
+
+    // style_models has no model_dir_name_map key, so we route by explicit folder.
+    expect(installModelViaManagerMock).toHaveBeenCalledWith({
+      name: "style.safetensors",
+      url: "https://example.com/style.safetensors",
+      filename: "style.safetensors",
+      type: "style_models",
+      save_path: "style_models",
     });
   });
 
@@ -322,7 +361,12 @@ describe("downloadModel — remote mode (Manager install-model dispatch)", () =>
     await downloadModel("https://example.com/path/cool.safetensors", "vae");
 
     expect(installModelViaManagerMock).toHaveBeenCalledWith(
-      expect.objectContaining({ filename: "cool.safetensors", type: "vae" }),
+      expect.objectContaining({
+        name: "cool.safetensors",
+        filename: "cool.safetensors",
+        type: "vae",
+        save_path: "default",
+      }),
     );
   });
 

@@ -84,7 +84,11 @@ export function registerModelExtrasTools(server: McpServer): void {
       "the ComfyUI-Manager install-model HTTP API (fetched server-side). Provide at least " +
       "one of model_id or model_version_id. Gated/early-access models require " +
       "CIVITAI_API_TOKEN locally (sent as a bearer header, never in the URL); remote " +
-      "Manager-side fetches rely on tokens configured on the ComfyUI host.",
+      "Manager-side fetches rely on tokens configured on the ComfyUI host. NOTE " +
+      "(remote): the server-side install requires the host's ComfyUI-Manager to run " +
+      "with network_mode=personal_cloud (or loopback) and a permissive security level; " +
+      "a stricter gate silently rejects the download, and Manager reports the queue " +
+      "task 'done' even on failure — so a remote dispatch does not guarantee the file landed.",
     {
       target_subfolder: z
         .string()

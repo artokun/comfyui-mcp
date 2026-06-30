@@ -784,9 +784,10 @@ describe("node-management service", () => {
   // ---- install model -----------------------------------------------------
 
   describe("installModelViaManager", () => {
-    it("queues an install-model task with url/filename/type and drains the queue", async () => {
+    it("queues an install-model task with name/url/filename/type/save_path and drains the queue", async () => {
       const { calls } = stubFetch();
       const res = await installModelViaManager({
+        name: "model.safetensors",
         url: "https://example.com/model.safetensors",
         filename: "model.safetensors",
         type: "checkpoints",
@@ -799,14 +800,19 @@ describe("node-management service", () => {
       expect(body.kind).toBe("install-model");
       expect(body.ui_id).toBeTruthy();
       expect(params).toMatchObject({
+        name: "model.safetensors",
         url: "https://example.com/model.safetensors",
         filename: "model.safetensors",
         type: "checkpoints",
       });
       // ui_id is threaded into params like the other task kinds.
       expect(params.ui_id).toBe(body.ui_id);
-      // No save_path sent when not provided.
-      expect(params.save_path).toBeUndefined();
+      // save_path is ALWAYS sent, defaulting to the literal "default" when no
+      // explicit path is given (Manager bails on a missing save_path).
+      expect(params.save_path).toBe("default");
+      // Drain only proves dispatch, not landing — message must NOT claim success.
+      expect(res.message).not.toMatch(/\binstalled\b/i);
+      expect(res.message).toMatch(/dispatched/i);
 
       // The queue worker was started and polled to completion.
       expect(
@@ -820,13 +826,28 @@ describe("node-management service", () => {
     it("includes save_path when provided", async () => {
       const { calls } = stubFetch();
       await installModelViaManager({
+        name: "lora.safetensors",
         url: "https://example.com/lora.safetensors",
         filename: "lora.safetensors",
-        type: "loras",
+        type: "lora",
         save_path: "loras/pusa",
       });
       const { params } = taskOf(calls, "install-model");
       expect(params.save_path).toBe("loras/pusa");
+    });
+
+    it("falls back to filename for name and 'default' for save_path when blank", async () => {
+      const { calls } = stubFetch();
+      await installModelViaManager({
+        name: "   ",
+        url: "https://example.com/m.safetensors",
+        filename: "m.safetensors",
+        type: "checkpoints",
+        save_path: "  ",
+      });
+      const { params } = taskOf(calls, "install-model");
+      expect(params.name).toBe("m.safetensors");
+      expect(params.save_path).toBe("default");
     });
   });
 

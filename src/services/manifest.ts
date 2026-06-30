@@ -25,6 +25,7 @@ import {
   downloadModel,
   listLocalModels,
   resolveExistingModelFile,
+  managerModelDestination,
   MODEL_SUBDIRS,
   type ModelType,
 } from "./model-resolver.js";
@@ -438,8 +439,9 @@ function report(
  * the same way the local resolver does, with the same anti-traversal guards.
  */
 function remoteModelTarget(model: ComfyManifest["models"][number]): {
+  name: string;
   type: string;
-  save_path?: string;
+  save_path: string;
   filename: string;
 } {
   if (model.local_path) {
@@ -461,16 +463,20 @@ function remoteModelTarget(model: ComfyManifest["models"][number]): {
         `Model local_path must include a category subfolder (e.g. 'checkpoints/foo.safetensors'): ${model.local_path}`,
       );
     }
-    return {
-      type: dirSegments[0],
-      save_path: dirSegments.length > 1 ? dirSegments.join("/") : undefined,
-      filename,
-    };
+    // Map our category folder to a Manager-valid { type, save_path }. Nested
+    // paths are handed to Manager verbatim; top-level categories resolve via the
+    // type-map ("default") or fall back to the folder name.
+    const { type, save_path } = managerModelDestination(
+      dirSegments[0],
+      dirSegments.length > 1 ? dirSegments.join("/") : undefined,
+    );
+    return { name: filename, type, save_path, filename };
   }
 
-  const type: ModelType = model.model_type ?? "checkpoints";
+  const category: ModelType = model.model_type ?? "checkpoints";
   const filename = model.filename ?? defaultFilenameForUrl(model.url);
-  return { type, filename };
+  const { type, save_path } = managerModelDestination(category);
+  return { name: filename, type, save_path, filename };
 }
 
 async function installedNodesOrEmpty(): Promise<InstalledNode[]> {
@@ -601,8 +607,9 @@ export async function applyManifest(
           );
           continue;
         }
-        const { type, save_path, filename } = remoteModelTarget(model);
+        const { name, type, save_path, filename } = remoteModelTarget(model);
         const res = await installModelViaManager({
+          name,
           url: model.url,
           filename,
           type,

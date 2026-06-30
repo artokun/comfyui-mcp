@@ -36,6 +36,65 @@ export const MODEL_SUBDIRS = [
 
 export type ModelType = (typeof MODEL_SUBDIRS)[number];
 
+/**
+ * Map our internal model category (a MODEL_SUBDIRS value, i.e. the literal
+ * ComfyUI models/ folder name) to a key that ComfyUI-Manager's
+ * `model_dir_name_map` understands. When an install-model task is sent with
+ * `save_path: "default"`, Manager resolves the destination folder by looking
+ * `type` up in this map; an unmapped value resolves to None and the install is
+ * a SILENT no-op (the model never lands). So every category we route to Manager
+ * with a default save_path must map to a real key here. Categories with NO
+ * Manager key (diffusers, hypernetworks, photomaker, style_models) are handled
+ * by sending an explicit save_path (the folder name) instead — see
+ * managerModelDestination().
+ */
+const MANAGER_MODEL_TYPE_MAP: Record<string, string> = {
+  checkpoints: "checkpoints",
+  loras: "lora",
+  vae: "vae",
+  upscale_models: "upscale",
+  controlnet: "controlnet",
+  embeddings: "embeddings",
+  clip: "clip",
+  diffusion_models: "diffusion_model",
+  gligen: "gligen",
+  text_encoders: "text_encoders",
+  unet: "unet",
+};
+
+/**
+ * Resolve the ComfyUI-Manager install-model { type, save_path } pair for a
+ * target model directory. `category` is our internal model folder (a
+ * MODEL_SUBDIRS value, or the first path segment of a target subfolder).
+ * `relPath` is the full relative path under models/ when a NESTED destination
+ * is wanted (e.g. "loras/pusa"); omit/equal-to-category for a top-level folder.
+ *
+ * Contract (verified against ComfyUI-Manager 4.2.2 do_install_model):
+ *   - `save_path` is ALWAYS sent. Manager's get_model_dir does
+ *     `if data["save_path"] != "default": <use save_path verbatim>` else it
+ *     resolves the folder from `type` via model_dir_name_map. A missing/None
+ *     save_path makes get_model_dir bail (→ None) and nothing installs.
+ *   - For a nested target we send the explicit relPath (Manager writes there
+ *     verbatim, so the type-map is bypassed).
+ *   - For a top-level category that HAS a Manager type-map key we send
+ *     "default" and the mapped type.
+ *   - For a top-level category with NO Manager key we send the category folder
+ *     as save_path so Manager writes into models/<category> directly.
+ */
+export function managerModelDestination(
+  category: string,
+  relPath?: string,
+): { type: string; save_path: string } {
+  const type = MANAGER_MODEL_TYPE_MAP[category] ?? category;
+  if (relPath && relPath !== category) {
+    return { type, save_path: relPath };
+  }
+  if (MANAGER_MODEL_TYPE_MAP[category]) {
+    return { type, save_path: "default" };
+  }
+  return { type, save_path: category };
+}
+
 export interface HFModelResult {
   id: string;
   modelId: string;
@@ -416,21 +475,31 @@ async function downloadModelViaManagerRemote(
       ` if this URL requires S3 credentials, the download will fail.`;
   }
 
+  // Map our category to a Manager-valid { type, save_path }. For a nested
+  // target we hand Manager the full relative path; for a top-level category we
+  // send "default" (mapped types) or the folder name (unmapped categories) so
+  // the model actually lands. See managerModelDestination().
+  const { type: managerType, save_path: managerSavePath } = managerModelDestination(
+    modelType,
+    segments.length > 1 ? normalizedSubfolder : undefined,
+  );
+
   const sensitiveParams = auth?.type === "query" ? [auth.query_param] : undefined;
   logger.info("Dispatching model install to remote ComfyUI via ComfyUI-Manager", {
     url: redactUrlForLogs(dispatchUrl, sensitiveParams),
-    type: modelType,
-    save_path: normalizedSubfolder,
+    type: managerType,
+    save_path: managerSavePath,
     filename: resolvedFilename,
   });
 
   await installModelViaManager({
+    // Manager's do_install_model reads json_data['name'] (required, non-empty).
+    // We only have the filename to identify the model here, so use it.
+    name: resolvedFilename,
     url: dispatchUrl,
     filename: resolvedFilename,
-    type: modelType,
-    // Only send an explicit save_path for nested targets; for a top-level
-    // category the `type` alone resolves the directory.
-    save_path: segments.length > 1 ? normalizedSubfolder : undefined,
+    type: managerType,
+    save_path: managerSavePath,
   });
 
   return `${normalizedSubfolder}/${resolvedFilename} (installed on the remote ComfyUI via ComfyUI-Manager)${authWarning}`;

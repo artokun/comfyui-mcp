@@ -1084,19 +1084,33 @@ export async function syncNodeDependencies(): Promise<SyncDepsResult> {
  * our local downloadModel() — no local filesystem is touched.
  */
 export interface InstallModelParams {
+  /**
+   * Display name for the model. REQUIRED, non-empty: Manager 4.2.2's
+   * do_install_model reads `json_data['name']`. When omitted/blank we fall back
+   * to `filename`. (Verified live: omitting this is a silent no-op.)
+   */
+  name: string;
   /** Direct download URL for the model file. */
   url: string;
   /** Saved filename under the target directory. */
   filename: string;
   /**
-   * ComfyUI model directory the file belongs to, e.g. "checkpoints", "loras",
-   * "vae". Manager uses this to pick the destination folder when `save_path`
-   * is not an explicit relative path.
+   * ComfyUI-Manager model `type` — MUST be a key in Manager's
+   * `model_dir_name_map` (e.g. "checkpoints", "lora", "vae", "controlnet",
+   * "clip_vision", "upscale", "embeddings", "text_encoders"/"clip",
+   * "diffusion_model", "unet", "gligen", "unclip"). When `save_path` is
+   * "default" Manager resolves the destination folder from this; an arbitrary
+   * value (e.g. "vae_approx") resolves to None and the install silently no-ops.
+   * Use managerModelDestination() to derive a valid value from our categories.
    */
   type: string;
   /**
-   * Optional explicit save path relative to models/ (e.g. "loras/sub"). When
-   * omitted Manager derives the directory from `type`.
+   * Save path relative to models/. ALWAYS sent to Manager (defaults to the
+   * literal "default" when blank). Manager's get_model_dir does
+   * `if data["save_path"] != "default": <use it verbatim>` else it resolves the
+   * folder from `type`; a missing/None save_path makes it bail (→ nothing
+   * installs). Pass an explicit relative path (e.g. "loras/sub") for a nested
+   * destination, or "default" for type-based resolution.
    */
   save_path?: string;
 }
@@ -1111,21 +1125,44 @@ export interface InstallModelParams {
 export async function installModelViaManager(
   params: InstallModelParams,
 ): Promise<NodeOpResult> {
+  // Build the ModelMetadata params exactly as Manager 4.2.2 expects. ALL of
+  // name/type/url/filename/save_path are load-bearing (verified live against a
+  // RunPod pod): `name` and `save_path` were the two missing fields that made
+  // the task dispatch but silently install nothing.
+  const name =
+    params.name && params.name.trim().length > 0 ? params.name : params.filename;
+  const save_path =
+    params.save_path && params.save_path.trim().length > 0
+      ? params.save_path
+      : "default";
   const taskParams: Record<string, unknown> = {
+    name,
     url: params.url,
     filename: params.filename,
     type: params.type,
+    save_path,
   };
-  if (params.save_path && params.save_path.trim().length > 0) {
-    taskParams.save_path = params.save_path;
-  }
   const status = await queueManagerTask("install-model", taskParams);
+  // NOTE: the Manager queue reports the task "done" once it DRAINS, even when
+  // the underlying OperationResult failed (e.g. a 404 download, or Manager's
+  // security gate rejecting a network fetch). The v2 queue/status endpoint only
+  // exposes aggregate counts (no per-task result), so a clean drain here does
+  // NOT prove the file landed — phrase the result as "dispatched", not
+  // "installed", and leave final verification to a list on the pod.
+  //
+  // DEPLOYMENT: remote model install requires the pod's ComfyUI-Manager to be
+  // in network_mode=personal_cloud (or loopback) with permissive security; a
+  // stricter security_level rejects the server-side download.
   return {
     mechanism: "manager-http",
     message:
-      `Queued model "${params.filename}" for install into ${params.type} on the ` +
-      `connected ComfyUI via ComfyUI-Manager. A restart may be required for ` +
-      `ComfyUI to see the new file.`,
+      `Dispatched model "${name}" (${params.filename}) to install into ` +
+      `${params.type} on the connected ComfyUI via ComfyUI-Manager. The queue ` +
+      `drained, but Manager reports tasks "done" even on failure and exposes no ` +
+      `per-task result, so success is NOT guaranteed — verify the file landed on ` +
+      `the ComfyUI host (a restart may be required to see it). If nothing lands, ` +
+      `confirm Manager runs with network_mode=personal_cloud (or loopback) and a ` +
+      `permissive security level so server-side downloads aren't blocked.`,
     details: status,
   };
 }
