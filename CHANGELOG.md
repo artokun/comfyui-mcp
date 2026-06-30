@@ -21,6 +21,10 @@ All notable changes to this project are documented here. This project adheres to
   - System prompt steers the agent: outline to understand → find to pinpoint →
     `panel_get_graph` for one node's detail; never grep/jq/python a saved graph.
   - Requires panel >= 0.4.6 for the frontend executors.
+- **Manual-edit awareness.** When the user edits the canvas by hand between turns (bypass/
+  mute a node, change a widget, rewire, add/remove nodes), the next turn opens with a
+  "⟳ MANUAL CANVAS CHANGES" change-list and the agent is told to treat it as ground truth
+  over its memory of the graph (diff + injection ship in panel >= 0.4.6).
 
 ### Changed
 
