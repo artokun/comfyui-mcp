@@ -339,4 +339,42 @@ describe("downloadModel — remote mode (Manager install-model dispatch)", () =>
     ).rejects.toBeInstanceOf(ModelError);
     expect(installModelViaManagerMock).not.toHaveBeenCalled();
   });
+
+  it("folds query auth into the dispatched URL (Manager fetches server-side)", async () => {
+    const out = await downloadModel(
+      "https://example.com/model.safetensors",
+      "checkpoints",
+      "model.safetensors",
+      { type: "query", query_param: "download_key", query_value: "query-secret" },
+    );
+
+    const calledUrl = installModelViaManagerMock.mock.calls[0][0].url as string;
+    expect(calledUrl).toContain("download_key=query-secret");
+    // Success descriptor, no auth warning for query auth.
+    expect(out).toContain("ComfyUI-Manager");
+    expect(out).not.toMatch(/WARNING/i);
+  });
+
+  it("warns (does not silently succeed) when header/basic/bearer auth can't reach Manager", async () => {
+    for (const auth of [
+      { type: "bearer", token: "t" } as const,
+      { type: "basic", username: "u", password: "p" } as const,
+      { type: "header", header_name: "X-Key", header_value: "v" } as const,
+    ]) {
+      installModelViaManagerMock.mockClear();
+      const out = await downloadModel(
+        "https://example.com/model.safetensors",
+        "checkpoints",
+        "model.safetensors",
+        auth,
+      );
+      // Still dispatched, but the URL is unmodified (no header forwarding possible)…
+      expect(installModelViaManagerMock).toHaveBeenCalledWith(
+        expect.objectContaining({ url: "https://example.com/model.safetensors" }),
+      );
+      // …and we surface a clear warning rather than reporting a clean success.
+      expect(out).toMatch(/WARNING/i);
+      expect(out).toContain(auth.type);
+    }
+  });
 });

@@ -11,6 +11,10 @@ const COMFY = "/fake/ComfyUI";
 
 const mockConfig = vi.hoisted(() => ({
   comfyuiPath: "/fake/ComfyUI" as string | undefined,
+  // Explicit remote override. When undefined, isRemoteMode mirrors the legacy
+  // "no comfyuiPath" gate; set true to model a remote target that COEXISTS with
+  // a local COMFYUI_PATH (the regression issue #1 guards against).
+  remote: undefined as boolean | undefined,
 }));
 
 const readFileMock = vi.hoisted(() => vi.fn());
@@ -31,7 +35,7 @@ vi.mock("../../config.js", () => ({
   config: mockConfig,
   // apply_manifest routes models through the Manager in remote mode (no
   // comfyuiPath). isRemoteMode mirrors that gate for the tests.
-  isRemoteMode: () => !mockConfig.comfyuiPath,
+  isRemoteMode: () => mockConfig.remote ?? !mockConfig.comfyuiPath,
 }));
 
 vi.mock("node:fs/promises", () => ({
@@ -90,6 +94,7 @@ import {
 
 beforeEach(() => {
   mockConfig.comfyuiPath = "/fake/ComfyUI";
+  mockConfig.remote = undefined;
   readFileMock.mockReset();
   statMock.mockReset().mockRejectedValue(new Error("missing"));
   mkdirMock.mockReset().mockResolvedValue(undefined);
@@ -539,6 +544,48 @@ describe("applyManifest", () => {
         type: "loras",
         save_path: "loras/pusa",
       });
+    });
+  });
+
+  describe("remote mode while a local COMFYUI_PATH is also set (issue #1 regression)", () => {
+    beforeEach(() => {
+      // A remote target coexists with an unrelated local install path. The
+      // local/remote split must key off isRemoteMode(), NOT comfyuiPath presence.
+      mockConfig.comfyuiPath = "/fake/ComfyUI";
+      mockConfig.remote = true;
+    });
+
+    it("routes pip + models remotely and never touches the local install/disk", async () => {
+      const result = await applyManifest({
+        manifest: {
+          pip: ["numpy"],
+          models: [
+            {
+              url: "https://example.com/model.safetensors",
+              model_type: "checkpoints",
+              filename: "model.safetensors",
+            },
+          ],
+        },
+      });
+
+      const byAction = Object.fromEntries(
+        result.results.map((r) => [r.action, r]),
+      );
+      // pip has no remote equivalent → skipped, never shelled out locally.
+      expect(byAction.pip.status).toBe("skipped");
+      expect(execFileSyncMock).not.toHaveBeenCalled();
+      // Model goes through the Manager (remote), NOT the local downloadModel,
+      // and the local model-existence check is skipped entirely.
+      expect(downloadModelMock).not.toHaveBeenCalled();
+      expect(resolveExistingModelFileMock).not.toHaveBeenCalled();
+      expect(installModelViaManagerMock).toHaveBeenCalledWith({
+        url: "https://example.com/model.safetensors",
+        filename: "model.safetensors",
+        type: "checkpoints",
+        save_path: undefined,
+      });
+      expect(byAction.model.status).toBe("applied");
     });
   });
 });

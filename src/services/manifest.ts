@@ -490,12 +490,16 @@ export async function applyManifest(
   const manifest = await resolveManifest(opts);
   const results: ManifestItemReport[] = [];
 
-  // Per-section mode handling. A LOCAL filesystem is available only when
-  // COMFYUI_PATH is set; otherwise we are targeting a remote (or cloud) ComfyUI
-  // over HTTP. custom_nodes and models can still be handled remotely through
-  // ComfyUI-Manager's HTTP API, but pip/apt have no remote equivalent.
+  // Per-section mode handling. A LOCAL filesystem is usable only when we are NOT
+  // in remote (or cloud) mode AND COMFYUI_PATH is set; otherwise we are targeting
+  // a remote/cloud ComfyUI over HTTP. Keying off isRemoteMode() (rather than mere
+  // comfyuiPath presence) matters because a remote target can coexist with an
+  // unrelated COMFYUI_PATH on this machine — in that case we must still route
+  // pip/model handling remotely instead of touching the local install/disk.
+  // custom_nodes and models can still be handled remotely through ComfyUI-Manager's
+  // HTTP API, but pip/apt have no remote equivalent.
   const comfyuiPath = config.comfyuiPath;
-  const hasLocalFs = Boolean(comfyuiPath);
+  const hasLocalFs = !isRemoteMode() && Boolean(comfyuiPath);
 
   for (const pkg of manifest.apt) {
     results.push(

@@ -1,25 +1,41 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
-vi.mock("../../config.js", () => ({
-  config: { comfyuiPath: "/comfy" as string | undefined },
+const mockConfig = vi.hoisted(() => ({
+  comfyuiPath: "/comfy" as string | undefined,
+  remote: false,
 }));
 
+vi.mock("../../config.js", () => ({
+  config: mockConfig,
+  isRemoteMode: () => mockConfig.remote,
+}));
+
+const readdirMock = vi.fn();
 vi.mock("node:fs/promises", () => ({
   readFile: vi.fn(),
   copyFile: vi.fn(),
-  readdir: vi.fn(),
+  readdir: (...a: unknown[]) => readdirMock(...a),
   stat: vi.fn(),
 }));
 
 const fetchImageMock = vi.fn();
 const uploadImageHttpMock = vi.fn();
+const getHistoryMock = vi.fn();
 vi.mock("../../comfyui/client.js", () => ({
   fetchImage: (...a: unknown[]) => fetchImageMock(...a),
   uploadImageHttp: (...a: unknown[]) => uploadImageHttpMock(...a),
+  getHistory: (...a: unknown[]) => getHistoryMock(...a),
 }));
 
-import { getOutputImage } from "../../services/image-management.js";
+import { getOutputImage, listOutputImages } from "../../services/image-management.js";
 import { ValidationError } from "../../utils/errors.js";
+
+beforeEach(() => {
+  mockConfig.comfyuiPath = "/comfy";
+  mockConfig.remote = false;
+  readdirMock.mockReset();
+  getHistoryMock.mockReset().mockResolvedValue({});
+});
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -135,5 +151,27 @@ describe("getOutputImage — path-traversal sanitisation (CWE-22)", () => {
       getOutputImage("hero.png", "output", "video/../.."),
     ).rejects.toBeInstanceOf(ValidationError);
     expect(fetchImageMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("listOutputImages — remote mode keyed off isRemoteMode (issue #2 regression)", () => {
+  it("uses /history (not a local-FS scan) when remote even though COMFYUI_PATH is set", async () => {
+    // A remote target coexists with an unrelated local COMFYUI_PATH. Scanning the
+    // local output dir would report the WRONG machine's outputs, so the remote
+    // branch must key off isRemoteMode(), not mere comfyuiPath presence.
+    mockConfig.comfyuiPath = "/comfy";
+    mockConfig.remote = true;
+    getHistoryMock.mockResolvedValue({
+      a: {
+        outputs: {
+          "1": { images: [{ filename: "remote.png", subfolder: "", type: "output" }] },
+        },
+      },
+    });
+
+    const results = await listOutputImages();
+    expect(getHistoryMock).toHaveBeenCalledTimes(1);
+    expect(readdirMock).not.toHaveBeenCalled(); // no local-disk scan
+    expect(results.map((r) => r.filename)).toEqual(["remote.png"]);
   });
 });

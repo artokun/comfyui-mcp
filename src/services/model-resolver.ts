@@ -360,6 +360,7 @@ async function downloadModelViaManagerRemote(
   url: string,
   targetSubfolder: string,
   filename?: string,
+  auth?: DownloadAuth,
 ): Promise<string> {
   const raw = (targetSubfolder ?? "").trim();
   if (!raw) {
@@ -392,15 +393,39 @@ async function downloadModelViaManagerRemote(
     );
   }
 
+  // Resolve auth for a server-side (Manager) fetch. Manager fetches the URL on
+  // the ComfyUI host and cannot receive our per-request HTTP headers, so:
+  //   - query auth → fold the param into the URL (works server-side);
+  //   - header/basic/bearer → cannot be forwarded; surface a clear warning so we
+  //     don't report a clean success for a download that will fail unauthenticated;
+  //   - s3 → no URL/header mutation here (Manager can't use our SigV4 creds either).
+  let dispatchUrl = url;
+  let authWarning = "";
+  if (auth?.type === "query") {
+    // applyDownloadAuth folds the query_param/query_value into the URL.
+    dispatchUrl = applyDownloadAuth(url, auth).url;
+  } else if (auth && (auth.type === "header" || auth.type === "basic" || auth.type === "bearer")) {
+    authWarning =
+      ` WARNING: ${auth.type} auth cannot be forwarded to ComfyUI-Manager's` +
+      ` server-side fetch — if this URL requires authentication, the download will` +
+      ` fail. Use a query-auth'd/signed URL, or configure the credential (e.g. an` +
+      ` HF/CivitAI token) on the ComfyUI host.`;
+  } else if (auth?.type === "s3") {
+    authWarning =
+      ` WARNING: s3 auth cannot be forwarded to ComfyUI-Manager's server-side fetch;` +
+      ` if this URL requires S3 credentials, the download will fail.`;
+  }
+
+  const sensitiveParams = auth?.type === "query" ? [auth.query_param] : undefined;
   logger.info("Dispatching model install to remote ComfyUI via ComfyUI-Manager", {
-    url: redactUrlForLogs(url),
+    url: redactUrlForLogs(dispatchUrl, sensitiveParams),
     type: modelType,
     save_path: normalizedSubfolder,
     filename: resolvedFilename,
   });
 
   await installModelViaManager({
-    url,
+    url: dispatchUrl,
     filename: resolvedFilename,
     type: modelType,
     // Only send an explicit save_path for nested targets; for a top-level
@@ -408,7 +433,7 @@ async function downloadModelViaManagerRemote(
     save_path: segments.length > 1 ? normalizedSubfolder : undefined,
   });
 
-  return `${normalizedSubfolder}/${resolvedFilename} (installed on the remote ComfyUI via ComfyUI-Manager)`;
+  return `${normalizedSubfolder}/${resolvedFilename} (installed on the remote ComfyUI via ComfyUI-Manager)${authWarning}`;
 }
 
 export async function downloadModel(
@@ -421,12 +446,13 @@ export async function downloadModel(
   // impossible. Dispatch the download to the connected ComfyUI host through
   // ComfyUI-Manager's `install-model` task instead — it fetches the file
   // server-side into the right models/ subfolder. The CivitAI/HuggingFace URL
-  // (and any auth-resolved URL) was already resolved by the caller. Note: a
-  // per-request `auth` header can't be forwarded to Manager's server-side
-  // fetch, so gated URLs needing custom headers must rely on the URL itself
-  // (e.g. CivitAI signed links) or tokens configured on the ComfyUI host.
+  // (and any auth-resolved URL) was already resolved by the caller. Query-style
+  // auth is folded into the URL before dispatch (Manager fetches server-side and
+  // can carry query params); header/basic/bearer auth can't be forwarded to
+  // Manager, so those are surfaced as a clear warning rather than reported as a
+  // clean success.
   if (isRemoteMode()) {
-    return downloadModelViaManagerRemote(url, targetSubfolder, filename);
+    return downloadModelViaManagerRemote(url, targetSubfolder, filename, auth);
   }
 
   const targetDir = resolveModelSubfolder(targetSubfolder);

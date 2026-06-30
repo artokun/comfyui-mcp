@@ -1,6 +1,6 @@
 import { readFile, copyFile, readdir, stat } from "node:fs/promises";
 import { join, basename, extname, relative, sep } from "node:path";
-import { config } from "../config.js";
+import { config, isRemoteMode } from "../config.js";
 import { getHistory } from "../comfyui/client.js";
 import { ValidationError, ModelError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
@@ -213,7 +213,11 @@ export async function listOutputImages(options?: {
   // REMOTE mode: no local filesystem to scan. Derive the output media from
   // ComfyUI's /history (HTTP, works against a remote instance) instead. Size and
   // modification time are unavailable over HTTP, so they come back as 0 / "".
-  if (!config.comfyuiPath) {
+  // Key off isRemoteMode() (not mere comfyuiPath absence): when a remote target
+  // coexists with an unrelated local COMFYUI_PATH, scanning the local output dir
+  // would report the wrong machine's outputs. Also fall back to /history when no
+  // local path is configured at all.
+  if (isRemoteMode() || !config.comfyuiPath) {
     return listOutputImagesFromHistory(limit, pattern);
   }
 
