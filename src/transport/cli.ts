@@ -18,6 +18,12 @@ export interface CliOptions {
   /** --allow-unauthenticated-non-loopback / COMFYUI_MCP_ALLOW_UNAUTH=1: opt into
    *  an OPEN /mcp endpoint on a non-loopback host (otherwise a hard fail). */
   allowUnauthenticated: boolean;
+  /** ComfyUI target URL captured from the `connect <comfyui-url>` subcommand.
+   *  When set, startup exports it as COMFYUI_URL so the panel orchestrator drives
+   *  that (possibly REMOTE, e.g. RunPod) ComfyUI from the agent running on THIS
+   *  machine — no Node/agent needed on the ComfyUI box. Undefined when `connect`
+   *  wasn't used (or used without a URL). `connect` also implies panelOrchestrator. */
+  comfyuiUrl?: string;
 }
 
 const DEFAULT_HOST = "127.0.0.1";
@@ -46,6 +52,7 @@ export function parseCliArgs(
   let tunnel = env.MCP_TUNNEL === "1" || env.MCP_TUNNEL === "true";
   let allowUnauthenticated =
     env.COMFYUI_MCP_ALLOW_UNAUTH === "1" || env.COMFYUI_MCP_ALLOW_UNAUTH === "true";
+  let comfyuiUrl: string | undefined;
 
   const valueOf = (current: string, inline: string, i: number): [string, number] => {
     if (current.includes("=")) return [current.slice(current.indexOf("=") + 1), i];
@@ -54,7 +61,19 @@ export function parseCliArgs(
 
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
-    if (a === "--http") {
+    if (a === "connect") {
+      // `comfyui-mcp connect <comfyui-url>` — one-command local connect: run the
+      // panel orchestrator (subscription auth, no API key) and point it at the
+      // given ComfyUI via COMFYUI_URL. The URL is the next positional token (a
+      // following "--flag" is left to be parsed normally). With no URL it's just
+      // sugar for --panel-orchestrator (local default / inherited COMFYUI_URL).
+      panelOrchestrator = true;
+      const next = args[i + 1];
+      if (next && !next.startsWith("-")) {
+        comfyuiUrl = next;
+        i += 1; // consume the URL token
+      }
+    } else if (a === "--http") {
       transport = "http";
     } else if (a === "--stdio") {
       transport = "stdio";
@@ -88,5 +107,5 @@ export function parseCliArgs(
   // here, to keep this parser pure/side-effect-free.)
   if (tunnel) transport = "http";
 
-  return { transport, host, port, panelOrchestrator, token, tunnel, allowUnauthenticated };
+  return { transport, host, port, panelOrchestrator, token, tunnel, allowUnauthenticated, comfyuiUrl };
 }

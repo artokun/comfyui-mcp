@@ -162,6 +162,28 @@ on demand by the panel's **Connect** button:
 npx -y comfyui-mcp --panel-orchestrator
 ```
 
+### Drive a REMOTE ComfyUI from your own machine (`connect`)
+
+When ComfyUI runs somewhere with **no Node/agent** (a RunPod pod, a cloud box) you
+can still run the agent on **your** machine and drive that remote ComfyUI — no
+agent login on the box, no tunnel:
+
+```bash
+npx -y comfyui-mcp connect https://abcd1234-8188.proxy.runpod.net
+```
+
+This is sugar for `--panel-orchestrator` with `COMFYUI_URL` set from the URL: the
+orchestrator runs locally on your Claude/ChatGPT login and reaches the remote
+ComfyUI over its public proxy URL. The agent bridge stays on
+`ws://127.0.0.1:9180`. Because the panel JS runs in **your local browser** (even
+when served by the remote ComfyUI), that bridge is already on your machine — so
+nothing needs to be installed remotely.
+
+To finish: open the remote ComfyUI in your browser, turn on **Settings → General →
+"Use external/local orchestrator (advanced)"** in the Agent panel, then click
+**Connect**. (In that mode the panel connects straight to the local bridge instead
+of asking the ComfyUI host to spawn an orchestrator it can't run.)
+
 **Multi-provider, full parity.** The orchestrator depends on a provider-neutral
 **`AgentBackend`** port (dependency injection), with two adapters:
 

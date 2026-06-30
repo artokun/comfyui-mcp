@@ -200,6 +200,39 @@ async function main() {
   // Standalone background orchestrator: owns the UI bridge and drives the panel
   // with autonomous Agent SDK sessions. Not an MCP server — it never returns.
   if (cli.panelOrchestrator) {
+    // `connect <comfyui-url>`: drive a (possibly REMOTE) ComfyUI from an agent on
+    // THIS machine. Export the URL as COMFYUI_URL so the orchestrator and the
+    // comfyui MCP it spawns target that server — the same remote-URL mechanism the
+    // panel's "Remote ComfyUI URL" setting uses, just from the CLI. The panel JS
+    // still runs in the user's local browser, so its bridge (ws://127.0.0.1:9180)
+    // already reaches this process — no tunnel needed.
+    if (cli.comfyuiUrl) {
+      process.env.COMFYUI_URL = cli.comfyuiUrl;
+      // Default panel bridge port is 9180 (claude); COMFYUI_MCP_BRIDGE_PORT overrides.
+      const bridgePort = Number(process.env.COMFYUI_MCP_BRIDGE_PORT) || 9180;
+      const bridge = `ws://127.0.0.1:${bridgePort}`;
+      process.stderr.write(
+        [
+          "",
+          "════════════════════════════════════════════════════════════════════",
+          " ComfyUI MCP — local agent bridge is starting",
+          "════════════════════════════════════════════════════════════════════",
+          ` Agent bridge : ${bridge}`,
+          ` Driving      : ${cli.comfyuiUrl}`,
+          "",
+          " Next steps:",
+          `   1. Open that ComfyUI in your browser: ${cli.comfyuiUrl}`,
+          "   2. In the Agent panel's Settings → General, turn ON",
+          "      'Use external/local orchestrator (advanced)'.",
+          "   3. Click Connect in the panel.",
+          "",
+          " The agent runs HERE on your Claude/Codex login — nothing is installed",
+          " on the ComfyUI box. Keep this terminal open.",
+          "════════════════════════════════════════════════════════════════════",
+          "",
+        ].join("\n"),
+      );
+    }
     const { runPanelOrchestrator } = await import("./orchestrator/index.js");
     await runPanelOrchestrator();
     return;

@@ -75,6 +75,37 @@ describe("parseCliArgs", () => {
     });
   });
 
+  it("`connect <url>` implies panelOrchestrator and captures comfyuiUrl", () => {
+    const o = parseCliArgs([...base, "connect", "https://abcd-8188.proxy.runpod.net"], {});
+    expect(o.panelOrchestrator).toBe(true);
+    expect(o.comfyuiUrl).toBe("https://abcd-8188.proxy.runpod.net");
+    expect(o.transport).toBe("stdio");
+  });
+
+  it("`connect` with no URL is sugar for --panel-orchestrator (no comfyuiUrl)", () => {
+    const o = parseCliArgs([...base, "connect"], {});
+    expect(o.panelOrchestrator).toBe(true);
+    expect(o.comfyuiUrl).toBeUndefined();
+  });
+
+  it("`connect` followed by a flag does not swallow the flag as a URL", () => {
+    const o = parseCliArgs([...base, "connect", "--port", "9999"], {});
+    expect(o.panelOrchestrator).toBe(true);
+    expect(o.comfyuiUrl).toBeUndefined();
+    expect(o.port).toBe(9999);
+  });
+
+  it("`connect <url>` still parses trailing flags", () => {
+    const o = parseCliArgs([...base, "connect", "http://10.0.0.5:8188", "--port=9181"], {});
+    expect(o.comfyuiUrl).toBe("http://10.0.0.5:8188");
+    expect(o.port).toBe(9181);
+  });
+
+  it("no `connect` subcommand leaves comfyuiUrl undefined", () => {
+    expect(parseCliArgs(base, {}).comfyuiUrl).toBeUndefined();
+    expect(parseCliArgs([...base, "--panel-orchestrator"], {}).comfyuiUrl).toBeUndefined();
+  });
+
   it("explicit --stdio flag overrides MCP_TRANSPORT=http env", () => {
     expect(parseCliArgs([...base, "--stdio"], { MCP_TRANSPORT: "http" }).transport).toBe("stdio");
   });
