@@ -340,7 +340,8 @@ describe("downloadModel — remote mode (Manager install-model dispatch)", () =>
     expect(installModelViaManagerMock).not.toHaveBeenCalled();
   });
 
-  it("folds query auth into the dispatched URL (Manager fetches server-side)", async () => {
+  it("folds query auth into the dispatched URL (Manager fetches server-side) and redacts the secret from the debug log", async () => {
+    const infoSpy = vi.spyOn(logger, "info").mockImplementation(() => undefined);
     const out = await downloadModel(
       "https://example.com/model.safetensors",
       "checkpoints",
@@ -349,17 +350,25 @@ describe("downloadModel — remote mode (Manager install-model dispatch)", () =>
     );
 
     const calledUrl = installModelViaManagerMock.mock.calls[0][0].url as string;
+    // The real (unredacted) secret IS sent to Manager (server-side fetch needs it)…
     expect(calledUrl).toContain("download_key=query-secret");
+    // …but the dispatch log must NOT leak it — it is redacted in the logged URL.
+    const logged = JSON.stringify(infoSpy.mock.calls);
+    expect(logged).not.toContain("query-secret");
+    expect(logged).toContain("download_key=%5BREDACTED%5D");
     // Success descriptor, no auth warning for query auth.
     expect(out).toContain("ComfyUI-Manager");
     expect(out).not.toMatch(/WARNING/i);
   });
 
-  it("warns (does not silently succeed) when header/basic/bearer auth can't reach Manager", async () => {
+  it("warns (does not silently succeed) when header/basic/bearer/s3 auth can't reach Manager", async () => {
     for (const auth of [
       { type: "bearer", token: "t" } as const,
       { type: "basic", username: "u", password: "p" } as const,
       { type: "header", header_name: "X-Key", header_value: "v" } as const,
+      // s3 SigV4 creds can't be handed to Manager's server-side fetch either, so
+      // it must surface the same kind of warning rather than report a clean success.
+      { type: "s3", access_key_id: "AKIA", secret_access_key: "shh" } as const,
     ]) {
       installModelViaManagerMock.mockClear();
       const out = await downloadModel(

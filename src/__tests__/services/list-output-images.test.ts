@@ -20,6 +20,17 @@ vi.mock("../../comfyui/client.js", () => ({
   uploadImageHttp: vi.fn(),
 }));
 
+// Keep the real config (and its mutable `comfyuiPath`) but make isRemoteMode()
+// toggleable so we can exercise the "remote target + local COMFYUI_PATH set"
+// case. The source keys the /history branch off isRemoteMode() *in addition to*
+// the no-path fallback, so we must be able to force remote mode independently of
+// comfyuiPath.
+let remoteFlag = false;
+vi.mock("../../config.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../config.js")>();
+  return { ...actual, isRemoteMode: () => remoteFlag };
+});
+
 import { config } from "../../config.js";
 import { listOutputImages } from "../../services/image-management.js";
 
@@ -49,6 +60,7 @@ beforeEach(async () => {
   // mode for the scan-based tests (resolveOutputDir is mocked to our temp dir).
   prevComfyuiPath = config.comfyuiPath;
   config.comfyuiPath = outputDir;
+  remoteFlag = false;
   getHistoryMock.mockReset();
 });
 
@@ -235,5 +247,32 @@ describe("listOutputImages — remote mode (derived from /history)", () => {
   it("returns [] when history is unavailable rather than throwing", async () => {
     getHistoryMock.mockRejectedValue(new Error("unreachable"));
     await expect(listOutputImages()).resolves.toEqual([]);
+  });
+
+  it("uses /history even when comfyuiPath IS set, as long as isRemoteMode() is true", async () => {
+    // Regression guard: the branch must key off isRemoteMode(), NOT merely
+    // `!config.comfyuiPath`. A remote target can coexist with an unrelated local
+    // COMFYUI_PATH; scanning that local dir would report the wrong machine's
+    // outputs. Reverting the condition to `!config.comfyuiPath` would make this
+    // test list the local file and never call getHistory.
+    remoteFlag = true;
+    config.comfyuiPath = outputDir; // non-empty AND points at a real dir with a file
+    // This local file would surface ONLY if the (forbidden) readdir scan ran.
+    await touch("local_only.png", new Date("2026-06-26T12:00:00Z"));
+    getHistoryMock.mockResolvedValue({
+      j: {
+        outputs: {
+          "1": { images: [{ filename: "from_history.png", subfolder: "", type: "output" }] },
+        },
+      },
+    });
+
+    const results = await listOutputImages({ limit: 100 });
+
+    // The /history path was taken…
+    expect(getHistoryMock).toHaveBeenCalled();
+    // …and ONLY the history-derived entry came back (readdir scan did NOT run).
+    expect(results.map((r) => r.filename)).toEqual(["from_history.png"]);
+    expect(results.find((r) => r.filename === "local_only.png")).toBeUndefined();
   });
 });
