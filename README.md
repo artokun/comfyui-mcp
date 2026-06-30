@@ -1,6 +1,6 @@
 # comfyui-mcp — the Claude Code plugin for ComfyUI
 
-**Claude Code plugin + MCP server for [ComfyUI](https://github.com/comfyanonymous/ComfyUI)** — generate images and video, execute and author workflows, manage models and custom nodes, and **edit your live ComfyUI graph from your Claude session** ([sidebar panel](https://github.com/artokun/comfyui-mcp-panel), zero API keys).
+**The local-first, agent-native control plane for [ComfyUI](https://github.com/comfyanonymous/ComfyUI)** — a Claude Code plugin + MCP server that generates images, video and audio, authors and runs workflows, manages models and custom nodes, and **edits your live ComfyUI graph in natural language** ([sidebar panel](https://github.com/artokun/comfyui-mcp-panel), zero API keys). One config targets local installs, LAN, VPS, or Comfy Cloud.
 
 [![npm version](https://img.shields.io/npm/v/comfyui-mcp)](https://www.npmjs.com/package/comfyui-mcp)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22.0.0-brightgreen)](https://nodejs.org)
@@ -12,7 +12,7 @@
 
 Works on **macOS**, **Linux**, and **Windows**. Auto-detects your ComfyUI installation and port.
 
-**108 MCP tools** | **22 AI skills** (Flux · WAN · LTX 2.3 video · Qwen · Z-Image · Ideogram 4 · ERNIE · ANIMA · model registry · Civitai · node authoring) | **13 installer packs** | **11 slash commands** | **4 autonomous agents** | **4 hooks**
+**108 MCP tools** | **29 AI skills** (Flux · WAN · LTX 2.3 video · Qwen · Z-Image · Ideogram 4 · ERNIE · ANIMA · model registry · Civitai · node authoring) | **13 installer packs** | **11 slash commands** | **4 autonomous agents** | **4 hooks**
 
 The plugin ships **expert skills that grow with every release** — model-specific generation guides with curated download URLs, workflow recipes, troubleshooting, and custom-node authoring — so Claude knows the right sampler, CFG, resolution, and model files for each architecture without trial and error.
 
@@ -56,7 +56,9 @@ Claude will find (or download) a checkpoint, build a workflow, execute it, and r
 
 ### Scope: local, remote, or Comfy Cloud
 
-`comfyui-mcp` is the community MCP for **local** and **remote** ComfyUI (Mac/Linux/Windows installs, RunPod, VPS, LAN, etc.) — that's the primary target.
+`comfyui-mcp` is **local-first**: a self-hosted ComfyUI on Mac/Linux/Windows is the primary target, with the same agent reaching remote installs (RunPod, VPS, LAN, reverse-proxied) from one config. Local-first, not local-only.
+
+**More than a bridge.** Most ComfyUI MCP servers are thin connectors — they forward a prompt and hand back an image. `comfyui-mcp` is a full control plane: it authors and edits the graph node-by-node, runs and iterates on workflows, manages models and custom nodes, and ships model-specific expertise (samplers, CFG, resolutions, curated model URLs) so the agent gets it right without trial and error. If you want a minimal local relay, a lightweight server is fine; if you want an agent that actually *operates* ComfyUI, that's this project.
 
 For **Comfy Cloud** users, [Comfy-Org ships an official Comfy Cloud MCP](https://docs.comfy.org/development/cloud/mcp-server) (currently invite-only beta) which is cloud-exclusive and maintained by the Comfy team. `comfyui-mcp` *also* includes a community cloud-mode (set `COMFYUI_API_KEY` — see [Deployment modes](#deployment-modes)) so a single MCP can target all three deployment shapes from one config; pick whichever fits your workflow.
 
@@ -91,7 +93,7 @@ This package also ships as a **Claude Code plugin**, providing slash commands, s
 
 ### Built-in skills
 
-22 skills total — model-family guides (Flux, WAN, LTX 2.3, Qwen, Z-Image, Ideogram 4, ERNIE, ANIMA + anime / WAN / Z-Image LoRA training), the **model-registry** (curated download URLs), the **civitai** pairing skill, node authoring, and the core four below. Full list on the [plugin docs page](https://comfyui-mcp.artokun.io/docs/plugin).
+29 skills total — model-family guides (Flux, WAN, LTX 2.3, Qwen, Z-Image, Ideogram 4, ERNIE, ANIMA + anime / WAN / Z-Image LoRA training), the **model-registry** (curated download URLs), the **civitai** pairing skill, node authoring, and the core four below. Full list on the [plugin docs page](https://comfyui-mcp.artokun.io/docs/plugin).
 
 > **Installer packs.** [`packs/`](packs/) bundles 13 one-command ComfyUI setups — ANIMA, Ideogram 4, LTX-2.3, ERNIE, WAN (animate / longer-videos / transparent), Qwen (image / image-edit), Z-Image (turbo / base / xy-plot) and artokun-flow (WAN Animate — replace / animate). Each is a manifest of custom nodes + model URLs + workflow that drives both `apply_manifest` and generated `install-windows.bat` / `install-runpod.sh`, with CI that validates every model link + payload size. See [`packs/README.md`](packs/README.md).
 
