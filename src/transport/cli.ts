@@ -1,3 +1,5 @@
+import { parseComfyUIUrl } from "./comfyui-url.js";
+
 export type TransportMode = "stdio" | "http";
 
 export interface CliOptions {
@@ -108,4 +110,28 @@ export function parseCliArgs(
   if (tunnel) transport = "http";
 
   return { transport, host, port, panelOrchestrator, token, tunnel, allowUnauthenticated, comfyuiUrl };
+}
+
+/**
+ * Validate the `connect <comfyui-url>` positional before the orchestrator starts.
+ * The URL is exported as COMFYUI_URL and used to drive a (possibly remote)
+ * ComfyUI, so a bad value (e.g. `connect not-a-url`) must hard-fail instead of
+ * silently falling back to the local default — which would leave the startup
+ * banner claiming it's "Driving <bad url>" while actually targeting localhost.
+ *
+ * Reuses parseComfyUIUrl (the same parser COMFYUI_URL / --comfyui-url use) so the
+ * accept/reject rules stay identical. Returns a clear, actionable error message
+ * when the URL is invalid, or null when it parses cleanly.
+ */
+export function validateConnectUrl(url: string): string | null {
+  try {
+    parseComfyUIUrl(url);
+    return null;
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return (
+      `Invalid ComfyUI URL passed to \`connect\`: "${url}" (${reason}). ` +
+      `Pass a full http(s) URL, e.g. https://abcd-8188.proxy.runpod.net or http://127.0.0.1:8188.`
+    );
+  }
 }

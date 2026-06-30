@@ -10,7 +10,7 @@ import {
 import { registerAllTools } from "./tools/index.js";
 import { logger } from "./utils/logger.js";
 import { JobWatcher } from "./services/job-watcher.js";
-import { parseCliArgs } from "./transport/cli.js";
+import { parseCliArgs, validateConnectUrl } from "./transport/cli.js";
 import { startHttpServer } from "./transport/http.js";
 import { isLocalMode } from "./config.js";
 import { ensurePanelInstalled } from "./services/panel-installer.js";
@@ -207,6 +207,13 @@ async function main() {
     // still runs in the user's local browser, so its bridge (ws://127.0.0.1:9180)
     // already reaches this process — no tunnel needed.
     if (cli.comfyuiUrl) {
+      // Hard-fail on a bad `connect <url>` instead of silently falling back to the
+      // local ComfyUI (which would make the banner below lie about what it drives).
+      const urlError = validateConnectUrl(cli.comfyuiUrl);
+      if (urlError) {
+        process.stderr.write(`\nComfyUI MCP — cannot start: ${urlError}\n\n`);
+        process.exit(1);
+      }
       process.env.COMFYUI_URL = cli.comfyuiUrl;
       // Default panel bridge port is 9180 (claude); COMFYUI_MCP_BRIDGE_PORT overrides.
       const bridgePort = Number(process.env.COMFYUI_MCP_BRIDGE_PORT) || 9180;

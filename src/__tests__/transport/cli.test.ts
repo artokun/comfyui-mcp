@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseCliArgs } from "../../transport/cli.js";
+import { parseCliArgs, validateConnectUrl } from "../../transport/cli.js";
 
 const base = ["node", "comfyui-mcp"];
 
@@ -113,5 +113,29 @@ describe("parseCliArgs", () => {
   it("explicit flags override env values", () => {
     const o = parseCliArgs([...base, "--port", "7000"], { MCP_PORT: "5000" });
     expect(o.port).toBe(7000);
+  });
+});
+
+describe("validateConnectUrl", () => {
+  it("accepts a full http(s) URL (returns null)", () => {
+    expect(validateConnectUrl("https://abcd-8188.proxy.runpod.net")).toBeNull();
+    expect(validateConnectUrl("http://127.0.0.1:8188")).toBeNull();
+    expect(validateConnectUrl("https://comfy.example.com/comfyapi")).toBeNull();
+  });
+
+  it("rejects a non-URL token with a clear, actionable error", () => {
+    const err = validateConnectUrl("not-a-url");
+    expect(err).not.toBeNull();
+    expect(err).toContain("not-a-url");
+    expect(err).toMatch(/http\(s\) URL/);
+  });
+
+  it("rejects a non-http(s) protocol", () => {
+    expect(validateConnectUrl("ftp://example.com")).not.toBeNull();
+    expect(validateConnectUrl("ws://127.0.0.1:8188")).not.toBeNull();
+  });
+
+  it("rejects an empty string", () => {
+    expect(validateConnectUrl("")).not.toBeNull();
   });
 });
