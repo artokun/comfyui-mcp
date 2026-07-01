@@ -36,6 +36,7 @@ import {
 } from "../services/panel-secrets.js";
 import { CodexBackend } from "./codex-backend.js";
 import { GeminiBackend, GEMINI_DEFAULT_MODEL } from "./gemini-backend.js";
+import { allBackendReadiness } from "./backend-readiness.js";
 import { startPanelMcpHttpServer, type PanelMcpHttpServer } from "./panel-mcp-http.js";
 import type { AgentBackend } from "./agent-backend.js";
 import { readComfyuiCrashLog, formatCrashNote } from "../services/crash-log.js";
@@ -917,6 +918,20 @@ export async function runPanelOrchestrator(): Promise<void> {
       });
   }
 
+  // Real per-provider readiness, computed HERE (the machine running the agents)
+  // and pushed over the bridge so the panel's provider switcher reflects the
+  // truth — not the ComfyUI host's probe, which is blind to the laptop in the
+  // "remote ComfyUI, local agent" model (and never sees Claude's SDK, which has
+  // no CLI). The panel prefers this frame over its GET /backends probe.
+  function pushReadiness(tabId: string): void {
+    try {
+      const { backends, any_ready } = allBackendReadiness(KNOWN_BACKENDS);
+      bridge.push({ type: "backends", backends, any_ready }, tabId);
+    } catch (err) {
+      logger.warn(`[panel-orchestrator] readiness probe failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   bridge.onPanelMessage = (event) => {
     // Connect ack: the instant a panel tab connects, the orchestrator announces
     // itself so "connected" means "a real agent is attending" — not merely "a
@@ -953,6 +968,9 @@ export async function runPanelOrchestrator(): Promise<void> {
 
       // Live model list for the picker; SDK slash commands are Claude-only.
       pushModels(panelTab);
+      // Truthful provider readiness (this machine runs the agents), so the
+      // switcher stops falsely showing "CLI not installed" behind a remote pod.
+      pushReadiness(panelTab);
       if (backend === "claude") pushCommands(panelTab);
       // Re-push the last usage so the context meter isn't blank after a reload.
       const lastStatus = manager.lastStatusFor(key);
