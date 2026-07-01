@@ -50,30 +50,39 @@ This design **inverts** that:
 | Concern | Where it lives | Persists a restart? |
 |---------|----------------|---------------------|
 | ComfyUI install + venv | **image** `/opt/ComfyUI` (immutable) | n/a (re-pulled with the image) |
-| `custom_nodes` (incl. Agent Panel, Manager) | **image** `/opt/ComfyUI/custom_nodes` | **No** — ephemeral |
-| Caches (HF / pip / torch / npm) | **container** ephemeral disk | **No** — ephemeral |
+| `custom_nodes` (Agent Panel + your installs) | **volume** `/workspace/custom_nodes` (symlinked; image nodes seeded each boot) | **Yes** |
+| ComfyUI-Manager | **image** venv (pip package) | n/a (in the image) |
+| Custom-node pip cache | **volume** `/workspace/.cache/pip` | **Yes** |
+| Other caches (HF / torch / npm) | **container** ephemeral disk | **No** — ephemeral |
 | `user/` (workflows + settings + Manager config) | **volume** `/workspace/user` | **Yes** |
 | `models/` (incl. Manager downloads) | **volume** `/workspace/models` | **Yes** |
 | `input/` | **volume** `/workspace/input` | **Yes** |
 | `output/` | **volume** `/workspace/output` | **Yes** |
 
-**Result:** restart is just `mkdir -p /workspace/{user,models,input,output}` (plus
-model subdirs) and `launch ComfyUI from the baked venv`. No install/sync/seed.
+**Result:** the base ComfyUI + venv boot fast from the immutable image; only your
+data **and your custom nodes** live on the volume. A restart is `mkdir -p` the
+user-data dirs, symlink + seed `custom_nodes`, reinstall node deps from the
+persistent cache, and launch from the baked venv. No full install/sync/seed.
 
-### ⚠️ The custom_nodes tradeoff (read this)
+### Custom nodes persist on the volume
 
-Because `custom_nodes` are **baked into the immutable image**, **custom nodes the
-agent or Manager install at runtime do NOT survive a restart** — they live on the
-container's ephemeral disk and are gone on the next start. This is the deliberate
-cost of fast restart.
+`custom_nodes` is **symlinked to `/workspace/custom_nodes`**, so **custom nodes the
+agent or Manager install at runtime survive a restart** — while the base ComfyUI +
+venv still boot fast from the immutable image.
 
+* **How it works (each boot).** The entrypoint symlinks
+  `/opt/ComfyUI/custom_nodes` → `/workspace/custom_nodes`, seeds/refreshes the
+  image's baked nodes (Agent Panel + ComfyUI builtins) into it — so an image
+  upgrade always ships a current panel while **your** installed nodes are preserved
+  — then reinstalls each node's `requirements.txt` into the venv from a
+  **persistent pip cache** on the volume (fast after the first time).
 * **Models DO persist** — Manager's install-model writes to `/workspace/models`
-  (see [Model paths](#model-paths-extra_model_pathsyaml)), so downloaded models
-  survive restarts.
-* **Nodes do NOT persist.** To add a custom node **permanently**, add it to the
-  `Dockerfile` (a `git clone` into `/opt/ComfyUI/custom_nodes` + its
-  `pip install`) and **rebuild the image**. Within a single pod session,
-  Manager-installed nodes work until the next restart.
+  (see [Model paths](#model-paths-extra_model_pathsyaml)).
+* **First install of a node** downloads its Python deps into the persistent cache;
+  every restart after re-materializes them from cache (the venv lives in the image,
+  so its packages are refreshed on boot). Compiled/CUDA-linked deps may rebuild
+  rather than unpack. To bake a node so it needs **zero** boot-time work, still add
+  it to the `Dockerfile` and rebuild.
 
 ---
 
@@ -414,9 +423,15 @@ Once the pod is up and you have its proxy URL, on your laptop:
 npx -y comfyui-mcp@latest connect https://<pod-id>-3000.proxy.runpod.net
 ```
 
-This starts the comfyui-mcp panel orchestrator pointed at the pod. Then open the
-pod's ComfyUI, open the **Agent Panel**, enable the **external-orchestrator**
-toggle, and click **Connect**.
+This starts the comfyui-mcp panel orchestrator pointed at the pod. Because the pod
+page is served over `https://`, `connect` automatically opens a secure, token-gated
+**`wss://` tunnel** (via Cloudflare) to the agent bridge on your machine and hands
+the pod's panel that URL — so the HTTPS page reaches your local agent with **no
+browser prompt, in any browser** (a secure page can't open a plain `ws://` socket
+to your box). Then open the pod's ComfyUI, open the **Agent Panel**, enable the
+**external-orchestrator** toggle, and click **Connect**. (Add **`--insecure-bridge`**
+to force the plain `ws://127.0.0.1:9180` loopback instead — e.g. when you reach the
+pod via an SSH port-forward.)
 
 If you're on a build that predates the `connect` subcommand, the equivalents are:
 

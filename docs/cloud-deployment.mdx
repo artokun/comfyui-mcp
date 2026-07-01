@@ -103,25 +103,28 @@ local Agent Panel uses, just with ComfyUI on a cloud GPU instead of localhost.
 
 ## What persists (and what doesn't)
 
-The image is optimized for **fast stop/start**. All software — ComfyUI, its venv,
-Manager v2, the Agent Panel — is baked into the immutable image and run from
-`/opt/ComfyUI`. The `/workspace` network volume holds **only your data**, so a warm
-restart does no install/sync/seed and just relaunches ComfyUI.
+The image is optimized for **fast stop/start**. The heavy software — ComfyUI, its
+venv, Manager v2 — is baked into the immutable image and run from `/opt/ComfyUI`,
+while `custom_nodes` lives on the `/workspace` volume (symlinked) so your installs
+persist. A warm restart does no full install/sync/seed and just relaunches ComfyUI.
 
 | What | Where it lives | Survives a restart? |
 |------|----------------|---------------------|
 | Models (incl. Manager downloads) | volume `/workspace/models` | **Yes** |
 | Workflows + ComfyUI settings + Manager config | volume `/workspace/user` | **Yes** |
 | Inputs / outputs | volume `/workspace/input`, `/output` | **Yes** |
-| ComfyUI install + venv + baked custom nodes | image `/opt/ComfyUI` | Re-pulled with the image |
-| **Custom nodes installed at runtime** (agent/Manager) | container ephemeral disk | **No** |
+| **Custom nodes** (agent/Manager installs) | volume `/workspace/custom_nodes` (symlinked) | **Yes** |
+| ComfyUI install + venv + Manager | image `/opt/ComfyUI` | Re-pulled with the image |
 
-<Warning>
-**Custom nodes the agent or Manager installs at runtime do NOT survive a restart**
-— that's the deliberate cost of fast restart. Models *do* persist. To add a custom
-node **permanently**, add it to the `Dockerfile` and rebuild the image (below).
-Within a single pod session, Manager-installed nodes work until the next restart.
-</Warning>
+<Note>
+**Custom nodes installed at runtime survive a restart.** `custom_nodes` is
+symlinked to `/workspace/custom_nodes`; on each boot the image's baked nodes (Agent
+Panel + builtins) are seeded/refreshed into it (so an image upgrade ships a current
+panel while your own nodes are kept), and each node's Python deps are reinstalled
+into the venv from a **persistent pip cache** on the volume — fast after the first
+time. Models persist too. To bake a node so it needs zero boot-time work, add it to
+the `Dockerfile` and rebuild the image (below).
+</Note>
 
 ## Build & deploy your own image
 

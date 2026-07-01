@@ -168,7 +168,7 @@ npx -y comfyui-mcp@latest connect
 
 When ComfyUI runs somewhere with **no Node/agent** (a RunPod pod, a cloud box) you
 can still run the agent on **your** machine and drive that remote ComfyUI — no
-agent login on the box, no tunnel:
+agent login on the box, nothing to install or configure remotely:
 
 ```bash
 npx -y comfyui-mcp@latest connect https://abcd1234-8188.proxy.runpod.net
@@ -176,10 +176,16 @@ npx -y comfyui-mcp@latest connect https://abcd1234-8188.proxy.runpod.net
 
 This is sugar for `--panel-orchestrator` with `COMFYUI_URL` set from the URL: the
 orchestrator runs locally on your Claude/ChatGPT login and reaches the remote
-ComfyUI over its public proxy URL. The agent bridge stays on
-`ws://127.0.0.1:9180`. Because the panel JS runs in **your local browser** (even
-when served by the remote ComfyUI), that bridge is already on your machine — so
-nothing needs to be installed remotely.
+ComfyUI over its public proxy URL. For a **remote HTTPS pod**, `connect`
+automatically opens a secure, token-gated **`wss://` tunnel** (via Cloudflare) to
+the local agent bridge and hands the pod's panel that URL — so the pod's HTTPS page
+reaches your machine with **no browser prompt, in any browser** (a secure page
+can't open a plain `ws://` socket to your box — mixed content / Private Network
+Access). A **local** ComfyUI uses the plain `ws://127.0.0.1:9180` loopback bridge;
+add **`--insecure-bridge`** to force that loopback for a remote pod (then arrange
+your own path to it, e.g. an SSH port-forward). Either way the panel JS runs in
+**your local browser** and the agent — and your login — run only on **your**
+machine, so nothing is installed remotely.
 
 To finish: open the remote ComfyUI in your browser, turn on **Settings → General →
 "Use external/local orchestrator (advanced)"** in the Agent panel, then click
