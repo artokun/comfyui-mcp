@@ -110,8 +110,8 @@ export async function validateWorkflow(
       }
     }
 
-    // 2d. Check for model references using objectInfo dropdown values
-    checkModelReferences(nodeId, classType, node.inputs, issues, objectInfo);
+    // 2d. Check every combo (dropdown) value against objectInfo's valid options
+    checkComboValues(nodeId, classType, node.inputs, issues, objectInfo);
   }
 
   // 3. Check for cycles (basic: no self-references)
@@ -167,12 +167,19 @@ export async function validateWorkflow(
 }
 
 /**
- * Check if model file references in node inputs exist in ComfyUI's known models.
- * Uses /object_info dropdown values (ComfyUI's authoritative model list) instead of
- * scanning the filesystem directly. This correctly handles all model search paths,
- * subdirectories, and custom loaders without hardcoded mappings.
+ * Check that every combo (dropdown) widget value is one ComfyUI actually offers —
+ * mirroring ComfyUI's OWN frontend validator, which rejects an out-of-list value
+ * with `value_not_in_list` (the "N ERRORS" the user sees in the error panel). This
+ * catches BOTH classes the frontend flags as errors:
+ *   - missing models (a `*.safetensors`/`*.gguf`/… value not in the loader's list,
+ *     incl. the empty-list case when nothing is installed), and
+ *   - any other invalid dropdown value (a wrong `type`, `sampler_name`, `scheduler`,
+ *     an uploaded-file name that isn't present, etc.).
+ * Uses /object_info's authoritative option lists (all model search paths, subdirs,
+ * and custom loaders — no hardcoded mappings). A value fed by a CONNECTION (not a
+ * literal widget value) is skipped: it can't be validated statically.
  */
-function checkModelReferences(
+function checkComboValues(
   nodeId: string,
   classType: string,
   inputs: Record<string, unknown>,
@@ -188,24 +195,36 @@ function checkModelReferences(
   };
 
   for (const [inputName, inputSpec] of Object.entries(allInputDefs)) {
-    const value = inputs[inputName];
-    if (typeof value !== "string") continue;
-
-    // Only check combo inputs (dropdowns) that have an array of valid values
+    // A combo input's spec is `[ [...options], {config?} ]`. Non-combos (INT/FLOAT/
+    // STRING/BOOLEAN, or a linked node-type string) have a non-array first element.
     if (!Array.isArray(inputSpec) || !Array.isArray(inputSpec[0])) continue;
 
-    const validValues = inputSpec[0] as string[];
+    const value = inputs[inputName];
+    // Only a literal widget value is checkable; a connection is `[nodeId, outIdx]`.
+    if (typeof value !== "string") continue;
 
-    // Only check values that look like model files (by extension)
-    if (!/\.(safetensors|gguf|ckpt|pt|pth|bin|sft)$/i.test(value)) continue;
+    const validValues = inputSpec[0] as unknown[];
+    // Only validate string option lists (model names, types, samplers, schedulers…).
+    // A non-empty non-string/mixed list (rare) is skipped to avoid false positives;
+    // an EMPTY list is validated (that's the "nothing installed" → not in [] case).
+    if (validValues.length > 0 && !validValues.every((v) => typeof v === "string")) continue;
+    if (validValues.includes(value)) continue;
 
-    if (!validValues.includes(value)) {
-      issues.push({
-        severity: "warning",
-        node_id: nodeId,
-        node_type: classType,
-        message: `Model "${value}" not found in ${classType}'s "${inputName}" options (${validValues.length} available). The model may need to be downloaded or ComfyUI restarted.`,
-      });
-    }
+    const isModel = /\.(safetensors|gguf|ckpt|pt|pth|bin|sft)$/i.test(value);
+    const hint = isModel
+      ? " This model file isn't installed here (or ComfyUI needs a restart to see it) — download it or fix the path/filename."
+      : validValues.length
+        ? ` Valid options: ${(validValues as string[])
+            .slice(0, 8)
+            .map((v) => `"${v}"`)
+            .join(", ")}${validValues.length > 8 ? ", …" : ""}.`
+        : ` No options are available for "${inputName}" on this ComfyUI (the source list is empty).`;
+
+    issues.push({
+      severity: "error",
+      node_id: nodeId,
+      node_type: classType,
+      message: `"${inputName}" = "${value}" is not in the list of valid options (value_not_in_list).${hint}`,
+    });
   }
 }
