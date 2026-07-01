@@ -10,6 +10,8 @@
 [![comfyui-mcp MCP server](https://glama.ai/mcp/servers/artokun/comfyui-mcp/badges/card.svg)](https://glama.ai/mcp/servers/artokun/comfyui-mcp)
 [![comfyui-mcp MCP server](https://glama.ai/mcp/servers/artokun/comfyui-mcp/badges/score.svg)](https://glama.ai/mcp/servers/artokun/comfyui-mcp)
 
+[![Deploy on RunPod](https://img.shields.io/badge/Deploy_on-RunPod-673AB7?style=for-the-badge)](https://console.runpod.io/deploy?template=bnqtkvcer3&ref=dkx71w9b) &nbsp;**One-click GPU pod** — a ready-to-run ComfyUI with this project + [Agent Panel](https://github.com/artokun/comfyui-mcp-panel) + ComfyUI-Manager v2 preinstalled, on your own GPU. No setup.
+
 Works on **macOS**, **Linux**, and **Windows**. Auto-detects your ComfyUI installation and port.
 
 **108 MCP tools** | **29 AI skills** (Flux · WAN · LTX 2.3 video · Qwen · Z-Image · Ideogram 4 · ERNIE · ANIMA · model registry · Civitai · node authoring) | **13 installer packs** | **11 slash commands** | **4 autonomous agents** | **4 hooks**
