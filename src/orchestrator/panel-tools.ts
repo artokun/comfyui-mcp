@@ -700,7 +700,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_get_errors",
-      "Read the most recent execution error and per-node validation errors from the user's open ComfyUI tab. Check this when a run fails or after panel_run reports node_errors. Read-only.",
+      "Read ComfyUI's pre-run VALIDATION errors (missing models, value_not_in_list / invalid widget values, broken links — the SAME 'N ERRORS' the user sees in the frontend's error panel) plus the most recent runtime execution error, from the user's open tab. The validation errors are populated by ComfyUI's own validator on ANY queue attempt — the user's OR yours — so this reflects what the user is looking at. A ⚠️ GRAPH VALIDATION block is also auto-injected at your turn start when this state changes; call this to re-check on demand (e.g. after you edit widgets/links). Read-only.",
       {},
       async (_args, ctx) => ctx.call({ cmd: "graph_get_errors" }),
     ),
