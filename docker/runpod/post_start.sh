@@ -224,12 +224,71 @@ export HF_TOKEN="${HF_TOKEN:-${HUGGINGFACE_TOKEN:-}}"
 [ -n "${HF_TOKEN}" ] && log "HF_TOKEN present — gated HuggingFace downloads authenticated."
 
 # -----------------------------------------------------------------------------
+# 4.5 CUSTOM NODES → the VOLUME (so runtime-installed nodes SURVIVE a restart).
+#     The base ComfyUI + venv stay in the image (fast boot), but custom_nodes live
+#     on /workspace — the #1 user complaint with a pure image-baked custom_nodes
+#     was losing them on stop/start. Mechanism:
+#       (a) symlink ${COMFY_HOME}/custom_nodes -> /workspace/custom_nodes, so
+#           ComfyUI AND Manager read/write the volume with zero path changes;
+#       (b) seed/refresh the image's baked nodes (panel + ComfyUI builtins) into it
+#           every boot — image upgrades push a fresh panel while USER nodes persist;
+#       (c) reinstall each node's Python deps into the (ephemeral, image) venv from
+#           a PERSISTENT pip cache on the volume — required because the venv is in
+#           the image: node CODE persists on the volume, its DEPS must be
+#           re-materialized into the venv each boot (fast after the first time).
+# -----------------------------------------------------------------------------
+CN_VOL="${WORKSPACE}/custom_nodes"
+CN_LINK="${COMFY_HOME}/custom_nodes"
+CN_SEED="${COMFY_HOME}/custom_nodes_seed"
+export PIP_CACHE_DIR="${WORKSPACE}/.cache/pip"
+mkdir -p "${CN_VOL}" "${PIP_CACHE_DIR}"
+
+# (a) Point the image's custom_nodes at the volume. Replace whatever is there — a
+#     real dir on a fresh container, or a stale symlink — with a link to the vol.
+if [ ! -L "${CN_LINK}" ] || [ "$(readlink -f "${CN_LINK}")" != "$(readlink -f "${CN_VOL}")" ]; then
+  rm -rf "${CN_LINK}"
+  ln -s "${CN_VOL}" "${CN_LINK}"
+  log "custom_nodes -> ${CN_VOL} (symlinked; installs now persist on the volume)"
+fi
+
+# (b) Seed/refresh the baked nodes (panel + builtins) onto the volume. cp -rf
+#     overwrites the image-owned copies (keeps them current on an image upgrade)
+#     but never deletes the user's OWN nodes already on the volume.
+if [ -d "${CN_SEED}" ]; then
+  cp -rf "${CN_SEED}/." "${CN_VOL}/" 2>/dev/null \
+    && log "seeded/refreshed baked custom_nodes (panel + builtins) onto the volume" \
+    || log "WARN: custom_nodes seed refresh had errors (continuing)"
+fi
+
+# (c) Reinstall custom-node Python deps into the venv from the persistent cache.
+#     Runs every boot (the venv is ephemeral); the cache makes it fast. Best-effort
+#     per node — a broken requirements.txt must not take the whole pod down.
+VPIP="${COMFY_HOME}/venv/bin/pip"
+if [ -x "${VPIP}" ]; then
+  cn_count=0
+  for req in "${CN_VOL}"/*/requirements.txt; do
+    [ -f "${req}" ] || continue          # literal glob when no matches → skip
+    node_name="$(basename "$(dirname "${req}")")"
+    log "custom-node deps: installing ${node_name} requirements…"
+    if "${VPIP}" install --no-input --disable-pip-version-check -r "${req}" \
+         >>"${LOG_DIR}/custom-node-deps.log" 2>&1; then
+      cn_count=$((cn_count + 1))
+    else
+      log "WARN: deps for ${node_name} failed (see custom-node-deps.log; node may not load)"
+    fi
+  done
+  log "custom-node deps: processed ${cn_count} node requirement set(s) (cache: ${PIP_CACHE_DIR})"
+else
+  log "WARN: venv pip not found at ${VPIP} — skipping custom-node dep install"
+fi
+
+# -----------------------------------------------------------------------------
 # 5. Launch ComfyUI from the BAKED venv (image), pointed at the volume dirs.
 #    Invoke the venv python by ABSOLUTE PATH (no `activate` needed).
 #    Per-directory flags keep user/input/output on /workspace; models come from
 #    extra_model_paths.yaml (is_default → volume is primary). custom_nodes are
-#    NOT redirected — they stay in the image (fast-restart contract). We do NOT
-#    use --base-directory because it would relocate custom_nodes onto the volume.
+#    symlinked onto the volume in §4.5 above (so runtime installs persist); we do
+#    NOT use --base-directory (it would relocate the whole tree, incl. the venv).
 # -----------------------------------------------------------------------------
 VPY="${COMFY_HOME}/venv/bin/python"
 if [ ! -x "${VPY}" ]; then

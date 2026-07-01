@@ -258,6 +258,16 @@ RUN curl -fsSL https://raw.githubusercontent.com/filebrowser/filebrowser/master/
  || echo "WARN: filebrowser install failed — it will be skipped at boot"
 
 # -----------------------------------------------------------------------------
+# custom_nodes PERSISTENCE seed. Move the image's baked custom_nodes (the Agent
+# Panel + ComfyUI's builtins) to a SEED dir. At boot, post_start.sh symlinks
+# ${COMFY_HOME}/custom_nodes -> /workspace/custom_nodes and copies this seed into
+# it — so nodes the agent/Manager install at RUNTIME live on the volume and
+# SURVIVE a restart (the base ComfyUI + venv still boot fast from the image).
+# Placed LATE so it doesn't bust the torch / spotcheck-model layer cache.
+# -----------------------------------------------------------------------------
+RUN mv "${COMFY_HOME}/custom_nodes" "${COMFY_HOME}/custom_nodes_seed"
+
+# -----------------------------------------------------------------------------
 # 10. Volume hygiene (LAST so it doesn't bust the expensive build-layer cache).
 #     The runpod/pytorch base points these caches at /workspace so they "persist"
 #     across restarts. With the fast-restart design ALL software is baked in the
