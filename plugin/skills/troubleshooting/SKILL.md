@@ -52,7 +52,13 @@ The GPU does not have enough VRAM to hold the model weights, intermediate tensor
 1. **Reduce resolution**: Drop to the model's native resolution (512 for SD 1.5, 1024 for SDXL/Flux)
 2. **Use FP8/FP16 quantized models**: FP8 Flux models use ~8GB vs ~24GB for FP16
    - Search for FP8 variants: `search_models("flux fp8")` or `search_models("sdxl fp8")`
-3. **Use `--lowvram` flag**: ComfyUI CLI flag that offloads model parts to CPU during inference
+3. **Launch flags (the VRAM ladder)**: offload aggressively via ComfyUI CLI flags —
+   - `--lowvram` — offload text encoders / model parts to CPU
+   - `--novram` — extreme offload; the go-to for long video (LTX 2 / WAN) OOM
+   - `--cache-none` — cache nothing (lowest RAM/VRAM); combine with `--novram`
+   - `--reserve-vram N` — reserve N GB so the GPU stops spilling into slow *shared* VRAM (Windows); typical `2`–`4`
+   - `--disable-smart-memory` — force offload to RAM when a run gets stuck / intermittently OOMs
+   - Full matrix + recipes: [`comfyui-launch-flags`](../comfyui-launch-flags/SKILL.md)
 4. **Free VRAM between generations**: ComfyUI should auto-manage, but restarting clears leaked memory
 5. **Use tiled VAE decoding**: For high-resolution images, tile the VAE decode step
    - Node: `VAEDecodeTiled` instead of `VAEDecode`
@@ -416,7 +422,7 @@ list_local_models(model_type="controlnet")        # Installed ControlNets
 
 | Error Message (partial) | Most Likely Fix |
 |--------------------------|----------------|
-| `CUDA out of memory` | Reduce resolution, use FP8 model, `--lowvram` |
+| `CUDA out of memory` | Reduce resolution, use FP8 model; VRAM ladder `--lowvram` → `--novram --cache-none` → `--reserve-vram N` ([launch flags](../comfyui-launch-flags/SKILL.md)) |
 | `Expected all tensors on same device` | Update custom node, restart ComfyUI |
 | `Cannot find node class` | Install the node pack, restart ComfyUI |
 | `Input contains NaN` | Lower CFG, use FP32 VAE, remove LoRAs |

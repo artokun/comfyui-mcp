@@ -8,6 +8,11 @@ globs:
 
 # Triton + SageAttention (ComfyUI acceleration)
 
+> See also [`comfyui-launch-flags`](../comfyui-launch-flags/SKILL.md) for the full
+> attention / VRAM / cache flag matrix. Note the **Z-Image exception**: Z-Image is
+> broken under `--use-sage-attention` → launch it with
+> `--use-pytorch-cross-attention` instead.
+
 ## Overview
 
 Two **optional accelerators** that many modern video graphs (especially kijai's

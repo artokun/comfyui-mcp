@@ -7,6 +7,11 @@ globs:
 
 # Z-Image Text-to-Image Workflows
 
+> ⚠️ **Launch flag:** Z-Image does **not** sample correctly under
+> `--use-sage-attention` (black / garbled output). Launch ComfyUI with
+> **`--use-pytorch-cross-attention`** for Z-Image. See
+> [`comfyui-launch-flags`](../comfyui-launch-flags/SKILL.md).
+
 ## Overview
 
 Z-Image is a 6B-parameter image generation model from Alibaba's Tongyi Lab using a Scalable Single-Stream DiT (S3-DiT) architecture. It uses a Qwen text encoder (not CLIP-L/T5). Its VAE shares the Flux VAE *architecture* (same tensor shapes, so the file is the same 320MB size) but ships **different weights** — it is NOT byte-identical to Flux's `ae.safetensors` and must be kept as a separate file (`z-image-ae.safetensors`) to avoid clobbering the Flux VAE. Two variants:

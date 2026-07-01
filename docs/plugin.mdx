@@ -1,6 +1,6 @@
 ---
 title: "Claude Code Plugin"
-description: "comfyui-mcp is a full Claude Code plugin: 29 AI skills, 11 slash commands, 4 autonomous agents, and 4 hooks on top of the 108 MCP tools — expert ComfyUI knowledge that grows with every release."
+description: "comfyui-mcp is a full Claude Code plugin: 31 AI skills, 11 slash commands, 4 autonomous agents, and 4 hooks on top of the 108 MCP tools — expert ComfyUI knowledge that grows with every release."
 icon: "puzzle-piece"
 ---
 
@@ -15,7 +15,7 @@ without trial and error.
 /plugin install comfy
 ```
 
-## 29 AI skills — and growing
+## 31 AI skills — and growing
 
 Skills are curated knowledge documents Claude loads on demand. Each model
 family gets generation parameters, node graphs, curated model download URLs,
@@ -43,6 +43,7 @@ and failure-mode guidance:
 | `director` | Multi-shot scene direction for video pipelines |
 | `prompt-engineering` | Architecture-specific prompting (natural language vs tags) |
 | `troubleshooting` | OOM, missing nodes, version drift — diagnosis trees |
+| `comfyui-launch-flags` | The VRAM/attention/cache/perf launch-flag matrix — `--reserve-vram`, `--novram`+`--cache-none`, `--use-sage-attention` vs `--use-pytorch-cross-attention` (Z-Image), plus Blackwell/RTX 5000 accel-stack notes |
 
 New skills land with each release — generated from popular registry packs via
 the built-in `generate_node_skill` tool, then human-curated.
