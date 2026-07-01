@@ -205,7 +205,8 @@ before launching. Two env toggles control it:
 | Env | Default | Effect |
 |-----|---------|--------|
 | `COMFY_AUTOUPDATE` | `1` (on) | `git pull --ff-only` on `/workspace/ComfyUI` **and** the panel checkout, then re-`pip install` each `requirements.txt` **only if its sha256 changed** (markers in `/workspace/ComfyUI/.autoupdate/`). Set `0` to skip all of it. |
-| `COMFY_AUTOUPDATE_MANAGER` | `0` (off) | When `1`, also `pip install -U comfyui_manager` in the volume venv. |
+| `COMFY_AUTOUPDATE_MANAGER` | `1` (on) | Also `pip install -U "$COMFY_MANAGER_SPEC"` in the volume venv, so Manager stays in lockstep with the auto-updating panel. Set `0` to freeze. |
+| `COMFY_MANAGER_SPEC` | `comfyui_manager>=4,<5` | The upgrade target/bound for the Manager bump. Defaults to the `/v2` major line so an auto-update can't silently cross into a breaking major. Widen to `comfyui_manager` to track absolute latest. |
 
 * The git pulls are best-effort and offline-safe — a failed or non-fast-forward
   pull just logs a warning and keeps the current checkout.
@@ -213,10 +214,11 @@ before launching. Two env toggles control it:
   sha256 differs from the recorded marker, so an unchanged tree is a fast no-op.
   The markers are seeded on the first boot so the second boot doesn't needlessly
   re-pip an unchanged tree.
-* **Manager is pinned by default for a reason.** `comfyui_manager`'s `/v2` API is
-  the contract the Agent Panel depends on for install-model / install-node. A
-  silent Manager bump could change or break that gate, so you upgrade it
-  **deliberately** (`COMFY_AUTOUPDATE_MANAGER=1`), not on every boot.
+* **Manager auto-updates by default, but within the `/v2` major.** `comfyui_manager`'s
+  `/v2` API is the contract the Agent Panel depends on for install-model /
+  install-node. `COMFY_MANAGER_SPEC` defaults to `>=4,<5` so you get patches +
+  minor updates automatically while a breaking `5.x` major can't land silently and
+  break the gate — bump the bound deliberately when you're ready to move majors.
 
 ---
 
@@ -389,7 +391,8 @@ Create a **Pod template** (or fill these on a one-off GPU pod):
 | `JUPYTER_PASSWORD` | *(unset)* | set to enable JupyterLab on :8888 (base behavior) |
 | `PUBLIC_KEY` | *(RunPod injects)* | SSH public key (base behavior) |
 | `COMFY_AUTOUPDATE` | `1` | `git pull` ComfyUI + panel + sha-checked pip each boot; `0` to skip |
-| `COMFY_AUTOUPDATE_MANAGER` | `0` | `1` to also `pip -U comfyui_manager` (pinned by default — see [Auto-update](#auto-update-per-boot)) |
+| `COMFY_AUTOUPDATE_MANAGER` | `1` | `pip -U` comfyui_manager within `COMFY_MANAGER_SPEC` each boot; `0` to freeze (see [Auto-update](#auto-update-per-boot)) |
+| `COMFY_MANAGER_SPEC` | `comfyui_manager>=4,<5` | Upgrade bound for the Manager bump — defaults to the `/v2` major line |
 | `COMFY_SECURITY_LEVEL` | `normal-` | Manager security level (`weak` = most permissive) |
 | `COMFY_NETWORK_MODE` | `personal_cloud` | must stay `personal_cloud` for remote installs |
 | `COMFY_EXTRA_ARGS` | *(empty)* | extra ComfyUI flags appended verbatim by the entrypoint |

@@ -45,11 +45,15 @@ COMFY_NETWORK_MODE="${COMFY_NETWORK_MODE:-personal_cloud}"
 COMFY_SECURITY_LEVEL="${COMFY_SECURITY_LEVEL:-normal-}"
 COMFY_EXTRA_ARGS="${COMFY_EXTRA_ARGS:-}"              # extra ComfyUI flags
 TORCH_INDEX_URL="${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}"
-# Auto-update toggles (per-boot). Git pulls are cheap + offline-safe; the Manager
-# pip bump is OFF by default because comfyui_manager's /v2 API is the contract the
-# Agent Panel depends on — bump it deliberately, not silently.
-COMFY_AUTOUPDATE="${COMFY_AUTOUPDATE:-1}"             # git pull ComfyUI + panel
-COMFY_AUTOUPDATE_MANAGER="${COMFY_AUTOUPDATE_MANAGER:-0}"  # pip -U comfyui_manager
+# Auto-update toggles (per-boot). Git pulls are cheap + offline-safe. The Manager
+# pip bump is ON by default so it stays in lockstep with the auto-updating panel
+# ("always up to date"). COMFY_MANAGER_SPEC bounds the bump to the /v2 major line
+# (>=4,<5) so an auto-update can't SILENTLY cross into a breaking API major that
+# would break the panel's install-model; widen it (e.g. `comfyui_manager`) to
+# track absolute latest, or set COMFY_AUTOUPDATE_MANAGER=0 to freeze.
+COMFY_AUTOUPDATE="${COMFY_AUTOUPDATE:-1}"                  # git pull ComfyUI + panel
+COMFY_AUTOUPDATE_MANAGER="${COMFY_AUTOUPDATE_MANAGER:-1}"  # pip -U comfyui_manager
+COMFY_MANAGER_SPEC="${COMFY_MANAGER_SPEC:-comfyui_manager>=4,<5}"
 
 USER_DIR="${WORKSPACE}/user"
 MODELS_DIR="${WORKSPACE}/models"
@@ -146,9 +150,9 @@ if [ "${FIRST_BOOT}" -eq 0 ] && [ "${COMFY_AUTOUPDATE}" = "1" ]; then
   maybe_pip_reqs "${COMFY_HOME}/requirements.txt"            "comfyui-reqs"
   maybe_pip_reqs "${PANEL_DIR}/requirements.txt"             "panel-reqs"
   if [ "${COMFY_AUTOUPDATE_MANAGER}" = "1" ]; then
-    log "auto-update: pip -U comfyui_manager (COMFY_AUTOUPDATE_MANAGER=1)…"
-    "${VPY}" -m pip install -U comfyui_manager >>"${LOG_DIR}/autoupdate.log" 2>&1 \
-      && log "comfyui_manager updated." \
+    log "auto-update: pip -U '${COMFY_MANAGER_SPEC}' (COMFY_AUTOUPDATE_MANAGER=1)…"
+    "${VPY}" -m pip install -U "${COMFY_MANAGER_SPEC}" >>"${LOG_DIR}/autoupdate.log" 2>&1 \
+      && log "comfyui_manager: $("${VPY}" -m pip show comfyui_manager 2>/dev/null | awk '/^Version:/{print $2}')" \
       || log "WARN: comfyui_manager update failed — continuing on installed version."
   fi
 else
