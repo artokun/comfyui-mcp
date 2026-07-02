@@ -31,6 +31,7 @@ import {
 } from "./panel-agent.js";
 import { createPanelMcpServer } from "./panel-tools.js";
 import { readUserMcpServers } from "../services/user-mcp-config.js";
+import { isForceRemoteFlagSet, isLoopbackHost } from "../config.js";
 import {
   buildComfyuiMcpEnv,
   comfyuiSecretKeys,
@@ -431,13 +432,19 @@ export async function runPanelOrchestrator(): Promise<void> {
   const envComfyuiPath = process.env.COMFYUI_PATH;
   const isLoopbackUrl = (u: string): boolean => {
     try {
-      const h = new URL(u).hostname.toLowerCase();
-      return h === "127.0.0.1" || h === "localhost" || h === "::1" || h === "0.0.0.0" || h === "";
+      return isLoopbackHost(new URL(u).hostname);
     } catch {
       return true;
     }
   };
   let comfyuiPath = isLoopbackUrl(comfyuiUrl) ? envComfyuiPath : undefined;
+  // Force the child remote only when opted in (--force-remote) or the target is
+  // non-loopback; a default loopback panel user with no COMFYUI_PATH is left to
+  // auto-detect its local install (keeps download_model/apply_manifest/scans).
+  const forceRemoteEnv = (): Record<string, string> =>
+    isForceRemoteFlagSet() || !isLoopbackUrl(comfyuiUrl)
+      ? { COMFYUI_MCP_FORCE_REMOTE: "1" }
+      : {};
   const model = process.env.COMFYUI_MCP_PANEL_MODEL ?? "claude-opus-4-8";
   const envEffort = process.env.COMFYUI_MCP_PANEL_EFFORT;
   const effort: Effort | undefined = isEffort(envEffort) ? envEffort : undefined;
@@ -628,9 +635,7 @@ export async function runPanelOrchestrator(): Promise<void> {
   const comfyuiBaseEnv = (): Record<string, string> => ({
     COMFYUI_URL: comfyuiUrl,
     COMFYUI_MCP_PROGRESS_DIR: progressDir,
-    // No local path → force remote, else a loopback-hosted remote (port-forward)
-    // re-detects LOCAL in the child and writes generations.db to CWD.
-    ...(comfyuiPath ? { COMFYUI_PATH: comfyuiPath } : { COMFYUI_MCP_FORCE_REMOTE: "1" }),
+    ...(comfyuiPath ? { COMFYUI_PATH: comfyuiPath } : forceRemoteEnv()),
     // Pass through optional credentials the comfyui MCP honors, when set in the
     // orchestrator's env — so Codex can do everything Claude can (Civitai, HF).
     ...(process.env.CIVITAI_API_TOKEN ? { CIVITAI_API_TOKEN: process.env.CIVITAI_API_TOKEN } : {}),
@@ -762,8 +767,7 @@ export async function runPanelOrchestrator(): Promise<void> {
         COMFYUI_MCP_PROGRESS_DIR: progressDir,
         // Local mode → enables download_model, apply_manifest (installer packs),
         // and model scans so the agent installs the right way instead of curl.
-        // Otherwise force remote (see comfyuiBaseEnv above).
-        ...(comfyuiPath ? { COMFYUI_PATH: comfyuiPath } : { COMFYUI_MCP_FORCE_REMOTE: "1" }),
+        ...(comfyuiPath ? { COMFYUI_PATH: comfyuiPath } : forceRemoteEnv()),
       }),
     },
   });

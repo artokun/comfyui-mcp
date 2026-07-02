@@ -144,7 +144,8 @@ const LOOPBACK_HOSTS = new Set([
   "0.0.0.0",
 ]);
 
-function isLoopbackHost(host: string | undefined): boolean {
+/** True when a hostname is loopback (or absent → assume local). */
+export function isLoopbackHost(host: string | undefined): boolean {
   if (!host) return true; // No URL → assume local
   return LOOPBACK_HOSTS.has(host.toLowerCase());
 }
@@ -261,9 +262,7 @@ function resolveUrlOverride(): ComfyUITarget | undefined {
   }
 }
 
-/** Escape hatch for isLoopbackHost(): dstack/RunPod-style port-forwarding
- *  makes a remote ComfyUI reachable at "localhost:8188", so a --comfyui-url
- *  target needs a way to force remote classification despite the hostname. */
+/** Force remote classification for a loopback --comfyui-url (dstack/RunPod port-forwards). */
 function resolveForceRemote(): boolean {
   const argv = process.argv.slice(2);
   if (argv.includes("--force-remote")) return true;
@@ -371,17 +370,16 @@ export function isLocalMode(): boolean {
   return !isCloudMode() && !isRemoteMode();
 }
 
-/** Exposed separately because env-capabilities.ts classifies a ComfyUI URL
- *  resolved independently of config.ts's urlOverride (e.g. connect <url>). */
+/** For env-capabilities.ts, which classifies a URL independently of urlOverride. */
 export function isForceRemoteFlagSet(): boolean {
   return forceRemote;
 }
 
-/** Filesystem-safe id for the target ComfyUI instance — scopes per-instance data
- *  (e.g. the generations DB) so multiple remotes keep separate histories. */
+/** Filesystem-safe id for the target instance — scopes per-instance data (e.g. generations DB). */
 export function getInstanceSlug(): string {
   if (isCloudMode()) return "comfy-cloud";
-  const raw = `${config.comfyuiHost}_${config.resolvedPort}`;
+  const host = isLoopbackHost(config.comfyuiHost) ? "localhost" : config.comfyuiHost;
+  const raw = `${host}_${config.resolvedPort}`;
   const slug = raw.replace(/[^a-zA-Z0-9._-]/g, "-").replace(/^-+|-+$/g, "");
   return slug || "comfyui";
 }
