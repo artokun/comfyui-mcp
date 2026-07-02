@@ -19,6 +19,7 @@ import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { platform, release, totalmem, cpus } from "node:os";
 import { join } from "node:path";
+import { isForceRemoteFlagSet } from "../config.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -144,9 +145,13 @@ function shortPython(v: string | undefined): string | undefined {
 }
 
 /** Is the COMFYUI_URL host loopback? → LOCAL, else REMOTE. Unknown URL → LOCAL
- *  (the panel's overwhelming default; never block on an unparseable URL). */
+ *  (the panel's overwhelming default; never block on an unparseable URL).
+ *  --force-remote/COMFYUI_MCP_FORCE_REMOTE overrides the loopback check (e.g.
+ *  a dstack/RunPod port-forward makes a remote ComfyUI reachable at
+ *  "localhost:8188"), so this stays consistent with config.ts's isRemoteMode(). */
 function classifyLocation(url: string | undefined): "LOCAL" | "REMOTE" {
   if (!url) return "LOCAL";
+  if (isForceRemoteFlagSet()) return "REMOTE";
   try {
     const host = new URL(url).hostname.toLowerCase();
     if (host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "0.0.0.0") {

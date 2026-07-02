@@ -553,12 +553,23 @@ The server auto-detects your ComfyUI installation and port. Override with enviro
 | Mode | Trigger | Local FS / process tools? |
 |------|---------|----------------------------|
 | **Local** | default | yes |
-| **Remote** | `--comfyui-url` / `COMFYUI_URL` points at a non-loopback host | no — server skips `COMFYUI_PATH` auto-detection so stale local installs can't silently absorb uploads |
+| **Remote** | `--comfyui-url` / `COMFYUI_URL` points at a non-loopback host, or `--force-remote` is set | no — server skips `COMFYUI_PATH` auto-detection so stale local installs can't silently absorb uploads |
 | **Cloud** | `COMFYUI_API_KEY` is set (targets [Comfy Cloud](https://cloud.comfy.org)) | no — HTTP primitives route via `cloud.comfy.org` over `X-API-Key`; WebSocket and local-only tools throw `CLOUD_UNSUPPORTED` |
+
+Some setups (e.g. [dstack](https://dstack.ai) driving ComfyUI on RunPod) port-forward
+a remote ComfyUI back to `localhost:8188`, so the loopback check above gets it
+wrong — the install isn't actually local. Pass `--force-remote` (or set
+`COMFYUI_MCP_FORCE_REMOTE=1`) alongside `--comfyui-url`/`COMFYUI_URL` to force
+remote mode regardless of hostname:
+
+```bash
+npx -y comfyui-mcp@latest --comfyui-url http://localhost:8188 --force-remote
+```
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `COMFYUI_URL` | | Full ComfyUI URL, e.g. `https://comfy.example.com:8443` — overrides `COMFYUI_HOST`/`PORT`/`SSL` and skips auto-detection. A **path prefix is preserved** (e.g. `https://host/comfyapi`) for reverse-proxied instances. Non-loopback hosts opt into **remote mode**. |
+| `COMFYUI_MCP_FORCE_REMOTE` | | Set to `1`/`true` (or pass `--force-remote`) to force **remote mode** even when `COMFYUI_URL`/`--comfyui-url` resolves to a loopback host — for port-forwarded remote installs (e.g. dstack/RunPod) that are reachable at `localhost`. No effect without a `COMFYUI_URL`/`--comfyui-url`. |
 | `COMFYUI_HOST` | `127.0.0.1` | ComfyUI server address |
 | `COMFYUI_PORT` | *(auto-detect)* | ComfyUI server port (tries 8188, then 8000) |
 | `COMFYUI_PATH` | *(auto-detect)* | Path to ComfyUI data directory. Auto-detection suppressed in remote/cloud modes. |
@@ -598,6 +609,7 @@ npx -y comfyui-mcp@latest --http --host 0.0.0.0 --port 9100   # bind/port overri
 | `--host <h>` | `MCP_HOST` | `127.0.0.1` | HTTP bind host (use `0.0.0.0` to expose) |
 | `--port <n>` | `MCP_PORT` | `9100` | HTTP port |
 | `--comfyui-url <url>` | `COMFYUI_URL` | *(auto-detect)* | Target a specific (incl. remote) ComfyUI |
+| `--force-remote` | `COMFYUI_MCP_FORCE_REMOTE` | `false` | Force remote mode for a loopback `--comfyui-url` (e.g. dstack/RunPod port-forwards to `localhost`) |
 
 ### Other agents & local LLMs (Hermes, OpenClaw, Copilot CLI, Ollama)
 

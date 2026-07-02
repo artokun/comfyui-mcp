@@ -21,6 +21,7 @@ describe("config mode detection", () => {
     process.env.COMFYUI_PATH = "";
     process.env.COMFYUI_HOST = "";
     process.env.COMFYUI_PORT = "8188";
+    process.env.COMFYUI_MCP_FORCE_REMOTE = "";
   });
 
   afterEach(() => {
@@ -54,6 +55,38 @@ describe("config mode detection", () => {
     expect(mod.isRemoteMode()).toBe(false);
     expect(mod.isCloudMode()).toBe(false);
     expect(mod.isLocalMode()).toBe(true);
+  });
+
+  it("--force-remote overrides a loopback COMFYUI_URL into remote mode", async () => {
+    process.env.COMFYUI_URL = "http://localhost:8188";
+    process.argv = [...OLD_ARGV, "--force-remote"];
+    const mod = await import("../config.js");
+    expect(mod.isForceRemoteFlagSet()).toBe(true);
+    expect(mod.isRemoteMode()).toBe(true);
+    expect(mod.isLocalMode()).toBe(false);
+    expect(mod.config.comfyuiPath).toBeUndefined();
+  });
+
+  it("COMFYUI_MCP_FORCE_REMOTE=1 overrides a loopback COMFYUI_URL into remote mode", async () => {
+    process.env.COMFYUI_URL = "http://127.0.0.1:8188";
+    process.env.COMFYUI_MCP_FORCE_REMOTE = "1";
+    const mod = await import("../config.js");
+    expect(mod.isRemoteMode()).toBe(true);
+  });
+
+  it("--force-remote with no COMFYUI_URL is a no-op (still local)", async () => {
+    process.argv = [...OLD_ARGV, "--force-remote"];
+    const mod = await import("../config.js");
+    expect(mod.isForceRemoteFlagSet()).toBe(true);
+    expect(mod.isRemoteMode()).toBe(false);
+    expect(mod.isLocalMode()).toBe(true);
+  });
+
+  it("without --force-remote, a non-loopback URL is still remote (unaffected)", async () => {
+    process.env.COMFYUI_URL = "http://192.168.1.50:8188";
+    const mod = await import("../config.js");
+    expect(mod.isForceRemoteFlagSet()).toBe(false);
+    expect(mod.isRemoteMode()).toBe(true);
   });
 
   it("explicit COMFYUI_PATH always wins over smart-detect", async () => {

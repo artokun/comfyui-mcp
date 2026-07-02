@@ -261,6 +261,22 @@ function resolveUrlOverride(): ComfyUITarget | undefined {
   }
 }
 
+/**
+ * Resolve --force-remote (argv) or COMFYUI_MCP_FORCE_REMOTE=1/true (env).
+ *
+ * Escape hatch for the loopback heuristic in isLoopbackHost(): tools like
+ * dstack that port-forward a remote ComfyUI (e.g. on RunPod) back to the
+ * local machine make --comfyui-url legitimately point at "localhost:8188"
+ * even though the install is not on this box. Setting this flag skips the
+ * loopback check so a --comfyui-url target is always treated as remote.
+ */
+function resolveForceRemote(): boolean {
+  const argv = process.argv.slice(2);
+  if (argv.includes("--force-remote")) return true;
+  const env = process.env.COMFYUI_MCP_FORCE_REMOTE;
+  return env === "1" || env === "true";
+}
+
 const configSchema = z.object({
   comfyuiHost: z.string().default("127.0.0.1"),
   comfyuiPort: z.coerce.number().int().positive().optional(),
@@ -286,11 +302,20 @@ export type Config = z.infer<typeof configSchema> & { resolvedPort: number };
 const urlOverride = resolveUrlOverride();
 const cloudApiKey = process.env.COMFYUI_API_KEY?.trim() || undefined;
 const cloudActive = Boolean(cloudApiKey);
-const remoteUrlActive = Boolean(urlOverride) && !isLoopbackHost(urlOverride?.host);
+const forceRemote = resolveForceRemote();
+const remoteUrlActive =
+  Boolean(urlOverride) && (forceRemote || !isLoopbackHost(urlOverride?.host));
 
 if (cloudActive) {
   console.error(
     `[comfyui-mcp] Comfy Cloud mode enabled (COMFYUI_API_KEY set) — local FS/process tools will throw.`,
+  );
+}
+
+if (forceRemote && !urlOverride) {
+  console.error(
+    `[comfyui-mcp] WARNING: --force-remote/COMFYUI_MCP_FORCE_REMOTE set but no ` +
+      `--comfyui-url/COMFYUI_URL given — there's no target to force remote, so this has no effect.`,
   );
 }
 
@@ -350,6 +375,17 @@ export function isRemoteMode(): boolean {
 
 export function isLocalMode(): boolean {
   return !isCloudMode() && !isRemoteMode();
+}
+
+/**
+ * Was --force-remote/COMFYUI_MCP_FORCE_REMOTE set? Exposed for callers (e.g.
+ * the panel orchestrator's env-capabilities probe) that classify a ComfyUI
+ * URL independently of config.ts's own urlOverride — connect <url> resolves
+ * its own target at runtime, so it needs the same escape hatch applied to
+ * whichever URL it's actually driving.
+ */
+export function isForceRemoteFlagSet(): boolean {
+  return forceRemote;
 }
 
 export function getCloudUrl(): string {
