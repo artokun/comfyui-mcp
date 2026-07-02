@@ -15,8 +15,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
-import { startUiBridge } from "../services/ui-bridge.js";
+import readline from "node:readline";
+import { startUiBridge, type UiBridge } from "../services/ui-bridge.js";
 import { setupSecureBridge, type SecureBridge } from "../services/secure-bridge.js";
+import { detectInstallMode } from "../services/self-update.js";
 import { SessionStore } from "./session-store.js";
 import { logger } from "../utils/logger.js";
 import {
@@ -253,6 +255,103 @@ function parentIdentityMatches(pid: number, expectedStartedAtMs: number | null):
   return Math.abs(actualStartedAtMs - expectedStartedAtMs) <= 2000;
 }
 
+interface OrchestratorLock {
+  pid?: unknown;
+  startedAt?: unknown;
+  version?: unknown;
+}
+
+function readOrchestratorLock(lockPath: string): OrchestratorLock | null {
+  try {
+    const raw = JSON.parse(readFileSync(lockPath, "utf8")) as unknown;
+    return raw && typeof raw === "object" ? (raw as OrchestratorLock) : null;
+  } catch {
+    return null; // missing / unreadable / not JSON — nothing to reclaim from.
+  }
+}
+
+/** A single y/n question on the real terminal. Resolves false on anything but
+ *  an explicit y/yes (a closed stdin, EOF, or a stray keypress all count as no). */
+function promptYesNo(question: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    rl.question(question, (answer) => {
+      rl.close();
+      resolve(/^y(es)?$/i.test(answer.trim()));
+    });
+  });
+}
+
+/**
+ * The bridge port is almost always held by a PREVIOUS comfyui-mcp orchestrator
+ * that never exited — a stale panel session, one orphaned by a ComfyUI crash,
+ * or simply an older version still running while the user upgraded — not some
+ * unrelated process. Rather than leave the user to go hunt down and kill a PID
+ * themselves (the old behavior: log a warning and stay degraded), read the
+ * lockfile the holder wrote at its own startup (see below) and, ONLY when
+ * stdin is a real terminal — `--panel-orchestrator` / `connect` run standalone
+ * in the user's own shell and are mutually exclusive with the stdio MCP server,
+ * so stdin is never claimed by the MCP JSON-RPC protocol here — interactively
+ * offer to stop it and retry the bind.
+ *
+ * Returns false (falls back to the existing hard-fail message) whenever it
+ * can't confidently identify a reclaimable holder, isn't running
+ * interactively, or the user declines.
+ */
+async function tryReclaimBridgePort(
+  bridge: UiBridge,
+  port: number,
+  lockPath: string,
+): Promise<boolean> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return false;
+  const lock = readOrchestratorLock(lockPath);
+  const pid = typeof lock?.pid === "number" ? lock.pid : NaN;
+  if (!Number.isInteger(pid) || pid <= 0 || !pidExists(pid)) return false;
+
+  const myVersion = detectInstallMode().currentVersion ?? "unknown";
+  const heldVersion = typeof lock?.version === "string" ? lock.version : "unknown";
+  const startedAt = typeof lock?.startedAt === "string" ? lock.startedAt : null;
+  const holderNote =
+    heldVersion !== "unknown" && myVersion !== "unknown" && heldVersion !== myVersion
+      ? `an older comfyui-mcp v${heldVersion} (this is v${myVersion})`
+      : `another comfyui-mcp v${heldVersion} session`;
+  logger.warn(
+    `[panel-orchestrator] port ${port} is already held by ${holderNote} — pid ${pid}` +
+      `${startedAt ? `, started ${startedAt}` : ""}.`,
+  );
+  const ok = await promptYesNo(
+    `Stop pid ${pid} and take over this port with the current version? [y/N] `,
+  );
+  if (!ok) return false;
+
+  logger.info(`[panel-orchestrator] stopping pid ${pid} to reclaim port ${port}…`);
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch (err) {
+    logger.warn(
+      `[panel-orchestrator] couldn't signal pid ${pid}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return false;
+  }
+  // Give it a moment to release the port; escalate to SIGKILL if it's still
+  // hanging around, then retry the bind once (bridge.start() runs its own
+  // EADDRINUSE backoff, covering the OS's brief port-release lag).
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline && pidExists(pid)) {
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  if (pidExists(pid)) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // already gone
+    }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  bridge.start();
+  return bridge.whenReady();
+}
+
 /**
  * Tie the orchestrator's lifetime to ComfyUI's. The launcher (the panel pack)
  * passes its own PID as COMFYUI_MCP_PARENT_PID; we poll whether that process is
@@ -368,13 +467,18 @@ export async function runPanelOrchestrator(): Promise<void> {
   const bridgeToken = wantSecureBridge ? randomBytes(24).toString("hex") : null;
 
   // Dedicated PANEL bridge port (default 9180). Token-gated only in secure mode.
-  const bridge = startUiBridge(Number(process.env.COMFYUI_MCP_BRIDGE_PORT) || 9180, bridgeToken);
+  const lockPort = Number(process.env.COMFYUI_MCP_BRIDGE_PORT) || 9180;
+  const lockPath = orchLockPath(lockPort);
+  const bridge = startUiBridge(lockPort, bridgeToken);
 
   // Owning the bridge port is the orchestrator's whole job — if another process
   // holds it, fail loudly instead of running uselessly. (This also avoids the
   // case where a failed bind leaves the process with no live handles and it
-  // exits silently.)
-  const bound = await bridge.whenReady();
+  // exits silently.) First try to reclaim it interactively (see
+  // tryReclaimBridgePort) — almost always a stale/older comfyui-mcp session,
+  // not some unrelated process — before giving up.
+  let bound = await bridge.whenReady();
+  if (!bound) bound = await tryReclaimBridgePort(bridge, lockPort, lockPath);
   if (!bound) {
     logger.error(
       `[panel-orchestrator] could not bind the panel bridge port — another process owns it. Free that port and restart the orchestrator. Override the port with COMFYUI_MCP_BRIDGE_PORT.`,
@@ -386,8 +490,6 @@ export async function runPanelOrchestrator(): Promise<void> {
   // panel pack can detect and replace us if we're ever orphaned across a Comfy
   // restart. Written only after a successful bind (so the file always names the
   // process that actually holds the port).
-  const lockPort = Number(process.env.COMFYUI_MCP_BRIDGE_PORT) || 9180;
-  const lockPath = orchLockPath(lockPort);
   try {
     writeFileSync(
       lockPath,
@@ -408,6 +510,9 @@ export async function runPanelOrchestrator(): Promise<void> {
         // without opening the bridge. Mirrors PANEL_AGENT_BACKEND.
         backend: (process.env.PANEL_AGENT_BACKEND ?? "claude").toLowerCase(),
         startedAt: new Date().toISOString(),
+        // npm package version — read by a NEXT orchestrator's tryReclaimBridgePort
+        // to tell the user whose/which version currently holds the port.
+        version: detectInstallMode().currentVersion ?? null,
       }),
     );
   } catch (err) {
@@ -876,9 +981,8 @@ export async function runPanelOrchestrator(): Promise<void> {
     logger.info(
       `[panel-orchestrator] retargeted ComfyUI ${prev} → ${comfyuiUrl} (${isLoopbackUrl(next) ? "local" : "remote"} mode) from panel hello`,
     );
-    // Keep the secure bridge advertised at the (new) pod so a later panel load
-    // there still gets the wss URL.
-    if (secureBridge && isRemoteHttpsUrl(comfyuiUrl)) void secureBridge.advertise(comfyuiUrl);
+    // Advertising itself happens unconditionally on every hello (see below) —
+    // a retarget doesn't need its own advertise call here.
     return true;
   };
 
@@ -1028,6 +1132,16 @@ export async function runPanelOrchestrator(): Promise<void> {
       // Retarget ComfyUI to the URL the browser was served from (window.location),
       // BEFORE the readiness probe so the "ready" ack reflects the right instance.
       applyComfyuiUrl((event as { comfyui_url?: unknown }).comfyui_url);
+      // Re-advertise the secure bridge on EVERY hello, not just when the URL
+      // changes: advertiseBridge's own retries are short (~3s) and can race a
+      // pod-side ComfyUI restart, permanently leaving the pod's stored bridge
+      // URL/token stale — the only symptom being a browser refresh that can
+      // never reconnect ("rejected a bridge connection with a missing/invalid
+      // token"), since a fresh page load re-fetches that stale value. A tab can
+      // only say hello once the pod is actually reachable, so retrying here on
+      // every connect self-heals a missed advertise with no extra risk — the
+      // POST is cheap and idempotent (see advertiseBridge's own docstring).
+      if (secureBridge && isRemoteHttpsUrl(comfyuiUrl)) void secureBridge.advertise(comfyuiUrl);
       // Per-tab backend selection (single-port multi-provider). The panel names
       // its chosen provider on connect (and on a switch it re-sends hello / a
       // set_backend); absent or unknown → the default.
