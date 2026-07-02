@@ -146,9 +146,7 @@ function shortPython(v: string | undefined): string | undefined {
 
 /** Is the COMFYUI_URL host loopback? → LOCAL, else REMOTE. Unknown URL → LOCAL
  *  (the panel's overwhelming default; never block on an unparseable URL).
- *  --force-remote/COMFYUI_MCP_FORCE_REMOTE overrides the loopback check (e.g.
- *  a dstack/RunPod port-forward makes a remote ComfyUI reachable at
- *  "localhost:8188"), so this stays consistent with config.ts's isRemoteMode(). */
+ *  --force-remote overrides this, keeping it in sync with isRemoteMode(). */
 function classifyLocation(url: string | undefined): "LOCAL" | "REMOTE" {
   if (!url) return "LOCAL";
   if (isForceRemoteFlagSet()) return "REMOTE";

@@ -261,15 +261,9 @@ function resolveUrlOverride(): ComfyUITarget | undefined {
   }
 }
 
-/**
- * Resolve --force-remote (argv) or COMFYUI_MCP_FORCE_REMOTE=1/true (env).
- *
- * Escape hatch for the loopback heuristic in isLoopbackHost(): tools like
- * dstack that port-forward a remote ComfyUI (e.g. on RunPod) back to the
- * local machine make --comfyui-url legitimately point at "localhost:8188"
- * even though the install is not on this box. Setting this flag skips the
- * loopback check so a --comfyui-url target is always treated as remote.
- */
+/** Escape hatch for isLoopbackHost(): dstack/RunPod-style port-forwarding
+ *  makes a remote ComfyUI reachable at "localhost:8188", so a --comfyui-url
+ *  target needs a way to force remote classification despite the hostname. */
 function resolveForceRemote(): boolean {
   const argv = process.argv.slice(2);
   if (argv.includes("--force-remote")) return true;
@@ -377,13 +371,8 @@ export function isLocalMode(): boolean {
   return !isCloudMode() && !isRemoteMode();
 }
 
-/**
- * Was --force-remote/COMFYUI_MCP_FORCE_REMOTE set? Exposed for callers (e.g.
- * the panel orchestrator's env-capabilities probe) that classify a ComfyUI
- * URL independently of config.ts's own urlOverride — connect <url> resolves
- * its own target at runtime, so it needs the same escape hatch applied to
- * whichever URL it's actually driving.
- */
+/** Exposed separately because env-capabilities.ts classifies a ComfyUI URL
+ *  resolved independently of config.ts's urlOverride (e.g. connect <url>). */
 export function isForceRemoteFlagSet(): boolean {
   return forceRemote;
 }
