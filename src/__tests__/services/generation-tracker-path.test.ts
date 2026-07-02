@@ -3,6 +3,12 @@ import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+const homeState = vi.hoisted(() => ({ dir: "" }));
+vi.mock("node:os", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:os")>();
+  return { ...actual, homedir: () => homeState.dir || actual.homedir() };
+});
+
 // generation-tracker.ts pulls in config.ts (top-level await for port detect), so
 // each test re-evaluates both with a fresh process.env via vi.resetModules().
 const OLD_ENV = process.env;
@@ -27,6 +33,7 @@ describe("GenerationTracker default DB path", () => {
     process.env.COMFYUI_PORT = "8188"; // skip port auto-detect
     process.env.COMFYUI_MCP_FORCE_REMOTE = "";
     process.env.COMFYUI_MCP_DATA_DIR = "";
+    homeState.dir = "";
   });
 
   afterEach(() => {
@@ -60,28 +67,20 @@ describe("GenerationTracker default DB path", () => {
     process.env.COMFYUI_MCP_DATA_DIR = dataDir;
     const { GenerationTracker } = await import("../../services/generation-tracker.js");
     const t = new GenerationTracker();
-    const expected = join(dataDir, "instances", "127.0.0.1_8188", "generations.db");
+    const expected = join(dataDir, "instances", "localhost_8188", "generations.db");
     expect(existsSync(expected)).toBe(true);
     t.close();
   });
 
-  it("defaults the base dir to ~/.comfyui-mcp when COMFYUI_MCP_DATA_DIR is unset", async () => {
+  it("defaults the base dir to <home>/.comfyui-mcp when COMFYUI_MCP_DATA_DIR is unset", async () => {
+    const fakeHome = tmp("gt-home-");
+    homeState.dir = fakeHome;
     process.env.COMFYUI_URL = "http://192.168.1.50:8188";
     const { GenerationTracker } = await import("../../services/generation-tracker.js");
-    const { homedir } = await import("node:os");
     const t = new GenerationTracker();
-    const expected = join(homedir(), ".comfyui-mcp", "instances", "192.168.1.50_8188", "generations.db");
+    const expected = join(fakeHome, ".comfyui-mcp", "instances", "192.168.1.50_8188", "generations.db");
     expect(existsSync(expected)).toBe(true);
     t.close();
-    // Clean up only the instance dir we created under the real homedir.
-    try {
-      rmSync(join(homedir(), ".comfyui-mcp", "instances", "192.168.1.50_8188"), {
-        recursive: true,
-        force: true,
-      });
-    } catch {
-      // best-effort
-    }
   });
 
   it("explicit dbPath argument still wins over the default", async () => {

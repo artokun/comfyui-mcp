@@ -6,6 +6,21 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### Added
+
+- **`--force-remote` flag** (`COMFYUI_MCP_FORCE_REMOTE=1`) — classify a loopback
+  `--comfyui-url` as remote, for dstack/RunPod-style port-forwards where a remote
+  ComfyUI is reachable at `localhost:8188`. The orchestrator forwards it to spawned
+  agents.
+
+### Changed
+
+- **`generations.db` for remote/cloud/undetected targets** now lives under
+  `~/.comfyui-mcp/instances/<host_port>/` (override with `COMFYUI_MCP_DATA_DIR`)
+  instead of the current working directory. Loopback hosts share one
+  `localhost_<port>` slug. Existing remote users' CWD `generations.db` is not
+  migrated — the history restarts empty at the new location.
+
 ## [0.22.0] - 2026-06-29
 
 ### Added
