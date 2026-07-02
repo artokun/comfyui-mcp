@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { mkdirSync } from "node:fs";
+import { homedir } from "node:os";
 import BetterSqlite3 from "better-sqlite3";
 import type Database from "better-sqlite3";
-import { config } from "../config.js";
+import { config, getInstanceSlug } from "../config.js";
 import { logger } from "../utils/logger.js";
 import { FileHasher, type FileHashResult } from "./file-hasher.js";
 
@@ -158,8 +159,10 @@ export class GenerationTracker {
     if (config.comfyuiPath) {
       return join(config.comfyuiPath, "comfyui-mcp", "generations.db");
     }
-    // Fallback: next to the MCP server package
-    return join(process.cwd(), "generations.db");
+    // Remote/cloud/undetected: comfyuiPath is undefined by design. Use a stable
+    // per-user data dir (override: COMFYUI_MCP_DATA_DIR) instead of littering CWD.
+    const baseDir = process.env.COMFYUI_MCP_DATA_DIR?.trim() || join(homedir(), ".comfyui-mcp");
+    return join(baseDir, "instances", getInstanceSlug(), "generations.db");
   }
 
   /**

@@ -628,7 +628,9 @@ export async function runPanelOrchestrator(): Promise<void> {
   const comfyuiBaseEnv = (): Record<string, string> => ({
     COMFYUI_URL: comfyuiUrl,
     COMFYUI_MCP_PROGRESS_DIR: progressDir,
-    ...(comfyuiPath ? { COMFYUI_PATH: comfyuiPath } : {}),
+    // No local path → force remote, else a loopback-hosted remote (port-forward)
+    // re-detects LOCAL in the child and writes generations.db to CWD.
+    ...(comfyuiPath ? { COMFYUI_PATH: comfyuiPath } : { COMFYUI_MCP_FORCE_REMOTE: "1" }),
     // Pass through optional credentials the comfyui MCP honors, when set in the
     // orchestrator's env — so Codex can do everything Claude can (Civitai, HF).
     ...(process.env.CIVITAI_API_TOKEN ? { CIVITAI_API_TOKEN: process.env.CIVITAI_API_TOKEN } : {}),
@@ -760,7 +762,8 @@ export async function runPanelOrchestrator(): Promise<void> {
         COMFYUI_MCP_PROGRESS_DIR: progressDir,
         // Local mode → enables download_model, apply_manifest (installer packs),
         // and model scans so the agent installs the right way instead of curl.
-        ...(comfyuiPath ? { COMFYUI_PATH: comfyuiPath } : {}),
+        // Otherwise force remote (see comfyuiBaseEnv above).
+        ...(comfyuiPath ? { COMFYUI_PATH: comfyuiPath } : { COMFYUI_MCP_FORCE_REMOTE: "1" }),
       }),
     },
   });

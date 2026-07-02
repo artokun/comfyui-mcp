@@ -101,6 +101,25 @@ describe("config mode detection", () => {
     const mod = await import("../config.js");
     expect(() => mod.getApiKey()).toThrow(/COMFYUI_API_KEY/);
   });
+
+  it("getInstanceSlug() derives a filesystem-safe host_port for a remote URL", async () => {
+    process.env.COMFYUI_URL = "http://192.168.1.50:8188";
+    const mod = await import("../config.js");
+    expect(mod.getInstanceSlug()).toBe("192.168.1.50_8188");
+  });
+
+  it("getInstanceSlug() keeps dots/hyphens for a RunPod-style https host", async () => {
+    process.env.COMFYUI_URL = "https://abcd-8188.proxy.runpod.net";
+    const mod = await import("../config.js");
+    expect(mod.getInstanceSlug()).toBe("abcd-8188.proxy.runpod.net_443");
+  });
+
+  it("getInstanceSlug() is 'comfy-cloud' in cloud mode", async () => {
+    process.env.COMFYUI_API_KEY = "test-key";
+    process.env.COMFYUI_PORT = "8188";
+    const mod = await import("../config.js");
+    expect(mod.getInstanceSlug()).toBe("comfy-cloud");
+  });
 });
 
 describe("remote self-hosted: path prefix + generic auth (#52)", () => {

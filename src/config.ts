@@ -377,6 +377,15 @@ export function isForceRemoteFlagSet(): boolean {
   return forceRemote;
 }
 
+/** Filesystem-safe id for the target ComfyUI instance — scopes per-instance data
+ *  (e.g. the generations DB) so multiple remotes keep separate histories. */
+export function getInstanceSlug(): string {
+  if (isCloudMode()) return "comfy-cloud";
+  const raw = `${config.comfyuiHost}_${config.resolvedPort}`;
+  const slug = raw.replace(/[^a-zA-Z0-9._-]/g, "-").replace(/^-+|-+$/g, "");
+  return slug || "comfyui";
+}
+
 export function getCloudUrl(): string {
   return config.comfyuiCloudUrl;
 }
