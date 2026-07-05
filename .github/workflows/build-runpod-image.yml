@@ -1,7 +1,7 @@
 name: Build RunPod image
 
 # Builds docker/runpod's image on GitHub-hosted runners with a BuildKit registry
-# cache, so unchanged layers (cu130 torch, ComfyUI, the base OS) are reused
+# cache, so unchanged layers (the pinned torch, ComfyUI, the base OS) are reused
 # across runs instead of a full from-scratch build every time — this is what
 # removes the "needs a local Docker daemon on a manual build machine" step.
 #
@@ -43,7 +43,7 @@ jobs:
       - uses: actions/checkout@v4
 
       # Standard GitHub-hosted runners ship ~20-25 GB free under /, which is
-      # tight even for the lean build (base image + cu130 torch + ComfyUI).
+      # tight even for the lean build (base image + the pinned torch + ComfyUI).
       # Drop preinstalled toolchains this build doesn't use to buy headroom.
       - name: Free up runner disk space
         run: |

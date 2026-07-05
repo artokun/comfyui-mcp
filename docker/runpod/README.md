@@ -366,6 +366,7 @@ Create a **Pod template** (or fill these on a one-off GPU pod):
 | **Expose HTTP ports** | **`3000`** (nginx → ComfyUI). Optionally `8081` (code-server), `8001` (app-manager), `8888` (Jupyter). |
 | **Expose TCP ports** | `22` (SSH) |
 | **GPU** | RTX 5090 / any Blackwell or Ada card (cu128 covers both) |
+| **Host driver** | >= 570 (CUDA 12.8) for the default image; >= 580 (CUDA 13) for the `:cu130` perf variant. The entrypoint preflights this (`MIN_DRIVER`) and holds the pod open with a clear message instead of crash-looping. |
 
 **Environment variables** (Pod → Environment):
 

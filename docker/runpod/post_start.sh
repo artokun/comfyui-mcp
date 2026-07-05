@@ -70,11 +70,12 @@ OUTPUT_DIR="${WORKSPACE}/output"
 LOG_DIR="${COMFY_LOG_DIR:-/var/log/comfyui-mcp}"
 mkdir -p "${LOG_DIR}"
 
-# Minimum host NVIDIA driver for this image. It ships the CUDA 13 stack (cu130
-# torch 2.9.1), and a Blackwell GPU (RTX 50xx / sm_120) additionally needs a
-# Blackwell-aware driver — CUDA 13.0 requires driver >= ~580. Override for a
-# different image/GPU, or set MIN_DRIVER=0 to disable the check.
-MIN_DRIVER="${MIN_DRIVER:-580}"
+# Minimum host NVIDIA driver. Baked per image variant by the Dockerfile
+# (MIN_DRIVER_DEFAULT env: 570 for the default cu128 build — the same CUDA 12.8
+# bar the runpod/pytorch base's container-start gate already enforces — 580 for
+# the cu130 perf variant, which needs CUDA 13). Override at runtime with
+# MIN_DRIVER, or set MIN_DRIVER=0 to disable the check.
+MIN_DRIVER="${MIN_DRIVER:-${MIN_DRIVER_DEFAULT:-570}}"
 
 # -----------------------------------------------------------------------------
 # 0. GPU DRIVER PREFLIGHT. The host NVIDIA driver is NOT upgradable from inside the
@@ -87,13 +88,13 @@ if [ "${MIN_DRIVER}" != "0" ] && command -v nvidia-smi >/dev/null 2>&1; then
   GPU_NAME="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)"
   DRV="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1)"
   DRV_MAJOR="${DRV%%.*}"
-  log "GPU: ${GPU_NAME:-unknown} | driver: ${DRV:-unknown} (this CUDA 13 image needs driver >= ${MIN_DRIVER})"
+  log "GPU: ${GPU_NAME:-unknown} | driver: ${DRV:-unknown} (this image needs driver >= ${MIN_DRIVER})"
   if [ -n "${DRV_MAJOR}" ] && [ "${DRV_MAJOR}" -lt "${MIN_DRIVER}" ] 2>/dev/null; then
     log "============================================================================"
     log "FATAL: host NVIDIA driver ${DRV} is TOO OLD for this image (needs >= ${MIN_DRIVER})."
     log "  Your ${GPU_NAME:-GPU} (esp. RTX 50xx / Blackwell) needs a newer driver, and the"
     log "  HOST driver CANNOT be upgraded from inside a pod — torch would fail to init CUDA."
-    log "  FIX: TERMINATE this pod and REDEPLOY on a host with CUDA >= 13 / driver >= ${MIN_DRIVER}"
+    log "  FIX: TERMINATE this pod and REDEPLOY on a host with driver >= ${MIN_DRIVER}"
     log "       (filter by 'CUDA Version' on the RunPod deploy screen). Verify with: nvidia-smi"
     log "  Holding the pod open (no crash-loop) so you can inspect it. Set MIN_DRIVER=0 to bypass."
     log "============================================================================"
@@ -361,12 +362,21 @@ mkdir -p "${COMFY_HOME}/user"
 # the whole UI ("won't render") even though curl (no Sec-Fetch headers) works.
 # --enable-cors-header swaps that middleware for the CORS one, letting the
 # proxied browser through.
-# PERF: --use-sage-attention (SageAttention 2.2, baked) + --enable-triton-backend
-# (comfy-kitchen Triton, available in the image). The RTX 5090 wants these on cu130.
-# Override via COMFY_EXTRA_ARGS / edit here to fall back to --use-pytorch-cross-attention.
+# PERF: attention backend PROBED, not assumed — the cu130 perf variant bakes
+# SageAttention 2.2 (+ triton backend) but the default cu128 build ships neither
+# (no linux cu128 wheels exist for this torch line). Passing --use-sage-attention
+# without the package would crash ComfyUI at startup, so import-check the venv
+# and pick the matching flags. Override either way via COMFY_EXTRA_ARGS.
+if "${COMFY_HOME}/venv/bin/python" -c "import sageattention" >/dev/null 2>&1; then
+  ATTN_ARGS=(--use-sage-attention --enable-triton-backend)
+  log "SageAttention baked in this image — launching with --use-sage-attention"
+else
+  ATTN_ARGS=(--use-pytorch-cross-attention)
+  log "no SageAttention in this image (cu128 broad-compat build) — using PyTorch cross-attention"
+fi
 ARGS=(--listen 0.0.0.0 --port "${COMFY_PORT}"
       --enable-manager --enable-cors-header
-      --use-sage-attention --enable-triton-backend
+      "${ATTN_ARGS[@]}"
       --user-directory  "${USER_DIR}"
       --input-directory "${INPUT_DIR}"
       --output-directory "${OUTPUT_DIR}")
