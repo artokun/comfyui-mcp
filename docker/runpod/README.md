@@ -437,13 +437,28 @@ Before any registry push, run the deeper suite:
 ./test_image.sh <image-ref> --static
 ```
 
-For the official Docker Hub image use the gated deploy script — it refuses to
-push an image that fails `test_image.sh`, then re-verifies **what the registry
-actually serves** after the push:
+For the official Docker Hub image, release **npm-publish style** — one command
+that versions, builds, gates, publishes, verifies, and pins the template:
+
+```bash
+npm run runpod:release              # minor bump: 1.6 -> 1.7
+npm run runpod:release:major        # major bump: 1.6 -> 2.0
+npm run runpod:release -- 2.3       # explicit tag
+```
+
+The script (`scripts/runpod-release.mjs`): resolves the next version from
+Docker Hub → builds the fat image (extras donor = the previous release, so no
+63 GB pull; panel layer cache-busted to the panel repo's main SHA) → runs the
+full `test_image.sh` suite via `deploy-dockerhub.sh` (**a failure aborts before
+anything is pushed**) → pushes `:<version>` + `:latest` → `verify_image_remote.py`
+checks what the registry actually serves → pins the RunPod template to the new
+version tag via the GraphQL API (`RUNPOD_API_KEY`; `SKIP_TEMPLATE=1` to skip).
+
+The two lower-level pieces also work standalone:
 
 ```bash
 docker build -t artokun/comfyui-mcp-runpod:build .
-./deploy-dockerhub.sh 1.6        # pushes :1.6 + :latest, verifies both ends
+./deploy-dockerhub.sh 1.7        # gate + push :1.7 + :latest + remote verify
 ```
 
 CI does the same for `ghcr.io/...:cu128-lean` (`verify_image_remote.py`
@@ -451,7 +466,10 @@ inspects the pushed manifest + seed layer without pulling the 20 GB image).
 
 > **Pin the RunPod template to the VERSION tag** (`:1.6`), not `:latest`.
 > RunPod hosts cache images per-tag — a template on `:latest` can silently
-> serve a stale build from a host's cache; a fresh version tag can't.
+> serve a stale build from a host's cache; a fresh version tag can't. The
+> release script does this for you. (Don't use `runpodctl template update`
+> for it — it trips a "public templates cannot have Registry Credentials"
+> API error on public templates; the script's GraphQL path doesn't.)
 
 Override pins as needed:
 
