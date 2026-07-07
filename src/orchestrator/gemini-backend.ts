@@ -430,10 +430,11 @@ export type GeminiMcpServerSpec =
 
 /**
  * Convert our MCP server specs into the ACP `session/new` `mcpServers` array.
- * ACP stdio McpServer: { name, command, args, env:[{name,value}] }. The HTTP
- * variant ({ type:"http", name, url }) is the closest faithful mapping to the ACP
- * spec's HTTP transport (gated by the agent's mcpCapabilities.http) — FLAGGED as
- * unverified against the live gemini CLI. Empty env is the required `[]`.
+ * ACP stdio McpServer: { name, command, args, env:[{name,value}] }. Streamable
+ * HTTP MCP rides the SSE variant ({ type:"sse", name, url, headers:[] }) — the
+ * live Gemini (and Grok) CLIs reject { type:"http" } with Invalid params on the
+ * FIRST user message, after a successful connect ack, so the old "http" mapping
+ * made a panel-MCP-attached tab look connected but fail on first use.
  */
 export function buildAcpMcpServers(
   servers: Record<string, GeminiMcpServerSpec>,
@@ -448,8 +449,7 @@ export function buildAcpMcpServers(
         env: Object.entries(spec.env ?? {}).map(([k, v]) => ({ name: k, value: v })),
       });
     } else {
-      // ASSUMPTION (unverified w/o live CLI): ACP HTTP McpServer variant.
-      out.push({ type: "http", name, url: spec.url });
+      out.push({ type: "sse", name, url: spec.url, headers: [] });
     }
   }
   return out;
