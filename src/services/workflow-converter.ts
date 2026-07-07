@@ -726,7 +726,12 @@ interface PendingLink {
  * Convert an API-format workflow to UI (canvas) format with a generated
  * layout. The inverse of convertUiToApi for well-formed graphs:
  * `convertUiToApi(convertApiToUi(x).workflow)` reproduces `x` (modulo layout,
- * string-normalized link refs, and filled-in defaults for omitted widgets).
+ * string-normalized link refs, and filled-in defaults for omitted widgets —
+ * both deliberate: the canvas itself materializes every widget when queueing).
+ * One knowing asymmetry: `_meta.mode` muted/bypassed becomes UI mode 2/4 and
+ * the node is PRESERVED on canvas, but convertUiToApi excludes mode-2/4 nodes
+ * from the executable prompt (correct queue semantics), so those nodes don't
+ * survive a UI→API round-trip.
  *
  * objectInfo is definitional: widget ORDER in widgets_values comes from
  * input_order (the same order convertUiToApi consumes), including the phantom
