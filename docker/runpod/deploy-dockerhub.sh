@@ -36,7 +36,8 @@ echo "[deploy] pushing ${REPO}:latest…"
 docker push "${REPO}:latest"
 
 echo "[deploy] gate 2/2: verifying what the registry actually serves…"
-python3 "${HERE}/verify_image_remote.py" "docker.io/${REPO}:${VERSION}"
+PY="$(command -v python3 || command -v python)"
+"${PY}" "${HERE}/verify_image_remote.py" "docker.io/${REPO}:${VERSION}"
 
 cat <<EOF
 [deploy] DONE: ${REPO}:${VERSION} (+ :latest) pushed and registry-verified.
