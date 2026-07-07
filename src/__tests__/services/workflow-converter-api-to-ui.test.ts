@@ -294,10 +294,27 @@ describe("convertApiToUi — structure and round-trip", () => {
       save: { class_type: "SaveImage", inputs: { images: ["latent", 0], filename_prefix: "x" } },
     } as never;
     const { workflow: ui, warnings } = convertApiToUi(api, T2I_INFO);
-    expect(warnings.some((w) => w.includes("not a positive integer"))).toBe(true);
+    expect(warnings.some((w) => w.includes("not a usable unique positive integer"))).toBe(true);
     expect(ui.links).toHaveLength(1);
     const save = ui.nodes.find((n) => n.type === "SaveImage")!;
     expect(save.inputs!.find((i) => i.name === "images")!.link).toBe(ui.links[0][0]);
+  });
+
+  it('remaps colliding numeric keys ("1" vs "01") to unique ids, keeping wiring', () => {
+    const api = {
+      "1": { class_type: "EmptyLatentImage", inputs: { width: 512, height: 512, batch_size: 1 } },
+      "01": { class_type: "EmptyLatentImage", inputs: { width: 256, height: 256, batch_size: 1 } },
+      "2": { class_type: "SaveImage", inputs: { images: ["01", 0], filename_prefix: "x" } },
+    } as never;
+    const { workflow: ui, warnings } = convertApiToUi(api, T2I_INFO);
+    expect(warnings.some((w) => w.includes('"01"'))).toBe(true);
+    const ids = ui.nodes.map((n) => n.id);
+    expect(new Set(ids).size).toBe(ids.length); // no duplicate node ids
+    // The link still points at the REMAPPED "01" node, not the "1" node.
+    const save = ui.nodes.find((n) => n.type === "SaveImage")!;
+    const link = ui.links.find((l) => l[0] === save.inputs![0].link)!;
+    const src = ui.nodes.find((n) => n.id === link[1])!;
+    expect(src.widgets_values![0]).toBe(256);
   });
 
   it("warns on a literal value stuck on a connection-only input and drops it", () => {

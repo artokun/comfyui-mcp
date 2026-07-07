@@ -717,7 +717,7 @@ function widgetDefaultValue(spec: NodeInputSpec): unknown {
 interface PendingLink {
   srcKey: string;
   srcSlot: number;
-  tgtId: number;
+  tgtKey: string;
   tgtSlotIdx: number;
   expectedType: string;
 }
@@ -741,21 +741,26 @@ export function convertApiToUi(
   const keys = Object.keys(api);
   const keySet = new Set(keys);
 
-  // Numeric node ids; non-numeric API keys (rare, hand-written) get remapped.
+  // Numeric node ids; non-numeric API keys (rare, hand-written) get remapped,
+  // as does a key whose numeric value another key already claimed ("1" vs
+  // "01" both Number() to 1 — duplicate node ids would corrupt the canvas).
   let maxId = 0;
   for (const k of keys) {
     const n = Number(k);
     if (Number.isInteger(n) && n > 0) maxId = Math.max(maxId, n);
   }
   const idFor = new Map<string, number>();
+  const usedIds = new Set<number>();
   for (const k of keys) {
     const n = Number(k);
-    if (Number.isInteger(n) && n > 0 && !idFor.has(k)) {
+    if (Number.isInteger(n) && n > 0 && !usedIds.has(n)) {
       idFor.set(k, n);
+      usedIds.add(n);
     } else {
       idFor.set(k, ++maxId);
+      usedIds.add(maxId);
       warnings.push(
-        `Node key "${k}" is not a positive integer — remapped to id ${maxId} (connections preserved).`,
+        `Node key "${k}" is not a usable unique positive integer — remapped to id ${maxId} (connections preserved).`,
       );
     }
   }
@@ -787,7 +792,7 @@ export function convertApiToUi(
           pending.push({
             srcKey: String(val[0]),
             srcSlot: val[1],
-            tgtId: id,
+            tgtKey: key,
             tgtSlotIdx: uiInputs.length - 1,
             expectedType: "*",
           });
@@ -821,7 +826,7 @@ export function convertApiToUi(
             pending.push({
               srcKey: String(raw[0]),
               srcSlot: raw[1],
-              tgtId: id,
+              tgtKey: key,
               tgtSlotIdx: uiInputs.length - 1,
               expectedType: widgetSlotType(spec),
             });
@@ -864,7 +869,7 @@ export function convertApiToUi(
             pending.push({
               srcKey: String(raw[0]),
               srcSlot: raw[1],
-              tgtId: id,
+              tgtKey: key,
               tgtSlotIdx: uiInputs.length - 1,
               expectedType: slotType,
             });
@@ -899,7 +904,7 @@ export function convertApiToUi(
           pending.push({
             srcKey: String(val[0]),
             srcSlot: val[1],
-            tgtId: id,
+            tgtKey: key,
             tgtSlotIdx: uiInputs.length - 1,
             expectedType: "*",
           });
@@ -944,7 +949,7 @@ export function convertApiToUi(
   let lastLinkId = 0;
   for (const p of pending) {
     const src = uiNodes.get(p.srcKey);
-    const tgt = [...uiNodes.values()].find((n) => n.id === p.tgtId)!;
+    const tgt = uiNodes.get(p.tgtKey)!;
     if (!src) continue; // ref to a key we never materialized (can't happen: keySet-gated)
     // Ensure the source has a slot at srcSlot even if its def was unknown.
     while ((src.outputs ??= []).length <= p.srcSlot) {
@@ -961,10 +966,7 @@ export function convertApiToUi(
   // ── Generated layout: topological layers, left → right ──────────────────
   const layerByKey = new Map<string, number>(keys.map((k) => [k, 0]));
   const edges = pending
-    .map((p) => {
-      const tgtKey = keys.find((k) => uiNodes.get(k)!.id === p.tgtId)!;
-      return [p.srcKey, tgtKey] as const;
-    })
+    .map((p) => [p.srcKey, p.tgtKey] as const)
     .filter(([s, t]) => s !== t);
   // Bounded relaxation — cycle-safe and plenty for real graph depths.
   for (let pass = 0; pass < keys.length; pass++) {
