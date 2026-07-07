@@ -290,7 +290,7 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
 
   server.tool(
     "save_workflow",
-    "Save a workflow JSON to the connected ComfyUI server's user library so it appears in the ComfyUI web UI. Requires a running ComfyUI server; this writes to that server's userdata and overwrites any existing file with the same filename without confirmation. Accepts API-format or UI-format JSON. Returns a confirmation message, or the HTTP status and error text on failure.",
+    "Save a workflow JSON to the connected ComfyUI server's user library so it appears in the ComfyUI web UI. Requires a running ComfyUI server; this writes to that server's userdata and overwrites any existing file with the same filename without confirmation. IMPORTANT: pass Web-UI-format JSON ({ nodes: [], links: [] }) so the saved workflow opens and edits in the ComfyUI canvas — when re-saving an existing workflow, load it with get_workflow format='ui' and modify THAT. API-format graphs are accepted and stored verbatim, but the canvas CANNOT open them (users see a broken/blank load), so only save API format for headless re-queueing. Returns a confirmation message (with a warning when the input was API format), or the HTTP status and error text on failure.",
     {
       filename: z
         .string()
@@ -299,7 +299,7 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
         ),
       workflow: z
         .record(z.string(), z.any())
-        .describe("Workflow JSON to save (API or UI format). Stored verbatim; not validated before saving."),
+        .describe("Workflow JSON to save. Prefer Web UI format ({ nodes: [], links: [] }) so it stays editable in ComfyUI's canvas; API format is accepted but the frontend cannot open it. Stored verbatim; not validated before saving."),
     },
     async (args) => {
       try {
@@ -327,11 +327,21 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
           };
         }
 
+        // API-format saves are legal (headless re-queue) but the canvas can't
+        // open them — the #1 way agents strand users with workflows that "exist"
+        // in the library yet load blank, so they keep creating new ones instead
+        // of navigating back. Warn loudly until auto-conversion ships.
+        const apiFormatWarning = isUiFormat(args.workflow)
+          ? ""
+          : `\n\n⚠️ This was saved in API format — the ComfyUI canvas CANNOT open or edit it. ` +
+            `If this workflow is meant to be reopened in the UI, rebuild it in Web UI format ` +
+            `({ nodes: [], links: [] }) — e.g. load the on-canvas graph or an existing file via ` +
+            `get_workflow format="ui", apply your changes to that, and save again.`;
         return {
           content: [
             {
               type: "text",
-              text: `Workflow saved as "${args.filename}" in the ComfyUI user library.`,
+              text: `Workflow saved as "${args.filename}" in the ComfyUI user library.${apiFormatWarning}`,
             },
           ],
         };

@@ -156,7 +156,7 @@ Slice ONE pipeline out of a toggle-template workflow — the kind built with rgt
 
 ## save_workflow
 
-Save a workflow JSON to the connected ComfyUI server's user library so it appears in the ComfyUI web UI. Requires a running ComfyUI server; this writes to that server's userdata and overwrites any existing file with the same filename without confirmation. Accepts API-format or UI-format JSON. Returns a confirmation message, or the HTTP status and error text on failure.
+Save a workflow JSON to the connected ComfyUI server's user library so it appears in the ComfyUI web UI. Requires a running ComfyUI server; this writes to that server's userdata and overwrites any existing file with the same filename without confirmation. **For a workflow that should be readable and editable in the ComfyUI canvas, pass Web UI format (`{ nodes: [], links: [] }`).** API-format graphs are accepted but the frontend cannot open them — the tool warns in its response when it happens. Returns a confirmation message, or the HTTP status and error text on failure.
 
 ### Parameters
 
@@ -164,7 +164,7 @@ Save a workflow JSON to the connected ComfyUI server's user library so it appear
   Filename to save as (e.g. 'my_workflow.json'). Will overwrite if it already exists.
 </ParamField>
 <ParamField path="workflow" type="object" required>
-  Workflow JSON to save (API or UI format). Stored verbatim; not validated before saving.
+  Workflow JSON to save. **Prefer Web UI format** (`{ nodes: [], links: [] }`) so it opens in ComfyUI's canvas; API format is accepted but not editable in the frontend. Stored verbatim; not validated before saving.
 </ParamField>
 
 ### Example
