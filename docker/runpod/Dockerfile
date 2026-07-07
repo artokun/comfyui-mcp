@@ -295,7 +295,14 @@ RUN chmod +x /post_start.sh
 # Placed LATE so it doesn't bust the expensive torch/ComfyUI layer cache. The
 # entrypoint runs it rooted at /workspace (browse/upload/download/delete), fronted
 # by nginx on :8083. Best-effort install.
-RUN curl -fsSL https://raw.githubusercontent.com/filebrowser/filebrowser/master/get.sh | bash \
+# PINNED release binary, NOT the project's get.sh installer — upstream deleted
+# that script (404 as of 2026-07; image 1.5 silently shipped without File
+# Browser because of it, #131). A pinned asset URL can't vanish out from under
+# a rebuild the same way.
+ARG FILEBROWSER_VERSION=v2.63.18
+RUN curl -fsSL "https://github.com/filebrowser/filebrowser/releases/download/${FILEBROWSER_VERSION}/linux-amd64-filebrowser.tar.gz" \
+      | tar -xz -C /usr/local/bin filebrowser \
+ && chmod +x /usr/local/bin/filebrowser \
  || echo "WARN: filebrowser install failed — it will be skipped at boot"
 
 # -----------------------------------------------------------------------------
