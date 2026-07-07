@@ -89,6 +89,17 @@ describe("Desktop-recorded install detection (installations.json)", () => {
     expect(mod.detectLocalComfyUIPath()).toBe(alive);
   });
 
+  it("skips remote entries by sourceId even when they carry a stale local path", async () => {
+    const stale = makeRoot(join(FAKE_HOME, "installs", "stale-remote"));
+    const local = makeRoot(join(FAKE_HOME, "installs", "local"));
+    writeInstallations([
+      { id: "r", installPath: stale, sourceId: "remote", lastLaunchedAt: 999 },
+      { id: "l", installPath: local, sourceId: "standalone", lastLaunchedAt: 1 },
+    ]);
+    const mod = await import("../config.js");
+    expect(mod.detectLocalComfyUIPath()).toBe(local);
+  });
+
   it("malformed installations.json is ignored without throwing", async () => {
     writeInstallations("{not json[");
     const mod = await import("../config.js");

@@ -60,8 +60,10 @@ export function descendToNestedRoot(p: string, label = "COMFYUI_PATH"): string {
  * installations.json — the authoritative source for Desktop users, who pick an
  * arbitrary install location at setup (e.g. ~/ComfyUI-Installs/ComfyUI) that no
  * directory heuristic can guess. Entries are sorted most-recently-launched
- * first; remote connections (empty installPath) are skipped. Best-effort: any
- * read/parse failure just falls through to the heuristic scan.
+ * first; remote connections are skipped (by sourceId, and by the empty
+ * installPath they normally carry — a stale local path on a remote entry must
+ * not win). Best-effort: any read/parse failure just falls through to the
+ * heuristic scan.
  */
 function desktopRecordedInstallPaths(): string[] {
   const home = homedir();
@@ -80,6 +82,7 @@ function desktopRecordedInstallPaths(): string[] {
       for (const inst of parsed) {
         if (!inst || typeof inst !== "object") continue;
         const rec = inst as Record<string, unknown>;
+        if (rec.sourceId === "remote") continue;
         if (typeof rec.installPath !== "string" || !rec.installPath.trim()) continue;
         entries.push({
           path: rec.installPath,

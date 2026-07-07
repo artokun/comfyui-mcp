@@ -592,7 +592,9 @@ export async function runPanelOrchestrator(): Promise<void> {
   // COMFYUI_PATH always landed in "local install/pack tools limited" even with
   // a local install the MCP itself could find.
   const envComfyuiPath = process.env.COMFYUI_PATH;
-  const localComfyuiPath = envComfyuiPath ?? detectLocalComfyUIPath();
+  // `||` not `??`: a set-but-empty COMFYUI_PATH= means "unset" (the headless
+  // MCP's config truthy-checks it the same way) — it must not block detection.
+  const localComfyuiPath = envComfyuiPath || detectLocalComfyUIPath();
   const isLoopbackUrl = (u: string): boolean => {
     try {
       return isLoopbackHost(new URL(u).hostname);
