@@ -128,25 +128,33 @@ function findPidByPort(port: number): number | null {
 }
 
 /**
- * Find PIDs of the Desktop app's Electron shell (ComfyUI.exe on Windows).
- * The Python backend is a child of the Electron app, so we need to kill
- * the parent to fully stop the Desktop app.
+ * Find PIDs of the Desktop app's Electron shell — current branding
+ * ("Comfy Desktop.exe" / "Comfy Desktop.app") and legacy ("ComfyUI.exe" /
+ * "ComfyUI.app"). The Python backend is a child of the Electron app, so we
+ * need to kill the parent to fully stop the Desktop app.
  */
 function findDesktopAppPids(): number[] {
   const pids: number[] = [];
-  try {
-    if (IS_WIN) {
-      const out = execSync(
-        `tasklist /FI "IMAGENAME eq ComfyUI.exe" /FO CSV /NH`,
-        { encoding: "utf-8", timeout: 5000 },
-      ).trim();
-      for (const line of out.split("\n")) {
-        // CSV format: "ComfyUI.exe","12345","Console","1","206,248 K"
-        const match = line.match(/"ComfyUI\.exe","(\d+)"/i);
-        if (match) pids.push(parseInt(match[1], 10));
+  if (IS_WIN) {
+    for (const exe of ["ComfyUI.exe", "Comfy Desktop.exe"]) {
+      try {
+        const out = execSync(
+          `tasklist /FI "IMAGENAME eq ${exe}" /FO CSV /NH`,
+          { encoding: "utf-8", timeout: 5000 },
+        ).trim();
+        for (const line of out.split("\n")) {
+          // CSV format: "ComfyUI.exe","12345","Console","1","206,248 K"
+          // (the image name is already filtered — match any first column)
+          const match = line.match(/^"[^"]+","(\d+)"/);
+          if (match) pids.push(parseInt(match[1], 10));
+        }
+      } catch {
+        // No processes with this image name
       }
-    } else {
-      const out = execSync(`pgrep -f "ComfyUI.app"`, {
+    }
+  } else {
+    try {
+      const out = execSync(`pgrep -f "ComfyUI.app|Comfy Desktop.app"`, {
         encoding: "utf-8",
         timeout: 5000,
       }).trim();
@@ -154,9 +162,9 @@ function findDesktopAppPids(): number[] {
         const pid = parseInt(line, 10);
         if (!isNaN(pid) && pid > 0) pids.push(pid);
       }
+    } catch {
+      // No Desktop app processes found
     }
-  } catch {
-    // No Desktop app processes found
   }
   return pids;
 }
@@ -216,7 +224,11 @@ function isDesktopApp(argv: string[]): boolean {
   return (
     joined.includes("programs/comfyui/resources") ||
     joined.includes("programs\\comfyui\\resources") ||
-    joined.includes("comfyui.app")
+    joined.includes("comfyui.app") ||
+    // Current branding ("Comfy Desktop\Comfy Desktop.exe", "Comfy Desktop.app")
+    // and the electron-era install dir.
+    joined.includes("comfy desktop") ||
+    joined.includes("@comfyorgcomfyui-electron")
   );
 }
 

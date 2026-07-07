@@ -89,6 +89,20 @@ describe("Desktop-recorded install detection (installations.json)", () => {
     expect(mod.detectLocalComfyUIPath()).toBe(alive);
   });
 
+  it("skips recorded dirs that still exist but are no longer installs (no root markers)", async () => {
+    // Uninstalled/moved: the dir remains (logs, leftovers) but has no main.py/
+    // output/custom_nodes/models and no nested ComfyUI root.
+    const dead = join(FAKE_HOME, "installs", "uninstalled");
+    mkdirSync(join(dead, "logs"), { recursive: true });
+    const alive = makeRoot(join(FAKE_HOME, "installs", "still-real"));
+    writeInstallations([
+      { id: "dead", installPath: dead, lastLaunchedAt: 999 },
+      { id: "ok", installPath: alive, lastLaunchedAt: 1 },
+    ]);
+    const mod = await import("../config.js");
+    expect(mod.detectLocalComfyUIPath()).toBe(alive);
+  });
+
   it("skips remote entries by sourceId even when they carry a stale local path", async () => {
     const stale = makeRoot(join(FAKE_HOME, "installs", "stale-remote"));
     const local = makeRoot(join(FAKE_HOME, "installs", "local"));

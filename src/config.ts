@@ -93,7 +93,18 @@ function desktopRecordedInstallPaths(): string[] {
       // Unreadable/malformed — the heuristic scan below still applies.
     }
   }
-  return entries.sort((a, b) => b.launched - a.launched).map((e) => e.path);
+  return (
+    entries
+      .sort((a, b) => b.launched - a.launched)
+      .map((e) => e.path)
+      // An entry can point at a directory that still EXISTS but is no longer
+      // an install (uninstalled/moved — only logs/outputs left). The shared
+      // detect filter trusts non-Documents paths without a marker check, so a
+      // dead recorded root would win over a real install — require real-root
+      // markers here (directly, or one level down for the Desktop-installer
+      // wrapper layout that descendToNestedRoot heals).
+      .filter((p) => looksLikeComfyUIRoot(p) || looksLikeComfyUIRoot(join(p, "ComfyUI")))
+  );
 }
 
 /**

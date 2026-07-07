@@ -602,7 +602,13 @@ export async function runPanelOrchestrator(): Promise<void> {
       return true;
     }
   };
-  let comfyuiPath = isLoopbackUrl(comfyuiUrl) ? localComfyuiPath : undefined;
+  // --force-remote drops the local path too: a loopback URL that is really a
+  // port-forward to a pod (e.g. RunPod/dstack) must not hand spawned agents a
+  // local install — the spawn env builders prefer COMFYUI_PATH over the
+  // force-remote flag, so a leaked path would silently defeat --force-remote.
+  const localPathForTarget = (url: string): string | undefined =>
+    !isForceRemoteFlagSet() && isLoopbackUrl(url) ? localComfyuiPath : undefined;
+  let comfyuiPath = localPathForTarget(comfyuiUrl);
   // Force the child remote only when opted in (--force-remote) or the target is
   // non-loopback; a default loopback panel user with no COMFYUI_PATH is left to
   // auto-detect its local install (keeps download_model/apply_manifest/scans).
@@ -1071,7 +1077,7 @@ export async function runPanelOrchestrator(): Promise<void> {
     if (!host || next === comfyuiUrl) return false;
     const prev = comfyuiUrl;
     comfyuiUrl = next;
-    comfyuiPath = isLoopbackUrl(next) ? localComfyuiPath : undefined;
+    comfyuiPath = localPathForTarget(next);
     // Point every provider at the new target: Claude via its rebuilt MCP env, the
     // manager's image-fetch URL, then respawn active agents so the live comfyui MCP
     // subprocess is recreated with the new COMFYUI_URL (no-op if none are running —
