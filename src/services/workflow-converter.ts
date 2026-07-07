@@ -2,8 +2,11 @@ import type {
   WorkflowJSON,
   ObjectInfo,
   ComfyUINodeDef,
+  NodeInputSpec,
   UiWorkflow,
   UiNode,
+  UiNodeInput,
+  UiNodeOutput,
   UiLink,
   SubgraphDefinition,
   SubgraphLink,
@@ -642,6 +645,380 @@ function findWidgetIndex(node: UiNode, widgetName: string): number | null {
   // it may be at a fixed position. Search widgets_values if we can match by name.
   // For now, return null — the widget is likely at its default value.
   return null;
+}
+
+// ── API → UI conversion ─────────────────────────────────────────────────────
+
+/**
+ * Detect an API-format workflow: a non-empty record whose every value is a
+ * node object with a string `class_type`. (`inputs` may be absent on
+ * degenerate nodes; class_type is the discriminator.)
+ */
+export function isApiFormat(obj: unknown): obj is WorkflowJSON {
+  if (typeof obj !== "object" || obj === null || Array.isArray(obj)) return false;
+  const values = Object.values(obj as Record<string, unknown>);
+  if (values.length === 0) return false;
+  return values.every(
+    (v) =>
+      typeof v === "object" &&
+      v !== null &&
+      !Array.isArray(v) &&
+      typeof (v as { class_type?: unknown }).class_type === "string",
+  );
+}
+
+/** An API-format connection reference: ["<nodeId>", <outputSlot>]. */
+function isLinkRef(v: unknown, nodeKeys: Set<string>): v is [string | number, number] {
+  return (
+    Array.isArray(v) &&
+    v.length === 2 &&
+    (typeof v[0] === "string" || typeof v[0] === "number") &&
+    typeof v[1] === "number" &&
+    nodeKeys.has(String(v[0]))
+  );
+}
+
+/** The UI slot `type` string for a widget input spec. */
+function widgetSlotType(spec: NodeInputSpec): string {
+  const t = spec[0];
+  return Array.isArray(t) ? "COMBO" : t;
+}
+
+/**
+ * A sensible widgets_values entry for a widget the API graph didn't provide:
+ * the spec default, else the first combo option, else a type-appropriate zero.
+ * Used both for omitted widgets (ComfyUI would apply the same default) and as
+ * the positional placeholder under a link-fed widget input.
+ */
+function widgetDefaultValue(spec: NodeInputSpec): unknown {
+  const [type, cfg] = spec;
+  const c = cfg as
+    | { default?: unknown; options?: Array<{ key?: unknown } | string> }
+    | undefined;
+  if (c?.default !== undefined) return c.default;
+  if (Array.isArray(type)) return type[0];
+  if (Array.isArray(c?.options)) {
+    const first = c.options[0];
+    return typeof first === "object" && first !== null ? first.key : first;
+  }
+  switch (type) {
+    case "INT":
+    case "FLOAT":
+      return 0;
+    case "STRING":
+      return "";
+    case "BOOLEAN":
+      return false;
+    default:
+      return undefined;
+  }
+}
+
+interface PendingLink {
+  srcKey: string;
+  srcSlot: number;
+  tgtId: number;
+  tgtSlotIdx: number;
+  expectedType: string;
+}
+
+/**
+ * Convert an API-format workflow to UI (canvas) format with a generated
+ * layout. The inverse of convertUiToApi for well-formed graphs:
+ * `convertUiToApi(convertApiToUi(x).workflow)` reproduces `x` (modulo layout,
+ * string-normalized link refs, and filled-in defaults for omitted widgets).
+ *
+ * objectInfo is definitional: widget ORDER in widgets_values comes from
+ * input_order (the same order convertUiToApi consumes), including the phantom
+ * control_after_generate slot after seed-type widgets and V3 dynamic-combo
+ * nested values ("combo.nested" dotted keys) after their combo.
+ */
+export function convertApiToUi(
+  api: WorkflowJSON,
+  objectInfo: ObjectInfo,
+): { workflow: UiWorkflow; warnings: string[] } {
+  const warnings: string[] = [];
+  const keys = Object.keys(api);
+  const keySet = new Set(keys);
+
+  // Numeric node ids; non-numeric API keys (rare, hand-written) get remapped.
+  let maxId = 0;
+  for (const k of keys) {
+    const n = Number(k);
+    if (Number.isInteger(n) && n > 0) maxId = Math.max(maxId, n);
+  }
+  const idFor = new Map<string, number>();
+  for (const k of keys) {
+    const n = Number(k);
+    if (Number.isInteger(n) && n > 0 && !idFor.has(k)) {
+      idFor.set(k, n);
+    } else {
+      idFor.set(k, ++maxId);
+      warnings.push(
+        `Node key "${k}" is not a positive integer — remapped to id ${maxId} (connections preserved).`,
+      );
+    }
+  }
+
+  const uiNodes = new Map<string, UiNode>();
+  const pending: PendingLink[] = [];
+
+  for (const key of keys) {
+    const apiNode = api[key];
+    const classType = apiNode.class_type;
+    const apiInputs = (apiNode.inputs ?? {}) as Record<string, unknown>;
+    const def = objectInfo[classType];
+    const id = idFor.get(key)!;
+
+    const uiInputs: UiNodeInput[] = [];
+    const widgetsValues: unknown[] = [];
+    const consumed = new Set<string>();
+
+    if (!def) {
+      // Best-effort: keep connections; carry literals as positional widgets in
+      // key order. convertUiToApi will skip this node too (same warning), so
+      // the graph degrades symmetrically instead of silently losing wiring.
+      warnings.push(
+        `Node ${key} (${classType}): not found in object_info — custom node may not be installed. Slot layout is best-effort.`,
+      );
+      for (const [name, val] of Object.entries(apiInputs)) {
+        if (isLinkRef(val, keySet)) {
+          uiInputs.push({ name, type: "*", link: null });
+          pending.push({
+            srcKey: String(val[0]),
+            srcSlot: val[1],
+            tgtId: id,
+            tgtSlotIdx: uiInputs.length - 1,
+            expectedType: "*",
+          });
+        } else {
+          widgetsValues.push(val);
+        }
+      }
+    } else {
+      const orderedNames = getOrderedInputNames(def);
+      for (const name of orderedNames) {
+        const spec = def.input.required?.[name] ?? def.input.optional?.[name];
+        if (!spec) continue;
+        consumed.add(name);
+        const raw = apiInputs[name];
+
+        if (isWidgetInput(name, def)) {
+          // A widget input fed by a link is a "converted widget" in the UI:
+          // an inputs[] slot carrying widget:{name}, with a positional
+          // placeholder kept in widgets_values so downstream widget indices
+          // stay aligned (convertUiToApi assigns the placeholder, then the
+          // link overrides it by name).
+          let effective: unknown;
+          if (isLinkRef(raw, keySet)) {
+            effective = widgetDefaultValue(spec);
+            uiInputs.push({
+              name,
+              type: widgetSlotType(spec),
+              link: null,
+              widget: { name },
+            });
+            pending.push({
+              srcKey: String(raw[0]),
+              srcSlot: raw[1],
+              tgtId: id,
+              tgtSlotIdx: uiInputs.length - 1,
+              expectedType: widgetSlotType(spec),
+            });
+          } else {
+            effective = raw !== undefined ? raw : widgetDefaultValue(spec);
+          }
+          widgetsValues.push(effective);
+
+          // Phantom "fixed"/"randomize" widget after control_after_generate
+          // seeds — convertUiToApi skips exactly one entry here.
+          if (hasControlAfterGenerate(name, def)) widgetsValues.push("fixed");
+
+          // V3 dynamic combo: the selected option's nested POSITIONAL widgets
+          // follow the combo value in widgets_values; their API values arrive
+          // as dotted "combo.nested" keys.
+          const opts = (
+            spec[1] as
+              | { options?: Array<{ key?: unknown; inputs?: { required?: Record<string, unknown> } }> }
+              | undefined
+          )?.options;
+          const nested = Array.isArray(opts)
+            ? opts.find((o) => o?.key === effective)?.inputs?.required
+            : undefined;
+          if (nested) {
+            for (const [nName, nSpec] of Object.entries(nested)) {
+              if (!isPositionalWidgetSpec(nSpec)) continue;
+              const dotted = `${name}.${nName}`;
+              consumed.add(dotted);
+              const nRaw = apiInputs[dotted];
+              widgetsValues.push(
+                nRaw !== undefined ? nRaw : widgetDefaultValue(nSpec as NodeInputSpec),
+              );
+            }
+          }
+        } else {
+          // Link (connection) input — always present as a slot, wired or not.
+          const slotType = typeof spec[0] === "string" ? spec[0] : "COMBO";
+          uiInputs.push({ name, type: slotType, link: null });
+          if (isLinkRef(raw, keySet)) {
+            pending.push({
+              srcKey: String(raw[0]),
+              srcSlot: raw[1],
+              tgtId: id,
+              tgtSlotIdx: uiInputs.length - 1,
+              expectedType: slotType,
+            });
+          } else if (raw !== undefined) {
+            warnings.push(
+              `Node ${key} (${classType}): input "${name}" expects a connection but got a literal value — dropped (wire it or use a Primitive node).`,
+            );
+          }
+        }
+      }
+
+      // rgthree Power Lora Loader: loras arrive as lora_1..lora_N input objects
+      // (the shape convertUiToApi emits); in the UI they live in widgets_values.
+      if (/Power Lora Loader/.test(classType)) {
+        const loraKeys = Object.keys(apiInputs)
+          .filter((k) => /^lora_\d+$/.test(k))
+          .sort((a, b) => Number(a.slice(5)) - Number(b.slice(5)));
+        for (const lk of loraKeys) {
+          consumed.add(lk);
+          const v = apiInputs[lk];
+          if (v && typeof v === "object" && !Array.isArray(v)) widgetsValues.push(v);
+        }
+      }
+
+      // Anything left is either a stray link (wire it anyway, extra slot) or a
+      // literal on an input the node definition doesn't declare (warn — it
+      // would be silently lost on a UI round-trip).
+      for (const [name, val] of Object.entries(apiInputs)) {
+        if (consumed.has(name)) continue;
+        if (isLinkRef(val, keySet)) {
+          uiInputs.push({ name, type: "*", link: null });
+          pending.push({
+            srcKey: String(val[0]),
+            srcSlot: val[1],
+            tgtId: id,
+            tgtSlotIdx: uiInputs.length - 1,
+            expectedType: "*",
+          });
+        } else {
+          warnings.push(
+            `Node ${key} (${classType}): input "${name}" is not declared by the node definition — value carried nowhere in UI format and will not round-trip.`,
+          );
+        }
+      }
+    }
+
+    // Output slots straight from the definition. (COMBO outputs appear as
+    // option arrays in some defs — normalize to a "COMBO" slot type.)
+    const outputs: UiNodeOutput[] = ((def?.output ?? []) as unknown[]).map((t, i) => ({
+      name: def?.output_name?.[i] ?? (typeof t === "string" ? t : "COMBO"),
+      type: typeof t === "string" ? t : "COMBO",
+      links: [],
+    }));
+
+    const meta = apiNode._meta as { title?: string; mode?: string } | undefined;
+    const mode = meta?.mode === "muted" ? 2 : meta?.mode === "bypassed" ? 4 : 0;
+
+    const uiNode: UiNode = {
+      id,
+      type: classType,
+      pos: [0, 0],
+      size: [280, 100], // finalized by the layout pass
+      flags: {},
+      order: 0,
+      mode,
+      inputs: uiInputs,
+      outputs,
+      properties: { "Node name for S&R": classType },
+      widgets_values: widgetsValues,
+    };
+    if (meta?.title && meta.title !== classType) uiNode.title = meta.title;
+    uiNodes.set(key, uiNode);
+  }
+
+  // ── Materialize links ────────────────────────────────────────────────────
+  const links: UiLink[] = [];
+  let lastLinkId = 0;
+  for (const p of pending) {
+    const src = uiNodes.get(p.srcKey);
+    const tgt = [...uiNodes.values()].find((n) => n.id === p.tgtId)!;
+    if (!src) continue; // ref to a key we never materialized (can't happen: keySet-gated)
+    // Ensure the source has a slot at srcSlot even if its def was unknown.
+    while ((src.outputs ??= []).length <= p.srcSlot) {
+      src.outputs.push({ name: `out_${src.outputs.length}`, type: "*", links: [] });
+    }
+    const srcOut = src.outputs[p.srcSlot];
+    const linkType = srcOut.type !== "*" ? srcOut.type : p.expectedType;
+    const linkId = ++lastLinkId;
+    (srcOut.links ??= []).push(linkId);
+    tgt.inputs![p.tgtSlotIdx].link = linkId;
+    links.push([linkId, src.id, p.srcSlot, tgt.id, p.tgtSlotIdx, linkType]);
+  }
+
+  // ── Generated layout: topological layers, left → right ──────────────────
+  const layerByKey = new Map<string, number>(keys.map((k) => [k, 0]));
+  const edges = pending
+    .map((p) => {
+      const tgtKey = keys.find((k) => uiNodes.get(k)!.id === p.tgtId)!;
+      return [p.srcKey, tgtKey] as const;
+    })
+    .filter(([s, t]) => s !== t);
+  // Bounded relaxation — cycle-safe and plenty for real graph depths.
+  for (let pass = 0; pass < keys.length; pass++) {
+    let changed = false;
+    for (const [s, t] of edges) {
+      const want = layerByKey.get(s)! + 1;
+      if (want > layerByKey.get(t)!) {
+        layerByKey.set(t, want);
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+  const byLayer = new Map<number, string[]>();
+  for (const k of keys) {
+    const l = layerByKey.get(k)!;
+    if (!byLayer.has(l)) byLayer.set(l, []);
+    byLayer.get(l)!.push(k);
+  }
+  const X_START = 40;
+  const X_STEP = 380;
+  const Y_START = 60;
+  const Y_GAP = 60;
+  let order = 0;
+  for (const layer of [...byLayer.keys()].sort((a, b) => a - b)) {
+    let y = Y_START;
+    for (const k of byLayer.get(layer)!) {
+      const n = uiNodes.get(k)!;
+      const slots = Math.max(n.inputs?.length ?? 0, n.outputs?.length ?? 0);
+      const widgets = Array.isArray(n.widgets_values) ? n.widgets_values.length : 0;
+      const height = Math.max(60, 36 + 22 * slots + 26 * widgets);
+      n.pos = [X_START + layer * X_STEP, y];
+      n.size = [280, height];
+      n.order = order++;
+      y += height + Y_GAP;
+    }
+  }
+
+  const nodes = keys.map((k) => uiNodes.get(k)!);
+  const workflow: UiWorkflow = {
+    last_node_id: Math.max(0, ...nodes.map((n) => n.id)),
+    last_link_id: lastLinkId,
+    nodes,
+    links,
+    groups: [],
+    config: {},
+    extra: {},
+    version: 0.4,
+  };
+
+  logger.info(
+    `Converted API workflow to UI format: ${nodes.length} nodes, ${links.length} links`,
+  );
+  return { workflow, warnings };
 }
 
 /**
