@@ -33,7 +33,7 @@ import {
 } from "./panel-agent.js";
 import { createPanelMcpServer } from "./panel-tools.js";
 import { readUserMcpServers } from "../services/user-mcp-config.js";
-import { isForceRemoteFlagSet, isLoopbackHost } from "../config.js";
+import { isForceRemoteFlagSet, isLoopbackHost, detectLocalComfyUIPath } from "../config.js";
 import {
   buildComfyuiMcpEnv,
   comfyuiSecretKeys,
@@ -586,7 +586,13 @@ export async function runPanelOrchestrator(): Promise<void> {
   // model-scan tools). A REMOTE target (non-loopback) forces remote-only, so we
   // drop the path. `envComfyuiPath` is the orchestrator's own env value; the live
   // `comfyuiPath` is derived from it + the current target.
+  // env > auto-detected. The detection (Desktop-recorded installs first, then
+  // common directories) is the same one the headless MCP's config uses — the
+  // orchestrator previously read ONLY the env var, so a Desktop user without
+  // COMFYUI_PATH always landed in "local install/pack tools limited" even with
+  // a local install the MCP itself could find.
   const envComfyuiPath = process.env.COMFYUI_PATH;
+  const localComfyuiPath = envComfyuiPath ?? detectLocalComfyUIPath();
   const isLoopbackUrl = (u: string): boolean => {
     try {
       return isLoopbackHost(new URL(u).hostname);
@@ -594,7 +600,7 @@ export async function runPanelOrchestrator(): Promise<void> {
       return true;
     }
   };
-  let comfyuiPath = isLoopbackUrl(comfyuiUrl) ? envComfyuiPath : undefined;
+  let comfyuiPath = isLoopbackUrl(comfyuiUrl) ? localComfyuiPath : undefined;
   // Force the child remote only when opted in (--force-remote) or the target is
   // non-loopback; a default loopback panel user with no COMFYUI_PATH is left to
   // auto-detect its local install (keeps download_model/apply_manifest/scans).
@@ -1063,7 +1069,7 @@ export async function runPanelOrchestrator(): Promise<void> {
     if (!host || next === comfyuiUrl) return false;
     const prev = comfyuiUrl;
     comfyuiUrl = next;
-    comfyuiPath = isLoopbackUrl(next) ? envComfyuiPath : undefined;
+    comfyuiPath = isLoopbackUrl(next) ? localComfyuiPath : undefined;
     // Point every provider at the new target: Claude via its rebuilt MCP env, the
     // manager's image-fetch URL, then respawn active agents so the live comfyui MCP
     // subprocess is recreated with the new COMFYUI_URL (no-op if none are running —

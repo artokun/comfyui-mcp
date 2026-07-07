@@ -2,7 +2,7 @@ import { z } from "zod";
 import dotenv from "dotenv";
 import { fileURLToPath } from "url";
 import { dirname, resolve, join } from "path";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { parseComfyUIUrl, type ComfyUITarget } from "./transport/comfyui-url.js";
 
@@ -56,13 +56,53 @@ export function descendToNestedRoot(p: string, label = "COMFYUI_PATH"): string {
 }
 
 /**
+ * Local install paths the ComfyUI Desktop app itself recorded in its
+ * installations.json — the authoritative source for Desktop users, who pick an
+ * arbitrary install location at setup (e.g. ~/ComfyUI-Installs/ComfyUI) that no
+ * directory heuristic can guess. Entries are sorted most-recently-launched
+ * first; remote connections (empty installPath) are skipped. Best-effort: any
+ * read/parse failure just falls through to the heuristic scan.
+ */
+function desktopRecordedInstallPaths(): string[] {
+  const home = homedir();
+  const configDirs = [
+    join(home, "AppData", "Roaming", "Comfy Desktop"), // Windows
+    join(home, "Library", "Application Support", "Comfy Desktop"), // macOS
+    join(home, ".config", "Comfy Desktop"), // Linux
+  ];
+  const entries: Array<{ path: string; launched: number }> = [];
+  for (const dir of configDirs) {
+    try {
+      const file = join(dir, "installations.json");
+      if (!existsSync(file)) continue;
+      const parsed = JSON.parse(readFileSync(file, "utf-8"));
+      if (!Array.isArray(parsed)) continue;
+      for (const inst of parsed) {
+        if (!inst || typeof inst !== "object") continue;
+        const rec = inst as Record<string, unknown>;
+        if (typeof rec.installPath !== "string" || !rec.installPath.trim()) continue;
+        entries.push({
+          path: rec.installPath,
+          launched: typeof rec.lastLaunchedAt === "number" ? rec.lastLaunchedAt : 0,
+        });
+      }
+    } catch {
+      // Unreadable/malformed — the heuristic scan below still applies.
+    }
+  }
+  return entries.sort((a, b) => b.launched - a.launched).map((e) => e.path);
+}
+
+/**
  * Auto-detect ComfyUI installation directories.
- * Checks common locations on macOS, Linux, and Windows.
+ * Checks the Desktop app's own installation records first, then common
+ * locations on macOS, Linux, and Windows.
  * Returns all found paths sorted by preference.
  */
 function detectComfyUIPaths(): string[] {
   const home = homedir();
-  const candidates: string[] = [];
+  // Desktop-recorded installs outrank every guessed location.
+  const candidates: string[] = [...desktopRecordedInstallPaths()];
 
   // macOS: ComfyUI Desktop app stores data here
   candidates.push(join(home, "Documents", "ComfyUI"));
@@ -195,6 +235,20 @@ function resolveComfyUIPath(
 
   // detectComfyUIPaths() already descends wrapper hits; this is a defensive
   // no-op so the selected path is guaranteed to be a real root.
+  return descendToNestedRoot(detected[0], "Detected ComfyUI path");
+}
+
+/**
+ * Best local ComfyUI install path by auto-detection alone (no env var, no
+ * remote/cloud gating — the CALLER decides whether a local path applies to its
+ * target). Used by the panel orchestrator so a loopback session without
+ * COMFYUI_PATH still resolves the local install (Desktop-recorded installs
+ * first) and keeps local install/pack tools enabled. Returns undefined when
+ * nothing is found.
+ */
+export function detectLocalComfyUIPath(): string | undefined {
+  const detected = detectComfyUIPaths();
+  if (detected.length === 0) return undefined;
   return descendToNestedRoot(detected[0], "Detected ComfyUI path");
 }
 

@@ -228,6 +228,12 @@ function findDesktopExeFromCommonPaths(): string | undefined {
   if (IS_WIN) {
     const home = process.env.LOCALAPPDATA || process.env.USERPROFILE || "";
     const candidates = [
+      // Current branding: "Comfy Desktop" (per-machine and per-user installs)
+      `C:\\Program Files\\Comfy Desktop\\Comfy Desktop.exe`,
+      `${process.env.LOCALAPPDATA}\\Programs\\Comfy Desktop\\Comfy Desktop.exe`,
+      // Electron-era install dir
+      `${process.env.LOCALAPPDATA}\\Programs\\@comfyorgcomfyui-electron\\ComfyUI.exe`,
+      // Legacy names
       `${home}\\Programs\\ComfyUI\\ComfyUI.exe`,
       `${process.env.LOCALAPPDATA}\\Programs\\ComfyUI\\ComfyUI.exe`,
       `C:\\Program Files\\ComfyUI\\ComfyUI.exe`,
@@ -243,6 +249,8 @@ function findDesktopExeFromCommonPaths(): string | undefined {
   } else {
     // macOS
     const candidates = [
+      "/Applications/Comfy Desktop.app",
+      `${process.env.HOME}/Applications/Comfy Desktop.app`,
       "/Applications/ComfyUI.app",
       `${process.env.HOME}/Applications/ComfyUI.app`,
     ];
