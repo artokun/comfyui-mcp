@@ -208,6 +208,47 @@ write_manager_config "${USER_DIR}/default/ComfyUI-Manager/config.ini"
 log "Manager config asserted: network_mode=${COMFY_NETWORK_MODE} security_level=${COMFY_SECURITY_LEVEL}"
 
 # -----------------------------------------------------------------------------
+# 3.5 Manager AUTO-UPDATE (honors the template's COMFY_AUTOUPDATE_MANAGER env,
+#     which existed on the template for ages but was silently ignored). The
+#     venv is EPHEMERAL by design, so any Manager fix applied inside a running
+#     pod (e.g. "update to nightly" to cure a broken install path) EVAPORATES
+#     on the next stop/start — this is the only runtime-persistent channel for
+#     Manager fixes short of shipping a new image.
+#       COMFY_AUTOUPDATE_MANAGER=1        (default) latest STABLE pip release
+#       COMFY_AUTOUPDATE_MANAGER=nightly  ComfyUI-Manager git main (bleeding edge)
+#       COMFY_AUTOUPDATE_MANAGER=0        keep the version baked in the image
+#     Best-effort with a hard timeout — an offline pod or a PyPI hiccup must
+#     never block boot. The baked manager_core shim is a SEPARATE site-packages
+#     module, so upgrades leave it in place (it goes inert if a future Manager
+#     drops the legacy import).
+# -----------------------------------------------------------------------------
+COMFY_AUTOUPDATE_MANAGER="${COMFY_AUTOUPDATE_MANAGER:-1}"
+MGR_PIP="${COMFY_HOME}/venv/bin/pip"
+MGR_PY="${COMFY_HOME}/venv/bin/python"
+mgr_ver() { "${MGR_PY}" -c "import importlib.metadata as m; print(m.version('comfyui-manager'))" 2>/dev/null || echo unknown; }
+if [ -x "${MGR_PIP}" ] && [ "${COMFY_AUTOUPDATE_MANAGER}" != "0" ]; then
+  MGR_BEFORE="$(mgr_ver)"
+  case "${COMFY_AUTOUPDATE_MANAGER}" in
+    nightly) MGR_SPEC="git+https://github.com/Comfy-Org/ComfyUI-Manager.git@main" ;;
+    *)       MGR_SPEC="comfyui_manager" ;;
+  esac
+  if timeout 180 "${MGR_PIP}" install -q -U --retries 2 "${MGR_SPEC}" \
+       >>"${LOG_DIR}/manager-update.log" 2>&1; then
+    MGR_AFTER="$(mgr_ver)"
+    if [ "${MGR_BEFORE}" = "${MGR_AFTER}" ]; then
+      log "Manager up to date: ${MGR_AFTER} (COMFY_AUTOUPDATE_MANAGER=${COMFY_AUTOUPDATE_MANAGER})"
+    else
+      log "Manager auto-updated: ${MGR_BEFORE} -> ${MGR_AFTER} (COMFY_AUTOUPDATE_MANAGER=${COMFY_AUTOUPDATE_MANAGER})"
+    fi
+  else
+    log "WARN: Manager auto-update failed/timed out — keeping baked $(mgr_ver) (see manager-update.log)"
+  fi
+else
+  [ "${COMFY_AUTOUPDATE_MANAGER}" = "0" ] \
+    && log "Manager auto-update disabled (COMFY_AUTOUPDATE_MANAGER=0) — baked $(mgr_ver)"
+fi
+
+# -----------------------------------------------------------------------------
 # 4. Ancillary services (best-effort — skipped if the binary is absent).
 # -----------------------------------------------------------------------------
 service cron start >/dev/null 2>&1 && log "cron started" || log "cron not available (skip)"

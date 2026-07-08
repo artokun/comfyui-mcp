@@ -395,6 +395,7 @@ Create a **Pod template** (or fill these on a one-off GPU pod):
 | `PUBLIC_KEY` | *(RunPod injects)* | SSH public key (base behavior) |
 | `COMFY_SECURITY_LEVEL` | `weak` | Manager security level — `weak` lets the agent install nodes from git URLs (single-user pod); set `normal-` to restore Manager's guardrails |
 | `COMFY_NETWORK_MODE` | `personal_cloud` | must stay `personal_cloud` for remote installs |
+| `COMFY_AUTOUPDATE_MANAGER` | `1` | fast-forward `comfyui_manager` (pip) at boot: `1` = latest stable release, `nightly` = ComfyUI-Manager git main, `0` = keep the baked pin. The venv is ephemeral, so this is the only Manager fix that survives a restart short of a new image. Best-effort (180s cap), never blocks boot. |
 | `COMFY_EXTRA_ARGS` | *(empty)* | extra ComfyUI flags appended verbatim by the entrypoint |
 | `COMFY_HOME` | `/opt/ComfyUI` | baked ComfyUI path (rarely overridden) |
 | `WORKSPACE` | `/workspace` | network-volume mount (rarely overridden) |
