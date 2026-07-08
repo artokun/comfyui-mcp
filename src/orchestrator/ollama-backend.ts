@@ -107,8 +107,12 @@ function toOpenAiMessages(messages: ChatMessage[]): Array<Record<string, unknown
   });
 }
 
-// The LLM Arena's best performer (scripts/llm-arena.mjs): 9/10, cleanest runs.
-const DEFAULT_MODEL = "gemma4:e4b";
+// Our FINE-TUNED gemma4 — QLoRA-trained on 1055 server-verified comfyui-mcp
+// trajectories over the full 178-tool surface (hf.co/artokun/gemma4-comfyui-mcp),
+// so it knows this exact tool suite natively. Supersedes stock gemma4:e4b (the
+// previous arena best, 9/10). Ladder: :e2b ~2 GB VRAM at q4 / :e4b ~3.5 GB
+// (default) / :12b ~8 GB — `ollama pull artokun/gemma4-comfyui-mcp:<size>`.
+const DEFAULT_MODEL = "artokun/gemma4-comfyui-mcp:e4b";
 const MAX_TOOL_ROUNDS = 32;
 
 /**
@@ -237,7 +241,7 @@ export class OllamaBackend implements AgentBackend {
       throw new Error(
         this.api === "openai"
           ? `The OpenAI-compatible endpoint at ${this.host} is not reachable or rejected the key (${msgOf(err)}).`
-          : `Ollama is not reachable at ${this.host} (${msgOf(err)}). Start it with \`ollama serve\` (install: https://ollama.com/download) and pull a tool-calling model, e.g. \`ollama pull ${this.model}\`.`,
+          : `Ollama is not reachable at ${this.host} (${msgOf(err)}). Start it with \`ollama serve\` (install: https://ollama.com/download), then \`ollama pull ${this.model}\` — our gemma4 fine-tuned on the comfyui-mcp tool suite (free, runs locally; \`:e2b\` fits ~2 GB VRAM, \`:e4b\` ~3.5 GB, \`:12b\` ~8 GB).`,
       );
     }
     await this.connectTools();

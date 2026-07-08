@@ -168,8 +168,13 @@ stdio mode (the default, what MCP clients use) needs none of this.
 
 ## Local models: tool calls fail or the model "can't see" tools
 
+- **First move: use [our fine-tuned model](/local-llms#our-fine-tuned-local-models-free-recommended)** —
+  `ollama pull artokun/gemma4-comfyui-mcp:e4b` (the panel's Ollama default).
+  It's Gemma 4 trained on the comfyui-mcp tool suite itself, which eliminates
+  most "wrong tool / malformed args" failures out of the box (`:e2b` for
+  ~2 GB VRAM, `:12b` for ~8 GB).
 - **gemma3 has no native tool calling in Ollama** — unsupported; use
-  `gemma4` (e4b+), `qwen3`, or `llama3.1+`.
+  our fine-tune above, stock `gemma4` (e4b+), `qwen3`, or `llama3.1+`.
 - Make sure [compact tool mode](/local-llms) is on for small models
   (`--compact`) — ~200 full schemas overflow small contexts and the model
   starts hallucinating tool names.

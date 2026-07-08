@@ -636,8 +636,11 @@ generate but can't see its own outputs.
 For small/local models, **compact tool mode** (`--compact` /
 `COMFYUI_MCP_TOOL_MODE=compact`) registers 3 meta-tools
 (`list_tools` → `describe_tool` → `call_tool`) instead of the full ~200-schema
-surface, pulling schemas into context one tool at a time. Validated
-end-to-end via Ollama with `gemma4:e4b`, `gemma4:e2b`, and `qwen3:4b`
+surface, pulling schemas into context one tool at a time. **Run it locally
+for free with our fine-tuned models**: `ollama pull artokun/gemma4-comfyui-mcp:e4b`
+(also `:e2b` for ~2 GB VRAM, `:12b` for ~8 GB) — Gemma 4 QLoRA-trained on 1,055
+server-verified trajectories over the full comfyui-mcp tool surface, and the
+panel's Ollama default. Stock `gemma4:*`/`qwen3:4b` also validated end-to-end
 (`npm run test:local-llm`); gemma3 has no native tool calling and is
 unsupported. Full guide — hosted-model guidance (DeepSeek/MiMo/GLM class),
 per-harness setup, troubleshooting:
@@ -669,8 +672,11 @@ generate but can't see its own outputs.
 For small/local models, **compact tool mode** (`--compact` /
 `COMFYUI_MCP_TOOL_MODE=compact`) registers 3 meta-tools
 (`list_tools` → `describe_tool` → `call_tool`) instead of the full ~200-schema
-surface, pulling schemas into context one tool at a time. Validated
-end-to-end via Ollama with `gemma4:e4b`, `gemma4:e2b`, and `qwen3:4b`
+surface, pulling schemas into context one tool at a time. **Run it locally
+for free with our fine-tuned models**: `ollama pull artokun/gemma4-comfyui-mcp:e4b`
+(also `:e2b` for ~2 GB VRAM, `:12b` for ~8 GB) — Gemma 4 QLoRA-trained on 1,055
+server-verified trajectories over the full comfyui-mcp tool surface, and the
+panel's Ollama default. Stock `gemma4:*`/`qwen3:4b` also validated end-to-end
 (`npm run test:local-llm`); gemma3 has no native tool calling and is
 unsupported. Full guide — hosted-model guidance (DeepSeek/MiMo/GLM class),
 per-harness setup, troubleshooting:

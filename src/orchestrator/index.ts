@@ -860,10 +860,13 @@ export async function runPanelOrchestrator(): Promise<void> {
   // COMFYUI_MCP_GEMINI_MODEL (default gemini-2.5-pro). The model is applied at spawn
   // via the CLI `--model` flag (ACP exposes no per-session model setter).
   const geminiModel = process.env.COMFYUI_MCP_GEMINI_MODEL ?? GEMINI_DEFAULT_MODEL;
-  // Ollama (local LLMs, issue #97): the model is a local tag (qwen3:4b, gemma4:e4b)
-  // applied PER REQUEST — switching live is free. Default = the LLM Arena's best
-  // performer (scripts/llm-arena.mjs): gemma4:e4b, 9/10 with the cleanest runs
-  // (first-try tool dispatch, no nudges) and multimodal headroom for vision.
+  // Ollama (local LLMs, issue #97): the model is a local tag applied PER
+  // REQUEST — switching live is free. Default = OUR FINE-TUNE,
+  // artokun/gemma4-comfyui-mcp:e4b — gemma4 QLoRA-trained on 1055
+  // server-verified comfyui-mcp trajectories over the full 178-tool surface
+  // (hf.co/artokun/gemma4-comfyui-mcp), so it drives this exact tool suite
+  // natively. Supersedes stock gemma4:e4b (the previous arena best, 9/10).
+  // Ladder by VRAM at q4: :e2b ~2 GB / :e4b ~3.5 GB / :12b ~8 GB.
   //
   // Config precedence: env (escape hatch, always wins) → persisted user settings
   // (~/.comfyui-mcp/panel-settings.json, edited from the panel Settings dialog
@@ -877,7 +880,7 @@ export async function runPanelOrchestrator(): Promise<void> {
   }
   const persistedAgent = getAgentSettings();
   let ollamaModel =
-    process.env.COMFYUI_MCP_OLLAMA_MODEL ?? persistedAgent.ollama?.model ?? "gemma4:e4b";
+    process.env.COMFYUI_MCP_OLLAMA_MODEL ?? persistedAgent.ollama?.model ?? "artokun/gemma4-comfyui-mcp:e4b";
   // The same backend also speaks any OpenAI-compatible endpoint (OpenRouter,
   // DeepSeek, vLLM, LM Studio): COMFYUI_MCP_OLLAMA_API=openai +
   // COMFYUI_MCP_OLLAMA_BASE_URL (incl. /v1) + COMFYUI_MCP_OLLAMA_API_KEY
@@ -1544,7 +1547,7 @@ export async function runPanelOrchestrator(): Promise<void> {
               : isGm
                 ? "⚠️ The background agent isn't responding — the Gemini CLI couldn't start. Make sure the Gemini CLI is installed and signed in (run `gemini` once and complete the Google sign-in), then Disconnect → Connect to retry."
                 : isOl
-                  ? "⚠️ The background agent isn't responding — Ollama isn't reachable. Start it with `ollama serve` and pull a tool-calling model (e.g. `ollama pull gemma4:e4b`), then Disconnect → Connect to retry."
+                  ? "⚠️ The background agent isn't responding — Ollama isn't reachable. Start it with `ollama serve` and pull our fine-tuned model (`ollama pull artokun/gemma4-comfyui-mcp:e4b` — gemma4 trained on the comfyui-mcp tool suite; `:e2b` for ~2 GB VRAM, `:12b` for ~8 GB), then Disconnect → Connect to retry."
                   : "⚠️ The background agent isn't responding — the Claude Agent SDK couldn't start. Make sure you're signed in (run `claude` once), then Disconnect → Connect to retry.";
             bridge.push({ type: "say", text: degradedText }, panelTab);
             bridge.push({ type: "ack", ok: false, kind: "degraded" }, panelTab);

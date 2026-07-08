@@ -159,6 +159,34 @@ Copilot CLI runs frontier models, so setup defaults to the **full** tool
 surface (pass `--compact` if you're routing Copilot at a smaller model).
 Check it with `/mcp show` inside `copilot`.
 
+## Our fine-tuned local models (free, recommended)
+
+If you want to run the agent **locally for free**, start here. We fine-tuned
+the Gemma 4 family specifically for comfyui-mcp: QLoRA-trained on **1,055
+server-verified tool-use trajectories** synthesized against a live ComfyUI —
+covering the **full 178-tool surface** (113 MCP + 65 panel tools) — so the
+model knows this exact tool suite natively instead of meeting it cold.
+
+```bash
+# 1. Install Ollama (once):  https://ollama.com/download
+# 2. Pull the size that fits your GPU:
+ollama pull artokun/gemma4-comfyui-mcp:e4b     # default — ~3.5 GB VRAM at q4
+ollama pull artokun/gemma4-comfyui-mcp:e2b     # smallest — ~2 GB VRAM
+ollama pull artokun/gemma4-comfyui-mcp:12b     # strongest — ~8 GB VRAM
+```
+
+| Tag | Base | VRAM (q4) | Notes |
+| --- | --- | --- | --- |
+| `:e4b` | Gemma 4 E4B | ~3.5 GB | **The default** — best size/quality balance |
+| `:e2b` | Gemma 4 E2B | ~2 GB | Thinks verbosely — allow generous `max_tokens` (≥512) |
+| `:12b` | Gemma 4 12B | ~8 GB | Strongest rung |
+
+The panel's Ollama backend **defaults to `:e4b`** — pick **Ollama (local)**
+in the backend picker and it just works once the model is pulled. No account,
+no API key, no per-token cost. Weights, LoRA adapters, and the training
+pipeline are open: [`artokun/gemma4-comfyui-mcp`](https://huggingface.co/artokun/gemma4-comfyui-mcp)
+(dataset: [`artokun/comfyui-mcp-trajectories`](https://huggingface.co/datasets/artokun/comfyui-mcp-trajectories)).
+
 ## Ollama & local models — the LLM Arena
 
 Any MCP harness that talks to Ollama (or an OpenAI-compatible endpoint) can
@@ -202,9 +230,11 @@ orchestrator drives your live graph with a local model — no account, no API
 key, fully offline. The model sees the 6-tool router (the 3 compact comfyui
 meta-tools plus `panel_list_tools` / `panel_describe_tool` /
 `panel_call_tool` for the live canvas), so even a 4B model isn't drowned in
-schemas. Default model: `gemma4:e4b` (the Arena's best performer); override
-with `COMFYUI_MCP_OLLAMA_MODEL` or the panel's model picker, which lists
-whatever you've pulled locally. Expect honest trade-offs versus frontier
+schemas. Default model: **`artokun/gemma4-comfyui-mcp:e4b`** — [our gemma4
+fine-tune](#our-fine-tuned-local-models-free-recommended), trained on this
+exact tool suite (supersedes stock `gemma4:e4b`, the previous Arena best);
+override with `COMFYUI_MCP_OLLAMA_MODEL` or the panel's model picker, which
+lists whatever you've pulled locally. Expect honest trade-offs versus frontier
 backends: slower turns (especially the first, while the model loads), no
 vision, no conversation rollback.
 
