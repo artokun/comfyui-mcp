@@ -544,6 +544,7 @@ describe("applyManifest", () => {
         filename: "model.safetensors",
         type: "checkpoints",
         save_path: "default",
+        trayCategory: "checkpoints",
       });
       expect(byAction.model.status).toBe("applied");
     });
@@ -568,6 +569,7 @@ describe("applyManifest", () => {
         filename: "lora.safetensors",
         type: "lora",
         save_path: "loras/pusa",
+        trayCategory: "loras",
       });
     });
   });
@@ -610,6 +612,7 @@ describe("applyManifest", () => {
         filename: "model.safetensors",
         type: "checkpoints",
         save_path: "default",
+        trayCategory: "checkpoints",
       });
       expect(byAction.model.status).toBe("applied");
     });
