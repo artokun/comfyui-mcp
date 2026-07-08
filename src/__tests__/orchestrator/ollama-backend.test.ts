@@ -156,6 +156,30 @@ describe("OllamaBackend", () => {
     }
   });
 
+  it("breaks a tool loop: identical repeat calls are blocked, 4th repeat ends the turn", async () => {
+    const { client, callTool } = fakeMcpClient(COMFY_META);
+    const backend = new OllamaBackend({ model: "gemma4:e4b", connectToolClients: async () => ({ comfyui: client }) });
+    const sameCall = [
+      { message: { content: "", tool_calls: [{ function: { name: "list_tools", arguments: { search: "krea" } } }] }, done: true },
+    ];
+    // The model re-issues the exact same call every round, forever.
+    chatScript.push(sameCall, sameCall, sameCall, sameCall, sameCall, sameCall);
+
+    const events = await collect(backend, turnsOf({ text: "find krea" }));
+    // Dispatched exactly once — repeats got the corrective nudge, not a re-run.
+    expect(callTool).toHaveBeenCalledTimes(1);
+    // Repeat calls receive the nudge as their tool result on the wire.
+    const nudges = chatRequests
+      .flatMap((r) => r.messages)
+      .filter((m) => m.role === "tool" && String(m.content).startsWith("REPEAT CALL BLOCKED"));
+    expect(nudges.length).toBeGreaterThanOrEqual(1);
+    // Turn ends with the loop-breaker, not max_tool_rounds (32 rounds later).
+    expect(events.filter((e) => e.type === "result")).toEqual([
+      { type: "result", ok: false, subtype: "tool_loop" },
+    ]);
+    expect(chatRequests.length).toBeLessThanOrEqual(5);
+  });
+
   it("dispatches comfyui meta-tool calls and feeds results back to the next request", async () => {
     const { client, callTool } = fakeMcpClient(COMFY_META);
     const backend = new OllamaBackend({ model: "gemma4:e4b", connectToolClients: async () => ({ comfyui: client }) });

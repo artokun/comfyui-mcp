@@ -711,6 +711,14 @@ export class OllamaBackend implements AgentBackend {
     this.history.push({ role: "user", content: turn.text });
 
     let resultEmitted = false;
+    // Loop-breaker: small models (especially stock ones) can wedge into
+    // re-issuing the SAME tool call verbatim for dozens of rounds (field:
+    // 30+ identical list_tools searches hunting a pack name). Track exact
+    // (name, args) repeats per turn: 2nd+ identical call is blocked with a
+    // corrective tool result instead of dispatched; at 4 repeats the turn is
+    // ended outright.
+    const seenCalls = new Map<string, number>();
+    let maxRepeats = 0;
     try {
       for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
         // Drain the chat stream manually: yield each delta event as it arrives,
@@ -744,8 +752,26 @@ export class OllamaBackend implements AgentBackend {
         for (const [i, tc] of toolCalls.entries()) {
           if (abort.signal.aborted) throw new Error("interrupted");
           const name = tc.function?.name ?? "?";
+          const args = tc.function?.arguments ?? {};
+          const callKey = `${name}:${typeof args === "string" ? args : JSON.stringify(args)}`;
+          const repeats = (seenCalls.get(callKey) ?? 0) + 1;
+          seenCalls.set(callKey, repeats);
+          maxRepeats = Math.max(maxRepeats, repeats);
           yield { type: "tool_call", name, phase: "start", detail: tc.function?.arguments };
-          const { text, isError } = await this.dispatch(name, tc.function?.arguments ?? {});
+          const { text, isError } =
+            repeats >= 2
+              ? {
+                  // Every emitted tool_call still needs a paired tool result
+                  // (the wire format breaks otherwise) — answer the repeat
+                  // with a corrective nudge instead of re-running it.
+                  text:
+                    `REPEAT CALL BLOCKED: you already called ${name} with these exact arguments this turn — the result has not changed. ` +
+                    `Do not call it again. Use the earlier result, or try DIFFERENT arguments or a different tool. ` +
+                    `Model families like krea2 / qwen-image-edit / wan / ltxv are installer PACKS, not tools: call_tool {"name":"list_packs"} to find them, then load one. ` +
+                    `If you are stuck, tell the user what you found and ask how to proceed.`,
+                  isError: true,
+                }
+              : await this.dispatch(name, args);
           opts.onActivity?.();
           yield { type: "tool_call", name, phase: "end", detail: { isError } };
           this.history.push({
@@ -754,6 +780,16 @@ export class OllamaBackend implements AgentBackend {
             tool_call_id: tc.id ?? `call_${i}`,
             content: text.slice(0, 16000),
           });
+        }
+        if (maxRepeats >= 4) {
+          logger.warn(`[ollama-backend] tool loop broken: a call repeated ${maxRepeats}x this turn (${this.model})`);
+          yield {
+            type: "assistant",
+            text: "(stopped: I kept repeating the same tool call without progress. Try rephrasing the request — and if you're on a stock model, switch to `artokun/gemma4-comfyui-mcp:e4b`, which knows this tool suite.)",
+          };
+          yield { type: "result", ok: false, subtype: "tool_loop" };
+          resultEmitted = true;
+          return;
         }
       }
       // Round budget exhausted — commit what we have so the turn gate advances.
