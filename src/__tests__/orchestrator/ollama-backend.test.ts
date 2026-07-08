@@ -127,6 +127,35 @@ describe("OllamaBackend", () => {
     expect(results).toEqual([{ type: "result", ok: true, usage: { input_tokens: 10, output_tokens: 5 } }]);
   });
 
+  it("num_ctx is model-aware: 16384 for stock, OMITTED for the fine-tune (baked 65536 governs), env override wins", async () => {
+    const { client } = fakeMcpClient(COMFY_META);
+    const oneTurn: Array<Record<string, unknown>> = [{ message: { content: "ok" }, done: true }];
+
+    // Stock model → explicit 16384 (its tag bakes no window; Ollama's own default is 4096).
+    let backend = new OllamaBackend({ model: "gemma4:e4b", connectToolClients: async () => ({ comfyui: client }) });
+    chatScript.push(oneTurn);
+    await collect(backend, turnsOf({ text: "hi" }));
+    expect((chatRequests.at(-1) as { options?: unknown }).options).toEqual({ num_ctx: 16384 });
+
+    // Our fine-tune → num_ctx omitted so the Modelfile's 65536 governs (a
+    // blanket 16384 here silently truncated conversations mid-flight).
+    backend = new OllamaBackend({ model: "artokun/gemma4-comfyui-mcp:e4b", connectToolClients: async () => ({ comfyui: client }) });
+    chatScript.push(oneTurn);
+    await collect(backend, turnsOf({ text: "hi" }));
+    expect((chatRequests.at(-1) as { options?: unknown }).options).toEqual({});
+
+    // COMFYUI_MCP_OLLAMA_NUM_CTX beats everything (e.g. 128K on big VRAM).
+    process.env.COMFYUI_MCP_OLLAMA_NUM_CTX = "131072";
+    try {
+      backend = new OllamaBackend({ model: "artokun/gemma4-comfyui-mcp:e4b", connectToolClients: async () => ({ comfyui: client }) });
+      chatScript.push(oneTurn);
+      await collect(backend, turnsOf({ text: "hi" }));
+      expect((chatRequests.at(-1) as { options?: unknown }).options).toEqual({ num_ctx: 131072 });
+    } finally {
+      delete process.env.COMFYUI_MCP_OLLAMA_NUM_CTX;
+    }
+  });
+
   it("dispatches comfyui meta-tool calls and feeds results back to the next request", async () => {
     const { client, callTool } = fakeMcpClient(COMFY_META);
     const backend = new OllamaBackend({ model: "gemma4:e4b", connectToolClients: async () => ({ comfyui: client }) });

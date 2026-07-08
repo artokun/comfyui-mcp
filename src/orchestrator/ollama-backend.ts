@@ -56,7 +56,14 @@ export interface OllamaBackendDeps {
   mcpServers?: Record<string, GeminiMcpServerSpec>;
   /** Panel system prompt (persona), prepended to the system message. */
   systemAppend?: string;
-  /** Context window tokens for /api/chat options.num_ctx (default 16384). */
+  /** Context window tokens for /api/chat options.num_ctx. Default is
+   *  MODEL-AWARE: for our fine-tune (artokun/gemma4-comfyui-mcp:*) num_ctx is
+   *  OMITTED so the tag's baked Modelfile window (65536) governs — request
+   *  options override Modelfile params, and a blanket 16384 here silently
+   *  clamped the fine-tune and truncated conversations mid-flight. Stock
+   *  models keep 16384 (their tags bake no window and Ollama's own default is
+   *  4096). Env COMFYUI_MCP_OLLAMA_NUM_CTX overrides everything — the
+   *  architecture allows up to 128K (e2b/e4b) / 256K (12b), VRAM permitting. */
   numCtx?: number;
   /** Test seam: replaces the MCP client construction from mcpServers specs. */
   connectToolClients?: () => Promise<{ comfyui?: McpToolClient; panel?: McpToolClient }>;
@@ -133,6 +140,7 @@ const OLLAMA_SYSTEM_PROMPT = [
   "Rules:",
   "- Catalog entries are tool NAMES, not data. Finish every task by actually running tools; never invent results.",
   "- Describe a tool before its first call so you use the right parameters. If a call errors, read the error — it includes the expected schema — fix the args and retry.",
+  "- To read the user's graph, ALWAYS start with panel_graph_outline (a compact text map) via panel_call_tool. NEVER fetch panel_get_graph for the whole canvas — on big graphs its JSON floods your context and you lose the conversation; use it only for ONE node's exact slot/widget detail.",
   "- To see or show any generated image/video, run the panel_show_media tool via panel_call_tool.",
   "- Workflows with API nodes cost the user PAID credits; local-GPU workflows are free. Ask before anything that might spend credits.",
 ].join("\n");
@@ -218,6 +226,26 @@ export class OllamaBackend implements AgentBackend {
 
   private authHeaders(): Record<string, string> {
     return this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {};
+  }
+
+  /** True for our fine-tuned ladder (artokun/gemma4-comfyui-mcp:*), whose
+   *  Ollama tags bake num_ctx 65536 into the Modelfile. */
+  private isFinetune(): boolean {
+    return this.model.includes("gemma4-comfyui-mcp");
+  }
+
+  /** num_ctx to SEND (0 = omit and let the Modelfile govern). Precedence:
+   *  deps.numCtx (settings) → COMFYUI_MCP_OLLAMA_NUM_CTX env → model-aware
+   *  default (fine-tune: omit → baked 65536; stock: 16384). */
+  private effectiveNumCtx(): number {
+    const envCtx = Number(process.env.COMFYUI_MCP_OLLAMA_NUM_CTX) || 0;
+    return this.deps.numCtx ?? (envCtx > 0 ? envCtx : this.isFinetune() ? 0 : 16384);
+  }
+
+  /** The context window actually in effect (for pressure warnings): the sent
+   *  num_ctx, or the fine-tune's baked 65536 when we omit it. */
+  private contextWindow(): number {
+    return this.effectiveNumCtx() || 65536;
   }
 
   async prepare(): Promise<void> {
@@ -477,7 +505,9 @@ export class OllamaBackend implements AgentBackend {
                 messages,
                 tools,
                 stream: true,
-                options: { num_ctx: this.deps.numCtx ?? 16384 },
+                // See OllamaBackendDeps.numCtx: omit for our fine-tune so the
+                // tag's baked 65536 window governs instead of clamping it.
+                options: this.effectiveNumCtx() ? { num_ctx: this.effectiveNumCtx() } : {},
               }),
               signal,
             });
@@ -547,6 +577,16 @@ export class OllamaBackend implements AgentBackend {
             input_tokens: chunk.prompt_eval_count ?? 0,
             output_tokens: chunk.eval_count ?? 0,
           };
+          // Context-pressure telltale: when the prompt fills ≥85% of the
+          // window, the NEXT turn will likely truncate history silently (the
+          // model "forgets" the conversation with no error anywhere). Surface
+          // it in the orchestrator log so the swamp is diagnosable.
+          const win = this.contextWindow();
+          if (usage.input_tokens >= win * 0.85) {
+            logger.warn(
+              `[ollama-backend] context ${usage.input_tokens}/${win} tokens (${Math.round((usage.input_tokens / win) * 100)}%) — history truncation imminent. Raise COMFYUI_MCP_OLLAMA_NUM_CTX (arch supports 128K on :e2b/:e4b, 256K on :12b, VRAM permitting) or start a fresh chat.`,
+            );
+          }
         }
       }
     }

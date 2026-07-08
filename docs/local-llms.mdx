@@ -183,7 +183,14 @@ ollama pull artokun/gemma4-comfyui-mcp:12b     # strongest — ~8 GB VRAM
 
 The panel's Ollama backend **defaults to `:e4b`** — pick **Ollama (local)**
 in the backend picker and it just works once the model is pulled. No account,
-no API key, no per-token cost. Weights, LoRA adapters, and the training
+no API key, no per-token cost.
+
+**Context window:** the tags ship a **65,536-token** window baked in, and the
+orchestrator defers to it (stock models get 16K). The architecture supports up
+to **128K** (`:e2b`/`:e4b`) and **256K** (`:12b`) — raise it with
+`COMFYUI_MCP_OLLAMA_NUM_CTX=131072` if you have the VRAM (KV cache grows with
+the window). If the agent starts "forgetting" mid-conversation, watch the
+orchestrator log: it warns when a turn fills ≥85% of the window. Weights, LoRA adapters, and the training
 pipeline are open: [`artokun/gemma4-comfyui-mcp`](https://huggingface.co/artokun/gemma4-comfyui-mcp)
 (dataset: [`artokun/comfyui-mcp-trajectories`](https://huggingface.co/datasets/artokun/comfyui-mcp-trajectories)).
 
