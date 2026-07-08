@@ -242,7 +242,7 @@ RUN if [ -n "${WHEEL_SAGE}${WHEEL_XFORMERS}" ]; then \
 # Bump PANEL_CACHEBUST (e.g. to the target panel commit SHA) to force a fresh
 # panel clone WITHOUT busting the expensive torch/sage layers above. `git clone
 # --branch` only accepts a ref name (not a raw SHA), so pinning is done here.
-ARG PANEL_CACHEBUST=0
+ARG PANEL_CACHEBUST=923330b
 RUN echo "panel cachebust: ${PANEL_CACHEBUST}" \
  && git clone --depth 1 ${PANEL_REF:+--branch "${PANEL_REF}"} \
       "${PANEL_REPO}" "${COMFY_HOME}/custom_nodes/comfyui-mcp-panel" \
