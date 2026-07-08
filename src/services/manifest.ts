@@ -443,6 +443,8 @@ function remoteModelTarget(model: ComfyManifest["models"][number]): {
   type: string;
   save_path: string;
   filename: string;
+  /** OUR canonical category folder — for the panel download-tray watcher. */
+  category: string;
 } {
   if (model.local_path) {
     if (isAbsolute(model.local_path)) {
@@ -470,13 +472,13 @@ function remoteModelTarget(model: ComfyManifest["models"][number]): {
       dirSegments[0],
       dirSegments.length > 1 ? dirSegments.join("/") : undefined,
     );
-    return { name: filename, type, save_path, filename };
+    return { name: filename, type, save_path, filename, category: dirSegments[0] };
   }
 
   const category: ModelType = model.model_type ?? "checkpoints";
   const filename = model.filename ?? defaultFilenameForUrl(model.url);
   const { type, save_path } = managerModelDestination(category);
-  return { name: filename, type, save_path, filename };
+  return { name: filename, type, save_path, filename, category };
 }
 
 async function installedNodesOrEmpty(): Promise<InstalledNode[]> {
@@ -607,13 +609,15 @@ export async function applyManifest(
           );
           continue;
         }
-        const { name, type, save_path, filename } = remoteModelTarget(model);
+        const { name, type, save_path, filename, category } = remoteModelTarget(model);
         const res = await installModelViaManager({
           name,
           url: model.url,
           filename,
           type,
           save_path,
+          // Panel tray: watch the canonical category for the file to land (#143).
+          trayCategory: category,
         });
         results.push(report("model", item, "applied", res.message));
         continue;

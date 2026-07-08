@@ -521,9 +521,11 @@ async function downloadModelViaManagerRemote(
     filename: resolvedFilename,
     type: managerType,
     save_path: managerSavePath,
+    // Panel tray: watch OUR canonical category for the file to land (#143).
+    trayCategory: modelType,
   });
 
-  return `${normalizedSubfolder}/${resolvedFilename} (installed on the remote ComfyUI via ComfyUI-Manager)${authWarning}`;
+  return `${normalizedSubfolder}/${resolvedFilename} (dispatched to the remote ComfyUI via ComfyUI-Manager — download continues server-side; the file lists under /models when complete)${authWarning}`;
 }
 
 export async function downloadModel(

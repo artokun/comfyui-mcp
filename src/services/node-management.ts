@@ -1,9 +1,10 @@
 import { execFileSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { config, getComfyUIBaseUrl } from "../config.js";
 import { comfyuiFetch } from "../comfyui/fetch.js";
+import { progressEnabled, reportDownloadProgress } from "./download-progress.js";
 import { ComfyUIError, ProcessControlError, ValidationError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 
@@ -1299,6 +1300,76 @@ export interface InstallModelParams {
    * destination, or "default" for type-based resolution.
    */
   save_path?: string;
+  /**
+   * OUR canonical folder-paths category (e.g. "diffusion_models", "vae") —
+   * used ONLY for panel download-tray progress. When set and the panel
+   * progress channel is active, a background watcher reports an indeterminate
+   * tray row until the file shows up in the server's /models/<category>
+   * listing (in-progress files are hidden there, so "listed" = landed).
+   */
+  trayCategory?: string;
+}
+
+// Remote (Manager-dispatched) downloads run server-side: the queue reports
+// "done" at dispatch/aria2-handoff while the host still streams gigabytes, so
+// tray progress can't come from bytes we never see (issue #143). Instead, poll
+// the server's /models/<category> listing — verified live: an in-progress file
+// is NOT listed; it appears when the download completes.
+const REMOTE_LANDING_POLL_MS = 5_000;
+const REMOTE_LANDING_TIMEOUT_MS = 4 * 60 * 60 * 1000; // generous: multi-GB on slow links
+
+/**
+ * Background tray reporter for a server-side model download. Writes an
+ * indeterminate "downloading" row immediately (and as a heartbeat, so the
+ * orchestrator's 60s dead-writer sweep doesn't prune long downloads), then a
+ * terminal "done" when the filename appears in /models/<category>, or "error"
+ * if it never shows within the timeout. Fire-and-forget: the tool call returns
+ * at dispatch; this keeps the tray honest afterwards. No-op outside the panel
+ * (progress channel disabled).
+ */
+export function watchRemoteModelLanding(
+  category: string,
+  filename: string,
+  url: string,
+): void {
+  if (!progressEnabled()) return;
+  const id = createHash("sha256").update(url).digest("hex").slice(0, 16);
+  const row = { id, name: filename, downloaded: 0, total: 0, bytes_per_sec: 0 };
+  reportDownloadProgress({ ...row, status: "downloading" }, true);
+  const started = Date.now();
+  const timer = setInterval(() => {
+    void (async () => {
+      let listed = false;
+      try {
+        const res = await comfyuiFetch(
+          `${getComfyUIBaseUrl()}/models/${encodeURIComponent(category)}`,
+        );
+        if (res.ok) {
+          const names = (await res.json()) as unknown;
+          // Entries are relative paths ("file.safetensors" or "sub/file.safetensors").
+          listed =
+            Array.isArray(names) &&
+            names.some(
+              (n) =>
+                typeof n === "string" &&
+                (n === filename || n.endsWith(`/${filename}`) || n.endsWith(`\\${filename}`)),
+            );
+        }
+      } catch {
+        // Server briefly unreachable (e.g. mid-reboot) — keep waiting.
+      }
+      if (listed) {
+        clearInterval(timer);
+        reportDownloadProgress({ ...row, status: "done" }, true);
+      } else if (Date.now() - started > REMOTE_LANDING_TIMEOUT_MS) {
+        clearInterval(timer);
+        reportDownloadProgress({ ...row, status: "error" }, true);
+      } else {
+        reportDownloadProgress({ ...row, status: "downloading" }, true);
+      }
+    })();
+  }, REMOTE_LANDING_POLL_MS);
+  timer.unref?.();
 }
 
 /**
@@ -1331,24 +1402,37 @@ export async function installModelViaManager(
   const status = await queueManagerTask("install-model", taskParams);
   // NOTE: the Manager queue reports the task "done" once it DRAINS, even when
   // the underlying OperationResult failed (e.g. a 404 download, or Manager's
-  // security gate rejecting a network fetch). The v2 queue/status endpoint only
-  // exposes aggregate counts (no per-task result), so a clean drain here does
-  // NOT prove the file landed — phrase the result as "dispatched", not
+  // security gate rejecting a network fetch) — and with an aria2 sidecar
+  // (COMFYUI_MANAGER_ARIA2_SERVER) it drains at HANDOFF, while the host is
+  // still streaming gigabytes. The v2 queue/status endpoint only exposes
+  // aggregate counts (no per-task result), so a clean drain here does NOT
+  // prove the file landed — phrase the result as "dispatched", not
   // "installed", and leave final verification to a list on the pod.
   //
   // DEPLOYMENT: remote model install requires the pod's ComfyUI-Manager to be
   // in network_mode=personal_cloud (or loopback) with permissive security; a
   // stricter security_level rejects the server-side download.
+  if (params.trayCategory) {
+    watchRemoteModelLanding(params.trayCategory, params.filename, params.url);
+  }
   return {
     mechanism: "manager-http",
     message:
       `Dispatched model "${name}" (${params.filename}) to install into ` +
       `${params.type} on the connected ComfyUI via ComfyUI-Manager. The queue ` +
-      `drained, but Manager reports tasks "done" even on failure and exposes no ` +
-      `per-task result, so success is NOT guaranteed — verify the file landed on ` +
-      `the ComfyUI host (a restart may be required to see it). If nothing lands, ` +
-      `confirm Manager runs with network_mode=personal_cloud (or loopback) and a ` +
-      `permissive security level so server-side downloads aren't blocked.`,
+      `drained, but that only means the download was HANDED OFF (with an aria2 ` +
+      `sidecar the host keeps streaming after the queue drains), and Manager ` +
+      `reports tasks "done" even on failure with no per-task result — so ` +
+      `success is NOT guaranteed. The file appears in the server's ` +
+      `/models/<category> listing only once the download COMPLETES (in-progress ` +
+      `files are hidden), and Manager may store it under its own type dir ` +
+      `(e.g. unet/, clip/) which ComfyUI aliases to diffusion_models/` +
+      `text_encoders — an empty canonical folder mid-download is NORMAL, not a ` +
+      `failure. Wait and re-check before re-dispatching (duplicates waste ` +
+      `bandwidth); a restart may be required for loaders to see the file. If ` +
+      `nothing ever lands, confirm Manager runs with ` +
+      `network_mode=personal_cloud (or loopback) and a permissive security ` +
+      `level so server-side downloads aren't blocked.`,
     details: status,
   };
 }
