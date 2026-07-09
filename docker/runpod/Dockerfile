@@ -252,6 +252,23 @@ RUN echo "panel cachebust: ${PANEL_CACHEBUST}" \
     fi
 
 # -----------------------------------------------------------------------------
+# 4.1 ComfyUI-Crystools — the resources monitor (VRAM/RAM/CPU/GPU/HDD bars in
+#     the ComfyUI topbar). Tiny, and exactly what you want visible on a RENTED
+#     GPU: VRAM pressure at a glance without asking the agent. Seeded onto the
+#     volume like every baked node; its Python deps (pynvml etc.) reinstall
+#     into the venv each boot from the persistent pip cache (post_start §4.5c).
+#     Pin CRYSTOOLS_REF to a tag for reproducible images (empty = default branch).
+# -----------------------------------------------------------------------------
+ARG CRYSTOOLS_REPO=https://github.com/crystian/ComfyUI-Crystools.git
+ARG CRYSTOOLS_REF=
+RUN git clone --depth 1 ${CRYSTOOLS_REF:+--branch "${CRYSTOOLS_REF}"} \
+      "${CRYSTOOLS_REPO}" "${COMFY_HOME}/custom_nodes/ComfyUI-Crystools" \
+ && if [ -f "${COMFY_HOME}/custom_nodes/ComfyUI-Crystools/requirements.txt" ]; then \
+      "${VPIP}" install --no-cache-dir --extra-index-url "${TORCH_INDEX_URL}" \
+        -r "${COMFY_HOME}/custom_nodes/ComfyUI-Crystools/requirements.txt"; \
+    fi
+
+# -----------------------------------------------------------------------------
 # 5. extra_model_paths.yaml — maps EVERY model category to /workspace/models/*
 #    with `is_default: true` so the volume is the PRIMARY (download) location.
 #    Passed at launch via --extra-model-paths-config (see post_start.sh).
@@ -396,6 +413,7 @@ RUN mv "${COMFY_HOME}/custom_nodes" "${COMFY_HOME}/custom_nodes_seed"
 # -----------------------------------------------------------------------------
 RUN set -e; \
     for f in "${COMFY_HOME}/custom_nodes_seed/comfyui-mcp-panel/__init__.py" \
+             "${COMFY_HOME}/custom_nodes_seed/ComfyUI-Crystools/__init__.py" \
              "${COMFY_HOME}/custom_nodes_seed/comfyui-mcp-panel/pyproject.toml" \
              "${COMFY_HOME}/custom_nodes_seed/comfyui-mcp-panel/web/js/comfyui-mcp-panel.js" \
              "${COMFY_HOME}/extra_model_paths.yaml" \
