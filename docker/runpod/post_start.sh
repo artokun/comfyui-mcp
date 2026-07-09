@@ -450,37 +450,42 @@ if [ -d "${CN_SEED}" ]; then
   fi
 fi
 
-# (b.1) PANEL AUTO-UPDATE — decouples "get the latest Agent Panel" from "wait for
-#     a new pod image". (a)+(b) above only refresh the volume from what THIS
-#     IMAGE baked at build time; a panel release between image builds otherwise
-#     needs a full image rebuild to reach a pod. Since the panel's checkout is a
-#     plain git clone (see the Dockerfile), fast-forward it in place before
-#     ComfyUI launches (so no restart is needed for the update to take effect —
-#     unlike driving this through Manager's install/update API, which only
-#     applies on ComfyUI's NEXT launch).
+# (b.1) BAKED-NODE AUTO-UPDATE — decouples "get the latest Agent Panel /
+#     Crystools" from "wait for a new pod image". (a)+(b) above only refresh the
+#     volume from what THIS IMAGE baked at build time — which also means (b)
+#     REVERTS any newer version a user pulled via Manager back to the baked one
+#     on every boot. Every baked node is a plain git clone (see the Dockerfile),
+#     so fast-forward each in place before ComfyUI launches (no extra restart
+#     needed, unlike Manager's update API which applies on the NEXT launch).
 #
-#     Skips itself (git symbolic-ref fails) when HEAD is DETACHED — i.e. a build
-#     pinned PANEL_REF to a tag/commit for reproducibility, which we must not
-#     silently override. Best-effort: any failure (offline pod, rate limit, a
-#     force-pushed history) logs a warning and keeps the existing checkout.
-PANEL_DIR="${CN_VOL}/comfyui-mcp-panel"
-if [ "${PANEL_AUTO_UPDATE}" = "1" ] && [ -d "${PANEL_DIR}/.git" ]; then
-  PANEL_BRANCH="$(git -C "${PANEL_DIR}" symbolic-ref -q --short HEAD 2>/dev/null || true)"
-  if [ -n "${PANEL_BRANCH}" ]; then
-    log "checking for a newer Agent Panel release (branch: ${PANEL_BRANCH})…"
-    if git -C "${PANEL_DIR}" fetch --depth 1 origin "${PANEL_BRANCH}" \
-         >>"${LOG_DIR}/panel-update.log" 2>&1 \
-       && git -C "${PANEL_DIR}" reset --hard "origin/${PANEL_BRANCH}" \
-         >>"${LOG_DIR}/panel-update.log" 2>&1; then
-      log "Agent Panel up to date: $(git -C "${PANEL_DIR}" rev-parse --short HEAD 2>/dev/null)"
-    else
-      log "WARN: Agent Panel update check failed — keeping the existing copy (see panel-update.log)"
-    fi
-  else
-    log "Agent Panel checkout is pinned (detached HEAD) — skipping auto-update, as intended"
+#     Per-node skip rules:
+#       * detached HEAD (a build pinned PANEL_REF/CRYSTOOLS_REF for
+#         reproducibility) — never silently overridden;
+#       * PANEL_AUTO_UPDATE!=1 disables the lot (same knob as before).
+#     Best-effort: any failure (offline pod, rate limit, force-pushed history)
+#     logs a warning and keeps the existing checkout.
+ff_baked_node() {  # $1 = dir under custom_nodes, $2 = display name
+  local dir="${CN_VOL}/$1" label="$2" branch
+  [ -d "${dir}/.git" ] || return 0
+  branch="$(git -C "${dir}" symbolic-ref -q --short HEAD 2>/dev/null || true)"
+  if [ -z "${branch}" ]; then
+    log "${label} checkout is pinned (detached HEAD) — skipping auto-update, as intended"
+    return 0
   fi
-elif [ "${PANEL_AUTO_UPDATE}" != "1" ]; then
-  log "Agent Panel auto-update disabled (PANEL_AUTO_UPDATE=${PANEL_AUTO_UPDATE})"
+  log "checking for a newer ${label} (branch: ${branch})…"
+  if git -C "${dir}" fetch --depth 1 origin "${branch}" >>"${LOG_DIR}/panel-update.log" 2>&1 \
+     && git -C "${dir}" reset --hard "origin/${branch}" >>"${LOG_DIR}/panel-update.log" 2>&1; then
+    log "${label} up to date: $(git -C "${dir}" rev-parse --short HEAD 2>/dev/null)"
+  else
+    log "WARN: ${label} update check failed — keeping the existing copy (see panel-update.log)"
+  fi
+}
+PANEL_DIR="${CN_VOL}/comfyui-mcp-panel"
+if [ "${PANEL_AUTO_UPDATE}" = "1" ]; then
+  ff_baked_node "comfyui-mcp-panel" "Agent Panel"
+  ff_baked_node "ComfyUI-Crystools" "Crystools"
+else
+  log "baked-node auto-update disabled (PANEL_AUTO_UPDATE=${PANEL_AUTO_UPDATE})"
 fi
 
 # (b.2) PANEL INTEGRITY CHECK + SELF-HEAL. A past ENOSPC (or any interrupted
