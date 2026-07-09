@@ -45,7 +45,9 @@
     "generations:stats": "node scripts/generation-stats.mjs",
     "release": "npm version patch && git push --follow-tags",
     "release:minor": "npm version minor && git push --follow-tags",
-    "release:major": "npm version major && git push --follow-tags"
+    "release:major": "npm version major && git push --follow-tags",
+    "changelog": "node scripts/gen-changelog.mjs",
+    "version": "node scripts/gen-changelog.mjs $npm_package_version && git add CHANGELOG.md"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",

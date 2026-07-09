@@ -6,38 +6,274 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
-### Added
+## [0.27.0] - 2026-07-08
 
-- **`--force-remote` flag** (`COMFYUI_MCP_FORCE_REMOTE=1`) — classify a loopback
-  `--comfyui-url` as remote, for dstack/RunPod-style port-forwards where a remote
-  ComfyUI is reachable at `localhost:8188`. The orchestrator forwards it to spawned
-  agents.
-- **Interactive bridge-port reclaim**: when `--panel-orchestrator` (or `connect`)
-  can't bind its port because a previous session still holds it, it now reads that
-  session's lockfile and — when run in a real terminal — offers to stop it and take
-  over (`Stop pid <pid> and take over this port with the current version? [y/N]`),
-  naming its version/pid instead of just logging that panel tools are unavailable
-  until you go find and kill it yourself.
+_No user-facing changes._
 
-### Fixed
+## [0.26.5] - 2026-07-08
 
-- **Secure bridge (RunPod/remote pod) token going stale after a ComfyUI restart** —
-  the orchestrator only re-advertised its `wss://` bridge URL/token to the pod when
-  the reported ComfyUI URL actually changed, so a same-pod reconnect never retried a
-  failed advertise (which routinely raced the pod's HTTP server still booting after a
-  ComfyUI restart). Once that race was lost, the pod was left with a stale token for
-  the rest of the session — any *fresh* browser page load would fail with
-  `rejected a bridge connection with a missing/invalid token` and never recover
-  without a full orchestrator restart. Now the orchestrator re-advertises on every
-  panel `hello` (cheap, idempotent), so the next tab connect self-heals it.
+### MCP
 
-### Changed
+#### Added
+- free local-model VRAM during generation + pause chat until it finishes (#154)
+- default Ollama to our fine-tuned gemma4-comfyui-mcp ladder (#151)
 
-- **`generations.db` for remote/cloud/undetected targets** now lives under
-  `~/.comfyui-mcp/instances/<host_port>/` (override with `COMFYUI_MCP_DATA_DIR`)
-  instead of the current working directory. Loopback hosts share one
-  `localhost_<port>` slug. Existing remote users' CWD `generations.db` is not
-  migrated — the history restarts empty at the new location.
+#### Fixed
+- tool-loop breaker — block identical repeat calls, end the turn at 4 repeats (#153)
+- stop clamping the fine-tune's context to 16K — model-aware num_ctx (#152)
+
+## [0.26.4] - 2026-07-08
+
+### RunPod image
+
+#### Added
+- honor COMFY_AUTOUPDATE_MANAGER — Manager fast-forward at boot (#148)
+
+#### Fixed
+- manager_core shim comfy_path must be EMPTY — non-empty stripped custom-node zip paths, breaking CNR installs (#150)
+
+### MCP
+
+#### Fixed
+- re-advertise the bridge URL on a timer — restart-after-install wiped the pod store, wedging reconnect (#149)
+
+## [0.26.3] - 2026-07-08
+
+### MCP
+
+#### Fixed
+- panel download tray for Manager-dispatched (remote/RunPod) model installs (#147)
+
+## [0.26.2] - 2026-07-08
+
+### RunPod image
+
+#### Fixed
+- shim verify step needs the ComfyUI root on sys.path
+- manager_core shim — pip Manager's aria2 install-model path crashed on a legacy import (#142)
+
+### MCP
+
+#### Added
+- takeover clears the port itself — tree-kill, port-resolved holders, one consent (#146)
+
+## [0.26.1] - 2026-07-08
+
+### MCP
+
+#### Fixed
+- remote-mode banner read as a failure ('no COMFYUI_PATH, tools limited') (#141)
+
+## [0.26.0] - 2026-07-08
+
+### RunPod image
+
+#### Added
+- npm-publish-style release — version, build, gate, publish, verify, pin template (#135)
+
+#### Fixed
+- harden the aria2 sidecar per codex review (#139)
+- aria2 download sidecar — Manager's built-in downloader ran at <1-4 MB/s (#138)
+- deploy-dockerhub.sh — fall back to 'python' when python3 is absent (Git Bash on Windows) (#134)
+- 0-byte panel/custom-nodes on full volumes — self-heal + integrity gates (#133)
+- File Browser — pinned release binary instead of the deleted get.sh installer (#132)
+
+### MCP
+
+#### Added
+- auto-convert API-format graphs to Web UI format (#126) (#136)
+
+#### Fixed
+- find Desktop-recorded installs + auto-detect in the orchestrator (#137)
+
+## [0.25.2] - 2026-07-08
+
+### MCP
+
+#### Fixed
+- un-mangle the topbar star — double-encoded UTF-8 rendered as 'â­' (#129)
+- warn when saving API format — the canvas can't open it (#125)
+- ACP mcpServers — live CLI rejects type 'http'; use the SSE variant (#124)
+
+## [0.25.1] - 2026-07-08
+
+_No user-facing changes._
+
+## [0.25.0] - 2026-07-08
+
+### RunPod image
+
+#### Fixed
+- default the image to cu128 (driver >=570) — cu130 perf stack becomes an opt-in variant (#119)
+
+## [0.24.5] - 2026-07-08
+
+### MCP
+
+#### Added
+- LAN bind for the panel bridge - server-side orchestrator topology (panel #54)
+
+## [0.24.4] - 2026-07-08
+
+### MCP
+
+#### Added
+- graceful legacy-Manager degradation messaging
+
+## [0.24.3] - 2026-07-08
+
+### RunPod image
+
+#### Fixed
+- default Manager security_level to weak so git-URL node installs work
+
+### MCP
+
+#### Fixed
+- speak BOTH ComfyUI-Manager API generations (fixes #116) + troubleshooting docs
+
+## [0.24.2] - 2026-07-08
+
+### MCP
+
+#### Added
+- comfyui-launch-flags — VRAM/attention/cache/perf launch-flag matrix (#101)
+
+#### Fixed
+- re-advertise secure bridge on every hello + offer interactive port reclaim (#115)
+- readable fatal errors + correct Docker HTTP recipe
+
+## [0.24.1] - 2026-07-08
+
+### RunPod image
+
+#### Added
+- panel auto-update on boot, independent of the image (#111 follow-up)
+
+### MCP
+
+#### Added
+- add --force-remote to override loopback detection
+- OpenAI-compatible panel backend, tiered LLM Arena v3, panel smoke harness, all-LLM repositioning
+- Ollama backend — drive the sidebar panel with a local LLM
+- ComfyUI LLM Arena + compact-mode catalog search over param docs
+- first-class Hermes/OpenClaw/Copilot CLI support + Gemma 4 validation
+- compact tool mode for Hermes Agent / Ollama / small models (#97)
+- opt-in relay backend for the secure bridge (comfyui-mcp-relay)
+
+#### Fixed
+- scope force-remote forwarding to opted-in / non-loopback targets
+- keep generations.db out of CWD for remote ComfyUI
+- local models were flying blind — dedicated system prompt, forgiving dispatch, markdown reconciliation, cold-load keepalive
+
+#### Changed
+- trim redundant comments in force-remote flag
+
+## [0.24.0] - 2026-07-08
+
+### MCP
+
+#### Added
+- OpenAI-compatible panel backend, tiered LLM Arena v3, panel smoke harness, all-LLM repositioning
+- Ollama backend — drive the sidebar panel with a local LLM
+- ComfyUI LLM Arena + compact-mode catalog search over param docs
+- first-class Hermes/OpenClaw/Copilot CLI support + Gemma 4 validation
+- compact tool mode for Hermes Agent / Ollama / small models (#97)
+
+#### Fixed
+- local models were flying blind — dedicated system prompt, forgiving dispatch, markdown reconciliation, cold-load keepalive
+
+## [0.23.6] - 2026-07-08
+
+### MCP
+
+#### Added
+- opt-in relay backend for the secure bridge (comfyui-mcp-relay)
+
+## [0.23.5] - 2026-07-08
+
+### RunPod image
+
+#### Added
+- persist custom_nodes on the volume (survive restarts) (#111)
+
+### MCP
+
+#### Added
+- secure wss:// bridge by default when driving a remote https pod
+
+#### Fixed
+- WebSocket keepalive so the secure wss tunnel doesn't drop mid-turn
+
+## [0.23.4] - 2026-07-08
+
+### MCP
+
+#### Added
+- secure wss:// bridge by default when driving a remote https pod
+
+## [0.23.3] - 2026-07-08
+
+### MCP
+
+#### Added
+- banner clarifies the terminal stays quiet until you click Connect
+
+## [0.23.2] - 2026-07-08
+
+### RunPod image
+
+#### Added
+- port GPU driver preflight into venv-in-image (CUDA 13 / driver >= 580)
+- perf variant — cu130 + torch 2.9.1 + SageAttention 2.2 + Triton
+
+#### Fixed
+- --enable-cors-header (proxy browser 403) + create ComfyUI 0.27 DB dir
+
+### MCP
+
+#### Added
+- match the frontend — every out-of-list combo value is an error (#110)
+
+## [0.23.1] - 2026-07-08
+
+### RunPod image
+
+#### Added
+- GPU driver preflight — fail fast on a too-old host driver
+
+### MCP
+
+#### Fixed
+- report real provider readiness over the bridge + bump SDK for Sonnet 5 (#108)
+
+## [0.23.0] - 2026-07-08
+
+### RunPod image
+
+#### Added
+- clean, progressive seed-extract progress (pv, no log spam)
+
+#### Fixed
+- adopt an already-seeded volume without a marker (migration safety)
+
+#### Changed
+- seed the volume from ONE archive + completion marker (no re-copy)
+
+### MCP
+
+#### Added
+- retarget ComfyUI from the panel's hello.comfyui_url
+- wan-multitalk — audio-driven talking-avatar pack + skill
+- single-port multi-provider — per-tab backend selection
+- custom RunPod image for the comfyui-mcp agent (draft) (#98)
+- one-command `connect <comfyui-url>` to drive a remote ComfyUI locally (#99)
+- remote-mode parity — route model install/manifest/output-listing through Manager v2 HTTP (#96)
+
+#### Fixed
+- detect host Triton/SageAttention from the ComfyUI LOG (fixes remote mode)
+- orchestrator-owned session is authoritative on reconnect
+
 
 ## [0.22.0] - 2026-06-29
 
