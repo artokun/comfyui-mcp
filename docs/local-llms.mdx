@@ -202,6 +202,11 @@ override with `COMFYUI_MCP_LMSTUDIO_HOST`). Setup is two clicks: install from
 [lmstudio.ai](https://lmstudio.ai), then **Developer → Start Server** with a
 **tool-calling model** loaded. The model picker mirrors whatever the server
 offers; with no default set, the first served model is adopted automatically.
+The orchestrator manages the **full lifecycle** hands-off: it auto-starts the
+server when needed, JIT-loads your model, frees its VRAM while a ComfyUI
+render runs (chat is held and answered when the render finishes), unloads the
+outgoing model on a model switch, and releases everything when you switch to
+a different provider.
 
 Our fine-tuned GGUFs work here too — search `artokun/gemma4-comfyui-mcp` in
 LM Studio's model downloader and grab a `model-q4_k_m.gguf`. Expect the same

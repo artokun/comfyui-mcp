@@ -47,16 +47,25 @@ function ollamaInstalled(home: string): boolean {
 /** LM Studio install signals: the app drops its `lms` CLI at ~/.lmstudio/bin on
  *  every platform (best cross-OS marker), plus the per-OS app locations. */
 function lmstudioInstalled(home: string): boolean {
-  if (onPath(CLI_NAMES.lmstudio)) return true;
-  if (fileExists(home, ".lmstudio", "bin", process.platform === "win32" ? "lms.exe" : "lms")) {
-    return true;
-  }
+  if (lmstudioCliPath(home)) return true;
   if (process.platform === "win32") {
     const localAppData = process.env.LOCALAPPDATA || join(home, "AppData", "Local");
     return fileExists(localAppData, "Programs", "LM Studio", "LM Studio.exe");
   }
   if (process.platform === "darwin") return fileExists("/Applications", "LM Studio.app");
   return fileExists(home, ".lmstudio");
+}
+
+/** Absolute path (or bare name if on PATH) of the `lms` CLI — the supported
+ *  programmatic surface for load/unload/server lifecycle. Used by
+ *  services/lmstudio-lifecycle to shell out even when PATH lacks it (the app
+ *  adds ~/.lmstudio/bin to PATH for NEW shells only). Null when not found. */
+export function lmstudioCliPath(home: string = homedir()): string | null {
+  if (onPath(CLI_NAMES.lmstudio)) return "lms";
+  const binName = process.platform === "win32" ? "lms.exe" : "lms";
+  const inHome = join(home, ".lmstudio", "bin", binName);
+  if (fileExists(inHome)) return inHome;
+  return null;
 }
 
 /** True if any of `names` resolves on the local PATH. */

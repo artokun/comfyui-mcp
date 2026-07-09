@@ -51,6 +51,12 @@ import type { AgentBackend } from "./agent-backend.js";
 import { readComfyuiCrashLog, formatCrashNote } from "../services/crash-log.js";
 import { QueueMonitor, type StallReport } from "../services/queue-monitor.js";
 import { unloadAllOllama, warmOllama, resolveOllamaHost } from "../services/ollama-vram.js";
+import {
+  isLocalLmstudio,
+  startLmstudioServer,
+  unloadAllLmstudio,
+  warmLmstudio,
+} from "../services/lmstudio-lifecycle.js";
 import { getAgentSettings, setAgentSettings } from "../services/panel-settings.js";
 import {
   gatherEnvCapabilities,
@@ -1249,16 +1255,24 @@ export async function runPanelOrchestrator(): Promise<void> {
   const anyLocalOllama = (): boolean =>
     ollamaApi === "ollama" &&
     (defaultBackend === "ollama" || [...tabBackends.values()].includes("ollama"));
+  // LM Studio joins the same VRAM handoff (issue #160 follow-up): local server
+  // only — a remote COMFYUI_MCP_LMSTUDIO_HOST is someone else's VRAM.
+  const anyLocalLmstudio = (): boolean =>
+    isLocalLmstudio(LMSTUDIO_BASE_URL) &&
+    (defaultBackend === "lmstudio" || [...tabBackends.values()].includes("lmstudio"));
   // agentKey -> messages held while a render runs (flushed on render end).
   const heldDuringGen = new Map<string, Array<{ text: string; opts: Record<string, unknown> }>>();
   let genPauseActive = false;
   if (pauseLocalDuringGen) {
     QueueMonitor.setTransitionHandlers({
       onRunStart: () => {
-        if (!anyLocalOllama()) return;
+        const ol = anyLocalOllama();
+        const ls = anyLocalLmstudio();
+        if (!ol && !ls) return;
         genPauseActive = true;
         // Free the local model's VRAM for the render (best-effort, fire-and-forget).
-        void unloadAllOllama(resolveOllamaHost());
+        if (ol) void unloadAllOllama(resolveOllamaHost());
+        if (ls) void unloadAllLmstudio(LMSTUDIO_BASE_URL);
       },
       onRunEnd: () => {
         if (!genPauseActive) return;
@@ -1268,6 +1282,7 @@ export async function runPanelOrchestrator(): Promise<void> {
         // instant ("ready to chat"). If messages ARE queued, sending them below
         // loads the model itself — no separate warm needed.
         if (anyLocalOllama() && !hadHeld) void warmOllama(resolveOllamaHost(), ollamaModel);
+        if (anyLocalLmstudio() && !hadHeld && lmstudioModel) void warmLmstudio(LMSTUDIO_BASE_URL, lmstudioModel);
         for (const [key, msgs] of heldDuringGen) {
           const tabId = panelTabOf(key);
           if (msgs.length > 0) {
@@ -1596,7 +1611,10 @@ export async function runPanelOrchestrator(): Promise<void> {
         logger.warn(`[panel-orchestrator] tab ${panelTab.slice(0, 8)} connected (openrouter) but no API key — degraded ack`);
         return;
       }
-      void ensureModels(backend)
+      void (isLs && isLocalLmstudio(LMSTUDIO_BASE_URL)
+        ? startLmstudioServer(LMSTUDIO_BASE_URL).then(() => ensureModels(backend))
+        : ensureModels(backend)
+      )
         .then((models) => {
           if (models.length) {
             const agentLabel = isCx
@@ -1665,6 +1683,20 @@ export async function runPanelOrchestrator(): Promise<void> {
       const prev = tabBackends.get(panelTab) ?? defaultBackend;
       if (prev !== reqBackend) manager.reset(panelTab + AGENT_KEY_SEP + prev);
       tabBackends.set(panelTab, reqBackend);
+      // Leaving a LOCAL provider frees its VRAM (no other tab still on it) —
+      // the point of switching to Claude/hosted is usually reclaiming the GPU.
+      if (prev !== reqBackend) {
+        const stillUsed = (b: string) => [...tabBackends.values()].includes(b) || defaultBackend === b;
+        if (prev === "lmstudio" && !stillUsed("lmstudio") && isLocalLmstudio(LMSTUDIO_BASE_URL)) {
+          void unloadAllLmstudio(LMSTUDIO_BASE_URL);
+        }
+        if (prev === "ollama" && !stillUsed("ollama") && ollamaApi === "ollama") {
+          void unloadAllOllama(resolveOllamaHost());
+        }
+        // Switching TO lmstudio: make sure its server is up (auto-start, no
+        // manual `lms server start`) so the readiness probe finds it alive.
+        if (reqBackend === "lmstudio") void startLmstudioServer(LMSTUDIO_BASE_URL);
+      }
       pushModels(panelTab);
       if (reqBackend === "claude") pushCommands(panelTab);
       bridge.push({ type: "ack", ok: true, kind: "set_backend", backend: reqBackend }, panelTab);
@@ -1792,6 +1824,12 @@ export async function runPanelOrchestrator(): Promise<void> {
             logger.warn(`[panel-orchestrator] ignoring unknown model "${nextModel}" — keeping current`);
             nextModel = undefined;
           }
+        }
+        // LM Studio model switch: unload everything EXCEPT the incoming model —
+        // the outgoing one would otherwise sit in VRAM next to the JIT-loaded
+        // replacement until its TTL expires.
+        if (nextModel && backendForTab(tabId) === "lmstudio" && isLocalLmstudio(LMSTUDIO_BASE_URL)) {
+          void unloadAllLmstudio(LMSTUDIO_BASE_URL, nextModel);
         }
         const applied = await manager.setOptions(agentKeyFor(tabId), { model: nextModel, effort: nextEffort });
         bridge.push(
@@ -2007,12 +2045,10 @@ export async function runPanelOrchestrator(): Promise<void> {
     // render is in flight, DON'T run the turn now — that would reload the model
     // on top of the generation (VRAM contention / OOM). Hold it and answer when
     // the render finishes (onRunEnd flushes the queue + warms the model).
-    if (
-      pauseLocalDuringGen &&
-      ollamaApi === "ollama" &&
-      backendForTab(event.tab_id) === "ollama" &&
-      QueueMonitor.isBusy()
-    ) {
+    const tabIsLocalVram =
+      (ollamaApi === "ollama" && backendForTab(event.tab_id) === "ollama") ||
+      (backendForTab(event.tab_id) === "lmstudio" && isLocalLmstudio(LMSTUDIO_BASE_URL));
+    if (pauseLocalDuringGen && tabIsLocalVram && QueueMonitor.isBusy()) {
       const key = agentKeyFor(event.tab_id);
       const arr = heldDuringGen.get(key) ?? [];
       arr.push({ text: outText, opts: sendOpts });
