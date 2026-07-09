@@ -140,4 +140,22 @@ describe("panel-secrets", () => {
       expect(spawnEnv.CIVITAI_API_TOKEN).toBe("legit");
     });
   });
+
+  describe("agent-secret allowlist (provider keys, issue #162)", () => {
+    it("accepts the custom-endpoint key and hydrates it into env", async () => {
+      const { setAgentSecret, loadAgentSecretEnv, isAllowedAgentSecretKey } = await import(
+        "../../services/panel-secrets.js"
+      );
+      expect(isAllowedAgentSecretKey("COMFYUI_MCP_CUSTOM_API_KEY")).toBe(true);
+      expect(isAllowedAgentSecretKey("OPENROUTER_API_KEY")).toBe(true);
+      expect(isAllowedAgentSecretKey("NODE_OPTIONS")).toBe(false);
+      const prev = process.env.COMFYUI_MCP_CUSTOM_API_KEY;
+      delete process.env.COMFYUI_MCP_CUSTOM_API_KEY;
+      setAgentSecret("COMFYUI_MCP_CUSTOM_API_KEY", "sk-custom-1");
+      expect(loadAgentSecretEnv().COMFYUI_MCP_CUSTOM_API_KEY).toBe("sk-custom-1");
+      expect(process.env.COMFYUI_MCP_CUSTOM_API_KEY).toBe("sk-custom-1");
+      if (prev === undefined) delete process.env.COMFYUI_MCP_CUSTOM_API_KEY;
+      else process.env.COMFYUI_MCP_CUSTOM_API_KEY = prev;
+    });
+  });
 });

@@ -228,6 +228,25 @@ default in current builds; **older builds need `--jinja`** (the panel detects a
 tools-incapable server at connect and says exactly that). The single loaded
 model is adopted automatically — no picking needed.
 
+## Custom endpoint (any OpenAI-compatible server)
+
+Anything that speaks `/v1/chat/completions` — vLLM, DeepSeek, Together, Azure
+OpenAI, a llama-server on another box, your company's gateway — plugs in as
+the **Custom endpoint** provider:
+
+1. ComfyUI Settings → **Comfy MCP Agent → Custom endpoint** → set the
+   **Endpoint base URL** (include the `/v1`, e.g. `http://192.168.1.20:8000/v1`).
+2. If the server needs a key: **Set API key…** — a masked input; the key is
+   stored `0600` by the orchestrator in `~/.comfyui-mcp`, never in ComfyUI
+   settings or chat.
+3. Pick **Custom endpoint** in the backend picker and Connect.
+
+The model list comes from the server's `/v1/models`; single-model servers are
+adopted automatically, or set a **Default model** id explicitly for endpoints
+that don't list models. Env escape hatches: `COMFYUI_MCP_CUSTOM_BASE_URL`,
+`COMFYUI_MCP_CUSTOM_MODEL`, `COMFYUI_MCP_CUSTOM_API_KEY`. The model must
+support **tool calling**.
+
 ## Ollama & local models — the LLM Arena
 
 Any MCP harness that talks to Ollama (or an OpenAI-compatible endpoint) can

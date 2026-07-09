@@ -40,6 +40,11 @@ placeholder follows the active backend ("Ask Claude…" / "Ask Ollama…").
   `COMFYUI_MCP_OLLAMA_API=openai`, `COMFYUI_MCP_OLLAMA_BASE_URL` (e.g.
   `https://openrouter.ai/api/v1`), and an API key
   (`COMFYUI_MCP_OLLAMA_API_KEY` / `OPENROUTER_API_KEY`).
+- **Custom endpoint** — no sign-in flow. Point it at any OpenAI-compatible
+  `/v1` (vLLM, DeepSeek, Together, Azure, a remote llama-server) in Settings →
+  Custom endpoint; add an API key there if the server needs one (masked input,
+  stored 0600 by the orchestrator). See
+  [Local LLMs → Custom endpoint](/local-llms#custom-endpoint-any-openai-compatible-server).
 
 ### Connect-time readiness & onboarding
 

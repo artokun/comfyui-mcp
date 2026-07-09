@@ -59,7 +59,8 @@ export function isAllowedComfyuiSecretKey(key: string): boolean {
 // so the injection surface is different from the comfyui child's — but we keep
 // the same allowlist discipline so a corrupt file can't set arbitrary env.
 //   OPENROUTER_API_KEY → the OpenRouter provider backend (OllamaBackend openai)
-export const AGENT_SECRET_ENV_ALLOWLIST = ["OPENROUTER_API_KEY"] as const;
+//   COMFYUI_MCP_CUSTOM_API_KEY → the user-defined Custom endpoint provider
+export const AGENT_SECRET_ENV_ALLOWLIST = ["OPENROUTER_API_KEY", "COMFYUI_MCP_CUSTOM_API_KEY"] as const;
 const AGENT_ALLOWLIST_SET = new Set<string>(AGENT_SECRET_ENV_ALLOWLIST);
 
 /** Is `key` a permitted orchestrator agent-secret env var? */

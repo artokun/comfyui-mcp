@@ -41,6 +41,8 @@ import {
   hydrateAgentSecretsIntoEnv,
   onAgentSecretsChanged,
   setAgentSecret,
+  setComfyuiSecret,
+  isAllowedComfyuiSecretKey,
 } from "../services/panel-secrets.js";
 import { CodexBackend } from "./codex-backend.js";
 import { GeminiBackend, GEMINI_DEFAULT_MODEL } from "./gemini-backend.js";
@@ -961,6 +963,29 @@ export async function runPanelOrchestrator(): Promise<void> {
   let llamacppModel =
     process.env.COMFYUI_MCP_LLAMACPP_MODEL ?? persistedAgent.llamacpp?.model ?? "";
   const llamacppDeps = () => ({ api: "openai" as const, host: LLAMACPP_BASE_URL });
+  // Custom OpenAI-compatible endpoint (issue #162) — the same openai dialect
+  // pointed anywhere the user says: vLLM, DeepSeek, Together, Azure, a box on
+  // the LAN… Base URL + model come from panel Settings (persisted) or env; the
+  // API key from the 0600 secrets store (COMFYUI_MCP_CUSTOM_API_KEY, set via
+  // the panel's masked "Set API key…" — many local endpoints need none). NO
+  // default URL on purpose: unconfigured degrades with an actionable ack
+  // instead of dialing a guess.
+  let customBaseUrl = (
+    process.env.COMFYUI_MCP_CUSTOM_BASE_URL ?? persistedAgent.custom?.baseUrl ?? ""
+  ).replace(/[/]$/, "");
+  let customModel = process.env.COMFYUI_MCP_CUSTOM_MODEL ?? persistedAgent.custom?.model ?? "";
+  // Key read FRESH each call (not a startup const) so a key set later via the
+  // panel — setAgentSecret hydrates it into env — applies on the next backend
+  // build without an orchestrator restart.
+  const customApiKey = () => process.env.COMFYUI_MCP_CUSTOM_API_KEY;
+  const customDeps = () => {
+    const key = customApiKey();
+    return {
+      api: "openai" as const,
+      host: customBaseUrl,
+      ...(key ? { apiKey: key } : {}),
+    };
+  };
   // ── Per-tab backend (single-port multi-provider) ──────────────────────────
   // ONE orchestrator on ONE bridge port serves ALL providers; the panel picks a
   // provider per tab via the `hello`/`set_backend` handshake, instead of the node
@@ -970,7 +995,7 @@ export async function runPanelOrchestrator(): Promise<void> {
   // provider (the panel replays the transcript to seed it) while a same-provider
   // reconnect RESUMES. `backendId`/`codexModel`/`geminiModel` above are the
   // DEFAULT + per-provider model config; the process is no longer pinned to one.
-  const KNOWN_BACKENDS = new Set(["claude", "codex", "gemini", "ollama", "openrouter", "lmstudio", "llamacpp"]);
+  const KNOWN_BACKENDS = new Set(["claude", "codex", "gemini", "ollama", "openrouter", "lmstudio", "llamacpp", "custom"]);
   const defaultBackend = KNOWN_BACKENDS.has(backendId) ? backendId : "claude";
   const AGENT_KEY_SEP = "::";
   const tabBackends = new Map<string, string>(); // panel tabId -> selected backend
@@ -1159,6 +1184,16 @@ export async function runPanelOrchestrator(): Promise<void> {
         ...llamacppDeps(),
       });
     }
+    if (backend === "custom") {
+      return new OllamaBackend({
+        cwd: comfyuiPath ?? process.cwd(),
+        model: customModel,
+        systemAppend: panelSystemAppend,
+        comfyuiUrl,
+        mcpServers: makeHttpBackendMcpServers(panelTabId),
+        ...customDeps(),
+      });
+    }
     return undefined; // claude → built-in ClaudeBackend
   };
   logger.info(
@@ -1186,7 +1221,9 @@ export async function runPanelOrchestrator(): Promise<void> {
                 ? new OllamaBackend({ cwd: comfyuiPath ?? process.cwd(), model: lmstudioModel, ...lmstudioDeps() })
                 : backend === "llamacpp"
                   ? new OllamaBackend({ cwd: comfyuiPath ?? process.cwd(), model: llamacppModel, ...llamacppDeps() })
-                  : new GeminiBackend({ cwd: comfyuiPath ?? process.cwd(), model: geminiModel });
+                  : backend === "custom"
+                    ? new OllamaBackend({ cwd: comfyuiPath ?? process.cwd(), model: customModel, ...customDeps() })
+                    : new GeminiBackend({ cwd: comfyuiPath ?? process.cwd(), model: geminiModel });
       probeBackends.set(backend, pb);
     }
     return pb;
@@ -1411,15 +1448,19 @@ export async function runPanelOrchestrator(): Promise<void> {
   // without a reconnect.
   const unsubscribeAgentSecrets = onAgentSecretsChanged(() => {
     hydrateAgentSecretsIntoEnv();
-    modelsByBackend.delete("openrouter");
-    const pb = probeBackends.get("openrouter");
-    if (pb?.close) void pb.close().catch(() => {});
-    probeBackends.delete("openrouter");
+    // A key change can affect either keyed endpoint provider — drop both
+    // caches so the next probe carries the fresh credentials.
+    for (const b of ["openrouter", "custom"]) {
+      modelsByBackend.delete(b);
+      const pb = probeBackends.get(b);
+      if (pb?.close) void pb.close().catch(() => {});
+      probeBackends.delete(b);
+    }
     for (const tabId of tabBackends.keys()) {
       pushReadiness(tabId);
       pushModels(tabId);
     }
-    logger.info("[panel-orchestrator] OpenRouter key saved → provider readiness + models refreshed");
+    logger.info("[panel-orchestrator] provider key saved → readiness + models refreshed");
   });
 
   // Debounce the connect ack: the panel re-sends `hello` on reconnect and on
@@ -1480,6 +1521,15 @@ export async function runPanelOrchestrator(): Promise<void> {
             logger.info(`[panel-orchestrator] llamacpp model → ${llamacppModel} (the server's loaded model)`);
           }
         }
+        // Custom endpoint: same adoption — many self-hosted servers (vLLM,
+        // llama-server, TGI) serve exactly one model, so the first listed id
+        // is the sane default when the user hasn't named one.
+        if (backend === "custom" && !customModel && list.length) {
+          customModel = (list[0] as { value?: string }).value ?? "";
+          if (customModel) {
+            logger.info(`[panel-orchestrator] custom endpoint model → ${customModel} (first served)`);
+          }
+        }
         // User-curated preferred models (panel Settings → set_config) pin to the
         // top of the ollama picker, ahead of the discovered catalog. Read fresh
         // on every probe; set_config evicts the cache so edits apply live.
@@ -1515,6 +1565,7 @@ export async function runPanelOrchestrator(): Promise<void> {
     if (backend === "openrouter") return openrouterModel;
     if (backend === "lmstudio") return lmstudioModel || undefined;
     if (backend === "llamacpp") return llamacppModel || undefined;
+    if (backend === "custom") return customModel || undefined;
     return model;
   }
   function pushModels(panelTabId: string): void {
@@ -1571,7 +1622,9 @@ export async function runPanelOrchestrator(): Promise<void> {
   // no CLI). The panel prefers this frame over its GET /backends probe.
   function pushReadiness(tabId: string): void {
     try {
-      const { backends, any_ready } = allBackendReadiness(KNOWN_BACKENDS);
+      const { backends, any_ready } = allBackendReadiness(KNOWN_BACKENDS, {
+        customEndpointConfigured: !!customBaseUrl,
+      });
       bridge.push({ type: "backends", backends, any_ready }, tabId);
       // llama.cpp reality check (async re-push): the binary is often unzipped
       // anywhere (not on PATH), so static detection says "not installed" while
@@ -1662,6 +1715,7 @@ export async function runPanelOrchestrator(): Promise<void> {
       const isOr = backend === "openrouter";
       const isLs = backend === "lmstudio";
       const isLc = backend === "llamacpp";
+      const isCu = backend === "custom";
       // TRUTHFUL "connected": only claim ready after PROVING the SELECTED backend
       // can run, by probing its model list. If the probe fails — the "connected
       // but dead" wedge — send a degraded ack so the panel shows the real state.
@@ -1683,6 +1737,22 @@ export async function runPanelOrchestrator(): Promise<void> {
         logger.warn(`[panel-orchestrator] tab ${panelTab.slice(0, 8)} connected (openrouter) but no API key — degraded ack`);
         return;
       }
+      // Custom endpoint with no URL: don't dial a guess — degrade up front
+      // with the exact fix (mirrors the OpenRouter keyless guard above).
+      if (isCu && !customBaseUrl) {
+        bridge.push(
+          {
+            type: "say",
+            text:
+              "⚠️ No endpoint configured — set the base URL in Settings → Custom endpoint (include the /v1, e.g. http://192.168.1.20:8000/v1 for vLLM, or a hosted provider's OpenAI-compatible URL), " +
+              "plus “Set API key…” if the server needs one. Both apply immediately — then Connect again.",
+          },
+          panelTab,
+        );
+        bridge.push({ type: "ack", ok: false, kind: "degraded" }, panelTab);
+        logger.warn(`[panel-orchestrator] tab ${panelTab.slice(0, 8)} connected (custom) but no base URL — degraded ack`);
+        return;
+      }
       void (isLs && isLocalLmstudio(LMSTUDIO_BASE_URL)
         ? startLmstudioServer(LMSTUDIO_BASE_URL).then(() => ensureModels(backend))
         : ensureModels(backend)
@@ -1699,7 +1769,9 @@ export async function runPanelOrchestrator(): Promise<void> {
                     ? (lmstudioModel || ((models[0] as { value?: string }).value ?? "LM Studio"))
                     : isLc
                       ? (llamacppModel || ((models[0] as { value?: string }).value ?? "llama.cpp"))
-                      : isOr
+                      : isCu
+                        ? (customModel || ((models[0] as { value?: string }).value ?? "Custom endpoint"))
+                        : isOr
                       ? (openrouterModel ?? (models[0] as { value?: string }).value ?? "OpenRouter")
                       : model;
             // llama.cpp launch gotchas (issue #161): a reachable server can still
@@ -1747,7 +1819,9 @@ export async function runPanelOrchestrator(): Promise<void> {
                       ? `🟢 comfyui-mcp agent ready — ${agentLabel} running locally via LM Studio (no account, no API key). Small local models are slower and simpler than frontier ones — expect fewer frills. Ask away.`
                       : isLc
                         ? `🟢 comfyui-mcp agent ready — ${agentLabel} running locally via llama.cpp (no account, no API key). Small local models are slower and simpler than frontier ones — expect fewer frills. Ask away.`
-                        : isOr
+                        : isCu
+                          ? `🟢 comfyui-mcp agent ready — ${agentLabel} via your custom endpoint (${customBaseUrl}). Ask away.`
+                          : isOr
                       ? `🟢 comfyui-mcp agent ready — ${agentLabel} via OpenRouter (hosted API, your OPENROUTER_API_KEY). Ask away.`
                       : `🟢 comfyui-mcp agent ready — ${agentLabel} on your Claude subscription. Ask away.`;
               bridge.push({ type: "say", text: readyText }, panelTab);
@@ -1765,7 +1839,9 @@ export async function runPanelOrchestrator(): Promise<void> {
                     ? `⚠️ The background agent isn't responding — LM Studio isn't reachable at ${LMSTUDIO_BASE_URL}. Open LM Studio → Developer → Start Server and load a tool-calling model (our gemma4-comfyui-mcp GGUFs from Hugging Face work great), or set COMFYUI_MCP_LMSTUDIO_HOST if it serves elsewhere — then Disconnect → Connect to retry.`
                     : isLc
                       ? `⚠️ The background agent isn't responding — llama-server isn't reachable at ${LLAMACPP_BASE_URL}. Start it with \`llama-server -m <model>.gguf -c 16384\` (our gemma4-comfyui-mcp GGUFs work great; add --jinja on older builds — required there for tool calling), or set COMFYUI_MCP_LLAMACPP_HOST — then Disconnect → Connect to retry.`
-                      : "⚠️ The background agent isn't responding — the Claude Agent SDK couldn't start. Make sure you're signed in (run `claude` once), then Disconnect → Connect to retry.";
+                      : isCu
+                        ? `⚠️ The background agent isn't responding — your custom endpoint isn't answering at ${customBaseUrl}. Check the base URL in Settings → Custom endpoint (it must be OpenAI-compatible and include the /v1) and the API key if the server requires one — then Connect to retry.`
+                        : "⚠️ The background agent isn't responding — the Claude Agent SDK couldn't start. Make sure you're signed in (run `claude` once), then Disconnect → Connect to retry.";
             bridge.push({ type: "say", text: degradedText }, panelTab);
             bridge.push({ type: "ack", ok: false, kind: "degraded" }, panelTab);
             logger.warn(`[panel-orchestrator] tab ${panelTab.slice(0, 8)} connected (${backend}) but model probe empty — degraded ack`);
@@ -1888,6 +1964,34 @@ export async function runPanelOrchestrator(): Promise<void> {
           logger.info(`[panel-orchestrator] lmstudio config → model=${lmstudioModel}`);
         }
       }
+      // Custom endpoint (issue #162): base_url + model, both user-supplied.
+      // base_url accepts "" (clears the endpoint → provider flips unready);
+      // either change evicts the probe/model caches so the next connect dials
+      // the new target, and re-pushes readiness so the picker flips live.
+      const cucfg = (event as { custom?: unknown }).custom;
+      if (cucfg && typeof cucfg === "object") {
+        const o = cucfg as { model?: unknown; base_url?: unknown };
+        const patch: { model?: string; baseUrl?: string } = {};
+        if (typeof o.model === "string" && o.model.trim()) {
+          patch.model = o.model.trim();
+          if (!process.env.COMFYUI_MCP_CUSTOM_MODEL) customModel = patch.model;
+        }
+        if (typeof o.base_url === "string") {
+          patch.baseUrl = o.base_url.trim().replace(/[/]$/, "");
+          if (!process.env.COMFYUI_MCP_CUSTOM_BASE_URL) customBaseUrl = patch.baseUrl;
+        }
+        if (Object.keys(patch).length) {
+          setAgentSettings({ custom: patch });
+          const pb = probeBackends.get("custom");
+          if (pb?.close) void pb.close().catch(() => {});
+          probeBackends.delete("custom");
+          modelsByBackend.delete("custom");
+          pushReadiness(event.tab_id);
+          logger.info(
+            `[panel-orchestrator] custom endpoint config → model=${customModel || "(first served)"} host=${customBaseUrl || "(unset)"}`,
+          );
+        }
+      }
       if (ollamaChanged) {
         modelsByBackend.delete("ollama");
         pushModels(event.tab_id);
@@ -1896,13 +2000,16 @@ export async function runPanelOrchestrator(): Promise<void> {
       return;
     }
 
-    // Panel-initiated provider secret (Settings › "Set API key…") — NO agent, no
+    // Panel-initiated secret (Settings › "Set API key/token…") — NO agent, no
     // chat: the panel paints its own masked input and ships the value here
     // directly, over the same loopback/token-gated bridge the agent-initiated
-    // request_secret reply already rides. setAgentSecret enforces the allowlist
-    // (OPENROUTER_API_KEY), persists 0600, and hydrates process.env immediately,
-    // so the refreshed readiness frame flips the provider picker live — a user
-    // can enable OpenRouter before ANY backend is ready (no chicken-and-egg).
+    // request_secret reply already rides. Routed by allowlist: PROVIDER keys
+    // (OPENROUTER_API_KEY, COMFYUI_MCP_CUSTOM_API_KEY) → setAgentSecret, which
+    // persists 0600 and hydrates process.env immediately so the refreshed
+    // readiness frame flips the provider picker live; comfyui TOOL tokens
+    // (CivitAI/HuggingFace) → setComfyuiSecret, whose change event already
+    // re-injects the MCP child env + respawns on idle — so EVERY token button
+    // works agent-free with just the bridge connected (no chicken-and-egg).
     if (event.type === "set_secret" && event.tab_id) {
       const rawKey = (event as { key?: unknown }).key;
       const rawValue = (event as { value?: unknown }).value;
@@ -1911,8 +2018,9 @@ export async function runPanelOrchestrator(): Promise<void> {
       let error: string | undefined;
       try {
         if (!value.trim()) throw new Error("No token entered — nothing was saved.");
-        setAgentSecret(key, value.trim());
-        logger.info(`[panel-orchestrator] provider secret set from panel Settings: ${key} (redacted)`);
+        if (isAllowedComfyuiSecretKey(key)) setComfyuiSecret(key, value.trim());
+        else setAgentSecret(key, value.trim());
+        logger.info(`[panel-orchestrator] secret set from panel Settings: ${key} (redacted)`);
       } catch (err) {
         error = err instanceof Error ? err.message : String(err);
       }

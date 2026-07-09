@@ -41,6 +41,10 @@ export interface AgentSettings {
   lmstudio?: OllamaAgentConfig;
   /** llama.cpp provider (issue #161) — same shape as lmstudio. */
   llamacpp?: OllamaAgentConfig;
+  /** Custom OpenAI-compatible endpoint (issue #162): baseUrl + model, both
+   *  user-supplied. The API key stays in the 0600 secrets store
+   *  (COMFYUI_MCP_CUSTOM_API_KEY), never here. */
+  custom?: OllamaAgentConfig;
 }
 
 export interface PanelSettings {
@@ -118,6 +122,9 @@ export function setAgentSettings(patch: AgentSettings): AgentSettings {
   }
   if (patch.llamacpp !== undefined) {
     next.llamacpp = { ...prev.llamacpp, ...patch.llamacpp };
+  }
+  if (patch.custom !== undefined) {
+    next.custom = { ...prev.custom, ...patch.custom };
   }
   settings.agent = next;
   write(settings);

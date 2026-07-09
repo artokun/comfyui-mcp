@@ -86,6 +86,19 @@ describe("backendReadiness", () => {
   it("unknown backend is never ready", () => {
     expect(backendReadiness("bogus").ready).toBe(false);
   });
+
+  it("custom: ready iff a base URL is configured (caller-resolved or env)", () => {
+    const realBase = process.env.COMFYUI_MCP_CUSTOM_BASE_URL;
+    delete process.env.COMFYUI_MCP_CUSTOM_BASE_URL;
+    expect(backendReadiness("custom").ready).toBe(false);
+    expect(backendReadiness("custom", { customEndpointConfigured: true }).ready).toBe(true);
+    process.env.COMFYUI_MCP_CUSTOM_BASE_URL = "http://127.0.0.1:8000/v1";
+    // opts wins even when explicitly false (the caller resolved persisted settings)
+    expect(backendReadiness("custom", { customEndpointConfigured: false }).ready).toBe(false);
+    expect(backendReadiness("custom").ready).toBe(true);
+    if (realBase === undefined) delete process.env.COMFYUI_MCP_CUSTOM_BASE_URL;
+    else process.env.COMFYUI_MCP_CUSTOM_BASE_URL = realBase;
+  });
 });
 
 describe("allBackendReadiness", () => {

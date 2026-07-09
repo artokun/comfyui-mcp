@@ -102,7 +102,10 @@ function fileExists(...parts: string[]): boolean {
  *   report it usable here rather than false-flagging "CLI not installed".
  * - codex/gemini: the CLI must be on PATH AND a login cached on disk.
  */
-export function backendReadiness(backend: string, opts?: { home?: string }): BackendReadiness {
+export function backendReadiness(
+  backend: string,
+  opts?: { home?: string; customEndpointConfigured?: boolean },
+): BackendReadiness {
   const b = (backend || "").toLowerCase();
   const home = opts?.home ?? homedir();
   if (b === "claude") {
@@ -145,6 +148,16 @@ export function backendReadiness(backend: string, opts?: { home?: string }): Bac
     const cli = onPath(CLI_NAMES.llamacpp);
     return { backend: "llamacpp", cli, auth: cli ? true : null, ready: cli };
   }
+  if (b === "custom") {
+    // A user-defined OpenAI-compatible endpoint (issue #162) — nothing to
+    // install, no login flow. Readiness = a base URL is configured (panel
+    // Settings or COMFYUI_MCP_CUSTOM_BASE_URL; the caller passes the resolved
+    // truth via opts). A wrong URL or key still surfaces via the connect ack's
+    // model probe (degraded), same as every other endpoint provider.
+    const configured =
+      opts?.customEndpointConfigured ?? !!process.env.COMFYUI_MCP_CUSTOM_BASE_URL;
+    return { backend: "custom", cli: configured, auth: configured ? true : null, ready: configured };
+  }
   if (b === "openrouter") {
     // Hosted — no CLI. Readiness = an OpenRouter API key in the orchestrator's
     // env (OPENROUTER_API_KEY, or the shared COMFYUI_MCP_OLLAMA_API_KEY). A bad
@@ -158,7 +171,7 @@ export function backendReadiness(backend: string, opts?: { home?: string }): Bac
 /** Readiness for every known backend, plus a rolled-up any_ready. */
 export function allBackendReadiness(
   backends: Iterable<string>,
-  opts?: { home?: string },
+  opts?: { home?: string; customEndpointConfigured?: boolean },
 ): {
   backends: BackendReadiness[];
   any_ready: boolean;
