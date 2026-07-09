@@ -1,6 +1,6 @@
 # `panel_auto_layout` — one-shot canvas auto-arrange
 
-**Status:** draft (RFC — spec-only PR) · **Implementation branch:** `feat/panel-auto-layout` · **Pairs with:** comfyui-mcp-panel [PR #75](https://github.com/artokun/comfyui-mcp-panel/pull/75) (`docs/design/auto-layout-engine.md` — the engine + `graph_auto_layout` bridge command)
+**Status:** implemented (this PR) · **Implementation branch:** `spec/panel-auto-layout` · **Pairs with:** comfyui-mcp-panel [PR #75](https://github.com/artokun/comfyui-mcp-panel/pull/75) (`docs/design/auto-layout-engine.md` — the engine + `graph_auto_layout` bridge command)
 
 > Prior art: [filliptm/ComfyUI_FL-MCP](https://github.com/filliptm/ComfyUI_FL-MCP) `modify_layout`. The engine, algorithm, and improvements over FL-MCP (groups, reroutes, barycenter, overlap resolution) are specified in the paired panel RFC; this doc covers only the orchestrator tool surface.
 
@@ -39,7 +39,7 @@ Result/error shapes are defined by the paired RFC (`{applied, columns, moved[], 
 
 ## Gating
 
-`panel_auto_layout` mutates the live canvas → belongs to the `panel-writes` gate from [safety-gates](./safety-gates.md) once that lands (orchestrator-side `isGateOpen`/`gateRefusal`, same as the other mutating panel tools). `dry_run:true` is still gated with the tool (simplicity; the read path is `panel_get_graph`).
+Ships ungated, exactly like the other mutating panel tools today (`panel_move_node`, `panel_add_node`, …). Safety gates were deferred: the `panel-writes` gate / spec PR #172 was closed and the work moved to [ROADMAP.md](../../ROADMAP.md) Theme G — when gates land they'll cover `panel_auto_layout` alongside the rest of the mutating panel surface.
 
 ## Implementation plan
 

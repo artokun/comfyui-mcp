@@ -630,6 +630,43 @@ export function buildPanelToolDefs(): PanelToolDef[] {
       async (args: A, ctx) => ctx.call({ cmd: "graph_move_node", node_id: args.node_id, pos: args.pos }),
     ),
     def(
+      "panel_auto_layout",
+      "Automatically arrange the user's open graph (or a subset of nodes) into a clean left-to-right / top-to-bottom / grid layout based on the real link topology. Group boxes move with their members and are re-fit. Use dry_run:true to preview proposed positions without touching the canvas. Undoable (one Ctrl+Z).",
+      {
+        node_ids: z
+          .array(z.number().int())
+          .optional()
+          .describe("Node ids to arrange (default: every node in the active graph)."),
+        mode: z
+          .enum(["flow_horizontal", "flow_vertical", "grid"])
+          .optional()
+          .describe("Layout strategy (default flow_horizontal — left-to-right by dependency depth)."),
+        spacing: z
+          .number()
+          .min(0.25)
+          .max(4)
+          .optional()
+          .describe("Gap multiplier (1 = compact default, 1.5 = 50% roomier)."),
+        groups: z.enum(["preserve", "cluster", "ignore"]).optional(),
+        dry_run: z
+          .boolean()
+          .optional()
+          .describe("Compute and return proposed positions without moving anything."),
+      },
+      async (args: A, ctx) =>
+        ctx.call(
+          {
+            cmd: "graph_auto_layout",
+            node_ids: args.node_ids,
+            mode: args.mode,
+            spacing: args.spacing,
+            groups: args.groups,
+            dry_run: args.dry_run,
+          },
+          15000,
+        ),
+    ),
+    def(
       "panel_canvas",
       "Control the user's canvas view: 'fit' frames the whole graph, 'center_on_node' jumps to a node (give node_id), 'pan' shifts by dx/dy, 'zoom' sets an absolute scale. View-only.",
       {

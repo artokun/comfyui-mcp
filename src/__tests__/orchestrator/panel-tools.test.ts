@@ -323,6 +323,61 @@ describe("panel-tools: panel_run (run-to-node partial execution)", () => {
   });
 });
 
+describe("panel-tools: panel_auto_layout (one-shot canvas arrange)", () => {
+  it("is registered in the shared def list", () => {
+    expect(buildPanelToolDefs().map((d) => d.name)).toContain("panel_auto_layout");
+  });
+
+  it("exposes the node_ids/mode/spacing/groups/dry_run schema", () => {
+    const def = defByName("panel_auto_layout");
+    expect(Object.keys(def.schema).sort()).toEqual([
+      "dry_run",
+      "groups",
+      "mode",
+      "node_ids",
+      "spacing",
+    ]);
+    // mode enum must match the engine contract exactly.
+    const mode = def.schema.mode as { safeParse: (v: unknown) => { success: boolean } };
+    expect(mode.safeParse("flow_horizontal").success).toBe(true);
+    expect(mode.safeParse("grid").success).toBe(true);
+    expect(mode.safeParse("diagonal").success).toBe(false);
+    expect(mode.safeParse(undefined).success).toBe(true);
+    // spacing is clamped to 0.25–4.
+    const spacing = def.schema.spacing as { safeParse: (v: unknown) => { success: boolean } };
+    expect(spacing.safeParse(1).success).toBe(true);
+    expect(spacing.safeParse(0.1).success).toBe(false);
+    expect(spacing.safeParse(5).success).toBe(false);
+    // groups enum.
+    const groups = def.schema.groups as { safeParse: (v: unknown) => { success: boolean } };
+    expect(groups.safeParse("preserve").success).toBe(true);
+    expect(groups.safeParse("nope").success).toBe(false);
+  });
+
+  it("forwards graph_auto_layout with every provided arg", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_auto_layout").handler(
+      { node_ids: [1, 2, 3], mode: "grid", spacing: 1.5, groups: "cluster", dry_run: true },
+      ctx,
+    );
+    expect(calls[0]).toMatchObject({
+      cmd: "graph_auto_layout",
+      node_ids: [1, 2, 3],
+      mode: "grid",
+      spacing: 1.5,
+      groups: "cluster",
+      dry_run: true,
+    });
+  });
+
+  it("forwards graph_auto_layout with no args (arrange whole graph, defaults)", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_auto_layout").handler({}, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "graph_auto_layout" });
+    expect(calls[0].node_ids).toBeUndefined();
+  });
+});
+
 describe("panel-tools: panel_find_nodes (live-graph search)", () => {
   it("is registered in the shared def list", () => {
     expect(buildPanelToolDefs().map((d) => d.name)).toContain("panel_find_nodes");
