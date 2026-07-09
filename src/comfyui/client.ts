@@ -372,6 +372,95 @@ export async function getLogs(): Promise<string[]> {
   return text.split("\n").filter(Boolean);
 }
 
+/**
+ * ComfyUI frontend per-user settings, served by the frontend user manager:
+ *   GET  /settings         → every stored setting as one JSON object
+ *   GET  /settings/{id}    → one setting's raw stored value
+ *   POST /settings/{id}    → persist one setting (JSON body is the raw value)
+ *
+ * These are the ComfyUI *frontend* UI settings (`Comfy.*` ids) and are entirely
+ * unrelated to our own get_defaults/set_defaults SQLite store. Local and remote
+ * (`--comfyui-url`) both work over plain REST and inherit `comfyuiFetch` auth
+ * headers. Comfy Cloud exposes no per-user settings store, so these throw
+ * CLOUD_UNSUPPORTED via `requireLocalMode`.
+ *
+ * Multi-user note: a `--multi-user` ComfyUI keys settings by a `comfy-user`
+ * header; set `COMFYUI_AUTH_COMFY_USER` (any COMFYUI_AUTH_* header is injected
+ * by `comfyuiFetch`) or requests may 404 or read/write another user's store.
+ */
+function settingsVersionDriftError(): ComfyUIError {
+  return new ComfyUIError(
+    "This ComfyUI version/config does not expose the user settings API " +
+      "(requires the standard frontend user manager). If this is a --multi-user " +
+      "server, set COMFYUI_AUTH_COMFY_USER so requests carry a comfy-user header.",
+    "SETTINGS_UNSUPPORTED",
+  );
+}
+
+/** GET /settings — every stored frontend setting as a raw `id: value` object. */
+export async function getSettings(): Promise<Record<string, unknown>> {
+  requireLocalMode("settings");
+  const client = getClient();
+  const res = await client.fetchApi("/settings");
+  if (res.status === 404) throw settingsVersionDriftError();
+  const text = await res.text();
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed === "object") {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // Non-JSON body — fall through to empty.
+  }
+  return {};
+}
+
+/**
+ * GET /settings/{id} — one setting's raw stored value. Returns `undefined` for
+ * an unset key: ComfyUI returns an empty body or `null` for unset ids on
+ * different versions, and some builds 404 the per-id route, so empty / `null` /
+ * 404 / parse-failure are all treated uniformly as "unset (frontend default
+ * applies)". Stored values are passed through verbatim — never coerced, so an
+ * older frontend's `"true"` string surfaces as a string.
+ */
+export async function getSetting(id: string): Promise<unknown> {
+  requireLocalMode("settings");
+  const client = getClient();
+  const res = await client.fetchApi(`/settings/${encodeURIComponent(id)}`);
+  if (res.status === 404) return undefined;
+  const text = await res.text();
+  if (text.trim() === "") return undefined;
+  try {
+    const parsed = JSON.parse(text);
+    return parsed === null ? undefined : parsed;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * POST /settings/{id} — persist one setting. The value is sent as-is (raw JSON
+ * body); it is stored verbatim and never coerced. A 404 here means the settings
+ * route is absent (version drift), not an unknown id — unknown ids are stored
+ * verbatim and ignored by the UI.
+ */
+export async function setSetting(id: string, value: unknown): Promise<void> {
+  requireLocalMode("settings");
+  const client = getClient();
+  const res = await client.fetchApi(`/settings/${encodeURIComponent(id)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(value),
+  });
+  if (res.status === 404) throw settingsVersionDriftError();
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new ConnectionError(
+      `ComfyUI /settings/${id} returned ${res.status} ${res.statusText}: ${body.slice(0, 500)}`,
+    );
+  }
+}
+
 export interface HistoryEntry {
   prompt: Record<string, unknown>;
   outputs: Record<string, unknown>;

@@ -182,8 +182,11 @@ const CATEGORIES: Array<{
     group: "Defaults, Stats & Skills",
     slug: "defaults-stats-skills",
     icon: "sliders",
-    description: "Generation defaults, history-based suggestions, and skill generation.",
-    tools: ["get_defaults", "set_defaults", "suggest_settings", "generation_stats", "generate_node_skill"],
+    description: "Generation defaults, ComfyUI frontend UI settings, history-based suggestions, and skill generation.",
+    tools: [
+      "get_defaults", "set_defaults", "get_comfyui_settings", "set_comfyui_setting",
+      "suggest_settings", "generation_stats", "generate_node_skill",
+    ],
   },
 ];
 

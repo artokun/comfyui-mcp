@@ -1,6 +1,8 @@
 # ComfyUI `/settings` read/write tools
 
-**Status:** draft (RFC — spec-only PR) · **Implementation branch:** `feat/comfyui-settings-tools` · **Depends on:** [safety-gates](./safety-gates.md) (`settings-writes` gate)
+**Status:** implemented (this PR)
+
+> **Safety gating deferred.** The original design gated `set_comfyui_setting` behind a `settings-writes` safety gate (spec PR #172). That gates effort was closed/deferred; gating is now tracked under **ROADMAP Theme G**. This PR ships `set_comfyui_setting` **ungated** — its tool description states plainly that it modifies the ComfyUI user's persisted UI settings and that changes take effect on the next frontend load/refresh.
 
 > Prior art: [filliptm/ComfyUI_FL-MCP](https://github.com/filliptm/ComfyUI_FL-MCP) `comfy_settings_get`/`comfy_settings_set`. We add filtering, previous-value capture for undo, multi-user/version-drift handling, and gate integration.
 
@@ -23,7 +25,7 @@ ComfyUI's frontend persists per-user settings via `GET /settings`, `GET /setting
 
 With `id`: `{ id, value }` — value is the raw stored JSON, or an explicit "unset (frontend default applies)" note. Without `id`: a sorted `id: value` listing (filtered), with a caveat that unset keys use frontend defaults invisible to this API.
 
-### `set_comfyui_setting` — write, category `server`, **gated `settings-writes`**
+### `set_comfyui_setting` — write, category `server` (ungated; gating deferred to ROADMAP Theme G)
 
 ```ts
 {
@@ -35,7 +37,7 @@ With `id`: `{ id, value }` — value is the raw stored JSON, or an explicit "uns
 
 Result: `{ id, previous, value }` — the old value is read first so the agent can report and undo. The description enumerates useful known ids — `Comfy.Validation.Workflows` (boolean), `Comfy.PreviewMethod` (`auto|latent2rgb|taesd|none`), `Comfy.LinkRenderMode` (0 straight / 1 linear / 2 spline / 3 hidden), `Comfy.UseNewMenu`, `Comfy.Sidebar.Location` — and notes that ids are frontend-defined: unknown ids are stored verbatim and ignored by the UI, and changes take effect on the next frontend load/refresh.
 
-Gate: `settings-writes` (`COMFYUI_MCP_ALLOW_SETTINGS_WRITES`, per the safety-gates RFC). This is server/user config, deliberately **not** the `workflow-writes` category.
+Gating: **deferred to ROADMAP Theme G.** This tool ships ungated in this PR. Because it is server/user config, when gates land it belongs to a dedicated `settings-writes` category — deliberately **not** the `workflow-writes` category. Until then, the tool description makes the write and its "takes effect on next frontend load/refresh" semantics explicit.
 
 ## Implementation
 
@@ -68,4 +70,4 @@ export async function setSetting(id: string, value: unknown): Promise<void> // P
 
 ## Rollout / compat
 
-Additive. Gate-category string coordinated with the safety-gates RFC (`settings-writes`); if gates merge first, the wrapper picks the tool up via `TOOL_GATES`. Until gates land, the tool description states that it modifies the ComfyUI user's persisted UI settings.
+Additive. Ships ungated (safety gating deferred to ROADMAP Theme G). If/when gates land, the future `settings-writes` category wraps `set_comfyui_setting` via `TOOL_GATES`; no tool-surface change is required. Until then, the tool description states that it modifies the ComfyUI user's persisted UI settings and takes effect on the next frontend load/refresh.
