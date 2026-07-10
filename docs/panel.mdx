@@ -112,7 +112,7 @@ over a loopback HTTP MCP for ChatGPT/Codex), so [parity](/backends) is automatic
 
 | Tool | Effect |
 |---|---|
-| `panel_get_graph` | Read the graph being viewed — subgraphs summarized shallowly |
+| `panel_query_graph` | Query the graph being viewed — filter/traverse/aggregate, token-bounded |
 | `panel_get_subgraph` | Read inside a subgraph node's inner graph |
 | `panel_get_errors` | Read the last execution error + per-node validation errors |
 | `panel_list_workflows` | List open workflow tabs and which is active |
@@ -129,6 +129,7 @@ over a loopback HTTP MCP for ChatGPT/Codex), so [parity](/backends) is automatic
 | `panel_connect` / `panel_disconnect` | Wire / unwire slots by name or index (omit both slots on `panel_connect` to auto-match by type; `auto_match:false` restores legacy index-0 semantics) |
 | `panel_set_widget` | Change a widget value (steps, cfg, prompts, …) |
 | `panel_move_node` | Move a node to a new canvas position |
+| `panel_auto_layout` | Auto-arrange the whole graph (or a subset) into a clean flow/grid layout by link topology — `dry_run` to preview |
 | `panel_set_node_title` | Rename a node's header title |
 | `panel_clear` | Remove every node — the whole wipe is one Ctrl+Z |
 
@@ -143,7 +144,7 @@ over a loopback HTTP MCP for ChatGPT/Codex), so [parity](/backends) is automatic
 
 ### Spatial layout
 
-The agent can see node geometry — `panel_get_graph` now returns each node's
+The agent can see node geometry — `panel_query_graph` detail rows return each node's
 `pos`/`size`, plus subgraph input/output `rails`, `groups`, and per-node
 `color`/`collapsed` — and arrange the canvas with a matching set of writes,
 then **screenshot** the result to judge its own layout. A `workflow-layout`

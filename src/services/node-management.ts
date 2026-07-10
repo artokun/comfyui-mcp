@@ -429,7 +429,7 @@ const GIT_CLONE_TIMEOUT = 180_000;
  *  on a stdin username/password prompt and hangs until the timeout (observed as a
  *  multi-minute "thinking" stall on a bad URL). GIT_ASKPASS=echo + the prompt
  *  flags make git fail fast instead. GITHUB_TOKEN is passed through when set. */
-function nonInteractiveGitEnv(): NodeJS.ProcessEnv {
+export function nonInteractiveGitEnv(): NodeJS.ProcessEnv {
   return {
     ...process.env,
     GIT_TERMINAL_PROMPT: "0",
@@ -772,7 +772,7 @@ function assertSafeGitUrl(gitId: string): void {
  * starting with '-', and names containing path separators or control chars —
  * any of which could escape custom_nodes or be parsed as a git option.
  */
-function assertSafeRepoName(repoName: string): void {
+export function assertSafeRepoName(repoName: string): void {
   if (
     repoName.length === 0 ||
     repoName === "." ||

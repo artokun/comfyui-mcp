@@ -1,27 +1,39 @@
 import type { WorkflowJSON, ObjectInfo, NodeInputSpec } from "../comfyui/types.js";
 import { getObjectInfo } from "../comfyui/client.js";
 import { logger } from "../utils/logger.js";
+import { analyzeGraphHealth, type GraphHealth } from "./workflow-health.js";
 
 export interface ValidationIssue {
-  severity: "error" | "warning";
+  severity: "error" | "warning" | "info";
   node_id: string;
   node_type: string;
   message: string;
+  /** Health-finding kind (disconnected, duplicate_model_load, …) when the issue came from graph-health. */
+  kind?: string;
 }
 
 export interface ValidationResult {
   valid: boolean;
   issues: ValidationIssue[];
   summary: string;
+  /** Structured graph-health analysis, present when `health` was requested. */
+  health?: GraphHealth;
 }
 
 /**
  * Validate a workflow without executing it.
  * Checks for missing nodes, broken connections, type mismatches, and missing models.
+ *
+ * @param workflow The workflow to validate (API format).
+ * @param options.health Merge graph-health heuristics (disconnected nodes, duplicate
+ *   model loads, orphaned branches, muted/bypassed) as info/warning issues plus a
+ *   structured `health` section. Health findings NEVER flip `valid`. Default true.
  */
 export async function validateWorkflow(
   workflow: WorkflowJSON,
+  options: { health?: boolean } = {},
 ): Promise<ValidationResult> {
+  const includeHealth = options.health ?? true;
   const issues: ValidationIssue[] = [];
 
   // 1. Fetch available node definitions
@@ -153,6 +165,25 @@ export async function validateWorkflow(
     });
   }
 
+  // 5. Graph-health heuristics (merged as info/warning issues — never flip `valid`).
+  let health: GraphHealth | undefined;
+  if (includeHealth) {
+    health = analyzeGraphHealth(workflow, objectInfo);
+    for (const f of health.findings) {
+      // Authoritative missing_required_input is already reported as an error above
+      // (step 2b) for installed nodes — don't double-report. The heuristic variant
+      // (uninstalled node) is NOT covered by the validator, so it adds value.
+      if (f.kind === "missing_required_input" && !f.heuristic) continue;
+      issues.push({
+        severity: f.severity,
+        node_id: f.node_ids[0] ?? "",
+        node_type: f.node_type ?? "",
+        message: f.detail,
+        kind: f.kind,
+      });
+    }
+  }
+
   const errors = issues.filter((i) => i.severity === "error");
   const warnings = issues.filter((i) => i.severity === "warning");
   const valid = errors.length === 0;
@@ -163,7 +194,7 @@ export async function validateWorkflow(
       : "Workflow is valid"
     : `Workflow has ${errors.length} error(s) and ${warnings.length} warning(s)`;
 
-  return { valid, issues, summary };
+  return { valid, issues, summary, health };
 }
 
 /**
