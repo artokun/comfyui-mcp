@@ -125,7 +125,7 @@ const MAX_TOOL_ROUNDS = 32;
 /**
  * The Ollama system prompt REPLACES the frontier panel prompt: that one is
  * thousands of tokens and instructs the agent to call dozens of tools BY NAME
- * (panel_get_graph, list_packs, …) that don't exist on this backend's 6-tool
+ * (panel_query_graph, list_packs, …) that don't exist on this backend's 6-tool
  * router — a small model obeys it, hits "unknown tool", and gives up. This one
  * is short, router-shaped, and (deliberately, for local models) does NOT carry
  * the NSFW consent-gate flow — only the absolute hard limits.
@@ -140,7 +140,7 @@ const OLLAMA_SYSTEM_PROMPT = [
   "Rules:",
   "- Catalog entries are tool NAMES, not data. Finish every task by actually running tools; never invent results.",
   "- Describe a tool before its first call so you use the right parameters. If a call errors, read the error — it includes the expected schema — fix the args and retry.",
-  "- To read the user's graph, ALWAYS start with panel_graph_outline (a compact text map) via panel_call_tool. NEVER fetch panel_get_graph for the whole canvas — on big graphs its JSON floods your context and you lose the conversation; use it only for ONE node's exact slot/widget detail.",
+  "- To read the user's graph, ALWAYS start with panel_graph_outline (a compact text map) via panel_call_tool. For specifics use panel_query_graph — filter by types/where ('cfg>7'), traverse upstream_of/downstream_of, or read ONE node's exact detail with {ids:[id], fields:'detail'}. Its output is token-bounded, so it can never flood your context.",
   "- To see or show any generated image/video, run the panel_show_media tool via panel_call_tool.",
   "- Workflows with API nodes cost the user PAID credits; local-GPU workflows are free. Ask before anything that might spend credits.",
 ].join("\n");

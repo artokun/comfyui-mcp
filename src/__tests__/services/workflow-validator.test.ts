@@ -98,3 +98,36 @@ describe("validateWorkflow — combo value_not_in_list parity with the ComfyUI f
     expect(r.issues.find((i) => i.node_id === "1" && /clip_name/.test(i.message))).toBeUndefined();
   });
 });
+
+describe("validateWorkflow — graph-health merge", () => {
+  it("merges health findings (warning/info) without flipping `valid` and returns a health section", async () => {
+    // Combo-clean graph, but structurally an isolated CLIPLoader (nothing reads it).
+    const r = await validateWorkflow(
+      wf({
+        "1": { class_type: "CLIPLoader", inputs: { clip_name: "good_clip.safetensors", type: "qwen_image" } },
+        "9": { class_type: "SaveImage", inputs: {} },
+      }),
+    );
+    // No hard errors → still valid despite the health warning.
+    expect(r.valid).toBe(true);
+    expect(r.health).toBeDefined();
+    const healthIssues = r.issues.filter((i) => i.kind);
+    expect(healthIssues.length).toBeGreaterThan(0);
+    // The disconnected finding is present and tagged with its kind.
+    expect(r.issues.some((i) => i.kind === "disconnected" && i.node_id === "1")).toBe(true);
+    // valid stays errors-only: no health issue is an error.
+    expect(r.issues.filter((i) => i.kind && i.severity === "error")).toHaveLength(0);
+  });
+
+  it("omits the health section when health:false", async () => {
+    const r = await validateWorkflow(
+      wf({
+        "1": { class_type: "CLIPLoader", inputs: { clip_name: "good_clip.safetensors", type: "qwen_image" } },
+        "9": { class_type: "SaveImage", inputs: {} },
+      }),
+      { health: false },
+    );
+    expect(r.health).toBeUndefined();
+    expect(r.issues.some((i) => i.kind)).toBe(false);
+  });
+});

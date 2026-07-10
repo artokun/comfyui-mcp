@@ -31,21 +31,31 @@ export function registerWorkflowValidateTools(server: McpServer): void {
       workflow: z
         .union([z.string(), z.record(z.string(), z.any())])
         .describe("ComfyUI workflow in API format (JSON string or object)"),
+      health: z
+        .boolean()
+        .optional()
+        .default(true)
+        .describe(
+          "Include graph-health heuristics (disconnected nodes, duplicate model loads, orphaned branches, muted/bypassed nodes) as info/warning issues plus a structured health section. Never affects `valid`.",
+        ),
     },
     async (args) => {
       try {
         const workflow = parseWorkflow(args.workflow);
-        const result = await validateWorkflow(workflow);
+        const result = await validateWorkflow(workflow, { health: args.health });
 
         const lines: string[] = [];
         lines.push(`## ${result.summary}`);
         lines.push("");
 
-        if (result.issues.length === 0) {
+        // Health findings are rendered in their own "### Graph health" section —
+        // exclude them from the Errors/Warnings buckets to avoid double-listing.
+        const nonHealth = result.issues.filter((i) => !i.kind);
+        if (nonHealth.length === 0) {
           lines.push("No issues found. The workflow is ready to execute.");
         } else {
-          const errors = result.issues.filter((i) => i.severity === "error");
-          const warnings = result.issues.filter((i) => i.severity === "warning");
+          const errors = nonHealth.filter((i) => i.severity === "error");
+          const warnings = nonHealth.filter((i) => i.severity === "warning");
 
           if (errors.length > 0) {
             lines.push("### Errors");
@@ -66,6 +76,16 @@ export function registerWorkflowValidateTools(server: McpServer): void {
                 : "Workflow";
               lines.push(`- **${loc}**: ${issue.message}`);
             }
+          }
+        }
+
+        if (result.health) {
+          lines.push("");
+          lines.push("### Graph health");
+          lines.push(`- ${result.health.summary}`);
+          for (const f of result.health.findings) {
+            const tag = f.heuristic ? `${f.severity}, heuristic` : f.severity;
+            lines.push(`- [${tag}] ${f.detail}`);
           }
         }
 

@@ -65,6 +65,9 @@ interface Conn {
   tabId: string;
   title: string;
   connectedAt: string;
+  /** Canvas-less client (mobile/remote pseudo-panel) — advertised in `hello`.
+   *  Lets tools resolve media to inline bytes instead of a browser /view ref. */
+  headless: boolean;
 }
 
 export interface BridgeCommand {
@@ -329,6 +332,7 @@ export class UiBridge {
           tabId,
           title: typeof msg.title === "string" && msg.title ? msg.title : "untitled",
           connectedAt: existing?.connectedAt ?? new Date().toISOString(),
+          headless: (msg as { headless?: unknown }).headless === true,
         });
         logger.info(
           `[ui-bridge] panel tab connected: ${tabId.slice(0, 8)} (“${this.conns.get(tabId)?.title}”) — ${this.conns.size} tab(s) total`,
@@ -392,6 +396,12 @@ export class UiBridge {
 
   connected(): boolean {
     return this.conns.size > 0;
+  }
+
+  /** True when the tab advertised itself as a canvas-less (mobile/remote) client
+   *  in its `hello`. Unknown tabs → false. */
+  isHeadless(tabId: string): boolean {
+    return this.conns.get(tabId)?.headless === true;
   }
 
   /** All currently connected tabs, most recent hello last. */

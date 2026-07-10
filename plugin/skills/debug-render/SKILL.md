@@ -34,7 +34,7 @@ crash) → use the **troubleshooting** skill; this skill is for outputs that
 ## The one hard rule: `to_node_id` must be an OUTPUT node
 
 ComfyUI can only run *to* an **output node** — SaveImage, PreviewImage, SaveVideo,
-SaveAudio, etc. (these show `is_output: true` in `panel_get_graph`). A bare
+SaveAudio, etc. (these show `is_output: true` in `panel_query_graph` detail rows). A bare
 KSampler / VAEDecode / preprocessor is **not** an output node, so you can't target
 it directly. To inspect a point that isn't already an output, **add a preview
 tap** there:
@@ -52,7 +52,7 @@ Build a tap with `panel_add_node` + `panel_connect`, run to it, inspect, then
 
 ## The loop
 
-1. **Read the graph.** `panel_get_graph` — note node ids, the output nodes
+1. **Read the graph.** `panel_graph_outline` (then `panel_query_graph` for specifics) — note node ids, the output nodes
    (`is_output: true`), and every node's **mode**. A node in `bypass`/`mute` on
    the path is OFF and is a top cause of wrong renders — fix modes first with
    `panel_set_node_mode` before you blame anything else.
