@@ -27,9 +27,9 @@ dataset `artokun/comfyui-mcp-trajectories`).
 2. **Pull the rung that fits the user's GPU:**
 
 ```bash
-ollama pull artokun/gemma4-comfyui-mcp:e4b   # DEFAULT — ~3.5 GB VRAM (q4)
-ollama pull artokun/gemma4-comfyui-mcp:e2b   # smallest — ~2 GB VRAM
-ollama pull artokun/gemma4-comfyui-mcp:12b   # strongest — ~8 GB VRAM
+ollama pull artokun/gemma4-comfyui-mcp:e4b   # DEFAULT — ~3.5 GB VRAM (q4); arena-best local (14/20)
+ollama pull artokun/gemma4-comfyui-mcp:12b   # ~8 GB VRAM (13/20)
+ollama pull artokun/gemma4-comfyui-mcp:e2b   # smallest — ~2 GB VRAM (currently WEAK: 4/20, fix queued)
 ```
 
 Then in the ComfyUI sidebar panel: backend picker → **Ollama (local)** →
@@ -40,9 +40,9 @@ Connect. `:e4b` is the built-in default — zero further config once pulled.
 
 | GPU VRAM free | Recommend |
 | --- | --- |
-| ~2-3 GB | `:e2b` — note it reasons verbosely; it needs generous token budgets |
-| ~4-7 GB | `:e4b` (the default sweet spot) |
-| 8 GB+ | `:12b` |
+| ~2-3 GB | `:e4b` anyway if at all possible (only ~1.5 GB more; `:e2b` currently scores 4/20 on the arena — below its stock base — a fix is queued for the next training cycle) |
+| ~4-7 GB | `:e4b` (the default sweet spot — best local model on the arena, 14/20) |
+| 8 GB+ | `:12b` (13/20; steadier on long multi-step tasks) |
 
 ## Expectations to set
 

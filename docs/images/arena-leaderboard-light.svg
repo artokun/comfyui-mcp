@@ -1,23 +1,23 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="860" height="632" viewBox="0 0 860 632" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif">
-<rect width="860" height="632" rx="12" fill="#fcfcfb"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="734" viewBox="0 0 860 734" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif">
+<rect width="860" height="734" rx="12" fill="#fcfcfb"/>
 <text x="28" y="38" font-size="19" font-weight="700" fill="#0b0b0b">ComfyUI LLM Arena</text>
-<text x="28" y="60" font-size="12.5" fill="#52514e">14 models · 10 real ComfyUI tasks over MCP · every score verified against the server, not the model's claims</text>
+<text x="28" y="60" font-size="12.5" fill="#52514e">17 models · 10 real ComfyUI tasks over MCP · every score verified against the server, not the model's claims</text>
 <rect x="28" y="72" width="10" height="10" rx="2" fill="#2a78d6"/>
 <text x="43" y="81" font-size="11.5" fill="#52514e">SoTA</text>
 <rect x="91.4" y="72" width="10" height="10" rx="2" fill="#1baf7a"/>
 <text x="106.4" y="81" font-size="11.5" fill="#52514e">B-tier</text>
 <rect x="168" y="72" width="10" height="10" rx="2" fill="#eda100"/>
 <text x="183" y="81" font-size="11.5" fill="#52514e">local</text>
-<line x1="278" y1="86" x2="278" y2="568" stroke="#c3c2b7" stroke-width="1"/>
-<text x="278" y="584" font-size="10.5" fill="#898781" text-anchor="middle" font-variant-numeric="tabular-nums">0</text>
-<line x1="394" y1="86" x2="394" y2="568" stroke="#e1e0d9" stroke-width="1"/>
-<text x="394" y="584" font-size="10.5" fill="#898781" text-anchor="middle" font-variant-numeric="tabular-nums">5</text>
-<line x1="510" y1="86" x2="510" y2="568" stroke="#e1e0d9" stroke-width="1"/>
-<text x="510" y="584" font-size="10.5" fill="#898781" text-anchor="middle" font-variant-numeric="tabular-nums">10</text>
-<line x1="626" y1="86" x2="626" y2="568" stroke="#e1e0d9" stroke-width="1"/>
-<text x="626" y="584" font-size="10.5" fill="#898781" text-anchor="middle" font-variant-numeric="tabular-nums">15</text>
-<line x1="742" y1="86" x2="742" y2="568" stroke="#e1e0d9" stroke-width="1"/>
-<text x="742" y="584" font-size="10.5" fill="#898781" text-anchor="middle" font-variant-numeric="tabular-nums">20</text>
+<line x1="278" y1="86" x2="278" y2="670" stroke="#c3c2b7" stroke-width="1"/>
+<text x="278" y="686" font-size="10.5" fill="#898781" text-anchor="middle" font-variant-numeric="tabular-nums">0</text>
+<line x1="394" y1="86" x2="394" y2="670" stroke="#e1e0d9" stroke-width="1"/>
+<text x="394" y="686" font-size="10.5" fill="#898781" text-anchor="middle" font-variant-numeric="tabular-nums">5</text>
+<line x1="510" y1="86" x2="510" y2="670" stroke="#e1e0d9" stroke-width="1"/>
+<text x="510" y="686" font-size="10.5" fill="#898781" text-anchor="middle" font-variant-numeric="tabular-nums">10</text>
+<line x1="626" y1="86" x2="626" y2="670" stroke="#e1e0d9" stroke-width="1"/>
+<text x="626" y="686" font-size="10.5" fill="#898781" text-anchor="middle" font-variant-numeric="tabular-nums">15</text>
+<line x1="742" y1="86" x2="742" y2="670" stroke="#e1e0d9" stroke-width="1"/>
+<text x="742" y="686" font-size="10.5" fill="#898781" text-anchor="middle" font-variant-numeric="tabular-nums">20</text>
 <text x="28" y="108" font-size="12.5" font-weight="600" fill="#0b0b0b">google/gemini-3.1-pro-preview</text>
 <text x="28" y="121" font-size="10" fill="#52514e">SoTA</text>
 <rect x="278" y="102" width="464" height="14" fill="#f0efec"/>
@@ -49,9 +49,9 @@
 <text x="754" y="249" font-size="13" font-weight="700" fill="#0b0b0b" font-variant-numeric="tabular-nums">19/20</text>
 <text x="754" y="261" font-size="9.5" fill="#898781" font-variant-numeric="tabular-nums">best of 3 (18–19)</text>
 <text x="28" y="278" font-size="12.5" font-weight="600" fill="#0b0b0b">xiaomi/mimo-v2.5</text>
-<text x="28" y="291" font-size="10" fill="#52514e">B-tier</text>
+<text x="28" y="291" font-size="10" fill="#52514e">SoTA</text>
 <rect x="278" y="272" width="464" height="14" fill="#f0efec"/>
-<path d="M 278 272 H 714.8 a 4 4 0 0 1 4 4 v 6 a 4 4 0 0 1 -4 4 H 278 Z" fill="#1baf7a"/>
+<path d="M 278 272 H 714.8 a 4 4 0 0 1 4 4 v 6 a 4 4 0 0 1 -4 4 H 278 Z" fill="#2a78d6"/>
 <text x="754" y="283" font-size="13" font-weight="700" fill="#0b0b0b" font-variant-numeric="tabular-nums">19/20</text>
 <text x="754" y="295" font-size="9.5" fill="#898781" font-variant-numeric="tabular-nums">best of 3 (18–19)</text>
 <text x="28" y="312" font-size="12.5" font-weight="600" fill="#0b0b0b">deepseek/deepseek-v3.2</text>
@@ -69,31 +69,49 @@
 <rect x="278" y="374" width="464" height="14" fill="#f0efec"/>
 <path d="M 278 374 H 622 a 4 4 0 0 1 4 4 v 6 a 4 4 0 0 1 -4 4 H 278 Z" fill="#2a78d6"/>
 <text x="754" y="385" font-size="13" font-weight="700" fill="#0b0b0b" font-variant-numeric="tabular-nums">15/20</text>
-<text x="28" y="414" font-size="12.5" font-weight="600" fill="#0b0b0b">qwen3:4b</text>
+<text x="28" y="414" font-size="12.5" font-weight="600" fill="#0b0b0b">artokun/gemma4-comfyui-mcp:e4b</text>
 <text x="28" y="427" font-size="10" fill="#52514e">local</text>
 <rect x="278" y="408" width="464" height="14" fill="#f0efec"/>
-<path d="M 278 408 H 575.6 a 4 4 0 0 1 4 4 v 6 a 4 4 0 0 1 -4 4 H 278 Z" fill="#eda100"/>
-<text x="754" y="419" font-size="13" font-weight="700" fill="#0b0b0b" font-variant-numeric="tabular-nums">13/20</text>
-<text x="28" y="448" font-size="12.5" font-weight="600" fill="#0b0b0b">gemma4:e4b</text>
+<path d="M 278 408 H 598.8 a 4 4 0 0 1 4 4 v 6 a 4 4 0 0 1 -4 4 H 278 Z" fill="#eda100"/>
+<text x="754" y="419" font-size="13" font-weight="700" fill="#0b0b0b" font-variant-numeric="tabular-nums">14/20</text>
+<text x="754" y="431" font-size="9.5" fill="#898781" font-variant-numeric="tabular-nums">best of 3 (13–14)</text>
+<text x="28" y="448" font-size="12.5" font-weight="600" fill="#0b0b0b">qwen3:4b</text>
 <text x="28" y="461" font-size="10" fill="#52514e">local</text>
 <rect x="278" y="442" width="464" height="14" fill="#f0efec"/>
-<path d="M 278 442 H 552.4 a 4 4 0 0 1 4 4 v 6 a 4 4 0 0 1 -4 4 H 278 Z" fill="#eda100"/>
-<text x="754" y="453" font-size="13" font-weight="700" fill="#0b0b0b" font-variant-numeric="tabular-nums">12/20</text>
-<text x="28" y="482" font-size="12.5" font-weight="600" fill="#0b0b0b">qwen3:8b</text>
+<path d="M 278 442 H 575.6 a 4 4 0 0 1 4 4 v 6 a 4 4 0 0 1 -4 4 H 278 Z" fill="#eda100"/>
+<text x="754" y="453" font-size="13" font-weight="700" fill="#0b0b0b" font-variant-numeric="tabular-nums">13/20</text>
+<text x="28" y="482" font-size="12.5" font-weight="600" fill="#0b0b0b">artokun/gemma4-comfyui-mcp:12b</text>
 <text x="28" y="495" font-size="10" fill="#52514e">local</text>
 <rect x="278" y="476" width="464" height="14" fill="#f0efec"/>
-<path d="M 278 476 H 529.2 a 4 4 0 0 1 4 4 v 6 a 4 4 0 0 1 -4 4 H 278 Z" fill="#eda100"/>
-<text x="754" y="487" font-size="13" font-weight="700" fill="#0b0b0b" font-variant-numeric="tabular-nums">11/20</text>
-<text x="28" y="516" font-size="12.5" font-weight="600" fill="#0b0b0b">gemma4:e2b</text>
+<path d="M 278 476 H 575.6 a 4 4 0 0 1 4 4 v 6 a 4 4 0 0 1 -4 4 H 278 Z" fill="#eda100"/>
+<text x="754" y="487" font-size="13" font-weight="700" fill="#0b0b0b" font-variant-numeric="tabular-nums">13/20</text>
+<text x="754" y="499" font-size="9.5" fill="#898781" font-variant-numeric="tabular-nums">best of 3 (12–13)</text>
+<text x="28" y="516" font-size="12.5" font-weight="600" fill="#0b0b0b">gemma4:e4b</text>
 <text x="28" y="529" font-size="10" fill="#52514e">local</text>
 <rect x="278" y="510" width="464" height="14" fill="#f0efec"/>
-<path d="M 278 510 H 459.6 a 4 4 0 0 1 4 4 v 6 a 4 4 0 0 1 -4 4 H 278 Z" fill="#eda100"/>
-<text x="754" y="521" font-size="13" font-weight="700" fill="#0b0b0b" font-variant-numeric="tabular-nums">8/20</text>
-<text x="28" y="550" font-size="12.5" font-weight="600" fill="#0b0b0b">llama3.1:8b</text>
+<path d="M 278 510 H 552.4 a 4 4 0 0 1 4 4 v 6 a 4 4 0 0 1 -4 4 H 278 Z" fill="#eda100"/>
+<text x="754" y="521" font-size="13" font-weight="700" fill="#0b0b0b" font-variant-numeric="tabular-nums">12/20</text>
+<text x="28" y="550" font-size="12.5" font-weight="600" fill="#0b0b0b">qwen3:8b</text>
 <text x="28" y="563" font-size="10" fill="#52514e">local</text>
 <rect x="278" y="544" width="464" height="14" fill="#f0efec"/>
-<path d="M 278 544 H 320.4 a 4 4 0 0 1 4 4 v 6 a 4 4 0 0 1 -4 4 H 278 Z" fill="#eda100"/>
-<text x="754" y="555" font-size="13" font-weight="700" fill="#0b0b0b" font-variant-numeric="tabular-nums">2/20</text>
-<text x="28" y="606" font-size="10.5" fill="#898781">cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync · temperature 0 · scenarios: health · models · registry · queue · generate · precision · breakfix · provenance · multiout · pipeline</text>
-<text x="28" y="621" font-size="10.5" fill="#898781">Reproduce with your own models: npm run arena — github.com/artokun/comfyui-mcp</text>
+<path d="M 278 544 H 529.2 a 4 4 0 0 1 4 4 v 6 a 4 4 0 0 1 -4 4 H 278 Z" fill="#eda100"/>
+<text x="754" y="555" font-size="13" font-weight="700" fill="#0b0b0b" font-variant-numeric="tabular-nums">11/20</text>
+<text x="28" y="584" font-size="12.5" font-weight="600" fill="#0b0b0b">gemma4:e2b</text>
+<text x="28" y="597" font-size="10" fill="#52514e">local</text>
+<rect x="278" y="578" width="464" height="14" fill="#f0efec"/>
+<path d="M 278 578 H 459.6 a 4 4 0 0 1 4 4 v 6 a 4 4 0 0 1 -4 4 H 278 Z" fill="#eda100"/>
+<text x="754" y="589" font-size="13" font-weight="700" fill="#0b0b0b" font-variant-numeric="tabular-nums">8/20</text>
+<text x="28" y="618" font-size="12.5" font-weight="600" fill="#0b0b0b">artokun/gemma4-comfyui-mcp:e2b</text>
+<text x="28" y="631" font-size="10" fill="#52514e">local</text>
+<rect x="278" y="612" width="464" height="14" fill="#f0efec"/>
+<path d="M 278 612 H 366.8 a 4 4 0 0 1 4 4 v 6 a 4 4 0 0 1 -4 4 H 278 Z" fill="#eda100"/>
+<text x="754" y="623" font-size="13" font-weight="700" fill="#0b0b0b" font-variant-numeric="tabular-nums">4/20</text>
+<text x="754" y="635" font-size="9.5" fill="#898781" font-variant-numeric="tabular-nums">best of 3 (4–4)</text>
+<text x="28" y="652" font-size="12.5" font-weight="600" fill="#0b0b0b">llama3.1:8b</text>
+<text x="28" y="665" font-size="10" fill="#52514e">local</text>
+<rect x="278" y="646" width="464" height="14" fill="#f0efec"/>
+<path d="M 278 646 H 320.4 a 4 4 0 0 1 4 4 v 6 a 4 4 0 0 1 -4 4 H 278 Z" fill="#eda100"/>
+<text x="754" y="657" font-size="13" font-weight="700" fill="#0b0b0b" font-variant-numeric="tabular-nums">2/20</text>
+<text x="28" y="708" font-size="10.5" fill="#898781">cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync · temperature 0 · scenarios: health · models · registry · queue · generate · precision · breakfix · provenance · multiout · pipeline</text>
+<text x="28" y="723" font-size="10.5" fill="#898781">Reproduce with your own models: npm run arena — github.com/artokun/comfyui-mcp</text>
 </svg>

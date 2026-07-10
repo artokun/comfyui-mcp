@@ -1853,7 +1853,7 @@ export async function runPanelOrchestrator(): Promise<void> {
               : isGm
                 ? "⚠️ The background agent isn't responding — the Gemini CLI couldn't start. Make sure the Gemini CLI is installed and signed in (run `gemini` once and complete the Google sign-in), then Disconnect → Connect to retry."
                 : isOl
-                  ? "⚠️ The background agent isn't responding — Ollama isn't reachable. Start it with `ollama serve` and pull our fine-tuned model (`ollama pull artokun/gemma4-comfyui-mcp:e4b` — gemma4 trained on the comfyui-mcp tool suite; `:e2b` for ~2 GB VRAM, `:12b` for ~8 GB), then Disconnect → Connect to retry."
+                  ? "⚠️ The background agent isn't responding — Ollama isn't reachable. Start it with `ollama serve` and pull our fine-tuned model (`ollama pull artokun/gemma4-comfyui-mcp:e4b` — gemma4 trained on the comfyui-mcp tool suite — arena-best local model; `:12b` for ~8 GB VRAM), then Disconnect → Connect to retry."
                   : isLs
                     ? `⚠️ The background agent isn't responding — LM Studio isn't reachable at ${LMSTUDIO_BASE_URL}. Open LM Studio → Developer → Start Server and load a tool-calling model (our gemma4-comfyui-mcp GGUFs from Hugging Face work great), or set COMFYUI_MCP_LMSTUDIO_HOST if it serves elsewhere — then Disconnect → Connect to retry.`
                     : isLc

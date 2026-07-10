@@ -171,9 +171,25 @@ model knows this exact tool suite natively instead of meeting it cold.
 # 1. Install Ollama (once):  https://ollama.com/download
 # 2. Pull the size that fits your GPU:
 ollama pull artokun/gemma4-comfyui-mcp:e4b     # default — ~3.5 GB VRAM at q4
-ollama pull artokun/gemma4-comfyui-mcp:e2b     # smallest — ~2 GB VRAM
-ollama pull artokun/gemma4-comfyui-mcp:12b     # strongest — ~8 GB VRAM
+ollama pull artokun/gemma4-comfyui-mcp:12b     # ~8 GB VRAM
+ollama pull artokun/gemma4-comfyui-mcp:e2b     # smallest — ~2 GB VRAM (see caveat)
 ```
+
+**Measured, not promised** — [LLM Arena](/arena) scores on the real 10-scenario
+ladder (best of 3, every result verified against a live ComfyUI server, RTX 4090):
+
+| Tag | VRAM (q4) | Arena score | vs. stock |
+|---|---|---|---|
+| `:e4b` | ~3.5 GB | **14/20** (13–14) — best local model we've tested | stock gemma4:e4b: 12/20 |
+| `:12b` | ~8 GB | 13/20 (12–13) | stock 12b unbenchmarked |
+| `:e2b` | ~2 GB | 4/20 — **currently regresses** below stock | stock gemma4:e2b: 8/20 |
+
+The honest caveat: the `:e2b` rung picked up a `call_tool`-envelope quirk in
+this training round (it drops the `name` field under pressure) and scores
+below its stock base — a fix is queued for the next fine-tune cycle. Until
+then, `:e4b` is the recommendation even on small GPUs (it's only ~1.5 GB
+more), and `:12b` mostly buys steadiness on long multi-step tasks, not raw
+score.
 
 | Tag | Base | VRAM (q4) | Notes |
 | --- | --- | --- | --- |
