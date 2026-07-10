@@ -183,9 +183,9 @@ stdio mode (the default, what MCP clients use) needs none of this.
   watchdog accounts for this, but a request that dies instantly usually
   means the model tag isn't pulled (`ollama pull <tag>`).
 - **Every request suddenly failing / connection refused on 11434** — the
-  Ollama daemon itself can crash under sustained model swapping (observed
-  twice on 0.31.x during back-to-back arena runs; the Windows app usually
-  self-restarts, but not always). Restart it (relaunch the app, or
+  Ollama app/daemon isn't running. Quitting the tray app kills the API with
+  it, which is easy to do by accident while an agent is mid-run (the panel
+  gives no warning that a local backend is in use). Relaunch the app (or
   `ollama serve`) and reconnect — sessions resume; no panel restart needed.
 
 ## Where to look for logs
