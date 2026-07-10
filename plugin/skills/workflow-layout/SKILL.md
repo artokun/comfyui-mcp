@@ -11,7 +11,7 @@ real node sizes and rail positions first, then compute positions from them.
 
 ## Primitives (panel tools)
 
-- **`panel_get_graph`** — READ FIRST, every time. Returns, for the graph you're viewing:
+- **`panel_query_graph {fields:'detail', limit:200, max_chars:60000}`** — READ FIRST, every time. Returns, for the graph you're viewing:
   - each node's **`pos` [x,y]**, **`size` [w,h]** (body only), and **`full_height`** (the
     TRUE rendered footprint = title bar + body; use this for vertical stacking),
   - all **`groups`** (`id`, `title`, `color`, `bounding [x,y,w,h]`),
@@ -44,7 +44,7 @@ real node sizes and rail positions first, then compute positions from them.
    that column + ~80`.
 4. **Y by FULL height (this is what stops overlaps):** stack a column top→down with
    `y[i+1] = y[i] + node[i].full_height + ROW_GAP`. Use **`full_height`** (from
-   `panel_get_graph`), NOT `size[1]`. `size[1]` is the BODY only (slots + widgets); the
+   `panel_query_graph` detail rows), NOT `size[1]`. `size[1]` is the BODY only (slots + widgets); the
    **title bar renders ~30px ABOVE `pos`** and is NOT in `size[1]`, so stacking by `size[1]`
    overlaps every node by a header (the classic "headers eating the node above" bug).
    `full_height` already includes that header (and is just the title height for a collapsed
@@ -70,13 +70,13 @@ above) → then pin the rails to the node band:
 - output rail → `panel_move_rail("output", [maxNodeX + 60,  bandTopY])`
 
 Keep rails at the same Y as the first row. Read current rail positions from
-`panel_get_graph` (`rails`) before deciding. `panel_exit_subgraph` when done.
+`panel_query_graph` (`rails`) before deciding. `panel_exit_subgraph` when done.
 
 **Wiring interior nodes to the boundary (don't connect to a guessed rail id).** To expose
 an interior node's output/input on the boundary so the PARENT graph can wire it, do NOT
 `panel_connect` to a rail node id you guessed — use `panel_expose_subgraph_output(from_node_id,
 from_output)` (interior output → output rail) and `panel_expose_subgraph_input(to_node_id,
-to_input)` (interior input → input rail), both while inside the subgraph. `panel_get_graph`'s
+to_input)` (interior input → input rail), both while inside the subgraph. `panel_query_graph`'s
 `rails` shows which boundary slots already exist and which still need exposing. To expand/
 dissolve a subgraph back into the parent (inline its inner nodes + rewire external links,
 removing the wrapper — the inverse of `panel_create_subgraph`), use
@@ -113,7 +113,7 @@ nodes expanded — and consider `panel_promote_widget` to surface the one key wi
 
 ## End-to-end workflow
 
-1. `panel_get_graph` — capture `pos`/`size`/`groups` (and `rails` inside each subgraph).
+1. `panel_query_graph {fields:'detail', limit:200, max_chars:60000}` — capture `pos`/`size`/`groups` (and `rails` inside each subgraph).
 2. Compute layers + overlap-free positions from the real sizes.
 3. `panel_move_node` for each (batch the moves — they apply in order).
 4. Per subgraph: enter → lay out inner nodes → `panel_move_rail` both rails → exit.

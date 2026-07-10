@@ -37,7 +37,7 @@ export type ObjectInfo = Record<string, ComfyUINodeDef>;
 export interface WorkflowNode {
   class_type: string;
   inputs: Record<string, unknown>;
-  _meta?: { title?: string };
+  _meta?: { title?: string; mode?: string };
 }
 
 export type WorkflowJSON = Record<string, WorkflowNode>;
