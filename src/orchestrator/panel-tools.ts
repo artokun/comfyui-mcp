@@ -303,26 +303,78 @@ export function buildPanelToolDefs(): PanelToolDef[] {
 
   return [
     def(
-      "panel_get_graph",
-      "Read the workflow the user is CURRENTLY VIEWING on their canvas (root graph or an opened subgraph — 'viewing' says which): node ids, types, titles, widget values, connections, and each node's MODE ('active', 'bypass', or 'mute'). Subgraph nodes are summarized shallowly — drill in with panel_get_subgraph. ALWAYS call this before your first edit so ids and slot names are accurate. CHECK THE MODE of every node on the path you care about: a node with mode 'bypass' is skipped (it just passes its input through) and one with mode 'mute' does not execute (and kills everything downstream) — so a BYPASSED/MUTED node means that part of the graph is OFF and may be why a render uses the wrong prompt/branch. If the path you intend to use is bypassed or muted, enable it with panel_set_node_mode before running. This is the user's live graph — they watch your edits happen. When you are VIEWING A SUBGRAPH (after panel_enter_subgraph), the response also includes `rails`: the input/output boundary rail node ids and their slots — read these to know exactly what's exposed on the boundary, and which interior outputs/inputs still need exposing (panel_expose_subgraph_output / panel_expose_subgraph_input) or repositioning (panel_move_rail). Read-only.",
-      {},
-      async (_args, ctx) => ctx.call({ cmd: "graph_get_state" }),
+      "panel_query_graph",
+      "QUERY the workflow the user is CURRENTLY VIEWING — filter, traverse, project, and aggregate over the live canvas WITHOUT dumping the whole graph (replaces the old panel_get_graph full-JSON dump; output is TOKEN-BOUNDED with an explicit truncation marker, so a big graph can never flood your context). Combine: `types` (node type contains any), `title` (contains), `where` widget predicates ANDed ('cfg>7', 'steps<=20', 'sampler_name=euler', 'text~sunset' — ops = != >= <= > < ~contains), `ids` (exact nodes — THE way to read ONE node's exact slot/widget detail: {ids:[42], fields:'detail'}), `upstream_of`/`downstream_of` + `depth` (dependency traversal: upstream = what FEEDS that node, downstream = what CONSUMES it; seed at depth 0), `fields` ('compact' one line per node [default], 'ids', 'detail' = the full node summary with slots + connections + mode), `group_by:'type'` (counts only), `limit` (default 40). detail rows include each node's MODE — a 'bypass' node is skipped and a 'mute' node kills everything downstream, so check modes on the path you care about before running (fix with panel_set_node_mode). Every result also carries `groups` (id, title, member node_ids — groups are geometric, trust this list) and, when viewing a SUBGRAPH (after panel_enter_subgraph), `rails` (boundary rail ids/slots). Typical flow: panel_graph_outline to orient → panel_query_graph to pinpoint/inspect → edit. Read-only.",
+      {
+        types: z.array(z.string()).optional().describe("Node type contains ANY of these (case-insensitive)."),
+        title: z.string().optional().describe("Node title contains this."),
+        where: z
+          .array(z.string())
+          .optional()
+          .describe("Widget predicates, ANDed: 'cfg>7', 'sampler_name=euler', 'text~sunset'."),
+        ids: z
+          .array(z.union([z.string(), z.number()]))
+          .optional()
+          .describe("Exact node ids — with fields:'detail' this reads one node's full slot/widget detail."),
+        upstream_of: z
+          .union([z.string(), z.number()])
+          .optional()
+          .describe("Scope to the dependency closure FEEDING this node id."),
+        downstream_of: z
+          .union([z.string(), z.number()])
+          .optional()
+          .describe("Scope to the nodes CONSUMING this node id's outputs."),
+        depth: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe("Max hops from the traversal seed (seed=0). Absent = full closure."),
+        fields: z
+          .enum(["ids", "compact", "detail"])
+          .optional()
+          .describe("Projection: compact one-liners (default), bare ids, or full node summaries."),
+        group_by: z.enum(["type"]).optional().describe("Aggregate: counts per node type instead of listing."),
+        limit: z.number().int().min(1).max(200).optional().describe("Max nodes listed (default 40)."),
+        max_chars: z
+          .number()
+          .int()
+          .min(500)
+          .max(60000)
+          .optional()
+          .describe("Output character bound (default 12000). Raise only for deliberate full reads, e.g. layout passes needing every node's geometry."),
+      },
+      async (args: A, ctx) =>
+        ctx.call({
+          cmd: "graph_query",
+          types: args.types,
+          title: args.title,
+          where: args.where,
+          ids: args.ids,
+          upstream_of: args.upstream_of,
+          downstream_of: args.downstream_of,
+          depth: args.depth,
+          fields: args.fields,
+          group_by: args.group_by,
+          limit: args.limit,
+          max_chars: args.max_chars,
+        }),
     ),
     def(
       "panel_graph_outline",
-      "Read a COMPACT, dependency-ordered TEXT MAP of the workflow the user is viewing — the FASTEST way to UNDERSTAND a graph (especially a big loaded pack/template) before you touch it. Returns one `outline` string built for you to read top→down: nodes are topologically sorted (sources first, sinks last), each shown on its own block as `id Type \"title\" [bypass/mute] [OUTPUT] · group:X  widget=value …` with `← inputs` (as source_node.output_name) and `→ outputs` (as target_node.input_name), preceded by a GROUPS index (title → member node ids). Far cheaper and clearer than panel_get_graph's full JSON, and it shows the WIRING you'd otherwise have to reconstruct. Use this FIRST to get oriented; then panel_find_nodes to pinpoint a node, or panel_get_graph for one node's exact slot/widget detail. Read-only.",
+      "Read a COMPACT, dependency-ordered TEXT MAP of the workflow the user is viewing — the FASTEST way to UNDERSTAND a graph (especially a big loaded pack/template) before you touch it. Returns one `outline` string built for you to read top→down: nodes are topologically sorted (sources first, sinks last), each shown on its own block as `id Type \"title\" [bypass/mute] [OUTPUT] · group:X  widget=value …` with `← inputs` (as source_node.output_name) and `→ outputs` (as target_node.input_name), preceded by a GROUPS index (title → member node ids). It shows the WIRING you'd otherwise have to reconstruct. Use this FIRST to get oriented; then panel_query_graph to filter/traverse/inspect (e.g. {ids:[42], fields:'detail'} for one node's exact slot/widget detail), or panel_find_nodes for free-text search. Read-only.",
       {},
       async (_args, ctx) => ctx.call({ cmd: "graph_outline" }),
     ),
     def(
       "panel_get_subgraph",
-      "Read INSIDE a subgraph node on the user's open graph: ids, types, widget values, and connections of its inner nodes. Use after panel_get_graph shows a node with is_subgraph=true. Read-only.",
+      "Read INSIDE a subgraph node on the user's open graph: ids, types, widget values, and connections of its inner nodes. Use after panel_graph_outline / panel_query_graph shows a node with is_subgraph=true. Read-only.",
       { node_id: z.number().int().describe("Subgraph node id (is_subgraph=true).") },
       async (args: A, ctx) => ctx.call({ cmd: "graph_get_subgraph", node_id: args.node_id }),
     ),
     def(
       "panel_find_nodes",
-      "SEARCH the workflow the user is CURRENTLY VIEWING for nodes matching filters — the right way to PINPOINT a node (a specific loader, sampler, save, switch) in a LARGE graph instead of dumping the whole thing with panel_get_graph and scanning it. This searches the LIVE graph ON THE CANVAS — NOT the installable node registry (that's panel_search_nodes). Unlike panel_get_graph it scans EVERY node (no truncation). Give a free-text `query` (matched case-insensitively across node type, title, description, widget NAMES, widget VALUES, and input/output port names+types — a node hits if ANY of those contain it) and/or targeted filters: type, title, input, output, widget (name), widget_value (contents), is_output, is_subgraph, mode. Targeted filters are ANDed together; the free `query` ORs across fields. Each match is the SAME rich summary as panel_get_graph (id, type, title, widgets, inputs WITH their connected_from sources, outputs, mode, is_output, …) PLUS the node's description and a `matched_on` list saying WHY it matched. Read-only. Examples — the video loader: {query:'tiktok'} or {type:'LoadVideo'} or {input:'video'}; every output node: {is_output:true}; the node whose widget holds a file: {widget_value:'.png'}; a bypassed switch: {type:'Switch', mode:'bypass'}.",
+      "SEARCH the workflow the user is CURRENTLY VIEWING for nodes matching filters — the right way to PINPOINT a node (a specific loader, sampler, save, switch) in a LARGE graph instead of dumping the whole graph and scanning it. This searches the LIVE graph ON THE CANVAS — NOT the installable node registry (that's panel_search_nodes). It scans EVERY node (no truncation). Give a free-text `query` (matched case-insensitively across node type, title, description, widget NAMES, widget VALUES, and input/output port names+types — a node hits if ANY of those contain it) and/or targeted filters: type, title, input, output, widget (name), widget_value (contents), is_output, is_subgraph, mode. Targeted filters are ANDed together; the free `query` ORs across fields. Each match is the SAME rich summary as panel_query_graph's detail rows (id, type, title, widgets, inputs WITH their connected_from sources, outputs, mode, is_output, …) PLUS the node's description and a `matched_on` list saying WHY it matched. Read-only. Examples — the video loader: {query:'tiktok'} or {type:'LoadVideo'} or {input:'video'}; every output node: {is_output:true}; the node whose widget holds a file: {widget_value:'.png'}; a bypassed switch: {type:'Switch', mode:'bypass'}.",
       {
         query: z
           .string()
@@ -400,7 +452,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     def(
       "panel_remove_node",
       "Remove a node (and its connections) from the user's open graph by id. Undoable with Ctrl+Z.",
-      { node_id: z.number().int().describe("Node id from panel_get_graph.") },
+      { node_id: z.number().int().describe("Node id from panel_graph_outline / panel_query_graph.") },
       async (args: A, ctx) => ctx.call({ cmd: "graph_remove_node", node_id: args.node_id }),
     ),
     def(
@@ -582,7 +634,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_connect",
-      "Connect an output slot of one node to an input slot of another in the user's open graph. Slots accept a name ('MODEL', 'samples') or numeric index. On a name mismatch the error lists available slots — re-check with panel_get_graph. Undoable.",
+      "Connect an output slot of one node to an input slot of another in the user's open graph. Slots accept a name ('MODEL', 'samples') or numeric index. On a name mismatch the error lists available slots — re-check with panel_query_graph ({ids:[node_id], fields:'detail'}). Undoable.",
       {
         from_node_id: z.number().int().describe("Source node id."),
         from_output: slotRef.optional().describe("Source output slot name or index (default 0)."),
@@ -611,7 +663,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
       "panel_set_widget",
       "Set a widget value on a node in the user's open graph (steps, cfg, seed, ckpt_name, text prompts, …). Returns the previous and new value. Undoable with Ctrl+Z.",
       {
-        node_id: z.number().int().describe("Node id from panel_get_graph."),
+        node_id: z.number().int().describe("Node id from panel_graph_outline / panel_query_graph."),
         widget: z.string().describe("Widget name (e.g. 'steps', 'cfg', 'text')."),
         value: z
           .union([z.string(), z.number(), z.boolean()])
@@ -624,7 +676,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
       "panel_move_node",
       "Move a node to a new canvas position [x, y] in the user's open graph. Undoable.",
       {
-        node_id: z.number().int().describe("Node id from panel_get_graph."),
+        node_id: z.number().int().describe("Node id from panel_graph_outline / panel_query_graph."),
         pos: xy().describe("New canvas [x, y] (two numbers)."),
       },
       async (args: A, ctx) => ctx.call({ cmd: "graph_move_node", node_id: args.node_id, pos: args.pos }),
@@ -651,7 +703,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_run",
-      "Queue the workflow the user has OPEN — exactly like them pressing Queue Prompt (current widget values, the live graph they can see). Returns queued:true, or queued:false with node_errors when frontend validation fails. Pass to_node_id to RUN ONLY ONE BRANCH ('run to node'): ComfyUI renders just that output node plus everything upstream of it and SKIPS every other output branch — handy for previewing or debugging part of a big graph without rendering the whole thing. to_node_id MUST be an OUTPUT node (SaveImage, PreviewImage, SaveVideo, …) — pick the one at the END of the branch you want; nodes are tagged is_output:true in panel_get_graph. Omit it to run the whole graph. Use this so the render runs on THEIR canvas and they see the result.",
+      "Queue the workflow the user has OPEN — exactly like them pressing Queue Prompt (current widget values, the live graph they can see). Returns queued:true, or queued:false with node_errors when frontend validation fails. Pass to_node_id to RUN ONLY ONE BRANCH ('run to node'): ComfyUI renders just that output node plus everything upstream of it and SKIPS every other output branch — handy for previewing or debugging part of a big graph without rendering the whole thing. to_node_id MUST be an OUTPUT node (SaveImage, PreviewImage, SaveVideo, …) — pick the one at the END of the branch you want; nodes are tagged is_output:true in panel_query_graph's detail rows. Omit it to run the whole graph. Use this so the render runs on THEIR canvas and they see the result.",
       {
         batch_count: z
           .number()
@@ -665,7 +717,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           .int()
           .optional()
           .describe(
-            "Output node id to render UP TO (partial execution). Omit to run the whole graph. Must be an OUTPUT node — one with is_output:true in panel_get_graph.",
+            "Output node id to render UP TO (partial execution). Omit to run the whole graph. Must be an OUTPUT node — one with is_output:true in panel_query_graph's detail rows.",
           ),
       },
       async (args: A, ctx) => {
@@ -1031,12 +1083,12 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_subgraph_group",
-      "Wrap an existing GROUP's nodes into ONE subgraph node in a single step — the clean way to refactor a big graph into readable, TOGGLEABLE units. Pass the group by `group` (its title, e.g. 'REPLACEMENT MODE', or its numeric id from panel_get_graph's groups[]). LiteGraph groups don't own nodes — membership is geometric — so this computes which nodes sit inside the group box, selects them, and collapses them via ComfyUI 'Convert to Subgraph', returning the new subgraph node id + the wrapped node ids. After this you can toggle that whole region as ONE unit: panel_set_node_mode(node_id, 'bypass'/'active') on the subgraph node, then panel_run — e.g. queue one run with the region ON and one with it OFF. Undoable with Ctrl+Z. (For an arbitrary set of nodes that isn't a group, use panel_create_subgraph with explicit node_ids.)",
+      "Wrap an existing GROUP's nodes into ONE subgraph node in a single step — the clean way to refactor a big graph into readable, TOGGLEABLE units. Pass the group by `group` (its title, e.g. 'REPLACEMENT MODE', or its numeric id from panel_query_graph's groups[]). LiteGraph groups don't own nodes — membership is geometric — so this computes which nodes sit inside the group box, selects them, and collapses them via ComfyUI 'Convert to Subgraph', returning the new subgraph node id + the wrapped node ids. After this you can toggle that whole region as ONE unit: panel_set_node_mode(node_id, 'bypass'/'active') on the subgraph node, then panel_run — e.g. queue one run with the region ON and one with it OFF. Undoable with Ctrl+Z. (For an arbitrary set of nodes that isn't a group, use panel_create_subgraph with explicit node_ids.)",
       {
         group: z
           .union([z.string(), z.number()])
           .describe(
-            "Group to wrap: its title (case-insensitive substring, e.g. 'replacement mode') or its numeric id from panel_get_graph groups[].id.",
+            "Group to wrap: its title (case-insensitive substring, e.g. 'replacement mode') or its numeric id from panel_query_graph groups[].id.",
           ),
       },
       async (args: A, ctx) => ctx.call({ cmd: "graph_subgraph_group", group: args.group }, 15000),
@@ -1120,9 +1172,9 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_move_group",
-      "Move a group box to a new top-left [x, y] on the user's open graph. By default the nodes inside the group move with it (like dragging the group header); pass move_nodes:false to move only the box. Group id comes from panel_get_graph (the `groups` array) or panel_create_group. Undoable.",
+      "Move a group box to a new top-left [x, y] on the user's open graph. By default the nodes inside the group move with it (like dragging the group header); pass move_nodes:false to move only the box. Group id comes from panel_query_graph (the `groups` array on every result) or panel_create_group. Undoable.",
       {
-        group_id: z.number().int().describe("Group id from panel_get_graph / panel_create_group."),
+        group_id: z.number().int().describe("Group id from panel_query_graph's groups[] / panel_create_group."),
         pos: xy().describe("New top-left [x, y] (two numbers)."),
         move_nodes: z.boolean().optional().describe("Move the contained nodes too (default true)."),
       },
@@ -1133,7 +1185,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
       "panel_edit_group",
       "Edit a group box: its title, color, font_size, and/or bounds [x, y, width, height]. Only the fields you pass are changed. Undoable.",
       {
-        group_id: z.number().int().describe("Group id from panel_get_graph / panel_create_group."),
+        group_id: z.number().int().describe("Group id from panel_query_graph's groups[] / panel_create_group."),
         title: z.string().optional().describe("New label."),
         color: z.string().optional().describe("New box/header color, e.g. '#3f789e'."),
         font_size: z.number().optional().describe("New title font size."),
@@ -1157,14 +1209,14 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     def(
       "panel_remove_group",
       "Remove a group box from the user's open graph. The nodes inside the group are NOT deleted — only the box. Undoable.",
-      { group_id: z.number().int().describe("Group id from panel_get_graph / panel_create_group.") },
+      { group_id: z.number().int().describe("Group id from panel_query_graph's groups[] / panel_create_group.") },
       async (args: A, ctx) => ctx.call({ cmd: "graph_remove_group", group_id: args.group_id }, 15000),
     ),
     def(
       "panel_set_node_title",
       "Rename a node's TITLE (the label on its header) — e.g. to label a node by its purpose. Different from panel_set_widget (which changes a value). Undoable with Ctrl+Z.",
       {
-        node_id: z.number().int().describe("Node id from panel_get_graph."),
+        node_id: z.number().int().describe("Node id from panel_graph_outline / panel_query_graph."),
         title: z.string().describe("New title text."),
       },
       async (args: A, ctx) => ctx.call({ cmd: "graph_set_title", node_id: args.node_id, title: args.title }, 15000),
@@ -1173,7 +1225,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
       "panel_set_node_collapsed",
       "Collapse (minimize) or expand a node on the user's open graph. Collapsed nodes shrink to just their title bar — handy for tidying loaders or rarely-touched nodes. Undoable.",
       {
-        node_id: z.number().int().describe("Node id from panel_get_graph."),
+        node_id: z.number().int().describe("Node id from panel_graph_outline / panel_query_graph."),
         collapsed: z.boolean().optional().describe("true = collapse/minimize (default), false = expand."),
       },
       async (args: A, ctx) =>
@@ -1185,9 +1237,9 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         "• 'active' — normal: the node executes.\n" +
         "• 'bypass' — the node is SKIPPED and PASSES ITS INPUT THROUGH to its output (downstream still runs, just as if this node weren't there). Use to disable a single processing node (an upscaler, a LoRA, a detailer) while keeping the pipeline connected.\n" +
         "• 'mute' — the node AND everything DOWNSTREAM of it do NOT execute (no pass-through). Use to fully switch off a branch/output.\n" +
-        "CRITICAL — modes silently change what a render produces, so they are a top cause of 'wrong output'. A BYPASSED node contributes nothing of its own and a MUTED node kills its branch. Use this tool to ENABLE the path you actually want and DISABLE the one you don't — e.g. to drive a workflow from its Ideogram/JSON prompt builder you must set the manual-prompt node to 'bypass' and the JSON-builder path to 'active' (or vice-versa); likewise to pick one branch of an rgthree 'Fast Groups Bypasser'/Muter or a prompt-source switch. ALWAYS read modes first with panel_get_graph: if the intended path is bypassed/muted, fix it HERE before running, and never assume a switch/route is already active. Undoable with Ctrl+Z.",
+        "CRITICAL — modes silently change what a render produces, so they are a top cause of 'wrong output'. A BYPASSED node contributes nothing of its own and a MUTED node kills its branch. Use this tool to ENABLE the path you actually want and DISABLE the one you don't — e.g. to drive a workflow from its Ideogram/JSON prompt builder you must set the manual-prompt node to 'bypass' and the JSON-builder path to 'active' (or vice-versa); likewise to pick one branch of an rgthree 'Fast Groups Bypasser'/Muter or a prompt-source switch. ALWAYS read modes first (panel_graph_outline marks [bypass]/[mute]; panel_query_graph detail rows carry mode): if the intended path is bypassed/muted, fix it HERE before running, and never assume a switch/route is already active. Undoable with Ctrl+Z.",
       {
-        node_id: z.number().int().describe("Node id from panel_get_graph."),
+        node_id: z.number().int().describe("Node id from panel_graph_outline / panel_query_graph."),
         mode: z
           .enum(["active", "bypass", "mute"])
           .describe(
@@ -1201,7 +1253,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
       "panel_set_node_color",
       "Set a node's title-bar and/or body color on the user's open graph. Easiest: pass a `preset` from ComfyUI's palette (red, brown, green, blue, pale_blue, cyan, purple, yellow, black) for matched colors. Or set explicit `color` (title bar) and/or `bgcolor` (body) as hex like '#3f789e'. Pass null for a field to reset it to the theme default. Great for colour-coding stages. Undoable.",
       {
-        node_id: z.number().int().describe("Node id from panel_get_graph."),
+        node_id: z.number().int().describe("Node id from panel_graph_outline / panel_query_graph."),
         preset: z
           .enum(["red", "brown", "green", "blue", "pale_blue", "cyan", "purple", "yellow", "black"])
           .optional()
@@ -1240,7 +1292,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_enter_subgraph",
-      "Navigate INTO a subgraph node so you can read and EDIT its inner nodes — after this, panel_get_graph and all panel_* edit tools target the subgraph's inner graph (the user sees the canvas drill in). This is how you edit inside a subgraph (e.g. tweak a widget on an inner node). Call panel_exit_subgraph when done. Returns the new viewing scope.",
+      "Navigate INTO a subgraph node so you can read and EDIT its inner nodes — after this, panel_query_graph / panel_graph_outline and all panel_* edit tools target the subgraph's inner graph (the user sees the canvas drill in). This is how you edit inside a subgraph (e.g. tweak a widget on an inner node). Call panel_exit_subgraph when done. Returns the new viewing scope.",
       { node_id: z.number().int().describe("Subgraph node id (is_subgraph=true).") },
       async (args: A, ctx) => ctx.call({ cmd: "graph_enter_subgraph", node_id: args.node_id }, 15000),
     ),
@@ -1252,7 +1304,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_move_rail",
-      "Reposition a subgraph's input or output RAIL (the boundary I/O node that the inner wires connect to). You MUST be INSIDE the subgraph first (panel_enter_subgraph). Read current rail positions from panel_get_graph's `rails` field. Use this to place the input rail just left of the first node column and the output rail just right of the last one, so a tidy interior layout doesn't leave the rails stranded. rail is 'input' or 'output'.",
+      "Reposition a subgraph's input or output RAIL (the boundary I/O node that the inner wires connect to). You MUST be INSIDE the subgraph first (panel_enter_subgraph). Read current rail positions from panel_query_graph's `rails` field (present when viewing a subgraph). Use this to place the input rail just left of the first node column and the output rail just right of the last one, so a tidy interior layout doesn't leave the rails stranded. rail is 'input' or 'output'.",
       {
         rail: z.enum(["input", "output"]).describe("Which boundary rail to move."),
         pos: xy().describe("New top-left [x, y] (two numbers)."),
@@ -1261,9 +1313,9 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_promote_widget",
-      "Expose (promote) an INNER subgraph widget on the PARENT subgraph node, so it can be set from outside without opening the subgraph — e.g. surface an inner KSampler's `seed`/`steps` on the subgraph node. You MUST be inside the subgraph first (call panel_enter_subgraph): `node_id` is an inner node (from panel_get_graph while inside) and `widget` is one of its widget names. Pass demote:true to un-promote. Undoable with Ctrl+Z.",
+      "Expose (promote) an INNER subgraph widget on the PARENT subgraph node, so it can be set from outside without opening the subgraph — e.g. surface an inner KSampler's `seed`/`steps` on the subgraph node. You MUST be inside the subgraph first (call panel_enter_subgraph): `node_id` is an inner node (from panel_query_graph while inside) and `widget` is one of its widget names. Pass demote:true to un-promote. Undoable with Ctrl+Z.",
       {
-        node_id: z.number().int().describe("Inner node id (from panel_get_graph while inside the subgraph)."),
+        node_id: z.number().int().describe("Inner node id (from panel_query_graph while inside the subgraph)."),
         widget: z.string().describe("Name of the widget on that node to promote (e.g. 'seed', 'steps', 'text')."),
         demote: z.boolean().optional().describe("Set true to UN-promote (remove the widget from the parent node)."),
       },
@@ -1272,9 +1324,9 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_expose_subgraph_output",
-      "Wire an interior node's OUTPUT to the subgraph's OUTPUT RAIL — i.e. expose it as a SUBGRAPH OUTPUT on the boundary so the PARENT graph can connect to the subgraph node's new output slot. You MUST be INSIDE the subgraph first (panel_enter_subgraph). This is the correct way to \"wire an internal output to the subgraph's output rail\": do NOT panel_connect to a guessed rail node id — call this with the interior node + the output you want exposed. Read panel_get_graph's `rails` to see the resulting boundary slots. `from_output` is an output slot NAME ('IMAGE', 'LATENT') or numeric index. Optional `name` titles the new boundary output (defaults from the source slot). Undoable with Ctrl+Z.",
+      "Wire an interior node's OUTPUT to the subgraph's OUTPUT RAIL — i.e. expose it as a SUBGRAPH OUTPUT on the boundary so the PARENT graph can connect to the subgraph node's new output slot. You MUST be INSIDE the subgraph first (panel_enter_subgraph). This is the correct way to \"wire an internal output to the subgraph's output rail\": do NOT panel_connect to a guessed rail node id — call this with the interior node + the output you want exposed. Read panel_query_graph's `rails` to see the resulting boundary slots. `from_output` is an output slot NAME ('IMAGE', 'LATENT') or numeric index. Optional `name` titles the new boundary output (defaults from the source slot). Undoable with Ctrl+Z.",
       {
-        from_node_id: z.number().int().describe("Interior (inner) node id whose output to expose (from panel_get_graph while inside the subgraph)."),
+        from_node_id: z.number().int().describe("Interior (inner) node id whose output to expose (from panel_query_graph while inside the subgraph)."),
         from_output: slotRef.describe("Output slot name (e.g. 'IMAGE', 'LATENT') or numeric index on that node."),
         name: z.string().optional().describe("Optional name for the new subgraph output (boundary slot). Defaults from the source slot."),
       },
@@ -1291,9 +1343,9 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_expose_subgraph_input",
-      "Wire an interior node's INPUT to the subgraph's INPUT RAIL — i.e. expose it as a SUBGRAPH INPUT on the boundary so the PARENT graph can feed the subgraph node's new input slot. You MUST be INSIDE the subgraph first (panel_enter_subgraph). This is the correct way to wire an internal input to the subgraph's input rail: do NOT panel_connect to a guessed rail node id — call this with the interior node + the input you want exposed. Read panel_get_graph's `rails` to see the resulting boundary slots. `to_input` is an input slot NAME ('model', 'pixels') or numeric index. Optional `name` titles the new boundary input (defaults from the target slot). Undoable with Ctrl+Z.",
+      "Wire an interior node's INPUT to the subgraph's INPUT RAIL — i.e. expose it as a SUBGRAPH INPUT on the boundary so the PARENT graph can feed the subgraph node's new input slot. You MUST be INSIDE the subgraph first (panel_enter_subgraph). This is the correct way to wire an internal input to the subgraph's input rail: do NOT panel_connect to a guessed rail node id — call this with the interior node + the input you want exposed. Read panel_query_graph's `rails` to see the resulting boundary slots. `to_input` is an input slot NAME ('model', 'pixels') or numeric index. Optional `name` titles the new boundary input (defaults from the target slot). Undoable with Ctrl+Z.",
       {
-        to_node_id: z.number().int().describe("Interior (inner) node id whose input to expose (from panel_get_graph while inside the subgraph)."),
+        to_node_id: z.number().int().describe("Interior (inner) node id whose input to expose (from panel_query_graph while inside the subgraph)."),
         to_input: slotRef.describe("Input slot name (e.g. 'model', 'pixels') or numeric index on that node."),
         name: z.string().optional().describe("Optional name for the new subgraph input (boundary slot). Defaults from the target slot."),
       },
@@ -1311,7 +1363,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     def(
       "panel_unpack_subgraph",
       "EXPAND / DISSOLVE a subgraph node on the user's open graph — inline its interior nodes back into the PARENT graph, rewire all external links to those now-inlined nodes, and remove the subgraph wrapper. This is the frontend's \"Unpack Subgraph\" (litegraph LGraph.unpackSubgraph) and the exact INVERSE of panel_create_subgraph. Use it to flatten a stage that was over-nested, or to edit interior nodes directly at the parent level. The interior nodes reappear on the parent canvas with their connections preserved. Undoable with Ctrl+Z.",
-      { node_id: z.number().int().describe("Subgraph node id to unpack/dissolve (is_subgraph=true, from panel_get_graph).") },
+      { node_id: z.number().int().describe("Subgraph node id to unpack/dissolve (is_subgraph=true, from panel_graph_outline / panel_query_graph).") },
       async (args: A, ctx) => ctx.call({ cmd: "graph_unpack_subgraph", node_id: args.node_id }, 15000),
     ),
     def(
