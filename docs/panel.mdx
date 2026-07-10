@@ -126,7 +126,7 @@ over a loopback HTTP MCP for ChatGPT/Codex), so [parity](/backends) is automatic
 |---|---|
 | `panel_add_node` | Add a node by class_type |
 | `panel_remove_node` | Remove a node |
-| `panel_connect` / `panel_disconnect` | Wire / unwire slots by name or index |
+| `panel_connect` / `panel_disconnect` | Wire / unwire slots by name or index (omit both slots on `panel_connect` to auto-match by type; `auto_match:false` restores legacy index-0 semantics) |
 | `panel_set_widget` | Change a widget value (steps, cfg, prompts, …) |
 | `panel_move_node` | Move a node to a new canvas position |
 | `panel_set_node_title` | Rename a node's header title |

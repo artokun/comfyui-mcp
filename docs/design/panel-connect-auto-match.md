@@ -1,6 +1,6 @@
 # `panel_connect` auto_match + slot-diagnostic errors; `dsl_to_workflow` wiring warnings
 
-**Status:** draft (RFC — spec-only PR) · **Implementation branch:** `feat/panel-connect-auto-match` · **Pairs with:** comfyui-mcp-panel [PR #76](https://github.com/artokun/comfyui-mcp-panel/pull/76) (`docs/design/connect-auto-match.md` — the resolver + diagnostics)
+**Status:** implemented (this PR) · **Implementation branch:** `spec/panel-connect-auto-match` · **Pairs with:** comfyui-mcp-panel [PR #76](https://github.com/artokun/comfyui-mcp-panel/pull/76) (`docs/design/connect-auto-match.md` — the resolver + diagnostics)
 
 > Prior art: [filliptm/ComfyUI_FL-MCP](https://github.com/filliptm/ComfyUI_FL-MCP) `fl_api.js` connect resolver. Matching rules, ambiguity guard, and diagnostic format are specified in the paired panel RFC; this doc covers the orchestrator tool surface and an optional server-side sibling: advisory wiring warnings in `dsl_to_workflow`.
 
@@ -38,7 +38,7 @@ No result-shape change agent-side (the panel's result JSON — now possibly carr
 
 ## Gating
 
-`panel_connect` already belongs to the `panel-writes` gate in the [safety-gates](./safety-gates.md) taxonomy; no change. DSL warnings are read-only advisory output — ungated.
+`panel_connect` is a panel-write; DSL warnings are read-only advisory output — ungated. There is no runtime gating change in this PR: the safety-gates taxonomy (spec PR #172) was closed, and gate enforcement is deferred to ROADMAP Theme G.
 
 ## Test plan
 

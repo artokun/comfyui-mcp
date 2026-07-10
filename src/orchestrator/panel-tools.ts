@@ -582,12 +582,20 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_connect",
-      "Connect an output slot of one node to an input slot of another in the user's open graph. Slots accept a name ('MODEL', 'samples') or numeric index. On a name mismatch the error lists available slots — re-check with panel_get_graph. Undoable.",
+      "Connect an output slot of one node to an input slot of another in the user's open graph. Slots accept a name ('MODEL', 'samples') or numeric index. If both slot args are omitted the panel picks the first type-compatible pairing. On failure the error lists every slot with its type and [connected] flag — re-check with panel_get_graph. Undoable.",
       {
         from_node_id: z.number().int().describe("Source node id."),
-        from_output: slotRef.optional().describe("Source output slot name or index (default 0)."),
+        from_output: slotRef
+          .optional()
+          .describe("Source output slot name or index; omit to auto-match by type (prefers an unconnected, exact-type input; `*` wildcards match last)."),
         to_node_id: z.number().int().describe("Target node id."),
-        to_input: slotRef.optional().describe("Target input slot name or index (default 0)."),
+        to_input: slotRef
+          .optional()
+          .describe("Target input slot name or index; omit to auto-match by type (prefers an unconnected, exact-type input; `*` wildcards match last)."),
+        auto_match: z
+          .boolean()
+          .optional()
+          .describe("Default true. Set false to force legacy exact resolution (omitted slot = index 0)."),
       },
       async (args: A, ctx) =>
         ctx.call({
@@ -596,6 +604,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           from_output: args.from_output,
           to_node_id: args.to_node_id,
           to_input: args.to_input,
+          auto_match: args.auto_match,
         }),
     ),
     def(
