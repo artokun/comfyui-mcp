@@ -1,6 +1,6 @@
 # `calculate` — safe batch expression evaluator
 
-**Status:** draft (RFC — spec-only PR) · **Implementation branch:** `feat/calculate-tool`
+**Status:** implemented (this PR)
 
 > Prior art: [filliptm/ComfyUI_FL-MCP](https://github.com/filliptm/ComfyUI_FL-MCP) `backend/calc.py` — a batch math evaluator with persistent assignments, seeded RNG, and a strict AST whitelist. Python got safety cheap via `ast`; our TypeScript equivalent is a tiny hand-rolled parser — **no `eval`/`new Function`, ever**.
 
