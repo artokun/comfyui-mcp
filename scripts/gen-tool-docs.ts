@@ -94,7 +94,7 @@ const CATEGORIES: Array<{
       "enqueue_workflow", "rerun_generation", "get_system_stats", "get_queue", "get_job_status",
       "get_queued_workflow", "move_queued_job", "edit_queued_job",
       "cancel_job", "cancel_queued_job", "clear_queue", "get_history", "get_logs",
-      "health_check",
+      "health_check", "calculate",
     ],
   },
   {
@@ -151,6 +151,8 @@ const CATEGORIES: Array<{
       "install_workflow_dependencies", "save_node_snapshot", "restore_node_snapshot",
       "list_node_snapshots", "bisect_start", "bisect_good", "bisect_bad",
       "bisect_reset", "bisect_status", "scaffold_custom_node", "verify_custom_node", "publish_custom_node",
+      "list_node_pack_files", "read_node_file", "search_node_packs", "write_node_file",
+      "apply_node_patch", "node_pack_git",
     ],
   },
   {
@@ -182,8 +184,11 @@ const CATEGORIES: Array<{
     group: "Defaults, Stats & Skills",
     slug: "defaults-stats-skills",
     icon: "sliders",
-    description: "Generation defaults, history-based suggestions, and skill generation.",
-    tools: ["get_defaults", "set_defaults", "suggest_settings", "generation_stats", "generate_node_skill"],
+    description: "Generation defaults, ComfyUI frontend UI settings, history-based suggestions, and skill generation.",
+    tools: [
+      "get_defaults", "set_defaults", "get_comfyui_settings", "set_comfyui_setting",
+      "suggest_settings", "generation_stats", "generate_node_skill",
+    ],
   },
 ];
 

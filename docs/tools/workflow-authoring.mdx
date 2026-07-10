@@ -73,6 +73,9 @@ Validate a ComfyUI workflow without executing it. Checks for missing node types,
 <ParamField path="workflow" type="string | object" required>
   ComfyUI workflow in API format (JSON string or object)
 </ParamField>
+<ParamField path="health" type="boolean" required default="true">
+  Include graph-health heuristics (disconnected nodes, duplicate model loads, orphaned branches, muted/bypassed nodes) as info/warning issues plus a structured health section. Never affects `valid`.
+</ParamField>
 
 ### Example
 
@@ -82,7 +85,8 @@ Validate a ComfyUI workflow without executing it. Checks for missing node types,
 {
   "tool": "validate_workflow",
   "arguments": {
-    "workflow": "<workflow>"
+    "workflow": "<workflow>",
+    "health": true
   }
 }
 ```

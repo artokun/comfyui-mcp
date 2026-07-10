@@ -4,7 +4,7 @@ description: "Discover, install, update, snapshot, bisect, scaffold, and publish
 icon: "puzzle"
 ---
 
-<Info>21 tools. Generated from the live MCP tool schemas — do not edit by hand; run `npm run docs:gen`.</Info>
+<Info>27 tools. Generated from the live MCP tool schemas — do not edit by hand; run `npm run docs:gen`.</Info>
 
 ## search_custom_nodes
 
@@ -564,6 +564,206 @@ Publish a local custom-node pack to the public Comfy Registry (registry.comfy.or
 {
   "tool": "publish_custom_node",
   "arguments": {}
+}
+```
+
+---
+
+## list_node_pack_files
+
+List the files in one installed custom-node pack under &lt;COMFYUI_PATH&gt;/custom_nodes/&lt;pack&gt;/ (read-only). Skips .git/, __pycache__/ and node_modules/. Use this to orient before read_node_file / search_node_packs when diagnosing or editing a pack you found via bisect_* or fix_custom_node. LOCAL-ONLY (requires COMFYUI_PATH); the pack name and every returned path are jailed to custom_nodes/.
+
+### Parameters
+
+<ParamField path="pack" type="string" required>
+  Pack folder name under custom_nodes/ (e.g. 'ComfyUI-Manager').
+</ParamField>
+<ParamField path="glob" type="string">
+  Optional glob to filter entries (supports *, **, ?), matched against pack-relative paths.
+</ParamField>
+<ParamField path="max_entries" type="integer">
+  Maximum entries to return (default 500, max 2000).
+</ParamField>
+
+### Example
+
+<Note>Example coming soon — the call below is a generated skeleton.</Note>
+
+```json
+{
+  "tool": "list_node_pack_files",
+  "arguments": {
+    "pack": "<pack>"
+  }
+}
+```
+
+---
+
+## read_node_file
+
+Read a slice of one file inside a custom-node pack (read-only), with bounded output so a huge file can't flood the context. Returns the requested line range with a truncation notice when clipped; long lines are chunked. Pair with search_node_packs to locate the line, then apply_node_patch or write_node_file to change it. LOCAL-ONLY (requires COMFYUI_PATH); the path is jailed to custom_nodes/.
+
+### Parameters
+
+<ParamField path="path" type="string" required>
+  Pack-relative path under custom_nodes/, e.g. 'MyPack/nodes.py'.
+</ParamField>
+<ParamField path="start_line" type="integer">
+  1-based line to start at (default 1).
+</ParamField>
+<ParamField path="line_count" type="integer">
+  Number of lines to return (default 240, max 800).
+</ParamField>
+<ParamField path="max_chars" type="integer">
+  Maximum characters to return (default 12000, max 24000).
+</ParamField>
+
+### Example
+
+<Note>Example coming soon — the call below is a generated skeleton.</Note>
+
+```json
+{
+  "tool": "read_node_file",
+  "arguments": {
+    "path": "<path>"
+  }
+}
+```
+
+---
+
+## search_node_packs
+
+Regex-search custom-node source under custom_nodes/ (read-only). Uses ripgrep when it's on PATH, otherwise a bounded built-in scanner (skips dot-dirs, __pycache__/node_modules, binary and &gt;1 MiB files). Returns file/line/text matches with per-line and result caps. Use this to find where a node class, import, or error string lives before reading or patching. LOCAL-ONLY (requires COMFYUI_PATH); the search path is jailed to custom_nodes/.
+
+### Parameters
+
+<ParamField path="query" type="string" required>
+  Regular expression to search for.
+</ParamField>
+<ParamField path="path" type="string">
+  Pack-relative directory to search, or '.' for all packs (default '.').
+</ParamField>
+<ParamField path="glob" type="string">
+  Optional glob to restrict which files are searched (e.g. '**/*.py').
+</ParamField>
+<ParamField path="max_results" type="integer">
+  Maximum matches to return (default 50, max 100).
+</ParamField>
+<ParamField path="case_sensitive" type="boolean">
+  Match case-sensitively (default false).
+</ParamField>
+
+### Example
+
+<Note>Example coming soon — the call below is a generated skeleton.</Note>
+
+```json
+{
+  "tool": "search_node_packs",
+  "arguments": {
+    "query": "<query>"
+  }
+}
+```
+
+---
+
+## write_node_file
+
+Create or overwrite one file inside a custom-node pack under custom_nodes/. Refuses to clobber an existing file unless overwrite is true, and creates parent directories by default. Use for whole-file edits or new files; for surgical edits prefer apply_node_patch. After writing, run verify_custom_node and restart_comfyui to load the change. LOCAL-ONLY (requires COMFYUI_PATH); the path is jailed to custom_nodes/.
+
+### Parameters
+
+<ParamField path="path" type="string" required>
+  Pack-relative path under custom_nodes/, e.g. 'MyPack/nodes.py'.
+</ParamField>
+<ParamField path="content" type="string" required>
+  Full file contents to write.
+</ParamField>
+<ParamField path="overwrite" type="boolean">
+  Overwrite an existing file instead of refusing (default false).
+</ParamField>
+<ParamField path="create_dirs" type="boolean">
+  Create missing parent directories (default true).
+</ParamField>
+
+### Example
+
+<Note>Example coming soon — the call below is a generated skeleton.</Note>
+
+```json
+{
+  "tool": "write_node_file",
+  "arguments": {
+    "path": "<path>",
+    "content": "<content>"
+  }
+}
+```
+
+---
+
+## apply_node_patch
+
+Apply a unified diff to custom-node source under custom_nodes/. Every touched path is jail-checked BEFORE any git call, then the patch is validated with `git apply --check` and only applied if the check passes (two-phase; never uses --unsafe-paths). Paths are relative to custom_nodes/ and may carry a/ b/ prefixes; works on non-repo packs too. Ideal for surgical edits located via search_node_packs. LOCAL-ONLY (requires COMFYUI_PATH).
+
+### Parameters
+
+<ParamField path="patch" type="string" required>
+  A unified diff. File headers (---/+++) are read to determine touched paths, which must resolve inside custom_nodes/ (e.g. 'a/MyPack/nodes.py').
+</ParamField>
+
+### Example
+
+<Note>Example coming soon — the call below is a generated skeleton.</Note>
+
+```json
+{
+  "tool": "apply_node_patch",
+  "arguments": {
+    "patch": "<patch>"
+  }
+}
+```
+
+---
+
+## node_pack_git
+
+Run a git operation inside one custom-node pack (status/diff/log/commit/push). Reads (status/diff/log) are always allowed. Writes (commit/push) require the environment flag COMFYUI_MCP_ALLOW_GIT_WRITES=1 (default OFF) and otherwise return a structured DISABLED_BY_CONFIG refusal so you can self-correct. commit requires a message and stages either the given paths or all pack changes. This is the final step of the author loop after scaffold_custom_node → write_node_file/apply_node_patch → verify_custom_node → restart_comfyui, before publish_custom_node. LOCAL-ONLY (requires COMFYUI_PATH); the pack and any paths are jailed to custom_nodes/.
+
+### Parameters
+
+<ParamField path="pack" type="string" required>
+  Pack folder name under custom_nodes/.
+</ParamField>
+<ParamField path="action" type="enum" required>
+  Git action. status/diff/log are read-only; commit/push require COMFYUI_MCP_ALLOW_GIT_WRITES=1. Options: `status`, `diff`, `log`, `commit`, `push`.
+</ParamField>
+<ParamField path="message" type="string">
+  Commit message (required for action 'commit').
+</ParamField>
+<ParamField path="paths" type="string[]">
+  Pack-relative paths to stage/scope (jail-checked). Defaults to all pack changes.
+</ParamField>
+<ParamField path="max_chars" type="integer">
+  Maximum characters of git output to return (default 12000).
+</ParamField>
+
+### Example
+
+<Note>Example coming soon — the call below is a generated skeleton.</Note>
+
+```json
+{
+  "tool": "node_pack_git",
+  "arguments": {
+    "pack": "<pack>",
+    "action": "status"
+  }
 }
 ```
 

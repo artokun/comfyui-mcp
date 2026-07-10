@@ -76,7 +76,9 @@ describe("watchRemoteModelLanding", () => {
     expect(trayRows()[0].status).toBe("downloading");
   });
 
-  it("writes a terminal error row when the file never lands within the timeout", async () => {
+  // Fake-advancing 4h steps ~2,880 async poll iterations — wall-clock sits right
+  // at vitest's default 5s on a loaded machine, so give it explicit headroom.
+  it("writes a terminal error row when the file never lands within the timeout", { timeout: 20_000 }, async () => {
     fetchMock.mockResolvedValue(listingResponse([]));
     watchRemoteModelLanding("checkpoints", "never.safetensors", "https://x/never");
     await vi.advanceTimersByTimeAsync(4 * 60 * 60 * 1000 + 10_000);

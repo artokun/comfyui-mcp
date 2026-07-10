@@ -4,7 +4,7 @@ description: "Enqueue workflows and inspect the queue, jobs, history, and system
 icon: "play"
 ---
 
-<Info>14 tools. Generated from the live MCP tool schemas — do not edit by hand; run `npm run docs:gen`.</Info>
+<Info>15 tools. Generated from the live MCP tool schemas — do not edit by hand; run `npm run docs:gen`.</Info>
 
 ## enqueue_workflow
 
@@ -358,6 +358,37 @@ Pre-flight diagnostic for the connected ComfyUI: one call that aggregates the si
 {
   "tool": "health_check",
   "arguments": {}
+}
+```
+
+---
+
+## calculate
+
+Evaluate a batch of math expressions exactly — no ComfyUI connection needed, so it works even in cloud mode or when ComfyUI is down. A safe, zero-dependency expression evaluator (no eval): numbers only, no strings/arrays/property access. Handy for the arithmetic agents get wrong token-by-token. Each line is one expression. `name = expr` assigns a variable that persists into later lines. Lines are separated by newlines or semicolons ONLY — commas are argument separators (e.g. min(a, b)), never expression separators. Operators: + - * / // (floor div) % (modulo) ** (power, right-assoc), comparisons &lt; &lt;= &gt; &gt;= == != (return 1/0), unary minus. Constants: pi, e, tau. Functions: abs round min max pow sqrt floor ceil sin cos tan asin acos atan atan2 sinh cosh tanh exp log log10 log2 hypot radians degrees sign trunc clamp(x,lo,hi), plus seeded RNG rand() random() uniform(a,b) randint(a,b) (inclusive). Pass `seed` for reproducible RNG; it is echoed back when omitted. Examples: • SDXL-legal resolution from an aspect ratio, snapped to /64: variables=&#123;ar: 1.5&#125;; spec="w = floor(sqrt(1024*1024*ar)/64)*64\nh = floor(sqrt(1024*1024/ar)/64)*64" • Reproducible seed batch (one 32-bit seed per line): spec="randint(0, 2**32-1)\nrandint(0, 2**32-1)\nrandint(0, 2**32-1)", seed=42 • CFG sweep: spec="3 + 0*0.5\n3 + 1*0.5\n3 + 2*0.5\n3 + 3*0.5"
+
+### Parameters
+
+<ParamField path="spec" type="string | string[]" required>
+  Expressions to evaluate, separated by newlines/semicolons (string) or one per array item. `name = expr` assigns; assignments persist across subsequent lines. NOTE: comma is an argument separator (min(a,b)), NOT an expression separator.
+</ParamField>
+<ParamField path="variables" type="object">
+  Initial variable environment, e.g. &#123;"w": 1024, "ar": 1.5&#125;.
+</ParamField>
+<ParamField path="seed" type="integer">
+  Seed for rand()/uniform(a,b)/randint(a,b). Same seed =&gt; identical sequence (mulberry32). Omit for a random seed (echoed in the result).
+</ParamField>
+
+### Example
+
+<Note>Example coming soon — the call below is a generated skeleton.</Note>
+
+```json
+{
+  "tool": "calculate",
+  "arguments": {
+    "spec": "<spec>"
+  }
 }
 ```
 

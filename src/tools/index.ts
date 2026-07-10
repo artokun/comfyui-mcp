@@ -47,6 +47,9 @@ import { registerWorkflowLockTools } from "./workflow-lock.js";
 import { registerSkillsAccessTools } from "./skills-access.js";
 import { registerInstallPanelTools } from "./install-panel.js";
 import { registerSelfUpdateTools } from "./self-update.js";
+import { registerCalculateTools } from "./calculate.js";
+import { registerComfyUISettingsTools } from "./comfyui-settings.js";
+import { registerNodeDevTools } from "./node-dev.js";
 import { DefaultsManager } from "../services/defaults-manager.js";
 import { ToolCatalog } from "./catalog.js";
 
@@ -103,6 +106,9 @@ const TOOL_GROUPS: ReadonlyArray<readonly [category: string, register: (server: 
   ["skills-config", registerSkillsAccessTools],
   ["server", registerInstallPanelTools],
   ["server", registerSelfUpdateTools],
+  ["diagnostics", registerCalculateTools],
+  ["server", registerComfyUISettingsTools],
+  ["custom-nodes", registerNodeDevTools],
 ];
 
 export async function registerAllTools(server: McpServer): Promise<void> {
