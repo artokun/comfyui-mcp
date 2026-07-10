@@ -156,7 +156,7 @@ export async function searchHuggingFaceModels(
     headers["Authorization"] = `Bearer ${config.huggingfaceToken}`;
   }
 
-  const url = `https://huggingface.co/api/models?${params}`;
+  const url = applyHfEndpoint(`https://huggingface.co/api/models?${params}`);
   logger.debug("HuggingFace API request", { url });
 
   const res = await fetch(url, { headers });
@@ -266,6 +266,29 @@ function isCivitaiUrl(url: string): boolean {
     return false;
   }
 }
+
+/** Network-restricted regions (issue #127): honor the de-facto HF_ENDPOINT
+ *  mirror var (e.g. https://hf-mirror.com) by rewriting huggingface.co URLs at
+ *  the API/download boundary. Only http(s) endpoints are accepted; anything
+ *  else leaves the URL untouched. Adapted from 1696762169/comfyui-mcp 6a2bd96. */
+export function applyHfEndpoint(url: string): string {
+  const ep = process.env.HF_ENDPOINT?.trim().replace(/\/+$/, "");
+  if (!ep || !/^https?:\/\//i.test(ep)) return url;
+  return url.replace(/^https?:\/\/huggingface\.co(?=[/?#]|$)/i, ep);
+}
+
+/** Issue #127: CIVITAI_ENABLED=0 disables Civitai access cleanly — tools fail
+ *  fast with a clear message instead of hanging against an unreachable host
+ *  (Civitai is blocked in some regions). Adapted from 1696762169/comfyui-mcp
+ *  a6441c0. */
+export function civitaiDisabled(): boolean {
+  const v = (process.env.CIVITAI_ENABLED ?? "").trim().toLowerCase();
+  return v === "0" || v === "false" || v === "no";
+}
+
+export const CIVITAI_DISABLED_MESSAGE =
+  "Civitai access is disabled by config (CIVITAI_ENABLED=0) — common on networks where civitai.com is unreachable. " +
+  "Unset CIVITAI_ENABLED to re-enable, or download the file elsewhere and pass a direct URL to download_model.";
 
 /**
  * Validate a target subfolder under models/ and resolve it to an absolute dir
@@ -534,6 +557,13 @@ export async function downloadModel(
   filename?: string,
   auth?: DownloadAuth,
 ): Promise<string> {
+  // Region flags (issue #127) applied at THE choke point every download path
+  // funnels through (local disk AND the remote Manager dispatch below).
+  const wasHfUrl = /^https?:\/\/huggingface\.co([/?#]|$)/i.test(url);
+  url = applyHfEndpoint(url);
+  if (isCivitaiUrl(url) && civitaiDisabled()) {
+    throw new ModelError(CIVITAI_DISABLED_MESSAGE);
+  }
   // REMOTE mode: the MCP has no local filesystem, so a local-disk download is
   // impossible. Dispatch the download to the connected ComfyUI host through
   // ComfyUI-Manager's `install-model` task instead — it fetches the file
@@ -579,7 +609,9 @@ export async function downloadModel(
 
   const request = applyDownloadAuth(url, auth);
   const headers: Record<string, string> = { ...request.headers };
-  if (!auth && config.huggingfaceToken && url.includes("huggingface.co")) {
+  // wasHfUrl keeps the token flowing when HF_ENDPOINT rewrote the host to a
+  // mirror (mirrors proxy gated repos and accept the same Bearer token).
+  if (!auth && config.huggingfaceToken && (wasHfUrl || url.includes("huggingface.co"))) {
     headers["Authorization"] = `Bearer ${config.huggingfaceToken}`;
   } else if (!auth && config.civitaiApiToken && isCivitaiUrl(url)) {
     // CivitAI auth travels as a request header (never in the URL/query) so the

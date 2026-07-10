@@ -1,6 +1,7 @@
 import { config } from "../config.js";
 import { ModelError, ValidationError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
+import { civitaiDisabled, CIVITAI_DISABLED_MESSAGE } from "./model-resolver.js";
 
 const CIVITAI_API_BASE = "https://civitai.com/api/v1";
 
@@ -53,6 +54,11 @@ function authHeaders(): Record<string, string> {
 }
 
 async function civitaiGet<T>(path: string): Promise<T> {
+  // User-initiated Civitai actions fail FAST with the config explanation when
+  // the kill-switch is set (issue #127) — never a hang against a blocked host.
+  if (civitaiDisabled()) {
+    throw new ModelError(CIVITAI_DISABLED_MESSAGE);
+  }
   const url = `${CIVITAI_API_BASE}${path}`;
   logger.debug("CivitAI API request", { url });
 

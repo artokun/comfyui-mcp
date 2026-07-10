@@ -105,6 +105,18 @@ error. Architecture and `cloud-client` dispatcher originally contributed by
 <ParamField path="HUGGINGFACE_TOKEN" type="string">
   HuggingFace token for higher search/download rate limits.
 </ParamField>
+<ParamField path="HF_ENDPOINT" type="string">
+  HuggingFace mirror endpoint for network-restricted regions (e.g.
+  `https://hf-mirror.com`). All `huggingface.co` API and download URLs are
+  rewritten to this host; your `HUGGINGFACE_TOKEN` still rides along for gated
+  repos. The de-facto standard var — the same one `huggingface_hub` honors.
+</ParamField>
+<ParamField path="CIVITAI_ENABLED" type="string">
+  Set to `0` to disable Civitai access entirely (regions where civitai.com is
+  unreachable). User-initiated Civitai tools fail fast with a clear "disabled
+  by config" message instead of hanging; background provenance lookups
+  quietly no-op.
+</ParamField>
 <ParamField path="GITHUB_TOKEN" type="string">
   GitHub token used by skill generation and node-metadata fetches to avoid rate limits.
 </ParamField>

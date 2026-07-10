@@ -115,8 +115,24 @@ const image = `${REPO}:${tag}`;
 // saveTemplate needs the full field set, so fetch-and-echo everything except
 // imageName. (runpodctl deliberately not used here — see the header note.)
 let key = process.env.RUNPOD_API_KEY;
-if (!key && existsSync(join(ROOT, ".env"))) {
-  key = /^RUNPOD_API_KEY=(.+)$/m.exec(readFileSync(join(ROOT, ".env"), "utf8"))?.[1]?.trim();
+// .env is untracked and lives only in the PRIMARY checkout — when this script
+// runs from a .claude/worktrees/* worktree, ROOT/.env doesn't exist and the
+// template pin used to silently downgrade to "update manually" (issue #145).
+// Probe ROOT first, then the primary checkout via the shared git common dir.
+if (!key) {
+  const envCandidates = [join(ROOT, ".env")];
+  try {
+    const commonDir = capture("git rev-parse --git-common-dir"); // <primary>/.git (absolute in worktrees)
+    const primary = join(commonDir, "..");
+    if (primary !== ROOT) envCandidates.push(join(primary, ".env"));
+  } catch {
+    // not a git checkout (tarball run) — ROOT/.env stays the only candidate
+  }
+  for (const p of envCandidates) {
+    if (!existsSync(p)) continue;
+    key = /^RUNPOD_API_KEY=(.+)$/m.exec(readFileSync(p, "utf8"))?.[1]?.trim();
+    if (key) break;
+  }
 }
 if (!key) {
   console.error(`released ${image}, but RUNPOD_API_KEY is not set — update the template manually:`);

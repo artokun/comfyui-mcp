@@ -1,5 +1,6 @@
 import { config } from "../config.js";
 import { logger } from "../utils/logger.js";
+import { civitaiDisabled } from "./model-resolver.js";
 import type { FileHasher } from "./file-hasher.js";
 
 export interface CivitaiModelVersion {
@@ -21,6 +22,9 @@ export async function lookupByHash(
   filename: string,
   autov2: string,
 ): Promise<CivitaiModelVersion | null> {
+  // CIVITAI_ENABLED=0 (issue #127): provenance lookups quietly no-op — this is
+  // background enrichment, not a user-initiated Civitai action, so no error.
+  if (civitaiDisabled()) return null;
   const url = `https://civitai.com/api/v1/model-versions/by-hash/${autov2}`;
 
   const headers: Record<string, string> = {
