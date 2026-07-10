@@ -48,6 +48,15 @@ and failure-mode guidance:
 New skills land with each release — generated from popular registry packs via
 the built-in `generate_node_skill` tool, then human-curated.
 
+**Try the knowledge before wiring anything up** — every skill is a plain
+markdown file, useful on its own. The most broadly applicable one is
+[`prompt-engineering`](https://github.com/artokun/comfyui-mcp/blob/main/plugin/skills/prompt-engineering/SKILL.md)
+— CLIP's 77-token limit and `BREAK` chunking, weight syntax, and per-architecture
+strategy (why Flux wants natural language and no negative prompt while SD1.5
+wants tags). Read it in the browser, or paste it into any agent's context as a
+system prompt — no ComfyUI, MCP, or install required. When you do connect the
+full plugin, agents load the same files automatically (`read_skill`).
+
 ### Pairs with the official Civitai MCP — bundled, headless
 
 comfyui-mcp doesn't proxy Civitai — it composes with Civitai's
