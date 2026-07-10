@@ -21,6 +21,7 @@ import {
   generateSummary,
 } from "../services/hierarchical-mermaid.js";
 import { convertToMermaid } from "../services/mermaid-converter.js";
+import { analyzeGraphHealth } from "../services/workflow-health.js";
 
 export function registerWorkflowLibraryTools(server: McpServer): void {
   server.tool(
@@ -419,7 +420,7 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
           "Workflow filename (e.g. 'Scene Builder v3.json'). Use list_workflows to see available files.",
         ),
       view: z
-        .enum(["summary", "overview", "detail", "list", "flat"])
+        .enum(["summary", "overview", "detail", "list", "flat", "health"])
         .optional()
         .default("summary")
         .describe(
@@ -428,7 +429,8 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
             "overview: mermaid diagram showing sections as summary nodes with cross-section data flow. " +
             "detail: mermaid diagram for one section (requires section parameter). " +
             "list: text listing of all sections with data flow summary. " +
-            "flat: single mermaid flowchart of the entire workflow (best for small workflows).",
+            "flat: single mermaid flowchart of the entire workflow (best for small workflows). " +
+            "health: graph-health heuristics (disconnected nodes, duplicate model loads, orphaned branches, muted/bypassed).",
         ),
       section: z
         .string()
@@ -462,6 +464,21 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
           // Simple mermaid flowchart — good for small workflows
           const mermaid = convertToMermaid(workflow, { showValues: true, direction: "LR" });
           content.push({ type: "text", text: `\`\`\`mermaid\n${mermaid}\n\`\`\`` });
+          return { content };
+        }
+
+        if (view === "health") {
+          const health = analyzeGraphHealth(workflow, objectInfo);
+          const lines: string[] = ["### Graph health", `- ${health.summary}`];
+          if (health.findings.length === 0) {
+            lines.push("- No health issues found.");
+          } else {
+            for (const f of health.findings) {
+              const tag = f.heuristic ? `${f.severity}, heuristic` : f.severity;
+              lines.push(`- [${tag}] ${f.detail}`);
+            }
+          }
+          content.push({ type: "text", text: lines.join("\n") });
           return { content };
         }
 

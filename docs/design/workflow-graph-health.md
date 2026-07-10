@@ -1,6 +1,6 @@
 # Graph-health heuristics in workflow analysis
 
-**Status:** draft (RFC — spec-only PR) · **Implementation branch:** `feat/workflow-graph-health`
+**Status:** implemented (this PR) · **Implementation branch:** `spec/workflow-graph-health`
 
 > Prior art: [filliptm/ComfyUI_FL-MCP](https://github.com/filliptm/ComfyUI_FL-MCP) `workflow_overview` (`web/js/query_executor.js`) reports node-type histograms, disconnected nodes, and missing required inputs — but client-side with slot-name heuristics, because the live canvas lacks schema data. We run server-side with real `/object_info` required/optional data, keeping their heuristics only as a fallback for uninstalled node types.
 
