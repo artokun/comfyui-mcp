@@ -13,6 +13,7 @@ import {
   collectNodeTypes,
 } from "../services/workflow-converter.js";
 import { sliceWorkflow } from "../services/workflow-slicer.js";
+import { queryApiGraph } from "../services/graph-query.js";
 import { detectSections } from "../services/workflow-sections.js";
 import {
   generateOverview,
@@ -21,6 +22,7 @@ import {
   generateSummary,
 } from "../services/hierarchical-mermaid.js";
 import { convertToMermaid } from "../services/mermaid-converter.js";
+import { analyzeGraphHealth } from "../services/workflow-health.js";
 
 export function registerWorkflowLibraryTools(server: McpServer): void {
   server.tool(
@@ -228,6 +230,116 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
   );
 
   server.tool(
+    "query_workflow",
+    "QUERY a workflow file — filter, traverse, project, and aggregate over its nodes WITHOUT " +
+      "dumping the whole JSON (the missing middle between analyze_workflow's fixed summary and " +
+      "get_workflow's full dump; on 100+-node graphs this is the ONLY context-safe way to answer " +
+      "questions like 'which KSamplers run cfg>7', 'what feeds node 42', 'count nodes by type'). " +
+      "Provide exactly one of path/filename/graph, then combine: `types` (class_type contains any), " +
+      "`title` (contains), `where` widget predicates ANDed ('cfg>7', 'steps<=20', 'sampler_name=euler', " +
+      "'text~sunset' — ops = != >= <= > < ~contains), `ids` (exact nodes — the way to read ONE node's " +
+      "detail), `upstream_of`/`downstream_of` + `depth` (dependency traversal: upstream = what FEEDS " +
+      "that node, downstream = what CONSUMES it; seed included at depth 0), `fields` ('compact' one " +
+      "line per node [default], 'ids', or 'detail' JSON rows with widgets + wiring), `group_by:'type'` " +
+      "(counts only), `limit` (default 40). Output is TOKEN-BOUNDED with an explicit truncation marker. " +
+      "For the LIVE canvas use panel_query_graph instead. Read-only.",
+    {
+      path: z.string().optional().describe("Absolute server-side path to a workflow .json on disk."),
+      filename: z
+        .string()
+        .optional()
+        .describe("Workflow filename in the ComfyUI userdata library, as an alternative to path."),
+      graph: z
+        .record(z.string(), z.any())
+        .optional()
+        .describe("Inline workflow JSON (UI or API format), as an alternative to path/filename."),
+      types: z
+        .array(z.string())
+        .optional()
+        .describe("Keep nodes whose class_type contains ANY of these (case-insensitive)."),
+      title: z.string().optional().describe("Keep nodes whose title contains this."),
+      where: z
+        .array(z.string())
+        .optional()
+        .describe("Widget predicates, ANDed: 'cfg>7', 'sampler_name=euler', 'text~sunset'."),
+      ids: z
+        .array(z.union([z.string(), z.number()]))
+        .optional()
+        .describe("Keep exactly these node ids."),
+      upstream_of: z
+        .union([z.string(), z.number()])
+        .optional()
+        .describe("Scope to the dependency closure FEEDING this node id."),
+      downstream_of: z
+        .union([z.string(), z.number()])
+        .optional()
+        .describe("Scope to the nodes CONSUMING this node id's outputs."),
+      depth: z
+        .number()
+        .int()
+        .min(0)
+        .optional()
+        .describe("Max hops from the traversal seed (seed=0). Absent = full closure."),
+      fields: z
+        .enum(["ids", "compact", "detail"])
+        .optional()
+        .describe("Projection: compact one-liners (default), bare ids, or detail JSON rows."),
+      group_by: z.enum(["type"]).optional().describe("Aggregate: counts per class_type instead of listing."),
+      limit: z.number().int().min(1).max(200).optional().describe("Max nodes listed (default 40)."),
+      max_chars: z
+        .number()
+        .int()
+        .min(500)
+        .max(60000)
+        .optional()
+        .describe("Output character bound (default 12000). Raise only for deliberate full reads."),
+    },
+    async ({ path, filename, graph, ...query }) => {
+      try {
+        const provided = [path, filename, graph].filter((v) => v != null).length;
+        if (provided !== 1) {
+          throw new ValidationError("Provide exactly one of: path, filename, or graph.");
+        }
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        let raw: any;
+        if (graph) {
+          raw = graph;
+        } else if (path) {
+          raw = JSON.parse(await readFile(path, "utf8"));
+        } else {
+          const client = getClient();
+          const encoded = encodeURIComponent(`workflows/${filename}`);
+          const res = await client.fetchApi(`/api/userdata/${encoded}`);
+          if (!res.ok) {
+            throw new ValidationError(`Workflow not found in library: ${filename} (${res.status})`);
+          }
+          raw = await res.json();
+        }
+        let api = raw;
+        const notes: string[] = [];
+        if (isUiFormat(raw)) {
+          const bulk = await getObjectInfo();
+          const objectInfo = await backfillObjectInfo(bulk, collectNodeTypes(raw));
+          const converted = convertUiToApi(raw, objectInfo);
+          api = converted.workflow;
+          if (converted.warnings.length)
+            notes.push(`${converted.warnings.length} conversion warning(s) — see strip_workflow for details`);
+        } else if (!isApiFormat(raw)) {
+          throw new ValidationError("Not a recognizable workflow (neither UI nor API format).");
+        }
+        const result = queryApiGraph(api, query);
+        return {
+          content: [
+            { type: "text", text: result.text + (notes.length ? `\n(${notes.join("; ")})` : "") },
+          ],
+        };
+      } catch (err) {
+        return errorToToolResult(err);
+      }
+    },
+  );
+
+  server.tool(
     "slice_workflow",
     "Slice ONE pipeline out of a toggle-template workflow — the kind built with rgthree " +
       "'Fast Groups Bypasser/Muter' where one graph holds many pipelines and only one is active at a time. " +
@@ -419,7 +531,7 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
           "Workflow filename (e.g. 'Scene Builder v3.json'). Use list_workflows to see available files.",
         ),
       view: z
-        .enum(["summary", "overview", "detail", "list", "flat"])
+        .enum(["summary", "overview", "detail", "list", "flat", "health"])
         .optional()
         .default("summary")
         .describe(
@@ -428,7 +540,8 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
             "overview: mermaid diagram showing sections as summary nodes with cross-section data flow. " +
             "detail: mermaid diagram for one section (requires section parameter). " +
             "list: text listing of all sections with data flow summary. " +
-            "flat: single mermaid flowchart of the entire workflow (best for small workflows).",
+            "flat: single mermaid flowchart of the entire workflow (best for small workflows). " +
+            "health: graph-health heuristics (disconnected nodes, duplicate model loads, orphaned branches, muted/bypassed).",
         ),
       section: z
         .string()
@@ -462,6 +575,21 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
           // Simple mermaid flowchart — good for small workflows
           const mermaid = convertToMermaid(workflow, { showValues: true, direction: "LR" });
           content.push({ type: "text", text: `\`\`\`mermaid\n${mermaid}\n\`\`\`` });
+          return { content };
+        }
+
+        if (view === "health") {
+          const health = analyzeGraphHealth(workflow, objectInfo);
+          const lines: string[] = ["### Graph health", `- ${health.summary}`];
+          if (health.findings.length === 0) {
+            lines.push("- No health issues found.");
+          } else {
+            for (const f of health.findings) {
+              const tag = f.heuristic ? `${f.severity}, heuristic` : f.severity;
+              lines.push(`- [${tag}] ${f.detail}`);
+            }
+          }
+          content.push({ type: "text", text: lines.join("\n") });
           return { content };
         }
 

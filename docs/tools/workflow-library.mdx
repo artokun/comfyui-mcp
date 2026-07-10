@@ -193,7 +193,7 @@ Load a saved workflow and return a structured analysis — sections, node settin
   Workflow filename (e.g. 'Scene Builder v3.json'). Use list_workflows to see available files.
 </ParamField>
 <ParamField path="view" type="enum" required default="summary">
-  summary (default): structured text with sections, node IDs, key settings, virtual wires, and full connection graph — best for AI understanding. overview: mermaid diagram showing sections as summary nodes with cross-section data flow. detail: mermaid diagram for one section (requires section parameter). list: text listing of all sections with data flow summary. flat: single mermaid flowchart of the entire workflow (best for small workflows). Options: `summary`, `overview`, `detail`, `list`, `flat`.
+  summary (default): structured text with sections, node IDs, key settings, virtual wires, and full connection graph — best for AI understanding. overview: mermaid diagram showing sections as summary nodes with cross-section data flow. detail: mermaid diagram for one section (requires section parameter). list: text listing of all sections with data flow summary. flat: single mermaid flowchart of the entire workflow (best for small workflows). health: graph-health heuristics (disconnected nodes, duplicate model loads, orphaned branches, muted/bypassed). Options: `summary`, `overview`, `detail`, `list`, `flat`, `health`.
 </ParamField>
 <ParamField path="section" type="string">
   Section name for detail view. Use view='list' first to see available section names.

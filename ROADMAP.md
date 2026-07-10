@@ -154,6 +154,17 @@ hardening first; this is the "shape it with users before building" track.
 > Scope: **v1 = local GPU only.** Reference client internals: `~/code/slutter` (CivitAI Video
 > Scroller, Flutter — decoded CivitAI API, OAuth login, account management).
 
+## Theme G — Safety gates / enterprise hardening (deferred until needed)
+Declarative per-category safety gates (workflow-writes, model-deletes, process-control, git-writes,
+…) enforced at a single registration-time choke point, `COMFYUI_MCP_SAFE_MODE` lockdown for
+shared/untrusted deployments, structured `DISABLED_BY_CONFIG` refusals agents can self-correct
+from, and a `capability_audit` tool reporting gate + environment state. Full design already
+specced: [`design/safety-gates.md`](https://github.com/artokun/comfyui-mcp/blob/spec/safety-gates/docs/design/safety-gates.md)
+(spec PR #172, closed unmerged; prior discussion in issue #168). Deferred — we're not serving
+shared/enterprise deployments yet; revive the spec branch when a customer or hosting story needs
+it. Until then, isolated write-risk tools ship with narrow inline env flags (e.g.
+`COMFYUI_MCP_ALLOW_GIT_WRITES`) that Theme G will absorb.
+
 ---
 
 ## "Roadmap to the roadmap" — sequencing
