@@ -151,6 +151,8 @@ const CATEGORIES: Array<{
       "install_workflow_dependencies", "save_node_snapshot", "restore_node_snapshot",
       "list_node_snapshots", "bisect_start", "bisect_good", "bisect_bad",
       "bisect_reset", "bisect_status", "scaffold_custom_node", "verify_custom_node", "publish_custom_node",
+      "list_node_pack_files", "read_node_file", "search_node_packs", "write_node_file",
+      "apply_node_patch", "node_pack_git",
     ],
   },
   {

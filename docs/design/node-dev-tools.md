@@ -1,6 +1,8 @@
 # Path-jailed live custom-node dev tools
 
-**Status:** draft (RFC — spec-only PR) · **Implementation branch:** `feat/node-dev-tools` · **Depends on:** [safety-gates](./safety-gates.md) (`node-writes`, `git-writes` gates)
+**Status:** implemented (this PR)
+
+> **Safety-gates note:** The original design depended on a general safety-gates framework (spec PR #172), which was closed — a gates framework is deferred to **ROADMAP Theme G**. This PR therefore ships without gates: `write_node_file` / `apply_node_patch` are UNGATED (like the other mutating tools in this repo today), and `node_pack_git commit`/`push` are guarded by a single narrow inline env flag, `COMFYUI_MCP_ALLOW_GIT_WRITES` (`"1"`/`"true"`; default OFF). When off, commit/push return an `isError` result with the structured `DISABLED_BY_CONFIG` body (`{ "error": "DISABLED_BY_CONFIG", "disabled_by_config": true, "required_flag": "COMFYUI_MCP_ALLOW_GIT_WRITES=1", "message": … }`); `status`/`diff`/`log` are always allowed. Theme G's gates framework will absorb this flag. Wherever the text below says "gated `node-writes`"/"gated `git-writes`", read it as: node-writes → ungated; git-writes → the `COMFYUI_MCP_ALLOW_GIT_WRITES` flag.
 
 > Prior art: [filliptm/ComfyUI_FL-MCP](https://github.com/filliptm/ComfyUI_FL-MCP) `backend/coding_tools.py` — file read/search/write/patch/git tools hard-jailed to `custom_nodes/` with bounded output. We port the shape and the output-bounding constants, and add Windows symlink/junction safety, gate integration, and reuse of our existing containment code.
 
@@ -68,7 +70,7 @@ function resolveInJail(relOrAbs: string): { abs: string; rel: string }
 1. `src/services/node-dev.ts` — jail resolver, bounded-text helpers (`boundText`, `chunkLongLines`; FL constants: read 12k/24k chars, 240/800 lines, search lines 600 chars, command output 12k), git runner, builtin search fallback, ripgrep probe. Inject fs/exec seams like `AuthoringDeps` (`node-authoring.ts:104-120`) so tests need no real disk/subprocess.
 2. `src/tools/node-dev.ts` — six `server.tool` registrations with zod schemas; handlers `try/catch errorToToolResult`.
 3. `src/tools/index.ts` — append `["custom-nodes", registerNodeDevTools]` (registration order is observable; append-only).
-4. `src/tools/gates.ts` — map `write_node_file`, `apply_node_patch` → `node-writes`; document `node_pack_git`'s in-handler action-level check.
+4. ~~`src/tools/gates.ts`~~ — no gates framework in this PR (deferred to ROADMAP Theme G). Instead, `node_pack_git commit`/`push` do an in-handler `gitWritesEnabled()` (`COMFYUI_MCP_ALLOW_GIT_WRITES`) check returning the `DISABLED_BY_CONFIG` refusal; `write_node_file`/`apply_node_patch` ship ungated.
 5. Export `nonInteractiveGitEnv` (and `assertSafeRepoName`) from `src/services/node-management.ts`.
 6. Docs page + README section; call out `git-writes` default-closed prominently.
 
@@ -85,4 +87,4 @@ function resolveInJail(relOrAbs: string): { abs: string; rel: string }
 
 - Six new tools appended; no existing tool changes. Reads work day one; writes honor SAFE_MODE; `node_pack_git commit/push` require explicit `COMFYUI_MCP_ALLOW_GIT_WRITES=1` — safe-by-default for the only genuinely new blast radius.
 - Remote/cloud modes: all six refuse cleanly (no `comfyuiPath`), consistent with node-authoring's LOCAL-ONLY contract.
-- Ships after (or in the same release as) the safety-gates RFC.
+- Ships independently: the safety-gates framework is deferred to ROADMAP Theme G, which will later absorb the narrow `COMFYUI_MCP_ALLOW_GIT_WRITES` flag introduced here.

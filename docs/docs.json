@@ -20,7 +20,7 @@
   "navbar": {
     "primary": {
       "type": "button",
-      "label": "\u2b50 Star on GitHub",
+      "label": "⭐ Star on GitHub",
       "href": "https://github.com/artokun/comfyui-mcp"
     },
     "links": [

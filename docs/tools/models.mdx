@@ -39,7 +39,7 @@ Search HuggingFace Hub for models usable in ComfyUI (checkpoints, LoRAs, VAEs, C
 
 ## download_model
 
-Download a model file to the connected ComfyUI's models directory from a URL (HuggingFace, direct HTTP(S), s3://, or Azure Blob). PREFER this over a raw shell download (curl/wget) for model weights: it lands the file in the right models/ subfolder. LOCAL ComfyUI: streams to disk and surfaces live progress in the panel download tray. REMOTE ComfyUI: dispatches the fetch to the ComfyUI host via the ComfyUI-Manager install-model HTTP API (downloaded server-side; a per-request `auth` header can't be forwarded). target_subfolder accepts any relative subfolder (incl. nested, e.g. 'loras/&lt;subdir&gt;').
+Download a model file to the connected ComfyUI's models directory from a URL (HuggingFace, direct HTTP(S), s3://, or Azure Blob). PREFER this over a raw shell download (curl/wget) for model weights: it lands the file in the right models/ subfolder. LOCAL ComfyUI: streams to disk and surfaces live progress in the panel download tray. REMOTE ComfyUI: dispatches the fetch to the ComfyUI host via the ComfyUI-Manager install-model HTTP API (downloaded server-side; a per-request `auth` header can't be forwarded). This requires the host's Manager to run with network_mode=personal_cloud (or loopback) and a permissive security level — a stricter gate silently rejects the download, and Manager reports the queue task 'done' even on failure, so a remote dispatch does not guarantee the file landed. target_subfolder accepts any relative subfolder (incl. nested, e.g. 'loras/&lt;subdir&gt;').
 
 ### Parameters
 
@@ -74,7 +74,7 @@ Download a model file to the connected ComfyUI's models directory from a URL (Hu
 
 ## download_civitai_model
 
-Download a model from CivitAI into the connected ComfyUI's models/ directory. Resolves a CivitAI model id (latest version) or a model-version id to a download URL via the CivitAI REST API. LOCAL ComfyUI (COMFYUI_PATH set): streams the file to disk under &lt;COMFYUI_PATH&gt;/models/&lt;target_subfolder&gt;/ and returns the saved absolute path. REMOTE ComfyUI: dispatches the download to the ComfyUI host via the ComfyUI-Manager install-model HTTP API (fetched server-side). Provide at least one of model_id or model_version_id. Gated/early-access models require CIVITAI_API_TOKEN locally (sent as a bearer header, never in the URL); remote Manager-side fetches rely on tokens configured on the ComfyUI host.
+Download a model from CivitAI into the connected ComfyUI's models/ directory. Resolves a CivitAI model id (latest version) or a model-version id to a download URL via the CivitAI REST API. LOCAL ComfyUI (COMFYUI_PATH set): streams the file to disk under &lt;COMFYUI_PATH&gt;/models/&lt;target_subfolder&gt;/ and returns the saved absolute path. REMOTE ComfyUI: dispatches the download to the ComfyUI host via the ComfyUI-Manager install-model HTTP API (fetched server-side). Provide at least one of model_id or model_version_id. Gated/early-access models require CIVITAI_API_TOKEN locally (sent as a bearer header, never in the URL); remote Manager-side fetches rely on tokens configured on the ComfyUI host. NOTE (remote): the server-side install requires the host's ComfyUI-Manager to run with network_mode=personal_cloud (or loopback) and a permissive security level; a stricter gate silently rejects the download, and Manager reports the queue task 'done' even on failure — so a remote dispatch does not guarantee the file landed.
 
 ### Parameters
 
