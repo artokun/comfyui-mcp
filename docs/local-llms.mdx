@@ -182,14 +182,14 @@ ladder (best of 3, every result verified against a live ComfyUI server, RTX 4090
 |---|---|---|---|
 | `:e4b` | ~3.5 GB | **14/20** (13–14) — best local model we've tested | stock gemma4:e4b: 12/20 |
 | `:12b` | ~8 GB | 13/20 (12–13) | stock 12b unbenchmarked |
-| `:e2b` | ~2 GB | 4/20 — **currently regresses** below stock | stock gemma4:e2b: 8/20 |
+| `:e2b` (v2) | ~2 GB | 10/20 (7–10) | stock gemma4:e2b: 8/20 |
 
-The honest caveat: the `:e2b` rung picked up a `call_tool`-envelope quirk in
-this training round (it drops the `name` field under pressure) and scores
-below its stock base — a fix is queued for the next fine-tune cycle. Until
-then, `:e4b` is the recommendation even on small GPUs (it's only ~1.5 GB
-more), and `:12b` mostly buys steadiness on long multi-step tasks, not raw
-score.
+Every rung now beats its stock base. The `:e2b` v2 retrain (dual-view
+training: direct tool calls AND the deployed router envelope) fixed v1's
+`call_tool` format regression — zero malformed envelopes across the verdict
+runs. Sizing guidance stands: `:e4b` is the sweet spot (only ~1.5 GB more
+than e2b and +4 on the arena); `:e2b` is now a legitimate pick for tight
+VRAM; `:12b` buys steadiness on long multi-step tasks, not raw score.
 
 | Tag | Base | VRAM (q4) | Notes |
 | --- | --- | --- | --- |
