@@ -248,6 +248,9 @@ describe("OllamaBackend", () => {
       .filter((m) => m.role === "tool" && String(m.content).startsWith("SEARCH LIMIT"));
     expect(limitNudges.length).toBeGreaterThanOrEqual(1);
     expect(String(limitNudges[0].content)).toContain("Civitai");
+    // The live panel wedge: hunting "lora loader" in the headless catalog —
+    // the nudge must point graph actions at the panel router.
+    expect(String(limitNudges[0].content)).toContain("panel_add_node");
     // And the turn ends on the loop-breaker, not by running to max_tool_rounds.
     expect(events.filter((e) => e.type === "result")).toEqual([
       { type: "result", ok: false, subtype: "tool_loop" },

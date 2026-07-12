@@ -145,6 +145,7 @@ export const OLLAMA_SYSTEM_PROMPT = [
   "- Catalog entries are tool NAMES, not data. Finish every task by actually running tools; never invent results.",
   "- Describe a tool before its first call so you use the right parameters. If a call errors, read the error — it includes the expected schema — fix the args and retry.",
   "- To read the user's graph, ALWAYS start with panel_graph_outline (a compact text map) via panel_call_tool. For specifics use panel_query_graph — filter by types/where ('cfg>7'), traverse upstream_of/downstream_of, or read ONE node's exact detail with {ids:[id], fields:'detail'}. Its output is token-bounded, so it can never flood your context.",
+  "- To EDIT the graph — add a node (e.g. a LoraLoader after a download), wire slots, set widgets, run — those are PANEL tools too: panel_call_tool with panel_add_node / panel_connect / panel_set_widget / panel_run. Do NOT search the headless list_tools catalog for graph editing; it is not there.",
   "- To see or show any generated image/video, run the panel_show_media tool via panel_call_tool.",
   "- Workflows with API nodes cost the user PAID credits; local-GPU workflows are free. Ask before anything that might spend credits.",
 ].join("\n");
@@ -834,7 +835,8 @@ export class OllamaBackend implements AgentBackend {
                     // search lives in the OPTIONAL companion server, not here).
                     text:
                       `SEARCH LIMIT: you have called ${name} ${discoveryHits} times without finding a matching tool — it is very likely NOT in this catalog. STOP searching. ` +
-                      `Common misses: Civitai keyword search is the search_civitai_models tool (filter by types + base_models, then download_civitai_model); ` +
+                      `Common misses: GRAPH/CANVAS actions (add a node, connect slots, set a widget, run the workflow) are PANEL tools — panel_call_tool {"name":"panel_add_node"} / panel_connect / panel_set_widget / panel_run, listed by panel_list_tools, NOT here. ` +
+                      `Civitai keyword search is the search_civitai_models tool (filter by types + base_models, then download_civitai_model); ` +
                       `model families like krea2 / qwen-image-edit / wan / ltxv are installer PACKS — call_tool {"name":"list_packs"}. ` +
                       `Otherwise, tell the user plainly what IS available and ask how they want to proceed. Do not call ${name} again.`,
                     isError: true,
