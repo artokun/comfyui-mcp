@@ -1,16 +1,12 @@
 {
   "comfyui": {
     "command": "npx",
-    "args": ["-y", "comfyui-mcp"],
+    "args": [
+      "-y",
+      "comfyui-mcp"
+    ],
     "env": {
       "CIVITAI_API_TOKEN": ""
-    }
-  },
-  "civitai": {
-    "type": "http",
-    "url": "https://mcp.civitai.com/mcp",
-    "headers": {
-      "Authorization": "Bearer ${CIVITAI_API_TOKEN:-}"
     }
   }
 }

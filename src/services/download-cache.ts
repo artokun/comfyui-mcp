@@ -144,8 +144,15 @@ async function streamUrlToFile(
   }
 
   if (!res.ok) {
+    // Civitai requires an account token for ALL downloads (401 keyless, 403
+    // for gated/early-access) — a raw status code leaves agents flailing
+    // through retries (live E2E), so name the fix.
+    const civitaiAuthHint =
+      (res.status === 401 || res.status === 403) && /(^|\.)civitai\.com$/i.test(new URL(currentUrl).hostname)
+        ? " — CivitAI requires an API token for downloads. Set CIVITAI_API_TOKEN (panel Settings › “Set CivitAI token…”, or the env var; create one at civitai.com/user/account) and retry. Do NOT retry other model ids — they will all fail the same way until a token is set."
+        : "";
     throw new ModelError(
-      `Download failed: ${res.status} ${res.statusText}`,
+      `Download failed: ${res.status} ${res.statusText}${civitaiAuthHint}`,
       { url: currentUrl === url ? logUrl : redactUrlForLogs(currentUrl), status: res.status },
     );
   }

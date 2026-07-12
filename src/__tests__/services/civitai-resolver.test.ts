@@ -9,6 +9,7 @@ import { config } from "../../config.js";
 import {
   resolveCivitaiModel,
   resolveCivitaiModelVersion,
+  searchCivitaiModels,
 } from "../../services/civitai-resolver.js";
 import { ModelError, ValidationError } from "../../utils/errors.js";
 
@@ -175,5 +176,77 @@ describe("resolveCivitaiModel", () => {
   it("throws ModelError when the model has no versions", async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ id: 100, modelVersions: [] }));
     await expect(resolveCivitaiModel(100)).rejects.toBeInstanceOf(ModelError);
+  });
+});
+
+describe("searchCivitaiModels", () => {
+  const SEARCH_BODY = {
+    items: [
+      {
+        id: 685874,
+        name: "Flux Detailer",
+        type: "LORA",
+        nsfw: false,
+        creator: { username: "jed" },
+        stats: { downloadCount: 15155, thumbsUpCount: 1200 },
+        modelVersions: [
+          {
+            id: 1374948,
+            name: "v3",
+            baseModel: "Flux.1 D",
+            trainedWords: ["Jeddtlv3"],
+            files: [{ name: "flux-detailer.safetensors", primary: true, sizeKB: 300000 }],
+          },
+        ],
+      },
+    ],
+  };
+
+  it("builds the query (types/baseModels/sort/nsfw pinned) and maps the download handoff fields", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(SEARCH_BODY));
+    const hits = await searchCivitaiModels("flux detail", {
+      types: ["LORA"],
+      baseModels: ["Flux.1 D"],
+    });
+    const url = String(fetchMock.mock.calls[0][0]);
+    expect(url).toContain("/models?");
+    expect(url).toContain("query=flux+detail");
+    expect(url).toContain("types=LORA");
+    expect(url).toContain("baseModels=Flux.1+D");
+    expect(url).toContain("nsfw=false"); // SFW pinned by default
+    expect(url).toContain("sort=Highest+Rated");
+    expect(hits).toHaveLength(1);
+    expect(hits[0]).toMatchObject({
+      model_id: 685874,
+      version_id: 1374948,
+      base_model: "Flux.1 D",
+      trained_words: ["Jeddtlv3"],
+      size_mb: 293,
+      creator: "jed",
+    });
+  });
+
+  it("nsfw: true opts in on the wire", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ items: [] }));
+    await searchCivitaiModels("x", { nsfw: true });
+    expect(String(fetchMock.mock.calls[0][0])).toContain("nsfw=true");
+  });
+
+  it("fails FAST with the config message when CIVITAI_ENABLED=0 (kill-switch, #127)", async () => {
+    process.env.CIVITAI_ENABLED = "0";
+    try {
+      await expect(searchCivitaiModels("anything")).rejects.toThrow(/disabled by config/);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.CIVITAI_ENABLED;
+    }
+  });
+
+  it("sends the bearer token when configured (gated results)", async () => {
+    config.civitaiApiToken = "civ_tok";
+    fetchMock.mockResolvedValueOnce(jsonResponse({ items: [] }));
+    await searchCivitaiModels("y");
+    const headers = (fetchMock.mock.calls[0][1] as { headers: Record<string, string> }).headers;
+    expect(headers["Authorization"]).toBe("Bearer civ_tok");
   });
 });

@@ -57,26 +57,24 @@ wants tags). Read it in the browser, or paste it into any agent's context as a
 system prompt — no ComfyUI, MCP, or install required. When you do connect the
 full plugin, agents load the same files automatically (`read_skill`).
 
-### Pairs with the official Civitai MCP — bundled, headless
+### Civitai search — built in
 
-comfyui-mcp doesn't proxy Civitai — it composes with Civitai's
-[official MCP server](https://mcp.civitai.com/mcp). **The plugin wires it for
-you:** the bundled `.mcp.json` declares the Civitai remote server next to
-comfyui, so `/plugin install comfy` gives you `mcp__civitai__*` automatically
-— no `claude mcp add`, no API key for browsing (the `Authorization` header
-defaults to an empty Bearer, which Civitai accepts for its read tools).
+`search_civitai_models` searches Civitai natively (public REST API, no key, no
+extra server): keyword + `types` + `base_models` filters ("a **Flux** LoRA"),
+SFW-only by default, and every hit returns the `model_version_id` that
+`download_civitai_model` takes directly — plus the model's **trigger words**
+for the prompt. Because it's a first-class tool it works on **every backend**,
+including small local models behind the compact router. The `civitai` skill
+teaches the full discovery → download → generate handoff.
 
-Civitai's `search_models` returns a model-version id; comfyui-mcp's
-`download_civitai_model` takes exactly that id, fetches the file into your
-local `models/`, and then `generate_image` or the sidebar panel wires it onto
-the graph. The `civitai` skill teaches Claude the full discovery → download →
-generate handoff (and falls back to HuggingFace search when the Civitai MCP
-isn't connected).
+**Optional API key.** Search needs none. `CIVITAI_API_TOKEN` unlocks
+gated/early-access downloads and gated search results — one variable powers
+both search and download.
 
-**Optional API key.** To unlock your account context (favorites, posting,
-gated/early-access downloads), set `CIVITAI_API_TOKEN` — the *same* variable
-comfyui-mcp uses for its own downloads, so one secret powers both. Standalone
-(non-plugin) MCP users can add the server manually:
+**Optional: the official Civitai MCP.** For the community surface beyond
+search→install (browsing example images + their generation params, posting,
+collections), pair Civitai's [official remote server](https://mcp.civitai.com/mcp)
+— no longer auto-bundled, add it once:
 
 ```bash
 claude mcp add --transport http civitai https://mcp.civitai.com/mcp \

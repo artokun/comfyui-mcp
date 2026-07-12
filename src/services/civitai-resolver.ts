@@ -330,3 +330,86 @@ export async function resolveCivitaiModel(
 
   return resolveFromVersion(version, model);
 }
+
+// ---------------------------------------------------------------------------
+// Keyword search (native — replaces the previously-bundled Civitai MCP for the
+// search→download loop). GET /api/v1/models works UNAUTHENTICATED with query,
+// type, and base-model filters, and each hit carries exactly what
+// download_civitai_model consumes (model id + version id) plus the trigger
+// words the prompt will need. Field driver: a local-model user asked to "find
+// a good Flux LoRA on Civitai" and there was no tool that could.
+// ---------------------------------------------------------------------------
+
+export interface CivitaiSearchHit {
+  model_id: number;
+  name: string;
+  type?: string;
+  creator?: string;
+  downloads?: number;
+  thumbs_up?: number;
+  nsfw?: boolean;
+  /** Latest version — the one download_civitai_model fetches by default. */
+  version_id?: number;
+  version_name?: string;
+  base_model?: string;
+  trained_words?: string[];
+  /** Approximate primary-file size, MB (when the API reports it). */
+  size_mb?: number;
+}
+
+const CIVITAI_SORTS = ["Highest Rated", "Most Downloaded", "Newest"] as const;
+export type CivitaiSort = (typeof CIVITAI_SORTS)[number];
+
+export interface CivitaiSearchOptions {
+  types?: string[];
+  /** Civitai base-model labels, e.g. "Flux.1 D", "SDXL 1.0", "SD 1.5", "Pony", "Illustrious". */
+  baseModels?: string[];
+  sort?: CivitaiSort;
+  nsfw?: boolean;
+  limit?: number;
+}
+
+interface CivitaiSearchResponse {
+  items?: Array<
+    CivitaiModel & {
+      nsfw?: boolean;
+      stats?: { downloadCount?: number; thumbsUpCount?: number };
+    }
+  >;
+}
+
+export async function searchCivitaiModels(
+  query: string,
+  opts: CivitaiSearchOptions = {},
+): Promise<CivitaiSearchHit[]> {
+  const params = new URLSearchParams();
+  params.set("query", query);
+  params.set("limit", String(Math.min(Math.max(opts.limit ?? 10, 1), 25)));
+  params.set("sort", opts.sort ?? "Highest Rated");
+  // Civitai defaults to including NSFW for authed accounts — pin it explicitly
+  // so results are SFW unless the caller opted in.
+  params.set("nsfw", opts.nsfw ? "true" : "false");
+  for (const t of opts.types ?? []) params.append("types", t);
+  for (const b of opts.baseModels ?? []) params.append("baseModels", b);
+
+  const data = await civitaiGet<CivitaiSearchResponse>(`/models?${params.toString()}`);
+  return (data.items ?? []).map((m) => {
+    const v = m.modelVersions?.[0];
+    const file = v ? pickFile(v) : undefined;
+    const sizeKb = (file as { sizeKB?: number } | undefined)?.sizeKB;
+    return {
+      model_id: m.id,
+      name: m.name ?? `model ${m.id}`,
+      type: m.type,
+      creator: m.creator?.username,
+      downloads: m.stats?.downloadCount,
+      thumbs_up: m.stats?.thumbsUpCount,
+      nsfw: m.nsfw,
+      version_id: v?.id,
+      version_name: v?.name,
+      base_model: v?.baseModel,
+      trained_words: v?.trainedWords?.slice(0, 6),
+      ...(sizeKb ? { size_mb: Math.round(sizeKb / 1024) } : {}),
+    };
+  });
+}

@@ -815,7 +815,7 @@ export class OllamaBackend implements AgentBackend {
                     // search lives in the OPTIONAL companion server, not here).
                     text:
                       `SEARCH LIMIT: you have called ${name} ${discoveryHits} times without finding a matching tool — it is very likely NOT in this catalog. STOP searching. ` +
-                      `Not everything is a tool here: Civitai model SEARCH is not built in (install the separate Civitai MCP server, or if you already have a model id/URL use download_civitai_model / download_model directly); ` +
+                      `Common misses: Civitai keyword search is the search_civitai_models tool (filter by types + base_models, then download_civitai_model); ` +
                       `model families like krea2 / qwen-image-edit / wan / ltxv are installer PACKS — call_tool {"name":"list_packs"}. ` +
                       `Otherwise, tell the user plainly what IS available and ask how they want to proceed. Do not call ${name} again.`,
                     isError: true,
@@ -845,7 +845,7 @@ export class OllamaBackend implements AgentBackend {
             type: "assistant",
             text:
               maxDiscovery >= 8
-                ? `(stopped: I searched the tool catalog ${maxDiscovery} times without finding what I was looking for — that capability probably isn't available here. For example, Civitai keyword search needs the separate Civitai MCP server; with a Civitai model id I can download directly. Tell me how you'd like to proceed.${switchTip})`
+                ? `(stopped: I searched the tool catalog ${maxDiscovery} times without finding what I was looking for — that capability probably isn't available here. Tell me how you'd like to proceed.${switchTip})`
                 : `(stopped: I kept repeating the same tool call without progress. Try rephrasing the request, or break it into smaller steps.${switchTip})`,
           };
           yield { type: "result", ok: false, subtype: "tool_loop" };
