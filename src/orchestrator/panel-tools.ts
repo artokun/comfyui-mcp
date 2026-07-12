@@ -667,14 +667,24 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           .boolean()
           .optional()
           .describe("Default true. Set false to force legacy exact resolution (omitted slot = index 0)."),
+        // ALIASES small models actually emit (live panel finding): zod silently
+        // STRIPPED from_slot_name/to_slot_name, both slots fell to "auto", and
+        // auto-match wired something the model never asked for — reported as
+        // success, scrambling the graph. Accept the aliases so intent survives.
+        from_slot_name: slotRef.optional().describe("Alias for from_output."),
+        to_slot_name: slotRef.optional().describe("Alias for to_input."),
+        from_slot: slotRef.optional().describe("Alias for from_output."),
+        to_slot: slotRef.optional().describe("Alias for to_input."),
+        output: slotRef.optional().describe("Alias for from_output."),
+        input: slotRef.optional().describe("Alias for to_input."),
       },
       async (args: A, ctx) =>
         ctx.call({
           cmd: "graph_connect",
           from_node_id: args.from_node_id,
-          from_output: args.from_output,
+          from_output: args.from_output ?? args.from_slot_name ?? args.from_slot ?? args.output,
           to_node_id: args.to_node_id,
-          to_input: args.to_input,
+          to_input: args.to_input ?? args.to_slot_name ?? args.to_slot ?? args.input,
           auto_match: args.auto_match,
         }),
     ),

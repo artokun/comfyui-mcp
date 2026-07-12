@@ -526,3 +526,31 @@ describe("panel-tools: workflow target (per-workflow agent)", () => {
     expect(text).toContain("Pinned");
   });
 });
+
+describe("panel_connect slot aliases (live panel finding: stripped aliases → auto-match scramble)", () => {
+  it("maps from_slot_name/to_slot_name onto from_output/to_input on the wire", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    const def = defByName("panel_connect");
+    await def.handler(
+      { from_node_id: 10, from_slot_name: "MODEL", to_node_id: 3, to_slot_name: "model" },
+      ctx,
+    );
+    expect(calls[0]).toMatchObject({
+      cmd: "graph_connect",
+      from_node_id: 10,
+      from_output: "MODEL",
+      to_node_id: 3,
+      to_input: "model",
+    });
+  });
+
+  it("canonical names win over aliases; bare aliases output/input also map", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    const def = defByName("panel_connect");
+    await def.handler(
+      { from_node_id: 1, from_output: "LATENT", from_slot: "WRONG", to_node_id: 2, input: "samples" },
+      ctx,
+    );
+    expect(calls[0]).toMatchObject({ from_output: "LATENT", to_input: "samples" });
+  });
+});
