@@ -269,6 +269,20 @@ export function registerModelExtrasTools(server: McpServer): void {
         ];
         if (resolved.modelName) lines.push(`  Model: ${resolved.modelName}`);
         lines.push(`  Version id: ${resolved.versionId}`);
+        // NOT-A-MODEL guard (live panel finding: the agent downloaded a
+        // 'Workflows'-type zip into loras/ and told the user their LoRA was
+        // installed). Loud warning when the entry type / file extension can't
+        // load as a model so the agent corrects course instead of celebrating.
+        const civitaiType = resolved.metadata?.modelType;
+        const NON_MODEL_TYPES = new Set(["Workflows", "Poses", "Wildcards", "Other"]);
+        const fileExt = (filename ?? savedPath).toLowerCase().match(/\.([a-z0-9]+)$/)?.[1];
+        const NON_MODEL_EXTS = new Set(["zip", "rar", "7z", "json", "txt", "png", "jpg"]);
+        if ((civitaiType && NON_MODEL_TYPES.has(civitaiType)) || (fileExt && NON_MODEL_EXTS.has(fileExt))) {
+          lines.push(
+            `  WARNING: this CivitAI entry is type "${civitaiType ?? "unknown"}" (file: .${fileExt ?? "?"}) — it is NOT a loadable model file and will not appear in a ${args.target_subfolder} loader. ` +
+              `If the user wanted a LoRA/checkpoint, re-run search_civitai_models with types:["LORA"] (or ["Checkpoint"]) and download a hit whose type matches. Do not tell the user a model was installed.`,
+          );
+        }
 
         // Write usage-docs sidecars beside the file so the panel agent has the
         // description, trigger words, and example generation params on hand.
