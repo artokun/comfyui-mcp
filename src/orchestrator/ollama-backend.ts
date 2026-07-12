@@ -738,6 +738,7 @@ export class OllamaBackend implements AgentBackend {
     // NOT here — describing many distinct tools is legitimate exploration.
     const DISCOVERY_TOOLS = new Set(["list_tools", "panel_list_tools", "search_models", "search_custom_nodes"]);
     const discoveryCounts = new Map<string, number>();
+    let emptyFinalRetried = false;
     try {
       for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
         // Drain the chat stream manually: yield each delta event as it arrives,
@@ -757,6 +758,20 @@ export class OllamaBackend implements AgentBackend {
         }
 
         if (!toolCalls.length) {
+          // EMPTY-FINAL recovery (live E2E, native dialect, temp 0): after a
+          // run of tool rounds the model sometimes emits a final message with
+          // NO content — the turn would "complete" in total silence. Nudge it
+          // ONCE to summarize; a second empty reply falls through (never loop).
+          if (!content.trim() && round > 0 && !emptyFinalRetried) {
+            emptyFinalRetried = true;
+            this.history.push({ role: "assistant", content });
+            this.history.push({
+              role: "user",
+              content:
+                "(system: your reply was EMPTY. In 1-3 sentences, tell the user what you found or did with the tools above, and what you recommend next. Do not call any more tools.)",
+            });
+            continue;
+          }
           // Record the final answer in history too — without this, the NEXT
           // turn's context is missing the model's own previous replies (and
           // the transcript dump ends mid-conversation on a tool message).
@@ -820,9 +835,18 @@ export class OllamaBackend implements AgentBackend {
           logger.warn(
             `[ollama-backend] tool loop broken: repeats=${maxRepeats} discovery=${maxDiscovery} this turn (${this.model})`,
           );
+          // Honest, breaker-specific stop copy (live E2E caught the old one
+          // recommending the fine-tune TO the fine-tune). Discovery wedge →
+          // the capability likely isn't here; repeat wedge → the model stalled.
+          const switchTip = this.isFinetune()
+            ? ""
+            : " If you're on a stock model, `artokun/gemma4-comfyui-mcp:e4b` knows this tool suite and gets stuck far less.";
           yield {
             type: "assistant",
-            text: "(stopped: I kept repeating the same tool call without progress. Try rephrasing the request — and if you're on a stock model, switch to `artokun/gemma4-comfyui-mcp:e4b`, which knows this tool suite.)",
+            text:
+              maxDiscovery >= 8
+                ? `(stopped: I searched the tool catalog ${maxDiscovery} times without finding what I was looking for — that capability probably isn't available here. For example, Civitai keyword search needs the separate Civitai MCP server; with a Civitai model id I can download directly. Tell me how you'd like to proceed.${switchTip})`
+                : `(stopped: I kept repeating the same tool call without progress. Try rephrasing the request, or break it into smaller steps.${switchTip})`,
           };
           yield { type: "result", ok: false, subtype: "tool_loop" };
           resultEmitted = true;
