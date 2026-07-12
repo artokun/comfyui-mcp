@@ -219,6 +219,20 @@ export function analyzeGraphHealth(
   // but never saved. Report one finding per connected component of the unreached
   // set (over the undirected graph) to avoid many line items on big graphs.
   const outputNodes = nodeIds.filter((id) => isOutputNode(workflow[id].class_type, objectInfo));
+  if (nodeIds.length > 0 && outputNodes.length === 0) {
+    // No output node at all → ComfyUI rejects the prompt outright with "Prompt
+    // has no outputs" (field: small models hand-build a graph and forget the
+    // sink). Surface it as the top finding so validate/analyze catches it BEFORE
+    // a failed run, and the agent can add the missing node instead of retrying.
+    findings.push({
+      kind: "no_output_reachable",
+      severity: "warning",
+      node_ids: [],
+      detail:
+        "No output node — the workflow will FAIL to run (ComfyUI: \"Prompt has no outputs\"). " +
+        "Add a terminal SaveImage (or PreviewImage / SaveVideo / SaveAudio) node and connect the final IMAGE/LATENT/etc. into it before running.",
+    });
+  }
   if (outputNodes.length > 0) {
     const reachable = new Set<string>();
     const queue = [...outputNodes];

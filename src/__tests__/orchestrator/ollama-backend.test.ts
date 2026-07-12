@@ -191,6 +191,33 @@ describe("OllamaBackend", () => {
     expect(chatRequests.length).toBeLessThanOrEqual(5);
   });
 
+  it("breaks a DISCOVERY loop: list_tools with a different search each round (the Civitai-hunt wedge)", async () => {
+    const { client, callTool } = fakeMcpClient(COMFY_META);
+    const backend = new OllamaBackend({ model: "gemma4:e4b", connectToolClients: async () => ({ comfyui: client }) });
+    // Every round the model searches list_tools with a NEW query — the exact-
+    // repeat breaker can't see these as repeats, but the discovery counter can.
+    const search = (q: string) => [
+      { message: { content: "", tool_calls: [{ function: { name: "list_tools", arguments: { search: q } } }] }, done: true },
+    ];
+    chatScript.push(
+      search("civitai"), search("lora"), search("flux"), search("download lora"),
+      search("model search"), search("find civitai"), search("browse"), search("more"),
+    );
+    const events = await collect(backend, turnsOf({ text: "find a good Flux LoRA on Civitai and add it" }));
+    // The first 3 distinct searches dispatch; the 4th+ get the SEARCH LIMIT nudge
+    // (which names the Civitai reality) instead of another catalog dump.
+    expect(callTool).toHaveBeenCalledTimes(3);
+    const limitNudges = chatRequests
+      .flatMap((r) => r.messages)
+      .filter((m) => m.role === "tool" && String(m.content).startsWith("SEARCH LIMIT"));
+    expect(limitNudges.length).toBeGreaterThanOrEqual(1);
+    expect(String(limitNudges[0].content)).toContain("Civitai");
+    // And the turn ends on the loop-breaker, not by running to max_tool_rounds.
+    expect(events.filter((e) => e.type === "result")).toEqual([
+      { type: "result", ok: false, subtype: "tool_loop" },
+    ]);
+  });
+
   it("dispatches comfyui meta-tool calls and feeds results back to the next request", async () => {
     const { client, callTool } = fakeMcpClient(COMFY_META);
     const backend = new OllamaBackend({ model: "gemma4:e4b", connectToolClients: async () => ({ comfyui: client }) });

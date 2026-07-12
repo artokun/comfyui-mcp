@@ -728,6 +728,16 @@ export class OllamaBackend implements AgentBackend {
     // ended outright.
     const seenCalls = new Map<string, number>();
     let maxRepeats = 0;
+    // Second wedge shape (field: Discord "circles" report): the model spams a
+    // DISCOVERY meta-tool with a DIFFERENT search each round (list_tools
+    // {"search":"lora"} → {"search":"civitai"} → {"search":"flux"} …), hunting a
+    // capability that isn't in the catalog — every call is unique so the
+    // exact-repeat breaker above never fires. Count calls per discovery tool
+    // (ignoring args); past a threshold, stop searching and tell it the truth
+    // (some capabilities live in OPTIONAL companion servers). describe_tool is
+    // NOT here — describing many distinct tools is legitimate exploration.
+    const DISCOVERY_TOOLS = new Set(["list_tools", "panel_list_tools", "search_models", "search_custom_nodes"]);
+    const discoveryCounts = new Map<string, number>();
     try {
       for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
         // Drain the chat stream manually: yield each delta event as it arrives,
@@ -766,6 +776,9 @@ export class OllamaBackend implements AgentBackend {
           const repeats = (seenCalls.get(callKey) ?? 0) + 1;
           seenCalls.set(callKey, repeats);
           maxRepeats = Math.max(maxRepeats, repeats);
+          const discoveryHits = DISCOVERY_TOOLS.has(name)
+            ? (discoveryCounts.set(name, (discoveryCounts.get(name) ?? 0) + 1), discoveryCounts.get(name)!)
+            : 0;
           yield { type: "tool_call", name, phase: "start", detail: tc.function?.arguments };
           const { text, isError } =
             repeats >= 2
@@ -780,7 +793,19 @@ export class OllamaBackend implements AgentBackend {
                     `If you are stuck, tell the user what you found and ask how to proceed.`,
                   isError: true,
                 }
-              : await this.dispatch(name, args);
+              : discoveryHits >= 4
+                ? {
+                    // Searched the catalog 4+ times with no hit — the capability
+                    // isn't here. Stop, and name the most common trap (Civitai
+                    // search lives in the OPTIONAL companion server, not here).
+                    text:
+                      `SEARCH LIMIT: you have called ${name} ${discoveryHits} times without finding a matching tool — it is very likely NOT in this catalog. STOP searching. ` +
+                      `Not everything is a tool here: Civitai model SEARCH is not built in (install the separate Civitai MCP server, or if you already have a model id/URL use download_civitai_model / download_model directly); ` +
+                      `model families like krea2 / qwen-image-edit / wan / ltxv are installer PACKS — call_tool {"name":"list_packs"}. ` +
+                      `Otherwise, tell the user plainly what IS available and ask how they want to proceed. Do not call ${name} again.`,
+                    isError: true,
+                  }
+                : await this.dispatch(name, args);
           opts.onActivity?.();
           yield { type: "tool_call", name, phase: "end", detail: { isError } };
           this.history.push({
@@ -790,8 +815,11 @@ export class OllamaBackend implements AgentBackend {
             content: text.slice(0, 16000),
           });
         }
-        if (maxRepeats >= 4) {
-          logger.warn(`[ollama-backend] tool loop broken: a call repeated ${maxRepeats}x this turn (${this.model})`);
+        const maxDiscovery = Math.max(0, ...discoveryCounts.values());
+        if (maxRepeats >= 4 || maxDiscovery >= 8) {
+          logger.warn(
+            `[ollama-backend] tool loop broken: repeats=${maxRepeats} discovery=${maxDiscovery} this turn (${this.model})`,
+          );
           yield {
             type: "assistant",
             text: "(stopped: I kept repeating the same tool call without progress. Try rephrasing the request — and if you're on a stock model, switch to `artokun/gemma4-comfyui-mcp:e4b`, which knows this tool suite.)",

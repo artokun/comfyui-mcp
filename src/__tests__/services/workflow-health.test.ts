@@ -103,6 +103,33 @@ describe("analyzeGraphHealth", () => {
     expect(orphans[0].node_ids).toContain("22");
   });
 
+  it("flags a graph with NO output node (the 'Prompt has no outputs' failure)", () => {
+    const h = analyzeGraphHealth(
+      wf({
+        "4": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: "sd_xl_base.safetensors" } },
+        "5": { class_type: "KSampler", inputs: { model: ["4", 0], positive: ["4", 1], negative: ["4", 1], latent_image: ["4", 2] } },
+        "6": { class_type: "VAEDecode", inputs: { samples: ["5", 0], vae: ["4", 2] } },
+        // No SaveImage / PreviewImage — ComfyUI would reject this prompt.
+      }),
+      OBJECT_INFO,
+    );
+    const noOut = h.findings.filter((f) => f.kind === "no_output_reachable");
+    expect(noOut).toHaveLength(1);
+    expect(noOut[0].detail).toMatch(/Prompt has no outputs/);
+    expect(noOut[0].detail).toMatch(/SaveImage/);
+  });
+
+  it("does NOT flag no_output_reachable when a save node is present", () => {
+    const h = analyzeGraphHealth(
+      wf({
+        "6": { class_type: "VAEDecode", inputs: {} },
+        "9": { class_type: "SaveImage", inputs: { images: ["6", 0] } },
+      }),
+      OBJECT_INFO,
+    );
+    expect(h.findings.filter((f) => f.kind === "no_output_reachable")).toHaveLength(0);
+  });
+
   it("groups multiple unreached nodes into one finding per connected component", () => {
     const h = analyzeGraphHealth(
       wf({
