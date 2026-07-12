@@ -220,6 +220,11 @@ describe("OllamaBackend", () => {
     const backend2 = new OllamaBackend({ model: "artokun/gemma4-comfyui-mcp:e4b", connectToolClients: async () => ({ comfyui: client }) });
     const events2 = await collect(backend2, turnsOf({ text: "find a lora" }));
     expect(events2.filter((e) => e.type === "result")).toMatchObject([{ type: "result", ok: true }]);
+    // …but never SILENTLY: the double-empty turn still shows a fallback line
+    // (live panel test: Civitai 503 → double empty → user saw nothing at all).
+    const finals2 = events2.filter((e) => e.type === "assistant") as Array<{ text: string }>;
+    expect(finals2).toHaveLength(1);
+    expect(finals2[0].text).toContain("couldn't compose a reply");
   });
 
   it("breaks a DISCOVERY loop: list_tools with a different search each round (the Civitai-hunt wedge)", async () => {

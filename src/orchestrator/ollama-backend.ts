@@ -776,7 +776,15 @@ export class OllamaBackend implements AgentBackend {
           // turn's context is missing the model's own previous replies (and
           // the transcript dump ends mid-conversation on a tool message).
           this.history.push({ role: "assistant", content });
-          yield { type: "assistant", text: content, id: streamId ?? undefined, usage };
+          // NEVER end a tool-using turn in total silence (live panel test: a
+          // Civitai 503 → empty final → empty retry → the user stared at a raw
+          // tool error with no explanation). History keeps the raw empty
+          // content; only the USER-FACING text gets the fallback.
+          const finalText =
+            content.trim() || (round === 0
+              ? content
+              : "(I ran the tools above but couldn't compose a reply — check the last tool result. Say “continue” to have me try again, or rephrase the request.)");
+          yield { type: "assistant", text: finalText, id: streamId ?? undefined, usage };
           yield { type: "result", ok: true, usage };
           resultEmitted = true;
           return;
