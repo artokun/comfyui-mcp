@@ -1291,9 +1291,30 @@ export async function runPanelOrchestrator(): Promise<void> {
   // Claude → undefined (PanelAgent uses its built-in in-process SDK backend);
   // codex/gemini → their CLI-driven backend, wired to the panel_* tools over the
   // loopback HTTP MCP for THIS panel tab's canvas (comfyuiUrl gives vision parity).
+  // A backend whose CONSTRUCTOR failed (e.g. GlmBackend throws when
+  // ZAI_API_KEY is absent) must never take the orchestrator down — the field
+  // failure was: click the GLM chip keyless → uncaught ValidationError → FATAL
+  // process exit. This stub satisfies AgentBackend and surfaces the original
+  // error as a normal degraded probe / in-chat error instead.
+  const brokenBackend = (backend: string, msg: string): AgentBackend =>
+    ({
+      id: backend,
+      capabilities: { modelEnumeration: false },
+      async *run() {
+        yield { type: "assistant", text: `⚠️ ${msg}` };
+        yield { type: "result", ok: false, subtype: "backend_unavailable" };
+      },
+      interrupt: async () => {},
+      listModels: async () => {
+        throw new Error(msg);
+      },
+      close: async () => {},
+    }) as unknown as AgentBackend;
+
   const makeBackend = (key: string): AgentBackend | undefined => {
     const backend = backendOf(key);
     const panelTabId = panelTabOf(key);
+    try {
     if (backend === "codex") {
       return new CodexBackend({
         cwd: comfyuiPath ?? process.cwd(),
@@ -1412,6 +1433,11 @@ export async function runPanelOrchestrator(): Promise<void> {
       });
     }
     return undefined; // claude → built-in ClaudeBackend
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.warn(`[panel-orchestrator] ${backend} backend construction failed: ${msg}`);
+      return brokenBackend(backend, msg);
+    }
   };
   logger.info(
     `[panel-orchestrator] single-port multi-provider: default backend=${defaultBackend}; ` +
@@ -1427,6 +1453,7 @@ export async function runPanelOrchestrator(): Promise<void> {
     if (backend === "claude") return null; // claude uses the SDK probe below
     let pb = probeBackends.get(backend);
     if (!pb) {
+      try {
       pb =
         backend === "codex"
           ? new CodexBackend({ cwd: comfyuiPath ?? process.cwd(), model: codexModel })
@@ -1452,6 +1479,12 @@ export async function runPanelOrchestrator(): Promise<void> {
                         ? new CopilotBackend({ cwd: comfyuiPath ?? process.cwd(), model: copilotModel })
                         : new GeminiBackend({ cwd: comfyuiPath ?? process.cwd(), model: geminiModel });
       probeBackends.set(backend, pb);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.warn(`[panel-orchestrator] ${backend} probe construction failed: ${msg}`);
+        // NOT cached: once the user supplies credentials, the next hello retries.
+        return brokenBackend(backend, msg);
+      }
     }
     return pb;
   };
