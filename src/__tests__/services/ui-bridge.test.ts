@@ -441,6 +441,43 @@ describe("UiBridge (multi-tab)", () => {
     sockB.close();
   });
 
+  it("SCRUBS a client-forged migrated_from (codex review: rebind hijack)", async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    bridge.onPanelMessage = (ev) => void seen.push(ev as unknown as Record<string, unknown>);
+    const sock = await connectPanel();
+    autoReply(sock, "attacker");
+    // Fresh socket, FIRST hello — no migration happened, but the client claims one.
+    sock.send(JSON.stringify({ type: "hello", tab_id: "attacker-tab", migrated_from: "victim-tab" }));
+    await vi.waitFor(() => expect(bridge.tabs()).toHaveLength(1));
+    const hello = seen.find((e) => e.type === "hello" && e.tab_id === "attacker-tab");
+    expect(hello).toBeTruthy();
+    expect(hello!.migrated_from).toBeUndefined();
+    bridge.onPanelMessage = null;
+    sock.close();
+  });
+
+  it("a DEAD socket's migration alias never routes to an unrelated tab reusing the id (deterministic wf: reuse)", async () => {
+    // sockA: legacy id → wf:reused (migration created), then DIES.
+    const sockA = await connectPanel();
+    autoReply(sockA, "A");
+    sockA.send(JSON.stringify({ type: "hello", tab_id: "legacy-old-id" }));
+    await vi.waitFor(() => expect(bridge.tabs()).toHaveLength(1));
+    sockA.send(JSON.stringify({ type: "hello", tab_id: "wf:reused" }));
+    await vi.waitFor(() => expect(bridge.tabs()[0]?.tab_id).toBe("wf:reused"));
+    sockA.close();
+    await vi.waitFor(() => expect(bridge.tabs()).toHaveLength(0));
+
+    // sockB: an UNRELATED tab that happens to get the same deterministic wf: id.
+    const sockB = await connectPanel();
+    autoReply(sockB, "B");
+    sockB.send(JSON.stringify({ type: "hello", tab_id: "wf:reused" }));
+    await vi.waitFor(() => expect(bridge.tabs()).toHaveLength(1));
+
+    // The old legacy id must NOT resolve to sockB's tab via the stale alias.
+    await expect(bridge.send({ cmd: "x" }, { tabId: "legacy-old-id" })).rejects.toThrow(/no connected tab/);
+    sockB.close();
+  });
+
   it("follows MIGRATION CHAINS: uuid → tmp: → wf: (the exact #210 field sequence)", async () => {
     // The reported failure re-helloed TWICE: legacy random UUID, then the
     // unsaved-tab tmp:<uuid> id, then the saved wf:<hash> id. The ORIGINAL id

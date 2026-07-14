@@ -1970,11 +1970,24 @@ export async function runPanelOrchestrator(): Promise<void> {
           );
         }
         // Carry the old tab's runtime prefs to the new id regardless of whether
-        // an agent was live (backend pick, headless flag), then retire the old id.
+        // an agent was live (backend pick, headless flag, pinned workflow
+        // target, held-during-render queue), then retire the old id.
         if (!tabBackends.has(panelTab) && tabBackends.has(migratedFrom)) {
           tabBackends.set(panelTab, tabBackends.get(migratedFrom)!);
         }
         if (headlessTabs.has(migratedFrom)) headlessTabs.add(panelTab);
+        // MOVE the pinned workflow target, don't discard it (codex review).
+        const pinned = workflowTargets.get(migratedFrom);
+        if (pinned.mode === "pinned") workflowTargets.set(panelTab, pinned);
+        // Re-key messages held during a render so the flush reaches the
+        // REBOUND agent instead of respawning one under the retired key.
+        const prevBackendForHeld = tabBackends.get(migratedFrom) ?? backend;
+        const heldOld = heldDuringGen.get(migratedFrom + AGENT_KEY_SEP + prevBackendForHeld);
+        if (heldOld?.length) {
+          const heldNewKey = panelTab + AGENT_KEY_SEP + prevBackendForHeld;
+          heldDuringGen.set(heldNewKey, [...(heldDuringGen.get(heldNewKey) ?? []), ...heldOld]);
+          heldDuringGen.delete(migratedFrom + AGENT_KEY_SEP + prevBackendForHeld);
+        }
         tabBackends.delete(migratedFrom);
         headlessTabs.delete(migratedFrom);
         workflowTargets.clear(migratedFrom);

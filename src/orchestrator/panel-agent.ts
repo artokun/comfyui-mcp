@@ -1265,40 +1265,45 @@ export class PanelAgentManager {
   rebindAgent(oldKey: string, newKey: string): boolean {
     if (oldKey === newKey) return false;
     if (this.agents.has(newKey)) return false;
+    // DURABLE state migrates even when no live agent exists (codex review:
+    // the agent may have been reaped while its persisted session survives —
+    // skipping this meant the rebound tab started a fresh conversation).
+    const moveDurable = () => {
+      if (this.pendingResume.has(oldKey)) {
+        this.pendingResume.set(newKey, this.pendingResume.get(oldKey)!);
+        this.pendingResume.delete(oldKey);
+      }
+      const persisted = this.opts.sessionStore?.get(oldKey);
+      if (persisted) this.opts.sessionStore?.set(newKey, persisted);
+      this.opts.sessionStore?.clear(oldKey);
+    };
     const agent = this.agents.get(oldKey);
-    if (!agent || agent.isStopped) return false;
+    if (!agent || agent.isStopped) {
+      moveDurable();
+      return false;
+    }
     this.agents.delete(oldKey);
     this.agents.set(newKey, agent);
-    const resume = this.pendingResume.get(oldKey);
-    if (resume) {
-      this.pendingResume.delete(oldKey);
-      this.pendingResume.set(newKey, resume);
-    }
-    const effortRestart = this.pendingEffortRestart.has(oldKey);
-    if (effortRestart) {
+    // has()-based moves throughout (codex review): truthy checks dropped
+    // legitimate null/undefined sentinels (e.g. restart-without-nudge, an
+    // explicit effort-override clear).
+    if (this.pendingEffortRestart.has(oldKey)) {
       this.pendingEffortRestart.delete(oldKey);
       this.pendingEffortRestart.add(newKey);
     }
-    const mcpRestart = this.pendingMcpRestart.get(oldKey);
-    if (mcpRestart !== undefined) {
+    if (this.pendingMcpRestart.has(oldKey)) {
+      this.pendingMcpRestart.set(newKey, this.pendingMcpRestart.get(oldKey)!);
       this.pendingMcpRestart.delete(oldKey);
-      this.pendingMcpRestart.set(newKey, mcpRestart);
     }
-    const model = this.modelByKey.get(oldKey);
-    if (model) {
+    if (this.modelByKey.has(oldKey)) {
+      this.modelByKey.set(newKey, this.modelByKey.get(oldKey)!);
       this.modelByKey.delete(oldKey);
-      this.modelByKey.set(newKey, model);
     }
-    const effort = this.effortByKey.get(oldKey);
-    if (effort) {
+    if (this.effortByKey.has(oldKey)) {
+      this.effortByKey.set(newKey, this.effortByKey.get(oldKey)!);
       this.effortByKey.delete(oldKey);
-      this.effortByKey.set(newKey, effort);
     }
-    // MIGRATE the persisted session id (don't clear it — that breaks resume
-    // across a process restart for the rebound conversation).
-    const persisted = this.opts.sessionStore?.get(oldKey);
-    if (persisted) this.opts.sessionStore?.set(newKey, persisted);
-    this.opts.sessionStore?.clear(oldKey);
+    moveDurable();
     return true;
   }
 

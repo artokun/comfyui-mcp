@@ -105,7 +105,7 @@ export class UiBridge {
    * their target via resolveTarget — the session self-heals instead of throwing
    * "no connected tab with id …" on every panel_* call.
    */
-  private tabMigrations = new Map<string, string>();
+  private tabMigrations = new Map<string, { to: string; sock: BridgeSocket }>();
   /** Per-tab "mailbox" of undeliverable render deliveries (show_media), buffered
    *  while a client is OFFLINE and flushed on reconnect — so a finished render is
    *  never lost when the mobile app is backgrounded/killed mid-render. Keyed by a
@@ -414,6 +414,10 @@ export class UiBridge {
 
       // Hello: register (or refresh) this connection under its tab id.
       if (msg.type === "hello" && typeof msg.tab_id === "string") {
+        // SECURITY (codex review): migrated_from is a SERVER-stamped field. A
+        // client-supplied value would let any tab rebind another tab's agent —
+        // scrub it unconditionally before the migration check below may re-add it.
+        delete (msg as Record<string, unknown>).migrated_from;
         // A single socket may RE-HELLO under a new tab id when the user switches
         // ComfyUI workflow tabs (per-workflow sessions). Drop this socket's PRIOR
         // tab mapping so a background agent's push() to the old tab can't leak into
@@ -423,11 +427,16 @@ export class UiBridge {
           // ids (random UUID → tmp:<uuid> → wf:<hash>). A single-hop lookup on
           // the ORIGINAL id would land on the dead intermediate — rewrite every
           // entry pointing at the id being retired so any historical id resolves
-          // to the LIVE tab in one step, and the map never grows chains.
-          for (const [from, to] of this.tabMigrations) {
-            if (to === tabId) this.tabMigrations.set(from, msg.tab_id as string);
+          // to the LIVE tab in one step, and the map never grows chains. Entries
+          // are SOCKET-SCOPED (codex review): wf:<hash> ids are deterministic and
+          // recur across reconnects, so a migration must only ever route to the
+          // socket that created it — compression too stays within this socket.
+          for (const [from, entry] of this.tabMigrations) {
+            if (entry.to === tabId && entry.sock === sock) {
+              this.tabMigrations.set(from, { to: msg.tab_id as string, sock });
+            }
           }
-          this.tabMigrations.set(tabId, msg.tab_id as string);
+          this.tabMigrations.set(tabId, { to: msg.tab_id as string, sock });
           // Authoritative migration signal for the orchestrator (same-socket
           // re-hello — the ONLY safe rebind trigger; title matching is not).
           (msg as Record<string, unknown>).migrated_from = tabId;
@@ -519,6 +528,12 @@ export class UiBridge {
     });
 
     sock.on("close", () => {
+      // Prune this socket's migration aliases — they can only ever route to
+      // this socket (socket-scoped), so they're inert once it dies. Keeps the
+      // map bounded over long-lived orchestrators (codex review).
+      for (const [from, entry] of this.tabMigrations) {
+        if (entry.sock === sock) this.tabMigrations.delete(from);
+      }
       if (tabId && this.conns.get(tabId)?.sock === sock) {
         this.conns.delete(tabId);
         if (this.lastActiveTabId === tabId) this.lastActiveTabId = null;
@@ -579,18 +594,21 @@ export class UiBridge {
       // Accept full ids or unambiguous prefixes (status shows 8-char ids).
       const exact = this.conns.get(tabId);
       if (exact) return exact;
-      // Tab-id migration fallback: an agent session was bound to a tabId that
-      // no longer matches any connected tab (the panel's tab-id scheme changed
-      // mid-session, e.g. random UUID → deterministic tmp:/wf:). Redirect to
-      // the new tabId the socket re-helloed under so the session self-heals.
-      const migrated = this.tabMigrations.get(tabId);
-      if (migrated) {
-        const target = this.conns.get(migrated);
-        if (target) return target;
-      }
       const prefixed = Array.from(this.conns.values()).filter((c) =>
         c.tabId.startsWith(tabId),
       );
+      // Tab-id migration fallback — checked AFTER prefix matching (codex
+      // review: a stale alias must never shadow a legitimately connected
+      // prefix match), and only honored when the live connection is STILL the
+      // socket that created the migration (wf:<hash> ids recur — an unrelated
+      // later tab reusing the id must not inherit someone else's alias).
+      if (prefixed.length === 0) {
+        const migrated = this.tabMigrations.get(tabId);
+        if (migrated) {
+          const target = this.conns.get(migrated.to);
+          if (target && target.sock === migrated.sock) return target;
+        }
+      }
       if (prefixed.length === 1) return prefixed[0];
       throw new Error(
         prefixed.length > 1
