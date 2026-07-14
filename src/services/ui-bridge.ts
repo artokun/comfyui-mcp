@@ -97,6 +97,15 @@ export class UiBridge {
    *  listener stays token-less so the local browser panel is unaffected. */
   private readonly extraServers: WebSocketServer[] = [];
   private conns = new Map<string, Conn>(); // tabId -> connection
+  /**
+   * Tab-id migrations (oldTabId → newTabId). When a panel socket re-hellos under
+   * a NEW tab id (e.g. after a panel update that changed the id scheme from
+   * random UUID to deterministic tmp:/wf: prefixed ids), the old id is mapped to
+   * the new one so agent sessions that were bound to the old id can still resolve
+   * their target via resolveTarget — the session self-heals instead of throwing
+   * "no connected tab with id …" on every panel_* call.
+   */
+  private tabMigrations = new Map<string, string>();
   /** Per-tab "mailbox" of undeliverable render deliveries (show_media), buffered
    *  while a client is OFFLINE and flushed on reconnect — so a finished render is
    *  never lost when the mobile app is backgrounded/killed mid-render. Keyed by a
@@ -410,6 +419,7 @@ export class UiBridge {
         // tab mapping so a background agent's push() to the old tab can't leak into
         // the newly-targeted view (frames carry no tab_id — the socket is the tab).
         if (tabId && tabId !== msg.tab_id && this.conns.get(tabId)?.sock === sock) {
+          this.tabMigrations.set(tabId, msg.tab_id);
           this.conns.delete(tabId);
         }
         tabId = msg.tab_id;
@@ -558,6 +568,15 @@ export class UiBridge {
       // Accept full ids or unambiguous prefixes (status shows 8-char ids).
       const exact = this.conns.get(tabId);
       if (exact) return exact;
+      // Tab-id migration fallback: an agent session was bound to a tabId that
+      // no longer matches any connected tab (the panel's tab-id scheme changed
+      // mid-session, e.g. random UUID → deterministic tmp:/wf:). Redirect to
+      // the new tabId the socket re-helloed under so the session self-heals.
+      const migrated = this.tabMigrations.get(tabId);
+      if (migrated) {
+        const target = this.conns.get(migrated);
+        if (target) return target;
+      }
       const prefixed = Array.from(this.conns.values()).filter((c) =>
         c.tabId.startsWith(tabId),
       );

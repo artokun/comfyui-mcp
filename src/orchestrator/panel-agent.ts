@@ -1254,6 +1254,50 @@ export class PanelAgentManager {
     this.pendingResume.set(tabId, sessionId);
   }
 
+  /**
+   * Rebind an agent from its current (stale) tabId to a new tabId — recovers
+   * from a panel tab-id scheme migration (e.g. random UUID → deterministic
+   * tmp:/wf: prefixed ids) without losing the conversation. The agent's panel
+   * tools still carry the old tabId; the UiBridge's tabMigrations map (see
+   * ui-bridge.ts resolveTarget) redirects those calls to the new connection.
+   * Returns true if an agent was rebound.
+   */
+  rebindAgent(oldKey: string, newKey: string): boolean {
+    if (oldKey === newKey) return false;
+    if (this.agents.has(newKey)) return false;
+    const agent = this.agents.get(oldKey);
+    if (!agent || agent.isStopped) return false;
+    this.agents.delete(oldKey);
+    this.agents.set(newKey, agent);
+    const resume = this.pendingResume.get(oldKey);
+    if (resume) {
+      this.pendingResume.delete(oldKey);
+      this.pendingResume.set(newKey, resume);
+    }
+    const effortRestart = this.pendingEffortRestart.has(oldKey);
+    if (effortRestart) {
+      this.pendingEffortRestart.delete(oldKey);
+      this.pendingEffortRestart.add(newKey);
+    }
+    const mcpRestart = this.pendingMcpRestart.get(oldKey);
+    if (mcpRestart !== undefined) {
+      this.pendingMcpRestart.delete(oldKey);
+      this.pendingMcpRestart.set(newKey, mcpRestart);
+    }
+    const model = this.modelByKey.get(oldKey);
+    if (model) {
+      this.modelByKey.delete(oldKey);
+      this.modelByKey.set(newKey, model);
+    }
+    const effort = this.effortByKey.get(oldKey);
+    if (effort) {
+      this.effortByKey.delete(oldKey);
+      this.effortByKey.set(newKey, effort);
+    }
+    this.opts.sessionStore?.clear(oldKey);
+    return true;
+  }
+
   /** Route a panel message to its tab's agent, creating the agent if needed.
    *  Never routes into a stopped agent (whose channel is closed) — respawns so
    *  the message reaches a live session. */
