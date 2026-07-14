@@ -1,6 +1,6 @@
 ---
 title: "Backends / providers"
-description: "The panel agent runs on ANY LLM: Claude, ChatGPT, or Gemini on your own subscription (no API key), a free local model via Ollama (no account at all), or any hosted model over an OpenAI-compatible endpoint. How the provider-neutral AgentBackend port, the picker, and the capability matrix work."
+description: "The panel agent runs on ANY LLM: Claude, ChatGPT, Gemini, Grok, Kimi, or GLM on your own subscription/plan, a free local model via Ollama / LM Studio / llama.cpp (no account at all), or any hosted model over an OpenAI-compatible endpoint. How the provider-neutral AgentBackend port, the picker, and the capability matrix work."
 icon: "shuffle"
 ---
 
@@ -20,8 +20,10 @@ panel (pick a provider) ⇄ loopback bridge ⇄ orchestrator (Claude · ChatGPT 
 
 ## Pick a provider, not a port
 
-The panel shows a **backend picker** — Claude / ChatGPT / Gemini / Ollama
-chips. Clicking one connects that provider on the single shared orchestrator
+The panel shows a **backend picker** — Claude / ChatGPT / Gemini / Grok /
+Kimi / GLM / Ollama / LM Studio / llama.cpp / OpenRouter / Custom endpoint
+chips (experimental providers like Copilot appear behind the experimental
+toggle). Clicking one connects that provider on the single shared orchestrator
 (one bridge port serves all providers; each panel tab picks its provider in
 the handshake). The Bridge URL lives under **Advanced** for user-managed
 orchestrators.
@@ -33,8 +35,23 @@ placeholder follows the active backend ("Ask Claude…" / "Ask Ollama…").
 ## Sign in (once per provider — or not at all)
 
 - **Claude** — `claude` (or `claude setup-token`) — claude.ai OAuth (subscription).
-- **ChatGPT** — `codex login` — ChatGPT login (subscription).
+- **ChatGPT (Codex)** — `codex login` — ChatGPT login (subscription); runs
+  through the Codex app-server.
+- **ChatGPT (direct OAuth)** — no extra step if you've ever run
+  `codex login`: the `chatgpt` backend reuses `~/.codex/auth.json` and talks
+  to ChatGPT directly (no Codex process). If the ack says the auth file is
+  missing, run `codex login` once.
 - **Gemini** — `gemini` — Google sign-in.
+- **Grok** — install the Grok CLI (xAI / Grok Build) and run `grok` once to
+  sign in; the backend drives it in ACP mode. The panel also offers an
+  in-panel OAuth sign-in row when Grok isn't ready.
+- **Kimi** — Kimi Code login (writes `~/.kimi/credentials/kimi-code.json`),
+  or set `KIMI_API_KEY` for pay-per-token/CI use. In-panel OAuth sign-in is
+  offered too.
+- **GLM** — set `ZAI_API_KEY` (Z.AI Coding Plan; `GLM_API_KEY` /
+  `ZHIPUAI_API_KEY` also accepted). No CLI.
+- **Copilot (experimental)** — sign in from the panel's experimental provider
+  row. Off by default; enable experimental backends in Settings first.
 - **Ollama (local)** — no sign-in. Install Ollama and pull a tool-calling
   model (`ollama pull gemma4:e4b`). For a **hosted** model instead, set
   `COMFYUI_MCP_OLLAMA_API=openai`, `COMFYUI_MCP_OLLAMA_BASE_URL` (e.g.
@@ -47,6 +64,12 @@ placeholder follows the active backend ("Ask Claude…" / "Ask Ollama…").
   [Local LLMs → Custom endpoint](/local-llms#custom-endpoint-any-openai-compatible-server).
 
 ### Connect-time readiness & onboarding
+
+Every provider chip degrades HONESTLY when it isn't ready: the connect ack
+tells you the exact missing step (“Set ZAI_API_KEY…”, “run `codex login`…”,
+“Sign in from the experimental row…”) instead of failing on your first
+message — and a provider whose credentials appear later flips to ready on
+the next Connect without a restart.
 
 The panel detects each provider's readiness at **Connect** time — a CLI on
 `PATH` plus a login on disk for the subscription providers, a present binary
