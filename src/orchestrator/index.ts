@@ -1135,11 +1135,6 @@ export async function runPanelOrchestrator(): Promise<void> {
   const tabBackends = new Map<string, string>(); // panel tabId -> selected backend
   const headlessTabs = new Set<string>(); // tabs with no ComfyUI canvas (mobile/remote) — deliver renders in-turn
   const workflowTargets = new WorkflowTargetStore();
-  /** Maps last-seen workflow title → panel tabId, for detecting tab-id migrations
-   *  (a panel update changed the tab-id scheme mid-session, e.g. random UUID →
-   *  deterministic tmp:/wf: prefixed ids). Updated on every hello; when a new
-   *  hello's title matches a DIFFERENT tabId, the old tab's agent is rebound. */
-  const workflowTitleToTabId = new Map<string, string>();
   const backendForTab = (panelTabId: string): string =>
     tabBackends.get(panelTabId) ?? defaultBackend;
   const agentKeyFor = (panelTabId: string): string =>
@@ -1954,27 +1949,36 @@ export async function runPanelOrchestrator(): Promise<void> {
           ? ((event as { backend?: string }).backend as string).toLowerCase()
           : undefined;
       const backend = reqBackend && KNOWN_BACKENDS.has(reqBackend) ? reqBackend : defaultBackend;
-      // Tab-id migration detection: when a tab reconnects under a NEW tabId
-      // (panel update changed the id scheme, e.g. random UUID → tmp:/wf:), find
-      // the existing agent that was bound to the old tabId for this workflow
-      // title and rebind it to the new tabId — keeping the conversation alive.
-      const helloTitle = typeof event.title === "string" && event.title ? event.title : "";
-      if (helloTitle) {
-        const prevTabId = workflowTitleToTabId.get(helloTitle);
-        if (prevTabId && prevTabId !== panelTab) {
-          const prevKey = prevTabId + AGENT_KEY_SEP + (tabBackends.get(prevTabId) ?? backend);
-          const newKey = panelTab + AGENT_KEY_SEP + backend;
-          if (manager.rebindAgent(prevKey, newKey)) {
-            logger.info(
-              `[panel-orchestrator] tab-id migration detected: ${prevTabId.slice(0, 8)} → ${panelTab.slice(0, 8)} for workflow "${helloTitle}" — agent rebound, conversation preserved`,
-            );
-            tabBackends.delete(prevTabId);
-            headlessTabs.delete(prevTabId);
-            workflowTargets.clear(prevTabId);
-          }
+      // Tab-id migration (issue #210): the BRIDGE stamps `migrated_from` on a
+      // hello when the SAME socket re-helloed under a new tab id (panel update
+      // changed the id scheme, e.g. random UUID → tmp:/wf:). That same-socket
+      // signal is the only safe rebind trigger — a workflow-title heuristic
+      // would steal agents across identically-titled tabs (two "Unsaved
+      // Workflow" tabs are routine). Rebind the old id's agent so the
+      // conversation survives instead of orphaning on a dead tab id.
+      const migratedFrom =
+        typeof (event as { migrated_from?: unknown }).migrated_from === "string"
+          ? ((event as { migrated_from?: string }).migrated_from as string)
+          : undefined;
+      if (migratedFrom && migratedFrom !== panelTab) {
+        const prevBackend = tabBackends.get(migratedFrom) ?? backend;
+        const prevKey = migratedFrom + AGENT_KEY_SEP + prevBackend;
+        const newKey = panelTab + AGENT_KEY_SEP + prevBackend;
+        if (manager.rebindAgent(prevKey, newKey)) {
+          logger.info(
+            `[panel-orchestrator] tab-id migration: ${migratedFrom.slice(0, 12)} → ${panelTab.slice(0, 12)} — agent rebound, conversation preserved`,
+          );
         }
+        // Carry the old tab's runtime prefs to the new id regardless of whether
+        // an agent was live (backend pick, headless flag), then retire the old id.
+        if (!tabBackends.has(panelTab) && tabBackends.has(migratedFrom)) {
+          tabBackends.set(panelTab, tabBackends.get(migratedFrom)!);
+        }
+        if (headlessTabs.has(migratedFrom)) headlessTabs.add(panelTab);
+        tabBackends.delete(migratedFrom);
+        headlessTabs.delete(migratedFrom);
+        workflowTargets.clear(migratedFrom);
       }
-      workflowTitleToTabId.set(helloTitle, panelTab);
       const prev = tabBackends.get(panelTab);
       if (prev && prev !== backend) {
         // Provider switch: retire the previous provider's agent for this tab so it

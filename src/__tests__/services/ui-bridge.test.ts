@@ -441,6 +441,32 @@ describe("UiBridge (multi-tab)", () => {
     sockB.close();
   });
 
+  it("follows MIGRATION CHAINS: uuid → tmp: → wf: (the exact #210 field sequence)", async () => {
+    // The reported failure re-helloed TWICE: legacy random UUID, then the
+    // unsaved-tab tmp:<uuid> id, then the saved wf:<hash> id. The ORIGINAL id
+    // must still resolve after both hops (single-hop lookup lands on the dead
+    // tmp: id) — the map path-compresses so every historical id points at the
+    // live tab.
+    const sock = await connectPanel();
+    autoReply(sock, "chained");
+    const uuid = "6eccc826-592e-4abb-b280-35434e00ddd1";
+    sock.send(JSON.stringify({ type: "hello", tab_id: uuid, title: "image_flux2_fp8" }));
+    await vi.waitFor(() => expect(bridge.tabs()).toHaveLength(1));
+
+    sock.send(JSON.stringify({ type: "hello", tab_id: "tmp:7eab1234", title: "image_flux2_fp8" }));
+    await vi.waitFor(() => expect(bridge.tabs()[0]?.tab_id).toBe("tmp:7eab1234"));
+
+    sock.send(JSON.stringify({ type: "hello", tab_id: "wf:workf", title: "image_flux2_fp8" }));
+    await vi.waitFor(() => expect(bridge.tabs()[0]?.tab_id).toBe("wf:workf"));
+
+    // Every id along the chain resolves to the live tab.
+    for (const id of [uuid, "tmp:7eab1234", "wf:workf"]) {
+      const r = await bridge.send({ cmd: "ping" }, { tabId: id });
+      expect(r).toMatchObject({ from: "chained" });
+    }
+    sock.close();
+  });
+
   it("retries binding when the port is briefly held, then self-heals", async () => {
     // Simulate a fast /mcp reconnect: a previous session still owns the port
     // when the new bridge starts. It should back off, retry, and bind once the

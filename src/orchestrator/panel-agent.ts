@@ -1294,6 +1294,10 @@ export class PanelAgentManager {
       this.effortByKey.delete(oldKey);
       this.effortByKey.set(newKey, effort);
     }
+    // MIGRATE the persisted session id (don't clear it — that breaks resume
+    // across a process restart for the rebound conversation).
+    const persisted = this.opts.sessionStore?.get(oldKey);
+    if (persisted) this.opts.sessionStore?.set(newKey, persisted);
     this.opts.sessionStore?.clear(oldKey);
     return true;
   }

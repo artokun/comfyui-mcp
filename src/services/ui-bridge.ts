@@ -419,7 +419,18 @@ export class UiBridge {
         // tab mapping so a background agent's push() to the old tab can't leak into
         // the newly-targeted view (frames carry no tab_id — the socket is the tab).
         if (tabId && tabId !== msg.tab_id && this.conns.get(tabId)?.sock === sock) {
-          this.tabMigrations.set(tabId, msg.tab_id);
+          // PATH-COMPRESS the migration map: the reported field failure chains
+          // ids (random UUID → tmp:<uuid> → wf:<hash>). A single-hop lookup on
+          // the ORIGINAL id would land on the dead intermediate — rewrite every
+          // entry pointing at the id being retired so any historical id resolves
+          // to the LIVE tab in one step, and the map never grows chains.
+          for (const [from, to] of this.tabMigrations) {
+            if (to === tabId) this.tabMigrations.set(from, msg.tab_id as string);
+          }
+          this.tabMigrations.set(tabId, msg.tab_id as string);
+          // Authoritative migration signal for the orchestrator (same-socket
+          // re-hello — the ONLY safe rebind trigger; title matching is not).
+          (msg as Record<string, unknown>).migrated_from = tabId;
           this.conns.delete(tabId);
         }
         tabId = msg.tab_id;
