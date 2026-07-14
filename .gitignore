@@ -50,7 +50,10 @@ arena-results*/panel-arena-results.json
 /*.png
 arena-results-local-batch/
 arena-results*/transcripts/
-finetune/artifacts/
+# Fine-tune training data/artifacts — canonical copies live on HF
+# (artokun/gemma4-comfyui-mcp finetune/); multi-GB, never committed.
+/finetune/
+/finetune-v2/
 arena-results-podverify/
 arena-results-quality-probe/
 /*.mp4

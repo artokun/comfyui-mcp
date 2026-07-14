@@ -6,6 +6,15 @@ dist
 .git
 .claude
 
+# Fine-tune data + eval artifacts — multi-GB, irrelevant to the image
+# (root Dockerfile only COPYs package.json/scripts/tsconfig/src, but the
+# whole repo root is the BUILD CONTEXT — without these lines every build
+# tars gigabytes to the daemon for nothing)
+finetune
+finetune-v2
+arena-results
+docs
+
 # Env / secrets / local user config
 .env
 .env.*
