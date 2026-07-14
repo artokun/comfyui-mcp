@@ -1,33 +1,26 @@
-# Build artifacts and deps — rebuilt inside the image
-node_modules
-dist
+# WHITELIST build context — the root Dockerfile COPYs exactly:
+#   package.json  package-lock.json  scripts/  tsconfig.json  src/
+# Ignore everything else by default so nothing that later lands in the repo
+# (fine-tune data, arena results, docs, worktrees, secrets) can ever bloat
+# the context or leak into a build. Last match wins: the trailing rules
+# carve tests back OUT of the re-included src/.
+*
+!package.json
+!package-lock.json
+!tsconfig.json
+!scripts
+!src
 
-# VCS and local agent worktrees
-.git
-.claude
-
-# Fine-tune data + eval artifacts — multi-GB, irrelevant to the image
-# (root Dockerfile only COPYs package.json/scripts/tsconfig/src, but the
-# whole repo root is the BUILD CONTEXT — without these lines every build
-# tars gigabytes to the daemon for nothing)
-finetune
-finetune-v2
-arena-results
-docs
-
-# Env / secrets / local user config
-.env
-.env.*
-model-settings.user.jsonc
-
-# Tests and docs not needed at runtime
+# Not needed to compile or run — carved back out of src/
 src/__tests__
 **/*.test.ts
-*.md
-TODO.md
 
-# Editor / OS cruft
-.vscode
-.idea
-.DS_Store
-npm-debug.log*
+# Defense in depth (already excluded by *, kept explicit for greppability)
+.env
+.env.*
+.git
+.claude
+node_modules
+dist
+finetune
+finetune-v2
