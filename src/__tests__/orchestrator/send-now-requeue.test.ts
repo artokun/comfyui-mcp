@@ -40,14 +40,21 @@ class RecordingBackend implements AgentBackend {
   private brokenByInterrupt = false;
   /** When true a turn completes cleanly (emits result) instead of hanging. */
   autoComplete = false;
+  /** Subtype for autoComplete results — lets a test simulate a REAL failed turn
+   *  (error subtype without any interrupt). */
+  completeSubtype = "success";
 
   async *run(opts: BackendStartOptions): AsyncGenerator<AgentEvent> {
     yield { type: "session", sessionId: "sess-rec" };
     for await (const turn of opts.channel) {
       this.turns.push(turn.text);
       if (this.autoComplete) {
-        // Clean completion → terminal result, no hang.
-        yield { type: "result", ok: true, subtype: "success" };
+        // Completion → terminal result, no hang (subtype per completeSubtype).
+        yield {
+          type: "result",
+          ok: this.completeSubtype === "success",
+          subtype: this.completeSubtype,
+        };
         continue;
       }
       // Hang until interrupt() breaks us (the in-flight turn the user "stops").
@@ -57,9 +64,12 @@ class RecordingBackend implements AgentBackend {
       this.breakTurn = null;
       if (this.brokenByInterrupt) {
         // The interrupted turn ends with a result (like the real SDK) — this is
-        // the signal that releases the turn gate for the next batch.
+        // the signal that releases the turn gate for the next batch. The real
+        // Claude SDK reports an interrupted turn with an ERROR subtype
+        // (error_during_execution), so mirror that: the panel must not paint it
+        // as a turn failure.
         this.brokenByInterrupt = false;
-        yield { type: "result", ok: false, subtype: "interrupted" };
+        yield { type: "result", ok: false, subtype: "error_during_execution" };
       }
     }
   }
@@ -77,12 +87,14 @@ class RecordingBackend implements AgentBackend {
   }
 }
 
-function makeDeps() {
+function makeDeps(says: string[] = []) {
   return {
     mcpServers: {},
     systemAppend: "",
     model: "claude-test",
-    onSay: () => {},
+    onSay: (_tab: string, text: string) => {
+      says.push(text);
+    },
     onTurn: () => {},
   };
 }
@@ -167,6 +179,39 @@ describe("send-now re-queues the interrupted message", () => {
     await new Promise((r) => setTimeout(r, 100));
     expect(backend.turns).toHaveLength(1);
     expect(backend.turns[0]).toContain("only message");
+
+    await agent.stop();
+  });
+
+  it("a user interrupt does NOT paint the '⚠️ That turn failed' banner", async () => {
+    // The real Claude SDK ends an interrupted turn with an error-subtype result
+    // (error_during_execution). That is the INTERRUPT landing, not a failure —
+    // the never-end-in-silence guard must stay quiet for it.
+    const says: string[] = [];
+    const backend = new RecordingBackend();
+    const agent = new PanelAgent("tab-banner", makeDeps(says) as never, backend);
+    void agent.start();
+
+    agent.send("message the user send-nows past");
+    await waitFor(() => backend.turns.length === 1);
+    agent.send("the send-now message");
+    await agent.interrupt({ requeueInFlight: true });
+    await waitFor(() => backend.turns.length === 2, 500);
+
+    expect(says.filter((s) => s.includes("That turn failed"))).toHaveLength(0);
+    await agent.stop();
+  });
+
+  it("a REAL failed turn (no interrupt) still paints the failure banner", async () => {
+    const says: string[] = [];
+    const backend = new RecordingBackend();
+    backend.autoComplete = true;
+    backend.completeSubtype = "error_during_execution"; // genuine failure, no interrupt
+    const agent = new PanelAgent("tab-realerr", makeDeps(says) as never, backend);
+    void agent.start();
+
+    agent.send("message whose turn genuinely fails");
+    await waitFor(() => says.some((s) => s.includes("That turn failed")), 2000);
 
     await agent.stop();
   });

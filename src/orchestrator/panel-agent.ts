@@ -188,6 +188,14 @@ export class PanelAgent {
    *  `error` event case so an error-subtype `result` right behind it doesn't
    *  paint a second failure line. Reset when a turn starts (busy = true). */
   private errorSurfaced = false;
+  /** True between a USER-initiated interrupt (Stop / send-now) and the aborted
+   *  turn's terminal result. The Claude SDK reports an interrupted turn as an
+   *  error-subtype result (error_during_execution), which the never-end-in-
+   *  silence guard below would otherwise paint as "⚠️ That turn failed" — a
+   *  scary failure line for something the user did on purpose. Cleared on the
+   *  next result and at the next turn dispatch, so a REAL later failure still
+   *  surfaces. */
+  private interruptRequested = false;
   // ---- turn idle watchdog (freeze safety net) ----
   // A stalled turn (the backend stops emitting ANY events — e.g. a wedged Codex
   // app-server) would otherwise leave the panel "working" forever. This is an
@@ -467,6 +475,9 @@ export class PanelAgent {
     // both clear it and have us re-queue a stale copy.
     const interrupted = this.inFlight;
     this.inFlight = null;
+    // The aborted turn's result is EXPECTED (and error-subtyped on the Claude
+    // SDK) — don't let the result case report it as a turn failure.
+    this.interruptRequested = true;
     // The turn that's in flight RIGHT NOW — the one we're aborting. Captured
     // before the await so the release fallback below targets exactly this turn's
     // gate (not a later one the channel may legitimately advance to if the
@@ -632,6 +643,7 @@ export class PanelAgent {
       // it's meant to catch, so onTurnStalled() would no-op. (handleEvent's later
       // `busy = true` becomes a harmless no-op.) Also shows "working" immediately.
       this.errorSurfaced = false; // fresh turn → its failure (if any) is unreported
+      this.interruptRequested = false; // a stale interrupt can't mute THIS turn's failure
       this.busy = true;
       this.deps.onTurn?.(this.tabId, "working");
       // Arm the freeze watchdog AT DISPATCH: a turn that produces NO events at all
@@ -948,8 +960,12 @@ export class PanelAgent {
         // Failed turn that never produced a visible error (the claude SDK path
         // reports failures only via the result subtype; the `error` event case
         // covers codex/gemini/grok) → say SOMETHING. A turn must never end in
-        // silence, error turns included.
-        if ((ev.ok === false || /error/i.test(ev.subtype ?? "")) && !this.errorSurfaced) {
+        // silence, error turns included. EXCEPT a turn the user just interrupted
+        // (Stop / send-now): its error-subtype result is the interrupt landing,
+        // not a failure.
+        const wasInterrupted = this.interruptRequested;
+        this.interruptRequested = false; // one result consumes the flag
+        if ((ev.ok === false || /error/i.test(ev.subtype ?? "")) && !this.errorSurfaced && !wasInterrupted) {
           this.errorSurfaced = true;
           this.deps.onSay(
             this.tabId,
