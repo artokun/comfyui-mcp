@@ -1086,6 +1086,44 @@ export function buildPanelToolDefs(): PanelToolDef[] {
       async (args: A, ctx) => ctx.call({ cmd: "set_todo", items: args.items }, 5000),
     ),
     def(
+      "panel_open_civitai",
+      "Open the in-panel CivitAI browser for the user, pre-seeded with a search term and suggested filters, so they can VISUALLY browse and pick a model / LoRA / checkpoint / workflow / image. Use this whenever the user wants to find or choose a resource on CivitAI: set a helpful query + filters matched to their goal (including the browsing level), and they pick. Their selection comes back to you as a normal chat message — UNLESS the panel is muted, in which case they download it directly themselves. Prefer this over guessing a specific model or asking them to paste a URL.",
+      {
+        query: z
+          .string()
+          .optional()
+          .describe("Search term to pre-fill (e.g. 'anime lineart', 'Flux photoreal'). Omit for a plain browse."),
+        tab: z
+          .enum(["images", "videos", "checkpoints", "loras", "workflows", "favorites"])
+          .optional()
+          .describe("Which tab to open. Default 'images'. Use 'loras'/'checkpoints'/'workflows' when they want a downloadable resource."),
+        browsingLevels: z
+          .array(z.number())
+          .optional()
+          .describe("Content levels to show, as a set of bitmask values: PG=1, PG-13=2, R=4, X=8, XXX=16. e.g. [1,2] for SFW only, [1,2,4,8,16] for everything. Default [1]. Match the user's stated comfort."),
+        filters: z
+          .object({
+            period: z.string().optional(),
+            modelSort: z.string().optional(),
+            imageSort: z.string().optional(),
+            baseModels: z.array(z.string()).optional(),
+          })
+          .optional()
+          .describe("Optional filter hints: period, a sort, and base-model names (e.g. ['Flux.1 D'])."),
+      },
+      async (args: A, ctx) =>
+        ctx.call(
+          {
+            cmd: "open_civitai",
+            query: args.query,
+            tab: args.tab,
+            browsingLevels: args.browsingLevels,
+            filters: args.filters,
+          },
+          10000,
+        ),
+    ),
+    def(
       "panel_ask",
       "Ask the user to choose between options — renders an interactive question card in the panel chat and BLOCKS until they pick, returning their choice as text. Use this (NOT the AskUserQuestion tool, which never renders here) whenever you need the user to decide between options. Each option may carry a short description. The card always includes an 'Other…' free-text field, so the returned string may be a listed label or whatever the user typed (comma-joined for multi_select). Ask only when the answer genuinely changes what you do.",
       {
