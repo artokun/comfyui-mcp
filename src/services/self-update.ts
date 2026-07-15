@@ -321,7 +321,22 @@ export async function getLatestPublishedVersion(
 // Policy engine
 // ---------------------------------------------------------------------------
 
-function isAutoUpdateDisabled(env: NodeJS.ProcessEnv): boolean {
+/** Truthy env values for the DISABLE-style flag. */
+function isTruthy(raw: string | undefined): boolean {
+  const v = (raw ?? "").trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes" || v === "on";
+}
+
+/**
+ * Master auto-update kill switch. Default ON. Two spellings:
+ *   - COMFYUI_MCP_AUTO_UPDATE_DISABLE=1 — the documented opt-out (default 0).
+ *   - COMFYUI_MCP_AUTOUPDATE=0          — the original opt-out, kept for
+ *     back-compat with existing setups.
+ * Disabling auto-update also disables the orchestrator's periodic check +
+ * self-restart (self-restart.ts consults this same switch).
+ */
+export function isAutoUpdateDisabled(env: NodeJS.ProcessEnv): boolean {
+  if (isTruthy(env.COMFYUI_MCP_AUTO_UPDATE_DISABLE)) return true;
   const v = (env.COMFYUI_MCP_AUTOUPDATE ?? "").trim().toLowerCase();
   return v === "0" || v === "false" || v === "no" || v === "off";
 }

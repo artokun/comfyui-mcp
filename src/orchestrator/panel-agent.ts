@@ -1511,6 +1511,15 @@ export class PanelAgentManager {
     return this.agents.size;
   }
 
+  /** True when NO agent is mid-turn or holding queued messages — the only
+   *  moment a self-restart may replace the process without eating a reply. */
+  allIdle(): boolean {
+    for (const a of this.agents.values()) {
+      if (a.isBusy || a.hasPending) return false;
+    }
+    return true;
+  }
+
   get defaults(): { model: string; effort?: Effort } {
     return { model: this.model, effort: this.effort };
   }

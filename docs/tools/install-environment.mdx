@@ -105,7 +105,7 @@ Install, update, reinstall, or report status of the ComfyUI sidebar panel ('comf
 
 ## self_update
 
-Check or apply a self-update of the comfyui-mcp npm package against the npm registry. The server also auto-checks on start (opt out with COMFYUI_MCP_AUTOUPDATE=0). Detects the install mode: a dev install (npm link / source checkout) is NEVER updated; global/local installs are updated via npm; npx fetches latest on next run. The running process cannot hot-swap its own code — after an update you must RECONNECT (/mcp) or restart the orchestrator to load the new version. This tool does not auto-restart.
+Check or apply a self-update of the comfyui-mcp npm package against the npm registry. The server also auto-checks on start (opt out with COMFYUI_MCP_AUTO_UPDATE_DISABLE=1, or the legacy COMFYUI_MCP_AUTOUPDATE=0). Detects the install mode: a dev install (npm link / source checkout) is NEVER updated; global/local installs are updated via npm; npx fetches latest on next run. The running MCP server cannot hot-swap its own code — after an update, RECONNECT (/mcp) to load the new version; this tool never restarts the MCP process (your MCP client owns it). The PANEL ORCHESTRATOR, by contrast, re-checks hourly and restarts itself once every agent is idle (announced in the panel; sessions resume automatically) — set COMFYUI_MCP_AUTORESTART=0 to keep checks but never restart.
 
 ### Parameters
 

@@ -9,12 +9,30 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+- a user interrupt (panel Stop or a pending-tray **Send now**) no longer paints
+  the "⚠️ That turn failed (error_during_execution)" banner — the Claude SDK
+  reports an interrupted turn with an error-subtype result, which the
+  never-end-in-silence guard mistook for a real failure; genuine failed turns
+  still surface (#221)
 - UI→API conversion no longer scrambles widget values on nodes with a custom
   serialized-widget layout (`properties.has_serialized_properties` — LTXDirector,
   LTXSequencer, PromptRelay): authoritative named values in `node.properties`
   now win over the shifted positional mapping (#222)
 
 #### Added
+- **orchestrator self-updater + self-restarter** (default ON) — the panel
+  orchestrator re-checks npm hourly, updates the installed package
+  (global/local via npm; npx respawns pinned to the new version), and restarts
+  itself once every agent is idle with nothing queued, held, or rendering —
+  the panel announces the restart, sessions resume from the durable store, and
+  the panel reconnects on its own. Dev installs (npm link / checkout) are
+  never modified on disk; instead the orchestrator restarts itself when a
+  rebuilt `dist` lands, so `npm run build` is all a developer needs (no more
+  days-old processes serving a fresh checkout). MCP stdio mode never
+  self-restarts (the MCP client owns that process). Opt out with
+  `COMFYUI_MCP_AUTO_UPDATE_DISABLE=1` (or keep checks but never restart with
+  `COMFYUI_MCP_AUTORESTART=0`); tune the period with
+  `COMFYUI_MCP_UPDATE_CHECK_MS`
 - panel_strip_workflow / panel_slice_workflow read the LIVE CANVAS when called
   with no source (new panel graph_serialize command) — no more save-to-disk
   round trip; strip's description now states its API-format output cannot be

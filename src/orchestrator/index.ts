@@ -20,6 +20,7 @@ import { startUiBridge, isLoopbackBindHost, type UiBridge } from "../services/ui
 import { setupSecureBridge, type SecureBridge } from "../services/secure-bridge.js";
 import { startQuickTunnel } from "../services/tunnel.js";
 import { detectInstallMode } from "../services/self-update.js";
+import { SelfRestarter } from "../services/self-restart.js";
 import { SessionStore } from "./session-store.js";
 import { listSessions, loadTranscript } from "./history.js";
 import { uploadImageHttp } from "../comfyui/client.js";
@@ -3082,10 +3083,16 @@ export async function runPanelOrchestrator(): Promise<void> {
   );
 
   let shuttingDown = false;
-  const shutdown = async () => {
+  // Forward declaration — assigned right after teardownCore exists; teardownCore
+  // stops its timers so no update-check tick can fire mid-teardown.
+  let selfRestarter: SelfRestarter | null = null;
+  /** Everything shutdown does EXCEPT exiting — shared with the self-restarter,
+   *  which spawns its replacement first and exits itself after this settles. */
+  const teardownCore = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
     logger.info("[panel-orchestrator] shutting down — stopping agents…");
+    selfRestarter?.stop();
     clearInterval(downloadTimer);
     if (readvertiseTimer) clearInterval(readvertiseTimer);
     QueueMonitor.stop();
@@ -3109,10 +3116,31 @@ export async function runPanelOrchestrator(): Promise<void> {
     } catch {
       // No lockfile / unreadable — nothing to clean up.
     }
+  };
+  const shutdown = async () => {
+    await teardownCore();
     process.exit(0);
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
+
+  // Self-updater + self-restarter (orchestrator mode only — an MCP stdio server
+  // must never replace itself; its client owns that lifecycle). Dev installs
+  // restart when a rebuild lands; published installs re-check npm periodically,
+  // update, and restart into the new code. A restart only fires with every
+  // agent idle, nothing queued or held, and no render in flight — sessions
+  // resume from the durable store and the panel reconnects on its own.
+  // Default ON; disable with COMFYUI_MCP_AUTO_UPDATE_DISABLE=1 (restart-only
+  // opt-out: COMFYUI_MCP_AUTORESTART=0).
+  selfRestarter = new SelfRestarter({
+    allIdle: () =>
+      manager.allIdle() &&
+      ![...heldDuringGen.values()].some((msgs) => msgs.length > 0) &&
+      !QueueMonitor.isBusy(),
+    announce: (text) => void bridge.push({ type: "say", text }),
+    teardown: teardownCore,
+  });
+  selfRestarter.start();
   // Now that shutdown exists, route self-exit through it (clean teardown: stop
   // agents, drop the lockfile, close the bridge) so the freed port + bridge-death
   // let the pack respawn a clean orchestrator.
