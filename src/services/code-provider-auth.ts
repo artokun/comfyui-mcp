@@ -462,21 +462,50 @@ export async function resolveCopilotOAuth(
   return { ghuToken };
 }
 
-/** GLM Coding Plan API key (Z.AI). Env: ZAI_API_KEY, GLM_API_KEY, or ZHIPUAI_API_KEY. */
-export function resolveGlmCodeCredentials(): GlmCodeCredentials {
-  const apiKey =
-    process.env.ZAI_API_KEY?.trim() ||
-    process.env.GLM_API_KEY?.trim() ||
-    process.env.ZHIPUAI_API_KEY?.trim() ||
-    process.env.ZHIPU_API_KEY?.trim();
+/**
+ * Shared shape for the simple OpenAI-compatible API-key providers (GLM,
+ * Moonshot, and any future one in the openai-provider-registry): read the first
+ * non-empty key from a precedence list (throw with an actionable message if
+ * none), then resolve the base URL from an optional override env (trailing slash
+ * stripped) or the provider default. The `resolve*` fns below are thin,
+ * type-narrowing wrappers so their public signatures and error messages are
+ * unchanged.
+ */
+function resolveKeyedCredentials(opts: {
+  /** API-key env vars in PRECEDENCE order (first non-empty wins). */
+  envKeys: string[];
+  /** Thrown (as a ValidationError) when none of `envKeys` is set. */
+  missingMessage: string;
+  /** Env var that overrides the base URL. */
+  baseUrlEnv: string;
+  /** Default base URL when the override env is unset. */
+  defaultBaseUrl: string;
+}): { apiKey: string; baseUrl: string } {
+  let apiKey: string | undefined;
+  for (const key of opts.envKeys) {
+    const v = process.env[key]?.trim();
+    if (v) {
+      apiKey = v;
+      break;
+    }
+  }
   if (!apiKey) {
-    throw new ValidationError(
-      "GLM Code API requires ZAI_API_KEY (or GLM_API_KEY / ZHIPUAI_API_KEY) from your Z.AI Coding Plan.",
-    );
+    throw new ValidationError(opts.missingMessage);
   }
   const baseUrl =
-    process.env.COMFYUI_MCP_GLM_BASE_URL?.trim().replace(/\/$/, "") || GLM_CODE_DEFAULT_BASE;
+    process.env[opts.baseUrlEnv]?.trim().replace(/\/$/, "") || opts.defaultBaseUrl;
   return { apiKey, baseUrl };
+}
+
+/** GLM Coding Plan API key (Z.AI). Env: ZAI_API_KEY, GLM_API_KEY, or ZHIPUAI_API_KEY. */
+export function resolveGlmCodeCredentials(): GlmCodeCredentials {
+  return resolveKeyedCredentials({
+    envKeys: ["ZAI_API_KEY", "GLM_API_KEY", "ZHIPUAI_API_KEY", "ZHIPU_API_KEY"],
+    missingMessage:
+      "GLM Code API requires ZAI_API_KEY (or GLM_API_KEY / ZHIPUAI_API_KEY) from your Z.AI Coding Plan.",
+    baseUrlEnv: "COMFYUI_MCP_GLM_BASE_URL",
+    defaultBaseUrl: GLM_CODE_DEFAULT_BASE,
+  });
 }
 
 /**
@@ -485,15 +514,26 @@ export function resolveGlmCodeCredentials(): GlmCodeCredentials {
  * Kimi Code coding subscription resolved by `resolveKimiCodeOAuth` above.
  */
 export function resolveMoonshotCredentials(): MoonshotCredentials {
-  const apiKey = process.env.MOONSHOT_API_KEY?.trim();
-  if (!apiKey) {
-    throw new ValidationError(
+  return resolveKeyedCredentials({
+    envKeys: ["MOONSHOT_API_KEY"],
+    missingMessage:
       "Moonshot (Kimi K3) requires MOONSHOT_API_KEY from platform.kimi.ai (https://platform.kimi.ai/console/api-keys).",
-    );
-  }
-  const baseUrl =
-    process.env.COMFYUI_MCP_MOONSHOT_BASE_URL?.trim().replace(/\/$/, "") || MOONSHOT_DEFAULT_BASE;
-  return { apiKey, baseUrl };
+    baseUrlEnv: "COMFYUI_MCP_MOONSHOT_BASE_URL",
+    defaultBaseUrl: MOONSHOT_DEFAULT_BASE,
+  });
+}
+
+/**
+ * Resolve credentials for a simple OpenAI-compatible api-key provider by its
+ * registry id (see services/openai-provider-registry). This is the one place
+ * that marries a `simpleKeyAuth` registry id to its resolver, so the generic
+ * backend factory in orchestrator/index.ts stays provider-agnostic. `kimi` is
+ * intentionally NOT here — its OAuth dual-auth path uses resolveKimiCodeOAuth.
+ */
+export function resolveOpenAiKeyCredentials(id: string): { apiKey: string; baseUrl: string } {
+  if (id === "glm") return resolveGlmCodeCredentials();
+  if (id === "moonshot") return resolveMoonshotCredentials();
+  throw new ValidationError(`No OpenAI api-key credential resolver for provider "${id}".`);
 }
 
 /**

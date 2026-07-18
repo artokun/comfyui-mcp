@@ -9,8 +9,9 @@
 //
 // REUSE vs COPILOT-SPECIFIC:
 // Copilot's chat endpoint is OpenAI chat-completions compatible, so this
-// backend is a THIN subclass of OllamaBackend's "openai" dialect — exactly the
-// GlmBackend/KimiBackend pattern (glm-backend.ts / kimi-backend.ts), NOT the
+// backend is a THIN subclass of OllamaBackend's "openai" dialect — the same
+// pattern as KimiBackend (kimi-backend.ts) and the generic api-key factory
+// (services/openai-provider-registry + makeOpenAiKeyBackend), NOT the
 // Grok/Codex Responses-API adapter (grok-backend.ts's GrokDirectBackend),
 // because Copilot is a real /chat/completions endpoint, not /responses. The
 // inherited chatStream/readOpenAiSse/run/runTurn/dispatch/buildModelTools all

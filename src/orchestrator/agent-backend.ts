@@ -284,22 +284,16 @@ export const CHATGPT_CAPABILITIES: AgentCapabilities = {
   vision: true, // Responses input_image data URLs; strip-and-retry on rejection (#218)
 };
 
-/** Z.AI GLM Coding Plan — OpenAI-compatible /v1/chat/completions. */
-export const GLM_CAPABILITIES: AgentCapabilities = {
-  ...OLLAMA_CAPABILITIES,
-};
-
 /** Kimi Code subscription OAuth or KIMI_API_KEY — OpenAI-compatible coding API. */
 export const KIMI_CAPABILITIES: AgentCapabilities = {
   ...OLLAMA_CAPABILITIES,
 };
 
-/** Moonshot platform API (Kimi K3) — MOONSHOT_API_KEY, OpenAI-compatible
- *  /v1/chat/completions. Distinct from the `kimi` backend (Kimi Code coding
- *  subscription): a general pay-per-token platform key, its own host + model. */
-export const MOONSHOT_CAPABILITIES: AgentCapabilities = {
-  ...OLLAMA_CAPABILITIES,
-};
+// NOTE: glm/moonshot no longer need dedicated *_CAPABILITIES consts — the generic
+// api-key factory (services/openai-provider-registry + makeOpenAiKeyBackend in
+// orchestrator/index.ts) builds a plain OllamaBackend, which already reports
+// OLLAMA_CAPABILITIES (the value the old GLM_CAPABILITIES/MOONSHOT_CAPABILITIES
+// spreads carried). Their BackendId union members are retained above.
 
 /** GitHub Copilot chat via in-panel device-code OAuth — EXPERIMENTAL (ToS risk,
  *  see OAUTH_PROVIDERS.copilot). OpenAI-compatible chat/completions + the same

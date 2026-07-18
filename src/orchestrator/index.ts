@@ -60,11 +60,17 @@ import {
 import { CodexBackend } from "./codex-backend.js";
 import { GeminiBackend, GEMINI_DEFAULT_MODEL } from "./gemini-backend.js";
 import { GrokBackend, GROK_DEFAULT_MODEL } from "./grok-backend.js";
-import { OllamaBackend, OLLAMA_SYSTEM_PROMPT } from "./ollama-backend.js";
+import { OllamaBackend, OLLAMA_SYSTEM_PROMPT, type OllamaBackendDeps } from "./ollama-backend.js";
 import { ChatGptOAuthBackend, CHATGPT_DEFAULT_MODEL } from "./chatgpt-oauth-backend.js";
-import { GlmBackend, GLM_DEFAULT_MODEL } from "./glm-backend.js";
-import { KimiBackend, KIMI_DEFAULT_MODEL } from "./kimi-backend.js";
-import { MoonshotBackend, MOONSHOT_DEFAULT_MODEL } from "./moonshot-backend.js";
+import { KimiBackend } from "./kimi-backend.js";
+import {
+  OPENAI_KEY_PROVIDER_IDS,
+  openAiKeyProvider,
+  simpleKeyProvider,
+  openAiKeyProviderModel,
+  type OpenAiKeyProvider,
+} from "../services/openai-provider-registry.js";
+import { resolveOpenAiKeyCredentials } from "../services/code-provider-auth.js";
 import { CopilotBackend, COPILOT_DEFAULT_MODEL } from "./copilot-backend.js";
 import { SYSTEM as MODEL_CARD_SYSTEM } from "./ai-proposer.js";
 import { resolvePrompt, registerPrompt, onPromptsChanged } from "../services/prompt-overrides.js";
@@ -1106,17 +1112,23 @@ export async function runPanelOrchestrator(): Promise<void> {
   {
     const hydrated = new Set(hydratedSecrets);
     const src = (k: string) => (process.env[k] ? (hydrated.has(k) ? "store" : "env") : "none");
+    const registryKeyed = OPENAI_KEY_PROVIDER_IDS.map(
+      (id) => `${id}=${src(openAiKeyProvider(id)!.envKeys[0]!)}`,
+    ).join(", ");
     logger.info(
-      `[panel-orchestrator] keyed providers: openrouter=${src("OPENROUTER_API_KEY")}, glm=${src("GLM_API_KEY")}, kimi=${src("KIMI_API_KEY")}, moonshot=${src("MOONSHOT_API_KEY")}`,
+      `[panel-orchestrator] keyed providers: openrouter=${src("OPENROUTER_API_KEY")}, ${registryKeyed}`,
     );
   }
   const persistedAgent = getAgentSettings();
   let ollamaModel =
     process.env.COMFYUI_MCP_OLLAMA_MODEL ?? persistedAgent.ollama?.model ?? "artokun/gemma4-comfyui-mcp:e4b";
   const chatgptModel = process.env.COMFYUI_MCP_CHATGPT_MODEL ?? CHATGPT_DEFAULT_MODEL;
-  const glmModel = process.env.COMFYUI_MCP_GLM_MODEL ?? GLM_DEFAULT_MODEL;
-  const kimiModel = process.env.COMFYUI_MCP_KIMI_MODEL ?? KIMI_DEFAULT_MODEL;
-  const moonshotModel = process.env.COMFYUI_MCP_MOONSHOT_MODEL ?? MOONSHOT_DEFAULT_MODEL;
+  // kimi keeps a local model var (its bespoke KimiBackend takes it). glm/moonshot
+  // read their model straight from the registry via the shared factory, so no
+  // per-provider model var is needed for them anymore. All three still resolve to
+  // the exact value the old <provider>Model consts held
+  // (process.env.COMFYUI_MCP_<X>_MODEL ?? <X>_DEFAULT_MODEL).
+  const kimiModel = openAiKeyProviderModel(openAiKeyProvider("kimi")!);
   // EXPERIMENTAL (ToS risk) — off by default, only reachable once the user has
   // signed in via the panel's experimental row (oauth-bridge.ts's
   // allow_experimental gate); never the defaultBackend/auto-pick.
@@ -1214,9 +1226,8 @@ export async function runPanelOrchestrator(): Promise<void> {
     "chatgpt",
     "gemini",
     "grok",
-    "glm",
-    "kimi",
-    "moonshot",
+    // Simple api-key providers (glm/kimi/moonshot) come from the registry.
+    ...OPENAI_KEY_PROVIDER_IDS,
     "ollama",
     "openrouter",
     "lmstudio",
@@ -1417,6 +1428,27 @@ export async function runPanelOrchestrator(): Promise<void> {
       close: async () => {},
     }) as unknown as AgentBackend;
 
+  // ONE code path for the simple OpenAI-compatible api-key providers (glm,
+  // moonshot, …): resolve the provider's key + base URL (throws if absent), then
+  // build the shared OllamaBackend openai driver pinned to that host/key/model.
+  // Collapses the near-identical GlmBackend/MoonshotBackend classes. `kimi` is
+  // excluded (simpleKeyProvider filters it) — its OAuth prepare() keeps KimiBackend.
+  const makeOpenAiKeyBackend = (
+    reg: OpenAiKeyProvider,
+    extra: Partial<OllamaBackendDeps> = {},
+  ): OllamaBackend => {
+    const creds = resolveOpenAiKeyCredentials(reg.id);
+    return new OllamaBackend({
+      ...extra,
+      cwd: comfyuiPath ?? process.cwd(),
+      backendId: reg.id,
+      model: openAiKeyProviderModel(reg),
+      api: "openai",
+      host: creds.baseUrl,
+      apiKey: creds.apiKey,
+    });
+  };
+
   const makeBackend = (key: string): AgentBackend | undefined => {
     const backend = backendOf(key);
     const panelTabId = panelTabOf(key);
@@ -1507,10 +1539,10 @@ export async function runPanelOrchestrator(): Promise<void> {
         mcpServers: makeHttpBackendMcpServers(panelTabId),
       });
     }
-    if (backend === "glm") {
-      return new GlmBackend({
-        cwd: comfyuiPath ?? process.cwd(),
-        model: glmModel,
+    const simpleKeyReg = simpleKeyProvider(backend);
+    if (simpleKeyReg) {
+      // glm/moonshot (and any future simple api-key provider) share one factory.
+      return makeOpenAiKeyBackend(simpleKeyReg, {
         systemAppend: panelSystemAppend,
         comfyuiUrl,
         mcpServers: makeHttpBackendMcpServers(panelTabId),
@@ -1520,15 +1552,6 @@ export async function runPanelOrchestrator(): Promise<void> {
       return new KimiBackend({
         cwd: comfyuiPath ?? process.cwd(),
         model: kimiModel,
-        systemAppend: panelSystemAppend,
-        comfyuiUrl,
-        mcpServers: makeHttpBackendMcpServers(panelTabId),
-      });
-    }
-    if (backend === "moonshot") {
-      return new MoonshotBackend({
-        cwd: comfyuiPath ?? process.cwd(),
-        model: moonshotModel,
         systemAppend: panelSystemAppend,
         comfyuiUrl,
         mcpServers: makeHttpBackendMcpServers(panelTabId),
@@ -1569,17 +1592,15 @@ export async function runPanelOrchestrator(): Promise<void> {
     let pb = probeBackends.get(backend);
     if (!pb) {
       try {
-      pb =
-        backend === "codex"
+      const simpleKeyReg = simpleKeyProvider(backend);
+      pb = simpleKeyReg
+        ? makeOpenAiKeyBackend(simpleKeyReg)
+        : backend === "codex"
           ? new CodexBackend({ cwd: comfyuiPath ?? process.cwd(), model: codexModel })
           : backend === "chatgpt"
             ? new ChatGptOAuthBackend({ cwd: comfyuiPath ?? process.cwd(), model: chatgptModel })
-          : backend === "glm"
-            ? new GlmBackend({ cwd: comfyuiPath ?? process.cwd(), model: glmModel })
           : backend === "kimi"
             ? new KimiBackend({ cwd: comfyuiPath ?? process.cwd(), model: kimiModel })
-          : backend === "moonshot"
-            ? new MoonshotBackend({ cwd: comfyuiPath ?? process.cwd(), model: moonshotModel })
           : backend === "ollama"
             ? new OllamaBackend({ cwd: comfyuiPath ?? process.cwd(), model: ollamaModel, ...ollamaDeps() })
             : backend === "grok"
@@ -1974,9 +1995,8 @@ export async function runPanelOrchestrator(): Promise<void> {
     if (backend === "llamacpp") return llamacppModel || undefined;
     if (backend === "custom") return customModel || undefined;
     if (backend === "chatgpt") return chatgptModel;
-    if (backend === "glm") return glmModel;
-    if (backend === "kimi") return kimiModel;
-    if (backend === "moonshot") return moonshotModel;
+    const reg = openAiKeyProvider(backend);
+    if (reg) return openAiKeyProviderModel(reg); // glm / kimi / moonshot
     if (backend === "copilot") return copilotModel;
     return model;
   }
@@ -2206,9 +2226,8 @@ export async function runPanelOrchestrator(): Promise<void> {
       const isCg = backend === "chatgpt";
       const isGm = backend === "gemini";
       const isGk = backend === "grok";
-      const isGl = backend === "glm";
-      const isKm = backend === "kimi";
-      const isMs = backend === "moonshot";
+      // glm/kimi/moonshot share one registry-driven ack (label + ready + degraded).
+      const reg = openAiKeyProvider(backend);
       const isOl = backend === "ollama";
       const isOr = backend === "openrouter";
       const isLs = backend === "lmstudio";
@@ -2258,7 +2277,9 @@ export async function runPanelOrchestrator(): Promise<void> {
       )
         .then((models) => {
           if (models.length) {
-            const agentLabel = isCx
+            const agentLabel = reg
+              ? (openAiKeyProviderModel(reg) ?? (models[0] as { value?: string }).value ?? reg.ackFallbackLabel)
+              : isCx
               ? (codexModel ?? (models[0] as { value?: string }).value ?? "Codex")
               : isCg
                 ? (chatgptModel ?? (models[0] as { value?: string }).value ?? "ChatGPT")
@@ -2266,12 +2287,6 @@ export async function runPanelOrchestrator(): Promise<void> {
                 ? (geminiModel ?? (models[0] as { value?: string }).value ?? "Gemini")
                 : isGk
                   ? (grokModel ?? (models[0] as { value?: string }).value ?? "Grok")
-                : isGl
-                  ? (glmModel ?? (models[0] as { value?: string }).value ?? "GLM")
-                : isKm
-                  ? (kimiModel ?? (models[0] as { value?: string }).value ?? "Kimi")
-                : isMs
-                  ? (moonshotModel ?? (models[0] as { value?: string }).value ?? "Kimi K3")
                 : isOl
                   ? (ollamaModel ?? (models[0] as { value?: string }).value ?? "Ollama")
                   : isLs
@@ -2320,7 +2335,9 @@ export async function runPanelOrchestrator(): Promise<void> {
             }
             // Greet only on a FRESH session (a resume/reconnect already has the thread).
             if (!resume) {
-              const readyText = isCx
+              const readyText = reg
+                ? reg.readyMessage(agentLabel)
+                : isCx
                 ? `🟢 comfyui-mcp agent ready — ${agentLabel} on your Codex (ChatGPT) account. Ask away.`
                 : isCg
                   ? `🟢 comfyui-mcp agent ready — ${agentLabel} on your ChatGPT subscription (direct OAuth). Ask away.`
@@ -2328,12 +2345,6 @@ export async function runPanelOrchestrator(): Promise<void> {
                   ? `🟢 comfyui-mcp agent ready — ${agentLabel} on your Google account (Gemini Code Assist). Ask away.`
                   : isGk
                     ? `🟢 comfyui-mcp agent ready — ${agentLabel} on your Grok (xAI) account. Ask away.`
-                  : isGl
-                    ? `🟢 comfyui-mcp agent ready — ${agentLabel} on your Z.AI GLM Coding Plan. Ask away.`
-                  : isKm
-                    ? `🟢 comfyui-mcp agent ready — ${agentLabel} on your Kimi Code subscription. Ask away.`
-                  : isMs
-                    ? `🟢 comfyui-mcp agent ready — ${agentLabel} on your Moonshot platform (Kimi K3) API key. Ask away.`
                   : isOl
                     ? `🟢 comfyui-mcp agent ready — ${agentLabel} running locally via Ollama (no account, no API key). Small local models are slower and simpler than frontier ones — expect fewer frills. Ask away.`
                     : isLs
@@ -2352,7 +2363,9 @@ export async function runPanelOrchestrator(): Promise<void> {
             bridge.push({ type: "ack", ok: true, kind: "ready", agent: agentLabel, backend }, panelTab);
             logger.debug(`[panel-orchestrator] tab ${panelTab.slice(0, 8)} connected (${backend}) — agent healthy, ready ack`);
           } else {
-            const degradedText = isCx
+            const degradedText = reg
+              ? reg.degradedMessage
+              : isCx
               ? "⚠️ The background agent isn't responding — the Codex app-server couldn't start. Make sure Codex is installed and signed in (run `codex login`), then Disconnect → Connect to retry."
               : isCg
                 ? "⚠️ The background agent isn't responding — ChatGPT direct OAuth couldn't start. Make sure ~/.codex/auth.json exists (run `codex login`), then Disconnect → Connect to retry."
@@ -2360,12 +2373,6 @@ export async function runPanelOrchestrator(): Promise<void> {
                 ? "⚠️ The background agent isn't responding — the Gemini CLI couldn't start. Make sure the Gemini CLI is installed and signed in (run `gemini` once and complete the Google sign-in), then Disconnect → Connect to retry."
                 : isGk
                   ? "⚠️ The background agent isn't responding — the Grok CLI couldn't start. Make sure Grok is installed and signed in (run `grok` once and complete the xAI sign-in), then Disconnect → Connect to retry."
-                : isGl
-                  ? "⚠️ The background agent isn't responding — GLM Code API couldn't start. Set ZAI_API_KEY (Z.AI Coding Plan), then Disconnect → Connect to retry."
-                : isKm
-                  ? "⚠️ The background agent isn't responding — Kimi Code couldn't start. Run Kimi Code login (~/.kimi/credentials/kimi-code.json) or set KIMI_API_KEY, then Disconnect → Connect to retry."
-                : isMs
-                  ? "⚠️ The background agent isn't responding — Moonshot (Kimi K3) couldn't start. Set MOONSHOT_API_KEY from platform.kimi.ai, then Disconnect → Connect to retry."
                 : isOl
                   ? "⚠️ The background agent isn't responding — Ollama isn't reachable. Start it with `ollama serve` and pull our fine-tuned model (`ollama pull artokun/gemma4-comfyui-mcp:e4b` — gemma4 trained on the comfyui-mcp tool suite — arena-best local model; `:12b` for ~8 GB VRAM), then Disconnect → Connect to retry."
                   : isLs

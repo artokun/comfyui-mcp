@@ -21,6 +21,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "n
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { logger } from "../utils/logger.js";
+import { OPENAI_KEY_PROVIDERS } from "./openai-provider-registry.js";
 
 interface PanelSecrets {
   /** Env vars injected into the built-in comfyui MCP server's spawn env. */
@@ -82,16 +83,14 @@ export function isAllowedComfyuiSecretKey(key: string): boolean {
 // the same allowlist discipline so a corrupt file can't set arbitrary env.
 //   OPENROUTER_API_KEY → the OpenRouter provider backend (OllamaBackend openai)
 //   COMFYUI_MCP_CUSTOM_API_KEY → the user-defined Custom endpoint provider
-export const AGENT_SECRET_ENV_ALLOWLIST = [
+// The registry providers' keys (GLM_API_KEY/ZHIPU*/ZAI_API_KEY, KIMI_API_KEY,
+// MOONSHOT_API_KEY) are DERIVED from openai-provider-registry so a new api-key
+// provider is allowlisted by adding one registry entry, not editing this array.
+export const AGENT_SECRET_ENV_ALLOWLIST: readonly string[] = [
   "OPENROUTER_API_KEY",
   "COMFYUI_MCP_CUSTOM_API_KEY",
-  "GLM_API_KEY",
-  "ZHIPU_API_KEY",
-  "ZHIPUAI_API_KEY",
-  "ZAI_API_KEY",
-  "KIMI_API_KEY",
-  "MOONSHOT_API_KEY",
-] as const;
+  ...OPENAI_KEY_PROVIDERS.flatMap((p) => p.envKeys),
+];
 const AGENT_ALLOWLIST_SET = new Set<string>(AGENT_SECRET_ENV_ALLOWLIST);
 
 /** Is `key` a permitted orchestrator agent-secret env var? */
@@ -351,9 +350,17 @@ export interface CredentialSlot {
  *  store. `store` decides which allowlist/setter applies. */
 export const CREDENTIAL_SLOTS: CredentialSlot[] = [
   { id: "openrouter", label: "OpenRouter", envKeys: ["OPENROUTER_API_KEY"], store: "agent", help: "Hosted models (MiMo, MiniMax, GPT, Claude…)" },
-  { id: "glm", label: "GLM / Zhipu", envKeys: ["GLM_API_KEY", "ZHIPU_API_KEY", "ZHIPUAI_API_KEY", "ZAI_API_KEY"], store: "agent", help: "GLM provider" },
-  { id: "kimi", label: "Kimi (API)", envKeys: ["KIMI_API_KEY"], store: "agent", help: "Kimi via API key (vs its OAuth)" },
-  { id: "moonshot", label: "Kimi K3 (Moonshot)", envKeys: ["MOONSHOT_API_KEY"], store: "agent", help: "Kimi K3 via the Moonshot platform API key" },
+  // The simple api-key providers (glm/kimi/moonshot) are DERIVED from the
+  // openai-provider-registry — one entry there feeds its slot here automatically.
+  ...OPENAI_KEY_PROVIDERS.map(
+    (p): CredentialSlot => ({
+      id: p.id,
+      label: p.slotLabel,
+      envKeys: p.envKeys,
+      store: "agent",
+      help: p.slotHelp,
+    }),
+  ),
   { id: "civitai", label: "Civitai", envKeys: ["CIVITAI_API_TOKEN"], store: "comfyui", help: "Model downloads" },
   { id: "huggingface", label: "HuggingFace", envKeys: ["HF_TOKEN", "HUGGINGFACE_TOKEN"], store: "comfyui", help: "Model downloads" },
   { id: "google", label: "Google / Gemini", envKeys: ["GEMINI_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY", "GOOGLE_API_KEY"], store: "comfyui", help: "Nano Banana concept images" },

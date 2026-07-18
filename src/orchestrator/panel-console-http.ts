@@ -12,20 +12,21 @@ import { extname, join, resolve, sep } from "node:path";
 import { allBackendReadiness } from "./backend-readiness.js";
 import { getLoraCatalog, loraPreviewsDir } from "../services/lora-catalog.js";
 import { setPanelSecret, clearPanelSecret, listPanelSecretsMasked, CREDENTIAL_SLOTS } from "../services/panel-secrets.js";
+import { OPENAI_KEY_PROVIDER_IDS } from "../services/openai-provider-registry.js";
 import { logger } from "../utils/logger.js";
 
-const KNOWN_BACKENDS = [
+// The simple api-key providers (glm/kimi/moonshot) are spliced in from the
+// openai-provider-registry so a new one appears here by adding a registry entry.
+const KNOWN_BACKENDS: string[] = [
   "claude",
   "codex",
   "chatgpt",
   "gemini",
   "grok",
-  "glm",
-  "kimi",
-  "moonshot",
+  ...OPENAI_KEY_PROVIDER_IDS,
   "ollama",
   "copilot", // EXPERIMENTAL — see orchestrator/index.ts's copilotModel comment
-] as const;
+];
 
 export interface PanelConsoleHttpServer {
   readonly port: number;

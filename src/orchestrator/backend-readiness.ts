@@ -14,6 +14,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { readOAuthStatus } from "../services/code-provider-auth.js";
 import type { OAuthStatusRecord } from "../services/panel-secrets.js";
+import { simpleKeyProvider } from "../services/openai-provider-registry.js";
 
 export type BackendReadiness = {
   backend: string;
@@ -170,14 +171,16 @@ export function backendReadiness(
     const auth = fileExists(home, ".codex", "auth.json");
     return { backend: "chatgpt", cli: true, auth, ready: !!auth };
   }
-  if (b === "glm") {
-    const apiKey =
-      process.env.ZAI_API_KEY?.trim() ||
-      process.env.GLM_API_KEY?.trim() ||
-      process.env.ZHIPUAI_API_KEY?.trim() ||
-      process.env.ZHIPU_API_KEY?.trim();
-    const auth = !!apiKey;
-    return { backend: "glm", cli: true, auth, ready: auth };
+  const simpleKeyReg = simpleKeyProvider(b);
+  if (simpleKeyReg) {
+    // Simple OpenAI-compatible api-key providers (glm, moonshot, …) — hosted, no
+    // CLI. Readiness = one of the provider's env keys is set (a bad key still
+    // surfaces via the connect ack's model probe → degraded). Derived from the
+    // openai-provider-registry so a new such provider needs no branch here.
+    // `kimi` is deliberately EXCLUDED (simpleKeyAuth=false): its dual OAuth-or-
+    // KIMI_API_KEY readiness is kept bespoke just below.
+    const auth = simpleKeyReg.envKeys.some((k) => !!process.env[k]?.trim());
+    return { backend: b, cli: true, auth, ready: auth };
   }
   if (b === "kimi") {
     const apiKey = process.env.KIMI_API_KEY?.trim();
@@ -185,13 +188,6 @@ export function backendReadiness(
     const oauth = fileExists(kimiShare, "credentials", "kimi-code.json");
     const auth = !!apiKey || oauth;
     return { backend: "kimi", cli: true, auth, ready: auth };
-  }
-  if (b === "moonshot") {
-    // Moonshot platform (Kimi K3) — hosted, no CLI. Readiness = MOONSHOT_API_KEY
-    // in the orchestrator's env (a bad key still surfaces via the connect ack's
-    // model probe → degraded). Distinct from `kimi` (Kimi Code subscription).
-    const auth = !!process.env.MOONSHOT_API_KEY?.trim();
-    return { backend: "moonshot", cli: true, auth, ready: auth };
   }
   if (b === "gemini") {
     const cli = onPath(CLI_NAMES.gemini);
