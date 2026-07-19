@@ -411,16 +411,17 @@ interface AcpInitializeResult {
 
 // ---- model catalog ----
 // ACP exposes no model enumeration, and the model is fixed at SPAWN via the CLI
-// `--model` flag — so we surface a static catalog of the current Gemini family.
-// Gemini's "thinking" is a token BUDGET, not a discrete effort scale, so we do
+// `--model` flag — so we surface a static catalog matching the current Grok CLI.
+// Grok's reasoning control is not exposed as a discrete effort scale here, so we do
 // NOT advertise supportsEffort/supportedEffortLevels: the panel's normalizeModels
 // then hides the effort dropdown (omission is the documented "no effort control"
-// signal). gemini-2.5-pro is the default.
+// signal). grok-4.5 is the current CLI default.
 const GROK_MODELS: ModelChoice[] = [
+  { id: "grok-4.5", label: "Grok 4.5" },
   { id: "grok-composer-2.5-fast", label: "Grok Composer 2.5 Fast" },
   { id: "grok-build", label: "Grok Build" },
 ];
-const GROK_DEFAULT_MODEL = "grok-composer-2.5-fast";
+const GROK_DEFAULT_MODEL = "grok-4.5";
 
 /** Does this id look like a Grok model (vs. the Claude panel model PanelAgent
  *  unconditionally passes as opts.model)? Used so the configured Grok model

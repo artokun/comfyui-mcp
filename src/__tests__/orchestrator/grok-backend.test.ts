@@ -355,7 +355,7 @@ describe("GrokBackend (ACP over stdio)", () => {
   it("listModels returns the static Grok catalog (no effort metadata)", async () => {
     const backend = new GrokBackend();
     const models = await backend.listModels();
-    expect(models.map((m) => m.id)).toEqual(["grok-composer-2.5-fast", "grok-build"]);
+    expect(models.map((m) => m.id)).toEqual(["grok-4.5", "grok-composer-2.5-fast", "grok-build"]);
     // Grok has no discrete effort scale → no effort metadata (panel hides picker).
     expect(models.every((m) => m.supportsEffort === undefined && m.supportedEffortLevels === undefined)).toBe(true);
   });
