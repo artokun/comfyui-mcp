@@ -8,8 +8,15 @@ export interface ValidationIssue {
   node_id: string;
   node_type: string;
   message: string;
-  /** Health-finding kind (disconnected, duplicate_model_load, …) when the issue came from graph-health. */
+  /** Health-finding kind (disconnected, duplicate_model_load, …) when the issue came from
+   *  graph-health, OR a validation kind — "missing_node_type" / "missing_model" /
+   *  "value_not_in_list" — so callers can partition issues without parsing `message`
+   *  (diagnose_run groups by this). */
   kind?: string;
+  /** The input/widget the issue is about, when it's input-scoped. */
+  input?: string;
+  /** The offending value (e.g. the model filename that isn't installed). */
+  value?: string;
 }
 
 export interface ValidationResult {
@@ -69,6 +76,7 @@ export async function validateWorkflow(
         severity: "error",
         node_id: nodeId,
         node_type: classType,
+        kind: "missing_node_type",
         message: `Unknown node type "${classType}". This node may not be installed.`,
       });
       continue; // Can't validate inputs without the definition
@@ -255,6 +263,9 @@ function checkComboValues(
       severity: "error",
       node_id: nodeId,
       node_type: classType,
+      kind: isModel ? "missing_model" : "value_not_in_list",
+      input: inputName,
+      value,
       message: `"${inputName}" = "${value}" is not in the list of valid options (value_not_in_list).${hint}`,
     });
   }

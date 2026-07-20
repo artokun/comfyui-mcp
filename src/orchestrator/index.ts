@@ -212,7 +212,10 @@ const HEADLESS_DIRECTIVE =
   "There is NO panel to auto-deliver a finished render, so you MUST deliver the result YOURSELF IN THIS SAME TURN: " +
   "enqueuing returns a prompt_id immediately, so wait for it with get_job_status(prompt_id) — poll it briefly until " +
   "it reports completion (this is the ONE case where polling IS correct) — then fetch the output with get_history and " +
-  "show it with panel_show_media. Do NOT end your turn expecting an automatic notification; none will arrive.";
+  "show it with panel_show_media. Do NOT end your turn expecting an automatic notification; none will arrive. " +
+  "If the run FAILED — or the user asks why a render failed / what's missing — call diagnose_run: it names the failed " +
+  "node with its exception, plus any missing models (exact file + the widget holding it) and missing node types, in one " +
+  "call. It is the canvas-less equivalent of the panel's \"why is this red?\", so do NOT try panel_view_errored_nodes here.";
 
 /** Live stall threshold (seconds) pushed from the panel setting via a `set_config`
  *  frame — applies WITHOUT a reconnect. null = not set, fall back to env then the
@@ -644,6 +647,11 @@ const CALL_TOOL_WHITELIST = new Set<string>([
   // tap, and (without clear_pending, which the mobile client never sends) it
   // never touches other pending jobs in a shared queue.
   "cancel_job",
+  // "Why did my render fail?" for canvas-less clients. The panel answers this from
+  // live canvas state (panel_view_errored_nodes); a phone has no canvas, so it reads
+  // the same story server-side from history + re-validating the graph that ran.
+  // Read-only.
+  "diagnose_run",
 ]);
 
 /** Lazily build ONE in-process MCP client wired to the full comfyui tool surface,
