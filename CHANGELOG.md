@@ -8,21 +8,29 @@ All notable changes to this project are documented here. This project adheres to
 
 ### MCP
 
+#### Removed
+- `panel_view_errored_nodes` — merged into `panel_get_errors` rather than
+  shipping two overlapping error tools. Requires panel ≥ 0.9.6 (the panel
+  executor moves with it); a 0.39.0 server paired with a newer panel would
+  otherwise call a command that no longer exists.
+
 #### Changed
-- `panel_view_errored_nodes` now documents the fields the panel actually
-  returns: `exception_type` on a runtime failure (e.g.
-  `PIL.UnidentifiedImageError`), `missing_node_count` as the fallback when
-  missing node-type NAMES can't be resolved, and `red_outline` per node. Also
-  flags the non-obvious bit found while testing: LiteGraph does NOT paint a
-  node red when it throws AT RUNTIME, so such a node surfaces with
-  `red_outline: false` — you cannot infer "errored" from the canvas alone.
-- `panel_view_errored_nodes` and `panel_get_errors` now cross-reference each
-  other so the agent picks correctly: `panel_get_errors` returns ComfyUI's RAW
-  payloads (node_id→errors map + last execution error), while
-  `panel_view_errored_nodes` joins each cause onto the actual node and adds the
-  missing-model file/folder/download-URL the raw payloads don't carry.
-- docs: the panel's Read-tools table now lists `panel_view_selected`,
-  `panel_view_nodes_in_viewport` and `panel_view_errored_nodes`.
+- `panel_get_errors` is now the single error surface and returns every errored
+  node JOINED TO ITS CAUSE — `nodes[]` with the node's detail summary,
+  `red_outline`, and `reasons[]` (`missing_model` with file/folder/download URL,
+  `missing_media`, `validation`, `execution` with `exception_type`) — plus
+  graph-level `missing_models`, `missing_media`, `missing_node_types` /
+  `missing_node_count`. The raw `node_errors` map and `last_execution_error`
+  are still returned unchanged for existing consumers.
+- This closes a real gap behind "red node, no error message": missing
+  model/media assets paint nodes red AS SOON AS THE WORKFLOW LOADS, but the raw
+  validation map only populates on a queue attempt — so the old tool answered
+  "no errors recorded since the last execution start" while the user was
+  looking at red nodes (reproduced live, then fixed). Likewise a node that
+  throws AT RUNTIME is never painted red, so it can only be found here
+  (`red_outline: false`).
+- docs: the panel's Read-tools table now lists `panel_view_selected` and
+  `panel_view_nodes_in_viewport`, and describes the merged `panel_get_errors`.
 
 ## [0.39.0] - 2026-07-19
 
