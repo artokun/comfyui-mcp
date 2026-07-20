@@ -114,7 +114,10 @@ over a loopback HTTP MCP for ChatGPT/Codex), so [parity](/backends) is automatic
 |---|---|
 | `panel_query_graph` | Query the graph being viewed — filter/traverse/aggregate, token-bounded |
 | `panel_get_subgraph` | Read inside a subgraph node's inner graph |
-| `panel_get_errors` | Read the last execution error + per-node validation errors |
+| `panel_view_selected` | Read the node(s) the user has **selected** — answers "this node" in one call |
+| `panel_view_nodes_in_viewport` | Read only what's **on screen** (viewport rect + zoom) — scopes work on a big graph |
+| `panel_view_errored_nodes` | **Why** a node is red — each cause joined to the node (missing model + download URL, validation, runtime `exception_type`) |
+| `panel_get_errors` | ComfyUI's raw validation-error map + last execution error |
 | `panel_list_workflows` | List open workflow tabs and which is active |
 | `panel_list_nodes` | List installed custom-node packs |
 | `panel_list_mcp` | List connected MCP servers |

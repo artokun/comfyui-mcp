@@ -6,6 +6,24 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Changed
+- `panel_view_errored_nodes` now documents the fields the panel actually
+  returns: `exception_type` on a runtime failure (e.g.
+  `PIL.UnidentifiedImageError`), `missing_node_count` as the fallback when
+  missing node-type NAMES can't be resolved, and `red_outline` per node. Also
+  flags the non-obvious bit found while testing: LiteGraph does NOT paint a
+  node red when it throws AT RUNTIME, so such a node surfaces with
+  `red_outline: false` — you cannot infer "errored" from the canvas alone.
+- `panel_view_errored_nodes` and `panel_get_errors` now cross-reference each
+  other so the agent picks correctly: `panel_get_errors` returns ComfyUI's RAW
+  payloads (node_id→errors map + last execution error), while
+  `panel_view_errored_nodes` joins each cause onto the actual node and adds the
+  missing-model file/folder/download-URL the raw payloads don't carry.
+- docs: the panel's Read-tools table now lists `panel_view_selected`,
+  `panel_view_nodes_in_viewport` and `panel_view_errored_nodes`.
+
 ## [0.39.0] - 2026-07-19
 
 ### MCP
