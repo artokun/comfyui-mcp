@@ -3196,13 +3196,17 @@ export async function runPanelOrchestrator(): Promise<void> {
         },
         event.tab_id,
       );
-      // Clear the working spinner. MUST be state:"done" — the panel's turn
-      // handler only recognizes "working" and "done", so the old "idle" frame
-      // was a no-op and the spinner ran until the 120s safety timeout (issue
-      // #257). "done" also disarms the panel's mid-task resume nudge, which is
-      // correct here: no turn is in flight — the message is held orchestrator-
-      // side and its re-delivery (onRunEnd) pushes a fresh turn:"working".
-      bridge.push({ type: "turn", state: "done" }, event.tab_id);
+      // Clear the working spinner — the panel's turn handler only recognizes
+      // "working" and "done", so the old "idle" frame never cleared it and the
+      // spinner ran until the 120s safety timeout (issue #257). But ONLY when no
+      // agent turn is actually in flight for this tab: a tab-wide "done" during
+      // an ACTIVE earlier turn would hide THAT turn's spinner and disarm its
+      // resume nudge (the idle frame was a load-bearing no-op in that case —
+      // #260 review). When a turn IS active we push nothing: the live turn's own
+      // turn:"done" clears the spinner at the right moment.
+      if (!manager.isTurnActive(key)) {
+        bridge.push({ type: "turn", state: "done" }, event.tab_id);
+      }
       return;
     }
     manager.send(agentKeyFor(event.tab_id), outText, sendOpts);
@@ -3367,6 +3371,11 @@ export async function runPanelOrchestrator(): Promise<void> {
   selfRestarter = new SelfRestarter({
     allIdle: () =>
       manager.allIdle() &&
+      // Failed-start held mail (issue #256): teardown erases it, so a restart
+      // while it's parked would silently drop the messages awaiting re-delivery.
+      // (allIdle() already covers this; kept explicit alongside heldDuringGen so
+      // the gate reads as the full "nothing queued or held" contract.)
+      !manager.hasHeldMail() &&
       ![...heldDuringGen.values()].some((msgs) => msgs.length > 0) &&
       !QueueMonitor.isBusy(),
     announce: (text) => void bridge.push({ type: "say", text }),

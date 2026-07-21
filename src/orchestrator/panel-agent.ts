@@ -1274,9 +1274,23 @@ export class PanelAgentManager {
   }
 
   /** Cancel a still-queued message for a tab (user edited/deleted it before the
-   *  agent read it). Returns true if it was removed from the queue. */
+   *  agent read it). Returns true if it was removed from the queue. Also reaches
+   *  HELD mail (issue #256 follow-up): after a failed start parks messages in
+   *  heldMessages there is no live agent, but the user can still delete/edit the
+   *  bubble — without this the cancelled prompt would execute on the next spawn
+   *  (possibly alongside its replacement). */
   cancelQueued(tabId: string, mid: string): boolean {
-    return this.agents.get(tabId)?.cancelQueued(mid) ?? false;
+    if (this.agents.get(tabId)?.cancelQueued(mid)) return true;
+    const held = this.heldMessages.get(tabId);
+    if (held) {
+      const i = held.findIndex((item) => item.mid === mid);
+      if (i >= 0) {
+        held.splice(i, 1);
+        if (held.length === 0) this.heldMessages.delete(tabId);
+        return true;
+      }
+    }
+    return false;
   }
 
   /** Replace a tab's agent with a fresh one (picks up the manager's current
@@ -1415,10 +1429,21 @@ export class PanelAgentManager {
     return true;
   }
 
-  /** Reorder a tab's still-queued messages to the panel's desired flush order. */
+  /** Reorder a tab's still-queued messages to the panel's desired flush order.
+   *  Also applies to HELD mail (a failed start parked the queue — the panel can
+   *  still drag bubbles while the tab is degraded), with the same stable-sort
+   *  semantics as PanelAgent.reorderQueue. */
   reorderQueue(tabId: string, order: string[]): boolean {
+    let applied = false;
+    const held = this.heldMessages.get(tabId);
+    if (Array.isArray(order) && held && held.length >= 2) {
+      const rank = new Map(order.map((mid, i) => [mid, i]));
+      const at = (mid?: string) => (mid && rank.has(mid) ? rank.get(mid)! : Number.MAX_SAFE_INTEGER);
+      held.sort((a, b) => at(a.mid) - at(b.mid));
+      applied = true;
+    }
     const agent = this.agents.get(tabId);
-    if (!agent || agent.isStopped) return false;
+    if (!agent || agent.isStopped) return applied;
     agent.reorderQueue(order);
     return true;
   }
@@ -1626,13 +1651,36 @@ export class PanelAgentManager {
     return this.agents.size;
   }
 
-  /** True when NO agent is mid-turn or holding queued messages — the only
-   *  moment a self-restart may replace the process without eating a reply. */
+  /** True when any message is parked in the held-mail map (a start failure
+   *  captured a doomed agent's queue for re-delivery, issue #256). Surfaced so
+   *  the self-restart gate can refuse to restart while mail is parked —
+   *  teardown (stopAll) ERASES held mail, so an auto-restart while it exists
+   *  would silently drop the very messages the hold protects. */
+  hasHeldMail(): boolean {
+    for (const msgs of this.heldMessages.values()) {
+      if (msgs.length > 0) return true;
+    }
+    return false;
+  }
+
+  /** True when this key's agent has a turn in flight (or messages queued to
+   *  start one imminently) — i.e. the panel's working spinner belongs to a REAL
+   *  turn that will push its own turn:"done". The orchestrator's held-during-gen
+   *  branch checks this before clearing the spinner, so a tab-wide turn:"done"
+   *  can never hide an ACTIVE turn's spinner or disarm its resume nudge. */
+  isTurnActive(key: string): boolean {
+    const agent = this.agents.get(key);
+    return !!agent && !agent.isStopped && (agent.isBusy || agent.hasPending);
+  }
+
+  /** True when NO agent is mid-turn or holding queued messages AND no failed-
+   *  start mail is parked for re-delivery — the only moment a self-restart may
+   *  replace the process without eating a reply (or erasing held mail). */
   allIdle(): boolean {
     for (const a of this.agents.values()) {
       if (a.isBusy || a.hasPending) return false;
     }
-    return true;
+    return !this.hasHeldMail();
   }
 
   get defaults(): { model: string; effort?: Effort } {
