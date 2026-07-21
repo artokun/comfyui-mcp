@@ -22,6 +22,7 @@ const idle = (): QueueSnapshot => ({
   currentNode: null,
   progressValue: null,
   progressMax: null,
+  lastCompleted: null,
 });
 
 const running = (progress: number): QueueSnapshot => ({
@@ -32,6 +33,7 @@ const running = (progress: number): QueueSnapshot => ({
   currentNode: "3",
   progressValue: progress,
   progressMax: 20,
+  lastCompleted: null,
 });
 
 describe("buildQueueStatusFrame", () => {
@@ -45,7 +47,18 @@ describe("buildQueueStatusFrame", () => {
       node: "3",
       progress_value: 7,
       progress_max: 20,
+      last_completed_prompt_id: null,
+      last_completed_status: null,
+      last_completed_at: null,
     });
+  });
+
+  it("carries the snapshot's lastCompleted onto the additive wire fields", () => {
+    const snap = { ...idle(), lastCompleted: { promptId: "p-done", status: "error" as const, at: 1234 } };
+    const f = buildQueueStatusFrame(snap);
+    expect(f.last_completed_prompt_id).toBe("p-done");
+    expect(f.last_completed_status).toBe("error");
+    expect(f.last_completed_at).toBe(1234);
   });
 
   it("maps an idle snapshot with nulls, not zeros", () => {
@@ -134,6 +147,56 @@ describe("createQueueStatusBroadcaster", () => {
 
     b.tick();
     expect(pushed).toHaveLength(1); // and never consumed the change either
+  });
+
+  // Issue #259: a run that starts AND finishes entirely between ticks leaves
+  // the state idle→idle — only the drained completion can reach subscribers.
+  it("replays drained completions as frames even when the state never changed", () => {
+    const done = { promptId: "p-flash", status: "error" as const, at: 5000 };
+    let snap = idle();
+    let queue: (typeof done)[] = [];
+    const pushed: QueueStatusFrame[] = [];
+    const b = createQueueStatusBroadcaster(
+      () => snap,
+      (f) => pushed.push(f),
+      () => queue.splice(0),
+    );
+
+    b.tick(); // idle baseline
+    expect(pushed).toHaveLength(1);
+
+    // A sub-tick run fails: state is already idle again, but the monitor
+    // recorded the completion (snapshot.lastCompleted + drained event).
+    snap = { ...idle(), lastCompleted: done };
+    queue = [done];
+    b.tick();
+    expect(pushed).toHaveLength(2);
+    expect(pushed[1].running).toBe(false);
+    expect(pushed[1].last_completed_prompt_id).toBe("p-flash");
+    expect(pushed[1].last_completed_status).toBe("error");
+
+    b.tick(); // nothing new — the sticky lastCompleted must not re-push
+    expect(pushed).toHaveLength(2);
+  });
+
+  it("replays a BURST of completions as distinct frames, newest deduping into the state frame", () => {
+    const a = { promptId: "p-a", status: "error" as const, at: 1 };
+    const bEv = { promptId: "p-b", status: "success" as const, at: 2 };
+    const snap = { ...idle(), lastCompleted: bEv };
+    const pushed: QueueStatusFrame[] = [];
+    let queue = [a, bEv];
+    const b = createQueueStatusBroadcaster(
+      () => snap,
+      (f) => pushed.push(f),
+      () => queue.splice(0),
+    );
+    b.tick();
+    // Two frames: one per completion; the trailing state frame equals the
+    // p-b frame and dedupes away.
+    expect(pushed).toHaveLength(2);
+    expect(pushed.map((f) => f.last_completed_prompt_id)).toEqual(["p-a", "p-b"]);
+    b.tick();
+    expect(pushed).toHaveLength(2);
   });
 });
 

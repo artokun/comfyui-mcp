@@ -3282,8 +3282,16 @@ export async function runPanelOrchestrator(): Promise<void> {
   const queueStatusBroadcaster = createQueueStatusBroadcaster(
     () => QueueMonitor.snapshot(),
     (frame) => void bridge.push(frame),
+    () => QueueMonitor.drainCompletions(),
   );
-  const queueStatusTimer = setInterval(() => queueStatusBroadcaster.tick(), 1000);
+  // Each tick first refreshes the monitor over HTTP (GET /queue + /history
+  // tail): on modern ComfyUI (0.28+) the passive watchdog WS carries no
+  // prompt_id and no completion events for foreign runs, so the poll is what
+  // restores run attribution (#258) and catches runs shorter than the tick
+  // (#259). poll() never rejects and self-guards against overlap.
+  const queueStatusTimer = setInterval(() => {
+    void QueueMonitor.poll().finally(() => queueStatusBroadcaster.tick());
+  }, 1000);
   queueStatusTimer.unref?.();
 
   // Keep the pod's stored bridge URL fresh so a ComfyUI RESTART self-heals fast.

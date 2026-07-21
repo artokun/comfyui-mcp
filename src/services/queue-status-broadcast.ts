@@ -12,7 +12,7 @@
 // sent. An idle rig therefore broadcasts nothing at all, and a running render
 // costs at most one frame per second.
 
-import type { QueueSnapshot } from "./queue-monitor.js";
+import type { CompletionEvent, QueueSnapshot } from "./queue-monitor.js";
 
 /** The wire shape of one live queue-status broadcast. */
 export interface QueueStatusFrame extends Record<string, unknown> {
@@ -30,10 +30,26 @@ export interface QueueStatusFrame extends Record<string, unknown> {
   /** Sampler-step progress of the current node (null before the first tick). */
   progress_value: number | null;
   progress_max: number | null;
+  // ---- Additive fields (issues #258/#259) — existing fields keep their exact
+  // meaning; older consumers simply ignore these. ----
+  /** prompt_id of the most recently FINISHED run (sticky; null until one
+   *  completes). Changes here push a frame even when a run started and finished
+   *  entirely between ticks — the sub-tick-run signal of issue #259. */
+  last_completed_prompt_id: string | null;
+  /** How that run ended. */
+  last_completed_status: "success" | "error" | "interrupted" | null;
+  /** ms epoch when the orchestrator observed the completion (staleness hint
+   *  for tabs that connect late and get this frame as their hello seed). */
+  last_completed_at: number | null;
 }
 
-/** Build the broadcast frame for one monitor snapshot. */
-export function buildQueueStatusFrame(s: QueueSnapshot): QueueStatusFrame {
+/** Build the broadcast frame for one monitor snapshot. `completed` overrides
+ *  the snapshot's own lastCompleted — used to replay a burst of completions
+ *  drained in one tick as distinct frames. */
+export function buildQueueStatusFrame(
+  s: QueueSnapshot,
+  completed: CompletionEvent | null = s.lastCompleted,
+): QueueStatusFrame {
   return {
     type: "queue_status",
     connected: s.connected,
@@ -43,6 +59,9 @@ export function buildQueueStatusFrame(s: QueueSnapshot): QueueStatusFrame {
     node: s.currentNode,
     progress_value: s.progressValue,
     progress_max: s.progressMax,
+    last_completed_prompt_id: completed?.promptId ?? null,
+    last_completed_status: completed?.status ?? null,
+    last_completed_at: completed?.at ?? null,
   };
 }
 
@@ -57,19 +76,32 @@ export interface QueueStatusBroadcaster {
  * Wire a snapshot source to a push sink with change-only semantics. The sink
  * is the bridge's broadcast push; it must never throw into the timer (the
  * bridge's own push already guarantees that, see ui-bridge.ts).
+ *
+ * `drainCompletions` (optional) yields runs that finished since the last tick
+ * — each one is replayed as its own frame BEFORE the change-only state frame,
+ * so even a run that started and completed entirely between ticks reaches
+ * every subscriber exactly once (issue #259). The final state frame carries
+ * the newest completion too, so it usually dedupes away.
  */
 export function createQueueStatusBroadcaster(
   snapshot: () => QueueSnapshot,
   push: (frame: QueueStatusFrame) => void,
+  drainCompletions?: () => CompletionEvent[],
 ): QueueStatusBroadcaster {
   let last = "";
+  const send = (frame: QueueStatusFrame): void => {
+    const key = JSON.stringify(frame);
+    if (key === last) return;
+    last = key;
+    push(frame);
+  };
   return {
     tick(): void {
-      const frame = buildQueueStatusFrame(snapshot());
-      const key = JSON.stringify(frame);
-      if (key === last) return;
-      last = key;
-      push(frame);
+      const snap = snapshot();
+      for (const ev of drainCompletions ? drainCompletions() : []) {
+        send(buildQueueStatusFrame(snap, ev));
+      }
+      send(buildQueueStatusFrame(snap));
     },
     current(): QueueStatusFrame {
       return buildQueueStatusFrame(snapshot());
