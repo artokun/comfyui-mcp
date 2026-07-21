@@ -1,0 +1,38 @@
+---
+title: "July 19: see what I see — viewport tools and one honest error surface"
+description: "New panel tools let the agent read your current selection and viewport, and panel_get_errors becomes the single error surface — every errored node joined to its cause (missing model with download URL, missing media, validation, runtime exception), closing the 'red node, no error message' gap."
+---
+
+_July 19, 2026_
+
+v0.39.0 → v0.40.0 plus panel 0.9.2 → 0.9.6.
+
+## "Look at this" — selection + viewport tools
+
+New read tools (#238, panel 0.9.2): **`panel_view_selected`** and
+**`panel_view_nodes_in_viewport`** — the agent can read exactly the nodes you've
+selected or the region of the canvas you're looking at, instead of you describing
+them.
+
+## `panel_get_errors` — every errored node, joined to its cause
+
+`panel_view_errored_nodes` merged into **`panel_get_errors`** (#240) rather than
+shipping two overlapping error tools. The single surface now returns every errored
+node **joined to its cause** — `nodes[]` with the node's detail summary,
+`red_outline`, and `reasons[]` (`missing_model` with file/folder/download URL,
+`missing_media`, `validation`, `execution` with `exception_type`) — plus graph-level
+missing models / media / node types.
+
+This closes a real gap behind "red node, no error message": missing model/media
+assets paint nodes red **as soon as the workflow loads**, but the raw validation map
+only populates on a queue attempt — so the old tool answered "no errors recorded"
+while you were staring at red nodes (reproduced live, then fixed). Likewise a node
+that throws at runtime is never painted red, so it can only be found here. Requires
+panel ≥ 0.9.6; the panel also announces missing assets at **turn start**, not just
+on request (#93).
+
+## Panel fixes
+
+Runtime failures carry their `exception_type` into the affordance (0.9.5), the
+missing-node-types source was corrected with a validation-error fallback (0.9.4),
+and the panel bundle stops tripping the Registry's YARA `SUSP_SVG` scan (0.9.3).

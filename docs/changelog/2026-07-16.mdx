@@ -1,0 +1,42 @@
+---
+title: "July 16: live queue status everywhere, one-tap mobile cancel"
+description: "The orchestrator broadcasts ComfyUI's live render/queue state to every connected tab (powering the mobile queue monitor), cancel_job joins the mobile whitelist for one-tap cancel, list_local_models links each model back to its CivitAI page, and the watchdog WebSocket reconnects after a ComfyUI retarget."
+---
+
+_July 16, 2026_
+
+v0.37.0 — a mobile-flavored release, plus a real watchdog fix.
+
+## Live `queue_status` for every client
+
+The orchestrator now broadcasts ComfyUI's **live render/queue state** — running,
+queue depth, current node, sampler progress, `prompt_id` — to every connected tab,
+riding the existing QueueMonitor watchdog so browser-queued jobs are covered too.
+Change-only and capped at 1 frame/sec (an idle rig broadcasts nothing), and each tab
+is seeded with the current state on `hello`, so a client connecting mid-render sees
+the running job immediately. This powers the
+[mobile app's](/blog/comfyui-mobile-app) live queue monitor.
+
+**`cancel_job` joins the mobile whitelist** for one-tap cancel of the running render
+from the phone — narrowly scoped: the client passes the `prompt_id` it observed,
+only a still-matching running job is interrupted, and pending jobs are never touched.
+
+## CivitAI provenance in `list_local_models`
+
+Models downloaded via `download_civitai_model` now render a `civitai: <page URL>`
+line from their sidecar metadata, carrying the model id + the **installed** version
+id — so agents and clients (like the mobile LoRA hub) can link back to the source
+and check CivitAI for newer versions.
+
+## Fixed: the watchdog survives a ComfyUI retarget
+
+The QueueMonitor WebSocket never reconnected once the orchestrator retargeted
+ComfyUI (e.g. the `127.0.0.1` → `localhost` swap on a local panel hello) — leaving
+`queue_status` permanently disconnected and silently disabling the local-Ollama VRAM
+pause. Latent since the watchdog landed on June 27; `start()` now reconnects on a
+URL change and stale-socket handlers can't null a new connection.
+
+## Docs
+
+A **[mobile app (beta)](/mobile)** page: Android (Firebase App Distribution) and iOS
+(TestFlight) beta-tester links plus the pairing walkthrough, wired into the nav.

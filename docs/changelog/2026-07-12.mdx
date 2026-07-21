@@ -1,0 +1,60 @@
+---
+title: "July 12: five new providers, A2UI chat cards, per-workflow sessions"
+description: "An OAuth engine brings Grok, Kimi, GLM, ChatGPT-direct, and Copilot as panel providers; validated interactive A2UI cards render in chat; each workflow can get its own agent session; a loopback MCP console and credential slots land — plus native CivitAI search, official comfy-cli integration, and the LTX 2.3 distill pack."
+---
+
+_July 12, 2026_
+
+v0.31.0 and panel 0.8.0 — a big community-inheritance release: four feature stacks
+ported from the MichaelDanCurtis fork, a pack from the jcd315 fork, and a batch of
+community fixes.
+
+## Five new providers via a real OAuth engine
+
+An OAuth engine plus provider backends for **Grok, Kimi, GLM, ChatGPT (direct
+OAuth), and Copilot** (#201). The panel gets provider chips with in-panel OAuth
+sign-in (behind experimental-backend gating), and existing CLI logins are detected
+so you're never asked to sign in twice.
+
+## A2UI chat cards
+
+**`panel_ui_render` / `panel_ui_update`** (#194) — the agent can render validated,
+interactive UI cards in chat (a lit-based renderer on the panel side), with a
+server-side spec wall so only vetted card specs reach the browser.
+
+## Per-workflow agent sessions + prompt registry
+
+Each workflow can run its own agent session (#199), with provider on/off switches
+and thread-rename migration on the panel side — the groundwork for conversations
+that follow your work rather than one global thread.
+
+## Loopback MCP console + credential slots
+
+A loopback-only MCP console for direct tool invocation and debugging (#197), plus
+**credential slots**: API keys are stored server-side and referenced by slot, with a
+clear/revoke path (#203) and a Clear button on each panel slot row.
+
+## Also in this release
+
+- **Native `search_civitai_models`** (#198) — CivitAI search is now built in; the
+  bundled third-party MCP is gone.
+- **Official comfy-cli integration** — environment/workspace discovery, managed
+  server lifecycle, jobs, validation/execution, and model tools ride
+  `comfy-cli`'s JSON envelope where available.
+- **Download metadata sidecars** with agent-visible LoRA trigger words.
+- **`ltx23-distill-3stage`** — a 3-stage LTX 2.3 distill I2V/T2V pack (from the
+  jcd315 fork, #195).
+- **Mobile groundwork** — `call_tool` (a whitelisted direct tool channel),
+  `upload_media` (stage phone media as ComfyUI input), chat-history bridge frames,
+  and tool calls forwarded as `action` frames for visibility.
+
+## Fixes
+
+A tool-using turn can never end in silence (#202); a throwing backend constructor
+can never kill the process (#209); the real LAN IP is picked over VPN/virtual
+adapters; a loud not-a-model warning stops the CivitAI "Workflows-zip" download trap
+(#206); graph editing is signposted to the panel router (#205); the in-flight
+message is re-queued when the agent crashes mid-turn; unsatisfiable searches no
+longer loop "in circles" (#191); plus community fixes to `get_node_info`,
+comfy-api-key fallback, and `save_workflow` docs (#196). The panel's pairing QR now
+encodes an https lander URL, since phone cameras refuse raw `ws://`.

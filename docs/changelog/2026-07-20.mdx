@@ -1,0 +1,57 @@
+---
+title: "July 20: GPT-5.6, the LoRA trainer lands, Blind mode gets mechanical"
+description: "The GPT-5.6 family (Sol / Terra / Luna) arrives with the extended max/ultra effort scale; seven train_* tools train character LoRAs on FLUX.1-dev end-to-end from chat; the panel's Blind toggle now mechanically gates every image-returning tool; and the Gemini backend is revived with a self-healing model catalog."
+---
+
+_July 20, 2026_
+
+v0.41.0 → v0.43.1 plus panel 0.9.7 — three headliners in one day.
+
+## GPT-5.6: Sol, Terra, and Luna
+
+The **GPT-5.6 family** lands for ChatGPT/Codex users with the extended effort scale
+(**`max`**, **`ultra`**) — the bundled Codex SDK moves to the field-verified
+0.145 alpha pairing, pre-5.6 models are deprecated (the picker hides them whenever
+the account has the 5.6 family), and the ChatGPT-direct default is now
+`gpt-5.6-luna`, successor to the retired `gpt-5.4-mini` (#241, #244; panel 0.9.7
+extends the effort slider). [Full rundown on the blog](/blog/gpt-5-6-comfyui).
+
+## Train a character LoRA by asking
+
+The **CLI LoRA trainer (P1)** ships (#237): seven `train_*` tools
+(`train_list_flows`, `train_prepare_dataset`, `train_start`, `train_status`,
+`train_cancel`, `train_build_image`, `train_doctor`) wrap ostris **ai-toolkit**
+inside a headless GPU Docker image, so training character LoRAs on **FLUX.1-dev**
+is an agent-orchestrated flow — config generation, a crash-safe job registry, live
+step/loss/sample progress, and a handoff that drops the finished `.safetensors`
+into `models/loras/` and catalogs it. Ships the `train-character-lora` skill;
+end-to-end proven on a 4090. [The story](/blog/lora-trainer-p1).
+
+## Blind mode: from prompt to mechanism
+
+A user proved the panel's **Blind** toggle was a polite request, not a guarantee.
+Now it **mechanically gates every image-returning tool** (#245): blind tabs spawn
+their tool server with `COMFYUI_MCP_BLIND=1`, and a single registration-boundary
+wrapper replaces image blocks with an honest "withheld" note — on both the full MCP
+surface and the compact router. Toggling Blind live respawns the tab's tool server
+at idle. [The full confession](/blog/blind-mode-privacy).
+
+## Gemini, revived
+
+Both old catalog entries had started returning 404 from Google, so every new Gemini
+user failed on their first prompt — the catalog now leads with Google's **floating
+aliases** (`gemini-pro-latest`, `gemini-flash-latest`) so it stops rotting, and the
+backend selects **API-key auth** when `GEMINI_API_KEY` is set instead of retrying
+Google's retired free OAuth sign-in forever (#242). Verified live against the
+Gemini API.
+
+## Fixes
+
+- **Text-preview node results are no longer invisible to the agent** (0.43.1) —
+  nodes like *Preview as Text* / `ShowText` publish into history's `ui` dict rather
+  than writing a file, and only images/videos were harvested, so caption and
+  prompt-builder workflows completed with nothing for the agent to read. History
+  analysis now extracts text as `text_outputs` on `get_job_status` and the
+  job-watcher completion record, tolerant of the shapes seen in the wild (#247).
+- **`diagnose_run`** — a canvas-less "why did my render fail?" for mobile parity
+  with the panel's error tools (#243).

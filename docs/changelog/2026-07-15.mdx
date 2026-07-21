@@ -1,0 +1,48 @@
+---
+title: "July 15: flatten workflows, CivitAI creator discovery, desktop-tab mirror"
+description: "panel_flatten_workflow resolves Get/Set buses, Reroutes, and use-everywhere links in place without moving a single kept node; search_civitai_creators + a creator filter make 'top creators → their models → download' work end-to-end; and the phone can mirror and drive a desktop tab's session."
+---
+
+_July 15, 2026_
+
+v0.35.0 and v0.36.0. The headline tool is
+[**`panel_flatten_workflow`**](/blog/flatten-workflows) — plus CivitAI creator
+discovery and remote control of a desktop session from the phone.
+
+## `panel_flatten_workflow` — untangle without wrecking the layout
+
+One call flattens the live canvas **in place, preserving the author's layout**:
+Get/Set buses, Reroutes, and cg-use-everywhere broadcasts resolve to direct real
+links and the virtual nodes are deleted, while kept nodes never move —
+groups, positions, colors, and titles survive exactly, and one undo restores. UE
+broadcasts materialize from the pack's own computed `extra.ue_links`; real
+executable nodes (rgthree Context, Seed Everywhere) are kept. Where
+`strip_workflow` produces a clean copy for the agent to run,
+flatten fixes the graph you're looking at. [How it works](/blog/flatten-workflows).
+
+## CivitAI creator discovery
+
+- **`search_civitai_creators`** — with no query it returns the site's creator
+  leaderboard (rank, score, downloads, likes); with a query it searches usernames.
+  A Discord mobile-beta request.
+- **`search_civitai_models` gains a `creator` filter** — list one creator's models
+  by exact username, with or without a keyword. Both CivitAI search tools are now
+  whitelisted on the mobile `call_tool` channel (read-only).
+- **`panel_open_civitai`** — the agent opens the panel's CivitAI browser pre-seeded
+  with a search (#225).
+
+Together: "show me top creators → their models → download" works end-to-end.
+
+## Desktop-tab mirror — remote control from the phone
+
+The mobile app can **mirror and drive a desktop tab's session** (#227) — see the
+same conversation and send into it from the couch — alongside a fix for
+workflows-over-tunnel. More on the mobile app in
+[the mobile beta post](/blog/comfyui-mobile-app).
+
+## Protocol polish
+
+`set_options` acks are now **cid-correlated** (#228): clients can stamp a request
+with an opaque `cid` and get it echoed with `requested_model`, making model-switch
+acks exactly attributable (acks aren't FIFO), with an `ok:false` ack on failure.
+Fully backward compatible.

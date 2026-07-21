@@ -8,6 +8,133 @@ Weekly notes on what shipped in [comfyui-mcp](https://github.com/artokun/comfyui
 ## Posts
 
 <Card
+  title="July 20: GPT-5.6, the LoRA trainer lands, Blind mode gets mechanical"
+  href="/changelog/2026-07-20"
+>
+  The **GPT-5.6 family** (Sol / Terra / Luna) with the max/ultra effort scale,
+  seven `train_*` tools that train character LoRAs on FLUX.1-dev from chat, a
+  Blind toggle that mechanically gates every image-returning tool, and a revived
+  Gemini backend. _July 20, 2026_
+</Card>
+
+<Card
+  title="July 19: see what I see — viewport tools and one honest error surface"
+  href="/changelog/2026-07-19"
+>
+  `panel_view_selected` / `panel_view_nodes_in_viewport` let the agent read what
+  you're looking at, and **`panel_get_errors`** becomes the single error surface —
+  every errored node joined to its cause, closing the "red node, no error message"
+  gap. _July 19, 2026_
+</Card>
+
+<Card
+  title="July 18: the 405 that wasn't — pip Manager's legacy-UI dialect"
+  href="/changelog/2026-07-18"
+>
+  Custom-node and model operations no longer 405 against a pip ComfyUI-Manager in
+  legacy-UI mode — comfyui-mcp detects the mode and speaks its `queue/batch`
+  dialect. Plus the panel's Kimi K3 chip. _July 18, 2026_
+</Card>
+
+<Card
+  title="July 17: Kimi K3, the CivitAI browser grows up, panel-owned sessions"
+  href="/changelog/2026-07-17"
+>
+  Moonshot's **Kimi K3** joins the provider roster; the CivitAI browser gains
+  likes, creator filters, and **load-workflow-onto-canvas** (zip wrappers
+  included); and panel-owned sessions become the default — conversations survive
+  workflow switches. _July 17, 2026_
+</Card>
+
+<Card
+  title="July 16: live queue status everywhere, one-tap mobile cancel"
+  href="/changelog/2026-07-16"
+>
+  The orchestrator broadcasts ComfyUI's live render/queue state to every client
+  (powering the mobile queue monitor), `cancel_job` goes mobile, and
+  `list_local_models` links models back to their CivitAI pages. _July 16, 2026_
+</Card>
+
+<Card
+  title="July 15: flatten workflows, CivitAI creator discovery, desktop-tab mirror"
+  href="/changelog/2026-07-15"
+>
+  **`panel_flatten_workflow`** resolves Get/Set buses, Reroutes, and
+  use-everywhere links in place without moving a single kept node;
+  `search_civitai_creators` makes creator → models → download work end-to-end;
+  and the phone can mirror a desktop tab's session. _July 15, 2026_
+</Card>
+
+<Card
+  title="July 14: the self-updating orchestrator, vision for every backend"
+  href="/changelog/2026-07-14"
+>
+  The orchestrator updates and restarts itself when every agent is idle — a
+  running install never goes stale. Every Ollama-family backend and
+  ChatGPT-direct gains inline image delivery with an honest fallback when a
+  model is text-only. _July 14, 2026_
+</Card>
+
+<Card
+  title="July 12: five new providers, A2UI chat cards, per-workflow sessions"
+  href="/changelog/2026-07-12"
+>
+  An OAuth engine brings **Grok, Kimi, GLM, ChatGPT-direct, and Copilot**;
+  validated interactive A2UI cards render in chat; per-workflow agent sessions,
+  a loopback MCP console, credential slots, native CivitAI search, and official
+  comfy-cli integration. _July 12, 2026_
+</Card>
+
+<Card
+  title="July 9: LM Studio & llama.cpp backends, phone pairing, gemma4 Arena results"
+  href="/changelog/2026-07-09"
+>
+  LM Studio, llama.cpp, and custom OpenAI-compatible endpoints become
+  first-class backends; token-gated phone pairing and the render mailbox land;
+  `query_workflow` filters big graphs; and the gemma4 fine-tune ladder posts its
+  Arena scores. _July 9, 2026_
+</Card>
+
+<Card
+  title="July 8: local LLMs, remote pods, and the RunPod image — 20 releases in one day"
+  href="/changelog/2026-07-08"
+>
+  The agent goes all-LLM: an **Ollama backend** with a compact tool mode and our
+  gemma4 fine-tune ladder as the local default. Plus one-command `connect` to a
+  remote ComfyUI over a secure `wss://` bridge, a custom RunPod image, and both
+  ComfyUI-Manager API generations. _July 8, 2026_
+</Card>
+
+<Card
+  title="June 29: Comfy MCP parity, run-to-node, graph navigation"
+  href="/changelog/2026-06-29"
+>
+  Five one-call generation tools close the gap with Comfy's official cloud MCP
+  (plus a token-gated tunnel connector), `panel_run` learns to render a single
+  output branch, and the panel agent gains graph outline/search/subgraph tools
+  plus manual-edit awareness. _June 29, 2026_
+</Card>
+
+<Card
+  title="June 27: render-wedge watchdog, color analysis, provider onboarding"
+  href="/changelog/2026-06-27"
+>
+  A self-healing queue/render watchdog (backpressure + stall detection +
+  escalating cancel), a new `analyze_color` tool, registry-first custom-node
+  installs with a hardened clone fallback, and a wave of panel polish — plus the
+  Krea 2 ULTRA V2 re-slice. _June 27, 2026_
+</Card>
+
+<Card
+  title="June 26: strip_workflow & slice_workflow — load any expert graph"
+  href="/changelog/2026-06-26"
+>
+  Two new workflow tools resolve GetNode/SetNode buses + Reroutes into real
+  connections and un-chunk rgthree Fast-Groups-Bypass-toggled pipelines — clean,
+  runnable wiring without hand-tracing. _June 26, 2026_
+</Card>
+
+<Card
   title="June 25: Multi-provider agent — Claude + ChatGPT"
   href="/changelog/2026-06-25"
 >
@@ -15,6 +142,15 @@ Weekly notes on what shipped in [comfyui-mcp](https://github.com/artokun/comfyui
   feature parity — pick a provider, drive your live canvas, load packs in one shot
   with `panel_load_workflow`, and stay cost-aware about paid API nodes via
   `check_workflow_runtime`. _June 25, 2026_
+</Card>
+
+<Card
+  title="June 24: Krea 2 Turbo pack"
+  href="/changelog/2026-06-24"
+>
+  Day-one ComfyUI pack for Krea 2 Turbo — Krea.ai's new 12B open-weight
+  text-to-image model. 8-step turbo speed, Qwen3-VL prompting, JSON area
+  prompts, one-command install. _June 24, 2026_
 </Card>
 
 <Card

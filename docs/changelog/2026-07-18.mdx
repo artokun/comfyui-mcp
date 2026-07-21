@@ -1,0 +1,25 @@
+---
+title: "July 18: the 405 that wasn't — speaking pip Manager's legacy-UI dialect"
+description: "Custom-node and model operations no longer 405 against a pip ComfyUI-Manager running in legacy-UI mode (hardcoded by popular Docker images): comfyui-mcp now detects the mode and speaks its queue/batch dialect, and Manager detection can no longer be fooled by an SPA's 200."
+---
+
+_July 18, 2026_
+
+v0.38.1 plus panel 0.9.1 — one deep compatibility fix, told in full in
+[the 405 that wasn't](/blog/manager-405-dialects).
+
+## pip Manager's legacy-UI mode is a third API dialect
+
+Popular Docker images (e.g. `yanwk/comfyui-boot`) hardcode
+`--enable-manager-legacy-ui`, which swaps in Manager's bundled 3.x server under the
+`/v2` prefix — a server with **no `queue/task` route**, so every custom-node and
+model operation died with a 405. comfyui-mcp now detects the mode
+(`/v2/manager/is_legacy_manager_ui`) and speaks its `queue/batch` dialect (#235),
+on top of the two Manager generations it already handled. Manager detection also
+validates the probe payload, so an SPA answering 200 to everything can't masquerade
+as a Manager API. Both root causes came from two excellent community bug reports.
+
+## Panel
+
+Panel 0.9.1 adds the **Kimi K3 (Moonshot) provider chip** (#89), pairing with
+yesterday's backend.

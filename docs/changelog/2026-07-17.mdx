@@ -1,0 +1,54 @@
+---
+title: "July 17: Kimi K3, the CivitAI browser grows up, panel-owned sessions"
+description: "Moonshot's Kimi K3 becomes a first-class provider; panel 0.9.0 turns the CivitAI browser into a full loop — browse, like, filter by creator, and load embedded workflows (even from zip wrappers) straight onto the canvas — makes panel-owned sessions the default so conversations survive workflow switches, and previews the LoRA Training modal."
+---
+
+_July 17, 2026_
+
+v0.38.0 plus the big panel 0.9.0.
+
+## Kimi K3 (Moonshot) as a first-class provider
+
+Moonshot's **Kimi K3** joins the provider roster (#233) — API-key based, alongside
+the existing Claude / ChatGPT / Gemini / Grok / GLM / Copilot / local lineup.
+
+## CivitAI browser: browse, like, load, recreate
+
+Panel 0.9.0 makes the in-panel [CivitAI browser](/blog/civitai-in-comfyui) a full
+loop:
+
+- **Load workflow onto canvas** (a Discord community request) — a lightbox post with
+  an embedded UI-format graph gets a "Load onto canvas" action through the same
+  undoable path the agent uses; model versions grow a per-file load button. CivitAI's
+  `.zip` workflow wrappers (780 of 844 live versions) are unpacked **in the browser**
+  under zip-bomb caps, downloads stream through a same-origin proxy with an SSRF
+  guard, gated files return a clean 401 with a one-click sign-in, and every outcome
+  surfaces as a toast + inline status — never a silent no-op.
+- **Favorites shows ALL your likes** — the feed reads your likes collection (the one
+  the website's ❤ saves into), not just in-panel reactions, and pagination no longer
+  drops one item per page or dead-ends on short pages.
+- **Creator filter + search qualifiers** — a top-creators leaderboard when empty,
+  debounced username search, removable creator pill across every feed, and
+  GitHub-style "@name terms" search (#86).
+- **Like/unlike hearts** on cards and in the lightbox, mirroring into a default
+  likes collection; full-screen lightbox with details, prompt/parameters, and
+  share-with-agent / save-workflow actions; debounced search on every tab.
+
+## Panel-owned sessions (the new default)
+
+The conversation and agent memory now **persist while you switch, save, rename, or
+create workflows** — the agent is mechanically told which canvas it operates on, and
+the live agent instance is rebound across tab ids (no respawn), so even in-memory
+local backends keep their history. Settings → General → "Conversation follows the
+panel" restores the legacy per-workflow mode.
+[Why and how on the blog](/blog/panel-owned-sessions).
+
+## Also in panel 0.9.0
+
+- **LoRA Training modal** (coming-soon preview, mobile-app parity): six training
+  flows as cards with base-model dropdowns under a Local/Cloud switch — Local shows
+  your rig's real GPU. (The trainer itself lands July 20.)
+- The iOS TestFlight and Android beta buttons are now **live invite links**.
+- The agent-feed gate is renamed **Deafen** (ear / slashed-ear icons) — it stops the
+  agent *hearing* canvas events; your typed messages still go through.
+- Provider chips, connect help, and tooltips no longer hardcode Claude.

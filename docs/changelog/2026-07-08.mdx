@@ -1,0 +1,78 @@
+---
+title: "July 8: local LLMs, remote pods, and the RunPod image — 20 releases in one day"
+description: "The agent goes all-LLM: an Ollama backend with a compact tool mode and our gemma4-comfyui-mcp fine-tune ladder as the local default, benchmarked in a new ComfyUI LLM Arena. Plus one-command connect to a remote ComfyUI over a secure wss:// bridge, a custom RunPod image, and speaking both ComfyUI-Manager API generations."
+---
+
+_July 8, 2026_
+
+The biggest release day yet: v0.23.0 → v0.27.0 (twenty MCP releases) plus panel
+0.6.6 → 0.6.8. Two headlines: **any LLM can now drive ComfyUI — including free local
+models** ([blog post](/blog/local-llms-comfyui)), and **remote ComfyUI became a
+first-class citizen** — one command to connect, a custom RunPod image, and a secure
+tunnel bridge.
+
+In the run-up (panel 0.4.7 → 0.6.5, July 1–7), the panel became a **pure frontend
+extension** — it never spawns the orchestrator, which cleared the Comfy Registry's
+security-scanner flag that had blocked every published version — and picked up
+remote-pod support (auto-target the ComfyUI you're viewing, secure-bridge discovery,
+per-shell copy for the `connect` command) plus fixes for Ctrl+C/Esc interrupt and
+`wss://` reconnect wedges.
+
+## Local LLMs: Ollama backend, compact tool mode, the fine-tune ladder
+
+- **Ollama backend** — drive the sidebar panel with a local LLM. No API keys, no
+  subscription, no cloud.
+- **Compact tool mode** (#97) — a reduced tool surface sized for small models, which
+  also unlocked Hermes Agent, OpenClaw, and Copilot CLI as first-class backends, plus
+  any **OpenAI-compatible endpoint**.
+- **`gemma4-comfyui-mcp` fine-tune ladder is the local default** (also panel 0.6.7) —
+  our Gemma 4 fine-tunes tuned specifically for these tools, with model-aware
+  `num_ctx` instead of a hard 16K clamp.
+- **ComfyUI LLM Arena** — a tiered benchmark harness that scores models on real
+  ComfyUI agent tasks, plus compact-mode catalog search over param docs.
+- **Local models stop flying blind** — a dedicated system prompt, forgiving tool
+  dispatch, markdown reconciliation, and a cold-load keepalive.
+- **VRAM sharing** — local-model VRAM is freed during a render and chat pauses until
+  it finishes, so a 12B model and an SDXL render can share one GPU.
+- **Tool-loop breaker** — identical repeat calls are blocked and the turn ends after
+  4 repeats, so a small model can't spin forever.
+
+## Remote ComfyUI: connect, secure bridge, relay
+
+- **`npx -y comfyui-mcp connect <url>`** — one command on your machine drives a
+  remote ComfyUI (a RunPod pod, a LAN box). The orchestrator retargets from the
+  panel's hello, so opening a pod's panel just works.
+- **Secure `wss://` bridge by default** when driving a remote https pod (with
+  WebSocket keepalive so the tunnel doesn't drop mid-turn), and an opt-in **relay
+  backend** (`comfyui-mcp-relay`) for networks where a tunnel can't run.
+- **Single-port multi-provider** — all providers share one bridge port with per-tab
+  backend selection.
+- **Remote-mode parity** — model installs, manifests, and output listing route
+  through Manager v2 HTTP when there's no local filesystem.
+- **`wan-multitalk`** — audio-driven talking-avatar pack + skill.
+
+## The RunPod image
+
+A custom RunPod image for the comfyui-mcp agent, hardened over the day's releases:
+cu128 by default (a cu130 + SageAttention perf variant is opt-in), GPU-driver
+preflight, one-archive volume seeding with a completion marker, custom_nodes
+persisted on the volume, an **aria2 download sidecar** (Manager's built-in
+downloader crawled at 1–4 MB/s), self-healing for 0-byte files on full volumes,
+panel auto-update on boot, and an npm-publish-style release pipeline.
+
+## ComfyUI-Manager: both API generations
+
+Custom-node and model operations now speak **both Manager API generations** (#116),
+with graceful degradation messaging on legacy versions and a default `security_level`
+on the image that lets git-URL installs work. API-format graphs are auto-converted
+to Web UI format on load (#136), and Desktop-recorded ComfyUI installs are
+auto-detected.
+
+## Panel polish
+
+- **Workflow tab switching fixed** (0.6.6) — switching to an already-open workflow
+  tab repaints the canvas correctly, with no duplicate tabs and no cross-tab buffer
+  clobber (confirmed by live in-browser debugging).
+- **Discord community + one-tap "Need help?"** (0.6.8) — copies a diagnostics
+  summary and opens the Discord; a version-sync guard keeps the panel version from
+  drifting out of the diagnostics blob.

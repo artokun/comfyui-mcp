@@ -1,0 +1,62 @@
+---
+title: "July 9: LM Studio & llama.cpp backends, phone pairing, gemma4 Arena results"
+description: "Every local runtime becomes a first-class backend (LM Studio, llama.cpp, custom OpenAI-compatible endpoints), a token-gated phone-pairing listener and render mailbox land for mobile, graph_query filters big workflows, and the gemma4 fine-tune ladder posts its Arena scores. The panel keeps working when you switch sidebar tabs."
+---
+
+_July 9, 2026_
+
+v0.28.0 → v0.30.0 plus panel 0.6.9 → 0.7.3. The local-LLM story from the day before
+rounds out to **every major local runtime**, the first **mobile** building blocks
+land, and the [gemma4 fine-tune ladder gets honest Arena numbers](/blog/gemma4-fine-tune-arena).
+
+## More local backends: LM Studio, llama.cpp, custom endpoints
+
+- **LM Studio** as a first-class local backend (#160), with a full hands-off
+  model/server lifecycle (#164) — the agent can load the model and start the server
+  itself.
+- **llama.cpp** (`llama-server`) as a first-class local backend (#161).
+- **Custom OpenAI-compatible endpoint** as a first-class backend (#162) — point the
+  panel at anything that speaks the API.
+- Temperature pinned to 0 for these backends — nondeterministic empty finals after
+  tool results are gone (#166).
+
+Each ships with its own panel chip + setup card (panel 0.6.9 / 0.7.0).
+
+## Mobile building blocks: phone pairing + render mailbox
+
+- **On-demand phone pairing** (#180) — a token-gated LAN/tunnel listener; nothing is
+  exposed until you ask.
+- **Render mailbox** (#182) — never lose a render while the phone is away; headless
+  (mobile/remote) tabs get renders delivered in-turn (#165) and `show_media` can
+  inline media bytes for clients with no ComfyUI reachability (#171).
+
+## gemma4 fine-tune Arena results
+
+LLM Arena results for the `gemma4-comfyui-mcp` ladder: **`:e4b` 14/20** (best local
+model tested), `:12b` 13/20, and `:e2b` honestly flagged at 4/20 pending its v2
+training fix. Leaderboard SVGs + model-sizing guidance updated across the docs and
+the Ollama onboarding copy. [Full story on the blog](/blog/gemma4-fine-tune-arena).
+
+## Workflow intelligence + node development
+
+- **`query_workflow`** (#179) — filter / traverse / aggregate over big workflows
+  without loading the whole graph into context.
+- **Graph-health findings** in `validate_workflow` / `analyze_workflow` (#175) —
+  disconnected nodes, missing required inputs, duplicate model loads, orphaned
+  branches, muted/bypassed nodes.
+- **Node-dev tools** (#173) — path-jailed read/search/write/patch plus per-pack git
+  for `custom_nodes`; commit/push stays behind `COMFYUI_MCP_ALLOW_GIT_WRITES`.
+- **`get_comfyui_settings` / `set_comfyui_setting`** (#174) — read/write ComfyUI's
+  own user-settings store. **`calculate`** (#176) — safe batch math with variables
+  and seeded RNG.
+- **`panel_auto_layout`** (#177) — one-shot topological canvas auto-arrange, and
+  `panel_connect` auto-matches slots by type with full diagnostics on failure (#178).
+
+## Panel: survives tab switching
+
+The agent now **keeps working when you switch to another sidebar tab** (0.7.3) — the
+panel detaches instead of tearing down, so the connection, session, and chat survive,
+and an **activity badge** on the tab icon shows a green spinner while a turn runs and
+a red dot when it finished while you weren't looking. Bridge-driven graph mutations
+became properly undoable (one command = one Ctrl+Z, 0.7.1), and a "Remote control"
+QR button (behind a default-off beta toggle) previews phone pairing.

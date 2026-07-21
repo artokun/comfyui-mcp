@@ -1,0 +1,70 @@
+---
+title: "June 29: Comfy MCP parity, run-to-node, graph navigation"
+description: "Five one-call generation tools close the gap with Comfy's official cloud MCP (plus a token-gated tunnel connector), panel_run learns to render a single output branch, and the panel agent gains graph outline/search/subgraph tools plus awareness of your manual canvas edits."
+---
+
+_June 29, 2026_
+
+Three MCP releases (0.21.0 → 0.22.0) and two panel releases (0.4.5, 0.4.6): the
+headline is **parity with Comfy's official cloud MCP** — while staying local-first
+and far broader — plus **run-to-node** partial execution and a set of
+**graph-navigation tools** built for reading big workflows.
+
+## Comfy MCP parity — five one-call tools + a hosted connector
+
+- **`run_workflow_url`** — fetch a workflow from a shared / registry / raw-JSON URL,
+  validate it (API or UI format, auto-converted), then load or run it. SSRF-hardened:
+  DNS-resolved addresses are checked against private/loopback/metadata ranges,
+  redirects are rejected, only bounded http/https fetches.
+- **`rerun_generation`** — re-enqueue the exact workflow behind a prior generation,
+  with optional input overrides — reproducibility in one call.
+- **`generate_video`** — one-call LTX-2.3 text/image-to-video on the render-verified
+  pack stack.
+- **`remove_background`** — one-call BiRefNet/RMBG cutout.
+- **`upscale_image`** — one-call model upscale.
+- **Remote / hosted connector** — token auth (`Authorization: Bearer` or `X-API-Key`,
+  constant-time) on the Streamable-HTTP `/mcp` transport, plus a one-command public
+  tunnel (`npx -y comfyui-mcp --tunnel`) that prints a paste-ready Claude Desktop
+  Custom Connector URL + token. Binding `/mcp` to a non-loopback host without a token
+  is now a hard error.
+
+All five tools were **live-verified on a real GPU** (RTX 4090, ComfyUI 0.26.2) —
+which surfaced and fixed two graph bugs only visible against installed node schemas
+(`generate_video` missing required LTX/SaveVideo widgets; ComfyUI-RMBG KeyErroring on
+omitted "optional" widgets), now pinned by regression tests.
+
+## Run to node — partial-execution debugging
+
+`panel_run` gains **`to_node_id`**: render only one output branch (the target output
+node plus everything upstream) via ComfyUI's native partial execution, skipping every
+other branch — a fast, cheap way to preview or debug part of a big graph. The new
+**`debug-render` skill** encodes the method for renders that *complete but look wrong*:
+localize the first bad stage with run-to-node, preview-tap intermediates, fix, confirm.
+(Panel side ships in 0.4.5.)
+
+## Graph navigation — read a big live graph without dumping JSON
+
+v0.22.0 + panel 0.4.6 add three tools built for an LLM to read a large canvas:
+
+- **`panel_graph_outline`** — a compact, dependency-ordered text map of the open graph
+  (topo-sorted, each node with key widgets + `←`/`→` wiring, plus a groups index).
+- **`panel_find_nodes`** — search the live graph by type, title, port, widget
+  name/value, output/subgraph/mode flags, or a free-text query, with a `matched_on`
+  reason per hit.
+- **`panel_subgraph_group`** — wrap an existing group's nodes into one toggleable
+  subgraph node in a single step; `panel_get_graph` groups now report member
+  `node_ids`.
+
+**Manual-edit awareness** ships alongside: when you edit the canvas by hand between
+turns (bypass a node, change a widget, rewire), the agent's next turn opens with a
+"⟳ MANUAL CANVAS CHANGES" list and is told to treat it as ground truth over its
+memory of the graph.
+
+## Packs
+
+- **`wan-animate-ofm`** (0.21.1) — WAN Animate 2.2 video-to-video character animation,
+  the "OFM hub" variant on the Kijai WanVideo stack. A personal pack: requires four
+  private teskor-hub nodes and is static-validated only, with caveats documented.
+- **`artokun-flow`** now ships the subgraph-organized WAN Animate workflow (named
+  subgraphs for loaders, preprocess, face lock, decode, SAM 3, upscale) — far easier
+  to navigate, and sanitized for shipping.

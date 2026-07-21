@@ -1,0 +1,62 @@
+---
+title: "July 14: the self-updating orchestrator, vision for every backend"
+description: "The panel orchestrator now updates and restarts itself when every agent is idle — a running install never goes stale. Every Ollama-family backend and ChatGPT-direct gains inline image delivery with an honest fallback when a model is text-only, the gemma4 fine-tunes get correct sampling, and a stable phone-pairing token survives restarts."
+---
+
+_July 14, 2026_
+
+v0.31.1 → v0.34.0 plus panel 0.8.1 / 0.8.2. Two headliners:
+[the orchestrator that never goes stale](/blog/self-updating-orchestrator) and
+[giving every backend eyes](/blog/vision-per-model).
+
+## Self-updater + self-restarter
+
+The panel orchestrator (default ON) re-checks npm hourly, updates the installed
+package, and **restarts itself once every agent is idle** with nothing queued, held,
+or rendering — the panel announces the restart, sessions resume from the durable
+store, and the panel reconnects on its own. Dev installs are never modified on disk;
+instead the orchestrator restarts when a rebuilt `dist` lands, so `npm run build` is
+all a developer needs. MCP stdio mode never self-restarts (the client owns that
+process). Opt out with `COMFYUI_MCP_AUTO_UPDATE_DISABLE=1`. And
+`npx github:artokun/comfyui-mcp` now works as a nightly channel.
+
+## Vision is per-model, for every backend
+
+Inline image delivery lands for **every Ollama-family backend** (ollama, OpenRouter,
+LM Studio, llama.cpp, custom endpoints, GLM, Kimi, Copilot) and for **ChatGPT-direct**
+via Responses-API `input_image` data URLs. Vision is always attempted; when an
+endpoint rejects image input there's a graceful one-shot strip-and-retry plus an
+honest 📎 note — and render-completed events no longer tell a text-only model the
+image is "attached below" (confabulation guard).
+
+The **gemma4 fine-tunes also got their sampling fixed**: the tags' baked
+`temperature 0` caused greedy repetition loops; the backend now sends the
+Gemma-recommended sampling (temp 1.0 / top_k 64 / top_p 0.95) for the fine-tune tags.
+
+## Mobile: a pairing token that survives restarts
+
+Set `COMFYUI_MCP_PAIR_TOKEN` to pin the mobile bridge's pairing token (#219) — a
+paired phone reconnects across orchestrator restarts instead of dying on a
+per-session token, and the LAN listener auto-starts at boot with a ready-to-paste
+pairing URL. Unset keeps the previous on-demand, nothing-exposed-until-you-ask
+behavior.
+
+## Also shipped
+
+- **Strip/slice read the live canvas** — `panel_strip_workflow` /
+  `panel_slice_workflow` called with no source capture the open graph directly (new
+  `graph_serialize` command, panel 0.8.2) — no more save-to-disk round trip.
+- **Keys live in one place** — `~/.comfyui-mcp/.env` is the only dotenv location (a
+  legacy package-root `.env` auto-migrates once); panel users manage keys via the
+  API Keys card. Boot logs which providers have a key and its source — never values.
+- **Connection guide for the five new providers** (#214) — Grok / Kimi / GLM /
+  ChatGPT-direct / Copilot sign-in paths and picker roster.
+
+## Fixes
+
+A user interrupt (Stop or "Send now") no longer paints a false "turn failed" banner
+(#221); UI→API conversion no longer scrambles widget values on nodes with custom
+serialized-widget layouts like LTXDirector (#222); the tab-id migration self-heal
+was hardened (#212, #213); the model catalog is live and account-aware, with current
+DeepSeek in the curated picks; and the expired Discord invite was replaced with the
+permanent link (#220).
