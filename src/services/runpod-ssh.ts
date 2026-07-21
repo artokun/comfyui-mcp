@@ -99,6 +99,14 @@ export function rsyncToPod(ep: PodSshEndpoint, localDir: string, remoteDir: stri
   );
 }
 
+/** rsync one FILE up to a pod path (parent created remotely first). */
+export async function rsyncFileToPod(ep: PodSshEndpoint, localFile: string, remotePath: string, timeoutMs = 120_000): Promise<{ code: number; stdout: string; stderr: string }> {
+  const parent = remotePath.slice(0, remotePath.lastIndexOf("/"));
+  const mk = await sshExec(ep, `mkdir -p '${parent.replace(/'/g, "'\\''")}'`, 30_000);
+  if (mk.code !== 0) return mk;
+  return exec("rsync", ["-az", "-e", `ssh ${SSH_OPTS.join(" ")} -p ${ep.port}`, localFile, `${ep.userHost}:${remotePath}`], timeoutMs);
+}
+
 /** rsync a pod dir DOWN to the rig (CONTENTS of remoteDir). */
 export function rsyncFromPod(ep: PodSshEndpoint, remoteDir: string, localDir: string, timeoutMs = 600_000): Promise<{ code: number; stdout: string; stderr: string }> {
   return exec(

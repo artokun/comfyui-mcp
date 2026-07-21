@@ -1292,3 +1292,135 @@ describe("independent review fixes (PR #237)", () => {
     expect(elapsed).toBeLessThan(5_000); // NOT the full 60s claim TTL
   });
 });
+
+describe("pod target (P4)", () => {
+  const EP = { userHost: "root@203.0.113.10", port: 23456 };
+
+  function podDeps(over: Partial<Parameters<typeof mod.startTrainingJob>[1]> = {}) {
+    const calls = { up: [] as string[][], cfg: [] as string[][], lora: [] as string[][], down: [] as string[][] };
+    const d = deferred<{ code: number; tail: string }>();
+    const deps = {
+      sshWorks: async () => true,
+      rsyncToPod: async (...a: unknown[]) => { calls.up.push(a as string[]); return { code: 0, stdout: "", stderr: "" }; },
+      rsyncFileToPod: async (...a: unknown[]) => {
+        const [ , remote] = a as [unknown, unknown, string];
+        if (remote.includes("loras")) calls.lora.push(a as string[]);
+        else calls.cfg.push(a as string[]);
+        return { code: 0, stdout: "", stderr: "" };
+      },
+      rsyncFromPod: async (...a: unknown[]) => {
+        calls.down.push(a as string[]);
+        // Simulate the LoRA + a sample landing back on the rig (third arg).
+        const [, , local] = a as [unknown, unknown, string];
+        mkdirSync(local, { recursive: true });
+        writeFileSync(join(local, "pod_lora.safetensors"), "weights");
+        mkdirSync(join(local, "samples"), { recursive: true });
+        writeFileSync(join(local, "samples", "s1.png"), "sample");
+        return { code: 0, stdout: "", stderr: "" };
+      },
+      startSshTraining: () => ({ containerName: "x", done: d.promise, child: {} as never }),
+      lorasDir: () => join(root, "loras"),
+      catalog: fakeCatalog(),
+      ...over,
+    };
+    return { deps, calls, d };
+  }
+
+  function stageDataset() {
+    const dataset = join(mod.datasetsRoot(), "dataset");
+    mkdirSync(dataset, { recursive: true });
+    makeImage(dataset, "img_00001.png");
+    return dataset;
+  }
+
+  it("runs end-to-end: pod paths in config, uploads staged, delivery both sides, pod tag", async () => {
+    const { deps, calls, d } = podDeps();
+    const catalog = deps.catalog as ReturnType<typeof fakeCatalog>;
+    const job = await mod.startTrainingJob(
+      { name: "pod_lora", flow: "character", model: "flux1-dev", datasetPath: stageDataset(), target: "pod", podEndpoint: EP },
+      deps,
+    );
+    expect(job.target).toBe("pod");
+    expect(job.containerName).toBe("pod|root@203.0.113.10|23456");
+    // Config points at REAL pod paths (no container mount rewrite).
+    const yaml = readFileSync(join(job.jobDir, "config.yml"), "utf-8");
+    expect(yaml).toContain("/workspace/training/datasets/pod_lora");
+    expect(yaml).toContain("/workspace/training/jobs/");
+    // Dataset + config were uploaded before launch.
+    expect(calls.up).toHaveLength(1);
+    expect(calls.cfg).toHaveLength(1);
+    expect(calls.cfg[0][2]).toContain("/workspace/training/jobs/");
+
+    // The runner "finishes" → finalize pulls output down and delivers both ways.
+    d.resolve({ code: 0, tail: "" });
+    await new Promise((r) => setTimeout(r, 50));
+    const done = (await mod.getJob(job.id))!;
+    if (done.status !== "completed") throw new Error(`job did not complete: ${done.error}`);
+    expect(calls.down).toHaveLength(1); // output pulled back
+    expect(calls.lora).toHaveLength(1); // delivered to the pod's models/loras
+    expect(calls.lora[0][2]).toBe("/workspace/models/loras/pod_lora.safetensors");
+    expect(done.result!.podLoraPath).toBe("/workspace/models/loras/pod_lora.safetensors");
+    expect(done.result!.loraPath).toBe(join(root, "loras", "pod_lora.safetensors")); // local copy too
+    expect(done.progress.samples).toHaveLength(1); // samples mirrored back
+    const upsert = (catalog.upserts[0] ?? {}) as { tags?: string[] };
+    expect(upsert.tags).toContain("trained-on-pod");
+  });
+
+  it("deliverTo 'pod' skips the local copy + catalog, keeps podLoraPath", async () => {
+    const { deps, calls, d } = podDeps();
+    const catalog = deps.catalog as ReturnType<typeof fakeCatalog>;
+    const job = await mod.startTrainingJob(
+      { name: "pod_lora", flow: "character", model: "flux1-dev", datasetPath: stageDataset(), target: "pod", podEndpoint: EP, deliverTo: "pod" },
+      deps,
+    );
+    d.resolve({ code: 0, tail: "" });
+    await new Promise((r) => setTimeout(r, 50));
+    const done = (await mod.getJob(job.id))!;
+    expect(done.status).toBe("completed");
+    expect(done.result!.podLoraPath).toBe("/workspace/models/loras/pod_lora.safetensors");
+    expect(existsSync(join(root, "loras", "pod_lora.safetensors"))).toBe(false);
+    expect(catalog.upserts).toHaveLength(0);
+    expect(done.result!.catalogId).toBeUndefined();
+  });
+
+  it("refuses with no endpoint, dead ssh, or an already-active pod job", async () => {
+    await expect(
+      mod.startTrainingJob({ name: "x", flow: "character", model: "flux1-dev", datasetPath: stageDataset(), target: "pod" }),
+    ).rejects.toThrow(/requires a pod SSH endpoint/);
+
+    await expect(
+      mod.startTrainingJob(
+        { name: "x", flow: "character", model: "flux1-dev", datasetPath: stageDataset(), target: "pod", podEndpoint: EP },
+        podDeps({ sshWorks: async () => false }).deps,
+      ),
+    ).rejects.toThrow(/pod SSH unreachable/);
+
+    const first = podDeps();
+    const job = await mod.startTrainingJob(
+      { name: "busy_pod", flow: "character", model: "flux1-dev", datasetPath: stageDataset(), target: "pod", podEndpoint: EP },
+      first.deps,
+    );
+    await expect(
+      mod.startTrainingJob(
+        { name: "second_pod", flow: "character", model: "flux1-dev", datasetPath: stageDataset(), target: "pod", podEndpoint: EP },
+        podDeps().deps,
+      ),
+    ).rejects.toThrow(/already has an active training job/);
+    first.d.resolve({ code: 1, tail: "cleanup" });
+    await new Promise((r) => setTimeout(r, 30));
+    void job;
+  });
+
+  it("hasActiveTrainingJob flags pod jobs only while running", async () => {
+    expect(mod.hasActiveTrainingJob("pod")).toBe(false);
+    const { deps, d } = podDeps();
+    await mod.startTrainingJob(
+      { name: "pod_lora", flow: "character", model: "flux1-dev", datasetPath: stageDataset(), target: "pod", podEndpoint: EP },
+      deps,
+    );
+    expect(mod.hasActiveTrainingJob("pod")).toBe(true);
+    d.resolve({ code: 0, tail: "" });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(mod.hasActiveTrainingJob("pod")).toBe(false);
+  });
+});

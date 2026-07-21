@@ -37,6 +37,20 @@ import {
   type TrainingProgress,
 } from "./ai-toolkit.js";
 import {
+  decodePodContainerName,
+  encodePodContainerName,
+  podJobPaths,
+  rsyncFileToPod,
+  rsyncFromPod,
+  rsyncToPod,
+  sshEndpointWorks,
+  sshExec,
+  sshProcessRunning,
+  startSshTraining,
+  stopSshTraining,
+  type PodSshEndpoint,
+} from "./runpod-ssh.js";
+import {
   buildTrainingConfig,
   type TrainParams,
   type TrainerFlow,
@@ -66,6 +80,12 @@ export interface TrainingJob {
     samples: string[];
   };
   containerName?: string;
+  /** Where the job runs. "local" = docker on this rig; "pod" = ssh-driven
+   *  pod-native training (containerName is the `pod|user@host|port` encoding).
+   *  Absent on pre-P4 records → local. */
+  target?: "local" | "pod";
+  /** Pod jobs: where the finished LoRA is delivered (default "both"). */
+  deliverTo?: "pod" | "local" | "both";
   /** Pid of the MCP process that launched the container — the ONLY process
    *  allowed to finalize it. Other processes may recover an orphaned job only
    *  when this owner is provably dead (train_status stays side-effect-free for
@@ -87,13 +107,17 @@ export interface TrainingJob {
    *  active instance at handoff time differs (retargeted mid-run). */
   instanceSlug?: string;
   result?: {
-    /** Absolute path of the LoRA copied into models/loras/. */
+    /** Absolute path of the LoRA copied into models/loras/ (local delivery),
+     *  or the pod path / pulled path for pod-only delivery. */
     loraPath: string;
     /** models/-relative path, e.g. "loras/my_lora.safetensors". */
     loraRelPath: string;
-    /** Absent when the catalog upsert was skipped (instance changed mid-run). */
+    /** Absent when the catalog upsert was skipped (instance changed mid-run
+     *  or pod-only delivery). */
     catalogId?: string;
     previewFile?: string;
+    /** Pod jobs: path inside the pod's models/loras (when delivered there). */
+    podLoraPath?: string;
   };
   createdAt: string;
   updatedAt: string;
@@ -106,6 +130,12 @@ export interface TrainingJobDeps {
   stopTraining?: typeof stopTraining;
   /** Container liveness probe (false = definitively gone, null = unknown). */
   containerRunning?: typeof containerRunning;
+  /** Pod seams (target "pod" jobs): ssh preflight, uploads, runner, downloads. */
+  sshWorks?: typeof sshEndpointWorks;
+  rsyncToPod?: typeof rsyncToPod;
+  rsyncFileToPod?: typeof rsyncFileToPod;
+  rsyncFromPod?: typeof rsyncFromPod;
+  startSshTraining?: typeof startSshTraining;
   /** Where the finished LoRA is copied. Default: ComfyUI models/loras. */
   lorasDir?: () => string;
   catalog?: Pick<ReturnType<typeof getLoraCatalog>, "upsert" | "setPreview">;
@@ -301,6 +331,21 @@ function readLockContent(file: string): { pid: number | null; raw: string } {
   }
 }
 
+/** The token's timestamp (pid:ts:seq) — used to tell a DEAD previous life of
+ *  this pid (token predates my process start) from another LIVE module
+ *  instance of this running process (token is newer; must not be reclaimed).
+ *  Codex finding: same-pid module instances (vitest query-imports) broke the
+ *  live-lock CAS; production pid-recycling needs exactly this distinction. */
+function lockTokenTs(raw: string): number {
+  const ts = Number(raw.split(":")[1]);
+  return Number.isFinite(ts) ? ts : 0;
+}
+
+/** This process's start time (uptime-derived; identical across module instances). */
+function processStartMs(): number {
+  return Date.now() - process.uptime() * 1000;
+}
+
 /** Acquire a lockfile (exclusive-create). Retries within `budgetMs`; returns
  *  false on timeout (caller MUST NOT mutate unlocked).
  *
@@ -367,7 +412,10 @@ async function acquireLock(file: string, budgetMs = LOCK_WAIT_MS, maxAgeMs = LOC
       // Lock exists — evaluate staleness.
       const observed = readLockContent(file);
       const breakable = (() => {
-        if (observed.pid === process.pid && heldLocks.get(file) !== observed.raw) return true; // dead previous life
+        // A DEAD previous life of this pid: token predates MY process start.
+        // A lock from another LIVE instance of this running process (module
+        // reload / query-import) has a newer token and must NOT be reclaimed.
+        if (observed.pid === process.pid && !heldLocks.has(file) && lockTokenTs(observed.raw) < processStartMs()) return true;
         if (observed.pid !== null && observed.pid !== process.pid && !pidAlive(observed.pid)) return true;
         try {
           const st = statSync(file);
@@ -688,7 +736,7 @@ async function recoverOrphanedJob(id: string, deps: TrainingJobDeps): Promise<vo
     if (!job || (job.status !== "running" && job.status !== "queued")) return;
     try {
       if (recoveredSuccessfully(job)) {
-        handoffToComfyUI(job, deps);
+        await handoffToComfyUI(job, deps);
         job.status = "completed";
         const samples = findSamples(job.outputDir, job.name, 4);
         if (samples.length > 0) job.progress.samples = samples;
@@ -717,6 +765,42 @@ export async function getJob(id: string, deps: TrainingJobDeps = {}): Promise<Tr
 export async function listJobs(deps: TrainingJobDeps = {}): Promise<TrainingJob[]> {
   await refreshRegistry(deps);
   return [...jobs.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+/** The default container liveness probe, pod-aware: `pod|…` names go over ssh. */
+export function defaultContainerProbe(name: string): Promise<boolean | null> {
+  return name.startsWith("pod|") ? sshProcessRunning(name) : containerRunning(name);
+}
+
+/** The default stop, pod-aware. */
+export function defaultTrainingStop(name: string): ReturnType<typeof stopTraining> {
+  return name.startsWith("pod|") ? stopSshTraining(name) : stopTraining(name);
+}
+
+/** Any job currently running/queued — FILE SCAN ONLY, no liveness probes (ssh
+ *  probes are far too slow for the 15s idle-stop tick). `target` "pod" matches
+ *  ssh-driven jobs; the connector's idle-stop must NEVER fire while one of
+ *  those is alive (the pod is busy training even when the ComfyUI queue is
+ *  empty). Stale records err toward "busy" (pod stays up — the cost-safe
+ *  direction for a false negative would be the expensive one). */
+export function hasActiveTrainingJob(target?: "pod"): boolean {
+  let files: string[] = [];
+  try {
+    files = readdirSync(jobsRoot()).filter((f) => f.endsWith(".json"));
+  } catch {
+    return false;
+  }
+  for (const f of files) {
+    try {
+      const j = JSON.parse(readFileSync(join(jobsRoot(), f), "utf-8")) as TrainingJob;
+      if (j.status !== "running" && j.status !== "queued") continue;
+      if (!target) return true;
+      if (j.target === target || j.containerName?.startsWith("pod|") === true) return true;
+    } catch {
+      // skip a garbled record
+    }
+  }
+  return false;
 }
 
 // ---- dataset staging ----------------------------------------------------------
@@ -850,6 +934,12 @@ export interface StartJobInput {
   trigger?: string;
   params?: Partial<TrainParams>;
   device?: string;
+  /** Where to run (default "local"). "pod" requires podEndpoint. */
+  target?: "local" | "pod";
+  /** SSH endpoint of the target pod (target "pod"). */
+  podEndpoint?: PodSshEndpoint;
+  /** Pod jobs: where the finished LoRA lands (default "both"). */
+  deliverTo?: "pod" | "local" | "both";
 }
 
 function countDatasetImages(datasetPath: string): number {
@@ -966,29 +1056,53 @@ function findSamples(outputDir: string, jobName: string, limit = 4): string[] {
  * Success handoff: copy the produced LoRA into models/loras/ and upsert the
  * catalog (trigger as keyword, base model from the trained arch) so the LoRA
  * is immediately usable in workflows and visible in the mobile LoRA hub.
+ * Pod jobs ALSO deliver onto the pod's models/loras (via ssh) per deliverTo.
  */
-function handoffToComfyUI(job: TrainingJob, deps: TrainingJobDeps): void {
+async function handoffToComfyUI(job: TrainingJob, deps: TrainingJobDeps): Promise<void> {
   const produced = findProducedLora(job.outputDir, job.name);
   if (!produced) {
     throw new Error(`training exited cleanly but no .safetensors found under ${join(job.outputDir, job.name)}`);
   }
-  // The destination resolved at job START wins (codex finding): if the ComfyUI
-  // target changed mid-run, re-resolving now would copy the LoRA to the new
-  // instance's models dir.
-  const lorasDir = job.lorasDir ?? (deps.lorasDir ? deps.lorasDir() : resolveModelSubfolder("loras"));
-  mkdirSync(lorasDir, { recursive: true });
-  const dest = join(lorasDir, `${job.name}.safetensors`);
-  copyFileSync(produced, dest);
+  const deliverTo = job.deliverTo ?? "both";
+  let dest: string | undefined;
+  if (deliverTo !== "pod") {
+    // The destination resolved at job START wins (codex finding): if the ComfyUI
+    // target changed mid-run, re-resolving now would copy the LoRA to the new
+    // instance's models dir.
+    const lorasDir = job.lorasDir ?? (deps.lorasDir ? deps.lorasDir() : resolveModelSubfolder("loras"));
+    mkdirSync(lorasDir, { recursive: true });
+    dest = join(lorasDir, `${job.name}.safetensors`);
+    copyFileSync(produced, dest);
+  }
+
+  // Pod-side delivery: the LoRA lands in the pod's own models/loras so it's
+  // usable on the pod immediately (that's the point of training there).
+  let podLoraPath: string | undefined;
+  if (job.target === "pod" && deliverTo !== "local" && job.containerName) {
+    const ep = decodePodContainerName(job.containerName);
+    if (ep) {
+      const remotePath = `${podJobPaths(job.id, job.name).lorasDir}/${job.name}.safetensors`;
+      const up = await (deps.rsyncFileToPod ?? rsyncFileToPod)(ep, dest ?? produced, remotePath);
+      if (up.code !== 0) {
+        throw new Error(`LoRA delivery to the pod's models/loras failed (rsync exit ${up.code}): ${up.stderr.trim().slice(0, 300)}`);
+      }
+      podLoraPath = remotePath;
+      pushLog(job, `[pod] LoRA delivered → ${remotePath}`);
+    }
+  }
 
   // The catalog is per-instance: after a mid-run retarget, upserting here
   // would register the LoRA in the WRONG instance's catalog. Copy still
   // happened (into the original dir, above); skip the catalog honestly.
-  if (job.instanceSlug && job.instanceSlug !== getInstanceSlug()) {
-    logger.warn(
-      `[training-jobs] ComfyUI instance changed mid-run (${job.instanceSlug} → ${getInstanceSlug()}); ` +
-        `LoRA copied to ${dest} but the catalog upsert was skipped — re-run lora_catalog_upsert on the original instance.`,
-    );
-    job.result = { loraPath: dest, loraRelPath: `loras/${job.name}.safetensors` };
+  // Pod-only delivery skips the rig catalog too (no local file to point at).
+  if (deliverTo === "pod" || (job.instanceSlug && job.instanceSlug !== getInstanceSlug())) {
+    if (deliverTo !== "pod") {
+      logger.warn(
+        `[training-jobs] ComfyUI instance changed mid-run (${job.instanceSlug} → ${getInstanceSlug()}); ` +
+          `LoRA copied to ${dest} but the catalog upsert was skipped — re-run lora_catalog_upsert on the original instance.`,
+      );
+    }
+    job.result = { loraPath: dest ?? podLoraPath ?? produced, loraRelPath: `loras/${job.name}.safetensors`, podLoraPath };
     return;
   }
 
@@ -996,14 +1110,14 @@ function handoffToComfyUI(job: TrainingJob, deps: TrainingJobDeps): void {
   const entry = catalog.upsert({
     relPath: `loras/${job.name}.safetensors`,
     displayName: job.name.replace(/_/g, " "),
-    description: `Character LoRA trained locally on FLUX.1-dev via ostris ai-toolkit (comfyui-mcp trainer, job ${job.id}).`,
+    description: `Character LoRA trained ${job.target === "pod" ? "on a RunPod pod" : "locally"} on FLUX.1-dev via ostris ai-toolkit (comfyui-mcp trainer, job ${job.id}).`,
     setupInstructions:
       "Load with LoraLoaderModelOnly on a FLUX.1-dev checkpoint" +
       (job.trigger ? ` and include the trigger word "${job.trigger}" in the prompt.` : "."),
     keywords: job.trigger ? [job.trigger] : [],
     baseModels: ["FLUX.1-dev"],
     strengthDefault: 1.0,
-    tags: ["trained-locally", "character"],
+    tags: ["trained-locally", "character", ...(job.target === "pod" ? ["trained-on-pod"] : [])],
     // Explicitly clear the flag — retraining a LoRA whose entry was marked
     // missing must become visible again (upsert otherwise preserves it).
     missing: false,
@@ -1019,7 +1133,7 @@ function handoffToComfyUI(job: TrainingJob, deps: TrainingJobDeps): void {
       logger.debug(`[training-jobs] preview copy skipped: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
-  job.result = { loraPath: dest, loraRelPath: `loras/${job.name}.safetensors`, catalogId: entry.id, previewFile };
+  job.result = { loraPath: dest!, loraRelPath: `loras/${job.name}.safetensors`, catalogId: entry.id, previewFile, podLoraPath };
 }
 
 async function finalizeJob(job: TrainingJob, code: number, tail: string, deps: TrainingJobDeps): Promise<void> {
@@ -1083,6 +1197,23 @@ async function finalizeJob(job: TrainingJob, code: number, tail: string, deps: T
       return;
     }
     job.finishedAt = new Date().toISOString();
+    // Pod jobs: pull the produced output (checkpoints + samples + LoRA) back to
+    // the rig BEFORE the usual handoff so findSamples/findProducedLora see it
+    // (samples mirror to panel/mobile through the same rig-local paths).
+    if (job.target === "pod" && job.containerName) {
+      const ep = decodePodContainerName(job.containerName);
+      if (ep) {
+        try {
+          pushLog(job, "[pod] pulling output back from the pod (rsync)…");
+          const down = await (deps.rsyncFromPod ?? rsyncFromPod)(ep, `${podJobPaths(job.id, job.name).outputDir}/${job.name}`, join(job.outputDir, job.name));
+          if (down.code !== 0) {
+            logger.warn(`[training-jobs] pod output rsync for ${job.id} failed: ${down.stderr.trim().slice(0, 200)}`);
+          }
+        } catch (err) {
+          logger.warn(`[training-jobs] pod output rsync for ${job.id} error: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+    }
     // Surface the generated samples in train_status regardless of outcome —
     // ai-toolkit prints only "Generating Images" bars (no saved-file lines), so
     // onProgress never sees sample paths (codex finding; confirmed by the E2E).
@@ -1090,7 +1221,7 @@ async function finalizeJob(job: TrainingJob, code: number, tail: string, deps: T
     if (samples.length > 0) job.progress.samples = samples;
     if (code === 0) {
       try {
-        handoffToComfyUI(job, deps);
+        await handoffToComfyUI(job, deps);
         job.status = "completed";
         // The last training bar can read e.g. 199/200 before the final save +
         // sampling phases — normalize so a completed job shows a complete count.
@@ -1137,9 +1268,24 @@ export async function startTrainingJob(input: StartJobInput, deps: TrainingJobDe
   if (!pathWithin(datasetsRoot(), datasetPath)) {
     throw new Error(`dataset must be staged under ${resolve(datasetsRoot())} — use train_prepare_dataset (the container mounts it read-write)`);
   }
+  const target = input.target ?? "local";
+  if (target === "pod") {
+    if (!input.podEndpoint) throw new Error('target "pod" requires a pod SSH endpoint');
+    const sshWorks = deps.sshWorks ?? sshEndpointWorks;
+    if (!(await sshWorks(input.podEndpoint))) {
+      throw new Error(`pod SSH unreachable at ${input.podEndpoint.userHost}:${input.podEndpoint.port} (key-only auth must be set up — the pod template injects $PUBLIC_KEY at boot)`);
+    }
+    // One training run per pod at a time (its GPU saturates; a second run.py
+    // would also make the remote pkill pattern ambiguous).
+    for (const j of jobs.values()) {
+      if ((j.status === "running" || j.status === "queued") && j.containerName?.startsWith("pod|")) {
+        throw new Error(`pod already has an active training job (${j.id}) — one run per pod`);
+      }
+    }
+  }
   // Pre-launch handoff check — throws early when no local ComfyUI is resolvable.
   const lorasDir = deps.lorasDir ?? (() => resolveModelSubfolder("loras"));
-  const resolvedLorasDir = lorasDir();
+  const resolvedLorasDir = target === "pod" && input.deliverTo === "pod" ? "" : lorasDir();
   const effDeps: TrainingJobDeps = { ...deps, lorasDir };
 
   const id = `t${now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
@@ -1147,13 +1293,16 @@ export async function startTrainingJob(input: StartJobInput, deps: TrainingJobDe
   const outputDir = join(jobDir, "output");
   mkdirSync(outputDir, { recursive: true });
 
-  // Config sees CONTAINER paths; the driver bind-mounts the host dirs there.
+  const isPod = target === "pod";
+  const podPaths = isPod ? podJobPaths(id, input.name) : null;
+  // Config paths: docker sees CONTAINER mount points; a pod-native run sees
+  // REAL pod paths (no mount rewrite).
   const built = buildTrainingConfig({
     name: input.name,
     flow: input.flow,
     model: input.model,
-    datasetPath: CONTAINER_DATASET,
-    outputDir: CONTAINER_OUTPUT,
+    datasetPath: isPod ? podPaths!.datasetDir : CONTAINER_DATASET,
+    outputDir: isPod ? podPaths!.outputDir : CONTAINER_OUTPUT,
     trigger: input.trigger,
     device: input.device,
     params: input.params,
@@ -1169,7 +1318,9 @@ export async function startTrainingJob(input: StartJobInput, deps: TrainingJobDe
     trigger: input.trigger,
     status: "queued",
     progress: { samples: [] },
-    containerName: `comfyui-train-${id}`,
+    containerName: isPod ? encodePodContainerName(input.podEndpoint!) : `comfyui-train-${id}`,
+    target,
+    deliverTo: input.deliverTo ?? "both",
     ownerPid: process.pid,
     datasetPath,
     jobDir,
@@ -1188,74 +1339,109 @@ export async function startTrainingJob(input: StartJobInput, deps: TrainingJobDe
     throw new Error(`could not persist the job record under ${jobsRoot()} — refusing to launch an untracked container`);
   }
 
+  // Pod staging: dataset + config must exist ON the pod before run.py starts.
+  if (isPod) {
+    const ep = input.podEndpoint!;
+    pushLog(job, `[pod] staging dataset → ${ep.userHost}:${podPaths!.datasetDir}`);
+    persist(job);
+    const up = await (deps.rsyncToPod ?? rsyncToPod)(ep, datasetPath, podPaths!.datasetDir);
+    if (up.code !== 0) {
+      jobs.delete(id);
+      throw new Error(`dataset upload to the pod failed (rsync exit ${up.code}): ${up.stderr.trim().slice(0, 300)}`);
+    }
+    const cfg = await (deps.rsyncFileToPod ?? rsyncFileToPod)(ep, configPath, podPaths!.configPath);
+    if (cfg.code !== 0) {
+      jobs.delete(id);
+      throw new Error(`config upload to the pod failed (rsync exit ${cfg.code}): ${cfg.stderr.trim().slice(0, 300)}`);
+    }
+    pushLog(job, "[pod] staged — starting run.py over ssh");
+  }
+
   let handle: TrainingHandle;
-  try {
-    handle = start({
-      containerName: job.containerName!,
-      configPath,
-      datasetPath,
-      outputDir,
-      hfCacheDir: hfCacheRoot(),
-      hfToken: process.env.HF_TOKEN?.trim() || undefined,
-      onProgress: (p: TrainingProgress) => {
-      // Terminal jobs ignore ticks — a progress line arriving while a cancel's
-      // docker stop is in flight must not resurrect the job (codex finding).
-      if (job.status === "cancelled") {
-        // …but a FOREIGN cancel can be rolled back: the cancelling process
-        // reverts the disk record to running when its docker stop fails. If the
-        // disk no longer says cancelled, resume — otherwise stay cancelled
-        // (codex finding: permanent adoption suppressed a later completion).
-        // While a cancel is IN FLIGHT (this process hasn't persisted it yet),
-        // the disk still says running legitimately — never reconcile that.
-        if (pendingCancels.has(job.id)) return;
-        if (!diskCancelled(job)) {
-          job.status = "running";
-          job.finishedAt = undefined;
-          job.error = undefined;
-        } else {
-          return;
-        }
-      }
-      if (job.status === "completed" || job.status === "failed") return;
-      if (job.status !== "running") {
+  // Driver-agnostic handlers — the local docker driver and the pod ssh runner
+  // feed the SAME progress/log plumbing (that's the point of the shared parse).
+  const onProgress = (p: TrainingProgress) => {
+    // Terminal jobs ignore ticks — a progress line arriving while a cancel's
+    // docker stop is in flight must not resurrect the job (codex finding).
+    if (job.status === "cancelled") {
+      // …but a FOREIGN cancel can be rolled back: the cancelling process
+      // reverts the disk record to running when its docker stop fails. If the
+      // disk no longer says cancelled, resume — otherwise stay cancelled
+      // (codex finding: permanent adoption suppressed a later completion).
+      // While a cancel is IN FLIGHT (this process hasn't persisted it yet),
+      // the disk still says running legitimately — never reconcile that.
+      if (pendingCancels.has(job.id)) return;
+      if (!diskCancelled(job)) {
         job.status = "running";
-        reportProgress(job, "downloading", true);
+        job.finishedAt = undefined;
+        job.error = undefined;
+      } else {
+        return;
       }
-      if (p.step !== undefined) job.progress.step = p.step;
-      if (p.totalSteps !== undefined) job.progress.totalSteps = p.totalSteps;
-      if (p.loss !== undefined) job.progress.loss = p.loss;
-      if (p.sample) {
-        job.progress.samples.unshift(toHostOutputPath(job, p.sample));
-        job.progress.samples = job.progress.samples.slice(0, 4);
-      }
-      job.updatedAt = new Date().toISOString();
-      reportProgress(job, "downloading");
-      // Throttled disk snapshot so OTHER processes (orchestrator call_tool
-      // client → mobile train_status) see live progress, not just the final
-      // state (codex finding: progress was memory-only until finalize).
-      const last = lastProgressPersistAt.get(id) ?? 0;
-      if (Date.now() - last >= PROGRESS_PERSIST_MS) {
-        lastProgressPersistAt.set(id, Date.now());
-        scheduleLivePersist(job);
-      }
-    },
-    onLog: (line) => {
-      pushLog(job, line);
-      // Refresh the owner liveness lease on log-only activity too (codex
-      // finding: a >60s log-only phase made the owner look stale). updatedAt
-      // rides out on the throttled persist below.
-      job.updatedAt = new Date().toISOString();
-      // Log lines also snapshot (same throttle): during the long first-run
-      // model download there are NO progress ticks, so without this a
-      // cross-process train_status sees an empty, apparently stalled record
-      // (codex finding).
-      const last = lastProgressPersistAt.get(id) ?? 0;
-      if (Date.now() - last >= PROGRESS_PERSIST_MS) {
-        lastProgressPersistAt.set(id, Date.now());
-        scheduleLivePersist(job);
-      }
-    },
-  });
+    }
+    if (job.status === "completed" || job.status === "failed") return;
+    if (job.status !== "running") {
+      job.status = "running";
+      reportProgress(job, "downloading", true);
+    }
+    if (p.step !== undefined) job.progress.step = p.step;
+    if (p.totalSteps !== undefined) job.progress.totalSteps = p.totalSteps;
+    if (p.loss !== undefined) job.progress.loss = p.loss;
+    if (p.sample) {
+      job.progress.samples.unshift(toHostOutputPath(job, p.sample));
+      job.progress.samples = job.progress.samples.slice(0, 4);
+    }
+    job.updatedAt = new Date().toISOString();
+    reportProgress(job, "downloading");
+    // Throttled disk snapshot so OTHER processes (orchestrator call_tool
+    // client → mobile train_status) see live progress, not just the final
+    // state (codex finding: progress was memory-only until finalize).
+    const last = lastProgressPersistAt.get(id) ?? 0;
+    if (Date.now() - last >= PROGRESS_PERSIST_MS) {
+      lastProgressPersistAt.set(id, Date.now());
+      scheduleLivePersist(job);
+    }
+  };
+  const onLog = (line: string) => {
+    pushLog(job, line);
+    // Refresh the owner liveness lease on log-only activity too (codex
+    // finding: a >60s log-only phase made the owner look stale). updatedAt
+    // rides out on the throttled persist below.
+    job.updatedAt = new Date().toISOString();
+    // Log lines also snapshot (same throttle): during the long first-run
+    // model download there are NO progress ticks, so without this a
+    // cross-process train_status sees an empty, apparently stalled record
+    // (codex finding).
+    const last = lastProgressPersistAt.get(id) ?? 0;
+    if (Date.now() - last >= PROGRESS_PERSIST_MS) {
+      lastProgressPersistAt.set(id, Date.now());
+      scheduleLivePersist(job);
+    }
+  };
+  try {
+    if (isPod) {
+      const h = (deps.startSshTraining ?? startSshTraining)({
+        containerName: job.containerName!,
+        remoteConfigPath: podPaths!.configPath,
+        hfCacheDir: podPaths!.hfCacheDir,
+        hfToken: process.env.HF_TOKEN?.trim() || undefined,
+        onProgress,
+        onLog,
+      });
+      if ("error" in h) throw new Error(h.error);
+      handle = h;
+    } else {
+      handle = start({
+        containerName: job.containerName!,
+        configPath,
+        datasetPath,
+        outputDir,
+        hfCacheDir: hfCacheRoot(),
+        hfToken: process.env.HF_TOKEN?.trim() || undefined,
+        onProgress,
+        onLog,
+      });
+    }
   } catch (err) {
     // startTraining threw before the container was up — the job must not sit
     // queued forever with a live-but-handleless owner (codex finding).

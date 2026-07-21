@@ -40,6 +40,23 @@ function trainerContextDir(): string {
   return join(packageRoot(), "docker", "trainer");
 }
 
+/** Resolve the pod for a pod-targeted train call: explicit pod_id, else the
+ *  connector's connected/watched pod. Returns the pod record or an error string. */
+async function resolvePodForTraining(podId?: string): Promise<import("../services/runpod-client.js").RunpodPod | string> {
+  const { getPod } = await import("../services/runpod-client.js");
+  const { getRunpodWatcher } = await import("../services/runpod-watch.js");
+  const id = podId ?? getRunpodWatcher()?.watchedPodId() ?? undefined;
+  if (!id) {
+    return "No pod selected: pass pod_id, or runpod_pod_connect to a pod first (runpod_list_pods shows yours).";
+  }
+  const pod = await getPod(id);
+  if (!pod) return `No pod ${id} on this RunPod account (runpod_list_pods).`;
+  if (pod.desiredStatus !== "RUNNING") {
+    return `Pod ${pod.id} is ${pod.desiredStatus}, not RUNNING — start it first (runpod_pod_start).`;
+  }
+  return pod;
+}
+
 const paramsSchema = z
   .object({
     steps: z.number().int().min(1).optional().describe("Total training steps (200 = smoke test, 1500-3000 real)."),
@@ -113,7 +130,7 @@ export function registerTrainTools(server: McpServer): void {
 
   server.tool(
     "train_start",
-    "Start a LoRA training job in the GPU trainer container: builds the ai-toolkit config, launches `docker run --gpus all`, and returns a job id for train_status/train_cancel. Long-running — this returns immediately; poll train_status for step/loss/samples. On completion the LoRA is copied into ComfyUI models/loras/ and added to the LoRA catalog automatically. Run train_doctor first if unsure the image/docker/GPU are ready.",
+    "Start a LoRA training job: target 'local' builds the config and launches the GPU trainer container (docker run --gpus all); target 'pod' ssh-drives pod-native training on a connected RunPod pod (pod_id, or the connector's currently connected pod). Returns a job id for train_status/train_cancel. Long-running — returns immediately; poll train_status. On completion the LoRA is delivered per deliverTo (pod/local/both) and cataloged when local. Run train_doctor first if unsure the image/docker/GPU (local) or bootstrap (pod) are ready.",
     {
       name: z.string().min(1).describe("Job name — becomes the output .safetensors basename (e.g. 'aria_character')."),
       flow: z.enum(["character"]).optional().default("character"),
@@ -122,14 +139,29 @@ export function registerTrainTools(server: McpServer): void {
       trigger: z.string().optional().describe("Unique trigger word (e.g. 'ohwx person') — injected as trigger_word and usable in prompts."),
       params: paramsSchema,
       device: z.string().optional().describe("GPU selector, default cuda:0."),
+      target: z.enum(["local", "pod"]).optional().default("local").describe("'local' = docker on this rig; 'pod' = pod-native over ssh on a RunPod pod."),
+      pod_id: z.string().optional().describe("RunPod pod to train on (target 'pod'). Default: the connector's currently connected/watched pod."),
+      deliverTo: z.enum(["pod", "local", "both"]).optional().default("both").describe("Pod jobs only: where the finished LoRA lands."),
     },
     async (args) => {
       try {
-        if (!(await dockerAvailable())) {
-          return textEnvelope({ ok: false, error: { code: "no_docker", message: "Docker daemon not reachable — start Docker Desktop / the docker engine, then re-run. See train_doctor." } });
-        }
-        if (!(await trainerImageExists())) {
-          return textEnvelope({ ok: false, error: { code: "no_image", message: `Trainer image ${TRAINER_IMAGE} not built yet — run train_build_image once (several minutes), then re-run train_start.` } });
+        let podEndpoint: import("../services/runpod-ssh.js").PodSshEndpoint | undefined;
+        if (args.target === "pod") {
+          const pod = await resolvePodForTraining(args.pod_id);
+          if (typeof pod === "string") return textEnvelope({ ok: false, error: { code: "no_pod", message: pod } });
+          const { podSshEndpoint } = await import("../services/runpod-ssh.js");
+          const ep = podSshEndpoint(pod);
+          if (!ep) {
+            return textEnvelope({ ok: false, error: { code: "no_ssh", message: `Pod ${pod.id} has no public SSH endpoint (not running, or the template doesn't expose port 22/tcp).` } });
+          }
+          podEndpoint = ep;
+        } else {
+          if (!(await dockerAvailable())) {
+            return textEnvelope({ ok: false, error: { code: "no_docker", message: "Docker daemon not reachable — start Docker Desktop / the docker engine, then re-run. See train_doctor." } });
+          }
+          if (!(await trainerImageExists())) {
+            return textEnvelope({ ok: false, error: { code: "no_image", message: `Trainer image ${TRAINER_IMAGE} not built yet — run train_build_image once (several minutes), then re-run train_start.` } });
+          }
         }
         const job = await startTrainingJob({
           name: args.name,
@@ -139,8 +171,53 @@ export function registerTrainTools(server: McpServer): void {
           trigger: args.trigger,
           params: args.params,
           device: args.device,
+          target: args.target,
+          podEndpoint,
+          deliverTo: args.deliverTo,
         });
         return textEnvelope({ ok: true, job });
+      } catch (error) {
+        return errorToToolResult(error);
+      }
+    },
+  );
+
+  server.tool(
+    "train_bootstrap",
+    "Set up the NATIVE (dockerless) trainer on this machine or a pod: clone ai-toolkit at the pinned commit, create its venv, install torch + requirements. One-time per machine/pod (~10 min fresh, idempotent; a pod's /workspace persists it across restarts). Needed before target 'pod' train_start on a fresh pod (no docker there).",
+    {
+      target: z.enum(["local", "pod"]).optional().default("local"),
+      pod_id: z.string().optional().describe("Pod to bootstrap (target 'pod'). Default: the connected pod."),
+    },
+    async (args) => {
+      try {
+        if (args.target === "pod") {
+          const pod = await resolvePodForTraining(args.pod_id);
+          if (typeof pod === "string") return textEnvelope({ ok: false, error: { code: "no_pod", message: pod } });
+          const { podSshEndpoint, sshExec } = await import("../services/runpod-ssh.js");
+          const ep = podSshEndpoint(pod);
+          if (!ep) return textEnvelope({ ok: false, error: { code: "no_ssh", message: `Pod ${pod.id} has no public SSH endpoint.` } });
+          const script = [
+            "set -e",
+            "mkdir -p /workspace/training && cd /workspace/training",
+            "[ -d ai-toolkit/.git ] || git clone --recurse-submodules https://github.com/ostris/ai-toolkit.git ai-toolkit",
+            "cd ai-toolkit && git fetch --all && git checkout a0224793cef5d5073c8ed0b8cdb838a84fd1cba0 && git submodule update --init --recursive",
+            "[ -x venv/bin/python ] || python3 -m venv venv",
+            "./venv/bin/python -m pip install --no-cache-dir torch==2.9.1 torchvision==0.24.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cu128",
+            "./venv/bin/python -m pip install --no-cache-dir hf_transfer",
+            "./venv/bin/python -m pip install --no-cache-dir -r requirements.txt",
+            "echo BOOTSTRAP_OK",
+          ].join(" && ");
+          const r = await sshExec(ep, script, 1_800_000);
+          if (r.code !== 0 || !r.stdout.includes("BOOTSTRAP_OK")) {
+            return textEnvelope({ ok: false, error: { code: "bootstrap_failed", message: `pod bootstrap failed (exit ${r.code})`, stderr: (r.stderr || r.stdout).slice(-2000) } });
+          }
+          return textEnvelope({ ok: true, pod: pod.id, note: "ai-toolkit installed at /workspace/training/ai-toolkit (persists across pod restarts)" });
+        }
+        const { bootstrapToolkit } = await import("../services/trainer-bootstrap.js");
+        const lines: string[] = [];
+        const result = await bootstrapToolkit({ onLog: (l) => lines.push(l) });
+        return textEnvelope({ ...result, log_tail: lines.slice(-20) });
       } catch (error) {
         return errorToToolResult(error);
       }
@@ -220,6 +297,29 @@ export function registerTrainTools(server: McpServer): void {
     async () => {
       try {
         const doctor = await trainerDoctor();
+        const { bootstrapStatus } = await import("../services/trainer-bootstrap.js");
+        const native = await bootstrapStatus();
+        // Connected pod (if any): enough for the wizard's Local/Pod switch.
+        let pod: Record<string, unknown> | null = null;
+        try {
+          const { getRunpodWatcher } = await import("../services/runpod-watch.js");
+          const { getPod } = await import("../services/runpod-client.js");
+          const { podSshEndpoint, sshEndpointWorks } = await import("../services/runpod-ssh.js");
+          const id = getRunpodWatcher()?.watchedPodId();
+          if (id) {
+            const p = await getPod(id);
+            if (p) {
+              const ep = podSshEndpoint(p);
+              pod = {
+                id: p.id,
+                name: p.name,
+                status: p.desiredStatus,
+                gpu: p.machine?.gpuDisplayName ?? null,
+                ssh: ep ? await sshEndpointWorks(ep) : false,
+              };
+            }
+          }
+        } catch { /* pod reporting is best-effort */ }
         return textEnvelope({
           ...doctor,
           data: {
@@ -231,6 +331,9 @@ export function registerTrainTools(server: McpServer): void {
             // on this MCP's machine — false in remote mode, so panel/mobile can
             // warn before a doomed launch instead of failing at staging.
             localFs: !isRemoteMode(),
+            // Native (dockerless) trainer bootstrap status — the pod path.
+            native: { dir: native.dir, cloned: native.cloned, venv: native.venv, ready: native.ready, ref: native.ref },
+            pod,
           },
         });
       } catch (error) {

@@ -85,6 +85,7 @@ import type { AgentBackend } from "./agent-backend.js";
 import { readComfyuiCrashLog, formatCrashNote } from "../services/crash-log.js";
 import { QueueMonitor, type StallReport } from "../services/queue-monitor.js";
 import { initRunpodWatcher, getRunpodWatcher } from "../services/runpod-watch.js";
+import { hasActiveTrainingJob } from "../services/training-jobs.js";
 import {
   buildQueueStatusFrame,
   createQueueStatusBroadcaster,
@@ -3353,7 +3354,11 @@ export async function runPanelOrchestrator(): Promise<void> {
     push: (frame) => void bridge.push(frame),
     comfyuiIdle: () => {
       const s = QueueMonitor.snapshot();
-      return s.connected && !s.running && s.queueDepth === 0;
+      // NOT idle while a training job is alive on the pod: training isn't a
+      // ComfyUI queue job, so the queue alone would call an hours-long LoRA
+      // run "idle" and auto-stop the pod mid-flight (P4 guard; review finding
+      // on the connector). hasActiveTrainingJob is a probe-free file scan.
+      return s.connected && !s.running && s.queueDepth === 0 && !hasActiveTrainingJob("pod");
     },
     // Idle auto-stop only applies to a pod we're actually rendering on: the active
     // ComfyUI target is that pod's proxy (its id appears in the URL). A pod we
