@@ -984,6 +984,9 @@ describe("independent review fixes (PR #237)", () => {
     makeImage(outside, "img_00001.png");
     // A symlink INSIDE datasetsRoot pointing OUT — lexical prefix passes, the
     // realpath containment must catch it (docker would mount the target rw).
+    // datasetsRoot() isn't auto-created (sibling tests create it implicitly
+    // via their dataset mkdir) — without this, symlinkSync ENOENTs on CI.
+    mkdirSync(mod.datasetsRoot(), { recursive: true });
     symlinkSync(outside, join(mod.datasetsRoot(), "linked"), "junction");
     await expect(
       mod.startTrainingJob(
