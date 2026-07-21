@@ -26,12 +26,14 @@
 // `agy models` answers (the connect ack's model probe). An unauthenticated CLI
 // gets an actionable "run `agy` once and sign in" message.
 //
-// MCP / ComfyUI tools: `agy` reads MCP servers from a per-workspace
-// `.agents/mcp_config.json` (and a global ~/.gemini/config/mcp_config.json we
-// NEVER touch). Before the first turn we MERGE our two servers — the headless
-// `comfyui` stdio MCP and the per-tab `panel` HTTP MCP — into the workspace file
-// under our own names, preserving every other entry byte-for-byte. Scoped,
-// merge-safe, reversible (delete the two keys) — per #262's requirements.
+// MCP / ComfyUI tools — VERIFIED LIVE against agy 1.1.5 (2026-07-21): the CLI
+// honors ONLY the global shared `~/.gemini/config/mcp_config.json`; the
+// workspace `.agents/mcp_config.json` path in third-party docs is IDE-only and
+// silently ignored by `agy -p`. Before the first turn we MERGE our two servers —
+// the headless `comfyui` stdio MCP and the per-tab `panel` HTTP MCP — into that
+// file under our own names, preserving every other entry byte-for-byte.
+// Merge-safe and reversible (delete the two keys); global rather than
+// workspace-scoped only because the CLI offers nothing narrower.
 //
 // LIMITS (flagged honestly, mirrors the issue's "reduced capabilities" ask):
 //   - `-p` prints plain text: no structured tool-call events, so the panel shows
@@ -51,7 +53,7 @@ import type { Readable } from "node:stream";
 type AgyChild = ChildProcessByStdio<null, Readable, Readable>;
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { logger } from "../utils/logger.js";
 import {
   type AgentBackend,
@@ -217,16 +219,27 @@ export function mergeAgyMcpConfig(
   return `${JSON.stringify(merged, null, 2)}\n`;
 }
 
+/** The MCP config file agy 1.1.5 actually honors — VERIFIED LIVE 2026-07-21:
+ *  the workspace `.agents/mcp_config.json` and `~/.gemini/antigravity-cli/mcp/`
+ *  paths circulating in third-party docs are IGNORED by the CLI; only the
+ *  global shared `~/.gemini/config/mcp_config.json` attaches servers to a
+ *  `-p` session (health_check round-trip confirmed against a live ComfyUI). */
+export function agyMcpConfigPath(home: string = homedir()): string {
+  return join(home, ".gemini", "config", "mcp_config.json");
+}
+
 /** Provider config the Antigravity backend needs. Mirrors GeminiBackendDeps. */
 export interface AntigravityBackendDeps {
-  /** Working directory for agy (the workspace whose .agents/mcp_config.json we manage). */
+  /** Working directory for agy. */
   cwd?: string;
   /** Model for turns (passed via --model). Unset = the account's default. */
   model?: string;
-  /** MCP servers to merge into the workspace .agents/mcp_config.json. */
+  /** MCP servers to merge into agy's global mcp_config.json (see agyMcpConfigPath). */
   mcpServers?: Record<string, GeminiMcpServerSpec>;
   /** Panel system prompt — prepended to the FIRST turn (agy -p has no system flag). */
   systemAppend?: string;
+  /** Override the MCP config file location (tests). Default agyMcpConfigPath(). */
+  mcpConfigPath?: string;
 }
 
 /** Sentinel session id: agy owns conversation storage and -p output carries no
@@ -246,6 +259,17 @@ export class AntigravityBackend implements AgentBackend {
   /** The in-flight per-turn child (interrupt/close kill its tree). */
   private child: AgyChild | null = null;
   private interrupted = false;
+  /** True from runTurn entry until settle — a turn is definitely in flight. */
+  private turnActive = false;
+  /** Expiry for an interrupt armed while NO turn was active. Two truths clash:
+   *  a Stop pressed right after Send must survive the pre-spawn window (the
+   *  03080bc bug — the turn is coming, just not visible to us yet), but a stray
+   *  Stop while genuinely idle must NOT stay armed and cancel the user's next
+   *  unrelated message minutes later. The backend can't see PanelAgent's queue
+   *  to tell the two apart, so an idle-armed interrupt self-expires after a
+   *  short grace: an imminent turn (Stop-after-Send) starts within it and
+   *  consumes the flag; nothing starting means it was a stray Stop. */
+  private idleInterruptExpiry: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
   /** False until the first turn of a FRESH conversation completes; resumed
    *  sessions start true so every turn continues the latest conversation. */
@@ -279,15 +303,19 @@ export class AntigravityBackend implements AgentBackend {
     this.resolveBin();
   }
 
-  /** Merge our MCP servers into the workspace .agents/mcp_config.json (once per
-   *  backend instance). Never touches the global ~/.gemini/config/mcp_config.json.
+  /** Merge our MCP servers into agy's global mcp_config.json (once per backend
+   *  instance) — the ONLY location the CLI honors (verified live; see
+   *  agyMcpConfigPath). Merge-safe: every entry we don't own is preserved
+   *  byte-for-byte, and removal = deleting our two keys. Being a GLOBAL file,
+   *  the per-tab `panel` entry is last-writer-wins across concurrent
+   *  antigravity tabs (each run() rewrites it) — an accepted edge for now.
    *  Failure is non-fatal: the agent still answers, just without ComfyUI tools —
    *  logged so the gap is visible. */
-  private ensureMcpConfig(cwd: string): void {
+  private ensureMcpConfig(): void {
     if (this.mcpConfigWritten || !this.deps.mcpServers || !Object.keys(this.deps.mcpServers).length)
       return;
-    const dir = join(cwd, ".agents");
-    const file = join(dir, "mcp_config.json");
+    const file = this.deps.mcpConfigPath ?? agyMcpConfigPath();
+    const dir = dirname(file);
     try {
       let existing: string | null = null;
       try {
@@ -320,13 +348,18 @@ export class AntigravityBackend implements AgentBackend {
    * releases one batch per turn).
    */
   async *run(opts: BackendStartOptions): AsyncGenerator<AgentEvent> {
-    // Panel may pass the Claude panel model unconditionally — only honor a model
-    // that plausibly belongs to this provider (anything not Claude-shaped; the
-    // real catalog is the account's own `agy models`).
-    if (opts.model && !/^claude/i.test(opts.model)) this.model = opts.model;
     await this.prepare();
+    // Panel may pass the CLAUDE panel model unconditionally in opts.model — but a
+    // simple "reject claude-*" filter is WRONG here: Antigravity's own catalog
+    // legitimately offers Claude models (verified live: claude-sonnet-4-6,
+    // claude-opus-4-6-thinking ride the Google subscription). So validate
+    // claude-shaped ids against the account's real `agy models` catalog and only
+    // drop the ones that aren't in it (the panel's Anthropic-side default).
+    // Non-claude ids are honored directly — they can only have come from our own
+    // picker (fed by listModels) or explicit config.
+    if (opts.model) this.model = (await this.acceptableModel(opts.model)) ?? this.model;
     const cwd = opts.cwd ?? this.deps.cwd ?? process.cwd();
-    this.ensureMcpConfig(cwd);
+    this.ensureMcpConfig();
 
     const resuming = !!(opts.resume ?? opts.sessionId);
     this.continueNext = resuming;
@@ -382,7 +415,33 @@ export class AntigravityBackend implements AgentBackend {
     // channel before reaching runTurn), and clearing at turn START silently
     // discarded it — the turn then ran with nothing able to stop it. The flag is
     // cleared when a turn SETTLES instead, so it survives setup and the child
-    // assignment below acts on it.
+    // assignment below acts on it. A pending idle-armed interrupt is now
+    // definitely aimed at THIS turn — cancel its expiry so it's consumed here.
+    this.turnActive = true;
+    if (this.idleInterruptExpiry) {
+      clearTimeout(this.idleInterruptExpiry);
+      this.idleInterruptExpiry = null;
+    }
+
+    // Windows caps the whole CreateProcess command line at 32,767 chars, and the
+    // prompt rides argv. The panel system preamble alone is ~29K on the first
+    // turn, so a transcript replay / pasted workflow can blow past it — spawn
+    // then fails with a cryptic EINVAL/E2BIG. Preflight with a legible error.
+    if (process.platform === "win32") {
+      const cmdLen = bin.length + args.reduce((n, a) => n + a.length + 3, 0);
+      if (cmdLen > 30_000) {
+        this.turnActive = false;
+        yield {
+          type: "error",
+          message:
+            `This message is too large for the Antigravity CLI (${cmdLen} chars; Windows caps a command line at ~32K, and agy takes the prompt as an argument). ` +
+            "Send a shorter message, or start a fresh chat to drop replayed context.",
+        };
+        yield { type: "result", ok: false, subtype: "error" };
+        return;
+      }
+    }
+
     const queue: AgentEvent[] = [];
     let wake: (() => void) | null = null;
     let done = false;
@@ -488,8 +547,10 @@ export class AntigravityBackend implements AgentBackend {
       }
       // Clear the interrupt HERE (turn end), not at turn start — see the note
       // where the queue is set up. The flag has now been consumed to pick this
-      // turn's result, so the next turn starts clean.
+      // turn's result, so the next turn starts clean. turnActive closes with it:
+      // interrupts landing from now until the next runTurn are idle no-ops.
       this.interrupted = false;
+      this.turnActive = false;
       finish();
     };
     child.on("error", (err) => settle(null, err));
@@ -519,21 +580,64 @@ export class AntigravityBackend implements AgentBackend {
     // Set the flag FIRST and UNCONDITIONALLY. `this.child` is only assigned
     // after spawn() returns, so an interrupt landing in that window used to hit
     // the `if (!child) return` below, leave `interrupted` false, and never kill
-    // anything — the turn then ran to completion with nothing able to stop it.
-    // In the panel that is "hit Stop right after Send and the turn hangs
-    // forever"; in CI it was a 5s timeout in the interrupt test. run() re-checks
-    // this flag the moment it assigns the child, so a kill is never lost.
+    // anything — the turn then ran to completion with nothing able to stop it
+    // (the original 03080bc bug). run() re-checks this flag the moment it
+    // assigns the child, so a kill is never lost.
     this.interrupted = true;
+    if (this.idleInterruptExpiry) clearTimeout(this.idleInterruptExpiry);
+    this.idleInterruptExpiry = null;
+    if (!this.turnActive) {
+      // Armed while NO turn was in flight: either a Stop racing its own turn's
+      // startup (honor it — a turn starts within ms and consumes the flag) or a
+      // stray idle Stop (PanelAgent interrupts unconditionally, e.g. rewind).
+      // Self-expire so the stray case can't linger and spuriously cancel the
+      // user's NEXT message (the post-03080bc poisoning regression).
+      const t = setTimeout(() => {
+        this.idleInterruptExpiry = null;
+        if (!this.turnActive) this.interrupted = false;
+      }, 500);
+      t.unref?.();
+      this.idleInterruptExpiry = t;
+    }
     const child = this.child;
     if (!child) return; // spawn window — run() kills it as soon as it exists
     killProcessTree(child.pid);
   }
 
+  /** The account's model catalog, fetched lazily via `agy models` and cached for
+   *  the backend's lifetime. Null when the probe fails (unauthenticated etc.) —
+   *  callers then fall back to the claude-prefix heuristic. */
+  private catalog: Set<string> | null = null;
+  private async ensureCatalog(): Promise<Set<string> | null> {
+    if (this.catalog) return this.catalog;
+    try {
+      this.catalog = new Set((await this.listModels()).map((m) => m.id));
+    } catch (err) {
+      logger.debug(`[antigravity-backend] catalog probe failed: ${msgOf(err)}`);
+      this.catalog = null;
+    }
+    return this.catalog;
+  }
+
+  /** Decide whether `model` is usable for THIS provider: non-claude ids pass
+   *  (they come from our own picker/config); claude-shaped ids are checked
+   *  against the live catalog — Antigravity DOES serve some claude-* models, but
+   *  the panel also leaks its Anthropic-side default (e.g. claude-opus-4-8)
+   *  through opts.model, which must be dropped. Returns the model when
+   *  acceptable, undefined when not. Catalog unavailable → drop claude ids
+   *  (conservative: a wrong --model makes every turn fail). */
+  private async acceptableModel(model: string): Promise<string | undefined> {
+    if (!/^claude/i.test(model)) return model;
+    const catalog = await this.ensureCatalog();
+    return catalog?.has(model) ? model : undefined;
+  }
+
   /** Switch the model for subsequent turns (--model is per-spawn, so this is
-   *  free — no respawn dance). Ignores Claude-shaped ids the panel may pass. */
+   *  free — no respawn dance). Drops ids the account's catalog can't serve
+   *  (see acceptableModel). */
   async setModel(model: string): Promise<void> {
-    if (/^claude/i.test(model)) return;
-    this.model = model;
+    const ok = await this.acceptableModel(model);
+    if (ok) this.model = ok;
   }
 
   /**

@@ -443,7 +443,9 @@ const parsedConfig = configSchema.parse({
   comfyuiAuthHeader: process.env.COMFYUI_AUTH_HEADER,
   comfyuiAuthScheme: process.env.COMFYUI_AUTH_SCHEME,
   comfyuiAuthToken: process.env.COMFYUI_AUTH_TOKEN,
-  huggingfaceToken: process.env.HUGGINGFACE_TOKEN,
+  // HF_TOKEN is the canonical var the huggingface_hub libs read; HUGGINGFACE_TOKEN
+  // is a legacy alias we still honor as a fallback.
+  huggingfaceToken: process.env.HF_TOKEN || process.env.HUGGINGFACE_TOKEN,
   githubToken: process.env.GITHUB_TOKEN,
   civitaiApiToken: process.env.CIVITAI_API_TOKEN,
   comfyApiKey: resolveComfyApiKey(),

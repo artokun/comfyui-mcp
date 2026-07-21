@@ -22,6 +22,7 @@ const KNOWN_BACKENDS: string[] = [
   "codex",
   "chatgpt",
   "gemini",
+  "antigravity",
   "grok",
   ...OPENAI_KEY_PROVIDER_IDS,
   "ollama",

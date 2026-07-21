@@ -10,7 +10,7 @@
 
 import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import type { AgentEvent, NeutralTurn } from "../../orchestrator/agent-backend.js";
 
@@ -86,6 +86,7 @@ vi.mock("node:child_process", async (importOriginal) => {
 
 import {
   AntigravityBackend,
+  agyMcpConfigPath,
   parseAgyModels,
   mergeAgyMcpConfig,
   resolveAgyBin,
@@ -275,19 +276,35 @@ describe("AntigravityBackend turns", () => {
     expect(t1.args[t1.args.indexOf("-p") + 1]).toBe("back");
   });
 
-  it("ignores a Claude panel model but honors a real one from opts", async () => {
-    hoisted.script.push({ stdout: ["x"], exit: 0 });
+  it("drops a Claude id absent from the catalog but honors a catalog Claude model", async () => {
+    // A claude-shaped opts.model triggers ONE `agy models` catalog probe; the
+    // live agy catalog really does include claude-* entries (verified 2026-07-21),
+    // so only ids missing from the catalog (the panel's Anthropic-side default)
+    // are dropped.
+    hoisted.script.push(
+      { stdout: ["gemini-3.6-flash-medium\nclaude-sonnet-4-6\n"], exit: 0 }, // agy models
+      { stdout: ["x"], exit: 0 }, // turn 1
+      { stdout: ["y"], exit: 0 }, // turn 2
+    );
     const backend = new AntigravityBackend({ cwd: workDir });
     await collect(
       backend.run({ model: "claude-opus-4-8", channel: channelOf([{ text: "q" }]) }),
     );
-    expect(hoisted.spawns[0]!.args).not.toContain("--model");
-    await backend.setModel("claude-sonnet-5"); // ignored
-    hoisted.script.push({ stdout: ["y"], exit: 0 });
-    await backend.setModel("gemini-3-flash");
+    expect(hoisted.spawns[0]!.args).toEqual(["models"]);
+    expect(hoisted.spawns[1]!.args).not.toContain("--model"); // panel default dropped
+    await backend.setModel("claude-sonnet-4-6"); // IN catalog → honored
     await collect(backend.run({ resume: "antigravity-latest", channel: channelOf([{ text: "q2" }]) }));
-    const t2 = hoisted.spawns[1]!;
-    expect(t2.args[t2.args.indexOf("--model") + 1]).toBe("gemini-3-flash");
+    const t2 = hoisted.spawns[2]!;
+    expect(t2.args[t2.args.indexOf("--model") + 1]).toBe("claude-sonnet-4-6");
+  });
+
+  it("honors a non-claude model without probing the catalog", async () => {
+    hoisted.script.push({ stdout: ["x"], exit: 0 });
+    const backend = new AntigravityBackend({ cwd: workDir });
+    await collect(backend.run({ model: "gemini-3.6-flash-low", channel: channelOf([{ text: "q" }]) }));
+    const t1 = hoisted.spawns[0]!;
+    expect(t1.args).not.toContain("models");
+    expect(t1.args[t1.args.indexOf("--model") + 1]).toBe("gemini-3.6-flash-low");
   });
 
   it("surfaces a failed exit as error + failed result (terminal-result invariant)", async () => {
@@ -356,6 +373,32 @@ describe("AntigravityBackend turns", () => {
     if (hoisted.procs[0]) expect(hoisted.killed).toContain(hoisted.procs[0]!.pid);
   });
 
+  it("an idle interrupt expires and does not cancel the next turn (stale-flag regression)", async () => {
+    hoisted.script.push({ stdout: ["fine"], exit: 0 });
+    const backend = new AntigravityBackend({ cwd: workDir });
+    await backend.interrupt(); // stray Stop while idle — arms with a 500ms expiry
+    await new Promise((r) => setTimeout(r, 650)); // let it expire (no turn started)
+    const events = await collect(backend.run({ channel: channelOf([{ text: "hi" }]) }));
+    expect(events.filter((e) => e.type === "result")).toEqual([
+      { type: "result", ok: true, subtype: "end_turn" },
+    ]);
+    expect(hoisted.killed).toEqual([]);
+  });
+
+  it("rejects an over-32K prompt on Windows with a legible error instead of a cryptic spawn failure", async () => {
+    if (process.platform !== "win32") return; // preflight is win32-only
+    const backend = new AntigravityBackend({ cwd: workDir });
+    const events = await collect(
+      backend.run({ channel: channelOf([{ text: "x".repeat(31_000) }]) }),
+    );
+    expect(hoisted.spawns).toHaveLength(0); // never spawned
+    const err = events.find((e) => e.type === "error") as { message: string };
+    expect(err.message).toMatch(/too large/i);
+    expect(events.filter((e) => e.type === "result")).toEqual([
+      { type: "result", ok: false, subtype: "error" },
+    ]);
+  });
+
   it("prepare() fails fast with install guidance when agy is missing", async () => {
     delete process.env.COMFYUI_MCP_ANTIGRAVITY_PATH;
     const savedPath = process.env.PATH;
@@ -374,31 +417,39 @@ describe("AntigravityBackend turns", () => {
 });
 
 describe("AntigravityBackend MCP config", () => {
-  it("writes .agents/mcp_config.json in the workspace before the first turn", async () => {
+  it("merges into the (injected) global mcp_config.json before the first turn", async () => {
     hoisted.script.push({ stdout: ["ok"], exit: 0 });
+    const cfg = join(workDir, "gemini-config", "mcp_config.json");
     const backend = new AntigravityBackend({
       cwd: workDir,
+      mcpConfigPath: cfg,
       mcpServers: {
         comfyui: { transport: "stdio", command: "node", args: ["dist/index.js"], env: {} },
         panel: { transport: "http", url: "http://127.0.0.1:9181/t1" },
       },
     });
     await collect(backend.run({ channel: channelOf([{ text: "hi" }]) }));
-    const written = JSON.parse(readFileSync(join(workDir, ".agents", "mcp_config.json"), "utf8"));
+    const written = JSON.parse(readFileSync(cfg, "utf8"));
     expect(written.mcpServers.comfyui.command).toBe("node");
     expect(written.mcpServers.panel.serverUrl).toBe("http://127.0.0.1:9181/t1");
   });
 
+  it("defaults to ~/.gemini/config/mcp_config.json (the only path agy honors)", () => {
+    expect(agyMcpConfigPath("/home/u")).toBe(join("/home/u", ".gemini", "config", "mcp_config.json"));
+  });
+
   it("leaves an unparseable user config untouched", async () => {
     hoisted.script.push({ stdout: ["ok"], exit: 0 });
-    mkdirSync(join(workDir, ".agents"), { recursive: true });
-    writeFileSync(join(workDir, ".agents", "mcp_config.json"), "{ not json", "utf8");
+    const cfg = join(workDir, "gemini-config", "mcp_config.json");
+    mkdirSync(dirname(cfg), { recursive: true });
+    writeFileSync(cfg, "{ not json", "utf8");
     const backend = new AntigravityBackend({
       cwd: workDir,
+      mcpConfigPath: cfg,
       mcpServers: { panel: { transport: "http", url: "http://x/" } },
     });
     await collect(backend.run({ channel: channelOf([{ text: "hi" }]) }));
-    expect(readFileSync(join(workDir, ".agents", "mcp_config.json"), "utf8")).toBe("{ not json");
+    expect(readFileSync(cfg, "utf8")).toBe("{ not json");
   });
 });
 
