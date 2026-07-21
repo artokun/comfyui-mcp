@@ -85,52 +85,12 @@ open-weight champ, Ideogram 4.
 ## Posts
 
 <Card
-  title="Kimi K3: the biggest open-weight model ever now drives your ComfyUI canvas"
-  href="/blog/kimi-k3-comfyui"
+  title="Train a character LoRA by asking"
+  href="/blog/lora-trainer-p1"
 >
-  Moonshot's 2.8T-parameter K3 — third on the intelligence boards, first on
-  Frontend Code Arena, weights landing July 27 — became a first-class provider
-  two days after release. Why it's a big deal, the honest caveats
-  (always-max thinking, $15/M output), and the one-key setup. _July 20, 2026_
-</Card>
-
-<Card
-  title="Bring any LLM: free local models now drive ComfyUI"
-  href="/blog/local-llms-comfyui"
->
-  Ollama, LM Studio, llama.cpp, or any OpenAI-compatible endpoint — no account,
-  no API key, fully offline. The compact tool router that makes ~200 tools fit a
-  4B model, the loop-breakers small models need, and the VRAM pause that lets one
-  GPU run both the diffusion model and the LLM driving it. _July 20, 2026_
-</Card>
-
-<Card
-  title="We fine-tuned Gemma 4 to drive ComfyUI — and built an arena to prove it"
-  href="/blog/gemma4-fine-tune-arena"
->
-  A gemma4 ladder (e2b/e4b/12b) trained on server-verified trajectories, scored
-  by a best-of-3 arena of real ComfyUI tasks — including the regression we
-  published against our own model, the train/serve format mismatch behind it, and
-  the temperature-0 loop bug the arena couldn't see. _July 20, 2026_
-</Card>
-
-<Card
-  title="Giving every backend eyes — and honesty when a model doesn't have them"
-  href="/blog/vision-per-model"
->
-  Vision is a property of the model, not the provider. Always attempt image
-  delivery, strip-and-retry once on rejection, and leave an in-history note so
-  the model can never pretend it saw an attachment it didn't. _July 20, 2026_
-</Card>
-
-<Card
-  title="GPT-5.6 Sol, Terra, and Luna land in the ComfyUI panel"
-  href="/blog/gpt-5-6-comfyui"
->
-  The new frontier family on your ChatGPT subscription — max and ultra efforts
-  with per-model ceilings from the live catalog, account-aware deprecation that
-  never force-switches a runnable pin, and the SDK-pin war story behind tracking
-  a fast-moving provider. _July 20, 2026_
+  The panel agent drives ostris's ai-toolkit end to end through train_* tools —
+  preflight, dataset staging, streamed progress, honest cancel — verified with a
+  real FLUX.1-dev character run on a 4090. _July 20, 2026_
 </Card>
 
 <Card
@@ -144,57 +104,23 @@ open-weight champ, Ideogram 4.
 </Card>
 
 <Card
-  title="Your conversation now survives workflow switching"
-  href="/blog/panel-owned-sessions"
+  title="GPT-5.6 Sol, Terra, and Luna land in the ComfyUI panel"
+  href="/blog/gpt-5-6-comfyui"
 >
-  The conversation is the unit of continuity; the workflow is just the canvas
-  target. How the orchestrator rebinds a live agent across workflow tabs — no
-  respawn, so even in-memory local models keep their history. _July 20, 2026_
+  The new frontier family on your ChatGPT subscription — max and ultra efforts
+  with per-model ceilings from the live catalog, account-aware deprecation that
+  never force-switches a runnable pin, and the SDK-pin war story behind tracking
+  a fast-moving provider. _July 20, 2026_
 </Card>
 
 <Card
-  title="CivitAI inside ComfyUI: browse, like, and run without a download folder"
-  href="/blog/civitai-in-comfyui"
+  title="Kimi K3: the biggest open-weight model ever now drives your ComfyUI canvas"
+  href="/blog/kimi-k3-comfyui"
 >
-  A full CivitAI browser in the sidebar — lightbox with generation details,
-  like/unlike with a synced likes collection, @creator search qualifiers, and
-  workflows that load straight onto the live canvas. _July 20, 2026_
-</Card>
-
-<Card
-  title="The render finished while you were making coffee: ComfyUI on your phone"
-  href="/blog/comfyui-mobile-app"
->
-  The mobile companion (iOS + Android beta): same agent, same providers, CivitAI
-  parity, one multi-purpose QR to pair — and tab-mirror remote control that lets
-  the phone drive a desktop session. _July 20, 2026_
-</Card>
-
-<Card
-  title="Train a character LoRA by asking"
-  href="/blog/lora-trainer-p1"
->
-  The panel agent drives ostris's ai-toolkit end to end through train_* tools —
-  preflight, dataset staging, streamed progress, honest cancel — verified with a
-  real FLUX.1-dev character run on a 4090. _July 20, 2026_
-</Card>
-
-<Card
-  title="Flatten the spaghetti: making expert workflows readable"
-  href="/blog/flatten-workflows"
->
-  Get/Set buses, Reroutes, and use-everywhere broadcasts resolved to direct
-  links IN PLACE — layout, groups, and widgets preserved — plus the
-  positional-widget bug the work exposed. _July 20, 2026_
-</Card>
-
-<Card
-  title="The orchestrator that never goes stale"
-  href="/blog/self-updating-orchestrator"
->
-  Hourly npm self-update and dev-build self-restart, coalesced to fire only when
-  every agent is idle and nothing is rendering — infrastructure that updates like
-  a browser, not a printer driver. _July 20, 2026_
+  Moonshot's 2.8T-parameter K3 — third on the intelligence boards, first on
+  Frontend Code Arena, weights landing July 27 — became a first-class provider
+  two days after release. Why it's a big deal, the honest caveats
+  (always-max thinking, $15/M output), and the one-key setup. _July 18, 2026_
 </Card>
 
 <Card
@@ -203,7 +129,81 @@ open-weight champ, Ideogram 4.
 >
   A debugging war story in three acts: per-operation routes vs task envelopes vs
   a legacy UI hiding under /v2 — and the frontend catchall that turns every wrong
-  guess into a 405. _July 20, 2026_
+  guess into a 405. _July 18, 2026_
+</Card>
+
+<Card
+  title="Your conversation now survives workflow switching"
+  href="/blog/panel-owned-sessions"
+>
+  The conversation is the unit of continuity; the workflow is just the canvas
+  target. How the orchestrator rebinds a live agent across workflow tabs — no
+  respawn, so even in-memory local models keep their history. _July 17, 2026_
+</Card>
+
+<Card
+  title="CivitAI inside ComfyUI: browse, like, and run without a download folder"
+  href="/blog/civitai-in-comfyui"
+>
+  A full CivitAI browser in the sidebar — lightbox with generation details,
+  like/unlike with a synced likes collection, @creator search qualifiers, and
+  workflows that load straight onto the live canvas. _July 17, 2026_
+</Card>
+
+<Card
+  title="The render finished while you were making coffee: ComfyUI on your phone"
+  href="/blog/comfyui-mobile-app"
+>
+  The mobile companion (iOS + Android beta): same agent, same providers, CivitAI
+  parity, one multi-purpose QR to pair — and tab-mirror remote control that lets
+  the phone drive a desktop session. _July 16, 2026_
+</Card>
+
+<Card
+  title="Flatten the spaghetti: making expert workflows readable"
+  href="/blog/flatten-workflows"
+>
+  Get/Set buses, Reroutes, and use-everywhere broadcasts resolved to direct
+  links IN PLACE — layout, groups, and widgets preserved — plus the
+  positional-widget bug the work exposed. _July 15, 2026_
+</Card>
+
+<Card
+  title="The orchestrator that never goes stale"
+  href="/blog/self-updating-orchestrator"
+>
+  Hourly npm self-update and dev-build self-restart, coalesced to fire only when
+  every agent is idle and nothing is rendering — infrastructure that updates like
+  a browser, not a printer driver. _July 14, 2026_
+</Card>
+
+<Card
+  title="We fine-tuned Gemma 4 to drive ComfyUI — and built an arena to prove it"
+  href="/blog/gemma4-fine-tune-arena"
+>
+  A gemma4 ladder (e2b/e4b/12b) trained on server-verified trajectories, scored
+  by a best-of-3 arena of real ComfyUI tasks — including the regression we
+  published against our own model, the train/serve format mismatch behind it, and
+  the temperature-0 loop bug the arena couldn't see. _July 14, 2026_
+</Card>
+
+<Card
+  title="Giving every backend eyes — and honesty when a model doesn't have them"
+  href="/blog/vision-per-model"
+>
+  Vision is a property of the model, not the provider. Always attempt image
+  delivery, strip-and-retry once on rejection, and leave an in-history note so
+  the model can never pretend it saw an attachment it didn't. _July 14, 2026_
+</Card>
+
+<Card
+  title="Bring any LLM: free local models now drive ComfyUI"
+  href="/blog/local-llms-comfyui"
+>
+  Ollama, LM Studio, llama.cpp, or any OpenAI-compatible endpoint — no account,
+  no API key, fully offline. The compact tool router that makes ~200 tools fit a
+  4B model, the loop-breakers small models need, and the VRAM pause that lets one
+  GPU run both the diffusion model and the LLM driving it. _July 14, 2026_
 </Card>
 
 <Card
