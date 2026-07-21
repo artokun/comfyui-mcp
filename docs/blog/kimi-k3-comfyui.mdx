@@ -1,6 +1,6 @@
 ---
 title: "Kimi K3: the biggest open-weight model ever now drives your ComfyUI canvas"
-description: "Moonshot AI's Kimi K3 — 2.8 trillion parameters, a 1M-token context window, and open weights promised for July 27 — is the closest an open model has ever come to the closed frontier. Why the release matters, what the benchmarks and the caveats actually say, and how to run it as your ComfyUI agent today with one API key: the moonshot provider landed in comfyui-mcp two days after K3 shipped."
+description: "Moonshot AI's Kimi K3 — 2.8 trillion parameters, a 1M-token context window, and open weights promised for July 27 — is the closest an open model has ever come to the closed frontier. Why the release matters, what the benchmarks and the caveats actually say, and how to run it as your ComfyUI agent today with one API key: the moonshot provider shipped the day after K3's release, with the panel chip the day after that."
 keywords:
   - Kimi K3
   - Kimi K3 ComfyUI
@@ -96,9 +96,11 @@ is conditional on the Hugging Face upload actually landing.
 comfyui-mcp already speaks to fourteen backends through one orchestrator port,
 so a new OpenAI-compatible provider is a well-worn path. K3 landed as the
 `moonshot` provider in [PR #233](https://github.com/artokun/comfyui-mcp/pull/233),
-merged July 18 and live-verified against the real API the same night: our
-`listModels()` sees `kimi-k3` in Moonshot's `/v1/models`, and a real turn
-answers over `chat/completions`.
+shipped in **v0.38.0 on July 17** — the day after K3's release — and
+live-verified against the real API that night: our `listModels()` sees
+`kimi-k3` in Moonshot's `/v1/models`, and a real turn answers over
+`chat/completions`. The panel's **Kimi K3 chip** followed in panel 0.9.1 the
+next day.
 
 One naming knot worth untangling, because you'll see **two Kimi chips** in the
 panel and that's deliberate. **Kimi K3 lives on Moonshot's platform API**
