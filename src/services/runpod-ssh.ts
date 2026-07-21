@@ -90,6 +90,11 @@ export function sshExec(ep: PodSshEndpoint, remoteCmd: string, timeoutMs = 60_00
   return exec("ssh", [...SSH_OPTS, "-p", String(ep.port), ep.userHost, remoteCmd], timeoutMs);
 }
 
+/** The self-match-proof process pattern: a bracketed first letter keeps the
+ *  probe's own shell cmdline (which contains the literal text) from matching
+ *  (codex finding: pgrep/pkill -f 'run.py' matched the invoking shell). */
+export const RUNPY_PATTERN = "[r]un.py";
+
 /** rsync a local dir UP to the pod (trailing-slash semantics: CONTENTS of localDir). */
 export function rsyncToPod(ep: PodSshEndpoint, localDir: string, remoteDir: string, timeoutMs = 300_000): Promise<{ code: number; stdout: string; stderr: string }> {
   return exec(
@@ -177,11 +182,12 @@ export function startSshTraining(opts: {
   return { containerName: opts.containerName, done, child };
 }
 
-/** Stop a pod job: pkill the remote run.py by its config path (idempotent). */
+/** Stop a pod job: pkill the remote run.py by its config path (idempotent).
+ *  The pattern is bracketed so the invoking shell can't self-match. */
 export async function stopSshTraining(containerName: string, remoteConfigPath?: string): Promise<TrainerEnvelope<{ stopped: string }>> {
   const ep = decodePodContainerName(containerName);
   if (!ep) return fail("train_cancel", "not_pod", `not a pod container name: ${containerName}`);
-  const pattern = remoteConfigPath ? `run.py ${remoteConfigPath}` : "run.py";
+  const pattern = remoteConfigPath ? `${RUNPY_PATTERN} ${remoteConfigPath}` : RUNPY_PATTERN;
   const r = await sshExec(ep, `pkill -f '${pattern.replace(/'/g, "'\\''")}' || true`, 30_000);
   if (r.code !== 0) {
     return fail("train_cancel", "stop_failed", `remote pkill on ${ep.userHost} failed: ${r.stderr.trim() || `exit ${r.code}`}`, r.stderr);
@@ -190,11 +196,11 @@ export async function stopSshTraining(containerName: string, remoteConfigPath?: 
 }
 
 /** Is a pod job's run.py still alive? false = definitively not running,
- *  null = can't tell (ssh unreachable). */
+ *  null = can't tell (ssh unreachable). Bracketed against self-match. */
 export async function sshProcessRunning(containerName: string): Promise<boolean | null> {
   const ep = decodePodContainerName(containerName);
   if (!ep) return null;
-  const r = await sshExec(ep, "pgrep -f 'run.py' >/dev/null && echo RUNNING || echo GONE", 20_000);
+  const r = await sshExec(ep, `pgrep -f '${RUNPY_PATTERN}' >/dev/null && echo RUNNING || echo GONE`, 20_000);
   if (r.code !== 0) return null; // ssh itself failed (pod down / network)
   return r.stdout.includes("RUNNING");
 }

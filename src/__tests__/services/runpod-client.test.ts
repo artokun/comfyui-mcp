@@ -128,7 +128,7 @@ describe("createPod (GPU fallback + billing safety)", () => {
     expect(deployCall.variables.input.templateId).toBe("bnqtkvcer3");
     expect(deployCall.variables.input.cloudType).toBe("COMMUNITY");
     expect(deployCall.variables.input.gpuTypeId).toBe("NVIDIA A40");
-    expect(deployCall.variables.input.ports).toBe("3000/http");
+    expect(deployCall.variables.input.ports).toBe("3000/http,22/tcp");
   });
 
   it("has sane default GPU types (24GB+ cards)", () => {

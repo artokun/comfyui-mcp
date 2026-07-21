@@ -99,7 +99,13 @@ export async function bootstrapToolkit(opts: { onLog?: (line: string) => void } 
       // a half repo at the real path.
       const tmp = `${dir}.clone-${process.pid}`;
       const r = await stream("git", ["clone", "--recurse-submodules", AI_TOOLKIT_REPO, tmp], undefined, log);
-      if (r.code !== 0) return fail("train_bootstrap", "clone_failed", `git clone exited ${r.code}`, r.tail);
+      if (r.code !== 0) {
+        // Clean the failed clone so a retry isn't blocked by its leftovers
+        // (codex finding: the stale temp dir made every retry fail instantly).
+        const { rmSync: rmTmp } = await import("node:fs");
+        rmTmp(tmp, { recursive: true, force: true });
+        return fail("train_bootstrap", "clone_failed", `git clone exited ${r.code}`, r.tail);
+      }
       const { renameSync, rmSync } = await import("node:fs");
       rmSync(dir, { recursive: true, force: true });
       renameSync(tmp, dir);

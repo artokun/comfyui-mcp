@@ -226,6 +226,8 @@ export interface RunpodCreateOptions {
   templateId?: string; // default RUNPOD_TEMPLATE_ID (our image)
   containerDiskInGb?: number; // default 20 (matches our template)
   volumeInGb?: number; // default 60 (matches our template; /workspace)
+  /** SSH public key injected as PUBLIC_KEY (trainer drives the pod over ssh). */
+  publicKey?: string;
 }
 
 async function deployOnce(
@@ -250,8 +252,12 @@ async function deployOnce(
         volumeInGb: opts.volumeInGb ?? 60,
         volumeMountPath: "/workspace",
         // Guarantee ComfyUI is reachable through RunPod's HTTP proxy even if
-        // the template's port config drifts.
-        ports: `${RUNPOD_COMFYUI_PORT}/http`,
+        // the template's port config drifts — AND expose ssh (22/tcp) so the
+        // pod-native trainer can drive ai-toolkit over it (codex finding:
+        // one-tap pods had no SSH endpoint and rejected every pod job).
+        ports: `${RUNPOD_COMFYUI_PORT}/http,22/tcp`,
+        // SSH auth for the trainer: the template injects this at boot.
+        ...(opts.publicKey ? { env: { PUBLIC_KEY: opts.publicKey } } : {}),
       },
     },
   );

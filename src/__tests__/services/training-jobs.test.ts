@@ -1423,4 +1423,45 @@ describe("pod target (P4)", () => {
     await new Promise((r) => setTimeout(r, 50));
     expect(mod.hasActiveTrainingJob("pod")).toBe(false);
   });
+
+  it("a failed staging TERMINALIZES the job (no orphaned queued record)", async () => {
+    const { deps } = podDeps({ rsyncToPod: async () => ({ code: 5, stdout: "", stderr: "no space left on device" }) });
+    await expect(
+      mod.startTrainingJob(
+        { name: "pod_lora", flow: "character", model: "flux1-dev", datasetPath: stageDataset(), target: "pod", podEndpoint: EP },
+        deps,
+      ),
+    ).rejects.toThrow(/dataset upload to the pod failed/);
+    const jobs = await mod.listJobs({ containerRunning: async () => false });
+    const job = jobs.find((j) => j.name === "pod_lora")!;
+    expect(job.status).toBe("failed");
+    expect(job.error).toContain("dataset upload to the pod failed");
+    expect(mod.hasActiveTrainingJob("pod")).toBe(false);
+  });
+
+  it("the one-run limit is per POD, not global (pod B is free while pod A trains)", async () => {
+    const podA = podDeps();
+    await mod.startTrainingJob(
+      { name: "pod_a_lora", flow: "character", model: "flux1-dev", datasetPath: stageDataset(), target: "pod", podEndpoint: EP },
+      podA.deps,
+    );
+    // A different endpoint — must NOT be rejected by pod A's active job.
+    const EP_B = { userHost: "root@198.51.100.7", port: 22001 };
+    const podB = podDeps();
+    const jobB = await mod.startTrainingJob(
+      { name: "pod_b_lora", flow: "character", model: "flux1-dev", datasetPath: stageDataset(), target: "pod", podEndpoint: EP_B },
+      podB.deps,
+    );
+    expect(jobB.containerName).toBe("pod|root@198.51.100.7|22001");
+    // But a SECOND job on pod A IS rejected.
+    await expect(
+      mod.startTrainingJob(
+        { name: "pod_a2_lora", flow: "character", model: "flux1-dev", datasetPath: stageDataset(), target: "pod", podEndpoint: EP },
+        podDeps().deps,
+      ),
+    ).rejects.toThrow(/already has an active training job/);
+    podA.d.resolve({ code: 1, tail: "cleanup" });
+    podB.d.resolve({ code: 1, tail: "cleanup" });
+    await new Promise((r) => setTimeout(r, 30));
+  });
 });

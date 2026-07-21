@@ -52,6 +52,7 @@ import {
 } from "./runpod-ssh.js";
 import {
   buildTrainingConfig,
+  sanitizeJobName,
   type TrainParams,
   type TrainerFlow,
   type TrainerModel,
@@ -706,7 +707,7 @@ async function refreshRegistry(deps: TrainingJobDeps = {}): Promise<void> {
     if (!job) continue;
     if (handles.has(job.id)) { jobs.set(job.id, jobs.get(job.id) ?? job); continue; } // live here — memory wins
     if ((job.status === "running" || job.status === "queued") && job.containerName) {
-      const probe = deps.containerRunning ?? containerRunning;
+      const probe = deps.containerRunning ?? defaultContainerProbe;
       const running = await probe(job.containerName).catch(() => null);
       if (running === false && (!ownerAlive(job) || ownerLeaseStale(job))) {
         // Container gone AND (owner provably dead OR its liveness lease
@@ -724,6 +725,25 @@ async function refreshRegistry(deps: TrainingJobDeps = {}): Promise<void> {
   }
 }
 
+/** Pod jobs: pull the produced output (checkpoints + samples + LoRA) back to
+ *  the rig so findSamples/findProducedLora/recoveredSuccessfully see it
+ *  (samples mirror to panel/mobile through the same rig-local paths). Used by
+ *  finalize AND owner-dead recovery (codex finding: recovery judged a pod job
+ *  from the rig-local output dir alone and failed a successful run). */
+async function pullPodOutput(job: TrainingJob, deps: TrainingJobDeps): Promise<void> {
+  if (job.target !== "pod" || !job.containerName) return;
+  const ep = decodePodContainerName(job.containerName);
+  if (!ep) return;
+  try {
+    pushLog(job, "[pod] pulling output back from the pod (rsync)…");
+    const down = await (deps.rsyncFromPod ?? rsyncFromPod)(ep, `${podJobPaths(job.id, job.name).outputDir}/${job.name}`, join(job.outputDir, job.name));
+    if (down.code !== 0) {
+      logger.warn(`[training-jobs] pod output rsync for ${job.id} failed: ${down.stderr.trim().slice(0, 200)}`);
+    }
+  } catch (err) {
+    logger.warn(`[training-jobs] pod output rsync for ${job.id} error: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
 /**
  * Owner-dead recovery under the per-job lock: re-read inside the lock (a
  * concurrent process may have finalized while we waited), then complete a
@@ -734,6 +754,9 @@ async function recoverOrphanedJob(id: string, deps: TrainingJobDeps): Promise<vo
   try {
     const job = readJobRecord(id);
     if (!job || (job.status !== "running" && job.status !== "queued")) return;
+    // Pod jobs: pull the pod-side output BEFORE judging success from the
+    // rig-local dir (codex finding: a finished pod run looked like a failure).
+    await pullPodOutput(job, deps);
     try {
       if (recoveredSuccessfully(job)) {
         await handoffToComfyUI(job, deps);
@@ -784,23 +807,32 @@ export function defaultTrainingStop(name: string): ReturnType<typeof stopTrainin
  *  empty). Stale records err toward "busy" (pod stays up — the cost-safe
  *  direction for a false negative would be the expensive one). */
 export function hasActiveTrainingJob(target?: "pod"): boolean {
+  return scanJobRecords().some((j) => {
+    if (j.status !== "running" && j.status !== "queued") return false;
+    if (!target) return true;
+    return j.target === target || j.containerName?.startsWith("pod|") === true;
+  });
+}
+
+/** Probe-free read of every persisted job record (shares no state with the
+ *  in-memory map; used by the idle-stop guard and the per-pod busy check). */
+function scanJobRecords(): TrainingJob[] {
   let files: string[] = [];
   try {
     files = readdirSync(jobsRoot()).filter((f) => f.endsWith(".json"));
   } catch {
-    return false;
+    return [];
   }
+  const out: TrainingJob[] = [];
   for (const f of files) {
     try {
       const j = JSON.parse(readFileSync(join(jobsRoot(), f), "utf-8")) as TrainingJob;
-      if (j.status !== "running" && j.status !== "queued") continue;
-      if (!target) return true;
-      if (j.target === target || j.containerName?.startsWith("pod|") === true) return true;
+      if (j && typeof j.id === "string") out.push(j);
     } catch {
       // skip a garbled record
     }
   }
-  return false;
+  return out;
 }
 
 // ---- dataset staging ----------------------------------------------------------
@@ -1200,20 +1232,7 @@ async function finalizeJob(job: TrainingJob, code: number, tail: string, deps: T
     // Pod jobs: pull the produced output (checkpoints + samples + LoRA) back to
     // the rig BEFORE the usual handoff so findSamples/findProducedLora see it
     // (samples mirror to panel/mobile through the same rig-local paths).
-    if (job.target === "pod" && job.containerName) {
-      const ep = decodePodContainerName(job.containerName);
-      if (ep) {
-        try {
-          pushLog(job, "[pod] pulling output back from the pod (rsync)…");
-          const down = await (deps.rsyncFromPod ?? rsyncFromPod)(ep, `${podJobPaths(job.id, job.name).outputDir}/${job.name}`, join(job.outputDir, job.name));
-          if (down.code !== 0) {
-            logger.warn(`[training-jobs] pod output rsync for ${job.id} failed: ${down.stderr.trim().slice(0, 200)}`);
-          }
-        } catch (err) {
-          logger.warn(`[training-jobs] pod output rsync for ${job.id} error: ${err instanceof Error ? err.message : String(err)}`);
-        }
-      }
-    }
+    await pullPodOutput(job, deps);
     // Surface the generated samples in train_status regardless of outcome —
     // ai-toolkit prints only "Generating Images" bars (no saved-file lines), so
     // onProgress never sees sample paths (codex finding; confirmed by the E2E).
@@ -1276,9 +1295,13 @@ export async function startTrainingJob(input: StartJobInput, deps: TrainingJobDe
       throw new Error(`pod SSH unreachable at ${input.podEndpoint.userHost}:${input.podEndpoint.port} (key-only auth must be set up — the pod template injects $PUBLIC_KEY at boot)`);
     }
     // One training run per pod at a time (its GPU saturates; a second run.py
-    // would also make the remote pkill pattern ambiguous).
-    for (const j of jobs.values()) {
-      if ((j.status === "running" || j.status === "queued") && j.containerName?.startsWith("pod|")) {
+    // would also make the remote pkill pattern ambiguous). Probe-free DISK
+    // scan scoped to THIS pod's endpoint — a restart or a second MCP process
+    // can't defeat it (codex findings: memory-only scan, and it was global
+    // instead of per-pod).
+    const myName = encodePodContainerName(input.podEndpoint);
+    for (const j of scanJobRecords()) {
+      if ((j.status === "running" || j.status === "queued") && j.containerName === myName) {
         throw new Error(`pod already has an active training job (${j.id}) — one run per pod`);
       }
     }
@@ -1294,9 +1317,10 @@ export async function startTrainingJob(input: StartJobInput, deps: TrainingJobDe
   mkdirSync(outputDir, { recursive: true });
 
   const isPod = target === "pod";
-  const podPaths = isPod ? podJobPaths(id, input.name) : null;
   // Config paths: docker sees CONTAINER mount points; a pod-native run sees
-  // REAL pod paths (no mount rewrite).
+  // REAL pod paths (no mount rewrite) — built from the SANITIZED job name
+  // (raw input could traverse or break the pod fs layout; codex finding).
+  const podPaths = isPod ? podJobPaths(id, sanitizeJobName(input.name)) : null;
   const built = buildTrainingConfig({
     name: input.name,
     flow: input.flow,
@@ -1346,13 +1370,23 @@ export async function startTrainingJob(input: StartJobInput, deps: TrainingJobDe
     persist(job);
     const up = await (deps.rsyncToPod ?? rsyncToPod)(ep, datasetPath, podPaths!.datasetDir);
     if (up.code !== 0) {
-      jobs.delete(id);
-      throw new Error(`dataset upload to the pod failed (rsync exit ${up.code}): ${up.stderr.trim().slice(0, 300)}`);
+      // Terminalize, don't orphan (codex finding: a deleted-but-persisted
+      // queued record suppressed idle auto-stop forever).
+      job.status = "failed";
+      job.error = `dataset upload to the pod failed (rsync exit ${up.code}): ${up.stderr.trim().slice(0, 300)}`;
+      job.finishedAt = new Date().toISOString();
+      job.updatedAt = job.finishedAt;
+      persist(job);
+      throw new Error(job.error);
     }
     const cfg = await (deps.rsyncFileToPod ?? rsyncFileToPod)(ep, configPath, podPaths!.configPath);
     if (cfg.code !== 0) {
-      jobs.delete(id);
-      throw new Error(`config upload to the pod failed (rsync exit ${cfg.code}): ${cfg.stderr.trim().slice(0, 300)}`);
+      job.status = "failed";
+      job.error = `config upload to the pod failed (rsync exit ${cfg.code}): ${cfg.stderr.trim().slice(0, 300)}`;
+      job.finishedAt = new Date().toISOString();
+      job.updatedAt = job.finishedAt;
+      persist(job);
+      throw new Error(job.error);
     }
     pushLog(job, "[pod] staged — starting run.py over ssh");
   }
@@ -1497,13 +1531,13 @@ export async function cancelJob(id: string, deps: TrainingJobDeps = {}): Promise
     // persisting the state and finishing `docker stop`, the container may
     // still be alive. Retry the stop instead of blindly returning.
     if (!job.containerName) return job;
-    const probe = deps.containerRunning ?? containerRunning;
+    const probe = deps.containerRunning ?? defaultContainerProbe;
     const alive = await probe(job.containerName).catch(() => null);
     // Only a definitive "gone" short-circuits; unknown (daemon temporarily
     // unreachable) still attempts the stop so a live container can't keep
     // burning GPU behind a stale cancelled record (codex finding).
     if (alive === false) return job;
-    const stop = deps.stopTraining ?? stopTraining;
+    const stop = deps.stopTraining ?? defaultTrainingStop;
     const res = await stop(job.containerName);
     // Always probe after a stop attempt: a CLI timeout can fire AFTER the
     // daemon honored the stop (codex finding). Only when liveness is unknown
@@ -1582,9 +1616,9 @@ async function cancelJobBody(id: string, job: TrainingJob, deps: TrainingJobDeps
   }
 
   if (job.containerName) {
-    const stop = deps.stopTraining ?? stopTraining;
+    const stop = deps.stopTraining ?? defaultTrainingStop;
     const res = await stop(job.containerName);
-    const probe = deps.containerRunning ?? containerRunning;
+    const probe = deps.containerRunning ?? defaultContainerProbe;
     // Probe after the stop regardless of its exit status (see above).
     const probed = await probe(job.containerName).catch(() => null);
     const stillRunning = probed ?? res.ok === false;

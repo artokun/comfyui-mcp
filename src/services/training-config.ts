@@ -126,6 +126,10 @@ function sanitizeName(name: string): string {
   return cleaned;
 }
 
+/** Exported for callers that build job-scoped paths (pod job dirs) with the
+ *  same rules the config generator applies internally. */
+export const sanitizeJobName = sanitizeName;
+
 /**
  * Build an ai-toolkit training config for the given request.
  * Throws on an unsupported flow/model so callers surface a clear error rather
