@@ -3,8 +3,8 @@
 // link so a user creating their own pod credits our account.
 //
 // Auth: RUNPOD_API_KEY (loaded from ~/.comfyui-mcp/.env into process.env by
-// src/config.ts). The key goes in the endpoint query string exactly as RunPod's
-// API expects (`?api_key=…`) — NEVER logged.
+// src/config.ts). The key is sent as an `Authorization: Bearer` header — NEVER
+// in the URL (query strings leak into proxy/server logs) and NEVER logged.
 //
 // Referral: RunPod's referral attaches at signup/deploy via a `?ref=` link, NOT as
 // a per-pod API parameter — so we surface the deploy link for pod CREATION while
@@ -62,6 +62,13 @@ function getApiKey(): string {
   return key;
 }
 
+/** Per-request timeout for RunPod API calls — a hung network must not pile up
+ *  poller ticks or wedge a tool call forever. Override with RUNPOD_HTTP_TIMEOUT_MS. */
+export const RUNPOD_HTTP_TIMEOUT_MS = (() => {
+  const v = Number(process.env.RUNPOD_HTTP_TIMEOUT_MS);
+  return Number.isFinite(v) && v > 0 ? v : 10_000;
+})();
+
 /** POST a GraphQL query to RunPod. Throws RunpodAuthError on 401, a descriptive
  *  Error on GraphQL/HTTP errors. The api_key never appears in thrown messages. */
 export async function runpodGql<T = unknown>(
@@ -71,13 +78,24 @@ export async function runpodGql<T = unknown>(
   const key = getApiKey();
   let res: Response;
   try {
-    res = await fetch(`${RUNPOD_GRAPHQL_ENDPOINT}?api_key=${encodeURIComponent(key)}`, {
+    res = await fetch(RUNPOD_GRAPHQL_ENDPOINT, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        // Bearer header, NOT `?api_key=` in the URL — URLs land in logs.
+        authorization: `Bearer ${key}`,
+      },
       body: JSON.stringify({ query, variables: variables ?? {} }),
+      signal: AbortSignal.timeout(RUNPOD_HTTP_TIMEOUT_MS),
     });
   } catch (err) {
-    throw new Error(`Could not reach RunPod (${RUNPOD_GRAPHQL_ENDPOINT}): ${err instanceof Error ? err.message : String(err)}`);
+    const msg = err instanceof Error ? err.message : String(err);
+    const timedOut = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+    throw new Error(
+      timedOut
+        ? `RunPod API request timed out after ${RUNPOD_HTTP_TIMEOUT_MS / 1000}s (${RUNPOD_GRAPHQL_ENDPOINT}).`
+        : `Could not reach RunPod (${RUNPOD_GRAPHQL_ENDPOINT}): ${msg}`,
+    );
   }
   if (res.status === 401) throw new RunpodAuthError("RunPod rejected the API key (401). Check RUNPOD_API_KEY in ~/.comfyui-mcp/.env.");
   const body = (await res.json().catch(() => ({}))) as { data?: T; errors?: unknown };
@@ -241,15 +259,65 @@ async function deployOnce(
   return pod?.id ? ({ ...pod, runtime: pod.runtime ?? null } as RunpodPod) : null;
 }
 
+/** Does this createPod failure PROVE RunPod did NOT create (and bill) a pod?
+ *  Only an explicit capacity/availability/quota rejection from RunPod's own
+ *  GraphQL layer qualifies — the server processed the mutation and refused it.
+ *  Everything else (network drop, timeout, 5xx, parse failure, rate limit) is
+ *  AMBIGUOUS: the billed mutation may have landed even though we never saw the
+ *  response, so blindly retrying could spawn a second billable pod. */
+export function isProvablyNotCreatedError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /no longer any instances available|no (?:gpu )?instances? available|no capacity|not enough .{0,40}(?:capacity|gpus?)|insufficient .{0,40}capacity|out of stock|quota (?:exceeded|reached)|there are no/i.test(
+    msg,
+  );
+}
+
+/** Reconcile after an AMBIGUOUS create failure: did a NEW pod with the requested
+ *  name appear (i.e. did the lost mutation actually land)? `priorIds` is the set
+ *  of same-named pod ids that existed BEFORE this createPod call — null when we
+ *  couldn't snapshot them, in which case we cannot tell new from pre-existing
+ *  and must NOT guess. Returns the full pod (re-fetched) or null. */
+async function findPodCreatedByThisCall(
+  name: string,
+  priorIds: Set<string> | null,
+): Promise<RunpodPod | null> {
+  if (!priorIds) return null;
+  try {
+    const pods = await listPods();
+    const created = pods.find((p) => p.name === name && !priorIds.has(p.id));
+    return created ?? null;
+  } catch {
+    return null; // reconciliation itself failed — treat as "unknown", never retry
+  }
+}
+
 /** Deploy a fresh on-demand pod from our template. Community GPU capacity is
  *  spotty, so unless a cloud type is pinned we try COMMUNITY (cheap) across each
  *  GPU type, then SECURE (reliable, pricier) — the first slot with capacity wins,
  *  so one-tap deploy survives community supply constraints. Throws a descriptive
  *  error listing what RunPod rejected if nothing is available. The returned pod
- *  is fresh (runtime null — still booting; follow with getPod/runpod_pod_connect). */
+ *  is fresh (runtime null — still booting; follow with getPod/runpod_pod_connect).
+ *
+ *  BILLING SAFETY: podFindAndDeployOnDemand is a non-idempotent, BILLED mutation.
+ *  We only move on to the next cloud/GPU slot when RunPod EXPLICITLY rejected the
+ *  deploy (capacity/quota — provably nothing was created). On any AMBIGUOUS
+ *  failure (network/timeout/5xx/parse — the pod may exist even though the
+ *  response was lost) we reconcile by listing pods under the requested name: if
+ *  this call's pod appeared, return it; otherwise fail WITHOUT retrying so a
+ *  lost-response create can never fan out into extra billable pods. Auth errors
+ *  surface immediately. */
 export async function createPod(opts: RunpodCreateOptions = {}): Promise<RunpodPod> {
   const gpuTypeIds = opts.gpuTypeIds?.length ? opts.gpuTypeIds : RUNPOD_DEFAULT_GPU_TYPES;
   const cloudTypes: Array<"COMMUNITY" | "SECURE"> = opts.cloudType ? [opts.cloudType] : ["COMMUNITY", "SECURE"];
+  const name = opts.name ?? "comfyui-mcp";
+  // Snapshot the ids of pods ALREADY carrying the requested name, so post-failure
+  // reconciliation can tell a pod THIS call created apart from a pre-existing one.
+  let priorIds: Set<string> | null = null;
+  try {
+    priorIds = new Set((await listPods()).filter((p) => p.name === name).map((p) => p.id));
+  } catch {
+    priorIds = null; // snapshot unavailable → ambiguous failures become terminal
+  }
   const attempts: string[] = [];
   for (const cloudType of cloudTypes) {
     for (const gpuTypeId of gpuTypeIds) {
@@ -258,7 +326,26 @@ export async function createPod(opts: RunpodCreateOptions = {}): Promise<RunpodP
         if (pod) return pod;
         attempts.push(`${cloudType}/${gpuTypeId}: no capacity available`);
       } catch (err) {
-        attempts.push(`${cloudType}/${gpuTypeId}: ${err instanceof Error ? err.message : String(err)}`);
+        const msg = err instanceof Error ? err.message : String(err);
+        // Auth rejection happens before any pod is created — surface it directly
+        // (retrying other slots with the same bad key is pointless).
+        if (err instanceof RunpodAuthError) throw err;
+        if (isProvablyNotCreatedError(err)) {
+          // RunPod itself said "no capacity/quota" → nothing was created; the
+          // next cloud/GPU slot is safe to try.
+          attempts.push(`${cloudType}/${gpuTypeId}: ${msg}`);
+          continue;
+        }
+        // AMBIGUOUS failure: the billed mutation may have landed. Reconcile first.
+        const created = await findPodCreatedByThisCall(name, priorIds);
+        if (created) return created;
+        throw new Error(
+          `RunPod pod creation failed on ${cloudType}/${gpuTypeId} and it could not be confirmed ` +
+            `whether a pod was created (${msg}). NOT retrying automatically — a retry could create ` +
+            `a second billable pod. Check your pods at console.runpod.io (or runpod_pod_status) ` +
+            `before trying again.` +
+            (attempts.length ? `\nEarlier attempts:\n${attempts.map((a) => `  • ${a}`).join("\n")}` : ""),
+        );
       }
     }
   }

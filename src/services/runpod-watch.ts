@@ -36,6 +36,9 @@ export interface RunpodStatusFrame extends Record<string, unknown> {
   autostop_minutes: number | null;
   /** Seconds until auto-stop fires (null when disabled / not idle / not running). */
   autostop_in_seconds: number | null;
+  /** True when an idle auto-stop ATTEMPT failed — the pod is still running (and
+   *  billing); the watcher keeps watching and retries next tick. */
+  autostop_failed?: boolean;
 }
 
 const CLEARED_FRAME: RunpodStatusFrame = {
@@ -143,7 +146,20 @@ export function createRunpodWatcher(deps: RunpodWatcherDeps): RunpodWatcher {
     };
   }
 
-  async function poll(): Promise<void> {
+  // In-flight guard: on a hung network a slow poll must not stack up under the
+  // interval — a tick that lands while the previous poll is still running JOINS
+  // it (no second concurrent RunPod request) instead of starting an overlap.
+  let inflight: Promise<void> | null = null;
+
+  function poll(): Promise<void> {
+    if (inflight) return inflight;
+    inflight = pollOnce().finally(() => {
+      inflight = null;
+    });
+    return inflight;
+  }
+
+  async function pollOnce(): Promise<void> {
     if (!podId || autoStopping) return;
     let pod: RunpodPod | null;
     try {
@@ -180,7 +196,14 @@ export function createRunpodWatcher(deps: RunpodWatcherDeps): RunpodWatcher {
           try {
             await stopPod(podId);
           } catch (err) {
-            logger.warn(`[runpod-watch] auto-stop of ${podId} failed: ${err instanceof Error ? err.message : err}`);
+            // MONEY SAFETY: the stop FAILED — the pod is still RUNNING and still
+            // BILLING. Do NOT pretend it exited and do NOT stop watching: broadcast
+            // the TRUE status with an autostop_failed hint so the UI can warn, keep
+            // the idle clock (remainMs stays ≤ 0), and retry the stop next tick.
+            logger.warn(`[runpod-watch] auto-stop of ${podId} FAILED — pod still running/billing, will retry next tick: ${err instanceof Error ? err.message : err}`);
+            autoStopping = false;
+            pushIfChanged({ ...frameFor(pod, idleSeconds, 0), autostop_failed: true });
+            return;
           }
           const stopped: RunpodStatusFrame = {
             ...frameFor(pod, idleSeconds, 0),
