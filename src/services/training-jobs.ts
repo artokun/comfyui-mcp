@@ -14,18 +14,21 @@
 
 import {
   appendFileSync,
+  closeSync,
   copyFileSync,
   existsSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { basename, extname, join, resolve } from "node:path";
+import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import {
   containerRunning,
   startTraining,
@@ -63,6 +66,11 @@ export interface TrainingJob {
     samples: string[];
   };
   containerName?: string;
+  /** Pid of the MCP process that launched the container — the ONLY process
+   *  allowed to finalize it. Other processes may recover an orphaned job only
+   *  when this owner is provably dead (train_status stays side-effect-free for
+   *  healthy-owner states; independent review finding #1). */
+  ownerPid?: number;
   /** Host dataset dir mounted at /dataset (writable — ai-toolkit caches into it). */
   datasetPath: string;
   /** Per-job dir holding config.yml, train.log, output/. */
@@ -102,6 +110,8 @@ export interface TrainingJobDeps {
   lorasDir?: () => string;
   catalog?: Pick<ReturnType<typeof getLoraCatalog>, "upsert" | "setPreview">;
   now?: () => number;
+  /** Lock-acquisition budget override (ms) for tests. */
+  lockBudgetMs?: number;
 }
 
 const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".webp"]);
@@ -109,6 +119,55 @@ const LOG_RING = 50;
 /** Container-side mount points (must match ai-toolkit.ts startTraining). */
 const CONTAINER_DATASET = "/dataset";
 const CONTAINER_OUTPUT = "/output";
+
+/** Case-fold decision for a root, probed against the REAL volume semantics
+ *  (APFS can be case-sensitive; NTFS is conventionally insensitive — codex
+ *  finding: don't assume by platform). Cached per root. */
+const caseFoldCache = new Map<string, boolean>();
+function volumeCaseInsensitive(root: string): boolean {
+  const key = resolve(root);
+  const cached = caseFoldCache.get(key);
+  if (cached !== undefined) return cached;
+  let insensitive = process.platform === "win32"; // platform default if the probe fails
+  try {
+    mkdirSync(key, { recursive: true });
+    const probe = join(key, `.cmcp-caseprobe-${process.pid}-${persistTmpSeq++}`);
+    writeFileSync(probe, "");
+    // Uppercase the BASENAME ONLY (codex finding: uppercasing the full path
+    // also flips case-sensitive ANCESTORS of a mounted insensitive volume).
+    insensitive = existsSync(join(key, basename(probe).toUpperCase()));
+    rmSync(probe, { force: true });
+  } catch { /* keep the platform default */ }
+  caseFoldCache.set(key, insensitive);
+  return insensitive;
+}
+
+/** Case-fold a path when its ROOT's volume is case-insensitive. */
+function pathKey(root: string, p: string): string {
+  return volumeCaseInsensitive(root) ? resolve(p).toLowerCase() : resolve(p);
+}
+
+/** Is `target` the same dir as `root` or inside it, honoring the volume's real
+ *  case semantics? Both sides are canonicalized (realpath — a symlink/junction
+ *  under `root` can't smuggle in an external dir; codex finding). Roots that
+ *  don't exist yet fall back to lexical resolution. */
+function pathWithin(root: string, target: string): boolean {
+  let r: string;
+  let t: string;
+  try {
+    r = realpathSync(root);
+  } catch {
+    r = resolve(root);
+  }
+  try {
+    t = realpathSync(target);
+  } catch {
+    t = resolve(target);
+  }
+  const rk = pathKey(root, r);
+  const tk = pathKey(root, t);
+  return tk === rk || tk.startsWith(rk + sep);
+}
 
 // ---- paths -----------------------------------------------------------------
 
@@ -139,6 +198,12 @@ export function hfCacheRoot(): string {
 
 const jobs = new Map<string, TrainingJob>();
 const handles = new Map<string, TrainingHandle>();
+/** Jobs with a cancel IN FLIGHT: concurrent cancels JOIN the in-flight promise
+ *  instead of acting on a marked-but-unpersisted state (codex finding: a
+ *  second caller could take the already-cancelled path, stop the container,
+ *  then watch the first acquisition time out and the job publish anyway).
+ *  onProgress also consults this to avoid reconciling memory back to running. */
+const pendingCancels = new Map<string, Promise<TrainingJob>>();
 /** Throttle for persisting live progress (codex finding: cross-process readers
  *  only see what's on disk, so running jobs must snapshot, not just finalize). */
 const lastProgressPersistAt = new Map<string, number>();
@@ -148,42 +213,401 @@ function jobFile(id: string): string {
   return join(jobsRoot(), `${id}.json`);
 }
 
-function persist(job: TrainingJob): void {
+/**
+ * Persist a job record ATOMICALLY (unique tmp + rename): a crash mid-write
+ * must never leave a truncated record, and concurrent writers (an unlocked
+ * progress snapshot racing a lock-holding finalizer) must never share a tmp
+ * path (codex finding). Returns success — startTrainingJob refuses to launch
+ * a container it can't track (independent review finding #5).
+ */
+let persistTmpSeq = 0;
+function persist(job: TrainingJob): boolean {
   try {
     mkdirSync(jobsRoot(), { recursive: true });
-    writeFileSync(jobFile(job.id), JSON.stringify(job, null, 2));
+    const file = jobFile(job.id);
+    const tmp = `${file}.tmp-${process.pid}-${persistTmpSeq++}`;
+    writeFileSync(tmp, JSON.stringify(job, null, 2));
+    renameSync(tmp, file);
+    return true;
   } catch (err) {
     logger.warn(`[training-jobs] could not persist ${job.id}: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
   }
 }
 
-/** True when the ON-DISK record says cancelled — i.e. another process issued a
- *  cancel this process hasn't seen (its memory still says running). */
-function diskCancelled(job: TrainingJob): boolean {
+// ---- per-job CAS lock ---------------------------------------------------------
+// Recovery (owner-dead handoff), owner finalization, and cancel all mutate the
+// same record across processes. Without a lock, a mobile train_status poll and
+// the owner's finalize can both hand off, and a cancel can land between a
+// finalizer's cancel-check and its handoff (independent review findings #1/#2).
+// The lock is a file created exclusively; holders re-read the record inside it.
+//
+// Codex-hardened: the creating fd is always closed; a stale lock is only
+// broken when its HOLDER PID is dead (a live 5-minute handoff copy is never
+// broken into); budgets are per-call-site so a cancel can't time out into
+// writing outside the lock, and a finalize retries past a dead holder.
+
+const LOCK_STALE_MS = 5 * 60_000; // fallback age for an UNREADABLE holder pid
+const LOCK_WAIT_MS = 15_000;
+
+function lockFile(id: string): string {
+  return join(jobsRoot(), `${id}.lock`);
+}
+
+/** Cross-platform pid liveness (signal-0 probe). */
+function pidAlive(pid: number): boolean {
   try {
-    const disk = JSON.parse(readFileSync(jobFile(job.id), "utf-8")) as TrainingJob;
-    return disk?.status === "cancelled";
+    process.kill(pid, 0);
+    return true;
   } catch {
     return false;
   }
 }
 
-/**
- * Persist a live progress/log snapshot WITHOUT clobbering a foreign cancel:
- * if the disk record was cancelled by another process since we last looked,
- * adopt that state into memory and skip the write (codex finding: the owner's
- * throttled persist overwrote the cross-process cancel, then finalize ran the
- * handoff anyway).
- */
-function persistLiveState(job: TrainingJob): void {
-  if (job.status === "cancelled") return;
-  if (diskCancelled(job)) {
-    job.status = "cancelled";
-    job.finishedAt = new Date().toISOString();
-    job.updatedAt = job.finishedAt;
-    return;
+function readLockHolderPid(file: string): number | null {
+  try {
+    const pid = parseInt(readFileSync(file, "utf-8").trim(), 10);
+    return Number.isFinite(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
   }
-  persist(job);
+}
+
+/** Locks THIS process currently holds: file → ownership token. A lockfile
+ *  whose token I don't know is not mine — even when its pid matches mine
+ *  (a previous dead life with a recycled pid) — and is reclaimable (codex
+ *  finding: pid reuse). The token also makes RELEASE safe: a preempted-and-
+ *  resumed holder can never delete a successor's fresh lock, because the
+ *  contents won't match (codex finding). */
+const heldLocks = new Map<string, string>();
+let lockTokenSeq = 0;
+/** Even a LIVE holder's critical section is capped: no handoff copy
+ *  legitimately runs this long, so beyond it the lock is reclaimable
+ *  regardless of pid liveness (covers pid-reuse with an unrelated live pid). */
+const LOCK_MAX_AGE_MS = 30 * 60_000;
+
+function newLockToken(): string {
+  return `${process.pid}:${Date.now()}:${lockTokenSeq++}`;
+}
+
+/** The lockfile's {pid, raw} — raw is the full ownership token text. */
+function readLockContent(file: string): { pid: number | null; raw: string } {
+  try {
+    const raw = readFileSync(file, "utf-8").trim();
+    const pid = parseInt(raw.split(":")[0], 10);
+    return { pid: Number.isFinite(pid) && pid > 0 ? pid : null, raw };
+  } catch {
+    return { pid: null, raw: "" };
+  }
+}
+
+/** Acquire a lockfile (exclusive-create). Retries within `budgetMs`; returns
+ *  false on timeout (caller MUST NOT mutate unlocked).
+ *
+ *  Stale takeover protocol: the stale lock is deleted ONLY through a claim
+ *  channel — an exclusive-create `.claim` file, itself TTL-bounded — and only
+ *  when its contents still EXACTLY match the stale observation. A rival's
+ *  FRESH lock always carries a different token, so it can never be deleted by
+ *  a stale observation (codex finding: check-then-unlink and rename takeover
+ *  were not atomic). Mutual exclusion of the critical section itself is
+ *  always decided by the exclusive `wx` create. */
+const CLAIM_TTL_MS = 60_000; // a claim is a sub-second operation; older = presumed dead
+
+async function acquireLock(file: string, budgetMs = LOCK_WAIT_MS, maxAgeMs = LOCK_MAX_AGE_MS): Promise<boolean> {
+  const start = Date.now();
+  for (;;) {
+    // Honor the claim channel from BOTH sides (codex finding): while a
+    // takeover claim is active, no fresh lock may be created — otherwise the
+    // breaker's content-check → rm can delete that fresh lock. An expired
+    // claim is presumed dead and swept.
+    const claim = `${file}.claim`;
+    try {
+      const st = statSync(claim);
+      if (Date.now() - st.mtimeMs > CLAIM_TTL_MS) {
+        // Expired claim: sweep ONLY the exact instance observed (mtime match) —
+        // a fresh claim created between our stat and rm must survive (codex
+        // finding). Worst case of a missed sweep: the TTL reaper gets it next.
+        try {
+          const st2 = statSync(claim);
+          if (st2.mtimeMs === st.mtimeMs) rmSync(claim, { force: true });
+        } catch { /* gone or replaced — leave it */ }
+      } else {
+        // Active takeover in progress — treat as contended.
+        if (Date.now() - start > budgetMs) return false;
+        await new Promise((r) => setTimeout(r, 100));
+        continue;
+      }
+    } catch { /* no claim — proceed */ }
+    try {
+      mkdirSync(dirname(file), { recursive: true }); // lock may live in a not-yet-created dir
+      const token = newLockToken();
+      const fd = openSync(file, "wx");
+      try {
+        writeFileSync(fd, token);
+      } catch (writeErr) {
+        // Created but couldn't record the holder (e.g. transient disk-full) —
+        // remove OUR empty lock so the next attempt isn't stalled for minutes
+        // on an unreadable holder (codex finding).
+        try {
+          rmSync(file, { force: true });
+        } catch { /* best effort */ }
+        throw writeErr;
+      } finally {
+        // writeFileSync does NOT close caller-supplied fds (leak finding).
+        closeSync(fd);
+      }
+      heldLocks.set(file, token);
+      return true;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      // Only EEXIST means contention. A create that fails on a read-only/full/
+      // corrupt volume must surface NOW, not burn the caller's budget (codex
+      // finding: finalize would otherwise retry for 30 minutes).
+      if (code && code !== "EEXIST") throw err;
+      // Lock exists — evaluate staleness.
+      const observed = readLockContent(file);
+      const breakable = (() => {
+        if (observed.pid === process.pid && heldLocks.get(file) !== observed.raw) return true; // dead previous life
+        if (observed.pid !== null && observed.pid !== process.pid && !pidAlive(observed.pid)) return true;
+        try {
+          const st = statSync(file);
+          const age = Date.now() - st.mtimeMs;
+          if (observed.pid === null && age > LOCK_STALE_MS) return true;
+          if (age > maxAgeMs) return true;
+        } catch { /* vanished — loop re-evaluates */ }
+        return false;
+      })();
+      if (breakable) {
+        const cleared = await breakStaleLock(file, observed.raw, budgetMs - (Date.now() - start));
+        if (cleared) continue; // path free — the wx create decides who wins
+        // Couldn't clear (claim busy or file changed): fall THROUGH to the
+        // budget check + delay — never spin without it (codex finding).
+      }
+      if (Date.now() - start > budgetMs) return false;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+}
+
+/** Delete `file` only if its contents still equal `expectedRaw`, serialized
+ *  through a claim channel so concurrent reclaimers can't double-act. An EMPTY
+ *  lock (crash between create and token write) older than the stale threshold
+ *  is broken by construction. The claim wait honors the CALLER's remaining
+ *  budget (codex finding: a fresh claim could otherwise stall a 300ms/15s
+ *  acquisition for the full 60s TTL). Returns true when the path was cleared
+ *  (or was already free). */
+async function breakStaleLock(file: string, expectedRaw: string, budgetMs: number): Promise<boolean> {
+  const claim = `${file}.claim`;
+  const start = Date.now();
+  const claimBudget = Math.max(0, Math.min(CLAIM_TTL_MS, budgetMs));
+  for (;;) {
+    try {
+      const fd = openSync(claim, "wx");
+      closeSync(fd);
+      break; // claim held
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      // A claim CREATE that fails for non-contention reasons (read-only/full/
+      // corrupt volume) surfaces immediately — never a synchronous tight loop
+      // or a frozen MCP process (codex finding).
+      if (code && code !== "EEXIST") return false;
+      // Claim exists: honor its TTL — a claim older than the cap is presumed
+      // dead (its operation is sub-second). Deleting it can at worst cause a
+      // redundant, content-guarded rm attempt of the SAME stale lock — never
+      // the deletion of a fresh lock (codex-safe by construction).
+      let expired = false;
+      try {
+        const st = statSync(claim);
+        expired = Date.now() - st.mtimeMs > CLAIM_TTL_MS;
+      } catch {
+        expired = true; // vanished
+      }
+      if (expired) {
+        try {
+          rmSync(claim, { force: true });
+        } catch { /* someone else cleared it */ }
+        if (Date.now() - start > claimBudget) return false; // caller's budget, not the full TTL
+        continue;
+      }
+      if (Date.now() - start > claimBudget) return false; // caller's budget, not the full TTL
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
+  try {
+    const current = readLockContent(file);
+    if (current.raw && current.raw === expectedRaw) {
+      try {
+        rmSync(file, { force: true });
+        return true;
+      } catch {
+        // Could NOT delete (permissions, volume) — the path is NOT clear;
+        // report false so the caller hits its budget instead of looping
+        // forever (codex finding).
+        return false;
+      }
+    }
+    if (!current.raw) {
+      // Empty lock (crashed between create and token write): break it once
+      // it's old — never loop on it (codex finding).
+      try {
+        const st = statSync(file);
+        if (Date.now() - st.mtimeMs > LOCK_STALE_MS) {
+          try {
+            rmSync(file, { force: true });
+            return true;
+          } catch {
+            return false; // couldn't delete — not cleared (see above)
+          }
+        }
+      } catch {
+        return true; // vanished
+      }
+    }
+    return false;
+  } finally {
+    try {
+      rmSync(claim, { force: true });
+    } catch { /* best effort */ }
+  }
+}
+
+/** Acquire the per-job lock. */
+async function acquireJobLock(id: string, budgetMs = LOCK_WAIT_MS): Promise<boolean> {
+  try {
+    mkdirSync(jobsRoot(), { recursive: true });
+  } catch { /* the create attempt reports it */ }
+  return acquireLock(lockFile(id), budgetMs);
+}
+
+/** Release a lock — delete the file only if it still carries OUR token, and
+ *  only through the SAME claim channel stale takeover uses (codex finding: a
+ *  preempted-and-resumed holder's token-check → rm otherwise races a takeover
+ *  and can delete the successor's active lock). Best-effort: a release that
+ *  can't claim leaves the lock for the age/pid reclaim paths. */
+function releaseLock(file: string): void {
+  const token = heldLocks.get(file);
+  heldLocks.delete(file);
+  if (!token) return; // never ours (already released / never acquired)
+  const claim = `${file}.claim`;
+  let claimed = false;
+  try {
+    const fd = openSync(claim, "wx");
+    claimed = true;
+    try {
+      const current = readLockContent(file);
+      if (current.raw === token) rmSync(file, { force: true });
+    } finally {
+      closeSync(fd);
+    }
+  } catch { /* couldn't claim/delete — the stale reclaim paths will get it */ }
+  // Only remove the claim WE created — never a rival's active claim (codex
+  // finding: unconditional cleanup broke takeover exclusion).
+  if (claimed) {
+    try {
+      rmSync(claim, { force: true });
+    } catch { /* best effort */ }
+  }
+}
+
+function releaseJobLock(id: string): void {
+  releaseLock(lockFile(id));
+}
+
+/** Read a job record straight from disk (no cache, no merging). */
+function readJobRecord(id: string): TrainingJob | null {
+  try {
+    const job = JSON.parse(readFileSync(jobFile(id), "utf-8")) as TrainingJob;
+    return job && typeof job.id === "string" ? job : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Is the process that OWNS this job (can finalize it) still alive? */
+function ownerAlive(job: TrainingJob): boolean {
+  // An in-flight cancel owns the outcome as surely as a live handle (codex
+  // finding: handle removed + pending cancel + dead container looked like an
+  // orphan, so status-driven recovery could race the cancel's marker).
+  if (pendingCancels.has(job.id)) return true;
+  // A finalizer that exhausted every lock cycle relinquishes ownership via an
+  // ADDITIVE marker file (create-if-absent — never races a terminal write).
+  if (existsSync(ownerReleaseFile(job.id))) return false;
+  if (!job.ownerPid) return false; // pre-owner records: unknown → treat as dead
+  if (job.ownerPid === process.pid) return handles.has(job.id); // same proc: owner only while we hold the handle
+  return pidAlive(job.ownerPid);
+}
+
+function ownerReleaseFile(id: string): string {
+  return join(jobsRoot(), `${id}.owner-released`);
+}
+
+/** The owner's liveness LEASE: while running, the owner persists progress/log
+ *  snapshots every few seconds. A live owner that stopped updating (crashed
+ *  between handle-loss and finalize, or hung) is indistinguishable from dead
+ *  for recovery purposes — pid liveness alone can't see a handleless owner
+ *  (codex finding). The window is generous: a HEALTHY owner finalizes seconds
+ *  after container exit, so 10 minutes of silence + a dead container is the
+ *  genuinely-hung case — shorter windows misclassify quiet-but-alive owners
+ *  (codex finding). */
+const OWNER_LEASE_MS = 10 * 60_000;
+function ownerLeaseStale(job: TrainingJob): boolean {
+  const t = Date.parse(job.updatedAt ?? "");
+  return !Number.isFinite(t) || Date.now() - t > OWNER_LEASE_MS;
+}
+
+/** True when the ON-DISK record says cancelled — i.e. another process issued a
+ *  cancel this process hasn't seen (its memory still says running). */
+function diskCancelled(job: TrainingJob): boolean {
+  return readJobRecord(job.id)?.status === "cancelled";
+}
+
+/** True when the ON-DISK record is in ANY terminal state (cancelled/completed/
+ *  failed) — a live snapshot must never overwrite a terminal record (codex
+ *  finding: a racing progress persist could resurrect "running" over them). */
+function diskTerminal(job: TrainingJob): boolean {
+  const s = readJobRecord(job.id)?.status;
+  return s === "cancelled" || s === "completed" || s === "failed";
+}
+
+/**
+ * Schedule a live progress/log snapshot. The terminal check and the write run
+ * TOGETHER under the per-job lock (codex finding: an unlocked check-then-write
+ * can overwrite a terminal record persisted by another process in between).
+ * Scheduled (not awaited) from the sync stream callbacks, serialized per job
+ * so snapshots can't interleave with themselves.
+ */
+const livePersistChain = new Map<string, Promise<void>>();
+
+function scheduleLivePersist(job: TrainingJob): void {
+  const prev = livePersistChain.get(job.id) ?? Promise.resolve();
+  const next = prev
+    .then(() => persistLiveStateLocked(job))
+    .catch((err) => {
+      logger.debug(`[training-jobs] live persist ${job.id}: ${err instanceof Error ? err.message : String(err)}`);
+    });
+  livePersistChain.set(job.id, next);
+  // GC the chain entry when it settles (it's the tail by construction).
+  void next.finally(() => {
+    if (livePersistChain.get(job.id) === next) livePersistChain.delete(job.id);
+  });
+}
+
+async function persistLiveStateLocked(job: TrainingJob): Promise<void> {
+  if (job.status === "cancelled") return;
+  if (!(await acquireJobLock(job.id, 5_000))) return; // busy — a fresher write is coming from the holder
+  try {
+    if (diskCancelled(job)) {
+      job.status = "cancelled";
+      job.finishedAt = new Date().toISOString();
+      job.updatedAt = job.finishedAt;
+      return;
+    }
+    if (diskTerminal(job)) return; // finalized elsewhere — never resurrect "running"
+    job.updatedAt = new Date().toISOString();
+    persist(job);
+  } finally {
+    releaseJobLock(job.id);
+  }
 }
 
 /**
@@ -201,6 +625,27 @@ function persistLiveState(job: TrainingJob): void {
  *    gone → mark failed; running or unknown → report as recorded, never
  *    mislabel a live foreign job as failed (codex finding #2).
  */
+/**
+ * Merge the on-disk records into the in-memory map. Runs on EVERY read: the
+ * orchestrator's long-lived in-process client (mobile `train_status`) is a
+ * different process from the one running `train_start`, so a load-once
+ * registry would show stale/empty state forever (codex finding #1).
+ *
+ * Merge rules:
+ *  - A job with a live in-process handle is authoritative in memory (fresher
+ *    than disk between throttled persists) — disk never overwrites it.
+ *  - Anything else takes the disk record (new, updated, or absent in memory).
+ *  - A record persisted as running/queued with NO live handle here: probe the
+ *    container. Running/unknown → report as recorded, never mislabel a live
+ *    foreign job (codex finding #2).
+ *  - Container gone: hand off/fail ONLY when the OWNER process is provably
+ *    dead (independent review finding #1). A healthy owner sits in exactly
+ *    this state between docker-exit and its own finalizeJob — a "read" must
+ *    never trigger the handoff or race that finalization, so we just report
+ *    the record as-is and let the owner persist its terminal state.
+ *  - Recovery (owner dead) runs under the per-job CAS lock and re-reads the
+ *    record inside, so two processes can't both hand off.
+ */
 async function refreshRegistry(deps: TrainingJobDeps = {}): Promise<void> {
   let files: string[] = [];
   try {
@@ -209,51 +654,58 @@ async function refreshRegistry(deps: TrainingJobDeps = {}): Promise<void> {
     return; // no jobs dir yet
   }
   for (const f of files) {
-    let job: TrainingJob;
-    try {
-      job = JSON.parse(readFileSync(join(jobsRoot(), f), "utf-8")) as TrainingJob;
-    } catch {
-      continue; // skip a garbled record
-    }
-    if (!job || typeof job.id !== "string") continue;
-    if (handles.has(job.id)) continue; // live in this process — memory wins
+    const job = readJobRecord(f.replace(/\.json$/, ""));
+    if (!job) continue;
+    if (handles.has(job.id)) { jobs.set(job.id, jobs.get(job.id) ?? job); continue; } // live here — memory wins
     if ((job.status === "running" || job.status === "queued") && job.containerName) {
       const probe = deps.containerRunning ?? containerRunning;
       const running = await probe(job.containerName).catch(() => null);
-      if (running === false) {
-        // Container gone with no live handle anywhere: the owning process died.
-        // Recover ONLY a proven-successful run — artifact presence alone is not
-        // enough (a crashed run leaves periodic checkpoints behind, and handing
-        // those off would publish partial weights as a finished LoRA; codex
-        // finding). Proof = the FINAL save exists AND ai-toolkit's own summary
-        // in train.log reports completed jobs.
-        try {
-          if (recoveredSuccessfully(job)) {
-            handoffToComfyUI(job, deps);
-            job.status = "completed";
-            const samples = findSamples(job.outputDir, job.name, 4);
-            if (samples.length > 0) job.progress.samples = samples;
-            if (job.progress.totalSteps !== undefined) job.progress.step = job.progress.totalSteps;
-            job.finishedAt = new Date().toISOString();
-            persist(job);
-            jobs.set(job.id, job);
-            continue;
-          }
-        } catch (err) {
-          job.status = "failed";
-          job.error = `recovered output but handoff failed: ${err instanceof Error ? err.message : String(err)}`;
-          job.finishedAt = new Date().toISOString();
-          persist(job);
-          jobs.set(job.id, job);
-          continue;
-        }
-        job.status = "failed";
-        job.error = "training container is no longer running (the MCP process that started it exited or the container died); any output (checkpoints, samples) is under the job's output/ dir.";
-        job.finishedAt = new Date().toISOString();
-        persist(job);
+      if (running === false && (!ownerAlive(job) || ownerLeaseStale(job))) {
+        // Container gone AND (owner provably dead OR its liveness lease
+        // expired): recover. A HEALTHY owner between docker-exit and its own
+        // finalizeJob has a fresh lease — we report as-is and let it persist
+        // its terminal state (read path stays side-effect-free for it).
+        await recoverOrphanedJob(job.id, deps);
+        const recovered = readJobRecord(job.id);
+        jobs.set(job.id, recovered ?? job);
+        continue;
       }
+      // running / unknown / container-gone-but-owner-alive: report as recorded.
     }
     jobs.set(job.id, job);
+  }
+}
+
+/**
+ * Owner-dead recovery under the per-job lock: re-read inside the lock (a
+ * concurrent process may have finalized while we waited), then complete a
+ * proven-finished run (final save present) or fail it honestly.
+ */
+async function recoverOrphanedJob(id: string, deps: TrainingJobDeps): Promise<void> {
+  if (!(await acquireJobLock(id, deps.lockBudgetMs))) return; // someone else is finalizing — the next read retries
+  try {
+    const job = readJobRecord(id);
+    if (!job || (job.status !== "running" && job.status !== "queued")) return;
+    try {
+      if (recoveredSuccessfully(job)) {
+        handoffToComfyUI(job, deps);
+        job.status = "completed";
+        const samples = findSamples(job.outputDir, job.name, 4);
+        if (samples.length > 0) job.progress.samples = samples;
+        if (job.progress.totalSteps !== undefined) job.progress.step = job.progress.totalSteps;
+      } else {
+        job.status = "failed";
+        job.error = "training container is no longer running (the MCP process that started it exited or the container died); any output (checkpoints, samples) is under the job's output/ dir.";
+      }
+    } catch (err) {
+      job.status = "failed";
+      job.error = `recovered output but handoff failed: ${err instanceof Error ? err.message : String(err)}`;
+    }
+    job.finishedAt = new Date().toISOString();
+    job.updatedAt = job.finishedAt;
+    persist(job);
+  } finally {
+    releaseJobLock(id);
   }
 }
 
@@ -310,9 +762,37 @@ export async function prepareDataset(opts: {
   }
   const dir = join(datasetsRoot(), sanitizeDirName(opts.name));
   const resolvedDir = resolve(dir);
+  // Same-name concurrent prepares would share the staging dir and the
+  // check-then-replace sequence (independent review finding #6) — guarded in
+  // two layers: the in-memory set (in-process fast path) AND a filesystem
+  // lockfile (cross-process, codex finding: two MCP processes each have their
+  // own set and could both destroy-and-swap the dir).
+  if (preparingNames.has(dir)) {
+    throw new Error(`dataset "${opts.name}" is already being prepared — wait for that call to finish`);
+  }
+  // Populate BOTH guards before the first await yields (another call can only
+  // interleave at an await — codex finding).
+  preparingNames.add(dir);
+  const prepLock = `${dir}.prep-lock`;
+  // Dataset prep can legitimately run long (large copies off slow storage), so
+  // the generic 30-min age cap would break a LIVE preparation — pass a 12h cap
+  // instead (codex finding); pid-liveness still reclaims dead holders.
+  const PREP_LOCK_MAX_AGE_MS = 12 * 60 * 60_000;
+  try {
+    if (!(await acquireLock(prepLock, deps.lockBudgetMs ?? LOCK_WAIT_MS, PREP_LOCK_MAX_AGE_MS))) {
+      throw new Error(`dataset "${opts.name}" is being prepared by another process — wait for it to finish`);
+    }
+  } catch (err) {
+    // Clear the in-process guard on ANY acquisition failure (contention or a
+    // thrown filesystem error) — a stuck entry rejects every later same-name
+    // prepare forever (codex finding).
+    preparingNames.delete(dir);
+    throw err;
+  }
+  try {
   const active = await listJobs(deps);
   const inUse = active.find(
-    (j) => (j.status === "running" || j.status === "queued") && resolve(j.datasetPath) === resolvedDir,
+    (j) => (j.status === "running" || j.status === "queued") && pathKey(resolvedDir, j.datasetPath) === pathKey(resolvedDir, resolvedDir),
   );
   if (inUse) {
     throw new Error(`dataset "${opts.name}" is in use by ${inUse.status} job ${inUse.id} — pick another name or cancel the job first`);
@@ -327,7 +807,7 @@ export async function prepareDataset(opts: {
     if (!IMAGE_EXTS.has(ext)) throw new Error(`not a supported image (${[...IMAGE_EXTS].join("/")}): ${src}`);
     return { src, ext, caption: (item.caption ?? opts.defaultCaption)?.trim() };
   });
-  const tmp = `${dir}.staging-${process.pid}`;
+  const tmp = `${dir}.staging-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
   rmSync(tmp, { recursive: true, force: true });
   mkdirSync(tmp, { recursive: true });
   const warnings: string[] = [];
@@ -350,7 +830,14 @@ export async function prepareDataset(opts: {
   rmSync(dir, { recursive: true, force: true });
   renameSync(tmp, dir);
   return { datasetPath: dir, imageCount: resolvedItems.length, captionedCount, warnings };
+  } finally {
+    preparingNames.delete(dir);
+    releaseLock(prepLock);
+  }
 }
+
+/** Datasets currently being staged (same-name race guard). */
+const preparingNames = new Set<string>();
 
 // ---- job lifecycle ------------------------------------------------------------
 
@@ -377,9 +864,34 @@ function pushLog(job: TrainingJob, line: string): void {
   job.log.push(line);
   if (job.log.length > LOG_RING) job.log.shift();
   try {
-    appendFileSync(join(job.jobDir, "train.log"), line + "\n");
+    const file = join(job.jobDir, "train.log");
+    appendFileSync(file, line + "\n");
+    // Rotate: an hours-long run's tqdm spam is unbounded otherwise. The
+    // cadence is tracked PER LOG FILE (codex finding: a module-global counter
+    // starves whichever job doesn't emit the 500th aggregate line).
+    const n = (logAppends.get(file) ?? 0) + 1;
+    logAppends.set(file, n % 500);
+    if (n % 500 === 0) rotateTrainingLog(file);
   } catch {
     // log file is best-effort
+  }
+}
+
+const logAppends = new Map<string, number>();
+const TRAIN_LOG_MAX_BYTES = 5 * 1024 * 1024;
+
+/** Keep the tail of an over-large train.log (~2MB), discarding the oldest. */
+function rotateTrainingLog(file: string): void {
+  try {
+    const st = statSync(file);
+    if (st.size <= TRAIN_LOG_MAX_BYTES) return;
+    const keep = 2 * 1024 * 1024;
+    const buf = readFileSync(file);
+    const tail = buf.subarray(buf.length - keep);
+    const firstNl = tail.indexOf(0x0a);
+    writeFileSync(file, `[rotated ${new Date().toISOString()} — kept last 2MB]\n` + tail.subarray(firstNl >= 0 ? firstNl + 1 : 0).toString("utf-8"));
+  } catch {
+    // best effort
   }
 }
 
@@ -511,51 +1023,94 @@ function handoffToComfyUI(job: TrainingJob, deps: TrainingJobDeps): void {
 }
 
 async function finalizeJob(job: TrainingJob, code: number, tail: string, deps: TrainingJobDeps): Promise<void> {
-  // A cancel marks the job before the container exits — don't overwrite it.
-  // Check BOTH this process's memory and the on-disk record: a cancel issued
-  // from another process (e.g. the orchestrator's call_tool client) only shows
-  // up on disk (codex finding: cross-process cancel was clobbered by finalize).
-  if (job.status === "cancelled") {
-    if (diskCancelled(job)) return;
-    // Memory says cancelled but disk doesn't: the cancel was rolled back after
-    // a failed stop — reconcile and finalize normally (codex finding).
-    job.status = "running";
-    job.finishedAt = undefined;
-    job.error = undefined;
+  // The whole cancel-check → handoff → persist sequence runs under the per-job
+  // CAS lock: a cancel landing between the check and the handoff must not end
+  // with the LoRA published anyway (independent review finding #2). The budget
+  // spans a DEAD holder's lock-breaking window — a live holder serializes us
+  // behind it. If it STILL can't be acquired after several cycles, ownership
+  // is relinquished on disk so orphan recovery (owner-pid gate) can take over
+  // instead of the job being stuck "running" forever (codex finding).
+  const MAX_CYCLES = 5;
+  let acquired = false;
+  for (let cycle = 0; cycle < MAX_CYCLES && !acquired; cycle++) {
+    acquired = await acquireJobLock(job.id, deps.lockBudgetMs ?? LOCK_STALE_MS + 60_000);
+    if (!acquired) {
+      logger.warn(`[training-jobs] finalize ${job.id}: lock held too long (cycle ${cycle + 1}/${MAX_CYCLES}) — retrying`);
+    }
   }
-  if (diskCancelled(job)) {
-    job.status = "cancelled";
-    job.finishedAt = new Date().toISOString();
-    job.updatedAt = job.finishedAt;
+  if (!acquired) {
+    // Relinquish ownership with an ADDITIVE marker (create-if-absent): mutating
+    // the record here without the lock could overwrite a terminal state the
+    // holder just wrote (codex finding). ownerAlive() honors the marker, so
+    // orphan recovery can take over from here.
+    try {
+      mkdirSync(jobsRoot(), { recursive: true });
+      const fd = openSync(ownerReleaseFile(job.id), "wx");
+      closeSync(fd);
+    } catch { /* already released — fine */ }
+    logger.warn(`[training-jobs] finalize ${job.id}: relinquished ownership after ${MAX_CYCLES} failed lock cycles`);
     return;
   }
-  job.finishedAt = new Date().toISOString();
-  // Surface the generated samples in train_status regardless of outcome —
-  // ai-toolkit prints only "Generating Images" bars (no saved-file lines), so
-  // onProgress never sees sample paths (codex finding; confirmed by the E2E).
-  const samples = findSamples(job.outputDir, job.name, 4);
-  if (samples.length > 0) job.progress.samples = samples;
-  if (code === 0) {
-    try {
-      handoffToComfyUI(job, deps);
-      job.status = "completed";
-      // The last training bar can read e.g. 199/200 before the final save +
-      // sampling phases — normalize so a completed job shows a complete count
-      // (codex finding).
-      if (job.progress.totalSteps !== undefined) job.progress.step = job.progress.totalSteps;
-      reportProgress(job, "done", true);
-    } catch (err) {
+  try {
+    // A cancel marks the job before the container exits — don't overwrite it.
+    // Check BOTH this process's memory and the on-disk record (re-read inside
+    // the lock): a cancel from another process only shows up on disk.
+    if (job.status === "cancelled") {
+      // An in-flight cancel (registered but not yet lock-persisted) must WIN
+      // over this finalize — treating it as a rollback because the disk hasn't
+      // caught up publishes a cancelled run (codex finding).
+      if (pendingCancels.has(job.id)) return;
+      const disk = readJobRecord(job.id);
+      if (disk?.status === "cancelled") return;
+      // Memory says cancelled but disk doesn't: the cancel was rolled back
+      // after a failed stop — reconcile and finalize normally.
+      job.status = "running";
+      job.finishedAt = undefined;
+      job.error = undefined;
+    }
+    const disk = readJobRecord(job.id);
+    if (disk?.status === "cancelled") {
+      job.status = "cancelled";
+      job.finishedAt = disk.finishedAt ?? new Date().toISOString();
+      job.updatedAt = job.finishedAt;
+      return;
+    }
+    if (disk && (disk.status === "completed" || disk.status === "failed")) {
+      // Another process already finalized (e.g. owner-dead recovery won the
+      // lock) — adopt its complete record instead of copying fields (codex
+      // finding: selective copies dropped finalized progress/samples/log).
+      jobs.set(job.id, disk);
+      return;
+    }
+    job.finishedAt = new Date().toISOString();
+    // Surface the generated samples in train_status regardless of outcome —
+    // ai-toolkit prints only "Generating Images" bars (no saved-file lines), so
+    // onProgress never sees sample paths (codex finding; confirmed by the E2E).
+    const samples = findSamples(job.outputDir, job.name, 4);
+    if (samples.length > 0) job.progress.samples = samples;
+    if (code === 0) {
+      try {
+        handoffToComfyUI(job, deps);
+        job.status = "completed";
+        // The last training bar can read e.g. 199/200 before the final save +
+        // sampling phases — normalize so a completed job shows a complete count.
+        if (job.progress.totalSteps !== undefined) job.progress.step = job.progress.totalSteps;
+        reportProgress(job, "done", true);
+      } catch (err) {
+        job.status = "failed";
+        job.error = `output handoff failed: ${err instanceof Error ? err.message : String(err)}`;
+        reportProgress(job, "error", true);
+      }
+    } else {
       job.status = "failed";
-      job.error = `output handoff failed: ${err instanceof Error ? err.message : String(err)}`;
+      job.error = `training container exited ${code}${tail ? ` — last output:\n${tail}` : ""}`;
       reportProgress(job, "error", true);
     }
-  } else {
-    job.status = "failed";
-    job.error = `training container exited ${code}${tail ? ` — last output:\n${tail}` : ""}`;
-    reportProgress(job, "error", true);
+    job.updatedAt = new Date().toISOString();
+    persist(job);
+  } finally {
+    releaseJobLock(job.id);
   }
-  job.updatedAt = new Date().toISOString();
-  persist(job);
 }
 
 /**
@@ -575,6 +1130,13 @@ export async function startTrainingJob(input: StartJobInput, deps: TrainingJobDe
   if (!existsSync(datasetPath)) throw new Error(`dataset not found: ${input.datasetPath}`);
   const imageCount = countDatasetImages(datasetPath);
   if (imageCount === 0) throw new Error(`dataset has no images (${[...IMAGE_EXTS].join("/")}): ${datasetPath}`);
+  // The dataset is bind-mounted READ-WRITE into the container (ai-toolkit
+  // caches into it), so it must live UNDER datasetsRoot() — arbitrary host
+  // dirs are not exposed to container writes (independent review finding #4).
+  // Stage datasets with train_prepare_dataset; it lands them there.
+  if (!pathWithin(datasetsRoot(), datasetPath)) {
+    throw new Error(`dataset must be staged under ${resolve(datasetsRoot())} — use train_prepare_dataset (the container mounts it read-write)`);
+  }
   // Pre-launch handoff check — throws early when no local ComfyUI is resolvable.
   const lorasDir = deps.lorasDir ?? (() => resolveModelSubfolder("loras"));
   const resolvedLorasDir = lorasDir();
@@ -608,6 +1170,7 @@ export async function startTrainingJob(input: StartJobInput, deps: TrainingJobDe
     status: "queued",
     progress: { samples: [] },
     containerName: `comfyui-train-${id}`,
+    ownerPid: process.pid,
     datasetPath,
     jobDir,
     outputDir,
@@ -618,16 +1181,23 @@ export async function startTrainingJob(input: StartJobInput, deps: TrainingJobDe
     updatedAt: new Date().toISOString(),
   };
   jobs.set(id, job);
-  persist(job);
+  // Never launch a container we failed to register — it would be unfindable
+  // and uncancellable after this process dies (independent review finding #5).
+  if (!persist(job)) {
+    jobs.delete(id);
+    throw new Error(`could not persist the job record under ${jobsRoot()} — refusing to launch an untracked container`);
+  }
 
-  const handle = start({
-    containerName: job.containerName!,
-    configPath,
-    datasetPath,
-    outputDir,
-    hfCacheDir: hfCacheRoot(),
-    hfToken: process.env.HF_TOKEN?.trim() || undefined,
-    onProgress: (p: TrainingProgress) => {
+  let handle: TrainingHandle;
+  try {
+    handle = start({
+      containerName: job.containerName!,
+      configPath,
+      datasetPath,
+      outputDir,
+      hfCacheDir: hfCacheRoot(),
+      hfToken: process.env.HF_TOKEN?.trim() || undefined,
+      onProgress: (p: TrainingProgress) => {
       // Terminal jobs ignore ticks — a progress line arriving while a cancel's
       // docker stop is in flight must not resurrect the job (codex finding).
       if (job.status === "cancelled") {
@@ -635,6 +1205,9 @@ export async function startTrainingJob(input: StartJobInput, deps: TrainingJobDe
         // reverts the disk record to running when its docker stop fails. If the
         // disk no longer says cancelled, resume — otherwise stay cancelled
         // (codex finding: permanent adoption suppressed a later completion).
+        // While a cancel is IN FLIGHT (this process hasn't persisted it yet),
+        // the disk still says running legitimately — never reconcile that.
+        if (pendingCancels.has(job.id)) return;
         if (!diskCancelled(job)) {
           job.status = "running";
           job.finishedAt = undefined;
@@ -663,11 +1236,15 @@ export async function startTrainingJob(input: StartJobInput, deps: TrainingJobDe
       const last = lastProgressPersistAt.get(id) ?? 0;
       if (Date.now() - last >= PROGRESS_PERSIST_MS) {
         lastProgressPersistAt.set(id, Date.now());
-        persistLiveState(job);
+        scheduleLivePersist(job);
       }
     },
     onLog: (line) => {
       pushLog(job, line);
+      // Refresh the owner liveness lease on log-only activity too (codex
+      // finding: a >60s log-only phase made the owner look stale). updatedAt
+      // rides out on the throttled persist below.
+      job.updatedAt = new Date().toISOString();
       // Log lines also snapshot (same throttle): during the long first-run
       // model download there are NO progress ticks, so without this a
       // cross-process train_status sees an empty, apparently stalled record
@@ -675,10 +1252,20 @@ export async function startTrainingJob(input: StartJobInput, deps: TrainingJobDe
       const last = lastProgressPersistAt.get(id) ?? 0;
       if (Date.now() - last >= PROGRESS_PERSIST_MS) {
         lastProgressPersistAt.set(id, Date.now());
-        persistLiveState(job);
+        scheduleLivePersist(job);
       }
     },
   });
+  } catch (err) {
+    // startTraining threw before the container was up — the job must not sit
+    // queued forever with a live-but-handleless owner (codex finding).
+    job.status = "failed";
+    job.error = `could not start the training container: ${err instanceof Error ? err.message : String(err)}`;
+    job.finishedAt = new Date().toISOString();
+    job.updatedAt = job.finishedAt;
+    persist(job);
+    throw err;
+  }
   handles.set(id, handle);
 
   handle.done
@@ -712,11 +1299,17 @@ export async function startTrainingJob(input: StartJobInput, deps: TrainingJobDe
 export async function cancelJob(id: string, deps: TrainingJobDeps = {}): Promise<TrainingJob> {
   const job = await getJob(id, deps);
   if (!job) throw new Error(`no training job ${id}`);
+  // A cancel is already IN FLIGHT for this job (in-process): JOIN it instead
+  // of acting on the marked-but-unpersisted state (codex finding: a second
+  // caller could take the already-cancelled path and stop the container, then
+  // the first acquisition times out, reverts, and the job finalizes anyway).
+  const pending = pendingCancels.get(id);
+  if (pending) return pending;
   if (job.status === "completed" || job.status === "failed") return job;
   if (job.status === "cancelled") {
-    // Already cancelled — but if a previous cancel died between persisting the
-    // state and finishing `docker stop`, the container may still be alive.
-    // Retry the stop instead of blindly returning (codex finding).
+    // Already cancelled (persisted) — but if a previous cancel died between
+    // persisting the state and finishing `docker stop`, the container may
+    // still be alive. Retry the stop instead of blindly returning.
     if (!job.containerName) return job;
     const probe = deps.containerRunning ?? containerRunning;
     const alive = await probe(job.containerName).catch(() => null);
@@ -741,11 +1334,66 @@ export async function cancelJob(id: string, deps: TrainingJobDeps = {}): Promise
     return job;
   }
 
+  // Register the pending cancel SYNCHRONOUSLY (before any await) so every
+  // concurrent caller joins it instead of racing us.
+  const p = cancelJobBody(id, job, deps);
+  pendingCancels.set(id, p);
+  try {
+    return await p;
+  } finally {
+    pendingCancels.delete(id);
+  }
+}
+
+/** The cancel body: mark → lock-persist → stop → verify. */
+async function cancelJobBody(id: string, job: TrainingJob, deps: TrainingJobDeps): Promise<TrainingJob> {
+  // Persist the cancelled state UNDER THE LOCK (independent review finding #2):
+  // a finalizer holds the same lock across its cancel-check → handoff, so a
+  // cancel can no longer slip in between and get published anyway. On timeout
+  // we do NOT write unlocked (codex finding) — the cancel is reported as
+  // failed-to-confirm and can be retried.
+  const prevStatus = job.status;
   job.status = "cancelled";
   job.finishedAt = new Date().toISOString();
   job.updatedAt = job.finishedAt;
   job.error = undefined;
-  persist(job);
+  if (!(await acquireJobLock(id, deps.lockBudgetMs ?? 90_000))) {
+    job.status = prevStatus;
+    job.finishedAt = undefined;
+    job.updatedAt = new Date().toISOString();
+    job.error = "could not confirm the cancel — a finalize is in progress on this job; retry in a few seconds";
+    return job;
+  }
+  try {
+    const disk = readJobRecord(id);
+    if (disk && (disk.status === "completed" || disk.status === "failed")) {
+      // Finalized while we waited for the lock — adopt the COMPLETE finalized
+      // record (codex finding: copying selected fields into the stale pre-wait
+      // object and persisting it overwrote the final progress/samples/log).
+      // Nothing to persist: the disk record is already the truth.
+      jobs.set(id, disk);
+      return disk;
+    }
+    if (disk && disk.status === "cancelled") {
+      // A cross-process cancel landed while we waited. Adopt the record — by
+      // MERGING into the live job object (codex finding: replacing the map
+      // entry made the registry report cancelled while the rest of this
+      // cancel kept mutating — and could persist — the OLD object as running).
+      // And CONTINUE to the stop path: the other process may have died between
+      // persisting the marker and its docker stop.
+      Object.assign(job, disk);
+    } else {
+      // Re-apply the cancelled state INSIDE the lock: the wait may have lasted
+      // long enough for memory to have been perturbed — the persisted marker is
+      // what the finalizer honors (codex finding).
+      job.status = "cancelled";
+      job.finishedAt = job.finishedAt ?? new Date().toISOString();
+      job.updatedAt = new Date().toISOString();
+      persist(job);
+    }
+  } finally {
+    releaseJobLock(id);
+  }
 
   if (job.containerName) {
     const stop = deps.stopTraining ?? stopTraining;

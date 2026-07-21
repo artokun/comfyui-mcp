@@ -46,15 +46,20 @@ RUN pip install --break-system-packages --no-cache-dir \
         --index-url https://download.pytorch.org/whl/cu128 \
     && pip install --break-system-packages --no-cache-dir hf_transfer
 
-# 3) ai-toolkit source (pin AI_TOOLKIT_REF for reproducible builds) + its
+# 3) ai-toolkit source (pinned to the E2E-proven commit for reproducible
+#    builds — train_build_image passes no ref by default, so the default MUST
+#    be the commit we validated; independent review finding #3) + its
 #    requirements. Requirements are installed from the cloned file so they layer
 #    after torch.
 ARG AI_TOOLKIT_REPO=https://github.com/ostris/ai-toolkit.git
+<<<<<<< HEAD
 # Pinned to the commit the P1 end-to-end run was validated against (200-step
 # character LoRA on a 4090). `main` moves, so an unpinned default silently
 # rebuilds a DIFFERENT trainer than the one we tested — override with
 # --build-arg AI_TOOLKIT_REF=<sha> to move deliberately.
-ARG AI_TOOLKIT_REF=a0224793
+=======
+ARG AI_TOOLKIT_REF=a0224793cef5d5073c8ed0b8cdb838a84fd1cba0
+>>>>>>> b4e161d (fix(training): harden job registry concurrency + review fixes per independent PR-237 review)
 WORKDIR /opt
 RUN git clone --recurse-submodules "${AI_TOOLKIT_REPO}" ai-toolkit \
     && cd ai-toolkit \

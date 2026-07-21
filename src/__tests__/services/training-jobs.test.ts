@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { itWithSymlinks } from "../helpers/platform.js";
 
 // The registry is module-level state keyed off COMFYUI_MCP_TRAINING_DIR, so each
 // test gets a fresh module (vi.resetModules) pointed at a fresh temp dir. All
@@ -178,7 +179,7 @@ describe("findProducedLora", () => {
 
 describe("startTrainingJob", () => {
   async function startWith(deps: Parameters<typeof mod.startTrainingJob>[1], name = "test_job") {
-    const dataset = join(root, "dataset");
+    const dataset = join(mod.datasetsRoot(), "dataset");
     mkdirSync(dataset, { recursive: true });
     makeImage(dataset, "img_00001.png");
     writeFileSync(join(dataset, "img_00001.txt"), "ohwx person");
@@ -284,7 +285,7 @@ describe("startTrainingJob", () => {
   });
 
   it("fails BEFORE launching the container when the loras destination is unresolvable", async () => {
-    const dataset = join(root, "dataset");
+    const dataset = join(mod.datasetsRoot(), "dataset");
     mkdirSync(dataset, { recursive: true });
     makeImage(dataset, "img_00001.png");
     let containerStarted = false;
@@ -311,7 +312,7 @@ describe("startTrainingJob", () => {
     try {
       const d = deferred<{ code: number; tail: string }>();
       let tick: ((p: { step?: number; totalSteps?: number; raw: string }) => void) | undefined;
-      const dataset = join(root, "dataset");
+      const dataset = join(mod.datasetsRoot(), "dataset");
       mkdirSync(dataset, { recursive: true });
       makeImage(dataset, "img_00001.png");
       const job = await mod.startTrainingJob(
@@ -327,13 +328,18 @@ describe("startTrainingJob", () => {
       );
       const file = join(mod.jobsRoot(), `${job.id}.json`);
       const readStep = () => (JSON.parse(readFileSync(file, "utf-8")) as { progress: { step?: number } }).progress.step;
+      // Snapshots are now async (chained under the job lock) — flush the chain.
+      const flush = () => vi.advanceTimersByTimeAsync(50);
 
       tick!({ step: 10, totalSteps: 200, raw: "10/200" });
+      await flush();
       expect(readStep()).toBe(10); // first tick always persists
       tick!({ step: 20, totalSteps: 200, raw: "20/200" });
+      await flush();
       expect(readStep()).toBe(10); // inside the 5s throttle window
       vi.setSystemTime(Date.now() + 6000);
       tick!({ step: 30, totalSteps: 200, raw: "30/200" });
+      await flush();
       expect(readStep()).toBe(30); // past the window → snapshot written
     } finally {
       vi.useRealTimers();
@@ -345,7 +351,7 @@ describe("cancelJob", () => {
   it("stops the container and keeps 'cancelled' even when done resolves later", async () => {
     const d = deferred<{ code: number; tail: string }>();
     const stopped: string[] = [];
-    const dataset = join(root, "dataset");
+    const dataset = join(mod.datasetsRoot(), "dataset");
     mkdirSync(dataset, { recursive: true });
     makeImage(dataset, "img_00001.png");
     const job = await mod.startTrainingJob(
@@ -378,7 +384,7 @@ describe("cancelJob", () => {
   it("ignores progress ticks that arrive after a cancel (no resurrection)", async () => {
     const d = deferred<{ code: number; tail: string }>();
     let tick: ((p: { step?: number; totalSteps?: number; raw: string }) => void) | undefined;
-    const dataset = join(root, "dataset");
+    const dataset = join(mod.datasetsRoot(), "dataset");
     mkdirSync(dataset, { recursive: true });
     makeImage(dataset, "img_00001.png");
     const job = await mod.startTrainingJob(
@@ -409,7 +415,7 @@ describe("cancelJob", () => {
     try {
       const d = deferred<{ code: number; tail: string }>();
       let tick: ((p: { step?: number; totalSteps?: number; raw: string }) => void) | undefined;
-      const dataset = join(root, "dataset");
+      const dataset = join(mod.datasetsRoot(), "dataset");
       mkdirSync(dataset, { recursive: true });
       makeImage(dataset, "img_00001.png");
       const job = await mod.startTrainingJob(
@@ -432,6 +438,7 @@ describe("cancelJob", () => {
       writeFileSync(file, JSON.stringify(record, null, 2));
       vi.setSystemTime(Date.now() + 6000); // past the persist throttle window
       tick!({ step: 10, totalSteps: 200, loss: 0.5, raw: "10/200 loss: 0.5" });
+      await vi.advanceTimersByTimeAsync(50); // flush the async snapshot chain
       expect(job.status).toBe("cancelled");
       const disk = JSON.parse(readFileSync(file, "utf-8")) as { status: string };
       expect(disk.status).toBe("cancelled");
@@ -453,7 +460,7 @@ describe("cancelJob", () => {
       let tick: ((p: { step?: number; totalSteps?: number; raw: string }) => void) | undefined;
       const catalog = fakeCatalog();
       const lorasDir = join(root, "loras");
-      const dataset = join(root, "dataset");
+      const dataset = join(mod.datasetsRoot(), "dataset");
       mkdirSync(dataset, { recursive: true });
       makeImage(dataset, "img_00001.png");
       const job = await mod.startTrainingJob(
@@ -473,6 +480,7 @@ describe("cancelJob", () => {
       writeFileSync(file, JSON.stringify(record, null, 2));
       vi.setSystemTime(Date.now() + 6000);
       tick!({ step: 10, totalSteps: 200, loss: 0.5, raw: "10/200 loss: 0.5" });
+      await vi.advanceTimersByTimeAsync(50); // flush the async snapshot chain
       expect(job.status).toBe("cancelled"); // adopted from disk
       // The cancelling process's docker stop FAILED → it reverts the record.
       record.status = "running";
@@ -497,7 +505,7 @@ describe("cancelJob", () => {
 
   it("reverts to running when the container genuinely fails to stop", async () => {
     const d = deferred<{ code: number; tail: string }>();
-    const dataset = join(root, "dataset");
+    const dataset = join(mod.datasetsRoot(), "dataset");
     mkdirSync(dataset, { recursive: true });
     makeImage(dataset, "img_00001.png");
     const job = await mod.startTrainingJob(
@@ -521,7 +529,7 @@ describe("cancelJob", () => {
 
   it("respects a cancel written by ANOTHER process (disk record) at finalize", async () => {
     const d = deferred<{ code: number; tail: string }>();
-    const dataset = join(root, "dataset");
+    const dataset = join(mod.datasetsRoot(), "dataset");
     mkdirSync(dataset, { recursive: true });
     makeImage(dataset, "img_00001.png");
     const catalog = fakeCatalog();
@@ -547,7 +555,7 @@ describe("cancelJob", () => {
   });
 
   it("retries docker stop for an already-cancelled job whose container is still alive", async () => {
-    const dataset = join(root, "dataset");
+    const dataset = join(mod.datasetsRoot(), "dataset");
     mkdirSync(dataset, { recursive: true });
     makeImage(dataset, "img_00001.png");
     mkdirSync(mod.jobsRoot(), { recursive: true });
@@ -584,7 +592,7 @@ describe("cancelJob", () => {
   });
 
   it("leaves an already-cancelled job alone when its container is gone", async () => {
-    const dataset = join(root, "dataset");
+    const dataset = join(mod.datasetsRoot(), "dataset");
     mkdirSync(dataset, { recursive: true });
     makeImage(dataset, "img_00001.png");
     mkdirSync(mod.jobsRoot(), { recursive: true });
@@ -610,7 +618,7 @@ describe("cancelJob", () => {
   });
 
   it("attempts the stop when cancelled-job liveness is UNKNOWN (daemon flapping)", async () => {
-    const dataset = join(root, "dataset");
+    const dataset = join(mod.datasetsRoot(), "dataset");
     mkdirSync(dataset, { recursive: true });
     makeImage(dataset, "img_00001.png");
     mkdirSync(mod.jobsRoot(), { recursive: true });
@@ -639,7 +647,7 @@ describe("cancelJob", () => {
 describe("registry persistence", () => {
   async function startRestartedJob() {
     const d = deferred<{ code: number; tail: string }>();
-    const dataset = join(root, "dataset");
+    const dataset = join(mod.datasetsRoot(), "dataset");
     mkdirSync(dataset, { recursive: true });
     makeImage(dataset, "img_00001.png");
     const job = await mod.startTrainingJob(
@@ -743,10 +751,544 @@ describe("registry persistence", () => {
     await mod2.listJobs({ containerRunning: async () => true });
     const d2 = deferred<{ code: number; tail: string }>();
     const job2 = await mod.startTrainingJob(
-      { name: "created_later", flow: "character", model: "flux1-dev", datasetPath: join(root, "dataset") },
+      { name: "created_later", flow: "character", model: "flux1-dev", datasetPath: join(mod.datasetsRoot(), "dataset") },
       { startTraining: () => fakeHandle(d2), lorasDir: () => join(root, "loras"), catalog: fakeCatalog() },
     );
     const jobs = await mod2.listJobs({ containerRunning: async () => true });
     expect(jobs.some((j) => j.id === job2.id)).toBe(true);
+  });
+});
+
+describe("independent review fixes (PR #237)", () => {
+  function writeRecord(id: string, extra: Record<string, unknown> = {}) {
+    const dataset = join(mod.datasetsRoot(), "dataset");
+    mkdirSync(dataset, { recursive: true });
+    makeImage(dataset, "img_00001.png");
+    mkdirSync(mod.jobsRoot(), { recursive: true });
+    const jobDir = join(mod.jobsRoot(), id);
+    const record = {
+      id, name: "review_lora", flow: "character", model: "flux1-dev",
+      status: "running", progress: { samples: [] }, containerName: `comfyui-train-${id}`,
+      datasetPath: dataset, jobDir, outputDir: join(jobDir, "output"), log: [],
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      ...extra,
+    };
+    writeFileSync(join(mod.jobsRoot(), `${id}.json`), JSON.stringify(record, null, 2));
+    return record;
+  }
+
+  it("train_status NEVER hands off in the healthy-owner window (read-only)", async () => {
+    // Container just exited; the OWNER PROCESS IS ALIVE (ppid here) and about
+    // to run its own finalize. A status poll must NOT recover/hand off/persist
+    // anything (independent review finding #1).
+    const rec = writeRecord("thealthy1", { ownerPid: process.ppid });
+    // …and a produced LoRA is sitting right there, so recovery WOULD fire if
+    // it weren't for the live owner.
+    const outDir = join(rec.jobDir as string, "output", "review_lora");
+    mkdirSync(outDir, { recursive: true });
+    writeFileSync(join(outDir, "review_lora.safetensors"), "weights");
+    const catalog = fakeCatalog();
+    const before = readFileSync(join(mod.jobsRoot(), "thealthy1.json"), "utf-8");
+    const job = (await mod.getJob("thealthy1", {
+      containerRunning: async () => false, // container gone
+      lorasDir: () => join(root, "loras"),
+      catalog,
+    }))!;
+    expect(job.status).toBe("running"); // reported as recorded
+    expect(catalog.upserts).toHaveLength(0); // NO handoff from a read
+    expect(existsSync(join(root, "loras", "review_lora.safetensors"))).toBe(false);
+    expect(readFileSync(join(mod.jobsRoot(), "thealthy1.json"), "utf-8")).toBe(before); // NO write
+  });
+
+  it("recovers when the owner pid is genuinely dead", async () => {
+    writeRecord("tdead1", { ownerPid: 99999999 }); // almost certainly not alive
+    const rec = readFileSync(join(mod.jobsRoot(), "tdead1.json"), "utf-8");
+    const jobDir = JSON.parse(rec).jobDir;
+    const outDir = join(jobDir, "output", "review_lora");
+    mkdirSync(outDir, { recursive: true });
+    writeFileSync(join(outDir, "review_lora.safetensors"), "weights");
+    const catalog = fakeCatalog();
+    const job = (await mod.getJob("tdead1", {
+      containerRunning: async () => false,
+      lorasDir: () => join(root, "loras"),
+      catalog,
+    }))!;
+    expect(job.status).toBe("completed");
+    expect(catalog.upserts).toHaveLength(1);
+  });
+
+  it("recovers when the owner is ALIVE but its liveness lease went stale (handleless)", async () => {
+    // Owner process alive (ppid) but the record stopped updating — the owner
+    // lost its handle without finalizing (codex finding).
+    const rec = writeRecord("tstale1", {
+      ownerPid: process.ppid,
+      updatedAt: new Date(Date.now() - 15 * 60_000).toISOString(), // > 10min lease
+    });
+    const outDir = join(rec.jobDir as string, "output", "review_lora");
+    mkdirSync(outDir, { recursive: true });
+    writeFileSync(join(outDir, "review_lora.safetensors"), "weights");
+    const catalog = fakeCatalog();
+    const job = (await mod.getJob("tstale1", {
+      containerRunning: async () => false,
+      lorasDir: () => join(root, "loras"),
+      catalog,
+    }))!;
+    expect(job.status).toBe("completed");
+    expect(catalog.upserts).toHaveLength(1);
+  });
+
+  it("marks the job failed (not queued-forever) when startTraining throws", async () => {
+    const dataset = join(mod.datasetsRoot(), "dataset");
+    mkdirSync(dataset, { recursive: true });
+    makeImage(dataset, "img_00001.png");
+    await expect(
+      mod.startTrainingJob(
+        { name: "thrower", flow: "character", model: "flux1-dev", datasetPath: dataset },
+        {
+          startTraining: () => {
+            throw new Error("docker binary exploded");
+          },
+          lorasDir: () => join(root, "loras"),
+          catalog: fakeCatalog(),
+        },
+      ),
+    ).rejects.toThrow("docker binary exploded");
+    const jobs = await mod.listJobs({ containerRunning: async () => false });
+    const job = jobs.find((j) => j.name === "thrower")!;
+    expect(job.status).toBe("failed");
+    expect(job.error).toContain("could not start the training container");
+  });
+
+  it("refreshes the owner lease on log-only activity (no progress ticks)", async () => {
+    vi.useFakeTimers();
+    try {
+      const d = deferred<{ code: number; tail: string }>();
+      let log: ((line: string) => void) | undefined;
+      const dataset = join(mod.datasetsRoot(), "dataset");
+      mkdirSync(dataset, { recursive: true });
+      makeImage(dataset, "img_00001.png");
+      const job = await mod.startTrainingJob(
+        { name: "heartbeat", flow: "character", model: "flux1-dev", datasetPath: dataset },
+        {
+          startTraining: (opts) => {
+            log = opts.onLog;
+            return fakeHandle(d);
+          },
+          lorasDir: () => join(root, "loras"),
+          catalog: fakeCatalog(),
+        },
+      );
+      const t0 = Date.parse(job.updatedAt);
+      // 90s of pure log output (model download phase) with NO progress ticks.
+      vi.setSystemTime(t0 + 90_000);
+      log!("Downloading model shards…");
+      const t1 = Date.parse(job.updatedAt);
+      expect(t1).toBeGreaterThan(t0 + 80_000); // lease refreshed by the log line
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a cancel that loses the race adopts the FULL finalized record (no overwrite)", async () => {
+    const d = deferred<{ code: number; tail: string }>();
+    const dataset = join(mod.datasetsRoot(), "dataset");
+    mkdirSync(dataset, { recursive: true });
+    makeImage(dataset, "img_00001.png");
+    const job = await mod.startTrainingJob(
+      { name: "race_lost", flow: "character", model: "flux1-dev", datasetPath: dataset },
+      { startTraining: () => fakeHandle(d), lorasDir: () => join(root, "loras"), catalog: fakeCatalog() },
+    );
+    // The finalizer wins: the disk record becomes a RICH completed record
+    // (progress + samples + result) before the cancel reads it.
+    const file = join(mod.jobsRoot(), `${job.id}.json`);
+    const finalized = {
+      ...JSON.parse(readFileSync(file, "utf-8")),
+      status: "completed",
+      progress: { step: 200, totalSteps: 200, loss: 0.12, samples: ["/x/s1.png", "/x/s2.png"] },
+      result: { loraPath: "/x/lora.safetensors", loraRelPath: "loras/race_lost.safetensors", catalogId: "c1" },
+      log: ["final line"],
+      finishedAt: new Date().toISOString(),
+    };
+    const finalizedText = JSON.stringify(finalized, null, 2);
+    writeFileSync(file, finalizedText);
+    const after = await mod.cancelJob(job.id, { containerRunning: async () => false });
+    expect(after.status).toBe("completed");
+    // The FULL record survived — progress, samples, result, and the disk file
+    // is byte-identical (the cancel persisted nothing over it).
+    expect(after.progress.samples).toEqual(["/x/s1.png", "/x/s2.png"]);
+    expect(after.result?.loraRelPath).toBe("loras/race_lost.safetensors");
+    expect(after.log).toEqual(["final line"]);
+    expect(readFileSync(file, "utf-8")).toBe(finalizedText);
+  });
+
+  it("two non-owner processes racing recovery hand off EXACTLY once (CAS)", async () => {
+    writeRecord("trace1"); // no ownerPid → dead owner
+    const rec = JSON.parse(readFileSync(join(mod.jobsRoot(), "trace1.json"), "utf-8"));
+    const outDir = join(rec.jobDir, "output", "review_lora");
+    mkdirSync(outDir, { recursive: true });
+    writeFileSync(join(outDir, "review_lora.safetensors"), "weights");
+    vi.resetModules();
+    // Distinct query strings → two DISTINCT module instances (two "processes").
+    const modA = await import("../../services/training-jobs.js?inst=a");
+    const modB = await import("../../services/training-jobs.js?inst=b");
+    const catA = fakeCatalog();
+    const catB = fakeCatalog();
+    await Promise.all([
+      modA.getJob("trace1", { containerRunning: async () => false, lorasDir: () => join(root, "loras"), catalog: catA }),
+      modB.getJob("trace1", { containerRunning: async () => false, lorasDir: () => join(root, "loras"), catalog: catB }),
+    ]);
+    expect(catA.upserts.length + catB.upserts.length).toBe(1);
+    const final = JSON.parse(readFileSync(join(mod.jobsRoot(), "trace1.json"), "utf-8"));
+    expect(final.status).toBe("completed");
+  });
+
+  it("refuses to launch when the job record can't be persisted", async () => {
+    // jobsRoot as a FILE → every jobs-dir write fails; the container must not start.
+    mkdirSync(join(root, "training"), { recursive: true });
+    writeFileSync(mod.jobsRoot(), "not-a-dir");
+    const dataset = join(mod.datasetsRoot(), "dataset");
+    mkdirSync(dataset, { recursive: true });
+    makeImage(dataset, "img_00001.png");
+    let containerStarted = false;
+    await expect(
+      mod.startTrainingJob(
+        { name: "nopersist", flow: "character", model: "flux1-dev", datasetPath: dataset },
+        {
+          startTraining: () => {
+            containerStarted = true;
+            return fakeHandle(deferred<{ code: number; tail: string }>());
+          },
+          lorasDir: () => join(root, "loras"),
+          catalog: fakeCatalog(),
+        },
+      ),
+    ).rejects.toThrow();
+    expect(containerStarted).toBe(false);
+  });
+
+  it("rejects a dataset outside datasetsRoot() (rw container mount constraint)", async () => {
+    const outside = join(root, "elsewhere");
+    mkdirSync(outside, { recursive: true });
+    makeImage(outside, "img_00001.png");
+    await expect(
+      mod.startTrainingJob(
+        { name: "escape", flow: "character", model: "flux1-dev", datasetPath: outside },
+        { startTraining: () => fakeHandle(deferred<{ code: number; tail: string }>()), lorasDir: () => join(root, "loras"), catalog: fakeCatalog() },
+      ),
+    ).rejects.toThrow(/must be staged under/);
+  });
+
+  itWithSymlinks("rejects a symlinked dataset dir that escapes datasetsRoot()", async () => {
+    const outside = join(root, "real-elsewhere");
+    mkdirSync(outside, { recursive: true });
+    makeImage(outside, "img_00001.png");
+    // A symlink INSIDE datasetsRoot pointing OUT — lexical prefix passes, the
+    // realpath containment must catch it (docker would mount the target rw).
+    symlinkSync(outside, join(mod.datasetsRoot(), "linked"), "junction");
+    await expect(
+      mod.startTrainingJob(
+        { name: "linked", flow: "character", model: "flux1-dev", datasetPath: join(mod.datasetsRoot(), "linked") },
+        { startTraining: () => fakeHandle(deferred<{ code: number; tail: string }>()), lorasDir: () => join(root, "loras"), catalog: fakeCatalog() },
+      ),
+    ).rejects.toThrow(/must be staged under/);
+  });
+
+  it("accepts a dataset path whose drive-letter casing differs (Windows FS semantics)", async () => {
+    if (process.platform !== "win32") return; // case-fold only applies there
+    const dataset = join(mod.datasetsRoot(), "dataset");
+    mkdirSync(dataset, { recursive: true });
+    makeImage(dataset, "img_00001.png");
+    // Same path, lowercased drive letter — the FS calls it the same dir.
+    const folded = dataset.replace(/^([A-Z])(?=:)/, (m) => m.toLowerCase());
+    expect(folded).not.toBe(dataset);
+    const job = await mod.startTrainingJob(
+      { name: "casefold", flow: "character", model: "flux1-dev", datasetPath: folded },
+      { startTraining: () => fakeHandle(deferred<{ code: number; tail: string }>()), lorasDir: () => join(root, "loras"), catalog: fakeCatalog() },
+    );
+    expect(job.status).toBe("running");
+  });
+
+  it("rejects a concurrent same-name prepare", async () => {
+    const src = join(root, "src");
+    mkdirSync(src);
+    const a = makeImage(src, "a.png");
+    const p1 = mod.prepareDataset({ name: "conc", items: [{ path: a }], defaultCaption: "ohwx" });
+    await expect(mod.prepareDataset({ name: "conc", items: [{ path: a }] })).rejects.toThrow(/already being prepared/);
+    await p1;
+  });
+
+  it("cancel does NOT write unlocked when a finalize holds the lock", async () => {
+    const rec = writeRecord("tlock1", { ownerPid: 99999999 });
+    // Simulate a LIVE finalizer mid-critical-section: lock held by the (live)
+    // parent pid — within the age cap, so it can't be reclaimed.
+    writeFileSync(join(mod.jobsRoot(), "tlock1.lock"), String(process.ppid));
+    const before = readFileSync(join(mod.jobsRoot(), "tlock1.json"), "utf-8");
+    const after = await mod.cancelJob("tlock1", {
+      containerRunning: async () => true,
+      lockBudgetMs: 300, // don't sit on the 90s default in a test
+    });
+    expect(after.status).toBe("running"); // reverted, not cancelled
+    expect(after.error).toContain("could not confirm the cancel");
+    expect(readFileSync(join(mod.jobsRoot(), "tlock1.json"), "utf-8")).toBe(before); // untouched
+  });
+
+  it("concurrent cancels COALESCE — the second joins the in-flight one", async () => {
+    const d = deferred<{ code: number; tail: string }>();
+    const dataset = join(mod.datasetsRoot(), "dataset");
+    mkdirSync(dataset, { recursive: true });
+    makeImage(dataset, "img_00001.png");
+    const job = await mod.startTrainingJob(
+      { name: "co_cancel", flow: "character", model: "flux1-dev", datasetPath: dataset },
+      { startTraining: () => fakeHandle(d), lorasDir: () => join(root, "loras"), catalog: fakeCatalog() },
+    );
+    // A live lock (parent pid) makes the first cancel wait — and time out.
+    writeFileSync(join(mod.jobsRoot(), `${job.id}.lock`), String(process.ppid));
+    let stops = 0;
+    const deps = {
+      containerRunning: async () => true,
+      stopTraining: async (name: string) => {
+        stops++;
+        return { ok: true, command: "train_cancel", data: { stopped: name } } as never;
+      },
+      lockBudgetMs: 300,
+    };
+    const [r1, r2] = await Promise.all([mod.cancelJob(job.id, deps), mod.cancelJob(job.id, deps)]);
+    // Same outcome object for both; the second caller never ran its own body.
+    expect(r1).toBe(r2);
+    expect(stops).toBe(0); // lock never acquired → no stop attempted at all
+    expect(r1.error).toContain("could not confirm the cancel");
+    // The pending registration is cleaned up afterwards: with the lock gone, a
+    // later cancel runs a FRESH body and actually succeeds.
+    rmSync(join(mod.jobsRoot(), `${job.id}.lock`), { force: true });
+    let alive = true;
+    const r3 = await mod.cancelJob(job.id, {
+      ...deps,
+      containerRunning: async () => alive,
+      stopTraining: async (name: string) => {
+        stops++;
+        alive = false;
+        return { ok: true, command: "train_cancel", data: { stopped: name } } as never;
+      },
+    });
+    expect(r3.status).toBe("cancelled");
+    expect(stops).toBe(1);
+  });
+
+  it("progress during a pending cancel does NOT reconcile memory back to running", async () => {
+    const d = deferred<{ code: number; tail: string }>();
+    let tick: ((p: { step?: number; totalSteps?: number; raw: string }) => void) | undefined;
+    const dataset = join(mod.datasetsRoot(), "dataset");
+    mkdirSync(dataset, { recursive: true });
+    makeImage(dataset, "img_00001.png");
+    const job = await mod.startTrainingJob(
+      { name: "pending_cancel", flow: "character", model: "flux1-dev", datasetPath: dataset },
+      {
+        startTraining: (opts) => {
+          tick = opts.onProgress;
+          return fakeHandle(d);
+        },
+        lorasDir: () => join(root, "loras"),
+        catalog: fakeCatalog(),
+      },
+    );
+    // Block the cancel's lock acquisition briefly (live holder = parent pid,
+    // within the age cap so it can't be reclaimed).
+    writeFileSync(join(mod.jobsRoot(), `${job.id}.lock`), String(process.ppid));
+    const cancelP = mod.cancelJob(job.id, {
+      containerRunning: async () => true,
+      lockBudgetMs: 400,
+    });
+    // Let the cancel reach its memory-marking (it awaits getJob + the lock
+    // probe first), then fire the tick mid-wait.
+    await new Promise((r) => setTimeout(r, 50));
+    tick!({ step: 5, totalSteps: 200, loss: 0.5, raw: "5/200 loss: 0.5" });
+    expect(job.status).toBe("cancelled");
+    const after = await cancelP; // fails to confirm (lock busy) → reverts honestly
+    expect(after.status).toBe("running");
+    expect(after.error).toContain("could not confirm the cancel");
+  });
+
+  it("finalize proceeds past a DEAD holder's lock (breaks it)", async () => {
+    // A crashed process's lock: owner dead, holder pid dead → recovery proceeds.
+    writeRecord("tdeadlock1", { ownerPid: 99999999 });
+    const rec = JSON.parse(readFileSync(join(mod.jobsRoot(), "tdeadlock1.json"), "utf-8"));
+    const outDir = join(rec.jobDir, "output", "review_lora");
+    mkdirSync(outDir, { recursive: true });
+    writeFileSync(join(outDir, "review_lora.safetensors"), "weights");
+    // The crashed finalizer's lock — its pid is not alive.
+    writeFileSync(join(mod.jobsRoot(), "tdeadlock1.lock"), "99999999");
+    const catalog = fakeCatalog();
+    const job = (await mod.getJob("tdeadlock1", {
+      containerRunning: async () => false,
+      lorasDir: () => join(root, "loras"),
+      catalog,
+    }))!;
+    expect(job.status).toBe("completed");
+    expect(catalog.upserts).toHaveLength(1);
+    expect(existsSync(join(mod.jobsRoot(), "tdeadlock1.lock"))).toBe(false);
+  });
+
+  it("reclaims an EMPTY stale lock (crash between create and token write)", async () => {
+    writeRecord("tempty1", { ownerPid: 99999999 });
+    const rec = JSON.parse(readFileSync(join(mod.jobsRoot(), "tempty1.json"), "utf-8"));
+    const outDir = join(rec.jobDir, "output", "review_lora");
+    mkdirSync(outDir, { recursive: true });
+    writeFileSync(join(outDir, "review_lora.safetensors"), "weights");
+    // Empty + ancient lockfile (no token at all).
+    const lockPath = join(mod.jobsRoot(), "tempty1.lock");
+    writeFileSync(lockPath, "");
+    const old = new Date(Date.now() - 10 * 60_000);
+    utimesSync(lockPath, old, old);
+    const catalog = fakeCatalog();
+    const job = (await mod.getJob("tempty1", {
+      containerRunning: async () => false,
+      lorasDir: () => join(root, "loras"),
+      catalog,
+      lockBudgetMs: 2_000,
+    }))!;
+    expect(job.status).toBe("completed"); // recovered, didn't loop on the empty lock
+    expect(catalog.upserts).toHaveLength(1);
+  });
+
+  it("a live snapshot never overwrites a terminal disk record", async () => {
+    const d = deferred<{ code: number; tail: string }>();
+    let tick: ((p: { step?: number; totalSteps?: number; raw: string }) => void) | undefined;
+    const dataset = join(mod.datasetsRoot(), "dataset");
+    mkdirSync(dataset, { recursive: true });
+    makeImage(dataset, "img_00001.png");
+    const job = await mod.startTrainingJob(
+      { name: "snap_terminal", flow: "character", model: "flux1-dev", datasetPath: dataset },
+      {
+        startTraining: (opts) => {
+          tick = opts.onProgress;
+          return fakeHandle(d);
+        },
+        lorasDir: () => join(root, "loras"),
+        catalog: fakeCatalog(),
+      },
+    );
+    // A finalizer elsewhere lands FIRST: the disk record becomes completed.
+    const file = join(mod.jobsRoot(), `${job.id}.json`);
+    const finalized = {
+      ...JSON.parse(readFileSync(file, "utf-8")),
+      status: "completed",
+      progress: { step: 200, totalSteps: 200, loss: 0.1, samples: [] },
+      result: { loraPath: "/x/l.safetensors", loraRelPath: "loras/snap_terminal.safetensors", catalogId: "c" },
+      finishedAt: new Date().toISOString(),
+    };
+    const finalizedText = JSON.stringify(finalized, null, 2);
+    writeFileSync(file, finalizedText);
+    // A late progress tick arrives and schedules its snapshot AFTER that.
+    tick!({ step: 42, totalSteps: 200, loss: 0.4, raw: "42/200 loss: 0.4" });
+    await new Promise((r) => setTimeout(r, 200)); // let the chained persist flush
+    // The terminal record survived — no running-overwrite, byte-identical.
+    expect(readFileSync(file, "utf-8")).toBe(finalizedText);
+  });
+
+  it("a LIVE holder's lock is respected within the age cap", async () => {
+    // An in-cap lockfile owned by a LIVE pid (this one, and actually held) must
+    // not be broken — long handoff copies are legitimate (codex finding).
+    const lockPath = join(mod.jobsRoot(), "tancient1.lock");
+    mkdirSync(mod.jobsRoot(), { recursive: true });
+    writeFileSync(lockPath, String(process.ppid)); // live, not me
+    const recent = new Date(Date.now() - 10 * 60_000); // 10min < 30min cap
+    utimesSync(lockPath, recent, recent);
+    writeRecord("tancient1", { ownerPid: 99999999 });
+    const job = (await mod.getJob("tancient1", {
+      containerRunning: async () => false,
+      lorasDir: () => join(root, "loras"),
+      catalog: fakeCatalog(),
+      lockBudgetMs: 300,
+    }))!;
+    expect(job.status).toBe("running"); // couldn't acquire → record untouched
+    expect(existsSync(lockPath)).toBe(true); // NOT broken
+  });
+
+  it("reclaims a lock past the age cap even with a LIVE unrelated pid (pid-reuse guard)", async () => {
+    const lockPath = join(mod.jobsRoot(), "tancient2.lock");
+    mkdirSync(mod.jobsRoot(), { recursive: true });
+    writeFileSync(lockPath, String(process.ppid)); // live pid, possibly recycled
+    const ancient = new Date(Date.now() - 45 * 60_000); // 45min > 30min cap
+    utimesSync(lockPath, ancient, ancient);
+    writeRecord("tancient2", { ownerPid: 99999999 });
+    const rec = JSON.parse(readFileSync(join(mod.jobsRoot(), "tancient2.json"), "utf-8"));
+    const outDir = join(rec.jobDir, "output", "review_lora");
+    mkdirSync(outDir, { recursive: true });
+    writeFileSync(join(outDir, "review_lora.safetensors"), "weights");
+    const catalog = fakeCatalog();
+    const job = (await mod.getJob("tancient2", {
+      containerRunning: async () => false,
+      lorasDir: () => join(root, "loras"),
+      catalog,
+    }))!;
+    expect(job.status).toBe("completed"); // reclaimed + recovered
+    expect(catalog.upserts).toHaveLength(1);
+  });
+
+  it("reclaims a lock with MY pid that this process never took (dead previous life)", async () => {
+    // The lockfile carries the CURRENT pid but was planted (never acquired via
+    // acquireLock) — i.e. a previous dead process with the same recycled pid.
+    const lockPath = join(mod.jobsRoot(), "trecycle1.lock");
+    mkdirSync(mod.jobsRoot(), { recursive: true });
+    writeFileSync(lockPath, String(process.pid));
+    writeRecord("trecycle1", { ownerPid: 99999999 });
+    const rec = JSON.parse(readFileSync(join(mod.jobsRoot(), "trecycle1.json"), "utf-8"));
+    const outDir = join(rec.jobDir, "output", "review_lora");
+    mkdirSync(outDir, { recursive: true });
+    writeFileSync(join(outDir, "review_lora.safetensors"), "weights");
+    const catalog = fakeCatalog();
+    const job = (await mod.getJob("trecycle1", {
+      containerRunning: async () => false,
+      lorasDir: () => join(root, "loras"),
+      catalog,
+    }))!;
+    expect(job.status).toBe("completed"); // reclaimed immediately, no timeout
+    expect(catalog.upserts).toHaveLength(1);
+  });
+
+  it("adopting a cancelled record CONTINUES to docker stop (cross-process cancel)", async () => {
+    const d = deferred<{ code: number; tail: string }>();
+    const dataset = join(mod.datasetsRoot(), "dataset");
+    mkdirSync(dataset, { recursive: true });
+    makeImage(dataset, "img_00001.png");
+    const job = await mod.startTrainingJob(
+      { name: "xproc_cancel", flow: "character", model: "flux1-dev", datasetPath: dataset },
+      { startTraining: () => fakeHandle(d), lorasDir: () => join(root, "loras"), catalog: fakeCatalog() },
+    );
+    // Process A persisted the cancel marker, then died BEFORE its docker stop.
+    const file = join(mod.jobsRoot(), `${job.id}.json`);
+    const record = JSON.parse(readFileSync(file, "utf-8")) as { status: string; finishedAt?: string };
+    record.status = "cancelled";
+    record.finishedAt = new Date().toISOString();
+    writeFileSync(file, JSON.stringify(record, null, 2));
+    const stopped: string[] = [];
+    let alive = true;
+    // Process B had the job as running and cancels too: it must ADOPT — and
+    // still stop the container (codex finding: ack-without-stop burns GPU).
+    const after = await mod.cancelJob(job.id, {
+      containerRunning: async () => alive,
+      stopTraining: async (name) => {
+        stopped.push(name);
+        alive = false;
+        return { ok: true, command: "train_cancel", data: { stopped: name } };
+      },
+    });
+    expect(stopped).toEqual([job.containerName]);
+    expect(after.status).toBe("cancelled");
+  });
+
+  it("lock acquisition honors the caller's budget past a fresh claim", async () => {
+    writeRecord("tbudget1", { ownerPid: 99999999 });
+    // Live lock + live (fresh) claim — a takeover "in progress" elsewhere.
+    writeFileSync(join(mod.jobsRoot(), "tbudget1.lock"), String(process.ppid));
+    writeFileSync(join(mod.jobsRoot(), "tbudget1.lock.claim"), String(process.ppid));
+    const t0 = Date.now();
+    const after = await mod.cancelJob("tbudget1", {
+      containerRunning: async () => true,
+      lockBudgetMs: 400,
+    });
+    const elapsed = Date.now() - t0;
+    expect(after.error).toContain("could not confirm the cancel");
+    expect(elapsed).toBeLessThan(5_000); // NOT the full 60s claim TTL
   });
 });
