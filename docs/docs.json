@@ -95,6 +95,7 @@
             "group": "Blog",
             "pages": [
               "blog/index",
+              "blog/kimi-k3-comfyui",
               "blog/local-llms-comfyui",
               "blog/gemma4-fine-tune-arena",
               "blog/vision-per-model",

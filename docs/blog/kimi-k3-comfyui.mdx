@@ -1,0 +1,159 @@
+---
+title: "Kimi K3: the biggest open-weight model ever now drives your ComfyUI canvas"
+description: "Moonshot AI's Kimi K3 — 2.8 trillion parameters, a 1M-token context window, and open weights promised for July 27 — is the closest an open model has ever come to the closed frontier. Why the release matters, what the benchmarks and the caveats actually say, and how to run it as your ComfyUI agent today with one API key: the moonshot provider landed in comfyui-mcp two days after K3 shipped."
+keywords:
+  - Kimi K3
+  - Kimi K3 ComfyUI
+  - Moonshot AI
+  - open-weight LLM
+  - ComfyUI AI agent
+  - Kimi K3 API
+  - ComfyUI MCP
+  - agentic LLM ComfyUI
+---
+
+_by [artokun](https://github.com/artokun) · July 20, 2026 · Kimi K3 · providers · open weights_
+
+On July 16, Moonshot AI released [Kimi K3](https://www.kimi.com/blog/kimi-k3) —
+a 2.8-trillion-parameter mixture-of-experts model with a one-million-token
+context window, native vision, and an always-on thinking mode. Moonshot calls
+it the largest open-weight model ever shipped, with the full weights promised
+on Hugging Face by **July 27** and a technical report alongside them.
+
+Two days later, K3 became a first-class provider in the [Agent
+Panel](/panel). Pick the **Kimi K3** chip, paste one API key, and the model
+that's currently sitting at the top of the open-weight world is editing the
+graph you're looking at.
+
+This post is two things: why K3 is a genuinely big deal beyond the parameter
+count, and what it's like wired into ComfyUI — including the honest caveats.
+
+## Why this release is different
+
+Open-weight models have been "almost frontier" for a while. The interesting
+thing about K3 is how small the "almost" has become, and how the gap closed.
+
+The scores first, with the usual self-reported-benchmark salt. On [Artificial
+Analysis's Intelligence Index](https://www.interconnects.ai/p/kimi-k3-the-open-weights-escalation),
+K3 lands **third overall** — behind only Claude Fable 5 and GPT-5.6 Sol at
+maximum effort, and ahead of everything else, closed or open. On Artificial
+Analysis's private long-horizon agentic evaluation it reaches an Elo of
+**1547 — a 732-point jump over its predecessor K2.6**. It takes **first place
+outright on the Frontend Code Arena**, ahead of the closed frontier. And on
+GDPval-AA v2, a benchmark built from real tasks across 44 occupations, it
+scores 1,687 — third again, ahead of Claude Opus 4.8.
+
+A model you can download outperforming last generation's closed flagships and
+trailing only the current two — that has never happened at this margin before.
+[Nathan Lambert's read](https://www.interconnects.ai/p/kimi-k3-the-open-weights-escalation)
+is that the open-to-closed gap has compressed from six-to-nine months to more
+like **three to five**, and K3 is the proof point.
+
+The second reason it matters is *how* Moonshot got there: architecture, not
+just scale. K3 activates only **16 of 896 experts per token** — an unusually
+sparse MoE — and pairs it with two new mechanisms, **Kimi Delta Attention**
+(a hybrid linear attention that makes the 1M-token window economical) and
+**Attention Residuals** (which carry representations across model depth).
+Moonshot claims roughly a 2.5× overall scaling-efficiency improvement over the
+K2 generation from these choices. The design is agent-shaped from the ground
+up: 1M tokens of context, aggressive prefix caching (cache-hit input is
+**$0.30 per million tokens** against $3.00 uncached), and long-horizon agent
+training. The bet is that agents get cheap when the architecture, the serving
+stack, and the agent loop are designed together — which happens to be exactly
+the shape of workload a canvas-driving ComfyUI agent produces: a long, stable
+tool-schema prefix and many short turns against it.
+
+## The honest caveats
+
+We wired K3 in, used it, and read the fine print, so here is the other column.
+
+**It thinks. A lot. Always.** K3 launched with a single reasoning effort —
+max — and no way to turn it down (Moonshot says lower-effort variants are
+coming). [Simon Willison measured](https://simonwillison.net/2026/Jul/16/kimi-k3/)
+a run where 13,241 of 16,658 total output tokens were reasoning. At **$15 per
+million output tokens** — Sonnet-tier pricing, the most expensive a Chinese
+lab has ever charged, up from K2's $0.95/$4 — asking K3 to nudge one widget
+value is using a freight train to deliver a postcard. The mitigations are
+real, though: K3 uses about 21% fewer output tokens than K2.6 for equivalent
+work, and the >90% cache-hit rates Moonshot reports on coding workloads map
+well onto agent loops like ours.
+
+**Moonshot's own launch notes are unusually candid**: overall performance
+still trails Claude Fable 5 and GPT-5.6 Sol, the model is sensitive to having
+its thinking history dropped by a harness, and it shows "excessive
+proactiveness" on ambiguous tasks — it will confidently do *something* when a
+more conservative model would ask. Supervise accordingly; every canvas edit
+the agent makes is one Ctrl+Z from gone, which is precisely the safety net an
+eager model needs.
+
+**And the headline is a promise until July 27.** "Open weights in eleven days"
+is not yet open weights. Moonshot's track record here is good — K2's weights
+shipped as promised — but the strategic significance everyone is writing about
+is conditional on the Hugging Face upload actually landing.
+
+## Wired in, two days later
+
+comfyui-mcp already speaks to fourteen backends through one orchestrator port,
+so a new OpenAI-compatible provider is a well-worn path. K3 landed as the
+`moonshot` provider in [PR #233](https://github.com/artokun/comfyui-mcp/pull/233),
+merged July 18 and live-verified against the real API the same night: our
+`listModels()` sees `kimi-k3` in Moonshot's `/v1/models`, and a real turn
+answers over `chat/completions`.
+
+One naming knot worth untangling, because you'll see **two Kimi chips** in the
+panel and that's deliberate. **Kimi K3 lives on Moonshot's platform API**
+(`api.moonshot.ai/v1`, key from [platform.kimi.ai](https://platform.kimi.ai),
+pay per token). The pre-existing **Kimi chip is Kimi Code** — the separate
+coding-subscription product with its own OAuth login and endpoint. Same
+company, different products, different auth, both selectable side by side.
+
+Setup is the whole of this paragraph: get a key from platform.kimi.ai, paste
+it into the **Kimi K3 (Moonshot)** slot in the panel's API Keys card (or set
+`MOONSHOT_API_KEY` for MCP-only use), pick the chip, Connect. Default model is
+`kimi-k3`; `COMFYUI_MCP_MOONSHOT_MODEL` and `COMFYUI_MCP_MOONSHOT_BASE_URL`
+override the model and endpoint — the latter means that when the weights drop
+on the 27th, pointing the same provider at a self-hosted or third-party K3
+endpoint is a one-variable change. That's the quiet payoff of the open-weights
+part: **the provider you configure today against Moonshot's API is the same
+provider that runs against your own serving stack later.**
+
+Two integration notes from the trenches. K3 streams its always-on thinking as
+`reasoning_content` alongside the answer; the backend handles it correctly
+today, and surfacing the live reasoning stream in the panel is on the wish
+list. And K3 was also the straw that fixed a maintenance problem: it was the
+provider that made us count the **~10 scattered files** every new
+OpenAI-compatible backend had to touch, and the follow-up
+[provider registry](https://github.com/artokun/comfyui-mcp/pull/234) collapsed
+that to one table entry — the next K3-shaped release wires in faster than this
+one did.
+
+Vision works the way it works everywhere in comfyui-mcp: capability is judged
+[per model, not per provider](/blog/vision-per-model), so K3's native visual
+understanding means it can actually look at your renders when you ask "why is
+the face melted?" — delivery is attempted, and honesty is enforced if a model
+can't see.
+
+## Where it fits in your lineup
+
+The panel's whole thesis is [pick a provider, not a
+port](/blog/comfyui-agent-claude-or-chatgpt), and K3 slots into a real niche
+in that lineup. For quick widget nudges, a [free local
+model](/blog/local-llms-comfyui) on your own GPU is still the right tool — K3's
+always-max thinking is overkill you pay for by the token. For the absolute
+ceiling, Claude and GPT-5.6 still hold the top two slots on most boards. K3's
+lane is the long, gnarly middle: a 128-node workflow autopsy, a
+plan-install-run-verify chain that touches thirty tools, anything where the
+1M-token window and long-horizon training earn their keep — at cached-input
+prices that undercut the closed frontier on exactly those workloads. And it's
+the one model in that class you'll be able to *download*.
+
+Eleven days until the weights. The chip is already in your sidebar.
+
+---
+
+*Try it: [install comfyui-mcp](https://github.com/artokun/comfyui-mcp) and add
+the [Panel](/panel) to ComfyUI, grab a key at
+[platform.kimi.ai](https://platform.kimi.ai), and pick the Kimi K3 chip. If
+you get K3 doing something great on your canvas — or something hilariously
+overeager — [file an issue or share
+it](https://github.com/artokun/comfyui-mcp/issues); we read everything.*
