@@ -189,7 +189,7 @@ export function registerDiagnosticsTools(server: McpServer): void {
 
   server.tool(
     "get_history",
-    "Get execution history for a ComfyUI prompt. Returns status, timing, cached nodes, output details, and full error information including Python tracebacks. Use after a failed enqueue_workflow to diagnose what went wrong.",
+    "Get execution history for a ComfyUI prompt: status, timing, cached nodes, and output details (media filenames for get_image). Also carries the raw error/traceback. To diagnose WHY a run FAILED or what's missing, prefer `diagnose_run` — it returns the same failure info PLUS missing models (with the file + widget) and missing node types, which this tool does not. Use get_history when you need the run's OUTPUTS or timing for a specific prompt_id.",
     {
       prompt_id: z
         .string()

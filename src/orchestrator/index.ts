@@ -213,9 +213,10 @@ const HEADLESS_DIRECTIVE =
   "enqueuing returns a prompt_id immediately, so wait for it with get_job_status(prompt_id) — poll it briefly until " +
   "it reports completion (this is the ONE case where polling IS correct) — then fetch the output with get_history and " +
   "show it with panel_show_media. Do NOT end your turn expecting an automatic notification; none will arrive. " +
-  "If the run FAILED — or the user asks why a render failed / what's missing — call diagnose_run: it names the failed " +
-  "node with its exception, plus any missing models (exact file + the widget holding it) and missing node types, in one " +
-  "call. It is the canvas-less equivalent of the panel's \"why is this red?\", so do NOT try panel_view_errored_nodes here.";
+  "If the run FAILED — or the user asks why a render failed / what's missing — call diagnose_run FIRST, and do NOT use " +
+  "get_history for that: diagnose_run returns everything get_history would (failed node + exception + traceback) PLUS the " +
+  "missing models (exact file + the widget holding it) and missing node types that get_history omits, in one call. It is " +
+  "the canvas-less equivalent of the panel's \"why is this red?\", so also do NOT try panel_view_errored_nodes here.";
 
 /** Live stall threshold (seconds) pushed from the panel setting via a `set_config`
  *  frame — applies WITHOUT a reconnect. null = not set, fall back to env then the
