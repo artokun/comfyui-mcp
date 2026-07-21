@@ -142,6 +142,7 @@ export function registerTrainTools(server: McpServer): void {
       target: z.enum(["local", "pod"]).optional().default("local").describe("'local' = docker on this rig; 'pod' = pod-native over ssh on a RunPod pod."),
       pod_id: z.string().optional().describe("RunPod pod to train on (target 'pod'). Default: the connector's currently connected/watched pod."),
       deliverTo: z.enum(["pod", "local", "both"]).optional().default("both").describe("Pod jobs only: where the finished LoRA lands."),
+      model_path: z.string().optional().describe("Override the base model path AS THE TRAINER SEES IT (pod path for target 'pod', container path for 'local') — e.g. a pre-uploaded local HF snapshot dir when the default HF repo id is gated/unreachable."),
     },
     async (args) => {
       try {
@@ -174,6 +175,7 @@ export function registerTrainTools(server: McpServer): void {
           target: args.target,
           podEndpoint,
           deliverTo: args.deliverTo,
+          modelPath: args.model_path,
         });
         return textEnvelope({ ok: true, job });
       } catch (error) {

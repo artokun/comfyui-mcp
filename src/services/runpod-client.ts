@@ -257,7 +257,7 @@ async function deployOnce(
         // one-tap pods had no SSH endpoint and rejected every pod job).
         ports: `${RUNPOD_COMFYUI_PORT}/http,22/tcp`,
         // SSH auth for the trainer: the template injects this at boot.
-        ...(opts.publicKey ? { env: { PUBLIC_KEY: opts.publicKey } } : {}),
+        ...(opts.publicKey ? { env: [{ key: "PUBLIC_KEY", value: opts.publicKey }] } : {}),
       },
     },
   );

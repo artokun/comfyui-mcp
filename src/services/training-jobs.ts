@@ -972,6 +972,9 @@ export interface StartJobInput {
   podEndpoint?: PodSshEndpoint;
   /** Pod jobs: where the finished LoRA lands (default "both"). */
   deliverTo?: "pod" | "local" | "both";
+  /** Override for the base model path as the trainer sees it (e.g. a pod-local
+   *  HF snapshot dir) — bypasses downloading the default HF repo id. */
+  modelPath?: string;
 }
 
 function countDatasetImages(datasetPath: string): number {
@@ -1330,6 +1333,7 @@ export async function startTrainingJob(input: StartJobInput, deps: TrainingJobDe
     trigger: input.trigger,
     device: input.device,
     params: input.params,
+    modelPath: input.modelPath,
   });
   const configPath = join(jobDir, "config.yml");
   writeFileSync(configPath, built.yaml);

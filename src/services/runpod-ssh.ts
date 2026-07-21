@@ -95,28 +95,139 @@ export function sshExec(ep: PodSshEndpoint, remoteCmd: string, timeoutMs = 60_00
  *  (codex finding: pgrep/pkill -f 'run.py' matched the invoking shell). */
 export const RUNPY_PATTERN = "[r]un.py";
 
-/** rsync a local dir UP to the pod (trailing-slash semantics: CONTENTS of localDir). */
+/** Pipe helper: spawn producer, stream its stdout into consumer's stdin,
+ *  resolve with both exit codes. The transport behind the rsync-replacements
+ *  below (Windows rigs have tar+ssh but no rsync — codex/E2E finding).
+ *  Every settle path kills BOTH children: a dead consumer (e.g. ssh auth
+ *  failure) must not leave tar writing into a closed pipe, and a dead
+ *  producer must not leave ssh waiting on stdin forever (codex finding:
+ *  EPIPE on cons.stdin is an uncaught stream error that kills the MCP
+ *  process). */
+function pipe(producer: { cmd: string; args: string[] }, consumer: { cmd: string; args: string[] }, timeoutMs: number): Promise<{ code: number; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    const prod = childProcess.spawn(producer.cmd, producer.args, { windowsHide: true });
+    const cons = childProcess.spawn(consumer.cmd, consumer.args, { windowsHide: true });
+    const errTail: string[] = [];
+    const outTail: string[] = [];
+    const grab = (s: NodeJS.ReadableStream | null, into: string[]) => {
+      if (!s) return;
+      s.setEncoding("utf8");
+      s.on("data", (chunk: string) => {
+        into.push(chunk);
+        if (into.length > 40) into.shift();
+      });
+    };
+    grab(prod.stderr, errTail);
+    grab(cons.stdout, outTail);
+    grab(cons.stderr, errTail);
+    let settled = false;
+    const settle = (result: { code: number; stdout: string; stderr: string }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { prod.kill("SIGKILL"); } catch { /* already exited */ }
+      try { cons.kill("SIGKILL"); } catch { /* already exited */ }
+      resolve(result);
+    };
+    const timer = setTimeout(() => {
+      settle({ code: 124, stdout: outTail.join(""), stderr: `pipe timed out after ${timeoutMs}ms\n${errTail.join("")}` });
+    }, timeoutMs);
+    // Stream errors (EPIPE when the peer dies mid-transfer) are expected
+    // failure noise — record them, never let them crash the process. The
+    // child 'close' handlers do the actual settling.
+    prod.stdout?.on("error", (e) => { errTail.push(`producer stdout: ${e.message}\n`); });
+    cons.stdin?.on("error", (e) => { errTail.push(`consumer stdin: ${e.message}\n`); });
+    prod.stdout?.pipe(cons.stdin ?? process.stdin);
+    // Settle only when BOTH exit codes are known (codex finding: consumer can
+    // close cleanly while the producer is still finishing — e.g. remote tar
+    // exits nonzero AFTER closing stdout; resolving on consumer-close alone
+    // would report success with the initial producer code and kill the
+    // producer before its real status arrives). A NONZERO consumer close
+    // settles immediately — no point waiting for a producer whose output is
+    // already unconsumable; settle() kills it.
+    let prodCode: number | null = null;
+    let consCode: number | null = null;
+    const maybeSettle = () => {
+      if (consCode === null) return;
+      if (consCode !== 0) {
+        settle({ code: consCode, stdout: outTail.join(""), stderr: errTail.join("") });
+        return;
+      }
+      if (prodCode === null) return;
+      settle({ code: prodCode !== 0 ? prodCode : consCode, stdout: outTail.join(""), stderr: errTail.join("") });
+    };
+    prod.on("error", (e) => {
+      settle({ code: 1, stdout: "", stderr: `${producer.cmd} failed to start: ${e.message}` });
+    });
+    prod.on("close", (code) => {
+      prodCode = code ?? 1;
+      try { cons.stdin?.end(); } catch { /* consumer already gone */ }
+      maybeSettle();
+    });
+    cons.on("error", (e) => {
+      settle({ code: 1, stdout: "", stderr: `${consumer.cmd} failed to start: ${e.message}` });
+    });
+    cons.on("close", (code) => {
+      consCode = code ?? 1;
+      maybeSettle();
+    });
+  });
+}
+
+function toForwardSlashes(p: string): string {
+  return p.replace(/\\/g, "/");
+}
+
+/** Upload a local dir's CONTENTS to a pod dir (rsync trailing-slash semantics,
+ *  via tar-over-ssh — no rsync binary needed on either side). The remote dir
+ *  is DELETED+recreated first (`rsync --delete` semantics): its content is
+ *  keyed by job/dataset name, so a re-staged dataset must not inherit files
+ *  removed locally since the last run (codex finding). */
 export function rsyncToPod(ep: PodSshEndpoint, localDir: string, remoteDir: string, timeoutMs = 300_000): Promise<{ code: number; stdout: string; stderr: string }> {
-  return exec(
-    "rsync",
-    ["-az", "--delete", "-e", `ssh ${SSH_OPTS.join(" ")} -p ${ep.port}`, `${localDir.replace(/[\\/]$/, "")}/`, `${ep.userHost}:${remoteDir}/`],
+  const src = toForwardSlashes(localDir.replace(/[\\/]$/, ""));
+  const remote = remoteDir.replace(/'/g, "'\\''");
+  return pipe(
+    { cmd: "tar", args: ["-C", src, "-czf", "-", "."] },
+    { cmd: "ssh", args: [...SSH_OPTS, "-p", String(ep.port), ep.userHost, `rm -rf '${remote}' && mkdir -p '${remote}' && tar --no-same-owner --no-same-permissions -xzf - -C '${remote}'`] },
     timeoutMs,
   );
 }
 
-/** rsync one FILE up to a pod path (parent created remotely first). */
+/** rsync one FILE up to a pod path (parent created remotely first). Honors
+ *  copy-to-PATH semantics: the payload lands at the exact remotePath even
+ *  when the local basename differs (e.g. ai-toolkit's `name_N.safetensors` →
+ *  requested `name.safetensors`). Extraction happens in a same-dir mktemp
+ *  staging dir so a differing local basename can never clobber an unrelated
+ *  existing remote file mid-transfer, and the final mv is a same-filesystem
+ *  rename (codex finding). The tar wrapper keeps truncated transfers
+ *  detectable (remote tar exits nonzero on a short archive). */
 export async function rsyncFileToPod(ep: PodSshEndpoint, localFile: string, remotePath: string, timeoutMs = 120_000): Promise<{ code: number; stdout: string; stderr: string }> {
   const parent = remotePath.slice(0, remotePath.lastIndexOf("/"));
-  const mk = await sshExec(ep, `mkdir -p '${parent.replace(/'/g, "'\\''")}'`, 30_000);
+  const parentQ = parent.replace(/'/g, "'\\''");
+  const mk = await sshExec(ep, `mkdir -p '${parentQ}'`, 30_000);
   if (mk.code !== 0) return mk;
-  return exec("rsync", ["-az", "-e", `ssh ${SSH_OPTS.join(" ")} -p ${ep.port}`, localFile, `${ep.userHost}:${remotePath}`], timeoutMs);
+  const base = toForwardSlashes(localFile);
+  const dir = base.slice(0, base.lastIndexOf("/")) || ".";
+  const name = base.slice(base.lastIndexOf("/") + 1);
+  const nameQ = name.replace(/'/g, "'\\''");
+  const remote = remotePath.replace(/'/g, "'\\''");
+  const extract = `tmp=$(mktemp -d '${parentQ}/.xfer.XXXXXX') && trap 'rm -rf "$tmp"' EXIT && tar --no-same-owner --no-same-permissions -xzf - -C "$tmp" && mv -f -- "$tmp"/'${nameQ}' '${remote}' && test -f '${remote}'`;
+  return pipe(
+    { cmd: "tar", args: ["-C", dir, "-czf", "-", "--", name] },
+    { cmd: "ssh", args: [...SSH_OPTS, "-p", String(ep.port), ep.userHost, extract] },
+    timeoutMs,
+  );
 }
 
-/** rsync a pod dir DOWN to the rig (CONTENTS of remoteDir). */
-export function rsyncFromPod(ep: PodSshEndpoint, remoteDir: string, localDir: string, timeoutMs = 600_000): Promise<{ code: number; stdout: string; stderr: string }> {
-  return exec(
-    "rsync",
-    ["-az", "-e", `ssh ${SSH_OPTS.join(" ")} -p ${ep.port}`, `${ep.userHost}:${remoteDir.replace(/[\\/]$/, "")}/`, `${localDir.replace(/[\\/]$/, "")}/`],
+/** Download a pod dir's CONTENTS to a local dir (created if missing). */
+export async function rsyncFromPod(ep: PodSshEndpoint, remoteDir: string, localDir: string, timeoutMs = 600_000): Promise<{ code: number; stdout: string; stderr: string }> {
+  const remote = remoteDir.replace(/'/g, "'\\''");
+  const dst = toForwardSlashes(localDir.replace(/[\\/]$/, ""));
+  const { mkdirSync } = await import("node:fs");
+  mkdirSync(dst, { recursive: true });
+  return pipe(
+    { cmd: "ssh", args: [...SSH_OPTS, "-p", String(ep.port), ep.userHost, `tar -C '${remote}' -czf - .`] },
+    { cmd: "tar", args: ["-xzf", "-", "-C", dst] },
     timeoutMs,
   );
 }
