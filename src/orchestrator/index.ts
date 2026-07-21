@@ -1745,6 +1745,11 @@ export async function runPanelOrchestrator(): Promise<void> {
         panelTab,
       );
       bridge.push({ type: "ack", ok: false, kind: "degraded" }, panelTab);
+      // The user_message path already pushed turn:"working", and the panel
+      // clears its thinking spinner ONLY on turn:"done" — without this the
+      // degraded tab sits on a live spinner for the 120s safety timeout
+      // (adversarial review of #253, finding 1).
+      bridge.push({ type: "turn", state: "done" }, panelTab);
       logger.warn(
         `[panel-orchestrator] tab ${panelTab.slice(0, 8)} (${backend}) agent failed to start — degraded THIS tab only, other tabs unaffected (${message})`,
       );

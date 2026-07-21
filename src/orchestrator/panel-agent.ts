@@ -1337,6 +1337,11 @@ export class PanelAgentManager {
         // Disconnect → Connect spawns a fresh agent on the same tab.
         if (this.opts.onStartFailure) this.opts.onStartFailure(tabId, m);
         else this.opts.onSay(tabId, `⚠️ The panel agent could not start: ${m}`);
+        // Insurance, not correctness: every current backend self-cleans when
+        // prepare() throws, but that's per-backend convention — stop() makes
+        // backend.close?.() a guarantee now that the process SURVIVES this
+        // path (it used to exit, which mooted cleanup).
+        void agent.stop().catch(() => {});
       } else if (gaveUp) {
         // The bounded self-restart loop gave up — the session keeps dropping. Same
         // fatal signal: let the orchestrator self-exit + respawn.
