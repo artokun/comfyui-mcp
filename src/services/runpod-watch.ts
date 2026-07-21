@@ -160,18 +160,25 @@ export function createRunpodWatcher(deps: RunpodWatcherDeps): RunpodWatcher {
   }
 
   async function pollOnce(): Promise<void> {
-    if (!podId || autoStopping) return;
+    // Capture the watched pod at poll START (the "generation"). A watch(other) or
+    // unwatch() can land while we await getPod/stopPod below; if the target moved
+    // off `target` before we resolve, this poll's result is STALE and must be
+    // dropped — otherwise it would republish pod A's status (or null out podId)
+    // after pod B was already selected, leaving B silently unwatched.
+    const target = podId;
+    if (!target || autoStopping) return;
     let pod: RunpodPod | null;
     try {
-      pod = await getPod(podId);
+      pod = await getPod(target);
     } catch (err) {
       // Transient RunPod API blip — keep the last frame, try again next tick.
-      logger.debug(`[runpod-watch] poll failed for ${podId}: ${err instanceof Error ? err.message : err}`);
+      logger.debug(`[runpod-watch] poll failed for ${target}: ${err instanceof Error ? err.message : err}`);
       return;
     }
+    if (podId !== target) return; // target changed while awaiting → stale, drop
     if (!pod) {
       // Pod vanished (terminated) — stop watching.
-      logger.info(`[runpod-watch] pod ${podId} no longer exists — unwatching`);
+      logger.info(`[runpod-watch] pod ${target} no longer exists — unwatching`);
       unwatch();
       return;
     }
@@ -183,7 +190,7 @@ export function createRunpodWatcher(deps: RunpodWatcherDeps): RunpodWatcher {
     const running = pod.desiredStatus === "RUNNING" && !!pod.runtime;
     let idleSeconds: number | null = null;
     let autostopIn: number | null = null;
-    if (running && deps.renderingOnPod(podId) && deps.comfyuiIdle()) {
+    if (running && deps.renderingOnPod(target) && deps.comfyuiIdle()) {
       if (idleSinceMs == null) idleSinceMs = now();
       idleSeconds = Math.floor((now() - idleSinceMs) / 1000);
       if (idleStopMs > 0) {
@@ -192,19 +199,21 @@ export function createRunpodWatcher(deps: RunpodWatcherDeps): RunpodWatcher {
         if (remainMs <= 0) {
           // Fire auto-stop once; broadcast the reason so the UI can show it.
           autoStopping = true;
-          logger.info(`[runpod-watch] pod ${podId} idle ${idleSeconds}s ≥ ${deps.idleStopMinutes}m — auto-stopping to save cost`);
+          logger.info(`[runpod-watch] pod ${target} idle ${idleSeconds}s ≥ ${deps.idleStopMinutes}m — auto-stopping to save cost`);
           try {
-            await stopPod(podId);
+            await stopPod(target);
           } catch (err) {
             // MONEY SAFETY: the stop FAILED — the pod is still RUNNING and still
             // BILLING. Do NOT pretend it exited and do NOT stop watching: broadcast
             // the TRUE status with an autostop_failed hint so the UI can warn, keep
             // the idle clock (remainMs stays ≤ 0), and retry the stop next tick.
-            logger.warn(`[runpod-watch] auto-stop of ${podId} FAILED — pod still running/billing, will retry next tick: ${err instanceof Error ? err.message : err}`);
+            logger.warn(`[runpod-watch] auto-stop of ${target} FAILED — pod still running/billing, will retry next tick: ${err instanceof Error ? err.message : err}`);
             autoStopping = false;
-            pushIfChanged({ ...frameFor(pod, idleSeconds, 0), autostop_failed: true });
+            if (podId === target) pushIfChanged({ ...frameFor(pod, idleSeconds, 0), autostop_failed: true });
             return;
           }
+          autoStopping = false;
+          if (podId !== target) return; // switched target mid-stop → don't touch B
           const stopped: RunpodStatusFrame = {
             ...frameFor(pod, idleSeconds, 0),
             status: "EXITED",
@@ -215,7 +224,6 @@ export function createRunpodWatcher(deps: RunpodWatcherDeps): RunpodWatcher {
           // EXITED (so the user can restart it) instead of the card vanishing.
           podId = null;
           idleSinceMs = null;
-          autoStopping = false;
           return;
         }
       }
@@ -227,10 +235,18 @@ export function createRunpodWatcher(deps: RunpodWatcherDeps): RunpodWatcher {
   }
 
   function watch(id: string): void {
+    const switching = podId !== id;
     podId = id;
     idleSinceMs = null;
-    // Kick an immediate poll so the panel doesn't wait a full interval.
-    void poll();
+    // Kick an immediate poll so the panel doesn't wait a full interval. If a poll
+    // for the PREVIOUS target is still in flight, don't overlap it — chain a fresh
+    // poll after it settles (that stale poll drops its own result via the
+    // generation guard), so the NEW target is polled promptly and correctly.
+    if (inflight) {
+      if (switching) void inflight.then(() => { if (podId === id) void poll(); });
+    } else {
+      void poll();
+    }
   }
 
   function unwatch(): void {

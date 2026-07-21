@@ -10,6 +10,7 @@
 import { loadQuery } from "./claude-backend.js";
 import { logger } from "../utils/logger.js";
 import { resolvePrompt } from "../services/prompt-overrides.js";
+import { buildAgentSpawnEnv } from "../services/panel-secrets.js";
 
 export interface ModelCardEvidence {
   filename: string;
@@ -98,6 +99,10 @@ export async function proposeModelCard(
       allowedTools: [],
       strictMcpConfig: true,
       maxTurns: 1,
+      // SECURITY: the SDK spawns a Claude Code subprocess; `env` REPLACES its
+      // environment entirely. Pass the agent env (process.env MINUS tool-only
+      // secrets) so RunPod/HF/CivitAI tokens never reach the LLM subprocess.
+      env: buildAgentSpawnEnv(),
     } as unknown as Parameters<typeof query>[0]["options"],
   });
 

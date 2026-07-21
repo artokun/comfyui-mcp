@@ -267,28 +267,54 @@ async function deployOnce(
  *  response, so blindly retrying could spawn a second billable pod. */
 export function isProvablyNotCreatedError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
-  return /no longer any instances available|no (?:gpu )?instances? available|no capacity|not enough .{0,40}(?:capacity|gpus?)|insufficient .{0,40}capacity|out of stock|quota (?:exceeded|reached)|there are no/i.test(
+  // CONSERVATIVE by design: match ONLY explicit capacity/availability/quota
+  // rejections, each anchored on a concrete noun (instances/capacity/gpu/stock/
+  // quota). An error we don't specifically recognize is treated as AMBIGUOUS
+  // (a pod MAY have been created) → the caller must NOT retry. A too-broad
+  // pattern here (e.g. a bare "there are no") would misclassify an ambiguous
+  // failure as safe-to-retry and could double-bill.
+  return /no longer any instances available|no (?:gpu )?instances? available|there are no (?:longer any )?(?:gpu )?instances? available|\bno capacity\b|not enough (?:instances|capacity|gpus?)|insufficient (?:instances|capacity|gpus?)|out of stock|quota (?:exceeded|reached)/i.test(
     msg,
   );
 }
 
+/** Outcome of reconciling an AMBIGUOUS create failure against the live pod list.
+ *  - `unknown`: we couldn't determine (no snapshot, or the reconcile list failed)
+ *  - `none`:    no NEW same-named pod appeared (the mutation likely didn't land)
+ *  - `one`:     exactly ONE new same-named pod → this call created it; return it
+ *  - `ambiguous`: MULTIPLE new same-named pods → cannot attribute one to THIS
+ *                 call (a concurrent create raced us); fail closed, do NOT guess. */
+type ReconcileResult =
+  | { kind: "unknown" }
+  | { kind: "none" }
+  | { kind: "one"; pod: RunpodPod }
+  | { kind: "ambiguous"; count: number };
+
 /** Reconcile after an AMBIGUOUS create failure: did a NEW pod with the requested
  *  name appear (i.e. did the lost mutation actually land)? `priorIds` is the set
  *  of same-named pod ids that existed BEFORE this createPod call — null when we
- *  couldn't snapshot them, in which case we cannot tell new from pre-existing
- *  and must NOT guess. Returns the full pod (re-fetched) or null. */
-async function findPodCreatedByThisCall(
+ *  couldn't snapshot them, in which case we cannot tell new from pre-existing.
+ *
+ *  CONCURRENCY HAZARD: pod name is NOT unique, so two concurrent createPod calls
+ *  for the same default name ("comfyui-mcp") each see the OTHER's pod as "new".
+ *  We therefore only attribute a pod to THIS call when EXACTLY ONE new same-named
+ *  pod appeared; if several did, we fail closed rather than risk claiming (and
+ *  then managing/auto-stopping) a pod a different caller created. */
+async function reconcileCreatedPod(
   name: string,
   priorIds: Set<string> | null,
-): Promise<RunpodPod | null> {
-  if (!priorIds) return null;
+): Promise<ReconcileResult> {
+  if (!priorIds) return { kind: "unknown" };
+  let created: RunpodPod[];
   try {
     const pods = await listPods();
-    const created = pods.find((p) => p.name === name && !priorIds.has(p.id));
-    return created ?? null;
+    created = pods.filter((p) => p.name === name && !priorIds.has(p.id));
   } catch {
-    return null; // reconciliation itself failed — treat as "unknown", never retry
+    return { kind: "unknown" }; // reconcile list failed — never retry blindly
   }
+  if (created.length === 0) return { kind: "none" };
+  if (created.length === 1) return { kind: "one", pod: created[0] };
+  return { kind: "ambiguous", count: created.length };
 }
 
 /** Deploy a fresh on-demand pod from our template. Community GPU capacity is
@@ -337,14 +363,24 @@ export async function createPod(opts: RunpodCreateOptions = {}): Promise<RunpodP
           continue;
         }
         // AMBIGUOUS failure: the billed mutation may have landed. Reconcile first.
-        const created = await findPodCreatedByThisCall(name, priorIds);
-        if (created) return created;
+        const rec = await reconcileCreatedPod(name, priorIds);
+        if (rec.kind === "one") return rec.pod; // exactly one new pod → it's ours
+        const suffix = attempts.length ? `\nEarlier attempts:\n${attempts.map((a) => `  • ${a}`).join("\n")}` : "";
+        if (rec.kind === "ambiguous") {
+          throw new Error(
+            `RunPod pod creation on ${cloudType}/${gpuTypeId} failed ambiguously (${msg}) and ` +
+              `${rec.count} new pods named "${name}" appeared — likely a concurrent create raced ` +
+              `this one, so which pod belongs to this call can't be determined. NOT retrying and ` +
+              `NOT claiming any of them automatically (a wrong guess could auto-stop someone else's ` +
+              `pod or leak a billable one). Reconcile manually at console.runpod.io (or ` +
+              `runpod_pod_status).` + suffix,
+          );
+        }
         throw new Error(
           `RunPod pod creation failed on ${cloudType}/${gpuTypeId} and it could not be confirmed ` +
             `whether a pod was created (${msg}). NOT retrying automatically — a retry could create ` +
             `a second billable pod. Check your pods at console.runpod.io (or runpod_pod_status) ` +
-            `before trying again.` +
-            (attempts.length ? `\nEarlier attempts:\n${attempts.map((a) => `  • ${a}`).join("\n")}` : ""),
+            `before trying again.` + suffix,
         );
       }
     }

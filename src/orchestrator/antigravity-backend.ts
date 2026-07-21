@@ -51,10 +51,18 @@ import type { Readable } from "node:stream";
 /** The per-turn child: stdin ignored (agy takes the prompt via argv), stdout +
  *  stderr piped. */
 type AgyChild = ChildProcessByStdio<null, Readable, Readable>;
+
+// SECURITY: agy is Google's LLM-vendor CLI — its subprocess must NOT inherit the
+// user's TOOL secrets (RunPod/CivitAI/HF/RunComfy/Registry tokens). agy auths via
+// the system keyring + Google Sign-In, but the GEMINI/GOOGLE keys are the SAME
+// vendor's OWN credential (an API-key fallback), so we KEEP them (not a
+// cross-vendor leak) and strip only the foreign tool secrets.
+const ANTIGRAVITY_KEEP_KEYS = ["GEMINI_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY", "GOOGLE_API_KEY"] as const;
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { logger } from "../utils/logger.js";
+import { buildAgentSpawnEnv } from "../services/panel-secrets.js";
 import {
   type AgentBackend,
   type AgentEvent,
@@ -464,7 +472,7 @@ export class AntigravityBackend implements AgentBackend {
     try {
       child = spawn(bin, args, {
         cwd,
-        env: process.env,
+        env: buildAgentSpawnEnv(process.env, { keep: ANTIGRAVITY_KEEP_KEYS }),
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
         detached: process.platform !== "win32",
@@ -655,7 +663,7 @@ export class AntigravityBackend implements AgentBackend {
       try {
         child = spawn(bin, ["models"], {
           cwd: this.deps.cwd ?? process.cwd(),
-          env: process.env,
+          env: buildAgentSpawnEnv(process.env, { keep: ANTIGRAVITY_KEEP_KEYS }),
           stdio: ["ignore", "pipe", "pipe"],
           windowsHide: true,
         }) as AgyChild;

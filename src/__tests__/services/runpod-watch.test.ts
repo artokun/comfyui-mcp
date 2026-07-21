@@ -168,6 +168,36 @@ describe("runpod-watch — idle auto-stop", () => {
     expect(getPodMock).toHaveBeenCalledTimes(2);
   });
 
+  it("drops a stale poll result when the watched pod changed mid-flight (no republish of A over B)", async () => {
+    // poll(A) is in flight; watch(B) lands before it resolves. When A's getPod
+    // finally returns, its frame must be DROPPED (generation guard) — otherwise
+    // it republishes pod A's status after B was selected, leaving B unwatched.
+    let resolveA: ((p: unknown) => void) | null = null;
+    getPodMock.mockImplementationOnce(() => new Promise((res) => (resolveA = res)));
+    const podB = runningPod({ id: "podB", name: "B" });
+    getPodMock.mockResolvedValue(podB); // every later getPod → B
+    const frames: RunpodStatusFrame[] = [];
+    const w = createRunpodWatcher({
+      push: (f) => frames.push(f as RunpodStatusFrame),
+      comfyuiIdle: () => false,
+      renderingOnPod: () => false,
+      idleStopMinutes: 0,
+    });
+    w.watch("podA"); // poll #1 (A) — hangs
+    expect(getPodMock).toHaveBeenCalledTimes(1);
+    w.watch("podB"); // switch target while A in flight
+    expect(w.watchedPodId()).toBe("podB");
+    // Resolve A's stale getPod with A's data — it must be dropped, not published.
+    resolveA!(runningPod({ id: "podA", name: "A" }));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(frames.some((f) => f.pod_id === "podA")).toBe(false); // A never published
+    expect(w.watchedPodId()).toBe("podB"); // still watching B
+    // The chained poll for B (kicked after A settled) publishes B.
+    await w.poll();
+    expect(frames.at(-1)?.pod_id).toBe("podB");
+  });
+
   it("never auto-stops when disabled (idleStopMinutes = 0)", async () => {
     getPodMock.mockResolvedValue(runningPod());
     const c = clock();

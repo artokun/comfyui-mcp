@@ -174,6 +174,28 @@ describe("createPod (GPU fallback + billing safety)", () => {
     expect(deployAttempts).toBe(1); // ambiguous → stop; do NOT try GPU-B or SECURE
   });
 
+  it("an AMBIGUOUS failure with MULTIPLE new same-named pods fails closed (concurrent-create race)", async () => {
+    // Pod NAME is not unique: a concurrent createPod for the same default name
+    // races this one, so >1 new same-named pod may appear. We must NOT guess
+    // which is ours (a wrong guess could auto-stop someone else's pod) → throw.
+    // list-before must be empty so BOTH pods count as "new"; first call is the snapshot.
+    let call = 0;
+    global.fetch = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      const body = JSON.parse((init as { body: string }).body) as GqlBody;
+      if (body.query.includes("podFindAndDeployOnDemand")) throw new Error("socket hang up");
+      const i = call++;
+      return gqlResponse(
+        i === 0
+          ? emptyList
+          : listOf([
+              { id: "pod-a", name: "comfyui-mcp", desiredStatus: "RUNNING", costPerHr: 0.44, machine: null, runtime: null },
+              { id: "pod-b", name: "comfyui-mcp", desiredStatus: "RUNNING", costPerHr: 0.44, machine: null, runtime: null },
+            ]),
+      );
+    }) as unknown as typeof fetch;
+    await expect(createPod({ gpuTypeIds: ["GPU-A"] })).rejects.toThrow(/concurrent create|2 new pods|can't be determined/i);
+  });
+
   it("reconciliation ignores same-named pods that existed BEFORE the call", async () => {
     // A pre-existing "comfyui-mcp" pod must not be mistaken for the one this
     // call may have created.
@@ -194,5 +216,9 @@ describe("createPod (GPU fallback + billing safety)", () => {
     expect(isProvablyNotCreatedError(new Error("socket hang up"))).toBe(false);
     expect(isProvablyNotCreatedError(new Error("RunPod API HTTP 500"))).toBe(false);
     expect(isProvablyNotCreatedError(new Error("RunPod API request timed out after 10s"))).toBe(false);
+    // CONSERVATIVE: an unrelated error that merely contains the words "there are
+    // no" (e.g. a vague server message) must NOT be treated as safe-to-retry.
+    expect(isProvablyNotCreatedError(new Error("there are no response details available"))).toBe(false);
+    expect(isProvablyNotCreatedError(new Error("Internal error: there are no results"))).toBe(false);
   });
 });

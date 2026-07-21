@@ -227,6 +227,35 @@ describe("resolveAgyBin / readiness", () => {
 });
 
 describe("AntigravityBackend turns", () => {
+  it("spawns agy WITHOUT tool-only secrets in its env, but KEEPS its own Google/Gemini keys", async () => {
+    // SECURITY (PR #251/#270): agy is Google's LLM-vendor CLI — the user's TOOL
+    // secrets (RunPod/CivitAI/HF…) must NOT reach it. The GEMINI/GOOGLE keys are
+    // the SAME vendor's own credential and are kept.
+    const saved = {
+      RUNPOD_API_KEY: process.env.RUNPOD_API_KEY,
+      CIVITAI_API_TOKEN: process.env.CIVITAI_API_TOKEN,
+      GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+    };
+    process.env.RUNPOD_API_KEY = "rp-tool-secret";
+    process.env.CIVITAI_API_TOKEN = "civ-tool-secret";
+    process.env.GEMINI_API_KEY = "AIza-own-key";
+    try {
+      hoisted.script.push({ stdout: ["ok"], exit: 0 });
+      const backend = new AntigravityBackend({ cwd: workDir });
+      await collect(backend.run({ channel: channelOf([{ text: "hi" }]) }));
+      const env = hoisted.spawns[0]!.opts.env as Record<string, string | undefined>;
+      expect(env.RUNPOD_API_KEY).toBeUndefined();
+      expect(env.CIVITAI_API_TOKEN).toBeUndefined();
+      expect(env.GEMINI_API_KEY).toBe("AIza-own-key"); // Google's own key kept
+      expect(env.PATH ?? env.Path).toBeDefined();
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  });
+
   it("streams stdout as deltas, commits the text, and continues with -c on turn 2", async () => {
     hoisted.script.push(
       { stdout: ["Hello ", "world"], exit: 0 },

@@ -20,6 +20,7 @@ import type {
   McpSdkServerConfigWithInstance,
 } from "@anthropic-ai/claude-agent-sdk";
 import { logger } from "../utils/logger.js";
+import { buildAgentSpawnEnv } from "../services/panel-secrets.js";
 import {
   type AgentBackend,
   type AgentEvent,
@@ -97,6 +98,11 @@ export async function fetchSupportedModels(model: string): Promise<ModelInfo[]> 
       allowDangerouslySkipPermissions: true,
       strictMcpConfig: true,
       mcpServers: {},
+      // SECURITY: the SDK spawns a Claude Code subprocess; `env` REPLACES its
+      // environment entirely. Pass the agent env (process.env MINUS tool-only
+      // secrets) so RunPod/HF/CivitAI tokens never reach the LLM subprocess.
+      // Claude auth is OAuth-file-based (ANTHROPIC_API_KEY is deliberately unset).
+      env: buildAgentSpawnEnv(),
     } as Options,
   });
   // The transport is pumped by iterating the query — do it in the background so
@@ -164,6 +170,8 @@ export async function fetchSupportedCommands(model: string): Promise<SlashComman
       allowDangerouslySkipPermissions: true,
       strictMcpConfig: true,
       mcpServers: {},
+      // SECURITY: agent env only (no tool-only secrets) — see fetchSupportedModels.
+      env: buildAgentSpawnEnv(),
     } as Options,
   });
   const drain = (async () => {
@@ -331,6 +339,11 @@ export class ClaudeBackend implements AgentBackend {
           }
         : {}),
       ...(rewindOpts ?? (resume ? { resume } : {})),
+      // SECURITY: the SDK spawns a Claude Code subprocess; `env` REPLACES its
+      // environment entirely. Pass the agent env (process.env MINUS tool-only
+      // secrets — RunPod/HF/CivitAI tokens) so tool credentials never reach the
+      // LLM subprocess. Claude auth is OAuth-file-based (no env key needed).
+      env: buildAgentSpawnEnv(),
     } as Options;
   }
 
