@@ -199,7 +199,12 @@ describe("per-tab start failure (issue #250)", () => {
     keyFixed = true;
     manager.send(tab, "second try");
     await waitFor(() => good.turnTexts.length >= 1);
-    expect(good.turnTexts).toContain("second try");
+    const delivered = good.turnTexts.join("\n\n");
+    expect(delivered).toContain("second try");
+    // Held mail (issue #256): the message that hit the FAILED start is no
+    // longer dropped — the fresh agent re-delivers it ahead of the retry.
+    expect(delivered).toContain("first try");
+    expect(delivered.indexOf("first try")).toBeLessThan(delivered.indexOf("second try"));
     expect(manager.hasLiveAgent(tab)).toBe(true);
     // Still no fatal escalation anywhere in the sequence.
     expect(rec.fatals).toHaveLength(0);
