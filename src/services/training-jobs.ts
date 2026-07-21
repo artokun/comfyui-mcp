@@ -729,19 +729,38 @@ async function refreshRegistry(deps: TrainingJobDeps = {}): Promise<void> {
  *  the rig so findSamples/findProducedLora/recoveredSuccessfully see it
  *  (samples mirror to panel/mobile through the same rig-local paths). Used by
  *  finalize AND owner-dead recovery (codex finding: recovery judged a pod job
- *  from the rig-local output dir alone and failed a successful run). */
-async function pullPodOutput(job: TrainingJob, deps: TrainingJobDeps): Promise<void> {
-  if (job.target !== "pod" || !job.containerName) return;
+ *  from the rig-local output dir alone and failed a successful run).
+ *
+ *  Codex #263 BLOCKER: the transport pulls into a TEMP dir and only a
+ *  fully-successful transfer (exit 0 — the verified transport also checks
+ *  entry safety + size/sha256 against the pod) is atomically promoted into
+ *  the final output dir. A failed/partial transfer leaves NO local artifact,
+ *  so a truncated LoRA can never be published as "completed" or re-uploaded
+ *  over the good pod-side copy. Callers must honor `ok`. */
+async function pullPodOutput(job: TrainingJob, deps: TrainingJobDeps): Promise<{ ok: boolean; error?: string }> {
+  if (job.target !== "pod" || !job.containerName) return { ok: true };
   const ep = decodePodContainerName(job.containerName);
-  if (!ep) return;
+  if (!ep) return { ok: false, error: `unparseable pod container name: ${job.containerName}` };
+  const finalDir = join(job.outputDir, job.name);
+  const tmpDir = `${finalDir}.pull-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
   try {
-    pushLog(job, "[pod] pulling output back from the pod (rsync)…");
-    const down = await (deps.rsyncFromPod ?? rsyncFromPod)(ep, `${podJobPaths(job.id, job.name).outputDir}/${job.name}`, join(job.outputDir, job.name));
+    pushLog(job, "[pod] pulling output back from the pod (verified tar-over-ssh)…");
+    const down = await (deps.rsyncFromPod ?? rsyncFromPod)(ep, `${podJobPaths(job.id, job.name).outputDir}/${job.name}`, tmpDir);
     if (down.code !== 0) {
-      logger.warn(`[training-jobs] pod output rsync for ${job.id} failed: ${down.stderr.trim().slice(0, 200)}`);
+      const msg = `pod output transfer failed (exit ${down.code}): ${down.stderr.trim().slice(0, 300)}`;
+      logger.warn(`[training-jobs] ${msg} (job ${job.id})`);
+      return { ok: false, error: msg };
     }
+    // Promote only a complete, verified pull (same-dir rename).
+    rmSync(finalDir, { recursive: true, force: true });
+    renameSync(tmpDir, finalDir);
+    return { ok: true };
   } catch (err) {
-    logger.warn(`[training-jobs] pod output rsync for ${job.id} error: ${err instanceof Error ? err.message : String(err)}`);
+    const msg = `pod output transfer error: ${err instanceof Error ? err.message : String(err)}`;
+    logger.warn(`[training-jobs] ${msg} (job ${job.id})`);
+    return { ok: false, error: msg };
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true }); // no-op after a successful rename
   }
 }
 /**
@@ -756,9 +775,14 @@ async function recoverOrphanedJob(id: string, deps: TrainingJobDeps): Promise<vo
     if (!job || (job.status !== "running" && job.status !== "queued")) return;
     // Pod jobs: pull the pod-side output BEFORE judging success from the
     // rig-local dir (codex finding: a finished pod run looked like a failure).
-    await pullPodOutput(job, deps);
+    const pulled = await pullPodOutput(job, deps);
     try {
-      if (recoveredSuccessfully(job)) {
+      if (!pulled.ok) {
+        // #263 blocker: a failed/partial transfer must never publish. The
+        // artifacts (if any) are still intact on the pod.
+        job.status = "failed";
+        job.error = `owner-dead recovery could not pull the pod output — not publishing a partial artifact: ${pulled.error}. Any produced files are still on the pod under ${podJobPaths(job.id, job.name).outputDir}.`;
+      } else if (recoveredSuccessfully(job)) {
         await handoffToComfyUI(job, deps);
         job.status = "completed";
         const samples = findSamples(job.outputDir, job.name, 4);
@@ -812,6 +836,32 @@ export function hasActiveTrainingJob(target?: "pod"): boolean {
     if (!target) return true;
     return j.target === target || j.containerName?.startsWith("pod|") === true;
   });
+}
+
+/** Money guard (codex #263): a running/queued record whose OWNER process died
+ *  mid-run stays "running" on disk forever if nobody calls train_status —
+ *  and hasActiveTrainingJob (a blind file scan, above) then suppresses the
+ *  pod idle auto-stop indefinitely, billing the pod until a human notices.
+ *  This reconciler probes ONLY dead-owner / stale-lease records (a healthy
+ *  run costs nothing) and routes provably-dead ones through the same locked
+ *  owner-dead recovery the read path uses, so they terminalize honestly and
+ *  stop counting as active. Called periodically by the orchestrator.
+ *  Returns how many records were reconciled to a terminal state. */
+export async function reconcileStaleTrainingJobs(deps: TrainingJobDeps = {}): Promise<number> {
+  let reconciled = 0;
+  for (const job of scanJobRecords()) {
+    if (job.status !== "running" && job.status !== "queued") continue;
+    if (!job.containerName) continue;
+    if (handles.has(job.id)) continue; // live in THIS process — the owner is us
+    if (ownerAlive(job) && !ownerLeaseStale(job)) continue; // healthy owner — not ours to touch
+    const probe = deps.containerRunning ?? defaultContainerProbe;
+    const running = await probe(job.containerName).catch(() => null);
+    if (running !== false) continue; // alive or unknown → err toward "busy" (never stop a live run)
+    await recoverOrphanedJob(job.id, deps);
+    const after = readJobRecord(job.id);
+    if (after && after.status !== "running" && after.status !== "queued") reconciled++;
+  }
+  return reconciled;
 }
 
 /** Probe-free read of every persisted job record (shares no state with the
@@ -1235,24 +1285,34 @@ async function finalizeJob(job: TrainingJob, code: number, tail: string, deps: T
     // Pod jobs: pull the produced output (checkpoints + samples + LoRA) back to
     // the rig BEFORE the usual handoff so findSamples/findProducedLora see it
     // (samples mirror to panel/mobile through the same rig-local paths).
-    await pullPodOutput(job, deps);
+    const pulled = await pullPodOutput(job, deps);
     // Surface the generated samples in train_status regardless of outcome —
     // ai-toolkit prints only "Generating Images" bars (no saved-file lines), so
     // onProgress never sees sample paths (codex finding; confirmed by the E2E).
     const samples = findSamples(job.outputDir, job.name, 4);
     if (samples.length > 0) job.progress.samples = samples;
     if (code === 0) {
-      try {
-        await handoffToComfyUI(job, deps);
-        job.status = "completed";
-        // The last training bar can read e.g. 199/200 before the final save +
-        // sampling phases — normalize so a completed job shows a complete count.
-        if (job.progress.totalSteps !== undefined) job.progress.step = job.progress.totalSteps;
-        reportProgress(job, "done", true);
-      } catch (err) {
+      if (!pulled.ok) {
+        // #263 BLOCKER: a failed/partial transfer must never mark the job
+        // completed — before this gate a truncated 172MB pull could be
+        // published locally AND (deliverTo pod/both) re-uploaded over the
+        // good pod-side artifact. The pod copy is intact; fail honestly.
         job.status = "failed";
-        job.error = `output handoff failed: ${err instanceof Error ? err.message : String(err)}`;
+        job.error = `training succeeded on the pod but the output transfer failed — not publishing a partial LoRA: ${pulled.error}. The finished artifacts are still on the pod under ${podJobPaths(job.id, job.name).outputDir}.`;
         reportProgress(job, "error", true);
+      } else {
+        try {
+          await handoffToComfyUI(job, deps);
+          job.status = "completed";
+          // The last training bar can read e.g. 199/200 before the final save +
+          // sampling phases — normalize so a completed job shows a complete count.
+          if (job.progress.totalSteps !== undefined) job.progress.step = job.progress.totalSteps;
+          reportProgress(job, "done", true);
+        } catch (err) {
+          job.status = "failed";
+          job.error = `output handoff failed: ${err instanceof Error ? err.message : String(err)}`;
+          reportProgress(job, "error", true);
+        }
       }
     } else {
       job.status = "failed";

@@ -1442,6 +1442,83 @@ describe("pod target (P4)", () => {
     expect(mod.hasActiveTrainingJob("pod")).toBe(false);
   });
 
+  it("a FAILED output pull never publishes (#263 blocker): job fails, no final file, no pod delivery", async () => {
+    const { deps, calls, d } = podDeps({
+      rsyncFromPod: async (...a: unknown[]) => {
+        // Simulate a transfer that died mid-stream: a PARTIAL file landed in
+        // the staging dir and the transport reports a nonzero exit.
+        const [, , local] = a as [unknown, unknown, string];
+        mkdirSync(local, { recursive: true });
+        writeFileSync(join(local, "pod_lora.safetensors"), "truncated-172mb-download");
+        return { code: 1, stdout: "", stderr: "connection reset by peer" };
+      },
+    });
+    const catalog = deps.catalog as ReturnType<typeof fakeCatalog>;
+    const job = await mod.startTrainingJob(
+      { name: "pod_lora", flow: "character", model: "flux1-dev", datasetPath: stageDataset(), target: "pod", podEndpoint: EP },
+      deps,
+    );
+    d.resolve({ code: 0, tail: "" }); // training SUCCEEDED on the pod
+    await new Promise((r) => setTimeout(r, 50));
+    const done = (await mod.getJob(job.id, { containerRunning: async () => true }))!;
+    expect(done.status).toBe("failed"); // NOT completed
+    expect(done.error).toMatch(/output transfer failed/);
+    // The partial file was never promoted into the final output dir…
+    expect(existsSync(join(job.outputDir, job.name))).toBe(false);
+    // …no local LoRA was published, no catalog upsert, and — critically for
+    // deliverTo pod/both — the good pod-side artifact was NOT overwritten.
+    expect(existsSync(join(root, "loras", "pod_lora.safetensors"))).toBe(false);
+    expect(calls.lora).toHaveLength(0);
+    expect(catalog.upserts).toHaveLength(0);
+  });
+
+  it("reconcileStaleTrainingJobs terminalizes a dead-owner pod job so it stops suppressing auto-stop (#263 money)", async () => {
+    // A persisted running pod record whose owner pid is dead — the harness
+    // crashed mid-run. Nothing ever calls train_status; before the fix this
+    // record suppressed the pod idle auto-stop (and its billing) forever.
+    mkdirSync(mod.jobsRoot(), { recursive: true });
+    const jobDir = join(mod.jobsRoot(), "tpodgone1");
+    writeFileSync(join(mod.jobsRoot(), "tpodgone1.json"), JSON.stringify({
+      id: "tpodgone1", name: "gone_lora", flow: "character", model: "flux1-dev",
+      status: "running", progress: { samples: [] },
+      containerName: "pod|root@203.0.113.10|23456", target: "pod",
+      ownerPid: 99999999, // almost certainly not alive
+      datasetPath: join(mod.datasetsRoot(), "dataset"), jobDir,
+      outputDir: join(jobDir, "output"), log: [],
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    }));
+    expect(mod.hasActiveTrainingJob("pod")).toBe(true); // the money leak
+    const n = await mod.reconcileStaleTrainingJobs({
+      containerRunning: async () => false, // remote run.py provably gone
+      rsyncFromPod: async () => ({ code: 1, stdout: "", stderr: "pod unreachable" }),
+    });
+    expect(n).toBe(1);
+    expect(mod.hasActiveTrainingJob("pod")).toBe(false); // auto-stop unblocked
+    const after = (await mod.getJob("tpodgone1", { containerRunning: async () => false }))!;
+    expect(after.status).toBe("failed");
+  });
+
+  it("reconcileStaleTrainingJobs leaves a healthy-owner running job alone", async () => {
+    mkdirSync(mod.jobsRoot(), { recursive: true });
+    const jobDir = join(mod.jobsRoot(), "tpodlive1");
+    let probed = 0;
+    writeFileSync(join(mod.jobsRoot(), "tpodlive1.json"), JSON.stringify({
+      id: "tpodlive1", name: "live_lora", flow: "character", model: "flux1-dev",
+      status: "running", progress: { samples: [] },
+      containerName: "pod|root@203.0.113.10|23456", target: "pod",
+      ownerPid: process.ppid, // alive owner…
+      datasetPath: join(mod.datasetsRoot(), "dataset"), jobDir,
+      outputDir: join(jobDir, "output"), log: [],
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), // …with a fresh lease
+    }));
+    const n = await mod.reconcileStaleTrainingJobs({
+      containerRunning: async () => { probed++; return false; },
+    });
+    expect(n).toBe(0);
+    expect(probed).toBe(0); // healthy owners are never even probed
+    expect(mod.hasActiveTrainingJob("pod")).toBe(true); // still honestly busy
+  });
+
   it("the one-run limit is per POD, not global (pod B is free while pod A trains)", async () => {
     const podA = podDeps();
     await mod.startTrainingJob(

@@ -9,6 +9,9 @@
 // stop/probe parse the endpoint back out of the name.
 
 import childProcess from "node:child_process";
+import { createHash } from "node:crypto";
+import { createReadStream, createWriteStream, mkdirSync, renameSync, rmSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { logger } from "../utils/logger.js";
 import type { RunpodPod } from "./runpod-client.js";
 import type { TrainerEnvelope, TrainingHandle, TrainingProgress } from "./ai-toolkit.js";
@@ -219,17 +222,241 @@ export async function rsyncFileToPod(ep: PodSshEndpoint, localFile: string, remo
   );
 }
 
-/** Download a pod dir's CONTENTS to a local dir (created if missing). */
+// ---- verified pod-dir download (codex #263 blocker) --------------------------
+// A 172MB LoRA pull that dies mid-stream must never publish a truncated file,
+// and a pod-controlled archive must never plant a symlink/traversal entry that
+// a later copyFileSync follows. The pull is therefore: remote size+sha256
+// manifest → archive downloaded to a temp FILE (ssh exit code authoritative) →
+// entries validated BEFORE extraction → extracted into a temp STAGE dir →
+// every manifest file verified (size, and sha256 when the pod emitted one) →
+// atomic same-dir rename into place. Any failure leaves the destination
+// untouched and cleans the temps.
+
+/** Sentinel between the size section and the sha256 section of the manifest. */
+const MANIFEST_SUMS_SENTINEL = "__CMCP_SUMS__";
+
+/** Reject unsafe tar entry NAMES: absolute, drive-letter, backslash, or a
+ *  `..` path component (exported for tests). */
+export function validateArchiveEntryNames(names: string[]): string | null {
+  for (const raw of names) {
+    const name = raw.trim();
+    if (!name) continue;
+    if (name.includes("\\")) return `unsafe archive entry (backslash in name): ${name}`;
+    if (name.startsWith("/") || /^[A-Za-z]:/.test(name)) return `unsafe archive entry (absolute path): ${name}`;
+    if (name.split("/").includes("..")) return `unsafe archive entry (path traversal): ${name}`;
+  }
+  return null;
+}
+
+/** Reject unsafe tar entry TYPES from a `tar -tvf` listing: a symlink at the
+ *  expected .safetensors name would be FOLLOWED by the handoff's copyFileSync
+ *  (codex #263); hardlinks and device/fifo/socket entries have no business in
+ *  a training output dir either (exported for tests). */
+export function findUnsafeArchiveType(tvListing: string): string | null {
+  for (const line of tvListing.split(/\r?\n/)) {
+    const t = line.charAt(0);
+    if (t === "l" || t === "h" || t === "c" || t === "b" || t === "p" || t === "s") {
+      return `unsafe archive entry (type '${t}'): ${line.trim()}`;
+    }
+  }
+  return null;
+}
+
+/** Parse the remote manifest: `<size>\t<path>` lines, the sentinel, then
+ *  optional `sha256sum` lines. Paths are normalized without the `./` prefix. */
+function parsePodManifest(stdout: string): { sizes: Map<string, number>; sums: Map<string, string> } {
+  const sizes = new Map<string, number>();
+  const sums = new Map<string, string>();
+  let inSums = false;
+  for (const line of stdout.split("\n")) {
+    const s = line.replace(/\r$/, "");
+    if (s === MANIFEST_SUMS_SENTINEL) { inSums = true; continue; }
+    if (!s) continue;
+    if (!inSums) {
+      const i = s.indexOf("\t");
+      if (i < 0) continue;
+      const n = Number(s.slice(0, i));
+      if (Number.isFinite(n)) sizes.set(s.slice(i + 1).replace(/^\.\//, ""), n);
+    } else {
+      const m = s.match(/^([0-9a-fA-F]{64})\s+\*?(.+)$/);
+      if (m) sums.set(m[2].replace(/^\.\//, ""), m[1].toLowerCase());
+    }
+  }
+  return { sizes, sums };
+}
+
+function sha256File(p: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const h = createHash("sha256");
+    const s = createReadStream(p);
+    s.on("error", reject);
+    s.on("data", (c) => h.update(c));
+    s.on("end", () => resolve(h.digest("hex")));
+  });
+}
+
+/** Spawn ssh and stream its stdout into a local file; the ssh EXIT CODE is
+ *  the transfer's truth (a mid-stream death is nonzero — the old streaming
+ *  pipe extracted whatever arrived and could look successful). */
+function downloadToFile(args: string[], outFile: string, timeoutMs: number): Promise<{ code: number; stderr: string }> {
+  return new Promise((resolve) => {
+    const child = childProcess.spawn("ssh", args, { windowsHide: true });
+    const ws = createWriteStream(outFile);
+    const errTail: string[] = [];
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (c: string) => {
+      errTail.push(c);
+      if (errTail.length > 40) errTail.shift();
+    });
+    let settled = false;
+    let childCode: number | null = null;
+    let streamClosed = false;
+    let streamErr: string | null = null;
+    const settle = () => {
+      if (settled || childCode === null || !streamClosed) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ code: streamErr ? childCode || 1 : childCode, stderr: (streamErr ? `${streamErr}\n` : "") + errTail.join("") });
+    };
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try { child.kill("SIGKILL"); } catch { /* already exited */ }
+      ws.destroy();
+      resolve({ code: 124, stderr: `download timed out after ${timeoutMs}ms\n${errTail.join("")}` });
+    }, timeoutMs);
+    child.on("error", (e) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      ws.destroy();
+      resolve({ code: 1, stderr: `ssh failed to start: ${e.message}` });
+    });
+    ws.on("error", (e) => {
+      streamErr = `write ${outFile}: ${e.message}`;
+      streamClosed = true;
+      try { child.kill("SIGKILL"); } catch { /* already exited */ }
+      settle();
+    });
+    ws.on("close", () => {
+      streamClosed = true;
+      settle();
+    });
+    child.stdout?.pipe(ws);
+    child.on("close", (code) => {
+      childCode = code ?? 1;
+      settle();
+    });
+  });
+}
+
+/** Download a pod dir's CONTENTS to a local dir — VERIFIED (see block comment
+ *  above). On success `localDir` holds exactly the verified content; on ANY
+ *  failure it is left untouched (pre-existing content survives) and the
+ *  return code is nonzero. */
 export async function rsyncFromPod(ep: PodSshEndpoint, remoteDir: string, localDir: string, timeoutMs = 600_000): Promise<{ code: number; stdout: string; stderr: string }> {
   const remote = remoteDir.replace(/'/g, "'\\''");
-  const dst = toForwardSlashes(localDir.replace(/[\\/]$/, ""));
-  const { mkdirSync } = await import("node:fs");
-  mkdirSync(dst, { recursive: true });
-  return pipe(
-    { cmd: "ssh", args: [...SSH_OPTS, "-p", String(ep.port), ep.userHost, `tar -C '${remote}' -czf - .`] },
-    { cmd: "tar", args: ["-xzf", "-", "-C", dst] },
-    timeoutMs,
+  const dst = localDir.replace(/[\\/]$/, "");
+  const stamp = `${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+  const archive = `${dst}.dl-${stamp}.tgz`;
+  const stage = `${dst}.x-${stamp}`;
+  const failCleanup = (code: number, stderr: string) => {
+    try { rmSync(archive, { force: true }); } catch { /* best effort */ }
+    try { rmSync(stage, { recursive: true, force: true }); } catch { /* best effort */ }
+    return { code: code || 1, stdout: "", stderr };
+  };
+  try {
+    mkdirSync(dirname(dst), { recursive: true });
+  } catch (err) {
+    return { code: 1, stdout: "", stderr: `could not create ${dirname(dst)}: ${err instanceof Error ? err.message : String(err)}` };
+  }
+  // 1) Remote manifest: sizes always; sha256 when the pod has sha256sum.
+  const man = await sshExec(
+    ep,
+    `cd '${remote}' && find . -type f -printf '%s\\t%p\\n' && printf '${MANIFEST_SUMS_SENTINEL}\\n' && { find . -type f -exec sha256sum -- {} + 2>/dev/null || true; }`,
+    Math.min(timeoutMs, 300_000),
   );
+  if (man.code !== 0) return failCleanup(man.code, `pod output manifest failed (exit ${man.code}): ${man.stderr}`);
+  const { sizes, sums } = parsePodManifest(man.stdout);
+  // 2) Archive → temp FILE; the ssh exit code is the transfer's truth.
+  const dl = await downloadToFile([...SSH_OPTS, "-p", String(ep.port), ep.userHost, `tar -C '${remote}' -czf - .`], archive, timeoutMs);
+  if (dl.code !== 0) return failCleanup(dl.code, `pod output download failed (exit ${dl.code}): ${dl.stderr}`);
+  // 3) Validate entries BEFORE extraction (types, then names).
+  const tv = await exec("tar", ["-tvf", archive], 300_000);
+  if (tv.code !== 0) return failCleanup(tv.code, `archive listing failed (truncated download?): ${tv.stderr}`);
+  const badType = findUnsafeArchiveType(tv.stdout);
+  if (badType) return failCleanup(1, badType);
+  const tl = await exec("tar", ["-tf", archive], 300_000);
+  if (tl.code !== 0) return failCleanup(tl.code, `archive listing failed: ${tl.stderr}`);
+  const badName = validateArchiveEntryNames(tl.stdout.split(/\r?\n/));
+  if (badName) return failCleanup(1, badName);
+  // 4) Extract into a temp STAGE dir next to the destination.
+  try {
+    mkdirSync(stage, { recursive: true });
+  } catch (err) {
+    return failCleanup(1, `could not create staging dir: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const ex = await exec("tar", ["--no-same-owner", "--no-same-permissions", "-xzf", archive, "-C", stage], timeoutMs);
+  if (ex.code !== 0) return failCleanup(ex.code, `archive extraction failed (exit ${ex.code}): ${ex.stderr}`);
+  // 5) Verify every manifest file (size, and sha256 when present).
+  for (const [rel, size] of sizes) {
+    const p = join(stage, rel);
+    let st;
+    try {
+      st = statSync(p);
+    } catch {
+      return failCleanup(1, `verification failed: ${rel} missing after extraction`);
+    }
+    if (st.size !== size) {
+      return failCleanup(1, `verification failed: ${rel} is ${st.size} bytes locally but ${size} on the pod (truncated transfer)`);
+    }
+    const want = sums.get(rel);
+    if (want) {
+      const got = await sha256File(p).catch(() => "");
+      if (got !== want) return failCleanup(1, `verification failed: sha256 mismatch on ${rel}`);
+    }
+  }
+  // 6) Promote: the pre-existing destination is replaced only NOW, by a
+  //    same-dir rename of fully verified content.
+  try {
+    rmSync(dst, { recursive: true, force: true });
+    renameSync(stage, dst);
+  } catch (err) {
+    return failCleanup(1, `could not promote verified output into place: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  try { rmSync(archive, { force: true }); } catch { /* best effort */ }
+  return { code: 0, stdout: "", stderr: "" };
+}
+
+/** Build the ssh invocation for a training run — exported for tests. The HF
+ *  token must NEVER appear in the argv or the remote command string: local
+ *  argv is visible to any process lister on the rig, and the remote command
+ *  lands in the pod's /proc cmdline (codex #263 security finding). When a
+ *  token is present it travels over the encrypted ssh channel's STDIN and the
+ *  remote shell reads it into the environment before exec'ing the trainer. */
+export function buildSshTrainingInvocation(opts: {
+  ep: PodSshEndpoint;
+  remoteConfigPath: string;
+  hfCacheDir?: string;
+  hfToken?: string;
+  aiToolkitDir?: string;
+}): { args: string[]; remote: string; stdinPayload: string | null } {
+  const toolkitDir = opts.aiToolkitDir ?? `${POD_TRAINING_ROOT}/ai-toolkit`;
+  const env: string[] = ["PYTHONUNBUFFERED=1", "PYTHONUTF8=1", "HF_HUB_ENABLE_HF_TRANSFER=1"];
+  if (opts.hfCacheDir) env.push(`HF_HOME=${opts.hfCacheDir}`);
+  let remote = `cd ${toolkitDir} && ${env.join(" ")} ./venv/bin/python run.py ${opts.remoteConfigPath}`;
+  let stdinPayload: string | null = null;
+  const token = opts.hfToken?.replace(/[\r\n]/g, "");
+  if (token) {
+    // First stdin line = the token. `read` strips the newline; export makes it
+    // visible to run.py without ever touching a command line on either side.
+    // `;` (not `&&`) after read: an empty line still starts the trainer — it
+    // just runs untokened, which fails loudly on gated models instead of
+    // silently blocking the launch.
+    remote = `IFS= read -r HF_TOKEN; export HF_TOKEN; ${remote}`;
+    stdinPayload = `${token}\n`;
+  }
+  return { args: [...SSH_OPTS, "-p", String(opts.ep.port), opts.ep.userHost, remote], remote, stdinPayload };
 }
 
 /**
@@ -249,18 +476,26 @@ export function startSshTraining(opts: {
 }): TrainingHandle | { error: string } {
   const ep = decodePodContainerName(opts.containerName);
   if (!ep) return { error: `not a pod container name: ${opts.containerName}` };
-  const toolkitDir = opts.aiToolkitDir ?? `${POD_TRAINING_ROOT}/ai-toolkit`;
-  const env: string[] = ["PYTHONUNBUFFERED=1", "PYTHONUTF8=1", "HF_HUB_ENABLE_HF_TRANSFER=1"];
-  if (opts.hfCacheDir) env.push(`HF_HOME=${opts.hfCacheDir}`);
-  // HF_TOKEN travels the ssh command line — acceptable on a single-user pod
-  // (its process list is the user's own). Never logged here.
-  if (opts.hfToken) env.push(`HF_TOKEN='${opts.hfToken.replace(/'/g, "'\\''")}'`);
-  const remote = `cd ${toolkitDir} && ${env.join(" ")} ./venv/bin/python run.py ${opts.remoteConfigPath}`;
+  const inv = buildSshTrainingInvocation({
+    ep,
+    remoteConfigPath: opts.remoteConfigPath,
+    hfCacheDir: opts.hfCacheDir,
+    hfToken: opts.hfToken,
+    aiToolkitDir: opts.aiToolkitDir,
+  });
 
-  const child = childProcess.spawn("ssh", [...SSH_OPTS, "-p", String(ep.port), ep.userHost, remote], {
+  const child = childProcess.spawn("ssh", inv.args, {
     windowsHide: true,
     env: { ...process.env },
   });
+  // Deliver the token (if any) over stdin — never argv (see the builder). A
+  // stdin error (remote died before the write) is failure noise; the exit
+  // code surfaces it.
+  child.stdin?.on("error", (e) => {
+    logger.debug(`[runpod-ssh] ssh stdin: ${e.message}`);
+  });
+  if (inv.stdinPayload) child.stdin?.write(inv.stdinPayload);
+  child.stdin?.end();
   const tailLines: string[] = [];
   const onLine = (line: string) => {
     tailLines.push(line);
