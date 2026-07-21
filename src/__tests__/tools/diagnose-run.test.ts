@@ -194,3 +194,61 @@ describe("diagnose_run — failure explanation", () => {
     expect(validateWorkflowMock).not.toHaveBeenCalled();
   });
 });
+
+describe("diagnose_run — interrupted runs (mobile#23)", () => {
+  // ComfyUI records an interrupted run with status_str "error" plus an
+  // execution_interrupted message and NO execution_error. Echoing the raw
+  // "error" made cancelled runs read as failures downstream (mobile's
+  // classifier keys on the exact word "error" → "Render failed").
+  const interruptedEntry = (queueNumber: number, id: string) => ({
+    prompt: [queueNumber, id, { "1": { class_type: "KSampler", inputs: {} } }, {}, []],
+    outputs: {},
+    status: {
+      status_str: "error",
+      completed: false,
+      messages: [
+        ["execution_start", { prompt_id: id, timestamp: 1 }],
+        ["execution_interrupted", { prompt_id: id, node_id: "5", node_type: "KSampler" }],
+      ],
+    },
+  });
+
+  it("reports Status: interrupted (not error) with an Interrupted section, no Runtime-failure section", async () => {
+    getHistoryMock.mockResolvedValue({ p: interruptedEntry(1, "p") });
+    const text = (await getHandler("diagnose_run")({ prompt_id: "p" })).content[0].text;
+    expect(text).toContain("**Status**: interrupted");
+    expect(text).not.toContain("**Status**: error");
+    expect(text).toContain("### Interrupted");
+    expect(text).toContain("interrupted/cancelled at node 5 (KSampler)");
+    expect(text).not.toContain("### Runtime failure");
+    expect(text).not.toContain("_No runtime error recorded");
+  });
+
+  it("a genuine execution_error wins over an interrupted marker in the same entry", async () => {
+    const e = interruptedEntry(1, "p") as { status: { messages: unknown[] } };
+    e.status.messages.push([
+      "execution_error",
+      { node_id: 7, node_type: "VAEDecode", exception_type: "RuntimeError", exception_message: "boom" },
+    ]);
+    getHistoryMock.mockResolvedValue({ p: e });
+    const text = (await getHandler("diagnose_run")({ prompt_id: "p" })).content[0].text;
+    expect(text).toContain("**Status**: error");
+    expect(text).toContain("### Runtime failure");
+    expect(text).not.toContain("### Interrupted");
+  });
+
+  it("formatRunOutcome maps an interrupted entry without node info too", async () => {
+    const { formatRunOutcome } = await import("../../tools/diagnostics.js");
+    const lines = formatRunOutcome({
+      prompt: {},
+      outputs: {},
+      status: {
+        status_str: "error",
+        completed: false,
+        messages: [["execution_interrupted", {}]],
+      },
+    } as never);
+    expect(lines[0]).toBe("**Status**: interrupted");
+    expect(lines.join("\n")).toContain("### Interrupted");
+  });
+});

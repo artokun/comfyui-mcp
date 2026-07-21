@@ -11,6 +11,7 @@
 //     runs that started AND finished entirely between polls (#259).
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { QueueMonitor, type CompletionEvent } from "./queue-monitor.js";
+import { logger } from "../utils/logger.js";
 
 // Reach into the singleton the same way queue-status-broadcast.test.ts does —
 // no real WS is opened (start() is never called here).
@@ -19,6 +20,8 @@ type Priv = {
   stopped: boolean;
   busy: boolean;
   pollInFlight: boolean;
+  pollGeneration: number;
+  monitorStartTs: number;
   historyPrimed: boolean;
   historySeen: Set<string>;
   completedReported: Set<string>;
@@ -64,6 +67,7 @@ beforeEach(() => {
   priv.stopped = false;
   priv.busy = false;
   priv.pollInFlight = false;
+  priv.monitorStartTs = Date.now();
   priv.historyPrimed = false;
   priv.historySeen = new Set();
   priv.completedReported = new Set();
@@ -186,5 +190,140 @@ describe("poll() /history tail diff (#259)", () => {
     mockFetch({ queue: emptyQueue, history: { "p-own": historyEntry("success") } });
     await QueueMonitor.poll();
     expect(QueueMonitor.drainCompletions()).toEqual([]);
+  });
+});
+
+describe("poll() hardening (codex review of PR #261)", () => {
+  it("issues the /queue and /history fetches in PARALLEL (worst case one timeout, not two)", async () => {
+    const resolvers: Array<() => void> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (input: unknown) =>
+          new Promise((res) => {
+            const body = String(input).includes("/history") ? {} : emptyQueue;
+            resolvers.push(() => res({ ok: true, json: async () => body }));
+          }),
+      ),
+    );
+    const done = QueueMonitor.poll();
+    await Promise.resolve(); // let poll() issue its requests
+    // BOTH requests must be in flight before either has resolved — a serial
+    // implementation would only have issued /queue at this point.
+    expect(resolvers).toHaveLength(2);
+    for (const r of resolvers) r();
+    await done;
+  });
+
+  it("fetches a 32-entry tail and warns (does not silently claim coverage) when a diff saturates it", async () => {
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+    try {
+      mockFetch({ queue: emptyQueue, history: {} });
+      await QueueMonitor.poll(); // prime
+      const urls = (fetch as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0]));
+      expect(urls.some((u) => u.includes("max_items=32"))).toBe(true);
+
+      // 32 brand-new entries — the whole window is unseen: possible gap.
+      const burst = Object.fromEntries(
+        Array.from({ length: 32 }, (_, i) => [
+          `h-${i}`,
+          { ...historyEntry("success"), prompt: [i + 1, `h-${i}`, {}, {}, []] },
+        ]),
+      );
+      mockFetch({ queue: emptyQueue, history: burst });
+      await QueueMonitor.poll();
+      expect(QueueMonitor.drainCompletions()).toHaveLength(32);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("saturated"));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("priming does NOT swallow a run that finished during startup (timestamp cutoff)", async () => {
+    priv.monitorStartTs = 1000;
+    mockFetch({
+      queue: emptyQueue,
+      history: {
+        "h-old": {
+          ...historyEntry("success", [["execution_success", { prompt_id: "h-old", timestamp: 500 }]]),
+          prompt: [1, "h-old", {}, {}, []],
+        },
+        "h-during": {
+          ...historyEntry("error", [["execution_error", { prompt_id: "h-during", timestamp: 2000 }]]),
+          prompt: [2, "h-during", {}, {}, []],
+        },
+      },
+    });
+    await QueueMonitor.poll(); // FIRST look — primes, but must keep h-during
+    const events = QueueMonitor.drainCompletions();
+    expect(events.map((e) => e.promptId)).toEqual(["h-during"]);
+    expect(events[0].status).toBe("error");
+    // …and h-during is not double-reported on the next diff.
+    await QueueMonitor.poll();
+    expect(QueueMonitor.drainCompletions()).toEqual([]);
+  });
+
+  it("abandons an in-flight poll's responses when the generation changes (retarget race)", async () => {
+    const resolvers: Array<() => void> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (input: unknown) =>
+          new Promise((res) => {
+            const body = String(input).includes("/history")
+              ? { "h-stale": historyEntry("success") }
+              : { queue_running: [[9, "p-stale", {}, {}, []]], queue_pending: [] };
+            resolvers.push(() => res({ ok: true, json: async () => body }));
+          }),
+      ),
+    );
+    priv.historyPrimed = true; // pretend a diff baseline exists so h-stale WOULD report
+    const done = QueueMonitor.poll();
+    await Promise.resolve();
+    priv.pollGeneration++; // what stop()/start(newUrl) does mid-flight
+    for (const r of resolvers) r();
+    await done;
+    // The old target's responses must not have touched anything.
+    const snap = QueueMonitor.snapshot();
+    expect(snap.running).toBe(false);
+    expect(snap.runningPromptId).toBeNull();
+    expect(QueueMonitor.drainCompletions()).toEqual([]);
+  });
+
+  it("start() resets completion state so nothing leaks across a retarget", () => {
+    priv.state.lastCompleted = { promptId: "p-old", status: "success", at: 1 };
+    priv.pendingCompletions.push({ promptId: "p-old", status: "success", at: 1 });
+    priv.completedReported.add("p-old");
+    priv.historyPrimed = true;
+    const gen = priv.pollGeneration;
+    QueueMonitor.start("http://127.0.0.1:9997"); // different URL → full retarget path
+    try {
+      expect(priv.pollGeneration).toBeGreaterThan(gen);
+      expect(QueueMonitor.snapshot().lastCompleted).toBeNull();
+      expect(priv.pendingCompletions).toHaveLength(0);
+      expect(priv.completedReported.size).toBe(0);
+      expect(priv.historyPrimed).toBe(false);
+    } finally {
+      QueueMonitor.stop();
+    }
+  });
+
+  it("replays a burst in ComfyUI queue-number order (prompt[0]), not /history object order", async () => {
+    mockFetch({ queue: emptyQueue, history: {} });
+    await QueueMonitor.poll(); // prime
+    // Object order deliberately scrambled vs. the queue counter.
+    mockFetch({
+      queue: emptyQueue,
+      history: {
+        "h-b": { ...historyEntry("success"), prompt: [7, "h-b", {}, {}, []] },
+        "h-a": { ...historyEntry("error"), prompt: [5, "h-a", {}, {}, []] },
+        "h-c": { ...historyEntry("success"), prompt: [6, "h-c", {}, {}, []] },
+      },
+    });
+    await QueueMonitor.poll();
+    const events = QueueMonitor.drainCompletions();
+    expect(events.map((e) => e.promptId)).toEqual(["h-a", "h-c", "h-b"]);
+    // lastCompleted is the genuinely newest run, not the last object key.
+    expect(QueueMonitor.snapshot().lastCompleted?.promptId).toBe("h-b");
   });
 });

@@ -92,6 +92,11 @@ export interface QueueSnapshot {
 }
 
 const RECONNECT_MS = 5000;
+// /history tail entries fetched per poll. Wide enough that a realistic burst
+// of sub-second runs between 1 Hz polls stays inside the window; when a diff
+// still saturates it (every entry new), we log the potential gap instead of
+// silently claiming coverage.
+const HISTORY_TAIL_ITEMS = 32;
 
 class QueueMonitorImpl {
   private ws: WebSocket | null = null;
@@ -117,9 +122,16 @@ class QueueMonitorImpl {
   };
   // ---- HTTP-poll bookkeeping (the broadcast-safe channel on modern ComfyUI) ----
   private pollInFlight = false;
-  // /history tail diff: the ids seen on the previous poll. Primed (no events
-  // emitted) on the first successful fetch after start(), so pre-existing
-  // history never replays as fresh completions.
+  // Bumped on every start()/stop(). A poll captures it before fetching and
+  // abandons its (now stale) responses if a retarget happened while awaiting —
+  // otherwise an in-flight /queue answer from the OLD ComfyUI could mutate
+  // state for the NEW one.
+  private pollGeneration = 0;
+  // When THIS monitor came up (ms epoch) — the priming cutoff for the history
+  // diff: tail entries that completed before this predate us and are swallowed;
+  // ones that completed after (a run finishing during startup) are reported.
+  private monitorStartTs = Date.now();
+  // /history tail diff: the ids seen on the previous poll.
   private historyPrimed = false;
   private historySeen = new Set<string>();
   // Prompt ids already reported as completed — dedupes the WS event vs. the
@@ -139,9 +151,16 @@ class QueueMonitorImpl {
     this.url = comfyuiUrl;
     this.stopped = false;
     // A (re)start may target a DIFFERENT ComfyUI whose history tail is all new
-    // to us — re-prime the diff so its backlog doesn't replay as completions.
+    // to us — invalidate any in-flight poll (generation bump), re-prime the
+    // diff, and drop completion state that belonged to the old target so its
+    // backlog can neither replay nor leak across the retarget.
+    this.pollGeneration++;
+    this.monitorStartTs = Date.now();
     this.historyPrimed = false;
     this.historySeen.clear();
+    this.completedReported.clear();
+    this.pendingCompletions.length = 0;
+    this.state.lastCompleted = null;
     this.connect();
   }
 
@@ -184,6 +203,7 @@ class QueueMonitorImpl {
 
   stop(): void {
     this.stopped = true;
+    this.pollGeneration++; // strand any in-flight poll's pending responses
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
     try {
@@ -401,7 +421,9 @@ class QueueMonitorImpl {
     const ev: CompletionEvent = { promptId, status, at: Date.now() };
     this.state.lastCompleted = ev;
     this.pendingCompletions.push(ev);
-    while (this.pendingCompletions.length > 20) this.pendingCompletions.shift();
+    // Bound must exceed the history tail (HISTORY_TAIL_ITEMS) so one saturated
+    // diff still reaches the broadcaster whole; beyond that, drop the oldest.
+    while (this.pendingCompletions.length > 2 * HISTORY_TAIL_ITEMS) this.pendingCompletions.shift();
     if (this.state.runningPromptId === promptId) {
       this.clearRunning();
       this.emitEndIfIdle();
@@ -438,13 +460,25 @@ class QueueMonitorImpl {
    *  the running prompt_id + true depth (#258) and diffs GET /history's tail
    *  for runs that finished since the last poll — including runs that started
    *  AND finished entirely between polls (#259). Best-effort, never rejects,
-   *  self-guards against overlap. */
+   *  self-guards against overlap. Both fetches run in PARALLEL so the
+   *  worst-case poll is one timeout, not two — overlapping ticks bail at
+   *  pollInFlight, so a serial 5s worst case would stall attribution. */
   async poll(): Promise<void> {
     if (this.stopped || !this.url || this.pollInFlight) return;
     this.pollInFlight = true;
+    const gen = this.pollGeneration;
+    const fetchStart = Date.now();
     try {
-      await this.pollQueue();
-      await this.pollHistory();
+      const [q, h] = await Promise.all([
+        this.fetchJson("/queue"),
+        this.fetchJson(`/history?max_items=${HISTORY_TAIL_ITEMS}`),
+      ]);
+      // A stop()/start() (retarget) happened while we were awaiting — these
+      // responses belong to the OLD target; writing them would corrupt the
+      // fresh state (and re-seed the old server's completions).
+      if (gen !== this.pollGeneration || this.stopped) return;
+      this.applyQueue(q, fetchStart);
+      this.applyHistory(h);
     } catch (err) {
       logger.debug(`[queue-monitor] poll failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -452,11 +486,8 @@ class QueueMonitorImpl {
     }
   }
 
-  private async pollQueue(): Promise<void> {
-    const fetchStart = Date.now();
-    const q = (await this.fetchJson("/queue")) as
-      | { queue_running?: unknown; queue_pending?: unknown }
-      | null;
+  private applyQueue(raw: unknown, fetchStart: number): void {
+    const q = raw as { queue_running?: unknown; queue_pending?: unknown } | null;
     if (!q || typeof q !== "object") return;
     const running = Array.isArray(q.queue_running) ? q.queue_running : [];
     const pending = Array.isArray(q.queue_pending) ? q.queue_pending : [];
@@ -478,35 +509,76 @@ class QueueMonitorImpl {
     }
   }
 
-  private async pollHistory(): Promise<void> {
-    // 8 entries of tail: at 1 Hz even a burst of sub-second runs can't scroll
-    // more than that past us between polls.
-    const h = (await this.fetchJson("/history?max_items=8")) as Record<string, unknown> | null;
+  /** Read one /history entry into diff-able facts. `queueNum` is ComfyUI's
+   *  monotonic queue counter (prompt[0]) — /history object order is NOT
+   *  chronological (see history-select.ts), so this is the only real order
+   *  key. `completedTs` is the newest server-side message timestamp (the end
+   *  event is always last), null when the entry carries none. */
+  private parseHistoryEntry(
+    id: string,
+    raw: unknown,
+  ): { id: string; queueNum: number; status: CompletionStatus; completedTs: number | null } {
+    const entry = raw as {
+      prompt?: unknown;
+      status?: { status_str?: unknown; completed?: unknown; messages?: unknown };
+    } | null;
+    const st = entry && typeof entry === "object" ? entry.status : undefined;
+    const messages = Array.isArray(st?.messages) ? (st.messages as unknown[]) : [];
+    let status: CompletionStatus;
+    if (st?.completed === true || st?.status_str === "success" || st === undefined) {
+      status = "success";
+    } else if (messages.some((m) => Array.isArray(m) && m[0] === "execution_interrupted")) {
+      status = "interrupted";
+    } else {
+      status = "error";
+    }
+    let completedTs: number | null = null;
+    for (const m of messages) {
+      if (!Array.isArray(m)) continue;
+      const ts = (m[1] as { timestamp?: unknown } | undefined)?.timestamp;
+      if (typeof ts === "number" && (completedTs === null || ts > completedTs)) completedTs = ts;
+    }
+    const prompt = entry && typeof entry === "object" ? entry.prompt : undefined;
+    const queueNum =
+      Array.isArray(prompt) && typeof prompt[0] === "number" ? prompt[0] : Number.MAX_SAFE_INTEGER;
+    return { id, queueNum, status, completedTs };
+  }
+
+  private applyHistory(raw: unknown): void {
+    const h = raw as Record<string, unknown> | null;
     if (!h || typeof h !== "object" || Array.isArray(h)) return;
     const ids = Object.keys(h);
     if (!this.historyPrimed) {
-      // First look after (re)start: whatever is already there predates us.
+      // First look after (re)start. Entries whose completion predates the
+      // monitor are swallowed — but a run that finished DURING startup
+      // (server-side timestamp after monitorStartTs) is a real completion the
+      // subscribers must still see, not priming noise. (Timestamps are the
+      // server's clock; against a remote host with heavy skew this degrades to
+      // at worst a replayed or swallowed tail entry at startup — best-effort.)
       this.historyPrimed = true;
       this.historySeen = new Set(ids);
+      const fresh = ids
+        .map((id) => this.parseHistoryEntry(id, h[id]))
+        .filter((e) => e.completedTs !== null && e.completedTs > this.monitorStartTs)
+        .sort((a, b) => a.queueNum - b.queueNum);
+      for (const e of fresh) this.recordCompletion(e.id, e.status);
       return;
     }
-    for (const id of ids) {
-      if (this.historySeen.has(id)) continue;
-      const entry = h[id] as { status?: { status_str?: unknown; completed?: unknown; messages?: unknown } } | null;
-      const st = entry && typeof entry === "object" ? entry.status : undefined;
-      let status: CompletionStatus;
-      if (st?.completed === true || st?.status_str === "success" || st === undefined) {
-        status = "success";
-      } else if (
-        Array.isArray(st.messages) &&
-        st.messages.some((m) => Array.isArray(m) && m[0] === "execution_interrupted")
-      ) {
-        status = "interrupted";
-      } else {
-        status = "error";
-      }
-      this.recordCompletion(id, status);
+    const unseen = ids
+      .filter((id) => !this.historySeen.has(id))
+      .map((id) => this.parseHistoryEntry(id, h[id]))
+      // Oldest-first by ComfyUI's monotonic queue number, so the burst replays
+      // in true order and lastCompleted lands on the genuinely newest run.
+      .sort((a, b) => a.queueNum - b.queueNum);
+    // Saturated window: EVERY entry of a full tail is new since the last
+    // successful diff — completions may have scrolled past unobserved. Say so
+    // instead of silently claiming full coverage.
+    if (unseen.length >= HISTORY_TAIL_ITEMS && unseen.length === ids.length) {
+      logger.warn(
+        `[queue-monitor] history tail saturated (${unseen.length} new entries in one diff) — some run completions may have been missed between polls`,
+      );
     }
+    for (const e of unseen) this.recordCompletion(e.id, e.status);
     this.historySeen = new Set(ids);
   }
 

@@ -23,6 +23,68 @@ function findExecutionError(entry: HistoryEntry): ExecutionErrorInfo | null {
   return msg ? (msg[1] as ExecutionErrorInfo) : null;
 }
 
+/** The `execution_interrupted` payload (user/agent cancel mid-run). */
+interface ExecutionInterruptedInfo {
+  node_id?: string | number;
+  node_type?: string;
+}
+
+function findExecutionInterrupted(entry: HistoryEntry): ExecutionInterruptedInfo | null {
+  const msg = (entry.status?.messages ?? []).find((m) => m[0] === "execution_interrupted");
+  return msg ? ((msg[1] ?? {}) as ExecutionInterruptedInfo) : null;
+}
+
+/**
+ * The Status line + outcome section of a diagnosis. Exported for tests.
+ *
+ * ComfyUI records an INTERRUPTED run with status_str "error" (plus an
+ * execution_interrupted message and NO execution_error) — echoing that raw
+ * "error" made cancelled runs read as failures ("Render failed" on mobile,
+ * see comfyui-mcp-mobile#23). Report it as interrupted instead; a genuine
+ * execution_error always wins over the interrupted marker.
+ */
+export function formatRunOutcome(entry: HistoryEntry): string[] {
+  const lines: string[] = [];
+  const execError = findExecutionError(entry);
+  const interrupted = execError ? null : findExecutionInterrupted(entry);
+  lines.push(`**Status**: ${interrupted ? "interrupted" : (entry.status?.status_str ?? "unknown")}`);
+
+  if (execError) {
+    lines.push("");
+    lines.push("### Runtime failure");
+    lines.push(`**Failed node**: ${execError.node_id ?? "?"} (${execError.node_type ?? "unknown type"})`);
+    if (execError.exception_type) lines.push(`**Type**: ${execError.exception_type}`);
+    if (execError.exception_message) {
+      lines.push(`**Message**: ${execError.exception_message}`);
+    }
+    if (Array.isArray(execError.traceback) && execError.traceback.length > 0) {
+      // Tail only — the last frames carry the cause, and a full traceback can
+      // be hundreds of lines (this reply goes straight into an agent's context).
+      const tail = execError.traceback.slice(-12);
+      lines.push("");
+      lines.push("```");
+      lines.push(tail.join("").trimEnd());
+      lines.push("```");
+    }
+  } else if (interrupted) {
+    lines.push("");
+    lines.push("### Interrupted");
+    const where =
+      interrupted.node_id !== undefined
+        ? ` at node ${interrupted.node_id}${interrupted.node_type ? ` (${interrupted.node_type})` : ""}`
+        : "";
+    lines.push(
+      `**This run was interrupted/cancelled${where}** — it did not crash. Nothing is broken; re-queue it if the cancellation wasn't intended.`,
+    );
+  } else {
+    lines.push("");
+    lines.push(
+      "_No runtime error recorded for this run_ — if the user still sees a problem, it was likely rejected BEFORE execution (see validation below) or the run simply produced an unwanted result.",
+    );
+  }
+  return lines;
+}
+
 /**
  * Pick the run to diagnose. An explicit id wins; otherwise prefer the most recent
  * FAILED run over a newer successful one — "why did it fail?" should land on the
@@ -256,35 +318,8 @@ export function registerDiagnosticsTools(server: McpServer): void {
         const [promptId, entry] = selected;
         const lines: string[] = [];
         lines.push(`## Diagnosis: ${promptId}`);
-        lines.push(`**Status**: ${entry.status?.status_str ?? "unknown"}`);
-
-        // 1. Runtime failure (what actually blew up mid-execution).
-        const execError = findExecutionError(entry);
-        if (execError) {
-          lines.push("");
-          lines.push("### Runtime failure");
-          lines.push(
-            `**Failed node**: ${execError.node_id ?? "?"} (${execError.node_type ?? "unknown type"})`,
-          );
-          if (execError.exception_type) lines.push(`**Type**: ${execError.exception_type}`);
-          if (execError.exception_message) {
-            lines.push(`**Message**: ${execError.exception_message}`);
-          }
-          if (Array.isArray(execError.traceback) && execError.traceback.length > 0) {
-            // Tail only — the last frames carry the cause, and a full traceback can
-            // be hundreds of lines (this reply goes straight into an agent's context).
-            const tail = execError.traceback.slice(-12);
-            lines.push("");
-            lines.push("```");
-            lines.push(tail.join("").trimEnd());
-            lines.push("```");
-          }
-        } else {
-          lines.push("");
-          lines.push(
-            "_No runtime error recorded for this run_ — if the user still sees a problem, it was likely rejected BEFORE execution (see validation below) or the run simply produced an unwanted result.",
-          );
-        }
+        // 1. Status + outcome: runtime failure, interruption, or clean.
+        lines.push(...formatRunOutcome(entry));
 
         // 2. Re-validate the exact graph that ran, so we can name what's missing.
         //    Reuses the same validator behind validate_workflow — the graph is the
