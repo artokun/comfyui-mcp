@@ -65,6 +65,7 @@ import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:chil
 import { createRequire } from "node:module";
 import readline from "node:readline";
 import { logger } from "../utils/logger.js";
+import { buildAgentSpawnEnv } from "../services/panel-secrets.js";
 import {
   type AgentBackend,
   type AgentEvent,
@@ -612,7 +613,19 @@ export class GeminiBackend implements AgentBackend {
     if (this.client) return;
     const { cmd, args, useShell } = this.resolveSpawn();
     const cwd = this.deps.cwd ?? process.cwd();
-    const client = new AcpClient(cmd, args, cwd, process.env, useShell);
+    // SECURITY: spawn with the agent env — process.env MINUS tool-only secrets
+    // (RunPod/HF/CivitAI… tokens; they belong only to the comfyui tool child).
+    // The GEMINI/GOOGLE keys are kept: they are this provider's OWN credential —
+    // the CLI authenticates with GEMINI_API_KEY from its spawn env (see run()).
+    const client = new AcpClient(
+      cmd,
+      args,
+      cwd,
+      buildAgentSpawnEnv(process.env, {
+        keep: ["GEMINI_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY", "GOOGLE_API_KEY"],
+      }),
+      useShell,
+    );
     // Publish the in-flight client BEFORE the startup awaits so a concurrent
     // close() can find and kill it (P0-A).
     this.preparingClient = client;

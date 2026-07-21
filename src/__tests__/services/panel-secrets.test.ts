@@ -208,4 +208,55 @@ describe("panel-secrets (canonical .env store)", () => {
       expect(readFileSync(envPath, "utf-8")).toMatch(/^COMFYUI_MCP_CUSTOM_API_KEY=sk-custom-1$/m);
     });
   });
+
+  describe("buildAgentSpawnEnv (tool secrets NEVER reach agent-provider subprocesses)", () => {
+    it("strips tool-only secrets from the agent spawn env while the tool server still gets them", async () => {
+      const { buildAgentSpawnEnv } = await import("../../services/panel-secrets.js");
+      // A user saves tool secrets via the panel → they land in process.env.
+      setComfyuiSecret("RUNPOD_API_KEY", "rp-secret");
+      setComfyuiSecret("CIVITAI_API_TOKEN", "civ-secret");
+      setComfyuiSecret("HF_TOKEN", "hf-secret");
+
+      // TOOL SERVER (comfyui MCP child): gets the secrets — that's its job.
+      const toolEnv = buildComfyuiMcpEnv({ COMFYUI_URL: "http://127.0.0.1:8188" });
+      expect(toolEnv.RUNPOD_API_KEY).toBe("rp-secret");
+      expect(toolEnv.CIVITAI_API_TOKEN).toBe("civ-secret");
+      expect(toolEnv.HF_TOKEN).toBe("hf-secret");
+
+      // AGENT SPAWN ENV (codex app-server / gemini / grok CLI): NO tool secrets.
+      const agentEnv = buildAgentSpawnEnv();
+      expect(agentEnv.RUNPOD_API_KEY).toBeUndefined();
+      expect(agentEnv.CIVITAI_API_TOKEN).toBeUndefined();
+      expect(agentEnv.HF_TOKEN).toBeUndefined();
+      expect(agentEnv.HUGGINGFACE_TOKEN).toBeUndefined();
+      expect(agentEnv.RUNCOMFY_API_KEY).toBeUndefined();
+      expect(agentEnv.REGISTRY_ACCESS_TOKEN).toBeUndefined();
+      // Non-secret env passes through untouched (the child still needs PATH etc.).
+      expect(agentEnv.PATH ?? agentEnv.Path).toBeDefined();
+    });
+
+    it("keeps agent-provider keys and honors the per-provider keep list (gemini's own key)", async () => {
+      const { buildAgentSpawnEnv, setAgentSecret } = await import("../../services/panel-secrets.js");
+      setAgentSecret("OPENROUTER_API_KEY", "or-key"); // agent secret — allowed through
+      setComfyuiSecret("GEMINI_API_KEY", "gm-key"); // tool secret, but ALSO gemini's own credential
+      setComfyuiSecret("RUNPOD_API_KEY", "rp-secret");
+
+      const codexEnv = buildAgentSpawnEnv();
+      expect(codexEnv.OPENROUTER_API_KEY).toBe("or-key");
+      expect(codexEnv.GEMINI_API_KEY).toBeUndefined(); // codex must not see it
+
+      const geminiEnv = buildAgentSpawnEnv(process.env, {
+        keep: ["GEMINI_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY", "GOOGLE_API_KEY"],
+      });
+      expect(geminiEnv.GEMINI_API_KEY).toBe("gm-key"); // its own vendor's key survives
+      expect(geminiEnv.RUNPOD_API_KEY).toBeUndefined(); // foreign tool secret still stripped
+    });
+
+    it("does not mutate process.env", async () => {
+      const { buildAgentSpawnEnv } = await import("../../services/panel-secrets.js");
+      setComfyuiSecret("RUNPOD_API_KEY", "rp-secret");
+      buildAgentSpawnEnv();
+      expect(process.env.RUNPOD_API_KEY).toBe("rp-secret");
+    });
+  });
 });

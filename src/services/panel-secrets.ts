@@ -443,6 +443,38 @@ export function buildComfyuiMcpEnv(base: Record<string, string>): Record<string,
   return { ...base, ...loadComfyuiSecretEnv() };
 }
 
+// ── Agent-provider spawn env (tool-secret scoping) ───────────────────────────
+// Tool secrets (RunPod/HF/CivitAI/RunComfy/Registry tokens…) live in process.env
+// because config.ts loads ~/.comfyui-mcp/.env at boot and setEnvSecret applies
+// live. That is CORRECT for the comfyui tool child (buildComfyuiMcpEnv), but the
+// agent-provider subprocesses (Codex app-server, Gemini/Grok CLI…) must NEVER
+// inherit them — a tool credential has no business in an LLM vendor's process.
+// buildAgentSpawnEnv is the single spawn-env builder those backends use: a copy
+// of process.env with every TOOL-ONLY secret key stripped.
+
+/** Secret env keys that are TOOL-only (comfyui allowlist minus agent allowlist)
+ *  — these must never reach an agent-provider subprocess's env. */
+export const TOOL_ONLY_SECRET_ENV_KEYS: readonly string[] =
+  COMFYUI_SECRET_ENV_ALLOWLIST.filter((k) => !AGENT_ALLOWLIST_SET.has(k));
+
+/**
+ * Build the env an AGENT-PROVIDER subprocess (Codex/Gemini/Grok CLI…) spawns
+ * with: `base` (default process.env) with all tool-only secret keys removed.
+ * `keep` re-admits specific keys when they double as the provider's OWN
+ * credential (e.g. GEMINI_API_KEY for the Gemini CLI — same vendor, not a leak).
+ */
+export function buildAgentSpawnEnv(
+  base: NodeJS.ProcessEnv = process.env,
+  opts: { keep?: readonly string[] } = {},
+): NodeJS.ProcessEnv {
+  const keep = new Set(opts.keep ?? []);
+  const out: NodeJS.ProcessEnv = { ...base };
+  for (const k of TOOL_ONLY_SECRET_ENV_KEYS) {
+    if (!keep.has(k)) delete out[k];
+  }
+  return out;
+}
+
 export interface CredentialSlot {
   id: string;
   label: string;

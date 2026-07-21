@@ -63,6 +63,7 @@ import readline from "node:readline";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { logger } from "../utils/logger.js";
+import { buildAgentSpawnEnv } from "../services/panel-secrets.js";
 import {
   type AgentBackend,
   type AgentCapabilities,
@@ -675,7 +676,9 @@ export class GrokBackend implements AgentBackend {
     if (this.client) return;
     const { cmd, args, useShell } = this.resolveSpawn();
     const cwd = this.deps.cwd ?? process.cwd();
-    const client = new AcpClient(cmd, args, cwd, process.env, useShell);
+    // SECURITY: spawn with the agent env — process.env MINUS tool-only secrets
+    // (RunPod/HF/CivitAI… tokens; they belong only to the comfyui tool child).
+    const client = new AcpClient(cmd, args, cwd, buildAgentSpawnEnv(), useShell);
     // Publish the in-flight client BEFORE the startup awaits so a concurrent
     // close() can find and kill it (P0-A).
     this.preparingClient = client;

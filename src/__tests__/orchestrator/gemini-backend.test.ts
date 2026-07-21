@@ -24,6 +24,8 @@ const hoisted = vi.hoisted(() => ({
   procs: [] as Array<Record<string, unknown>>,
   // The argv passed to spawn() for each spawned proc (to assert --model pinning).
   spawnArgs: [] as string[][],
+  // The env passed to spawn() for each spawned proc (to assert tool-secret scoping).
+  spawnEnvs: [] as Array<Record<string, string | undefined> | undefined>,
   // Every JSON-RPC message the client SENT to the server (requests + notifications).
   received: [] as Array<Record<string, unknown>>,
   // Per-test server behavior: "complete" auto-finishes the prompt with end_turn;
@@ -187,8 +189,9 @@ vi.mock("node:child_process", async (importOriginal) => {
 
   return {
     ...actual,
-    spawn: (_cmd: string, args: string[]) => {
+    spawn: (_cmd: string, args: string[], opts?: { env?: Record<string, string | undefined> }) => {
       hoisted.spawnArgs.push(Array.isArray(args) ? args : []);
+      hoisted.spawnEnvs.push(opts?.env);
       return makeFakeProc();
     },
     // killProcessTree calls spawnSync("taskkill", …) on win32 — make it a no-op.
@@ -201,6 +204,7 @@ let GeminiBackend: typeof import("../../orchestrator/gemini-backend.js").GeminiB
 beforeEach(async () => {
   hoisted.procs.length = 0;
   hoisted.spawnArgs.length = 0;
+  hoisted.spawnEnvs.length = 0;
   hoisted.received.length = 0;
   hoisted.config.mode = "complete";
   hoisted.config.authMethods = [];
@@ -265,6 +269,32 @@ function consume(gen: AsyncIterable<AgentEvent>, events: AgentEvent[]): Promise<
 }
 
 describe("GeminiBackend (ACP over stdio)", () => {
+  it("spawns the CLI WITHOUT tool-only secrets in its env, but WITH its own GEMINI_API_KEY", async () => {
+    // SECURITY (PR #251): tool secrets (RunPod/CivitAI/HF…) live in process.env
+    // for the comfyui tool child — they must NOT leak into the Gemini CLI's
+    // spawn env. GEMINI_API_KEY is the provider's OWN credential and must stay.
+    const saved = { RUNPOD_API_KEY: process.env.RUNPOD_API_KEY, CIVITAI_API_TOKEN: process.env.CIVITAI_API_TOKEN };
+    process.env.RUNPOD_API_KEY = "rp-tool-secret";
+    process.env.CIVITAI_API_TOKEN = "civ-tool-secret";
+    process.env.GEMINI_API_KEY = "AIza-own-key";
+    try {
+      const backend = new GeminiBackend({ cwd: process.cwd() });
+      await backend.prepare();
+      await backend.close();
+      expect(hoisted.spawnEnvs).toHaveLength(1);
+      const env = hoisted.spawnEnvs[0]!;
+      expect(env.RUNPOD_API_KEY).toBeUndefined();
+      expect(env.CIVITAI_API_TOKEN).toBeUndefined();
+      expect(env.GEMINI_API_KEY).toBe("AIza-own-key");
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+      delete process.env.GEMINI_API_KEY;
+    }
+  });
+
   it("handshake → prompt → streamed updates → result maps to the canonical AgentEvent sequence", async () => {
     const backend = new GeminiBackend({ cwd: process.cwd(), systemAppend: "BE NICE." });
     const channel = makeChannel();

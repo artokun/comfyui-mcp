@@ -42,6 +42,7 @@ import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { logger } from "../utils/logger.js";
+import { buildAgentSpawnEnv } from "../services/panel-secrets.js";
 import {
   type AgentBackend,
   type AgentEvent,
@@ -710,7 +711,10 @@ export class CodexBackend implements AgentBackend {
       "-c",
       `approval_policy=${JSON.stringify("never")}`,
     ];
-    const client = new AppServerClient(bin, cwd, process.env, extraArgs);
+    // SECURITY: spawn with the agent env — process.env MINUS tool-only secrets
+    // (RunPod/HF/CivitAI… tokens). Those belong to the comfyui tool child
+    // (buildComfyuiMcpEnv), never to an LLM vendor's subprocess.
+    const client = new AppServerClient(bin, cwd, buildAgentSpawnEnv(), extraArgs);
     // Publish the in-flight client BEFORE the startup awaits so a concurrent
     // close() can find and kill it instead of seeing this.client === null and
     // returning early — which would orphan the spawning app-server child (P0-A).
