@@ -1048,14 +1048,28 @@ export interface PanelAgentManagerOptions {
    */
   makeBackend?: (tabId: string) => AgentBackend | undefined;
   /**
-   * Fired when a tab's agent dies FATALLY — either it failed to start (hard
-   * reject from backend.prepare/run) or its bounded self-restart loop gave up
+   * Fired when a tab's agent FAILED TO START — a hard reject from
+   * backend.prepare()/run before any session existed (e.g. an OpenAI-dialect
+   * provider rejecting an invalid API key with a 401, or an unreachable
+   * endpoint). This is a PER-TAB, recoverable condition (issue #250): the
+   * manager has already dropped the dead agent, so once the user fixes the
+   * credentials the next message / Disconnect → Connect on the SAME tab spawns
+   * a fresh agent. The orchestrator should degrade THAT tab (honest say +
+   * degraded ack) and must NOT self-exit — a bad key on one tab used to take
+   * down every other tab. When absent, the manager falls back to a generic
+   * onSay notice (still per-tab, still no fatal escalation).
+   */
+  onStartFailure?: (tabId: string, message: string) => void;
+  /**
+   * Fired when a tab's agent dies FATALLY: its bounded self-restart loop gave up
    * (the session kept dropping immediately). This is the "agent backend is dead"
    * signal: the orchestrator is alive and the bridge is up, but no agent will
    * ever handshake. The orchestrator wires this to a clean self-exit so the panel
    * pack's bridge-death → reclaim + sticky-reconnect path respawns a FRESH
    * orchestrator, instead of leaving the user wedged on "bridge open but no panel
    * agent responded". `reason` is a short human label for the log.
+   * NOTE (issue #250): plain start failures no longer route here — they are
+   * per-tab configuration errors handled by onStartFailure above.
    */
   onAgentFatal?: (tabId: string, reason: string) => void;
   /**
@@ -1313,11 +1327,16 @@ export class PanelAgentManager {
       if (err) {
         const m = msgOf(err);
         logger.error(`[panel-agent ${tabId.slice(0, 8)}] failed to start: ${m}`);
-        this.opts.onSay(tabId, `⚠️ The panel agent could not start: ${m}`);
-        // Hard start failure (e.g. the codex app-server can't spawn/handshake, the
-        // Claude SDK can't init) → fatal: the orchestrator should exit so a fresh
-        // one is respawned rather than serving a dead agent.
-        this.opts.onAgentFatal?.(tabId, `agent failed to start: ${m}`);
+        // PER-TAB degradation (issue #250): a hard start failure is almost
+        // always a tab-local configuration error — an invalid API key (the
+        // endpoint 401s in prepare()), an unreachable base URL, a missing CLI
+        // login. It must degrade THIS tab only. The old escalation
+        // (onAgentFatal → orchestrator self-exit) killed every OTHER tab too,
+        // including healthy sessions on different providers. The agent slot was
+        // cleared above, so after the user fixes the key, the next message /
+        // Disconnect → Connect spawns a fresh agent on the same tab.
+        if (this.opts.onStartFailure) this.opts.onStartFailure(tabId, m);
+        else this.opts.onSay(tabId, `⚠️ The panel agent could not start: ${m}`);
       } else if (gaveUp) {
         // The bounded self-restart loop gave up — the session keeps dropping. Same
         // fatal signal: let the orchestrator self-exit + respawn.

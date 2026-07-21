@@ -1719,13 +1719,45 @@ export async function runPanelOrchestrator(): Promise<void> {
     onSeen: (key, mid) => {
       bridge.push({ type: "ack", ok: true, kind: "seen", mid }, panelTabOf(key));
     },
+    // PER-TAB start failure (issue #250): a backend that rejects at
+    // prepare()/first-connect — an invalid API key 401ing on an OpenAI-dialect
+    // provider (moonshot/glm/custom/openrouter), an unreachable endpoint — is a
+    // tab-local configuration error, the same class as the keyless ctor path
+    // (#209), one step later. Degrade THAT tab only: an honest say naming the
+    // provider with check-your-key guidance, plus a degraded ack so the panel
+    // shows the real state. The manager already dropped the dead agent, so
+    // fixing the key and Disconnect → Connect (or just re-sending) retries
+    // cleanly. This must NOT self-exit — a bad moonshot key on one tab was
+    // killing healthy sessions on every other tab.
+    onStartFailure: (key, message) => {
+      const backend = backendOf(key);
+      const panelTab = panelTabOf(key);
+      const reg = openAiKeyProvider(backend);
+      const hint = reg
+        ? `Check your ${reg.slotLabel} API key in the API Keys card (${reg.envKeys[0]}), then Disconnect → Connect to retry.`
+        : backend === "openrouter"
+          ? "Check your OpenRouter API key in the API Keys card (OPENROUTER_API_KEY), then Disconnect → Connect to retry."
+          : backend === "custom"
+            ? "Check the base URL and API key in Settings → Custom endpoint, then Disconnect → Connect to retry."
+            : "Check the provider's credentials/login, then Disconnect → Connect to retry.";
+      bridge.push(
+        { type: "say", text: `⚠️ The ${backend} agent could not start: ${message} — ${hint}` },
+        panelTab,
+      );
+      bridge.push({ type: "ack", ok: false, kind: "degraded" }, panelTab);
+      logger.warn(
+        `[panel-orchestrator] tab ${panelTab.slice(0, 8)} (${backend}) agent failed to start — degraded THIS tab only, other tabs unaffected (${message})`,
+      );
+    },
     // ROOT-CAUSE self-exit (the "bridge open but no panel agent responded" wedge):
-    // a tab's agent died fatally (couldn't start, or its bounded self-restart gave
-    // up). The orchestrator is alive and the bridge is up, but no agent will ever
-    // handshake — exactly the wedge. Exit cleanly so the panel pack's bridge-death
-    // → reclaim + sticky-reconnect respawns a FRESH orchestrator, instead of
-    // leaving the user staring at the manual "fully restart ComfyUI" warning.
-    // Mirrors the uncaughtException exit above (Node's own default on a fatal).
+    // a tab's agent died fatally — its bounded self-restart loop gave up (the
+    // session kept dropping immediately). The orchestrator is alive and the
+    // bridge is up, but no agent will ever handshake — exactly the wedge. Exit
+    // cleanly so the panel pack's bridge-death → reclaim + sticky-reconnect
+    // respawns a FRESH orchestrator, instead of leaving the user staring at the
+    // manual "fully restart ComfyUI" warning. Mirrors the uncaughtException exit
+    // above (Node's own default on a fatal). Start failures no longer route here
+    // (issue #250) — they degrade per-tab via onStartFailure above.
     onAgentFatal: (tabId, reason) => {
       requestSelfExit(`tab ${tabId.slice(0, 8)} ${reason}`);
     },
