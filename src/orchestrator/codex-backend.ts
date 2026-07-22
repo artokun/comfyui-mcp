@@ -57,6 +57,41 @@ function msgOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+const configuredInterruptTimeoutMs = Number(process.env.COMFYUI_MCP_CODEX_INTERRUPT_TIMEOUT_MS);
+const CODEX_INTERRUPT_TIMEOUT_MS =
+  Number.isFinite(configuredInterruptTimeoutMs) && configuredInterruptTimeoutMs > 0
+    ? configuredInterruptTimeoutMs
+    : 1500;
+const configuredCloseTimeoutMs = Number(process.env.COMFYUI_MCP_CODEX_CLOSE_TIMEOUT_MS);
+const CODEX_CLOSE_TIMEOUT_MS =
+  Number.isFinite(configuredCloseTimeoutMs) && configuredCloseTimeoutMs > 0
+    ? configuredCloseTimeoutMs
+    : 2000;
+const configuredForceKillGraceMs = Number(process.env.COMFYUI_MCP_CODEX_FORCE_KILL_GRACE_MS);
+const CODEX_FORCE_KILL_GRACE_MS =
+  Number.isFinite(configuredForceKillGraceMs) && configuredForceKillGraceMs > 0
+    ? configuredForceKillGraceMs
+    : 500;
+const CODEX_CLIENT_CLOSE_BUDGET_MS =
+  CODEX_CLOSE_TIMEOUT_MS * 2 + CODEX_FORCE_KILL_GRACE_MS + 100;
+
+async function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise.then(
+        () => true,
+        () => true,
+      ),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 /**
  * Kill an entire process tree, not just the direct child. On the Windows
  * PATH/shell fallback the direct child is a cmd.exe/shim whose grandchild is the
@@ -66,28 +101,36 @@ function msgOf(err: unknown): string {
  * falling back to the single pid. Best-effort + swallows errors: it runs during
  * teardown and must never throw into the host process.
  */
-function killProcessTree(pid: number | undefined): void {
-  if (!Number.isFinite(pid)) return;
+function killProcessTree(pid: number | undefined, force = false): boolean {
+  if (!Number.isFinite(pid)) return false;
   const p = pid as number;
   if (process.platform === "win32") {
     try {
-      spawnSync("taskkill", ["/PID", String(p), "/T", "/F"], { windowsHide: true });
+      const result = spawnSync("taskkill", ["/PID", String(p), "/T", "/F"], {
+        windowsHide: true,
+        timeout: CODEX_CLOSE_TIMEOUT_MS,
+      });
+      if (!result.error && result.status === 0) return true;
     } catch {
-      try {
-        process.kill(p);
-      } catch {
-        // already gone
-      }
+      // Fall through to the direct-pid kill below.
     }
-    return;
+    try {
+      process.kill(p, "SIGKILL");
+      return true;
+    } catch {
+      return false; // already gone or inaccessible
+    }
   }
+  const signal = force ? "SIGKILL" : "SIGTERM";
   try {
-    process.kill(-p, "SIGTERM"); // process group (we spawn detached on POSIX)
+    process.kill(-p, signal); // process group (we spawn detached on POSIX)
+    return true;
   } catch {
     try {
-      process.kill(p, "SIGTERM");
+      process.kill(p, signal);
+      return true;
     } catch {
-      // already gone
+      return false; // already gone or inaccessible
     }
   }
 }
@@ -117,6 +160,7 @@ class AppServerClient {
   >();
   private nextId = 1;
   private closed = false;
+  private closePromise: Promise<void> | null = null;
   private exitResolved = false;
   /** The error that ended the connection (null = clean exit). Readable so a turn
    *  can surface a meaningful message when the child dies mid-turn. */
@@ -326,32 +370,55 @@ class AppServerClient {
   }
 
   async close(): Promise<void> {
-    if (this.closed) {
-      await this.exitPromise;
-      return;
+    if (!this.closePromise) {
+      this.closePromise = (async () => {
+        this.closed = true;
+        // Drop the notification handler so a late notification can't re-enter a
+        // torn-down turn during shutdown.
+        this.notificationHandler = null;
+        this.rl?.close();
+        this.rl = null;
+        const proc = this.proc;
+        let softKillTimer: NodeJS.Timeout | undefined;
+        if (proc && proc.exitCode === null) {
+          try {
+            proc.stdin.end();
+          } catch {
+            // already gone
+          }
+          // Give a graceful stdin-EOF shutdown a beat, then kill the whole tree.
+          softKillTimer = setTimeout(() => {
+            if (proc.exitCode === null) killProcessTree(proc.pid, false);
+          }, 50);
+          softKillTimer.unref?.();
+        }
+
+        let exited = await settlesWithin(this.exitPromise, CODEX_CLOSE_TIMEOUT_MS);
+        if (softKillTimer) clearTimeout(softKillTimer);
+        if (!exited && proc && proc.exitCode === null) {
+          logger.warn(
+            `[codex-backend] app-server did not exit within ${CODEX_CLOSE_TIMEOUT_MS}ms -- forcing process-tree termination`,
+          );
+          killProcessTree(proc.pid, true);
+          exited = await settlesWithin(this.exitPromise, CODEX_FORCE_KILL_GRACE_MS);
+        }
+        if (!exited) {
+          // Queue recovery must not depend on an OS exit event. Detach the pipes
+          // and resolve the logical connection even if both tree-kill attempts failed.
+          try {
+            proc?.stdin.destroy();
+            proc?.stdout.destroy();
+            proc?.stderr.destroy();
+            proc?.unref?.();
+          } catch {
+            // best-effort final detach
+          }
+          this.handleExit(new Error("codex app-server teardown timed out after forced termination."));
+        }
+        this.proc = null;
+      })();
     }
-    this.closed = true;
-    // Drop the notification handler so a late notification can't re-enter a
-    // torn-down turn during shutdown.
-    this.notificationHandler = null;
-    this.rl?.close();
-    this.rl = null;
-    if (this.proc && this.proc.exitCode === null) {
-      try {
-        this.proc.stdin.end();
-      } catch {
-        // already gone
-      }
-      const proc = this.proc;
-      // Give a graceful stdin-EOF shutdown a beat, then KILL THE WHOLE TREE — on
-      // the Windows shell fallback the direct child is a shim whose grandchild is
-      // the real codex node process, so proc.kill() alone would orphan it.
-      setTimeout(() => {
-        if (proc.exitCode === null) killProcessTree(proc.pid);
-      }, 50).unref?.();
-    }
-    await this.exitPromise;
-    this.proc = null;
+    await this.closePromise;
   }
 }
 
@@ -563,6 +630,10 @@ export class CodexBackend implements AgentBackend {
    *  concurrent close() can tear it down even before it's published to
    *  this.client (P0-A: close() racing prepare() must never leak the child). */
   private preparingClient: AppServerClient | null = null;
+  /** Detached clients whose bounded teardown is still in flight. */
+  private closingClients = new Map<AppServerClient, Promise<void>>();
+  /** Per-turn escape hatch used when the app-server ignores turn/interrupt. */
+  private abortActiveTurn: (() => void) | null = null;
   /** Set once close() runs — a hard tripwire so an in-flight prepare() that wakes
    *  up after close() disposes its local client instead of publishing it (P0-A). */
   private disposed = false;
@@ -599,6 +670,30 @@ export class CodexBackend implements AgentBackend {
   constructor(deps: CodexBackendDeps = {}) {
     this.deps = deps;
     this.model = deps.model;
+  }
+
+  private beginClientClose(client: AppServerClient, reason: string): Promise<void> {
+    const existing = this.closingClients.get(client);
+    if (existing) return existing;
+
+    const closeOperation = Promise.resolve()
+      .then(() => client.close())
+      .catch((err) => {
+        logger.warn(`[codex-backend] ${reason}: ${msgOf(err)}`);
+      });
+    const closing = settlesWithin(closeOperation, CODEX_CLIENT_CLOSE_BUDGET_MS)
+      .then((settled) => {
+        if (!settled) {
+          logger.warn(
+            `[codex-backend] ${reason}: close did not settle within ${CODEX_CLIENT_CLOSE_BUDGET_MS}ms; detaching`,
+          );
+        }
+      })
+      .finally(() => {
+        if (this.closingClients.get(client) === closing) this.closingClients.delete(client);
+      });
+    this.closingClients.set(client, closing);
+    return closing;
   }
 
   /**
@@ -850,6 +945,9 @@ export class CodexBackend implements AgentBackend {
     // PanelAgent's idle watchdog so a long, quiet generation doesn't falsely trip.
     for await (const turn of opts.channel) {
       yield* this.runTurn(client, turn, opts.onActivity);
+      // A timed-out interrupt detaches this client. End the old run before it can
+      // consume another queued turn; PanelAgent will start a fresh app-server.
+      if (this.client !== client) return;
     }
   }
 
@@ -937,6 +1035,18 @@ export class CodexBackend implements AgentBackend {
         streamKind = null;
       }
     };
+
+    const abortActiveTurn = () => {
+      interrupted = true;
+      if (finishedResult) return;
+      finishedResult = true;
+      closeStream();
+      // This is controlled recovery, not a provider failure. `ok: true` also
+      // prevents the watchdog path from painting a duplicate failure banner.
+      push({ type: "result", ok: true, subtype: "interrupted" });
+      finish();
+    };
+    this.abortActiveTurn = abortActiveTurn;
 
     // Normalize ONE notification (already confirmed to belong to this turn) into
     // canonical AgentEvents. Pulled out so it can be applied to both live and
@@ -1159,7 +1269,7 @@ export class CodexBackend implements AgentBackend {
           if (interrupted) {
             // Deliberate teardown (interrupt restored/closed the turn): still end
             // with a result so the gate advances, but no user-facing error.
-            emitTerminalError("codex turn interrupted.");
+            abortActiveTurn();
           } else {
             emitTerminalError(msgOf(err));
           }
@@ -1181,6 +1291,7 @@ export class CodexBackend implements AgentBackend {
       // Mark interrupted so a late turn/start rejection / exit doesn't surface as
       // a spurious error after we've already torn the turn down.
       interrupted = true;
+      if (this.abortActiveTurn === abortActiveTurn) this.abortActiveTurn = null;
       // Restore the prior handler ONLY if it's still ours (close() may have nulled
       // it during shutdown — don't resurrect a stale handler onto a dead client).
       if (client.notificationHandler && !client.exitError) client.notificationHandler = prev ?? null;
@@ -1196,10 +1307,35 @@ export class CodexBackend implements AgentBackend {
   async interrupt(): Promise<void> {
     const client = this.client;
     if (!client || !this.threadId || !this.turnId) return;
+    let timer: NodeJS.Timeout | undefined;
+    let timedOut = false;
     try {
-      await client.request("turn/interrupt", { threadId: this.threadId, turnId: this.turnId });
+      await Promise.race([
+        client.request("turn/interrupt", { threadId: this.threadId, turnId: this.turnId }),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            timedOut = true;
+            reject(new Error(`turn/interrupt timed out after ${CODEX_INTERRUPT_TIMEOUT_MS}ms`));
+          }, CODEX_INTERRUPT_TIMEOUT_MS);
+        }),
+      ]);
     } catch (err) {
+      if (timedOut) {
+        logger.warn(
+          `[codex-backend] interrupt timed out after ${CODEX_INTERRUPT_TIMEOUT_MS}ms -- recycling app-server`,
+        );
+        if (this.client === client) {
+          this.client = null;
+          this.threadId = null;
+          this.turnId = null;
+          this.abortActiveTurn?.();
+        }
+        void this.beginClientClose(client, "interrupt recycle teardown failed");
+        return;
+      }
       logger.debug(`[codex-backend] interrupt: ${msgOf(err)}`);
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 
@@ -1302,18 +1438,24 @@ export class CodexBackend implements AgentBackend {
     // published yet — without this, close() would return while that child is still
     // coming up and orphan it (P0-A).
     const preparing = this.preparingClient;
+    const closing = [...this.closingClients.keys()];
+    const abortActiveTurn = this.abortActiveTurn;
     this.client = null;
     this.preparingClient = null;
     this.threadId = null;
     this.turnId = null;
-    if (client) {
-      client.notificationHandler = null;
-      await client.close().catch(() => {});
+    abortActiveTurn?.();
+    if (this.abortActiveTurn === abortActiveTurn) this.abortActiveTurn = null;
+    const clients = new Set<AppServerClient>();
+    for (const candidate of [...closing, client, preparing]) {
+      if (candidate) clients.add(candidate);
     }
-    if (preparing && preparing !== client) {
-      preparing.notificationHandler = null;
-      await preparing.close().catch(() => {});
-    }
+    for (const candidate of clients) candidate.notificationHandler = null;
+    await Promise.all(
+      [...clients].map((candidate) =>
+        this.beginClientClose(candidate, "backend close teardown failed"),
+      ),
+    );
     // Sweep any temp image files a turn didn't get to clean up (e.g. close() raced
     // an in-flight turn). Snapshot first — cleanupTempImages mutates the set.
     if (this.tempImageFiles.size) {
