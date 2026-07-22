@@ -21,19 +21,24 @@ beforeAll(async () => {
 });
 
 /** A backend that FAILS any run resuming a session (simulating a pruned rollout)
- *  and succeeds on a fresh (resume-less) session. */
+ *  and succeeds on a fresh (resume-less) session. When `alwaysThrow` is set it
+ *  throws the error on EVERY run (even fresh) — to prove a fresh-start failure
+ *  still counts toward the rapid-restart give-up bound. */
 class ResumeMissBackend implements AgentBackend {
   readonly id = "claude" as const;
   readonly capabilities = CLAUDE_CAPABILITIES;
   runCount = 0;
   resumes: Array<string | undefined> = [];
   turnTexts: string[] = [];
-  constructor(private readonly errorText: string) {}
+  constructor(
+    private readonly errorText: string,
+    private readonly alwaysThrow = false,
+  ) {}
 
   async *run(opts: BackendStartOptions): AsyncGenerator<AgentEvent> {
     this.runCount += 1;
     this.resumes.push(opts.resume);
-    if (opts.resume) {
+    if (opts.resume || this.alwaysThrow) {
       // The resume target is gone — Codex surfaces this as a stream error.
       throw new Error(this.errorText);
     }
@@ -90,4 +95,21 @@ describe("resume-miss self-heal (#277)", () => {
       expect(backend.runCount).toBeLessThanOrEqual(3);
     });
   }
+
+  it("a FRESH start that keeps emitting the rollout error still hits the give-up bound (#278)", async () => {
+    // No resume seeded → every run is a fresh start that throws the same text.
+    // resumeMiss must NOT be set for a fresh start, so the rapid-restart counter
+    // is NOT reset and the loop terminates (gives up) instead of spinning forever.
+    const backend = new ResumeMissBackend("no rollout found for thread id deadbeef", true);
+    const manager = makeManager(backend);
+    const tab = "tab-fresh-fail";
+    manager.send(tab, "hello");
+    // The agent should GIVE UP (drop itself from the live map) within the bound.
+    await waitFor(() => !manager.hasLiveAgent(tab), 6000);
+    // Bounded restarts, not an infinite loop (initial + ~4 rapid restarts).
+    expect(backend.runCount).toBeGreaterThanOrEqual(3);
+    expect(backend.runCount).toBeLessThanOrEqual(6);
+    // Every attempt was a FRESH start (no resume was ever set).
+    expect(backend.resumes.every((r) => r === undefined)).toBe(true);
+  });
 });

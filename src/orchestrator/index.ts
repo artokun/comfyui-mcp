@@ -676,16 +676,18 @@ const CALL_TOOL_WHITELIST = new Set<string>([
   "train_start",
   "train_cancel",
   // RunPod control panel (desktop + mobile): the one-tap pod lifecycle + the
-  // local⇄pod host switch. Read-only status/list/troubleshoot plus the
-  // user-initiated lifecycle actions (start/stop/connect/use_local/watch/
-  // unwatch) and the referral deploy link. Each tool validates its own pod
-  // state; the whitelist only gates reachability from a canvas-less client.
-  // NOTE: runpod_pod_create is deliberately EXCLUDED (#269) — deploying a pod
-  // is a BILLED mutation, so it must go through an agent turn / explicit UI
-  // action, never the confirmation-less direct call_tool channel.
+  // local⇄pod host switch. Read-only status/list/troubleshoot, the COST-SAVING
+  // actions (stop/use_local), connect (retarget only — a pod must already be
+  // RUNNING, so it neither spins nor keeps one billing), watch/unwatch, and the
+  // referral deploy link. Each tool validates its own pod state; the whitelist
+  // only gates reachability from a canvas-less client.
+  // NOTE: runpod_pod_create AND runpod_pod_start are deliberately EXCLUDED
+  // (#269/#278) — both put a pod into a BILLING state (create deploys; start
+  // RESUMES billing on a stopped pod). A confirmation-less mirrored/foreign tab
+  // must not be able to spend money, so both go through an agent turn / explicit
+  // UI action. stop is kept (it SAVES money).
   "runpod_pod_status",
   "runpod_list_pods",
-  "runpod_pod_start",
   "runpod_pod_stop",
   "runpod_pod_connect",
   "runpod_pod_troubleshoot",
@@ -1933,23 +1935,35 @@ export async function runPanelOrchestrator(): Promise<void> {
   // the next probe uses the new key, and re-push readiness + models to every
   // live tab so the OpenRouter provider flips to "ready" and lists its models
   // without a reconnect.
+  const KEYED_PROVIDERS = ["openrouter", "custom", "glm", "kimi", "moonshot"];
   const unsubscribeAgentSecrets = onAgentSecretsChanged(() => {
     hydrateAgentSecretsIntoEnv();
     // A key change can affect ANY keyed provider (OpenRouter/Custom endpoints and
     // the hosted API-key backends GLM / Kimi / Moonshot) — drop each one's cached
     // probe backend + model list so the next probe carries the fresh credentials
     // (and a revoked key immediately stops reading as "ready" from a stale cache).
-    for (const b of ["openrouter", "custom", "glm", "kimi", "moonshot"]) {
+    for (const b of KEYED_PROVIDERS) {
       modelsByBackend.delete(b);
       const pb = probeBackends.get(b);
       if (pb?.close) void pb.close().catch(() => {});
       probeBackends.delete(b);
     }
+    // Cache-drop alone does NOT rotate the key on a LIVE agent: keyed backends
+    // capture the credential at construction and keep using the OLD key until
+    // rebuilt (#278). So a live tab running a keyed provider must be restarted
+    // for the new/revoked key to take effect — a SILENT rebuild at idle (no
+    // download-retry nudge; the guard's job was only to stop the spurious nudge
+    // + unrelated Claude/Codex restarts, not to stop key rotation).
+    for (const [tabId, backend] of tabBackends.entries()) {
+      if (KEYED_PROVIDERS.includes(backend)) {
+        manager.restartForProviderKey(agentKeyFor(tabId));
+      }
+    }
     for (const tabId of tabBackends.keys()) {
       pushReadiness(tabId);
       pushModels(tabId);
     }
-    logger.info("[panel-orchestrator] provider key saved → readiness + models refreshed");
+    logger.info("[panel-orchestrator] provider key saved → readiness + models refreshed + keyed agents rebuilt");
   });
 
   // Debounce the connect ack: the panel re-sends `hello` on reconnect and on

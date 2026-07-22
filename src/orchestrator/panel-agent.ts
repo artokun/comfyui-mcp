@@ -741,7 +741,12 @@ export class PanelAgent {
         // orchestrator (a live bridge left serving a permanently-dead agent). Drop
         // the dead resume target so the NEXT iteration starts a FRESH session and
         // self-heals; queued messages (this.queue) survive and replay.
-        if (/(?:No conversation found with session ID|no rollout found for thread id)/i.test(emsg)) {
+        // GUARD (#278): only treat this as a recoverable resume-MISS when this
+        // start actually RESUMED something. A FRESH start (no resume) that emits
+        // the same text is a real, non-recoverable failure and MUST count toward
+        // the rapid-restart give-up bound below — otherwise resumeMiss would reset
+        // the counter forever and spin an infinite restart loop.
+        if (resume && /(?:No conversation found with session ID|no rollout found for thread id)/i.test(emsg)) {
           logger.warn(
             `[panel-agent ${this.short()}] resume target is gone — starting a fresh session`,
           );
@@ -1233,6 +1238,16 @@ export class PanelAgentManager {
     if (!this.agents.has(key)) return;
     this.pendingMcpRestart.set(key, nudge ?? null);
     this.applyPendingRestarts(key);
+  }
+
+  /** Rebuild a live agent because its PROVIDER credential rotated (#278): keyed
+   *  backends (OpenRouter/Custom/GLM/Kimi/Moonshot) capture the API key at
+   *  construction, so a rotated/revoked key only takes effect on a fresh spawn.
+   *  Reuses the coalesced at-idle restart (a fresh makeBackend reads the new
+   *  env key) WITHOUT a retry nudge — this is a silent key refresh, not the
+   *  download-401 flow. No-op when the tab has no live agent. */
+  restartForProviderKey(key: string): void {
+    this.restartForMcpEnv(key);
   }
 
   /**
