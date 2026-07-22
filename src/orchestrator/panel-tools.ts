@@ -1243,7 +1243,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_civitai_results",
-      "READ the CivitAI browser's CURRENT results as text (metadata + media URLs only — you will NOT be shown the images; you reason from the text and pick which URLs matter). Open the browser first with panel_open_civitai. Returns exactly these fields per result and NOTHING else: a MEDIA item is { id, kind:'media', author, prompt (length-capped), modelName, reactions, url }; a MODEL item is { id, kind:'model', name, creator, type, baseModel, downloadCount, thumbsUp, coverUrl }. There is no title, and model descriptions are NOT included (they require a separate detail fetch) — do not expect them. Use this to see what's on screen before you highlight, switch tabs, or open the lightbox. If a fetch is still in flight the panel reports what it has so far. The browser must be open — otherwise the panel replies with an honest error.",
+      "READ the CivitAI browser's CURRENT results as text (metadata + media URLs only — you will NOT be shown the images; you reason from the text and pick which URLs matter). Open the browser first with panel_open_civitai. Returns { items, total, loading }. Each item carries EXACTLY these fields and nothing else — a MEDIA item is { id, kind:'image'|'video', title:null, creator, baseModel, type, stats:{ reactions }, prompt (length-capped ~600 chars), urls:[] }; a MODEL item is { id, kind:'model', title (the model's name), creator, baseModel, type, stats:{ downloadCount, thumbsUp }, prompt:null, urls:[] }. Note: stats is a NESTED object (reactions for media; downloadCount+thumbsUp for models), urls is an ARRAY of media URL(s), and media items have title:null while models have prompt:null. Model descriptions are NOT included (they require a separate detail fetch) — do not expect them. Use this to see what's on screen before you highlight, switch tabs, or open the lightbox. `loading:true` means a fetch is still in flight and the panel is reporting what it has so far. The browser must be open — otherwise the panel replies with an honest error.",
       {
         limit: z
           .number()
@@ -1346,20 +1346,22 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_training_set_field",
-      "Set one field in the OPEN training wizard (e.g. a name, base model, learning rate, step count, dataset path). Use this to fill the form for the user as you walk them through setup. Only known wizard fields are accepted (the panel applies a per-field allowlist and rejects anything else). Open the wizard first with panel_training_open. This configures only — you have no command to launch training. The wizard must be open — otherwise the panel replies with an honest error.",
+      "Set one field in the OPEN training wizard. The panel applies a strict per-field ALLOWLIST — the ONLY accepted `name` values are: 'datasetName' (string — the LoRA/dataset name), 'trigger' (string — the trigger word), 'preset' (one of 'smoke' | 'standard' | 'custom'), and 'target' (one of 'local' | 'pod', same as panel_training_set_target). Any other name is rejected server-side. There is NO learning-rate/step-count/base-model/dataset-path field here — those come from the chosen preset. Open the wizard first with panel_training_open. This configures only — you have no command to launch training. The wizard must be open — otherwise the panel replies with an honest error.",
       {
-        name: z.string().describe("The field name/key to set (as the wizard labels it, e.g. 'learning_rate', 'name'). Must be a known wizard field; unknown names are rejected server-side."),
+        name: z
+          .enum(["datasetName", "trigger", "preset", "target"])
+          .describe("The wizard field to set. Only these four are accepted; anything else is rejected."),
         value: z
           .union([z.string(), z.number(), z.boolean()])
-          .describe("The value to set (string, number, or boolean depending on the field)."),
+          .describe("The value: datasetName/trigger are strings; preset is 'smoke'|'standard'|'custom'; target is 'local'|'pod'."),
       },
       async (args: A, ctx) => ctx.call({ cmd: "training_set_field", name: args.name, value: args.value }, 10000),
     ),
     def(
       "panel_training_goto_step",
-      "Navigate the OPEN training wizard to a specific step (0-based) — move the user forward/back through the setup flow as you explain each stage. This enforces the SAME gates as the wizard's Next button (backend capability, a valid name, uploads settled, images present); if the step's prerequisites aren't met the panel rejects it and throws honestly, so call panel_training_get_state first to check readiness. Open the wizard first with panel_training_open. The wizard must be open — otherwise the panel replies with an honest error.",
+      "Navigate the OPEN training wizard to one of its four steps (1-based): 1 = dataset (gather images), 2 = label (caption them), 3 = launch (choose target + start), 4 = monitor (watch progress). Move the user forward/back as you explain each stage. This enforces the SAME gates as the wizard's Next button (backend capability, a valid name, uploads settled, images present); if the step's prerequisites aren't met the panel rejects it and throws honestly, so call panel_training_get_state first to check readiness. Open the wizard first with panel_training_open. The wizard must be open — otherwise the panel replies with an honest error.",
       {
-        step: z.number().int().min(0).describe("The step index to jump to (0-based)."),
+        step: z.number().int().min(1).max(4).describe("The step to jump to: 1=dataset, 2=label, 3=launch, 4=monitor."),
       },
       async (args: A, ctx) => ctx.call({ cmd: "training_goto_step", step: args.step }, 10000),
     ),

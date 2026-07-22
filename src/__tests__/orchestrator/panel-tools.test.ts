@@ -665,26 +665,39 @@ describe("panel-tools: agent-driven CivitAI + training modals", () => {
     expect(calls[0]).toMatchObject({ cmd: "open_training", dock: false });
   });
 
-  it("panel_training_set_field forwards name + value (string|number|boolean)", async () => {
+  it("panel_training_set_field forwards an allowlisted name + value, rejecting others", async () => {
     const { ctx, calls } = makeFakeCtx();
-    await defByName("panel_training_set_field").handler({ name: "learning_rate", value: 0.0004 }, ctx);
-    expect(calls[0]).toMatchObject({ cmd: "training_set_field", name: "learning_rate", value: 0.0004 });
+    await defByName("panel_training_set_field").handler({ name: "datasetName", value: "my-lora" }, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "training_set_field", name: "datasetName", value: "my-lora" });
+    // name is a real enum: only the four allowlisted fields pass.
+    const name = defByName("panel_training_set_field").schema.name as {
+      safeParse: (v: unknown) => { success: boolean };
+    };
+    for (const ok of ["datasetName", "trigger", "preset", "target"]) {
+      expect(name.safeParse(ok).success).toBe(true);
+    }
+    for (const bad of ["learning_rate", "name", "steps", "dataset_path"]) {
+      expect(name.safeParse(bad).success).toBe(false);
+    }
     const value = defByName("panel_training_set_field").schema.value as {
       safeParse: (v: unknown) => { success: boolean };
     };
-    expect(value.safeParse("adamw").success).toBe(true);
+    expect(value.safeParse("standard").success).toBe(true);
     expect(value.safeParse(true).success).toBe(true);
     expect(value.safeParse({}).success).toBe(false);
   });
 
-  it("panel_training_goto_step forwards a 0-based int step", async () => {
+  it("panel_training_goto_step forwards a 1-based int step clamped to 1..4", async () => {
     const { ctx, calls } = makeFakeCtx();
     await defByName("panel_training_goto_step").handler({ step: 2 }, ctx);
     expect(calls[0]).toMatchObject({ cmd: "training_goto_step", step: 2 });
     const step = defByName("panel_training_goto_step").schema.step as {
       safeParse: (v: unknown) => { success: boolean };
     };
-    expect(step.safeParse(-1).success).toBe(false);
+    expect(step.safeParse(1).success).toBe(true);
+    expect(step.safeParse(4).success).toBe(true);
+    expect(step.safeParse(0).success).toBe(false);
+    expect(step.safeParse(5).success).toBe(false);
     expect(step.safeParse(1.5).success).toBe(false);
   });
 
