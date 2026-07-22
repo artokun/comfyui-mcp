@@ -227,10 +227,12 @@ describe("resolveAgyBin / readiness", () => {
 });
 
 describe("AntigravityBackend turns", () => {
-  it("spawns agy WITHOUT tool-only secrets in its env, but KEEPS its own Google/Gemini keys", async () => {
-    // SECURITY (PR #251/#270): agy is Google's LLM-vendor CLI — the user's TOOL
-    // secrets (RunPod/CivitAI/HF…) must NOT reach it. The GEMINI/GOOGLE keys are
-    // the SAME vendor's own credential and are kept.
+  it("spawns agy WITHOUT any tool-only secrets in its env (incl. GEMINI/GOOGLE — agy uses OAuth/keyring)", async () => {
+    // SECURITY (PR #270): agy is Google's LLM-vendor CLI — the user's TOOL
+    // secrets (RunPod/CivitAI/HF…) must NOT reach it. Per the official Antigravity
+    // CLI docs agy authenticates via native keyring + browser/SSH OAuth, with NO
+    // documented API-key env auth, so the GEMINI/GOOGLE keys (which panel-secrets
+    // classifies as tool secrets) are ALSO stripped — no keep-list.
     const saved = {
       RUNPOD_API_KEY: process.env.RUNPOD_API_KEY,
       CIVITAI_API_TOKEN: process.env.CIVITAI_API_TOKEN,
@@ -246,7 +248,7 @@ describe("AntigravityBackend turns", () => {
       const env = hoisted.spawns[0]!.opts.env as Record<string, string | undefined>;
       expect(env.RUNPOD_API_KEY).toBeUndefined();
       expect(env.CIVITAI_API_TOKEN).toBeUndefined();
-      expect(env.GEMINI_API_KEY).toBe("AIza-own-key"); // Google's own key kept
+      expect(env.GEMINI_API_KEY).toBeUndefined(); // tool secret — stripped, no keep-list
       expect(env.PATH ?? env.Path).toBeDefined();
     } finally {
       for (const [k, v] of Object.entries(saved)) {

@@ -220,5 +220,17 @@ describe("createPod (GPU fallback + billing safety)", () => {
     // no" (e.g. a vague server message) must NOT be treated as safe-to-retry.
     expect(isProvablyNotCreatedError(new Error("there are no response details available"))).toBe(false);
     expect(isProvablyNotCreatedError(new Error("Internal error: there are no results"))).toBe(false);
+    // CONSERVATIVE: "no capacity INFORMATION … status is unknown" is AMBIGUOUS —
+    // it must NOT match the capacity-rejection pattern (that would trigger a
+    // billed retry of a possibly-landed create).
+    expect(
+      isProvablyNotCreatedError(
+        new Error("RunPod response contained no capacity information, so creation status is unknown."),
+      ),
+    ).toBe(false);
+    expect(isProvablyNotCreatedError(new Error("insufficient capacity details returned"))).toBe(false);
+    // Still TRUE for the real rejection phrasings.
+    expect(isProvablyNotCreatedError(new Error("no capacity available for this GPU"))).toBe(true);
+    expect(isProvablyNotCreatedError(new Error("insufficient capacity"))).toBe(true);
   });
 });

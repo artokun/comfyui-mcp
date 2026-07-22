@@ -267,16 +267,34 @@ async function deployOnce(
  *  response, so blindly retrying could spawn a second billable pod. */
 export function isProvablyNotCreatedError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
-  // CONSERVATIVE by design: match ONLY explicit capacity/availability/quota
-  // rejections, each anchored on a concrete noun (instances/capacity/gpu/stock/
-  // quota). An error we don't specifically recognize is treated as AMBIGUOUS
-  // (a pod MAY have been created) → the caller must NOT retry. A too-broad
-  // pattern here (e.g. a bare "there are no") would misclassify an ambiguous
-  // failure as safe-to-retry and could double-bill.
-  return /no longer any instances available|no (?:gpu )?instances? available|there are no (?:longer any )?(?:gpu )?instances? available|\bno capacity\b|not enough (?:instances|capacity|gpus?)|insufficient (?:instances|capacity|gpus?)|out of stock|quota (?:exceeded|reached)/i.test(
-    msg,
-  );
+  return NOT_CREATED_RE.test(msg);
 }
+
+// CONSERVATIVE by design: match ONLY RunPod's explicit capacity/availability/
+// quota REJECTION clauses. An error we don't specifically recognize is treated
+// as AMBIGUOUS (a pod MAY have been created) → the caller must NOT retry.
+//
+// The "…capacity" clauses carry a negative lookahead that EXCLUDES the "capacity
+// information / details / data / status" wording used by AMBIGUOUS "status
+// unknown" messages — e.g. "response contained no capacity information, so
+// creation status is unknown" must NOT be read as a capacity rejection, or a
+// lost-but-landed create would be retried and double-bill. Likewise the
+// availability clauses require the concrete "instances available" phrasing, not
+// any sentence containing "there are no …".
+const CAP_NOISE = "(?!\\s+(?:information|informations|data|details?|info|status|unknown))";
+const NOT_CREATED_RE = new RegExp(
+  [
+    "no longer any instances? available",
+    "there are no (?:longer any )?(?:gpu )?instances? available",
+    "no (?:gpu )?instances? (?:currently )?available",
+    `\\bno capacity${CAP_NOISE}`,
+    `(?:not enough|insufficient) (?:gpu )?capacity${CAP_NOISE}`,
+    "(?:not enough|insufficient) (?:gpu instances|gpus|instances)",
+    "out of stock",
+    "quota (?:exceeded|reached)",
+  ].join("|"),
+  "i",
+);
 
 /** Outcome of reconciling an AMBIGUOUS create failure against the live pod list.
  *  - `unknown`: we couldn't determine (no snapshot, or the reconcile list failed)
@@ -298,8 +316,18 @@ type ReconcileResult =
  *  CONCURRENCY HAZARD: pod name is NOT unique, so two concurrent createPod calls
  *  for the same default name ("comfyui-mcp") each see the OTHER's pod as "new".
  *  We therefore only attribute a pod to THIS call when EXACTLY ONE new same-named
- *  pod appeared; if several did, we fail closed rather than risk claiming (and
- *  then managing/auto-stopping) a pod a different caller created. */
+ *  pod appeared; if several did, we fail closed (kind:"ambiguous") rather than
+ *  risk claiming (and then managing/auto-stopping) a pod a different caller made.
+ *
+ *  RESIDUAL LIMITATION (mis-attribution, NOT extra billing): the single-new-pod
+ *  path can still claim a pod created by a CONCURRENT caller if THIS call failed
+ *  before creating anything AND, in the same window, exactly one other same-named
+ *  pod appeared. The claimed pod exists regardless (no extra spend); the only
+ *  harm is that the wrong caller manages/auto-stops it. A fully correct fix needs
+ *  a per-create idempotency token or a unique deploy name (a RunPod-API design
+ *  change owned by the connector author). Tracked in issue #276 — see the note at
+ *  the createPod call site (~line 400). Not blocking: the common single-caller
+ *  path is correct and the multi-new-pod case is already fail-closed. */
 async function reconcileCreatedPod(
   name: string,
   priorIds: Set<string> | null,
@@ -364,7 +392,11 @@ export async function createPod(opts: RunpodCreateOptions = {}): Promise<RunpodP
         }
         // AMBIGUOUS failure: the billed mutation may have landed. Reconcile first.
         const rec = await reconcileCreatedPod(name, priorIds);
-        if (rec.kind === "one") return rec.pod; // exactly one new pod → it's ours
+        // Exactly one new same-named pod → attribute it to this call. NOTE: a
+        // concurrent same-name create can make this mis-attribute (harm =
+        // wrong owner manages the pod, NOT extra billing); a proper fix needs a
+        // per-create idempotency key / unique deploy name — tracked in issue #276.
+        if (rec.kind === "one") return rec.pod;
         const suffix = attempts.length ? `\nEarlier attempts:\n${attempts.map((a) => `  • ${a}`).join("\n")}` : "";
         if (rec.kind === "ambiguous") {
           throw new Error(
