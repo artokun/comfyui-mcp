@@ -10,7 +10,7 @@
 
 import childProcess from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream, createWriteStream, mkdirSync, renameSync, rmSync, statSync } from "node:fs";
+import { createReadStream, createWriteStream, existsSync, mkdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { logger } from "../utils/logger.js";
 import type { RunpodPod } from "./runpod-client.js";
@@ -417,13 +417,27 @@ export async function rsyncFromPod(ep: PodSshEndpoint, remoteDir: string, localD
     }
   }
   // 6) Promote: the pre-existing destination is replaced only NOW, by a
-  //    same-dir rename of fully verified content.
+  //    same-dir rename of fully verified content. Recoverable — a prior dst is
+  //    moved aside to a .bak first and restored if the promote rename fails, so
+  //    a failed promote leaves the previously-verified destination intact
+  //    (delete-then-rename would lose it if the rename threw; codex finding).
+  const bak = `${dst}.bak-${process.pid}-${Date.now()}`;
+  let backedUp = false;
   try {
-    rmSync(dst, { recursive: true, force: true });
+    if (existsSync(dst)) {
+      renameSync(dst, bak);
+      backedUp = true;
+    }
     renameSync(stage, dst);
   } catch (err) {
+    if (backedUp) {
+      // Restore the prior destination we moved aside.
+      try { rmSync(dst, { recursive: true, force: true }); } catch { /* best effort */ }
+      try { renameSync(bak, dst); } catch { /* best effort */ }
+    }
     return failCleanup(1, `could not promote verified output into place: ${err instanceof Error ? err.message : String(err)}`);
   }
+  if (backedUp) { try { rmSync(bak, { recursive: true, force: true }); } catch { /* best effort */ } }
   try { rmSync(archive, { force: true }); } catch { /* best effort */ }
   return { code: 0, stdout: "", stderr: "" };
 }
@@ -542,11 +556,20 @@ export async function stopSshTraining(containerName: string, remoteConfigPath?: 
 }
 
 /** Is a pod job's run.py still alive? false = definitively not running,
- *  null = can't tell (ssh unreachable). Bracketed against self-match. */
-export async function sshProcessRunning(containerName: string): Promise<boolean | null> {
+ *  null = can't tell (ssh unreachable). Bracketed against self-match.
+ *
+ *  MUST be scoped to the SAME job config path the kill uses (stopSshTraining):
+ *  an unscoped `run.py` probe reports RUNNING when ANY unrelated ai-toolkit run
+ *  (another registry, a manual launch) is alive on the pod, which would make a
+ *  successful cancel of THIS job falsely revert its record to "running" — and a
+ *  false-active record keeps suppressing the connector's pod idle-stop (codex
+ *  finding). Passing the config path greps `run.py <config>`, matching the
+ *  pkill pattern, so it reports running only when THIS job's process survives. */
+export async function sshProcessRunning(containerName: string, remoteConfigPath?: string): Promise<boolean | null> {
   const ep = decodePodContainerName(containerName);
   if (!ep) return null;
-  const r = await sshExec(ep, `pgrep -f '${RUNPY_PATTERN}' >/dev/null && echo RUNNING || echo GONE`, 20_000);
+  const pattern = remoteConfigPath ? `${RUNPY_PATTERN} ${remoteConfigPath}` : RUNPY_PATTERN;
+  const r = await sshExec(ep, `pgrep -f '${pattern.replace(/'/g, "'\\''")}' >/dev/null && echo RUNNING || echo GONE`, 20_000);
   if (r.code !== 0) return null; // ssh itself failed (pod down / network)
   return r.stdout.includes("RUNNING");
 }

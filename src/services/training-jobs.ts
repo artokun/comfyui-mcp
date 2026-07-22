@@ -129,8 +129,10 @@ export interface TrainingJob {
 export interface TrainingJobDeps {
   startTraining?: typeof startTraining;
   stopTraining?: typeof defaultTrainingStop;
-  /** Container liveness probe (false = definitively gone, null = unknown). */
-  containerRunning?: typeof containerRunning;
+  /** Container liveness probe (false = definitively gone, null = unknown).
+   *  The optional 2nd arg scopes pod probes to a job's config path (see
+   *  defaultContainerProbe); docker probes ignore it. */
+  containerRunning?: (name: string, remoteConfigPath?: string) => Promise<boolean | null>;
   /** Pod seams (target "pod" jobs): ssh preflight, uploads, runner, downloads. */
   sshWorks?: typeof sshEndpointWorks;
   rsyncToPod?: typeof rsyncToPod;
@@ -708,7 +710,7 @@ async function refreshRegistry(deps: TrainingJobDeps = {}): Promise<void> {
     if (handles.has(job.id)) { jobs.set(job.id, jobs.get(job.id) ?? job); continue; } // live here — memory wins
     if ((job.status === "running" || job.status === "queued") && job.containerName) {
       const probe = deps.containerRunning ?? defaultContainerProbe;
-      const running = await probe(job.containerName).catch(() => null);
+      const running = await probe(job.containerName, jobProbeConfigPath(job)).catch(() => null);
       if (running === false && (!ownerAlive(job) || ownerLeaseStale(job))) {
         // Container gone AND (owner provably dead OR its liveness lease
         // expired): recover. A HEALTHY owner between docker-exit and its own
@@ -751,9 +753,26 @@ async function pullPodOutput(job: TrainingJob, deps: TrainingJobDeps): Promise<{
       logger.warn(`[training-jobs] ${msg} (job ${job.id})`);
       return { ok: false, error: msg };
     }
-    // Promote only a complete, verified pull (same-dir rename).
-    rmSync(finalDir, { recursive: true, force: true });
-    renameSync(tmpDir, finalDir);
+    // Promote only a complete, verified pull (same-dir rename). Recoverable:
+    // a prior finalDir is moved aside to a .bak first and restored if the
+    // promote rename throws, so a failed promote leaves the previously-verified
+    // destination intact (delete-then-rename would lose it; codex finding).
+    const bak = `${finalDir}.bak-${process.pid}-${Date.now()}`;
+    let backedUp = false;
+    try {
+      if (existsSync(finalDir)) {
+        renameSync(finalDir, bak);
+        backedUp = true;
+      }
+      renameSync(tmpDir, finalDir);
+    } catch (promoteErr) {
+      if (backedUp) {
+        try { rmSync(finalDir, { recursive: true, force: true }); } catch { /* best effort */ }
+        try { renameSync(bak, finalDir); } catch { /* best effort */ }
+      }
+      throw promoteErr;
+    }
+    if (backedUp) { try { rmSync(bak, { recursive: true, force: true }); } catch { /* best effort */ } }
     return { ok: true };
   } catch (err) {
     const msg = `pod output transfer error: ${err instanceof Error ? err.message : String(err)}`;
@@ -814,9 +833,20 @@ export async function listJobs(deps: TrainingJobDeps = {}): Promise<TrainingJob[
   return [...jobs.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
-/** The default container liveness probe, pod-aware: `pod|…` names go over ssh. */
-export function defaultContainerProbe(name: string): Promise<boolean | null> {
-  return name.startsWith("pod|") ? sshProcessRunning(name) : containerRunning(name);
+/** The default container liveness probe, pod-aware: `pod|…` names go over ssh.
+ *  The probe MUST be scoped to the job's own config path (same as the stop),
+ *  or an unrelated `run.py` alive on the pod makes this job's cancel falsely
+ *  report still-running (codex finding). */
+export function defaultContainerProbe(name: string, remoteConfigPath?: string): Promise<boolean | null> {
+  return name.startsWith("pod|") ? sshProcessRunning(name, remoteConfigPath) : containerRunning(name);
+}
+
+/** The remote config path a pod job's kill AND liveness probe must both scope
+ *  to (undefined for docker jobs, which ignore it). Keeps the probe and the
+ *  stop pointed at the SAME `run.py <config>` so a cancel can't be fooled by an
+ *  unrelated run.py on the pod. */
+function jobProbeConfigPath(job: TrainingJob): string | undefined {
+  return job.containerName?.startsWith("pod|") ? podJobPaths(job.id, job.name).configPath : undefined;
 }
 
 /** The default stop, pod-aware. Pod stops are SCOPED to the job's own config
@@ -858,7 +888,7 @@ export async function reconcileStaleTrainingJobs(deps: TrainingJobDeps = {}): Pr
     if (handles.has(job.id)) continue; // live in THIS process — the owner is us
     if (ownerAlive(job) && !ownerLeaseStale(job)) continue; // healthy owner — not ours to touch
     const probe = deps.containerRunning ?? defaultContainerProbe;
-    const running = await probe(job.containerName).catch(() => null);
+    const running = await probe(job.containerName, jobProbeConfigPath(job)).catch(() => null);
     if (running !== false) continue; // alive or unknown → err toward "busy" (never stop a live run)
     await recoverOrphanedJob(job.id, deps);
     const after = readJobRecord(job.id);
@@ -1605,17 +1635,19 @@ export async function cancelJob(id: string, deps: TrainingJobDeps = {}): Promise
     // still be alive. Retry the stop instead of blindly returning.
     if (!job.containerName) return job;
     const probe = deps.containerRunning ?? defaultContainerProbe;
-    const alive = await probe(job.containerName).catch(() => null);
+    const cfgPath = jobProbeConfigPath(job);
+    const alive = await probe(job.containerName, cfgPath).catch(() => null);
     // Only a definitive "gone" short-circuits; unknown (daemon temporarily
     // unreachable) still attempts the stop so a live container can't keep
     // burning GPU behind a stale cancelled record (codex finding).
     if (alive === false) return job;
     const stop = deps.stopTraining ?? defaultTrainingStop;
-    const res = await stop(job.containerName, job.containerName.startsWith("pod|") ? podJobPaths(job.id, job.name).configPath : undefined);
+    const res = await stop(job.containerName, cfgPath);
     // Always probe after a stop attempt: a CLI timeout can fire AFTER the
     // daemon honored the stop (codex finding). Only when liveness is unknown
-    // do we fall back to the stop command's own result.
-    const probed = await probe(job.containerName).catch(() => null);
+    // do we fall back to the stop command's own result. The probe is scoped to
+    // THIS job's config path so an unrelated run.py can't fake still-running.
+    const probed = await probe(job.containerName, cfgPath).catch(() => null);
     const stillRunning = probed ?? res.ok === false;
     if (stillRunning === true) {
       job.status = "running";
@@ -1690,10 +1722,12 @@ async function cancelJobBody(id: string, job: TrainingJob, deps: TrainingJobDeps
 
   if (job.containerName) {
     const stop = deps.stopTraining ?? defaultTrainingStop;
-    const res = await stop(job.containerName, job.containerName.startsWith("pod|") ? podJobPaths(job.id, job.name).configPath : undefined);
+    const cfgPath = jobProbeConfigPath(job);
+    const res = await stop(job.containerName, cfgPath);
     const probe = deps.containerRunning ?? defaultContainerProbe;
-    // Probe after the stop regardless of its exit status (see above).
-    const probed = await probe(job.containerName).catch(() => null);
+    // Probe after the stop regardless of its exit status (see above), scoped to
+    // THIS job's config path so an unrelated run.py can't fake still-running.
+    const probed = await probe(job.containerName, cfgPath).catch(() => null);
     const stillRunning = probed ?? res.ok === false;
     if (stillRunning === true) {
       // Stop genuinely failed — the container is still training.

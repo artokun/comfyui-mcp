@@ -1519,6 +1519,49 @@ describe("pod target (P4)", () => {
     expect(mod.hasActiveTrainingJob("pod")).toBe(true); // still honestly busy
   });
 
+  it("a pod cancel is scoped to THIS job's config — an unrelated run.py can't fake still-running (#263)", async () => {
+    // A running pod job owned by a live process (so refresh won't orphan-recover
+    // it). The stop pkills only `run.py <thisConfig>`; the post-stop liveness
+    // probe MUST be scoped to the SAME config path. If it were unscoped, an
+    // UNRELATED run.py alive on the pod (another registry / manual launch) would
+    // report RUNNING and falsely revert this cancel to "running" — which then
+    // keeps suppressing pod idle auto-stop. This models exactly that: the probe
+    // answers "gone" only when handed this job's config path, "alive" otherwise.
+    mkdirSync(mod.jobsRoot(), { recursive: true });
+    const jobDir = join(mod.jobsRoot(), "tpodcancel1");
+    writeFileSync(join(mod.jobsRoot(), "tpodcancel1.json"), JSON.stringify({
+      id: "tpodcancel1", name: "scoped_lora", flow: "character", model: "flux1-dev",
+      status: "running", progress: { samples: [] },
+      containerName: "pod|root@203.0.113.10|23456", target: "pod",
+      ownerPid: process.ppid, // alive owner + fresh lease → not orphan-recovered
+      datasetPath: join(mod.datasetsRoot(), "dataset"), jobDir,
+      outputDir: join(jobDir, "output"), log: [],
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    }));
+    const expectedConfig = "/workspace/training/jobs/tpodcancel1/config.yml";
+    const probedWith: Array<string | undefined> = [];
+    const stoppedWith: Array<string | undefined> = [];
+    const after = await mod.cancelJob("tpodcancel1", {
+      // Scope-aware: run.py for THIS job's config is gone (false); an unrelated
+      // run.py is alive, so an UNSCOPED probe (no config path) would say true.
+      containerRunning: async (_name: string, remoteConfigPath?: string) => {
+        probedWith.push(remoteConfigPath);
+        return remoteConfigPath === expectedConfig ? false : true;
+      },
+      stopTraining: async (name: string, remoteConfigPath?: string) => {
+        stoppedWith.push(remoteConfigPath);
+        return { ok: true as const, command: "train_cancel" as const, data: { stopped: name } };
+      },
+    });
+    // Cancel stuck — NOT reverted to running by the unrelated run.py.
+    expect(after.status).toBe("cancelled");
+    // Both the kill and the post-stop liveness probe were scoped to this job.
+    expect(stoppedWith).toContain(expectedConfig);
+    expect(probedWith).toContain(expectedConfig);
+    expect(probedWith.every((c) => c === expectedConfig)).toBe(true); // never unscoped
+    expect(mod.hasActiveTrainingJob("pod")).toBe(false); // auto-stop unblocked
+  });
+
   it("the one-run limit is per POD, not global (pod B is free while pod A trains)", async () => {
     const podA = podDeps();
     await mod.startTrainingJob(
