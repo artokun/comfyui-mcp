@@ -1172,6 +1172,12 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           })
           .optional()
           .describe("Optional filter hints: period, a sort, and base-model names (e.g. ['Flux.1 D'])."),
+        dock: z
+          .boolean()
+          .optional()
+          .describe(
+            "Side-dock the browser beside the chat instead of a centered overlay, so chat and results stay visible together while you drive it. Default true (agent-opened browsers dock). Set false to force the old full-screen centered overlay.",
+          ),
       },
       async (args: A, ctx) =>
         ctx.call(
@@ -1181,9 +1187,131 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             tab: args.tab,
             browsingLevels: args.browsingLevels,
             filters: args.filters,
+            dock: args.dock,
           },
           10000,
         ),
+    ),
+    def(
+      "panel_civitai_results",
+      "READ the CivitAI browser's CURRENT results as text (metadata + media URLs only — you will NOT be shown the images; you reason from the text and pick which URLs matter). Open the browser first with panel_open_civitai. Returns, per result: id, kind (media|model), title, creator, baseModel|type, stats, prompt/description, and the media URL(s). Use this to see what's on screen before you highlight, switch tabs, or open the lightbox. If a fetch is still in flight the panel reports what it has so far. The browser must be open — otherwise the panel replies with an honest error.",
+      {
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(50)
+          .optional()
+          .describe("Max results to serialize (1–50, default 20). The grid is ordered as shown to the user."),
+      },
+      async (args: A, ctx) => ctx.call({ cmd: "civitai_results", limit: args.limit }, 10000),
+    ),
+    def(
+      "panel_civitai_highlight",
+      "Draw the user's attention to specific results by wrapping their cards in a glowing green outline (and scrolling the first into view) — this is how you say 'these are the ones I mean.' Call panel_civitai_results FIRST to get the ids. Pass a LIST of ids to light up several at once ('these three'). The browser must be open — otherwise the panel replies with an honest error. Non-destructive; it only changes what's highlighted, never downloads or selects.",
+      {
+        ids: z
+          .array(z.union([z.string(), z.number()]))
+          .min(1)
+          .describe("Result ids to glow green (from panel_civitai_results). Pass several to highlight a set."),
+        kind: z
+          .enum(["media", "model"])
+          .optional()
+          .describe("Which result kind these ids refer to (media = images/videos, model = checkpoints/loras/workflows). Match the active tab if omitted."),
+      },
+      async (args: A, ctx) => ctx.call({ cmd: "civitai_highlight", ids: args.ids, kind: args.kind }, 10000),
+    ),
+    def(
+      "panel_civitai_clear_highlight",
+      "Remove any green highlight glow from the CivitAI results — clears what panel_civitai_highlight set. The browser must be open — otherwise the panel replies with an honest error.",
+      {},
+      async (_args: A, ctx) => ctx.call({ cmd: "civitai_clear_highlight" }, 10000),
+    ),
+    def(
+      "panel_civitai_switch_tab",
+      "Switch the OPEN CivitAI browser to a different tab (crossfades and re-fetches that tab's results). Use to move between images, videos, checkpoints, loras, workflows, or the user's favorites while driving the browse. Follow with panel_civitai_results to read what loaded. The browser must be open — otherwise the panel replies with an honest error.",
+      {
+        tab: z
+          .enum(["images", "videos", "checkpoints", "loras", "workflows", "favorites"])
+          .describe("The tab to switch to."),
+      },
+      async (args: A, ctx) => ctx.call({ cmd: "civitai_switch_tab", tab: args.tab }, 10000),
+    ),
+    def(
+      "panel_civitai_search",
+      "Run a NEW search inside the already-open CivitAI browser (re-queries the current tab with a fresh term and optional filters). Use this to refine or pivot the browse after reading results — e.g. narrow by base model or change the sort. Follow with panel_civitai_results to read the new results. To open the browser in the first place, use panel_open_civitai instead. The browser must be open — otherwise the panel replies with an honest error.",
+      {
+        query: z.string().describe("The new search term (e.g. 'ghibli background', 'Flux portrait')."),
+        filters: z
+          .object({
+            period: z.string().optional().describe("Time window filter (e.g. 'Week', 'Month', 'AllTime')."),
+            modelSort: z.string().optional().describe("Sort for model tabs (e.g. 'Most Downloaded')."),
+            imageSort: z.string().optional().describe("Sort for image/video tabs (e.g. 'Most Reactions')."),
+            baseModels: z.array(z.string()).optional().describe("Base-model names to filter to (e.g. ['Flux.1 D'])."),
+          })
+          .optional()
+          .describe("Optional filters applied to this search."),
+      },
+      async (args: A, ctx) => ctx.call({ cmd: "civitai_search", query: args.query, filters: args.filters }, 10000),
+    ),
+    def(
+      "panel_civitai_open_lightbox",
+      "Open the full-size lightbox viewer for one result by id, so the user gets a big look at that specific image/video. Get the id from panel_civitai_results. Use sparingly — as the finishing flourish after you've highlighted your pick. The browser must be open — otherwise the panel replies with an honest error.",
+      {
+        id: z
+          .union([z.string(), z.number()])
+          .describe("The result id to open in the lightbox (from panel_civitai_results)."),
+      },
+      async (args: A, ctx) => ctx.call({ cmd: "civitai_open_lightbox", id: args.id }, 10000),
+    ),
+    def(
+      "panel_training_open",
+      "Open the in-panel LoRA/model TRAINING wizard for the user, so they can configure and launch a training run visually while you guide them. Opens side-docked beside the chat by default so the wizard and chat stay visible together. After it's open, drive it with panel_training_set_field, panel_training_goto_step, panel_training_set_target, and panel_training_highlight. This only OPENS and configures the wizard — it never starts a run; the user confirms and launches training themselves.",
+      {
+        dock: z
+          .boolean()
+          .optional()
+          .describe("Side-dock the wizard beside chat (default true). Set false for the centered overlay."),
+      },
+      async (args: A, ctx) => ctx.call({ cmd: "open_training", dock: args.dock }, 10000),
+    ),
+    def(
+      "panel_training_set_field",
+      "Set one field in the OPEN training wizard (e.g. a name, base model, learning rate, step count, dataset path). Use this to fill the form for the user as you walk them through setup. Open the wizard first with panel_training_open. This configures only — it never launches training. The wizard must be open — otherwise the panel replies with an honest error.",
+      {
+        name: z.string().describe("The field name/key to set (as the wizard labels it, e.g. 'learning_rate', 'name')."),
+        value: z
+          .union([z.string(), z.number(), z.boolean()])
+          .describe("The value to set (string, number, or boolean depending on the field)."),
+      },
+      async (args: A, ctx) => ctx.call({ cmd: "training_set_field", name: args.name, value: args.value }, 10000),
+    ),
+    def(
+      "panel_training_goto_step",
+      "Navigate the OPEN training wizard to a specific step (0-based) — move the user forward/back through the setup flow as you explain each stage. Open the wizard first with panel_training_open. The wizard must be open — otherwise the panel replies with an honest error.",
+      {
+        step: z.number().int().min(0).describe("The step index to jump to (0-based)."),
+      },
+      async (args: A, ctx) => ctx.call({ cmd: "training_goto_step", step: args.step }, 10000),
+    ),
+    def(
+      "panel_training_set_target",
+      "Set WHERE the training run will execute — 'local' (this machine) or 'pod' (a remote GPU pod). Use this in the wizard to steer the user toward the right compute for their job. Open the wizard first with panel_training_open. This only configures the target; it never launches the run. The wizard must be open — otherwise the panel replies with an honest error.",
+      {
+        target: z.enum(["local", "pod"]).describe("Execution target: 'local' machine or remote 'pod'."),
+      },
+      async (args: A, ctx) => ctx.call({ cmd: "training_set_target", target: args.target }, 10000),
+    ),
+    def(
+      "panel_training_highlight",
+      "Draw the user's attention to specific parts of the OPEN training wizard (steps or fields) with a glowing green outline — this is how you point at 'set this here.' Pass a LIST of refs to light up several. Open the wizard first with panel_training_open. Non-destructive. The wizard must be open — otherwise the panel replies with an honest error.",
+      {
+        refs: z
+          .array(z.string())
+          .min(1)
+          .describe("Wizard step/field refs to glow green (as the wizard labels them). Pass several to highlight a set."),
+      },
+      async (args: A, ctx) => ctx.call({ cmd: "training_highlight", refs: args.refs }, 10000),
     ),
     def(
       "panel_ask",

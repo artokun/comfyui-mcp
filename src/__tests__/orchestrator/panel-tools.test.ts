@@ -555,6 +555,152 @@ describe("panel_connect slot aliases (live panel finding: stripped aliases → a
   });
 });
 
+describe("panel-tools: agent-driven CivitAI + training modals", () => {
+  it("registers every new drive tool in the shared def list", () => {
+    const names = buildPanelToolDefs().map((d) => d.name);
+    for (const expected of [
+      "panel_civitai_results",
+      "panel_civitai_highlight",
+      "panel_civitai_clear_highlight",
+      "panel_civitai_switch_tab",
+      "panel_civitai_search",
+      "panel_civitai_open_lightbox",
+      "panel_training_open",
+      "panel_training_set_field",
+      "panel_training_goto_step",
+      "panel_training_set_target",
+      "panel_training_highlight",
+    ]) {
+      expect(names).toContain(expected);
+    }
+  });
+
+  it("panel_open_civitai forwards a dock flag alongside the existing args", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_open_civitai").handler({ query: "flux", dock: true }, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "open_civitai", query: "flux", dock: true });
+  });
+
+  it("panel_civitai_results forwards civitai_results with limit and clamps the range", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_civitai_results").handler({ limit: 20 }, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "civitai_results", limit: 20 });
+    const limit = defByName("panel_civitai_results").schema.limit as {
+      safeParse: (v: unknown) => { success: boolean };
+    };
+    expect(limit.safeParse(0).success).toBe(false);
+    expect(limit.safeParse(51).success).toBe(false);
+    expect(limit.safeParse(undefined).success).toBe(true);
+  });
+
+  it("panel_civitai_highlight forwards ids + kind, and requires at least one id", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_civitai_highlight").handler({ ids: [1, "abc"], kind: "media" }, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "civitai_highlight", ids: [1, "abc"], kind: "media" });
+    const ids = defByName("panel_civitai_highlight").schema.ids as {
+      safeParse: (v: unknown) => { success: boolean };
+    };
+    expect(ids.safeParse([]).success).toBe(false);
+    const kind = defByName("panel_civitai_highlight").schema.kind as {
+      safeParse: (v: unknown) => { success: boolean };
+    };
+    expect(kind.safeParse("model").success).toBe(true);
+    expect(kind.safeParse("nope").success).toBe(false);
+  });
+
+  it("panel_civitai_clear_highlight forwards civitai_clear_highlight with no args", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    expect(Object.keys(defByName("panel_civitai_clear_highlight").schema)).toEqual([]);
+    await defByName("panel_civitai_clear_highlight").handler({}, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "civitai_clear_highlight" });
+  });
+
+  it("panel_civitai_switch_tab forwards civitai_switch_tab with a real tab enum", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_civitai_switch_tab").handler({ tab: "loras" }, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "civitai_switch_tab", tab: "loras" });
+    const tab = defByName("panel_civitai_switch_tab").schema.tab as {
+      safeParse: (v: unknown) => { success: boolean };
+    };
+    expect(tab.safeParse("favorites").success).toBe(true);
+    expect(tab.safeParse("nope").success).toBe(false);
+  });
+
+  it("panel_civitai_search forwards query + filters", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_civitai_search").handler(
+      { query: "ghibli", filters: { baseModels: ["Flux.1 D"] } },
+      ctx,
+    );
+    expect(calls[0]).toMatchObject({
+      cmd: "civitai_search",
+      query: "ghibli",
+      filters: { baseModels: ["Flux.1 D"] },
+    });
+  });
+
+  it("panel_civitai_open_lightbox forwards civitai_open_lightbox with a string|number id", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_civitai_open_lightbox").handler({ id: 42 }, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "civitai_open_lightbox", id: 42 });
+    const id = defByName("panel_civitai_open_lightbox").schema.id as {
+      safeParse: (v: unknown) => { success: boolean };
+    };
+    expect(id.safeParse("abc").success).toBe(true);
+    expect(id.safeParse(1).success).toBe(true);
+  });
+
+  it("panel_training_open forwards open_training with an optional dock flag", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_training_open").handler({ dock: false }, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "open_training", dock: false });
+  });
+
+  it("panel_training_set_field forwards name + value (string|number|boolean)", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_training_set_field").handler({ name: "learning_rate", value: 0.0004 }, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "training_set_field", name: "learning_rate", value: 0.0004 });
+    const value = defByName("panel_training_set_field").schema.value as {
+      safeParse: (v: unknown) => { success: boolean };
+    };
+    expect(value.safeParse("adamw").success).toBe(true);
+    expect(value.safeParse(true).success).toBe(true);
+    expect(value.safeParse({}).success).toBe(false);
+  });
+
+  it("panel_training_goto_step forwards a 0-based int step", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_training_goto_step").handler({ step: 2 }, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "training_goto_step", step: 2 });
+    const step = defByName("panel_training_goto_step").schema.step as {
+      safeParse: (v: unknown) => { success: boolean };
+    };
+    expect(step.safeParse(-1).success).toBe(false);
+    expect(step.safeParse(1.5).success).toBe(false);
+  });
+
+  it("panel_training_set_target forwards a local|pod enum", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_training_set_target").handler({ target: "pod" }, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "training_set_target", target: "pod" });
+    const target = defByName("panel_training_set_target").schema.target as {
+      safeParse: (v: unknown) => { success: boolean };
+    };
+    expect(target.safeParse("local").success).toBe(true);
+    expect(target.safeParse("cloud").success).toBe(false);
+  });
+
+  it("panel_training_highlight forwards refs and requires at least one", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_training_highlight").handler({ refs: ["step:2", "field:lr"] }, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "training_highlight", refs: ["step:2", "field:lr"] });
+    const refs = defByName("panel_training_highlight").schema.refs as {
+      safeParse: (v: unknown) => { success: boolean };
+    };
+    expect(refs.safeParse([]).success).toBe(false);
+  });
+});
+
 describe("panel-tools: strip/slice read the live canvas by default", () => {
   const CANVAS_GRAPH = {
     nodes: [
