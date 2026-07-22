@@ -192,6 +192,32 @@ describe("panel-secrets (canonical .env store)", () => {
       expect(migrated).not.toContain("CIVITAI_API_TOKEN"); // skipped (already present)
       delete process.env.COMFYUI_MCP_PANEL_SECRETS;
     });
+
+    it("removeEnvSecret PURGES the legacy JSON so a revoked key can't resurrect (#269)", async () => {
+      const { writeFileSync } = require("node:fs");
+      const jsonPath = join(dir, "panel-secrets.json");
+      process.env.COMFYUI_MCP_PANEL_SECRETS = jsonPath;
+      writeFileSync(
+        jsonPath,
+        JSON.stringify({ comfyuiEnv: { CIVITAI_API_TOKEN: "civ-legacy" }, agentEnv: { OPENROUTER_API_KEY: "or-legacy" } }),
+      );
+      writeFileSync(envPath, "CIVITAI_API_TOKEN=civ-legacy\n");
+      process.env.CIVITAI_API_TOKEN = "civ-legacy";
+
+      const { removeEnvSecret, migrateSecretsToEnv } = await import("../../services/panel-secrets.js");
+      expect(removeEnvSecret("CIVITAI_API_TOKEN")).toBe(true);
+      // Gone from .env AND from the JSON map.
+      expect(readFileSync(envPath, "utf-8")).not.toMatch(/CIVITAI_API_TOKEN/);
+      const json = JSON.parse(readFileSync(jsonPath, "utf-8"));
+      expect(json.comfyuiEnv.CIVITAI_API_TOKEN).toBeUndefined();
+      expect(json.agentEnv.OPENROUTER_API_KEY).toBe("or-legacy"); // untouched
+      // A subsequent boot migration must NOT bring the revoked key back.
+      delete process.env.CIVITAI_API_TOKEN;
+      const migrated = migrateSecretsToEnv();
+      expect(migrated).not.toContain("CIVITAI_API_TOKEN");
+      expect(process.env.CIVITAI_API_TOKEN).toBeUndefined();
+      delete process.env.COMFYUI_MCP_PANEL_SECRETS;
+    });
   });
 
   describe("agent-secret allowlist (provider keys)", () => {

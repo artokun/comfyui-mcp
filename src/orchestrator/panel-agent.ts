@@ -734,12 +734,14 @@ export class PanelAgent {
         logger.error(`[panel-agent ${this.short()}] stream error: ${emsg}`);
         // A resume whose target session no longer exists — e.g. the orchestrator was
         // relaunched from a different cwd, or the session transcript was pruned —
-        // fails with "No conversation found with session ID: <id>". Retrying the SAME
-        // resume just loops until the give-up threshold trips and self-exits the whole
-        // orchestrator (a live bridge left serving a permanently-dead agent). Drop the
-        // dead resume target so the NEXT iteration starts a FRESH session and
+        // fails with "No conversation found with session ID: <id>". Current Codex
+        // can instead report "no rollout found for thread id <uuid>" for the same
+        // pruned/missing-target condition (#277). Retrying the SAME resume just
+        // loops until the give-up threshold trips and self-exits the whole
+        // orchestrator (a live bridge left serving a permanently-dead agent). Drop
+        // the dead resume target so the NEXT iteration starts a FRESH session and
         // self-heals; queued messages (this.queue) survive and replay.
-        if (/No conversation found with session ID/i.test(emsg)) {
+        if (/(?:No conversation found with session ID|no rollout found for thread id)/i.test(emsg)) {
           logger.warn(
             `[panel-agent ${this.short()}] resume target is gone — starting a fresh session`,
           );

@@ -677,14 +677,16 @@ const CALL_TOOL_WHITELIST = new Set<string>([
   "train_cancel",
   // RunPod control panel (desktop + mobile): the one-tap pod lifecycle + the
   // local⇄pod host switch. Read-only status/list/troubleshoot plus the
-  // user-initiated lifecycle actions (create/start/stop/connect/use_local/
-  // watch/unwatch) and the referral deploy link. Each tool validates its own
-  // pod state; the whitelist only gates reachability from a canvas-less client.
+  // user-initiated lifecycle actions (start/stop/connect/use_local/watch/
+  // unwatch) and the referral deploy link. Each tool validates its own pod
+  // state; the whitelist only gates reachability from a canvas-less client.
+  // NOTE: runpod_pod_create is deliberately EXCLUDED (#269) — deploying a pod
+  // is a BILLED mutation, so it must go through an agent turn / explicit UI
+  // action, never the confirmation-less direct call_tool channel.
   "runpod_pod_status",
   "runpod_list_pods",
   "runpod_pod_start",
   "runpod_pod_stop",
-  "runpod_pod_create",
   "runpod_pod_connect",
   "runpod_pod_troubleshoot",
   "runpod_use_local",
@@ -3352,13 +3354,15 @@ export async function runPanelOrchestrator(): Promise<void> {
   })();
   initRunpodWatcher({
     push: (frame) => void bridge.push(frame),
-    comfyuiIdle: () => {
+    comfyuiIdle: (podId) => {
       const s = QueueMonitor.snapshot();
-      // NOT idle while a training job is alive on the pod: training isn't a
+      // NOT idle while a training job is alive on THIS pod: training isn't a
       // ComfyUI queue job, so the queue alone would call an hours-long LoRA
       // run "idle" and auto-stop the pod mid-flight (P4 guard; review finding
-      // on the connector). hasActiveTrainingJob is a probe-free file scan.
-      return s.connected && !s.running && s.queueDepth === 0 && !hasActiveTrainingJob("pod");
+      // on the connector). hasActiveTrainingJob is a probe-free file scan,
+      // scoped to the watched pod so a run on another pod doesn't suppress
+      // this pod's idle-stop (codex #274).
+      return s.connected && !s.running && s.queueDepth === 0 && !hasActiveTrainingJob("pod", podId);
     },
     // Idle auto-stop only applies to a pod we're actually rendering on: the active
     // ComfyUI target is that pod's proxy (its id appears in the URL). A pod we

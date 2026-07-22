@@ -61,8 +61,10 @@ const CLEARED_FRAME: RunpodStatusFrame = {
 export interface RunpodWatcherDeps {
   /** Broadcast a frame to all panel/mobile tabs (the bridge's fire-and-forget push). */
   push: (frame: Record<string, unknown>) => void;
-  /** True when the ACTIVE ComfyUI target's queue is empty and nothing is running. */
-  comfyuiIdle: () => boolean;
+  /** True when the ACTIVE ComfyUI target's queue is empty and nothing is
+   *  running. Receives the WATCHED pod id so the predicate can scope
+   *  "busy training" to this exact pod (codex #274). */
+  comfyuiIdle: (podId: string) => boolean;
   /** True only when comfyui-mcp is CURRENTLY rendering on this pod (its ComfyUI is
    *  the active target). Idle auto-stop applies ONLY then — a pod we merely watch
    *  (e.g. while it boots, before connect) must never be stopped on the LOCAL
@@ -190,7 +192,7 @@ export function createRunpodWatcher(deps: RunpodWatcherDeps): RunpodWatcher {
     const running = pod.desiredStatus === "RUNNING" && !!pod.runtime;
     let idleSeconds: number | null = null;
     let autostopIn: number | null = null;
-    if (running && deps.renderingOnPod(target) && deps.comfyuiIdle()) {
+    if (running && deps.renderingOnPod(target) && deps.comfyuiIdle(target)) {
       if (idleSinceMs == null) idleSinceMs = now();
       idleSeconds = Math.floor((now() - idleSinceMs) / 1000);
       if (idleStopMs > 0) {

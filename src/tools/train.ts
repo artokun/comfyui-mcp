@@ -147,6 +147,7 @@ export function registerTrainTools(server: McpServer): void {
     async (args) => {
       try {
         let podEndpoint: import("../services/runpod-ssh.js").PodSshEndpoint | undefined;
+        let podId: string | undefined;
         if (args.target === "pod") {
           const pod = await resolvePodForTraining(args.pod_id);
           if (typeof pod === "string") return textEnvelope({ ok: false, error: { code: "no_pod", message: pod } });
@@ -156,6 +157,7 @@ export function registerTrainTools(server: McpServer): void {
             return textEnvelope({ ok: false, error: { code: "no_ssh", message: `Pod ${pod.id} has no public SSH endpoint (not running, or the template doesn't expose port 22/tcp).` } });
           }
           podEndpoint = ep;
+          podId = pod.id;
         } else {
           if (!(await dockerAvailable())) {
             return textEnvelope({ ok: false, error: { code: "no_docker", message: "Docker daemon not reachable — start Docker Desktop / the docker engine, then re-run. See train_doctor." } });
@@ -174,6 +176,7 @@ export function registerTrainTools(server: McpServer): void {
           device: args.device,
           target: args.target,
           podEndpoint,
+          podId,
           deliverTo: args.deliverTo,
           modelPath: args.model_path,
         });

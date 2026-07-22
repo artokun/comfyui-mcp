@@ -369,7 +369,17 @@ async function reconcileCreatedPod(
 export async function createPod(opts: RunpodCreateOptions = {}): Promise<RunpodPod> {
   const gpuTypeIds = opts.gpuTypeIds?.length ? opts.gpuTypeIds : RUNPOD_DEFAULT_GPU_TYPES;
   const cloudTypes: Array<"COMMUNITY" | "SECURE"> = opts.cloudType ? [opts.cloudType] : ["COMMUNITY", "SECURE"];
-  const name = opts.name ?? "comfyui-mcp";
+  // Mis-attribution mitigation (#276): pod name is NOT unique, so a shared
+  // default ("comfyui-mcp") let a lost-response reconcile claim a CONCURRENT
+  // caller's same-named pod. RunPod exposes no per-create idempotency token, so
+  // instead we default to a UNIQUE deploy name — then reconcileCreatedPod's
+  // `name` filter attributes exactly THIS call's pod and concurrent creates no
+  // longer collide. An explicitly-passed name keeps its old (shared) semantics:
+  // the caller opted in.
+  const name = opts.name ?? `comfyui-mcp-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  // Ensure deployOnce sends the SAME name we reconcile against (its own default
+  // would otherwise be the shared "comfyui-mcp").
+  opts = { ...opts, name };
   // Snapshot the ids of pods ALREADY carrying the requested name, so post-failure
   // reconciliation can tell a pod THIS call created apart from a pre-existing one.
   let priorIds: Set<string> | null = null;

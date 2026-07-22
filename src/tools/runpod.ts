@@ -318,6 +318,13 @@ export function registerRunpodTools(server: McpServer): void {
         if (!probeRes.ok) {
           return { content: [{ type: "text", text: `Pod \`${pod.id}\` exposes ComfyUI but it isn't answering yet at ${url} (${probeRes.status ?? probeRes.error}). It may still be booting — wait ~30s, or run runpod_pod_troubleshoot.` }] };
         }
+        // Readiness needs MORE than /system_stats (#269): a ComfyUI whose core is
+        // up but whose queue/prompt endpoint is broken would answer /system_stats
+        // yet fail every render. Verify /queue answers too before declaring ready.
+        const queueProbe = await probe(`${url}/queue`);
+        if (!queueProbe.ok) {
+          return { content: [{ type: "text", text: `Pod \`${pod.id}\` answers /system_stats but its queue endpoint isn't ready at ${url} (${queueProbe.status ?? queueProbe.error}) — ComfyUI may still be initializing. Wait ~30s, or run runpod_pod_troubleshoot.` }] };
+        }
         const applied = setComfyuiTarget(url);
         if (!applied) return { content: [{ type: "text", text: `Resolved ${url} but could not retarget (unexpected URL parse failure).` }] };
         resetClient();

@@ -87,6 +87,11 @@ export interface TrainingJob {
   target?: "local" | "pod";
   /** Pod jobs: where the finished LoRA is delivered (default "both"). */
   deliverTo?: "pod" | "local" | "both";
+  /** RunPod pod id this job runs on (target "pod"). Lets the idle auto-stop
+   *  scope "is a pod busy training?" to the SPECIFIC watched pod — a run on
+   *  pod A must not suppress the idle-stop of pod B (codex #274). Absent on
+   *  pre-#274 records → treated as busy-for-any-pod (cost-safe). */
+  podId?: string;
   /** Pid of the MCP process that launched the container — the ONLY process
    *  allowed to finalize it. Other processes may recover an orphaned job only
    *  when this owner is provably dead (train_status stays side-effect-free for
@@ -530,6 +535,16 @@ async function acquireJobLock(id: string, budgetMs = LOCK_WAIT_MS): Promise<bool
   return acquireLock(lockFile(id), budgetMs);
 }
 
+/** Cross-process reservation lock keyed by a POD ENDPOINT (codex #273). Held
+ *  across the one-run-per-pod scan→persist→launch in startTrainingJob so two
+ *  MCP processes can't both pass the disk scan and double-launch run.py on the
+ *  same pod. The endpoint encoding (`pod|user@host|port`) is sanitized into a
+ *  filename-safe key. */
+function podReservationLockFile(endpoint: PodSshEndpoint): string {
+  const key = encodePodContainerName(endpoint).replace(/[^A-Za-z0-9._-]+/g, "_");
+  return join(jobsRoot(), `.pod-reserve-${key}.lock`);
+}
+
 /** Release a lock — delete the file only if it still carries OUR token, and
  *  only through the SAME claim channel stale takeover uses (codex finding: a
  *  preempted-and-resumed holder's token-check → rm otherwise races a takeover
@@ -863,11 +878,19 @@ export function defaultTrainingStop(name: string, remoteConfigPath?: string): Re
  *  those is alive (the pod is busy training even when the ComfyUI queue is
  *  empty). Stale records err toward "busy" (pod stays up — the cost-safe
  *  direction for a false negative would be the expensive one). */
-export function hasActiveTrainingJob(target?: "pod"): boolean {
+export function hasActiveTrainingJob(target?: "pod", podId?: string): boolean {
   return scanJobRecords().some((j) => {
     if (j.status !== "running" && j.status !== "queued") return false;
     if (!target) return true;
-    return j.target === target || j.containerName?.startsWith("pod|") === true;
+    const isPodJob = j.target === "pod" || j.containerName?.startsWith("pod|") === true;
+    if (!isPodJob) return false;
+    // Scope to a SPECIFIC pod when the caller names one AND this record knows
+    // its pod (codex #274): a run on pod A must not suppress pod B's idle-stop.
+    // A record with no podId (pre-#274) can't be attributed to a pod, so it
+    // errs toward "busy" for every pod — the cost-safe direction (never stop a
+    // maybe-live training run mid-flight).
+    if (podId && j.podId) return j.podId === podId;
+    return true;
   });
 }
 
@@ -1053,6 +1076,9 @@ export interface StartJobInput {
   target?: "local" | "pod";
   /** SSH endpoint of the target pod (target "pod"). */
   podEndpoint?: PodSshEndpoint;
+  /** RunPod pod id (target "pod") — persisted so the idle auto-stop can scope
+   *  "busy training" to this exact pod (codex #274). */
+  podId?: string;
   /** Pod jobs: where the finished LoRA lands (default "both"). */
   deliverTo?: "pod" | "local" | "both";
   /** Override for the base model path as the trainer sees it (e.g. a pod-local
@@ -1190,7 +1216,24 @@ async function handoffToComfyUI(job: TrainingJob, deps: TrainingJobDeps): Promis
     const lorasDir = job.lorasDir ?? (deps.lorasDir ? deps.lorasDir() : resolveModelSubfolder("loras"));
     mkdirSync(lorasDir, { recursive: true });
     dest = join(lorasDir, `${job.name}.safetensors`);
-    copyFileSync(produced, dest);
+    // Atomic publish (codex #268): a straight copyFileSync onto dest lets
+    // ComfyUI's models/loras scan observe a HALF-WRITTEN file, and a same-name
+    // collision clobbers an existing LoRA silently. Copy to a tmp sibling on the
+    // SAME volume, then rename over dest — rename is atomic (libuv uses
+    // MOVEFILE_REPLACE_EXISTING on Windows), so a reader sees either the old or
+    // the complete new file, never a partial one. Overwriting an existing name
+    // (a legit retrain) is allowed but logged so it's not silent.
+    if (existsSync(dest)) {
+      logger.warn(`[training-jobs] overwriting existing LoRA ${dest} (retrain of "${job.name}")`);
+    }
+    const tmpDest = join(lorasDir, `.${job.name}.safetensors.tmp-${process.pid}-${Date.now()}`);
+    copyFileSync(produced, tmpDest);
+    try {
+      renameSync(tmpDest, dest);
+    } catch (err) {
+      try { rmSync(tmpDest, { force: true }); } catch { /* best effort */ }
+      throw err;
+    }
   }
 
   // Pod-side delivery: the LoRA lands in the pod's own models/loras so it's
@@ -1370,6 +1413,11 @@ async function finalizeJob(job: TrainingJob, code: number, tail: string, deps: T
  * here than after an hours-long run.
  */
 export async function startTrainingJob(input: StartJobInput, deps: TrainingJobDeps = {}): Promise<TrainingJob> {
+  // Pod reservation lock (codex #273): held from the one-run-per-pod scan
+  // through the launch so a second process can't double-launch on this pod.
+  // Released on EVERY exit path by the finally at the end of the function.
+  let podReserveLock: string | null = null;
+  try {
   const start = deps.startTraining ?? startTraining;
   const now = deps.now ?? (() => Date.now());
   const datasetPath = resolve(input.datasetPath);
@@ -1396,6 +1444,15 @@ export async function startTrainingJob(input: StartJobInput, deps: TrainingJobDe
     if (!(await sshWorks(input.podEndpoint))) {
       throw new Error(`pod SSH unreachable at ${input.podEndpoint.userHost}:${input.podEndpoint.port} (key-only auth must be set up — the pod template injects $PUBLIC_KEY at boot)`);
     }
+    // Cross-process serialization (codex #273): acquire a pod-scoped lock BEFORE
+    // the scan and hold it through persist+launch, so two MCP processes can't
+    // both pass the disk scan (scan→persist has no in-process yield, so the race
+    // is purely cross-process) and double-launch run.py on this pod.
+    const reserveFile = podReservationLockFile(input.podEndpoint);
+    if (!(await acquireLock(reserveFile, deps.lockBudgetMs ?? LOCK_WAIT_MS))) {
+      throw new Error(`another train_start is already reserving pod ${input.podEndpoint.userHost}:${input.podEndpoint.port} — retry in a moment`);
+    }
+    podReserveLock = reserveFile;
     // One training run per pod at a time (its GPU saturates; a second run.py
     // would also make the remote pkill pattern ambiguous). Probe-free DISK
     // scan scoped to THIS pod's endpoint — a restart or a second MCP process
@@ -1448,6 +1505,7 @@ export async function startTrainingJob(input: StartJobInput, deps: TrainingJobDe
     containerName: isPod ? encodePodContainerName(input.podEndpoint!) : `comfyui-train-${id}`,
     target,
     deliverTo: input.deliverTo ?? "both",
+    podId: input.podId,
     ownerPid: process.pid,
     datasetPath,
     jobDir,
@@ -1608,6 +1666,9 @@ export async function startTrainingJob(input: StartJobInput, deps: TrainingJobDe
   job.updatedAt = new Date().toISOString();
   persist(job);
   return job;
+  } finally {
+    if (podReserveLock) releaseLock(podReserveLock);
+  }
 }
 
 /** Stop the container and mark the job cancelled. Idempotent. Works

@@ -154,7 +154,9 @@ describe("createPod (GPU fallback + billing safety)", () => {
       );
     });
     global.fetch = fetchMock as unknown as typeof fetch;
-    const pod = await createPod({ gpuTypeIds: ["GPU-A", "GPU-B"] });
+    // Explicit name → the shared-name reconcile path (the default name is now
+    // unique per create; #276). reconcileCreatedPod matches on this name.
+    const pod = await createPod({ gpuTypeIds: ["GPU-A", "GPU-B"], name: "comfyui-mcp" });
     expect(pod.id).toBe("ghost-pod"); // reconciled, not re-created
     expect(deployAttempts).toBe(1); // NEVER retried the billed mutation
   });
@@ -193,7 +195,9 @@ describe("createPod (GPU fallback + billing safety)", () => {
             ]),
       );
     }) as unknown as typeof fetch;
-    await expect(createPod({ gpuTypeIds: ["GPU-A"] })).rejects.toThrow(/concurrent create|2 new pods|can't be determined/i);
+    // Explicit shared name reproduces the concurrent same-name race (the default
+    // is unique now, #276). Both pods carry this name → ambiguous, fail closed.
+    await expect(createPod({ gpuTypeIds: ["GPU-A"], name: "comfyui-mcp" })).rejects.toThrow(/concurrent create|2 new pods|can't be determined/i);
   });
 
   it("reconciliation ignores same-named pods that existed BEFORE the call", async () => {
@@ -206,7 +210,27 @@ describe("createPod (GPU fallback + billing safety)", () => {
       return gqlResponse(listOf([preExisting])); // same list before and after
     });
     global.fetch = fetchMock as unknown as typeof fetch;
-    await expect(createPod({ gpuTypeIds: ["GPU-A"] })).rejects.toThrow(/could not be confirmed|NOT retrying/i);
+    await expect(createPod({ gpuTypeIds: ["GPU-A"], name: "comfyui-mcp" })).rejects.toThrow(/could not be confirmed|NOT retrying/i);
+  });
+
+  it("defaults to a UNIQUE deploy name so concurrent creates don't mis-attribute (#276)", async () => {
+    const names: string[] = [];
+    const { fetchMock } = mockGql((b) => {
+      if (b.query.includes("podFindAndDeployOnDemand")) {
+        const name = (b.variables.input as { name: string }).name;
+        names.push(name);
+        return { data: { podFindAndDeployOnDemand: { id: `p${names.length}`, name, desiredStatus: "RUNNING", costPerHr: 0.44, machine: null } } };
+      }
+      return emptyList;
+    });
+    await createPod({ gpuTypeIds: ["GPU-A"] });
+    await createPod({ gpuTypeIds: ["GPU-A"] });
+    expect(names).toHaveLength(2);
+    // Neither is the bare shared default, and the two differ.
+    expect(names[0]).not.toBe("comfyui-mcp");
+    expect(names[0]).toMatch(/^comfyui-mcp-/);
+    expect(names[0]).not.toBe(names[1]);
+    void fetchMock;
   });
 
   it("classifies errors: capacity/quota are provably-not-created; network/HTTP are not", () => {

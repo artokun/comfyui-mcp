@@ -11,6 +11,7 @@ import { describe, expect, it, beforeEach, vi } from "vitest";
 
 const hoisted = vi.hoisted(() => ({
   spawnEnvs: [] as Array<Record<string, string | undefined> | undefined>,
+  spawnArgs: [] as string[][],
 }));
 
 vi.mock("node:child_process", async (importOriginal) => {
@@ -21,6 +22,7 @@ vi.mock("node:child_process", async (importOriginal) => {
     ...actual,
     spawn: (_cmd: string, _args: string[], opts?: { env?: Record<string, string | undefined> }) => {
       hoisted.spawnEnvs.push(opts?.env);
+      hoisted.spawnArgs.push(_args ?? []);
       const proc = new EventEmitter() as EventEmitter & Record<string, unknown>;
       proc.pid = 4243;
       proc.exitCode = null;
@@ -51,6 +53,7 @@ import { CodexBackend } from "../../orchestrator/codex-backend.js";
 
 beforeEach(() => {
   hoisted.spawnEnvs.length = 0;
+  hoisted.spawnArgs.length = 0;
 });
 
 describe("CodexBackend spawn env (tool-secret scoping)", () => {
@@ -85,5 +88,18 @@ describe("CodexBackend spawn env (tool-secret scoping)", () => {
         else process.env[k] = v;
       }
     }
+  });
+
+  it("isolates the embedded app-server from the user's global Codex notify hook (#277)", async () => {
+    const backend = new CodexBackend({});
+    await backend.prepare().catch(() => {});
+    expect(hoisted.spawnArgs.length).toBeGreaterThanOrEqual(1);
+    const args = hoisted.spawnArgs[0];
+    // `-c notify=[]` must be present as adjacent argv entries.
+    let found = false;
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === "-c" && args[i + 1] === "notify=[]") found = true;
+    }
+    expect(found, "app-server args must include `-c notify=[]`").toBe(true);
   });
 });

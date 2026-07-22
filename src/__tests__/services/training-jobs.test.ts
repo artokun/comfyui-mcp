@@ -1427,6 +1427,65 @@ describe("pod target (P4)", () => {
     expect(mod.hasActiveTrainingJob("pod")).toBe(false);
   });
 
+  it("hasActiveTrainingJob scopes to the WATCHED pod id (#274)", async () => {
+    const { deps, d } = podDeps();
+    await mod.startTrainingJob(
+      { name: "scoped_pod", flow: "character", model: "flux1-dev", datasetPath: stageDataset(), target: "pod", podEndpoint: EP, podId: "pod-A" },
+      deps,
+    );
+    // Busy for its OWN pod, and for an unscoped query…
+    expect(mod.hasActiveTrainingJob("pod")).toBe(true);
+    expect(mod.hasActiveTrainingJob("pod", "pod-A")).toBe(true);
+    // …but NOT for a different pod — a run on pod-A must not suppress pod-B's
+    // idle auto-stop.
+    expect(mod.hasActiveTrainingJob("pod", "pod-B")).toBe(false);
+    d.resolve({ code: 0, tail: "" });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(mod.hasActiveTrainingJob("pod", "pod-A")).toBe(false);
+  });
+
+  it("serializes two concurrent starts for the SAME pod — exactly one wins (#273)", async () => {
+    const a = podDeps();
+    const b = podDeps();
+    const [r1, r2] = await Promise.allSettled([
+      mod.startTrainingJob(
+        { name: "race_a", flow: "character", model: "flux1-dev", datasetPath: stageDataset(), target: "pod", podEndpoint: EP },
+        a.deps,
+      ),
+      mod.startTrainingJob(
+        { name: "race_b", flow: "character", model: "flux1-dev", datasetPath: stageDataset(), target: "pod", podEndpoint: EP },
+        b.deps,
+      ),
+    ]);
+    const outcomes = [r1, r2];
+    expect(outcomes.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const rejected = outcomes.find((r) => r.status === "rejected") as PromiseRejectedResult;
+    expect(String(rejected.reason)).toMatch(/already has an active training job|already reserving/i);
+    a.d.resolve({ code: 0, tail: "" });
+    b.d.resolve({ code: 0, tail: "" });
+    await new Promise((r) => setTimeout(r, 30));
+  });
+
+  it("local LoRA delivery is atomic and leaves no tmp file (#268)", async () => {
+    // Pre-existing same-name LoRA: the retrain must overwrite it with the new
+    // weights via tmp+rename (no half-written file, no leftover tmp).
+    const lorasDir = join(root, "loras");
+    mkdirSync(lorasDir, { recursive: true });
+    writeFileSync(join(lorasDir, "pod_lora.safetensors"), "OLD");
+    const { deps, d } = podDeps();
+    const job = await mod.startTrainingJob(
+      { name: "pod_lora", flow: "character", model: "flux1-dev", datasetPath: stageDataset(), target: "pod", podEndpoint: EP },
+      deps,
+    );
+    d.resolve({ code: 0, tail: "" });
+    await new Promise((r) => setTimeout(r, 50));
+    const done = (await mod.getJob(job.id))!;
+    expect(done.status).toBe("completed");
+    expect(readFileSync(join(lorasDir, "pod_lora.safetensors"), "utf-8")).toBe("weights");
+    const leftovers = readdirSync(lorasDir).filter((f) => f.includes(".tmp-"));
+    expect(leftovers).toHaveLength(0);
+  });
+
   it("a failed staging TERMINALIZES the job (no orphaned queued record)", async () => {
     const { deps } = podDeps({ rsyncToPod: async () => ({ code: 5, stdout: "", stderr: "no space left on device" }) });
     await expect(

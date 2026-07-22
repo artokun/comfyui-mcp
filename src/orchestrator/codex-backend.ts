@@ -710,6 +710,13 @@ export class CodexBackend implements AgentBackend {
       `sandbox_mode=${JSON.stringify(this.sandbox)}`,
       "-c",
       `approval_policy=${JSON.stringify("never")}`,
+      // Isolate the embedded app-server from the user's GLOBAL Codex `notify`
+      // config (#277): an inherited legacy_notify hook can fail after a panel
+      // turn on Windows with `os error 206` (filename/extension too long),
+      // emitting a misleading warning alongside a failed turn. The panel owns
+      // its own UI notifications, so the embedded app-server needs no hook.
+      "-c",
+      "notify=[]",
     ];
     // SECURITY: spawn with the agent env — process.env MINUS tool-only secrets
     // (RunPod/HF/CivitAI… tokens). Those belong to the comfyui tool child

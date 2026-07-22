@@ -239,19 +239,38 @@ export function setEnvSecret(key: string, value: string): void {
   }
   upsertEnvFile(trimmed, value);
   process.env[trimmed] = value; // live in-process effect (env wins over the file)
-  emitter.emit("change"); // comfyui tool secret → re-inject/respawn agent on idle
+  // Only a COMFYUI tool secret should restart the comfyui MCP child + inject the
+  // "retry the download that needed this token" nudge (#269): saving an
+  // agent-ONLY provider key (OPENROUTER/GLM/KIMI…) previously restarted every
+  // agent with that nonsensical download-retry message. Agent-only keys fire
+  // just "agentChange" (readiness/model refresh) below.
+  if (isAllowedComfyuiSecretKey(trimmed)) emitter.emit("change");
   if (isAllowedAgentSecretKey(trimmed)) emitter.emit("agentChange"); // flip provider readiness live
 }
 
-/** Canonical remover: drop a token from .env + process.env + emit. */
+/** Canonical remover: drop a token from .env + process.env + emit. Also PURGES
+ *  the legacy panel-secrets.json maps (#269): without this a key revoked from
+ *  .env would RESURRECT on the next boot, because migrateSecretsToEnv() re-adds
+ *  any key still present in the JSON store that .env no longer provides. */
 export function removeEnvSecret(key: string): boolean {
   const removed = removeEnvFileKey(key);
   if (process.env[key] !== undefined) delete process.env[key];
-  if (removed) {
-    emitter.emit("change");
+  // Purge the legacy JSON maps so a revoked key can't resurrect via migration.
+  const s = read();
+  let purgedJson = false;
+  for (const map of [s.comfyuiEnv, s.agentEnv]) {
+    if (map && Object.prototype.hasOwnProperty.call(map, key)) {
+      delete map[key];
+      purgedJson = true;
+    }
+  }
+  if (purgedJson) write(s);
+  const changed = removed || purgedJson;
+  if (changed) {
+    if (isAllowedComfyuiSecretKey(key)) emitter.emit("change"); // comfyui-only restart (#269)
     if (isAllowedAgentSecretKey(key)) emitter.emit("agentChange");
   }
-  return removed;
+  return changed;
 }
 
 /**
