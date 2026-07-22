@@ -7,10 +7,11 @@
 // panel JS executors implement), and that the McpServer HTTP path registers the
 // identical set.
 
-import { describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setNsfwConsent } from "../../services/panel-settings.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   buildPanelToolDefs,
@@ -566,6 +567,7 @@ describe("panel-tools: agent-driven CivitAI + training modals", () => {
       "panel_civitai_search",
       "panel_civitai_open_lightbox",
       "panel_training_open",
+      "panel_training_get_state",
       "panel_training_set_field",
       "panel_training_goto_step",
       "panel_training_set_target",
@@ -639,6 +641,13 @@ describe("panel-tools: agent-driven CivitAI + training modals", () => {
     });
   });
 
+  it("panel_training_get_state forwards training_get_state with no args", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    expect(Object.keys(defByName("panel_training_get_state").schema)).toEqual([]);
+    await defByName("panel_training_get_state").handler({}, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "training_get_state" });
+  });
+
   it("panel_civitai_open_lightbox forwards civitai_open_lightbox with a string|number id", async () => {
     const { ctx, calls } = makeFakeCtx();
     await defByName("panel_civitai_open_lightbox").handler({ id: 42 }, ctx);
@@ -698,6 +707,89 @@ describe("panel-tools: agent-driven CivitAI + training modals", () => {
       safeParse: (v: unknown) => { success: boolean };
     };
     expect(refs.safeParse([]).success).toBe(false);
+  });
+});
+
+describe("panel-tools: NSFW consent enforced server-side on CivitAI browsing levels", () => {
+  const origSettings = process.env.COMFYUI_MCP_PANEL_SETTINGS;
+
+  beforeAll(() => {
+    // Isolate the persistent consent store to a throwaway file for this suite.
+    const dir = mkdtempSync(join(tmpdir(), "nsfw-consent-"));
+    process.env.COMFYUI_MCP_PANEL_SETTINGS = join(dir, "panel-settings.json");
+  });
+  afterAll(() => {
+    if (origSettings === undefined) delete process.env.COMFYUI_MCP_PANEL_SETTINGS;
+    else process.env.COMFYUI_MCP_PANEL_SETTINGS = origSettings;
+  });
+  beforeEach(() => {
+    setNsfwConsent(false); // default: no consent
+  });
+
+  it("panel_open_civitai clamps adult levels out when un-consented, keeping SFW", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_open_civitai").handler(
+      { query: "x", browsingLevels: [1, 2, 4, 8, 16] },
+      ctx,
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0].browsingLevels).toEqual([1, 2]);
+  });
+
+  it("panel_open_civitai REJECTS an all-adult request when un-consented (no bridge call)", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    const res = await defByName("panel_open_civitai").handler({ browsingLevels: [16] }, ctx);
+    expect(res.isError).toBe(true);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("panel_open_civitai passes adult levels through when consent IS granted", async () => {
+    setNsfwConsent(true);
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_open_civitai").handler({ browsingLevels: [1, 16] }, ctx);
+    expect(calls[0].browsingLevels).toEqual([1, 16]);
+  });
+
+  it("panel_open_civitai rejects an unknown level value", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    const res = await defByName("panel_open_civitai").handler({ browsingLevels: [3] }, ctx);
+    expect(res.isError).toBe(true);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("panel_open_civitai leaves omitted browsingLevels undefined (panel default applies)", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_open_civitai").handler({ query: "cats" }, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "open_civitai", query: "cats" });
+    expect(calls[0].browsingLevels).toBeUndefined();
+  });
+
+  it("panel_civitai_search enforces the SAME gate on its post-open browsingLevels", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    // Un-consented: adult stripped, SFW kept.
+    await defByName("panel_civitai_search").handler(
+      { query: "y", browsingLevels: [2, 8] },
+      ctx,
+    );
+    expect(calls[0].browsingLevels).toEqual([2]);
+
+    // Consented: passes through.
+    setNsfwConsent(true);
+    await defByName("panel_civitai_search").handler(
+      { query: "y", browsingLevels: [8] },
+      ctx,
+    );
+    expect(calls[1].browsingLevels).toEqual([8]);
+  });
+
+  it("panel_civitai_search rejects an all-adult un-consented search (no bridge call)", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    const res = await defByName("panel_civitai_search").handler(
+      { query: "z", browsingLevels: [8, 16] },
+      ctx,
+    );
+    expect(res.isError).toBe(true);
+    expect(calls).toHaveLength(0);
   });
 });
 

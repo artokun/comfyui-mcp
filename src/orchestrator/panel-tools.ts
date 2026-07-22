@@ -83,6 +83,49 @@ function fail(err: unknown): ToolResult {
 
 const slotRef = z.union([z.string(), z.number().int().min(0)]);
 
+// CivitAI browsing-level bitmask values: PG=1, PG-13=2, R=4, X=8, XXX=16.
+const KNOWN_BROWSING_LEVELS = [1, 2, 4, 8, 16];
+// R/X/XXX are adult and gated behind the persistent NSFW consent (getNsfwConsent()).
+const ADULT_BROWSING_LEVELS = [4, 8, 16];
+
+/**
+ * SERVER-SIDE enforcement of the persistent NSFW consent gate on any
+ * agent-supplied browsing levels. The agent can pass arbitrary bitmask values;
+ * this walls them before they reach the panel so adult content is never
+ * surfaced without consent (matching panel_get_content_mode / the consent gate).
+ *
+ * - Rejects unknown levels (not in the PG..XXX enum).
+ * - Rejects a supplied-but-empty array.
+ * - When consent is NOT granted, strips R/X/XXX (4/8/16); if that leaves nothing,
+ *   THROWS so the agent gets an honest, actionable error instead of silent SFW.
+ * - Returns the sanitized, de-duped levels, or undefined when none were supplied
+ *   (preserving the panel's own default, currently [1] = PG).
+ */
+function sanitizeBrowsingLevels(levels: unknown): number[] | undefined {
+  if (levels === undefined || levels === null) return undefined;
+  if (!Array.isArray(levels) || levels.length === 0) {
+    throw new Error(
+      "browsingLevels must be a non-empty array of level values (PG=1, PG-13=2, R=4, X=8, XXX=16).",
+    );
+  }
+  const nums = levels.map((l) => Number(l));
+  for (const n of nums) {
+    if (!KNOWN_BROWSING_LEVELS.includes(n)) {
+      throw new Error(
+        `Unknown browsing level ${String(n)}. Allowed: 1 (PG), 2 (PG-13), 4 (R), 8 (X), 16 (XXX).`,
+      );
+    }
+  }
+  if (getNsfwConsent().allowed) return [...new Set(nums)];
+  const safe = [...new Set(nums.filter((n) => !ADULT_BROWSING_LEVELS.includes(n)))];
+  if (safe.length === 0) {
+    throw new Error(
+      "Adult content (R/X/XXX) requires consent, which the user hasn't granted. Call panel_request_adult_consent first, or request SFW levels only (PG=1, PG-13=2).",
+    );
+  }
+  return safe;
+}
+
 // ---- server-side pack workflow resolution (for panel_load_workflow) --------
 // Read a bundled pack's UI workflow.json on the SERVER so the (large) graph
 // never has to shuttle through the agent's conversation. Mirrors the package-
@@ -1162,7 +1205,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         browsingLevels: z
           .array(z.number())
           .optional()
-          .describe("Content levels to show, as a set of bitmask values: PG=1, PG-13=2, R=4, X=8, XXX=16. e.g. [1,2] for SFW only, [1,2,4,8,16] for everything. Default [1]. Match the user's stated comfort."),
+          .describe("Content levels to show, as a set of bitmask values: PG=1, PG-13=2, R=4, X=8, XXX=16. e.g. [1,2] for SFW only, [1,2,4,8,16] for everything. Default [1]. Match the user's stated comfort. Adult levels (R/X/XXX = 4/8/16) are enforced server-side against the persistent NSFW consent gate and stripped/rejected unless the user has consented (panel_request_adult_consent)."),
         filters: z
           .object({
             period: z.string().optional(),
@@ -1179,22 +1222,28 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             "Side-dock the browser beside the chat instead of a centered overlay, so chat and results stay visible together while you drive it. Default true (agent-opened browsers dock). Set false to force the old full-screen centered overlay.",
           ),
       },
-      async (args: A, ctx) =>
-        ctx.call(
-          {
-            cmd: "open_civitai",
-            query: args.query,
-            tab: args.tab,
-            browsingLevels: args.browsingLevels,
-            filters: args.filters,
-            dock: args.dock,
-          },
-          10000,
-        ),
+      async (args: A, ctx) => {
+        try {
+          const browsingLevels = sanitizeBrowsingLevels(args.browsingLevels);
+          return await ctx.call(
+            {
+              cmd: "open_civitai",
+              query: args.query,
+              tab: args.tab,
+              browsingLevels,
+              filters: args.filters,
+              dock: args.dock,
+            },
+            10000,
+          );
+        } catch (err) {
+          return fail(err);
+        }
+      },
     ),
     def(
       "panel_civitai_results",
-      "READ the CivitAI browser's CURRENT results as text (metadata + media URLs only — you will NOT be shown the images; you reason from the text and pick which URLs matter). Open the browser first with panel_open_civitai. Returns, per result: id, kind (media|model), title, creator, baseModel|type, stats, prompt/description, and the media URL(s). Use this to see what's on screen before you highlight, switch tabs, or open the lightbox. If a fetch is still in flight the panel reports what it has so far. The browser must be open — otherwise the panel replies with an honest error.",
+      "READ the CivitAI browser's CURRENT results as text (metadata + media URLs only — you will NOT be shown the images; you reason from the text and pick which URLs matter). Open the browser first with panel_open_civitai. Returns exactly these fields per result and NOTHING else: a MEDIA item is { id, kind:'media', author, prompt (length-capped), modelName, reactions, url }; a MODEL item is { id, kind:'model', name, creator, type, baseModel, downloadCount, thumbsUp, coverUrl }. There is no title, and model descriptions are NOT included (they require a separate detail fetch) — do not expect them. Use this to see what's on screen before you highlight, switch tabs, or open the lightbox. If a fetch is still in flight the panel reports what it has so far. The browser must be open — otherwise the panel replies with an honest error.",
       {
         limit: z
           .number()
@@ -1251,8 +1300,22 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           })
           .optional()
           .describe("Optional filters applied to this search."),
+        browsingLevels: z
+          .array(z.number())
+          .optional()
+          .describe("Content levels for this search, as bitmask values: PG=1, PG-13=2, R=4, X=8, XXX=16. Omit to keep the browser's current levels. Adult levels (R/X/XXX = 4/8/16) are enforced server-side against the persistent NSFW consent gate and stripped/rejected unless the user has consented (panel_request_adult_consent)."),
       },
-      async (args: A, ctx) => ctx.call({ cmd: "civitai_search", query: args.query, filters: args.filters }, 10000),
+      async (args: A, ctx) => {
+        try {
+          const browsingLevels = sanitizeBrowsingLevels(args.browsingLevels);
+          return await ctx.call(
+            { cmd: "civitai_search", query: args.query, filters: args.filters, browsingLevels },
+            10000,
+          );
+        } catch (err) {
+          return fail(err);
+        }
+      },
     ),
     def(
       "panel_civitai_open_lightbox",
@@ -1266,7 +1329,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_training_open",
-      "Open the in-panel LoRA/model TRAINING wizard for the user, so they can configure and launch a training run visually while you guide them. Opens side-docked beside the chat by default so the wizard and chat stay visible together. After it's open, drive it with panel_training_set_field, panel_training_goto_step, panel_training_set_target, and panel_training_highlight. This only OPENS and configures the wizard — it never starts a run; the user confirms and launches training themselves.",
+      "Open the in-panel LoRA/model TRAINING wizard for the user, so they can configure a training run visually while you guide them. Opens side-docked beside the chat by default so the wizard and chat stay visible together. After it's open, read it with panel_training_get_state and drive it with panel_training_set_field, panel_training_goto_step, panel_training_set_target, and panel_training_highlight. This only OPENS and configures the wizard — you have NO command to start a run; the user reviews the setup and launches training themselves from the wizard's Launch control.",
       {
         dock: z
           .boolean()
@@ -1276,10 +1339,16 @@ export function buildPanelToolDefs(): PanelToolDef[] {
       async (args: A, ctx) => ctx.call({ cmd: "open_training", dock: args.dock }, 10000),
     ),
     def(
+      "panel_training_get_state",
+      "READ the OPEN training wizard's current state so you can drive it SAFELY. Returns the current view/step, which transitions are allowed right now (so you know if a step's prerequisites are met), the current field values, target availability (e.g. whether a remote pod is SSH-ready), and any async/loading status. Call this BEFORE panel_training_goto_step or panel_training_set_target — the wizard enforces the same gates as its own buttons and will reject a premature move, so check readiness here first. Open the wizard first with panel_training_open. The wizard must be open — otherwise the panel replies with an honest error.",
+      {},
+      async (_args: A, ctx) => ctx.call({ cmd: "training_get_state" }, 10000),
+    ),
+    def(
       "panel_training_set_field",
-      "Set one field in the OPEN training wizard (e.g. a name, base model, learning rate, step count, dataset path). Use this to fill the form for the user as you walk them through setup. Open the wizard first with panel_training_open. This configures only — it never launches training. The wizard must be open — otherwise the panel replies with an honest error.",
+      "Set one field in the OPEN training wizard (e.g. a name, base model, learning rate, step count, dataset path). Use this to fill the form for the user as you walk them through setup. Only known wizard fields are accepted (the panel applies a per-field allowlist and rejects anything else). Open the wizard first with panel_training_open. This configures only — you have no command to launch training. The wizard must be open — otherwise the panel replies with an honest error.",
       {
-        name: z.string().describe("The field name/key to set (as the wizard labels it, e.g. 'learning_rate', 'name')."),
+        name: z.string().describe("The field name/key to set (as the wizard labels it, e.g. 'learning_rate', 'name'). Must be a known wizard field; unknown names are rejected server-side."),
         value: z
           .union([z.string(), z.number(), z.boolean()])
           .describe("The value to set (string, number, or boolean depending on the field)."),
@@ -1288,7 +1357,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_training_goto_step",
-      "Navigate the OPEN training wizard to a specific step (0-based) — move the user forward/back through the setup flow as you explain each stage. Open the wizard first with panel_training_open. The wizard must be open — otherwise the panel replies with an honest error.",
+      "Navigate the OPEN training wizard to a specific step (0-based) — move the user forward/back through the setup flow as you explain each stage. This enforces the SAME gates as the wizard's Next button (backend capability, a valid name, uploads settled, images present); if the step's prerequisites aren't met the panel rejects it and throws honestly, so call panel_training_get_state first to check readiness. Open the wizard first with panel_training_open. The wizard must be open — otherwise the panel replies with an honest error.",
       {
         step: z.number().int().min(0).describe("The step index to jump to (0-based)."),
       },
@@ -1296,7 +1365,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_training_set_target",
-      "Set WHERE the training run will execute — 'local' (this machine) or 'pod' (a remote GPU pod). Use this in the wizard to steer the user toward the right compute for their job. Open the wizard first with panel_training_open. This only configures the target; it never launches the run. The wizard must be open — otherwise the panel replies with an honest error.",
+      "Set WHERE the training run will execute — 'local' (this machine) or 'pod' (a remote GPU pod). Use this in the wizard to steer the user toward the right compute for their job. Choosing 'pod' runs the same preflight as the wizard's own button (a train_doctor check) and is REJECTED if there is no SSH-ready pod — call panel_training_get_state first to confirm pod availability. Open the wizard first with panel_training_open. This only configures the target; you have no command to launch the run. The wizard must be open — otherwise the panel replies with an honest error.",
       {
         target: z.enum(["local", "pod"]).describe("Execution target: 'local' machine or remote 'pod'."),
       },
