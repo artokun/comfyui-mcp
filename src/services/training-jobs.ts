@@ -128,7 +128,7 @@ export interface TrainingJob {
 /** Injectable seams so tests can run without docker / a ComfyUI install. */
 export interface TrainingJobDeps {
   startTraining?: typeof startTraining;
-  stopTraining?: typeof stopTraining;
+  stopTraining?: typeof defaultTrainingStop;
   /** Container liveness probe (false = definitively gone, null = unknown). */
   containerRunning?: typeof containerRunning;
   /** Pod seams (target "pod" jobs): ssh preflight, uploads, runner, downloads. */
@@ -819,9 +819,12 @@ export function defaultContainerProbe(name: string): Promise<boolean | null> {
   return name.startsWith("pod|") ? sshProcessRunning(name) : containerRunning(name);
 }
 
-/** The default stop, pod-aware. */
-export function defaultTrainingStop(name: string): ReturnType<typeof stopTraining> {
-  return name.startsWith("pod|") ? stopSshTraining(name) : stopTraining(name);
+/** The default stop, pod-aware. Pod stops are SCOPED to the job's own config
+ *  path (pkill 'run.py <config>'): an unscoped pattern kills EVERY ai-toolkit
+ *  run.py on the pod — including runs from other registries/processes (codex
+ *  finding). */
+export function defaultTrainingStop(name: string, remoteConfigPath?: string): ReturnType<typeof stopTraining> {
+  return name.startsWith("pod|") ? stopSshTraining(name, remoteConfigPath) : stopTraining(name);
 }
 
 /** Any job currently running/queued — FILE SCAN ONLY, no liveness probes (ssh
@@ -1351,6 +1354,12 @@ export async function startTrainingJob(input: StartJobInput, deps: TrainingJobDe
     throw new Error(`dataset must be staged under ${resolve(datasetsRoot())} — use train_prepare_dataset (the container mounts it read-write)`);
   }
   const target = input.target ?? "local";
+  // A local job has no pod to deliver TO — this combination used to sail
+  // through and complete with a loraRelPath for a file never installed
+  // anywhere (codex finding).
+  if (target === "local" && input.deliverTo === "pod") {
+    throw new Error(`deliverTo "pod" is only valid for pod jobs — a local run has no pod to deliver to (use "local" or "both")`);
+  }
   if (target === "pod") {
     if (!input.podEndpoint) throw new Error('target "pod" requires a pod SSH endpoint');
     const sshWorks = deps.sshWorks ?? sshEndpointWorks;
@@ -1602,7 +1611,7 @@ export async function cancelJob(id: string, deps: TrainingJobDeps = {}): Promise
     // burning GPU behind a stale cancelled record (codex finding).
     if (alive === false) return job;
     const stop = deps.stopTraining ?? defaultTrainingStop;
-    const res = await stop(job.containerName);
+    const res = await stop(job.containerName, job.containerName.startsWith("pod|") ? podJobPaths(job.id, job.name).configPath : undefined);
     // Always probe after a stop attempt: a CLI timeout can fire AFTER the
     // daemon honored the stop (codex finding). Only when liveness is unknown
     // do we fall back to the stop command's own result.
@@ -1681,7 +1690,7 @@ async function cancelJobBody(id: string, job: TrainingJob, deps: TrainingJobDeps
 
   if (job.containerName) {
     const stop = deps.stopTraining ?? defaultTrainingStop;
-    const res = await stop(job.containerName);
+    const res = await stop(job.containerName, job.containerName.startsWith("pod|") ? podJobPaths(job.id, job.name).configPath : undefined);
     const probe = deps.containerRunning ?? defaultContainerProbe;
     // Probe after the stop regardless of its exit status (see above).
     const probed = await probe(job.containerName).catch(() => null);
