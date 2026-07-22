@@ -1125,11 +1125,18 @@ export class CodexBackend implements AgentBackend {
           break;
         }
         case "error": {
-          // A terminal `error` notification ends the turn: emit it AND finish, so a
-          // turn that errors out (no following turn/completed) doesn't hang (P0-2).
-          // Routed through the single idempotent terminal-error helper so it can
-          // never double-emit with the exit watcher / turn-start rejection (P0-B).
+          // App-server uses the same notification for transient provider failures
+          // and terminal errors. `willRetry: true` means Codex is still owning the
+          // turn and will continue it after reconnecting; completing our iterator
+          // here would abort that recovery and make the panel report e.g.
+          // "Reconnecting... 2/5" as the final failure. The notification already
+          // bumped onActivity above, so keep waiting for either a later terminal
+          // error or turn/completed.
           const e = (params.error ?? {}) as { message?: string };
+          if (params.willRetry === true) break;
+          // A non-retrying `error` ends the turn: emit it AND finish, so a turn that
+          // errors out (no following turn/completed) doesn't hang (P0-2). Route it
+          // through the idempotent helper to avoid racing another terminal path.
           emitTerminalError(e.message ?? "Codex error");
           break;
         }

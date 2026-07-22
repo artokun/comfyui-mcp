@@ -56,6 +56,104 @@ function installActiveClient(backend: Backend, client: object): void {
 }
 
 describe("CodexBackend interrupt recovery", () => {
+  it("keeps the turn alive while app-server reports a retryable error", async () => {
+    const onActivity = vi.fn();
+    const client = {
+      notificationHandler: null as ((message: unknown) => void) | null,
+      exitError: null,
+      exitPromise: new Promise(() => {}),
+      request: vi.fn(async (method: string) => {
+        if (method === "thread/start") {
+          return { thread: { id: "thread-1" }, model: "gpt-5.6-sol" };
+        }
+        if (method === "turn/start") return { turn: { id: "turn-1" } };
+        throw new Error(`unexpected request: ${method}`);
+      }),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+    const backend = new CodexBackend({ model: "gpt-5.6-sol" });
+    Object.assign(backend, { client });
+
+    async function* channel() {
+      yield { text: "continue" };
+    }
+
+    const iterator = backend.run({ channel: channel(), onActivity });
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: { type: "session", sessionId: "thread-1" },
+    });
+    const nextEvent = iterator.next();
+    for (let attempt = 0; attempt < 10 && !(backend as any).turnId; attempt += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    client.notificationHandler?.({
+      method: "error",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        willRetry: true,
+        error: { message: "Reconnecting... 2/5" },
+      },
+    });
+    client.notificationHandler?.({
+      method: "turn/completed",
+      params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } },
+    });
+
+    await expect(nextEvent).resolves.toMatchObject({
+      value: { type: "result", ok: true, subtype: "completed" },
+    });
+    expect(onActivity).toHaveBeenCalledTimes(2);
+    await expect(iterator.next()).resolves.toMatchObject({ done: true });
+  });
+
+  it("still terminates the turn for a non-retrying app-server error", async () => {
+    const client = {
+      notificationHandler: null as ((message: unknown) => void) | null,
+      exitError: null,
+      exitPromise: new Promise(() => {}),
+      request: vi.fn(async (method: string) => {
+        if (method === "thread/start") {
+          return { thread: { id: "thread-1" }, model: "gpt-5.6-sol" };
+        }
+        if (method === "turn/start") return { turn: { id: "turn-1" } };
+        throw new Error(`unexpected request: ${method}`);
+      }),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+    const backend = new CodexBackend({ model: "gpt-5.6-sol" });
+    Object.assign(backend, { client });
+
+    async function* channel() {
+      yield { text: "continue" };
+    }
+
+    const iterator = backend.run({ channel: channel() });
+    await iterator.next();
+    const errorEvent = iterator.next();
+    for (let attempt = 0; attempt < 10 && !(backend as any).turnId; attempt += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    client.notificationHandler?.({
+      method: "error",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        willRetry: false,
+        error: { message: "provider unavailable" },
+      },
+    });
+
+    await expect(errorEvent).resolves.toMatchObject({
+      value: { type: "error", message: "provider unavailable" },
+    });
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: { type: "result", ok: false, subtype: "error" },
+    });
+    await expect(iterator.next()).resolves.toMatchObject({ done: true });
+  });
+
   it("keeps a responsive client and bounds an unresponsive one", async () => {
     const responsive = {
       request: vi.fn().mockResolvedValue({}),
