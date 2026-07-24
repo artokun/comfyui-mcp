@@ -123,20 +123,20 @@ export async function waitForJob(
     }
 
     if (status.done) {
-      // A failure isn't always a structured `error` — the cloud status source
-      // can report done + status_str "failed"/"error" with no error object.
-      const failed =
-        status.error != null ||
-        status.status_str === "failed" ||
-        status.status_str === "error";
-      // Local ComfyUI reports BOTH real failures and user/agent interruptions
-      // as done + status_str "error"; only a structured `error` proves an
-      // actual execution failure. Don't call an interrupted job a failure.
+      // Classification:
+      //  - structured `error` → definite execution failure;
+      //  - cloud status_str "failed" → definite failure (cloud reports
+      //    cancellation separately as "cancelled");
+      //  - local status_str "error" WITHOUT a structured error is ambiguous —
+      //    local ComfyUI reports both real failures and user/agent
+      //    interruptions this way, so don't call it a failure outright.
       const outcome = status.error
         ? `finished with an error (${status.error.exception_type ?? status.error.exception_message ?? "execution error"})`
-        : failed
-          ? `did not complete (status "${status.status_str}" — failed or was interrupted/cancelled; no execution error was recorded)`
-          : `completed${status.status_str ? ` (${status.status_str})` : ""}`;
+        : status.status_str === "failed"
+          ? `failed (no execution error details were recorded)`
+          : status.status_str === "error"
+            ? `did not complete (status "error" — failed or was interrupted/cancelled; no execution error was recorded)`
+            : `completed${status.status_str ? ` (${status.status_str})` : ""}`;
       return {
         prompt_id: opts.prompt_id,
         timed_out: false,

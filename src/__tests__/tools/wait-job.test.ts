@@ -87,7 +87,10 @@ describe("waitForJob", () => {
     const result = await waitForJob({ prompt_id: PROMPT_ID }, { statusFn, ...clock });
 
     expect(result.timed_out).toBe(false);
-    expect(result.message).toContain('did not complete (status "failed"');
+    expect(result.message).toContain("failed");
+    // Cloud "failed" is definitive — must NOT be hedged as maybe-cancelled.
+    expect(result.message).not.toContain("interrupted");
+    expect(result.message).not.toContain("cancelled");
   });
 
   it("does not call a local interrupted job (done+error status, no error object) a failure", async () => {
