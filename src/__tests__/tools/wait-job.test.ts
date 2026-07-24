@@ -74,6 +74,22 @@ describe("waitForJob", () => {
     expect(result.message).toContain("RuntimeError");
   });
 
+  it("reports failure for cloud-style done+status_str:'failed' with no error object", async () => {
+    const failed: JobStatus = {
+      running: false,
+      pending: false,
+      done: true,
+      status_str: "failed",
+    };
+    const clock = fakeClock();
+    const statusFn = vi.fn(async () => failed);
+
+    const result = await waitForJob({ prompt_id: PROMPT_ID }, { statusFn, ...clock });
+
+    expect(result.timed_out).toBe(false);
+    expect(result.message).toContain("finished with an error (failed)");
+  });
+
   it("returns timed_out (without throwing) when the job never finishes", async () => {
     const clock = fakeClock();
     const statusFn = vi.fn(async () => running);

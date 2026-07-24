@@ -103,8 +103,14 @@ export async function waitForJob(
     lastStatus = status;
 
     if (status.done) {
-      const outcome = status.error
-        ? `finished with an error (${status.error.exception_type ?? "execution error"})`
+      // A failure isn't always a structured `error` — the cloud status source
+      // can report done + status_str "failed"/"error" with no error object.
+      const failed =
+        status.error != null ||
+        status.status_str === "failed" ||
+        status.status_str === "error";
+      const outcome = failed
+        ? `finished with an error (${status.error?.exception_type ?? status.error?.exception_message ?? status.status_str ?? "execution error"})`
         : `completed${status.status_str ? ` (${status.status_str})` : ""}`;
       return {
         prompt_id: opts.prompt_id,
