@@ -59,6 +59,7 @@ import { registerTrainTools } from "./train.js";
 import { registerAppsTools } from "./apps.js";
 import { registerTemplateSchemaTools } from "./template-schema.js";
 import { registerRunTemplateTools } from "./run-template.js";
+import { registerWaitJobTools } from "./wait-job.js";
 import { DefaultsManager } from "../services/defaults-manager.js";
 import { ToolCatalog } from "./catalog.js";
 
@@ -127,6 +128,9 @@ const TOOL_GROUPS: ReadonlyArray<readonly [category: string, register: (server: 
   ["apps", registerAppsTools],
   ["workflows", registerTemplateSchemaTools],
   ["workflows", registerRunTemplateTools],
+  // Appended (not inserted next to queue-management) because tools/list order
+  // is observable and must not shift for existing tools.
+  ["workflows", registerWaitJobTools],
 ];
 
 // ── Blind content mode (panel issue #90) ────────────────────────────────────
