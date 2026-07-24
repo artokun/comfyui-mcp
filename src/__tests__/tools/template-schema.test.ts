@@ -192,7 +192,7 @@ describe("templateGraphToApi (UI-format template, offline fallback schema)", () 
           id: 6,
           type: "CLIPTextEncode",
           pos: [0, 0],
-          inputs: [],
+          inputs: [null, { name: "clip", type: "CLIP", link: null }], // null entry must be dropped
           outputs: [],
           widgets_values: ["ok"],
         },

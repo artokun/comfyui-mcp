@@ -268,19 +268,26 @@ export function templateGraphToApi(
           !!n && typeof n === "object" && typeof (n as { id?: unknown }).id === "number" &&
           typeof (n as { type?: unknown }).type === "string",
       )
-      // The converter iterates node.inputs/outputs as arrays — normalize any
-      // non-array nested field so a malformed node can't crash it. (Non-array
-      // widgets_values is LEGITIMATE — e.g. VHS nodes use a name→value object —
-      // and the converter handles it, so leave that alone.)
-      .map((n) =>
-        Array.isArray(n.inputs ?? []) && Array.isArray(n.outputs ?? [])
-          ? n
-          : {
-              ...n,
-              inputs: Array.isArray(n.inputs) ? n.inputs : undefined,
-              outputs: Array.isArray(n.outputs) ? n.outputs : undefined,
-            },
-      );
+      // The converter iterates node.inputs/outputs as arrays of objects and
+      // dereferences entry fields (input.link, input.name) — normalize any
+      // non-array nested field AND drop non-object entries so a malformed node
+      // can't crash it. (Non-array widgets_values is LEGITIMATE — e.g. VHS
+      // nodes use a name→value object — the converter handles it; leave alone.)
+      .map((n) => {
+        const slotArr = <T>(v: unknown): T[] | undefined =>
+          Array.isArray(v)
+            ? (v.filter((e) => !!e && typeof e === "object") as T[])
+            : undefined;
+        const inputs = slotArr<NonNullable<UiWorkflow["nodes"][number]["inputs"]>[number]>(n.inputs);
+        const outputs = slotArr<NonNullable<UiWorkflow["nodes"][number]["outputs"]>[number]>(n.outputs);
+        if (
+          inputs?.length === (Array.isArray(n.inputs) ? n.inputs.length : -1) &&
+          outputs?.length === (Array.isArray(n.outputs) ? n.outputs.length : -1)
+        ) {
+          return n; // fully well-shaped, keep as-is
+        }
+        return { ...n, inputs, outputs };
+      });
     if (goodNodes.length !== (ui.nodes ?? []).length) {
       warnings.push(
         `Dropped ${(ui.nodes ?? []).length - goodNodes.length} malformed node entr(y/ies) (missing id/type).`,
