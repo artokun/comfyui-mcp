@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { getJobStatus, type JobStatus } from "../services/queue-manager.js";
+import { isCloudMode } from "../config.js";
 import { errorToToolResult } from "../utils/errors.js";
 
 const DEFAULT_TIMEOUT_S = 300;
@@ -25,6 +26,10 @@ interface WaitForJobDeps {
   statusFn?: (promptId: string) => Promise<JobStatus>;
   sleepFn?: (ms: number) => Promise<void>;
   nowFn?: () => number;
+  /** Backend discriminator (defaults to the real config). Cloud never reports
+   *  an interruption as done — cancellation arrives as status "cancelled" —
+   *  so in cloud mode a bare terminal "error"/"failed" IS a failure. */
+  cloudModeFn?: () => boolean;
 }
 
 const realSleep = (ms: number): Promise<void> =>
@@ -125,17 +130,20 @@ export async function waitForJob(
     if (status.done) {
       // Classification:
       //  - structured `error` → definite execution failure;
-      //  - cloud status_str "failed" → definite failure (cloud reports
-      //    cancellation separately as "cancelled");
-      //  - local status_str "error" WITHOUT a structured error is ambiguous —
-      //    local ComfyUI reports both real failures and user/agent
+      //  - status_str "failed"/"error" in CLOUD mode → definite failure
+      //    (cloud reports cancellation separately as "cancelled", never as a
+      //    done job, and history enrichment can rewrite "failed" to "error");
+      //  - LOCAL status_str "error" WITHOUT a structured error is genuinely
+      //    ambiguous — local ComfyUI reports both real failures and user/agent
       //    interruptions this way, so don't call it a failure outright.
+      const errorish = status.status_str === "failed" || status.status_str === "error";
+      const cloud = (deps.cloudModeFn ?? isCloudMode)();
       const outcome = status.error
         ? `finished with an error (${status.error.exception_type ?? status.error.exception_message ?? "execution error"})`
-        : status.status_str === "failed"
-          ? `failed (no execution error details were recorded)`
-          : status.status_str === "error"
-            ? `did not complete (status "error" — failed or was interrupted/cancelled; no execution error was recorded)`
+        : errorish && cloud
+          ? `failed (status "${status.status_str}"; no execution error details were recorded)`
+          : errorish
+            ? `did not complete (status "${status.status_str}" — failed or was interrupted/cancelled; no execution error was recorded)`
             : `completed${status.status_str ? ` (${status.status_str})` : ""}`;
       return {
         prompt_id: opts.prompt_id,

@@ -74,24 +74,32 @@ describe("waitForJob", () => {
     expect(result.message).toContain("RuntimeError");
   });
 
-  it("reports failure for cloud-style done+status_str:'failed' with no error object", async () => {
-    const failed: JobStatus = {
-      running: false,
-      pending: false,
-      done: true,
-      status_str: "failed",
-    };
-    const clock = fakeClock();
-    const statusFn = vi.fn(async () => failed);
+  it.each(["failed", "error"] as const)(
+    "in cloud mode, reports done+status_str:'%s' with no error object as a definitive failure",
+    async (statusStr) => {
+      // Cloud history enrichment can rewrite "failed" to "error", so both
+      // spellings must classify as failure in cloud mode.
+      const failed: JobStatus = {
+        running: false,
+        pending: false,
+        done: true,
+        status_str: statusStr,
+      };
+      const clock = fakeClock();
+      const statusFn = vi.fn(async () => failed);
 
-    const result = await waitForJob({ prompt_id: PROMPT_ID }, { statusFn, ...clock });
+      const result = await waitForJob(
+        { prompt_id: PROMPT_ID },
+        { statusFn, ...clock, cloudModeFn: () => true },
+      );
 
-    expect(result.timed_out).toBe(false);
-    expect(result.message).toContain("failed");
-    // Cloud "failed" is definitive — must NOT be hedged as maybe-cancelled.
-    expect(result.message).not.toContain("interrupted");
-    expect(result.message).not.toContain("cancelled");
-  });
+      expect(result.timed_out).toBe(false);
+      expect(result.message).toContain("failed");
+      // Cloud failure is definitive — must NOT be hedged as maybe-cancelled.
+      expect(result.message).not.toContain("interrupted");
+      expect(result.message).not.toContain("cancelled");
+    },
+  );
 
   it("does not call a local interrupted job (done+error status, no error object) a failure", async () => {
     // Local ComfyUI reports interruptions exactly like this — done:true,
@@ -105,7 +113,10 @@ describe("waitForJob", () => {
     const clock = fakeClock();
     const statusFn = vi.fn(async () => interrupted);
 
-    const result = await waitForJob({ prompt_id: PROMPT_ID }, { statusFn, ...clock });
+    const result = await waitForJob(
+      { prompt_id: PROMPT_ID },
+      { statusFn, ...clock, cloudModeFn: () => false },
+    );
 
     expect(result.timed_out).toBe(false);
     expect(result.message).not.toContain("finished with an error");
