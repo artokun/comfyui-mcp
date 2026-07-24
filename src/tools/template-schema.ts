@@ -134,7 +134,9 @@ export function extractTemplateSlots(
     const node = api[nodeId];
     if (!node || typeof node !== "object" || typeof node.class_type !== "string") continue;
     const inputs = node.inputs;
-    if (!inputs || typeof inputs !== "object") continue;
+    // An inputs ARRAY is malformed (Object.entries would emit fake "<id>.0"
+    // index keys) — only a name→value record is a valid API-format inputs map.
+    if (!inputs || typeof inputs !== "object" || Array.isArray(inputs)) continue;
     const def = objectInfo?.[node.class_type];
     const title = node._meta?.title;
     for (const [widget, value] of Object.entries(inputs)) {

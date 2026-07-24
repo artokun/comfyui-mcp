@@ -107,6 +107,7 @@ describe("extractTemplateSlots (API-format template)", () => {
       a: { class_type: "TotallyUnknownNode", inputs: { foo: 3, bar: 1.5, baz: true, qux: "x" } },
       b: { class_type: "Broken", inputs: null },
       c: {},
+      d: { class_type: "ArrayInputs", inputs: [null, { nope: 1 }] }, // malformed: array inputs
     } as unknown as WorkflowJSON;
     const res = extractTemplateSlots(weird, null);
     const foo = res.other_slots.find((s) => s.key === "a.foo");
@@ -115,6 +116,8 @@ describe("extractTemplateSlots (API-format template)", () => {
     expect(res.other_slots.find((s) => s.key === "a.baz")?.type).toBe("BOOLEAN");
     expect(res.other_slots.find((s) => s.key === "a.qux")?.type).toBe("STRING");
     expect(res.slots).toEqual([]);
+    // Array-shaped inputs must NOT produce fake index keys like "d.0".
+    expect(res.other_slots.some((s) => s.node_id === "d")).toBe(false);
   });
 });
 
