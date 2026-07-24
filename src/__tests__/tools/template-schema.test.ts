@@ -181,6 +181,14 @@ describe("templateGraphToApi (UI-format template, offline fallback schema)", () 
         null,
         { pos: [0, 0] }, // missing id/type
         {
+          id: 5,
+          type: "CLIPTextEncode",
+          pos: [0, 0],
+          inputs: {}, // malformed: object where an array belongs
+          outputs: "nope", // malformed
+          widgets_values: ["kept anyway"],
+        },
+        {
           id: 6,
           type: "CLIPTextEncode",
           pos: [0, 0],
@@ -194,7 +202,11 @@ describe("templateGraphToApi (UI-format template, offline fallback schema)", () 
     const norm = templateGraphToApi(broken, null);
     expect(norm).not.toBeNull();
     const { slots } = extractTemplateSlots(norm!.api, norm!.objectInfo);
-    expect(slots.map((s) => s.key)).toContain("6.text");
+    const keys = slots.map((s) => s.key);
+    expect(keys).toContain("6.text");
+    // Node 5 had malformed nested fields but a valid id/type — its widget
+    // survives via the normalized shape instead of crashing the converter.
+    expect(keys).toContain("5.text");
     expect(norm!.warnings.join(" ")).toMatch(/malformed/i);
   });
 
