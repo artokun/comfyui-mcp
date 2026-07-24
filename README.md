@@ -1,5 +1,7 @@
 # comfyui-mcp — drive ComfyUI with ANY LLM
 
+[![MCP Toplist](https://mcptoplist.com/badge/pulsemcp%2Fartokun-comfyui.svg)](https://mcptoplist.com/server/pulsemcp%2Fartokun-comfyui)
+
 **The local-first, agent-native control plane for [ComfyUI](https://github.com/comfyanonymous/ComfyUI)** — an MCP server + live sidebar agent that generates images, video and audio, authors and runs workflows, manages models and custom nodes, and **edits your live ComfyUI graph in natural language**. Bring whatever model you have: **Claude or ChatGPT on your subscription, Gemini on your Google login, a free local model via Ollama (fully offline), or any hosted model over one API key** (DeepSeek, GLM, MiMo, Kimi, GPT, Claude via OpenRouter). Same tools, same panel, every tier — and the built-in [LLM Arena](https://comfyui-mcp.artokun.io/docs/arena) scores them all on real ComfyUI tasks so you know exactly what your model can do. One config targets local installs, LAN, VPS, or Comfy Cloud.
 
 [![npm version](https://img.shields.io/npm/v/comfyui-mcp)](https://www.npmjs.com/package/comfyui-mcp)
