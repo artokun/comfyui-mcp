@@ -38,6 +38,17 @@ function nearMatches(query: string, names: string[]): string[] {
   return scored.slice(0, 8).map((s) => s.name);
 }
 
+/** An API-graph input value of the form [sourceNodeId, outputSlot] is a graph
+ *  connection (link), not a widget value — run_template must not clobber it. */
+function isLinkValue(v: unknown): boolean {
+  return (
+    Array.isArray(v) &&
+    v.length === 2 &&
+    (typeof v[0] === "string" || typeof v[0] === "number") &&
+    typeof v[1] === "number"
+  );
+}
+
 /**
  * Parse "<nodeId>.<widget_name>" override keys (the SAME convention
  * get_template_schema emits, so schema→run round-trips) into set_input
@@ -64,10 +75,18 @@ function overridesToOps(
         `Override "${key}": no node "${nodeId}" in the template's graph. Node ids: ${ids}`,
       );
     }
+    const widgetInputs = Object.entries(node.inputs ?? {})
+      .filter(([, v]) => !isLinkValue(v))
+      .map(([k]) => k);
     if (!node.inputs || !(widget in node.inputs)) {
-      const avail = Object.keys(node.inputs ?? {}).join(", ") || "(none)";
+      const avail = widgetInputs.join(", ") || "(none)";
       throw new ValidationError(
-        `Override "${key}": node ${nodeId} (${node.class_type}) has no input "${widget}". Available inputs: ${avail}`,
+        `Override "${key}": node ${nodeId} (${node.class_type}) has no input "${widget}". Overridable widgets: ${avail}`,
+      );
+    }
+    if (isLinkValue(node.inputs[widget])) {
+      throw new ValidationError(
+        `Override "${key}": input "${widget}" on node ${nodeId} (${node.class_type}) is a graph CONNECTION, not a widget — overriding it would break the graph. Overridable widgets: ${widgetInputs.join(", ") || "(none)"}. Use modify_workflow to rewire connections.`,
       );
     }
     ops.push({ op: "set_input", node_id: nodeId, input_name: widget, value });
@@ -102,7 +121,7 @@ async function loadTemplateApiGraph(wfFile: string): Promise<WorkflowJSON> {
 export function registerRunTemplateTools(server: McpServer): void {
   server.tool(
     "run_template",
-    "ONE-SHOT: run a named workflow template (a bundled pack from list_packs) with optional overrides. Resolves the template's expert graph, applies overrides, and enqueues it — replacing the manual read_pack_workflow → modify_workflow → enqueue_workflow chain. Override keys are '<nodeId>.<widget_name>' (e.g. {'6.text': 'a cat', '3.seed': 42}) — the SAME keys get_template_schema reports, so schema→run round-trips. By default returns {prompt_id} immediately; pass wait:true to block until the job completes and return its outputs (images etc.). Unresolvable template names return a clear error with near-matches.",
+    "ONE-SHOT: run a named workflow template (a bundled pack from list_packs) with optional overrides. Resolves the template's expert graph, applies overrides, and enqueues it — replacing the manual read_pack_workflow → modify_workflow → enqueue_workflow chain. Override keys are '<nodeId>.<widget_name>' (e.g. {'6.text': 'a cat', '3.seed': 42}) — the SAME keys the companion get_template_schema tool reports (when available), so schema→run round-trips; only widget values can be overridden, never graph connections. By default returns {prompt_id} immediately; pass wait:true to block until the job completes and return its outputs (images etc.). Unresolvable template names return a clear error with near-matches.",
     {
       template: z
         .string()

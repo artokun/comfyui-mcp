@@ -145,6 +145,15 @@ describe("run_template", () => {
     expect(enqueueWorkflowMock).not.toHaveBeenCalled();
   });
 
+  it("rejects overrides targeting a graph CONNECTION (link) input", async () => {
+    const handler = getHandler();
+    const res = await handler({ template: "anima-txt2img", overrides: { "3.model": "x" } });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/CONNECTION/);
+    expect(res.content[0].text).toMatch(/seed/); // lists overridable widgets
+    expect(enqueueWorkflowMock).not.toHaveBeenCalled();
+  });
+
   it("wait:true polls to completion and returns outputs", async () => {
     getJobStatusMock
       .mockResolvedValueOnce({ running: true, pending: false, done: false })
