@@ -4,6 +4,7 @@ import { registerWorkflowVisualizeTools } from "./workflow-visualize.js";
 import { registerWorkflowComposeTools } from "./workflow-compose.js";
 import { registerWorkflowValidateTools } from "./workflow-validate.js";
 import { registerQueueManagementTools } from "./queue-management.js";
+import { registerBatchTools } from "./batches.js";
 import { registerRegistrySearchTools } from "./registry-search.js";
 import { registerModelManagementTools } from "./model-management.js";
 import { registerModelExtrasTools } from "./model-extras.js";
@@ -131,6 +132,7 @@ const TOOL_GROUPS: ReadonlyArray<readonly [category: string, register: (server: 
   // Appended (not inserted next to queue-management) because tools/list order
   // is observable and must not shift for existing tools.
   ["workflows", registerWaitJobTools],
+  ["workflows", registerBatchTools],
 ];
 
 // ── Blind content mode (panel issue #90) ────────────────────────────────────
