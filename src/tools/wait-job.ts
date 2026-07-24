@@ -30,6 +30,28 @@ interface WaitForJobDeps {
 const realSleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
+const POLL_HUNG = Symbol("poll-hung");
+
+/** Race a status poll against the remaining deadline so a stalled/hung status
+ *  request can never suspend the wait past its timeout (the hard cap must hold
+ *  even when ComfyUI stops answering, not just when it answers slowly). */
+async function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T | typeof POLL_HUNG> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<typeof POLL_HUNG>((resolve) => {
+        timer = setTimeout(() => resolve(POLL_HUNG), Math.max(ms, 1));
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+    // If the deadline won, a later rejection of the abandoned poll must not
+    // become an unhandled rejection.
+    promise.catch(() => {});
+  }
+}
+
 function describeState(status: JobStatus): string {
   if (status.running) return "running";
   if (status.pending) return "pending";
@@ -56,10 +78,29 @@ export async function waitForJob(
   const deadline = start + timeoutS * 1000;
   let polls = 0;
 
+  let lastStatus: JobStatus | undefined;
+
   for (;;) {
     polls++;
-    const status = await statusFn(opts.prompt_id);
+    const polled = await withDeadline(statusFn(opts.prompt_id), deadline - now());
     const waitedS = Math.round((now() - start) / 100) / 10;
+
+    if (polled === POLL_HUNG) {
+      return {
+        prompt_id: opts.prompt_id,
+        timed_out: true,
+        waited_s: waitedS,
+        polls,
+        status: lastStatus ?? { running: false, pending: false, done: false },
+        message:
+          `Timed out: the status check for job ${opts.prompt_id} did not respond within the ` +
+          `${timeoutS}s timeout (${polls} polls${lastStatus ? `; last observed state: ${describeState(lastStatus)}` : ""}). ` +
+          `ComfyUI may be busy or unreachable — the job has NOT been cancelled. ` +
+          `Try wait_for_job again, get_job_status, or health_check.`,
+      };
+    }
+    const status = polled;
+    lastStatus = status;
 
     if (status.done) {
       const outcome = status.error

@@ -121,6 +121,23 @@ describe("waitForJob", () => {
     expect(clock.sleepFn).toHaveBeenCalledWith(250);
   });
 
+  it("times out even when the status source hangs and never resolves", async () => {
+    const clock = fakeClock();
+    // Never resolves — simulates ComfyUI stalling mid-request. The deadline
+    // race uses REAL time, so use the minimum 1s timeout.
+    const statusFn = vi.fn(() => new Promise<JobStatus>(() => {}));
+
+    const result = await waitForJob(
+      { prompt_id: PROMPT_ID, timeout_s: 1 },
+      { statusFn, ...clock },
+    );
+
+    expect(result.timed_out).toBe(true);
+    expect(result.polls).toBe(1);
+    expect(result.status.done).toBe(false);
+    expect(result.message).toContain("did not respond");
+  }, 10_000);
+
   it("propagates status-source errors like get_job_status does", async () => {
     const clock = fakeClock();
     const statusFn = vi.fn(async () => {
