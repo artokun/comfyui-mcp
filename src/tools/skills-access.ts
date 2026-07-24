@@ -165,7 +165,8 @@ export function enumeratePacks(): Array<Record<string, unknown>> {
 
 /** Locate a pack's workflow.json file path (name-guarded, must exist). Returns
  *  null when the pack or its workflow is missing. Shared by read_pack_workflow
- *  and check_workflow_runtime so they resolve the file identically. */
+ *  and check_workflow_runtime so they resolve the file identically. Also
+ *  exported for run_template, which resolves templates the same way. */
 export function resolvePackWorkflowFile(packName: string): string | null {
   const name = packName.trim();
   if (!SAFE_NAME.test(name)) return null;
