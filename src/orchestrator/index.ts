@@ -722,6 +722,18 @@ const CALL_TOOL_WHITELIST = new Set<string>([
   // download_model (already whitelisted): writes a local app bundle, no
   // model/system mutation. Deps install stays a separate consented action.
   "apps_import",
+  // App dependency side-panel (Explore/detail): the ✓/download panel reads what
+  // an app needs vs what's installed and offers per-item fetches. Reads are safe
+  // (missing-model detection + candidate resolution, node-pack presence); model
+  // downloads reuse the already-whitelisted download_civitai_model/download_model.
+  // install_custom_node is a MUTATION that runs the pack's code on install —
+  // reachable for the panel's "install missing node" button, gated behind an
+  // explicit themed confirm client-side. (Revisit if a canvas-less/foreign tab
+  // must not be able to trigger a node install.)
+  "resolve_missing_models",
+  "extract_workflow_dependencies",
+  "list_installed_nodes",
+  "install_custom_node",
 ]);
 
 /** Lazily build ONE in-process MCP client wired to the full comfyui tool surface,
