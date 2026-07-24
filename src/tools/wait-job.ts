@@ -129,9 +129,14 @@ export async function waitForJob(
         status.error != null ||
         status.status_str === "failed" ||
         status.status_str === "error";
-      const outcome = failed
-        ? `finished with an error (${status.error?.exception_type ?? status.error?.exception_message ?? status.status_str ?? "execution error"})`
-        : `completed${status.status_str ? ` (${status.status_str})` : ""}`;
+      // Local ComfyUI reports BOTH real failures and user/agent interruptions
+      // as done + status_str "error"; only a structured `error` proves an
+      // actual execution failure. Don't call an interrupted job a failure.
+      const outcome = status.error
+        ? `finished with an error (${status.error.exception_type ?? status.error.exception_message ?? "execution error"})`
+        : failed
+          ? `did not complete (status "${status.status_str}" — failed or was interrupted/cancelled; no execution error was recorded)`
+          : `completed${status.status_str ? ` (${status.status_str})` : ""}`;
       return {
         prompt_id: opts.prompt_id,
         timed_out: false,

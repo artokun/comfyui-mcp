@@ -87,7 +87,26 @@ describe("waitForJob", () => {
     const result = await waitForJob({ prompt_id: PROMPT_ID }, { statusFn, ...clock });
 
     expect(result.timed_out).toBe(false);
-    expect(result.message).toContain("finished with an error (failed)");
+    expect(result.message).toContain('did not complete (status "failed"');
+  });
+
+  it("does not call a local interrupted job (done+error status, no error object) a failure", async () => {
+    // Local ComfyUI reports interruptions exactly like this — done:true,
+    // status_str "error", and NO structured error.
+    const interrupted: JobStatus = {
+      running: false,
+      pending: false,
+      done: true,
+      status_str: "error",
+    };
+    const clock = fakeClock();
+    const statusFn = vi.fn(async () => interrupted);
+
+    const result = await waitForJob({ prompt_id: PROMPT_ID }, { statusFn, ...clock });
+
+    expect(result.timed_out).toBe(false);
+    expect(result.message).not.toContain("finished with an error");
+    expect(result.message).toContain("interrupted");
   });
 
   it("treats cloud-style 'cancelled' (done:false) as terminal instead of spinning", async () => {
