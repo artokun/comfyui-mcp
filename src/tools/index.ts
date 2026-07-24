@@ -23,6 +23,7 @@ import { registerAutoloadedWorkflows } from "./workflow-autoload.js";
 import { registerDefaultsTools } from "./defaults.js";
 import { registerGenerateImageTool } from "./generate-image.js";
 import { registerGenerateAudioTool } from "./generate-audio.js";
+import { registerGenerate3dTools } from "./generate-3d.js";
 import { registerGenerateVideoTool } from "./generate-video.js";
 import { registerRemoveBackgroundTool } from "./remove-background.js";
 import { registerUpscaleImageTool } from "./upscale-image.js";
@@ -91,6 +92,7 @@ const TOOL_GROUPS: ReadonlyArray<readonly [category: string, register: (server: 
   ["skills-config", registerDefaultsTools],
   ["generation", registerGenerateImageTool],
   ["generation", registerGenerateAudioTool],
+  ["generation", registerGenerate3dTools],
   ["generation", registerGenerateVideoTool],
   ["generation", registerRemoveBackgroundTool],
   ["generation", registerUpscaleImageTool],

@@ -491,6 +491,13 @@ export interface GenerateWithApiNodeArgs {
   class_type: string;
   inputs: Record<string, unknown>;
   disable_random_seed?: boolean;
+  /**
+   * Extra supporting nodes to merge into the enqueued workflow (e.g. a
+   * LoadImage feeding the API node's IMAGE link input). The API node itself is
+   * always node "1", and "2" may be used for an auto-added SaveImage — extra
+   * node ids must avoid both.
+   */
+  extra_nodes?: WorkflowJSON;
 }
 
 export interface GenerateWithApiNodeResult {
@@ -571,6 +578,18 @@ export async function generateWithApiNode(
       _meta: { title: schema.display_name },
     },
   };
+
+  // Merge caller-supplied supporting nodes (e.g. LoadImage → IMAGE link input).
+  if (args.extra_nodes) {
+    for (const [id, node] of Object.entries(args.extra_nodes)) {
+      if (id === "1" || id === "2") {
+        throw new ValidationError(
+          `extra_nodes id "${id}" is reserved (the API node is "1"; "2" may be used for an auto-added output node). Use a different id.`,
+        );
+      }
+      workflow[id] = node;
+    }
+  }
 
   // ComfyUI only executes graphs that reach a terminal OUTPUT_NODE; a bare
   // non-output API node fails validation with "prompt_no_outputs". If the API
