@@ -57,6 +57,7 @@ import { registerNodeDevTools } from "./node-dev.js";
 import { registerComfyCliTools } from "./comfy-cli.js";
 import { registerTrainTools } from "./train.js";
 import { registerAppsTools } from "./apps.js";
+import { registerTemplateSchemaTools } from "./template-schema.js";
 import { DefaultsManager } from "../services/defaults-manager.js";
 import { ToolCatalog } from "./catalog.js";
 
@@ -123,6 +124,7 @@ const TOOL_GROUPS: ReadonlyArray<readonly [category: string, register: (server: 
   ["custom-nodes", registerNodeDevTools],
   ["training", registerTrainTools],
   ["apps", registerAppsTools],
+  ["workflows", registerTemplateSchemaTools],
 ];
 
 // ── Blind content mode (panel issue #90) ────────────────────────────────────

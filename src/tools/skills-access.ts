@@ -116,7 +116,7 @@ function enumerateSkills(): Array<{ name: string; description: string }> {
 
 /** Enumerate installer packs as { name, family, kind, description, workflow,
  *  has_workflow, has_manifest }. Reads each packs/<name>/pack.yaml. */
-function enumeratePacks(): Array<Record<string, unknown>> {
+export function enumeratePacks(): Array<Record<string, unknown>> {
   const dir = packsDir();
   if (!existsSync(dir)) return [];
   const out: Array<Record<string, unknown>> = [];
@@ -166,7 +166,7 @@ function enumeratePacks(): Array<Record<string, unknown>> {
 /** Locate a pack's workflow.json file path (name-guarded, must exist). Returns
  *  null when the pack or its workflow is missing. Shared by read_pack_workflow
  *  and check_workflow_runtime so they resolve the file identically. */
-function resolvePackWorkflowFile(packName: string): string | null {
+export function resolvePackWorkflowFile(packName: string): string | null {
   const name = packName.trim();
   if (!SAFE_NAME.test(name)) return null;
   const packDir = join(packsDir(), name);
