@@ -282,13 +282,20 @@ export function templateGraphToApi(
             : undefined;
         const inputs = slotArr<NonNullable<UiWorkflow["nodes"][number]["inputs"]>[number]>(n.inputs);
         const outputs = slotArr<NonNullable<UiWorkflow["nodes"][number]["outputs"]>[number]>(n.outputs);
+        // widgets_values may be a positional array OR a name→value record (VHS
+        // nodes) — both are valid. A scalar (string/number/…) would crash the
+        // converter's `name in wv` check, so normalize it away.
+        const wv = n.widgets_values;
+        const widgets_values =
+          Array.isArray(wv) || (wv != null && typeof wv === "object") ? wv : undefined;
         if (
+          widgets_values === wv &&
           inputs?.length === (Array.isArray(n.inputs) ? n.inputs.length : -1) &&
           outputs?.length === (Array.isArray(n.outputs) ? n.outputs.length : -1)
         ) {
           return n; // fully well-shaped, keep as-is
         }
-        return { ...n, inputs, outputs };
+        return { ...n, inputs, outputs, widgets_values };
       });
     if (goodNodes.length !== (ui.nodes ?? []).length) {
       warnings.push(

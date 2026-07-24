@@ -192,6 +192,14 @@ describe("templateGraphToApi (UI-format template, offline fallback schema)", () 
           widgets_values: ["kept anyway"],
         },
         {
+          id: 8,
+          type: "CLIPTextEncode",
+          pos: [0, 0],
+          inputs: [],
+          outputs: [],
+          widgets_values: "bad-scalar", // malformed: must not crash `name in wv`
+        },
+        {
           id: 6,
           type: "CLIPTextEncode",
           pos: [0, 0],
