@@ -102,6 +102,26 @@ export async function waitForJob(
     const status = polled;
     lastStatus = status;
 
+    // Comfy Cloud can report a terminal "cancelled" job that the JobStatus
+    // mapping leaves with done:false (queue-manager maps only completed/failed
+    // to done, but always copies the cloud status into status_str). Waiting on
+    // a cancelled job would otherwise spin until timeout.
+    const cancelled =
+      !status.done &&
+      !status.running &&
+      !status.pending &&
+      (status.status_str === "cancelled" || status.status_str === "canceled");
+    if (cancelled) {
+      return {
+        prompt_id: opts.prompt_id,
+        timed_out: false,
+        waited_s: waitedS,
+        polls,
+        status,
+        message: `Job ${opts.prompt_id} was cancelled (after ${waitedS}s of waiting).`,
+      };
+    }
+
     if (status.done) {
       // A failure isn't always a structured `error` — the cloud status source
       // can report done + status_str "failed"/"error" with no error object.

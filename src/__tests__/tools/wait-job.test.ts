@@ -90,6 +90,26 @@ describe("waitForJob", () => {
     expect(result.message).toContain("finished with an error (failed)");
   });
 
+  it("treats cloud-style 'cancelled' (done:false) as terminal instead of spinning", async () => {
+    const cancelled: JobStatus = {
+      running: false,
+      pending: false,
+      done: false,
+      status_str: "cancelled",
+    };
+    const clock = fakeClock();
+    const statusFn = vi
+      .fn<(id: string) => Promise<JobStatus>>()
+      .mockResolvedValueOnce(running)
+      .mockResolvedValueOnce(cancelled);
+
+    const result = await waitForJob({ prompt_id: PROMPT_ID }, { statusFn, ...clock });
+
+    expect(statusFn).toHaveBeenCalledTimes(2);
+    expect(result.timed_out).toBe(false);
+    expect(result.message).toContain("cancelled");
+  });
+
   it("returns timed_out (without throwing) when the job never finishes", async () => {
     const clock = fakeClock();
     const statusFn = vi.fn(async () => running);
