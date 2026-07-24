@@ -82,6 +82,15 @@ function objectInfoWith3d(): ObjectInfo {
       output: ["STRING", "MODEL_TASK_ID", "FILE_3D_GLB"],
       input: { required: { model_task_id: ["MODEL_TASK_ID", {}] } },
     }),
+    // DECOY: 3D-category API node with a prompt but NO FILE_3D output (a
+    // utility/plumbing node) — must never be picked as a generation backend.
+    Tripo3dTaskStatusNode: nodeDef({
+      api_node: true,
+      category: "partner/3d/Tripo",
+      display_name: "Tripo: Task status",
+      output: ["STRING"],
+      input: { required: { prompt: ["STRING", {}] } },
+    }),
     // Non-3D API node — excluded.
     FluxProImageNode: nodeDef({
       api_node: true,
@@ -97,6 +106,14 @@ function objectInfoWith3d(): ObjectInfo {
 
 function objectInfoNo3d(): ObjectInfo {
   return {
+    // Category-only 3D decoy (no FILE_3D output) — must NOT count as a backend.
+    Some3dUtilityNode: nodeDef({
+      api_node: true,
+      category: "partner/3d/Acme",
+      display_name: "Acme 3D utility",
+      output: ["STRING"],
+      input: { required: { prompt: ["STRING", {}] } },
+    }),
     FluxProImageNode: nodeDef({
       api_node: true,
       category: "api node/image/BFL",
@@ -129,6 +146,8 @@ describe("3D API-node detection", () => {
     const info = objectInfoWith3d();
     expect(is3dApiNode(info.TripoTextToModelNode)).toBe(true);
     expect(is3dApiNode(info.FluxProImageNode)).toBe(false);
+    // Category alone must not qualify — a real FILE_3D output is required.
+    expect(is3dApiNode(info.Tripo3dTaskStatusNode)).toBe(false);
     expect(is3dApiNode(info.KSampler)).toBe(false);
 
     const text = find3dApiNodes(info, "text");

@@ -54,14 +54,14 @@ function has3dOutput(def: ComfyUINodeDef): boolean {
   );
 }
 
-/** Is the node in a 3D category (e.g. "partner/3d/Tripo", "api node/3d/Rodin")? */
-function has3dCategory(def: ComfyUINodeDef): boolean {
-  return /(^|\/)3d(\/|$)/i.test(def.category ?? "");
-}
-
-/** A hosted partner/API node that produces a 3D model. */
+/**
+ * A hosted partner/API node that produces a 3D model. Requires an actual
+ * FILE_3D* output — a 3D-ish category alone is NOT enough, since 3D categories
+ * also contain post-processing/utility nodes (UV unwrap, retopology, task-id
+ * plumbing) that would be a false "backend" for generation.
+ */
 export function is3dApiNode(def: ComfyUINodeDef): boolean {
-  return isApiNode(def) && (has3dOutput(def) || has3dCategory(def));
+  return isApiNode(def) && has3dOutput(def);
 }
 
 /** Names of required link-type inputs (non-widget — need an upstream node). */

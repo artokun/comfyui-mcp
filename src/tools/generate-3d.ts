@@ -27,13 +27,13 @@ export function registerGenerate3dTools(server: McpServer): void {
         .string()
         .optional()
         .describe(
-          "Text description of the 3D model (required for mode 'text'; in mode 'image' it is passed along only if the chosen node accepts a prompt).",
+          "REQUIRED when mode is 'text': text description of the 3D model. In mode 'image' it is optional and passed along only if the chosen node accepts a prompt. (Cross-field requirement enforced at runtime — the call fails with a clear error if omitted in text mode.)",
         ),
       image: z
         .string()
         .optional()
         .describe(
-          "ComfyUI input-image filename (required for mode 'image'). Upload local files first with upload_image.",
+          "REQUIRED when mode is 'image': ComfyUI input-image filename. Upload local files first with upload_image. (Cross-field requirement enforced at runtime.)",
         ),
       node: z
         .string()
