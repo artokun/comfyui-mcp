@@ -164,6 +164,40 @@ describe("templateGraphToApi (UI-format template, offline fallback schema)", () 
     expect(values).not.toContain("randomize");
   });
 
+  it("keeps a two-number literal widget value that is not a node reference", () => {
+    const api = {
+      "1": { class_type: "TotallyUnknownNode", inputs: { size: [512, 512], real_link: ["2", 0] } },
+      "2": { class_type: "AnotherNode", inputs: {} },
+    } as unknown as WorkflowJSON;
+    const res = extractTemplateSlots(api, null);
+    const keys = [...res.slots, ...res.other_slots].map((s) => s.key);
+    expect(keys).toContain("1.size"); // literal, kept
+    expect(keys).not.toContain("1.real_link"); // actual connection, dropped
+  });
+
+  it("survives malformed UI node entries without crashing", () => {
+    const broken = {
+      nodes: [
+        null,
+        { pos: [0, 0] }, // missing id/type
+        {
+          id: 6,
+          type: "CLIPTextEncode",
+          pos: [0, 0],
+          inputs: [],
+          outputs: [],
+          widgets_values: ["ok"],
+        },
+      ],
+      links: [null, [1, 6, 0]],
+    };
+    const norm = templateGraphToApi(broken, null);
+    expect(norm).not.toBeNull();
+    const { slots } = extractTemplateSlots(norm!.api, norm!.objectInfo);
+    expect(slots.map((s) => s.key)).toContain("6.text");
+    expect(norm!.warnings.join(" ")).toMatch(/malformed/i);
+  });
+
   it("returns null for JSON that is neither UI nor API format", () => {
     expect(templateGraphToApi({ hello: "world" }, null)).toBeNull();
     expect(templateGraphToApi([1, 2, 3], null)).toBeNull();

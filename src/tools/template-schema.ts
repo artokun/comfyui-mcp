@@ -91,13 +91,15 @@ export function classifyWidget(classType: string, widget: string): string {
   return "other";
 }
 
-/** A UI-format link value in an API graph: [nodeId, outputSlot]. */
-function isLinkValue(v: unknown): boolean {
+/** An API-format connection reference: [nodeId, outputSlot] — only when the
+ *  referenced node actually exists (a literal like [512, 512] is a widget value). */
+function isLinkValue(v: unknown, nodeKeys: Set<string>): boolean {
   return (
     Array.isArray(v) &&
     v.length === 2 &&
     (typeof v[0] === "string" || typeof v[0] === "number") &&
-    typeof v[1] === "number"
+    typeof v[1] === "number" &&
+    nodeKeys.has(String(v[0]))
   );
 }
 
@@ -121,6 +123,7 @@ export function extractTemplateSlots(
 ): { slots: TemplateSlot[]; other_slots: TemplateSlot[] } {
   const slots: TemplateSlot[] = [];
   const other: TemplateSlot[] = [];
+  const nodeKeys = new Set(Object.keys(api));
   const ids = Object.keys(api).sort((a, b) => {
     const na = Number(a);
     const nb = Number(b);
@@ -135,7 +138,7 @@ export function extractTemplateSlots(
     const def = objectInfo?.[node.class_type];
     const title = node._meta?.title;
     for (const [widget, value] of Object.entries(inputs)) {
-      if (isLinkValue(value)) continue; // connection, not an overridable widget
+      if (isLinkValue(value, nodeKeys)) continue; // connection, not an overridable widget
       const slot: TemplateSlot = {
         key: `${nodeId}.${widget}`,
         node_id: nodeId,
@@ -254,8 +257,25 @@ export function templateGraphToApi(
 ): { api: WorkflowJSON; warnings: string[]; objectInfo: ObjectInfo } | null {
   if (isUiFormat(graph)) {
     const merged: ObjectInfo = { ...FALLBACK_OBJECT_INFO, ...(objectInfo ?? {}) };
-    const { workflow, warnings } = convertUiToApi(graph as UiWorkflow, merged);
-    return { api: workflow, warnings, objectInfo: merged };
+    // isUiFormat only checks that nodes/links are arrays — drop malformed
+    // entries (null nodes, missing id/type) so the converter can't crash on
+    // odd shapes; report what was dropped.
+    const ui = graph as UiWorkflow;
+    const warnings: string[] = [];
+    const goodNodes = (ui.nodes ?? []).filter(
+      (n): n is UiWorkflow["nodes"][number] =>
+        !!n && typeof n === "object" && typeof (n as { id?: unknown }).id === "number" &&
+        typeof (n as { type?: unknown }).type === "string",
+    );
+    if (goodNodes.length !== (ui.nodes ?? []).length) {
+      warnings.push(
+        `Dropped ${(ui.nodes ?? []).length - goodNodes.length} malformed node entr(y/ies) (missing id/type).`,
+      );
+    }
+    const goodLinks = (ui.links ?? []).filter((l) => Array.isArray(l) && l.length >= 6);
+    const sanitized: UiWorkflow = { ...ui, nodes: goodNodes, links: goodLinks as UiWorkflow["links"] };
+    const { workflow, warnings: convWarnings } = convertUiToApi(sanitized, merged);
+    return { api: workflow, warnings: [...warnings, ...convWarnings], objectInfo: merged };
   }
   if (isApiFormat(graph)) {
     return {
