@@ -7,6 +7,7 @@ import { modifyWorkflow, type ModifyOperation } from "../services/workflow-compo
 import {
   isUiFormat,
   isApiFormat,
+  isLinkRef,
   convertUiToApi,
 } from "../services/workflow-converter.js";
 import { getJobStatus } from "../services/queue-manager.js";
@@ -38,17 +39,6 @@ function nearMatches(query: string, names: string[]): string[] {
   return scored.slice(0, 8).map((s) => s.name);
 }
 
-/** An API-graph input value of the form [sourceNodeId, outputSlot] is a graph
- *  connection (link), not a widget value — run_template must not clobber it. */
-function isLinkValue(v: unknown): boolean {
-  return (
-    Array.isArray(v) &&
-    v.length === 2 &&
-    (typeof v[0] === "string" || typeof v[0] === "number") &&
-    typeof v[1] === "number"
-  );
-}
-
 /**
  * Parse "<nodeId>.<widget_name>" override keys (the SAME convention
  * get_template_schema emits, so schema→run round-trips) into set_input
@@ -59,6 +49,7 @@ function overridesToOps(
   overrides: Record<string, unknown>,
 ): ModifyOperation[] {
   const ops: ModifyOperation[] = [];
+  const nodeKeys = new Set(Object.keys(workflow));
   for (const [key, value] of Object.entries(overrides)) {
     const dot = key.indexOf(".");
     if (dot <= 0 || dot === key.length - 1) {
@@ -76,7 +67,7 @@ function overridesToOps(
       );
     }
     const widgetInputs = Object.entries(node.inputs ?? {})
-      .filter(([, v]) => !isLinkValue(v))
+      .filter(([, v]) => !isLinkRef(v, nodeKeys))
       .map(([k]) => k);
     if (!node.inputs || !(widget in node.inputs)) {
       const avail = widgetInputs.join(", ") || "(none)";
@@ -84,7 +75,7 @@ function overridesToOps(
         `Override "${key}": node ${nodeId} (${node.class_type}) has no input "${widget}". Overridable widgets: ${avail}`,
       );
     }
-    if (isLinkValue(node.inputs[widget])) {
+    if (isLinkRef(node.inputs[widget], nodeKeys)) {
       throw new ValidationError(
         `Override "${key}": input "${widget}" on node ${nodeId} (${node.class_type}) is a graph CONNECTION, not a widget — overriding it would break the graph. Overridable widgets: ${widgetInputs.join(", ") || "(none)"}. Use modify_workflow to rewire connections.`,
       );

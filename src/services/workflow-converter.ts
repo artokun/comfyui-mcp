@@ -667,8 +667,11 @@ export function isApiFormat(obj: unknown): obj is WorkflowJSON {
   );
 }
 
-/** An API-format connection reference: ["<nodeId>", <outputSlot>]. */
-function isLinkRef(v: unknown, nodeKeys: Set<string>): v is [string | number, number] {
+/** An API-format connection reference: ["<nodeId>", <outputSlot>]. Graph-aware:
+ *  only counts as a link when the first element names an existing node, so
+ *  array-valued widgets like [1024, 1024] are not misclassified. Exported for
+ *  run_template's override validation. */
+export function isLinkRef(v: unknown, nodeKeys: Set<string>): v is [string | number, number] {
   return (
     Array.isArray(v) &&
     v.length === 2 &&

@@ -62,7 +62,12 @@ const TEMPLATE_GRAPH = {
     class_type: "KSampler",
     inputs: { seed: 1, steps: 20, cfg: 7, model: ["4", 0], positive: ["6", 0] },
   },
-  "6": { class_type: "CLIPTextEncode", inputs: { text: "default prompt", clip: ["4", 1] } },
+  "6": {
+    class_type: "CLIPTextEncode",
+    // `size` is an ARRAY-valued widget whose first element is NOT a node id —
+    // it must be overridable (not misclassified as a graph connection).
+    inputs: { text: "default prompt", size: [1024, 1024], clip: ["4", 1] },
+  },
 };
 
 const dir = mkdtempSync(join(tmpdir(), "run-template-"));
@@ -145,9 +150,21 @@ describe("run_template", () => {
     expect(enqueueWorkflowMock).not.toHaveBeenCalled();
   });
 
+  it("allows overriding an array-valued widget (not a link — first element isn't a node id)", async () => {
+    const handler = getHandler();
+    const res = await handler({
+      template: "anima-txt2img",
+      overrides: { "6.size": [512, 768] },
+    });
+    expect(res.isError).toBeFalsy();
+    const enqueued = enqueueWorkflowMock.mock.calls[0][0] as typeof TEMPLATE_GRAPH;
+    expect(enqueued["6"].inputs.size).toEqual([512, 768]);
+  });
+
   it("rejects overrides targeting a graph CONNECTION (link) input", async () => {
     const handler = getHandler();
-    const res = await handler({ template: "anima-txt2img", overrides: { "3.model": "x" } });
+    // "3.positive" is ["6", 0] and node "6" exists → a real connection.
+    const res = await handler({ template: "anima-txt2img", overrides: { "3.positive": "x" } });
     expect(res.isError).toBe(true);
     expect(res.content[0].text).toMatch(/CONNECTION/);
     expect(res.content[0].text).toMatch(/seed/); // lists overridable widgets
