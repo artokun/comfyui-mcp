@@ -15,6 +15,30 @@ async function getInputDir(): Promise<string> {
 }
 
 /**
+ * Reject filenames that would escape the ComfyUI input/ directory.
+ * The MCP client is untrusted input, so `filename` must be treated as such.
+ */
+function assertSafeInputFilename(filename: string): string {
+  // Strip any directory components — only allow a bare filename.
+  const safe = basename(filename);
+  if (
+    !safe ||
+    safe === "." ||
+    safe === ".." ||
+    safe !== filename ||
+    safe.includes("/") ||
+    safe.includes("\\") ||
+    safe.includes("\0")
+  ) {
+    throw new ValidationError(
+      `Invalid filename "${filename}": must be a bare filename with no path components.`,
+    );
+  }
+  return safe;
+}
+
+
+/**
  * Copy a local image file into ComfyUI's input/ directory so it can be
  * referenced by LoadImage nodes in workflows.
  */
@@ -23,7 +47,7 @@ export async function uploadImage(
   filename?: string,
 ): Promise<{ filename: string; path: string }> {
   const inputDir = await getInputDir();
-  const resolvedFilename = filename ?? basename(sourcePath);
+  const resolvedFilename = assertSafeInputFilename(filename ?? basename(sourcePath));
 
   // Validate extension
   const ext = extname(resolvedFilename).toLowerCase();
@@ -368,7 +392,7 @@ async function uploadMediaLocal(
   kind: "video" | "audio",
 ): Promise<{ filename: string; path: string }> {
   const inputDir = await getInputDir();
-  const resolvedFilename = filename ?? basename(sourcePath);
+  const resolvedFilename = assertSafeInputFilename(filename ?? basename(sourcePath));
   resolveMediaMime(resolvedFilename, mimeMap, kind);
   const targetPath = join(inputDir, resolvedFilename);
   logger.info(`Uploading ${kind} to ComfyUI input`, { sourcePath, targetPath });
