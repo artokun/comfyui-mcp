@@ -21,6 +21,7 @@ const KIMI_OAUTH_TOKEN_URL = "https://api.kimi.com/oauth/token";
 export const GLM_CODE_DEFAULT_BASE = "https://api.z.ai/api/coding/paas/v4";
 export const KIMI_CODE_DEFAULT_BASE = "https://api.kimi.com/coding/v1";
 export const MOONSHOT_DEFAULT_BASE = "https://api.moonshot.ai/v1";
+export const MINIMAX_DEFAULT_BASE = "https://api.minimax.io/v1";
 
 const TOKEN_REFRESH_SKEW_MS = 120_000;
 
@@ -524,6 +525,22 @@ export function resolveMoonshotCredentials(): MoonshotCredentials {
 }
 
 /**
+ * MiniMax platform API key. Env: MINIMAX_API_KEY. OpenAI-compatible
+ * /v1/chat/completions at the global endpoint (https://api.minimax.io/v1);
+ * set COMFYUI_MCP_MINIMAX_BASE_URL to the China-region endpoint
+ * (https://api.minimaxi.com/v1) or any other OpenAI-compatible host.
+ */
+export function resolveMiniMaxCredentials(): MoonshotCredentials {
+  return resolveKeyedCredentials({
+    envKeys: ["MINIMAX_API_KEY"],
+    missingMessage:
+      "MiniMax requires MINIMAX_API_KEY from platform.minimax.io (https://platform.minimax.io/console/api-keys).",
+    baseUrlEnv: "COMFYUI_MCP_MINIMAX_BASE_URL",
+    defaultBaseUrl: MINIMAX_DEFAULT_BASE,
+  });
+}
+
+/**
  * Resolve credentials for a simple OpenAI-compatible api-key provider by its
  * registry id (see services/openai-provider-registry). This is the one place
  * that marries a `simpleKeyAuth` registry id to its resolver, so the generic
@@ -533,6 +550,7 @@ export function resolveMoonshotCredentials(): MoonshotCredentials {
 export function resolveOpenAiKeyCredentials(id: string): { apiKey: string; baseUrl: string } {
   if (id === "glm") return resolveGlmCodeCredentials();
   if (id === "moonshot") return resolveMoonshotCredentials();
+  if (id === "minimax") return resolveMiniMaxCredentials();
   throw new ValidationError(`No OpenAI api-key credential resolver for provider "${id}".`);
 }
 
@@ -763,6 +781,7 @@ export const __testing = {
   GLM_CODE_DEFAULT_BASE,
   KIMI_CODE_DEFAULT_BASE,
   MOONSHOT_DEFAULT_BASE,
+  MINIMAX_DEFAULT_BASE,
   codexAuthPath,
   kimiCodeAuthPath,
   grokAuthPath,

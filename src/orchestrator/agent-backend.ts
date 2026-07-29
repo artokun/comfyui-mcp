@@ -19,6 +19,7 @@ export type BackendId =
   | "glm"
   | "kimi"
   | "moonshot"
+  | "minimax"
   | "ollama"
   | "openrouter"
   | "copilot";

@@ -6,6 +6,7 @@ import {
   resolveGlmCodeCredentials,
   resolveKimiCodeOAuth,
   resolveMoonshotCredentials,
+  resolveMiniMaxCredentials,
   resolveOpenAICodexOAuth,
   __testing,
 } from "../../services/code-provider-auth.js";
@@ -51,6 +52,30 @@ describe("resolveMoonshotCredentials", () => {
 
   it("throws when MOONSHOT_API_KEY is not set", () => {
     expect(() => resolveMoonshotCredentials()).toThrow(/MOONSHOT_API_KEY/);
+  });
+});
+
+describe("resolveMiniMaxCredentials", () => {
+  afterEach(() => {
+    delete process.env.MINIMAX_API_KEY;
+    delete process.env.COMFYUI_MCP_MINIMAX_BASE_URL;
+  });
+
+  it("reads MINIMAX_API_KEY and default base URL", () => {
+    process.env.MINIMAX_API_KEY = "minimax-test-key";
+    const creds = resolveMiniMaxCredentials();
+    expect(creds.apiKey).toBe("minimax-test-key");
+    expect(creds.baseUrl).toBe(__testing.MINIMAX_DEFAULT_BASE);
+  });
+
+  it("honors a base URL override (trailing slash stripped)", () => {
+    process.env.MINIMAX_API_KEY = "minimax-test-key";
+    process.env.COMFYUI_MCP_MINIMAX_BASE_URL = "https://api.minimaxi.com/v1/";
+    expect(resolveMiniMaxCredentials().baseUrl).toBe("https://api.minimaxi.com/v1");
+  });
+
+  it("throws when MINIMAX_API_KEY is not set", () => {
+    expect(() => resolveMiniMaxCredentials()).toThrow(/MINIMAX_API_KEY/);
   });
 });
 

@@ -27,7 +27,7 @@
 // the copy/identity that used to be duplicated.
 
 /** The simple OpenAI-compatible API-key providers, by id. */
-export type OpenAiKeyProviderId = "glm" | "kimi" | "moonshot";
+export type OpenAiKeyProviderId = "glm" | "kimi" | "moonshot" | "minimax";
 
 export interface OpenAiKeyProvider {
   /** Panel backend id (a member of orchestrator BackendId). */
@@ -113,6 +113,20 @@ export const OPENAI_KEY_PROVIDERS: OpenAiKeyProvider[] = [
       `🟢 comfyui-mcp agent ready — ${agentLabel} on your Moonshot platform (Kimi K3) API key. Ask away.`,
     degradedMessage:
       "⚠️ The background agent isn't responding — Moonshot (Kimi K3) couldn't start. Set MOONSHOT_API_KEY from platform.kimi.ai, then Disconnect → Connect to retry.",
+    simpleKeyAuth: true,
+  },
+  {
+    id: "minimax",
+    slotLabel: "MiniMax",
+    slotHelp: "MiniMax M3 via the MiniMax platform API key",
+    envKeys: ["MINIMAX_API_KEY"],
+    modelEnv: "COMFYUI_MCP_MINIMAX_MODEL",
+    defaultModel: process.env.COMFYUI_MCP_MINIMAX_MODEL?.trim() || "MiniMax-M3",
+    ackFallbackLabel: "MiniMax",
+    readyMessage: (agentLabel) =>
+      `🟢 comfyui-mcp agent ready — ${agentLabel} on your MiniMax platform API key. Ask away.`,
+    degradedMessage:
+      "⚠️ The background agent isn't responding — MiniMax couldn't start. Set MINIMAX_API_KEY from platform.minimax.io, then Disconnect → Connect to retry.",
     simpleKeyAuth: true,
   },
 ];

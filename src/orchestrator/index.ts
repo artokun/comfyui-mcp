@@ -2025,11 +2025,11 @@ export async function runPanelOrchestrator(): Promise<void> {
   // the next probe uses the new key, and re-push readiness + models to every
   // live tab so the OpenRouter provider flips to "ready" and lists its models
   // without a reconnect.
-  const KEYED_PROVIDERS = ["openrouter", "custom", "glm", "kimi", "moonshot"];
+  const KEYED_PROVIDERS = ["openrouter", "custom", "glm", "kimi", "moonshot", "minimax"];
   const unsubscribeAgentSecrets = onAgentSecretsChanged(() => {
     hydrateAgentSecretsIntoEnv();
     // A key change can affect ANY keyed provider (OpenRouter/Custom endpoints and
-    // the hosted API-key backends GLM / Kimi / Moonshot) — drop each one's cached
+    // the hosted API-key backends GLM / Kimi / Moonshot / MiniMax) — drop each one's cached
     // probe backend + model list so the next probe carries the fresh credentials
     // (and a revoked key immediately stops reading as "ready" from a stale cache).
     for (const b of KEYED_PROVIDERS) {

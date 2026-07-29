@@ -62,6 +62,12 @@ describe("panel-secrets credential slots (canonical .env)", () => {
     expect(process.env.MOONSHOT_API_KEY).toBe("sk-moonshot-abc123");
   });
 
+  it("the minimax slot writes MINIMAX_API_KEY", async () => {
+    const m = await import("../../services/panel-secrets.js");
+    m.setPanelSecret("minimax", "minimax-abc123");
+    expect(process.env.MINIMAX_API_KEY).toBe("minimax-abc123");
+  });
+
   it("rejects an unknown slot", async () => {
     const m = await import("../../services/panel-secrets.js");
     expect(() => m.setPanelSecret("not-a-slot", "x")).toThrow(/unknown credential slot/i);

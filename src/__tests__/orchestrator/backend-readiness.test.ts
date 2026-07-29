@@ -130,6 +130,18 @@ describe("backendReadiness", () => {
     else process.env.MOONSHOT_API_KEY = real;
   });
 
+  it("minimax: ready when MINIMAX_API_KEY is set", () => {
+    const real = process.env.MINIMAX_API_KEY;
+    delete process.env.MINIMAX_API_KEY;
+    expect(backendReadiness("minimax", { home: tmp }).ready).toBe(false);
+    process.env.MINIMAX_API_KEY = "minimax-test-key";
+    const r = backendReadiness("minimax", { home: tmp });
+    expect(r.auth).toBe(true);
+    expect(r.ready).toBe(true);
+    if (real === undefined) delete process.env.MINIMAX_API_KEY;
+    else process.env.MINIMAX_API_KEY = real;
+  });
+
   it("unknown backend is never ready", () => {
     expect(backendReadiness("bogus").ready).toBe(false);
   });
