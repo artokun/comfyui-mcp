@@ -23,6 +23,7 @@ import type {
   McpSdkServerConfigWithInstance,
 } from "@anthropic-ai/claude-agent-sdk";
 import { logger } from "../utils/logger.js";
+import { toReadableText } from "../utils/errors.js";
 import type { SessionStore } from "./session-store.js";
 import type { AgentBackend, AgentEvent, NeutralTurn } from "./agent-backend.js";
 import {
@@ -357,7 +358,7 @@ export class PanelAgent {
    * reached the agent." Only meaningful when a session is live (the manager only
    * calls this for an existing agent, so we never spawn one just for an event).
    */
-  injectEvent(ev: { kind?: string; images?: ImageRef[]; error?: string; note?: string }): void {
+  injectEvent(ev: { kind?: string; images?: ImageRef[]; error?: unknown; note?: string }): void {
     let text: string | null = null;
     let images: ImageRef[] | undefined;
     if (ev.kind === "executed") {
@@ -387,8 +388,10 @@ export class PanelAgent {
         images = imgs.filter((i) => i.filename).map((i) => ({ ...i, type: i.type ?? "output" }));
       }
     } else if (ev.kind === "run_error") {
+      // ev.error may be a structured ComfyUI error object — normalize to
+      // readable text so it never renders as `[object Object]` (#176).
       text =
-        `[panel event] The user's workflow run just ERRORED: ${ev.error ?? "unknown error"}. ` +
+        `[panel event] The user's workflow run just ERRORED: ${toReadableText(ev.error, "unknown error")}. ` +
         `If it relates to what you were doing, diagnose it (panel_get_errors has the details) and offer a fix.`;
     }
     if (!text) return;
@@ -406,10 +409,14 @@ export class PanelAgent {
    *  run succeeded. INTERRUPT any live turn (re-queued so it resumes AFTER the
    *  error), then put the error at the FRONT of the queue so the agent addresses
    *  it before anything else. */
-  async injectRunError(error: string): Promise<void> {
+  async injectRunError(error: unknown): Promise<void> {
     if (this.closed) return;
+    // The panel forwards ComfyUI's execution error, which may be a STRUCTURED
+    // object ({ node_id, node_type, exception_message, … }), not a string.
+    // Normalize it so the agent reads real text, never `[object Object]` (#176).
+    const readable = toReadableText(error, "unknown error");
     const text =
-      `[panel event] ⚠️ The workflow run you just queued ERRORED on the user's canvas: ${error}. ` +
+      `[panel event] ⚠️ The workflow run you just queued ERRORED on the user's canvas: ${readable}. ` +
       `STOP — do not carry on as if it succeeded. If it relates to what you were doing, diagnose it ` +
       `(panel_get_errors has the full node-level details) and fix it; otherwise tell the user briefly.`;
     if (this.inFlight) {
@@ -979,7 +986,13 @@ export class PanelAgent {
         // exact "three Hellos into the void" failure from the support thread.
         // Surface it as a visible chat line; the follow-up `result` event still
         // advances the turn gate normally.
-        const detail = typeof ev.message === "string" && ev.message.trim() ? ev.message.trim() : "unknown error";
+        // ev.message is typed string, but a backend may surface a structured
+        // failure (quota/rate-limit) object — normalize so a non-string never
+        // renders as `[object Object]` in chat (#176).
+        const detail =
+          typeof ev.message === "string" && ev.message.trim()
+            ? ev.message.trim()
+            : toReadableText(ev.message as unknown, "unknown error");
         this.errorSurfaced = true;
         this.deps.onSay(
           this.tabId,
@@ -1373,7 +1386,7 @@ export class PanelAgentManager {
 
   /** Feed a ComfyUI execution event to an EXISTING agent (no-op if none — we
    *  never spawn an agent just to react to an event). Returns whether delivered. */
-  injectEvent(tabId: string, ev: { kind?: string; images?: ImageRef[]; error?: string; note?: string }): boolean {
+  injectEvent(tabId: string, ev: { kind?: string; images?: ImageRef[]; error?: unknown; note?: string }): boolean {
     const agent = this.agents.get(tabId);
     if (!agent || agent.isStopped) return false; // best-effort; don't enqueue into a closed agent
     agent.injectEvent(ev);
@@ -1382,7 +1395,7 @@ export class PanelAgentManager {
 
   /** Push a ComfyUI execution error to a tab's agent — interrupt the live turn
    *  and front-queue the error so the agent stops and addresses it. */
-  async injectRunError(tabId: string, error: string): Promise<boolean> {
+  async injectRunError(tabId: string, error: unknown): Promise<boolean> {
     const agent = this.agents.get(tabId);
     if (!agent || agent.isStopped) return false;
     await agent.injectRunError(error);

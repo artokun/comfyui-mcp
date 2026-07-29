@@ -1338,6 +1338,7 @@ export async function runPanelOrchestrator(): Promise<void> {
   const AGENT_KEY_SEP = "::";
   const tabBackends = new Map<string, string>(); // panel tabId -> selected backend
   const headlessTabs = new Set<string>(); // tabs with no ComfyUI canvas (mobile/remote) — deliver renders in-turn
+  const warnedNoPanelMcp = new Set<string>(); // tabs already told their non-Claude backend lacks panel_* tools (#168)
   const workflowTargets = new WorkflowTargetStore();
   const backendForTab = (panelTabId: string): string =>
     tabBackends.get(panelTabId) ?? defaultBackend;
@@ -3090,12 +3091,14 @@ export async function runPanelOrchestrator(): Promise<void> {
       const ev = event as {
         kind?: string;
         images?: Array<{ filename: string; subfolder?: string; type?: string }>;
-        error?: string;
+        error?: unknown;
         note?: string;
       };
       // A run error is URGENT: interrupt the live turn + front-queue it ("hey,
       // look at me") so the agent stops and fixes it instead of running blind.
       // Everything else (e.g. a finished render's images) is enqueued normally.
+      // `ev.error` may be a STRUCTURED object (ComfyUI's node-level error);
+      // injectRunError normalizes it to readable text, never `[object Object]`.
       if (ev.kind === "run_error") {
         void manager.injectRunError(agentKeyFor(event.tab_id), ev.error ?? "unknown error");
         logger.info(`[panel-orchestrator] tab ${event.tab_id.slice(0, 8)} run_error → agent (interrupt)`);
@@ -3407,6 +3410,24 @@ export async function runPanelOrchestrator(): Promise<void> {
         bridge.push({ type: "turn", state: "done" }, event.tab_id);
       }
       return;
+    }
+    // Live-canvas tool diagnostic (#168): a non-Claude tab drives the canvas
+    // through the loopback HTTP panel-MCP. If that server never started (port
+    // bind failure — the startup error at :panelMcpPort), the backend silently
+    // gets headless-only tools with NO panel_* (panel_graph_outline,
+    // panel_query_graph, …), so the agent can't see or edit the live graph.
+    // Surface it explicitly ONCE per tab instead of failing silently. (Claude
+    // tabs host panel_* in-process and are unaffected.)
+    if (!panelMcpHttp && backendForTab(event.tab_id) !== "claude" && !warnedNoPanelMcp.has(event.tab_id)) {
+      warnedNoPanelMcp.add(event.tab_id);
+      bridge.push(
+        {
+          type: "say",
+          text:
+            "⚠️ Live-canvas tools (panel_graph_outline, panel_query_graph, and the other panel_* tools) are UNAVAILABLE for this provider — the orchestrator's loopback panel-MCP failed to start (usually a port already in use). I can still work headlessly, but I can't see or edit your open graph. Check the orchestrator terminal for the \"could not start the panel HTTP MCP\" error, free the port, and restart. (Claude runs these tools in-process and is unaffected.)",
+        },
+        event.tab_id,
+      );
     }
     manager.send(agentKeyFor(event.tab_id), outText, sendOpts);
   };
