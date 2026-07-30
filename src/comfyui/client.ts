@@ -226,9 +226,25 @@ export async function backfillObjectInfo(
         const res = await comfyuiFetch(`${base}/${encodeURIComponent(t)}`);
         if (!res.ok) return;
         const def = (await res.json()) as Record<string, unknown>;
-        if (def && def[t]) {
+        if (!def || typeof def !== "object") return;
+        // `/object_info/<Type>` returns the schema keyed by the node's LIVE
+        // registration name — which can differ from the string we asked for in
+        // case, namespace prefix, or display-vs-class name (#404,
+        // `DetectorForNSFW`). Honor whatever key(s) ComfyUI actually returns
+        // rather than narrowing to an exact `def[t]` match (which silently
+        // dropped the node and made get_node_info report "no match" for a node
+        // the server clearly registers). Prefer the exact key when present,
+        // otherwise merge every returned definition.
+        if (def[t]) {
           merged[t] = def[t];
           logger.info(`Backfilled object_info for '${t}' (missing from bulk /object_info)`);
+        } else {
+          const keys = Object.keys(def);
+          if (keys.length === 0) return;
+          for (const k of keys) merged[k] = def[k];
+          logger.info(
+            `Backfilled object_info for '${t}' under live registration key(s) [${keys.join(", ")}] (missing from bulk /object_info)`,
+          );
         }
       } catch {
         // Leave it missing — the converter skips + warns as before.
