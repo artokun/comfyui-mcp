@@ -7,7 +7,7 @@ import {
   TEMPLATE_NAMES,
   type ModifyOperation,
 } from "../services/workflow-composer.js";
-import { getObjectInfo, backfillObjectInfo } from "../comfyui/client.js";
+import { getObjectInfo, backfillObjectInfo, resetObjectInfoCache } from "../comfyui/client.js";
 import { errorToToolResult, ValidationError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 
@@ -163,10 +163,26 @@ export function registerWorkflowComposeTools(server: McpServer): void {
             "it when you need the actual enum values (e.g. exact model filenames) and the " +
             "filter matches few nodes. Default false: structural summary with enum value counts.",
         ),
+      refresh: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe(
+          "If true, discard the memoized /object_info snapshot and refetch live from the " +
+            "connected server before answering. Use after the ComfyUI server was restarted " +
+            "EXTERNALLY (systemd/service manager) or new model files were added out-of-band — " +
+            "the cache is otherwise only invalidated by MCP-managed restarts, so loader " +
+            "dropdowns (model lists) would remain stale for the rest of the session (#499).",
+        ),
     },
-    async ({ node_type, verbose }) => {
+    async ({ node_type, verbose, refresh }) => {
       try {
-        logger.info("Getting node info", { filter: node_type, verbose });
+        logger.info("Getting node info", { filter: node_type, verbose, refresh });
+        // #499: an external (non-MCP) restart or an out-of-band model install
+        // leaves the memoized /object_info snapshot stale, silently serving
+        // pre-restart loader dropdowns. `refresh` forces a fresh live fetch so
+        // newly installed model files show up in the returned combos.
+        if (refresh) resetObjectInfoCache();
         let info = await getObjectInfo();
 
         let entries = Object.entries(info);

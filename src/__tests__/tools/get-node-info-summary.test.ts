@@ -6,8 +6,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // whose enum dropdowns embed the entire local model list (100s of KB per node).
 
 const getObjectInfoMock = vi.fn();
+const resetObjectInfoCacheMock = vi.fn();
+const backfillObjectInfoMock = vi.fn(async (info: unknown) => info);
 vi.mock("../../comfyui/client.js", () => ({
   getObjectInfo: (...a: unknown[]) => getObjectInfoMock(...a),
+  resetObjectInfoCache: (...a: unknown[]) => resetObjectInfoCacheMock(...a),
+  backfillObjectInfo: (...a: unknown[]) => backfillObjectInfoMock(...a),
 }));
 
 import { registerWorkflowComposeTools, summarizeNodeDef } from "../../tools/workflow-compose.js";
@@ -53,6 +57,8 @@ const loaderDef: ComfyUINodeDef = {
 
 beforeEach(() => {
   getObjectInfoMock.mockReset();
+  resetObjectInfoCacheMock.mockReset();
+  backfillObjectInfoMock.mockClear();
   getObjectInfoMock.mockResolvedValue({ CheckpointLoaderSimple: loaderDef });
 });
 
@@ -109,6 +115,50 @@ describe("get_node_info >20 matches (unchanged name-list behavior)", () => {
     expect(parsed.count).toBe(25);
     expect(parsed.nodes[0]).not.toHaveProperty("input_required");
     expect(parsed.hint).toMatch(/more specific/);
+  });
+});
+
+describe("get_node_info refresh after external restart (issue #499)", () => {
+  // A loader whose model dropdown is served from a STALE cache after the ComfyUI
+  // server was restarted externally (systemd) and a new model file was added.
+  // The stale snapshot omits the freshly-installed file; refresh:true must drop
+  // the cache and refetch so the new file shows up in the verbose dropdown.
+  const staleDef: ComfyUINodeDef = {
+    ...loaderDef,
+    input: { required: { clip_name: [["old-clip.gguf"]] } },
+  };
+  const freshDef: ComfyUINodeDef = {
+    ...loaderDef,
+    input: { required: { clip_name: [["old-clip.gguf", "Qwen2.5-VL-7B-Instruct-UD-Q8_0.gguf"]] } },
+  };
+
+  it("does NOT reset the cache when refresh is omitted (serves memoized snapshot)", async () => {
+    getObjectInfoMock.mockResolvedValue({ CLIPLoaderGGUF: staleDef });
+    const handler = getHandler("get_node_info");
+    const res = await handler({ node_type: "CLIPLoaderGGUF", verbose: true });
+    expect(resetObjectInfoCacheMock).not.toHaveBeenCalled();
+    const parsed = JSON.parse(res.content[0].text);
+    expect(parsed.CLIPLoaderGGUF.input.required.clip_name[0]).toEqual(["old-clip.gguf"]);
+  });
+
+  it("refresh:true invalidates the cache BEFORE fetching, so the live post-restart dropdown surfaces", async () => {
+    // The cache invalidation (resetObjectInfoCache) must happen before the fetch
+    // so getObjectInfo re-reads the live server (which now lists the new file).
+    // The reset→refetch guarantee itself is covered in object-info-cache.test.ts.
+    let resetBeforeFetch = false;
+    resetObjectInfoCacheMock.mockImplementation(() => {
+      resetBeforeFetch = true;
+    });
+    getObjectInfoMock.mockImplementation(async () =>
+      resetBeforeFetch ? { CLIPLoaderGGUF: freshDef } : { CLIPLoaderGGUF: staleDef },
+    );
+    const handler = getHandler("get_node_info");
+    const res = await handler({ node_type: "CLIPLoaderGGUF", verbose: true, refresh: true });
+    expect(resetObjectInfoCacheMock).toHaveBeenCalledTimes(1);
+    const parsed = JSON.parse(res.content[0].text);
+    expect(parsed.CLIPLoaderGGUF.input.required.clip_name[0]).toContain(
+      "Qwen2.5-VL-7B-Instruct-UD-Q8_0.gguf",
+    );
   });
 });
 

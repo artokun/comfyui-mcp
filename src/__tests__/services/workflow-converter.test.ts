@@ -456,3 +456,101 @@ describe("convertUiToApi — asset-combo fallback (issue #407)", () => {
     expect(workflow["1"].inputs.ckpt_name).toBe("not-installed.pt2");
   });
 });
+
+describe("convertUiToApi — media-combo fallback (issue #504)", () => {
+  // A LoadImage node whose `image` widget points at a freshly staged upload
+  // (2Dto3D_v2_front_clean.png) that isn't yet in the CONNECTED server's STALE
+  // /object_info combo (which still only lists KENT_concept_00012_.png). Before
+  // the fix, media values failed looksLikeAssetFilename() so comboOpts[0]
+  // silently replaced the user's image — headless execution then ran on the
+  // WRONG source image with no warning.
+  const STALE_INFO = {
+    LoadImage: {
+      input: {
+        required: {
+          image: [["KENT_concept_00012_.png"]],
+          upload: ["IMAGE_UPLOAD"],
+        },
+      },
+    },
+  } as never;
+
+  function loadImageGraph(image: string) {
+    return {
+      nodes: [
+        {
+          id: 12,
+          type: "LoadImage",
+          mode: 0,
+          inputs: [],
+          outputs: [
+            { name: "IMAGE", type: "IMAGE", links: [] },
+            { name: "MASK", type: "MASK", links: [] },
+          ],
+          widgets_values: [image, "image"],
+        },
+      ],
+      links: [],
+    } as never;
+  }
+
+  it("PRESERVES a staged LoadImage value NOT in the stale combo (never comboOpts[0])", () => {
+    const staged = "2Dto3D_v2_front_clean.png";
+    const { workflow, warnings } = convertUiToApi(loadImageGraph(staged), STALE_INFO);
+    // The staged image survives — NOT silently rewritten to the first cached file.
+    expect(workflow["12"].inputs.image).toBe(staged);
+    expect(workflow["12"].inputs.image).not.toBe("KENT_concept_00012_.png");
+    // …and the substitution is flagged so it surfaces as an honest missing-asset error.
+    expect(
+      warnings.some(
+        (w) => w.includes("12") && w.includes(staged) && /missing-asset/.test(w),
+      ),
+    ).toBe(true);
+  });
+
+  it("does not warn or alter a LoadImage value that IS present on the server", () => {
+    const { workflow, warnings } = convertUiToApi(
+      loadImageGraph("KENT_concept_00012_.png"),
+      STALE_INFO,
+    );
+    expect(workflow["12"].inputs.image).toBe("KENT_concept_00012_.png");
+    expect(warnings.some((w) => /missing-asset/.test(w))).toBe(false);
+  });
+
+  it("preserves an extensionless staged image via the media widget-name allowlist", () => {
+    // Some staged inputs carry a subfolder path with no extension; the value has
+    // no file suffix and the stale combo has none either, so detection must fall
+    // back to the `image` widget-name allowlist rather than substituting.
+    const { workflow, warnings } = convertUiToApi(
+      loadImageGraph("clipspace/staged_input"),
+      STALE_INFO,
+    );
+    expect(workflow["12"].inputs.image).toBe("clipspace/staged_input");
+    expect(workflow["12"].inputs.image).not.toBe("KENT_concept_00012_.png");
+    expect(warnings.some((w) => /missing-asset/.test(w))).toBe(true);
+  });
+
+  it("preserves a staged .mp4 media value for a video loader (extension coverage)", () => {
+    const info = {
+      VHS_LoadVideo: {
+        input: { required: { video: [["cached_clip.mp4"]] } },
+      },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "VHS_LoadVideo",
+          mode: 0,
+          inputs: [],
+          outputs: [],
+          widgets_values: ["freshly_staged.mp4"],
+        },
+      ],
+      links: [],
+    } as never;
+    const { workflow, warnings } = convertUiToApi(ui, info);
+    expect(workflow["1"].inputs.video).toBe("freshly_staged.mp4");
+    expect(warnings.some((w) => /missing-asset/.test(w))).toBe(true);
+  });
+});

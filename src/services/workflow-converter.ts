@@ -83,15 +83,22 @@ function isPositionalWidgetSpec(spec: unknown): boolean {
 }
 
 /**
- * Model/asset file extensions that appear in ComfyUI loader combos
- * (unet_name, ckpt_name, vae_name, lora_name, control_net_name, clip_name, …).
- * Used to distinguish an asset-selection combo — where substituting a different
- * installed file silently swaps the user's model — from a plain enum combo
- * (sampler_name, a stale "Select to add Wildcard" UI helper) where falling back
- * to the first option is harmless.
+ * Model/asset & MEDIA file extensions that appear in ComfyUI loader/input combos
+ * (unet_name, ckpt_name, vae_name, lora_name, control_net_name, clip_name, and
+ * LoadImage/LoadAudio/LoadVideo's image/audio/video selectors, …). Used to
+ * distinguish an asset-selection combo — where substituting a different file
+ * silently swaps the user's model OR their input media (issue #504) — from a
+ * plain enum combo (sampler_name, a stale "Select to add Wildcard" UI helper)
+ * where falling back to the first option is harmless.
+ *
+ * Media extensions matter because LoadImage's `image` widget lists the input
+ * files on the *connected* server; a freshly staged upload (e.g. via
+ * stage_output_as_input) isn't in a STALE /object_info combo, and without media
+ * coverage here the value was silently rewritten to comboOpts[0] — headless
+ * execution then ran on the WRONG source image with no warning (#504).
  */
 const ASSET_FILE_RE =
-  /\.(safetensors|safetensor|sft|ckpt|pt|pt2|pth|bin|gguf|onnx|vae|pkl|npz|yaml)$/i;
+  /\.(safetensors|safetensor|sft|ckpt|pt|pt2|pth|bin|gguf|onnx|vae|pkl|npz|yaml|png|jpe?g|webp|bmp|gif|tiff?|mp4|webm|mov|mkv|m4v|avi|wav|mp3|flac|ogg|m4a)$/i;
 
 function looksLikeAssetFilename(value: unknown): boolean {
   return typeof value === "string" && ASSET_FILE_RE.test(value.trim());
@@ -103,7 +110,10 @@ function looksLikeAssetFilename(value: unknown): boolean {
  * extensionless directory names). Substituting a different entry here silently
  * swaps the user's model, so these must never take the comboOpts[0] fallback.
  * Deliberately excludes enum-shaped "_name" widgets (sampler_name, scheduler)
- * whose first-option fallback is legitimate.
+ * whose first-option fallback is legitimate. Also covers the MEDIA input
+ * selectors (LoadImage.image, LoadAudio.audio, VHS_LoadVideo.video) so a staged
+ * upload absent from a stale combo is never silently swapped for comboOpts[0]
+ * (issue #504) even when the value carries no recognizable file extension.
  */
 const ASSET_WIDGET_NAMES = new Set([
   "ckpt_name",
@@ -123,6 +133,9 @@ const ASSET_WIDGET_NAMES = new Set([
   "clip_vision_name",
   "model_path",
   "diffusion_model",
+  "image",
+  "audio",
+  "video",
 ]);
 
 /**
@@ -1259,15 +1272,16 @@ export function convertUiToApi(
       // default first option. ComfyUI hard-rejects "Value not in list" otherwise,
       // so defaulting is strictly safer than passing the stale value through.
       //
-      // EXCEPTION (issue #407): an ASSET-selection combo (unet_name, ckpt_name,
-      // vae_name, lora_name, …) lists the files installed on the *connected*
-      // server. When the declared model isn't installed there, comboOpts[0] is a
-      // completely unrelated model — e.g. Krea 2's "krea2_turbo_fp8.safetensors"
-      // silently became "flux-2-klein-9b.safetensors" (the first installed unet).
-      // Silently swapping one model for another produces a misleading graph that
-      // can't render the advertised workflow. For asset combos we KEEP the
-      // declared value and warn, so it surfaces as an honest missing-asset error
-      // instead of a wrong-model success.
+      // EXCEPTION (issues #407, #504): an ASSET/MEDIA-selection combo (unet_name,
+      // ckpt_name, vae_name, lora_name, LoadImage.image, …) lists the files
+      // present on the *connected* server. When the declared file isn't there,
+      // comboOpts[0] is a completely unrelated entry — e.g. Krea 2's
+      // "krea2_turbo_fp8.safetensors" silently became "flux-2-klein-9b.safetensors"
+      // (#407), or a freshly staged LoadImage input silently became the first
+      // cached filename (#504). Silently swapping the user's model OR their input
+      // media produces a misleading graph / wrong-source render. For asset & media
+      // combos we KEEP the declared value and warn, so it surfaces as an honest
+      // missing-asset error instead of a wrong-file success.
       const comboOpts = Array.isArray(spec) ? spec[0] : undefined;
       if (
         Array.isArray(comboOpts) &&
@@ -1288,6 +1302,20 @@ export function convertUiToApi(
           );
           // inputs[name] already holds the declared value; leave it untouched.
         } else {
+          // Non-asset ENUM combo (sampler_name, scheduler, a stale Impact
+          // "Select to add Wildcard" UI-helper value, …). ComfyUI hard-rejects a
+          // "Value not in list", so falling back to the first option keeps the
+          // graph runnable — but the substitution must NOT be silent: the user
+          // set this value, so surface a warning that it was changed. (Only the
+          // fallback direction differs from the asset case above; neither path
+          // overwrites a user-set value without a warning.)
+          warnings.push(
+            `Node ${nodeId} (${classType}): widget "${name}" value "${String(
+              value,
+            )}" is not a valid option on the connected server — substituting the first available option "${String(
+              comboOpts[0],
+            )}" so the graph stays runnable (ComfyUI rejects unknown enum values).`,
+          );
           inputs[name] = comboOpts[0];
         }
       }
