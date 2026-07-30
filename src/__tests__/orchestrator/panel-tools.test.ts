@@ -17,6 +17,7 @@ import {
   buildPanelToolDefs,
   makePanelToolCtx,
   registerPanelTools,
+  __openWorkflowTestHooks,
   type PanelToolCtx,
 } from "../../orchestrator/panel-tools.js";
 import { WorkflowTargetStore } from "../../services/workflow-target-store.js";
@@ -1079,5 +1080,175 @@ describe("panel-tools: strip/slice read the live canvas by default", () => {
     expect(send).not.toHaveBeenCalled();
     const text = (res as { content: Array<{ text: string }> }).content[0].text;
     expect(text).toContain("Sliced");
+  });
+});
+
+describe("panel_open_workflow: verify active state after ack-timeout (#215/#319/#496)", () => {
+  const TARGET = "my-workflow.json";
+  const timeoutResult = () => ({
+    content: [
+      {
+        type: "text" as const,
+        text: `Error: Panel tab abcd1234 did not reply to "workflow_open" within 15000 ms — the ComfyUI tab may be backgrounded or frozen`,
+      },
+    ],
+    isError: true,
+  });
+
+  // Programmable ctx: workflow_open returns whatever `openReply` yields; each
+  // workflow_list returns the next entry in `listReplies` (last one repeats).
+  function makeVerifyCtx(opts: {
+    openReply: () => unknown;
+    listReplies: Array<{ active: unknown }>;
+  }): { ctx: PanelToolCtx; cmds: string[] } {
+    const cmds: string[] = [];
+    let listIdx = 0;
+    const ctx = {
+      call: async (cmd: Record<string, unknown>) => {
+        cmds.push(cmd.cmd as string);
+        if (cmd.cmd === "workflow_open") return opts.openReply();
+        if (cmd.cmd === "workflow_list") {
+          const reply = opts.listReplies[Math.min(listIdx, opts.listReplies.length - 1)];
+          listIdx++;
+          return { content: [{ type: "text", text: JSON.stringify(reply) }] };
+        }
+        return { content: [{ type: "text", text: "{}" }] };
+      },
+      confirm: async () => true,
+      bridge: {} as unknown as PanelToolCtx["bridge"],
+      tabId: "test-tab",
+    } as PanelToolCtx;
+    return { ctx, cmds };
+  }
+
+  beforeAll(() => {
+    // Fast, deterministic verify timing so the test doesn't wait the real budget.
+    __openWorkflowTestHooks.setOpenVerifyTiming({ budgetMs: 200, intervalMs: 1, probeTimeoutMs: 50 });
+  });
+  afterAll(() => {
+    __openWorkflowTestHooks.setOpenVerifyTiming(null);
+  });
+
+  it("ack-timeout BUT target becomes active ⇒ SUCCESS with a recovered note", async () => {
+    const { ctx, cmds } = makeVerifyCtx({
+      openReply: () => timeoutResult(),
+      // First list: some other tab is active; second: our target is active.
+      listReplies: [
+        { active: { path: "other.json", filename: "other.json", key: "k-other" } },
+        { active: { path: TARGET, filename: TARGET, key: "k-mine" } },
+      ],
+    });
+    const res = (await defByName("panel_open_workflow").handler({ path: TARGET }, ctx)) as {
+      content: Array<{ text: string }>;
+      isError?: boolean;
+    };
+    expect(res.isError).toBeFalsy();
+    const text = res.content[0].text;
+    expect(text).toContain("recovered");
+    expect(text).toMatch(/active workflow/i);
+    // It DID poll the authoritative active signal after the open timed out.
+    expect(cmds[0]).toBe("workflow_open");
+    expect(cmds).toContain("workflow_list");
+  });
+
+  it("ack-timeout AND target never becomes active ⇒ clear FAILURE (no false success)", async () => {
+    const { ctx } = makeVerifyCtx({
+      openReply: () => timeoutResult(),
+      listReplies: [{ active: { path: "other.json", filename: "other.json", key: "k-other" } }],
+    });
+    const res = (await defByName("panel_open_workflow").handler({ path: TARGET }, ctx)) as {
+      content: Array<{ text: string }>;
+      isError?: boolean;
+    };
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/did not reply/i);
+  });
+
+  it("a genuine acked open-failure (missing file) still fails clearly, unverified", async () => {
+    let listCalls = 0;
+    const ctx = {
+      call: async (cmd: Record<string, unknown>) => {
+        if (cmd.cmd === "workflow_open") {
+          return {
+            content: [{ type: "text", text: `Error: no workflow matching "${TARGET}"` }],
+            isError: true,
+          };
+        }
+        if (cmd.cmd === "workflow_list") listCalls++;
+        return { content: [{ type: "text", text: "{}" }] };
+      },
+      confirm: async () => true,
+      bridge: {} as unknown as PanelToolCtx["bridge"],
+      tabId: "test-tab",
+    } as PanelToolCtx;
+    const res = (await defByName("panel_open_workflow").handler({ path: TARGET }, ctx)) as {
+      content: Array<{ text: string }>;
+      isError?: boolean;
+    };
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/no workflow matching/i);
+    // A genuine error is NOT an ack-timeout, so verification must NOT run.
+    expect(listCalls).toBe(0);
+  });
+
+  it("a timeout-WORDED acked executor error is NOT treated as a no-reply (not verified)", async () => {
+    // A genuine executor error that happens to contain "did not reply … within N ms"
+    // wording but is NOT the canonical bridge `Panel tab …` no-reply must fail
+    // verbatim and must NOT trigger workflow_list verification (no false recovery).
+    let listCalls = 0;
+    const ctx = {
+      call: async (cmd: Record<string, unknown>) => {
+        if (cmd.cmd === "workflow_open") {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Error: upstream service did not reply to us within 500 ms while loading`,
+              },
+            ],
+            isError: true,
+          };
+        }
+        if (cmd.cmd === "workflow_list") listCalls++;
+        return { content: [{ type: "text", text: JSON.stringify({ active: { path: TARGET } }) }] };
+      },
+      confirm: async () => true,
+      bridge: {} as unknown as PanelToolCtx["bridge"],
+      tabId: "test-tab",
+    } as PanelToolCtx;
+    const res = (await defByName("panel_open_workflow").handler({ path: TARGET }, ctx)) as {
+      content: Array<{ text: string }>;
+      isError?: boolean;
+    };
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/upstream service did not reply/i);
+    expect(listCalls).toBe(0);
+  });
+
+  it("normal fast success returns verbatim without polling workflow_list", async () => {
+    let listCalls = 0;
+    const ctx = {
+      call: async (cmd: Record<string, unknown>) => {
+        if (cmd.cmd === "workflow_open") {
+          return {
+            content: [
+              { type: "text", text: JSON.stringify({ opened: { path: TARGET }, modified: false }) },
+            ],
+          };
+        }
+        if (cmd.cmd === "workflow_list") listCalls++;
+        return { content: [{ type: "text", text: "{}" }] };
+      },
+      confirm: async () => true,
+      bridge: {} as unknown as PanelToolCtx["bridge"],
+      tabId: "test-tab",
+    } as PanelToolCtx;
+    const res = (await defByName("panel_open_workflow").handler({ path: TARGET }, ctx)) as {
+      content: Array<{ text: string }>;
+      isError?: boolean;
+    };
+    expect(res.isError).toBeFalsy();
+    expect(res.content[0].text).toContain("opened");
+    expect(listCalls).toBe(0);
   });
 });

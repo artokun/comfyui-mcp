@@ -226,6 +226,172 @@ async function waitForPanelReady(
   return { ready: false, waited_ms: Date.now() - start, attempts };
 }
 
+// ---- workflow_open verify-after-timeout (#215/#319/#496) --------------------
+// `panel_open_workflow` forwards `workflow_open` over the UI bridge and waits for
+// the tab to ACK. When the target tab is BACKGROUNDED/FROZEN, or the workflow is
+// already the active one, the tab can be slow to ack and the bridge surfaces a
+// `did not reply to "workflow_open" within N ms` TIMEOUT — yet the switch itself
+// genuinely happened (the executor ran; the ack just didn't make it back in the
+// window). Reporting that as a failure is a FALSE FAILURE: a follow-up
+// `workflow_list` shows the target IS the active tab, and it invites unsafe
+// retries. Mirroring the reboot-readiness pattern (waitForPanelReady / #497), on
+// an ack-timeout we do NOT immediately fail — we VERIFY the AUTHORITATIVE active
+// workflow by polling `workflow_list` (a fresh bridge round-trip, never a stale
+// cache) and return SUCCESS with a `recovered` note if the target became active,
+// only failing when it genuinely never did.
+
+/**
+ * True only when a ToolResult is the bridge's ACK-TIMEOUT for a command — i.e.
+ * the tab never replied within the window (`did not reply to "…" within N ms`).
+ * This is the ONLY error we verify-after: a GENUINE executor failure (e.g. "no
+ * workflow matching …") comes back as a normal error REPLY the bridge received
+ * and relayed, NOT a timeout, so it is never treated as a candidate for recovery
+ * and still fails clearly. Defensive: non-error results are never a timeout.
+ */
+function isAckTimeout(res: ToolResult): boolean {
+  if (!res?.isError) return false;
+  const text = res?.content?.find((c) => c.type === "text")?.text ?? "";
+  // Match the CANONICAL bridge ack-timeout SPECIFICALLY (ui-bridge.ts): a
+  // `Panel tab <id> did not reply to "workflow_open" within N ms` message. Anchor
+  // on the bridge preamble AND the exact command name so a merely timeout-WORDED
+  // acked executor error (which the panel relays verbatim) is NOT mistaken for a
+  // no-reply and thus never masked as a false "recovered" success (codex gate).
+  return /Panel tab \S+ did not reply to "workflow_open" within \d+\s*ms/i.test(text);
+}
+
+/** Parse a ctx.call ToolResult's text payload as JSON, or null if not parseable. */
+function parseToolResultJson(res: ToolResult): Record<string, unknown> | null {
+  if (!res || res.isError) return null;
+  const text = res?.content?.find((c) => c.type === "text")?.text;
+  if (typeof text !== "string") return null;
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Drop a trailing .json (case-insensitive) so filename/path forms compare equal. */
+function stripJsonExt(s: unknown): string | null {
+  return typeof s === "string" ? s.replace(/\.json$/i, "") : null;
+}
+
+/**
+ * Does the AUTHORITATIVE active workflow (the `active` object from a fresh
+ * `workflow_list`) correspond to the `path` the caller asked to open? Mirrors the
+ * panel executor's own matcher: exact path/filename/key, or filename/path with a
+ * trailing `.json` stripped (callers pass any of those forms). Null-active (no
+ * open workflow) never matches.
+ */
+function activeMatchesTarget(active: unknown, path: string): boolean {
+  if (!active || typeof active !== "object") return false;
+  const a = active as { path?: unknown; filename?: unknown; key?: unknown };
+  if (a.path === path || a.filename === path || a.key === path) return true;
+  const want = stripJsonExt(path);
+  if (want == null) return false;
+  return stripJsonExt(a.filename) === want || stripJsonExt(a.path) === want;
+}
+
+interface OpenVerifyTiming {
+  /** Total wall-clock budget to confirm the target became active. */
+  budgetMs: number;
+  /** Interval between `workflow_list` probes. */
+  intervalMs: number;
+  /** Per-probe timeout for the `workflow_list` round-trip. */
+  probeTimeoutMs: number;
+}
+
+let openVerifyTimingOverride: OpenVerifyTiming | null = null;
+
+function getOpenVerifyTiming(): OpenVerifyTiming {
+  if (openVerifyTimingOverride) return openVerifyTimingOverride;
+  return {
+    budgetMs: Math.round(parsePositiveNumberEnv("COMFYUI_PANEL_OPEN_VERIFY_BUDGET_S", 6) * 1000),
+    intervalMs: Math.round(parsePositiveNumberEnv("COMFYUI_PANEL_OPEN_VERIFY_INTERVAL_S", 1) * 1000),
+    probeTimeoutMs: Math.round(parsePositiveNumberEnv("COMFYUI_PANEL_OPEN_VERIFY_PROBE_S", 4) * 1000),
+  };
+}
+
+interface OpenVerifyResult {
+  active: boolean;
+  waited_ms: number;
+  attempts: number;
+}
+
+/**
+ * Poll `workflow_list` until the target `path` is the active workflow, or the
+ * bounded budget elapses. Each probe is a fresh bridge round-trip via ctx.call
+ * (never throws; returns the AUTHORITATIVE live active identity, not a cache).
+ */
+async function waitForWorkflowActive(
+  ctx: PanelToolCtx,
+  path: string,
+  timing: OpenVerifyTiming,
+): Promise<OpenVerifyResult> {
+  const start = Date.now();
+  const deadline = start + timing.budgetMs;
+  const intervalMs = openVerifyTimingOverride
+    ? Math.max(1, timing.intervalMs)
+    : Math.max(100, timing.intervalMs);
+  let attempts = 0;
+  for (;;) {
+    const remaining = deadline - Date.now();
+    const probeTimeoutMs = Math.max(1, Math.min(timing.probeTimeoutMs, remaining));
+    const probe = await ctx.call({ cmd: "workflow_list" }, probeTimeoutMs);
+    attempts++;
+    const parsed = parseToolResultJson(probe);
+    if (parsed && activeMatchesTarget(parsed.active, path)) {
+      return { active: true, waited_ms: Date.now() - start, attempts };
+    }
+    const left = deadline - Date.now();
+    if (left <= 0) break;
+    await sleep(Math.min(intervalMs, left));
+  }
+  return { active: false, waited_ms: Date.now() - start, attempts };
+}
+
+/**
+ * `panel_open_workflow` body, shared across transports. Forwards `workflow_open`
+ * and returns its reply verbatim on success or on a GENUINE failure (a normal
+ * error reply, e.g. "no workflow matching"). Only on an ACK-TIMEOUT does it
+ * verify the authoritative active workflow: SUCCESS (with a `recovered` note) if
+ * the target became active despite the slow ack, otherwise the original timeout
+ * failure. Never masks a genuine open-failure as success.
+ */
+async function openWorkflowWithVerify(path: string, ctx: PanelToolCtx): Promise<ToolResult> {
+  const res = await ctx.call({ cmd: "workflow_open", path }, 15000);
+  // Success, or a genuine acked error (missing file / real executor error) — the
+  // caller must see it as-is. Only a slow-ack TIMEOUT warrants verification.
+  if (!isAckTimeout(res)) return res;
+
+  const timing = getOpenVerifyTiming();
+  const verify = await waitForWorkflowActive(ctx, path, timing);
+  if (verify.active) {
+    return ok({
+      opened: { path },
+      recovered: true,
+      note:
+        `"${path}" is now the active workflow — the switch succeeded, but the tab was slow ` +
+        `to acknowledge (backgrounded/frozen or already open), so the initial ack timed out. ` +
+        `Confirmed active via workflow_list after ${(verify.waited_ms / 1000).toFixed(1)}s ` +
+        `(${verify.attempts} probe${verify.attempts === 1 ? "" : "s"}). Do NOT retry.`,
+    });
+  }
+  // The ack timed out AND the target never became active within the budget — this
+  // is a REAL failure. Return the original bridge timeout error unchanged.
+  return res;
+}
+
+export const __openWorkflowTestHooks = {
+  /** Inject fast open-verify timing so tests don't wait the real ~6s budget. */
+  setOpenVerifyTiming(timing: OpenVerifyTiming | null): void {
+    openVerifyTimingOverride = timing;
+  },
+  isAckTimeout,
+  activeMatchesTarget,
+};
+
 const slotRef = z.union([z.string(), z.number().int().min(0)]);
 
 // CivitAI browsing-level bitmask values: PG=1, PG-13=2, R=4, X=8, XXX=16.
@@ -1811,7 +1977,11 @@ export function buildPanelToolDefs(): PanelToolDef[] {
       "panel_open_workflow",
       "Open / switch to a workflow by path or filename (from panel_list_workflows). Switches the active tab to it.",
       { path: z.string().describe("Workflow path, filename, or key from panel_list_workflows.") },
-      async (args: A, ctx) => ctx.call({ cmd: "workflow_open", path: args.path }, 15000),
+      // Verify-after-timeout (#215/#319/#496): a backgrounded/frozen or already-open
+      // tab can be slow to ack workflow_open even though the switch succeeded. On an
+      // ack-timeout, confirm via the authoritative workflow_list active identity
+      // before reporting failure — see openWorkflowWithVerify.
+      async (args: A, ctx) => openWorkflowWithVerify(args.path as string, ctx),
     ),
     def(
       "panel_rename_workflow",
