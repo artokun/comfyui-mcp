@@ -17,12 +17,13 @@ import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 import { getObjectInfo, getSystemStats } from "../comfyui/client.js";
-import type { WorkflowJSON } from "../comfyui/types.js";
+import type { ObjectInfo, WorkflowJSON } from "../comfyui/types.js";
 import { config } from "../config.js";
 import { ProcessControlError, ValidationError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 
 import { MODEL_SUBDIRS } from "./model-resolver.js";
+import { isUiFormat, looksLikeAssetFilename } from "./workflow-converter.js";
 
 export interface LockedModel {
   name: string;
@@ -65,20 +66,32 @@ export interface LockDrift {
 // covers the loaders ComfyUI core ships; custom packs are walked best-effort
 // via the same input-field heuristic (any string input ending in a model
 // extension that resolves under <models>/<subdir>/).
-const KNOWN_LOADERS: Array<{ classType: string; field: string; modelType: string }> = [
-  { classType: "CheckpointLoaderSimple", field: "ckpt_name", modelType: "checkpoints" },
-  { classType: "UNETLoader", field: "unet_name", modelType: "diffusion_models" },
-  { classType: "VAELoader", field: "vae_name", modelType: "vae" },
-  { classType: "CLIPLoader", field: "clip_name", modelType: "text_encoders" },
-  { classType: "DualCLIPLoader", field: "clip_name1", modelType: "text_encoders" },
-  { classType: "DualCLIPLoader", field: "clip_name2", modelType: "text_encoders" },
-  { classType: "LoraLoader", field: "lora_name", modelType: "loras" },
-  { classType: "LoraLoaderModelOnly", field: "lora_name", modelType: "loras" },
-  { classType: "ControlNetLoader", field: "control_net_name", modelType: "controlnet" },
-  { classType: "UpscaleModelLoader", field: "model_name", modelType: "upscale_models" },
-  { classType: "CLIPVisionLoader", field: "clip_name", modelType: "clip_vision" },
-  { classType: "StyleModelLoader", field: "style_model_name", modelType: "style_models" },
+//
+// `widgetIndex` is the field's position in a UI-format node's `widgets_values`
+// array — needed because UI-saved graphs carry values positionally with no
+// field names. For every core loader here the model filename is the FIRST
+// widget (index 0); the one exception is DualCLIPLoader's second encoder
+// (clip_name2 at index 1).
+const KNOWN_LOADERS: Array<{
+  classType: string;
+  field: string;
+  modelType: string;
+  widgetIndex: number;
+}> = [
+  { classType: "CheckpointLoaderSimple", field: "ckpt_name", modelType: "checkpoints", widgetIndex: 0 },
+  { classType: "UNETLoader", field: "unet_name", modelType: "diffusion_models", widgetIndex: 0 },
+  { classType: "VAELoader", field: "vae_name", modelType: "vae", widgetIndex: 0 },
+  { classType: "CLIPLoader", field: "clip_name", modelType: "text_encoders", widgetIndex: 0 },
+  { classType: "DualCLIPLoader", field: "clip_name1", modelType: "text_encoders", widgetIndex: 0 },
+  { classType: "DualCLIPLoader", field: "clip_name2", modelType: "text_encoders", widgetIndex: 1 },
+  { classType: "LoraLoader", field: "lora_name", modelType: "loras", widgetIndex: 0 },
+  { classType: "LoraLoaderModelOnly", field: "lora_name", modelType: "loras", widgetIndex: 0 },
+  { classType: "ControlNetLoader", field: "control_net_name", modelType: "controlnet", widgetIndex: 0 },
+  { classType: "UpscaleModelLoader", field: "model_name", modelType: "upscale_models", widgetIndex: 0 },
+  { classType: "CLIPVisionLoader", field: "clip_name", modelType: "clip_vision", widgetIndex: 0 },
+  { classType: "StyleModelLoader", field: "style_model_name", modelType: "style_models", widgetIndex: 0 },
 ];
+
 
 function requireLocal(op: string): string {
   if (!config.comfyuiPath) {
@@ -89,17 +102,93 @@ function requireLocal(op: string): string {
   return config.comfyuiPath;
 }
 
-function extractReferencedModels(workflow: WorkflowJSON): Array<{ name: string; type: string }> {
-  const seen = new Map<string, string>(); // key: `${type}/${name}` → type
-  for (const node of Object.values(workflow)) {
-    if (!node?.class_type || !node.inputs) continue;
-    const classMatches = KNOWN_LOADERS.filter((l) => l.classType === node.class_type);
-    for (const match of classMatches) {
-      const value = (node.inputs as Record<string, unknown>)[match.field];
-      if (typeof value !== "string" || !value) continue;
-      seen.set(`${match.modelType}/${value}`, match.modelType);
+/**
+ * Flatten a UI-format workflow to every REAL node — top-level nodes PLUS the
+ * nodes inside every subgraph definition (`definitions.subgraphs[].nodes`). A
+ * top-level node whose `type` is a subgraph-definition id is a structural
+ * INSTANCE, not a real node, so it's skipped; its inner nodes are walked from
+ * the definition instead. Without this, a loader or custom node nested inside a
+ * subgraph/component would silently disappear from the lock (models + packs).
+ * Mirrors the subgraph-aware walk in api-nodes.extractWorkflowClassTypes.
+ */
+function collectUiNodes(workflow: WorkflowJSON): Array<Record<string, unknown>> {
+  const g = workflow as unknown as Record<string, unknown>;
+  const defs = (g.definitions as { subgraphs?: unknown[] } | undefined)?.subgraphs;
+  const defIds = new Set<string>();
+  const defNodeLists: unknown[] = [];
+  if (Array.isArray(defs)) {
+    for (const sg of defs) {
+      const s = sg as Record<string, unknown> | null;
+      const id = s?.id;
+      if (typeof id === "string" && id.length > 0) defIds.add(id);
+      if (Array.isArray(s?.nodes)) defNodeLists.push(s!.nodes);
     }
   }
+  const out: Array<Record<string, unknown>> = [];
+  const push = (nodes: unknown): void => {
+    if (!Array.isArray(nodes)) return;
+    for (const n of nodes) {
+      const node = n as Record<string, unknown> | null;
+      const t = node?.type;
+      if (typeof t !== "string" || t.length === 0) continue;
+      if (defIds.has(t)) continue; // subgraph instance — structural, not a real node
+      out.push(node as Record<string, unknown>);
+    }
+  };
+  push(g.nodes);
+  for (const nl of defNodeLists) push(nl);
+  return out;
+}
+
+/**
+ * Extract referenced model files from a saved workflow, handling BOTH formats.
+ *
+ * Workflows saved from the ComfyUI UI are stored in UI format
+ * (`{ nodes: [...], links: [...] }` with `type` + positional `widgets_values`),
+ * NOT the API/prompt format (`{ "1": { class_type, inputs: {...} } }`). The old
+ * walk only understood API format, so a UI-saved graph exposed neither
+ * `class_type` nor `inputs` and lock generation silently found 0 models — e.g.
+ * native VAELoader (`vae_name`) / UNETLoader (`unet_name`) went uncaptured
+ * (issue #482).
+ *
+ * Reading UI nodes directly (rather than round-tripping through a UI→API
+ * converter) is deliberate: the converter drops bypassed/muted nodes and nodes
+ * absent from /object_info, which would silently omit their models from the
+ * lock. Provenance must capture every referenced model regardless of a node's
+ * mute state or whether its (native) loader happens to be installed, matching
+ * the API-format behavior.
+ */
+function extractReferencedModels(workflow: WorkflowJSON): Array<{ name: string; type: string }> {
+  const seen = new Map<string, string>(); // key: `${type}/${name}` → type
+  const add = (modelType: string, value: unknown): void => {
+    if (typeof value !== "string" || !value) return;
+    seen.set(`${modelType}/${value}`, modelType);
+  };
+
+  if (isUiFormat(workflow)) {
+    for (const n of collectUiNodes(workflow)) {
+      const type = n.type as string; // collectUiNodes guarantees a non-empty string
+      const widgets = Array.isArray(n.widgets_values) ? n.widgets_values : null;
+      if (!widgets) continue;
+      for (const match of KNOWN_LOADERS.filter((l) => l.classType === type)) {
+        const value = widgets[match.widgetIndex];
+        // Positional read: guard with the shared asset-filename predicate so an
+        // unusual widget order can't misread a non-filename widget (e.g.
+        // UNETLoader's "default" weight_dtype) as a model.
+        if (looksLikeAssetFilename(value)) {
+          add(match.modelType, value);
+        }
+      }
+    }
+  } else {
+    for (const node of Object.values(workflow)) {
+      if (!node?.class_type || !node.inputs) continue;
+      for (const match of KNOWN_LOADERS.filter((l) => l.classType === node.class_type)) {
+        add(match.modelType, (node.inputs as Record<string, unknown>)[match.field]);
+      }
+    }
+  }
+
   return Array.from(seen.entries()).map(([key, type]) => ({
     name: key.slice(type.length + 1),
     type,
@@ -177,9 +266,9 @@ interface ClassTypeOriginMap {
   byClass: Map<string, { pack: string | null; builtin: boolean }>;
 }
 
-async function buildClassTypeOriginMap(): Promise<ClassTypeOriginMap> {
+function buildClassTypeOriginMap(objectInfo: ObjectInfo): ClassTypeOriginMap {
   const byClass = new Map<string, { pack: string | null; builtin: boolean }>();
-  const info = (await getObjectInfo()) as unknown as Record<string, { python_module?: string }>;
+  const info = objectInfo as unknown as Record<string, { python_module?: string }>;
   for (const [classType, def] of Object.entries(info ?? {})) {
     const mod = def?.python_module ?? "";
     // `python_module` is e.g. "custom_nodes.ComfyUI-WanVideoWrapper.nodes" for
@@ -194,14 +283,24 @@ async function buildClassTypeOriginMap(): Promise<ClassTypeOriginMap> {
   return { byClass };
 }
 
+// Every node's class_type, reading UI format (`node.type`, subgraph-aware) or
+// API/prompt format (`node.class_type`). Bypassed/muted nodes are included on
+// purpose: their pack is still a provenance dependency of the saved graph.
+function workflowClassTypes(workflow: WorkflowJSON): string[] {
+  if (isUiFormat(workflow)) {
+    return collectUiNodes(workflow).map((n) => n.type as string);
+  }
+  return Object.values(workflow)
+    .map((n) => n?.class_type)
+    .filter((t): t is string => typeof t === "string" && t.length > 0);
+}
+
 async function packsReferencedByWorkflow(
   workflow: WorkflowJSON,
   origins: ClassTypeOriginMap,
 ): Promise<string[]> {
   const packs = new Set<string>();
-  for (const node of Object.values(workflow)) {
-    const classType = node?.class_type;
-    if (!classType) continue;
+  for (const classType of workflowClassTypes(workflow)) {
     const origin = origins.byClass.get(classType);
     if (origin?.pack) packs.add(origin.pack);
   }
@@ -212,6 +311,11 @@ export async function generateLock(workflow: WorkflowJSON): Promise<WorkflowLock
   const comfyPath = requireLocal("generateLock");
   const stats = (await getSystemStats()) as unknown as { system?: { comfyui_version?: string } };
   const comfyuiVersion = stats.system?.comfyui_version ?? "unknown";
+
+  // /object_info maps class_types to their originating packs. Model + pack
+  // discovery read UI and API/prompt formats directly (see extractReferencedModels
+  // / workflowClassTypes), so no whole-graph conversion is needed.
+  const objectInfo = await getObjectInfo();
 
   const models = extractReferencedModels(workflow);
   const lockedModels: LockedModel[] = [];
@@ -233,7 +337,7 @@ export async function generateLock(workflow: WorkflowJSON): Promise<WorkflowLock
     }
   }
 
-  const origins = await buildClassTypeOriginMap();
+  const origins = buildClassTypeOriginMap(objectInfo);
   const packIds = await packsReferencedByWorkflow(workflow, origins);
   const lockedPacks: LockedNodePack[] = [];
   for (const id of packIds) {

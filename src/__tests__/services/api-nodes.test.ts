@@ -20,6 +20,7 @@ import {
   generateWithApiNode,
   buildApiNodeInputs,
   isApiNode,
+  checkWorkflowRuntime,
   type ApiNodesDeps,
 } from "../../services/api-nodes.js";
 import type { ObjectInfo, WorkflowJSON, ComfyUINodeDef } from "../../comfyui/types.js";
@@ -211,6 +212,56 @@ describe("listApiNodes", () => {
       getObjectInfo: async () => ({ KSampler: nodeDef({ category: "sampling" }) }),
     });
     expect(await listApiNodes(undefined, deps)).toEqual([]);
+  });
+});
+
+describe("checkWorkflowRuntime", () => {
+  // A graph whose custom nodes aren't in this server's /object_info.
+  const graphWithUninstalledNodes = {
+    "1": { class_type: "QwenImageEditLoader", inputs: {} },
+    "2": { class_type: "QwenImageSampler", inputs: {} },
+    "3": { class_type: "SaveImage", inputs: {} },
+  } as unknown as WorkflowJSON;
+
+  // Server only knows the core SaveImage node; the two Qwen nodes are absent.
+  const partialObjectInfo = async () => ({ SaveImage: nodeDef({ category: "image" }) });
+
+  it("returns 'unknown' for an arbitrary graph with unclassifiable nodes", async () => {
+    const { deps } = makeDeps({ getObjectInfo: partialObjectInfo });
+    const rt = await checkWorkflowRuntime(graphWithUninstalledNodes, deps);
+    expect(rt.runtime).toBe("unknown");
+    expect(rt.usesApiNodes).toBeNull();
+    expect(rt.unknownNodes).toEqual(
+      expect.arrayContaining(["QwenImageEditLoader", "QwenImageSampler"]),
+    );
+  });
+
+  // Regression for #464: a BUNDLED pack is guaranteed local/free, so uninstalled
+  // custom nodes must not collapse the verdict to "unknown" and wrongly demand a
+  // paid-credits confirmation.
+  it("trusts a bundled pack as local even when its custom nodes aren't installed (#464)", async () => {
+    const { deps } = makeDeps({ getObjectInfo: partialObjectInfo });
+    const rt = await checkWorkflowRuntime(graphWithUninstalledNodes, deps, {
+      bundledLocalPack: true,
+    });
+    expect(rt.runtime).toBe("local");
+    expect(rt.usesApiNodes).toBe(false);
+    // The unclassifiable nodes are still surfaced for transparency.
+    expect(rt.unknownNodes).toEqual(
+      expect.arrayContaining(["QwenImageEditLoader", "QwenImageSampler"]),
+    );
+  });
+
+  it("still reports API nodes in a bundled pack rather than masking them as local", async () => {
+    const graph = {
+      "1": { class_type: "FluxProImageNode", inputs: {} },
+      "2": { class_type: "QwenImageSampler", inputs: {} },
+    } as unknown as WorkflowJSON;
+    const { deps } = makeDeps(); // sampleObjectInfo knows FluxProImageNode as an API node
+    const rt = await checkWorkflowRuntime(graph, deps, { bundledLocalPack: true });
+    expect(rt.usesApiNodes).toBe(true);
+    expect(rt.apiNodes).toContain("FluxProImageNode");
+    expect(["api", "mixed"]).toContain(rt.runtime);
   });
 });
 

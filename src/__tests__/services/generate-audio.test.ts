@@ -139,6 +139,44 @@ describe("generateAudio", () => {
       expect(["V0", "128k", "320k"]).toContain(save?.inputs.quality);
     });
 
+    // Regression for #501 (bug 5): the generate_audio tool/service dropped the
+    // ACE encoder's musical controls (bpm, timesignature, temperature, top_p,
+    // top_k, min_p, generate_audio_codes) and SaveAudioMP3 `quality` — they were
+    // absent from DEFAULTABLE_KEYS and the createWorkflow passthrough, so callers
+    // could never change them off the composer defaults. They must now flow all
+    // the way into the emitted graph.
+    it("threads bpm/timesignature/LLM-sampling controls + audio_quality into the graph (#501)", async () => {
+      const { deps, enqueued } = makeDeps();
+      await generateAudio(
+        {
+          model_family: "ace_step_1.5",
+          prompt: "uptempo synthwave",
+          duration: 40,
+          unet: "ace.safetensors",
+          bpm: 90,
+          timesignature: "3",
+          temperature: 1.1,
+          top_p: 0.8,
+          top_k: 50,
+          min_p: 0.05,
+          generate_audio_codes: false,
+          audio_quality: "V0",
+        },
+        deps,
+      );
+      const wf = JSON.parse(JSON.stringify(enqueued[0])) as WorkflowJSON;
+      const enc = byClass(wf, "TextEncodeAceStepAudio1.5");
+      expect(enc?.inputs.bpm).toBe(90);
+      expect(enc?.inputs.timesignature).toBe("3");
+      expect(enc?.inputs.temperature).toBe(1.1);
+      expect(enc?.inputs.top_p).toBe(0.8);
+      expect(enc?.inputs.top_k).toBe(50);
+      expect(enc?.inputs.min_p).toBe(0.05);
+      expect(enc?.inputs.generate_audio_codes).toBe(false);
+      const save = byClass(wf, "SaveAudioMP3");
+      expect(save?.inputs.quality).toBe("V0");
+    });
+
     it("auto-resolves UNet/VAE/CLIP from local models when not specified", async () => {
       const { deps, resolveFirstModel } = makeDeps();
       await generateAudio({ model_family: "ace_step_1.5", prompt: "p", duration: 10 }, deps);

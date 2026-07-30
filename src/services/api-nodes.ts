@@ -200,9 +200,21 @@ export interface WorkflowRuntime {
  * node class_types against the connected ComfyUI's /object_info (the same signal
  * isApiNode uses). Works on UI or API/prompt format graphs.
  */
+export interface CheckWorkflowRuntimeOptions {
+  /** The graph is one of the repo's BUNDLED installer packs, which are
+   *  guaranteed local-GPU/free (no hosted API nodes). When set, class_types that
+   *  aren't in the connected server's /object_info (uninstalled custom nodes) are
+   *  trusted as LOCAL instead of collapsing the verdict to "unknown" — as long as
+   *  NO recognized API node is present. This resolves the contradiction where a
+   *  known-local pack read back as "unknown" merely because its custom nodes
+   *  weren't installed (issue #464). Arbitrary/ad-hoc graphs must NOT set this. */
+  bundledLocalPack?: boolean;
+}
+
 export async function checkWorkflowRuntime(
   graph: unknown,
   deps: ApiNodesDeps = defaultDeps,
+  opts: CheckWorkflowRuntimeOptions = {},
 ): Promise<WorkflowRuntime> {
   const classTypes = extractWorkflowClassTypes(graph);
   const objectInfo = await deps.getObjectInfo();
@@ -224,12 +236,15 @@ export async function checkWorkflowRuntime(
   if (hasApiNodes) {
     runtime = apiNodes.length >= classifiable && classifiable > 0 ? "api" : "mixed";
     usesApiNodes = true;
-  } else if (unknownNodes.length > 0) {
+  } else if (unknownNodes.length > 0 && !opts.bundledLocalPack) {
     // No recognized API nodes, but some class_types aren't in /object_info — they
     // COULD be paid API/partner nodes the server doesn't expose. Don't claim free.
     runtime = "unknown";
     usesApiNodes = null;
   } else {
+    // Either everything classified as local, OR this is a bundled pack (declared
+    // local/free) whose only unclassifiable nodes are its own uninstalled custom
+    // nodes — never API nodes. Trust the pack's local guarantee (#464).
     runtime = "local";
     usesApiNodes = false;
   }

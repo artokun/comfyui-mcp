@@ -93,7 +93,7 @@ function isPositionalWidgetSpec(spec: unknown): boolean {
 const ASSET_FILE_RE =
   /\.(safetensors|safetensor|sft|ckpt|pt|pt2|pth|bin|gguf|onnx|vae|pkl|npz|yaml)$/i;
 
-function looksLikeAssetFilename(value: unknown): boolean {
+export function looksLikeAssetFilename(value: unknown): boolean {
   return typeof value === "string" && ASSET_FILE_RE.test(value.trim());
 }
 
