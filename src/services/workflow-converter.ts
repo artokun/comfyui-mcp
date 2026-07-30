@@ -83,37 +83,19 @@ function isPositionalWidgetSpec(spec: unknown): boolean {
 }
 
 /**
- * Model/asset & MEDIA file extensions that appear in ComfyUI loader/input combos
- * (unet_name, ckpt_name, vae_name, lora_name, control_net_name, clip_name, and
- * LoadImage/LoadAudio/LoadVideo's image/audio/video selectors, …). Used to
- * distinguish an asset-selection combo — where substituting a different file
- * silently swaps the user's model OR their input media (issue #504) — from a
- * plain enum combo (sampler_name, a stale "Select to add Wildcard" UI helper)
- * where falling back to the first option is harmless.
- *
- * Media extensions matter because LoadImage's `image` widget lists the input
- * files on the *connected* server; a freshly staged upload (e.g. via
- * stage_output_as_input) isn't in a STALE /object_info combo, and without media
- * coverage here the value was silently rewritten to comboOpts[0] — headless
- * execution then ran on the WRONG source image with no warning (#504).
- */
-const ASSET_FILE_RE =
-  /\.(safetensors|safetensor|sft|ckpt|pt|pt2|pth|bin|gguf|onnx|vae|pkl|npz|yaml|png|jpe?g|webp|bmp|gif|tiff?|mp4|webm|mov|mkv|m4v|avi|wav|mp3|flac|ogg|m4a)$/i;
-
-function looksLikeAssetFilename(value: unknown): boolean {
-  return typeof value === "string" && ASSET_FILE_RE.test(value.trim());
-}
-
-/**
- * Widget names that are ALWAYS server-side asset selectors, even when their
+ * Widget names that are ALWAYS server-side MODEL asset selectors, even when their
  * options carry no file extension (e.g. DiffusersLoader.model_path lists
  * extensionless directory names). Substituting a different entry here silently
- * swaps the user's model, so these must never take the comboOpts[0] fallback.
- * Deliberately excludes enum-shaped "_name" widgets (sampler_name, scheduler)
- * whose first-option fallback is legitimate. Also covers the MEDIA input
- * selectors (LoadImage.image, LoadAudio.audio, VHS_LoadVideo.video) so a staged
- * upload absent from a stale combo is never silently swapped for comboOpts[0]
- * (issue #504) even when the value carries no recognizable file extension.
+ * swaps the user's model, so these must never take the comboOpts[0] fallback
+ * (issue #407). These "_name"/"model_path" widget names are unambiguous model
+ * selectors on every node that exposes them, so a plain name match is safe.
+ *
+ * Deliberately EXCLUDES generic media names (image/audio/video) and enum-shaped
+ * "_name" widgets (sampler_name, scheduler): those are NOT globally asset
+ * selectors — a combo merely *named* `image` on some non-loader node, or a
+ * `sampler_name`, is a true enum whose first-option fallback is legitimate.
+ * Media/upload selectors are recognized structurally instead (see
+ * LOADER_ASSET_INPUTS and isUploadSelectorSpec).
  */
 const ASSET_WIDGET_NAMES = new Set([
   "ckpt_name",
@@ -133,10 +115,117 @@ const ASSET_WIDGET_NAMES = new Set([
   "clip_vision_name",
   "model_path",
   "diffusion_model",
-  "image",
-  "audio",
-  "video",
 ]);
+
+/**
+ * KNOWN server-side file/upload SELECTORS, keyed by (classType → input name):
+ * real loader nodes whose combo lists media files present on the *connected*
+ * server (uploads or on-disk inputs). For these — and ONLY these, plus the
+ * model-loader widget names in ASSET_WIDGET_NAMES and object_info upload-flag
+ * metadata (isUploadSelectorSpec) — a value absent from a STALE combo is
+ * PRESERVED with a warning rather than silently rewritten to comboOpts[0]
+ * (issue #504). This is deliberately an allowlist, NOT a global name/extension
+ * heuristic: a combo merely *named* `image`/`audio`/`video`/`extension` on some
+ * OTHER node, or a media-looking value (`.bmp`, `.mp4`, …) on a TRUE enum, is
+ * NOT an asset selector and must take the enum fallback (substitute + warn) so
+ * ComfyUI does not hard-reject a "Value not in list".
+ */
+const LOADER_ASSET_INPUTS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ["LoadImage", new Set(["image"])],
+  ["LoadImageMask", new Set(["image"])],
+  ["LoadImageOutput", new Set(["image"])],
+  ["VHS_LoadVideo", new Set(["video"])],
+  ["VHS_LoadVideoPath", new Set(["video"])],
+  ["VHS_LoadVideoFFmpeg", new Set(["video"])],
+  ["VHS_LoadVideoFFmpegPath", new Set(["video"])],
+  ["LoadAudio", new Set(["audio"])],
+  ["VHS_LoadAudio", new Set(["audio"])],
+  ["VHS_LoadAudioUpload", new Set(["audio"])],
+]);
+
+function isKnownLoaderInput(classType: string, name: string): boolean {
+  return LOADER_ASSET_INPUTS.get(classType)?.has(name) ?? false;
+}
+
+/**
+ * Whether object_info marks this input as an in-browser file/media UPLOAD
+ * selector — the authoritative signal that the combo lists server-side input
+ * files (LoadImage's `image` carries `{image_upload: true}`, audio/video loaders
+ * `{audio_upload|video_upload: true}`). When present this is more reliable than
+ * any name allowlist, so a staged value absent from a stale combo is preserved.
+ */
+function isUploadSelectorSpec(spec: unknown): boolean {
+  if (!Array.isArray(spec)) return false;
+  const cfg = spec[1] as Record<string, unknown> | undefined;
+  if (!cfg || typeof cfg !== "object") return false;
+  return (
+    cfg.image_upload === true ||
+    cfg.audio_upload === true ||
+    cfg.video_upload === true
+  );
+}
+
+/**
+ * Validate one saved widget value against its object_info COMBO options and
+ * return the value to store. Non-combo specs and in-list values pass through
+ * unchanged. For an out-of-list value the decision mirrors #407/#504:
+ *
+ *  - genuine ASSET/upload selector (model-loader widget name, (classType,input)
+ *    loader allowlist, or object_info upload flag) → PRESERVE + warn, so a
+ *    staged/absent file surfaces as an honest missing-asset error rather than a
+ *    silent wrong-file swap;
+ *  - true ENUM (sampler_name, scheduler, a stale "Select to add Wildcard"
+ *    helper, a combo merely NAMED image/extension, a media-looking value on a
+ *    non-loader enum) → SUBSTITUTE comboOpts[0] + warn, because ComfyUI hard-
+ *    rejects a "Value not in list".
+ *
+ * Applied on EVERY widget-population path — the positional widgets_values array,
+ * the name→value object form (VHS_VideoCombine, …), AND the
+ * has_serialized_properties overwrite — so an invalid enum value can't leak past
+ * validation on any of them.
+ */
+function validateComboWidgetValue(
+  name: string,
+  value: unknown,
+  def: ComfyUINodeDef,
+  classType: string,
+  nodeId: string,
+  warnings: string[],
+): unknown {
+  const spec =
+    (def.input?.required as Record<string, unknown>)?.[name] ??
+    (def.input?.optional as Record<string, unknown>)?.[name];
+  const comboOpts = Array.isArray(spec) ? spec[0] : undefined;
+  if (
+    !Array.isArray(comboOpts) ||
+    comboOpts.length === 0 ||
+    comboOpts.includes(value as never)
+  ) {
+    return value;
+  }
+  const isAssetCombo =
+    ASSET_WIDGET_NAMES.has(name) ||
+    isKnownLoaderInput(classType, name) ||
+    isUploadSelectorSpec(spec);
+  if (isAssetCombo) {
+    warnings.push(
+      `Node ${nodeId} (${classType}): widget "${name}" value "${String(
+        value,
+      )}" is not installed on the connected server — keeping the declared value so it surfaces as a missing-asset error rather than silently substituting "${String(
+        comboOpts[0],
+      )}".`,
+    );
+    return value;
+  }
+  warnings.push(
+    `Node ${nodeId} (${classType}): widget "${name}" value "${String(
+      value,
+    )}" is not a valid option on the connected server — substituting the first available option "${String(
+      comboOpts[0],
+    )}" so the graph stays runnable (ComfyUI rejects unknown enum values).`,
+  );
+  return comboOpts[0];
+}
 
 /**
  * Check if an input has control_after_generate in its spec config.
@@ -1245,7 +1334,15 @@ export function convertUiToApi(
     if (!Array.isArray(widgetValues)) {
       const wv = widgetValues as Record<string, unknown>;
       for (const name of widgetNames) {
-        if (name in wv) inputs[name] = wv[name];
+        if (name in wv)
+          inputs[name] = validateComboWidgetValue(
+            name,
+            wv[name],
+            def,
+            classType,
+            nodeId,
+            warnings,
+          );
       }
     } else {
     let widgetIdx = 0;
@@ -1269,56 +1366,18 @@ export function convertUiToApi(
       // Classic combo widget: if the saved value isn't one of the valid options
       // (a stale UI-helper combo like Impact's "Select to add Wildcard", or a
       // value from a node version with different options), fall back to the
-      // default first option. ComfyUI hard-rejects "Value not in list" otherwise,
-      // so defaulting is strictly safer than passing the stale value through.
-      //
-      // EXCEPTION (issues #407, #504): an ASSET/MEDIA-selection combo (unet_name,
-      // ckpt_name, vae_name, lora_name, LoadImage.image, …) lists the files
-      // present on the *connected* server. When the declared file isn't there,
-      // comboOpts[0] is a completely unrelated entry — e.g. Krea 2's
-      // "krea2_turbo_fp8.safetensors" silently became "flux-2-klein-9b.safetensors"
-      // (#407), or a freshly staged LoadImage input silently became the first
-      // cached filename (#504). Silently swapping the user's model OR their input
-      // media produces a misleading graph / wrong-source render. For asset & media
-      // combos we KEEP the declared value and warn, so it surfaces as an honest
-      // missing-asset error instead of a wrong-file success.
-      const comboOpts = Array.isArray(spec) ? spec[0] : undefined;
-      if (
-        Array.isArray(comboOpts) &&
-        comboOpts.length > 0 &&
-        !comboOpts.includes(value as never)
-      ) {
-        const isAssetCombo =
-          ASSET_WIDGET_NAMES.has(name) ||
-          looksLikeAssetFilename(value) ||
-          comboOpts.some((opt) => looksLikeAssetFilename(opt));
-        if (isAssetCombo) {
-          warnings.push(
-            `Node ${nodeId} (${classType}): widget "${name}" value "${String(
-              value,
-            )}" is not installed on the connected server — keeping the declared value so it surfaces as a missing-asset error rather than silently substituting "${String(
-              comboOpts[0],
-            )}".`,
-          );
-          // inputs[name] already holds the declared value; leave it untouched.
-        } else {
-          // Non-asset ENUM combo (sampler_name, scheduler, a stale Impact
-          // "Select to add Wildcard" UI-helper value, …). ComfyUI hard-rejects a
-          // "Value not in list", so falling back to the first option keeps the
-          // graph runnable — but the substitution must NOT be silent: the user
-          // set this value, so surface a warning that it was changed. (Only the
-          // fallback direction differs from the asset case above; neither path
-          // overwrites a user-set value without a warning.)
-          warnings.push(
-            `Node ${nodeId} (${classType}): widget "${name}" value "${String(
-              value,
-            )}" is not a valid option on the connected server — substituting the first available option "${String(
-              comboOpts[0],
-            )}" so the graph stays runnable (ComfyUI rejects unknown enum values).`,
-          );
-          inputs[name] = comboOpts[0];
-        }
-      }
+      // default first option — UNLESS it's a genuine asset/upload selector, which
+      // we preserve + warn (#407/#504). See validateComboWidgetValue for the full
+      // classification (model-loader names + (classType,input) loader allowlist +
+      // object_info upload flag — NOT a global name/extension heuristic).
+      inputs[name] = validateComboWidgetValue(
+        name,
+        value,
+        def,
+        classType,
+        nodeId,
+        warnings,
+      );
 
       const opts = (
         Array.isArray(spec)
@@ -1359,7 +1418,15 @@ export function convertUiToApi(
     const serializedProps = node.properties as Record<string, unknown> | undefined;
     if (serializedProps?.has_serialized_properties === true) {
       for (const name of widgetNames) {
-        if (name in serializedProps) inputs[name] = serializedProps[name];
+        if (name in serializedProps)
+          inputs[name] = validateComboWidgetValue(
+            name,
+            serializedProps[name],
+            def,
+            classType,
+            nodeId,
+            warnings,
+          );
       }
     }
 

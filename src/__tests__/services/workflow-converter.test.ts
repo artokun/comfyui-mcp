@@ -461,9 +461,9 @@ describe("convertUiToApi — media-combo fallback (issue #504)", () => {
   // A LoadImage node whose `image` widget points at a freshly staged upload
   // (2Dto3D_v2_front_clean.png) that isn't yet in the CONNECTED server's STALE
   // /object_info combo (which still only lists KENT_concept_00012_.png). Before
-  // the fix, media values failed looksLikeAssetFilename() so comboOpts[0]
-  // silently replaced the user's image — headless execution then ran on the
-  // WRONG source image with no warning.
+  // the fix, LoadImage.image was not recognized as a media selector, so
+  // comboOpts[0] silently replaced the user's image — headless execution then
+  // ran on the WRONG source image with no warning.
   const STALE_INFO = {
     LoadImage: {
       input: {
@@ -517,16 +517,28 @@ describe("convertUiToApi — media-combo fallback (issue #504)", () => {
     expect(warnings.some((w) => /missing-asset/.test(w))).toBe(false);
   });
 
-  it("preserves an extensionless staged image via the media widget-name allowlist", () => {
-    // Some staged inputs carry a subfolder path with no extension; the value has
-    // no file suffix and the stale combo has none either, so detection must fall
-    // back to the `image` widget-name allowlist rather than substituting.
+  it("preserves an extensionless staged image via the (classType,input) loader allowlist", () => {
+    // Isolate the allowlist: BOTH the staged value AND the stale combo option are
+    // extensionless, so no extension heuristic can carry this — preservation must
+    // come purely from LoadImage.image being a KNOWN loader input. (The prior
+    // fixture's stale combo held a ".png", so the retired regex passed regardless
+    // and never actually exercised the allowlist.)
+    const EXTLESS_INFO = {
+      LoadImage: {
+        input: {
+          required: {
+            image: [["cached_input"]],
+            upload: ["IMAGE_UPLOAD"],
+          },
+        },
+      },
+    } as never;
     const { workflow, warnings } = convertUiToApi(
       loadImageGraph("clipspace/staged_input"),
-      STALE_INFO,
+      EXTLESS_INFO,
     );
     expect(workflow["12"].inputs.image).toBe("clipspace/staged_input");
-    expect(workflow["12"].inputs.image).not.toBe("KENT_concept_00012_.png");
+    expect(workflow["12"].inputs.image).not.toBe("cached_input");
     expect(warnings.some((w) => /missing-asset/.test(w))).toBe(true);
   });
 
@@ -552,5 +564,220 @@ describe("convertUiToApi — media-combo fallback (issue #504)", () => {
     const { workflow, warnings } = convertUiToApi(ui, info);
     expect(workflow["1"].inputs.video).toBe("freshly_staged.mp4");
     expect(warnings.some((w) => /missing-asset/.test(w))).toBe(true);
+  });
+
+  it("preserves LoadImage.image flagged by object_info upload metadata (no name/ext match)", () => {
+    // The value is extensionless AND arrives on a class NOT in the loader
+    // allowlist by chance — but object_info flags the input `{image_upload:true}`,
+    // the authoritative upload-selector signal — so it must still be preserved.
+    const info = {
+      MyCustomImageLoader: {
+        input: {
+          required: {
+            image: [["on_disk_input"], { image_upload: true }],
+          },
+        },
+      },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 7,
+          type: "MyCustomImageLoader",
+          mode: 0,
+          inputs: [],
+          outputs: [],
+          widgets_values: ["staged_upload"],
+        },
+      ],
+      links: [],
+    } as never;
+    const { workflow, warnings } = convertUiToApi(ui, info);
+    expect(workflow["7"].inputs.image).toBe("staged_upload");
+    expect(warnings.some((w) => /missing-asset/.test(w))).toBe(true);
+  });
+});
+
+describe("convertUiToApi — true-enum over-preservation guard (P0 regression, #504)", () => {
+  // The #504 fix must NOT over-correct: a combo merely *named* image/audio/video,
+  // or a media-looking value on a TRUE enum, is NOT an asset selector. Preserving
+  // an out-of-list value there feeds ComfyUI a "Value not in list" it hard-rejects,
+  // breaking conversions that previously substituted comboOpts[0] + warned.
+
+  it("SUBSTITUTES+warns a non-loader enum literally named `image` (not preserved)", () => {
+    // A node whose combo happens to be named `image` but whose options are a real
+    // enum ["foreground","background"] — a value of "mask" is invalid and must be
+    // replaced by the first option, NOT preserved as a phantom missing-asset.
+    const info = {
+      SomeMaskModeNode: {
+        input: {
+          required: {
+            image: [["foreground", "background"]],
+          },
+        },
+      },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 3,
+          type: "SomeMaskModeNode",
+          mode: 0,
+          inputs: [],
+          outputs: [],
+          widgets_values: ["mask"],
+        },
+      ],
+      links: [],
+    } as never;
+    const { workflow, warnings } = convertUiToApi(ui, info);
+    expect(workflow["3"].inputs.image).toBe("foreground");
+    expect(workflow["3"].inputs.image).not.toBe("mask");
+    expect(
+      warnings.some(
+        (w) => w.includes("3") && w.includes("mask") && /substituting/.test(w),
+      ),
+    ).toBe(true);
+    // …and it must NOT be misreported as a missing asset (would preserve it).
+    expect(warnings.some((w) => /missing-asset/.test(w))).toBe(false);
+  });
+
+  it("SUBSTITUTES+warns a format `extension` enum with a media-looking value (.bmp not preserved)", () => {
+    // A true format enum [".png",".jpg"] with a ".bmp" value: the retired
+    // extension heuristic wrongly preserved ".bmp" (it matches a media regex);
+    // ComfyUI rejects it. Must substitute the first option instead.
+    const info = {
+      SaveImageFormatNode: {
+        input: {
+          required: {
+            extension: [[".png", ".jpg"]],
+          },
+        },
+      },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 5,
+          type: "SaveImageFormatNode",
+          mode: 0,
+          inputs: [],
+          outputs: [],
+          widgets_values: [".bmp"],
+        },
+      ],
+      links: [],
+    } as never;
+    const { workflow, warnings } = convertUiToApi(ui, info);
+    expect(workflow["5"].inputs.extension).toBe(".png");
+    expect(workflow["5"].inputs.extension).not.toBe(".bmp");
+    expect(
+      warnings.some(
+        (w) => w.includes("5") && w.includes(".bmp") && /substituting/.test(w),
+      ),
+    ).toBe(true);
+    expect(warnings.some((w) => /missing-asset/.test(w))).toBe(false);
+  });
+
+  it("validates object-form widgets_values too — invalid enum substitutes (not copied raw)", () => {
+    // Name->value object form (VHS_VideoCombine shape). This path copied values
+    // straight in WITHOUT combo validation, so an invalid true-enum value on a
+    // combo named `image` leaked through unchanged. It must now substitute+warn.
+    const info = {
+      MaskModeCombine: {
+        input: {
+          required: {
+            image: [["foreground", "background"]],
+            format: [["mp4", "webm"]],
+          },
+        },
+      },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 9,
+          type: "MaskModeCombine",
+          mode: 0,
+          inputs: [],
+          outputs: [],
+          widgets_values: { image: "mask", format: "mp4" },
+        },
+      ],
+      links: [],
+    } as never;
+    const { workflow, warnings } = convertUiToApi(ui, info);
+    expect(workflow["9"].inputs.image).toBe("foreground");
+    expect(workflow["9"].inputs.image).not.toBe("mask");
+    // a VALID value on the same object form is left untouched
+    expect(workflow["9"].inputs.format).toBe("mp4");
+    expect(
+      warnings.some((w) => w.includes("9") && /substituting/.test(w)),
+    ).toBe(true);
+  });
+
+  it("object-form still PRESERVES a real loader asset value (allowlist survives the path)", () => {
+    // The object-form validation must keep the asset-preservation semantics: a
+    // staged LoadImage.image absent from the stale combo is preserved, not swapped.
+    const info = {
+      LoadImage: {
+        input: { required: { image: [["cached.png"]], upload: ["IMAGE_UPLOAD"] } },
+      },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 10,
+          type: "LoadImage",
+          mode: 0,
+          inputs: [],
+          outputs: [],
+          widgets_values: { image: "staged_fresh.png" },
+        },
+      ],
+      links: [],
+    } as never;
+    const { workflow, warnings } = convertUiToApi(ui, info);
+    expect(workflow["10"].inputs.image).toBe("staged_fresh.png");
+    expect(warnings.some((w) => /missing-asset/.test(w))).toBe(true);
+  });
+
+  it("validates has_serialized_properties overwrites too — invalid enum substitutes", () => {
+    // Authoritative node.properties overwrite the positional mapping AFTER combo
+    // validation; an invalid enum restored there previously leaked unvalidated to
+    // ComfyUI. It must be validated (substituted) as well.
+    const info = {
+      SerNode: {
+        input: {
+          required: {
+            mode: [["a", "b"]],
+          },
+        },
+        input_order: { required: ["mode"] },
+      },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 11,
+          type: "SerNode",
+          mode: 0,
+          inputs: [],
+          outputs: [],
+          widgets_values: ["a"],
+          properties: {
+            has_serialized_properties: true,
+            mode: "z", // stale, out-of-list — must NOT survive
+          },
+        },
+      ],
+      links: [],
+    } as never;
+    const { workflow, warnings } = convertUiToApi(ui, info);
+    expect(workflow["11"].inputs.mode).toBe("a");
+    expect(workflow["11"].inputs.mode).not.toBe("z");
+    expect(
+      warnings.some((w) => w.includes("11") && /substituting/.test(w)),
+    ).toBe(true);
   });
 });
