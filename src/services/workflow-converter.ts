@@ -36,6 +36,30 @@ export function isUiFormat(obj: unknown): obj is UiWorkflow {
   return Array.isArray(record.nodes) && Array.isArray(record.links);
 }
 
+/** The primitive scalar widget types that occupy a widgets_values slot. */
+const SCALAR_WIDGET_TYPES = new Set(["INT", "FLOAT", "STRING", "BOOLEAN", "COMBO"]);
+
+/**
+ * Whether a (type, cfg) pair describes a scalar widget input. Beyond the plain
+ * "INT"/"FLOAT"/… types this also recognizes:
+ *  - a `widgetType` config hint (the frontend's authoritative "render this as a
+ *    FLOAT/INT widget" flag), and
+ *  - a COMBINED type string like "FLOAT,INT" (ComfyUI declares widgets whose value
+ *    may be either — e.g. LTXVEmptyLatentAudio.frame_rate is `["FLOAT,INT", …]`).
+ * Without this, a combined-type widget is misread as a LINK input, dropped from
+ * the widget list, and every following widget value shifts by one slot (issue
+ * #193: frame_rate 24 landed on batch_size and frame_rate fell back to default 25).
+ */
+function isScalarWidgetType(type: unknown, cfg?: unknown): boolean {
+  const wt = (cfg as { widgetType?: unknown } | undefined)?.widgetType;
+  if (typeof wt === "string" && SCALAR_WIDGET_TYPES.has(wt)) return true;
+  if (typeof type !== "string") return false;
+  if (SCALAR_WIDGET_TYPES.has(type)) return true;
+  if (!type.includes(",")) return false;
+  const parts = type.split(",").map((s) => s.trim()).filter(Boolean);
+  return parts.length > 0 && parts.every((p) => SCALAR_WIDGET_TYPES.has(p));
+}
+
 /**
  * Check if an input spec represents a widget (value input) vs a link (connection input).
  * Widget inputs have an array type spec like ["INT", {...}] or ["STRING", {...}].
@@ -56,15 +80,8 @@ function isWidgetInput(
   // COMFY_DYNAMICCOMBO_V3) — the selected option's key is a widget value.
   const cfg = spec[1] as { options?: unknown } | undefined;
   if (Array.isArray(cfg?.options)) return true;
-  // Standard widget types
-  const WIDGET_TYPES = new Set([
-    "INT",
-    "FLOAT",
-    "STRING",
-    "BOOLEAN",
-    "COMBO",
-  ]);
-  return WIDGET_TYPES.has(typeSpec);
+  // Standard + combined + widgetType-hinted scalar widgets.
+  return isScalarWidgetType(typeSpec, cfg);
 }
 
 /**
@@ -79,7 +96,7 @@ function isPositionalWidgetSpec(spec: unknown): boolean {
   if (Array.isArray(type)) return true; // inline combo options
   const cfg = spec[1] as { options?: unknown } | undefined;
   if (Array.isArray(cfg?.options)) return true; // dynamic combo (options-carrying)
-  return ["INT", "FLOAT", "STRING", "BOOLEAN", "COMBO"].includes(String(type));
+  return isScalarWidgetType(type, cfg);
 }
 
 /**
@@ -426,6 +443,22 @@ const isWiringVirtual = (t: string | undefined) =>
   t != null && (t === "Reroute" || isGetVirtual(t) || isSetVirtual(t));
 
 /**
+ * The bus name (the "Constant" widget) that keys a Set/Get virtual node. Usually
+ * widgets_values[0] on a serialized graph, but the live-canvas reconstruction
+ * fallback (#384) keys widget values BY NAME, so widgets_values can be an object
+ * ({ Constant: "…" }) instead of a positional array. Read both shapes so Set/Get
+ * resolution survives the fallback path.
+ */
+function busKey(wv: unknown): unknown {
+  if (Array.isArray(wv)) return wv[0];
+  if (wv && typeof wv === "object") {
+    const o = wv as Record<string, unknown>;
+    return o.Constant ?? o.constant ?? Object.values(o)[0];
+  }
+  return undefined;
+}
+
+/**
  * Pre-pass: strip the pure "wiring" virtual nodes — KJNodes **Get/Set** bus nodes
  * and **Reroute** — by rewriting each consumer's link straight to the real
  * upstream source (following chains, and Get→bus→Set→source). Runs on the
@@ -456,7 +489,7 @@ function deVirtualizeGraph(
   const busSet = new Map<string, UiNode>();
   for (const n of nodes) {
     if (isSetVirtual(n.type)) {
-      const b = n.widgets_values?.[0];
+      const b = busKey(n.widgets_values);
       if (b != null) busSet.set(String(b), n);
     }
   }
@@ -478,10 +511,19 @@ function deVirtualizeGraph(
       return s ? resolveReal(s.node, s.slot, depth + 1) : null;
     }
     if (isGetVirtual(node.type)) {
-      const b = node.widgets_values?.[0];
+      const b = busKey(node.widgets_values);
       const setN = b != null ? busSet.get(String(b)) : undefined;
       if (!setN) return null;
       const s = incoming(setN);
+      return s ? resolveReal(s.node, s.slot, depth + 1) : null;
+    }
+    // SetNode passthrough: rgthree/KJNodes Set nodes expose an output that mirrors
+    // their value input, so a consumer can wire straight off the SetNode (not only
+    // via a GetNode). Follow the Set's value input to the real source — otherwise
+    // the link is left pointing at the (removed) virtual and gets dropped, losing
+    // the connection (issue #361: Set/Get-resolved links missing on downstream nodes).
+    if (isSetVirtual(node.type)) {
+      const s = incoming(node);
       return s ? resolveReal(s.node, s.slot, depth + 1) : null;
     }
     return { node: nodeId, slot };
@@ -490,7 +532,10 @@ function deVirtualizeGraph(
   const drop = new Set<unknown>();
   for (const l of links as any[]) {
     const srcType = byId.get(lsrc(l))?.type;
-    if (srcType === "Reroute" || (srcType && isGetVirtual(srcType))) {
+    if (
+      srcType === "Reroute" ||
+      (srcType && (isGetVirtual(srcType) || isSetVirtual(srcType)))
+    ) {
       const real = resolveReal(lsrc(l), lsrcSlot(l));
       if (real && !isWiringVirtual(byId.get(real.node as number)?.type)) {
         setLsrc(l, real.node, real.slot);
@@ -972,7 +1017,12 @@ export function isLinkRef(v: unknown, nodeKeys: Set<string>): v is [string | num
 /** The UI slot `type` string for a widget input spec. */
 function widgetSlotType(spec: NodeInputSpec): string {
   const t = spec[0];
-  return Array.isArray(t) ? "COMBO" : t;
+  if (Array.isArray(t)) return "COMBO";
+  const wt = (spec[1] as { widgetType?: unknown } | undefined)?.widgetType;
+  if (typeof wt === "string") return wt;
+  // Combined type like "FLOAT,INT" → the first member is the concrete slot type.
+  if (typeof t === "string" && t.includes(",")) return t.split(",")[0].trim();
+  return t;
 }
 
 /**
@@ -1371,7 +1421,7 @@ export function convertUiToApi(
   const busSource = new Map<string, number>();
   for (const n of expanded.nodes) {
     if (!isSetType(n.type)) continue;
-    const bus = n.widgets_values?.[0];
+    const bus = busKey(n.widgets_values);
     const inp = (n.inputs ?? []).find((i) => i.link != null);
     if (bus != null && inp?.link != null) busSource.set(String(bus), inp.link);
   }
@@ -1395,7 +1445,7 @@ export function convertUiToApi(
     }
     // Virtual GetNode: follow the bus to the SetNode that wrote it.
     if (isGetType(src.type)) {
-      const bus = src.widgets_values?.[0];
+      const bus = busKey(src.widgets_values);
       const setLink = bus != null ? busSource.get(String(bus)) : undefined;
       return setLink != null ? resolveSource(setLink, depth + 1) : null;
     }
@@ -1484,19 +1534,139 @@ export function convertUiToApi(
     const widgetValues = node.widgets_values ?? [];
 
     // Some nodes (e.g. VHS_VideoCombine) store widgets_values as a name->value
-    // object instead of a positional array. Map those by name directly.
+    // object instead of a positional array — as does the #384 live-canvas
+    // fallback (graph_get_state keys every widget by name). Map those by name
+    // directly; no positional drift means the values are authoritative (no
+    // combo-validity re-resolution or phantom control_after_generate slot needed).
     if (!Array.isArray(widgetValues)) {
       const wv = widgetValues as Record<string, unknown>;
+
+      // Resolve a top-level dynamic combo's SELECTED-option nested inputs (merged
+      // required + optional — an asset selector may live under `optional`, and
+      // reading only `required` would drop it, regressing #504/#407). Mirrors the
+      // positional branch's nested lookup.
+      const nestedFor = (name: string): Record<string, unknown> | undefined => {
+        const spec =
+          (def.input?.required as Record<string, unknown>)?.[name] ??
+          (def.input?.optional as Record<string, unknown>)?.[name];
+        const opts = (
+          Array.isArray(spec)
+            ? (spec[1] as {
+                options?: Array<{
+                  key?: unknown;
+                  inputs?: {
+                    required?: Record<string, unknown>;
+                    optional?: Record<string, unknown>;
+                  };
+                }>;
+              })
+            : undefined
+        )?.options;
+        const selInputs = Array.isArray(opts)
+          ? opts.find((o) => o?.key === wv[name])?.inputs
+          : undefined;
+        return selInputs && (selInputs.required || selInputs.optional)
+          ? { ...selInputs.required, ...selInputs.optional }
+          : undefined;
+      };
+
+      // A name-keyed capture (the #384 graph_get_state fallback, or a natively
+      // name-keyed widgets_values) stores EVERY widget in ONE FLAT name→value map.
+      // That is only authoritative when names are GLOBALLY UNIQUE. When more than
+      // one control claims the SAME flat slot — two dynamic-combo parents each with
+      // a nested "strength", OR a nested "strength" shadowing a top-level widget
+      // "strength" — the single stored value can't be attributed to ANY of them, so
+      // reading by leaf name would silently push one control's value onto another
+      // (the #504/#499 wrong-value bug class). A control claims the flat slot L when
+      // it needs L and the capture did NOT parent-qualify it ("first.strength"); a
+      // PARENT-QUALIFIED key is always unambiguous and consumes its own slot, never
+      // the flat one. Count the claimants of each flat slot up front so the emit
+      // loop can FAIL CLOSED — refuse EVERY control competing for an over-subscribed
+      // slot (top-level AND nested), leaving each to its node default — rather than
+      // trust a value that might belong to a different control.
+      const nestedByParent = new Map<string, Record<string, unknown>>();
       for (const name of widgetNames) {
-        if (name in wv)
-          inputs[name] = validateComboWidgetValue(
-            name,
-            wv[name],
-            def,
-            classType,
-            nodeId,
-            warnings,
-          );
+        const nested = nestedFor(name);
+        if (nested) nestedByParent.set(name, nested);
+      }
+      // flat-slot claimant count, keyed by leaf name.
+      const flatClaimants = new Map<string, number>();
+      const claimFlat = (leaf: string) =>
+        flatClaimants.set(leaf, (flatClaimants.get(leaf) ?? 0) + 1);
+      for (const name of widgetNames) {
+        if (name in wv) claimFlat(name); // top-level widget claims its own flat slot
+      }
+      for (const [parent, nested] of nestedByParent) {
+        for (const [nName, nSpec] of Object.entries(nested)) {
+          if (!isPositionalWidgetSpec(nSpec)) continue;
+          // a nested leaf claims the flat slot only when it FALLS BACK to it
+          // (no parent-qualified key present in the capture).
+          if (`${parent}.${nName}` in wv) continue;
+          if (nName in wv) claimFlat(nName);
+        }
+      }
+      const flatAmbiguous = (leaf: string) => (flatClaimants.get(leaf) ?? 0) > 1;
+      const ambiguityWarning = (target: string, leaf: string) =>
+        `Node ${nodeId} (${classType}): widget "${target}" could not be resolved from the name-keyed capture because the flat slot "${leaf}" is claimed by more than one control (multiple dynamic-combo nested leaves of the same name, or a nested leaf shadowing a top-level widget), so the single stored value can't be attributed to the right control. Left to the node default rather than risk assigning another control's value. Re-capture with a panel that emits parent-qualified widget names, or pass pack/path/graph.`;
+
+      for (const name of widgetNames) {
+        if (name in wv) {
+          // A top-level widget whose flat slot is over-subscribed (a nested leaf of
+          // the same name also falls back to it) is itself ambiguous — the stored
+          // value might be the nested control's — so refuse it too, don't trust it.
+          if (flatAmbiguous(name)) {
+            warnings.push(ambiguityWarning(name, name));
+          } else {
+            inputs[name] = validateComboWidgetValue(
+              name,
+              wv[name],
+              def,
+              classType,
+              nodeId,
+              warnings,
+            );
+          }
+        }
+
+        // V3 dynamic-combo nested inputs: the selected option adds required
+        // sub-inputs whose live values are ALSO keyed in wv. Emit them as
+        // "<combo>.<nested>" so the prompt matches the array-branch shape (ComfyUI
+        // rebuilds the nested dict from these dotted keys). Each nested leaf is
+        // validated against ITS OWN spec/name (mirrors the array branch — don't
+        // regress #504/#407 asset preservation for nested combos).
+        const nested = nestedByParent.get(name);
+        if (nested) {
+          for (const [nName, nSpec] of Object.entries(nested)) {
+            if (!isPositionalWidgetSpec(nSpec)) continue;
+            const qualified = `${name}.${nName}`;
+            // Preferred: the capture already parent-qualified the key — unambiguous.
+            if (qualified in wv) {
+              inputs[qualified] = validateComboValueForSpec(
+                nName,
+                wv[qualified],
+                nSpec,
+                classType,
+                nodeId,
+                warnings,
+              );
+              continue;
+            }
+            if (!(nName in wv)) continue;
+            // Flat leaf: safe ONLY when it is the SOLE claimant of that flat slot.
+            if (flatAmbiguous(nName)) {
+              warnings.push(ambiguityWarning(qualified, nName));
+              continue;
+            }
+            inputs[qualified] = validateComboValueForSpec(
+              nName,
+              wv[nName],
+              nSpec,
+              classType,
+              nodeId,
+              warnings,
+            );
+          }
+        }
       }
     } else {
     let widgetIdx = 0;

@@ -208,6 +208,13 @@ export const __panelToolsTestHooks = {
   },
   isRetrySafeCmd,
   isTransientReconnectError,
+  // #384 live-canvas capture fallback (defined later in the module).
+  reconstructUiFromState: (reply: unknown) => reconstructUiFromState(reply),
+  resolveWorkflowInput: (
+    args: Record<string, unknown>,
+    ctx: PanelToolCtx,
+    allowStateFallback = true,
+  ) => resolveWorkflowInput(args, ctx, allowStateFallback),
 };
 
 function sleep(ms: number): Promise<void> {
@@ -1126,9 +1133,103 @@ export function makePanelToolCtx(
  * what I have open" is the common ask, and requiring a save-to-disk round trip
  * first derailed real sessions (deleted placeholder files, 404 tabs).
  */
+/**
+ * Rebuild a UI-format workflow ({ nodes, links }) from the panel's back-compat
+ * `graph_get_state` reply (the #384 fallback). Each summarized node carries its
+ * widget values keyed BY NAME (`widgets`) and its inputs' upstream source
+ * (`connected_from`), so we materialize:
+ *   - nodes with `widgets_values` as the name→value OBJECT — convertUiToApi maps
+ *     those by name, which also sidesteps the positional widget-order pitfalls,
+ *   - a synthetic links array + per-input `link` ids from `connected_from`.
+ * Returns null when the reply has no usable nodes.
+ */
+function reconstructUiFromState(reply: unknown): Record<string, unknown> | null {
+  const r = reply as { nodes?: unknown[]; truncated?: boolean; node_count?: number } | null;
+  const nodesIn = r?.nodes;
+  if (!Array.isArray(nodesIn) || nodesIn.length === 0) return null;
+  // graph_get_state caps at MAX_STATE_NODES (100) and flags the overflow. A
+  // truncated capture would silently yield an INCOMPLETE executable graph, so
+  // refuse it — the caller then surfaces the actionable "pass pack/path/graph"
+  // error rather than stripping a partial workflow.
+  if (r?.truncated === true) return null;
+  if (typeof r?.node_count === "number" && r.node_count > nodesIn.length) return null;
+
+  type StateNode = {
+    id: number;
+    type: string;
+    title?: string;
+    mode?: string;
+    widgets?: Record<string, unknown>;
+    inputs?: {
+      name: string;
+      type?: string;
+      connected_from?: { node_id: number; output_slot?: number } | null;
+    }[];
+    outputs?: { name: string; type?: string }[];
+  };
+
+  const uiNodes = nodesIn.map((raw) => {
+    const n = raw as StateNode;
+    const mode = n.mode === "mute" ? 2 : n.mode === "bypass" ? 4 : 0;
+    return {
+      id: n.id,
+      type: n.type,
+      mode,
+      pos: [0, 0] as [number, number],
+      inputs: (n.inputs ?? []).map((inp) => ({
+        name: inp.name,
+        type: inp.type ?? "*",
+        link: null as number | null,
+      })),
+      outputs: (n.outputs ?? []).map((o) => ({
+        name: o.name,
+        type: o.type ?? "*",
+        links: [] as number[],
+      })),
+      widgets_values:
+        n.widgets && typeof n.widgets === "object"
+          ? (n.widgets as unknown as unknown[])
+          : ([] as unknown[]),
+      properties: {} as Record<string, unknown>,
+      ...(n.title ? { title: n.title } : {}),
+    };
+  });
+
+  const byId = new Map(uiNodes.map((n) => [n.id, n]));
+  const links: [number, number, number, number, number, string][] = [];
+  let linkId = 0;
+  nodesIn.forEach((raw, idx) => {
+    const inputs = (raw as StateNode).inputs ?? [];
+    const tgt = uiNodes[idx];
+    inputs.forEach((inp, slot) => {
+      const from = inp.connected_from;
+      if (!from || from.node_id == null || !byId.has(from.node_id)) return;
+      const id = ++linkId;
+      tgt.inputs[slot].link = id;
+      const srcNode = byId.get(from.node_id)!;
+      const srcSlot = from.output_slot ?? 0;
+      while (srcNode.outputs.length <= srcSlot) {
+        srcNode.outputs.push({ name: `out_${srcNode.outputs.length}`, type: "*", links: [] });
+      }
+      srcNode.outputs[srcSlot].links.push(id);
+      links.push([id, from.node_id, srcSlot, tgt.id, slot, inp.type ?? "*"]);
+    });
+  });
+
+  return { nodes: uiNodes, links } as unknown as Record<string, unknown>;
+}
+
 async function resolveWorkflowInput(
   args: Record<string, unknown>,
   ctx: PanelToolCtx,
+  // The live-canvas graph_get_state fallback (#384) is LOSSY: it reconstructs
+  // only nodes/links/widgets (name-keyed) — no layout, groups, properties, or
+  // subgraph definitions. That's fine for panel_strip_workflow (API/prompt output
+  // for inspection/execution), but panel_flatten_workflow LOADS its result back
+  // ONTO the canvas and panel_slice_workflow needs groups to find its seeds, so
+  // they must NOT take this fallback — they keep the actionable "update your
+  // panel" error instead. Only strip opts in.
+  allowStateFallback = false,
 ): Promise<Record<string, unknown>> {
   if (args.pack) return readPackWorkflow(args.pack as string);
   if (args.path) return await readWorkflowFromPath(args.path as string);
@@ -1153,8 +1254,30 @@ async function resolveWorkflowInput(
       timeoutMs: 30000,
     });
   } catch (err) {
+    // #384: a panel too old to register graph_serialize (added at 0.11.4) still
+    // answers the back-compat `graph_get_state`. On an "Unknown command" rejection
+    // ONLY (a genuine transport/timeout error must surface as-is), fall back to it
+    // and reconstruct the graph so "strip the live canvas" works without a
+    // save-to-disk round trip.
+    const msg = err instanceof Error ? err.message : String(err);
+    if (allowStateFallback && /unknown command/i.test(msg)) {
+      try {
+        const target = ctx.workflowTarget?.get(ctx.tabId);
+        const stateCmd = target
+          ? withWorkflowTarget({ cmd: "graph_get_state" }, target)
+          : { cmd: "graph_get_state" };
+        const stateReply = await ctx.bridge.send(stateCmd as { cmd: string }, {
+          tabId: ctx.tabId,
+          timeoutMs: 30000,
+        });
+        const rebuilt = reconstructUiFromState(stateReply);
+        if (rebuilt) return rebuilt;
+      } catch {
+        /* fall through to the actionable error below */
+      }
+    }
     throw new Error(
-      `Couldn't capture the live canvas (${err instanceof Error ? err.message : String(err)}). ` +
+      `Couldn't capture the live canvas (${msg}). ` +
         `An older panel version may not support graph_serialize — pass pack, path, or graph instead.`,
     );
   }
@@ -1578,7 +1701,9 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           .describe("Inline UI workflow (object or JSON string) to strip instead of a pack/path."),
       },
       async (args: A, ctx) => {
-        const raw = await resolveWorkflowInput(args, ctx);
+        // strip opts into the lossy live-canvas fallback (#384) — its API/prompt
+        // output is for inspection/execution, never reloaded onto the canvas.
+        const raw = await resolveWorkflowInput(args, ctx, true);
         const ui = raw as unknown as UiWorkflow;
         const bulk = await getObjectInfo();
         const objectInfo = await backfillObjectInfo(bulk, collectNodeTypes(ui));

@@ -1848,3 +1848,143 @@ describe("panel_ask surface + late-answer resilience (#300/#486) and set_todo bo
     expect(sent.at(-1)).toMatchObject({ cmd: "set_todo" });
   });
 });
+
+describe("panel_strip_workflow live-canvas fallback (issue #384)", () => {
+  it("reconstructUiFromState rebuilds nodes + links with name-keyed widgets", () => {
+    const state = {
+      nodes: [
+        {
+          id: 1,
+          type: "CheckpointLoaderSimple",
+          widgets: { ckpt_name: "m.ckpt" },
+          inputs: [],
+          outputs: [{ name: "MODEL", type: "MODEL" }],
+        },
+        {
+          id: 2,
+          type: "KSampler",
+          widgets: { seed: 42, steps: 20 },
+          inputs: [
+            { name: "model", type: "MODEL", connected_from: { node_id: 1, output_slot: 0 } },
+          ],
+          outputs: [],
+        },
+      ],
+    };
+    const ui = __panelToolsTestHooks.reconstructUiFromState(state) as {
+      nodes: Array<{ id: number; inputs: Array<{ link: number | null }>; widgets_values: unknown }>;
+      links: unknown[];
+    } | null;
+    expect(ui).not.toBeNull();
+    expect(ui!.nodes.length).toBe(2);
+    expect(ui!.links.length).toBe(1);
+    const ks = ui!.nodes.find((n) => n.id === 2)!;
+    expect(ks.inputs[0].link).not.toBeNull();
+    // widgets survive keyed BY NAME (convertUiToApi maps them by name)
+    expect(ks.widgets_values).toEqual({ seed: 42, steps: 20 });
+  });
+
+  it("returns null when the state reply has no nodes", () => {
+    expect(__panelToolsTestHooks.reconstructUiFromState({ nodes: [] })).toBeNull();
+    expect(__panelToolsTestHooks.reconstructUiFromState({})).toBeNull();
+  });
+
+  it("refuses a TRUNCATED state reply rather than stripping a partial graph", () => {
+    const partial = {
+      truncated: true,
+      node_count: 250,
+      nodes: [{ id: 1, type: "SaveImage", widgets: {}, inputs: [], outputs: [] }],
+    };
+    expect(__panelToolsTestHooks.reconstructUiFromState(partial)).toBeNull();
+    // also caught by the node_count > nodes.length guard alone
+    expect(
+      __panelToolsTestHooks.reconstructUiFromState({
+        node_count: 3,
+        nodes: [{ id: 1, type: "SaveImage", widgets: {}, inputs: [], outputs: [] }],
+      }),
+    ).toBeNull();
+  });
+
+  it("falls back to graph_get_state when graph_serialize is an unknown command", async () => {
+    const sent: string[] = [];
+    const ctx = {
+      tabId: "t",
+      ensureReachable: () => {},
+      bridge: {
+        send: async (cmd: { cmd: string }) => {
+          sent.push(cmd.cmd);
+          if (cmd.cmd === "graph_serialize") {
+            throw new Error('Unknown command "graph_serialize"');
+          }
+          if (cmd.cmd === "graph_get_state") {
+            return {
+              nodes: [
+                { id: 1, type: "SaveImage", widgets: { filename_prefix: "out" }, inputs: [], outputs: [] },
+              ],
+            };
+          }
+          return {};
+        },
+      },
+    } as unknown as PanelToolCtx;
+    const wf = (await __panelToolsTestHooks.resolveWorkflowInput({}, ctx)) as {
+      nodes: Array<{ type: string }>;
+    };
+    expect(sent).toContain("graph_serialize");
+    expect(sent).toContain("graph_get_state");
+    expect(wf.nodes[0].type).toBe("SaveImage");
+  });
+
+  it("surfaces the actionable error when neither serialize nor state is available", async () => {
+    const ctx = {
+      tabId: "t",
+      ensureReachable: () => {},
+      bridge: {
+        send: async (cmd: { cmd: string }) => {
+          throw new Error(`Unknown command "${cmd.cmd}"`);
+        },
+      },
+    } as unknown as PanelToolCtx;
+    await expect(
+      __panelToolsTestHooks.resolveWorkflowInput({}, ctx),
+    ).rejects.toThrow(/pass pack, path, or graph/);
+  });
+
+  it("does NOT fall back when allowStateFallback is false (flatten/slice keep the actionable error)", async () => {
+    const sent: string[] = [];
+    const ctx = {
+      tabId: "t",
+      ensureReachable: () => {},
+      bridge: {
+        send: async (cmd: { cmd: string }) => {
+          sent.push(cmd.cmd);
+          throw new Error('Unknown command "graph_serialize"');
+        },
+      },
+    } as unknown as PanelToolCtx;
+    await expect(
+      __panelToolsTestHooks.resolveWorkflowInput({}, ctx, false),
+    ).rejects.toThrow(/pass pack, path, or graph/);
+    // the lossy state reconstruction must NOT run for flatten/slice
+    expect(sent).not.toContain("graph_get_state");
+  });
+
+  it("does NOT fall back on a genuine transport error (surfaces as-is)", async () => {
+    const sent: string[] = [];
+    const ctx = {
+      tabId: "t",
+      ensureReachable: () => {},
+      bridge: {
+        send: async (cmd: { cmd: string }) => {
+          sent.push(cmd.cmd);
+          throw new Error("disconnected mid-command — genuinely gone");
+        },
+      },
+    } as unknown as PanelToolCtx;
+    await expect(
+      __panelToolsTestHooks.resolveWorkflowInput({}, ctx),
+    ).rejects.toThrow(/Couldn't capture the live canvas/);
+    // never attempted the state fallback for a non-unknown-command failure
+    expect(sent).not.toContain("graph_get_state");
+  });
+});

@@ -317,6 +317,403 @@ describe("convertUiToApi — serialized-widget nodes (has_serialized_properties)
   });
 });
 
+describe("convertUiToApi — combined-type widget (issue #193, LTXVEmptyLatentAudio)", () => {
+  // Real /object_info: frame_rate is declared with the COMBINED type "FLOAT,INT"
+  // (accepts either) plus a widgetType hint. Before the fix isWidgetInput only
+  // matched the exact scalar types, so frame_rate was treated as a LINK input,
+  // dropped from the widget list, and batch_size stole frame_rate's slot value
+  // while frame_rate fell back to its default (25).
+  const LTXV_INFO = {
+    LTXVEmptyLatentAudio: {
+      input: {
+        required: {
+          frames_number: ["INT", { default: 97 }],
+          frame_rate: ["FLOAT,INT", { default: 25, widgetType: "FLOAT" }],
+          batch_size: ["INT", { default: 1 }],
+          audio_vae: ["VAE", {}],
+        },
+      },
+      input_order: {
+        required: ["frames_number", "frame_rate", "batch_size", "audio_vae"],
+      },
+    },
+  } as never;
+
+  function ltxvGraph() {
+    return {
+      nodes: [
+        {
+          id: 5,
+          type: "LTXVEmptyLatentAudio",
+          mode: 0,
+          // audio_vae is a real VAE link slot; the three scalars live in widgets_values
+          // in UI widget order: frames_number, frame_rate, batch_size.
+          inputs: [{ name: "audio_vae", type: "VAE", link: null }],
+          outputs: [{ name: "Latent", type: "LATENT", links: [] }],
+          widgets_values: [121, 24, 1],
+        },
+      ],
+      links: [],
+    } as never;
+  }
+
+  it("maps frames_number/frame_rate/batch_size positionally (frame_rate is a FLOAT,INT widget)", () => {
+    const { workflow } = convertUiToApi(ltxvGraph(), LTXV_INFO);
+    const inputs = (workflow["5"] as { inputs: Record<string, unknown> }).inputs;
+    expect(inputs.frames_number).toBe(121);
+    expect(inputs.frame_rate).toBe(24);
+    expect(inputs.batch_size).toBe(1);
+  });
+
+  // Cross-repo regression for panel#193 (same root cause, live-canvas strip):
+  // reproduce the EXACT reported symptom to prove it never recurs — the pre-fix
+  // converter emitted {frames_number:121, batch_size:24, frame_rate:25}, i.e.
+  // batch_size stole frame_rate's 24 and frame_rate fell back to its default 25.
+  it("panel#193 exact symptom: batch_size no longer steals frame_rate's value, frame_rate not defaulted", () => {
+    const { workflow } = convertUiToApi(ltxvGraph(), LTXV_INFO);
+    const inputs = (workflow["5"] as { inputs: Record<string, unknown> }).inputs;
+    // pre-fix (buggy) values must NOT appear
+    expect(inputs.batch_size).not.toBe(24);
+    expect(inputs.frame_rate).not.toBe(25);
+    // exactly the live-canvas values
+    expect(inputs).toMatchObject({ frames_number: 121, frame_rate: 24, batch_size: 1 });
+  });
+
+  // A widgetType hint alone (type is a bare link-shaped string) is enough to treat
+  // the slot as a positional scalar widget — guards the second recognition path in
+  // isScalarWidgetType so a hint-only frontend build can't reintroduce the shift.
+  it("recognizes a widgetType-hint-only scalar widget (no combined type)", () => {
+    const HINT_INFO = {
+      LTXVEmptyLatentAudio: {
+        input: {
+          required: {
+            frames_number: ["INT", { default: 97 }],
+            frame_rate: ["FLOAT", { default: 25, widgetType: "FLOAT" }],
+            batch_size: ["INT", { default: 1 }],
+            audio_vae: ["VAE", {}],
+          },
+        },
+        input_order: {
+          required: ["frames_number", "frame_rate", "batch_size", "audio_vae"],
+        },
+      },
+    } as never;
+    const { workflow } = convertUiToApi(ltxvGraph(), HINT_INFO);
+    const inputs = (workflow["5"] as { inputs: Record<string, unknown> }).inputs;
+    expect(inputs).toMatchObject({ frames_number: 121, frame_rate: 24, batch_size: 1 });
+  });
+});
+
+describe("convertUiToApi — name-keyed widgets carry dynamic-combo nested values (issue #384 fallback)", () => {
+  // The live-canvas fallback reconstructs widgets_values as a name->value OBJECT.
+  // A V3 dynamic combo's selected-option nested inputs must still be emitted as
+  // "<combo>.<nested>" from that object form (not only from the positional array).
+  const DYN_INFO = {
+    MyDynNode: {
+      input: {
+        required: {
+          method: [
+            "COMFY_DYNAMICCOMBO_V3",
+            {
+              options: [
+                { key: "rcas", inputs: { required: { strength: ["FLOAT", { default: 0.5 }] } } },
+                { key: "none", inputs: { required: {} } },
+              ],
+            },
+          ],
+        },
+      },
+      input_order: { required: ["method"] },
+    },
+  } as never;
+
+  it("emits <combo>.<nested> from object-form widgets_values", () => {
+    const graph = {
+      nodes: [
+        {
+          id: 7,
+          type: "MyDynNode",
+          mode: 0,
+          inputs: [],
+          outputs: [],
+          // object (name-keyed) form, as produced by the graph_get_state fallback
+          widgets_values: { method: "rcas", strength: 0.8 },
+        },
+      ],
+      links: [],
+    } as never;
+    const { workflow } = convertUiToApi(graph, DYN_INFO);
+    const inputs = (workflow["7"] as { inputs: Record<string, unknown> }).inputs;
+    expect(inputs.method).toBe("rcas");
+    expect(inputs["method.strength"]).toBe(0.8);
+  });
+
+  // An option's nested input may live under `inputs.optional` (e.g. an asset
+  // selector). The object-form fallback must merge required+optional like the
+  // positional branch, or it silently drops the optional nested value — a #504/#407
+  // regression on the live-canvas fallback path.
+  it("emits an OPTIONAL nested <combo>.<nested> from object-form widgets_values", () => {
+    const OPT_INFO = {
+      OptDynNode: {
+        input: {
+          required: {
+            method: [
+              "COMFY_DYNAMICCOMBO_V3",
+              {
+                options: [
+                  {
+                    key: "load",
+                    inputs: {
+                      required: { strength: ["FLOAT", { default: 0.5 }] },
+                      optional: { vae_name: [["a.safetensors", "b.safetensors"], {}] },
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        input_order: { required: ["method"] },
+      },
+    } as never;
+    const graph = {
+      nodes: [
+        {
+          id: 9,
+          type: "OptDynNode",
+          mode: 0,
+          inputs: [],
+          outputs: [],
+          widgets_values: { method: "load", strength: 0.6, vae_name: "b.safetensors" },
+        },
+      ],
+      links: [],
+    } as never;
+    const { workflow } = convertUiToApi(graph, OPT_INFO);
+    const inputs = (workflow["9"] as { inputs: Record<string, unknown> }).inputs;
+    expect(inputs["method.strength"]).toBe(0.6);
+    // the optional nested asset selector must survive (kept-declared, not dropped)
+    expect(inputs["method.vae_name"]).toBe("b.safetensors");
+  });
+});
+
+describe("convertUiToApi — name-keyed nested-leaf name collisions must FAIL CLOSED (P0)", () => {
+  // Two dynamic-combo parents each exposing a nested leaf of the SAME name. The
+  // flat name→value capture (graph_get_state fallback) can only hold ONE "strength"
+  // slot, so reading nested values by leaf name would push it onto BOTH controls —
+  // a silent wrong-value regression (the #504/#499 bug class).
+  const TWO_COMBO_INFO = {
+    TwoComboNode: {
+      input: {
+        required: {
+          first: [
+            "COMFY_DYNAMICCOMBO_V3",
+            { options: [{ key: "on", inputs: { required: { strength: ["FLOAT", { default: 0.5 }] } } }] },
+          ],
+          second: [
+            "COMFY_DYNAMICCOMBO_V3",
+            { options: [{ key: "on", inputs: { required: { strength: ["FLOAT", { default: 0.5 }] } } }] },
+          ],
+        },
+      },
+      input_order: { required: ["first", "second"] },
+    },
+  } as never;
+
+  function twoComboGraph(widgets: Record<string, unknown>) {
+    return {
+      nodes: [
+        { id: 3, type: "TwoComboNode", mode: 0, inputs: [], outputs: [], widgets_values: widgets },
+      ],
+      links: [],
+    } as never;
+  }
+
+  it("REFUSES a collapsed flat leaf shared by two dynamic-combo parents (never emits both to one value)", () => {
+    // pre-fix: BOTH first.strength AND second.strength came out 0.8 (collapsed).
+    const { workflow, warnings } = convertUiToApi(
+      twoComboGraph({ first: "on", second: "on", strength: 0.8 }),
+      TWO_COMBO_INFO,
+    );
+    const inputs = (workflow["3"] as { inputs: Record<string, unknown> }).inputs;
+    // must NOT silently collapse the same value onto both controls
+    expect(inputs["first.strength"]).toBeUndefined();
+    expect(inputs["second.strength"]).toBeUndefined();
+    expect(warnings.some((w) => /more than one control/i.test(w))).toBe(true);
+  });
+
+  it("uses PARENT-QUALIFIED keys when the capture provides them (both correct, distinct)", () => {
+    const { workflow } = convertUiToApi(
+      twoComboGraph({
+        first: "on",
+        second: "on",
+        "first.strength": 0.2,
+        "second.strength": 0.8,
+      }),
+      TWO_COMBO_INFO,
+    );
+    const inputs = (workflow["3"] as { inputs: Record<string, unknown> }).inputs;
+    expect(inputs["first.strength"]).toBe(0.2);
+    expect(inputs["second.strength"]).toBe(0.8);
+  });
+
+  it("REFUSES a nested leaf that shadows a top-level widget of the same name", () => {
+    const SHADOW_INFO = {
+      ShadowNode: {
+        input: {
+          required: {
+            strength: ["FLOAT", { default: 1 }], // top-level widget
+            method: [
+              "COMFY_DYNAMICCOMBO_V3",
+              { options: [{ key: "load", inputs: { required: { strength: ["FLOAT", { default: 0.5 }] } } }] },
+            ],
+          },
+        },
+        input_order: { required: ["strength", "method"] },
+      },
+    } as never;
+    const graph = {
+      nodes: [
+        {
+          id: 4,
+          type: "ShadowNode",
+          mode: 0,
+          inputs: [],
+          outputs: [],
+          widgets_values: { strength: 0.9, method: "load" },
+        },
+      ],
+      links: [],
+    } as never;
+    const { workflow, warnings } = convertUiToApi(graph, SHADOW_INFO);
+    const inputs = (workflow["4"] as { inputs: Record<string, unknown> }).inputs;
+    // The single flat "strength" slot can't be attributed to EITHER the top-level
+    // widget or the nested leaf, so BOTH destinations must fail closed — the
+    // top-level is left to its NODE DEFAULT (1), never the untrusted stored 0.9,
+    // and the nested leaf is not emitted at all.
+    expect(inputs.strength).not.toBe(0.9); // must not trust the collapsed value
+    expect(inputs.strength).toBe(1); // filled with the widget's declared default
+    expect(inputs["method.strength"]).toBeUndefined();
+    expect(warnings.some((w) => /more than one control/i.test(w))).toBe(true);
+  });
+
+  it("a top-level widget stays safe when the nested leaf is PARENT-QUALIFIED (not competing for the flat slot)", () => {
+    const SHADOW_INFO = {
+      ShadowNode: {
+        input: {
+          required: {
+            strength: ["FLOAT", { default: 1 }],
+            method: [
+              "COMFY_DYNAMICCOMBO_V3",
+              { options: [{ key: "load", inputs: { required: { strength: ["FLOAT", { default: 0.5 }] } } }] },
+            ],
+          },
+        },
+        input_order: { required: ["strength", "method"] },
+      },
+    } as never;
+    const graph = {
+      nodes: [
+        {
+          id: 6,
+          type: "ShadowNode",
+          mode: 0,
+          inputs: [],
+          outputs: [],
+          // nested value is parent-qualified, so the flat "strength" is unambiguously
+          // the top-level widget's.
+          widgets_values: { strength: 0.9, method: "load", "method.strength": 0.2 },
+        },
+      ],
+      links: [],
+    } as never;
+    const { workflow } = convertUiToApi(graph, SHADOW_INFO);
+    const inputs = (workflow["6"] as { inputs: Record<string, unknown> }).inputs;
+    expect(inputs.strength).toBe(0.9);
+    expect(inputs["method.strength"]).toBe(0.2);
+  });
+});
+
+describe("convertUiToApi — Set/Get bus resolution (issue #361)", () => {
+  const GETSET_INFO = {
+    CheckpointLoaderSimple: {
+      input: { required: { ckpt_name: [["a.ckpt", "b.ckpt"], {}] } },
+    },
+    KSampler: {
+      input: { required: { model: ["MODEL"], seed: ["INT"] } },
+    },
+  } as never;
+
+  // Loader(1).MODEL --link10--> SetNode(2) "mdl"
+  //   GetNode(3) "mdl" --link12--> KSampler(4).model       (resolved via the bus)
+  //   SetNode(2) passthrough output --link11--> KSampler(5).model  (direct off Set)
+  function busGraph() {
+    return {
+      nodes: [
+        {
+          id: 1,
+          type: "CheckpointLoaderSimple",
+          mode: 0,
+          inputs: [],
+          outputs: [{ name: "MODEL", type: "MODEL", links: [10] }],
+          widgets_values: ["a.ckpt"],
+        },
+        {
+          id: 2,
+          type: "SetNode",
+          mode: 0,
+          inputs: [{ name: "MODEL", type: "MODEL", link: 10 }],
+          outputs: [{ name: "*", type: "MODEL", links: [11] }],
+          widgets_values: ["mdl"],
+        },
+        {
+          id: 3,
+          type: "GetNode",
+          mode: 0,
+          inputs: [],
+          outputs: [{ name: "*", type: "MODEL", links: [12] }],
+          widgets_values: ["mdl"],
+        },
+        {
+          id: 4,
+          type: "KSampler",
+          mode: 0,
+          inputs: [{ name: "model", type: "MODEL", link: 12 }],
+          outputs: [],
+          widgets_values: [123],
+        },
+        {
+          id: 5,
+          type: "KSampler",
+          mode: 0,
+          inputs: [{ name: "model", type: "MODEL", link: 11 }],
+          outputs: [],
+          widgets_values: [456],
+        },
+      ],
+      links: [
+        [10, 1, 0, 2, 0, "MODEL"],
+        [11, 2, 0, 5, 0, "MODEL"],
+        [12, 3, 0, 4, 0, "MODEL"],
+      ],
+    } as never;
+  }
+
+  it("resolves a GetNode consumer through the bus to the real source", () => {
+    const { workflow } = convertUiToApi(busGraph(), GETSET_INFO);
+    expect(workflow["4"].inputs.model).toEqual(["1", 0]);
+    expect(workflow["4"].inputs.seed).toBe(123);
+  });
+
+  it("preserves a link taken directly off a SetNode passthrough output (was dropped)", () => {
+    const { workflow } = convertUiToApi(busGraph(), GETSET_INFO);
+    expect(workflow["5"].inputs.model).toEqual(["1", 0]);
+    // virtual bus nodes never appear in the prompt
+    expect(workflow["2"]).toBeUndefined();
+    expect(workflow["3"]).toBeUndefined();
+  });
+});
+
 describe("convertUiToApi — asset-combo fallback (issue #407)", () => {
   // Real Krea 2 manual-pack shape: node 54 is a UNETLoader whose saved
   // unet_name is the advertised Krea Turbo model, but the CONNECTED server only
