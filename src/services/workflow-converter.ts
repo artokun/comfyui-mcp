@@ -83,6 +83,21 @@ function isPositionalWidgetSpec(spec: unknown): boolean {
 }
 
 /**
+ * Model/asset file extensions that appear in ComfyUI loader combos
+ * (unet_name, ckpt_name, vae_name, lora_name, control_net_name, clip_name, …).
+ * Used to distinguish an asset-selection combo — where substituting a different
+ * installed file silently swaps the user's model — from a plain enum combo
+ * (sampler_name, a stale "Select to add Wildcard" UI helper) where falling back
+ * to the first option is harmless.
+ */
+const ASSET_FILE_RE =
+  /\.(safetensors|safetensor|sft|ckpt|pt|pt2|pth|bin|gguf|onnx|vae|pkl|npz|yaml)$/i;
+
+export function looksLikeAssetFilename(value: unknown): boolean {
+  return typeof value === "string" && ASSET_FILE_RE.test(value.trim());
+}
+
+/**
  * Widget names that are ALWAYS server-side MODEL asset selectors, even when their
  * options carry no file extension (e.g. DiffusersLoader.model_path lists
  * extensionless directory names). Substituting a different entry here silently

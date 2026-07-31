@@ -106,6 +106,182 @@ describe("generateLock", () => {
     });
   });
 
+  // Regression for #482: a UI-format saved workflow (nodes[]/links[] with
+  // `type` + widgets_values, NOT class_type + inputs) referencing native
+  // VAELoader (`vae_name`) + UNETLoader (`unet_name`) locked 0 models because
+  // extraction only understood API/prompt format. generateLock must normalize
+  // UI format first so both native loader models are captured and hashed.
+  it("captures native VAELoader + UNETLoader models from a UI-format workflow (#482)", async () => {
+    await mkdir(join(tempDir, "models", "vae"), { recursive: true });
+    await mkdir(join(tempDir, "models", "diffusion_models"), { recursive: true });
+    await mkdir(join(tempDir, "models", "upscale_models"), { recursive: true });
+    await writeFile(
+      join(tempDir, "models", "vae", "seedvr2_ema_vae_fp16.safetensors"),
+      "vae-bytes",
+    );
+    await writeFile(
+      join(tempDir, "models", "diffusion_models", "seedvr2_3b_fp8_e4m3fn.safetensors"),
+      "unet-bytes",
+    );
+    // A non-.safetensors asset extension (.pt2) must also be recognized.
+    await writeFile(join(tempDir, "models", "upscale_models", "4x_realesrgan.pt2"), "up-bytes");
+
+    // /object_info supplies the widget schema the UI→API converter needs to map
+    // each node's positional widgets_values to its named inputs.
+    getObjectInfo.mockResolvedValue({
+      VAELoader: {
+        python_module: "nodes",
+        input: { required: { vae_name: [["seedvr2_ema_vae_fp16.safetensors"], {}] } },
+        input_order: { required: ["vae_name"] },
+      },
+      UNETLoader: {
+        python_module: "nodes",
+        input: {
+          required: {
+            unet_name: [["seedvr2_3b_fp8_e4m3fn.safetensors"], {}],
+            weight_dtype: [["default", "fp8_e4m3fn"], { default: "default" }],
+          },
+        },
+        input_order: { required: ["unet_name", "weight_dtype"] },
+      },
+    });
+
+    // A ComfyUI-UI-saved graph: nodes[] with `type` + widgets_values, links[].
+    const uiWorkflow = {
+      last_node_id: 2,
+      last_link_id: 0,
+      nodes: [
+        {
+          id: 1,
+          type: "VAELoader",
+          pos: [0, 0],
+          widgets_values: ["seedvr2_ema_vae_fp16.safetensors"],
+          outputs: [{ name: "VAE", type: "VAE", links: null }],
+        },
+        {
+          id: 2,
+          type: "UNETLoader",
+          pos: [0, 200],
+          widgets_values: ["seedvr2_3b_fp8_e4m3fn.safetensors", "default"],
+          outputs: [{ name: "MODEL", type: "MODEL", links: null }],
+        },
+        {
+          id: 3,
+          type: "UpscaleModelLoader",
+          pos: [0, 400],
+          widgets_values: ["4x_realesrgan.pt2"],
+          outputs: [{ name: "UPSCALE_MODEL", type: "UPSCALE_MODEL", links: null }],
+        },
+      ],
+      links: [],
+    } as never;
+
+    const lock = await generateLock(uiWorkflow);
+
+    expect(lock.models).toHaveLength(3);
+    const upscale = lock.models.find((m) => m.name === "4x_realesrgan.pt2");
+    expect(upscale).toBeDefined();
+    expect(upscale!.type).toBe("upscale_models");
+    expect(upscale!.sha256).toMatch(/^[0-9a-f]{64}$/);
+    const vae = lock.models.find((m) => m.name === "seedvr2_ema_vae_fp16.safetensors");
+    const unet = lock.models.find((m) => m.name === "seedvr2_3b_fp8_e4m3fn.safetensors");
+    expect(vae).toBeDefined();
+    expect(vae!.type).toBe("vae");
+    expect(vae!.sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(unet).toBeDefined();
+    expect(unet!.type).toBe("diffusion_models");
+    expect(unet!.sha256).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  // A UI-saved graph may bypass/mute a loader (mode 2/4) or reference a native
+  // loader whose class isn't in /object_info. A whole-graph UI→API conversion
+  // would drop such nodes and silently omit their models from the lock; reading
+  // UI nodes directly must still capture them (provenance = every referenced
+  // model, regardless of mute state — matches the API-format walk).
+  it("still captures a bypassed loader's model in a UI-format workflow (#482)", async () => {
+    await mkdir(join(tempDir, "models", "vae"), { recursive: true });
+    await writeFile(join(tempDir, "models", "vae", "bypassed_vae.safetensors"), "vae-bytes");
+    getObjectInfo.mockResolvedValue({}); // loader class absent from /object_info
+
+    const uiWorkflow = {
+      nodes: [
+        {
+          id: 1,
+          type: "VAELoader",
+          mode: 4, // bypassed
+          pos: [0, 0],
+          widgets_values: ["bypassed_vae.safetensors"],
+        },
+      ],
+      links: [],
+    } as never;
+
+    const lock = await generateLock(uiWorkflow);
+    expect(lock.models).toHaveLength(1);
+    expect(lock.models[0]).toMatchObject({
+      name: "bypassed_vae.safetensors",
+      type: "vae",
+    });
+    expect(lock.models[0].sha256).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  // A loader nested inside a subgraph definition (definitions.subgraphs[].nodes)
+  // must also be captured — otherwise a component's model silently vanishes from
+  // the lock. The top-level subgraph INSTANCE (type = the def's UUID) is
+  // structural and must NOT be treated as a real node.
+  it("captures a loader nested inside a UI subgraph definition, and does NOT treat the instance UUID as a real node (#482)", async () => {
+    await mkdir(join(tempDir, "models", "vae"), { recursive: true });
+    await writeFile(join(tempDir, "models", "vae", "nested_vae.safetensors"), "vae-bytes");
+
+    // Give the subgraph-INSTANCE UUID a (bogus) custom-pack origin. If the walk
+    // wrongly treated the structural instance as a real node, this phantom pack
+    // would be recorded in node_packs. The skip must keep it out.
+    const instanceId = "1111aaaa-2222-bbbb-3333-cccc4444dddd";
+    getObjectInfo.mockResolvedValue({
+      VAELoader: { python_module: "nodes" },
+      [instanceId]: { python_module: "custom_nodes.PhantomPack.foo" },
+    });
+    await mkdir(join(tempDir, "custom_nodes", "PhantomPack", ".git"), { recursive: true });
+    await writeFile(
+      join(tempDir, "custom_nodes", "PhantomPack", ".git", "HEAD"),
+      "feedface0000000000000000000000000000face\n",
+    );
+
+    const uiWorkflow = {
+      nodes: [
+        // A subgraph instance: its `type` is the definition id (a UUID). Not a
+        // real node — must be skipped, not mistaken for a class_type/loader.
+        { id: 10, type: instanceId, pos: [0, 0] },
+      ],
+      links: [],
+      definitions: {
+        subgraphs: [
+          {
+            id: instanceId,
+            name: "MyComponent",
+            nodes: [
+              {
+                id: 1,
+                type: "VAELoader",
+                pos: [0, 0],
+                widgets_values: ["nested_vae.safetensors"],
+              },
+            ],
+            links: [],
+          },
+        ],
+      },
+    } as never;
+
+    const lock = await generateLock(uiWorkflow);
+    expect(lock.models).toHaveLength(1);
+    expect(lock.models[0]).toMatchObject({ name: "nested_vae.safetensors", type: "vae" });
+    expect(lock.models[0].sha256).toMatch(/^[0-9a-f]{64}$/);
+    // The structural instance UUID must never surface as a custom pack.
+    expect(lock.node_packs.map((p) => p.id)).not.toContain("PhantomPack");
+    expect(lock.node_packs).toHaveLength(0);
+  });
+
   it("marks missing models with `missing: true` instead of failing", async () => {
     getObjectInfo.mockResolvedValue({
       CheckpointLoaderSimple: { python_module: "nodes" },

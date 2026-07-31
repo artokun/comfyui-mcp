@@ -84,6 +84,50 @@ export function registerGenerateAudioTool(server: McpServer): void {
         .describe(
           "TextEncodeAceStepAudio1.5 cfg_scale — text encoder guidance scale (ACE only, default: 2)",
         ),
+      bpm: z
+        .number()
+        .int()
+        .min(10)
+        .max(300)
+        .optional()
+        .describe("TextEncodeAceStepAudio1.5 tempo in beats per minute (ACE only, 10-300, default: 120)"),
+      timesignature: z
+        .enum(["2", "3", "4", "6"])
+        .optional()
+        .describe("TextEncodeAceStepAudio1.5 time signature (ACE only, one of '2'/'3'/'4'/'6', default: '4')"),
+      temperature: z
+        .number()
+        .min(0)
+        .max(2)
+        .optional()
+        .describe("TextEncodeAceStepAudio1.5 LLM sampling temperature (ACE only, 0-2, default: 0.85)"),
+      top_p: z
+        .number()
+        .min(0)
+        .max(2000)
+        .optional()
+        .describe("TextEncodeAceStepAudio1.5 LLM top-p nucleus sampling (ACE only, 0-2000, default: 0.9)"),
+      top_k: z
+        .number()
+        .int()
+        .min(0)
+        .max(100)
+        .optional()
+        .describe("TextEncodeAceStepAudio1.5 LLM top-k sampling (ACE only, 0-100, default: 0 = disabled)"),
+      min_p: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe("TextEncodeAceStepAudio1.5 LLM min-p sampling (ACE only, 0-1, default: 0)"),
+      generate_audio_codes: z
+        .boolean()
+        .optional()
+        .describe("TextEncodeAceStepAudio1.5 — generate audio codes via the LLM (ACE only, default: true)"),
+      audio_quality: z
+        .enum(["V0", "128k", "320k"])
+        .optional()
+        .describe("SaveAudioMP3 bitrate/quality (ACE only, one of 'V0'/'128k'/'320k', default: '320k')"),
 
       // Stable Audio 3 specific
       checkpoint: z

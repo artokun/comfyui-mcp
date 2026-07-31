@@ -439,6 +439,7 @@ export function registerSkillsAccessTools(server: McpServer): void {
       try {
         traceToolCall("check_workflow_runtime", { pack: args.pack });
         let graph: unknown;
+        let bundledLocalPack = false;
         if (args.pack) {
           const wfFile = resolvePackWorkflowFile(args.pack);
           if (!wfFile) {
@@ -454,6 +455,10 @@ export function registerSkillsAccessTools(server: McpServer): void {
             };
           }
           graph = JSON.parse(readFileSync(wfFile, "utf8"));
+          // Bundled packs are guaranteed local/free (list_packs contract). Trust
+          // that so an uninstalled custom node doesn't read back as "unknown" and
+          // wrongly demand a paid-credits confirmation (#464).
+          bundledLocalPack = true;
         } else if (args.graph != null) {
           graph = typeof args.graph === "string" ? JSON.parse(args.graph) : args.graph;
         } else {
@@ -472,7 +477,7 @@ export function registerSkillsAccessTools(server: McpServer): void {
         // return SOMETHING useful even if the live /object_info is unreachable.
         const classTypes = extractWorkflowClassTypes(graph);
         try {
-          const runtime = await checkWorkflowRuntime(graph);
+          const runtime = await checkWorkflowRuntime(graph, undefined, { bundledLocalPack });
           const guidance =
             runtime.runtime === "local"
               ? "Local-GPU / free — every node runs on the user's own GPU, no paid credits."
