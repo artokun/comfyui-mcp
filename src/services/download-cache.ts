@@ -653,6 +653,17 @@ export interface DownloadCacheOptions {
    *  misattribute it to another job (#467). Not called on a coalesced/cache-hit
    *  path (no physical resume happened). */
   onResume?: ResumeReporter;
+  /** Per-download abort signal (#515), threaded into the fetch + stream pipeline so
+   *  cancel_download aborts exactly this transfer. On abort the partial is left on
+   *  disk (resumable) and is NEVER renamed to the destination — no false-complete. */
+  signal?: AbortSignal;
+  /** Fired SYNCHRONOUSLY the instant the completed, validated file is renamed into its
+   *  destination (#515). The job commits "done" here — BEFORE any later await (LRU
+   *  eviction, stat) — so there is NO window where the file exists at the destination
+   *  yet the job still reads "downloading" and a cancel could falsely mark it cancelled.
+   *  Not fired for the remote Manager path (no local rename); that commits done when
+   *  downloadModel returns. */
+  onLanded?: (targetPath: string) => void;
 }
 
 export interface DownloadCacheResult {
@@ -821,7 +832,12 @@ async function streamUrlToFile(
    *  than finalized as a corrupt model under a false success (#473). Empty ⇒ no
    *  payload validation (unknown/non-model destination). */
   modelExt = "",
+  /** Per-download abort signal (#515): passed to fetch AND the write pipeline so a
+   *  cancel aborts the in-flight transfer promptly; the partial is left on disk. */
+  signal?: AbortSignal,
 ): Promise<string> {
+  // Fail fast if we were cancelled before any bytes moved — no request, no partial.
+  if (signal?.aborted) throw new DOMException("The download was cancelled.", "AbortError");
   if (supportsCloudDownload(url)) {
     // Cloud downloaders (S3/Azure) don't range-resume — they overwrite the target.
     // If a partial exists it's being discarded; surface that (#467) instead of a
@@ -847,7 +863,13 @@ async function streamUrlToFile(
       );
       onResume?.({ outcome: "declined:full-response", discardedBytes: resumeFromBytes, discarded: true });
     }
-    await downloadCloudUrlToFile(url, targetPath, storageAuth);
+    await downloadCloudUrlToFile(url, targetPath, storageAuth, signal);
+    // INTEGRITY BACKSTOP (#515): the S3/Azure SDKs may not honor the abort promptly
+    // (or at all), so a cancel that arrived mid-transfer could let the cloud download
+    // run to completion. If we were cancelled, throw BEFORE the size/payload checks
+    // and the caller's rename/materialize — so a cancelled cloud transfer is NEVER
+    // finalized as a complete file (the partial is left in the cache dir, unrenamed).
+    if (signal?.aborted) throw new DOMException("The download was cancelled.", "AbortError");
     // #343 edge: the S3/Azure path bypasses the HTTP size gate below. The cloud
     // downloaders verify their own Content-Length (truncation), but a stream
     // that yielded ZERO bytes can still resolve cleanly — backstop it here so a
@@ -976,7 +998,7 @@ async function streamUrlToFile(
   for (let redirectCount = 0; ; redirectCount += 1) {
     res = await fetchOrThrow(
       currentUrl,
-      { headers: currentHeaders, redirect: "manual" },
+      { headers: currentHeaders, redirect: "manual", signal },
       currentUrl === url ? logUrl : redactUrlForLogs(currentUrl),
     );
     if (res.status < 300 || res.status >= 400) break;
@@ -1414,7 +1436,7 @@ async function streamUrlToFile(
 
   // No progress wanted (internal/cache caller, or not under the panel) → straight pipe.
   if (!progress) {
-    await pipeline(nodeStream, fileStream);
+    await pipeline(nodeStream, fileStream, { signal });
     await assertComplete();
     await assertModelPayload();
     // Complete: the validator sidecar is only needed to guard a resume, so drop it.
@@ -1449,7 +1471,7 @@ async function streamUrlToFile(
     },
   });
   try {
-    await pipeline(nodeStream, counter, fileStream);
+    await pipeline(nodeStream, counter, fileStream, { signal });
     await assertComplete();
     await assertModelPayload();
     if (resumable) await safeRm(validatorSidecar);
@@ -1457,7 +1479,11 @@ async function streamUrlToFile(
     emit("done", true);
     return responseContentType;
   } catch (err) {
-    emit("error", true);
+    // On a user cancel (#515) the abort left a resumable .partial on disk. Do NOT emit
+    // an "error" row for it, and do NOT clear the row here: this cache layer has no
+    // registry context, and a coalesced sibling may share this progress row. The JOB
+    // layer (finalizeCancelled) clears it registry-aware. Only a genuine failure emits.
+    if (!signal?.aborted) emit("error", true);
     throw err;
   }
 }
@@ -1470,6 +1496,7 @@ async function downloadIntoCache(
   progress?: ProgressMeta,
   onResume?: ResumeReporter,
   modelExt = "",
+  signal?: AbortSignal,
 ): Promise<string> {
   // Representation-aware identity (#467): a same-URL download with different HTTP
   // auth headers OR different cloud (S3/Azure) credentials gets its OWN cache file,
@@ -1482,6 +1509,21 @@ async function downloadIntoCache(
   // of its own — the decision is reported to the job that actually runs the
   // stream (#467). This is inherent to the callback model: onResume is not passed
   // to the shared promise, so a coalesced caller simply awaits the same result.
+  //
+  // CANCEL SEMANTICS across coalescing (#515): two DIFFERENT-destination jobs for the
+  // same URL+auth are distinct jobs (distinct AbortControllers) but share ONE physical
+  // stream here (the first caller's, keyed by cache identity). This shared stream binds
+  // the FIRST caller's signal. Integrity is preserved in every case:
+  //  - Cancelling the stream OWNER aborts the shared stream; the other (uncancelled)
+  //    caller's promise rejects, and since ITS signal is not aborted, downloadWithCache
+  //    falls back to a fresh direct download and still completes correctly.
+  //  - Cancelling a COALESCED caller does not abort the shared stream (it keeps running
+  //    for the owner), but that caller's own commit guard (its aborted signal, checked
+  //    in downloadModel before the done row / return) refuses to finalize — so it is
+  //    never reported as complete.
+  // The deliberate trade-off is prompt stream-abort for the common SOLE-caller case at
+  // the cost of a rare redundant re-download when a shared owner is cancelled; no caller
+  // can ever false-complete or be corrupted by another's cancel.
   if (existing) return existing;
 
   const promise = (async () => {
@@ -1597,6 +1639,7 @@ async function downloadIntoCache(
         true, // resumable: cache partials use the .partial + If-Range resume handshake
         onResume,
         modelExt,
+        signal,
       );
       await downloadCacheFs.rename(partial, target);
       await touch(target);
@@ -1682,9 +1725,27 @@ function isHardlinkUnsupported(code: unknown): boolean {
  *  EEXIST — ONLY then do we move the destination ASIDE and swap. Any OTHER rename
  *  error (ENOENT, EIO, EXDEV, …) must NOT touch a valid existing destination (#467):
  *  clean our temp and propagate. */
-async function renameTempOverDestination(tmp: string, targetPath: string): Promise<void> {
+async function renameTempOverDestination(
+  tmp: string,
+  targetPath: string,
+  /** Fired SYNCHRONOUSLY the instant the destination rename succeeds — BEFORE any
+   *  further await (e.g. Windows backup cleanup) — so the job can commit "done" with no
+   *  window where the file is at its destination yet the job still reads "downloading"
+   *  and a cancel could falsely mark it cancelled (#515). */
+  onLanded?: (targetPath: string) => void,
+  /** Abort signal (#515). Checked before the atomic replace AND (Windows path) after the
+   *  destination is moved aside but before the swap — so a cancel that lands during the
+   *  backup move restores the original and bails instead of swapping the temp in. */
+  signal?: AbortSignal,
+): Promise<void> {
+  // Cancelled before the swap — leave the destination untouched (the temp is cleaned up).
+  if (signal?.aborted) {
+    await downloadCacheFs.rm(tmp, { force: true }).catch(() => undefined);
+    throw new DOMException("The download was cancelled.", "AbortError");
+  }
   try {
     await downloadCacheFs.rename(tmp, targetPath);
+    onLanded?.(targetPath); // landed (POSIX atomic replace) — commit done before returning
     return;
   } catch (err) {
     const code = (err as NodeJS.ErrnoException)?.code;
@@ -1707,8 +1768,32 @@ async function renameTempOverDestination(tmp: string, targetPath: string): Promi
     } catch {
       /* destination may not exist — nothing to move aside */
     }
+    // A cancel that landed WHILE we moved the old destination aside must NOT swap the
+    // temp in — restore the original and bail, so a cancelled download never lands its
+    // file over the destination (#515). The temp is cleaned up.
+    if (signal?.aborted) {
+      await downloadCacheFs.rm(tmp, { force: true }).catch(() => undefined);
+      if (backedUp) {
+        const restored = await downloadCacheFs
+          .rename(backup, targetPath)
+          .then(() => true)
+          .catch(() => false);
+        if (!restored) {
+          throw new ModelError(
+            `Download cancelled but the previous file could not be restored — it is PRESERVED at ` +
+              `"${backup}"; move it back to "${targetPath}" manually.`,
+            { url: targetPath },
+          );
+        }
+      }
+      throw new DOMException("The download was cancelled.", "AbortError");
+    }
     try {
       await downloadCacheFs.rename(tmp, targetPath);
+      // Swapped in — the file is at its destination. Commit done NOW, before the backup
+      // cleanup await, so a cancel during that await can't falsely mark a landed file
+      // cancelled (#515).
+      onLanded?.(targetPath);
       if (backedUp) await downloadCacheFs.rm(backup, { force: true }).catch(() => undefined);
     } catch (e) {
       await downloadCacheFs.rm(tmp, { force: true }).catch(() => undefined);
@@ -1736,8 +1821,15 @@ const MATERIALIZE_TEMP_ATTEMPTS = 5;
 async function materializeCacheFile(
   cachePath: string,
   targetPath: string,
+  signal?: AbortSignal,
+  onLanded?: (targetPath: string) => void,
 ): Promise<"hardlink" | "copy"> {
-  if (resolve(cachePath) === resolve(targetPath)) return "hardlink";
+  if (resolve(cachePath) === resolve(targetPath)) {
+    // The download streamed directly to the destination (cache === target) — it is
+    // already on disk; commit "done" synchronously (#515).
+    onLanded?.(targetPath);
+    return "hardlink";
+  }
 
   // Materialize ATOMICALLY into an UNGUESSABLE, EXCLUSIVELY-created temp, then
   // rename over targetPath — never write directly at targetPath, and never reuse a
@@ -1773,7 +1865,19 @@ async function materializeCacheFile(
       }
       mode = "copy";
     }
-    await renameTempOverDestination(tmp, targetPath);
+    // FINAL CANCEL GUARD (#515): the temp is built but NOT yet swapped in. If this
+    // caller was cancelled, remove the temp and bail WITHOUT replacing the destination
+    // — so a cancelled download never lands its target even if the abort arrived during
+    // materialization. (The cache entry itself is untouched — the temp was our own.)
+    if (signal?.aborted) {
+      await downloadCacheFs.rm(tmp, { force: true }).catch(() => undefined);
+      throw new DOMException("The download was cancelled.", "AbortError");
+    }
+    // onLanded fires INSIDE renameTempOverDestination the instant the destination rename
+    // succeeds (before any Windows backup cleanup await), closing the landed→return
+    // window entirely; the signal lets it also abort the Windows swap after the backup
+    // move (#515).
+    await renameTempOverDestination(tmp, targetPath, onLanded, signal);
     return mode;
   }
 }
@@ -1819,6 +1923,7 @@ export async function downloadUrlToFile(
   storageAuth: CloudStorageAuth = {},
   progress?: ProgressMeta,
   modelExt = extname(targetPath),
+  signal?: AbortSignal,
 ): Promise<void> {
   await streamUrlToFile(
     url,
@@ -1831,6 +1936,7 @@ export async function downloadUrlToFile(
     false,
     undefined,
     modelExt,
+    signal,
   );
 }
 
@@ -1852,7 +1958,14 @@ export async function downloadWithCache(
       options.progress,
       options.onResume,
       modelExt,
+      options.signal,
     );
+    // CANCEL GUARD (#515): a COALESCED caller (or a CACHE HIT) reaches here without
+    // ever streaming — it awaited another job's shared physical download. If THIS
+    // caller was cancelled meanwhile, it must NOT materialize its destination: bail
+    // BEFORE validation/materialization so a cancelled download never lands a completed
+    // file at its models path (which we'd then misreport as "cancelled, partial left").
+    if (options.signal?.aborted) throw new DOMException("The download was cancelled.", "AbortError");
     // Validate the CACHE FILE itself before materializing it to this destination —
     // this is the authoritative per-caller gate (#473). It covers four cases the
     // stream-time check can't: (1) a CACHE HIT that skipped streaming entirely,
@@ -1884,7 +1997,12 @@ export async function downloadWithCache(
         if (neutralized) await safeRm(cacheCtSidecar(cachePath));
       },
     });
-    const materializedBy = await materializeCacheFile(cachePath, options.targetPath);
+    const materializedBy = await materializeCacheFile(
+      cachePath,
+      options.targetPath,
+      options.signal,
+      options.onLanded,
+    );
     await evictLruIfNeeded();
     return {
       targetPath: options.targetPath,
@@ -1894,6 +2012,10 @@ export async function downloadWithCache(
     };
   } catch (err) {
     if (err instanceof ModelError) throw err;
+    // A user cancel (#515) aborted the transfer — do NOT fall back to a direct
+    // download (it would immediately re-abort). Propagate so the job records a
+    // clean cancellation; the resumable .partial is left in the cache dir.
+    if (options.signal?.aborted) throw err;
     logger.warn("Download cache unavailable; falling back to direct download", {
       url: logUrl,
       error: err instanceof Error ? err.message : String(err),
@@ -1916,8 +2038,19 @@ export async function downloadWithCache(
         options.storageAuth,
         options.progress,
         modelExt,
+        options.signal,
       );
-      await renameTempOverDestination(tmp, options.targetPath);
+      // PRE-RENAME CANCEL GUARD (#515), mirroring the cache-path materialize guard: a
+      // cancel that arrived during the post-stream validation lets the stream return
+      // normally, but we must NOT swap the temp into the destination — bail so a
+      // cancelled download never lands its target here either. (An abort DURING the
+      // un-interruptible rename lands a complete, validated file → the job reports done,
+      // consistent with the invariant.) The temp is removed by the catch below.
+      if (options.signal?.aborted) throw new DOMException("The download was cancelled.", "AbortError");
+      // onLanded fires inside renameTempOverDestination at the successful rename (before
+      // any backup-cleanup await) — commits "done" with no landed→return window; the
+      // signal also aborts the Windows swap after the backup move (#515).
+      await renameTempOverDestination(tmp, options.targetPath, options.onLanded, options.signal);
     } catch (e) {
       await downloadCacheFs.rm(tmp, { force: true }).catch(() => undefined);
       throw e;

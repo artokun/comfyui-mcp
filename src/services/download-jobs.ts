@@ -24,6 +24,17 @@ import {
 } from "./model-resolver.js";
 import type { DownloadAuth } from "./download-auth.js";
 import type { ResumeDiagnostic } from "./download-resume-diag.js";
+import { ModelError } from "../utils/errors.js";
+import {
+  persistDownloadJob,
+  readPersistedDownloadJob,
+  listPersistedDownloadJobs,
+  findPersistedDownloadJob,
+  clearDownloadProgress,
+  PERSIST_OWNER,
+  PERSISTED_INFLIGHT_STALE_MS,
+  type PersistedDownloadJob,
+} from "./download-progress.js";
 import { logger } from "../utils/logger.js";
 
 export interface DownloadJob {
@@ -31,11 +42,18 @@ export interface DownloadJob {
    *  fetched to two different targets is two separately-pollable jobs
    *  (download_status(id) resolves each independently). Also the registry key. */
   id: string;
-  /** The panel tray / progress-file id — a hash of the SOURCE URL only, matching
-   *  the row the streaming download writes (readDownloadProgress keys on this).
-   *  Kept separate from `id` so distinct-destination jobs still read their live
-   *  byte progress from the tray. */
+  /** The panel tray / progress-file id — a hash of the ORIGINAL source URL only.
+   *  STABLE for the life of the job and used to ADOPT this download by URL after a
+   *  reconnect (#529): findDownloadJob({url}) hashes the same original URL. Kept
+   *  separate from `id` so distinct-destination jobs still map to their URL. */
   trayId: string;
+  /** The id the PHYSICAL progress rows are actually written under — a hash of the
+   *  POST-auth/post-HF-rewrite request URL, reported by the writer (#515). Differs
+   *  from `trayId` only for query-auth or HF_ENDPOINT-rewritten URLs; equals it for
+   *  the common case. download_status byte display and cancel cleanup key on THIS id
+   *  (falling back to trayId when unset). Never used for URL adoption (that needs the
+   *  stable original-URL trayId). */
+  progressId?: string;
   /** This job's OWN resume decision (#467), reported by its physical download via
    *  a callback and stored here — so download_status surfaces exactly this job's
    *  outcome and never a stale/other job's. Absent when no resumable download ran
@@ -45,12 +63,25 @@ export interface DownloadJob {
   url: string;
   target_subfolder: string;
   filename?: string;
-  status: "downloading" | "done" | "error";
+  /** "cancelled" is a user-requested abort (#515): the stream was aborted, no
+   *  false-complete is reported, and the resumable .partial is left on disk. */
+  status: "downloading" | "done" | "error" | "cancelled";
   /** Absolute path once the file has landed. */
   path?: string;
   error?: string;
   started_at: number;
   finished_at?: number;
+  /** The auth-free destination key (local targetPath or canonical remote id) this
+   *  job serializes/persists under — surfaced so a reconnecting session can adopt
+   *  the same in-flight download by destination without starting a duplicate (#529). */
+  destKey?: string;
+  /** True when this download is DISPATCHED to a remote ComfyUI-Manager (server-side
+   *  fetch) rather than streamed to local disk. A "done" viaManager job means the
+   *  dispatch was ACCEPTED — NOT that the file has verifiably landed (Manager reports
+   *  its queue task done even on failure), and a cancel can't recall the server task.
+   *  download_status renders it as "dispatched (not verified here)" so it isn't
+   *  mistaken for a validated local completion. */
+  viaManager?: boolean;
   /** Lines produced by post-download work (trigger words, sidecar paths,
    *  not-a-model warnings). These used to be returned inline by the tool; once a
    *  download outlives its tool call they have to survive somewhere the agent
@@ -65,7 +96,19 @@ interface Entry {
    *  destination key when locally resolvable). Kept so a superseding job can
    *  unregister ALL of a stale entry's keys — no orphaned index rows. */
   keys: string[];
+  /** Per-download abort handle (#515). Its `signal` is threaded through
+   *  downloadModel → the fetch + stream pipeline, so `cancel_download` can abort
+   *  exactly THIS job's transfer without touching any other in-flight download. */
+  controller: AbortController;
+  /** While in flight, periodically re-persists the record so its `updated` stamp
+   *  acts as a liveness heartbeat — letting ANOTHER session tell a live download from
+   *  a crashed one when deciding whether to preserve a shared tray row (#515/#529). */
+  heartbeat?: ReturnType<typeof setInterval>;
 }
+
+/** How often an in-flight job re-persists its record (liveness heartbeat). Must stay
+ *  comfortably below PERSISTED_INFLIGHT_STALE_MS so a live download is always fresh. */
+const HEARTBEAT_MS = 15_000;
 
 // The in-flight registry is indexed under MULTIPLE keys per job so dedup is
 // ROUTE-INDEPENDENT: a repeated request finds the in-flight job whether or not the
@@ -365,7 +408,13 @@ export async function startDownloadJob(
     filename,
     status: "downloading",
     started_at: Date.now(),
+    destKey: serializeKey,
+    viaManager: dispatchToManager,
   };
+
+  // Per-download abort handle (#515). The signal is threaded through downloadModel
+  // into the fetch + stream pipeline, so cancel_download aborts exactly THIS job.
+  const controller = new AbortController();
 
   // Serialize behind any in-flight job writing the SAME destination (#467 P1-C) so
   // this job's download+materialize+onComplete run without a concurrent different-
@@ -376,15 +425,58 @@ export async function startDownloadJob(
   // would take down the process on a simple 404.
   // The physical download reports its resume decision straight onto THIS job — no
   // shared keyed map, so it can never be misattributed to another job (#467).
+  // Commit the DONE state. Invoked SYNCHRONOUSLY the instant the file is renamed into
+  // its destination (via the onLanded callback below) — before any later await — so
+  // there is NO window where the file exists at the destination yet the job still reads
+  // "downloading" (which a cancel would otherwise flip to "cancelled"). Idempotent and
+  // only advances a still-"downloading" job, so it never overrides a real terminal
+  // state. Reads status as the full union to dodge the closure's "downloading" narrowing.
+  const commitDone = (landedPath: string): void => {
+    if ((job.status as DownloadJob["status"]) !== "downloading") return;
+    job.path = landedPath;
+    job.status = "done";
+    job.finished_at = Date.now();
+    persistJobRecord(job);
+  };
   const settled = (async () => {
     // Wait for the prior same-destination job to fully finish (never fail THIS job
     // because that one errored — swallow its result).
     if (priorSameDest) await priorSameDest.catch(() => undefined);
     try {
-      const path = await downloadModel(url, targetSubfolder, filename, auth, dispatchToManager, (d) => {
-        job.resume = d;
-      });
-      job.path = path;
+      // A cancel that arrived before (or while waiting for) our turn makes downloadModel
+      // throw at its up-front abort guard → the catch records the cancellation. So there
+      // is no separate pre-start branch: the download either runs to a materialized file
+      // (done) or is aborted before the file lands (cancelled).
+      const path = await downloadModel(
+        url,
+        targetSubfolder,
+        filename,
+        auth,
+        dispatchToManager,
+        (d) => {
+          job.resume = d;
+        },
+        controller.signal,
+        (progressId) => {
+          // Record the id the tray rows are ACTUALLY written under (post-auth/HF
+          // rewrite) as job.progressId — WITHOUT touching job.trayId, which must stay
+          // the stable original-URL hash so URL reconnect adoption (#529) still
+          // resolves. download_status byte display and cancel cleanup key on
+          // progressId (falling back to trayId); it only differs for query-auth /
+          // mirror-rewritten URLs. Persist so a reconnecting session reads live bytes.
+          if (progressId && progressId !== job.progressId) {
+            job.progressId = progressId;
+            persistJobRecord(job);
+          }
+        },
+        // onLanded: fires the moment the local file is renamed into place → commit done
+        // synchronously, closing the rename→return window.
+        commitDone,
+      );
+      // Local paths already committed done via onLanded at the rename. The remote Manager
+      // dispatch has no local rename, so commit done here when it returns (dispatch
+      // accepted — the viaManager flag marks it as unverified in the tools). Idempotent.
+      commitDone(path);
       if (onComplete) {
         // Post-processing must not turn a landed file into a failed download —
         // the bytes are on disk either way, and reporting "error" here would
@@ -397,12 +489,32 @@ export async function startDownloadJob(
           ];
         }
       }
-      job.status = "done";
-      job.finished_at = Date.now();
     } catch (err: unknown) {
-      job.status = "error";
-      job.error = err instanceof Error ? err.message : String(err);
-      job.finished_at = Date.now();
+      // If the file ALREADY landed (onLanded committed done) a later throw — e.g. an LRU
+      // eviction hiccup after the rename — must NOT override a real completed download.
+      if ((job.status as DownloadJob["status"]) === "done") {
+        // keep done
+      } else if (controller.signal.aborted) {
+        // An abort that stopped the transfer BEFORE the file landed surfaces here as a
+        // rejected fetch/pipeline (or a guard throw) — a clean cancellation, never an
+        // "error" and never a false success.
+        finalizeCancelled(job);
+        // …but if the cancellation cleanup threw a recovery-critical ModelError (e.g. the
+        // Windows backup of the PREVIOUS destination file could not be restored, so it's
+        // preserved under a random .bak path), surface that message on the job so
+        // download_status shows the recoverable path instead of masking it behind a plain
+        // "cancelled, resumable partial". (Ordinary cancellation throws an AbortError,
+        // which is NOT a ModelError, so it never sets this.)
+        if (err instanceof ModelError) job.error = err.message;
+      } else {
+        job.status = "error";
+        job.error = err instanceof Error ? err.message : String(err);
+        job.finished_at = Date.now();
+      }
+    } finally {
+      // Persist the terminal state so a reconnecting session sees the resolved
+      // outcome (#529) instead of a forever-"downloading" record.
+      persistJobRecord(job);
     }
   })();
 
@@ -416,32 +528,298 @@ export async function startDownloadJob(
   // Index under EVERY key (deduped) so any of them adopts this one writer. Uses the
   // entry-scoped registerKey guard so a fresh registration can never overwrite a row
   // still owned by a different, live writer (rule 3).
-  const entry: Entry = { job, settled, keys: [] };
+  const entry: Entry = { job, settled, keys: [], controller };
   for (const k of new Set(lookupKeys)) registerKey(entry, k);
+  // Persist the (downloading) record so a session that reconnects while this is in
+  // flight can still resolve/adopt it by id or URL/destination (#529).
+  persistJobRecord(job);
+  // Liveness heartbeat: while in flight, refresh the persisted record's `updated`
+  // stamp so ANOTHER session can distinguish this LIVE download from a crashed one
+  // (its heartbeat stops) when deciding whether to preserve a shared tray row. Cheap
+  // (a small write every 15s, only under the panel where persistence is active) and
+  // unref'd so it never keeps the process alive.
+  const heartbeat = setInterval(() => {
+    if (job.status === "downloading") persistJobRecord(job);
+  }, HEARTBEAT_MS);
+  if (typeof heartbeat.unref === "function") heartbeat.unref();
+  entry.heartbeat = heartbeat;
+  void settled.finally(() => clearInterval(heartbeat));
   return entry;
+}
+
+/** Mark a job cancelled: never a false-complete, and drop its tray row. The
+ *  resumable .partial is deliberately LEFT on disk (a later download resumes it). */
+function finalizeCancelled(job: DownloadJob): void {
+  job.status = "cancelled";
+  if (job.finished_at === undefined) job.finished_at = Date.now();
+  // Remove the panel tray row so a cancelled download doesn't linger — but clear it
+  // ONLY when this job exclusively owns that physical row. Two subtleties:
+  //  - A job with no progressId never wrote a row (the writer reports progressId
+  //    BEFORE the first row), so there is nothing to clear.
+  //  - Same-URL siblings can SHARE one physical stream/row: a coalesced consumer (same
+  //    URL+auth, different destination) or a serialized same-auth sibling observes the
+  //    OWNER's progressId. Clearing it while ANOTHER in-flight job still uses it would
+  //    wipe that active job's live display. So skip the clear when any other in-flight
+  //    job shares this progressId; the last one out clears it. (trayId is deliberately
+  //    NOT a fallback — it's the original-URL hash siblings share even more broadly.)
+  if (!job.progressId) return;
+  const sharedByLocal = [...new Set(jobs.values())].some(
+    (e) =>
+      e.job !== job && e.job.status === "downloading" && e.job.progressId === job.progressId,
+  );
+  // Also honor a live sibling in ANOTHER session (#529): a persisted in-flight record
+  // written by a DIFFERENT session (owner ≠ this process's PERSIST_OWNER) that shares
+  // this progressId is another session's active download of the same URL — its tray row
+  // must not be wiped. Comparing by OWNER (not id) catches the case two sessions run the
+  // SAME logical download (identical deterministic id): they persist distinct
+  // owner-scoped files, so the other session's record is still seen here. This process's
+  // OWN persisted records (same owner) are excluded — they always correspond to an
+  // in-memory job already covered by the local scan above. If any live sibling exists in
+  // either store, leave the row for the last one out (or the orchestrator's dead-writer
+  // prune) to clear.
+  const now = Date.now();
+  const sharedByPersisted = listPersistedDownloadJobs().some(
+    (rec) =>
+      rec.owner !== PERSIST_OWNER &&
+      rec.status === "downloading" &&
+      rec.progressId === job.progressId &&
+      // Only a FRESH record counts as a live sibling — a crashed session's heartbeat
+      // stops, so its record goes stale and must NOT permanently suppress this sole
+      // job's cleanup (its tray row would otherwise linger). Bounded by the heartbeat
+      // interval so a genuinely-live foreign download is always seen as fresh.
+      now - (rec.updated ?? 0) < PERSISTED_INFLIGHT_STALE_MS,
+  );
+  if (!sharedByLocal && !sharedByPersisted) clearDownloadProgress(job.progressId);
+}
+
+/** Persist a job record to the cross-session store (progress dir), redacting the
+ *  URL. No-op outside the panel. Keeps the persisted copy in step with the job. */
+function persistJobRecord(job: DownloadJob): void {
+  persistDownloadJob({
+    id: job.id,
+    trayId: job.trayId,
+    progressId: job.progressId,
+    url: job.url,
+    target_subfolder: job.target_subfolder,
+    filename: job.filename,
+    status: job.status,
+    path: job.path,
+    error: job.error,
+    started_at: job.started_at,
+    finished_at: job.finished_at,
+    notes: job.notes,
+    dest_key: job.destKey,
+    via_manager: job.viaManager,
+    resume: job.resume,
+  });
+}
+
+/** Rebuild an in-memory DownloadJob view from a persisted record (#529 adoption
+ *  after a reconnect). It is a read-only snapshot — there is no live AbortController
+ *  in THIS process for a job another/previous session started, so it can be polled
+ *  by download_status but not cancelled from here. */
+function jobFromPersisted(rec: PersistedDownloadJob): DownloadJob {
+  return {
+    id: rec.id,
+    trayId: rec.trayId,
+    progressId: rec.progressId,
+    url: rec.url,
+    target_subfolder: rec.target_subfolder,
+    filename: rec.filename,
+    status: rec.status,
+    path: rec.path,
+    error: rec.error,
+    started_at: rec.started_at,
+    finished_at: rec.finished_at,
+    notes: rec.notes,
+    destKey: rec.dest_key,
+    viaManager: rec.via_manager,
+    resume: rec.resume as ResumeDiagnostic | undefined,
+  };
+}
+
+/** True when a FRESH foreign in-flight persisted record shares `id` but carries a
+ *  DIFFERENT trayId — a distinct concurrent physical download in ANOTHER session (two
+ *  distinct URLs resolving to the same dest+auth). The id alone can't disambiguate, so
+ *  a by-id lookup/cancel must decline rather than silently act on the local one.
+ *  Excludes this process's own records (same owner) and stale/dead ones (heartbeat). */
+function hasAmbiguousForeignSibling(id: string, localTrayId: string): boolean {
+  const now = Date.now();
+  return listPersistedDownloadJobs().some(
+    (rec) =>
+      rec.id === id &&
+      rec.trayId !== localTrayId &&
+      rec.owner !== PERSIST_OWNER &&
+      rec.status === "downloading" &&
+      now - (rec.updated ?? 0) < PERSISTED_INFLIGHT_STALE_MS,
+  );
 }
 
 export function getDownloadJob(id: string): DownloadJob | undefined {
   // The registry indexes each job under its request key and (when local) its
   // destination key; the public id is one of those, so a direct get resolves it.
-  return jobs.get(id)?.job;
+  const live = jobs.get(id)?.job;
+  if (live) {
+    // Cross-session ambiguity: a live foreign download shares this id with a DIFFERENT
+    // trayId. Don't silently report the local one — decline (same as the persisted path).
+    if (hasAmbiguousForeignSibling(id, live.trayId)) return undefined;
+    return live;
+  }
+  // #529: after a reconnect the in-memory registry is empty, but the download's
+  // record persists in the progress dir — resolve it there so an id from a prior
+  // session still reports instead of "no download with id …, tracked per session".
+  const persisted = readPersistedDownloadJob(id);
+  return persisted ? jobFromPersisted(persisted) : undefined;
+}
+
+/** Adopt an in-flight download by URL or destination after a reconnect (#529) —
+ *  so a caller can confirm a download is still running (and not start a duplicate)
+ *  even without the id. Prefers a LIVE in-memory job, then the persisted store.
+ *
+ *  URL matching is EXACT (query included): in-memory by raw url, persisted by the
+ *  trayId hash of the full url — so two distinct signed/versioned URLs are never
+ *  conflated (the persisted url is credential-redacted and can't be compared safely). */
+export function findDownloadJob(query: { url?: string; destKey?: string }): DownloadJob | undefined {
+  const trayId = query.url ? downloadIdFor(query.url) : undefined;
+  const destKey = query.destKey;
+  if (!trayId && !destKey) return undefined;
+
+  // Gather candidate IN-FLIGHT jobs from BOTH this process's registry AND the cross-
+  // session persisted store, deduped by id (a live in-memory copy wins over its
+  // persisted snapshot). The ambiguity guard must span BOTH stores: one session's live
+  // job for URL→destA plus another session's persisted in-flight job for URL→destB are
+  // two DISTINCT jobs for the same URL, and adopting either by URL alone would be a
+  // guess — so decline (the caller must use the exact id).
+  // Key candidates by (id, trayId): two distinct URLs to one dest+auth share an id but
+  // differ in trayId (distinct physical downloads), so id alone would wrongly collapse
+  // them and mask the ambiguity. A live in-memory copy wins over its persisted snapshot
+  // (same id+trayId key).
+  const keyOf = (id: string, tray: string): string => `${id}\n${tray}`;
+  const now = Date.now();
+  const inflightByKey = new Map<string, DownloadJob>();
+  for (const e of new Set(jobs.values())) {
+    if (e.job.status !== "downloading") continue;
+    if ((query.url && e.job.url === query.url) || (destKey && e.job.destKey === destKey)) {
+      inflightByKey.set(keyOf(e.job.id, e.job.trayId), e.job);
+    }
+  }
+  for (const rec of listPersistedDownloadJobs()) {
+    // Only FRESH in-flight records count as live candidates — a stale/dead record
+    // (crashed session, never reaped) must not inflate the ambiguity count and force a
+    // false "no download" (matching the persisted helpers' fresh-in-flight rule).
+    if (rec.status !== "downloading" || now - (rec.updated ?? 0) >= PERSISTED_INFLIGHT_STALE_MS) {
+      continue;
+    }
+    const key = keyOf(rec.id, rec.trayId);
+    if (inflightByKey.has(key)) continue;
+    if ((trayId && rec.trayId === trayId) || (destKey && rec.dest_key === destKey)) {
+      inflightByKey.set(key, jobFromPersisted(rec));
+    }
+  }
+  if (inflightByKey.size > 1) return undefined; // ambiguous across both stores
+  if (inflightByKey.size === 1) return [...inflightByKey.values()][0];
+
+  // No in-flight match anywhere — fall back to a single unambiguous SETTLED persisted
+  // record (for status reporting); findPersistedDownloadJob declines if ambiguous.
+  const persisted = findPersistedDownloadJob({ trayId, destKey });
+  return persisted ? jobFromPersisted(persisted) : undefined;
 }
 
 export function listDownloadJobs(): DownloadJob[] {
-  // One Entry is indexed under multiple keys — dedup by identity so a job appears
-  // once regardless of how many keys point at it.
+  // One Entry is indexed under multiple keys — dedup by identity so a job appears once
+  // regardless of how many keys point at it. Identity is (id, trayId), NOT id alone:
+  // two distinct URLs to one dest+auth share an id but are distinct physical downloads
+  // (different trayId), and both must be listed — download_status with no selector
+  // promises EVERY tracked download.
   const seen = new Set<Entry>();
-  const out: DownloadJob[] = [];
+  const keyOf = (j: DownloadJob): string => `${j.id}\n${j.trayId}`;
+  const byKey = new Map<string, DownloadJob>();
   for (const e of jobs.values()) {
     if (seen.has(e)) continue;
     seen.add(e);
-    out.push(e.job);
+    byKey.set(keyOf(e.job), e.job);
   }
-  return out.sort((a, b) => b.started_at - a.started_at);
+  // #529: fold in persisted records for jobs THIS session's registry doesn't hold
+  // (started before a reconnect), so download_status still lists in-flight downloads.
+  // A live in-memory job always wins over its persisted snapshot (same id+trayId).
+  for (const rec of listPersistedDownloadJobs()) {
+    const job = jobFromPersisted(rec);
+    const k = keyOf(job);
+    if (!byKey.has(k)) byKey.set(k, job);
+  }
+  return [...byKey.values()].sort((a, b) => b.started_at - a.started_at);
+}
+
+/**
+ * Cancel an in-flight download by id (#515): abort its stream and mark it
+ * cancelled. The abort unwinds the fetch + pipeline; the .partial is left on disk
+ * (resumable) and NEVER renamed to the destination, so nothing is reported as
+ * complete. Idempotent — cancelling an already-settled job just reports its state.
+ * Returns the resulting status plus whether this call performed the abort.
+ *
+ * Only a download owned by THIS process can be aborted (its AbortController lives
+ * here). A job resolvable only via the persisted store (started by another/previous
+ * session after a reconnect) cannot be aborted from here — reported as not-owned.
+ */
+export function cancelDownloadJob(id: string): {
+  found: boolean;
+  owned: boolean;
+  aborted: boolean;
+  /** The id denotes MORE than one concurrent physical download (a live foreign
+   *  session shares it with a different trayId) — declined, nothing was aborted. */
+  ambiguous?: boolean;
+  status?: DownloadJob["status"];
+  job?: DownloadJob;
+} {
+  const entry = jobs.get(id);
+  if (entry) {
+    const { job, controller } = entry;
+    // Cross-session ambiguity: a live foreign download shares this id with a DIFFERENT
+    // trayId. Aborting by id could act on the wrong logical download — decline so a
+    // cancel-by-id can never hit an unintended concurrent download (a #515 invariant).
+    if (job.status === "downloading" && hasAmbiguousForeignSibling(id, job.trayId)) {
+      return { found: true, owned: true, aborted: false, ambiguous: true, status: job.status, job };
+    }
+    if (job.status !== "downloading") {
+      // Already settled (done/error/cancelled) — idempotent no-op.
+      return { found: true, owned: true, aborted: false, status: job.status, job };
+    }
+    // Request the abort ONLY — do NOT set a synchronous terminal state here. The FINAL
+    // state is decided by the settled closure based on what actually happened on disk:
+    //   - the file already landed (its destination rename completed, so onLanded →
+    //     commitDone marks it DONE) — a validated complete file must never read
+    //     "cancelled"; OR
+    //   - the transfer was stopped before the file landed (downloadModel THROWS via the
+    //     stream abort / pre-materialize / pre-rename guards → the catch marks it
+    //     CANCELLED and cleans up the tray row + resumable partial).
+    // Setting "cancelled" synchronously here would LOSE the race where a rename has
+    // physically completed but its promise continuation (→ onLanded) hasn't run yet:
+    // commitDone only advances a still-"downloading" job, so a synchronous "cancelled"
+    // would strand a landed file as cancelled (#515 codex). The tool reports this as a
+    // best-effort request and points the caller at download_status for the resolved state.
+    if (!controller.signal.aborted) controller.abort();
+    return { found: true, owned: true, aborted: true, status: "downloading", job };
+  }
+  // Not in THIS process's registry. It may still exist in the persisted store
+  // (another/previous session owns the AbortController), which we can't abort here.
+  const persisted = readPersistedDownloadJob(id);
+  if (persisted) {
+    return {
+      found: true,
+      owned: false,
+      aborted: false,
+      status: persisted.status,
+      job: jobFromPersisted(persisted),
+    };
+  }
+  return { found: false, owned: false, aborted: false };
 }
 
 /** Test seam — the registry is process-global otherwise. */
 export function resetDownloadJobs(): void {
+  for (const e of new Set(jobs.values())) {
+    if (e.heartbeat) clearInterval(e.heartbeat);
+  }
   jobs.clear();
   destChains.clear();
 }

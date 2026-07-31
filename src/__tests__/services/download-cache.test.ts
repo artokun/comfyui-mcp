@@ -128,6 +128,98 @@ describe("downloadModel cache", () => {
     await expect(readFile(twoPath, "utf-8")).resolves.toBe("one network body");
   });
 
+  it("#515: a cancelled COALESCED caller never materializes its destination", async () => {
+    // A and B fetch the SAME url (→ one physical download, coalesced) to DIFFERENT
+    // destinations. B is cancelled while awaiting A's shared stream; when A finishes, B
+    // must bail BEFORE materializing — no completed file at B's models path.
+    let resolveFetch!: (r: Response) => void;
+    fetchMock.mockReturnValueOnce(
+      new Promise<Response>((res) => {
+        resolveFetch = res;
+      }),
+    );
+
+    const ctrlB = new AbortController();
+    // Start A first and let it become the physical-stream OWNER (fetch fired) before B
+    // joins, so B deterministically COALESCES onto A's stream (rather than the reverse).
+    const a = downloadModel(
+      "https://example.com/models/coalesce.safetensors",
+      "checkpoints",
+      "a.safetensors",
+    );
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const b = downloadModel(
+      "https://example.com/models/coalesce.safetensors",
+      "loras",
+      "b.safetensors",
+      undefined,
+      undefined,
+      undefined,
+      ctrlB.signal,
+    );
+    // Let B reach the coalesce point (await A's shared inflight promise).
+    await new Promise((r) => setTimeout(r, 10));
+    expect(fetchMock).toHaveBeenCalledTimes(1); // B did NOT start its own fetch
+    ctrlB.abort(); // cancel B while it awaits A's shared physical download
+    // Attach B's rejection expectation BEFORE resolving A, so B's rejection is never
+    // momentarily unhandled once A completes.
+    const bRejects = expect(b).rejects.toThrow();
+    resolveFetch(okResponse("real model bytes"));
+
+    const aPath = await a;
+    await bRejects;
+    // A landed; B did NOT (its destination was never materialized).
+    await expect(readFile(aPath, "utf-8")).resolves.toBe("real model bytes");
+    const bTarget = join(comfyDir, "models", "loras", "b.safetensors");
+    await expect(stat(bTarget)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("#515: aborting mid-stream rejects and never finalizes the target (integrity preserved)", async () => {
+    // A body that emits one chunk then STALLS forever, so we can abort it mid-transfer.
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new TextEncoder().encode("partial-bytes-on-disk"));
+      },
+      pull() {
+        return new Promise<void>(() => {}); // never resolves — the stream stalls
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    fetchMock.mockResolvedValueOnce(
+      new Response(body, {
+        status: 200,
+        statusText: "OK",
+        headers: { "content-length": "1000000" }, // far more than we ever send
+      }),
+    );
+
+    const controller = new AbortController();
+    const p = downloadModel(
+      "https://example.com/models/abortme.safetensors",
+      "checkpoints",
+      "abortme.safetensors",
+      undefined,
+      undefined,
+      undefined,
+      controller.signal,
+    );
+    // Let the stream begin, then abort it.
+    await new Promise((r) => setTimeout(r, 25));
+    controller.abort();
+
+    // The transfer rejects (aborted) — it is NOT reported as a successful download.
+    await expect(p).rejects.toThrow();
+    // The web body was cancelled by the aborted pipeline.
+    expect(cancelled).toBe(true);
+    // Integrity: the destination file was NEVER created — no truncated partial was
+    // renamed into place and reported as complete (#515/#343).
+    const target = join(comfyDir, "models", "checkpoints", "abortme.safetensors");
+    await expect(stat(target)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("falls back to copying when hardlink materialization fails", async () => {
     const linkSpy = vi
       .spyOn(downloadCacheFs, "link")

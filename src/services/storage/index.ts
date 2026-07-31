@@ -97,13 +97,14 @@ export async function downloadCloudUrlToFile(
   url: string,
   targetPath: string,
   auth: CloudStorageAuth = {},
+  signal?: AbortSignal,
 ): Promise<void> {
   if (isS3Url(url)) {
-    await downloadS3ToFile(url, targetPath, auth.s3);
+    await downloadS3ToFile(url, targetPath, auth.s3, signal);
     return;
   }
   if (isAzureBlobUrl(url)) {
-    await downloadAzureBlobToFile(url, targetPath);
+    await downloadAzureBlobToFile(url, targetPath, signal);
     return;
   }
   throw new ValidationError(

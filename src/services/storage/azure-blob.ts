@@ -137,15 +137,24 @@ async function blobServiceClientForUpload(): Promise<BlobServiceClient> {
   return envClient.client;
 }
 
-export async function downloadAzureBlobToFile(url: string, targetPath: string): Promise<void> {
+export async function downloadAzureBlobToFile(
+  url: string,
+  targetPath: string,
+  signal?: AbortSignal,
+): Promise<void> {
   try {
-    const response = await (await blobClientForDownload(url)).download();
+    // Thread the abort signal into BOTH the SDK download and the write pipeline so a
+    // cancel_download (#515) aborts the Azure transfer; the streamUrlToFile cloud
+    // branch also guards before/after so a cancelled transfer is never finalized.
+    const response = await (await blobClientForDownload(url)).download(undefined, undefined, {
+      abortSignal: signal,
+    });
     if (!response.readableStreamBody) {
       throw new ModelError("Azure Blob download response has no body", {
         url: redactUrlForLogs(url),
       });
     }
-    await pipeline(response.readableStreamBody, createWriteStream(targetPath));
+    await pipeline(response.readableStreamBody, createWriteStream(targetPath), { signal });
     // #343 edge: verify the written size against the blob's authoritative
     // contentLength so an early-ending stream can't be reported as a complete
     // download (silent truncation).

@@ -271,6 +271,9 @@ describe("applyManifest", () => {
       undefined,
       false, // routing decision threaded through (local, #420 codex round 1)
       expect.any(Function), // onResume callback — reports the resume decision onto the job (#467)
+      expect.any(AbortSignal), // per-download abort signal threaded from the job's controller (#515)
+      expect.any(Function), // onTrayId callback — aligns the job trayId with the tray row id (#515)
+      expect.any(Function), // onLanded callback — commits done synchronously at the destination rename (#515)
     );
   });
 
@@ -434,6 +437,9 @@ describe("applyManifest", () => {
       undefined,
       false, // routing decision threaded through (local, #420 codex round 1)
       expect.any(Function), // onResume callback — reports the resume decision onto the job (#467)
+      expect.any(AbortSignal), // per-download abort signal threaded from the job's controller (#515)
+      expect.any(Function), // onTrayId callback — aligns the job trayId with the tray row id (#515)
+      expect.any(Function), // onLanded callback — commits done synchronously at the destination rename (#515)
     );
   });
 
@@ -460,6 +466,9 @@ describe("applyManifest", () => {
       undefined,
       false, // routing decision threaded through (local, #420 codex round 1)
       expect.any(Function), // onResume callback — reports the resume decision onto the job (#467)
+      expect.any(AbortSignal), // per-download abort signal threaded from the job's controller (#515)
+      expect.any(Function), // onTrayId callback — aligns the job trayId with the tray row id (#515)
+      expect.any(Function), // onLanded callback — commits done synchronously at the destination rename (#515)
     );
   });
 

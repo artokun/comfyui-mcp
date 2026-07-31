@@ -498,12 +498,32 @@ export function registerModelExtrasTools(server: McpServer): void {
             ],
           };
         }
+        if (job.status === "cancelled") {
+          // A concurrent cancel_download landed during this grace window — do NOT fall
+          // through to the success renderer (which would dereference an unset job.path).
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: job.viaManager
+                  ? `CivitAI download \`${job.id}\` was cancelled. It was a remote ComfyUI-Manager dispatch, so there is no local partial to resume; the host MAY still be fetching server-side. Check list_local_models to see if it landed; re-issuing starts a NEW dispatch, not a resume.`
+                  : `CivitAI download \`${job.id}\` was cancelled. A resumable partial may remain on disk — re-issue the same download to resume it.`,
+              },
+            ],
+          };
+        }
 
         const savedPath = job.path!;
-        const lines = [
-          "CivitAI model downloaded successfully:",
-          `  ${savedPath}`,
-        ];
+        const lines = job.viaManager
+          ? [
+              "CivitAI model DISPATCHED to the remote ComfyUI via ComfyUI-Manager (server-side fetch):",
+              `  ${savedPath}`,
+              "  NOTE: the dispatch was ACCEPTED, NOT verified as landed — ComfyUI-Manager reports its queue task 'done' even on failure. Confirm with list_local_models before relying on it.",
+            ]
+          : [
+              "CivitAI model downloaded successfully:",
+              `  ${savedPath}`,
+            ];
         if (resolved.modelName) lines.push(`  Model: ${resolved.modelName}`);
         lines.push(`  Version id: ${resolved.versionId}`);
         lines.push(...(job.notes ?? []));

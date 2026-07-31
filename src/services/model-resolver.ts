@@ -803,7 +803,10 @@ async function downloadModelViaManagerRemote(
   targetSubfolder: string,
   filename?: string,
   auth?: DownloadAuth,
+  signal?: AbortSignal,
 ): Promise<string> {
+  // Cancelled before we dispatched — do not hand the fetch to the remote Manager at all.
+  if (signal?.aborted) throw new DOMException("The download was cancelled.", "AbortError");
   const raw = (targetSubfolder ?? "").trim();
   if (!raw) {
     throw new ModelError("target_subfolder is required (e.g. 'loras', 'checkpoints').");
@@ -887,6 +890,12 @@ async function downloadModelViaManagerRemote(
     trayCategory: modelType,
   });
 
+  // Cancelled while the dispatch was in flight (#515): the local job is cancelled.
+  // We CAN'T recall a Manager queue task, so the host may keep fetching — but this
+  // must NOT be reported as a completed local download. Throw so the job records
+  // "cancelled" (the tool message notes the server may still be fetching).
+  if (signal?.aborted) throw new DOMException("The download was cancelled.", "AbortError");
+
   return `${normalizedSubfolder}/${resolvedFilename} (dispatched to the remote ComfyUI via ComfyUI-Manager — download continues server-side; the file lists under /models when complete)${authWarning}`;
 }
 
@@ -963,7 +972,25 @@ export async function downloadModel(
   /** Sink for the resume decision, threaded from the job so the outcome is stored
    *  on that job (#467). Omitted by direct callers (no job to report to). */
   onResume?: ResumeReporter,
+  /** Per-download abort signal, threaded from the job's AbortController into the
+   *  fetch + stream pipeline so cancel_download aborts exactly this transfer (#515).
+   *  Omitted by direct callers (no cancellation handle). */
+  signal?: AbortSignal,
+  /** Reports the ACTUAL progress-tray id (a hash of the post-auth/post-HF-rewrite
+   *  request URL) back to the job, so the job's trayId matches the id the streaming
+   *  and done rows are written under. Without it a query-auth or HF_ENDPOINT-rewritten
+   *  download's tray row is keyed differently from the job's original-URL trayId — so
+   *  download_status byte display AND cancel cleanup would target the wrong id. Called
+   *  only on the LOCAL streaming path (the Manager path writes no streaming rows). */
+  onTrayId?: (trayId: string) => void,
+  /** Fired the instant the completed, validated file is renamed into its destination
+   *  (#515) — so the job can commit "done" with NO window where the file exists but the
+   *  job still reads "downloading". Local paths only (the remote Manager dispatch has no
+   *  local rename; the caller commits done when this function returns). */
+  onLanded?: (targetPath: string) => void,
 ): Promise<string> {
+  // Cancelled before we did anything — never start a transfer (local OR server-side).
+  if (signal?.aborted) throw new DOMException("The download was cancelled.", "AbortError");
   // Region flags (issue #127) applied at THE choke point every download path
   // funnels through (local disk AND the remote Manager dispatch below).
   const wasHfUrl = /^https?:\/\/huggingface\.co([/?#]|$)/i.test(url);
@@ -987,7 +1014,7 @@ export async function downloadModel(
   const routeToManager =
     dispatchToManager ?? (await shouldDispatchDownloadToManager());
   if (routeToManager) {
-    return downloadModelViaManagerRemote(url, targetSubfolder, filename, auth);
+    return downloadModelViaManagerRemote(url, targetSubfolder, filename, auth, signal);
   }
 
   // Root the destination at the LIVE server's models dir (its --base-directory),
@@ -1023,6 +1050,9 @@ export async function downloadModel(
   // retries map to the same row. Name is the friendly file name.
   const progressId = createHash("sha256").update(request.url).digest("hex").slice(0, 16);
   const progress = { id: progressId, name: resolvedFilename };
+  // Tell the job the id the tray rows actually use, so status display + cancel
+  // cleanup key on the SAME id even when auth/HF-endpoint rewrote the request URL.
+  onTrayId?.(progressId);
 
   try {
     await downloadWithCache({
@@ -1033,14 +1063,29 @@ export async function downloadModel(
       storageAuth: auth?.type === "s3" ? { s3: auth } : undefined,
       progress,
       onResume,
+      signal,
+      onLanded,
     });
   } catch (err) {
-    // Surface a failed row in the tray, then rethrow for the tool to report.
-    reportDownloadProgress({ ...progress, downloaded: 0, total: 0, bytes_per_sec: 0, status: "error" }, true);
+    // On a user cancel (#515) the transfer was aborted, not a real failure — do NOT
+    // emit an "error" row (the job reports "cancelled"). The tray row is cleared by the
+    // JOB layer (finalizeCancelled), which is registry-aware so it can't wipe a
+    // coalesced sibling's live row; clearing here would clear that shared row blindly.
+    // For a genuine error, surface a failed row, then rethrow.
+    if (!signal?.aborted) {
+      reportDownloadProgress({ ...progress, downloaded: 0, total: 0, bytes_per_sec: 0, status: "error" }, true);
+    }
     throw err;
   }
 
   const info = await stat(targetPath);
+  // The file has MATERIALIZED to its destination and passed model-payload/size
+  // validation. We deliberately do NOT abort here on a late cancel: the file on disk is
+  // a complete, valid model, so the honest outcome is a completed download (the job
+  // reports "done"). A cancel that arrived BEFORE the file landed already made this
+  // function THROW — via the stream abort, or the cache-layer pre-materialize /
+  // pre-rename guards — so it never reaches this point. (Rolling a validated landed file
+  // back would be unsafe.) Result: file present ⟺ done; file absent ⟺ cancelled.
   logger.info(`Download complete: ${resolvedFilename} (${(info.size / 1024 / 1024).toFixed(1)} MB)`);
   // Ensure a terminal "done" row even on a cache hit (no streaming happened).
   reportDownloadProgress(
