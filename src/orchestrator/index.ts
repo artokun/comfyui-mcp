@@ -105,6 +105,7 @@ import { getAgentSettings, setAgentSettings, normalizePreferredModels } from "..
 import {
   gatherEnvCapabilities,
   buildPanelSystemAppend,
+  resolveBackends,
   type EnvCapabilities,
 } from "../services/env-capabilities.js";
 import { WorkflowTargetStore } from "../services/workflow-target-store.js";
@@ -137,7 +138,7 @@ MERGE / COMPOSE WORKFLOWS — to bring nodes from ONE workflow into ANOTHER (com
 
 REUSE SUBGRAPHS via the blueprint library — when the user builds a useful subgraph and wants to reuse it (now or in other workflows), SAVE it: panel_create_subgraph to group the nodes (if not already a subgraph), then panel_save_subgraph(node_id, name) publishes it to their library programmatically (no dialog). To drop a saved one into ANY workflow later, list them with panel_list_subgraphs and add with panel_add_subgraph(name). This is the durable way to reuse a building block across projects — distinct from copy/paste (a one-off merge of the current clipboard).
 
-PREFER READY EXPERTISE OVER HAND-BUILDING. When the user asks you to "set up", "build", or "make" a workflow for a specific model FAMILY (krea2, wan, flux, qwen, ltx, z-image, ideogram, anima, ernie, etc.), do NOT immediately hand-build a generic graph from scratch. FIRST, in order: (a) consult the matching SKILL for that family. If you already have a skill for it loaded in your context, use it. If you do NOT have its full guidance in front of you, do NOT guess from memory — actually CALL the comfyui MCP's list_skills to see what's bundled, then read_skill(name) to load the real family expertise (model slots, the node graph, settings, gotchas) before you build; (b) check the installer PACKS by CALLING list_packs (each packs/<name>/ has a ready manifest.yaml AND a ready workflow.json). If a pack matches the family, PREFER it: apply_manifest --path <its manifest_path> installs the right custom nodes + model weights, and the pack's workflow.json is the expert graph — CALL read_pack_workflow(name) to get that ready graph and recreate it on the live canvas via panel_add_node/panel_connect/panel_set_widget so the user watches it build (or enqueue it headlessly when they don't need it on-canvas), instead of inventing your own. Don't claim a skill or pack exists unless a tool result confirmed it; (c) check the official ComfyUI workflow Templates — call list_workflow_templates (it lists the server's bundled comfyui-workflow-templates + custom-node templates) for a matching starter, and point the user at it in the frontend's Templates browser. Only build from scratch if NOTHING matches — and when you do, briefly say what you checked (skill, packs, templates) so the user knows you didn't reinvent the wheel. And never wipe the user's current canvas (no panel_clear) until the replacement is actually ready to drop in. To load a ready pack graph onto the live canvas in one shot (instead of recreating it node-by-node), use panel_load_workflow(pack:<name>) — the pack's UI workflow.json is read server-side and dropped onto the canvas, undoable.
+PREFER READY EXPERTISE OVER HAND-BUILDING. When the user asks you to "set up", "build", or "make" a workflow for a specific model FAMILY (krea2, wan, flux, qwen, ltx, z-image, ideogram, anima, ernie, etc.), do NOT immediately hand-build a generic graph from scratch. FIRST, in order: (a) consult the matching SKILL for that family. If you already have a skill for it loaded in your context, use it. If you do NOT have its full guidance in front of you, do NOT guess from memory — actually CALL the comfyui MCP's list_skills to see what's bundled, then read_skill(name) to load the real family expertise (model slots, the node graph, settings, gotchas) before you build; (b) check the installer PACKS by CALLING list_packs (each packs/<name>/ has a ready manifest.yaml AND a ready workflow.json). If a pack matches the family, PREFER it: apply_manifest --path <its manifest_path> installs the right custom nodes + model weights, and the pack's workflow.json is the expert graph — CALL read_pack_workflow(name) to get that ready graph and recreate it on the live canvas via panel_add_node/panel_connect/panel_set_widget so the user watches it build (or enqueue it headlessly when they don't need it on-canvas), instead of inventing your own. Don't claim a skill or pack exists unless a tool result confirmed it; (c) check the ComfyUI workflow Templates — call list_workflow_templates (it lists CUSTOM-NODE-contributed templates from the server's /api/workflow_templates index; it does NOT enumerate ComfyUI's own core bundled templates, which are served separately) for a matching starter, and ALSO point the user at the frontend's Templates browser directly, since core templates only appear there. Only build from scratch if NOTHING matches — and when you do, briefly say what you checked (skill, packs, templates) so the user knows you didn't reinvent the wheel. And never wipe the user's current canvas (no panel_clear) until the replacement is actually ready to drop in. To load a ready pack graph onto the live canvas in one shot (instead of recreating it node-by-node), use panel_load_workflow(pack:<name>) — the pack's UI workflow.json is read server-side and dropped onto the canvas, undoable.
 
 OPENING A STAGED / DOWNLOADED WORKFLOW. When you've saved or downloaded a workflow .json into the user's ComfyUI workflows folder (e.g. an example you fetched), open it with panel_open_workflow(path:<name-or-path>) — it now REFRESHES the frontend's (cached) workflow list before searching, so a just-staged file is found and opened natively in its own tab. For a workflow .json that lives OUTSIDE the workflows folder (any absolute path on the ComfyUI machine, or a downloaded example you didn't move into workflows/), load it directly onto the live canvas with panel_load_workflow(path:<file>) — the orchestrator reads + parses the JSON server-side and drops it on the canvas in one shot, so even a large (100KB+) workflow never has to shuttle through this chat. Prefer panel_load_workflow(path:<file>) over pasting a big workflow JSON inline as the graph arg.
 
@@ -1395,13 +1396,37 @@ export async function runPanelOrchestrator(): Promise<void> {
     } catch (err) {
       if (gen !== envRefreshGen) return; // superseded — let the newer refresh own the prompt
       // Belt-and-suspenders: gather is internally guarded, but never let a stray
-      // throw break the prompt — fall back to the static append.
+      // throw break the prompt — fall back to the static append. Also DROP any
+      // previously-gathered envCaps so systemAppendForBackend() falls back to the
+      // same static append for EVERY backend (not just the default) — otherwise a
+      // non-default backend would rebuild a stale env block off the old caps,
+      // disagreeing with the reset panelSystemAppend (#358 wiring).
+      envCaps = undefined;
       panelSystemAppend = resolvePrompt("panel.persona", PANEL_SYSTEM_APPEND);
       logger.debug(
         `[panel-orchestrator] env-capabilities probe failed (using static prompt): ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }
+  // The ENVIRONMENT block's `Backend:` line must name the provider running THIS
+  // tab's turn, not the process default (#358). Backends are per-tab now, so the
+  // single `panelSystemAppend` (built with the default backend id) would tell a
+  // Grok tab it's Claude. Rebuild the block per-tab-backend: same env facts, but
+  // the backend label recomputed from the tab's actual backend id. Falls back to
+  // the shared append when the env probe produced nothing (envCaps undefined).
+  const systemAppendForBackend = (bId: string): string => {
+    if (!envCaps) return panelSystemAppend;
+    const { backend, otherBackendAvailable } = resolveBackends(bId);
+    // Already the default's label → reuse the shared string (no rebuild).
+    if (envCaps.backend === backend && envCaps.otherBackendAvailable === otherBackendAvailable) {
+      return panelSystemAppend;
+    }
+    return buildPanelSystemAppend(
+      resolvePrompt("panel.persona", PANEL_SYSTEM_APPEND),
+      { ...envCaps, backend, otherBackendAvailable },
+    );
+  };
+
   // Build it before any agent could spawn. Guarded so a probe stall can't block
   // orchestrator startup beyond the probes' own (short) timeouts.
   await refreshEnvCapabilities();
@@ -1568,12 +1593,14 @@ export async function runPanelOrchestrator(): Promise<void> {
   const makeBackend = (key: string): AgentBackend | undefined => {
     const backend = backendOf(key);
     const panelTabId = panelTabOf(key);
+    // The ENVIRONMENT block's `Backend:` line must name THIS backend (#358).
+    const sysAppend = systemAppendForBackend(backend);
     try {
     if (backend === "codex") {
       return new CodexBackend({
         cwd: comfyuiPath ?? process.cwd(),
         model: codexModel,
-        systemAppend: panelSystemAppend,
+        systemAppend: sysAppend,
         comfyuiUrl,
         mcpServers: makeHttpBackendMcpServers(panelTabId),
       });
@@ -1582,7 +1609,7 @@ export async function runPanelOrchestrator(): Promise<void> {
       return new GeminiBackend({
         cwd: comfyuiPath ?? process.cwd(),
         model: geminiModel,
-        systemAppend: panelSystemAppend,
+        systemAppend: sysAppend,
         comfyuiUrl,
         mcpServers: makeHttpBackendMcpServers(panelTabId),
       });
@@ -1591,7 +1618,7 @@ export async function runPanelOrchestrator(): Promise<void> {
       return new AntigravityBackend({
         cwd: comfyuiPath ?? process.cwd(),
         ...(antigravityModel ? { model: antigravityModel } : {}),
-        systemAppend: panelSystemAppend,
+        systemAppend: sysAppend,
         mcpServers: makeHttpBackendMcpServers(panelTabId),
       });
     }
@@ -1599,7 +1626,7 @@ export async function runPanelOrchestrator(): Promise<void> {
       return new GrokBackend({
         cwd: comfyuiPath ?? process.cwd(),
         model: grokModel,
-        systemAppend: panelSystemAppend,
+        systemAppend: sysAppend,
         comfyuiUrl,
         mcpServers: makeHttpBackendMcpServers(panelTabId),
       });
@@ -1608,7 +1635,7 @@ export async function runPanelOrchestrator(): Promise<void> {
       return new OllamaBackend({
         cwd: comfyuiPath ?? process.cwd(),
         model: ollamaModel,
-        systemAppend: panelSystemAppend,
+        systemAppend: sysAppend,
         comfyuiUrl,
         mcpServers: makeHttpBackendMcpServers(panelTabId),
         ...ollamaDeps(),
@@ -1618,7 +1645,7 @@ export async function runPanelOrchestrator(): Promise<void> {
       return new OllamaBackend({
         cwd: comfyuiPath ?? process.cwd(),
         model: openrouterModel,
-        systemAppend: panelSystemAppend,
+        systemAppend: sysAppend,
         comfyuiUrl,
         mcpServers: makeHttpBackendMcpServers(panelTabId),
         ...openrouterDeps(),
@@ -1628,7 +1655,7 @@ export async function runPanelOrchestrator(): Promise<void> {
       return new OllamaBackend({
         cwd: comfyuiPath ?? process.cwd(),
         model: lmstudioModel,
-        systemAppend: panelSystemAppend,
+        systemAppend: sysAppend,
         comfyuiUrl,
         mcpServers: makeHttpBackendMcpServers(panelTabId),
         ...lmstudioDeps(),
@@ -1638,7 +1665,7 @@ export async function runPanelOrchestrator(): Promise<void> {
       return new OllamaBackend({
         cwd: comfyuiPath ?? process.cwd(),
         model: llamacppModel,
-        systemAppend: panelSystemAppend,
+        systemAppend: sysAppend,
         comfyuiUrl,
         mcpServers: makeHttpBackendMcpServers(panelTabId),
         ...llamacppDeps(),
@@ -1648,7 +1675,7 @@ export async function runPanelOrchestrator(): Promise<void> {
       return new OllamaBackend({
         cwd: comfyuiPath ?? process.cwd(),
         model: customModel,
-        systemAppend: panelSystemAppend,
+        systemAppend: sysAppend,
         comfyuiUrl,
         mcpServers: makeHttpBackendMcpServers(panelTabId),
         ...customDeps(),
@@ -1658,7 +1685,7 @@ export async function runPanelOrchestrator(): Promise<void> {
       return new ChatGptOAuthBackend({
         cwd: comfyuiPath ?? process.cwd(),
         model: chatgptModel,
-        systemAppend: panelSystemAppend,
+        systemAppend: sysAppend,
         comfyuiUrl,
         mcpServers: makeHttpBackendMcpServers(panelTabId),
       });
@@ -1667,7 +1694,7 @@ export async function runPanelOrchestrator(): Promise<void> {
     if (simpleKeyReg) {
       // glm/moonshot (and any future simple api-key provider) share one factory.
       return makeOpenAiKeyBackend(simpleKeyReg, {
-        systemAppend: panelSystemAppend,
+        systemAppend: sysAppend,
         comfyuiUrl,
         mcpServers: makeHttpBackendMcpServers(panelTabId),
       });
@@ -1676,7 +1703,7 @@ export async function runPanelOrchestrator(): Promise<void> {
       return new KimiBackend({
         cwd: comfyuiPath ?? process.cwd(),
         model: kimiModel,
-        systemAppend: panelSystemAppend,
+        systemAppend: sysAppend,
         comfyuiUrl,
         mcpServers: makeHttpBackendMcpServers(panelTabId),
       });
@@ -1689,7 +1716,7 @@ export async function runPanelOrchestrator(): Promise<void> {
       return new CopilotBackend({
         cwd: comfyuiPath ?? process.cwd(),
         model: copilotModel,
-        systemAppend: panelSystemAppend,
+        systemAppend: sysAppend,
         comfyuiUrl,
         mcpServers: makeHttpBackendMcpServers(panelTabId),
       });
@@ -1792,6 +1819,10 @@ export async function runPanelOrchestrator(): Promise<void> {
     makeBackend,
     comfyuiUrl, // for fetching image bytes to inline into agent turns
     systemAppend: panelSystemAppend,
+    // Per-KEY env block so the CLAUDE path (makeBackend returns undefined) still
+    // gets the tab's actual backend on its `Backend:` line (#358). Non-claude
+    // tabs get it via makeBackend's sysAppend; this covers the built-in default.
+    makeSystemAppend: (key) => systemAppendForBackend(backendOf(key)),
     pluginPath: pluginAvailable ? pluginPath : undefined,
     // In-process live-graph MCP for CLAUDE keys only (codex/gemini drive the
     // canvas through the loopback HTTP MCP instead). Bound to the PANEL tab so

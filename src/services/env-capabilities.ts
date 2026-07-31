@@ -52,7 +52,7 @@ export interface EnvCapabilities {
   manager?: "v4" | "legacy" | "unknown";
   triton?: TriState;
   sageattention?: TriState;
-  backend?: "Claude" | "Codex" | "Gemini"; // active provider (human label)
+  backend?: string; // active provider (human label, e.g. "Claude" / "Grok" / "unknown")
   otherBackendAvailable?: boolean; // is the OTHER provider resolvable?
   mcpVersion?: string; // comfyui-mcp package version, e.g. "0.48.4"
   panelVersion?: string; // sidebar panel version from the panel's hello, e.g. "0.11.3" / "nightly"
@@ -426,11 +426,38 @@ function canResolve(specifier: string): boolean {
 }
 
 /**
+ * Human labels for every panel backend id (PANEL_AGENT_BACKEND / per-tab
+ * selection). The env block reports the ACTUAL active provider for the turn — an
+ * unrecognized id degrades to "unknown" rather than being silently mislabeled as
+ * "Claude" (#358: a Grok turn must NOT say "Backend: Claude"). Keep in sync with
+ * the BackendId union in orchestrator/agent-backend.ts.
+ */
+export const BACKEND_LABELS: Record<string, string> = {
+  claude: "Claude",
+  codex: "Codex",
+  chatgpt: "ChatGPT",
+  gemini: "Gemini",
+  antigravity: "Antigravity",
+  grok: "Grok",
+  glm: "GLM",
+  kimi: "Kimi",
+  moonshot: "Kimi K3 (Moonshot)",
+  ollama: "Ollama",
+  openrouter: "OpenRouter",
+  copilot: "Copilot",
+  lmstudio: "LM Studio",
+  llamacpp: "llama.cpp",
+  custom: "Custom endpoint",
+};
+
+/**
  * Determine the active backend label and whether ANY other provider is available.
- * activeBackendId is "claude" | "codex" | "gemini" (from PANEL_AGENT_BACKEND).
+ * activeBackendId is a PANEL_AGENT_BACKEND / per-tab backend id (e.g. "claude",
+ * "codex", "gemini", "grok", "ollama"…). An unknown id resolves to "unknown" so
+ * the env block never reports a WRONG specific provider (#358).
  */
 export function resolveBackends(activeBackendId: string): {
-  backend: "Claude" | "Codex" | "Gemini";
+  backend: string;
   otherBackendAvailable: boolean;
 } {
   const id = activeBackendId.toLowerCase();
@@ -440,14 +467,17 @@ export function resolveBackends(activeBackendId: string): {
   // the cheap, synchronous signal we use here (a PATH-only CLI reads as absent).
   const codexAvailable = canResolve("@openai/codex");
   const geminiAvailable = canResolve("@google/gemini-cli");
-  const backend = id === "codex" ? "Codex" : id === "gemini" ? "Gemini" : "Claude";
-  // "Other available" = any provider other than the active one is resolvable.
+  // Own-property lookup ONLY — a plain-object index would resolve inherited keys
+  // like "constructor"/"__proto__" to prototype members (a function/object),
+  // wrongly labeling those ids instead of degrading to "unknown".
+  const backend = Object.hasOwn(BACKEND_LABELS, id) ? BACKEND_LABELS[id] : "unknown";
+  // "Other available" = one of the three SDK/CLI-resolvable providers OTHER than
+  // the active one is present. (A cheap synchronous signal; the full provider set
+  // is larger, but these three are the ones we can detect without I/O.)
   const otherBackendAvailable =
-    backend === "Claude"
-      ? codexAvailable || geminiAvailable
-      : backend === "Codex"
-        ? claudeAvailable || geminiAvailable
-        : claudeAvailable || codexAvailable;
+    (claudeAvailable && id !== "claude") ||
+    (codexAvailable && id !== "codex") ||
+    (geminiAvailable && id !== "gemini");
   return { backend, otherBackendAvailable };
 }
 

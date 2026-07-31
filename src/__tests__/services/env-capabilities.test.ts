@@ -8,6 +8,7 @@ import {
   buildPanelSystemAppend,
   resolveComfyuiPython,
   reconcileProbeState,
+  resolveBackends,
   type EnvCapabilities,
 } from "../../services/env-capabilities.js";
 
@@ -114,6 +115,41 @@ describe("formatEnvBlock", () => {
 
   it("returns an empty string when nothing is known", () => {
     expect(formatEnvBlock({})).toBe("");
+  });
+});
+
+describe("resolveBackends (#358 — report the ACTUAL backend, never a wrong specific)", () => {
+  it("labels non-Claude backends by their real identity, not 'Claude'", () => {
+    // The regression: a Grok turn was reported as "Backend: Claude". Every known
+    // backend id must map to its own label.
+    expect(resolveBackends("grok").backend).toBe("Grok");
+    expect(resolveBackends("codex").backend).toBe("Codex");
+    expect(resolveBackends("gemini").backend).toBe("Gemini");
+    expect(resolveBackends("ollama").backend).toBe("Ollama");
+    expect(resolveBackends("copilot").backend).toBe("Copilot");
+    expect(resolveBackends("claude").backend).toBe("Claude");
+    // Case-insensitive.
+    expect(resolveBackends("GROK").backend).toBe("Grok");
+  });
+
+  it("degrades an unrecognized id to 'unknown' rather than mislabeling it Claude", () => {
+    expect(resolveBackends("some-future-provider").backend).toBe("unknown");
+    expect(resolveBackends("").backend).toBe("unknown");
+  });
+
+  it("degrades prototype-key ids to 'unknown' (no inherited-property leak)", () => {
+    // A plain object index would resolve these to Object.prototype members
+    // (a function/object) rather than "unknown".
+    for (const id of ["constructor", "__proto__", "toString", "hasOwnProperty"]) {
+      expect(resolveBackends(id).backend).toBe("unknown");
+    }
+  });
+
+  it("the rendered Backend line reflects the real provider for the turn", () => {
+    const grok = resolveBackends("grok");
+    const out = formatEnvBlock({ backend: grok.backend, otherBackendAvailable: grok.otherBackendAvailable });
+    expect(out).toContain("Backend: Grok");
+    expect(out).not.toContain("Backend: Claude");
   });
 });
 

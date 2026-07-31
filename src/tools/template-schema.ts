@@ -392,7 +392,7 @@ async function loadServerTemplate(
     if (res.ok) index = (await res.json()) as Record<string, unknown>;
   } catch {
     return {
-      error: "Not a bundled pack, and the ComfyUI server is unreachable to look up official workflow templates.",
+      error: "Not a bundled pack, and the ComfyUI server is unreachable to look up custom-node-contributed workflow templates.",
       available: [],
     };
   }
@@ -408,7 +408,7 @@ async function loadServerTemplate(
     const needle = name.toLowerCase();
     const near = resolved.all.filter((n) => n.toLowerCase().includes(needle)).slice(0, 10);
     return {
-      error: `No official workflow template named "${name}".`,
+      error: `No custom-node-contributed workflow template named "${name}" (core templates from the comfyui-workflow-templates package are not in this /api/workflow_templates index — check the ComfyUI frontend's Templates browser for those).`,
       available: near.length ? near : resolved.all.slice(0, 20),
     };
   }
@@ -440,12 +440,12 @@ async function loadServerTemplate(
 export function registerTemplateSchemaTools(server: McpServer): void {
   server.tool(
     "get_template_schema",
-    "Get a template's OVERRIDABLE run-time parameters (its 'slots') before running it. Pass a bundled pack name (from list_packs) or an official ComfyUI workflow template name (from list_workflow_templates). Returns `slots` — the meaningful knobs: positive/negative prompt, seed, steps, cfg, sampler/scheduler, width/height, checkpoint/LoRA/model files, denoise, batch_size, input image — plus `other_slots` (every remaining overridable widget), each with a stable key `\"<nodeId>.<widget_name>\"`, semantic role, type, current value, and min/max/options where the node schema is known. Feed the keys DIRECTLY into run_template's `overrides` (same convention) for a schema→run round-trip.",
+    "Get a template's OVERRIDABLE run-time parameters (its 'slots') before running it. Pass a bundled pack name (from list_packs) or a custom-node-contributed workflow template name (from list_workflow_templates). Returns `slots` — the meaningful knobs: positive/negative prompt, seed, steps, cfg, sampler/scheduler, width/height, checkpoint/LoRA/model files, denoise, batch_size, input image — plus `other_slots` (every remaining overridable widget), each with a stable key `\"<nodeId>.<widget_name>\"`, semantic role, type, current value, and min/max/options where the node schema is known. Feed the keys DIRECTLY into run_template's `overrides` (same convention) for a schema→run round-trip.",
     {
       template: z
         .string()
         .min(1)
-        .describe("Template name/id: a bundled pack directory name (list_packs) or an official workflow template name (list_workflow_templates)."),
+        .describe("Template name/id: a bundled pack directory name (list_packs) or a custom-node-contributed workflow template name (list_workflow_templates)."),
     },
     async (args) => {
       try {
@@ -471,7 +471,7 @@ export function registerTemplateSchemaTools(server: McpServer): void {
                     {
                       error: `Could not resolve template "${name}". ${res.error}`,
                       near_matches: [...near, ...res.available].slice(0, 20),
-                      hint: "Use list_packs for bundled packs or list_workflow_templates for official templates.",
+                      hint: "Use list_packs for bundled packs or list_workflow_templates for custom-node-contributed templates (core templates only appear in the ComfyUI frontend's own Templates browser).",
                     },
                     null,
                     2,

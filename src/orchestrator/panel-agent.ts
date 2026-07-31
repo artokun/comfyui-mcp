@@ -1091,6 +1091,12 @@ export interface PanelAgentManagerOptions {
    *  env like the Blind content gate (panel issue #90): a static object shared
    *  across tabs cannot express per-tab COMFYUI_MCP_BLIND. */
   makeMcpServers?: (key: string) => Options["mcpServers"];
+  /** Per-KEY systemAppend factory (key = tabId::backend). When provided it wins
+   *  over the static `systemAppend` for every spawn — required so the ENVIRONMENT
+   *  block's `Backend:` line names the tab's ACTUAL backend rather than the
+   *  process default (#358). Falls back to `systemAppend` when it returns
+   *  undefined or is unset. */
+  makeSystemAppend?: (key: string) => string | undefined;
   /** Bundled plugin dir whose skills make the agent an expert (optional). */
   pluginPath?: string;
   /**
@@ -1200,7 +1206,7 @@ export class PanelAgentManager {
       // the Blind gate) wins over the static set (kept for tests/back-compat).
       mcpServers: this.opts.makeMcpServers?.(tabId) ?? this.opts.mcpServers,
       comfyuiUrl: this.opts.comfyuiUrl,
-      systemAppend: this.opts.systemAppend,
+      systemAppend: this.opts.makeSystemAppend?.(tabId) ?? this.opts.systemAppend,
       model: this.modelFor(tabId),
       effort: this.effortFor(tabId),
       onSay: this.opts.onSay,
