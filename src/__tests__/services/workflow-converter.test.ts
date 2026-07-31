@@ -1094,10 +1094,16 @@ describe("convertUiToApi — linked PrimitiveNode combo validation (P1-A, #504)"
     ).toBe(true);
   });
 
-  it("does NOT consume a positional slot for a LINKED nested leaf — trailing widget stays aligned", () => {
-    // model.aspect_ratio is converted-to-input (linked), so it has NO positional
-    // widgets_values entry: ["Nano Banana 2", 12345] = [model, seed]. Consuming a
-    // slot for the linked leaf would steal seed's value. It must be skipped.
+  it("REFUSES the tail when a LINKED nested leaf precedes trailing widgets — placeholder ambiguity must not shift the seed (#517 P0-A)", () => {
+    // model.aspect_ratio is converted-to-input (linked). widgets_values
+    // ["Nano Banana 2", 12345] is AMBIGUOUS: on a frontend that drops the converted
+    // widget's slot it is [model, seed] (seed=12345); on one that RETAINS a
+    // placeholder it is [model, aspect_ratio-placeholder, seed?] and 12345 is the
+    // placeholder, not the seed. The two can't be told apart positionally, so
+    // consuming vs skipping the linked leaf silently shifts the seed either way.
+    // The safe contract is to REFUSE: warn + leave the trailing widget(s) to their
+    // defaults, and let the link supply the nested leaf. seed must NOT be silently
+    // assigned the ambiguous 12345.
     const info = {
       NanoBananaNode: {
         input: {
@@ -1132,7 +1138,7 @@ describe("convertUiToApi — linked PrimitiveNode combo validation (P1-A, #504)"
           mode: 0,
           inputs: [{ name: "model.aspect_ratio", type: "COMBO", link: 10 }],
           outputs: [],
-          widgets_values: ["Nano Banana 2", 12345], // aspect_ratio linked = no slot
+          widgets_values: ["Nano Banana 2", 12345], // aspect_ratio linked = ambiguous slot
         },
         {
           id: 2,
@@ -1145,11 +1151,88 @@ describe("convertUiToApi — linked PrimitiveNode combo validation (P1-A, #504)"
       ],
       links: [[10, 2, 0, 1, 0, "COMBO"]],
     } as never;
-    const { workflow } = convertUiToApi(ui, info);
-    // seed keeps its real value — not stolen by the linked nested leaf.
-    expect(workflow["1"].inputs.seed).toBe(12345);
-    // and the nested leaf comes from the link.
+    const { workflow, warnings } = convertUiToApi(ui, info);
+    // seed must NOT be silently assigned the ambiguous trailing value.
+    expect(workflow["1"].inputs.seed).not.toBe(12345);
+    // The nested leaf still comes from the link.
     expect(workflow["1"].inputs["model.aspect_ratio"]).toBe("1:1");
+    // The refusal is warned (not silent).
+    expect(
+      warnings.some(
+        (w) =>
+          w.includes("1") &&
+          w.includes("model.aspect_ratio") &&
+          /default/.test(w),
+      ),
+    ).toBe(true);
+  });
+
+  it("does NOT let a RETAINED linked-nested placeholder shift a control-eligible seed (#517 P0-A silent-seed)", () => {
+    // Exact placeholder-retention repro: `multiplier` is a linked nested leaf; the
+    // frontend RETAINED its serialized placeholder, so widgets_values is
+    // ["A", 4(placeholder), 424242(seed), "fixed"]. The pre-fix code skipped the
+    // linked leaf WITHOUT consuming its slot, mapped seed=4, then skipped the real
+    // 424242 as the control_after_generate phantom — the user's seed silently became
+    // 4. The fix REFUSES the tail: seed is left to default, 4 never lands on it.
+    const info = {
+      MultNode: {
+        input: {
+          required: {
+            mode: [
+              "COMFY_DYNAMICCOMBO_V3",
+              {
+                options: [
+                  {
+                    key: "A",
+                    inputs: { required: { multiplier: ["FLOAT", {}] } },
+                  },
+                ],
+              },
+            ],
+            seed: ["INT", { control_after_generate: true, default: 0 }],
+          },
+        },
+        input_order: { required: ["mode", "seed"] },
+      },
+      PrimitiveNode: { input: { required: {} } },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "MultNode",
+          mode: 0,
+          inputs: [{ name: "mode.multiplier", type: "FLOAT", link: 10 }],
+          outputs: [],
+          widgets_values: ["A", 4, 424242, "fixed"],
+        },
+        {
+          id: 2,
+          type: "PrimitiveNode",
+          mode: 0,
+          inputs: [],
+          outputs: [{ name: "FLOAT", type: "FLOAT", links: [10] }],
+          widgets_values: [8],
+        },
+      ],
+      links: [[10, 2, 0, 1, 0, "FLOAT"]],
+    } as never;
+    const { workflow, warnings } = convertUiToApi(ui, info);
+    // The retained placeholder must NEVER become the seed.
+    expect(workflow["1"].inputs.seed).not.toBe(4);
+    // seed falls to its schema default, not a shifted placeholder value.
+    expect(workflow["1"].inputs.seed).toBe(0);
+    // The linked nested leaf is supplied by its (PrimitiveNode) source, not the
+    // retained placeholder 4.
+    expect(workflow["1"].inputs["mode.multiplier"]).toBe(8);
+    expect(
+      warnings.some(
+        (w) =>
+          w.includes("1") &&
+          w.includes("mode.multiplier") &&
+          /default/.test(w),
+      ),
+    ).toBe(true);
   });
 
   it("re-anchors nested leaves when a PrimitiveNode overrides the dynamic PARENT (A -> B)", () => {
@@ -1747,6 +1830,73 @@ describe("convertUiToApi — linked PrimitiveNode combo validation (P1-A, #504)"
     expect(workflow["3"].inputs["model.choice"]).toEqual(["2", 0]);
   });
 
+  it("PRESERVES a LITERAL nested leaf defined by SOME (not all) options under a real-LINK parent — no silent user-value drop (#517 P0-B)", () => {
+    // The dynamic parent `model` is fed by a real link (converted to input) but the
+    // frontend RETAINED its widgets_values placeholder ["A", 0.75], so the positional
+    // pass sets model.strength=0.75. Option A DEFINES strength (FLOAT default 0.5),
+    // option B OMITS it. The pre-fix strict default-deny deleted model.strength purely
+    // because B lacks it — silently discarding the user's 0.75 so execution used A's
+    // default 0.5. A LITERAL user value defined by at least one option (and valid where
+    // defined) must be PRESERVED: dropping it on option B, a resolution that may never
+    // occur, is the corruption. (Link-ref leaves — no user scalar to lose — keep the
+    // strict every-option rule; see the two tests above.)
+    const info = {
+      ComboProvider: {
+        input: { required: {} },
+        output: ["COMBO"],
+        output_name: ["COMBO"],
+      },
+      DynParentNode: {
+        input: {
+          required: {
+            model: [
+              "COMFY_DYNAMICCOMBO_V3",
+              {
+                options: [
+                  {
+                    key: "A",
+                    inputs: {
+                      required: { strength: ["FLOAT", { default: 0.5 }] },
+                    },
+                  },
+                  { key: "B", inputs: { required: {} } }, // B omits `strength`
+                ],
+              },
+            ],
+          },
+        },
+        input_order: { required: ["model"] },
+      },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 5,
+          type: "ComboProvider",
+          mode: 0,
+          inputs: [],
+          outputs: [{ name: "COMBO", type: "COMBO", links: [20] }],
+          widgets_values: [],
+        },
+        {
+          id: 3,
+          type: "DynParentNode",
+          mode: 0,
+          inputs: [{ name: "model", type: "COMBO", link: 20 }],
+          outputs: [],
+          // Retained placeholder: parent "A" + nested literal strength 0.75.
+          widgets_values: ["A", 0.75],
+        },
+      ],
+      links: [[20, 5, 0, 3, 0, "COMBO"]],
+    } as never;
+    const { workflow } = convertUiToApi(ui, info);
+    // Parent is a runtime link ref…
+    expect(Array.isArray(workflow["3"].inputs.model)).toBe(true);
+    // …and the user's literal strength is PRESERVED, not dropped to A's default 0.5.
+    expect(workflow["3"].inputs["model.strength"]).toBe(0.75);
+  });
+
   it("leaves a VALID enum fed by a linked PrimitiveNode untouched (no warn)", () => {
     const info = {
       KSamplerSelect: {
@@ -2159,6 +2309,221 @@ describe("convertUiToApi — option-bearing / dynamic nested combo validation (P
           /can't be reconstructed|default/.test(w),
       ),
     ).toBe(true);
+  });
+
+  it("DEFAULTS the tail when a STILL-VALID dynamic option's nested arity DRIFTED (leftover) — no stale nested value on the seed (#517 P0 arity-drift)", () => {
+    // The saved option key "A" STILL EXISTS, so the stale-parent (removed-key) guard
+    // does NOT fire. But when the graph was saved, option A owned a nested
+    // `multiplier` (=4); the CURRENT schema's option A has REMOVED it. Mapping with
+    // the current (empty) nested layout consumes nothing, so the loop assigns
+    // seed=4 (the stale nested value) and skips the REAL 424242 as the control
+    // phantom — the user's seed silently becomes 4, with a leftover "fixed" proving
+    // the drift. The leftover-drift guard must default the post-combo widgets: seed
+    // must NOT be 4.
+    const info = {
+      DriftArityNode: {
+        input: {
+          required: {
+            mode: [
+              "COMFY_DYNAMICCOMBO_V3",
+              // Current option A defines NO nested inputs (multiplier was removed).
+              { options: [{ key: "A", inputs: { required: {} } }] },
+            ],
+            seed: ["INT", { control_after_generate: true, default: 0 }],
+          },
+        },
+        input_order: { required: ["mode", "seed"] },
+      },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "DriftArityNode",
+          mode: 0,
+          inputs: [],
+          outputs: [],
+          // Saved under the OLD layout: [mode, multiplier(nested,=4), seed, control].
+          widgets_values: ["A", 4, 424242, "fixed"],
+        },
+      ],
+      links: [],
+    } as never;
+    const { workflow, warnings } = convertUiToApi(ui, info);
+    // Parent stays "A" (still a valid option).
+    expect(workflow["1"].inputs.mode).toBe("A");
+    // The stale nested value must NEVER become the seed.
+    expect(workflow["1"].inputs.seed).not.toBe(4);
+    // seed falls to its schema default, not the shifted positional value.
+    expect(workflow["1"].inputs.seed).toBe(0);
+    // The drift is warned (not silent).
+    expect(
+      warnings.some(
+        (w) => w.includes("1") && /nested-input layout|default/.test(w),
+      ),
+    ).toBe(true);
+  });
+
+  it("does NOT let the arity-drift guard mis-fire on a LINKED-leaf refusal in a LATER dynamic combo — earlier valid combo must not default the later parent (#517 P0-A/drift interaction)", () => {
+    // Two dynamic combos in order. The FIRST (`first`) is a normal still-valid combo
+    // (sets sawDynamicCombo). The SECOND (`second`) has a LINKED nested leaf
+    // (second.choice), which triggers the P0-A refuse-the-tail path — leaving a
+    // leftover. Without the tailRefused gate, the post-loop drift guard would ALSO
+    // fire, wrongly deleting `second` (a valid parent selection) and defaulting it to
+    // the first option. The gate must suppress the drift guard here: `second` keeps
+    // its saved "Y".
+    const info = {
+      TwoParentNode: {
+        input: {
+          required: {
+            first: [
+              "COMFY_DYNAMICCOMBO_V3",
+              { options: [{ key: "A", inputs: { required: {} } }] },
+            ],
+            second: [
+              "COMFY_DYNAMICCOMBO_V3",
+              {
+                options: [
+                  {
+                    key: "X",
+                    inputs: {
+                      required: { choice: ["COMBO", { options: ["x1"] }] },
+                    },
+                  },
+                  {
+                    key: "Y",
+                    inputs: {
+                      required: { choice: ["COMBO", { options: ["y1"] }] },
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        input_order: { required: ["first", "second"] },
+      },
+      PrimitiveNode: { input: { required: {} } },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "TwoParentNode",
+          mode: 0,
+          // second.choice is converted-to-input (linked).
+          inputs: [{ name: "second.choice", type: "COMBO", link: 10 }],
+          outputs: [],
+          widgets_values: ["A", "Y", 424242],
+        },
+        {
+          id: 2,
+          type: "PrimitiveNode",
+          mode: 0,
+          inputs: [],
+          outputs: [{ name: "COMBO", type: "COMBO", links: [10] }],
+          widgets_values: ["y1"],
+        },
+      ],
+      links: [[10, 2, 0, 1, 0, "COMBO"]],
+    } as never;
+    const { workflow } = convertUiToApi(ui, info);
+    expect(workflow["1"].inputs.first).toBe("A");
+    // The later parent must KEEP its saved selection, not be defaulted to "X".
+    expect(workflow["1"].inputs.second).toBe("Y");
+  });
+
+  it("DEFAULTS a shifted NESTED leaf on proven arity-shrink even with NO trailing top-level widget (#517 P0 nested-shrink)", () => {
+    // Old option A owned nested [obsolete, strength]; the CURRENT schema's A dropped
+    // `obsolete`, leaving [strength]. Saved ["A", 4, 0.75] was serialized as
+    // [mode, obsolete=4, strength=0.75]. Mapping with the current layout assigns
+    // strength=4 (the OBSOLETE value!) and leaves 0.75 as a leftover. There is NO
+    // trailing top-level widget, so the guard must STILL fire on the leftover and
+    // default the shifted nested leaf — strength must NOT silently be 4.
+    const info = {
+      NestedShrinkNode: {
+        input: {
+          required: {
+            mode: [
+              "COMFY_DYNAMICCOMBO_V3",
+              {
+                options: [
+                  {
+                    key: "A",
+                    // `obsolete` was removed; only `strength` remains.
+                    inputs: { required: { strength: ["FLOAT", { default: 1 }] } },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        input_order: { required: ["mode"] },
+      },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "NestedShrinkNode",
+          mode: 0,
+          inputs: [],
+          outputs: [],
+          widgets_values: ["A", 4, 0.75], // [mode, obsolete=4, strength=0.75]
+        },
+      ],
+      links: [],
+    } as never;
+    const { workflow, warnings } = convertUiToApi(ui, info);
+    expect(workflow["1"].inputs.mode).toBe("A");
+    // The shifted OBSOLETE value must NOT survive on the strength leaf.
+    expect(workflow["1"].inputs["mode.strength"]).not.toBe(4);
+    // It is dropped (absent) so ComfyUI supplies the option's runtime default.
+    expect("mode.strength" in workflow["1"].inputs).toBe(false);
+    expect(
+      warnings.some(
+        (w) => w.includes("1") && /nested-input layout|default/.test(w),
+      ),
+    ).toBe(true);
+  });
+
+  it("does NOT default a later EMPTY-OPTIONS V3 parent when an earlier valid combo set the drift flag (#517 P1 empty-options multi-combo)", () => {
+    // An earlier valid dynamic combo (`first`) sets sawDynamicCombo. The later combo
+    // (`second`) is an EMPTY-OPTIONS V3 whose saved selection is stale → the stale-
+    // parent refusal fires. That refusal must set tailRefused so the leftover guard
+    // does NOT delete `second` — an empty options list has no substitution or default
+    // to restore it from, so deleting it would LOSE the declared parent entirely.
+    const info = {
+      TwoWithEmptyNode: {
+        input: {
+          required: {
+            first: [
+              "COMFY_DYNAMICCOMBO_V3",
+              { options: [{ key: "A", inputs: { required: {} } }] },
+            ],
+            second: ["COMFY_DYNAMICCOMBO_V3", { options: [] }],
+          },
+        },
+        input_order: { required: ["first", "second"] },
+      },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "TwoWithEmptyNode",
+          mode: 0,
+          inputs: [],
+          outputs: [],
+          widgets_values: ["A", "my-model", 42], // first=A, second=my-model + trailing
+        },
+      ],
+      links: [],
+    } as never;
+    const { workflow } = convertUiToApi(ui, info);
+    expect(workflow["1"].inputs.first).toBe("A");
+    // The empty-options parent's declared value is preserved, NOT deleted.
+    expect(workflow["1"].inputs.second).toBe("my-model");
   });
 
   it("PRESERVES a shared SCALAR required leaf under a runtime-linked dynamic parent — not dropped as a non-member (#517 false-positive)", () => {

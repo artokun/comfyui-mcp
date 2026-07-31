@@ -1485,9 +1485,34 @@ export function convertUiToApi(
       }
     } else {
     let widgetIdx = 0;
+    // A still-valid dynamic-combo option whose NESTED arity DRIFTED between save
+    // and load (the option kept its key but added/removed nested inputs) can't be
+    // detected up front — its saved nested slots were serialized against the OLD
+    // arity, but we map using the CURRENT one, so any drift shifts the trailing
+    // top-level widgets (e.g. a since-removed nested "multiplier" leaves its stale
+    // value to land on the seed). The stale-parent guard below only catches a
+    // REMOVED option (key absent). For a still-present option, a LEFTOVER saved
+    // value after the whole positional mapping is the reliable drift signal — a
+    // self-consistent layout consumes exactly. Track whether a still-valid dynamic
+    // combo was processed and which widgets were mapped AFTER it, so on leftover we
+    // can default those (shifted) widgets + warn instead of trusting the shift.
+    let sawDynamicCombo = false;
+    let tailRefused = false;
+    const widgetsAfterDynamicCombo: string[] = [];
+    // Dotted "<combo>.<leaf>" keys assigned positionally from a dynamic combo's
+    // nested layout. On a proven arity drift (leftover) these are ALSO suspect — a
+    // since-removed nested slot shifts every later nested value onto the wrong leaf
+    // (old A=[obsolete, strength], current A=[strength], saved ["A",4,0.75] maps
+    // strength=4, the obsolete value) — so the drift guard defaults them too, not
+    // just the trailing top-level widgets.
+    const nestedKeysFromDynamic: string[] = [];
     for (let nameIdx = 0; nameIdx < widgetNames.length; nameIdx++) {
       const name = widgetNames[nameIdx];
       if (widgetIdx >= widgetValues.length) break;
+      // A widget mapped AFTER a still-valid dynamic combo is positionally
+      // downstream of its (unverifiable) nested arity — record it for the
+      // drift-leftover check below.
+      if (sawDynamicCombo) widgetsAfterDynamicCombo.push(name);
       const value = widgetValues[widgetIdx];
       inputs[name] = value;
       widgetIdx++;
@@ -1617,8 +1642,18 @@ export function convertUiToApi(
             widgetValues.length - widgetIdx
           } saved widget value(s) are left to their defaults rather than risk silently assigning a stale nested value to a later widget (such as a seed).`,
         );
+        // Mark tailRefused so the post-loop leftover drift-guard does NOT ALSO fire
+        // on the leftover this break creates — otherwise, when an EARLIER combo had
+        // set sawDynamicCombo, the guard would delete THIS (stale/empty-options)
+        // parent, which has no substitution or default to be restored from.
+        tailRefused = true;
         break;
       }
+
+      // Still-valid dynamic combo (option key present): its nested arity is trusted
+      // from the CURRENT schema but can't be verified against the save — flag it so
+      // the post-loop leftover check can detect a drift-induced tail shift.
+      if (isDynamicOptions && savedOption !== undefined) sawDynamicCombo = true;
 
       const selectedInputs = savedOption?.inputs;
       const nested =
@@ -1634,12 +1669,35 @@ export function convertUiToApi(
         // non-widget nested inputs (AUTOGROW lists like Nano Banana 2's
         // "images", or IMAGE/link types) have no saved widget value, so skipping
         // them keeps the positional mapping aligned.
+        let refuseTail = false;
         for (const [nName, nSpec] of Object.entries(nested)) {
           if (!isPositionalWidgetSpec(nSpec)) continue;
-          // A linked (converted-to-input) nested leaf has NO positional slot — its
-          // value comes from the link, populated in the link loop below — so it
-          // must NOT consume a widgets_values entry or the tail shifts.
-          if (linkedInputNames.has(`${name}.${nName}`)) continue;
+          // A linked (converted-to-input) nested leaf's value arrives via the link
+          // loop below, NOT the saved array. Other/older frontend versions, though,
+          // RETAIN a serialized placeholder for a converted widget, so the leaf may
+          // OR may not still occupy a widgets_values slot — and that cannot be told
+          // apart positionally. If a placeholder IS present and we skip it without
+          // consuming, the retained value shifts onto the NEXT top-level widget: a
+          // seed silently becomes the placeholder (e.g. widgets_values
+          // [parent, 4(linked-nested placeholder), 424242(seed), "fixed"] would map
+          // seed=4). When trailing saved values remain, the alignment is
+          // unrecoverable, so REFUSE the tail — the same safe pattern as the
+          // stale-parent guard above: warn + leave the remaining top-level widgets
+          // to their defaults rather than risk a silent shift onto a later widget.
+          // (If NO trailing values remain there is nothing to misassign, so the
+          // link simply supplies the leaf and the loop ends.)
+          if (linkedInputNames.has(`${name}.${nName}`)) {
+            if (widgetIdx < widgetValues.length) {
+              warnings.push(
+                `Node ${nodeId} (${classType}): widget "${name}" has a converted-to-input (linked) nested widget "${name}.${nName}" whose widgets_values slot can't be positionally resolved (frontend versions differ on whether a converted widget keeps a placeholder slot), so the remaining ${
+                  widgetValues.length - widgetIdx
+                } saved widget value(s) are left to their defaults rather than risk silently assigning a stale value to a later widget (such as a seed).`,
+              );
+              refuseTail = true;
+              break;
+            }
+            continue;
+          }
           if (widgetIdx >= widgetValues.length) break;
           // Nested leaf values bypass the top-level widget validation, so validate
           // each against ITS OWN leaf spec/name (P1-B). Asset classification keys
@@ -1653,6 +1711,7 @@ export function convertUiToApi(
             nodeId,
             warnings,
           );
+          nestedKeysFromDynamic.push(`${name}.${nName}`);
           widgetIdx++;
           // A nested seed-type / control_after_generate leaf carries a phantom
           // "fixed"/"randomize" value right after it (same as top-level seeds), so
@@ -1664,7 +1723,54 @@ export function convertUiToApi(
             widgetIdx++;
           }
         }
+        // A linked nested leaf with trailing saved values made the alignment
+        // ambiguous — stop mapping the remaining top-level widgets (they
+        // default-fill below) so no retained placeholder can shift onto a seed.
+        // Mark tailRefused so the leftover drift-guard below does NOT ALSO fire on
+        // the leftover this break creates (double-warn + wrongly defaulting a
+        // later dynamic parent when an EARLIER combo had set sawDynamicCombo).
+        if (refuseTail) {
+          tailRefused = true;
+          break;
+        }
       }
+    }
+    // Drift guard: a LEFTOVER saved value after a still-valid dynamic combo means
+    // its nested arity SHRANK since the save (see the sawDynamicCombo note above) —
+    // the current option consumes fewer nested slots than the save held, leaving a
+    // provable leftover. A self-consistent layout consumes exactly; a leftover proves
+    // the positional mapping after (and WITHIN) the drifted combo is shifted: both the
+    // trailing top-level widgets AND the nested dotted leaves may hold a value that
+    // belongs to a since-removed slot (e.g. old A=[obsolete, strength], current
+    // A=[strength], saved ["A",4,0.75] maps strength=4 — the obsolete value). Default
+    // BOTH sets (delete so top-level widgets default-fill below and nested leaves fall
+    // to their runtime option defaults) and warn, rather than trust a silently shifted
+    // value on a later widget (such as a seed) OR a nested leaf. This fires on ANY
+    // leftover — even with no trailing top-level widget — so a shifted nested value
+    // can't survive. (Mirrors the stale-parent + linked-leaf refusals.)
+    //
+    // LIMITATION (accepted): the OPPOSITE drift — the option GAINED nested inputs
+    // since the save — over-consumes trailing values yet often lands on EXACT
+    // consumption, positionally IDENTICAL to a legitimate multi-nested layout (the
+    // canonical Nano Banana node: [prompt, model, aspect_ratio, resolution,
+    // thinking_level, seed, control, response_modalities]). No positional signal
+    // distinguishes the two, so catching arity-GROWTH would require refusing ALL
+    // trailing widgets after every dynamic combo — regressing that real shipping
+    // node. We therefore catch only the provable (leftover) direction. tailRefused
+    // gates out the stale-parent + linked-leaf refusal paths (which already warned +
+    // defaulted the tail) so this guard can't double-warn or default a later, valid
+    // combo parent.
+    if (sawDynamicCombo && !tailRefused && widgetIdx < widgetValues.length) {
+      for (const wn of widgetsAfterDynamicCombo) delete inputs[wn];
+      for (const nk of nestedKeysFromDynamic) delete inputs[nk];
+      const defaulted = [...nestedKeysFromDynamic, ...widgetsAfterDynamicCombo];
+      warnings.push(
+        `Node ${nodeId} (${classType}): a dynamic-combo option's nested-input layout appears to have changed since this workflow was saved (${
+          widgetValues.length - widgetIdx
+        } saved widget value(s) remain unmapped), so its nested leaves and the widget(s) positioned after it${
+          defaulted.length ? ` (${defaulted.join(", ")})` : ""
+        } are left to their defaults rather than risk a silently shifted value on a later widget (such as a seed) or nested leaf.`,
+      );
     }
     }
 
@@ -1838,35 +1944,55 @@ export function convertUiToApi(
         // swallow its warning.
         let anyOption = false;
         let definedEverywhere = true;
-        let memberEverywhere = true;
+        let definedSomewhere = false;
+        // For a LITERAL leaf: it must be an in-list MEMBER of every option that
+        // DEFINES it as a combo. Options that OMIT the leaf are skipped (not failed)
+        // so a leaf defined by only some options is still assessed on the options
+        // that do define it. A scalar/non-combo defining option (getComboOptions
+        // undefined) can't fail membership — it's a normal required input.
+        let memberWhereDefined = true;
         if (Array.isArray(pOpts)) {
           for (const o of pOpts) {
             anyOption = true;
             const s = o?.inputs?.required?.[leaf] ?? o?.inputs?.optional?.[leaf];
             if (s === undefined) {
-              // An option that doesn't define the leaf → orphan if it resolves.
+              // This option omits the leaf entirely (orphan if IT resolves).
               definedEverywhere = false;
-              break;
+              continue;
             }
+            definedSomewhere = true;
             if (leafIsLink) continue; // link ref: definition is all we can check
             const optList = getComboOptions(s);
-            // The membership check applies ONLY to COMBO leaves — those that HAVE
-            // an enumerable option list to validate against. A scalar/non-combo
-            // required leaf (INT/FLOAT/STRING; getComboOptions returns undefined)
-            // is a NORMAL required input, valid whichever option resolves as long
-            // as it's DEFINED (checked via `definedEverywhere` above). Treating a
-            // missing option list as a membership failure would DROP a legitimate
-            // required scalar and cause a missing-required-input error (#517). So
-            // only fail membership when there IS an option list and the value is
-            // out-of-list.
             if (Array.isArray(optList) && !optList.includes(leafVal as never)) {
-              memberEverywhere = false;
-              break;
+              memberWhereDefined = false;
             }
           }
         }
-        if (!anyOption || !definedEverywhere || !memberEverywhere)
-          delete inputs[key];
+        // Decision, split by leaf kind:
+        //  - LINK-REF leaf: its runtime value is unknowable, so the only defense
+        //    against orphaning it under an option that omits the leaf is strict
+        //    default-DENY — keep only if EVERY option defines it. Dropping a link
+        //    ref discards no user-authored scalar (the connection's value is
+        //    runtime), so the strict rule is cheap and safe.
+        //  - LITERAL leaf: it is a concrete USER VALUE. Dropping it just because
+        //    SOME option omits the leaf silently discards the user's input on a
+        //    resolution that may never occur (#517 P0-B: option A defines
+        //    strength=0.75, option B omits it — the strict rule deleted 0.75 even
+        //    though A is the live selection). A deterministic parent never reaches
+        //    this branch (a Primitive/positional parent is a STRING, re-anchored
+        //    against its RESOLVED option in the non-array path above), so here the
+        //    selection is genuinely unknowable — preserve a literal that at least
+        //    one option DEFINES, provided it stays a valid member wherever a
+        //    defining option enumerates options. A wrong-option literal (defined by
+        //    all options but out-of-list for one — the test-1216 case) still fails
+        //    memberWhereDefined and is dropped, so no invalid literal reaches the
+        //    prompt.
+        const drop = !anyOption
+          ? true
+          : leafIsLink
+            ? !definedEverywhere
+            : !definedSomewhere || !memberWhereDefined;
+        if (drop) delete inputs[key];
         continue;
       }
       const { leafName, spec } = resolveWidgetSpec(def, key, inputs);
