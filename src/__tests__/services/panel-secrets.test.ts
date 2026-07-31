@@ -115,6 +115,57 @@ describe("panel-secrets (canonical .env store)", () => {
     expect(cb).toHaveBeenCalledTimes(1);
   });
 
+  // #164 — the "token is now active, retry the action" nudge must be gated on an
+  // OUTSTANDING panel_request_secret. The correlation rides the change event as
+  // `requested`: only an agent-driven request (panel_request_secret) sets it; a
+  // Settings-panel slot save, a background reload, or a revoke leaves it false.
+  describe("change event carries request correlation (#164)", () => {
+    it("marks a Settings-style save (no opts) as NOT requested → no retry nudge", () => {
+      const cb = vi.fn();
+      const off = onComfyuiSecretsChanged(cb);
+      setComfyuiSecret("CIVITAI_API_TOKEN", "tok"); // Settings slot path omits opts
+      off();
+      expect(cb).toHaveBeenCalledTimes(1);
+      expect(cb).toHaveBeenLastCalledWith({ requested: false });
+    });
+
+    it("marks a panel_request_secret save (requested:true) as requested → nudge eligible", () => {
+      const cb = vi.fn();
+      const off = onComfyuiSecretsChanged(cb);
+      setComfyuiSecret("CIVITAI_API_TOKEN", "tok", { requested: true });
+      off();
+      expect(cb).toHaveBeenCalledTimes(1);
+      expect(cb).toHaveBeenLastCalledWith({ requested: true });
+    });
+
+    it("carries the requesting tabId so ONLY that tab is nudged (never a broadcast)", () => {
+      const cb = vi.fn();
+      const off = onComfyuiSecretsChanged(cb);
+      setComfyuiSecret("CIVITAI_API_TOKEN", "tok", { requested: true, tabId: "tab-xyz" });
+      off();
+      expect(cb).toHaveBeenLastCalledWith({ requested: true, tabId: "tab-xyz" });
+    });
+
+    it("drops tabId for a NON-requested change (a stray tabId can't smuggle a nudge)", () => {
+      const cb = vi.fn();
+      const off = onComfyuiSecretsChanged(cb);
+      // Not requested, but a tabId is present on the raw event — must be ignored.
+      setComfyuiSecret("CIVITAI_API_TOKEN", "tok", { tabId: "tab-xyz" });
+      off();
+      expect(cb).toHaveBeenLastCalledWith({ requested: false, tabId: undefined });
+    });
+
+    it("marks a REVOKE as NOT requested → a removed token never nudges 'retry'", () => {
+      setComfyuiSecret("CIVITAI_API_TOKEN", "tok", { requested: true });
+      const cb = vi.fn();
+      const off = onComfyuiSecretsChanged(cb);
+      expect(removeComfyuiSecret("CIVITAI_API_TOKEN")).toBe(true);
+      off();
+      expect(cb).toHaveBeenCalledTimes(1);
+      expect(cb).toHaveBeenLastCalledWith({ requested: false });
+    });
+  });
+
   it("removes a secret from .env + process.env and reports absence", () => {
     setComfyuiSecret("CIVITAI_API_TOKEN", "tok");
     expect(removeComfyuiSecret("CIVITAI_API_TOKEN")).toBe(true);

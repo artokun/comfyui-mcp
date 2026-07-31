@@ -2042,13 +2042,24 @@ export async function runPanelOrchestrator(): Promise<void> {
   // idle so the LIVE comfyui MCP subprocess is recreated WITH the new env, and
   // nudge it to retry the action the secret unblocked. No process restart, no
   // reload fight. The value is never logged — only the env-var KEYS.
-  const unsubscribeSecrets = onComfyuiSecretsChanged(() => {
+  const SECRET_RETRY_NUDGE =
+    "🔑 The API token you just provided is now active for the comfyui tools — retry the action that needed it (e.g. the download that returned 401).";
+  const unsubscribeSecrets = onComfyuiSecretsChanged((change) => {
     manager.setMcpServers(buildMcpServers());
-    manager.restartAllForMcpEnv(
-      "🔑 The API token you just provided is now active for the comfyui tools — retry the action that needed it (e.g. the download that returned 401).",
-    );
+    // EVERY tab's comfyui child needs the new/removed env, so respawn each at its
+    // next idle — but SILENTLY (no nudge). The env rebuild is shared; the "retry
+    // the action" nudge is not, so it must never broadcast to unrelated tabs.
+    // restartAllForMcpEnv() is nudge-preserving, so this can't erase a per-request
+    // nudge already queued on another tab (#164).
+    manager.restartAllForMcpEnv();
+    // NUDGE only the tab whose panel_request_secret this change answers — a
+    // Settings slot save, a background token (re)load, or a revoke leaves
+    // `requested` false and nudges nothing. The per-tab pending-restart map
+    // coalesces, so a repeat event for the same tab can't double-inject (#164).
+    const nudgedTab = change.requested && change.tabId ? change.tabId : null;
+    if (nudgedTab) manager.restartForMcpEnv(agentKeyFor(nudgedTab), SECRET_RETRY_NUDGE);
     logger.info(
-      `[panel-orchestrator] tool secret saved → comfyui MCP env updated + agents respawn on idle (keys: ${comfyuiSecretKeys().join(", ") || "none"})`,
+      `[panel-orchestrator] tool secret ${change.requested ? "saved (requested)" : "changed"} → comfyui MCP env updated + agents respawn on idle${nudgedTab ? ` + retry nudge → tab ${nudgedTab.slice(0, 8)}` : ""} (keys: ${comfyuiSecretKeys().join(", ") || "none"})`,
     );
   });
 

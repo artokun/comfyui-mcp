@@ -113,11 +113,32 @@ export function panelSecretsPath(): string {
 // emitter is enough to tell the orchestrator to re-inject + respawn.
 const emitter = new EventEmitter();
 
-/** Subscribe to "a comfyui tool secret changed". Returns an unsubscribe fn. */
-export function onComfyuiSecretsChanged(cb: () => void): () => void {
-  emitter.on("change", cb);
+/** Payload for a comfyui tool-secret change. `requested` is true ONLY when the
+ *  change ANSWERS an outstanding panel_request_secret (the agent asked the user
+ *  for a token to unblock an action) — a Settings-panel slot save, a background
+ *  (re)load/migration, or a revoke is `false`. The orchestrator gates the
+ *  "token active — retry the action" nudge on this so it is never injected when
+ *  no request was outstanding (#164). */
+export interface ComfyuiSecretChange {
+  requested: boolean;
+  /** The panel tab whose panel_request_secret this change answers, when
+   *  `requested` — so the orchestrator can nudge ONLY that tab's agent to retry
+   *  (never a broadcast to unrelated tabs). Undefined for non-request changes. */
+  tabId?: string;
+}
+
+/** Subscribe to "a comfyui tool secret changed". The callback receives whether
+ *  the change answered an outstanding secret REQUEST and, if so, the requesting
+ *  tab (see ComfyuiSecretChange). Returns an unsubscribe fn. */
+export function onComfyuiSecretsChanged(cb: (change: ComfyuiSecretChange) => void): () => void {
+  const handler = (payload?: Partial<ComfyuiSecretChange>) =>
+    cb({
+      requested: payload?.requested === true,
+      tabId: payload?.requested === true ? payload?.tabId : undefined,
+    });
+  emitter.on("change", handler);
   return () => {
-    emitter.off("change", cb);
+    emitter.off("change", handler);
   };
 }
 
@@ -227,7 +248,11 @@ export function isAllowedSecretKey(key: string): boolean {
  * on idle (the respawn reloads .env → the child gets the new key). Rejects a
  * non-allowlisted key so a stray key can never be written.
  */
-export function setEnvSecret(key: string, value: string): void {
+export function setEnvSecret(
+  key: string,
+  value: string,
+  opts: { requested?: boolean; tabId?: string } = {},
+): void {
   const trimmed = key.trim();
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmed)) {
     throw new Error(`Invalid env var name "${key}" — use a valid shell identifier.`);
@@ -244,7 +269,11 @@ export function setEnvSecret(key: string, value: string): void {
   // agent-ONLY provider key (OPENROUTER/GLM/KIMI…) previously restarted every
   // agent with that nonsensical download-retry message. Agent-only keys fire
   // just "agentChange" (readiness/model refresh) below.
-  if (isAllowedComfyuiSecretKey(trimmed)) emitter.emit("change");
+  // `requested` rides the change so the orchestrator only injects the retry
+  // nudge when this save ANSWERS an outstanding panel_request_secret — a
+  // Settings slot save / background reload / revoke leaves it false (#164).
+  if (isAllowedComfyuiSecretKey(trimmed))
+    emitter.emit("change", { requested: opts.requested === true, tabId: opts.tabId });
   if (isAllowedAgentSecretKey(trimmed)) emitter.emit("agentChange"); // flip provider readiness live
 }
 
@@ -374,7 +403,11 @@ export function comfyuiSecretKeys(): string[] {
  * a change so the orchestrator re-injects it and respawns the server. `value` is
  * the raw secret (the caller already applied any prefix); it is never logged.
  */
-export function setComfyuiSecret(key: string, value: string): void {
+export function setComfyuiSecret(
+  key: string,
+  value: string,
+  opts: { requested?: boolean; tabId?: string } = {},
+): void {
   const trimmed = key.trim();
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmed)) {
     throw new Error(`Invalid env var name "${key}" — use a valid shell identifier (letters, digits, underscore).`);
@@ -385,7 +418,10 @@ export function setComfyuiSecret(key: string, value: string): void {
       `Env var "${trimmed}" is not an accepted comfyui tool secret. Allowed: ${COMFYUI_SECRET_ENV_ALLOWLIST.join(", ")}.`,
     );
   }
-  setEnvSecret(trimmed, value); // canonical store = ~/.comfyui-mcp/.env
+  // `opts.requested` is set ONLY by panel_request_secret (an agent-driven token
+  // ask) so the orchestrator can nudge "retry the action"; the Settings slot
+  // save path (setPanelSecret) omits it → no spurious nudge (#164).
+  setEnvSecret(trimmed, value, opts); // canonical store = ~/.comfyui-mcp/.env
 }
 
 /** Remove a stored comfyui secret. Returns false if absent. Emits on removal. */

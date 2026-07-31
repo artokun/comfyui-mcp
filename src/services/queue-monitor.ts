@@ -46,6 +46,15 @@ interface MonitorState {
   // progress value ticked up) while a job runs. A stuck step re-emits the same
   // progress value, which must NOT refresh this — that's how we see the stall.
   lastActivityTs: number | null;
+  // LIVENESS heartbeats — the server is alive here (even if a long node emits no
+  // FORWARD progress) when EITHER is fresh (#183):
+  //   lastFrameTs      — any ws frame of any type arrived (server socket alive).
+  //   lastServerAliveTs — a /queue HTTP poll SUCCEEDED (server answered).
+  // A busy, progress-silent node (tiled VAE decode, audio/video sampling, a big
+  // model load) keeps the 1 Hz poll fresh, so it is NOT mistaken for a wedge; a
+  // server that stops answering lets both lapse → a real stall still surfaces.
+  lastFrameTs: number | null;
+  lastServerAliveTs: number | null;
   // The most recent completed run (from the /history tail diff or, on older
   // ComfyUI, the execution_success/error WS events). Sticky: survives idle so a
   // tab that connects late still learns what just finished.
@@ -99,6 +108,12 @@ const RECONNECT_MS = 5000;
 // still saturates it (every entry new), we log the potential gap instead of
 // silently claiming coverage.
 const HISTORY_TAIL_ITEMS = 32;
+// Absolute floor of zero-forward-progress time after which a running job is
+// flagged as stalled EVEN when the server still looks alive here — the backstop
+// for a genuine in-node deadlock on a reachable ComfyUI (#183). Far beyond any
+// legitimate single-node runtime (a long tiled VAE decode / video sample is
+// minutes, not half an hour), so it never trips on a healthy render.
+const HARD_STALL_FLOOR_MS = 30 * 60 * 1000; // 30 minutes
 
 class QueueMonitorImpl {
   private ws: WebSocket | null = null;
@@ -120,6 +135,8 @@ class QueueMonitorImpl {
     progressMax: null,
     queueRemaining: 0,
     lastActivityTs: null,
+    lastFrameTs: null,
+    lastServerAliveTs: null,
     lastCompleted: null,
   };
   // ---- HTTP-poll bookkeeping (the broadcast-safe channel on modern ComfyUI) ----
@@ -163,6 +180,10 @@ class QueueMonitorImpl {
     this.completedReported.clear();
     this.pendingCompletions.length = 0;
     this.state.lastCompleted = null;
+    // Liveness heartbeats belong to the OLD target — reset so a fresh target's
+    // stall clock doesn't inherit a stale "alive" (or a stale "dark") reading.
+    this.state.lastFrameTs = null;
+    this.state.lastServerAliveTs = null;
     this.connect();
   }
 
@@ -314,6 +335,10 @@ class QueueMonitorImpl {
     } catch {
       return;
     }
+    // Any decodable frame proves the server's ws is alive right now — a liveness
+    // heartbeat independent of FORWARD progress, so a long progress-silent node
+    // isn't mistaken for a wedge (#183).
+    this.state.lastFrameTs = Date.now();
     const data = (msg.data ?? {}) as Record<string, unknown>;
     switch (msg.type) {
       case "status": {
@@ -498,6 +523,11 @@ class QueueMonitorImpl {
   private applyQueue(raw: unknown, fetchStart: number): void {
     const q = raw as { queue_running?: unknown; queue_pending?: unknown } | null;
     if (!q || typeof q !== "object") return;
+    // The server answered this /queue poll → it's alive here right now. This is
+    // the heartbeat that keeps a long, progress-silent node (VAE decode, model
+    // load) from being flagged as stalled — and that lapses when the server
+    // stops answering, letting a real stall surface (#183).
+    this.state.lastServerAliveTs = fetchStart;
     const running = Array.isArray(q.queue_running) ? q.queue_running : [];
     const pending = Array.isArray(q.queue_pending) ? q.queue_pending : [];
     this.state.queueRemaining = running.length + pending.length;
@@ -609,9 +639,31 @@ class QueueMonitorImpl {
   /** Stall/backlog report for the turn-start injector. */
   report(stallMs: number): StallReport {
     const running = this.state.runningPromptId !== null;
+    const now = Date.now();
     const queueDepth = Math.max(running ? 1 : 0, this.state.queueRemaining);
-    const idleFor = running && this.state.lastActivityTs ? Date.now() - this.state.lastActivityTs : 0;
-    const stalled = running && idleFor >= stallMs;
+    const idleFor = running && this.state.lastActivityTs ? now - this.state.lastActivityTs : 0;
+    // LIVENESS GATE (#183): a legitimately long node emits NO forward progress
+    // for minutes (tiled VAE decode, audio/video sampling, a big model load), so
+    // "no progress for N seconds" alone false-flagged healthy renders. A job is
+    // only stalled when the server has ALSO gone dark HERE — no ws frame and no
+    // successful /queue poll within the window. A reachable ComfyUI keeps the
+    // 1 Hz poll fresh, so a busy decode stays live and is NOT flagged; a server
+    // that stops answering (crashed / event-loop wedged) lets the heartbeat
+    // lapse → a real stall still surfaces.
+    const heartbeatTs = Math.max(this.state.lastServerAliveTs ?? 0, this.state.lastFrameTs ?? 0);
+    const serverAlive = heartbeatTs > 0 && now - heartbeatTs < stallMs;
+    // Backstop so a genuine in-node DEADLOCK on a still-reachable server isn't
+    // suppressed FOREVER: after a long hard floor of zero forward progress, flag
+    // regardless of liveness. A real deadlock usually holds Python's GIL, which
+    // also freezes ComfyUI's own HTTP handler → the /queue heartbeat lapses and
+    // `serverAlive` catches it at stallMs without this floor; the floor only
+    // covers the rarer non-GIL wedge (a node stuck in a network/IO wait) that
+    // keeps HTTP alive. The floor is a deliberate finite tradeoff: a healthy but
+    // progress-silent node exceeding it is re-flagged (unavoidable — "busy" and
+    // "wedged" are indistinguishable from outside past some horizon), so it is
+    // set far beyond any legitimate single-node runtime.
+    const hardStalled = running && idleFor >= Math.max(stallMs, HARD_STALL_FLOOR_MS);
+    const stalled = running && idleFor >= stallMs && (!serverAlive || hardStalled);
     const progress =
       this.state.progressValue !== null && this.state.progressMax !== null
         ? `${this.state.progressValue}/${this.state.progressMax}`

@@ -1275,6 +1275,14 @@ export class PanelAgentManager {
    *  agent so it auto-continues (e.g. retries the download the secret unblocked). */
   restartAllForMcpEnv(nudge?: string): void {
     for (const tabId of this.agents.keys()) {
+      // A SILENT env respawn (no nudge) must NOT downgrade a tab that already has
+      // a retry nudge queued (#164): a concurrent env change on another tab, or a
+      // retarget, would otherwise erase a still-pending per-request nudge before
+      // its busy agent could apply it. Keep the existing nudge; still coalesce.
+      if (nudge === undefined && this.pendingMcpRestart.get(tabId)) {
+        this.applyPendingRestarts(tabId);
+        continue;
+      }
       this.pendingMcpRestart.set(tabId, nudge ?? null);
       // Apply immediately when the tab is already idle; otherwise it fires on the
       // next turn-done via applyPendingRestarts().
@@ -1287,6 +1295,13 @@ export class PanelAgentManager {
    *  at-idle replacement; no-op when the tab has no live agent. */
   restartForMcpEnv(key: string, nudge?: string): void {
     if (!this.agents.has(key)) return;
+    // A SILENT restart (no nudge — a blind-mode toggle #90, a provider-key
+    // refresh #278) must NOT erase a per-request secret nudge already queued for
+    // this tab (#164). A real nudge still replaces/refreshes any existing one.
+    if (nudge === undefined && this.pendingMcpRestart.get(key)) {
+      this.applyPendingRestarts(key);
+      return;
+    }
     this.pendingMcpRestart.set(key, nudge ?? null);
     this.applyPendingRestarts(key);
   }

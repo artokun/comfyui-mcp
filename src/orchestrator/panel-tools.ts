@@ -49,6 +49,7 @@ import { flattenUiWorkflow } from "../services/flatten-workflow.js";
 import { getNsfwConsent, setNsfwConsent } from "../services/panel-settings.js";
 import { QueueMonitor } from "../services/queue-monitor.js";
 import {
+  getClient,
   getObjectInfo,
   backfillObjectInfo,
   resetClient,
@@ -773,54 +774,136 @@ function comfyWorkflowsDirs(): string[] {
   ];
 }
 
-/** Read + parse a UI workflow JSON from disk by path. Resolves an absolute path,
- *  OR a path relative to a ComfyUI workflows dir (COMFYUI_PATH/user/default/workflows,
- *  then user/workflows). Guards: must be .json, must exist/be readable, and must
- *  parse to a UI workflow (a top-level `nodes` array). */
-function readWorkflowFromPath(rawPath: string): Record<string, unknown> {
+/** Validate a parsed value is a UI/litegraph workflow (a top-level `nodes`
+ *  array), throwing a source-labelled error otherwise. */
+function assertUiWorkflow(parsed: unknown, sourceLabel: string): Record<string, unknown> {
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error(`${sourceLabel} did not parse to a workflow object.`);
+  }
+  if (!Array.isArray((parsed as Record<string, unknown>).nodes)) {
+    throw new Error(
+      `${sourceLabel} is not a UI workflow (missing a top-level \`nodes\` array). ` +
+        `Provide a UI/litegraph workflow JSON, not API/prompt format.`,
+    );
+  }
+  return parsed as Record<string, unknown>;
+}
+
+/** Read + parse a UI workflow JSON by path. Resolves an ABSOLUTE path off the
+ *  orchestrator's disk, or a RELATIVE name authoritatively through the CONNECTED
+ *  ComfyUI's userdata API — which resolves under the server's RUNTIME
+ *  `--user-directory` (custom or default), so the RIGHT file always wins and a
+ *  stale same-named file under the guessed default dir can never shadow it
+ *  (#202). Only when the server can't serve the name (404 / unreachable) does it
+ *  fall back to the orchestrator's guessed local workflows dirs, so a
+ *  disk-staged file still opens. Guards: must be .json and must parse to a UI
+ *  workflow (a top-level `nodes` array). Fails loudly (never loads the wrong
+ *  file) when the name resolves nowhere. */
+async function readWorkflowFromPath(rawPath: string): Promise<Record<string, unknown>> {
   const p = (rawPath ?? "").trim();
   if (!p) throw new Error("Provide a non-empty `path` to a workflow .json file.");
   if (!/\.json$/i.test(p)) {
     throw new Error(`"${p}" is not a .json file — pass the path to a ComfyUI workflow JSON.`);
   }
 
-  // Build the candidate absolute paths to try, in order.
-  const candidates: string[] = [];
+  const readLocal = (resolved: string): Record<string, unknown> => {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(readFileSync(resolved, "utf8"));
+    } catch (err) {
+      throw new Error(`"${resolved}" is not valid JSON: ${(err as Error).message}`);
+    }
+    return assertUiWorkflow(parsed, `"${resolved}"`);
+  };
+
+  // ABSOLUTE path → the orchestrator's own disk, unchanged.
   if (isAbsolute(p)) {
-    candidates.push(resolve(p));
-  } else {
-    // Relative to each ComfyUI workflows dir (the common case — a just-staged file).
-    for (const dir of comfyWorkflowsDirs()) candidates.push(resolve(dir, p));
-    // Also relative to the orchestrator's CWD as a last resort.
-    candidates.push(resolve(process.cwd(), p));
-  }
-
-  const resolved = candidates.find((c) => existsSync(c) && statSync(c).isFile());
-  if (!resolved) {
-    const where = isAbsolute(p)
-      ? candidates[0]
-      : `the ComfyUI workflows dir (${comfyWorkflowsDirs().join(" or ") || "COMFYUI_PATH not set"}) or an absolute path`;
+    const resolved = resolve(p);
+    if (existsSync(resolved) && statSync(resolved).isFile()) return readLocal(resolved);
     throw new Error(
-      `No workflow file at "${p}". Looked under ${where}. Pass an absolute path, or a name relative to the ComfyUI workflows folder.`,
+      `No workflow file at "${p}". Looked under ${resolved}. ` +
+        `Pass an absolute path, or a name relative to the ComfyUI workflows folder.`,
     );
   }
 
-  let parsed: unknown;
+  // RELATIVE name → the AUTHORITATIVE source is the connected ComfyUI's userdata
+  // API (the SAME source list_workflows / panel_open_workflow read): it resolves
+  // under the runtime `--user-directory`, so a CUSTOM user-dir loads the correct
+  // file and a stale same-named file under the orchestrator's guessed default
+  // dir can't shadow it (#202). Try it FIRST; fall back to local disk ONLY when
+  // the server genuinely lacks the name (404) or can't be reached — NOT when it
+  // refuses (401/403/5xx) or returns a malformed file, which must surface their
+  // own honest error rather than silently loading a possibly-stale local file.
+  type Outcome =
+    | { kind: "found"; parsed: unknown }
+    | { kind: "malformed"; detail: string } // 2xx but bad JSON → error, no fallback
+    | { kind: "refused"; detail: string } // non-404 HTTP error → error, no fallback
+    | { kind: "absent"; detail: string } // 404 → local fallback allowed
+    | { kind: "unreachable"; detail: string }; // transport failure → local fallback allowed
+  let outcome: Outcome;
   try {
-    parsed = JSON.parse(readFileSync(resolved, "utf8"));
+    const client = getClient();
+    const encoded = encodeURIComponent(`workflows/${p.replace(/^[\\/]+/, "")}`);
+    const res = await client.fetchApi(`/api/userdata/${encoded}`);
+    if (res.ok) {
+      // Read the body as TEXT and classify HERE so a malformed 2xx surfaces its
+      // OWN error (no fallback), while ComfyUI's "200 + EMPTY body = file does
+      // not exist" convention (some builds; see parseWorkflowLock) is treated as
+      // an ABSENCE that DOES allow the local fallback — not a malformed error.
+      const body = (await res.text()).trim();
+      if (body === "") {
+        outcome = { kind: "absent", detail: "was not in the ComfyUI userdata library (empty 200 response)" };
+      } else {
+        try {
+          outcome = { kind: "found", parsed: JSON.parse(body) };
+        } catch (err) {
+          outcome = { kind: "malformed", detail: err instanceof Error ? err.message : String(err) };
+        }
+      }
+    } else if (res.status === 404) {
+      outcome = { kind: "absent", detail: "was not in the ComfyUI userdata library (HTTP 404)" };
+    } else {
+      outcome = { kind: "refused", detail: `ComfyUI userdata library returned HTTP ${res.status}` };
+    }
   } catch (err) {
-    throw new Error(`"${resolved}" is not valid JSON: ${(err as Error).message}`);
+    outcome = {
+      kind: "unreachable",
+      detail: `ComfyUI userdata library was unreachable (${err instanceof Error ? err.message : String(err)})`,
+    };
   }
-  if (!parsed || typeof parsed !== "object") {
-    throw new Error(`"${resolved}" did not parse to a workflow object.`);
+
+  if (outcome.kind === "found") {
+    // A found-but-non-UI file must surface its own honest error, not silence.
+    return assertUiWorkflow(outcome.parsed, `The workflow "${p}" from the ComfyUI userdata library`);
   }
-  if (!Array.isArray((parsed as Record<string, unknown>).nodes)) {
+  if (outcome.kind === "malformed") {
+    throw new Error(`The workflow "${p}" in the ComfyUI userdata library is not valid JSON: ${outcome.detail}`);
+  }
+  if (outcome.kind === "refused") {
+    // Server is reachable but did not serve the file — do NOT fall back to a
+    // possibly-stale local file; report the status honestly.
     throw new Error(
-      `"${resolved}" is not a UI workflow (missing a top-level \`nodes\` array). ` +
-        `Provide a UI/litegraph workflow JSON, not API/prompt format.`,
+      `Could not read "${p}" from the connected ComfyUI: ${outcome.detail}. ` +
+        `Pass an absolute path, or a name shown by panel_list_workflows.`,
     );
   }
-  return parsed as Record<string, unknown>;
+
+  // outcome.kind is "absent" (404) or "unreachable" — fall back to the
+  // orchestrator's guessed local workflows dirs (best-effort; only meaningful on
+  // a same-machine ComfyUI whose user-dir matches the default layout, or a file
+  // staged straight to disk).
+  const localCandidates = [
+    ...comfyWorkflowsDirs().map((dir) => resolve(dir, p)),
+    resolve(process.cwd(), p), // orchestrator CWD as a last local resort
+  ];
+  const local = localCandidates.find((c) => existsSync(c) && statSync(c).isFile());
+  if (local) return readLocal(local);
+
+  throw new Error(
+    `No workflow file at "${p}". It ${outcome.detail}, and it is not under the orchestrator's workflows ` +
+      `dir (${comfyWorkflowsDirs().join(" or ") || "COMFYUI_PATH not set"}). ` +
+      `Pass an absolute path, or a name shown by panel_list_workflows.`,
+  );
 }
 
 // IMPORTANT (Codex parity): use `z.array(z.number())` — NOT `z.tuple([...])` — for
@@ -1048,7 +1131,7 @@ async function resolveWorkflowInput(
   ctx: PanelToolCtx,
 ): Promise<Record<string, unknown>> {
   if (args.pack) return readPackWorkflow(args.pack as string);
-  if (args.path) return readWorkflowFromPath(args.path as string);
+  if (args.path) return await readWorkflowFromPath(args.path as string);
   if (args.graph != null) {
     return (typeof args.graph === "string"
       ? JSON.parse(args.graph as string)
@@ -1641,9 +1724,10 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             // Read the (large) pack graph SERVER-SIDE so it never enters the agent's context.
             data = readPackWorkflow(args.pack as string);
           } else if (args.path) {
-            // Read an arbitrary workflow JSON off the orchestrator's local disk —
-            // same server-side-read pattern as `pack`, keeping the big JSON out of chat.
-            data = readWorkflowFromPath(args.path as string);
+            // Read an arbitrary workflow JSON server-side — a local disk path, or
+            // (for a relative name under a custom --user-directory) the connected
+            // ComfyUI's userdata API — keeping the big JSON out of chat (#202).
+            data = await readWorkflowFromPath(args.path as string);
           } else if (args.graph != null) {
             data = typeof args.graph === "string" ? JSON.parse(args.graph as string) : args.graph;
           } else {
@@ -2001,7 +2085,15 @@ export function buildPanelToolDefs(): PanelToolDef[] {
                 "The built-in comfyui server takes secrets as env vars — use target_kind 'env' (e.g. key 'CIVITAI_API_TOKEN').",
               );
             }
-            setComfyuiSecret(args.key as string, `${(args.value_prefix as string) ?? ""}${secret}`);
+            setComfyuiSecret(args.key as string, `${(args.value_prefix as string) ?? ""}${secret}`, {
+              // This save ANSWERS an outstanding agent secret request — mark it so
+              // the orchestrator injects the "retry the action" nudge, and carry
+              // the requesting tab so ONLY that tab's agent is nudged (never a
+              // broadcast to unrelated tabs). A Settings-panel slot save omits
+              // both and never nudges (#164).
+              requested: true,
+              tabId: ctx.tabId,
+            });
             // Redacted ack ONLY — the secret never enters the agent's context. The
             // respawn is deferred to this turn's end, so this is accurate.
             return ok(

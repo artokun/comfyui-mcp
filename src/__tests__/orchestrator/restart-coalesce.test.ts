@@ -151,4 +151,55 @@ describe("coalesced effort + comfyui-MCP-env restart (P1b)", () => {
     expect(backend.efforts[1]).toBe("low"); // unchanged effort
     expect(backend.turnTexts.filter((t) => t === "RETRY")).toHaveLength(1);
   });
+
+  // #164 — a queued per-request secret nudge must SURVIVE a concurrent SILENT
+  // env respawn: a broadcast restartAllForMcpEnv() (no nudge) and a single-tab
+  // restartForMcpEnv() (no nudge, e.g. a blind-mode toggle / provider-key
+  // refresh) must NOT downgrade the tab's pending nudge to null.
+  describe("silent restart preserves a queued secret nudge (#164)", () => {
+    it("restartAllForMcpEnv() (no nudge) does not erase a tab's pending nudge", async () => {
+      const backend = new RecordingBackend();
+      backend.autoComplete = false; // first turn hangs → agent stays BUSY
+      const manager = makeManager(backend, "low");
+      const tab = "tab-preserve-all";
+
+      manager.send(tab, "hello");
+      await waitFor(() => backend.runCount >= 1 && backend.turnTexts.length >= 1);
+
+      // A panel_request_secret resolved → this tab gets the retry nudge queued.
+      manager.restartForMcpEnv(tab, "RETRY the download");
+      // An UNRELATED secret change now respawns every tab's env SILENTLY.
+      manager.restartAllForMcpEnv();
+
+      backend.autoComplete = true;
+      backend.release();
+      await waitFor(() => backend.runCount >= 2);
+      await new Promise((r) => setTimeout(r, 100));
+      expect(backend.runCount).toBe(2);
+      // The nudge survived the silent respawn and was delivered exactly once.
+      expect(backend.turnTexts.filter((t) => t === "RETRY the download")).toHaveLength(1);
+    });
+
+    it("restartForMcpEnv() (no nudge) does not erase a tab's pending nudge", async () => {
+      const backend = new RecordingBackend();
+      backend.autoComplete = false;
+      const manager = makeManager(backend, "low");
+      const tab = "tab-preserve-single";
+
+      manager.send(tab, "hello");
+      await waitFor(() => backend.runCount >= 1 && backend.turnTexts.length >= 1);
+
+      manager.restartForMcpEnv(tab, "RETRY the download");
+      // A silent single-tab restart (blind toggle / provider-key refresh) on the
+      // SAME tab must keep the nudge.
+      manager.restartForMcpEnv(tab);
+
+      backend.autoComplete = true;
+      backend.release();
+      await waitFor(() => backend.runCount >= 2);
+      await new Promise((r) => setTimeout(r, 100));
+      expect(backend.runCount).toBe(2);
+      expect(backend.turnTexts.filter((t) => t === "RETRY the download")).toHaveLength(1);
+    });
+  });
 });
