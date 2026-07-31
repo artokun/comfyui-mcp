@@ -190,6 +190,62 @@ export async function searchHuggingFaceModels(
   }));
 }
 
+/**
+ * Discover the GGUF model-folder categories a running ComfyUI has registered, by
+ * asking `GET /models` (which returns every key in `folder_names_and_paths`) and
+ * keeping the `*_gguf` ones our static MODEL_SUBDIRS list doesn't already cover.
+ *
+ * This is what fixes #526: core `/models/<dir>` only lists extensions in
+ * `supported_pt_extensions` (no `.gguf`), so a static scan of MODEL_SUBDIRS misses
+ * every GGUF model. But those files are not hidden — ComfyUI-GGUF (and every
+ * derivative) registers its own categories (`unet_gguf`, `clip_gguf`) with a
+ * `.gguf` filter, and ComfyUI serves them over REST like any other category.
+ * Listing them surfaces GGUF models authoritatively: it reflects the LIVE server,
+ * honours extra_model_paths, works remotely, and needs no filesystem scan or folder
+ * guessing — each model is typed by the category ComfyUI itself registered.
+ *
+ * Why only `*_gguf` and not "every non-core category `/models` reports": `/models`
+ * exposes category NAMES but not their extension sets, so there is no safe way to
+ * tell a weight-bearing custom category from an extension-BLIND one (ComfyUI's own
+ * `custom_nodes` / `datasets` register with an empty set and would list every file
+ * under them — source code, arbitrary data — flooding the output). The `_gguf`
+ * suffix is a reliable, self-describing signal for GGUF model folders (the subject
+ * of #526) and cannot flood. Surfacing other loader categories (e.g. TensorRT's
+ * `.engine`) is a separate enhancement that needs per-category extension knowledge.
+ *
+ * Best-effort: returns [] when `/models` is unavailable (older server / error), in
+ * which case the caller still lists the core categories and, offline, the filesystem
+ * fallback still finds `.gguf` files on disk under their real folders.
+ */
+/** A `*_gguf` registry category (ComfyUI-GGUF's `unet_gguf`/`clip_gguf`, …). */
+function isGgufCategory(dir: string): boolean {
+  return /_gguf$/i.test(dir);
+}
+
+async function discoverGgufCategories(
+  client: ReturnType<typeof getClient>,
+): Promise<string[]> {
+  try {
+    const res = await client.fetchApi("/models");
+    if (!res.ok) return [];
+    const json = (await res.json()) as unknown;
+    if (!Array.isArray(json)) return [];
+    const core = new Set<string>(MODEL_SUBDIRS);
+    // Keep `*_gguf` categories only, deduped, minus any the core scan already covers.
+    return [
+      ...new Set(
+        json.filter(
+          (c): c is string =>
+            typeof c === "string" && /_gguf$/i.test(c) && !core.has(c),
+        ),
+      ),
+    ];
+  } catch (err) {
+    logger.debug("HTTP /models category discovery failed", { err });
+    return [];
+  }
+}
+
 export async function listLocalModels(
   modelType?: string,
 ): Promise<LocalModel[]> {
@@ -205,6 +261,13 @@ export async function listLocalModels(
   let httpReturnedAny = false;
   try {
     const client = getClient(); // throws CLOUD_UNSUPPORTED in cloud mode
+    // For an unfiltered listing, also scan ComfyUI-GGUF's registered `*_gguf`
+    // categories (`unet_gguf`/`clip_gguf`, …) holding the `.gguf` weights that core
+    // `/models/<dir>` omits. A filtered call already targets its exact category via
+    // dirsToScan, so it needs no discovery. See #526.
+    if (!modelType) {
+      for (const cat of await discoverGgufCategories(client)) dirsToScan.push(cat);
+    }
     for (const dir of dirsToScan) {
       try {
         const res = await client.fetchApi(`/models/${dir}`);
@@ -213,6 +276,13 @@ export async function listLocalModels(
         if (!Array.isArray(files)) continue;
         for (const name of files) {
           if (typeof name !== "string") continue;
+          // Hardening for any `*_gguf` category (discovered OR explicitly requested):
+          // emit ONLY `.gguf` files. A well-behaved category registers a `{".gguf"}`
+          // filter, but a malformed one could register an EMPTY extension set (which
+          // lists every file) over a shared dir — without this guard that would flood
+          // the output and double-count normal weights already listed under their core
+          // category. Core categories never contain `.gguf`, so this stays additive.
+          if (isGgufCategory(dir) && !name.toLowerCase().endsWith(".gguf")) continue;
           httpReturnedAny = true;
           results.push({
             name,
@@ -249,6 +319,9 @@ export async function listLocalModels(
       continue;
     }
     for (const entry of entries) {
+      // Same `.gguf`-only guard as the HTTP path for `*_gguf` categories (e.g. an
+      // explicit `listLocalModels("unet_gguf")`): never list non-gguf files here.
+      if (isGgufCategory(dir) && !entry.toLowerCase().endsWith(".gguf")) continue;
       const filePath = join(dirPath, entry);
       try {
         const info = await stat(filePath);

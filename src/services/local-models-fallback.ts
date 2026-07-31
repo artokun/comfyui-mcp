@@ -93,12 +93,18 @@ export async function listLocalModelsFallback(args: {
   switch (args.action) {
     case "list-folders": {
       // comfy `models list-folders` reports the model folder names. We list
-      // the folders that actually contain at least one model, keeping the
-      // canonical ordering of MODEL_SUBDIRS.
+      // the folders that actually contain at least one model — the canonical
+      // MODEL_SUBDIRS first (in their canonical order), then any additional
+      // loader-registered categories present (e.g. ComfyUI-GGUF's `unet_gguf`,
+      // `clip_gguf`), so GGUF-only folders aren't silently dropped (#526).
       const models = await listLocalModels();
       if (models.length === 0) await assertLocalSourceAvailable();
       const present = new Set(models.map((m) => m.type));
-      const folders = MODEL_SUBDIRS.filter((f) => present.has(f));
+      const canonical = MODEL_SUBDIRS.filter((f) => present.has(f));
+      const extras = [...present].filter(
+        (t) => !(MODEL_SUBDIRS as readonly string[]).includes(t),
+      );
+      const folders = [...canonical, ...extras];
       return { command: "models list-folders", data: { folders } };
     }
     case "list-folder": {
