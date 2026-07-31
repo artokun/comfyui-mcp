@@ -9,7 +9,7 @@
 // This no-ops entirely when COMFYUI_MCP_PROGRESS_DIR is unset — i.e. for every
 // normal (non-panel) use of the MCP — so it costs nothing outside the panel.
 
-import { mkdirSync, readFileSync, readdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, writeFileSync, renameSync, rmSync } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 
@@ -65,6 +65,15 @@ const lastWriteAt = new Map<string, number>();
 /** True when running under the panel orchestrator (progress channel is active). */
 export function progressEnabled(): boolean {
   return !!PROGRESS_DIR;
+}
+
+/** True when the cross-session persisted job store is active (a channel dir exists,
+ *  from the env var OR the orchestrator's late binding). Unlike progressEnabled(), this
+ *  honors the late-bound dir — so the job registry only runs its persistence heartbeat
+ *  when there is actually somewhere to persist/adopt (avoids a leaked no-op interval on
+ *  plain non-panel downloads). */
+export function persistedRecordsEnabled(): boolean {
+  return !!channelDir();
 }
 
 function fileFor(id: string, target?: string): string {
@@ -383,6 +392,10 @@ export interface PersistedDownloadJob {
   /** The auth-free destination key (local targetPath or canonical remote id) — lets
    *  a caller adopt by DESTINATION as well as by URL, without a duplicate download. */
   dest_key?: string;
+  /** The route-independent request key (url+subfolder+filename+auth) — the SAME across a
+   *  local↔Manager route flip, so cross-session adoption matches a reconnect even when
+   *  the route (and thus the public id) changed. */
+  req_key?: string;
   /** True when dispatched to a remote ComfyUI-Manager (server-side fetch), not streamed
    *  to local disk — a "done" record then means dispatch-accepted, not verified landed. */
   via_manager?: boolean;
@@ -405,13 +418,28 @@ function jobFileFor(id: string): string {
   return join(channelDir(), `${JOB_PREFIX}${sanitizeIdPart(id)}-${PERSIST_OWNER}.json`);
 }
 
+let persistSeq = 0;
+
 /** Persist (or update) a job record so another session can adopt it after a
  *  reconnect (#529). URL is redacted before it touches disk (it can carry query
  *  auth), matching the rest of this channel. Best-effort — a persistence failure
- *  never fails a download. No-op without a progress dir. */
-export function persistDownloadJob(job: Omit<PersistedDownloadJob, "updated">): void {
+ *  never fails a download. No-op without a progress dir.
+ *
+ *  ATOMIC: writes to a unique temp then renames it over the target, so a concurrent
+ *  reader (another session polling for adoption, or this session's heartbeat) NEVER sees
+ *  a half-written/truncated record and treats a live download as absent — which would let
+ *  a reconnect-reissue start a SECOND writer (torn-write double-writer race). fs.rename
+ *  atomically replaces on POSIX and on Windows (libuv MoveFileEx REPLACE_EXISTING). The
+ *  `.tmp` name ends in `.tmp` (not `.json`) so no scanner ever picks up a temp.
+ *
+ *  Returns TRUE iff the record was DURABLY replaced (the atomic rename succeeded), so the
+ *  caller (the heartbeat) can keep retrying a transiently-failing TERMINAL persist until
+ *  the terminal state is durable — otherwise a done/cancelled job could linger as a fresh
+ *  "downloading" record (bounded by the stale reap, but this recovers it sooner). Returns
+ *  false when there is no channel dir (nothing to persist) or the replace didn't happen. */
+export function persistDownloadJob(job: Omit<PersistedDownloadJob, "updated">): boolean {
   const dir = channelDir();
-  if (!dir) return;
+  if (!dir) return false;
   try {
     mkdirSync(dir, { recursive: true });
     const safe: PersistedDownloadJob = {
@@ -420,9 +448,38 @@ export function persistDownloadJob(job: Omit<PersistedDownloadJob, "updated">): 
       url: job.url ? redactUrl(job.url) : job.url,
       updated: Date.now(),
     };
-    writeFileSync(jobFileFor(job.id), JSON.stringify(safe));
+    const body = JSON.stringify(safe);
+    const finalPath = jobFileFor(job.id);
+    const tmpPath = `${finalPath}.${process.pid}-${persistSeq++}.tmp`;
+    writeFileSync(tmpPath, body);
+    // Atomic replace, retried a few times for a TRANSIENT Windows sharing violation (a
+    // reader briefly holding the target open during its own readFileSync). We must NEVER
+    // fall back to an in-place writeFileSync(finalPath): that truncate+rewrite is exactly
+    // the torn-read that lets another process see the record as absent and start a SECOND
+    // writer. On persistent failure we KEEP the prior COMPLETE record untouched and drop
+    // the temp; the next ~15s heartbeat retries the atomic replace (self-healing). A
+    // terminal persist that can't replace ages out via the stale-in-flight reap instead
+    // of ever corrupting the scanned .json.
+    let renamed = false;
+    for (let attempt = 0; attempt < 5 && !renamed; attempt++) {
+      try {
+        renameSync(tmpPath, finalPath); // readers see old or new complete record, never torn
+        renamed = true;
+      } catch {
+        /* transient (e.g. Windows sharing violation) — retry */
+      }
+    }
+    if (!renamed) {
+      try {
+        rmSync(tmpPath, { force: true });
+      } catch {
+        /* ignore — a stray temp is never scanned (ends in .tmp) */
+      }
+    }
+    return renamed;
   } catch {
     // best-effort — adoption is a convenience, never fail a download over it
+    return false;
   }
 }
 
@@ -491,9 +548,14 @@ export function readPersistedDownloadJob(id: string): PersistedDownloadJob | nul
     if (new Set(live.map((j) => j.trayId)).size > 1) return null; // ambiguous live download
     return live.sort((a, b) => (b.updated ?? 0) - (a.updated ?? 0))[0];
   }
-  // No live download — report the most recent record (terminal, or a stale in-flight)
-  // for status. No live ambiguity to guard against here.
-  return matches.sort((a, b) => (b.updated ?? 0) - (a.updated ?? 0))[0];
+  // No live download. INTEGRITY TRUTH (cross-session): a terminal DONE means a validated
+  // file landed at the destination. It must WIN over a later cancelled/error record for
+  // the SAME id — a cancel/error never lands a file, so it must NEVER override another
+  // session's validated-complete file (cancelled-over-complete). Prefer the most-recent
+  // DONE; only if there is none do we report the most-recent terminal record.
+  const done = matches.filter((j) => j.status === "done");
+  const pool = done.length > 0 ? done : matches;
+  return pool.sort((a, b) => (b.updated ?? 0) - (a.updated ?? 0))[0];
 }
 
 /** Every persisted job record (freshest not guaranteed; caller sorts). Used to
@@ -548,6 +610,10 @@ export function findPersistedDownloadJob(query: { trayId?: string; destKey?: str
     if (new Set(live.map(distinctKey)).size > 1) return null; // ambiguous live download
     return live.sort((a, b) => (b.updated ?? 0) - (a.updated ?? 0))[0];
   }
-  // No live download — report the most recent record (terminal/stale) for status.
-  return matches.sort((a, b) => (b.updated ?? 0) - (a.updated ?? 0))[0];
+  // No live download. INTEGRITY TRUTH: a terminal DONE (validated file landed) must WIN
+  // over a later cancelled/error record for the same destination — never override a
+  // validated-complete file. Prefer the most-recent DONE, else the most-recent terminal.
+  const done = matches.filter((j) => j.status === "done");
+  const pool = done.length > 0 ? done : matches;
+  return pool.sort((a, b) => (b.updated ?? 0) - (a.updated ?? 0))[0];
 }

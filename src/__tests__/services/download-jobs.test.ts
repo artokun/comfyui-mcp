@@ -124,10 +124,17 @@ async function writeForeignJobRecord(
     url: string;
     owner: string;
     dest_key?: string;
+    /** Route-independent request key (for local↔Manager route-flip adoption). */
+    req_key?: string;
     /** Age of the record's `updated` stamp in ms (defaults to fresh). */
     ageMs?: number;
+    /** Terminal status to simulate (defaults to an in-flight "downloading" record). */
+    status?: "downloading" | "done" | "error" | "cancelled";
+    /** Landed path for a "done" record. */
+    path?: string;
   },
 ): Promise<void> {
+  const status = rec.status ?? "downloading";
   const body = {
     id: rec.id,
     trayId: rec.trayId,
@@ -135,8 +142,11 @@ async function writeForeignJobRecord(
     url: rec.url,
     target_subfolder: "loras",
     dest_key: rec.dest_key,
-    status: "downloading",
+    req_key: rec.req_key,
+    status,
+    path: rec.path,
     started_at: Date.now(),
+    finished_at: status === "downloading" ? undefined : Date.now(),
     owner: rec.owner,
     updated: Date.now() - (rec.ageMs ?? 0),
   };
@@ -1043,6 +1053,33 @@ describe("download job registry", () => {
       }
     });
 
+    it("never reads a half-written temp as a record (atomic-write safety → no torn-read missed adoption)", async () => {
+      const dir = await mkdtemp(pathJoin(tmpdir(), "djobs-persist-"));
+      setProgressDir(dir);
+      try {
+        // A valid, complete in-flight record.
+        await writeForeignJobRecord(dir, {
+          id: "validid000000001",
+          trayId: "validtray0000001",
+          progressId: "p",
+          url: URL_A,
+          owner: "sess",
+        });
+        // A half-written atomic-write temp with GARBAGE bytes (what a reader could see if
+        // persist wrote in place). Its name ends in `.tmp`, so no scanner reads it.
+        await writeFile(
+          pathJoin(dir, `control-job-validid000000001-sess.json.99999-0.tmp`),
+          "{ half-written garba",
+        );
+        // Readers see only the complete record — never the torn temp.
+        expect(getDownloadJob("validid000000001")?.status).toBe("downloading");
+        expect(listDownloadJobs().filter((j) => j.id === "validid000000001")).toHaveLength(1);
+      } finally {
+        setProgressDir("");
+        await fsRm(dir, { recursive: true, force: true });
+      }
+    });
+
     it("reaps a DEAD (crashed-writer) in-flight record so it is not reported as still streaming", async () => {
       const dir = await mkdtemp(pathJoin(tmpdir(), "djobs-persist-"));
       setProgressDir(dir);
@@ -1080,6 +1117,230 @@ describe("download job registry", () => {
         const adopted = getDownloadJob(id);
         expect(adopted?.status).toBe("done");
         expect(adopted?.path).toBe("/M/checkpoints/big.safetensors");
+      } finally {
+        setProgressDir("");
+        await fsRm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("a reconnect + reissue ADOPTS another session's in-flight download instead of starting a SECOND writer", async () => {
+      const dir = await mkdtemp(pathJoin(tmpdir(), "djobs-persist-"));
+      setProgressDir(dir);
+      try {
+        // Session A started the download (this test process stands in for it to compute
+        // the real deterministic id), then a DIFFERENT session (owner) owns it in flight.
+        const a = await startDownloadJob(URL_A, "checkpoints");
+        const id = a.job.id;
+        expect(hoisted.calls).toBe(1);
+        // Simulate the OTHER session owning the in-flight download, and this session NOT
+        // having it: rewrite the record under a different owner and drop our own copy +
+        // in-memory registry (a reconnect is a NEW process = NEW owner).
+        await fsRm(pathJoin(dir, `control-job-${id}-${PERSIST_OWNER}.json`), { force: true });
+        await writeForeignJobRecord(dir, {
+          id,
+          trayId: a.job.trayId,
+          progressId: `prog-${URL_A}`,
+          url: URL_A,
+          owner: `${PERSIST_OWNER}-other`,
+          dest_key: a.job.destKey,
+        });
+        resetDownloadJobs();
+
+        // Reissue the SAME url/destination — must ADOPT the foreign in-flight job.
+        const b = await startDownloadJob(URL_A, "checkpoints");
+        expect(b.job.id).toBe(id);
+        expect(b.job.status).toBe("downloading");
+        // Crucially: NO second physical writer was started for the same file.
+        expect(hoisted.calls).toBe(1);
+        // The adopted view is read-only (not registered) — settled resolves immediately.
+        await expect(b.settled).resolves.toBeUndefined();
+      } finally {
+        setProgressDir("");
+        await fsRm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("this session's IN-MEMORY cancelled does NOT mask another session's validated DONE (same id)", async () => {
+      const dir = await mkdtemp(pathJoin(tmpdir(), "djobs-persist-"));
+      setProgressDir(dir);
+      try {
+        // This session (A) is cancelled locally — its in-memory record is terminal cancelled.
+        const a = await startDownloadJob(URL_A, "checkpoints");
+        cancelDownloadJob(a.job.id);
+        await a.settled;
+        expect(a.job.status).toBe("cancelled");
+        // Another session (B) landed + VALIDATED the SAME file (done), same id + trayId.
+        await writeForeignJobRecord(dir, {
+          id: a.job.id,
+          trayId: a.job.trayId,
+          progressId: `prog-${URL_A}`,
+          url: URL_A,
+          owner: `${PERSIST_OWNER}-other`,
+          status: "done",
+          path: "/M/checkpoints/big.safetensors",
+        });
+
+        // NON-reconnect: A is STILL in this process's in-memory registry as cancelled — but
+        // getDownloadJob and the no-selector list must report B's validated DONE, not A's cancelled.
+        const got = getDownloadJob(a.job.id);
+        expect(got?.status).toBe("done");
+        expect(got?.path).toBe("/M/checkpoints/big.safetensors");
+        const listed = listDownloadJobs().find((j) => j.id === a.job.id && j.trayId === a.job.trayId);
+        expect(listed?.status).toBe("done");
+      } finally {
+        setProgressDir("");
+        await fsRm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("adopts across a local↔Manager route flip via the route-independent reqKey (not just id)", async () => {
+      const dir = await mkdtemp(pathJoin(tmpdir(), "djobs-persist-"));
+      setProgressDir(dir);
+      try {
+        // This session runs LOCAL → public id = destination hash; capture its reqKey.
+        const a = await startDownloadJob(URL_A, "checkpoints");
+        const reqKey = a.job.reqKey!;
+        const localId = a.job.id;
+        expect(reqKey).toBeTruthy();
+        // The OTHER session ran the SAME request via the MANAGER route → a DIFFERENT public
+        // id (keyed by the request key) but the SAME reqKey + trayId. Remove our own record.
+        await fsRm(pathJoin(dir, `control-job-${localId}-${PERSIST_OWNER}.json`), { force: true });
+        await writeForeignJobRecord(dir, {
+          id: reqKey, // remote route keys the public id by the request key
+          trayId: a.job.trayId,
+          progressId: "foreign-prog",
+          url: URL_A,
+          owner: `${PERSIST_OWNER}-other`,
+          req_key: reqKey,
+        });
+        resetDownloadJobs();
+
+        // Reissue LOCALLY (our id = destination hash ≠ the foreign remote id) — must still
+        // ADOPT the foreign in-flight download via the route-independent reqKey, not
+        // double-write.
+        const b = await startDownloadJob(URL_A, "checkpoints");
+        expect(b.job.id).toBe(reqKey); // adopted the foreign (remote-keyed) record
+        expect(b.job.status).toBe("downloading");
+        expect(hoisted.calls).toBe(1); // NO second physical writer
+      } finally {
+        setProgressDir("");
+        await fsRm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("stops a completed job's heartbeat when persistence goes inactive (no forever-retrying interval)", async () => {
+      const dir = await mkdtemp(pathJoin(tmpdir(), "djobs-persist-"));
+      setProgressDir(dir);
+      vi.useFakeTimers();
+      const clearSpy = vi.spyOn(globalThis, "clearInterval");
+      try {
+        const entry = await startDownloadJob(URL_A, "checkpoints");
+        const hb = (entry as { heartbeat?: ReturnType<typeof setInterval> }).heartbeat;
+        expect(hb).toBeDefined();
+        // Persistence goes INACTIVE, then the download completes. The settled finally's
+        // terminal persist no-ops (no dir → not durable), so it does NOT clear the
+        // heartbeat there — the heartbeat itself must stop on its next tick.
+        setProgressDir("");
+        hoisted.resolvers[0].resolve("/M/checkpoints/big.safetensors");
+        await entry.settled;
+        clearSpy.mockClear();
+        // One heartbeat tick later, the terminal branch clears the interval (persistence
+        // inactive) — a completed job's interval never does filesystem work forever.
+        await vi.advanceTimersByTimeAsync(15_001);
+        expect(clearSpy).toHaveBeenCalledWith(hb);
+      } finally {
+        vi.useRealTimers();
+        setProgressDir("");
+        await fsRm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("installs a heartbeat only when the persisted store is active (no leak on non-panel downloads)", async () => {
+      // No progress dir → persistence inactive → NO heartbeat interval (would otherwise
+      // leak, retrying a no-op forever since persist never reports durable).
+      const noPanel = await startDownloadJob(URL_A, "checkpoints");
+      expect((noPanel as { heartbeat?: unknown }).heartbeat).toBeUndefined();
+
+      // With a progress dir → a heartbeat is installed (and cleared by resetDownloadJobs).
+      const dir = await mkdtemp(pathJoin(tmpdir(), "djobs-persist-"));
+      setProgressDir(dir);
+      try {
+        const panel = await startDownloadJob(URL_B, "loras");
+        expect((panel as { heartbeat?: unknown }).heartbeat).toBeDefined();
+      } finally {
+        setProgressDir("");
+        await fsRm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("does NOT adopt a foreign live download of a DIFFERENT url to the same destination (same id, different trayId)", async () => {
+      const dir = await mkdtemp(pathJoin(tmpdir(), "djobs-persist-"));
+      setProgressDir(dir);
+      try {
+        // Discover the deterministic id for URL_A → checkpoints, then clear everything.
+        const probe = await startDownloadJob(URL_A, "checkpoints");
+        const id = probe.job.id;
+        const destKey = probe.job.destKey;
+        await fsRm(pathJoin(dir, `control-job-${id}-${PERSIST_OWNER}.json`), { force: true });
+        resetDownloadJobs();
+        // A foreign session is live-downloading a DIFFERENT source url (different trayId)
+        // to the SAME destination+auth (same id).
+        await writeForeignJobRecord(dir, {
+          id,
+          trayId: "differenturltray",
+          progressId: "foreign-prog",
+          url: URL_B,
+          owner: `${PERSIST_OWNER}-other`,
+          dest_key: destKey,
+        });
+
+        // Reissuing URL_A must NOT adopt the foreign URL_B download — it's a distinct
+        // logical download. We start our OWN writer for URL_A.
+        const b = await startDownloadJob(URL_A, "checkpoints");
+        expect(b.job.trayId).toBe(downloadIdFor(URL_A)); // OUR url, not the foreign one
+        expect(b.job.status).toBe("downloading");
+        expect(hoisted.calls).toBe(2); // our own writer started (probe was call 1)
+      } finally {
+        setProgressDir("");
+        await fsRm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("a validated DONE record WINS over a LATER same-id cancelled/error record (no cancelled-over-complete)", async () => {
+      const dir = await mkdtemp(pathJoin(tmpdir(), "djobs-persist-"));
+      setProgressDir(dir);
+      try {
+        const sharedId = "sharedid00000001";
+        const sharedTray = "sharedtray000001";
+        // Session B landed + VALIDATED the file (done) — EARLIER.
+        await writeForeignJobRecord(dir, {
+          id: sharedId,
+          trayId: sharedTray,
+          progressId: "shared-prog",
+          url: URL_A,
+          owner: "sessionB",
+          status: "done",
+          path: "/M/checkpoints/m.safetensors",
+          ageMs: 5000, // 5s ago
+        });
+        // Session A cancelled the SAME id LATER — must NOT override the validated file.
+        await writeForeignJobRecord(dir, {
+          id: sharedId,
+          trayId: sharedTray,
+          progressId: "shared-prog",
+          url: URL_A,
+          owner: "sessionA",
+          status: "cancelled",
+          ageMs: 0, // now (newer than the done)
+        });
+
+        // download_status(id) MUST report the validated DONE, not the newer cancelled.
+        const got = getDownloadJob(sharedId);
+        expect(got?.status).toBe("done");
+        expect(got?.path).toBe("/M/checkpoints/m.safetensors");
+        // The no-selector list must also surface the DONE for that (id, trayId), not the cancelled.
+        const listed = listDownloadJobs().find((j) => j.id === sharedId && j.trayId === sharedTray);
+        expect(listed?.status).toBe("done");
       } finally {
         setProgressDir("");
         await fsRm(dir, { recursive: true, force: true });

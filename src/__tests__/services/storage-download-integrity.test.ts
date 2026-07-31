@@ -88,4 +88,42 @@ describe("S3 download integrity (#343)", () => {
     await downloadS3ToFile("s3://bucket/nolen.safetensors", target);
     await expect(readFile(target, "utf-8")).resolves.toBe("no-length-header-body");
   });
+
+  it("#515: threads the AbortSignal into the S3 request AND aborts the write pipeline (cancel actually cancels)", async () => {
+    // A Body that emits one chunk then STALLS forever, so we can abort mid-pipeline —
+    // proving the signal reaches the write pipeline and stops the cloud stream (not a
+    // no-op that runs to completion).
+    const body = new Readable({ read() {} });
+    body.push(Buffer.from("partial-cloud-bytes"));
+    // never push(null) → the stream never ends on its own
+    s3Send.mockResolvedValueOnce({ Body: body, ContentLength: 1_000_000 });
+
+    const controller = new AbortController();
+    const p = downloadS3ToFile("s3://bucket/abort.safetensors", target, undefined, controller.signal);
+    await new Promise((r) => setTimeout(r, 20));
+    controller.abort();
+
+    // The transfer rejects on abort (it does NOT hang or silently complete).
+    await expect(p).rejects.toThrow();
+    // The abort signal was passed to the S3 request itself (request-level cancellation).
+    expect(s3Send).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ abortSignal: controller.signal }),
+    );
+    // Best-effort cleanup: the write stream is destroyed on abort.
+    body.destroy();
+  });
+
+  it("#515: a pre-aborted signal aborts the S3 download before it completes", async () => {
+    const body = new Readable({ read() {} });
+    body.push(Buffer.from("bytes"));
+    s3Send.mockResolvedValueOnce({ Body: body, ContentLength: 1_000_000 });
+
+    const controller = new AbortController();
+    controller.abort(); // already aborted before we start
+    await expect(
+      downloadS3ToFile("s3://bucket/pre-abort.safetensors", target, undefined, controller.signal),
+    ).rejects.toThrow();
+    body.destroy();
+  });
 });
