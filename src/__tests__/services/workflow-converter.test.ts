@@ -1746,11 +1746,21 @@ describe("convertUiToApi — linked PrimitiveNode combo validation (P1-A, #504)"
         [11, 2, 0, 3, 1, "COMBO"],
       ],
     } as never;
-    const { workflow } = convertUiToApi(ui, info);
+    const { workflow, warnings } = convertUiToApi(ui, info);
     // Parent stays a runtime link ref…
     expect(Array.isArray(workflow["3"].inputs.model)).toBe(true);
     // …but the leaf, not defined by every option, is dropped (would orphan under B).
     expect("model.choice" in workflow["3"].inputs).toBe(false);
+    // …and the drop MUST be warned (FIX 2) — a silently removed link is the bug class.
+    expect(
+      warnings.some(
+        (w) =>
+          w.includes("3") &&
+          w.includes("model.choice") &&
+          w.includes("model") &&
+          /dropped|link/.test(w),
+      ),
+    ).toBe(true);
   });
 
   it("KEEPS a real-LINK dotted leaf under a real-LINK parent when EVERY option defines the leaf", () => {
@@ -2524,6 +2534,81 @@ describe("convertUiToApi — option-bearing / dynamic nested combo validation (P
     expect(workflow["1"].inputs.first).toBe("A");
     // The empty-options parent's declared value is preserved, NOT deleted.
     expect(workflow["1"].inputs.second).toBe("my-model");
+  });
+
+  it("does NOT delete VALID earlier values when a LATER combo refuses — a refusal's expected leftover is not a drift signal (#517 FIX 1 no-false-positive)", () => {
+    // `first` is a valid dynamic combo with a correctly-mapped nested leaf
+    // (first.note="hello"); `count`=7 is an ordinary widget after it; `second` is a
+    // dynamic combo whose nested `choice` is LINKED, so it hits the linked-leaf
+    // refusal with saved values remaining. The refusal INTENTIONALLY leaves a
+    // leftover — that leftover must NOT be read as "first drifted" and cause the guard
+    // to delete the perfectly valid first.note and count. (A refusal suppresses the
+    // drift guard for the whole node; earlier drift, if any, is positionally
+    // indistinguishable from this valid layout and falls to the accepted limitation.)
+    const info = {
+      MixedNode: {
+        input: {
+          required: {
+            first: [
+              "COMFY_DYNAMICCOMBO_V3",
+              {
+                options: [
+                  {
+                    key: "A",
+                    inputs: { required: { note: ["STRING", {}] } },
+                  },
+                ],
+              },
+            ],
+            count: ["INT", { default: 0 }],
+            second: [
+              "COMFY_DYNAMICCOMBO_V3",
+              {
+                options: [
+                  {
+                    key: "Y",
+                    inputs: {
+                      required: { choice: ["COMBO", { options: ["y1"] }] },
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        input_order: { required: ["first", "count", "second"] },
+      },
+      PrimitiveNode: { input: { required: {} } },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "MixedNode",
+          mode: 0,
+          // second.choice is converted-to-input (linked).
+          inputs: [{ name: "second.choice", type: "COMBO", link: 10 }],
+          outputs: [],
+          widgets_values: ["A", "hello", 7, "Y", 424242],
+        },
+        {
+          id: 2,
+          type: "PrimitiveNode",
+          mode: 0,
+          inputs: [],
+          outputs: [{ name: "COMBO", type: "COMBO", links: [10] }],
+          widgets_values: ["y1"],
+        },
+      ],
+      links: [[10, 2, 0, 1, 0, "COMBO"]],
+    } as never;
+    const { workflow } = convertUiToApi(ui, info);
+    expect(workflow["1"].inputs.first).toBe("A");
+    // The valid earlier nested leaf and widget must be PRESERVED, not deleted.
+    expect(workflow["1"].inputs["first.note"]).toBe("hello");
+    expect(workflow["1"].inputs.count).toBe(7);
+    // The later linked-leaf combo keeps its saved selection.
+    expect(workflow["1"].inputs.second).toBe("Y");
   });
 
   it("PRESERVES a shared SCALAR required leaf under a runtime-linked dynamic parent — not dropped as a non-member (#517 false-positive)", () => {

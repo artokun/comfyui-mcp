@@ -1497,7 +1497,16 @@ export function convertUiToApi(
     // combo was processed and which widgets were mapped AFTER it, so on leftover we
     // can default those (shifted) widgets + warn instead of trusting the shift.
     let sawDynamicCombo = false;
-    let tailRefused = false;
+    // Set when ANY combo hits a refusal (stale/empty-options parent, or a linked-
+    // nested leaf). A refusal INTENTIONALLY stops mapping and leaves the tail
+    // unconsumed, so the leftover it creates is EXPECTED — it does NOT prove that an
+    // EARLIER combo drifted. Positionally, a valid layout ([first, first.note,
+    // count, second→refuse]) and a drifted one are IDENTICAL once a refusal is
+    // present, so acting on that leftover would DELETE valid earlier values (a real
+    // regression). Therefore a refusal suppresses the leftover drift guard entirely
+    // for this node; the drift guard fires only on a leftover with NO refusal, where
+    // it unambiguously means the arity shrank.
+    let refusalOccurred = false;
     const widgetsAfterDynamicCombo: string[] = [];
     // Dotted "<combo>.<leaf>" keys assigned positionally from a dynamic combo's
     // nested layout. On a proven arity drift (leftover) these are ALSO suspect — a
@@ -1642,11 +1651,9 @@ export function convertUiToApi(
             widgetValues.length - widgetIdx
           } saved widget value(s) are left to their defaults rather than risk silently assigning a stale nested value to a later widget (such as a seed).`,
         );
-        // Mark tailRefused so the post-loop leftover drift-guard does NOT ALSO fire
-        // on the leftover this break creates — otherwise, when an EARLIER combo had
-        // set sawDynamicCombo, the guard would delete THIS (stale/empty-options)
-        // parent, which has no substitution or default to be restored from.
-        tailRefused = true;
+        // A refusal's leftover is expected and can't be attributed to earlier drift,
+        // so suppress the drift guard for this node (see refusalOccurred note).
+        refusalOccurred = true;
         break;
       }
 
@@ -1726,11 +1733,11 @@ export function convertUiToApi(
         // A linked nested leaf with trailing saved values made the alignment
         // ambiguous — stop mapping the remaining top-level widgets (they
         // default-fill below) so no retained placeholder can shift onto a seed.
-        // Mark tailRefused so the leftover drift-guard below does NOT ALSO fire on
-        // the leftover this break creates (double-warn + wrongly defaulting a
-        // later dynamic parent when an EARLIER combo had set sawDynamicCombo).
+        // This refusal's leftover is expected, so suppress the drift guard for this
+        // node (see refusalOccurred note) — otherwise it would delete valid earlier
+        // widgets/leaves mapped before this refusing combo.
         if (refuseTail) {
-          tailRefused = true;
+          refusalOccurred = true;
           break;
         }
       }
@@ -1749,18 +1756,29 @@ export function convertUiToApi(
     // leftover — even with no trailing top-level widget — so a shifted nested value
     // can't survive. (Mirrors the stale-parent + linked-leaf refusals.)
     //
-    // LIMITATION (accepted): the OPPOSITE drift — the option GAINED nested inputs
-    // since the save — over-consumes trailing values yet often lands on EXACT
-    // consumption, positionally IDENTICAL to a legitimate multi-nested layout (the
-    // canonical Nano Banana node: [prompt, model, aspect_ratio, resolution,
-    // thinking_level, seed, control, response_modalities]). No positional signal
-    // distinguishes the two, so catching arity-GROWTH would require refusing ALL
-    // trailing widgets after every dynamic combo — regressing that real shipping
-    // node. We therefore catch only the provable (leftover) direction. tailRefused
-    // gates out the stale-parent + linked-leaf refusal paths (which already warned +
-    // defaulted the tail) so this guard can't double-warn or default a later, valid
-    // combo parent.
-    if (sawDynamicCombo && !tailRefused && widgetIdx < widgetValues.length) {
+    // LIMITATION (accepted, BROAD): only the direction that nets to a LEFTOVER is
+    // catchable. Any nested-arity drift that nets to EXACT consumption is positionally
+    // INDISTINGUISHABLE from a legitimate layout and CANNOT be caught from
+    // widgets_values alone. That covers not just arity-GROWTH (option gained nested
+    // inputs) but ALSO arity-SHRINK masked by a newly-added TOP-LEVEL widget (a
+    // removed nested slot canceled by an added trailing widget → exact), and the
+    // multi-combo variants of both. Catching any of these would require refusing ALL
+    // trailing widgets after every dynamic combo — which regresses the canonical Nano
+    // Banana multi-nested node ([prompt, model, aspect_ratio, resolution,
+    // thinking_level, seed, control, response_modalities], an existing passing test).
+    // So this guard catches only the provable (leftover) direction.
+    //
+    // ALSO ACCEPTED (undecidable when a REFUSAL is present): a refusal (linked-leaf
+    // or stale/empty-options parent) INTENTIONALLY stops mapping, so the leftover it
+    // creates is EXPECTED and cannot be attributed to an earlier combo's drift — a
+    // valid layout ([first, first.note, count, second→refuse]) and a drifted one are
+    // positionally IDENTICAL once a refusal is present. Acting on that leftover would
+    // DELETE valid earlier values, so `refusalOccurred` suppresses this guard for the
+    // whole node. (Any earlier drift then falls to the accepted exact-consumption
+    // class above — a refusal's leftover is not a reliable drift signal.) The guard
+    // therefore fires ONLY on a leftover with NO refusal, where it unambiguously means
+    // the arity shrank.
+    if (sawDynamicCombo && !refusalOccurred && widgetIdx < widgetValues.length) {
       for (const wn of widgetsAfterDynamicCombo) delete inputs[wn];
       for (const nk of nestedKeysFromDynamic) delete inputs[nk];
       const defaulted = [...nestedKeysFromDynamic, ...widgetsAfterDynamicCombo];
@@ -1992,7 +2010,19 @@ export function convertUiToApi(
           : leafIsLink
             ? !definedEverywhere
             : !definedSomewhere || !memberWhereDefined;
-        if (drop) delete inputs[key];
+        if (drop) {
+          // A dropped LINK-REF leaf is a real connection the user wired — deleting it
+          // silently would make the parent's runtime option fall back to its default
+          // with no trace (FIX 2, #517). Keep the strict default-deny (safest against
+          // orphaning under an option that omits the leaf), but WARN so the removed
+          // link + parent are surfaced rather than silently discarded.
+          if (leafIsLink) {
+            warnings.push(
+              `Node ${nodeId} (${classType}): the linked nested input "${key}" was dropped — its dynamic parent "${parent}" is fed by a runtime link (resolved option unknown) and not every option defines "${leaf}", so keeping the connection could orphan it under an option that omits the leaf. "${leaf}" will use the resolved option's default instead of the wired link.`,
+            );
+          }
+          delete inputs[key];
+        }
         continue;
       }
       const { leafName, spec } = resolveWidgetSpec(def, key, inputs);
