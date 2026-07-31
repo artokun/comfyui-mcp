@@ -1485,7 +1485,8 @@ export function convertUiToApi(
       }
     } else {
     let widgetIdx = 0;
-    for (const name of widgetNames) {
+    for (let nameIdx = 0; nameIdx < widgetNames.length; nameIdx++) {
+      const name = widgetNames[nameIdx];
       if (widgetIdx >= widgetValues.length) break;
       const value = widgetValues[widgetIdx];
       inputs[name] = value;
@@ -1539,15 +1540,72 @@ export function convertUiToApi(
       //
       // Look up the option by the RAW saved `value` (the selection the array was
       // serialized against), NOT the post-validation inputs[name]. If the saved
-      // selection is stale (substituted for a valid one), its ORIGINAL nested
-      // arity is unrecoverable, so we deliberately consume NO nested slots rather
-      // than guess against the replacement option's layout — guessing would
-      // silently steal or drop the trailing top-level widgets (e.g. a seed). The
-      // parent value is still substituted+warned above; required nested inputs of
-      // the replacement simply fall through to default-fill.
-      const selectedInputs = Array.isArray(opts)
-        ? opts.find((o) => o?.key === value)?.inputs
+      // selection is stale (its option was removed/renamed), its ORIGINAL nested
+      // arity is unrecoverable, so consuming zero nested slots while still
+      // advancing the top-level index would silently misassign a leftover nested
+      // value onto the trailing top-level widgets (e.g. a removed option's nested
+      // strength overwriting the user's seed). The stale-parent guard below REFUSES
+      // that case (warn + stop) instead of guessing.
+      // A V3 (object-keyed) dynamic options list has {key, inputs} entries — only
+      // these can add nested positional slots. A classic string-option COMBO
+      // (["a","b"]) never does, and its elements have no `.key`, so it must NOT
+      // trip the stale-parent guard below (which would wrongly refuse a perfectly
+      // valid classic-combo value).
+      const isDynamicOptions =
+        Array.isArray(opts) &&
+        opts.some(
+          (o) =>
+            o != null &&
+            typeof o === "object" &&
+            !Array.isArray(o) &&
+            "key" in (o as Record<string, unknown>),
+        );
+      const savedOption = Array.isArray(opts)
+        ? opts.find((o) => o?.key === value)
         : undefined;
+
+      // P0 (#517): STALE dynamic-combo parent. The saved selection is NOT among
+      // the current dynamic options (the option was removed/renamed, or was
+      // substituted above). The saved array was serialized against the OLD
+      // option's layout: [parent, <OLD option's nested slots>, ...trailing
+      // top-level widgets...]. The OLD nested arity is unknowable from THIS schema,
+      // so the pre-fix code consumed ZERO nested slots while still advancing the
+      // top-level index — silently mapping a leftover stale nested value onto the
+      // next widget (e.g. a removed option's strength=0.75 landing on the user's
+      // seed, discarding the real 42 with no warning).
+      //
+      // The saved array was serialized as
+      //   [parent, <removed option's nested slots>, ...trailing top-level widgets...]
+      // and we CANNOT reconstruct where the orphaned-nested block ends: NEITHER the
+      // removed option's nested arity NOR the trailing widgets' saved-slot count is
+      // recoverable. The trailing count is doubly unknown — a nested seed carries a
+      // variable control_after_generate phantom, a trailing dynamic combo adds a
+      // value-dependent number of slots, AND the current schema may have added or
+      // removed trailing widgets since the graph was saved. A surplus arithmetic
+      // (values-left vs current trailing-widget-count) silently mis-attributes
+      // orphaned slots whenever any of those drift (e.g. a schema-added trailing
+      // widget makes surplus cancel to zero while an orphan still sits before the
+      // seed). Because NO positional reconstruction is provably safe, REFUSE: warn
+      // and stop positional mapping here so an orphaned nested value can NEVER be
+      // silently mapped onto a later top-level widget (such as a seed). The
+      // remaining required inputs then default-fill below. The parent itself was
+      // already substituted + warned via validateComboWidgetValue above.
+      if (
+        isDynamicOptions &&
+        savedOption === undefined &&
+        widgetIdx < widgetValues.length
+      ) {
+        warnings.push(
+          `Node ${nodeId} (${classType}): widget "${name}" saved selection "${String(
+            value,
+          )}" is no longer an available option, so the removed option's nested-input layout can't be reconstructed. The remaining ${
+            widgetValues.length - widgetIdx
+          } saved widget value(s) are left to their defaults rather than risk silently assigning a stale nested value to a later widget (such as a seed).`,
+        );
+        break;
+      }
+
+      const selectedInputs = savedOption?.inputs;
       const nested =
         selectedInputs &&
         (selectedInputs.required || selectedInputs.optional)
@@ -1777,7 +1835,16 @@ export function convertUiToApi(
             }
             if (leafIsLink) continue; // link ref: definition is all we can check
             const optList = getComboOptions(s);
-            if (!Array.isArray(optList) || !optList.includes(leafVal as never)) {
+            // The membership check applies ONLY to COMBO leaves — those that HAVE
+            // an enumerable option list to validate against. A scalar/non-combo
+            // required leaf (INT/FLOAT/STRING; getComboOptions returns undefined)
+            // is a NORMAL required input, valid whichever option resolves as long
+            // as it's DEFINED (checked via `definedEverywhere` above). Treating a
+            // missing option list as a membership failure would DROP a legitimate
+            // required scalar and cause a missing-required-input error (#517). So
+            // only fail membership when there IS an option list and the value is
+            // out-of-list.
+            if (Array.isArray(optList) && !optList.includes(leafVal as never)) {
               memberEverywhere = false;
               break;
             }

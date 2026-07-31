@@ -1889,13 +1889,15 @@ describe("convertUiToApi — option-bearing / dynamic nested combo validation (P
     );
   });
 
-  it("does NOT consume nested slots for a STALE (substituted) dynamic parent — trailing widget stays aligned", () => {
+  it("REFUSES to map trailing widgets after a STALE dynamic parent when a trailing widget is control-eligible (ambiguous slot count) — no stale value on seed (#517 P0)", () => {
     // Saved parent "removed-model" is no longer an option and is substituted to
-    // "new-model". The saved array was serialized against the OLD option's layout
-    // (here: no nested widgets), so its nested arity is unrecoverable. We must
-    // consume NO nested slots against the replacement's layout — doing so would
-    // steal the trailing `seed` value. seed must survive; the required nested
-    // aspect_ratio of the replacement is left to default-fill.
+    // "new-model". The array [removed-model, 12345] is AMBIGUOUS: it could be
+    // [parent, seed] (old option had 0 nested) OR [parent, orphaned-nested] (old
+    // option owned 1 nested, seed omitted). Since the trailing `seed` is
+    // control-eligible (variable phantom slot), the removed option's nested arity
+    // can't be reconstructed unambiguously, so we REFUSE: seed is left to default
+    // rather than risk a stale nested value being mapped onto it. This is the safe
+    // contract — a wrong seed is silently wrong; a defaulted seed is warned.
     const info = {
       NanoBananaNode: {
         input: {
@@ -1929,7 +1931,6 @@ describe("convertUiToApi — option-bearing / dynamic nested combo validation (P
           mode: 0,
           inputs: [],
           outputs: [],
-          // OLD option had no nested widgets: [model(stale), seed]
           widgets_values: ["removed-model", 12345],
         },
       ],
@@ -1937,13 +1938,297 @@ describe("convertUiToApi — option-bearing / dynamic nested combo validation (P
     } as never;
     const { workflow, warnings } = convertUiToApi(ui, info);
     expect(workflow["1"].inputs.model).toBe("new-model");
-    // seed is NOT stolen by an ambiguous nested slot.
-    expect(workflow["1"].inputs.seed).toBe(12345);
+    // seed must NOT hold an ambiguous positional value from the stale layout.
+    expect(workflow["1"].inputs.seed).not.toBe(12345);
+    // The refusal is warned (not silent).
     expect(
       warnings.some(
-        (w) => w.includes("1") && w.includes("removed-model") && /substituting/.test(w),
+        (w) =>
+          w.includes("1") &&
+          w.includes("removed-model") &&
+          /can't be reconstructed|default/.test(w),
       ),
     ).toBe(true);
+  });
+
+  it("REFUSES (never realigns) a STALE dynamic parent even when the CURRENT schema added a trailing widget — an orphaned nested value never lands on a later widget (#517 P0 schema-drift)", () => {
+    // The saved parent option "Removed" is gone; the OLD option owned a nested
+    // `strength` (=0.75) sitting between the parent and the trailing `seed`. The
+    // CURRENT schema has ALSO added a trailing `new_widget`. A naive surplus
+    // arithmetic (values-left minus current-trailing-count) cancels the orphaned
+    // slot to zero and would silently map seed=0.75 and new_widget=42 — the orphan
+    // STILL lands on seed. Since neither the removed option's arity NOR the
+    // trailing schema drift is recoverable, the fix REFUSES all positional mapping
+    // after the stale parent: seed and new_widget default, and the orphaned 0.75
+    // NEVER reaches a later widget.
+    const info = {
+      DriftNode: {
+        input: {
+          required: {
+            mode: [
+              "COMFY_DYNAMICCOMBO_V3",
+              { options: [{ key: "A", inputs: { required: {} } }] },
+            ],
+            seed: ["INT", { default: 0 }],
+            new_widget: ["INT", { default: 99 }],
+          },
+        },
+        input_order: { required: ["mode", "seed", "new_widget"] },
+      },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "DriftNode",
+          mode: 0,
+          inputs: [],
+          outputs: [],
+          // OLD "Removed" option owned strength=0.75; saved [mode, strength, seed]
+          widgets_values: ["Removed", 0.75, 42],
+        },
+      ],
+      links: [],
+    } as never;
+    const { workflow, warnings } = convertUiToApi(ui, info);
+    expect(workflow["1"].inputs.mode).toBe("A");
+    // The orphaned nested value NEVER lands on a later widget.
+    expect(workflow["1"].inputs.seed).not.toBe(0.75);
+    expect(workflow["1"].inputs.new_widget).not.toBe(0.75);
+    // seed/new_widget fall to their schema defaults, not a shifted positional value.
+    expect(workflow["1"].inputs.seed).toBe(0);
+    expect(workflow["1"].inputs.new_widget).toBe(99);
+    expect(
+      warnings.some(
+        (w) =>
+          w.includes("1") &&
+          w.includes("Removed") &&
+          /can't be reconstructed|default/.test(w),
+      ),
+    ).toBe(true);
+  });
+
+  it("REFUSES (warn + default) when a stale dynamic parent is followed by a control-eligible seed — the orphaned nested value never lands on seed (#517 P0)", () => {
+    // Exact P0 repro shape: current option A owns no nested; the OLD option owned a
+    // nested strength=0.75 now sitting before the trailing top-level `seed`. `seed`
+    // is control_after_generate (variable phantom slot), so the surplus is
+    // ambiguous — we can't tell [mode, strength, seed] from [mode, seed, control].
+    // We REFUSE: seed must NOT be silently overwritten by the orphaned 0.75.
+    const info = {
+      StaleSeedNode: {
+        input: {
+          required: {
+            mode: [
+              "COMFY_DYNAMICCOMBO_V3",
+              { options: [{ key: "A", inputs: { required: {} } }] },
+            ],
+            seed: ["INT", { default: 0 }],
+          },
+        },
+        input_order: { required: ["mode", "seed"] },
+      },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "StaleSeedNode",
+          mode: 0,
+          inputs: [],
+          outputs: [],
+          widgets_values: ["Removed", 0.75, 42],
+        },
+      ],
+      links: [],
+    } as never;
+    const { workflow, warnings } = convertUiToApi(ui, info);
+    expect(workflow["1"].inputs.mode).toBe("A");
+    // seed must NOT be the orphaned nested value.
+    expect(workflow["1"].inputs.seed).not.toBe(0.75);
+    // The refusal is warned; seed is left to its schema default rather than a
+    // silently-misaligned positional value.
+    expect(
+      warnings.some(
+        (w) =>
+          w.includes("1") &&
+          w.includes("Removed") &&
+          /can't be reconstructed|default/.test(w),
+      ),
+    ).toBe(true);
+  });
+
+  it("REFUSES to reconstruct (warn + default-fill) when a trailing widget after a stale dynamic parent is itself a dynamic combo (#517 P0)", () => {
+    // Two dynamic combos in a row; the FIRST is stale. The trailing one's nested
+    // arity is value-dependent and can't be counted, so the surplus is ambiguous.
+    // Rather than risk misassigning, the remaining widgets are left to defaults.
+    const info = {
+      TwoDynNode: {
+        input: {
+          required: {
+            mode: [
+              "COMFY_DYNAMICCOMBO_V3",
+              { options: [{ key: "A", inputs: { required: {} } }] },
+            ],
+            other: [
+              "COMFY_DYNAMICCOMBO_V3",
+              {
+                options: [
+                  {
+                    key: "X",
+                    inputs: { required: { sub: ["COMBO", { options: ["p", "q"] }] } },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        input_order: { required: ["mode", "other"] },
+      },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "TwoDynNode",
+          mode: 0,
+          inputs: [],
+          outputs: [],
+          widgets_values: ["Removed", 0.75, "X", "p"],
+        },
+      ],
+      links: [],
+    } as never;
+    const { workflow, warnings } = convertUiToApi(ui, info);
+    expect(workflow["1"].inputs.mode).toBe("A");
+    expect(
+      warnings.some(
+        (w) => w.includes("Removed") && /can't be reconstructed|default/.test(w),
+      ),
+    ).toBe(true);
+  });
+
+  it("PRESERVES a shared SCALAR required leaf under a runtime-linked dynamic parent — not dropped as a non-member (#517 false-positive)", () => {
+    // `mode` is fed by a real (non-Primitive) link, so the resolved option is
+    // unknown at convert time. BOTH options define a required SCALAR `strength`
+    // (FLOAT, no combo options). The default-deny must NOT drop it: a scalar leaf
+    // has no option list to be an in-list "member" of, so the membership check
+    // must not apply — the leaf is valid whichever option resolves because every
+    // option DEFINES it. Dropping it would cause a missing-required-input failure.
+    const info = {
+      ComboProvider: {
+        input: { required: {} },
+        output: ["COMBO"],
+        output_name: ["COMBO"],
+      },
+      ScalarLeafNode: {
+        input: {
+          required: {
+            mode: [
+              "COMFY_DYNAMICCOMBO_V3",
+              {
+                options: [
+                  {
+                    key: "A",
+                    inputs: { required: { strength: ["FLOAT", {}] } },
+                  },
+                  {
+                    key: "B",
+                    inputs: { required: { strength: ["FLOAT", {}] } },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        input_order: { required: ["mode"] },
+      },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "ComboProvider",
+          mode: 0,
+          inputs: [],
+          outputs: [{ name: "COMBO", type: "COMBO", links: [10] }],
+          widgets_values: [],
+        },
+        {
+          id: 3,
+          type: "ScalarLeafNode",
+          mode: 0,
+          inputs: [{ name: "mode", type: "COMBO", link: 10 }],
+          outputs: [],
+          widgets_values: ["A", 0.75],
+        },
+      ],
+      links: [[10, 1, 0, 3, 0, "COMBO"]],
+    } as never;
+    const { workflow } = convertUiToApi(ui, info);
+    // Parent is a link ref.
+    expect(Array.isArray(workflow["3"].inputs.mode)).toBe(true);
+    // The shared scalar leaf is PRESERVED with its value.
+    expect(workflow["3"].inputs["mode.strength"]).toBe(0.75);
+  });
+
+  it("still DROPS a genuinely orphaned COMBO leaf (value not in an option's list) under a runtime-linked dynamic parent (#517 guard intact)", () => {
+    // Contrast to the scalar case: `choice` IS a combo. The saved literal "a1"
+    // is valid only under option A; option B's `choice` list is ["b1","b2"], so a
+    // runtime resolution to B would orphan it. The default-deny must still drop it.
+    const info = {
+      ComboProvider: {
+        input: { required: {} },
+        output: ["COMBO"],
+        output_name: ["COMBO"],
+      },
+      ComboLeafNode: {
+        input: {
+          required: {
+            mode: [
+              "COMFY_DYNAMICCOMBO_V3",
+              {
+                options: [
+                  {
+                    key: "A",
+                    inputs: { required: { choice: ["COMBO", { options: ["a1", "a2"] }] } },
+                  },
+                  {
+                    key: "B",
+                    inputs: { required: { choice: ["COMBO", { options: ["b1", "b2"] }] } },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        input_order: { required: ["mode"] },
+      },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "ComboProvider",
+          mode: 0,
+          inputs: [],
+          outputs: [{ name: "COMBO", type: "COMBO", links: [10] }],
+          widgets_values: [],
+        },
+        {
+          id: 3,
+          type: "ComboLeafNode",
+          mode: 0,
+          inputs: [{ name: "mode", type: "COMBO", link: 10 }],
+          outputs: [],
+          widgets_values: ["A", "a1"],
+        },
+      ],
+      links: [[10, 1, 0, 3, 0, "COMBO"]],
+    } as never;
+    const { workflow } = convertUiToApi(ui, info);
+    expect(Array.isArray(workflow["3"].inputs.mode)).toBe(true);
+    // The option-dependent combo leaf is dropped (not a member of every option).
+    expect("mode.choice" in workflow["3"].inputs).toBe(false);
   });
 
   it("skips the phantom control_after_generate slot after a NESTED seed widget", () => {
