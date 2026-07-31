@@ -131,11 +131,33 @@ export async function getSystemStats(): Promise<SystemStats> {
 }
 
 // /object_info is large (~MBs) and slow (300-800 ms) but only changes when
-// ComfyUI restarts or a custom node is (un)installed. Memoize it for the
-// life of the server process; restartComfyUI()/stopComfyUI() reset it.
-// In-flight coalescing prevents a thundering herd on the first fetch.
-// Perf gap flagged by josephoibrahim/comfy-cozy (re-validate ~7 s → ~0.5 s).
+// ComfyUI restarts or a custom node is (un)installed. Memoize it, but only for a
+// bounded FRESHNESS WINDOW rather than the whole process lifetime: an out-of-band
+// ComfyUI restart/install (Desktop Manager reboot, a manual restart, a node pack
+// installed outside an mcp tool) never calls resetObjectInfoCache(), so a
+// lifetime cache serves the PRE-restart schema forever — get_node_info /
+// check_workflow_runtime / validate_workflow all report the new nodes as unknown
+// (#528). A TTL bounds that staleness: within the window we serve the cached
+// snapshot (so a burst of validations stays ~0.5 s, the perf win flagged by
+// josephoibrahim/comfy-cozy), and the FIRST call after the window does a single
+// coalesced refetch that picks up whatever the live server now exposes. No cheap
+// per-call probe is added — ComfyUI's /object_info has no ETag/Last-Modified and
+// no node-set-identity endpoint, so a TTL is the lightest mechanism that both
+// self-heals after an out-of-band change and never fetches the heavy payload on
+// every call. Managed restart/install paths still call resetObjectInfoCache() for
+// an immediate refresh; the TTL is the backstop for the out-of-band case.
+//
+// Override with COMFYUI_MCP_OBJECT_INFO_TTL_MS (0 disables caching entirely; a
+// large value restores the old lifetime behavior for latency-sensitive setups).
+const OBJECT_INFO_TTL_MS = (() => {
+  const raw = process.env.COMFYUI_MCP_OBJECT_INFO_TTL_MS;
+  if (raw === undefined || raw.trim() === "") return 30_000;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : 30_000;
+})();
+
 let objectInfoCache: ObjectInfo | null = null;
+let objectInfoCachedAt = 0;
 let objectInfoInflight: Promise<ObjectInfo> | null = null;
 // Invalidation epoch. resetObjectInfoCache() bumps it; a fetch that STARTED under
 // an older epoch must not commit its result to the cache — otherwise a request
@@ -144,9 +166,18 @@ let objectInfoInflight: Promise<ObjectInfo> | null = null;
 // stale value (codex WS-3 finding #1).
 let objectInfoEpoch = 0;
 
+function objectInfoCacheFresh(): boolean {
+  return (
+    objectInfoCache !== null &&
+    Date.now() - objectInfoCachedAt < OBJECT_INFO_TTL_MS
+  );
+}
+
 export async function getObjectInfo(): Promise<ObjectInfo> {
   if (isCloudMode()) return cloudClient.getObjectInfo();
-  if (objectInfoCache) return objectInfoCache;
+  // Serve from cache only while still inside the freshness window; once it lapses
+  // we fall through to a refetch so an out-of-band restart/install is picked up.
+  if (objectInfoCacheFresh()) return objectInfoCache as ObjectInfo;
   if (objectInfoInflight) return objectInfoInflight;
 
   const startEpoch = objectInfoEpoch;
@@ -154,7 +185,10 @@ export async function getObjectInfo(): Promise<ObjectInfo> {
   // fetching. Awaiters of this promise still get the value (they asked before
   // the reset), but the cache is not poisoned for callers that arrive after.
   const commit = (info: ObjectInfo): ObjectInfo => {
-    if (objectInfoEpoch === startEpoch) objectInfoCache = info;
+    if (objectInfoEpoch === startEpoch) {
+      objectInfoCache = info;
+      objectInfoCachedAt = Date.now();
+    }
     return info;
   };
 
@@ -197,6 +231,7 @@ export async function getObjectInfo(): Promise<ObjectInfo> {
  */
 export function resetObjectInfoCache(): void {
   objectInfoCache = null;
+  objectInfoCachedAt = 0;
   objectInfoInflight = null;
   objectInfoEpoch++;
   logger.debug("object_info cache reset", { epoch: objectInfoEpoch });
