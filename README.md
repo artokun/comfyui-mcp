@@ -16,7 +16,7 @@ Works on **macOS**, **Linux**, and **Windows**. Auto-detects your ComfyUI instal
 
 **Stuck or have a question? [Join the Discord](https://discord.gg/cW9arBhzCu)** — help, model tips, and release announcements.
 
-**181 MCP tools** | **35 AI skills** (Flux · WAN · LTX 2.3 video · Qwen · Z-Image · Ideogram 4 · ERNIE · ANIMA · model registry · Civitai · node authoring · launch/perf flags) | **55 installer packs** | **11 slash commands** | **4 autonomous agents** | **3 hooks**
+**182 MCP tools** | **35 AI skills** (Flux · WAN · LTX 2.3 video · Qwen · Z-Image · Ideogram 4 · ERNIE · ANIMA · model registry · Civitai · node authoring · launch/perf flags) | **55 installer packs** | **11 slash commands** | **4 autonomous agents** | **3 hooks**
 
 The plugin ships **expert skills that grow with every release** — model-specific generation guides with curated download URLs, workflow recipes, troubleshooting, and custom-node authoring — so Claude knows the right sampler, CFG, resolution, and model files for each architecture without trial and error.
 
@@ -248,7 +248,7 @@ for the port, the capability matrix, and the per-provider "clink" points, and th
 
 ## MCP Tools
 
-181 tools across workflow execution, generation, iteration, composition, models, and more:
+182 tools across workflow execution, generation, iteration, composition, models, and more:
 
 ### Image Generation (high-level)
 
