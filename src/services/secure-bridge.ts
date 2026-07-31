@@ -23,6 +23,7 @@
 // (see UiBridge).
 
 import { randomBytes } from "node:crypto";
+import { existsSync } from "node:fs";
 import { startQuickTunnel, type QuickTunnel } from "./tunnel.js";
 import { RelayClient } from "./relay-client.js";
 import { logger } from "../utils/logger.js";
@@ -84,6 +85,93 @@ export async function advertiseBridge(comfyuiUrl: string, wssUrl: string, should
     await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
   }
   return false;
+}
+
+/**
+ * GET the panel's status route to learn where ComfyUI lives on THIS machine.
+ *
+ * The sidebar panel serves `/comfyui_mcp_panel/status` with a `base_path` — the
+ * ComfyUI install root the panel is running inside (panel commit f45054e). The
+ * orchestrator consumes it as a LAST-RESORT source of the local ComfyUI base for
+ * an embedded loopback session that has no CLI-configured workspace (COMFYUI_PATH
+ * unset AND auto-detect empty), so the path-dependent LOCAL surface still works —
+ * the comfyui MCP runs in LOCAL mode (download_model / apply_manifest / model
+ * scans) and panel_load_workflow's local fallback can resolve names (#296).
+ *
+ * Best-effort and time-bounded: returns undefined on ANY failure (unreachable,
+ * non-2xx, non-JSON, missing/blank field) so it can only ADD a path — it must
+ * NEVER throw or stall session start. Sent with the same auth headers as
+ * advertiseBridge so a token-gated panel answers. Disk validation is the caller's
+ * job (this returns the panel's raw claim).
+ */
+export async function fetchPanelBasePath(
+  comfyuiUrl: string,
+  timeoutMs = 2500,
+): Promise<string | undefined> {
+  let endpoint: string;
+  try {
+    endpoint = new URL("/comfyui_mcp_panel/status", comfyuiUrl).toString();
+  } catch {
+    return undefined;
+  }
+  try {
+    const res = await fetch(endpoint, {
+      headers: { ...getComfyUIAuthHeaders() },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) return undefined;
+    const data = (await res.json()) as unknown;
+    if (!data || typeof data !== "object") return undefined;
+    // The route's field is snake_case `base_path`; tolerate a camelCase alias.
+    const raw =
+      (data as { base_path?: unknown }).base_path ??
+      (data as { basePath?: unknown }).basePath;
+    if (typeof raw === "string" && raw.trim()) return raw.trim();
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Resolve the effective LOCAL ComfyUI base directory for a session target,
+ * consulting the panel's status route as a LAST-RESORT fallback (#296).
+ *
+ * Decision order — kept in ONE place so startup and the panel-`hello` retarget
+ * path can never disagree about where ComfyUI lives:
+ *   1. A CLI-configured / auto-detected local path (`localPath`) wins, but ONLY
+ *      for a loopback, non-force-remote target (a REMOTE/force-remote target must
+ *      never adopt a local dir — it isn't the remote host).
+ *   2. Remote / force-remote target → undefined (routes through the Manager).
+ *   3. Otherwise (loopback, non-force-remote, but NO local path) → GET the panel's
+ *      `/comfyui_mcp_panel/status` `base_path` and adopt it, but ONLY if that path
+ *      actually EXISTS on this machine (a bogus / remote-looking claim must not
+ *      poison LOCAL mode).
+ *
+ * `fetchBasePath`/`exists` are injectable purely for tests; production uses the
+ * real status fetch + `fs.existsSync`. Best-effort — never throws.
+ */
+export async function resolveComfyuiPathForTarget(opts: {
+  target: string;
+  localPath: string | undefined;
+  forceRemote: boolean;
+  isLoopback: boolean;
+  fetchBasePath?: (url: string) => Promise<string | undefined>;
+  exists?: (p: string) => boolean;
+}): Promise<string | undefined> {
+  const { target, localPath, forceRemote, isLoopback } = opts;
+  if (!forceRemote && isLoopback && localPath) return localPath;
+  if (forceRemote || !isLoopback) return undefined;
+  const fetchBasePath = opts.fetchBasePath ?? fetchPanelBasePath;
+  const exists = opts.exists ?? existsSync;
+  let fromPanel: string | undefined;
+  try {
+    fromPanel = await fetchBasePath(target);
+  } catch {
+    return undefined; // bulletproof — a broken fetch must not break session start
+  }
+  if (fromPanel && exists(fromPanel)) return fromPanel;
+  return undefined;
 }
 
 export interface SetupSecureBridgeOpts {

@@ -140,6 +140,46 @@ describe("promptText (#175)", () => {
   });
 });
 
+describe("promptText — literal [object Object] artifact (#534)", () => {
+  it("maps an exact literal sentinel string to empty", () => {
+    expect(promptText("[object Object]")).toBe("");
+  });
+
+  it("trims a padded exact sentinel to empty", () => {
+    expect(promptText("  [object Object]  ")).toBe("");
+  });
+
+  it("strips a standalone leading sentinel line and keeps the real message", () => {
+    expect(promptText("[object Object]\n\n지금 연결된 니 모델이 뭐야")).toBe(
+      "지금 연결된 니 모델이 뭐야",
+    );
+  });
+
+  it("strips a leading sentinel line with a single newline too", () => {
+    expect(promptText("[object Object]\nhello")).toBe("hello");
+  });
+
+  it("tolerates horizontal whitespace around a leading sentinel line", () => {
+    expect(promptText("  [object Object]  \n\nreal message")).toBe("real message");
+  });
+
+  it("does NOT touch a legitimate mid-prose mention of the phrase", () => {
+    const prose = "my logs printed [object Object] and I want to know why";
+    expect(promptText(prose)).toBe(prose);
+  });
+
+  it("does NOT strip a sentinel that is not on its own leading line", () => {
+    const prose = "here is the value: [object Object]";
+    expect(promptText(prose)).toBe(prose);
+  });
+
+  it("only strips the FIRST leading sentinel line, leaving inline copies intact", () => {
+    expect(promptText("[object Object]\n\nkeep [object Object] here")).toBe(
+      "keep [object Object] here",
+    );
+  });
+});
+
 describe("messageText (#421, #422)", () => {
   it("passes a plain string reply through unchanged", () => {
     expect(messageText("Done — 4 images rendered.")).toBe("Done — 4 images rendered.");

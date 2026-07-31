@@ -44,6 +44,28 @@ export function errorText(err: unknown): string {
 }
 
 /**
+ * Strip a leading/whole-value literal "[object Object]" coercion artifact from a
+ * user-turn string (#534) without corrupting legitimate prose.
+ *
+ * Only two shapes are treated as the upstream artifact:
+ *  - the ENTIRE (trimmed) value is the sentinel -> "" (the whole turn was lost)
+ *  - the value STARTS with a sentinel on its own line, followed by one or more
+ *    line breaks -> that leading line is removed, the real message is preserved.
+ * A sentinel appearing mid-prose (e.g. a user quoting "[object Object]") is left
+ * untouched.
+ */
+function stripObjectSentinel(value: string): string {
+  if (value.trim() === "[object Object]") return "";
+  // Leading sentinel line (optional surrounding horizontal whitespace) followed
+  // by at least one newline, then the genuine message body.
+  const withoutLeadingSentinel = value.replace(
+    /^[ \t]*\[object Object\][ \t]*(?:\r?\n)+/,
+    "",
+  );
+  return withoutLeadingSentinel;
+}
+
+/**
  * Coerce a user-turn payload into prompt-safe text.
  *
  * A user turn's `text` is normally a string, but a structured/multi-part chat
@@ -52,9 +74,18 @@ export function errorText(err: unknown): string {
  * `text` field when the value is an object, otherwise JSON-serialize — never
  * rely on implicit object coercion, and never collapse a payload that still
  * carries `parts` to an empty prompt.
+ *
+ * A string value is normally authoritative and passes through unchanged, but an
+ * UPSTREAM boundary may have already coerced the structured object to the literal
+ * "[object Object]" sentinel BEFORE it reaches here — e.g. after a sidebar/Codex
+ * reconnect the turn arrived as `"[object Object]\n\n<real message>"` (#534). Strip
+ * that specific artifact — an exact sentinel becomes "", and a standalone leading
+ * sentinel line is removed — WITHOUT touching a legitimate mention of the phrase
+ * inside normal prose (only a whole-value match or a leading sentinel-on-its-own-line
+ * is treated as the artifact).
  */
 export function promptText(value: unknown): string {
-  if (typeof value === "string") return value;
+  if (typeof value === "string") return stripObjectSentinel(value);
   if (value == null) return "";
   if (typeof value === "object") {
     let text: unknown;

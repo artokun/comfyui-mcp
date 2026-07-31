@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import readline from "node:readline";
 import { startUiBridge, isLoopbackBindHost, type UiBridge } from "../services/ui-bridge.js";
-import { setupSecureBridge, type SecureBridge } from "../services/secure-bridge.js";
+import { setupSecureBridge, resolveComfyuiPathForTarget, type SecureBridge } from "../services/secure-bridge.js";
 import { startQuickTunnel } from "../services/tunnel.js";
 import { detectInstallMode } from "../services/self-update.js";
 import { SelfRestarter } from "../services/self-restart.js";
@@ -1064,7 +1064,28 @@ export async function runPanelOrchestrator(): Promise<void> {
   // force-remote flag, so a leaked path would silently defeat --force-remote.
   const localPathForTarget = (url: string): string | undefined =>
     !isForceRemoteFlagSet() && isLoopbackUrl(url) ? localComfyuiPath : undefined;
-  let comfyuiPath = localPathForTarget(comfyuiUrl);
+  // #296: an embedded LOCAL sidebar session with NO CLI-configured workspace
+  // (COMFYUI_PATH unset AND auto-detect empty) would otherwise spawn path-less —
+  // its comfyui MCP stuck in a degraded "local but path-less" state (no
+  // download_model/apply_manifest/model-scan LOCAL surface, panel_load_workflow's
+  // local fallback blind). The panel already KNOWS where ComfyUI lives and serves
+  // it at GET /comfyui_mcp_panel/status (base_path). resolveComfyuiPathForTarget
+  // consumes it as a last-resort fallback for a loopback, non-force-remote target
+  // (adopting only a path that actually exists on THIS machine). Awaited here so
+  // the recovered path is in place BEFORE the MCP-env builders / manager below
+  // capture it. Best-effort — a failed/absent status route leaves us path-less.
+  let comfyuiPath = await resolveComfyuiPathForTarget({
+    target: comfyuiUrl,
+    localPath: localComfyuiPath,
+    forceRemote: isForceRemoteFlagSet(),
+    isLoopback: isLoopbackUrl(comfyuiUrl),
+  });
+  if (comfyuiPath && comfyuiPath !== localPathForTarget(comfyuiUrl)) {
+    logger.info(
+      `[panel-orchestrator] no COMFYUI_PATH/default workspace; adopted ComfyUI ` +
+        `base_path from the panel status route: ${comfyuiPath} (#296).`,
+    );
+  }
   // Force the child remote only when opted in (--force-remote) or the target is
   // non-loopback; a default loopback panel user with no COMFYUI_PATH is left to
   // auto-detect its local install (keeps download_model/apply_manifest/scans).
@@ -2029,6 +2050,37 @@ export async function runPanelOrchestrator(): Promise<void> {
     logger.info(
       `[panel-orchestrator] retargeted ComfyUI ${prev} → ${comfyuiUrl} (${isLoopbackUrl(next) ? "local" : "remote"} mode) from panel hello`,
     );
+    // #296: the synchronous `localPathForTarget(next)` above can't see the NEWLY
+    // targeted panel's base_path, so a retarget to a loopback ComfyUI with no
+    // env/auto-detected path lands path-less even though that panel serves it. Kick
+    // off a best-effort recovery from the NEW target's status route (fire-and-forget
+    // so the retarget stays synchronous). On success — and only if a newer retarget
+    // hasn't superseded us mid-fetch — adopt the path and rebuild the comfyui MCP
+    // spawn env so each tab's child respawns in LOCAL mode. Skipped entirely when a
+    // local path is already set (the common case does no I/O).
+    if (!comfyuiPath) {
+      void (async () => {
+        const recovered = await resolveComfyuiPathForTarget({
+          target: next,
+          localPath: localComfyuiPath,
+          forceRemote: isForceRemoteFlagSet(),
+          isLoopback: isLoopbackUrl(next),
+        });
+        if (!recovered) return;
+        // Superseded by a newer retarget while we fetched — do nothing.
+        if (canonTargetUrl(comfyuiUrl) !== canonTargetUrl(next)) return;
+        if (comfyuiPath === recovered) return;
+        comfyuiPath = recovered;
+        logger.info(
+          `[panel-orchestrator] recovered ComfyUI base_path from panel status route ` +
+            `after retarget: ${recovered} (#296).`,
+        );
+        // Rebuild the comfyui MCP spawn env (now carrying COMFYUI_PATH) and respawn
+        // each tab's agent at its next idle so the LIVE child runs in LOCAL mode.
+        manager.setMcpServers(buildMcpServers());
+        manager.restartAllForMcpEnv();
+      })();
+    }
     // Advertising itself happens unconditionally on every hello (see below) —
     // a retarget doesn't need its own advertise call here.
     return true;
