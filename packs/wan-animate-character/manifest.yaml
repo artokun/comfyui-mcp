@@ -10,7 +10,6 @@ pip: []
 # Full superset from the wan-animate monolith (safe — the slice spans WanVideo
 # sampler/decode, SeC segmentation, WanAnimate pose/face preprocess, and VHS I/O).
 custom_nodes:
-  - https://github.com/ltdrdata/ComfyUI-Manager.git
   - https://github.com/kijai/ComfyUI-WanVideoWrapper
   - https://github.com/rgthree/rgthree-comfy
   - https://github.com/kijai/ComfyUI-KJNodes

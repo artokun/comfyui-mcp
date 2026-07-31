@@ -28,7 +28,6 @@ echo "-------- custom nodes --------"
 clone "ComfyUI-WanVideoWrapper" "https://github.com/kijai/ComfyUI-WanVideoWrapper.git"
 clone "ComfyUI-KJNodes" "https://github.com/kijai/ComfyUI-KJNodes.git"
 clone "ComfyUI-VideoHelperSuite" "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git"
-clone "ComfyUI-Manager" "https://github.com/ltdrdata/ComfyUI-Manager.git"
 
 echo "-------- pip (manifest extras) --------"
 "$PY" -m pip install "imageio-ffmpeg"

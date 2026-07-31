@@ -18,7 +18,6 @@ custom_nodes:
   - https://github.com/ltdrdata/was-node-suite-comfyui # String to Text, RegexExtract
   - https://github.com/TinyTerra/ComfyUI_tinyterraNodes # ttN text
   # From the ULTRA installer (base WAN 2.2 stack / manager):
-  - https://github.com/ltdrdata/ComfyUI-Manager.git
 
 models:
   # --- VAE (ULTRA installer) ---

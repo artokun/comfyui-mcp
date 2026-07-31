@@ -16,7 +16,6 @@ pip:
 # (Power Lora Loader), VHS (LoadImagePath/VideoCombine), ComfyMath, plus the rest
 # of the shared ULTRA toolchain (ResizeImagesByLongerEdge et al.).
 custom_nodes:
-  - https://github.com/ltdrdata/ComfyUI-Manager.git
   - https://github.com/city96/ComfyUI-GGUF
   - https://github.com/rgthree/rgthree-comfy
   - https://github.com/yolain/ComfyUI-Easy-Use

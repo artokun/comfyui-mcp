@@ -25,7 +25,6 @@ grab() { # relpath url
 }
 
 echo "-------- custom nodes --------"
-clone "ComfyUI-Manager" "https://github.com/ltdrdata/ComfyUI-Manager.git"
 clone "ComfyUI-WanVideoWrapper" "https://github.com/kijai/ComfyUI-WanVideoWrapper"
 clone "ComfyUI-KJNodes" "https://github.com/kijai/ComfyUI-KJNodes"
 clone "ComfyUI-VideoHelperSuite" "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite"

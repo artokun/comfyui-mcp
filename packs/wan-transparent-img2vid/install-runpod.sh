@@ -31,7 +31,6 @@ clone "ComfyUI-VideoHelperSuite" "https://github.com/Kosinkadink/ComfyUI-VideoHe
 clone "rgthree-comfy" "https://github.com/rgthree/rgthree-comfy"
 clone "ComfyUI-Easy-Use" "https://github.com/yolain/ComfyUI-Easy-Use"
 clone "ComfyUI_tinyterraNodes" "https://github.com/TinyTerra/ComfyUI_tinyterraNodes"
-clone "ComfyUI-Manager" "https://github.com/ltdrdata/ComfyUI-Manager.git"
 
 echo "-------- models --------"
 grab "models/vae/wan_2.1_vae.safetensors" "https://huggingface.co/Aitrepreneur/FLX/resolve/main/wan_2.1_vae.safetensors"

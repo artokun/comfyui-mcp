@@ -13,7 +13,6 @@
 pip: []
 
 custom_nodes:
-  - https://github.com/ltdrdata/ComfyUI-Manager.git
   # ComfyUI-GGUF (city96) — provides UnetLoaderGGUF + CLIPLoaderGGUF.
   - https://github.com/city96/ComfyUI-GGUF
   # rgthree-comfy — Power Lora Loader, Image Comparer, Label, Fast Groups Bypasser.

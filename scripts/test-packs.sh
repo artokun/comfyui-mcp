@@ -43,9 +43,14 @@ for dir in "$PACKS"/*/; do
   ( cd "$root" && PATH="$BIN:$PATH" bash "$sh" ) > "$WORK/r1.log" 2>&1
   nodes=$(find "$root/custom_nodes" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
   models=$(find "$root/models" -type f | wc -l | tr -d ' ')
-  echo "   nodes=$nodes models=$models"
-  if [ "$nodes" -lt 1 ] || [ "$models" -lt 1 ]; then
-    echo "   [FAIL] expected >=1 node and >=1 model staged"; fail=1
+  # Expected node count is derived from the generated installer itself (one
+  # `clone` invocation per custom_nodes entry). A pack may legitimately declare
+  # zero custom nodes (all nodes native to core ComfyUI) — assert the installer
+  # staged exactly what it declares rather than a blanket >=1.
+  want_nodes=$(grep -cE '^clone ' "$sh" || true)
+  echo "   nodes=$nodes/$want_nodes models=$models"
+  if [ "$nodes" -ne "$want_nodes" ] || [ "$models" -lt 1 ]; then
+    echo "   [FAIL] expected $want_nodes node(s) and >=1 model staged"; fail=1
   fi
 
   echo "== $name: second run (idempotency) =="

@@ -10,7 +10,6 @@ pip: []
 custom_nodes:
   # Full superset from the monolith manifest (safe — covers every node type the
   # slice could reference plus the shared post-proc the closure may pull in).
-  - https://github.com/ltdrdata/ComfyUI-Manager.git
   - https://github.com/city96/ComfyUI-GGUF            # UnetLoaderGGUF / CLIPLoaderGGUF
   - https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite  # VHS_* (combine/select/load)
   - https://github.com/Fannovel16/ComfyUI-Frame-Interpolation # RIFE VFI (auto-downloads rife49.pth)

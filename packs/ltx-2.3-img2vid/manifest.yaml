@@ -16,7 +16,6 @@ pip:
 custom_nodes:
   # All LTX 2.3 nodes are native to current ComfyUI (comfy_extras). Manager is
   # only for install tooling; update ComfyUI itself to a recent build.
-  - https://github.com/ltdrdata/ComfyUI-Manager.git
 
 models:
   # --- Main checkpoint: 22B dev transformer + audio VAE (~46 GB) ---

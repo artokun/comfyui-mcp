@@ -22,7 +22,6 @@ call :clone "rgthree-comfy" "https://github.com/rgthree/rgthree-comfy"
 call :clone "ComfyUI-Easy-Use" "https://github.com/yolain/ComfyUI-Easy-Use"
 call :clone "was-node-suite-comfyui" "https://github.com/ltdrdata/was-node-suite-comfyui"
 call :clone "ComfyUI_tinyterraNodes" "https://github.com/TinyTerra/ComfyUI_tinyterraNodes"
-call :clone "ComfyUI-Manager" "https://github.com/ltdrdata/ComfyUI-Manager.git"
 
 echo -------- models --------
 call :grab "models\vae\wan_2.1_vae.safetensors" "https://huggingface.co/Aitrepreneur/FLX/resolve/main/wan_2.1_vae.safetensors"

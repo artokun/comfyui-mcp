@@ -12,7 +12,6 @@
 pip: []
 
 custom_nodes:
-  - https://github.com/ltdrdata/ComfyUI-Manager.git
   - https://github.com/kijai/ComfyUI-WanVideoWrapper         # WanVideo* (model loader / sampler / encode / AddPusaNoise / scheduler / text encode)
   - https://github.com/kijai/ComfyUI-KJNodes                 # ColorMatchV2, ImageResizeKJv2, GetImageRangeFromBatch, CreateScheduleFloatList, GetLatentSizeAndCount, ImageBatchMulti/ImageConcatMulti, Get/SetNode
   - https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite  # VHS_LoadVideo / VHS_VideoCombine

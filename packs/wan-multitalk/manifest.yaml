@@ -20,7 +20,6 @@ custom_nodes:
   - https://github.com/kijai/ComfyUI-WanVideoWrapper.git   # WanVideo*/MultiTalk*/Wav2Vec/T5 nodes
   - https://github.com/kijai/ComfyUI-KJNodes.git           # ImageResizeKJv2
   - https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git  # VHS_VideoCombine
-  - https://github.com/ltdrdata/ComfyUI-Manager.git
 
 models:
   # --- WAN 2.1 14B Image-to-Video 480p, GGUF Q8 (main transformer) ---

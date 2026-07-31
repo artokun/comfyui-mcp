@@ -6,7 +6,6 @@
 pip: []
 
 custom_nodes:
-  - https://github.com/ltdrdata/ComfyUI-Manager.git
   - https://github.com/rgthree/rgthree-comfy
   - https://github.com/kijai/ComfyUI-KJNodes
   - https://github.com/cubiq/ComfyUI_essentials

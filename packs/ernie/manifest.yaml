@@ -18,7 +18,6 @@ pip:
   - librosa
 
 custom_nodes:
-  - https://github.com/ltdrdata/ComfyUI-Manager.git
   - https://github.com/city96/ComfyUI-GGUF
   - https://github.com/rgthree/rgthree-comfy
   - https://github.com/yolain/ComfyUI-Easy-Use

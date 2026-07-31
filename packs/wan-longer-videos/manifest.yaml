@@ -19,7 +19,6 @@ custom_nodes:
   # (The full installer also clones controlnet_aux, UltimateSDUpscale, essentials,
   #  MagCache, wlsh_nodes, comfyui-vrgamedevgirl, RES4LYF, Impact-Pack and
   #  WanVideoWrapper, but the Longer-Videos workflow does not use those node types.)
-  - https://github.com/ltdrdata/ComfyUI-Manager.git
   - https://github.com/city96/ComfyUI-GGUF            # UnetLoaderGGUF / CLIPLoaderGGUF
   - https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite  # VHS_* (load/combine/select)
   - https://github.com/Fannovel16/ComfyUI-Frame-Interpolation # RIFE VFI (auto-downloads rife49.pth)

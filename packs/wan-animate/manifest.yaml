@@ -8,7 +8,6 @@
 pip: []
 
 custom_nodes:
-  - https://github.com/ltdrdata/ComfyUI-Manager.git
   - https://github.com/kijai/ComfyUI-WanVideoWrapper
   - https://github.com/rgthree/rgthree-comfy
   - https://github.com/kijai/ComfyUI-KJNodes

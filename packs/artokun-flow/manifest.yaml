@@ -24,7 +24,6 @@
 pip: []
 
 custom_nodes:
-  - https://github.com/ltdrdata/ComfyUI-Manager.git
   - https://github.com/kijai/ComfyUI-WanVideoWrapper        # WanVideo* (model/vae/lora/sampler/decode/animate/uni3c/blockswap)
   - https://github.com/kijai/ComfyUI-WanAnimatePreprocess   # PoseAndFaceDetection, OnnxDetectionModelLoader
   - https://github.com/kijai/ComfyUI-KJNodes               # ImageResizeKJv2, GetImageSizeAndCount, DrawMaskOnImage, ImageConcatMulti, PreviewAnimation

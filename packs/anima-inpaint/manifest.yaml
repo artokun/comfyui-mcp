@@ -8,7 +8,6 @@
 pip: []
 
 custom_nodes:
-  - https://github.com/ltdrdata/ComfyUI-Manager.git
   - https://github.com/ltdrdata/ComfyUI-Impact-Pack
   - https://github.com/ltdrdata/ComfyUI-Impact-Subpack
   - https://github.com/rgthree/rgthree-comfy
