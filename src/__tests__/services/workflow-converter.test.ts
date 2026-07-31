@@ -742,6 +742,36 @@ describe("convertUiToApi — true-enum over-preservation guard (P0 regression, #
     expect(warnings.some((w) => /missing-asset/.test(w))).toBe(true);
   });
 
+  it("WARNS (not silent) when a combo has ZERO options on the server", () => {
+    // An empty option list ([[], {}]) — e.g. no models installed — has nothing to
+    // substitute to. The saved literal is kept, but must be flagged, not silently
+    // emitted as an out-of-list value the server will reject.
+    const info = {
+      EmptyEnum: {
+        input: { required: { mode: [[], {}] } },
+        input_order: { required: ["mode"] },
+      },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 504,
+          type: "EmptyEnum",
+          mode: 0,
+          inputs: [],
+          outputs: [],
+          widgets_values: ["retired"],
+        },
+      ],
+      links: [],
+    } as never;
+    const { workflow, warnings } = convertUiToApi(ui, info);
+    expect(workflow["504"].inputs.mode).toBe("retired");
+    expect(
+      warnings.some((w) => w.includes("504") && w.includes("retired")),
+    ).toBe(true);
+  });
+
   it("validates has_serialized_properties overwrites too — invalid enum substitutes", () => {
     // Authoritative node.properties overwrite the positional mapping AFTER combo
     // validation; an invalid enum restored there previously leaked unvalidated to
@@ -778,6 +808,929 @@ describe("convertUiToApi — true-enum over-preservation guard (P0 regression, #
     expect(workflow["11"].inputs.mode).not.toBe("z");
     expect(
       warnings.some((w) => w.includes("11") && /substituting/.test(w)),
+    ).toBe(true);
+  });
+});
+
+describe("convertUiToApi — linked PrimitiveNode combo validation (P1-A, #504)", () => {
+  // A PrimitiveNode wired into a combo input provides a LITERAL value that is
+  // assigned AFTER the widget-value validation (widgets first, links after), so
+  // it previously bypassed combo validation entirely: an out-of-list literal
+  // overwrote the validated widget value and reached the API unchecked.
+
+  it("SUBSTITUTES+warns an out-of-list enum fed by a linked PrimitiveNode", () => {
+    const info = {
+      KSamplerSelect: {
+        input: { required: { sampler_name: [["euler", "dpmpp_2m"]] } },
+        input_order: { required: ["sampler_name"] },
+      },
+      PrimitiveNode: { input: { required: {} } },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "PrimitiveNode",
+          mode: 0,
+          inputs: [],
+          outputs: [{ name: "COMBO", type: "COMBO", links: [10] }],
+          widgets_values: ["removed_sampler"], // no longer a valid option
+        },
+        {
+          id: 2,
+          type: "KSamplerSelect",
+          mode: 0,
+          inputs: [{ name: "sampler_name", type: "COMBO", link: 10 }],
+          outputs: [],
+          widgets_values: ["euler"], // valid, but the link overrides it
+        },
+      ],
+      links: [[10, 1, 0, 2, 0, "COMBO"]],
+    } as never;
+    const { workflow, warnings } = convertUiToApi(ui, info);
+    // The stale primitive literal must NOT reach the API — substituted to first opt.
+    expect(workflow["2"].inputs.sampler_name).toBe("euler");
+    expect(workflow["2"].inputs.sampler_name).not.toBe("removed_sampler");
+    expect(
+      warnings.some(
+        (w) =>
+          w.includes("2") &&
+          w.includes("removed_sampler") &&
+          /substituting/.test(w),
+      ),
+    ).toBe(true);
+    expect(warnings.some((w) => /missing-asset/.test(w))).toBe(false);
+  });
+
+  it("PRESERVES+warns a stale LOADER asset fed by a linked PrimitiveNode", () => {
+    const info = {
+      CheckpointLoaderSimple: {
+        input: { required: { ckpt_name: [["installed.safetensors"]] } },
+        input_order: { required: ["ckpt_name"] },
+      },
+      PrimitiveNode: { input: { required: {} } },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "PrimitiveNode",
+          mode: 0,
+          inputs: [],
+          outputs: [{ name: "COMBO", type: "COMBO", links: [10] }],
+          widgets_values: ["not_installed.safetensors"],
+        },
+        {
+          id: 2,
+          type: "CheckpointLoaderSimple",
+          mode: 0,
+          inputs: [{ name: "ckpt_name", type: "COMBO", link: 10 }],
+          outputs: [],
+          widgets_values: [],
+        },
+      ],
+      links: [[10, 1, 0, 2, 0, "COMBO"]],
+    } as never;
+    const { workflow, warnings } = convertUiToApi(ui, info);
+    // A loader asset is preserved (honest missing-asset), NOT swapped to opt[0].
+    expect(workflow["2"].inputs.ckpt_name).toBe("not_installed.safetensors");
+    expect(workflow["2"].inputs.ckpt_name).not.toBe("installed.safetensors");
+    expect(
+      warnings.some(
+        (w) =>
+          w.includes("2") &&
+          w.includes("not_installed.safetensors") &&
+          /missing-asset/.test(w),
+      ),
+    ).toBe(true);
+  });
+
+  it("SUBSTITUTES+warns an invalid dynamic-combo NESTED value fed by a linked PrimitiveNode (dotted key)", () => {
+    // A PrimitiveNode wired straight into a dotted "<combo>.<leaf>" nested input:
+    // validateComboWidgetValue's top-level lookup can't find "model.aspect_ratio",
+    // so the resolver must recover the LEAF spec from the selected option.
+    const info = {
+      NanoBananaNode: {
+        input: {
+          required: {
+            model: [
+              "COMFY_DYNAMICCOMBO_V3",
+              {
+                options: [
+                  {
+                    key: "Nano Banana 2",
+                    inputs: {
+                      required: {
+                        aspect_ratio: ["COMBO", { options: ["auto", "1:1", "16:9"] }],
+                      },
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        input_order: { required: ["model"] },
+      },
+      PrimitiveNode: { input: { required: {} } },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "PrimitiveNode",
+          mode: 0,
+          inputs: [],
+          outputs: [{ name: "COMBO", type: "COMBO", links: [10] }],
+          widgets_values: ["4:3"], // invalid aspect_ratio
+        },
+        {
+          id: 2,
+          type: "NanoBananaNode",
+          mode: 0,
+          inputs: [{ name: "model.aspect_ratio", type: "COMBO", link: 10 }],
+          outputs: [],
+          widgets_values: ["Nano Banana 2"], // selects the option; leaf is linked
+        },
+      ],
+      links: [[10, 1, 0, 2, 0, "COMBO"]],
+    } as never;
+    const { workflow, warnings } = convertUiToApi(ui, info);
+    expect(workflow["2"].inputs["model.aspect_ratio"]).toBe("auto");
+    expect(workflow["2"].inputs["model.aspect_ratio"]).not.toBe("4:3");
+    expect(
+      warnings.some(
+        (w) =>
+          w.includes("2") &&
+          w.includes("aspect_ratio") &&
+          /substituting/.test(w),
+      ),
+    ).toBe(true);
+    expect(warnings.some((w) => /missing-asset/.test(w))).toBe(false);
+  });
+
+  it("PRESERVES+warns a stale NESTED loader asset fed by a linked PrimitiveNode (dotted key)", () => {
+    // The leaf name (lora_name) is a model-loader selector, so a stale value must
+    // be preserved (honest missing-asset) even when supplied through the dotted
+    // override path — leaf-name classification must survive the resolver.
+    const info = {
+      DynLoraNode: {
+        input: {
+          required: {
+            model: [
+              "COMFY_DYNAMICCOMBO_V3",
+              {
+                options: [
+                  {
+                    key: "with-lora",
+                    inputs: {
+                      required: {
+                        lora_name: ["COMBO", { options: ["installed.safetensors"] }],
+                      },
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        input_order: { required: ["model"] },
+      },
+      PrimitiveNode: { input: { required: {} } },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "PrimitiveNode",
+          mode: 0,
+          inputs: [],
+          outputs: [{ name: "COMBO", type: "COMBO", links: [10] }],
+          widgets_values: ["not_installed.safetensors"],
+        },
+        {
+          id: 2,
+          type: "DynLoraNode",
+          mode: 0,
+          inputs: [{ name: "model.lora_name", type: "COMBO", link: 10 }],
+          outputs: [],
+          widgets_values: ["with-lora"],
+        },
+      ],
+      links: [[10, 1, 0, 2, 0, "COMBO"]],
+    } as never;
+    const { workflow, warnings } = convertUiToApi(ui, info);
+    expect(workflow["2"].inputs["model.lora_name"]).toBe("not_installed.safetensors");
+    expect(workflow["2"].inputs["model.lora_name"]).not.toBe("installed.safetensors");
+    expect(
+      warnings.some(
+        (w) =>
+          w.includes("2") &&
+          w.includes("not_installed.safetensors") &&
+          /missing-asset/.test(w),
+      ),
+    ).toBe(true);
+  });
+
+  it("SUBSTITUTES+warns an invalid OPTIONAL dynamic-combo nested leaf fed by a linked PrimitiveNode", () => {
+    // V3 option inputs can live under `optional`, not just `required` — the
+    // resolver must search both or the leaf spec is missing and validation skipped.
+    const info = {
+      NanoBananaNode: {
+        input: {
+          required: {
+            model: [
+              "COMFY_DYNAMICCOMBO_V3",
+              {
+                options: [
+                  {
+                    key: "Nano Banana 2",
+                    inputs: {
+                      optional: {
+                        output_format: ["COMBO", { options: ["png", "webp"] }],
+                      },
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        input_order: { required: ["model"] },
+      },
+      PrimitiveNode: { input: { required: {} } },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "PrimitiveNode",
+          mode: 0,
+          inputs: [],
+          outputs: [{ name: "COMBO", type: "COMBO", links: [10] }],
+          widgets_values: ["gif"], // invalid output_format
+        },
+        {
+          id: 2,
+          type: "NanoBananaNode",
+          mode: 0,
+          inputs: [{ name: "model.output_format", type: "COMBO", link: 10 }],
+          outputs: [],
+          widgets_values: ["Nano Banana 2"],
+        },
+      ],
+      links: [[10, 1, 0, 2, 0, "COMBO"]],
+    } as never;
+    const { workflow, warnings } = convertUiToApi(ui, info);
+    expect(workflow["2"].inputs["model.output_format"]).toBe("png");
+    expect(workflow["2"].inputs["model.output_format"]).not.toBe("gif");
+    expect(
+      warnings.some(
+        (w) =>
+          w.includes("2") &&
+          w.includes("output_format") &&
+          /substituting/.test(w),
+      ),
+    ).toBe(true);
+  });
+
+  it("does NOT consume a positional slot for a LINKED nested leaf — trailing widget stays aligned", () => {
+    // model.aspect_ratio is converted-to-input (linked), so it has NO positional
+    // widgets_values entry: ["Nano Banana 2", 12345] = [model, seed]. Consuming a
+    // slot for the linked leaf would steal seed's value. It must be skipped.
+    const info = {
+      NanoBananaNode: {
+        input: {
+          required: {
+            model: [
+              "COMFY_DYNAMICCOMBO_V3",
+              {
+                options: [
+                  {
+                    key: "Nano Banana 2",
+                    inputs: {
+                      required: {
+                        aspect_ratio: ["COMBO", { options: ["auto", "1:1"] }],
+                      },
+                    },
+                  },
+                ],
+              },
+            ],
+            seed: ["INT"],
+          },
+        },
+        input_order: { required: ["model", "seed"] },
+      },
+      PrimitiveNode: { input: { required: {} } },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "NanoBananaNode",
+          mode: 0,
+          inputs: [{ name: "model.aspect_ratio", type: "COMBO", link: 10 }],
+          outputs: [],
+          widgets_values: ["Nano Banana 2", 12345], // aspect_ratio linked = no slot
+        },
+        {
+          id: 2,
+          type: "PrimitiveNode",
+          mode: 0,
+          inputs: [],
+          outputs: [{ name: "COMBO", type: "COMBO", links: [10] }],
+          widgets_values: ["1:1"],
+        },
+      ],
+      links: [[10, 2, 0, 1, 0, "COMBO"]],
+    } as never;
+    const { workflow } = convertUiToApi(ui, info);
+    // seed keeps its real value — not stolen by the linked nested leaf.
+    expect(workflow["1"].inputs.seed).toBe(12345);
+    // and the nested leaf comes from the link.
+    expect(workflow["1"].inputs["model.aspect_ratio"]).toBe("1:1");
+  });
+
+  it("re-anchors nested leaves when a PrimitiveNode overrides the dynamic PARENT (A -> B)", () => {
+    // Positional mapping emits model="A" and validates model.choice="a1" against
+    // A. A PrimitiveNode then overrides the parent model="B". Without a final
+    // re-anchor, model.choice="a1" (valid for A, invalid for B) reaches the API.
+    const info = {
+      DynParentNode: {
+        input: {
+          required: {
+            model: [
+              "COMFY_DYNAMICCOMBO_V3",
+              {
+                options: [
+                  {
+                    key: "A",
+                    inputs: {
+                      required: { choice: ["COMBO", { options: ["a1", "a2"] }] },
+                    },
+                  },
+                  {
+                    key: "B",
+                    inputs: {
+                      required: { choice: ["COMBO", { options: ["b1", "b2"] }] },
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        input_order: { required: ["model"] },
+      },
+      PrimitiveNode: { input: { required: {} } },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "PrimitiveNode",
+          mode: 0,
+          inputs: [],
+          outputs: [{ name: "COMBO", type: "COMBO", links: [10] }],
+          widgets_values: ["B"], // overrides the parent selection
+        },
+        {
+          id: 3,
+          type: "DynParentNode",
+          mode: 0,
+          inputs: [{ name: "model", type: "COMBO", link: 10 }],
+          outputs: [],
+          widgets_values: ["A", "a1"], // saved under option A
+        },
+      ],
+      links: [[10, 1, 0, 3, 0, "COMBO"]],
+    } as never;
+    const { workflow } = convertUiToApi(ui, info);
+    expect(workflow["3"].inputs.model).toBe("B");
+    // model.choice must be re-anchored to B's options, NOT left as A's "a1".
+    expect(workflow["3"].inputs["model.choice"]).not.toBe("a1");
+    expect(["b1", "b2"]).toContain(workflow["3"].inputs["model.choice"]);
+  });
+
+  it("drops a wrong-option nested leaf when the dynamic PARENT is fed by a real link", () => {
+    // model is fed by a NON-Primitive link (runtime value unknown), and the saved
+    // nested model.choice="a1" belongs to option A. Since the resolved option
+    // could be B (choice=[b1,b2]), the option-dependent literal must be dropped —
+    // not left as a wrong-option "a1" in the prompt.
+    const info = {
+      ComboProvider: {
+        input: { required: {} },
+        output: ["COMBO"],
+        output_name: ["COMBO"],
+      },
+      DynParentNode: {
+        input: {
+          required: {
+            model: [
+              "COMFY_DYNAMICCOMBO_V3",
+              {
+                options: [
+                  {
+                    key: "A",
+                    inputs: {
+                      required: { choice: ["COMBO", { options: ["a1", "a2"] }] },
+                    },
+                  },
+                  {
+                    key: "B",
+                    inputs: {
+                      required: { choice: ["COMBO", { options: ["b1", "b2"] }] },
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        input_order: { required: ["model"] },
+      },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "ComboProvider",
+          mode: 0,
+          inputs: [],
+          outputs: [{ name: "COMBO", type: "COMBO", links: [10] }],
+          widgets_values: [],
+        },
+        {
+          id: 3,
+          type: "DynParentNode",
+          mode: 0,
+          inputs: [{ name: "model", type: "COMBO", link: 10 }],
+          outputs: [],
+          widgets_values: ["A", "a1"],
+        },
+      ],
+      links: [[10, 1, 0, 3, 0, "COMBO"]],
+    } as never;
+    const { workflow } = convertUiToApi(ui, info);
+    // model is a link ref; the wrong-option leaf must be gone.
+    expect(Array.isArray(workflow["3"].inputs.model)).toBe(true);
+    expect("model.choice" in workflow["3"].inputs).toBe(false);
+  });
+
+  it("drops a linked-leaf literal under a link-ref parent whose option combo is EMPTY (no silent literal)", () => {
+    // model (parent) is a real link; model.choice (leaf) is a linked PrimitiveNode
+    // "retired"; the option's choice combo is empty [[], {}]. The leaf must NOT be
+    // silently kept — with no valid membership under any option it is dropped.
+    const info = {
+      ComboProvider: {
+        input: { required: {} },
+        output: ["COMBO"],
+        output_name: ["COMBO"],
+      },
+      DynParentNode: {
+        input: {
+          required: {
+            model: [
+              "COMFY_DYNAMICCOMBO_V3",
+              {
+                options: [
+                  {
+                    key: "A",
+                    inputs: { required: { choice: [[], {}] } },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        input_order: { required: ["model"] },
+      },
+      PrimitiveNode: { input: { required: {} } },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "ComboProvider",
+          mode: 0,
+          inputs: [],
+          outputs: [{ name: "COMBO", type: "COMBO", links: [10] }],
+          widgets_values: [],
+        },
+        {
+          id: 2,
+          type: "PrimitiveNode",
+          mode: 0,
+          inputs: [],
+          outputs: [{ name: "COMBO", type: "COMBO", links: [11] }],
+          widgets_values: ["retired"],
+        },
+        {
+          id: 3,
+          type: "DynParentNode",
+          mode: 0,
+          inputs: [
+            { name: "model", type: "COMBO", link: 10 },
+            { name: "model.choice", type: "COMBO", link: 11 },
+          ],
+          outputs: [],
+          widgets_values: [],
+        },
+      ],
+      links: [
+        [10, 1, 0, 3, 0, "COMBO"],
+        [11, 2, 0, 3, 1, "COMBO"],
+      ],
+    } as never;
+    const { workflow } = convertUiToApi(ui, info);
+    expect(Array.isArray(workflow["3"].inputs.model)).toBe(true);
+    // No silent out-of-list "retired" literal on model.choice.
+    expect("model.choice" in workflow["3"].inputs).toBe(false);
+  });
+
+  it("leaves a VALID enum fed by a linked PrimitiveNode untouched (no warn)", () => {
+    const info = {
+      KSamplerSelect: {
+        input: { required: { sampler_name: [["euler", "dpmpp_2m"]] } },
+        input_order: { required: ["sampler_name"] },
+      },
+      PrimitiveNode: { input: { required: {} } },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "PrimitiveNode",
+          mode: 0,
+          inputs: [],
+          outputs: [{ name: "COMBO", type: "COMBO", links: [10] }],
+          widgets_values: ["dpmpp_2m"],
+        },
+        {
+          id: 2,
+          type: "KSamplerSelect",
+          mode: 0,
+          inputs: [{ name: "sampler_name", type: "COMBO", link: 10 }],
+          outputs: [],
+          widgets_values: ["euler"],
+        },
+      ],
+      links: [[10, 1, 0, 2, 0, "COMBO"]],
+    } as never;
+    const { workflow, warnings } = convertUiToApi(ui, info);
+    expect(workflow["2"].inputs.sampler_name).toBe("dpmpp_2m");
+    expect(warnings.some((w) => /substituting|missing-asset/.test(w))).toBe(
+      false,
+    );
+  });
+});
+
+describe("convertUiToApi — option-bearing / dynamic nested combo validation (P1-B, #504)", () => {
+  // The option-list extraction only read spec[0] as the options array, so it
+  // MISSED the ["COMBO",{options:[...]}] form and V3 dynamic-combo nested combos —
+  // those values were copied raw and reached the API unvalidated.
+
+  it("SUBSTITUTES+warns an out-of-list nested value in a V3 dynamic combo", () => {
+    const info = {
+      NanoBananaNode: {
+        input: {
+          required: {
+            prompt: ["STRING"],
+            model: [
+              "COMFY_DYNAMICCOMBO_V3",
+              {
+                options: [
+                  {
+                    key: "Nano Banana 2",
+                    inputs: {
+                      required: {
+                        aspect_ratio: ["COMBO", { options: ["auto", "1:1", "16:9"] }],
+                      },
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        input_order: { required: ["prompt", "model"] },
+      },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "NanoBananaNode",
+          mode: 0,
+          inputs: [],
+          outputs: [],
+          widgets_values: ["a prompt", "Nano Banana 2", "4:3"],
+        },
+      ],
+      links: [],
+    } as never;
+    const { workflow, warnings } = convertUiToApi(ui, info);
+    expect(workflow["1"].inputs.model).toBe("Nano Banana 2");
+    // The nested "4:3" is not a valid aspect_ratio option — substituted to "auto".
+    expect(workflow["1"].inputs["model.aspect_ratio"]).toBe("auto");
+    expect(workflow["1"].inputs["model.aspect_ratio"]).not.toBe("4:3");
+    expect(
+      warnings.some(
+        (w) =>
+          w.includes("1") &&
+          w.includes("aspect_ratio") &&
+          /substituting/.test(w),
+      ),
+    ).toBe(true);
+  });
+
+  it("leaves a VALID nested dynamic-combo value untouched (no warn)", () => {
+    const info = {
+      NanoBananaNode: {
+        input: {
+          required: {
+            prompt: ["STRING"],
+            model: [
+              "COMFY_DYNAMICCOMBO_V3",
+              {
+                options: [
+                  {
+                    key: "Nano Banana 2",
+                    inputs: {
+                      required: {
+                        aspect_ratio: ["COMBO", { options: ["auto", "1:1", "16:9"] }],
+                      },
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        input_order: { required: ["prompt", "model"] },
+      },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "NanoBananaNode",
+          mode: 0,
+          inputs: [],
+          outputs: [],
+          widgets_values: ["a prompt", "Nano Banana 2", "16:9"],
+        },
+      ],
+      links: [],
+    } as never;
+    const { workflow, warnings } = convertUiToApi(ui, info);
+    expect(workflow["1"].inputs["model.aspect_ratio"]).toBe("16:9");
+    expect(warnings.some((w) => /substituting|missing-asset/.test(w))).toBe(
+      false,
+    );
+  });
+
+  it("does NOT consume nested slots for a STALE (substituted) dynamic parent — trailing widget stays aligned", () => {
+    // Saved parent "removed-model" is no longer an option and is substituted to
+    // "new-model". The saved array was serialized against the OLD option's layout
+    // (here: no nested widgets), so its nested arity is unrecoverable. We must
+    // consume NO nested slots against the replacement's layout — doing so would
+    // steal the trailing `seed` value. seed must survive; the required nested
+    // aspect_ratio of the replacement is left to default-fill.
+    const info = {
+      NanoBananaNode: {
+        input: {
+          required: {
+            model: [
+              "COMFY_DYNAMICCOMBO_V3",
+              {
+                options: [
+                  {
+                    key: "new-model",
+                    inputs: {
+                      required: {
+                        aspect_ratio: ["COMBO", { options: ["1:1", "16:9"] }],
+                      },
+                    },
+                  },
+                ],
+              },
+            ],
+            seed: ["INT"],
+          },
+        },
+        input_order: { required: ["model", "seed"] },
+      },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "NanoBananaNode",
+          mode: 0,
+          inputs: [],
+          outputs: [],
+          // OLD option had no nested widgets: [model(stale), seed]
+          widgets_values: ["removed-model", 12345],
+        },
+      ],
+      links: [],
+    } as never;
+    const { workflow, warnings } = convertUiToApi(ui, info);
+    expect(workflow["1"].inputs.model).toBe("new-model");
+    // seed is NOT stolen by an ambiguous nested slot.
+    expect(workflow["1"].inputs.seed).toBe(12345);
+    expect(
+      warnings.some(
+        (w) => w.includes("1") && w.includes("removed-model") && /substituting/.test(w),
+      ),
+    ).toBe(true);
+  });
+
+  it("skips the phantom control_after_generate slot after a NESTED seed widget", () => {
+    // A dynamic option exposing a nested controlled seed carries a phantom
+    // "fixed"/"randomize" value after it (like top-level seeds). Not skipping it
+    // shifts every following widget: aspect_ratio would eat "fixed" and steps
+    // would eat "16:9".
+    const info = {
+      SeededNanoNode: {
+        input: {
+          required: {
+            model: [
+              "COMFY_DYNAMICCOMBO_V3",
+              {
+                options: [
+                  {
+                    key: "new-model",
+                    inputs: {
+                      required: {
+                        seed: ["INT", { control_after_generate: true }],
+                        aspect_ratio: ["COMBO", { options: ["1:1", "16:9"] }],
+                      },
+                    },
+                  },
+                ],
+              },
+            ],
+            steps: ["INT"],
+          },
+        },
+        input_order: { required: ["model", "steps"] },
+      },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "SeededNanoNode",
+          mode: 0,
+          inputs: [],
+          outputs: [],
+          // [model, nested seed, phantom "fixed", nested aspect_ratio, steps]
+          widgets_values: ["new-model", 42, "fixed", "16:9", 7],
+        },
+      ],
+      links: [],
+    } as never;
+    const { workflow } = convertUiToApi(ui, info);
+    expect(workflow["1"].inputs["model.seed"]).toBe(42);
+    // aspect_ratio must be "16:9", NOT the phantom "fixed".
+    expect(workflow["1"].inputs["model.aspect_ratio"]).toBe("16:9");
+    // steps must land on 7, not be shifted onto "16:9".
+    expect(workflow["1"].inputs.steps).toBe(7);
+  });
+
+  it("SUBSTITUTES+warns an out-of-list required combo DEFAULT (schema-drift default-fill)", () => {
+    // A required combo whose own schema `default` is not among its options (custom
+    // node version drift). With no saved widget value the default-fill loop emits
+    // it — it must be validated (substituted to first option), not passed raw.
+    const info = {
+      DriftySampler: {
+        input: {
+          required: {
+            sampler_name: [["euler", "dpmpp_2m"], { default: "removed_sampler" }],
+          },
+        },
+        input_order: { required: ["sampler_name"] },
+      },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 77,
+          type: "DriftySampler",
+          mode: 0,
+          inputs: [],
+          outputs: [],
+          widgets_values: [], // nothing saved -> default-fill path
+        },
+      ],
+      links: [],
+    } as never;
+    const { workflow, warnings } = convertUiToApi(ui, info);
+    expect(workflow["77"].inputs.sampler_name).toBe("euler");
+    expect(workflow["77"].inputs.sampler_name).not.toBe("removed_sampler");
+    expect(
+      warnings.some(
+        (w) =>
+          w.includes("77") &&
+          w.includes("removed_sampler") &&
+          /substituting/.test(w),
+      ),
+    ).toBe(true);
+  });
+
+  it("consumes+validates an OPTIONAL positional nested leaf and keeps later widget index aligned", () => {
+    // A V3 option whose nested widget lives under `optional`. It occupies a
+    // positional widgets_values slot; reading only `required` would skip it and
+    // mis-position the trailing top-level `seed` widget. The nested value must be
+    // validated (substituted) AND the following widget must still land correctly.
+    const info = {
+      NanoBananaNode: {
+        input: {
+          required: {
+            model: [
+              "COMFY_DYNAMICCOMBO_V3",
+              {
+                options: [
+                  {
+                    key: "Nano Banana 2",
+                    inputs: {
+                      optional: {
+                        output_format: ["COMBO", { options: ["png", "webp"] }],
+                      },
+                    },
+                  },
+                ],
+              },
+            ],
+            seed: ["INT"],
+          },
+        },
+        input_order: { required: ["model", "seed"] },
+      },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "NanoBananaNode",
+          mode: 0,
+          inputs: [],
+          outputs: [],
+          // model, model.output_format (optional nested), seed
+          widgets_values: ["Nano Banana 2", "gif", 12345],
+        },
+      ],
+      links: [],
+    } as never;
+    const { workflow, warnings } = convertUiToApi(ui, info);
+    // The optional nested leaf is consumed + validated (gif -> png).
+    expect(workflow["1"].inputs["model.output_format"]).toBe("png");
+    // …and the trailing top-level `seed` still lands on the right slot.
+    expect(workflow["1"].inputs.seed).toBe(12345);
+    expect(
+      warnings.some(
+        (w) => w.includes("1") && w.includes("output_format") && /substituting/.test(w),
+      ),
+    ).toBe(true);
+  });
+
+  it("SUBSTITUTES+warns an out-of-list value on a top-level [\"COMBO\",{options}] spec", () => {
+    const info = {
+      ApiImageNode: {
+        input: {
+          required: {
+            response_modalities: [
+              "COMBO",
+              { options: ["IMAGE", "IMAGE+TEXT"] },
+            ],
+          },
+        },
+        input_order: { required: ["response_modalities"] },
+      },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "ApiImageNode",
+          mode: 0,
+          inputs: [],
+          outputs: [],
+          widgets_values: ["AUDIO"], // not an option — helper missed this shape before
+        },
+      ],
+      links: [],
+    } as never;
+    const { workflow, warnings } = convertUiToApi(ui, info);
+    expect(workflow["1"].inputs.response_modalities).toBe("IMAGE");
+    expect(workflow["1"].inputs.response_modalities).not.toBe("AUDIO");
+    expect(
+      warnings.some(
+        (w) => w.includes("1") && w.includes("AUDIO") && /substituting/.test(w),
+      ),
     ).toBe(true);
   });
 });

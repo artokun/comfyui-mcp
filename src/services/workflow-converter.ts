@@ -166,9 +166,47 @@ function isUploadSelectorSpec(spec: unknown): boolean {
 }
 
 /**
- * Validate one saved widget value against its object_info COMBO options and
- * return the value to store. Non-combo specs and in-list values pass through
- * unchanged. For an out-of-list value the decision mirrors #407/#504:
+ * Extract the selectable option list from a widget spec, covering ALL three
+ * combo shapes so validation never misses one (issue #504 P1-B):
+ *   - inline combo:      [["a","b"], {..}]                 -> spec[0]
+ *   - COMBO w/ options:  ["COMBO", {options:["a","b"]}]    -> spec[1].options
+ *   - V3 dynamic combo:  ["COMFY_DYNAMICCOMBO_V3",         -> the option keys
+ *                          {options:[{key:"K", inputs:{…}}]}]
+ * A plain scalar spec (["INT",{…}]) or a link input carries no enumerable list,
+ * so this returns undefined and the caller passes the value through untouched.
+ * Object-shaped dynamic options are normalized to their `key`.
+ */
+function getComboOptions(spec: unknown): unknown[] | undefined {
+  if (!Array.isArray(spec)) return undefined;
+  const type = spec[0];
+  if (Array.isArray(type)) return type; // inline combo: spec[0] IS the option list
+  const cfg = spec[1] as { options?: unknown } | undefined;
+  const opts = cfg?.options;
+  if (Array.isArray(opts)) {
+    // Flat value list (["auto","1:1"]) or object-keyed dynamic-combo list
+    // ([{key:"Nano Banana 2", …}]). Normalize both to their selectable values.
+    return opts.map((o) =>
+      o &&
+      typeof o === "object" &&
+      !Array.isArray(o) &&
+      "key" in (o as Record<string, unknown>)
+        ? (o as { key: unknown }).key
+        : o,
+    );
+  }
+  return undefined;
+}
+
+/**
+ * Validate one saved combo value against its object_info options (of ANY combo
+ * shape — see getComboOptions) and return the value to store. This is the SINGLE
+ * choke-point every combo-value assignment flows through — direct widget, the
+ * name→value object form, the has_serialized_properties overwrite, a linked
+ * PrimitiveNode literal (P1-A), AND a V3 dynamic-combo nested leaf value (P1-B) —
+ * so no path can emit a value ComfyUI would reject with "Value not in list".
+ *
+ * Non-combo specs and in-list values pass through unchanged. For an out-of-list
+ * value the decision mirrors #407/#504:
  *
  *  - genuine ASSET/upload selector (model-loader widget name, (classType,input)
  *    loader allowlist, or object_info upload flag) → PRESERVE + warn, so a
@@ -176,37 +214,48 @@ function isUploadSelectorSpec(spec: unknown): boolean {
  *    silent wrong-file swap;
  *  - true ENUM (sampler_name, scheduler, a stale "Select to add Wildcard"
  *    helper, a combo merely NAMED image/extension, a media-looking value on a
- *    non-loader enum) → SUBSTITUTE comboOpts[0] + warn, because ComfyUI hard-
- *    rejects a "Value not in list".
+ *    non-loader enum, an out-of-list dynamic/nested key) → SUBSTITUTE
+ *    comboOpts[0] + warn, because ComfyUI hard-rejects a "Value not in list".
  *
- * Applied on EVERY widget-population path — the positional widgets_values array,
- * the name→value object form (VHS_VideoCombine, …), AND the
- * has_serialized_properties overwrite — so an invalid enum value can't leak past
- * validation on any of them.
+ * `name` is the LEAF input name (nested leaf for dynamic combos) so asset
+ * classification keys off the real selector name, and `spec` is that leaf's
+ * spec, never regressing #504/#407.
  */
-function validateComboWidgetValue(
+function validateComboValueForSpec(
   name: string,
   value: unknown,
-  def: ComfyUINodeDef,
+  spec: unknown,
   classType: string,
   nodeId: string,
   warnings: string[],
 ): unknown {
-  const spec =
-    (def.input?.required as Record<string, unknown>)?.[name] ??
-    (def.input?.optional as Record<string, unknown>)?.[name];
-  const comboOpts = Array.isArray(spec) ? spec[0] : undefined;
-  if (
-    !Array.isArray(comboOpts) ||
-    comboOpts.length === 0 ||
-    comboOpts.includes(value as never)
-  ) {
-    return value;
-  }
+  const comboOpts = getComboOptions(spec);
+  // Not an enumerable combo (plain INT/FLOAT/STRING/BOOLEAN or a link input) —
+  // nothing to validate against.
+  if (!Array.isArray(comboOpts)) return value;
+  // Already a valid option — pass through untouched.
+  if (comboOpts.includes(value as never)) return value;
   const isAssetCombo =
     ASSET_WIDGET_NAMES.has(name) ||
     isKnownLoaderInput(classType, name) ||
     isUploadSelectorSpec(spec);
+  // Recognized combo whose option list is EMPTY on the connected server (e.g. no
+  // models/files installed, or a fully-retired enum). There is no valid option to
+  // substitute to, so preserve the declared value and WARN — surfacing an honest
+  // missing-option/asset error rather than SILENTLY emitting an out-of-list
+  // literal. (Previously the length===0 branch returned the value with no warning.)
+  if (comboOpts.length === 0) {
+    warnings.push(
+      isAssetCombo
+        ? `Node ${nodeId} (${classType}): widget "${name}" value "${String(
+            value,
+          )}" — the connected server has no installed options for this asset combo; keeping the declared value so it surfaces as a missing-asset error.`
+        : `Node ${nodeId} (${classType}): widget "${name}" value "${String(
+            value,
+          )}" — the connected server lists no options for this combo, so it cannot be validated; keeping the declared value so it surfaces as an honest error rather than being silently emitted.`,
+    );
+    return value;
+  }
   if (isAssetCombo) {
     warnings.push(
       `Node ${nodeId} (${classType}): widget "${name}" value "${String(
@@ -228,6 +277,96 @@ function validateComboWidgetValue(
 }
 
 /**
+ * Def-keyed wrapper for validateComboValueForSpec: resolves the input's spec from
+ * object_info by name (required then optional) and delegates. Used by the direct
+ * widget paths and the linked-PrimitiveNode path.
+ */
+function validateComboWidgetValue(
+  name: string,
+  value: unknown,
+  def: ComfyUINodeDef,
+  classType: string,
+  nodeId: string,
+  warnings: string[],
+): unknown {
+  const spec =
+    (def.input?.required as Record<string, unknown>)?.[name] ??
+    (def.input?.optional as Record<string, unknown>)?.[name];
+  return validateComboValueForSpec(name, value, spec, classType, nodeId, warnings);
+}
+
+/**
+ * Resolve an input NAME (possibly a V3 dynamic-combo dotted "<combo>.<leaf>"
+ * key) to its LEAF name and object_info spec. A flat name resolves against the
+ * node's top-level required/optional inputs. A dotted name resolves the leaf
+ * against the parent dynamic combo's SELECTED option (looked up from the already
+ * populated `inputs[parent]`), so validation and asset classification key off
+ * the real leaf spec + leaf name — never the dotted name (which no top-level
+ * lookup would find, letting an unvalidated value through). Used by the linked
+ * PrimitiveNode path, where a primitive can feed a nested dotted input directly.
+ */
+function resolveWidgetSpec(
+  def: ComfyUINodeDef,
+  name: string,
+  inputs: Record<string, unknown>,
+): { leafName: string; spec: unknown } {
+  const dot = name.indexOf(".");
+  if (dot < 0) {
+    const spec =
+      (def.input?.required as Record<string, unknown>)?.[name] ??
+      (def.input?.optional as Record<string, unknown>)?.[name];
+    return { leafName: name, spec };
+  }
+  const parent = name.slice(0, dot);
+  const leafName = name.slice(dot + 1);
+  const parentSpec =
+    (def.input?.required as Record<string, unknown>)?.[parent] ??
+    (def.input?.optional as Record<string, unknown>)?.[parent];
+  const opts = (
+    Array.isArray(parentSpec)
+      ? (parentSpec[1] as {
+          options?: Array<{
+            key?: unknown;
+            inputs?: {
+              required?: Record<string, unknown>;
+              optional?: Record<string, unknown>;
+            };
+          }>;
+        })
+      : undefined
+  )?.options;
+  const selectedKey = inputs[parent];
+  // V3 option inputs may live under required OR optional — search both so an
+  // optional nested leaf isn't left unresolved (which would skip validation).
+  const selected = Array.isArray(opts)
+    ? opts.find((o) => o?.key === selectedKey)?.inputs
+    : undefined;
+  const spec = selected?.required?.[leafName] ?? selected?.optional?.[leafName];
+  return { leafName, spec };
+}
+
+/**
+ * Whether a widget SPEC carries a control_after_generate phantom slot — either
+ * flagged in its config, or a seed-type INT the ComfyUI frontend auto-augments.
+ * Works for both top-level inputs and V3 dynamic-combo NESTED leaves (which have
+ * no entry in def.input), so nested controlled seeds skip their phantom
+ * "fixed"/"randomize" slot too instead of shifting every following widget.
+ */
+function specHasControlAfterGenerate(name: string, spec: unknown): boolean {
+  if (!Array.isArray(spec)) return false;
+  if ((spec[1] as Record<string, unknown> | undefined)?.control_after_generate === true)
+    return true;
+  // ComfyUI's frontend auto-adds a control_after_generate widget to seed-type INT
+  // widgets even when object_info doesn't flag it (e.g. UltimateSDUpscale.seed,
+  // KSamplerAdvanced.noise_seed). The saved widgets_values then carry the extra
+  // "fixed"/"randomize"/… value that must be skipped during mapping.
+  return (
+    spec[0] === "INT" &&
+    (name === "seed" || name === "noise_seed" || name === "rand_seed")
+  );
+}
+
+/**
  * Check if an input has control_after_generate in its spec config.
  * These inputs (like seed, noise_seed) have a phantom "fixed"/"randomize" widget
  * in the UI's widgets_values array that doesn't correspond to any named input.
@@ -239,18 +378,7 @@ function hasControlAfterGenerate(
   const spec =
     def.input.required?.[inputName] ?? def.input.optional?.[inputName];
   if (!spec) return false;
-  if ((spec[1] as Record<string, unknown> | undefined)?.control_after_generate === true)
-    return true;
-  // ComfyUI's frontend auto-adds a control_after_generate widget to seed-type INT
-  // widgets even when object_info doesn't flag it (e.g. UltimateSDUpscale.seed,
-  // KSamplerAdvanced.noise_seed). The saved widgets_values then carry the extra
-  // "fixed"/"randomize"/… value that must be skipped during mapping.
-  if (
-    spec[0] === "INT" &&
-    (inputName === "seed" || inputName === "noise_seed" || inputName === "rand_seed")
-  )
-    return true;
-  return false;
+  return specHasControlAfterGenerate(inputName, spec);
 }
 
 /**
@@ -1323,6 +1451,17 @@ export function convertUiToApi(
       }
     }
 
+    // Nested widgets that have been "converted to input" (linked) carry NO
+    // positional widgets_values slot — their value arrives via the link, not the
+    // saved array — so consuming a slot for them would steal the next widget's
+    // value and mis-align the whole tail. Track the linked (dotted) input names
+    // to skip their positional consumption below.
+    const linkedInputNames = new Set(
+      (node.inputs ?? [])
+        .filter((i) => i.link != null)
+        .map((i) => i.name),
+    );
+
     // Map widgets_values to named widget inputs.
     // Some INT inputs with "control_after_generate": true (like seed, noise_seed) have
     // a phantom widget value in widgets_values ("fixed"/"randomize"/"increment"/"decrement")
@@ -1381,12 +1520,39 @@ export function convertUiToApi(
 
       const opts = (
         Array.isArray(spec)
-          ? (spec[1] as { options?: Array<{ key?: unknown; inputs?: { required?: Record<string, unknown> } }> })
+          ? (spec[1] as {
+              options?: Array<{
+                key?: unknown;
+                inputs?: {
+                  required?: Record<string, unknown>;
+                  optional?: Record<string, unknown>;
+                };
+              }>;
+            })
           : undefined
       )?.options;
-      const nested = Array.isArray(opts)
-        ? opts.find((o) => o?.key === value)?.inputs?.required
+      // A V3 option's nested widgets can live under required OR optional; both
+      // occupy positional widgets_values slots in serialization order (required
+      // then optional). Merging them keeps the positional index aligned AND
+      // ensures every nested leaf is validated — reading only `required` would
+      // skip an optional leaf and mis-position every later widget.
+      //
+      // Look up the option by the RAW saved `value` (the selection the array was
+      // serialized against), NOT the post-validation inputs[name]. If the saved
+      // selection is stale (substituted for a valid one), its ORIGINAL nested
+      // arity is unrecoverable, so we deliberately consume NO nested slots rather
+      // than guess against the replacement option's layout — guessing would
+      // silently steal or drop the trailing top-level widgets (e.g. a seed). The
+      // parent value is still substituted+warned above; required nested inputs of
+      // the replacement simply fall through to default-fill.
+      const selectedInputs = Array.isArray(opts)
+        ? opts.find((o) => o?.key === value)?.inputs
         : undefined;
+      const nested =
+        selectedInputs &&
+        (selectedInputs.required || selectedInputs.optional)
+          ? { ...selectedInputs.required, ...selectedInputs.optional }
+          : undefined;
       if (nested) {
         // V3 dynamic-combo nested inputs are keyed with the combo's id as a
         // "<combo>.<nested>" prefix (ComfyUI rebuilds the nested dict from these
@@ -1396,10 +1562,34 @@ export function convertUiToApi(
         // "images", or IMAGE/link types) have no saved widget value, so skipping
         // them keeps the positional mapping aligned.
         for (const [nName, nSpec] of Object.entries(nested)) {
-          if (widgetIdx >= widgetValues.length) break;
           if (!isPositionalWidgetSpec(nSpec)) continue;
-          inputs[`${name}.${nName}`] = widgetValues[widgetIdx];
+          // A linked (converted-to-input) nested leaf has NO positional slot — its
+          // value comes from the link, populated in the link loop below — so it
+          // must NOT consume a widgets_values entry or the tail shifts.
+          if (linkedInputNames.has(`${name}.${nName}`)) continue;
+          if (widgetIdx >= widgetValues.length) break;
+          // Nested leaf values bypass the top-level widget validation, so validate
+          // each against ITS OWN leaf spec/name (P1-B). Asset classification keys
+          // off the leaf name + loader/upload allowlist (don't regress #504/#407);
+          // an out-of-list nested enum (e.g. aspect_ratio "4:3") substitutes+warns.
+          inputs[`${name}.${nName}`] = validateComboValueForSpec(
+            nName,
+            widgetValues[widgetIdx],
+            nSpec,
+            classType,
+            nodeId,
+            warnings,
+          );
           widgetIdx++;
+          // A nested seed-type / control_after_generate leaf carries a phantom
+          // "fixed"/"randomize" value right after it (same as top-level seeds), so
+          // skip that slot or every following widget shifts by one.
+          if (
+            specHasControlAfterGenerate(nName, nSpec) &&
+            widgetIdx < widgetValues.length
+          ) {
+            widgetIdx++;
+          }
         }
       }
     }
@@ -1452,7 +1642,21 @@ export function convertUiToApi(
       } else {
         dflt = config?.default;
       }
-      if (dflt !== undefined) inputs[name] = dflt;
+      if (dflt !== undefined) {
+        // A schema `default` can itself be out-of-list (custom-node combo drift,
+        // e.g. sampler_name default "removed_sampler" not in its own options).
+        // Route the derived default through the same choke-point so it can't emit
+        // a value ComfyUI rejects — first-option substitution for a true enum,
+        // leaf-name asset preservation for a loader/upload selector.
+        inputs[name] = validateComboValueForSpec(
+          name,
+          dflt,
+          spec,
+          classType,
+          nodeId,
+          warnings,
+        );
+      }
     }
 
     // Map linked inputs from node's inputs array (bypass/mute resolved)
@@ -1466,12 +1670,117 @@ export function convertUiToApi(
         const srcNode = link ? nodesById.get(link.sourceNodeId) : undefined;
         if (srcNode?.type === "PrimitiveNode") {
           const val = srcNode.widgets_values?.[0];
-          if (val !== undefined) inputs[input.name] = val;
+          // A linked PrimitiveNode literal bypasses the widget-value validation
+          // above (widgets are processed first, links after), so route it through
+          // the same choke-point (P1-A). A stale LOADER asset is preserved+warned;
+          // a true out-of-list ENUM (e.g. sampler_name "removed_sampler") is
+          // substituted+warned rather than reaching the API and being rejected.
+          // input.name may be a dynamic-combo dotted "<combo>.<leaf>" key, so
+          // resolve the leaf spec/name first — a top-level lookup would miss it
+          // and let the value through unvalidated.
+          if (val !== undefined) {
+            const { leafName, spec } = resolveWidgetSpec(def, input.name, inputs);
+            inputs[input.name] = validateComboValueForSpec(
+              leafName,
+              val,
+              spec,
+              classType,
+              nodeId,
+              warnings,
+            );
+          }
           continue;
         }
         const resolved = resolveSource(input.link);
         if (resolved) inputs[input.name] = [resolved.id, resolved.slot];
       }
+    }
+
+    // Final dependency-aware pass over V3 dynamic-combo dotted "<parent>.<leaf>"
+    // inputs: a link/PrimitiveNode override above can change the PARENT selection
+    // AFTER its nested leaves were validated against the ORIGINAL option (e.g.
+    // positional emits model="A"+model.choice="a1", then a primitive overrides
+    // model="B"). Re-anchor every dotted leaf to the FINAL parent value — drop a
+    // leaf that the selected option no longer defines, and revalidate the rest
+    // against the leaf's real spec — so no leaf reaches the prompt validated
+    // against the wrong option.
+    for (const key of Object.keys(inputs)) {
+      const dot = key.indexOf(".");
+      if (dot < 0) continue;
+      const parent = key.slice(0, dot);
+      // Orphaned dotted leaf: its dynamic parent isn't in the prompt (e.g. an
+      // optional parent left unset while the leaf was linked). There's no option
+      // context to validate against, and the leaf is meaningless without its
+      // parent, so default-deny — drop it rather than let an unvalidated literal
+      // reach the prompt.
+      if (!(parent in inputs)) {
+        if (!Array.isArray(inputs[key])) delete inputs[key];
+        continue;
+      }
+      const leafVal = inputs[key];
+      if (Array.isArray(leafVal)) continue; // leaf itself is a link ref
+      // Parent fed by a real (non-Primitive) link → the SELECTED option is only
+      // known at runtime, so a leaf literal saved under one option may be wrong
+      // for the resolved one. Keep it only if it validates under EVERY option
+      // that defines the leaf; otherwise drop it (ComfyUI supplies the runtime
+      // option's default). This prevents a wrong-option literal (e.g. option-A
+      // "a1" left on a parent that resolves to option B) reaching the prompt.
+      if (Array.isArray(inputs[parent])) {
+        const leaf = key.slice(dot + 1);
+        const pSpec =
+          (def.input?.required as Record<string, unknown>)?.[parent] ??
+          (def.input?.optional as Record<string, unknown>)?.[parent];
+        const pOpts = (
+          Array.isArray(pSpec)
+            ? (pSpec[1] as {
+                options?: Array<{
+                  inputs?: {
+                    required?: Record<string, unknown>;
+                    optional?: Record<string, unknown>;
+                  };
+                }>;
+              })
+            : undefined
+        )?.options;
+        // Keep the leaf ONLY if its literal is a genuine in-list MEMBER of every
+        // option that defines it (so it's valid whichever option resolves at
+        // runtime). Use a strict membership test — NOT validateComboValueForSpec,
+        // whose asset/empty-combo PRESERVE path would keep an out-of-list literal
+        // and swallow its warning. Anything else (out-of-list, asset, empty combo,
+        // undefined-everywhere) is dropped so no silent wrong-option literal reaches
+        // the prompt; ComfyUI fills the runtime option's default.
+        let definedSomewhere = false;
+        let memberEverywhere = true;
+        if (Array.isArray(pOpts)) {
+          for (const o of pOpts) {
+            const s = o?.inputs?.required?.[leaf] ?? o?.inputs?.optional?.[leaf];
+            if (s === undefined) continue;
+            definedSomewhere = true;
+            const optList = getComboOptions(s);
+            if (!Array.isArray(optList) || !optList.includes(leafVal as never)) {
+              memberEverywhere = false;
+              break;
+            }
+          }
+        }
+        if (!definedSomewhere || !memberEverywhere) delete inputs[key];
+        continue;
+      }
+      const { leafName, spec } = resolveWidgetSpec(def, key, inputs);
+      if (spec === undefined) {
+        // The final selected option does not define this leaf — it belongs to the
+        // superseded option and would be an unknown input on the current one.
+        delete inputs[key];
+        continue;
+      }
+      inputs[key] = validateComboValueForSpec(
+        leafName,
+        leafVal,
+        spec,
+        classType,
+        nodeId,
+        warnings,
+      );
     }
 
     // rgthree "Power Lora Loader" stores its loras in widgets_values as a list of
@@ -1584,5 +1893,11 @@ export function convertUiToApi(
     `Converted UI workflow: ${nodeCount} nodes (${skipped} skipped)`,
   );
 
-  return { workflow, warnings };
+  // De-duplicate identical warnings. A value can legitimately be validated twice
+  // (positional pass, then the final dynamic-parent re-anchor pass) and produce
+  // the same message; identical strings already embed node id + input, so exact
+  // duplicates are pure noise. Distinct nodes/inputs keep their own warnings.
+  const dedupedWarnings = [...new Set(warnings)];
+
+  return { workflow, warnings: dedupedWarnings };
 }
