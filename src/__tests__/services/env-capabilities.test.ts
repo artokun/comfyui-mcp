@@ -9,6 +9,7 @@ import {
   resolveComfyuiPython,
   reconcileProbeState,
   resolveBackends,
+  readInstalledPanelVersion,
   type EnvCapabilities,
 } from "../../services/env-capabilities.js";
 
@@ -368,5 +369,74 @@ describe("buildPanelSystemAppend", () => {
 
   it("returns the static prompt unchanged when the env block is empty", () => {
     expect(buildPanelSystemAppend(STATIC, {})).toBe(STATIC);
+  });
+});
+
+describe("readInstalledPanelVersion (disk fallback)", () => {
+  let dir: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "cmcp-panelver-"));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  // Write a pyproject.toml under a specific custom_nodes subdir.
+  async function writePanel(dirName: string, body: string) {
+    const d = join(dir, "custom_nodes", dirName);
+    await mkdir(d, { recursive: true });
+    await writeFile(join(d, "pyproject.toml"), body, "utf8");
+  }
+
+  it("reads the panel's [project].version (authoritative by [project].name)", async () => {
+    await writePanel(
+      "comfyui-mcp-panel",
+      `[project]\nname = "comfyui-agent-panel"\nversion = "0.11.20"\n`,
+    );
+    expect(readInstalledPanelVersion(dir)).toBe("0.11.20");
+  });
+
+  it("mirrors the shipped parsePyproject reader (single-line description, then version)", async () => {
+    // Shape mirrors the real panel pyproject.toml (long single-line description).
+    await writePanel(
+      "comfyui-mcp-panel",
+      `[project]\n` +
+        `name = "comfyui-agent-panel"\n` +
+        `description = "Autonomous AI agent in the ComfyUI sidebar - drive the canvas, browse CivitAI, generate."\n` +
+        `version = "0.11.20"\n` +
+        `license = { file = "LICENSE" }\n` +
+        `[tool.comfy]\nPublisherId = "artokun"\n`,
+    );
+    expect(readInstalledPanelVersion(dir)).toBe("0.11.20");
+  });
+
+  it("finds the panel under the alternate registry dir name", async () => {
+    await writePanel(
+      "comfyui-agent-panel",
+      `[project]\nname = "comfyui-agent-panel"\nversion = "0.12.0"\n`,
+    );
+    expect(readInstalledPanelVersion(dir)).toBe("0.12.0");
+  });
+
+  it("returns undefined for a non-panel pyproject squatting a known dir (wrong project name)", async () => {
+    // Authoritative guard: only [project].name == comfyui-agent-panel is trusted,
+    // so a different node at the same dir name never yields a WRONG version.
+    await writePanel(
+      "comfyui-mcp-panel",
+      `[project]\nname = "some-other-node"\nversion = "9.9.9"\n`,
+    );
+    expect(readInstalledPanelVersion(dir)).toBeUndefined();
+  });
+
+  it("returns undefined when the panel pyproject declares no version", async () => {
+    await writePanel("comfyui-mcp-panel", `[project]\nname = "comfyui-agent-panel"\n`);
+    expect(readInstalledPanelVersion(dir)).toBeUndefined();
+  });
+
+  it("returns undefined when the file/dir is missing or comfyuiPath is undefined", () => {
+    expect(readInstalledPanelVersion(undefined)).toBeUndefined();
+    expect(readInstalledPanelVersion(join(dir, "does-not-exist"))).toBeUndefined();
+    // custom_nodes exists but the panel is not installed.
+    expect(readInstalledPanelVersion(dir)).toBeUndefined();
   });
 });

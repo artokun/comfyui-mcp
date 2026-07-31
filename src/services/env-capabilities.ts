@@ -16,10 +16,13 @@
 
 import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { comfyuiFetch } from "../comfyui/fetch.js";
 import { platform, release, totalmem, cpus } from "node:os";
 import { isForceRemoteFlagSet } from "../config.js";
 import { resolveComfyuiPython } from "./workspace-env.js";
+import { parsePyproject } from "./node-authoring.js";
 
 // The interpreter resolver lives in workspace-env (which owns ComfyUI-base
 // resolution) so get_environment and this panel probe share ONE live-first
@@ -499,12 +502,53 @@ export interface GatherOptions {
   tritonTimeoutMs?: number;
 }
 
+// The panel's known custom_nodes dir names (registry unpack vs repo name), kept
+// in sync with panel-installer's FAST_PATH_DIRS.
+const PANEL_DIR_NAMES = ["comfyui-mcp-panel", "comfyui-agent-panel"] as const;
+// pyproject `[project].name` — the AUTHORITATIVE panel identity (a dir may be
+// squatted; the project name is not). Mirrors panel-installer's PANEL_REGISTRY_ID.
+const PANEL_PROJECT_NAME = "comfyui-agent-panel";
+
+/**
+ * Fallback panel version from DISK. The panel version normally rides the panel's
+ * `hello`, but a stale (browser-cached) panel — one loaded before the panel began
+ * advertising its version — omits it, leaving the agent's ENV line `panel=?` and
+ * bug reports unable to version-match the panel. Read the INSTALLED panel's
+ * version from its `pyproject.toml` under ComfyUI's custom_nodes.
+ *
+ * Parsing is delegated to the shipped `parsePyproject` (the same minimal reader
+ * that gates panel install/reinstall) so there is ONE pyproject convention, not
+ * two. We only accept a version whose `[project].name` is authoritatively the
+ * panel's — a non-panel pyproject squatting a known dir name yields undefined,
+ * never a wrong version. Best-effort: returns undefined on any failure, never
+ * throws.
+ */
+export function readInstalledPanelVersion(comfyuiPath?: string): string | undefined {
+  if (!comfyuiPath) return undefined;
+  for (const name of PANEL_DIR_NAMES) {
+    try {
+      const toml = readFileSync(
+        join(comfyuiPath, "custom_nodes", name, "pyproject.toml"),
+        "utf8",
+      );
+      const parsed = parsePyproject(toml);
+      if (parsed.projectName === PANEL_PROJECT_NAME && parsed.version) return parsed.version;
+    } catch {
+      /* try the next known dir name */
+    }
+  }
+  return undefined;
+}
+
 export async function gatherEnvCapabilities(opts: GatherOptions): Promise<EnvCapabilities> {
   const caps: EnvCapabilities = {};
 
   // --- our own build versions (caller-supplied; panel version rides the hello) ---
   caps.mcpVersion = opts.mcpVersion;
-  caps.panelVersion = opts.panelVersion;
+  // Prefer the live hello's panel version; fall back to the INSTALLED panel's
+  // pyproject version so a stale (cached) panel that omits it from the hello
+  // still gets the agent's ENV line stamped (report_issue can version-match).
+  caps.panelVersion = opts.panelVersion ?? readInstalledPanelVersion(opts.comfyuiPath);
 
   // --- cheap, synchronous local machine facts (node os) ---
   caps.os = friendlyOs();
