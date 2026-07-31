@@ -219,6 +219,8 @@ const LOOPBACK_HOSTS = new Set([
   "::1",
   "localhost",
   "0.0.0.0",
+  "::", // IPv6 wildcard bind — reachable on loopback (::1)
+  "0000:0000:0000:0000:0000:0000:0000:0000",
 ]);
 
 /** True when a hostname is loopback (or absent → assume local). Bracketed IPv6
@@ -581,6 +583,19 @@ if (!bootLocalTarget && !isRunpodProxyHost(bootComfyui.host) && process.env.COMF
  *  forcing 127.0.0.1 broke rigs whose local ComfyUI lives on another LAN host). */
 export function getLocalComfyuiUrl(): string {
   return lastNonPodTarget ?? "http://127.0.0.1:8188";
+}
+
+/**
+ * The orchestrator's PROCESS-START local ComfyUI base URL, captured at boot from
+ * COMFYUI_URL/argv/defaults and NEVER mutated by a runtime retarget (a panel
+ * `hello` calls setComfyuiTarget, which does NOT touch this snapshot). Returns null
+ * unless boot pointed at a LOOPBACK instance with a resolved port. Use this — not
+ * getComfyUIBaseUrl(), which a client `hello` can steer — as the SERVER-AUTHORIZED
+ * target for a self-probe that must not be client-influenced (#509 security).
+ */
+export function getBootLocalComfyUIBaseUrl(): string | null {
+  if (!isLoopbackHost(bootComfyui.host) || !(bootComfyui.port > 0)) return null;
+  return `${bootComfyui.ssl ? "https" : "http"}://${bootComfyui.host}:${bootComfyui.port}${bootComfyui.basePath}`;
 }
 
 /** Orchestrator startup hook: re-point the saved-target file (port-scoped, so

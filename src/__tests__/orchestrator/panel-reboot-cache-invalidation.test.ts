@@ -4,7 +4,7 @@
 // refusal comes back as a normal ToolResult with `rebooting:false` — resetting
 // then would close the shared client mid-generation.
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const resetClient = vi.fn();
 const resetObjectInfoCache = vi.fn();
@@ -15,21 +15,29 @@ vi.mock("../../comfyui/client.js", () => ({
   resetObjectInfoCache: () => resetObjectInfoCache(),
 }));
 
-const { buildPanelToolDefs, rebootConfirmed } = await import(
+const { buildPanelToolDefs, rebootConfirmed, __panelToolsTestHooks } = await import(
   "../../orchestrator/panel-tools.js"
 );
 import type { PanelToolCtx } from "../../orchestrator/panel-tools.js";
 import type { ToolResult } from "../../orchestrator/panel-tools.js";
 
 function ctxReplying(reply: unknown): PanelToolCtx {
+  // comfy_reboot is dispatched via ctx.bridge.send (pinned, no rebind); readiness
+  // never certifies here (no down→up, no reconnect) — that's fine, this suite only
+  // asserts cache-reset gating on the reboot CLASSIFICATION, not readiness.
   return {
-    call: async () => ({
-      content: [{ type: "text", text: JSON.stringify(reply) }],
-    }),
+    call: async () => ({ content: [{ type: "text", text: JSON.stringify(reply) }] }),
     confirm: async () => true,
-    bridge: {} as PanelToolCtx["bridge"],
+    ensureReachable: () => {},
+    bridge: {
+      send: async () => reply,
+      tabOrigin: () => undefined,
+      tabIsLocal: () => false,
+      tabSockId: () => "s0",
+      canReach: () => false,
+    } as unknown as PanelToolCtx["bridge"],
     tabId: "test-tab",
-  } as PanelToolCtx;
+  } as unknown as PanelToolCtx;
 }
 
 function rebootHandler() {
@@ -63,6 +71,20 @@ describe("panel_restart_comfyui cache invalidation", () => {
   beforeEach(() => {
     resetClient.mockClear();
     resetObjectInfoCache.mockClear();
+    // Fast, deterministic readiness poll (no real 3s settle / network probe) so
+    // these cache-invalidation assertions don't hit vitest's 5s test timeout.
+    __panelToolsTestHooks.setPanelRebootTiming({
+      settleMs: 0,
+      budgetMs: 100,
+      intervalMs: 5,
+      probeTimeoutMs: 20,
+    });
+    __panelToolsTestHooks.setHealthProbe(async () => false); // panel round-trip governs
+  });
+
+  afterEach(() => {
+    __panelToolsTestHooks.setPanelRebootTiming(null);
+    __panelToolsTestHooks.setHealthProbe(null);
   });
 
   it("invalidates the client + object_info caches on a CONFIRMED reboot", async () => {

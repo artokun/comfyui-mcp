@@ -34,6 +34,7 @@ import { parse as parseYaml } from "yaml";
 import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { UiBridge } from "../services/ui-bridge.js";
+import { dispatchOutcomeOf } from "../services/ui-bridge.js";
 import {
   type WorkflowTargetStore,
   withWorkflowTarget,
@@ -57,7 +58,12 @@ import {
 } from "../comfyui/client.js";
 import { convertUiToApi, collectNodeTypes } from "../services/workflow-converter.js";
 import { restartComfyUI } from "../services/process-control.js";
-import { isRemoteMode } from "../config.js";
+import {
+  isRemoteMode,
+  isCloudMode,
+  getBootLocalComfyUIBaseUrl,
+  getComfyUIBaseUrl,
+} from "../config.js";
 import { sliceWorkflow } from "../services/workflow-slicer.js";
 import { validateA2UISpecServer } from "../services/a2ui-spec.js";
 import type { UiWorkflow } from "../comfyui/types.js";
@@ -112,30 +118,29 @@ export function rebootConfirmed(res: ToolResult): boolean {
 }
 
 /**
- * True when a comfy_reboot ToolResult is an ERROR whose text is the EXPECTED
- * connection drop of a server going down (the reboot handler exits the instant it
- * accepts the request, so the browser tab's socket dies before it can ack). This
- * is the SUCCESS signal of a reboot, NOT a failure — the bridge surfaces it as a
- * mid-command "OUTCOME UNKNOWN" / "disconnected" / "not open" / "did not reply"
- * error. Distinguished from a genuine refusal, which comes back as a NON-error
- * ToolResult carrying `rebooting:false` (handled by rebootConfirmed instead).
+ * True when a comfy_reboot ToolResult is the bridge's canonical POST-WRITE mid-command
+ * drop — the command was ACTUALLY WRITTEN to the panel socket and the connection then
+ * died before a reply (the reboot handler exits the instant it accepts, so the socket
+ * dies mid-flight). The bridge emits this for a MUTATING command as
+ * "disconnected mid-command … OUTCOME UNKNOWN" (ui-bridge.ts handleMidCommandDisconnect).
+ *
+ * Deliberately NOT matched (coordinator P0): a raw PRE-WRITE `sock.send()` failure
+ * (ECONNRESET / socket hang up / EPIPE / "was NOT dispatched") — that means the command
+ * was NEVER written, so NOTHING was dispatched. Treating a pre-write send failure as an
+ * accepted/ambiguous "dropped reboot" would let readiness certify a cycle that was never
+ * even requested. Also NOT matched: pre-dispatch "is not open" / "did not reply within N
+ * ms" (a live-but-frozen tab) / idempotent-read grace expiry — those return verbatim.
+ * A genuine refusal comes back as a NON-error `rebooting:false` (rebootConfirmed handles).
  */
 export function rebootDropped(res: ToolResult): boolean {
   if (!res?.isError) return false;
   const text = res?.content?.find((c) => c.type === "text")?.text ?? "";
-  // Match ONLY signals that the command we JUST sent (comfy_reboot) died IN
-  // FLIGHT — i.e. the reboot was accepted and the origin went down before it
-  // could ack. The bridge's mutating-command mid-flight drop is the canonical
-  // one ("disconnected mid-command … OUTCOME UNKNOWN", ui-bridge.ts), plus raw
-  // socket resets. Deliberately NOT matched: pre-dispatch / generic errors like
-  // "is not open" (socket already closed BEFORE we sent — no reboot happened),
-  // "did not reply within N ms" (a live-but-frozen/backgrounded tab), and the
-  // idempotent-read "genuinely gone" grace expiry. Treating those as a reboot
-  // would risk a FALSE success (claiming a restart that never fired) once an
-  // unrelated tab reconnection makes readiness pass. Those return verbatim.
-  return /disconnected mid-command|OUTCOME UNKNOWN|ECONNRESET|socket hang up|premature close|other side closed|ECONNABORTED|EPIPE/i.test(
-    text,
-  );
+  // The AUTHORITATIVE signal is the bridge's TYPED dispatch flag (dispatchOutcomeOf),
+  // checked by the caller BEFORE this. This text match is a defense-in-depth fallback:
+  // the pre-write wrapper ("the command was NOT dispatched") must WIN even if its quoted
+  // detail contains a post-write phrase, so a pre-write send failure is never a "drop".
+  if (/NOT dispatched/i.test(text)) return false;
+  return /disconnected mid-command|OUTCOME UNKNOWN/i.test(text);
 }
 
 /**
@@ -175,6 +180,13 @@ interface PanelRebootTiming {
 
 let panelRebootTimingOverride: PanelRebootTiming | null = null;
 
+// The whole readiness wait (settle + poll budget) MUST finish comfortably below the
+// client's outer ~300s tools/call timeout, so a FAILING wait always returns a clean
+// ready:false in time instead of being killed as a bare 300s timeout — even if the
+// COMFYUI_PANEL_REBOOT_* env overrides are set absurdly high (coordinator codex P2).
+const MAX_REBOOT_SETTLE_MS = 10_000; // 10s
+const MAX_REBOOT_BUDGET_MS = 240_000; // 240s  → settle+budget ≤ 250s < 300s outer
+
 function parsePositiveNumberEnv(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw == null || raw === "") return fallback;
@@ -182,14 +194,29 @@ function parsePositiveNumberEnv(name: string, fallback: number): number {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
-function getPanelRebootTiming(): PanelRebootTiming {
-  if (panelRebootTimingOverride) return panelRebootTimingOverride;
+/** Reboot-readiness timing from env, with each value HARD-CAPPED so no override can
+ *  push the total wait past the outer tools/call budget (coordinator codex P2).
+ *  The probe interval defaults to a TIGHT 500ms: the observer runs CONCURRENTLY with
+ *  the reboot dispatch and must catch a BRIEF down window (a fast restart can be down
+ *  for well under 2s), needing >=2 down probes inside it (coordinator HIGH). settleMs
+ *  is retained only for the env cap; the observer no longer settles before probing. */
+function computeRebootTimingFromEnv(): PanelRebootTiming {
   return {
-    settleMs: Math.round(parsePositiveNumberEnv("COMFYUI_PANEL_REBOOT_SETTLE_S", 3) * 1000),
-    budgetMs: Math.round(parsePositiveNumberEnv("COMFYUI_PANEL_REBOOT_BUDGET_S", 120) * 1000),
-    intervalMs: Math.round(parsePositiveNumberEnv("COMFYUI_PANEL_REBOOT_INTERVAL_S", 2) * 1000),
-    probeTimeoutMs: Math.round(parsePositiveNumberEnv("COMFYUI_PANEL_REBOOT_PROBE_S", 5) * 1000),
+    settleMs: Math.min(
+      MAX_REBOOT_SETTLE_MS,
+      Math.round(parsePositiveNumberEnv("COMFYUI_PANEL_REBOOT_SETTLE_S", 3) * 1000),
+    ),
+    budgetMs: Math.min(
+      MAX_REBOOT_BUDGET_MS,
+      Math.round(parsePositiveNumberEnv("COMFYUI_PANEL_REBOOT_BUDGET_S", 120) * 1000),
+    ),
+    intervalMs: Math.round(parsePositiveNumberEnv("COMFYUI_PANEL_REBOOT_INTERVAL_S", 0.2) * 1000),
+    probeTimeoutMs: Math.round(parsePositiveNumberEnv("COMFYUI_PANEL_REBOOT_PROBE_S", 2) * 1000),
   };
+}
+
+function getPanelRebootTiming(): PanelRebootTiming {
+  return panelRebootTimingOverride ?? computeRebootTimingFromEnv();
 }
 
 /** The default generous readiness budget, in seconds — reported to callers. */
@@ -202,6 +229,26 @@ export const __panelToolsTestHooks = {
   setPanelRebootTiming(timing: PanelRebootTiming | null): void {
     panelRebootTimingOverride = timing;
   },
+  /** Inject a fake boot-endpoint probe so readiness tests drive the real proof loop
+   *  without real HTTP. Returns a ProbeStatus, or a boolean (true→healthy/false→down)
+   *  so DOWN→UP can be scripted with plain booleans. null restores the live probe. */
+  setHealthProbe(
+    fn:
+      | ((base: string | null, timeoutMs: number) => Promise<boolean | ProbeStatus>)
+      | null,
+  ): void {
+    healthProbeOverride = fn;
+  },
+  looksLikeSystemStats,
+  probeComfyHealth,
+  probeComfyEndpoint,
+  captureRebootHealthBase,
+  sameHttpOrigin,
+  sameHttpBase,
+  isLoopbackOrigin,
+  loopbackProbeUrl,
+  /** Compute reboot timing from env WITH the P2 hard caps (bypasses any override). */
+  computeRebootTimingFromEnv,
   /** Zero out the post-drop retry settle so retry-once tests don't sleep. */
   setRetrySettleMs(ms: number | null): void {
     retrySettleMsOverride = ms;
@@ -285,46 +332,426 @@ interface PanelReadyResult {
   ready: boolean;
   waited_ms: number;
   attempts: number;
+  /** How readiness was established after an ACCEPTED reboot:
+   *   - "observed-cycle": we saw the boot endpoint go DOWN then become healthy — a
+   *     directly observed restart cycle. This is the ONLY sound proof that THIS ComfyUI
+   *     instance cycled, and the only value ever set.
+   *   undefined when it does not recover within budget (couldn't-confirm), or no signal. */
+  via?: "observed-cycle";
+  /** True once the boot endpoint was observed unreachable after the accepted dispatch. */
+  sawDown: boolean;
+}
+
+/** True when a decoded /system_stats body has the recognizable ComfyUI shape (a
+ *  `system` object and/or a `devices` array) — the same fields health_check /
+ *  get_environment read. A bare 2xx from a reverse-proxy login page, an SPA
+ *  catch-all, or a proxy error page is NOT ComfyUI and must NOT certify recovery
+ *  (codex #509 P1). */
+function looksLikeSystemStats(body: unknown): boolean {
+  if (!body || typeof body !== "object") return false;
+  const b = body as { system?: unknown; devices?: unknown };
+  const hasSystem = b.system != null && typeof b.system === "object";
+  const hasDevices = Array.isArray(b.devices);
+  return hasSystem || hasDevices;
+}
+
+/** The CONCRETE loopback FAMILY of a hostname, or null when it isn't an unambiguous
+ *  loopback literal. IPv4 loopback (127.0.0.1 / the 0.0.0.0 wildcard) → "127.0.0.1";
+ *  IPv6 loopback (::1 / the :: wildcard) → "::1". The families are kept DISTINCT so a
+ *  v4 tab and a v6 instance at the same port are NOT wrongly matched (coordinator
+ *  finding 4: v6 A on [::1]:8188 + v4 B on 127.0.0.1:8188 are DIFFERENT instances).
+ *
+ *  `localhost` returns null ON PURPOSE (coordinator P0): a URL preserves the literal
+ *  "localhost" and does NOT reveal whether the browser actually reached 127.0.0.1 or
+ *  ::1 — so PINNING it to a family we can't verify could send the auth-bearing probe to
+ *  a DIFFERENT-family instance than the reboot went to (v6 A rebooted, v4 B probed →
+ *  false cert + auth leak). We therefore refuse the ambiguity: a `localhost` boot/tab
+ *  origin is NOT directly-probeable and routes to the honest dispatched-unconfirmed
+ *  result instead of the direct-probe certification path. */
+function loopbackFamily(host: string): "127.0.0.1" | "::1" | null {
+  const h = host.toLowerCase().replace(/^\[|\]$/g, "");
+  if (h === "127.0.0.1" || h === "0.0.0.0") return "127.0.0.1";
+  if (h === "::1" || h === "::" || h === "0000:0000:0000:0000:0000:0000:0000:0000") return "::1";
+  return null;
+}
+
+/** True when a hostname is loopback-equivalent (either family, incl. the wildcard
+ *  binds 0.0.0.0/:: which are reachable on loopback). */
+function isLoopbackHostName(host: string): boolean {
+  return loopbackFamily(host) !== null;
+}
+
+/** The scheme://host:port origin of a URL (default ports made explicit), or null if
+ *  unparseable. Loopback hosts canonicalize to their FAMILY loopback (v4 → 127.0.0.1,
+ *  v6 → ::1) — so localhost/127.0.0.1/0.0.0.0 compare equal, and ::1/:: compare equal,
+ *  but a v4 host and a v6 host DIFFER (they may be different instances). Ports differ. */
+function httpOriginOf(rawUrl: string): string | null {
+  try {
+    const u = new URL(rawUrl);
+    const port = u.port || (u.protocol === "https:" ? "443" : "80");
+    const host = u.hostname.toLowerCase();
+    const canonHost = loopbackFamily(host) ?? host;
+    return `${u.protocol}//${canonHost}:${port}`;
+  } catch {
+    return null;
+  }
+}
+
+/** Rewrite a CONCRETE loopback-literal base URL to one that is actually CONNECTABLE and
+ *  that AGREES with loopbackFamily's identity canonicalization — so the probe (and the
+ *  auth headers it carries) can never hit a DIFFERENT-family instance than the one
+ *  identity matched (coordinator P1). Every IPv4-family loopback literal (127.0.0.1 /
+ *  0.0.0.0) → the literal 127.0.0.1; every IPv6-family loopback literal (::1 / ::) → the
+ *  bracketed literal [::1]. A DNS-ambiguous `localhost` has no concrete family and is
+ *  left UNCHANGED (callers gate it out via loopbackFamily before probing). Non-loopback
+ *  hosts are returned unchanged. */
+function loopbackProbeUrl(rawUrl: string): string {
+  try {
+    const u = new URL(rawUrl);
+    const fam = loopbackFamily(u.hostname);
+    if (fam === "127.0.0.1") u.hostname = "127.0.0.1";
+    else if (fam === "::1") u.hostname = "[::1]";
+    return u.toString().replace(/\/+$/, "");
+  } catch {
+    return rawUrl;
+  }
+}
+
+/** True when two URLs share the exact same scheme + host + port (path ignored).
+ *  Used ONLY for the redirect host-escape check — a same-host redirect isn't a
+ *  host escape. Instance IDENTITY uses sameHttpBase (path-aware) instead. */
+function sameHttpOrigin(a: string | null | undefined, b: string | null | undefined): boolean {
+  const oa = a ? httpOriginOf(a) : null;
+  const ob = b ? httpOriginOf(b) : null;
+  return oa != null && oa === ob;
+}
+
+/** The canonical scheme://host:port/path form of a URL (loopback host normalized,
+ *  trailing slashes stripped, path case-sensitive), or null if unparseable. Two
+ *  ComfyUI instances reverse-proxied under the SAME host:port but DIFFERENT path
+ *  prefixes (/a vs /b) are DISTINCT — so instance identity must include the path. */
+function canonicalHttpBase(rawUrl: string): string | null {
+  const origin = httpOriginOf(rawUrl);
+  if (origin == null) return null;
+  try {
+    const path = new URL(rawUrl).pathname.replace(/\/+$/, "");
+    return `${origin}${path}`;
+  } catch {
+    return null;
+  }
+}
+
+/** True when two URLs identify the SAME instance: same scheme+host+port AND the
+ *  same path prefix (a reverse-proxied mount point is part of its identity). */
+function sameHttpBase(a: string | null | undefined, b: string | null | undefined): boolean {
+  const ca = a ? canonicalHttpBase(a) : null;
+  const cb = b ? canonicalHttpBase(b) : null;
+  return ca != null && ca === cb;
+}
+
+/** True when a URL's host is loopback-EQUIVALENT (incl. the wildcard binds 0.0.0.0/::,
+ *  which are reachable on loopback) — the only hosts the orchestrator can reach on its
+ *  OWN machine to health-probe (the #509 local case). */
+function isLoopbackOrigin(rawUrl: string): boolean {
+  try {
+    return isLoopbackHostName(new URL(rawUrl).hostname);
+  } catch {
+    return false;
+  }
+}
+
+type ProbeStatus = "healthy" | "down" | "unknown";
+
+/** Connection error codes that DEFINITIVELY mean the endpoint's PORT is not accepting —
+ *  the listener is gone (a restarting process closed it). This is the ONLY connection
+ *  failure that proves a process-down for the cycle proof, and for a LOOPBACK probe the
+ *  ONLY sound one: ECONNREFUSED = the host actively refused the connection because nothing
+ *  is listening on that port. Everything else is (correctly) NOT a listener-down:
+ *   - ECONNRESET / EPIPE / EPROTO / ETIMEDOUT / "socket hang up" — a still-LISTENING server
+ *     can reset a connection or transiently fail TLS without going down;
+ *   - ENETUNREACH / EHOSTUNREACH / ENETDOWN / EHOSTDOWN — a local network/routing failure;
+ *     the ComfyUI process can still be listening while the stack is momentarily unavailable
+ *     (codex High);
+ *   - ENOTFOUND / EAI_AGAIN — DNS (inapplicable to a loopback literal), not a listener-down.
+ *  A genuine restart CLOSES the loopback port, so repeated polling observes ECONNREFUSED
+ *  during the down window; the ambiguous codes above stay "unknown" so a transient glitch
+ *  + a later 200 can never fake a restart cycle. */
+const PORT_NOT_LISTENING_CODES = new Set([
+  "ECONNREFUSED", // host refused — nothing listening on the port (the restarting-process signal)
+]);
+
+/** Extract a connection error's OS code (undici wraps the real error under `.cause`). */
+function connErrorCode(err: unknown): string | undefined {
+  const e = err as { code?: unknown; cause?: { code?: unknown } };
+  if (typeof e?.code === "string") return e.code;
+  if (typeof e?.cause?.code === "string") return e.cause.code;
+  return undefined;
 }
 
 /**
- * Poll the panel bridge until ComfyUI is reachable again after a reboot. Each probe
- * is a lightweight `nodes_queue_status` round-trip (via ctx.call, which never
- * throws — it returns an isError ToolResult while the tab/backend is down and
- * auto-heals onto the reconnected tab once it returns). Resolves ready:true on the
- * first successful probe (with how long recovery took), or ready:false when the
- * server never comes back within the bounded budget.
+ * Probe the boot endpoint and CLASSIFY it. Because the down→up transition is the SOLE
+ * proof a process actually CYCLED, "down" must mean the endpoint STOPPED SERVING at the
+ * CONNECTION level — the port isn't accepting (a restarting process closes its listener).
+ * The boot endpoint in the certify path is a DIRECT loopback ComfyUI (no reverse proxy —
+ * captureRebootHealthBase probes 127.0.0.1/[::1] directly), so:
+ *   - "down" = a CONNECTION failure whose code DEFINITIVELY means the port isn't accepting
+ *     (ECONNREFUSED — the process is not listening, a genuine restart). Ambiguous
+ *     mid-connection errors (ECONNRESET / EPIPE / EPROTO / hang up) and network/DNS
+ *     reachability failures (ENETUNREACH / EHOSTUNREACH / ENOTFOUND …) do NOT count — the
+ *     server can still be listening — so they are "unknown". ECONNREFUSED is the ONLY
+ *     signal that proves a cycle.
+ *   - "healthy" = a same-origin 2xx carrying a real /system_stats body.
+ *   - "unknown" = the server RESPONDED (so its HTTP listener is UP — NOT a process-down),
+ *     just not as ComfyUI-up-and-serving-stats: ANY 5xx (a transient 500 is an app error,
+ *     NOT a restart — codex false-success fix), a 3xx (redirect:"manual", so a login/SPA
+ *     redirect can't certify and no auth is sent onward), a 4xx (401/403/404/429), a
+ *     wrong-origin URL, or a 2xx with a non-ComfyUI / malformed body; AND our own request
+ *     TIMEOUT (the port accepted the connection but was slow to answer → listening, not
+ *     down). "unknown" is NOT a down and NEVER contributes to the cycle proof — so a
+ *     transient 5xx / slow response can never masquerade as a restart.
+ * Never throws.
  */
-async function waitForPanelReady(
-  ctx: PanelToolCtx,
+async function probeComfyEndpoint(base: string | null, timeoutMs: number): Promise<ProbeStatus> {
+  if (!base) return "unknown";
+  const url = `${base}/system_stats`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Math.max(1, timeoutMs));
+  timer.unref?.();
+  try {
+    const res = await comfyuiFetch(url, { signal: controller.signal, redirect: "manual" });
+    const status = res.status;
+    // A 5xx means the HTTP server ANSWERED — its listener is UP — so it is NOT proof the
+    // process went down; treat it as "unknown", never "down" (a transient 500 must not
+    // fake a restart cycle). Same for 3xx/4xx.
+    if (status < 200 || status >= 300) return "unknown"; // 3xx/4xx/5xx = responded, not stats
+    if (res.url && !sameHttpOrigin(res.url, url)) return "unknown"; // wrong origin
+    let body: unknown;
+    try {
+      body = await res.json();
+    } catch {
+      return "unknown"; // 2xx but not JSON — up, but not a /system_stats we trust
+    }
+    return looksLikeSystemStats(body) ? "healthy" : "unknown";
+  } catch (err) {
+    // OUR abort = a TIMEOUT: the port accepted the connection but was slow to answer, so
+    // its listener is UP (not a process-down) → "unknown", never part of a cycle proof (a
+    // transiently-slow no-op server must not fake a restart).
+    if (controller.signal.aborted) return "unknown";
+    // A connection failure is "down" ONLY when its code DEFINITIVELY means the port isn't
+    // accepting (ECONNREFUSED &c). An AMBIGUOUS mid-connection error (ECONNRESET / EPIPE /
+    // EPROTO / hang up) can come from a STILL-listening server, so it is "unknown" — never
+    // a down that a later 200 could turn into a phantom cycle (codex High).
+    const code = connErrorCode(err);
+    return code != null && PORT_NOT_LISTENING_CODES.has(code) ? "down" : "unknown";
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Boolean healthy? wrapper over probeComfyEndpoint (redirect-safe). */
+async function probeComfyHealth(base: string | null, timeoutMs: number): Promise<boolean> {
+  return (await probeComfyEndpoint(base, timeoutMs)) === "healthy";
+}
+
+/** Coerce a health-probe override's boolean (true→healthy / false→down) or an explicit
+ *  ProbeStatus, so tests can script recovery sequences with plain booleans. */
+function normalizeProbe(v: boolean | ProbeStatus): ProbeStatus {
+  if (v === true) return "healthy";
+  if (v === false) return "down";
+  return v;
+}
+
+/**
+ * The FIXED ComfyUI base URL to health-probe during a reboot readiness wait, or
+ * null when we must fall back to the panel round-trip (as before #509). Captured by
+ * the handler BEFORE it dispatches comfy_reboot and held for the whole wait.
+ *
+ * SECURITY (coordinator codex P1): the probe TARGET is the orchestrator's own
+ * PROCESS-START local ComfyUI endpoint (getBootLocalComfyUIBaseUrl) — captured at
+ * boot and IMMUTABLE. It is deliberately NOT getComfyUIBaseUrl(): that reflects the
+ * mutable runtime config a panel `hello` can retarget (applyComfyuiUrl →
+ * setComfyuiTarget), so a client could steer it. And it is NEVER the client-advertised
+ * `hello.comfyui_url` (spoofable; comfyuiFetch would leak the configured ComfyUI auth
+ * headers to an attacker-chosen origin). The tab origin is used ONLY as a gate, and the
+ * gate reads the SERVER-OBSERVED handshake Origin (tabServerOrigin) — which the browser
+ * sets and blocks page JS from forging — NOT the spoofable hello.comfyui_url: we
+ * self-probe our OWN boot endpoint solely when the rebooted tab PROVABLY (by its
+ * handshake) fronts THAT SAME instance, so a socket that merely CLAIMS the boot URL can't
+ * ride an unrelated boot-instance cycle to a false certification (codex High). Null
+ * (→ honest dispatched-unconfirmed) when:
+ *   - cloud OR remote mode; or
+ *   - the orchestrator didn't boot against a LOCAL loopback ComfyUI; or
+ *   - the tab isn't SERVER-TRUSTED-local (tabIsLocal — arrived on the token-less
+ *     loopback primary listener; relay/tunnel/LAN/pairing → false); or
+ *   - the tab's HANDSHAKE origin is absent, ambiguous (`localhost`), or does NOT match our
+ *     boot endpoint by scheme+host+port (concrete-family loopback-canonicalized) — i.e. it
+ *     drives a DIFFERENT instance / family, or one we can't verify; AND, because a handshake
+ *     Origin carries NO path, a boot target mounted under a basePath fails path-aware
+ *     identity and is (soundly) fail-closed to dispatched-unconfirmed.
+ */
+function captureRebootHealthBase(ctx: PanelToolCtx): string | null {
+  if (isCloudMode() || isRemoteMode()) return null;
+  const bootBase = getBootLocalComfyUIBaseUrl(); // server-authorized, hello-immutable
+  if (!bootBase || !isLoopbackOrigin(bootBase)) return null;
+  const base = bootBase.replace(/\/+$/, "");
+  // Server-trusted provenance: the tab arrived on the token-less loopback listener.
+  if (ctx.bridge?.tabIsLocal?.(ctx.tabId) !== true) return null;
+  // And the rebooted tab must provably front THAT SAME boot instance. Use the SERVER-
+  // OBSERVED handshake Origin (tabServerOrigin) — the browser sets it on the WS upgrade
+  // and blocks page JS from forging it — NOT the spoofable client hello.comfyui_url
+  // (tabOrigin): a non-Comfy socket on the host could otherwise CLAIM the boot URL, ack
+  // comfy_reboot without rebooting, and ride an unrelated boot-instance cycle to a false
+  // ready:true (codex High). A handshake Origin proves only scheme+host+port (it carries
+  // NO path), so we compare it path-AWARE (sameHttpBase) against the boot base: when the
+  // boot target is mounted under a basePath (e.g. …:8188/comfy) the pathless Origin cannot
+  // prove the tab fronts THAT mount vs another instance at the same host:port, so we FAIL
+  // CLOSED to the honest dispatched-unconfirmed result rather than certify unsoundly (codex
+  // P1). The common pathless boot base matches an equal Origin and certifies. Loopback
+  // identity canonicalizes only CONCRETE literals by family (127.0.0.1 ≡ a 0.0.0.0 bind;
+  // ::1 ≡ a :: bind) — a DNS-ambiguous `localhost` on EITHER side yields no family
+  // (loopbackFamily → null), so it never matches a concrete literal and this returns null
+  // (coordinator P0). A different instance / family / path / absent Origin → null too.
+  const origin = ctx.bridge?.tabServerOrigin?.(ctx.tabId);
+  if (!sameHttpBase(origin, base)) return null;
+  // Return a CONNECTABLE probe URL bound to the SAME concrete family identity matched
+  // above: a wildcard-bound (0.0.0.0/::) local ComfyUI is reachable on loopback, so probe
+  // the family literal at that port (127.0.0.1 / [::1]). The probe (and the auth headers
+  // it carries) can therefore never cross to a different-family instance.
+  return loopbackProbeUrl(base);
+}
+
+let healthProbeOverride:
+  | ((base: string | null, timeoutMs: number) => Promise<boolean | ProbeStatus>)
+  | null = null;
+
+/**
+ * The concurrent-observation gate shared between the reboot handler and observeRecovery.
+ * It separates PROBING (which starts concurrently with the dispatch so a FAST reboot whose
+ * down→up happens entirely inside the ack/drop/timeout window is still captured) from
+ * COUNTING (which is admitted only from the POST-write instant, so a pre-dispatch sample
+ * can never contribute to the down→up cycle) — coordinator design.
+ */
+interface DispatchObservationGate {
+  /** Flipped true SYNCHRONOUSLY the instant AFTER the reboot command is written to the
+   *  socket (ctx.bridge.send()'s executor writes synchronously). The observer neither
+   *  probes nor counts before this, so no sample taken before the command was dispatched
+   *  can mark the endpoint "down" (coordinator: "don't count pre-dispatch downs"). */
+  dispatched: boolean;
+  /** The wall-clock instant `dispatched` flipped (∞ until then). A probe SAMPLE counts
+   *  toward the down→up cycle only if it was taken at/after this instant — an explicit
+   *  post-write COUNTING gate (the observer also structurally defers its first probe until
+   *  dispatched, so both agree). */
+  dispatchedAt: number;
+  /** Flipped true to ABORT observation — a PRE-write send failure (nothing transmitted) or
+   *  a non-accepted refusal. The observer stops promptly and NOTHING certifies. */
+  cancelled: boolean;
+  /** Mutable proof deadline. Starts at the whole-handler cap so probing spans the (possibly
+   *  slow) ack window; tightened to (ack-completion + budget) once the dispatch outcome is
+   *  known, so a slow ack does not eat the readiness budget. */
+  deadline: number;
+  /** A NOTIFICATION that resolves the microtask AFTER the socket write. The observer AWAITS
+   *  this (rather than polling on a timer) so its FIRST probe fires the instant the command
+   *  is dispatched — NO leading timer window in which a sub-millisecond down→up could be
+   *  missed (codex). Always resolved by the handler right after ctx.bridge.send() returns,
+   *  on EVERY path, so the observer never hangs. */
+  waitDispatched: Promise<void>;
+}
+
+interface ObserveRecoveryOpts {
+  /** The FIXED boot /system_stats base to probe (captured before dispatch, bound to the
+   *  exact host FAMILY the reboot was dispatched to). Must be non-null — the caller returns
+   *  the honest dispatched-unconfirmed result when there is no probeable boot endpoint. */
+  healthBase: string;
+  /** When present, run in CONCURRENT mode (started before/with the dispatch): defer probing
+   *  until gate.dispatched (post-write), honor gate.cancelled, and use gate.deadline as the
+   *  live deadline. Absent → legacy mode (started AFTER the restart's synchronous work;
+   *  probe immediately against the fixed `deadline`). */
+  gate?: DispatchObservationGate;
+}
+
+/**
+ * Observe the boot endpoint's recovery AFTER a reboot was dispatched, and certify ONLY on
+ * an OBSERVED DOWN→UP cycle. Acceptance (dispatch confirmed/dropped) is the guard against
+ * a NO-OP, but we deliberately do NOT certify a lone healthy endpoint after a settle:
+ * the panel emits rebooting:true even when it merely INFERS a reboot from a dropped fetch
+ * (its comfy_reboot handler's catch branch), so a confirmed ack is NOT a guarantee that a
+ * real Manager reboot was accepted — treat it like the ambiguous DROP and require the
+ * endpoint to actually go DOWN then come back (coordinator: panel invariant unverifiable).
+ *   - ANY single "down" (an ECONNREFUSED — the port stopped listening) marks it going down;
+ *     the next "healthy" → observed-cycle.
+ *   - Never healthy after an observed down, OR never a down at all → couldn't-confirm.
+ *
+ * CONCURRENT mode (a `gate` is supplied): the caller starts this BEFORE awaiting the full
+ * dispatch, so probes are already sampling the endpoint DURING the ack/drop/timeout window
+ * — catching a FAST reboot whose down→up completes before the ack returns (the #509 fast-
+ * reboot false-timeout). PROBE-FIRST-THEN-SLEEP: the observer AWAITS the post-write
+ * notification (gate.waitDispatched — no timer poll, so no leading window in which a
+ * sub-millisecond cycle could be missed), then takes its FIRST probe IMMEDIATELY at the
+ * post-write dispatch instant (no leading interval sleep), sleeping intervalMs only BETWEEN
+ * subsequent probes. COUNTING stays post-write: a sample
+ * marks the cycle only if taken at/after gate.dispatchedAt, so a pre-dispatch down never
+ * contributes. gate.deadline is the live deadline (tightened to ack-completion + budget so a
+ * slow ack doesn't eat it); gate.cancelled aborts.
+ * LEGACY mode (no gate): started AFTER the restart's synchronous work; probe immediately
+ * against the fixed `deadline`.
+ */
+async function observeRecovery(
   timing: PanelRebootTiming,
+  deadline: number,
+  opts: ObserveRecoveryOpts,
 ): Promise<PanelReadyResult> {
-  if (timing.settleMs > 0) await sleep(timing.settleMs);
   const start = Date.now();
-  // Enforce an ABSOLUTE wall-clock deadline so the total wait honours budgetMs —
-  // NOT budgetMs/intervalMs iterations that each also burn a probe timeout + a
-  // sleep (which would overrun the advertised bound several-fold). Each probe and
-  // each inter-probe sleep is capped by the time remaining.
-  const deadline = start + timing.budgetMs;
-  // Clamp interval to a floor so a 0/tiny env value can't hot-loop unbounded —
-  // UNLESS a test override is active (tests inject small deterministic values).
+  const gate = opts.gate;
   const intervalMs = panelRebootTimingOverride
     ? Math.max(1, timing.intervalMs)
-    : Math.max(250, timing.intervalMs);
+    : Math.max(50, timing.intervalMs);
+  const probe = healthProbeOverride ?? probeComfyEndpoint;
+  const currentDeadline = () => gate?.deadline ?? deadline;
+  let sawDown = false;
   let attempts = 0;
   for (;;) {
-    const remaining = deadline - Date.now();
-    const probeTimeoutMs = Math.max(1, Math.min(timing.probeTimeoutMs, remaining));
-    const probe = await ctx.call({ cmd: "nodes_queue_status" }, probeTimeoutMs);
-    attempts++;
-    if (!probe.isError) {
-      return { ready: true, waited_ms: Date.now() - start, attempts };
+    if (gate?.cancelled) break;
+    if (currentDeadline() - Date.now() <= 0) break;
+    if (gate && !gate.dispatched) {
+      // CONCURRENT mode, not yet dispatched: AWAIT the post-write NOTIFICATION (resolves the
+      // microtask after the socket write) WITHOUT probing — no timer poll, so there is NO
+      // leading window in which a sub-millisecond down→up could be missed (codex). The very
+      // first probe then fires the instant the command is dispatched (probe-first).
+      await gate.waitDispatched;
+      if (gate.cancelled) break;
+      // Fall through and probe immediately (a fast non-accepted outcome that resolves before
+      // this observer wakes will already have set gate.cancelled above; otherwise a single
+      // read of our OWN boot endpoint during the sub-ack window is the accepted benign
+      // residual — see the handler's INHERENT TRADEOFF note — and is discarded on refusal).
     }
-    const left = deadline - Date.now();
+    // PROBE NOW (no leading interval sleep) — the first sample lands at the post-write
+    // dispatch instant so a sub-interval down→up is caught (coordinator: probe-first).
+    const sampleAt = Date.now();
+    attempts++;
+    const t = Math.max(1, Math.min(timing.probeTimeoutMs, currentDeadline() - Date.now()));
+    let status: ProbeStatus = "unknown";
+    try {
+      status = normalizeProbe(await probe(opts.healthBase, t));
+    } catch {
+      status = "unknown";
+    }
+    if (gate?.cancelled) break;
+    // COUNTING gate: a sample contributes to the cycle only if taken at/after the post-write
+    // dispatched instant (defensive — the observer also defers its first probe to dispatch).
+    if (gate == null || sampleAt >= gate.dispatchedAt) {
+      if (status === "down") {
+        sawDown = true;
+      } else if (status === "healthy" && sawDown) {
+        return { ready: true, waited_ms: Date.now() - start, attempts, via: "observed-cycle", sawDown };
+      }
+      // "healthy" without a prior down, and "unknown", are ignored — keep looking.
+    }
+    // Sleep BETWEEN probes (both modes).
+    const left = currentDeadline() - Date.now();
     if (left <= 0) break;
     await sleep(Math.min(intervalMs, left));
   }
-  return { ready: false, waited_ms: Date.now() - start, attempts };
+  return { ready: false, waited_ms: Date.now() - start, attempts, sawDown };
 }
 
 // ---- workflow_open verify-after-timeout (#215/#319/#496) --------------------
@@ -335,7 +762,7 @@ async function waitForPanelReady(
 // genuinely happened (the executor ran; the ack just didn't make it back in the
 // window). Reporting that as a failure is a FALSE FAILURE: a follow-up
 // `workflow_list` shows the target IS the active tab, and it invites unsafe
-// retries. Mirroring the reboot-readiness pattern (waitForPanelReady / #497), on
+// retries. Mirroring the reboot-readiness pattern (observeRecovery / #497), on
 // an ack-timeout we do NOT immediately fail — we VERIFY the AUTHORITATIVE active
 // workflow by polling `workflow_list` (a fresh bridge round-trip, never a stale
 // cache) and return SUCCESS with a `recovered` note if the target became active,
@@ -936,7 +1363,7 @@ export interface PanelToolCtx {
   /** Forward a command to the panel and wrap the reply as a tool result. */
   call: (cmd: Record<string, unknown>, timeoutMs?: number) => Promise<ToolResult>;
   /** Human-in-the-loop yes/no confirm card (false on decline/timeout/no-panel). */
-  confirm: (question: string, header: string) => Promise<boolean>;
+  confirm: (question: string, header: string, timeoutMs?: number) => Promise<boolean>;
   /** The raw bridge + tab id, for the handful of tools that need bespoke wiring
    *  (image screenshots, secret collection). */
   bridge: UiBridge;
@@ -1078,7 +1505,11 @@ export function makePanelToolCtx(
   // (We gate inside the tool because the SDK's canUseTool is bypassed under
   // bypassPermissions, which the panel agent runs in; the Codex HTTP path runs
   // approvalPolicy "never", so the same in-tool gate is the only safeguard.)
-  const confirm = async (question: string, header: string): Promise<boolean> => {
+  const confirm = async (
+    question: string,
+    header: string,
+    timeoutMs = 300000,
+  ): Promise<boolean> => {
     try {
       ensureReachable();
       const reply = await bridge.send(
@@ -1091,7 +1522,7 @@ export function makePanelToolCtx(
             { label: "No, cancel", description: "" },
           ],
         } as { cmd: string },
-        { tabId: ctx.tabId, timeoutMs: 300000 },
+        { tabId: ctx.tabId, timeoutMs: Math.max(1, timeoutMs) },
       );
       return isAffirmative(reply);
     } catch {
@@ -3118,42 +3549,190 @@ export function buildPanelToolDefs(): PanelToolDef[] {
       "Restart the user's ComfyUI server via the built-in Manager — needed to load newly installed/updated custom nodes. CALL THIS DIRECTLY when a restart is needed: it pops a confirm card and only restarts on a yes (don't ask separately first). ComfyUI and this agent go down briefly, then the panel auto-reconnects and you resume. ⚠️ BUSY GUARD: a restart ABORTS any in-progress or queued generation — if ComfyUI is generating, this tool REFUSES and tells you (it does NOT restart). When that happens, tell the user a render is running and WAIT for it (poll panel_node_queue_status), or pass force:true ONLY if the user explicitly confirms they want to kill the running generation. Best practice: before restarting after an install, check the queue is idle first. Only call when a restart is actually needed.",
       { force: z.boolean().optional() },
       async ({ force }, ctx) => {
+        // Whole-handler budget (coordinator): confirm + dispatch + readiness — INCLUDING
+        // the legacy path's UNPREEMPTIBLE synchronous execSync blocks — must ALL finish
+        // under the outer ~300s tools/call limit. 255s + the legacy admission rule below
+        // (kill+relaunch starts only with >=130s left, its ~40s of sync work FRONT-LOADED)
+        // means the handler PROVABLY returns well under 300s.
+        const OVERALL_MAX_MS = 255_000;
+        const overallDeadline = Date.now() + OVERALL_MAX_MS;
         if (
           !(await ctx.confirm(
             "Restart ComfyUI now? It (and this agent) will go down briefly, then reconnect and resume automatically.",
             "Restart ComfyUI",
+            Math.max(1, overallDeadline - Date.now()),
           ))
         ) {
           return ok("Cancelled — ComfyUI was not restarted.");
         }
-        const res = await ctx.call({ cmd: "comfy_reboot", force: force === true }, 15000);
+        // Heal an orphaned session onto the live tab FIRST, then bind the reboot dispatch
+        // to that ONE tab id (no await between capture and dispatch, so JS run-to-
+        // completion prevents any rebind in between). The boot-endpoint probe target is
+        // server-authorized + immutable, bound to the exact host FAMILY the reboot goes
+        // to (null unless the bound tab provably fronts our boot instance).
+        ctx.ensureReachable?.();
+        const boundTabId = ctx.tabId;
+        const healthBase = captureRebootHealthBase(ctx);
+        const timing = getPanelRebootTiming();
+        const dispatchTimeout = Math.max(1, Math.min(15000, overallDeadline - Date.now()));
+        // CONCURRENT OBSERVATION (coordinator): start probing the fixed boot endpoint NOW,
+        // in parallel with the dispatch, so a FAST reboot whose down→up completes entirely
+        // inside the ack/drop/timeout window is still captured (the reopened #509 fast-reboot
+        // false-timeout). COUNTING stays post-write via the gate: the observer neither probes
+        // nor counts until gate.dispatched flips (the instant AFTER the socket write), so a
+        // pre-dispatch down never contributes. gate.deadline starts at the whole-handler cap
+        // (probing spans the ack window) and is tightened to ack-completion + budget below.
+        //
+        // INHERENT TRADEOFF (coordinator, verified: no early-accept signal exists — the bridge
+        // resolves send() only with the single rid-correlated {rebooting} reply, so accept vs
+        // REFUSE is known only IN that reply). To catch a fast reboot we MUST probe DURING the
+        // ack window, i.e. before we know accept/refuse. The residual is BENIGN and bounded:
+        //   • the probe targets ONLY the orchestrator's OWN immutable, server-authorized boot
+        //     ComfyUI (captureRebootHealthBase → getBootLocalComfyUIBaseUrl) with the correct
+        //     configured auth — never a client-advertised, cross-family, or wrong instance, so
+        //     it is NOT an auth leak or a wrong-instance probe (handshake-Origin gated above);
+        //   • a genuinely REFUSED reboot does NOT restart ComfyUI, so no REAL ECONNREFUSED→
+        //     healthy cycle occurs to certify; and even a CONTRIVED one is explicitly discarded
+        //     (the refusal branch below returns the refusal verbatim and never reads the
+        //     observer — a refusal can NEVER certify).
+        // Eliminating even this harmless own-endpoint read would require probing only AFTER the
+        // reply, which reopens the #509 fast-reboot false-timeout — an unacceptable regression.
+        let signalDispatched!: () => void;
+        const gate: DispatchObservationGate = {
+          dispatched: false,
+          dispatchedAt: Number.POSITIVE_INFINITY,
+          cancelled: false,
+          deadline: overallDeadline,
+          waitDispatched: new Promise<void>((r) => {
+            signalDispatched = r;
+          }),
+        };
+        const recoveryPromise =
+          healthBase != null
+            ? observeRecovery(timing, gate.deadline, { healthBase, gate })
+            : null;
+        // The AUTHORITATIVE, TYPED dispatch outcome from the bridge rejection (if any):
+        // false = a PRE-write send failure (nothing transmitted), true = a POST-write
+        // mid-command OUTCOME-UNKNOWN drop / reply-timeout. Captured from the RAW error —
+        // text can't defeat it — so a pre-write failure whose detail happens to quote
+        // "OUTCOME UNKNOWN" is still categorically NOT-dispatched (coordinator P1).
+        let res: ToolResult;
+        let dispatchOutcome: boolean | undefined;
+        // ctx.bridge.send()'s Promise executor writes to the socket SYNCHRONOUSLY, so by the
+        // time it returns the promise the command has been written (or synchronously pre-write
+        // failed). Open the counting gate right here — this is the POST-write instant — then
+        // await the ack. Probing (already running) begins the moment this flips.
+        const sendPromise = ctx.bridge.send(
+          { cmd: "comfy_reboot", force: force === true } as { cmd: string },
+          { tabId: boundTabId, timeoutMs: dispatchTimeout },
+        );
+        gate.dispatched = true;
+        gate.dispatchedAt = Date.now();
+        // Wake the observer's FIRST probe IMMEDIATELY (microtask — no timer window) now that
+        // the command has been written. Resolved on EVERY path (accept / drop / refuse /
+        // pre-write failure), so the observer never hangs on gate.waitDispatched.
+        signalDispatched();
+        try {
+          res = ok(await sendPromise);
+        } catch (err) {
+          res = fail(err);
+          dispatchOutcome = dispatchOutcomeOf(err);
+        }
+        // A PRE-write send failure means nothing was transmitted — the reboot never happened,
+        // so NOTHING may certify: abort the concurrent observer immediately (coordinator P1).
+        if (dispatchOutcome === false) gate.cancelled = true;
 
         // Classify the reboot dispatch:
         //  - CONFIRMED (rebooting:true): the panel acked before it went down.
-        //  - EXPECTED DROP: the reboot handler exits the instant it accepts the
-        //    request, so ComfyUI (and the tab it serves) goes down before it can
-        //    ack — the bridge surfaces that as a mid-command "OUTCOME UNKNOWN" /
-        //    disconnected error. That dropped connection IS the success signal of a
-        //    reboot, NOT a failure (#493, panel #222/#263/#266/#306/#307).
-        //  - REFUSAL: a busy-guard / Manager-forbidden / no-endpoint refusal comes
-        //    back as a NON-error ToolResult with `rebooting:false` — the server is
-        //    still up and was NOT restarted; return it verbatim and touch nothing.
+        //  - EXPECTED DROP: the reboot handler exits the instant it accepts the request,
+        //    so ComfyUI (and the tab it serves) goes down before it can ack — a bridge
+        //    mid-command "OUTCOME UNKNOWN"/disconnect. That drop IS the accept + went-down
+        //    signal (#493, panel #222/#263/#266/#306/#307).
+        //  - REFUSAL: a busy-guard / Manager-forbidden / no-endpoint refusal — the server
+        //    is still up and was NOT restarted; return it verbatim and touch nothing.
         const fired = rebootConfirmed(res);
-        const dropped = !fired && rebootDropped(res);
+        // A pre-write send failure (typed dispatchOutcome === false) is categorically NOT an
+        // accepted drop — never enter the probing path for a command that never left. The
+        // text check (rebootDropped) is a defense-in-depth fallback for older bridges that
+        // don't carry the typed flag.
+        const dropped =
+          !fired && dispatchOutcome !== false && (dispatchOutcome === true || rebootDropped(res));
         if (!fired && !dropped) {
-          // The panel could not fire a Manager reboot. If the SOLE reason is that
-          // NO Manager reboot endpoint answered (legacy Manager 3.x: v2 route 405s,
-          // legacy route 404s — #425, panel #253/#266) AND the target is a LOCAL,
-          // process-controllable ComfyUI, fall back to the headless managed restart
-          // (kill + relaunch) — the same mechanism as the `restart_comfyui` tool.
-          // A busy-guard or security refusal is deliberately NOT eligible
-          // (rebootNoEndpoint excludes those), so this never aborts a running
-          // render or bypasses Manager's security gate.
-          if (!isRemoteMode() && rebootNoEndpoint(res)) {
+          // NOT accepted (e.g. a rebooting:false busy-guard/security REFUSAL). BELT-AND-
+          // SUSPENDERS (coordinator): EXPLICITLY DISCARD any cycle the concurrent observer may
+          // have sampled during the sub-ack window — a refusal must NEVER certify. We cancel
+          // the observer and, crucially, never read recoveryPromise on this path: whatever it
+          // resolved to (even a contrived ready:true) is dropped, and we return the refusal
+          // verbatim. (The legacy no-endpoint fallback below starts its OWN fresh observation
+          // after the restart's synchronous work; it does not reuse this observer.)
+          gate.cancelled = true;
+          void recoveryPromise; // discarded — a refused reboot can never yield ready:true
+          // If the SOLE reason is NO Manager reboot endpoint (legacy Manager
+          // 3.x — #425, panel #253/#266) AND the target is a LOCAL, process-controllable
+          // ComfyUI, fall back to the headless managed restart (kill + relaunch). A
+          // busy-guard / security refusal is NOT eligible (rebootNoEndpoint excludes them).
+          if (
+            !isRemoteMode() &&
+            rebootNoEndpoint(res) &&
+            // INSTANCE BINDING: restartComfyUI() acts on the orchestrator's GLOBAL config
+            // target (a hello can retarget it). Only run it when the bound tab provably
+            // fronts our OWN boot instance AND that boot instance is the CURRENT global
+            // target — so the relaunch cycles the SAME instance this tab rebooted.
+            healthBase != null &&
+            sameHttpBase(getComfyUIBaseUrl(), healthBase)
+          ) {
+            // The managed kill+relaunch does UNPREEMPTIBLE synchronous execSync work — PID
+            // discovery (~5+8s) + termination (~10s) + first port-free lookup (~13s) ≈ 40s
+            // worst case (Windows) — that a Promise.race CANNOT interrupt, and it BLOCKS the
+            // observer during that window. Admit it ONLY with enough budget for that sync
+            // work AND a full cold-start observation AFTER it, and give the observer a
+            // deadline that spans BOTH (coordinator P1: the proof deadline must start after,
+            // not before, the restart's synchronous work — otherwise a genuine cold start
+            // that finishes at sync+coldStart false-times-out).
+            const LEGACY_SYNC_WORST_CASE_MS = 40_000; // execSync PID lookup + kill + port-free
+            const LEGACY_COLD_START_OBS_MS = 100_000; // cold-start observation AFTER the sync
+            const LEGACY_RESTART_MIN_BUDGET_MS = LEGACY_SYNC_WORST_CASE_MS + LEGACY_COLD_START_OBS_MS;
+            if (overallDeadline - Date.now() < LEGACY_RESTART_MIN_BUDGET_MS) {
+              return ok({
+                rebooting: false,
+                ready: false,
+                confirmed_cycle: false,
+                note:
+                  "The built-in Manager exposed no reboot endpoint (legacy Manager 3.x), and " +
+                  "there isn't enough remaining time to safely run the headless managed restart " +
+                  "(kill + relaunch). ComfyUI was NOT restarted — retry panel_restart_comfyui " +
+                  "(a fresh call gets the full budget).",
+              });
+            }
+            // A managed kill+relaunch restarts ComfyUI out-of-band, so drop the memoized
+            // caches. The observer watches the boot endpoint itself with a deadline spanning
+            // the ~40s blocking sync + a full cold-start window, and certifies ONLY on an
+            // OBSERVED down→up — a never-restarted healthy endpoint (a Desktop first-healthy
+            // Manager-reboot / preflight no-op) is honestly couldn't-confirm (coordinator P1).
+            resetClient();
+            resetObjectInfoCache();
+            // The observation window spans the ~40s blocking sync + a full cold-start
+            // window. (Under a test timing override, use the injected budget instead so the
+            // never-certify cases don't wait the real ~140s.)
+            const legacyProofWindow = panelRebootTimingOverride
+              ? timing.settleMs + timing.budgetMs
+              : LEGACY_RESTART_MIN_BUDGET_MS;
+            const proofDeadline = Math.min(Date.now() + legacyProofWindow, overallDeadline);
+            const proofPromise = observeRecovery(timing, proofDeadline, { healthBase });
+            const restartBudget = Math.max(1, overallDeadline - Date.now());
             let restart: Awaited<ReturnType<typeof restartComfyUI>> | undefined;
+            let restartTimer: ReturnType<typeof setTimeout> | undefined;
             try {
-              restart = await restartComfyUI();
+              restart = await Promise.race([
+                restartComfyUI(),
+                new Promise<undefined>((resolve) => {
+                  restartTimer = setTimeout(() => resolve(undefined), restartBudget);
+                  restartTimer.unref?.();
+                }),
+              ]);
             } catch (err) {
+              clearTimeout(restartTimer);
+              void proofPromise.catch(() => {}); // self-terminates at proofDeadline
               return fail(
                 "The built-in Manager exposed no reboot endpoint (legacy Manager 3.x), " +
                   "and the headless managed restart also failed: " +
@@ -3161,77 +3740,116 @@ export function buildPanelToolDefs(): PanelToolDef[] {
                   " — restart ComfyUI on the host, then reconnect.",
               );
             }
-            if (!restart.started) {
+            clearTimeout(restartTimer);
+            // DEFINITIVE no-restart: a spawn failure, OR restartComfyUI refused before
+            // stopping anything (no process found / unsafe relaunch → stopped:false &&
+            // started:false). The process was NOT cycled, so the still-healthy endpoint is
+            // the OLD one — fail clearly rather than certify a no-op (coordinator P1).
+            if (
+              restart?.spawn_error ||
+              (restart != null && restart.stopped !== true && restart.started !== true)
+            ) {
+              void proofPromise.catch(() => {});
               return fail(
                 "The built-in Manager exposed no reboot endpoint (legacy Manager 3.x). " +
-                  "Tried the headless managed restart (kill + relaunch) as a fallback, but it " +
-                  `could not restart ComfyUI: ${restart.message} ` +
+                  "Tried the headless managed restart (kill + relaunch), but it did not restart " +
+                  `ComfyUI: ${restart?.message ?? "unknown error"} ` +
                   "Restart ComfyUI on the host, then reconnect.",
               );
             }
-            // A managed kill+relaunch restarts ComfyUI out-of-band from the WS
-            // client, so drop the memoized caches exactly as the Manager-reboot
-            // path does before waiting for the panel to reconnect.
-            resetClient();
-            resetObjectInfoCache();
-            const timing = getPanelRebootTiming();
-            const recovery = await waitForPanelReady(ctx, timing);
+            // Otherwise (the process WAS stopped/started, or restartComfyUI's own readiness
+            // poll merely expired — neither terminal) DEFER to OUR OWN observed DOWN→UP.
+            const recovery = await proofPromise;
+            const observed = recovery.via === "observed-cycle";
             return ok({
               rebooting: true,
               ready: recovery.ready,
+              confirmed_cycle: observed, // true = we directly observed the down→up cycle
               recovered_ms: recovery.waited_ms,
               probes: recovery.attempts,
-              via: "headless-managed-restart",
+              saw_down: recovery.sawDown,
+              via: recovery.ready ? recovery.via : undefined,
               note:
-                "ComfyUI-Manager (legacy 3.x) had no reboot endpoint; restarted ComfyUI " +
-                `via the headless managed restart (kill + relaunch)${
-                  recovery.ready
-                    ? ` and it came back ready in ${(recovery.waited_ms / 1000).toFixed(1)}s.`
-                    : " but the panel did not reconnect within the readiness budget — verify with panel_node_queue_status."
-                }`,
+                "ComfyUI-Manager (legacy 3.x) had no reboot endpoint; ran the headless managed " +
+                "restart (kill + relaunch) " +
+                (recovery.ready
+                  ? `and it came back healthy in ${(recovery.waited_ms / 1000).toFixed(1)}s` +
+                    (observed ? " (observed it go down then come back)." : " (cycle not directly observed).")
+                  : `but it did NOT become healthy within ${Math.round(recovery.waited_ms / 1000)}s — verify with health_check / panel_node_queue_status before assuming it restarted.`),
             });
           }
-          // Genuine refusal (or an unrelated error) — do NOT poll or reset caches.
-          // Resetting on a refusal would close the shared client mid-generation
-          // (codex WS-3 finding #2).
+          // Genuine refusal (busy guard / security / no eligible fallback) — return
+          // verbatim; do NOT reset caches (that would close the shared client mid-render).
           return res;
         }
 
-        // A panel/Manager reboot restarts ComfyUI out-of-band from the MCP
-        // process-control path, so the orchestrator's WebSocket client and its
-        // memoized /object_info survive the restart and go stale: get_node_info
-        // then returns pre-restart schemas, model dropdowns, and required/optional
-        // placement (#353/#378/#394), and newly installed nodes stay invisible
-        // (#357). The reboot is the triggering event — drop both caches so the
-        // next call refetches against the fresh server.
+        // ACCEPTED. A reboot restarts ComfyUI out-of-band, so the orchestrator's cached WS
+        // client + /object_info go stale (#353/#357/#378/#394) — drop both caches.
         resetClient();
         resetObjectInfoCache();
 
-        // The reboot has FIRED. The connection drop is EXPECTED, not an error — do
-        // not surface it as a false timeout/failure. Instead poll readiness (a
-        // lightweight nodes_queue_status round-trip that auto-heals onto the
-        // reconnected tab) up to a generous bound and report SUCCESS once ComfyUI
-        // is reachable again, with how long recovery took. Only report FAILURE if
-        // it genuinely never comes back within the budget — a truly-dead server
-        // still fails honestly.
-        const timing = getPanelRebootTiming();
-        const recovery = await waitForPanelReady(ctx, timing);
+        // Observe recovery. There is exactly ONE sound proof that THIS ComfyUI instance
+        // actually cycled: a directly OBSERVED down→up on the server-authorized, immutable,
+        // family-bound boot endpoint (observeRecovery). We do NOT fabricate a second proof
+        // from a weaker proxy. In particular a panel tab disconnecting→reconnecting proves
+        // only that a panel↔orchestrator socket churned — NOT that the (possibly remote)
+        // ComfyUI cycled; `tab_id` is client-supplied and a different same-kind socket can
+        // take that id over with a fresh nonce, so a tab reconnect can never certify a
+        // same-instance restart (codex gate). So when there is NO probeable boot endpoint
+        // (remote / cloud / older / untrusted-locality panel), we HONESTLY report the reboot
+        // as dispatched-and-accepted but NOT server-confirmable — a non-error result that
+        // tells the caller to verify, NOT the #509 false-TIMEOUT *error* (the real #509 local
+        // case is a probeable boot endpoint and is certified by observeRecovery below).
+        if (healthBase == null) {
+          // No probeable boot endpoint — the concurrent observer was never started.
+          return ok({
+            rebooting: true,
+            ready: false,
+            confirmed_cycle: false,
+            dispatched: true,
+            note:
+              "ComfyUI restart was dispatched and accepted; it is restarting out-of-band. " +
+              "There is no local boot endpoint I can safely probe from here, so I can't " +
+              "confirm it finished coming back — a panel reconnect wouldn't prove this " +
+              "instance actually cycled. Check health_check / panel_node_queue_status in a " +
+              "few seconds to confirm it's back.",
+          });
+        }
+        // The concurrent observer has been probing since dispatch (catching a fast down→up
+        // inside the ack window). Now measure the readiness budget from ACK COMPLETION — so a
+        // slow ack doesn't eat it — by tightening the live deadline, then await the verdict.
+        // Both fired and dropped are AMBIGUOUS (the panel emits rebooting:true even when it
+        // only INFERS a reboot from a dropped fetch), so certification requires an OBSERVED
+        // down→up, which the observer has been (and continues) watching for.
+        gate.deadline = Math.min(Date.now() + timing.budgetMs, overallDeadline);
+        const recovery = await recoveryPromise!;
         if (!recovery.ready) {
-          return fail(
-            `Reboot was triggered but ComfyUI did not come back within ${Math.round(
-              timing.budgetMs / 1000,
-            )}s (${recovery.attempts} probes). Check the host — is ComfyUI-Manager restarting it? ` +
-              "Verify with panel_node_queue_status once a tab reconnects before retrying.",
-          );
+          const waited = Math.round(recovery.waited_ms / 1000);
+          return ok({
+            rebooting: true,
+            ready: false,
+            confirmed_cycle: false,
+            recovered_ms: recovery.waited_ms,
+            probes: recovery.attempts,
+            saw_down: recovery.sawDown,
+            note: recovery.sawDown
+              ? `Reboot was dispatched and ComfyUI went down, but it has not become healthy within ${waited}s — it may still be starting or the restart failed. Verify with health_check / panel_node_queue_status before retrying; do NOT assume it is back.`
+              : `The reboot command was sent but I could NOT confirm ComfyUI actually cycled within ${waited}s (it never went down — the panel may have merely disconnected/inferred a reboot without one). Verify with health_check / panel_node_queue_status; do NOT assume it restarted.`,
+          });
         }
         return ok({
           rebooting: true,
           ready: true,
+          confirmed_cycle: true, // we directly observed the down→up cycle on the boot endpoint
           recovered_ms: recovery.waited_ms,
           probes: recovery.attempts,
-          note: `ComfyUI rebooted and came back ready in ${(recovery.waited_ms / 1000).toFixed(
-            1,
-          )}s${dropped ? " (connection dropped as expected while it went down)" : ""}.`,
+          saw_down: recovery.sawDown,
+          via: recovery.via,
+          note:
+            `ComfyUI restart accepted and it is healthy again in ${(recovery.waited_ms / 1000).toFixed(1)}s` +
+            " (observed it go down then come back)" +
+            (dropped ? "; connection dropped as expected while it went down" : "") +
+            ".",
         });
       },
     ),

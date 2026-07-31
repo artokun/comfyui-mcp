@@ -108,6 +108,26 @@ interface Conn {
    *  Reset to empty on every hello (a reconnect may be a freshly updated panel
    *  build, so a stale unsupported-verdict must never carry over). */
   unsupportedCmds: Set<string>;
+  /** The ComfyUI origin this tab's browser was served from (`comfyui_url` =
+   *  window.location in its `hello`), if sent. Lets a tool bind an HTTP probe to the
+   *  EXACT instance THIS tab fronts — not the process-global target, which a
+   *  different instance's hello may have retargeted (#509). */
+  originUrl?: string;
+  /** SERVER-OBSERVED: the browser `Origin` header from THIS socket's WebSocket upgrade
+   *  handshake (scheme://host:port of the page the panel runs in). Unlike `originUrl`
+   *  (client-supplied `hello.comfyui_url`, spoofable by page JS), the browser sets Origin
+   *  and forbids page scripts from overriding it — so it is the TRUSTED proof of which
+   *  ComfyUI a real browser tab actually fronts. Undefined when the handshake carried no
+   *  Origin (a non-browser / relay client). Used to gate the reboot self-probe (#509): a
+   *  socket can CLAIM any comfyui_url, but only a page genuinely SERVED FROM the boot
+   *  origin gets a matching handshake Origin, so we never certify a same-instance cycle
+   *  from a spoofed origin. */
+  serverOrigin?: string;
+  /** SERVER-TRUSTED: the socket arrived on the token-less loopback primary listener
+   *  (a browser on the orchestrator's OWN host). False for relay/tunnel/LAN/pairing
+   *  connections, whose advertised loopback origin is NOT the orchestrator's host
+   *  and must not be directly health-probed (#509). */
+  local: boolean;
 }
 
 /** Panel build that first implements the full graph_* / ui_* bridge command set.
@@ -153,6 +173,52 @@ export function makeUnknownCommandError(
 export interface BridgeCommand {
   cmd: string;
   [key: string]: unknown;
+}
+
+/** Normalize a WebSocket handshake `Origin` header into a canonical scheme://host:port
+ *  string, or undefined when it is absent, the opaque literal `"null"` (a sandboxed /
+ *  file:// / data: origin, which proves nothing), or unparseable. The browser sets this
+ *  header on the upgrade and forbids page JS from overriding it, so a value here is
+ *  server-trusted provenance of the page the socket runs in. Host case is lowercased and
+ *  the default port made explicit so it compares cleanly against a probe base. */
+function normalizeHandshakeOrigin(raw: string | string[] | undefined): string | undefined {
+  const val = Array.isArray(raw) ? raw[0] : raw;
+  if (typeof val !== "string" || val === "" || val.toLowerCase() === "null") return undefined;
+  try {
+    const u = new URL(val);
+    const port = u.port || (u.protocol === "https:" ? "443" : "80");
+    return `${u.protocol}//${u.hostname.toLowerCase()}:${port}`;
+  } catch {
+    return undefined;
+  }
+}
+
+/** AUTHORITATIVE, TYPED dispatch outcome carried on a bridge command REJECTION so a
+ *  caller never has to infer it from message text:
+ *   - `false` = the command was NEVER written to the socket (a PRE-write send() failure);
+ *   - `true`  = the command WAS written and the socket then died before a reply (a
+ *     POST-write mid-command OUTCOME-UNKNOWN drop).
+ *  Absent on all other errors (a reply-timeout, a genuine refusal, "panel gone", etc.). */
+const DISPATCHED = Symbol.for("comfyui-mcp.bridge.dispatched");
+
+/** Tag an error with the typed {@link DISPATCHED} outcome and return it (for throw/reject). */
+export function markDispatched<E extends Error>(err: E, dispatched: boolean): E {
+  Object.defineProperty(err, DISPATCHED, {
+    value: dispatched,
+    enumerable: false,
+    configurable: true,
+  });
+  return err;
+}
+
+/** Read the typed dispatch outcome from an error, or undefined if it carries none.
+ *  A reboot readiness check uses this to classify a PRE-write send failure
+ *  (`false`) categorically as NOT-dispatched — never as an accepted/dropped reboot —
+ *  regardless of any post-write phrase its message text may quote. */
+export function dispatchOutcomeOf(err: unknown): boolean | undefined {
+  if (err == null || (typeof err !== "object" && typeof err !== "function")) return undefined;
+  const v = (err as Record<symbol, unknown>)[DISPATCHED];
+  return typeof v === "boolean" ? v : undefined;
 }
 
 /**
@@ -472,14 +538,20 @@ export class UiBridge {
       }
     });
 
-    wss.on("connection", (sock) => {
+    wss.on("connection", (sock, req) => {
       // Keepalive bookkeeping for the SERVER-LEVEL heartbeat loop, which only
       // iterates real wss.clients (relay-mediated shim connections aren't real
       // sockets bound by this server, so they're intentionally excluded — see
       // relay-client.ts / the relay README for why that's believed low-risk).
       this.missedPongs.set(sock, 0);
       sock.on("pong", () => this.missedPongs.set(sock, 0));
-      this.handleConnection(sock);
+      // SERVER-OBSERVED handshake Origin (the browser sets it and forbids page JS from
+      // overriding it) — the trusted proof of which page this socket runs in, distinct
+      // from the spoofable hello.comfyui_url (#509 self-probe gate).
+      const handshakeOrigin = normalizeHandshakeOrigin(req?.headers?.origin);
+      // Trusted-local ONLY when the primary listener is a token-less loopback bind
+      // (no LAN bind, no tunnel/secure token in front) — see handleConnection's doc.
+      this.handleConnection(sock, !this.token && isLoopbackBindHost(this.host), handshakeOrigin);
     });
   }
 
@@ -550,7 +622,18 @@ export class UiBridge {
     });
   }
 
-  private handleConnection(sock: BridgeSocket): void {
+  /**
+   * @param local SERVER-TRUSTED provenance: true only when the socket arrived on
+   *   the token-less loopback primary listener, i.e. a browser genuinely on the
+   *   orchestrator's own host. A token-gated/tunnel-fronted primary, a relay shim,
+   *   and any LAN/pairing listener are all `false` — a browser reaching those can
+   *   sit on a DIFFERENT machine yet advertise its OWN 127.0.0.1 ComfyUI, which
+   *   must never be treated as the orchestrator's local host (#509).
+   * @param serverOrigin SERVER-OBSERVED handshake `Origin` (scheme://host:port), captured
+   *   from the WebSocket upgrade — NOT client-supplied. Undefined for non-browser/relay
+   *   connections. Bound to the tab so the reboot self-probe can trust which page it fronts.
+   */
+  private handleConnection(sock: BridgeSocket, local = false, serverOrigin?: string): void {
     // The connection is anonymous until its hello frame names a tab id.
     let tabId: string | null = null;
     // A socket's KIND (canvas-owning panel vs headless viewer) is pinned on its
@@ -659,6 +742,24 @@ export class UiBridge {
               : existing?.panelVersion,
           // Fresh per hello — see the field's doc comment (#236).
           unsupportedCmds: new Set<string>(),
+          // window.location the browser was served from — the ComfyUI instance THIS
+          // tab fronts. Preserved across a SAME-SOCKET re-hello that omits it, but
+          // NEVER inherited by a DIFFERENT socket reusing this (possibly recurring
+          // wf:<hash>) tab id — that could let an unrelated instance's origin certify
+          // this tab's restart (#509, codex: cross-ownership inheritance).
+          originUrl:
+            typeof (msg as { comfyui_url?: unknown }).comfyui_url === "string" &&
+            (msg as { comfyui_url?: string }).comfyui_url
+              ? (msg as { comfyui_url?: string }).comfyui_url
+              : existing?.sock === sock
+                ? existing?.originUrl
+                : undefined,
+          // SERVER-OBSERVED handshake Origin of THIS socket (from the WS upgrade, not the
+          // hello) — bound per-socket. A same-socket re-hello keeps it; a DIFFERENT socket
+          // taking over the id carries its OWN handshake Origin (never inherits the old).
+          serverOrigin: existing?.sock === sock ? (serverOrigin ?? existing?.serverOrigin) : serverOrigin,
+          // Server-trusted provenance of THIS socket (not client-controlled).
+          local,
         });
         if (incomingHeadless) this.headlessSeen.add(tabId);
         this.broadcastTabList(); // a tab connected/reconnected — refresh mirror pickers
@@ -878,6 +979,48 @@ export class UiBridge {
    *  weaken `resolveTarget`, so multi-tab routing stays conservative. */
   resolveActiveTabId(): string {
     return this.resolveTarget().tabId;
+  }
+
+  /** The ComfyUI origin the given tab's browser was served from (`comfyui_url` in
+   *  its `hello`), or undefined if the tab never advertised one / is unknown. Lets a
+   *  tool HTTP-probe the EXACT instance THIS tab fronts rather than the process-
+   *  global target a different instance may have retargeted (#509). Resolves the id
+   *  through the SAME prefix + migration-alias path as command routing (resolveTarget)
+   *  so a migrated session still finds its origin; never throws. */
+  tabOrigin(tabId: string): string | undefined {
+    try {
+      return this.resolveTarget(tabId).originUrl;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** SERVER-OBSERVED origin (scheme://host:port) of the given tab's WebSocket handshake —
+   *  the page the browser was actually serving when it opened this socket. Unlike
+   *  {@link tabOrigin} (client-supplied `hello.comfyui_url`, spoofable), the browser sets
+   *  the handshake `Origin` and blocks page JS from forging it, so this is the TRUSTED
+   *  proof of which ComfyUI a real tab fronts — the origin the reboot self-probe binds to
+   *  (#509). Undefined when the handshake carried no usable Origin. Resolves migration
+   *  aliases like tabOrigin; never throws. */
+  tabServerOrigin(tabId: string): string | undefined {
+    try {
+      return this.resolveTarget(tabId).serverOrigin;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** SERVER-TRUSTED: true only when this tab's socket arrived on the token-less
+   *  loopback primary listener (a browser on the orchestrator's OWN host), so its
+   *  advertised loopback ComfyUI origin really is the orchestrator's local host and
+   *  may be directly health-probed (#509). Relay/tunnel/LAN/pairing tabs → false.
+   *  Resolves migration aliases like tabOrigin; unknown → false. */
+  tabIsLocal(tabId: string): boolean {
+    try {
+      return this.resolveTarget(tabId).local === true;
+    } catch {
+      return false;
+    }
   }
 
   /** True when the tab advertised itself as a canvas-less (mobile/remote) client
@@ -1130,9 +1273,18 @@ export class UiBridge {
     };
     const timer = setTimeout(() => {
       this.pending.delete(rid);
+      // This timer only fires AFTER sock.send() below returned successfully — the command
+      // WAS WRITTEN to the socket; the tab (possibly backgrounded/frozen) merely didn't
+      // reply in time and may still apply it. So this is a POST-write outcome: tag it
+      // dispatched:true so a mutating caller (e.g. comfy_reboot readiness) treats it as an
+      // accepted-but-unacked dispatch and verifies by observation, rather than mistaking a
+      // genuinely-sent command for one that never went out (#509).
       ctx.reject(
-        new Error(
-          `Panel tab ${conn.tabId.slice(0, 8)} did not reply to "${cmd.cmd}" within ${ctx.timeoutMs} ms — the ComfyUI tab may be backgrounded or frozen`,
+        markDispatched(
+          new Error(
+            `Panel tab ${conn.tabId.slice(0, 8)} did not reply to "${cmd.cmd}" within ${ctx.timeoutMs} ms — the ComfyUI tab may be backgrounded or frozen`,
+          ),
+          true,
         ),
       );
     }, replyTimeoutMs);
@@ -1150,7 +1302,22 @@ export class UiBridge {
     } catch (err) {
       clearTimeout(timer);
       this.pending.delete(rid);
-      ctx.reject(err instanceof Error ? err : new Error(String(err)));
+      // The write to the socket FAILED — the command was NEVER transmitted, so nothing
+      // was dispatched (distinct from a POST-write mid-command drop). Surface that
+      // explicitly so callers don't mistake it for an in-flight/accepted command (a
+      // reboot readiness check must NOT treat a pre-write send failure as a fired reboot).
+      // Carry an AUTHORITATIVE TYPED flag `dispatched:false` so a caller classifies this
+      // categorically — never by string-matching a detail that might quote a post-write
+      // phrase ("OUTCOME UNKNOWN") from the underlying socket error.
+      const detail = err instanceof Error ? err.message : String(err);
+      ctx.reject(
+        markDispatched(
+          new Error(
+            `failed to send "${cmd.cmd}" to panel tab ${conn.tabId.slice(0, 8)} — the command was NOT dispatched (${detail})`,
+          ),
+          false,
+        ),
+      );
     }
   }
 
@@ -1202,8 +1369,11 @@ export class UiBridge {
     // second render). Say the outcome is UNKNOWN so the caller verifies first.
     if (ctx.mutating) {
       ctx.reject(
-        new Error(
-          `panel tab ${short} disconnected mid-command ("${cmd}") — OUTCOME UNKNOWN: the command was already sent, so the panel may have applied it (for a run, ComfyUI may already be rendering). Verify before retrying (e.g. check get_queue / list_output_images) instead of re-issuing it blindly.`,
+        markDispatched(
+          new Error(
+            `panel tab ${short} disconnected mid-command ("${cmd}") — OUTCOME UNKNOWN: the command was already sent, so the panel may have applied it (for a run, ComfyUI may already be rendering). Verify before retrying (e.g. check get_queue / list_output_images) instead of re-issuing it blindly.`,
+          ),
+          true,
         ),
       );
     } else {

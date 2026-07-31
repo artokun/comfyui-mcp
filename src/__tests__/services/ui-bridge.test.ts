@@ -4,6 +4,8 @@ import {
   UiBridge,
   makeUnknownCommandError,
   MIN_PANEL_VERSION_FOR_BRIDGE_COMMANDS,
+  markDispatched,
+  dispatchOutcomeOf,
 } from "../../services/ui-bridge.js";
 
 let bridge: UiBridge;
@@ -294,6 +296,29 @@ describe("UiBridge (multi-tab)", () => {
       tab_id: "tab-aaaa-1111",
       title: "my-flux-graph",
     });
+    a.close();
+  });
+
+  it("records the tab's ComfyUI origin from hello and preserves it across a re-hello (#509)", async () => {
+    const a = await connectPanel("tab-origin-1", "wf");
+    a.send(
+      JSON.stringify({
+        type: "hello",
+        tab_id: "tab-origin-1",
+        title: "wf",
+        comfyui_url: "http://127.0.0.1:8188",
+      }),
+    );
+    await vi.waitFor(() => expect(bridge.tabOrigin("tab-origin-1")).toBe("http://127.0.0.1:8188"));
+    // Token-less loopback primary listener → server-trusted local provenance.
+    expect(bridge.tabIsLocal("tab-origin-1")).toBe(true);
+    // A later re-hello that OMITS comfyui_url must not wipe the stored origin.
+    a.send(JSON.stringify({ type: "hello", tab_id: "tab-origin-1", title: "wf" }));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(bridge.tabOrigin("tab-origin-1")).toBe("http://127.0.0.1:8188");
+    // Unknown tab → undefined origin / not-local.
+    expect(bridge.tabOrigin("nope")).toBeUndefined();
+    expect(bridge.tabIsLocal("nope")).toBe(false);
     a.close();
   });
 
@@ -941,6 +966,62 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
   });
 });
 
+describe("markDispatched / dispatchOutcomeOf (typed dispatch outcome — #509 P1)", () => {
+  it("carries a TYPED boolean that survives message-text and is undefined otherwise", () => {
+    const preWrite = markDispatched(new Error("failed — NOT dispatched (OUTCOME UNKNOWN)"), false);
+    const postWrite = markDispatched(new Error("disconnected mid-command — OUTCOME UNKNOWN"), true);
+    expect(dispatchOutcomeOf(preWrite)).toBe(false); // categorically NOT-dispatched
+    expect(dispatchOutcomeOf(postWrite)).toBe(true); // authoritative accepted drop
+    // Plain errors / non-errors carry no signal.
+    expect(dispatchOutcomeOf(new Error("disconnected mid-command"))).toBeUndefined();
+    expect(dispatchOutcomeOf(undefined)).toBeUndefined();
+    expect(dispatchOutcomeOf("OUTCOME UNKNOWN")).toBeUndefined();
+    // The flag is non-enumerable (doesn't pollute JSON / spreads).
+    expect(Object.keys(preWrite)).not.toContain("dispatched");
+  });
+});
+
+describe("tabServerOrigin (server-observed handshake Origin — #509 spoof gate)", () => {
+  const connectWithOrigin = (tabId: string, origin?: string, comfyuiUrl?: string): Promise<WebSocket> =>
+    new Promise((resolve, reject) => {
+      const sock = new WebSocket(`ws://127.0.0.1:${port}`, origin ? { origin } : undefined);
+      sock.on("open", () => {
+        sock.send(
+          JSON.stringify({ type: "hello", tab_id: tabId, title: "wf", comfyui_url: comfyuiUrl }),
+        );
+        resolve(sock);
+      });
+      sock.on("error", reject);
+    });
+
+  it("reflects the browser handshake Origin, NOT the client-supplied comfyui_url", async () => {
+    // The hello CLAIMS a different comfyui_url than the real handshake Origin. The trusted
+    // server-observed value must be the handshake Origin; the claim only shows in tabOrigin.
+    const s = await connectWithOrigin("tab-origin-1", "http://127.0.0.1:8188", "http://evil.example:1");
+    await vi.waitFor(() => expect(bridge.canReach("tab-origin-1")).toBe(true));
+    expect(bridge.tabServerOrigin("tab-origin-1")).toBe("http://127.0.0.1:8188");
+    expect(bridge.tabOrigin("tab-origin-1")).toBe("http://evil.example:1"); // spoofable claim
+    s.close();
+  });
+
+  it("is undefined when the handshake carried no Origin (non-browser client)", async () => {
+    const s = await connectWithOrigin("tab-origin-2", undefined, "http://127.0.0.1:8188");
+    await vi.waitFor(() => expect(bridge.canReach("tab-origin-2")).toBe(true));
+    expect(bridge.tabServerOrigin("tab-origin-2")).toBeUndefined();
+    expect(bridge.tabServerOrigin("nope")).toBeUndefined();
+    s.close();
+  });
+
+  it("normalizes to scheme://host:port — any path is stripped (Origin carries none)", async () => {
+    // Even if a client sends a path-bearing value, the stored origin is authority-only, so
+    // a path-mounted boot base is fail-closed (never falsely matched) downstream.
+    const s = await connectWithOrigin("tab-origin-3", "http://127.0.0.1:8188/comfy");
+    await vi.waitFor(() => expect(bridge.canReach("tab-origin-3")).toBe(true));
+    expect(bridge.tabServerOrigin("tab-origin-3")).toBe("http://127.0.0.1:8188");
+    s.close();
+  });
+});
+
 describe("makeUnknownCommandError (old-panel version gate)", () => {
   it("rewrites an Unknown command reply into an actionable update message", () => {
     const e = makeUnknownCommandError('Unknown command "graph_query"');
@@ -1087,6 +1168,23 @@ describe("UiBridge.send (graceful gate end-to-end)", () => {
 
     const res = await bridge.send({ cmd: "graph_query" }, { tabId: "old-tab-4" });
     expect(res).toEqual({ cmd: "graph_query" });
+  });
+
+  it("tags a POST-write reply-timeout as dispatched:true (frozen tab may still apply it — #509)", async () => {
+    // A connected tab that NEVER replies: sock.send() succeeds, then the reply timer fires.
+    // The command WAS written, so the rejection must carry the typed dispatched:true flag.
+    const sock = await connectPanel("frozen-tab", "wf");
+    await vi.waitFor(() => expect(bridge.canReach("frozen-tab")).toBe(true));
+    let caught: unknown;
+    try {
+      await bridge.send({ cmd: "comfy_reboot" }, { tabId: "frozen-tab", timeoutMs: 40 });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toMatch(/did not reply.*backgrounded or frozen/i);
+    expect(dispatchOutcomeOf(caught)).toBe(true); // POST-write → accepted-but-unacked
+    sock.close();
   });
 });
 

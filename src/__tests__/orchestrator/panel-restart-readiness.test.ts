@@ -1,13 +1,11 @@
-// panel_restart_comfyui must NOT report a false timeout/failure on the EXPECTED
-// connection drop of a rebooting server. After the reboot fires (a confirmed
-// `rebooting:true` ack OR a mid-command "OUTCOME UNKNOWN"/disconnect drop), the
-// tool polls readiness (nodes_queue_status round-trips that auto-heal onto the
-// reconnected tab) and reports SUCCESS once ComfyUI is reachable again, with how
-// long recovery took. It reports a clear FAILURE only when the server genuinely
-// never comes back within the bounded budget.
+// panel_restart_comfyui reboot-DISPATCH classification: a CONFIRMED ack
+// (rebooting:true) or an EXPECTED mid-command drop ("OUTCOME UNKNOWN") is a fired
+// reboot (drop caches, then poll for restart PROOF); a PRE-DISPATCH "is not open"
+// (no reboot was sent) or a busy-guard REFUSAL (rebooting:false) is NOT fired —
+// returned verbatim, caches untouched, no poll.
 //   #493 (comfyui-mcp) + #222/#263/#266/#306/#307 (comfyui-mcp-panel).
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const resetClient = vi.fn();
 const resetObjectInfoCache = vi.fn();
@@ -23,33 +21,30 @@ const { buildPanelToolDefs, __panelToolsTestHooks } = await import(
 );
 import type { PanelToolCtx, ToolResult } from "../../orchestrator/panel-tools.js";
 
-const rr = (obj: unknown): ToolResult =>
-  ({ content: [{ type: "text", text: JSON.stringify(obj) }] }) as ToolResult;
-const errRes = (text: string): ToolResult =>
-  ({ content: [{ type: "text", text }], isError: true }) as ToolResult;
+const parse = (res: ToolResult): Record<string, unknown> =>
+  JSON.parse(res.content.find((c) => c.type === "text")!.text as string);
 
-/** A ctx whose `call` returns the reboot reply for cmd:comfy_reboot, and a
- *  scripted sequence of readiness replies for each subsequent nodes_queue_status. */
-function ctxScripted(reboot: ToolResult, readiness: ToolResult[]): {
-  ctx: PanelToolCtx;
-  calls: Array<Record<string, unknown>>;
-} {
-  const calls: Array<Record<string, unknown>> = [];
-  let probe = 0;
-  const ctx = {
-    call: async (cmd: Record<string, unknown>) => {
-      calls.push(cmd);
-      if (cmd.cmd === "comfy_reboot") return reboot;
-      // nodes_queue_status readiness probe
-      const reply = readiness[Math.min(probe, readiness.length - 1)];
-      probe++;
-      return reply;
+/** A ctx whose comfy_reboot dispatch (via bridge.send) returns `reply` or throws
+ *  `throwMsg`. Readiness never certifies here (no down→up, no reconnect). */
+function ctxReboot(reply: Record<string, unknown> | null, throwMsg?: string): PanelToolCtx {
+  return {
+    call: async () => {
+      throw new Error("ctx.call must not be used for reboot dispatch");
     },
     confirm: async () => true,
-    bridge: {} as PanelToolCtx["bridge"],
+    ensureReachable: () => {},
+    bridge: {
+      send: async () => {
+        if (throwMsg) throw new Error(throwMsg);
+        return reply ?? {};
+      },
+      tabOrigin: () => undefined,
+      tabIsLocal: () => false,
+      tabSockId: () => "s0",
+      canReach: () => false,
+    } as unknown as PanelToolCtx["bridge"],
     tabId: "test-tab",
-  } as PanelToolCtx;
-  return { ctx, calls };
+  } as unknown as PanelToolCtx;
 }
 
 function rebootHandler() {
@@ -58,102 +53,58 @@ function rebootHandler() {
   return def.handler;
 }
 
-const parse = (res: ToolResult): Record<string, unknown> =>
-  JSON.parse(res.content.find((c) => c.type === "text")!.text as string);
-
 beforeEach(() => {
   resetClient.mockClear();
   resetObjectInfoCache.mockClear();
-  // Fast deterministic timing so the poll doesn't wait the real ~120s budget.
   __panelToolsTestHooks.setPanelRebootTiming({
     settleMs: 0,
-    budgetMs: 200,
+    budgetMs: 60,
     intervalMs: 5,
-    probeTimeoutMs: 50,
+    probeTimeoutMs: 10,
   });
 });
 
-describe("panel_restart_comfyui readiness poll", () => {
-  it("confirmed reboot, health recovers after a delay → SUCCESS with recovery timing", async () => {
-    const { ctx, calls } = ctxScripted(rr({ rebooting: true }), [
-      errRes("panel tab is not open"),
-      errRes("did not reply within 5000 ms"),
-      rr({ queue_running: 0, queue_pending: 0 }), // back up
-    ]);
+afterEach(() => {
+  __panelToolsTestHooks.setPanelRebootTiming(null);
+  __panelToolsTestHooks.setHealthProbe(null);
+});
 
-    const res = await rebootHandler()({ force: false }, ctx);
-
-    expect(res.isError).toBeFalsy();
+describe("panel_restart_comfyui reboot-dispatch classification", () => {
+  it("CONFIRMED ack (rebooting:true) is a fired reboot → caches dropped, readiness polled", async () => {
+    const res = await rebootHandler()({ force: false }, ctxReboot({ rebooting: true }));
     const out = parse(res);
     expect(out.rebooting).toBe(true);
-    expect(out.ready).toBe(true);
-    expect(out.probes).toBe(3);
-    expect(typeof out.recovered_ms).toBe("number");
-    // Caches were dropped on the confirmed reboot.
     expect(resetClient).toHaveBeenCalledTimes(1);
     expect(resetObjectInfoCache).toHaveBeenCalledTimes(1);
-    // It polled readiness with nodes_queue_status, not a second reboot.
-    expect(calls.filter((c) => c.cmd === "nodes_queue_status").length).toBe(3);
   });
 
-  it("EXPECTED connection drop (OUTCOME UNKNOWN) is treated as reboot-fired, not a failure", async () => {
-    const { ctx } = ctxScripted(
-      errRes(
-        'panel tab abc disconnected mid-command ("comfy_reboot") — OUTCOME UNKNOWN: the command was already sent',
-      ),
-      [rr({ queue_running: 0 })],
+  it("EXPECTED drop (OUTCOME UNKNOWN) is a fired reboot → caches dropped", async () => {
+    const res = await rebootHandler()(
+      { force: false },
+      ctxReboot(null, 'panel tab abc disconnected mid-command ("comfy_reboot") — OUTCOME UNKNOWN'),
     );
-
-    const res = await rebootHandler()({ force: false }, ctx);
-
-    expect(res.isError).toBeFalsy();
-    const out = parse(res);
-    expect(out.ready).toBe(true);
-    expect(String(out.note)).toContain("dropped as expected");
+    expect(parse(res).rebooting).toBe(true);
     expect(resetClient).toHaveBeenCalledTimes(1);
   });
 
-  it("reboot fires but health NEVER recovers within the bound → clear FAILURE", async () => {
-    const { ctx } = ctxScripted(rr({ rebooting: true }), [
-      errRes("panel tab is not open"),
-    ]);
-
-    const res = await rebootHandler()({ force: false }, ctx);
-
+  it("PRE-DISPATCH 'is not open' (no reboot sent) → returned verbatim, caches untouched", async () => {
+    const res = await rebootHandler()(
+      { force: false },
+      ctxReboot(null, "Panel tab abc12345 is not open"),
+    );
     expect(res.isError).toBe(true);
-    const text = res.content.find((c) => c.type === "text")!.text as string;
-    expect(text).toContain("did not come back within");
-  });
-
-  it("a PRE-DISPATCH error (tab already closed, no reboot sent) is returned verbatim — no false success", async () => {
-    // "is not open" is emitted BEFORE the reboot is written to a socket, so no
-    // reboot occurred. It must NOT be treated as an expected drop (which would
-    // then poll readiness and falsely claim a restart once any tab reconnects).
-    const { ctx, calls } = ctxScripted(errRes("Panel tab abc12345 is not open"), [
-      rr({ queue_running: 0 }),
-    ]);
-
-    const res = await rebootHandler()({ force: false }, ctx);
-
-    expect(res.isError).toBe(true);
-    expect(calls.some((c) => c.cmd === "nodes_queue_status")).toBe(false);
     expect(resetClient).not.toHaveBeenCalled();
     expect(resetObjectInfoCache).not.toHaveBeenCalled();
   });
 
-  it("a REFUSAL (busy guard, rebooting:false) is returned verbatim — no poll, no cache reset", async () => {
-    const { ctx, calls } = ctxScripted(
-      rr({ rebooting: false, blocked_busy: true, queue_running: 1 }),
-      [rr({ queue_running: 0 })],
+  it("REFUSAL (busy guard, rebooting:false) → returned verbatim, no cache reset", async () => {
+    const res = await rebootHandler()(
+      { force: false },
+      ctxReboot({ rebooting: false, blocked_busy: true, queue_running: 1 }),
     );
-
-    const res = await rebootHandler()({ force: false }, ctx);
-
     const out = parse(res);
     expect(out.rebooting).toBe(false);
     expect(out.blocked_busy).toBe(true);
-    // Never polled readiness, never reset caches.
-    expect(calls.some((c) => c.cmd === "nodes_queue_status")).toBe(false);
     expect(resetClient).not.toHaveBeenCalled();
   });
 });
