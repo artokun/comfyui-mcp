@@ -145,8 +145,9 @@ export interface PanelAgentDeps {
   onStream?: (tabId: string, ev: StreamDelta) => void;
   /** Report per-turn usage (context meter) for this tab. */
   onStatus?: (tabId: string, status: UsageStatus) => void;
-  /** Report the SDK session id once known, so the panel can persist/resume it. */
-  onSession?: (tabId: string, sessionId: string) => void;
+  /** Report the SDK session id once known, so the panel can persist/resume it.
+   *  `model` is the SDK-resolved model (#376), used to correct the ready banner. */
+  onSession?: (tabId: string, sessionId: string, model?: string) => void;
   /** Report each turn's ending assistant-message UUID — the anchor the panel
    *  stores so a later "rewind conversation to here" can fork the session at that
    *  point (resumeSessionAt + forkSession). */
@@ -900,7 +901,9 @@ export class PanelAgent {
       case "session": {
         this.sessionId = ev.sessionId;
         if (ev.model) this.model = ev.model;
-        this.deps.onSession?.(this.tabId, ev.sessionId);
+        // Pass the SDK-resolved model so the panel can correct a ready banner that
+        // was sent with the pre-init default (#376).
+        this.deps.onSession?.(this.tabId, ev.sessionId, ev.model);
         logger.info(
           `[panel-agent ${this.short()}] init model=${ev.model} session=${ev.sessionId.slice(0, 8)} effort=${this.effort ?? "default"}`,
         );
@@ -1073,7 +1076,7 @@ export interface PanelAgentManagerOptions {
   /** Live incremental thinking/reply deltas (streaming). */
   onStream?: (tabId: string, ev: StreamDelta) => void;
   onStatus?: (tabId: string, status: UsageStatus) => void;
-  onSession?: (tabId: string, sessionId: string) => void;
+  onSession?: (tabId: string, sessionId: string, model?: string) => void;
   onTurnAnchor?: (tabId: string, uuid: string) => void;
   onTurn?: (tabId: string, state: "working" | "done") => void;
   /** Live extended-thinking token count, for a "thinking… (N)" indicator. */
@@ -1214,9 +1217,9 @@ export class PanelAgentManager {
       onStatus: this.opts.onStatus,
       // Persist the session id to our durable store (resume-after-restart) BEFORE
       // forwarding it to the panel — so it's on disk the moment the SDK reports it.
-      onSession: (id, sid) => {
+      onSession: (id, sid, model) => {
         this.opts.sessionStore?.set(id, sid);
-        this.opts.onSession?.(id, sid);
+        this.opts.onSession?.(id, sid, model);
       },
       onTurnAnchor: this.opts.onTurnAnchor,
       // Wrap onTurn so the manager learns when a turn ends — the safe point to

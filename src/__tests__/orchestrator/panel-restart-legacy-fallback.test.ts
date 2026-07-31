@@ -60,7 +60,7 @@ function makeCtx(
     call: async () => {
       throw new Error("ctx.call must not be used for reboot dispatch");
     },
-    confirm: async () => true,
+    confirm: async () => "yes" as const,
     ensureReachable: () => {},
     bridge: {
       send: async (cmd: { cmd: string }) => {

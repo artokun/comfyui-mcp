@@ -79,6 +79,7 @@ import { resolvePrompt, registerPrompt, onPromptsChanged } from "../services/pro
 import { allBackendReadiness } from "./backend-readiness.js";
 import { handleOAuthBegin, handleOAuthStatus, handleOAuthSignout } from "./oauth-bridge.js";
 import { buildStartFailureNotice } from "./start-failure-notice.js";
+import { readyBannerText, bannerCorrection } from "./ready-banner.js";
 import { OAUTH_PROVIDERS } from "../services/oauth-flow.js";
 import { startPanelMcpHttpServer, type PanelMcpHttpServer } from "./panel-mcp-http.js";
 import { startPanelConsoleHttpServer, type PanelConsoleHttpServer } from "./panel-console-http.js";
@@ -1360,6 +1361,15 @@ export async function runPanelOrchestrator(): Promise<void> {
   const defaultBackend = KNOWN_BACKENDS.has(backendId) ? backendId : "claude";
   const AGENT_KEY_SEP = "::";
   const tabBackends = new Map<string, string>(); // panel tabId -> selected backend
+  // #376: the model label advertised in a tab's ready banner (sent at hello, before
+  // the SDK reports the real model). onSession re-sends a corrected banner when the
+  // resolved model differs from what's stored here. A tab with NO entry never got a
+  // greeting (a resume/reconnect), so it must never be "corrected".
+  const advertisedBannerModel = new Map<string, string>();
+  // The SDK-resolved model per tab, learned from the session/init event. Kept so a
+  // greeting emitted AFTER the model is already known (the onSession-before-greeting
+  // race) can label itself correctly instead of showing the pre-init default.
+  const resolvedModelByTab = new Map<string, string>();
   const headlessTabs = new Set<string>(); // tabs with no ComfyUI canvas (mobile/remote) — deliver renders in-turn
   const workflowTargets = new WorkflowTargetStore();
   const backendForTab = (panelTabId: string): string =>
@@ -1871,9 +1881,27 @@ export async function runPanelOrchestrator(): Promise<void> {
     // Per-response usage → the panel's context/usage meter (updates live).
     onStatus: (key, status) => pushStatus(panelTabOf(key), status),
     // Report the SDK session id so the panel can persist it and resume on reload.
-    onSession: (key, sessionId) => {
-      bridge.push({ type: "session", session_id: sessionId }, panelTabOf(key));
+    onSession: (key, sessionId, model) => {
+      const panelTab = panelTabOf(key);
+      bridge.push({ type: "session", session_id: sessionId }, panelTab);
       bridge.broadcastTabList(); // a session started/changed → refresh mirror pickers
+      // #376: the ready banner was sent at hello with the PRE-init default model.
+      // Now the SDK reports the ACTUALLY-resolved model — remember it, then re-send
+      // a corrected banner IFF a banner was actually advertised for this tab AND the
+      // resolved model differs (bannerCorrection returns null otherwise, so a resume
+      // with no prior greeting is never "corrected" and a correct banner never
+      // duplicates).
+      if (typeof model === "string" && model.trim()) resolvedModelByTab.set(panelTab, model);
+      const corrected = bannerCorrection({
+        backend: backendForTab(panelTab),
+        advertisedLabel: advertisedBannerModel.get(panelTab),
+        resolvedModel: model,
+        customBaseUrl,
+      });
+      if (corrected) {
+        advertisedBannerModel.set(panelTab, model as string);
+        bridge.push({ type: "say", text: corrected }, panelTab);
+      }
     },
     // Per-turn rewind anchor (assistant UUID) → the panel stores it so a later
     // "rewind conversation to here" can fork the session at that point.
@@ -2633,32 +2661,16 @@ export async function runPanelOrchestrator(): Promise<void> {
             }
             // Greet only on a FRESH session (a resume/reconnect already has the thread).
             if (!resume) {
-              const readyText = reg
-                ? reg.readyMessage(agentLabel)
-                : isCx
-                ? `🟢 comfyui-mcp agent ready — ${agentLabel} on your Codex (ChatGPT) account. Ask away.`
-                : isCg
-                  ? `🟢 comfyui-mcp agent ready — ${agentLabel} on your ChatGPT subscription (direct OAuth). Ask away.`
-                : isGm
-                  ? `🟢 comfyui-mcp agent ready — ${agentLabel} on your Google account (Gemini Code Assist). Ask away.`
-                  : isAg
-                    ? `🟢 comfyui-mcp agent ready — ${agentLabel} on your Google AI subscription via Antigravity CLI. Note: agy turns show final answers only (no live tool progress). Ask away.`
-                  : isGk
-                    ? `🟢 comfyui-mcp agent ready — ${agentLabel} on your Grok (xAI) account. Ask away.`
-                  : isOl
-                    ? `🟢 comfyui-mcp agent ready — ${agentLabel} running locally via Ollama (no account, no API key). Small local models are slower and simpler than frontier ones — expect fewer frills. Ask away.`
-                    : isLs
-                      ? `🟢 comfyui-mcp agent ready — ${agentLabel} running locally via LM Studio (no account, no API key). Small local models are slower and simpler than frontier ones — expect fewer frills. Ask away.`
-                      : isLc
-                        ? `🟢 comfyui-mcp agent ready — ${agentLabel} running locally via llama.cpp (no account, no API key). Small local models are slower and simpler than frontier ones — expect fewer frills. Ask away.`
-                        : isCu
-                          ? `🟢 comfyui-mcp agent ready — ${agentLabel} via your custom endpoint (${customBaseUrl}). Ask away.`
-                          : isOr
-                      ? `🟢 comfyui-mcp agent ready — ${agentLabel} via OpenRouter (hosted API, your OPENROUTER_API_KEY). Ask away.`
-                      : isCp
-                        ? `🟢 comfyui-mcp agent ready — ${agentLabel} on your GitHub Copilot subscription (⚠️ experimental, ToS risk — you opted in). Ask away.`
-                      : `🟢 comfyui-mcp agent ready — ${agentLabel} on your Claude subscription. Ask away.`;
-              bridge.push({ type: "say", text: readyText }, panelTab);
+              // Prefer an ALREADY-resolved model if the SDK init raced ahead of this
+              // greeting (#376) — otherwise the pre-init label. Remember what we
+              // advertised so the onSession correction re-sends only on a real
+              // mismatch.
+              const bannerLabel = resolvedModelByTab.get(panelTab) ?? agentLabel;
+              advertisedBannerModel.set(panelTab, bannerLabel);
+              bridge.push(
+                { type: "say", text: readyBannerText(backend, bannerLabel, customBaseUrl) },
+                panelTab,
+              );
             }
             bridge.push({ type: "ack", ok: true, kind: "ready", agent: agentLabel, backend }, panelTab);
             logger.debug(`[panel-orchestrator] tab ${panelTab.slice(0, 8)} connected (${backend}) — agent healthy, ready ack`);

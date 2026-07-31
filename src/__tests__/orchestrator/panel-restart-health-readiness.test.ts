@@ -73,7 +73,7 @@ function makeCtx(opts: {
     },
     confirm: async (_q: string, _h: string, timeoutMs?: number) => {
       opts.confirmSeen?.(timeoutMs);
-      return true;
+      return "yes" as const;
     },
     ensureReachable: () => {},
     bridge,

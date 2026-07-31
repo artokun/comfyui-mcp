@@ -27,7 +27,7 @@ function ctxReplying(reply: unknown): PanelToolCtx {
   // asserts cache-reset gating on the reboot CLASSIFICATION, not readiness.
   return {
     call: async () => ({ content: [{ type: "text", text: JSON.stringify(reply) }] }),
-    confirm: async () => true,
+    confirm: async () => "yes" as const,
     ensureReachable: () => {},
     bridge: {
       send: async () => reply,

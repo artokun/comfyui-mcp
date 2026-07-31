@@ -31,7 +31,7 @@ function ctxReboot(reply: Record<string, unknown> | null, throwMsg?: string): Pa
     call: async () => {
       throw new Error("ctx.call must not be used for reboot dispatch");
     },
-    confirm: async () => true,
+    confirm: async () => "yes" as const,
     ensureReachable: () => {},
     bridge: {
       send: async () => {

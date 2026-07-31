@@ -37,7 +37,7 @@ function makeFakeCtx(
       calls.push(cmd);
       return { content: [{ type: "text", text: JSON.stringify(cmd) }] };
     },
-    confirm: async () => true,
+    confirm: async () => "yes" as const,
     // Some tools (panel_civitai_search) go through the raw bridge so they can
     // inspect the panel's reply. Record the forwarded cmd on the same `calls`
     // array and hand back a caller-supplied reply.
@@ -417,7 +417,7 @@ function makeRunCtx(reply: ToolResult): { ctx: PanelToolCtx; calls: Forwarded[] 
       calls.push(cmd);
       return reply;
     },
-    confirm: async () => true,
+    confirm: async () => "yes" as const,
     bridge: {} as unknown as PanelToolCtx["bridge"],
     tabId: "test-tab",
   };
@@ -1552,7 +1552,7 @@ describe("panel-tools: strip/slice read the live canvas by default", () => {
     const send = vi.fn(sendImpl ?? (async () => ({ workflow: CANVAS_GRAPH, node_count: 1 })));
     const ctx: PanelToolCtx = {
       call: async (cmd) => ({ content: [{ type: "text", text: JSON.stringify(cmd) }] }),
-      confirm: async () => true,
+      confirm: async () => "yes" as const,
       bridge: { send } as unknown as PanelToolCtx["bridge"],
       tabId: "test-tab",
     };
@@ -1620,7 +1620,7 @@ describe("panel_open_workflow: verify active state after ack-timeout (#215/#319/
         }
         return { content: [{ type: "text", text: "{}" }] };
       },
-      confirm: async () => true,
+      confirm: async () => "yes" as const,
       bridge: {} as unknown as PanelToolCtx["bridge"],
       tabId: "test-tab",
     } as PanelToolCtx;
@@ -1683,7 +1683,7 @@ describe("panel_open_workflow: verify active state after ack-timeout (#215/#319/
         if (cmd.cmd === "workflow_list") listCalls++;
         return { content: [{ type: "text", text: "{}" }] };
       },
-      confirm: async () => true,
+      confirm: async () => "yes" as const,
       bridge: {} as unknown as PanelToolCtx["bridge"],
       tabId: "test-tab",
     } as PanelToolCtx;
@@ -1718,7 +1718,7 @@ describe("panel_open_workflow: verify active state after ack-timeout (#215/#319/
         if (cmd.cmd === "workflow_list") listCalls++;
         return { content: [{ type: "text", text: JSON.stringify({ active: { path: TARGET } }) }] };
       },
-      confirm: async () => true,
+      confirm: async () => "yes" as const,
       bridge: {} as unknown as PanelToolCtx["bridge"],
       tabId: "test-tab",
     } as PanelToolCtx;
@@ -1745,7 +1745,7 @@ describe("panel_open_workflow: verify active state after ack-timeout (#215/#319/
         if (cmd.cmd === "workflow_list") listCalls++;
         return { content: [{ type: "text", text: "{}" }] };
       },
-      confirm: async () => true,
+      confirm: async () => "yes" as const,
       bridge: {} as unknown as PanelToolCtx["bridge"],
       tabId: "test-tab",
     } as PanelToolCtx;
@@ -1912,6 +1912,124 @@ describe("panel_ask surface + late-answer resilience (#300/#486) and set_todo bo
     expect(res.isError).toBeFalsy();
     expect(forwardedTimeout).toBeGreaterThanOrEqual(15000);
     expect(sent.at(-1)).toMatchObject({ cmd: "set_todo" });
+  });
+});
+
+describe("confirm-card timeout is honest, bounded, and late-answer-safe (#360)", () => {
+  const REPLY_TIMEOUT_ERR = (cmd: string, ms: number) =>
+    new Error(
+      `Panel tab abcd1234 did not reply to "${cmd}" within ${ms} ms — the ComfyUI tab may be backgrounded or frozen`,
+    );
+
+  function toolText(res: ToolResult): string {
+    return (res.content[0] as { text: string }).text;
+  }
+
+  afterEach(() => {
+    __panelAskTestHooks.setAskTiming(null);
+  });
+
+  // FAIL-BEFORE: the old confirm swallowed a card-reply timeout as `false`, so an
+  // unanswered restart card reported "Cancelled — ComfyUI was not restarted." (a
+  // wrong, definitive decline). PASS-AFTER: an unanswered card reports an honest
+  // "timed out waiting for confirmation" AND never dispatches the reboot.
+  it("panel_restart_comfyui reports a timeout honestly and does NOT restart when the card is unanswered", async () => {
+    __panelAskTestHooks.setAskTiming({ deadlineMs: 5, graceMs: 20, pollMs: 2 });
+    const dispatched: Array<Record<string, unknown>> = [];
+    const bridge = {
+      send: async (cmd: Record<string, unknown>, opts?: { timeoutMs?: number }) => {
+        if (cmd.cmd === "ask_user") throw REPLY_TIMEOUT_ERR("ask_user", opts?.timeoutMs ?? 0);
+        dispatched.push(cmd);
+        return { rebooting: true };
+      },
+    } as unknown as PanelToolCtx["bridge"];
+    const ctx = makePanelToolCtx(bridge, "abcd1234");
+
+    const res = await defByName("panel_restart_comfyui").handler({}, ctx);
+    expect(res.isError).toBeFalsy();
+    expect(toolText(res)).toMatch(/timed out waiting for your confirmation/i);
+    expect(toolText(res)).not.toMatch(/^Cancelled/);
+    // Critically: the reboot was NEVER dispatched.
+    expect(dispatched.some((c) => c.cmd === "comfy_reboot")).toBe(false);
+  });
+
+  // The confirm card deadline must be CLAMPED under the ~300s MCP tools/call budget
+  // (the old hardcoded 300000ms had zero margin and blew the transport).
+  it("panel_restart_comfyui clamps the confirm-card deadline under the MCP budget", async () => {
+    let forwardedTimeout = Infinity;
+    const bridge = {
+      send: async (cmd: Record<string, unknown>, opts?: { timeoutMs?: number }) => {
+        if (cmd.cmd === "ask_user") {
+          forwardedTimeout = opts?.timeoutMs ?? 0;
+          return "No, cancel";
+        }
+        return { rebooting: true };
+      },
+    } as unknown as PanelToolCtx["bridge"];
+    const ctx = makePanelToolCtx(bridge, "abcd1234");
+
+    await defByName("panel_restart_comfyui").handler({}, ctx);
+    expect(forwardedTimeout).toBeGreaterThan(0);
+    expect(forwardedTimeout).toBeLessThan(300000);
+  });
+
+  // #360 mirrors #486: a slow-but-valid answer buffered after the card timeout must
+  // be HONORED, not lost — a late "yes" still performs the action. Uses panel_clear
+  // (dispatch-and-return) so the assertion isolates the confirm path.
+  it("confirm honors a late-but-valid 'yes' buffered after the card timeout", async () => {
+    __panelAskTestHooks.setAskTiming({ deadlineMs: 5, graceMs: 500, pollMs: 2 });
+    const dispatched: Array<Record<string, unknown>> = [];
+    let takes = 0;
+    const bridge = {
+      send: async (cmd: Record<string, unknown>, opts?: { timeoutMs?: number }) => {
+        if (cmd.cmd === "ask_user") throw REPLY_TIMEOUT_ERR("ask_user", opts?.timeoutMs ?? 0);
+        dispatched.push(cmd);
+        return {};
+      },
+      takeLateAskReply: (_askId: string) => {
+        takes += 1;
+        return takes >= 2 ? "Yes, go ahead" : undefined;
+      },
+    } as unknown as PanelToolCtx["bridge"];
+    const ctx = makePanelToolCtx(bridge, "abcd1234");
+
+    const res = await defByName("panel_clear").handler({}, ctx);
+    expect(res.isError).toBeFalsy();
+    expect(toolText(res)).not.toMatch(/timed out|Cancelled/i);
+    expect(dispatched.some((c) => c.cmd === "graph_clear")).toBe(true);
+  });
+
+  // An explicit decline is still a clean, definitive "Cancelled" (not a timeout).
+  it("panel_clear reports a clean cancel on an explicit decline and a timeout on no answer", async () => {
+    __panelAskTestHooks.setAskTiming({ deadlineMs: 5, graceMs: 20, pollMs: 2 });
+    // Decline branch.
+    const declineDispatched: Array<Record<string, unknown>> = [];
+    const declineBridge = {
+      send: async (cmd: Record<string, unknown>) => {
+        if (cmd.cmd === "ask_user") return "No, cancel";
+        declineDispatched.push(cmd);
+        return {};
+      },
+    } as unknown as PanelToolCtx["bridge"];
+    const declineRes = await defByName("panel_clear").handler(
+      {},
+      makePanelToolCtx(declineBridge, "abcd1234"),
+    );
+    expect(toolText(declineRes)).toMatch(/^Cancelled/);
+    expect(declineDispatched.some((c) => c.cmd === "graph_clear")).toBe(false);
+
+    // Timeout branch.
+    const timeoutBridge = {
+      send: async (cmd: Record<string, unknown>, opts?: { timeoutMs?: number }) => {
+        if (cmd.cmd === "ask_user") throw REPLY_TIMEOUT_ERR("ask_user", opts?.timeoutMs ?? 0);
+        return {};
+      },
+    } as unknown as PanelToolCtx["bridge"];
+    const timeoutRes = await defByName("panel_clear").handler(
+      {},
+      makePanelToolCtx(timeoutBridge, "abcd1234"),
+    );
+    expect(toolText(timeoutRes)).toMatch(/timed out waiting for your confirmation/i);
   });
 });
 

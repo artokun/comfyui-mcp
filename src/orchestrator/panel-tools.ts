@@ -1354,6 +1354,15 @@ const rect = () =>
   z.array(z.number()).min(4).max(4).describe("[x, y, width, height] (four numbers).");
 
 /**
+ * Outcome of a human-in-the-loop confirm card (#360). A tri-state so callers can
+ * tell a deliberate DECLINE ("no") apart from the user simply not answering in
+ * time ("timeout") — the latter must be reported honestly ("timed out waiting for
+ * confirmation"), never silently treated as a decline. Any non-timeout failure
+ * (no panel, transport error) maps to "no" so the destructive op is SKIPPED.
+ */
+export type ConfirmOutcome = "yes" | "no" | "timeout";
+
+/**
  * The execution context every tool handler receives. Both transports (Anthropic
  * SDK in-process, MCP-SDK over HTTP) build the SAME context bound to a tab, so a
  * handler is transport-agnostic — it only ever talks to the bridge via `call` /
@@ -1362,8 +1371,12 @@ const rect = () =>
 export interface PanelToolCtx {
   /** Forward a command to the panel and wrap the reply as a tool result. */
   call: (cmd: Record<string, unknown>, timeoutMs?: number) => Promise<ToolResult>;
-  /** Human-in-the-loop yes/no confirm card (false on decline/timeout/no-panel). */
-  confirm: (question: string, header: string, timeoutMs?: number) => Promise<boolean>;
+  /** Human-in-the-loop yes/no confirm card. Tri-state (#360): "yes" on an explicit
+   *  affirmative, "no" on a decline / no-panel / transport error, "timeout" when the
+   *  user never answered in time. `timeoutMs` (optional, #536) caps the WHOLE confirm
+   *  wait (card deadline + late-answer grace) for a caller with a tighter
+   *  whole-handler budget (e.g. panel_restart) — always clamped under the ask ceiling. */
+  confirm: (question: string, header: string, timeoutMs?: number) => Promise<ConfirmOutcome>;
   /** The raw bridge + tab id, for the handful of tools that need bespoke wiring
    *  (image screenshots, secret collection). */
   bridge: UiBridge;
@@ -1508,13 +1521,35 @@ export function makePanelToolCtx(
   const confirm = async (
     question: string,
     header: string,
-    timeoutMs = 300000,
-  ): Promise<boolean> => {
+    timeoutMs?: number,
+  ): Promise<ConfirmOutcome> => {
+    // #360: the enclosing MCP `tools/call` is killed at ~300s. A hardcoded 300s
+    // card wait had ZERO margin below that budget — so an unanswered confirm blew
+    // the whole tool call (a transport timeout) instead of returning cleanly, and
+    // any late answer was lost. CLAMP the card deadline under the budget (the same
+    // getAskTiming() ceiling panel_ask uses for #486) and, on a reply-timeout,
+    // poll the bridge's late-reply buffer for a bounded grace so a slow-but-valid
+    // yes/no is still HONORED. A genuine no-answer returns "timeout" (reported
+    // honestly by the caller), never a silent decline.
+    const base = getAskTiming();
+    // A caller may pass a tighter WHOLE-confirm budget (#536: panel_restart bounds
+    // confirm+dispatch+readiness under the outer limit). Treat timeoutMs as the HARD
+    // ceiling on deadline+grace so we never overrun the caller's budget, while still
+    // never exceeding the ask clamp. Absent → the full clamp (deadline+grace).
+    const total =
+      typeof timeoutMs === "number"
+        ? Math.max(1, Math.min(timeoutMs, base.deadlineMs + base.graceMs))
+        : base.deadlineMs + base.graceMs;
+    const deadlineMs = Math.max(1, Math.min(base.deadlineMs, total));
+    const graceMs = Math.max(0, total - deadlineMs);
+    const timing = { deadlineMs, graceMs, pollMs: base.pollMs };
+    const askId = randomUUID();
     try {
       ensureReachable();
       const reply = await bridge.send(
         {
           cmd: "ask_user",
+          ask_id: askId,
           question,
           header,
           options: [
@@ -1522,11 +1557,20 @@ export function makePanelToolCtx(
             { label: "No, cancel", description: "" },
           ],
         } as { cmd: string },
-        { tabId: ctx.tabId, timeoutMs: Math.max(1, timeoutMs) },
+        { tabId: ctx.tabId, timeoutMs: timing.deadlineMs },
       );
-      return isAffirmative(reply);
-    } catch {
-      return false;
+      return isAffirmative(reply) ? "yes" : "no";
+    } catch (err) {
+      // Only a card-reply TIMEOUT is recoverable/honest-as-timeout: poll the late
+      // buffer, then report "timeout" if still unanswered. Any other error (no
+      // panel, transport failure) → "no" so the destructive op is SKIPPED, exactly
+      // as the previous catch-all did.
+      if (isReplyTimeoutError(err)) {
+        const late = await pollLateAskReply(bridge, askId, timing);
+        if (late !== undefined) return isAffirmative(late) ? "yes" : "no";
+        return "timeout";
+      }
+      return "no";
     }
   };
 
@@ -2093,12 +2137,17 @@ export function buildPanelToolDefs(): PanelToolDef[] {
       "Remove EVERY node from the user's open graph — only for an explicit 'clear/reset the canvas'. Just CALL THIS DIRECTLY when they ask to clear: the tool itself pops a confirm card and only wipes on a yes (don't ask separately first). The wipe is a single Ctrl+Z undo. NEVER use this for a 'new workflow' — that's panel_new_workflow (a new tab, leaves this graph intact).",
       {},
       async (_args, ctx) => {
-        if (
-          !(await ctx.confirm(
-            "Clear the canvas? This removes every node from the open workflow. (One Ctrl+Z undoes it.)",
-            "Clear canvas",
-          ))
-        ) {
+        const decision = await ctx.confirm(
+          "Clear the canvas? This removes every node from the open workflow. (One Ctrl+Z undoes it.)",
+          "Clear canvas",
+        );
+        if (decision === "timeout") {
+          return ok(
+            "Timed out waiting for your confirmation, so I left the canvas as-is. " +
+              "Tell me to clear it again when you're ready.",
+          );
+        }
+        if (decision !== "yes") {
           return ok("Cancelled — the canvas was left as-is.");
         }
         return ctx.call({ cmd: "graph_clear" });
@@ -3549,20 +3598,26 @@ export function buildPanelToolDefs(): PanelToolDef[] {
       "Restart the user's ComfyUI server via the built-in Manager — needed to load newly installed/updated custom nodes. CALL THIS DIRECTLY when a restart is needed: it pops a confirm card and only restarts on a yes (don't ask separately first). ComfyUI and this agent go down briefly, then the panel auto-reconnects and you resume. ⚠️ BUSY GUARD: a restart ABORTS any in-progress or queued generation — if ComfyUI is generating, this tool REFUSES and tells you (it does NOT restart). When that happens, tell the user a render is running and WAIT for it (poll panel_node_queue_status), or pass force:true ONLY if the user explicitly confirms they want to kill the running generation. Best practice: before restarting after an install, check the queue is idle first. Only call when a restart is actually needed.",
       { force: z.boolean().optional() },
       async ({ force }, ctx) => {
-        // Whole-handler budget (coordinator): confirm + dispatch + readiness — INCLUDING
+        // Whole-handler budget (#536): confirm + dispatch + readiness — INCLUDING
         // the legacy path's UNPREEMPTIBLE synchronous execSync blocks — must ALL finish
         // under the outer ~300s tools/call limit. 255s + the legacy admission rule below
         // (kill+relaunch starts only with >=130s left, its ~40s of sync work FRONT-LOADED)
-        // means the handler PROVABLY returns well under 300s.
+        // means the handler PROVABLY returns well under 300s. The confirm wait is bound
+        // to the remaining budget (its deadline+grace can't overrun it — see confirm).
         const OVERALL_MAX_MS = 255_000;
         const overallDeadline = Date.now() + OVERALL_MAX_MS;
-        if (
-          !(await ctx.confirm(
-            "Restart ComfyUI now? It (and this agent) will go down briefly, then reconnect and resume automatically.",
-            "Restart ComfyUI",
-            Math.max(1, overallDeadline - Date.now()),
-          ))
-        ) {
+        const decision = await ctx.confirm(
+          "Restart ComfyUI now? It (and this agent) will go down briefly, then reconnect and resume automatically.",
+          "Restart ComfyUI",
+          Math.max(1, overallDeadline - Date.now()),
+        );
+        if (decision === "timeout") {
+          return ok(
+            "Timed out waiting for your confirmation, so I did NOT restart ComfyUI. " +
+              "Tell me to restart it and I'll go ahead.",
+          );
+        }
+        if (decision !== "yes") {
           return ok("Cancelled — ComfyUI was not restarted.");
         }
         // Heal an orphaned session onto the live tab FIRST, then bind the reboot dispatch

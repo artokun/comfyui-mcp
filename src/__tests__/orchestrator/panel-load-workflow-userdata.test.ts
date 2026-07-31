@@ -35,7 +35,7 @@ function makeCtx(): { ctx: PanelToolCtx; calls: Forwarded[] } {
       calls.push(cmd);
       return { content: [{ type: "text", text: "ok" }] };
     },
-    confirm: async () => true,
+    confirm: async () => "yes" as const,
     bridge: { send: async (cmd: Forwarded) => { calls.push(cmd); return {}; } },
     tabId: "test-tab",
   } as unknown as PanelToolCtx;
