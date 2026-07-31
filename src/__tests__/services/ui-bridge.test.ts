@@ -997,6 +997,97 @@ describe("UiBridge.send (graceful gate end-to-end)", () => {
       /too old for "graph_query".*0\.6\.8.*update/is,
     );
   });
+
+  // #236 — the FIRST call to an unsupported command still round-trips to the
+  // panel (there's no way to know in advance), but every LATER call in the same
+  // session must be gated proactively: rejected with the same actionable message
+  // WITHOUT ever reaching the panel again. FAIL-before: the old code always
+  // re-dispatched and re-parsed the panel's raw "Unknown command" string on every
+  // single call.
+  it("gates a REPEAT call to an already-proven-unsupported command without re-dispatching to the panel", async () => {
+    const sock = await connectPanel(undefined);
+    let dispatchCount = 0;
+    sock.send(JSON.stringify({ type: "hello", tab_id: "old-tab-2", title: "wf", panel_version: "0.6.8" }));
+    sock.on("message", (buf) => {
+      const msg = JSON.parse(buf.toString());
+      if (msg.rid && msg.cmd) {
+        dispatchCount += 1;
+        sock.send(JSON.stringify({ rid: msg.rid, ok: false, error: `Unknown command "${msg.cmd}"` }));
+      }
+    });
+    await new Promise((r) => setTimeout(r, 50));
+
+    // First call: genuinely round-trips (the only way to discover it's unsupported).
+    await expect(bridge.send({ cmd: "graph_query" }, { tabId: "old-tab-2" })).rejects.toThrow(
+      /too old for "graph_query"/i,
+    );
+    expect(dispatchCount).toBe(1);
+
+    // Second call: gated proactively — same actionable message, but the panel
+    // must NEVER see a second dispatch of this command.
+    await expect(bridge.send({ cmd: "graph_query" }, { tabId: "old-tab-2" })).rejects.toThrow(
+      /too old for "graph_query".*0\.6\.8.*update/is,
+    );
+    expect(dispatchCount).toBe(1);
+  });
+
+  // A command that has NEVER been tried on this connection must never be
+  // pre-emptively blocked by another command's failure (no blanket gate — only
+  // the SPECIFIC cmd that was empirically proven unsupported is gated).
+  it("does NOT gate a different, never-tried command after another command was proven unsupported", async () => {
+    const sock = await connectPanel(undefined);
+    sock.send(JSON.stringify({ type: "hello", tab_id: "old-tab-3", title: "wf", panel_version: "0.6.8" }));
+    sock.on("message", (buf) => {
+      const msg = JSON.parse(buf.toString());
+      if (!msg.rid || !msg.cmd) return;
+      if (msg.cmd === "graph_query") {
+        sock.send(JSON.stringify({ rid: msg.rid, ok: false, error: `Unknown command "${msg.cmd}"` }));
+      } else {
+        // Every other command this (otherwise old) panel actually DOES support.
+        sock.send(JSON.stringify({ rid: msg.rid, ok: true, result: { cmd: msg.cmd } }));
+      }
+    });
+    await new Promise((r) => setTimeout(r, 50));
+
+    await expect(bridge.send({ cmd: "graph_query" }, { tabId: "old-tab-3" })).rejects.toThrow(
+      /too old for "graph_query"/i,
+    );
+    // graph_add_node must still be dispatched normally and succeed.
+    const res = await bridge.send({ cmd: "graph_add_node" }, { tabId: "old-tab-3" });
+    expect(res).toEqual({ cmd: "graph_add_node" });
+  });
+
+  // A reconnect (fresh hello) may be an updated panel build — a previously
+  // learned "unsupported" verdict must never carry over and permanently block a
+  // command the NEW connection could actually support.
+  it("clears the learned-unsupported set on a fresh hello (reconnect may be an updated panel)", async () => {
+    const sock1 = await connectPanel(undefined);
+    sock1.send(JSON.stringify({ type: "hello", tab_id: "old-tab-4", title: "wf", panel_version: "0.6.8" }));
+    sock1.on("message", (buf) => {
+      const msg = JSON.parse(buf.toString());
+      if (msg.rid && msg.cmd) {
+        sock1.send(JSON.stringify({ rid: msg.rid, ok: false, error: `Unknown command "${msg.cmd}"` }));
+      }
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    await expect(bridge.send({ cmd: "graph_query" }, { tabId: "old-tab-4" })).rejects.toThrow(
+      /too old for "graph_query"/i,
+    );
+
+    // Reconnect under the same tab id with a NEWER panel that now supports it.
+    const sock2 = await connectPanel(undefined);
+    sock2.send(JSON.stringify({ type: "hello", tab_id: "old-tab-4", title: "wf", panel_version: "0.11.4" }));
+    sock2.on("message", (buf) => {
+      const msg = JSON.parse(buf.toString());
+      if (msg.rid && msg.cmd) {
+        sock2.send(JSON.stringify({ rid: msg.rid, ok: true, result: { cmd: msg.cmd } }));
+      }
+    });
+    await new Promise((r) => setTimeout(r, 50));
+
+    const res = await bridge.send({ cmd: "graph_query" }, { tabId: "old-tab-4" });
+    expect(res).toEqual({ cmd: "graph_query" });
+  });
 });
 
 // ── #486: a validated ask_user answer that lands AFTER the reply timeout must be

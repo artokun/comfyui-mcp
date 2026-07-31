@@ -96,11 +96,36 @@ interface Conn {
    *  (see makeUnknownCommandError) — the panel gained these bridge commands in
    *  0.11.4, so older builds reject graph_* / ui_* with a raw dispatch error. */
   panelVersion?: string;
+  /** Commands THIS connection has already proven it doesn't support, via a real
+   *  "Unknown command" reply earlier in the session (#236). Once a cmd lands
+   *  here, every later call is gated proactively — rejected before it ever
+   *  reaches the panel, with the same actionable message — instead of paying a
+   *  full round trip (and re-parsing the panel's raw error) every single time.
+   *  Never pre-populated from panelVersion alone: some graph_ and ui_ commands
+   *  predate 0.11.4 and DO work on older panels, so only an EMPIRICALLY observed
+   *  rejection from this exact connection can prove a command unsupported —
+   *  guaranteeing this never blocks a call that would otherwise have succeeded.
+   *  Reset to empty on every hello (a reconnect may be a freshly updated panel
+   *  build, so a stale unsupported-verdict must never carry over). */
+  unsupportedCmds: Set<string>;
 }
 
 /** Panel build that first implements the full graph_* / ui_* bridge command set.
  *  Reports of "Unknown command <x>" come from panels older than this. */
 export const MIN_PANEL_VERSION_FOR_BRIDGE_COMMANDS = "0.11.4";
+
+/** The actionable "update your panel" message for a command a connected panel has
+ *  been discovered NOT to support. Shared by the reactive path (the panel's own
+ *  "Unknown command" reply, mapped by makeUnknownCommandError) and the proactive
+ *  gate (#236 — a command already known-unsupported for THIS connection, from an
+ *  earlier call in the same session) so both produce the identical message. */
+function buildPanelTooOldError(cmd: string, panelVersion?: string): Error {
+  const detected = panelVersion ? ` (detected ${panelVersion})` : "";
+  return new Error(
+    `This ComfyUI-MCP panel is too old for "${cmd}"${detected} — update the ComfyUI-MCP panel ` +
+      `to ≥${MIN_PANEL_VERSION_FOR_BRIDGE_COMMANDS} (ComfyUI Manager → update comfyui-mcp panel), then reconnect.`,
+  );
+}
 
 /**
  * A panel replies `{ ok: false, error: 'Unknown command "<cmd>"' }` when the
@@ -122,12 +147,7 @@ export function makeUnknownCommandError(
   // exactly this string. Case-insensitive, tolerant of straight or smart quotes.
   const m = /^unknown command\s*["“']?([\w.-]+)["”']?/i.exec(error.trim());
   if (!m) return null;
-  const cmd = m[1];
-  const detected = panelVersion ? ` (detected ${panelVersion})` : "";
-  return new Error(
-    `This ComfyUI-MCP panel is too old for "${cmd}"${detected} — update the ComfyUI-MCP panel ` +
-      `to ≥${MIN_PANEL_VERSION_FOR_BRIDGE_COMMANDS} (ComfyUI Manager → update comfyui-mcp panel), then reconnect.`,
-  );
+  return buildPanelTooOldError(m[1], panelVersion);
 }
 
 export interface BridgeCommand {
@@ -637,6 +657,8 @@ export class UiBridge {
             typeof (msg as { panel_version?: unknown }).panel_version === "string"
               ? ((msg as { panel_version?: string }).panel_version || undefined)
               : existing?.panelVersion,
+          // Fresh per hello — see the field's doc comment (#236).
+          unsupportedCmds: new Set<string>(),
         });
         if (incomingHeadless) this.headlessSeen.add(tabId);
         this.broadcastTabList(); // a tab connected/reconnected — refresh mirror pickers
@@ -1031,6 +1053,15 @@ export class UiBridge {
       }
       return Promise.reject(err instanceof Error ? err : new Error(String(err)));
     }
+    // #236 — proactively gate a command this exact connection has already proven
+    // unsupported (see Conn.unsupportedCmds), instead of dispatching it again just
+    // to have the panel reject it and re-parse the same "Unknown command" string.
+    // Never a false gate: membership here is only ever set from a REAL rejection
+    // on THIS connection (in dispatch()'s rejectMapped below), never inferred from
+    // panelVersion alone.
+    if (conn.unsupportedCmds.has(cmd.cmd)) {
+      return Promise.reject(buildPanelTooOldError(cmd.cmd, conn.panelVersion));
+    }
     if (conn.sock.readyState !== WebSocket.OPEN) {
       if (opts.tabId && UiBridge.isMailboxable(cmd)) {
         this.storeMailbox(opts.tabId, cmd);
@@ -1088,6 +1119,13 @@ export class UiBridge {
     // passed through untouched.
     const rejectMapped = (err: Error) => {
       const friendly = makeUnknownCommandError(err.message, conn.panelVersion);
+      if (friendly) {
+        // Learned, not assumed (#236) — this exact connection just proved it
+        // doesn't support cmd.cmd, so every later call in this session is gated
+        // proactively (see the `send()` preflight above) instead of round-
+        // tripping to the panel again.
+        conn.unsupportedCmds.add(cmd.cmd);
+      }
       ctx.reject(friendly ?? err);
     };
     const timer = setTimeout(() => {
