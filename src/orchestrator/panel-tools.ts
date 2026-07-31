@@ -1788,16 +1788,31 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_set_widget",
-      "Set a widget value on a node in the user's open graph (steps, cfg, seed, ckpt_name, text prompts, …). Returns the previous and new value. Undoable with Ctrl+Z.",
+      "Set a widget value on a node in the user's open graph (steps, cfg, seed, ckpt_name, text prompts, …). Returns the previous and new value. Undoable with Ctrl+Z. To CLEAR a text widget to an empty string, pass `clear: true` (some MCP clients drop an empty-string `value` from the serialized payload, so `value: \"\"` may not arrive — `clear: true` always works).",
       {
         node_id: z.number().int().describe("Node id from panel_graph_outline / panel_query_graph."),
         widget: z.string().describe("Widget name (e.g. 'steps', 'cfg', 'text')."),
         value: z
           .union([z.string(), z.number(), z.boolean()])
-          .describe("New value. Must match the widget's expected type."),
+          .optional()
+          .describe("New value. Must match the widget's expected type. Optional only when `clear: true` is set (which forces an empty string)."),
+        clear: z
+          .boolean()
+          .optional()
+          .describe("Set true to clear the widget to an empty string (\"\"). Escape hatch for when a client cannot carry an empty-string `value` through tool-arg JSON. Overrides `value`."),
       },
-      async (args: A, ctx) =>
-        ctx.call({ cmd: "graph_set_widget", node_id: args.node_id, widget: args.widget, value: args.value }),
+      async (args: A, ctx) => {
+        // Distinguish "value present but empty" from "value absent" by key
+        // presence, NOT a truthiness check — an empty string is a legitimate
+        // value. `clear: true` is the transport-independent way to set "".
+        const value = args.clear === true ? "" : args.value;
+        if (value === undefined) {
+          return fail(
+            "panel_set_widget needs a `value`. To set an empty string, pass `clear: true` (some clients drop an empty-string `value`).",
+          );
+        }
+        return ctx.call({ cmd: "graph_set_widget", node_id: args.node_id, widget: args.widget, value });
+      },
     ),
     def(
       "panel_move_node",

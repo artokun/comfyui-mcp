@@ -131,6 +131,72 @@ describe("panel-tools: copy/paste + subgraph blueprints", () => {
   });
 });
 
+describe("panel-tools: panel_set_widget (empty-string clear, issue #347)", () => {
+  it("forwards a normal non-empty value unchanged", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_set_widget").handler(
+      { node_id: 39, widget: "text_input", value: "hello" },
+      ctx,
+    );
+    expect(calls[0]).toMatchObject({
+      cmd: "graph_set_widget",
+      node_id: 39,
+      widget: "text_input",
+      value: "hello",
+    });
+  });
+
+  it("forwards an explicit empty-string value (present-but-empty is honored)", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_set_widget").handler(
+      { node_id: 39, widget: "text_input", value: "" },
+      ctx,
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      cmd: "graph_set_widget",
+      node_id: 39,
+      widget: "text_input",
+      value: "",
+    });
+  });
+
+  it("clear:true sets the widget to an empty string even when value is absent", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    // Simulates the client that drops the empty-string value from the payload.
+    await defByName("panel_set_widget").handler(
+      { node_id: 39, widget: "text_input", clear: true },
+      ctx,
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      cmd: "graph_set_widget",
+      node_id: 39,
+      widget: "text_input",
+      value: "",
+    });
+  });
+
+  it("clear:true overrides any provided value", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_set_widget").handler(
+      { node_id: 39, widget: "text_input", value: "stale", clear: true },
+      ctx,
+    );
+    expect(calls[0]).toMatchObject({ cmd: "graph_set_widget", value: "" });
+  });
+
+  it("errors (does not forward) when neither value nor clear is provided", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    const res = await defByName("panel_set_widget").handler(
+      { node_id: 39, widget: "text_input" },
+      ctx,
+    );
+    expect(res.isError).toBe(true);
+    expect(calls).toHaveLength(0);
+  });
+});
+
 describe("panel-tools: panel_set_node_mode (bypass/mute/active)", () => {
   it("is present in the shared def list", () => {
     const names = buildPanelToolDefs().map((d) => d.name);
