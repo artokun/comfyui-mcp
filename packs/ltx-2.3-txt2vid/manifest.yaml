@@ -12,9 +12,9 @@
 pip:
   - imageio-ffmpeg   # CreateVideo/SaveVideo need an ffmpeg for the mux
 
-custom_nodes:
-  # All LTX 2.3 nodes are native to current ComfyUI (comfy_extras). Manager is
-  # only for install tooling; update ComfyUI itself to a recent build.
+# All LTX 2.3 nodes are native to current ComfyUI (comfy_extras); this pack
+# needs no custom nodes. Update ComfyUI itself to a recent build.
+custom_nodes: []
 
 models:
   # --- Main checkpoint: 22B dev transformer + audio VAE (~46 GB) ---
