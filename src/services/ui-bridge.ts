@@ -170,6 +170,48 @@ export function makeUnknownCommandError(
   return buildPanelTooOldError(m[1], panelVersion);
 }
 
+/**
+ * Bridge commands with NO side effect — safe to re-dispatch after a reconnect and
+ * safe to WAIT ON longer (a read can't be double-applied). Module-level so both
+ * the mutating-vs-read classification and the default-timeout policy share one
+ * authoritative list. Everything not listed is treated as mutating.
+ */
+export const BRIDGE_READONLY_CMDS: ReadonlySet<string> = new Set<string>([
+  "graph_serialize",
+  "graph_outline",
+  "graph_get_errors",
+  "graph_get_state",
+  "graph_get_subgraph",
+  "graph_view_selected",
+  "graph_view_nodes_in_viewport",
+  "graph_prompt_director_audit",
+  "graph_query",
+  "civitai_results",
+  "get_todo",
+]);
+
+/** Tight default reply timeout for a MUTATING command with no explicit timeout —
+ *  fail fast so the agent isn't blocked on a stuck write. */
+export const BRIDGE_DEFAULT_TIMEOUT_MS = 6000;
+/** More tolerant default for a READ (idempotent) command with no explicit timeout.
+ *  A legitimately busy-but-alive panel main thread — e.g. Preview3D parsing a large
+ *  FBX — can take many seconds to service a graph_query; failing it at the tight
+ *  6s default surfaced a FALSE "tab backgrounded or frozen" timeout even though a
+ *  retry moments later succeeded (#357). Reads have no side effect, so waiting
+ *  longer is safe; a genuinely dead/frozen tab still times out, just at this bound.
+ *  Note: a WebSocket pong is answered by the browser network stack even while JS is
+ *  blocked, so it can't distinguish busy-JS from dead-JS — a tolerant read timeout,
+ *  not pong-liveness, is the correct lever here. */
+export const BRIDGE_READ_DEFAULT_TIMEOUT_MS = 20_000;
+
+/** The default reply timeout to use for `cmd` when the caller passed none. Read
+ *  ops get the tolerant bound; everything else stays tight (#357). */
+export function defaultBridgeTimeoutMs(cmdName: string): number {
+  return BRIDGE_READONLY_CMDS.has(cmdName)
+    ? BRIDGE_READ_DEFAULT_TIMEOUT_MS
+    : BRIDGE_DEFAULT_TIMEOUT_MS;
+}
+
 export interface BridgeCommand {
   cmd: string;
   [key: string]: unknown;
@@ -335,17 +377,10 @@ export class UiBridge {
   private static readonly RECONNECT_GRACE_MS = 4000;
   /** Bridge commands with no side effect — safe to re-dispatch after a reconnect.
    *  Everything else is treated as mutating (no auto-retry) so a render/edit is
-   *  never silently double-applied. */
-  private static readonly READONLY_CMDS = new Set<string>([
-    "graph_serialize",
-    "graph_outline",
-    "graph_get_errors",
-    "graph_get_subgraph",
-    "graph_prompt_director_audit",
-    "graph_query",
-    "civitai_results",
-    "get_todo",
-  ]);
+   *  never silently double-applied. Single source of truth at module scope
+   *  (BRIDGE_READONLY_CMDS) so the mutating flag and the default-timeout policy
+   *  can never drift apart. */
+  private static readonly READONLY_CMDS = BRIDGE_READONLY_CMDS;
   private portInUse = false;
   private bindRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -1183,7 +1218,10 @@ export class UiBridge {
   }
 
   send(cmd: BridgeCommand, opts: { tabId?: string; timeoutMs?: number } = {}): Promise<unknown> {
-    const timeoutMs = opts.timeoutMs ?? 6000;
+    // #357: read (idempotent) ops get a more tolerant default so a busy-but-alive
+    // panel main thread (e.g. Preview3D loading a large FBX) isn't declared frozen;
+    // mutating ops keep the tight default. An explicit opts.timeoutMs always wins.
+    const timeoutMs = opts.timeoutMs ?? defaultBridgeTimeoutMs(cmd.cmd);
     let conn: Conn;
     try {
       conn = this.resolveTarget(opts.tabId);

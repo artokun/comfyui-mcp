@@ -6,6 +6,10 @@ import {
   MIN_PANEL_VERSION_FOR_BRIDGE_COMMANDS,
   markDispatched,
   dispatchOutcomeOf,
+  defaultBridgeTimeoutMs,
+  BRIDGE_DEFAULT_TIMEOUT_MS,
+  BRIDGE_READ_DEFAULT_TIMEOUT_MS,
+  BRIDGE_READONLY_CMDS,
 } from "../../services/ui-bridge.js";
 
 let bridge: UiBridge;
@@ -1019,6 +1023,69 @@ describe("tabServerOrigin (server-observed handshake Origin — #509 spoof gate)
     await vi.waitFor(() => expect(bridge.canReach("tab-origin-3")).toBe(true));
     expect(bridge.tabServerOrigin("tab-origin-3")).toBe("http://127.0.0.1:8188");
     s.close();
+  });
+});
+
+describe("defaultBridgeTimeoutMs — tolerant read timeout (#357)", () => {
+  it("gives READ (idempotent) ops the tolerant default, mutating ops the tight one", () => {
+    // Every readonly command gets the tolerant bound…
+    for (const readCmd of BRIDGE_READONLY_CMDS) {
+      expect(defaultBridgeTimeoutMs(readCmd)).toBe(BRIDGE_READ_DEFAULT_TIMEOUT_MS);
+    }
+    // …and anything else (a render/edit) keeps the tight default.
+    for (const mutateCmd of ["graph_run", "graph_add_node", "graph_move_node", "workflow_save"]) {
+      expect(defaultBridgeTimeoutMs(mutateCmd)).toBe(BRIDGE_DEFAULT_TIMEOUT_MS);
+    }
+  });
+
+  it("covers the OTHER main-thread graph reads that share the FBX-busy hazard (#357)", () => {
+    // These run on the same busy panel main thread as graph_query and are
+    // dispatched with no explicit timeout — they must be tolerant too.
+    for (const readCmd of [
+      "graph_view_selected",
+      "graph_view_nodes_in_viewport",
+      "graph_get_state",
+      "graph_get_subgraph",
+      "graph_outline",
+    ]) {
+      expect(BRIDGE_READONLY_CMDS.has(readCmd)).toBe(true);
+      expect(defaultBridgeTimeoutMs(readCmd)).toBe(BRIDGE_READ_DEFAULT_TIMEOUT_MS);
+    }
+  });
+
+  it("graph_query is tolerant and STRICTLY longer than the old flat 6s default (#357)", () => {
+    // The regression: graph_query used the flat 6000ms default and timed out while
+    // Preview3D loaded a large FBX on a busy-but-alive main thread.
+    expect(defaultBridgeTimeoutMs("graph_query")).toBe(20_000);
+    expect(defaultBridgeTimeoutMs("graph_query")).toBeGreaterThan(6000);
+    expect(defaultBridgeTimeoutMs("graph_query")).toBeGreaterThan(defaultBridgeTimeoutMs("graph_run"));
+  });
+
+  it("a no-timeout READ stays alive PAST the old 6s cutoff (end-to-end) (#357)", async () => {
+    const a = await connectPanel("tab-aaaa-1111"); // never auto-replies
+    await vi.waitFor(() => expect(bridge.tabs()).toHaveLength(1));
+    let settled = false;
+    // No explicit timeout → send() applies the tolerant read default (20s). Swallow
+    // the eventual late rejection so it never surfaces as an unhandled rejection
+    // (the bridge is torn down in afterEach; the pending read settles then).
+    void bridge.send({ cmd: "graph_query" }).then(
+      () => { settled = true; },
+      () => { settled = true; },
+    );
+    // Wait comfortably past the OLD 6000ms default: before the fix this would have
+    // already rejected (settled === true); after it, the read is still in-flight.
+    await new Promise((r) => setTimeout(r, 6500));
+    expect(settled).toBe(false);
+    a.close();
+  }, 12000);
+
+  it("an explicit timeout always overrides the read default", async () => {
+    const a = await connectPanel("tab-aaaa-1111"); // never replies
+    await vi.waitFor(() => expect(bridge.tabs()).toHaveLength(1));
+    await expect(bridge.send({ cmd: "graph_query" }, { timeoutMs: 120 })).rejects.toThrow(
+      /did not reply to "graph_query" within 120 ms/,
+    );
+    a.close();
   });
 });
 
