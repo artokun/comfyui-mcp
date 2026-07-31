@@ -223,12 +223,12 @@ function isGgufCategory(dir: string): boolean {
 }
 
 /**
- * The physical folders a `*_gguf` view is backed by — used ONLY to recognise when the
- * SAME file is surfaced both via the view and via one of the real folders it aliases.
- * ComfyUI-GGUF registers `unet_gguf` over the `diffusion_models` folders (`unet/` +
- * `diffusion_models/`) and `clip_gguf` over the `text_encoders` folders
- * (`text_encoders/` + `clip/`). Unknown `<x>_gguf` views fall back to the folder named
- * by stripping the suffix. Never used for a model's reported `type`.
+ * The physical folders a KNOWN `*_gguf` view is backed by — used ONLY to recognise when
+ * the SAME file is surfaced both via the view and via one of the real folders it
+ * aliases. ComfyUI-GGUF registers `unet_gguf` over the `diffusion_models` folders
+ * (`unet/` + `diffusion_models/`) and `clip_gguf` over the `text_encoders` folders
+ * (`text_encoders/` + `clip/`); that is the complete set for standard ComfyUI-GGUF.
+ * Never used for a model's reported `type`.
  */
 const GGUF_BACKING_DIRS: Record<string, string[]> = {
   unet_gguf: ["unet", "diffusion_models"],
@@ -236,19 +236,22 @@ const GGUF_BACKING_DIRS: Record<string, string[]> = {
 };
 
 /**
- * The real folder(s) a scanned category resolves to, for de-dup identity. A `*_gguf`
- * view resolves to the physical folders it aliases; every other category (including
- * ComfyUI's core ones) resolves to ITSELF. This intentionally targets only the
- * duplication THIS fix can introduce — the same file surfaced via a core category AND
- * a `*_gguf` view of it. The pre-existing overlap between ComfyUI's own back-compat
- * categories (e.g. `diffusion_models` also listing `unet/`) is left exactly as it is
- * on main: its provenance is erased over REST, so collapsing it would risk discarding
- * genuinely distinct same-name files. Category lookup is case-insensitive.
+ * The real folder(s) a scanned category resolves to, for de-dup identity. A KNOWN
+ * `*_gguf` view resolves to the physical folders it aliases (so the same file surfaced
+ * via the view and via its backing core folder collapses to one). EVERY other category
+ * — a core category, OR an UNKNOWN/unmapped `*_gguf` — resolves to ITSELF. We must NOT
+ * assume an unknown `<x>_gguf` aliases a same-named `<x>` folder: a genuinely distinct
+ * `<x>_gguf/model.gguf` would then be wrongly collapsed against a real `<x>/model.gguf`
+ * and dropped. Lookup is case-insensitive.
+ *
+ * This intentionally targets only the duplication THIS fix can introduce. The
+ * pre-existing overlap between ComfyUI's own back-compat categories (e.g.
+ * `diffusion_models` also listing `unet/`) is left exactly as on main: its provenance
+ * is erased over REST, so collapsing it would risk discarding distinct same-name files.
  */
 function identityFoldersFor(category: string): string[] {
   const lower = category.toLowerCase();
-  if (isGgufCategory(lower)) return GGUF_BACKING_DIRS[lower] ?? [lower.replace(/_gguf$/, "")];
-  return [lower];
+  return GGUF_BACKING_DIRS[lower] ?? [lower];
 }
 
 /**

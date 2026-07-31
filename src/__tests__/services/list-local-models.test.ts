@@ -248,6 +248,52 @@ describe("listLocalModels — HTTP-first with FS fallback", () => {
     expect(new Set(models.map((m) => m.type))).toEqual(new Set(["unet_gguf", "clip_gguf"]));
   });
 
+  it("#526: an UNKNOWN *_gguf category is NOT assumed to alias a same-named core folder", async () => {
+    // `checkpoints_gguf` is not a known ComfyUI-GGUF view. A distinct file in it must
+    // NOT collapse against a same-basename file in the real `checkpoints/` folder.
+    // Drive the filesystem fallback (all REST listings empty).
+    getClient.mockReturnValue({ fetchApi });
+    fetchApi.mockImplementation(async (path: string) =>
+      path === "/models"
+        ? new Response(JSON.stringify(["checkpoints_gguf"]), { status: 200 })
+        : new Response("[]", { status: 200 }),
+    );
+    readdir.mockImplementation(async (dir: string) => {
+      const s = String(dir).replace(/\\/g, "/");
+      if (s.endsWith("/checkpoints") || s.endsWith("/checkpoints_gguf")) return ["model.gguf"];
+      return [];
+    });
+    stat.mockResolvedValue({
+      isFile: () => true,
+      size: 7,
+      mtime: new Date("2026-07-31T00:00:00Z"),
+    });
+
+    const result = await listLocalModels();
+    const models = result.filter((m) => m.name === "model.gguf");
+    expect(models).toHaveLength(2); // distinct files, NOT collapsed
+    expect(new Set(models.map((m) => m.type))).toEqual(
+      new Set(["checkpoints", "checkpoints_gguf"]),
+    );
+  });
+
+  it("#526: a KNOWN unet_gguf alias of the SAME file still collapses to one", async () => {
+    // Sanity counterpart to the unknown-category test: the mapped views DO alias
+    // real folders, so the same file via /models/diffusion_models and /models/unet_gguf
+    // is one record.
+    getClient.mockReturnValue({ fetchApi });
+    fetchApi.mockImplementation(async (path: string) => {
+      if (path === "/models") return new Response(JSON.stringify(["unet_gguf"]), { status: 200 });
+      if (path === "/models/diffusion_models" || path === "/models/unet_gguf") {
+        return new Response(JSON.stringify(["shared.gguf"]), { status: 200 });
+      }
+      return new Response("[]", { status: 200 });
+    });
+
+    const result = await listLocalModels();
+    expect(result.filter((m) => m.name === "shared.gguf")).toHaveLength(1);
+  });
+
   it("#526: de-dup preserves filename case (Model.gguf vs model.gguf are distinct)", async () => {
     // On a case-sensitive filesystem these are two different files; the identity key
     // must NOT lowercase the filename and collapse them.
