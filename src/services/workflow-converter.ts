@@ -1546,20 +1546,35 @@ export function convertUiToApi(
       // value onto the trailing top-level widgets (e.g. a removed option's nested
       // strength overwriting the user's seed). The stale-parent guard below REFUSES
       // that case (warn + stop) instead of guessing.
-      // A V3 (object-keyed) dynamic options list has {key, inputs} entries — only
-      // these can add nested positional slots. A classic string-option COMBO
-      // (["a","b"]) never does, and its elements have no `.key`, so it must NOT
+      // A V3 dynamic combo must be identified by its EXPLICIT type string
+      // (spec[0] === "COMFY_DYNAMICCOMBO_V3"), NOT by whether its current options
+      // list happens to contain keyed objects. An EMPTY current options list
+      // (["COMFY_DYNAMICCOMBO_V3", {options: []}]) has NO keyed entries, so the
+      // object-key heuristic alone reports false and the stale-parent guard below
+      // never fires — re-opening the exact silent-positional-shift hole: with an
+      // empty options list every saved selection is stale, and consuming zero
+      // nested slots while advancing the top-level index misassigns a leftover
+      // nested value (e.g. a removed option's strength=0.75) onto the next widget
+      // (e.g. a seed). Keying off the type covers the empty-options case too.
+      //
+      // The object-key heuristic is retained as a fallback for any V3 dynamic list
+      // that carries keyed {key, inputs} entries without the literal type marker.
+      // A classic string-option COMBO (spec[0] is the ["a","b"] options array, not
+      // the "COMFY_DYNAMICCOMBO_V3" string) matches NEITHER branch, so it must NOT
       // trip the stale-parent guard below (which would wrongly refuse a perfectly
       // valid classic-combo value).
+      const specType = Array.isArray(spec) ? spec[0] : undefined;
+      const isDynamicComboType = specType === "COMFY_DYNAMICCOMBO_V3";
       const isDynamicOptions =
-        Array.isArray(opts) &&
-        opts.some(
-          (o) =>
-            o != null &&
-            typeof o === "object" &&
-            !Array.isArray(o) &&
-            "key" in (o as Record<string, unknown>),
-        );
+        isDynamicComboType ||
+        (Array.isArray(opts) &&
+          opts.some(
+            (o) =>
+              o != null &&
+              typeof o === "object" &&
+              !Array.isArray(o) &&
+              "key" in (o as Record<string, unknown>),
+          ));
       const savedOption = Array.isArray(opts)
         ? opts.find((o) => o?.key === value)
         : undefined;

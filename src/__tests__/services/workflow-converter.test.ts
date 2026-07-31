@@ -2107,6 +2107,60 @@ describe("convertUiToApi — option-bearing / dynamic nested combo validation (P
     ).toBe(true);
   });
 
+  it("REFUSES (warn + default) when a stale dynamic parent has an EMPTY current options list — the type marker, not the option-key heuristic, must fire the guard (#517 P0 empty-options)", () => {
+    // The CURRENT schema's dynamic combo has NO options at all
+    // (["COMFY_DYNAMICCOMBO_V3", {options: []}]) — e.g. its option source hasn't
+    // populated yet, or every option was removed. The saved selection is therefore
+    // stale by definition, and the OLD option owned a nested strength=0.75 sitting
+    // between the parent and the trailing `seed`. An empty options array has NO
+    // keyed {key,inputs} entries, so the object-key heuristic reports NOT-dynamic
+    // and the stale-parent guard would be BYPASSED — the loop would silently map
+    // seed=0.75 (the orphaned nested value) and treat 42 as a phantom slot. Keying
+    // the guard off the EXPLICIT type string ("COMFY_DYNAMICCOMBO_V3") fires the
+    // refusal here too: seed keeps its schema default, and 0.75 never lands on it.
+    const info = {
+      EmptyOptsNode: {
+        input: {
+          required: {
+            model: ["COMFY_DYNAMICCOMBO_V3", { options: [] }],
+            seed: ["INT", { default: 0 }],
+          },
+        },
+        input_order: { required: ["model", "seed"] },
+      },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "EmptyOptsNode",
+          mode: 0,
+          inputs: [],
+          outputs: [],
+          // OLD removed option owned strength=0.75; saved
+          // [model, strength(nested), seed, control-phantom].
+          widgets_values: ["removed-option", 0.75, 42, "fixed"],
+        },
+      ],
+      links: [],
+    } as never;
+    const { workflow, warnings } = convertUiToApi(ui, info);
+    // The parent itself is preserved (an empty option list can't substitute it).
+    // The critical invariant: seed is NOT the silently-shifted orphaned 0.75.
+    expect(workflow["1"].inputs.seed).not.toBe(0.75);
+    // seed falls to its schema default rather than an ambiguous positional value.
+    expect(workflow["1"].inputs.seed).toBe(0);
+    // The refusal is warned (not silent) and names the stale selection.
+    expect(
+      warnings.some(
+        (w) =>
+          w.includes("1") &&
+          w.includes("removed-option") &&
+          /can't be reconstructed|default/.test(w),
+      ),
+    ).toBe(true);
+  });
+
   it("PRESERVES a shared SCALAR required leaf under a runtime-linked dynamic parent — not dropped as a non-member (#517 false-positive)", () => {
     // `mode` is fed by a real (non-Primitive) link, so the resolved option is
     // unknown at convert time. BOTH options define a required SCALAR `strength`
