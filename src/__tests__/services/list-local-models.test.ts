@@ -201,6 +201,68 @@ describe("listLocalModels — HTTP-first with FS fallback", () => {
     expect(result.some((m) => m.name === "notes.txt")).toBe(false);
   });
 
+  it("#526: same .gguf via a core category AND a *_gguf alias is de-duped to ONE record", async () => {
+    // A custom node re-registers `diffusion_models` to also admit `.gguf`, so the
+    // same file is reported by BOTH /models/diffusion_models and /models/unet_gguf
+    // (which is backed by diffusion_models). It must appear exactly once.
+    getClient.mockReturnValue({ fetchApi });
+    fetchApi.mockImplementation(async (path: string) => {
+      if (path === "/models") return new Response(JSON.stringify(["unet_gguf"]), { status: 200 });
+      if (path === "/models/diffusion_models") {
+        return new Response(JSON.stringify(["flux-Q4.gguf"]), { status: 200 });
+      }
+      if (path === "/models/unet_gguf") {
+        return new Response(JSON.stringify(["flux-Q4.gguf"]), { status: 200 });
+      }
+      return new Response("[]", { status: 200 });
+    });
+
+    const result = await listLocalModels();
+    expect(result.filter((m) => m.name === "flux-Q4.gguf")).toHaveLength(1);
+    // The core-category record wins (scanned first), keeping the real folder type.
+    expect(result.find((m) => m.name === "flux-Q4.gguf")).toMatchObject({
+      type: "diffusion_models",
+    });
+  });
+
+  it("#526: distinct same-basename .gguf files in genuinely different folders are NOT collapsed", async () => {
+    // A GGUF named `model.gguf` in the unet family AND a DIFFERENT `model.gguf` in
+    // the text-encoder family (surfaced via clip_gguf) are distinct files → TWO.
+    getClient.mockReturnValue({ fetchApi });
+    fetchApi.mockImplementation(async (path: string) => {
+      if (path === "/models") {
+        return new Response(JSON.stringify(["unet_gguf", "clip_gguf"]), { status: 200 });
+      }
+      if (path === "/models/unet_gguf") {
+        return new Response(JSON.stringify(["model.gguf"]), { status: 200 });
+      }
+      if (path === "/models/clip_gguf") {
+        return new Response(JSON.stringify(["model.gguf"]), { status: 200 });
+      }
+      return new Response("[]", { status: 200 });
+    });
+
+    const result = await listLocalModels();
+    const models = result.filter((m) => m.name === "model.gguf");
+    expect(models).toHaveLength(2);
+    expect(new Set(models.map((m) => m.type))).toEqual(new Set(["unet_gguf", "clip_gguf"]));
+  });
+
+  it("#526: de-dup preserves filename case (Model.gguf vs model.gguf are distinct)", async () => {
+    // On a case-sensitive filesystem these are two different files; the identity key
+    // must NOT lowercase the filename and collapse them.
+    getClient.mockReturnValue({ fetchApi });
+    fetchApi.mockImplementation(async (path: string) => {
+      if (path === "/models") return new Response(JSON.stringify(["unet_gguf"]), { status: 200 });
+      return path === "/models/unet_gguf"
+        ? new Response(JSON.stringify(["Model.gguf", "model.gguf"]), { status: 200 })
+        : new Response("[]", { status: 200 });
+    });
+
+    const result = await listLocalModels();
+    expect(result.map((m) => m.name).sort()).toEqual(["Model.gguf", "model.gguf"]);
+  });
+
   it("#526: a specific-category filter (unet_gguf) works directly via the core scan", async () => {
     // A filtered call already targets its exact category, so no discovery is needed:
     // listLocalModels("unet_gguf") must query /models/unet_gguf directly. It must NOT

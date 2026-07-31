@@ -222,6 +222,62 @@ function isGgufCategory(dir: string): boolean {
   return /_gguf$/i.test(dir);
 }
 
+/**
+ * The physical folders a `*_gguf` view is backed by — used ONLY to recognise when the
+ * SAME file is surfaced both via the view and via one of the real folders it aliases.
+ * ComfyUI-GGUF registers `unet_gguf` over the `diffusion_models` folders (`unet/` +
+ * `diffusion_models/`) and `clip_gguf` over the `text_encoders` folders
+ * (`text_encoders/` + `clip/`). Unknown `<x>_gguf` views fall back to the folder named
+ * by stripping the suffix. Never used for a model's reported `type`.
+ */
+const GGUF_BACKING_DIRS: Record<string, string[]> = {
+  unet_gguf: ["unet", "diffusion_models"],
+  clip_gguf: ["text_encoders", "clip"],
+};
+
+/**
+ * The real folder(s) a scanned category resolves to, for de-dup identity. A `*_gguf`
+ * view resolves to the physical folders it aliases; every other category (including
+ * ComfyUI's core ones) resolves to ITSELF. This intentionally targets only the
+ * duplication THIS fix can introduce — the same file surfaced via a core category AND
+ * a `*_gguf` view of it. The pre-existing overlap between ComfyUI's own back-compat
+ * categories (e.g. `diffusion_models` also listing `unet/`) is left exactly as it is
+ * on main: its provenance is erased over REST, so collapsing it would risk discarding
+ * genuinely distinct same-name files. Category lookup is case-insensitive.
+ */
+function identityFoldersFor(category: string): string[] {
+  const lower = category.toLowerCase();
+  if (isGgufCategory(lower)) return GGUF_BACKING_DIRS[lower] ?? [lower.replace(/_gguf$/, "")];
+  return [lower];
+}
+
+/**
+ * Identity keys for a file within a scanned category — `<backing-folder>/<relname>`.
+ * The RELATIVE name (which may include subfolders) is used, not just the basename: a
+ * `*_gguf` view and its backing core folder report the SAME relative path for the same
+ * file, so keying on it collapses that alias duplicate while keeping genuinely distinct
+ * files (same basename in a different subfolder, or in a different real folder)
+ * separate. The folder segment is lowercased (folder/category names are effectively
+ * case-insensitive); the relative NAME is used verbatim — its case and path separators
+ * matter (`Model.gguf` ≠ `model.gguf`, and a literal `a\b` ≠ nested `a/b` on POSIX).
+ * That's safe because a single call de-dups within ONE source (all HTTP or all
+ * filesystem), so the same file always arrives with identical spelling. `add` returns
+ * false (recording nothing) when the file is already present under any of its backing
+ * folders, so callers skip the duplicate; otherwise it records every key and returns
+ * true.
+ */
+function makeModelDeduper(): { add: (category: string, name: string) => boolean } {
+  const seen = new Set<string>();
+  return {
+    add(category: string, name: string): boolean {
+      const keys = identityFoldersFor(category).map((folder) => `${folder}/${name}`);
+      if (keys.some((k) => seen.has(k))) return false;
+      for (const k of keys) seen.add(k);
+      return true;
+    },
+  };
+}
+
 async function discoverGgufCategories(
   client: ReturnType<typeof getClient>,
 ): Promise<string[]> {
@@ -268,6 +324,11 @@ export async function listLocalModels(
     if (!modelType) {
       for (const cat of await discoverGgufCategories(client)) dirsToScan.push(cat);
     }
+    // A `*_gguf` view aliases real folders, so the same file can be reported both
+    // via the view and via a core category (e.g. a custom node that re-registers
+    // `diffusion_models` to also admit `.gguf`). De-dup by resolved-folder identity
+    // so it surfaces once, without collapsing genuinely distinct same-name files.
+    const dedup = makeModelDeduper();
     for (const dir of dirsToScan) {
       try {
         const res = await client.fetchApi(`/models/${dir}`);
@@ -280,9 +341,9 @@ export async function listLocalModels(
           // emit ONLY `.gguf` files. A well-behaved category registers a `{".gguf"}`
           // filter, but a malformed one could register an EMPTY extension set (which
           // lists every file) over a shared dir — without this guard that would flood
-          // the output and double-count normal weights already listed under their core
-          // category. Core categories never contain `.gguf`, so this stays additive.
+          // the output. Core categories never contain `.gguf`, so this stays additive.
           if (isGgufCategory(dir) && !name.toLowerCase().endsWith(".gguf")) continue;
+          if (!dedup.add(dir, name)) continue; // same file already surfaced elsewhere
           httpReturnedAny = true;
           results.push({
             name,
@@ -310,6 +371,7 @@ export async function listLocalModels(
   // simply didn't return anything over HTTP.
   if (!config.comfyuiPath) return results;
   const modelsRoot = join(config.comfyuiPath, "models");
+  const dedup = makeModelDeduper();
   for (const dir of dirsToScan) {
     const dirPath = join(modelsRoot, dir);
     let entries: string[];
@@ -326,6 +388,7 @@ export async function listLocalModels(
       try {
         const info = await stat(filePath);
         if (!info.isFile()) continue;
+        if (!dedup.add(dir, entry)) continue; // same file already surfaced elsewhere
         results.push({
           name: entry,
           path: filePath,
