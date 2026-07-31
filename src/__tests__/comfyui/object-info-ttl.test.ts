@@ -85,6 +85,33 @@ describe("#528 object_info TTL self-heals after an out-of-band restart", () => {
     expect(getNodeDefs).toHaveBeenCalledTimes(2);
   });
 
+  it("treats a backward system-clock jump as expired (rollback can't extend the window)", async () => {
+    // 1. Cache is populated while the server exposes the ORIGINAL node set.
+    getNodeDefs.mockResolvedValueOnce({ KSampler: {} });
+    await expect(getObjectInfo()).resolves.toEqual({ KSampler: {} });
+
+    // 2. ComfyUI is restarted OUT OF BAND with a new pack installed.
+    getNodeDefs.mockResolvedValue({ KSampler: {}, UnetLoaderGGUF: {} });
+
+    // 3. The system clock steps BACKWARD by an hour (NTP step / VM snapshot
+    //    restore / manual correction) — far more than the 5 s TTL. With a raw
+    //    Date.now() age this goes negative and the stale snapshot would read
+    //    "fresh" for ~an hour, so the out-of-band change would stay stale.
+    vi.setSystemTime(new Date("2026-07-29T23:00:00Z")); // 1 h before the base time
+
+    // 4. The next call must treat the negative age as expired, refetch, and
+    //    reflect the LIVE node set rather than the stuck snapshot.
+    const fresh = await getObjectInfo();
+    expect(fresh).toHaveProperty("UnetLoaderGGUF");
+    expect(getNodeDefs).toHaveBeenCalledTimes(2);
+
+    // 5. The refetch re-stamps the timestamp against the corrected clock, so
+    //    normal within-window caching resumes immediately (no per-call refetch).
+    const again = await getObjectInfo();
+    expect(again).toBe(fresh);
+    expect(getNodeDefs).toHaveBeenCalledTimes(2);
+  });
+
   it("coalesces the post-window refetch so concurrent callers share one fetch", async () => {
     getNodeDefs.mockResolvedValueOnce({ KSampler: {} });
     await getObjectInfo();

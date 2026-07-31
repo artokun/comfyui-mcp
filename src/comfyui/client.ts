@@ -167,10 +167,16 @@ let objectInfoInflight: Promise<ObjectInfo> | null = null;
 let objectInfoEpoch = 0;
 
 function objectInfoCacheFresh(): boolean {
-  return (
-    objectInfoCache !== null &&
-    Date.now() - objectInfoCachedAt < OBJECT_INFO_TTL_MS
-  );
+  if (objectInfoCache === null) return false;
+  const age = Date.now() - objectInfoCachedAt;
+  // A NEGATIVE age means the system clock moved backward since we cached (manual
+  // correction, VM snapshot restore, NTP step). Without this guard the snapshot
+  // would read "fresh" until wall time catches back up — a 1 h rollback would
+  // extend a 30 s TTL by ~an hour, so an out-of-band restart stays stale far past
+  // the window (#528 review P2). Treat a backward jump as EXPIRED: the next call
+  // refetches and re-stamps objectInfoCachedAt against the corrected clock, so
+  // normal within-window caching resumes immediately after the single refetch.
+  return age >= 0 && age < OBJECT_INFO_TTL_MS;
 }
 
 export async function getObjectInfo(): Promise<ObjectInfo> {
