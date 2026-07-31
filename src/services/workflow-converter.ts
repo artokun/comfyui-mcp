@@ -1711,16 +1711,26 @@ export function convertUiToApi(
       // Orphaned dotted leaf: its dynamic parent isn't in the prompt (e.g. an
       // optional parent left unset while the leaf was linked). There's no option
       // context to validate against, and the leaf is meaningless without its
-      // parent, so default-deny — drop it rather than let an unvalidated literal
-      // reach the prompt.
+      // parent — ComfyUI has no selected option so "<parent>.<leaf>" is an unknown
+      // input it hard-rejects. Default-DENY: drop the leaf UNCONDITIONALLY,
+      // whether it's an un-parented literal OR a link ref. Keeping a link ref here
+      // (the previous behavior) still emitted an orphan the server would reject.
       if (!(parent in inputs)) {
-        if (!Array.isArray(inputs[key])) delete inputs[key];
+        delete inputs[key];
         continue;
       }
       const leafVal = inputs[key];
-      if (Array.isArray(leafVal)) continue; // leaf itself is a link ref
+      // A leaf can itself be a LINK REF ([id, slot]) — a nested widget converted to
+      // input and wired to a real node. We can't membership-check its runtime
+      // value, but we CAN check whether the FINAL selected option even DEFINES the
+      // leaf: an array leaf under an option that doesn't define it is just as
+      // orphaned as a literal one, and ComfyUI hard-rejects the unknown input. So
+      // link-ref leaves are re-anchored too (previously they short-circuited here
+      // with an unconditional `continue`, leaking an orphan under an incompatible
+      // parent).
+      const leafIsLink = Array.isArray(leafVal);
       // Parent fed by a real (non-Primitive) link → the SELECTED option is only
-      // known at runtime, so a leaf literal saved under one option may be wrong
+      // known at runtime, so a leaf saved/linked under one option may be wrong
       // for the resolved one. Keep it only if it validates under EVERY option
       // that defines the leaf; otherwise drop it (ComfyUI supplies the runtime
       // option's default). This prevents a wrong-option literal (e.g. option-A
@@ -1742,20 +1752,30 @@ export function convertUiToApi(
               })
             : undefined
         )?.options;
-        // Keep the leaf ONLY if its literal is a genuine in-list MEMBER of every
-        // option that defines it (so it's valid whichever option resolves at
-        // runtime). Use a strict membership test — NOT validateComboValueForSpec,
-        // whose asset/empty-combo PRESERVE path would keep an out-of-list literal
-        // and swallow its warning. Anything else (out-of-list, asset, empty combo,
-        // undefined-everywhere) is dropped so no silent wrong-option literal reaches
-        // the prompt; ComfyUI fills the runtime option's default.
-        let definedSomewhere = false;
+        // The resolved option is unknowable at convert time, so KEEP the leaf only
+        // if it stays valid WHICHEVER option resolves — i.e. it must be defined by
+        // EVERY option (definedEverywhere). If ANY option omits the leaf, that
+        // runtime resolution would orphan it (ComfyUI rejects the unknown nested
+        // input), so default-DENY and drop it — the option's default is supplied at
+        // runtime. This holds for a LINK-REF leaf (whose runtime value we can't
+        // membership-check — definition is all we can verify) AND a LITERAL leaf,
+        // which must ALSO be a strict in-list MEMBER of every option. Membership
+        // uses a strict includes() — NOT validateComboValueForSpec, whose
+        // asset/empty-combo PRESERVE path would keep an out-of-list literal and
+        // swallow its warning.
+        let anyOption = false;
+        let definedEverywhere = true;
         let memberEverywhere = true;
         if (Array.isArray(pOpts)) {
           for (const o of pOpts) {
+            anyOption = true;
             const s = o?.inputs?.required?.[leaf] ?? o?.inputs?.optional?.[leaf];
-            if (s === undefined) continue;
-            definedSomewhere = true;
+            if (s === undefined) {
+              // An option that doesn't define the leaf → orphan if it resolves.
+              definedEverywhere = false;
+              break;
+            }
+            if (leafIsLink) continue; // link ref: definition is all we can check
             const optList = getComboOptions(s);
             if (!Array.isArray(optList) || !optList.includes(leafVal as never)) {
               memberEverywhere = false;
@@ -1763,16 +1783,24 @@ export function convertUiToApi(
             }
           }
         }
-        if (!definedSomewhere || !memberEverywhere) delete inputs[key];
+        if (!anyOption || !definedEverywhere || !memberEverywhere)
+          delete inputs[key];
         continue;
       }
       const { leafName, spec } = resolveWidgetSpec(def, key, inputs);
       if (spec === undefined) {
         // The final selected option does not define this leaf — it belongs to the
-        // superseded option and would be an unknown input on the current one.
+        // superseded option and would be an unknown input on the current one. Drop
+        // it whether it's a literal OR a real-link ref (both orphan under the final
+        // option; a link ref is not exempt — the previous `continue` above leaked
+        // exactly this case).
         delete inputs[key];
         continue;
       }
+      // Leaf IS defined by the final selected option. A real-link ref into a defined
+      // leaf is a valid connection whose runtime value ComfyUI validates — keep it
+      // as-is (there's no literal to re-validate here).
+      if (leafIsLink) continue;
       inputs[key] = validateComboValueForSpec(
         leafName,
         leafVal,

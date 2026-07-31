@@ -1349,6 +1349,404 @@ describe("convertUiToApi — linked PrimitiveNode combo validation (P1-A, #504)"
     expect("model.choice" in workflow["3"].inputs).toBe(false);
   });
 
+  it("drops an ORPHAN dotted leaf LITERAL whose optional dynamic parent is ENTIRELY ABSENT (default-deny)", () => {
+    // `model` is an OPTIONAL COMFY_DYNAMICCOMBO_V3 left completely unset — no
+    // widget value, and optional so it is never default-filled — hence absent
+    // from inputs. A PrimitiveNode feeds a literal straight into the nested dotted
+    // `model.aspect_ratio`. With no parent option selected there is no schema
+    // context for the leaf and ComfyUI would reject the un-parented input, so it
+    // must be dropped rather than left as an orphan literal.
+    const info = {
+      DynOptNode: {
+        input: {
+          required: {},
+          optional: {
+            model: [
+              "COMFY_DYNAMICCOMBO_V3",
+              {
+                options: [
+                  {
+                    key: "Nano Banana 2",
+                    inputs: {
+                      required: {
+                        aspect_ratio: ["COMBO", { options: ["auto", "1:1", "16:9"] }],
+                      },
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        input_order: { required: [], optional: ["model"] },
+      },
+      PrimitiveNode: { input: { required: {} } },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "PrimitiveNode",
+          mode: 0,
+          inputs: [],
+          outputs: [{ name: "COMBO", type: "COMBO", links: [10] }],
+          widgets_values: ["16:9"],
+        },
+        {
+          id: 2,
+          type: "DynOptNode",
+          mode: 0,
+          inputs: [{ name: "model.aspect_ratio", type: "COMBO", link: 10 }],
+          outputs: [],
+          widgets_values: [], // parent `model` never set
+        },
+      ],
+      links: [[10, 1, 0, 2, 0, "COMBO"]],
+    } as never;
+    const { workflow } = convertUiToApi(ui, info);
+    // Parent absent, and the orphan leaf must NOT survive as an un-parented literal.
+    expect("model" in workflow["2"].inputs).toBe(false);
+    expect("model.aspect_ratio" in workflow["2"].inputs).toBe(false);
+  });
+
+  it("drops an ORPHAN dotted leaf LINK-REF whose optional dynamic parent is ENTIRELY ABSENT (default-deny)", () => {
+    // Same orphan shape, but the nested dotted leaf is fed by a REAL (non-Primitive)
+    // node, so it resolves to a [id, slot] link ref instead of a literal. An
+    // un-parented link ref is just as invalid as an un-parented literal — the
+    // parent combo has no selected option — so default-deny drops it too. (The
+    // previous code kept array-valued orphans, leaking a leaf the server rejects.)
+    const info = {
+      ComboProvider: {
+        input: { required: {} },
+        output: ["COMBO"],
+        output_name: ["COMBO"],
+      },
+      DynOptNode: {
+        input: {
+          required: {},
+          optional: {
+            model: [
+              "COMFY_DYNAMICCOMBO_V3",
+              {
+                options: [
+                  {
+                    key: "Nano Banana 2",
+                    inputs: {
+                      required: {
+                        aspect_ratio: ["COMBO", { options: ["auto", "1:1", "16:9"] }],
+                      },
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        input_order: { required: [], optional: ["model"] },
+      },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "ComboProvider",
+          mode: 0,
+          inputs: [],
+          outputs: [{ name: "COMBO", type: "COMBO", links: [10] }],
+          widgets_values: [],
+        },
+        {
+          id: 2,
+          type: "DynOptNode",
+          mode: 0,
+          inputs: [{ name: "model.aspect_ratio", type: "COMBO", link: 10 }],
+          outputs: [],
+          widgets_values: [], // parent `model` never set
+        },
+      ],
+      links: [[10, 1, 0, 2, 0, "COMBO"]],
+    } as never;
+    const { workflow } = convertUiToApi(ui, info);
+    // The ComboProvider is still in the prompt (so this is not dangling-ref pruning)…
+    expect(workflow["1"]).toBeDefined();
+    // …but the orphan link-ref leaf under the absent parent must be dropped.
+    expect("model" in workflow["2"].inputs).toBe(false);
+    expect("model.aspect_ratio" in workflow["2"].inputs).toBe(false);
+  });
+
+  it("drops a real-LINK dotted leaf when the PRESENT parent's final option does NOT define it (default-deny)", () => {
+    // model="B" is a present literal parent whose option B does NOT define `choice`
+    // (only option A does). model.choice is fed by a REAL node → a [id, slot] link
+    // ref. It is orphaned under B, and ComfyUI rejects the unknown input, so the
+    // re-anchor pass must DROP it even though it's an array (link) value — the case
+    // that previously slipped through the `Array.isArray(leafVal) continue` guard.
+    const info = {
+      ComboProvider: {
+        input: { required: {} },
+        output: ["COMBO"],
+        output_name: ["COMBO"],
+      },
+      DynParentNode: {
+        input: {
+          required: {
+            model: [
+              "COMFY_DYNAMICCOMBO_V3",
+              {
+                options: [
+                  {
+                    key: "A",
+                    inputs: {
+                      required: { choice: ["COMBO", { options: ["a1", "a2"] }] },
+                    },
+                  },
+                  { key: "B", inputs: { required: {} } }, // B defines no `choice`
+                ],
+              },
+            ],
+          },
+        },
+        input_order: { required: ["model"] },
+      },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "ComboProvider",
+          mode: 0,
+          inputs: [],
+          outputs: [{ name: "COMBO", type: "COMBO", links: [10] }],
+          widgets_values: [],
+        },
+        {
+          id: 3,
+          type: "DynParentNode",
+          mode: 0,
+          inputs: [{ name: "model.choice", type: "COMBO", link: 10 }],
+          outputs: [],
+          widgets_values: ["B"], // final selected option is B
+        },
+      ],
+      links: [[10, 1, 0, 3, 0, "COMBO"]],
+    } as never;
+    const { workflow } = convertUiToApi(ui, info);
+    expect(workflow["1"]).toBeDefined(); // provider stays — not dangling-ref pruning
+    expect(workflow["3"].inputs.model).toBe("B");
+    // The real-link leaf is orphaned under option B and must be dropped.
+    expect("model.choice" in workflow["3"].inputs).toBe(false);
+  });
+
+  it("KEEPS a real-LINK dotted leaf when the PRESENT parent's final option DOES define it", () => {
+    // Guard against over-deletion: model="A" defines `choice`, and model.choice is
+    // a real link into a defined leaf → a valid connection that must be preserved
+    // as-is (its runtime value is validated by ComfyUI, not here).
+    const info = {
+      ComboProvider: {
+        input: { required: {} },
+        output: ["COMBO"],
+        output_name: ["COMBO"],
+      },
+      DynParentNode: {
+        input: {
+          required: {
+            model: [
+              "COMFY_DYNAMICCOMBO_V3",
+              {
+                options: [
+                  {
+                    key: "A",
+                    inputs: {
+                      required: { choice: ["COMBO", { options: ["a1", "a2"] }] },
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        input_order: { required: ["model"] },
+      },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "ComboProvider",
+          mode: 0,
+          inputs: [],
+          outputs: [{ name: "COMBO", type: "COMBO", links: [10] }],
+          widgets_values: [],
+        },
+        {
+          id: 3,
+          type: "DynParentNode",
+          mode: 0,
+          inputs: [{ name: "model.choice", type: "COMBO", link: 10 }],
+          outputs: [],
+          widgets_values: ["A"],
+        },
+      ],
+      links: [[10, 1, 0, 3, 0, "COMBO"]],
+    } as never;
+    const { workflow } = convertUiToApi(ui, info);
+    expect(workflow["3"].inputs.model).toBe("A");
+    // Valid link into a defined leaf — kept as the [id, slot] ref.
+    expect(workflow["3"].inputs["model.choice"]).toEqual(["1", 0]);
+  });
+
+  it("drops a real-LINK dotted leaf under a real-LINK parent when SOME option omits the leaf (runtime-unknown default-deny)", () => {
+    // model (parent) is fed by a REAL link → the resolved option is unknowable.
+    // Option A defines `choice`, option B does NOT. model.choice is fed by another
+    // real link. If the parent resolves to B at runtime, `model.choice` is an
+    // unknown input ComfyUI rejects. Since we can't know the resolution, default-
+    // deny: the leaf must be dropped unless EVERY option defines it.
+    const info = {
+      ComboProvider: {
+        input: { required: {} },
+        output: ["COMBO"],
+        output_name: ["COMBO"],
+      },
+      DynParentNode: {
+        input: {
+          required: {
+            model: [
+              "COMFY_DYNAMICCOMBO_V3",
+              {
+                options: [
+                  {
+                    key: "A",
+                    inputs: {
+                      required: { choice: ["COMBO", { options: ["a1", "a2"] }] },
+                    },
+                  },
+                  { key: "B", inputs: { required: {} } }, // B omits `choice`
+                ],
+              },
+            ],
+          },
+        },
+        input_order: { required: ["model"] },
+      },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "ComboProvider",
+          mode: 0,
+          inputs: [],
+          outputs: [{ name: "COMBO", type: "COMBO", links: [10] }],
+          widgets_values: [],
+        },
+        {
+          id: 2,
+          type: "ComboProvider",
+          mode: 0,
+          inputs: [],
+          outputs: [{ name: "COMBO", type: "COMBO", links: [11] }],
+          widgets_values: [],
+        },
+        {
+          id: 3,
+          type: "DynParentNode",
+          mode: 0,
+          inputs: [
+            { name: "model", type: "COMBO", link: 10 },
+            { name: "model.choice", type: "COMBO", link: 11 },
+          ],
+          outputs: [],
+          widgets_values: [],
+        },
+      ],
+      links: [
+        [10, 1, 0, 3, 0, "COMBO"],
+        [11, 2, 0, 3, 1, "COMBO"],
+      ],
+    } as never;
+    const { workflow } = convertUiToApi(ui, info);
+    // Parent stays a runtime link ref…
+    expect(Array.isArray(workflow["3"].inputs.model)).toBe(true);
+    // …but the leaf, not defined by every option, is dropped (would orphan under B).
+    expect("model.choice" in workflow["3"].inputs).toBe(false);
+  });
+
+  it("KEEPS a real-LINK dotted leaf under a real-LINK parent when EVERY option defines the leaf", () => {
+    // Guard against over-deletion: both options A and B define `choice`, so the
+    // linked leaf is valid whichever option resolves and must be preserved.
+    const info = {
+      ComboProvider: {
+        input: { required: {} },
+        output: ["COMBO"],
+        output_name: ["COMBO"],
+      },
+      DynParentNode: {
+        input: {
+          required: {
+            model: [
+              "COMFY_DYNAMICCOMBO_V3",
+              {
+                options: [
+                  {
+                    key: "A",
+                    inputs: {
+                      required: { choice: ["COMBO", { options: ["a1", "a2"] }] },
+                    },
+                  },
+                  {
+                    key: "B",
+                    inputs: {
+                      required: { choice: ["COMBO", { options: ["b1", "b2"] }] },
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        input_order: { required: ["model"] },
+      },
+    } as never;
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "ComboProvider",
+          mode: 0,
+          inputs: [],
+          outputs: [{ name: "COMBO", type: "COMBO", links: [10] }],
+          widgets_values: [],
+        },
+        {
+          id: 2,
+          type: "ComboProvider",
+          mode: 0,
+          inputs: [],
+          outputs: [{ name: "COMBO", type: "COMBO", links: [11] }],
+          widgets_values: [],
+        },
+        {
+          id: 3,
+          type: "DynParentNode",
+          mode: 0,
+          inputs: [
+            { name: "model", type: "COMBO", link: 10 },
+            { name: "model.choice", type: "COMBO", link: 11 },
+          ],
+          outputs: [],
+          widgets_values: [],
+        },
+      ],
+      links: [
+        [10, 1, 0, 3, 0, "COMBO"],
+        [11, 2, 0, 3, 1, "COMBO"],
+      ],
+    } as never;
+    const { workflow } = convertUiToApi(ui, info);
+    expect(Array.isArray(workflow["3"].inputs.model)).toBe(true);
+    // Defined by every option → the link ref is preserved.
+    expect(workflow["3"].inputs["model.choice"]).toEqual(["2", 0]);
+  });
+
   it("leaves a VALID enum fed by a linked PrimitiveNode untouched (no warn)", () => {
     const info = {
       KSamplerSelect: {
