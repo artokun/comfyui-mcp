@@ -2405,18 +2405,28 @@ function getAskTiming(): AskTiming {
  *  replied within the window), NOT a genuine transport/command error. Only a
  *  timeout warrants polling the late-reply buffer for a slow-but-valid answer.
  *
- *  Anchored on the bridge's CANONICAL no-reply message shape (ui-bridge `send()`:
- *  `Panel tab <id> did not reply to "<cmd>" within <N> ms — the ComfyUI tab may be
- *  backgrounded or frozen`). Requiring the `Panel tab … did not reply to "…" within
- *  … ms` form stops an unrelated executor/transport error that merely mentions
- *  "did not reply … within … ms" (e.g. `upstream service did not reply to us within
- *  500 ms`) from being mis-handled as a recoverable card-reply timeout — the same
- *  distinction the panel_open_workflow ack-timeout path already draws. Crucial for
- *  the consent gate: a real transport failure must reach fail(), not be quietly
+ *  Anchored (`^…$`) on the bridge's CANONICAL no-reply message — the WHOLE message
+ *  ui-bridge `dispatch()` emits: `Panel tab <id> did not reply to "<cmd>" within <N>
+ *  ms — the ComfyUI tab may be backgrounded or frozen`. Whole-message anchoring is
+ *  deliberate: a genuine transport error that merely WRAPS or embeds the phrase —
+ *  e.g. `relay failed: Panel tab abcd did not reply to "ask_user" within 500 ms;
+ *  reconnecting`, or `upstream service did not reply to us within 500 ms` — must NOT
+ *  be mis-handled as a recoverable card-reply timeout. It mirrors the same canonical
+ *  distinction the panel_open_workflow ack-timeout path draws. Crucial for the
+ *  consent gate: a real transport failure must reach fail(), never be quietly
  *  reported as an unchanged-state success. */
 function isReplyTimeoutError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err ?? "");
-  return /Panel tab \S+ did not reply to "[^"]*" within \d+\s*ms/i.test(msg);
+  // EXACT whole-message match: literal single space before "ms" (the bridge always
+  // emits "within <N> ms"), no `.trim()`, `^` at true start (no /m flag) and a HARD
+  // end-of-input `(?![\s\S])` — NOT `$`, which in JS also matches just before a final
+  // "\n" and would let `canonical + "\n"` slip through. So canonical text wrapped in
+  // leading/trailing whitespace (incl. a trailing newline), or a noncanonical variant
+  // like "within 500ms"/"within 500\tms", does NOT match and is surfaced as a real
+  // error. Case-sensitive: the message is a fixed literal template.
+  return /^Panel tab \S+ did not reply to "[^"]*" within \d+ ms — the ComfyUI tab may be backgrounded or frozen(?![\s\S])/.test(
+    msg,
+  );
 }
 
 /**

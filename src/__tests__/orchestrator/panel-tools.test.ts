@@ -1654,10 +1654,13 @@ describe("panel-tools: adult-consent card survives an idle-user timeout (#390)",
     __panelAskTestHooks.setAskTiming(null);
   });
 
-  // A card-reply TIMEOUT the bridge surfaces when the tab never answered — matches
-  // isReplyTimeoutError so the handler treats it as recoverable (not a hard error).
+  // A card-reply TIMEOUT the bridge surfaces when the tab never answered — the EXACT
+  // canonical whole-message ui-bridge emits, so isReplyTimeoutError treats it as
+  // recoverable (not a hard error). Must match the bridge form verbatim.
   const replyTimeoutErr = (ms: number) =>
-    new Error(`Panel tab abcd did not reply to "ask_user" within ${ms} ms — backgrounded or frozen`);
+    new Error(
+      `Panel tab abcd did not reply to "ask_user" within ${ms} ms — the ComfyUI tab may be backgrounded or frozen`,
+    );
 
   function timeoutBridge(late?: () => unknown) {
     let forwardedTimeout = 0;
@@ -1856,33 +1859,53 @@ describe("panel-tools: adult-consent card survives an idle-user timeout (#390)",
     expect(getNsfwConsent().allowed).toBe(true);
   });
 
-  // A genuine transport/executor error that merely mentions "did not reply … within
-  // N ms" (NOT the canonical `Panel tab … did not reply to "…"` no-reply) must NOT be
-  // treated as a recoverable card timeout — it must surface as a real error (fail),
-  // never a quiet "nothing changed" success that masks the failure.
+  // A genuine transport/executor error that merely mentions — or WRAPS — the reply
+  // phrase (NOT the canonical whole-message `Panel tab … did not reply to "…" within
+  // N ms — the ComfyUI tab may be backgrounded or frozen`) must NOT be treated as a
+  // recoverable card timeout. It must surface as a real error (fail), never a quiet
+  // "nothing changed" success that masks the failure. isReplyTimeoutError is anchored
+  // ^…$ to the whole canonical message, so a prefixed/suffixed wrapper won't match.
   it("a non-timeout transport error surfaces as fail(), not a swallowed unchanged-state result", async () => {
-    setNsfwConsent(false);
-    let polled = false;
-    const bridge = {
-      send: async () => {
-        throw new Error("upstream service did not reply to us within 500 ms while loading");
-      },
-      canReach: () => true,
-      isHeadless: () => false,
-      resolveActiveTabId: () => "abcd",
-      push: () => 1,
-      takeLateAskReply: () => {
-        polled = true;
-        return undefined;
-      },
-    } as unknown as PanelToolCtx["bridge"];
-    const ctx = { bridge, tabId: "abcd", ensureReachable: () => {} } as unknown as PanelToolCtx;
-    const res = await defByName("panel_request_adult_consent").handler({}, ctx);
-    expect(res.isError).toBe(true);
-    // Not misclassified as a card timeout, so the late-reply buffer was never polled.
-    expect(polled).toBe(false);
-    // And the gate was never touched.
-    expect(getNsfwConsent().allowed).toBe(false);
+    const wrapped = [
+      // Bare phrase in an unrelated error.
+      "upstream service did not reply to us within 500 ms while loading",
+      // PREFIXED wrapper around the exact bridge phrase (the P1c trigger).
+      'relay failed: Panel tab abcd did not reply to "ask_user" within 500 ms; reconnecting',
+      // SUFFIXED wrapper (canonical phrase then extra trailing text).
+      'Panel tab abcd did not reply to "ask_user" within 500 ms — the ComfyUI tab may be backgrounded or frozen; socket closed',
+      // LEADING whitespace before canonical (fails the `^` start anchor).
+      '  Panel tab abcd did not reply to "ask_user" within 500 ms — the ComfyUI tab may be backgrounded or frozen',
+      // Canonical + a trailing newline ONLY: JS `$` matches just before a final "\n",
+      // so this specifically exercises the HARD end anchor (?![\s\S]) that rejects it.
+      'Panel tab abcd did not reply to "ask_user" within 500 ms — the ComfyUI tab may be backgrounded or frozen\n',
+      // NONCANONICAL spacing before "ms" — not the bridge's literal single space.
+      'Panel tab abcd did not reply to "ask_user" within 500ms — the ComfyUI tab may be backgrounded or frozen',
+      'Panel tab abcd did not reply to "ask_user" within 500\tms — the ComfyUI tab may be backgrounded or frozen',
+    ];
+    for (const message of wrapped) {
+      setNsfwConsent(false);
+      let polled = false;
+      const bridge = {
+        send: async () => {
+          throw new Error(message);
+        },
+        canReach: () => true,
+        isHeadless: () => false,
+        resolveActiveTabId: () => "abcd",
+        push: () => 1,
+        takeLateAskReply: () => {
+          polled = true;
+          return undefined;
+        },
+      } as unknown as PanelToolCtx["bridge"];
+      const ctx = { bridge, tabId: "abcd", ensureReachable: () => {} } as unknown as PanelToolCtx;
+      const res = await defByName("panel_request_adult_consent").handler({}, ctx);
+      expect(res.isError, `wrapped error "${message}" must fail(), not succeed`).toBe(true);
+      // Not misclassified as a card timeout, so the late-reply buffer was never polled.
+      expect(polled, `wrapped error "${message}" must NOT be polled as a timeout`).toBe(false);
+      // And the gate was never touched.
+      expect(getNsfwConsent().allowed).toBe(false);
+    }
   });
 });
 
