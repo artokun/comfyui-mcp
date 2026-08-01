@@ -3890,7 +3890,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_open_workflow",
-      "Open / switch to a workflow by path or filename (from panel_list_workflows). Switches the active tab to it. If the workflow was ALREADY open and its .json changed on disk out-of-band, the result carries stale:true with a stale_hint — the canvas still shows the version this tab loaded (it is NOT auto-reloaded); call panel_load_workflow to load the on-disk version.",
+      "Open / switch to a workflow by path or filename (from panel_list_workflows). Switches the active tab to it. If the workflow was ALREADY open and its .json changed on disk out-of-band, the result carries stale:true (or stale:\"unknown\" when staleness couldn't be verified) with a stale_hint — the canvas still shows the version this tab loaded (it is NOT auto-reloaded); call panel_load_workflow to load the on-disk version.",
       { path: z.string().describe("Workflow path, filename, or key from panel_list_workflows.") },
       // Verify-after-timeout (#215/#319/#496): a backgrounded/frozen or already-open
       // tab can be slow to ack workflow_open even though the switch succeeded. On an
