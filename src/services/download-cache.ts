@@ -1226,6 +1226,20 @@ async function streamUrlToFile(
       // sidecar was ever written) got thrown away and re-downloaded from 0 with
       // no log and no signal (#467). Defer the log/diagnostic until we actually
       // truncate (below), so a pre-write failure can't falsely report a discard.
+      //
+      // DO NOT "recover" this case by PROBING the URL for an identity and resuming
+      // on it — that is a SILENT-CORRUPTION path and was rejected (#467, corruption
+      // class). A validator fetched NOW identifies the CURRENT object, not the object
+      // this sidecar-less partial was written against; there is NO recorded write-time
+      // identity to bind the OLD bytes, so a same-size re-upload (or a same-head/tail
+      // replacement whose unsampled middle differs) would append fresh bytes onto a
+      // stale prefix and finalize a corrupt model under a green success. Head/tail
+      // byte-sampling is likewise necessary-but-not-sufficient (the middle is
+      // unverifiable without re-downloading it). The ONLY safe resume is one whose
+      // whole-object identity was recorded at WRITE time — i.e. the sidecar route
+      // above, which HF Xet DOES take now that the X-Linked-Etag from the resolve
+      // redirect is persisted on the first attempt. A genuinely sidecar-less/legacy
+      // partial must therefore RESTART (never-silent), which is exactly what happens.
       effectiveResume = 0;
       if (resumable) resumeDeclinedNoValidator = true;
     }
