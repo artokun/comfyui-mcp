@@ -242,6 +242,18 @@ let panelRebootTimingOverride: PanelRebootTiming | null = null;
 const MAX_REBOOT_SETTLE_MS = 10_000; // 10s
 const MAX_REBOOT_BUDGET_MS = 240_000; // 240s  → settle+budget ≤ 250s < 300s outer
 
+// #404: hard ceiling on how long the panel_restart_comfyui CONFIRMATION card waits for
+// a yes/no answer. A restart is user-initiated, so a present user answers in seconds;
+// the failure mode is an unanswered/undelivered card AFTER a prior restart's reconnect
+// (the "second restart in one turn" repro: the panel tab is backgrounded or still
+// re-registering, so the card is never seen/answered). Previously the confirm inherited
+// the full remaining ~255s budget, so it blocked for ~4 minutes and read as an
+// indefinite hang (the user killed it at ~2min). Bounding the WAIT here — well under the
+// ~240s ask deadline and the ~300s tools/call budget — makes an unanswered card fail
+// fast with an actionable retry / restart_comfyui hint. It NEVER shortcuts the
+// confirmation itself (no auto-confirm): it bounds only how long we wait for the answer.
+const RESTART_CONFIRM_TIMEOUT_MS = 90_000; // 90s
+
 function parsePositiveNumberEnv(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw == null || raw === "") return fallback;
@@ -304,6 +316,8 @@ export const __panelToolsTestHooks = {
   loopbackProbeUrl,
   /** Compute reboot timing from env WITH the P2 hard caps (bypasses any override). */
   computeRebootTimingFromEnv,
+  /** #404: the hard ceiling on the panel_restart_comfyui confirmation-card wait. */
+  RESTART_CONFIRM_TIMEOUT_MS,
   /** Zero out the post-drop retry settle so retry-once tests don't sleep. */
   setRetrySettleMs(ms: number | null): void {
     retrySettleMsOverride = ms;
@@ -4574,15 +4588,41 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         // to the remaining budget (its deadline+grace can't overrun it — see confirm).
         const OVERALL_MAX_MS = 255_000;
         const overallDeadline = Date.now() + OVERALL_MAX_MS;
+        // #404: if the ONLY reachable client is canvas-less (a mobile mirror / remote /
+        // headless viewer), a yes/no card can't render, so the confirm would block with
+        // no way to answer. Detect that up front — exactly as panel_ask does — and fail
+        // fast with an actionable message instead of dispatching a card into the void and
+        // waiting out the whole budget. Points at the headless restart_comfyui fallback,
+        // which needs no panel card. (A normal interactive tab returns null → proceed.)
+        const surfaceErr = askSurfaceError(ctx);
+        if (surfaceErr) {
+          return fail(
+            surfaceErr +
+              " To restart the server without a panel confirmation card, use restart_comfyui.",
+          );
+        }
+        // #404: BOUND the confirmation wait. It previously inherited the full remaining
+        // ~255s budget, so an unanswered/undelivered card (the panel tab backgrounded or
+        // still reconnecting after a PRIOR restart — the second-restart-in-one-turn repro)
+        // blocked for ~4 minutes and read as an indefinite hang. Cap it at
+        // RESTART_CONFIRM_TIMEOUT_MS (still clamped under the outer budget). This bounds
+        // only the WAIT — it never auto-confirms; on timeout we fail fast, below.
+        const confirmBudget = Math.max(
+          1,
+          Math.min(RESTART_CONFIRM_TIMEOUT_MS, overallDeadline - Date.now()),
+        );
         const decision = await ctx.confirm(
           "Restart ComfyUI now? It (and this agent) will go down briefly, then reconnect and resume automatically.",
           "Restart ComfyUI",
-          Math.max(1, overallDeadline - Date.now()),
+          confirmBudget,
         );
         if (decision === "timeout") {
           return ok(
-            "Timed out waiting for your confirmation, so I did NOT restart ComfyUI. " +
-              "Tell me to restart it and I'll go ahead.",
+            `No confirmation received within ${Math.round(confirmBudget / 1000)}s, so I did NOT ` +
+              "restart ComfyUI. The panel tab may be backgrounded or still reconnecting after a " +
+              "previous restart, so the confirmation card wasn't answered. Tell me to restart it " +
+              "and I'll re-ask, or use restart_comfyui to restart the server directly without a " +
+              "panel card.",
           );
         }
         if (decision !== "yes") {

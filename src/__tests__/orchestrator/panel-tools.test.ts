@@ -2714,9 +2714,11 @@ describe("confirm-card timeout is honest, bounded, and late-answer-safe (#360)",
 
     const res = await defByName("panel_restart_comfyui").handler({}, ctx);
     expect(res.isError).toBeFalsy();
-    expect(toolText(res)).toMatch(/timed out waiting for your confirmation/i);
+    // #404: honest, ACTIONABLE timeout — names the retry AND the restart_comfyui fallback.
+    expect(toolText(res)).toMatch(/no confirmation received within/i);
+    expect(toolText(res)).toMatch(/restart_comfyui/);
     expect(toolText(res)).not.toMatch(/^Cancelled/);
-    // Critically: the reboot was NEVER dispatched.
+    // Critically: the reboot was NEVER dispatched (no auto-confirm).
     expect(dispatched.some((c) => c.cmd === "comfy_reboot")).toBe(false);
   });
 
@@ -2738,6 +2740,81 @@ describe("confirm-card timeout is honest, bounded, and late-answer-safe (#360)",
     await defByName("panel_restart_comfyui").handler({}, ctx);
     expect(forwardedTimeout).toBeGreaterThan(0);
     expect(forwardedTimeout).toBeLessThan(300000);
+  });
+
+  // #404: the confirm-card wait must be bounded by the dedicated restart-confirm
+  // ceiling — NOT the full ~255s remaining budget it used to inherit (which read as an
+  // indefinite hang when a card went unanswered after a prior restart's reconnect).
+  it("panel_restart_comfyui bounds the confirm-card wait by RESTART_CONFIRM_TIMEOUT_MS (not the full ~255s budget)", async () => {
+    // No ask-timing override → the REAL getAskTiming (240s) is in effect, so the forwarded
+    // reply timeout reflects the handler's own confirm budget, not a test clamp.
+    let forwardedTimeout = Infinity;
+    const bridge = {
+      send: async (cmd: Record<string, unknown>, opts?: { timeoutMs?: number }) => {
+        if (cmd.cmd === "ask_user") {
+          forwardedTimeout = opts?.timeoutMs ?? 0;
+          return "No, cancel";
+        }
+        return { rebooting: true };
+      },
+    } as unknown as PanelToolCtx["bridge"];
+    const ctx = makePanelToolCtx(bridge, "abcd1234");
+
+    await defByName("panel_restart_comfyui").handler({}, ctx);
+    expect(forwardedTimeout).toBeGreaterThan(0);
+    expect(forwardedTimeout).toBeLessThanOrEqual(
+      __panelToolsTestHooks.RESTART_CONFIRM_TIMEOUT_MS,
+    );
+    // And well under the old ~255s inheritance that produced the #404 hang.
+    expect(forwardedTimeout).toBeLessThan(240000);
+  });
+
+  // #404 core regression: an unanswered/undelivered restart confirmation must REJECT with
+  // the actionable timeout error WITHIN the bound — never hang indefinitely — and must
+  // NOT dispatch the reboot (no auto-confirm). Bounded via the fast ask-timing override
+  // so the test proves the fail-fast without waiting the real ceiling.
+  it("panel_restart_comfyui fails fast with an actionable error when the confirmation card is never answered (#404)", async () => {
+    __panelAskTestHooks.setAskTiming({ deadlineMs: 5, graceMs: 15, pollMs: 2 });
+    const dispatched: Array<Record<string, unknown>> = [];
+    const bridge = {
+      // The card is DELIVERED but the tab never replies (backgrounded / reconnecting).
+      send: async (cmd: Record<string, unknown>, opts?: { timeoutMs?: number }) => {
+        if (cmd.cmd === "ask_user") throw REPLY_TIMEOUT_ERR("ask_user", opts?.timeoutMs ?? 0);
+        dispatched.push(cmd);
+        return { rebooting: true };
+      },
+    } as unknown as PanelToolCtx["bridge"];
+    const ctx = makePanelToolCtx(bridge, "abcd1234");
+
+    const started = Date.now();
+    const res = await defByName("panel_restart_comfyui").handler({}, ctx);
+    // Settled promptly — not an indefinite hang.
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(res.isError).toBeFalsy();
+    const text = toolText(res);
+    expect(text).toMatch(/no confirmation received within/i);
+    expect(text).toMatch(/backgrounded|reconnecting/i);
+    expect(text).toMatch(/restart_comfyui/);
+    // The reboot was NEVER dispatched — the wait is bounded, not the confirmation bypassed.
+    expect(dispatched.some((c) => c.cmd === "comfy_reboot")).toBe(false);
+  });
+
+  // #404: a normally-confirmed restart still proceeds to dispatch the reboot — the bound
+  // is on the WAIT only; a real "yes" is honored exactly as before.
+  it("panel_restart_comfyui still dispatches the reboot on a normal 'yes' confirmation (#404)", async () => {
+    const dispatched: Array<Record<string, unknown>> = [];
+    const bridge = {
+      send: async (cmd: Record<string, unknown>) => {
+        if (cmd.cmd === "ask_user") return "Yes, go ahead";
+        dispatched.push(cmd);
+        return { rebooting: true };
+      },
+    } as unknown as PanelToolCtx["bridge"];
+    const ctx = makePanelToolCtx(bridge, "abcd1234");
+
+    const res = await defByName("panel_restart_comfyui").handler({}, ctx);
+    expect(res.isError).toBeFalsy();
+    expect(dispatched.some((c) => c.cmd === "comfy_reboot")).toBe(true);
   });
 
   // #360 mirrors #486: a slow-but-valid answer buffered after the card timeout must
