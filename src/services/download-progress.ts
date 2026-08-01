@@ -110,7 +110,20 @@ function fileFor(id: string, target?: string, attempt?: number): string {
   // every variant. Absent on rows with no attempt epoch (pre-fix / non-model reporters
   // — they keep the single-file name, unchanged).
   const attemptSeg = Number.isFinite(attempt) ? `-a${attempt}` : "";
-  return join(PROGRESS_DIR, `${id.replace(/[^a-zA-Z0-9_.-]/g, "_")}-${disc}${attemptSeg}.json`);
+  // Per-PROCESS owner segment (codex finding): the attempt epoch alone is not guaranteed
+  // unique across DIFFERENT processes (two children starting the same download in the
+  // same millisecond could tie), which would put two live writers on ONE file and let a
+  // late terminal clobber the other's live row. Owner-scoping the filename — the same
+  // per-process nonce the persisted job store already uses (#515/#529) — makes two
+  // processes ALWAYS write distinct files, so a clobber is impossible regardless of any
+  // epoch tie. (Supersession ordering for a genuinely simultaneous same-ms cross-process
+  // double-start is inherently undefined, but it is non-corrupting: #467/#473 O_EXCL temp
+  // + atomic rename + payload validation, and #529 in-flight adoption normally prevents a
+  // second writer in the first place.)
+  return join(
+    PROGRESS_DIR,
+    `${id.replace(/[^a-zA-Z0-9_.-]/g, "_")}-${disc}${attemptSeg}-o${PERSIST_OWNER}.json`,
+  );
 }
 
 /** Credential-free form of a target URL for persisted rows / control files:

@@ -245,6 +245,21 @@ describe("attempt-supersession (panel#489)", () => {
     expect(rows.some((r) => r.status === "error" && r.attempt === 1000)).toBe(true);
   });
 
+  it("owner-scopes the progress filename so two processes never share (and clobber) one file", () => {
+    // The attempt epoch alone can tie across processes (same ms); the per-process owner
+    // segment guarantees distinct files regardless, so a late terminal from one process
+    // can never overwrite another process's live row.
+    process.env.COMFYUI_URL = T;
+    const id = "own001";
+    mod.reportDownloadProgress({ id, name: "m", downloaded: 1, total: 2, bytes_per_sec: 1, status: "downloading", attempt: 1000 }, true);
+    const f = readdirSync(dir).find((x) => x.startsWith(`${id}-`))!;
+    expect(f).toContain(`-o${mod.PERSIST_OWNER}`);
+    // A different process (different owner) writing the SAME id+target+epoch lands on a
+    // DIFFERENT file — both rows survive, none is clobbered.
+    writeFileSync(join(dir, `${id}-x-a1000-oOTHEROWNER.json`), JSON.stringify({ id, target: T, name: "m", status: "error", attempt: 1000, updated: 1 }));
+    expect(readdirSync(dir).filter((x) => x.startsWith(`${id}-`))).toHaveLength(2);
+  });
+
   it("mirrors the orchestrator poll: the superseded attempt's row is filtered out of the emitted rows", () => {
     // A faithful slice of pollDownloads' phased reconcile: the newer attempt's live
     // row is broadcast, the older attempt's FAILED row is dropped — so the tray/agent
