@@ -1283,6 +1283,180 @@ describe("panel-tools: post-reconnect retry-once (#278/#310/#332/#481)", () => {
   });
 });
 
+describe("panel-tools: desktop-canvas fall-through for headless-bound sessions (#624)", () => {
+  // The mobile / remote pseudo-panel is a HEADLESS bridge client: it accepts only
+  // show_media and rejects every other ServerCommand with "mobile client has no open
+  // canvas". A DESKTOP panel surface command (set_todo footer tray, open_civitai
+  // in-panel browser) must therefore NOT be dispatched at a headless client — it must
+  // resolve the live desktop canvas tab (the same canvas-owning filter graph tools
+  // use) when the session's bound tab is headless, and fail with the REAL reason when
+  // no single canvas can be picked — never surface the misleading mobile string.
+  //
+  // `lastActive` mirrors the real UiBridge.resolveActiveTabId: a sole tab resolves,
+  // an explicit last-active id resolves among 2+, otherwise it throws the ambiguity.
+  function headlessAwareBridge(
+    tabs: Array<{ id: string; headless: boolean }>,
+    lastActive?: string,
+  ) {
+    const sent: Array<{ cmd: Record<string, unknown>; tabId?: string }> = [];
+    const byId = new Map(tabs.map((t) => [t.id, t]));
+    const bridge = {
+      send: async (cmd: Record<string, unknown>, opts?: { tabId?: string }) => {
+        const id = opts?.tabId;
+        if (id && !byId.has(id)) {
+          throw new Error(`no connected tab with id "${id}". Connected: none`);
+        }
+        sent.push({ cmd, tabId: id });
+        return { ok: true, routedTo: id };
+      },
+      push: () => 1,
+      isHeadless: (id: string) => byId.get(id)?.headless === true,
+      canReach: (id: string) => byId.has(id),
+      tabs: () => tabs.map((t) => ({ tab_id: t.id, title: t.id, connected_at: 0 })),
+      resolveActiveTabId: () => {
+        if (lastActive) return lastActive;
+        if (tabs.length === 1) return tabs[0].id;
+        throw new Error("Multiple panel tabs are connected and none is last active — pass tab_id.");
+      },
+    } as unknown as PanelToolCtx["bridge"];
+    return { bridge, sent };
+  }
+
+  const MOBILE_ERR = /mobile client has no open canvas/i;
+
+  beforeAll(() => __panelToolsTestHooks.setRetrySettleMs(0));
+  afterAll(() => __panelToolsTestHooks.setRetrySettleMs(null));
+
+  it("panel_set_todo redirects onto the live desktop canvas when the session is bound to a headless tab", async () => {
+    const store = new WorkflowTargetStore();
+    const { bridge, sent } = headlessAwareBridge([
+      { id: "mobile-tab", headless: true },
+      { id: "desktop-tab", headless: false },
+    ]);
+    // Session bound to the headless mobile tab, but a real desktop canvas is open.
+    const ctx = makePanelToolCtx(bridge, "mobile-tab", store);
+    const res = await defByName("panel_set_todo").handler(
+      { items: [{ text: "step 1", status: "active" }] },
+      ctx,
+    );
+    expect(res.isError).toBeFalsy();
+    expect((res.content[0] as { text: string }).text).not.toMatch(MOBILE_ERR);
+    // Dispatched at the DESKTOP canvas, not the headless mobile tab.
+    expect(sent.at(-1)).toMatchObject({ cmd: { cmd: "set_todo" }, tabId: "desktop-tab" });
+    // The session's own binding is left intact (no silent hijack of ctx.tabId).
+    expect(ctx.tabId).toBe("mobile-tab");
+  });
+
+  it("panel_open_civitai redirects onto the live desktop canvas when the session is bound to a headless tab", async () => {
+    const store = new WorkflowTargetStore();
+    const { bridge, sent } = headlessAwareBridge([
+      { id: "mobile-tab", headless: true },
+      { id: "desktop-tab", headless: false },
+    ]);
+    const ctx = makePanelToolCtx(bridge, "mobile-tab", store);
+    const res = await defByName("panel_open_civitai").handler(
+      { tab: "loras", browsingLevels: [1, 2] },
+      ctx,
+    );
+    expect(res.isError).toBeFalsy();
+    expect((res.content[0] as { text: string }).text).not.toMatch(MOBILE_ERR);
+    expect(sent.at(-1)).toMatchObject({ cmd: { cmd: "open_civitai" }, tabId: "desktop-tab" });
+    expect(ctx.tabId).toBe("mobile-tab");
+  });
+
+  it("fails with the REAL reason (not the mobile string) when the ONLY client is canvas-less", async () => {
+    const store = new WorkflowTargetStore();
+    const { bridge, sent } = headlessAwareBridge([{ id: "mobile-tab", headless: true }]);
+    const ctx = makePanelToolCtx(bridge, "mobile-tab", store);
+    const res = await defByName("panel_set_todo").handler({ items: [] }, ctx);
+    expect(res.isError).toBe(true);
+    const text = (res.content[0] as { text: string }).text;
+    expect(text).not.toMatch(MOBILE_ERR);
+    expect(text).toMatch(/canvas-less|desktop panel canvas|comfyui browser tab/i);
+    // Nothing was blasted at the headless client.
+    expect(sent.length).toBe(0);
+  });
+
+  it("leaves a normal desktop-bound session on the standard ctx.call path (no redirect)", async () => {
+    const store = new WorkflowTargetStore();
+    const { bridge, sent } = headlessAwareBridge([{ id: "desktop-tab", headless: false }]);
+    const ctx = makePanelToolCtx(bridge, "desktop-tab", store);
+    const res = await defByName("panel_set_todo").handler({ items: [] }, ctx);
+    expect(res.isError).toBeFalsy();
+    expect(sent.at(-1)).toMatchObject({ cmd: { cmd: "set_todo" }, tabId: "desktop-tab" });
+  });
+
+  it("redirects onto the LAST-ACTIVE desktop canvas among multiple desktop tabs", async () => {
+    const store = new WorkflowTargetStore();
+    const { bridge, sent } = headlessAwareBridge(
+      [
+        { id: "mobile-tab", headless: true },
+        { id: "desktop-a", headless: false },
+        { id: "desktop-b", headless: false },
+      ],
+      "desktop-b", // last-active is an interactive desktop tab
+    );
+    const ctx = makePanelToolCtx(bridge, "mobile-tab", store);
+    const res = await defByName("panel_set_todo").handler({ items: [] }, ctx);
+    expect(res.isError).toBeFalsy();
+    expect(sent.at(-1)).toMatchObject({ cmd: { cmd: "set_todo" }, tabId: "desktop-b" });
+  });
+
+  it("fails with an ACCURATE ambiguity error (not the mobile string) when 2+ desktop tabs and none is last-active", async () => {
+    const store = new WorkflowTargetStore();
+    // Headless-bound + two desktop tabs + resolveActiveTabId throws (no last-active):
+    // must NOT fall through to ctx.call (that would re-dispatch at the headless tab and
+    // reproduce the mobile string) — it must fail with the real multi-desktop reason.
+    const { bridge, sent } = headlessAwareBridge([
+      { id: "mobile-tab", headless: true },
+      { id: "desktop-a", headless: false },
+      { id: "desktop-b", headless: false },
+    ]);
+    const ctx = makePanelToolCtx(bridge, "mobile-tab", store);
+    const res = await defByName("panel_open_civitai").handler({}, ctx);
+    expect(res.isError).toBe(true);
+    const text = (res.content[0] as { text: string }).text;
+    expect(text).not.toMatch(MOBILE_ERR);
+    expect(text).toMatch(/multiple desktop tabs|pick one/i);
+    expect(sent.length).toBe(0);
+  });
+
+  it("retry-safe set_todo redirect recovers from a transient drop by re-resolving the desktop tab (#481 parity)", async () => {
+    const store = new WorkflowTargetStore();
+    const sent: Array<{ cmd: Record<string, unknown>; tabId?: string }> = [];
+    // Bound to a headless tab. The desktop tab drops mid-send once (throws a transient
+    // "no connected tab") then reconnects under a NEW id — the redirect must re-resolve
+    // and retry the idempotent set_todo onto the reconnected desktop tab.
+    let liveDesktop = "desktop-old";
+    let dropsLeft = 1;
+    const headlessId = "mobile-tab";
+    const bridge = {
+      send: async (cmd: Record<string, unknown>, opts?: { tabId?: string }) => {
+        if (dropsLeft > 0) {
+          dropsLeft--;
+          liveDesktop = "desktop-new";
+          throw new Error(`no connected tab with id "${opts?.tabId}". Connected: none`);
+        }
+        sent.push({ cmd, tabId: opts?.tabId });
+        return { ok: true, routedTo: opts?.tabId };
+      },
+      push: () => 1,
+      isHeadless: (id: string) => id === headlessId,
+      canReach: (id: string) => id === headlessId || id === liveDesktop,
+      tabs: () => [
+        { tab_id: headlessId, title: "mobile", connected_at: 0 },
+        { tab_id: liveDesktop, title: "desktop", connected_at: 0 },
+      ],
+      resolveActiveTabId: () => liveDesktop,
+    } as unknown as PanelToolCtx["bridge"];
+    const ctx = makePanelToolCtx(bridge, headlessId, store);
+    const res = await defByName("panel_set_todo").handler({ items: [] }, ctx);
+    expect(res.isError).toBeFalsy();
+    // Re-resolved onto the RECONNECTED desktop tab, not the stale id or the headless tab.
+    expect(sent.at(-1)).toMatchObject({ cmd: { cmd: "set_todo" }, tabId: "desktop-new" });
+  });
+});
+
 describe("panel-tools: session tabId self-heal (#322 reload / #331 workflow-switch / #332 reconnect)", () => {
   // A minimal fake bridge modelling the ONE fact that matters: which tab ids are
   // currently live. `send` routes only to a live id (throws `no connected tab`

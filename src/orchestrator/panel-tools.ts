@@ -2505,6 +2505,120 @@ function askSurfaceError(ctx: PanelToolCtx): string | null {
   );
 }
 
+/**
+ * Route a canvas-requiring panel UI command (set_todo, open_civitai) onto the live
+ * DESKTOP canvas tab when THIS session's bound tab is a headless (mobile/remote)
+ * client (#624). The mobile / remote pseudo-panel accepts ONLY show_media and
+ * rejects every other ServerCommand with the (client-authored) string "mobile
+ * client has no open canvas" — a misleading, mobile-specific error even when a real
+ * desktop ComfyUI canvas is open in the same session. These commands render on the
+ * desktop panel surface (the footer TODO tray, the in-panel CivitAI browser), so
+ * when the bound tab is canvas-less we resolve the SAME interactive desktop tab the
+ * graph/workflow tools bind to instead of blasting the command at the headless
+ * client. This is the desktop fall-through; genuine tab-mirror sessions are bound to
+ * the desktop tab already (non-headless) and are therefore untouched.
+ *
+ * Returns:
+ *  - `{ tabId }`  → REDIRECT the dispatch onto the interactive (canvas-owning)
+ *    desktop tab (the sole one, else the last-active one when it is itself a canvas);
+ *  - `{ error }`  → the ONLY connected client is canvas-less, so fail with the REAL
+ *    reason (named honestly) rather than surfacing the raw mobile "no open canvas";
+ *  - `null`       → the bound tab is already a reachable canvas, the choice among 2+
+ *    desktop tabs is ambiguous, or the bridge can't enumerate headlessness — in every
+ *    such case the normal `ctx.call` path (unchanged) runs.
+ */
+function desktopCanvasRedirect(
+  ctx: PanelToolCtx,
+  label: string,
+): { tabId?: string; error?: string } | null {
+  const b = ctx.bridge as unknown as {
+    isHeadless?: (id: string) => boolean;
+    tabs?: () => Array<{ tab_id: string }>;
+    resolveActiveTabId?: () => string;
+  };
+  // Older / lightweight bridges can't classify tabs — leave routing exactly as-is.
+  if (typeof b.isHeadless !== "function" || typeof b.tabs !== "function") return null;
+  // Only intervene when THIS session is bound to a canvas-less (mobile/remote) client.
+  // A desktop-bound session — healthy, or merely orphaned by a reconnect — is left to
+  // the normal ctx.call path and its reconnect/rebind machinery untouched.
+  if (!b.isHeadless(ctx.tabId)) return null;
+  // Bound to a headless client: find the interactive (canvas-owning) DESKTOP tabs, the
+  // SAME filter rebindToActiveTab/ensureReachable use for graph/workflow bindings.
+  const live = b.tabs();
+  const interactive = Array.isArray(live)
+    ? live.filter((t) => !b.isHeadless!(t.tab_id))
+    : [];
+  if (interactive.length === 1) return { tabId: interactive[0].tab_id };
+  if (interactive.length === 0) {
+    return {
+      error:
+        `${label} needs an open ComfyUI desktop panel canvas to render, but this session ` +
+        `is attached to a canvas-less client (a mobile/remote viewer or a headless run) ` +
+        `and no desktop ComfyUI panel tab is connected. Open the ComfyUI browser tab with ` +
+        `the comfyui-mcp-panel pack installed, then retry.`,
+    };
+  }
+  // 2+ interactive desktop tabs: prefer the last-active one when it is itself a canvas.
+  // The bound tab is headless, so we must NOT fall through to ctx.call here — that would
+  // dispatch right back at the canvas-less client and reproduce "mobile client has no
+  // open canvas". When we can't single out one canvas tab, fail with the REAL reason.
+  if (typeof b.resolveActiveTabId === "function") {
+    try {
+      const active = b.resolveActiveTabId();
+      if (active && !b.isHeadless(active)) return { tabId: active };
+    } catch {
+      /* ambiguous active-tab resolution — fall through to the ambiguity error below */
+    }
+  }
+  return {
+    error:
+      `${label} needs an open ComfyUI desktop panel canvas, but this session is bound to ` +
+      `a canvas-less (mobile/remote) client and multiple desktop tabs are open — it can't ` +
+      `pick one automatically. Switch to the ComfyUI tab you want, rebind with ` +
+      `panel_set_workflow_target({mode:"current"}), then retry.`,
+  };
+}
+
+/** Dispatch a command to a SPECIFIC tab id (the #624 desktop-canvas redirect target)
+ *  and wrap the reply in the SAME ok()/fail() envelope ctx.call uses. The redirect
+ *  target came straight from a live `bridge.tabs()` enumeration, so it is already
+ *  reachable — this is a thin send that does NOT mutate ctx.tabId (the session's own
+ *  binding is left intact). For a retry-safe (idempotent full-replace) command it
+ *  mirrors ctx.call's single post-drop retry: on a transient reconnect error it settles
+ *  briefly, RE-RESOLVES the desktop tab (it may have reconnected under a new id), and
+ *  re-sends once before surfacing the error. `reResolve` returns the fresh desktop tab
+ *  id (or undefined to reuse `tabId`). */
+async function dispatchToTab(
+  ctx: PanelToolCtx,
+  tabId: string,
+  cmd: Record<string, unknown>,
+  timeoutMs: number,
+  reResolve?: () => string | undefined,
+): Promise<ToolResult> {
+  try {
+    return ok(await ctx.bridge.send(cmd as { cmd: string }, { tabId, timeoutMs }));
+  } catch (err) {
+    if (isRetrySafeCmd(cmd) && isTransientReconnectError(err)) {
+      try {
+        await sleep(retrySettleMs());
+        const fresh = reResolve?.() ?? tabId;
+        return ok(await ctx.bridge.send(cmd as { cmd: string }, { tabId: fresh, timeoutMs }));
+      } catch (err2) {
+        return fail(err2);
+      }
+    }
+    return fail(err);
+  }
+}
+
+/** Re-resolve the desktop redirect target after a transient drop — returns the fresh
+ *  interactive desktop tab id, or undefined when it can't be re-picked (so the caller
+ *  falls back to the original id for its single retry). */
+function reResolveDesktopTab(ctx: PanelToolCtx, label: string): string | undefined {
+  const r = desktopCanvasRedirect(ctx, label);
+  return r?.tabId;
+}
+
 /** Poll the bridge's late-reply buffer for a validated ask answer that arrived
  *  after the card-reply timeout, up to the grace budget. undefined if none. */
 async function pollLateAskReply(
@@ -3599,7 +3713,24 @@ export function buildPanelToolDefs(): PanelToolDef[] {
       // momentarily backgrounded. set_todo is a non-destructive, idempotent full-
       // replace UI write (already in RETRY_SAFE_CMDS), so give it the same sane 15s
       // bound as the other UI-state writes (workflow_save) instead of a tight 5s.
-      async (args: A, ctx) => ctx.call({ cmd: "set_todo", items: args.items }, 15000),
+      async (args: A, ctx) => {
+        // #624: the footer TODO tray is a DESKTOP panel surface. When this session's
+        // bound tab is a headless (mobile/remote) client, resolve the live desktop
+        // canvas tab instead of dispatching at the headless client — which would
+        // reject with the misleading "mobile client has no open canvas".
+        const redirect = desktopCanvasRedirect(ctx, "panel_set_todo");
+        if (redirect?.error) return fail(redirect.error);
+        if (redirect?.tabId) {
+          return dispatchToTab(
+            ctx,
+            redirect.tabId,
+            { cmd: "set_todo", items: args.items },
+            15000,
+            () => reResolveDesktopTab(ctx, "panel_set_todo"),
+          );
+        }
+        return ctx.call({ cmd: "set_todo", items: args.items }, 15000);
+      },
     ),
     def(
       "panel_open_civitai",
@@ -3645,17 +3776,26 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           const query = creator
             ? `@${creator}${rawQuery ? " " + rawQuery : " "}`
             : args.query;
-          return await ctx.call(
-            {
-              cmd: "open_civitai",
-              query,
-              tab: args.tab,
-              browsingLevels,
-              filters: args.filters,
-              dock: args.dock,
-            },
-            10000,
-          );
+          const cmd = {
+            cmd: "open_civitai",
+            query,
+            tab: args.tab,
+            browsingLevels,
+            filters: args.filters,
+            dock: args.dock,
+          };
+          // #624: the in-panel CivitAI browser is a DESKTOP panel surface. When this
+          // session's bound tab is a headless (mobile/remote) client, resolve the live
+          // desktop canvas tab instead of dispatching at the headless client — which
+          // would reject with the misleading "mobile client has no open canvas".
+          const redirect = desktopCanvasRedirect(ctx, "panel_open_civitai");
+          if (redirect?.error) return fail(redirect.error);
+          if (redirect?.tabId) {
+            return await dispatchToTab(ctx, redirect.tabId, cmd, 10000, () =>
+              reResolveDesktopTab(ctx, "panel_open_civitai"),
+            );
+          }
+          return await ctx.call(cmd, 10000);
         } catch (err) {
           return fail(err);
         }
