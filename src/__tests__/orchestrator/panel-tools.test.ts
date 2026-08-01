@@ -1655,6 +1655,9 @@ describe("panel-tools: agent-driven CivitAI + training modals", () => {
         { id: 3, kind: "image", title: null, urls: ["/comfyui_mcp_panel/civitai/download?versionId=9"], gated: false },
         // Backslash authority trick (`\`→`/` folding) — refused before fetch.
         { id: 4, kind: "image", title: null, urls: ["/\\evil.example/x.jpeg"], gated: false },
+        // Same-origin route that merely ENDS WITH the proxy path — refused by the
+        // EXACT-path check (endsWith would have let this reach an auth'd request).
+        { id: 5, kind: "image", title: null, urls: ["/other/comfyui_mcp_panel/civitai/media?uuid=a"], gated: false },
       ],
     };
     const { ctx } = makeReplyCtx(reply);
@@ -1719,6 +1722,30 @@ describe("panel-tools: agent-driven CivitAI + training modals", () => {
     expect(images.safeParse(0).success).toBe(true);
     expect(images.safeParse(9).success).toBe(false); // > max 8
     expect(images.safeParse(undefined).success).toBe(true);
+  });
+
+  it("panel_civitai_results bounds fetch ATTEMPTS, not just successes, on dud URLs (#623)", async () => {
+    // 50 eligible non-gated proxy URLs that all 404: with images:1 the loop must
+    // NOT fire 50 requests — attempts are capped at images + a small slack.
+    const items = Array.from({ length: 50 }, (_, i) => ({
+      id: i, kind: "image", title: null,
+      urls: [`/comfyui_mcp_panel/civitai/media?uuid=${i}&ext=jpeg`], gated: false,
+    }));
+    const { ctx } = makeReplyCtx({ total: 50, loading: false, items });
+    const urls: string[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown) => {
+      urls.push(String(input));
+      return { ok: false, status: 404, headers: new Map(), arrayBuffer: async () => new ArrayBuffer(0) };
+    }) as unknown as typeof fetch;
+    try {
+      const res = await defByName("panel_civitai_results").handler({ images: 1 }, ctx);
+      expect(imageBlocks(res).length).toBe(0); // all 404 → no images
+      // images:1 + slack(4) = at most 5 network attempts, never all 50.
+      expect(urls.length).toBeLessThanOrEqual(5);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
   });
 
   it("panel_civitai_results caps delivered samples at the requested images count (#623)", async () => {

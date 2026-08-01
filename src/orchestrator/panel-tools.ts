@@ -980,9 +980,15 @@ const CIVITAI_SAMPLE_MAX_BYTES = 4 * 1024 * 1024; // per-thumbnail cap (450px jp
 const CIVITAI_SAMPLE_DEFAULT = 4; // thumbnails delivered by default — bounds context
 const CIVITAI_SAMPLE_MAX = 8; // hard ceiling even if the agent asks for more
 const CIVITAI_SAMPLE_FETCH_TIMEOUT_MS = 8000;
-// The exact same-origin proxy path the panel serves CivitAI media from. urls[0]
-// MUST resolve to this path on the ComfyUI origin or it is not fetched (SSRF /
-// auth-header-exfil guard — see fetchCivitaiSampleImages).
+// Extra fetch ATTEMPTS allowed beyond the requested image count, so a few
+// 404/non-image/oversize URLs don't starve the result — but a malformed reply
+// with many dud eligible URLs still can't trigger unbounded requests (the cap is
+// on attempts, not just successes).
+const CIVITAI_SAMPLE_ATTEMPT_SLACK = 4;
+// The exact same-origin proxy path the panel serves CivitAI media from (appended
+// to the ComfyUI base path). urls[0] MUST resolve to EXACTLY this pathname on the
+// ComfyUI origin or it is not fetched (SSRF / auth-header-exfil guard — see
+// fetchCivitaiSampleImages).
 const CIVITAI_MEDIA_PROXY_PATH = "/comfyui_mcp_panel/civitai/media";
 
 /**
@@ -1025,14 +1031,24 @@ async function fetchCivitaiSampleImages(
   if (max <= 0) return out;
   const items = Array.isArray(reply.items) ? (reply.items as Record<string, unknown>[]) : [];
   const base = getComfyUIBaseUrl();
-  let baseOrigin: string;
+  let baseUrl: URL;
   try {
-    baseOrigin = new URL(base).origin;
+    baseUrl = new URL(base);
   } catch {
     return out; // no resolvable ComfyUI origin — deliver text only
   }
+  const baseOrigin = baseUrl.origin;
+  // The ONE canonical proxy pathname on this ComfyUI = base path + proxy route.
+  // We require an EXACT match (not endsWith), so a same-origin reverse-proxy route
+  // that merely *ends with* the proxy path (e.g. /other/comfyui_mcp_panel/civitai/media)
+  // cannot receive an auth-bearing request.
+  const expectedPath = baseUrl.pathname.replace(/\/+$/, "") + CIVITAI_MEDIA_PROXY_PATH;
+  // Bound total network ATTEMPTS, not just successes: with images:1 and a reply
+  // carrying 50 dud eligible URLs we must not fire 50 fetches.
+  const maxAttempts = max + CIVITAI_SAMPLE_ATTEMPT_SLACK;
+  let attempts = 0;
   for (const item of items) {
-    if (out.length >= max) break;
+    if (out.length >= max || attempts >= maxAttempts) break;
     if (!item || typeof item !== "object") continue;
     if (!civitaiSampleEligible(item)) continue;
     const urls = Array.isArray(item.urls) ? item.urls : [];
@@ -1043,8 +1059,8 @@ async function fetchCivitaiSampleImages(
     // Refuse anything but a root-absolute same-origin path: no scheme (http:,
     // file:, data:, …), no protocol-relative //host prefix, and no backslash
     // (the WHATWG parser folds `\`→`/` for special schemes, so `/\host` could
-    // otherwise resolve to an authority). The strict origin check below is the
-    // real guard; this just refuses the obvious tricks up front.
+    // otherwise resolve to an authority). The strict origin + exact-path checks
+    // below are the real guard; this just refuses the obvious tricks up front.
     if (!raw.startsWith("/") || raw.startsWith("//") || raw.includes("\\")) continue;
     let url: URL;
     try {
@@ -1052,10 +1068,11 @@ async function fetchCivitaiSampleImages(
     } catch {
       continue; // unresolvable URL — skip, keep going
     }
-    // Defense-in-depth: the resolved URL must stay on the ComfyUI origin AND hit
-    // the CivitAI media proxy path — never an arbitrary endpoint.
+    // Defense-in-depth: the resolved URL must stay on the ComfyUI origin AND be
+    // EXACTLY the CivitAI media proxy endpoint — never any other route.
     if (url.origin !== baseOrigin) continue;
-    if (!url.pathname.endsWith(CIVITAI_MEDIA_PROXY_PATH)) continue;
+    if (url.pathname !== expectedPath) continue;
+    attempts++; // count this as a network attempt BEFORE the fetch
     try {
       const resp = await comfyuiFetch(url.toString(), {
         signal: AbortSignal.timeout(CIVITAI_SAMPLE_FETCH_TIMEOUT_MS),
