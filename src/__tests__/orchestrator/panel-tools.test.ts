@@ -11,7 +11,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { setNsfwConsent } from "../../services/panel-settings.js";
+import { getNsfwConsent, setNsfwConsent } from "../../services/panel-settings.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   buildPanelToolDefs,
@@ -1634,6 +1634,147 @@ describe("panel-tools: NSFW consent enforced server-side on CivitAI browsing lev
     );
     expect(res.isError).toBe(true);
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe("panel-tools: adult-consent card survives an idle-user timeout (#390)", () => {
+  const origSettings = process.env.COMFYUI_MCP_PANEL_SETTINGS;
+
+  beforeAll(() => {
+    // Isolate the persistent consent store to a throwaway file for this suite.
+    const dir = mkdtempSync(join(tmpdir(), "consent-390-"));
+    process.env.COMFYUI_MCP_PANEL_SETTINGS = join(dir, "panel-settings.json");
+  });
+  afterAll(() => {
+    if (origSettings === undefined) delete process.env.COMFYUI_MCP_PANEL_SETTINGS;
+    else process.env.COMFYUI_MCP_PANEL_SETTINGS = origSettings;
+  });
+  afterEach(() => {
+    // Restore the real ask timing so other suites see the production defaults.
+    __panelAskTestHooks.setAskTiming(null);
+  });
+
+  // A card-reply TIMEOUT the bridge surfaces when the tab never answered — matches
+  // isReplyTimeoutError so the handler treats it as recoverable (not a hard error).
+  const replyTimeoutErr = (ms: number) =>
+    new Error(`Panel tab abcd did not reply to "ask_user" within ${ms} ms — backgrounded or frozen`);
+
+  function timeoutBridge(late?: () => unknown) {
+    let forwardedTimeout = 0;
+    let forwardedAskId: unknown;
+    const bridge = {
+      send: async (cmd: Record<string, unknown>, opts?: { timeoutMs?: number }) => {
+        forwardedTimeout = opts?.timeoutMs ?? 0;
+        forwardedAskId = (cmd as { ask_id?: unknown }).ask_id;
+        throw replyTimeoutErr(opts?.timeoutMs ?? 0);
+      },
+      canReach: () => true,
+      isHeadless: () => false,
+      resolveActiveTabId: () => "abcd",
+      push: () => 1,
+      takeLateAskReply: () => (late ? late() : undefined),
+    } as unknown as PanelToolCtx["bridge"];
+    return {
+      ctx: { bridge, tabId: "abcd", ensureReachable: () => {} } as unknown as PanelToolCtx,
+      get forwardedTimeout() {
+        return forwardedTimeout;
+      },
+      get forwardedAskId() {
+        return forwardedAskId;
+      },
+    };
+  }
+
+  function replyBridge(reply: unknown) {
+    return {
+      send: async () => reply,
+      canReach: () => true,
+      isHeadless: () => false,
+      resolveActiveTabId: () => "abcd",
+      push: () => 1,
+    } as unknown as PanelToolCtx["bridge"];
+  }
+
+  function parse(res: ToolResult): Record<string, unknown> {
+    return JSON.parse((res.content[0] as { text: string }).text);
+  }
+
+  it("an unanswered card resolves cleanly as { timed_out:true } WITHOUT granting consent", async () => {
+    setNsfwConsent(false);
+    __panelAskTestHooks.setAskTiming({ deadlineMs: 5, graceMs: 20, pollMs: 2 });
+    const h = timeoutBridge(); // no late reply ever arrives
+    const res = await defByName("panel_request_adult_consent").handler({}, h.ctx);
+    // Resolves cleanly — NOT a transport error (the whole point of #390).
+    expect(res.isError).toBeFalsy();
+    const out = parse(res);
+    expect(out.timed_out).toBe(true);
+    expect(out.nsfw_allowed).toBe(false);
+    // GATE PRESERVED: a timeout must NEVER auto-grant the persistent consent.
+    expect(getNsfwConsent().allowed).toBe(false);
+    // The card deadline was clamped under the ~300s MCP tools/call budget and a
+    // stable ask_id was sent so a late-but-valid answer could still be keyed.
+    expect(h.forwardedTimeout).toBeGreaterThan(0);
+    expect(h.forwardedTimeout).toBeLessThan(300000);
+    expect(typeof h.forwardedAskId).toBe("string");
+  });
+
+  it("honors a late-but-valid YES buffered after the reply timeout and grants consent", async () => {
+    setNsfwConsent(false);
+    __panelAskTestHooks.setAskTiming({ deadlineMs: 5, graceMs: 500, pollMs: 2 });
+    let takes = 0;
+    const h = timeoutBridge(() => {
+      takes += 1;
+      return takes >= 2 ? "Yes — I'm 18+ and it's legal in my region" : undefined;
+    });
+    const res = await defByName("panel_request_adult_consent").handler({}, h.ctx);
+    const out = parse(res);
+    expect(out.timed_out).toBeUndefined();
+    expect(out.nsfw_allowed).toBe(true);
+    expect(getNsfwConsent().allowed).toBe(true);
+  });
+
+  it("honors a late-but-valid NO buffered after the reply timeout and stays SFW", async () => {
+    setNsfwConsent(false);
+    __panelAskTestHooks.setAskTiming({ deadlineMs: 5, graceMs: 500, pollMs: 2 });
+    let takes = 0;
+    const h = timeoutBridge(() => {
+      takes += 1;
+      return takes >= 2 ? "No — keep it SFW" : undefined;
+    });
+    const res = await defByName("panel_request_adult_consent").handler({}, h.ctx);
+    const out = parse(res);
+    expect(out.nsfw_allowed).toBe(false);
+    expect(getNsfwConsent().allowed).toBe(false);
+  });
+
+  it("a fast YES grants and a fast NO keeps SFW — the gate is not weakened", async () => {
+    // Fast NO → stays SFW.
+    setNsfwConsent(false);
+    let ctx = { bridge: replyBridge("No — keep it SFW"), tabId: "abcd", ensureReachable: () => {} } as unknown as PanelToolCtx;
+    let out = parse(await defByName("panel_request_adult_consent").handler({}, ctx));
+    expect(out.nsfw_allowed).toBe(false);
+    expect(getNsfwConsent().allowed).toBe(false);
+
+    // Fast affirmative → grants (the only path that turns the gate ON).
+    ctx = {
+      bridge: replyBridge("Yes — I'm 18+ and it's legal in my region"),
+      tabId: "abcd",
+      ensureReachable: () => {},
+    } as unknown as PanelToolCtx;
+    out = parse(await defByName("panel_request_adult_consent").handler({}, ctx));
+    expect(out.nsfw_allowed).toBe(true);
+    expect(getNsfwConsent().allowed).toBe(true);
+  });
+
+  it("an idle timeout does NOT drop a previously GRANTED consent", async () => {
+    setNsfwConsent(true); // user consented earlier this session
+    __panelAskTestHooks.setAskTiming({ deadlineMs: 5, graceMs: 20, pollMs: 2 });
+    const h = timeoutBridge();
+    const out = parse(await defByName("panel_request_adult_consent").handler({}, h.ctx));
+    expect(out.timed_out).toBe(true);
+    // Reflects — and preserves — the surviving grant; the timeout wrote nothing.
+    expect(out.nsfw_allowed).toBe(true);
+    expect(getNsfwConsent().allowed).toBe(true);
   });
 });
 

@@ -3364,18 +3364,54 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           // that lost its live binding (reconnect/reload/workflow-switch) throws a
           // false `no connected tab` here even though graph tools just worked.
           ctx.ensureReachable?.();
-          const reply = await ctx.bridge.send(
-            {
-              cmd: "ask_user",
-              question,
-              header: "18+ consent",
-              options: [
-                { label: "Yes — I'm 18+ and it's legal in my region", description: "Enable adult content for this session" },
-                { label: "No — keep it SFW", description: "Stay in safe-for-work mode" },
-              ],
-            },
-            { tabId: ctx.tabId, timeoutMs: 300000 },
-          );
+          // #390: the enclosing MCP `tools/call` is killed at ~300s. A hardcoded 300s
+          // card wait raced that budget with ZERO margin, so an idle user who never
+          // clicked blew the whole tool call as a transport timeout ("timed out
+          // awaiting tools/call after 300s") instead of resolving cleanly. CLAMP the
+          // card deadline under the budget (the same getAskTiming() ceiling panel_ask
+          // and confirm use) with a stable ask_id, and on a reply-timeout poll the
+          // bridge's late-reply buffer for a bounded grace so a slow-but-VALID pick is
+          // still honored. If the user is simply away, resolve cleanly with
+          // { nsfw_allowed:false, timed_out:true } WITHOUT touching consent — a timeout
+          // NEVER grants the gate; the persistent decision is unchanged and can be read
+          // back with panel_get_content_mode, or the user re-asked, on the next turn.
+          const timing = getAskTiming();
+          const askId = randomUUID();
+          const askCard = {
+            cmd: "ask_user",
+            ask_id: askId,
+            question,
+            header: "18+ consent",
+            options: [
+              { label: "Yes — I'm 18+ and it's legal in my region", description: "Enable adult content for this session" },
+              { label: "No — keep it SFW", description: "Stay in safe-for-work mode" },
+            ],
+          } as { cmd: string };
+          let reply: unknown;
+          try {
+            reply = await ctx.bridge.send(askCard, { tabId: ctx.tabId, timeoutMs: timing.deadlineMs });
+          } catch (err) {
+            // Only a card-reply TIMEOUT is recoverable here: poll the late buffer for a
+            // slow-but-valid answer, and if still unanswered return a structured
+            // timed_out result (gate untouched). Any other error (no panel, transport
+            // failure) propagates to the outer catch → fail(), exactly as before.
+            if (!isReplyTimeoutError(err)) throw err;
+            const late = await pollLateAskReply(ctx.bridge, askId, timing);
+            if (late === undefined) {
+              // Idle user never answered. Do NOT call setNsfwConsent — the gate stays
+              // exactly where it was (SFW by default). Never auto-grant on a timeout.
+              const current = getNsfwConsent();
+              return ok({
+                nsfw_allowed: current.allowed,
+                decided_at: current.decidedAt ?? null,
+                timed_out: true,
+                note:
+                  "The 18+ consent card wasn't answered in time, so nothing changed — adult content stays gated. " +
+                  "Ask again when the user is back, or read the current state with panel_get_content_mode.",
+              });
+            }
+            reply = late;
+          }
           const allowed = isAffirmative(reply);
           const state = setNsfwConsent(allowed);
           return ok({
