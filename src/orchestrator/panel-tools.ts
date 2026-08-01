@@ -412,6 +412,7 @@ const MUTATING_GRAPH_EDIT_CMDS = new Set<string>([
   "graph_connect",
   "graph_disconnect",
   "graph_set_widget",
+  "graph_set_node_property",
   "graph_move_node",
   "graph_resize_node",
   "graph_set_title",
@@ -3339,6 +3340,21 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           OBJECT_INFO_REFRESH_ACK_TIMEOUT_MS,
         );
       },
+    ),
+    def(
+      "panel_set_property",
+      "Set a node's LiteGraph PROPERTY (the right-click → Properties panel), NOT a widget — the counterpart to panel_set_widget, which only reaches `widgets`. Many custom nodes are configured entirely through node properties: e.g. the rgthree Fast Groups Bypasser's filters `matchTitle`, `matchColors`, `sort`, and `toggleRestriction` are node properties, and without `matchTitle` the node enumerates EVERY group in the workflow (a footgun). Sets node.properties[name] and, when the node defines an onPropertyChanged callback (rgthree and many LiteGraph nodes do), invokes it so the change takes effect LIVE (e.g. rgthree re-filters its group list). Returns the previous and new value. Undoable with Ctrl+Z.",
+      {
+        node_id: z.number().int().describe("Node id from panel_graph_outline / panel_query_graph."),
+        name: z
+          .string()
+          .describe("Property name from the node's right-click → Properties panel (e.g. 'matchTitle', 'matchColors', 'sort', 'toggleRestriction')."),
+        value: z
+          .union([z.string(), z.number(), z.boolean(), z.null()])
+          .describe("New property value (string/number/boolean/null). For the rgthree Fast Groups Bypasser, matchTitle is a title substring/regex filter."),
+      },
+      async (args: A, ctx) =>
+        ctx.call({ cmd: "graph_set_node_property", node_id: args.node_id, name: args.name, value: args.value }),
     ),
     def(
       "panel_move_node",
