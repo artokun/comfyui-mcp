@@ -1028,11 +1028,33 @@ async function touch(path: string): Promise<void> {
 interface ResumeSidecar {
   validator: string;
   total?: number;
+  /** True IFF `validator` is a CONTENT-ADDRESSED X-Linked-Etag (HF's LFS/Xet object
+   *  hash) — the ONLY validator kind whose value is safe to (a) compare across
+   *  redirect hops with lenient normalization and (b) trust as PROOF that a
+   *  cross-origin CAS 206 is byte-identical to the partial. A plain ETag /
+   *  Last-Modified (or a legacy sidecar without this marker) carries no content
+   *  guarantee, so it must NEVER be normalize-compared against a resolve hop's
+   *  X-Linked-Etag (different validator namespaces could coincidentally normalize
+   *  equal and splice a genuinely-changed object onto the stale prefix — #467
+   *  false-negative). */
+  contentHash?: boolean;
 }
 
-/** Read the resume sidecar (line 1 = validator, optional line 2 = total) or null.
- *  Best-effort: a missing/unreadable sidecar just means "resume without an If-Range
- *  guard" — never fatal. Backward compatible with pre-total single-line sidecars. */
+/** Sidecar line 3 marker tagging the validator as a content-addressed X-Linked-Etag
+ *  (see {@link ResumeSidecar.contentHash}). Kept on its OWN line — NEVER folded into
+ *  the line-1 value — so it can never be confused with, or collide against, a real
+ *  validator whose text happens to start with the marker (a value-prefix scheme
+ *  mis-tags such a legacy value as a content hash — #467 provenance false-positive).
+ *  A sidecar without a line-3 marker (every legacy sidecar, and every plain
+ *  ETag/Last-Modified capture) reads back as contentHash:false. */
+const CONTENT_HASH_SIDECAR_MARKER = "xet";
+
+/** Read the resume sidecar (line 1 = validator, optional line 2 = total, optional
+ *  line 3 = content-hash provenance marker) or null. Best-effort: a missing/unreadable
+ *  sidecar just means "resume without an If-Range guard" — never fatal. Backward
+ *  compatible with pre-total single-line sidecars and with legacy sidecars (no line 3
+ *  ⇒ contentHash:false). The validator on line 1 is used VERBATIM — no prefix is
+ *  stripped — so a value can never be mis-parsed as carrying provenance. */
 async function readValidatorSidecar(path: string): Promise<ResumeSidecar | null> {
   try {
     const raw = await readFile(path, "utf-8");
@@ -1040,7 +1062,12 @@ async function readValidatorSidecar(path: string): Promise<ResumeSidecar | null>
     const validator = (lines[0] ?? "").trim();
     if (validator.length === 0) return null;
     const total = lines.length > 1 ? Number(lines[1].trim()) : NaN;
-    return Number.isFinite(total) && total > 0 ? { validator, total } : { validator };
+    // Provenance is on its OWN line (index 2), never derived from the value text.
+    const contentHash = (lines[2] ?? "").trim() === CONTENT_HASH_SIDECAR_MARKER;
+    const base: ResumeSidecar =
+      Number.isFinite(total) && total > 0 ? { validator, total } : { validator };
+    if (contentHash) base.contentHash = true;
+    return base;
   } catch {
     return null;
   }
@@ -1048,11 +1075,22 @@ async function readValidatorSidecar(path: string): Promise<ResumeSidecar | null>
 
 /** Persist the resume validator (+ authoritative total when known) next to a
  *  .partial. Best-effort — a failure here only costs the change-detection guard on
- *  a later resume. The validator is a single-line header value; the optional total
- *  goes on line 2. */
-async function writeValidatorSidecar(path: string, value: string, total?: number): Promise<void> {
+ *  a later resume. Line 1 is the header value VERBATIM, line 2 the optional total,
+ *  line 3 the `xet` marker when the value is a content-addressed X-Linked-Etag (so a
+ *  later resume knows it is safe to normalize-compare / trust for a cross-origin
+ *  append). When a content hash has no known total, line 2 is left EMPTY so the
+ *  marker always lands on line 3. */
+async function writeValidatorSidecar(
+  path: string,
+  value: string,
+  total?: number,
+  contentHash = false,
+): Promise<void> {
   try {
-    const body = typeof total === "number" && total > 0 ? `${value}\n${total}` : value;
+    const totalLine = typeof total === "number" && total > 0 ? String(total) : "";
+    let body = value;
+    if (contentHash) body = `${value}\n${totalLine}\n${CONTENT_HASH_SIDECAR_MARKER}`;
+    else if (totalLine) body = `${value}\n${totalLine}`;
     await writeFile(path, body, "utf-8");
   } catch {
     /* best effort */
@@ -1072,6 +1110,28 @@ function extractValidator(res: Response): string | null {
     res.headers.get("etag") ||
     res.headers.get("last-modified")
   );
+}
+
+/** Normalize an entity-tag / X-Linked-Etag for a STABLE content comparison across
+ *  redirect hops. HF's `resolve` 302 carries the content-addressed X-Linked-Etag
+ *  (the LFS/Xet object hash), but the CAS CDN — and even different CDN nodes — can
+ *  quote it, weak-prefix it (`W/`), case-vary a hex hash, or pad whitespace, so a
+ *  RAW string compare false-positives "changed" on an unchanged, content-addressed
+ *  object and then deletes the valid partial (the #467 recurrence). Strips a leading
+ *  weak `W/`, one layer of surrounding double-quotes, and surrounding whitespace,
+ *  then case-folds a PURE-HEX value (HF's X-Linked-Etag is a hex object hash).
+ *  Returns null for an absent/empty value so a MISSING validator is never mistaken
+ *  for either a match or a difference. */
+function normalizeEtag(value: string | null | undefined): string | null {
+  if (value == null) return null;
+  let s = value.trim();
+  if (/^W\//i.test(s)) s = s.slice(2).trim();
+  if (s.length >= 2 && s.startsWith('"') && s.endsWith('"')) s = s.slice(1, -1).trim();
+  if (s.length === 0) return null;
+  // Case-fold only a pure-hex token (HF's content hash) — an opaque non-hex ETag
+  // may be case-sensitive, so leave it untouched.
+  if (/^[0-9a-f]+$/i.test(s)) s = s.toLowerCase();
+  return s;
 }
 
 async function streamUrlToFile(
@@ -1204,6 +1264,13 @@ async function streamUrlToFile(
   // refuse the append ourselves if they differ (belt-and-braces on top of the
   // origin's If-Range: we never trust a CAS 206 whose upstream object changed).
   let priorValidator: string | null = null;
+  // Whether `priorValidator` is a CONTENT-ADDRESSED X-Linked-Etag (vs a plain
+  // ETag/Last-Modified or a legacy sidecar). Only a content hash may be
+  // normalize-compared against a resolve hop's X-Linked-Etag or trusted to prove a
+  // cross-origin 206 unchanged — a plain validator from a DIFFERENT namespace could
+  // otherwise coincidentally normalize equal and splice a changed object onto the
+  // stale prefix (#467 false-negative). See ResumeSidecar.contentHash.
+  let priorIsContentHash = false;
   // The authoritative full-file size the ORIGINAL response declared (persisted in
   // the sidecar), if known — a resume 206 whose Content-Range total DISAGREES with
   // this is a server understating the size, and must be refused (#467).
@@ -1211,6 +1278,7 @@ async function streamUrlToFile(
   if (resumeFromBytes > 0) {
     const sidecar = resumable ? await readValidatorSidecar(validatorSidecar) : null;
     priorValidator = sidecar?.validator ?? null;
+    priorIsContentHash = sidecar?.contentHash === true;
     priorTotal = sidecar?.total;
     if (priorValidator) {
       currentHeaders = {
@@ -1288,7 +1356,19 @@ async function streamUrlToFile(
     const hopValidator = res.headers.get("x-linked-etag");
     if (hopValidator) {
       redirectValidator = hopValidator;
-      if (requestedResume && priorValidator && hopValidator !== priorValidator) {
+      // Compare the NORMALIZED content hashes (strip quotes / `W/` / case /
+      // whitespace) so a hop that merely re-quotes or re-cases the SAME object hash
+      // is not misread as a change (#467). Only compare when the prior validator is
+      // ITSELF a content-addressed X-Linked-Etag — comparing a plain ETag against a
+      // resolve hop's X-Linked-Etag is a namespace error that could false-match OR
+      // false-differ (#467 false-negative). Only a genuinely different normalized
+      // content hash flags a change.
+      if (
+        requestedResume &&
+        priorValidator &&
+        priorIsContentHash &&
+        normalizeEtag(hopValidator) !== normalizeEtag(priorValidator)
+      ) {
         sawChangedRedirectValidator = true;
       }
     }
@@ -1388,53 +1468,85 @@ async function streamUrlToFile(
   // or not. Only 206s are gated — a 200 is a full body and restarts cleanly below.
   // On refusal, drop the partial + sidecar so a retry is a clean full download.
   if (requestedResume && res.status === 206) {
+    // Compare NORMALIZED content-addressed hashes only (strip quotes / `W/` / case /
+    // whitespace), from the SAME authoritative hop the partial's validator was
+    // captured on — so an unchanged, content-addressed object can NEVER read as
+    // "changed" on a cross-hop quoting/case difference (the #467 recurrence).
+    // priorNorm is non-null ONLY when the stored validator is a content-addressed
+    // X-Linked-Etag: a plain ETag/Last-Modified must never be normalize-compared
+    // against a resolve hop's X-Linked-Etag (different namespaces could coincidentally
+    // normalize equal and let a genuinely-changed object append — #467 false-negative).
+    const priorNorm = priorIsContentHash ? normalizeEtag(priorValidator) : null;
+    const redirectNorm = normalizeEtag(redirectValidator);
     // The final response's OWN content-addressed validator (the CAS 206 usually
     // omits it, but when present it describes exactly THESE bytes — authoritative).
-    const finalValidator = res.headers.get("x-linked-etag");
-    // Any content-addressed validator we observed that CONTRADICTS the partial's.
+    const finalNorm = normalizeEtag(res.headers.get("x-linked-etag"));
+    // A change is PROVEN only when an OBSERVED content hash genuinely DIFFERS from
+    // the content hash the partial was written against. A hop that carries NO
+    // X-Linked-Etag (finalNorm/redirectNorm === null), or a prior that is not a
+    // content hash (priorNorm === null), proves nothing — absence must never be read
+    // as a change (that false-positive, comparing the resolve hash to a per-hop CAS
+    // ETag, is exactly what deleted valid partials in #467).
     const provenChange =
       sawChangedRedirectValidator ||
-      (redirectValidator !== null && redirectValidator !== priorValidator) ||
-      (finalValidator !== null && finalValidator !== priorValidator);
-    // The validator that best binds THESE bytes: the final response's own, else
-    // the nearest redirect's. Used for the cross-origin "must be proven" check.
-    const boundValidator = finalValidator ?? redirectValidator;
-    const unprovenCrossOrigin = crossOriginRedirect && boundValidator !== priorValidator; // includes missing
+      (priorNorm !== null && redirectNorm !== null && redirectNorm !== priorNorm) ||
+      (priorNorm !== null && finalNorm !== null && finalNorm !== priorNorm);
+    // The content hash that best binds THESE bytes (final response, else nearest
+    // redirect). A cross-origin resume can't lean on the requesting origin's
+    // If-Range, so it may append ONLY when a CONTENT-ADDRESSED prior hash is PROVEN
+    // unchanged by an OBSERVED content hash of these bytes. Anything less — a plain/
+    // legacy prior (priorNorm null), or no observable content hash (boundNorm null),
+    // or a mismatch — is UNVERIFIABLE and must restart, never append (#467/#630).
+    const boundNorm = finalNorm ?? redirectNorm;
+    const provenUnchangedCrossOrigin =
+      priorNorm !== null && boundNorm !== null && boundNorm === priorNorm;
+    const unprovenCrossOrigin = crossOriginRedirect && !provenUnchangedCrossOrigin;
     if (provenChange || unprovenCrossOrigin) {
-      // provenChange (a validator we saw DIFFERS from the partial's) is a proven
-      // change; unprovenCrossOrigin alone (no validator to compare) is merely
-      // UNVERIFIABLE — report each honestly rather than always "changed".
+      // provenChange = an OBSERVED hash truly differs; unprovenCrossOrigin = no
+      // content hash to prove it either way — report each honestly.
       const why = provenChange
         ? "the upstream now reports a DIFFERENT content-addressed object (X-Linked-Etag changed" +
-          (finalValidator !== null && finalValidator !== priorValidator
+          (priorNorm !== null && finalNorm !== null && finalNorm !== priorNorm
             ? " on the final response"
             : " on a redirect hop") +
           ")"
         : "the resume crossed origins to a CDN that returned no content-addressed validator, so an unchanged upstream can't be proven";
-      // Remove the stale partial + sidecar, then CONFIRM the partial is actually
-      // gone (safeRm swallows failures) before claiming it — a swallowed rm
-      // failure must not be reported as "removed", and would otherwise leave a
-      // partial a retry re-hits (#467 P1-a). The declined outcome is accurate
-      // regardless (we refused to append); only the removal wording is conditional.
-      await safeRm(targetPath);
-      await safeRm(validatorSidecar);
-      const removed = await partialConfirmedDiscarded(targetPath);
+      // Release the 206 slice's socket before we re-request the full body.
+      try {
+        await (res.body as ReadableStream | null | undefined)?.cancel?.();
+      } catch {
+        /* best effort */
+      }
+      // Do NOT delete the partial and throw. That was the core #467 harm: on a
+      // MISREAD cross-hop header it discarded a valid multi-GB partial AND forced the
+      // caller to issue a SECOND identical call before the download would even start.
+      // Instead RESTART the download IN THIS SAME CALL by re-requesting from byte 0:
+      // the resumable-restart path below truncates+overwrites the un-appendable
+      // prefix with the fresh full 200, so ONE call completes. The #630/#343 safety
+      // invariant is preserved — we never APPEND bytes we could not prove belong to
+      // this object; we re-download instead of splicing.
       onResume?.({
         outcome: provenChange ? "declined:etag-changed" : "declined:unverifiable",
         discardedBytes: resumeFromBytes,
-        discarded: removed,
+        discarded: true,
       });
-      const tail = removed
-        ? "Removed the stale partial so a retry restarts cleanly."
-        : "Could not remove the stale partial — a retry may repeat this rejection; delete the .partial manually if so.";
       logger.warn(
-        `Refusing to append a 206 and ${removed ? "discarded" : "abandoning"} a ${resumeFromBytes}-byte ` +
-          `partial: ${why} — appending would risk corrupting the file (#343). ${tail}`,
-        { url: logUrl, discardedBytes: resumeFromBytes, partialRemoved: removed },
+        `Not appending a 206 for a ${resumeFromBytes}-byte partial; restarting the download from 0 in ` +
+          `the same call: ${why} — appending would risk corrupting the file (#343/#467).`,
+        { url: logUrl, discardedBytes: resumeFromBytes },
       );
-      throw new ModelError(
-        `Download resume rejected: ${why}. ${tail}`,
-        { url: logUrl },
+      return await streamUrlToFile(
+        url,
+        targetPath,
+        headers,
+        logUrl,
+        storageAuth,
+        0, // restart from byte 0 — no Range, forces a clean full download this call
+        progress,
+        resumable,
+        onResume,
+        modelExt,
+        signal,
       );
     }
   }
@@ -1528,8 +1640,9 @@ async function streamUrlToFile(
   // begin writing, a truncated partial is already paired with a MATCHING
   // validator. On a 206 append the existing sidecar already matches — leave it.
   if (resumable && !appendMode) {
-    // Drop any stale sidecar, then EXPLICITLY truncate the stale partial to zero
-    // and verify that truncation SUCCEEDED before we either (a) pair a new
+    // Neutralize any stale sidecar with CONFIRMATION (remove, else truncate to 0 so it
+    // carries no resumable validator), then EXPLICITLY truncate the stale partial to
+    // zero and verify that truncation SUCCEEDED before we either (a) pair a new
     // validator with the file or (b) report the discard. Doing the truncation
     // ourselves (create-or-truncate to 0) — rather than relying on the lazy "w"
     // stream open below — lets us confirm the old prefix is gone up front. The
@@ -1538,7 +1651,26 @@ async function streamUrlToFile(
     // bytes onto a stale prefix and silently corrupt the file). If truncation
     // fails, we write NO validator (a retry sees no sidecar → safe restart) and
     // report nothing (the discard didn't actually happen).
-    await safeRm(validatorSidecar);
+    //
+    // #467 P0c: a mere safeRm here SWALLOWS a removal failure — leaving a stale
+    // (possibly content-hash-tagged `xet`) sidecar that a later swallowed new-write
+    // failure would pair with the FRESH bytes we're about to stream, so a subsequent
+    // cross-origin re-serve of the OLD object would append OLD bytes onto the NEW
+    // prefix (silent corruption). Require the old sidecar to be provably GONE or
+    // EMPTY (rmOrTruncate) BEFORE we truncate the partial. If it can be neither
+    // removed nor emptied, FAIL NOW — before touching the partial — so the old
+    // sidecar+old partial remain a CONSISTENT resumable pair rather than a stale
+    // validator paired with new bytes. (An emptied 0-byte sidecar reads back as "no
+    // validator", so even a later failed new-write forces a safe full restart, never
+    // a stale-flag resume.)
+    if (!(await rmOrTruncate(validatorSidecar, logUrl))) {
+      throw new ModelError(
+        `Download restart failed: could not remove or empty the stale resume-validator sidecar, so a ` +
+          `fresh download could pair new bytes with a stale validator (risking corruption on a later ` +
+          `resume). Left the ${resumeFromBytes}-byte partial and its sidecar intact; retry.`,
+        { url: logUrl },
+      );
+    }
     // If we can't truncate the stale partial, FAIL rather than fall through to the
     // "w" open below: a partial-truncate failure that the later "w" open then
     // silently fixed would perform the discard WITHOUT reporting it (#467). By
@@ -1580,18 +1712,41 @@ async function streamUrlToFile(
       onResume?.({ outcome: "declined:no-validator", discardedBytes: resumeFromBytes, discarded: true });
     }
     // The file is now confirmed truncated (we threw otherwise), so a new validator
-    // can never pair with a stale prefix (#343). Prefer the final response's
-    // validator; fall back to one captured off the redirect chain (HF Xet: the CAS
-    // 200 has none, but the resolve 302 carried X-Linked-Etag). Persist the
-    // AUTHORITATIVE full-file size (this restart response is a full 200, so its
-    // Content-Length IS the total) so a later resume can reject a 206 that
+    // can never pair with a stale prefix (#343). PREFER the content-addressed
+    // X-Linked-Etag captured off the resolve redirect over the final response's own
+    // validator: HF's `resolve` 302 carries the true LFS/Xet object hash, while the
+    // final CAS 200 may carry only a per-node/per-request `etag`/`last-modified`.
+    // The resume change-check reads the resolve hop's X-Linked-Etag, so capturing
+    // THAT same hop's value here makes capture-time and check-time compare
+    // like-for-like — otherwise an unchanged object false-reads as "changed on a
+    // redirect hop" and the valid partial is deleted (the #467 recurrence). Fall
+    // back to the final response's validator only when no X-Linked-Etag was seen (a
+    // plain non-HF origin, where If-Range works against that origin's own ETag).
+    // Persist the AUTHORITATIVE full-file size (this restart response is a full 200,
+    // so its Content-Length IS the total) so a later resume can reject a 206 that
     // understates it (#467).
-    const validator = extractValidator(res) || redirectValidator;
+    const finalXLinkedEtag = res.headers.get("x-linked-etag");
+    const validator = redirectValidator || extractValidator(res);
+    // Tag the sidecar's provenance: the value is a CONTENT-ADDRESSED X-Linked-Etag ONLY
+    // when the CHOSEN validator is itself a NON-EMPTY X-Linked-Etag (from the resolve
+    // redirect — always non-empty, it's captured under `if (hopValidator)` — or the
+    // final response's own). An EMPTY/whitespace `x-linked-etag` header makes
+    // extractValidator fall back to a plain ETag/Last-Modified; that fallback is NOT a
+    // content hash and must NOT be flagged as one (#467 P0a — a mistagged plain value
+    // could later normalize-match a DIFFERENT object's X-Linked-Etag and append onto a
+    // stale prefix). Comparing against the actually-chosen `validator` also guarantees
+    // the flag describes the value we persist, not merely a header that was present.
+    const isNonEmpty = (v: string | null): boolean => v !== null && v.trim().length > 0;
+    const validatorIsContentHash =
+      !!validator &&
+      ((redirectValidator !== null && validator === redirectValidator) ||
+        (isNonEmpty(finalXLinkedEtag) && validator === finalXLinkedEtag));
     // Authoritative total: the GREATER of Content-Length and HF's X-Linked-Size, so
     // a later resume cross-checks against the TRUE size, not an understated one (#467).
     const fullTotal =
       Math.max(Number(res.headers.get("content-length")) || 0, redirectSize ?? 0) || undefined;
-    if (validator) await writeValidatorSidecar(validatorSidecar, validator, fullTotal);
+    if (validator)
+      await writeValidatorSidecar(validatorSidecar, validator, fullTotal, validatorIsContentHash);
   } else if (appendMode) {
     // A resume was actually taken (validated 206 append). Record it so
     // download_status can report the partial was reused, not discarded (#467).

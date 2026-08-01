@@ -692,7 +692,8 @@ describe("downloadModel cache", () => {
     // partial could never resume. Now the redirect's X-Linked-Etag is captured,
     // plus the authoritative total on line 2 (#467).
     await expect(stat(partial)).resolves.toBeTruthy();
-    await expect(readFile(sidecar, "utf-8")).resolves.toBe('"xet-content-hash-v1"\n1000');
+    // Line 1 = value, line 2 = total, line 3 = the `xet` content-hash marker (#467).
+    await expect(readFile(sidecar, "utf-8")).resolves.toBe('"xet-content-hash-v1"\n1000\nxet');
   });
 
   it("forwards Range across a cross-origin CAS redirect and APPENDS a 206 (HF Xet resume) (#467)", async () => {
@@ -700,7 +701,7 @@ describe("downloadModel cache", () => {
     const url = "https://huggingface.co/org/repo/resolve/main/resume-xet.safetensors";
     const { partial, sidecar } = await cachePaths(url);
     await writeFile(partial, "AAAA"); // 4 bytes already downloaded
-    await writeFile(sidecar, '"xet-content-hash-v1"');
+    await writeFile(sidecar, '"xet-content-hash-v1"\n\nxet'); // content-addressed prior
 
     // Hop 1: resolve URL 302s cross-origin, advertising the SAME content-addressed
     // X-Linked-Etag as the partial — proving the object is unchanged, so the
@@ -742,12 +743,12 @@ describe("downloadModel cache", () => {
     expect(cap.box.d?.outcome).toBe("resumed");
   });
 
-  it("REFUSES to append a CAS 206 when the redirect's content-addressed X-Linked-Etag changed, even if the CDN honors the Range (#467/#343)", async () => {
+  it("does NOT append a CAS 206 when the redirect's X-Linked-Etag genuinely changed — restarts in the SAME call (#467/#343)", async () => {
     await fsPromises.mkdir(cacheDir, { recursive: true });
     const url = "https://huggingface.co/org/repo/resolve/main/xet-changed.safetensors";
-    const { partial, sidecar } = await cachePaths(url);
+    const { partial } = await cachePaths(url);
     await writeFile(partial, "AAAA");
-    await writeFile(sidecar, '"xet-hash-OLD"'); // partial written against OLD content
+    await writeFile(`${partial}.etag`, '"xet-hash-OLD"\n\nxet'); // content-addressed prior, OLD content
 
     // Hop 1: resolve 302 now advertises a DIFFERENT content hash (file changed).
     fetchMock.mockResolvedValueOnce(
@@ -767,25 +768,27 @@ describe("downloadModel cache", () => {
         headers: { "content-range": "bytes 4-7/8" },
       }),
     );
+    // Restart within the same call: re-request from 0 → the fresh full object.
+    fetchMock.mockResolvedValueOnce(okResponse("BRANDNEWFULLOBJECT"));
 
-    // We must NOT splice new-object bytes onto the stale prefix — reject instead.
+    // We must NOT splice new-object bytes onto the stale prefix, but the SAME call
+    // must still complete — no second manual retry (#467).
     const cap = resumeCapture();
-    await expect(
-      downloadModel(url, "diffusion_models", "xet-changed-out.safetensors", undefined, undefined, cap.onResume),
-    ).rejects.toThrow(/resume rejected/i);
-    // Stale partial + sidecar removed so a retry restarts clean.
-    await expect(stat(partial)).rejects.toThrow();
-    await expect(stat(sidecar)).rejects.toThrow();
+    const target = await downloadModel(
+      url, "diffusion_models", "xet-changed-out.safetensors", undefined, undefined, cap.onResume,
+    );
+    // The genuinely-changed file was re-downloaded in full (NOT "AAAABBBB").
+    await expect(readFile(target, "utf-8")).resolves.toBe("BRANDNEWFULLOBJECT");
     expect(cap.box.d?.outcome).toBe("declined:etag-changed");
     expect(cap.box.d?.discarded).toBe(true);
   });
 
-  it("REFUSES a cross-origin CAS 206 whose redirect gives NO content-addressed validator (can't prove unchanged) (#467/#343)", async () => {
+  it("does NOT append a cross-origin CAS 206 whose redirect gives NO content validator — restarts in the SAME call (#467/#343)", async () => {
     await fsPromises.mkdir(cacheDir, { recursive: true });
     const url = "https://huggingface.co/org/repo/resolve/main/xet-unproven.safetensors";
-    const { partial, sidecar } = await cachePaths(url);
+    const { partial } = await cachePaths(url);
     await writeFile(partial, "AAAA");
-    await writeFile(sidecar, '"xet-hash-v1"');
+    await writeFile(`${partial}.etag`, '"xet-hash-v1"\n\nxet'); // content-addressed prior
 
     // Hop 1: resolve 302s cross-origin WITHOUT an X-Linked-Etag — we cannot prove
     // the CAS object still matches the partial.
@@ -803,13 +806,15 @@ describe("downloadModel cache", () => {
         headers: { "content-range": "bytes 4-7/8" },
       }),
     );
+    // Restart within the same call rather than throwing + demanding a retry.
+    fetchMock.mockResolvedValueOnce(okResponse("FULLBODYAGAIN"));
 
     const cap = resumeCapture();
-    await expect(
-      downloadModel(url, "diffusion_models", "xet-unproven-out.safetensors", undefined, undefined, cap.onResume),
-    ).rejects.toThrow(/resume rejected/i);
-    await expect(stat(partial)).rejects.toThrow();
-    await expect(stat(sidecar)).rejects.toThrow();
+    const target = await downloadModel(
+      url, "diffusion_models", "xet-unproven-out.safetensors", undefined, undefined, cap.onResume,
+    );
+    // Unverifiable append refused, but the same call re-downloaded in full.
+    await expect(readFile(target, "utf-8")).resolves.toBe("FULLBODYAGAIN");
     // Unverifiable, not proven-changed: no validator was available to compare.
     expect(cap.box.d?.outcome).toBe("declined:unverifiable");
   });
@@ -819,7 +824,7 @@ describe("downloadModel cache", () => {
     const url = "https://huggingface.co/org/repo/resolve/main/multihop.safetensors";
     const { partial, sidecar } = await cachePaths(url);
     await writeFile(partial, "AAAA");
-    await writeFile(sidecar, '"xet-hash-v1"');
+    await writeFile(sidecar, '"xet-hash-v1"\n\nxet'); // content-addressed prior
 
     // Hop 1: same-origin 302 whose X-Linked-Etag MATCHES the partial...
     fetchMock.mockResolvedValueOnce(
@@ -850,12 +855,15 @@ describe("downloadModel cache", () => {
         headers: { "content-range": "bytes 4-7/8" },
       }),
     );
+    // Restart within the same call → the fresh full object.
+    fetchMock.mockResolvedValueOnce(okResponse("MULTIHOPFULLBODY"));
 
     const cap = resumeCapture();
-    await expect(
-      downloadModel(url, "diffusion_models", "multihop-out.safetensors", undefined, undefined, cap.onResume),
-    ).rejects.toThrow(/resume rejected/i);
-    await expect(stat(partial)).rejects.toThrow();
+    const target = await downloadModel(
+      url, "diffusion_models", "multihop-out.safetensors", undefined, undefined, cap.onResume,
+    );
+    // A changed hash on a LATER hop still triggers a restart-in-call, not an append.
+    await expect(readFile(target, "utf-8")).resolves.toBe("MULTIHOPFULLBODY");
     expect(cap.box.d?.outcome).toBe("declined:etag-changed");
   });
 
@@ -947,12 +955,12 @@ describe("downloadModel cache", () => {
     expect(cached.some((f) => f.endsWith(".safetensors"))).toBe(false);
   });
 
-  it("REFUSES a cross-origin 206 whose FINAL response carries a DIFFERENT X-Linked-Etag than the matching redirect (#467 P0-2)", async () => {
+  it("does NOT append a cross-origin 206 whose FINAL response carries a DIFFERENT X-Linked-Etag than the matching redirect — restarts in-call (#467 P0-2)", async () => {
     await fsPromises.mkdir(cacheDir, { recursive: true });
     const url = "https://huggingface.co/org/repo/resolve/main/finalconflict.safetensors";
-    const { partial, sidecar } = await cachePaths(url);
+    const { partial } = await cachePaths(url);
     await writeFile(partial, "AAAA");
-    await writeFile(sidecar, '"xet-v1"');
+    await writeFile(`${partial}.etag`, '"xet-v1"\n\nxet'); // content-addressed prior
 
     // Hop 1: resolve 302 cross-origin whose X-Linked-Etag MATCHES the partial...
     fetchMock.mockResolvedValueOnce(
@@ -973,14 +981,325 @@ describe("downloadModel cache", () => {
         headers: { "content-range": "bytes 4-7/8", "x-linked-etag": '"xet-v2-CHANGED"' },
       }),
     );
+    // Restart within the same call → the fresh full object.
+    fetchMock.mockResolvedValueOnce(okResponse("FINALCONFLICTFULL"));
 
     const cap = resumeCapture();
-    await expect(
-      downloadModel(url, "diffusion_models", "finalconflict-out.safetensors", undefined, undefined, cap.onResume),
-    ).rejects.toThrow(/resume rejected/i);
-    await expect(stat(partial)).rejects.toThrow();
-    await expect(stat(sidecar)).rejects.toThrow();
+    const target = await downloadModel(
+      url, "diffusion_models", "finalconflict-out.safetensors", undefined, undefined, cap.onResume,
+    );
+    // The final-hop change is caught and the object is re-downloaded in full.
+    await expect(readFile(target, "utf-8")).resolves.toBe("FINALCONFLICTFULL");
     expect(cap.box.d?.outcome).toBe("declined:etag-changed");
+  });
+
+  it("captures the resolve REDIRECT's X-Linked-Etag for the sidecar even when the final CAS 200 carries its OWN per-hop ETag (#467 recurrence root cause)", async () => {
+    await fsPromises.mkdir(cacheDir, { recursive: true });
+    const url = "https://huggingface.co/org/repo/resolve/main/perhop.safetensors";
+    const { partial, sidecar } = await cachePaths(url);
+
+    // Hop 1: resolve 302 carries the CONTENT-ADDRESSED X-Linked-Etag.
+    fetchMock.mockResolvedValueOnce(
+      new Response(null, {
+        status: 302,
+        headers: {
+          location: "https://cas-bridge.xethub.hf.co/xet-bridge-us/obj?sig=abc",
+          "x-linked-etag": '"xet-content-hash-STABLE"',
+        },
+      }),
+    );
+    // Hop 2: the CAS 200 ALSO carries its OWN per-node/per-request etag + last-modified
+    // (different from the content hash). The sidecar MUST store the content hash — the
+    // value the resume change-check reads on the resolve hop — NOT this per-hop ETag,
+    // or an unchanged object false-reads as "changed on a redirect hop" (#467).
+    const stream = new ReadableStream<Uint8Array>({
+      start(c) { c.enqueue(new TextEncoder().encode("half")); c.close(); },
+    });
+    fetchMock.mockResolvedValueOnce(
+      new Response(stream, {
+        status: 200,
+        statusText: "OK",
+        headers: {
+          "content-length": "1000",
+          etag: '"cas-per-request-node-etag"',
+          "last-modified": "Wed, 21 Oct 2026 07:28:00 GMT",
+        },
+      }),
+    );
+
+    await expect(
+      downloadModel(url, "diffusion_models", "perhop-out.safetensors"),
+    ).rejects.toThrow(/truncat/i);
+
+    await expect(stat(partial)).resolves.toBeTruthy();
+    // The STABLE content hash was persisted (with its line-3 `xet` provenance marker),
+    // NOT the CAS per-hop ETag.
+    await expect(readFile(sidecar, "utf-8")).resolves.toBe('"xet-content-hash-STABLE"\n1000\nxet');
+  });
+
+  it("(a) does NOT falsely reject a resume when X-Linked-Etag is on the resolve hop but ABSENT on the final CAS 206 — partial NOT deleted (#467)", async () => {
+    await fsPromises.mkdir(cacheDir, { recursive: true });
+    const url = "https://huggingface.co/org/repo/resolve/main/absent-final.safetensors";
+    const { partial, sidecar } = await cachePaths(url);
+    await writeFile(partial, "AAAA");
+    await writeFile(sidecar, '"xet-content-hash-STABLE"\n\nxet'); // content-addressed prior
+
+    // Hop 1: resolve 302 advertises the SAME content hash as the partial.
+    fetchMock.mockResolvedValueOnce(
+      new Response(null, {
+        status: 302,
+        headers: {
+          location: "https://cas-bridge.xethub.hf.co/xet-bridge-us/obj?sig=abc",
+          "x-linked-etag": '"xet-content-hash-STABLE"',
+        },
+      }),
+    );
+    // Hop 2: the final CAS 206 carries NO X-Linked-Etag (typical). Absence must NOT
+    // be read as a change — the resume must proceed.
+    fetchMock.mockResolvedValueOnce(
+      new Response("BBBB", {
+        status: 206,
+        statusText: "Partial Content",
+        headers: { "content-range": "bytes 4-7/8" },
+      }),
+    );
+
+    const cap = resumeCapture();
+    const target = await downloadModel(
+      url, "diffusion_models", "absent-final-out.safetensors", undefined, undefined, cap.onResume,
+    );
+    // Appended, not re-downloaded or deleted.
+    await expect(readFile(target, "utf-8")).resolves.toBe("AAAABBBB");
+    expect(cap.box.d?.outcome).toBe("resumed");
+    expect(cap.box.d?.discarded).toBe(false);
+  });
+
+  it("(b) treats an X-Linked-Etag that differs only by quoting / W/ / case as UNCHANGED — resume proceeds (#467)", async () => {
+    await fsPromises.mkdir(cacheDir, { recursive: true });
+    const url = "https://huggingface.co/org/repo/resolve/main/normalize.safetensors";
+    const { partial, sidecar } = await cachePaths(url);
+    await writeFile(partial, "AAAA");
+    // Partial captured a content-addressed, bare, upper-case hex hash (line-3 marker).
+    await writeFile(sidecar, "DEADBEEFCAFE\n\nxet");
+
+    // Hop 1: resolve 302 reports the SAME hash but weak-prefixed, quoted, lower-case.
+    fetchMock.mockResolvedValueOnce(
+      new Response(null, {
+        status: 302,
+        headers: {
+          location: "https://cas-bridge.xethub.hf.co/xet-bridge-us/obj?sig=abc",
+          "x-linked-etag": 'W/"deadbeefcafe"',
+        },
+      }),
+    );
+    fetchMock.mockResolvedValueOnce(
+      new Response("BBBB", {
+        status: 206,
+        statusText: "Partial Content",
+        headers: { "content-range": "bytes 4-7/8" },
+      }),
+    );
+
+    const cap = resumeCapture();
+    const target = await downloadModel(
+      url, "diffusion_models", "normalize-out.safetensors", undefined, undefined, cap.onResume,
+    );
+    await expect(readFile(target, "utf-8")).resolves.toBe("AAAABBBB");
+    expect(cap.box.d?.outcome).toBe("resumed");
+  });
+
+  it("(c) restarts on a GENUINELY different content hash (hex) — no corrupt append (#467/#630)", async () => {
+    await fsPromises.mkdir(cacheDir, { recursive: true });
+    const url = "https://huggingface.co/org/repo/resolve/main/genuine-change.safetensors";
+    const { partial } = await cachePaths(url);
+    await writeFile(partial, "AAAA");
+    await writeFile(`${partial}.etag`, "aaaa1111\n\nxet"); // content-addressed old hash
+
+    fetchMock.mockResolvedValueOnce(
+      new Response(null, {
+        status: 302,
+        headers: {
+          location: "https://cas-bridge.xethub.hf.co/xet-bridge-us/obj?sig=new",
+          "x-linked-etag": '"bbbb2222"', // genuinely different object
+        },
+      }),
+    );
+    fetchMock.mockResolvedValueOnce(
+      new Response("BBBB", {
+        status: 206,
+        statusText: "Partial Content",
+        headers: { "content-range": "bytes 4-7/8" },
+      }),
+    );
+    fetchMock.mockResolvedValueOnce(okResponse("GENUINELYNEWFULLBODY"));
+
+    const cap = resumeCapture();
+    const target = await downloadModel(
+      url, "diffusion_models", "genuine-change-out.safetensors", undefined, undefined, cap.onResume,
+    );
+    // The stale prefix was NOT spliced onto the new object — full re-download.
+    await expect(readFile(target, "utf-8")).resolves.toBe("GENUINELYNEWFULLBODY");
+    expect(cap.box.d?.outcome).toBe("declined:etag-changed");
+  });
+
+  it("(d) a restart decision completes within the SAME call — no second identical call required (#467)", async () => {
+    await fsPromises.mkdir(cacheDir, { recursive: true });
+    const url = "https://huggingface.co/org/repo/resolve/main/single-call.safetensors";
+    const { partial } = await cachePaths(url);
+    await writeFile(partial, "AAAA");
+    await writeFile(`${partial}.etag`, '"xet-OLD"\n\nxet'); // content-addressed prior
+
+    // A genuine change forces a restart decision mid-call.
+    fetchMock.mockResolvedValueOnce(
+      new Response(null, {
+        status: 302,
+        headers: {
+          location: "https://cas-bridge.xethub.hf.co/xet-bridge-us/obj?sig=z",
+          "x-linked-etag": '"xet-NEW"',
+        },
+      }),
+    );
+    fetchMock.mockResolvedValueOnce(
+      new Response("BBBB", {
+        status: 206,
+        statusText: "Partial Content",
+        headers: { "content-range": "bytes 4-7/8" },
+      }),
+    );
+    fetchMock.mockResolvedValueOnce(okResponse("COMPLETEDINONECALL"));
+
+    // ONE call resolves — it does not throw and does not need a manual retry.
+    const target = await downloadModel(url, "diffusion_models", "single-call-out.safetensors");
+    await expect(readFile(target, "utf-8")).resolves.toBe("COMPLETEDINONECALL");
+    // Exactly the two resume hops + one restart fetch — a single downloadModel call.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("does NOT trust a PLAIN/legacy (non-content-hash) validator that coincidentally normalizes equal to a resolve X-Linked-Etag — restarts, never appends (#467 false-negative)", async () => {
+    await fsPromises.mkdir(cacheDir, { recursive: true });
+    const url = "https://huggingface.co/org/repo/resolve/main/namespace-collision.safetensors";
+    const { partial } = await cachePaths(url);
+    await writeFile(partial, "AAAA");
+    // A BARE (un-prefixed) sidecar: a plain ETag / legacy value, NOT a content hash.
+    // Its hex happens to equal a DIFFERENT object's X-Linked-Etag after normalization.
+    await writeFile(`${partial}.etag`, "deadbeef");
+
+    // Hop 1: resolve 302 for a genuinely DIFFERENT object whose content hash is the
+    // same hex string (weak-prefixed + quoted) — a namespace collision, not the same
+    // bytes. It must NOT be trusted to prove the cross-origin 206 unchanged.
+    fetchMock.mockResolvedValueOnce(
+      new Response(null, {
+        status: 302,
+        headers: {
+          location: "https://cas-bridge.xethub.hf.co/xet-bridge-us/obj?sig=q",
+          "x-linked-etag": 'W/"deadbeef"',
+        },
+      }),
+    );
+    fetchMock.mockResolvedValueOnce(
+      new Response("BBBB", {
+        status: 206,
+        statusText: "Partial Content",
+        headers: { "content-range": "bytes 4-7/8" },
+      }),
+    );
+    // Same-call restart rather than a corrupt append.
+    fetchMock.mockResolvedValueOnce(okResponse("SAFE-FULL-REDOWNLOAD"));
+
+    const cap = resumeCapture();
+    const target = await downloadModel(
+      url, "diffusion_models", "namespace-collision-out.safetensors", undefined, undefined, cap.onResume,
+    );
+    // The stale prefix was NEVER spliced under the collision — full re-download.
+    await expect(readFile(target, "utf-8")).resolves.toBe("SAFE-FULL-REDOWNLOAD");
+    // A plain prior can't PROVE unchanged cross-origin → unverifiable, not resumed.
+    expect(cap.box.d?.outcome).toBe("declined:unverifiable");
+  });
+
+  it("(P0a) does NOT tag a plain-ETag fallback as content-hash when X-Linked-Etag is EMPTY (#467)", async () => {
+    await fsPromises.mkdir(cacheDir, { recursive: true });
+    const url = "https://example.com/models/empty-xlinked.safetensors";
+    const { partial, sidecar } = await cachePaths(url);
+
+    // Fresh 200 with an EMPTY x-linked-etag header (present but blank) + a plain ETag.
+    // extractValidator falls back to the plain ETag; that fallback must NOT be flagged
+    // content-hash (no line-3 `xet` marker), else it could later normalize-match a
+    // different object's X-Linked-Etag and append onto a stale prefix.
+    const stream = new ReadableStream<Uint8Array>({
+      start(c) { c.enqueue(new TextEncoder().encode("half")); c.close(); },
+    });
+    fetchMock.mockResolvedValueOnce(
+      new Response(stream, {
+        status: 200,
+        statusText: "OK",
+        headers: { "content-length": "1000", "x-linked-etag": "  ", etag: '"plain-etag-v1"' },
+      }),
+    );
+
+    await expect(
+      downloadModel(url, "checkpoints", "empty-xlinked-out.safetensors"),
+    ).rejects.toThrow(/truncat/i);
+
+    await expect(stat(partial)).resolves.toBeTruthy();
+    // Plain validator + total, NO `xet` marker line → read back as contentHash:false.
+    await expect(readFile(sidecar, "utf-8")).resolves.toBe('"plain-etag-v1"\n1000');
+  });
+
+  it("(P0b) treats a legacy sidecar whose line-1 value literally starts with 'xet:' as PLAIN (no line-3 marker) — never appends cross-origin (#467)", async () => {
+    await fsPromises.mkdir(cacheDir, { recursive: true });
+    const url = "https://huggingface.co/org/repo/resolve/main/literal-xet.safetensors";
+    const { partial } = await cachePaths(url);
+    await writeFile(partial, "AAAA");
+    // A legacy/plain sidecar whose VALUE happens to be the literal text "xet:deadbeef"
+    // and has NO line-3 provenance marker. It must be read as a PLAIN validator
+    // (contentHash:false), not mis-parsed as content-hash-tagged.
+    await writeFile(`${partial}.etag`, "xet:deadbeef");
+
+    // Cross-origin resolve advertising a hash that would normalize-match the literal
+    // value's tail — must NOT be trusted, since the prior is plain.
+    fetchMock.mockResolvedValueOnce(
+      new Response(null, {
+        status: 302,
+        headers: {
+          location: "https://cas-bridge.xethub.hf.co/xet-bridge-us/obj?sig=q",
+          "x-linked-etag": '"xet:deadbeef"',
+        },
+      }),
+    );
+    fetchMock.mockResolvedValueOnce(
+      new Response("BBBB", {
+        status: 206,
+        statusText: "Partial Content",
+        headers: { "content-range": "bytes 4-7/8" },
+      }),
+    );
+    fetchMock.mockResolvedValueOnce(okResponse("PLAIN-LITERAL-REDOWNLOAD"));
+
+    const cap = resumeCapture();
+    const target = await downloadModel(
+      url, "diffusion_models", "literal-xet-out.safetensors", undefined, undefined, cap.onResume,
+    );
+    await expect(readFile(target, "utf-8")).resolves.toBe("PLAIN-LITERAL-REDOWNLOAD");
+    expect(cap.box.d?.outcome).toBe("declined:unverifiable");
+  });
+
+  it("(P0c) FAILS the restart (never pairs new bytes with a stale sidecar) when the stale sidecar can't be removed or emptied (#467)", async () => {
+    await fsPromises.mkdir(cacheDir, { recursive: true });
+    const url = "https://example.com/models/stuck-sidecar.safetensors";
+    const { partial, sidecar } = await cachePaths(url);
+    await writeFile(partial, "AAAA");
+    // Make the sidecar PATH a directory so both rm (non-empty dir) AND truncate-to-file
+    // fail — the restart must fail rather than leave new bytes paired with a stale flag.
+    await fsPromises.mkdir(sidecar, { recursive: true });
+    await fsPromises.writeFile(join(sidecar, "blocker"), "x"); // non-empty ⇒ rm fails
+
+    // A no-validator resume declines and would restart with a full 200 — but the
+    // stale-sidecar neutralization must gate that restart.
+    fetchMock.mockResolvedValueOnce(okResponse("SHOULD-NOT-LAND"));
+
+    await expect(
+      downloadModel(url, "checkpoints", "stuck-sidecar-out.safetensors"),
+    ).rejects.toThrow(/remove or empty the stale resume-validator sidecar|restart failed/i);
   });
 
   it("does NOT coalesce same-URL downloads carrying DIFFERENT auth headers — each gets its own bytes (#467 P1-2)", async () => {
