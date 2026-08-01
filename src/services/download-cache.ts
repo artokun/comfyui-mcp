@@ -896,6 +896,10 @@ export const downloadCacheFs = {
 export interface ProgressMeta {
   id: string;
   name: string;
+  /** Attempt generation/epoch (panel#489): the epoch-ms this download attempt began.
+   *  Stamped onto every progress row so the orchestrator can drop a late terminal row
+   *  from a SUPERSEDED attempt (a same-URL retry reuses the deterministic id). */
+  attempt?: number;
 }
 
 export interface DownloadCacheOptions {
@@ -1709,7 +1713,7 @@ async function streamUrlToFile(
   let bytesPerSec = 0;
   const emit = (status: DownloadProgress["status"], force = false) =>
     reportDownloadProgress(
-      { id: progress.id, name: progress.name, downloaded, total, bytes_per_sec: bytesPerSec, status },
+      { id: progress.id, name: progress.name, attempt: progress.attempt, downloaded, total, bytes_per_sec: bytesPerSec, status },
       force,
     );
   emit("downloading", true); // show the row immediately, even before the first chunk

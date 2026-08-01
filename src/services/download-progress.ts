@@ -39,6 +39,16 @@ export interface DownloadProgress {
   bytes_per_sec: number;
   /** Lifecycle. */
   status: "downloading" | "done" | "error";
+  /** Attempt generation/epoch (panel#489): the epoch-ms at which THIS download
+   *  ATTEMPT began. The tray/progress id is URL-derived (deterministic), so a retry
+   *  of the same URL reuses the SAME id — attempt N and attempt N+1 are otherwise
+   *  indistinguishable. Stamping each attempt's start epoch lets the orchestrator
+   *  DROP a late terminal (failed/done) row from a SUPERSEDED attempt when a newer
+   *  attempt for the same id is already progressing, instead of firing a stale
+   *  "download FAILED" event that contradicts the live transfer. Absent on pre-fix
+   *  rows and non-model reporters — such rows are treated conservatively (never
+   *  suppressed, and never used to suppress). */
+  attempt?: number;
   /** Epoch ms of this snapshot (set on write). */
   updated: number;
   /** The ComfyUI target this download serves (the writer's own COMFYUI_URL at
@@ -82,7 +92,7 @@ export function persistedRecordsEnabled(): boolean {
   return !!channelDir();
 }
 
-function fileFor(id: string, target?: string): string {
+function fileFor(id: string, target?: string, attempt?: number): string {
   // The id is a hex hash from callers, but stay defensive about the filename.
   // Include a TARGET discriminator (codex finding: the same URL downloaded for
   // local AND pod concurrently shared one file — the last writer's target won
@@ -91,7 +101,16 @@ function fileFor(id: string, target?: string): string {
     .update(target ?? `pid:${process.pid}`)
     .digest("hex")
     .slice(0, 8);
-  return join(PROGRESS_DIR, `${id.replace(/[^a-zA-Z0-9_.-]/g, "_")}-${disc}.json`);
+  // Per-ATTEMPT file (panel#489): the id is URL-derived, so attempt N and a retry N+1
+  // share id AND target. Giving each attempt its OWN file (by its start epoch) means a
+  // retry can NEVER clobber the still-live row of the attempt it replaced — both rows
+  // coexist on disk, so the orchestrator deterministically drops the SUPERSEDED
+  // attempt's terminal instead of racing a shared-file overwrite. Readers scan the
+  // shared `${id}-` prefix, so readDownloadProgress/clearDownloadProgress still see
+  // every variant. Absent on rows with no attempt epoch (pre-fix / non-model reporters
+  // — they keep the single-file name, unchanged).
+  const attemptSeg = Number.isFinite(attempt) ? `-a${attempt}` : "";
+  return join(PROGRESS_DIR, `${id.replace(/[^a-zA-Z0-9_.-]/g, "_")}-${disc}${attemptSeg}.json`);
 }
 
 /** Credential-free form of a target URL for persisted rows / control files:
@@ -140,7 +159,10 @@ export function reportDownloadProgress(
     // COMFYUI_MCP_TAB) so the orchestrator can wake EXACTLY that tab's agent when
     // the download settles (#547), the same self-scoping trick `target` uses.
     const tab = p.tab ?? (process.env.COMFYUI_MCP_TAB?.trim() || undefined);
-    writeFileSync(fileFor(p.id, target), JSON.stringify({ ...p, target, tab, updated: now }));
+    // Per-attempt file (panel#489): a retry of the same URL/target writes its OWN file
+    // (keyed by attempt epoch), so it can never overwrite the still-live row of the
+    // attempt it superseded. The orchestrator sees both and drops the superseded one.
+    writeFileSync(fileFor(p.id, target, p.attempt), JSON.stringify({ ...p, target, tab, updated: now }));
   } catch {
     // best-effort — progress is cosmetic, never fail a download over it
   }
@@ -176,6 +198,72 @@ export function readDownloadProgress(id: string): DownloadProgress | null {
   } catch {
     return null; // absent or mid-write — not an error
   }
+}
+
+// ── Attempt-supersession (panel#489) ────────────────────────────────────────
+// The tray/progress id is a deterministic hash of the source URL, so a RETRY of
+// the same URL reuses the SAME id: attempt N and attempt N+1 share an id but are
+// distinct transfers. When attempt N fails (poison-partial discard, network drop)
+// AFTER attempt N+1 for the same id has begun, attempt N's TERMINAL (error/done)
+// row is a LATE artifact of an abandoned attempt — firing a "download FAILED"
+// event off it contradicts the live progress of attempt N+1. These helpers let
+// the orchestrator's tray poll detect and drop such superseded terminals, and the
+// WRITER-side guard (reportDownloadProgress) stops a superseded terminal from ever
+// clobbering the shared on-disk row of a newer attempt for the same (id, target).
+
+interface AttemptRowLike {
+  id?: unknown;
+  status?: unknown;
+  attempt?: unknown;
+  target?: unknown;
+}
+
+/** Supersession scope key: (id, target). Two downloads with the SAME URL-derived id
+ *  but DIFFERENT targets — e.g. the SAME model streamed to LOCAL and to a POD at once
+ *  (#269) — are INDEPENDENT transfers, not retries of each other, so a terminal from
+ *  one must NEVER be treated as superseded by the other. Attempts of the same logical
+ *  download share id AND target. Returns null when the row carries no usable id. A
+ *  missing target (in-process caller / no COMFYUI_URL) collapses to "" — two such
+ *  attempts still share a scope, which is correct (same logical local destination). */
+export function downloadAttemptKey(row: AttemptRowLike): string | null {
+  const id = typeof row?.id === "string" ? row.id : undefined;
+  if (!id) return null;
+  const target = typeof row?.target === "string" ? row.target : "";
+  return `${id}\n${target}`;
+}
+
+/** Newest attempt epoch per (id, target) across the given rows (ANY status — a
+ *  superseding newer attempt may itself be downloading OR already terminal). Rows
+ *  missing an `attempt` epoch (pre-fix writer / non-model reporter) are ignored —
+ *  they never establish supersession. The caller passes rows that have survived the
+ *  dead-writer freshness filter so a crashed attempt's stale row can't shadow a real
+ *  terminal. */
+export function newestAttemptEpochs(rows: AttemptRowLike[]): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const r of rows) {
+    const attempt = typeof r?.attempt === "number" ? r.attempt : undefined;
+    const k = downloadAttemptKey(r);
+    if (!k || attempt === undefined) continue;
+    const cur = out.get(k);
+    if (cur === undefined || attempt > cur) out.set(k, attempt);
+  }
+  return out;
+}
+
+/** True when `row` belongs to a SUPERSEDED attempt — a strictly-newer attempt for the
+ *  SAME (id, target) exists (panel#489). Applies to ANY status: a superseded attempt's
+ *  late TERMINAL (error/done) must not fire a stale panel event, and its abandoned
+ *  "downloading" row must not linger as a duplicate tray/idle-veto row beside the live
+ *  retry. Both `row` AND the newer attempt must carry `attempt` epochs for a
+ *  supersession to be provable; otherwise returns false (conservative — a genuine
+ *  current row still shows, and pre-fix rows are unaffected). Strictly-greater, so an
+ *  attempt's OWN rows (equal epoch) never suppress themselves. */
+export function isSupersededAttempt(row: AttemptRowLike, newest: Map<string, number>): boolean {
+  const attempt = typeof row?.attempt === "number" ? row.attempt : undefined;
+  const k = downloadAttemptKey(row);
+  if (!k || attempt === undefined) return false;
+  const n = newest.get(k);
+  return n !== undefined && n > attempt;
 }
 
 /** Remove a download's progress file(s) (e.g. on cancel). Target-scoped files

@@ -139,3 +139,125 @@ describe("control channel (#269 MCP child → orchestrator)", () => {
     expect(bare.listTargetChangeRequests(dir)).toHaveLength(0);
   });
 });
+
+describe("attempt-supersession (panel#489)", () => {
+  const T = "https://host"; // shared target for same-logical-download attempts
+
+  it("stamps the attempt epoch onto the written row", () => {
+    mod.reportDownloadProgress(
+      { id: "s1", name: "seedvr2_dit.safetensors", downloaded: 1, total: 2, bytes_per_sec: 1, status: "downloading", attempt: 12345 },
+      true,
+    );
+    const row = JSON.parse(readFileSync(join(dir, readdirSync(dir).find((f) => f.startsWith("s1-"))!), "utf-8"));
+    expect(row.attempt).toBe(12345);
+  });
+
+  it("drops a late FAILED terminal from a superseded attempt while the retry progresses", () => {
+    // The reported case: two SeedVR2 files. An OLDER attempt (N) fails AFTER a NEWER
+    // attempt (N+1) for the SAME URL-derived id + SAME target has begun and is actively
+    // progressing. attempt N's terminal "error" row is a late artifact of an abandoned
+    // attempt.
+    const dit = "a1b2c3"; // deterministic URL-derived id (same for both attempts)
+    const errorN = { id: dit, target: T, name: "seedvr2_dit.safetensors", status: "error", attempt: 1000 };
+    const downloadingN1 = { id: dit, target: T, name: "seedvr2_dit.safetensors", status: "downloading", attempt: 2000 };
+
+    const newest = mod.newestAttemptEpochs([errorN, downloadingN1]);
+    // The late FAILED terminal of attempt N is SUPERSEDED → must be dropped (no event).
+    expect(mod.isSupersededAttempt(errorN, newest)).toBe(true);
+    // The live progressing row is the current attempt — never suppressed.
+    expect(mod.isSupersededAttempt(downloadingN1, newest)).toBe(false);
+  });
+
+  it("suppresses a superseded attempt's stale DOWNLOADING row too (no duplicate tray/idle-veto row)", () => {
+    // An abandoned attempt (N) that died mid-transfer left a stale "downloading" row; the
+    // retry (N+1) is live. N's row must be dropped so it doesn't duplicate the tray row or
+    // wrongly veto pod idle-stop next to the live retry.
+    const id = "dd77ee";
+    const staleN = { id, target: T, name: "m", status: "downloading", attempt: 1000 };
+    const liveN1 = { id, target: T, name: "m", status: "downloading", attempt: 2000 };
+    const newest = mod.newestAttemptEpochs([staleN, liveN1]);
+    expect(mod.isSupersededAttempt(staleN, newest)).toBe(true);
+    expect(mod.isSupersededAttempt(liveN1, newest)).toBe(false);
+  });
+
+  it("a superseding newer attempt that itself already finished still drops the older terminal", () => {
+    // Newer attempt N+1 completed (done) while the older N left a stale error behind
+    // (distinct per-attempt files). The newest attempt wins regardless of status.
+    const id = "bb22cc";
+    const errorN = { id, target: T, name: "m", status: "error", attempt: 1000 };
+    const doneN1 = { id, target: T, name: "m", status: "done", attempt: 2000 };
+    const newest = mod.newestAttemptEpochs([errorN, doneN1]);
+    expect(mod.isSupersededAttempt(errorN, newest)).toBe(true);
+    expect(mod.isSupersededAttempt(doneN1, newest)).toBe(false); // the current attempt emits
+  });
+
+  it("a genuine CURRENT failure (no newer attempt) still emits", () => {
+    const id = "d4e5f6";
+    const errorNow = { id, target: T, name: "seedvr2_vae.safetensors", status: "error", attempt: 5000 };
+    const newest = mod.newestAttemptEpochs([errorNow]);
+    expect(mod.isSupersededAttempt(errorNow, newest)).toBe(false);
+  });
+
+  it("does NOT suppress a terminal when the newer row is the SAME attempt (equal epoch)", () => {
+    const id = "eeee11";
+    const errorNewer = { id, target: T, name: "m", status: "error", attempt: 3000 };
+    const downloadingSame = { id, target: T, name: "m", status: "downloading", attempt: 3000 };
+    const newest = mod.newestAttemptEpochs([errorNewer, downloadingSame]);
+    expect(mod.isSupersededAttempt(errorNewer, newest)).toBe(false);
+  });
+
+  it("scopes supersession by (id, target): a concurrent LOCAL + POD download of the same URL is independent (#269)", () => {
+    // Same URL-derived id, DIFFERENT targets (local vs pod). A genuine LOCAL failure must
+    // NOT be suppressed just because a POD transfer of the same URL is downloading — they
+    // are independent downloads, not retries of each other. This is the P1-B regression
+    // an id-only scope would have caused.
+    const id = "cafe01";
+    const localError = { id, target: "http://127.0.0.1:8188", name: "m", status: "error", attempt: 1000 };
+    const podDownloading = { id, target: "https://pod-3000.proxy.runpod.net", name: "m", status: "downloading", attempt: 2000 };
+    const newest = mod.newestAttemptEpochs([localError, podDownloading]);
+    // The local failure is genuine for its own target — it still emits.
+    expect(mod.isSupersededAttempt(localError, newest)).toBe(false);
+  });
+
+  it("is conservative for rows missing an attempt epoch (pre-fix writer / non-model reporter)", () => {
+    const id = "legacy1";
+    const errorNoEpoch = { id, target: T, name: "m", status: "error" }; // no attempt
+    const downloadingNoEpoch = { id, target: T, name: "m", status: "downloading" }; // no attempt
+    // A row without an epoch establishes no supersession.
+    expect(mod.newestAttemptEpochs([downloadingNoEpoch]).size).toBe(0);
+    // A row without an epoch is never suppressed, even against an epoched newer row.
+    const newest = mod.newestAttemptEpochs([{ id, target: T, name: "m", status: "downloading", attempt: 9000 }]);
+    expect(mod.isSupersededAttempt(errorNoEpoch, newest)).toBe(false);
+  });
+
+  it("per-attempt files: a retry writes its OWN file so both attempts coexist on disk", () => {
+    // The id is URL-derived, so both attempts share id + target; the attempt epoch in the
+    // filename keeps them in SEPARATE files — the retry can never overwrite the live row.
+    process.env.COMFYUI_URL = T;
+    const id = "pa0001";
+    mod.reportDownloadProgress({ id, name: "m", downloaded: 5, total: 10, bytes_per_sec: 1, status: "downloading", attempt: 2000 }, true);
+    mod.reportDownloadProgress({ id, name: "m", downloaded: 0, total: 0, bytes_per_sec: 0, status: "error", attempt: 1000 }, true);
+    const files = readdirSync(dir).filter((f) => f.startsWith(`${id}-`));
+    expect(files).toHaveLength(2); // two distinct per-attempt files, no overwrite
+    // Both rows are readable; the orchestrator (not this reader) decides which wins.
+    const rows = files.map((f) => JSON.parse(readFileSync(join(dir, f), "utf-8")));
+    expect(rows.some((r) => r.status === "downloading" && r.attempt === 2000)).toBe(true);
+    expect(rows.some((r) => r.status === "error" && r.attempt === 1000)).toBe(true);
+  });
+
+  it("mirrors the orchestrator poll: the superseded attempt's row is filtered out of the emitted rows", () => {
+    // A faithful slice of pollDownloads' phased reconcile: the newer attempt's live
+    // row is broadcast, the older attempt's FAILED row is dropped — so the tray/agent
+    // never sees a FAILED that contradicts the active transfer.
+    const id = "poll01";
+    const rows = [
+      { id, target: T, name: "seedvr2_dit.safetensors", status: "error", attempt: 1000, updated: 1_000 },
+      { id, target: T, name: "seedvr2_dit.safetensors", status: "downloading", attempt: 2000, updated: 2_000 },
+    ];
+    const newest = mod.newestAttemptEpochs(rows);
+    const emitted = rows.filter((r) => !mod.isSupersededAttempt(r, newest));
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0].status).toBe("downloading");
+    expect(emitted.some((r) => r.status === "error")).toBe(false);
+  });
+});

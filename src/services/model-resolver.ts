@@ -134,6 +134,18 @@ export interface LocalModel {
  * Never falls back to a local workspace in remote mode (that dir isn't the remote
  * target). Returns undefined when no usable local path exists.
  */
+/** Strictly-monotonic attempt epoch (panel#489). Normally the wall clock, but never
+ *  repeats or goes backward WITHIN this process — so two retries started in the same
+ *  millisecond (or across a small clock rollback) still get distinct, increasing
+ *  generations. A tie would leave neither attempt able to supersede the other, letting a
+ *  stale FAILED slip through. Cross-process ordering still rests on the wall clock (a
+ *  later-spawned child is later in real time), which is correct for reconnect respawns. */
+let lastAttemptEpoch = 0;
+function nextAttemptEpoch(): number {
+  lastAttemptEpoch = Math.max(Date.now(), lastAttemptEpoch + 1);
+  return lastAttemptEpoch;
+}
+
 function resolveComfyUIBase(): string | undefined {
   return resolveEffectiveComfyUIBase();
 }
@@ -1171,7 +1183,15 @@ export async function downloadModel(
   // Stable id for the panel tray, keyed on the (pre-redirect) URL so resumes and
   // retries map to the same row. Name is the friendly file name.
   const progressId = createHash("sha256").update(request.url).digest("hex").slice(0, 16);
-  const progress = { id: progressId, name: resolvedFilename };
+  // Attempt generation/epoch (panel#489): the id is URL-derived (deterministic), so a
+  // retry of the SAME URL reuses it — attempt N and attempt N+1 are otherwise
+  // indistinguishable. Stamp this attempt's start epoch on every row it writes so the
+  // orchestrator can drop a LATE terminal (failed/done) row from a superseded attempt
+  // once a newer attempt for the same id is already progressing. nextAttemptEpoch()
+  // guarantees STRICT monotonicity within this process, so two same-millisecond retries
+  // never tie (a tie would leave neither able to supersede the other); across processes
+  // the wall clock orders a later spawn after an earlier one.
+  const progress = { id: progressId, name: resolvedFilename, attempt: nextAttemptEpoch() };
   // Tell the job the id the tray rows actually use, so status display + cancel
   // cleanup key on the SAME id even when auth/HF-endpoint rewrote the request URL.
   onTrayId?.(progressId);

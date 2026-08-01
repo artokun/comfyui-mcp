@@ -89,7 +89,7 @@ import { readComfyuiCrashLog, formatCrashNote } from "../services/crash-log.js";
 import { QueueMonitor, type StallReport } from "../services/queue-monitor.js";
 import { initRunpodWatcher, getRunpodWatcher, type RunpodStatusFrame, type RunpodAlertFrame } from "../services/runpod-watch.js";
 import { getPod } from "../services/runpod-client.js";
-import { listTargetChangeRequests, consumeTargetChange, ackTargetChange, setProgressDir, CONTROL_PREFIX } from "../services/download-progress.js";
+import { listTargetChangeRequests, consumeTargetChange, ackTargetChange, setProgressDir, CONTROL_PREFIX, newestAttemptEpochs, isSupersededAttempt, downloadAttemptKey } from "../services/download-progress.js";
 import { hasActiveTrainingJob, reconcileStaleTrainingJobs } from "../services/training-jobs.js";
 import {
   buildQueueStatusFrame,
@@ -3685,9 +3685,15 @@ export async function runPanelOrchestrator(): Promise<void> {
   // at which we emit. Keyed by download IDENTITY (row.id), not display name, so
   // two distinct downloads sharing a filename in one batch don't overwrite each
   // other and hide a failure (codex).
+  // Each pending terminal carries its attempt epoch + (id,target) supersession key so a
+  // newer live attempt for the SAME logical download can evict a queued FAILED/done
+  // before it fires (panel#489).
   const downloadDonePending = new Map<
     string,
-    { downloads: Map<string, { name: string; status: string }>; flushAt: number }
+    {
+      downloads: Map<string, { name: string; status: string; attempt?: number; supKey: string }>;
+      flushAt: number;
+    }
   >();
   // Resolve which agent to wake for a settled download row: the stamped tab's
   // agent when it's still live; else the SINGLE live agent (pre-fix/in-process
@@ -3786,7 +3792,10 @@ export async function runPanelOrchestrator(): Promise<void> {
       files = []; // dir not created yet — nothing downloading
     }
     const now = Date.now();
-    const downloads: Array<Record<string, unknown>> = [];
+    // Phase 1: parse every tray row up front (skip control-channel + corrupt files),
+    // so the attempt-supersession map (panel#489) is computed over the WHOLE tray
+    // before any terminal row is acted on.
+    const parsed: Array<{ full: string; row: Record<string, unknown>; status: unknown; updated: number }> = [];
     for (const f of files) {
       if (f.startsWith(CONTROL_PREFIX)) continue; // control channel, not a download row
       const full = join(progressDir, f);
@@ -3797,8 +3806,54 @@ export async function runPanelOrchestrator(): Promise<void> {
         continue; // mid-write or corrupt — retry next tick
       }
       if (!row || typeof row !== "object") continue;
-      const status = row.status;
       const updated = typeof row.updated === "number" ? row.updated : now;
+      parsed.push({ full, row, status: row.status, updated });
+    }
+    // Phase 2: newest attempt epoch per (id, target) (panel#489). A same-URL retry
+    // reuses the deterministic id, so this distinguishes attempt N+1 from attempt N's
+    // abandoned transfer — while the (id, target) scope keeps a concurrent LOCAL and
+    // POD download of the same URL (#269) independent (neither supersedes the other).
+    // Dead "downloading" writers (>60s stale) are excluded so a crashed attempt can't
+    // shadow a real terminal; terminal rows are always kept (the newer attempt that
+    // supersedes may itself have already finished).
+    const freshForAttempts = parsed
+      .filter((p) => p.status !== "downloading" || now - p.updated <= 60000)
+      .map((p) => p.row);
+    const newestAttemptByKey = newestAttemptEpochs(freshForAttempts);
+    // A newer attempt for an (id, target) invalidates any terminal event STILL PENDING
+    // for that same download from an abandoned attempt (the cross-tick case: attempt N's
+    // terminal was observed and queued on an earlier poll, then attempt N+1's row
+    // appeared). Evict the superseded entry from every agent's debounce bucket so no
+    // "download FAILED" turn fires against a download that is actually still progressing.
+    for (const bucket of downloadDonePending.values()) {
+      for (const [idKey, entry] of bucket.downloads) {
+        if (entry.attempt === undefined) continue;
+        const newest = newestAttemptByKey.get(entry.supKey);
+        if (newest !== undefined && newest > entry.attempt) bucket.downloads.delete(idKey);
+      }
+    }
+    const downloads: Array<Record<string, unknown>> = [];
+    for (const { full, row, status, updated } of parsed) {
+      // panel#489: a row from a SUPERSEDED attempt (older `attempt` epoch than the newest
+      // attempt for this (id, target)) is a late artifact of the abandoned attempt a retry
+      // replaced. Drop it entirely — a superseded TERMINAL fires no FAILED/done agent
+      // event, and a superseded "downloading" row is kept off the tray + idle-stop veto so
+      // it can't contradict or duplicate the live retry. Re-read before unlinking so a
+      // writer that replaced the file between the parse above and here isn't clobbered
+      // (only remove a file that STILL belongs to a superseded attempt). Per-attempt files
+      // mean the retry writes a DIFFERENT file, so both coexist and this is deterministic
+      // — never a shared-file race. A genuinely-current row (no newer attempt) is
+      // unaffected and still shows/emits.
+      if (isSupersededAttempt(row, newestAttemptByKey)) {
+        try {
+          const cur = JSON.parse(readFileSync(full, "utf8")) as Record<string, unknown>;
+          if (isSupersededAttempt(cur, newestAttemptByKey)) {
+            unlinkSync(full);
+            downloadRemoveAt.delete(full);
+          }
+        } catch { /* gone or mid-write — nothing to remove */ }
+        continue;
+      }
       if (status === "done" || status === "error") {
         const due = downloadRemoveAt.get(full);
         if (due == null) {
@@ -3811,9 +3866,18 @@ export async function runPanelOrchestrator(): Promise<void> {
           if (key && manager.hasLiveAgent(key)) {
             const bucket =
               downloadDonePending.get(key) ??
-              { downloads: new Map<string, { name: string; status: string }>(), flushAt: 0 };
-            const idKey = String(row.id ?? full);
-            bucket.downloads.set(idKey, { name: String(row.name ?? row.id ?? "model"), status: String(status) });
+              { downloads: new Map<string, { name: string; status: string; attempt?: number; supKey: string }>(), flushAt: 0 };
+            // Identify each pending download by its (id, target) supersession key — NOT
+            // the id alone: a concurrent LOCAL + POD transfer of the same URL shares an id
+            // but must produce TWO #547 outcomes, and the same key lets a newer attempt
+            // evict this entry above. Fall back to the file path when the row has no id.
+            const supKey = downloadAttemptKey(row) ?? ` ${full}`;
+            bucket.downloads.set(supKey, {
+              name: String(row.name ?? row.id ?? "model"),
+              status: String(status),
+              attempt: typeof row.attempt === "number" ? row.attempt : undefined,
+              supKey,
+            });
             bucket.flushAt = now + DOWNLOAD_DONE_DEBOUNCE_MS;
             downloadDonePending.set(key, bucket);
           }
@@ -3849,6 +3913,10 @@ export async function runPanelOrchestrator(): Promise<void> {
       if (now < bucket.flushAt) continue;
       downloadDonePending.delete(key);
       const settled = [...bucket.downloads.values()];
+      // The bucket can be emptied by the supersession eviction above (panel#489) —
+      // a queued terminal cancelled by a newer live attempt. Don't fire an empty
+      // "download_done" turn in that case.
+      if (settled.length === 0) continue;
       manager.injectEvent(key, { kind: "download_done", downloads: settled });
     }
     // MCP-child control channel (#269): runpod_* tools that ran in spawned
