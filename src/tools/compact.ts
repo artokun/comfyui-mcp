@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { errorToToolResult } from "../utils/errors.js";
+import { logger } from "../utils/logger.js";
 import type { CatalogedTool, ToolCatalog } from "./catalog.js";
 
 /** First sentence of a tool description, hard-capped so the manifest stays token-light. */
@@ -78,8 +79,37 @@ export function buildManifest(
  * MCP client on a non-frontier LLM) where 200 JSON schemas blow the context
  * budget — see issue #97.
  */
-export function registerCompactTools(server: McpServer, catalog: ToolCatalog): void {
-  server.tool(
+export function registerCompactTools(
+  server: McpServer,
+  catalog: ToolCatalog,
+  opts: { skip?: ReadonlySet<string> } = {},
+): void {
+  // A caller may reserve some meta-tool names — e.g. registerFullTools layers the
+  // facade onto the full direct surface, and if the user has an autoloaded
+  // workflow literally named `call_tool`/`list_tools`/`describe_tool`, that name
+  // is ALREADY registered on the live server; re-registering it here would throw
+  // (McpServer rejects duplicate tool names) and take down startup. `skip`
+  // dedups the EXPECTED collisions the caller detected. The try/catch is the
+  // belt-and-suspenders: collision detection relies on a catalog snapshot that
+  // could, in a startup race, disagree with what's actually on the live server
+  // (a workflow file removed between the two discovery passes), so a duplicate
+  // that slips past `skip` is swallowed and logged rather than crashing startup.
+  // In every collision case the FIRST registration (the user's direct tool)
+  // keeps the name; the rest of the facade still registers. (#616)
+  const skip = opts.skip ?? new Set<string>();
+  const register: McpServer["tool"] = ((...args: Parameters<McpServer["tool"]>) => {
+    const name = args[0] as string;
+    if (skip.has(name)) return undefined as unknown as ReturnType<McpServer["tool"]>;
+    try {
+      return server.tool(...args);
+    } catch (err) {
+      logger.warn(
+        `[compact] skipping facade meta-tool '${name}' — already registered (name collision): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return undefined as unknown as ReturnType<McpServer["tool"]>;
+    }
+  }) as McpServer["tool"];
+  register(
     "list_tools",
     "List every comfyui-mcp capability as a token-light catalog: tool names with one-line summaries, grouped by category. Start here. Then use describe_tool to get a tool's parameters and call_tool to run it.",
     {
@@ -95,7 +125,7 @@ export function registerCompactTools(server: McpServer, catalog: ToolCatalog): v
     async (args) => text(buildManifest(catalog, args)),
   );
 
-  server.tool(
+  register(
     "describe_tool",
     "Get the full description and JSON Schema of one tool from the catalog. Always call this before the first call_tool of a tool you haven't used in this session.",
     {
@@ -123,7 +153,7 @@ export function registerCompactTools(server: McpServer, catalog: ToolCatalog): v
     },
   );
 
-  server.tool(
+  register(
     "call_tool",
     "Execute a tool from the catalog by name. Pass its parameters in `args` (object). The result is exactly what the underlying tool returns.",
     {

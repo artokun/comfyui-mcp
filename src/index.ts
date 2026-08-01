@@ -7,7 +7,7 @@ import {
   ListResourcesRequestSchema,
   ListResourceTemplatesRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { registerAllTools, collectToolCatalog } from "./tools/index.js";
+import { collectToolCatalog, registerFullTools } from "./tools/index.js";
 import { registerCompactTools } from "./tools/compact.js";
 import { logger } from "./utils/logger.js";
 import { JobWatcher } from "./services/job-watcher.js";
@@ -121,7 +121,11 @@ async function createConfiguredServer(toolMode: ToolMode = "full"): Promise<McpS
       `Compact tool mode: ${catalog.tools.size} tools available via list_tools/describe_tool/call_tool`,
     );
   } else {
-    await registerAllTools(server);
+    // Full direct surface PLUS the compact facade (list_tools/describe_tool/
+    // call_tool) as a stable reconnect escape hatch — see registerFullTools and
+    // issue #616. One atomic registration pass, completed before the transport
+    // connects below. Opt out of the facade with COMFYUI_MCP_NO_FACADE=1.
+    await registerFullTools(server);
   }
 
   server.server.setRequestHandler(ListResourcesRequestSchema, async () => ({

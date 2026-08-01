@@ -63,6 +63,8 @@ import { registerTemplateSchemaTools } from "./template-schema.js";
 import { registerRunTemplateTools } from "./run-template.js";
 import { DefaultsManager } from "../services/defaults-manager.js";
 import { ToolCatalog } from "./catalog.js";
+import { registerCompactTools } from "./compact.js";
+import { logger } from "../utils/logger.js";
 
 /**
  * Every static tool group, in registration order (order is observable in
@@ -198,6 +200,69 @@ export async function registerAllTools(server: McpServer): Promise<void> {
   const gated = withBlindImageGate(server);
   for (const [, register] of TOOL_GROUPS) register(gated);
   await registerAutoloadedWorkflows(gated);
+}
+
+/**
+ * Default (non-compact) registration WITH the compact facade layered on top.
+ *
+ * #616 — reconnect resilience: a code-execution MCP client (the SDK's
+ * `exec_main.mjs` harness that exposes each tool as a callable
+ * `tools.mcp__comfyui__<tool>`) snapshots the tool surface from a `tools/list`.
+ * After the user restarts ComfyUI and the panel session resumes, that snapshot
+ * can go stale — a previously-bound direct tool is briefly absent from the
+ * refreshed surface, and calling the cached binding throws
+ * `TypeError: tools.mcp__comfyui__get_environment is not a function` BEFORE
+ * dispatch. Layering the facade (`list_tools` / `describe_tool` / `call_tool`)
+ * onto the full direct surface guarantees EVERY advertised surface — compact or
+ * full — carries a STABLE `call_tool` escape hatch, so such a client can always
+ * route a missing direct tool through `call_tool({ name, args })` instead of
+ * dead-ending. The direct tools and the facade are registered in ONE atomic
+ * pass here, before the transport is connected, so a resumed turn never sees a
+ * half-built catalog (facade-only) missing the direct tools.
+ *
+ * The facade adds only 3 tools to the surface and reuses the SAME underlying
+ * handlers (via collectToolCatalog), so there is no divergence between a direct
+ * call and its `call_tool` route. Opt out with COMFYUI_MCP_NO_FACADE=1 (env) or
+ * `{ facade: false }`.
+ */
+export async function registerFullTools(
+  server: McpServer,
+  opts: { facade?: boolean } = {},
+): Promise<void> {
+  await registerAllTools(server);
+  const facade = opts.facade ?? process.env.COMFYUI_MCP_NO_FACADE !== "1";
+  if (facade) {
+    // Capture the same registration into a catalog; call_tool dispatches to these
+    // handlers, so the facade route is behaviorally identical to a direct call.
+    // Built and registered in-sequence with the direct surface above and BEFORE
+    // server.connect(), so the whole snapshot is atomic (no half-built tools/list).
+    //
+    // NOTE: this is a SECOND filesystem discovery of autoloaded workflows. In the
+    // (sub-millisecond) window between the two passes a workflow could be added or
+    // removed; the divergence self-heals on the next spawn — call_tool routes
+    // through THIS catalog (internally consistent), and at worst a just-removed
+    // workflow stays directly listed but unreachable via call_tool, or a just-added
+    // one is reachable via call_tool before it appears in the direct list. Neither
+    // drops an established tool. The one race that could otherwise CRASH startup —
+    // a reserved-name workflow present in pass 1 (registered live) but gone from
+    // pass 2's catalog, so `skip` misses it and the facade double-registers — is
+    // caught inside registerCompactTools (it swallows a duplicate-name throw).
+    const catalog = await collectToolCatalog();
+    // Collision guard (fast path): if a user's autoloaded workflow is literally
+    // named after a facade meta-tool, registerAllTools already claimed that name on
+    // the live server. Skip the colliding meta(s) cleanly (no error noise) and keep
+    // the direct tool + the rest of the facade. registerCompactTools's try/catch
+    // still backstops any collision this snapshot-based check misses. (#616 / codex P1)
+    const reserved = ["list_tools", "describe_tool", "call_tool"] as const;
+    const skip = new Set(reserved.filter((name) => catalog.get(name)));
+    if (skip.size > 0) {
+      logger.warn(
+        `[tools] facade meta-tool name(s) already claimed by a direct tool — not layering the facade for: ${[...skip].join(", ")}. ` +
+          `Rename the conflicting workflow file(s) to expose the full facade.`,
+      );
+    }
+    registerCompactTools(server, catalog, { skip });
+  }
 }
 
 /**
