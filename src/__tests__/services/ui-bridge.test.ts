@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createServer } from "node:net";
 import WebSocket, { WebSocketServer } from "ws";
 import {
   UiBridge,
@@ -17,6 +18,46 @@ import {
 
 let bridge: UiBridge;
 let port: number;
+
+/** Ask the OS for a currently-free ephemeral TCP port on loopback, then release it.
+ *  Deterministic across parallel test files in a way `20000 + random(20000)` is NOT:
+ *  the OS never hands the same ephemeral port to two concurrently-listening probes,
+ *  so this avoids the birthday-paradox collisions that made the shared bridge bind
+ *  flake on loaded Windows CI. (A lost fixed-range race left `whenReady()` resolving
+ *  false in the `beforeEach`, whose `expect(...).toBe(true)` then failed — and vitest
+ *  misattributed that beforeEach failure to whichever test ran next, e.g. the pure
+ *  makeUnknownCommandError case, making a platform-independent logic test look
+ *  OS-dependent. The bind, not the logic, was the flake.) */
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = createServer();
+    srv.once("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const addr = srv.address();
+      const p = addr && typeof addr === "object" ? addr.port : 0;
+      srv.close((err) => (err ? reject(err) : resolve(p)));
+    });
+  });
+}
+
+/** Start a UiBridge on a guaranteed-free port and await its bound `listening` event.
+ *  Retries on the (rare) close→rebind reuse race so a returned bridge is ALWAYS
+ *  actually listening — the harness never surfaces a flaky bind as a spurious,
+ *  misattributed test failure. Used by the high-frequency `beforeEach`. */
+async function startBridgeOnFreePort(
+  make: (p: number) => UiBridge = (p) => new UiBridge(p),
+): Promise<{ bridge: UiBridge; port: number }> {
+  let lastErr = "no attempt made";
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const p = await freePort();
+    const b = make(p);
+    b.start();
+    if (await b.whenReady()) return { bridge: b, port: p };
+    lastErr = `bind to ${p} lost a close→rebind race`;
+    await b.stop();
+  }
+  throw new Error(`could not bind a free bridge port after 6 attempts: ${lastErr}`);
+}
 
 function connectPanel(tabId?: string, title = "workflow-a"): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
@@ -42,13 +83,12 @@ function autoReply(sock: WebSocket, tag: string): void {
 }
 
 beforeEach(async () => {
-  port = 20000 + Math.floor(Math.random() * 20000);
-  bridge = new UiBridge(port);
-  bridge.start();
-  // Await the actual bound `listening` event before any test connects a client.
-  // start() binds asynchronously; without this, connectPanel() can race the bind
-  // and fail with ECONNREFUSED on loaded CI (ubuntu-latest) — the #486 flake.
-  expect(await bridge.whenReady()).toBe(true);
+  // Bind on an OS-assigned free port (retried past the rare reuse race) so the
+  // shared bridge is guaranteed listening before any test connects a client —
+  // start() binds asynchronously, and a fixed-range random port could collide with
+  // a parallel test file on loaded CI, leaving whenReady() false (the #486/#619
+  // Windows bind flake). startBridgeOnFreePort awaits `listening` internally.
+  ({ bridge, port } = await startBridgeOnFreePort());
 });
 
 afterEach(async () => {
@@ -58,7 +98,7 @@ afterEach(async () => {
 
 describe("UiBridge (token gate — secure/wss mode)", () => {
   it("accepts the correct token and rejects a missing one", async () => {
-    const tport = 20000 + Math.floor(Math.random() * 20000);
+    const tport = await freePort();
     const tbridge = new UiBridge(tport, "s3cr3t-token");
     tbridge.start();
     expect(await tbridge.whenReady()).toBe(true);
@@ -85,7 +125,7 @@ describe("UiBridge (token gate — secure/wss mode)", () => {
   });
 
   it("rejects a wrong token", async () => {
-    const tport = 20000 + Math.floor(Math.random() * 20000);
+    const tport = await freePort();
     const tbridge = new UiBridge(tport, "right-token");
     tbridge.start();
     expect(await tbridge.whenReady()).toBe(true);
@@ -107,7 +147,7 @@ describe("UiBridge (LAN bind — panel #54)", () => {
   });
 
   it("loopback hosts stay allowed without a token", async () => {
-    const tport = 20000 + Math.floor(Math.random() * 20000);
+    const tport = await freePort();
     const lb = new UiBridge(tport, null, "localhost");
     lb.start();
     expect(await lb.whenReady()).toBe(true);
@@ -115,7 +155,7 @@ describe("UiBridge (LAN bind — panel #54)", () => {
   });
 
   it("binds 0.0.0.0 with a token, gates the upgrade, and serves a tab", async () => {
-    const tport = 20000 + Math.floor(Math.random() * 20000);
+    const tport = await freePort();
     const lan = new UiBridge(tport, "lan-token", "0.0.0.0");
     lan.start();
     expect(await lan.whenReady()).toBe(true);
@@ -145,7 +185,7 @@ describe("UiBridge (LAN bind — panel #54)", () => {
 describe("UiBridge (on-demand pairing listener — addListener)", () => {
   it("adds a token-gated second listener sharing tab routing; primary loopback stays token-less", async () => {
     // The beforeEach bridge is loopback + token-less (the local panel case).
-    const pairPort = 20000 + Math.floor(Math.random() * 20000);
+    const pairPort = await freePort();
     await bridge.addListener("127.0.0.1", pairPort, "pair-token");
 
     // Pairing port WITHOUT a token → rejected.
@@ -1325,6 +1365,40 @@ describe("makeUnknownCommandError (old-panel version gate)", () => {
     }
   });
 
+  // A MALFORMED version that merely PREFIXES a valid semver (e.g. `0.11.28.1`,
+  // `0.11.28abc`) must not be prefix-matched as `0.11.28` and mistaken for new
+  // enough — the SEMVER_RE screen is END-ANCHORED, so it fails and falls through to
+  // the conservative too-old rewrite rather than leaking the raw error (codex P2).
+  it("treats a malformed prefix-only version as NOT proven new enough (strict end-anchored screen)", () => {
+    // Includes empty prerelease/build identifiers (`0.11.28-`, `0.11.28+.`,
+    // `0.11.28-.`) which a lax `[0-9A-Za-z.-]+` class would have let slip through.
+    for (const bad of [
+      "0.11.28.1",
+      "0.11.28abc",
+      "0.4.6.0",
+      "0.4.6-",
+      "1.2",
+      "0.11.28+.",
+      "0.11.28-.",
+      "0.11.28+",
+      "01.11.28", // leading zero in the numeric core (SemVer 2.0.0 forbids)
+      "0.011.28", // leading zero in minor
+    ]) {
+      const e = makeUnknownCommandError('Unknown command "graph_outline"', bad);
+      expect(e).not.toBeNull();
+      expect(e?.message.toLowerCase()).toContain("too old");
+    }
+    // And it is symmetric on the proactive gate: a malformed version can't PROVE
+    // unsupported either, so it is never proactively blocked (fail-open to reactive).
+    for (const bad of ["0.11.28.1", "0.11.28+.", "0.11.28-."]) {
+      expect(panelVersionProvesUnsupported("refresh_nodes", bad)).toBe(false);
+    }
+    expect(panelVersionProvesUnsupported("graph_query", "0.6.8abc")).toBe(false);
+    // A well-formed version WITH build/prerelease metadata is still accepted.
+    expect(makeUnknownCommandError('Unknown command "graph_outline"', "0.11.28+build.5")).toBeNull();
+    expect(makeUnknownCommandError('Unknown command "graph_outline"', "0.11.28-rc.1")).toBeNull();
+  });
+
   it("still declares a genuinely-too-old panel too old (advertised version below the minimum)", () => {
     // One patch below graph_outline's 0.4.6 minimum → genuinely too old.
     const e = makeUnknownCommandError('Unknown command "graph_outline"', "0.4.5");
@@ -1351,6 +1425,45 @@ describe("makeUnknownCommandError (old-panel version gate)", () => {
     expect(makeUnknownCommandError("unknown command “graph_serialize”")?.message).toContain(
       "graph_serialize",
     );
+  });
+
+  // #619 — refresh_nodes (panel #608) shipped in panel 0.11.28. The reporter's
+  // 0.11.20 panel lacks it and replies `Unknown command "refresh_nodes"`. Because
+  // the command now carries its OWN authoritative minimum (0.11.28), a 0.11.20 panel
+  // is correctly declared too old with the right remedy version — not passed through
+  // raw, and not told the (wrong) 0.11.4 baseline.
+  it("rewrites refresh_nodes on a <0.11.28 panel into an actionable update-to-0.11.28 message (#619)", () => {
+    expect(minPanelVersionForCmd("refresh_nodes")).toBe("0.11.28");
+    const e = makeUnknownCommandError('Unknown command "refresh_nodes"', "0.11.20");
+    expect(e).not.toBeNull();
+    expect(e?.message).toContain("refresh_nodes");
+    expect(e?.message).toContain("0.11.20"); // connected/detected panel version
+    expect(e?.message).toContain("0.11.28"); // required minimum
+    expect(e?.message.toLowerCase()).toContain("too old");
+    expect(e?.message.toLowerCase()).toContain("update");
+    // The opaque raw internal error must not leak through.
+    expect(e?.message).not.toBe('Unknown command "refresh_nodes"');
+  });
+
+  it("does NOT rewrite refresh_nodes once the panel is at/above 0.11.28 (#619 boundary)", () => {
+    expect(makeUnknownCommandError('Unknown command "refresh_nodes"', "0.11.28")).toBeNull();
+    expect(makeUnknownCommandError('Unknown command "refresh_nodes"', "0.12.0")).toBeNull();
+  });
+
+  // #619 CLASS-WIDE FIX: a command with NO authoritative minimum in the table has no
+  // KNOWN real minimum, so the inflated 0.11.4 fallback baseline can never PROVE a
+  // panel "new enough". An Unknown-command reply from such a command is authoritative
+  // evidence the panel lacks it, so it maps to an actionable "update your panel"
+  // message (quoting the baseline floor) rather than a bare passthrough — even when the
+  // connected panel version parseably exceeds the fallback baseline.
+  it("still rewrites an UNTABLED command to actionable even when the panel exceeds the fallback baseline (#619)", () => {
+    // ui_render is not in BRIDGE_CMD_MIN_PANEL_VERSION; 0.11.21 > the 0.11.4 baseline.
+    const e = makeUnknownCommandError('Unknown command "ui_render"', "0.11.21");
+    expect(e).not.toBeNull();
+    expect(e?.message).toContain("ui_render");
+    expect(e?.message).toContain("0.11.21"); // connected version surfaced
+    expect(e?.message.toLowerCase()).toContain("update");
+    expect(e?.message).not.toBe('Unknown command "ui_render"'); // never the bare passthrough
   });
 });
 
@@ -1386,6 +1499,16 @@ describe("panelVersionProvesUnsupported (#392 proactive version gate)", () => {
     expect(panelVersionProvesUnsupported("graph_outline", "0.4.5")).toBe(true);
     expect(panelVersionProvesUnsupported("graph_outline", "0.4.6")).toBe(false);
     expect(panelVersionProvesUnsupported("graph_outline", "0.11.7")).toBe(false);
+  });
+
+  // #619 — refresh_nodes is now tabled (min 0.11.28), so the proactive #392 gate
+  // rejects the first call on a <0.11.28 panel BEFORE dispatch (capability gating
+  // derived from the advertised version), and never gates a 0.11.28+ panel.
+  it("proactively gates refresh_nodes below 0.11.28 and clears it at/above (#619)", () => {
+    expect(panelVersionProvesUnsupported("refresh_nodes", "0.11.20")).toBe(true);
+    expect(panelVersionProvesUnsupported("refresh_nodes", "0.11.27")).toBe(true);
+    expect(panelVersionProvesUnsupported("refresh_nodes", "0.11.28")).toBe(false);
+    expect(panelVersionProvesUnsupported("refresh_nodes", "0.12.0")).toBe(false);
   });
 });
 

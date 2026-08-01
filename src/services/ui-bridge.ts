@@ -173,6 +173,15 @@ export const BRIDGE_CMD_MIN_PANEL_VERSION: Readonly<Record<string, string>> = {
   graph_find_nodes: "0.4.6",
   graph_query: "0.7.0",
   graph_serialize: "0.8.2",
+  // #608 forced-refresh executor shipped in panel 0.11.28. Older panels (e.g. the
+  // 0.11.20 in #619) register no `refresh_nodes` handler and reply with the raw
+  // dispatch error `Unknown command "refresh_nodes"`. Without this AUTHORITATIVE
+  // entry the command falls back to the 0.11.4 baseline, which a 0.11.20 panel
+  // already exceeds — so makeUnknownCommandError's false-negative guard mistook it
+  // for "new enough" and leaked the opaque raw error instead of an actionable
+  // "update your panel to ≥0.11.28" verdict. Listing it here also lets the #392
+  // PROACTIVE gate reject the very first call on a <0.11.28 panel before dispatch.
+  refresh_nodes: "0.11.28",
 };
 
 /** The minimum panel version that supports `cmd`. */
@@ -184,19 +193,43 @@ export function minPanelVersionForCmd(cmd: string): string {
  *  BOTH for "equal" and for "unparseable", so callers that must distinguish an
  *  unparseable input from a genuine tie (like panelSupportsCmd's `>= 0`) have to
  *  screen the input first — otherwise `panel_version: "dev"` would compare as 0
- *  and be mistaken for a match. */
-const SEMVER_RE = /^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?/;
+ *  and be mistaken for a match. This is the CANONICAL SemVer 2.0.0 grammar from
+ *  semver.org (with an optional `v` prefix), END-ANCHORED ($) so the WHOLE trimmed
+ *  string must be a strict, spec-valid version: numeric core with NO leading zeros,
+ *  NON-EMPTY dot-separated prerelease/build identifiers, no numeric-prerelease leading
+ *  zeros. Every malformed value that used to prefix-match as a valid version and get
+ *  mistaken for new-enough — `0.11.28.1`, `0.11.28abc`, `0.11.28-` (empty prerelease),
+ *  `0.11.28+.` / `0.11.28-.` (empty dot identifier), `01.11.28` (leading zero) — fails
+ *  the screen and falls through to the conservative fail-closed path (reactive rewrite;
+ *  never proactively gated), keeping panelSupportsCmd and panelVersionProvesUnsupported
+ *  symmetric on garbage input (codex). */
+const SEMVER_RE =
+  /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/;
 
 /** True when the panel ADVERTISED a PARSEABLE version (in its `hello`) that already
- *  meets `cmd`'s real minimum — i.e. this panel is new enough to support the command,
- *  so an "Unknown command" reply is NOT an age problem and must never be rewritten
- *  into a "too old — update your panel" verdict (#352 false negative). Missing OR
- *  unparseable panelVersion → we can't PROVE it's new enough, so treat as not-proven
- *  (fall through to the honest too-old path, which quotes the correct minimum, and
- *  keep the #236 learning path intact). */
+ *  meets `cmd`'s AUTHORITATIVE, command-specific minimum — i.e. this panel is provably
+ *  new enough to support the command, so an "Unknown command" reply is NOT an age
+ *  problem and must never be rewritten into a "too old — update your panel" verdict
+ *  (#352 false negative).
+ *
+ *  Only an EXPLICIT BRIDGE_CMD_MIN_PANEL_VERSION entry counts as proof. A command with
+ *  NO entry has no known real minimum — the inflated full-set fallback baseline (0.11.4)
+ *  is a GUESS, not proof — so we can never certify a panel "new enough" for it. Trusting
+ *  that guess is exactly what leaked #619: refresh_nodes (real min 0.11.28) was unlisted,
+ *  the 0.11.4 fallback said a 0.11.20 panel was "new enough", and the panel's genuine
+ *  "Unknown command" reply passed through raw instead of being rewritten. So an unlisted
+ *  command returns false here → makeUnknownCommandError produces an actionable "update
+ *  your panel" message (never a bare passthrough of the opaque internal command name).
+ *  Mirrors panelVersionProvesUnsupported, which likewise trusts only tabled minimums.
+ *
+ *  Missing OR unparseable panelVersion → we can't PROVE it's new enough, so treat as
+ *  not-proven (fall through to the honest too-old path, which quotes the correct
+ *  minimum, and keep the #236 learning path intact). */
 function panelSupportsCmd(cmd: string, panelVersion?: string): boolean {
+  const min = BRIDGE_CMD_MIN_PANEL_VERSION[cmd];
+  if (!min) return false;
   if (!panelVersion || !SEMVER_RE.test(panelVersion.trim())) return false;
-  return compareSemver(panelVersion, minPanelVersionForCmd(cmd)) >= 0;
+  return compareSemver(panelVersion, min) >= 0;
 }
 
 /** True when the panel's ADVERTISED version PARSEABLY PROVES it is too old to
