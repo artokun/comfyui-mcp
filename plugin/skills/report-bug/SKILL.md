@@ -120,13 +120,27 @@ ENV line is missing them: mcp = its `package.json` `version` (or `get_environmen
 panel = `PANEL_VERSION` near the top of the pack's `comfyui-mcp-panel.js`.
 ```
 
-Then file it (no need to ask):
+Then file it. The report itself is autonomous **via the Worker** (below) — it
+files under the PROJECT's own server-side identity, so no user GitHub account is
+touched and nothing is done as the user. That is the default and needs no ask.
 
-- **Engineer path (preferred when `gh` is authed and the fix is clean):** run
-  `gh auth status`; if authed, branch/`gh repo fork`, apply the fix, run the gate
-  (Step 4), push, `gh pr create --fill`. **Never merge** — it's for our review.
-- **Default path (everyone):** POST the report to our intake Worker — no GitHub
-  account needed:
+- **Default path (everyone) — the Worker:** POST the report to our intake Worker.
+  No GitHub account needed; files/dedups under the project identity, never yours.
+  This is the autonomous path — use it for every our-repo bug REPORT.
+- **Engineer path — ONLY with the user's explicit go-ahead, and only if THEY want
+  to author a fix PR under THEIR GitHub account.** Running `gh` files/forks/PRs as
+  **whatever account is currently `gh`-authed on this machine** — that is acting as
+  the user's GitHub identity, so it is NOT autonomous and NOT a Worker fallback.
+  Before ever running `gh` to file/fork/PR: run `gh auth status`, tell the user
+  **which account** it would act as, and proceed only if they explicitly agree to
+  submit as that account. If they just want the bug reported (not to personally
+  author a PR), use the Worker — never fork/PR/`gh issue create` under an ambient
+  account they didn't choose. If the fix is clean and they agree: branch/`gh repo
+  fork`, apply the fix, run the gate (Step 4), push, `gh pr create --fill`.
+  **Never merge** — it's for our review. (A Worker 403/failure falls back to the
+  `report_issue` prefilled link below — NEVER to an unprompted `gh` command.)
+
+  The Worker POST — no GitHub account needed:
 
   The Worker files the issue **synchronously**: on success the POST response
   ALWAYS carries the issue `url` inline (`{ ok:true, url, number, deduped?,
