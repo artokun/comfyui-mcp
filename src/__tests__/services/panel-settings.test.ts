@@ -1,7 +1,7 @@
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   getAgentSettings,
   getNsfwConsent,
@@ -45,6 +45,26 @@ describe("panel-settings nsfw consent", () => {
     expect(getNsfwConsent().allowed).toBe(true);
     setNsfwConsent(false);
     expect(getNsfwConsent().allowed).toBe(false);
+  });
+
+  function writeRawSettings(json: string): void {
+    mkdirSync(dirname(settingsPath), { recursive: true });
+    writeFileSync(settingsPath, json);
+  }
+
+  it("FAILS CLOSED on a non-boolean on-disk allowed (tampered/legacy file) — #390", () => {
+    // read() casts arbitrary JSON, so a truthy STRING or number could otherwise
+    // sneak past `if (!allowed)` and enable adult content. Only strict `true` counts.
+    for (const bad of ['"false"', '"true"', "1", "0", '"yes"', "null", "{}"]) {
+      writeRawSettings(`{"nsfwConsent":{"allowed":${bad},"decidedAt":"2020-01-01T00:00:00.000Z"}}`);
+      expect(getNsfwConsent().allowed, `allowed:${bad} must NOT be consent`).toBe(false);
+    }
+  });
+
+  it("accepts a strict boolean true from disk as consent — #390", () => {
+    writeRawSettings(`{"nsfwConsent":{"allowed":true,"decidedAt":"2020-01-01T00:00:00.000Z"}}`);
+    expect(getNsfwConsent().allowed).toBe(true);
+    expect(getNsfwConsent().decidedAt).toBe("2020-01-01T00:00:00.000Z");
   });
 
   it("preserves unrelated settings keys", () => {

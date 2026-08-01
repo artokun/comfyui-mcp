@@ -68,12 +68,53 @@ import { sliceWorkflow } from "../services/workflow-slicer.js";
 import { validateA2UISpecServer } from "../services/a2ui-spec.js";
 import type { UiWorkflow } from "../comfyui/types.js";
 
-/** Treat these as an affirmative answer to the adult-content consent card. */
+/** Treat these as an affirmative answer to a yes/no confirm card (destructive-op
+ *  gate). Deliberately BROAD/lenient — a false "no" only SKIPS a destructive op, so
+ *  erring toward "not yes" is safe. NEVER use this for the adult-consent gate: a
+ *  false positive there would enable adult content without genuine consent. Use
+ *  classifyConsentReply() for that. */
 function isAffirmative(reply: unknown): boolean {
   if (typeof reply !== "string") return false;
   return /^(yes|allow|allowed|true|on|ok(ay)?|sure|agree|confirm|enable|i'?m? ?18|18\+?|adult)/i.test(
     reply.trim(),
   );
+}
+
+// The exact option labels the adult-consent card presents. Single source of truth
+// shared by the card and its STRICT reply classifier so the gate matches on option
+// IDENTITY, never on a loose heuristic.
+const CONSENT_YES_LABEL = "Yes — I'm 18+ and it's legal in my region";
+const CONSENT_NO_LABEL = "No — keep it SFW";
+
+// STRICT, whole-string affirmatives/declines accepted from the card's free-text
+// ("Other") box in addition to the exact option labels. Anchored ^…$ so ONLY an
+// unambiguous token counts — unlike the broad isAffirmative() PREFIX match, a
+// free-text reply like "adult content is illegal here", "On second thought, no",
+// or "18 is the age but I decline" can NEVER be read as consent. Consent semantics
+// (18+ AND legal) really live in the affirmative BUTTON; these bare tokens are the
+// pragmatic fallback for a user who types instead of clicking.
+const CONSENT_STRICT_YES_RE = /^(yes|y|yep|yeah|i agree|i consent|agreed?|confirm(ed)?|enable)$/i;
+const CONSENT_STRICT_NO_RE = /^(no|n|nope|decline|declined|cancel|keep (it )?sfw|sfw)$/i;
+
+/**
+ * STRICT classification of an adult-consent card reply — the ONLY gate that may
+ * turn adult mode ON. Returns:
+ *   "grant"   → the EXACT affirmative option, or a strict whole-string yes token
+ *               → turn consent ON.
+ *   "decline" → the EXACT decline option, or a strict whole-string no token
+ *               → turn consent OFF.
+ *   "unclear" → anything else (free text, ambiguous, non-string) → change NOTHING
+ *               (never grants; never revokes a prior genuine grant).
+ * Never routes through isAffirmative() — a loose prefix match must not gate adult
+ * content.
+ */
+function classifyConsentReply(reply: unknown): "grant" | "decline" | "unclear" {
+  const s = typeof reply === "string" ? reply.trim() : "";
+  if (s === CONSENT_YES_LABEL) return "grant";
+  if (s === CONSENT_NO_LABEL) return "decline";
+  if (CONSENT_STRICT_YES_RE.test(s)) return "grant";
+  if (CONSENT_STRICT_NO_RE.test(s)) return "decline";
+  return "unclear";
 }
 
 export type ToolResult = {
@@ -2362,10 +2403,20 @@ function getAskTiming(): AskTiming {
 
 /** True when an error is the bridge's reply-TIMEOUT for a card (the tab never
  *  replied within the window), NOT a genuine transport/command error. Only a
- *  timeout warrants polling the late-reply buffer for a slow-but-valid answer. */
+ *  timeout warrants polling the late-reply buffer for a slow-but-valid answer.
+ *
+ *  Anchored on the bridge's CANONICAL no-reply message shape (ui-bridge `send()`:
+ *  `Panel tab <id> did not reply to "<cmd>" within <N> ms — the ComfyUI tab may be
+ *  backgrounded or frozen`). Requiring the `Panel tab … did not reply to "…" within
+ *  … ms` form stops an unrelated executor/transport error that merely mentions
+ *  "did not reply … within … ms" (e.g. `upstream service did not reply to us within
+ *  500 ms`) from being mis-handled as a recoverable card-reply timeout — the same
+ *  distinction the panel_open_workflow ack-timeout path already draws. Crucial for
+ *  the consent gate: a real transport failure must reach fail(), not be quietly
+ *  reported as an unchanged-state success. */
 function isReplyTimeoutError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err ?? "");
-  return /did not reply to .* within \d+\s*ms|backgrounded or frozen/i.test(msg);
+  return /Panel tab \S+ did not reply to "[^"]*" within \d+\s*ms/i.test(msg);
 }
 
 /**
@@ -3383,36 +3434,43 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             question,
             header: "18+ consent",
             options: [
-              { label: "Yes — I'm 18+ and it's legal in my region", description: "Enable adult content for this session" },
-              { label: "No — keep it SFW", description: "Stay in safe-for-work mode" },
+              { label: CONSENT_YES_LABEL, description: "Enable adult content for this session" },
+              { label: CONSENT_NO_LABEL, description: "Stay in safe-for-work mode" },
             ],
           } as { cmd: string };
           let reply: unknown;
+          let timedOut = false;
           try {
             reply = await ctx.bridge.send(askCard, { tabId: ctx.tabId, timeoutMs: timing.deadlineMs });
           } catch (err) {
             // Only a card-reply TIMEOUT is recoverable here: poll the late buffer for a
-            // slow-but-valid answer, and if still unanswered return a structured
-            // timed_out result (gate untouched). Any other error (no panel, transport
-            // failure) propagates to the outer catch → fail(), exactly as before.
+            // slow-but-valid answer. Any other error (no panel, transport failure)
+            // propagates to the outer catch → fail(), exactly as before.
             if (!isReplyTimeoutError(err)) throw err;
-            const late = await pollLateAskReply(ctx.bridge, askId, timing);
-            if (late === undefined) {
-              // Idle user never answered. Do NOT call setNsfwConsent — the gate stays
-              // exactly where it was (SFW by default). Never auto-grant on a timeout.
-              const current = getNsfwConsent();
-              return ok({
-                nsfw_allowed: current.allowed,
-                decided_at: current.decidedAt ?? null,
-                timed_out: true,
-                note:
-                  "The 18+ consent card wasn't answered in time, so nothing changed — adult content stays gated. " +
-                  "Ask again when the user is back, or read the current state with panel_get_content_mode.",
-              });
-            }
-            reply = late;
+            timedOut = true;
+            reply = await pollLateAskReply(ctx.bridge, askId, timing);
           }
-          const allowed = isAffirmative(reply);
+          // STRICT gate: adult mode turns ON only on the EXACT affirmative option (or a
+          // strict whole-string yes token) — never via the loose isAffirmative() prefix
+          // match, so a free-text late reply like "adult content is illegal here" or "On
+          // second thought, no" can't grant. An UNCLEAR reply (incl. a no-answer timeout,
+          // where reply is undefined) changes NOTHING: it neither grants nor revokes a
+          // prior genuine grant. Only an EXACT decline explicitly reverts to SFW.
+          const decision = classifyConsentReply(reply);
+          if (decision === "unclear") {
+            const current = getNsfwConsent();
+            return ok({
+              nsfw_allowed: current.allowed,
+              decided_at: current.decidedAt ?? null,
+              ...(timedOut ? { timed_out: true } : {}),
+              note: timedOut
+                ? "The 18+ consent card wasn't answered in time, so nothing changed — adult content stays gated by the existing state. " +
+                  "Ask again when the user is back, or read the current state with panel_get_content_mode."
+                : "The 18+ consent card wasn't answered with a clear yes/no, so nothing changed — the existing content-mode state is unchanged. " +
+                  "Ask again with a clear choice, or read the current state with panel_get_content_mode.",
+            });
+          }
+          const allowed = decision === "grant";
           const state = setNsfwConsent(allowed);
           return ok({
             nsfw_allowed: state.allowed,

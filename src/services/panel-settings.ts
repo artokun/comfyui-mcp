@@ -78,9 +78,18 @@ function write(settings: PanelSettings): void {
   writeFileSync(p, JSON.stringify(settings, null, 2));
 }
 
-/** Current NSFW consent state. Defaults to OFF when never set. */
+/** Current NSFW consent state. Defaults to OFF when never set.
+ *
+ *  FAIL-CLOSED: `read()` casts arbitrary on-disk JSON, so a tampered or
+ *  legacy/corrupt settings file could carry a non-boolean `allowed` (e.g. the
+ *  truthy STRING "false", 1, "true"). Adult content must be enabled ONLY on a
+ *  strict boolean `true`; every other value is treated as NOT consented. We also
+ *  normalize `decidedAt` to a string-or-undefined so callers never see junk. */
 export function getNsfwConsent(): NsfwConsent {
-  return read().nsfwConsent ?? { allowed: false };
+  const raw = read().nsfwConsent as Partial<NsfwConsent> | undefined;
+  const allowed = raw?.allowed === true;
+  const decidedAt = typeof raw?.decidedAt === "string" ? raw.decidedAt : undefined;
+  return decidedAt === undefined ? { allowed } : { allowed, decidedAt };
 }
 
 /**
