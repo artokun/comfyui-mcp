@@ -8,7 +8,7 @@ import {
 } from "node:fs";
 import { platform } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { config } from "../config.js";
+import { resolveEffectiveComfyUIBase } from "./workspace-env.js";
 import { ComfyUIError, ValidationError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 
@@ -249,18 +249,27 @@ function toClassName(slug: string): string {
 }
 
 /**
- * Resolve the custom_nodes root, throwing a clear error in remote mode where
- * there is no local install path to write into.
+ * Resolve the custom_nodes root, throwing a clear error when there is no local
+ * install path to write into. Resolves the effective LOCAL ComfyUI base the same
+ * way every other filesystem-backed tool does (node-dev, node-verify): COMFYUI_PATH
+ * first, then the saved default workspace (set via set_default_workspace) when
+ * COMFYUI_PATH is unset and we are not targeting a remote ComfyUI. This is what
+ * get_environment / get_workspace already report, so scaffold/publish no longer
+ * reject a loopback session that has a saved default workspace as if it were remote
+ * (#506). Returns undefined only in remote mode or when no local install is known —
+ * then we refuse with a clear, actionable error.
  */
 function customNodesRoot(): string {
-  if (!config.comfyuiPath) {
+  const base = resolveEffectiveComfyUIBase();
+  if (!base) {
     throw new ValidationError(
-      "This operation needs a local ComfyUI install, but config.comfyuiPath is " +
-        "not set (running in remote --comfyui-url mode). Set COMFYUI_PATH to your " +
-        "local ComfyUI directory to scaffold or publish custom nodes.",
+      "This operation needs a local ComfyUI install, but none is configured " +
+        "(COMFYUI_PATH is unset, no saved default workspace, or running in remote " +
+        "--comfyui-url mode). Set COMFYUI_PATH or a default workspace " +
+        "(set_default_workspace) to scaffold or publish custom nodes.",
     );
   }
-  return join(config.comfyuiPath, "custom_nodes");
+  return join(base, "custom_nodes");
 }
 
 /**

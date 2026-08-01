@@ -10,6 +10,15 @@ vi.mock("../../config.js", () => {
   return { config };
 });
 
+// Control the effective LOCAL base node-authoring resolves through, so #506's
+// saved-default-workspace behavior is exercised without touching real user
+// config. resolveEffectiveComfyUIBase() prefers COMFYUI_PATH then the saved
+// default; the mock mirrors that: config.comfyuiPath first, else wsMock.saved.
+const wsMock = vi.hoisted(() => ({ saved: undefined as string | undefined }));
+vi.mock("../../services/workspace-env.js", () => ({
+  resolveEffectiveComfyUIBase: () => config.comfyuiPath ?? wsMock.saved,
+}));
+
 import { config } from "../../config.js";
 import {
   scaffoldCustomNode,
@@ -72,6 +81,7 @@ const CUSTOM_NODES = join("/fake/comfy", "custom_nodes");
 
 beforeEach(() => {
   config.comfyuiPath = "/fake/comfy";
+  wsMock.saved = undefined;
   delete process.env.REGISTRY_ACCESS_TOKEN;
 });
 
@@ -214,12 +224,29 @@ describe("scaffoldCustomNode", () => {
     expect(writes).toHaveLength(0);
   });
 
-  it("throws a clear error in remote mode (no comfyuiPath)", () => {
+  it("throws a clear error in remote mode (no comfyuiPath, no saved default)", () => {
     config.comfyuiPath = undefined;
+    wsMock.saved = undefined;
     const { deps } = makeDeps();
     expect(() =>
       scaffoldCustomNode({ name: "x", displayName: "X" }, deps),
     ).toThrow(/local ComfyUI install/i);
+  });
+
+  it("resolves against the saved default workspace when COMFYUI_PATH is unset (#506)", () => {
+    // No COMFYUI_PATH, but a saved default workspace is set — a loopback session
+    // must be treated as local, mirroring get_environment/get_workspace, instead
+    // of being rejected as remote. Scaffold should write under the saved default.
+    config.comfyuiPath = undefined;
+    wsMock.saved = "/saved/ws";
+    const { deps, mkdirs } = makeDeps();
+    const res = scaffoldCustomNode(
+      { name: "my-nodes", displayName: "My Nodes" },
+      deps,
+    );
+    const packDir = resolve(join("/saved/ws", "custom_nodes"), "my-nodes");
+    expect(res.path).toBe(packDir);
+    expect(mkdirs).toContain(packDir);
   });
 
   it("writes a placeholder PublisherId when none is given", () => {
@@ -460,12 +487,33 @@ describe("publishCustomNode", () => {
     expect(() => publishCustomNode({}, deps)).toThrow(ValidationError);
   });
 
-  it("throws a clear error in remote mode when using name", () => {
+  it("throws a clear error in remote mode when using name (no saved default)", () => {
     config.comfyuiPath = undefined;
+    wsMock.saved = undefined;
     process.env.REGISTRY_ACCESS_TOKEN = "tok";
     const deps = depsWithToml(goodToml);
     expect(() => publishCustomNode({ name: "mypack" }, deps)).toThrow(
       /local ComfyUI install/i,
+    );
+  });
+
+  it("resolves name against the saved default workspace when COMFYUI_PATH is unset (#506)", () => {
+    // COMFYUI_PATH unset but a saved default workspace exists — resolving a pack
+    // by name must use it (not reject as remote), so publish runs in the pack dir
+    // under the saved default's custom_nodes/.
+    config.comfyuiPath = undefined;
+    wsMock.saved = "/saved/ws";
+    process.env.REGISTRY_ACCESS_TOKEN = "tok";
+    const runSpy = vi.fn(() => "ok");
+    const deps = makeDeps({
+      existsSync: vi.fn(() => true),
+      readFile: vi.fn(() => goodToml),
+      run: runSpy,
+    }).deps;
+    const res = publishCustomNode({ name: "mypack" }, deps);
+    expect(res.published).toBe(true);
+    expect(runSpy.mock.calls[0][2].cwd).toBe(
+      resolve(join("/saved/ws", "custom_nodes"), "mypack"),
     );
   });
 });
