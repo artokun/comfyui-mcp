@@ -115,8 +115,9 @@ function fileFor(id: string, target?: string, attempt?: number): string {
   // same millisecond could tie), which would put two live writers on ONE file and let a
   // late terminal clobber the other's live row. Owner-scoping the filename — the same
   // per-process nonce the persisted job store already uses (#515/#529) — makes two
-  // processes ALWAYS write distinct files, so a clobber is impossible regardless of any
-  // epoch tie. (Supersession ordering for a genuinely simultaneous same-ms cross-process
+  // processes write distinct files (barring a ~2^-64 owner-nonce collision), so a
+  // clobber is effectively impossible regardless of any epoch tie. (Supersession
+  // ordering for a genuinely simultaneous same-ms cross-process
   // double-start is inherently undefined, but it is non-corrupting: #467/#473 O_EXCL temp
   // + atomic rename + payload validation, and #529 in-flight adoption normally prevents a
   // second writer in the first place.)
