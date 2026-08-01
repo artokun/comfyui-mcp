@@ -534,6 +534,106 @@ describe("UiBridge (multi-tab)", () => {
     a.close();
   });
 
+  // #436 priority 4: the no-panel guidance must be ACTIONABLE. Before any tab has
+  // connected, "install the pack" is right. But once a tab HAS connected and later
+  // dropped (the post-restart / tab-reload window), the pack is provably installed —
+  // so the guidance must send the user to refresh the ComfyUI browser tab, never to
+  // diagnose a nonexistent install problem (the exact wrong path the report hit).
+  describe("actionable no-panel guidance after a reconnect drop (#436.4)", () => {
+    it("suggests installing the pack ONLY when nothing has ever connected", () => {
+      // Fresh bridge (beforeEach) — no tab has ever helloed.
+      const msg = bridge.status();
+      expect(msg).toMatch(/pack installed/);
+      expect(msg).not.toMatch(/refresh/i);
+    });
+
+    it("after a tab connected then dropped, tells the user to refresh the browser tab (not install)", async () => {
+      const a = await connectPanel("wf:workflows/x.json", "x");
+      await vi.waitFor(() => expect(bridge.tabs()).toHaveLength(1));
+      a.close();
+      await vi.waitFor(() => expect(bridge.tabs()).toHaveLength(0));
+      const msg = bridge.status();
+      expect(msg).toMatch(/refresh/i);
+      expect(msg).toMatch(/browser tab/i);
+      // Must NOT send the agent to diagnose a (nonexistent) install problem.
+      expect(msg).not.toMatch(/pack installed and check the Agent sidebar/);
+    });
+
+    it("a WRITE to the pre-restart id after the drop fails with the refresh guidance appended, keeping 'Connected: none'", async () => {
+      const a = await connectPanel("wf:workflows/x.json", "x");
+      await vi.waitFor(() => expect(bridge.tabs()).toHaveLength(1));
+      a.close();
+      await vi.waitFor(() => expect(bridge.tabs()).toHaveLength(0));
+      const err = await bridge
+        .send({ cmd: "graph_add_node" }, { tabId: "wf:workflows/x.json" })
+        .catch((e) => e as Error);
+      expect(err).toBeInstanceOf(Error);
+      // Machine-readable phrase preserved (retry/transient classifiers + tests key on it)…
+      expect(err.message).toMatch(/no connected tab with id "wf:workflows\/x\.json"\. Connected: none/);
+      // …now with the actionable refresh guidance appended.
+      expect(err.message).toMatch(/refresh/i);
+      // The refusal is BEFORE any socket write — nothing was dispatched (fail-closed).
+      expect(dispatchOutcomeOf(err)).toBe(false);
+    });
+
+    it("a HEADLESS-only history (phone mirror, no desktop tab) never claims the desktop pack is installed", async () => {
+      // A canvas-less mobile/remote pseudo-panel connects then drops. It proves neither
+      // that the sidebar pack is installed nor that a browser tab exists to refresh, so
+      // the zero-tab guidance must stay the conservative "install the pack" wording.
+      const phone = await new Promise<WebSocket>((resolve, reject) => {
+        const s = new WebSocket(`ws://127.0.0.1:${port}`);
+        s.on("open", () => {
+          s.send(JSON.stringify({ type: "hello", tab_id: "phone-1", title: "mirror", headless: true }));
+          resolve(s);
+        });
+        s.on("error", reject);
+      });
+      await vi.waitFor(() => expect(bridge.tabs()).toHaveLength(1));
+      phone.close();
+      await vi.waitFor(() => expect(bridge.tabs()).toHaveLength(0));
+      const msg = bridge.status();
+      expect(msg).toMatch(/pack installed/);
+      expect(msg).not.toMatch(/refresh/i);
+    });
+
+    it("a still-live OTHER tab keeps the exact tab listing (not the refresh guidance)", async () => {
+      const a = await connectPanel("tab-aaaa-1111", "one");
+      await vi.waitFor(() => expect(bridge.tabs()).toHaveLength(1));
+      const err = await bridge
+        .send({ cmd: "graph_add_node" }, { tabId: "wf:workflows/gone.json" })
+        .catch((e) => e as Error);
+      expect(err.message).toMatch(/Connected: tab-aaaa/);
+      expect(err.message).not.toMatch(/refresh/i);
+      a.close();
+    });
+  });
+
+  // #436 priority 1: reads must be HONEST about the binding — a read cannot resolve a
+  // tab the write path can't. Both a read (graph_outline) and a write (graph_add_node)
+  // routed to the SAME id resolve through the SAME registry, so in the zero-tab window
+  // BOTH refuse identically (no read false-positive), and once a tab is live BOTH reach
+  // it. This is the registry-consistency guarantee the reconnect race violated.
+  describe("read/write resolve against the same tab registry (#436.1)", () => {
+    it("in the zero-tab window a read and a write to the same id BOTH refuse (dispatched:false)", async () => {
+      const a = await connectPanel("wf:workflows/x.json", "x");
+      await vi.waitFor(() => expect(bridge.tabs()).toHaveLength(1));
+      a.close();
+      await vi.waitFor(() => expect(bridge.tabs()).toHaveLength(0));
+      const readErr = await bridge
+        .send({ cmd: "graph_outline" }, { tabId: "wf:workflows/x.json", timeoutMs: 500 })
+        .catch((e) => e as Error);
+      const writeErr = await bridge
+        .send({ cmd: "graph_add_node" }, { tabId: "wf:workflows/x.json", timeoutMs: 500 })
+        .catch((e) => e as Error);
+      expect(readErr).toBeInstanceOf(Error);
+      expect(writeErr).toBeInstanceOf(Error);
+      // The read did NOT falsely resolve while the write was refused — both dispatched:false.
+      expect(dispatchOutcomeOf(readErr)).toBe(false);
+      expect(dispatchOutcomeOf(writeErr)).toBe(false);
+      expect(readErr.message).toMatch(/no connected tab with id "wf:workflows\/x\.json"/);
+    });
+  });
+
   it("resolves via tab-id migration when a socket re-hellos under a new scheme (tmp:→wf:)", async () => {
     // Simulate the bug scenario: a tab first connects with a random-UUID tab id
     // (the old scheme), an agent binds to it, then the SAME socket re-hellos

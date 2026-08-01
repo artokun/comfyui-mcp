@@ -3848,7 +3848,9 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             deferredBind = true;
             rebindNote =
               " No panel tab is connected yet — cleared the stale binding; this session will " +
-              "follow (bind onto) the tab as soon as one reconnects. Retry your graph tool in a moment.";
+              "follow (bind onto) the tab as soon as one reconnects. Retry your graph tool in a " +
+              "moment; if nothing reconnects shortly, ask the user to refresh (reload) the ComfyUI " +
+              "browser tab, which reconnects the Agent panel after a restart (not an install issue).";
           }
           // Detect the rebind regardless of whether awaitReachable or rebindToActiveTab
           // performed it (either mutates ctx.tabId), so the note is never swallowed.

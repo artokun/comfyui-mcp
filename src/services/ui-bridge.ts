@@ -497,6 +497,13 @@ export class UiBridge {
    *  `isHeadless` stays true across a disconnect (see isHeadless). */
   private readonly headlessSeen = new Set<string>();
   private seenTabs = new Set<string>(); // tabIds ever announced — dedup connect logs across reconnect churn
+  /** True once a CANVAS-OWNING (non-headless) tab has helloed — i.e. a real ComfyUI
+   *  browser tab with the comfyui-mcp-panel pack was open this session. Distinct from
+   *  `seenTabs`, which also counts headless mobile/remote pseudo-panels: those prove
+   *  neither that the desktop pack is installed nor that a browser tab exists to
+   *  refresh, so they must NOT drive the "refresh the ComfyUI browser tab" guidance
+   *  (#436.4). Never cleared — a faithful "a real panel tab connected once" mark. */
+  private everConnectedDesktopTab = false;
   /** Frames pushed at a tab with NO live connection, buffered for replay when that
    *  tab re-hellos. Per-workflow sessions re-target ONE socket between workflow tab
    *  ids, so a backgrounded workflow's agent output would otherwise be dropped on
@@ -979,6 +986,12 @@ export class UiBridge {
         // (codex round-8 P1).
         migratedProvenSupported = undefined;
         if (incomingHeadless) this.headlessSeen.add(tabId);
+        // A canvas-owning (non-headless) hello PROVES the comfyui-mcp-panel pack is
+        // installed and a real ComfyUI browser tab was open — the precondition for
+        // the "refresh the browser tab" guidance (#436.4). A headless mobile/remote
+        // pseudo-panel must NOT set this: if only a phone ever connected, there may be
+        // no desktop tab to refresh and no proof the sidebar pack is installed (codex).
+        else this.everConnectedDesktopTab = true;
         this.broadcastTabList(); // a tab connected/reconnected — refresh mirror pickers
         // Log a real connect ONCE per tab id. A reconnect/ping-pong loop (a new
         // socket every couple seconds — e.g. two browser contexts sharing one tab
@@ -1302,12 +1315,37 @@ export class UiBridge {
     }));
   }
 
+  /** True once a real CANVAS-OWNING panel tab has connected during this bridge's
+   *  lifetime. When a later state has zero tabs, this distinguishes "the pack is
+   *  installed and a tab merely dropped" (typically a ComfyUI restart or a browser-tab
+   *  reload) from "nothing has ever connected — the pack may be missing". Drives the
+   *  actionable no-panel guidance below (#436 priority 4): a session that flapped after
+   *  a restart must be told to refresh the ComfyUI browser tab, NOT sent to diagnose a
+   *  nonexistent install problem. Uses `everConnectedDesktopTab` (NOT `seenTabs`) so a
+   *  headless-only history — a phone mirror that connected but no desktop tab — never
+   *  triggers desktop-tab guidance (codex). */
+  private hasEverConnected(): boolean {
+    return this.everConnectedDesktopTab;
+  }
+
+  /** Actionable guidance for a ZERO-tab state, shared by `status()` and the tab-id
+   *  resolution refusal so every "no tab" surface says the same true, actionable
+   *  thing. Once a tab has connected, the pack is installed and the tab just
+   *  disconnected — point the user at refreshing the ComfyUI browser tab (the ONLY
+   *  thing that reliably restores the binding after a restart, per #436). Only when
+   *  nothing has EVER connected do we suggest the pack may be missing. */
+  noPanelGuidance(): string {
+    return this.hasEverConnected()
+      ? "the ComfyUI panel tab is not connected — this is almost always because ComfyUI was just restarted or the browser tab reloaded, which drops the Agent panel's socket. Ask the user to refresh (reload) the ComfyUI browser tab to reconnect the Agent panel, then retry. (The comfyui-mcp-panel pack IS installed — a tab connected earlier this session — so this is a reconnect, not an install problem.)"
+      : "no panel connected — open ComfyUI with the comfyui-mcp-panel pack installed and check the Agent sidebar tab";
+  }
+
   status(): string {
     if (this.portInUse) {
       return `port ${this.port} is held by another comfyui-mcp session — close that session (or whatever owns the port) and reconnect`;
     }
     if (this.conns.size === 0) {
-      return "no panel connected — open ComfyUI with the comfyui-mcp-panel pack installed and check the Agent sidebar tab";
+      return this.noPanelGuidance();
     }
     const lines = this.tabs().map(
       (t) =>
@@ -1338,12 +1376,22 @@ export class UiBridge {
         }
       }
       if (prefixed.length === 1) return prefixed[0];
+      if (prefixed.length > 1) {
+        throw new Error(`tab_id "${tabId}" is ambiguous — matches ${prefixed.length} tabs`);
+      }
+      const connected = this.tabs();
+      // ZERO tabs → this is the post-restart "Connected: none" window. Keep the
+      // machine-readable "no connected tab … Connected: none" phrase intact (the
+      // panel-tools retry/transient classifier and existing tests key on it) but
+      // APPEND the actionable next step so the agent stops diagnosing a nonexistent
+      // install problem and instead surfaces the real fix — refresh the ComfyUI
+      // browser tab (#436 priority 4). Other-tabs-live keeps the exact tab listing.
       throw new Error(
-        prefixed.length > 1
-          ? `tab_id "${tabId}" is ambiguous — matches ${prefixed.length} tabs`
-          : `no connected tab with id "${tabId}". Connected: ${this.tabs()
+        connected.length === 0
+          ? `no connected tab with id "${tabId}". Connected: none — ${this.noPanelGuidance()}`
+          : `no connected tab with id "${tabId}". Connected: ${connected
               .map((t) => `${t.tab_id.slice(0, 8)} (“${t.title}”)`)
-              .join(", ") || "none"}`,
+              .join(", ")}`,
       );
     }
     if (this.conns.size === 1) {
