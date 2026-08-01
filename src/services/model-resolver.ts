@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { existsSync, type Stats } from "node:fs";
 import { readdir, stat, mkdir, readFile, lstat, realpath } from "node:fs/promises";
 import { dirname, join, basename, resolve, relative, sep, isAbsolute, extname } from "node:path";
@@ -134,15 +134,28 @@ export interface LocalModel {
  * Never falls back to a local workspace in remote mode (that dir isn't the remote
  * target). Returns undefined when no usable local path exists.
  */
-/** Strictly-monotonic attempt epoch (panel#489). Normally the wall clock, but never
- *  repeats or goes backward WITHIN this process — so two retries started in the same
- *  millisecond (or across a small clock rollback) still get distinct, increasing
- *  generations. A tie would leave neither attempt able to supersede the other, letting a
- *  stale FAILED slip through. Cross-process ordering still rests on the wall clock (a
- *  later-spawned child is later in real time), which is correct for reconnect respawns. */
+/** A stable per-PROCESS tiebreak (0..999) folded into every attempt epoch so two
+ *  DIFFERENT processes that start an attempt in the very same millisecond still get
+ *  DISTINCT epochs (codex finding). Equal epochs would collide on the per-attempt
+ *  filename (a real clobber) AND defeat supersession (the predicate needs strictly
+ *  greater). Live processes on one host have distinct pids, but a random nonce avoids
+ *  even a pid-reuse tie; the space only needs to separate the rare same-URL,
+ *  same-target, same-ms double-start. */
+const ATTEMPT_TIEBREAK = randomBytes(2).readUInt16BE(0) % 1000;
+
+/** Strictly-monotonic attempt epoch (panel#489). Wall-clock milliseconds DOMINATE the
+ *  ordering (× 1000), so a retry — which starts later in real time — always outranks the
+ *  attempt it replaced, even across a reconnect respawn in a different process. The
+ *  low-order tiebreak makes concurrent same-ms attempts in different processes distinct
+ *  (no filename clobber, decisive supersession). Within THIS process the value never
+ *  repeats or goes backward — two same-ms retries (or a small local clock rollback) still
+ *  get increasing generations; a tie would let a stale FAILED slip through. (Cross-process
+ *  ordering still assumes the wall clock does not jump backward by more than a retry gap —
+ *  a severe NTP step is out of scope, as it is for any wall-clock generation.) */
 let lastAttemptEpoch = 0;
 function nextAttemptEpoch(): number {
-  lastAttemptEpoch = Math.max(Date.now(), lastAttemptEpoch + 1);
+  const base = Date.now() * 1000 + ATTEMPT_TIEBREAK;
+  lastAttemptEpoch = Math.max(base, lastAttemptEpoch + 1);
   return lastAttemptEpoch;
 }
 
