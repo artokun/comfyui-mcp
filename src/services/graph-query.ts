@@ -71,6 +71,102 @@ function clip(v: unknown, n = 60): string {
   return one.length > n ? `${one.slice(0, n - 1)}…` : one;
 }
 
+// #609: per-widget-value cap for the `detail` projection. One oversized value
+// (a ResolutionMaster presets JSON, LTXDirector.timeline_data, a VHS videopreview)
+// must not consume the whole max_chars budget and starve the rest of the query.
+const WIDGET_VALUE_CAP = 2048;
+
+/** Bound one widget value by its ESCAPED (JSON-serialized) size (#609), so the bound
+ *  holds regardless of content — control chars and lone surrogates escape to 6 chars
+ *  each, not 2. Small values pass through; else the longest head prefix whose encoding
+ *  fits `cap`, with an honest marker naming how many raw chars were dropped. */
+function capWidgetValue(value: unknown, cap = WIDGET_VALUE_CAP): unknown {
+  if (value == null) return value;
+  const s = typeof value === "string" ? value : (() => { try { return JSON.stringify(value); } catch { return String(value); } })();
+  if (typeof s !== "string") return value;
+  if (JSON.stringify(s).length <= cap) return value;
+  const target = Math.max(2, cap - 40);
+  let lo = 0;
+  let hi = s.length;
+  let best = 0;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (JSON.stringify(s.slice(0, mid)).length <= target) { best = mid; lo = mid + 1; }
+    else hi = mid - 1;
+  }
+  return `${s.slice(0, best)}…(+${s.length - best} chars, truncated)`;
+}
+
+/** Clip a KEY/name to a small bound (#609) so a pathological long key can't blow the line. */
+function capKey(key: string, cap = 128): string {
+  const k = String(key);
+  return k.length <= cap ? k : `${k.slice(0, cap)}…`;
+}
+
+/** Serialized (JSON-escaped) size of one `"key":value,` widget entry — the ACTUAL
+ *  line contribution, so escape-heavy strings don't slip the budget. */
+function entrySize(key: string, value: unknown): number {
+  let vLen: number;
+  try { vLen = JSON.stringify(value)?.length ?? 0; } catch { vLen = String(value).length; }
+  return JSON.stringify(key).length + vLen + 2;
+}
+
+/** Cap every value in a widgets map, AND bound the TOTAL serialized size by dropping
+ *  overflow widgets (keeping valid JSON) with an elision marker (#609) — so even a
+ *  many-widget node can't blow the char budget. When a budget is set, the per-value
+ *  cap is tightened to it so even the single retained widget respects it. At least one
+ *  widget always survives. */
+function capWidgets(widgets: Record<string, unknown>, totalCap = Number.POSITIVE_INFINITY): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  // capWidgetValue bounds the ESCAPED size exactly, so the per-value cap can be the
+  // budget itself (minus a small reserve for the key + JSON framing).
+  const perValueCap = Number.isFinite(totalCap) ? Math.min(WIDGET_VALUE_CAP, Math.max(1, totalCap - 256)) : WIDGET_VALUE_CAP;
+  const entries = Object.entries(widgets);
+  let used = 0;
+  let omitted = 0;
+  for (let i = 0; i < entries.length; i++) {
+    const k = capKey(entries[i][0]);
+    const capped = capWidgetValue(entries[i][1], perValueCap);
+    const size = entrySize(k, capped);
+    if (Number.isFinite(totalCap) && Object.keys(out).length > 0 && used + size > totalCap) {
+      omitted = entries.length - i;
+      break;
+    }
+    out[k] = capped;
+    used += size;
+  }
+  if (omitted > 0) out["…"] = `${omitted} widget(s) omitted (exceeded budget); raise max_chars`;
+  return out;
+}
+
+/** Hard-clip an assembled COMPACT (plain-string) line to `maxChars` (#609) — the
+ *  protected first match bypasses the running budget, so a thousands-of-widgets node
+ *  would else emit an unbounded first line. */
+function clipLine(line: string, maxChars: number): string {
+  if (!Number.isFinite(maxChars) || line.length <= maxChars) return line;
+  return line.slice(0, Math.max(0, maxChars - 1)) + "…";
+}
+
+/** Final guard for a DETAIL (JSON) line (#609): if a node's fully-capped detail STILL
+ *  exceeds `maxChars` — a high-fan-in node whose upstream/downstream the per-field
+ *  caps don't fully bound against a shared budget — replace it with a bounded
+ *  VALID-JSON stub. The row is never dropped (shown ≥ 1) but every rendered detail
+ *  line is ≤ maxChars. */
+function fitDetailLine(line: string, stub: Record<string, unknown>, maxChars: number): string {
+  if (!Number.isFinite(maxChars) || line.length <= maxChars) return line;
+  // Clip the stub's OWN fields too — a graph may carry an arbitrarily long node id or
+  // type, which would otherwise blow even the stub past the budget.
+  const clipF = (v: unknown) => (typeof v === "string" && v.length > 60 ? `${v.slice(0, 60)}…` : v);
+  const safe: Record<string, unknown> = { id: clipF(stub.id), type: clipF(stub.type) };
+  if (stub.title != null) safe.title = clipF(stub.title);
+  const s = JSON.stringify({
+    ...safe,
+    detail_omitted: `full detail is ${line.length} chars > max_chars ${maxChars}; raise max_chars to read this node`,
+  });
+  if (s.length <= maxChars) return s;
+  return JSON.stringify({ id: typeof safe.id === "string" ? safe.id.slice(0, 40) : safe.id, detail_omitted: "raise max_chars" });
+}
+
 function matchPredicate(value: unknown, op: string, rhs: string): boolean {
   const lhsNum = typeof value === "number" ? value : Number(value);
   const rhsNum = Number(rhs);
@@ -151,7 +247,8 @@ export function queryApiGraph(graph: ApiGraph, opts: GraphQueryOptions = {}): Gr
   const depth = opts.depth != null && opts.depth >= 0 ? opts.depth : Number.POSITIVE_INFINITY;
   const seedErr = (which: string, id: string): GraphQueryResult => ({
     total, candidates: 0, matched: 0, shown: 0, truncated: false,
-    text: `${which} node ${id} not found in the graph (${total} nodes).`,
+    // #609: clip the caller-supplied id so an oversized seed can't flood the diagnostic.
+    text: `${which} node ${clip(id, 120)} not found in the graph (${total} nodes).`,
   });
   if (opts.upstream_of != null) {
     const seed = String(opts.upstream_of);
@@ -176,7 +273,8 @@ export function queryApiGraph(graph: ApiGraph, opts: GraphQueryOptions = {}): Gr
     // mistyped ("cfg >> 7", "steps => 20") and would otherwise silently match
     // nothing as a string compare.
     if (!m || /^[=<>~]/.test(m[3])) {
-      throw new Error(`Bad predicate "${w}" — expected "name op value" with op one of = != >= <= > < ~`);
+      // #609: clip the caller-supplied predicate so an oversized value can't flood the error.
+      throw new Error(`Bad predicate "${clip(w, 120)}" — expected "name op value" with op one of = != >= <= > < ~`);
     }
     return { name: m[1], op: m[2], rhs: m[3] };
   });
@@ -209,11 +307,23 @@ export function queryApiGraph(graph: ApiGraph, opts: GraphQueryOptions = {}): Gr
       const t = graph[id]?.class_type ?? "?";
       hist.set(t, (hist.get(t) ?? 0) + 1);
     }
-    const lines = [...hist.entries()].sort((a, b) => b[1] - a[1]).map(([t, c]) => `${c}× ${t}`);
+    // #609: bound the aggregate too — clip each type and char-bound the list so a graph
+    // with thousands of distinct/long class_types can't flood the read.
+    const allLines = [...hist.entries()].sort((a, b) => b[1] - a[1]).map(([t, c]) => `${c}× ${clip(t, 200)}`);
+    const head = `${matched.length} node(s) across ${hist.size} type(s):`;
+    const kept: string[] = [];
+    let used = head.length;
+    let aggTruncated = false;
+    for (const l of allLines) {
+      if (used + l.length + 1 > maxChars) { aggTruncated = true; break; }
+      kept.push(l);
+      used += l.length + 1;
+    }
+    const aggTail = aggTruncated ? `\n…(${allLines.length - kept.length} more type(s) omitted; raise max_chars)` : "";
     return {
       total, candidates: candidates.length, matched: matched.length,
-      shown: matched.length, truncated: false,
-      text: `${matched.length} node(s) across ${hist.size} type(s):\n${lines.join("\n")}`,
+      shown: matched.length, truncated: aggTruncated,
+      text: `${head}\n${kept.join("\n")}${aggTail}`,
     };
   }
 
@@ -222,6 +332,14 @@ export function queryApiGraph(graph: ApiGraph, opts: GraphQueryOptions = {}): Gr
   const header =
     `${matched.length} match(es) of ${candidates.length} in scope (graph: ${total} nodes)` +
     (scope ? ` · traversal${Number.isFinite(depth) ? ` depth≤${depth}` : ""}` : "");
+  // #609: protect ONLY the FIRST match from the char budget so asking for one node
+  // by id never returns shown:0 (a huge sibling or one oversized widget blob can no
+  // longer starve the thing you asked for). We deliberately do NOT exempt every
+  // requested id — that would disable the max_chars token bound for a large `ids`
+  // list; at most one line (the first, itself per-value capped) can overflow.
+  // NOTE (#607): link-driven-widget staleness cannot occur in this API-format engine
+  // — ref inputs are excluded from widgetsOf() by construction (isRef), so a
+  // link-driven input is never reported as a stale widget value. #607 is panel-only.
   const lines: string[] = [];
   let shown = 0;
   let truncated = false;
@@ -231,14 +349,32 @@ export function queryApiGraph(graph: ApiGraph, opts: GraphQueryOptions = {}): Gr
     const n = graph[id] ?? {};
     let line: string;
     if (fields === "ids") {
-      line = String(id);
+      line = clipLine(String(id), maxChars); // #609: bound even a pathological long id
     } else if (fields === "detail") {
+      // #609: bound EVERY field so the protected first line stays O(max_chars): clip
+      // the title/type, clip ref-input names + source ids and cap their count, and cap
+      // the downstream consumer list (a fan-out hub can have hundreds) — each with a
+      // "+N more" / "…" tail. widgets is total-capped by capWidgets.
+      const REF_CAP = 64;
       const upRefs: Record<string, string> = {};
-      for (const [k, v] of Object.entries(n.inputs ?? {})) if (isRef(v)) upRefs[k] = `${v[0]}.${v[1]}`;
+      const refEntries = Object.entries(n.inputs ?? {}).filter(([, v]) => isRef(v));
+      for (const [k, v] of refEntries.slice(0, REF_CAP)) {
+        upRefs[capKey(k)] = clip(`${(v as [unknown, unknown])[0]}.${(v as [unknown, unknown])[1]}`, 128);
+      }
+      if (refEntries.length > REF_CAP) upRefs["…"] = `+${refEntries.length - REF_CAP} more`;
+      const allDown = [...(down.get(String(id)) ?? [])];
+      const DOWN_CAP = 64;
+      const downstream: Array<string | number> =
+        allDown.length > DOWN_CAP ? [...allDown.slice(0, DOWN_CAP), `…+${allDown.length - DOWN_CAP} more`] : allDown;
+      const title = n._meta?.title != null ? clip(n._meta.title, 200) : n._meta?.title;
       line = JSON.stringify({
-        id, type: n.class_type ?? "?", title: n._meta?.title,
-        widgets: widgetsOf(n), upstream: upRefs, downstream: [...(down.get(String(id)) ?? [])],
+        id, type: clip(n.class_type ?? "?", 200), title,
+        widgets: capWidgets(widgetsOf(n), maxChars), upstream: upRefs, downstream,
       });
+      // Final guard: if the fully-capped detail STILL exceeds max_chars (a pathological
+      // high-fan-in node), degrade the protected line to a bounded valid-JSON stub so it
+      // is never dropped yet can't flood — every rendered detail line ends up ≤ max_chars.
+      line = fitDetailLine(line, { id, type: clip(n.class_type ?? "?", 200) }, maxChars);
     } else {
       const w = Object.entries(widgetsOf(n)).map(([k, v]) => `${k}=${clip(v)}`).join(" ");
       const ins = Object.entries(n.inputs ?? {})
@@ -249,14 +385,21 @@ export function queryApiGraph(graph: ApiGraph, opts: GraphQueryOptions = {}): Gr
       line =
         `#${id} ${n.class_type ?? "?"}${n._meta?.title ? ` "${clip(n._meta.title, 40)}"` : ""}` +
         (w ? ` · ${w}` : "") + (ins ? `  ← ${ins}` : "") + (outs ? `  → ${outs}` : "");
+      // #609: bound the compact line by widget COUNT too — the protected first line
+      // bypasses the running budget, so a thousands-of-widgets node would else be
+      // unbounded. Plain string ⇒ a tail ellipsis is safe.
+      line = clipLine(line, maxChars);
     }
-    if (chars + line.length + 1 > maxChars) { truncated = true; break; }
+    const protectedLine = shown === 0; // first match always renders → shown≥1
+    if (!protectedLine && chars + line.length + 1 > maxChars) { truncated = true; break; }
     chars += line.length + 1;
     lines.push(line);
     shown++;
   }
   const tail = truncated
-    ? `\n… truncated at ${shown} of ${matched.length} — narrow with types/where/ids/depth, use group_by:"type", or raise limit.`
+    ? (wantIds?.length
+        ? `\n… truncated at ${shown} of ${matched.length} — requested nodes exceed max_chars (per-field values are already capped); raise max_chars or request fewer ids at once.`
+        : `\n… truncated at ${shown} of ${matched.length} — narrow with types/where/ids/depth, use group_by:"type", or raise limit.`)
     : "";
   const body = fields === "ids" ? lines.join(",") : lines.join("\n");
   return {
