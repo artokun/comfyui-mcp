@@ -34,7 +34,11 @@ import { parse as parseYaml } from "yaml";
 import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { UiBridge } from "../services/ui-bridge.js";
-import { dispatchOutcomeOf, isPanelCmdUnsupportedError } from "../services/ui-bridge.js";
+import {
+  dispatchOutcomeOf,
+  isPanelCmdUnsupportedError,
+  isReplyTimeoutTagged,
+} from "../services/ui-bridge.js";
 import {
   type WorkflowTargetStore,
   withWorkflowTarget,
@@ -109,11 +113,21 @@ const CONSENT_STRICT_NO_RE = /^(no|n|nope|decline|declined|cancel|keep (it )?sfw
  * content.
  */
 function classifyConsentReply(reply: unknown): "grant" | "decline" | "unclear" {
-  const s = typeof reply === "string" ? reply.trim() : "";
-  if (s === CONSENT_YES_LABEL) return "grant";
-  if (s === CONSENT_NO_LABEL) return "decline";
-  if (CONSENT_STRICT_YES_RE.test(s)) return "grant";
-  if (CONSENT_STRICT_NO_RE.test(s)) return "decline";
+  if (typeof reply !== "string") return "unclear";
+  // Exact OPTION IDENTITY: a button click echoes the card's label verbatim, so match
+  // it BYTE-FOR-BYTE — no .trim(). Trimming here would strip zero-width/BOM/line-
+  // separator characters (U+2028/U+2029/U+FEFF, \n) and let a near-label like
+  // " Yes — I'm 18+…﻿" pass as the exact affirmative, defeating the exact-identity
+  // invariant this classifier exists to hold.
+  if (reply === CONSENT_YES_LABEL) return "grant";
+  if (reply === CONSENT_NO_LABEL) return "decline";
+  // Free-text ("Other" box) fallback: a small set of unambiguous whole-string tokens.
+  // This path is DELIBERATELY loose — a user who types " yes " is consenting — so a
+  // minimal .trim() of surrounding whitespace is applied ONLY here, never to the
+  // exact-label comparison above.
+  const t = reply.trim();
+  if (CONSENT_STRICT_YES_RE.test(t)) return "grant";
+  if (CONSENT_STRICT_NO_RE.test(t)) return "decline";
   return "unclear";
 }
 
@@ -300,6 +314,10 @@ export const __panelToolsTestHooks = {
   },
   isRetrySafeCmd,
   isTransientReconnectError,
+  // Adult-consent classifier + its exact card labels (#390 gate tests).
+  classifyConsentReply,
+  CONSENT_YES_LABEL,
+  CONSENT_NO_LABEL,
   // #384 live-canvas capture fallback (defined later in the module).
   reconstructUiFromState: (reply: unknown) => reconstructUiFromState(reply),
   resolveWorkflowInput: (
@@ -2416,15 +2434,23 @@ function getAskTiming(): AskTiming {
  *  consent gate: a real transport failure must reach fail(), never be quietly
  *  reported as an unchanged-state success. */
 function isReplyTimeoutError(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err ?? "");
-  // EXACT whole-message match: literal single space before "ms" (the bridge always
-  // emits "within <N> ms"), no `.trim()`, `^` at true start (no /m flag) and a HARD
-  // end-of-input `(?![\s\S])` — NOT `$`, which in JS also matches just before a final
-  // "\n" and would let `canonical + "\n"` slip through. So canonical text wrapped in
-  // leading/trailing whitespace (incl. a trailing newline), or a noncanonical variant
-  // like "within 500ms"/"within 500\tms", does NOT match and is surfaced as a real
+  // AUTHORITATIVE: the bridge tags every reply-timeout with a typed marker
+  // (markReplyTimeout). Keying on it makes the recoverable-timeout decision robust to
+  // ANY tab_id — including one containing spaces, which the text form below can't
+  // segment (ui-bridge accepts an arbitrary-string tab_id).
+  if (isReplyTimeoutTagged(err)) return true;
+  // FALLBACK (test-injected plain errors / any untagged error): an EXACT whole-message
+  // match of the bridge's canonical no-reply. Literal single space before "ms" (the
+  // bridge always emits "within <N> ms"), no `.trim()`, `^` at true start (no /m flag)
+  // and a HARD end-of-input `(?![\s\S])` — NOT `$`, which in JS also matches just
+  // before a final "\n" and would let `canonical + "\n"` slip through. The tab-id
+  // segment is `.+?` (lazy, bounded by the fixed ` did not reply to "` that follows —
+  // an ≤8-char id slice can't contain that 19-char delimiter) so a spaced tab_id still
+  // matches here too. So a prefixed/suffixed wrapper, whitespace/newline-wrapped text,
+  // or noncanonical spacing ("within 500ms") does NOT match and is surfaced as a real
   // error. Case-sensitive: the message is a fixed literal template.
-  return /^Panel tab \S+ did not reply to "[^"]*" within \d+ ms — the ComfyUI tab may be backgrounded or frozen(?![\s\S])/.test(
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  return /^Panel tab .+? did not reply to "[^"]*" within \d+ ms — the ComfyUI tab may be backgrounded or frozen(?![\s\S])/.test(
     msg,
   );
 }

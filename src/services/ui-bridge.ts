@@ -407,6 +407,32 @@ export function dispatchOutcomeOf(err: unknown): boolean | undefined {
   return typeof v === "boolean" ? v : undefined;
 }
 
+/** Marks an error as a card/command REPLY-TIMEOUT: the command WAS sent (or was about
+ *  to be) and the tab simply never answered within the window — distinct from a
+ *  disconnect ("panel gone") or a pre-write send failure. Callers that offer a
+ *  late-answer grace (panel_ask / confirm / the adult-consent card) key their
+ *  recoverable-timeout decision on THIS typed marker rather than parsing the message
+ *  text, so an arbitrary tab_id (e.g. one containing spaces, which no text regex could
+ *  reliably segment) can never misroute a genuine timeout away from the late-reply
+ *  buffer. */
+const REPLY_TIMEOUT = Symbol.for("comfyui-mcp.bridge.reply-timeout");
+
+/** Tag an error as a reply-timeout and return it (for throw/reject). */
+export function markReplyTimeout<E extends Error>(err: E): E {
+  Object.defineProperty(err, REPLY_TIMEOUT, {
+    value: true,
+    enumerable: false,
+    configurable: true,
+  });
+  return err;
+}
+
+/** True when `err` carries the typed reply-timeout marker set by the bridge. */
+export function isReplyTimeoutTagged(err: unknown): boolean {
+  if (err == null || (typeof err !== "object" && typeof err !== "function")) return false;
+  return (err as Record<symbol, unknown>)[REPLY_TIMEOUT] === true;
+}
+
 /**
  * Frame `type`s that are safe to MIRROR to a tab's viewers — genuine shared-session
  * activity a remote-control phone should see. This is an ALLOWLIST (default-deny):
@@ -1510,8 +1536,10 @@ export class UiBridge {
     const remaining = ctx.deadline - Date.now();
     if (remaining <= 0) {
       ctx.reject(
-        new Error(
-          `Panel tab ${conn.tabId.slice(0, 8)} did not reply to "${cmd.cmd}" within ${ctx.timeoutMs} ms — the ComfyUI tab may be backgrounded or frozen`,
+        markReplyTimeout(
+          new Error(
+            `Panel tab ${conn.tabId.slice(0, 8)} did not reply to "${cmd.cmd}" within ${ctx.timeoutMs} ms — the ComfyUI tab may be backgrounded or frozen`,
+          ),
         ),
       );
       return;
@@ -1564,11 +1592,13 @@ export class UiBridge {
       // accepted-but-unacked dispatch and verifies by observation, rather than mistaking a
       // genuinely-sent command for one that never went out (#509).
       ctx.reject(
-        markDispatched(
-          new Error(
-            `Panel tab ${conn.tabId.slice(0, 8)} did not reply to "${cmd.cmd}" within ${ctx.timeoutMs} ms — the ComfyUI tab may be backgrounded or frozen`,
+        markReplyTimeout(
+          markDispatched(
+            new Error(
+              `Panel tab ${conn.tabId.slice(0, 8)} did not reply to "${cmd.cmd}" within ${ctx.timeoutMs} ms — the ComfyUI tab may be backgrounded or frozen`,
+            ),
+            true,
           ),
-          true,
         ),
       );
     }, replyTimeoutMs);
