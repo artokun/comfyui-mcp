@@ -314,6 +314,10 @@ export const __panelToolsTestHooks = {
   },
   isRetrySafeCmd,
   isTransientReconnectError,
+  // CivitAI sample-image gating (#623): the predicate that decides which results'
+  // pixels may be shown to the agent, and the bounded thumbnail fetcher.
+  civitaiSampleEligible,
+  fetchCivitaiSampleImages,
   // Adult-consent classifier + its exact card labels (#390 gate tests).
   classifyConsentReply,
   CONSENT_YES_LABEL,
@@ -956,6 +960,128 @@ function parseToolResultJson(res: ToolResult): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+// ---- panel_civitai_results inline sample thumbnails (#623) -------------------
+// The agent recommends CivitAI models/LoRAs for a VISUAL medium, so it must be
+// able to SEE the sample images — not just read titles + download counts. The
+// civitai_results reply already carries the panel's same-origin proxy media URLs
+// (/comfyui_mcp_panel/civitai/media?… served by the ComfyUI server the
+// orchestrator is connected to), so we fetch the top-N NON-GATED thumbnails here
+// and hand them back as MCP image content blocks — the same {type:"image"} bytes
+// mechanism panel_show_media / view_image use.
+//
+// NSFW/consent gate preservation is the load-bearing invariant: a result the
+// panel would render as a BLURRED/gated placeholder (rating outside the user's
+// enabled browsing levels) is NEVER fetched, so this vision path can never leak a
+// sample the human-facing UI withholds. See civitaiSampleEligible for the
+// fail-CLOSED gating rule and fetchCivitaiSampleImages for the same-origin lock.
+const CIVITAI_SAMPLE_MAX_BYTES = 4 * 1024 * 1024; // per-thumbnail cap (450px jpeg ≈ tens of KB)
+const CIVITAI_SAMPLE_DEFAULT = 4; // thumbnails delivered by default — bounds context
+const CIVITAI_SAMPLE_MAX = 8; // hard ceiling even if the agent asks for more
+const CIVITAI_SAMPLE_FETCH_TIMEOUT_MS = 8000;
+// The exact same-origin proxy path the panel serves CivitAI media from. urls[0]
+// MUST resolve to this path on the ComfyUI origin or it is not fetched (SSRF /
+// auth-header-exfil guard — see fetchCivitaiSampleImages).
+const CIVITAI_MEDIA_PROXY_PATH = "/comfyui_mcp_panel/civitai/media";
+
+/**
+ * Decide whether a single civitai_results item's sample thumbnail may be shown to
+ * the agent as pixels. FAILS CLOSED: pixels are delivered ONLY when the panel
+ * EXPLICITLY marks the item in-level (`gated === false`).
+ *   • gated === false → newer panel proved it in-level (and, because the panel
+ *     only sets gated=false when a real thumbnail exists, urls[0] is guaranteed to
+ *     be the small thumbnail, never a full-res image) → SHOW.
+ *   • gated === true  → the panel renders a blurred placeholder → WITHHOLD.
+ *   • gated absent    → an OLDER panel that predates the flag: we cannot prove the
+ *     result is in-level (nor that urls[0] is a thumbnail rather than a full-res
+ *     image on a card whose thumbnail was suppressed) → WITHHOLD.
+ * A missing/ambiguous flag therefore NEVER leaks a sample the UI would blur,
+ * regardless of which panel build is connected or which tab is active.
+ */
+function civitaiSampleEligible(item: Record<string, unknown>): boolean {
+  return item.gated === false;
+}
+
+/**
+ * Best-effort fetch of up to `max` NON-GATED sample thumbnails from a parsed
+ * civitai_results reply, as MCP image blocks paired with their result id (so the
+ * agent can map each picture back to the items array). NEVER throws: any fetch
+ * failure, non-image response, oversize body, or unreachable proxy simply yields
+ * fewer (or zero) images — the caller still returns the full text results.
+ *
+ * SECURITY: only the panel's OWN same-origin CivitAI media proxy is fetched. urls[0]
+ * must be a root-absolute path that resolves to CIVITAI_MEDIA_PROXY_PATH on the
+ * ComfyUI origin; absolute/protocol-relative/off-origin/off-path URLs are refused,
+ * and redirects are treated as errors. This prevents a malformed or compromised
+ * panel reply from turning the fetch into an SSRF that exfiltrates the ComfyUI auth
+ * headers comfyuiFetch attaches.
+ */
+async function fetchCivitaiSampleImages(
+  reply: Record<string, unknown>,
+  max: number,
+): Promise<Array<{ id: unknown; image: { type: "image"; data: string; mimeType: string } }>> {
+  const out: Array<{ id: unknown; image: { type: "image"; data: string; mimeType: string } }> = [];
+  if (max <= 0) return out;
+  const items = Array.isArray(reply.items) ? (reply.items as Record<string, unknown>[]) : [];
+  const base = getComfyUIBaseUrl();
+  let baseOrigin: string;
+  try {
+    baseOrigin = new URL(base).origin;
+  } catch {
+    return out; // no resolvable ComfyUI origin — deliver text only
+  }
+  for (const item of items) {
+    if (out.length >= max) break;
+    if (!item || typeof item !== "object") continue;
+    if (!civitaiSampleEligible(item)) continue;
+    const urls = Array.isArray(item.urls) ? item.urls : [];
+    // urls[0] is always the smaller thumbnail/poster (media: [thumb, full];
+    // model: [cover]); the full/video URL is intentionally NOT fetched.
+    const raw = urls.find((u): u is string => typeof u === "string" && u.length > 0);
+    if (!raw) continue;
+    // Refuse anything but a root-absolute same-origin path: no scheme (http:,
+    // file:, data:, …), no protocol-relative //host prefix, and no backslash
+    // (the WHATWG parser folds `\`→`/` for special schemes, so `/\host` could
+    // otherwise resolve to an authority). The strict origin check below is the
+    // real guard; this just refuses the obvious tricks up front.
+    if (!raw.startsWith("/") || raw.startsWith("//") || raw.includes("\\")) continue;
+    let url: URL;
+    try {
+      url = new URL(raw, base);
+    } catch {
+      continue; // unresolvable URL — skip, keep going
+    }
+    // Defense-in-depth: the resolved URL must stay on the ComfyUI origin AND hit
+    // the CivitAI media proxy path — never an arbitrary endpoint.
+    if (url.origin !== baseOrigin) continue;
+    if (!url.pathname.endsWith(CIVITAI_MEDIA_PROXY_PATH)) continue;
+    try {
+      const resp = await comfyuiFetch(url.toString(), {
+        signal: AbortSignal.timeout(CIVITAI_SAMPLE_FETCH_TIMEOUT_MS),
+        // A same-origin URL must not be allowed to 30x-bounce to another host
+        // (which would carry the auth headers off-origin). The proxy streams
+        // bytes directly, so a legitimate response never redirects.
+        redirect: "error",
+      });
+      if (!resp.ok) continue;
+      const mime = (resp.headers.get("content-type") ?? "").split(";")[0].trim();
+      if (!mime.startsWith("image/")) continue; // never inline a video/other body
+      // Require an HONEST, bounded Content-Length so a chunked/length-less body
+      // can't buffer unbounded memory into arrayBuffer(). The proxy always sets it.
+      const declared = Number(resp.headers.get("content-length") ?? "");
+      if (!Number.isFinite(declared) || declared <= 0 || declared > CIVITAI_SAMPLE_MAX_BYTES) continue;
+      const buf = Buffer.from(await resp.arrayBuffer());
+      if (buf.length === 0 || buf.length > CIVITAI_SAMPLE_MAX_BYTES) continue;
+      out.push({
+        id: item.id,
+        image: { type: "image", data: buf.toString("base64"), mimeType: mime },
+      });
+    } catch {
+      // best-effort — skip this thumbnail, the text path is unaffected
+    }
+  }
+  return out;
 }
 
 // ---- panel_run reply interpretation (#213/#331/#248/#194) -------------------
@@ -3663,7 +3789,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_civitai_results",
-      "READ the CivitAI browser's CURRENT results as text (metadata + media URLs only — you will NOT be shown the images; you reason from the text and pick which URLs matter). This is the READ step of the show-don't-tell flow: rather than answering a 'good X model/LoRA?' question purely in a text table, open the docked browser, read the real results here, then panel_civitai_highlight your picks so the user SEES the cards. Open the browser first with panel_open_civitai. Returns { items, total, loading }. Each item carries EXACTLY these fields and nothing else — a MEDIA item is { id, kind:'image'|'video', title:null, creator, baseModel, type, stats:{ reactions }, prompt (length-capped ~600 chars), urls:[] }; a MODEL item is { id, kind:'model', title (the model's name), creator, baseModel, type, stats:{ downloadCount, thumbsUp }, prompt:null, urls:[] }. Note: stats is a NESTED object (reactions for media; downloadCount+thumbsUp for models), urls is an ARRAY of media URL(s), and media items have title:null while models have prompt:null. Model descriptions are NOT included (they require a separate detail fetch) — do not expect them. Use this to see what's on screen before you highlight, switch tabs, or open the lightbox. `loading:true` means a fetch is still in flight and the panel is reporting what it has so far. The browser must be open — otherwise the panel replies with an honest error.\n\nDISAMBIGUATING AN EMPTY GRID: a `total:0` result is NOT automatically 'no matches'. Newer panels attach status fields you MUST check before concluding anything from an empty set: `error` (e.g. { status:503, message:'CivitAI API 503: Service Unavailable' } — an UPSTREAM failure, retry rather than narrowing filters), and on the favorites tab a `favoritesStatus` (e.g. 'ok' | 'signed_out' | 'no_likes_collection' | 'filtered_out') plus `authenticated`. If `error` is present the grid is empty because the request FAILED, not because nothing matched; if `favoritesStatus` is 'signed_out'/'no_likes_collection' the favorites couldn't be located at all. Only treat total:0 as a true empty result when `error` is null and (off the favorites tab, or favoritesStatus is 'ok').",
+      "READ the CivitAI browser's CURRENT results — metadata AND the actual SAMPLE IMAGES. This is the READ step of the show-don't-tell flow: rather than answering a 'good X model/LoRA?' question from a text table, open the docked browser, read the real results here, then panel_civitai_highlight your picks so the user SEES the cards. You ARE shown pixels now: the top few NON-GATED results' sample thumbnails are fetched and returned as inline IMAGE blocks after the JSON, each preceded by a line naming its result id — so you can actually JUDGE whether a LoRA's samples match the user's request (a visual medium) instead of reasoning from titles + download counts alone. Content gating is preserved: any result the panel would BLUR (a rating outside the user's enabled browsing levels, e.g. on the favorites tab) is WITHHELD — its pixels are never fetched — so this never bypasses the NSFW/consent gate. Control the image budget with `images` (default 4, max 8, 0 = metadata only). Open the browser first with panel_open_civitai. Returns { items, total, loading } as text, then the sample images. Each item carries these fields — a MEDIA item is { id, kind:'image'|'video', title:null, creator, baseModel, type, stats:{ reactions }, prompt (length-capped ~600 chars), urls:[], gated }; a MODEL item is { id, kind:'model', title (the model's name), creator, baseModel, type, stats:{ downloadCount, thumbsUp }, prompt:null, urls:[], gated }. Note: stats is a NESTED object (reactions for media; downloadCount+thumbsUp for models), urls is an ARRAY of media URL(s), and media items have title:null while models have prompt:null. `gated:true` marks a result the panel BLURS (rating outside the enabled browsing levels) — its sample image is withheld from the inline pixels above. Only results explicitly flagged `gated:false` get pixels; an older panel that doesn't send `gated` returns metadata only (no inline samples), never a blurred one. Model descriptions are NOT included (they require a separate detail fetch) — do not expect them. Use this to see what's on screen before you highlight, switch tabs, or open the lightbox. `loading:true` means a fetch is still in flight and the panel is reporting what it has so far. The browser must be open — otherwise the panel replies with an honest error.\n\nDISAMBIGUATING AN EMPTY GRID: a `total:0` result is NOT automatically 'no matches'. Newer panels attach status fields you MUST check before concluding anything from an empty set: `error` (e.g. { status:503, message:'CivitAI API 503: Service Unavailable' } — an UPSTREAM failure, retry rather than narrowing filters), and on the favorites tab a `favoritesStatus` (e.g. 'ok' | 'signed_out' | 'no_likes_collection' | 'filtered_out') plus `authenticated`. If `error` is present the grid is empty because the request FAILED, not because nothing matched; if `favoritesStatus` is 'signed_out'/'no_likes_collection' the favorites couldn't be located at all. Only treat total:0 as a true empty result when `error` is null and (off the favorites tab, or favoritesStatus is 'ok').",
       {
         limit: z
           .number()
@@ -3672,8 +3798,50 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           .max(50)
           .optional()
           .describe("Max results to serialize (1–50, default 20). The grid is ordered as shown to the user."),
+        images: z
+          .number()
+          .int()
+          .min(0)
+          .max(CIVITAI_SAMPLE_MAX)
+          .optional()
+          .describe(
+            `How many top NON-GATED sample thumbnails to fetch and return as inline IMAGE blocks (0–${CIVITAI_SAMPLE_MAX}, default ${CIVITAI_SAMPLE_DEFAULT}). Set 0 for metadata only (e.g. a quick scan where you don't need pixels). Gated/blurred results are always skipped regardless of this count.`,
+          ),
       },
-      async (args: A, ctx) => ctx.call({ cmd: "civitai_results", limit: args.limit }, 10000),
+      async (args: A, ctx) => {
+        const res = await ctx.call({ cmd: "civitai_results", limit: args.limit }, 10000);
+        // Enrich with inline sample pixels (#623). Best-effort + additive: on any
+        // problem we return the untouched text results, so the read path can never
+        // regress to an error just because a thumbnail fetch failed.
+        if (res.isError) return res;
+        const want =
+          args.images === undefined
+            ? CIVITAI_SAMPLE_DEFAULT
+            : Math.max(0, Math.min(Math.floor(Number(args.images) || 0), CIVITAI_SAMPLE_MAX));
+        if (want <= 0) return res;
+        const parsed = parseToolResultJson(res);
+        if (!parsed) return res;
+        let samples: Awaited<ReturnType<typeof fetchCivitaiSampleImages>> = [];
+        try {
+          samples = await fetchCivitaiSampleImages(parsed, want);
+        } catch {
+          samples = [];
+        }
+        if (samples.length === 0) return res;
+        const content: ToolResult["content"] = [...res.content];
+        content.push({
+          type: "text",
+          text:
+            `Sample images for the top ${samples.length} non-gated result(s) below, ` +
+            `each labelled with its result id (map it to the items array). Blurred/gated ` +
+            `results are omitted. Judge the VISUAL match from these pixels, not just the metadata.`,
+        });
+        for (const s of samples) {
+          content.push({ type: "text", text: `— sample for result id ${String(s.id)}:` });
+          content.push(s.image);
+        }
+        return { content };
+      },
     ),
     def(
       "panel_civitai_highlight",

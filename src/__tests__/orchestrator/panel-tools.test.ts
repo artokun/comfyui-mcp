@@ -1509,6 +1509,233 @@ describe("panel-tools: agent-driven CivitAI + training modals", () => {
     expect(limit.safeParse(undefined).success).toBe(true);
   });
 
+  // ── #623: panel_civitai_results returns inline sample IMAGE blocks ──────────
+  // The agent recommends models/LoRAs for a VISUAL medium, so it must SEE the
+  // sample thumbnails — not just read titles + counts. These assert the top-N
+  // non-gated samples come back as {type:"image"} blocks, and that gating is
+  // never bypassed (blurred/gated results withhold their pixels).
+
+  // A ctx whose `call` returns a caller-supplied civitai_results reply as the
+  // JSON text payload the real panel would send back.
+  function makeReplyCtx(reply: unknown): { ctx: PanelToolCtx; calls: Forwarded[] } {
+    const calls: Forwarded[] = [];
+    const ctx: PanelToolCtx = {
+      call: async (cmd) => {
+        calls.push(cmd);
+        // Mirror the real ctx.call, which wraps the panel reply via ok() (pretty JSON).
+        return { content: [{ type: "text", text: JSON.stringify(reply, null, 2) }] };
+      },
+      confirm: async () => "yes" as const,
+      bridge: { send: async () => reply } as unknown as PanelToolCtx["bridge"],
+      tabId: "test-tab",
+    };
+    return { ctx, calls };
+  }
+
+  // Fake global fetch that returns a tiny image body with an honest Content-Length;
+  // records the URLs it saw. Errors on a redirect request (redirect:"error"), never
+  // reached by the same-origin proxy path in these tests.
+  function stubImageFetch(): { urls: string[]; restore: () => void } {
+    const urls: string[] = [];
+    const bytes = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]); // JPEG SOI-ish
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      urls.push(String(input));
+      if (init && init.redirect && init.redirect !== "error") {
+        throw new Error(`unexpected redirect mode: ${init.redirect}`);
+      }
+      return {
+        ok: true,
+        headers: new Map([
+          ["content-type", "image/jpeg"],
+          ["content-length", String(bytes.length)],
+        ]),
+        arrayBuffer: async () => bytes.buffer.slice(0),
+      };
+    }) as unknown as typeof fetch;
+    return { urls, restore: () => void (globalThis.fetch = realFetch) };
+  }
+
+  function imageBlocks(res: ToolResult) {
+    return res.content.filter((c) => c.type === "image");
+  }
+
+  it("civitaiSampleEligible fails CLOSED — pixels only for explicit gated:false (#623)", () => {
+    const { civitaiSampleEligible } = __panelToolsTestHooks;
+    expect(civitaiSampleEligible({ gated: false })).toBe(true); // proven in-level → show
+    expect(civitaiSampleEligible({ gated: true })).toBe(false); // blurred → withhold
+    // Anything ambiguous (older panel omitting the flag, or a junk value) is
+    // withheld — a missing flag must never leak a sample the UI would blur.
+    expect(civitaiSampleEligible({})).toBe(false);
+    expect(civitaiSampleEligible({ gated: undefined })).toBe(false);
+    expect(civitaiSampleEligible({ gated: "false" })).toBe(false);
+  });
+
+  it("panel_civitai_results returns inline image blocks for non-gated results (#623)", async () => {
+    const reply = {
+      total: 2,
+      loading: false,
+      items: [
+        { id: 5, kind: "model", title: "Dreamy LoRA", urls: ["/comfyui_mcp_panel/civitai/media?uuid=a&ext=jpeg"], gated: false },
+        { id: 6, kind: "image", title: null, urls: ["/comfyui_mcp_panel/civitai/media?uuid=b&ext=jpeg", "/full/b"], gated: false },
+      ],
+    };
+    const { ctx } = makeReplyCtx(reply);
+    const fetchStub = stubImageFetch();
+    try {
+      const res = await defByName("panel_civitai_results").handler({ limit: 20 }, ctx);
+      const imgs = imageBlocks(res);
+      expect(imgs.length).toBe(2);
+      expect(imgs[0]).toMatchObject({ type: "image", mimeType: "image/jpeg" });
+      expect(typeof (imgs[0] as { data: string }).data).toBe("string");
+      // The original JSON text payload is preserved (additive enrichment).
+      expect(res.content[0].type).toBe("text");
+      expect((res.content[0] as { text: string }).text).toContain('"total": 2');
+      // Each image is labelled with its result id so the agent can map it back.
+      const labels = res.content.filter((c) => c.type === "text").map((c) => (c as { text: string }).text).join("\n");
+      expect(labels).toContain("result id 5");
+      expect(labels).toContain("result id 6");
+      // Only the thumbnail (urls[0]) is fetched, never the full/video url.
+      expect(fetchStub.urls.some((u) => u.includes("uuid=a"))).toBe(true);
+      expect(fetchStub.urls.some((u) => u.includes("/full/b"))).toBe(false);
+    } finally {
+      fetchStub.restore();
+    }
+  });
+
+  it("panel_civitai_results WITHHOLDS pixels for gated/blurred results (#623 gating)", async () => {
+    const reply = {
+      total: 1,
+      loading: false,
+      items: [
+        { id: 9, kind: "image", title: null, urls: ["/comfyui_mcp_panel/civitai/media?uuid=x&ext=jpeg"], gated: true },
+      ],
+    };
+    const { ctx } = makeReplyCtx(reply);
+    const fetchStub = stubImageFetch();
+    try {
+      const res = await defByName("panel_civitai_results").handler({ limit: 20 }, ctx);
+      expect(imageBlocks(res).length).toBe(0);
+      // The gated thumbnail is NEVER fetched.
+      expect(fetchStub.urls.length).toBe(0);
+    } finally {
+      fetchStub.restore();
+    }
+  });
+
+  it("panel_civitai_results withholds pixels for an OLDER panel that omits `gated` (fail-closed) (#623)", async () => {
+    // No per-item `gated` flag at all (pre-flag panel build): the fail-closed rule
+    // withholds every sample — a missing flag must never leak a blurred image.
+    const reply = {
+      total: 1,
+      loading: false,
+      items: [{ id: 3, kind: "image", title: null, urls: ["/comfyui_mcp_panel/civitai/media?uuid=z&ext=jpeg"] }],
+    };
+    const { ctx } = makeReplyCtx(reply);
+    const fetchStub = stubImageFetch();
+    try {
+      const res = await defByName("panel_civitai_results").handler({ limit: 20 }, ctx);
+      expect(imageBlocks(res).length).toBe(0);
+      expect(fetchStub.urls.length).toBe(0);
+    } finally {
+      fetchStub.restore();
+    }
+  });
+
+  it("panel_civitai_results refuses off-origin / absolute sample URLs (SSRF + auth-header guard) (#623)", async () => {
+    const reply = {
+      total: 3,
+      loading: false,
+      items: [
+        // Absolute off-origin URL — must never be fetched (would leak ComfyUI auth headers).
+        { id: 1, kind: "image", title: null, urls: ["http://evil.example/steal?uuid=a"], gated: false },
+        // Protocol-relative host — also refused.
+        { id: 2, kind: "image", title: null, urls: ["//evil.example/x.jpeg"], gated: false },
+        // Same-origin path but NOT the media proxy — refused.
+        { id: 3, kind: "image", title: null, urls: ["/comfyui_mcp_panel/civitai/download?versionId=9"], gated: false },
+        // Backslash authority trick (`\`→`/` folding) — refused before fetch.
+        { id: 4, kind: "image", title: null, urls: ["/\\evil.example/x.jpeg"], gated: false },
+      ],
+    };
+    const { ctx } = makeReplyCtx(reply);
+    const fetchStub = stubImageFetch();
+    try {
+      const res = await defByName("panel_civitai_results").handler({ limit: 20 }, ctx);
+      expect(imageBlocks(res).length).toBe(0);
+      expect(fetchStub.urls.length).toBe(0); // nothing was fetched
+    } finally {
+      fetchStub.restore();
+    }
+  });
+
+  it("panel_civitai_results skips a length-less/oversize sample body (unbounded-read guard) (#623)", async () => {
+    const reply = {
+      total: 2,
+      loading: false,
+      items: [
+        { id: 1, kind: "image", title: null, urls: ["/comfyui_mcp_panel/civitai/media?uuid=nolen&ext=jpeg"], gated: false },
+        { id: 2, kind: "image", title: null, urls: ["/comfyui_mcp_panel/civitai/media?uuid=big&ext=jpeg"], gated: false },
+      ],
+    };
+    const { ctx } = makeReplyCtx(reply);
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown) => {
+      const s = String(input);
+      const headers = new Map<string, string>([["content-type", "image/jpeg"]]);
+      if (s.includes("uuid=big")) headers.set("content-length", String(5 * 1024 * 1024)); // > cap
+      // uuid=nolen: no content-length header at all
+      return {
+        ok: true,
+        headers,
+        arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+      };
+    }) as unknown as typeof fetch;
+    try {
+      const res = await defByName("panel_civitai_results").handler({ limit: 20 }, ctx);
+      expect(imageBlocks(res).length).toBe(0); // both refused before/without buffering
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("panel_civitai_results honors images:0 (metadata only, no fetch) (#623)", async () => {
+    const reply = {
+      total: 1,
+      loading: false,
+      items: [{ id: 1, kind: "image", title: null, urls: ["/comfyui_mcp_panel/civitai/media?uuid=q&ext=jpeg"], gated: false }],
+    };
+    const { ctx } = makeReplyCtx(reply);
+    const fetchStub = stubImageFetch();
+    try {
+      const res = await defByName("panel_civitai_results").handler({ images: 0 }, ctx);
+      expect(imageBlocks(res).length).toBe(0);
+      expect(fetchStub.urls.length).toBe(0);
+    } finally {
+      fetchStub.restore();
+    }
+    const images = defByName("panel_civitai_results").schema.images as {
+      safeParse: (v: unknown) => { success: boolean };
+    };
+    expect(images.safeParse(0).success).toBe(true);
+    expect(images.safeParse(9).success).toBe(false); // > max 8
+    expect(images.safeParse(undefined).success).toBe(true);
+  });
+
+  it("panel_civitai_results caps delivered samples at the requested images count (#623)", async () => {
+    const items = Array.from({ length: 6 }, (_, i) => ({
+      id: i, kind: "image", title: null, urls: [`/comfyui_mcp_panel/civitai/media?uuid=${i}&ext=jpeg`], gated: false,
+    }));
+    const { ctx } = makeReplyCtx({ total: 6, loading: false, items });
+    const fetchStub = stubImageFetch();
+    try {
+      const res = await defByName("panel_civitai_results").handler({ images: 2 }, ctx);
+      expect(imageBlocks(res).length).toBe(2);
+      expect(fetchStub.urls.length).toBe(2);
+    } finally {
+      fetchStub.restore();
+    }
+  });
+
   it("panel_civitai_highlight forwards ids + kind, and requires at least one id", async () => {
     const { ctx, calls } = makeFakeCtx();
     await defByName("panel_civitai_highlight").handler({ ids: [1, "abc"], kind: "media" }, ctx);
