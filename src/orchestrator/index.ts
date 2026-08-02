@@ -2445,11 +2445,11 @@ export async function runPanelOrchestrator(): Promise<void> {
       // and unverifiable scans, and only reports a version it verified on disk.
       // A desktop hello is the first point at which we can both repair an
       // unpinned skew and tell the affected user that ComfyUI must restart. The
-      // bridge pins each socket's kind on its FIRST hello, so query that trusted
-      // session state rather than this raw (and replayable) hello's `headless`.
-      // A headless mirror cannot load the desktop extension.
+      // bridge pins each CURRENT socket's kind on its FIRST hello, so query that
+      // trusted session state rather than this raw (and replayable) hello's
+      // `headless`. A headless mirror cannot load the desktop extension.
       if (
-        !bridge.isHeadless(panelTab) &&
+        !bridge.isCurrentHeadless(panelTab) &&
         !isPanelAutoInstallDisabled()
       ) {
         void performPanelSync()

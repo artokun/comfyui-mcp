@@ -1580,26 +1580,35 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
     expect(res.from).toBe("desktop"); // forged flag ignored — takeover refused
   });
 
-  it("keeps auto-sync eligibility headless across omitted or forged re-hello flags (#710 P1)", async () => {
+  it("keeps auto-sync eligibility on the current socket's pinned kind (#710 P1)", async () => {
     const phone = await connectHeadless("phone-sync-pinned");
     await vi.waitFor(() => expect(bridge.tabs().some((t) => t.tab_id === "phone-sync-pinned")).toBe(true));
     // This is the exact classification the orchestrator must use after each hello.
-    expect(bridge.isHeadless("phone-sync-pinned")).toBe(true);
+    expect(bridge.isCurrentHeadless("phone-sync-pinned")).toBe(true);
 
     // A later hello cannot turn this socket into a desktop install/update target.
     phone.send(JSON.stringify({ type: "hello", tab_id: "phone-sync-pinned", title: "phone" }));
     await settle();
-    expect(bridge.isHeadless("phone-sync-pinned")).toBe(true);
+    expect(bridge.isCurrentHeadless("phone-sync-pinned")).toBe(true);
     phone.send(JSON.stringify({ type: "hello", tab_id: "phone-sync-pinned", title: "phone", headless: false }));
     await settle();
-    expect(bridge.isHeadless("phone-sync-pinned")).toBe(true);
+    expect(bridge.isCurrentHeadless("phone-sync-pinned")).toBe(true);
 
-    // A first-hello desktop keeps its legitimate sync eligibility.
-    const desktop = await connectPanel("desktop-sync-eligible", "G");
+    // The old mobile client is gone. A fresh desktop socket may reuse its id;
+    // stale headless history must not suppress this desktop's legitimate sync.
+    phone.close();
+    await vi.waitFor(() => expect(bridge.tabs().some((t) => t.tab_id === "phone-sync-pinned")).toBe(false));
+    const desktop = await connectPanel("phone-sync-pinned", "G");
+    await vi.waitFor(() => expect(bridge.tabs().some((t) => t.tab_id === "phone-sync-pinned")).toBe(true));
+    expect(bridge.isCurrentHeadless("phone-sync-pinned")).toBe(false);
+    expect(bridge.isHeadless("phone-sync-pinned")).toBe(false);
+
+    // A first-hello desktop is likewise a legitimate sync target.
+    const separateDesktop = await connectPanel("desktop-sync-eligible", "G");
     await vi.waitFor(() => expect(bridge.tabs().some((t) => t.tab_id === "desktop-sync-eligible")).toBe(true));
     expect(bridge.isHeadless("desktop-sync-eligible")).toBe(false);
-    phone.close();
     desktop.close();
+    separateDesktop.close();
   });
 
   it("re-attaching to another tab stops the first tab's fanout", async () => {
