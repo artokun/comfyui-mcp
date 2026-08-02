@@ -363,6 +363,107 @@ describe("searchCivitaiModels", () => {
     expect(String(fetchMock.mock.calls[0][0])).toContain("nsfw=true");
   });
 
+  it("nsfw:false selects the newest PG-13 version, not the latest mixed-NSFW one (#664)", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        items: [
+          {
+            id: 1403959,
+            name: "Camera Motion",
+            type: "LORA",
+            nsfw: false, // model-level flag is clean — the API lets it through
+            creator: { username: "someone" },
+            modelVersions: [
+              {
+                id: 1666048, // latest version fronts explicit previews + adult words
+                name: "v3",
+                baseModel: "Wan Video",
+                trainedWords: ["explicit adult phrase", "camera motion"],
+                images: [
+                  { url: "a", nsfwLevel: 1 },
+                  { url: "b", nsfwLevel: 2 },
+                  { url: "c", nsfwLevel: 8 },
+                ],
+              },
+              {
+                id: 1599906, // older version stays at/below PG-13 (levels 1-2)
+                name: "v2",
+                baseModel: "Wan Video",
+                trainedWords: ["subtle camera motion"],
+                images: [
+                  { url: "d", nsfwLevel: 1 },
+                  { url: "e", nsfwLevel: 2 },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    const { hits } = await searchCivitaiModels("subtle camera motion cinematic", { nsfw: false });
+    expect(hits[0].version_id).toBe(1599906);
+    expect(hits[0].version_name).toBe("v2");
+    expect(hits[0].trained_words).toEqual(["subtle camera motion"]);
+  });
+
+  it("nsfw:false never serializes trained words when NO version is clean (#664)", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        items: [
+          {
+            id: 1,
+            name: "Mixed Pack",
+            nsfw: false,
+            modelVersions: [
+              {
+                id: 1666048,
+                name: "v1",
+                trainedWords: ["explicit adult phrase"],
+                images: [{ url: "a", nsfwLevel: 8 }],
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    const { hits } = await searchCivitaiModels("mixed", { nsfw: false });
+    // The download handoff is preserved (the model itself is flagged SFW)…
+    expect(hits[0].version_id).toBe(1666048);
+    // …but trigger words from an adult-preview version are never vouched for.
+    expect(hits[0].trained_words).toBeUndefined();
+  });
+
+  it("nsfw:true keeps the latest version and its words regardless of preview levels", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        items: [
+          {
+            id: 1403959,
+            name: "Camera Motion",
+            nsfw: true,
+            modelVersions: [
+              {
+                id: 1666048,
+                name: "v3",
+                trainedWords: ["camera motion"],
+                images: [{ url: "a", nsfwLevel: 8 }],
+              },
+              {
+                id: 1599906,
+                name: "v2",
+                trainedWords: ["subtle camera motion"],
+                images: [{ url: "b", nsfwLevel: 1 }],
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    const { hits } = await searchCivitaiModels("camera motion", { nsfw: true });
+    expect(hits[0].version_id).toBe(1666048);
+    expect(hits[0].trained_words).toEqual(["camera motion"]);
+  });
+
   it("fails FAST with the config message when CIVITAI_ENABLED=0 (kill-switch, #127)", async () => {
     process.env.CIVITAI_ENABLED = "0";
     try {

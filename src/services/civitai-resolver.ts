@@ -528,8 +528,31 @@ export interface CivitaiSearchResult {
   scanError?: string;
 }
 
-function toSearchHit(m: CivitaiSearchItem): CivitaiSearchHit {
-  const v = m.modelVersions?.[0];
+/**
+ * CivitAI `nsfwLevel` ladder: 1 None · 2 Soft (PG-13) · 4 Mature · 8 Explicit ·
+ * 16 X · 32 Blocked. SFW search surfaces nothing above PG-13.
+ */
+const MAX_SFW_NSFW_LEVEL = 2;
+
+/** True when every preview of this version is at/below PG-13 (or it has none). */
+function versionIsSfw(version: CivitaiModelVersion): boolean {
+  return (version.images ?? []).every(
+    (img) => (img.nsfwLevel ?? 1) <= MAX_SFW_NSFW_LEVEL,
+  );
+}
+
+function toSearchHit(
+  m: CivitaiSearchItem,
+  opts: { nsfw?: boolean } = {},
+): CivitaiSearchHit {
+  const versions = m.modelVersions ?? [];
+  // The API gates only the MODEL-level nsfw flag — a model flagged SFW can
+  // still front a version with mature/explicit previews and adult trigger
+  // words (#664). In SFW mode prefer the newest version whose previews stay
+  // at/below PG-13; when none qualifies, keep the latest version for the
+  // download handoff but don't vouch for its trigger words.
+  const clean = opts.nsfw ? undefined : versions.find(versionIsSfw);
+  const v = clean ?? versions[0];
   const file = v ? pickFile(v) : undefined;
   const sizeKb = (file as { sizeKB?: number } | undefined)?.sizeKB;
   return {
@@ -543,7 +566,8 @@ function toSearchHit(m: CivitaiSearchItem): CivitaiSearchHit {
     version_id: v?.id,
     version_name: v?.name,
     base_model: v?.baseModel,
-    trained_words: v?.trainedWords?.slice(0, 6),
+    trained_words:
+      opts.nsfw || clean ? v?.trainedWords?.slice(0, 6) : undefined,
     ...(sizeKb ? { size_mb: Math.round(sizeKb / 1024) } : {}),
   };
 }
@@ -580,7 +604,7 @@ export async function searchCivitaiModels(
     }
     params.set("limit", String(limit));
     const data = await civitaiGet<CivitaiSearchResponse>(`/models?${params.toString()}`);
-    return { hits: (data.items ?? []).slice(0, limit).map(toSearchHit) };
+    return { hits: (data.items ?? []).slice(0, limit).map((m) => toSearchHit(m, opts)) };
   }
 
   // Creator + keyword: `query` + `username` together return an EMPTY page
@@ -643,7 +667,7 @@ export async function searchCivitaiModels(
     if (page === CREATOR_SCAN_MAX_PAGES - 1) stoppedEarly = true; // page cap, more remained
   }
   return {
-    hits: matches.slice(0, limit).map(toSearchHit),
+    hits: matches.slice(0, limit).map((m) => toSearchHit(m, opts)),
     scanned,
     scanCapped: stoppedEarly && matches.length < limit,
     ...(scanError ? { scanError } : {}),
