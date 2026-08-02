@@ -16,6 +16,14 @@ process.env.COMFYUI_MCP_PANEL_LOCK = join(
 // import graph still pulls config in.)
 vi.mock("../../config.js", () => ({
   config: { comfyuiPath: undefined as string | undefined },
+  isLocalMode: () => true,
+}));
+
+// #700: panel management must use the same saved-default workspace resolution
+// as get_environment when COMFYUI_PATH itself is unset.
+const workspace = vi.hoisted(() => ({ base: undefined as string | undefined }));
+vi.mock("../../services/workspace-env.js", () => ({
+  resolveEffectiveComfyUIBase: () => workspace.base,
 }));
 
 import {
@@ -32,6 +40,7 @@ import {
   PanelInstallError,
   PANEL_REGISTRY_ID,
   PANEL_VERSION,
+  defaultDeps,
   type PanelInstallerDeps,
 } from "../../services/panel-installer.js";
 import type { PanelPinState } from "../../services/panel-settings.js";
@@ -132,6 +141,27 @@ function makeDeps(opts: {
 }
 
 describe("detectPanelInstall", () => {
+  it("#700: default deps inspect the saved local workspace when COMFYUI_PATH is unset", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cmcp-panel-saved-workspace-"));
+    try {
+      workspace.base = root;
+      const panelDir = join(root, "custom_nodes", "comfyui-mcp-panel");
+      mkdirSync(panelDir, { recursive: true });
+      writeFileSync(join(panelDir, "pyproject.toml"), pyproject(PANEL_REGISTRY_ID, "0.8.0"));
+
+      const detected = await detectPanelInstall(defaultDeps);
+      expect(detected).toMatchObject({
+        applicable: true,
+        installed: true,
+        dir: panelDir,
+        version: "0.8.0",
+      });
+    } finally {
+      workspace.base = undefined;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("returns not-applicable when no local ComfyUI (remote/cloud mode)", async () => {
     const { deps } = makeDeps({ comfyuiPath: undefined });
     const d = await detectPanelInstall(deps);

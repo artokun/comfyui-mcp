@@ -85,7 +85,7 @@ Install, update, reinstall, sync, pin, or report status of the ComfyUI sidebar p
 ### Parameters
 
 <ParamField path="action" type="enum" default="status">
-  status: report installed/version/dev-symlink/pin plus a sync assessment (never errors). sync: bring the panel up to what this orchestrator needs — no-ops when already current, WARNS ONLY when pinned, and reports the version re-read from disk afterwards. install: add the panel (nightly). update: pull the latest nightly. reinstall: uninstall + reinstall (nightly). pin: hold the panel at a version (requires `version`). unpin: clear the pin so a sync can proceed. install/update/reinstall/sync refuse on a dev symlink or an active pin, and require a local COMFYUI_PATH. Options: `status`, `install`, `update`, `reinstall`, `sync`, `pin`, `unpin`.
+  status: report installed/version/dev-symlink/pin plus a sync assessment (never errors). sync: bring the panel up to what this orchestrator needs — no-ops when already current, WARNS ONLY when pinned, and reports the version re-read from disk afterwards. install: add the panel (nightly). update: pull the latest nightly. reinstall: uninstall + reinstall (nightly). pin: hold the panel at a version (requires `version`). unpin: clear the pin so a sync can proceed. install/update/reinstall/sync refuse on a dev symlink or an active pin, and require a local workspace (COMFYUI_PATH or the saved default workspace). Options: `status`, `install`, `update`, `reinstall`, `sync`, `pin`, `unpin`.
 </ParamField>
 <ParamField path="version" type="string">
   action='pin' only: the panel version to hold at, e.g. '0.11.20'. Use the installedVersion from action='status' to pin where you already are.

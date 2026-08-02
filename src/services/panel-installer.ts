@@ -43,6 +43,7 @@ import {
   type PanelPinState,
 } from "./panel-settings.js";
 import { withPanelMutationLock } from "./panel-pin-guard.js";
+import { resolveEffectiveComfyUIBase } from "./workspace-env.js";
 
 /** Comfy Registry id (also pyproject [project].name). Authoritative for detection. */
 export const PANEL_REGISTRY_ID = "comfyui-agent-panel";
@@ -85,7 +86,7 @@ export interface PanelInstallerDeps {
    * the WRONG filesystem). The on-load ensure also no-ops.
    */
   isLocalMode: () => boolean;
-  /** Resolved local ComfyUI root, or undefined in remote/cloud mode. */
+  /** Resolved local ComfyUI root, or undefined when no local workspace is known. */
   comfyuiPath: () => string | undefined;
   /** Process env (for the opt-out flag). */
   env: () => NodeJS.ProcessEnv;
@@ -215,7 +216,10 @@ export function resolveGitRevision(dir: string): string | undefined {
 
 export const defaultDeps: PanelInstallerDeps = {
   isLocalMode: () => isLocalMode(),
-  comfyuiPath: () => config.comfyuiPath,
+  // Keep panel management aligned with get_environment, downloads, and
+  // comfy-cli: an explicit COMFYUI_PATH wins, then a saved default workspace
+  // is a valid local install when this target is not remote (#700).
+  comfyuiPath: () => resolveEffectiveComfyUIBase(),
   env: () => process.env,
   existsSync,
   probeFile: (p) => {

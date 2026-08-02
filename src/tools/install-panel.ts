@@ -62,7 +62,7 @@ export function registerInstallPanelTools(server: McpServer): void {
             "+ reinstall (nightly). pin: hold the panel at a version (requires " +
             "`version`). unpin: clear the pin so a sync can proceed. " +
             "install/update/reinstall/sync refuse on a dev symlink or an active " +
-            "pin, and require a local COMFYUI_PATH.",
+            "pin, and require a local workspace (COMFYUI_PATH or the saved default workspace).",
         ),
       version: z
         .string()
