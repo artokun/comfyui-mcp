@@ -1,4 +1,4 @@
-// Pin-write CANCELLATION of pending panel-affecting work (#689).
+// Pin-write handling of pending panel-affecting work (#689).
 //
 // update_all and deferred snapshot restores are handed to ComfyUI-Manager and
 // applied out of band (see panel-pin-guard.ts). Before this fix, a pin written
@@ -39,7 +39,6 @@
 //     update_all. The report says so.
 
 import { getComfyUIBaseUrl } from "../config.js";
-import { resetQueue } from "./manager-config.js";
 import {
   detectManagerApi,
   fetchManagerClientQueueCounts,
@@ -48,7 +47,6 @@ import {
   type ManagerApi,
   type ManagerTaskHistoryEntry,
 } from "./node-management.js";
-import { cancelPendingSnapshotRestore } from "./node-snapshots.js";
 import {
   clearPanelPendingOp,
   PANEL_PACK_ALIASES,
@@ -389,124 +387,24 @@ async function cancelUpdateAllProvable(
     });
   }
 
-  // 3. Our tasks are PROVABLY pending and NOTHING is running (the panel's, if
-  //    enqueued, is among them: it did not run and is not running). The reset
-  //    is a targeted cancel now — still queue-wide, so measure the blast
-  //    radius too.
-  const shared = await fetchManagerQueueCounts(base);
-  try {
-    await resetQueue(base);
-  } catch (err) {
-    return {
-      op,
-      outcome: "could-not-verify",
-      markerCleared: false,
-      detail:
-        `the queue reset on ${base} FAILED: ${
-          err instanceof Error ? err.message : String(err)
-        }. The queued update_all may still be pending; the warning stands.`,
-      pendingBefore: mine.pending,
-      inProgress: mine.inProgress,
-    };
-  }
-
-  // 4. Prove the end state: the panel's task is gone from EVERYWHERE (a task
-  //    could have been dequeued or completed in the race). A reset fired, so
-  //    every branch below names the shared-queue blast radius, and every
-  //    dropped count is DERIVED from before/after reads — never asserted.
-  const mineAfter = await fetchManagerClientQueueCounts(base);
-  const sharedAfter = await fetchManagerQueueCounts(base);
-  const blast =
-    shared && sharedAfter
-      ? ` Queue-wide pending went ${shared.pending} → ${sharedAfter.pending} ` +
-        `(the Manager queue is shared — unrelated queued work was dropped too).`
-      : ` The Manager queue is shared, so unrelated queued work may have been ` +
-        `dropped too.`;
-  if (!mineAfter) {
-    return {
-      op,
-      outcome: "could-not-verify",
-      markerCleared: false,
-      detail:
-        `a queue reset was sent on ${base} with ${mine.pending} of this ` +
-        `orchestrator's task(s) pending, but the post-reset state could not be ` +
-        `read — what was dropped is UNVERIFIED and nothing is claimed.${blast} ` +
-        `The update_all may still be pending.`,
-      pendingBefore: mine.pending,
-      inProgress: mine.inProgress,
-    };
-  }
-  const dropped = mine.pending - mineAfter.pending;
-  const afterLookup = await panelTaskState(uiId, base);
-  if (afterLookup === undefined) {
-    return {
-      op,
-      outcome: "could-not-verify",
-      markerCleared: false,
-      detail:
-        `a queue reset was sent on ${base} (this orchestrator's pending tasks ` +
-        `went ${mine.pending} → ${mineAfter.pending}), but the queue history ` +
-        `could not be re-read — whether the panel's task ran in the meantime ` +
-        `is UNKNOWN.${blast} The warning stands.`,
-      pendingBefore: mine.pending,
-      pendingAfter: mineAfter.pending,
-      inProgress: mineAfter.inProgress,
-    };
-  }
-  if (afterLookup || mineAfter.inProgress > 0 || mineAfter.processing) {
-    // A concurrent same-orchestrator enqueue can re-fill the queue between the
-    // pre- and post-reset reads, making mineAfter.pending >= mine.pending — a
-    // zero or negative "dropped" is NOT a provable drop, so claim it only when
-    // it is positive; otherwise say the count moved and nothing more.
-    const dropClaim =
-      dropped > 0
-        ? `dropped ${dropped} of this orchestrator's pending task(s) via a ` +
-          `queue reset on ${base} (${mine.pending} → ${mineAfter.pending}), BUT `
-        : `sent a queue reset on ${base} (this orchestrator's pending went ` +
-          `${mine.pending} → ${mineAfter.pending} — a concurrent enqueue may have ` +
-          `re-filled it, so what the reset dropped is UNPROVEN), BUT `;
-    return {
-      op,
-      outcome: "partially-cancelled",
-      markerCleared: false,
-      detail:
-        `${dropClaim}${
-          afterLookup
-            ? `the panel's task COMPLETED in the meantime (it is in the queue history)`
-            : `${mineAfter.inProgress} task(s) were already RUNNING and in-flight work cannot be cancelled`
-        } — the update_all may STILL have moved the panel.${blast}`,
-      pendingBefore: mine.pending,
-      pendingAfter: mineAfter.pending,
-      inProgress: mineAfter.inProgress,
-    };
-  }
-  if (mineAfter.pending > 0) {
-    return {
-      op,
-      outcome: "could-not-verify",
-      markerCleared: false,
-      detail:
-        `a queue reset was sent on ${base}, but ${mineAfter.pending} of this ` +
-        `orchestrator's task(s) are STILL pending (was ${mine.pending}; ` +
-        `concurrent enqueues can re-fill the queue) — the update_all was not ` +
-        `provably cancelled.${blast} The warning stands.`,
-      pendingBefore: mine.pending,
-      pendingAfter: mineAfter.pending,
-      inProgress: mineAfter.inProgress,
-    };
-  }
-  return finalize(op, {
-    outcome: "cancelled",
+  // A v4 history entry proves only that the marked task has not completed; it
+  // does not prove which pending queue entry belongs to this update_all. The
+  // only available cancellation endpoint resets the ENTIRE shared queue, so
+  // using it here can delete unrelated work. Keep the marker and warning until
+  // Manager exposes an owned, atomic per-task cancellation API.
+  return {
+    op,
+    outcome: "could-not-verify",
+    markerCleared: false,
     detail:
-      `cancelled the queued update_all before it could touch the panel: the ` +
-      `panel's update task is not in the queue history and, after a queue ` +
-      `reset on ${base}, nothing from this orchestrator is pending or running ` +
-      `— it was dropped (or never enqueued) and CANNOT run. The reset dropped ` +
-      `${dropped} of this orchestrator's pending task(s).${blast}`,
+      `the panel task has not reached the Manager history and ${mine.pending} ` +
+      `task(s) from this orchestrator are pending on ${base}, but ComfyUI-Manager ` +
+      `offers only a queue-wide reset. That reset could delete unrelated pending ` +
+      `work and cannot prove it cancelled this update_all, so NOTHING was sent; ` +
+      `the warning stands.`,
     pendingBefore: mine.pending,
-    pendingAfter: 0,
-    inProgress: 0,
-  });
+    inProgress: mine.inProgress,
+  };
 }
 
 /**
@@ -586,75 +484,20 @@ function cancelSnapshotRestore(op: PanelPendingOp): PanelPendingCancelReport {
     };
   }
 
-  const result = cancelPendingSnapshotRestore();
-
-  // No recorded server: the local action is at best a guess about which host
-  // the restore was scheduled on. It is still applied (a local restore file
-  // WILL run at the next local restart, so deleting it is protective), but
-  // nothing here is PROOF — report UNVERIFIED and keep the marker.
-  if (!op.base) {
-    switch (result.outcome) {
-      case "cancelled":
-        return {
-          op,
-          outcome: "could-not-verify",
-          markerCleared: false,
-          detail:
-            `${result.detail} — HOWEVER the marker recorded no server, so this ` +
-            `is UNVERIFIED: if the restore was scheduled on a DIFFERENT (e.g. ` +
-            `remote) host, it is still scheduled there and will run at its next ` +
-            `restart. The warning stands.`,
-        };
-      case "not-scheduled":
-        return {
-          op,
-          outcome: "could-not-verify",
-          markerCleared: false,
-          detail:
-            `no deferred restore file exists on the current target, but the ` +
-            `marker recorded no server — the restore may be scheduled on a ` +
-            `DIFFERENT host and still run at its next ComfyUI restart. The ` +
-            `warning stands.`,
-        };
-      case "remote":
-        return {
-          op,
-          outcome: "cannot-cancel-remote",
-          markerCleared: false,
-          detail: result.detail,
-        };
-      case "failed":
-        return {
-          op,
-          outcome: "could-not-verify",
-          markerCleared: false,
-          detail: result.detail,
-        };
-    }
-  }
-
-  // The marker's base IS the current target — local evidence is about the
-  // right host, so outcomes are provable here.
-  switch (result.outcome) {
-    case "cancelled":
-      return finalize(op, { outcome: "cancelled", detail: result.detail });
-    case "not-scheduled":
-      return finalize(op, { outcome: "already-drained", detail: result.detail });
-    case "remote":
-      return {
-        op,
-        outcome: "cannot-cancel-remote",
-        markerCleared: false,
-        detail: result.detail,
-      };
-    case "failed":
-      return {
-        op,
-        outcome: "could-not-verify",
-        markerCleared: false,
-        detail: result.detail,
-      };
-  }
+  // The deferred file has no operation identity: a stale marker for this base
+  // is indistinguishable from a later restore requested by another operation.
+  // Deleting it would therefore risk cancelling the wrong restore. Keep the
+  // marker until Manager provides an owned restore identifier or cancellation
+  // endpoint.
+  return {
+    op,
+    outcome: "cannot-cancel",
+    markerCleared: false,
+    detail:
+      `cannot safely cancel the deferred restore on ${currentBase}: Manager's ` +
+      `restore-snapshot.json has no operation identity, so deleting it could ` +
+      `remove a later unrelated restore. NOTHING was deleted; the warning stands.`,
+  };
 }
 
 /** Attempt to cancel ONE pending panel-affecting op, honestly reported. */

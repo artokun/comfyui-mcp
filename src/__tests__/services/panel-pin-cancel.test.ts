@@ -280,23 +280,22 @@ describe("pin write cancels a pending update_all (#689)", () => {
     // then the reset.
     expect(historyGets().some((c) => c.url.includes("ui_id=ui-1_comfyui-agent-panel"))).toBe(true);
     expect(historyGets().some((c) => c.url.includes("ui_id=ui-1_comfyui-mcp-panel"))).toBe(true);
-    expect(clientStatusGets().length).toBeGreaterThanOrEqual(2); // before + after
-    expect(resetPosts().map((c) => c.url)).toEqual([`${ORIG}/v2/manager/queue/reset`]);
+    expect(clientStatusGets()).toHaveLength(1);
+    expect(resetPosts()).toEqual([]);
 
     // The report names OUR dropped count AND the shared blast radius — never "saved".
     const [cancel] = cancelReports(report);
-    expect(cancel.outcome).toBe("cancelled");
-    expect(cancel.markerCleared).toBe(true);
+    expect(cancel.outcome).toBe("could-not-verify");
+    expect(cancel.markerCleared).toBe(false);
     expect(cancel.pendingBefore).toBe(2);
-    expect(cancel.pendingAfter).toBe(0);
     expect(cancel.inProgress).toBe(0);
-    expect(cancel.detail).toMatch(/dropped 2 of this orchestrator's pending task/);
-    expect(cancel.detail).toMatch(/Queue-wide pending went 5 → 0/);
+    expect(cancel.detail).toMatch(/queue-wide reset/);
+    expect(cancel.detail).toMatch(/NOTHING was sent/);
 
     // Marker provably cleared; no residue warning in the note.
-    expect(activePanelPendingOps()).toEqual([]);
-    expect(report.pendingPanelOps).toBeUndefined();
-    expect(report.note as string).not.toMatch(/WARNING — a panel-affecting operation/);
+    expect(activePanelPendingOps()).toHaveLength(1);
+    expect(report.pendingPanelOps).toHaveLength(1);
+    expect(report.note as string).toMatch(/WARNING — a panel-affecting operation/);
     expect(report.note as string).toMatch(/Pending-op handling:/);
   });
 
@@ -407,11 +406,11 @@ describe("pin write cancels a pending update_all (#689)", () => {
 
     const report = await writePin();
 
-    expect(resetPosts()).toHaveLength(1); // the reset WAS attempted
+    expect(resetPosts()).toHaveLength(0);
     const [cancel] = cancelReports(report);
     expect(cancel.outcome).toBe("could-not-verify");
     expect(cancel.markerCleared).toBe(false);
-    expect(cancel.detail).toMatch(/queue reset on .* FAILED/);
+    expect(cancel.detail).toMatch(/queue-wide reset/);
     // The marker and today's warning survive.
     expect(activePanelPendingOps()).toHaveLength(1);
     expect(report.pendingPanelOps).toHaveLength(1);
@@ -484,7 +483,7 @@ describe("pin write cancels a pending update_all (#689)", () => {
     expect(report.note as string).toMatch(/WARNING — a panel-affecting operation is still pending/);
   });
 
-  it("partial with a concurrent RE-FILL (pending 2 → 3): drop UNPROVEN, never a 'dropped' claim", async () => {
+  it("a possible concurrent refill never triggers a queue-wide reset", async () => {
     recordUpdateAllMarker({ base: ORIG, uiId: "ui-5b" });
     const mine: QueueState = { pending: 2, inProgress: 0, done: 1 };
     v4Persona(
@@ -500,22 +499,18 @@ describe("pin write cancels a pending update_all (#689)", () => {
 
     const report = await writePin();
 
-    expect(resetPosts()).toHaveLength(1);
+    expect(resetPosts()).toHaveLength(0);
     const [cancel] = cancelReports(report);
-    expect(cancel.outcome).toBe("partially-cancelled");
+    expect(cancel.outcome).toBe("could-not-verify");
     expect(cancel.markerCleared).toBe(false);
     expect(cancel.pendingBefore).toBe(2);
-    expect(cancel.pendingAfter).toBe(3);
     // mineAfter.pending > mine.pending: a "dropped" count would be zero or
     // negative, i.e. fabricated. The report names the movement and stops there.
-    expect(cancel.detail).not.toMatch(/dropped \d/);
-    expect(cancel.detail).toMatch(/UNPROVEN/);
-    expect(cancel.detail).toMatch(/2 → 3/);
-    expect(cancel.detail).toMatch(/RUNNING/);
+    expect(cancel.detail).toMatch(/NOTHING was sent/);
     expect(activePanelPendingOps()).toHaveLength(1);
   });
 
-  it("partial: the dropped count is DERIVED from before/after reads, never asserted", async () => {    recordUpdateAllMarker({ base: ORIG, uiId: "ui-5" });
+  it("a possible partial drain is not claimed because no reset is sent", async () => {    recordUpdateAllMarker({ base: ORIG, uiId: "ui-5" });
     const mine: QueueState = { pending: 2, inProgress: 0, done: 1 };
     v4Persona(
       { pending: 2, inProgress: 0, done: 3 },
@@ -530,35 +525,28 @@ describe("pin write cancels a pending update_all (#689)", () => {
 
     const report = await writePin();
 
-    expect(resetPosts()).toHaveLength(1);
+    expect(resetPosts()).toHaveLength(0);
     const [cancel] = cancelReports(report);
-    expect(cancel.outcome).toBe("partially-cancelled");
+    expect(cancel.outcome).toBe("could-not-verify");
     expect(cancel.markerCleared).toBe(false);
     expect(cancel.pendingBefore).toBe(2);
-    expect(cancel.pendingAfter).toBe(1);
-    expect(cancel.inProgress).toBe(1);
     // 2 → 1 is a drop of ONE: the report must not claim both were dropped.
-    expect(cancel.detail).toMatch(/dropped 1 of this orchestrator's pending task/);
-    expect(cancel.detail).toMatch(/\(2 → 1\)/);
-    expect(cancel.detail).not.toMatch(/dropped 2/);
-    expect(cancel.detail).toMatch(/Queue-wide pending went/);
+    expect(cancel.detail).toMatch(/NOTHING was sent/);
     expect(activePanelPendingOps()).toHaveLength(1);
     expect(report.note as string).toMatch(/WARNING/);
   });
 
-  it("post-reset state unreadable: UNVERIFIED claims NO drop and names the blast radius", async () => {
+  it("post-reset state is never needed because no reset is sent", async () => {
     recordUpdateAllMarker({ base: ORIG, uiId: "ui-8" });
     v4Persona({ pending: 2, inProgress: 0, done: 1 }, { clientStatusFailsAfterReset: true });
 
     const report = await writePin();
 
-    expect(resetPosts()).toHaveLength(1); // the reset DID fire
+    expect(resetPosts()).toHaveLength(0);
     const [cancel] = cancelReports(report);
     expect(cancel.outcome).toBe("could-not-verify");
     expect(cancel.markerCleared).toBe(false);
-    expect(cancel.detail).toMatch(/what was dropped is UNVERIFIED/);
-    expect(cancel.detail).toMatch(/Queue-wide pending went 2 → 0/);
-    expect(cancel.detail).not.toMatch(/dropped \d/); // no unmeasured claim
+    expect(cancel.detail).toMatch(/NOTHING was sent/);
     expect(activePanelPendingOps()).toHaveLength(1);
   });
 
@@ -681,13 +669,12 @@ describe("pin write cancels a deferred snapshot restore (#689)", () => {
 
     const report = await writePin();
 
-    expect(existsSync(restoreFile)).toBe(false);
+    expect(existsSync(restoreFile)).toBe(true);
     const [cancel] = cancelReports(report);
-    expect(cancel.outcome).toBe("cancelled");
-    expect(cancel.markerCleared).toBe(true);
-    expect(cancel.detail).toMatch(/deleted the deferred restore file/);
-    expect(cancel.detail).toContain(restoreFile);
-    expect(activePanelPendingOps()).toEqual([]);
+    expect(cancel.outcome).toBe("cannot-cancel");
+    expect(cancel.markerCleared).toBe(false);
+    expect(cancel.detail).toMatch(/no operation identity/);
+    expect(activePanelPendingOps()).toHaveLength(1);
     // The cancel is filesystem-local — the Manager was never contacted.
     expect(managerCalls).toEqual([]);
   });
@@ -699,11 +686,10 @@ describe("pin write cancels a deferred snapshot restore (#689)", () => {
     const report = await writePin();
 
     const [cancel] = cancelReports(report);
-    expect(cancel.outcome).toBe("already-drained");
-    expect(cancel.markerCleared).toBe(true);
-    expect(cancel.detail).toMatch(/NOTHING left to cancel/);
-    expect(cancel.detail).toMatch(/may ALREADY have been reverted/);
-    expect(activePanelPendingOps()).toEqual([]);
+    expect(cancel.outcome).toBe("cannot-cancel");
+    expect(cancel.markerCleared).toBe(false);
+    expect(cancel.detail).toMatch(/no operation identity/);
+    expect(activePanelPendingOps()).toHaveLength(1);
     expect(managerCalls).toEqual([]);
   });
 
@@ -714,10 +700,9 @@ describe("pin write cancels a deferred snapshot restore (#689)", () => {
     const report = await writePin();
 
     const [cancel] = cancelReports(report);
-    expect(cancel.outcome).toBe("cannot-cancel-remote");
+    expect(cancel.outcome).toBe("cannot-cancel");
     expect(cancel.markerCleared).toBe(false);
-    expect(cancel.detail).toMatch(/cannot cancel — remote host/);
-    expect(cancel.detail).toMatch(/BEFORE the next ComfyUI restart/);
+    expect(cancel.detail).toMatch(/no operation identity/);
     expect(activePanelPendingOps()).toHaveLength(1);
     expect(report.pendingPanelOps).toHaveLength(1);
     expect(report.note as string).toMatch(/WARNING — a panel-affecting operation is still pending/);
@@ -784,12 +769,11 @@ describe("pin write cancels a deferred snapshot restore (#689)", () => {
 
     // The local file WILL run at the next local restart, so deleting it is
     // protective — but it proves nothing about which host the marker is for.
-    expect(existsSync(restoreFile)).toBe(false);
+    expect(existsSync(restoreFile)).toBe(true);
     const [cancel] = cancelReports(report);
-    expect(cancel.outcome).toBe("could-not-verify");
+    expect(cancel.outcome).toBe("cannot-cancel");
     expect(cancel.markerCleared).toBe(false);
-    expect(cancel.detail).toMatch(/UNVERIFIED/);
-    expect(cancel.detail).toMatch(/recorded no server/);
+    expect(cancel.detail).toMatch(/no operation identity/);
     expect(activePanelPendingOps()).toHaveLength(1);
     expect(managerCalls).toEqual([]);
   });
@@ -805,9 +789,9 @@ describe("pin write cancels a deferred snapshot restore (#689)", () => {
     const report = await writePin();
 
     const [cancel] = cancelReports(report);
-    expect(cancel.outcome).toBe("could-not-verify");
+    expect(cancel.outcome).toBe("cannot-cancel");
     expect(cancel.markerCleared).toBe(false);
-    expect(cancel.detail).toMatch(/recorded no server/);
+    expect(cancel.detail).toMatch(/no operation identity/);
     expect(activePanelPendingOps()).toHaveLength(1);
     expect(managerCalls).toEqual([]);
   });
