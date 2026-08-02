@@ -2444,10 +2444,12 @@ export async function runPanelOrchestrator(): Promise<void> {
       // local install under the panel-op lock, refuses pins/dev installs/shadows
       // and unverifiable scans, and only reports a version it verified on disk.
       // A desktop hello is the first point at which we can both repair an
-      // unpinned skew and tell the affected user that ComfyUI must restart. Do
-      // not run this for a headless mirror: it cannot load the desktop extension.
+      // unpinned skew and tell the affected user that ComfyUI must restart. The
+      // bridge pins each socket's kind on its FIRST hello, so query that trusted
+      // session state rather than this raw (and replayable) hello's `headless`.
+      // A headless mirror cannot load the desktop extension.
       if (
-        (event as { headless?: unknown }).headless !== true &&
+        !bridge.isHeadless(panelTab) &&
         !isPanelAutoInstallDisabled()
       ) {
         void performPanelSync()
