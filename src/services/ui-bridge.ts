@@ -243,6 +243,20 @@ export function minPanelVersionForCmd(cmd: string): string {
 export const SEMVER_RE =
   /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/;
 
+/**
+ * The highest panel version this MCP build needs across its bridge commands.
+ * Keep this beside the command capability table so both proactive panel sync
+ * and a bridge refusal report the same derived requirement.
+ */
+export function requiredPanelVersion(): string {
+  let best = MIN_PANEL_VERSION_FOR_BRIDGE_COMMANDS;
+  for (const min of Object.values(BRIDGE_CMD_MIN_PANEL_VERSION)) {
+    if (!SEMVER_RE.test(min.trim())) continue;
+    if (!SEMVER_RE.test(best.trim()) || compareSemver(min, best) > 0) best = min;
+  }
+  return best;
+}
+
 /** True when the panel ADVERTISED a PARSEABLE version (in its `hello`) that already
  *  meets `cmd`'s AUTHORITATIVE, command-specific minimum — i.e. this panel is provably
  *  new enough to support the command, so an "Unknown command" reply is NOT an age
@@ -1866,7 +1880,9 @@ export class UiBridge {
       if (!conn.enforcesWorkflowStamp || !hasTrustedStamp) {
         const why = !conn.enforcesWorkflowStamp
           ? `panel tab ${conn.tabId.slice(0, 8)} does not enforce per-command workflow targeting ` +
-            `(update the ComfyUI-MCP panel to edit the graph)`
+            `(detected panel ${conn.panelVersion ?? "version unknown"}; this MCP requires panel ` +
+              `${requiredPanelVersion()}+). Run install_panel(action:'update') and restart ComfyUI; ` +
+              `rebinding cannot add the missing capability`
           : `this workflow has no trusted identity for the panel to fence the command against`;
         return Promise.reject(
           markDispatched(

@@ -37,12 +37,10 @@ import {
   PANEL_PIN_ENV_VAR,
   type PanelPinState,
 } from "./panel-settings.js";
-import {
-  BRIDGE_CMD_MIN_PANEL_VERSION,
-  MIN_PANEL_VERSION_FOR_BRIDGE_COMMANDS,
-  SEMVER_RE,
-} from "./ui-bridge.js";
+import { requiredPanelVersion as requiredBridgePanelVersion, SEMVER_RE } from "./ui-bridge.js";
 import { compareSemver, detectInstallMode } from "./self-update.js";
+
+export { requiredBridgePanelVersion as requiredPanelVersion };
 
 /*
  * Version screening. `compareSemver` returns 0 for anything it cannot parse, so
@@ -64,23 +62,6 @@ import { compareSemver, detectInstallMode } from "./self-update.js";
 
 function isComparableVersion(v: string | undefined): v is string {
   return typeof v === "string" && SEMVER_RE.test(v.trim());
-}
-
-/**
- * The highest panel version THIS orchestrator build is known to require.
- *
- * Derived, not hand-maintained: it is the maximum of the bridge baseline and
- * every per-command minimum the orchestrator declares. A release that adds a
- * command needing a newer panel raises this automatically, so the sync advice
- * can never drift from the code that actually needs the newer panel.
- */
-export function requiredPanelVersion(): string {
-  let best = MIN_PANEL_VERSION_FOR_BRIDGE_COMMANDS;
-  for (const min of Object.values(BRIDGE_CMD_MIN_PANEL_VERSION)) {
-    if (!isComparableVersion(min)) continue;
-    if (!isComparableVersion(best) || compareSemver(min, best) > 0) best = min;
-  }
-  return best;
 }
 
 /**
@@ -167,7 +148,7 @@ export function evaluatePanelSync(
   status: PanelStatus,
   opts: EvaluateOptions = {},
 ): PanelSyncAssessment {
-  const required = opts.requiredVersion ?? requiredPanelVersion();
+  const required = opts.requiredVersion ?? requiredBridgePanelVersion();
   const orchestratorVersion =
     opts.orchestratorVersion ?? detectInstallMode().currentVersion ?? undefined;
   // A PanelStatus without a `pin` is a caller that predates the pin (or built

@@ -1480,7 +1480,7 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
     // A mutating graph command is refused BEFORE dispatch (never written to the socket).
     await expect(
       bridge.send({ cmd: "graph_add_node", node: "x" } as never, { tabId: "tmp:old" }),
-    ).rejects.toThrow(/enforces per-command workflow targeting|update the ComfyUI-MCP panel/i);
+    ).rejects.toThrow(/enforce.*workflow targeting|install_panel\(action:'update'\)/i);
 
     // …but a READ-ONLY graph command still works (read-only graph access retained).
     await expect(
@@ -1491,7 +1491,7 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
     // refused — the class the graph_-only gate previously missed (#570 P0c, codex cycle 8).
     await expect(
       bridge.send({ cmd: "workflow_close", force: true } as never, { tabId: "tmp:old" }),
-    ).rejects.toThrow(/enforces per-command workflow targeting|update the ComfyUI-MCP panel/i);
+    ).rejects.toThrow(/enforce.*workflow targeting|install_panel\(action:'update'\)/i);
 
     // ALL FOUR workflow mutators are refused on a non-enforcing panel — regardless of path,
     // including an EXPLICIT non-empty path. The server can't resolve the selector or prove it
@@ -1505,9 +1505,25 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
       { cmd: "workflow_close", path: "workflows/other.json", force: true }, // explicit path — still gated
     ]) {
       await expect(bridge.send(cmd as never, { tabId: "tmp:old" })).rejects.toThrow(
-        /enforces per-command workflow targeting|update the ComfyUI-MCP panel/i,
+        /enforce.*workflow targeting|install_panel\(action:'update'\)/i,
       );
     }
+    old.close();
+  });
+
+  it("names the versioned panel-sync remedy when stamp enforcement is absent (#706)", async () => {
+    const old = new WebSocket(`ws://127.0.0.1:${port}`);
+    await new Promise<void>((res, rej) => {
+      old.on("open", () => {
+        old.send(JSON.stringify({ type: "hello", tab_id: "old-skew", title: "wf", panel_version: "0.11.0" }));
+        res();
+      });
+      old.on("error", rej);
+    });
+    await vi.waitFor(() => expect(bridge.tabs().some((t) => t.tab_id === "old-skew")).toBe(true));
+    await expect(
+      bridge.send({ cmd: "graph_add_node", node: "x" } as never, { tabId: "old-skew" }),
+    ).rejects.toThrow(/detected panel 0\.11\.0.*requires panel 0\.11\.28\+.*install_panel\(action:'update'\).*restart ComfyUI.*rebinding cannot/i);
     old.close();
   });
 

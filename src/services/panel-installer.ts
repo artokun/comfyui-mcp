@@ -777,7 +777,12 @@ export interface EnsureOptions {
   timeoutMs?: number;
 }
 
-function isAutoInstallDisabled(env: NodeJS.ProcessEnv): boolean {
+/**
+ * The explicit opt-out applies to every unattended panel mutation. A user who
+ * disables on-load installation must not get an automatic version sync later
+ * merely because a desktop tab says hello.
+ */
+export function isPanelAutoInstallDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
   const v = (env.COMFYUI_MCP_PANEL_AUTOINSTALL ?? "").trim().toLowerCase();
   return v === "0" || v === "false" || v === "no" || v === "off";
 }
@@ -802,7 +807,7 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
 }
 
 async function ensureInner(deps: PanelInstallerDeps): Promise<EnsureResult> {
-  if (isAutoInstallDisabled(deps.env())) {
+  if (isPanelAutoInstallDisabled(deps.env())) {
     return {
       action: "skipped",
       reason: "COMFYUI_MCP_PANEL_AUTOINSTALL disabled",

@@ -20,6 +20,8 @@ import { startUiBridge, isLoopbackBindHost, SESSION_EPOCH, type UiBridge } from 
 import { setupSecureBridge, resolveComfyuiPathForTarget, type SecureBridge } from "../services/secure-bridge.js";
 import { startQuickTunnel } from "../services/tunnel.js";
 import { detectInstallMode } from "../services/self-update.js";
+import { performPanelSync } from "../services/panel-sync.js";
+import { isPanelAutoInstallDisabled } from "../services/panel-installer.js";
 import { SelfRestarter } from "../services/self-restart.js";
 import {
   SessionStore,
@@ -2436,6 +2438,45 @@ export async function runPanelOrchestrator(): Promise<void> {
       if (typeof helloPanelVer === "string" && helloPanelVer && helloPanelVer !== latestPanelVersion) {
         latestPanelVersion = helloPanelVer;
         void refreshEnvCapabilities();
+      }
+      // #706 — an npm-orchestrator update can require a newer Registry panel.
+      // The panel-sync service owns the ENTIRE safety decision: it re-reads the
+      // local install under the panel-op lock, refuses pins/dev installs/shadows
+      // and unverifiable scans, and only reports a version it verified on disk.
+      // A desktop hello is the first point at which we can both repair an
+      // unpinned skew and tell the affected user that ComfyUI must restart. Do
+      // not run this for a headless mirror: it cannot load the desktop extension.
+      if (
+        (event as { headless?: unknown }).headless !== true &&
+        !isPanelAutoInstallDisabled()
+      ) {
+        void performPanelSync()
+          .then((sync) => {
+            // An already-current local panel needs no chat noise. Every other
+            // outcome is actionable: synced => restart, pinned => unpin first,
+            // blocked/unknown/dev => its truthful recovery guidance.
+            if (sync.decision === "up-to-date" || sync.decision === "not-applicable") return;
+            bridge.push({ type: "say", text: `âš ï¸ ${sync.message}` }, panelTab);
+            logger.info(
+              `[panel-orchestrator] panel sync on hello for ${panelTab.slice(0, 8)}: ` +
+                `${sync.decision}${sync.synced ? ` (verified ${sync.verifiedVersion ?? "unknown"})` : ""}`,
+            );
+          })
+          .catch((err) => {
+            // Never translate a Manager queue/verification failure into success.
+            // The explicit tool remains available for diagnosis and retry.
+            const detail = err instanceof Error ? err.message : String(err);
+            logger.warn(`[panel-orchestrator] panel auto-sync on hello failed: ${detail}`);
+            bridge.push(
+              {
+                type: "say",
+                text:
+                  `âš ï¸ Could not automatically sync the ComfyUI-MCP panel; no update was claimed. ` +
+                  `Run install_panel(action:'status') to inspect it, then retry install_panel(action:'sync') if appropriate. (${detail})`,
+              },
+              panelTab,
+            );
+          });
       }
       // Retarget ComfyUI to the URL the browser was served from (window.location),
       // BEFORE the readiness probe so the "ready" ack reflects the right instance —
