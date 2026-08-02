@@ -3437,6 +3437,10 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           return ok(`${summary}\n\n${JSON.stringify(graph)}`);
         }
         const loaded = await ctx.call({ cmd: "graph_load", graph: graph as never }, 30000);
+        // ctx.call returns an error ToolResult for an outcome-unknown graph_load
+        // (rather than throwing). Preserve it verbatim: wrapping it as a successful
+        // "Loaded" result would fabricate success and hide its retry_of token.
+        if (loaded.isError) return loaded;
         const loadText = (loaded as { content?: Array<{ text?: string }> }).content?.[0]?.text ?? "";
         return ok(`${summary}\nLoaded onto the canvas (one undo restores the original). ${loadText.slice(0, 120)}`);
       },

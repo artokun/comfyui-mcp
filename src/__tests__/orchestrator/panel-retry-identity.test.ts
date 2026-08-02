@@ -106,6 +106,21 @@ describe("#694 retry token on OUTCOME-UNKNOWN mutating failures", () => {
     expect(textOf(res)).toContain(RETRY_LINE);
   });
 
+  it.each([
+    ["reply timeout", () => replyTimeout("graph_load")],
+    ["mid-command disconnect", () => midCommandDrop("graph_load")],
+  ])(
+    "(a) panel_flatten_workflow preserves an outcome-unknown %s instead of fabricating load success",
+    async (_kind, failure) => {
+      const ctx = makePanelToolCtx(failingBridge(failure), "tab-1");
+      const flatten = buildPanelToolDefs().find((d) => d.name === "panel_flatten_workflow")!;
+      const res = await flatten.handler({ graph: { nodes: [], links: [] } }, ctx);
+      expect(res.isError).toBe(true);
+      expect(textOf(res)).toContain(RETRY_LINE);
+      expect(textOf(res)).not.toContain("Loaded onto the canvas");
+    },
+  );
+
   it("(b) a PRE-WRITE refusal (dispatched:false) mints NO token", async () => {
     const ctx = makePanelToolCtx(
       failingBridge(
