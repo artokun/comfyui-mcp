@@ -102,6 +102,10 @@ describe("convertUiToApi — bypass / mute resolution", () => {
           },
         },
       },
+      ImageSource: {
+        input: { required: {} },
+        output: ["IMAGE"],
+      },
       SaveImage: {
         input: { required: { images: ["IMAGE"], filename_prefix: ["STRING"] } },
       },
@@ -113,7 +117,9 @@ describe("convertUiToApi — bypass / mute resolution", () => {
           id: 1,
           type: "GeminiNanoBanana2V2",
           mode: 0,
-          inputs: [],
+          inputs: [
+            { name: "model.images.image_1", type: "IMAGE", link: 2 },
+          ],
           outputs: [{ name: "IMAGE", type: "IMAGE", links: [1] }],
           widgets_values: [
             "a red cube", // prompt
@@ -127,6 +133,14 @@ describe("convertUiToApi — bypass / mute resolution", () => {
           ],
         },
         {
+          id: 3,
+          type: "ImageSource",
+          mode: 0,
+          inputs: [],
+          outputs: [{ name: "IMAGE", type: "IMAGE", links: [2] }],
+          widgets_values: [],
+        },
+        {
           id: 2,
           type: "SaveImage",
           mode: 0,
@@ -135,7 +149,10 @@ describe("convertUiToApi — bypass / mute resolution", () => {
           widgets_values: ["out"],
         },
       ],
-      links: [[1, 1, 0, 2, 0, "IMAGE"]],
+      links: [
+        [1, 1, 0, 2, 0, "IMAGE"],
+        [2, 3, 0, 1, 0, "IMAGE"],
+      ],
     } as never;
 
     const { workflow } = convertUiToApi(ui, objectInfo);
@@ -145,6 +162,7 @@ describe("convertUiToApi — bypass / mute resolution", () => {
       "model.aspect_ratio": "16:9",
       "model.resolution": "2K",
       "model.thinking_level": "HIGH",
+      "model.images.image_1": ["3", 0],
       seed: 7,
       response_modalities: "IMAGE",
     });

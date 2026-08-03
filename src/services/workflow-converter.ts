@@ -378,6 +378,49 @@ function resolveWidgetSpec(
 }
 
 /**
+ * Return the full schema path of an AUTOGROW ancestor for a dotted prompt key.
+ * AUTOGROW can be top-level (`values.a`) or nested below one or more selected
+ * dynamic-combo options (`model.images.image_1`). In the latter case, looking
+ * only at the first segment mistakes `images.image_1` for a combo leaf and the
+ * final re-anchoring pass deletes the wired entry as unknown.
+ */
+function autogrowParentPath(
+  def: ComfyUINodeDef,
+  key: string,
+  inputs: Record<string, unknown>,
+): string | undefined {
+  const parts = key.split(".");
+  if (parts.length < 2) return undefined;
+
+  let path = parts[0];
+  let spec =
+    (def.input?.required as Record<string, unknown>)?.[path] ??
+    (def.input?.optional as Record<string, unknown>)?.[path];
+
+  for (let i = 1; i < parts.length; i++) {
+    if (Array.isArray(spec) && spec[0] === "COMFY_AUTOGROW_V3") return path;
+    if (!Array.isArray(spec)) return undefined;
+
+    const options = (spec[1] as {
+      options?: Array<{
+        key?: unknown;
+        inputs?: {
+          required?: Record<string, unknown>;
+          optional?: Record<string, unknown>;
+        };
+      }>;
+    } | undefined)?.options;
+    if (!Array.isArray(options)) return undefined;
+
+    const selected = options.find((option) => option?.key === inputs[path])?.inputs;
+    path = `${path}.${parts[i]}`;
+    spec = selected?.required?.[parts[i]] ?? selected?.optional?.[parts[i]];
+  }
+
+  return undefined;
+}
+
+/**
  * Whether a widget SPEC carries a control_after_generate phantom slot — either
  * flagged in its config, or a seed-type INT the ComfyUI frontend auto-augments.
  * Works for both top-level inputs and V3 dynamic-combo NESTED leaves (which have
@@ -2089,16 +2132,11 @@ export function convertUiToApi(
     for (const key of Object.keys(inputs)) {
       const dot = key.indexOf(".");
       if (dot < 0) continue;
+      // AUTOGROW entries may be top-level (`values.a`) or nested inside a
+      // dynamic-combo option (`model.images.image_1`). Preserve the whole
+      // repeated-entry subtree; it is not a dynamic-combo leaf to re-anchor.
+      if (autogrowParentPath(def, key, inputs)) continue;
       const parent = key.slice(0, dot);
-      const parentSpec =
-        (def.input?.required as Record<string, unknown>)?.[parent] ??
-        (def.input?.optional as Record<string, unknown>)?.[parent];
-      const parentType = Array.isArray(parentSpec) ? parentSpec[0] : undefined;
-      // AUTOGROW inputs serialize each repeated entry as a dotted key
-      // (`values.a`, `values.b`, …) without a separate `values` parent value.
-      // They are not dynamic-combo leaves and must bypass the combo-specific
-      // orphan/re-anchoring pass below.
-      if (parentType === "COMFY_AUTOGROW_V3") continue;
       // Orphaned dotted leaf: its dynamic parent isn't in the prompt (e.g. an
       // optional parent left unset while the leaf was linked). There's no option
       // context to validate against, and the leaf is meaningless without its
