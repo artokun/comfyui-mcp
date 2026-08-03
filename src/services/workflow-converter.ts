@@ -2090,6 +2090,15 @@ export function convertUiToApi(
       const dot = key.indexOf(".");
       if (dot < 0) continue;
       const parent = key.slice(0, dot);
+      const parentSpec =
+        (def.input?.required as Record<string, unknown>)?.[parent] ??
+        (def.input?.optional as Record<string, unknown>)?.[parent];
+      const parentType = Array.isArray(parentSpec) ? parentSpec[0] : undefined;
+      // AUTOGROW inputs serialize each repeated entry as a dotted key
+      // (`values.a`, `values.b`, …) without a separate `values` parent value.
+      // They are not dynamic-combo leaves and must bypass the combo-specific
+      // orphan/re-anchoring pass below.
+      if (parentType === "COMFY_AUTOGROW_V3") continue;
       // Orphaned dotted leaf: its dynamic parent isn't in the prompt (e.g. an
       // optional parent left unset while the leaf was linked). There's no option
       // context to validate against, and the leaf is meaningless without its

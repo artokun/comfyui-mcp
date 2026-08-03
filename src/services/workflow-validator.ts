@@ -90,7 +90,11 @@ export async function validateWorkflow(
     // 2b. Check required inputs are present
     const requiredInputs = nodeDef.input?.required ?? {};
     for (const [inputName, inputSpec] of Object.entries(requiredInputs)) {
-      if (!(inputName in node.inputs)) {
+      const inputType = Array.isArray(inputSpec) ? inputSpec[0] : undefined;
+      const hasAutogrowChildren =
+        inputType === "COMFY_AUTOGROW_V3" &&
+        Object.keys(node.inputs).some((name) => name.startsWith(`${inputName}.`));
+      if (!(inputName in node.inputs) && !hasAutogrowChildren) {
         issues.push({
           severity: "error",
           node_id: nodeId,

@@ -154,6 +154,70 @@ describe("convertUiToApi — bypass / mute resolution", () => {
     expect(workflow["1"].inputs).not.toHaveProperty("aspect_ratio");
   });
 
+  it("preserves linked COMFY_AUTOGROW_V3 entries without a serialized parent value", () => {
+    const objectInfo = {
+      PrimitiveInt: {
+        input: { required: { value: ["INT", { default: 0 }] } },
+        output: ["INT"],
+      },
+      ComfyMathExpression: {
+        input: {
+          required: {
+            expression: ["STRING", { default: "a + b" }],
+            values: [
+              "COMFY_AUTOGROW_V3",
+              {
+                template: {
+                  input: { required: { value: ["FLOAT,INT,BOOLEAN", {}] } },
+                  names: ["a", "b"],
+                  min: 1,
+                },
+              },
+            ],
+          },
+        },
+        output: ["FLOAT", "INT", "BOOLEAN"],
+      },
+    } as never;
+
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "PrimitiveInt",
+          mode: 0,
+          inputs: [],
+          outputs: [{ name: "INT", type: "INT", links: [1, 2] }],
+          widgets_values: [8],
+        },
+        {
+          id: 2,
+          type: "ComfyMathExpression",
+          mode: 0,
+          inputs: [
+            { name: "values.a", type: "FLOAT,INT,BOOLEAN", link: 1 },
+            { name: "values.b", type: "FLOAT,INT,BOOLEAN", link: 2 },
+            { name: "expression", type: "STRING", link: null, widget: { name: "expression" } },
+          ],
+          outputs: [{ name: "INT", type: "INT", links: null }],
+          widgets_values: ["a + b"],
+        },
+      ],
+      links: [
+        [1, 1, 0, 2, 0, "INT"],
+        [2, 1, 0, 2, 1, "INT"],
+      ],
+    } as never;
+
+    const { workflow } = convertUiToApi(ui, objectInfo);
+    expect(workflow["2"].inputs).toEqual({
+      expression: "a + b",
+      "values.a": ["1", 0],
+      "values.b": ["1", 0],
+    });
+    expect(workflow["2"].inputs).not.toHaveProperty("values");
+  });
+
   it("virtual Set/Get bus nodes are dropped and consumers resolve through the bus", () => {
     // LoadImage(1) -> SetNode(2,'BUS');  GetNode(3,'BUS') -> SaveImage(4)
     const ui = {

@@ -99,6 +99,57 @@ describe("validateWorkflow — combo value_not_in_list parity with the ComfyUI f
   });
 });
 
+describe("validateWorkflow — COMFY_AUTOGROW_V3 required inputs", () => {
+  const autogrowObjectInfo = {
+    PrimitiveInt: {
+      input: { required: { value: ["INT", { default: 0 }] } },
+      output: ["INT"],
+    },
+    ComfyMathExpression: {
+      input: {
+        required: {
+          expression: ["STRING", { default: "a + b" }],
+          values: ["COMFY_AUTOGROW_V3", { min: 1 }],
+        },
+      },
+      output: ["FLOAT", "INT", "BOOLEAN"],
+    },
+  } as const;
+
+  it("accepts dotted child entries without a separate parent value", async () => {
+    getObjectInfoMock.mockResolvedValue(autogrowObjectInfo);
+    const r = await validateWorkflow(
+      wf({
+        "1": { class_type: "PrimitiveInt", inputs: { value: 8 } },
+        "2": {
+          class_type: "ComfyMathExpression",
+          inputs: { expression: "a / 2", "values.a": ["1", 0] },
+        },
+      }),
+      { health: false },
+    );
+    expect(r.issues.filter((issue) => issue.severity === "error")).toHaveLength(0);
+    expect(r.valid).toBe(true);
+  });
+
+  it("still reports a missing required AUTOGROW input when it has no children", async () => {
+    getObjectInfoMock.mockResolvedValue(autogrowObjectInfo);
+    const r = await validateWorkflow(
+      wf({
+        "2": { class_type: "ComfyMathExpression", inputs: { expression: "a / 2" } },
+      }),
+      { health: false },
+    );
+    expect(r.issues).toContainEqual(
+      expect.objectContaining({
+        node_id: "2",
+        message: 'Missing required input "values"',
+      }),
+    );
+    expect(r.valid).toBe(false);
+  });
+});
+
 describe("validateWorkflow — graph-health merge", () => {
   it("merges health findings (warning/info) without flipping `valid` and returns a health section", async () => {
     // Combo-clean graph, but structurally an isolated CLIPLoader (nothing reads it).
