@@ -73,6 +73,13 @@ export interface TriageResult {
   recommend_upgrade?: boolean;
   agent_message?: string;
   possible_duplicate?: boolean;
+  /**
+   * Existing issues triage judged to share a root cause with this report
+   * (classification "related"). The created issue's body references them, so
+   * GitHub already cross-linked the cluster; surfaced so the agent can tell
+   * the user their report joined a known defect.
+   */
+  related_issues?: number[];
 }
 
 /**
@@ -129,8 +136,12 @@ export async function submitAndPoll(opts: {
 }): Promise<SubmitOutcome> {
   const doFetch = opts.fetchImpl ?? fetch;
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-  // AI triage runs ~30-120s; poll patiently but bounded. ~40 * 3s ≈ 2 min.
-  const maxPolls = opts.maxPolls ?? 40;
+  // Poll past the WORKER's own wall-clock budget, not just the typical triage
+  // time — the worker allows itself up to 240 s (TRIAGE_WALL_CLOCK_MS) and a
+  // thorough dedup (several searches + candidate reads) now uses it. A shorter
+  // client budget returns "still triaging" for work that was about to finish,
+  // costing the reporter the fix-version/duplicate answer. ~95 * 3 s ≈ 285 s.
+  const maxPolls = opts.maxPolls ?? 95;
   const pollDelayMs = opts.pollDelayMs ?? 3000;
   const timeoutMs = opts.timeoutMs ?? 15000; // per-request cap (not the whole job)
 
@@ -267,6 +278,9 @@ function frameToResult(frame: StatusFrame): TriageResult | null {
     recommend_upgrade: p?.recommend_upgrade,
     agent_message: p?.agent_message,
     possible_duplicate: p?.possible_duplicate,
+    // Older workers omit this entirely — keep it absent rather than [] so the
+    // surface distinguishes "no cluster" from "worker predates clustering".
+    related_issues: Array.isArray(p?.related_issues) ? p.related_issues : undefined,
   };
 }
 
@@ -376,6 +390,9 @@ export function registerReportIssueTools(server: McpServer): void {
               fix_pr_url: r.fix_pr_url,
               recommend_upgrade: r.recommend_upgrade,
               possible_duplicate: r.possible_duplicate,
+              // Present (non-empty) when triage judged this a NEW symptom of an
+              // already-known defect; the issues are cross-linked on GitHub.
+              related_issues: r.related_issues?.length ? r.related_issues : undefined,
               versions: outcome.ack.versions,
               up_to_date: outcome.ack.up_to_date,
               upgrade_hint: outcome.ack.upgrade_hint,
