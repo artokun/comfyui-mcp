@@ -1202,6 +1202,10 @@ async function streamUrlToFile(
     // progress into this shared file while we were backing off, truncating would
     // throw away multi-gigabyte work that is not ours. Refuse before touching it.
     if (beforeWrite) await beforeWrite();
+    // …and re-check the cancel, because that hook AWAITS. A cancel that lands
+    // during it would otherwise be noticed only AFTER the truncate below, which
+    // erases the resumable partial a cancel is supposed to leave behind.
+    if (signal?.aborted) throw new DOMException("The download was cancelled.", "AbortError");
     // Cloud downloaders (S3/Azure) don't range-resume — they overwrite the target.
     // If a partial exists it's being discarded; surface that (#467) instead of a
     // silent restart. Truncate it OURSELVES first and CONFIRM (throw on failure)
@@ -1608,6 +1612,11 @@ async function streamUrlToFile(
   // not touch the file on its way there, so the recursive call runs this check
   // itself — the boundary holds on that path too.
   if (beforeWrite) await beforeWrite();
+  // …and re-check the cancel, because that hook AWAITS. Every path below either
+  // deletes or truncates the staged file, so a cancel that landed during the hook
+  // must stop HERE — a cancelled download is promised a resumable partial, and
+  // erasing it on the way out would be exactly the data loss the promise denies.
+  if (signal?.aborted) throw new DOMException("The download was cancelled.", "AbortError");
 
   // A 206 to a request we did NOT range (a FRESH download, or a no-validator
   // decline — effectiveResume === 0, no Range sent) is UNSOLICITED and unsafe: its
@@ -2212,11 +2221,16 @@ async function downloadIntoCache(
      *  upstream object to the same length would look unchanged. It cannot do that
      *  without writing that object's validator here, so the sidecar is the part of
      *  the snapshot that actually detects a swapped object. */
-    const sidecarBytes = async (): Promise<string> => {
+    const sidecarBytes = async (): Promise<string | undefined> => {
       try {
         return await readFile(`${partial}.etag`, "utf-8");
-      } catch {
-        return "";
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException)?.code;
+        // ABSENT is knowable ("" — no validator was ever recorded); anything else
+        // (EACCES, EIO, …) means we could not find out, and undefined says so.
+        // Collapsing the two would let "I cannot read it" be reported as "the host
+        // never sent one", and would let an unknown state pass an equality check.
+        return code === "ENOENT" || code === "ENOTDIR" ? "" : undefined;
       }
     };
 
@@ -2224,26 +2238,79 @@ async function downloadIntoCache(
      *  the last instant before a write), so they cannot drift apart in wording or
      *  in what they promise. It NEVER deletes or truncates anything: the bytes it
      *  is refusing to touch belong to the other download. */
-    const interferenceError = (
-      expected: number | undefined,
-      actual: number | undefined,
-      when: string,
-    ): ModelError =>
+    const interferenceError = (why: string, when: string): ModelError =>
       new ModelError(
-        `Download stopped: another download is writing the same staged file (` +
-          (actual !== expected
-            ? `it went from ${expected} to ${actual === undefined ? "an unreadable size" : `${actual}`} bytes`
-            : `its resume validator changed, so a DIFFERENT upstream object has been staged there`) +
-          ` ${when}). Writing now would interleave two transfers into one file. Nothing was deleted — ` +
-          `the other download's progress is intact. Wait for it to finish (check download_status), then ` +
-          `re-issue this download; it will reuse the completed file rather than re-fetching it.`,
+        `Download stopped: another download is writing the same staged file, or this attempt cannot ` +
+          `establish that it is not (${why} ${when}). Writing now could interleave two transfers into ` +
+          `one file, or throw away another download's progress. Nothing was deleted — anything on disk ` +
+          `is intact. Check download_status; if another download of this file is running, wait for it ` +
+          `and then re-issue this one (it will reuse the completed file rather than re-fetching it).`,
         { url: logUrl, retryable: false },
       );
 
+    /**
+     * Compare the staged file's state against what we recorded, and REFUSE unless
+     * they are provably identical.
+     *
+     * Fails CLOSED on an unreadable stat or sidecar. "I could not read it" is not
+     * "it is unchanged" — treating it as such is how a retry ends up truncating a
+     * file it does not own, which on the cloud path is unrecoverable
+     * multi-gigabyte loss. Unknown ownership must stop the write, not switch the
+     * detector off.
+     */
+    const assertStillOurs = async (
+      expectedSize: number | undefined,
+      expectedSidecar: string | undefined,
+      when: string,
+      /** Require the size to be KNOWN on both sides, not merely unchanged.
+       *
+       *  True only across a retry boundary, and that asymmetry is the point. Once
+       *  we have left bytes on disk and gone quiet for a backoff, "I cannot read
+       *  the staged file" is exactly the state in which assuming it is still ours
+       *  and truncating it destroys another writer's work — so it must refuse.
+       *  Within a single attempt there is no such history: an unreadable file was
+       *  unreadable before we started, which is a pre-existing condition the older
+       *  guards diagnose far more precisely (#467 P1-B's "could not be verified",
+       *  #467 P0c's stale-sidecar refusal). Refusing there would replace an
+       *  accurate diagnosis with a wrong one and block first attempts that never
+       *  had anything to own. */
+      strict: boolean,
+    ): Promise<void> => {
+      const nowSize = await partialSize();
+      const nowSidecar = await sidecarBytes();
+      // `partialSize` reports a missing file as a definite 0, so `undefined` means
+      // the file is THERE but unreadable.
+      if (strict && (expectedSize === undefined || nowSize === undefined)) {
+        throw interferenceError("the staged file's size could not be read", when);
+      }
+      if (nowSize !== expectedSize) {
+        throw interferenceError(
+          `it went from ${expectedSize ?? "an unreadable size"} to ${nowSize ?? "an unreadable size"} bytes`,
+          when,
+        );
+      }
+      // SIDECAR is compared for CHANGE, not for readability. An unreadable sidecar
+      // that was ALREADY unreadable when we looked a moment ago is a stable
+      // pre-existing condition (a blocked path, a stale directory), not evidence of
+      // another writer — and it has its own, better-targeted guard downstream
+      // (#467 P0c refuses to pair new bytes with a sidecar it cannot neutralize).
+      // Refusing here instead would replace that precise diagnosis with a wrong
+      // one. `undefined !== undefined` is false, so this compares equal only when
+      // the state is genuinely unchanged, and still catches readable-then-not.
+      if (nowSidecar !== expectedSidecar) {
+        throw interferenceError(
+          "its resume validator changed, so a DIFFERENT upstream object has been staged there",
+          when,
+        );
+      }
+    };
+
     /** What WE left the partial (and its validator) at when our previous attempt
-     *  ended. Undefined before the first retry. See the interference check below. */
-    let sizeWeLeft: number | undefined;
-    let sidecarWeLeft = "";
+     *  ended. `sizeWeLeft` stays NULL before the first retry — there is nothing to
+     *  compare against yet. That is deliberately distinct from `undefined`, which
+     *  means "we tried to read it and could not" and must REFUSE rather than skip. */
+    let sizeWeLeft: number | undefined | null = null;
+    let sidecarWeLeft: string | undefined = "";
 
     for (let attempt = 1; ; attempt += 1) {
       // A cancel between attempts stops here — never consumed by a retry.
@@ -2284,12 +2351,9 @@ async function downloadIntoCache(
       // to the non-retry path. It is NOT made worse here, and it is deliberately
       // left for a follow-up rather than half-solved with a lease whose stale-claim
       // and crash-cleanup behaviour (#529's objection) could destroy live partials.
-      if (sizeWeLeft !== undefined) {
-        const nowSize = await partialSize();
-        const nowSidecar = await sidecarBytes();
-        if (nowSize !== sizeWeLeft || nowSidecar !== sidecarWeLeft) {
-          throw interferenceError(sizeWeLeft, nowSize, "while this attempt was backing off");
-        }
+      if (sizeWeLeft !== null) {
+        // STRICT: we left bytes here and went quiet, so unknown state must refuse.
+        await assertStillOurs(sizeWeLeft, sidecarWeLeft, "while this attempt was backing off", true);
       }
 
       const resumeFromBytes = await resumeOffsetFromDisk();
@@ -2352,11 +2416,14 @@ async function downloadIntoCache(
           // Re-verify, immediately before the first write, that the staged file is
           // still the one this attempt reasoned about.
           async () => {
-            const nowSize = await partialSize();
-            const nowSidecar = await sidecarBytes();
-            if (nowSize !== decidedSize || nowSidecar !== decidedSidecar) {
-              throw interferenceError(decidedSize, nowSize, "while this attempt was requesting it");
-            }
+            // Change-detection only: within one attempt an unreadable file was
+            // already unreadable, and the older guards diagnose that better.
+            await assertStillOurs(
+              decidedSize,
+              decidedSidecar,
+              "while this attempt was requesting it",
+              false,
+            );
           },
         );
         await downloadCacheFs.rename(partial, target);
@@ -2404,14 +2471,22 @@ async function downloadIntoCache(
             // next call deliberately restarts from zero (#343/#467). Promising
             // "re-issuing resumes from there" in that case is a remedy the caller
             // cannot act on — the bytes are real but they will be re-fetched.
-            const hasValidator = (await sidecarBytes()).trim().length > 0;
+            // THREE states, not two: a validator was recorded, none was (the host
+            // sent none), or we could not find out. The last must not be reported
+            // as either of the first two — claiming "the host never sent one" when
+            // the sidecar merely could not be read is a definite verdict drawn from
+            // an absence of evidence.
+            const sidecar = await sidecarBytes();
+            const gb = (bytes: number): string => (bytes / 1024 ** 3).toFixed(2);
             const partialNote =
               kept === undefined
                 ? `The partial download's size could NOT be read, so how much progress survived is unknown — check the download cache before assuming either way.`
                 : kept > 0
-                  ? hasValidator
-                    ? `${(kept / 1024 ** 3).toFixed(2)} GB of partial data is preserved on disk; re-issuing the SAME download resumes from there (it is not re-fetched) provided the host still serves the same object.`
-                    : `${(kept / 1024 ** 3).toFixed(2)} GB of partial data is on disk, but the host never sent an ETag/Last-Modified validator for it, so there is no recorded proof of WHICH object those bytes belong to. A re-issue will therefore restart from the beginning rather than resume — appending to a prefix of unknown provenance is how a model gets silently corrupted (#343/#467).`
+                  ? sidecar === undefined
+                    ? `${gb(kept)} GB of partial data is on disk, but its resume-validator sidecar could not be read, so whether a re-issue can RESUME those bytes or must re-download them could not be determined here. Re-issue and watch download_status, which reports the resume decision the next attempt actually makes.`
+                    : sidecar.trim().length > 0
+                      ? `${gb(kept)} GB of partial data is preserved on disk; re-issuing the SAME download resumes from there (it is not re-fetched) provided the host still serves the same object.`
+                      : `${gb(kept)} GB of partial data is on disk, but the host never sent an ETag/Last-Modified validator for it, so there is no recorded proof of WHICH object those bytes belong to. A re-issue will therefore restart from the beginning rather than resume — appending to a prefix of unknown provenance is how a model gets silently corrupted (#343/#467).`
                   : `No partial data survived, so a re-issue restarts from the beginning.`;
             throw new ModelError(
               `Download failed after ${attempt} attempts (the last ${attempt - 1} were automatic retries with backoff): ` +

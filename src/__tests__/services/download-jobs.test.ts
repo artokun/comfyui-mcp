@@ -599,6 +599,43 @@ describe("download job registry", () => {
       }
     });
 
+    it("a LIVE foreign download is never hidden behind this session's settled row for the same URL", async () => {
+      // `trayId` is a hash of the URL, so it does NOT separate sessions: this
+      // session's finished record and ANOTHER session's still-running download of
+      // the same URL to the same destination collapse to one (id, trayId) key.
+      // Reporting the settled one would hide a running transfer behind a stale
+      // verdict — worse than the ambiguity this selector exists to surface, and it
+      // would make `tray_id` weaker than the plain by-id lookup in that state.
+      const dir = await mkdtemp(pathJoin(tmpdir(), "djobs-822-"));
+      setProgressDir(dir);
+      try {
+        const a = await startDownloadJob(URL_A, "checkpoints");
+        // Our own download is cancelled and settles…
+        cancelDownloadJob(a.job.id, a.job.trayId);
+        await a.settled;
+        expect(a.job.status).toBe("cancelled");
+
+        // …while another session is still downloading the SAME url to the SAME
+        // destination (same id, and — because trayId hashes the url — same trayId).
+        await writeForeignJobRecord(dir, {
+          id: a.job.id,
+          trayId: a.job.trayId,
+          progressId: "foreign-live-prog",
+          url: URL_A,
+          owner: `${PERSIST_OWNER}-other`,
+        });
+
+        const candidates = listDownloadJobCandidates(a.job.id);
+        expect(candidates).toHaveLength(1);
+        // The LIVE one is reported, not our cancelled one.
+        expect(candidates[0].status).toBe("downloading");
+        expect(getDownloadJob(a.job.id, a.job.trayId)?.status).toBe("downloading");
+      } finally {
+        setProgressDir("");
+        await fsRm(dir, { recursive: true, force: true });
+      }
+    });
+
     it("getDownloadJob(id, trayId) resolves the ORPHAN — the row that was unreachable", async () => {
       const dir = await mkdtemp(pathJoin(tmpdir(), "djobs-822-"));
       setProgressDir(dir);

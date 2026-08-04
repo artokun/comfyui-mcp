@@ -1015,16 +1015,33 @@ export function listDownloadJobCandidates(id: string): DownloadJob[] {
     const cur = byKey.get(keyOf(e.job));
     if (!cur || (e.job.status === "done" && cur.status !== "done")) byKey.set(keyOf(e.job), e.job);
   }
+  // `trayId` is a hash of the URL, so it does NOT separate sessions: this
+  // session's SETTLED record for a URL and ANOTHER session's still-running
+  // download of the same URL to the same destination collapse to one key. Which
+  // one is reported matters — showing the local "cancelled" row while a foreign
+  // transfer is live would hide a running download behind a stale verdict, and
+  // that is worse than the ambiguity this function exists to surface.
+  const now = Date.now();
+  const isLive = (r: PersistedDownloadJob): boolean =>
+    r.status === "downloading" && now - (r.updated ?? 0) < PERSISTED_INFLIGHT_STALE_MS;
   for (const rec of listPersistedDownloadJobs()) {
     if (rec.id !== id) continue;
     const job = jobFromPersisted(rec);
     const k = keyOf(job);
     const cur = byKey.get(k);
-    // A live in-memory copy wins over its own persisted snapshot; otherwise a
-    // validated DONE wins over a cancelled/error record for the same identity
-    // (the same integrity truth listDownloadJobs applies).
-    if (!cur) byKey.set(k, job);
-    else if (job.status === "done" && cur.status !== "done" && cur.status !== "downloading") {
+    if (!cur) {
+      byKey.set(k, job);
+      continue;
+    }
+    // Precedence, most authoritative first:
+    //  1. a validated DONE — the file landed, and no later verdict undoes that;
+    //  2. a LIVE transfer — still happening, so it is what the caller needs to know;
+    //  3. anything settled.
+    // (A live IN-MEMORY job is this process's own and already sits in `byKey`, so
+    // it is never displaced by a merely-settled persisted record.)
+    if (job.status === "done" && cur.status !== "done" && cur.status !== "downloading") {
+      byKey.set(k, job);
+    } else if (isLive(rec) && cur.status !== "done" && cur.status !== "downloading") {
       byKey.set(k, job);
     }
   }

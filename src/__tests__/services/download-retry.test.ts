@@ -865,6 +865,108 @@ describe("download retry + resume, end to end (#470)", () => {
     await expect(stat(sidecar)).rejects.toThrow();
   });
 
+  it("REFUSES a retry whose ownership it cannot establish — an unreadable staged file is not 'unchanged'", async () => {
+    // Fail-CLOSED across the retry boundary. If the stat that records what we left
+    // behind fails transiently, we do not know what is on disk — and "I could not
+    // read it" must not be treated as "it is still mine", because the very next
+    // thing a restart does is truncate it. The gate's sequence: attempt 1 stages
+    // bytes and fails, its final stat errors, another writer grows the file during
+    // the backoff, and the retry destroys their multi-gigabyte progress.
+    const url = "https://example.com/models/unreadable-ownership.safetensors";
+
+    const realStat = downloadCacheFs.stat;
+    let attemptsSeen = 0;
+    let statsSinceAttempt = 0;
+    vi.spyOn(downloadCacheFs, "stat").mockImplementation(async (...args) => {
+      const path = String(args[0]);
+      if (attemptsSeen > 0 && path.endsWith(".partial")) {
+        statsSinceAttempt += 1;
+        // The FIRST post-response read is this attempt's own pre-write check; the
+        // NEXT is the record of what we LEFT BEHIND — make exactly that one fail,
+        // with EACCES rather than ENOENT (a MISSING file is knowably 0 bytes and
+        // must NOT be treated as unknown).
+        if (statsSinceAttempt >= 2) {
+          throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+        }
+      }
+      return realStat(...(args as Parameters<typeof realStat>));
+    });
+    fetchMock.mockImplementation(async () => {
+      attemptsSeen += 1;
+      return shortBody("AAAA", 64, { etag: '"v"' });
+    });
+
+    const err = await downloadModel(url, "checkpoints", "unreadable-out.safetensors").catch(
+      (e: unknown) => e,
+    );
+    expect(String((err as Error).message)).toMatch(/size could not be read/i);
+    // It stopped rather than proceeding to truncate on an assumption.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("a cancel that lands DURING the pre-write check still leaves the resumable partial on disk", async () => {
+    // The interference check awaits, so a cancel can arrive inside it. Every path
+    // after that hook deletes or truncates the staged file, and a cancelled
+    // download is promised a resumable partial — erasing it on the way out would be
+    // exactly the data loss that promise denies.
+    const url = "https://example.com/models/cancel-in-hook.safetensors";
+    const { partial, sidecar } = cachePaths(url);
+    // A partial with NO validator: the resume declines and the restart path would
+    // TRUNCATE it — the destructive branch this guards.
+    await writeFile(partial, "PRECIOUS-BYTES");
+    const ctl = new AbortController();
+
+    fetchMock.mockImplementationOnce(async () => {
+      // Cancel while the response is being handled, i.e. around the hook.
+      setTimeout(() => ctl.abort(), 0);
+      await new Promise((r) => setTimeout(r, 20));
+      return new Response("FULL-REPLACEMENT-BODY", { status: 200, statusText: "OK" });
+    });
+    fetchMock.mockImplementation(async () => new Response("MUST-NOT-BE-FETCHED", { status: 200 }));
+
+    await expect(
+      downloadModel(
+        url,
+        "checkpoints",
+        "cancel-in-hook-out.safetensors",
+        undefined,
+        undefined,
+        undefined,
+        ctl.signal,
+      ),
+    ).rejects.toThrow();
+
+    // The bytes a cancel promises to leave behind are still there, untruncated.
+    await expect(readFile(partial, "utf-8")).resolves.toBe("PRECIOUS-BYTES");
+    await expect(stat(sidecar)).rejects.toThrow(); // and no validator was paired with them
+  });
+
+  it("does not claim 'the host never sent a validator' when the sidecar merely could not be READ", async () => {
+    // Three states, not two. Reporting an unreadable sidecar as "no validator was
+    // ever sent" is a definite verdict drawn from absence of evidence, and it tells
+    // the caller their bytes will be re-downloaded when they may well resume.
+    const url = "https://example.com/models/unreadable-sidecar.safetensors";
+    const { sidecar } = cachePaths(url);
+    fetchMock.mockImplementation(async () => shortBody("ABCD", 100, { etag: '"v"' }));
+    // Block the sidecar path so reading it fails with EISDIR, not ENOENT.
+    await mkdir(sidecar, { recursive: true });
+    await writeFile(join(sidecar, "blocker"), "x");
+
+    const err = await downloadModel(url, "checkpoints", "unreadable-sidecar-out.safetensors").catch(
+      (e: unknown) => e,
+    );
+    const message = String((err as Error).message);
+    if (/after 3 attempts/i.test(message)) {
+      expect(message).toMatch(/could not be read/);
+      expect(message).not.toMatch(/the host never sent/);
+    } else {
+      // An earlier, more precise guard (#467's stale-sidecar refusal) claimed it —
+      // which is also correct, and is exactly why the pre-write check does not
+      // fail closed on a sidecar that was already unreadable.
+      expect(message).toMatch(/sidecar|validator/i);
+    }
+  });
+
   it("a retry that lands on a POISONED partial (#473 leftover) restarts instead of resuming onto it", async () => {
     const url = "https://example.com/models/poisoned.safetensors";
     const { partial, sidecar } = cachePaths(url);
