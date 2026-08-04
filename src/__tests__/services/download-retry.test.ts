@@ -718,6 +718,46 @@ describe("download retry + resume, end to end (#470)", () => {
     await expect(readFile(sidecar, "utf-8")).resolves.toBe('"obj-v2"');
   });
 
+  it("catches another writer that acts DURING the request — between deciding how to resume and writing", async () => {
+    // The TOCTOU the between-attempts snapshot alone does NOT cover, and the one
+    // that produces a valid-LOOKING corrupt file:
+    //   1. we read the staged file (4 bytes of v1) and its v1 validator;
+    //   2. we issue a ranged request for v1's remainder;
+    //   3. WHILE that request is in flight, another writer truncates and re-stages
+    //      v2, writing 4 bytes and v2's validator;
+    //   4. we append v1's suffix onto v2's prefix — landing on exactly the
+    //      authoritative total, so size, Content-Range and total all still pass.
+    // Re-checking immediately before the write is what stops step 4.
+    const url = "https://example.com/models/toctou.safetensors";
+    const { partial, sidecar } = cachePaths(url);
+    await writeFile(partial, "V1V1");
+    await writeFile(sidecar, '"obj-v1"');
+
+    fetchMock.mockImplementationOnce(async () => {
+      // The other writer lands while our request is being served.
+      await writeFile(partial, "V2V2");
+      await writeFile(sidecar, '"obj-v2"');
+      return new Response("V1SUFFIX", {
+        status: 206,
+        statusText: "Partial Content",
+        headers: { "content-range": "bytes 4-11/12" },
+      });
+    });
+    fetchMock.mockImplementation(async () => new Response("MUST-NOT-BE-FETCHED", { status: 200 }));
+
+    const err = await downloadModel(url, "checkpoints", "toctou-out.safetensors").catch(
+      (e: unknown) => e,
+    );
+    expect(String((err as Error).message)).toMatch(
+      /another download is writing the same staged file/i,
+    );
+    // The spliced file was never written: the staged bytes are still exactly what
+    // the other writer left, with no v1 suffix appended.
+    await expect(readFile(partial, "utf-8")).resolves.toBe("V2V2");
+    // And it is not retried into the same splice on a later attempt.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("a retry that lands on a POISONED partial (#473 leftover) restarts instead of resuming onto it", async () => {
     const url = "https://example.com/models/poisoned.safetensors";
     const { partial, sidecar } = cachePaths(url);

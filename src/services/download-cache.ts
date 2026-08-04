@@ -1178,6 +1178,19 @@ async function streamUrlToFile(
    *  and the agent's natural response (re-issue) is precisely the second-writer
    *  hazard the download machinery exists to prevent. */
   deferErrorRow = false,
+  /** Last-moment re-verification, awaited IMMEDIATELY before this function first
+   *  touches the file — before the restart truncation and before the append stream
+   *  opens. Throwing from it aborts the write.
+   *
+   *  It exists to close a TOCTOU on the SHARED staged file: the resume offset and
+   *  the validator are read, then a request is issued, and only then do we write.
+   *  Another process writing the same `.partial` in that gap (it is keyed by the
+   *  download's representation, so a second process running the same download
+   *  shares it) could truncate and re-stage a different upstream object, and our
+   *  append would land a valid-LOOKING file whose prefix and suffix come from
+   *  different objects. Re-checking here shrinks that window from "the whole
+   *  request round-trip" to the few instructions before the open. */
+  beforeWrite?: () => Promise<void>,
 ): Promise<string> {
   // Fail fast if we were cancelled before any bytes moved — no request, no partial.
   if (signal?.aborted) throw new DOMException("The download was cancelled.", "AbortError");
@@ -1571,6 +1584,7 @@ async function streamUrlToFile(
         signal,
         onBytes,
         deferErrorRow,
+        beforeWrite,
       );
     }
   }
@@ -1654,6 +1668,14 @@ async function streamUrlToFile(
     }
     rangeTotal = total;
   }
+
+  // LAST-MOMENT INTERFERENCE RE-CHECK. Everything above only READ the staged file
+  // (its size, its validator) and talked to the server; from here on we MUTATE it —
+  // the restart path truncates it, the append path opens it for writing. This is
+  // therefore the last instant at which refusing costs nothing and is still
+  // correct. See the `beforeWrite` doc: it closes the gap between deciding how to
+  // resume and acting on that decision.
+  if (beforeWrite) await beforeWrite();
 
   const flags = appendMode ? "a" : "w";
 
@@ -2186,6 +2208,26 @@ async function downloadIntoCache(
       }
     };
 
+    /** The one refusal used by both interference checks (between attempts, and at
+     *  the last instant before a write), so they cannot drift apart in wording or
+     *  in what they promise. It NEVER deletes or truncates anything: the bytes it
+     *  is refusing to touch belong to the other download. */
+    const interferenceError = (
+      expected: number | undefined,
+      actual: number | undefined,
+      when: string,
+    ): ModelError =>
+      new ModelError(
+        `Download stopped: another download is writing the same staged file (` +
+          (actual !== expected
+            ? `it went from ${expected} to ${actual === undefined ? "an unreadable size" : `${actual}`} bytes`
+            : `its resume validator changed, so a DIFFERENT upstream object has been staged there`) +
+          ` ${when}). Writing now would interleave two transfers into one file. Nothing was deleted — ` +
+          `the other download's progress is intact. Wait for it to finish (check download_status), then ` +
+          `re-issue this download; it will reuse the completed file rather than re-fetching it.`,
+        { url: logUrl, retryable: false },
+      );
+
     /** What WE left the partial (and its validator) at when our previous attempt
      *  ended. Undefined before the first retry. See the interference check below. */
     let sizeWeLeft: number | undefined;
@@ -2214,37 +2256,39 @@ async function downloadIntoCache(
       // alone. (We deliberately do NOT delete or truncate anything here — those
       // bytes are the other download's.)
       //
-      // WHAT THIS DOES AND DOES NOT BUY. It is a detector, not a lock, and the
-      // scope is deliberate — #529 rejected a cross-process lease because its
-      // stale-claim and crash-cleanup failure modes are worse than the rare
-      // duplicate transfer it would prevent. What matters is that the SPLICE cases
-      // are covered: the dangerous one is another writer re-staging a DIFFERENT
-      // upstream object, and it cannot do that without writing that object's
-      // validator to the sidecar — which this snapshot catches even when the byte
-      // count happens to match. The residual is two writers appending
-      // SIMULTANEOUSLY, which is not silent: both stream the same remaining range
-      // into one append-mode file, so it overshoots the authoritative total and the
-      // #467 oversize guard removes it and fails loudly rather than finalizing it.
+      // WHAT THIS DOES AND DOES NOT BUY — stated precisely, because it is easy to
+      // over-claim here. It is a DETECTOR, not a lock. It covers the window in
+      // which this loop is idle (the backoff), and a second check immediately
+      // before any write (`beforeWrite`, passed below) covers the window between
+      // reading the file's state and acting on it. Together they close the
+      // interference this retry loop ADDS over a single-shot download.
+      //
+      // What remains OPEN is pre-existing and not closable by observation: two
+      // processes streaming into this shared file at genuinely overlapping times.
+      // A snapshot cannot exclude a writer that acts between our last check and our
+      // own write, and no ordering of checks can. Closing it needs real write
+      // exclusion on the staged file (an owned claim held for the download's
+      // lifetime), which is a larger change than this cluster and applies equally
+      // to the non-retry path. It is NOT made worse here, and it is deliberately
+      // left for a follow-up rather than half-solved with a lease whose stale-claim
+      // and crash-cleanup behaviour (#529's objection) could destroy live partials.
       if (sizeWeLeft !== undefined) {
         const nowSize = await partialSize();
         const nowSidecar = await sidecarBytes();
         if (nowSize !== sizeWeLeft || nowSidecar !== sidecarWeLeft) {
-          const what =
-            nowSize !== sizeWeLeft
-              ? `it went from ${sizeWeLeft} to ${nowSize === undefined ? "an unreadable size" : `${nowSize}`} bytes`
-              : `its resume validator changed, so a DIFFERENT upstream object has been staged there`;
-          throw new ModelError(
-            `Download stopped before retrying: another download is writing the same staged file ` +
-              `(${what} while this attempt was backing off). ` +
-              `Appending now would interleave two transfers into one file. Nothing was deleted — the ` +
-              `other download's progress is intact. Wait for it to finish (check download_status), then ` +
-              `re-issue this download; it will reuse the completed file rather than re-fetching it.`,
-            { url: logUrl, retryable: false },
-          );
+          throw interferenceError(sizeWeLeft, nowSize, "while this attempt was backing off");
         }
       }
 
       const resumeFromBytes = await resumeOffsetFromDisk();
+
+      // The state THIS attempt based its resume decision on. Re-verified at the
+      // last instant before any write (see `beforeWrite`), so the decision and the
+      // action are checked against the same file rather than merely assumed to
+      // describe it. Taken AFTER resumeOffsetFromDisk because that call may itself
+      // discard a poisoned partial.
+      const decidedSize = await partialSize();
+      const decidedSidecar = await sidecarBytes();
 
       // Per-attempt abort, fed by TWO independent sources: the caller's cancel
       // (forwarded) and our stall watchdog. They are kept distinguishable — the
@@ -2293,6 +2337,15 @@ async function downloadIntoCache(
           // WE decide when this download is over, so no attempt publishes a
           // terminal "error" row on our behalf (#470 / #547).
           true,
+          // Re-verify, immediately before the first write, that the staged file is
+          // still the one this attempt reasoned about.
+          async () => {
+            const nowSize = await partialSize();
+            const nowSidecar = await sidecarBytes();
+            if (nowSize !== decidedSize || nowSidecar !== decidedSidecar) {
+              throw interferenceError(decidedSize, nowSize, "while this attempt was requesting it");
+            }
+          },
         );
         await downloadCacheFs.rename(partial, target);
         await touch(target);
