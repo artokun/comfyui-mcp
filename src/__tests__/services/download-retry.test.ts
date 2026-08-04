@@ -52,6 +52,7 @@ vi.mock("../../services/storage/index.js", async () => {
 });
 
 import { config } from "../../config.js";
+import { downloadCacheFs } from "../../services/download-cache.js";
 import { downloadModel } from "../../services/model-resolver.js";
 import {
   abortableDelay,
@@ -653,6 +654,68 @@ describe("download retry + resume, end to end (#470)", () => {
     // The remedy names what the caller can do from here.
     expect(message).toMatch(/download_status/);
     expect(message).toMatch(/re-issue/i);
+  });
+
+  it("emits exactly ONE terminal error row even when the cache path bails out to the direct-download fallback", async () => {
+    // downloadWithCache falls back to a direct stream when the cache layer throws
+    // something that is not a ModelError (an unusable cache dir, say). That
+    // fallback stream is a separate call into streamUrlToFile, so unless it also
+    // defers, the failure is announced twice — once by the fallback and once by
+    // downloadModel — for a single download.
+    const url = "https://example.com/models/cache-unavailable.safetensors";
+    // Break the cache layer with a NON-ModelError so the fallback path is taken.
+    vi.spyOn(downloadCacheFs, "mkdir").mockRejectedValue(new Error("cache dir unusable"));
+    // The body must fail DURING streaming, not at the status line: a non-2xx throws
+    // before any row is emitted, so it would not exercise the emit at all.
+    fetchMock.mockImplementation(async () => shortBody("AB", 100));
+
+    await expect(
+      downloadModel(url, "checkpoints", "cache-unavailable-out.safetensors"),
+    ).rejects.toThrow();
+
+    expect(progressRows.filter((r) => r.status === "error")).toHaveLength(1);
+  });
+
+  it("catches another writer that re-staged a DIFFERENT object at the SAME byte count", async () => {
+    // The splice the size check alone would miss, and the one that actually
+    // corrupts: another writer truncates the shared staged file and re-stages a
+    // DIFFERENT upstream object to exactly the same length. Our resume would then
+    // append v1's suffix onto v2's prefix and every downstream check — size,
+    // Content-Range, total — would still pass.
+    //
+    // It cannot do that without writing the new object's validator to the sidecar,
+    // which is why the snapshot covers the sidecar and not just the size.
+    const url = "https://example.com/models/same-size-swap.safetensors";
+    const { partial, sidecar } = cachePaths(url);
+    setDownloadRetryPolicyForTests({ backoffBaseMs: 2_000, backoffCapMs: 2_000 });
+
+    fetchMock.mockImplementationOnce(async () => {
+      void (async () => {
+        for (let i = 0; i < 400; i += 1) {
+          const size = await stat(partial).then((s) => s.size).catch(() => 0);
+          if (size >= 4) break;
+          await new Promise((r) => setTimeout(r, 5));
+        }
+        await new Promise((r) => setTimeout(r, 250));
+        // SAME length, DIFFERENT object — byte count is unchanged.
+        await writeFile(partial, "ZZZZ");
+        await writeFile(sidecar, '"obj-v2"');
+      })();
+      return shortBody("AAAA", 64, { etag: '"obj-v1"' });
+    });
+    fetchMock.mockImplementation(async () => new Response("MUST-NOT-BE-FETCHED", { status: 200 }));
+
+    const err = await downloadModel(url, "checkpoints", "same-size-swap-out.safetensors").catch(
+      (e: unknown) => e,
+    );
+    const message = String((err as Error).message);
+    expect(message).toMatch(/another download is writing the same staged file/i);
+    // It names WHY — the validator, not the size, is what gave it away.
+    expect(message).toMatch(/resume validator changed/i);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // Nothing of the other writer's was destroyed.
+    await expect(readFile(partial, "utf-8")).resolves.toBe("ZZZZ");
+    await expect(readFile(sidecar, "utf-8")).resolves.toBe('"obj-v2"');
   });
 
   it("a retry that lands on a POISONED partial (#473 leftover) restarts instead of resuming onto it", async () => {

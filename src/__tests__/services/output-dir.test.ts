@@ -445,6 +445,27 @@ describe("models dir + extra-config argv parsing (#345/#346/#369)", () => {
         }
       });
 
+      it("keeps the pre-existing relDir '.' behaviour unchanged (deliberately NOT tightened here)", async () => {
+        // `python main.py` with no reported cwd gives relDir ".", which corroborates
+        // nothing beyond "the configured base is a ComfyUI install" — a reviewer
+        // fairly calls that weak evidence for the #369 hazard. It is nonetheless
+        // UNCHANGED by #813, and deliberately so: this is the single most common
+        // local launch, and refusing it would route those users through the
+        // Manager (often not installed) for every download. Tightening it is a
+        // separate decision about a pre-existing behaviour, not part of fixing the
+        // portable-base anchoring. This test exists so the choice is explicit and
+        // any future change to it is a visible one.
+        const base = resolve("/home/me/ComfyUI");
+        (config as { comfyuiPath?: string }).comfyuiPath = base;
+        observedLiveRoot = undefined;
+        hasEntrypointFor = (dir) => resolve(dir) === base;
+        getSystemStats.mockResolvedValue({ system: { argv: ["main.py", "--listen"] } });
+
+        const { modelsDir, source } = await resolveModelsDirWithBases();
+        expect(modelsDir).toBe(join(base, "models"));
+        expect(source).toBe("base-anchored");
+      });
+
       it("corroborates a MULTI-SEGMENT relative script against a base ending in those segments", async () => {
         // `python sub/ComfyUI/main.py` with COMFYUI_PATH=<...>/sub/ComfyUI.
         const base = resolve("/srv/stack/sub/ComfyUI");

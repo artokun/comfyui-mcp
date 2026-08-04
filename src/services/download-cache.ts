@@ -2172,9 +2172,24 @@ async function downloadIntoCache(
       }
     };
 
-    /** What WE left the partial at when our previous attempt ended. Undefined
-     *  before the first retry. See the interference check below. */
+    /** The `.etag` sidecar's exact contents, or "" when it is absent/unreadable.
+     *  Read alongside the size because SIZE ALONE cannot catch the dangerous
+     *  interference: another writer that truncates and re-stages a DIFFERENT
+     *  upstream object to the same length would look unchanged. It cannot do that
+     *  without writing that object's validator here, so the sidecar is the part of
+     *  the snapshot that actually detects a swapped object. */
+    const sidecarBytes = async (): Promise<string> => {
+      try {
+        return await readFile(`${partial}.etag`, "utf-8");
+      } catch {
+        return "";
+      }
+    };
+
+    /** What WE left the partial (and its validator) at when our previous attempt
+     *  ended. Undefined before the first retry. See the interference check below. */
     let sizeWeLeft: number | undefined;
+    let sidecarWeLeft = "";
 
     for (let attempt = 1; ; attempt += 1) {
       // A cancel between attempts stops here — never consumed by a retry.
@@ -2192,17 +2207,35 @@ async function downloadIntoCache(
       // backoff and then come BACK and append. If another writer moved the file
       // while we waited, appending would interleave two streams into one file.
       //
-      // Nothing WE do touches the partial between our attempts, so ANY change to
-      // its size is proof that someone else is writing it. Detect that and stop
-      // rather than compete: the other writer is producing a valid file, and the
-      // honest, non-destructive move is to leave it alone. (We deliberately do NOT
-      // delete or truncate anything here — those bytes are the other download's.)
+      // Nothing WE do touches the partial (or its `.etag`) between our own
+      // attempts, so ANY change to either is proof that someone else is writing
+      // it. Detect that and stop rather than compete: the other writer is
+      // producing a valid file, and the honest, non-destructive move is to leave it
+      // alone. (We deliberately do NOT delete or truncate anything here — those
+      // bytes are the other download's.)
+      //
+      // WHAT THIS DOES AND DOES NOT BUY. It is a detector, not a lock, and the
+      // scope is deliberate — #529 rejected a cross-process lease because its
+      // stale-claim and crash-cleanup failure modes are worse than the rare
+      // duplicate transfer it would prevent. What matters is that the SPLICE cases
+      // are covered: the dangerous one is another writer re-staging a DIFFERENT
+      // upstream object, and it cannot do that without writing that object's
+      // validator to the sidecar — which this snapshot catches even when the byte
+      // count happens to match. The residual is two writers appending
+      // SIMULTANEOUSLY, which is not silent: both stream the same remaining range
+      // into one append-mode file, so it overshoots the authoritative total and the
+      // #467 oversize guard removes it and fails loudly rather than finalizing it.
       if (sizeWeLeft !== undefined) {
         const nowSize = await partialSize();
-        if (nowSize !== sizeWeLeft) {
+        const nowSidecar = await sidecarBytes();
+        if (nowSize !== sizeWeLeft || nowSidecar !== sidecarWeLeft) {
+          const what =
+            nowSize !== sizeWeLeft
+              ? `it went from ${sizeWeLeft} to ${nowSize === undefined ? "an unreadable size" : `${nowSize}`} bytes`
+              : `its resume validator changed, so a DIFFERENT upstream object has been staged there`;
           throw new ModelError(
             `Download stopped before retrying: another download is writing the same staged file ` +
-              `(it went from ${sizeWeLeft} to ${nowSize === undefined ? "an unreadable size" : `${nowSize}`} bytes while this attempt was backing off). ` +
+              `(${what} while this attempt was backing off). ` +
               `Appending now would interleave two transfers into one file. Nothing was deleted — the ` +
               `other download's progress is intact. Wait for it to finish (check download_status), then ` +
               `re-issue this download; it will reuse the completed file rather than re-fetching it.`,
@@ -2332,6 +2365,7 @@ async function downloadIntoCache(
         // top of the loop). Taken AFTER the attempt has fully unwound, so it
         // reflects the final on-disk state this attempt produced.
         sizeWeLeft = await partialSize();
+        sidecarWeLeft = await sidecarBytes();
         // Backoff before re-requesting. #470 observed a 403 from an INSTANT
         // re-request after an aborted connection — the wait is part of the fix,
         // not politeness. It wakes early if the caller cancels.
@@ -2597,6 +2631,11 @@ export async function downloadUrlToFile(
   progress?: ProgressMeta,
   modelExt = extname(targetPath),
   signal?: AbortSignal,
+  /** See streamUrlToFile: when true the caller owns the terminal "error" row. The
+   *  cache-unavailable fallback in downloadWithCache passes true because
+   *  downloadModel already publishes exactly one row when the whole call throws;
+   *  emitting here as well would write that outcome twice (#470/#547). */
+  deferErrorRow = false,
 ): Promise<void> {
   await streamUrlToFile(
     url,
@@ -2610,6 +2649,8 @@ export async function downloadUrlToFile(
     undefined,
     modelExt,
     signal,
+    undefined,
+    deferErrorRow,
   );
 }
 
@@ -2712,6 +2753,10 @@ export async function downloadWithCache(
         options.progress,
         modelExt,
         options.signal,
+        // downloadModel emits the single terminal "error" row when this whole call
+        // throws; this fallback stream must not emit a second one for the same
+        // failure (#470/#547).
+        true,
       );
       // PRE-RENAME CANCEL GUARD (#515), mirroring the cache-path materialize guard: a
       // cancel that arrived during the post-stream validation lets the stream return
