@@ -758,6 +758,113 @@ describe("download retry + resume, end to end (#470)", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("a CLOUD retry never truncates a staged file another writer has grown — the most destructive path checks first", async () => {
+    // The cloud (S3/Azure) path cannot range-resume: it TRUNCATES the staged file
+    // and re-downloads in full. Under automatic retry that turns a later attempt
+    // into a destructive writer — before #470 a failed cloud attempt simply ended
+    // and could never come back to clobber anyone. If another process staged real
+    // progress while we were backing off, truncating destroys work that is not ours
+    // and that (unlike an HTTP resume) nothing can cheaply re-fetch.
+    const url = "s3://bucket/models/contended-cloud.safetensors";
+    // A cloud cache path folds in the storage principal, so take it from what the
+    // downloader is actually handed rather than recomputing it here.
+    let stagedPath = "";
+    setDownloadRetryPolicyForTests({ maxAttempts: 3, backoffBaseMs: 1_500, backoffCapMs: 1_500 });
+
+    const cloudDownload = vi.mocked(
+      (await import("../../services/storage/index.js")).downloadCloudUrlToFile,
+    );
+    let call = 0;
+    cloudDownload.mockImplementation(async (_url, targetPath) => {
+      call += 1;
+      stagedPath = targetPath as string;
+      if (call === 1) {
+        await writeFile(stagedPath, "OURS");
+        // The other writer stages substantial progress during our backoff.
+        void (async () => {
+          await new Promise((r) => setTimeout(r, 250));
+          await writeFile(stagedPath, "SOMEONE-ELSES-MANY-GIGABYTES");
+        })();
+        throw Object.assign(new Error("connection reset by peer"), { code: "ECONNRESET" });
+      }
+      // A later attempt must never get here with the other writer's bytes staged.
+      await writeFile(stagedPath, "CLOBBERED");
+      throw new Error("second cloud attempt");
+    });
+
+    const err = await downloadModel(url, "checkpoints", "contended-cloud-out.safetensors").catch(
+      (e: unknown) => e,
+    );
+    expect(String((err as Error).message)).toMatch(
+      /another download is writing the same staged file/i,
+    );
+    // THE assertion: the other writer's bytes are untouched. A truncate here would
+    // have been silent, unrecoverable, multi-gigabyte data loss.
+    await expect(readFile(stagedPath, "utf-8")).resolves.toBe("SOMEONE-ELSES-MANY-GIGABYTES");
+  }, 20_000);
+
+  it("an integrity REFUSAL never deletes a partial another writer re-staged — refusing our response is not licence to clean up theirs", async () => {
+    // The refusal paths (#467) remove the staged file and its sidecar, which is
+    // right when the file is OURS. If another writer re-staged it while our request
+    // was in flight it is not — and "we got a bad response" must not become "we
+    // deleted your multi-gigabyte partial". The interference check therefore sits
+    // BEFORE those refusals, not after them.
+    const url = "https://example.com/models/refusal-vs-other-writer.safetensors";
+    const { partial, sidecar } = cachePaths(url);
+    await writeFile(partial, "OURS");
+    await writeFile(sidecar, '"obj-v1"');
+
+    fetchMock.mockImplementationOnce(async () => {
+      // The other writer re-stages while we wait for the response…
+      await writeFile(partial, "SOMEONE-ELSES-CONTENT");
+      await writeFile(sidecar, '"obj-v2"');
+      // …and the response we get is one the integrity guards would REFUSE and then
+      // clean up after (a 206 whose Content-Range starts at the wrong offset).
+      return new Response("XXXX", {
+        status: 206,
+        statusText: "Partial Content",
+        headers: { "content-range": "bytes 999-1002/1003" },
+      });
+    });
+    fetchMock.mockImplementation(async () => new Response("MUST-NOT-BE-FETCHED", { status: 200 }));
+
+    const err = await downloadModel(url, "checkpoints", "refusal-out.safetensors").catch(
+      (e: unknown) => e,
+    );
+    expect(String((err as Error).message)).toMatch(
+      /another download is writing the same staged file/i,
+    );
+    // Neither the partial nor the sidecar was cleaned up on the other writer's behalf.
+    await expect(readFile(partial, "utf-8")).resolves.toBe("SOMEONE-ELSES-CONTENT");
+    await expect(readFile(sidecar, "utf-8")).resolves.toBe('"obj-v2"');
+  });
+
+  it("does NOT promise a resume for bytes with no recorded identity — they exist, but a re-issue re-fetches them", async () => {
+    // A partial with no validator sidecar is deliberately RESTARTED, not resumed
+    // (#343/#467): there is no recorded proof of which object those bytes belong
+    // to. Telling the caller "re-issuing resumes from there" would be a remedy they
+    // cannot act on — the bytes are real, but they will be downloaded again.
+    const url = "https://example.com/models/no-validator-giveup.safetensors";
+    // Short bodies with NO validator header at all, so no sidecar is ever written.
+    fetchMock.mockImplementation(async () => shortBody("ABCD", 100));
+
+    const err = await downloadModel(url, "checkpoints", "no-validator-giveup-out.safetensors").catch(
+      (e: unknown) => e,
+    );
+    const message = String((err as Error).message);
+    expect(message).toMatch(/after 3 attempts/i);
+    // It states the bytes exist…
+    expect(message).toMatch(/of partial data is on disk/);
+    // …and is honest that they will NOT be resumed, and why.
+    expect(message).toMatch(/restart from the beginning rather than resume/);
+    expect(message).toMatch(/no recorded proof of WHICH object/);
+    expect(message).not.toMatch(/resumes from there/);
+    // The bytes really are there, and really have no validator — checked on disk.
+    const { partial, sidecar } = cachePaths(url);
+    await expect(stat(partial).then((s) => s.size)).resolves.toBeGreaterThan(0);
+    await expect(stat(sidecar)).rejects.toThrow();
+  });
+
   it("a retry that lands on a POISONED partial (#473 leftover) restarts instead of resuming onto it", async () => {
     const url = "https://example.com/models/poisoned.safetensors";
     const { partial, sidecar } = cachePaths(url);

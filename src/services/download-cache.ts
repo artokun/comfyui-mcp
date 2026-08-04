@@ -1195,6 +1195,13 @@ async function streamUrlToFile(
   // Fail fast if we were cancelled before any bytes moved — no request, no partial.
   if (signal?.aborted) throw new DOMException("The download was cancelled.", "AbortError");
   if (supportsCloudDownload(url)) {
+    // INTERFERENCE RE-CHECK FIRST (see `beforeWrite`). This branch is the most
+    // destructive one in the function: a cloud transfer cannot range-resume, so it
+    // TRUNCATES the staged file and re-downloads in full. Under the retry loop that
+    // makes a later attempt a destructive writer — if another process staged real
+    // progress into this shared file while we were backing off, truncating would
+    // throw away multi-gigabyte work that is not ours. Refuse before touching it.
+    if (beforeWrite) await beforeWrite();
     // Cloud downloaders (S3/Azure) don't range-resume — they overwrite the target.
     // If a partial exists it's being discarded; surface that (#467) instead of a
     // silent restart. Truncate it OURSELVES first and CONFIRM (throw on failure)
@@ -1589,6 +1596,19 @@ async function streamUrlToFile(
     }
   }
 
+  // LAST-MOMENT INTERFERENCE RE-CHECK (see `beforeWrite`). Placed HERE — before the
+  // integrity refusals below — because those refusals DELETE the staged file and
+  // its sidecar. "Refusing our own bad response" must not become "deleting someone
+  // else's good partial": if another writer re-staged this file while our request
+  // was in flight, that file is no longer ours to clean up. Everything above this
+  // line only READ the file or talked to the server; everything below MUTATES it,
+  // so this is the true first-touch boundary.
+  //
+  // The 206-refusal path above returns by RECURSING with a clean restart and does
+  // not touch the file on its way there, so the recursive call runs this check
+  // itself — the boundary holds on that path too.
+  if (beforeWrite) await beforeWrite();
+
   // A 206 to a request we did NOT range (a FRESH download, or a no-validator
   // decline — effectiveResume === 0, no Range sent) is UNSOLICITED and unsafe: its
   // body is only a partial slice, but the "w"/Content-Length path below would
@@ -1668,14 +1688,6 @@ async function streamUrlToFile(
     }
     rangeTotal = total;
   }
-
-  // LAST-MOMENT INTERFERENCE RE-CHECK. Everything above only READ the staged file
-  // (its size, its validator) and talked to the server; from here on we MUTATE it —
-  // the restart path truncates it, the append path opens it for writing. This is
-  // therefore the last instant at which refusing costs nothing and is still
-  // correct. See the `beforeWrite` doc: it closes the gap between deciding how to
-  // resume and acting on that decision.
-  if (beforeWrite) await beforeWrite();
 
   const flags = appendMode ? "a" : "w";
 
@@ -2386,11 +2398,20 @@ async function downloadIntoCache(
             // knowable "there is nothing to resume" is never dressed up as a
             // mystery, and a genuine mystery is never asserted as a fact.
             const kept = await partialSize();
+            // Whether those bytes are actually RESUMABLE, which is not the same
+            // question as whether they exist. A resume requires the write-time
+            // validator; without one the prefix has no recorded identity and the
+            // next call deliberately restarts from zero (#343/#467). Promising
+            // "re-issuing resumes from there" in that case is a remedy the caller
+            // cannot act on — the bytes are real but they will be re-fetched.
+            const hasValidator = (await sidecarBytes()).trim().length > 0;
             const partialNote =
               kept === undefined
                 ? `The partial download's size could NOT be read, so how much progress survived is unknown — check the download cache before assuming either way.`
                 : kept > 0
-                  ? `${(kept / 1024 ** 3).toFixed(2)} GB of partial data is preserved on disk; re-issuing the SAME download resumes from there (it is not re-fetched) provided the host still serves the same object.`
+                  ? hasValidator
+                    ? `${(kept / 1024 ** 3).toFixed(2)} GB of partial data is preserved on disk; re-issuing the SAME download resumes from there (it is not re-fetched) provided the host still serves the same object.`
+                    : `${(kept / 1024 ** 3).toFixed(2)} GB of partial data is on disk, but the host never sent an ETag/Last-Modified validator for it, so there is no recorded proof of WHICH object those bytes belong to. A re-issue will therefore restart from the beginning rather than resume — appending to a prefix of unknown provenance is how a model gets silently corrupted (#343/#467).`
                   : `No partial data survived, so a re-issue restarts from the beginning.`;
             throw new ModelError(
               `Download failed after ${attempt} attempts (the last ${attempt - 1} were automatic retries with backoff): ` +
