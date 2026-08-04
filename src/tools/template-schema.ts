@@ -375,7 +375,12 @@ export function resolveTemplateFromIndex(
 /** Fetch an official workflow template's graph from the live ComfyUI. */
 async function loadServerTemplate(
   name: string,
-): Promise<{ graph: unknown; source: string } | { error: string; available: string[] }> {
+): Promise<
+  | { graph: unknown; source: string }
+  // #809: `available` is a bounded PREVIEW, so the shape carries the true total and an
+  // explicit "this was cut" line — a caller must never read the preview as the index.
+  | { error: string; available: string[]; available_count?: number; available_truncated?: string }
+> {
   // Use the SAME canonical base URL + auth headers as the connected ComfyUI
   // client (getObjectInfo/getClient). A bare protocol://host:port fetch drops
   // the reverse-proxy base path and any gateway auth headers, so a proxied or
@@ -410,6 +415,15 @@ async function loadServerTemplate(
     return {
       error: `No custom-node-contributed workflow template named "${name}" (core templates from the comfyui-workflow-templates package are not in this /api/workflow_templates index — check the ComfyUI frontend's Templates browser for those).`,
       available: near.length ? near : resolved.all.slice(0, 20),
+      // #809: `available` is a PREVIEW, and a caller who reads it as the full index
+      // concludes their template does not exist. State the real total and the tool that
+      // lists all of them.
+      available_count: resolved.all.length,
+      ...((near.length ? near.length : Math.min(resolved.all.length, 20)) < resolved.all.length
+        ? {
+            available_truncated: `Showing ${near.length ? near.length : Math.min(resolved.all.length, 20)} of ${resolved.all.length} templates (fixed preview cap — no parameter raises it); list_workflow_templates returns every one.`,
+          }
+        : {}),
     };
   }
   const { module, name: tmpl } = resolved.match;
@@ -519,7 +533,15 @@ export function registerTemplateSchemaTools(server: McpServer): void {
                   slots,
                   other_slot_count: other_slots.length,
                   other_slots,
+                  // #809: a warnings array silently clipped at 20 reads as "these are
+                  // all the warnings". Report the true count alongside the preview.
+                  warning_count: normalized.warnings.length,
                   warnings: normalized.warnings.slice(0, 20),
+                  ...(normalized.warnings.length > 20
+                    ? {
+                        warnings_truncated: `Showing 20 of ${normalized.warnings.length} warnings (fixed preview cap — no parameter raises it); fix these and re-run to surface the rest.`,
+                      }
+                    : {}),
                 },
                 null,
                 2,

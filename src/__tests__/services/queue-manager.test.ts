@@ -85,7 +85,13 @@ describe("getJobStatus history enrichment", () => {
         },
       },
     });
-    expect(status.error?.traceback).toHaveLength(TRACEBACK_MAX_CHARS);
+    // #809: the cut is now MARKED inline — a traceback that simply stopped at 2000 chars
+    // was indistinguishable, to a reader, from one that ended. The retained payload is
+    // still exactly TRACEBACK_MAX_CHARS; the marker rides after it.
+    const tb = status.error?.traceback ?? "";
+    expect(tb.slice(0, TRACEBACK_MAX_CHARS)).toHaveLength(TRACEBACK_MAX_CHARS);
+    expect(tb.slice(TRACEBACK_MAX_CHARS)).toMatch(/more char\(s\) cut at the fixed 2000-char/);
+    expect(tb.slice(TRACEBACK_MAX_CHARS)).toContain("get_logs");
   });
 
   it("adds optional timing stats for successful completed prompts", async () => {

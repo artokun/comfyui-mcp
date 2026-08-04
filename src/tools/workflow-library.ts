@@ -13,7 +13,12 @@ import {
   collectNodeTypes,
 } from "../services/workflow-converter.js";
 import { sliceWorkflow } from "../services/workflow-slicer.js";
-import { queryApiGraph } from "../services/graph-query.js";
+import {
+  queryApiGraph,
+  LIMIT_CEILING,
+  MAX_CHARS_CEILING,
+  MAX_CHARS_FLOOR,
+} from "../services/graph-query.js";
 import { detectSections } from "../services/workflow-sections.js";
 import {
   generateOverview,
@@ -253,7 +258,9 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
       "detail), `upstream_of`/`downstream_of` + `depth` (dependency traversal: upstream = what FEEDS " +
       "that node, downstream = what CONSUMES it; seed included at depth 0), `fields` ('compact' one " +
       "line per node [default], 'ids', or 'detail' JSON rows with widgets + wiring), `group_by:'type'` " +
-      "(counts only), `limit` (default 40). Output is TOKEN-BOUNDED with an explicit truncation marker. Read-only.",
+      `(counts only), \`limit\` (default 40, max ${LIMIT_CEILING}), \`max_chars\` (default 12000, max ${MAX_CHARS_CEILING}). ` +
+      "Output is TOKEN-BOUNDED and, when it truncates, the tail names WHICH of the two caps fired and the exact " +
+      "parameter to raise — read it and retry rather than concluding the graph can't be read. Read-only.",
     {
       path: z.string().optional().describe("Absolute server-side path to a workflow .json on disk."),
       filename: z
@@ -296,14 +303,24 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
         .optional()
         .describe("Projection: compact one-liners (default), bare ids, or detail JSON rows."),
       group_by: z.enum(["type"]).optional().describe("Aggregate: counts per class_type instead of listing."),
-      limit: z.number().int().min(1).max(200).optional().describe("Max nodes listed (default 40)."),
+      // #809: the ceilings come from the engine's own clamps, so a hint that quotes a
+      // ceiling can never disagree with what the schema accepts or the runtime enforces.
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(LIMIT_CEILING)
+        .optional()
+        .describe(`Max nodes listed (default 40, max ${LIMIT_CEILING}).`),
       max_chars: z
         .number()
         .int()
-        .min(500)
-        .max(60000)
+        .min(MAX_CHARS_FLOOR)
+        .max(MAX_CHARS_CEILING)
         .optional()
-        .describe("Output character bound (default 12000). Raise only for deliberate full reads."),
+        .describe(
+          `Output character bound (default 12000, max ${MAX_CHARS_CEILING}). Raise this — not \`limit\` — when the truncation tail says the char budget cut the result.`,
+        ),
     },
     async ({ path, filename, graph, ...query }) => {
       try {

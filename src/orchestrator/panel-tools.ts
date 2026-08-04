@@ -1183,6 +1183,124 @@ function toolResultText(res: ToolResult): string {
   return res?.content?.find((c) => c.type === "text")?.text ?? "workflow_open failed";
 }
 
+// ---- #809: turn the panel's silent `truncated: true` booleans into a remedy --------
+//
+// A bare boolean is the WORST truncation signal there is: it is a field, not prose, so
+// a model reading the result gets no instruction from it at all. The observed failure
+// (a Kimi session on a 690-node graph) is an agent concluding the TOOL cannot do the
+// thing and escalating to the human, when a different argument would have answered it.
+//
+// These riders are applied ORCHESTRATOR-side on purpose. The panel ships as a separate
+// package on its own release cadence, so attaching the remedy here means every user
+// gets it the moment they update the MCP server, regardless of their panel build. When
+// a newer panel supplies its own hint under the same key, the rider defers to it.
+// The REAL panel-side clamp for graph_find_nodes (`Math.min(Math.max(limit ?? 40, 1), 200)`
+// in comfyui-mcp-panel.js). Kept as named constants so the zod `.max()`, the parameter
+// description and the truncation remedy below cannot drift apart — the drift is exactly
+// what made `panel_find_nodes` claim "no truncation" while capping at 40 (#809).
+const FIND_NODES_DEFAULT_LIMIT = 40;
+const FIND_NODES_LIMIT_CEILING = 200;
+
+// #809: panel_graph_outline's budget. Deliberately the SAME name and the SAME
+// 500–60000 clamp as panel_query_graph's max_chars — one budget concept, one spelling,
+// so an agent that has learned the lever on one graph read already knows it on the
+// other. The outline degrades by RESOLUTION, never by coverage: half a map is not a
+// smaller map, and an agent handed the first 200 of 690 nodes cannot tell what it is
+// missing. See the panel-side ladder in comfyui-mcp-panel.js (graph_outline).
+const OUTLINE_MAX_CHARS_FLOOR = 500;
+const OUTLINE_MAX_CHARS_DEFAULT = 24000;
+const OUTLINE_MAX_CHARS_CEILING = 60000;
+
+interface TruncationRule {
+  /** Attach only when the panel reply carries this field as boolean `true`. */
+  flag: string;
+  /** Field to attach the remedy under. Must not collide with a panel-supplied field. */
+  key: string;
+  /** Build the remedy from the reply. Keep it one sentence — it is spent from context. */
+  text: (payload: Record<string, unknown>) => string;
+}
+
+/** Count of an array-valued reply field, or null when it isn't an array. */
+function replyCount(payload: Record<string, unknown>, key: string): number | null {
+  const v = payload[key];
+  return Array.isArray(v) ? v.length : null;
+}
+
+/** "N of M" when both are known, else "N" — never invent a total we weren't given. */
+function shownOf(shown: number | null, total: unknown): string {
+  const t = typeof total === "number" && Number.isFinite(total) ? total : null;
+  if (shown == null) return t == null ? "some" : `some of ${t}`;
+  return t == null ? `${shown}` : `${shown} of ${t}`;
+}
+
+function withTruncationHints(res: ToolResult, rules: TruncationRule[]): ToolResult {
+  const payload = parseToolResultJson(res);
+  if (!payload) return res;
+  let changed = false;
+  for (const rule of rules) {
+    if (payload[rule.flag] !== true) continue;
+    // Never clobber a hint the panel itself supplied — a newer panel knows its own caps
+    // better than this rider does.
+    if (payload[rule.key] != null) continue;
+    payload[rule.key] = rule.text(payload);
+    changed = true;
+  }
+  // Synthetic flags (markBudgetIgnored) are plumbing, not part of the tool's result —
+  // strip them so a caller never sees a field the panel did not send.
+  if (payload.__budget_ignored !== undefined) {
+    delete payload.__budget_ignored;
+    changed = true;
+  }
+  if (!changed) return res;
+  // Rewrite ONLY the JSON text block, so an image-carrying reply keeps its other parts.
+  const idx = res.content.findIndex((c) => c.type === "text");
+  if (idx < 0) return res;
+  return {
+    ...res,
+    content: res.content.map((c, i) =>
+      i === idx && c.type === "text" ? { ...c, text: JSON.stringify(payload, null, 2) } : c,
+    ),
+  };
+}
+
+/**
+ * #809 (codex gate): set a synthetic `__budget_ignored` flag when the caller asked for a
+ * `max_chars` on the outline and the reply shows no sign of it. A panel that supports the
+ * budget echoes `max_chars` back; an older build silently returns the full outline, so
+ * the bound this tool advertises did not apply. The flag is stripped again before the
+ * result is returned — it exists only to drive the rider.
+ */
+function markBudgetIgnored(res: ToolResult, requested: unknown): ToolResult {
+  if (typeof requested !== "number") return res;
+  const payload = parseToolResultJson(res);
+  if (!payload || typeof payload.max_chars === "number") return res;
+  const idx = res.content.findIndex((c) => c.type === "text");
+  if (idx < 0) return res;
+  payload.__budget_ignored = true;
+  return {
+    ...res,
+    content: res.content.map((c, i) =>
+      i === idx && c.type === "text" ? { ...c, text: JSON.stringify(payload, null, 2) } : c,
+    ),
+  };
+}
+
+/** The MAX_STATE_NODES views (#809): a FIXED panel-side cap with no parameter to
+ *  raise. Saying so plainly — and naming the tool that CAN target the rest — is the
+ *  honest remedy; inventing a lever these tools do not have would be the same defect
+ *  in the other direction. */
+function fixedCapHint(
+  what: string,
+  shown: number | null,
+  total: unknown,
+  targeted: string,
+): string {
+  return (
+    `Showing ${shownOf(shown, total)} ${what} — this view has a FIXED cap and no parameter raises it. ` +
+    targeted
+  );
+}
+
 // ---- panel_civitai_results inline sample thumbnails (#623) -------------------
 // The agent recommends CivitAI models/LoRAs for a VISUAL medium, so it must be
 // able to SEE the sample images — not just read titles + download counts. The
@@ -4070,7 +4188,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
   const defs: PanelToolDef[] = [
     def(
       "panel_query_graph",
-      "FILTER or TRAVERSE a SUBSET of the live canvas, for when you ALREADY KNOW what you're looking for. NOT for 'show me the canvas' or any whole-graph overview — call panel_graph_outline FIRST for that. NOT query_workflow (that queries a saved file or JSON you provide, not the live canvas). Filters, traverses, projects and aggregates over the workflow the user is CURRENTLY VIEWING without dumping the whole graph (replaces the old panel_get_graph full-JSON dump; output is TOKEN-BOUNDED with an explicit truncation marker, so a big graph can never flood your context). Combine: `types` (node type contains any), `title` (contains), `where` widget predicates ANDed ('cfg>7', 'steps<=20', 'sampler_name=euler', 'text~sunset' — ops = != >= <= > < ~contains), `ids` (exact nodes — THE way to read ONE node's exact slot/widget detail: {ids:[42], fields:'detail'}), `upstream_of`/`downstream_of` + `depth` (dependency traversal: upstream = what FEEDS that node, downstream = what CONSUMES it; seed at depth 0), `fields` ('compact' one line per node [default], 'ids', 'detail' = the full node summary with slots + connections + mode), `group_by:'type'` (counts only), `limit` (default 40). detail rows include each node's MODE — a 'bypass' node is skipped and a 'mute' node kills everything downstream, so check modes on the path you care about before running (fix with panel_set_node_mode). Every result also carries `groups` (id, title, member node_ids — groups are geometric, trust this list) and, when viewing a SUBGRAPH (after panel_enter_subgraph), `rails` (boundary rail ids/slots). Typical flow: panel_graph_outline to orient → panel_query_graph to pinpoint/inspect → edit. Read-only.",
+      "FILTER or TRAVERSE a SUBSET of the live canvas, for when you ALREADY KNOW what you're looking for. NOT for 'show me the canvas' or any whole-graph overview — call panel_graph_outline FIRST for that. NOT query_workflow (that queries a saved file or JSON you provide, not the live canvas). Filters, traverses, projects and aggregates over the workflow the user is CURRENTLY VIEWING without dumping the whole graph (replaces the old panel_get_graph full-JSON dump; output is TOKEN-BOUNDED with an explicit truncation marker, so a big graph can never flood your context). Combine: `types` (node type contains any), `title` (contains), `where` widget predicates ANDed ('cfg>7', 'steps<=20', 'sampler_name=euler', 'text~sunset' — ops = != >= <= > < ~contains), `ids` (exact nodes — THE way to read ONE node's exact slot/widget detail: {ids:[42], fields:'detail'}), `upstream_of`/`downstream_of` + `depth` (dependency traversal: upstream = what FEEDS that node, downstream = what CONSUMES it; seed at depth 0), `fields` ('compact' one line per node [default], 'ids', 'detail' = the full node summary with slots + connections + mode), `group_by:'type'` (counts only), `limit` (default 40). detail rows include each node's MODE — a 'bypass' node is skipped and a 'mute' node kills everything downstream, so check modes on the path you care about before running (fix with panel_set_node_mode). Every result also carries `groups` (id, title, member node_ids — groups are geometric, trust this list) and, when viewing a SUBGRAPH (after panel_enter_subgraph), `rails` (boundary rail ids/slots). NOTE: `max_chars` bounds the `text` field ONLY; those two riders are bounded by their own fixed caps and say so in-band when they cut, so lowering `max_chars` shrinks the rows and not the groups list (folding them into one budget is artokun/comfyui-mcp#807). Typical flow: panel_graph_outline to orient → panel_query_graph to pinpoint/inspect → edit. Read-only.",
       {
         types: z.array(z.string()).optional().describe("Node type contains ANY of these (case-insensitive)."),
         title: z.string().optional().describe("Node title contains this."),
@@ -4108,7 +4226,10 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           .min(500)
           .max(60000)
           .optional()
-          .describe("Output character bound (default 12000). Raise only for deliberate full reads, e.g. layout passes needing every node's geometry."),
+          .describe(
+            "Output character bound for the `text` field (default 12000, max 60000). Raise only for deliberate full reads, e.g. layout passes needing every node's geometry. " +
+              "It bounds `text` ONLY: the `groups` and `rails` riders are bounded separately by their own fixed caps (each marked in-band when it cuts), so lowering this shrinks the rows and not those (artokun/comfyui-mcp#807 tracks folding them into one budget).",
+          ),
       },
       async (args: A, ctx) =>
         ctx.call({
@@ -4128,21 +4249,127 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_graph_outline",
-      "READ THE LIVE CANVAS the user is looking at, as text. 'Show me what's on the canvas' / 'what's on the graph right now' / 'read the current workflow' / 'describe the open graph' -> THIS TOOL, with no arguments. NOT visualize_workflow or visualize_workflow_hierarchical (those DRAW A DIAGRAM of a workflow you PASS IN — a saved file or JSON — and never see the live canvas). NOT panel_query_graph (that FILTERS a SUBSET, for when you already know what you're looking for). Returns one `outline` string covering the WHOLE open graph, topologically sorted (sources first, sinks last): each node as `id Type \"title\" [bypass/mute] [OUTPUT] · group:X  widget=value …` with `← inputs` (source_node.output_name) and `→ outputs` (target_node.input_name), after a GROUPS index (title → member node ids). It gives you the WIRING you would otherwise reconstruct by hand — read it FIRST to get oriented, then panel_query_graph to inspect one node ({ids:[42], fields:'detail'}) or panel_find_nodes for free-text search. Read-only.",
-      {},
-      async (_args, ctx) => ctx.call({ cmd: "graph_outline" }),
+      "READ THE LIVE CANVAS the user is looking at, as text. 'Show me what's on the canvas' / 'what's on the graph right now' / 'read the current workflow' / 'describe the open graph' -> THIS TOOL, with no arguments. NOT visualize_workflow or visualize_workflow_hierarchical (those DRAW A DIAGRAM of a workflow you PASS IN — a saved file or JSON — and never see the live canvas). NOT panel_query_graph (that FILTERS a SUBSET, for when you already know what you're looking for). Returns one `outline` string covering the WHOLE open graph, topologically sorted (sources first, sinks last): each node as `id Type \"title\" [bypass/mute] [OUTPUT] · group:X  widget=value …` with `← inputs` (source_node.output_name) and `→ outputs` (target_node.input_name), after a GROUPS index (title → member node ids). It gives you the WIRING you would otherwise reconstruct by hand — read it FIRST to get oriented, then panel_query_graph to inspect one node ({ids:[42], fields:'detail'}) or panel_find_nodes for free-text search. Over `max_chars` it never cuts the graph short: it sheds per-node detail, or refuses with a reason — never a partial outline. Read-only.",
+      {
+        max_chars: z
+          .number()
+          .int()
+          .min(OUTLINE_MAX_CHARS_FLOOR)
+          .max(OUTLINE_MAX_CHARS_CEILING)
+          .optional()
+          .describe(
+            `Output character bound for the outline (default ${OUTLINE_MAX_CHARS_DEFAULT}, max ${OUTLINE_MAX_CHARS_CEILING}) — the SAME budget concept as panel_query_graph's max_chars. ` +
+              `COVERAGE IS NEVER TRADED AWAY: over budget the outline sheds RESOLUTION, not nodes — first per-node widget values, then titles, and at the floor a per-group summary — so any outline it DOES return describes the whole graph, with real node/group counts. ` +
+              `If even the group-level floor will not fit, it returns NO outline and says so (detail_level:"refused") rather than a partial one that would read as complete. ` +
+              `detail_level names the rung used and degraded_reason says why. Panel builds older than this budget ignore it and return the full outline; the result carries a max_chars field when the budget was actually applied.`,
+          ),
+      },
+      async (args: A, ctx) =>
+        withTruncationHints(
+          // The synthetic `__budget_ignored` flag below is derived from the reply, not
+          // sent by the panel: a build that supports the budget echoes `max_chars` back.
+          markBudgetIgnored(
+            await ctx.call({ cmd: "graph_outline", max_chars: args.max_chars }),
+            args.max_chars,
+          ),
+          [
+            {
+              // #809 (codex gate): a panel older than this budget IGNORES `max_chars` and
+              // returns the full outline, so the bound this tool advertises silently did
+              // not apply. A current panel echoes `max_chars` back; its absence is the
+              // tell. Saying so is the whole point — the caller must not read an
+              // unbounded reply as "this fitted".
+              flag: "__budget_ignored",
+              key: "max_chars_hint",
+              text: (p) =>
+                `This panel build does not support \`max_chars\` on the outline, so the budget you set (${typeof args.max_chars === "number" ? args.max_chars : OUTLINE_MAX_CHARS_DEFAULT}) was NOT applied and the outline below is the full, unbounded one (${typeof p.node_count === "number" ? p.node_count : "all"} node(s)). ` +
+                `Update the ComfyUI Agent Panel to bound it, or scope the read with panel_query_graph in the meantime.`,
+            },
+            {
+              // On an older panel this is never set either, so the rider is inert there.
+              flag: "degraded",
+              key: "truncation_hint",
+              text: (p) => {
+                const inForce =
+                  typeof args.max_chars === "number" ? args.max_chars : OUTLINE_MAX_CHARS_DEFAULT;
+                // At the ceiling "raise max_chars" is a dead retry (codex gate).
+                const more =
+                  inForce >= OUTLINE_MAX_CHARS_CEILING
+                    ? `\`max_chars\` is already at its ceiling of ${OUTLINE_MAX_CHARS_CEILING}, so this is the most one outline can carry — read specific nodes with panel_query_graph {ids:[…], fields:'detail'}.`
+                    : `Raise \`max_chars\` (up to ${OUTLINE_MAX_CHARS_CEILING}) for more detail, or read specific nodes with panel_query_graph {ids:[…], fields:'detail'}.`;
+                const nodes = typeof p.node_count === "number" ? p.node_count : "the";
+                const groups = typeof p.group_count === "number" ? p.group_count : "all";
+                // `degraded` covers TWO different outcomes and they say opposite things
+                // (codex gate). "refused" means NO outline was produced at all — claiming
+                // it "still covers ALL nodes" would describe content the reader cannot
+                // see, which is the same lie as a silent cut.
+                if (p.detail_level === "refused") {
+                  // And if the floor exceeds the CEILING, raising is a guaranteed second
+                  // refusal — a dead retry inside the message explaining the first.
+                  //
+                  // A panel that refuses WITHOUT reporting `floor_chars` (the revision
+                  // just before that field existed) leaves this unknowable, and treating
+                  // unknown as reachable is what produced the dead retry (codex gate). So
+                  // hedge: offer the raise as something to TRY, and name the fallback in
+                  // the same breath, instead of asserting it will work.
+                  const floor = typeof p.floor_chars === "number" ? p.floor_chars : null;
+                  const next =
+                    floor != null && floor > OUTLINE_MAX_CHARS_CEILING
+                      ? `Its smallest whole-graph form needs ~${floor} chars, past \`max_chars\`'s ceiling of ${OUTLINE_MAX_CHARS_CEILING}, so raising it will NOT produce an outline for this graph — read it in parts with panel_query_graph.`
+                      : floor != null || inForce >= OUTLINE_MAX_CHARS_CEILING
+                        ? more
+                        : `This panel build does not report how large the smallest form would be, so raising \`max_chars\` (up to ${OUTLINE_MAX_CHARS_CEILING}) MAY still refuse — if it does, the graph cannot be outlined in one call; read it in parts with panel_query_graph.`;
+                  return (
+                    `NO outline was returned: even the smallest whole-graph form did not fit \`max_chars\`=${inForce}, and a PARTIAL outline is deliberately withheld because it would read as complete. ` +
+                    `The graph has ${nodes} node(s) and ${groups} group(s). ${next}`
+                  );
+                }
+                return (
+                  `The outline still covers ALL ${nodes} node(s) and ${groups} group(s), but at reduced detail (detail_level ${JSON.stringify(p.detail_level ?? "reduced")}) to fit \`max_chars\`=${inForce}. ` +
+                  more
+                );
+              },
+            },
+          ],
+        ),
     ),
     def(
       "panel_view_selected",
       "What the user has SELECTED on the canvas right now. Call this FIRST whenever they say \"this node\", \"the selected one\", \"the highlighted node\", \"where did I get this from\", or otherwise point at something without giving an id — the selection IS the answer, and reading it costs one call instead of scanning the graph. Returns the full detail summary (id, type, title, widgets, inputs with sources, outputs, mode) for each selected node, plus `selected_count` and any selected groups/reroutes. If `selected_count` is 0, nothing is selected — ask the user to click the node rather than guessing. NEVER dump the whole graph to work out which node they mean. Read-only.",
       {},
-      async (_args, ctx) => ctx.call({ cmd: "graph_view_selected" }),
+      async (_args, ctx) =>
+        withTruncationHints(await ctx.call({ cmd: "graph_view_selected" }), [
+          {
+            flag: "truncated",
+            key: "truncation_hint",
+            text: (p) =>
+              fixedCapHint(
+                "selected node(s)",
+                replyCount(p, "nodes"),
+                p.selected_count,
+                "Ask the user to select fewer nodes, or read the ones you need by id with panel_query_graph {ids:[…], fields:'detail'}, which DOES take limit and max_chars.",
+              ),
+          },
+        ]),
     ),
     def(
       "panel_view_nodes_in_viewport",
       "ONLY the nodes inside the current VIEWPORT (pan+zoom) — a screen-region subset, NOT the whole open graph (that is panel_graph_outline, which is what 'show me what's on the canvas' means). Use this to SCOPE your work to what's on their screen: when they say \"these nodes\", \"the ones here\", \"what am I looking at right now\", or when a graph is large and you only need the region in front of them. Returns the viewport rect in graph coordinates (x, y, width, height, zoom), `node_count` (whole graph) vs `in_view_count`, and the detail summary of each visible node. A node counts as visible if any part of it overlaps the viewport. On a big canvas this is dramatically cheaper than reading everything. Read-only.",
       {},
-      async (_args, ctx) => ctx.call({ cmd: "graph_view_nodes_in_viewport" }),
+      async (_args, ctx) =>
+        withTruncationHints(await ctx.call({ cmd: "graph_view_nodes_in_viewport" }), [
+          {
+            flag: "truncated",
+            key: "truncation_hint",
+            text: (p) =>
+              fixedCapHint(
+                "visible node(s)",
+                replyCount(p, "nodes"),
+                p.in_view_count,
+                "Ask the user to zoom in so fewer nodes are on screen, or read the region with panel_query_graph (which DOES take limit and max_chars) / panel_graph_outline for the whole graph.",
+              ),
+          },
+        ]),
     ),
     def(
       "panel_audit_prompt_director",
@@ -4154,11 +4381,27 @@ export function buildPanelToolDefs(): PanelToolDef[] {
       "panel_get_subgraph",
       "Read INSIDE a subgraph node on the user's open graph: ids, types, widget values, and connections of its inner nodes. Use after panel_graph_outline / panel_query_graph shows a node with is_subgraph=true. Read-only.",
       { node_id: z.number().int().describe("Subgraph node id (is_subgraph=true).") },
-      async (args: A, ctx) => ctx.call({ cmd: "graph_get_subgraph", node_id: args.node_id }),
+      async (args: A, ctx) =>
+        withTruncationHints(await ctx.call({ cmd: "graph_get_subgraph", node_id: args.node_id }), [
+          {
+            flag: "truncated",
+            key: "truncation_hint",
+            text: (p) =>
+              fixedCapHint(
+                "inner node(s)",
+                replyCount(p, "nodes"),
+                p.node_count,
+                // Honest about the follow-up's OWN ceiling (codex gate): panel_query_graph
+                // clamps limit at 200 and has no cursor, so on a >200-node subgraph it is
+                // a way to read MORE, not a way to read all.
+                "panel_enter_subgraph into it, then panel_query_graph — which takes limit (max 200) and max_chars. It has no cursor, so beyond 200 inner nodes use its types/where filters to work through them.",
+              ),
+          },
+        ]),
     ),
     def(
       "panel_find_nodes",
-      "SEARCH the live canvas for nodes matching a term you supply — the right way to PINPOINT a node (a specific loader, sampler, save, switch) in a LARGE graph. Supply a free-text `query` and/or targeted filters; with nothing specific in mind, read the whole graph with panel_graph_outline instead. This searches the LIVE graph ON THE CANVAS — NOT the installable node registry (that's panel_search_nodes). It scans EVERY node (no truncation). Give a free-text `query` (matched case-insensitively across node type, title, description, widget NAMES, widget VALUES, and input/output port names+types — a node hits if ANY of those contain it) and/or targeted filters: type, title, input, output, widget (name), widget_value (contents), is_output, is_subgraph, mode. Targeted filters are ANDed together; the free `query` ORs across fields. Each match is the SAME rich summary as panel_query_graph's detail rows (id, type, title, widgets, inputs WITH their connected_from sources, outputs, mode, is_output, …) PLUS the node's description and a `matched_on` list saying WHY it matched. Read-only. Examples — the video loader: {query:'tiktok'} or {type:'LoadVideo'} or {input:'video'}; every output node: {is_output:true}; the node whose widget holds a file: {widget_value:'.png'}; a bypassed switch: {type:'Switch', mode:'bypass'}.",
+      "SEARCH the live canvas for nodes matching a term you supply — the right way to PINPOINT a node (a specific loader, sampler, save, switch) in a LARGE graph. Supply a free-text `query` and/or targeted filters; with nothing specific in mind, read the whole graph with panel_graph_outline instead. This searches the LIVE graph ON THE CANVAS — NOT the installable node registry (that's panel_search_nodes). It scans the graph in the canvas's own node order and STOPS once it has `limit` matches (default 40, max 200) — so a capped result is neither exhaustive nor a count of all matches: the result's count field is what was returned, total is the graph's node count, and truncated:true means the scan REACHED the cap — on current panels that proves more matches exist, on older panel builds it can also fire on an exactly-`limit` result that dropped nothing, so read it as 'may be incomplete'. Either way the result carries a truncation_hint naming the fix (raise `limit`, up to 200, or add a filter) — retry, do not conclude the node isn't there. Give a free-text `query` (matched case-insensitively across node type, title, description, widget NAMES, widget VALUES, and input/output port names+types — a node hits if ANY of those contain it) and/or targeted filters: type, title, input, output, widget (name), widget_value (contents), is_output, is_subgraph, mode. Targeted filters are ANDed together; the free `query` ORs across fields. Each match is the SAME rich summary as panel_query_graph's detail rows (id, type, title, widgets, inputs WITH their connected_from sources, outputs, mode, is_output, …) PLUS the node's description and a `matched_on` list saying WHY it matched. Read-only. Examples — the video loader: {query:'tiktok'} or {type:'LoadVideo'} or {input:'video'}; every output node: {is_output:true}; the node whose widget holds a file: {widget_value:'.png'}; a bypassed switch: {type:'Switch', mode:'bypass'}.",
       {
         query: z
           .string()
@@ -4200,25 +4443,56 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           .number()
           .int()
           .min(1)
-          .max(200)
+          .max(FIND_NODES_LIMIT_CEILING)
           .optional()
-          .describe("Max matches to return (default 40)."),
+          .describe(
+            `Max matches to return (default ${FIND_NODES_DEFAULT_LIMIT}, max ${FIND_NODES_LIMIT_CEILING}). The scan STOPS once this many match, so a capped result is not a complete match set.`,
+          ),
       },
       async (args: A, ctx) =>
-        ctx.call({
-          cmd: "graph_find_nodes",
-          query: args.query,
-          type: args.type,
-          title: args.title,
-          input: args.input,
-          output: args.output,
-          widget: args.widget,
-          widget_value: args.widget_value,
-          is_output: args.is_output,
-          is_subgraph: args.is_subgraph,
-          mode: args.mode,
-          limit: args.limit,
-        }),
+        withTruncationHints(
+          await ctx.call({
+            cmd: "graph_find_nodes",
+            query: args.query,
+            type: args.type,
+            title: args.title,
+            input: args.input,
+            output: args.output,
+            widget: args.widget,
+            widget_value: args.widget_value,
+            is_output: args.is_output,
+            is_subgraph: args.is_subgraph,
+            mode: args.mode,
+            limit: args.limit,
+          }),
+          [
+            {
+              flag: "truncated",
+              key: "truncation_hint",
+              // #809 (defect 2): the scan STOPS at the cap, so `count` is not a match
+              // total and the absent matches are not "no more matches".
+              //
+              // The wording is deliberately "may be incomplete", not "there ARE more"
+              // (codex gate): this orchestrator ships ahead of the panel, and a panel
+              // build older than the matching panel PR sets `truncated` on an EXACT-cap
+              // result that dropped nothing. Asserting more exist would manufacture the
+              // very false alarm this issue is removing. A current panel supplies its own
+              // precise hint and the rider defers to it.
+              text: (p) => {
+                const inForce =
+                  typeof args.limit === "number" ? args.limit : FIND_NODES_DEFAULT_LIMIT;
+                const raise =
+                  inForce >= FIND_NODES_LIMIT_CEILING
+                    ? `\`limit\` is already at its ceiling of ${FIND_NODES_LIMIT_CEILING}, so narrow with \`type\`/\`title\`/\`widget_value\` instead`
+                    : `Raise \`limit\` up to ${FIND_NODES_LIMIT_CEILING}, or narrow with \`type\`/\`title\`/\`widget_value\``;
+                return (
+                  `The scan reached \`limit\`=${inForce} at ${replyCount(p, "matches") ?? "the cap"} match(es), so this result MAY be incomplete — ` +
+                  `treat it as "not proof a node is absent" rather than as the full match set. ${raise}.`
+                );
+              },
+            },
+          ],
+        ),
     ),
     def(
       "panel_add_node",
@@ -4770,7 +5044,34 @@ export function buildPanelToolDefs(): PanelToolDef[] {
       "panel_get_errors",
       "WHY IS THAT NODE RED / WHY DID THE RUN FAIL? The single error surface for the user's open tab: every errored node JOINED TO ITS CAUSE, which ComfyUI itself does not show — LiteGraph only paints a red outline and stores no reason, which is why users report \"red node, no error message\". Call this whenever the user mentions a red/highlighted/erroring node, a failed run, or \"required models are missing\" — instead of guessing from widget values. Each entry in `nodes[]` is the node's full detail summary plus `red_outline` and `reasons[]`, drawn from every source: `missing_model` (exact file, its models directory, the widget holding it, and a download URL when known), `missing_media` (a referenced input image/video that isn't on disk — the usual cause of a red LoadImage), `validation` (per-input errors from the last queue attempt: message, details, offending input), and `execution` (runtime failure with `exception_type`, e.g. PIL.UnidentifiedImageError). TWO THINGS THAT MAKE THIS ESSENTIAL: (1) missing model/media assets paint nodes red AS SOON AS THE WORKFLOW LOADS, long before any queue attempt — so the raw validation map is still EMPTY while the user is staring at red nodes; (2) a node that throws AT RUNTIME is never painted red at all, so it can't be spotted on the canvas — it appears here with red_outline:false. Also returns graph-level `missing_models`, `missing_media`, `missing_node_types` (or `missing_node_count`), plus the raw `node_errors` map and `last_execution_error` for reference. A ⚠️ GRAPH VALIDATION block is auto-injected at your turn start when this state changes; call this to re-check on demand (e.g. after you edit widgets/links). Read-only.",
       {},
-      async (_args, ctx) => ctx.call({ cmd: "graph_get_errors" }),
+      async (_args, ctx) =>
+        withTruncationHints(await ctx.call({ cmd: "graph_get_errors" }), [
+          {
+            flag: "truncated",
+            key: "truncation_hint",
+            text: (p) =>
+              fixedCapHint(
+                "errored node(s)",
+                replyCount(p, "nodes"),
+                p.errored_count,
+                "Fix these first and re-check, or inspect specific ids with panel_query_graph {ids:[…], fields:'detail'}.",
+              ),
+          },
+          {
+            flag: "stale_flags_truncated",
+            key: "stale_flags_truncation_hint",
+            // Older panels send no total for this list, so the rider says so rather than
+            // implying the shown count is the whole of it (codex gate). A current panel
+            // supplies its own hint WITH the total, and the rider defers to it.
+            text: (p) =>
+              fixedCapHint(
+                "stale red-outline node(s)",
+                replyCount(p, "stale_flags"),
+                undefined,
+                "An unknown number more were cut (this panel build reports no total). They are cosmetic leftovers, not errors; the cap is fixed and there is no parameter to page it.",
+              ),
+          },
+        ]),
     ),
     def(
       "panel_refresh_nodes",

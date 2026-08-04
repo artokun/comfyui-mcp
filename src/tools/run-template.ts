@@ -61,9 +61,17 @@ function overridesToOps(
     const widget = key.slice(dot + 1);
     const node = workflow[nodeId];
     if (!node) {
-      const ids = Object.keys(workflow).slice(0, 40).join(", ");
+      // #809: an id list clipped at 40 with no marker looks exhaustive, so a caller
+      // whose node sits past the cut concludes the id does not exist at all. Say it was
+      // cut, and name the tool that reports every override key.
+      const allIds = Object.keys(workflow);
+      const ids = allIds.slice(0, 40).join(", ");
+      const more =
+        allIds.length > 40
+          ? ` (+${allIds.length - 40} more not listed — get_template_schema reports every override key)`
+          : "";
       throw new ValidationError(
-        `Override "${key}": no node "${nodeId}" in the template's graph. Node ids: ${ids}`,
+        `Override "${key}": no node "${nodeId}" in the template's graph. Node ids: ${ids}${more}`,
       );
     }
     const widgetInputs = Object.entries(node.inputs ?? {})

@@ -315,7 +315,7 @@ Read Prompt Director's latest sanitized RUNTIME state after its nodes execute. R
 
 ## query_workflow
 
-QUERY a SAVED workflow FILE (or JSON you pass in) — NOT the live canvas, which is panel_query_graph / panel_graph_outline. Filter, traverse, project, and aggregate over its nodes WITHOUT dumping the whole JSON (the missing middle between analyze_workflow's fixed summary and get_workflow's full dump; on 100+-node graphs this is the ONLY context-safe way to answer questions like 'which KSamplers run cfg&gt;7', 'what feeds node 42', 'count nodes by type'). Provide exactly one of path/filename/graph, then combine: `types` (class_type contains any), `title` (contains), `where` widget predicates ANDed ('cfg&gt;7', 'steps&lt;=20', 'sampler_name=euler', 'text~sunset' — ops = != &gt;= &lt;= &gt; &lt; ~contains), `ids` (exact nodes — the way to read ONE node's detail), `upstream_of`/`downstream_of` + `depth` (dependency traversal: upstream = what FEEDS that node, downstream = what CONSUMES it; seed included at depth 0), `fields` ('compact' one line per node [default], 'ids', or 'detail' JSON rows with widgets + wiring), `group_by:'type'` (counts only), `limit` (default 40). Output is TOKEN-BOUNDED with an explicit truncation marker. Read-only.
+QUERY a SAVED workflow FILE (or JSON you pass in) — NOT the live canvas, which is panel_query_graph / panel_graph_outline. Filter, traverse, project, and aggregate over its nodes WITHOUT dumping the whole JSON (the missing middle between analyze_workflow's fixed summary and get_workflow's full dump; on 100+-node graphs this is the ONLY context-safe way to answer questions like 'which KSamplers run cfg&gt;7', 'what feeds node 42', 'count nodes by type'). Provide exactly one of path/filename/graph, then combine: `types` (class_type contains any), `title` (contains), `where` widget predicates ANDed ('cfg&gt;7', 'steps&lt;=20', 'sampler_name=euler', 'text~sunset' — ops = != &gt;= &lt;= &gt; &lt; ~contains), `ids` (exact nodes — the way to read ONE node's detail), `upstream_of`/`downstream_of` + `depth` (dependency traversal: upstream = what FEEDS that node, downstream = what CONSUMES it; seed included at depth 0), `fields` ('compact' one line per node [default], 'ids', or 'detail' JSON rows with widgets + wiring), `group_by:'type'` (counts only), `limit` (default 40, max 200), `max_chars` (default 12000, max 60000). Output is TOKEN-BOUNDED and, when it truncates, the tail names WHICH of the two caps fired and the exact parameter to raise — read it and retry rather than concluding the graph can't be read. Read-only.
 
 ### Parameters
 
@@ -356,10 +356,10 @@ QUERY a SAVED workflow FILE (or JSON you pass in) — NOT the live canvas, which
   Aggregate: counts per class_type instead of listing. Options: `type`.
 </ParamField>
 <ParamField path="limit" type="integer">
-  Max nodes listed (default 40).
+  Max nodes listed (default 40, max 200).
 </ParamField>
 <ParamField path="max_chars" type="integer">
-  Output character bound (default 12000). Raise only for deliberate full reads.
+  Output character bound (default 12000, max 60000). Raise this — not `limit` — when the truncation tail says the char budget cut the result.
 </ParamField>
 
 ### Example

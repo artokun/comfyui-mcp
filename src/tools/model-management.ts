@@ -105,7 +105,10 @@ export function registerModelManagementTools(server: McpServer): void {
                 (m, i) =>
                   `${i + 1}. **${m.modelId}** by ${m.author || "unknown"}\n` +
                   `   Downloads: ${m.downloads.toLocaleString()} | Likes: ${m.likes}\n` +
-                  `   Tags: ${m.tags.slice(0, 5).join(", ") || "none"}`,
+                  // #809: a silently-clipped tag list reads as the model's COMPLETE tag
+                  // set, so a caller filtering on tags draws a false conclusion. Say how
+                  // many more there are; the 5-tag cap itself is fixed.
+                  `   Tags: ${m.tags.slice(0, 5).join(", ") || "none"}${m.tags.length > 5 ? ` (+${m.tags.length - 5} more; fixed 5-tag preview that no parameter raises — the rest are only on the model's Hub page)` : ""}`,
               )
               .join("\n\n");
 

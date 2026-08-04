@@ -137,7 +137,13 @@ export function parseCrashBlock(text: string): CrashParseResult {
   let block = text.slice(lineStart).trim();
   if (block.length > MAX_BLOCK_CHARS) {
     // Keep the HEAD of the block (the signature + the top frames matter most).
-    block = block.slice(0, MAX_BLOCK_CHARS) + "\n…(truncated)";
+    // #809: "…(truncated)" said nothing actionable. Name the amount, the fixed cap, and
+    // the tool that holds the rest — this block is INJECTED, so it has no parameters of
+    // its own and inventing a lever here would send the caller nowhere.
+    const dropped = block.length - MAX_BLOCK_CHARS;
+    block =
+      block.slice(0, MAX_BLOCK_CHARS) +
+      `\n…(+${dropped} more char(s) cut at the fixed ${MAX_BLOCK_CHARS}-char crash-block cap — no parameter raises it; get_logs may still hold the full crash while it is within the log tail)`;
   }
 
   // Culprit: the DEEPEST (innermost / actually-crashing) frame in the fatal

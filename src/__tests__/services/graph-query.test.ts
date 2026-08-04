@@ -148,7 +148,7 @@ describe("queryApiGraph", () => {
 
     it("the oversized widget value is capped, not dropped silently", () => {
       const r = queryApiGraph(Gblob, { ids: [164], fields: "detail" });
-      expect(r.text).toContain("truncated)"); // the per-value cap marker
+      expect(r.text).toContain("per-widget cap"); // #809: the per-value cap marker, naming the cap
       expect(r.text.length).toBeLessThan(BLOB.length); // blob no longer flooding
       expect(r.text).toContain('"width":1024'); // the small sibling value survives intact
     });
@@ -174,8 +174,11 @@ describe("queryApiGraph", () => {
       expect(r.matched).toBe(3);
       expect(r.shown).toBe(1); // first renders, rest budget-truncated (bounded output)
       expect(r.truncated).toBe(true);
-      expect(r.text).toContain("raise max_chars");
+      expect(r.text).toContain("raise `max_chars`");
       expect(r.text).not.toContain("narrow with"); // no dead-end advice for explicit ids
+      // #809: the char budget did the cutting, so `limit` must NOT be offered as the fix.
+      expect(r.truncated_by).toBe("max_chars");
+      expect(r.text).not.toContain("raise `limit`");
     });
 
     it("even the protected first node's detail stays token-bounded (many oversized widgets)", () => {
@@ -190,7 +193,7 @@ describe("queryApiGraph", () => {
       expect(r.shown).toBe(1); // still renders the requested node
       // Bounded: the single line must not be an order of magnitude over the budget.
       expect(r.text.length).toBeLessThan(maxChars * 2);
-      expect(r.text).toContain("omitted (exceeded budget)"); // honest elision marker
+      expect(r.text).toContain("cut by the `max_chars` budget"); // #809: elision marker names its lever
     });
 
     it("detail bound holds for a SMALL budget, even with ESCAPE-HEAVY content", () => {
@@ -218,7 +221,7 @@ describe("queryApiGraph", () => {
       const parsed = JSON.parse(r.text.split("\n")[1]);
       expect(Array.isArray(parsed.widgets.presets)).toBe(true); // FAIL-BEFORE: was a string
       expect(parsed.widgets.presets).toHaveLength(300);
-      expect(r.text).not.toContain("truncated)");
+      expect(r.text).not.toContain("per-widget cap");
     });
 
     it("a genuinely oversize OBJECT still truncates with the per-value cap marker", () => {
@@ -228,7 +231,7 @@ describe("queryApiGraph", () => {
       const Gover = { "1": { class_type: "Presets", inputs: { presets: arr } } };
       const r = queryApiGraph(Gover, { ids: [1], fields: "detail", max_chars: 6000 });
       expect(r.shown).toBe(1);
-      expect(r.text).toContain("chars, truncated)");
+      expect(r.text).toContain("per-widget cap"); // #809
       expect(r.text.length).toBeLessThan(JSON.stringify(arr).length); // capped, not flooding
     });
 
@@ -326,7 +329,7 @@ describe("queryApiGraph", () => {
       const r = queryApiGraph(G7, { group_by: "type", max_chars: maxChars });
       expect(r.text.length).toBeLessThan(maxChars * 2);
       expect(r.truncated).toBe(true);
-      expect(r.text).toContain("more type(s) omitted");
+      expect(r.text).toContain("more type(s) cut by `max_chars`");
     });
 
     it("fields:'ids' also bounds a pathologically long node id (#609)", () => {
@@ -344,7 +347,7 @@ describe("queryApiGraph", () => {
       for (let i = 0; i < 30; i++) many[String(i)] = { class_type: "KSampler", inputs: { note: "y".repeat(400) } };
       const r = queryApiGraph(many, { fields: "detail", max_chars: 800 });
       expect(r.truncated).toBe(true);
-      expect(r.text).toContain("narrow with types/where/ids/depth");
+      expect(r.text).toContain("narrow with `types`/`where`/`ids`/`depth`");
     });
   });
 });

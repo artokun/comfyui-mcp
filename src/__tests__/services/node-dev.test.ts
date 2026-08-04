@@ -50,6 +50,11 @@ import {
   NodeDevError,
   LONG_LINE_CHUNK,
   READ_MAX_CHARS,
+  // #809
+  MIN_OUTPUT_CHARS,
+  SEARCH_LINE_MAX,
+  SEARCH_MAX_RESULTS,
+  LIST_MAX_ENTRIES,
   defaultDeps,
   type NodeDevDeps,
   type RunResult,
@@ -196,12 +201,39 @@ describe("bounding helpers", () => {
   });
 
   it("boundText clips and flags truncation", () => {
-    const r = boundText("abcdef", 3);
+    // #809: the notice is REQUIRED — boundText is shared by tools with different levers,
+    // so a default naming `max_chars` would ship a dead remedy to callers without one.
+    const notice = (dropped: number) => `[cut ${dropped}]`;
+    // The notice is reserved OUT of the budget (#809), so the budget must leave room for
+    // both: 20 chars fits "abcdef"'s head plus the ~8-char marker.
+    const r = boundText("abcdef".repeat(10), 20, notice);
     expect(r.truncated).toBe(true);
-    expect(r.text.startsWith("abc")).toBe(true);
-    const ok = boundText("abc", 10);
+    expect(r.text.startsWith("a")).toBe(true);
+    expect(r.text.length).toBeLessThanOrEqual(20);
+    const ok = boundText("abc", 10, notice);
     expect(ok.truncated).toBe(false);
     expect(ok.text).toBe("abc");
+  });
+
+  // #809 (codex gate): the marker is spent from the very budget it describes, so a longer
+  // marker must not be able to push the result past maxChars — the bound is the promise
+  // the parameter makes, and breaking it to explain the break would be absurd.
+  it("boundText keeps the RESULT within maxChars even with a long notice", () => {
+    const notice = (dropped: number) =>
+      `\n\n[... ${dropped} more char(s) cut by \`max_chars\`; raise \`max_chars\` up to ${READ_MAX_CHARS} ...]`;
+    const noticeLen = notice(50_000).length;
+    for (const budget of [200, 1000, 5000, 12_000]) {
+      const r = boundText("z".repeat(50_000), budget, notice);
+      expect(r.truncated).toBe(true);
+      expect(r.text.length, `budget ${budget} breached`).toBeLessThanOrEqual(budget);
+      // And the marker itself survives — reserving space must not clip the instruction.
+      expect(r.text).toContain("raise `max_chars`");
+    }
+    // A budget smaller than the marker cannot honour both; the MARKER wins, because an
+    // empty unexplained field reads as "the file is empty".
+    const tiny = boundText("z".repeat(50_000), 5, notice);
+    expect(tiny.text).toContain("raise `max_chars`");
+    expect(tiny.text.length).toBeLessThanOrEqual(noticeLen);
   });
 
   it("readNodeFile reports total_lines on a CRLF file and clips char budget", () => {
@@ -278,6 +310,171 @@ describe("searchNodePacks", () => {
     expect(rgCallsSpy[0].args).toContain("hit");
     // no option-injection: query passed after --regexp, not as a bare arg
     expect(rgCallsSpy[0].args[rgCallsSpy[0].args.indexOf("--regexp") + 1]).toBe("hit");
+  });
+
+  // #809 (codex gate) — BOTH directions of the truncation lie, run for real rather than
+  // asserted against the source text.
+  //
+  // `--max-count` is PER FILE, so asking rg for exactly `cap` meant a file holding more
+  // had its extras dropped by rg before we saw a line (silent loss), while a search with
+  // exactly `cap` real matches was labelled truncated (false alarm — the agent is told to
+  // retry wider for nothing, which is how it learns to distrust the tool). Asking for
+  // `cap + 1` closes both: the extra line is the proof, its absence the proof of
+  // completeness.
+  it("asks ripgrep for ONE past the cap so truncation can be PROVEN either way", () => {
+    const seen: string[][] = [];
+    const { deps } = makeDeps({
+      hasRipgrep: () => true,
+      runRipgrep: (args) => {
+        seen.push(args);
+        return { status: 0, stdout: "", stderr: "" };
+      },
+    });
+    searchNodePacks({ query: "x", maxResults: 5 }, deps);
+    expect(seen[0][seen[0].indexOf("--max-count") + 1]).toBe("6");
+  });
+
+  it("does NOT claim truncation when the match count is exactly max_results", () => {
+    const lines = Array.from({ length: 3 }, (_, i) => `a.py:${i + 1}:hit`).join("\n");
+    const { deps } = makeDeps({
+      hasRipgrep: () => true,
+      runRipgrep: () => ({ status: 0, stdout: `${lines}\n`, stderr: "" }),
+    });
+    const res = searchNodePacks({ query: "hit", maxResults: 3 }, deps);
+    expect(res.matches).toHaveLength(3);
+    expect(res.truncated).toBe(false);
+    expect(res.truncation_hint).toBeUndefined();
+  });
+
+  it("DOES claim truncation — with the lever and ceiling — on the (cap+1)-th match", () => {
+    const lines = Array.from({ length: 4 }, (_, i) => `a.py:${i + 1}:hit`).join("\n");
+    const { deps } = makeDeps({
+      hasRipgrep: () => true,
+      runRipgrep: () => ({ status: 0, stdout: `${lines}\n`, stderr: "" }),
+    });
+    const res = searchNodePacks({ query: "hit", maxResults: 3 }, deps);
+    expect(res.matches).toHaveLength(3);
+    expect(res.truncated).toBe(true);
+    expect(res.truncated_by).toBe("max_results");
+    expect(res.truncation_hint).toContain("`max_results`");
+    expect(res.truncation_hint).toContain(`up to ${SEARCH_MAX_RESULTS}`);
+  });
+
+  // codex gate: the FIRST cut is the one the caller must act on. If a later write could
+  // flip an actionable "raise `max_results`" into "no parameter raises it", the remedy
+  // would name the wrong lever — the defect this whole issue is about.
+  it("keeps the FIRST truncation cause, so the remedy names the lever that applies", () => {
+    const files = Array.from({ length: 50 }, (_, i) => ({ name: `f${i}.py`, isDir: false }));
+    const { deps } = makeDeps({
+      hasRipgrep: () => false,
+      isDirectory: () => true,
+      listDir: () => files,
+      fileSize: () => 10,
+      readFileBuffer: () => Buffer.from("hit\nhit\nhit\n"),
+    });
+    const res = searchNodePacks({ query: "hit", maxResults: 2 }, deps);
+    expect(res.truncated).toBe(true);
+    expect(res.truncated_by).toBe("max_results");
+    expect(res.truncation_hint).toContain("`max_results`");
+    expect(res.truncation_hint).not.toContain("no parameter raises it");
+  });
+
+  it("marks the 600-char per-line clip and stays inside it", () => {
+    const { deps } = makeDeps({
+      hasRipgrep: () => true,
+      runRipgrep: () => ({ status: 0, stdout: `a.py:1:${"z".repeat(5000)}\n`, stderr: "" }),
+    });
+    const res = searchNodePacks({ query: "z" }, deps);
+    expect(res.matches[0].text.length).toBeLessThanOrEqual(SEARCH_LINE_MAX);
+    expect(res.matches[0].text).toContain("fixed 600-char per-line cap");
+  });
+});
+
+// #809 (codex gate): the file walk had the same exact-cap false alarm, and reported a
+// bare boolean with no total and no lever.
+describe("listNodePackFiles truncation honesty (#809)", () => {
+  const seed = (n: number) => {
+    const pack = join(customNodes, "Pack");
+    mkdirSync(pack, { recursive: true });
+    for (let i = 0; i < n; i++) writeFileSync(join(pack, `f${i}.py`), "x");
+  };
+
+  it("does NOT claim truncation when the entry count is exactly max_entries", () => {
+    seed(3);
+    const res = listNodePackFiles({ pack: "Pack", maxEntries: 3 });
+    expect(res.entries).toHaveLength(3);
+    expect(res.truncated).toBe(false);
+    expect(res.truncation_hint).toBeUndefined();
+  });
+
+  it("names max_entries, its ceiling, and glob when the walk really stopped early", () => {
+    seed(5);
+    const res = listNodePackFiles({ pack: "Pack", maxEntries: 3 });
+    expect(res.entries).toHaveLength(3);
+    expect(res.truncated).toBe(true);
+    expect(res.truncation_hint).toContain("`max_entries`");
+    expect(res.truncation_hint).toContain(`up to ${LIST_MAX_ENTRIES}`);
+    expect(res.truncation_hint).toContain("`glob`");
+  });
+});
+
+// #809 (codex gate): the clamps must be exercised, not asserted about. A remedy that
+// quotes a ceiling the runtime does not enforce is the same defect as a wrong param.
+describe("max_chars clamps are real (#809)", () => {
+  it("read_node_file honours the ceiling AND the floor it advertises", () => {
+    const pack = join(customNodes, "Pack");
+    mkdirSync(pack, { recursive: true });
+    // MANY lines, so paging by start_line/line_count is a live remedy here.
+    writeFileSync(join(pack, "big.py"), Array.from({ length: 5000 }, (_, i) => `line ${i} ${"z".repeat(60)}`).join("\n"));
+
+    // line_count high enough that the CHAR budget is what cuts, not the line window.
+    const over = readNodeFile({ path: "Pack/big.py", maxChars: 1_000_000, lineCount: 800 });
+    expect(over.content.length).toBeLessThanOrEqual(READ_MAX_CHARS);
+    expect(over.truncated).toBe(true);
+    // Clamped to the ceiling, so the remedy must NOT say "raise max_chars to 24000" —
+    // the caller is already there, and that retry would change nothing (#809 codex gate).
+    expect(over.content).toContain(`already at its ceiling of ${READ_MAX_CHARS}`);
+    expect(over.content).not.toContain("raise `max_chars` (up to");
+    // What IS left must still be named.
+    expect(over.content).toContain("`start_line`");
+
+    // A budget of 1 used to yield either an unexplained empty field or a marker that
+    // breached its own bound. The FLOOR (not the ceiling) fixes that.
+    const under = readNodeFile({ path: "Pack/big.py", maxChars: 1 });
+    expect(under.content.length).toBeLessThanOrEqual(MIN_OUTPUT_CHARS);
+    expect(under.content).toContain("raise `max_chars`");
+  });
+
+  // codex gate: `start_line`/`line_count` index SOURCE lines. On a slice that is ONE
+  // physical line there is nothing to page to, so offering it names a real lever that
+  // cannot move — the same wasted round trip as naming a nonexistent one.
+  it("does NOT offer line paging when the slice is a single overlong line", () => {
+    const pack = join(customNodes, "Pack");
+    mkdirSync(pack, { recursive: true });
+    writeFileSync(join(pack, "min.js"), "z".repeat(200_000));
+
+    const r = readNodeFile({ path: "Pack/min.js", maxChars: 1_000_000 });
+    expect(r.truncated).toBe(true);
+    expect(r.content).toMatch(/SINGLE physical line/);
+    expect(r.content).toMatch(/`start_line`\/`line_count` cannot reach the rest/);
+    // At the ceiling it must not pretend another parameter would help either.
+    expect(r.content).toContain(`at the ${READ_MAX_CHARS} ceiling this tool cannot return more of it`);
+    expect(r.content).toContain("search_node_packs");
+  });
+
+  it("node_pack_git honours the same ceiling and floor", () => {
+    mkdirSync(join(customNodes, "Pack"), { recursive: true });
+    const { deps } = makeDeps({
+      runGit: () => ({ status: 0, stdout: "d".repeat(200_000), stderr: "" }),
+    });
+    const over = nodePackGit({ pack: "Pack", action: "diff", maxChars: 1_000_000 }, deps);
+    expect(over.stdout.length).toBeLessThanOrEqual(READ_MAX_CHARS);
+    expect(over.stdout).toContain(`already at its ceiling of ${READ_MAX_CHARS}`);
+    expect(over.stdout).toContain("`paths`");
+
+    const under = nodePackGit({ pack: "Pack", action: "diff", maxChars: 1 }, deps);
+    expect(under.stdout.length).toBeLessThanOrEqual(MIN_OUTPUT_CHARS);
+    expect(under.stdout).toContain("raise `max_chars`");
   });
 });
 
