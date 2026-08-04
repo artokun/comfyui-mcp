@@ -875,25 +875,42 @@ describe("download retry + resume, end to end (#470)", () => {
     const url = "https://example.com/models/unreadable-ownership.safetensors";
 
     const realStat = downloadCacheFs.stat;
-    let attemptsSeen = 0;
-    let statsSinceAttempt = 0;
+    // Flipped by the response stream itself, the instant its last byte is
+    // delivered — so the read that records what we LEFT BEHIND is the one that
+    // fails, and the attempt's own earlier checks are unaffected. Keyed on a
+    // real event rather than a count of stat calls, which would silently retarget
+    // whenever a guard adds or removes a read.
+    let failPartialStat = false;
     vi.spyOn(downloadCacheFs, "stat").mockImplementation(async (...args) => {
       const path = String(args[0]);
-      if (attemptsSeen > 0 && path.endsWith(".partial")) {
-        statsSinceAttempt += 1;
-        // The FIRST post-response read is this attempt's own pre-write check; the
-        // NEXT is the record of what we LEFT BEHIND — make exactly that one fail,
-        // with EACCES rather than ENOENT (a MISSING file is knowably 0 bytes and
-        // must NOT be treated as unknown).
-        if (statsSinceAttempt >= 2) {
-          throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
-        }
+      if (failPartialStat && path.endsWith(".partial")) {
+        // EACCES, not ENOENT — a MISSING file is knowably 0 bytes and must NOT be
+        // treated as unknown.
+        throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
       }
       return realStat(...(args as Parameters<typeof realStat>));
     });
     fetchMock.mockImplementation(async () => {
-      attemptsSeen += 1;
-      return shortBody("AAAA", 64, { etag: '"v"' });
+      let sent = false;
+      const stream = new ReadableStream<Uint8Array>({
+        // `pull`, not `start`: start() runs at CONSTRUCTION, before the request has
+        // even been answered, so flipping there would break the attempt's own
+        // earlier checks instead of the record-what-we-left read.
+        pull(c) {
+          if (!sent) {
+            sent = true;
+            c.enqueue(new TextEncoder().encode("AAAA"));
+            return;
+          }
+          failPartialStat = true; // body consumed; the attempt is now unwinding
+          c.close();
+        },
+      });
+      return new Response(stream, {
+        status: 200,
+        statusText: "OK",
+        headers: { "content-length": "64", etag: '"v"' },
+      });
     });
 
     const err = await downloadModel(url, "checkpoints", "unreadable-out.safetensors").catch(
@@ -1259,6 +1276,94 @@ describe("download retry + resume, end to end (#470)", () => {
     await expect(readFile(partial, "utf-8")).resolves.toBe(
       "<?xml version='1.0'?><their-in-progress-asset/>",
     );
+  });
+
+  it("re-checks ownership before EACH destructive act — a foreign write between the check and the delete is caught", async () => {
+    // The granularity property, driven in the window that actually matters.
+    //
+    // `discardRejectedPayload` performs SEPARATE awaited destructive operations on
+    // the partial and on its sidecar. A single check at its entry authorises the
+    // first and is stale for the rest, so a foreign writer landing after that check
+    // gets its multi-gigabyte partial deleted and then its validator erased too.
+    //
+    // The injection point here is the `rm` syscall itself: the write lands AFTER
+    // the ownership check that authorised the partial's removal has already
+    // returned — the exact gap an entry-only check leaves open — so it can only be
+    // caught by the sidecar's own, separate check.
+    const url = "https://example.com/models/gap-between-check-and-delete.safetensors";
+    const { partial, sidecar } = cachePaths(url);
+    await writeFile(partial, "OURS");
+    await writeFile(sidecar, '"ours"');
+    await writeFile(`${partial}.rejected`, "stale marker"); // sends us down the discard path
+
+    const realRm = downloadCacheFs.rm;
+    let planted = false;
+    vi.spyOn(downloadCacheFs, "rm").mockImplementation(async (...args) => {
+      const path = String(args[0]);
+      if (!planted && path.endsWith(".partial")) {
+        planted = true;
+        // We are now PAST the check that authorised this removal and about to
+        // perform it. A foreign writer takes the file over right here.
+        await writeFile(partial, "SOMEONE-ELSES-MANY-GIGABYTES");
+        await writeFile(sidecar, '"their-object"');
+        // Let our (now wrong) removal proceed, exactly as it would in production —
+        // the point is what happens to everything AFTER it.
+      }
+      return realRm(...(args as Parameters<typeof realRm>));
+    });
+
+    fetchMock.mockImplementation(async () => new Response("BODY", { status: 200 }));
+
+    const err = await downloadModel(url, "checkpoints", "gap-out.safetensors").catch(
+      (e: unknown) => e,
+    );
+    expect(String((err as Error).message)).toMatch(
+      /another download is writing the same staged file/i,
+    );
+    // THE assertion: the foreign writer's VALIDATOR survives. With one check at the
+    // helper's entry it would have been erased along with the partial, leaving them
+    // with bytes they could no longer resume.
+    await expect(readFile(sidecar, "utf-8")).resolves.toBe('"their-object"');
+  });
+
+  it("re-checks ownership before the TRUNCATE fallback too — a failed rm does not license blanking a foreign file", async () => {
+    // The fourth destructive act, and the easiest one to forget: when `rm` fails
+    // (EPERM/EACCES), the cleanup falls back to truncating the file to 0 bytes.
+    // That fallback is reached only after a FAILED syscall — another await — so the
+    // check that authorised the rm is stale by the time it runs. Blanking a foreign
+    // multi-gigabyte partial is exactly as destructive as deleting it.
+    const url = "https://example.com/models/truncate-fallback-gap.safetensors";
+    const { partial, sidecar } = cachePaths(url);
+    await writeFile(partial, "OURS");
+    await writeFile(sidecar, '"ours"');
+    await writeFile(`${partial}.rejected`, "stale marker");
+
+    const realRm = downloadCacheFs.rm;
+    let planted = false;
+    vi.spyOn(downloadCacheFs, "rm").mockImplementation(async (...args) => {
+      const path = String(args[0]);
+      if (!planted && path.endsWith(".partial")) {
+        planted = true;
+        // The foreign writer takes over, and OUR removal then fails — so the code
+        // proceeds to the truncate fallback with a stale authorisation.
+        await writeFile(partial, "SOMEONE-ELSES-MANY-GIGABYTES");
+        await writeFile(sidecar, '"their-object"');
+        throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" });
+      }
+      return realRm(...(args as Parameters<typeof realRm>));
+    });
+
+    fetchMock.mockImplementation(async () => new Response("BODY", { status: 200 }));
+
+    const err = await downloadModel(url, "checkpoints", "truncate-fallback-out.safetensors").catch(
+      (e: unknown) => e,
+    );
+    expect(String((err as Error).message)).toMatch(
+      /another download is writing the same staged file/i,
+    );
+    // Their bytes are intact — NOT blanked to 0 by a fallback acting on a stale check.
+    await expect(readFile(partial, "utf-8")).resolves.toBe("SOMEONE-ELSES-MANY-GIGABYTES");
+    await expect(readFile(sidecar, "utf-8")).resolves.toBe('"their-object"');
   });
 
   it("a retry that lands on a POISONED partial (#473 leftover) restarts instead of resuming onto it", async () => {

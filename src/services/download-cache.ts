@@ -50,13 +50,52 @@ async function safeRm(path: string): Promise<void> {
   }
 }
 
-/** Remove `path`, returning true iff it is confirmed gone. Unlike `safeRm` this
+/**
+ * A path together with the check that AUTHORISES destroying it.
+ *
+ * The destructive helpers below take one of these instead of a bare string, so it
+ * is not expressible to delete or truncate a file without re-proving, immediately
+ * beforehand, that it is still the file the caller checked.
+ *
+ * WHY A TYPE RATHER THAN A CALL AT THE TOP. `discardRejectedPayload` performs up
+ * to FOUR separate awaited destructive operations (rm and a truncate fallback, for
+ * the payload and again for its sidecar). A single check at the helper's entry
+ * authorises the first act and then goes stale: every `await` after it is a window
+ * in which another process can replace the file, and the remaining acts would
+ * destroy something nobody checked. Carrying the check WITH the path makes the
+ * guarantee structural — a new destructive step cannot be added without one.
+ *
+ * The residual gap is the scheduling boundary between the check's last read and
+ * the syscall it authorises. That cannot be closed without OS-level locking; what
+ * this removes is every gap that contains OTHER I/O.
+ */
+interface GuardedPath {
+  readonly path: string;
+  /** Re-prove ownership. Throws to abort the destruction. */
+  readonly assertOwned: () => Promise<void>;
+}
+
+/**
+ * A path no other process can be writing — our own O_EXCL temp, a cache entry this
+ * call materialised, or a `.partial` whose ownership the caller established and
+ * cannot lose while it holds the stream. Making this explicit means an unguarded
+ * destruction is a deliberate, reviewable claim at the call site rather than an
+ * omission nobody notices.
+ */
+function selfOwned(path: string): GuardedPath {
+  return { path, assertOwned: async () => {} };
+}
+
+/** Remove `target`, returning true iff it is confirmed gone. Unlike `safeRm` this
  *  LOGS a removal failure (EPERM/EACCES/…) instead of swallowing it silently — a
  *  left-behind rejected artifact (a poisoned partial / cache entry) must at least be
  *  visible, since a later cache-hit or resume could otherwise re-hit it (#473 P1). */
-async function rmOrLog(path: string, logUrl: string): Promise<boolean> {
+async function rmOrLog(target: GuardedPath, logUrl: string): Promise<boolean> {
+  const path = target.path;
+  // Immediately before the syscall — nothing but the check itself in between.
+  await target.assertOwned();
   try {
-    await rm(path, { force: true });
+    await downloadCacheFs.rm(path, { force: true });
     return true;
   } catch (err) {
     logger.warn(
@@ -72,8 +111,12 @@ async function rmOrLog(path: string, logUrl: string): Promise<boolean> {
  *  true iff the path ends up removed OR emptied. A 0-byte partial is treated as fresh
  *  (not resumed) and a 0-byte cache/sidecar entry carries no resumable state, so
  *  zeroing is as safe as deleting. Logs (error) only when it can do NEITHER (#473 P1). */
-async function rmOrTruncate(path: string, logUrl: string): Promise<boolean> {
-  if (await rmOrLog(path, logUrl)) return true;
+async function rmOrTruncate(target: GuardedPath, logUrl: string): Promise<boolean> {
+  if (await rmOrLog(target, logUrl)) return true;
+  const path = target.path;
+  // The failed rm was itself an await, so the entry check is already stale —
+  // re-prove before the truncate, which is just as destructive.
+  await target.assertOwned();
   try {
     await writeFile(path, "");
     return true;
@@ -95,12 +138,16 @@ async function rmOrTruncate(path: string, logUrl: string): Promise<boolean> {
  *  when the partial itself can be deleted (#473 P1). A hard failure to neutralize is
  *  surfaced via the log inside rmOrTruncate. */
 async function discardRejectedPayload(
-  path: string,
-  sidecarPath: string | undefined,
+  target: GuardedPath,
+  sidecar: GuardedPath | undefined,
   logUrl: string,
 ): Promise<boolean> {
-  const neutralized = await rmOrTruncate(path, logUrl);
-  if (sidecarPath) await rmOrTruncate(sidecarPath, logUrl);
+  // Each rmOrTruncate re-proves ownership before every syscall it performs. The
+  // sidecar's destruction is separated from the payload's by at least one await,
+  // so it needs its own check — authorising both from one observation is exactly
+  // the granularity bug this shape prevents.
+  const neutralized = await rmOrTruncate(target, logUrl);
+  if (sidecar) await rmOrTruncate(sidecar, logUrl);
   return neutralized;
 }
 
@@ -1259,7 +1306,11 @@ async function streamUrlToFile(
       url,
       logUrl,
       onReject: async () => {
-        await discardRejectedPayload(targetPath, undefined, logUrl);
+        // selfOwned: this runs AFTER we streamed these bytes ourselves, so the
+        // caller's pre-write baseline no longer describes the file (we changed it)
+        // and re-checking against it would refuse our OWN cleanup. We hold the
+        // stream; these bytes are ours to discard.
+        await discardRejectedPayload(selfOwned(targetPath), undefined, logUrl);
       },
       // FAIL CLOSED, same as the HTTP path: a cloud (S3/Azure) object can be an XML/
       // HTML AccessDenied body saved under a `.safetensors` name, and if we CAN'T
@@ -1741,7 +1792,18 @@ async function streamUrlToFile(
     // validator paired with new bytes. (An emptied 0-byte sidecar reads back as "no
     // validator", so even a later failed new-write forces a safe full restart, never
     // a stale-flag resume.)
-    if (!(await rmOrTruncate(validatorSidecar, logUrl))) {
+    // The caller's pre-write ownership check is still VALID here: nothing has been
+    // written yet in this restart block, so its baseline still describes the staged
+    // file. Re-running it immediately before this destruction is both meaningful
+    // and free — and this IS a destruction of a file another writer may have
+    // re-staged while our request was in flight.
+    const guardedStaleSidecar: GuardedPath = {
+      path: validatorSidecar,
+      assertOwned: async () => {
+        if (beforeWrite) await beforeWrite();
+      },
+    };
+    if (!(await rmOrTruncate(guardedStaleSidecar, logUrl))) {
       throw new ModelError(
         `Download restart failed: could not remove or empty the stale resume-validator sidecar, so a ` +
           `fresh download could pair new bytes with a stale validator (risking corruption on a later ` +
@@ -1945,7 +2007,14 @@ async function streamUrlToFile(
       // marker so a content-type-only rejection (whose body may sniff as binary on
       // retry) still can't be resumed even if neutralization failed.
       onReject: async () => {
-        await discardRejectedPayload(targetPath, resumable ? validatorSidecar : undefined, logUrl);
+        // selfOwned, for the same reason as the cloud path above: we streamed these
+        // bytes ourselves, so the pre-write baseline no longer describes the file
+        // and would refuse our own cleanup. The stream is ours.
+        await discardRejectedPayload(
+          selfOwned(targetPath),
+          resumable ? selfOwned(validatorSidecar) : undefined,
+          logUrl,
+        );
         if (resumable) await writePoisonMarker(`${targetPath}.rejected`, logUrl);
       },
     });
@@ -2102,15 +2171,44 @@ async function downloadIntoCache(
      */
     const resumeOffsetFromDisk = async (
       /** The staged state this attempt VERIFIED moments ago. Re-asserted immediately
-       *  before each destructive cleanup below, because those cleanups delete or
-       *  truncate the SHARED staged file — and between the retry-boundary check and
-       *  this function a foreign writer can have replaced it. That gap was the last
-       *  window the retry loop added without an ownership check: a valid replacement
-       *  plus a surviving `.rejected` marker (whose removal transiently failed)
-       *  would otherwise have our automatic retry destroy the other writer's
-       *  partial. */
+       *  before EACH destructive syscall below (via the guards this builds), because
+       *  those cleanups delete or truncate the SHARED staged file — and between the
+       *  retry-boundary check and this function a foreign writer can have replaced
+       *  it. That gap was the last window the retry loop added without an ownership
+       *  check: a valid replacement plus a surviving `.rejected` marker (whose
+       *  removal transiently failed) would otherwise have our automatic retry
+       *  destroy the other writer's partial. */
       verified: StagedState,
     ): Promise<number> => {
+      /**
+       * The `.partial` and its `.etag`, each carrying the check that authorises
+       * destroying THAT file — deliberately not the same check.
+       *
+       * The partial's guard compares the whole staged state. The sidecar's compares
+       * ONLY the sidecar, because by the time it runs we may legitimately have
+       * removed the partial ourselves; re-checking the partial there would refuse
+       * our own cleanup. Each guard asserts what is still meaningful evidence for
+       * the file it protects.
+       */
+      const guardedStagedPair = (when: string): [GuardedPath, GuardedPath] => [
+        {
+          path: partial,
+          assertOwned: () => assertStillOurs(verified, when, false),
+        },
+        {
+          path: `${partial}.etag`,
+          assertOwned: async () => {
+            const nowSidecar = await sidecarBytes();
+            if (nowSidecar !== verified.sidecar) {
+              throw interferenceError(
+                "its resume validator changed, so a DIFFERENT upstream object has been staged there",
+                when,
+              );
+            }
+          },
+        },
+      ];
+
       let resumeFromBytes = 0;
       try {
         const existing = await downloadCacheFs.stat(partial);
@@ -2144,13 +2242,13 @@ async function downloadIntoCache(
             { url: logUrl, bytes: resumeFromBytes },
           );
         }
-        // Prove it is still ours BEFORE destroying it. A `.rejected` marker records
-        // that a PRIOR attempt of OURS rejected a body; it says nothing about a
-        // partial another writer has since staged in its place.
-        await assertStillOurs(verified, "before discarding a previously-rejected partial", false);
+        // Prove it is still ours before EACH destructive act. A `.rejected` marker
+        // records that a PRIOR attempt of OURS rejected a body; it says nothing
+        // about a partial another writer has since staged in its place. The guards
+        // travel with the paths, so every rm/truncate inside re-checks — a single
+        // check here would authorise the first act and go stale for the rest.
         const neutralized = await discardRejectedPayload(
-          partial,
-          `${partial}.etag`,
+          ...guardedStagedPair("before discarding a previously-rejected partial"),
           logUrl ?? redactUrlForLogs(url),
         );
         // Keep the marker if the partial could NOT be neutralized (rm AND truncate both
@@ -2182,8 +2280,10 @@ async function downloadIntoCache(
           );
           // Same rule: the head we just sniffed may belong to another writer's
           // in-progress file, not to our own poisoned leftover.
-          await assertStillOurs(verified, "before discarding a non-model partial", false);
-          await discardRejectedPayload(partial, `${partial}.etag`, logUrl ?? redactUrlForLogs(url));
+          await discardRejectedPayload(
+            ...guardedStagedPair("before discarding a non-model partial"),
+            logUrl ?? redactUrlForLogs(url),
+          );
           resumeFromBytes = 0;
         }
       }
@@ -2293,7 +2393,16 @@ async function downloadIntoCache(
     }
 
     /** One read of both fields. Callers that VERIFY and then RECORD must use a
-     *  single call for both, or they reintroduce the very gap they are closing. */
+     *  single call for both, or they reintroduce the very gap they are closing.
+     *
+     *  NOT AN ATOMIC SNAPSHOT, despite being one call. The size and the validator
+     *  are two separate filesystem reads with an await between them, so a writer
+     *  can change the sidecar after the size has been read. "Single call" here
+     *  means "no CALLER-level gap between verifying and recording" — it does not
+     *  mean the two fields were observed at one instant, and no filesystem API
+     *  available here would give that. The guarantee this buys is narrower than it
+     *  looks: it removes gaps that contain other logic, not the inherent
+     *  non-atomicity of observing a file nobody has locked. */
     const readStaged = async (): Promise<StagedState> => ({
       size: await partialSize(),
       sidecar: await sidecarBytes(),
@@ -2916,7 +3025,10 @@ export async function downloadWithCache(
       // miss), and log if even that fails, so a poisoned cache entry can't silently
       // re-poison cache hits (#473 P1).
       onReject: async () => {
-        const neutralized = await discardRejectedPayload(cachePath, undefined, logUrl);
+        // selfOwned: a materialised CACHE entry, not the shared `.partial`. It is
+        // reached through this call's own O_EXCL-temp-then-rename, so no concurrent
+        // downloader is streaming into it.
+        const neutralized = await discardRejectedPayload(selfOwned(cachePath), undefined, logUrl);
         // Only drop the Content-Type sidecar once the poisoned cache file is actually
         // gone/emptied. If the cache file SURVIVED (rm AND truncate both failed), KEEP
         // the `.ct` so the NEXT caller can still reject it by its persisted
