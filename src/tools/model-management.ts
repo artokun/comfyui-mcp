@@ -11,6 +11,7 @@ import {
   getDownloadJob,
   findDownloadJob,
   listDownloadJobs,
+  listDownloadJobCandidates,
   cancelDownloadJob,
   describePlacement,
   type DownloadJob,
@@ -235,6 +236,10 @@ export function registerModelManagementTools(server: McpServer): void {
         .string()
         .optional()
         .describe("Download id from download_model. Omit to list every tracked download (incl. in-flight ones from before a reconnect)."),
+      tray_id: z
+        .string()
+        .optional()
+        .describe("Disambiguator, shown on every row as `(tray <tray_id>)`. Only needed when two rows share one `id` — two different source URLs downloading to the SAME destination file. Pass it WITH `id` to select exactly one of them."),
       url: z
         .string()
         .url()
@@ -243,7 +248,7 @@ export function registerModelManagementTools(server: McpServer): void {
     },
     async (args) => {
       try {
-        const byId = args.id ? getDownloadJob(args.id) : undefined;
+        const byId = args.id ? getDownloadJob(args.id, args.tray_id) : undefined;
         const byUrl = !byId && args.url ? findDownloadJob({ url: args.url }) : undefined;
         const list =
           args.id || args.url
@@ -251,8 +256,33 @@ export function registerModelManagementTools(server: McpServer): void {
             : listDownloadJobs();
 
         if (list.length === 0) {
+          // #822: an id that answers to SEVERAL downloads resolved to none. That is
+          // not "no such download" — reporting it as one turns "could not determine
+          // which" into a definite (and wrong) verdict, and leaves the caller with
+          // no move. Name the candidates and the exact selector that picks one.
+          const candidates = args.id && !args.tray_id ? listDownloadJobCandidates(args.id) : [];
+          if (candidates.length > 1) {
+            const rows = candidates
+              .map(
+                (c) =>
+                  `  - tray \`${c.trayId}\` — ${c.status}, started ${Math.round((Date.now() - c.started_at) / 1000)}s ago, from: ${c.url}`,
+              )
+              .join("\n");
+            return {
+              content: [
+                {
+                  type: "text",
+                  text:
+                    `The id \`${args.id}\` matches ${candidates.length} DIFFERENT downloads, so it cannot select one. ` +
+                    `That id is derived from the DESTINATION file, and these downloads fetch different source URLs into the same destination:\n${rows}\n\n` +
+                    `Re-run download_status with \`tray_id\` set to the one you mean. ` +
+                    `Note that two of these are writing the SAME file — decide which to keep and cancel_download the other (also by \`tray_id\`).`,
+                },
+              ],
+            };
+          }
           const selector = args.id
-            ? `id \`${args.id}\``
+            ? `id \`${args.id}\`${args.tray_id ? ` + tray \`${args.tray_id}\`` : ""}`
             : args.url
               ? `url \`${args.url}\``
               : "";
@@ -271,6 +301,14 @@ export function registerModelManagementTools(server: McpServer): void {
         // ONE resolution for the whole listing: a verdict made against a
         // DIFFERENT ComfyUI than the one connected now must not be re-asserted (#369).
         const liveModelsDir = await currentLiveModelsRoot();
+        // #822: `id` is derived from the DESTINATION (+auth), so two rows fetching
+        // different URLs into one file legitimately share it. The composite
+        // (id, trayId) is the real handle — render trayId on EVERY row so the
+        // printed handle always identifies exactly one download, and shout when a
+        // listing actually contains a collision (two writers, one file).
+        const idCounts = new Map<string, number>();
+        for (const j of list) idCounts.set(j.id, (idCounts.get(j.id) ?? 0) + 1);
+        const collidingIds = [...idCounts.entries()].filter(([, n]) => n > 1).map(([k]) => k);
         const lines = list.map((j) => {
           const p = readDownloadProgress(j.progressId ?? j.trayId);
           const bytes =
@@ -279,7 +317,10 @@ export function registerModelManagementTools(server: McpServer): void {
               : p && p.downloaded > 0
                 ? `  ${(p.downloaded / 1024 ** 3).toFixed(2)} GB so far`
                 : "";
-          const head = `- \`${j.id}\` **${j.status}**${bytes}`;
+          const head = `- \`${j.id}\` (tray \`${j.trayId}\`) **${j.status}**${bytes}`;
+          const collisionNote = idCounts.get(j.id)! > 1
+            ? `\n    AMBIGUOUS id: another row in this listing shares \`${j.id}\` — these are DIFFERENT source URLs writing the SAME destination file, so the last writer wins and the result may be a mix. Select this one with \`tray_id\`: \`${j.trayId}\`. Pass that same tray_id to cancel_download to stop THIS one specifically.`
+            : "";
           // Same single placement policy the download_model renderer uses (#369):
           // a bare "landed at" is only ever printed for a CONFIRMED placement.
           const placement =
@@ -336,10 +377,14 @@ export function registerModelManagementTools(server: McpServer): void {
                 : "re-downloading in full";
             resumeNote = `\n    resume: ${diag.outcome} — ${fate} because ${why}; ${next}`;
           }
-          return `${head}${detail}${staleNote}${resumeNote}\n    from: ${j.url}`;
+          return `${head}${detail}${collisionNote}${staleNote}${resumeNote}\n    from: ${j.url}`;
         });
 
-        return { content: [{ type: "text", text: `## Downloads\n\n${lines.join("\n")}` }] };
+        const header =
+          collidingIds.length > 0
+            ? `## Downloads\n\nNOTE: ${collidingIds.length} id(s) below name MORE THAN ONE download (same destination file, different source URLs). Use the \`tray_id\` shown on each row — not the id alone — with download_status and cancel_download.\n`
+            : "## Downloads\n";
+        return { content: [{ type: "text", text: `${header}\n${lines.join("\n")}` }] };
       } catch (err) {
         return errorToToolResult(err);
       }
@@ -354,29 +399,44 @@ export function registerModelManagementTools(server: McpServer): void {
         .string()
         .min(1)
         .describe("The download id to cancel (from download_model / download_civitai_model / download_status)."),
+      tray_id: z
+        .string()
+        .optional()
+        .describe("Disambiguator, shown on every download_status row as `(tray <tray_id>)`. Required only when the `id` names more than one download (two different source URLs writing the SAME destination file) — then it selects exactly which one to abort."),
     },
     async (args) => {
       try {
-        const res = cancelDownloadJob(args.id);
+        const res = cancelDownloadJob(args.id, args.tray_id);
         if (!res.found) {
+          const candidates = res.candidates ?? [];
           return {
             content: [
               {
                 type: "text",
-                text: `No download with id \`${args.id}\` to cancel. It may have already finished and been pruned, or the id is wrong — check download_status.`,
+                text: candidates.length > 0
+                  ? `No download with id \`${args.id}\` AND tray \`${args.tray_id}\`. The id is tracked, but its tray ids are: ${candidates.map((c) => `\`${c.trayId}\` (${c.status})`).join(", ")}. Re-check download_status and use one of those.`
+                  : `No download with id \`${args.id}\` to cancel. It may have already finished and been pruned, or the id is wrong — check download_status.`,
               },
             ],
           };
         }
         if (res.ambiguous) {
+          const rows = (res.candidates ?? [])
+            .map(
+              (c) =>
+                `  - tray \`${c.trayId}\` — ${c.status}, started ${Math.round((Date.now() - c.started_at) / 1000)}s ago, from: ${c.url}`,
+            )
+            .join("\n");
           return {
             content: [
               {
                 type: "text",
                 text:
-                  `Refusing to cancel \`${args.id}\`: that id currently denotes MORE than one concurrent download ` +
-                  `(another session is downloading a different source to the same destination). Cancelling by id ` +
-                  `could stop the wrong one. Stop the specific download from the panel download tray instead.`,
+                  `Refusing to cancel \`${args.id}\` on the id alone: it denotes MORE than one download — different source URLs ` +
+                  `writing the SAME destination file, so cancelling by id could stop the wrong one.\n` +
+                  (rows ? `${rows}\n\n` : "\n") +
+                  `Re-run cancel_download with \`tray_id\` set to the one you want stopped. ` +
+                  `(A download owned by a PREVIOUS session still cannot be aborted from here — that one must be stopped from the panel download tray — but it is now selectable, so you can at least confirm which it is with download_status.)`,
               },
             ],
           };

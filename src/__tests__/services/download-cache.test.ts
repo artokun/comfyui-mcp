@@ -23,6 +23,7 @@ import { config } from "../../config.js";
 import { downloadCacheFs } from "../../services/download-cache.js";
 import { downloadModel } from "../../services/model-resolver.js";
 import type { ResumeDiagnostic } from "../../services/download-resume-diag.js";
+import { setDownloadRetryPolicyForTests } from "../../services/download-retry.js";
 
 /** Capture the resume decision a physical download reports (#467). The decision
  *  is delivered to the CALLER via an onResume callback (no shared map), so a test
@@ -70,6 +71,12 @@ beforeEach(async () => {
   config.civitaiApiToken = undefined;
   vi.stubGlobal("fetch", fetchMock);
   fetchMock.mockReset();
+  // These tests exercise ONE physical attempt's integrity semantics (#343/#467/#473).
+  // #470 added automatic retry on transient failures, which would otherwise re-enter
+  // the stream with a mock that has no further queued response. Pin a single attempt
+  // and disable the stall watchdog so each assertion is about the attempt itself.
+  // Retry behaviour has its own dedicated coverage (download-retry.test.ts).
+  setDownloadRetryPolicyForTests({ maxAttempts: 1, stallTimeoutMs: 0 });
 });
 
 afterEach(async () => {

@@ -266,6 +266,127 @@ describe("download_status tool", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+  // ── #822: a printed handle must identify exactly one row ──────────────────
+  describe("#822 the id is not unique — the rendered handle must still select", () => {
+    /** Two persisted in-flight records with the SAME id (one destination) and
+     *  DIFFERENT source URLs: the exact listing #822 reported. */
+    async function seedCollidingRows(dir: string, id: string): Promise<void> {
+      const common = {
+        id,
+        target_subfolder: "text_encoders",
+        status: "downloading",
+        started_at: Date.now() - 60_000,
+        updated: Date.now(),
+      };
+      await writeFile(
+        join(dir, `control-job-${id}-session-live.json`),
+        JSON.stringify({
+          ...common,
+          trayId: "livetray00000001",
+          progressId: "live-prog",
+          url: "https://huggingface.co/Comfy-Org/Krea-2/resolve/main/text_encoders/q.safetensors",
+          owner: "session-live",
+        }),
+      );
+      await writeFile(
+        join(dir, `control-job-${id}-session-orphan.json`),
+        JSON.stringify({
+          ...common,
+          trayId: "orphantray000001",
+          progressId: "orphan-prog",
+          url: "https://huggingface.co/Aitrepreneur/FLX/resolve/main/q.safetensors",
+          owner: "session-orphan",
+          started_at: Date.now() - 884_000,
+        }),
+      );
+    }
+
+    it("renders the tray id on every row, so the printed handle names ONE download", async () => {
+      const dir = await mkdtemp(join(tmpdir(), "model-management-822-"));
+      setProgressDir(dir);
+      try {
+        await seedCollidingRows(dir, "a0b477082f35745c");
+        const { downloadStatus } = makeServer();
+        const text = (await downloadStatus({})).content[0].text;
+
+        // Both rows appear (download_status promises EVERY tracked download)…
+        expect(text).toContain("livetray00000001");
+        expect(text).toContain("orphantray000001");
+        // …each carrying its tray id alongside the shared id, so the two lines are
+        // programmatically distinguishable rather than identical-looking.
+        expect(text).toContain("`a0b477082f35745c` (tray `livetray00000001`)");
+        expect(text).toContain("`a0b477082f35745c` (tray `orphantray000001`)");
+      } finally {
+        setProgressDir("");
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("SHOUTS when a listing contains two rows under one id — two writers, one file", async () => {
+      const dir = await mkdtemp(join(tmpdir(), "model-management-822-"));
+      setProgressDir(dir);
+      try {
+        await seedCollidingRows(dir, "a0b477082f35745c");
+        const { downloadStatus } = makeServer();
+        const text = (await downloadStatus({})).content[0].text;
+
+        expect(text).toMatch(/name MORE THAN ONE download/);
+        expect(text).toContain("AMBIGUOUS id");
+        // The remedy is stated in terms the caller can act on right now.
+        expect(text).toMatch(/Use the `tray_id`/);
+        expect(text).toMatch(/cancel_download/);
+      } finally {
+        setProgressDir("");
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("download_status(id) on an ambiguous id names the candidates — it does NOT report 'no download'", async () => {
+      const dir = await mkdtemp(join(tmpdir(), "model-management-822-"));
+      setProgressDir(dir);
+      try {
+        await seedCollidingRows(dir, "a0b477082f35745c");
+        const { downloadStatus } = makeServer();
+        const text = (await downloadStatus({ id: "a0b477082f35745c" })).content[0].text;
+
+        // The regression this guards: the id resolved to nothing (ambiguous), and
+        // saying "no download matching" would turn "could not determine WHICH" into
+        // a definite — and false — "it never started".
+        expect(text).not.toMatch(/No download matching/);
+        expect(text).toMatch(/matches 2 DIFFERENT downloads/);
+        expect(text).toContain("livetray00000001");
+        expect(text).toContain("orphantray000001");
+        // Both source URLs are shown, which is what lets a caller tell them apart.
+        expect(text).toContain("Krea-2");
+        expect(text).toContain("Aitrepreneur");
+        expect(text).toMatch(/Re-run download_status with `tray_id`/);
+      } finally {
+        setProgressDir("");
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("download_status(id, tray_id) selects exactly one of the colliding rows", async () => {
+      const dir = await mkdtemp(join(tmpdir(), "model-management-822-"));
+      setProgressDir(dir);
+      try {
+        await seedCollidingRows(dir, "a0b477082f35745c");
+        const { downloadStatus } = makeServer();
+        const text = (
+          await downloadStatus({ id: "a0b477082f35745c", tray_id: "orphantray000001" })
+        ).content[0].text;
+
+        expect(text).toContain("orphantray000001");
+        expect(text).toContain("Aitrepreneur");
+        // The OTHER row is not reported — the selector actually selected.
+        expect(text).not.toContain("livetray00000001");
+        expect(text).not.toContain("Krea-2");
+      } finally {
+        setProgressDir("");
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
 });
 
 describe("list_local_models rendering", () => {

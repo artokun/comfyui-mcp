@@ -78,6 +78,7 @@ vi.mock("../../services/extra-paths.js", () => ({
 
 import { config } from "../../config.js";
 import { downloadModel, resolveDownloadTarget } from "../../services/model-resolver.js";
+import { setDownloadRetryPolicyForTests } from "../../services/download-retry.js";
 import { ModelError } from "../../utils/errors.js";
 import { logger } from "../../utils/logger.js";
 
@@ -138,6 +139,12 @@ beforeEach(() => {
   config.comfyuiPath = "/comfy";
   config.huggingfaceToken = undefined;
   config.civitaiApiToken = undefined;
+  // These tests assert routing / auth-header / destination behaviour with
+  // single-shot fetch mocks. #470 added automatic retry on transient failures
+  // (a 500 IS transient), which would re-enter the stream with no queued
+  // response. Pin ONE attempt so each assertion stays about its own subject;
+  // retry has dedicated coverage in download-retry.test.ts.
+  setDownloadRetryPolicyForTests({ maxAttempts: 1, stallTimeoutMs: 0 });
 });
 
 afterEach(() => {

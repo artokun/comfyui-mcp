@@ -23,6 +23,12 @@ import { redactUrlForLogs } from "./download-auth.js";
 import { reportDownloadProgress, type DownloadProgress } from "./download-progress.js";
 import type { ResumeReporter } from "./download-resume-diag.js";
 import {
+  abortableDelay,
+  backoffDelayMs,
+  classifyDownloadFailure,
+  downloadRetryPolicy,
+} from "./download-retry.js";
+import {
   cloudPrincipalKey,
   downloadCloudUrlToFile,
   supportsCloudDownload,
@@ -1156,6 +1162,22 @@ async function streamUrlToFile(
   /** Per-download abort signal (#515): passed to fetch AND the write pipeline so a
    *  cancel aborts the in-flight transfer promptly; the partial is left on disk. */
   signal?: AbortSignal,
+  /** Called with the byte count of every chunk that reaches disk (#470). Feeds the
+   *  caller's STALL watchdog: a transfer that stops delivering bytes entirely is
+   *  abandoned and retried (resuming), instead of sitting "in flight" for half an
+   *  hour. Fires regardless of whether a progress tray is attached — the watchdog
+   *  must bound the attempt on the plain (non-panel) path too. */
+  onBytes?: (delta: number) => void,
+  /** When true, a failed attempt does NOT publish a terminal `error` progress row —
+   *  the CALLER will, once it has decided the download is really over (#470).
+   *
+   *  This matters more than it looks. The orchestrator treats the first terminal
+   *  row as the download's OUTCOME and wakes the tab's agent with it (#547). An
+   *  attempt that is about to be retried is not an outcome, so emitting `error`
+   *  there tells the agent the download FAILED while it is in fact still running —
+   *  and the agent's natural response (re-issue) is precisely the second-writer
+   *  hazard the download machinery exists to prevent. */
+  deferErrorRow = false,
 ): Promise<string> {
   // Fail fast if we were cancelled before any bytes moved — no request, no partial.
   if (signal?.aborted) throw new DOMException("The download was cancelled.", "AbortError");
@@ -1547,6 +1569,8 @@ async function streamUrlToFile(
         onResume,
         modelExt,
         signal,
+        onBytes,
+        deferErrorRow,
       );
     }
   }
@@ -1810,9 +1834,17 @@ async function streamUrlToFile(
     if (expectedTotal > 0 && actual < expectedTotal) {
       // Truncated. Keep the partial on disk so a later call can range-resume it,
       // but do NOT report this as a completed download.
+      //
+      // `retryable` is the CONTRACT the retry loop reads (#470): the bytes on disk
+      // are a valid prefix of THIS object (their validator sidecar was written
+      // against it), so another attempt resumes rather than restarts. Stated as a
+      // flag rather than inferred from this sentence, which is prose and will be
+      // reworded. It is a claim about the PARTIAL, not about the server: the resume
+      // still has to re-prove object identity via If-Range/X-Linked-Etag on the next
+      // attempt, exactly as a fresh call would.
       throw new ModelError(
         `Download truncated: wrote ${actual} of ${expectedTotal} bytes — the stream ended early. Not complete; retry to resume.`,
-        { url: logUrl },
+        { url: logUrl, retryable: true },
       );
     }
     if (expectedTotal > 0 && actual > expectedTotal) {
@@ -1864,8 +1896,9 @@ async function streamUrlToFile(
       },
     });
 
-  // No progress wanted (internal/cache caller, or not under the panel) → straight pipe.
-  if (!progress) {
+  // No progress tray AND no stall watchdog (internal/cache caller, not under the
+  // panel) → straight pipe, nothing to count.
+  if (!progress && !onBytes) {
     await pipeline(nodeStream, fileStream, { signal });
     await assertComplete();
     await assertModelPayload();
@@ -1874,21 +1907,31 @@ async function streamUrlToFile(
     return responseContentType;
   }
 
-  // Tally bytes as they flow and report throughput to the panel tray.
+  // Tally bytes as they flow: report throughput to the panel tray (when a tray row
+  // was requested) and feed the caller's stall watchdog (#470). The counter now runs
+  // whenever EITHER sink is present — the watchdog must be able to bound a wedged
+  // attempt even with no panel attached, which is where #470's 30-minute silent
+  // stall was observed.
   const total = expectedTotal;
   let downloaded = appendMode ? effectiveResume : 0;
   let windowStart = Date.now();
   let windowBytes = downloaded;
   let bytesPerSec = 0;
   const emit = (status: DownloadProgress["status"], force = false) =>
-    reportDownloadProgress(
-      { id: progress.id, name: progress.name, attempt: progress.attempt, downloaded, total, bytes_per_sec: bytesPerSec, status },
-      force,
-    );
+    progress
+      ? reportDownloadProgress(
+          { id: progress.id, name: progress.name, attempt: progress.attempt, downloaded, total, bytes_per_sec: bytesPerSec, status },
+          force,
+        )
+      : undefined;
   emit("downloading", true); // show the row immediately, even before the first chunk
   const counter = new Transform({
     transform(chunk: Buffer, _enc, cb) {
       downloaded += chunk.length;
+      // Feed the watchdog FIRST and unconditionally — before the 400 ms throughput
+      // window gate — so a trickle that never fills a window still counts as
+      // liveness. Gating it would let a slow-but-alive transfer be killed as stalled.
+      onBytes?.(chunk.length);
       const now = Date.now();
       const dt = now - windowStart;
       if (dt >= 400) {
@@ -1912,8 +1955,11 @@ async function streamUrlToFile(
     // On a user cancel (#515) the abort left a resumable .partial on disk. Do NOT emit
     // an "error" row for it, and do NOT clear the row here: this cache layer has no
     // registry context, and a coalesced sibling may share this progress row. The JOB
-    // layer (finalizeCancelled) clears it registry-aware. Only a genuine failure emits.
-    if (!signal?.aborted) emit("error", true);
+    // layer (finalizeCancelled) clears it registry-aware. Only a genuine failure emits
+    // — and, under a retrying caller, only once that caller has given up
+    // (deferErrorRow), so an attempt that is about to be retried never publishes an
+    // outcome the agent would act on (#470).
+    if (!signal?.aborted && !deferErrorRow) emit("error", true);
     throw err;
   }
 }
@@ -1987,103 +2033,97 @@ async function downloadIntoCache(
     // handshake.) Cleanup on terminal failure stays unchanged.
     const partial = join(cacheDir(), `.${basename(target)}.partial`);
     const rejectedMarker = `${partial}.rejected`;
-    let resumeFromBytes = 0;
-    try {
-      const existing = await downloadCacheFs.stat(partial);
-      if (existing.isFile() && existing.size > 0) {
-        resumeFromBytes = existing.size;
-        logger.info("Resuming partial download", {
-          url: logUrl,
-          bytes: resumeFromBytes,
-        });
-      }
-    } catch {
-      // No partial — fresh download.
-    }
 
-    // #473 P1 — poison MARKER guard (cleanup- AND content-type-independent). A prior
-    // attempt that REJECTED this download (even solely on the response Content-Type,
-    // which is gone now) drops a `.rejected` marker next to the partial. If it's
-    // present, the leftover partial is poison regardless of what its bytes sniff as —
-    // never resume onto it. Discard everything and restart from 0.
-    let markerPresent = false;
-    try {
-      markerPresent = (await downloadCacheFs.stat(rejectedMarker)).isFile();
-    } catch {
-      /* no marker */
-    }
-    if (markerPresent) {
-      if (resumeFromBytes > 0) {
-        logger.warn(
-          `Discarding a previously-rejected (${resumeFromBytes}-byte) partial before resume: a ` +
-            `poison marker from an earlier non-model rejection is present — restarting from 0 (#473).`,
-          { url: logUrl, bytes: resumeFromBytes },
-        );
+    /**
+     * The byte offset THIS attempt may resume from, re-derived from disk every
+     * time (#470). Re-deriving is the point: after an interrupted attempt the
+     * `.partial` is larger than it was, so the next attempt picks up where the
+     * last one actually stopped rather than where this call originally started.
+     *
+     * It returns only a CANDIDATE offset. Nothing here proves the bytes belong to
+     * the requested object — that proof is `streamUrlToFile`'s job (the `.etag`
+     * validator sidecar recorded at WRITE time, replayed as `If-Range`, plus the
+     * content-addressed X-Linked-Etag cross-check for cross-origin 206s, #343/#467).
+     * A partial with no recorded write-time identity is NOT resumed; it restarts.
+     */
+    const resumeOffsetFromDisk = async (): Promise<number> => {
+      let resumeFromBytes = 0;
+      try {
+        const existing = await downloadCacheFs.stat(partial);
+        if (existing.isFile() && existing.size > 0) {
+          resumeFromBytes = existing.size;
+          logger.info("Resuming partial download", {
+            url: logUrl,
+            bytes: resumeFromBytes,
+          });
+        }
+      } catch {
+        // No partial — fresh download.
       }
-      const neutralized = await discardRejectedPayload(
-        partial,
-        `${partial}.etag`,
-        logUrl ?? redactUrlForLogs(url),
-      );
-      // Keep the marker if the partial could NOT be neutralized (rm AND truncate both
-      // failed), so a still-poisoned leftover stays flagged for the next attempt.
-      // resumeFromBytes = 0 forces this attempt to re-download fresh ("w" truncates the
-      // leftover), so the poison is cleared here regardless.
-      if (neutralized) await safeRm(rejectedMarker);
-      resumeFromBytes = 0;
-    }
 
-    // #473 P1 — cleanup-INDEPENDENT poison guard (body-magic). A prior attempt may have REJECTED
-    // this download as an HTML/JSON auth/error body and then been UNABLE to remove or
-    // truncate the leftover .partial (a denied rm AND a denied truncate). Re-inspect
-    // the partial's HEAD here, before deciding to resume: if it is itself a non-model
-    // (HTML/JSON) body for a binary-model destination, it is poison — NEVER resume
-    // onto it. Reset to a fresh download (resumeFromBytes = 0 ⇒ no Range ⇒ the "w"
-    // open truncates the poisoned bytes) and best-effort discard the sidecar, so the
-    // invariant "a rejected leftover can't be treated as resumable" holds even when
-    // both cleanup mechanisms failed. A legitimate in-progress partial sniffs as
-    // binary (null) and resumes normally.
-    if (resumeFromBytes > 0 && modelExt) {
-      const partialHead = await readHead(partial);
-      if (detectNonModelPayload(partialHead, "", modelExt)) {
-        logger.warn(
-          `Discarding a previously-rejected non-model (${resumeFromBytes}-byte) partial before ` +
-            `resume: its head is an HTML/JSON auth/error body, not a model — restarting from 0 so ` +
-            `the poisoned bytes can't be resumed onto (#473).`,
-          { url: logUrl, bytes: resumeFromBytes },
+      // #473 P1 — poison MARKER guard (cleanup- AND content-type-independent). A prior
+      // attempt that REJECTED this download (even solely on the response Content-Type,
+      // which is gone now) drops a `.rejected` marker next to the partial. If it's
+      // present, the leftover partial is poison regardless of what its bytes sniff as —
+      // never resume onto it. Discard everything and restart from 0.
+      let markerPresent = false;
+      try {
+        markerPresent = (await downloadCacheFs.stat(rejectedMarker)).isFile();
+      } catch {
+        /* no marker */
+      }
+      if (markerPresent) {
+        if (resumeFromBytes > 0) {
+          logger.warn(
+            `Discarding a previously-rejected (${resumeFromBytes}-byte) partial before resume: a ` +
+              `poison marker from an earlier non-model rejection is present — restarting from 0 (#473).`,
+            { url: logUrl, bytes: resumeFromBytes },
+          );
+        }
+        const neutralized = await discardRejectedPayload(
+          partial,
+          `${partial}.etag`,
+          logUrl ?? redactUrlForLogs(url),
         );
-        await discardRejectedPayload(partial, `${partial}.etag`, logUrl ?? redactUrlForLogs(url));
+        // Keep the marker if the partial could NOT be neutralized (rm AND truncate both
+        // failed), so a still-poisoned leftover stays flagged for the next attempt.
+        // resumeFromBytes = 0 forces this attempt to re-download fresh ("w" truncates the
+        // leftover), so the poison is cleared here regardless.
+        if (neutralized) await safeRm(rejectedMarker);
         resumeFromBytes = 0;
       }
-    }
 
-    try {
-      const contentType = await streamUrlToFile(
-        url,
-        partial,
-        headers,
-        logUrl,
-        storageAuth,
-        resumeFromBytes,
-        progress,
-        true, // resumable: cache partials use the .partial + If-Range resume handshake
-        onResume,
-        modelExt,
-        signal,
-      );
-      await downloadCacheFs.rename(partial, target);
-      await touch(target);
-      // Persist the response Content-Type beside the cache file so a later cache-HIT /
-      // coalesced caller re-validates with it (#473 reuse gap).
-      await writeCacheContentType(target, contentType);
-      // Clean any stale poison marker now that a CLEAN payload finalized under this
-      // key — the partial is gone (renamed) and the bytes passed validation.
-      await safeRm(rejectedMarker);
-      return target;
-    } catch (err) {
-      // Leave the partial on disk for a future resume; only nuke it if it
-      // is now empty (server said the previous partial was bogus, or our
-      // first write failed).
+      // #473 P1 — cleanup-INDEPENDENT poison guard (body-magic). A prior attempt may have REJECTED
+      // this download as an HTML/JSON auth/error body and then been UNABLE to remove or
+      // truncate the leftover .partial (a denied rm AND a denied truncate). Re-inspect
+      // the partial's HEAD here, before deciding to resume: if it is itself a non-model
+      // (HTML/JSON) body for a binary-model destination, it is poison — NEVER resume
+      // onto it. Reset to a fresh download (resumeFromBytes = 0 ⇒ no Range ⇒ the "w"
+      // open truncates the poisoned bytes) and best-effort discard the sidecar, so the
+      // invariant "a rejected leftover can't be treated as resumable" holds even when
+      // both cleanup mechanisms failed. A legitimate in-progress partial sniffs as
+      // binary (null) and resumes normally.
+      if (resumeFromBytes > 0 && modelExt) {
+        const partialHead = await readHead(partial);
+        if (detectNonModelPayload(partialHead, "", modelExt)) {
+          logger.warn(
+            `Discarding a previously-rejected non-model (${resumeFromBytes}-byte) partial before ` +
+              `resume: its head is an HTML/JSON auth/error body, not a model — restarting from 0 so ` +
+              `the poisoned bytes can't be resumed onto (#473).`,
+            { url: logUrl, bytes: resumeFromBytes },
+          );
+          await discardRejectedPayload(partial, `${partial}.etag`, logUrl ?? redactUrlForLogs(url));
+          resumeFromBytes = 0;
+        }
+      }
+
+      return resumeFromBytes;
+    };
+
+    /** Only ever removes an EMPTY partial — a non-empty one is the resume
+     *  candidate and is deliberately preserved on every failure path (#470's
+     *  governing harm: never destroy progress you cannot re-fetch cheaply). */
+    const dropEmptyPartial = async (): Promise<void> => {
       try {
         const remaining = await downloadCacheFs.stat(partial);
         if (remaining.size === 0) {
@@ -2096,7 +2136,156 @@ async function downloadIntoCache(
       } catch {
         // Partial gone — nothing to clean.
       }
-      throw err;
+    };
+
+    /** Bytes retained on disk right now, or undefined when it can't be read.
+     *  Reported, never assumed: an unreadable partial must not be described as
+     *  "N bytes preserved" — "could not determine" stays undetermined. */
+    const retainedBytes = async (): Promise<number | undefined> => {
+      try {
+        const st = await downloadCacheFs.stat(partial);
+        return st.isFile() ? st.size : undefined;
+      } catch {
+        return undefined;
+      }
+    };
+
+    // ── #470: bounded retry with backoff, resuming each time ──────────────────
+    //
+    // A transfer that cannot survive an interruption will eventually be killed by
+    // one. The `.partial` + `.etag` machinery already made an interrupted transfer
+    // RESUMABLE; what was missing is anything that resumes it WITHOUT a human
+    // re-issuing the call. This loop is that.
+    //
+    // Every attempt re-derives its offset from disk and goes through the SAME
+    // identity proof a cold call does — there is no "we already checked" shortcut,
+    // so a retry can never splice bytes from a different object.
+    const retry = downloadRetryPolicy();
+    for (let attempt = 1; ; attempt += 1) {
+      // A cancel between attempts stops here — never consumed by a retry.
+      if (signal?.aborted) throw new DOMException("The download was cancelled.", "AbortError");
+
+      const resumeFromBytes = await resumeOffsetFromDisk();
+
+      // Per-attempt abort, fed by TWO independent sources: the caller's cancel
+      // (forwarded) and our stall watchdog. They are kept distinguishable — the
+      // caller's `signal` is still consulted directly below — because a cancel must
+      // never be retried into a completion, while a stall must always be.
+      const attemptCtl = new AbortController();
+      const forwardCancel = (): void => attemptCtl.abort();
+      // An `abort` listener added to an ALREADY-aborted signal never fires, so
+      // forward the existing state explicitly rather than registering a listener
+      // that can never run — otherwise an attempt could start with a live signal
+      // for a download the caller has already cancelled.
+      if (signal?.aborted) attemptCtl.abort();
+      else signal?.addEventListener("abort", forwardCancel, { once: true });
+      let stalled = false;
+      let lastByteAt = Date.now();
+      const stallTicker =
+        retry.stallTimeoutMs > 0
+          ? setInterval(
+              () => {
+                if (Date.now() - lastByteAt >= retry.stallTimeoutMs) {
+                  stalled = true;
+                  attemptCtl.abort();
+                }
+              },
+              Math.min(5_000, Math.max(500, Math.floor(retry.stallTimeoutMs / 4))),
+            )
+          : undefined;
+      if (stallTicker && typeof stallTicker.unref === "function") stallTicker.unref();
+
+      try {
+        const contentType = await streamUrlToFile(
+          url,
+          partial,
+          headers,
+          logUrl,
+          storageAuth,
+          resumeFromBytes,
+          progress,
+          true, // resumable: cache partials use the .partial + If-Range resume handshake
+          onResume,
+          modelExt,
+          attemptCtl.signal,
+          () => {
+            lastByteAt = Date.now();
+          },
+          // WE decide when this download is over, so no attempt publishes a
+          // terminal "error" row on our behalf (#470 / #547).
+          true,
+        );
+        await downloadCacheFs.rename(partial, target);
+        await touch(target);
+        // Persist the response Content-Type beside the cache file so a later cache-HIT /
+        // coalesced caller re-validates with it (#473 reuse gap).
+        await writeCacheContentType(target, contentType);
+        // Clean any stale poison marker now that a CLEAN payload finalized under this
+        // key — the partial is gone (renamed) and the bytes passed validation.
+        await safeRm(rejectedMarker);
+        return target;
+      } catch (err) {
+        // THE CALLER CANCELLED. Checked before anything else and never classified:
+        // a cancel is a decision, not a failure, and retrying it would resurrect a
+        // transfer the user stopped. The partial is left for a later resume.
+        if (signal?.aborted) {
+          await dropEmptyPartial();
+          throw err;
+        }
+
+        const cls = stalled
+          ? {
+              retryable: true,
+              reason: `no bytes arrived for ${Math.round(retry.stallTimeoutMs / 1000)}s (the connection wedged without closing)`,
+            }
+          : classifyDownloadFailure(err);
+
+        if (!cls.retryable || attempt >= retry.maxAttempts) {
+          await dropEmptyPartial();
+          // NOTE: no terminal "error" row is published here. downloadModel already
+          // emits exactly one when this whole call throws (model-resolver.ts), which
+          // is precisely the moment the download is genuinely over. Withholding the
+          // per-attempt rows (deferErrorRow) therefore removes the FALSE failures
+          // without removing the real one — and without double-reporting it.
+          // Only ANNOTATE when retries actually happened and the cause was transient
+          // — an auth/gating failure must keep its own actionable message intact.
+          if (attempt > 1 && cls.retryable) {
+            const kept = await retainedBytes();
+            const partialNote =
+              kept === undefined
+                ? `The partial download's size could NOT be read, so how much progress survived is unknown — check the download cache before assuming either way.`
+                : kept > 0
+                  ? `${(kept / 1024 ** 3).toFixed(2)} GB of partial data is preserved on disk; re-issuing the SAME download resumes from there (it is not re-fetched) provided the host still serves the same object.`
+                  : `No partial data survived, so a re-issue restarts from the beginning.`;
+            throw new ModelError(
+              `Download failed after ${attempt} attempts (the last ${attempt - 1} were automatic retries with backoff): ` +
+                `${err instanceof Error ? err.message : String(err)} — ${cls.reason}. ${partialNote}`,
+              { url: logUrl, attempts: attempt, retryable: false },
+            );
+          }
+          throw err;
+        }
+
+        const delay = backoffDelayMs(attempt, retry);
+        logger.warn(
+          `Download attempt ${attempt}/${retry.maxAttempts} failed and will be retried in ` +
+            `${Math.round(delay / 1000)}s: ${cls.reason}. The partial file is kept and the retry ` +
+            `resumes from it (re-proving the object's identity first, #467).`,
+          {
+            url: logUrl,
+            attempt,
+            bytesBeforeAttempt: resumeFromBytes,
+            error: err instanceof Error ? err.message : String(err),
+          },
+        );
+        // Backoff before re-requesting. #470 observed a 403 from an INSTANT
+        // re-request after an aborted connection — the wait is part of the fix,
+        // not politeness. It wakes early if the caller cancels.
+        await abortableDelay(delay, signal);
+      } finally {
+        if (stallTicker) clearInterval(stallTicker);
+        signal?.removeEventListener("abort", forwardCancel);
+      }
     }
   })();
 

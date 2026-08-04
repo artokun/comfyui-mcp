@@ -1993,5 +1993,91 @@ describe("node-management service", () => {
       expect(msg).toMatch(/disable the old custom_nodes\/ComfyUI-Manager clone/i);
       expect(msg).toMatch(/--enable-manager/i);
     });
+
+    // ---- #817: a model download is not a node install ----------------------
+    describe("#817 the queue budget for a model download", () => {
+      /** A Manager whose queue NEVER drains, so the wait always times out. */
+      function stubNeverDrainingQueue(): void {
+        vi.stubGlobal(
+          "fetch",
+          vi.fn(async (url: string): Promise<Response> => {
+            const path = new URL(url).pathname;
+            if (path === "/v2/manager/queue/status") {
+              return jsonResponse({
+                total_count: 1,
+                done_count: 0,
+                in_progress_count: 1,
+                pending_count: 0,
+                is_processing: true,
+              });
+            }
+            if (path === "/v2/manager/is_legacy_manager_ui") {
+              return jsonResponse({ is_legacy_manager_ui: false });
+            }
+            return new Response("", { status: 200 });
+          }),
+        );
+      }
+
+      it("uses the MODEL budget, not the 600s node-install budget", async () => {
+        // The node budget is 5000 ms in this suite; the model budget is set to a
+        // distinct, larger value. If install-model wrongly took the node budget,
+        // the message would name 5 seconds — which is #817 in miniature: a model
+        // download timed out on a ceiling that was never sized for one.
+        setQueueTimingForTests({ timeoutMs: 5000, modelTimeoutMs: 90 });
+        stubNeverDrainingQueue();
+
+        const err = await installModelViaManager({
+          name: "big.safetensors",
+          url: "https://example.com/big.safetensors",
+          filename: "big.safetensors",
+          type: "diffusion_models",
+        }).catch((e) => e as Error);
+
+        expect((err as Error).message).toMatch(/did not finish within 0s|did not finish within/);
+        expect((err as Error).message).not.toMatch(/did not finish within 5s/);
+      });
+
+      it("says the wait gave up — NOT that the download failed — and forbids a re-issue", async () => {
+        setQueueTimingForTests({ modelTimeoutMs: 90 });
+        stubNeverDrainingQueue();
+
+        const err = await installModelViaManager({
+          name: "big.safetensors",
+          url: "https://example.com/big.safetensors",
+          filename: "big.safetensors",
+          type: "diffusion_models",
+        }).catch((e) => e as Error);
+        const msg = (err as Error).message;
+
+        // The wait ended; the host was never told to stop. Claiming failure here is
+        // what made #817's reporter re-issue — and a second concurrent server-side
+        // fetch of one file is how the destination ended up truncated.
+        expect(msg).toMatch(/NOT proof the download failed/i);
+        expect(msg).toMatch(/Do NOT re-issue/i);
+        expect(msg).toMatch(/corrupt model/i);
+        // …and it names moves the caller can actually make from here.
+        expect(msg).toMatch(/list_local_models/);
+        expect(msg).toMatch(/COMFYUI_MANAGER_DOWNLOAD_TIMEOUT_S/);
+        expect(msg).toMatch(/LOCAL ComfyUI/);
+      });
+
+      it("leaves a NODE install's timeout message alone — it must not inherit the download advice", async () => {
+        setQueueTimingForTests({ timeoutMs: 60 });
+        stubNeverDrainingQueue();
+
+        const err = await installCustomNode({ id: "comfyui-impact-pack" }).catch(
+          (e) => e as Error,
+        );
+        const msg = (err as Error).message;
+
+        expect(msg).toMatch(/did not finish within/);
+        // A node install has no half-downloaded model to protect and no
+        // COMFYUI_MANAGER_DOWNLOAD_TIMEOUT_S knob — telling it the model story would
+        // be advice that does not apply.
+        expect(msg).not.toMatch(/Do NOT re-issue/i);
+        expect(msg).not.toMatch(/COMFYUI_MANAGER_DOWNLOAD_TIMEOUT_S/);
+      });
+    });
   });
 });

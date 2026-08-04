@@ -109,6 +109,7 @@ import {
   getDownloadJob,
   findDownloadJob,
   listDownloadJobs,
+  listDownloadJobCandidates,
   cancelDownloadJob,
   resetDownloadJobs,
   downloadIdFor,
@@ -557,6 +558,164 @@ describe("download job registry", () => {
     await pub.settled;
     await new Promise((r) => setTimeout(r, 0));
     expect(hoisted.calls).toBe(2);
+  });
+
+  // ── #822: the exposed `id` is not unique, so it cannot select ─────────────
+  //
+  // `id` is a hash of the DESTINATION (+auth), deliberately: two URLs landing on
+  // one file are one writer. The consequence is that `id` is a DESTINATION handle
+  // while download_status renders it as though it were a JOB handle — and when a
+  // reconnect leaves an orphaned in-flight record, two rows carry the same id and
+  // neither can be selected. The composite (id, trayId) is the real identity; this
+  // block is about making it reachable from the public surface.
+  describe("#822 selecting one download when an id names several", () => {
+    it("lists EVERY download an id answers to, keyed by the true (id, trayId) identity", async () => {
+      const dir = await mkdtemp(pathJoin(tmpdir(), "djobs-822-"));
+      setProgressDir(dir);
+      try {
+        const a = await startDownloadJob(URL_A, "checkpoints");
+        // The #822 shape: an orphan from before a reconnect — same destination
+        // (same id), different SOURCE URL (different trayId), heartbeat stale.
+        await writeForeignJobRecord(dir, {
+          id: a.job.id,
+          trayId: "orphantrayid0001",
+          progressId: "orphan-prog",
+          url: URL_B,
+          owner: `${PERSIST_OWNER}-reconnected-away`,
+          ageMs: 313_000,
+        });
+
+        const candidates = listDownloadJobCandidates(a.job.id);
+        expect(candidates).toHaveLength(2);
+        // Both share the id — which is exactly why the id alone cannot select.
+        expect(new Set(candidates.map((c) => c.id))).toEqual(new Set([a.job.id]));
+        // …and both are distinguishable by trayId.
+        expect(new Set(candidates.map((c) => c.trayId))).toEqual(
+          new Set([a.job.trayId, "orphantrayid0001"]),
+        );
+      } finally {
+        setProgressDir("");
+        await fsRm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("getDownloadJob(id, trayId) resolves the ORPHAN — the row that was unreachable", async () => {
+      const dir = await mkdtemp(pathJoin(tmpdir(), "djobs-822-"));
+      setProgressDir(dir);
+      try {
+        const a = await startDownloadJob(URL_A, "checkpoints");
+        await writeForeignJobRecord(dir, {
+          id: a.job.id,
+          trayId: "orphantrayid0001",
+          progressId: "orphan-prog",
+          url: URL_B,
+          owner: `${PERSIST_OWNER}-reconnected-away`,
+          ageMs: 313_000,
+        });
+
+        // By id alone you get the local live one (which is fine, and is #761's rule).
+        expect(getDownloadJob(a.job.id)?.trayId).toBe(a.job.trayId);
+        // With the tray id you get the specific one you asked for — including the
+        // orphan, which #822 reported as unselectable by any means.
+        const orphan = getDownloadJob(a.job.id, "orphantrayid0001");
+        expect(orphan?.trayId).toBe("orphantrayid0001");
+        expect(orphan?.url).toBe(URL_B);
+        // And a tray id that names nothing resolves to nothing — not to "whichever".
+        expect(getDownloadJob(a.job.id, "nosuchtrayid0000")).toBeUndefined();
+      } finally {
+        setProgressDir("");
+        await fsRm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("cancel_download with a tray_id aborts EXACTLY that download, leaving its same-id sibling alone", async () => {
+      // Two in-flight jobs in THIS process that share a destination id would
+      // normally coalesce, so drive the distinguishing case directly: two jobs with
+      // different ids, and confirm tray-id selection targets the right one and does
+      // not fall back to "whatever the id row happens to hold".
+      const a = await startDownloadJob(URL_A, "checkpoints");
+      const b = await startDownloadJob(URL_B, "loras");
+
+      const wrongTray = cancelDownloadJob(a.job.id, b.job.trayId);
+      // a's id + b's tray is not a real download — nothing may be aborted on it.
+      expect(wrongTray.aborted).toBe(false);
+      expect(wrongTray.found).toBe(false);
+      expect(a.job.status).toBe("downloading");
+      expect(b.job.status).toBe("downloading");
+
+      const right = cancelDownloadJob(a.job.id, a.job.trayId);
+      expect(right.aborted).toBe(true);
+      await a.settled;
+      expect(a.job.status).toBe("cancelled");
+      // The sibling is untouched.
+      expect(b.job.status).toBe("downloading");
+      hoisted.resolvers.find((r) => r.url === URL_B)!.resolve("/M/loras/other.safetensors");
+      await b.settled;
+    });
+
+    it("an ambiguity refusal NAMES the candidates instead of leaving the caller stuck", async () => {
+      const dir = await mkdtemp(pathJoin(tmpdir(), "djobs-822-"));
+      setProgressDir(dir);
+      try {
+        const a = await startDownloadJob(URL_A, "checkpoints");
+        // A FRESH foreign sibling: a genuinely concurrent different-URL download to
+        // the same destination. Cancel-by-id must still decline (#515) — but the
+        // refusal now carries the tray ids that resolve it, which is the difference
+        // between "no move available" and an actionable next step.
+        await writeForeignJobRecord(dir, {
+          id: a.job.id,
+          trayId: "freshtrayid00001",
+          progressId: "fresh-prog",
+          url: URL_B,
+          owner: `${PERSIST_OWNER}-other`,
+        });
+
+        const res = cancelDownloadJob(a.job.id);
+        expect(res.ambiguous).toBe(true);
+        expect(res.aborted).toBe(false);
+        expect(res.candidates?.map((c) => c.trayId).sort()).toEqual(
+          [a.job.trayId, "freshtrayid00001"].sort(),
+        );
+
+        // And naming one resolves it: the local job CAN be cancelled by tray id.
+        const chosen = cancelDownloadJob(a.job.id, a.job.trayId);
+        expect(chosen.aborted).toBe(true);
+        await a.settled;
+        expect(a.job.status).toBe("cancelled");
+      } finally {
+        setProgressDir("");
+        await fsRm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("a foreign-session download selected by tray_id is reported as NOT abortable here — never falsely aborted", async () => {
+      const dir = await mkdtemp(pathJoin(tmpdir(), "djobs-822-"));
+      setProgressDir(dir);
+      try {
+        const a = await startDownloadJob(URL_A, "checkpoints");
+        await writeForeignJobRecord(dir, {
+          id: a.job.id,
+          trayId: "orphantrayid0001",
+          progressId: "orphan-prog",
+          url: URL_B,
+          owner: `${PERSIST_OWNER}-reconnected-away`,
+          ageMs: 313_000,
+        });
+
+        const res = cancelDownloadJob(a.job.id, "orphantrayid0001");
+        expect(res.found).toBe(true);
+        // We hold no AbortController for another session's writer — say so rather
+        // than reporting an abort that did not happen.
+        expect(res.owned).toBe(false);
+        expect(res.aborted).toBe(false);
+        expect(res.job?.url).toBe(URL_B);
+        // Our own live download was NOT collateral damage.
+        expect(a.job.status).toBe("downloading");
+      } finally {
+        setProgressDir("");
+        await fsRm(dir, { recursive: true, force: true });
+      }
+    });
   });
 
   // ── #515: per-download cancellation ────────────────────────────────────────
