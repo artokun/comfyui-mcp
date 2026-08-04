@@ -1251,9 +1251,24 @@ describe("UiBridge (multi-tab)", () => {
     // FULLY (awaited close) before the first retry can fire, so attempt #1
     // deterministically succeeds. Same code path — bind failure → backoff →
     // self-heal — zero timing choreography.
-    const racePort = 40000 + Math.floor(Math.random() * 20000);
-    const blocker = new WebSocketServer({ port: racePort, host: "127.0.0.1" });
-    await new Promise<void>((resolve) => blocker.on("listening", () => resolve()));
+    //
+    // #821: the blocker must NOT pick a random port — ~1 in 8 runs that port
+    // is already held on the machine, "listening" never fires, and the test
+    // hangs to the deadline. Bind on an OS-assigned port (listen(0)) and read
+    // back the assigned one. The blocker is the FIXTURE, so its bind must be
+    // verifiably complete (and its error a rejected promise, not a silent
+    // hang) before the bridge starts: a setup failure must report as a setup
+    // failure, not as a timeout in the behaviour under test.
+    const blocker = new WebSocketServer({ port: 0, host: "127.0.0.1" });
+    await new Promise<void>((resolve, reject) => {
+      blocker.on("listening", () => resolve());
+      blocker.on("error", reject);
+    });
+    const blockerAddr = blocker.address();
+    if (!blockerAddr || typeof blockerAddr !== "object") {
+      throw new Error("fixture setup failed: blocker is listening but reported no address");
+    }
+    const racePort = blockerAddr.port;
 
     const reconnecting = new UiBridge(racePort);
     reconnecting.start(); // hits EADDRINUSE, schedules a retry

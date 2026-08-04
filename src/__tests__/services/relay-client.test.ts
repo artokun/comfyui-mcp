@@ -9,9 +9,23 @@ import { RelayClient } from "../../services/relay-client.js";
  * {t,id,d} envelope on the orchestrator leg documented in that repo's README.
  * Exercises RelayClient + UiBridge.attachRelayConnection end to end without
  * needing a live Cloudflare deploy.
+ *
+ * Binds an OS-assigned port (listen(0)) and reads it back — never a guessed
+ * random port, which can already be held on the machine (#821). A bind failure
+ * rejects HERE, so a broken fixture reports as a setup failure instead of a
+ * timeout in the behaviour under test.
  */
-function startFakeRelay(port: number) {
-  const wss = new WebSocketServer({ port });
+async function startFakeRelay(): Promise<{ port: number; close: () => Promise<void> }> {
+  const wss = new WebSocketServer({ port: 0, host: "127.0.0.1" });
+  await new Promise<void>((resolve, reject) => {
+    wss.on("listening", () => resolve());
+    wss.on("error", reject);
+  });
+  const addr = wss.address();
+  if (!addr || typeof addr !== "object") {
+    throw new Error("fixture setup failed: fake relay is listening but reported no address");
+  }
+  const port = addr.port;
   let orchestrator: WebSocket | null = null;
   const panels = new Map<string, WebSocket>();
   const allSockets = new Set<WebSocket>();
@@ -51,6 +65,7 @@ function startFakeRelay(port: number) {
   });
 
   return {
+    port,
     // wss.close() alone only stops accepting NEW connections — it waits for
     // already-open sockets to end on their own before its callback fires. Force
     // them shut so a test simulating "the relay disappeared" sees an immediate
@@ -78,8 +93,8 @@ describe("RelayClient + UiBridge.attachRelayConnection (via a fake relay)", () =
   });
 
   it("routes a panel-tab hello + command/reply through the relay envelope", async () => {
-    const port = 20000 + Math.floor(Math.random() * 20000);
-    const fakeRelay = startFakeRelay(port);
+    const fakeRelay = await startFakeRelay();
+    const port = fakeRelay.port;
     cleanup.push(() => fakeRelay.close());
 
     // No .start() — attachRelayConnection doesn't touch the loopback server at all.
@@ -119,8 +134,8 @@ describe("RelayClient + UiBridge.attachRelayConnection (via a fake relay)", () =
   });
 
   it("supports multiple panel tabs multiplexed over the single orchestrator connection", async () => {
-    const port = 20000 + Math.floor(Math.random() * 20000);
-    const fakeRelay = startFakeRelay(port);
+    const fakeRelay = await startFakeRelay();
+    const port = fakeRelay.port;
     cleanup.push(() => fakeRelay.close());
 
     const bridge = new UiBridge();
@@ -154,8 +169,8 @@ describe("RelayClient + UiBridge.attachRelayConnection (via a fake relay)", () =
   });
 
   it("closes shim connections when the relay control channel drops", async () => {
-    const port = 20000 + Math.floor(Math.random() * 20000);
-    const fakeRelay = startFakeRelay(port);
+    const fakeRelay = await startFakeRelay();
+    const port = fakeRelay.port;
     cleanup.push(() => fakeRelay.close());
 
     const bridge = new UiBridge();
