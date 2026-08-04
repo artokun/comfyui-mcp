@@ -32,6 +32,17 @@ vi.mock("node:fs", () => ({
   readFileSync: vi.fn(() => {
     throw Object.assign(new Error("no /proc in test"), { code: "ENOENT" });
   }),
+  // The #795 pid-ATTRIBUTION walk goes through the same `/proc`, and on a Linux
+  // runner the real one exists — an un-mocked readdir would grade these assertions
+  // against the runner's own process table. Absent by default, so every test that
+  // does not explicitly install a fd reader falls through to lsof, which is the
+  // contract the rest of this file was written against.
+  readdirSync: vi.fn(() => {
+    throw Object.assign(new Error("no /proc in test"), { code: "ENOENT" });
+  }),
+  readlinkSync: vi.fn(() => {
+    throw Object.assign(new Error("no /proc in test"), { code: "ENOENT" });
+  }),
 }));
 
 /** `execSync` throws with `status` (the exit code) for a command that RAN and
@@ -1182,6 +1193,710 @@ describe("probePortOwner — POSIX (kernel socket table, consulted before lsof)"
     expect(probePortOwner(8188).state).toBe("unknown");
     expect(mockExecSync).toHaveBeenCalled();
     expect(String(mockExecSync.mock.calls[0][0])).toMatch(/lsof/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #795 — naming the OWNER from /proc alone.
+//
+// #785 established the split this suite rests on: EXISTENCE is decided by the
+// kernel table, and lsof only ATTRIBUTES a socket to a pid. That left attribution
+// as the half a host without lsof could never perform, so every feature built on
+// process identity said "cannot confirm" there forever. `/proc/net/tcp{,6}` prints
+// each socket's inode and `/proc/<pid>/fd/*` resolves to `socket:[<inode>]`, so the
+// same source can do both.
+//
+// The standard each answer is held to is unchanged, and asymmetric on purpose:
+// `owned` is a positive finding about ONE process (it is what gets spent to kill
+// something), while failing to attribute is never evidence the port is free — the
+// kernel already said a socket is there.
+// ---------------------------------------------------------------------------
+describe("probePortOwner — POSIX (#795: owner attributed from /proc/<pid>/fd)", () => {
+  const HEADER_V4 =
+    "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode";
+  const HEADER_V6 =
+    "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode";
+
+  const hex = (port: number): string =>
+    port.toString(16).toUpperCase().padStart(4, "0");
+
+  /** One `/proc/net/tcp` LISTEN row, with the inode and local address under test. */
+  function v4Table(
+    rows: Array<{ port: number; inode: string; address?: string; state?: string }>,
+  ): string {
+    return [
+      HEADER_V4,
+      ...rows.map(
+        (r, i) =>
+          `   ${i}: ${r.address ?? "0100007F"}:${hex(r.port)} 00000000:0000 ${
+            r.state ?? "0A"
+          } 00000000:00000000 00:00000000 00000000  1000        0 ${r.inode} 1`,
+      ),
+      "",
+    ].join("\n");
+  }
+  /** The same, in `/proc/net/tcp6`'s 32-hex-digit address width. */
+  function v6Table(rows: Array<{ port: number; inode: string; address?: string }>): string {
+    return [
+      HEADER_V6,
+      ...rows.map(
+        (r, i) =>
+          `   ${i}: ${
+            r.address ?? "00000000000000000000000001000000"
+          }:${hex(r.port)} 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 ${r.inode} 1`,
+      ),
+      "",
+    ].join("\n");
+  }
+  const emptyV4 = `${HEADER_V4}\n`;
+  const emptyV6 = `${HEADER_V6}\n`;
+  const enoent = (): NodeJS.ErrnoException =>
+    Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+  const eacces = (): NodeJS.ErrnoException =>
+    Object.assign(new Error("EACCES"), { code: "EACCES" });
+
+  /** A `/proc` where each pid holds the listed fd → link targets. */
+  function fdReader(
+    tree: Record<number, Record<string, string> | NodeJS.ErrnoException>,
+  ): {
+    listPids: () => number[];
+    listFds: (pid: number) => string[];
+    readFdLink: (pid: number, fd: string) => string;
+  } {
+    return {
+      listPids: () => Object.keys(tree).map(Number),
+      listFds: (pid) => {
+        const entry = tree[pid];
+        if (entry instanceof Error) throw entry;
+        return Object.keys(entry ?? {});
+      },
+      readFdLink: (pid, fd) => {
+        const entry = tree[pid];
+        if (entry instanceof Error) throw entry;
+        const link = entry?.[fd];
+        if (link === undefined) throw enoent();
+        return link;
+      },
+    };
+  }
+
+  function install(
+    tables: (table: string) => string,
+    tree: Parameters<typeof fdReader>[0],
+    hooks: { setProcNetReader: (f: (t: string) => string) => void; setProcFdReader: (f: ReturnType<typeof fdReader>) => void },
+  ): void {
+    hooks.setProcNetReader(tables);
+    hooks.setProcFdReader(fdReader(tree));
+  }
+
+  it("names the owner from /proc alone, WITHOUT spawning lsof", async () => {
+    // The headline of #795: the inode in the socket table and the fd symlink are the
+    // whole identity. lsof must not even be reached — asserting that is what
+    // separates "attributed from /proc" from "lsof happened to answer too".
+    const { probePortOwner, __portOwnerTestHooks } = await loadProbe();
+    install(
+      (t) => (t === "/proc/net/tcp" ? v4Table([{ port: 8188, inode: "54321" }]) : emptyV6),
+      { 4321: { "0": "socket:[54321]", "1": "/dev/null" } },
+      __portOwnerTestHooks,
+    );
+
+    expect(probePortOwner(8188)).toEqual({ state: "owned", pid: 4321 });
+    expect(mockExecSync).not.toHaveBeenCalled();
+  });
+
+  it("names the owner on a host where lsof does not exist at all", async () => {
+    // The condition the issue is actually about — a minimal container. Even if the
+    // fall-through ran, lsof would fail to spawn, so a pass here can only come from
+    // /proc.
+    const { probePortOwner, __portOwnerTestHooks } = await loadProbe();
+    mockExecSync.mockImplementation(() => {
+      throw spawnFailure("ENOENT");
+    });
+    install(
+      (t) => (t === "/proc/net/tcp" ? v4Table([{ port: 8188, inode: "54321" }]) : emptyV6),
+      { 4321: { "0": "socket:[54321]" } },
+      __portOwnerTestHooks,
+    );
+
+    expect(probePortOwner(8188)).toEqual({ state: "owned", pid: 4321 });
+  });
+
+  it("attributes a 32-hex-digit tcp6 listener, address-matched to the host asked for", async () => {
+    // `00000000000000000000000001000000` is `::1` as a real kernel prints it: four
+    // LITTLE-ENDIAN 32-bit words, so the bytes reverse within each word. Decoding it
+    // as big-endian would yield `100:0` and the host match would fail.
+    const { probePortOwner, __portOwnerTestHooks } = await loadProbe();
+    install(
+      (t) => (t === "/proc/net/tcp6" ? v6Table([{ port: 8188, inode: "22454" }]) : emptyV4),
+      { 909: { "3": "socket:[22454]" } },
+      __portOwnerTestHooks,
+    );
+
+    expect(probePortOwner(8188, "::1")).toEqual({ state: "owned", pid: 909 });
+    expect(mockExecSync).not.toHaveBeenCalled();
+  });
+
+  it("does not attribute a listener bound to an address that does not serve the host", async () => {
+    // `0501A8C0` is 192.168.1.5. It is a real listener on the port — so the port is
+    // NOT free — but it is not the loopback instance we are talking to, and naming
+    // its process as our port's owner would point a kill at a stranger.
+    const { probePortOwner, __portOwnerTestHooks } = await loadProbe();
+    mockExecSync.mockReturnValue("");
+    install(
+      (t) =>
+        t === "/proc/net/tcp"
+          ? v4Table([{ port: 8188, inode: "54321", address: "0501A8C0" }])
+          : emptyV6,
+      { 4321: { "0": "socket:[54321]" } },
+      __portOwnerTestHooks,
+    );
+
+    const probe = probePortOwner(8188, "127.0.0.1");
+    expect(probe.state).toBe("unknown");
+    expect(probe).not.toMatchObject({ pid: 4321 });
+  });
+
+  it("an IPv6 address this module will not decode is not attributed to a requested host", async () => {
+    // `B80D0120…01000000` is 2001:db8::1. A general IPv6 address has several legal
+    // textual spellings, so string-comparing a decoded one against a user-supplied
+    // host would be a guess — and the finding it would produce is a POSITIVE, the
+    // direction that licenses stopping a process. Declining costs a fall-through to
+    // lsof; guessing would cost somebody else's server.
+    const { probePortOwner, __portOwnerTestHooks } = await loadProbe();
+    mockExecSync.mockReturnValue("");
+    install(
+      (t) =>
+        t === "/proc/net/tcp6"
+          ? v6Table([
+              { port: 8188, inode: "31337", address: "B80D0120000000000000000001000000" },
+            ])
+          : emptyV4,
+      { 4321: { "0": "socket:[31337]" } },
+      __portOwnerTestHooks,
+    );
+
+    const probe = probePortOwner(8188, "::1");
+    expect(probe.state).toBe("unknown");
+    expect(probe).not.toMatchObject({ pid: 4321 });
+  });
+
+  it("…but with NO host asked for, that same listener IS attributed", async () => {
+    // The counterpart, and the reason the check is not simply "decode or refuse":
+    // with no host constraint every listener on the port qualifies (exactly as the
+    // lsof parser behaves), so the address is never decoded and #795's benefit is
+    // not thrown away on hosts whose ComfyUI binds a global IPv6 address.
+    const { probePortOwner, __portOwnerTestHooks } = await loadProbe();
+    install(
+      (t) =>
+        t === "/proc/net/tcp6"
+          ? v6Table([
+              { port: 8188, inode: "31337", address: "B80D0120000000000000000001000000" },
+            ])
+          : emptyV4,
+      { 4321: { "0": "socket:[31337]" } },
+      __portOwnerTestHooks,
+    );
+
+    expect(probePortOwner(8188)).toEqual({ state: "owned", pid: 4321 });
+  });
+
+  it("only the process holding THAT inode is the owner", async () => {
+    // Two processes, one socket. Attribution is by inode, not by "a process exists".
+    const { probePortOwner, __portOwnerTestHooks } = await loadProbe();
+    install(
+      (t) => (t === "/proc/net/tcp" ? v4Table([{ port: 8188, inode: "54321" }]) : emptyV6),
+      {
+        111: { "0": "socket:[99999]", "1": "/tmp/x" },
+        222: { "0": "socket:[54321]" },
+      },
+      __portOwnerTestHooks,
+    );
+
+    expect(probePortOwner(8188)).toEqual({ state: "owned", pid: 222 });
+  });
+
+  it("an inode from a DIFFERENT port's row is never our owner", async () => {
+    // The join key must come from the row that matched the port and the LISTEN
+    // state. Taking any inode in the table would attribute an unrelated service.
+    const { probePortOwner, __portOwnerTestHooks } = await loadProbe();
+    mockExecSync.mockReturnValue("");
+    install(
+      (t) =>
+        t === "/proc/net/tcp"
+          ? v4Table([
+              { port: 9999, inode: "11111" },
+              { port: 8188, inode: "22222" },
+            ])
+          : emptyV6,
+      { 777: { "0": "socket:[11111]" } },
+      __portOwnerTestHooks,
+    );
+
+    expect(probePortOwner(8188).state).toBe("unknown");
+  });
+
+  it("a socket several processes share names NONE of them", async () => {
+    // Forked workers / SO_REUSEPORT genuinely share one listener. Naming any single
+    // one would license killing a process whose death does not release the port, so
+    // the ambiguity itself is the answer — and it is STATED, not merely implied.
+    const { probePortOwner, __portOwnerTestHooks } = await loadProbe();
+    mockExecSync.mockReturnValue("");
+    install(
+      (t) => (t === "/proc/net/tcp" ? v4Table([{ port: 8188, inode: "54321" }]) : emptyV6),
+      { 100: { "0": "socket:[54321]" }, 200: { "4": "socket:[54321]" } },
+      __portOwnerTestHooks,
+    );
+
+    const probe = probePortOwner(8188);
+    expect(probe.state).toBe("unknown");
+    expect(probe).toMatchObject({
+      reason: expect.stringMatching(/held by several processes \(100, 200\)/),
+    });
+  });
+
+  it("a pid whose fds cannot be READ is a blind spot, and says so", async () => {
+    // EACCES is another user's process: it may well be the owner, and reporting "no
+    // process holds it" would describe a search we did not finish. The REASON is
+    // asserted because the state alone (`unknown`) is reachable from a clean,
+    // complete search that simply found nothing.
+    const { probePortOwner, __portOwnerTestHooks } = await loadProbe();
+    mockExecSync.mockReturnValue("");
+    install(
+      (t) => (t === "/proc/net/tcp" ? v4Table([{ port: 8188, inode: "54321" }]) : emptyV6),
+      { 1: eacces() },
+      __portOwnerTestHooks,
+    );
+
+    const probe = probePortOwner(8188);
+    expect(probe.state).toBe("unknown");
+    expect(probe).toMatchObject({
+      reason: expect.stringMatching(/could not all be read/i),
+    });
+  });
+
+  it("a pid that EXITED mid-walk is not a blind spot", async () => {
+    // ENOENT while reading a pid's fds means that process is gone — a process that
+    // does not exist cannot be holding the socket, so the search is still complete.
+    // Conflating it with EACCES would permanently downgrade every scan (pids come
+    // and go constantly) and make the honest "nobody holds it" unreachable.
+    const { probePortOwner, __portOwnerTestHooks } = await loadProbe();
+    mockExecSync.mockReturnValue("");
+    install(
+      (t) => (t === "/proc/net/tcp" ? v4Table([{ port: 8188, inode: "54321" }]) : emptyV6),
+      { 5: enoent(), 6: { "0": "/dev/null" } },
+      __portOwnerTestHooks,
+    );
+
+    const probe = probePortOwner(8188);
+    expect(probe.state).toBe("unknown");
+    expect(probe).toMatchObject({
+      reason: expect.stringMatching(/no process in \/proc holds it/i),
+    });
+  });
+
+  it("failing to attribute NEVER reports the port as free", async () => {
+    // The one inversion that would be catastrophic: the kernel said a socket is
+    // there, so "I could not name its owner" must never become "nothing is
+    // listening" — a caller waiting for a port release would act on a server that is
+    // still running. lsof states absence here, which is exactly the shape that would
+    // fabricate it.
+    const { probePortOwner, __portOwnerTestHooks } = await loadProbe();
+    mockExecSync.mockImplementation(() => {
+      const err = exitWith(1) as Error & { status: number; stdout: string };
+      err.stdout = "lsof: Internet address not located: TCP:8188\n";
+      return err as never;
+    });
+    install(
+      (t) => (t === "/proc/net/tcp" ? v4Table([{ port: 8188, inode: "54321" }]) : emptyV6),
+      { 1: eacces() },
+      __portOwnerTestHooks,
+    );
+
+    expect(probePortOwner(8188).state).toBe("unknown");
+  });
+
+  it("inode 0 is never matched", async () => {
+    // A row printing inode `0` has no inode of its own; `socket:[0]` in some
+    // process's fd table could only be a coincidence, never our listener.
+    const { probePortOwner, __portOwnerTestHooks } = await loadProbe();
+    mockExecSync.mockReturnValue("");
+    install(
+      (t) => (t === "/proc/net/tcp" ? v4Table([{ port: 8188, inode: "0" }]) : emptyV6),
+      { 4321: { "0": "socket:[0]" } },
+      __portOwnerTestHooks,
+    );
+
+    expect(probePortOwner(8188).state).toBe("unknown");
+  });
+
+  it("a row truncated before its inode still proves a LISTENER, it just cannot name one", async () => {
+    // The two halves keep their own standards: existence survives a row cut short
+    // (the fields it already showed cannot be unmade), attribution does not (the
+    // inode is simply not there). Regressing existence to require a whole row would
+    // turn a damaged table into a false "nothing is listening".
+    const { probePortOwner, __portOwnerTestHooks } = await loadProbe();
+    mockExecSync.mockImplementation(() => {
+      const err = exitWith(1) as Error & { status: number; stdout: string };
+      err.stdout = "lsof: Internet address not located: TCP:8188\n";
+      return err as never;
+    });
+    const truncated = [
+      HEADER_V4,
+      `   0: 0100007F:${hex(8188)} 00000000:0000 0A`,
+      "",
+    ].join("\n");
+    install(
+      (t) => (t === "/proc/net/tcp" ? truncated : emptyV6),
+      { 4321: { "0": "socket:[54321]" } },
+      __portOwnerTestHooks,
+    );
+
+    // NOT free — lsof stated absence and was overruled by the kernel's positive.
+    expect(probePortOwner(8188).state).toBe("unknown");
+  });
+
+  it("still reports FREE from the kernel table without walking /proc at all", async () => {
+    // Attribution must not disturb the decisive negative #785 established: when the
+    // tables are whole and hold no listener, the port is free and nothing else runs.
+    const { probePortOwner, __portOwnerTestHooks } = await loadProbe();
+    const walker = fdReader({ 4321: { "0": "socket:[54321]" } });
+    const listPids = vi.fn(walker.listPids);
+    __portOwnerTestHooks.setProcNetReader((t) => (t === "/proc/net/tcp" ? emptyV4 : emptyV6));
+    __portOwnerTestHooks.setProcFdReader({ ...walker, listPids });
+
+    expect(probePortOwner(8188)).toEqual({ state: "free" });
+    expect(listPids).not.toHaveBeenCalled();
+    expect(mockExecSync).not.toHaveBeenCalled();
+  });
+
+  it("a listener that CHANGED between the table read and the fd walk is not attributed", async () => {
+    // The inode and the fd walk are two separate observations, and a socket inode is
+    // reusable the moment its socket closes: the listener can go away in between,
+    // its number be handed to an unrelated socket, and the walk then name whatever
+    // process holds THAT. Nothing downstream would catch it when the server is
+    // wedged and has no argv to corroborate against — and the pid is what a stop
+    // kills. So the join is BRACKETED: the same inode must still be listening on the
+    // port afterwards.
+    //
+    // Modelled as a second table read that shows a DIFFERENT inode on the port.
+    const { probePortOwner, __portOwnerTestHooks } = await loadProbe();
+    mockExecSync.mockReturnValue("");
+    let reads = 0;
+    __portOwnerTestHooks.setProcNetReader((t) => {
+      if (t !== "/proc/net/tcp") return emptyV6;
+      reads++;
+      // The first pass sees inode 54321; by the second, a different socket holds
+      // the port.
+      return v4Table([{ port: 8188, inode: reads <= 1 ? "54321" : "99999" }]);
+    });
+    __portOwnerTestHooks.setProcFdReader(
+      fdReader({ 4321: { "0": "socket:[54321]" }, 5555: { "0": "socket:[99999]" } }),
+    );
+
+    const probe = probePortOwner(8188);
+    expect(probe.state).toBe("unknown");
+    expect(probe).not.toMatchObject({ pid: 4321 });
+    expect(probe).toMatchObject({
+      reason: expect.stringMatching(/changed while its owner was being identified/i),
+    });
+  });
+
+  it("an unchanged listener passes the bracket and is still attributed", async () => {
+    // The control: the bracket must not reject the ordinary case, or attribution
+    // would never succeed at all.
+    const { probePortOwner, __portOwnerTestHooks } = await loadProbe();
+    const reader = vi.fn((t: string) =>
+      t === "/proc/net/tcp" ? v4Table([{ port: 8188, inode: "54321" }]) : emptyV6,
+    );
+    __portOwnerTestHooks.setProcNetReader(reader);
+    __portOwnerTestHooks.setProcFdReader(fdReader({ 4321: { "0": "socket:[54321]" } }));
+
+    expect(probePortOwner(8188)).toEqual({ state: "owned", pid: 4321 });
+    // Read twice: once to find the inode, once to confirm it is still the listener.
+    expect(reader.mock.calls.filter((c) => c[0] === "/proc/net/tcp").length).toBe(2);
+  });
+
+  it("the SAME PID must still hold the socket, not merely the same inode be listening", async () => {
+    // The bracket has two halves because the finding pairs a pid with a socket.
+    // Re-reading the table proves the INODE is still on the port; it says nothing
+    // about who holds it. An fd can be closed or handed on between the walk and the
+    // re-read, leaving that inode listening under a NEW owner while the pid we return
+    // is a former holder — and that pid is what a stop kills.
+    const { probePortOwner, __portOwnerTestHooks } = await loadProbe();
+    mockExecSync.mockReturnValue("");
+    __portOwnerTestHooks.setProcNetReader((t) =>
+      t === "/proc/net/tcp" ? v4Table([{ port: 8188, inode: "54321" }]) : emptyV6,
+    );
+    // The first walk finds 4321 holding it; by the re-check it has let it go.
+    let walks = 0;
+    const tree: Record<number, Record<string, string>> = {
+      4321: { "0": "socket:[54321]" },
+    };
+    const walker = fdReader(tree);
+    __portOwnerTestHooks.setProcFdReader({
+      ...walker,
+      listFds: (pid) => {
+        walks++;
+        // The attribution walk sees the fd; the re-check does not.
+        if (walks > 1) tree[4321] = { "0": "/dev/null" };
+        return walker.listFds(pid);
+      },
+    });
+
+    const probe = probePortOwner(8188);
+    expect(probe.state).toBe("unknown");
+    expect(probe).not.toMatchObject({ pid: 4321 });
+    expect(probe).toMatchObject({
+      reason: expect.stringMatching(/could not be re-confirmed as the owner/i),
+    });
+    // The inner reason states the search was COMPLETE and found nobody — not that it
+    // hit a wall, which is the other way to fail this re-check.
+    expect(probe).toMatchObject({
+      reason: expect.stringMatching(/no process in \/proc holds it/i),
+    });
+  });
+
+  it("holding SOME listener on the port is not holding THE one we bracketed", async () => {
+    // The subtlest form of the substitution, and the reason the re-check asks about
+    // the specific inode rather than just the pid. Two listeners on the port, I and
+    // J. First pass: our pid holds I and is the only VISIBLE holder (another process
+    // is unreadable, which does not withdraw a single-holder finding). Second pass:
+    // our pid has released I and holds only J, while the unreadable process now holds
+    // I. Re-attribution still names our pid — it does hold *a* listener — so a check
+    // that stops at the pid would confirm a claim about a socket it no longer has.
+    const { probePortOwner, __portOwnerTestHooks } = await loadProbe();
+    mockExecSync.mockReturnValue("");
+    __portOwnerTestHooks.setProcNetReader((t) =>
+      t === "/proc/net/tcp"
+        ? v4Table([
+            { port: 8188, inode: "54321" },
+            { port: 8188, inode: "99999" },
+          ])
+        : emptyV6,
+    );
+    const tree: Record<number, Record<string, string> | NodeJS.ErrnoException> = {
+      1: eacces(), // the other holder, never readable
+      4321: { "0": "socket:[54321]" },
+    };
+    const walker = fdReader(tree);
+    let walks = 0;
+    __portOwnerTestHooks.setProcFdReader({
+      ...walker,
+      listPids: () => {
+        walks++;
+        if (walks > 1) tree[4321] = { "0": "socket:[99999]" };
+        return walker.listPids();
+      },
+    });
+
+    const probe = probePortOwner(8188);
+    expect(probe.state).toBe("unknown");
+    expect(probe).not.toMatchObject({ pid: 4321 });
+    // The reason names THIS fact — it holds another listener, which is a different
+    // finding — rather than collapsing into "changed hands (PID 4321, then PID 4321)".
+    expect(probe).toMatchObject({
+      reason: expect.stringMatching(
+        /no longer holds the socket it was identified by .* holds another listener/i,
+      ),
+    });
+  });
+
+  it("a DUAL-STACK holder is not withdrawn just because the walk reached its other socket first", async () => {
+    // The counterpart, and why the re-check asks whether the pid's COMPLETE set
+    // contains the bracketed inode rather than whether the walk selected it again. A
+    // process listening on two sockets of the same port holds both; which one an fd
+    // scan stops at is an artifact of directory order, not a change in the world.
+    // Recording only the first match would make this ordinary case fail at random.
+    const { probePortOwner, __portOwnerTestHooks } = await loadProbe();
+    __portOwnerTestHooks.setProcNetReader((t) =>
+      t === "/proc/net/tcp"
+        ? v4Table([
+            { port: 8188, inode: "54321" },
+            { port: 8188, inode: "99999" },
+          ])
+        : emptyV6,
+    );
+    const tree: Record<number, Record<string, string>> = {
+      4321: { "0": "socket:[54321]" },
+    };
+    const walker = fdReader(tree);
+    let walks = 0;
+    __portOwnerTestHooks.setProcFdReader({
+      ...walker,
+      listPids: () => {
+        walks++;
+        // Still both sockets — the OTHER one simply comes first this time.
+        if (walks > 1) tree[4321] = { "0": "socket:[99999]", "1": "socket:[54321]" };
+        return walker.listPids();
+      },
+    });
+
+    expect(probePortOwner(8188)).toEqual({ state: "owned", pid: 4321 });
+  });
+
+  it("a socket that CHANGED HANDS between the scans is not attributed to the old owner", async () => {
+    // The fd is passed on: the same inode is still listening, so the socket half of
+    // the bracket holds — but the owner is now somebody else, and returning the
+    // former holder would point a stop at a process that no longer has anything to do
+    // with the port.
+    const { probePortOwner, __portOwnerTestHooks } = await loadProbe();
+    mockExecSync.mockReturnValue("");
+    __portOwnerTestHooks.setProcNetReader((t) =>
+      t === "/proc/net/tcp" ? v4Table([{ port: 8188, inode: "54321" }]) : emptyV6,
+    );
+    const tree: Record<number, Record<string, string>> = {
+      4321: { "0": "socket:[54321]" },
+      200: { "0": "/dev/null" },
+    };
+    const walker = fdReader(tree);
+    let walks = 0;
+    __portOwnerTestHooks.setProcFdReader({
+      ...walker,
+      listPids: () => {
+        walks++;
+        if (walks > 1) {
+          tree[4321] = { "0": "/dev/null" };
+          tree[200] = { "0": "socket:[54321]" };
+        }
+        return walker.listPids();
+      },
+    });
+
+    const probe = probePortOwner(8188);
+    expect(probe.state).toBe("unknown");
+    expect(probe).not.toMatchObject({ pid: 4321 });
+    expect(probe).toMatchObject({
+      reason: expect.stringMatching(/changed hands .*PID 4321, then PID 200/i),
+    });
+  });
+
+  it("a SECOND holder appearing between the scans withdraws the finding", async () => {
+    // The claim being bracketed is "exactly one visible process holds this socket".
+    // Re-checking only that OUR pid still holds it accepts a second holder appearing
+    // beside it — which the opening scan would have refused as ambiguous, so the
+    // bracket would launder a verdict the same evidence was not allowed to produce a
+    // moment earlier. The closing check therefore re-derives the WHOLE finding.
+    const { probePortOwner, __portOwnerTestHooks } = await loadProbe();
+    mockExecSync.mockReturnValue("");
+    __portOwnerTestHooks.setProcNetReader((t) =>
+      t === "/proc/net/tcp" ? v4Table([{ port: 8188, inode: "54321" }]) : emptyV6,
+    );
+    // 4321 holds it throughout; 200 inherits the same socket after the first pass.
+    const tree: Record<number, Record<string, string>> = {
+      4321: { "0": "socket:[54321]" },
+      200: { "0": "/dev/null" },
+    };
+    const walker = fdReader(tree);
+    let walks = 0;
+    __portOwnerTestHooks.setProcFdReader({
+      ...walker,
+      listPids: () => {
+        walks++;
+        if (walks > 1) tree[200] = { "0": "socket:[54321]" };
+        return walker.listPids();
+      },
+    });
+
+    const probe = probePortOwner(8188);
+    expect(probe.state).toBe("unknown");
+    expect(probe).not.toMatchObject({ pid: 4321 });
+    expect(probe).toMatchObject({
+      reason: expect.stringMatching(/held by several processes \(200, 4321\)/),
+    });
+  });
+
+  it("a pid that EXITED before the re-check is a definite negative, not a blind spot", async () => {
+    // The reason is what distinguishes these, since both refuse: a process that no
+    // longer exists definitively does not hold the socket, whereas a permission wall
+    // means we could not look. Collapsing the first into the second would report a
+    // blind spot to a user whose evidence was actually complete.
+    const { probePortOwner, __portOwnerTestHooks } = await loadProbe();
+    mockExecSync.mockReturnValue("");
+    __portOwnerTestHooks.setProcNetReader((t) =>
+      t === "/proc/net/tcp" ? v4Table([{ port: 8188, inode: "54321" }]) : emptyV6,
+    );
+    let walks = 0;
+    const walker = fdReader({ 4321: { "0": "socket:[54321]" } });
+    __portOwnerTestHooks.setProcFdReader({
+      ...walker,
+      listFds: (pid) => {
+        walks++;
+        // The process is gone by the time we re-check.
+        if (walks > 1) throw enoent();
+        return walker.listFds(pid);
+      },
+    });
+
+    const probe = probePortOwner(8188);
+    expect(probe.state).toBe("unknown");
+    expect(probe).toMatchObject({
+      reason: expect.stringMatching(/no process in \/proc holds it/i),
+    });
+  });
+
+  it("a re-check that cannot be performed does not confirm ownership either", async () => {
+    // A permission wall on the re-read is "I could not look", and an unverified
+    // pairing must not be spent as a verified one.
+    const { probePortOwner, __portOwnerTestHooks } = await loadProbe();
+    mockExecSync.mockReturnValue("");
+    __portOwnerTestHooks.setProcNetReader((t) =>
+      t === "/proc/net/tcp" ? v4Table([{ port: 8188, inode: "54321" }]) : emptyV6,
+    );
+    let walks = 0;
+    const walker = fdReader({ 4321: { "0": "socket:[54321]" } });
+    __portOwnerTestHooks.setProcFdReader({
+      ...walker,
+      listFds: (pid) => {
+        walks++;
+        if (walks > 1) throw eacces();
+        return walker.listFds(pid);
+      },
+    });
+
+    const probe = probePortOwner(8188);
+    expect(probe.state).toBe("unknown");
+    expect(probe).toMatchObject({
+      reason: expect.stringMatching(/could not all be read/i),
+    });
+  });
+
+  it("a single readable holder is named even when another process could not be read", async () => {
+    // A DELIBERATE asymmetry, stated so it is reviewed rather than assumed. Requiring
+    // a complete /proc walk would make attribution impossible on any multi-user host
+    // — an unprivileged process cannot read ANY other user's fds and every box runs
+    // root daemons — which is exactly the permanent "cannot confirm" #795 removes.
+    // lsof reaches no further (same files, same credentials), and a socket is shared
+    // by INHERITANCE, so an unseen co-holder is a descendant that the process-tree
+    // kill takes with it anyway.
+    const { probePortOwner, __portOwnerTestHooks } = await loadProbe();
+    __portOwnerTestHooks.setProcNetReader((t) =>
+      t === "/proc/net/tcp" ? v4Table([{ port: 8188, inode: "54321" }]) : emptyV6,
+    );
+    __portOwnerTestHooks.setProcFdReader(
+      fdReader({ 1: eacces(), 4321: { "0": "socket:[54321]" } }),
+    );
+
+    expect(probePortOwner(8188)).toEqual({ state: "owned", pid: 4321 });
+  });
+
+  it("a /proc that cannot be enumerated at all falls through to lsof", async () => {
+    // The honest fallback #795 explicitly asks to preserve: shrinking the
+    // unverifiable set, not removing the other source.
+    const { probePortOwner, __portOwnerTestHooks } = await loadProbe();
+    mockExecSync.mockReturnValue("p4321\nn127.0.0.1:8188\n");
+    __portOwnerTestHooks.setProcNetReader((t) =>
+      t === "/proc/net/tcp" ? v4Table([{ port: 8188, inode: "54321" }]) : emptyV6,
+    );
+    __portOwnerTestHooks.setProcFdReader({
+      listPids: () => {
+        throw eacces();
+      },
+      listFds: () => [],
+      readFdLink: () => "",
+    });
+
+    expect(probePortOwner(8188)).toEqual({ state: "owned", pid: 4321 });
+    expect(mockExecSync).toHaveBeenCalled();
   });
 });
 

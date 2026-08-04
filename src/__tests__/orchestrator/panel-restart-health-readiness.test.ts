@@ -333,10 +333,16 @@ describe("panel_restart_comfyui recovery after an ACCEPTED reboot (coordinator p
     expect(resetClient).not.toHaveBeenCalled();
   });
 
-  it("P0: a `localhost` tab origin is ambiguous → HONEST dispatched, probe (with auth) never sent", async () => {
-    // Boot base is the concrete 127.0.0.1 default; the tab advertises http://localhost:8188.
-    // localhost may resolve to ::1 in the browser, so we CANNOT prove the tab fronts the
-    // 127.0.0.1 instance — captureRebootHealthBase → null → honest dispatched, no probe.
+  it("P0: a `localhost` tab origin is ambiguous → REFUSED, probe (with auth) never sent", async () => {
+    // Boot base is the concrete 127.0.0.1 default; the tab advertises
+    // http://localhost:8188. localhost may resolve to ::1 in the browser, so we CANNOT
+    // prove the tab fronts the 127.0.0.1 instance — captureRebootHealthBase → null.
+    //
+    // That used to mean an honest dispatched-but-unconfirmable reboot. It now REFUSES
+    // (#814): a reboot STOPS whatever the tab fronts, and being unable to say WHICH
+    // server that is means being unable to say anything about bringing it back. The
+    // original assertion holds more strongly than before — the probe is not merely
+    // unsent, nothing is dispatched at all.
     const health = vi.fn(async () => "healthy" as const);
     __panelToolsTestHooks.setHealthProbe(health);
     const { ctx } = makeCtx({ reboot: { rebooting: true }, origin: "http://localhost:8188", local: true });
@@ -344,19 +350,23 @@ describe("panel_restart_comfyui recovery after an ACCEPTED reboot (coordinator p
     const res = await rebootHandler()({ force: false }, ctx);
     expect(res.isError).not.toBe(true);
     const out = parse(res);
-    expect(out.dispatched).toBe(true);
-    expect(out.ready).toBe(false);
+    expect(out.refused).toBe(true);
+    expect(out.rebooting).toBe(false);
     expect(out.confirmed_cycle).toBe(false);
     expect(health).not.toHaveBeenCalled(); // ambiguous origin → never probed, no auth sent
-    expect(String(out.note)).toMatch(/health_check|verify|can't confirm|couldn't/i);
+    expect(String(out.note)).toMatch(/cannot tell which server/i);
   });
 
-  it("Gap: no probeable boot endpoint (remote/old panel) → HONEST dispatched, NOT a false-timeout, NEVER a proxy certify", async () => {
+  it("Gap: no probeable boot endpoint → REFUSED for a local target, and never a proxy certify", async () => {
     // captureRebootHealthBase → null (non-local tab): there is NO sound proof this
-    // (possibly remote) instance cycled. We must NOT invent one from a panel reconnect
-    // (tab_id is client-supplied — a different same-kind socket can take it over), and we
-    // must NOT emit the old #509 false-TIMEOUT error. Honest outcome: dispatched+accepted,
-    // ready:false, told to verify — and the boot probe is never consulted (null base).
+    // instance would cycle, and — since #814 — no proof of WHICH instance would be
+    // stopped either. For a LOCAL target that now refuses before dispatch.
+    //
+    // Everything this test was written to forbid still holds, and more cheaply: no
+    // invented proof from a panel reconnect, no #509 false-TIMEOUT error, and the boot
+    // probe never consulted. The honest dispatched-but-unconfirmable result remains for
+    // REMOTE targets, where the Manager reboot is the only restart path (covered in
+    // panel-restart-cancel-truth).
     let healthConsulted = false;
     __panelToolsTestHooks.setHealthProbe(async () => {
       healthConsulted = true;
@@ -367,25 +377,26 @@ describe("panel_restart_comfyui recovery after an ACCEPTED reboot (coordinator p
     const res = await rebootHandler()({ force: false }, ctx);
     expect(res.isError).not.toBe(true); // NOT the #509 false-timeout error
     const out = parse(res);
-    expect(out.rebooting).toBe(true);
-    expect(out.dispatched).toBe(true);
-    expect(out.ready).toBe(false); // no sound proof → honest couldn't-confirm
+    expect(out.refused).toBe(true);
+    expect(out.rebooting).toBe(false);
     expect(out.confirmed_cycle).toBe(false);
     expect(out.via).toBeUndefined(); // no proxy proof value
     expect(healthConsulted).toBe(false); // boot probe never consulted (null base)
-    expect(String(out.note)).toMatch(/health_check|verify|can't confirm|couldn't/i);
+    expect(String(out.note)).toMatch(/cannot tell which server/i);
   });
 
-  it("Gap: a DROPPED reboot with no boot endpoint is ALSO honest dispatched, not a false success", async () => {
-    // Same as above but via the EXPECTED-DROP accept path (mid-command OUTCOME UNKNOWN):
-    // still no probeable endpoint, so still an honest dispatched/verify — never ready:true.
+  it("Gap: a DROPPED reboot with no boot endpoint is REFUSED before it can drop", async () => {
+    // Same shape via the EXPECTED-DROP accept path: with no probeable endpoint there is
+    // no proof of which instance is being stopped, so the refusal happens BEFORE the
+    // dispatch — the drop never occurs. Never a false success, which is what this test
+    // has always been about.
     const { ctx } = makeCtx({ reboot: DROP, local: false });
 
     const out = parse(await rebootHandler()({ force: false }, ctx));
-    expect(out.rebooting).toBe(true);
-    expect(out.ready).toBe(false);
+    expect(out.refused).toBe(true);
+    expect(out.rebooting).toBe(false);
     expect(out.confirmed_cycle).toBe(false);
-    expect(String(out.note)).toMatch(/health_check|verify|can't confirm|couldn't/i);
+    expect(String(out.note)).toMatch(/cannot tell which server/i);
   });
 
   it("accepted but endpoint NEVER becomes healthy → couldn't-confirm (ready:false)", async () => {

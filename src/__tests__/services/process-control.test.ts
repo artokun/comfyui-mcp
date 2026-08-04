@@ -194,6 +194,36 @@ afterEach(() => {
   __processControlTestHooks.reset();
 });
 
+/**
+ * A live ComfyUI Desktop shell supervising the backend on the port (#814).
+ *
+ * A Manager reboot STOPS the process and depends on that shell to start it again, so
+ * a Desktop restart now has to prove the shell is there before it dispatches
+ * anything. Tests about what happens AFTER the dispatch — the reboot firing, the
+ * caches, the dispatch record, "it is never killed" — therefore have to model the
+ * install they mean to model: an ordinary Desktop with its supervisor running.
+ * Without this they exercise the refusal instead, which is a different test.
+ */
+function installLiveDesktopSupervisor(backendPid = 4321, shellPid = 300): void {
+  __processControlTestHooks.setProcessIdentityResolver((pid) => {
+    if (pid === backendPid) return { startedAt: "5000", parentPid: shellPid };
+    if (pid === shellPid) {
+      return {
+        // The OS's own record of the binary — what the supervisor check trusts.
+        executablePath: "C:\\Program Files\\Comfy Desktop\\Comfy Desktop.exe",
+        commandLine: '"C:\\Program Files\\Comfy Desktop\\Comfy Desktop.exe"',
+        // The shell predates the backend it spawned, as causality requires.
+        startedAt: "2000",
+      };
+    }
+    return undefined;
+  });
+  __processControlTestHooks.setParentPidResolver((pid) =>
+    pid === backendPid ? shellPid : undefined,
+  );
+  __processControlTestHooks.setProcessExistsProbe(() => true);
+}
+
 describe("process-control startup readiness", () => {
   it("reports ready after the bounded readiness probe succeeds", async () => {
     setLaunchInfo();
@@ -569,6 +599,9 @@ describe("process-control restart relaunch preflight (#368/#370)", () => {
     // Exe cannot be located on disk — under the old path this refused; now it
     // is never consulted because we reboot via the Manager instead.
     mockExistsSync.mockImplementation(() => false);
+    // …and the shell that would re-exec it is running, which is what makes the
+    // reboot a safe stop at all (#814).
+    installLiveDesktopSupervisor();
     __processControlTestHooks.setRemoteRebootTimingForTests({
       settleMs: 0,
       budgetMs: 1000,
@@ -839,7 +872,11 @@ describe("restart truthfulness + Pinokio-shaped refusal (#742)", () => {
     expect(preflight.ok).toBe(true);
   });
 
-  it("preflightLocalRestart passes a Desktop app (the Manager reboot IS its safe path, #400)", async () => {
+  it("preflightLocalRestart passes a Desktop app whose supervisor is PROVEN live (#400)", async () => {
+    // #400's ruling is preserved exactly: the Manager reboot is the Desktop restart
+    // path and the relaunch command is never consulted. What changed is that being
+    // Desktop no longer stands in for being SUPERVISED — that is a fact about the
+    // running process tree, and here it is established.
     mockLivePortNoKill();
     mockGetSystemStats.mockResolvedValue({
       system: {
@@ -851,19 +888,49 @@ describe("restart truthfulness + Pinokio-shaped refusal (#742)", () => {
       },
     });
     mockExistsSync.mockImplementation(() => false); // relaunch never consulted
+    installLiveDesktopSupervisor();
 
     const preflight = await preflightLocalRestart();
 
     expect(preflight.ok).toBe(true);
   });
 
-  it("preflightLocalRestart passes when no running process can be proven", async () => {
+  it("preflightLocalRestart REFUSES a Desktop app whose supervision cannot be established (#814)", async () => {
+    // The counterpart, and the policy the #814 loss forced. A reboot has not happened
+    // yet and cannot be undone, so "I could not establish that anything will restart
+    // this" refuses — unlike `listener_ownership`, where the launch has ALREADY
+    // happened and uncertainty is merely disclosed. Refuse before, disclose after.
+    mockLivePortNoKill();
+    mockGetSystemStats.mockResolvedValue({
+      system: {
+        argv: [
+          "C:\\Users\\x\\AppData\\Local\\Programs\\Comfy Desktop\\resources\\ComfyUI\\main.py",
+          "--port",
+          "8188",
+        ],
+      },
+    });
+    // No parent chain readable — the ordinary shape on a locked-down host.
+    __processControlTestHooks.setParentPidResolver(() => undefined);
+
+    const preflight = await preflightLocalRestart();
+
+    expect(preflight.ok).toBe(false);
+    expect(preflight.reason).toMatch(/could not be established/i);
+  });
+
+  it("preflightLocalRestart REFUSES when no running process can be identified", async () => {
+    // The door beside the gate: an instance whose listener cannot be attributed — a
+    // container with no `lsof`, a permission wall — used to resolve to NOTHING and
+    // return ok, so the reboot went out with no check at all. An instance we cannot
+    // identify is an instance whose relaunch we cannot prove.
     mockNoPortProcess();
     mockGetSystemStats.mockRejectedValue(new Error("connection refused"));
 
     const preflight = await preflightLocalRestart();
 
-    expect(preflight.ok).toBe(true);
+    expect(preflight.ok).toBe(false);
+    expect(preflight.reason).toMatch(/could not be identified/i);
   });
 
   it("stop succeeded but relaunch fails → truthful lost-server message, never 'cancelled' (#742)", async () => {
@@ -968,6 +1035,7 @@ describe("restart truthfulness + Pinokio-shaped refusal (#742)", () => {
         ],
       },
     });
+    installLiveDesktopSupervisor();
     __processControlTestHooks.setRemoteRebootTimingForTests({
       settleMs: 0,
       budgetMs: 30,

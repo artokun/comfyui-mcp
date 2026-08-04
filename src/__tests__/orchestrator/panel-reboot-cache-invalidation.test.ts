@@ -20,6 +20,13 @@ const { buildPanelToolDefs, rebootConfirmed, __panelToolsTestHooks } = await imp
 );
 import type { PanelToolCtx } from "../../orchestrator/panel-tools.js";
 import type { ToolResult } from "../../orchestrator/panel-tools.js";
+import { getBootLocalComfyUIBaseUrl } from "../../config.js";
+
+/** The orchestrator own boot endpoint — what a local tab must front to be bound. */
+const BOOT_BASE = (getBootLocalComfyUIBaseUrl() ?? "http://127.0.0.1:8188").replace(
+  /[/]+$/,
+  "",
+);
 
 function ctxReplying(reply: unknown): PanelToolCtx {
   // comfy_reboot is dispatched via ctx.bridge.send (pinned, no rebind); readiness
@@ -32,7 +39,11 @@ function ctxReplying(reply: unknown): PanelToolCtx {
     bridge: {
       send: async () => reply,
       tabOrigin: () => undefined,
-      tabIsLocal: () => false,
+      // BOUND to our own boot instance (#814): a LOCAL target the panel cannot be
+      // tied to is now refused before any dispatch, so a suite about what happens
+      // AFTER the dispatch has to model the ordinary local panel.
+      tabIsLocal: () => true,
+      tabServerOrigin: () => BOOT_BASE,
       tabSockId: () => "s0",
       canReach: () => false,
     } as unknown as PanelToolCtx["bridge"],
@@ -80,11 +91,18 @@ describe("panel_restart_comfyui cache invalidation", () => {
       probeTimeoutMs: 20,
     });
     __panelToolsTestHooks.setHealthProbe(async () => false); // panel round-trip governs
+    // #814 widened the refuse-safe preflight to EVERY local target, not only a
+    // tab-bound one, so it now runs on this path too. These tests are about the
+    // dispatch classification, not about relaunch safety, and the real preflight
+    // would do live process/port discovery against the host — stub a PASS so the
+    // subject under test is the only thing being measured.
+    __panelToolsTestHooks.setLocalRestartPreflight(async () => ({ ok: true }));
   });
 
   afterEach(() => {
     __panelToolsTestHooks.setPanelRebootTiming(null);
     __panelToolsTestHooks.setHealthProbe(null);
+  __panelToolsTestHooks.setLocalRestartPreflight(null);
   });
 
   it("invalidates the client + object_info caches on a CONFIRMED reboot", async () => {

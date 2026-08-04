@@ -21,11 +21,14 @@ import {
   type LaunchEnvResolution,
 } from "./launcher-env.js";
 import {
+  classifyDesktopSupervision,
   classifyListenerOwnership,
   isDescendantOfChild,
   launchedChildStillRunning,
   unclassifiedOwnership,
+  unclassifiedSupervision,
   type ListenerOwnership,
+  type SupervisorRelaunch,
 } from "./listener-ownership.js";
 import { resetManagerApiCache } from "./manager-api-cache.js";
 import {
@@ -37,6 +40,7 @@ import {
   recordLaunchedInterpreter,
   clearLaunchedInterpreter,
   readProcessIdentity,
+  argv0FromCommandLine,
   commandLineMatchesArgv,
   type ProcessIdentity,
 } from "./live-interpreter.js";
@@ -55,6 +59,52 @@ interface ProcessInfo {
   pid: number;
   port: number;
   argv: string[];
+  /**
+   * The port owner's argv as the OS reports it, captured when the SERVER could not
+   * report its own (#767).
+   *
+   * A ComfyUI wedged by a CUDA OOM stops answering `/system_stats`, so `argv` comes
+   * back empty — and with it went every way to relaunch: `stop_comfyui` killed the
+   * process anyway, announced `has_restart_info: true`, and `start_comfyui` then had
+   * nothing to start. The OS knew the whole command line the entire time. The user's
+   * own recovery was to read it out of the process table by hand.
+   *
+   * Kept in a SEPARATE field, never merged into `argv`, because the two have
+   * different standing. `argv` is the server's own account of itself and is what the
+   * OS command line is CORROBORATED against; folding a value derived from that same
+   * command line into it would make the check compare a reading with itself and
+   * always agree. This one is only ever spent to build a relaunch and to tell the
+   * user how to start the server by hand.
+   */
+  osArgv?: string[];
+  /**
+   * May `osArgv` be SPAWNED, or only read?
+   *
+   * macOS reports a process's arguments as one flattened string (`ps -o command=`),
+   * so `--output-directory /a/My Outputs` is indistinguishable from two arguments and
+   * relaunching from it would spawn a command the user never ran — very possibly one
+   * ComfyUI's own argument parser rejects, after we had already stopped the server
+   * (codex gate round 6). Linux and Windows can be reconstructed faithfully.
+   *
+   * A flattened argv is still perfectly good for the two things it is READ for: the
+   * recovery hint a human acts on, and the before/after comparison that catches a pid
+   * substitution. Only the SPAWN needs fidelity.
+   */
+  osArgvExact?: boolean;
+  /** The OS's raw command line — the recovery hint even when argv is not spawnable. */
+  osCommandLine?: string;
+  /**
+   * TRUE when `pid` was found by SCANNING PROCESS NAMES for a Desktop shell, rather
+   * than resolved from the port.
+   *
+   * The distinction decides whether anything may be concluded about supervision. A
+   * port-resolved pid is the process that would be stopped, so what stands above it
+   * is its supervisor. A name-scanned one is merely "a Desktop app is running
+   * somewhere on this machine" — bound to no port and no backend — and a second,
+   * unrelated Desktop window must never license stopping a server it has never heard
+   * of (codex gate round 9).
+   */
+  pidFromDesktopScan?: boolean;
   isDesktopApp: boolean;
   desktopExePath?: string;
   /**
@@ -93,10 +143,49 @@ interface ProcessInfo {
   envPlan?: LaunchEnvResolution;
 }
 
+/**
+ * How to bring this instance back BY HAND — captured while the process is still
+ * alive, because the process table entry dies with it (#814/#767).
+ *
+ * Every field is what we actually observed, with its provenance intact, because the
+ * two sources are not equally complete. `server_argv` is Python's `sys.argv`: its
+ * first element is the SCRIPT, so the interpreter is simply not in it and pasting it
+ * into a shell would not work. `command` is the OS's view and IS the whole thing.
+ * Presenting either as "the command to run" without saying which it is would hand a
+ * user a recovery instruction that fails at the moment they need it most.
+ */
+interface RecoveryHint {
+  /** The full command line the OS reported for the process, when readable. */
+  command?: string;
+  /**
+   * TRUE when the OS gave us the arguments FLATTENED into one string (macOS), so a
+   * value containing a space cannot be told from two arguments. The command is still
+   * what a human needs — they can see where the quotes belong — but it is reported as
+   * approximate rather than as something to paste unread.
+   */
+  command_flattened?: boolean;
+  /** The server's own `sys.argv` — NO interpreter (Python does not put it there). */
+  server_argv?: string[];
+  /** The working directory the process was running in, when readable. */
+  cwd?: string;
+}
+
 interface StopResult {
   stopped: boolean;
   message: string;
+  /**
+   * Can `start_comfyui` actually bring this back?
+   *
+   * It used to mean "we stored a ProcessInfo", which was true even when that info
+   * held nothing runnable — so a stop reported `true` and the start that followed
+   * reported "No command-line info captured from previous run" (#767). It now means
+   * what its name says: a relaunch command was BUILT AND VALIDATED before the kill.
+   */
   has_restart_info: boolean;
+  /** Present whenever a hand-restart may be needed — always on a refusal. */
+  restart_hint?: RecoveryHint;
+  /** Why a relaunch could not be validated, when it could not. */
+  relaunch_blocked?: string;
   auto_restart?: SupervisorResult;
   /**
    * Set when the stop was COMMITTED without being able to confirm the process
@@ -134,6 +223,10 @@ interface RestartResult {
   stopped: boolean;
   started: boolean;
   message: string;
+  /** How to start it by hand — carried on every refusal, so a user who is told
+   *  "not restarting" is never left to dig the command out of the process table
+   *  themselves (#814). */
+  restart_hint?: RecoveryHint;
   ready?: boolean;
   readiness?: StartupReadinessResult;
   auto_restart?: SupervisorResult;
@@ -301,6 +394,83 @@ function killDesktopApp(portPid: number): void {
     // Fallback — just kill the port process
     killProcessTree(portPid);
   }
+}
+
+/**
+ * Is THIS PROCESS the Desktop supervisor — the Electron shell itself?
+ *
+ * Deliberately NOT `isDesktopApp`, and the difference matters. That one asks "was
+ * this SERVER started by Desktop?", and answers yes on any mention of the Desktop
+ * install — including a `--extra-model-paths-config` pointing into
+ * `…/Comfy Desktop/…`, which is exactly how a Desktop backend identifies itself.
+ * Reusing it here would let a WRAPPER that merely passes such a flag stand in for
+ * the shell, and a wrapper cannot re-exec anything (codex gate).
+ *
+ * So this requires the Desktop binary to be the process's OWN EXECUTABLE — argv[0],
+ * never merely somewhere on the command line. Searching the whole line let a wrapper
+ * that PASSES the Desktop exe as an argument
+ * (`python wrapper.py --desktop-exe "…/Comfy Desktop.exe"`) stand in for the shell,
+ * and a wrapper re-execs nothing (codex gate round 2).
+ *
+ * THE ASYMMETRY IS DELIBERATE. Failing to recognise a real supervisor costs the walk
+ * a hop and can end in `abandoned` — a REFUSED restart, which leaves the server
+ * running and points the user at the Desktop app that would have restarted it
+ * anyway. Recognising a NON-supervisor licenses a stop that nothing undoes. So when
+ * the evidence is shaped awkwardly, this errs strict.
+ */
+function isDesktopSupervisorProcess(identity: ProcessIdentity): boolean {
+  const looksLikeDesktopBinary = (path: string): boolean => {
+    const norm = path.replace(/\\/g, "/").toLowerCase();
+    const base = norm.split("/").pop() ?? "";
+    // Current and legacy Windows branding, including the electron-era install dir.
+    if (base === "comfy desktop.exe" || base === "comfyui.exe") return true;
+    // macOS: the bundle's MAIN binary, which by convention is named after the bundle
+    // (`Comfy Desktop.app/Contents/MacOS/Comfy Desktop`). Accepting ANY binary under
+    // `Contents/MacOS/` was too loose: a venv shim or launcher script living inside
+    // the bundle would pass, and a shim re-execs nothing (coordinator gate). The
+    // backreference ties the two halves together so the binary must belong to the
+    // bundle naming it. Electron HELPERS are excluded structurally — they live in
+    // `Contents/Frameworks/<Helper>.app/Contents/MacOS/…`, so the first bundle in the
+    // path is not followed by `Contents/MacOS/`.
+    return /\/(comfy desktop|comfyui)\.app\/contents\/macos\/\1$/.test(norm);
+  };
+
+  // THE KERNEL'S ANSWER FIRST, and ALONE when it exists (codex gate round 3).
+  // argv[0] is a string the launcher chose: `exec -a`, or a hand-built Windows
+  // command line, lets any program present itself as any other, so a check that
+  // trusts it can be told "I am Comfy Desktop.exe" by something that is not. The
+  // executable path comes from the OS (`Win32_Process.ExecutablePath`,
+  // `/proc/<pid>/exe`) and the process cannot set it. When we have it, a NEGATIVE
+  // from it is final — falling through to argv[0] afterwards would hand the claim
+  // back its authority.
+  if (identity.executablePath) return looksLikeDesktopBinary(identity.executablePath);
+
+  // argv[0] — exact on Linux, and on Windows the launcher quotes a path with spaces
+  // (which "Comfy Desktop" always has), so the tokeniser recovers it whole. Reached
+  // only where the OS withheld the authenticated path (macOS `ps` has no such
+  // column; an elevated Windows process may withhold it), which is the evidence this
+  // check had before and is still better than nothing.
+  const exe =
+    identity.argv?.[0] ?? argv0FromCommandLine(identity.commandLine ?? "") ?? "";
+  if (looksLikeDesktopBinary(exe)) return true;
+  // macOS: `ps -o command=` prints argv joined by SPACES, so an app-bundle argv[0]
+  // containing one ("Comfy Desktop.app" — the current branding) cannot be tokenised
+  // back out, and every such install would otherwise walk past its own shell into a
+  // false `abandoned`. It is still recognisable by POSITION rather than content:
+  // argv[0] OPENS the command line, and the only space in the bundle path is inside
+  // the app name itself, so the directory prefix before it has none. An argument can
+  // never satisfy that — reaching it would mean crossing the space that separates it
+  // from argv[0].
+  //
+  // The BINARY NAME is required here too, for the same reason as above: a launcher
+  // script or venv shim inside the bundle would otherwise be read as the shell
+  // (coordinator gate). `\2` ties it to the bundle that names it, and the match must
+  // end at whitespace or end-of-line so the binary is the whole argv[0] rather than a
+  // prefix of some longer name.
+  const line = (identity.commandLine ?? "").trim().replace(/\\/g, "/").toLowerCase();
+  return /^"?(\/[^\s"]*\/)?(comfy desktop|comfyui)\.app\/contents\/macos\/\2(\s|"|$)/.test(
+    line,
+  );
 }
 
 function isDesktopApp(argv: string[]): boolean {
@@ -944,8 +1114,27 @@ function processIdentityStillValid(
   // server's argv is POSITIVE evidence this pid is somebody else, and gating it
   // behind `startedAt` would discard that evidence exactly when we have least of
   // it (codex gate).
+  // WHAT THIS PROCESS SHOULD STILL BE RUNNING — the server's own account when it
+  // gave one, otherwise the OS's EARLIER reading of the same pid.
+  //
+  // Passing `info.argv` unguarded was wrong: commandLineMatchesArgv fails CLOSED on
+  // an empty argv, which is right for "is this ComfyUI?" and wrong here — a server
+  // that never answered has no argv to disagree with, and reading that absence as a
+  // mismatch refuses to stop exactly the wedged instance the user is recovering
+  // (#767). But simply SKIPPING the check there left the wedged path with nothing
+  // but numeric pid/port equality (codex gate round 5). The OS reading is the
+  // answer: comparing a LATER reading against an EARLIER one is not
+  // self-corroboration — they are two observations separated in time, which is
+  // exactly what a substitution has to survive. Together with the creation stamp
+  // below (now retained on this path), a replacement that inherited the number is
+  // caught whether or not it runs the same command line.
+  const expectedArgv = info.argv.length > 0 ? info.argv : (info.osArgv ?? []);
   const now = resolveProcessIdentity(info.pid);
-  if (now?.commandLine && !commandLineMatchesArgv(now.commandLine, info.argv)) {
+  if (
+    expectedArgv.length > 0 &&
+    now?.commandLine &&
+    !commandLineMatchesArgv(now.commandLine, expectedArgv)
+  ) {
     return {
       ok: false,
       reason:
@@ -975,11 +1164,31 @@ function resolveLiveProcessCwd(pid: number): string | undefined {
   }
 }
 
+/**
+ * The argv a relaunch is built from: the SERVER's own `sys.argv` when it could tell
+ * us, otherwise the OS's view of the same process (#767).
+ *
+ * The two differ in shape and both are handled downstream: `sys.argv[0]` is the
+ * SCRIPT (`main.py`, so an interpreter has to be resolved for it), while the OS's
+ * argv[0] is the INTERPRETER itself — which is strictly better, since it needs no
+ * resolution at all. The order is not a preference between sources of truth: the
+ * server's answer simply comes with an identity binding the OS reading cannot have,
+ * so it is used whenever it exists.
+ */
+function relaunchArgv(info: ProcessInfo): string[] {
+  if (info.argv.length > 0) return info.argv;
+  // A FLATTENED reading is not a command. It is still reported to the user, who can
+  // see where the quotes belong; we cannot, and guessing would spawn arguments the
+  // server never had (codex gate round 6).
+  return info.osArgvExact ? (info.osArgv ?? []) : [];
+}
+
 function resolveLaunchCommand(
   info: ProcessInfo,
 ): { exe: string; args: string[]; cwd?: string } | null {
-  if (info.argv.length === 0) return null;
-  const [first, ...rest] = info.argv;
+  const argv = relaunchArgv(info);
+  if (argv.length === 0) return null;
+  const [first, ...rest] = argv;
   // Strip surrounding quotes a launcher may leave on the script path BEFORE the
   // suffix test — otherwise `"C:\…\main.py"` fails the `.py` check, bypasses the
   // unified live-first resolver, and gets treated as the executable (#401 / PR #433
@@ -987,7 +1196,7 @@ function resolveLaunchCommand(
   const firstUnquoted = first.trim().replace(/^["']+/, "").replace(/["']+$/, "");
   const looksLikeScript = /\.pyw?$/i.test(firstUnquoted);
   if (looksLikeScript) {
-    const python = findComfyuiPython(config.comfyuiPath ?? undefined, info.argv);
+    const python = findComfyuiPython(config.comfyuiPath ?? undefined, argv);
     if (!python) return null;
     // sys.argv[0] can be RELATIVE (the standard Windows portable launcher runs
     // `python ComfyUI\main.py` from the portable root). We force cwd to
@@ -1012,7 +1221,7 @@ function resolveLaunchCommand(
     // to the base — not to config.comfyuiPath directly. When no absolute anchor
     // exists we keep the raw (possibly relative) script and let assessRelaunch's
     // refuse-safe preflight catch a truly unresolvable install.
-    const anchor = resolveScriptAnchor(info.argv);
+    const anchor = resolveScriptAnchor(argv);
     const scriptIsAbsolute = isAbsolute(firstUnquoted) || isWindowsAbsolute;
     // LIVE-CWD anchor (#535): before falling back to the canonical base, resolve a
     // RELATIVE script against the running process's OWN cwd (captured live, so it
@@ -1033,7 +1242,7 @@ function resolveLaunchCommand(
     let liveCwdPython: string | undefined;
     if (!scriptIsAbsolute && info.liveCwd && relSegments.length > 0) {
       const candidateScript = join(info.liveCwd, ...relSegments);
-      const candidatePython = findComfyuiPython(info.liveCwd, info.argv);
+      const candidatePython = findComfyuiPython(info.liveCwd, argv);
       const pythonIsAbsolute =
         !!candidatePython &&
         (isAbsolute(candidatePython) || /^[a-zA-Z]:[\\/]/.test(candidatePython));
@@ -1137,6 +1346,173 @@ function isRegularFile(p: string | undefined): boolean {
 /** True when a token looks like a filesystem path (has a separator or a drive). */
 function looksLikePath(s: string): boolean {
   return /[\\/]/.test(s) || /^[a-zA-Z]:/.test(s);
+}
+
+/** Quote a token only when it needs it, so the hint can be pasted into a shell. */
+function quoteToken(token: string): string {
+  return /[\s"]/.test(token) ? `"${token.replace(/"/g, '\\"')}"` : token;
+}
+
+/**
+ * Everything we know about how to restart this instance by hand, captured from a
+ * LIVE process (#814/#767). Both sources are reported with their provenance rather
+ * than merged: see RecoveryHint.
+ */
+function recoveryHint(info: ProcessInfo): RecoveryHint | undefined {
+  const hint: RecoveryHint = {};
+  if (info.osArgvExact && info.osArgv?.length) {
+    hint.command = info.osArgv.map(quoteToken).join(" ");
+  } else if (info.osCommandLine) {
+    // Re-quoting a flattened reading would invent boundaries we do not know, so it is
+    // passed through EXACTLY as the OS printed it and labelled as approximate.
+    hint.command = info.osCommandLine;
+    hint.command_flattened = true;
+  }
+  if (info.argv.length > 0) hint.server_argv = info.argv;
+  if (info.liveCwd) hint.cwd = info.liveCwd;
+  return hint.command || hint.server_argv || hint.cwd ? hint : undefined;
+}
+
+/** The sentence appended to a refusal so the user can act on it immediately. */
+function describeRecovery(hint: RecoveryHint | undefined): string {
+  if (!hint) return "";
+  if (hint.command) {
+    return (
+      ` To start it by hand, run: ${hint.command}${
+        hint.cwd ? ` (from ${hint.cwd})` : ""
+      }.` +
+      (hint.command_flattened
+        ? " (This OS reports arguments flattened into one line, so any path containing" +
+          " a space needs re-quoting before you run it.)"
+        : "")
+    );
+  }
+  if (hint.server_argv) {
+    return ` The server reported these launch arguments: ${hint.server_argv
+      .map(quoteToken)
+      .join(" ")}${
+      hint.cwd ? ` (from ${hint.cwd})` : ""
+    } — note this is Python's sys.argv, so the interpreter that ran it is not part of it.`;
+  }
+  return "";
+}
+
+/** Injectable existence probe, so supervision can be driven without real pids. */
+let processExistsOverride: ((pid: number) => boolean | undefined) | null = null;
+
+/**
+ * Does something hold this pid? TRI-STATE — see SupervisionEvidence.processExists.
+ * EPERM is "exists but not ours to signal", which is still existence; anything else
+ * unrecognised is "cannot tell" and must not be spent as either answer.
+ */
+function processExists(pid: number): boolean | undefined {
+  if (processExistsOverride) return processExistsOverride(pid);
+  if (!pid || pid <= 0) return undefined;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") return false;
+    if (code === "EPERM") return true;
+    return undefined;
+  }
+}
+
+/**
+ * Will the Desktop supervisor bring this instance back after a Manager reboot?
+ *
+ * A Desktop instance is NEVER killed and relaunched by us (#400) — the Electron
+ * shell owns it, so the restart path asks ComfyUI-Manager to re-exec the process and
+ * depends on that shell being there to do it. #814 is the case where it was not: two
+ * ComfyUI backends off one install, the shell that spawned the bound one had moved
+ * on, the reboot stopped it, and nothing brought it back. The tool then said it
+ * "couldn't confirm it came back" — a verdict computed AFTER the stop, about a stop
+ * it should never have made.
+ *
+ * ONLY `supervised` proceeds. `unconfirmed` REFUSES, and the asymmetry with the rest
+ * of this file is deliberate rather than an inconsistency (coordinator gate):
+ *
+ *   `listener_ownership` reports on an action that HAS ALREADY HAPPENED — the child
+ *   was spawned, the server is answering — and only the DESCRIPTION of it is
+ *   uncertain. Denying `started` there would turn an uncertain description into a
+ *   false one, so uncertainty is DISCLOSED.
+ *
+ *   A reboot has NOT happened yet and cannot be undone. Uncertainty about whether
+ *   anything will restart the process is uncertainty about whether the user still has
+ *   a ComfyUI afterwards, so it is REFUSED.
+ *
+ * Refuse before, disclose after — the same principle pointed in opposite directions
+ * by whether the irreversible step is still ahead.
+ *
+ * The earlier reading — that proceeding on `unconfirmed` preserved #400 — conflated
+ * two different claims. #400 established that a Desktop process must never be KILLED
+ * locally, because respawning the exe does not reliably bring the listener back. It
+ * did not establish that an UNVERIFIED Manager stop is safe. Only the first is
+ * settled, and refusing here does not touch it: the refusal leaves the server
+ * RUNNING and points the user at the Desktop app, which restarts it reliably.
+ */
+function assessDesktopSupervision(info: ProcessInfo): {
+  ok: boolean;
+  reason?: string;
+  supervision: SupervisorRelaunch;
+} {
+  const cannotAssess = (because: string): {
+    ok: boolean;
+    reason: string;
+    supervision: SupervisorRelaunch;
+  } => ({
+    ok: false,
+    supervision: unclassifiedSupervision(),
+    reason:
+      `this is a ComfyUI Desktop instance, and it could not be established that a Desktop app ` +
+      `is still supervising it (${because}). A restart from here asks ComfyUI-Manager to STOP ` +
+      `the process and depends on that supervisor to start it again — so without that, the ` +
+      `stop could not be undone.`,
+  });
+
+  // A SHELL FOUND BY NAME IS NOT EVIDENCE ABOUT THIS PORT'S SERVER. When ComfyUI
+  // could not be attributed to the port, the caller falls back to whatever Desktop
+  // process is running anywhere on the machine. That pid is bound to no port and no
+  // backend: a second, unrelated Desktop window would otherwise stand in as the
+  // supervisor of an orphaned backend it has never heard of, and the reboot would
+  // stop a server nothing restarts (codex gate round 9). There is nothing to classify
+  // here — the premise is missing, not the evidence.
+  if (info.pidFromDesktopScan) {
+    return cannotAssess(
+      `the server on port ${info.port} could not be identified, and the only ComfyUI Desktop ` +
+        `process found (PID ${info.pid}) was located by scanning process names — nothing ties ` +
+        `it to that port, so it cannot be shown to supervise the server this would stop`,
+    );
+  }
+  // NO SPECIAL CASE FOR A MISSING PID. An early `ok: true` here would be one more
+  // permissive exit skipping the guard, and an untestable one at that. The classifier
+  // already handles pid 0 the way it handles any pid it cannot read — the identity
+  // and parent reads come back empty and the verdict is `unconfirmed`, which now
+  // refuses — so letting it fall through inherits a path that IS tested.
+  const { verdict, because } = classifyDesktopSupervision({
+    pid: info.pid,
+    readParentPid,
+    readIdentity: resolveProcessIdentity,
+    processExists,
+    isSupervisorProcess: isDesktopSupervisorProcess,
+  });
+  if (verdict === "supervised") return { ok: true, supervision: verdict };
+  if (verdict === "abandoned") {
+    return {
+      ok: false,
+      supervision: verdict,
+      reason:
+        `ComfyUI Desktop started the server on port ${info.port} (PID ${info.pid}), but no ` +
+        `Desktop app is still supervising it — its parent process is gone. A restart from here ` +
+        `asks ComfyUI-Manager to stop the process and relies on that supervisor to start it ` +
+        `again, so it would be stopped and nothing would bring it back.`,
+    };
+  }
+  return {
+    ...cannotAssess(because ?? `the process tree above PID ${info.pid} could not be read`),
+    supervision: verdict,
+  };
 }
 
 /**
@@ -1284,6 +1660,10 @@ async function acquireProcessInfo(): Promise<{
           argv: [],
           isDesktopApp: true,
           desktopExePath: findDesktopExeFromCommonPaths(),
+          // FOUND BY NAME, NOT BY PORT — nothing ties this shell to the server on
+          // config.resolvedPort. Recorded so the restart preflight cannot mistake
+          // "a Desktop app is running" for "this Desktop app supervises that server".
+          pidFromDesktopScan: true,
         },
       };
     }
@@ -1556,8 +1936,28 @@ async function gatherProcessInfo(): Promise<ProcessInfo> {
     );
   }
 
-  const desktop = isDesktopApp(argv);
-  const desktopExe = desktop ? findDesktopExePath(argv) : undefined;
+  // THE SERVER COULD NOT SAY WHAT IT IS RUNNING — ask the OS (#767).
+  //
+  // An empty `argv` means `/system_stats` did not answer: the server is wedged
+  // (a CUDA OOM is the reported case) or otherwise unreachable, which is EXACTLY
+  // when a user reaches for stop/restart. Everything downstream then had nothing to
+  // relaunch from, so the stop went ahead and the start could not follow. The OS has
+  // the command line throughout.
+  //
+  // Read here, while the pid is alive, for the same reason `liveCwd` is: the process
+  // table entry is gone the instant the kill lands.
+  const osIdentity = argv.length === 0 ? resolveProcessIdentity(pid) : undefined;
+  const osArgv = osIdentity?.argv;
+  const osArgvExact = osIdentity?.argvFidelity === "exact";
+  const osCommandLine = osIdentity?.commandLine;
+
+  // Desktop is decided from WHATEVER account of the process we have. Deciding it
+  // from `argv` alone meant an unreachable Desktop instance (argv empty) classified
+  // as an ordinary Python install — and would then be KILLED, which is the one thing
+  // the Desktop path exists to never do (#400).
+  const identifyingArgv = argv.length > 0 ? argv : (osArgv ?? []);
+  const desktop = isDesktopApp(identifyingArgv);
+  const desktopExe = desktop ? findDesktopExePath(identifyingArgv) : undefined;
   // Capture the live process cwd NOW, while the pid is guaranteed alive — the
   // `/proc/<pid>/cwd` symlink is gone the instant a later stop kills it (#535).
   const liveCwd = desktop ? undefined : resolveLiveProcessCwd(pid);
@@ -1584,10 +1984,20 @@ async function gatherProcessInfo(): Promise<ProcessInfo> {
     err.identityAmbiguous = true;
     throw err;
   }
-  const startedAt =
-    desktop || corroboration.kind !== "confirmed"
-      ? undefined
-      : corroboration.identity.startedAt;
+  const startedAt = desktop
+    ? undefined
+    : corroboration.kind === "confirmed"
+      ? corroboration.identity.startedAt
+      : // THE WEDGED PATH KEEPS ITS STAMP (codex gate round 5). With no answer from
+        // the server there is nothing to corroborate the pid against, and the
+        // corroboration therefore comes back `unknown` — but the pid's own creation
+        // time was read all the same, and that stamp is precisely what pid REUSE
+        // defeats. Discarding it would leave the pre-kill check with nothing but
+        // numeric pid/port equality, so a replacement instance that rebound the port
+        // after inheriting the number would be killed as if it were the one we
+        // identified. Only reachable when the server said nothing: a corroboration
+        // that came back `mismatch` has already thrown above.
+        osIdentity?.startedAt;
 
   // BIND THE PID TO THE PROCESS THAT ANSWERED (coordinator gate P1(1)).
   //
@@ -1626,6 +2036,9 @@ async function gatherProcessInfo(): Promise<ProcessInfo> {
     pid,
     port,
     argv,
+    osArgv,
+    osArgvExact,
+    osCommandLine,
     isDesktopApp: desktop,
     desktopExePath: desktopExe,
     liveCwd,
@@ -1693,6 +2106,52 @@ export async function stopComfyUI(preInfo?: ProcessInfo): Promise<StopResult> {
     isDesktopApp: info.isDesktopApp,
     argv: info.argv.join(" "),
   });
+
+  // CAN THIS BE STARTED AGAIN? Asked BEFORE the kill, and answered honestly (#767).
+  //
+  // The stop used to report `has_restart_info: true` on the strength of having
+  // stored a ProcessInfo — which is true even when that info holds nothing runnable.
+  // A user recovering a wedged server was told the restart information was there,
+  // and `start_comfyui` then answered "No command-line info captured from previous
+  // run". By then the server was gone.
+  //
+  // A REFUSAL is reserved for the genuinely unrecoverable case: no launch command
+  // from the server, none from the OS, nothing to tell the user to run. Then the stop
+  // is a one-way door and it is not ours to walk through. When a command WAS observed
+  // the stop proceeds — `stop_comfyui` is an explicit instruction to stop, and a
+  // wedged server is precisely when someone means it — but `has_restart_info` states
+  // whether we can do the starting, and the hint says how to do it by hand.
+  //
+  // `requireReproducibleEnv` is deliberately NOT set here, and the distinction is the
+  // point: this flag answers "is there a command to run?", which is what #767 was
+  // about and what start_comfyui needs to exist at all. An irreproducible launcher
+  // environment is a different, weaker fact — the spawn still happens, it may simply
+  // fail during import — and it is reported as its own caveat below rather than
+  // collapsed into "there is no restart information", which would say something
+  // untrue about a case where the command is right there.
+  const relaunch = assessRelaunch(info);
+  // Resolved EXPLICITLY rather than read off `info.envPlan`, which is only populated
+  // by whichever caller happened to ask for it — a caveat that appears when the stop
+  // came through restartComfyUI and vanishes when the same install is stopped
+  // directly would be worse than no caveat at all.
+  let envPlan: LaunchEnvResolution | undefined;
+  if (relaunch.ok && !info.isDesktopApp) {
+    const cmd = resolveLaunchCommand(info);
+    if (cmd) envPlan = ensureLaunchEnvPlan(info, cmd);
+  }
+  const hint = recoveryHint(info);
+  if (!relaunch.ok && !hint) {
+    return {
+      stopped: false,
+      has_restart_info: false,
+      relaunch_blocked: relaunch.reason,
+      message:
+        `Refusing to stop ComfyUI (PID ${info.pid}): ${relaunch.reason} Nothing was killed — ` +
+        `and nothing was observed about how this server was launched, so stopping it would ` +
+        `leave you with no way to bring it back, by this tool or by hand. Stop it from the ` +
+        `launcher/console that owns it instead.`,
+    };
+  }
 
   // Remember HOW to relaunch before doing anything irreversible. Saving this only
   // after a committed stop meant that any later refusal — including one taken while
@@ -1820,8 +2279,23 @@ export async function stopComfyUI(preInfo?: ProcessInfo): Promise<StopResult> {
     stopped: true,
     message:
       `ComfyUI (PID ${info.pid}) stopped on port ${info.port}` +
-      (unverified ? ` — NOTE: ${unverified}; continuing so the server can be brought back.` : ""),
-    has_restart_info: true,
+      (unverified ? ` — NOTE: ${unverified}; continuing so the server can be brought back.` : "") +
+      // Said PLAINLY and up front, not left to a boolean the caller may not read:
+      // start_comfyui will not be able to do this, so the human has to.
+      (relaunch.ok
+        ? // A command exists, but the environment it was launched into may not be
+          // reproducible — a weaker claim, stated as one.
+          envPlan && !envPlan.reproducible
+          ? ` NOTE: ${envPlan.reason ?? envPlan.info.note} start_comfyui will still try, but the relaunch may fail during import.` +
+            describeRecovery(hint)
+          : ""
+        : ` WARNING: start_comfyui will NOT be able to bring this back — ${relaunch.reason}` +
+          describeRecovery(hint)),
+    // The one claim #767 was about: it now means a relaunch command was built AND
+    // validated, not merely that some process info was stored.
+    has_restart_info: relaunch.ok,
+    relaunch_blocked: relaunch.ok ? undefined : relaunch.reason,
+    restart_hint: hint,
     auto_restart: supervisorResult(info),
     unverified_exit: unverified,
   };
@@ -2389,6 +2863,25 @@ export async function restartComfyUI(): Promise<RestartResult> {
   // supervisor that owns the process cycles it — and NEVER kill it. Only
   // self-spawned Python installs fall through to the kill+relaunch path below.
   if (info.isDesktopApp) {
+    // …but only when a supervisor is actually there to do the cycling. The Manager
+    // reboot STOPS the process; the Electron shell is what starts it again. When the
+    // shell has provably gone, firing the reboot is stopping a server we cannot
+    // restart, which is the #814 lost-server. Decided BEFORE anything is dispatched.
+    const desktop = assessDesktopSupervision(info);
+    if (!desktop.ok) {
+      const hint = recoveryHint(info);
+      return {
+        stopped: false,
+        started: false,
+        message:
+          `Refusing to restart: ${desktop.reason} ComfyUI was left running (not stopped) so ` +
+          `you don't lose the server. Restart it from the ComfyUI Desktop app.` +
+          describeRecovery(hint),
+        restart_hint: hint,
+        // Nothing was stopped and nothing launched.
+        listener_ownership: unclassifiedOwnership(),
+      };
+    }
     return restartViaManagerReboot({ label: "Desktop" });
   }
 
@@ -2399,11 +2892,13 @@ export async function restartComfyUI(): Promise<RestartResult> {
     return {
       stopped: false,
       started: false,
+      restart_hint: recoveryHint(info),
       message:
         `Refusing to restart: ${relaunch.reason} ComfyUI was left running (not stopped) ` +
         "so you don't lose the server. " +
         (relaunch.advice ??
-          "Fix the launch path (e.g. COMFYUI_PATH) and try again."),
+          "Fix the launch path (e.g. COMFYUI_PATH) and try again.") +
+        describeRecovery(recoveryHint(info)),
       // Refused before touching anything: the still-running server is the one that
       // was already there, which this call did not start.
       listener_ownership: unclassifiedOwnership(),
@@ -2570,25 +3065,55 @@ export function getRestartDispatchRecord(
  * server is externally supervised yet its relaunch is NOT provable from here
  * (a relative `main.py` argv with no COMFYUI_PATH/workspace anchor and no live
  * process cwd), and the supervisor does NOT re-launch after a plain Manager
- * restart — so the reboot would kill ComfyUI permanently. Only the PROVEN
- * dangerous shape refuses: a reachable, running, non-Desktop local instance
- * whose relaunch command cannot be built/validated. Everything else returns
- * ok:true and the caller proceeds exactly as before:
- *   - remote mode (no local process to assess);
- *   - nothing found / unreachable-but-unmapped (no proven running process —
- *     #449 already punts those to a Manager reboot on purpose);
- *   - a Desktop app (Electron-supervised — the Manager reboot IS its safe
- *     restart path, #400);
- *   - a validated relaunch (assessRelaunch, the #476/#426 machinery).
+ * restart — so the reboot would kill ComfyUI permanently.
+ *
+ * WHAT PASSES is now stated positively, because every "everything else proceeds"
+ * clause here turned out to be a way in for the same loss:
+ *   - remote mode — there is no local process to assess, and the Manager reboot is
+ *     that target's restart path by design;
+ *   - a Desktop instance a live supervisor is proven to be watching (#400's safe
+ *     path, now checked rather than assumed);
+ *   - a non-Desktop instance whose relaunch command can be built and validated
+ *     (assessRelaunch, the #476/#426 machinery).
+ * Everything else — including an instance that could not be identified at all —
+ * REFUSES, and says what it could not establish.
  */
 export async function preflightLocalRestart(): Promise<{
   ok: boolean;
   reason?: string;
 }> {
   if (isRemoteMode()) return { ok: true };
-  const { info } = await acquireProcessInfo();
-  if (!info) return { ok: true };
-  if (info.isDesktopApp) return { ok: true };
+  const { info, diagnostic } = await acquireProcessInfo();
+  // NOTHING COULD BE RESOLVED — and that is not a pass (coordinator gate).
+  //
+  // This was the door beside the widened gate: a local instance whose listener cannot
+  // be attributed (a container with no `lsof`, a permission wall, no `/proc`) resolves
+  // to NOTHING here, so the preflight "assessed" it, passed, and the reboot went out
+  // without anyone having checked whether a supervisor was still there. That is the
+  // container/permission form of the very #814 loss the gate exists to prevent — an
+  // instance we cannot identify is an instance whose relaunch we cannot prove.
+  //
+  // The refusal is safe in the genuinely-nothing-running case too: there is no server
+  // to lose, and the message says exactly what could not be established rather than
+  // asserting something is wrong.
+  if (!info) {
+    return {
+      ok: false,
+      reason:
+        `the ComfyUI this restart would stop could not be identified from here` +
+        (diagnostic ? ` (${diagnostic})` : ` (nothing was found listening on port ${config.resolvedPort})`) +
+        `, so it could not be established that stopping it is something we could undo.`,
+    };
+  }
+  if (info.isDesktopApp) {
+    // NOT an automatic pass any more (#814). Electron supervision is what makes a
+    // Desktop reboot safe, and it is a FACT about the running process tree, not a
+    // property of the install. See assessDesktopSupervision for why UNCONFIRMED
+    // refuses here while it is merely disclosed on the post-launch ownership path.
+    const desktop = assessDesktopSupervision(info);
+    if (desktop.ok) return { ok: true };
+    return { ok: false, reason: `${desktop.reason}${describeRecovery(recoveryHint(info))}` };
+  }
   // NOTE (#776): the launch-ENVIRONMENT check is deliberately NOT applied here.
   // This preflight guards an OUT-OF-BAND ComfyUI-Manager reboot, which re-execs
   // the SAME process — it inherits its own (launcher-supplied) environment, so a
@@ -2611,6 +3136,7 @@ export const __processControlTestHooks = {
     liveEnvResolverOverride = null;
     processIdentityOverride = null;
     parentPidResolverOverride = null;
+    processExistsOverride = null;
     deliberateStop = false;
     restartDispatchRecords.clear();
   },
@@ -2618,6 +3144,11 @@ export const __processControlTestHooks = {
    *  real process tree. */
   setParentPidResolver(fn: ((pid: number) => number | undefined) | null): void {
     parentPidResolverOverride = fn;
+  },
+  /** Inject a fake pid-existence probe (#814) so the Desktop supervision check can
+   *  be driven without spawning and killing real processes. */
+  setProcessExistsProbe(fn: ((pid: number) => boolean | undefined) | null): void {
+    processExistsOverride = fn;
   },
   /** Inject a fake process-identity (creation time) reader so tests can drive
    *  recycled-PID scenarios on any host, including where the native read is

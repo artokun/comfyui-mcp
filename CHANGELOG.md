@@ -6,6 +6,17 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.49.5] - 2026-08-04
+
+### MCP
+
+#### Fixed
+- `panel_ask`: a validated answer is now durable and is never delivered across a tab or conversation boundary (#486) (#811)
+- `restart_comfyui`: preserve the launcher environment, and never report ownership or a restart that was not observed (#776) (#785)
+- `install_panel`: the panel swap is crash-safe by ordering, and the status report no longer claims what it never observed (#771) (#793)
+- `strip_workflow` / `panel_flatten_workflow`: preserve dynamic widget values and virtual-node links, and disclose anything dropped (#361) (#805)
+- panel agent: rebind the agent tab across id migration and keep the release fallback starvation-free (#568) (#802)
+
 ## [0.49.4] - 2026-08-03
 
 ### MCP

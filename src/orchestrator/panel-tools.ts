@@ -6493,8 +6493,77 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         // (Electron-supervised, #400), unverifiable, or remote — proceeds exactly as
         // before. The binding for this DECISION is captured pre-await; nothing
         // downstream may reuse it (r7).
+        //
+        // #814: AN UNIDENTIFIED LOCAL TARGET IS NOT SENT AN IRREVERSIBLE STOP.
+        //
+        // `captureRebootHealthBase` answers "is the instance this tab fronts provably
+        // our own local boot ComfyUI?" — loopback base, server-observed handshake
+        // Origin, pathless mount. When it cannot say yes, we do not know WHICH
+        // ComfyUI the reboot will reach: the command goes to the bound TAB, not to
+        // the orchestrator's configured target.
+        //
+        // The original code dispatched anyway and reported honestly that it could not
+        // confirm the return — a verdict computed after a stop it should not have
+        // made, and the #814 lost server. A first attempt at this ran the local
+        // preflight in that case and let a PASS proceed, which was worse in a subtle
+        // way: the assessment describes the CONFIGURED instance while the reboot hits
+        // the TAB's, so a safe local install could authorize stopping an orphaned
+        // Desktop backend in some other tab (codex gate round 11). A pass for one
+        // instance is not permission to stop another.
+        //
+        // So: BOUND, assess the instance the reboot will reach and decide on it.
+        // UNBOUND and local, REFUSE — the assessment describes the orchestrator's
+        // CONFIGURED target, which is not shown to be what the reboot reaches, and a
+        // finding about one instance may not be spent on another IN EITHER DIRECTION.
+        //
+        // An asymmetric version was tried (a pass authorizes nothing, a fail still
+        // refuses) and is incoherent: if the configured target is a good enough proxy
+        // to refuse on, it is good enough to proceed on, and if it is not, the refusal
+        // is as unfounded as the permission. Keeping only the refusal would also break
+        // a working tab-fronted instance whenever the unrelated configured one is
+        // stale — while still leaving the dispatch unproven.
+        //
+        // The cost is real and is the point: `captureRebootHealthBase` also returns
+        // null for ordinary local setups (an ambiguous `localhost` origin, a basePath
+        // mount, an older panel), and those lose the panel restart until the binding
+        // can be proven. They keep restart_comfyui, and the note says so. Weighed
+        // against #814 — where exactly such a user's server was stopped and never came
+        // back — declining is the recoverable side.
         const preflightHealthBase = captureRebootHealthBase(ctx);
-        if (preflightHealthBase != null && sameHttpBase(getComfyUIBaseUrl(), preflightHealthBase)) {
+        const preflightBound =
+          preflightHealthBase != null &&
+          sameHttpBase(getComfyUIBaseUrl(), preflightHealthBase);
+        // Remote and cloud are excluded for the reason they always were: there is no
+        // local process to assess, and the Manager reboot is their ONLY restart path —
+        // a supervised remote (the tunnelled Desktop app) restarts through it by
+        // design, so refusing there would remove a path that works.
+        if (!preflightBound && !isRemoteMode() && !isCloudMode()) {
+          return ok({
+            rebooting: false,
+            ready: false,
+            confirmed_cycle: false,
+            refused: true,
+            note:
+              "Refusing to restart ComfyUI: I could not confirm that this panel's ComfyUI is " +
+              "the local instance I can account for, so I cannot tell which server the restart " +
+              "would stop — and it STOPS it, relying on whatever supervises it to start it " +
+              // A claim about what I DID, not about a server I have just said I cannot
+              // identify: "it is still running" would be exactly the unvalidated
+              // assertion the stale-target rule forbids (r8).
+              "again. Nothing was dispatched, so nothing was stopped. USE restart_comfyui " +
+              // The alternative is NAMED and the difference EXPLAINED (coordinator
+              // ruling): this tool restarts whatever the calling TAB fronts, which is
+              // exactly the thing that could not be identified here. restart_comfyui is
+              // not tab-scoped — it acts on the ComfyUI this server is configured for,
+              // which it can identify and assess — so it remains available. A user who
+              // loses one entry point must be told the other one works, and why.
+              "INSTEAD: unlike this panel-scoped restart, it is not tied to a browser tab " +
+              "— it acts on the ComfyUI this server is configured for, which it CAN " +
+              "identify and check before stopping. Or restart ComfyUI from whatever " +
+              "launches it (its own launcher, the Desktop app, or your terminal).",
+          });
+        }
+        if (preflightBound) {
           // Snapshot the target GENERATION at the decision (r11): a final-state
           // base comparison (A vs A) cannot detect an intervening A→B→A
           // retarget, so stability is judged by the monotonic epoch bumped on
@@ -6537,6 +6606,9 @@ export function buildPanelToolDefs(): PanelToolDef[] {
                 "panel_restart_comfyui.",
             });
           }
+          // r9: the danger proof follows the INSTANCE the tab fronts, not the mutable
+          // runtime config — a config-only retarget mid-await must not wash out the
+          // proof that the tab-fronted boot instance is unrelaunchable.
           if (!preflight.ok && tabFrontsSameInstance) {
             // r9: the danger proof follows the INSTANCE the tab fronts, NOT the
             // mutable runtime config — a config-only retarget mid-await must
@@ -6554,11 +6626,18 @@ export function buildPanelToolDefs(): PanelToolDef[] {
               confirmed_cycle: false,
               refused: true,
               note:
-                `Refusing to restart ComfyUI: ${preflight.reason} This looks like an ` +
-                "externally-managed install (e.g. Pinokio): a restart from here would STOP " +
-                "ComfyUI and nothing would bring it back automatically, so it was refused " +
-                "BEFORE anything was stopped — ComfyUI is still running. Restart it from the " +
-                "launcher that owns it (e.g. Pinokio's own controls), or point COMFYUI_PATH " +
+                // The REASON leads, because there is now more than one shape that
+                // reaches here — an externally-managed install whose launch command
+                // cannot be rebuilt (Pinokio, #742) and a Desktop instance whose
+                // supervisor has gone (#814) — and telling a Desktop user to check
+                // Pinokio would send them somewhere they have never been.
+                `Refusing to restart ComfyUI: ${preflight.reason}` +
+                " A restart from here would " +
+                "STOP ComfyUI and nothing would bring it back automatically, so it was " +
+                "refused BEFORE anything was stopped — ComfyUI is still running. Restart it " +
+                "from whatever launches it (its own launcher — e.g. Pinokio's own controls — " +
+                "the Desktop app, or your terminal); for an externally-managed install you " +
+                "can also point COMFYUI_PATH " +
                 "at the live install so a relaunch can be proven and use restart_comfyui.",
             });
           }
@@ -6583,6 +6662,37 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         // routing id while the original is still reconnecting.
         const preRestartPanelIdentity = ctx.panelConnectionIdentity?.();
         const healthBase = captureRebootHealthBase(ctx);
+        // THE BINDING RULE APPLIES AT THE DISPATCH POINT, NOT ONLY BEFORE THE AWAIT.
+        //
+        // The check above happens before the preflight; a tab or connection rebind
+        // DURING that await lands here with a target that is no longer bound, and
+        // `tabFrontsSameInstance` being false meant neither post-await refusal fired
+        // — so both a passing and a failing preflight fell through and the fresh,
+        // unidentified tab received the reboot (codex gate round 12). The pre-await
+        // check is kept because it avoids assessing an instance we already know we
+        // may not act on; this one is what actually holds the line.
+        //
+        // Same rule, same exclusions: only a LOCAL target we cannot tie to the
+        // instance this server accounts for is refused.
+        const dispatchBound =
+          healthBase != null && sameHttpBase(getComfyUIBaseUrl(), healthBase);
+        if (!dispatchBound && !isRemoteMode() && !isCloudMode()) {
+          return ok({
+            rebooting: false,
+            ready: false,
+            confirmed_cycle: false,
+            refused: true,
+            note:
+              "Refusing to restart ComfyUI: the panel connection changed while the restart " +
+              "was being prepared, and I can no longer confirm which ComfyUI this tab " +
+              "fronts — a restart STOPS a server, so it is never sent to one I cannot " +
+              // Again: what I did, not what an unidentified instance is doing.
+              "identify. Nothing was dispatched, so nothing was stopped. Retry once the " +
+              "panel has settled, or USE restart_comfyui INSTEAD: unlike this panel-scoped " +
+              "restart, it is not tied to a browser tab — it acts on the ComfyUI this " +
+              "server is configured for, which it CAN identify and check before stopping.",
+          });
+        }
         const timing = getPanelRebootTiming();
         const dispatchTimeout = Math.max(1, Math.min(15000, overallDeadline - Date.now()));
         // CONCURRENT OBSERVATION (coordinator): start probing the fixed boot endpoint NOW,

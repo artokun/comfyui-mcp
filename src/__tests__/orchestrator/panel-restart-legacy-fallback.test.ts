@@ -252,11 +252,16 @@ describe("panel_restart_comfyui — legacy no-endpoint fallback", () => {
   it("bound tab does NOT front the boot instance → does NOT restart the wrong local server", async () => {
     // The managed kill+relaunch acts on the orchestrator's global target; if we can't
     // prove the bound tab fronts THAT (boot) instance, we must not restart a different
-    // local instance and claim success — return the refusal verbatim instead.
+    // local instance and claim success.
+    //
+    // Since #814 the guard fires EARLIER and harder: an unbindable local target is
+    // refused before any reboot is dispatched at all, so the legacy fallback is never
+    // reached. The assertion this test exists for — the wrong local server is not
+    // restarted — holds a fortiori.
     const { ctx } = makeCtx(NO_ENDPOINT_REPLY, /* frontsBoot */ false);
     const res = (await restartTool().handler({}, ctx)) as ToolResult;
     expect(hoisted.restart).not.toHaveBeenCalled();
-    expect(res.content[0].text).toContain("was NOT restarted");
+    expect(res.content[0].text).toMatch(/cannot tell which server the restart would stop/i);
   });
 
   it("busy-guard refusal → NEVER falls back (does not abort a running render)", async () => {

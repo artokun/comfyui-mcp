@@ -112,9 +112,27 @@ beforeEach(() => {
   // Desktop classification is itself derived from that same possibly-stale argv, so
   // it cannot be what decides whether to verify. It needs the port owner's creation
   // time at both ends; model the ordinary host where that is readable.
-  __processControlTestHooks.setProcessIdentityResolver(() => ({
-    startedAt: "stable-stamp",
-  }));
+  // …and a LIVE Desktop shell above the backend (#814). A Manager reboot STOPS the
+  // process and depends on that shell to start it again, so the restart now proves
+  // the shell is there before dispatching anything. These tests are about what
+  // happens AFTER the dispatch — the reboot firing, and above all that the instance
+  // is never KILLED (#400) — so they must model the install they mean to model: an
+  // ordinary Desktop with its supervisor running. The refusal path has its own tests.
+  __processControlTestHooks.setProcessIdentityResolver((pid) => {
+    if (pid === 300) {
+      return {
+        executablePath: "C:\\Program Files\\Comfy Desktop\\Comfy Desktop.exe",
+        commandLine: '"C:\\Program Files\\Comfy Desktop\\Comfy Desktop.exe"',
+        startedAt: "2000", // the shell predates the backend it spawned
+      };
+    }
+    // A COMPARABLE stamp, not a placeholder: the supervisor check confirms the
+    // parent link causally (a parent cannot have started after its child), so a
+    // stamp that cannot be compared against the shell's leaves the link unverified.
+    return { startedAt: "5000", parentPid: 300 };
+  });
+  __processControlTestHooks.setParentPidResolver((pid) => (pid === 4321 ? 300 : undefined));
+  __processControlTestHooks.setProcessExistsProbe(() => true);
 });
 
 afterEach(() => {

@@ -26,7 +26,7 @@
 // should be added here as tier 0 — it works for remote servers too.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readlinkSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { platform } from "node:os";
 import { findPidByPort } from "./port-owner.js";
@@ -104,10 +104,134 @@ export function argv0FromCommandLine(cmdline: string): string | undefined {
   return m ? m[0] : undefined;
 }
 
+/**
+ * Split a command line the OS reports as ONE STRING back into argv.
+ *
+ * Needed because Windows (WMI `CommandLine`) and macOS (`ps -o command=`) hand back
+ * a flattened string, and a relaunch needs the pieces. Only double quotes group —
+ * that is the rule on Windows, and on macOS `ps` reproduces the argv joined by
+ * spaces, where a quote is at worst part of a filename.
+ *
+ * On WINDOWS the round-trip is faithful: this implements CommandLineToArgvW, the very
+ * rule the child's own runtime applies to that same string, so an argument containing
+ * a space was necessarily quoted (or the process itself would have seen two).
+ *
+ * On macOS it is LOSSY BY NATURE — `ps` prints argv joined by spaces and the quoting
+ * is gone, so `--output-directory /a/My Outputs` cannot be told from two arguments.
+ * That is why the caller records `argvFidelity`, and why a "flattened" argv may be
+ * READ but never SPAWNED (codex gate round 6).
+ *
+ * The result is likewise never used to CORROBORATE an identity against the command
+ * line it came from — a string tokenised from itself would trivially agree with
+ * itself, which is not evidence of anything. Linux does not use this at all:
+ * `/proc/<pid>/cmdline` is already NUL-separated argv.
+ */
+export function tokenizeCommandLine(commandLine: string): string[] {
+  const tokens: string[] = [];
+  let current = "";
+  let quoted = false;
+  let started = false;
+  let backslashes = 0;
+
+  /** Flush pending backslashes as literal characters. */
+  const flushBackslashes = (count: number): void => {
+    current += "\\".repeat(count);
+    if (count > 0) started = true;
+  };
+
+  for (const ch of commandLine) {
+    if (ch === "\\") {
+      backslashes++;
+      continue;
+    }
+    if (ch === '"') {
+      // The documented Windows rule (CommandLineToArgvW): 2n backslashes before a
+      // quote emit n backslashes and the quote GROUPS; 2n+1 emit n backslashes and
+      // the quote is LITERAL. Without this, `--flag "a\\" --next` loses the closing
+      // quote and everything after it fuses into one argument — a relaunch command
+      // that spawns with mangled arguments while every existence check upstream
+      // still passes, because those only validate the executable and the script.
+      flushBackslashes(Math.floor(backslashes / 2));
+      const literalQuote = backslashes % 2 === 1;
+      backslashes = 0;
+      if (literalQuote) {
+        current += '"';
+      } else {
+        quoted = !quoted;
+      }
+      started = true;
+      continue;
+    }
+    flushBackslashes(backslashes);
+    backslashes = 0;
+    if (!quoted && /\s/.test(ch)) {
+      if (started) tokens.push(current);
+      current = "";
+      started = false;
+      continue;
+    }
+    current += ch;
+    started = true;
+  }
+  flushBackslashes(backslashes);
+  if (started) tokens.push(current);
+  return tokens;
+}
+
 /** What the OS can tell us about a running process. */
 export interface ProcessIdentity {
   /** Full command line, as the OS reports it. */
   commandLine?: string;
+  /**
+   * The command line as ARGV — exact on Linux (`/proc/<pid>/cmdline` is already
+   * NUL-separated), tokenised from the flattened string elsewhere.
+   *
+   * Its ONLY purpose is to rebuild a relaunch command for a server that could not
+   * report its own `sys.argv` (a wedged or unreachable ComfyUI, #767). It is never
+   * evidence of identity: on the platforms where it is tokenised it is derived from
+   * `commandLine`, so checking one against the other proves nothing.
+   */
+  argv?: string[];
+  /**
+   * Does `argv` reproduce the argument vector the process ACTUALLY received?
+   *
+   * This is the difference between an argv that can be spawned and one that can only
+   * be read (codex gate round 6).
+   *
+   *   "exact"     — Linux `/proc/<pid>/cmdline`, which is already NUL-separated, and
+   *                 Windows `Win32_Process.CommandLine`, which is the literal string
+   *                 handed to CreateProcess and is parsed by the child's own runtime
+   *                 with exactly the CommandLineToArgvW rule `tokenizeCommandLine`
+   *                 implements. An argument containing a space MUST have been quoted
+   *                 there, or the process itself would have seen two — so the
+   *                 round-trip is faithful.
+   *   "flattened" — macOS `ps -o command=`, where the kernel joined argv with spaces
+   *                 and the quoting is simply GONE. `--output-directory /a/My Outputs`
+   *                 is indistinguishable from two arguments, and relaunching from it
+   *                 would spawn a command the user never ran.
+   */
+  argvFidelity?: "exact" | "flattened";
+  /**
+   * The OS's OWN record of which binary this process is running — independent of
+   * argv[0], which the process itself supplies.
+   *
+   * argv[0] is a string the launcher chose. `exec -a`, or a hand-built Windows
+   * command line, can make any program present itself as any other, so argv[0] is a
+   * CLAIM. This field is the kernel's answer (`Win32_Process.ExecutablePath`,
+   * `/proc/<pid>/exe`) and cannot be set by the process (codex gate round 3).
+   *
+   * Used ONLY where the question is "what program is this?" — deciding whether a
+   * parent really is the ComfyUI Desktop shell before its supervision is allowed to
+   * license a stop. It is deliberately NOT used for the INTERPRETER question this
+   * module exists for: for a venv, both sources resolve through the trampoline to the
+   * BASE interpreter, while argv[0] is the venv python whose site-packages the server
+   * actually imports (#401). Two questions, two fields.
+   *
+   * `undefined` where the platform or permissions do not expose it — macOS `ps`
+   * reports no such column, and an elevated Windows process may withhold it — in
+   * which case the caller falls back to argv[0], which is what it had before.
+   */
+  executablePath?: string;
   /** Process creation time, in whatever stable form the platform provides. Only ever
    *  compared against another reading taken on the SAME platform. */
   startedAt?: string;
@@ -123,17 +247,22 @@ export interface ProcessIdentity {
 /**
  * Read a running process's command line AND creation time from the OS.
  *
- * Windows: WMI's `CommandLine`, NOT `ExecutablePath`. This distinction is the whole
+ * Windows: WMI's `CommandLine` is what answers the INTERPRETER question, NOT
+ * `ExecutablePath`. This distinction is the whole
  * point — for a venv, Windows reports ExecutablePath as the BASE interpreter the
  * venv trampoline loads (e.g. …\standalone-env\python.exe) while CommandLine's
  * argv[0] is the venv python (…\ComfyUI\.venv\Scripts\python.exe), which is what
  * `sys.executable` reports and whose site-packages the server actually imports.
  * Verified against a live ComfyUI Desktop instance while fixing #401.
+ * `ExecutablePath` IS read, into its own field, for the separate "what program is
+ * this?" question — see `executablePath`.
  *
  * Linux: /proc/PID/cmdline ("\u0000"-separated argv) plus field 22 of /proc/PID/stat
- * (starttime, in clock ticks since boot). Avoids /proc/PID/exe, which resolves
+ * (starttime, in clock ticks since boot). /proc/PID/exe likewise goes to
+ * `executablePath` ONLY, never to the interpreter answer, because it resolves
  * through the venv symlink to the base interpreter.
- * macOS: `ps -o lstart=,command=`.
+ * macOS: `ps -o lstart=,command=` — which exposes no authenticated executable
+ * column, so `executablePath` is undefined there.
  */
 function parsePid(raw: string | undefined): number | undefined {
   if (raw == null) return undefined;
@@ -150,7 +279,7 @@ export function readProcessIdentity(pid: number): ProcessIdentity | undefined {
           "-NoProfile",
           "-Command",
           `$p = Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}"; ` +
-            `if ($p) { "START=" + $p.CreationDate.ToFileTimeUtc(); "PPID=" + $p.ParentProcessId; "CMD=" + $p.CommandLine }`,
+            `if ($p) { "START=" + $p.CreationDate.ToFileTimeUtc(); "PPID=" + $p.ParentProcessId; "EXE=" + $p.ExecutablePath; "CMD=" + $p.CommandLine }`,
         ],
         { encoding: "utf-8", timeout: 8000, windowsHide: true },
       );
@@ -158,10 +287,16 @@ export function readProcessIdentity(pid: number): ProcessIdentity | undefined {
       // PPID before CMD in the output so a multi-line command line (captured with
       // [\s\S]) cannot swallow it.
       const parentPid = parsePid(out.match(/^PPID=(.+)$/m)?.[1]);
+      // EXE before CMD for the same reason PPID is: a multi-line command line
+      // (captured with [\s\S]) must not swallow the fields after it.
+      const executablePath = out.match(/^EXE=(.*)$/m)?.[1]?.trim();
       const commandLine = out.match(/^CMD=([\s\S]*)$/m)?.[1]?.trim();
       if (!startedAt && !commandLine) return undefined;
       return {
         commandLine: commandLine || undefined,
+        argv: commandLine ? tokenizeCommandLine(commandLine) : undefined,
+        argvFidelity: "exact",
+        executablePath: executablePath || undefined,
         startedAt: startedAt || undefined,
         parentPid,
       };
@@ -169,7 +304,9 @@ export function readProcessIdentity(pid: number): ProcessIdentity | undefined {
     if (platform() === "linux") {
       // argv entries are "\u0000"-separated; rejoin them as a command line.
       const raw = readFileSync(`/proc/${pid}/cmdline`, "utf-8");
-      const commandLine = raw.split("\u0000").filter(Boolean).join(" ").trim();
+      // EXACT argv — the kernel already separated it, so nothing is guessed here.
+      const argv = raw.split("\u0000").filter(Boolean);
+      const commandLine = argv.join(" ").trim();
       let startedAt: string | undefined;
       let parentPid: number | undefined;
       try {
@@ -183,8 +320,24 @@ export function readProcessIdentity(pid: number): ProcessIdentity | undefined {
       } catch {
         /* start time unavailable → the launched-by-us tier fails closed */
       }
+      // The kernel's own record of the binary, which argv[0] cannot forge. Absent
+      // (EACCES) for another user's process, which is exactly the case where the
+      // caller must fall back rather than conclude anything.
+      let executablePath: string | undefined;
+      try {
+        executablePath = readlinkSync(`/proc/${pid}/exe`);
+      } catch {
+        /* not ours to read → undefined, and the caller falls back to argv[0] */
+      }
       if (!commandLine && !startedAt) return undefined;
-      return { commandLine: commandLine || undefined, startedAt, parentPid };
+      return {
+        commandLine: commandLine || undefined,
+        argv: argv.length > 0 ? argv : undefined,
+        argvFidelity: "exact",
+        executablePath: executablePath || undefined,
+        startedAt,
+        parentPid,
+      };
     }
     const out = execFileSync(
       "ps",
@@ -196,11 +349,13 @@ export function readProcessIdentity(pid: number): ProcessIdentity | undefined {
     const m = out.match(
       /^\s*(\d+)\s+(\w{3}\s+\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+([\s\S]*)$/,
     );
-    if (!m) return { commandLine: out };
+    if (!m) return { commandLine: out, argv: tokenizeCommandLine(out), argvFidelity: "flattened" };
     return {
       parentPid: parsePid(m[1]),
       startedAt: m[2].replace(/\s+/g, " "),
       commandLine: m[3].trim(),
+      argv: tokenizeCommandLine(m[3].trim()),
+      argvFidelity: "flattened",
     };
   } catch {
     return undefined;

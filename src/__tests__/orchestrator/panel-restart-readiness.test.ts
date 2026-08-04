@@ -20,6 +20,13 @@ const { buildPanelToolDefs, __panelToolsTestHooks } = await import(
   "../../orchestrator/panel-tools.js"
 );
 import type { PanelToolCtx, ToolResult } from "../../orchestrator/panel-tools.js";
+import { getBootLocalComfyUIBaseUrl } from "../../config.js";
+
+/** The orchestrator's own boot endpoint — what a local tab must front to be bound. */
+const BOOT_BASE = (getBootLocalComfyUIBaseUrl() ?? "http://127.0.0.1:8188").replace(
+  /\/+$/,
+  "",
+);
 
 const parse = (res: ToolResult): Record<string, unknown> =>
   JSON.parse(res.content.find((c) => c.type === "text")!.text as string);
@@ -39,7 +46,13 @@ function ctxReboot(reply: Record<string, unknown> | null, throwMsg?: string): Pa
         return reply ?? {};
       },
       tabOrigin: () => undefined,
-      tabIsLocal: () => false,
+      // BOUND to our own boot instance (#814): panel_restart_comfyui now refuses a
+      // LOCAL target it cannot tie to the instance it can account for, because a
+      // reboot STOPS a server and it must know which one. These tests are about the
+      // dispatch CLASSIFICATION that follows, so they model the ordinary local panel:
+      // a loopback tab fronting the boot ComfyUI.
+      tabIsLocal: () => true,
+      tabServerOrigin: () => BOOT_BASE,
       tabSockId: () => "s0",
       canReach: () => false,
     } as unknown as PanelToolCtx["bridge"],
@@ -56,6 +69,12 @@ function rebootHandler() {
 beforeEach(() => {
   resetClient.mockClear();
   resetObjectInfoCache.mockClear();
+  // #814 widened the refuse-safe preflight to EVERY local target, not only a
+  // tab-bound one, so it now runs on this path too. These tests are about the
+  // dispatch classification, not about relaunch safety, and the real preflight
+  // would do live process/port discovery against the host — stub a PASS so the
+  // subject under test is the only thing being measured.
+  __panelToolsTestHooks.setLocalRestartPreflight(async () => ({ ok: true }));
   __panelToolsTestHooks.setPanelRebootTiming({
     settleMs: 0,
     budgetMs: 60,
@@ -67,6 +86,7 @@ beforeEach(() => {
 afterEach(() => {
   __panelToolsTestHooks.setPanelRebootTiming(null);
   __panelToolsTestHooks.setHealthProbe(null);
+  __panelToolsTestHooks.setLocalRestartPreflight(null);
 });
 
 describe("panel_restart_comfyui reboot-dispatch classification", () => {

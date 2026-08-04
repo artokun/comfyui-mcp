@@ -25,6 +25,9 @@ vi.mock("../../comfyui/client.js", () => ({
 const hoistedConfig = vi.hoisted(() => ({
   configBase: { value: null as string | null },
   generation: { value: 0 },
+  /** #814: drive REMOTE mode, the one target shape the widened preflight gate
+   *  deliberately excludes (no local process to assess). */
+  remote: { value: false },
 }));
 vi.mock("../../config.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../config.js")>();
@@ -32,6 +35,7 @@ vi.mock("../../config.js", async (importOriginal) => {
     ...actual,
     getComfyUIBaseUrl: () => hoistedConfig.configBase.value ?? actual.getComfyUIBaseUrl(),
     getComfyuiTargetGeneration: () => hoistedConfig.generation.value,
+    isRemoteMode: () => hoistedConfig.remote.value || actual.isRemoteMode(),
   };
 });
 
@@ -64,6 +68,9 @@ function makeCtx(opts: {
   fronts?: { current: boolean };
   /** The comfy_reboot reply (default: an accepted `{rebooting: true}`). */
   rebootReply?: Record<string, unknown>;
+  /** Called on every ctx.ensureReachable() — lets a test land a retarget at a
+   *  specific point in the handler (the DISPATCH point is the third call). */
+  onEnsureReachable?: () => void;
 }): { ctx: PanelToolCtx; sends: Array<Record<string, unknown>> } {
   const sends: Array<Record<string, unknown>> = [];
   const frontsBoot = opts.frontsBoot ?? true;
@@ -86,7 +93,7 @@ function makeCtx(opts: {
       throw new Error("ctx.call must not be used by the restart handler");
     },
     confirm: async () => opts.confirm,
-    ensureReachable: () => {},
+    ensureReachable: () => opts.onEnsureReachable?.(),
     bridge,
     tabId: "bound-tab",
     panelConnectionIdentity: () => ({ generation: 1, tabSessionId: "browser-tab-a" }),
@@ -127,6 +134,7 @@ beforeEach(() => {
   // r9: real configured base unless a test retargets it mid-flight.
   hoistedConfig.configBase.value = null;
   hoistedConfig.generation.value = 0;
+  hoistedConfig.remote.value = false;
 });
 
 afterEach(() => {
@@ -137,6 +145,7 @@ afterEach(() => {
   __processControlTestHooks.reset();
   hoistedConfig.configBase.value = null;
   hoistedConfig.generation.value = 0;
+  hoistedConfig.remote.value = false;
 });
 
 describe("panel_restart_comfyui — decline truthfulness (#742)", () => {
@@ -532,12 +541,17 @@ describe("panel_restart_comfyui — Pinokio-style refuse-safe preflight (#742)",
     expect(resetObjectInfoCache).not.toHaveBeenCalled();
   });
 
-  it("a failing preflight with a mid-await REBIND issues NO stale-target refusal (r8)", async () => {
-    // Bound at the preflight decision; the session rebinds to an unconfirmable
-    // target DURING the await and the preflight FAILS. The refusal must NOT be
-    // composed against the stale pre-await target ("ComfyUI is still running"
-    // would describe a target never validated) — nothing was stopped, so the
-    // flow falls through to the honest unbound dispatch instead.
+  it("a failing preflight with a mid-await REBIND issues NO STALE-TARGET refusal (r8)", async () => {
+    // Bound at the preflight decision; the session rebinds to an unconfirmable target
+    // DURING the await and the preflight FAILS. r8's rule stands: the refusal must NOT
+    // be composed against the STALE pre-await target — "ComfyUI is still running" would
+    // describe an instance that was never validated, and the reason would name a
+    // diagnosis belonging to a different install.
+    //
+    // What CHANGED is where the flow lands instead. It used to fall through to an
+    // honest unbound dispatch; a local target we cannot identify is now refused at the
+    // DISPATCH POINT (#814), so the outcome is a refusal about the CURRENT binding —
+    // the panel connection changed — not about the stale one.
     const fronts = { current: true }; // bound when the preflight is decided…
     __panelToolsTestHooks.setLocalRestartPreflight(async () => {
       fronts.current = false; // …but a rebind lands DURING the preflight await
@@ -554,46 +568,17 @@ describe("panel_restart_comfyui — Pinokio-style refuse-safe preflight (#742)",
     const out = parse(await restartTool().handler({}, ctx));
     const note = String(out.note ?? "");
 
-    // NO stale-target refusal, no unvalidated "still running" claim…
-    expect(note).not.toMatch(/Refusing to restart/i);
+    // The r8 invariant: NOTHING from the stale assessment appears — not its reason,
+    // and not a "still running" claim about an instance it never validated.
+    expect(note).not.toMatch(/does not exist on disk/i);
     expect(note).not.toMatch(/still running/i);
-    expect(out.refused).not.toBe(true);
-    // …the restart proceeds against the CURRENT (unbound) target and is
-    // reported honestly as dispatched-but-unconfirmable.
-    expect(sends.some((c) => c.cmd === "comfy_reboot")).toBe(true);
-    expect(out.rebooting).toBe(true);
-    expect(note).toMatch(/can't confirm/i);
-    expect(__panelToolsTestHooks.getSessionRestartDispatch(ctx)).toBeNull();
-  });
-
-  it("a CONFIG-ONLY retarget mid-await still REFUSES the proven-dangerous boot instance (r9)", async () => {
-    // The tab fronts the boot instance THROUGHOUT; only the MUTABLE runtime
-    // config moves during the preflight await. The failed preflight already
-    // PROVED that instance unrelaunchable — the proof follows the instance the
-    // tab fronts, not the mutable config — so the reboot must be REFUSED and
-    // never dispatched (an instance proven unrelaunchable is NEVER sent a
-    // stop/reboot, regardless of config shuffling mid-flight).
-    __panelToolsTestHooks.setLocalRestartPreflight(async () => {
-      hoistedConfig.configBase.value = "http://127.0.0.1:9999"; // config-only retarget mid-await
-      hoistedConfig.generation.value += 1; // every real retarget bumps the generation
-      return {
-        ok: false,
-        reason:
-          "Resolved ComfyUI script does not exist on disk: main.py — could not " +
-          "locate the ComfyUI install.",
-      };
-    });
-    __panelToolsTestHooks.setHealthProbe(async () => "down");
-    const { ctx, sends } = makeCtx({ confirm: "yes", frontsBoot: true });
-
-    const out = parse(await restartTool().handler({}, ctx));
-    const note = String(out.note ?? "");
-
+    // The refusal is about the binding that actually applies now.
     expect(out.refused).toBe(true);
-    expect(note).toMatch(/Refusing to restart/i);
-    expect(note).toMatch(/still running/i);
-    // CRITICAL: the reboot was NEVER dispatched — the proven-dangerous
-    // instance was not stopped.
+    expect(note).toMatch(/panel connection changed/i);
+    // Same condition on this refusal: name the alternative and say why it works.
+    expect(note).toMatch(/use restart_comfyui instead/i);
+    expect(note).toMatch(/not tied to a browser tab/i);
+    // CRITICAL: nothing was dispatched to the unidentified target.
     expect(sends.some((c) => c.cmd === "comfy_reboot")).toBe(false);
   });
 
@@ -649,18 +634,125 @@ describe("panel_restart_comfyui — Pinokio-style refuse-safe preflight (#742)",
     expect(sends.some((c) => c.cmd === "comfy_reboot")).toBe(false);
   });
 
-  it("does NOT consult the preflight when the tab doesn't provably front our boot instance", async () => {
-    // The preflight guards OUR local boot instance only. A reboot bound for a
-    // different/remote instance proceeds exactly as before (dispatched +
-    // accepted, honestly unconfirmable from here).
+  it("#814: a LOCAL target the tab cannot be bound to is REFUSED, whatever the local check says", async () => {
+    // THE #814 DEFECT, pinned — together with two wrong answers to it.
+    //
+    // Originally the safety check was gated on the same capture as the CERTIFICATION,
+    // so an instance we could not certify was also never assessed: the reboot went out
+    // with no evidence, the server stopped, nothing brought it back, and the result
+    // honestly said it could not confirm the return.
+    //
+    // The first fix ran the local preflight anyway and let a PASS proceed. But the
+    // assessment describes the orchestrator CONFIGURED instance while the reboot goes
+    // to the bound TAB, so a safe local install could authorize stopping an orphaned
+    // backend in some other tab. The second tried to keep only the FAIL half, which is
+    // incoherent: if the configured target is a good enough proxy to refuse on, it is
+    // good enough to proceed on.
+    //
+    // So an unbindable LOCAL target is refused outright — and the local assessment is
+    // not consulted at all, because nothing it could say may be spent on a different
+    // instance.
+    const preflight = vi.fn(async () => ({ ok: true }));
+    __panelToolsTestHooks.setLocalRestartPreflight(preflight);
+    const { ctx, sends } = makeCtx({ confirm: "yes", frontsBoot: false });
+
+    const out = parse(await restartTool().handler({}, ctx));
+
+    expect(out.refused).toBe(true);
+    expect(out.rebooting).toBe(false);
+    expect(String(out.note)).toMatch(/cannot tell which server the restart would stop/i);
+    // It reports what it DID — not a 'still running' claim about an instance it has
+    // just said it cannot identify (the same rule r8 enforces for a stale target).
+    expect(String(out.note)).toMatch(/nothing was stopped/i);
+    // A user who loses this entry point is told which one still works AND why: the
+    // refusal is a documented trade, not a dead end (coordinator ruling).
+    expect(String(out.note)).toMatch(/use restart_comfyui instead/i);
+    expect(String(out.note)).toMatch(/not tied to a browser tab/i);
+    // A PASSING local assessment did not launder permission for a target it does not
+    // describe — and was never even asked.
+    expect(preflight).not.toHaveBeenCalled();
+    // CRITICAL: nothing was dispatched, so nothing was stopped.
+    expect(sends.some((c) => c.cmd === "comfy_reboot")).toBe(false);
+  });
+
+  it("#814: a BOUND local target with a failing assessment refuses with its reason", async () => {
+    // The bound path, where the assessment genuinely describes the instance the
+    // reboot will reach. A Desktop instance whose supervisor has gone is refused
+    // BEFORE anything is stopped, and the specific reason is carried through rather
+    // than replaced by a generic one — a Desktop user must not be sent to look at
+    // Pinokio's controls.
+    const preflight = vi.fn(async () => ({
+      ok: false,
+      reason: "no Desktop app is still supervising it.",
+    }));
+    __panelToolsTestHooks.setLocalRestartPreflight(preflight);
+    const { ctx, sends } = makeCtx({ confirm: "yes", frontsBoot: true });
+
+    const out = parse(await restartTool().handler({}, ctx));
+
+    expect(preflight).toHaveBeenCalled();
+    expect(out.refused).toBe(true);
+    expect(out.rebooting).toBe(false);
+    expect(String(out.note)).toMatch(/no Desktop app is still supervising it/);
+    expect(String(out.note)).toMatch(/still running/i);
+    // CRITICAL: nothing was ever dispatched, so nothing was ever stopped.
+    expect(sends.some((c) => c.cmd === "comfy_reboot")).toBe(false);
+  });
+
+  it("a BOUND local target with a PASSING assessment dispatches as before", async () => {
+    // The control: the refusals are about missing or negative evidence, not a
+    // blanket denial. When the tab provably fronts our own instance and its
+    // relaunch is proven, the restart proceeds exactly as it always did.
+    const preflight = vi.fn(async () => ({ ok: true }));
+    __panelToolsTestHooks.setLocalRestartPreflight(preflight);
+    const { ctx, sends } = makeCtx({ confirm: "yes", frontsBoot: true });
+
+    const out = parse(await restartTool().handler({}, ctx));
+
+    expect(preflight).toHaveBeenCalled();
+    expect(out.rebooting).toBe(true);
+    expect(sends.some((c) => c.cmd === "comfy_reboot")).toBe(true);
+  });
+
+  it("a retarget landing AFTER the preflight is caught at the dispatch point", async () => {
+    // The dispatch-point check has to compare the tab's instance against the target
+    // as it stands THEN. A retarget that lands after the preflight block leaves the
+    // tab bound to the old base while the reboot would go to a different configured
+    // instance — so a check that only asked "is the tab bound to something?" would
+    // wave it through. `ensureReachable` is called at the dispatch point (third
+    // call), which is where this lands the move.
+    let calls = 0;
+    const { ctx, sends } = makeCtx({
+      confirm: "yes",
+      frontsBoot: true,
+      onEnsureReachable: () => {
+        calls++;
+        if (calls >= 3) {
+          hoistedConfig.configBase.value = "http://127.0.0.1:9999";
+          hoistedConfig.generation.value += 1;
+        }
+      },
+    });
+
+    const out = parse(await restartTool().handler({}, ctx));
+
+    expect(out.refused).toBe(true);
+    expect(sends.some((c) => c.cmd === "comfy_reboot")).toBe(false);
+  });
+
+  it("a REMOTE target is not assessed — the Manager reboot is its only restart path", async () => {
+    // There is no local process to assess, and a supervised remote (the tunnelled
+    // Desktop app) restarts through exactly this reboot by design. Refusing here
+    // would remove a path that works, which is the opposite of the point.
+    hoistedConfig.remote.value = true;
     const preflight = vi.fn(async () => ({ ok: false, reason: "would refuse" }));
     __panelToolsTestHooks.setLocalRestartPreflight(preflight);
     const { ctx, sends } = makeCtx({ confirm: "yes", frontsBoot: false });
 
     const out = parse(await restartTool().handler({}, ctx));
 
-    expect(out.rebooting).toBe(true);
     expect(preflight).not.toHaveBeenCalled();
+    expect(out.rebooting).toBe(true);
     expect(sends.some((c) => c.cmd === "comfy_reboot")).toBe(true);
   });
 
@@ -743,6 +835,11 @@ describe("panel_restart_comfyui — restart dispatch record (r4/r5)", () => {
     // record: the dispatch can't be proven to have hit the instance a later
     // decline would probe. It lands only in the process-wide non-causation
     // slot (documenting that a dispatch happened).
+    // REMOTE, because that is where an unbound dispatch still happens: a LOCAL
+    // target the tab cannot be tied to is now refused outright (#814 — a stop is
+    // never sent to a server we cannot identify). The subject here is unchanged:
+    // an unconfirmable dispatch must not stamp a causation-capable record.
+    hoistedConfig.remote.value = true;
     __panelToolsTestHooks.setHealthProbe(async () => "down");
     const { ctx, sends } = makeCtx({ confirm: "yes", frontsBoot: false });
 
@@ -769,11 +866,17 @@ describe("panel_restart_comfyui — restart dispatch record (r4/r5)", () => {
     __panelToolsTestHooks.setHealthProbe(async () => seq[Math.min(i++, seq.length - 1)]);
     const { ctx, sends } = makeCtx({ confirm: "yes", fronts });
 
-    // 1. Accepted reboot while UNBOUND — dispatched, honestly unconfirmable.
+    // 1. Accepted reboot while UNBOUND — dispatched, honestly unconfirmable. REMOTE,
+    // because that is where an unbound dispatch still happens: a LOCAL target the tab
+    // cannot be tied to is now refused outright (#814). The scenario under test is
+    // unchanged — a reboot of a possibly-different instance must never be blamed for
+    // a later down on the bound one.
+    hoistedConfig.remote.value = true;
     const out1 = parse(await restartTool().handler({}, ctx));
     expect(out1.rebooting).toBe(true);
 
     // 2. The session REBINDS to the boot tab and a second card is declined.
+    hoistedConfig.remote.value = false;
     fronts.current = true;
     ctx.confirm = async () => "no" as const;
     __panelToolsTestHooks.setHealthProbe(async () => "down"); // full-window refusal
@@ -789,10 +892,14 @@ describe("panel_restart_comfyui — restart dispatch record (r4/r5)", () => {
   });
 
   it("a rebind DURING the preflight await withholds the causation-capable stamp (r7)", async () => {
-    // Bound at the preflight DECISION, but the session rebinds to an
-    // unconfirmable target MID-AWAIT: the dispatch proceeds to the new target,
-    // yet the stamp must use the DISPATCH-POINT binding (unbound → process-wide
-    // non-causation slot only) — never the stale pre-await bound base.
+    // Bound at the preflight DECISION, but the session rebinds to an unconfirmable
+    // target MID-AWAIT. r7's rule is that nothing may be stamped against the STALE
+    // pre-await bound base — the dispatch-point binding governs.
+    //
+    // That rule now holds in its strongest form: a local target we cannot identify is
+    // refused AT THE DISPATCH POINT (#814), so there is no dispatch and no record at
+    // all — neither session-held nor process-wide. A stamp against the stale base was
+    // never possible, because nothing was ever sent.
     const fronts = { current: true }; // bound when the preflight is decided…
     __panelToolsTestHooks.setLocalRestartPreflight(async () => {
       fronts.current = false; // …but a rebind lands DURING the preflight await
@@ -803,14 +910,11 @@ describe("panel_restart_comfyui — restart dispatch record (r4/r5)", () => {
 
     const out = parse(await restartTool().handler({}, ctx));
 
-    // The dispatch still proceeded (to the new, unconfirmable target) and was
-    // accepted — honestly reported unconfirmable.
-    expect(sends.some((c) => c.cmd === "comfy_reboot")).toBe(true);
-    expect(out.rebooting).toBe(true);
-    // The causation-capable stamp is WITHHELD: no session-held record…
+    expect(out.refused).toBe(true);
+    expect(sends.some((c) => c.cmd === "comfy_reboot")).toBe(false);
+    // NOTHING is on record — least of all against the stale bound base.
     expect(__panelToolsTestHooks.getSessionRestartDispatch(ctx)).toBeNull();
-    // …only the shared process-wide (never-causation) slot knows of it.
-    expect(getRestartDispatchRecord(PROCESS_WIDE_RESTART_DISPATCH_TOKEN)).not.toBeNull();
+    expect(getRestartDispatchRecord(PROCESS_WIDE_RESTART_DISPATCH_TOKEN)).toBeNull();
   });
 
   it("a dispatch stamped DURING a decline probe survives the exoneration clear (r15)", async () => {

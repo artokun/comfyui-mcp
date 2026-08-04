@@ -38,6 +38,235 @@ export function unclassifiedOwnership(): ListenerOwnership {
 }
 
 // ---------------------------------------------------------------------------
+// Will a supervisor bring this process back? (#814)
+// ---------------------------------------------------------------------------
+
+declare const SUPERVISION_CLASSIFIED: unique symbol;
+
+/**
+ * Whether stopping this process is SURVIVABLE — i.e. whether something else will
+ * start it again.
+ *
+ * The question exists because a ComfyUI **Desktop** instance is never killed and
+ * relaunched by us (#400): the Electron shell owns the process, so the restart path
+ * asks ComfyUI-Manager to re-exec it and relies on that shell to be there. #814 is
+ * what happens when it is NOT — the reboot stopped a Desktop-spawned server whose
+ * shell had already moved on, nothing brought it back, and the user was left with no
+ * ComfyUI at all. The stop was dispatched on an ASSUMPTION about a supervisor nobody
+ * had looked for.
+ *
+ * Branded for exactly the reason `ListenerOwnership` is: a definite verdict may only
+ * come from the code that gathered the evidence. Here BOTH definite verdicts are
+ * costly in opposite directions — `supervised` licenses a stop, `abandoned` denies a
+ * user a restart that would have worked — so neither is reachable from a literal.
+ */
+export type SupervisorRelaunch = ("supervised" | "abandoned" | "unconfirmed") & {
+  readonly [SUPERVISION_CLASSIFIED]: true;
+};
+
+function classifiedSupervision(
+  verdict: "supervised" | "abandoned" | "unconfirmed",
+): SupervisorRelaunch {
+  return verdict as SupervisorRelaunch;
+}
+
+/** The only verdict a caller that did NOT classify is entitled to return. */
+export function unclassifiedSupervision(): SupervisorRelaunch {
+  return "unconfirmed" as SupervisorRelaunch;
+}
+
+/**
+ * The verdict AND what stopped the walk from reaching a definite one.
+ *
+ * `because` exists because `unconfirmed` now REFUSES a reboot rather than allowing
+ * it, and a refusal that cannot say what it failed to establish is not actionable:
+ * "could not read the parent of PID 4321" tells a user (and a maintainer) something
+ * a bare "unconfirmed" does not. Only populated for `unconfirmed` — the two definite
+ * verdicts describe themselves.
+ */
+export interface SupervisionAssessment {
+  verdict: SupervisorRelaunch;
+  because?: string;
+}
+
+export interface SupervisionEvidence {
+  /** The process that would be stopped — the one holding ComfyUI's port. */
+  pid: number;
+  readParentPid: (pid: number) => number | undefined;
+  readIdentity: (pid: number) => ProcessIdentity | undefined;
+  /**
+   * Does this pid exist? TRI-STATE, from a signal-0 probe:
+   *   false     — ESRCH: nothing holds that number.
+   *   true      — it exists (or exists and is not ours to signal).
+   *   undefined — could not tell.
+   * The DEFINITE FALSE is the load-bearing one: "the supervisor's pid is gone" is
+   * the positive finding that a stop will not be undone.
+   */
+  processExists: (pid: number) => boolean | undefined;
+  /**
+   * Is this process a Desktop supervisor (the Electron shell / .app)?
+   *
+   * Takes the whole identity, not just the command line, so the decision can be made
+   * from argv[0] — the process's OWN executable. A predicate over the raw string
+   * cannot tell "this IS the Desktop shell" from "this merely mentions it", and a
+   * wrapper that passes the Desktop exe as an argument re-execs nothing.
+   */
+  isSupervisorProcess: (identity: ProcessIdentity) => boolean;
+}
+
+/**
+ * Is `parent` old enough to BE the parent of `child`?
+ *
+ * A parent pid alone does not identify a parent process. When a process's parent
+ * exits, the number it held stays written in the child's record and becomes
+ * reusable — so a LATER process can inherit it, and on Windows that later process
+ * can perfectly well be another `Comfy Desktop.exe` (the user restarted the app).
+ * Checking only "does that pid exist and look like a shell" then answers
+ * `supervised` about a shell that has never heard of this backend, which is the very
+ * lost-server this classifier exists to prevent (codex gate).
+ *
+ * Causality settles it: a parent cannot have started AFTER its child. Equality is
+ * allowed because the stamps are coarse on some platforms (macOS `lstart` has
+ * one-second resolution, and a shell spawning its backend immediately lands in the
+ * same second).
+ *
+ * The stamps are only ever compared against another reading from the SAME platform,
+ * as everywhere else in this codebase. All-digit forms (Linux clock ticks since
+ * boot; a Windows FILETIME, which exceeds Number.MAX_SAFE_INTEGER and is therefore
+ * compared as BigInt) compare numerically; otherwise a date parse is attempted.
+ * Anything that cannot be compared is `unknown` — never quietly "fine".
+ */
+type StartOrder = "parent-first" | "parent-newer" | "unknown";
+
+export function compareStartTimes(
+  parent: string | undefined,
+  child: string | undefined,
+): StartOrder {
+  if (!parent || !child) return "unknown";
+  const p = parent.trim();
+  const c = child.trim();
+  if (/^\d+$/.test(p) && /^\d+$/.test(c)) {
+    return BigInt(p) <= BigInt(c) ? "parent-first" : "parent-newer";
+  }
+  const pd = Date.parse(p);
+  const cd = Date.parse(c);
+  if (Number.isNaN(pd) || Number.isNaN(cd)) return "unknown";
+  return pd <= cd ? "parent-first" : "parent-newer";
+}
+
+/**
+ * Is a live Desktop supervisor still watching `pid`?
+ *
+ * ANCESTRY, WALKED UPWARD — which is the opposite direction from
+ * `isDescendantOfChild` above, and for a different question. That one asks "is this
+ * the child WE spawned?", where tracing to a long-lived ancestor proves nothing
+ * because every stale sibling shares it. This one asks "is anything above this
+ * process going to restart it?", and an ancestor is precisely what can: the Desktop
+ * shell spawns the Python backend, so the shell IS the supervisor. Intermediate
+ * wrappers (a launcher script, a shim) are walked THROUGH rather than treated as an
+ * answer.
+ *
+ *   `supervised` — an ancestor is alive and its command line is a Desktop shell.
+ *                  Positive: there is something there to re-exec the process.
+ *   `abandoned`  — the chain was READ to its top and no live Desktop shell stands on
+ *                  it: either the parent's number is provably vacant (the shell
+ *                  exited) or the tree root was reached with every step readable and
+ *                  none of them a supervisor. Positive too — this is the #814 shape,
+ *                  and it is what refuses a stop.
+ *   `unconfirmed`— the chain became unreadable, a pid could not be probed, or the hop
+ *                  budget ran out. NOT an answer in either direction — and note that
+ *                  it is the CALLER that decides what to do with it. For a reboot,
+ *                  which is irreversible and has not happened yet, the caller refuses:
+ *                  see assessDesktopSupervision. Each such outcome carries `because`,
+ *                  so a refusal can name what it failed to establish.
+ *
+ * The hop budget is small on purpose. A Desktop backend sits one or two levels under
+ * its shell; a chain longer than that is not a layout we can reason about, and
+ * "cannot tell" is the honest verdict for it.
+ */
+export function classifyDesktopSupervision(
+  input: SupervisionEvidence,
+  maxHops = 8,
+): SupervisionAssessment {
+  const unconfirmed = (because: string): SupervisionAssessment => ({
+    verdict: classifiedSupervision("unconfirmed"),
+    because,
+  });
+  const definite = (v: "supervised" | "abandoned"): SupervisionAssessment => ({
+    verdict: classifiedSupervision(v),
+  });
+  // NO SELF-SUPERVISOR SHORTCUT. An earlier revision returned `supervised` when the
+  // pid handed in was ITSELF a Desktop shell, to serve the caller's fallback of
+  // "ComfyUI could not be attributed to the port, so use whatever Desktop shell is
+  // running". But that fallback picks a shell by scanning process NAMES — it is bound
+  // to no port and to no backend, so "this pid is a Desktop shell" says nothing about
+  // whether it supervises the server the reboot would stop. A second, unrelated
+  // Desktop window would have licensed stopping an orphaned backend it has never
+  // heard of, which is the same lost server by a new route (codex gate round 9).
+  //
+  // The premise, not the shortcut, was the problem: that caller now declines before
+  // reaching here, so every pid this classifier sees is one resolved FROM THE PORT —
+  // a backend, whose supervisor is genuinely somewhere above it.
+  const self = input.readIdentity(input.pid);
+  let current = input.pid;
+  let currentStartedAt = self?.startedAt;
+  for (let hop = 0; hop < maxHops; hop++) {
+    const parent = input.readParentPid(current);
+    // The chain stopped being readable. Nothing was learned in either direction.
+    if (parent == null) return unconfirmed(`the parent process of PID ${current} could not be read`);
+    // A process cannot be its own parent; that reading is damage, not a tree root.
+    if (parent === current) return unconfirmed(`PID ${current} was reported as its own parent, which is not a tree this can be read from`);
+    // The TOP of the tree, reached without passing a supervisor. On POSIX an
+    // orphan is reparented to init (1) — that reparenting is itself the record
+    // that whoever spawned it has gone.
+    if (parent <= 1) return definite("abandoned");
+    const alive = input.processExists(parent);
+    // THE #814 SIGNAL: the parent's number is vacant, so the shell that spawned this
+    // server has exited. Nothing is left to act on a reboot request.
+    if (alive === false) return definite("abandoned");
+    // Exists, but we could not establish that — do not spend it either way.
+    if (alive !== true) return unconfirmed(`it could not be established whether PID ${parent} (the parent of PID ${current}) is still running`);
+    const identity = input.readIdentity(parent);
+    // Something holds that number and we cannot see WHAT it is. A pid can be
+    // RECYCLED, so "a process exists there" is not evidence a supervisor does.
+    //
+    // "What it is" now has two possible sources, and either will do: the command
+    // line, or the OS's own record of the binary. Gating on the command line alone
+    // was a leftover from when it was the only one — a process whose command line is
+    // unreadable but whose EXECUTABLE the OS names would stop the walk here, and the
+    // authenticated evidence that exists precisely to settle this question would
+    // never be consulted (codex gate round 4).
+    if (!identity || (!identity.commandLine && !identity.executablePath)) {
+      return unconfirmed(`PID ${parent} (the parent of PID ${current}) exists but what it is running could not be read`);
+    }
+    // IS THIS REALLY THE PARENT, or just whoever holds that number now? A pid
+    // recorded in a child's record outlives the process that earned it, and the
+    // replacement can look exactly like a supervisor.
+    const order = compareStartTimes(identity.startedAt, currentStartedAt);
+    // The process at that number started AFTER its supposed child, so the real
+    // parent has exited — which is what made the number reusable. That is positive
+    // evidence the supervisor is gone.
+    if (order === "parent-newer") return definite("abandoned");
+    // No usable stamps on one side or the other: the link is unverified, so nothing
+    // built on it may be claimed.
+    if (order === "unknown") {
+      return unconfirmed(
+        `PID ${parent} could not be confirmed as the parent of PID ${current} — the process ` +
+          `start times needed to rule out a reused PID could not be compared`,
+      );
+    }
+    if (input.isSupervisorProcess(identity)) return definite("supervised");
+    current = parent;
+    currentStartedAt = identity.startedAt;
+  }
+  // Ran out of hops: did not finish looking.
+  return unconfirmed(
+    `no Desktop supervisor was found within ${maxHops} levels above PID ${input.pid}, and the ` +
+      `walk ran out before reaching the top of the process tree`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Path tokens
 // ---------------------------------------------------------------------------
 
