@@ -2138,18 +2138,6 @@ async function downloadIntoCache(
       }
     };
 
-    /** Bytes retained on disk right now, or undefined when it can't be read.
-     *  Reported, never assumed: an unreadable partial must not be described as
-     *  "N bytes preserved" — "could not determine" stays undetermined. */
-    const retainedBytes = async (): Promise<number | undefined> => {
-      try {
-        const st = await downloadCacheFs.stat(partial);
-        return st.isFile() ? st.size : undefined;
-      } catch {
-        return undefined;
-      }
-    };
-
     // ── #470: bounded retry with backoff, resuming each time ──────────────────
     //
     // A transfer that cannot survive an interruption will eventually be killed by
@@ -2161,9 +2149,67 @@ async function downloadIntoCache(
     // identity proof a cold call does — there is no "we already checked" shortcut,
     // so a retry can never splice bytes from a different object.
     const retry = downloadRetryPolicy();
+    // THE STALL WATCHDOG IS HTTP-ONLY. A cloud (S3/Azure) transfer is performed by
+    // the vendor SDK, which writes the file itself and reports no per-chunk
+    // progress here — so `onBytes` never fires and a perfectly healthy multi-GB
+    // cloud download would look stalled from its first second. Aborting it would be
+    // catastrophic rather than merely wasteful: the cloud path cannot range-resume,
+    // so every "retry" TRUNCATES the partial and starts over, and a transfer longer
+    // than the stall window could never finish. No byte signal ⇒ no watchdog.
+    const stallTimeoutMs = supportsCloudDownload(url) ? 0 : retry.stallTimeoutMs;
+
+    /** The partial's size as it stands, distinguishing ABSENT (0 — knowably
+     *  nothing) from UNREADABLE (undefined — genuinely unknown). Collapsing the
+     *  two would either invent progress that is not there or report a knowable
+     *  absence as a mystery. */
+    const partialSize = async (): Promise<number | undefined> => {
+      try {
+        const st = await downloadCacheFs.stat(partial);
+        return st.isFile() ? st.size : 0;
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException)?.code;
+        return code === "ENOENT" || code === "ENOTDIR" ? 0 : undefined;
+      }
+    };
+
+    /** What WE left the partial at when our previous attempt ended. Undefined
+     *  before the first retry. See the interference check below. */
+    let sizeWeLeft: number | undefined;
+
     for (let attempt = 1; ; attempt += 1) {
       // A cancel between attempts stops here — never consumed by a retry.
       if (signal?.aborted) throw new DOMException("The download was cancelled.", "AbortError");
+
+      // ── ANOTHER WRITER OWNS THIS PARTIAL ──────────────────────────────────
+      //
+      // The `.partial` is keyed by the download's representation (url + auth
+      // headers), so a SECOND PROCESS running the same download shares this exact
+      // file. The job registry's cross-process dedup is best-effort by design
+      // (#529): two processes that start at the same instant can both run writers.
+      //
+      // Before this loop existed that cost, at worst, a duplicate transfer — a
+      // failed attempt simply ended. A retry changes the shape: we go quiet for a
+      // backoff and then come BACK and append. If another writer moved the file
+      // while we waited, appending would interleave two streams into one file.
+      //
+      // Nothing WE do touches the partial between our attempts, so ANY change to
+      // its size is proof that someone else is writing it. Detect that and stop
+      // rather than compete: the other writer is producing a valid file, and the
+      // honest, non-destructive move is to leave it alone. (We deliberately do NOT
+      // delete or truncate anything here — those bytes are the other download's.)
+      if (sizeWeLeft !== undefined) {
+        const nowSize = await partialSize();
+        if (nowSize !== sizeWeLeft) {
+          throw new ModelError(
+            `Download stopped before retrying: another download is writing the same staged file ` +
+              `(it went from ${sizeWeLeft} to ${nowSize === undefined ? "an unreadable size" : `${nowSize}`} bytes while this attempt was backing off). ` +
+              `Appending now would interleave two transfers into one file. Nothing was deleted — the ` +
+              `other download's progress is intact. Wait for it to finish (check download_status), then ` +
+              `re-issue this download; it will reuse the completed file rather than re-fetching it.`,
+            { url: logUrl, retryable: false },
+          );
+        }
+      }
 
       const resumeFromBytes = await resumeOffsetFromDisk();
 
@@ -2182,15 +2228,15 @@ async function downloadIntoCache(
       let stalled = false;
       let lastByteAt = Date.now();
       const stallTicker =
-        retry.stallTimeoutMs > 0
+        stallTimeoutMs > 0
           ? setInterval(
               () => {
-                if (Date.now() - lastByteAt >= retry.stallTimeoutMs) {
+                if (Date.now() - lastByteAt >= stallTimeoutMs) {
                   stalled = true;
                   attemptCtl.abort();
                 }
               },
-              Math.min(5_000, Math.max(500, Math.floor(retry.stallTimeoutMs / 4))),
+              Math.min(5_000, Math.max(500, Math.floor(stallTimeoutMs / 4))),
             )
           : undefined;
       if (stallTicker && typeof stallTicker.unref === "function") stallTicker.unref();
@@ -2236,7 +2282,7 @@ async function downloadIntoCache(
         const cls = stalled
           ? {
               retryable: true,
-              reason: `no bytes arrived for ${Math.round(retry.stallTimeoutMs / 1000)}s (the connection wedged without closing)`,
+              reason: `no bytes arrived for ${Math.round(stallTimeoutMs / 1000)}s (the connection wedged without closing)`,
             }
           : classifyDownloadFailure(err);
 
@@ -2250,7 +2296,10 @@ async function downloadIntoCache(
           // Only ANNOTATE when retries actually happened and the cause was transient
           // — an auth/gating failure must keep its own actionable message intact.
           if (attempt > 1 && cls.retryable) {
-            const kept = await retainedBytes();
+            // `partialSize` separates ABSENT (0) from UNREADABLE (undefined), so a
+            // knowable "there is nothing to resume" is never dressed up as a
+            // mystery, and a genuine mystery is never asserted as a fact.
+            const kept = await partialSize();
             const partialNote =
               kept === undefined
                 ? `The partial download's size could NOT be read, so how much progress survived is unknown — check the download cache before assuming either way.`
@@ -2278,6 +2327,11 @@ async function downloadIntoCache(
             error: err instanceof Error ? err.message : String(err),
           },
         );
+        // Record where WE left the partial, so the next attempt can tell "nobody
+        // touched it" from "another writer moved it" (the interference check at the
+        // top of the loop). Taken AFTER the attempt has fully unwound, so it
+        // reflects the final on-disk state this attempt produced.
+        sizeWeLeft = await partialSize();
         // Backoff before re-requesting. #470 observed a 403 from an INSTANT
         // re-request after an aborted connection — the wait is part of the fix,
         // not politeness. It wakes early if the caller cancels.

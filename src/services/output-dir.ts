@@ -262,15 +262,22 @@ export function parseExtraModelPathsConfigsFromArgvRaw(argv: string[] | undefine
  * configured local base — collected only in LOCAL mode (the guard runs only
  * locally; a remote server's argv paths are on the remote host).
  */
-/** Do two absolute paths name the same directory? Windows and macOS are
- *  case-insensitive and Windows mixes separators, so a server that reports
- *  `comfyui\main.py` against a base of `...\ComfyUI` names the SAME directory. */
+/** Do two absolute paths name the same directory?
+ *
+ *  Case is folded on WINDOWS ONLY. Windows filesystems are case-insensitive
+ *  everywhere, so a server reporting `comfyui\main.py` against a base of
+ *  `...\ComfyUI` genuinely names the same directory. macOS is deliberately NOT
+ *  folded even though HFS+/APFS are case-insensitive by DEFAULT: APFS can be
+ *  formatted case-SENSITIVE, and on such a volume `/x/ComfyUI` and `/x/comfyui`
+ *  are two different installs. This comparison decides whether a download may be
+ *  written to a base, so a wrong "same" is the #369 harm (a model landing in an
+ *  install the running server never reads, reported as a success). Being strict
+ *  costs a case-differing macOS user a refusal they can fix; being lax could cost
+ *  them a silently misplaced multi-gigabyte file. */
 function samePath(a: string, b: string): boolean {
   const norm = (s: string): string => {
     const slashed = resolve(s).replace(/\\/g, "/").replace(/\/+$/, "");
-    return process.platform === "win32" || process.platform === "darwin"
-      ? slashed.toLowerCase()
-      : slashed;
+    return process.platform === "win32" ? slashed.toLowerCase() : slashed;
   };
   return norm(a) === norm(b);
 }

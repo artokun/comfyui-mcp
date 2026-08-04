@@ -414,6 +414,37 @@ describe("models dir + extra-config argv parsing (#345/#346/#369)", () => {
         await expect(resolveModelsDirWithBases()).rejects.toThrow(/could not be determined/i);
       });
 
+      it("does NOT fold case on macOS — APFS can be case-SENSITIVE, so a case-differing relDir is not corroboration", async () => {
+        // `/x/ComfyUI` and `/x/comfyui` are two different installs on a
+        // case-sensitive APFS volume. This comparison decides where a
+        // multi-gigabyte file gets written, so a wrong "same" is the #369 harm (a
+        // model landing in an install the running server never reads, announced as
+        // a success). Windows filesystems ARE case-insensitive everywhere, so
+        // folding is correct there — and only there.
+        //
+        // The platform is stubbed rather than the test being skipped off macOS:
+        // this rule must be verifiable on every host, or it is only ever checked on
+        // the one machine least likely to run the suite.
+        const realPlatform = process.platform;
+        Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
+        try {
+          const base = resolve("/D/portable/ComfyUI");
+          (config as { comfyuiPath?: string }).comfyuiPath = base;
+          observedLiveRoot = undefined;
+          hasEntrypointFor = (dir) => resolve(dir) === base;
+          getSystemStats.mockResolvedValue({
+            system: { argv: [join("comfyui", "main.py"), "--listen"] },
+          });
+
+          await expect(resolveModelsDirWithBases()).rejects.toThrow(/could not be determined/i);
+        } finally {
+          Object.defineProperty(process, "platform", {
+            value: realPlatform,
+            configurable: true,
+          });
+        }
+      });
+
       it("corroborates a MULTI-SEGMENT relative script against a base ending in those segments", async () => {
         // `python sub/ComfyUI/main.py` with COMFYUI_PATH=<...>/sub/ComfyUI.
         const base = resolve("/srv/stack/sub/ComfyUI");

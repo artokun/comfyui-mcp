@@ -79,17 +79,22 @@ const TRANSIENT_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
  * Message fragments for transport failures that arrive with NO usable code.
  * undici surfaces a mid-body socket death as a bare `TypeError: terminated`
  * whose code lives (if anywhere) on a nested cause — this is the exact string
- * #470 reported. Kept deliberately SHORT and anchored to whole-ish phrases so it
- * cannot swallow an integrity message: none of the refusals in download-cache.ts
- * contain any of these.
+ * #470 reported.
+ *
+ * Kept deliberately SHORT and specific. It must not include the wording of
+ * fetchOrThrow's wrapper ("…failed at the network layer: …"), which is applied
+ * to EVERY thrown fetch — that would make an expired TLS certificate, a bad
+ * proxy, or an aborted request all look transient, i.e. it would invert this
+ * module's fail-safe default for the entire class of fetch failures. Those cases
+ * carry real codes (CERT_HAS_EXPIRED, ENOTFOUND, ECONNRESET, …) and are decided
+ * by the code list above; a fetch failure with NO code and none of these phrases
+ * is not recognised, and therefore not retried.
  */
 const TRANSIENT_MESSAGE_FRAGMENTS = [
   "terminated",
   "socket hang up",
   "other side closed",
   "premature close",
-  "connection closed",
-  "network layer",
 ];
 
 export interface FailureClassification {

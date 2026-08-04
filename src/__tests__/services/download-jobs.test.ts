@@ -628,29 +628,49 @@ describe("download job registry", () => {
       }
     });
 
-    it("cancel_download with a tray_id aborts EXACTLY that download, leaving its same-id sibling alone", async () => {
-      // Two in-flight jobs in THIS process that share a destination id would
-      // normally coalesce, so drive the distinguishing case directly: two jobs with
-      // different ids, and confirm tray-id selection targets the right one and does
-      // not fall back to "whatever the id row happens to hold".
-      const a = await startDownloadJob(URL_A, "checkpoints");
-      const b = await startDownloadJob(URL_B, "loras");
+    it("cancel_download with a tray_id aborts EXACTLY the named row of a COLLIDING id, and leaves the other alone", async () => {
+      // The real #822 collision: one live local download and one orphaned in-flight
+      // record from before a reconnect, sharing an id because they resolve to the
+      // same destination file. `tray_id` must pick out precisely one of them.
+      const dir = await mkdtemp(pathJoin(tmpdir(), "djobs-822-"));
+      setProgressDir(dir);
+      try {
+        const a = await startDownloadJob(URL_A, "checkpoints");
+        await writeForeignJobRecord(dir, {
+          id: a.job.id,
+          trayId: "orphantrayid0001",
+          progressId: "orphan-prog",
+          url: URL_B,
+          owner: `${PERSIST_OWNER}-reconnected-away`,
+          ageMs: 313_000,
+        });
+        // Precondition: the id really does name two rows.
+        expect(listDownloadJobCandidates(a.job.id)).toHaveLength(2);
 
-      const wrongTray = cancelDownloadJob(a.job.id, b.job.trayId);
-      // a's id + b's tray is not a real download — nothing may be aborted on it.
-      expect(wrongTray.aborted).toBe(false);
-      expect(wrongTray.found).toBe(false);
-      expect(a.job.status).toBe("downloading");
-      expect(b.job.status).toBe("downloading");
+        // Naming the ORPHAN must not touch our live transfer…
+        const orphan = cancelDownloadJob(a.job.id, "orphantrayid0001");
+        expect(orphan.aborted).toBe(false);
+        expect(a.job.status).toBe("downloading");
 
-      const right = cancelDownloadJob(a.job.id, a.job.trayId);
-      expect(right.aborted).toBe(true);
-      await a.settled;
-      expect(a.job.status).toBe("cancelled");
-      // The sibling is untouched.
-      expect(b.job.status).toBe("downloading");
-      hoisted.resolvers.find((r) => r.url === URL_B)!.resolve("/M/loras/other.safetensors");
-      await b.settled;
+        // …and a tray id that names NOTHING must abort nothing at all.
+        const bogus = cancelDownloadJob(a.job.id, "nosuchtrayid0000");
+        expect(bogus.found).toBe(false);
+        expect(bogus.aborted).toBe(false);
+        expect(a.job.status).toBe("downloading");
+        // The refusal still lists what the id DOES name, so the caller can retry.
+        expect(bogus.candidates?.map((c) => c.trayId).sort()).toEqual(
+          [a.job.trayId, "orphantrayid0001"].sort(),
+        );
+
+        // Only the exact tray id aborts the live one.
+        const right = cancelDownloadJob(a.job.id, a.job.trayId);
+        expect(right.aborted).toBe(true);
+        await a.settled;
+        expect(a.job.status).toBe("cancelled");
+      } finally {
+        setProgressDir("");
+        await fsRm(dir, { recursive: true, force: true });
+      }
     });
 
     it("an ambiguity refusal NAMES the candidates instead of leaving the caller stuck", async () => {

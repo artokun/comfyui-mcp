@@ -41,6 +41,16 @@ vi.mock("../../services/download-progress.js", async () => {
   };
 });
 
+/** The cloud (S3/Azure) downloader is the vendor SDK; stub it so the watchdog's
+ *  behaviour around it can be exercised without a real bucket. Everything else in
+ *  the storage module (URL detection, principal keying) stays real. */
+vi.mock("../../services/storage/index.js", async () => {
+  const actual = await vi.importActual<typeof import("../../services/storage/index.js")>(
+    "../../services/storage/index.js",
+  );
+  return { ...actual, downloadCloudUrlToFile: vi.fn() };
+});
+
 import { config } from "../../config.js";
 import { downloadModel } from "../../services/model-resolver.js";
 import {
@@ -134,6 +144,23 @@ describe("classifyDownloadFailure (#470)", () => {
       ]) {
         expect(classifyDownloadFailure(new ModelError(message)).retryable).toBe(false);
       }
+    });
+
+    it("does NOT retry on the fetch wrapper's 'network layer' prose alone", () => {
+      // fetchOrThrow wraps EVERY thrown fetch as "…failed at the network layer: …".
+      // If that phrase counted as a transient signature, an expired TLS
+      // certificate, a misconfigured proxy and an aborted request would all look
+      // retryable — inverting this module's fail-safe default for the entire class
+      // of fetch failures. The transport CODE decides instead.
+      const wrapper =
+        "Download request to the model host failed at the network layer: unable to verify the " +
+        "first certificate. This is a connectivity/TLS/proxy failure reaching the file host.";
+      expect(classifyDownloadFailure(new ModelError(wrapper)).retryable).toBe(false);
+      // …and the very same wrapper WITH a transport code is still retried, so this
+      // is about the prose carrying no evidence, not about distrusting the wrapper.
+      expect(
+        classifyDownloadFailure(new ModelError(wrapper, { code: "ECONNRESET" })).retryable,
+      ).toBe(true);
     });
 
     it("defaults to NOT retryable for an error it does not recognise", () => {
@@ -370,22 +397,29 @@ describe("download retry + resume, end to end (#470)", () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
-  it("never claims preserved bytes it did not observe — an unreadable partial is reported as unknown", async () => {
-    const url = "https://example.com/models/no-partial-left.safetensors";
-    // A 0-byte body: assertComplete removes the empty partial AND its sidecar, so
-    // by the time we report there is genuinely nothing left to resume.
+  it("reports 'no partial survived' — as a FACT, not a shrug — when no bytes were ever staged", async () => {
+    // The mirror of the test above, and the reason `partialSize` separates ABSENT
+    // from UNREADABLE. A 503 is retryable but never streams a body, so no .partial
+    // is ever created. "There is nothing to resume" is KNOWN here, and reporting it
+    // as "could not be read" would be a shrug where a fact was available — the same
+    // failure mode as the reverse, just pointing the other way.
+    const url = "https://example.com/models/never-staged.safetensors";
     fetchMock.mockImplementation(
-      async () => new Response("A", { status: 200, statusText: "OK", headers: { "content-length": "50" } }),
+      async () => new Response("upstream busy", { status: 503, statusText: "Service Unavailable" }),
     );
 
-    const err = await downloadModel(url, "checkpoints", "no-partial-out.safetensors").catch(
+    const err = await downloadModel(url, "checkpoints", "never-staged-out.safetensors").catch(
       (e: unknown) => e,
     );
     const message = String((err as Error).message);
     expect(message).toMatch(/after 3 attempts/i);
-    // It reports what it actually found — a surviving partial here — rather than a
-    // canned "your data is safe". The point is the claim is derived from a stat.
-    expect(message).toMatch(/preserved on disk|No partial data survived|could NOT be read/);
+    expect(message).toMatch(/No partial data survived/);
+    expect(message).not.toMatch(/could NOT be read/);
+    expect(message).not.toMatch(/preserved on disk/);
+    // The claim is TRUE — checked against the filesystem, not against the sentence.
+    const { partial } = cachePaths(url);
+    await expect(stat(partial)).rejects.toThrow();
+    expect(fetchMock).toHaveBeenCalledTimes(3); // a 503 really is retried
   });
 
   it("a CANCEL during backoff stops the download — it is never retried into a completion", async () => {
@@ -424,39 +458,37 @@ describe("download retry + resume, end to end (#470)", () => {
     await expect(stat(partial).then((s) => s.size)).resolves.toBe(4);
   });
 
-  it("a cancel that SURFACES AS A TRANSIENT ERROR is still not retried — cancellation is decided by the signal, not by the message", async () => {
-    // The hazard this pins: aborting a fetch mid-body makes undici raise
-    // `TypeError: terminated` — which is EXACTLY the transient signature #470
-    // asked us to retry. If the loop classified the error instead of consulting
-    // the caller's signal first, a user's cancel would be "recovered from" and the
-    // download would run to completion after they stopped it. The loop must decide
-    // on the SIGNAL, and this test fails if that ordering is ever inverted.
+  it("a cancel whose error IS classified transient is still not retried — cancellation is decided by the signal, not by the message", async () => {
+    // The hazard this pins. Aborting a fetch mid-BODY makes undici raise
+    // `TypeError: terminated` — the exact signature #470 asked us to retry, and
+    // one this suite asserts elsewhere IS retryable. If the loop classified the
+    // error instead of consulting the caller's signal first, a user's cancel would
+    // be "recovered from" and the download would run on after they stopped it.
     const url = "https://example.com/models/cancel-looks-transient.safetensors";
     const ctl = new AbortController();
 
-    // Cancelling while the REQUEST is in flight makes fetch reject with an
-    // AbortError, which fetchOrThrow wraps as "…failed at the network layer: …".
-    // classifyDownloadFailure reads that as TRANSIENT — correctly, because in
-    // every other circumstance it is. Confirm it really does:
-    expect(
-      classifyDownloadFailure(
-        new ModelError(
-          "Download request to the model host failed at the network layer: This operation was aborted.",
-        ),
-      ).retryable,
-    ).toBe(true);
+    // Not a hypothesis — the error this transport raises really is retryable:
+    expect(classifyDownloadFailure(new TypeError("terminated")).retryable).toBe(true);
 
-    fetchMock.mockImplementationOnce(
-      (_u: string, init: { signal?: AbortSignal }) =>
-        new Promise((_resolve, reject) => {
-          setTimeout(() => ctl.abort(), 5);
-          init.signal?.addEventListener(
-            "abort",
-            () => reject(new DOMException("This operation was aborted.", "AbortError")),
-            { once: true },
-          );
-        }),
-    );
+    fetchMock.mockImplementationOnce(async () => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(c) {
+          c.enqueue(new TextEncoder().encode("AAAA"));
+          setTimeout(() => {
+            // Order matters and is deterministic: both statements run in ONE
+            // synchronous tick, so the caller's signal is already aborted by the
+            // time the pipeline's rejection is handled in a later microtask.
+            c.error(new TypeError("terminated"));
+            ctl.abort();
+          }, 5);
+        },
+      });
+      return new Response(stream, {
+        status: 200,
+        statusText: "OK",
+        headers: { "content-length": "64", etag: '"v"' },
+      });
+    });
     fetchMock.mockImplementation(async () => new Response("MUST-NOT-BE-FETCHED", { status: 200 }));
 
     await expect(
@@ -549,6 +581,78 @@ describe("download retry + resume, end to end (#470)", () => {
     const errorRows = progressRows.filter((r) => r.status === "error");
     // Exactly one — not one per attempt, and not zero.
     expect(errorRows).toHaveLength(1);
+  });
+
+  it("does NOT arm the stall watchdog for a cloud (S3/Azure) transfer, which reports no byte progress", async () => {
+    // A cloud transfer is performed by the vendor SDK, which writes the file
+    // itself and never calls back per chunk — so the watchdog's liveness clock
+    // would never be refreshed and a perfectly healthy multi-GB transfer would
+    // look stalled from its first second. That is not merely wasteful: the cloud
+    // path cannot range-resume, so each "retry" TRUNCATES the partial and starts
+    // over, destroying real progress on a loop that could never terminate.
+    setDownloadRetryPolicyForTests({ maxAttempts: 3, stallTimeoutMs: 100 });
+
+    const cloudDownload = vi.mocked(
+      (await import("../../services/storage/index.js")).downloadCloudUrlToFile,
+    );
+    // A transfer that takes far longer than the stall window but is perfectly alive.
+    cloudDownload.mockImplementation(async (_url, targetPath) => {
+      await new Promise((r) => setTimeout(r, 500));
+      await writeFile(targetPath as string, "CLOUD-PAYLOAD-BYTES");
+    });
+
+    const target = await downloadModel(
+      "s3://bucket/models/slow.safetensors",
+      "checkpoints",
+      "cloud-slow-out.safetensors",
+    );
+
+    // It completed — it was never aborted as "stalled" — and it ran only once.
+    await expect(readFile(target, "utf-8")).resolves.toBe("CLOUD-PAYLOAD-BYTES");
+    expect(cloudDownload).toHaveBeenCalledTimes(1);
+  }, 20_000);
+
+  it("REFUSES to retry onto a partial another writer moved — two transfers must never interleave into one file", async () => {
+    // The `.partial` is keyed by the download's representation, so a SECOND
+    // PROCESS running the same download writes this exact file. Cross-process
+    // dedup is best-effort by design (#529). Before the retry loop, a failed
+    // attempt simply ended; now we go quiet for a backoff and come BACK to append —
+    // so if someone else moved the file meanwhile, appending would interleave two
+    // streams into one file. Nothing WE do touches the partial between attempts,
+    // so any size change is proof of another writer.
+    const url = "https://example.com/models/contended.safetensors";
+    const { partial } = cachePaths(url);
+    // A backoff long enough that the other writer provably acts DURING it, after
+    // our own attempt has fully unwound (which takes single-digit ms here).
+    setDownloadRetryPolicyForTests({ backoffBaseMs: 2_000, backoffCapMs: 2_000 });
+
+    fetchMock.mockImplementationOnce(async () => {
+      // Simulate the other writer replacing the staged file during our backoff.
+      void (async () => {
+        for (let i = 0; i < 400; i += 1) {
+          const size = await stat(partial).then((s) => s.size).catch(() => 0);
+          if (size >= 4) break;
+          await new Promise((r) => setTimeout(r, 5));
+        }
+        await new Promise((r) => setTimeout(r, 250)); // our attempt has ended; the backoff is running
+        await writeFile(partial, "SOMEONE-ELSES-LONGER-CONTENT");
+      })();
+      return shortBody("AAAA", 64, { etag: '"v"' });
+    });
+    fetchMock.mockImplementation(async () => new Response("MUST-NOT-BE-FETCHED", { status: 200 }));
+
+    const err = await downloadModel(url, "checkpoints", "contended-out.safetensors").catch(
+      (e: unknown) => e,
+    );
+    const message = String((err as Error).message);
+    expect(message).toMatch(/another download is writing the same staged file/i);
+    // It stops instead of competing — no second request was issued.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // And it DESTROYS NOTHING: the other writer's bytes are exactly as they left them.
+    await expect(readFile(partial, "utf-8")).resolves.toBe("SOMEONE-ELSES-LONGER-CONTENT");
+    // The remedy names what the caller can do from here.
+    expect(message).toMatch(/download_status/);
+    expect(message).toMatch(/re-issue/i);
   });
 
   it("a retry that lands on a POISONED partial (#473 leftover) restarts instead of resuming onto it", async () => {
