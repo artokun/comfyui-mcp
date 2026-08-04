@@ -1608,9 +1608,20 @@ async function streamUrlToFile(
   // line only READ the file or talked to the server; everything below MUTATES it,
   // so this is the true first-touch boundary.
   //
-  // The 206-refusal path above returns by RECURSING with a clean restart and does
-  // not touch the file on its way there, so the recursive call runs this check
-  // itself — the boundary holds on that path too.
+  // The 206-refusal path above returns by RECURSING with a clean restart. That
+  // path touches nothing on its way out, and the recursion forwards THIS `beforeWrite`
+  // (along with every other parameter — see the call site, which passes all of them
+  // explicitly), so the recursive call re-runs this check before it writes and the
+  // boundary holds there too.
+  //
+  // That forwarding is load-bearing, not incidental: a recursive restart that
+  // dropped `beforeWrite` would perform the truncating 200-restart with no
+  // ownership check at all, which is the exact hazard this line exists to prevent.
+  // It is covered by a test that stages a foreign writer during the RECURSIVE
+  // request specifically; if someone deletes an argument from that call, the test
+  // fails. The same goes for `onBytes` (drop it and the stall watchdog kills the
+  // healthy restarted transfer) and `deferErrorRow` (drop it and the restarted
+  // stream publishes a terminal failure while the outer loop is still retrying).
   if (beforeWrite) await beforeWrite();
   // …and re-check the cancel, because that hook AWAITS. Every path below either
   // deletes or truncates the staged file, so a cancel that landed during the hook
@@ -2089,7 +2100,17 @@ async function downloadIntoCache(
      * content-addressed X-Linked-Etag cross-check for cross-origin 206s, #343/#467).
      * A partial with no recorded write-time identity is NOT resumed; it restarts.
      */
-    const resumeOffsetFromDisk = async (): Promise<number> => {
+    const resumeOffsetFromDisk = async (
+      /** The staged state this attempt VERIFIED moments ago. Re-asserted immediately
+       *  before each destructive cleanup below, because those cleanups delete or
+       *  truncate the SHARED staged file — and between the retry-boundary check and
+       *  this function a foreign writer can have replaced it. That gap was the last
+       *  window the retry loop added without an ownership check: a valid replacement
+       *  plus a surviving `.rejected` marker (whose removal transiently failed)
+       *  would otherwise have our automatic retry destroy the other writer's
+       *  partial. */
+      verified: StagedState,
+    ): Promise<number> => {
       let resumeFromBytes = 0;
       try {
         const existing = await downloadCacheFs.stat(partial);
@@ -2123,6 +2144,10 @@ async function downloadIntoCache(
             { url: logUrl, bytes: resumeFromBytes },
           );
         }
+        // Prove it is still ours BEFORE destroying it. A `.rejected` marker records
+        // that a PRIOR attempt of OURS rejected a body; it says nothing about a
+        // partial another writer has since staged in its place.
+        await assertStillOurs(verified, "before discarding a previously-rejected partial", false);
         const neutralized = await discardRejectedPayload(
           partial,
           `${partial}.etag`,
@@ -2155,6 +2180,9 @@ async function downloadIntoCache(
               `the poisoned bytes can't be resumed onto (#473).`,
             { url: logUrl, bytes: resumeFromBytes },
           );
+          // Same rule: the head we just sniffed may belong to another writer's
+          // in-progress file, not to our own poisoned leftover.
+          await assertStillOurs(verified, "before discarding a non-model partial", false);
           await discardRejectedPayload(partial, `${partial}.etag`, logUrl ?? redactUrlForLogs(url));
           resumeFromBytes = 0;
         }
@@ -2258,9 +2286,22 @@ async function downloadIntoCache(
      * multi-gigabyte loss. Unknown ownership must stop the write, not switch the
      * detector off.
      */
-    const assertStillOurs = async (
-      expectedSize: number | undefined,
-      expectedSidecar: string | undefined,
+    /** The staged file's observable state: its size and its validator bytes. */
+    interface StagedState {
+      size: number | undefined;
+      sidecar: string | undefined;
+    }
+
+    /** One read of both fields. Callers that VERIFY and then RECORD must use a
+     *  single call for both, or they reintroduce the very gap they are closing. */
+    const readStaged = async (): Promise<StagedState> => ({
+      size: await partialSize(),
+      sidecar: await sidecarBytes(),
+    });
+
+    const assertMatches = (
+      expected: StagedState,
+      actual: StagedState,
       when: string,
       /** Require the size to be KNOWN on both sides, not merely unchanged.
        *
@@ -2275,9 +2316,9 @@ async function downloadIntoCache(
        *  accurate diagnosis with a wrong one and block first attempts that never
        *  had anything to own. */
       strict: boolean,
-    ): Promise<void> => {
-      const nowSize = await partialSize();
-      const nowSidecar = await sidecarBytes();
+    ): void => {
+      const { size: expectedSize, sidecar: expectedSidecar } = expected;
+      const { size: nowSize, sidecar: nowSidecar } = actual;
       // `partialSize` reports a missing file as a definite 0, so `undefined` means
       // the file is THERE but unreadable.
       if (strict && (expectedSize === undefined || nowSize === undefined)) {
@@ -2313,6 +2354,13 @@ async function downloadIntoCache(
         );
       }
     };
+
+    /** Read the staged state NOW and require it to match `expected`. */
+    const assertStillOurs = async (
+      expected: StagedState,
+      when: string,
+      strict: boolean,
+    ): Promise<void> => assertMatches(expected, await readStaged(), when, strict);
 
     /** What WE left the partial (and its validator) at when our previous attempt
      *  ended. `sizeWeLeft` stays NULL before the first retry — there is nothing to
@@ -2360,20 +2408,32 @@ async function downloadIntoCache(
       // to the non-retry path. It is NOT made worse here, and it is deliberately
       // left for a follow-up rather than half-solved with a lease whose stale-claim
       // and crash-cleanup behaviour (#529's objection) could destroy live partials.
+      // ONE read serves BOTH purposes: proving the file is still the one we left,
+      // and becoming the baseline everything downstream is checked against. Using
+      // two reads would leave a gap between "verified" and "recorded" — precisely
+      // the kind of gap this guard exists to close.
+      const verified = await readStaged();
       if (sizeWeLeft !== null) {
         // STRICT: we left bytes here and went quiet, so unknown state must refuse.
-        await assertStillOurs(sizeWeLeft, sidecarWeLeft, "while this attempt was backing off", true);
+        assertMatches(
+          { size: sizeWeLeft, sidecar: sidecarWeLeft },
+          verified,
+          "while this attempt was backing off",
+          true,
+        );
       }
 
-      const resumeFromBytes = await resumeOffsetFromDisk();
+      // resumeOffsetFromDisk can DESTROY the staged file (the #473 poison guards),
+      // so it re-asserts `verified` immediately before each cleanup rather than
+      // trusting the check above to still hold by the time it acts.
+      const resumeFromBytes = await resumeOffsetFromDisk(verified);
 
       // The state THIS attempt based its resume decision on. Re-verified at the
       // last instant before any write (see `beforeWrite`), so the decision and the
       // action are checked against the same file rather than merely assumed to
-      // describe it. Taken AFTER resumeOffsetFromDisk because that call may itself
-      // discard a poisoned partial.
-      const decidedSize = await partialSize();
-      const decidedSidecar = await sidecarBytes();
+      // describe it. Re-read AFTER resumeOffsetFromDisk because that call may have
+      // legitimately discarded a poisoned partial of OUR OWN.
+      const decided = await readStaged();
 
       // Per-attempt abort, fed by TWO independent sources: the caller's cancel
       // (forwarded) and our stall watchdog. They are kept distinguishable — the
@@ -2427,12 +2487,7 @@ async function downloadIntoCache(
           async () => {
             // Change-detection only: within one attempt an unreadable file was
             // already unreadable, and the older guards diagnose that better.
-            await assertStillOurs(
-              decidedSize,
-              decidedSidecar,
-              "while this attempt was requesting it",
-              false,
-            );
+            await assertStillOurs(decided, "while this attempt was requesting it", false);
           },
         );
         await downloadCacheFs.rename(partial, target);
@@ -2522,8 +2577,9 @@ async function downloadIntoCache(
         // touched it" from "another writer moved it" (the interference check at the
         // top of the loop). Taken AFTER the attempt has fully unwound, so it
         // reflects the final on-disk state this attempt produced.
-        sizeWeLeft = await partialSize();
-        sidecarWeLeft = await sidecarBytes();
+        const left = await readStaged();
+        sizeWeLeft = left.size;
+        sidecarWeLeft = left.sidecar;
         // Backoff before re-requesting. #470 observed a 403 from an INSTANT
         // re-request after an aborted connection — the wait is part of the fix,
         // not politeness. It wakes early if the caller cancels.

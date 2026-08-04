@@ -997,6 +997,270 @@ describe("download retry + resume, end to end (#470)", () => {
     }
   });
 
+  it("the RECURSIVE restart inherits the ownership check — a foreign writer during it is refused, not truncated", async () => {
+    // The recursive `streamUrlToFile(...)` restart (taken when a cross-origin 206
+    // cannot be PROVEN to be the same object) must inherit the full context of the
+    // call it replaces. If it dropped `beforeWrite`, the restart would run its
+    // truncating 200 path with NO ownership check — reopening the exact hazard the
+    // pre-write check exists to close, one level down.
+    //
+    // This drives a foreign writer into the RECURSIVE request's window specifically.
+    const url = "https://huggingface.co/org/repo/resolve/main/recursive-restart.safetensors";
+    const { partial, sidecar } = cachePaths(url);
+    await writeFile(partial, "V1V1");
+    // A CONTENT-ADDRESSED validator, so the resume is attempted and the cross-origin
+    // 206 below is judged against it.
+    await writeFile(sidecar, `xet\n"obj-v1"\n8\nxet`);
+
+    let hop = 0;
+    fetchMock.mockImplementation(async () => {
+      hop += 1;
+      if (hop === 1) {
+        // HF resolve → CAS CDN, carrying a DIFFERENT content hash: the resume is
+        // unprovable, so the code recurses into a clean full restart.
+        return new Response(null, {
+          status: 302,
+          headers: {
+            location: "https://cas-bridge.xethub.hf.co/xet-bridge-us/obj?sig=q",
+            "x-linked-etag": '"obj-v2"',
+          },
+        });
+      }
+      if (hop === 2) {
+        return new Response("ZZZZ", {
+          status: 206,
+          statusText: "Partial Content",
+          headers: { "content-range": "bytes 4-7/8" },
+        });
+      }
+      // hop 3 IS the recursive restart's request. A foreign writer stages its own
+      // transfer into the shared file while it is in flight.
+      await writeFile(partial, "SOMEONE-ELSES-PARTIAL");
+      await writeFile(sidecar, `xet\n"obj-v9"\n21\nxet`);
+      return new Response("FULL-REPLACEMENT-BODY", { status: 200, statusText: "OK" });
+    });
+
+    const err = await downloadModel(url, "checkpoints", "recursive-restart-out.safetensors").catch(
+      (e: unknown) => e,
+    );
+    expect(String((err as Error).message)).toMatch(
+      /another download is writing the same staged file/i,
+    );
+    // The recursive restart did NOT truncate the foreign writer's bytes.
+    await expect(readFile(partial, "utf-8")).resolves.toBe("SOMEONE-ELSES-PARTIAL");
+  });
+
+  /** Drive the cross-origin-unprovable-206 path, which makes streamUrlToFile
+   *  RECURSE into a clean full restart. `onRestart` supplies that restart's
+   *  response, which is the request the recursion actually issues. */
+  function mockRecursiveRestart(onRestart: () => Promise<Response>): void {
+    let hop = 0;
+    fetchMock.mockImplementation(async () => {
+      hop += 1;
+      if (hop === 1) {
+        return new Response(null, {
+          status: 302,
+          headers: {
+            location: "https://cas-bridge.xethub.hf.co/xet-bridge-us/obj?sig=q",
+            "x-linked-etag": '"obj-v2"',
+          },
+        });
+      }
+      if (hop === 2) {
+        return new Response("ZZZZ", {
+          status: 206,
+          statusText: "Partial Content",
+          headers: { "content-range": "bytes 4-7/8" },
+        });
+      }
+      return onRestart();
+    });
+  }
+
+  async function stageUnprovableResume(url: string): Promise<void> {
+    const { partial, sidecar } = cachePaths(url);
+    await writeFile(partial, "V1V1");
+    await writeFile(sidecar, `xet\n"obj-v1"\n8\nxet`);
+  }
+
+  it("the RECURSIVE restart inherits onBytes — a healthy trickling restart is not killed as stalled", async () => {
+    // If the recursion dropped `onBytes`, the outer stall timer would never be
+    // reset during the restarted full-body transfer, so a download that is
+    // CONTINUOUSLY writing bytes would be aborted as stalled — the watchdog
+    // destroying progress that is being made.
+    const url = "https://huggingface.co/org/repo/resolve/main/recursive-trickle.safetensors";
+    await stageUnprovableResume(url);
+    // One attempt only, so a watchdog abort is fatal and cannot be masked by a
+    // retry that happens to succeed. The transfer runs for ~3s against a 250 ms
+    // stall window — the watchdog gets many chances to fire, so a pass here means
+    // it genuinely never had cause to.
+    setDownloadRetryPolicyForTests({ maxAttempts: 1, stallTimeoutMs: 250 });
+
+    mockRecursiveRestart(async () => {
+      // Bytes arrive steadily, each gap well under the stall window, for a total
+      // duration many times OVER it.
+      const stream = new ReadableStream<Uint8Array>({
+        async start(c) {
+          for (let i = 0; i < 20; i += 1) {
+            await new Promise((r) => setTimeout(r, 150));
+            c.enqueue(new TextEncoder().encode("AB"));
+          }
+          c.close();
+        },
+      });
+      return new Response(stream, {
+        status: 200,
+        statusText: "OK",
+        headers: { "content-length": "40" },
+      });
+    });
+
+    const target = await downloadModel(url, "checkpoints", "recursive-trickle-out.safetensors");
+    await expect(readFile(target, "utf-8")).resolves.toBe("AB".repeat(20));
+  }, 30_000);
+
+  it("the stall watchdog IS armed across the recursive restart — a wedged restart is abandoned and retried", async () => {
+    // The companion to the trickle test above: that one shows a healthy restart is
+    // not killed, this one shows a WEDGED restart still is. Together they pin the
+    // watchdog's behaviour on the recursive path in both directions.
+    const url = "https://huggingface.co/org/repo/resolve/main/recursive-wedge.safetensors";
+    await stageUnprovableResume(url);
+    setDownloadRetryPolicyForTests({ maxAttempts: 2, stallTimeoutMs: 150 });
+
+    let restarts = 0;
+    mockRecursiveRestart(async () => {
+      restarts += 1;
+      if (restarts === 1) {
+        // Bytes stop arriving and the socket never closes.
+        const stream = new ReadableStream<Uint8Array>({
+          start(c) {
+            c.enqueue(new TextEncoder().encode("AAAA"));
+          },
+        });
+        return new Response(stream, {
+          status: 200,
+          statusText: "OK",
+          headers: { "content-length": "8" },
+        });
+      }
+      return new Response("COMPLETE", { status: 200, statusText: "OK" });
+    });
+
+    const target = await downloadModel(url, "checkpoints", "recursive-wedge-out.safetensors");
+    // It did not hang: the wedged restart was bounded and the retry finished it.
+    await expect(readFile(target, "utf-8")).resolves.toBe("COMPLETE");
+    expect(restarts).toBe(2);
+  }, 30_000);
+
+  it("the RECURSIVE restart inherits deferErrorRow — it does not announce a failure the outer loop is still retrying", async () => {
+    // If the recursion dropped `deferErrorRow`, a retryable failure inside the
+    // restarted stream would publish a terminal `error` row while the outer retry
+    // loop was still going. A caller reading that as failure re-issues — and
+    // re-issuing is what creates the second writer that truncated #817's model.
+    const url = "https://huggingface.co/org/repo/resolve/main/recursive-defer.safetensors";
+    await stageUnprovableResume(url);
+
+    let restarts = 0;
+    mockRecursiveRestart(async () => {
+      restarts += 1;
+      // First restart is cut short (retryable); the retry then completes.
+      return restarts === 1
+        ? shortBody("AAAA", 16)
+        : new Response("COMPLETE-BODY-16", { status: 200, statusText: "OK" });
+    });
+
+    await downloadModel(url, "checkpoints", "recursive-defer-out.safetensors");
+
+    expect(restarts).toBeGreaterThan(1); // the retry really happened…
+    // …and no failure was ever announced for a download that succeeded.
+    expect(progressRows.map((r) => r.status)).not.toContain("error");
+    expect(progressRows.map((r) => r.status)).toContain("done");
+  }, 20_000);
+
+  it("the #473 poison CLEANUP checks ownership first — a foreign writer's partial is not discarded as our leftover", async () => {
+    // The last window the retry loop added without an ownership check. Between the
+    // retry-boundary check and the poison guards inside resumeOffsetFromDisk, a
+    // foreign writer can replace the staged file. A surviving `.rejected` marker
+    // (its removal having transiently failed on a PRIOR attempt of ours) then makes
+    // our automatic retry discard THEIR partial as if it were our poisoned leftover.
+    // The foreign write must land INSIDE that window — after the boundary check has
+    // read the file, before the cleanup acts on it. The marker `stat` sits exactly
+    // in between, so hooking it places the writer precisely where the bug lives.
+    // (A write during the BACKOFF is a different, already-covered window: the
+    // boundary check catches it and the cleanup guard is never reached.)
+    const url = "https://example.com/models/poison-vs-foreign.safetensors";
+    const { partial, sidecar } = cachePaths(url);
+    await writeFile(partial, "OURS");
+    await writeFile(sidecar, '"v"');
+    // A stale marker from an earlier rejection of OURS whose removal failed.
+    await writeFile(`${partial}.rejected`, "stale marker");
+
+    const realStat = downloadCacheFs.stat;
+    let planted = false;
+    vi.spyOn(downloadCacheFs, "stat").mockImplementation(async (...args) => {
+      const path = String(args[0]);
+      if (!planted && path.endsWith(".rejected")) {
+        planted = true;
+        // The foreign writer replaces the staged file right here.
+        await writeFile(partial, "SOMEONE-ELSES-MANY-GIGABYTES");
+        await writeFile(sidecar, '"their-object"');
+      }
+      return realStat(...(args as Parameters<typeof realStat>));
+    });
+
+    fetchMock.mockImplementation(async () => new Response("BODY", { status: 200 }));
+
+    const err = await downloadModel(url, "checkpoints", "poison-vs-foreign-out.safetensors").catch(
+      (e: unknown) => e,
+    );
+    expect(String((err as Error).message)).toMatch(
+      /another download is writing the same staged file/i,
+    );
+    // Their partial and their validator are both untouched — not discarded as
+    // "a previously-rejected leftover" of ours.
+    await expect(readFile(partial, "utf-8")).resolves.toBe("SOMEONE-ELSES-MANY-GIGABYTES");
+    await expect(readFile(sidecar, "utf-8")).resolves.toBe('"their-object"');
+  }, 20_000);
+
+  it("the #473 BODY-SNIFF cleanup checks ownership first — a foreign partial that merely LOOKS non-model is not discarded", async () => {
+    // The second destructive branch inside resumeOffsetFromDisk. It discards a
+    // partial whose head sniffs as HTML/JSON, on the theory that it is our own
+    // rejected auth page. If a foreign writer replaced the staged file after our
+    // boundary check, that head is THEIRS — and a legitimate transfer whose first
+    // bytes happen to start with "<" (an SVG, an XML asset) would be destroyed.
+    const url = "https://example.com/models/bodysniff-vs-foreign.safetensors";
+    const { partial, sidecar } = cachePaths(url);
+    await writeFile(partial, "OURS-BINARY-PREFIX");
+    await writeFile(sidecar, '"v"');
+
+    const realStat = downloadCacheFs.stat;
+    let planted = false;
+    vi.spyOn(downloadCacheFs, "stat").mockImplementation(async (...args) => {
+      const path = String(args[0]);
+      // The marker probe runs BEFORE the body sniff, so this lands the foreign
+      // write in the window between our boundary check and that sniff.
+      if (!planted && path.endsWith(".rejected")) {
+        planted = true;
+        await writeFile(partial, "<?xml version='1.0'?><their-in-progress-asset/>");
+        await writeFile(sidecar, '"their-object"');
+      }
+      return realStat(...(args as Parameters<typeof realStat>));
+    });
+
+    fetchMock.mockImplementation(async () => new Response("BODY", { status: 200 }));
+
+    const err = await downloadModel(url, "checkpoints", "bodysniff-vs-foreign-out.safetensors").catch(
+      (e: unknown) => e,
+    );
+    expect(String((err as Error).message)).toMatch(
+      /another download is writing the same staged file/i,
+    );
+    // Their bytes survive, even though they sniff as "not a model".
+    await expect(readFile(partial, "utf-8")).resolves.toBe(
+      "<?xml version='1.0'?><their-in-progress-asset/>",
+    );
+  });
+
   it("a retry that lands on a POISONED partial (#473 leftover) restarts instead of resuming onto it", async () => {
     const url = "https://example.com/models/poisoned.safetensors";
     const { partial, sidecar } = cachePaths(url);
