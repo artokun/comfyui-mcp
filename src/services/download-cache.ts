@@ -2289,14 +2289,23 @@ async function downloadIntoCache(
           when,
         );
       }
-      // SIDECAR is compared for CHANGE, not for readability. An unreadable sidecar
-      // that was ALREADY unreadable when we looked a moment ago is a stable
-      // pre-existing condition (a blocked path, a stale directory), not evidence of
-      // another writer — and it has its own, better-targeted guard downstream
-      // (#467 P0c refuses to pair new bytes with a sidecar it cannot neutralize).
-      // Refusing here instead would replace that precise diagnosis with a wrong
-      // one. `undefined !== undefined` is false, so this compares equal only when
-      // the state is genuinely unchanged, and still catches readable-then-not.
+      // The SIDECAR gets the same strict treatment across a retry boundary, and for
+      // the same reason as the size: an unreadable validator is not a matching one.
+      // It matters specifically because readValidatorSidecar() reads "unreadable"
+      // as "no validator", which sends the attempt down the 200-restart path — and
+      // that path TRUNCATES the staged file. So an unknown validator plus a
+      // same-size replacement by another writer would destroy their partial.
+      if (strict && (expectedSidecar === undefined || nowSidecar === undefined)) {
+        throw interferenceError("the staged file's resume validator could not be read", when);
+      }
+      // WITHIN one attempt it is only compared for CHANGE. A sidecar that was
+      // ALREADY unreadable a moment ago is a stable pre-existing condition (a
+      // blocked path, a stale directory), not evidence of another writer, and it
+      // has its own better-targeted guard downstream (#467 P0c refuses to pair new
+      // bytes with a sidecar it cannot neutralize). Refusing here would replace
+      // that precise diagnosis with a wrong one. `undefined !== undefined` is
+      // false, so this compares equal only when genuinely unchanged, and still
+      // catches readable-then-not.
       if (nowSidecar !== expectedSidecar) {
         throw interferenceError(
           "its resume validator changed, so a DIFFERENT upstream object has been staged there",

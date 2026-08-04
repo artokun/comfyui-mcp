@@ -324,15 +324,26 @@ function anchorRelativeEntrypointOnBase(base: string, relDir: string): string | 
   // rejected, which is the whole point of corroborating.
   const segments = relDir.split(/[\\/]+/).filter((s) => s !== "" && s !== ".");
   const impliedCwd = resolve(base, ...segments.map(() => ".."));
-  if (samePath(resolve(impliedCwd, relDir), base) && hasComfyUIEntrypoint(base)) {
-    return resolve(base);
-  }
+  const baseIsTheInstall =
+    samePath(resolve(impliedCwd, relDir), base) && hasComfyUIEntrypoint(base);
   // A — base is the outer launcher root; the server is nested under it. (This
   // also covers relDir "." — `resolve(base, ".")` is base — which is how a server
   // launched as plain `python main.py` from inside the install already resolved.)
   const nested = resolve(base, relDir);
-  if (hasComfyUIEntrypoint(nested)) return nested;
-  return undefined;
+  const nestedIsTheInstall = !samePath(nested, base) && hasComfyUIEntrypoint(nested);
+
+  // BOTH readings fit. `<base>/main.py` and `<base>/<relDir>/main.py` both exist,
+  // and the server's relative path is consistent with either — so the evidence
+  // does not say WHICH install is running, and picking one would be a guess about
+  // a destination for multi-gigabyte files. That is exactly the #369 harm (a model
+  // landing in a stale install and being reported a success), so refuse and let
+  // the caller resolve it. Returning undefined routes into the existing refusal,
+  // which names both interpretations.
+  if (baseIsTheInstall && nestedIsTheInstall) return undefined;
+  if (baseIsTheInstall) return resolve(base);
+  if (nestedIsTheInstall) return nested;
+  // relDir "." (or empty): nested IS base, so only the base reading can apply.
+  return hasComfyUIEntrypoint(nested) ? nested : undefined;
 }
 
 export async function resolveModelsDirWithBases(): Promise<{

@@ -445,6 +445,22 @@ describe("models dir + extra-config argv parsing (#345/#346/#369)", () => {
         }
       });
 
+      it("REFUSES when BOTH readings fit — the evidence does not say which install is running", async () => {
+        // base = <...>/ComfyUI holding main.py, AND <base>/ComfyUI/main.py also
+        // present. The server's "ComfyUI\main.py" is consistent with EITHER, so
+        // picking one is a guess about where multi-gigabyte files land — and
+        // guessing wrong is precisely the #369 harm (a model in a stale install,
+        // reported as a success).
+        const base = resolve("/bundle/ComfyUI");
+        (config as { comfyuiPath?: string }).comfyuiPath = base;
+        observedLiveRoot = undefined;
+        hasEntrypointFor = (dir) =>
+          resolve(dir) === base || resolve(dir) === join(base, "ComfyUI");
+        getSystemStats.mockResolvedValue({ system: { argv: RELATIVE_ARGV } });
+
+        await expect(resolveModelsDirWithBases()).rejects.toThrow(/could not be determined/i);
+      });
+
       it("keeps the pre-existing relDir '.' behaviour unchanged (deliberately NOT tightened here)", async () => {
         // `python main.py` with no reported cwd gives relDir ".", which corroborates
         // nothing beyond "the configured base is a ComfyUI install" — a reviewer

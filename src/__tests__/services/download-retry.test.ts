@@ -904,6 +904,36 @@ describe("download retry + resume, end to end (#470)", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("REFUSES a retry whose VALIDATOR it cannot read — an unknown validator sends the attempt down the truncating path", async () => {
+    // The sidecar half of the same fail-closed rule, and it is not cosmetic:
+    // readValidatorSidecar() reads "unreadable" as "no validator", which routes the
+    // attempt to the 200-RESTART path — and that path TRUNCATES the staged file. So
+    // an unknown validator plus a same-size replacement by another writer during
+    // the backoff would silently destroy their partial.
+    const url = "https://example.com/models/unreadable-validator.safetensors";
+    const { partial, sidecar } = cachePaths(url);
+    // Staged bytes plus a validator path that CANNOT be read (a blocked directory —
+    // EISDIR, not ENOENT; a MISSING sidecar is knowably "no validator" and is a
+    // legitimate clean restart).
+    await writeFile(partial, "PRECIOUS-BYTES");
+    await mkdir(sidecar, { recursive: true });
+    await writeFile(join(sidecar, "blocker"), "x");
+
+    fetchMock.mockImplementation(async () => new Response("FULL-REPLACEMENT", { status: 200 }));
+
+    const err = await downloadModel(url, "checkpoints", "unreadable-validator-out.safetensors").catch(
+      (e: unknown) => e,
+    );
+    // A validator-related refusal — from this guard or from #467's more precise
+    // stale-sidecar one. What must NEVER happen is proceeding to the truncating
+    // restart on a validator nobody could read.
+    expect(String((err as Error).message)).toMatch(
+      /resume validator could not be read|remove or empty the stale resume-validator sidecar|restart failed/i,
+    );
+    // The decisive assertion: the staged bytes were not truncated on the way out.
+    await expect(readFile(partial, "utf-8")).resolves.toBe("PRECIOUS-BYTES");
+  });
+
   it("a cancel that lands DURING the pre-write check still leaves the resumable partial on disk", async () => {
     // The interference check awaits, so a cancel can arrive inside it. Every path
     // after that hook deletes or truncates the staged file, and a cancelled
