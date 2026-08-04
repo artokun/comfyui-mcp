@@ -272,6 +272,9 @@ Check on model downloads started by download_model. Reports each download's stat
 <ParamField path="id" type="string">
   Download id from download_model. Omit to list every tracked download (incl. in-flight ones from before a reconnect).
 </ParamField>
+<ParamField path="tray_id" type="string">
+  Use this when two rows come back with the SAME `id`, so the id alone cannot say which one you mean. That happens when two different source URLs are downloading to the same destination file. Every row prints its own tray id as `(tray &lt;tray_id&gt;)` — pass that here, together with `id`, to report on exactly one of them.
+</ParamField>
 <ParamField path="url" type="string">
   Adopt an in-flight download by its source URL when you don't have the id (e.g. after a reconnect) — reports the matching job without starting a duplicate.
 </ParamField>
@@ -297,6 +300,9 @@ Cancel ONE in-flight model download started by download_model / download_civitai
 
 <ParamField path="id" type="string" required>
   The download id to cancel (from download_model / download_civitai_model / download_status).
+</ParamField>
+<ParamField path="tray_id" type="string">
+  Use this when a cancel is refused because the `id` names more than one download — two different source URLs writing to the same destination file, so cancelling by id could stop the wrong one. Every download_status row prints its own tray id as `(tray &lt;tray_id&gt;)`; pass the one you want stopped here, together with `id`, and only that download is aborted.
 </ParamField>
 
 ### Example

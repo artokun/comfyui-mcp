@@ -239,7 +239,7 @@ export function registerModelManagementTools(server: McpServer): void {
       tray_id: z
         .string()
         .optional()
-        .describe("Disambiguator, shown on every row as `(tray <tray_id>)`. Only needed when two rows share one `id` — two different source URLs downloading to the SAME destination file. Pass it WITH `id` to select exactly one of them."),
+        .describe("Use this when two rows come back with the SAME `id`, so the id alone cannot say which one you mean. That happens when two different source URLs are downloading to the same destination file. Every row prints its own tray id as `(tray <tray_id>)` — pass that here, together with `id`, to report on exactly one of them."),
       url: z
         .string()
         .url()
@@ -402,7 +402,7 @@ export function registerModelManagementTools(server: McpServer): void {
       tray_id: z
         .string()
         .optional()
-        .describe("Disambiguator, shown on every download_status row as `(tray <tray_id>)`. Required only when the `id` names more than one download (two different source URLs writing the SAME destination file) — then it selects exactly which one to abort."),
+        .describe("Use this when a cancel is refused because the `id` names more than one download — two different source URLs writing to the same destination file, so cancelling by id could stop the wrong one. Every download_status row prints its own tray id as `(tray <tray_id>)`; pass the one you want stopped here, together with `id`, and only that download is aborted."),
     },
     async (args) => {
       try {
