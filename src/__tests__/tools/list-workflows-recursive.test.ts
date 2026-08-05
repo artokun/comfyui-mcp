@@ -224,7 +224,11 @@ describe("#810 — an unread library is never reported as an empty one", () => {
     const text = await listWorkflows();
     expect(text).toMatch(/No workflows to list/);
     expect(text).toMatch(/HTTP 404/);
-    expect(text).toMatch(/not there right now/);
+    // The STATUS is the observation; "the directory is not there" is an inference from
+    // it, and a proxy 404 or a mismatched base path makes that inference false. The two
+    // must stay apart (codex gate r8).
+    expect(text).toMatch(/the answer it gives for a directory it does not have/);
+    expect(text).toMatch(/all this call observed, not a verdict on your library/);
     // …but a 404 proves the directory is missing NOW, not that nothing was ever saved,
     // and not that this call even reached the userdata API. Reporting it as a verdict
     // on the library is what would send someone to recreate a workflow they still have.
@@ -273,7 +277,11 @@ describe("#810 — an unread library is never reported as an empty one", () => {
     forcedThrow = "socket hang up";
     const text = await listWorkflows();
     expect(text).toMatch(/Could NOT read the workflow library/);
-    expect(text).toMatch(/never reached the server/);
+    // Not "the request never arrived" — a reply lost after ComfyUI had already listed
+    // the directory looks identical from here. What was observed is the absence of a
+    // response (codex gate r8).
+    expect(text).toMatch(/no response came back/);
+    expect(text).toMatch(/learned nothing about the library either way/);
     expect(text).not.toMatch(/No saved workflows found/);
   });
 });

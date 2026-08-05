@@ -117,7 +117,11 @@ export async function listWorkflowLibraryKeys(): Promise<WorkflowLibraryListing>
     return {
       ok: false,
       kind: "unreachable",
-      detail: `the request never reached the server (${err instanceof Error ? err.message : String(err)})`,
+      // What was observed is that NO Response came back — not that the request failed to
+      // arrive (codex gate MAJOR). A reply lost after ComfyUI had already listed the
+      // directory looks identical from here, and for a read that distinction changes
+      // nothing except whether the sentence is true.
+      detail: `no response came back (${err instanceof Error ? err.message : String(err)}), so this call learned nothing about the library either way`,
     };
   }
   if (!res.ok) {

@@ -55,12 +55,17 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
                 {
                   type: "text",
                   text:
-                    `No workflows to list: ${listing.detail}, so that directory is not there right now — ` +
-                    `usually because nothing has been saved into it yet, in which case save one from the ` +
-                    `ComfyUI web UI or with save_workflow. If you expected workflows here, do NOT recreate ` +
-                    `them on this result: the same answer comes back when the server is running with a ` +
-                    `different --user-directory, or when this call did not reach its userdata API at all. ` +
-                    `Check the ComfyUI sidebar first.`,
+                    // The status is the observation; "the directory is not there" is an
+                    // INFERENCE from it, and a 404 from a proxy or a mismatched base path
+                    // makes the same inference false (codex gate). State the one, offer
+                    // the other as what it usually means, and keep them apart.
+                    `No workflows to list: ${listing.detail} — the answer it gives for a directory it does ` +
+                    `not have, usually because nothing has been saved into that library yet, in which case ` +
+                    `save one from the ComfyUI web UI or with save_workflow. That status is all this call ` +
+                    `observed, not a verdict on your library: the same 404 comes back when the server is ` +
+                    `running with a different --user-directory, and when this call reached something other ` +
+                    `than that ComfyUI's userdata API. If you expected workflows here, check the ComfyUI ` +
+                    `sidebar first — do NOT recreate them on this result.`,
                 },
               ],
             };
