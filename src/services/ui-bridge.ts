@@ -2741,7 +2741,15 @@ export class UiBridge {
         // otherwise reasons about an observation the current tab never made
         // (codex gate). An inherited value is still worth SHOWING — it is a real
         // earlier reading — but labelled as what it is.
-        const advertised = conn.panelVersionAdvertised ? conn.panelVersion : undefined;
+        // TRIMMED, and blank-is-absent: a hello carrying `panel_version: "   "`
+        // sets panelVersionAdvertised (it is a non-empty string) but says
+        // nothing. Untrimmed it rendered "this tab reports panel    " while the
+        // skew resolver — which does trim — simultaneously reported that the tab
+        // advertised no version: one refusal, two contradictory readings of the
+        // same field (codex gate). An unreadable observation is an absent one.
+        const advertised = conn.panelVersionAdvertised
+          ? conn.panelVersion?.trim() || undefined
+          : undefined;
         const recovery = describePanelUpdateRecovery(
           undefined,
           resolveStaleBundleSkew(advertised),

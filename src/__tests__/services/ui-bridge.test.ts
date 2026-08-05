@@ -2435,6 +2435,34 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
     sock.close();
   });
 
+  it("a BLANK panel_version is disclosed as unreadable, never rendered as a reported version", async () => {
+    // codex gate. `panel_version: "   "` is a non-empty string, so the
+    // connection records it as advertised — but it says nothing. Untrimmed, the
+    // refusal read "this tab reports panel    " while the skew resolver, which
+    // does trim, simultaneously treated the tab as having advertised no version:
+    // one message, two readings of one field.
+    const sock = new WebSocket(`ws://127.0.0.1:${port}`);
+    await new Promise<void>((res, rej) => {
+      sock.on("open", () => {
+        sock.send(
+          JSON.stringify({ type: "hello", tab_id: "tmp:blankver", title: "w", panel_version: "   " }),
+        );
+        res();
+      });
+      sock.on("error", rej);
+    });
+    await vi.waitFor(() => expect(bridge.tabs().some((t) => t.tab_id === "tmp:blankver")).toBe(true));
+    const err = await bridge
+      .send({ cmd: "graph_add_node", node: "x" } as never, { tabId: "tmp:blankver" })
+      .then(() => null)
+      .catch((e: Error) => e);
+    const msg = (err as Error).message;
+    expect(msg).not.toMatch(/reports panel\s*[;.)]/); // no empty "reports panel" claim
+    expect(msg).not.toMatch(/reports panel {2}/);
+    expect(msg).toMatch(/advertised NO panel version/);
+    sock.close();
+  });
+
   it("quotes NO fence version when this build's capability table cannot state one", async () => {
     // codex gate. The refusal is still correct — the panel did not advertise the
     // fence — but the DIAGNOSIS must not invent a number. Falling back to the

@@ -9,8 +9,12 @@ import {
   requiredPanelVersion,
   requiredPanelVersionForWorkflowFence,
   BRIDGE_CAPABILITY_MIN_PANEL_VERSION,
+  BRIDGE_CMD_MIN_PANEL_VERSION,
+  MIN_PANEL_VERSION_FOR_BRIDGE_COMMANDS,
+  SEMVER_RE,
   BRIDGE_READONLY_CMDS,
 } from "../../services/ui-bridge.js";
+import { compareSemver } from "../../services/self-update.js";
 
 /**
  * #778 — a READ blocked by a WRITE gate, and the reason it could happen at all.
@@ -161,6 +165,52 @@ describe("GRAPH_CMD_EFFECT vs BRIDGE_READONLY_CMDS — two questions, two answer
     // just as wrong.
     expect(GRAPH_CMD_EFFECT.graph_canvas).toBe("inert");
     expect(BRIDGE_READONLY_CMDS.has("graph_canvas")).toBe(false);
+  });
+});
+
+describe("the version tables are source, so a broken one is a BUILD failure", () => {
+  // codex gate. The two consumers of these tables degrade DIFFERENTLY on a
+  // malformed entry, and must: `requiredPanelVersion()` skips it (a sync floor
+  // that fabricates a requirement from a typo would be worse than one that is a
+  // little low), while `requiredPanelVersionForWorkflowFence()` refuses to
+  // answer at all (a write refusal must not quote a number it cannot justify).
+  // Those are the right individual behaviours, and together they can disagree —
+  // the sync could call a panel `meets-floor` while the write gate says its
+  // requirement is unknowable.
+  //
+  // The resolution is NOT to make one degrade like the other: these tables are
+  // hand-written CONSTANTS in this repo, not runtime input, so the state that
+  // produces the disagreement is a developer typo, and the place to stop a typo
+  // is the build. These assertions turn it into a failing test; the defensive
+  // handling in both functions stays as the belt to this braces.
+  it.each([
+    ["BRIDGE_CMD_MIN_PANEL_VERSION", BRIDGE_CMD_MIN_PANEL_VERSION],
+    ["BRIDGE_CAPABILITY_MIN_PANEL_VERSION", BRIDGE_CAPABILITY_MIN_PANEL_VERSION],
+  ])("every %s entry is a parseable version", (_name, table) => {
+    const bad = Object.entries(table).filter(([, v]) => typeof v !== "string" || !SEMVER_RE.test(v.trim()));
+    expect(bad).toEqual([]);
+  });
+
+  it("the baseline itself parses", () => {
+    expect(SEMVER_RE.test(MIN_PANEL_VERSION_FOR_BRIDGE_COMMANDS.trim())).toBe(true);
+  });
+
+  it("BOTH workflow-fence capabilities are present — the write gate needs both", () => {
+    // Deleting either would leave requiredPanelVersionForWorkflowFence() unable
+    // to answer while requiredPanelVersion() still produced a number, which is
+    // exactly the "nothing needed" / "writes refused" contradiction.
+    expect(BRIDGE_CAPABILITY_MIN_PANEL_VERSION.enforces_workflow_stamp).toBeTypeOf("string");
+    expect(BRIDGE_CAPABILITY_MIN_PANEL_VERSION.enforces_workflow_stamp_at_write).toBeTypeOf("string");
+    expect(requiredPanelVersionForWorkflowFence()).toBeTypeOf("string");
+  });
+
+  it("the sync floor is never BELOW the fence floor", () => {
+    // The sync's aggregate is a max that includes both fence capabilities, so it
+    // can only ever be >= the fence's own maximum. If that ever inverted, a
+    // `meets-floor` verdict could stand while graph writes were refused.
+    const fence = requiredPanelVersionForWorkflowFence();
+    expect(fence).toBeDefined();
+    expect(compareSemver(requiredPanelVersion(), fence as string)).toBeGreaterThanOrEqual(0);
   });
 });
 
