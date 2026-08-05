@@ -409,7 +409,12 @@ export function queryApiGraph(graph: ApiGraph, opts: GraphQueryOptions = {}): Gr
     const n = graph[id] ?? {};
     let line: string;
     if (fields === "ids") {
-      line = clipLine(String(id), maxChars); // #609: bound even a pathological long id
+      const rawId = String(id); // #609: bound even a pathological long id
+      line = clipLine(rawId, maxChars);
+      // A clipped ID is worse than a clipped compact row: the caller cannot even
+      // pass it back, so this branch needs the remedy note at least as much as the
+      // other two.
+      if (line !== rawId) clippedRow = true;
     } else if (fields === "detail") {
       // #609: bound EVERY field so the protected first line stays O(max_chars): clip
       // the title/type, clip ref-input names + source ids and cap their count, and cap

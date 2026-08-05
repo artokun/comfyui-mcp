@@ -161,6 +161,17 @@ describe("queryApiGraph", () => {
       expect(r.text).toContain("raise max_chars");
     });
 
+    it("a clipped ID in the ids projection gets the same remedy", () => {
+      // fields:"ids" clips a pathological node id too, and a clipped id is worse
+      // than a clipped row — the caller cannot even pass it back.
+      const longId = "n".repeat(2000);
+      const r = queryApiGraph({ [longId]: { class_type: "A" } }, { fields: "ids", max_chars: 500 });
+      expect(r.shown).toBe(1);
+      expect(r.truncated).toBe(false);
+      expect(r.text).toContain("was clipped in place");
+      expect(r.text).toContain("raise max_chars");
+    });
+
     it("char-bound WITHOUT ids: names max_chars, and does not send the reader to raise limit", () => {
       const r = queryApiGraph(G, { max_chars: 500 });
       expect(r.truncated).toBe(true);
@@ -428,8 +439,16 @@ describe("queryApiGraph", () => {
       const maxChars = 500;
       const r = queryApiGraph(G6, { ids: [longId], fields: "ids", max_chars: maxChars });
       expect(r.shown).toBe(1);
-      const body = r.text.split("\n").slice(1).join("\n");
-      expect(body.length).toBeLessThanOrEqual(maxChars);
+      // The bound #609 is about is on the RENDERED ROW. Measured on the id line
+      // rather than on everything after the header, because a clipped id now also
+      // carries the "raise max_chars" note — and every explanatory tail in this
+      // engine has always sat outside the row budget (the truncation tails do too).
+      // A fixed ~150-char note is not the token flood the guard exists to stop, and
+      // dropping it to save those chars would leave a clipped, unusable id with no
+      // way to find out why.
+      const idLine = r.text.split("\n")[1];
+      expect(idLine.length).toBeLessThanOrEqual(maxChars);
+      expect(r.text).toContain("was clipped in place");
     });
 
     it("without explicit ids the advice still points at narrowing", () => {
