@@ -95,8 +95,22 @@ function graphCommandLiteralsInSource(): Set<string> {
  * the literal scan rather than replacing it: between them, evading both means
  * neither writing the name down nor dispatching it.
  */
-function dispatchedGraphCommandsAtRuntime(): { cmds: Set<string>; toolsThatDispatched: number } {
+async function dispatchedGraphCommandsAtRuntime(
+  // Injectable so the probe's own observation points can be tested against
+  // handlers that deliberately evade them, rather than only against the tool
+  // surface as it happens to be written today.
+  defs: ReturnType<typeof buildPanelToolDefs> = buildPanelToolDefs(),
+): Promise<{
+  cmds: Set<string>;
+  toolsThatDispatched: number;
+  /** Per tool, what it had dispatched BY THE TIME ITS HANDLER RETURNED. Snapshot,
+   *  not a live view: a handler that dispatches only after an await contributes
+   *  nothing here unless the probe actually waited for it, which is what makes
+   *  the await observable to a test. */
+  byTool: Record<string, string[]>;
+}> {
   const cmds = new Set<string>();
+  const byTool: Record<string, string[]> = {};
   let toolsThatDispatched = 0;
   // Plausible values for the common required params, so more handlers get past
   // their own guards and reach a dispatch. Anything still unhappy just throws
@@ -134,19 +148,34 @@ function dispatchedGraphCommandsAtRuntime(): { cmds: Set<string>; toolsThatDispa
     collapsed: true,
     force: true,
   };
-  for (const def of buildPanelToolDefs()) {
+  for (const def of defs) {
     let dispatched = false;
+    const seenThisTool = new Set<string>();
+    // BOTH doors. Handlers reach the panel through `ctx.call` OR directly
+    // through `ctx.bridge.send` — panel_screenshot does the latter — and a probe
+    // watching only the first would let a command dispatched the other way slip
+    // past every layer of this file.
+    const observe = (cmd: unknown): void => {
+      const name = (cmd as { cmd?: unknown } | undefined)?.cmd;
+      if (typeof name !== "string") return;
+      if (name.startsWith("graph_")) {
+        cmds.add(name);
+        seenThisTool.add(name);
+      }
+      dispatched = true;
+    };
     const ctx = {
       call: async (cmd: Record<string, unknown>) => {
-        if (typeof cmd.cmd === "string") {
-          if (cmd.cmd.startsWith("graph_")) cmds.add(cmd.cmd);
-          dispatched = true;
-        }
+        observe(cmd);
         return { content: [{ type: "text", text: "{}" }] };
       },
       confirm: async () => "yes" as const,
       bridge: {
-        send: async () => ({}),
+        send: async (cmd: unknown) => {
+          observe(cmd);
+          // Shaped enough for the direct-send callers to get a little further.
+          return { image: "", mimeType: "image/png" };
+        },
         push: () => 1,
         canReach: () => true,
         isHeadless: () => false,
@@ -157,15 +186,18 @@ function dispatchedGraphCommandsAtRuntime(): { cmds: Set<string>; toolsThatDispa
       ensureReachable: () => {},
     } as unknown as Parameters<ReturnType<typeof buildPanelToolDefs>[number]["handler"]>[1];
     try {
-      // Handlers are async; a rejection is as uninteresting as a throw here.
-      const r = def.handler({ ...ARGS }, ctx) as unknown as Promise<unknown>;
-      if (r && typeof (r as Promise<unknown>).catch === "function") void r.catch(() => {});
+      // AWAITED. Several handlers dispatch only AFTER an await — panel_clear
+      // waits on its confirmation before sending graph_clear — so a probe that
+      // fires and forgets never observes those dispatches at all.
+      await def.handler({ ...ARGS }, ctx);
     } catch {
       /* this handler needs more than synthetic args — the literal scan covers it */
     }
+    // Snapshot TAKEN HERE, immediately after the handler resolved.
+    byTool[def.name] = [...seenThisTool].sort();
     if (dispatched) toolsThatDispatched += 1;
   }
-  return { cmds, toolsThatDispatched };
+  return { cmds, toolsThatDispatched, byTool };
 }
 
 describe("GRAPH_CMD_EFFECT — the ledger is complete", () => {
@@ -189,25 +221,76 @@ describe("GRAPH_CMD_EFFECT — the ledger is complete", () => {
     expect(unclassified).toEqual([]);
   });
 
-  it("classifies every graph_* command the REAL tool surface dispatches (spelling-independent)", () => {
+  it("classifies every graph_* command the REAL tool surface dispatches (spelling-independent)", async () => {
     // The source scan is evadable by construction — it reads text. This one
     // watches the commands actually routed by `buildPanelToolDefs()`'s handlers,
     // so a helper, an alias table, or a computed name cannot slip past it.
-    const { cmds, toolsThatDispatched } = dispatchedGraphCommandsAtRuntime();
+    const { cmds, toolsThatDispatched, byTool } = await dispatchedGraphCommandsAtRuntime();
     // Guard the guard: a probe that drove nothing would pass vacuously.
     expect(toolsThatDispatched).toBeGreaterThan(20);
     expect(cmds.size).toBeGreaterThan(20);
     expect(cmds.has("graph_set_widget")).toBe(true);
+    // The two dispatch shapes the probe must cover, asserted through the
+    // per-tool SNAPSHOT so each observation point is load-bearing:
+    //  - panel_screenshot dispatches through `ctx.bridge.send`, not `ctx.call`,
+    //    so it fails if the probe watches only one door;
+    //  - panel_clear dispatches only AFTER an awaited confirmation, so its
+    //    snapshot is empty unless the probe actually waited for the handler.
+    expect(byTool.panel_screenshot).toContain("graph_screenshot");
+    expect(byTool.panel_clear).toContain("graph_clear");
     expect([...cmds].filter((c) => GRAPH_CMD_EFFECT[c] === undefined).sort()).toEqual([]);
   });
 
-  it("driving the real tool surface classifies nothing by FALLBACK", () => {
+  it("the probe catches an evasion the literal scan CANNOT — via ctx.call and via bridge.send", async () => {
+    // The claim layers 2 and 3 exist to support, made durable instead of being a
+    // mutation someone ran once. Two synthetic tools dispatch commands whose
+    // names are assembled at runtime, so no literal exists to scan for — one
+    // through each door, and one of them only after an await.
+    const evasive = [
+      {
+        name: "evil_via_call",
+        description: "",
+        schema: {},
+        handler: async (_a: Record<string, unknown>, ctx: { call: (c: Record<string, unknown>) => Promise<unknown> }) => {
+          await ctx.call({ cmd: ["graph", "via", "call"].join("_") });
+          return { content: [] };
+        },
+      },
+      {
+        name: "evil_via_bridge",
+        description: "",
+        schema: {},
+        handler: async (
+          _a: Record<string, unknown>,
+          ctx: { bridge: { send: (c: Record<string, unknown>) => Promise<unknown> } },
+        ) => {
+          await ctx.bridge.send({ cmd: ["graph", "via", "bridge"].join("_") });
+          return { content: [] };
+        },
+      },
+    ] as unknown as ReturnType<typeof buildPanelToolDefs>;
+
+    // Layer 1 is blind to both: the names exist nowhere as literals.
+    const literals = graphCommandLiteralsInSource();
+    expect(literals.has("graph_via_call")).toBe(false);
+    expect(literals.has("graph_via_bridge")).toBe(false);
+
+    // Layer 2 sees both.
+    const { cmds } = await dispatchedGraphCommandsAtRuntime(evasive);
+    expect([...cmds].sort()).toEqual(["graph_via_bridge", "graph_via_call"]);
+    expect([...cmds].filter((c) => GRAPH_CMD_EFFECT[c] === undefined).sort()).toEqual([
+      "graph_via_bridge",
+      "graph_via_call",
+    ]);
+  });
+
+  it("driving the real tool surface classifies nothing by FALLBACK", async () => {
     // The assertion that needs no scanner at all. `isMutatingGraphCommand`
     // records every command it had to classify by default, at the point of use —
     // an observation taken from the command being ROUTED, which no spelling can
     // dodge. After exercising the surface, that record must be empty.
     __resetUnclassifiedGraphCommands();
-    const { cmds } = dispatchedGraphCommandsAtRuntime();
+    const { cmds } = await dispatchedGraphCommandsAtRuntime();
     for (const cmd of cmds) requiresWorkflowStampEnforcement({ cmd });
     expect([...unclassifiedGraphCommandsSeen()].sort()).toEqual([]);
   });

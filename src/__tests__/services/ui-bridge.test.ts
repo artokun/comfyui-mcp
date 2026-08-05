@@ -18,6 +18,8 @@ import {
   isMutatingGraphCommand,
   requiresWorkflowStampEnforcement,
   BRIDGE_CAPABILITY_MIN_PANEL_VERSION,
+  unclassifiedGraphCommandsSeen,
+  __resetUnclassifiedGraphCommands,
 } from "../../services/ui-bridge.js";
 import { carryWorkflowCommandStamp } from "../../orchestrator/session-store.js";
 import {
@@ -2535,6 +2537,38 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
     }
   });
 
+  it("an UNCLASSIFIED graph command routed through the bridge is fenced AND recorded", async () => {
+    // Layer 3, exercised through the DISPATCH PATH rather than by calling the
+    // classifier directly — the gap the independent gate flagged in the earlier
+    // evidence. A command with no ledger entry, arriving at the real bridge:
+    // it must still fail closed (fenced as a write) AND leave a record, so the
+    // fallback is never a silent default however the command got here.
+    __resetUnclassifiedGraphCommands();
+    const sock = new WebSocket(`ws://127.0.0.1:${port}`);
+    await new Promise<void>((res, rej) => {
+      sock.on("open", () => {
+        sock.send(JSON.stringify({ type: "hello", tab_id: "tmp:unclassified", title: "w" }));
+        res();
+      });
+      sock.on("error", rej);
+    });
+    await vi.waitFor(() =>
+      expect(bridge.tabs().some((t) => t.tab_id === "tmp:unclassified")).toBe(true),
+    );
+    const err = await bridge
+      .send({ cmd: "graph_brand_new_unclassified" } as never, { tabId: "tmp:unclassified" })
+      .then(() => null)
+      .catch((e: Error) => e);
+    // Fenced, for the stated reason — not merely rejected.
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/does not enforce per-command workflow targeting/i);
+    expect(dispatchOutcomeOf(err as Error)).toBe(false); // nothing was written
+    // And recorded, so the ledger gap is visible.
+    expect([...unclassifiedGraphCommandsSeen()]).toContain("graph_brand_new_unclassified");
+    __resetUnclassifiedGraphCommands();
+    sock.close();
+  });
+
   it("quotes NO fence version when this build's capability table cannot state one", async () => {
     // codex gate. The refusal is still correct — the panel did not advertise the
     // fence — but the DIAGNOSIS must not invent a number. Falling back to the
@@ -2773,12 +2807,24 @@ describe("makeUnknownCommandError (old-panel version gate)", () => {
   // (compareSemver returns 0 both for "equal" and "unparseable"). Without the
   // parse screen, `panel_version: "dev"` would compare as 0 (>= 0 → "supported")
   // and wrongly leak the raw error / skip the #236 learning path.
-  it("treats an unparseable advertised version as NOT proven new enough (still too old)", () => {
+  it("treats an unparseable advertised version as NOT proven new enough (still rewritten)", () => {
     for (const bad of ["dev", "unknown", "latest", ""]) {
       const e = makeUnknownCommandError('Unknown command "graph_outline"', bad);
+      // The point of this test is that the rewrite still FIRES — an unparseable
+      // version must never be mistaken for new-enough.
       expect(e).not.toBeNull();
-      expect(e?.message.toLowerCase()).toContain("too old");
+      expect(e?.message.toLowerCase()).toContain('does not implement "graph_outline"');
+      expect(e?.message).toContain("0.4.6"); // the true minimum is still quoted
+      // But it must not claim an AGE it never observed. "too old" is a verdict
+      // that needs a version that parsed and compared below the minimum; the one
+      // observed fact here is the panel's own "Unknown command" reply.
+      expect(e?.message.toLowerCase()).not.toContain("too old");
     }
+    // And the unparseable text is shown as EVIDENCE, quoted, never as a version.
+    const nightly = makeUnknownCommandError('Unknown command "graph_outline"', "nightly");
+    expect(nightly?.message).toContain('this panel reports "nightly"');
+    expect(nightly?.message).toContain("not a comparable version");
+    expect(nightly?.message).not.toContain("detected panel nightly");
   });
 
   // A MALFORMED version that merely PREFIXES a valid semver (e.g. `0.11.28.1`,
@@ -2802,7 +2848,11 @@ describe("makeUnknownCommandError (old-panel version gate)", () => {
     ]) {
       const e = makeUnknownCommandError('Unknown command "graph_outline"', bad);
       expect(e).not.toBeNull();
-      expect(e?.message.toLowerCase()).toContain("too old");
+      // Rewritten (not mistaken for new-enough), and — as above — no age verdict
+      // from a string that failed the screen.
+      expect(e?.message.toLowerCase()).toContain('does not implement "graph_outline"');
+      expect(e?.message.toLowerCase()).not.toContain("too old");
+      expect(e?.message).toContain(`this panel reports "${bad}"`);
     }
     // And it is symmetric on the proactive gate: a malformed version can't PROVE
     // unsupported either, so it is never proactively blocked (fail-open to reactive).

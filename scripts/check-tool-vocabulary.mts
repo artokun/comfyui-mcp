@@ -213,6 +213,22 @@ const SPLIT_ALLOWED: Array<{ path: string; context: string; why: string }> = [
     context: 'return "sec_" + name.replace(',
     why: "builds a Mermaid section id from a node title — nothing to do with tool names",
   },
+  {
+    path: "src/__tests__/services/graph-command-effect.test.ts",
+    context: '["graph", "via", "call"].join("_")',
+    why:
+      "NOT a tool name — a synthetic BRIDGE command in a test that proves the graph-effect " +
+      "ledger's runtime probe catches a command whose name is assembled at runtime. The " +
+      "assembly is the thing under test: a literal here would defeat the test's whole point, " +
+      "which is that a literal scan cannot see this and the runtime probe can.",
+  },
+  {
+    path: "src/__tests__/services/graph-command-effect.test.ts",
+    context: '["graph", "via", "bridge"].join("_")',
+    why:
+      "NOT a tool name — same test, the ctx.bridge.send door rather than the ctx.call door. " +
+      "See the entry above.",
+  },
 ];
 
 interface Hit {

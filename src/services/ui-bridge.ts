@@ -315,6 +315,43 @@ function highestRequirement(candidates: readonly (string | undefined)[]): string
 }
 
 /**
+ * A panel version AS OBSERVED, with the parsed form separated from the text.
+ *
+ * The handshake's `panel_version` is an arbitrary string. Screening it wherever
+ * it happens to be rendered does not hold: the screen was added at the write
+ * refusal, and the reactive unknown-command path — which builds its own view
+ * from the same raw field — went on rendering "detected panel nightly" and
+ * calling the panel too old. One value, two consumers, one of them screened.
+ *
+ * So the screen moves into the TYPE. A consumer that wants a version reads
+ * `.version`, which exists only when the text is strict SemVer; a consumer that
+ * wants to show what was actually said reads `.raw`. The unparseable value is
+ * still available — it is real evidence, and hiding it would be its own kind of
+ * lying — but it is no longer reachable through a field named like a version, so
+ * the next consumer added cannot accidentally treat it as one.
+ *
+ * `nightly` is the case that matters in practice: it is what ComfyUI-Manager
+ * reports for a git-installed pack, so it is the normal reading for anyone
+ * running the panel from source rather than the Registry.
+ */
+export interface PanelVersionReading {
+  /** Verbatim (trimmed) text the handshake carried. EVIDENCE, never a version. */
+  raw?: string;
+  /** Set ONLY when `raw` is a strict SemVer — the sole form that may be compared,
+   *  or quoted to a user as this panel's version. */
+  version?: string;
+}
+
+/** Screen a handshake `panel_version` into a reading. Blank and unparseable both
+ *  yield no `.version`; blank additionally yields no `.raw`, because whitespace
+ *  is not evidence of anything. Never throws. */
+export function readPanelVersion(raw: string | undefined): PanelVersionReading {
+  const trimmed = typeof raw === "string" ? raw.trim() : "";
+  if (!trimmed) return {};
+  return SEMVER_RE.test(trimmed) ? { raw: trimmed, version: trimmed } : { raw: trimmed };
+}
+
+/**
  * The highest panel version this MCP build needs across its bridge commands and
  * handshake capabilities. Keep this beside both capability tables so proactive
  * panel sync and a bridge refusal report the same derived requirement.
@@ -553,21 +590,38 @@ function mcpServerVersion(): string | undefined {
 
 function buildPanelTooOldError(
   cmd: string,
-  panelVersion?: string,
+  reading: PanelVersionReading,
   mcpVersion: string | undefined = mcpServerVersion(),
 ): Error {
-  const detected = panelVersion
-    ? ` (detected panel ${panelVersion}${mcpVersion ? `, mcp ${mcpVersion}` : ""})`
-    : mcpVersion
-      ? ` (detected mcp ${mcpVersion})`
-      : "";
+  const mcpTail = mcpVersion ? `, mcp ${mcpVersion}` : "";
+  const detected = reading.version
+    ? ` (detected panel ${reading.version}${mcpTail})`
+    : reading.raw
+      ? // The value is EVIDENCE, quoted so it reads as a string rather than as a
+        // version. "nightly" is the common one — ComfyUI-Manager's answer for a
+        // git-installed pack — and it used to render as "detected panel nightly",
+        // a version-shaped claim about something never parsed.
+        ` (this panel reports "${reading.raw}", which is not a comparable version${mcpTail})`
+      : mcpVersion
+        ? ` (detected mcp ${mcpVersion})`
+        : "";
   const min = BRIDGE_CMD_MIN_PANEL_VERSION[cmd];
+  // "TOO OLD" IS AN AGE VERDICT, and it may only be reached from an age
+  // OBSERVATION: a version that parsed AND compares below the command's known
+  // minimum. Everything else — no version, an unparseable one — has exactly one
+  // observed fact behind it, the panel's own "Unknown command" reply, and that
+  // fact is "does not implement", not "is old". The remedy is unchanged either
+  // way, and the command's true minimum is still quoted when it is known, so
+  // nothing actionable is lost by declining to guess the cause.
+  const provenOld =
+    !!min && !!reading.version && SEMVER_RE.test(min.trim()) && compareSemver(reading.version, min) < 0;
+  const remedy = min
+    ? `update the ComfyUI-MCP panel to ≥${min} (ComfyUI Manager → update comfyui-mcp panel), then reconnect.`
+    : `update the ComfyUI-MCP panel to the latest release (ComfyUI Manager → update comfyui-mcp panel), then reconnect.`;
   const e = new Error(
-    min
-      ? `This ComfyUI-MCP panel is too old for "${cmd}"${detected} — update the ComfyUI-MCP panel ` +
-          `to ≥${min} (ComfyUI Manager → update comfyui-mcp panel), then reconnect.`
-      : `This ComfyUI-MCP panel does not implement "${cmd}"${detected} — update the ComfyUI-MCP panel ` +
-          `to the latest release (ComfyUI Manager → update comfyui-mcp panel), then reconnect.`,
+    provenOld
+      ? `This ComfyUI-MCP panel is too old for "${cmd}"${detected} — ${remedy}`
+      : `This ComfyUI-MCP panel does not implement "${cmd}"${detected} — ${remedy}`,
   );
   // STRUCTURED discriminator (#413): both the reactive rewrite and the #236
   // proactive gate funnel through here, so tagging the error object lets callers
@@ -652,7 +706,11 @@ export function makeUnknownCommandError(
   // (which would also POISON the #236 unsupported-cmd gate against a capable panel).
   // Return null so the raw error surfaces and the gate is never poisoned.
   if (panelSupportsCmd(cmd, panelVersion)) return null;
-  return buildPanelTooOldError(cmd, panelVersion, mcpVersion);
+  // The raw handshake string ends here: everything downstream sees a screened
+  // reading, so an unparseable value cannot be rendered as a version or read as
+  // an age (see PanelVersionReading — this consumer used to build its own view
+  // from the raw field and did both).
+  return buildPanelTooOldError(cmd, readPanelVersion(panelVersion), mcpVersion);
 }
 
 /**
@@ -2718,7 +2776,7 @@ export class UiBridge {
     // on THIS connection (in dispatch()'s rejectMapped below), never inferred from
     // panelVersion alone.
     if (conn.unsupportedCmds.has(cmd.cmd)) {
-      return Promise.reject(buildPanelTooOldError(cmd.cmd, conn.panelVersion));
+      return Promise.reject(buildPanelTooOldError(cmd.cmd, readPanelVersion(conn.panelVersion)));
     }
     // #392 — PROACTIVELY gate a command whose changelog-verified minimum the panel's
     // ADVERTISED version parseably undercuts (e.g. graph_query on a <0.7.0 panel), so
@@ -2740,7 +2798,7 @@ export class UiBridge {
       !conn.provenSupportedCmds.has(cmd.cmd) &&
       panelVersionProvesUnsupported(cmd.cmd, conn.panelVersion)
     ) {
-      return Promise.reject(buildPanelTooOldError(cmd.cmd, conn.panelVersion));
+      return Promise.reject(buildPanelTooOldError(cmd.cmd, readPanelVersion(conn.panelVersion)));
     }
     // #570 P0c — FAIL CLOSED for a command that mutates the ACTIVE workflow/canvas (every
     // graph_* mutator, plus path-less workflow_save/save_as/rename/close) when the resolved
@@ -2820,11 +2878,15 @@ export class UiBridge {
         // path — including into `resolveStaleBundleSkew`, which then reasons
         // from "no comparable version" instead of silently rejecting a value it
         // would have screened out one line later anyway.
-        const rawAdvertised = conn.panelVersionAdvertised
-          ? conn.panelVersion?.trim() || undefined
-          : undefined;
-        const advertised =
-          rawAdvertised && SEMVER_RE.test(rawAdvertised) ? rawAdvertised : undefined;
+        // Screened through the SAME helper as the reactive path, so the two
+        // cannot drift: `.version` is comparable and attributable, `.raw` is
+        // evidence. Only an ADVERTISED reading counts — an inherited value is
+        // not this handshake's observation (see below).
+        const reading = conn.panelVersionAdvertised
+          ? readPanelVersion(conn.panelVersion)
+          : {};
+        const rawAdvertised = reading.raw;
+        const advertised = reading.version;
         const recovery = describePanelUpdateRecovery(
           undefined,
           resolveStaleBundleSkew(advertised),
