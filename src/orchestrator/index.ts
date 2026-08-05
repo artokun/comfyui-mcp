@@ -248,18 +248,26 @@ You are running on the pi (pi.dev) backend, which has NO ComfyUI tools. Disregar
  * block never reaches us. A failed bind is our own return value. Saying so is a
  * claim we are entitled to make.
  *
- * Narrower than PI_CAPABILITY_OVERRIDE, and deliberately so: pi has no MCP client
- * at all, whereas here the headless `comfyui` stdio server is still attached and
- * every one of its tools still works. Only the live-canvas surface is gone, so only
- * that is retracted — telling the agent it had lost the rest would be the same
- * defect pointing the other way.
+ * Narrower than PI_CAPABILITY_OVERRIDE, and deliberately so: pi has no MCP client at
+ * all, whereas a failed panel bind removes only the live-canvas surface. Telling the
+ * agent it had lost the rest would be the same defect pointing the other way.
+ *
+ * But narrow is not the same as making the OPPOSITE claim, which two earlier drafts
+ * did. They said the headless tools were "UNAFFECTED and still work" and that
+ * restarting the orchestrator "restores" the canvas ones. A failed panel bind
+ * establishes neither: the stdio child is a separate connection that can fail on its
+ * own, and a bind failure whose cause persists (the port simply stays occupied)
+ * survives a restart. So this says what was observed — the panel server did not
+ * start — and then explicitly declines to speak for the other server or for the
+ * future. Retracting one false capability claim while attaching two new ones is the
+ * defect this whole change exists to remove, wearing the fix's clothes.
  */
 const NO_PANEL_TOOLS_OVERRIDE = `
 
 === CAPABILITY CORRECTION — READ THIS, IT SUPERSEDES THE ABOVE ===
 The live-canvas tools are NOT available in this session. The loopback panel MCP server failed to start, so no panel_* tool (panel_graph_outline, panel_query_graph, panel_add_node, panel_connect, panel_set_widget, panel_run, panel_save_workflow, …) exists in your runtime this run. Disregard every instruction above about reading or editing the user's open canvas: you cannot see it, cannot change it, and must never claim to, pretend to, or narrate doing so.
-Your headless comfyui tools are UNAFFECTED and still work — saved workflow files on disk (list_workflows, get_workflow, analyze_workflow, query_workflow), generation, the queue, models, node packs, and the ComfyUI process itself.
-If the user asks for work on the graph in front of them, say plainly that live-canvas tools failed to start this run and that restarting the orchestrator is what restores them; offer the file-based route in the meantime.`;
+That is ALL this tells you. The headless comfyui server is a SEPARATE connection that succeeds or fails on its own, so this says nothing about whether you have its tools — go by the tool list you were actually given. If it is there, the file-based route (list_workflows, get_workflow, analyze_workflow, query_workflow) is your way to work on a saved workflow; if it is not, say that plainly instead of guessing.
+The panel tools cannot come back during this session — the tool set was fixed when it started. If the user asks for work on the graph in front of them, tell them the live-canvas tools failed to start this run and that you cannot reach the canvas until the orchestrator is restarted. Do not promise a restart will fix it: whether it does depends on why the bind failed, and a port still held by something else will fail the same way again.`;
 
 /**
  * Whether this backend's prompt has to retract its panel_* claim, given whether the

@@ -30,17 +30,29 @@ describe("panel_* claim is retracted when the loopback panel MCP did not bind", 
     // ...tells the model not to narrate doing it anyway, which is the actual
     // failure mode (improvising against absent tools reads as a broken panel)...
     expect(note).toMatch(/never claim to, pretend to, or narrate doing so/);
-    // ...and leaves a route that still works, since a remedy has to be reachable
-    // from where the caller is standing.
-    expect(note).toMatch(/\bget_workflow\b/);
-    expect(note).toMatch(/restarting the orchestrator/);
+    // ...and stops there. "That is ALL this tells you" is the load-bearing clause.
+    expect(note).toMatch(/That is ALL this tells you/);
   });
 
-  it("retracts ONLY the canvas surface — the headless comfyui tools are untouched", () => {
-    // Over-retracting would be the same defect pointing the other way: the stdio
-    // comfyui server is still attached and every one of its tools still works.
+  it("retracts ONLY the canvas surface, without vouching for the headless one", () => {
+    // Over-retracting would be the same defect pointing the other way. But so is
+    // UNDER-retracting into a fresh claim: the stdio child is a separate connection
+    // that can fail on its own, so the note may be emitted with nothing connected.
+    // It must therefore neither condemn nor vouch — only point at the real list.
     const note = panelToolsRetraction("codex", false);
-    expect(note).toMatch(/headless comfyui tools are UNAFFECTED/);
+    expect(note).toMatch(/SEPARATE connection that succeeds or fails on its own/);
+    expect(note).toMatch(/go by the tool list you were actually given/);
+    expect(note).not.toMatch(/UNAFFECTED/);
+    expect(note).not.toMatch(/still work\b/);
+  });
+
+  it("does not promise that a restart brings the canvas tools back", () => {
+    // A bind failure whose cause persists — the port simply stays occupied —
+    // survives a restart, so "restarting restores them" is unobserved. What IS
+    // known is that the tool set is fixed for the session.
+    const note = panelToolsRetraction("codex", false);
+    expect(note).toMatch(/cannot come back during this session/);
+    expect(note).toMatch(/Do not promise a restart will fix it/);
   });
 
   it("stays silent for pi, whose own override already retracts strictly more", () => {
@@ -81,11 +93,21 @@ describe("the Ollama-family prompt retracts its own panel router claim", () => {
     // arithmetic here would be a second wrong number replacing the first. The model
     // is sent to the list it was actually handed.
     expect(note).not.toMatch(/\b(three|THREE|six|SIX|3|6)\b/);
-    expect(note).toMatch(/go by the list you actually received/);
+    expect(note).toMatch(/go by the tool list you were actually handed/);
     expect(note).toMatch(/never claim to have read or edited the user's canvas/);
-    // ...and leaves the route that still works, since the headless server is
-    // unaffected — over-retracting is the same defect pointing the other way.
-    expect(note).toMatch(/list_workflows, get_workflow, analyze_workflow, query_workflow/);
-    expect(note).toMatch(/restarting the agent/);
+  });
+
+  it("neither vouches for the headless server nor promises a restart", () => {
+    // connectTools() catches a failed headless connection independently and leaves
+    // `comfy` null, so this prompt can be emitted with NOTHING connected — and the
+    // session's tool set is fixed, so the router cannot return within it. Retracting
+    // one false capability claim while attaching two new ones is the same defect.
+    const note = ollamaPanelRetraction(false);
+    expect(note).toMatch(/That is ALL this tells you/);
+    expect(note).toMatch(/separate connection that can succeed or fail on its own/);
+    expect(note).toMatch(/cannot come back during this session/);
+    expect(note).toMatch(/Do not promise that a restart will fix it/);
+    expect(note).not.toMatch(/unaffected/i);
+    expect(note).not.toMatch(/You can still do everything/);
   });
 });

@@ -304,7 +304,7 @@ Ask the agent, in plain words:
     are indistinguishable at this step, and this is the branch that cost a user days
     — being sure it was the wiring.
 
-    One check separates them, and it is not something the agent can see: **open your
+    One check narrows it, and it is not something the agent can see: **open your
     client's own list of MCP servers** — the place it shows which servers it
     connected to, which is a different list from the tools it hands the model.
 
@@ -312,9 +312,18 @@ Ask the agent, in plain words:
       wiring problem, not a panel or server fault. It splits again into two — never
       wired up, or a host that cannot hold them at all — and the list
       [below](#where-each-answer-usually-comes-from) tells those apart.
-    - **It is there and connected, but the model still lists no tools** → they are
-      being withheld between the two. That is **blocked**, and the same list below
-      says where to look.
+    - **It is there and connected, and the model still lists nothing** → the tools
+      reached your client. Where they stopped after that is still open: they may be
+      withheld from the model by a permission rule, or the model may simply have
+      failed or declined to list them, which looks exactly the same from here. Do
+      **not** start loosening permissions on this alone.
+
+      If that server list also shows **which tools it took from comfyui-mcp**, it
+      settles it: tools listed there but not by the model means the model is the
+      problem, not your permissions; none listed there means they are being filtered
+      before the model ever sees them. If your client does not show that — and many
+      do not — nothing available to you distinguishes the two here, and step 2 is
+      the better chance, because a denial comes back in words.
   </Step>
   <Step title="Ask it to try, and to report back verbatim">
     > Now call the one you'd use for the thing that isn't working, and paste
@@ -334,8 +343,11 @@ Ask the agent, in plain words:
     - **"That was denied" / "not permitted" / "I need permission"** — **blocked**,
       inside your client. This one is conclusive: the agent asked and was refused.
     - **"I don't have that tool"** — absent *or* blocked, still. A withheld tool and
-      a missing one look the same from the model's seat, so settle it with the
-      server-list check in step 1 rather than acting on this.
+      a missing one look identical from the model's seat, so do not act on this by
+      itself: take it back to step 1's server list, and if that list does not show
+      per-server tools either, then nothing you can reach separates the two and the
+      honest next move is to ask in the issue tracker rather than to start changing
+      settings.
     - **More prose, still no call** — ask flatly: *"Did you call a tool? If not, why
       not?"* An agent that dodges twice is usually working around something it has
       not mentioned.

@@ -213,6 +213,16 @@ const MAX_TOOL_ROUNDS = 32;
  * so the correction would have been a second wrong number replacing the first. It
  * names the three tools that are GONE, which is what was actually observed, and
  * points the model at the list it was really handed.
+ *
+ * And it makes NO claim about the headless server, for the same reason. Two earlier
+ * drafts said its tools were "unaffected" and that a restart would bring the canvas
+ * back. Neither is observed here: connectTools() catches a failed headless connection
+ * independently and leaves `comfy` null, so this prompt can be emitted with NOTHING
+ * connected; and the tool set is fixed for the life of the session, so the panel
+ * router cannot return within it — while a restart only helps if the bind succeeds
+ * next time, which a still-occupied port will not. Retracting a false capability
+ * claim and attaching two fresh unverified ones in its place is the same defect
+ * wearing the fix's clothes.
  */
 export function ollamaPanelRetraction(panelRouterAvailable: boolean): string {
   if (panelRouterAvailable) return "";
@@ -220,9 +230,9 @@ export function ollamaPanelRetraction(panelRouterAvailable: boolean): string {
     "",
     "",
     "CORRECTION — THIS OVERRIDES THE TOOL LIST ABOVE:",
-    "The live-canvas router did not start this session. panel_list_tools, panel_describe_tool and panel_call_tool DO NOT EXIST right now — do not call them, and never claim to have read or edited the user's canvas. Whatever tools you were given for the headless ComfyUI server are unaffected; go by the list you actually received, not by any count named above.",
-    "You can still do everything through the headless server: saved workflow FILES on disk (list_workflows, get_workflow, analyze_workflow, query_workflow), generation, the queue, models, custom nodes.",
-    "If the user asks about the graph open in front of them, say the live-canvas tools failed to start this session and that restarting the agent is what brings them back.",
+    "The live-canvas router did not start this session. panel_list_tools, panel_describe_tool and panel_call_tool DO NOT EXIST right now — do not call them, and never claim to have read or edited the user's canvas.",
+    "That is ALL this tells you. It says nothing about the headless ComfyUI server, which is a separate connection that can succeed or fail on its own — so go by the tool list you were actually handed, not by any count named above. If it carries list_tools / describe_tool / call_tool, use them; if it carries nothing either, say so rather than guessing.",
+    "The panel tools cannot come back during this session — the tool set was fixed when it started. If the user asks about the graph open in front of them, tell them the live-canvas tools failed to start and that you have no way to reach the canvas until the orchestrator is restarted. Do not promise that a restart will fix it: whether it does depends on why the bind failed, and a port that is still occupied will fail the same way again.",
   ].join("\n");
 }
 

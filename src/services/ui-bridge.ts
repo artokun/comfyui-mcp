@@ -2599,11 +2599,17 @@ export class UiBridge {
    *  mirror, remote viewer) that connected and left does not count and must not be
    *  described away — hence "no ComfyUI canvas tab", never "nothing at all".
    *
-   *  That observation is a BUCKET holding at least four situations (no ComfyUI
+   *  That observation is a BUCKET holding at least five situations (no ComfyUI
    *  running, ComfyUI running without the pack loaded, the Agent tab open but never
    *  Connected — the panel attaches only on Connect, so this is the ordinary state
-   *  of a freshly opened tab — and a panel that connected to some OTHER bridge
-   *  address). It used to be narrated as one of them ("open ComfyUI with the pack
+   *  of a freshly opened tab — a panel that connected to some OTHER bridge address,
+   *  and a panel that reached THIS bridge whose handshake never completed). That
+   *  last one is easy to lose: `conns` is only populated by a valid hello, so a
+   *  token-rejected socket or one that opens and never helloes (tracked as
+   *  anonymous, see handleConnection) leaves this count at zero exactly like a
+   *  panel dialling somewhere else. Step 4 therefore offers BOTH and names the
+   *  orchestrator log as what separates them, rather than sending a user to rewrite
+   *  Bridge URL settings for a failure on the bridge they are already on. It used to be narrated as one of them ("open ComfyUI with the pack
    *  installed"), which is the #804 shape: an unobserved cause
    *  asserted from an observation that cannot separate them, sending a user who
    *  already installed the pack off to install it again. So it now states what was
@@ -2633,7 +2639,7 @@ export class UiBridge {
   noPanelGuidance(): string {
     return this.hasEverConnected()
       ? "the ComfyUI panel tab is not connected — this is almost always because ComfyUI was just restarted or the browser tab reloaded, which drops the Agent panel's socket. Ask the user to refresh (reload) the ComfyUI browser tab to reconnect the Agent panel, then retry. (The comfyui-mcp-panel pack IS installed — a tab connected earlier this session — so this is a reconnect, not an install problem.)"
-      : `no panel connected — no ComfyUI canvas tab has connected to this bridge (bound on ${this.host}:${this.port}) since it started. That is the whole of what is known here, and it does not distinguish which of the steps below is the missing one. Ask the user to check, in this order: (1) is ComfyUI open in a browser at all; (2) does its sidebar have an Agent tab — if not, that ComfyUI does not have the panel pack installed and loaded (ComfyUI-Manager lists it as comfyui-agent-panel; the install_panel tool can do it too, but only when this session has that tool AND the ComfyUI is on this machine — it is local-only and refuses in remote/cloud mode, so a remote ComfyUI has to be installed on its own host); (3) if the Agent tab is there, has a provider been picked and Connect clicked? The panel attaches on Connect, never on load, so a freshly opened tab is expected to show nothing yet; (4) if it reports itself connected and this bridge still sees no tab, it reached a different bridge than this one. The panel dials whatever is in its Settings → Advanced → Bridge URL, so compare that against what this orchestrator reported when it started: a LAN bind prints a ready-to-paste Bridge URL carrying a reachable host and the required token, a loopback run prints its ws:// address, and a secure-tunnel run prints nothing to copy because the panel is handed the address — so in that last case a hand-set Bridge URL is itself the thing to suspect.`;
+      : `no panel connected — no ComfyUI canvas tab has connected to this bridge (bound on ${this.host}:${this.port}) since it started. That is the whole of what is known here, and it does not distinguish which of the steps below is the missing one. Ask the user to check, in this order: (1) is ComfyUI open in a browser at all; (2) does its sidebar have an Agent tab — if not, that ComfyUI does not have the panel pack installed and loaded (ComfyUI-Manager lists it as comfyui-agent-panel; the install_panel tool can do it too, but only when this session has that tool AND the ComfyUI is on this machine — it is local-only and refuses in remote/cloud mode, so a remote ComfyUI has to be installed on its own host); (3) if the Agent tab is there, has a provider been picked and Connect clicked? The panel attaches on Connect, never on load, so a freshly opened tab is expected to show nothing yet; (4) if it reports itself connected and this bridge still has no tab, that splits two ways this state cannot tell apart, because a tab only appears here once a socket completes a valid hello: EITHER the panel reached some other bridge, OR it reached this one and the handshake never completed (a rejected token, or a socket that opened and never helloed — both leave this count at zero). The orchestrator log separates them: a rejected or silent socket is logged here, and nothing arriving at all means it is dialling elsewhere. For the elsewhere case the panel dials whatever is in its Settings → Advanced → Bridge URL, so compare that against what this orchestrator reported when it started — a LAN bind prints a ready-to-paste Bridge URL carrying a reachable host and the required token, a loopback run prints its ws:// address, and a secure-tunnel run prints nothing to copy because the panel is handed the address, so in that last case a hand-set Bridge URL is itself the thing to suspect.`;
   }
 
   status(): string {

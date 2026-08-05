@@ -804,7 +804,12 @@ describe("UiBridge (multi-tab)", () => {
       // wording had no room for: present, but reaching a different bridge.
       expect(msg).toMatch(/is ComfyUI open in a browser/);
       expect(msg).toMatch(/has a provider been picked and Connect clicked/);
-      expect(msg).toMatch(/reached a different bridge than this one/);
+      // Step 4 must NOT conclude "different bridge": `conns` fills only on a valid
+      // hello, so a token-rejected or never-helloed socket on THIS bridge leaves the
+      // count at zero identically. Both are offered, with the log as the separator.
+      expect(msg).toMatch(/splits two ways this state cannot tell apart/);
+      expect(msg).toMatch(/the handshake never completed/);
+      expect(msg).toMatch(/orchestrator log separates them/);
       // The mismatch remedy must point at the panel setting that can fix it, not at
       // the bind address printed here — under a 0.0.0.0 bind that is a wildcard no
       // panel can dial, and it carries no token.
