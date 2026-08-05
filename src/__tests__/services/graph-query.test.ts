@@ -143,6 +143,24 @@ describe("queryApiGraph", () => {
       expect(r.text).not.toContain("max_chars");
     });
 
+    it("a clipped-in-place row still names a remedy, and is not called a truncation", () => {
+      // One node whose compact line alone exceeds the budget. It is the PROTECTED
+      // first match, so nothing is dropped and no truncation tail fires — the reader
+      // used to get a bare "…" with nothing telling them what to raise.
+      // Compact rows cap each widget VALUE, so the way one row outgrows the whole
+      // budget is widget COUNT — the #609 case clipLine exists for.
+      const inputs: Record<string, unknown> = {};
+      for (let i = 0; i < 200; i++) inputs[`w${i}`] = `value_${i}`;
+      const G2 = { "1": { class_type: "A", inputs } };
+      const r = queryApiGraph(G2, { ids: [1], max_chars: 500 });
+      expect(r.shown).toBe(1);
+      // Rows dropped is what `truncated` means, and none were — panel-tools keys off it.
+      expect(r.truncated).toBe(false);
+      expect(r.text).toContain("was clipped in place");
+      expect(r.text).toContain("no node was dropped");
+      expect(r.text).toContain("raise max_chars");
+    });
+
     it("char-bound WITHOUT ids: names max_chars, and does not send the reader to raise limit", () => {
       const r = queryApiGraph(G, { max_chars: 500 });
       expect(r.truncated).toBe(true);

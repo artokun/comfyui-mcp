@@ -800,7 +800,13 @@ describe("UiBridge (multi-tab)", () => {
       // ...and the discriminating check, in order, ending at the case the old
       // wording had no room for: present, but reaching a different bridge.
       expect(msg).toMatch(/is ComfyUI open in a browser/);
-      expect(msg).toMatch(/different bridge address/);
+      expect(msg).toMatch(/has a provider been picked and Connect clicked/);
+      expect(msg).toMatch(/reached a different bridge than this one/);
+      // The mismatch remedy must point at the panel setting that can fix it, not at
+      // the bind address printed here — under a 0.0.0.0 bind that is a wildcard no
+      // panel can dial, and it carries no token.
+      expect(msg).toMatch(/Settings → Advanced → Bridge URL/);
+      expect(msg).not.toMatch(/COMFYUI_MCP_BRIDGE_PORT/);
     });
 
     // panel-tools.ts classifies a resolve failure as "nothing connected, defer the

@@ -364,6 +364,15 @@ export function queryApiGraph(graph: ApiGraph, opts: GraphQueryOptions = {}): Gr
   // promises the two stay in lockstep and a reader would otherwise assume the fix
   // reached both surfaces.
   let truncatedBy: "limit" | "chars" | null = null;
+  // A COMPACT/IDS row long enough to exceed the whole budget is clipped in place by
+  // clipLine. When that row is the protected first match — the ordinary "read one
+  // node with a huge widget" case — no row is DROPPED, so `truncatedBy` stays null
+  // and the reader used to get a bare "…" with nothing naming the remedy. (The
+  // `detail` projection already self-explains via fitDetailLine's
+  // `detail_omitted: "raise max_chars"` stub; this closes the same gap for the other
+  // two projections.) `truncated` deliberately stays false: it means rows were
+  // dropped, which is what panel-tools keys off, and a clipped row is not that.
+  let clippedRow = false;
   let chars = header.length;
   for (const id of matched) {
     if (shown >= limit) { truncatedBy = "limit"; break; }
@@ -409,7 +418,9 @@ export function queryApiGraph(graph: ApiGraph, opts: GraphQueryOptions = {}): Gr
       // #609: bound the compact line by widget COUNT too — the protected first line
       // bypasses the running budget, so a thousands-of-widgets node would else be
       // unbounded. Plain string ⇒ a tail ellipsis is safe.
+      const full = line;
       line = clipLine(line, maxChars);
+      if (line !== full) clippedRow = true;
     }
     const protectedLine = shown === 0; // first match always renders → shown≥1
     if (!protectedLine && chars + line.length + 1 > maxChars) { truncatedBy = "chars"; break; }
@@ -429,7 +440,9 @@ export function queryApiGraph(graph: ApiGraph, opts: GraphQueryOptions = {}): Gr
       (truncatedBy === "limit"
         ? `hit the node limit (${limit}); raise limit (max 200), or ${narrowing}.`
         : `hit the max_chars budget (${maxChars}) (per-field values are already capped); raise max_chars (max 60000), or ${narrowing}.`)
-    : "";
+    : clippedRow
+      ? `\n… a rendered row was itself longer than max_chars (${maxChars}) and was clipped in place — no node was dropped; raise max_chars (max 60000) to read it in full.`
+      : "";
   const body = fields === "ids" ? lines.join(",") : lines.join("\n");
   return {
     total, candidates: candidates.length, matched: matched.length, shown, truncated,
