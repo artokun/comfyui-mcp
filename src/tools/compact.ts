@@ -317,17 +317,25 @@ const PANEL_NAMESPACE_RE = /^(?:mcp__[A-Za-z0-9_]+__)?panel_/;
  *    with its condition rather than as a guarantee.
  */
 function panelNamespaceMessage(catalog: ToolCatalog, name: string): string {
-  // Derived, not asserted: whatever `panel_` names this catalog holds are named, so
-  // the message can never claim ownership the catalog contradicts.
+  // Derived, not asserted — and scoped to the ONE thing it is derived from.
+  //
+  // The claim is about THIS CATALOG, never about "this server", because in full mode
+  // the facade's catalog comes from a SECOND workflow discovery pass (see
+  // registerFullTools) and the two can legitimately disagree for a moment: a
+  // workflow file removed between the passes stays directly registered on the live
+  // server while being absent here. "This server serves no panel_ names" would be
+  // false in exactly that window. "This catalog holds none" is what was measured,
+  // and it is also the only thing that matters to the caller, since call_tool
+  // dispatches through this catalog and nothing else.
   const localPanelTools = [...catalog.tools.keys()].filter((n) => n.startsWith("panel_"));
   const localNote = localPanelTools.length
-    ? `This server does serve ${localPanelTools.length} name(s) under \`panel_\` — ` +
+    ? `This catalog does hold ${localPanelTools.length} name(s) under \`panel_\` — ` +
       `${localPanelTools.slice(0, 5).join(", ")}${localPanelTools.length > 5 ? ", …" : ""} ` +
       `(autoloaded workflow files take their tool name from their filename) — but '${name}' is not among them. ` +
       "The LIVE-CANVAS panel_* tools are a different thing entirely: they are served "
-    : "This server serves no `panel_` names at all: that prefix is the live-canvas surface, served ";
+    : "This catalog holds no `panel_` names at all: that prefix is the live-canvas surface, served ";
   return (
-    `Unknown tool '${name}' — no tool by that name is registered on THIS server. ` +
+    `Unknown tool '${name}' — no tool by that name is in THIS server's call_tool catalog. ` +
     localNote +
     "separately by the ComfyUI sidebar panel's own per-tab MCP server. So this answers WHICH " +
     `SURFACE you reached, and says nothing about whether '${name}' exists. This server cannot ` +

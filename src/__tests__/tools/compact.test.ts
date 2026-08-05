@@ -274,7 +274,7 @@ describe("compact mode over a real MCP client/server pair", () => {
       const text = textOf(res as never);
       // Scoped to THIS server, and explicit that it is answering a different
       // question than "does this tool exist".
-      expect(text).toMatch(/registered on THIS server/);
+      expect(text).toMatch(/in THIS server.s call_tool catalog/);
       expect(text).toMatch(/says nothing about whether 'panel_graph_outline' exists/);
       expect(text).toMatch(/ComfyUI sidebar panel's own per-tab MCP server/);
       // Refuses to pick between the two states it cannot observe, and defers to
@@ -317,7 +317,7 @@ describe("compact mode over a real MCP client/server pair", () => {
         arguments: { name: "mcp__comfyui__panel_query_graph" },
       })) as { isError?: boolean };
       expect(res.isError).toBe(true);
-      expect(textOf(res as never)).toMatch(/registered on THIS server/);
+      expect(textOf(res as never)).toMatch(/in THIS server.s call_tool catalog/);
     });
 
     it("describe_tool answers identically (one message, both entry points)", async () => {
@@ -327,7 +327,7 @@ describe("compact mode over a real MCP client/server pair", () => {
         arguments: { name: "panel_set_widget" },
       })) as { isError?: boolean };
       expect(res.isError).toBe(true);
-      expect(textOf(res as never)).toMatch(/registered on THIS server/);
+      expect(textOf(res as never)).toMatch(/in THIS server.s call_tool catalog/);
     });
 
     it("a RETIRED panel name keeps its named replacement instead", async () => {
@@ -342,7 +342,7 @@ describe("compact mode over a real MCP client/server pair", () => {
       expect(res.isError).toBe(true);
       const text = textOf(res as never);
       expect(text).toContain("panel_query_graph");
-      expect(text).not.toMatch(/registered on THIS server/);
+      expect(text).not.toMatch(/in THIS server.s call_tool catalog/);
     });
 
     it("never shadows a real same-server tool that happens to start with panel_", async () => {
@@ -386,10 +386,10 @@ describe("compact mode over a real MCP client/server pair", () => {
         arguments: { name: "panel_typo" },
       })) as { isError?: boolean };
       const otherText = textOf(other as never);
-      expect(otherText).toContain("This server does serve 1 name(s) under `panel_`");
+      expect(otherText).toContain("This catalog does hold 1 name(s) under `panel_`");
       expect(otherText).toContain("panel_custom");
       expect(otherText).toContain("'panel_typo' is not among them");
-      expect(otherText).not.toMatch(/serves no `panel_` names at all/);
+      expect(otherText).not.toMatch(/holds no `panel_` names at all/);
     });
 
     it("says it serves no panel_ names only when the catalog really has none", async () => {
@@ -398,7 +398,7 @@ describe("compact mode over a real MCP client/server pair", () => {
         name: "call_tool",
         arguments: { name: "panel_graph_outline" },
       })) as { isError?: boolean };
-      expect(textOf(res as never)).toContain("This server serves no `panel_` names at all");
+      expect(textOf(res as never)).toContain("This catalog holds no `panel_` names at all");
     });
 
     it("leaves a non-panel unknown name on the fuzzy path", async () => {
@@ -409,7 +409,7 @@ describe("compact mode over a real MCP client/server pair", () => {
       })) as { isError?: boolean };
       const text = textOf(res as never);
       expect(text).toContain("Did you mean");
-      expect(text).not.toMatch(/registered on THIS server/);
+      expect(text).not.toMatch(/in THIS server.s call_tool catalog/);
     });
   });
 
