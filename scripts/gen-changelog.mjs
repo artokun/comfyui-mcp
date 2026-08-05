@@ -102,12 +102,21 @@ function parseCommits(range) {
   for (const subject of raw.split("\n")) {
     if (isReleaseSubject(subject)) continue; // release commits describe themselves
     const m = subject.match(/^(\w+)(?:\(([^)]+)\))?(!)?:\s*(.+)$/);
-    // Read the PR number from the DESCRIPTION when the subject is conventional, and only
-    // from the whole subject otherwise. `fix(#809): … (#818)` puts an ISSUE number in the
-    // scope and the PR number at the end; scanning the whole subject would take #809 and
-    // mis-attribute the entry — and, worse, break the dedupe against hand-written
-    // highlights, which is keyed on the PR number.
-    const prIn = (s) => (s.match(/\(#(\d+)\)/) || [])[1] || null;
+    // The LAST `(#N)`, not the first: GitHub appends the PR reference at the end of a
+    // squash subject, so anything earlier is an ISSUE the author cited. Both shapes occur —
+    // `fix(#809): … (#818)` puts the issue in the SCOPE, and
+    // `test: … (#852) (#853)` puts it INLINE — and taking the first match attributes the
+    // entry to the issue. (Reading only the description fixes the first shape and not the
+    // second, which is why this reads positionally rather than by field.)
+    //
+    // Beyond a wrong link, this breaks the dedupe against hand-written highlights, which is
+    // keyed on the PR number — so a hand-written entry would be DUPLICATED by the
+    // auto-generated one instead of suppressed. That is the same class of failure as the
+    // silent drop this file was just fixed for, in the opposite direction.
+    const prIn = (s) => {
+      const all = [...s.matchAll(/\(#(\d+)\)/g)];
+      return all.length ? all[all.length - 1][1] : null;
+    };
     if (!m) {
       // Non-conventional. Keep it if it names a PR; otherwise it is a local commit
       // that a squash will have superseded, and dropping it is right.
