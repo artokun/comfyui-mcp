@@ -335,11 +335,24 @@ function highestRequirement(candidates: readonly (string | undefined)[]): string
  * running the panel from source rather than the Registry.
  */
 export interface PanelVersionReading {
-  /** Verbatim (trimmed) text the handshake carried. EVIDENCE, never a version. */
+  /** Verbatim (trimmed) text THIS handshake carried. EVIDENCE, never a version. */
   raw?: string;
   /** Set ONLY when `raw` is a strict SemVer — the sole form that may be compared,
    *  or quoted to a user as this panel's version. */
   version?: string;
+  /**
+   * A PREVIOUS connection's text, when THIS handshake carried none.
+   *
+   * `Conn.panelVersion` is inherited across a reconnect that omits the field, so
+   * a raw read of it silently attributes an old observation to the current
+   * connection. Provenance therefore travels with the reading, exactly as
+   * parseability does — and for the same reason: the screen has to live
+   * somewhere a consumer cannot forget it. It is never a `.version`: it was not
+   * observed here, so it may not be compared or stated as this panel's version.
+   * It is still disclosed, because it is a real earlier reading and discarding
+   * it would be its own way of losing evidence.
+   */
+  inherited?: string;
 }
 
 /** Screen a handshake `panel_version` into a reading. Blank and unparseable both
@@ -349,6 +362,27 @@ export function readPanelVersion(raw: string | undefined): PanelVersionReading {
   const trimmed = typeof raw === "string" ? raw.trim() : "";
   if (!trimmed) return {};
   return SEMVER_RE.test(trimmed) ? { raw: trimmed, version: trimmed } : { raw: trimmed };
+}
+
+/**
+ * What THIS connection observed about the panel's version — the single answer
+ * every consumer must use.
+ *
+ * There were three consumers reading `conn.panelVersion` and they disagreed:
+ * the workflow fence checked `panelVersionAdvertised`, the proactive gate
+ * checked it, and the reactive unknown-command rewrite did not — so a re-hello
+ * that omitted the field could still produce "detected panel 0.4.5 … too old"
+ * about a connection that observed no version at all. Routing all of them
+ * through here makes provenance a property of the reading rather than something
+ * each call site has to remember.
+ */
+export function connPanelVersionReading(conn: {
+  panelVersion?: string;
+  panelVersionAdvertised?: boolean;
+}): PanelVersionReading {
+  if (conn.panelVersionAdvertised) return readPanelVersion(conn.panelVersion);
+  const carried = typeof conn.panelVersion === "string" ? conn.panelVersion.trim() : "";
+  return carried ? { inherited: carried } : {};
 }
 
 /**
@@ -602,9 +636,15 @@ function buildPanelTooOldError(
         // git-installed pack — and it used to render as "detected panel nightly",
         // a version-shaped claim about something never parsed.
         ` (this panel reports "${reading.raw}", which is not a comparable version${mcpTail})`
-      : mcpVersion
-        ? ` (detected mcp ${mcpVersion})`
-        : "";
+      : reading.inherited
+        ? // Observed by an EARLIER connection, not this one. Disclosed, because
+          // it is real, and labelled, because attributing it to this handshake
+          // would be a claim nothing here supports.
+          ` (this connection advertised no panel version; an earlier connection for this tab ` +
+          `reported ${reading.inherited}, which may be out of date${mcpTail})`
+        : mcpVersion
+          ? ` (detected mcp ${mcpVersion})`
+          : "";
   const min = BRIDGE_CMD_MIN_PANEL_VERSION[cmd];
   // "TOO OLD" IS AN AGE VERDICT, and it may only be reached from an age
   // OBSERVATION: a version that parsed AND compares below the command's known
@@ -688,7 +728,9 @@ export function isUnknownCommandReply(error: string): boolean {
 
 export function makeUnknownCommandError(
   error: string,
-  panelVersion?: string,
+  /** A raw handshake string (callers with nothing else) or, preferably, an
+   *  already-screened reading carrying parseability AND provenance. */
+  panelVersion?: string | PanelVersionReading,
   mcpVersion?: string,
 ): Error | null {
   // Match the panel's exact shape: `Unknown command "graph_query"` (quotes
@@ -705,12 +747,24 @@ export function makeUnknownCommandError(
   // or a transient), so do NOT rewrite it into a bogus "update your panel" verdict
   // (which would also POISON the #236 unsupported-cmd gate against a capable panel).
   // Return null so the raw error surfaces and the gate is never poisoned.
-  if (panelSupportsCmd(cmd, panelVersion)) return null;
-  // The raw handshake string ends here: everything downstream sees a screened
-  // reading, so an unparseable value cannot be rendered as a version or read as
-  // an age (see PanelVersionReading — this consumer used to build its own view
-  // from the raw field and did both).
-  return buildPanelTooOldError(cmd, readPanelVersion(panelVersion), mcpVersion);
+  const reading =
+    typeof panelVersion === "object" && panelVersion !== null
+      ? panelVersion
+      : readPanelVersion(panelVersion);
+  // TWO DIFFERENT QUESTIONS, deliberately given different inputs.
+  //
+  // The #352 VETO asks "might this rewrite be bogus?", and its fail-safe answer
+  // is to suppress: surface the raw error and do not poison the #236 learned
+  // gate. An inherited version is weak evidence, but it is evidence, and being
+  // conservative here costs only a less-friendly message — so it keeps the value
+  // this call site has always given it, and the gate's behaviour is unchanged.
+  if (panelSupportsCmd(cmd, reading.version ?? reading.inherited)) return null;
+  // The MESSAGE asks "what did we observe?", and may only state what THIS
+  // connection saw. The raw handshake string ends here: everything downstream
+  // sees a screened reading, so an unparseable value cannot be rendered as a
+  // version, and an inherited one cannot be attributed to this connection (both
+  // of which this consumer used to do — it built its own view of the raw field).
+  return buildPanelTooOldError(cmd, reading, mcpVersion);
 }
 
 /**
@@ -2776,7 +2830,7 @@ export class UiBridge {
     // on THIS connection (in dispatch()'s rejectMapped below), never inferred from
     // panelVersion alone.
     if (conn.unsupportedCmds.has(cmd.cmd)) {
-      return Promise.reject(buildPanelTooOldError(cmd.cmd, readPanelVersion(conn.panelVersion)));
+      return Promise.reject(buildPanelTooOldError(cmd.cmd, connPanelVersionReading(conn)));
     }
     // #392 — PROACTIVELY gate a command whose changelog-verified minimum the panel's
     // ADVERTISED version parseably undercuts (e.g. graph_query on a <0.7.0 panel), so
@@ -2798,7 +2852,7 @@ export class UiBridge {
       !conn.provenSupportedCmds.has(cmd.cmd) &&
       panelVersionProvesUnsupported(cmd.cmd, conn.panelVersion)
     ) {
-      return Promise.reject(buildPanelTooOldError(cmd.cmd, readPanelVersion(conn.panelVersion)));
+      return Promise.reject(buildPanelTooOldError(cmd.cmd, connPanelVersionReading(conn)));
     }
     // #570 P0c — FAIL CLOSED for a command that mutates the ACTIVE workflow/canvas (every
     // graph_* mutator, plus path-less workflow_save/save_as/rename/close) when the resolved
@@ -2878,13 +2932,11 @@ export class UiBridge {
         // path — including into `resolveStaleBundleSkew`, which then reasons
         // from "no comparable version" instead of silently rejecting a value it
         // would have screened out one line later anyway.
-        // Screened through the SAME helper as the reactive path, so the two
-        // cannot drift: `.version` is comparable and attributable, `.raw` is
-        // evidence. Only an ADVERTISED reading counts — an inherited value is
-        // not this handshake's observation (see below).
-        const reading = conn.panelVersionAdvertised
-          ? readPanelVersion(conn.panelVersion)
-          : {};
+        // The SAME reading every other consumer uses, so parseability AND
+        // provenance are decided once: `.version` is comparable and
+        // attributable, `.raw` is this handshake's unparseable text, `.inherited`
+        // is an earlier connection's.
+        const reading = connPanelVersionReading(conn);
         const rawAdvertised = reading.raw;
         const advertised = reading.version;
         const recovery = describePanelUpdateRecovery(
@@ -2910,9 +2962,9 @@ export class UiBridge {
               `this tab advertised "${rawAdvertised}", which is not a version this MCP can ` +
               `compare (ComfyUI-Manager reports "nightly" for a git-installed pack), ` +
               `${NOT_OBSERVED}`
-            : conn.panelVersion
+            : reading.inherited
               ? `this tab advertised NO panel version in its current handshake (an EARLIER ` +
-                `connection for this tab reported ${conn.panelVersion}, which may be out of ` +
+                `connection for this tab reported ${reading.inherited}, which may be out of ` +
                 `date), ${NOT_OBSERVED}`
               : `this tab advertised NO panel version, ${NOT_OBSERVED}`;
         // The FENCE's own minimum, never the aggregate requiredPanelVersion():
@@ -3022,7 +3074,7 @@ export class UiBridge {
     // reply-error path only; the happy path and genuine command errors are
     // passed through untouched.
     const rejectMapped = (err: Error) => {
-      const friendly = makeUnknownCommandError(err.message, conn.panelVersion);
+      const friendly = makeUnknownCommandError(err.message, connPanelVersionReading(conn));
       // Apply the learned verdict to the LIVE connection — following a same-socket
       // migration whose reply landed after the tmp:→wf: id change — so neither the
       // reactive #236 unsupported gate NOR the #422 proven veto is stranded on a

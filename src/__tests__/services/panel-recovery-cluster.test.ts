@@ -386,7 +386,7 @@ describe("recovery guidance depends on the session, not on a hardcoded string", 
     // the panel can have an empty custom_nodes. `git -C <dir> pull` and
     // `mv <dir> …` both fail in that state, which left cases (1) and (2) as no
     // instruction at all. A plain clone is the command that moves them.
-    expect(text).toMatch(/NOT PRESENT/);
+    expect(text).toMatch(/NEITHER/);
     expect(text).toMatch(
       new RegExp(`git clone --depth 1 ${PANEL_REPO_URL.replace(/[.]/g, "\\.")} comfyui-agent-panel`),
     );
@@ -447,6 +447,28 @@ describe("disk-current but handshake-old is diagnosed as a stale tab, not a stal
     // Crucially it does not send them round the loop again.
     expect(text).not.toMatch(/Run install_panel\(action:'update'\)/);
     expect(text).not.toContain(PANEL_REPO_URL);
+  });
+
+  it("the manual instructions recognise BOTH accepted panel directory names", async () => {
+    // A plain `git clone` of the repo lands in comfyui-mcp-panel; the Registry
+    // installs comfyui-agent-panel. The installer accepts both. Guidance that
+    // judged "not present" by the Registry name alone told a repo-checkout user
+    // to clone a SECOND serving copy into custom_nodes — manufacturing the
+    // two-panels-racing state (#641) that the same paragraph warns about.
+    const { FAST_PATH_DIRS } = await import("../../services/panel-installer.js");
+    const { PANEL_DIR_NAMES, manualPanelUpdateCommands } = await import(
+      "../../services/panel-recovery.js"
+    );
+    expect([...PANEL_DIR_NAMES].sort()).toEqual([...FAST_PATH_DIRS].sort());
+
+    const text = manualPanelUpdateCommands("/home/u/ComfyUI");
+    for (const dir of FAST_PATH_DIRS) expect(text).toContain(dir);
+    // The absent-case is gated on BOTH being missing, and the danger of running
+    // it otherwise is stated rather than left to be discovered.
+    expect(text).toMatch(/NEITHER .* is present/);
+    expect(text).toMatch(/Do NOT run case \(3\) while one of them exists under the other name/);
+    // The in-place cases no longer hardcode one name.
+    expect(text).toMatch(/git -C <panel-dir> pull --ff-only/);
   });
 
   it("handles the 'version unknown' handshake from #784 WITHOUT asserting the cause", () => {

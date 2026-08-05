@@ -43,8 +43,28 @@ import { lastPanelBaseResolution, panelBaseSync } from "./panel-workspace.js";
 /** Upstream source of truth for the panel pack — the manual-recovery clone URL. */
 export const PANEL_REPO_URL = "https://github.com/artokun/comfyui-mcp-panel.git";
 
-/** Canonical custom_nodes directory name for the panel pack. */
+/** Canonical custom_nodes directory name for the panel pack (the Registry name). */
 export const PANEL_DIR_NAME = "comfyui-agent-panel";
+
+/**
+ * The OTHER directory name that is the same panel: a plain `git clone` of the
+ * repo lands in `comfyui-mcp-panel`, and the installer accepts both (see
+ * panel-installer's FAST_PATH_DIRS).
+ *
+ * This matters here and not only there. The manual recovery tells a user to
+ * clone the pack when it is "NOT PRESENT" — and if "present" is judged by the
+ * Registry name alone, someone with a perfectly good repo checkout is told to
+ * clone a SECOND copy alongside it. ComfyUI serves every directory under
+ * custom_nodes, so that produces exactly the ambiguous two-panels state the rest
+ * of this text exists to warn about (#641), and later panel management then
+ * correctly refuses to act on the duplicate. Guidance that manufactures the
+ * failure it warns about is worse than no guidance.
+ *
+ * `panel-recovery-cluster.test.ts` asserts this list matches the installer's, so
+ * the two cannot drift (kept as a separate constant rather than an import
+ * because panel-installer imports THIS module).
+ */
+export const PANEL_DIR_NAMES: readonly string[] = [PANEL_DIR_NAME, "comfyui-mcp-panel"];
 
 /** Why install_panel provably cannot perform the update in this session. */
 export type PanelRecoveryBlocker =
@@ -185,22 +205,28 @@ function blockerPhrase(blocker: PanelRecoveryBlocker | undefined): string {
  */
 export function manualPanelUpdateCommands(comfyuiPath?: string): string {
   const root = comfyuiPath ?? "<ComfyUI>";
+  const either = PANEL_DIR_NAMES.join(" or ");
   return (
-    `cd "${root}/custom_nodes", then run the ONE case that matches what is there. ` +
-    `(1) ${PANEL_DIR_NAME} is a git checkout — fast-forward it: ` +
-    `git -C ${PANEL_DIR_NAME} pull --ff-only. ` +
-    `(2) ${PANEL_DIR_NAME} exists but has NO .git (a Comfy Registry zip install, so there ` +
-    `is nothing to pull) — replace it: ` +
+    `cd "${root}/custom_nodes". The panel pack is whichever of ${either} you have — ` +
+    `BOTH are the same pack (the Registry installs the first, a plain git clone of the repo ` +
+    `lands in the second), so check for both before deciding, and call the one you find ` +
+    `<panel-dir>. Then run the ONE case that matches. ` +
+    `(1) <panel-dir> exists and is a git checkout — fast-forward it: ` +
+    `git -C <panel-dir> pull --ff-only. ` +
+    `(2) <panel-dir> exists but has NO .git (a Comfy Registry zip install, so there ` +
+    `is nothing to pull) — replace it IN PLACE, keeping its name: ` +
     `git clone --depth 1 ${PANEL_REPO_URL} ../.agent-panel-new && ` +
     `mkdir -p ../custom_nodes_backup && ` +
-    `mv ${PANEL_DIR_NAME} ../custom_nodes_backup/ && ` +
-    `mv ../.agent-panel-new ${PANEL_DIR_NAME}. ` +
-    `(3) ${PANEL_DIR_NAME} is NOT PRESENT — a stale ComfyUI-Manager 3.x reports its queue ` +
+    `mv <panel-dir> ../custom_nodes_backup/ && ` +
+    `mv ../.agent-panel-new <panel-dir>. ` +
+    `(3) NEITHER ${either} is present — a stale ComfyUI-Manager 3.x reports its queue ` +
     `drained without creating the pack (#819), so "already installed" can mean an empty ` +
     `custom_nodes; install it outright: ` +
     `git clone --depth 1 ${PANEL_REPO_URL} ${PANEL_DIR_NAME}. ` +
-    `In case (2), keep the old copy OUT of custom_nodes — ComfyUI serves every directory ` +
-    `in there, so a leftover copy would shadow the new panel in the browser`
+    `Do NOT run case (3) while one of them exists under the other name — ComfyUI serves ` +
+    `every directory in custom_nodes, so a second copy would leave two panels racing to ` +
+    `register and the browser loading whichever sorts first (#641). For the same reason, in ` +
+    `case (2) keep the old copy OUT of custom_nodes`
   );
 }
 

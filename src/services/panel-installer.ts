@@ -86,7 +86,10 @@ export const PANEL_VERSION = "nightly";
  * "comfyui-agent-panel" — so check both quickly, then fall back to a full scan.
  * The pyproject `name == comfyui-agent-panel` match is always authoritative.
  */
-const FAST_PATH_DIRS = ["comfyui-mcp-panel", "comfyui-agent-panel"];
+// Exported so panel-recovery's manual instructions can be pinned to the SAME
+// accepted names in a test: guidance that judged "present" by only one of them
+// told a repo-checkout user to clone a second serving copy (#641 in miniature).
+export const FAST_PATH_DIRS = ["comfyui-mcp-panel", "comfyui-agent-panel"];
 
 /** Hard cap so the on-load ensure can never block startup. */
 const ENSURE_TIMEOUT_MS = 20_000;

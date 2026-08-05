@@ -2537,6 +2537,49 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
     }
   });
 
+  it("#819: an INHERITED version is not attributed to this tab by the REACTIVE path either", async () => {
+    // The provenance screen had been applied to the write-refusal path only. The
+    // reactive Unknown-command rewrite built its own view from the same raw
+    // field, so a re-hello that omitted panel_version could still produce
+    // "detected panel 0.4.5 … too old" about a connection that observed no
+    // version at all — the same defect as the fence path, one door over.
+    const sock = new WebSocket(`ws://127.0.0.1:${port}`);
+    await new Promise<void>((res, rej) => {
+      sock.on("open", () => {
+        sock.send(
+          JSON.stringify({ type: "hello", tab_id: "tmp:inherit-reactive", title: "w", panel_version: "0.4.5" }),
+        );
+        res();
+      });
+      sock.on("error", rej);
+    });
+    await vi.waitFor(() =>
+      expect(bridge.tabs().some((t) => t.tab_id === "tmp:inherit-reactive")).toBe(true),
+    );
+    // Re-hello WITHOUT a version: 0.4.5 is inherited for messaging only.
+    sock.send(JSON.stringify({ type: "hello", tab_id: "tmp:inherit-reactive", title: "w" }));
+    await new Promise((r) => setTimeout(r, 25));
+    // The panel answers an ALLOWED (inert) command with the dispatcher's own
+    // Unknown-command reply — the reactive rewrite path.
+    sock.on("message", (buf) => {
+      const m = JSON.parse(buf.toString());
+      if (m.rid && m.cmd) {
+        sock.send(JSON.stringify({ rid: m.rid, ok: false, error: `Unknown command "${m.cmd}"` }));
+      }
+    });
+    const err = await bridge
+      .send({ cmd: "graph_outline" } as never, { tabId: "tmp:inherit-reactive" })
+      .then(() => null)
+      .catch((e: Error) => e);
+    const msg = (err as Error).message;
+    expect(msg).not.toContain("detected panel 0.4.5");
+    expect(msg.toLowerCase()).not.toContain("too old"); // no age verdict from an unobserved version
+    expect(msg).toMatch(/does not implement "graph_outline"/);
+    expect(msg).toMatch(/this connection advertised no panel version/);
+    expect(msg).toMatch(/an earlier connection for this tab reported 0\.4\.5, which may be out of date/);
+    sock.close();
+  });
+
   it("an UNCLASSIFIED graph command routed through the bridge is fenced AND recorded", async () => {
     // Layer 3, exercised through the DISPATCH PATH rather than by calling the
     // classifier directly — the gap the independent gate flagged in the earlier
