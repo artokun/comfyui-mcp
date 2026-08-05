@@ -677,43 +677,6 @@ per-harness setup, troubleshooting:
 | `setup <agent>` | | | Write the comfyui entry into hermes / openclaw / copilot config, then exit |
 | `--full` / `--tool-mode full` | `COMFYUI_MCP_TOOL_MODE=full` | `compact` | Opt into the full ~200-schema surface; the default compact mode registers 3 meta-tools instead |
 
-### Other agents & local LLMs (Hermes, OpenClaw, Copilot CLI, Ollama)
-
-comfyui-mcp has **first-class support for non-Claude harnesses**. One command
-writes the server entry into the harness's own config (merging, not
-clobbering):
-
-```bash
-npx -y comfyui-mcp setup hermes     # → ~/.hermes/config.yaml      (compact by default)
-npx -y comfyui-mcp setup openclaw   # → ~/.openclaw/openclaw.json  (compact by default)
-npx -y comfyui-mcp setup copilot    # → ~/.copilot/mcp-config.json (full by default)
-# flags: --compact | --full, --comfyui-url <url>, --dry-run
-```
-
-**Model requirements**: tool calling is a hard requirement (no tool calling =
-doesn't work). Thinking and vision are strongly recommended — without
-thinking, multi-step tool chains degrade; without vision the agent can
-generate but can't see its own outputs.
-
-**Compact tool mode is the default**: the server registers 3 meta-tools
-(`list_tools` → `describe_tool` → `call_tool`) instead of the full ~200-schema
-surface (~200 KB / ~50k tokens per `tools/list`), pulling schemas into context
-one tool at a time. Frontier-model harnesses opt back into the full surface
-with `--full` / `COMFYUI_MCP_TOOL_MODE=full`. **Run it locally
-for free with our fine-tuned models**: `ollama pull artokun/gemma4-comfyui-mcp:e4b`
-(also `:e2b` for ~2 GB VRAM, `:12b` for ~8 GB) — Gemma 4 QLoRA-trained on 1,055
-server-verified trajectories over the full comfyui-mcp tool surface, and the
-panel's Ollama default. Stock `gemma4:*`/`qwen3:4b` also validated end-to-end
-(`npm run test:local-llm`); gemma3 has no native tool calling and is
-unsupported. Full guide — hosted-model guidance (DeepSeek/MiMo/GLM class),
-per-harness setup, troubleshooting:
-**[Local LLMs & other agents](https://comfyui-mcp.artokun.io/docs/local-llms)**.
-
-| Flag | Env | Default | Description |
-|------|-----|---------|-------------|
-| `setup <agent>` | | | Write the comfyui entry into hermes / openclaw / copilot config, then exit |
-| `--full` / `--tool-mode full` | `COMFYUI_MCP_TOOL_MODE=full` | `compact` | Opt into the full ~200-schema surface; the default compact mode registers 3 meta-tools instead |
-
 ### Remote ComfyUI
 
 Point the server at a ComfyUI running anywhere — no local install required:
