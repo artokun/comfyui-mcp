@@ -166,6 +166,19 @@ docker run --rm -p 9100:9100 -e COMFYUI_MCP_HTTP_TOKEN=changeme comfyui-mcp \
 
 stdio mode (the default, what MCP clients use) needs none of this.
 
+## The agent never calls a tool — no error, it just talks
+
+It describes your workflow instead of reading it, or offers to write a script.
+There is no error because nothing failed: either the tools never reached your
+client, or your client is stopping the calls, or the capability exists under a
+name that never came up. Those three look identical from the outside and have
+opposite fixes, so guessing is worse than checking.
+
+Two questions to your agent tell them apart —
+see [When it says nothing](./using-tools#when-it-says-nothing). Note that a
+client-side permission block never reaches this server, so nothing in the logs
+below will show it.
+
 ## Local models: tool calls fail or the model "can't see" tools
 
 - **First move: use [our fine-tuned model](./local-llms#our-fine-tuned-local-models-free-recommended)** —

@@ -2220,12 +2220,26 @@ export class UiBridge {
    *  resolution refusal so every "no tab" surface says the same true, actionable
    *  thing. Once a tab has connected, the pack is installed and the tab just
    *  disconnected — point the user at refreshing the ComfyUI browser tab (the ONLY
-   *  thing that reliably restores the binding after a restart, per #436). Only when
-   *  nothing has EVER connected do we suggest the pack may be missing. */
+   *  thing that reliably restores the binding after a restart, per #436).
+   *
+   *  The never-connected branch is the one that has to be careful. All this bridge
+   *  observed is "nothing has helloed me since I bound my port" — a BUCKET holding
+   *  at least three different situations (no ComfyUI running, ComfyUI running
+   *  without the pack, pack installed and talking to some OTHER bridge address).
+   *  It used to be narrated as one of them ("open ComfyUI with the pack installed"),
+   *  which is the #804 shape: an unobserved cause asserted from an observation that
+   *  cannot separate them, sending a user who already installed the pack off to
+   *  install it again. So it now states what was observed, says plainly that the
+   *  observation does not discriminate, and gives an ORDERED check whose steps do.
+   *
+   *  The remedies are phrased as things the USER does rather than tools the agent
+   *  calls, because this string is read by agents with very different tool sets
+   *  (#784: guidance naming install_panel reached a session that did not have it),
+   *  so the one tool named here is named conditionally. */
   noPanelGuidance(): string {
     return this.hasEverConnected()
       ? "the ComfyUI panel tab is not connected — this is almost always because ComfyUI was just restarted or the browser tab reloaded, which drops the Agent panel's socket. Ask the user to refresh (reload) the ComfyUI browser tab to reconnect the Agent panel, then retry. (The comfyui-mcp-panel pack IS installed — a tab connected earlier this session — so this is a reconnect, not an install problem.)"
-      : "no panel connected — open ComfyUI with the comfyui-mcp-panel pack installed and check the Agent sidebar tab";
+      : `no panel connected — nothing has connected to this bridge (ws://${this.host}:${this.port}) since it started, which on its own does not distinguish a missing panel from an installed one that is pointing at a different address. Ask the user to check, in this order: (1) is ComfyUI open in a browser at all; (2) is the comfyui-mcp-panel pack installed on that ComfyUI — the Agent tab in its sidebar is the proof, and no Agent tab means no pack (ComfyUI Manager lists it as comfyui-mcp; the install_panel tool also installs it, when this session has that tool); (3) if the Agent tab is there and still shows nothing connected, it reached a different bridge address than this one.`;
   }
 
   status(): string {

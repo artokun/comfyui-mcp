@@ -783,6 +783,22 @@ describe("UiBridge (multi-tab)", () => {
       expect(msg).not.toMatch(/refresh/i);
     });
 
+    // #804: the zero-tab-ever state is a BUCKET (no ComfyUI / no pack / pack
+    // pointing at another bridge). Naming one of them as the cause is what sent a
+    // user who had already installed the pack back to install it again, so the
+    // message must say what it observed, say that the observation does not
+    // separate the cases, and give the check that does.
+    it("never-connected states what was observed and does not assert a cause", () => {
+      const msg = bridge.status();
+      // The observation, scoped to this bridge — not a claim about the install.
+      expect(msg).toMatch(/nothing has connected to this bridge/);
+      expect(msg).toMatch(/does not distinguish/);
+      // ...and the discriminating check, in order, ending at the case the old
+      // wording had no room for: installed, but reaching a different bridge.
+      expect(msg).toMatch(/is ComfyUI open in a browser/);
+      expect(msg).toMatch(/different bridge address/);
+    });
+
     it("after a tab connected then dropped, tells the user to refresh the browser tab (not install)", async () => {
       const a = await connectPanel("wf:workflows/x.json", "x");
       await vi.waitFor(() => expect(bridge.tabs()).toHaveLength(1));

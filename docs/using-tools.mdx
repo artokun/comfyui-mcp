@@ -139,6 +139,60 @@ You should not notice any of this. You never typed the old name either; you said
   anything.
 </Note>
 
+## Asking for something different
+
+Every tool page lists parameters — `max_chars`, `limit`, `depth`, `fields`. It is a fair question where you are supposed to type them, and the honest answer is: nowhere. There is no settings box for `max_chars`, because it is not a setting. It is an argument the **agent** fills in, freshly, each time it calls the tool.
+
+That does not leave you out of it. It changes what the control looks like:
+
+<Note>
+  You don't set a parameter. You ask for one — in the same sentence you were
+  going to write anyway.
+</Note>
+
+### Two ways to ask
+
+Both work. They fail differently, which is the only reason to know both.
+
+| | Sounds like | Reach for it when |
+| --- | --- | --- |
+| **Plain** | "Read node 42 in detail — just that node, not the whole graph." | Always start here. It is what people actually type, and it usually works. |
+| **Explicit** | "Use `panel_query_graph` with `ids` [42] and `max_chars` 20000." | The model already got it wrong once and you want to leave it no room. |
+
+Naming the tool and the argument is not the *correct* form — it is the *forceful* form. Keep it for the retry.
+
+### When the answer gets cut off
+
+Long reads are capped so that one enormous graph cannot swallow the whole conversation. When a read is trimmed you get a note saying so, and that note names the argument to raise. The agent is supposed to notice and retry by itself. When it doesn't, you are the fallback, and this is the sentence:
+
+> That got truncated — retry the same query with `max_chars` 60000.
+
+### Where the walls are
+
+These are the numbers for the two tools that read a graph on a budget — `panel_query_graph` (the live canvas) and `query_workflow` (a saved file):
+
+| Argument | Default | Most you can ask for |
+| --- | --- | --- |
+| `max_chars` | 12000 | 60000 |
+| `limit` (nodes listed) | 40 | 200 |
+
+Asking beyond a ceiling is rejected as an invalid argument rather than quietly rounded down, so the agent finds out immediately and can correct itself. Those two numbers are not universal: several other tools take a `max_chars` and set their own ceiling, stated in that tool's own description.
+
+### Scope beats budget
+
+Raising the ceiling is the second thing to try, not the first. On a 600-node workflow, a bigger budget mostly buys you more of the wrong nodes, and burying the answer among hundreds of irrelevant ones degrades the reply even when it technically fits.
+
+Narrow first, in whatever words are natural:
+
+| You say | What it narrows to |
+| --- | --- |
+| "Just look at nodes 42 and 43." | those ids only |
+| "What feeds into the sampler?" | the upstream side of one node |
+| "…only two hops back." | a bounded distance from there |
+| "How many of each node type are in here?" | counts instead of a listing |
+
+Then, if it is still cut off, widen.
+
 ## When it says no
 
 A tool refusing is not usually a bug. Most refusals are a guard that fired because the call would have done something you did not ask for.
@@ -189,6 +243,95 @@ Different problem, similar-looking message. This means the outside agent cannot 
 - The panel is not installed yet. See [the panel guide](/panel).
 
 The message itself will tell you which — it distinguishes "never connected" from "connected earlier and dropped", and the second one is always just a reload.
+
+## When it says nothing
+
+The harder failure is the one with no error in it at all. The agent does not call a tool, does not refuse, does not complain. It just talks: it describes what your workflow probably contains, or offers to write you a script. It sounds helpful, and it never looked at anything.
+
+Three completely different situations produce that same behaviour, and from where you are sitting they are indistinguishable:
+
+<CardGroup cols={3}>
+  <Card title="Absent" icon="circle-minus">
+    Your client never got the tools. They are not in the list it hands the model,
+    so there is nothing to call.
+  </Card>
+  <Card title="Blocked" icon="hand">
+    Your client has the tools and will not let the model run them. The call is
+    stopped inside your client.
+  </Card>
+  <Card title="Not asked for" icon="eye-slash">
+    Everything works. The thing you wanted exists under a name that never came up,
+    so nobody reached for it.
+  </Card>
+</CardGroup>
+
+The remedies point in three different directions, and two of them are actively harmful if you guess wrong: reinstalling what is already installed, or loosening permissions that were never the problem. So the first move is not to fix anything. It is to find out which one you are in.
+
+### Two questions that separate them
+
+Ask the agent, in plain words:
+
+<Steps>
+  <Step title="Ask what it can see">
+    > What tools do you have from comfyui-mcp? Just list the names.
+
+    **Three names** — `list_tools`, `describe_tool`, `call_tool` — is normal and
+    healthy. That is [compact mode](#if-you-run-a-small-local-model), the default:
+    the rest of the catalogue is one `list_tools` call away, so ask it to run that
+    and you will see the real list. A long list is equally fine; that is the same
+    surface with nothing held back.
+
+    **No names at all**, or "I don't have any tools for ComfyUI", points at
+    **absent** — a client-side configuration problem, not a panel or server one.
+  </Step>
+  <Step title="Ask it to try, and to report back verbatim">
+    > Now call the one you'd use for the thing that isn't working, and paste
+    > exactly what comes back — including any error. Don't work around it.
+
+    Two details in that sentence are doing the work.
+
+    **The tool you'd use for the thing that isn't working**, specifically. Permission
+    rules are usually written per tool, so a different tool succeeding proves nothing
+    about the one you care about — that is precisely how a block hides. If the canvas
+    is what is not being read, the test has to be a canvas read.
+
+    **Don't work around it.** The whole failure mode is an agent quietly routing
+    around an obstacle instead of naming it, and left to itself it will do that again.
+
+    - **A real result** — that tool works. You are in the third case.
+    - **"I don't have that tool"** — **absent**.
+    - **"That was denied" / "not permitted" / "I need permission"** — **blocked**,
+      inside your client.
+    - **More prose, still no call** — ask flatly: *"Did you call a tool? If not, why
+      not?"* An agent that dodges twice is usually working around something it has
+      not mentioned.
+  </Step>
+</Steps>
+
+### What we can see from here, and what we cannot
+
+<Warning>
+  When your client refuses a tool call, that call never leaves your client. Nothing
+  reaches this server, so nothing appears in its log and no error is produced
+  anywhere we can reach. We cannot detect a block, and we will not pretend to: any
+  page or message claiming to tell you "your client blocked this" would be guessing.
+</Warning>
+
+The same fact cuts the other way, and it is the part that misleads people: a quiet log is not evidence that nothing was attempted. Absent, blocked, and never-asked-for all look like silence from here.
+
+Which is why the two questions above are the real diagnostic. They work because they ask the one participant who *was* in the room — your agent — to say what it tried, and refuse it the option of routing around the answer.
+
+### Where each answer usually comes from
+
+**Blocked — your client's own permission rules.** In Claude Code that is the `permissions` block of `settings.json` (`~/.claude/settings.json`, or the project's `.claude/settings.json`); MCP tools appear there under their namespaced names, `mcp__comfyui__<tool>`. A strict `allow` list that never mentions them stops every call before it is sent. This is the case that cost one user several days: the tools looked like they were working, precisely because the errors he was hunting could never appear.
+
+**Absent — a host with no MCP client at all.** Some agents do not speak MCP, and no amount of configuration changes that. `pi` is one: it has its own built-in shell-and-editor tools and no MCP client, so it cannot be handed ours whatever else is installed. The panel says so outright when you pick it — *"pi has no ComfyUI tools (no MCP)"*. That line is the answer, not a symptom to debug.
+
+**Either — something sitting in between.** A gateway, proxy, or router carrying your MCP traffic may pass along only part of the surface. If the catalogue and what actually runs disagree with each other, suspect the middle.
+
+### If it turns out to be the third case
+
+Then nothing was broken and nobody misconfigured anything: a capability existed and you had no way to find out. That is our failure rather than yours, and it is worth telling us — ask the agent to file it and it will attach your setup for you. A feature nobody can find is, from where you sit, a feature we did not ship.
 
 ## If you run a small local model
 

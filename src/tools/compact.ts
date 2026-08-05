@@ -254,12 +254,68 @@ export function registerCompactTools(
   );
 }
 
+/**
+ * `panel_…`, with or without a client's `mcp__<server>__` namespacing — the same
+ * prefix form `deadNameRe`/`findDeadName` accept, because that is how tool names
+ * appear in agent transcripts and skill files.
+ */
+const PANEL_NAMESPACE_RE = /^(?:mcp__[A-Za-z0-9_]+__)?panel_/;
+
+/**
+ * The answer for a `panel_*` name, which is NOT the same question as "does this
+ * tool exist".
+ *
+ * The panel_* live-canvas tools are registered by a DIFFERENT server — the
+ * orchestrator's per-tab surface (registerPanelTools / startPanelMcpHttpServer),
+ * never by this one. So this catalog's silence about `panel_graph_outline` says
+ * nothing whatsoever about whether that tool exists; it only says this server
+ * does not serve it. The bare "Unknown tool 'panel_graph_outline'." that used to
+ * come back is the #804 defect in miniature: a tool the caller could not SEE,
+ * narrated as a tool that does not EXIST — and a model that reads it that way
+ * tells the user the capability is missing, which is false and sends them to
+ * reinstall something that is already fine.
+ *
+ * This path is reachable through our own prose, not just through a model's
+ * imagination: `visualize_workflow` and `visualize_workflow_hierarchical` both
+ * tell the reader to "use panel_graph_outline instead" for the live canvas, and
+ * the bundled plugin's debug-render / director skills name panel_* tools too —
+ * all of which an outside MCP client reads while holding none of them (#784, same
+ * family: recovery guidance naming a tool the caller cannot invoke).
+ *
+ * We deliberately do NOT assert which of the two situations the caller is in,
+ * because from inside this catalog the two are indistinguishable — the caller may
+ * hold the panel surface alongside this one (a panel-hosted session) or hold
+ * nothing of the sort (an outside client). Both branches are therefore stated,
+ * each with a remedy that works from that state, and no claim is made about
+ * whether `name` is a real panel tool: the namespace fact is what we know.
+ */
+function panelNamespaceMessage(name: string): string {
+  return (
+    `Unknown tool '${name}' — no tool by that name is registered on THIS server. ` +
+    "Names beginning `panel_` are the live-canvas tools, and they are never registered here: " +
+    "they are served by the ComfyUI sidebar Agent panel's own per-tab MCP surface. " +
+    "This server cannot see which surfaces you hold, so both cases are given. " +
+    `If your client also lists panel_ tools, call ${name} DIRECTLY — call_tool only dispatches ` +
+    "within this server's catalog and can never reach the panel surface. " +
+    "If it does not list them, this session has no live-canvas access at all: read the workflow " +
+    "from disk instead (list_workflows, get_workflow, analyze_workflow, query_workflow), or ask " +
+    "the user to make the request from the Agent tab in the ComfyUI sidebar, whose agent does " +
+    "hold those tools."
+  );
+}
+
 function unknownToolMessage(catalog: ToolCatalog, name: string): string {
   // A name in the retirement ledger gets a specific answer — which version
   // removed it and what to call instead (#659). Exact matches only: partial
   // names still get the fuzzy suggestions below.
+  //
+  // Checked BEFORE the panel namespace, because the ledger holds retired panel_*
+  // names too and has a strictly better answer for them — a named live replacement
+  // — than "wrong surface" does. Answering "ask the panel agent" for a name no
+  // panel agent serves either would send the caller to a second dead end.
   const retired = retiredToolMessage(name);
   if (retired) return retired;
+  if (PANEL_NAMESPACE_RE.test(name)) return panelNamespaceMessage(name);
   const needle = name.toLowerCase();
   const close = [...catalog.tools.keys()]
     .filter((n) => n.includes(needle) || needle.includes(n))
