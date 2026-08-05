@@ -99,11 +99,23 @@ export function isAllowedAgentSecretKey(key: string): boolean {
   return AGENT_ALLOWLIST_SET.has(key);
 }
 
-/** Secrets file path. Overridable for tests. */
-export function panelSecretsPath(): string {
+/** Secrets file path. Overridable for tests.
+ *
+ *  `home` scopes the read to a caller-supplied home directory. It exists because
+ *  `readOAuthStatus(home)` already took one and threaded it to `nativeCliStatus`,
+ *  while the mirror half reached this function and silently used the REAL home —
+ *  so a test that injected a temp home still read the developer's actual logins,
+ *  and its result flipped depending on whether that machine happened to be signed
+ *  into codex (#859). The docstring there promised "tests never read the
+ *  developer's real logins"; for one of its two halves that was false.
+ *
+ *  Precedence is deliberately env > `home` > real home. `COMFYUI_MCP_PANEL_SECRETS`
+ *  is the explicit global redirect and must keep winning, so this adds scoping
+ *  where a `home` is passed without changing any path that already worked. */
+export function panelSecretsPath(home?: string): string {
   return (
     process.env.COMFYUI_MCP_PANEL_SECRETS ||
-    join(homedir(), ".comfyui-mcp", "panel-secrets.json")
+    join(home ?? homedir(), ".comfyui-mcp", "panel-secrets.json")
   );
 }
 
@@ -142,8 +154,8 @@ export function onComfyuiSecretsChanged(cb: (change: ComfyuiSecretChange) => voi
   };
 }
 
-function read(): PanelSecrets {
-  const p = panelSecretsPath();
+function read(home?: string): PanelSecrets {
+  const p = panelSecretsPath(home);
   if (!existsSync(p)) return {};
   try {
     const parsed = JSON.parse(readFileSync(p, "utf-8")) as unknown;
@@ -362,9 +374,10 @@ export function setOAuthStatus(rec: OAuthStatusRecord): void {
   write(secrets);
 }
 
-/** All stored OAuth status records (re-sanitized on read, defense in depth). */
-export function listOAuthStatus(): OAuthStatusRecord[] {
-  const status = read().oauthStatus;
+/** All stored OAuth status records (re-sanitized on read, defense in depth).
+ *  `home` scopes the read — see `panelSecretsPath` (#859). */
+export function listOAuthStatus(home?: string): OAuthStatusRecord[] {
+  const status = read(home).oauthStatus;
   if (!status || typeof status !== "object") return [];
   return Object.values(status).map(sanitizeOAuthStatus);
 }

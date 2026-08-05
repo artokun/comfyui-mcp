@@ -783,7 +783,10 @@ function nativeCliStatus(providerId: string, home = homedir()): OAuthStatusRecor
  *  CLI-authenticated provider never asks the user to sign in a second time.
  *  `home` is injectable so tests never read the developer's real logins. */
 export function readOAuthStatus(home = homedir()): OAuthStatusRecord[] {
-  const mirror = listOAuthStatus();
+  // `home` goes to BOTH halves. It used to reach only `nativeCliStatus` below,
+  // while the mirror read fell through to the real home — so the promise in this
+  // docstring held for the detection half and not the mirror half (#859).
+  const mirror = listOAuthStatus(home);
   const seen = new Set(mirror.map((r) => r.provider));
   for (const providerId of ["codex", "grok", "copilot"]) {
     if (seen.has(providerId)) continue;

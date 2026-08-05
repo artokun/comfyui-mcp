@@ -257,3 +257,59 @@ describe("nativeCliStatus (CLI-auth detection for oauth_status)", () => {
     expect(JSON.stringify(rec)).not.toContain("rt-2");
   });
 });
+
+describe("readOAuthStatus — home scoping (#859)", () => {
+  let tmp: string;
+
+  beforeEach(async () => {
+    tmp = await mkdtemp(join(tmpdir(), "cmcp-oauth-home-"));
+    // The panel-secrets env override is the OTHER redirect and must stay unset
+    // here: this test exists to prove the `home` ARGUMENT alone scopes the read.
+    delete process.env.COMFYUI_MCP_PANEL_SECRETS;
+  });
+
+  afterEach(async () => {
+    await rm(tmp, { recursive: true, force: true });
+  });
+
+  it("reads the mirror from the injected home, not the developer's real one", async () => {
+    // A provider id no real machine would have signed in. If the mirror read
+    // falls through to the real home, this record is simply absent — which is
+    // exactly the failure #859 describes, and why the assertion is on THIS
+    // record rather than on a count (a count passes on a signed-out machine).
+    await mkdir(join(tmp, ".comfyui-mcp"), { recursive: true });
+    await writeFile(
+      join(tmp, ".comfyui-mcp", "panel-secrets.json"),
+      JSON.stringify({
+        oauthStatus: {
+          "fixture-only-provider": {
+            provider: "fixture-only-provider",
+            account_label: "scoped@example.test",
+            obtained_at: 1_700_000_000,
+          },
+        },
+      }),
+      "utf-8",
+    );
+
+    const { readOAuthStatus } = await import("../../services/code-provider-auth.js");
+    const records = readOAuthStatus(tmp);
+
+    const scoped = records.find((r) => r.provider === "fixture-only-provider");
+    expect(scoped, "the injected home's mirror entry must be returned").toBeDefined();
+    expect(scoped?.account_label).toBe("scoped@example.test");
+  });
+
+  it("returns no mirror entries for an EMPTY injected home", async () => {
+    // The inverse, and the half that actually catches a developer's real logins
+    // leaking in: with nothing written under `tmp`, anything returned here that
+    // is not a detected native CLI session came from outside the fixture.
+    const { readOAuthStatus } = await import("../../services/code-provider-auth.js");
+    const records = readOAuthStatus(tmp);
+
+    expect(
+      records.find((r) => r.provider === "fixture-only-provider"),
+      "no record may survive from a previous test's home",
+    ).toBeUndefined();
+  });
+});
