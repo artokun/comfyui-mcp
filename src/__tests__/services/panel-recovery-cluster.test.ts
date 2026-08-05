@@ -449,10 +449,32 @@ describe("disk-current but handshake-old is diagnosed as a stale tab, not a stal
     expect(text).not.toContain(PANEL_REPO_URL);
   });
 
-  it("handles the 'version unknown' handshake from #784", () => {
+  it("handles the 'version unknown' handshake from #784 WITHOUT asserting the cause", () => {
+    // codex gate. With no advertised version, "your tab is running a cached old
+    // bundle" is an inference, not an observation — a relay or other non-panel
+    // client that never implemented the fence is observationally identical, and
+    // "hard-refresh your tab" is unactionable for it. What IS proven is that the
+    // pack on disk is capable, so no update helps; the causes are RANKED, most
+    // likely and most actionable first, with the other named rather than hidden.
     const text = describePanelUpdateRecovery(undefined, SKEW);
     expect(text).toMatch(/advertised no version/);
-    expect(text).toMatch(/HARD-REFRESH/);
+    expect(text).toMatch(/Updating the panel will not fix this/); // the proven part
+    expect(text).not.toMatch(/This BROWSER TAB is running an older cached copy/); // the unproven part
+    expect(text).toMatch(/does not by itself say why/);
+    expect(text).toMatch(/\(1\) It is a ComfyUI browser tab/);
+    expect(text).toMatch(/HARD-REFRESH/); // still leads with the actionable fix
+    expect(text).toMatch(/\(2\) It is NOT a panel tab/);
+    expect(text).toMatch(/nothing to refresh/);
+  });
+
+  it("an ADVERTISED old version is still a definite diagnosis", () => {
+    // The other side of the same coin: a version below the floor IS positive
+    // proof of a tab/disk skew (both the version and the capability are built by
+    // the same served file), so hedging there would be its own failure.
+    const text = describePanelUpdateRecovery(undefined, { ...SKEW, handshakeVersion: "0.11.34" });
+    expect(text).toMatch(/Do NOT update the panel/);
+    expect(text).toMatch(/This BROWSER TAB is running an older cached copy/);
+    expect(text).not.toMatch(/does not by itself say why/);
   });
 
   it("the skew branch outranks remote mode — and still never names an uncallable tool", () => {
@@ -460,7 +482,7 @@ describe("disk-current but handshake-old is diagnosed as a stale tab, not a stal
     mode.remote = true;
     __resetPanelBaseCache();
     const text = describePanelUpdateRecovery(undefined, SKEW);
-    expect(text).toMatch(/Do NOT update the panel/);
+    expect(text).toMatch(/Updating the panel will not fix this/);
     expect(text).not.toMatch(/ON THE COMFYUI HOST/);
     // Even the closing aside must not mention a tool that is not callable in
     // this session.

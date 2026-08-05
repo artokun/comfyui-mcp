@@ -2011,6 +2011,47 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
     }
   });
 
+  it("a CAPABLE disk plus NO advertised version ranks the causes instead of asserting one", async () => {
+    // codex gate, and the exact combination the other new tests miss: the pack on
+    // disk clears the fence floor AND the hello carried no panel_version. "Your
+    // browser tab is running a cached old bundle" is then an inference — a relay
+    // or other non-panel client that never implemented the fence looks identical
+    // from here, and telling it to hard-refresh a tab it does not have is the
+    // dead end this cluster is about.
+    writeTempPanelPack("0.11.38");
+    try {
+      const sock = new WebSocket(`ws://127.0.0.1:${port}`);
+      await new Promise<void>((res, rej) => {
+        sock.on("open", () => {
+          sock.send(JSON.stringify({ type: "hello", tab_id: "no-version-capable", title: "wf" }));
+          res();
+        });
+        sock.on("error", rej);
+      });
+      await vi.waitFor(() =>
+        expect(bridge.tabs().some((t) => t.tab_id === "no-version-capable")).toBe(true),
+      );
+      const err = await bridge
+        .send({ cmd: "graph_add_node", node: "x" } as never, { tabId: "no-version-capable" })
+        .catch((e: Error) => e);
+      const msg = (err as Error).message;
+      // The PROVEN part is still stated plainly, and still spares them the update.
+      expect(msg).toMatch(/Updating the panel will not fix this/);
+      expect(msg).toMatch(/already 0\.11\.38/);
+      expect(msg).not.toMatch(/Run install_panel\(action:'update'\)/);
+      // The UNPROVEN part is not asserted...
+      expect(msg).not.toMatch(/This BROWSER TAB is running an older cached copy/);
+      // ...it is ranked, actionable case first, the other named rather than hidden.
+      expect(msg).toMatch(/\(1\) It is a ComfyUI browser tab/);
+      expect(msg).toMatch(/HARD-REFRESH/);
+      expect(msg).toMatch(/\(2\) It is NOT a panel tab/);
+      expect(msg).not.toMatch(/[A-Za-z)"']\.\./);
+      sock.close();
+    } finally {
+      clearPanelDiskObservation();
+    }
+  });
+
   it("#709: the capability refusal carries the typed marker, the FULL tab id, and the hard-refresh recovery", async () => {
     // The stale-bundle recurrence: on-disk panel current, browser tab still running a
     // cached pre-#570 bundle. The refusal must (a) be typed so the tool layer never

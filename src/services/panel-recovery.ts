@@ -272,16 +272,44 @@ export function describePanelUpdateRecovery(
   // install_panel, not a host-side git pull. Sending this user to either is
   // what makes the loop feel unfixable, so this branch outranks both.
   if (skew) {
+    // WHAT IS PROVEN vs WHAT IS INFERRED (codex gate).
+    //
+    // Proven in both variants: the pack on disk clears the floor, so no update
+    // of the pack changes this refusal. That is the part the headline may state.
+    //
+    // The CAUSE is a different claim, and the evidence for it differs:
+    //  - the client advertised a version BELOW the floor → the served pack and
+    //    the announced build genuinely disagree. Both the version and the
+    //    capability are built by the same served file, so a client running the
+    //    installed bundle would have announced the installed version. A stale
+    //    cached bundle is then a conclusion, not a guess.
+    //  - the client advertised NO version → nothing was observed. A browser tab
+    //    on a cached bundle looks exactly like a relay or other non-panel client
+    //    that never implemented the fence at all, and "hard-refresh your tab" is
+    //    unactionable for the latter. Asserting the cache is the fabrication
+    //    this cluster exists to remove, so that variant RANKS the possibilities
+    //    instead — the actionable one first, the other named rather than hidden.
+    const HARD_REFRESH =
+      `The panel's module URLs carry no cache-busting key, so an ordinary reload can ` +
+      `serve the stale file again: HARD-REFRESH this ComfyUI tab with a cache-bypassing ` +
+      `reload (Ctrl+Shift+R, or Cmd+Shift+R on macOS; if that does not take, open ` +
+      `DevTools and use right-click reload → "Empty Cache and Hard Reload"). `;
     return (
-      `Do NOT update the panel — the pack ON DISK is already ${skew.diskVersion}, which ` +
-      `meets the ${skew.requiredVersion}+ this MCP requires. This BROWSER TAB is running ` +
-      `an older cached copy of the panel's JavaScript ` +
-      `(it advertised ${skew.handshakeVersion ? `${skew.handshakeVersion}` : "no version"}), ` +
-      `and the capability check reads what the TAB announced. The panel's module URLs ` +
-      `carry no cache-busting key, so an ordinary reload can serve the stale file again: ` +
-      `HARD-REFRESH this ComfyUI tab with a cache-bypassing reload (Ctrl+Shift+R, or ` +
-      `Cmd+Shift+R on macOS; if that does not take, open DevTools and use ` +
-      `right-click reload → "Empty Cache and Hard Reload"). ` +
+      (skew.handshakeVersion
+        ? `Do NOT update the panel — the pack ON DISK is already ${skew.diskVersion}, which ` +
+          `meets the ${skew.requiredVersion}+ a graph write needs. This BROWSER TAB is running ` +
+          `an older cached copy of the panel's JavaScript (it advertised ` +
+          `${skew.handshakeVersion}), and the capability check reads what the TAB ` +
+          `announced. ${HARD_REFRESH}`
+        : `Updating the panel will not fix this — the pack ON DISK is already ` +
+          `${skew.diskVersion}, which meets the ${skew.requiredVersion}+ a graph write needs, ` +
+          `so the SERVED panel is already capable. What connected advertised no version and ` +
+          `no workflow fence, which does not by itself say why, so here are both ` +
+          `possibilities. (1) It is a ComfyUI browser tab — much the more common case — ` +
+          `running a cached older copy of the panel's JavaScript. ${HARD_REFRESH}` +
+          `(2) It is NOT a panel tab (a relay or other client): then it does not implement ` +
+          `the fence at all and there is nothing to refresh — issue graph WRITES from a ` +
+          `ComfyUI tab running the panel. `) +
       // Only name the tool where naming it is useful. In a remote/cloud session
       // it is not callable at all, so mentioning it is a pointless mention of an
       // absent tool; say the plain thing instead.
