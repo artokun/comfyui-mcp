@@ -1511,8 +1511,13 @@ function fitQueryGraphReply(res: ToolResult, requested: unknown): ToolResult {
     capEvidence.groups_truncation_hint = riders.groups_truncation_hint;
 
   // Rung 2 — the group index itself goes. Its true size is stated in its place.
+  //
+  // An EMPTY `groups: []` is not a rider to shed, it is an OBSERVATION — "this graph has
+  // no groups" — costing about fifteen characters. Deleting it saved nothing and quietly
+  // turned a stated zero into an absent field, which is the same coverage loss one rung
+  // up (codex gate MAJOR). Only a non-empty list is dropped here.
   const withoutGroups: Record<string, unknown> = { ...riders };
-  delete withoutGroups.groups;
+  if (hasGroups) delete withoutGroups.groups;
   const noGroups = assemble(withoutGroups);
   if (hasGroups) {
     // The count we can vouch for is "what this reply carried", not "what the graph has".
@@ -1528,8 +1533,11 @@ function fitQueryGraphReply(res: ToolResult, requested: unknown): ToolResult {
   }
   if (render(noGroups).length <= budget) return replaceWith(noGroups);
 
-  // Rung 3 — the subgraph rails go too. The cap evidence still rides.
-  const bare = assemble(capEvidence);
+  // Rung 3 — the subgraph rails go too. The cap evidence, and an empty groups
+  // observation, still ride.
+  const bareRiders: Record<string, unknown> = { ...capEvidence };
+  if (!hasGroups && riders.groups !== undefined) bareRiders.groups = riders.groups;
+  const bare = assemble(bareRiders);
   if (hasGroups && noGroups.groups_omitted !== undefined)
     bare.groups_omitted = noGroups.groups_omitted;
   if (hasRails) {

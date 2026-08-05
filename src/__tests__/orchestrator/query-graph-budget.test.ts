@@ -390,6 +390,26 @@ describe("#807 — panel_query_graph's budget covers the WHOLE reply", () => {
       expect(note).not.toMatch(/for a smaller reply lower `max_chars`/);
     });
 
+    it("keeps an EMPTY groups list — a stated zero is an observation, not a rider", async () => {
+      // `groups: []` costs about fifteen characters and says "this graph has no
+      // groups". Deleting it saved nothing and turned that stated zero into an absent
+      // field, and then let the overrun note claim nothing had been discarded when a
+      // field had (codex gate r7).
+      const { payload, text } = await runQueryGraph(
+        { max_chars: 900 },
+        {
+          viewing: { scope: "subgraph", owner_node_id: 1, title: "T".repeat(3000) },
+          groups: [],
+          total: 1,
+          shown: 0,
+          text: "0 match(es)",
+        },
+      );
+      expect(payload.groups).toEqual([]);
+      assertBoundHonoured(payload, text, 900);
+      expect(String(payload.budget_overrun)).toMatch(/Nothing was discarded to meet the budget/);
+    });
+
     it("discloses an over-budget aggregate (group_by) reply", async () => {
       const { payload, text } = await runQueryGraph(
         { max_chars: 700, group_by: "type" },
