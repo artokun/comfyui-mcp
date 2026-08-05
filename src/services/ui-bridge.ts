@@ -2242,11 +2242,15 @@ export class UiBridge {
    *  The remedies are phrased as things the USER does rather than tools the agent
    *  calls, because this string is read by agents with very different tool sets
    *  (#784: guidance naming install_panel reached a session that did not have it),
-   *  so the one tool named here is named conditionally. */
+   *  so the one tool named here is named conditionally. For the same reason the
+   *  address mismatch points at the panel's Bridge URL setting rather than at
+   *  COMFYUI_MCP_BRIDGE_PORT: that env var picks THIS listener's port, so it
+   *  cannot correct a panel dialling a different host, token or wss:// tunnel —
+   *  a remedy has to be reachable from where the mismatch actually lives. */
   noPanelGuidance(): string {
     return this.hasEverConnected()
       ? "the ComfyUI panel tab is not connected — this is almost always because ComfyUI was just restarted or the browser tab reloaded, which drops the Agent panel's socket. Ask the user to refresh (reload) the ComfyUI browser tab to reconnect the Agent panel, then retry. (The comfyui-mcp-panel pack IS installed — a tab connected earlier this session — so this is a reconnect, not an install problem.)"
-      : `no panel connected — no ComfyUI canvas tab has connected to this bridge (ws://${this.host}:${this.port}) since it started. That is the whole of what is known here, and it does not distinguish which of the steps below is the missing one. Ask the user to check, in this order: (1) is ComfyUI open in a browser at all; (2) does its sidebar have an Agent tab — if not, that ComfyUI does not have the panel pack installed and loaded (ComfyUI-Manager lists it as comfyui-agent-panel; the install_panel tool also installs it, when this session has that tool); (3) if the Agent tab is there, has a provider been picked and Connect clicked? The panel attaches on Connect, never on load, so a freshly opened tab is expected to show nothing yet; (4) if it reports itself connected and this bridge still sees no tab, it reached a different bridge address than this one (COMFYUI_MCP_BRIDGE_PORT selects it).`;
+      : `no panel connected — no ComfyUI canvas tab has connected to this bridge (ws://${this.host}:${this.port}) since it started. That is the whole of what is known here, and it does not distinguish which of the steps below is the missing one. Ask the user to check, in this order: (1) is ComfyUI open in a browser at all; (2) does its sidebar have an Agent tab — if not, that ComfyUI does not have the panel pack installed and loaded (ComfyUI-Manager lists it as comfyui-agent-panel; the install_panel tool also installs it, when this session has that tool); (3) if the Agent tab is there, has a provider been picked and Connect clicked? The panel attaches on Connect, never on load, so a freshly opened tab is expected to show nothing yet; (4) if it reports itself connected and this bridge still sees no tab, it reached a different bridge address than this one — the panel's Settings → Advanced → Bridge URL is what it dials, so compare that against this listener's address above and reconnect.`;
   }
 
   status(): string {
