@@ -334,7 +334,8 @@ export function requiredPanelVersion(): string {
 
 /**
  * The minimum panel version that can fence a graph WRITE to its workflow — the
- * only version a fenced-write refusal is entitled to quote.
+ * only version a fenced-write refusal is entitled to quote. `undefined` when
+ * this build cannot state it.
  *
  * A write needs BOTH handshake capabilities (the dispatch-time stamp check and
  * the after-await write-boundary recheck), so it is their maximum, not the
@@ -344,12 +345,39 @@ export function requiredPanelVersion(): string {
  * their write needs a version it does not need — a number they cannot verify,
  * attached to a remedy they will run for the wrong reason. Same defect as #352 /
  * #619 (a blanket floor quoted as one command's requirement), one level up.
+ *
+ * BOTH entries must be present and parseable, and an incomplete table yields
+ * `undefined` rather than a number (codex gate). Two wrong answers were
+ * available here and both are the fold this cluster exists to remove:
+ *
+ *  - falling back to `MIN_PANEL_VERSION_FOR_BRIDGE_COMMANDS` would quote 0.11.4
+ *    as "the first build that fences every command", which is simply false — the
+ *    fence shipped in 0.11.30/0.11.35. An unreadable table is an unreadable
+ *    OBSERVATION, not evidence of a low requirement.
+ *  - taking the max of whichever entry survived would UNDERSTATE it: a user told
+ *    0.11.30 suffices would update, still be refused, and be back in the loop
+ *    #812 reported.
+ *
+ * So when the table cannot answer, nothing is quoted. The gate still refuses —
+ * the refusal is not what is uncertain — and the message says which part it
+ * could not determine.
  */
-export function requiredPanelVersionForWorkflowFence(): string {
-  return highestRequirement([
+export function requiredPanelVersionForWorkflowFence(): string | undefined {
+  const raw = [
     BRIDGE_CAPABILITY_MIN_PANEL_VERSION.enforces_workflow_stamp,
     BRIDGE_CAPABILITY_MIN_PANEL_VERSION.enforces_workflow_stamp_at_write,
-  ]);
+  ];
+  // Every entry must be a parseable version. `typeof` first so a table with a
+  // deleted or non-string key degrades instead of throwing inside .trim() —
+  // this runs while composing an error message.
+  if (!raw.every((v) => typeof v === "string" && SEMVER_RE.test(v.trim()))) return undefined;
+  // Folded WITHOUT highestRequirement's baseline seed: this answer is the
+  // capabilities' own maximum and must not inherit an unrelated floor, in either
+  // direction. Trimmed because the value is rendered into a user-facing
+  // sentence. (Every entry is already screened, so compareSemver's
+  // equal-vs-unparseable ambiguity cannot bite here.)
+  const parsed = raw.map((v) => (v as string).trim());
+  return parsed.reduce((best, v) => (compareSemver(v, best) > 0 ? v : best));
 }
 
 /**
@@ -2708,14 +2736,25 @@ export class UiBridge {
         // quoting the global max would name a version this command does not
         // require the moment any unrelated command declares a higher one.
         const fenceMin = requiredPanelVersionForWorkflowFence();
+        // And symmetrically: when THIS build cannot state the fence's minimum,
+        // quote no number at all (codex gate). Falling back to the bridge
+        // baseline would assert "0.11.4, the first build that fences every
+        // command" — false, and false in the direction that sends a user to an
+        // update that will not clear the gate. An unreadable table is another
+        // unmade observation.
+        const needs = (capability: string): string =>
+          fenceMin
+            ? `a graph WRITE needs panel ${fenceMin}+, the first build that ${capability}`
+            : `a graph WRITE needs a panel that ${capability}, but this MCP build cannot say ` +
+              `which version first shipped it (its capability table is incomplete) — no ` +
+              `version is quoted here rather than a wrong one; update to the latest panel`;
         const why = !conn.enforcesWorkflowStamp
-          ? `panel tab ${conn.tabId} does not enforce per-command workflow targeting ` +
-            `(${observed}; a graph WRITE needs panel ${fenceMin}+, the first build that fences ` +
-              `every command to the workflow it was issued for). ${recovery}`
+          ? `panel tab ${conn.tabId} does not enforce per-command workflow targeting (${observed}; ` +
+            `${needs("fences every command to the workflow it was issued for")}). ${recovery}`
           : !conn.enforcesWorkflowStampAtWrite
             ? `panel tab ${conn.tabId} does not recheck workflow targeting at the graph write ` +
-              `boundary after asynchronous work (${observed}; a graph WRITE needs panel ` +
-                `${fenceMin}+, the first build that rechecks the fence after an await). ${recovery}`
+              `boundary after asynchronous work (${observed}; ` +
+                `${needs("rechecks the fence after an await")}). ${recovery}`
           : `this workflow has no trusted identity for the panel to fence the command against`;
         const refusal = markDispatched(
           new Error(

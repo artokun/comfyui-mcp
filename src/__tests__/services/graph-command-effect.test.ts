@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6,6 +6,9 @@ import {
   GRAPH_CMD_EFFECT,
   isMutatingGraphCommand,
   requiresWorkflowStampEnforcement,
+  requiredPanelVersion,
+  requiredPanelVersionForWorkflowFence,
+  BRIDGE_CAPABILITY_MIN_PANEL_VERSION,
   BRIDGE_READONLY_CMDS,
 } from "../../services/ui-bridge.js";
 
@@ -158,5 +161,46 @@ describe("GRAPH_CMD_EFFECT vs BRIDGE_READONLY_CMDS — two questions, two answer
     // just as wrong.
     expect(GRAPH_CMD_EFFECT.graph_canvas).toBe("inert");
     expect(BRIDGE_READONLY_CMDS.has("graph_canvas")).toBe(false);
+  });
+});
+
+describe("requiredPanelVersionForWorkflowFence — the fence's own minimum", () => {
+  // `Readonly<Record<…>>` is a compile-time claim; the runtime object is a plain
+  // mutable one, and this is the only way to exercise a broken table.
+  const table = BRIDGE_CAPABILITY_MIN_PANEL_VERSION as Record<string, string | undefined>;
+  const original = { ...table };
+  afterEach(() => {
+    for (const k of Object.keys(table)) delete table[k];
+    Object.assign(table, original);
+  });
+
+  it("is the MAXIMUM of the two fence capabilities, not the global aggregate", () => {
+    expect(requiredPanelVersionForWorkflowFence()).toBe("0.11.35");
+    // Today the two coincide. Prove the SEPARATION rather than the coincidence:
+    // raise an unrelated command's minimum and only the aggregate must move.
+    table.some_unrelated_future_capability = "9.9.9";
+    expect(requiredPanelVersion()).toBe("9.9.9");
+    expect(requiredPanelVersionForWorkflowFence()).toBe("0.11.35");
+  });
+
+  it.each([
+    ["a MISSING entry", () => delete table.enforces_workflow_stamp_at_write],
+    ["a MALFORMED entry", () => (table.enforces_workflow_stamp_at_write = "nightly")],
+    ["BOTH entries gone", () => {
+      delete table.enforces_workflow_stamp;
+      delete table.enforces_workflow_stamp_at_write;
+    }],
+  ])("quotes NO version on %s, and does not throw", (_label, breakIt) => {
+    breakIt();
+    // Not the bridge baseline (0.11.4) — that would assert "the first build that
+    // fences every command" about a build that does no such thing. Not the
+    // surviving entry either — that would UNDERSTATE the requirement and send a
+    // user to an update that still leaves them refused (#812's loop).
+    expect(requiredPanelVersionForWorkflowFence()).toBeUndefined();
+  });
+
+  it("a whitespace-padded but valid entry resolves, TRIMMED (it is rendered to a user)", () => {
+    table.enforces_workflow_stamp_at_write = " 0.11.40 ";
+    expect(requiredPanelVersionForWorkflowFence()).toBe("0.11.40");
   });
 });

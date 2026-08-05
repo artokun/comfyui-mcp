@@ -17,6 +17,7 @@ import {
   BRIDGE_READONLY_CMDS,
   isMutatingGraphCommand,
   requiresWorkflowStampEnforcement,
+  BRIDGE_CAPABILITY_MIN_PANEL_VERSION,
 } from "../../services/ui-bridge.js";
 import { carryWorkflowCommandStamp } from "../../orchestrator/session-store.js";
 import {
@@ -2305,6 +2306,46 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
     expect(msg).toContain("0.11.32");
     expect(msg).toMatch(/needs panel 0\.11\.35\+/);
     old.close();
+  });
+
+  it("quotes NO fence version when this build's capability table cannot state one", async () => {
+    // codex gate. The refusal is still correct — the panel did not advertise the
+    // fence — but the DIAGNOSIS must not invent a number. Falling back to the
+    // 0.11.4 bridge baseline would assert "0.11.4, the first build that fences
+    // every command", which is false and points at an update that would not
+    // clear the gate: #812's loop, rebuilt inside the fix for it.
+    const table = BRIDGE_CAPABILITY_MIN_PANEL_VERSION as Record<string, string | undefined>;
+    const saved = table.enforces_workflow_stamp_at_write;
+    delete table.enforces_workflow_stamp_at_write;
+    try {
+      const old = new WebSocket(`ws://127.0.0.1:${port}`);
+      await new Promise<void>((res, rej) => {
+        old.on("open", () => {
+          old.send(
+            JSON.stringify({ type: "hello", tab_id: "tmp:notable", title: "w", panel_version: "0.11.32" }),
+          );
+          res();
+        });
+        old.on("error", rej);
+      });
+      await vi.waitFor(() => expect(bridge.tabs().some((t) => t.tab_id === "tmp:notable")).toBe(true));
+      const err = await bridge
+        .send({ cmd: "graph_add_node", node: "x" } as never, { tabId: "tmp:notable" })
+        .then(() => null)
+        .catch((e: Error) => e);
+      const msg = (err as Error).message;
+      expect(msg).not.toMatch(/needs panel \d/); // no number, right or wrong
+      expect(msg).not.toContain("0.11.4+");
+      expect(msg).toMatch(/cannot say which version first shipped it/);
+      // Still a refusal, still typed, and still carrying a remedy.
+      expect(err).toBeInstanceOf(Error);
+      expect(isCapabilityRefusal(err as Error)).toBe(true);
+      expect(dispatchOutcomeOf(err as Error)).toBe(false);
+      expect(msg).toMatch(/update to the latest panel/);
+      old.close();
+    } finally {
+      table.enforces_workflow_stamp_at_write = saved;
+    }
   });
 });
 
