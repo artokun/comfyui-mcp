@@ -332,7 +332,15 @@ function unknownToolMessage(catalog: ToolCatalog, name: string): string {
   // panel agent serves either would send the caller to a second dead end.
   const retired = retiredToolMessage(name);
   if (retired) return retired;
-  if (PANEL_NAMESPACE_RE.test(name)) return panelNamespaceMessage(name);
+  // The namespace answer is only correct when the name is not ALSO a real tool on
+  // this surface under its bare form. `catalog.get()` above is an exact lookup, so
+  // a client that namespaces its calls (`mcp__comfyui__panel_custom`) misses an
+  // autoloaded `panel_custom` workflow and would land here — where "that prefix
+  // belongs to another server" is exactly the wrong thing to say about a tool this
+  // server does serve. Fall through to the fuzzy path instead, which suggests the
+  // bare name (the behaviour every other namespaced live tool already gets).
+  const bare = name.replace(/^mcp__[A-Za-z0-9_]+__/, "");
+  if (PANEL_NAMESPACE_RE.test(name) && !catalog.get(bare)) return panelNamespaceMessage(name);
   const needle = name.toLowerCase();
   const close = [...catalog.tools.keys()]
     .filter((n) => n.includes(needle) || needle.includes(n))

@@ -364,6 +364,18 @@ describe("compact mode over a real MCP client/server pair", () => {
       })) as { isError?: boolean };
       expect(res.isError).not.toBe(true);
       expect(textOf(res as never)).toBe("ran the autoloaded workflow");
+
+      // ...and the same tool reached under a client's namespacing misses the exact
+      // catalog lookup, so it lands in the unknown-name path. It must NOT be told
+      // the prefix belongs to another server — that is a tool this server serves.
+      const ns = (await client.callTool({
+        name: "call_tool",
+        arguments: { name: "mcp__comfyui__panel_custom" },
+      })) as { isError?: boolean };
+      const nsText = textOf(ns as never);
+      expect(nsText).not.toMatch(/live-canvas surface/);
+      expect(nsText).toContain("Did you mean");
+      expect(nsText).toContain("panel_custom");
     });
 
     it("leaves a non-panel unknown name on the fuzzy path", async () => {

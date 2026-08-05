@@ -163,11 +163,14 @@ Naming the tool and the argument is not the *correct* form — it is the *forcef
 
 ### When the answer gets cut off
 
-Long reads are capped so that one enormous graph cannot swallow the whole conversation. When a read is trimmed you get a note saying so, and it names an argument to raise.
+Long reads are capped so that one enormous graph cannot swallow the whole conversation. When a read is trimmed you get a note saying so, and it suggests an argument to raise.
 
-**Check which argument.** Two different ceilings can stop the same read — the character budget (`max_chars`) or the number of nodes listed (`limit`) — and raising the one that was not the problem changes nothing, which reads exactly like the retry having failed.
+**Check that suggestion against what actually ran out**, because two different ceilings can stop the same read and the suggestion does not always name the right one:
 
-The agent is supposed to read its own truncation note and retry by itself. When it doesn't, you are the fallback, and this is the sentence:
+- The note reads `truncated at 40 of 300` — the first number is exactly the node limit in force (40 unless someone raised it), so `limit` is what ran out.
+- It stops at some arbitrary-looking number instead, usually on rows carrying a lot of detail — then it is `max_chars`, the character budget.
+
+Raising the one that was not the problem changes nothing, which reads exactly like the retry having failed. The agent is supposed to work this out and retry by itself; when it doesn't, you are the fallback, and this is the sentence:
 
 > That got truncated — retry the same query, raising whichever limit it actually hit.
 
@@ -244,9 +247,10 @@ Different problem, similar-looking message. This means the outside agent cannot 
 
 - ComfyUI is not open in a browser at all — open it and look at the Agent tab in the sidebar.
 - ComfyUI was just restarted, or you reloaded the tab. That drops the connection. **Reload the ComfyUI tab** and it comes straight back.
+- The Agent tab is open but has never been connected. The panel attaches when you pick a provider and click **Connect**, never on load, so a freshly opened tab showing nothing is the ordinary state rather than a fault.
 - The panel is not installed yet. See [the panel guide](/panel).
 
-The message itself will tell you which — it distinguishes "never connected" from "connected earlier and dropped", and the second one is always just a reload.
+The message splits these into two groups for you — it distinguishes "connected earlier and dropped" from "nothing has connected yet" — and the first of those is always just a reload. It does not go further than that, and says so: within the second group it walks you through the checks above in order rather than naming a cause it has no way to observe.
 
 ## When it says nothing
 

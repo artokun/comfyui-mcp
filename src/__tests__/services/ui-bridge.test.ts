@@ -25,7 +25,7 @@ import {
   clearPanelDiskObservation,
   recordPanelDiskObservation,
 } from "../../services/panel-workspace.js";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -804,16 +804,34 @@ describe("UiBridge (multi-tab)", () => {
     });
 
     // panel-tools.ts classifies a resolve failure as "nothing connected, defer the
-    // rebind" vs "ambiguous, make the user choose" by MATCHING THIS TEXT. Rewording
-    // the guidance can silently flip a deferrable state into a hard failure, and the
-    // classifier lives in another file, so the invariant is pinned here beside the
-    // string it constrains.
+    // rebind" vs "ambiguous, make the user choose" by MATCHING THIS TEXT, so
+    // rewording the guidance can silently flip a deferrable state into a hard
+    // failure. The classifier is an inline literal in a 7000-line file with no
+    // exported seam, so this reads the two regexes STRAIGHT OUT OF THAT SOURCE and
+    // applies them here. Copying them instead would prove only that the copy still
+    // matches: this way a change on either side — the string or the matcher —
+    // surfaces as a failure pointing at both.
     it("stays classifiable by the deferred-rebind matcher in panel-tools", () => {
-      const positive = /no panel connected|not reachable|connected:\s*none|no connected tab/i;
-      const negative = /multiple|last active|pass tab_id/i;
+      const src = readFileSync(
+        new URL("../../orchestrator/panel-tools.ts", import.meta.url),
+        "utf8",
+      );
+      const found = src.match(
+        /noTabsConnected =\s*(\/[^\n]*?\/i)\.test\(msg\) &&\s*!(\/[^\n]*?\/i)\.test\(msg\);/,
+      );
+      expect(
+        found,
+        "could not locate the deferred-rebind classifier in panel-tools.ts — if it moved or " +
+          "was restructured, re-point this test at it rather than deleting it",
+      ).not.toBeNull();
+      const [, positiveSrc, negativeSrc] = found!;
+      const toRe = (literal: string): RegExp =>
+        new RegExp(literal.slice(1, literal.lastIndexOf("/")), literal.slice(literal.lastIndexOf("/") + 1));
+      const positive = toRe(positiveSrc);
+      const negative = toRe(negativeSrc);
       for (const msg of [bridge.status(), bridge.noPanelGuidance()]) {
-        expect(positive.test(msg)).toBe(true);
-        expect(negative.test(msg)).toBe(false);
+        expect(positive.test(msg), `not recognised as a no-tab state: ${msg}`).toBe(true);
+        expect(negative.test(msg), `wrongly reads as an ambiguous multi-tab state: ${msg}`).toBe(false);
       }
     });
 
