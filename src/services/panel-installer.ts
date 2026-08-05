@@ -86,7 +86,10 @@ export const PANEL_VERSION = "nightly";
  * "comfyui-agent-panel" — so check both quickly, then fall back to a full scan.
  * The pyproject `name == comfyui-agent-panel` match is always authoritative.
  */
-const FAST_PATH_DIRS = ["comfyui-mcp-panel", "comfyui-agent-panel"];
+// Exported so panel-recovery's manual instructions can be pinned to the SAME
+// accepted names in a test: guidance that judged "present" by only one of them
+// told a repo-checkout user to clone a second serving copy (#641 in miniature).
+export const FAST_PATH_DIRS = ["comfyui-mcp-panel", "comfyui-agent-panel"];
 
 /** Hard cap so the on-load ensure can never block startup. */
 const ENSURE_TIMEOUT_MS = 20_000;
@@ -1263,7 +1266,19 @@ function describePanelShadow(
 
 export type EnsureAction =
   | "installed"
-  | "up-to-date"
+  /**
+   * The pack is THERE. Nothing more.
+   *
+   * #806 — this was called `up-to-date`, and a user read it exactly as it is
+   * written: "you are on the latest panel". It never meant that. This branch does
+   * not compare versions at all (see the "Present already" comment below: the
+   * on-load ensure is install-if-missing and never diffs the nightly channel), so
+   * `up-to-date` was not even the floor check people assumed — it was a presence
+   * check wearing a currency check's name. The user in #806 spent days on a
+   * canvas-binding bug whose fix had already shipped, because this line told him
+   * there was nothing to get.
+   */
+  | "present"
   | "skipped-dev"
   | "skipped"
   | "shadowed" // installed/present, but a #641 shadow copy will win in the browser
@@ -1476,8 +1491,18 @@ async function ensureInner(deps: PanelInstallerDeps): Promise<EnsureResult> {
       installedVersion: detection.version,
     };
   }
+  // #806 — say what was actually determined. This branch proved the pack EXISTS;
+  // it did not compare `detection.version` against anything, so it must not imply
+  // currency. The reason travels with the result because the result is what gets
+  // logged and pasted into bug reports.
   return {
-    action: "up-to-date",
+    action: "present",
+    reason:
+      `The panel pack is installed${detection.version ? ` (${detection.version})` : ""} and was ` +
+      `left untouched — the on-load check only installs a MISSING panel and does not compare ` +
+      `versions, so this is not a statement that the panel is current. Run ` +
+      `install_panel(action='status') to compare it against what this orchestrator needs, or ` +
+      `install_panel(action='update') to pull the latest panel.`,
     dir: detection.dir,
     installedVersion: detection.version,
   };

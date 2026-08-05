@@ -24,7 +24,14 @@ vi.mock("../../services/workflow-converter.js", () => ({
 
 // Unused-by-this-test services still imported by the module under test.
 vi.mock("../../services/workflow-slicer.js", () => ({ sliceWorkflow: vi.fn() }));
-vi.mock("../../services/graph-query.js", () => ({ queryApiGraph: vi.fn() }));
+// #809: query_workflow's schema + description now quote the engine's own clamps, so
+// the mock has to carry them — a stub that omits them fails registration outright.
+vi.mock("../../services/graph-query.js", () => ({
+  queryApiGraph: vi.fn(),
+  LIMIT_CEILING: 200,
+  MAX_CHARS_CEILING: 60000,
+  MAX_CHARS_FLOOR: 500,
+}));
 vi.mock("../../services/workflow-sections.js", () => ({ detectSections: vi.fn() }));
 vi.mock("../../services/hierarchical-mermaid.js", () => ({
   generateOverview: vi.fn(),

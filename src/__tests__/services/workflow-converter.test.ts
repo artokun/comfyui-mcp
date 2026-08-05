@@ -102,6 +102,10 @@ describe("convertUiToApi — bypass / mute resolution", () => {
           },
         },
       },
+      ImageSource: {
+        input: { required: {} },
+        output: ["IMAGE"],
+      },
       SaveImage: {
         input: { required: { images: ["IMAGE"], filename_prefix: ["STRING"] } },
       },
@@ -113,7 +117,9 @@ describe("convertUiToApi — bypass / mute resolution", () => {
           id: 1,
           type: "GeminiNanoBanana2V2",
           mode: 0,
-          inputs: [],
+          inputs: [
+            { name: "model.images.image_1", type: "IMAGE", link: 2 },
+          ],
           outputs: [{ name: "IMAGE", type: "IMAGE", links: [1] }],
           widgets_values: [
             "a red cube", // prompt
@@ -127,6 +133,14 @@ describe("convertUiToApi — bypass / mute resolution", () => {
           ],
         },
         {
+          id: 3,
+          type: "ImageSource",
+          mode: 0,
+          inputs: [],
+          outputs: [{ name: "IMAGE", type: "IMAGE", links: [2] }],
+          widgets_values: [],
+        },
+        {
           id: 2,
           type: "SaveImage",
           mode: 0,
@@ -135,7 +149,10 @@ describe("convertUiToApi — bypass / mute resolution", () => {
           widgets_values: ["out"],
         },
       ],
-      links: [[1, 1, 0, 2, 0, "IMAGE"]],
+      links: [
+        [1, 1, 0, 2, 0, "IMAGE"],
+        [2, 3, 0, 1, 0, "IMAGE"],
+      ],
     } as never;
 
     const { workflow } = convertUiToApi(ui, objectInfo);
@@ -145,6 +162,7 @@ describe("convertUiToApi — bypass / mute resolution", () => {
       "model.aspect_ratio": "16:9",
       "model.resolution": "2K",
       "model.thinking_level": "HIGH",
+      "model.images.image_1": ["3", 0],
       seed: 7,
       response_modalities: "IMAGE",
     });
@@ -152,6 +170,70 @@ describe("convertUiToApi — bypass / mute resolution", () => {
     // slot, and no `model.images` key is emitted from widgets_values.
     expect(workflow["1"].inputs).not.toHaveProperty("model.images");
     expect(workflow["1"].inputs).not.toHaveProperty("aspect_ratio");
+  });
+
+  it("preserves linked COMFY_AUTOGROW_V3 entries without a serialized parent value", () => {
+    const objectInfo = {
+      PrimitiveInt: {
+        input: { required: { value: ["INT", { default: 0 }] } },
+        output: ["INT"],
+      },
+      ComfyMathExpression: {
+        input: {
+          required: {
+            expression: ["STRING", { default: "a + b" }],
+            values: [
+              "COMFY_AUTOGROW_V3",
+              {
+                template: {
+                  input: { required: { value: ["FLOAT,INT,BOOLEAN", {}] } },
+                  names: ["a", "b"],
+                  min: 1,
+                },
+              },
+            ],
+          },
+        },
+        output: ["FLOAT", "INT", "BOOLEAN"],
+      },
+    } as never;
+
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "PrimitiveInt",
+          mode: 0,
+          inputs: [],
+          outputs: [{ name: "INT", type: "INT", links: [1, 2] }],
+          widgets_values: [8],
+        },
+        {
+          id: 2,
+          type: "ComfyMathExpression",
+          mode: 0,
+          inputs: [
+            { name: "values.a", type: "FLOAT,INT,BOOLEAN", link: 1 },
+            { name: "values.b", type: "FLOAT,INT,BOOLEAN", link: 2 },
+            { name: "expression", type: "STRING", link: null, widget: { name: "expression" } },
+          ],
+          outputs: [{ name: "INT", type: "INT", links: null }],
+          widgets_values: ["a + b"],
+        },
+      ],
+      links: [
+        [1, 1, 0, 2, 0, "INT"],
+        [2, 1, 0, 2, 1, "INT"],
+      ],
+    } as never;
+
+    const { workflow } = convertUiToApi(ui, objectInfo);
+    expect(workflow["2"].inputs).toEqual({
+      expression: "a + b",
+      "values.a": ["1", 0],
+      "values.b": ["1", 0],
+    });
+    expect(workflow["2"].inputs).not.toHaveProperty("values");
   });
 
   it("virtual Set/Get bus nodes are dropped and consumers resolve through the bus", () => {

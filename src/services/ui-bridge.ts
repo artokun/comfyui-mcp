@@ -298,21 +298,157 @@ export function minPanelVersionForCmd(cmd: string): string {
 export const SEMVER_RE =
   /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/;
 
-/**
- * The highest panel version this MCP build needs across its bridge commands and
- * handshake capabilities. Keep this beside both capability tables so proactive
- * panel sync and a bridge refusal report the same derived requirement.
- */
-export function requiredPanelVersion(): string {
+/** Fold a list of candidate minimums into the highest PARSEABLE one, seeded with
+ *  the full-set baseline. Unparseable entries are skipped rather than allowed to
+ *  win — a table typo must not fabricate a requirement. */
+function highestRequirement(candidates: readonly (string | undefined)[]): string {
   let best = MIN_PANEL_VERSION_FOR_BRIDGE_COMMANDS;
-  for (const min of [
-    ...Object.values(BRIDGE_CMD_MIN_PANEL_VERSION),
-    ...Object.values(BRIDGE_CAPABILITY_MIN_PANEL_VERSION),
-  ]) {
+  for (const min of candidates) {
+    // A missing table key must degrade to "skip", never to a throw: this runs
+    // inside error-message construction, where a throw would replace an
+    // actionable refusal with an opaque crash.
+    if (typeof min !== "string") continue;
     if (!SEMVER_RE.test(min.trim())) continue;
     if (!SEMVER_RE.test(best.trim()) || compareSemver(min, best) > 0) best = min;
   }
   return best;
+}
+
+/**
+ * A panel version AS OBSERVED, with the parsed form separated from the text.
+ *
+ * The handshake's `panel_version` is an arbitrary string. Screening it wherever
+ * it happens to be rendered does not hold: the screen was added at the write
+ * refusal, and the reactive unknown-command path — which builds its own view
+ * from the same raw field — went on rendering "detected panel nightly" and
+ * calling the panel too old. One value, two consumers, one of them screened.
+ *
+ * So the screen moves into the TYPE. A consumer that wants a version reads
+ * `.version`, which exists only when the text is strict SemVer; a consumer that
+ * wants to show what was actually said reads `.raw`. The unparseable value is
+ * still available — it is real evidence, and hiding it would be its own kind of
+ * lying — but it is no longer reachable through a field named like a version, so
+ * the next consumer added cannot accidentally treat it as one.
+ *
+ * `nightly` is the case that matters in practice: it is what ComfyUI-Manager
+ * reports for a git-installed pack, so it is the normal reading for anyone
+ * running the panel from source rather than the Registry.
+ */
+export interface PanelVersionReading {
+  /** Verbatim (trimmed) text THIS handshake carried. EVIDENCE, never a version. */
+  raw?: string;
+  /** Set ONLY when `raw` is a strict SemVer — the sole form that may be compared,
+   *  or quoted to a user as this panel's version. */
+  version?: string;
+  /**
+   * A PREVIOUS connection's text, when THIS handshake carried none.
+   *
+   * `Conn.panelVersion` is inherited across a reconnect that omits the field, so
+   * a raw read of it silently attributes an old observation to the current
+   * connection. Provenance therefore travels with the reading, exactly as
+   * parseability does — and for the same reason: the screen has to live
+   * somewhere a consumer cannot forget it. It is never a `.version`: it was not
+   * observed here, so it may not be compared or stated as this panel's version.
+   * It is still disclosed, because it is a real earlier reading and discarding
+   * it would be its own way of losing evidence.
+   */
+  inherited?: string;
+}
+
+/** Screen a handshake `panel_version` into a reading. Blank and unparseable both
+ *  yield no `.version`; blank additionally yields no `.raw`, because whitespace
+ *  is not evidence of anything. Never throws. */
+export function readPanelVersion(raw: string | undefined): PanelVersionReading {
+  const trimmed = typeof raw === "string" ? raw.trim() : "";
+  if (!trimmed) return {};
+  return SEMVER_RE.test(trimmed) ? { raw: trimmed, version: trimmed } : { raw: trimmed };
+}
+
+/**
+ * What THIS connection observed about the panel's version — the single answer
+ * every consumer must use.
+ *
+ * There were three consumers reading `conn.panelVersion` and they disagreed:
+ * the workflow fence checked `panelVersionAdvertised`, the proactive gate
+ * checked it, and the reactive unknown-command rewrite did not — so a re-hello
+ * that omitted the field could still produce "detected panel 0.4.5 … too old"
+ * about a connection that observed no version at all. Routing all of them
+ * through here makes provenance a property of the reading rather than something
+ * each call site has to remember.
+ */
+export function connPanelVersionReading(conn: {
+  panelVersion?: string;
+  panelVersionAdvertised?: boolean;
+}): PanelVersionReading {
+  if (conn.panelVersionAdvertised) return readPanelVersion(conn.panelVersion);
+  const carried = typeof conn.panelVersion === "string" ? conn.panelVersion.trim() : "";
+  return carried ? { inherited: carried } : {};
+}
+
+/**
+ * The highest panel version this MCP build needs across its bridge commands and
+ * handshake capabilities. Keep this beside both capability tables so proactive
+ * panel sync and a bridge refusal report the same derived requirement.
+ *
+ * This is the SYNC/INSTALL question — "how new must the panel be for this
+ * orchestrator to have everything it might want?" It is an aggregate across
+ * every command and capability, so it is NOT the answer to "what does the write
+ * I just refused actually need"; quoting it there is the #619 self-contradiction
+ * in another costume (see requiredPanelVersionForWorkflowFence).
+ */
+export function requiredPanelVersion(): string {
+  return highestRequirement([
+    ...Object.values(BRIDGE_CMD_MIN_PANEL_VERSION),
+    ...Object.values(BRIDGE_CAPABILITY_MIN_PANEL_VERSION),
+  ]);
+}
+
+/**
+ * The minimum panel version that can fence a graph WRITE to its workflow — the
+ * only version a fenced-write refusal is entitled to quote. `undefined` when
+ * this build cannot state it.
+ *
+ * A write needs BOTH handshake capabilities (the dispatch-time stamp check and
+ * the after-await write-boundary recheck), so it is their maximum, not the
+ * global one. Today the two happen to be equal, which is precisely why this
+ * needs to be separate NOW: the moment some unrelated command declares a higher
+ * minimum, `requiredPanelVersion()` rises and the refusal starts telling users
+ * their write needs a version it does not need — a number they cannot verify,
+ * attached to a remedy they will run for the wrong reason. Same defect as #352 /
+ * #619 (a blanket floor quoted as one command's requirement), one level up.
+ *
+ * BOTH entries must be present and parseable, and an incomplete table yields
+ * `undefined` rather than a number (codex gate). Two wrong answers were
+ * available here and both are the fold this cluster exists to remove:
+ *
+ *  - falling back to `MIN_PANEL_VERSION_FOR_BRIDGE_COMMANDS` would quote 0.11.4
+ *    as "the first build that fences every command", which is simply false — the
+ *    fence shipped in 0.11.30/0.11.35. An unreadable table is an unreadable
+ *    OBSERVATION, not evidence of a low requirement.
+ *  - taking the max of whichever entry survived would UNDERSTATE it: a user told
+ *    0.11.30 suffices would update, still be refused, and be back in the loop
+ *    #812 reported.
+ *
+ * So when the table cannot answer, nothing is quoted. The gate still refuses —
+ * the refusal is not what is uncertain — and the message says which part it
+ * could not determine.
+ */
+export function requiredPanelVersionForWorkflowFence(): string | undefined {
+  const raw = [
+    BRIDGE_CAPABILITY_MIN_PANEL_VERSION.enforces_workflow_stamp,
+    BRIDGE_CAPABILITY_MIN_PANEL_VERSION.enforces_workflow_stamp_at_write,
+  ];
+  // Every entry must be a parseable version. `typeof` first so a table with a
+  // deleted or non-string key degrades instead of throwing inside .trim() —
+  // this runs while composing an error message.
+  if (!raw.every((v) => typeof v === "string" && SEMVER_RE.test(v.trim()))) return undefined;
+  // Folded WITHOUT highestRequirement's baseline seed: this answer is the
+  // capabilities' own maximum and must not inherit an unrelated floor, in either
+  // direction. Trimmed because the value is rendered into a user-facing
+  // sentence. (Every entry is already screened, so compareSemver's
+  // equal-vs-unparseable ambiguity cannot bite here.)
+  const parsed = raw.map((v) => (v as string).trim());
+  return parsed.reduce((best, v) => (compareSemver(v, best) > 0 ? v : best));
 }
 
 /**
@@ -345,6 +481,10 @@ export function requiredPanelVersion(): string {
  *     A tab claiming the same current version yet missing the capability is some
  *     other fault, not this one, and must not be given this diagnosis.
  */
+/** @param panelVersion the version THIS connection ADVERTISED in its own hello —
+ *  never `conn.panelVersion` raw, which is inherited across an omitted-version
+ *  reconnect. Reasoning about an inherited value here would let a previous
+ *  connection's reading decide whether the CURRENT tab is the stale part. */
 function resolveStaleBundleSkew(panelVersion?: string): PanelBundleSkew | undefined {
   const disk = verifiedPanelDiskVersion()?.trim();
   if (!disk) {
@@ -355,13 +495,33 @@ function resolveStaleBundleSkew(panelVersion?: string): PanelBundleSkew | undefi
     void primePanelBase().catch(() => {});
     return undefined;
   }
-  const required = requiredPanelVersion();
+  // THE FENCE's floor, not the aggregate requiredPanelVersion() (codex gate).
+  // This function answers one question — "is the install sufficient for the
+  // WRITE that was just refused?" — and the aggregate answers a different one
+  // ("is it sufficient for everything this build might want?"). Using the
+  // aggregate is wrong in both directions:
+  //   - too strict: an unrelated command declaring a higher minimum would deny
+  //     the positive proof for a disk panel that IS sufficient for this write,
+  //     and send a user whose only problem is a cached tab off to update;
+  //   - self-contradictory: with an incomplete fence table the aggregate still
+  //     returns a number, so the same refusal could say "Do NOT update — your
+  //     0.11.35 meets the 0.11.30+ required" while its other half says it cannot
+  //     state the fence version at all.
+  // And when the fence's own floor is unknowable, nothing is proven: no skew.
+  const required = requiredPanelVersionForWorkflowFence();
+  if (!required) return undefined;
   if (!SEMVER_RE.test(disk) || !SEMVER_RE.test(required.trim())) return undefined;
   if (compareSemver(disk, required) < 0) return undefined; // install really IS behind
 
   const advertised = panelVersion?.trim();
   if (advertised) {
-    // A version we cannot parse is not proof of an old tab.
+    // Defence in depth. The caller now screens the handshake value against
+    // SEMVER_RE and passes `undefined` for anything unparseable, so a value that
+    // reaches here is already a version — but this must not become the ONLY
+    // screen: returning undefined for an unparseable string would silently drop
+    // the diagnosis for the "nightly" case (a git-installed pack), which is
+    // precisely the population that ends up in this refusal. An unparseable
+    // reading is an ABSENT reading, and the caller resolves it as one.
     if (!SEMVER_RE.test(advertised)) return undefined;
     if (compareSemver(advertised, required) >= 0) return undefined;
   }
@@ -464,21 +624,44 @@ function mcpServerVersion(): string | undefined {
 
 function buildPanelTooOldError(
   cmd: string,
-  panelVersion?: string,
+  reading: PanelVersionReading,
   mcpVersion: string | undefined = mcpServerVersion(),
 ): Error {
-  const detected = panelVersion
-    ? ` (detected panel ${panelVersion}${mcpVersion ? `, mcp ${mcpVersion}` : ""})`
-    : mcpVersion
-      ? ` (detected mcp ${mcpVersion})`
-      : "";
+  const mcpTail = mcpVersion ? `, mcp ${mcpVersion}` : "";
+  const detected = reading.version
+    ? ` (detected panel ${reading.version}${mcpTail})`
+    : reading.raw
+      ? // The value is EVIDENCE, quoted so it reads as a string rather than as a
+        // version. "nightly" is the common one — ComfyUI-Manager's answer for a
+        // git-installed pack — and it used to render as "detected panel nightly",
+        // a version-shaped claim about something never parsed.
+        ` (this panel reports "${reading.raw}", which is not a comparable version${mcpTail})`
+      : reading.inherited
+        ? // Observed by an EARLIER connection, not this one. Disclosed, because
+          // it is real, and labelled, because attributing it to this handshake
+          // would be a claim nothing here supports.
+          ` (this connection advertised no panel version; an earlier connection for this tab ` +
+          `reported ${reading.inherited}, which may be out of date${mcpTail})`
+        : mcpVersion
+          ? ` (detected mcp ${mcpVersion})`
+          : "";
   const min = BRIDGE_CMD_MIN_PANEL_VERSION[cmd];
+  // "TOO OLD" IS AN AGE VERDICT, and it may only be reached from an age
+  // OBSERVATION: a version that parsed AND compares below the command's known
+  // minimum. Everything else — no version, an unparseable one — has exactly one
+  // observed fact behind it, the panel's own "Unknown command" reply, and that
+  // fact is "does not implement", not "is old". The remedy is unchanged either
+  // way, and the command's true minimum is still quoted when it is known, so
+  // nothing actionable is lost by declining to guess the cause.
+  const provenOld =
+    !!min && !!reading.version && SEMVER_RE.test(min.trim()) && compareSemver(reading.version, min) < 0;
+  const remedy = min
+    ? `update the ComfyUI-MCP panel to ≥${min} (ComfyUI Manager → update comfyui-mcp panel), then reconnect.`
+    : `update the ComfyUI-MCP panel to the latest release (ComfyUI Manager → update comfyui-mcp panel), then reconnect.`;
   const e = new Error(
-    min
-      ? `This ComfyUI-MCP panel is too old for "${cmd}"${detected} — update the ComfyUI-MCP panel ` +
-          `to ≥${min} (ComfyUI Manager → update comfyui-mcp panel), then reconnect.`
-      : `This ComfyUI-MCP panel does not implement "${cmd}"${detected} — update the ComfyUI-MCP panel ` +
-          `to the latest release (ComfyUI Manager → update comfyui-mcp panel), then reconnect.`,
+    provenOld
+      ? `This ComfyUI-MCP panel is too old for "${cmd}"${detected} — ${remedy}`
+      : `This ComfyUI-MCP panel does not implement "${cmd}"${detected} — ${remedy}`,
   );
   // STRUCTURED discriminator (#413): both the reactive rewrite and the #236
   // proactive gate funnel through here, so tagging the error object lets callers
@@ -545,7 +728,9 @@ export function isUnknownCommandReply(error: string): boolean {
 
 export function makeUnknownCommandError(
   error: string,
-  panelVersion?: string,
+  /** A raw handshake string (callers with nothing else) or, preferably, an
+   *  already-screened reading carrying parseability AND provenance. */
+  panelVersion?: string | PanelVersionReading,
   mcpVersion?: string,
 ): Error | null {
   // Match the panel's exact shape: `Unknown command "graph_query"` (quotes
@@ -562,8 +747,24 @@ export function makeUnknownCommandError(
   // or a transient), so do NOT rewrite it into a bogus "update your panel" verdict
   // (which would also POISON the #236 unsupported-cmd gate against a capable panel).
   // Return null so the raw error surfaces and the gate is never poisoned.
-  if (panelSupportsCmd(cmd, panelVersion)) return null;
-  return buildPanelTooOldError(cmd, panelVersion, mcpVersion);
+  const reading =
+    typeof panelVersion === "object" && panelVersion !== null
+      ? panelVersion
+      : readPanelVersion(panelVersion);
+  // TWO DIFFERENT QUESTIONS, deliberately given different inputs.
+  //
+  // The #352 VETO asks "might this rewrite be bogus?", and its fail-safe answer
+  // is to suppress: surface the raw error and do not poison the #236 learned
+  // gate. An inherited version is weak evidence, but it is evidence, and being
+  // conservative here costs only a less-friendly message — so it keeps the value
+  // this call site has always given it, and the gate's behaviour is unchanged.
+  if (panelSupportsCmd(cmd, reading.version ?? reading.inherited)) return null;
+  // The MESSAGE asks "what did we observe?", and may only state what THIS
+  // connection saw. The raw handshake string ends here: everything downstream
+  // sees a screened reading, so an unparseable value cannot be rendered as a
+  // version, and an inherited one cannot be attributed to this connection (both
+  // of which this consumer used to do — it built its own view of the raw field).
+  return buildPanelTooOldError(cmd, reading, mcpVersion);
 }
 
 /**
@@ -594,11 +795,181 @@ export const BRIDGE_READONLY_CMDS: ReadonlySet<string> = new Set<string>([
   "refresh_nodes",
 ]);
 
-/** #570 P0c — a graph command that WRITES the canvas (add/remove/connect/move/set_widget/
- *  clear/load/…). Any `graph_*` command that is NOT in the read-only allowlist mutates, so
- *  this stays correct as new graph mutators are added without having to enumerate them. */
+/**
+ * What a `graph_*` command can do to the user's WORKFLOW — the single question
+ * the #570 write gate asks.
+ *
+ * THIS IS A LEDGER, NOT A DERIVED SET (#778). The gate used to answer its
+ * question with a value computed for a DIFFERENT one: `BRIDGE_READONLY_CMDS`
+ * exists to decide the default reply timeout and whether a mid-command socket
+ * drop may be parked and resumed, so it lists only commands that are safe to
+ * RE-DISPATCH. Reading "not in that set" as "mutates the canvas" silently
+ * misclassified every command that is a genuine read but not idempotently
+ * re-dispatchable — and every view/selection/scope change, which touches no
+ * workflow content at all. `graph_find_nodes` (#778) was the reported instance;
+ * `graph_list_subgraphs`, `graph_screenshot`, `graph_canvas`,
+ * `graph_select_nodes`, `graph_enter_subgraph`, `graph_exit_subgraph` and
+ * `graph_copy_nodes` were the same defect, unreported. The orchestrator already
+ * knew they were reads — RETRY_TOKEN_CMD_BY_TOOL's doc names them one by one as
+ * "view/read-only" and "reads in spirit" — but that knowledge lived in a third
+ * list, so the gate could not see it.
+ *
+ * So each command is classified ONCE, here, by effect:
+ *
+ *  - `inert`    — cannot change workflow CONTENT and cannot act on it. Pure
+ *                 queries, plus viewport / selection / subgraph-scope /
+ *                 clipboard changes. Delivered to the wrong workflow after a
+ *                 tab switch, the worst case is that the user is looking at
+ *                 something unexpected — nothing of theirs is altered, so the
+ *                 per-command workflow fence buys nothing and refusing these on
+ *                 an old panel only removes read access for no safety gain.
+ *  - `targeted` — changes workflow content, publishes from it, or queues a
+ *                 render of it. A delivered frame cannot be retracted, so these
+ *                 MUST be fenced to the workflow they were issued for.
+ *
+ * Unlisted commands FAIL CLOSED to `targeted`: a command nobody classified must
+ * never be waved through the gate by omission. `graph-command-effect.test.ts`
+ * turns that silent fallback into a failing test by scanning the orchestrator
+ * for every `graph_*` command it actually dispatches and requiring an entry
+ * here — which is the part that was missing when #778 shipped.
+ */
+export type GraphCmdEffect = "inert" | "targeted";
+
+export const GRAPH_CMD_EFFECT: Readonly<Record<string, GraphCmdEffect>> = {
+  // ---- inert: reads -------------------------------------------------------
+  graph_serialize: "inert",
+  graph_outline: "inert",
+  graph_get_errors: "inert",
+  graph_get_state: "inert",
+  graph_get_subgraph: "inert",
+  graph_prompt_director_audit: "inert",
+  graph_query: "inert",
+  // #778 — the reported instance: a filtered node query, no different from
+  // graph_query, refused as a canvas mutation on a panel that does not advertise
+  // the workflow fence.
+  graph_find_nodes: "inert",
+  // Lists saved subgraph BLUEPRINTS from the user's library. Its own tool
+  // description ends "Read-only."
+  graph_list_subgraphs: "inert",
+  graph_screenshot: "inert",
+  // ---- inert: view / selection / scope / clipboard ------------------------
+  graph_view_selected: "inert",
+  graph_view_nodes_in_viewport: "inert",
+  // Moves the viewport only ("It changes what they are looking AT and returns
+  // nothing about the graph … View-only"). NOT added to BRIDGE_READONLY_CMDS:
+  // `pan` is a dx/dy DELTA, so re-dispatching it after a reconnect would pan
+  // twice. Inert for the fence, not idempotent for the parker — which is exactly
+  // the distinction collapsing the two lists destroyed.
+  graph_canvas: "inert",
+  graph_select_nodes: "inert",
+  graph_enter_subgraph: "inert",
+  graph_exit_subgraph: "inert",
+  // Reads nodes OUT of the graph into the clipboard. Writes nothing back; the
+  // paste that would write is `graph_paste_nodes`, which is targeted.
+  graph_copy_nodes: "inert",
+  // ---- targeted: content edits -------------------------------------------
+  graph_add_node: "targeted",
+  graph_remove_node: "targeted",
+  graph_clear: "targeted",
+  graph_connect: "targeted",
+  graph_disconnect: "targeted",
+  graph_set_widget: "targeted",
+  graph_set_node_property: "targeted",
+  graph_move_node: "targeted",
+  graph_resize_node: "targeted",
+  graph_set_title: "targeted",
+  graph_set_node_collapsed: "targeted",
+  graph_set_node_color: "targeted",
+  graph_edit_node: "targeted",
+  graph_set_node_mode: "targeted",
+  graph_update_node: "targeted",
+  graph_create_group: "targeted",
+  graph_edit_group: "targeted",
+  graph_remove_group: "targeted",
+  graph_move_group: "targeted",
+  graph_create_subgraph: "targeted",
+  graph_add_subgraph: "targeted",
+  graph_unpack_subgraph: "targeted",
+  graph_subgraph_group: "targeted",
+  graph_expose_subgraph_input: "targeted",
+  graph_expose_subgraph_output: "targeted",
+  graph_promote_widget: "targeted",
+  graph_move_rail: "targeted",
+  graph_paste_nodes: "targeted",
+  graph_auto_layout: "targeted",
+  graph_load: "targeted",
+  // Publishes a subgraph node from THIS graph into the user's blueprint library
+  // — a persistent artifact built from whichever workflow received the command.
+  graph_save_subgraph: "targeted",
+  // Does not edit the graph, but QUEUES it: the wrong workflow would consume the
+  // GPU and write output files the user never asked for. The fence's promise is
+  // "this command acts on the workflow it was issued for", and a render is an
+  // act on it.
+  graph_run: "targeted",
+};
+
+/**
+ * Every `graph_*` command this process has had to classify BY DEFAULT, because
+ * it had no GRAPH_CMD_EFFECT entry.
+ *
+ * The ledger's completeness is checked by scanning the sources for the commands
+ * the orchestrator dispatches — and a source scan can only see what it can
+ * recognise. A command routed through a helper, an alias, or a computed name
+ * walks around it, the suite stays green, and the command silently falls back to
+ * `targeted`: the unclassified-read over-refusal (#778) rebuilt behind the guard
+ * that exists to prevent it. That is the same shape as the vocabulary ratchet,
+ * where deleting a baseline line is the documented way to disarm the gate.
+ *
+ * So the fallback also RECORDS, at the point of use. This observation cannot be
+ * evaded by how a call is spelled — it is taken from the command actually being
+ * routed — and it gives the tests an assertion that does not depend on reading
+ * source text: drive the real tool surface, then assert this set is empty.
+ */
+const unclassifiedGraphCmds = new Set<string>();
+
+/** The `graph_*` commands classified by fallback since process start. Empty is
+ *  the invariant; anything in it is a ledger gap, not a runtime condition. */
+export function unclassifiedGraphCommandsSeen(): ReadonlySet<string> {
+  return unclassifiedGraphCmds;
+}
+
+/** Test hook — clear the record between probes. */
+export function __resetUnclassifiedGraphCommands(): void {
+  unclassifiedGraphCmds.clear();
+}
+
+/** Record + warn ONCE per command name. Deliberately cannot throw: this runs on
+ *  the dispatch path of every graph command, and a guard that can fail is not a
+ *  guard. It does not change the decision — the fallback is still `targeted`,
+ *  still fail-closed; it only makes the fallback observable instead of silent. */
+function noteUnclassifiedGraphCmd(cmdName: string): void {
+  if (unclassifiedGraphCmds.has(cmdName)) return;
+  unclassifiedGraphCmds.add(cmdName);
+  try {
+    logger.warn(
+      `[ui-bridge] graph command "${cmdName}" has no GRAPH_CMD_EFFECT entry — fencing it as a ` +
+        `WRITE by default. If it is a read or a view/selection change this needlessly refuses ` +
+        `it on every panel below the workflow-fence version (#778). Classify it in ` +
+        `GRAPH_CMD_EFFECT (src/services/ui-bridge.ts).`,
+    );
+  } catch {
+    /* an error-path guard must never become the error */
+  }
+}
+
+/** #570 P0c — a graph command that must be fenced to the workflow it was issued for.
+ *  Answered from GRAPH_CMD_EFFECT, which classifies by EFFECT; an unlisted `graph_*`
+ *  command fails closed to `targeted` so a new mutator is never waved through by
+ *  omission — and is recorded (see unclassifiedGraphCommandsSeen) so the omission
+ *  is visible rather than silent. */
 export function isMutatingGraphCommand(cmdName: string): boolean {
-  return cmdName.startsWith("graph_") && !BRIDGE_READONLY_CMDS.has(cmdName);
+  if (!cmdName.startsWith("graph_")) return false;
+  const effect = GRAPH_CMD_EFFECT[cmdName];
+  if (effect === undefined) {
+    noteUnclassifiedGraphCmd(cmdName);
+    return true; // fail closed
+  }
+  return effect === "targeted";
 }
 
 /** #570 P0c — the four workflow mutators. workflow_save / workflow_save_as ignore any path and
@@ -2496,7 +2867,7 @@ export class UiBridge {
     // on THIS connection (in dispatch()'s rejectMapped below), never inferred from
     // panelVersion alone.
     if (conn.unsupportedCmds.has(cmd.cmd)) {
-      return Promise.reject(buildPanelTooOldError(cmd.cmd, conn.panelVersion));
+      return Promise.reject(buildPanelTooOldError(cmd.cmd, connPanelVersionReading(conn)));
     }
     // #392 — PROACTIVELY gate a command whose changelog-verified minimum the panel's
     // ADVERTISED version parseably undercuts (e.g. graph_query on a <0.7.0 panel), so
@@ -2518,7 +2889,7 @@ export class UiBridge {
       !conn.provenSupportedCmds.has(cmd.cmd) &&
       panelVersionProvesUnsupported(cmd.cmd, conn.panelVersion)
     ) {
-      return Promise.reject(buildPanelTooOldError(cmd.cmd, conn.panelVersion));
+      return Promise.reject(buildPanelTooOldError(cmd.cmd, connPanelVersionReading(conn)));
     }
     // #570 P0c — FAIL CLOSED for a command that mutates the ACTIVE workflow/canvas (every
     // graph_* mutator, plus path-less workflow_save/save_as/rename/close) when the resolved
@@ -2574,23 +2945,95 @@ export class UiBridge {
         // panel sync read OFF DISK at this tab's own hello. When the pack on
         // disk already clears the floor, no update of any kind helps and the
         // remedy is a cache-bypassing reload of this tab.
+        // `conn.panelVersion` is INHERITED across a reconnect whose hello omitted
+        // the field (see the field's doc); `panelVersionAdvertised` is the record
+        // of whether THIS connection actually stated one. Only the advertised
+        // value may be attributed to this tab, or to the skew diagnosis, which
+        // otherwise reasons about an observation the current tab never made
+        // (codex gate). An inherited value is still worth SHOWING — it is a real
+        // earlier reading — but labelled as what it is.
+        // The distinction that matters is PARSEABLE vs NOT, not empty vs
+        // non-empty. An earlier fix trimmed the field so `panel_version: "   "`
+        // stopped rendering as "this tab reports panel    " — but that only
+        // screened BLANK, and `panel_version: "nightly"` sailed through as
+        // "this tab reports panel nightly": a version-shaped claim built from a
+        // string we never parsed, which is this cluster's own defect surviving
+        // inside its fix. It is not a rare input either — ComfyUI-Manager
+        // reports "nightly" for a git-installed pack, so it is the normal case
+        // for anyone running the panel from source rather than the Registry.
+        //
+        // So: `rawAdvertised` is what this handshake actually said (evidence,
+        // shown verbatim), and `advertised` is what we may COMPARE or attribute
+        // as a version. Anything that fails the strict SemVer screen has the
+        // same evidential value as no version at all and takes the unreadable
+        // path — including into `resolveStaleBundleSkew`, which then reasons
+        // from "no comparable version" instead of silently rejecting a value it
+        // would have screened out one line later anyway.
+        // The SAME reading every other consumer uses, so parseability AND
+        // provenance are decided once: `.version` is comparable and
+        // attributable, `.raw` is this handshake's unparseable text, `.inherited`
+        // is an earlier connection's.
+        const reading = connPanelVersionReading(conn);
+        const rawAdvertised = reading.raw;
+        const advertised = reading.version;
         const recovery = describePanelUpdateRecovery(
           undefined,
-          resolveStaleBundleSkew(conn.panelVersion),
+          resolveStaleBundleSkew(advertised),
         );
+        // #819/#823 — do not fold an ABSENT reading into a definite verdict.
+        // "detected panel version unknown; this MCP requires panel 0.11.35+"
+        // reads as "your panel is too old", but a missing version is a missing
+        // OBSERVATION: the tab sent no version, and a CURRENT install behind a
+        // stale cached browser bundle presents exactly the same way. Report what
+        // was actually seen and let the recovery cover both.
+        const NOT_OBSERVED =
+          `so its age was not observed — this is equally consistent with an old install ` +
+          `and with a current one whose browser tab is running a cached older bundle`;
+        const observed = advertised
+          ? `this tab reports panel ${advertised}`
+          : rawAdvertised
+            ? // It said SOMETHING, and that something is evidence worth showing —
+              // but it is not a version, so it may not be narrated as one. The
+              // most common value here is "nightly" (a git-installed pack), for
+              // which the true version is genuinely indeterminate.
+              `this tab advertised "${rawAdvertised}", which is not a version this MCP can ` +
+              `compare (ComfyUI-Manager reports "nightly" for a git-installed pack), ` +
+              `${NOT_OBSERVED}`
+            : reading.inherited
+              ? `this tab advertised NO panel version in its current handshake (an EARLIER ` +
+                `connection for this tab reported ${reading.inherited}, which may be out of ` +
+                `date), ${NOT_OBSERVED}`
+              : `this tab advertised NO panel version, ${NOT_OBSERVED}`;
+        // The FENCE's own minimum, never the aggregate requiredPanelVersion():
+        // a write needs the two workflow-fence capabilities and nothing else, so
+        // quoting the global max would name a version this command does not
+        // require the moment any unrelated command declares a higher one.
+        const fenceMin = requiredPanelVersionForWorkflowFence();
+        // And symmetrically: when THIS build cannot state the fence's minimum,
+        // quote no number at all (codex gate). Falling back to the bridge
+        // baseline would assert "0.11.4, the first build that fences every
+        // command" — false, and false in the direction that sends a user to an
+        // update that will not clear the gate. An unreadable table is another
+        // unmade observation.
+        const needs = (capability: string): string =>
+          fenceMin
+            ? `a graph WRITE needs panel ${fenceMin}+, the first build that ${capability}`
+            : `a graph WRITE needs a panel that ${capability}, but this MCP build cannot say ` +
+              `which version first shipped it (its capability table is incomplete) — no ` +
+              `version is quoted here rather than a wrong one; update to the latest panel`;
         const why = !conn.enforcesWorkflowStamp
-          ? `panel tab ${conn.tabId} does not enforce per-command workflow targeting ` +
-            `(detected panel ${conn.panelVersion ?? "version unknown"}; this MCP requires panel ` +
-              `${requiredPanelVersion()}+). ${recovery}`
+          ? `panel tab ${conn.tabId} does not enforce per-command workflow targeting (${observed}; ` +
+            `${needs("fences every command to the workflow it was issued for")}). ${recovery}`
           : !conn.enforcesWorkflowStampAtWrite
             ? `panel tab ${conn.tabId} does not recheck workflow targeting at the graph write ` +
-              `boundary after asynchronous work (detected panel ${conn.panelVersion ?? "version unknown"}; this MCP ` +
-                `requires panel ${requiredPanelVersion()}+). ${recovery}`
+              `boundary after asynchronous work (${observed}; ` +
+                `${needs("rechecks the fence after an await")}). ${recovery}`
           : `this workflow has no trusted identity for the panel to fence the command against`;
         const refusal = markDispatched(
           new Error(
-            `"${cmd.cmd}" cannot be safely targeted to the active workflow: ${why}. Read-only graph ` +
-              `commands (graph_outline, graph_query, graph_get_state) still work.`,
+            `"${cmd.cmd}" cannot be safely targeted to the active workflow: ${why}. Reads and ` +
+              `view-only commands still work (graph_outline, graph_query, graph_get_state, ` +
+              `graph_find_nodes, graph_list_subgraphs, graph_screenshot, graph_canvas).`,
           ),
           false,
         );
@@ -2668,7 +3111,7 @@ export class UiBridge {
     // reply-error path only; the happy path and genuine command errors are
     // passed through untouched.
     const rejectMapped = (err: Error) => {
-      const friendly = makeUnknownCommandError(err.message, conn.panelVersion);
+      const friendly = makeUnknownCommandError(err.message, connPanelVersionReading(conn));
       // Apply the learned verdict to the LIVE connection — following a same-socket
       // migration whose reply landed after the tmp:→wf: id change — so neither the
       // reactive #236 unsupported gate NOR the #422 proven veto is stranded on a

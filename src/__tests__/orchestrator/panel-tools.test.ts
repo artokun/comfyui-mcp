@@ -943,15 +943,24 @@ describe("panel-tools: panel_find_nodes (live-graph search)", () => {
 });
 
 describe("panel-tools: panel_graph_outline (compact text map)", () => {
-  it("is registered and takes no args", () => {
+  // #809: the outline gained ONE optional argument — `max_chars`, deliberately the same
+  // name and clamp as panel_query_graph's, so there is one budget concept to learn. It
+  // stays argument-free for the "just show me the canvas" call.
+  it("is registered and takes only the optional max_chars budget", () => {
     expect(buildPanelToolDefs().map((d) => d.name)).toContain("panel_graph_outline");
-    expect(Object.keys(defByName("panel_graph_outline").schema)).toEqual([]);
+    expect(Object.keys(defByName("panel_graph_outline").schema)).toEqual(["max_chars"]);
   });
 
   it("forwards graph_outline", async () => {
     const { ctx, calls } = makeFakeCtx();
     await defByName("panel_graph_outline").handler({}, ctx);
     expect(calls[0]).toMatchObject({ cmd: "graph_outline" });
+  });
+
+  it("forwards max_chars when the caller sets one", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_graph_outline").handler({ max_chars: 4000 }, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "graph_outline", max_chars: 4000 });
   });
 });
 

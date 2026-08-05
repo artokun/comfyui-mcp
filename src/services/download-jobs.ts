@@ -993,7 +993,75 @@ export function describePlacement(
   }
 }
 
-export function getDownloadJob(id: string): DownloadJob | undefined {
+/**
+ * Every DISTINCT tracked download that answers to `id`, across this process's
+ * registry AND the persisted store, deduped by the TRUE composite identity
+ * (id, trayId) — the same key `listDownloadJobs`/`findDownloadJob` already use.
+ *
+ * `id` is derived from destination+auth, so two different SOURCE URLs landing on
+ * one file deliberately share it (#467 P1-A dedup). That makes `id` a
+ * DESTINATION handle, not a job handle — and #822 is the consequence: an
+ * identifier that can name two rows cannot select either. This function is what
+ * lets every id-keyed operation SAY SO — listing the candidates a caller must
+ * choose between — instead of silently acting on one or reporting "not found".
+ *
+ * Newest-started first, so a caller printing candidates leads with the live one.
+ */
+export function listDownloadJobCandidates(id: string): DownloadJob[] {
+  const keyOf = (j: DownloadJob): string => `${j.id}\n${j.trayId}`;
+  const byKey = new Map<string, DownloadJob>();
+  for (const e of new Set(jobs.values())) {
+    if (e.job.id !== id) continue;
+    const cur = byKey.get(keyOf(e.job));
+    if (!cur || (e.job.status === "done" && cur.status !== "done")) byKey.set(keyOf(e.job), e.job);
+  }
+  // `trayId` is a hash of the URL, so it does NOT separate sessions: this
+  // session's SETTLED record for a URL and ANOTHER session's still-running
+  // download of the same URL to the same destination collapse to one key. Which
+  // one is reported matters — showing the local "cancelled" row while a foreign
+  // transfer is live would hide a running download behind a stale verdict, and
+  // that is worse than the ambiguity this function exists to surface.
+  const now = Date.now();
+  const isLive = (r: PersistedDownloadJob): boolean =>
+    r.status === "downloading" && now - (r.updated ?? 0) < PERSISTED_INFLIGHT_STALE_MS;
+  for (const rec of listPersistedDownloadJobs()) {
+    if (rec.id !== id) continue;
+    const job = jobFromPersisted(rec);
+    const k = keyOf(job);
+    const cur = byKey.get(k);
+    if (!cur) {
+      byKey.set(k, job);
+      continue;
+    }
+    // Precedence, most authoritative first:
+    //  1. a validated DONE — the file landed, and no later verdict undoes that;
+    //  2. a LIVE transfer — still happening, so it is what the caller needs to know;
+    //  3. anything settled.
+    // (A live IN-MEMORY job is this process's own and already sits in `byKey`, so
+    // it is never displaced by a merely-settled persisted record.)
+    if (job.status === "done" && cur.status !== "done" && cur.status !== "downloading") {
+      byKey.set(k, job);
+    } else if (isLive(rec) && cur.status !== "done" && cur.status !== "downloading") {
+      byKey.set(k, job);
+    }
+  }
+  return [...byKey.values()].sort((a, b) => b.started_at - a.started_at);
+}
+
+/**
+ * Resolve ONE download.
+ *
+ * `trayId` is the DISAMBIGUATOR (#822): with it the lookup keys on the full
+ * composite identity (id, trayId) and can always name exactly one row. Without
+ * it, an id that denotes more than one download still resolves to nothing —
+ * but callers can now distinguish that from "no such download" by asking
+ * {@link listDownloadJobCandidates}, which is the difference between an
+ * actionable "say which one" and a false "it never existed".
+ */
+export function getDownloadJob(id: string, trayId?: string): DownloadJob | undefined {
+  if (trayId) {
+    return listDownloadJobCandidates(id).find((j) => j.trayId === trayId);
+  }
   // The registry indexes each job under its request key and (when local) its
   // destination key; the public id is one of those, so a direct get resolves it.
   const live = jobs.get(id)?.job;
@@ -1131,16 +1199,53 @@ export function listDownloadJobs(): DownloadJob[] {
  * here). A job resolvable only via the persisted store (started by another/previous
  * session after a reconnect) cannot be aborted from here — reported as not-owned.
  */
-export function cancelDownloadJob(id: string): {
+export function cancelDownloadJob(
+  id: string,
+  /** #822 disambiguator: the tray id of the SPECIFIC download to cancel, when the
+   *  public `id` denotes more than one (two source URLs → one destination). With
+   *  it the composite identity (id, trayId) selects exactly one row, which is what
+   *  made the stale job in #822 unselectable — and therefore unstoppable. */
+  trayId?: string,
+): {
   found: boolean;
   owned: boolean;
   aborted: boolean;
   /** The id denotes MORE than one concurrent physical download (a live foreign
-   *  session shares it with a different trayId) — declined, nothing was aborted. */
+   *  session shares it with a different trayId) — declined, nothing was aborted.
+   *  Pass `trayId` to resolve it. */
   ambiguous?: boolean;
+  /** Every download the id answers to — so an ambiguity refusal can NAME the
+   *  choices instead of leaving the caller with no next move. */
+  candidates?: DownloadJob[];
   status?: DownloadJob["status"];
   job?: DownloadJob;
 } {
+  if (trayId) {
+    // Explicit selection: find the ONE local entry with this composite identity.
+    // Scanning entries (rather than jobs.get(id)) matters because the registry's
+    // id row holds only one of several same-destination jobs.
+    const entry = [...new Set(jobs.values())].find(
+      (e) => e.job.id === id && e.job.trayId === trayId,
+    );
+    if (entry) {
+      const { job, controller } = entry;
+      // No ambiguity check here: the caller named the exact download, which is
+      // precisely the information the by-id refusal was missing. A foreign
+      // same-id sibling is a DIFFERENT trayId and is untouched by this abort.
+      if (job.status !== "downloading") {
+        return { found: true, owned: true, aborted: false, status: job.status, job };
+      }
+      if (!controller.signal.aborted) controller.abort();
+      return { found: true, owned: true, aborted: true, status: "downloading", job };
+    }
+    // Not ours. It may be another session's (persisted) — reportable, not abortable.
+    const foreign = listDownloadJobCandidates(id).find((j) => j.trayId === trayId);
+    if (foreign) {
+      return { found: true, owned: false, aborted: false, status: foreign.status, job: foreign };
+    }
+    return { found: false, owned: false, aborted: false, candidates: listDownloadJobCandidates(id) };
+  }
+
   const entry = jobs.get(id);
   if (entry) {
     const { job, controller } = entry;
@@ -1148,8 +1253,24 @@ export function cancelDownloadJob(id: string): {
     // trayId. Aborting by id could act on the wrong logical download — decline so a
     // cancel-by-id can never hit an unintended concurrent download (a #515 invariant).
     if (job.status === "downloading" && hasAmbiguousForeignSibling(id, job.trayId)) {
-      return { found: true, owned: true, aborted: false, ambiguous: true, status: job.status, job };
+      return {
+        found: true,
+        owned: true,
+        aborted: false,
+        ambiguous: true,
+        candidates: listDownloadJobCandidates(id),
+        status: job.status,
+        job,
+      };
     }
+    // NOTE (#822 vs #761): a STALE foreign record sharing this id deliberately does
+    // NOT refuse here. A dead session's leftover row must never permanently jam the
+    // live download this process owns (#761), and the live local job is
+    // unambiguously the one a by-id cancel means. What #822 was missing is not more
+    // refusals — it is the ability to NAME the other row, which `trayId` above now
+    // provides. So: by-id keeps acting on the job we own; the stale sibling is
+    // selectable by its tray id (and reported as not-abortable-from-here, which is
+    // the truth — its AbortController died with its session).
     if (job.status !== "downloading") {
       // Already settled (done/error/cancelled) — idempotent no-op.
       return { found: true, owned: true, aborted: false, status: job.status, job };
@@ -1172,6 +1293,23 @@ export function cancelDownloadJob(id: string): {
   }
   // Not in THIS process's registry. It may still exist in the persisted store
   // (another/previous session owns the AbortController), which we can't abort here.
+  // #822: with no local job to prefer, picking one of several persisted records to
+  // report on would be a guess. Refuse and NAME them — the caller re-issues with the
+  // tray id of the one they mean. Only STILL-DOWNLOADING records create that
+  // ambiguity: a settled record cannot be cancelled wrongly (the call is a no-op
+  // report either way), so it must not block the one row that could be acted on.
+  const persistedCandidates = listDownloadJobCandidates(id);
+  if (persistedCandidates.filter((c) => c.status === "downloading").length > 1) {
+    return {
+      found: true,
+      owned: false,
+      aborted: false,
+      ambiguous: true,
+      candidates: persistedCandidates,
+      status: persistedCandidates[0].status,
+      job: persistedCandidates[0],
+    };
+  }
   const persisted = readPersistedDownloadJob(id);
   if (persisted) {
     return {

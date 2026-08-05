@@ -535,7 +535,7 @@ List the files in one installed custom-node pack under &lt;COMFYUI_PATH&gt;/cust
   Optional glob to filter entries (supports *, **, ?), matched against pack-relative paths.
 </ParamField>
 <ParamField path="max_entries" type="integer">
-  Maximum entries to return (default 500, max 2000).
+  Maximum entries to return (default 500, max 2000 — a hard clamp). The walk STOPS at this many, so a capped result is not the pack's full file list.
 </ParamField>
 
 ### Example
@@ -569,7 +569,7 @@ Read a slice of one file inside a custom-node pack (read-only), with bounded out
   Number of lines to return (default 240, max 800).
 </ParamField>
 <ParamField path="max_chars" type="integer">
-  Maximum characters to return (default 12000, max 24000).
+  Maximum characters to return (default 12000, min 500, max 24000 — hard clamps; values outside are silently pulled into range).
 </ParamField>
 
 ### Example
@@ -603,7 +603,7 @@ Regex-search custom-node source under custom_nodes/ (read-only). Uses ripgrep wh
   Optional glob to restrict which files are searched (e.g. '**/*.py').
 </ParamField>
 <ParamField path="max_results" type="integer">
-  Maximum matches to return (default 50, max 100).
+  Maximum matches to return (default 50, max 100). The scan STOPS at this many, so a capped result is not a complete match set.
 </ParamField>
 <ParamField path="case_sensitive" type="boolean">
   Match case-sensitively (default false).
@@ -703,7 +703,7 @@ Run a git operation inside one custom-node pack (status/diff/log/commit/push). R
   Pack-relative paths to stage/scope (jail-checked). Defaults to all pack changes.
 </ParamField>
 <ParamField path="max_chars" type="integer">
-  Maximum characters of git output to return (default 12000).
+  Maximum characters of git output to return (default 12000, min 500, max 24000 — hard clamps the runtime applies; values outside are silently pulled into range).
 </ParamField>
 
 ### Example

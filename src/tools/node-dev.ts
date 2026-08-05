@@ -7,6 +7,19 @@ import {
   writeNodeFile,
   applyNodePatch,
   nodePackGit,
+  // #809: quote the REAL clamps, never a hand-typed number. node_pack_git's 24000
+  // ceiling was a code clamp its description never mentioned, which is exactly how a
+  // caller ends up raising a parameter and seeing nothing change.
+  READ_DEFAULT_LINES,
+  READ_MAX_LINES,
+  READ_DEFAULT_CHARS,
+  READ_MAX_CHARS,
+  SEARCH_DEFAULT_RESULTS,
+  SEARCH_MAX_RESULTS,
+  CMD_OUTPUT_MAX,
+  LIST_DEFAULT_ENTRIES,
+  LIST_MAX_ENTRIES,
+  MIN_OUTPUT_CHARS,
 } from "../services/node-dev.js";
 import { errorToToolResult } from "../utils/errors.js";
 
@@ -42,7 +55,9 @@ export function registerNodeDevTools(server: McpServer): void {
         .number()
         .int()
         .optional()
-        .describe("Maximum entries to return (default 500, max 2000)."),
+        .describe(
+          `Maximum entries to return (default ${LIST_DEFAULT_ENTRIES}, max ${LIST_MAX_ENTRIES} — a hard clamp). The walk STOPS at this many, so a capped result is not the pack's full file list.`,
+        ),
     },
     async (args) => {
       try {
@@ -80,12 +95,12 @@ export function registerNodeDevTools(server: McpServer): void {
         .number()
         .int()
         .optional()
-        .describe("Number of lines to return (default 240, max 800)."),
+        .describe(`Number of lines to return (default ${READ_DEFAULT_LINES}, max ${READ_MAX_LINES}).`),
       max_chars: z
         .number()
         .int()
         .optional()
-        .describe("Maximum characters to return (default 12000, max 24000)."),
+        .describe(`Maximum characters to return (default ${READ_DEFAULT_CHARS}, min ${MIN_OUTPUT_CHARS}, max ${READ_MAX_CHARS} — hard clamps; values outside are silently pulled into range).`),
     },
     async (args) => {
       try {
@@ -126,7 +141,7 @@ export function registerNodeDevTools(server: McpServer): void {
         .number()
         .int()
         .optional()
-        .describe("Maximum matches to return (default 50, max 100)."),
+        .describe(`Maximum matches to return (default ${SEARCH_DEFAULT_RESULTS}, max ${SEARCH_MAX_RESULTS}). The scan STOPS at this many, so a capped result is not a complete match set.`),
       case_sensitive: z
         .boolean()
         .optional()
@@ -244,7 +259,7 @@ export function registerNodeDevTools(server: McpServer): void {
         .number()
         .int()
         .optional()
-        .describe("Maximum characters of git output to return (default 12000)."),
+        .describe(`Maximum characters of git output to return (default ${CMD_OUTPUT_MAX}, min ${MIN_OUTPUT_CHARS}, max ${READ_MAX_CHARS} — hard clamps the runtime applies; values outside are silently pulled into range).`),
     },
     async (args) => {
       try {

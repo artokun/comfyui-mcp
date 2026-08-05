@@ -377,10 +377,19 @@ describe("recovery guidance depends on the session, not on a hardcoded string", 
     expect(text).toMatch(/ON THE COMFYUI HOST/);
     expect(text).toMatch(/REMOTE ComfyUI/);
     expect(text).toContain(PANEL_REPO_URL);
-    // Both install shapes are covered, because the user cannot be asked to
+    // ALL THREE on-disk states are covered, because the user cannot be asked to
     // diagnose which one they have before they can act.
-    expect(text).toMatch(/pull --ff-only/);
-    expect(text).toMatch(/no \.git/);
+    expect(text).toMatch(/pull --ff-only/); // (1) git checkout
+    expect(text).toMatch(/NO \.git/); // (2) Comfy Registry zip install
+    // (3) #819 — the pack is NOT THERE. A stale ComfyUI-Manager 3.x reports its
+    // queue drained without creating it, so a user who believes they installed
+    // the panel can have an empty custom_nodes. `git -C <dir> pull` and
+    // `mv <dir> …` both fail in that state, which left cases (1) and (2) as no
+    // instruction at all. A plain clone is the command that moves them.
+    expect(text).toMatch(/NEITHER/);
+    expect(text).toMatch(
+      new RegExp(`git clone --depth 1 ${PANEL_REPO_URL.replace(/[.]/g, "\\.")} comfyui-agent-panel`),
+    );
   });
 
   it("CLOUD: same, and says why (no custom_nodes to write)", () => {
@@ -440,10 +449,54 @@ describe("disk-current but handshake-old is diagnosed as a stale tab, not a stal
     expect(text).not.toContain(PANEL_REPO_URL);
   });
 
-  it("handles the 'version unknown' handshake from #784", () => {
+  it("the manual instructions recognise BOTH accepted panel directory names", async () => {
+    // A plain `git clone` of the repo lands in comfyui-mcp-panel; the Registry
+    // installs comfyui-agent-panel. The installer accepts both. Guidance that
+    // judged "not present" by the Registry name alone told a repo-checkout user
+    // to clone a SECOND serving copy into custom_nodes — manufacturing the
+    // two-panels-racing state (#641) that the same paragraph warns about.
+    const { FAST_PATH_DIRS } = await import("../../services/panel-installer.js");
+    const { PANEL_DIR_NAMES, manualPanelUpdateCommands } = await import(
+      "../../services/panel-recovery.js"
+    );
+    expect([...PANEL_DIR_NAMES].sort()).toEqual([...FAST_PATH_DIRS].sort());
+
+    const text = manualPanelUpdateCommands("/home/u/ComfyUI");
+    for (const dir of FAST_PATH_DIRS) expect(text).toContain(dir);
+    // The absent-case is gated on BOTH being missing, and the danger of running
+    // it otherwise is stated rather than left to be discovered.
+    expect(text).toMatch(/NEITHER .* is present/);
+    expect(text).toMatch(/Do NOT run case \(3\) while one of them exists under the other name/);
+    // The in-place cases no longer hardcode one name.
+    expect(text).toMatch(/git -C <panel-dir> pull --ff-only/);
+  });
+
+  it("handles the 'version unknown' handshake from #784 WITHOUT asserting the cause", () => {
+    // codex gate. With no advertised version, "your tab is running a cached old
+    // bundle" is an inference, not an observation — a relay or other non-panel
+    // client that never implemented the fence is observationally identical, and
+    // "hard-refresh your tab" is unactionable for it. What IS proven is that the
+    // pack on disk is capable, so no update helps; the causes are RANKED, most
+    // likely and most actionable first, with the other named rather than hidden.
     const text = describePanelUpdateRecovery(undefined, SKEW);
     expect(text).toMatch(/advertised no version/);
-    expect(text).toMatch(/HARD-REFRESH/);
+    expect(text).toMatch(/Updating the panel will not fix this/); // the proven part
+    expect(text).not.toMatch(/This BROWSER TAB is running an older cached copy/); // the unproven part
+    expect(text).toMatch(/does not by itself say why/);
+    expect(text).toMatch(/\(1\) It is a ComfyUI browser tab/);
+    expect(text).toMatch(/HARD-REFRESH/); // still leads with the actionable fix
+    expect(text).toMatch(/\(2\) It is NOT a panel tab/);
+    expect(text).toMatch(/nothing to refresh/);
+  });
+
+  it("an ADVERTISED old version is still a definite diagnosis", () => {
+    // The other side of the same coin: a version below the floor IS positive
+    // proof of a tab/disk skew (both the version and the capability are built by
+    // the same served file), so hedging there would be its own failure.
+    const text = describePanelUpdateRecovery(undefined, { ...SKEW, handshakeVersion: "0.11.34" });
+    expect(text).toMatch(/Do NOT update the panel/);
+    expect(text).toMatch(/This BROWSER TAB is running an older cached copy/);
+    expect(text).not.toMatch(/does not by itself say why/);
   });
 
   it("the skew branch outranks remote mode — and still never names an uncallable tool", () => {
@@ -451,12 +504,15 @@ describe("disk-current but handshake-old is diagnosed as a stale tab, not a stal
     mode.remote = true;
     __resetPanelBaseCache();
     const text = describePanelUpdateRecovery(undefined, SKEW);
-    expect(text).toMatch(/Do NOT update the panel/);
+    expect(text).toMatch(/Updating the panel will not fix this/);
     expect(text).not.toMatch(/ON THE COMFYUI HOST/);
-    // Even the closing "it would report nothing to do" aside must not mention a
-    // tool that is not callable in this session.
+    // Even the closing aside must not mention a tool that is not callable in
+    // this session.
     expect(text).not.toMatch(/install_panel/);
-    expect(text).toMatch(/No update of any kind will help/);
+    expect(text).toMatch(/No update of any kind fixes this/);
+    // No trailing period: the bridge appends its own sentence break, and one
+    // here rendered ".." to the user (codex gate).
+    expect(text.endsWith(".")).toBe(false);
   });
 
   it("without a skew, the ordinary update guidance is unchanged", async () => {

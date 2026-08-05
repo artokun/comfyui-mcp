@@ -83,6 +83,13 @@ export function registerRegistrySearchTools(server: McpServer): void {
             ...details.versions.slice(0, 5).map(
               (v) => `- **${v.version}**${v.changelog ? `: ${v.changelog}` : ""}`,
             ),
+            // #809: say how many were dropped. This preview has no parameter to raise,
+            // so the honest remedy is the upstream index, not an invented lever.
+            ...(details.versions.length > 5
+              ? [
+                  `- …and ${details.versions.length - 5} older version(s) not shown (fixed 5-version preview — full history at https://registry.comfy.org/)`,
+                ]
+              : []),
           );
         }
 

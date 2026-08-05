@@ -34,8 +34,15 @@ function ensurePanelOnLoad(): void {
             res,
           );
           break;
-        case "up-to-date":
-          logger.info("Panel auto-install: panel already present.", res);
+        // #806 — "already present" is the whole claim. The line used to be paired
+        // with `action: "up-to-date"`, and users read the pair as "you are on the
+        // newest panel"; nothing on this path compares versions.
+        case "present":
+          logger.info(
+            "Panel auto-install: panel already present — NOT a version check. " +
+              "Run install_panel(action='status') to compare it against what this build needs.",
+            res,
+          );
           break;
         case "skipped-dev":
           logger.info(

@@ -63,22 +63,37 @@ describe("assertComplete fail-closed (#467 P1-B)", () => {
   it("does NOT finalize (rename into cache) when the size can't be verified against a known Content-Length", async () => {
     // A full body WITH an authoritative Content-Length. Normally this verifies and
     // finalizes; with stat failing at completion it must fail closed instead.
+    // The stat must fail AT COMPLETION, which is what this test is about. Flipping
+    // the flag before the call would instead trip the staged-file ownership check
+    // (an unreadable staged file now refuses BEFORE writing, rather than being
+    // mistaken for "no partial" and truncated) — a different, also-correct
+    // refusal, but not the one named here. Flip it once the body is consumed.
     fetchMock.mockResolvedValueOnce(
-      new Response("the-model-bytes", {
-        status: 200,
-        statusText: "OK",
-        headers: { "content-length": "15" },
-      }),
+      new Response(
+        new ReadableStream<Uint8Array>({
+          pull(c) {
+            c.enqueue(new TextEncoder().encode("the-model-bytes"));
+            statCtl.fail = true;
+            c.close();
+          },
+        }),
+        { status: 200, statusText: "OK", headers: { "content-length": "15" } },
+      ),
     );
 
-    statCtl.fail = true;
     await expect(
       downloadWithCache({
         url: "https://example.com/models/failclosed.safetensors",
         headers: {},
         targetPath: join(comfyDir, "out.safetensors"),
       }),
-    ).rejects.toThrow(/could not be verified|not finalizing/i);
+      // Either fail-closed refusal is correct here, and which one fires depends on
+      // WHICH stat the simulated EIO reaches first. The completion check says "I
+      // could not verify the size"; the staged-file ownership check says "I could
+      // not read the staged file, so I will not act on it". Both refuse for the
+      // same reason — an unreadable file is not a known-good one — and the
+      // load-bearing assertion below (nothing was finalized) is unchanged either way.
+    ).rejects.toThrow(/could not be verified|not finalizing|could not be read/i);
 
     // Crucially: nothing was renamed into the cache as a "successful" download.
     statCtl.fail = false;

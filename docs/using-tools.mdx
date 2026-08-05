@@ -163,18 +163,24 @@ Naming the tool and the argument is not the *correct* form — it is the *forcef
 
 ### When the answer gets cut off
 
-Long reads are capped so that one enormous graph cannot swallow the whole conversation. When a read is trimmed you get a note saying so, and it suggests an argument to raise.
+Long reads are capped so that one enormous graph cannot swallow the whole conversation. Two different ceilings can stop the same read — the number of nodes listed (`limit`) and the character budget (`max_chars`) — and raising the one that was not the problem changes nothing, which reads exactly like the retry having failed.
 
-**Check that suggestion against what actually ran out.** Two different ceilings can stop the same read, and the suggestion does not always name the one that fired.
+You are not expected to work out which. On a saved file, the note **names the lever that fired and rules out the other one**, in as many words:
 
-The note reads like `truncated at 40 of 300`. Compare that first number with the node limit that was in force — 40 unless the agent had already raised it:
+> … truncated at 40 of 300 by `limit`=40 — raise `limit` up to 200, or narrow with `types`/`where`/`ids`/`depth`. `max_chars` is not the constraint here.
 
-- **They match.** `limit` ran out: it listed as many nodes as it was allowed to.
-- **It stopped short of the limit**, usually on rows carrying a lot of detail. Then it was `max_chars`, the character budget.
+And when the lever is already at its ceiling it says so instead of sending you to raise it again, because there is nothing left to raise.
 
-Raising the one that was not the problem changes nothing, which reads exactly like the retry having failed. And if the argument is already at its ceiling, raising it is not available at all — narrow the question instead, as below. The agent is supposed to work this out and retry by itself; when it doesn't, you are the fallback, and this is the sentence:
+<Note>
+  On the live canvas (`panel_query_graph`) the same read is executed by the panel's
+  own copy of this engine, which has not caught up with that wording yet. If a note
+  there names an argument and raising it changes nothing, try the other one before
+  concluding the tool is broken.
+</Note>
 
-> That got truncated — retry the same query, raising whichever limit it actually hit.
+The agent is meant to read its own note and retry by itself. When it doesn't, you are the fallback, and this is the sentence:
+
+> That got truncated — read the note and retry the same query, raising the limit it names.
 
 ### Where the walls are
 

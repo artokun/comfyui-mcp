@@ -43,8 +43,28 @@ import { lastPanelBaseResolution, panelBaseSync } from "./panel-workspace.js";
 /** Upstream source of truth for the panel pack — the manual-recovery clone URL. */
 export const PANEL_REPO_URL = "https://github.com/artokun/comfyui-mcp-panel.git";
 
-/** Canonical custom_nodes directory name for the panel pack. */
+/** Canonical custom_nodes directory name for the panel pack (the Registry name). */
 export const PANEL_DIR_NAME = "comfyui-agent-panel";
+
+/**
+ * The OTHER directory name that is the same panel: a plain `git clone` of the
+ * repo lands in `comfyui-mcp-panel`, and the installer accepts both (see
+ * panel-installer's FAST_PATH_DIRS).
+ *
+ * This matters here and not only there. The manual recovery tells a user to
+ * clone the pack when it is "NOT PRESENT" — and if "present" is judged by the
+ * Registry name alone, someone with a perfectly good repo checkout is told to
+ * clone a SECOND copy alongside it. ComfyUI serves every directory under
+ * custom_nodes, so that produces exactly the ambiguous two-panels state the rest
+ * of this text exists to warn about (#641), and later panel management then
+ * correctly refuses to act on the duplicate. Guidance that manufactures the
+ * failure it warns about is worse than no guidance.
+ *
+ * `panel-recovery-cluster.test.ts` asserts this list matches the installer's, so
+ * the two cannot drift (kept as a separate constant rather than an import
+ * because panel-installer imports THIS module).
+ */
+export const PANEL_DIR_NAMES: readonly string[] = [PANEL_DIR_NAME, "comfyui-mcp-panel"];
 
 /** Why install_panel provably cannot perform the update in this session. */
 export type PanelRecoveryBlocker =
@@ -160,9 +180,22 @@ function blockerPhrase(blocker: PanelRecoveryBlocker | undefined): string {
 
 /**
  * The manual, host-side update. Written as a real command sequence because the
- * caller may be an agent with no ability to ask a human to "use the Manager UI",
- * and it covers BOTH install shapes: a git checkout fast-forwards, while a Comfy
- * Registry zip install has no `.git` to pull and must be replaced (#771).
+ * caller may be an agent with no ability to ask a human to "use the Manager UI".
+ *
+ * IT MUST WORK FROM WHICHEVER STATE THE CALLER IS ACTUALLY IN, and this function
+ * cannot see which one that is — the refusal that renders it knows the tab did
+ * not advertise the fence, not what is on the host's disk. So it enumerates the
+ * three real states and lets the reader match, instead of asserting one:
+ *
+ *   (a) a git checkout — fast-forward;
+ *   (b) a Comfy Registry zip install with no `.git` — nothing to pull, so the
+ *       directory has to be REPLACED (#771);
+ *   (c) NOT THERE AT ALL (#819) — ComfyUI-Manager 3.x can report its install
+ *       queue drained without ever creating the pack, so a user who "installed
+ *       the panel" can still have an empty custom_nodes. Both (a) and (b) fail
+ *       in that state — `git -C <dir> pull` and `mv <dir> …` need a directory
+ *       that exists — which left the one instruction we gave them dead. A fresh
+ *       clone is the command that moves them, and it was missing.
  *
  * The BACKUP LEAVES custom_nodes on purpose. ComfyUI serves every directory
  * under custom_nodes as a web extension — including dot-prefixed ones — so a
@@ -172,16 +205,28 @@ function blockerPhrase(blocker: PanelRecoveryBlocker | undefined): string {
  */
 export function manualPanelUpdateCommands(comfyuiPath?: string): string {
   const root = comfyuiPath ?? "<ComfyUI>";
+  const either = PANEL_DIR_NAMES.join(" or ");
   return (
-    `cd "${root}/custom_nodes" && git -C ${PANEL_DIR_NAME} pull --ff-only` +
-    ` — or, if ${PANEL_DIR_NAME} has no .git (a Comfy Registry zip install, so there is ` +
-    `nothing to pull), replace it instead: ` +
+    `cd "${root}/custom_nodes". The panel pack is whichever of ${either} you have — ` +
+    `BOTH are the same pack (the Registry installs the first, a plain git clone of the repo ` +
+    `lands in the second), so check for both before deciding, and call the one you find ` +
+    `<panel-dir>. Then run the ONE case that matches. ` +
+    `(1) <panel-dir> exists and is a git checkout — fast-forward it: ` +
+    `git -C <panel-dir> pull --ff-only. ` +
+    `(2) <panel-dir> exists but has NO .git (a Comfy Registry zip install, so there ` +
+    `is nothing to pull) — replace it IN PLACE, keeping its name: ` +
     `git clone --depth 1 ${PANEL_REPO_URL} ../.agent-panel-new && ` +
     `mkdir -p ../custom_nodes_backup && ` +
-    `mv ${PANEL_DIR_NAME} ../custom_nodes_backup/ && ` +
-    `mv ../.agent-panel-new ${PANEL_DIR_NAME}` +
-    ` (keep the old copy OUT of custom_nodes — ComfyUI serves every directory in ` +
-    `there, so a leftover copy would shadow the new panel in the browser)`
+    `mv <panel-dir> ../custom_nodes_backup/ && ` +
+    `mv ../.agent-panel-new <panel-dir>. ` +
+    `(3) NEITHER ${either} is present — a stale ComfyUI-Manager 3.x reports its queue ` +
+    `drained without creating the pack (#819), so "already installed" can mean an empty ` +
+    `custom_nodes; install it outright: ` +
+    `git clone --depth 1 ${PANEL_REPO_URL} ${PANEL_DIR_NAME}. ` +
+    `Do NOT run case (3) while one of them exists under the other name — ComfyUI serves ` +
+    `every directory in custom_nodes, so a second copy would leave two panels racing to ` +
+    `register and the browser loading whichever sorts first (#641). For the same reason, in ` +
+    `case (2) keep the old copy OUT of custom_nodes`
   );
 }
 
@@ -218,6 +263,28 @@ const RESTART_AND_REFRESH =
   `panel JS; rebinding cannot add the missing capability`;
 
 /**
+ * WHY "install_panel does not exist" is usually wrong, and what to do about it.
+ *
+ * #812 and #823 both report the same dead end: an error names install_panel, the
+ * agent searches its tool list, finds nothing, and concludes the remedy is
+ * impossible. In almost every one of those sessions the tool was there —
+ * COMPACT TOOL MODE IS THE DEFAULT (#667). It registers exactly three meta-tools
+ * and leaves the other ~200, install_panel among them, reachable only through
+ * `call_tool`. A tool-name search cannot see it; `call_tool` can run it.
+ *
+ * Saying so is the difference between a remedy the caller can execute from where
+ * they are and one that reads as "this is impossible". The host-side commands
+ * still follow, for the surfaces where neither route exists (the embedded
+ * `panel_*` sidebar set, #784).
+ */
+const COMPACT_ROUTER_FALLBACK = (action: string): string =>
+  `If install_panel is not in this session's tool list, it is probably not missing — ` +
+  `compact tool mode is the DEFAULT and exposes only list_tools / describe_tool / ` +
+  `call_tool, with every other tool reachable through them. Try ` +
+  `call_tool {"name": "install_panel", "args": {"action": "${action}"}} before concluding ` +
+  `it is unavailable.`;
+
+/**
  * The recovery sentence for a panel that is too old for the write gate. Names
  * install_panel only where install_panel can really do it, and ALWAYS carries a
  * host-side command sequence so the caller is never left without a next step.
@@ -231,31 +298,69 @@ export function describePanelUpdateRecovery(
   // install_panel, not a host-side git pull. Sending this user to either is
   // what makes the loop feel unfixable, so this branch outranks both.
   if (skew) {
+    // WHAT IS PROVEN vs WHAT IS INFERRED (codex gate).
+    //
+    // Proven in both variants: the pack on disk clears the floor, so no update
+    // of the pack changes this refusal. That is the part the headline may state.
+    //
+    // The CAUSE is a different claim, and the evidence for it differs:
+    //  - the client advertised a version BELOW the floor → the served pack and
+    //    the announced build genuinely disagree. Both the version and the
+    //    capability are built by the same served file, so a client running the
+    //    installed bundle would have announced the installed version. A stale
+    //    cached bundle is then a conclusion, not a guess.
+    //  - the client advertised NO version → nothing was observed. A browser tab
+    //    on a cached bundle looks exactly like a relay or other non-panel client
+    //    that never implemented the fence at all, and "hard-refresh your tab" is
+    //    unactionable for the latter. Asserting the cache is the fabrication
+    //    this cluster exists to remove, so that variant RANKS the possibilities
+    //    instead — the actionable one first, the other named rather than hidden.
+    const HARD_REFRESH =
+      `The panel's module URLs carry no cache-busting key, so an ordinary reload can ` +
+      `serve the stale file again: HARD-REFRESH this ComfyUI tab with a cache-bypassing ` +
+      `reload (Ctrl+Shift+R, or Cmd+Shift+R on macOS; if that does not take, open ` +
+      `DevTools and use right-click reload → "Empty Cache and Hard Reload"). `;
     return (
-      `Do NOT update the panel — the pack ON DISK is already ${skew.diskVersion}, which ` +
-      `meets the ${skew.requiredVersion}+ this MCP requires. This BROWSER TAB is running ` +
-      `an older cached copy of the panel's JavaScript ` +
-      `(it advertised ${skew.handshakeVersion ? `${skew.handshakeVersion}` : "no version"}), ` +
-      `and the capability check reads what the TAB announced. The panel's module URLs ` +
-      `carry no cache-busting key, so an ordinary reload can serve the stale file again: ` +
-      `HARD-REFRESH this ComfyUI tab with a cache-bypassing reload (Ctrl+Shift+R, or ` +
-      `Cmd+Shift+R on macOS; if that does not take, open DevTools and use ` +
-      `right-click reload → "Empty Cache and Hard Reload"). ` +
+      (skew.handshakeVersion
+        ? `Do NOT update the panel — the pack ON DISK is already ${skew.diskVersion}, which ` +
+          `meets the ${skew.requiredVersion}+ a graph write needs. This BROWSER TAB is running ` +
+          `an older cached copy of the panel's JavaScript (it advertised ` +
+          `${skew.handshakeVersion}), and the capability check reads what the TAB ` +
+          `announced. ${HARD_REFRESH}`
+        : `Updating the panel will not fix this — the pack ON DISK is already ` +
+          `${skew.diskVersion}, which meets the ${skew.requiredVersion}+ a graph write needs, ` +
+          `so the SERVED panel is already capable. What connected advertised no version and ` +
+          `no workflow fence, which does not by itself say why, so here are both ` +
+          `possibilities. (1) It is a ComfyUI browser tab — much the more common case — ` +
+          `running a cached older copy of the panel's JavaScript. ${HARD_REFRESH}` +
+          `(2) It is NOT a panel tab (a relay or other client): then it does not implement ` +
+          `the fence at all and there is nothing to refresh — issue graph WRITES from a ` +
+          `ComfyUI tab running the panel. `) +
       // Only name the tool where naming it is useful. In a remote/cloud session
-      // it is not callable at all, so "it would report nothing to do" is a
-      // pointless mention of an absent tool; say the plain thing instead.
+      // it is not callable at all, so mentioning it is a pointless mention of an
+      // absent tool; say the plain thing instead.
+      //
+      // NOT "it will report nothing to do" — that was only true while a
+      // floor-clearing panel was believed to be the newest one (#806). An update
+      // CAN pull a newer panel; what it cannot do is replace the JS an open tab
+      // is already running, which is the whole point of this branch.
+      //
+      // And NO trailing period: every caller appends its own sentence break, and
+      // adding one here rendered ".." into a real refusal (codex gate).
       (ctx.installPanelUsable
-        ? `Running install_panel(action:'update') here will correctly report nothing ` +
-          `to do — the install is not the problem.`
-        : `No update of any kind will help — the install is not the problem.`)
+        ? `install_panel(action:'update') is not the fix here — it may pull a newer ` +
+          `panel, but no update replaces the JavaScript an open tab is already running`
+        : `No update of any kind fixes this — the install is not the problem`)
     );
   }
 
   if (ctx.installPanelUsable) {
     return (
-      `Run install_panel(action:'update') — or, if install_panel is not in this ` +
-      `session's tool set, update the pack on the ComfyUI host: ` +
-      `${manualPanelUpdateCommands(ctx.comfyuiPath)} — then ${RESTART_AND_REFRESH}`
+      `Run install_panel(action:'update'). ${COMPACT_ROUTER_FALLBACK("update")} ` +
+      `If neither route exists on this surface, update the pack on the ComfyUI host: ` +
+      // No trailing period: every caller of this function appends its own
+      // sentence break, and adding one here rendered ".." to the user.
+      `${manualPanelUpdateCommands(ctx.comfyuiPath)}. Then ${RESTART_AND_REFRESH}`
     );
   }
   return (
@@ -277,9 +382,9 @@ export function describePanelManagementRedirect(
     return (
       `Use install_panel instead: install_panel(action='sync') brings the panel in line ` +
       `with this orchestrator and re-reads the installed version from disk, and ` +
-      `action='status' reports it. If install_panel is not in this session's tool set, ` +
-      `update the pack on the ComfyUI host instead: ` +
-      `${manualPanelUpdateCommands(ctx.comfyuiPath)}.`
+      `action='status' reports it. ${COMPACT_ROUTER_FALLBACK("sync")} ` +
+      `If neither route exists on this surface, update the pack on the ComfyUI host ` +
+      `instead: ${manualPanelUpdateCommands(ctx.comfyuiPath)}.`
     );
   }
   return (

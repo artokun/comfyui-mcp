@@ -262,6 +262,90 @@ export function parseExtraModelPathsConfigsFromArgvRaw(argv: string[] | undefine
  * configured local base — collected only in LOCAL mode (the guard runs only
  * locally; a remote server's argv paths are on the remote host).
  */
+/** Do two absolute paths name the same directory?
+ *
+ *  Case is folded on WINDOWS ONLY. Windows filesystems are case-insensitive
+ *  everywhere, so a server reporting `comfyui\main.py` against a base of
+ *  `...\ComfyUI` genuinely names the same directory. macOS is deliberately NOT
+ *  folded even though HFS+/APFS are case-insensitive by DEFAULT: APFS can be
+ *  formatted case-SENSITIVE, and on such a volume `/x/ComfyUI` and `/x/comfyui`
+ *  are two different installs. This comparison decides whether a download may be
+ *  written to a base, so a wrong "same" is the #369 harm (a model landing in an
+ *  install the running server never reads, reported as a success). Being strict
+ *  costs a case-differing macOS user a refusal they can fix; being lax could cost
+ *  them a silently misplaced multi-gigabyte file. */
+function samePath(a: string, b: string): boolean {
+  const norm = (s: string): string => {
+    const slashed = resolve(s).replace(/\\/g, "/").replace(/\/+$/, "");
+    return process.platform === "win32" ? slashed.toLowerCase() : slashed;
+  };
+  return norm(a) === norm(b);
+}
+
+/**
+ * Corroborate a configured local `base` against the RELATIVE `main.py` path the
+ * running server reported, and return the install root when — and only when —
+ * they agree. Returns undefined when they do not, so the caller refuses rather
+ * than guesses (#369's doctrine: an honest "I don't know where this would land"
+ * beats a fabricated success).
+ *
+ * TWO base conventions coexist in this codebase and BOTH are legitimate (#813):
+ *
+ *   A. `base` is the OUTER launcher root, the server one level down at
+ *      `<base>/<relDir>/main.py`. This is ComfyUI Desktop, whose `<base>` holds
+ *      the launcher's `standalone-env` python rather than the server.
+ *
+ *   B. `base` IS the ComfyUI directory (it holds `main.py` directly), and the
+ *      server's relative `relDir/main.py` is written from base's PARENT. This is
+ *      the classic Windows portable bundle with `COMFYUI_PATH` set to
+ *      `...\ComfyUI_windows_portable\ComfyUI` — the value `get_environment`,
+ *      `list_local_models` and `resolveEffectiveComfyUIBase` all already treat as
+ *      correct. Only this resolver rejected it, so every download refused (#813).
+ *
+ * Order follows the rule `serverRootsUnder` (workspace-env.ts) already
+ * established for exactly this ambiguity, rather than inventing a second
+ * convention: a base that DIRECTLY holds `main.py` IS the server root and wins;
+ * a nested checkout never outranks it (#401).
+ *
+ * Convention B is accepted ONLY on the same evidence convention A demands —
+ * that the server's reported relative path, anchored one level up, names THIS
+ * directory (so `relDir` must match base's own name) AND that `main.py` is
+ * really there. A base whose name does not match `relDir` is NOT corroborated
+ * and is still refused: the server said its script lives at `<something>/ComfyUI/
+ * main.py`, and a base named `ComfyUI-master` is not that, whatever it contains.
+ */
+function anchorRelativeEntrypointOnBase(base: string, relDir: string): string | undefined {
+  // B — base is itself the directory the server named. The evidence is that
+  // `base` ENDS WITH `relDir`'s segments: climb that many levels up from base and
+  // re-anchor; if we land back on base, then some working directory (the one the
+  // server did not report) makes `relDir/main.py` resolve to exactly this install.
+  // Handles multi-segment relDir ("sub/ComfyUI") as well as the reported single
+  // "ComfyUI"; a base whose tail does NOT match relDir lands elsewhere and is
+  // rejected, which is the whole point of corroborating.
+  const segments = relDir.split(/[\\/]+/).filter((s) => s !== "" && s !== ".");
+  const impliedCwd = resolve(base, ...segments.map(() => ".."));
+  const baseIsTheInstall =
+    samePath(resolve(impliedCwd, relDir), base) && hasComfyUIEntrypoint(base);
+  // A — base is the outer launcher root; the server is nested under it. (This
+  // also covers relDir "." — `resolve(base, ".")` is base — which is how a server
+  // launched as plain `python main.py` from inside the install already resolved.)
+  const nested = resolve(base, relDir);
+  const nestedIsTheInstall = !samePath(nested, base) && hasComfyUIEntrypoint(nested);
+
+  // BOTH readings fit. `<base>/main.py` and `<base>/<relDir>/main.py` both exist,
+  // and the server's relative path is consistent with either — so the evidence
+  // does not say WHICH install is running, and picking one would be a guess about
+  // a destination for multi-gigabyte files. That is exactly the #369 harm (a model
+  // landing in a stale install and being reported a success), so refuse and let
+  // the caller resolve it. Returning undefined routes into the existing refusal,
+  // which names both interpretations.
+  if (baseIsTheInstall && nestedIsTheInstall) return undefined;
+  if (baseIsTheInstall) return resolve(base);
+  if (nestedIsTheInstall) return nested;
+  // relDir "." (or empty): nested IS base, so only the base reading can apply.
+  return hasComfyUIEntrypoint(nested) ? nested : undefined;
+}
+
 export async function resolveModelsDirWithBases(): Promise<{
   modelsDir: string;
   baseDirs: string[];
@@ -370,15 +454,15 @@ export async function resolveModelsDirWithBases(): Promise<{
     // honest "I don't know where this would land" beats a fabricated success.
     const anchored =
       base && live?.relDir !== undefined && live.source === "unresolved"
-        ? resolve(base, live.relDir)
+        ? anchorRelativeEntrypointOnBase(base, live.relDir)
         : undefined;
-    if (anchored && hasComfyUIEntrypoint(anchored)) {
+    if (anchored) {
       modelsDir = join(anchored, "models");
       source = "base-anchored";
       baseDirs.add(anchored);
       logger.debug(
         "Anchored the live server's relative main.py on the configured base",
-        { modelsDir, relDir: live?.relDir },
+        { modelsDir, relDir: live?.relDir, anchored },
       );
     } else if (snapshot.reachable && !isRemoteMode() && live?.source === "unresolved" && live.relDir !== undefined) {
       throw new ValidationError(
@@ -386,7 +470,11 @@ export async function resolveModelsDirWithBases(): Promise<{
           "download has no verified destination. What could not be determined:\n" +
           `  - the running server reported its launch script as the RELATIVE path "${join(live.relDir, "main.py")}" and did NOT report a working directory, so its install root is unknown;\n` +
           `  - the OS process table did not identify an interpreter for the ComfyUI listening on ${config.resolvedPort} that sits inside an install tree${live.observedPython ? ` (observed "${live.observedPython}")` : ""};\n` +
-          `  - ${base ? `the configured local base "${base}" does not contain "${join(live.relDir, "main.py")}", so it is a DIFFERENT install than the one that is running` : "no COMFYUI_PATH or default workspace is configured"}.\n` +
+          `  - ${
+            base
+              ? `the configured local base "${base}" corroborates neither reading of that path: it does not contain "${join(live.relDir, "main.py")}" (the ComfyUI Desktop / launcher-root shape), and it is not itself "${live.relDir}" holding "main.py" (the portable shape where COMFYUI_PATH already points at the ComfyUI directory) — so it is a DIFFERENT install than the one that is running`
+              : "no COMFYUI_PATH or default workspace is configured"
+          }.\n` +
           "Refusing to write to a guessed directory (that is how a model lands in a stale install and is reported as a success). " +
           "Fix by launching ComfyUI with an ABSOLUTE --base-directory, or set COMFYUI_PATH to the install that is actually running.",
       );

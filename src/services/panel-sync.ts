@@ -103,7 +103,42 @@ const STALE_BUNDLE_HINT =
   `the problem — the open ComfyUI browser tab is running a CACHED older copy of the ` +
   `panel's JavaScript, and the capability check reads what the tab announced. ` +
   `Hard-refresh that tab with a cache-bypassing reload (Ctrl+Shift+R, or Cmd+Shift+R ` +
-  `on macOS); updating or reinstalling the pack will keep reporting nothing to do.`;
+  // NOT "updating the pack will report nothing to do" — that was true only while
+  // this verdict was believed to mean "you are on the newest panel". An update
+  // CAN pull a newer panel (see FLOOR_IS_NOT_LATEST, #806); what it cannot do is
+  // fix a stale TAB. Say the thing that stays true in both worlds.
+  `on macOS). Updating the pack may pull a newer panel, but no update of any kind ` +
+  `replaces the JavaScript an already-open tab is running.`;
+
+/** Where a human can read the newest published panel version. Deliberately the
+ *  pack's `pyproject.toml` and NOT the repo's GitHub releases: the panel ships to
+ *  the Comfy Registry on a pyproject version change, and its releases page lags
+ *  or omits versions entirely, so "latest release" is the wrong answer. */
+const PANEL_PYPROJECT_URL =
+  "https://github.com/artokun/comfyui-mcp-panel/blob/main/pyproject.toml";
+
+/**
+ * The sentence a floor check owes the reader (#806).
+ *
+ * Clearing the floor and being current are different claims, and the gap between
+ * them is where a real user's bug lived for days. This orchestrator genuinely
+ * cannot close that gap — nothing on this path knows the newest published panel;
+ * `PANEL_VERSION` is the Manager channel name ("nightly"), not a version number,
+ * and there is no registry lookup here. So the honest move is not to guess a
+ * latest version, it is to STOP IMPLYING ONE: name what was compared, say the
+ * comparison's limit out loud, and point at the two things that do move the user
+ * (the update action, and the file where the real latest is published).
+ *
+ * A function, not a constant: the update instruction depends on whether
+ * install_panel can act in THIS session.
+ */
+const FLOOR_IS_NOT_LATEST = (): string =>
+  ` NOTE — that is a FLOOR check, not a latest-version check. It compares your panel ` +
+  `against the MINIMUM this orchestrator requires; it does not know the newest published ` +
+  `panel, and most panel fixes ship WITHOUT raising the floor. So a newer panel carrying ` +
+  `fixes you are missing can exist while this still reads "meets the minimum". The newest ` +
+  `version is published in the pack's pyproject.toml (${PANEL_PYPROJECT_URL}); to pull it, ` +
+  `run ${describeInstallPanelAction("update", "the update on the ComfyUI host")}.`;
 
 /**
  * What a just-written persisted pin actually achieved. Writing the settings file
@@ -142,8 +177,22 @@ export type PanelSyncDecision =
   | "sync"
   /** Behind, but the user pinned the panel → WARN ONLY. Never sync. */
   | "pinned-warn"
-  /** The installed panel already meets what this orchestrator needs. */
-  | "up-to-date"
+  /**
+   * The installed panel CLEARS THE FLOOR this orchestrator requires.
+   *
+   * #806 — this was `up-to-date`, which answers a question nothing here asks.
+   * The comparison is against `requiredPanelVersion()`, the MINIMUM this build
+   * needs; the newest published panel is not known to this process at all (there
+   * is no registry or pyproject lookup on this path — see the summary text). A
+   * user on 0.11.36 with 0.11.38 published, whose bug was fixed in 0.11.37, was
+   * told "up-to-date" and stopped looking. Most panel fixes never raise the
+   * floor, so the population this verdict most misleads is exactly the one that
+   * most needs an update.
+   *
+   * `behind: false` on this decision therefore means "not below the floor", NOT
+   * "current".
+   */
+  | "meets-floor"
   /** Something must be fixed by a human first (shadow copy, unreadable pin). */
   | "blocked"
   /** Can't read a comparable installed version → don't guess, don't touch. */
@@ -399,11 +448,20 @@ export function evaluatePanelSync(
     if (!behind) {
       return {
         ...base,
-        decision: "up-to-date",
+        decision: "meets-floor",
         behind: false,
         summary:
-          `Panel ${status.installedVersion} already meets what ${orch} needs ` +
-          `(${required}+). You are ${describePanelPin(pin)}; nothing to do.`,
+          `Panel ${status.installedVersion} meets the minimum ${orch} needs ` +
+          `(${required}+). You are ${describePanelPin(pin)}; nothing will be changed.` +
+          // The pinned reader gets the same honesty, with the step that actually
+          // applies to them: an update is gated behind clearing the pin, so
+          // sending them straight at install_panel(action='update') would be the
+          // dead-end shape this cluster exists to remove.
+          ` NOTE — that is a FLOOR check, not a latest-version check: a newer panel with ` +
+          `fixes you are missing can exist while this still reads "meets the minimum", ` +
+          `because most panel fixes do not raise the floor. The newest version is published ` +
+          `in the pack's pyproject.toml (${PANEL_PYPROJECT_URL}). To move onto it you must ` +
+          `first clear the pin (${UNPIN_INSTRUCTION()}).`,
       };
     }
     // THE WARN CASE. Say what exists, say they're pinned, change nothing.
@@ -428,11 +486,11 @@ export function evaluatePanelSync(
   if (!behind) {
     return {
       ...base,
-      decision: "up-to-date",
+      decision: "meets-floor",
       behind: false,
       summary:
-        `Panel ${status.installedVersion} already meets what ${orch} needs ` +
-        `(${required}+). Nothing to do.${STALE_BUNDLE_HINT}`,
+        `Panel ${status.installedVersion} meets the minimum ${orch} needs ` +
+        `(${required}+), so nothing will be synced.${FLOOR_IS_NOT_LATEST()}${STALE_BUNDLE_HINT}`,
     };
   }
 

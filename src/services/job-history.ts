@@ -151,9 +151,27 @@ function tracebackText(value: unknown): string | undefined {
   return undefined;
 }
 
+/**
+ * #809: a `traceback_truncated: true` boolean next to a traceback that just STOPS is
+ * indistinguishable, to a reader, from a traceback that ended. Mark the cut inline and
+ * say what to do — this cap is FIXED (no parameter raises it), so the remedy is the
+ * tool that holds the untruncated text, not a lever that does not exist.
+ */
 function truncateTraceback(text: string): { text: string; truncated: boolean } {
   if (text.length <= TRACEBACK_MAX_CHARS) return { text, truncated: false };
-  return { text: text.slice(0, TRACEBACK_MAX_CHARS), truncated: true };
+  const dropped = text.length - TRACEBACK_MAX_CHARS;
+  return {
+    // The remedy is deliberately a MAY, not a promise (codex gate): the full text came
+    // from ComfyUI's /history and no tool re-serves it, so claiming get_logs "has" it
+    // would be the same lie as naming a parameter that does not exist. What IS certain:
+    // this is the HEAD, and a Python traceback prints the exception LAST — so the line
+    // that names the failure may be among the cut frames. Say that; it changes what the
+    // reader does next.
+    text:
+      text.slice(0, TRACEBACK_MAX_CHARS) +
+      `\n[... ${dropped} more char(s) cut at the fixed ${TRACEBACK_MAX_CHARS}-char traceback cap — no parameter raises it, and the rest is not retained in this result. This is the HEAD, so the final exception line is likely among the cut frames; get_logs may still hold the full traceback if the run is recent ...]`,
+    truncated: true,
+  };
 }
 
 function isOomError(error: ExecutionErrorDetails): boolean {

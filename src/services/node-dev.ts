@@ -86,6 +86,27 @@ export const LONG_LINE_CHUNK = 1_000;
 export const SEARCH_LINE_MAX = 600;
 /** Bound on any subprocess (git / patch) stdout+stderr surfaced to the caller. */
 export const CMD_OUTPUT_MAX = 12_000;
+/**
+ * #809 (codex gate): the FLOOR for any `max_chars`, mirroring query_workflow's own 500.
+ * A budget of 1 cannot hold the sentence that explains why the output was cut, so it
+ * used to produce either an unexplained empty field or a marker that breached the very
+ * bound it described. Neither is honest. This raises a FLOOR, not a cap — the ceiling is
+ * untouched — and it is the smallest value at which the tool can still answer "why is
+ * this empty?".
+ */
+export const MIN_OUTPUT_CHARS = 500;
+
+/**
+ * #809 (codex gate): "raise `X` up to N" is ITSELF a dead retry when the caller is
+ * already at N. Telling someone at max_results=100 to raise it to 100 wastes exactly the
+ * round trip this issue exists to prevent, and teaches the same wrong lesson ("the tool
+ * can't do this"). At the ceiling the remedy must switch to what is actually left.
+ */
+export function raiseOrCeiling(param: string, inForce: number, ceiling: number): string {
+  return inForce >= ceiling
+    ? `\`${param}\` is already at its ceiling of ${ceiling}, so raising it is not an option`
+    : `raise \`${param}\` up to ${ceiling}`;
+}
 export const LIST_DEFAULT_ENTRIES = 500;
 export const LIST_MAX_ENTRIES = 2_000;
 export const SEARCH_DEFAULT_RESULTS = 50;
@@ -397,14 +418,38 @@ export function chunkLongLines(lines: string[], width = LONG_LINE_CHUNK): string
   return out;
 }
 
-/** Clip text to maxChars, appending a truncation notice when clipped. */
+/**
+ * Clip text to maxChars, appending a truncation notice when clipped.
+ *
+ * #809: the default notice ("request a narrower range") named no parameter at all, so
+ * a caller could not tell WHICH argument to change or how far it could go. Callers now
+ * pass a notice built by `boundedNotice`, which states how much was dropped, the exact
+ * parameter to raise, and that parameter's REAL clamp — not the one in the prose.
+ */
 export function boundText(
   text: string,
   maxChars: number,
-  notice = "\n\n[... output truncated — request a narrower range ...]",
+  /**
+   * REQUIRED (codex gate): there is no safe default. `boundText` is shared by tools with
+   * DIFFERENT levers — read_node_file has `max_chars`, apply_node_patch has none — so a
+   * default naming `max_chars` would ship a dead remedy to whichever caller lacks it.
+   * Every call site states its own.
+   */
+  notice: (dropped: number) => string,
 ): { text: string; truncated: boolean } {
   if (text.length <= maxChars) return { text, truncated: false };
-  return { text: text.slice(0, maxChars) + notice, truncated: true };
+  // The marker is spent from the SAME budget it describes (codex gate): reserve its
+  // worst-case size up front so the returned text still honours `maxChars`. The digit
+  // count is bounded by text.length, so the reserve can never be too small.
+  //
+  // The one case that cannot honour it: a budget SMALLER than the marker itself. There
+  // the marker still wins and content is dropped entirely — an empty field with no
+  // explanation reads as "the file is empty", which is a worse lie than an over-budget
+  // sentence. Every real caller clamps well above the marker, so this is a corner, not
+  // the contract.
+  const reserve = notice(text.length).length;
+  const keep = Math.max(0, maxChars - reserve);
+  return { text: text.slice(0, keep) + notice(text.length - keep), truncated: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -457,6 +502,9 @@ export interface ListFilesResult {
   root: string;
   entries: ListedEntry[];
   truncated: boolean;
+  /** #809: the remedy in prose. A bare `truncated` boolean is not text the model reads,
+   *  so an agent that hits it concludes the pack simply has these files. */
+  truncation_hint?: string;
   is_git_repo: boolean;
   has_pyproject: boolean;
 }
@@ -489,23 +537,28 @@ export function listNodePackFiles(
       if (truncated) return;
       const full = join(dir, item.name);
       const rel = relative(packDir, full).split(/[\\/]/).join("/");
+      // #809 (codex gate): stopping AT the cap cannot tell "exactly cap entries" from
+      // "capped", so a pack with exactly `max_entries` files was reported as truncated.
+      // Take ONE past the cap, then drop it: the extra entry is the proof, and its
+      // presence is the only honest truncation signal.
+      const take = (entry: ListedEntry): boolean => {
+        entries.push(entry);
+        if (entries.length > cap) {
+          entries.pop();
+          truncated = true;
+          return true;
+        }
+        return false;
+      };
       if (item.isDir) {
         if (SKIP_DIRS.has(item.name)) continue;
         if (!matcher || matcher.test(rel)) {
-          entries.push({ path: rel, size: 0, dir: true });
-          if (entries.length >= cap) {
-            truncated = true;
-            return;
-          }
+          if (take({ path: rel, size: 0, dir: true })) return;
         }
         walk(full);
       } else {
         if (matcher && !matcher.test(rel)) continue;
-        entries.push({ path: rel, size: deps.fileSize(full), dir: false });
-        if (entries.length >= cap) {
-          truncated = true;
-          return;
-        }
+        if (take({ path: rel, size: deps.fileSize(full), dir: false })) return;
       }
     }
   };
@@ -516,6 +569,14 @@ export function listNodePackFiles(
     root: packDir,
     entries,
     truncated,
+    ...(truncated
+      ? {
+          truncation_hint:
+            `Stopped at \`max_entries\`=${cap} after ${entries.length} entr(ies); the walk did NOT ` +
+            `finish, so this is not the pack's full file list. ` +
+            `${raiseOrCeiling("max_entries", cap, LIST_MAX_ENTRIES)}, or narrow with \`glob\` (e.g. '**/*.py').`,
+        }
+      : {}),
     is_git_repo: deps.isDirectory(join(packDir, ".git")),
     has_pyproject: deps.isFile(join(packDir, "pyproject.toml")),
   };
@@ -532,6 +593,35 @@ export interface ReadFileOptions {
   maxChars?: number;
 }
 
+/**
+ * #809: read_node_file's truncation notice. Exported (with the other notice builders
+ * below) so the schema-driven remedy test can check the parameters they name against
+ * read_node_file's REAL zod shape without standing up a filesystem — an untested hint
+ * string is precisely how this issue's defect 1 happened.
+ *
+ * Two DIFFERENT levers, both named: the char budget and the line window. A caller cut by
+ * one and told to raise the other burns a retry and concludes the file is unreadable.
+ */
+export const readBoundNotice =
+  (maxChars: number, startLine: number, endLine: number, sliceLineCount = 2) =>
+  (dropped: number) => {
+    // Paging by `start_line`/`line_count` indexes SOURCE lines. On a slice that is ONE
+    // physical line (a minified bundle, an embedded blob) there is nothing to page to —
+    // offering it would be a lever that exists and cannot move (codex gate). Say what is
+    // actually true: past the ceiling this tool cannot return the rest of that line.
+    const onePhysicalLine = sliceLineCount <= 1;
+    // Deliberately NOT quoting a length for that line (codex gate): what was measured is
+    // the CHUNKED text, which carries inserted newlines, so any number here would be a
+    // small lie inside a marker whose whole job is to be trusted.
+    const rest = onePhysicalLine
+      ? `this slice is a SINGLE physical line, so \`start_line\`/\`line_count\` cannot reach the rest — ` +
+        (maxChars >= READ_MAX_CHARS
+          ? `at the ${READ_MAX_CHARS} ceiling this tool cannot return more of it; search within it with search_node_packs instead`
+          : `${raiseOrCeiling("max_chars", maxChars, READ_MAX_CHARS)}, and past that use search_node_packs to locate what you need inside it`)
+      : `${raiseOrCeiling("max_chars", maxChars, READ_MAX_CHARS)}, or page with \`start_line\`/\`line_count\` (max ${READ_MAX_LINES} lines)`;
+    return `\n\n[... ${dropped} more char(s) in lines ${startLine}-${endLine} cut by \`max_chars\`=${maxChars}; ${rest} ...]`;
+  };
+
 export interface ReadFileResult {
   path: string;
   content: string;
@@ -540,6 +630,9 @@ export interface ReadFileResult {
   total_lines: number;
   size: number;
   truncated: boolean;
+  /** #809: present when content was dropped WITHOUT an inline marker (the line window
+   *  ended short of the file) — names the parameter to page with. */
+  truncation_hint?: string;
 }
 
 export function readNodeFile(
@@ -564,7 +657,9 @@ export function readNodeFile(
     READ_MAX_LINES,
   );
   const maxChars = Math.min(
-    Math.max(1, Math.floor(options.maxChars ?? READ_DEFAULT_CHARS)),
+    // #809: floor at MIN_OUTPUT_CHARS so the truncation notice always fits inside the
+    // budget it describes. The CEILING is unchanged.
+    Math.max(MIN_OUTPUT_CHARS, Math.floor(options.maxChars ?? READ_DEFAULT_CHARS)),
     READ_MAX_CHARS,
   );
 
@@ -573,7 +668,26 @@ export function readNodeFile(
   const endLine = Math.min(totalLines, startIdx + slice.length);
 
   const chunked = chunkLongLines(slice);
-  const bounded = boundText(chunked.join("\n"), maxChars);
+  // #809: name BOTH levers this tool actually has — the char budget and the line window
+  // — with their real clamps, so a caller who hit the wrong one doesn't retry the wrong
+  // parameter and conclude the file is unreadable.
+  const bounded = boundText(
+    chunked.join("\n"),
+    maxChars,
+    // slice.length is the count of SOURCE lines — the unit `start_line`/`line_count`
+    // address. `chunked` is longer when a line was split, and paging cannot reach those
+    // chunks, so the notice must be told the real number (codex gate).
+    readBoundNotice(maxChars, startLine, endLine, slice.length),
+  );
+  // The line window can end short of the file INDEPENDENTLY of the char budget — two
+  // different cuts with two different remedies. Suppressing this note whenever the char
+  // budget also fired lost the continuation point exactly when the caller needed it most
+  // (codex gate): the inline marker only describes the chars cut WITHIN the shown range,
+  // and says nothing about the lines beyond it.
+  const linesCut = endLine < totalLines;
+  const truncationHint = linesCut
+    ? `Shown lines ${startLine}-${endLine} of ${totalLines} (${totalLines - endLine} line(s) remain); continue with \`start_line\`:${endLine + 1} (\`line_count\` max ${READ_MAX_LINES}).`
+    : undefined;
 
   return {
     path: rel.split(/[\\/]/).join("/"),
@@ -582,7 +696,8 @@ export function readNodeFile(
     end_line: endLine,
     total_lines: totalLines,
     size,
-    truncated: bounded.truncated || endLine < totalLines,
+    truncated: bounded.truncated || linesCut,
+    ...(truncationHint ? { truncation_hint: truncationHint } : {}),
   };
 }
 
@@ -608,6 +723,37 @@ export interface SearchResult {
   engine: "ripgrep" | "builtin";
   matches: SearchMatch[];
   truncated: boolean;
+  /** #809: WHICH cap fired — "max_results" has a lever (`max_results`), "scanned_files"
+   *  does NOT (it is a fixed walker bound) and must be narrowed with `path`/`glob`
+   *  instead. Naming the wrong one of these sends the caller at a dead parameter. */
+  truncated_by?: "max_results" | "scanned_files";
+  /** The remedy in prose — a boolean alone never reaches the model's reading of the result. */
+  truncation_hint?: string;
+}
+
+/** #809: a hard 600-char slice with no marker read as if the line simply ended there.
+ *  Mark it, and say the cap is fixed so nobody retries a parameter that can't move it. */
+export function clipMatchLine(text: string): string {
+  if (text.length <= SEARCH_LINE_MAX) return text;
+  // The marker is spent from the SAME cap it describes (codex gate), so reserve its
+  // worst-case size — the emitted field still honours SEARCH_LINE_MAX.
+  const marker = (dropped: number) =>
+    // "read the FULL line" would over-promise (codex gate): read_node_file has its own
+    // 24000-char budget, so it returns MORE of the line, not necessarily all of it.
+    `…(+${dropped} chars; fixed ${SEARCH_LINE_MAX}-char per-line cap — read more of it with read_node_file, itself bounded by its own max_chars, max ${READ_MAX_CHARS})`;
+  const keep = Math.max(0, SEARCH_LINE_MAX - marker(text.length).length);
+  return text.slice(0, keep) + marker(text.length - keep);
+}
+
+/** #809: the whole-result remedy, naming the lever that matches the cause. */
+export function searchTruncationHint(
+  reason: "max_results" | "scanned_files",
+  shown: number,
+  cap: number,
+): string {
+  return reason === "max_results"
+    ? `Stopped at \`max_results\`=${cap} after ${shown} match(es); there may be more. ${raiseOrCeiling("max_results", cap, SEARCH_MAX_RESULTS)}, or narrow with \`path\`/\`glob\`.`
+    : `Stopped after scanning ${SEARCH_MAX_SCANNED_FILES} files (a FIXED walker bound — no parameter raises it) with ${shown} match(es) found. Narrow with \`path\`/\`glob\`, or install ripgrep on PATH to remove this bound.`;
 }
 
 /** Resolve the directory a search runs over (default "." = the whole jail root). */
@@ -653,8 +799,15 @@ function searchWithRipgrep(
     "never",
     "--path-separator",
     "/",
+    // #809 (codex gate): ask for ONE past the cap. `--max-count` is PER FILE, so with
+    // `cap` exactly, a file holding more matches had them dropped BY RIPGREP before we
+    // saw a line — and the loop below reported truncated:false. With `cap + 1`, any
+    // truncation anywhere necessarily produces a (cap+1)-th line, which the loop sees;
+    // and a search with exactly `cap` real matches produces no extra line, so it is no
+    // longer mislabelled as truncated. Both directions of the lie are closed by the
+    // same +1.
     "--max-count",
-    String(cap),
+    String(cap + 1),
   ];
   if (!options.caseSensitive) args.push("-i");
   if (options.glob) args.push("-g", options.glob);
@@ -671,21 +824,35 @@ function searchWithRipgrep(
 
   const matches: SearchMatch[] = [];
   let truncated = false;
+  // Paired with the `cap + 1` above: seeing a (cap+1)-th line is the PROOF that content
+  // was dropped, and its absence is proof that nothing was. No per-file bookkeeping is
+  // needed — rg cannot hide a match without also pushing the global count past `cap`.
   for (const raw of res.stdout.split(/\r?\n/)) {
     if (!raw) continue;
+    const m = /^(.*?):(\d+):(.*)$/.exec(raw);
+    if (!m) continue;
     if (matches.length >= cap) {
       truncated = true;
       break;
     }
-    const m = /^(.*?):(\d+):(.*)$/.exec(raw);
-    if (!m) continue;
     matches.push({
       file: m[1],
       line: Number(m[2]),
-      text: m[3].slice(0, SEARCH_LINE_MAX),
+      text: clipMatchLine(m[3]),
     });
   }
-  return { engine: "ripgrep", matches, truncated };
+  return {
+    engine: "ripgrep",
+    matches,
+    truncated,
+    // ripgrep walks everything, so the only cut here is the result cap.
+    ...(truncated
+      ? {
+          truncated_by: "max_results" as const,
+          truncation_hint: searchTruncationHint("max_results", matches.length, cap),
+        }
+      : {}),
+  };
 }
 
 function searchBuiltin(
@@ -699,6 +866,19 @@ function searchBuiltin(
   const globMatcher = options.glob ? globToRegExp(options.glob) : null;
   const matches: SearchMatch[] = [];
   let truncated = false;
+  // #809: the builtin walker has TWO independent cuts with OPPOSITE remedies — the
+  // result cap (raise `max_results`) and the fixed scanned-file bound (no lever;
+  // narrow the search). Remember which one fired.
+  //
+  // WRITE-ONCE (codex gate): the FIRST cut is the one the caller has to act on. A later
+  // write would flip an actionable "raise `max_results`" into "no parameter raises it",
+  // which is the exact wrong-lever defect this issue exists to remove. The recursive walk
+  // already unwinds on `truncated`, so no overwrite path is known today — this makes the
+  // invariant explicit rather than depending on every future early-return staying correct.
+  let reason: "max_results" | "scanned_files" | null = null;
+  const setReason = (r: "max_results" | "scanned_files") => {
+    if (reason === null) reason = r;
+  };
   let scanned = 0;
 
   const walk = (dir: string) => {
@@ -722,6 +902,7 @@ function searchBuiltin(
       if (deps.fileSize(full) > SEARCH_MAX_FILE_BYTES) continue;
       if (++scanned > SEARCH_MAX_SCANNED_FILES) {
         truncated = true;
+        setReason("scanned_files");
         return;
       }
       let buf: Buffer;
@@ -734,21 +915,34 @@ function searchBuiltin(
       const lines = buf.toString("utf-8").split(/\r\n|\n/);
       for (let i = 0; i < lines.length; i++) {
         if (re.test(lines[i])) {
+          // #809 (codex gate): stopping AT the cap cannot distinguish "exactly cap
+          // matches" from "capped". Reaching a (cap+1)-th match is the proof.
           if (matches.length >= cap) {
             truncated = true;
+            setReason("max_results");
             return;
           }
           matches.push({
             file: rel,
             line: i + 1,
-            text: lines[i].slice(0, SEARCH_LINE_MAX),
+            text: clipMatchLine(lines[i]),
           });
         }
       }
     }
   };
   walk(searchDir);
-  return { engine: "builtin", matches, truncated };
+  return {
+    engine: "builtin",
+    matches,
+    truncated,
+    ...(truncated && reason
+      ? {
+          truncated_by: reason,
+          truncation_hint: searchTruncationHint(reason, matches.length, cap),
+        }
+      : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -835,6 +1029,15 @@ export function parsePatchPaths(patch: string): string[] {
   return [...paths];
 }
 
+/**
+ * #809 (codex gate): apply_node_patch's ONLY parameter is `patch` — it has no
+ * `max_chars`. Its git output cap is therefore fixed, and a remedy naming a lever this
+ * tool does not have would be the very defect this issue is about, pointing the other
+ * way. Say the cap is fixed, and name the tool that CAN page the same text.
+ */
+export const patchBoundNotice = (dropped: number) =>
+  `\n\n[... ${dropped} more char(s) cut at the fixed ${CMD_OUTPUT_MAX}-char git-output cap — apply_node_patch has no parameter to raise it. Split the patch into smaller per-file hunks and re-apply: the output shrinks with the patch ...]`;
+
 export function applyNodePatch(
   patch: string,
   deps: NodeDevDeps = defaultDeps,
@@ -871,8 +1074,8 @@ export function applyNodePatch(
       success: false,
       stage: "check",
       touched,
-      stdout: boundText(check.stdout, CMD_OUTPUT_MAX).text,
-      stderr: boundText(check.stderr, CMD_OUTPUT_MAX).text,
+      stdout: boundText(check.stdout, CMD_OUTPUT_MAX, patchBoundNotice).text,
+      stderr: boundText(check.stderr, CMD_OUTPUT_MAX, patchBoundNotice).text,
     };
   }
 
@@ -886,8 +1089,8 @@ export function applyNodePatch(
     success: apply.status === 0,
     stage: "apply",
     touched,
-    stdout: boundText(apply.stdout, CMD_OUTPUT_MAX).text,
-    stderr: boundText(apply.stderr, CMD_OUTPUT_MAX).text,
+    stdout: boundText(apply.stdout, CMD_OUTPUT_MAX, patchBoundNotice).text,
+    stderr: boundText(apply.stderr, CMD_OUTPUT_MAX, patchBoundNotice).text,
   };
 }
 
@@ -931,6 +1134,13 @@ function packRelativePath(packDir: string, p: string, deps: NodeDevDeps): string
   return rel.split(/[\\/]/).join("/") || ".";
 }
 
+/** #809: node_pack_git's real ceiling is READ_MAX_CHARS (24000) — a CODE clamp the
+ *  parameter description never mentioned. State it here so a caller who raises
+ *  `max_chars` past it learns why the extra was silently dropped, and narrow-the-scope
+ *  is offered because a whole-pack `diff` is often better answered by `paths`. */
+export const gitBoundNotice = (maxChars: number) => (dropped: number) =>
+  `\n\n[... ${dropped} more char(s) cut by \`max_chars\`=${maxChars}; ${raiseOrCeiling("max_chars", maxChars, READ_MAX_CHARS)} (a hard clamp), or scope the command with \`paths\` ...]`;
+
 export function nodePackGit(
   options: GitOptions,
   deps: NodeDevDeps = defaultDeps,
@@ -941,7 +1151,9 @@ export function nodePackGit(
   }
   const action = options.action;
   const maxChars = Math.min(
-    Math.max(1, options.maxChars ?? CMD_OUTPUT_MAX),
+    // #809: same floor as read_node_file — a budget too small to explain itself is not a
+    // usable budget. Ceiling untouched.
+    Math.max(MIN_OUTPUT_CHARS, options.maxChars ?? CMD_OUTPUT_MAX),
     READ_MAX_CHARS,
   );
 
@@ -979,8 +1191,8 @@ export function nodePackGit(
           action,
           argv: addArgs,
           status: add.status,
-          stdout: boundText(add.stdout, maxChars).text,
-          stderr: boundText(add.stderr, maxChars).text,
+          stdout: boundText(add.stdout, maxChars, gitBoundNotice(maxChars)).text,
+          stderr: boundText(add.stderr, maxChars, gitBoundNotice(maxChars)).text,
           success: false,
         };
       }
@@ -1002,8 +1214,8 @@ export function nodePackGit(
     action,
     argv,
     status: res.status,
-    stdout: boundText(res.stdout, maxChars).text,
-    stderr: boundText(res.stderr, maxChars).text,
+    stdout: boundText(res.stdout, maxChars, gitBoundNotice(maxChars)).text,
+    stderr: boundText(res.stderr, maxChars, gitBoundNotice(maxChars)).text,
     success: res.status === 0,
   };
 }

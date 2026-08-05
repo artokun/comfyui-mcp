@@ -33,6 +33,12 @@ let savedDefaultWorkspace: string | undefined;
 // the OS process table.
 let observedLiveRoot: string | undefined;
 let baseHasEntrypoint = false;
+/** Per-DIRECTORY entrypoint probe (#813). The flat `baseHasEntrypoint` boolean
+ *  cannot express the case the bug is about — `<base>/main.py` existing while
+ *  `<base>/ComfyUI/main.py` does not — so tests that need to tell the two
+ *  candidate anchors apart install a predicate here. Default keeps every
+ *  pre-existing test on the flat boolean. */
+let hasEntrypointFor: ((dir: string) => boolean) | undefined;
 vi.mock("../../services/workspace-env.js", async () => {
   const actual = await vi.importActual<
     typeof import("../../services/workspace-env.js")
@@ -40,7 +46,8 @@ vi.mock("../../services/workspace-env.js", async () => {
   return {
     resolveEffectiveComfyUIBase: () => config.comfyuiPath ?? savedDefaultWorkspace,
     liveRootFromArgv: actual.liveRootFromArgv,
-    hasComfyUIEntrypoint: () => baseHasEntrypoint,
+    hasComfyUIEntrypoint: (dir: string) =>
+      hasEntrypointFor ? hasEntrypointFor(dir) : baseHasEntrypoint,
     resolveLiveServerRoot: (argv?: string[], cwd?: string) => {
       const relDir = actual.liveRelDirFromArgv(argv);
       const fromArgv = actual.liveRootFromArgv(argv, cwd);
@@ -83,6 +90,7 @@ beforeEach(() => {
   liveRootExists = true;
   observedLiveRoot = undefined;
   baseHasEntrypoint = false;
+  hasEntrypointFor = undefined;
 });
 
 afterEach(() => {
@@ -334,6 +342,160 @@ describe("models dir + extra-config argv parsing (#345/#346/#369)", () => {
       const { modelsDir, source } = await resolveModelsDirWithBases();
       expect(modelsDir).toBe(join(resolve("/bundle"), "ComfyUI", "models"));
       expect(source).toBe("base-anchored");
+    });
+
+    // ── #813: COMFYUI_PATH already pointing AT the ComfyUI directory ─────────
+    //
+    // Two base conventions coexist and both are legitimate. Only the OUTER
+    // launcher-root reading (`<base>/<relDir>/main.py`, ComfyUI Desktop) was
+    // implemented, so a Windows portable install whose COMFYUI_PATH is the inner
+    // ComfyUI directory — the value get_environment / list_local_models /
+    // resolveEffectiveComfyUIBase all already accept — had every download refused.
+    describe("#813 the base IS the ComfyUI directory (Windows portable)", () => {
+      it("anchors on the base itself when the base is the very directory the server named", async () => {
+        const base = resolve("/D/ComfyUI_windows_portable/ComfyUI");
+        (config as { comfyuiPath?: string }).comfyuiPath = base;
+        observedLiveRoot = undefined;
+        // The portable shape: main.py sits DIRECTLY under the base, and the
+        // Desktop-style nesting <base>/ComfyUI/main.py does NOT exist.
+        hasEntrypointFor = (dir) => resolve(dir) === base;
+        getSystemStats.mockResolvedValue({ system: { argv: RELATIVE_ARGV } });
+
+        const { modelsDir, source, baseDirs } = await resolveModelsDirWithBases();
+        // Resolves to <base>/models — NOT the double-nested <base>/ComfyUI/models
+        // that never exists, which is what made this refuse.
+        expect(modelsDir).toBe(join(base, "models"));
+        expect(source).toBe("base-anchored");
+        expect(baseDirs).toContain(base);
+      });
+
+      it("still prefers the NESTED launcher-root reading when THAT is the one that exists", async () => {
+        // ComfyUI Desktop: <base> holds the launcher, the server is one level down.
+        // The #813 change must not steal this case.
+        const base = resolve("/bundle");
+        (config as { comfyuiPath?: string }).comfyuiPath = base;
+        observedLiveRoot = undefined;
+        hasEntrypointFor = (dir) => resolve(dir) === join(base, "ComfyUI");
+        getSystemStats.mockResolvedValue({ system: { argv: RELATIVE_ARGV } });
+
+        const { modelsDir, source } = await resolveModelsDirWithBases();
+        expect(modelsDir).toBe(join(base, "ComfyUI", "models"));
+        expect(source).toBe("base-anchored");
+      });
+
+      it("REFUSES a base that holds main.py but is NOT the directory the server named", async () => {
+        // The corroboration is what makes accepting the base safe. A base called
+        // "ComfyUI-master" containing a main.py is a DIFFERENT install from the
+        // one whose script is "ComfyUI/main.py" — accepting it is exactly the
+        // stale-install landing #369 exists to prevent. "Could not determine"
+        // must not become a definite "yes".
+        const base = resolve("/D/checkouts/ComfyUI-master");
+        (config as { comfyuiPath?: string }).comfyuiPath = base;
+        observedLiveRoot = undefined;
+        hasEntrypointFor = (dir) => resolve(dir) === base; // base HAS main.py
+        getSystemStats.mockResolvedValue({ system: { argv: RELATIVE_ARGV } });
+
+        const err = await resolveModelsDirWithBases().catch((e: Error) => e);
+        expect((err as Error).message).toMatch(/could not be determined/i);
+        // …and the refusal explains BOTH readings it tried, so the reader can fix it.
+        expect((err as Error).message).toMatch(/does not contain/);
+        expect((err as Error).message).toMatch(/is not itself "ComfyUI" holding "main\.py"/);
+      });
+
+      it("REFUSES the base-is-the-install reading when the base does NOT hold main.py", async () => {
+        // Name matches, entrypoint absent: no corroboration, so no anchor. This is
+        // the mutation guard for dropping the hasComfyUIEntrypoint(base) check.
+        const base = resolve("/D/ComfyUI_windows_portable/ComfyUI");
+        (config as { comfyuiPath?: string }).comfyuiPath = base;
+        observedLiveRoot = undefined;
+        hasEntrypointFor = () => false;
+        getSystemStats.mockResolvedValue({ system: { argv: RELATIVE_ARGV } });
+
+        await expect(resolveModelsDirWithBases()).rejects.toThrow(/could not be determined/i);
+      });
+
+      it("does NOT fold case on macOS — APFS can be case-SENSITIVE, so a case-differing relDir is not corroboration", async () => {
+        // `/x/ComfyUI` and `/x/comfyui` are two different installs on a
+        // case-sensitive APFS volume. This comparison decides where a
+        // multi-gigabyte file gets written, so a wrong "same" is the #369 harm (a
+        // model landing in an install the running server never reads, announced as
+        // a success). Windows filesystems ARE case-insensitive everywhere, so
+        // folding is correct there — and only there.
+        //
+        // The platform is stubbed rather than the test being skipped off macOS:
+        // this rule must be verifiable on every host, or it is only ever checked on
+        // the one machine least likely to run the suite.
+        const realPlatform = process.platform;
+        Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
+        try {
+          const base = resolve("/D/portable/ComfyUI");
+          (config as { comfyuiPath?: string }).comfyuiPath = base;
+          observedLiveRoot = undefined;
+          hasEntrypointFor = (dir) => resolve(dir) === base;
+          getSystemStats.mockResolvedValue({
+            system: { argv: [join("comfyui", "main.py"), "--listen"] },
+          });
+
+          await expect(resolveModelsDirWithBases()).rejects.toThrow(/could not be determined/i);
+        } finally {
+          Object.defineProperty(process, "platform", {
+            value: realPlatform,
+            configurable: true,
+          });
+        }
+      });
+
+      it("REFUSES when BOTH readings fit — the evidence does not say which install is running", async () => {
+        // base = <...>/ComfyUI holding main.py, AND <base>/ComfyUI/main.py also
+        // present. The server's "ComfyUI\main.py" is consistent with EITHER, so
+        // picking one is a guess about where multi-gigabyte files land — and
+        // guessing wrong is precisely the #369 harm (a model in a stale install,
+        // reported as a success).
+        const base = resolve("/bundle/ComfyUI");
+        (config as { comfyuiPath?: string }).comfyuiPath = base;
+        observedLiveRoot = undefined;
+        hasEntrypointFor = (dir) =>
+          resolve(dir) === base || resolve(dir) === join(base, "ComfyUI");
+        getSystemStats.mockResolvedValue({ system: { argv: RELATIVE_ARGV } });
+
+        await expect(resolveModelsDirWithBases()).rejects.toThrow(/could not be determined/i);
+      });
+
+      it("keeps the pre-existing relDir '.' behaviour unchanged (deliberately NOT tightened here)", async () => {
+        // `python main.py` with no reported cwd gives relDir ".", which corroborates
+        // nothing beyond "the configured base is a ComfyUI install" — a reviewer
+        // fairly calls that weak evidence for the #369 hazard. It is nonetheless
+        // UNCHANGED by #813, and deliberately so: this is the single most common
+        // local launch, and refusing it would route those users through the
+        // Manager (often not installed) for every download. Tightening it is a
+        // separate decision about a pre-existing behaviour, not part of fixing the
+        // portable-base anchoring. This test exists so the choice is explicit and
+        // any future change to it is a visible one.
+        const base = resolve("/home/me/ComfyUI");
+        (config as { comfyuiPath?: string }).comfyuiPath = base;
+        observedLiveRoot = undefined;
+        hasEntrypointFor = (dir) => resolve(dir) === base;
+        getSystemStats.mockResolvedValue({ system: { argv: ["main.py", "--listen"] } });
+
+        const { modelsDir, source } = await resolveModelsDirWithBases();
+        expect(modelsDir).toBe(join(base, "models"));
+        expect(source).toBe("base-anchored");
+      });
+
+      it("corroborates a MULTI-SEGMENT relative script against a base ending in those segments", async () => {
+        // `python sub/ComfyUI/main.py` with COMFYUI_PATH=<...>/sub/ComfyUI.
+        const base = resolve("/srv/stack/sub/ComfyUI");
+        (config as { comfyuiPath?: string }).comfyuiPath = base;
+        observedLiveRoot = undefined;
+        hasEntrypointFor = (dir) => resolve(dir) === base;
+        getSystemStats.mockResolvedValue({
+          system: { argv: [join("sub", "ComfyUI", "main.py"), "--listen"] },
+        });
+
+        const { modelsDir, source } = await resolveModelsDirWithBases();
+        expect(modelsDir).toBe(join(base, "models"));
+        expect(source).toBe("base-anchored");
+      });
     });
 
     it("an UNREACHABLE server still falls back to <COMFYUI_PATH>/models (no regression)", async () => {

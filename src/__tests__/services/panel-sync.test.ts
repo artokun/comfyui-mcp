@@ -161,17 +161,42 @@ describe("evaluatePanelSync — the four required outcomes", () => {
     ).toBe("sync");
   });
 
-  it("versions equal → up-to-date (no-op)", () => {
+  it("versions equal → meets-floor (no-op)", () => {
     const a = evaluatePanelSync(status({ installedVersion: REQUIRED }), {
       requiredVersion: REQUIRED,
       orchestratorVersion: ORCH,
     });
-    expect(a.decision).toBe("up-to-date");
+    expect(a.decision).toBe("meets-floor");
     expect(a.behind).toBe(false);
   });
 
-  it("installed NEWER than required → up-to-date, never a downgrade", () => {
-    expect(decide({ installedVersion: "0.12.0" })).toBe("up-to-date");
+  it("installed NEWER than required → meets-floor, never a downgrade", () => {
+    expect(decide({ installedVersion: "0.12.0" })).toBe("meets-floor");
+  });
+
+  // #806 — the whole cluster's headline defect. This branch compares against the
+  // orchestrator's MINIMUM and nothing else; the newest published panel is not
+  // known here at all. Reporting that as "up-to-date" told a user two versions
+  // behind the fix for his own bug that there was nothing to get.
+  it("clearing the floor is never reported as being current", () => {
+    const a = evaluatePanelSync(status({ installedVersion: "0.11.36" }), {
+      requiredVersion: REQUIRED,
+      orchestratorVersion: ORCH,
+    });
+    expect(a.decision).toBe("meets-floor");
+    // The verdict value itself must not carry the currency claim...
+    expect(a.decision).not.toBe("up-to-date");
+    // ...and neither may the prose the user actually reads.
+    expect(a.summary).not.toMatch(/up-to-date|already current|latest version/i);
+    // It names BOTH numbers, says what kind of check it was, and admits its limit.
+    expect(a.summary).toContain("0.11.36");
+    expect(a.summary).toContain(REQUIRED);
+    expect(a.summary).toMatch(/FLOOR check, not a latest-version check/);
+    expect(a.summary).toMatch(/most panel fixes ship WITHOUT raising the floor/);
+    // And points at where the real latest lives: the pack's pyproject, NOT the
+    // repo's GitHub releases (the panel publishes on a pyproject version change).
+    expect(a.summary).toContain("pyproject.toml");
+    expect(a.summary).not.toMatch(/\/releases/);
   });
 });
 
@@ -187,9 +212,24 @@ describe("evaluatePanelSync — a pin is honoured in every shape", () => {
     expect(a.summary).toContain("COMFYUI_MCP_PANEL_PIN");
   });
 
-  it("a pin while already current is simply up-to-date (no nagging)", () => {
+  it("a pin while already at the floor is simply meets-floor (no nagging)", () => {
     const pin: PanelPinState = { pinned: true, version: REQUIRED, source: "settings" };
-    expect(decide({ installedVersion: REQUIRED, pin })).toBe("up-to-date");
+    expect(decide({ installedVersion: REQUIRED, pin })).toBe("meets-floor");
+  });
+
+  // #806, pinned variant. The honesty is owed here too — but the step that moves
+  // a PINNED user is clearing the pin, not install_panel(action='update'), which
+  // this state would refuse. Naming the wrong one is the dead-end shape again.
+  it("a pinned floor-clearing panel is told the floor is not the latest, and to unpin first", () => {
+    const pin: PanelPinState = { pinned: true, version: REQUIRED, source: "settings" };
+    const a = evaluatePanelSync(status({ installedVersion: REQUIRED, pin }), {
+      requiredVersion: REQUIRED,
+      orchestratorVersion: ORCH,
+    });
+    expect(a.summary).toMatch(/FLOOR check, not a latest-version check/);
+    expect(a.summary).toContain("pyproject.toml");
+    expect(a.summary).toMatch(/clear the pin/i);
+    expect(a.summary).not.toContain("install_panel(action='update')");
   });
 
   it("a pin blocks even a FRESH install of a missing panel", () => {
@@ -438,11 +478,11 @@ describe("performPanelSync", () => {
     expect(r.verifiedVersion).toBe(REQUIRED);
   });
 
-  it("no-ops without touching anything when already current", async () => {
+  it("no-ops without touching anything when the floor is already met", async () => {
     const h = makeDeps({ installedVersion: REQUIRED });
     const r = await performPanelSync({ deps: h.deps, ...RUN });
     expect(r.synced).toBe(false);
-    expect(r.decision).toBe("up-to-date");
+    expect(r.decision).toBe("meets-floor");
     expect(h.updates).toBe(0);
   });
 

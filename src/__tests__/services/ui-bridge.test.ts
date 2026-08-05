@@ -17,6 +17,9 @@ import {
   BRIDGE_READONLY_CMDS,
   isMutatingGraphCommand,
   requiresWorkflowStampEnforcement,
+  BRIDGE_CAPABILITY_MIN_PANEL_VERSION,
+  unclassifiedGraphCommandsSeen,
+  __resetUnclassifiedGraphCommands,
 } from "../../services/ui-bridge.js";
 import { carryWorkflowCommandStamp } from "../../orchestrator/session-store.js";
 import {
@@ -1312,9 +1315,24 @@ describe("UiBridge (multi-tab)", () => {
     // FULLY (awaited close) before the first retry can fire, so attempt #1
     // deterministically succeeds. Same code path — bind failure → backoff →
     // self-heal — zero timing choreography.
-    const racePort = 40000 + Math.floor(Math.random() * 20000);
-    const blocker = new WebSocketServer({ port: racePort, host: "127.0.0.1" });
-    await new Promise<void>((resolve) => blocker.on("listening", () => resolve()));
+    //
+    // #821: the blocker must NOT pick a random port — ~1 in 8 runs that port
+    // is already held on the machine, "listening" never fires, and the test
+    // hangs to the deadline. Bind on an OS-assigned port (listen(0)) and read
+    // back the assigned one. The blocker is the FIXTURE, so its bind must be
+    // verifiably complete (and its error a rejected promise, not a silent
+    // hang) before the bridge starts: a setup failure must report as a setup
+    // failure, not as a timeout in the behaviour under test.
+    const blocker = new WebSocketServer({ port: 0, host: "127.0.0.1" });
+    await new Promise<void>((resolve, reject) => {
+      blocker.on("listening", () => resolve());
+      blocker.on("error", reject);
+    });
+    const blockerAddr = blocker.address();
+    if (!blockerAddr || typeof blockerAddr !== "object") {
+      throw new Error("fixture setup failed: blocker is listening but reported no address");
+    }
+    const racePort = blockerAddr.port;
 
     const reconnecting = new UiBridge(racePort);
     reconnecting.start(); // hits EADDRINUSE, schedules a retry
@@ -1935,7 +1953,7 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
     await vi.waitFor(() => expect(bridge.tabs().some((t) => t.tab_id === "old-skew")).toBe(true));
     await expect(
       bridge.send({ cmd: "graph_add_node", node: "x" } as never, { tabId: "old-skew" }),
-    ).rejects.toThrow(/detected panel 0\.11\.0.*requires panel 0\.11\.35\+.*install_panel\(action:'update'\).*restart ComfyUI.*rebinding cannot/i);
+    ).rejects.toThrow(/reports panel 0\.11\.0.*needs panel 0\.11\.35\+.*install_panel\(action:'update'\).*restart ComfyUI.*rebinding cannot/i);
     old.close();
   });
 
@@ -1973,6 +1991,17 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
       expect((err as Error).message).toMatch(/0\.11\.38/);
       // It must NOT send them back to the tool that will report nothing to do.
       expect((err as Error).message).not.toMatch(/Run install_panel\(action:'update'\)/);
+      // …and it must not claim the update would report nothing to do: since #806
+      // an update CAN pull a newer panel. What it cannot do is replace the JS an
+      // open tab is running, which is what this branch is actually about.
+      expect((err as Error).message).not.toMatch(/report nothing to do/);
+      expect((err as Error).message).toMatch(/no update replaces the JavaScript an open tab/);
+      // READ AS A HUMAN WOULD: the recovery is concatenated into a wrapper that
+      // appends its own sentence break, and a trailing period here rendered
+      // "the install is not the problem.. Reads and view-only commands…"
+      // (codex gate). Anchored on a word character so the legitimate "../" in
+      // the host-side commands cannot false-positive.
+      expect((err as Error).message).not.toMatch(/[A-Za-z)"']\.\./);
       // The gate itself still refused the write — the diagnosis changed, not the gate.
       expect(isCapabilityRefusal(err as Error)).toBe(true);
       stale.close();
@@ -2006,6 +2035,81 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
       expect((err as Error).message).not.toMatch(/Do NOT update the panel/);
       expect((err as Error).message).toMatch(/install_panel\(action:'update'\)|ON THE COMFYUI HOST/);
       behind.close();
+    } finally {
+      clearPanelDiskObservation();
+    }
+  });
+
+  it("the stale-bundle proof uses the FENCE's floor, not the aggregate requirement", async () => {
+    // codex gate. resolveStaleBundleSkew answers "is the INSTALL sufficient for
+    // the write that was just refused?" — a fence question. Answering it with
+    // requiredPanelVersion(), the max across every command and capability this
+    // build knows, denies the positive proof for an install that IS sufficient
+    // the moment anything unrelated raises the aggregate, and sends a user whose
+    // only problem is a cached tab off to update.
+    const table = BRIDGE_CAPABILITY_MIN_PANEL_VERSION as Record<string, string | undefined>;
+    writeTempPanelPack("0.11.35"); // exactly the fence floor, well under the aggregate below
+    table.some_unrelated_future_capability = "9.9.9";
+    try {
+      const stale = new WebSocket(`ws://127.0.0.1:${port}`);
+      await new Promise<void>((res, rej) => {
+        stale.on("open", () => {
+          stale.send(
+            JSON.stringify({ type: "hello", tab_id: "fence-floor", title: "wf", panel_version: "0.11.34" }),
+          );
+          res();
+        });
+        stale.on("error", rej);
+      });
+      await vi.waitFor(() => expect(bridge.tabs().some((t) => t.tab_id === "fence-floor")).toBe(true));
+      const err = await bridge
+        .send({ cmd: "graph_add_node", node: "x" } as never, { tabId: "fence-floor" })
+        .catch((e: Error) => e);
+      expect((err as Error).message).toMatch(/Do NOT update the panel/);
+      expect((err as Error).message).toMatch(/already 0\.11\.35/);
+      stale.close();
+    } finally {
+      delete table.some_unrelated_future_capability;
+      clearPanelDiskObservation();
+    }
+  });
+
+  it("a CAPABLE disk plus NO advertised version ranks the causes instead of asserting one", async () => {
+    // codex gate, and the exact combination the other new tests miss: the pack on
+    // disk clears the fence floor AND the hello carried no panel_version. "Your
+    // browser tab is running a cached old bundle" is then an inference — a relay
+    // or other non-panel client that never implemented the fence looks identical
+    // from here, and telling it to hard-refresh a tab it does not have is the
+    // dead end this cluster is about.
+    writeTempPanelPack("0.11.38");
+    try {
+      const sock = new WebSocket(`ws://127.0.0.1:${port}`);
+      await new Promise<void>((res, rej) => {
+        sock.on("open", () => {
+          sock.send(JSON.stringify({ type: "hello", tab_id: "no-version-capable", title: "wf" }));
+          res();
+        });
+        sock.on("error", rej);
+      });
+      await vi.waitFor(() =>
+        expect(bridge.tabs().some((t) => t.tab_id === "no-version-capable")).toBe(true),
+      );
+      const err = await bridge
+        .send({ cmd: "graph_add_node", node: "x" } as never, { tabId: "no-version-capable" })
+        .catch((e: Error) => e);
+      const msg = (err as Error).message;
+      // The PROVEN part is still stated plainly, and still spares them the update.
+      expect(msg).toMatch(/Updating the panel will not fix this/);
+      expect(msg).toMatch(/already 0\.11\.38/);
+      expect(msg).not.toMatch(/Run install_panel\(action:'update'\)/);
+      // The UNPROVEN part is not asserted...
+      expect(msg).not.toMatch(/This BROWSER TAB is running an older cached copy/);
+      // ...it is ranked, actionable case first, the other named rather than hidden.
+      expect(msg).toMatch(/\(1\) It is a ComfyUI browser tab/);
+      expect(msg).toMatch(/HARD-REFRESH/);
+      expect(msg).toMatch(/\(2\) It is NOT a panel tab/);
+      expect(msg).not.toMatch(/[A-Za-z)"']\.\./);
+      sock.close();
     } finally {
       clearPanelDiskObservation();
     }
@@ -2228,6 +2332,386 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
     const msg = seen.find((e) => e.type === "user_message" && e.text === "after-close");
     expect(msg?.tab_id).toBe("phone-c"); // reverted to own tab, not routed into the dead id
   });
+
+  // ---------------------------------------------------------------------------
+  // The panel-version-floor cluster (#778 / #819 / #812 / #823).
+  //
+  // Placed at the END of this describe on purpose: a capability refusal whose
+  // on-disk panel version cannot be read kicks off a background primePanelBase()
+  // that this file's afterEach cannot await, and a late resolution lands in
+  // whichever test is running when it settles. Sitting last, these cannot
+  // perturb the stale-bundle tests above, which seed a base synchronously.
+  // ---------------------------------------------------------------------------
+
+  it("#778: a non-enforcing panel still gets its READS and view-only commands", async () => {
+    // The reported bug and its unreported siblings. Each of these was refused as
+    // "a canvas mutation" on any panel below the fence version, purely because it
+    // was missing from BRIDGE_READONLY_CMDS — a set about RE-DISPATCH SAFETY, not
+    // about what the command does. Assert they are DISPATCHED (the socket saw
+    // them), not merely that no error was thrown.
+    const old = new WebSocket(`ws://127.0.0.1:${port}`);
+    const sawOnSocket: string[] = [];
+    await new Promise<void>((res, rej) => {
+      old.on("open", () => {
+        old.send(JSON.stringify({ type: "hello", tab_id: "tmp:old778", title: "old" })); // no fence flags
+        res();
+      });
+      old.on("error", rej);
+    });
+    old.on("message", (buf) => {
+      const m = JSON.parse(buf.toString());
+      if (m.rid && m.cmd) {
+        sawOnSocket.push(m.cmd);
+        old.send(JSON.stringify({ rid: m.rid, ok: true, result: {} }));
+      }
+    });
+    await vi.waitFor(() => expect(bridge.tabs().some((t) => t.tab_id === "tmp:old778")).toBe(true));
+
+    const reads = [
+      "graph_find_nodes",
+      "graph_list_subgraphs",
+      "graph_screenshot",
+      "graph_canvas",
+      "graph_select_nodes",
+      "graph_enter_subgraph",
+      "graph_exit_subgraph",
+      "graph_copy_nodes",
+    ];
+    for (const cmd of reads) {
+      await expect(bridge.send({ cmd } as never, { tabId: "tmp:old778" })).resolves.toBeTruthy();
+    }
+    expect(sawOnSocket).toEqual(reads);
+
+    // And the gate is still a gate: the write the same session wanted (#812) is
+    // refused, and refused FOR THE STATED REASON — not merely refused.
+    await expect(
+      bridge.send({ cmd: "graph_set_widget", node_id: 1 } as never, { tabId: "tmp:old778" }),
+    ).rejects.toThrow(/does not enforce per-command workflow targeting/i);
+    expect(sawOnSocket).toEqual(reads); // nothing extra reached the socket
+    old.close();
+  });
+
+  it("#819/#823: an unadvertised panel version is reported as unobserved, not as old", async () => {
+    const old = new WebSocket(`ws://127.0.0.1:${port}`);
+    await new Promise<void>((res, rej) => {
+      old.on("open", () => {
+        // No panel_version in the hello — exactly #819's "panel version unknown".
+        old.send(JSON.stringify({ type: "hello", tab_id: "tmp:noversion", title: "old" }));
+        res();
+      });
+      old.on("error", rej);
+    });
+    await vi.waitFor(() =>
+      expect(bridge.tabs().some((t) => t.tab_id === "tmp:noversion")).toBe(true),
+    );
+    const err = await bridge
+      .send({ cmd: "graph_add_node", node: "x" } as never, { tabId: "tmp:noversion" })
+      .then(() => null)
+      .catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    const msg = (err as Error).message;
+    // The old text read "detected panel version unknown; this MCP requires panel
+    // 0.11.35+", which an agent reasonably takes as a verdict that the panel is
+    // too old. An absent reading is an absent OBSERVATION: a CURRENT install
+    // behind a stale cached browser bundle presents identically.
+    expect(msg).not.toMatch(/detected panel version unknown/i);
+    expect(msg).toMatch(/advertised NO panel version/);
+    expect(msg).toMatch(/age was not observed/);
+    expect(msg).toMatch(/equally consistent with an old install/);
+    // It still names the version a write needs, and a command that moves them.
+    expect(msg).toMatch(/needs panel 0\.11\.35\+/);
+    expect(msg).toContain("git clone --depth 1");
+    old.close();
+  });
+
+  it("#812/#823: the remedy names how to reach install_panel when it is not in the tool list", async () => {
+    const old = new WebSocket(`ws://127.0.0.1:${port}`);
+    await new Promise<void>((res, rej) => {
+      old.on("open", () => {
+        old.send(
+          JSON.stringify({
+            type: "hello",
+            tab_id: "tmp:compact",
+            title: "w",
+            panel_version: "0.11.32",
+          }),
+        );
+        res();
+      });
+      old.on("error", rej);
+    });
+    await vi.waitFor(() => expect(bridge.tabs().some((t) => t.tab_id === "tmp:compact")).toBe(true));
+    const err = await bridge
+      .send({ cmd: "graph_set_widget", node_id: 1 } as never, { tabId: "tmp:compact" })
+      .then(() => null)
+      .catch((e: Error) => e);
+    const msg = (err as Error).message;
+    // #812's reporter searched their tool list for install_panel, found nothing,
+    // and concluded the documented recovery was impossible. It was there — behind
+    // the compact router, which is the DEFAULT tool mode. Naming the actual call
+    // is the difference between a remedy and a dead end.
+    expect(msg).toContain(`call_tool {"name": "install_panel", "args": {"action": "update"}}`);
+    // The specific version found and the version required, both named.
+    expect(msg).toContain("0.11.32");
+    expect(msg).toMatch(/needs panel 0\.11\.35\+/);
+    old.close();
+  });
+
+  it("#819: a version INHERITED across a reconnect is never attributed to this tab", async () => {
+    // codex gate. `conn.panelVersion` survives a reconnect whose hello omits the
+    // field, so "this tab reports panel 0.11.32" would be a claim about an
+    // observation the current handshake never made — the same fabrication the
+    // "version unknown" fix removes, arriving by the other door. The earlier
+    // reading is still shown (it is real), labelled as earlier and possibly out
+    // of date.
+    const sock = new WebSocket(`ws://127.0.0.1:${port}`);
+    await new Promise<void>((res, rej) => {
+      sock.on("open", () => {
+        sock.send(
+          JSON.stringify({
+            type: "hello",
+            tab_id: "tmp:inherit",
+            title: "w",
+            panel_version: "0.11.32",
+          }),
+        );
+        res();
+      });
+      sock.on("error", rej);
+    });
+    await vi.waitFor(() => expect(bridge.tabs().some((t) => t.tab_id === "tmp:inherit")).toBe(true));
+
+    // Re-hello WITHOUT a panel_version. The connection inherits 0.11.32 for
+    // messaging but records panelVersionAdvertised: false.
+    sock.send(JSON.stringify({ type: "hello", tab_id: "tmp:inherit", title: "w" }));
+    await new Promise((r) => setTimeout(r, 25));
+
+    const err = await bridge
+      .send({ cmd: "graph_add_node", node: "x" } as never, { tabId: "tmp:inherit" })
+      .then(() => null)
+      .catch((e: Error) => e);
+    const msg = (err as Error).message;
+    expect(msg).not.toContain("this tab reports panel 0.11.32");
+    expect(msg).toMatch(/advertised NO panel version in its current handshake/);
+    expect(msg).toMatch(/EARLIER connection for this tab reported 0\.11\.32, which may be out of date/);
+    expect(msg).toMatch(/age was not observed/);
+    sock.close();
+  });
+
+  it("a BLANK panel_version is disclosed as unreadable, never rendered as a reported version", async () => {
+    // codex gate. `panel_version: "   "` is a non-empty string, so the
+    // connection records it as advertised — but it says nothing. Untrimmed, the
+    // refusal read "this tab reports panel    " while the skew resolver, which
+    // does trim, simultaneously treated the tab as having advertised no version:
+    // one message, two readings of one field.
+    const sock = new WebSocket(`ws://127.0.0.1:${port}`);
+    await new Promise<void>((res, rej) => {
+      sock.on("open", () => {
+        sock.send(
+          JSON.stringify({ type: "hello", tab_id: "tmp:blankver", title: "w", panel_version: "   " }),
+        );
+        res();
+      });
+      sock.on("error", rej);
+    });
+    await vi.waitFor(() => expect(bridge.tabs().some((t) => t.tab_id === "tmp:blankver")).toBe(true));
+    const err = await bridge
+      .send({ cmd: "graph_add_node", node: "x" } as never, { tabId: "tmp:blankver" })
+      .then(() => null)
+      .catch((e: Error) => e);
+    const msg = (err as Error).message;
+    expect(msg).not.toMatch(/reports panel\s*[;.)]/); // no empty "reports panel" claim
+    expect(msg).not.toMatch(/reports panel {2}/);
+    expect(msg).toMatch(/advertised NO panel version/);
+    sock.close();
+  });
+
+  it.each([
+    ["nightly", "a git-installed pack — ComfyUI-Manager's own answer"],
+    ["dev", "a local checkout"],
+    ["0.11.28.1", "a four-part string that is not SemVer"],
+  ])("an UNPARSEABLE panel_version (%s) is shown as evidence, never narrated as a version", async (
+    raw,
+  ) => {
+    // The distinction is PARSEABLE vs NOT, not empty vs non-empty. Trimming
+    // caught `"   "`; this catches everything else that is not a version. It is
+    // not a corner case — "nightly" is what a git-installed panel reports, so it
+    // is the normal reading for anyone running from source.
+    const sock = new WebSocket(`ws://127.0.0.1:${port}`);
+    await new Promise<void>((res, rej) => {
+      sock.on("open", () => {
+        sock.send(
+          JSON.stringify({ type: "hello", tab_id: `tmp:unparse-${raw}`, title: "w", panel_version: raw }),
+        );
+        res();
+      });
+      sock.on("error", rej);
+    });
+    await vi.waitFor(() =>
+      expect(bridge.tabs().some((t) => t.tab_id === `tmp:unparse-${raw}`)).toBe(true),
+    );
+    const err = await bridge
+      .send({ cmd: "graph_add_node", node: "x" } as never, { tabId: `tmp:unparse-${raw}` })
+      .then(() => null)
+      .catch((e: Error) => e);
+    const msg = (err as Error).message;
+    expect(msg).not.toContain(`reports panel ${raw}`); // no version-shaped claim
+    expect(msg).toContain(`advertised "${raw}"`); // but the evidence is still shown
+    expect(msg).toMatch(/is not a version this MCP can compare/);
+    expect(msg).toMatch(/age was not observed/);
+    sock.close();
+  });
+
+  it("an UNPARSEABLE version with a CAPABLE disk still earns the stale-bundle diagnosis", async () => {
+    // The consequence of routing "nightly" to the unreadable path rather than
+    // dropping it: a git-install user whose pack on disk already clears the
+    // fence floor used to be sent off to update (the skew resolver silently
+    // rejected the unparseable value). They now get the honest ranked answer.
+    writeTempPanelPack("0.11.38");
+    try {
+      const sock = new WebSocket(`ws://127.0.0.1:${port}`);
+      await new Promise<void>((res, rej) => {
+        sock.on("open", () => {
+          sock.send(
+            JSON.stringify({ type: "hello", tab_id: "nightly-capable", title: "w", panel_version: "nightly" }),
+          );
+          res();
+        });
+        sock.on("error", rej);
+      });
+      await vi.waitFor(() =>
+        expect(bridge.tabs().some((t) => t.tab_id === "nightly-capable")).toBe(true),
+      );
+      const err = await bridge
+        .send({ cmd: "graph_add_node", node: "x" } as never, { tabId: "nightly-capable" })
+        .catch((e: Error) => e);
+      const msg = (err as Error).message;
+      expect(msg).toMatch(/Updating the panel will not fix this/);
+      expect(msg).toMatch(/already 0\.11\.38/);
+      expect(msg).not.toMatch(/Run install_panel\(action:'update'\)/);
+      // Still no fabricated cause — the causes are ranked, as for no version.
+      expect(msg).not.toMatch(/This BROWSER TAB is running an older cached copy/);
+      expect(msg).toMatch(/\(1\) It is a ComfyUI browser tab/);
+      sock.close();
+    } finally {
+      clearPanelDiskObservation();
+    }
+  });
+
+  it("#819: an INHERITED version is not attributed to this tab by the REACTIVE path either", async () => {
+    // The provenance screen had been applied to the write-refusal path only. The
+    // reactive Unknown-command rewrite built its own view from the same raw
+    // field, so a re-hello that omitted panel_version could still produce
+    // "detected panel 0.4.5 … too old" about a connection that observed no
+    // version at all — the same defect as the fence path, one door over.
+    const sock = new WebSocket(`ws://127.0.0.1:${port}`);
+    await new Promise<void>((res, rej) => {
+      sock.on("open", () => {
+        sock.send(
+          JSON.stringify({ type: "hello", tab_id: "tmp:inherit-reactive", title: "w", panel_version: "0.4.5" }),
+        );
+        res();
+      });
+      sock.on("error", rej);
+    });
+    await vi.waitFor(() =>
+      expect(bridge.tabs().some((t) => t.tab_id === "tmp:inherit-reactive")).toBe(true),
+    );
+    // Re-hello WITHOUT a version: 0.4.5 is inherited for messaging only.
+    sock.send(JSON.stringify({ type: "hello", tab_id: "tmp:inherit-reactive", title: "w" }));
+    await new Promise((r) => setTimeout(r, 25));
+    // The panel answers an ALLOWED (inert) command with the dispatcher's own
+    // Unknown-command reply — the reactive rewrite path.
+    sock.on("message", (buf) => {
+      const m = JSON.parse(buf.toString());
+      if (m.rid && m.cmd) {
+        sock.send(JSON.stringify({ rid: m.rid, ok: false, error: `Unknown command "${m.cmd}"` }));
+      }
+    });
+    const err = await bridge
+      .send({ cmd: "graph_outline" } as never, { tabId: "tmp:inherit-reactive" })
+      .then(() => null)
+      .catch((e: Error) => e);
+    const msg = (err as Error).message;
+    expect(msg).not.toContain("detected panel 0.4.5");
+    expect(msg.toLowerCase()).not.toContain("too old"); // no age verdict from an unobserved version
+    expect(msg).toMatch(/does not implement "graph_outline"/);
+    expect(msg).toMatch(/this connection advertised no panel version/);
+    expect(msg).toMatch(/an earlier connection for this tab reported 0\.4\.5, which may be out of date/);
+    sock.close();
+  });
+
+  it("an UNCLASSIFIED graph command routed through the bridge is fenced AND recorded", async () => {
+    // Layer 3, exercised through the DISPATCH PATH rather than by calling the
+    // classifier directly — the gap the independent gate flagged in the earlier
+    // evidence. A command with no ledger entry, arriving at the real bridge:
+    // it must still fail closed (fenced as a write) AND leave a record, so the
+    // fallback is never a silent default however the command got here.
+    __resetUnclassifiedGraphCommands();
+    const sock = new WebSocket(`ws://127.0.0.1:${port}`);
+    await new Promise<void>((res, rej) => {
+      sock.on("open", () => {
+        sock.send(JSON.stringify({ type: "hello", tab_id: "tmp:unclassified", title: "w" }));
+        res();
+      });
+      sock.on("error", rej);
+    });
+    await vi.waitFor(() =>
+      expect(bridge.tabs().some((t) => t.tab_id === "tmp:unclassified")).toBe(true),
+    );
+    const err = await bridge
+      .send({ cmd: "graph_brand_new_unclassified" } as never, { tabId: "tmp:unclassified" })
+      .then(() => null)
+      .catch((e: Error) => e);
+    // Fenced, for the stated reason — not merely rejected.
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/does not enforce per-command workflow targeting/i);
+    expect(dispatchOutcomeOf(err as Error)).toBe(false); // nothing was written
+    // And recorded, so the ledger gap is visible.
+    expect([...unclassifiedGraphCommandsSeen()]).toContain("graph_brand_new_unclassified");
+    __resetUnclassifiedGraphCommands();
+    sock.close();
+  });
+
+  it("quotes NO fence version when this build's capability table cannot state one", async () => {
+    // codex gate. The refusal is still correct — the panel did not advertise the
+    // fence — but the DIAGNOSIS must not invent a number. Falling back to the
+    // 0.11.4 bridge baseline would assert "0.11.4, the first build that fences
+    // every command", which is false and points at an update that would not
+    // clear the gate: #812's loop, rebuilt inside the fix for it.
+    const table = BRIDGE_CAPABILITY_MIN_PANEL_VERSION as Record<string, string | undefined>;
+    const saved = table.enforces_workflow_stamp_at_write;
+    delete table.enforces_workflow_stamp_at_write;
+    try {
+      const old = new WebSocket(`ws://127.0.0.1:${port}`);
+      await new Promise<void>((res, rej) => {
+        old.on("open", () => {
+          old.send(
+            JSON.stringify({ type: "hello", tab_id: "tmp:notable", title: "w", panel_version: "0.11.32" }),
+          );
+          res();
+        });
+        old.on("error", rej);
+      });
+      await vi.waitFor(() => expect(bridge.tabs().some((t) => t.tab_id === "tmp:notable")).toBe(true));
+      const err = await bridge
+        .send({ cmd: "graph_add_node", node: "x" } as never, { tabId: "tmp:notable" })
+        .then(() => null)
+        .catch((e: Error) => e);
+      const msg = (err as Error).message;
+      expect(msg).not.toMatch(/needs panel \d/); // no number, right or wrong
+      expect(msg).not.toContain("0.11.4+");
+      expect(msg).toMatch(/cannot say which version first shipped it/);
+      // Still a refusal, still typed, and still carrying a remedy.
+      expect(err).toBeInstanceOf(Error);
+      expect(isCapabilityRefusal(err as Error)).toBe(true);
+      expect(dispatchOutcomeOf(err as Error)).toBe(false);
+      expect(msg).toMatch(/update to the latest panel/);
+      old.close();
+    } finally {
+      table.enforces_workflow_stamp_at_write = saved;
+    }
+  });
 });
 
 describe("markDispatched / dispatchOutcomeOf (typed dispatch outcome — #509 P1)", () => {
@@ -2427,12 +2911,24 @@ describe("makeUnknownCommandError (old-panel version gate)", () => {
   // (compareSemver returns 0 both for "equal" and "unparseable"). Without the
   // parse screen, `panel_version: "dev"` would compare as 0 (>= 0 → "supported")
   // and wrongly leak the raw error / skip the #236 learning path.
-  it("treats an unparseable advertised version as NOT proven new enough (still too old)", () => {
+  it("treats an unparseable advertised version as NOT proven new enough (still rewritten)", () => {
     for (const bad of ["dev", "unknown", "latest", ""]) {
       const e = makeUnknownCommandError('Unknown command "graph_outline"', bad);
+      // The point of this test is that the rewrite still FIRES — an unparseable
+      // version must never be mistaken for new-enough.
       expect(e).not.toBeNull();
-      expect(e?.message.toLowerCase()).toContain("too old");
+      expect(e?.message.toLowerCase()).toContain('does not implement "graph_outline"');
+      expect(e?.message).toContain("0.4.6"); // the true minimum is still quoted
+      // But it must not claim an AGE it never observed. "too old" is a verdict
+      // that needs a version that parsed and compared below the minimum; the one
+      // observed fact here is the panel's own "Unknown command" reply.
+      expect(e?.message.toLowerCase()).not.toContain("too old");
     }
+    // And the unparseable text is shown as EVIDENCE, quoted, never as a version.
+    const nightly = makeUnknownCommandError('Unknown command "graph_outline"', "nightly");
+    expect(nightly?.message).toContain('this panel reports "nightly"');
+    expect(nightly?.message).toContain("not a comparable version");
+    expect(nightly?.message).not.toContain("detected panel nightly");
   });
 
   // A MALFORMED version that merely PREFIXES a valid semver (e.g. `0.11.28.1`,
@@ -2456,7 +2952,11 @@ describe("makeUnknownCommandError (old-panel version gate)", () => {
     ]) {
       const e = makeUnknownCommandError('Unknown command "graph_outline"', bad);
       expect(e).not.toBeNull();
-      expect(e?.message.toLowerCase()).toContain("too old");
+      // Rewritten (not mistaken for new-enough), and — as above — no age verdict
+      // from a string that failed the screen.
+      expect(e?.message.toLowerCase()).toContain('does not implement "graph_outline"');
+      expect(e?.message.toLowerCase()).not.toContain("too old");
+      expect(e?.message).toContain(`this panel reports "${bad}"`);
     }
     // And it is symmetric on the proactive gate: a malformed version can't PROVE
     // unsupported either, so it is never proactively blocked (fail-open to reactive).

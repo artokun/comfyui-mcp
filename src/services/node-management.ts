@@ -635,8 +635,42 @@ const queueTiming = {
   // counts queued items). Give the worker a grace window to spin up before
   // treating an idle-looking status as "done".
   startupGraceMs: 8000,
+  // Budget for node installs/updates/fixes: bounded by how long `pip install`
+  // and a git clone plausibly take.
   timeoutMs: 600_000,
+  /**
+   * Budget for an `install-model` task (#817). A model download is NOT the same
+   * shape of work as a node install: 600s is a hard guarantee of failure for any
+   * multi-GB file on a normal link (a 15 GB file at 25 MB/s needs 600s just for
+   * the bytes, before any CDN slowness), and #817 is exactly that — the queue
+   * timing out at 600s every time.
+   *
+   * We cannot make the REMOTE transfer resumable — ComfyUI-Manager fetches
+   * server-side and exposes no per-task progress or byte count — so unlike the
+   * local path (#470) there is nothing here to bound an attempt AGAINST. All we
+   * can honestly do is stop declaring failure while the host is still working.
+   * The value is deliberately generous rather than tuned; the timeout's job is to
+   * stop us waiting forever, not to police the download.
+   */
+  modelTimeoutMs: 4 * 60 * 60_000,
 };
+
+/** Per-kind queue budget. Only `install-model` gets the large one — a node
+ *  install that hangs for four hours is a real failure worth reporting. */
+function queueTimeoutFor(kind?: ManagerTaskKind): number {
+  if (kind !== "install-model") return queueTiming.timeoutMs;
+  const raw = process.env.COMFYUI_MANAGER_DOWNLOAD_TIMEOUT_S;
+  if (raw !== undefined && raw.trim() !== "") {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n > 0) {
+      return Math.min(24 * 60 * 60_000, Math.max(60_000, Math.round(n) * 1000));
+    }
+    logger.warn(
+      `Ignoring COMFYUI_MANAGER_DOWNLOAD_TIMEOUT_S="${raw}" — not a positive number of seconds.`,
+    );
+  }
+  return queueTiming.modelTimeoutMs;
+}
 
 /** @internal — test hook to shrink polling timings; not part of the tool API. */
 export function setQueueTimingForTests(
@@ -805,8 +839,15 @@ export async function fetchManagerTaskHistoryEntry(
  * work that is really running — and inviting a caller retry that double-executes
  * it (#646).
  */
-async function runManagerQueue(api: ManagerApi, base: string): Promise<QueueStatus> {
+async function runManagerQueue(
+  api: ManagerApi,
+  base: string,
+  /** Selects the queue budget — a model download gets a far larger one than a
+   *  node install (#817). Omitted ⇒ the node-install budget. */
+  kind?: ManagerTaskKind,
+): Promise<QueueStatus> {
   const prefix = managerQueuePrefixFor(api);
+  const timeoutMs = queueTimeoutFor(kind);
   // queue/start returns 200 (worker started) or 201 (already running) — both
   // are 2xx, so managerFetch accepts either. Same on both generations. Some
   // legacy 3.x builds expose start as GET-only, so negotiate POST→GET on a 405
@@ -815,7 +856,7 @@ async function runManagerQueue(api: ManagerApi, base: string): Promise<QueueStat
 
   const start = Date.now();
   let lastStatus: QueueStatus | undefined;
-  while (Date.now() - start < queueTiming.timeoutMs) {
+  while (Date.now() - start < timeoutMs) {
     await sleep(queueTiming.pollIntervalMs);
     const status = await managerFetch<QueueStatus>(`${prefix}/status`, {
       base,
@@ -834,8 +875,26 @@ async function runManagerQueue(api: ManagerApi, base: string): Promise<QueueStat
       }
     }
   }
+  // TIMED OUT. Be precise about what that does and does NOT mean (#817): we
+  // stopped WAITING; the ComfyUI host's queue worker was never told to stop and,
+  // for a model download, is very likely still streaming. Reporting this as a
+  // plain failure is what led #817's reporter to re-issue — starting a SECOND
+  // server-side fetch of the same file, which is how the destination ended up
+  // truncated and failing safetensors shape checks. There is no Manager API to
+  // recall a queued task, so the only honest remedy is: look, don't re-issue.
   throw new NodeManagementError(
-    `ComfyUI-Manager queue did not finish within ${queueTiming.timeoutMs / 1000}s`,
+    `ComfyUI-Manager queue did not finish within ${Math.round(timeoutMs / 1000)}s. ` +
+      (kind === "install-model"
+        ? `This is the WAIT giving up, NOT proof the download failed — ComfyUI-Manager fetches the file ` +
+          `server-side and there is no API to stop or inspect an individual task, so the host is probably ` +
+          `still downloading. Do NOT re-issue the download: a second server-side fetch writes the SAME ` +
+          `destination file concurrently, and the interleaved result is a corrupt model (that is the ` +
+          `"shape is invalid for input of size N" failure). Instead, wait and check list_local_models on ` +
+          `the connected server until the file appears and its size stops changing. If your files are ` +
+          `genuinely larger than this budget, raise COMFYUI_MANAGER_DOWNLOAD_TIMEOUT_S (seconds), or ` +
+          `download to a LOCAL ComfyUI, where the transfer is streamed here — resumable, retried ` +
+          `automatically, and size-verified before anything is reported as landed.`
+        : `The Manager worker may still be running the task on the host; check its state before retrying.`),
     lastStatus,
   );
 }
@@ -864,7 +923,8 @@ async function queueManagerTask(
     enqueueManagerTask(api, kind, resolve, randomUUID(), base, epoch),
     base,
   );
-  return runManagerQueue(used, base);
+  // Thread the kind so a model download gets the model budget, not the node one (#817).
+  return runManagerQueue(used, base, kind);
 }
 
 /** Params for a Manager task: a fixed body, or a resolver invoked with the

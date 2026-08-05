@@ -52,7 +52,7 @@ pin, shadow copies, dev symlinks, remote/cloud mode, and unreadable versions.
 
 | `decision` | What it means | What you do |
 |---|---|---|
-| `up-to-date` | Panel already meets what the orchestrator needs. | Nothing. Say so in one line, or say nothing at all if the user didn't ask. |
+| `meets-floor` | Panel clears the **minimum** the orchestrator needs. It is **not** a statement that a newer panel does not exist — nothing on this path knows the newest published version, and most panel fixes ship without raising the floor (#806). | Nothing, unless the user is chasing a bug. Say "meets the minimum (X ≥ Y)", never "up to date". If they are debugging, add that a newer panel may carry the fix and that the latest is published in the pack's `pyproject.toml`. |
 | `sync` | Behind, not pinned, nothing ambiguous. | Step 3 — sync it. |
 | `pinned-warn` | Behind, **but pinned**. | Step 4 — warn only. **Do not sync.** |
 | `blocked` | A shadow copy, or a pin we couldn't read. | Step 5 — get it unblocked first. |
@@ -81,7 +81,7 @@ re-reads the pack from disk afterwards. Read the result:
     compared, so whether the mismatch is fixed is **unknown**. Say exactly that.
     `null` is not `false` — never report it as "you're fine".
 - `synced: false` → nothing was changed. `decision` says why (`pinned-warn`,
-  `up-to-date`, `blocked`, …). This is a normal outcome, not a failure.
+  `meets-floor`, `blocked`, …). This is a normal outcome, not a failure.
 - **The tool errored** → the sync FAILED. The error text names the cause
   (ComfyUI-Manager's stale-3.x silent no-op, a shadow copy, an unverifiable
   post-state) and the fix. Relay it. **Never** describe a failed sync as
@@ -177,8 +177,11 @@ pin.
   documented sidebar feature that isn't there.
 - Whenever the user asks to update, pin, or unpin the panel.
 
-Be proportionate: this is a one-line check. If `decision` is `up-to-date` and the
+Be proportionate: this is a one-line check. If `decision` is `meets-floor` and the
 user didn't ask, don't narrate it — just carry on with what they actually wanted.
+The exception is a user who is DEBUGGING the panel: `meets-floor` is exactly the
+state that hides a shipped fix behind an unchanged floor, so there it is worth the
+sentence.
 
 ## Absolute rules
 
