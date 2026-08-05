@@ -444,7 +444,13 @@ function resolveStaleBundleSkew(panelVersion?: string): PanelBundleSkew | undefi
 
   const advertised = panelVersion?.trim();
   if (advertised) {
-    // A version we cannot parse is not proof of an old tab.
+    // Defence in depth. The caller now screens the handshake value against
+    // SEMVER_RE and passes `undefined` for anything unparseable, so a value that
+    // reaches here is already a version — but this must not become the ONLY
+    // screen: returning undefined for an unparseable string would silently drop
+    // the diagnosis for the "nightly" case (a git-installed pack), which is
+    // precisely the population that ends up in this refusal. An unparseable
+    // reading is an ABSENT reading, and the caller resolves it as one.
     if (!SEMVER_RE.test(advertised)) return undefined;
     if (compareSemver(advertised, required) >= 0) return undefined;
   }
@@ -790,12 +796,68 @@ export const GRAPH_CMD_EFFECT: Readonly<Record<string, GraphCmdEffect>> = {
   graph_run: "targeted",
 };
 
+/**
+ * Every `graph_*` command this process has had to classify BY DEFAULT, because
+ * it had no GRAPH_CMD_EFFECT entry.
+ *
+ * The ledger's completeness is checked by scanning the sources for the commands
+ * the orchestrator dispatches — and a source scan can only see what it can
+ * recognise. A command routed through a helper, an alias, or a computed name
+ * walks around it, the suite stays green, and the command silently falls back to
+ * `targeted`: the unclassified-read over-refusal (#778) rebuilt behind the guard
+ * that exists to prevent it. That is the same shape as the vocabulary ratchet,
+ * where deleting a baseline line is the documented way to disarm the gate.
+ *
+ * So the fallback also RECORDS, at the point of use. This observation cannot be
+ * evaded by how a call is spelled — it is taken from the command actually being
+ * routed — and it gives the tests an assertion that does not depend on reading
+ * source text: drive the real tool surface, then assert this set is empty.
+ */
+const unclassifiedGraphCmds = new Set<string>();
+
+/** The `graph_*` commands classified by fallback since process start. Empty is
+ *  the invariant; anything in it is a ledger gap, not a runtime condition. */
+export function unclassifiedGraphCommandsSeen(): ReadonlySet<string> {
+  return unclassifiedGraphCmds;
+}
+
+/** Test hook — clear the record between probes. */
+export function __resetUnclassifiedGraphCommands(): void {
+  unclassifiedGraphCmds.clear();
+}
+
+/** Record + warn ONCE per command name. Deliberately cannot throw: this runs on
+ *  the dispatch path of every graph command, and a guard that can fail is not a
+ *  guard. It does not change the decision — the fallback is still `targeted`,
+ *  still fail-closed; it only makes the fallback observable instead of silent. */
+function noteUnclassifiedGraphCmd(cmdName: string): void {
+  if (unclassifiedGraphCmds.has(cmdName)) return;
+  unclassifiedGraphCmds.add(cmdName);
+  try {
+    logger.warn(
+      `[ui-bridge] graph command "${cmdName}" has no GRAPH_CMD_EFFECT entry — fencing it as a ` +
+        `WRITE by default. If it is a read or a view/selection change this needlessly refuses ` +
+        `it on every panel below the workflow-fence version (#778). Classify it in ` +
+        `GRAPH_CMD_EFFECT (src/services/ui-bridge.ts).`,
+    );
+  } catch {
+    /* an error-path guard must never become the error */
+  }
+}
+
 /** #570 P0c — a graph command that must be fenced to the workflow it was issued for.
  *  Answered from GRAPH_CMD_EFFECT, which classifies by EFFECT; an unlisted `graph_*`
  *  command fails closed to `targeted` so a new mutator is never waved through by
- *  omission (and the effect ledger's completeness test flags it at build time). */
+ *  omission — and is recorded (see unclassifiedGraphCommandsSeen) so the omission
+ *  is visible rather than silent. */
 export function isMutatingGraphCommand(cmdName: string): boolean {
-  return cmdName.startsWith("graph_") && (GRAPH_CMD_EFFECT[cmdName] ?? "targeted") === "targeted";
+  if (!cmdName.startsWith("graph_")) return false;
+  const effect = GRAPH_CMD_EFFECT[cmdName];
+  if (effect === undefined) {
+    noteUnclassifiedGraphCmd(cmdName);
+    return true; // fail closed
+  }
+  return effect === "targeted";
 }
 
 /** #570 P0c — the four workflow mutators. workflow_save / workflow_save_as ignore any path and
@@ -2741,15 +2803,28 @@ export class UiBridge {
         // otherwise reasons about an observation the current tab never made
         // (codex gate). An inherited value is still worth SHOWING — it is a real
         // earlier reading — but labelled as what it is.
-        // TRIMMED, and blank-is-absent: a hello carrying `panel_version: "   "`
-        // sets panelVersionAdvertised (it is a non-empty string) but says
-        // nothing. Untrimmed it rendered "this tab reports panel    " while the
-        // skew resolver — which does trim — simultaneously reported that the tab
-        // advertised no version: one refusal, two contradictory readings of the
-        // same field (codex gate). An unreadable observation is an absent one.
-        const advertised = conn.panelVersionAdvertised
+        // The distinction that matters is PARSEABLE vs NOT, not empty vs
+        // non-empty. An earlier fix trimmed the field so `panel_version: "   "`
+        // stopped rendering as "this tab reports panel    " — but that only
+        // screened BLANK, and `panel_version: "nightly"` sailed through as
+        // "this tab reports panel nightly": a version-shaped claim built from a
+        // string we never parsed, which is this cluster's own defect surviving
+        // inside its fix. It is not a rare input either — ComfyUI-Manager
+        // reports "nightly" for a git-installed pack, so it is the normal case
+        // for anyone running the panel from source rather than the Registry.
+        //
+        // So: `rawAdvertised` is what this handshake actually said (evidence,
+        // shown verbatim), and `advertised` is what we may COMPARE or attribute
+        // as a version. Anything that fails the strict SemVer screen has the
+        // same evidential value as no version at all and takes the unreadable
+        // path — including into `resolveStaleBundleSkew`, which then reasons
+        // from "no comparable version" instead of silently rejecting a value it
+        // would have screened out one line later anyway.
+        const rawAdvertised = conn.panelVersionAdvertised
           ? conn.panelVersion?.trim() || undefined
           : undefined;
+        const advertised =
+          rawAdvertised && SEMVER_RE.test(rawAdvertised) ? rawAdvertised : undefined;
         const recovery = describePanelUpdateRecovery(
           undefined,
           resolveStaleBundleSkew(advertised),
@@ -2765,11 +2840,19 @@ export class UiBridge {
           `and with a current one whose browser tab is running a cached older bundle`;
         const observed = advertised
           ? `this tab reports panel ${advertised}`
-          : conn.panelVersion
-            ? `this tab advertised NO panel version in its current handshake (an EARLIER ` +
-              `connection for this tab reported ${conn.panelVersion}, which may be out of ` +
-              `date), ${NOT_OBSERVED}`
-            : `this tab advertised NO panel version, ${NOT_OBSERVED}`;
+          : rawAdvertised
+            ? // It said SOMETHING, and that something is evidence worth showing —
+              // but it is not a version, so it may not be narrated as one. The
+              // most common value here is "nightly" (a git-installed pack), for
+              // which the true version is genuinely indeterminate.
+              `this tab advertised "${rawAdvertised}", which is not a version this MCP can ` +
+              `compare (ComfyUI-Manager reports "nightly" for a git-installed pack), ` +
+              `${NOT_OBSERVED}`
+            : conn.panelVersion
+              ? `this tab advertised NO panel version in its current handshake (an EARLIER ` +
+                `connection for this tab reported ${conn.panelVersion}, which may be out of ` +
+                `date), ${NOT_OBSERVED}`
+              : `this tab advertised NO panel version, ${NOT_OBSERVED}`;
         // The FENCE's own minimum, never the aggregate requiredPanelVersion():
         // a write needs the two workflow-fence capabilities and nothing else, so
         // quoting the global max would name a version this command does not

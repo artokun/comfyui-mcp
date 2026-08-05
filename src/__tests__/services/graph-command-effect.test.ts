@@ -13,8 +13,11 @@ import {
   MIN_PANEL_VERSION_FOR_BRIDGE_COMMANDS,
   SEMVER_RE,
   BRIDGE_READONLY_CMDS,
+  unclassifiedGraphCommandsSeen,
+  __resetUnclassifiedGraphCommands,
 } from "../../services/ui-bridge.js";
 import { compareSemver } from "../../services/self-update.js";
+import { buildPanelToolDefs } from "../../orchestrator/panel-tools.js";
 
 /**
  * #778 — a READ blocked by a WRITE gate, and the reason it could happen at all.
@@ -40,8 +43,29 @@ import { compareSemver } from "../../services/self-update.js";
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const SRC = join(HERE, "..", "..");
 
-/** Every `cmd: "graph_…"` literal in the orchestrator's non-test sources. */
-function dispatchedGraphCommands(): Set<string> {
+/**
+ * Every `"graph_…"` string LITERAL in the orchestrator's non-test sources, with
+ * comments stripped first.
+ *
+ * Deliberately widened from the original `cmd: "graph_…"` property match. That
+ * pattern only recognised one spelling, so a command routed through a helper, an
+ * alias table, or `ctx.call({ cmd })` walked around the completeness check AND
+ * the stale-entry check with the suite still green — a guard a rename can step
+ * over, which is the thing this codebase keeps relearning. Matching any literal
+ * means evading it now requires never writing the name down at all — assembling
+ * it from fragments at runtime — and the runtime probe below closes that.
+ * (The tool-vocabulary gate rejects an assembled name for the same reason, and
+ * it reads comments too: writing the illustrative fragment out here tripped it.)
+ *
+ * Comments are stripped because prose legitimately names commands while
+ * discussing them, and a scanner that cannot tell code from commentary would
+ * either miss real entries or invent fake ones.
+ */
+function stripComments(src: string): string {
+  return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+}
+
+function graphCommandLiteralsInSource(): Set<string> {
   const found = new Set<string>();
   const walk = (dir: string): void => {
     for (const entry of readdirSync(dir)) {
@@ -52,17 +76,101 @@ function dispatchedGraphCommands(): Set<string> {
         continue;
       }
       if (!full.endsWith(".ts")) continue;
-      const src = readFileSync(full, "utf8");
-      for (const m of src.matchAll(/cmd:\s*"(graph_[a-z0-9_]+)"/g)) found.add(m[1]);
+      const src = stripComments(readFileSync(full, "utf8"));
+      for (const m of src.matchAll(/"(graph_[a-z0-9_]+)"/g)) found.add(m[1]);
     }
   };
   walk(SRC);
   return found;
 }
 
+/**
+ * Every `graph_*` command the real tool surface actually DISPATCHES, observed by
+ * driving each panel tool handler and recording what reaches `ctx.call`.
+ *
+ * This is the half a source scan cannot do. It sees the command as ROUTED, so a
+ * helper, an alias, or a computed name is caught regardless of how it is
+ * spelled. It is also necessarily partial — a handler that throws on synthetic
+ * args before dispatching contributes nothing — which is why it stands ALONGSIDE
+ * the literal scan rather than replacing it: between them, evading both means
+ * neither writing the name down nor dispatching it.
+ */
+function dispatchedGraphCommandsAtRuntime(): { cmds: Set<string>; toolsThatDispatched: number } {
+  const cmds = new Set<string>();
+  let toolsThatDispatched = 0;
+  // Plausible values for the common required params, so more handlers get past
+  // their own guards and reach a dispatch. Anything still unhappy just throws
+  // and is skipped.
+  const ARGS: Record<string, unknown> = {
+    node_id: 1,
+    node_ids: [1, 2],
+    id: 1,
+    node: "PreviewImage",
+    type: "PreviewImage",
+    widget: "steps",
+    value: 1,
+    name: "x",
+    title: "x",
+    text: "x",
+    query: "x",
+    group: 1,
+    from_node: 1,
+    to_node: 1,
+    from_slot: 0,
+    to_slot: 0,
+    input: "image",
+    output: "IMAGE",
+    action: "fit",
+    mode: "active",
+    pos: [0, 0],
+    x: 0,
+    y: 0,
+    width: 100,
+    height: 100,
+    scale: 1,
+    color: "#fff",
+    preset: "red",
+    path: "workflows/x.json",
+    collapsed: true,
+    force: true,
+  };
+  for (const def of buildPanelToolDefs()) {
+    let dispatched = false;
+    const ctx = {
+      call: async (cmd: Record<string, unknown>) => {
+        if (typeof cmd.cmd === "string") {
+          if (cmd.cmd.startsWith("graph_")) cmds.add(cmd.cmd);
+          dispatched = true;
+        }
+        return { content: [{ type: "text", text: "{}" }] };
+      },
+      confirm: async () => "yes" as const,
+      bridge: {
+        send: async () => ({}),
+        push: () => 1,
+        canReach: () => true,
+        isHeadless: () => false,
+        tabs: () => [{ tab_id: "tab-1", title: "t", connected_at: 0 }],
+        resolveActiveTabId: () => "tab-1",
+      },
+      tabId: "tab-1",
+      ensureReachable: () => {},
+    } as unknown as Parameters<ReturnType<typeof buildPanelToolDefs>[number]["handler"]>[1];
+    try {
+      // Handlers are async; a rejection is as uninteresting as a throw here.
+      const r = def.handler({ ...ARGS }, ctx) as unknown as Promise<unknown>;
+      if (r && typeof (r as Promise<unknown>).catch === "function") void r.catch(() => {});
+    } catch {
+      /* this handler needs more than synthetic args — the literal scan covers it */
+    }
+    if (dispatched) toolsThatDispatched += 1;
+  }
+  return { cmds, toolsThatDispatched };
+}
+
 describe("GRAPH_CMD_EFFECT — the ledger is complete", () => {
   it("finds the graph commands at all (guards the scanner itself)", () => {
-    const dispatched = dispatchedGraphCommands();
+    const dispatched = graphCommandLiteralsInSource();
     // A scanner that silently matched nothing would make the completeness test
     // below vacuously green — the failure mode this whole file exists to prevent.
     expect(dispatched.size).toBeGreaterThan(30);
@@ -70,8 +178,8 @@ describe("GRAPH_CMD_EFFECT — the ledger is complete", () => {
     expect(dispatched.has("graph_find_nodes")).toBe(true);
   });
 
-  it("classifies EVERY graph_* command the orchestrator dispatches", () => {
-    const unclassified = [...dispatchedGraphCommands()]
+  it("classifies EVERY graph_* command named anywhere in the orchestrator's source", () => {
+    const unclassified = [...graphCommandLiteralsInSource()]
       .filter((cmd) => GRAPH_CMD_EFFECT[cmd] === undefined)
       .sort();
     // If this fails you added a graph_* command without deciding what it does to
@@ -81,8 +189,47 @@ describe("GRAPH_CMD_EFFECT — the ledger is complete", () => {
     expect(unclassified).toEqual([]);
   });
 
+  it("classifies every graph_* command the REAL tool surface dispatches (spelling-independent)", () => {
+    // The source scan is evadable by construction — it reads text. This one
+    // watches the commands actually routed by `buildPanelToolDefs()`'s handlers,
+    // so a helper, an alias table, or a computed name cannot slip past it.
+    const { cmds, toolsThatDispatched } = dispatchedGraphCommandsAtRuntime();
+    // Guard the guard: a probe that drove nothing would pass vacuously.
+    expect(toolsThatDispatched).toBeGreaterThan(20);
+    expect(cmds.size).toBeGreaterThan(20);
+    expect(cmds.has("graph_set_widget")).toBe(true);
+    expect([...cmds].filter((c) => GRAPH_CMD_EFFECT[c] === undefined).sort()).toEqual([]);
+  });
+
+  it("driving the real tool surface classifies nothing by FALLBACK", () => {
+    // The assertion that needs no scanner at all. `isMutatingGraphCommand`
+    // records every command it had to classify by default, at the point of use —
+    // an observation taken from the command being ROUTED, which no spelling can
+    // dodge. After exercising the surface, that record must be empty.
+    __resetUnclassifiedGraphCommands();
+    const { cmds } = dispatchedGraphCommandsAtRuntime();
+    for (const cmd of cmds) requiresWorkflowStampEnforcement({ cmd });
+    expect([...unclassifiedGraphCommandsSeen()].sort()).toEqual([]);
+  });
+
+  it("an unclassified command IS recorded, so the fallback is never silent", () => {
+    // The negative control for the test above: without this, "the record is
+    // empty" would also be true of a recorder that never records.
+    __resetUnclassifiedGraphCommands();
+    expect(requiresWorkflowStampEnforcement({ cmd: "graph_some_new_command" })).toBe(true);
+    expect([...unclassifiedGraphCommandsSeen()]).toEqual(["graph_some_new_command"]);
+    // Recorded once, not once per dispatch.
+    requiresWorkflowStampEnforcement({ cmd: "graph_some_new_command" });
+    expect([...unclassifiedGraphCommandsSeen()]).toEqual(["graph_some_new_command"]);
+    // A CLASSIFIED command never lands in the record.
+    requiresWorkflowStampEnforcement({ cmd: "graph_set_widget" });
+    requiresWorkflowStampEnforcement({ cmd: "graph_find_nodes" });
+    expect([...unclassifiedGraphCommandsSeen()]).toEqual(["graph_some_new_command"]);
+    __resetUnclassifiedGraphCommands();
+  });
+
   it("classifies nothing it does not dispatch (no stale ledger entries)", () => {
-    const dispatched = dispatchedGraphCommands();
+    const dispatched = graphCommandLiteralsInSource();
     const stale = Object.keys(GRAPH_CMD_EFFECT)
       .filter((cmd) => !dispatched.has(cmd))
       .sort();

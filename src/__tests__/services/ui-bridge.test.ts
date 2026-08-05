@@ -2463,6 +2463,78 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
     sock.close();
   });
 
+  it.each([
+    ["nightly", "a git-installed pack — ComfyUI-Manager's own answer"],
+    ["dev", "a local checkout"],
+    ["0.11.28.1", "a four-part string that is not SemVer"],
+  ])("an UNPARSEABLE panel_version (%s) is shown as evidence, never narrated as a version", async (
+    raw,
+  ) => {
+    // The distinction is PARSEABLE vs NOT, not empty vs non-empty. Trimming
+    // caught `"   "`; this catches everything else that is not a version. It is
+    // not a corner case — "nightly" is what a git-installed panel reports, so it
+    // is the normal reading for anyone running from source.
+    const sock = new WebSocket(`ws://127.0.0.1:${port}`);
+    await new Promise<void>((res, rej) => {
+      sock.on("open", () => {
+        sock.send(
+          JSON.stringify({ type: "hello", tab_id: `tmp:unparse-${raw}`, title: "w", panel_version: raw }),
+        );
+        res();
+      });
+      sock.on("error", rej);
+    });
+    await vi.waitFor(() =>
+      expect(bridge.tabs().some((t) => t.tab_id === `tmp:unparse-${raw}`)).toBe(true),
+    );
+    const err = await bridge
+      .send({ cmd: "graph_add_node", node: "x" } as never, { tabId: `tmp:unparse-${raw}` })
+      .then(() => null)
+      .catch((e: Error) => e);
+    const msg = (err as Error).message;
+    expect(msg).not.toContain(`reports panel ${raw}`); // no version-shaped claim
+    expect(msg).toContain(`advertised "${raw}"`); // but the evidence is still shown
+    expect(msg).toMatch(/is not a version this MCP can compare/);
+    expect(msg).toMatch(/age was not observed/);
+    sock.close();
+  });
+
+  it("an UNPARSEABLE version with a CAPABLE disk still earns the stale-bundle diagnosis", async () => {
+    // The consequence of routing "nightly" to the unreadable path rather than
+    // dropping it: a git-install user whose pack on disk already clears the
+    // fence floor used to be sent off to update (the skew resolver silently
+    // rejected the unparseable value). They now get the honest ranked answer.
+    writeTempPanelPack("0.11.38");
+    try {
+      const sock = new WebSocket(`ws://127.0.0.1:${port}`);
+      await new Promise<void>((res, rej) => {
+        sock.on("open", () => {
+          sock.send(
+            JSON.stringify({ type: "hello", tab_id: "nightly-capable", title: "w", panel_version: "nightly" }),
+          );
+          res();
+        });
+        sock.on("error", rej);
+      });
+      await vi.waitFor(() =>
+        expect(bridge.tabs().some((t) => t.tab_id === "nightly-capable")).toBe(true),
+      );
+      const err = await bridge
+        .send({ cmd: "graph_add_node", node: "x" } as never, { tabId: "nightly-capable" })
+        .catch((e: Error) => e);
+      const msg = (err as Error).message;
+      expect(msg).toMatch(/Updating the panel will not fix this/);
+      expect(msg).toMatch(/already 0\.11\.38/);
+      expect(msg).not.toMatch(/Run install_panel\(action:'update'\)/);
+      // Still no fabricated cause — the causes are ranked, as for no version.
+      expect(msg).not.toMatch(/This BROWSER TAB is running an older cached copy/);
+      expect(msg).toMatch(/\(1\) It is a ComfyUI browser tab/);
+      sock.close();
+    } finally {
+      clearPanelDiskObservation();
+    }
+  });
+
   it("quotes NO fence version when this build's capability table cannot state one", async () => {
     // codex gate. The refusal is still correct — the panel did not advertise the
     // fence — but the DIAGNOSIS must not invent a number. Falling back to the
