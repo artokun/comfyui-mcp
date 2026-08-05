@@ -1928,6 +1928,17 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
       expect((err as Error).message).toMatch(/0\.11\.38/);
       // It must NOT send them back to the tool that will report nothing to do.
       expect((err as Error).message).not.toMatch(/Run install_panel\(action:'update'\)/);
+      // …and it must not claim the update would report nothing to do: since #806
+      // an update CAN pull a newer panel. What it cannot do is replace the JS an
+      // open tab is running, which is what this branch is actually about.
+      expect((err as Error).message).not.toMatch(/report nothing to do/);
+      expect((err as Error).message).toMatch(/no update replaces the JavaScript an open tab/);
+      // READ AS A HUMAN WOULD: the recovery is concatenated into a wrapper that
+      // appends its own sentence break, and a trailing period here rendered
+      // "the install is not the problem.. Reads and view-only commands…"
+      // (codex gate). Anchored on a word character so the legitimate "../" in
+      // the host-side commands cannot false-positive.
+      expect((err as Error).message).not.toMatch(/[A-Za-z)"']\.\./);
       // The gate itself still refused the write — the diagnosis changed, not the gate.
       expect(isCapabilityRefusal(err as Error)).toBe(true);
       stale.close();
@@ -1962,6 +1973,40 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
       expect((err as Error).message).toMatch(/install_panel\(action:'update'\)|ON THE COMFYUI HOST/);
       behind.close();
     } finally {
+      clearPanelDiskObservation();
+    }
+  });
+
+  it("the stale-bundle proof uses the FENCE's floor, not the aggregate requirement", async () => {
+    // codex gate. resolveStaleBundleSkew answers "is the INSTALL sufficient for
+    // the write that was just refused?" — a fence question. Answering it with
+    // requiredPanelVersion(), the max across every command and capability this
+    // build knows, denies the positive proof for an install that IS sufficient
+    // the moment anything unrelated raises the aggregate, and sends a user whose
+    // only problem is a cached tab off to update.
+    const table = BRIDGE_CAPABILITY_MIN_PANEL_VERSION as Record<string, string | undefined>;
+    writeTempPanelPack("0.11.35"); // exactly the fence floor, well under the aggregate below
+    table.some_unrelated_future_capability = "9.9.9";
+    try {
+      const stale = new WebSocket(`ws://127.0.0.1:${port}`);
+      await new Promise<void>((res, rej) => {
+        stale.on("open", () => {
+          stale.send(
+            JSON.stringify({ type: "hello", tab_id: "fence-floor", title: "wf", panel_version: "0.11.34" }),
+          );
+          res();
+        });
+        stale.on("error", rej);
+      });
+      await vi.waitFor(() => expect(bridge.tabs().some((t) => t.tab_id === "fence-floor")).toBe(true));
+      const err = await bridge
+        .send({ cmd: "graph_add_node", node: "x" } as never, { tabId: "fence-floor" })
+        .catch((e: Error) => e);
+      expect((err as Error).message).toMatch(/Do NOT update the panel/);
+      expect((err as Error).message).toMatch(/already 0\.11\.35/);
+      stale.close();
+    } finally {
+      delete table.some_unrelated_future_capability;
       clearPanelDiskObservation();
     }
   });

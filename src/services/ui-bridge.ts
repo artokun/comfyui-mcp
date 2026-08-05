@@ -424,7 +424,21 @@ function resolveStaleBundleSkew(panelVersion?: string): PanelBundleSkew | undefi
     void primePanelBase().catch(() => {});
     return undefined;
   }
-  const required = requiredPanelVersion();
+  // THE FENCE's floor, not the aggregate requiredPanelVersion() (codex gate).
+  // This function answers one question — "is the install sufficient for the
+  // WRITE that was just refused?" — and the aggregate answers a different one
+  // ("is it sufficient for everything this build might want?"). Using the
+  // aggregate is wrong in both directions:
+  //   - too strict: an unrelated command declaring a higher minimum would deny
+  //     the positive proof for a disk panel that IS sufficient for this write,
+  //     and send a user whose only problem is a cached tab off to update;
+  //   - self-contradictory: with an incomplete fence table the aggregate still
+  //     returns a number, so the same refusal could say "Do NOT update — your
+  //     0.11.35 meets the 0.11.30+ required" while its other half says it cannot
+  //     state the fence version at all.
+  // And when the fence's own floor is unknowable, nothing is proven: no skew.
+  const required = requiredPanelVersionForWorkflowFence();
+  if (!required) return undefined;
   if (!SEMVER_RE.test(disk) || !SEMVER_RE.test(required.trim())) return undefined;
   if (compareSemver(disk, required) < 0) return undefined; // install really IS behind
 

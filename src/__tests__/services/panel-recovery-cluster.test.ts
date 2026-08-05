@@ -462,10 +462,13 @@ describe("disk-current but handshake-old is diagnosed as a stale tab, not a stal
     const text = describePanelUpdateRecovery(undefined, SKEW);
     expect(text).toMatch(/Do NOT update the panel/);
     expect(text).not.toMatch(/ON THE COMFYUI HOST/);
-    // Even the closing "it would report nothing to do" aside must not mention a
-    // tool that is not callable in this session.
+    // Even the closing aside must not mention a tool that is not callable in
+    // this session.
     expect(text).not.toMatch(/install_panel/);
-    expect(text).toMatch(/No update of any kind will help/);
+    expect(text).toMatch(/No update of any kind fixes this/);
+    // No trailing period: the bridge appends its own sentence break, and one
+    // here rendered ".." to the user (codex gate).
+    expect(text.endsWith(".")).toBe(false);
   });
 
   it("without a skew, the ordinary update guidance is unchanged", async () => {

@@ -283,12 +283,20 @@ export function describePanelUpdateRecovery(
       `Cmd+Shift+R on macOS; if that does not take, open DevTools and use ` +
       `right-click reload → "Empty Cache and Hard Reload"). ` +
       // Only name the tool where naming it is useful. In a remote/cloud session
-      // it is not callable at all, so "it would report nothing to do" is a
-      // pointless mention of an absent tool; say the plain thing instead.
+      // it is not callable at all, so mentioning it is a pointless mention of an
+      // absent tool; say the plain thing instead.
+      //
+      // NOT "it will report nothing to do" — that was only true while a
+      // floor-clearing panel was believed to be the newest one (#806). An update
+      // CAN pull a newer panel; what it cannot do is replace the JS an open tab
+      // is already running, which is the whole point of this branch.
+      //
+      // And NO trailing period: every caller appends its own sentence break, and
+      // adding one here rendered ".." into a real refusal (codex gate).
       (ctx.installPanelUsable
-        ? `Running install_panel(action:'update') here will correctly report nothing ` +
-          `to do — the install is not the problem.`
-        : `No update of any kind will help — the install is not the problem.`)
+        ? `install_panel(action:'update') is not the fix here — it may pull a newer ` +
+          `panel, but no update replaces the JavaScript an open tab is already running`
+        : `No update of any kind fixes this — the install is not the problem`)
     );
   }
 
