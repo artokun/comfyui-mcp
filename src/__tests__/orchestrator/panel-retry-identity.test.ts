@@ -223,6 +223,29 @@ describe("#694 retry_of threading through the tool defs", () => {
     expect(calls[0]).toMatchObject({ cmd: "graph_set_widget", retry_of: "tok-9" });
   });
 
+  // codex gate. The four UI-state tools declare retry_of in their schema and
+  // their description promises dedupe. #778 reclassified their bridge commands
+  // as `inert` for the workflow fence — and withRetryToken used to decide
+  // forwarding with the FENCE predicate, so a caller-supplied token would have
+  // been accepted, validated, and then silently dropped before the wire. A
+  // caller who believes their retry is deduped and is wrong is the exact failure
+  // the token exists to prevent, so forwarding asks the retry map's own question.
+  it.each([
+    ["panel_select_nodes", "graph_select_nodes", { node_ids: [1, 2] }],
+    ["panel_enter_subgraph", "graph_enter_subgraph", { node_id: 3 }],
+    ["panel_exit_subgraph", "graph_exit_subgraph", {}],
+    ["panel_copy_nodes", "graph_copy_nodes", { node_ids: [1] }],
+  ])("%s forwards a caller-supplied retry_of even though its cmd is inert", async (
+    tool,
+    cmd,
+    args,
+  ) => {
+    expect(requiresWorkflowStampEnforcement({ cmd })).toBe(false); // inert since #778
+    const { ctx, calls } = makeRecordingCtx();
+    await defByName(tool).handler({ ...args, retry_of: "tok-ui" }, ctx);
+    expect(calls[0]).toMatchObject({ cmd, retry_of: "tok-ui" });
+  });
+
   it("no retry_of arg → the cmd bag carries no retry_of key at all", async () => {
     const { ctx, calls } = makeRecordingCtx();
     await defByName("panel_set_widget").handler({ node_id: 1, widget: "steps", value: 5 }, ctx);

@@ -2308,6 +2308,47 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
     old.close();
   });
 
+  it("#819: a version INHERITED across a reconnect is never attributed to this tab", async () => {
+    // codex gate. `conn.panelVersion` survives a reconnect whose hello omits the
+    // field, so "this tab reports panel 0.11.32" would be a claim about an
+    // observation the current handshake never made — the same fabrication the
+    // "version unknown" fix removes, arriving by the other door. The earlier
+    // reading is still shown (it is real), labelled as earlier and possibly out
+    // of date.
+    const sock = new WebSocket(`ws://127.0.0.1:${port}`);
+    await new Promise<void>((res, rej) => {
+      sock.on("open", () => {
+        sock.send(
+          JSON.stringify({
+            type: "hello",
+            tab_id: "tmp:inherit",
+            title: "w",
+            panel_version: "0.11.32",
+          }),
+        );
+        res();
+      });
+      sock.on("error", rej);
+    });
+    await vi.waitFor(() => expect(bridge.tabs().some((t) => t.tab_id === "tmp:inherit")).toBe(true));
+
+    // Re-hello WITHOUT a panel_version. The connection inherits 0.11.32 for
+    // messaging but records panelVersionAdvertised: false.
+    sock.send(JSON.stringify({ type: "hello", tab_id: "tmp:inherit", title: "w" }));
+    await new Promise((r) => setTimeout(r, 25));
+
+    const err = await bridge
+      .send({ cmd: "graph_add_node", node: "x" } as never, { tabId: "tmp:inherit" })
+      .then(() => null)
+      .catch((e: Error) => e);
+    const msg = (err as Error).message;
+    expect(msg).not.toContain("this tab reports panel 0.11.32");
+    expect(msg).toMatch(/advertised NO panel version in its current handshake/);
+    expect(msg).toMatch(/EARLIER connection for this tab reported 0\.11\.32, which may be out of date/);
+    expect(msg).toMatch(/age was not observed/);
+    sock.close();
+  });
+
   it("quotes NO fence version when this build's capability table cannot state one", async () => {
     // codex gate. The refusal is still correct — the panel did not advertise the
     // fence — but the DIAGNOSIS must not invent a number. Falling back to the

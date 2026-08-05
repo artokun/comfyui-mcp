@@ -410,6 +410,10 @@ export function requiredPanelVersionForWorkflowFence(): string | undefined {
  *     A tab claiming the same current version yet missing the capability is some
  *     other fault, not this one, and must not be given this diagnosis.
  */
+/** @param panelVersion the version THIS connection ADVERTISED in its own hello —
+ *  never `conn.panelVersion` raw, which is inherited across an omitted-version
+ *  reconnect. Reasoning about an inherited value here would let a previous
+ *  connection's reading decide whether the CURRENT tab is the stale part. */
 function resolveStaleBundleSkew(panelVersion?: string): PanelBundleSkew | undefined {
   const disk = verifiedPanelDiskVersion()?.trim();
   if (!disk) {
@@ -2716,9 +2720,17 @@ export class UiBridge {
         // panel sync read OFF DISK at this tab's own hello. When the pack on
         // disk already clears the floor, no update of any kind helps and the
         // remedy is a cache-bypassing reload of this tab.
+        // `conn.panelVersion` is INHERITED across a reconnect whose hello omitted
+        // the field (see the field's doc); `panelVersionAdvertised` is the record
+        // of whether THIS connection actually stated one. Only the advertised
+        // value may be attributed to this tab, or to the skew diagnosis, which
+        // otherwise reasons about an observation the current tab never made
+        // (codex gate). An inherited value is still worth SHOWING — it is a real
+        // earlier reading — but labelled as what it is.
+        const advertised = conn.panelVersionAdvertised ? conn.panelVersion : undefined;
         const recovery = describePanelUpdateRecovery(
           undefined,
-          resolveStaleBundleSkew(conn.panelVersion),
+          resolveStaleBundleSkew(advertised),
         );
         // #819/#823 — do not fold an ABSENT reading into a definite verdict.
         // "detected panel version unknown; this MCP requires panel 0.11.35+"
@@ -2726,11 +2738,16 @@ export class UiBridge {
         // OBSERVATION: the tab sent no version, and a CURRENT install behind a
         // stale cached browser bundle presents exactly the same way. Report what
         // was actually seen and let the recovery cover both.
-        const observed = conn.panelVersion
-          ? `this tab reports panel ${conn.panelVersion}`
-          : `this tab advertised NO panel version, so its age was not observed — this is ` +
-            `equally consistent with an old install and with a current one whose browser ` +
-            `tab is running a cached older bundle`;
+        const NOT_OBSERVED =
+          `so its age was not observed — this is equally consistent with an old install ` +
+          `and with a current one whose browser tab is running a cached older bundle`;
+        const observed = advertised
+          ? `this tab reports panel ${advertised}`
+          : conn.panelVersion
+            ? `this tab advertised NO panel version in its current handshake (an EARLIER ` +
+              `connection for this tab reported ${conn.panelVersion}, which may be out of ` +
+              `date), ${NOT_OBSERVED}`
+            : `this tab advertised NO panel version, ${NOT_OBSERVED}`;
         // The FENCE's own minimum, never the aggregate requiredPanelVersion():
         // a write needs the two workflow-fence capabilities and nothing else, so
         // quoting the global max would name a version this command does not

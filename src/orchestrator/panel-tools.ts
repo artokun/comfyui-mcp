@@ -3327,18 +3327,21 @@ export function makePanelToolCtx(
       // attempt's rid as the caller's retry token: re-issuing identical args plus
       // retry_of:"<rid>" lets the panel recognize and dedupe that exact mutation.
       // Pre-write refusals (dispatched:false, handled above) mint NO token — nothing
-      // was sent, so there is nothing to dedupe. Minting is gated BOTH ways: the
-      // bridge fences the command to a workflow (requiresWorkflowStampEnforcement)
-      // AND the command is one the retry map admits (RETRY_TOKEN_CMDS). Both gates
-      // are still needed after #778 gave the fence its own effect ledger — they
-      // now disagree in the OTHER direction: the four idempotent UI-state commands
-      // (select_nodes, enter/exit_subgraph, copy_nodes) are in the retry map but
-      // are `inert`, so the first gate correctly withholds a token nothing needs.
-      // A read must never mint one either way (a ledger answer for a read is a
-      // STALE outcome).
+      // was sent, so there is nothing to dedupe.
+      //
+      // Minting is gated on RETRY_TOKEN_CMDS — the map's own membership, which is
+      // the question being asked ("does the panel dedupe a retry of this?"). It
+      // used to be gated on requiresWorkflowStampEnforcement AS WELL, as a second
+      // guard against a read sneaking into the map. That guard read as a free
+      // extra until #778 gave the fence its own effect ledger and the two
+      // predicates diverged: the four idempotent UI-state commands the map admits
+      // on purpose (select_nodes, enter/exit_subgraph, copy_nodes) are `inert`,
+      // so keeping it would have silently changed which commands mint a token —
+      // an unrelated behaviour change smuggled in by a classification fix. The
+      // "no read in the retry map" property it was standing in for is now
+      // asserted directly in panel-retry-identity.test.ts, where it belongs.
       if (
         dispatchedRid &&
-        requiresWorkflowStampEnforcement(cmd) &&
         RETRY_TOKEN_CMDS.has(typeof cmd.cmd === "string" ? cmd.cmd : "") &&
         (dispatchOutcomeOf(err) === true || isReplyTimeoutTagged(err))
       ) {
@@ -4354,12 +4357,12 @@ const RETRY_OF_ARG = {
  *
  * Four UI-STATE commands are admitted on purpose (graph_select_nodes,
  * graph_enter/exit_subgraph, graph_copy_nodes): they change selection, subgraph
- * scope or clipboard idempotently, so a deduped retry is a no-op. They ACCEPT a
- * token; since #778 gave the fence its own effect ledger they are `inert` and so
- * no longer MINT one (the mint gate at the error path requires
- * requiresWorkflowStampEnforcement too). That is the right outcome — a retry
- * token for an idempotent op is noise the agent has to reason about — and it
- * loses nothing: re-issuing any of them blind is already safe.
+ * scope or clipboard idempotently, so a deduped retry is a no-op. THIS MAP — not
+ * the workflow fence — is what decides whether a token is minted and whether a
+ * caller-supplied one reaches the wire, so those four keep behaving exactly as
+ * they did before #778 reclassified them as `inert` for the fence. The two
+ * questions are related but not the same, and answering one with the other is
+ * the defect #778 is about.
  *
  * EXPLICIT MAP, mirroring the RETRY_SAFE_CMDS / MUTATING_GRAPH_EDIT_CMDS
  * maintenance model — keep in sync when mutating tools are added. Exported for
@@ -4437,7 +4440,22 @@ function withRetryToken(d: PanelToolDef): PanelToolDef {
         onDispatchedRid?: (rid: string) => void,
       ) =>
         ctx.call(
-          requiresWorkflowStampEnforcement(cmd) ? { ...cmd, retry_of: retryOf } : cmd,
+          // Ask the RETRY MAP's question, not the workflow fence's (codex gate).
+          // These were the same answer only while isMutatingGraphCommand
+          // over-classified — the #778 defect. Once the fence got its own effect
+          // ledger they diverged, and gating on the fence would have SILENTLY
+          // DROPPED a caller-supplied retry_of for the four UI-state commands the
+          // map admits on purpose: the schema accepts the token, the description
+          // promises dedupe, and nothing would reach the wire. A caller who
+          // believes their retry is deduped and is wrong is exactly the failure
+          // the token exists to prevent.
+          //
+          // A read probe inside a mutating handler (panel_flatten_workflow's
+          // graph_serialize) is still excluded — RETRY_TOKEN_CMDS contains no
+          // reads, which is asserted in panel-retry-identity.test.ts.
+          RETRY_TOKEN_CMDS.has(typeof cmd.cmd === "string" ? cmd.cmd : "")
+            ? { ...cmd, retry_of: retryOf }
+            : cmd,
           timeoutMs,
           onDispatchedRid,
         );
