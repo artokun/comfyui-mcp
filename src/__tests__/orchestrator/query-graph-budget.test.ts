@@ -215,6 +215,31 @@ describe("#807 — panel_query_graph's budget covers the WHOLE reply", () => {
     const { payload } = await runQueryGraph({ max_chars: 1500 }, reply);
     expect(payload.groups_omitted).toMatch(/not the graph's total/);
     expect(payload.groups_omitted).not.toMatch(/all 200 group\(s\)/);
+    // …and the panel's own marker is the ONLY place the real figure (640) survives, so
+    // dropping it along with the list would destroy the one coverage fact still
+    // available (codex gate r6). It rides on every rung below the index.
+    expect(payload.groups_truncation_hint).toBe(reply.groups_truncation_hint);
+    expect(payload.groups_truncated).toBe(true);
+  });
+
+  it("keeps the panel's cap evidence even when the rails go too", async () => {
+    const rails: Record<string, unknown> = {};
+    for (let i = 0; i < 60; i++) rails[`slot_${i}`] = { id: -10 - i, name: "x".repeat(60) };
+    const { payload } = await runQueryGraph(
+      { max_chars: 500 },
+      panelReply({
+        groups: 200,
+        membersPerGroup: 200,
+        extra: {
+          rails,
+          groups_truncated: true,
+          groups_truncation_hint: "Showing 200 of 640 group(s)…",
+        },
+      }),
+    );
+    expect(payload.groups).toBeUndefined();
+    expect(payload.rails).toBeUndefined();
+    expect(payload.groups_truncation_hint).toBe("Showing 200 of 640 group(s)…");
   });
 
   it("keeps the subgraph rails until last — groups go before boundary wiring", async () => {

@@ -1500,17 +1500,25 @@ function fitQueryGraphReply(res: ToolResult, requested: unknown): ToolResult {
     if (render(p).length <= budget) return replaceWith(p);
   }
 
+  // The panel's OWN cap markers are evidence about the GRAPH, not payload this code is
+  // free to spend: `groups_truncation_hint` is the only place the real group count
+  // ("Showing 200 of 640") survives, so dropping it while dropping the list destroys the
+  // one coverage fact the caller could still have had (codex gate MAJOR). They are two
+  // short fields and they are kept on every rung below the index.
+  const capEvidence: Record<string, unknown> = {};
+  if (riders.groups_truncated !== undefined) capEvidence.groups_truncated = riders.groups_truncated;
+  if (riders.groups_truncation_hint !== undefined)
+    capEvidence.groups_truncation_hint = riders.groups_truncation_hint;
+
   // Rung 2 — the group index itself goes. Its true size is stated in its place.
   const withoutGroups: Record<string, unknown> = { ...riders };
   delete withoutGroups.groups;
-  delete withoutGroups.groups_truncated;
-  delete withoutGroups.groups_truncation_hint;
   const noGroups = assemble(withoutGroups);
   if (hasGroups) {
     // The count we can vouch for is "what this reply carried", not "what the graph has".
     const carried =
       groupsPreCapped
-        ? `the ${groups!.length} group(s) this reply carried (the panel had already capped that list, so that is not the graph's total)`
+        ? `the ${groups!.length} group(s) this reply carried (the panel had already capped that list, so that is not the graph's total — its own groups_truncated / groups_truncation_hint are kept here and record the real figure)`
         : `all ${groups!.length} group(s)`;
     noGroups.groups_omitted =
       `The groups rider was dropped entirely — ${carried} — because the whole reply did not fit \`max_chars\`=${budget} even with their membership already omitted, ` +
@@ -1520,8 +1528,8 @@ function fitQueryGraphReply(res: ToolResult, requested: unknown): ToolResult {
   }
   if (render(noGroups).length <= budget) return replaceWith(noGroups);
 
-  // Rung 3 — the subgraph rails go too.
-  const bare = assemble({});
+  // Rung 3 — the subgraph rails go too. The cap evidence still rides.
+  const bare = assemble(capEvidence);
   if (hasGroups && noGroups.groups_omitted !== undefined)
     bare.groups_omitted = noGroups.groups_omitted;
   if (hasRails) {
