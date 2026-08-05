@@ -128,7 +128,13 @@ beforeEach(() => {
   fetchMock.mockReset();
   mkdirMock.mockReset().mockResolvedValue(undefined);
   rmMock.mockReset().mockResolvedValue(undefined);
-  statMock.mockReset().mockRejectedValue(new Error("missing"));
+  // ENOENT, not a bare Error: this stub means "the file is ABSENT", and the code
+  // now distinguishes that (knowably nothing staged → a fresh download) from "the
+  // stat FAILED" (unknown → refuse rather than truncate someone else's bytes).
+  // A codeless rejection asserted the wrong thing about reality.
+  statMock
+    .mockReset()
+    .mockRejectedValue(Object.assign(new Error("ENOENT: missing"), { code: "ENOENT" }));
   // Default: nothing in the path is a symlink (best-effort guard is inert).
   lstatMock.mockReset().mockResolvedValue({ isSymbolicLink: () => false });
   realpathMock.mockReset().mockImplementation((p: string) => Promise.resolve(p));

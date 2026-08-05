@@ -1366,6 +1366,116 @@ describe("download retry + resume, end to end (#470)", () => {
     await expect(readFile(sidecar, "utf-8")).resolves.toBe('"their-object"');
   });
 
+  it("the #473 payload-rejection cleanup proves ownership too — 'we streamed it' is not 'it is still ours'", async () => {
+    // The staged `.partial` sits at a deterministic path in a shared directory, so
+    // a second process running the same download reaches the very same file.
+    // Having streamed the bytes ourselves establishes what we WROTE, not what is
+    // there when we act: `assertModelPayloadOrThrow` reads the head and awaits the
+    // rejection callback, and a foreign writer can take the file over inside that
+    // gap. Destroying THEIR files while reporting OUR rejection is the harm.
+    const url = "https://example.com/models/reject-vs-foreign.safetensors";
+    const { partial, sidecar } = cachePaths(url);
+
+    // A body that will be REJECTED as a non-model (an HTML auth page).
+    fetchMock.mockImplementation(
+      async () =>
+        new Response("<!DOCTYPE html><html><body>login</body></html>", {
+          status: 200,
+          statusText: "OK",
+          headers: { "content-type": "text/html", etag: '"v"' },
+        }),
+    );
+
+    const realRm = downloadCacheFs.rm;
+    let planted = false;
+    vi.spyOn(downloadCacheFs, "rm").mockImplementation(async (...args) => {
+      const path = String(args[0]);
+      if (!planted && path.endsWith(".partial")) {
+        planted = true;
+        // The foreign writer takes over while we are cleaning up our rejection.
+        await writeFile(partial, "SOMEONE-ELSES-MANY-GIGABYTES");
+        await writeFile(sidecar, '"their-object"');
+      }
+      return realRm(...(args as Parameters<typeof realRm>));
+    });
+
+    await expect(
+      downloadModel(url, "checkpoints", "reject-vs-foreign-out.safetensors"),
+    ).rejects.toThrow();
+
+    // Their validator survives: the sidecar's own check caught the takeover. With
+    // an unconditional "we own this" claim it would have been deleted along with
+    // their partial, leaving them bytes they could no longer resume.
+    await expect(readFile(sidecar, "utf-8")).resolves.toBe('"their-object"');
+  });
+
+  it("an INTEGRITY refusal's cleanup proves ownership too — it does not delete a new writer's validator", async () => {
+    // The integrity refusals (0-byte body, oversized body, bad Content-Range,
+    // unsolicited 206) each issued two raw `safeRm`s with an await between them and
+    // the failure swallowed. Same granularity bug, different spelling: the second
+    // removal acts on whatever is there by then, so a writer that staged a real
+    // transfer in the gap loses the validator that makes its bytes resumable — and
+    // nothing is reported, because safeRm swallows.
+    const url = "https://example.com/models/empty-cleanup-vs-foreign.safetensors";
+    const { partial, sidecar } = cachePaths(url);
+
+    // A 0-byte body: assertComplete removes the empty partial and the cleanup runs.
+    fetchMock.mockImplementation(
+      async () => new Response("", { status: 200, statusText: "OK", headers: { "content-length": "0" } }),
+    );
+
+    const realRm = downloadCacheFs.rm;
+    let planted = false;
+    vi.spyOn(downloadCacheFs, "rm").mockImplementation(async (...args) => {
+      const path = String(args[0]);
+      if (!planted && path.endsWith(".partial")) {
+        planted = true;
+        // A new writer stages a real transfer at the same path.
+        await writeFile(partial, "NEW-WRITERS-BYTES");
+        await writeFile(sidecar, '"new-writers-object"');
+      }
+      return realRm(...(args as Parameters<typeof realRm>));
+    });
+
+    await downloadModel(url, "checkpoints", "empty-cleanup-out.safetensors").catch(
+      () => undefined,
+    );
+
+    // The new writer keeps BOTH its bytes and the validator that makes them resumable.
+    await expect(readFile(sidecar, "utf-8")).resolves.toBe('"new-writers-object"');
+  });
+
+  it("REFUSES when the staged file exists but its size cannot be read — unreadable is not 'no partial'", async () => {
+    // The repo's dominant fold, in its most expensive form. A transient stat error
+    // used to be caught as "No partial — fresh download": the resume offset stayed
+    // 0, the attempt took the non-append path, and a full 200 opened the existing
+    // file in TRUNCATING mode — deleting an active writer's bytes because we could
+    // not read a size.
+    const url = "https://example.com/models/unreadable-is-not-absent.safetensors";
+    const { partial } = cachePaths(url);
+    await writeFile(partial, "ANOTHER-WRITERS-MANY-GIGABYTES");
+
+    const realStat = downloadCacheFs.stat;
+    vi.spyOn(downloadCacheFs, "stat").mockImplementation(async (...args) => {
+      const path = String(args[0]);
+      if (path.endsWith(".partial")) {
+        // EIO, not ENOENT — the file is THERE, we just cannot read its size.
+        throw Object.assign(new Error("EIO: i/o error"), { code: "EIO" });
+      }
+      return realStat(...(args as Parameters<typeof realStat>));
+    });
+    fetchMock.mockImplementation(async () => new Response("FULL-REPLACEMENT", { status: 200 }));
+
+    const err = await downloadModel(url, "checkpoints", "unreadable-absent-out.safetensors").catch(
+      (e: unknown) => e,
+    );
+    expect(String((err as Error).message)).toMatch(/size could not be read/i);
+    // The bytes are untouched — not truncated by an attempt that assumed "fresh".
+    await expect(readFile(partial, "utf-8")).resolves.toBe("ANOTHER-WRITERS-MANY-GIGABYTES");
+    // And it refused BEFORE issuing a request.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("a retry that lands on a POISONED partial (#473 leftover) restarts instead of resuming onto it", async () => {
     const url = "https://example.com/models/poisoned.safetensors";
     const { partial, sidecar } = cachePaths(url);

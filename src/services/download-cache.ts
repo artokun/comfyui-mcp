@@ -44,7 +44,10 @@ const inflight = new Map<string, Promise<string>>();
  *  may already be gone). Used on the integrity-failure cleanup paths. */
 async function safeRm(path: string): Promise<void> {
   try {
-    await rm(path, { force: true });
+    // Through the same seam as the guarded helpers, so every removal of a staged
+    // file is observable in one place (and a test can interpose on the exact
+    // syscall an ownership check authorises).
+    await downloadCacheFs.rm(path, { force: true });
   } catch {
     /* best effort */
   }
@@ -76,14 +79,127 @@ interface GuardedPath {
 }
 
 /**
- * A path no other process can be writing — our own O_EXCL temp, a cache entry this
- * call materialised, or a `.partial` whose ownership the caller established and
- * cannot lose while it holds the stream. Making this explicit means an unguarded
- * destruction is a deliberate, reviewable claim at the call site rather than an
- * omission nobody notices.
+ * A path NO OTHER PROCESS CAN NAME: an O_EXCL temp this call created under a
+ * random name. That is the only circumstance in which an empty check is sound.
+ *
+ * It is deliberately NOT usable for the staged `.partial`, a `.etag`, or a cache
+ * entry. All three live at deterministic paths in a shared directory, so a second
+ * process running the same download reaches exactly the same file — "we streamed
+ * it ourselves" establishes what we WROTE, not what is there NOW, and every await
+ * between the two is a window. Those sites must supply a real check.
  */
-function selfOwned(path: string): GuardedPath {
+function exclusivelyOwned(path: string): GuardedPath {
   return { path, assertOwned: async () => {} };
+}
+
+/** The size of a staged file, distinguishing ABSENT (0 — knowably nothing) from
+ *  UNREADABLE (undefined — genuinely unknown). Collapsing the two either invents
+ *  progress that is not there or reports a knowable absence as a mystery. */
+async function stagedSize(path: string): Promise<number | undefined> {
+  try {
+    const st = await downloadCacheFs.stat(path);
+    return st.isFile() ? st.size : 0;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    return code === "ENOENT" || code === "ENOTDIR" ? 0 : undefined;
+  }
+}
+
+/** A validator sidecar's exact bytes: "" when provably absent, undefined when it
+ *  could not be read. Read alongside the size because SIZE ALONE cannot catch the
+ *  dangerous interference — another writer that truncates and re-stages a DIFFERENT
+ *  object to the same length looks unchanged, and cannot do that without writing
+ *  that object's validator here. */
+async function stagedSidecar(path: string): Promise<string | undefined> {
+  try {
+    return await readFile(path, "utf-8");
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    return code === "ENOENT" || code === "ENOTDIR" ? "" : undefined;
+  }
+}
+
+/** The observable state of a staged file plus its validator. NOT an atomic
+ *  snapshot — two reads with an await between them; see the caller-level note on
+ *  `readStaged`. */
+interface StagedState {
+  size: number | undefined;
+  sidecar: string | undefined;
+}
+
+async function readStagedState(path: string, sidecarPath: string): Promise<StagedState> {
+  return { size: await stagedSize(path), sidecar: await stagedSidecar(sidecarPath) };
+}
+
+/** The ONE refusal every ownership check raises, so they cannot drift apart in
+ *  wording or in what they promise. It NEVER deletes or truncates anything: the
+ *  bytes it is refusing to touch may belong to another download. */
+function interferenceError(why: string, when: string, logUrl: string): ModelError {
+  return new ModelError(
+    `Download stopped: another download is writing the same staged file, or this attempt cannot ` +
+      `establish that it is not (${why} ${when}). Writing now could interleave two transfers into ` +
+      `one file, or throw away another download's progress. Nothing was deleted — anything on disk ` +
+      `is intact. Check download_status; if another download of this file is running, wait for it ` +
+      `and then re-issue this one (it will reuse the completed file rather than re-fetching it).`,
+    { url: logUrl, retryable: false },
+  );
+}
+
+/**
+ * Guards for a staged file and its validator, each re-proving — immediately before
+ * every destructive syscall — that the file it protects is unchanged since
+ * `baseline`.
+ *
+ * The two checks are deliberately DIFFERENT. The payload's compares both fields;
+ * the sidecar's compares only the sidecar, because by the time it runs we may
+ * legitimately have removed the payload ourselves, and re-checking it there would
+ * refuse our own cleanup.
+ *
+ * An UNREADABLE size refuses. "I could not read it" is not "it is unchanged", and
+ * the act being authorised is a delete or a truncate.
+ */
+function guardStagedPair(
+  path: string,
+  sidecarPath: string,
+  baseline: StagedState,
+  when: string,
+  logUrl: string,
+): [GuardedPath, GuardedPath] {
+  return [
+    {
+      path,
+      assertOwned: async () => {
+        const size = await stagedSize(path);
+        if (size === undefined || baseline.size === undefined) {
+          throw interferenceError("the staged file's size could not be read", when, logUrl);
+        }
+        if (size !== baseline.size) {
+          throw interferenceError(`it went from ${baseline.size} to ${size} bytes`, when, logUrl);
+        }
+        const sidecar = await stagedSidecar(sidecarPath);
+        if (sidecar !== baseline.sidecar) {
+          throw interferenceError(
+            "its resume validator changed, so a DIFFERENT upstream object has been staged there",
+            when,
+            logUrl,
+          );
+        }
+      },
+    },
+    {
+      path: sidecarPath,
+      assertOwned: async () => {
+        const sidecar = await stagedSidecar(sidecarPath);
+        if (sidecar !== baseline.sidecar) {
+          throw interferenceError(
+            "its resume validator changed, so a DIFFERENT upstream object has been staged there",
+            when,
+            logUrl,
+          );
+        }
+      },
+    },
+  ];
 }
 
 /** Remove `target`, returning true iff it is confirmed gone. Unlike `safeRm` this
@@ -1238,9 +1354,77 @@ async function streamUrlToFile(
    *  different objects. Re-checking here shrinks that window from "the whole
    *  request round-trip" to the few instructions before the open. */
   beforeWrite?: () => Promise<void>,
+  /**
+   * Is `targetPath` a SHARED staged file (the deterministic `.partial` in the
+   * download cache) rather than an O_EXCL temp only this call can name?
+   *
+   * It decides how the post-download cleanups authorise themselves. Having
+   * streamed the bytes ourselves establishes what we WROTE, not what is on disk by
+   * the time we classify the body and act — `readHead` and the rejection callback
+   * are awaits, and on a shared path another process can replace the file inside
+   * them. So a shared target takes a baseline the instant its write completes and
+   * re-proves it before every destructive syscall; an exclusive temp needs none,
+   * because no other writer can name it.
+   */
+  stagedFileIsShared = false,
 ): Promise<string> {
   // Fail fast if we were cancelled before any bytes moved — no request, no partial.
   if (signal?.aborted) throw new DOMException("The download was cancelled.", "AbortError");
+
+  const sidecarOfTarget = `${targetPath}.etag`;
+  /** Read the staged file's state NOW — called at the moment our own write
+   *  finishes, so it captures what WE produced and nothing later. */
+  const currentStagedBaseline = (): Promise<StagedState> =>
+    stagedFileIsShared
+      ? readStagedState(targetPath, sidecarOfTarget)
+      : Promise.resolve({ size: undefined, sidecar: undefined });
+  /**
+   * Guards for the post-download cleanups.
+   *
+   * A SHARED staged file gets real checks against `baseline`. An O_EXCL temp gets
+   * none — and that is the only case where none is honest, because no other writer
+   * can name it. The dispatch lives here so a caller cannot silently acquire the
+   * empty check for a shared path by forgetting a flag: the default is `false`,
+   * i.e. exclusive, which is only ever passed by the direct-temp path.
+   */
+  const cleanupGuards = (baseline: StagedState, when: string): [GuardedPath, GuardedPath] =>
+    stagedFileIsShared
+      ? guardStagedPair(targetPath, sidecarOfTarget, baseline, when, logUrl)
+      : [exclusivelyOwned(targetPath), exclusivelyOwned(sidecarOfTarget)];
+
+  /**
+   * Discard the staged payload and its validator after an INTEGRITY REFUSAL,
+   * proving ownership before each removal.
+   *
+   * The integrity refusals below (an unsolicited 206, a malformed or inconsistent
+   * Content-Range, a 0-byte body, an oversized body) each used to issue two raw
+   * `safeRm` calls with an await between them. On a shared staged file that is the
+   * same granularity bug as everywhere else, just spelled differently: the second
+   * removal acts on whatever is there by then, so a writer that took the file over
+   * loses its validator — and `safeRm` swallows the failure, so nothing is said.
+   *
+   * Best-effort like the `safeRm` it replaces: a refusal here is logged and skipped
+   * rather than thrown, because these paths are already reporting a different,
+   * more important failure and must not have it masked by a cleanup complaint.
+   */
+  const discardStagedAfterRefusal = async (when: string): Promise<void> => {
+    const [guardedPayload, guardedSidecar] = cleanupGuards(
+      await currentStagedBaseline(),
+      when,
+    );
+    for (const guarded of resumable ? [guardedPayload, guardedSidecar] : [guardedPayload]) {
+      try {
+        await guarded.assertOwned();
+        await safeRm(guarded.path);
+      } catch (err) {
+        logger.info(
+          `Left "${guarded.path}" in place while cleaning up a rejected download: it is no longer the file this attempt staged.`,
+          { url: logUrl, error: err instanceof Error ? err.message : String(err) },
+        );
+      }
+    }
+  };
+
   if (supportsCloudDownload(url)) {
     // INTERFERENCE RE-CHECK FIRST (see `beforeWrite`). This branch is the most
     // destructive one in the function: a cloud transfer cannot range-resume, so it
@@ -1306,11 +1490,15 @@ async function streamUrlToFile(
       url,
       logUrl,
       onReject: async () => {
-        // selfOwned: this runs AFTER we streamed these bytes ourselves, so the
-        // caller's pre-write baseline no longer describes the file (we changed it)
-        // and re-checking against it would refuse our OWN cleanup. We hold the
-        // stream; these bytes are ours to discard.
-        await discardRejectedPayload(selfOwned(targetPath), undefined, logUrl);
+        // The cloud downloader has finished writing, so THIS is the moment the
+        // file is ours. Baseline it here, then re-prove before each destructive
+        // act — `assertModelPayloadOrThrow` reads the head and awaits this
+        // callback, and on a shared path another writer can take the file over
+        // inside that gap.
+        await discardRejectedPayload(
+          ...cleanupGuards(await currentStagedBaseline(), "while classifying the downloaded body"),
+          logUrl,
+        );
       },
       // FAIL CLOSED, same as the HTTP path: a cloud (S3/Azure) object can be an XML/
       // HTML AccessDenied body saved under a `.safetensors` name, and if we CAN'T
@@ -1647,6 +1835,7 @@ async function streamUrlToFile(
         onBytes,
         deferErrorRow,
         beforeWrite,
+        stagedFileIsShared,
       );
     }
   }
@@ -1687,8 +1876,7 @@ async function streamUrlToFile(
   // Content-Length 1024 → a 1 KiB file renamed into cache as the whole 4096-byte
   // model). Refuse it — a no-Range request must be answered with 200 (#467 P0).
   if (res.status === 206 && effectiveResume === 0) {
-    await safeRm(targetPath);
-    if (resumable) await safeRm(validatorSidecar);
+    await discardStagedAfterRefusal("while rejecting this response");
     const cleared = await partialConfirmedDiscarded(targetPath);
     throw new ModelError(
       `Download failed: the server returned "206 Partial Content" to a request that sent NO Range ` +
@@ -1732,8 +1920,7 @@ async function streamUrlToFile(
       total > end &&
       end === total - 1;
     if (!valid) {
-      await safeRm(targetPath);
-      await safeRm(validatorSidecar);
+      await discardStagedAfterRefusal("while rejecting this response");
       throw new ModelError(
         `Download resume rejected: a 206 for byte ${effectiveResume}+ must carry a complete, ` +
           `consistent Content-Range "bytes ${effectiveResume}-<end>/<total>" reaching the end of ` +
@@ -1748,8 +1935,7 @@ async function streamUrlToFile(
     // otherwise let a short prefix finalize as "complete" (#467). Refuse the
     // mismatch (also catches a partial we already have that exceeds the new total).
     if (priorTotal !== undefined && total !== priorTotal) {
-      await safeRm(targetPath);
-      await safeRm(validatorSidecar);
+      await discardStagedAfterRefusal("while rejecting this response");
       throw new ModelError(
         `Download resume rejected: the server now reports a total size of ${total} bytes, but the ` +
           `original download recorded ${priorTotal}. The upstream size changed — appending would ` +
@@ -1940,8 +2126,7 @@ async function streamUrlToFile(
       // Nothing landed — remove it (and its validator sidecar) so it can't
       // masquerade as a real file / poison a resume with a validator that has
       // no matching bytes. Best-effort: never let cleanup throw here.
-      await safeRm(targetPath);
-      if (resumable) await safeRm(validatorSidecar);
+      await discardStagedAfterRefusal("while rejecting this response");
       throw new ModelError(
         "Download produced a 0-byte file — the source sent no data. Removed it; retry.",
         { url: logUrl },
@@ -1970,8 +2155,7 @@ async function streamUrlToFile(
       // corrupt file with no error (#467 P0-1). This is NOT resumable — the bytes
       // on disk are wrong — so remove the partial + validator and fail; a retry
       // starts clean rather than range-resuming a corrupt prefix.
-      await safeRm(targetPath);
-      if (resumable) await safeRm(validatorSidecar);
+      await discardStagedAfterRefusal("while rejecting this response");
       throw new ModelError(
         `Download oversized: wrote ${actual} bytes but the file is only ${expectedTotal} — the ` +
           `response sent more data than its declared size (corrupt or misbehaving server). Removed ` +
@@ -1993,7 +2177,7 @@ async function streamUrlToFile(
   // without persisting it a body that only a Content-Type could flag (e.g. an
   // HTML/JSON page whose bytes don't sniff as text) could slip through on reuse (#473).
   const responseContentType = res.headers.get("content-type") || "";
-  const assertModelPayload = (): Promise<void> =>
+  const assertModelPayload = (postWrite: StagedState): Promise<void> =>
     assertModelPayloadOrThrow({
       targetPath,
       modelExt,
@@ -2007,12 +2191,22 @@ async function streamUrlToFile(
       // marker so a content-type-only rejection (whose body may sniff as binary on
       // retry) still can't be resumed even if neutralization failed.
       onReject: async () => {
-        // selfOwned, for the same reason as the cloud path above: we streamed these
-        // bytes ourselves, so the pre-write baseline no longer describes the file
-        // and would refuse our own cleanup. The stream is ours.
+        // Same as the cloud path: baseline at the moment our write finished, then
+        // re-prove before each destructive act. `readHead` and this callback are
+        // awaits, and on a shared staged file another writer can replace both the
+        // payload and its validator inside them — removing THEIR files while
+        // reporting OUR rejection is the harm.
+        // `postWrite`, NOT a fresh read: the caller captured it the instant our
+        // write finished. Reading it here would baseline whatever is on disk AFTER
+        // the classify gap — i.e. adopt a foreign writer's replacement as our own
+        // and then delete it, which is the failure this guard exists to prevent.
+        const [guardedPayload, guardedSidecar] = cleanupGuards(
+          postWrite,
+          "while classifying the downloaded body",
+        );
         await discardRejectedPayload(
-          selfOwned(targetPath),
-          resumable ? selfOwned(validatorSidecar) : undefined,
+          guardedPayload,
+          resumable ? guardedSidecar : undefined,
           logUrl,
         );
         if (resumable) await writePoisonMarker(`${targetPath}.rejected`, logUrl);
@@ -2024,7 +2218,11 @@ async function streamUrlToFile(
   if (!progress && !onBytes) {
     await pipeline(nodeStream, fileStream, { signal });
     await assertComplete();
-    await assertModelPayload();
+    // Baseline the file the INSTANT our write finished — BEFORE the body is
+    // classified. Taking it inside the rejection callback would baseline whatever
+    // is on disk AFTER the classify gap, i.e. adopt a foreign writer's replacement
+    // as our own and then delete it.
+    await assertModelPayload(await currentStagedBaseline());
     // Complete: the validator sidecar is only needed to guard a resume, so drop it.
     if (resumable) await safeRm(validatorSidecar);
     return responseContentType;
@@ -2069,7 +2267,8 @@ async function streamUrlToFile(
   try {
     await pipeline(nodeStream, counter, fileStream, { signal });
     await assertComplete();
-    await assertModelPayload();
+    // See above: baseline before the classify gap, not inside the callback.
+    await assertModelPayload(await currentStagedBaseline());
     if (resumable) await safeRm(validatorSidecar);
     bytesPerSec = 0;
     emit("done", true);
@@ -2180,47 +2379,37 @@ async function downloadIntoCache(
        *  destroy the other writer's partial. */
       verified: StagedState,
     ): Promise<number> => {
-      /**
-       * The `.partial` and its `.etag`, each carrying the check that authorises
-       * destroying THAT file — deliberately not the same check.
-       *
-       * The partial's guard compares the whole staged state. The sidecar's compares
-       * ONLY the sidecar, because by the time it runs we may legitimately have
-       * removed the partial ourselves; re-checking the partial there would refuse
-       * our own cleanup. Each guard asserts what is still meaningful evidence for
-       * the file it protects.
-       */
-      const guardedStagedPair = (when: string): [GuardedPath, GuardedPath] => [
-        {
-          path: partial,
-          assertOwned: () => assertStillOurs(verified, when, false),
-        },
-        {
-          path: `${partial}.etag`,
-          assertOwned: async () => {
-            const nowSidecar = await sidecarBytes();
-            if (nowSidecar !== verified.sidecar) {
-              throw interferenceError(
-                "its resume validator changed, so a DIFFERENT upstream object has been staged there",
-                when,
-              );
-            }
-          },
-        },
-      ];
+      /** The `.partial` and its `.etag`, each carrying the check that authorises
+       *  destroying THAT file. Built by the shared module-level helper so this path
+       *  and the post-download cleanups cannot drift apart in what they check. */
+      const guardedStagedPair = (when: string): [GuardedPath, GuardedPath] =>
+        guardStagedPair(
+          partial,
+          `${partial}.etag`,
+          verified,
+          when,
+          logUrl ?? redactUrlForLogs(url),
+        );
 
-      let resumeFromBytes = 0;
-      try {
-        const existing = await downloadCacheFs.stat(partial);
-        if (existing.isFile() && existing.size > 0) {
-          resumeFromBytes = existing.size;
-          logger.info("Resuming partial download", {
-            url: logUrl,
-            bytes: resumeFromBytes,
-          });
-        }
-      } catch {
-        // No partial — fresh download.
+      // UNREADABLE IS NOT ABSENT. A bare try/catch here folded every stat failure
+      // into "no partial", which is this repo's dominant defect in its most
+      // expensive form: `resumeFromBytes` stays 0, the attempt takes the
+      // non-append path, and a full 200 response opens the existing file in
+      // TRUNCATING mode — deleting an active writer's bytes because we could not
+      // read a size. `stagedSize` reports a genuinely missing file as 0 (that IS a
+      // fresh download); anything else is unknown and must refuse.
+      const existingSize = await stagedSize(partial);
+      if (existingSize === undefined) {
+        throw interferenceError(
+          "the staged file exists but its size could not be read, so whether it holds another " +
+            "download's bytes is unknown",
+          "before deciding how to resume",
+          logUrl ?? redactUrlForLogs(url),
+        );
+      }
+      let resumeFromBytes = existingSize;
+      if (resumeFromBytes > 0) {
+        logger.info("Resuming partial download", { url: logUrl, bytes: resumeFromBytes });
       }
 
       // #473 P1 — poison MARKER guard (cleanup- AND content-type-independent). A prior
@@ -2295,17 +2484,52 @@ async function downloadIntoCache(
      *  candidate and is deliberately preserved on every failure path (#470's
      *  governing harm: never destroy progress you cannot re-fetch cheaply). */
     const dropEmptyPartial = async (): Promise<void> => {
+      // Goes through the SAME guarded helpers as every other destructive path.
+      // It used to issue two raw `rm`s with the failure swallowed, and the second
+      // one ran after an await with no re-check — so a writer that created a real
+      // partial and validator in that gap had its validator deleted, leaving bytes
+      // it could no longer resume, silently. Being outside `GuardedPath` is exactly
+      // how a site avoids the review the type was introduced to force.
+      // The partial must be PRESENT AND EMPTY for there to be anything of ours to
+      // clean. Present-and-empty and ABSENT both read as 0 bytes, and the
+      // difference matters: if the file is gone, there is no empty partial of ours
+      // to pair a sidecar with, and a sidecar sitting there alone may be a NEW
+      // writer's — deleting it would strip the validator that makes their bytes
+      // resumable. A fresh baseline cannot tell us whose it is, so absence means
+      // touch nothing.
+      let presentAndEmpty = false;
       try {
-        const remaining = await downloadCacheFs.stat(partial);
-        if (remaining.size === 0) {
-          await downloadCacheFs.rm(partial, { force: true }).catch(() => undefined);
-          // The validator sidecar is only meaningful alongside a resumable
-          // partial — drop it too so a later attempt doesn't If-Range against a
-          // file that no longer exists.
-          await downloadCacheFs.rm(`${partial}.etag`, { force: true }).catch(() => undefined);
-        }
+        const st = await downloadCacheFs.stat(partial);
+        presentAndEmpty = st.isFile() && st.size === 0;
       } catch {
-        // Partial gone — nothing to clean.
+        presentAndEmpty = false; // absent, or unreadable — either way, not ours to clear
+      }
+      if (!presentAndEmpty) return;
+      const baseline = await readStagedState(partial, `${partial}.etag`);
+      // `undefined` (unreadable) is NOT 0 — it means we do not know, so we do not act.
+      if (baseline.size !== 0) return;
+      const [guardedPartial, guardedSidecar] = guardStagedPair(
+        partial,
+        `${partial}.etag`,
+        baseline,
+        "while cleaning up an empty staged file",
+        logUrl ?? redactUrlForLogs(url),
+      );
+      try {
+        await rmOrLog(guardedPartial, logUrl ?? redactUrlForLogs(url));
+        // The validator sidecar is only meaningful alongside a resumable partial —
+        // drop it too so a later attempt doesn't If-Range against a file that no
+        // longer exists. Its guard re-checks: the removal above was an await.
+        await rmOrLog(guardedSidecar, logUrl ?? redactUrlForLogs(url));
+      } catch (err) {
+        // An interference refusal here is not a failure of the download — the
+        // download already failed or was cancelled and we are only tidying up. Log
+        // it and leave the other writer's files alone rather than masking their
+        // real outcome with our cleanup's complaint.
+        logger.info(
+          "Left the staged file in place during cleanup: it is no longer the empty file this attempt created.",
+          { url: logUrl, error: err instanceof Error ? err.message : String(err) },
+        );
       }
     };
 
@@ -2329,52 +2553,13 @@ async function downloadIntoCache(
     // than the stall window could never finish. No byte signal ⇒ no watchdog.
     const stallTimeoutMs = supportsCloudDownload(url) ? 0 : retry.stallTimeoutMs;
 
-    /** The partial's size as it stands, distinguishing ABSENT (0 — knowably
-     *  nothing) from UNREADABLE (undefined — genuinely unknown). Collapsing the
-     *  two would either invent progress that is not there or report a knowable
-     *  absence as a mystery. */
-    const partialSize = async (): Promise<number | undefined> => {
-      try {
-        const st = await downloadCacheFs.stat(partial);
-        return st.isFile() ? st.size : 0;
-      } catch (err) {
-        const code = (err as NodeJS.ErrnoException)?.code;
-        return code === "ENOENT" || code === "ENOTDIR" ? 0 : undefined;
-      }
-    };
-
-    /** The `.etag` sidecar's exact contents, or "" when it is absent/unreadable.
-     *  Read alongside the size because SIZE ALONE cannot catch the dangerous
-     *  interference: another writer that truncates and re-stages a DIFFERENT
-     *  upstream object to the same length would look unchanged. It cannot do that
-     *  without writing that object's validator here, so the sidecar is the part of
-     *  the snapshot that actually detects a swapped object. */
-    const sidecarBytes = async (): Promise<string | undefined> => {
-      try {
-        return await readFile(`${partial}.etag`, "utf-8");
-      } catch (err) {
-        const code = (err as NodeJS.ErrnoException)?.code;
-        // ABSENT is knowable ("" — no validator was ever recorded); anything else
-        // (EACCES, EIO, …) means we could not find out, and undefined says so.
-        // Collapsing the two would let "I cannot read it" be reported as "the host
-        // never sent one", and would let an unknown state pass an equality check.
-        return code === "ENOENT" || code === "ENOTDIR" ? "" : undefined;
-      }
-    };
-
-    /** The one refusal used by both interference checks (between attempts, and at
-     *  the last instant before a write), so they cannot drift apart in wording or
-     *  in what they promise. It NEVER deletes or truncates anything: the bytes it
-     *  is refusing to touch belong to the other download. */
-    const interferenceError = (why: string, when: string): ModelError =>
-      new ModelError(
-        `Download stopped: another download is writing the same staged file, or this attempt cannot ` +
-          `establish that it is not (${why} ${when}). Writing now could interleave two transfers into ` +
-          `one file, or throw away another download's progress. Nothing was deleted — anything on disk ` +
-          `is intact. Check download_status; if another download of this file is running, wait for it ` +
-          `and then re-issue this one (it will reuse the completed file rather than re-fetching it).`,
-        { url: logUrl, retryable: false },
-      );
+    // These bind the module-level helpers to THIS download's paths, so the retry
+    // loop and the post-download cleanups share one definition of what a staged
+    // file's state is and what counts as interference.
+    const partialSize = (): Promise<number | undefined> => stagedSize(partial);
+    const sidecarBytes = (): Promise<string | undefined> => stagedSidecar(`${partial}.etag`);
+    const interferenceFor = (why: string, when: string): ModelError =>
+      interferenceError(why, when, logUrl ?? redactUrlForLogs(url));
 
     /**
      * Compare the staged file's state against what we recorded, and REFUSE unless
@@ -2431,10 +2616,10 @@ async function downloadIntoCache(
       // `partialSize` reports a missing file as a definite 0, so `undefined` means
       // the file is THERE but unreadable.
       if (strict && (expectedSize === undefined || nowSize === undefined)) {
-        throw interferenceError("the staged file's size could not be read", when);
+        throw interferenceFor("the staged file's size could not be read", when);
       }
       if (nowSize !== expectedSize) {
-        throw interferenceError(
+        throw interferenceFor(
           `it went from ${expectedSize ?? "an unreadable size"} to ${nowSize ?? "an unreadable size"} bytes`,
           when,
         );
@@ -2446,7 +2631,7 @@ async function downloadIntoCache(
       // that path TRUNCATES the staged file. So an unknown validator plus a
       // same-size replacement by another writer would destroy their partial.
       if (strict && (expectedSidecar === undefined || nowSidecar === undefined)) {
-        throw interferenceError("the staged file's resume validator could not be read", when);
+        throw interferenceFor("the staged file's resume validator could not be read", when);
       }
       // WITHIN one attempt it is only compared for CHANGE. A sidecar that was
       // ALREADY unreadable a moment ago is a stable pre-existing condition (a
@@ -2457,7 +2642,7 @@ async function downloadIntoCache(
       // false, so this compares equal only when genuinely unchanged, and still
       // catches readable-then-not.
       if (nowSidecar !== expectedSidecar) {
-        throw interferenceError(
+        throw interferenceFor(
           "its resume validator changed, so a DIFFERENT upstream object has been staged there",
           when,
         );
@@ -2598,6 +2783,10 @@ async function downloadIntoCache(
             // already unreadable, and the older guards diagnose that better.
             await assertStillOurs(decided, "while this attempt was requesting it", false);
           },
+          // The cache `.partial` lives at a deterministic path in a shared
+          // directory, so a second process running this download reaches the very
+          // same file. Its post-download cleanups must prove ownership.
+          true,
         );
         await downloadCacheFs.rename(partial, target);
         await touch(target);
@@ -3013,6 +3202,13 @@ export async function downloadWithCache(
     // now, so we recover it from the `.ct` sidecar persisted at download time —
     // otherwise a Content-Type-only-flaggable body could finalize as a model on reuse.
     const cachedContentType = await readCacheContentType(cachePath);
+    // Baseline the cache entry BEFORE we classify it, so the rejection cleanup can
+    // prove it is still the file we objected to. This path is reachable on a cache
+    // HIT — the entry may have been produced by an earlier call or another process
+    // — so "this call materialised it" is not established here, and the classify
+    // step (a head read plus an awaited callback) is a window in which another
+    // downloader can replace it with a GOOD file we must not delete.
+    const cacheBaseline = await readStagedState(cachePath, cacheCtSidecar(cachePath));
     await assertModelPayloadOrThrow({
       targetPath: cachePath,
       modelExt,
@@ -3025,10 +3221,14 @@ export async function downloadWithCache(
       // miss), and log if even that fails, so a poisoned cache entry can't silently
       // re-poison cache hits (#473 P1).
       onReject: async () => {
-        // selfOwned: a materialised CACHE entry, not the shared `.partial`. It is
-        // reached through this call's own O_EXCL-temp-then-rename, so no concurrent
-        // downloader is streaming into it.
-        const neutralized = await discardRejectedPayload(selfOwned(cachePath), undefined, logUrl);
+        const [guardedCacheFile] = guardStagedPair(
+          cachePath,
+          cacheCtSidecar(cachePath),
+          cacheBaseline,
+          "while classifying a cached body",
+          logUrl,
+        );
+        const neutralized = await discardRejectedPayload(guardedCacheFile, undefined, logUrl);
         // Only drop the Content-Type sidecar once the poisoned cache file is actually
         // gone/emptied. If the cache file SURVIVED (rm AND truncate both failed), KEEP
         // the `.ct` so the NEXT caller can still reject it by its persisted
