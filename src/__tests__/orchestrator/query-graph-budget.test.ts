@@ -242,9 +242,9 @@ describe("#807 — panel_query_graph's budget covers the WHOLE reply", () => {
     assertBoundHonoured(payload, text, 500);
     // The notes, not the rows, are the overflow here — so the note must NOT send the
     // caller off to narrow a query or lower a budget that cannot shrink them.
-    expect(String(payload.budget_overrun)).toMatch(/the rest is the note\(s\) above/);
-    expect(String(payload.budget_overrun)).toMatch(/no parameter shrinks them/);
-    expect(String(payload.budget_overrun)).not.toMatch(/narrow the query/);
+    expect(String(payload.budget_overrun)).toMatch(/note\(s\) above saying which context was dropped/);
+    expect(String(payload.budget_overrun)).toMatch(/act on the ROWS ONLY/);
+    expect(String(payload.budget_overrun)).toMatch(/no parameter shrinks the rest/);
   });
 
   it("reports the TRUE size when the rows alone overrun, instead of standing on a bound that did not hold", async () => {
@@ -262,7 +262,12 @@ describe("#807 — panel_query_graph's budget covers the WHOLE reply", () => {
     const overrun = payload.budget_overrun as string;
     expect(typeof overrun).toBe("string");
     expect(overrun).toMatch(/over `max_chars`=1000/);
-    expect(overrun).toMatch(/never discarded to meet a budget/);
+    expect(overrun).toMatch(/Nothing was discarded to meet the budget/);
+    // The rows really ARE the bulk here, so the note may say so and may offer the two
+    // levers that shrink them.
+    const rows_ = Number(/rows answering your query are (\d+) chars/.exec(overrun)?.[1]);
+    expect(rows_).toBeGreaterThan(1000);
+    expect(overrun).toMatch(/lower `max_chars` \(floor 500\)/);
     // EXACTLY the size of the thing the caller is holding, this note included. A size
     // measured before the note was added would understate the reply by the length of
     // the sentence claiming to have counted everything (codex gate MAJOR), and a round
@@ -310,7 +315,7 @@ describe("#807 — panel_query_graph's budget covers the WHOLE reply", () => {
       const { payload, text } = await runQueryGraph({ max_chars: 900 }, reply);
       expect(payload.text).toBe(reply.text);
       assertBoundHonoured(payload, text, 900);
-      expect(String(payload.budget_overrun)).toMatch(/render to \d+ chars on their own/);
+      expect(String(payload.budget_overrun)).toMatch(/rows answering your query are \d+ chars/);
     });
 
     it("counts a field it has never seen before", async () => {
@@ -340,6 +345,16 @@ describe("#807 — panel_query_graph's budget covers the WHOLE reply", () => {
       );
       expect((payload.viewing as { title: string }).title).toHaveLength(3000);
       assertBoundHonoured(payload, text, 900);
+
+      // And the overrun note must not BLAME the rows for it (codex gate r3). The rows
+      // here are 11 characters; calling 3000 of subgraph title "the rows that answer
+      // your query" and then offering to shrink them names two levers that cannot
+      // touch the field responsible — the dead retry this accounting exists to remove.
+      const note = String(payload.budget_overrun);
+      expect(note).toMatch(/rows answering your query are 1[0-9] chars/);
+      expect(note).toMatch(/act on the ROWS ONLY/);
+      expect(note).toMatch(/no parameter shrinks the rest/);
+      expect(note).not.toMatch(/for a smaller reply lower `max_chars`/);
     });
 
     it("discloses an over-budget aggregate (group_by) reply", async () => {

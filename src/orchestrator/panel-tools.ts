@@ -1530,22 +1530,33 @@ function fitQueryGraphReply(res: ToolResult, requested: unknown): ToolResult {
       recovery(render(noGroups).length, floorOf(withoutGroups));
   }
 
-  // Every rider is gone and it STILL does not fit. What is left is the rows plus the
-  // sentences saying what was dropped, and neither may be silently cut — so the overrun
-  // is DISCLOSED with the real number rather than left standing behind a `max_chars`
-  // that did not hold. Which of the two is responsible decides the remedy: telling a
-  // caller to narrow a query when the notes are the overflow is the same dead retry
-  // this whole accounting exists to prevent.
-  const answerChars = render(answer).length;
+  // Every rider is gone and it STILL does not fit. What is left is the rows, the fields
+  // that say which graph they came from, and the sentences saying what was dropped —
+  // none of which may be silently cut, so the overrun is DISCLOSED with the real number
+  // rather than left standing behind a `max_chars` that did not hold.
+  //
+  // WHICH part is responsible has to be measured, not assumed (codex gate MAJOR). The
+  // earlier wording called every non-rider byte "the rows that answer your query" and
+  // then offered to shrink them, which on a reply carrying a 3000-character subgraph
+  // title blamed the wrong field AND named two levers that cannot touch it — the dead
+  // retry this whole accounting exists to prevent. `lower max_chars` and `narrow the
+  // query` both act on the ROWS ONLY, so they are offered only while the rest of the
+  // reply would fit without them.
+  const withoutRows = (p: Record<string, unknown>): Record<string, unknown> =>
+    answer.text !== undefined ? { ...p, text: "" } : p;
+  const rowsChars = render(answer).length - render(withoutRows(answer)).length;
+  const floorWithNotes = render(withoutRows(bare)).length;
   const shrink =
-    budget > QUERY_GRAPH_MAX_CHARS_FLOOR
-      ? `For a smaller reply, lower \`max_chars\` (floor ${QUERY_GRAPH_MAX_CHARS_FLOOR}) or narrow the query with \`ids\`/\`types\`/\`where\`/\`limit\`.`
-      : `\`max_chars\` is already at its floor of ${QUERY_GRAPH_MAX_CHARS_FLOOR}, so narrow the query with \`ids\`/\`types\`/\`where\`/\`limit\` for a smaller reply.`;
+    floorWithNotes <= budget
+      ? budget > QUERY_GRAPH_MAX_CHARS_FLOOR
+        ? `Both levers act on the rows, so for a smaller reply lower \`max_chars\` (floor ${QUERY_GRAPH_MAX_CHARS_FLOOR}) or narrow the query with \`ids\`/\`types\`/\`where\`/\`limit\`.`
+        : `\`max_chars\` is already at its floor of ${QUERY_GRAPH_MAX_CHARS_FLOOR}, so narrow the query with \`ids\`/\`types\`/\`where\`/\`limit\` for a smaller reply.`
+      : `Lowering \`max_chars\` and narrowing the query both act on the ROWS ONLY, and everything else here is already ${floorWithNotes} chars on its own — so neither would bring this reply under the budget, and no parameter shrinks the rest.`;
   const overrun = (size: number): string =>
-    `This reply is ${size} chars, over \`max_chars\`=${budget} (that figure counts the JSON framing and escaping, and this note itself). ` +
-    (answerChars > budget
-      ? `The rows that answer your query render to ${answerChars} chars on their own and are never discarded to meet a budget. ${shrink}`
-      : `The rows render to ${answerChars} chars; the rest is the note(s) above saying which context was dropped, kept deliberately because a silently missing rider is the defect this budget exists to prevent, and no parameter shrinks them.`);
+    `This reply is ${size} chars, over \`max_chars\`=${budget} — that figure counts the JSON framing and escaping, and this note itself. ` +
+    `Of it, the rows answering your query are ${rowsChars} chars; the remaining ${size - rowsChars} is the fields identifying the graph this came from, anything else the panel sent, and the note(s) above saying which context was dropped. ` +
+    `Nothing was discarded to meet the budget: the rows are your answer, and a silently missing rider — or a silently missing explanation of one — is the defect this accounting exists to prevent. ` +
+    shrink;
   // The stated size must include the statement (codex gate MAJOR), so solve for it: the
   // note only grows the payload, and only its own digit count feeds back, so this
   // settles in one or two passes. The loop is bounded and the last pass is emitted
