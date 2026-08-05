@@ -22,6 +22,8 @@ let userRoot = "";
 let forcedStatus: number | null = null;
 /** Force the transport to fail before any Response exists. */
 let forcedThrow: string | null = null;
+/** Force the listing body to be exactly this array, bypassing the tree walk. */
+let forcedEntries: unknown[] | null = null;
 /** Every route the tool actually requested, so the shallow spelling cannot creep back. */
 const requested: string[] = [];
 
@@ -62,6 +64,7 @@ function handle(rawUrl: string): Response {
     }
     const recurse = (url.searchParams.get("recurse") ?? "").toLowerCase() === "true";
     const split = (url.searchParams.get("split") ?? "").toLowerCase() === "true";
+    if (forcedEntries) return Response.json(forcedEntries);
     const files = listFiles(path, recurse);
     return Response.json(split ? files.map((f) => [f, ...f.split("/")]) : files);
   }
@@ -126,6 +129,7 @@ beforeEach(() => {
   userRoot = mkdtempSync(join(tmpdir(), "comfyui-userdata-"));
   forcedStatus = null;
   forcedThrow = null;
+  forcedEntries = null;
   requested.length = 0;
   const wf = join(userRoot, "workflows");
   mkdirSync(join(wf, "IMAGE"), { recursive: true });
@@ -210,9 +214,34 @@ describe("#810 — an unread library is never reported as an empty one", () => {
     // with the reason attached rather than left as a bare "none".
     rmSync(join(userRoot, "workflows"), { recursive: true, force: true });
     const text = await listWorkflows();
-    expect(text).toMatch(/No saved workflows found/);
+    expect(text).toMatch(/No workflows to list/);
     expect(text).toMatch(/HTTP 404/);
-    expect(text).toMatch(/nothing has been saved/);
+    expect(text).toMatch(/not there right now/);
+    // …but a 404 proves the directory is missing NOW, not that nothing was ever saved,
+    // and not that this call even reached the userdata API. Reporting it as a verdict
+    // on the library is what would send someone to recreate a workflow they still have.
+    expect(text).toMatch(/do NOT recreate/);
+    expect(text).toMatch(/different --user-directory/);
+  });
+
+  it("does not call a listing of UNRECOGNISED entries an empty library", async () => {
+    // `[{}]` decodes to zero names but is not zero workflows: each undecodable entry is
+    // a file that EXISTS and cannot be named here.
+    forcedEntries = [{}, { size: 12 }];
+    const text = await listWorkflows();
+    expect(text).toMatch(/Could NOT read the workflow library/);
+    expect(text).toMatch(/2 entry\(ies\)/);
+    expect(text).not.toMatch(/No saved workflows found/);
+    expect(text).toMatch(/do not create or overwrite/);
+  });
+
+  it("says the list may be short when SOME entries could not be named", async () => {
+    forcedEntries = ["IMAGE/portrait.json", {}, 42];
+    const text = await listWorkflows();
+    expect(text).toMatch(/Found 1 workflow\(s\)/);
+    expect(text).toContain("IMAGE/portrait.json");
+    expect(text).toMatch(/2 further entry\(ies\)/);
+    expect(text).toMatch(/this list may be short/);
   });
 
   it("refuses to call a REFUSED listing empty", async () => {

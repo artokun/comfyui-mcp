@@ -62,14 +62,17 @@ export async function userdataFetch(route: string): Promise<Response> {
  * The outcome of one library listing, with "the library is empty" kept DISTINCT from
  * "the library could not be read".
  *
- *  - `ok: true`   — the server answered with a list. `keys` may legitimately be empty.
- *  - `ok: false`  — no usable list. `kind` says which flavour, so a caller can word an
- *                   empty directory ("nothing saved yet") differently from a refusal
- *                   ("could not be determined") instead of collapsing both into
- *                   "no workflows found".
+ *  - `ok: true`   — the server answered with a list.
+ *  - `ok: false`  — no usable list. `kind` says which flavour, so a caller can word a
+ *                   missing directory differently from a refusal, instead of collapsing
+ *                   both into "no workflows found".
  */
 export type WorkflowLibraryListing =
-  | { ok: true; keys: string[] }
+  /** The server answered with a list. `keys` may legitimately be empty — but only when
+   *  `unreadable` is 0, because an entry this build could not decode is a workflow that
+   *  EXISTS and is missing from `keys`. Reporting `[{}]` as an empty library would be
+   *  the same false negative in miniature (codex gate MAJOR). */
+  | { ok: true; keys: string[]; unreadable: number }
   | { ok: false; kind: "absent" | "refused" | "unreachable" | "undecodable"; detail: string };
 
 /** Normalize one listing entry to a store-relative key, or null when it is not one. */
@@ -110,12 +113,14 @@ export async function listWorkflowLibraryKeys(): Promise<WorkflowLibraryListing>
     };
   }
   if (!res.ok) {
-    // 404 is ComfyUI's answer for "that directory does not exist", which for the
-    // workflow library means nothing has ever been saved into it. That is a
-    // DETERMINED negative and is worded as one; every other status is a refusal we
-    // must not dress up as an empty library.
+    // 404 is ComfyUI's answer for "that directory does not exist". What it PROVES is
+    // that the directory is not there NOW — not the historical claim that nothing was
+    // ever saved (codex gate MAJOR), and not that this request even reached the
+    // listing handler rather than a proxy or a mismatched base path. So it is kept
+    // separate from a refusal, and the caller words it as an observation with its
+    // caveat rather than as a verdict on the user's library.
     return res.status === 404
-      ? { ok: false, kind: "absent", detail: "the server has no `workflows` directory (HTTP 404)" }
+      ? { ok: false, kind: "absent", detail: "the server answered HTTP 404 for its `workflows` directory" }
       : { ok: false, kind: "refused", detail: `the server answered HTTP ${res.status}` };
   }
   let body: unknown;
@@ -131,5 +136,11 @@ export async function listWorkflowLibraryKeys(): Promise<WorkflowLibraryListing>
   if (!Array.isArray(body)) {
     return { ok: false, kind: "undecodable", detail: "the listing was not a JSON array" };
   }
-  return { ok: true, keys: body.map(entryKey).filter((k): k is string => k != null) };
+  const decoded = body.map(entryKey);
+  const keys = decoded.filter((k): k is string => k != null);
+  // An entry in a shape none of the known ComfyUI response forms produce is a workflow
+  // this call cannot name. Silently dropping it is how a listing becomes a lie by
+  // omission — and a listing of ONLY such entries would otherwise read as an empty
+  // library. Count them so the caller can say the list may be short.
+  return { ok: true, keys, unreadable: decoded.length - keys.length };
 }

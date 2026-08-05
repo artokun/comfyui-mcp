@@ -43,17 +43,24 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
 
         if (!listing.ok) {
           // "Could not determine" must never be rendered as "determined there are
-          // none" (#810). `absent` is the one flavour that IS a determined negative —
-          // ComfyUI 404s the listing when the directory does not exist, which for the
-          // workflow library means nothing has ever been saved into it.
+          // none" (#810). `absent` is the closest thing to a determined negative —
+          // ComfyUI 404s the listing when the directory is not there — but it proves
+          // the directory is missing NOW, not that nothing was ever saved, and not
+          // that the request reached that handler at all. So it is reported as the
+          // observation it is, with the one alternative explanation that would send
+          // someone to recreate a workflow they still have.
           if (listing.kind === "absent") {
             return {
               content: [
                 {
                   type: "text",
                   text:
-                    `No saved workflows found: ${listing.detail}, so nothing has been saved to this ` +
-                    `server's library yet. Save one from the ComfyUI web UI, or with save_workflow.`,
+                    `No workflows to list: ${listing.detail}, so that directory is not there right now — ` +
+                    `usually because nothing has been saved into it yet, in which case save one from the ` +
+                    `ComfyUI web UI or with save_workflow. If you expected workflows here, do NOT recreate ` +
+                    `them on this result: the same answer comes back when the server is running with a ` +
+                    `different --user-directory, or when this call did not reach its userdata API at all. ` +
+                    `Check the ComfyUI sidebar first.`,
                 },
               ],
             };
@@ -73,6 +80,14 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
         }
 
         const files = [...listing.keys].sort((a, b) => a.localeCompare(b));
+        // Entries the listing carried that this build could not turn into a name. Each
+        // one is a workflow that EXISTS and is missing below, so it is stated rather
+        // than dropped — and a listing of nothing BUT those is not an empty library.
+        const unreadable =
+          listing.unreadable > 0
+            ? ` ${listing.unreadable} further entry(ies) came back in a shape this build does not recognise ` +
+              `and could not be named, so this list may be short — read the ComfyUI sidebar for those.`
+            : "";
 
         if (files.length === 0) {
           return {
@@ -80,8 +95,12 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
               {
                 type: "text",
                 text:
-                  "No saved workflows found: the connected ComfyUI reported an empty workflow library " +
-                  "(subfolders included).",
+                  listing.unreadable > 0
+                    ? `Could NOT read the workflow library: the connected ComfyUI answered with ${listing.unreadable} ` +
+                      `entry(ies) in a shape this build does not recognise, and none it could name. This is NOT ` +
+                      `"the library is empty" — do not create or overwrite a workflow on the strength of it.`
+                    : "No saved workflows found: the connected ComfyUI reported an empty workflow library " +
+                      "(subfolders included).",
               },
             ],
           };
@@ -101,7 +120,7 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
               type: "text",
               text:
                 `Found ${files.length} workflow(s) (subfolders included; each name below is what ` +
-                `get_workflow / analyze_workflow / query_workflow take as \`filename\`):\n\n${text}`,
+                `get_workflow / analyze_workflow / query_workflow take as \`filename\`).${unreadable}\n\n${text}`,
             },
           ],
         };
