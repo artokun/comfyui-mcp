@@ -58,6 +58,8 @@ function panelReply(opts: {
   membersPerGroup?: number;
   rails?: boolean;
   text?: string;
+  /** What the PANEL says cut its own rows, if anything. */
+  truncatedBy?: "limit" | "max_chars";
   extra?: Record<string, unknown>;
 }): Record<string, unknown> {
   const { groups = 0, membersPerGroup = 200, rails = false, text = "1 match(es)\n#42 KSampler" } = opts;
@@ -72,8 +74,8 @@ function panelReply(opts: {
     candidates: 690,
     matched: 1,
     shown: 1,
-    truncated: false,
-    truncated_by: null,
+    truncated: opts.truncatedBy != null,
+    truncated_by: opts.truncatedBy ?? null,
     text,
   };
 }
@@ -484,6 +486,31 @@ describe("#807 — panel_query_graph's budget covers the WHOLE reply", () => {
       expect(note).toMatch(/past `max_chars`'s ceiling of 60000/);
       expect(note).toMatch(/no combination of raising it and narrowing/);
       expect(note).not.toMatch(/raise `max_chars` \(up to/);
+    });
+
+    it("does not size a raise against rows the panel had ALREADY cut at this budget", async () => {
+      // The panel stops adding rows at this same `max_chars` and says so in
+      // `truncated_by`. Sizing "raise to ~N to keep them" against the rows in hand then
+      // describes a reply nobody has seen: raising the budget returns MORE ROWS as well,
+      // and the riders can be shed all over again (codex gate r9).
+      const cut = await runQueryGraph(
+        { max_chars: 4000 },
+        panelReply({ groups: 20, membersPerGroup: 60, truncatedBy: "max_chars" }),
+      );
+      const note = String(cut.payload.groups_membership_omitted ?? cut.payload.groups_omitted);
+      expect(note).toMatch(/THESE rows/);
+      expect(note).toMatch(/cut the ROWS at this same budget too/);
+      expect(note).toMatch(/may still not leave room/);
+
+      // A reply the panel did NOT cut carries no such caveat — the size really is what a
+      // raise would need, so hedging it would be its own false claim.
+      const whole = await runQueryGraph(
+        { max_chars: 4000 },
+        panelReply({ groups: 20, membersPerGroup: 60 }),
+      );
+      const plain = String(whole.payload.groups_membership_omitted ?? whole.payload.groups_omitted);
+      expect(plain).toMatch(/raise `max_chars` \(up to 60000\)/);
+      expect(plain).not.toMatch(/cut the ROWS at this same budget/);
     });
 
     it("offers raise-AND-narrow only when narrowing would actually bring it under the ceiling", async () => {

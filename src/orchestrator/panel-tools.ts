@@ -1451,20 +1451,30 @@ function fitQueryGraphReply(res: ToolResult, requested: unknown): ToolResult {
    * Response FIELDS are named bare on purpose: backticks here mean "a lever on this
    * tool", and dressing a field as a parameter is that same wasted retry.
    */
+  //
+  // And the ROWS IN HAND may already be a cut set. The panel stops adding rows at this
+  // same `max_chars` and reports `truncated_by:"max_chars"` when it did, so on that path
+  // raising the budget returns MORE ROWS as well — a budget sized to "these rows plus
+  // the riders" is then not enough to keep both, and calling that size "the untruncated
+  // reply" describes a reply nobody has seen (codex gate MAJOR).
+  const rowsCutByBudget = answer.truncated_by === "max_chars";
   const recovery = (needed: number, floor: number): string => {
     const narrow =
       floor <= budget
         ? " Narrowing this query (`ids`/`types`/`where`/`limit`) frees budget for them too."
         : "";
+    const alsoMoreRows = rowsCutByBudget
+      ? " But the panel cut the ROWS at this same budget too, so raising it returns more rows as well and may still not leave room for them — narrow the query (`ids`/`types`/`where`/`limit`) in the same call to be sure."
+      : narrow;
     if (budget >= QUERY_GRAPH_MAX_CHARS_CEILING) {
       return floor <= budget
         ? `\`max_chars\` is already at its ceiling of ${QUERY_GRAPH_MAX_CHARS_CEILING}.${narrow}`
         : `\`max_chars\` is already at its ceiling of ${QUERY_GRAPH_MAX_CHARS_CEILING}, and they need ~${floor} chars even with no matching rows at all, so one reply cannot carry them.`;
     }
     if (needed <= QUERY_GRAPH_MAX_CHARS_CEILING)
-      return `The untruncated reply is ~${needed} chars: raise \`max_chars\` (up to ${QUERY_GRAPH_MAX_CHARS_CEILING}) to about that to keep them.${narrow}`;
+      return `Keeping them alongside THESE rows takes ~${needed} chars: raise \`max_chars\` (up to ${QUERY_GRAPH_MAX_CHARS_CEILING}) to about that.${alsoMoreRows}`;
     if (floor <= QUERY_GRAPH_MAX_CHARS_CEILING)
-      return `The untruncated reply is ~${needed} chars, past this tool's ceiling — but only ~${floor} chars without the matching rows, so raise \`max_chars\` (up to ${QUERY_GRAPH_MAX_CHARS_CEILING}) AND narrow the query (\`ids\`/\`types\`/\`where\`/\`limit\`) together.`;
+      return `Keeping them alongside THESE rows takes ~${needed} chars, past this tool's ceiling — but only ~${floor} chars without the rows, so raise \`max_chars\` (up to ${QUERY_GRAPH_MAX_CHARS_CEILING}) AND narrow the query (\`ids\`/\`types\`/\`where\`/\`limit\`) together.`;
     return `They need ~${floor} chars even with no matching rows at all, past \`max_chars\`'s ceiling of ${QUERY_GRAPH_MAX_CHARS_CEILING}, so no combination of raising it and narrowing this query returns them here.`;
   };
   /** The same reply with the answer rows removed — the floor `recovery` reasons about. */
