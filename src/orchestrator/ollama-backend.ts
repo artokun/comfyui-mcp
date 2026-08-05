@@ -206,6 +206,13 @@ const MAX_TOOL_ROUNDS = 32;
  * Kept blunt and short on purpose: this prompt is written for small models, and the
  * surrounding file's own comment records what happens to them when a prompt names a
  * tool they cannot reach (they hit "unknown tool" and give up).
+ *
+ * States NO tool COUNT, deliberately. An earlier draft said "THREE tools, not six",
+ * which is only true under COMFYUI_MCP_TOOL_MODE=compact — in full mode the headless
+ * child registers its whole direct surface and buildModelTools advertises all of it,
+ * so the correction would have been a second wrong number replacing the first. It
+ * names the three tools that are GONE, which is what was actually observed, and
+ * points the model at the list it was really handed.
  */
 export function ollamaPanelRetraction(panelRouterAvailable: boolean): string {
   if (panelRouterAvailable) return "";
@@ -213,7 +220,7 @@ export function ollamaPanelRetraction(panelRouterAvailable: boolean): string {
     "",
     "",
     "CORRECTION — THIS OVERRIDES THE TOOL LIST ABOVE:",
-    "The live-canvas router did not start this session. You have THREE tools, not six: list_tools / describe_tool / call_tool. panel_list_tools, panel_describe_tool and panel_call_tool DO NOT EXIST right now — do not call them, and never claim to have read or edited the user's canvas.",
+    "The live-canvas router did not start this session. panel_list_tools, panel_describe_tool and panel_call_tool DO NOT EXIST right now — do not call them, and never claim to have read or edited the user's canvas. Whatever tools you were given for the headless ComfyUI server are unaffected; go by the list you actually received, not by any count named above.",
     "You can still do everything through the headless server: saved workflow FILES on disk (list_workflows, get_workflow, analyze_workflow, query_workflow), generation, the queue, models, custom nodes.",
     "If the user asks about the graph open in front of them, say the live-canvas tools failed to start this session and that restarting the agent is what brings them back.",
   ].join("\n");

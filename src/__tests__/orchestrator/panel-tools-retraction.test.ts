@@ -74,10 +74,14 @@ describe("the Ollama-family prompt retracts its own panel router claim", () => {
     expect(ollamaPanelRetraction(true)).toBe("");
   });
 
-  it("corrects the count and names the three tools that do not exist", () => {
+  it("names the three tools that do not exist, and states no tool COUNT", () => {
     const note = ollamaPanelRetraction(false);
-    expect(note).toMatch(/THREE tools, not six/);
     expect(note).toMatch(/panel_list_tools, panel_describe_tool and panel_call_tool DO NOT EXIST/);
+    // No count: "six" is only right under COMFYUI_MCP_TOOL_MODE=compact, so any
+    // arithmetic here would be a second wrong number replacing the first. The model
+    // is sent to the list it was actually handed.
+    expect(note).not.toMatch(/\b(three|THREE|six|SIX|3|6)\b/);
+    expect(note).toMatch(/go by the list you actually received/);
     expect(note).toMatch(/never claim to have read or edited the user's canvas/);
     // ...and leaves the route that still works, since the headless server is
     // unaffected — over-retracting is the same defect pointing the other way.
