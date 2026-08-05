@@ -163,9 +163,11 @@ Naming the tool and the argument is not the *correct* form — it is the *forcef
 
 ### When the answer gets cut off
 
-Long reads are capped so that one enormous graph cannot swallow the whole conversation. When a read is trimmed you get a note saying so, and that note names the argument to raise. The agent is supposed to notice and retry by itself. When it doesn't, you are the fallback, and this is the sentence:
+Long reads are capped so that one enormous graph cannot swallow the whole conversation. When a read is trimmed you get a note saying so, and **that note names the argument that ran out** — which is not always the same one. Two different ceilings can stop a read: the character budget (`max_chars`) or the number of nodes listed (`limit`). Raising the wrong one changes nothing and looks like the retry failed.
 
-> That got truncated — retry the same query with `max_chars` 60000.
+The agent is supposed to read its own truncation note and retry by itself. When it doesn't, you are the fallback, and this is the sentence:
+
+> That got truncated — retry the same query, raising whichever limit the note said you hit.
 
 ### Where the walls are
 
@@ -176,7 +178,7 @@ These are the numbers for the two tools that read a graph on a budget — `panel
 | `max_chars` | 12000 | 60000 |
 | `limit` (nodes listed) | 40 | 200 |
 
-Asking beyond a ceiling is rejected as an invalid argument rather than quietly rounded down, so the agent finds out immediately and can correct itself. Those two numbers are not universal: several other tools take a `max_chars` and set their own ceiling, stated in that tool's own description.
+On these two tools, asking past a ceiling is rejected as an invalid argument rather than quietly rounded down, so the agent finds out immediately and can correct itself. The numbers are not universal, either: several other tools take a `max_chars` and set their own ceiling, stated in that tool's own description.
 
 ### Scope beats budget
 
@@ -282,7 +284,10 @@ Ask the agent, in plain words:
     surface with nothing held back.
 
     **No names at all**, or "I don't have any tools for ComfyUI", points at
-    **absent** — a client-side configuration problem, not a panel or server one.
+    **absent**: the tools never reached your client. That is something on your
+    client's side rather than a panel or server fault, and it splits again into
+    two — never wired up, or a host that cannot hold them at all. The list
+    [below](#where-each-answer-usually-comes-from) tells those apart.
   </Step>
   <Step title="Ask it to try, and to report back verbatim">
     > Now call the one you'd use for the thing that isn't working, and paste
@@ -325,7 +330,9 @@ Which is why the two questions above are the real diagnostic. They work because 
 
 **Blocked — your client's own permission rules.** In Claude Code that is the `permissions` block of `settings.json` (`~/.claude/settings.json`, or the project's `.claude/settings.json`); MCP tools appear there under their namespaced names, `mcp__comfyui__<tool>`. A strict `allow` list that never mentions them stops every call before it is sent. This is the case that cost one user several days: the tools looked like they were working, precisely because the errors he was hunting could never appear.
 
-**Absent — a host with no MCP client at all.** Some agents do not speak MCP, and no amount of configuration changes that. `pi` is one: it has its own built-in shell-and-editor tools and no MCP client, so it cannot be handed ours whatever else is installed. The panel says so outright when you pick it — *"pi has no ComfyUI tools (no MCP)"*. That line is the answer, not a symptom to debug.
+**Absent, and fixable — never wired up.** The client speaks MCP but was never told about this server, or was told and the entry is wrong. This is the common one and it is a config edit; see [Quickstart](/quickstart) for the entry your client expects.
+
+**Absent, and not fixable — a host with no MCP client at all.** Some agents do not speak MCP, and no amount of configuration changes that. `pi` is one: it has its own built-in shell-and-editor tools and no MCP client, so it cannot be handed ours whatever else is installed. The panel says so outright when you pick it — *"pi has no ComfyUI tools (no MCP)"*. That line is the answer, not a symptom to debug; the fix is to pick a different backend.
 
 **Either — something sitting in between.** A gateway, proxy, or router carrying your MCP traffic may pass along only part of the surface. If the catalogue and what actually runs disagree with each other, suspect the middle.
 

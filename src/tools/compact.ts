@@ -282,25 +282,37 @@ const PANEL_NAMESPACE_RE = /^(?:mcp__[A-Za-z0-9_]+__)?panel_/;
  * all of which an outside MCP client reads while holding none of them (#784, same
  * family: recovery guidance naming a tool the caller cannot invoke).
  *
- * We deliberately do NOT assert which of the two situations the caller is in,
- * because from inside this catalog the two are indistinguishable — the caller may
- * hold the panel surface alongside this one (a panel-hosted session) or hold
- * nothing of the sort (an outside client). Both branches are therefore stated,
- * each with a remedy that works from that state, and no claim is made about
- * whether `name` is a real panel tool: the namespace fact is what we know.
+ * What this message must NOT do is replace one asserted cause with another. The
+ * test is only a PREFIX, so four separate things stay deliberately unclaimed:
+ *
+ *  - whether `name` is a real panel tool at all. `panel_typo` reaches here too,
+ *    and the namespace fact is true of it while "it exists elsewhere" is not.
+ *  - which surfaces the caller holds. From inside this catalog a panel-hosted
+ *    session and an outside client are indistinguishable, so both are addressed.
+ *  - HOW the caller would reach the panel surface if it has one. Not every host
+ *    exposes the panel tools by their own names: the Ollama backend advertises a
+ *    three-tool panel router (panel_list_tools / panel_describe_tool /
+ *    panel_call_tool) instead, so "call it directly" would be wrong advice there.
+ *    The caller's own tool list is the authority, and it is the one thing the
+ *    caller can read and we cannot.
+ *  - that the sidebar's agent necessarily holds these tools. It usually does, but
+ *    the `pi` backend has no MCP client at all (see pi-backend.ts) and therefore
+ *    gets no ComfyUI tools whatever is installed — so that fallback is stated
+ *    with its condition rather than as a guarantee.
  */
 function panelNamespaceMessage(name: string): string {
   return (
-    `Unknown tool '${name}' — no tool by that name is registered on THIS server. ` +
-    "Names beginning `panel_` are the live-canvas tools, and they are never registered here: " +
-    "they are served by the ComfyUI sidebar Agent panel's own per-tab MCP surface. " +
-    "This server cannot see which surfaces you hold, so both cases are given. " +
-    `If your client also lists panel_ tools, call ${name} DIRECTLY — call_tool only dispatches ` +
-    "within this server's catalog and can never reach the panel surface. " +
-    "If it does not list them, this session has no live-canvas access at all: read the workflow " +
-    "from disk instead (list_workflows, get_workflow, analyze_workflow, query_workflow), or ask " +
-    "the user to make the request from the Agent tab in the ComfyUI sidebar, whose agent does " +
-    "hold those tools."
+    `Unknown tool '${name}' — no tool by that name is registered on THIS server, and this ` +
+    "server registers no `panel_` names at all: that prefix is the live-canvas surface, served " +
+    "separately by the ComfyUI sidebar panel's own per-tab MCP server. So this answers WHICH " +
+    `SURFACE you reached, and says nothing about whether '${name}' exists. This server cannot ` +
+    "see what else your client holds, so check the tool list your client gave you. " +
+    `If it offers ${name}, or a panel router such as panel_call_tool, go that way — call_tool ` +
+    "dispatches only within this server's own catalog and can never reach the panel surface. " +
+    "If it offers nothing under `panel_`, there is no live-canvas route from here: read the " +
+    "workflow from disk instead (list_workflows, get_workflow, analyze_workflow, query_workflow), " +
+    "or ask the user to make the request from the Agent tab in the ComfyUI sidebar, on a backend " +
+    "that has ComfyUI tools (the pi backend has no MCP client and so has none)."
   );
 }
 

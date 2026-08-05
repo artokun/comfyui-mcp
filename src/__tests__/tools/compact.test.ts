@@ -272,18 +272,42 @@ describe("compact mode over a real MCP client/server pair", () => {
       })) as { isError?: boolean };
       expect(res.isError).toBe(true);
       const text = textOf(res as never);
-      // Scoped to THIS server rather than asserting the tool does not exist.
+      // Scoped to THIS server, and explicit that it is answering a different
+      // question than "does this tool exist".
       expect(text).toMatch(/registered on THIS server/);
-      expect(text).toMatch(/ComfyUI sidebar Agent panel/);
-      // Refuses to pick between the two states it cannot observe...
-      expect(text).toMatch(/cannot see which surfaces you hold/);
-      // ...and each state gets a remedy reachable FROM that state: call it
-      // directly if the client holds the panel surface, read from disk if not.
-      expect(text).toMatch(/call panel_graph_outline DIRECTLY/);
+      expect(text).toMatch(/says nothing about whether 'panel_graph_outline' exists/);
+      expect(text).toMatch(/ComfyUI sidebar panel's own per-tab MCP server/);
+      // Refuses to pick between the two states it cannot observe, and defers to
+      // the one source that can settle it — the caller's own tool list.
+      expect(text).toMatch(/cannot see what else your client holds/);
+      expect(text).toMatch(/check the tool list your client gave you/);
+      // Each state gets a remedy reachable FROM that state...
+      expect(text).toMatch(/panel_graph_outline, or a panel router such as panel_call_tool/);
       expect(text).toMatch(/\bget_workflow\b/);
+      // ...and neither prescribes a CALL FORM we cannot see: the Ollama backend
+      // fronts the panel with a three-tool router, so an unconditional "call it
+      // directly" would be wrong advice on a host that genuinely has the canvas.
+      expect(text).not.toMatch(/call panel_graph_outline DIRECTLY/);
+      // The sidebar fallback carries its condition — the pi backend has no MCP
+      // client, so "the Agent tab has these tools" is not true everywhere.
+      expect(text).toMatch(/on a backend that has ComfyUI tools/);
       // The bare unknown-name path must not also fire — "Did you mean" here would
       // offer a same-server near-miss for a name that was never a same-server tool.
       expect(text).not.toContain("Did you mean");
+    });
+
+    it("claims nothing about whether the name is a real panel tool", async () => {
+      // A typo reaches this branch too. The namespace fact is true of it; "it
+      // exists on the other surface" is not, so the message must not say so.
+      const client = await compactPair(fakeCatalog());
+      const res = (await client.callTool({
+        name: "call_tool",
+        arguments: { name: "panel_not_a_real_tool_xyz" },
+      })) as { isError?: boolean };
+      const text = textOf(res as never);
+      expect(text).toMatch(/says nothing about whether 'panel_not_a_real_tool_xyz' exists/);
+      // Conditional on the caller's list containing it, never asserted outright.
+      expect(text).toMatch(/If it offers panel_not_a_real_tool_xyz/);
     });
 
     it("applies through a client's mcp__<server>__ namespacing", async () => {

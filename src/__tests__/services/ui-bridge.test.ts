@@ -790,13 +790,31 @@ describe("UiBridge (multi-tab)", () => {
     // separate the cases, and give the check that does.
     it("never-connected states what was observed and does not assert a cause", () => {
       const msg = bridge.status();
-      // The observation, scoped to this bridge — not a claim about the install.
-      expect(msg).toMatch(/nothing has connected to this bridge/);
+      // The observation, scoped to this bridge AND to the kind of tab the flag
+      // behind it actually tracks: everConnectedDesktopTab is canvas-owning tabs
+      // only, so a headless client that connected and left must not be erased by
+      // a blanket "nothing has ever connected".
+      expect(msg).toMatch(/no ComfyUI canvas tab has connected to this bridge/);
+      expect(msg).not.toMatch(/nothing has connected/);
       expect(msg).toMatch(/does not distinguish/);
       // ...and the discriminating check, in order, ending at the case the old
-      // wording had no room for: installed, but reaching a different bridge.
+      // wording had no room for: present, but reaching a different bridge.
       expect(msg).toMatch(/is ComfyUI open in a browser/);
       expect(msg).toMatch(/different bridge address/);
+    });
+
+    // panel-tools.ts classifies a resolve failure as "nothing connected, defer the
+    // rebind" vs "ambiguous, make the user choose" by MATCHING THIS TEXT. Rewording
+    // the guidance can silently flip a deferrable state into a hard failure, and the
+    // classifier lives in another file, so the invariant is pinned here beside the
+    // string it constrains.
+    it("stays classifiable by the deferred-rebind matcher in panel-tools", () => {
+      const positive = /no panel connected|not reachable|connected:\s*none|no connected tab/i;
+      const negative = /multiple|last active|pass tab_id/i;
+      for (const msg of [bridge.status(), bridge.noPanelGuidance()]) {
+        expect(positive.test(msg)).toBe(true);
+        expect(negative.test(msg)).toBe(false);
+      }
     });
 
     it("after a tab connected then dropped, tells the user to refresh the browser tab (not install)", async () => {
