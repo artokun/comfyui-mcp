@@ -80,7 +80,24 @@ export type WorkflowLibraryListing =
    *  `unreadable` is 0, because an entry this build could not decode is a workflow that
    *  EXISTS and is missing from `keys`. Reporting `[{}]` as an empty library would be
    *  the same false negative in miniature (codex gate MAJOR). */
-  | { ok: true; keys: string[]; unreadable: number }
+  | {
+      ok: true;
+      keys: string[];
+      unreadable: number;
+      /**
+       * Whether the RESPONSE shows it covered subfolders — true only when a returned
+       * name carries a path separator, which is the listing itself proving it recursed.
+       *
+       * The REQUEST is not evidence about the response (independent gate P0). Asking for
+       * `recurse=true` says what we wanted; a proxy, a shim, or a handler that ignores
+       * the parameter answers with the top-level list and looks identical. On a
+       * non-empty result the tell exists in the data; on an EMPTY one it cannot, which
+       * is exactly why an empty listing is UNDETERMINED with respect to subfolders and
+       * must not be reported as "you have none" — the original #810 failure, moved one
+       * layer out.
+       */
+      recursionProven: boolean;
+    }
   | { ok: false; kind: "absent" | "refused" | "unreachable" | "undecodable"; detail: string };
 
 /** Normalize one listing entry to a store-relative key, or null when it is not one. */
@@ -154,5 +171,12 @@ export async function listWorkflowLibraryKeys(): Promise<WorkflowLibraryListing>
   // this call cannot name. Silently dropping it is how a listing becomes a lie by
   // omission — and a listing of ONLY such entries would otherwise read as an empty
   // library. Count them so the caller can say the list may be short.
-  return { ok: true, keys, unreadable: decoded.length - keys.length };
+  return {
+    ok: true,
+    keys,
+    unreadable: decoded.length - keys.length,
+    // Positive evidence only: a name carrying a separator is the response demonstrating
+    // it recursed. Anything else — including an empty list — leaves it unproven.
+    recursionProven: keys.some((k) => k.includes("/")),
+  };
 }

@@ -33,7 +33,7 @@ import { analyzeGraphHealth } from "../services/workflow-health.js";
 export function registerWorkflowLibraryTools(server: McpServer): void {
   server.tool(
     "list_workflows",
-    "List the workflows saved in the connected ComfyUI server's user library (the same workflows visible in the ComfyUI web UI), INCLUDING the ones filed in subfolders. Requires a running ComfyUI server. Takes no parameters. Returns a numbered list of library names, each relative to the library root — a workflow in a folder appears as 'VIDEO/MiniMaxH3/clip.json', and that whole string is what get_workflow / analyze_workflow / query_workflow take as `filename`. Says the library is empty ONLY when the server actually reported an empty library; a listing it could not read is reported as unread, never as empty.",
+    "List the workflows saved in the connected ComfyUI server's user library (the same workflows visible in the ComfyUI web UI), INCLUDING the ones filed in subfolders. Requires a running ComfyUI server. Takes no parameters. Returns a numbered list of library names, each relative to the library root — a workflow in a folder appears as 'VIDEO/MiniMaxH3/clip.json', and that whole string is what get_workflow / analyze_workflow / query_workflow take as `filename`. It never reports an absence it did not establish: a listing it could not read says so, and an EMPTY listing says the library could not be CONFIRMED empty (an answer with no names in it cannot show whether it covered subfolders) and tells you to check the ComfyUI sidebar rather than recreate anything.",
     {},
     async () => {
       try {
@@ -104,18 +104,21 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
                     ? `Could NOT read the workflow library: the connected ComfyUI answered with ${listing.unreadable} ` +
                       `entry(ies) in a shape this build does not recognise, and none it could name. This is NOT ` +
                       `"the library is empty" — do not create or overwrite a workflow on the strength of it.`
-                    : // The subfolder coverage is a CONDITION, not a bare assertion: it holds
-                      // because ComfyUI's `recurse` parameter shipped in the same commit as
-                      // the workflow library, so a build without it 404s instead of answering
-                      // with an empty list. Say the condition, and say what a contradiction
-                      // between this answer and the sidebar would mean — the alternative is
-                      // an unverifiable "(subfolders included)" next to the exact wrong
-                      // answer #810 is about.
-                      "No saved workflows found: the connected ComfyUI answered the library listing with an " +
-                      "empty list. That listing was recursive, and every ComfyUI build that has this library " +
-                      "supports recursion, so it covers subfolders too. If the ComfyUI sidebar DOES show " +
-                      "workflows, then this call is not reaching that ComfyUI — check the URL/port before " +
-                      "recreating anything.",
+                    : // An EMPTY list is the one answer that carries no evidence about its own
+                      // coverage (independent gate P0). `recurse=true` says what was REQUESTED;
+                      // a proxy, a shim or a handler that ignores it returns the top-level list,
+                      // and with no names there is no separator to prove otherwise. So this is
+                      // UNDETERMINED, not "none" — which is #810 itself, moved one layer out —
+                      // and it is worded as the open question it is, with the check that
+                      // settles it. Verdict headline deliberately withheld.
+                      "Could NOT confirm the workflow library is empty: the connected ComfyUI answered the " +
+                      "recursive listing with an empty list. That is what an empty library returns — and " +
+                      "also what a responder that ignored `recurse` returns for a library whose workflows " +
+                      "all live in folders. An empty answer carries no name to tell those apart, so this " +
+                      "call cannot. CHECK THE COMFYUI SIDEBAR: if it lists workflows, this call is not " +
+                      "reaching that ComfyUI (check the URL/port) and they are still there — do not " +
+                      "recreate them. If it lists none, the library is genuinely empty; save one from the " +
+                      "web UI or with save_workflow.",
               },
             ],
           };
@@ -134,8 +137,10 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
         // folder is the listing PROVING it recursed, so on that reply the claim is
         // observed rather than assumed. With every name at the root there is no such
         // proof — the usual reason is a flat library, and the message says which reading
-        // to trust and how to tell, instead of asserting coverage it cannot see.
-        const coverage = files.some((f) => f.includes("/"))
+        // to trust and how to tell, instead of asserting coverage it cannot see. The
+        // predicate is the listing's own `recursionProven`, so this branch and the empty
+        // one above cannot come to different conclusions from the same evidence.
+        const coverage = listing.recursionProven
           ? " Subfolders ARE included: the names carrying one are this listing proving it recursed."
           : " Every name here sits at the library root, which this listing cannot tell apart from a" +
             " subfolder read that did not happen: the usual reading is that the library has no workflow" +

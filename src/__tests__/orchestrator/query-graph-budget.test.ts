@@ -17,26 +17,40 @@ import { describe, expect, it } from "vitest";
 import { buildPanelToolDefs } from "../../orchestrator/panel-tools.js";
 import type { PanelToolCtx } from "../../orchestrator/panel-tools.js";
 
+type ToolResult = { isError?: boolean; content: Array<{ type: string; text?: string }> };
+
 const DEFAULT_MAX_CHARS = 12000;
 const CEILING = 60000;
 
 /** Run the REAL panel_query_graph def against a stubbed panel reply, and hand back both
- *  the parsed payload and the exact text a caller would receive. */
+ *  the parsed payload and the exact text a caller would receive.
+ *
+ *  `extraBlocks` models a reply whose content list carries MORE than the JSON block —
+ *  the shape the ToolResult type allows and the fitter must still account for. */
 async function runQueryGraph(
   args: Record<string, unknown>,
   reply: Record<string, unknown>,
-): Promise<{ payload: Record<string, unknown>; text: string }> {
+  extraBlocks: Array<{ type: "text"; text: string } | { type: "image"; data: string }> = [],
+): Promise<{ payload: Record<string, unknown>; text: string; res: ToolResult }> {
   const d = buildPanelToolDefs().find((t) => t.name === "panel_query_graph");
   expect(d, "panel_query_graph is not a panel tool").toBeTruthy();
   const res = await d!.handler(args, {
     call: async () => ({
       // The same shape the bridge produces: pretty-printed JSON, riders first.
-      content: [{ type: "text" as const, text: JSON.stringify(reply, null, 2) }],
+      content: [
+        { type: "text" as const, text: JSON.stringify(reply, null, 2) },
+        ...extraBlocks,
+      ],
     }),
   } as unknown as PanelToolCtx);
   const block = res.content.find((c) => c.type === "text") as { text: string } | undefined;
   expect(block, "panel_query_graph returned no text block").toBeTruthy();
-  return { payload: JSON.parse(block!.text) as Record<string, unknown>, text: block!.text };
+  return { payload: JSON.parse(block!.text) as Record<string, unknown>, text: block!.text, res };
+}
+
+/** Every character the CALLER receives, across every text block of the result. */
+function replyChars(res: ToolResult): number {
+  return res.content.reduce((n, c) => (c.type === "text" ? n + (c.text?.length ?? 0) : n), 0);
 }
 
 /** A group as the panel actually summarizes one (summarizeGroup in comfyui-mcp-panel.js):
@@ -90,15 +104,18 @@ const keyOrder = (payload: Record<string, unknown>): string[] => Object.keys(pay
  */
 function assertBoundHonoured(
   payload: Record<string, unknown>,
-  text: string,
+  res: ToolResult,
   budget: number,
 ): void {
   expect(payload.max_chars, "the reply must report the budget it was fitted to").toBe(budget);
+  // Measured over EVERY text block, not just the JSON one: a bound that describes part
+  // of a reply is the defect this file exists to catch (independent gate P0).
+  const chars = replyChars(res);
   if (payload.budget_overrun === undefined) {
-    expect(text.length, "no overrun was declared, so the reply must fit").toBeLessThanOrEqual(budget);
+    expect(chars, "no overrun was declared, so the whole reply must fit").toBeLessThanOrEqual(budget);
   } else {
     expect(String(payload.budget_overrun)).toContain(`\`max_chars\`=${budget}`);
-    expect(text.length, "an overrun was declared on a reply that actually fits").toBeGreaterThan(budget);
+    expect(chars, "an overrun was declared on a reply that actually fits").toBeGreaterThan(budget);
   }
 }
 
@@ -112,7 +129,7 @@ describe("#807 — panel_query_graph's budget covers the WHOLE reply", () => {
       DEFAULT_MAX_CHARS * 5,
     );
 
-    const { payload, text } = await runQueryGraph({}, reply);
+    const { payload, text, res } = await runQueryGraph({}, reply);
 
     // The two halves of the claim, asserted together — either alone passes via the
     // wrong path. `max_chars` is what the reply SAYS its bound is; text.length is what
@@ -128,8 +145,8 @@ describe("#807 — panel_query_graph's budget covers the WHOLE reply", () => {
       [1, 500], // below the floor
       [999999, CEILING], // above the ceiling
     ] as const) {
-      const { payload, text } = await runQueryGraph({ max_chars: asked }, reply);
-      assertBoundHonoured(payload, text, expected);
+      const { payload, text, res } = await runQueryGraph({ max_chars: asked }, reply);
+      assertBoundHonoured(payload, res, expected);
     }
   });
 
@@ -137,7 +154,7 @@ describe("#807 — panel_query_graph's budget covers the WHOLE reply", () => {
     // The rows are the answer to the question that was asked. A budget that trades them
     // for contextual extras answers a different question than the caller put.
     const rows = "1 match(es) of 690 in scope\n" + JSON.stringify({ id: 42, type: "KSampler" });
-    const { payload } = await runQueryGraph({ max_chars: 2000 }, panelReply({ groups: 40, text: rows }));
+    const { payload, res } = await runQueryGraph({ max_chars: 2000 }, panelReply({ groups: 40, text: rows }));
     expect(payload.text).toBe(rows);
     expect(payload.shown).toBe(1);
     expect(payload.matched).toBe(1);
@@ -146,7 +163,7 @@ describe("#807 — panel_query_graph's budget covers the WHOLE reply", () => {
   it("serializes the riders AFTER the answer, never before it", async () => {
     // "…truncated by groups before reaching node details" was literal: the panel emits
     // the riders first, so an agent reading top-down met the rosters before its answer.
-    const { payload } = await runQueryGraph({ max_chars: CEILING }, panelReply({ groups: 2, membersPerGroup: 3, rails: true }));
+    const { payload, res } = await runQueryGraph({ max_chars: CEILING }, panelReply({ groups: 2, membersPerGroup: 3, rails: true }));
     const order = keyOrder(payload);
     expect(order.indexOf("text")).toBeLessThan(order.indexOf("groups"));
     expect(order.indexOf("text")).toBeLessThan(order.indexOf("rails"));
@@ -157,7 +174,7 @@ describe("#807 — panel_query_graph's budget covers the WHOLE reply", () => {
     // Half a group list reads as "this graph has that many groups". A complete index
     // without member ids does not, and it still answers "which groups exist".
     const reply = panelReply({ groups: 30, membersPerGroup: 120 });
-    const { payload, text } = await runQueryGraph({ max_chars: 8000 }, reply);
+    const { payload, text, res } = await runQueryGraph({ max_chars: 8000 }, reply);
 
     const groups = payload.groups as Array<Record<string, unknown>>;
     expect(Array.isArray(groups)).toBe(true);
@@ -175,7 +192,7 @@ describe("#807 — panel_query_graph's budget covers the WHOLE reply", () => {
 
   it("drops the group index only when the index itself will not fit, and says how many", async () => {
     const reply = panelReply({ groups: 200, membersPerGroup: 200 });
-    const { payload, text } = await runQueryGraph({ max_chars: 1500 }, reply);
+    const { payload, text, res } = await runQueryGraph({ max_chars: 1500 }, reply);
 
     expect(payload.groups).toBeUndefined();
     expect(payload.groups_omitted).toMatch(/all 200 group\(s\)/);
@@ -193,13 +210,13 @@ describe("#807 — panel_query_graph's budget covers the WHOLE reply", () => {
       membersPerGroup: 120,
       extra: { groups_truncated: true, groups_truncation_hint: "Showing 200 of 640 group(s)…" },
     });
-    const { payload, text } = await runQueryGraph({ max_chars: 8000 }, reply);
+    const { payload, text, res } = await runQueryGraph({ max_chars: 8000 }, reply);
     expect(payload.groups).toHaveLength(30); // the membership rung, not the index rung
     const note = String(payload.groups_membership_omitted);
     expect(note).toMatch(/CARRIED/);
     expect(note).toMatch(/not the graph's total/);
     expect(note).not.toMatch(/Every group is still listed/);
-    assertBoundHonoured(payload, text, 8000);
+    assertBoundHonoured(payload, res, 8000);
 
     // …and the unclipped case still says the plain thing, so this is not just prose.
     const plain = await runQueryGraph({ max_chars: 8000 }, panelReply({ groups: 30, membersPerGroup: 120 }));
@@ -214,7 +231,7 @@ describe("#807 — panel_query_graph's budget covers the WHOLE reply", () => {
       membersPerGroup: 200,
       extra: { groups_truncated: true, groups_truncation_hint: "Showing 200 of 640 group(s)…" },
     });
-    const { payload } = await runQueryGraph({ max_chars: 1500 }, reply);
+    const { payload, res } = await runQueryGraph({ max_chars: 1500 }, reply);
     expect(payload.groups_omitted).toMatch(/not the graph's total/);
     expect(payload.groups_omitted).not.toMatch(/all 200 group\(s\)/);
     // …and the panel's own marker is the ONLY place the real figure (640) survives, so
@@ -227,7 +244,7 @@ describe("#807 — panel_query_graph's budget covers the WHOLE reply", () => {
   it("keeps the panel's cap evidence even when the rails go too", async () => {
     const rails: Record<string, unknown> = {};
     for (let i = 0; i < 60; i++) rails[`slot_${i}`] = { id: -10 - i, name: "x".repeat(60) };
-    const { payload } = await runQueryGraph(
+    const { payload, res } = await runQueryGraph(
       { max_chars: 500 },
       panelReply({
         groups: 200,
@@ -246,7 +263,7 @@ describe("#807 — panel_query_graph's budget covers the WHOLE reply", () => {
 
   it("keeps the subgraph rails until last — groups go before boundary wiring", async () => {
     const reply = panelReply({ groups: 30, membersPerGroup: 200, rails: true });
-    const { payload } = await runQueryGraph({ max_chars: 2000 }, reply);
+    const { payload, res } = await runQueryGraph({ max_chars: 2000 }, reply);
     expect(payload.groups).toBeUndefined();
     expect(payload.rails).toBeDefined();
     expect(payload.rails_omitted).toBeUndefined();
@@ -255,7 +272,7 @@ describe("#807 — panel_query_graph's budget covers the WHOLE reply", () => {
   it("drops the rails too rather than break the bound, and says how to get them back", async () => {
     const rails: Record<string, unknown> = {};
     for (let i = 0; i < 60; i++) rails[`slot_${i}`] = { id: -10 - i, name: "x".repeat(60) };
-    const { payload, text } = await runQueryGraph(
+    const { payload, text, res } = await runQueryGraph(
       { max_chars: 500 },
       panelReply({ groups: 5, rails: false, extra: { rails }, text: "0 match(es)" }),
     );
@@ -266,7 +283,7 @@ describe("#807 — panel_query_graph's budget covers the WHOLE reply", () => {
     // At the 500 FLOOR the sentences explaining what was dropped are themselves larger
     // than the budget. They are not cut — a silently missing rider is the defect — so
     // the reply must say plainly that it overran, and why.
-    assertBoundHonoured(payload, text, 500);
+    assertBoundHonoured(payload, res, 500);
     // The notes, not the rows, are the overflow here — so the note must NOT send the
     // caller off to narrow a query or lower a budget that cannot shrink them.
     expect(String(payload.budget_overrun)).toMatch(/note\(s\) above saying which context was dropped/);
@@ -280,7 +297,7 @@ describe("#807 — panel_query_graph's budget covers the WHOLE reply", () => {
     // discarding that would be answering a different question — so the overrun is
     // DISCLOSED with the real number rather than papered over.
     const rows = "row\n".repeat(400); // ~1600 chars against a 1000-char budget
-    const { payload, text } = await runQueryGraph(
+    const { payload, text, res } = await runQueryGraph(
       { max_chars: 1000 },
       panelReply({ groups: 4, text: rows }),
     );
@@ -313,7 +330,7 @@ describe("#807 — panel_query_graph's budget covers the WHOLE reply", () => {
     // A FALSE truncation costs the same round trip as a silent one and teaches distrust
     // of a complete result (#809). Nothing here is over budget, so nothing may be cut.
     const reply = panelReply({ groups: 2, membersPerGroup: 3, rails: true });
-    const { payload, text } = await runQueryGraph({ max_chars: CEILING }, reply);
+    const { payload, text, res } = await runQueryGraph({ max_chars: CEILING }, reply);
     expect(text.length).toBeLessThanOrEqual(CEILING);
     expect((payload.groups as unknown[]).length).toBe(2);
     expect((payload.groups as Array<Record<string, unknown>>)[0].node_ids).toEqual([1000, 1001, 1002]);
@@ -326,9 +343,9 @@ describe("#807 — panel_query_graph's budget covers the WHOLE reply", () => {
 
   it("keeps a rider-free reply intact, adding only the budget it was fitted to", async () => {
     const reply = { total: 3, matched: 0, shown: 0, truncated: false, text: "0 match(es)" };
-    const { payload, text } = await runQueryGraph({ max_chars: 500 }, reply);
+    const { payload, text, res } = await runQueryGraph({ max_chars: 500 }, reply);
     expect(payload).toEqual({ ...reply, max_chars: 500 });
-    assertBoundHonoured(payload, text, 500);
+    assertBoundHonoured(payload, res, 500);
   });
 
   describe("every reply is measured, including the ones with nothing to shed", () => {
@@ -344,9 +361,9 @@ describe("#807 — panel_query_graph's budget covers the WHOLE reply", () => {
         truncated: false,
         text: "x".repeat(2000),
       };
-      const { payload, text } = await runQueryGraph({ max_chars: 900 }, reply);
+      const { payload, text, res } = await runQueryGraph({ max_chars: 900 }, reply);
       expect(payload.text).toBe(reply.text);
-      assertBoundHonoured(payload, text, 900);
+      assertBoundHonoured(payload, res, 900);
       expect(String(payload.budget_overrun)).toMatch(/rows answering your query are \d+ chars/);
       // With no riders there really was nothing to drop, so the plain claim is true —
       // which is what keeps the guarded wording above from being blanket hedging.
@@ -357,19 +374,19 @@ describe("#807 — panel_query_graph's budget covers the WHOLE reply", () => {
       // A future panel field is not a rider this code knows how to shed, but it is
       // still part of what the caller receives — so it must at least be COUNTED, and
       // the shortfall admitted, rather than sailing past the bound unremarked.
-      const { payload, text } = await runQueryGraph(
+      const { payload, text, res } = await runQueryGraph(
         { max_chars: 900 },
         { total: 1, shown: 0, text: "0 match(es)", some_future_index: "z".repeat(2000) },
       );
       expect(payload.some_future_index).toBe("z".repeat(2000));
-      assertBoundHonoured(payload, text, 900);
+      assertBoundHonoured(payload, res, 900);
     });
 
     it("counts an oversized `viewing`, which identifies the graph and is never shed", async () => {
       // Subgraph titles are user-controlled and unbounded. `viewing` says WHICH graph
       // the answer describes, so dropping it would make the whole reply ambiguous — it
       // is kept, counted, and the overrun stated.
-      const { payload, text } = await runQueryGraph(
+      const { payload, text, res } = await runQueryGraph(
         { max_chars: 900 },
         {
           viewing: { scope: "subgraph", owner_node_id: 12, title: "T".repeat(3000) },
@@ -379,7 +396,7 @@ describe("#807 — panel_query_graph's budget covers the WHOLE reply", () => {
         },
       );
       expect((payload.viewing as { title: string }).title).toHaveLength(3000);
-      assertBoundHonoured(payload, text, 900);
+      assertBoundHonoured(payload, res, 900);
 
       // And the overrun note must not BLAME the rows for it (codex gate r3). The rows
       // here are 11 characters; calling 3000 of subgraph title "the rows that answer
@@ -397,7 +414,7 @@ describe("#807 — panel_query_graph's budget covers the WHOLE reply", () => {
       // groups". Deleting it saved nothing and turned that stated zero into an absent
       // field, and then let the overrun note claim nothing had been discarded when a
       // field had (codex gate r7).
-      const { payload, text } = await runQueryGraph(
+      const { payload, text, res } = await runQueryGraph(
         { max_chars: 900 },
         {
           viewing: { scope: "subgraph", owner_node_id: 1, title: "T".repeat(3000) },
@@ -408,12 +425,66 @@ describe("#807 — panel_query_graph's budget covers the WHOLE reply", () => {
         },
       );
       expect(payload.groups).toEqual([]);
-      assertBoundHonoured(payload, text, 900);
+      assertBoundHonoured(payload, res, 900);
       expect(String(payload.budget_overrun)).toMatch(/Nothing was discarded to meet the budget/);
     });
 
+    it("counts EVERY text block, not just the one carrying the JSON", async () => {
+      // Measuring the first block and leaving the rest untouched is this issue's own
+      // defect relocated to the block list: a small fitted payload reporting
+      // `max_chars` with an unmeasured 100k block riding beside it (independent gate
+      // P0). "The last place the reply is touched" has to mean the whole reply.
+      const reply = { total: 1, shown: 1, truncated: false, text: "#42 KSampler" };
+      // Alone, this payload fits 500 easily and is passed through with no complaint.
+      const alone = await runQueryGraph({ max_chars: 500 }, reply);
+      expect(alone.text.length).toBeLessThanOrEqual(500);
+      expect(alone.payload.budget_overrun).toBeUndefined();
+
+      const { payload, res } = await runQueryGraph({ max_chars: 500 }, reply, [
+        { type: "text", text: "S".repeat(100_000) },
+      ]);
+      expect(replyChars(res)).toBeGreaterThan(100_000);
+      const overrun = String(payload.budget_overrun);
+      expect(overrun, "an unmeasured sibling block escaped the budget").toMatch(
+        /over `max_chars`=500/,
+      );
+      // The figure is the WHOLE reply, and the siblings are named rather than folded
+      // silently into "everything else".
+      expect(Number(/This reply is (\d+) chars/.exec(overrun)?.[1])).toBe(replyChars(res));
+      expect(overrun).toMatch(/1 further text block\(s\) carrying 100000 chars/);
+    });
+
+    it("counts sibling blocks on the FITTING path too, rather than only when it overruns", async () => {
+      // A reply whose JSON fits alone but not once the sibling is counted must shed its
+      // riders exactly as if those bytes had been in the JSON — the sibling is the ONLY
+      // difference between these two runs.
+      const reply = panelReply({ groups: 3, membersPerGroup: 60 });
+      const alone = await runQueryGraph({ max_chars: 4000 }, reply);
+      expect(alone.payload.groups).toHaveLength(3);
+      expect((alone.payload.groups as Array<Record<string, unknown>>)[0].node_ids).toBeDefined();
+      expect(alone.payload.groups_membership_omitted).toBeUndefined();
+      assertBoundHonoured(alone.payload, alone.res, 4000);
+
+      const { payload, res } = await runQueryGraph({ max_chars: 4000 }, reply, [
+        { type: "text", text: "S".repeat(2000) },
+      ]);
+      expect(payload.groups_membership_omitted ?? payload.groups_omitted).toBeDefined();
+      assertBoundHonoured(payload, res, 4000);
+    });
+
+    it("discloses non-text blocks rather than silently leaving them out of the figure", async () => {
+      const { payload, res } = await runQueryGraph(
+        { max_chars: 500 },
+        { total: 1, shown: 1, truncated: false, text: "x".repeat(2000) },
+        [{ type: "image", data: "AAAA" }],
+      );
+      expect(String(payload.budget_overrun)).toMatch(
+        /1 non-text block\(s\), whose bytes `max_chars` does not bound/,
+      );
+    });
+
     it("discloses an over-budget aggregate (group_by) reply", async () => {
-      const { payload, text } = await runQueryGraph(
+      const { payload, text, res } = await runQueryGraph(
         { max_chars: 700, group_by: "type" },
         {
           viewing: { scope: "root" },
@@ -425,12 +496,12 @@ describe("#807 — panel_query_graph's budget covers the WHOLE reply", () => {
           text: "900 node(s) across 300 type(s):\n" + "12× SomeNodeType\n".repeat(80),
         },
       );
-      assertBoundHonoured(payload, text, 700);
+      assertBoundHonoured(payload, res, 700);
     });
 
     it("discloses an over-budget seed-not-found reply", async () => {
       // The early returns carry no riders at all, and used to bypass the fitter.
-      const { payload, text } = await runQueryGraph(
+      const { payload, text, res } = await runQueryGraph(
         { max_chars: 500, upstream_of: 999 },
         {
           total: 690,
@@ -441,19 +512,44 @@ describe("#807 — panel_query_graph's budget covers the WHOLE reply", () => {
           text: `upstream_of node ${"9".repeat(1200)} not found (690 nodes in view).`,
         },
       );
-      assertBoundHonoured(payload, text, 500);
+      assertBoundHonoured(payload, res, 500);
     });
+  });
+
+  it("re-derives its own markers instead of carrying an inbound one through", async () => {
+    // `budget_overrun` and the omission notes are fields THIS accounting authors. An
+    // arriving copy is a claim from a different measurement: carried through, a reply
+    // that FITS would still announce that it does not — a false positive on the one
+    // marker that has to be trustworthy, and a caller who learns to distrust it will
+    // ignore the real ones (independent gate P0).
+    const { payload, text, res } = await runQueryGraph(
+      { max_chars: 4000 },
+      {
+        total: 1,
+        shown: 1,
+        truncated: false,
+        text: "#42 KSampler",
+        budget_overrun: "This reply is 99999 chars, over `max_chars`=500",
+        groups_omitted: "stale claim from somewhere else",
+        rails_omitted: "likewise",
+      },
+    );
+    expect(text.length).toBeLessThanOrEqual(4000);
+    expect(payload.budget_overrun).toBeUndefined();
+    expect(payload.groups_omitted).toBeUndefined();
+    expect(payload.rails_omitted).toBeUndefined();
+    assertBoundHonoured(payload, res, 4000);
   });
 
   it("reports the budget it ENFORCED, not one the panel happened to mention", async () => {
     // Deferring to a panel-supplied `max_chars` reports a bound nothing checked: a
     // reply fitted to 4000 announcing 3777 looks compliant at 3900 (codex gate SEVERE).
-    const { payload, text } = await runQueryGraph(
+    const { payload, text, res } = await runQueryGraph(
       { max_chars: 4000 },
       panelReply({ groups: 2, membersPerGroup: 2, extra: { max_chars: 3777 } }),
     );
     expect(payload.max_chars).toBe(4000);
-    assertBoundHonoured(payload, text, 4000);
+    assertBoundHonoured(payload, res, 4000);
   });
 
   it("leaves an error reply alone", async () => {
@@ -470,7 +566,7 @@ describe("#807 — panel_query_graph's budget covers the WHOLE reply", () => {
       const reply = panelReply({ groups: 20, membersPerGroup: 60 });
       const needed = JSON.stringify(reply, null, 2).length;
       expect(needed).toBeLessThan(CEILING); // a raise CAN hold it
-      const { payload } = await runQueryGraph({ max_chars: 4000 }, reply);
+      const { payload, res } = await runQueryGraph({ max_chars: 4000 }, reply);
       const note = String(payload.groups_membership_omitted ?? payload.groups_omitted);
       expect(note).toMatch(/raise `max_chars` \(up to 60000\)/);
     });
@@ -481,7 +577,7 @@ describe("#807 — panel_query_graph's budget covers the WHOLE reply", () => {
       // explaining the first one.
       const reply = panelReply({ groups: 200, membersPerGroup: 200 });
       expect(JSON.stringify(reply, null, 2).length).toBeGreaterThan(CEILING);
-      const { payload } = await runQueryGraph({ max_chars: 4000 }, reply);
+      const { payload, res } = await runQueryGraph({ max_chars: 4000 }, reply);
       const note = String(payload.groups_omitted ?? payload.groups_membership_omitted);
       expect(note).toMatch(/past `max_chars`'s ceiling of 60000/);
       expect(note).toMatch(/no combination of raising it and narrowing/);
@@ -519,13 +615,13 @@ describe("#807 — panel_query_graph's budget covers the WHOLE reply", () => {
       const reply = panelReply({ groups: 45, membersPerGroup: 40, text: "r".repeat(30000) });
       expect(JSON.stringify(reply, null, 2).length).toBeGreaterThan(CEILING);
       expect(JSON.stringify({ ...reply, text: "" }, null, 2).length).toBeLessThan(CEILING);
-      const { payload } = await runQueryGraph({ max_chars: 4000 }, reply);
+      const { payload, res } = await runQueryGraph({ max_chars: 4000 }, reply);
       const note = String(payload.groups_omitted ?? payload.groups_membership_omitted);
       expect(note).toMatch(/raise `max_chars` \(up to 60000\) AND narrow the query/);
     });
 
     it("says the budget is maxed instead of telling a caller at the ceiling to raise it", async () => {
-      const { payload } = await runQueryGraph(
+      const { payload, res } = await runQueryGraph(
         { max_chars: CEILING },
         panelReply({ groups: 200, membersPerGroup: 200 }),
       );

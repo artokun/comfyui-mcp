@@ -10,7 +10,7 @@ icon: "folder-open"
 
 ## list_workflows
 
-List the workflows saved in the connected ComfyUI server's user library (the same workflows visible in the ComfyUI web UI), INCLUDING the ones filed in subfolders. Requires a running ComfyUI server. Takes no parameters. Returns a numbered list of library names, each relative to the library root — a workflow in a folder appears as 'VIDEO/MiniMaxH3/clip.json', and that whole string is what get_workflow / analyze_workflow / query_workflow take as `filename`. Says the library is empty ONLY when the server actually reported an empty library; a listing it could not read is reported as unread, never as empty.
+List the workflows saved in the connected ComfyUI server's user library (the same workflows visible in the ComfyUI web UI), INCLUDING the ones filed in subfolders. Requires a running ComfyUI server. Takes no parameters. Returns a numbered list of library names, each relative to the library root — a workflow in a folder appears as 'VIDEO/MiniMaxH3/clip.json', and that whole string is what get_workflow / analyze_workflow / query_workflow take as `filename`. It never reports an absence it did not establish: a listing it could not read says so, and an EMPTY listing says the library could not be CONFIRMED empty (an answer with no names in it cannot show whether it covered subfolders) and tells you to check the ComfyUI sidebar rather than recreate anything.
 
 <Tip>**In plain terms:** The saved workflow FILES in your ComfyUI — the same list you see in the ComfyUI sidebar, folders and all. Usually the first call in any "open my…" request.</Tip>
 

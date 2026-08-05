@@ -1359,6 +1359,17 @@ const QUERY_GRAPH_RIDER_KEYS = [
   "rails",
 ] as const;
 
+/** The fields THIS accounting authors. Any inbound copy is dropped before measuring, so
+ *  a stale claim from a different measurement can never ride out as if this one made it
+ *  (independent gate P0). `max_chars` is re-set unconditionally just below. */
+const QUERY_GRAPH_OWNED_KEYS: ReadonlySet<string> = new Set([
+  "max_chars",
+  "groups_membership_omitted",
+  "groups_omitted",
+  "rails_omitted",
+  "budget_overrun",
+]);
+
 /** A group reduced to its INDEX form: which groups exist, what they are called, and how
  *  many nodes each holds. Membership and geometry are what grow with the graph. */
 function groupIndexEntry(g: unknown): unknown {
@@ -1390,9 +1401,12 @@ function groupIndexEntry(g: unknown): unknown {
  *
  * An error or non-JSON reply is passed through untouched. It makes no budget CLAIM —
  * there is no `max_chars` on it to be wrong — and rewriting a failure message to
- * mention a character budget would bury the failure. Non-text content blocks (this tool
- * emits none, but the shape allows them) are preserved and not counted: `max_chars`
- * bounds characters, and calling image bytes characters would be its own false figure.
+ * mention a character budget would bury the failure.
+ *
+ * EVERY text block is counted, not only the one carrying the JSON, and a non-text block
+ * (this tool emits none, but the shape allows them) has its PRESENCE disclosed rather
+ * than silently ignored — `max_chars` bounds characters, and calling image bytes
+ * characters would be its own false figure.
  */
 function fitQueryGraphReply(res: ToolResult, requested: unknown): ToolResult {
   const payload = parseToolResultJson(res);
@@ -1401,7 +1415,23 @@ function fitQueryGraphReply(res: ToolResult, requested: unknown): ToolResult {
   if (idx < 0) return res;
 
   const budget = clampQueryGraphMaxChars(requested);
+  // EVERY text block counts, not just the one carrying the JSON (independent gate P0).
+  // Measuring the first block and leaving the rest untouched is the SAME defect this
+  // function exists to remove — a budget describing one part of a reply while something
+  // rides beside it — relocated from `groups`/`rails` to the block list. A small fitted
+  // payload next to an unmeasured 100k second block would report `max_chars` and no
+  // overrun. "The last place the reply is touched" has to mean the whole reply.
+  const siblingText = res.content.reduce(
+    (n, c, i) => (i !== idx && c.type === "text" ? n + (c.text?.length ?? 0) : n),
+    0,
+  );
+  // Blocks that are not text (this tool emits none, but the shape allows them) are not
+  // counted — `max_chars` bounds characters, and calling image bytes characters would be
+  // its own false figure — so their PRESENCE is disclosed instead of silently ignored.
+  const nonTextBlocks = res.content.filter((c) => c.type !== "text").length;
   const render = (p: Record<string, unknown>): string => JSON.stringify(p, null, 2);
+  /** The whole reply's character count: the fitted JSON plus every sibling text block. */
+  const sizeOf = (p: Record<string, unknown>): number => render(p).length + siblingText;
   const replaceWith = (p: Record<string, unknown>): ToolResult => ({
     ...res,
     content: res.content.map((c, i) =>
@@ -1414,12 +1444,19 @@ function fitQueryGraphReply(res: ToolResult, requested: unknown): ToolResult {
   const riders: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(payload)) {
     if (riderKeys.has(k)) riders[k] = v;
-    else answer[k] = v;
+    else if (!QUERY_GRAPH_OWNED_KEYS.has(k)) answer[k] = v;
   }
   // The budget this call ENFORCED, always — it is the number the fitting below works
   // to, and it is measured with this field already present. Deferring to a panel-supplied
   // `max_chars` would report a bound nothing checked (codex gate SEVERE): a reply fitted
   // to 4000 could announce 3777 and look compliant at 3900.
+  //
+  // The loop above drops any INBOUND copy of the fields this function authors, for the
+  // same reason (independent gate P0). An arriving `budget_overrun` is a claim from a
+  // different measurement: carried through, a reply that fits after fitting would still
+  // announce that it does not — a false positive on the one marker that has to be
+  // trustworthy, and a caller who learns to distrust it will ignore the real ones. This
+  // accounting is the sole author of these fields, so it is also their sole source.
   answer.max_chars = budget;
 
   const groups = Array.isArray(riders.groups) ? (riders.groups as unknown[]) : null;
@@ -1434,7 +1471,7 @@ function fitQueryGraphReply(res: ToolResult, requested: unknown): ToolResult {
   };
 
   const full = assemble(riders);
-  const fullChars = render(full).length;
+  const fullChars = sizeOf(full);
   if (fullChars <= budget) return replaceWith(full);
 
   /**
@@ -1479,7 +1516,7 @@ function fitQueryGraphReply(res: ToolResult, requested: unknown): ToolResult {
   };
   /** The same reply with the answer rows removed — the floor `recovery` reasons about. */
   const floorOf = (r: Record<string, unknown>): number =>
-    render({ ...assemble(r), ...(answer.text !== undefined ? { text: "" } : {}) }).length;
+    sizeOf({ ...assemble(r), ...(answer.text !== undefined ? { text: "" } : {}) });
 
   const outline =
     ` panel_graph_outline's GROUPS index lists every member id — but only while its own max_chars affords a node-level rung; if it reports detail_level:"groups" it gives counts, not ids.`;
@@ -1507,7 +1544,7 @@ function fitQueryGraphReply(res: ToolResult, requested: unknown): ToolResult {
         : `Every group is still listed and each node_count is exact. `) +
       recovery(fullChars, floorOf(riders)) +
       outline;
-    if (render(p).length <= budget) return replaceWith(p);
+    if (sizeOf(p) <= budget) return replaceWith(p);
   }
 
   // The panel's OWN cap markers are evidence about the GRAPH, not payload this code is
@@ -1541,7 +1578,7 @@ function fitQueryGraphReply(res: ToolResult, requested: unknown): ToolResult {
       recovery(fullChars, floorOf(riders)) +
       outline;
   }
-  if (render(noGroups).length <= budget) return replaceWith(noGroups);
+  if (sizeOf(noGroups) <= budget) return replaceWith(noGroups);
 
   // Rung 3 — the subgraph rails go too. The cap evidence, and an empty groups
   // observation, still ride.
@@ -1553,7 +1590,7 @@ function fitQueryGraphReply(res: ToolResult, requested: unknown): ToolResult {
   if (hasRails) {
     bare.rails_omitted =
       `The subgraph boundary rails were dropped because the reply did not fit \`max_chars\`=${budget} without them. ` +
-      recovery(render(noGroups).length, floorOf(withoutGroups));
+      recovery(sizeOf(noGroups), floorOf(withoutGroups));
   }
 
   // Every rider is gone and it STILL does not fit. What is left is the rows, the fields
@@ -1571,7 +1608,7 @@ function fitQueryGraphReply(res: ToolResult, requested: unknown): ToolResult {
   const withoutRows = (p: Record<string, unknown>): Record<string, unknown> =>
     answer.text !== undefined ? { ...p, text: "" } : p;
   const rowsChars = render(answer).length - render(withoutRows(answer)).length;
-  const floorWithNotes = render(withoutRows(bare)).length;
+  const floorWithNotes = sizeOf(withoutRows(bare));
   const shrink =
     floorWithNotes <= budget
       ? budget > QUERY_GRAPH_MAX_CHARS_FLOOR
@@ -1582,23 +1619,34 @@ function fitQueryGraphReply(res: ToolResult, requested: unknown): ToolResult {
   // was (codex gate r4). Two fields down, that contradiction is the kind a reader
   // resolves by distrusting both. Say which of the two situations this is.
   const shedSomething = hasGroups || hasRails;
+  // Sibling text blocks are part of the reply and part of the figure, so they are named
+  // rather than folded silently into "everything else" (independent gate P0).
+  const siblings =
+    siblingText > 0
+      ? `${res.content.filter((c, i) => i !== idx && c.type === "text").length} further text block(s) carrying ${siblingText} chars, `
+      : "";
+  const nonText =
+    nonTextBlocks > 0
+      ? ` This reply also carries ${nonTextBlocks} non-text block(s), whose bytes \`max_chars\` does not bound and this figure does not count.`
+      : "";
   const overrun = (size: number): string =>
-    `This reply is ${size} chars, over \`max_chars\`=${budget} — that figure counts the JSON framing and escaping, and this note itself. ` +
-    `Of it, the rows answering your query are ${rowsChars} chars; the remaining ${size - rowsChars} is the fields identifying the graph this came from, anything else the panel sent, and the note(s) above saying which context was dropped. ` +
+    `This reply is ${size} chars, over \`max_chars\`=${budget} — that figure counts the JSON framing and escaping, every text block, and this note itself. ` +
+    `Of it, the rows answering your query are ${rowsChars} chars; the remaining ${size - rowsChars} is ${siblings}the fields identifying the graph this came from, anything else the panel sent, and the note(s) above saying which context was dropped. ` +
     (shedSomething
       ? `The context that COULD be dropped for the budget already has been, and the note(s) above record it; what remains was not cut down any further. `
       : `Nothing was discarded to meet the budget — there was no context to drop. `) +
     `The rows are your answer, and a silently short answer — or a silently missing rider, or a silently missing explanation of one — is the defect this accounting exists to prevent. ` +
-    shrink;
+    shrink +
+    nonText;
   // The stated size must include the statement (codex gate MAJOR), so solve for it: the
   // note only grows the payload, and only its own digit count feeds back, so this
   // settles in one or two passes. The loop is bounded and the last pass is emitted
   // regardless — a size that is a character or two low is still the honest order of
   // magnitude, and the `budget_overrun` field itself is what carries the finding.
-  let claimed = render({ ...bare, budget_overrun: overrun(render(bare).length) }).length;
+  let claimed = sizeOf({ ...bare, budget_overrun: overrun(sizeOf(bare)) });
   for (let i = 0; i < 4; i++) {
     const attempt = { ...bare, budget_overrun: overrun(claimed) };
-    const size = render(attempt).length;
+    const size = sizeOf(attempt);
     if (size === claimed) return replaceWith(attempt);
     claimed = size;
   }
