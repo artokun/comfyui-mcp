@@ -71,6 +71,24 @@ function clip(v: unknown, n = 60): string {
   return one.length > n ? `${one.slice(0, n - 1)}…` : one;
 }
 
+/**
+ * The hard ceilings, in one place, because both the clamps below and every message
+ * that says "raise it" have to agree on them. `raiseChars` is the whole point: past
+ * the ceiling the tools' schemas REJECT a larger value, so "raise max_chars" stops
+ * being a remedy and becomes a guaranteed validation error — the caller is sent to
+ * do something that cannot work. Every site that used to say it unconditionally now
+ * asks here instead.
+ */
+const MAX_CHARS_CEILING = 60000;
+const LIMIT_CEILING = 200;
+
+/** "raise max_chars" — or the truth, once there is nothing left to raise it to. */
+function raiseChars(maxChars: number): string {
+  return maxChars >= MAX_CHARS_CEILING
+    ? `max_chars is already at its ${MAX_CHARS_CEILING} maximum`
+    : `raise max_chars (max ${MAX_CHARS_CEILING})`;
+}
+
 // #609: per-widget-value cap for the `detail` projection. One oversized value
 // (a ResolutionMaster presets JSON, LTXDirector.timeline_data, a VHS videopreview)
 // must not consume the whole max_chars budget and starve the rest of the query.
@@ -141,7 +159,7 @@ function capWidgets(widgets: Record<string, unknown>, totalCap = Number.POSITIVE
     out[k] = capped;
     used += size;
   }
-  if (omitted > 0) out["…"] = `${omitted} widget(s) omitted (exceeded budget); raise max_chars`;
+  if (omitted > 0) out["…"] = `${omitted} widget(s) omitted (exceeded budget); ${raiseChars(totalCap)}`;
   return out;
 }
 
@@ -167,10 +185,13 @@ function fitDetailLine(line: string, stub: Record<string, unknown>, maxChars: nu
   if (stub.title != null) safe.title = clipF(stub.title);
   const s = JSON.stringify({
     ...safe,
-    detail_omitted: `full detail is ${line.length} chars > max_chars ${maxChars}; raise max_chars to read this node`,
+    detail_omitted: `full detail is ${line.length} chars > max_chars ${maxChars}; ${raiseChars(maxChars)} to read this node`,
   });
   if (s.length <= maxChars) return s;
-  return JSON.stringify({ id: typeof safe.id === "string" ? safe.id.slice(0, 40) : safe.id, detail_omitted: "raise max_chars" });
+  return JSON.stringify({
+    id: typeof safe.id === "string" ? safe.id.slice(0, 40) : safe.id,
+    detail_omitted: raiseChars(maxChars),
+  });
 }
 
 function matchPredicate(value: unknown, op: string, rhs: string): boolean {
@@ -230,8 +251,8 @@ function closure(adj: Map<string, Set<string>>, seed: string, depth: number): Se
 export function queryApiGraph(graph: ApiGraph, opts: GraphQueryOptions = {}): GraphQueryResult {
   const nodeIds = Object.keys(graph);
   const total = nodeIds.length;
-  const limit = Math.min(Math.max(opts.limit ?? 40, 1), 200);
-  const maxChars = Math.min(Math.max(opts.max_chars ?? 12000, 500), 60000);
+  const limit = Math.min(Math.max(opts.limit ?? 40, 1), LIMIT_CEILING);
+  const maxChars = Math.min(Math.max(opts.max_chars ?? 12000, 500), MAX_CHARS_CEILING);
 
   // Adjacency (upstream = the nodes my ref-inputs point at; downstream = inverse).
   const up = new Map<string, Set<string>>();
@@ -325,7 +346,16 @@ export function queryApiGraph(graph: ApiGraph, opts: GraphQueryOptions = {}): Gr
       kept.push(l);
       used += l.length + 1;
     }
-    const aggTail = aggTruncated ? `\n…(${allLines.length - kept.length} more type(s) omitted; raise max_chars)` : "";
+    // An aggregate has no `limit` and no narrower projection to fall back on, so at
+    // the ceiling the honest answer is that the type list cannot be shown whole —
+    // scoping the query (types/where/ids/depth) is the only thing left.
+    const aggTail = aggTruncated
+      ? `\n…(${allLines.length - kept.length} more type(s) omitted; ${
+          maxChars >= MAX_CHARS_CEILING
+            ? `max_chars is already at its ${MAX_CHARS_CEILING} maximum, so scope the query with types/where/ids/depth instead`
+            : `raise max_chars (max ${MAX_CHARS_CEILING})`
+        })`
+      : "";
     return {
       total, candidates: candidates.length, matched: matched.length,
       shown: matched.length, truncated: aggTruncated,
@@ -446,13 +476,13 @@ export function queryApiGraph(graph: ApiGraph, opts: GraphQueryOptions = {}): Gr
   const tail = truncatedBy
     ? `\n… truncated at ${shown} of ${matched.length} — ` +
       (truncatedBy === "limit"
-        ? `hit the node limit (${limit}); ${raise(limit >= 200, "limit", 200)}`
-        : `hit the max_chars budget (${maxChars}) (per-field values are already capped); ${raise(maxChars >= 60000, "max_chars", 60000)}`)
+        ? `hit the node limit (${limit}); ${raise(limit >= LIMIT_CEILING, "limit", LIMIT_CEILING)}`
+        : `hit the max_chars budget (${maxChars}) (per-field values are already capped); ${raise(maxChars >= MAX_CHARS_CEILING, "max_chars", MAX_CHARS_CEILING)}`)
     : clippedRow
       ? `\n… a rendered row was itself longer than max_chars (${maxChars}) and was clipped in place — no node was dropped; ` +
-        (maxChars >= 60000
-          ? "max_chars is already at its 60000 maximum, so this row cannot be rendered whole at all."
-          : "raise max_chars (max 60000) to read it in full.")
+        (maxChars >= MAX_CHARS_CEILING
+          ? `max_chars is already at its ${MAX_CHARS_CEILING} maximum, so this row cannot be rendered whole at all.`
+          : `raise max_chars (max ${MAX_CHARS_CEILING}) to read it in full.`)
       : "";
   const body = fields === "ids" ? lines.join(",") : lines.join("\n");
   return {

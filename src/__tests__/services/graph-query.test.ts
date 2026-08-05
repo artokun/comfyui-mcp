@@ -193,6 +193,26 @@ describe("queryApiGraph", () => {
       expect(r.text).toContain("max_chars is already at its 60000 maximum");
       expect(r.text).not.toContain("raise max_chars");
     });
+
+    // An aggregate has no `limit` and no narrower projection to retreat to, so at
+    // the ceiling the only remaining move is to scope the query.
+    it("a group_by aggregate at the ceiling stops offering a raise too", () => {
+      const many: Record<string, { class_type: string }> = {};
+      for (let i = 1; i <= 4000; i++) many[String(i)] = { class_type: `AVeryLongDistinctNodeTypeName_${i}` };
+      const r = queryApiGraph(many, { group_by: "type", max_chars: 60000 });
+      expect(r.truncated).toBe(true);
+      expect(r.text).toContain("max_chars is already at its 60000 maximum");
+      expect(r.text).toContain("scope the query");
+      expect(r.text).not.toContain("raise max_chars");
+    });
+
+    it("a group_by aggregate below the ceiling still offers the raise", () => {
+      const many: Record<string, { class_type: string }> = {};
+      for (let i = 1; i <= 200; i++) many[String(i)] = { class_type: `Type_${i}` };
+      const r = queryApiGraph(many, { group_by: "type", max_chars: 500 });
+      expect(r.truncated).toBe(true);
+      expect(r.text).toContain("raise max_chars (max 60000)");
+    });
   });
 
   it("max_chars bounds output with the explicit marker", () => {
