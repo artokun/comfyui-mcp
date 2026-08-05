@@ -6,6 +6,28 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.49.7] - 2026-08-05
+
+### MCP
+
+#### Fixed
+- attribute a changelog entry to the PR, not the first issue it cites (#856)
+- the changelog generator silently dropped the entries that mattered most (#855)
+
+#### Changed
+- **panel version floor: blocked mutations with no self-service path, and "up-to-date"
+  that means "meets the minimum" (#832).** A read was being blocked by a WRITE gate: the
+  workflow fence asked "can this reach the wrong workflow's content?" and answered it with
+  a set that exists to answer "is this safe to re-dispatch after a reconnect?". Eight graph
+  commands that are genuine reads were refused as canvas mutations on older panels. There
+  is now a single effect ledger with enforcement a rename cannot step over. Separately,
+  a non-parseable advertised version (`nightly`, which is what ComfyUI-Manager reports for
+  a git-installed pack) was rendered as an observed version and an age verdict; it is now
+  screened by parseability and shown verbatim as evidence. Closes #819, #812, #806, #778;
+  #823 remains partly open.
+- give the suite a real timeout — the "rotating cast of flaky files" was runner starvation (#852) (#853)
+
+
 ## [0.49.6] - 2026-08-04
 
 ### MCP
