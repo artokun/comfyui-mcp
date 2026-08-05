@@ -180,6 +180,30 @@ describe("#807 — panel_query_graph's budget covers the WHOLE reply", () => {
     expect(text.length).toBeLessThanOrEqual(1500);
   });
 
+  it("does not call a pre-capped group list complete when only membership was shed", async () => {
+    // The panel caps `groups` at 200 before this code sees it. Saying "every group is
+    // still listed" on that reply contradicts the panel's own "showing 200 of 640"
+    // sitting two fields away, and claims whole-graph coverage nobody observed
+    // (codex gate MAJOR). This is the MEMBERSHIP rung — the index survives, so the
+    // temptation to claim completeness is at its strongest here.
+    const reply = panelReply({
+      groups: 30,
+      membersPerGroup: 120,
+      extra: { groups_truncated: true, groups_truncation_hint: "Showing 200 of 640 group(s)…" },
+    });
+    const { payload, text } = await runQueryGraph({ max_chars: 8000 }, reply);
+    expect(payload.groups).toHaveLength(30); // the membership rung, not the index rung
+    const note = String(payload.groups_membership_omitted);
+    expect(note).toMatch(/CARRIED/);
+    expect(note).toMatch(/not the graph's total/);
+    expect(note).not.toMatch(/Every group is still listed/);
+    assertBoundHonoured(payload, text, 8000);
+
+    // …and the unclipped case still says the plain thing, so this is not just prose.
+    const plain = await runQueryGraph({ max_chars: 8000 }, panelReply({ groups: 30, membersPerGroup: 120 }));
+    expect(String(plain.payload.groups_membership_omitted)).toMatch(/Every group is still listed/);
+  });
+
   it("does not pass off the panel's own capped group list as the graph's total", async () => {
     // The panel caps `groups` at 200 before the orchestrator ever sees it. Saying "all
     // 200 groups" there would report a number nobody observed.

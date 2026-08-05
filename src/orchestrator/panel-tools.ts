@@ -1479,13 +1479,22 @@ function fitQueryGraphReply(res: ToolResult, requested: unknown): ToolResult {
   // answered by the presence or absence of `budget_overrun`, which is checked, not
   // predicted.
 
-  // Rung 1 — every group still listed, membership and geometry gone.
+  // The panel caps its own groups list at 200 BEFORE this code sees it, so the coverage
+  // claim any note here can make is about what the reply CARRIED, never about the graph
+  // (codex gate MAJOR — "every group is still listed" sat next to the panel's own
+  // "showing 200 of 640" and contradicted it).
+  const groupsPreCapped = riders.groups_truncated === true;
+
+  // Rung 1 — every group the reply carried still listed, membership and geometry gone.
   if (hasGroups) {
     const reduced: Record<string, unknown> = { ...riders, groups: groups!.map(groupIndexEntry) };
     const p = assemble(reduced);
     p.groups_membership_omitted =
       `Member node_ids and box geometry were omitted from all ${groups!.length} group(s): the whole reply did not fit \`max_chars\`=${budget}, ` +
-      `and the rows answering your query are never dropped to make room for context. Every group is still listed and each node_count is exact. ` +
+      `and the rows answering your query are never dropped to make room for context. ` +
+      (groupsPreCapped
+        ? `Every group this reply CARRIED is still listed with an exact node_count — but the panel had already capped that list before this call saw it (see groups_truncation_hint), so ${groups!.length} is not the graph's total. `
+        : `Every group is still listed and each node_count is exact. `) +
       recovery(fullChars, floorOf(riders)) +
       outline;
     if (render(p).length <= budget) return replaceWith(p);
@@ -1498,10 +1507,9 @@ function fitQueryGraphReply(res: ToolResult, requested: unknown): ToolResult {
   delete withoutGroups.groups_truncation_hint;
   const noGroups = assemble(withoutGroups);
   if (hasGroups) {
-    // The panel caps its own groups list before we ever see it, so the count we can
-    // vouch for is "what this reply carried", not "what the graph has".
+    // The count we can vouch for is "what this reply carried", not "what the graph has".
     const carried =
-      riders.groups_truncated === true
+      groupsPreCapped
         ? `the ${groups!.length} group(s) this reply carried (the panel had already capped that list, so that is not the graph's total)`
         : `all ${groups!.length} group(s)`;
     noGroups.groups_omitted =
