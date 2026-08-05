@@ -435,13 +435,24 @@ export function queryApiGraph(graph: ApiGraph, opts: GraphQueryOptions = {}): Gr
   const narrowing = wantIds?.length
     ? "request fewer ids at once"
     : 'narrow with types/where/ids/depth, or use group_by:"type"';
+  // "Raise it" stops being a remedy once the argument is AT its ceiling: the schema
+  // rejects anything higher, so a caller told to raise a maxed-out limit is being
+  // sent to a guaranteed validation error. At the cap the only real move left is to
+  // narrow, and the message says exactly that instead of pretending otherwise.
+  const raise = (atCap: boolean, arg: string, cap: number): string =>
+    atCap
+      ? `${arg} is already at its ${cap} maximum, so ${narrowing}.`
+      : `raise ${arg} (max ${cap}), or ${narrowing}.`;
   const tail = truncatedBy
     ? `\n… truncated at ${shown} of ${matched.length} — ` +
       (truncatedBy === "limit"
-        ? `hit the node limit (${limit}); raise limit (max 200), or ${narrowing}.`
-        : `hit the max_chars budget (${maxChars}) (per-field values are already capped); raise max_chars (max 60000), or ${narrowing}.`)
+        ? `hit the node limit (${limit}); ${raise(limit >= 200, "limit", 200)}`
+        : `hit the max_chars budget (${maxChars}) (per-field values are already capped); ${raise(maxChars >= 60000, "max_chars", 60000)}`)
     : clippedRow
-      ? `\n… a rendered row was itself longer than max_chars (${maxChars}) and was clipped in place — no node was dropped; raise max_chars (max 60000) to read it in full.`
+      ? `\n… a rendered row was itself longer than max_chars (${maxChars}) and was clipped in place — no node was dropped; ` +
+        (maxChars >= 60000
+          ? "max_chars is already at its 60000 maximum, so this row cannot be rendered whole at all."
+          : "raise max_chars (max 60000) to read it in full.")
       : "";
   const body = fields === "ids" ? lines.join(",") : lines.join("\n");
   return {

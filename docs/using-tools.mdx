@@ -167,10 +167,12 @@ Long reads are capped so that one enormous graph cannot swallow the whole conver
 
 **Check that suggestion against what actually ran out**, because two different ceilings can stop the same read and the suggestion does not always name the right one:
 
-- The note reads `truncated at 40 of 300` — the first number is exactly the node limit in force (40 unless someone raised it), so `limit` is what ran out.
-- It stops at some arbitrary-looking number instead, usually on rows carrying a lot of detail — then it is `max_chars`, the character budget.
+The note reads like `truncated at 40 of 300`. Compare that first number with the node limit that was in force — 40 unless the agent had already raised it:
 
-Raising the one that was not the problem changes nothing, which reads exactly like the retry having failed. The agent is supposed to work this out and retry by itself; when it doesn't, you are the fallback, and this is the sentence:
+- **They match.** `limit` ran out: it listed as many nodes as it was allowed to.
+- **It stopped short of the limit**, usually on rows carrying a lot of detail. Then it was `max_chars`, the character budget.
+
+Raising the one that was not the problem changes nothing, which reads exactly like the retry having failed. And if the argument is already at its ceiling, raising it is not available at all — narrow the question instead, as below. The agent is supposed to work this out and retry by itself; when it doesn't, you are the fallback, and this is the sentence:
 
 > That got truncated — retry the same query, raising whichever limit it actually hit.
 

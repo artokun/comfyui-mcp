@@ -168,6 +168,31 @@ describe("queryApiGraph", () => {
       expect(r.text).toContain("raise max_chars");
       expect(r.text).not.toContain("raise limit");
     });
+
+    // "Raise it" is not a remedy once the argument is AT its ceiling — the schema
+    // rejects anything higher, so the retry is a guaranteed validation error.
+    it("at the limit ceiling it stops offering a raise and offers narrowing", () => {
+      const big: Record<string, { class_type: string }> = {};
+      for (let i = 1; i <= 250; i++) big[String(i)] = { class_type: "A" };
+      const r = queryApiGraph(big, { limit: 200 });
+      expect(r.truncated).toBe(true);
+      expect(r.text).toContain("limit is already at its 200 maximum");
+      expect(r.text).not.toContain("raise limit");
+      expect(r.text).toContain("narrow with");
+    });
+
+    it("at the max_chars ceiling it stops offering a raise and offers narrowing", () => {
+      // `detail` rows carry per-widget values up to the 2048 cap, so the 60000
+      // budget runs out long before the 200-node limit does.
+      const big: Record<string, { class_type: string; inputs: Record<string, string> }> = {};
+      for (let i = 1; i <= 200; i++) {
+        big[String(i)] = { class_type: `NodeType${i}`, inputs: { a: "x".repeat(2000) } };
+      }
+      const r = queryApiGraph(big, { max_chars: 60000, limit: 200, fields: "detail" });
+      expect(r.truncated).toBe(true);
+      expect(r.text).toContain("max_chars is already at its 60000 maximum");
+      expect(r.text).not.toContain("raise max_chars");
+    });
   });
 
   it("max_chars bounds output with the explicit marker", () => {
