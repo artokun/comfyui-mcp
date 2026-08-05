@@ -173,7 +173,13 @@ describe("#810 — list_workflows sees the whole library, subfolders included", 
     expect(flat).toMatch(/Found 2 workflow\(s\)/);
     expect(flat).not.toMatch(/Subfolders ARE included/);
     expect(flat).toMatch(/Every name here sits at the library root/);
-    expect(flat).toMatch(/not reaching that ComfyUI/);
+    // Root-only names are NOT proof that no subfolders exist — they are also what a
+    // read that never recursed looks like. Both readings are offered; neither is
+    // asserted (codex gate r11).
+    expect(flat).toMatch(/cannot tell apart from a subfolder read that did not happen/);
+    expect(flat).toMatch(/the usual reading is/);
+    expect(flat).toMatch(/check the URL\/port/);
+    expect(flat).not.toMatch(/that means it has no workflow subfolders/);
   });
 
   it("an EMPTY subfolder contributes nothing and breaks nothing", async () => {

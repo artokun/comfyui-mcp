@@ -137,9 +137,10 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
         // to trust and how to tell, instead of asserting coverage it cannot see.
         const coverage = files.some((f) => f.includes("/"))
           ? " Subfolders ARE included: the names carrying one are this listing proving it recursed."
-          : " Every name here sits at the library root — the listing was requested recursively, so on the" +
-            " connected ComfyUI that means it has no workflow subfolders. If its sidebar DOES show folders," +
-            " this call is not reaching that ComfyUI; check the URL/port.";
+          : " Every name here sits at the library root, which this listing cannot tell apart from a" +
+            " subfolder read that did not happen: the usual reading is that the library has no workflow" +
+            " subfolders, and the other one is that something besides that ComfyUI's userdata API answered." +
+            " If its sidebar DOES show folders, it is the second — check the URL/port.";
 
         return {
           content: [
