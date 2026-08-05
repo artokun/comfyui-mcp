@@ -163,11 +163,13 @@ Naming the tool and the argument is not the *correct* form — it is the *forcef
 
 ### When the answer gets cut off
 
-Long reads are capped so that one enormous graph cannot swallow the whole conversation. When a read is trimmed you get a note saying so, and **that note names the argument that ran out** — which is not always the same one. Two different ceilings can stop a read: the character budget (`max_chars`) or the number of nodes listed (`limit`). Raising the wrong one changes nothing and looks like the retry failed.
+Long reads are capped so that one enormous graph cannot swallow the whole conversation. When a read is trimmed you get a note saying so, and it names an argument to raise.
+
+**Check which argument.** Two different ceilings can stop the same read — the character budget (`max_chars`) or the number of nodes listed (`limit`) — and raising the one that was not the problem changes nothing, which reads exactly like the retry having failed.
 
 The agent is supposed to read its own truncation note and retry by itself. When it doesn't, you are the fallback, and this is the sentence:
 
-> That got truncated — retry the same query, raising whichever limit the note said you hit.
+> That got truncated — retry the same query, raising whichever limit it actually hit.
 
 ### Where the walls are
 
@@ -222,7 +224,7 @@ The fix is three steps, and **the third is the one people skip**:
 <Steps>
   <Step title="Update the panel">
     Ask the agent to update it (`install_panel` with `action: "update"`), or do it
-    from ComfyUI Manager, where it is listed as the comfyui-mcp panel.
+    from ComfyUI-Manager, where it is listed as `comfyui-agent-panel`.
   </Step>
   <Step title="Restart ComfyUI">
     The update does not restart anything on its own. Ask the agent, or restart it

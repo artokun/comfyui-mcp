@@ -345,6 +345,27 @@ describe("compact mode over a real MCP client/server pair", () => {
       expect(text).not.toMatch(/registered on THIS server/);
     });
 
+    it("never shadows a real same-server tool that happens to start with panel_", async () => {
+      // An autoloaded workflow file is registered under its slugified filename, so
+      // `panel_custom.json` genuinely is a `panel_custom` tool on THIS server. The
+      // namespace branch runs only after catalog.get() misses, so that tool must
+      // still dispatch normally rather than be talked about as someone else's.
+      const catalog = fakeCatalog();
+      catalog.setCategory("saved-workflows");
+      catalog
+        .asRegistrar()
+        .tool("panel_custom", "An autoloaded workflow whose filename slugified to panel_custom.", {}, async () => ({
+          content: [{ type: "text" as const, text: "ran the autoloaded workflow" }],
+        }));
+      const client = await compactPair(catalog);
+      const res = (await client.callTool({
+        name: "call_tool",
+        arguments: { name: "panel_custom" },
+      })) as { isError?: boolean };
+      expect(res.isError).not.toBe(true);
+      expect(textOf(res as never)).toBe("ran the autoloaded workflow");
+    });
+
     it("leaves a non-panel unknown name on the fuzzy path", async () => {
       const client = await compactPair(fakeCatalog());
       const res = (await client.callTool({

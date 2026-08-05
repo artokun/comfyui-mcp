@@ -348,10 +348,25 @@ export function queryApiGraph(graph: ApiGraph, opts: GraphQueryOptions = {}): Gr
   // link-driven input is never reported as a stale widget value. #607 is panel-only.
   const lines: string[] = [];
   let shown = 0;
-  let truncated = false;
+  // WHICH ceiling stopped the read, not merely THAT one did. Two different bounds
+  // can break this loop and they have different remedies, but the tail below used
+  // to pick its wording from `wantIds` — a property of the REQUEST — so it named
+  // whichever cause it happened to be shaped for. A plain query truncated by the
+  // char budget was told to "raise limit" (which changes nothing, and reads as the
+  // retry having failed), and an id-scoped query truncated by the node limit was
+  // told its "requested nodes exceed max_chars" (which is not what happened).
+  // Recording the actual break condition is the whole fix: a message may only name
+  // the cause it observed.
+  //
+  // NOT YET MIRRORED: the panel's live-graph twin (the graph_query executor in
+  // comfyui-mcp-panel, which is what panel_query_graph actually runs) still picks
+  // its tail the old way. Stated rather than implied, because the header above
+  // promises the two stay in lockstep and a reader would otherwise assume the fix
+  // reached both surfaces.
+  let truncatedBy: "limit" | "chars" | null = null;
   let chars = header.length;
   for (const id of matched) {
-    if (shown >= limit) { truncated = true; break; }
+    if (shown >= limit) { truncatedBy = "limit"; break; }
     const n = graph[id] ?? {};
     let line: string;
     if (fields === "ids") {
@@ -397,15 +412,23 @@ export function queryApiGraph(graph: ApiGraph, opts: GraphQueryOptions = {}): Gr
       line = clipLine(line, maxChars);
     }
     const protectedLine = shown === 0; // first match always renders → shown≥1
-    if (!protectedLine && chars + line.length + 1 > maxChars) { truncated = true; break; }
+    if (!protectedLine && chars + line.length + 1 > maxChars) { truncatedBy = "chars"; break; }
     chars += line.length + 1;
     lines.push(line);
     shown++;
   }
-  const tail = truncated
-    ? (wantIds?.length
-        ? `\n… truncated at ${shown} of ${matched.length} — requested nodes exceed max_chars (per-field values are already capped); raise max_chars or request fewer ids at once.`
-        : `\n… truncated at ${shown} of ${matched.length} — narrow with types/where/ids/depth, use group_by:"type", or raise limit.`)
+  const truncated = truncatedBy !== null;
+  // The SCOPE half still keys off the request: "narrow with ids" is dead-end advice
+  // for a caller who already named the ids it wants, so that branch offers fewer ids
+  // instead. Only the CAUSE half is now driven by what actually happened.
+  const narrowing = wantIds?.length
+    ? "request fewer ids at once"
+    : 'narrow with types/where/ids/depth, or use group_by:"type"';
+  const tail = truncatedBy
+    ? `\n… truncated at ${shown} of ${matched.length} — ` +
+      (truncatedBy === "limit"
+        ? `hit the node limit (${limit}); raise limit (max 200), or ${narrowing}.`
+        : `hit the max_chars budget (${maxChars}) (per-field values are already capped); raise max_chars (max 60000), or ${narrowing}.`)
     : "";
   const body = fields === "ids" ? lines.join(",") : lines.join("\n");
   return {

@@ -287,6 +287,11 @@ const PANEL_NAMESPACE_RE = /^(?:mcp__[A-Za-z0-9_]+__)?panel_/;
  *
  *  - whether `name` is a real panel tool at all. `panel_typo` reaches here too,
  *    and the namespace fact is true of it while "it exists elsewhere" is not.
+ *  - that NO `panel_`-prefixed tool can be on this surface. An autoloaded workflow
+ *    file (registerAutoloadedWorkflows) is registered under its slugified filename,
+ *    so `panel_custom.json` really would be a `panel_custom` tool here — and it
+ *    would be found by `catalog.get()` long before this function runs. The claim is
+ *    therefore about whose prefix it is, not about what could ever be registered.
  *  - which surfaces the caller holds. From inside this catalog a panel-hosted
  *    session and an outside client are indistinguishable, so both are addressed.
  *  - HOW the caller would reach the panel surface if it has one. Not every host
@@ -302,8 +307,8 @@ const PANEL_NAMESPACE_RE = /^(?:mcp__[A-Za-z0-9_]+__)?panel_/;
  */
 function panelNamespaceMessage(name: string): string {
   return (
-    `Unknown tool '${name}' — no tool by that name is registered on THIS server, and this ` +
-    "server registers no `panel_` names at all: that prefix is the live-canvas surface, served " +
+    `Unknown tool '${name}' — no tool by that name is registered on THIS server, and the ` +
+    "`panel_` prefix is not this server's to serve: it is the live-canvas surface, served " +
     "separately by the ComfyUI sidebar panel's own per-tab MCP server. So this answers WHICH " +
     `SURFACE you reached, and says nothing about whether '${name}' exists. This server cannot ` +
     "see what else your client holds, so check the tool list your client gave you. " +

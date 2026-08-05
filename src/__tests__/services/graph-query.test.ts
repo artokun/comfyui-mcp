@@ -122,6 +122,36 @@ describe("queryApiGraph", () => {
     expect(r.text).toContain("… truncated at 2 of 8");
   });
 
+  // The tail used to choose its wording from the REQUEST shape (was `ids` passed?)
+  // rather than from the bound that actually fired, so it routinely named the wrong
+  // remedy: a plain query stopped by the char budget was told to raise `limit`, and
+  // an id-scoped query stopped by the node limit was told its nodes "exceed
+  // max_chars". Raising the argument it names then changes nothing, which reads as
+  // the retry having failed. Each case is pinned to the bound it really hit.
+  describe("the truncation tail names the bound that actually fired", () => {
+    it("limit-bound: names limit, and does not blame max_chars", () => {
+      const r = queryApiGraph(G, { limit: 2 });
+      expect(r.text).toContain("hit the node limit (2)");
+      expect(r.text).toContain("raise limit");
+      expect(r.text).not.toContain("max_chars");
+    });
+
+    it("limit-bound WITH explicit ids: still names limit, not max_chars", () => {
+      const r = queryApiGraph(G, { ids: [1, 2, 3], limit: 1 });
+      expect(r.truncated).toBe(true);
+      expect(r.text).toContain("hit the node limit (1)");
+      expect(r.text).not.toContain("max_chars");
+    });
+
+    it("char-bound WITHOUT ids: names max_chars, and does not send the reader to raise limit", () => {
+      const r = queryApiGraph(G, { max_chars: 500 });
+      expect(r.truncated).toBe(true);
+      expect(r.text).toContain("hit the max_chars budget (500)");
+      expect(r.text).toContain("raise max_chars");
+      expect(r.text).not.toContain("raise limit");
+    });
+  });
+
   it("max_chars bounds output with the explicit marker", () => {
     const r = queryApiGraph(G, { max_chars: 500 });
     expect(r.truncated).toBe(true);

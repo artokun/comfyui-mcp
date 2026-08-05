@@ -2228,10 +2228,12 @@ export class UiBridge {
    *  mirror, remote viewer) that connected and left does not count and must not be
    *  described away — hence "no ComfyUI canvas tab", never "nothing at all".
    *
-   *  That observation is a BUCKET holding at least three situations (no ComfyUI
-   *  running, ComfyUI running without the pack loaded, pack loaded and talking to
-   *  some OTHER bridge address). It used to be narrated as one of them ("open
-   *  ComfyUI with the pack installed"), which is the #804 shape: an unobserved cause
+   *  That observation is a BUCKET holding at least four situations (no ComfyUI
+   *  running, ComfyUI running without the pack loaded, the Agent tab open but never
+   *  Connected — the panel attaches only on Connect, so this is the ordinary state
+   *  of a freshly opened tab — and a panel that connected to some OTHER bridge
+   *  address). It used to be narrated as one of them ("open ComfyUI with the pack
+   *  installed"), which is the #804 shape: an unobserved cause
    *  asserted from an observation that cannot separate them, sending a user who
    *  already installed the pack off to install it again. So it now states what was
    *  observed, says plainly that the observation does not discriminate, and gives an
@@ -2244,7 +2246,7 @@ export class UiBridge {
   noPanelGuidance(): string {
     return this.hasEverConnected()
       ? "the ComfyUI panel tab is not connected — this is almost always because ComfyUI was just restarted or the browser tab reloaded, which drops the Agent panel's socket. Ask the user to refresh (reload) the ComfyUI browser tab to reconnect the Agent panel, then retry. (The comfyui-mcp-panel pack IS installed — a tab connected earlier this session — so this is a reconnect, not an install problem.)"
-      : `no panel connected — no ComfyUI canvas tab has connected to this bridge (ws://${this.host}:${this.port}) since it started. That is the whole of what is known here, and on its own it does not distinguish a panel that is missing from one that is present and reaching a different address. Ask the user to check, in this order: (1) is ComfyUI open in a browser at all; (2) does its sidebar have an Agent tab — if not, that ComfyUI does not have the comfyui-mcp-panel pack installed and loaded (ComfyUI Manager lists it as comfyui-mcp; the install_panel tool also installs it, when this session has that tool); (3) if the Agent tab IS there and still shows nothing connected, it reached a different bridge address than this one.`;
+      : `no panel connected — no ComfyUI canvas tab has connected to this bridge (ws://${this.host}:${this.port}) since it started. That is the whole of what is known here, and it does not distinguish which of the steps below is the missing one. Ask the user to check, in this order: (1) is ComfyUI open in a browser at all; (2) does its sidebar have an Agent tab — if not, that ComfyUI does not have the panel pack installed and loaded (ComfyUI-Manager lists it as comfyui-agent-panel; the install_panel tool also installs it, when this session has that tool); (3) if the Agent tab is there, has a provider been picked and Connect clicked? The panel attaches on Connect, never on load, so a freshly opened tab is expected to show nothing yet; (4) if it reports itself connected and this bridge still sees no tab, it reached a different bridge address than this one (COMFYUI_MCP_BRIDGE_PORT selects it).`;
   }
 
   status(): string {
