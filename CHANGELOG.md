@@ -6,6 +6,41 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.49.8] - 2026-08-05
+
+### MCP
+
+#### Added
+- add --help, deriving every default from the parser rather than restating it (#864)
+
+#### Fixed
+- **a zero-byte pending-ops marker wedged `update_all` permanently (#847).** The wedge was
+  self-perpetuating: `recordPanelPendingOp` threw on any unreadable prior marker, and
+  `JSON.parse("")` throws — so a zero-byte `~/.comfyui-mcp/panel-pending-ops.json` made it
+  throw forever. It runs BEFORE the ComfyUI-Manager handoff by design, so `update_all` could
+  never start again, and the write that would have replaced the bad file was gated behind the
+  same check the bad file failed. Deleting the file by hand was the only escape.
+
+  An empty file and an undecodable one now answer different questions: overwriting an empty
+  one loses nothing (so it is superseded), while content we cannot decode may describe a real
+  queued operation (so it is still refused). Both refusals name the file path, and the two
+  warnings differ in what they tell you to do. Both writers are now atomic (temp + fsync +
+  rename), so a crash can no longer leave a zero-byte file at all, and superseding a
+  pre-existing one carries an indeterminate record forward — the block lifts, the warning
+  does not.
+
+  Also fixed on the way: the test suite was writing live pending-op markers into the real
+  `~/.comfyui-mcp`, where the orchestrator reads them and warns on every pin write about
+  operations that never happened. Third such leak found (after the real `.env` and the real
+  OAuth mirror); a runtime guard covering all of them is tracked in #866.
+- readOAuthStatus threaded home to one of its two halves (#863)
+
+#### Changed
+- .env.example advertised the wrong default, and the README shipped a section twice (#861)
+- tell absent from blocked from undiscoverable — and stop our own messages asserting causes they did not observe (#841)
+- truncated results fit the budget they report, and a library listing that looks in the folders (#807, #810) (#838)
+
+
 ## [0.49.7] - 2026-08-05
 
 ### MCP
