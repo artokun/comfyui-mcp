@@ -158,6 +158,24 @@ describe("#810 — list_workflows sees the whole library, subfolders included", 
     expect(text).toMatch(/Found 3 workflow\(s\)/);
   });
 
+  it("claims subfolder coverage only where the listing itself proves it", async () => {
+    // Asking for `recurse=true` proves what was REQUESTED, not what answered (codex
+    // gate r10). A name carrying a folder is the listing proving it recursed, so there
+    // the claim is observed; with every name at the root there is no such proof, and
+    // an accidental wrong URL/port returning a shallow list is the nonempty form of
+    // this very issue — so that reply says which reading to trust and how to tell.
+    const nested = await listWorkflows();
+    expect(nested).toMatch(/Subfolders ARE included/);
+    expect(nested).toMatch(/proving it recursed/);
+
+    forcedEntries = ["a.json", "b.json"];
+    const flat = await listWorkflows();
+    expect(flat).toMatch(/Found 2 workflow\(s\)/);
+    expect(flat).not.toMatch(/Subfolders ARE included/);
+    expect(flat).toMatch(/Every name here sits at the library root/);
+    expect(flat).toMatch(/not reaching that ComfyUI/);
+  });
+
   it("an EMPTY subfolder contributes nothing and breaks nothing", async () => {
     const text = await listWorkflows();
     expect(text).not.toContain("Empty Folder");

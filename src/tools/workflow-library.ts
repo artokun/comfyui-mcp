@@ -129,13 +129,25 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
           .map((f, i) => `${i + 1}. ${f}`)
           .join("\n");
 
+        // "Subfolders included" is a claim about the ANSWER, and asking for
+        // `recurse=true` only proves what was requested (codex gate). A name carrying a
+        // folder is the listing PROVING it recursed, so on that reply the claim is
+        // observed rather than assumed. With every name at the root there is no such
+        // proof — the usual reason is a flat library, and the message says which reading
+        // to trust and how to tell, instead of asserting coverage it cannot see.
+        const coverage = files.some((f) => f.includes("/"))
+          ? " Subfolders ARE included: the names carrying one are this listing proving it recursed."
+          : " Every name here sits at the library root — the listing was requested recursively, so on the" +
+            " connected ComfyUI that means it has no workflow subfolders. If its sidebar DOES show folders," +
+            " this call is not reaching that ComfyUI; check the URL/port.";
+
         return {
           content: [
             {
               type: "text",
               text:
-                `Found ${files.length} workflow(s) (subfolders included; each name below is what ` +
-                `get_workflow / analyze_workflow / query_workflow take as \`filename\`).${unreadable}\n\n${text}`,
+                `Found ${files.length} workflow(s) — each name below is what get_workflow / ` +
+                `analyze_workflow / query_workflow take as \`filename\`.${coverage}${unreadable}\n\n${text}`,
             },
           ],
         };
