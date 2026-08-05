@@ -478,17 +478,26 @@ export function queryApiGraph(graph: ApiGraph, opts: GraphQueryOptions = {}): Gr
     atCap
       ? `${arg} is already at its ${cap} maximum, so ${narrowing}.`
       : `raise ${arg} (max ${cap}), or ${narrowing}.`;
-  const tail = truncatedBy
+  // The two conditions COMPOSE — they are not alternatives, and writing them as an
+  // either/or lost one of them. Rows can be dropped (`truncatedBy`) while a rendered
+  // row was ALSO clipped in place (`clippedRow`): ask for `ids` with a 2000-char
+  // first id and `limit: 1` and both happen at once. Emitting only the first left the
+  // caller raising `limit`, getting the same unusable id back, and concluding the
+  // remedy does not work — a remedy that addresses one of two live constraints reads
+  // exactly like a broken tool. Each part states its own condition and its own fix.
+  const truncationNote = truncatedBy
     ? `\n… truncated at ${shown} of ${matched.length} — ` +
       (truncatedBy === "limit"
         ? `hit the node limit (${limit}); ${raise(limit >= LIMIT_CEILING, "limit", LIMIT_CEILING)}`
         : `hit the max_chars budget (${maxChars}) (per-field values are already capped); ${raise(maxChars >= MAX_CHARS_CEILING, "max_chars", MAX_CHARS_CEILING)}`)
-    : clippedRow
-      ? `\n… a rendered row was itself longer than max_chars (${maxChars}) and was clipped in place — no node was dropped; ` +
-        (maxChars >= MAX_CHARS_CEILING
-          ? `max_chars is already at its ${MAX_CHARS_CEILING} maximum, so this row cannot be rendered whole at all.`
-          : `raise max_chars (max ${MAX_CHARS_CEILING}) to read it in full.`)
-      : "";
+    : "";
+  const clippedNote = clippedRow
+    ? `\n… a rendered row was itself longer than max_chars (${maxChars}) and was clipped in place — that row is incomplete, though no node was dropped for it; ` +
+      (maxChars >= MAX_CHARS_CEILING
+        ? `max_chars is already at its ${MAX_CHARS_CEILING} maximum, so this row cannot be rendered whole at all.`
+        : `raise max_chars (max ${MAX_CHARS_CEILING}) to read it in full.`)
+    : "";
+  const tail = truncationNote + clippedNote;
   const body = fields === "ids" ? lines.join(",") : lines.join("\n");
   return {
     total, candidates: candidates.length, matched: matched.length, shown, truncated,

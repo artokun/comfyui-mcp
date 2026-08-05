@@ -376,6 +376,29 @@ describe("compact mode over a real MCP client/server pair", () => {
       expect(nsText).not.toMatch(/live-canvas surface/);
       expect(nsText).toContain("Did you mean");
       expect(nsText).toContain("panel_custom");
+
+      // ...and a DIFFERENT panel_ name against this same catalog must not claim the
+      // prefix is "not this server's to serve" — that catalog demonstrably serves
+      // one. The ownership sentence is derived from the catalog, so it names what is
+      // really there and says only that the requested name is not among it.
+      const other = (await client.callTool({
+        name: "call_tool",
+        arguments: { name: "panel_typo" },
+      })) as { isError?: boolean };
+      const otherText = textOf(other as never);
+      expect(otherText).toContain("This server does serve 1 name(s) under `panel_`");
+      expect(otherText).toContain("panel_custom");
+      expect(otherText).toContain("'panel_typo' is not among them");
+      expect(otherText).not.toMatch(/serves no `panel_` names at all/);
+    });
+
+    it("says it serves no panel_ names only when the catalog really has none", async () => {
+      const client = await compactPair(fakeCatalog());
+      const res = (await client.callTool({
+        name: "call_tool",
+        arguments: { name: "panel_graph_outline" },
+      })) as { isError?: boolean };
+      expect(textOf(res as never)).toContain("This server serves no `panel_` names at all");
     });
 
     it("leaves a non-panel unknown name on the fuzzy path", async () => {

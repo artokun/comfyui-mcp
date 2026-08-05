@@ -291,11 +291,24 @@ Ask the agent, in plain words:
     and you will see the real list. A long list is equally fine; that is the same
     surface with nothing held back.
 
-    **No names at all**, or "I don't have any tools for ComfyUI", points at
-    **absent**: the tools never reached your client. That is something on your
-    client's side rather than a panel or server fault, and it splits again into
-    two — never wired up, or a host that cannot hold them at all. The list
-    [below](#where-each-answer-usually-comes-from) tells those apart.
+    **No names at all**, or "I don't have any tools for ComfyUI", rules out the
+    third case and nothing else. It does **not** mean absent. A permission policy
+    can withhold tools from the list the model is shown, so a server that is
+    installed, connected and working produces this exact answer. Absent and blocked
+    are indistinguishable at this step, and this is the branch that cost a user days
+    — being sure it was the wiring.
+
+    One check separates them, and it is not something the agent can see: **open your
+    client's own list of MCP servers** — the place it shows which servers it
+    connected to, which is a different list from the tools it hands the model.
+
+    - **comfyui-mcp is not there, or shows as failed** → **absent**. A client-side
+      wiring problem, not a panel or server fault. It splits again into two — never
+      wired up, or a host that cannot hold them at all — and the list
+      [below](#where-each-answer-usually-comes-from) tells those apart.
+    - **It is there and connected, but the model still lists no tools** → they are
+      being withheld between the two. That is **blocked**, and the same list below
+      says where to look.
   </Step>
   <Step title="Ask it to try, and to report back verbatim">
     > Now call the one you'd use for the thing that isn't working, and paste
@@ -312,9 +325,11 @@ Ask the agent, in plain words:
     around an obstacle instead of naming it, and left to itself it will do that again.
 
     - **A real result** — that tool works. You are in the third case.
-    - **"I don't have that tool"** — **absent**.
     - **"That was denied" / "not permitted" / "I need permission"** — **blocked**,
-      inside your client.
+      inside your client. This one is conclusive: the agent asked and was refused.
+    - **"I don't have that tool"** — absent *or* blocked, still. A withheld tool and
+      a missing one look the same from the model's seat, so settle it with the
+      server-list check in step 1 rather than acting on this.
     - **More prose, still no call** — ask flatly: *"Did you call a tool? If not, why
       not?"* An agent that dodges twice is usually working around something it has
       not mentioned.

@@ -297,9 +297,12 @@ const PANEL_NAMESPACE_RE = /^(?:mcp__[A-Za-z0-9_]+__)?panel_/;
  *    and the namespace fact is true of it while "it exists elsewhere" is not.
  *  - that NO `panel_`-prefixed tool can be on this surface. An autoloaded workflow
  *    file (registerAutoloadedWorkflows) is registered under its slugified filename,
- *    so `panel_custom.json` really would be a `panel_custom` tool here — and it
- *    would be found by `catalog.get()` long before this function runs. The claim is
- *    therefore about whose prefix it is, not about what could ever be registered.
+ *    so `panel_custom.json` really is a `panel_custom` tool here — this patch's own
+ *    test proves it. An earlier draft said the prefix "is not this server's to
+ *    serve", which that same test disproves, and an absolute a colleague can falsify
+ *    from the diff is exactly the overclaim this change exists to remove. So the
+ *    sentence is now DERIVED: the catalog is asked what `panel_` names it actually
+ *    holds, and the message says only what the answer supports.
  *  - which surfaces the caller holds. From inside this catalog a panel-hosted
  *    session and an outside client are indistinguishable, so both are addressed.
  *  - HOW the caller would reach the panel surface if it has one. Not every host
@@ -313,10 +316,19 @@ const PANEL_NAMESPACE_RE = /^(?:mcp__[A-Za-z0-9_]+__)?panel_/;
  *    gets no ComfyUI tools whatever is installed — so that fallback is stated
  *    with its condition rather than as a guarantee.
  */
-function panelNamespaceMessage(name: string): string {
+function panelNamespaceMessage(catalog: ToolCatalog, name: string): string {
+  // Derived, not asserted: whatever `panel_` names this catalog holds are named, so
+  // the message can never claim ownership the catalog contradicts.
+  const localPanelTools = [...catalog.tools.keys()].filter((n) => n.startsWith("panel_"));
+  const localNote = localPanelTools.length
+    ? `This server does serve ${localPanelTools.length} name(s) under \`panel_\` — ` +
+      `${localPanelTools.slice(0, 5).join(", ")}${localPanelTools.length > 5 ? ", …" : ""} ` +
+      `(autoloaded workflow files take their tool name from their filename) — but '${name}' is not among them. ` +
+      "The LIVE-CANVAS panel_* tools are a different thing entirely: they are served "
+    : "This server serves no `panel_` names at all: that prefix is the live-canvas surface, served ";
   return (
-    `Unknown tool '${name}' — no tool by that name is registered on THIS server, and the ` +
-    "`panel_` prefix is not this server's to serve: it is the live-canvas surface, served " +
+    `Unknown tool '${name}' — no tool by that name is registered on THIS server. ` +
+    localNote +
     "separately by the ComfyUI sidebar panel's own per-tab MCP server. So this answers WHICH " +
     `SURFACE you reached, and says nothing about whether '${name}' exists. This server cannot ` +
     "see what else your client holds, so check the tool list your client gave you. " +
@@ -348,7 +360,7 @@ function unknownToolMessage(catalog: ToolCatalog, name: string): string {
   // server does serve. Fall through to the fuzzy path instead, which suggests the
   // bare name (the behaviour every other namespaced live tool already gets).
   const bare = name.replace(/^mcp__[A-Za-z0-9_]+__/, "");
-  if (PANEL_NAMESPACE_RE.test(name) && !catalog.get(bare)) return panelNamespaceMessage(name);
+  if (PANEL_NAMESPACE_RE.test(name) && !catalog.get(bare)) return panelNamespaceMessage(catalog, name);
   const needle = name.toLowerCase();
   const close = [...catalog.tools.keys()]
     .filter((n) => n.includes(needle) || needle.includes(n))

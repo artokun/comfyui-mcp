@@ -172,6 +172,22 @@ describe("queryApiGraph", () => {
       expect(r.text).toContain("raise max_chars");
     });
 
+    it("a clipped row AND a dropped row both get said — they are not alternatives", () => {
+      // Both fire at once: the first id is clipped in place, then the second trips
+      // the node limit. Reporting only the truncation left the caller raising
+      // `limit`, getting the same unusable id back, and concluding it was broken.
+      const longId = "n".repeat(2000);
+      const G2 = { [longId]: { class_type: "A" }, "2": { class_type: "B" } };
+      const r = queryApiGraph(G2, { ids: [longId, 2], fields: "ids", limit: 1, max_chars: 500 });
+      expect(r.truncated).toBe(true);
+      // the dropped row, with its own remedy...
+      expect(r.text).toContain("hit the node limit (1)");
+      expect(r.text).toContain("raise limit");
+      // ...and the clipped row, with its own, in the same message
+      expect(r.text).toContain("was clipped in place");
+      expect(r.text).toContain("raise max_chars");
+    });
+
     it("char-bound WITHOUT ids: names max_chars, and does not send the reader to raise limit", () => {
       const r = queryApiGraph(G, { max_chars: 500 });
       expect(r.truncated).toBe(true);
