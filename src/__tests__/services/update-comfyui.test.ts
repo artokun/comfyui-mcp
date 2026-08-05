@@ -1,5 +1,19 @@
 import { describe, expect, it, beforeEach, vi, type Mock } from "vitest";
 
+// The pending-operation marker is a REAL file (panel-pin-guard). Point it at a
+// temp path at MODULE scope so the suite never touches ~/.comfyui-mcp, and so
+// parallel vitest workers get their own file instead of racing on one.
+//
+// Without this, every call here wrote live pending-op markers into the developer's
+// own state, where the orchestrator reads them and warns on every pin write that a
+// queued update or deferred restore may be outstanding. Same class as #837 (the
+// suite writing to the real .env) and #859 (the real OAuth mirror).
+process.env.COMFYUI_MCP_PANEL_PENDING = join(
+  tmpdir(),
+  `cmcp-pending-update-comfyui-${process.pid}.json`,
+);
+
+
 // --- Mocks --------------------------------------------------------------
 
 // Mutable config the service reads via property access.

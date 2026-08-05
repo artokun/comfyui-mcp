@@ -26,9 +26,11 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import {
   closeSync,
+  fsyncSync,
   mkdirSync,
   openSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
   writeSync,
@@ -513,6 +515,45 @@ interface PendingOpsRead {
   state: PendingOpsReadState;
 }
 
+/**
+ * Replace the marker atomically: write a uniquely-named temp beside it, fsync,
+ * then rename over the target.
+ *
+ * `writeFileSync` TRUNCATES in place, so a crash after truncation and before the
+ * content lands leaves a ZERO-BYTE file that previously held real operations.
+ * That is what made "an empty file records nothing" untrue for this writer, and
+ * it is the hole the independent gate found in the first cut of #847 — the write
+ * path would have superseded such a file and silently dropped a queued
+ * operation's warning. A rename is atomic: a reader sees the whole old content or
+ * the whole new content, never nothing.
+ *
+ * The temp name carries a uuid because two agents share this rig, and a fixed
+ * `.tmp` would let concurrent writers clobber each other's staging file.
+ */
+function writePanelPendingOpsAtomic(path: string, body: string): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = `${path}.${randomUUID()}.tmp`;
+  const fd = openSync(tmp, "wx");
+  try {
+    writeSync(fd, body);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  try {
+    renameSync(tmp, path);
+  } catch (err) {
+    // Never leave staging debris behind: it is not the marker, and a stray file
+    // beside it is one more thing for a later reader to misinterpret.
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      /* best effort */
+    }
+    throw err;
+  }
+}
+
 function readPanelPendingOpsFile(): PendingOpsRead {
   const path = panelPendingOpsPath();
   let raw: string;
@@ -605,8 +646,27 @@ export function recordPanelPendingOp(
       );
     }
     const kept = prior.ops.filter((o) => o.kind !== kind);
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, JSON.stringify({ ops: [...kept, op] }, null, 2), "utf-8");
+    // Superseding an EMPTY marker unwedges the operation, but it must not also
+    // erase the possibility that the empty file masked a real queued op. A
+    // pre-existing zero-byte file (written by the old truncating writer, before
+    // writePanelPendingOpsAtomic) genuinely CAN be an interrupted write. So carry
+    // an explicit indeterminate record forward: the block is lifted, the warning
+    // is not. It warns rather than blocks, and clearPanelPendingOp can retire it.
+    const carried: PanelPendingOp[] =
+      prior.state === "empty"
+        ? [
+            {
+              kind: "unknown",
+              queuedAt: new Date(now).toISOString(),
+              expiresAt: new Date(now + ttlMs).toISOString(),
+              detail:
+                `an EMPTY pending-operation marker was found at ${path} and superseded. It recorded ` +
+                "no operation, but an interrupted write cannot be told from a file that never got " +
+                "content, so a previously queued update or deferred restore may still be outstanding.",
+            },
+          ]
+        : [];
+    writePanelPendingOpsAtomic(path, JSON.stringify({ ops: [...carried, ...kept, op] }, null, 2));
 
     // Verify the exact replacement record, not merely that JSON still parses.
     // A partial/redirected write that drops this operation would recreate the
@@ -665,8 +725,7 @@ export function clearPanelPendingOp(op: PanelPendingOp): boolean {
     if (prior.unreadable) return false;
     if (!prior.ops.some(matches)) return true; // already gone
     const kept = prior.ops.filter((candidate) => !matches(candidate));
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, JSON.stringify({ ops: kept }, null, 2), "utf-8");
+    writePanelPendingOpsAtomic(path, JSON.stringify({ ops: kept }, null, 2));
     const confirmed = readPanelPendingOpsFile();
     return !confirmed.unreadable && !confirmed.ops.some(matches);
   } catch (err) {

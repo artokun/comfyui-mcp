@@ -1,6 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { DEAD_NAMES, TOOL_NAMES } from "../../tools/vocabulary.js";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+
+// The pending-operation marker is a REAL file (panel-pin-guard). Point it at a
+// temp path at MODULE scope so the suite never touches ~/.comfyui-mcp, and so
+// parallel vitest workers get their own file instead of racing on one.
+//
+// Without this, every call here wrote live pending-op markers into the developer's
+// own state, where the orchestrator reads them and warns on every pin write that a
+// queued update or deferred restore may be outstanding. Same class as #837 (the
+// suite writing to the real .env) and #859 (the real OAuth mirror).
+process.env.COMFYUI_MCP_PANEL_PENDING = join(
+  tmpdir(),
+  `cmcp-pending-snapshots-tool-${process.pid}.json`,
+);
+
 
 /**
  * The consolidated `node_snapshot` tool (0.49.0 slice 2): save/restore/list

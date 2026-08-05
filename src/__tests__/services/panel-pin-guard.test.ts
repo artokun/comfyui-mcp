@@ -7,7 +7,15 @@
 // the guard. A pinned user was one generic call away from being moved.
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtempSync, existsSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import {
+  mkdtempSync,
+  existsSync,
+  rmSync,
+  writeFileSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -500,5 +508,50 @@ describe("#847 — a zero-byte pending-ops file must not wedge update_all foreve
     // other needs a human decision, and telling a user the wrong one wastes the
     // trip either way.
     expect(active[0].detail).not.toMatch(/clears on its own/);
+  });
+});
+
+describe("#847 gate P0 — superseding an empty marker must not hide a queued op", () => {
+  const pendingPath = () => process.env.COMFYUI_MCP_PANEL_PENDING as string;
+
+  it("carries an indeterminate record forward when it supersedes an EMPTY marker", () => {
+    // The independent gate found the hole in my first cut: writeFileSync
+    // TRUNCATES, so a crash after truncation and before content leaves a
+    // zero-byte file that DID hold a real op. Superseding it silently dropped
+    // that warning. The block is lifted; the warning must survive it.
+    writeFileSync(pendingPath(), "", "utf-8");
+
+    recordPanelPendingOp("update-all", "after an empty marker", 60_000);
+
+    const active = activePanelPendingOps();
+    expect(active.some((o) => o.kind === "update-all")).toBe(true);
+    const carried = active.find((o) => o.kind === "unknown");
+    expect(carried, "an indeterminate record must be carried forward").toBeDefined();
+    expect(carried?.detail).toMatch(/EMPTY pending-operation marker/);
+    expect(carried?.detail).toMatch(/may still be outstanding/);
+  });
+
+  it("does NOT invent an indeterminate record when the prior marker was absent", () => {
+    // Discrimination: the carry-forward must be tied to the empty case, not
+    // emitted on every write. An absent file is genuinely proof of nothing
+    // pending, and warning there would be the fold pointed the other way.
+    expect(existsSync(pendingPath())).toBe(false);
+
+    recordPanelPendingOp("update-all", "clean start", 60_000);
+
+    const active = activePanelPendingOps();
+    expect(active.some((o) => o.kind === "update-all")).toBe(true);
+    expect(active.some((o) => o.kind === "unknown")).toBe(false);
+  });
+
+  it("writes atomically — no zero-byte window, and no staging file left behind", () => {
+    recordPanelPendingOp("update-all", "atomic", 60_000);
+
+    // A truncating writer can be observed mid-write as zero bytes; a rename
+    // cannot. The observable proxy for "the temp path was cleaned up" is that
+    // nothing but the marker remains in the directory.
+    const dirEntries = readdirSync(dirname(pendingPath()));
+    expect(dirEntries.filter((f) => f.includes(".tmp"))).toEqual([]);
+    expect(readFileSync(pendingPath(), "utf-8").length).toBeGreaterThan(0);
   });
 });

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { join } from "node:path";
+import { writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 
 // The product builds snapshot paths with node:path.join, so separators differ
@@ -345,10 +346,23 @@ describe("restoreNodeSnapshot", () => {
   });
 
   it("refuses before contacting Manager when the deferred-restore marker cannot persist", async () => {
-    // NUL is rejected by fs before a record can be read/written. The mutation
-    // must not run without the durable warning a later pin depends on.
+    // Make the marker's PARENT a regular file, so every read/write against it
+    // fails. The mutation must not run without the durable warning a later pin
+    // depends on.
+    //
+    // This used to set the env var to "\0", intending an fs-rejected path. It did
+    // not do that: Node truncates a NUL assignment to "", and `panelPendingOpsPath`
+    // treats an empty env var as UNSET — so the test silently fell back to the
+    // developer's REAL ~/.comfyui-mcp/panel-pending-ops.json. It therefore tested
+    // nothing it claimed, and wrote live pending-op markers into the user's own
+    // state, where the orchestrator reads them and warns on every pin write. Same
+    // class as #837 (the suite writing to the real .env) and #859 (the real OAuth
+    // mirror). The blocker technique below is what update-comfyui.test.ts already
+    // uses correctly for this same assertion.
+    const blocker = join(tmpdir(), `cmcp-snapshot-pending-blocker-${process.pid}-${Date.now()}`);
+    writeFileSync(blocker, "not a directory");
     const previous = process.env.COMFYUI_MCP_PANEL_PENDING;
-    process.env.COMFYUI_MCP_PANEL_PENDING = "\0";
+    process.env.COMFYUI_MCP_PANEL_PENDING = join(blocker, "pending.json");
     try {
       await expect(restoreNodeSnapshot("prod")).rejects.toThrow(
         /Could not persist the pending snapshot-restore marker/i,
@@ -357,6 +371,7 @@ describe("restoreNodeSnapshot", () => {
     } finally {
       if (previous === undefined) delete process.env.COMFYUI_MCP_PANEL_PENDING;
       else process.env.COMFYUI_MCP_PANEL_PENDING = previous;
+      rmSync(blocker, { force: true });
     }
   });
 });
