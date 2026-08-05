@@ -262,7 +262,12 @@ describe("#807 — panel_query_graph's budget covers the WHOLE reply", () => {
     const overrun = payload.budget_overrun as string;
     expect(typeof overrun).toBe("string");
     expect(overrun).toMatch(/over `max_chars`=1000/);
-    expect(overrun).toMatch(/Nothing was discarded to meet the budget/);
+    // …and it must NOT say "nothing was discarded" while `groups_omitted` two fields up
+    // says the groups were (codex gate r4). A contradiction that plain gets resolved by
+    // distrusting both notes.
+    expect(payload.groups_omitted).toBeDefined();
+    expect(overrun).not.toMatch(/Nothing was discarded/);
+    expect(overrun).toMatch(/already has been, and the note\(s\) above record it/);
     // The rows really ARE the bulk here, so the note may say so and may offer the two
     // levers that shrink them.
     const rows_ = Number(/rows answering your query are (\d+) chars/.exec(overrun)?.[1]);
@@ -316,6 +321,9 @@ describe("#807 — panel_query_graph's budget covers the WHOLE reply", () => {
       expect(payload.text).toBe(reply.text);
       assertBoundHonoured(payload, text, 900);
       expect(String(payload.budget_overrun)).toMatch(/rows answering your query are \d+ chars/);
+      // With no riders there really was nothing to drop, so the plain claim is true —
+      // which is what keeps the guarded wording above from being blanket hedging.
+      expect(String(payload.budget_overrun)).toMatch(/Nothing was discarded to meet the budget/);
     });
 
     it("counts a field it has never seen before", async () => {

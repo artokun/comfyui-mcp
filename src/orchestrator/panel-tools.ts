@@ -1552,10 +1552,17 @@ function fitQueryGraphReply(res: ToolResult, requested: unknown): ToolResult {
         ? `Both levers act on the rows, so for a smaller reply lower \`max_chars\` (floor ${QUERY_GRAPH_MAX_CHARS_FLOOR}) or narrow the query with \`ids\`/\`types\`/\`where\`/\`limit\`.`
         : `\`max_chars\` is already at its floor of ${QUERY_GRAPH_MAX_CHARS_FLOOR}, so narrow the query with \`ids\`/\`types\`/\`where\`/\`limit\` for a smaller reply.`
       : `Lowering \`max_chars\` and narrowing the query both act on the ROWS ONLY, and everything else here is already ${floorWithNotes} chars on its own — so neither would bring this reply under the budget, and no parameter shrinks the rest.`;
+  // "Nothing was discarded" is FALSE next to a groups_omitted note saying exactly what
+  // was (codex gate r4). Two fields down, that contradiction is the kind a reader
+  // resolves by distrusting both. Say which of the two situations this is.
+  const shedSomething = hasGroups || hasRails;
   const overrun = (size: number): string =>
     `This reply is ${size} chars, over \`max_chars\`=${budget} — that figure counts the JSON framing and escaping, and this note itself. ` +
     `Of it, the rows answering your query are ${rowsChars} chars; the remaining ${size - rowsChars} is the fields identifying the graph this came from, anything else the panel sent, and the note(s) above saying which context was dropped. ` +
-    `Nothing was discarded to meet the budget: the rows are your answer, and a silently missing rider — or a silently missing explanation of one — is the defect this accounting exists to prevent. ` +
+    (shedSomething
+      ? `The context that COULD be dropped for the budget already has been, and the note(s) above record it; what remains was not cut down any further. `
+      : `Nothing was discarded to meet the budget — there was no context to drop. `) +
+    `The rows are your answer, and a silently short answer — or a silently missing rider, or a silently missing explanation of one — is the defect this accounting exists to prevent. ` +
     shrink;
   // The stated size must include the statement (codex gate MAJOR), so solve for it: the
   // note only grows the payload, and only its own digit count feeds back, so this
