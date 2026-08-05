@@ -298,21 +298,58 @@ export function minPanelVersionForCmd(cmd: string): string {
 export const SEMVER_RE =
   /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/;
 
-/**
- * The highest panel version this MCP build needs across its bridge commands and
- * handshake capabilities. Keep this beside both capability tables so proactive
- * panel sync and a bridge refusal report the same derived requirement.
- */
-export function requiredPanelVersion(): string {
+/** Fold a list of candidate minimums into the highest PARSEABLE one, seeded with
+ *  the full-set baseline. Unparseable entries are skipped rather than allowed to
+ *  win — a table typo must not fabricate a requirement. */
+function highestRequirement(candidates: readonly (string | undefined)[]): string {
   let best = MIN_PANEL_VERSION_FOR_BRIDGE_COMMANDS;
-  for (const min of [
-    ...Object.values(BRIDGE_CMD_MIN_PANEL_VERSION),
-    ...Object.values(BRIDGE_CAPABILITY_MIN_PANEL_VERSION),
-  ]) {
+  for (const min of candidates) {
+    // A missing table key must degrade to "skip", never to a throw: this runs
+    // inside error-message construction, where a throw would replace an
+    // actionable refusal with an opaque crash.
+    if (typeof min !== "string") continue;
     if (!SEMVER_RE.test(min.trim())) continue;
     if (!SEMVER_RE.test(best.trim()) || compareSemver(min, best) > 0) best = min;
   }
   return best;
+}
+
+/**
+ * The highest panel version this MCP build needs across its bridge commands and
+ * handshake capabilities. Keep this beside both capability tables so proactive
+ * panel sync and a bridge refusal report the same derived requirement.
+ *
+ * This is the SYNC/INSTALL question — "how new must the panel be for this
+ * orchestrator to have everything it might want?" It is an aggregate across
+ * every command and capability, so it is NOT the answer to "what does the write
+ * I just refused actually need"; quoting it there is the #619 self-contradiction
+ * in another costume (see requiredPanelVersionForWorkflowFence).
+ */
+export function requiredPanelVersion(): string {
+  return highestRequirement([
+    ...Object.values(BRIDGE_CMD_MIN_PANEL_VERSION),
+    ...Object.values(BRIDGE_CAPABILITY_MIN_PANEL_VERSION),
+  ]);
+}
+
+/**
+ * The minimum panel version that can fence a graph WRITE to its workflow — the
+ * only version a fenced-write refusal is entitled to quote.
+ *
+ * A write needs BOTH handshake capabilities (the dispatch-time stamp check and
+ * the after-await write-boundary recheck), so it is their maximum, not the
+ * global one. Today the two happen to be equal, which is precisely why this
+ * needs to be separate NOW: the moment some unrelated command declares a higher
+ * minimum, `requiredPanelVersion()` rises and the refusal starts telling users
+ * their write needs a version it does not need — a number they cannot verify,
+ * attached to a remedy they will run for the wrong reason. Same defect as #352 /
+ * #619 (a blanket floor quoted as one command's requirement), one level up.
+ */
+export function requiredPanelVersionForWorkflowFence(): string {
+  return highestRequirement([
+    BRIDGE_CAPABILITY_MIN_PANEL_VERSION.enforces_workflow_stamp,
+    BRIDGE_CAPABILITY_MIN_PANEL_VERSION.enforces_workflow_stamp_at_write,
+  ]);
 }
 
 /**
@@ -594,11 +631,125 @@ export const BRIDGE_READONLY_CMDS: ReadonlySet<string> = new Set<string>([
   "refresh_nodes",
 ]);
 
-/** #570 P0c — a graph command that WRITES the canvas (add/remove/connect/move/set_widget/
- *  clear/load/…). Any `graph_*` command that is NOT in the read-only allowlist mutates, so
- *  this stays correct as new graph mutators are added without having to enumerate them. */
+/**
+ * What a `graph_*` command can do to the user's WORKFLOW — the single question
+ * the #570 write gate asks.
+ *
+ * THIS IS A LEDGER, NOT A DERIVED SET (#778). The gate used to answer its
+ * question with a value computed for a DIFFERENT one: `BRIDGE_READONLY_CMDS`
+ * exists to decide the default reply timeout and whether a mid-command socket
+ * drop may be parked and resumed, so it lists only commands that are safe to
+ * RE-DISPATCH. Reading "not in that set" as "mutates the canvas" silently
+ * misclassified every command that is a genuine read but not idempotently
+ * re-dispatchable — and every view/selection/scope change, which touches no
+ * workflow content at all. `graph_find_nodes` (#778) was the reported instance;
+ * `graph_list_subgraphs`, `graph_screenshot`, `graph_canvas`,
+ * `graph_select_nodes`, `graph_enter_subgraph`, `graph_exit_subgraph` and
+ * `graph_copy_nodes` were the same defect, unreported. The orchestrator already
+ * knew they were reads — RETRY_TOKEN_CMD_BY_TOOL's doc names them one by one as
+ * "view/read-only" and "reads in spirit" — but that knowledge lived in a third
+ * list, so the gate could not see it.
+ *
+ * So each command is classified ONCE, here, by effect:
+ *
+ *  - `inert`    — cannot change workflow CONTENT and cannot act on it. Pure
+ *                 queries, plus viewport / selection / subgraph-scope /
+ *                 clipboard changes. Delivered to the wrong workflow after a
+ *                 tab switch, the worst case is that the user is looking at
+ *                 something unexpected — nothing of theirs is altered, so the
+ *                 per-command workflow fence buys nothing and refusing these on
+ *                 an old panel only removes read access for no safety gain.
+ *  - `targeted` — changes workflow content, publishes from it, or queues a
+ *                 render of it. A delivered frame cannot be retracted, so these
+ *                 MUST be fenced to the workflow they were issued for.
+ *
+ * Unlisted commands FAIL CLOSED to `targeted`: a command nobody classified must
+ * never be waved through the gate by omission. `graph-command-effect.test.ts`
+ * turns that silent fallback into a failing test by scanning the orchestrator
+ * for every `graph_*` command it actually dispatches and requiring an entry
+ * here — which is the part that was missing when #778 shipped.
+ */
+export type GraphCmdEffect = "inert" | "targeted";
+
+export const GRAPH_CMD_EFFECT: Readonly<Record<string, GraphCmdEffect>> = {
+  // ---- inert: reads -------------------------------------------------------
+  graph_serialize: "inert",
+  graph_outline: "inert",
+  graph_get_errors: "inert",
+  graph_get_state: "inert",
+  graph_get_subgraph: "inert",
+  graph_prompt_director_audit: "inert",
+  graph_query: "inert",
+  // #778 — the reported instance: a filtered node query, no different from
+  // graph_query, refused as a canvas mutation on a panel that does not advertise
+  // the workflow fence.
+  graph_find_nodes: "inert",
+  // Lists saved subgraph BLUEPRINTS from the user's library. Its own tool
+  // description ends "Read-only."
+  graph_list_subgraphs: "inert",
+  graph_screenshot: "inert",
+  // ---- inert: view / selection / scope / clipboard ------------------------
+  graph_view_selected: "inert",
+  graph_view_nodes_in_viewport: "inert",
+  // Moves the viewport only ("It changes what they are looking AT and returns
+  // nothing about the graph … View-only"). NOT added to BRIDGE_READONLY_CMDS:
+  // `pan` is a dx/dy DELTA, so re-dispatching it after a reconnect would pan
+  // twice. Inert for the fence, not idempotent for the parker — which is exactly
+  // the distinction collapsing the two lists destroyed.
+  graph_canvas: "inert",
+  graph_select_nodes: "inert",
+  graph_enter_subgraph: "inert",
+  graph_exit_subgraph: "inert",
+  // Reads nodes OUT of the graph into the clipboard. Writes nothing back; the
+  // paste that would write is `graph_paste_nodes`, which is targeted.
+  graph_copy_nodes: "inert",
+  // ---- targeted: content edits -------------------------------------------
+  graph_add_node: "targeted",
+  graph_remove_node: "targeted",
+  graph_clear: "targeted",
+  graph_connect: "targeted",
+  graph_disconnect: "targeted",
+  graph_set_widget: "targeted",
+  graph_set_node_property: "targeted",
+  graph_move_node: "targeted",
+  graph_resize_node: "targeted",
+  graph_set_title: "targeted",
+  graph_set_node_collapsed: "targeted",
+  graph_set_node_color: "targeted",
+  graph_edit_node: "targeted",
+  graph_set_node_mode: "targeted",
+  graph_update_node: "targeted",
+  graph_create_group: "targeted",
+  graph_edit_group: "targeted",
+  graph_remove_group: "targeted",
+  graph_move_group: "targeted",
+  graph_create_subgraph: "targeted",
+  graph_add_subgraph: "targeted",
+  graph_unpack_subgraph: "targeted",
+  graph_subgraph_group: "targeted",
+  graph_expose_subgraph_input: "targeted",
+  graph_expose_subgraph_output: "targeted",
+  graph_promote_widget: "targeted",
+  graph_move_rail: "targeted",
+  graph_paste_nodes: "targeted",
+  graph_auto_layout: "targeted",
+  graph_load: "targeted",
+  // Publishes a subgraph node from THIS graph into the user's blueprint library
+  // — a persistent artifact built from whichever workflow received the command.
+  graph_save_subgraph: "targeted",
+  // Does not edit the graph, but QUEUES it: the wrong workflow would consume the
+  // GPU and write output files the user never asked for. The fence's promise is
+  // "this command acts on the workflow it was issued for", and a render is an
+  // act on it.
+  graph_run: "targeted",
+};
+
+/** #570 P0c — a graph command that must be fenced to the workflow it was issued for.
+ *  Answered from GRAPH_CMD_EFFECT, which classifies by EFFECT; an unlisted `graph_*`
+ *  command fails closed to `targeted` so a new mutator is never waved through by
+ *  omission (and the effect ledger's completeness test flags it at build time). */
 export function isMutatingGraphCommand(cmdName: string): boolean {
-  return cmdName.startsWith("graph_") && !BRIDGE_READONLY_CMDS.has(cmdName);
+  return cmdName.startsWith("graph_") && (GRAPH_CMD_EFFECT[cmdName] ?? "targeted") === "targeted";
 }
 
 /** #570 P0c — the four workflow mutators. workflow_save / workflow_save_as ignore any path and
@@ -2541,19 +2692,36 @@ export class UiBridge {
           undefined,
           resolveStaleBundleSkew(conn.panelVersion),
         );
+        // #819/#823 — do not fold an ABSENT reading into a definite verdict.
+        // "detected panel version unknown; this MCP requires panel 0.11.35+"
+        // reads as "your panel is too old", but a missing version is a missing
+        // OBSERVATION: the tab sent no version, and a CURRENT install behind a
+        // stale cached browser bundle presents exactly the same way. Report what
+        // was actually seen and let the recovery cover both.
+        const observed = conn.panelVersion
+          ? `this tab reports panel ${conn.panelVersion}`
+          : `this tab advertised NO panel version, so its age was not observed — this is ` +
+            `equally consistent with an old install and with a current one whose browser ` +
+            `tab is running a cached older bundle`;
+        // The FENCE's own minimum, never the aggregate requiredPanelVersion():
+        // a write needs the two workflow-fence capabilities and nothing else, so
+        // quoting the global max would name a version this command does not
+        // require the moment any unrelated command declares a higher one.
+        const fenceMin = requiredPanelVersionForWorkflowFence();
         const why = !conn.enforcesWorkflowStamp
           ? `panel tab ${conn.tabId} does not enforce per-command workflow targeting ` +
-            `(detected panel ${conn.panelVersion ?? "version unknown"}; this MCP requires panel ` +
-              `${requiredPanelVersion()}+). ${recovery}`
+            `(${observed}; a graph WRITE needs panel ${fenceMin}+, the first build that fences ` +
+              `every command to the workflow it was issued for). ${recovery}`
           : !conn.enforcesWorkflowStampAtWrite
             ? `panel tab ${conn.tabId} does not recheck workflow targeting at the graph write ` +
-              `boundary after asynchronous work (detected panel ${conn.panelVersion ?? "version unknown"}; this MCP ` +
-                `requires panel ${requiredPanelVersion()}+). ${recovery}`
+              `boundary after asynchronous work (${observed}; a graph WRITE needs panel ` +
+                `${fenceMin}+, the first build that rechecks the fence after an await). ${recovery}`
           : `this workflow has no trusted identity for the panel to fence the command against`;
         const refusal = markDispatched(
           new Error(
-            `"${cmd.cmd}" cannot be safely targeted to the active workflow: ${why}. Read-only graph ` +
-              `commands (graph_outline, graph_query, graph_get_state) still work.`,
+            `"${cmd.cmd}" cannot be safely targeted to the active workflow: ${why}. Reads and ` +
+              `view-only commands still work (graph_outline, graph_query, graph_get_state, ` +
+              `graph_find_nodes, graph_list_subgraphs, graph_screenshot, graph_canvas).`,
           ),
           false,
         );

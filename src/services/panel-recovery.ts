@@ -160,9 +160,22 @@ function blockerPhrase(blocker: PanelRecoveryBlocker | undefined): string {
 
 /**
  * The manual, host-side update. Written as a real command sequence because the
- * caller may be an agent with no ability to ask a human to "use the Manager UI",
- * and it covers BOTH install shapes: a git checkout fast-forwards, while a Comfy
- * Registry zip install has no `.git` to pull and must be replaced (#771).
+ * caller may be an agent with no ability to ask a human to "use the Manager UI".
+ *
+ * IT MUST WORK FROM WHICHEVER STATE THE CALLER IS ACTUALLY IN, and this function
+ * cannot see which one that is — the refusal that renders it knows the tab did
+ * not advertise the fence, not what is on the host's disk. So it enumerates the
+ * three real states and lets the reader match, instead of asserting one:
+ *
+ *   (a) a git checkout — fast-forward;
+ *   (b) a Comfy Registry zip install with no `.git` — nothing to pull, so the
+ *       directory has to be REPLACED (#771);
+ *   (c) NOT THERE AT ALL (#819) — ComfyUI-Manager 3.x can report its install
+ *       queue drained without ever creating the pack, so a user who "installed
+ *       the panel" can still have an empty custom_nodes. Both (a) and (b) fail
+ *       in that state — `git -C <dir> pull` and `mv <dir> …` need a directory
+ *       that exists — which left the one instruction we gave them dead. A fresh
+ *       clone is the command that moves them, and it was missing.
  *
  * The BACKUP LEAVES custom_nodes on purpose. ComfyUI serves every directory
  * under custom_nodes as a web extension — including dot-prefixed ones — so a
@@ -173,15 +186,21 @@ function blockerPhrase(blocker: PanelRecoveryBlocker | undefined): string {
 export function manualPanelUpdateCommands(comfyuiPath?: string): string {
   const root = comfyuiPath ?? "<ComfyUI>";
   return (
-    `cd "${root}/custom_nodes" && git -C ${PANEL_DIR_NAME} pull --ff-only` +
-    ` — or, if ${PANEL_DIR_NAME} has no .git (a Comfy Registry zip install, so there is ` +
-    `nothing to pull), replace it instead: ` +
+    `cd "${root}/custom_nodes", then run the ONE case that matches what is there. ` +
+    `(1) ${PANEL_DIR_NAME} is a git checkout — fast-forward it: ` +
+    `git -C ${PANEL_DIR_NAME} pull --ff-only. ` +
+    `(2) ${PANEL_DIR_NAME} exists but has NO .git (a Comfy Registry zip install, so there ` +
+    `is nothing to pull) — replace it: ` +
     `git clone --depth 1 ${PANEL_REPO_URL} ../.agent-panel-new && ` +
     `mkdir -p ../custom_nodes_backup && ` +
     `mv ${PANEL_DIR_NAME} ../custom_nodes_backup/ && ` +
-    `mv ../.agent-panel-new ${PANEL_DIR_NAME}` +
-    ` (keep the old copy OUT of custom_nodes — ComfyUI serves every directory in ` +
-    `there, so a leftover copy would shadow the new panel in the browser)`
+    `mv ../.agent-panel-new ${PANEL_DIR_NAME}. ` +
+    `(3) ${PANEL_DIR_NAME} is NOT PRESENT — a stale ComfyUI-Manager 3.x reports its queue ` +
+    `drained without creating the pack (#819), so "already installed" can mean an empty ` +
+    `custom_nodes; install it outright: ` +
+    `git clone --depth 1 ${PANEL_REPO_URL} ${PANEL_DIR_NAME}. ` +
+    `In case (2), keep the old copy OUT of custom_nodes — ComfyUI serves every directory ` +
+    `in there, so a leftover copy would shadow the new panel in the browser`
   );
 }
 
@@ -216,6 +235,28 @@ const RESTART_AND_REFRESH =
   `restart ComfyUI, then hard-refresh the ComfyUI browser tab (Ctrl+Shift+R) so it ` +
   `loads the updated bundle — a restart alone leaves the tab running its cached old ` +
   `panel JS; rebinding cannot add the missing capability`;
+
+/**
+ * WHY "install_panel does not exist" is usually wrong, and what to do about it.
+ *
+ * #812 and #823 both report the same dead end: an error names install_panel, the
+ * agent searches its tool list, finds nothing, and concludes the remedy is
+ * impossible. In almost every one of those sessions the tool was there —
+ * COMPACT TOOL MODE IS THE DEFAULT (#667). It registers exactly three meta-tools
+ * and leaves the other ~200, install_panel among them, reachable only through
+ * `call_tool`. A tool-name search cannot see it; `call_tool` can run it.
+ *
+ * Saying so is the difference between a remedy the caller can execute from where
+ * they are and one that reads as "this is impossible". The host-side commands
+ * still follow, for the surfaces where neither route exists (the embedded
+ * `panel_*` sidebar set, #784).
+ */
+const COMPACT_ROUTER_FALLBACK = (action: string): string =>
+  `If install_panel is not in this session's tool list, it is probably not missing — ` +
+  `compact tool mode is the DEFAULT and exposes only list_tools / describe_tool / ` +
+  `call_tool, with every other tool reachable through them. Try ` +
+  `call_tool {"name": "install_panel", "args": {"action": "${action}"}} before concluding ` +
+  `it is unavailable.`;
 
 /**
  * The recovery sentence for a panel that is too old for the write gate. Names
@@ -253,9 +294,11 @@ export function describePanelUpdateRecovery(
 
   if (ctx.installPanelUsable) {
     return (
-      `Run install_panel(action:'update') — or, if install_panel is not in this ` +
-      `session's tool set, update the pack on the ComfyUI host: ` +
-      `${manualPanelUpdateCommands(ctx.comfyuiPath)} — then ${RESTART_AND_REFRESH}`
+      `Run install_panel(action:'update'). ${COMPACT_ROUTER_FALLBACK("update")} ` +
+      `If neither route exists on this surface, update the pack on the ComfyUI host: ` +
+      // No trailing period: every caller of this function appends its own
+      // sentence break, and adding one here rendered ".." to the user.
+      `${manualPanelUpdateCommands(ctx.comfyuiPath)}. Then ${RESTART_AND_REFRESH}`
     );
   }
   return (
@@ -277,9 +320,9 @@ export function describePanelManagementRedirect(
     return (
       `Use install_panel instead: install_panel(action='sync') brings the panel in line ` +
       `with this orchestrator and re-reads the installed version from disk, and ` +
-      `action='status' reports it. If install_panel is not in this session's tool set, ` +
-      `update the pack on the ComfyUI host instead: ` +
-      `${manualPanelUpdateCommands(ctx.comfyuiPath)}.`
+      `action='status' reports it. ${COMPACT_ROUTER_FALLBACK("sync")} ` +
+      `If neither route exists on this surface, update the pack on the ComfyUI host ` +
+      `instead: ${manualPanelUpdateCommands(ctx.comfyuiPath)}.`
     );
   }
   return (

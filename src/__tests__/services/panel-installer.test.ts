@@ -391,16 +391,37 @@ describe("ensurePanelInstalled policy matrix", () => {
     expect(h.installs).toEqual([]); // never re-installs a present panel
   });
 
-  it("present → up-to-date (no churn on load, no install call)", async () => {
+  it("present → present (no churn on load, no install call)", async () => {
     const dir = join(CUSTOM_NODES, "comfyui-mcp-panel");
     const h = makeDeps({
       comfyuiPath: COMFY,
       files: { [join(dir, "pyproject.toml")]: pyproject(PANEL_REGISTRY_ID, "1.0.0") },
     });
     const res = await ensurePanelInstalled({ deps: h.deps });
-    expect(res.action).toBe("up-to-date");
+    expect(res.action).toBe("present");
     expect(res.installedVersion).toBe("1.0.0");
     expect(h.installs).toEqual([]);
+  });
+
+  // #806 — the on-load ensure NEVER compares versions (it is install-if-missing),
+  // so its verdict may not carry a currency word. The user in #806 read
+  // `{"action":"up-to-date","installedVersion":"0.11.36"}` as "you are on the
+  // latest panel" while 0.11.38 was published with the fix for the bug he was
+  // chasing. Assert the CLAIM, not just the branch: the old name is gone and the
+  // result says what it actually established.
+  it("the present verdict never claims currency, and says what it did check", async () => {
+    const dir = join(CUSTOM_NODES, "comfyui-mcp-panel");
+    const h = makeDeps({
+      comfyuiPath: COMFY,
+      files: { [join(dir, "pyproject.toml")]: pyproject(PANEL_REGISTRY_ID, "0.11.36") },
+    });
+    const res = await ensurePanelInstalled({ deps: h.deps });
+    expect(res.action).not.toBe("up-to-date");
+    expect(JSON.stringify(res)).not.toContain("up-to-date");
+    expect(res.reason).toMatch(/does not compare versions/i);
+    expect(res.reason).toMatch(/not a statement that the panel is current/i);
+    // And it names a next step that moves someone who IS behind.
+    expect(res.reason).toContain("install_panel(action='update')");
   });
 
   it("dev symlink → skipped-dev (never touches it)", async () => {

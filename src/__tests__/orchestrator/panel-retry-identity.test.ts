@@ -264,17 +264,52 @@ describe("#694 retry_of threading through the tool defs", () => {
   });
 });
 
+/** The four commands RETRY_TOKEN_CMD_BY_TOOL admits that the workflow fence does
+ *  NOT gate: they change only selection / subgraph scope / clipboard, and doing
+ *  so twice is doing so once. */
+const IDEMPOTENT_UI_STATE_CMDS = new Set([
+  "graph_select_nodes",
+  "graph_enter_subgraph",
+  "graph_exit_subgraph",
+  "graph_copy_nodes",
+]);
+
 describe("#694 retry_of schema surface", () => {
+  it("(f) no DATA-RETURNING read is in the retry map (a ledger answer would be stale)", () => {
+    // The invariant the assertion below used to protect only as a side effect.
+    // A read's retry can be answered from the dedupe ledger with the outcome of
+    // the FIRST call, so a read in this map would hand the agent stale data.
+    const mapped = new Set(Object.values(RETRY_TOKEN_CMD_BY_TOOL));
+    for (const readCmd of [
+      "graph_find_nodes",
+      "graph_list_subgraphs",
+      "graph_screenshot",
+      "graph_canvas",
+      "graph_outline",
+      "graph_query",
+      "graph_get_state",
+      "graph_serialize",
+    ]) {
+      expect(mapped.has(readCmd), `${readCmd} must not be in the retry map`).toBe(false);
+    }
+  });
+
   it("(f) every tool in RETRY_TOKEN_CMD_BY_TOOL accepts an OPTIONAL retry_of", () => {
     const defs = buildPanelToolDefs();
     for (const [name, cmd] of Object.entries(RETRY_TOKEN_CMD_BY_TOOL)) {
       const d = defs.find((x) => x.name === name);
       expect(d, `${name} exists in buildPanelToolDefs()`).toBeTruthy();
-      // The map's cmd really is in the #694 mutation surface (graph_* outside
-      // BRIDGE_READONLY_CMDS, or one of the four workflow mutators).
+      // The map's cmd really is in the #694 mutation surface: either the bridge
+      // fences it to a workflow, or it is one of the four UI-state commands the
+      // map admits on purpose (see RETRY_TOKEN_CMD_BY_TOOL's own doc — they
+      // change selection / scope / clipboard idempotently, so a deduped retry is
+      // a no-op). Those four used to satisfy requiresWorkflowStampEnforcement
+      // only BY ACCIDENT: it classified every graph command outside
+      // BRIDGE_READONLY_CMDS as a canvas mutation, which is the #778 defect
+      // itself. Naming them makes the map's real membership rule visible.
       expect(
-        requiresWorkflowStampEnforcement({ cmd }),
-        `${name} → ${cmd} is a mutating bridge command`,
+        requiresWorkflowStampEnforcement({ cmd }) || IDEMPOTENT_UI_STATE_CMDS.has(cmd),
+        `${name} → ${cmd} is fenced, or an admitted idempotent UI-state command`,
       ).toBe(true);
       const field = d!.schema.retry_of as z.ZodOptional<z.ZodString> | undefined;
       expect(field, `${name} schema carries retry_of`).toBeDefined();

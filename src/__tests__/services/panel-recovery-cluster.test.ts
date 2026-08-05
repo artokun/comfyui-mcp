@@ -377,10 +377,19 @@ describe("recovery guidance depends on the session, not on a hardcoded string", 
     expect(text).toMatch(/ON THE COMFYUI HOST/);
     expect(text).toMatch(/REMOTE ComfyUI/);
     expect(text).toContain(PANEL_REPO_URL);
-    // Both install shapes are covered, because the user cannot be asked to
+    // ALL THREE on-disk states are covered, because the user cannot be asked to
     // diagnose which one they have before they can act.
-    expect(text).toMatch(/pull --ff-only/);
-    expect(text).toMatch(/no \.git/);
+    expect(text).toMatch(/pull --ff-only/); // (1) git checkout
+    expect(text).toMatch(/NO \.git/); // (2) Comfy Registry zip install
+    // (3) #819 — the pack is NOT THERE. A stale ComfyUI-Manager 3.x reports its
+    // queue drained without creating it, so a user who believes they installed
+    // the panel can have an empty custom_nodes. `git -C <dir> pull` and
+    // `mv <dir> …` both fail in that state, which left cases (1) and (2) as no
+    // instruction at all. A plain clone is the command that moves them.
+    expect(text).toMatch(/NOT PRESENT/);
+    expect(text).toMatch(
+      new RegExp(`git clone --depth 1 ${PANEL_REPO_URL.replace(/[.]/g, "\\.")} comfyui-agent-panel`),
+    );
   });
 
   it("CLOUD: same, and says why (no custom_nodes to write)", () => {

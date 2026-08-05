@@ -1889,7 +1889,7 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
     await vi.waitFor(() => expect(bridge.tabs().some((t) => t.tab_id === "old-skew")).toBe(true));
     await expect(
       bridge.send({ cmd: "graph_add_node", node: "x" } as never, { tabId: "old-skew" }),
-    ).rejects.toThrow(/detected panel 0\.11\.0.*requires panel 0\.11\.35\+.*install_panel\(action:'update'\).*restart ComfyUI.*rebinding cannot/i);
+    ).rejects.toThrow(/reports panel 0\.11\.0.*needs panel 0\.11\.35\+.*install_panel\(action:'update'\).*restart ComfyUI.*rebinding cannot/i);
     old.close();
   });
 
@@ -2181,6 +2181,130 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
     await settle();
     const msg = seen.find((e) => e.type === "user_message" && e.text === "after-close");
     expect(msg?.tab_id).toBe("phone-c"); // reverted to own tab, not routed into the dead id
+  });
+
+  // ---------------------------------------------------------------------------
+  // The panel-version-floor cluster (#778 / #819 / #812 / #823).
+  //
+  // Placed at the END of this describe on purpose: a capability refusal whose
+  // on-disk panel version cannot be read kicks off a background primePanelBase()
+  // that this file's afterEach cannot await, and a late resolution lands in
+  // whichever test is running when it settles. Sitting last, these cannot
+  // perturb the stale-bundle tests above, which seed a base synchronously.
+  // ---------------------------------------------------------------------------
+
+  it("#778: a non-enforcing panel still gets its READS and view-only commands", async () => {
+    // The reported bug and its unreported siblings. Each of these was refused as
+    // "a canvas mutation" on any panel below the fence version, purely because it
+    // was missing from BRIDGE_READONLY_CMDS — a set about RE-DISPATCH SAFETY, not
+    // about what the command does. Assert they are DISPATCHED (the socket saw
+    // them), not merely that no error was thrown.
+    const old = new WebSocket(`ws://127.0.0.1:${port}`);
+    const sawOnSocket: string[] = [];
+    await new Promise<void>((res, rej) => {
+      old.on("open", () => {
+        old.send(JSON.stringify({ type: "hello", tab_id: "tmp:old778", title: "old" })); // no fence flags
+        res();
+      });
+      old.on("error", rej);
+    });
+    old.on("message", (buf) => {
+      const m = JSON.parse(buf.toString());
+      if (m.rid && m.cmd) {
+        sawOnSocket.push(m.cmd);
+        old.send(JSON.stringify({ rid: m.rid, ok: true, result: {} }));
+      }
+    });
+    await vi.waitFor(() => expect(bridge.tabs().some((t) => t.tab_id === "tmp:old778")).toBe(true));
+
+    const reads = [
+      "graph_find_nodes",
+      "graph_list_subgraphs",
+      "graph_screenshot",
+      "graph_canvas",
+      "graph_select_nodes",
+      "graph_enter_subgraph",
+      "graph_exit_subgraph",
+      "graph_copy_nodes",
+    ];
+    for (const cmd of reads) {
+      await expect(bridge.send({ cmd } as never, { tabId: "tmp:old778" })).resolves.toBeTruthy();
+    }
+    expect(sawOnSocket).toEqual(reads);
+
+    // And the gate is still a gate: the write the same session wanted (#812) is
+    // refused, and refused FOR THE STATED REASON — not merely refused.
+    await expect(
+      bridge.send({ cmd: "graph_set_widget", node_id: 1 } as never, { tabId: "tmp:old778" }),
+    ).rejects.toThrow(/does not enforce per-command workflow targeting/i);
+    expect(sawOnSocket).toEqual(reads); // nothing extra reached the socket
+    old.close();
+  });
+
+  it("#819/#823: an unadvertised panel version is reported as unobserved, not as old", async () => {
+    const old = new WebSocket(`ws://127.0.0.1:${port}`);
+    await new Promise<void>((res, rej) => {
+      old.on("open", () => {
+        // No panel_version in the hello — exactly #819's "panel version unknown".
+        old.send(JSON.stringify({ type: "hello", tab_id: "tmp:noversion", title: "old" }));
+        res();
+      });
+      old.on("error", rej);
+    });
+    await vi.waitFor(() =>
+      expect(bridge.tabs().some((t) => t.tab_id === "tmp:noversion")).toBe(true),
+    );
+    const err = await bridge
+      .send({ cmd: "graph_add_node", node: "x" } as never, { tabId: "tmp:noversion" })
+      .then(() => null)
+      .catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    const msg = (err as Error).message;
+    // The old text read "detected panel version unknown; this MCP requires panel
+    // 0.11.35+", which an agent reasonably takes as a verdict that the panel is
+    // too old. An absent reading is an absent OBSERVATION: a CURRENT install
+    // behind a stale cached browser bundle presents identically.
+    expect(msg).not.toMatch(/detected panel version unknown/i);
+    expect(msg).toMatch(/advertised NO panel version/);
+    expect(msg).toMatch(/age was not observed/);
+    expect(msg).toMatch(/equally consistent with an old install/);
+    // It still names the version a write needs, and a command that moves them.
+    expect(msg).toMatch(/needs panel 0\.11\.35\+/);
+    expect(msg).toContain("git clone --depth 1");
+    old.close();
+  });
+
+  it("#812/#823: the remedy names how to reach install_panel when it is not in the tool list", async () => {
+    const old = new WebSocket(`ws://127.0.0.1:${port}`);
+    await new Promise<void>((res, rej) => {
+      old.on("open", () => {
+        old.send(
+          JSON.stringify({
+            type: "hello",
+            tab_id: "tmp:compact",
+            title: "w",
+            panel_version: "0.11.32",
+          }),
+        );
+        res();
+      });
+      old.on("error", rej);
+    });
+    await vi.waitFor(() => expect(bridge.tabs().some((t) => t.tab_id === "tmp:compact")).toBe(true));
+    const err = await bridge
+      .send({ cmd: "graph_set_widget", node_id: 1 } as never, { tabId: "tmp:compact" })
+      .then(() => null)
+      .catch((e: Error) => e);
+    const msg = (err as Error).message;
+    // #812's reporter searched their tool list for install_panel, found nothing,
+    // and concluded the documented recovery was impossible. It was there — behind
+    // the compact router, which is the DEFAULT tool mode. Naming the actual call
+    // is the difference between a remedy and a dead end.
+    expect(msg).toContain(`call_tool {"name": "install_panel", "args": {"action": "update"}}`);
+    // The specific version found and the version required, both named.
+    expect(msg).toContain("0.11.32");
+    expect(msg).toMatch(/needs panel 0\.11\.35\+/);
+    old.close();
   });
 });
 

@@ -2876,10 +2876,13 @@ export async function runPanelOrchestrator(): Promise<void> {
       ) {
         void performPanelSync()
           .then((sync) => {
-            // An already-current local panel needs no chat noise. Every other
-            // outcome is actionable: synced => restart, pinned => unpin first,
-            // blocked/unknown/dev => its truthful recovery guidance.
-            if (sync.decision === "up-to-date" || sync.decision === "not-applicable") return;
+            // A panel that clears the floor needs no chat noise on every hello.
+            // Every other outcome is actionable: synced => restart, pinned =>
+            // unpin first, blocked/unknown/dev => its truthful recovery guidance.
+            // (#806 renamed this decision from `up-to-date` — the suppression is
+            // unchanged, but the value now says what it actually proved: the
+            // floor was cleared, NOT that a newer panel does not exist.)
+            if (sync.decision === "meets-floor" || sync.decision === "not-applicable") return;
             bridge.push({ type: "say", text: `⚠️ ${sync.message}` }, panelTab);
             logger.info(
               `[panel-orchestrator] panel sync on hello for ${panelTab.slice(0, 8)}: ` +
