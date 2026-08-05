@@ -807,6 +807,9 @@ describe("UiBridge (multi-tab)", () => {
       // panel can dial, and it carries no token.
       expect(msg).toMatch(/Settings → Advanced → Bridge URL/);
       expect(msg).not.toMatch(/COMFYUI_MCP_BRIDGE_PORT/);
+      // install_panel is named with BOTH its conditions: holding the tool is not
+      // enough, since it is local-only and refuses in remote/cloud mode.
+      expect(msg).toMatch(/local-only and refuses in remote\/cloud mode/);
     });
 
     // panel-tools.ts classifies a resolve failure as "nothing connected, defer the
