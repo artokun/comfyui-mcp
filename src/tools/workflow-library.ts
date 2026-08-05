@@ -99,8 +99,18 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
                     ? `Could NOT read the workflow library: the connected ComfyUI answered with ${listing.unreadable} ` +
                       `entry(ies) in a shape this build does not recognise, and none it could name. This is NOT ` +
                       `"the library is empty" — do not create or overwrite a workflow on the strength of it.`
-                    : "No saved workflows found: the connected ComfyUI reported an empty workflow library " +
-                      "(subfolders included).",
+                    : // The subfolder coverage is a CONDITION, not a bare assertion: it holds
+                      // because ComfyUI's `recurse` parameter shipped in the same commit as
+                      // the workflow library, so a build without it 404s instead of answering
+                      // with an empty list. Say the condition, and say what a contradiction
+                      // between this answer and the sidebar would mean — the alternative is
+                      // an unverifiable "(subfolders included)" next to the exact wrong
+                      // answer #810 is about.
+                      "No saved workflows found: the connected ComfyUI answered the library listing with an " +
+                      "empty list. That listing was recursive, and every ComfyUI build that has this library " +
+                      "supports recursion, so it covers subfolders too. If the ComfyUI sidebar DOES show " +
+                      "workflows, then this call is not reaching that ComfyUI — check the URL/port before " +
+                      "recreating anything.",
               },
             ],
           };

@@ -204,8 +204,16 @@ describe("#810 — an unread library is never reported as an empty one", () => {
     mkdirSync(join(userRoot, "workflows"));
     const text = await listWorkflows();
     expect(text).toMatch(/No saved workflows found/);
-    expect(text).toMatch(/reported an empty workflow library/);
-    expect(text).toMatch(/subfolders included/);
+    expect(text).toMatch(/empty list/);
+    // The subfolder coverage is stated as the CONDITION it rests on, not asserted flat
+    // (codex gate r5): "(subfolders included)" would be an unverifiable claim printed
+    // next to the exact wrong answer this issue is about. It holds because ComfyUI's
+    // `recurse` shipped in the same commit as the library — a build without it 404s
+    // instead — and the one way that ground fails is something else answering the API,
+    // which the message names.
+    expect(text).toMatch(/every ComfyUI build that has this library supports recursion/);
+    expect(text).toMatch(/not reaching that ComfyUI/);
+    expect(text).toMatch(/before recreating anything/);
   });
 
   it("distinguishes a library directory that does not exist yet", async () => {

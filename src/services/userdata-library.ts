@@ -27,9 +27,17 @@ import { getClient } from "../comfyui/client.js";
  * `split=false` is explicit rather than implied. The endpoint switches shape on
  * `split=true` (each entry becomes `[rel_path, ...segments]`), and its default is
  * "absent means false"; naming it means a build that ever flipped that default cannot
- * silently turn every entry into an array. Unknown/false-valued query args are ignored
- * by builds that do not implement them, so this needs no version gate: the worst case
- * on an ancient build is the flat list it already returned.
+ * silently turn every entry into an array.
+ *
+ * There is no "the server ignored `recurse`" case to version-gate against, and that is
+ * a checked fact rather than an assumption (codex gate MAJOR asked for the proof): the
+ * `/userdata` listing route and its `recurse` parameter arrived in the SAME ComfyUI
+ * commit as the workflow library itself — 90aebb6c, "New Menu & Workflow Management"
+ * (#3112, 2024-06-25), present from tag v0.0.1 onward. A build old enough to ignore
+ * `recurse` has no `workflows` userdata library to list, so it answers 404 and takes
+ * the `absent` path, never the empty-list one. The empty-list message still states that
+ * dependency rather than asserting subfolder coverage outright, because something OTHER
+ * than that ComfyUI answering this route is the one way the ground could be false.
  */
 export const WORKFLOW_LIBRARY_LISTING_ROUTE =
   "/api/userdata?dir=workflows&recurse=true&split=false";
