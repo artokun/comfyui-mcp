@@ -255,9 +255,17 @@ export function registerCompactTools(
 }
 
 /**
- * `panel_…`, with or without a client's `mcp__<server>__` namespacing — the same
- * prefix form `deadNameRe`/`findDeadName` accept, because that is how tool names
- * appear in agent transcripts and skill files.
+ * `panel_…`, optionally behind a client's `mcp__<server>__` namespacing — which is
+ * how tool names appear in agent transcripts and skill files.
+ *
+ * The namespace part is `[A-Za-z0-9_]+` and nothing else, deliberately: this is the
+ * SAME form `deadNameRe`/`findDeadName` accept in vocabulary.ts, and the two have to
+ * agree or a name could get the panel-surface answer while the retirement ledger
+ * declined to recognise it (or the reverse). So a namespace carrying any other
+ * character — a hyphenated server label, say — matches neither, and falls through to
+ * the fuzzy unknown-tool path. That is a real gap rather than a claimed guarantee,
+ * and it is written down here so the next reader does not assume coverage this
+ * pattern does not have.
  */
 const PANEL_NAMESPACE_RE = /^(?:mcp__[A-Za-z0-9_]+__)?panel_/;
 
