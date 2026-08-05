@@ -19,6 +19,7 @@ import {
   MAX_CHARS_CEILING,
   MAX_CHARS_FLOOR,
 } from "../services/graph-query.js";
+import { listWorkflowLibraryKeys } from "../services/userdata-library.js";
 import { detectSections } from "../services/workflow-sections.js";
 import {
   generateOverview,
@@ -32,20 +33,64 @@ import { analyzeGraphHealth } from "../services/workflow-health.js";
 export function registerWorkflowLibraryTools(server: McpServer): void {
   server.tool(
     "list_workflows",
-    "List the filenames of workflows saved in the connected ComfyUI server's user library (the same workflows visible in the ComfyUI web UI). Requires a running ComfyUI server. Takes no parameters. Returns a numbered list of .json filenames; pass a filename to get_workflow or analyze_workflow to load one. Returns \"No saved workflows found.\" when the library is empty.",
+    "List the workflows saved in the connected ComfyUI server's user library (the same workflows visible in the ComfyUI web UI), INCLUDING the ones filed in subfolders. Requires a running ComfyUI server. Takes no parameters. Returns a numbered list of library names, each relative to the library root — a workflow in a folder appears as 'VIDEO/MiniMaxH3/clip.json', and that whole string is what get_workflow / analyze_workflow / query_workflow take as `filename`. Says the library is empty ONLY when the server actually reported an empty library; a listing it could not read is reported as unread, never as empty.",
     {},
     async () => {
       try {
-        const client = getClient();
-        const res = await client.fetchApi("/api/userdata?dir=workflows");
-        const files = (await res.json()) as string[];
+        // #810: the listing is RECURSIVE. Users organize the library into folders in
+        // the web UI, and a shallow read reported six visible workflows as none.
+        const listing = await listWorkflowLibraryKeys();
 
-        if (files.length === 0) {
+        if (!listing.ok) {
+          // "Could not determine" must never be rendered as "determined there are
+          // none" (#810). `absent` is the one flavour that IS a determined negative —
+          // ComfyUI 404s the listing when the directory does not exist, which for the
+          // workflow library means nothing has ever been saved into it.
+          if (listing.kind === "absent") {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text:
+                    `No saved workflows found: ${listing.detail}, so nothing has been saved to this ` +
+                    `server's library yet. Save one from the ComfyUI web UI, or with save_workflow.`,
+                },
+              ],
+            };
+          }
           return {
-            content: [{ type: "text", text: "No saved workflows found." }],
+            content: [
+              {
+                type: "text",
+                text:
+                  `Could NOT read the workflow library — ${listing.detail}. This is NOT "the library is ` +
+                  `empty": workflows may well be saved on this server and this call cannot see them, so ` +
+                  `do not create or overwrite one on the strength of this result. Check that the ComfyUI ` +
+                  `server is up and reachable, then retry.`,
+              },
+            ],
           };
         }
 
+        const files = [...listing.keys].sort((a, b) => a.localeCompare(b));
+
+        if (files.length === 0) {
+          return {
+            content: [
+              {
+                type: "text",
+                text:
+                  "No saved workflows found: the connected ComfyUI reported an empty workflow library " +
+                  "(subfolders included).",
+              },
+            ],
+          };
+        }
+
+        // Deliberately UNCAPPED. For a listing, coverage IS the content: a name cut
+        // off the end reads to the caller as "that workflow does not exist", which is
+        // the very defect #810 is about, and one short line per file is a far cheaper
+        // failure than sending someone to recreate a workflow they already have.
         const text = files
           .map((f, i) => `${i + 1}. ${f}`)
           .join("\n");
@@ -54,7 +99,9 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
           content: [
             {
               type: "text",
-              text: `Found ${files.length} workflows:\n\n${text}`,
+              text:
+                `Found ${files.length} workflow(s) (subfolders included; each name below is what ` +
+                `get_workflow / analyze_workflow / query_workflow take as \`filename\`):\n\n${text}`,
             },
           ],
         };
@@ -74,7 +121,8 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
       filename: z
         .string()
         .describe(
-          "Workflow filename (e.g. 'my_workflow.json'). Use list_workflows to see available files.",
+          "Workflow library name, exactly as list_workflows reports it. A workflow filed in a folder " +
+            "keeps its folder in the name ('VIDEO/MiniMaxH3/clip.json') and that whole string goes here.",
         ),
       format: z
         .enum(["ui", "api"])
@@ -167,7 +215,10 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
       filename: z
         .string()
         .optional()
-        .describe("Workflow filename in the ComfyUI userdata library, as an alternative to path."),
+        .describe(
+          "Workflow library name as list_workflows reports it (subfolders included, e.g. " +
+            "'IMAGE/portrait.json'), as an alternative to path.",
+        ),
       graph: z
         .record(z.string(), z.any())
         .optional()
@@ -266,7 +317,10 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
       filename: z
         .string()
         .optional()
-        .describe("Workflow filename in the ComfyUI userdata library, as an alternative to path."),
+        .describe(
+          "Workflow library name as list_workflows reports it (subfolders included, e.g. " +
+            "'IMAGE/portrait.json'), as an alternative to path.",
+        ),
       graph: z
         .record(z.string(), z.any())
         .optional()
@@ -378,7 +432,9 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
       "strip_workflow afterward to flatten the Set/Get buses into real connections.",
     {
       path: z.string().optional().describe("Absolute server-side path to the workflow .json on disk."),
-      filename: z.string().optional().describe("Workflow filename in the ComfyUI userdata library."),
+      filename: z.string().optional().describe(
+        "Workflow library name as list_workflows reports it, subfolders included (e.g. 'IMAGE/portrait.json').",
+      ),
       graph: z.record(z.string(), z.any()).optional().describe("Inline UI-format workflow JSON."),
       groups: z
         .union([z.string(), z.array(z.string())])
@@ -557,7 +613,8 @@ export function registerWorkflowLibraryTools(server: McpServer): void {
       filename: z
         .string()
         .describe(
-          "Workflow filename (e.g. 'Scene Builder v3.json'). Use list_workflows to see available files.",
+          "Workflow library name, exactly as list_workflows reports it (e.g. 'Scene Builder v3.json', or " +
+            "'VIDEO/MiniMaxH3/clip.json' for one filed in a folder — the folder is part of the name).",
         ),
       view: z
         .enum(["summary", "overview", "detail", "list", "flat", "health"])

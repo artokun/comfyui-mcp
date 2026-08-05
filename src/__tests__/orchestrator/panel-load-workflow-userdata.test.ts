@@ -48,6 +48,9 @@ vi.mock("../../comfyui/client.js", async (importOriginal) => {
 });
 
 const { buildPanelToolDefs } = await import("../../orchestrator/panel-tools.js");
+// #810: the listing route is now shared with list_workflows, so pinning the literal
+// here would let the two drift apart again — which is how one recursed and one did not.
+const { WORKFLOW_LIBRARY_LISTING_ROUTE } = await import("../../services/userdata-library.js");
 import type { PanelToolCtx } from "../../orchestrator/panel-tools.js";
 
 type Forwarded = Record<string, unknown>;
@@ -745,7 +748,7 @@ describe("readWorkflowFromPath: near-miss names resolve via the server's OWN lis
 
     expect(res.isError).toBeUndefined();
     expect(calls[0].graph).toMatchObject(graph);
-    expect(fetchApi).toHaveBeenCalledWith("/api/userdata?dir=workflows&recurse=true");
+    expect(fetchApi).toHaveBeenCalledWith(WORKFLOW_LIBRARY_LISTING_ROUTE);
     expect(fetchApi).toHaveBeenCalledWith(
       `/api/userdata/${encodeURIComponent(`workflows/recipes/${nfc}`)}`,
     );
@@ -989,7 +992,7 @@ describe("readWorkflowFromPath: near-miss names resolve via the server's OWN lis
     expect(calls).toHaveLength(0);
     // The listing WAS consulted (and its 500 swallowed) — otherwise this test would
     // pass even if the near-miss lookup had been dropped entirely.
-    expect(fetchApi).toHaveBeenCalledWith("/api/userdata?dir=workflows&recurse=true");
+    expect(fetchApi).toHaveBeenCalledWith(WORKFLOW_LIBRARY_LISTING_ROUTE);
     expect(JSON.stringify(res)).toMatch(/list_workflows/);
     // And the refusal admits the listing was unreadable rather than implying the
     // library was fully checked.

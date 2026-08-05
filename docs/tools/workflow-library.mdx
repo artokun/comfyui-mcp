@@ -10,9 +10,9 @@ icon: "folder-open"
 
 ## list_workflows
 
-List the filenames of workflows saved in the connected ComfyUI server's user library (the same workflows visible in the ComfyUI web UI). Requires a running ComfyUI server. Takes no parameters. Returns a numbered list of .json filenames; pass a filename to get_workflow or analyze_workflow to load one. Returns "No saved workflows found." when the library is empty.
+List the workflows saved in the connected ComfyUI server's user library (the same workflows visible in the ComfyUI web UI), INCLUDING the ones filed in subfolders. Requires a running ComfyUI server. Takes no parameters. Returns a numbered list of library names, each relative to the library root — a workflow in a folder appears as 'VIDEO/MiniMaxH3/clip.json', and that whole string is what get_workflow / analyze_workflow / query_workflow take as `filename`. Says the library is empty ONLY when the server actually reported an empty library; a listing it could not read is reported as unread, never as empty.
 
-<Tip>**In plain terms:** The saved workflow FILES in your ComfyUI — the same list you see in the ComfyUI sidebar. Usually the first call in any "open my…" request.</Tip>
+<Tip>**In plain terms:** The saved workflow FILES in your ComfyUI — the same list you see in the ComfyUI sidebar, folders and all. Usually the first call in any "open my…" request.</Tip>
 
 <Note>This tool takes no parameters.</Note>
 
@@ -27,7 +27,7 @@ List the filenames of workflows saved in the connected ComfyUI server's user lib
 }
 ```
 
-**You get back:** A numbered list of .json filenames. Pick one and hand it to analyze_workflow or get_workflow.
+**You get back:** A numbered list of names, each relative to the library root — one filed in a folder shows as VIDEO/MiniMaxH3/clip.json. Pick one and hand the whole name to analyze_workflow or get_workflow.
 
 ---
 
@@ -40,7 +40,7 @@ Return the full JSON of a SAVED workflow FILE, named from the library — a file
 ### Parameters
 
 <ParamField path="filename" type="string" required>
-  Workflow filename (e.g. 'my_workflow.json'). Use list_workflows to see available files.
+  Workflow library name, exactly as list_workflows reports it. A workflow filed in a folder keeps its folder in the name ('VIDEO/MiniMaxH3/clip.json') and that whole string goes here.
 </ParamField>
 <ParamField path="format" type="enum" default="api">
   Output format: 'api' (default, recommended) converts to compact API format with named inputs, connection references, and _meta.mode flags for muted/bypassed nodes. 'ui' returns the raw UI format with layout positions and links arrays. Options: `ui`, `api`.
@@ -118,7 +118,7 @@ Strip a workflow to a clean, flat API graph — resolving Get/Set buses, Reroute
   Absolute server-side path to a workflow .json on disk (e.g. C:\\Users\\you\\ComfyUI\\user\\default\\workflows\\pusa_extend.json). Read directly from disk — no library lookup.
 </ParamField>
 <ParamField path="filename" type="string">
-  Workflow filename in the ComfyUI userdata library, as an alternative to path.
+  Workflow library name as list_workflows reports it (subfolders included, e.g. 'IMAGE/portrait.json'), as an alternative to path.
 </ParamField>
 <ParamField path="graph" type="object">
   Inline UI-format workflow JSON, as an alternative to path/filename.
@@ -150,7 +150,7 @@ Slice ONE pipeline out of a toggle-template workflow — the kind built with rgt
   Absolute server-side path to the workflow .json on disk.
 </ParamField>
 <ParamField path="filename" type="string">
-  Workflow filename in the ComfyUI userdata library.
+  Workflow library name as list_workflows reports it, subfolders included (e.g. 'IMAGE/portrait.json').
 </ParamField>
 <ParamField path="graph" type="object">
   Inline UI-format workflow JSON.
@@ -235,7 +235,7 @@ SUMMARIZE a SAVED workflow FILE named from the library — sections, node settin
 ### Parameters
 
 <ParamField path="filename" type="string" required>
-  Workflow filename (e.g. 'Scene Builder v3.json'). Use list_workflows to see available files.
+  Workflow library name, exactly as list_workflows reports it (e.g. 'Scene Builder v3.json', or 'VIDEO/MiniMaxH3/clip.json' for one filed in a folder — the folder is part of the name).
 </ParamField>
 <ParamField path="view" type="enum" default="summary">
   summary (default): structured text with sections, node IDs, key settings, virtual wires, and full connection graph — best for AI understanding. overview: mermaid diagram showing sections as summary nodes with cross-section data flow. detail: mermaid diagram for one section (requires section parameter). list: text listing of all sections with data flow summary. flat: single mermaid flowchart of the entire workflow (best for small workflows). health: graph-health heuristics (disconnected nodes, duplicate model loads, orphaned branches, muted/bypassed). Options: `summary`, `overview`, `detail`, `list`, `flat`, `health`.

@@ -292,14 +292,16 @@ export const TOOL_DOC_EXAMPLES: Readonly<Record<string, ToolDocEntry>> = {
   list_workflows: {
     gloss:
       "The saved workflow FILES in your ComfyUI — the same list you see in the " +
-      "ComfyUI sidebar. Usually the first call in any \"open my…\" request.",
+      "ComfyUI sidebar, folders and all. Usually the first call in any " +
+      "\"open my…\" request.",
     examples: [
       {
         ask: "What workflows have I got saved?",
         args: {},
         returns:
-          "A numbered list of .json filenames. Pick one and hand it to " +
-          "analyze_workflow or get_workflow.",
+          "A numbered list of names, each relative to the library root — one filed " +
+          "in a folder shows as VIDEO/MiniMaxH3/clip.json. Pick one and hand the " +
+          "whole name to analyze_workflow or get_workflow.",
       },
     ],
   },

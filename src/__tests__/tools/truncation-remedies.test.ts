@@ -878,12 +878,53 @@ describe("#809 truncation remedies name a lever that actually exists", () => {
     expect(handlerSrc).not.toContain("To read the rest");
   });
 
-  it("discloses that groups/rails ride outside the max_chars accounting", () => {
-    // Fixing that accounting is #807. This issue's job is that the CURRENT behaviour is
-    // stated: a caller lowering max_chars and still overflowing must know why.
+  it("no longer advertises groups/rails as riding outside the max_chars accounting", () => {
+    // #807 folded them in, so the #809-era disclosure would now be false. A budget the
+    // description says covers only `text` sends a caller lowering max_chars looking for
+    // a second knob that no longer exists.
     const d = buildPanelToolDefs().find((t) => t.name === "panel_query_graph");
-    expect(d!.description).toMatch(/bounds the `text` field ONLY/);
-    expect(d!.description).toMatch(/#807/);
+    expect(d!.description).not.toMatch(/bounds the `text` field ONLY/);
+    expect(d!.description).toMatch(/`max_chars` bounds the WHOLE result/);
+  });
+
+  it("#807 — every note the whole-reply budget emits names a real lever of this tool", async () => {
+    // The budget accounting added for #807 emits four new strings, and each of them is a
+    // remedy in exactly the sense this file polices. They go through the SAME schema-driven
+    // check as everything else, so a note that backticks a RESPONSE FIELD (`node_ids`,
+    // `groups`) as though it were a parameter, or points at a tool that is not registered,
+    // fails here rather than costing a caller a round trip.
+    const groups = Array.from({ length: 40 }, (_, i) => ({
+      id: i,
+      title: `REGION ${i}`,
+      color: "#333",
+      bounding: [0, 0, 100, 100],
+      node_count: 200,
+      node_ids: Array.from({ length: 200 }, (_, n) => i * 1000 + n),
+    }));
+    const base = { total: 690, matched: 1, shown: 1, truncated: false, text: "#42 KSampler" };
+
+    for (const [where, args, reply] of [
+      // Membership shed, with a raise that WOULD fit.
+      ["membership", { max_chars: 4000 }, { ...base, groups: groups.slice(0, 6) }],
+      // Group index shed, with a raise that could never fit.
+      ["index", { max_chars: 1500 }, { ...base, groups }],
+      // Caller already at the ceiling.
+      ["ceiling", { max_chars: 60000 }, { ...base, groups }],
+      // Rails shed and the reply still over the bound.
+      ["rails", { max_chars: 500 }, { ...base, groups, rails: { input: { id: -10 } } }],
+    ] as Array<[string, Record<string, unknown>, Record<string, unknown>]>) {
+      const payload = await runPanelTool("panel_query_graph", args, reply);
+      const notes = [
+        payload.groups_membership_omitted,
+        payload.groups_omitted,
+        payload.rails_omitted,
+        payload.budget_overrun,
+      ].filter((n): n is string => typeof n === "string");
+      expect(notes.length, `${where}: the budget shed content without saying so`).toBeGreaterThan(0);
+      for (const note of notes) {
+        assertRemedyIsActionable("panel_query_graph", `panel_query_graph #807 (${where})`, note);
+      }
+    }
   });
 
   it("never clobbers a hint the panel itself supplied", async () => {

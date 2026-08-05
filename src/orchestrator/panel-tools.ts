@@ -54,6 +54,7 @@ import {
 } from "../services/user-mcp-config.js";
 import { setComfyuiSecret, setAgentSecret, isAllowedAgentSecretKey } from "../services/panel-secrets.js";
 import { flattenUiWorkflow } from "../services/flatten-workflow.js";
+import { listWorkflowLibraryKeys, userdataFetch } from "../services/userdata-library.js";
 import { getNsfwConsent, setNsfwConsent } from "../services/panel-settings.js";
 import { QueueMonitor } from "../services/queue-monitor.js";
 import { RunCompletions } from "./run-completion-journal.js";
@@ -1308,6 +1309,205 @@ function fixedCapHint(
   );
 }
 
+// ---- #807: ONE budget, for the WHOLE panel_query_graph reply ----------------------
+//
+// `max_chars` used to bound the `text` field and nothing else. Everything else in the
+// reply — the `groups` array with each group's full member `node_ids`, and the subgraph
+// `rails` — rode ALONGSIDE it under separate fixed caps, and was serialized BEFORE the
+// rows the caller had asked for. On a 690-node graph that is not a rounding error: at
+// the panel's own caps those riders alone can render to well over 100k characters, so a
+// reply announcing "truncated at 12 of 690 by max_chars=12000" could hand back ten times
+// that. A budget figure that does not describe the actual payload is a fabricated
+// observation, and the agent that reads it concludes the TOOL cannot show it node
+// detail — which is exactly what the reporter's session concluded.
+//
+// The accounting is applied HERE, once, over the finished payload, for the same reason
+// the #809 riders are: this is the last place the reply is touched before the caller
+// sees it, it measures the EXACT string that will be returned (pretty-printed JSON,
+// escaping and all), and it holds against every panel build rather than only the ones
+// that ship after it.
+//
+// Two rules govern what gets shed:
+//   1. The rows that ANSWER THE QUERY are never dropped to make room for context. The
+//      riders are spent from what is left over, and are moved to the END of the object
+//      so the answer is also what a reader meets first.
+//   2. Coverage before resolution, mirroring panel_graph_outline's ladder: dropping
+//      every group's membership still leaves a complete group index, whereas listing
+//      half the groups reads as "this graph has that many groups".
+const QUERY_GRAPH_MAX_CHARS_FLOOR = 500;
+const QUERY_GRAPH_MAX_CHARS_DEFAULT = 12000;
+const QUERY_GRAPH_MAX_CHARS_CEILING = 60000;
+
+/** The panel's own clamp for graph_query's budget, mirrored so the figure this module
+ *  reports and enforces is the one the panel was actually working to. */
+function clampQueryGraphMaxChars(v: unknown): number {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return QUERY_GRAPH_MAX_CHARS_DEFAULT;
+  return Math.min(
+    Math.max(Math.floor(n), QUERY_GRAPH_MAX_CHARS_FLOOR),
+    QUERY_GRAPH_MAX_CHARS_CEILING,
+  );
+}
+
+/** The reply fields that are CONTEXT rather than answer. `viewing` is deliberately not
+ *  one of them: it identifies which graph the answer describes, it is a couple of small
+ *  fields, and a reply that cannot say what it is about is worse than a bigger one. */
+const QUERY_GRAPH_RIDER_KEYS = [
+  "groups_truncated",
+  "groups_truncation_hint",
+  "groups",
+  "rails",
+] as const;
+
+/** A group reduced to its INDEX form: which groups exist, what they are called, and how
+ *  many nodes each holds. Membership and geometry are what grow with the graph. */
+function groupIndexEntry(g: unknown): unknown {
+  if (!g || typeof g !== "object" || Array.isArray(g)) return g;
+  const r = g as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  if ("id" in r) out.id = r.id;
+  if ("title" in r) out.title = r.title;
+  // `node_count` is the group's TRUE size on every panel that reports it. Falling back
+  // to the length of `node_ids` is only sound when that list was not itself clipped —
+  // otherwise the count would understate the group, which is the same lie one rung down.
+  if (typeof r.node_count === "number") out.node_count = r.node_count;
+  else if (Array.isArray(r.node_ids) && r.node_ids_truncated === undefined)
+    out.node_count = r.node_ids.length;
+  return out;
+}
+
+/**
+ * Fit the WHOLE panel_query_graph reply inside the `max_chars` it advertises, by
+ * shedding CONTEXT — never the rows that answer the query.
+ *
+ * Returns the reply untouched when there is no context to spend a budget on, so a
+ * result that fitted is never dressed up as a truncated one (the false-truncation
+ * defect #809 also exists to remove).
+ */
+function fitQueryGraphReply(res: ToolResult, requested: unknown): ToolResult {
+  const payload = parseToolResultJson(res);
+  if (!payload) return res;
+  const idx = res.content.findIndex((c) => c.type === "text");
+  if (idx < 0) return res;
+
+  const budget = clampQueryGraphMaxChars(requested);
+  const render = (p: Record<string, unknown>): string => JSON.stringify(p, null, 2);
+  const replaceWith = (p: Record<string, unknown>): ToolResult => ({
+    ...res,
+    content: res.content.map((c, i) =>
+      i === idx && c.type === "text" ? { ...c, text: render(p) } : c,
+    ),
+  });
+
+  const riderKeys = new Set<string>(QUERY_GRAPH_RIDER_KEYS);
+  const answer: Record<string, unknown> = {};
+  const riders: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(payload)) {
+    if (riderKeys.has(k)) riders[k] = v;
+    else answer[k] = v;
+  }
+  // Echo the budget that governs the WHOLE reply, so the bound is checkable against the
+  // reply itself rather than taken on trust. Never over a value the panel supplied.
+  if (answer.max_chars === undefined) answer.max_chars = budget;
+
+  const groups = Array.isArray(riders.groups) ? (riders.groups as unknown[]) : null;
+  const hasGroups = !!groups && groups.length > 0;
+  const hasRails = riders.rails !== undefined;
+  // Nothing to spend the budget on but the answer: leave the panel's reply alone.
+  if (!hasGroups && !hasRails) return res;
+
+  const full: Record<string, unknown> = { ...answer };
+  for (const k of QUERY_GRAPH_RIDER_KEYS) if (riders[k] !== undefined) full[k] = riders[k];
+  const fullChars = render(full).length;
+  if (fullChars <= budget) return replaceWith(full);
+
+  // How the caller gets the shed context, checked against where they actually are.
+  // "Raise `max_chars`" is a dead retry at the ceiling, and equally dead when even the
+  // ceiling could not hold the full reply — both cost the round trip this exists to save.
+  // Response FIELDS are named bare on purpose: backticks in these strings mean "a lever
+  // on this tool", and dressing a field as a parameter is the same wasted retry.
+  const raise =
+    budget >= QUERY_GRAPH_MAX_CHARS_CEILING
+      ? `\`max_chars\` is already at its ceiling of ${QUERY_GRAPH_MAX_CHARS_CEILING}, so it cannot carry them in one reply.`
+      : fullChars <= QUERY_GRAPH_MAX_CHARS_CEILING
+        ? `The untruncated reply is ~${fullChars} chars: raise \`max_chars\` (up to ${QUERY_GRAPH_MAX_CHARS_CEILING}) to about that to keep them.`
+        : `The untruncated reply is ~${fullChars} chars, past \`max_chars\`'s ceiling of ${QUERY_GRAPH_MAX_CHARS_CEILING}, so raising it will NOT bring them back.`;
+  // Narrowing only frees room when the ROWS are big enough to account for the overflow;
+  // on a graph whose groups alone dwarf the budget, "ask for less" changes nothing.
+  const textChars = typeof answer.text === "string" ? (answer.text as string).length : 0;
+  const narrow =
+    fullChars - budget < textChars
+      ? " Narrowing this query (`ids`/`types`/`where`/`limit`) frees budget for them too."
+      : "";
+  const outline =
+    ` panel_graph_outline's GROUPS index lists every member id — but only while its own max_chars affords a node-level rung; if it reports detail_level:"groups" it gives counts, not ids.`;
+
+  // Rung 1 — every group still listed, membership and geometry gone.
+  if (hasGroups) {
+    const reduced: Record<string, unknown> = { ...answer };
+    if (riders.groups_truncated !== undefined) reduced.groups_truncated = riders.groups_truncated;
+    if (riders.groups_truncation_hint !== undefined)
+      reduced.groups_truncation_hint = riders.groups_truncation_hint;
+    reduced.groups = groups!.map(groupIndexEntry);
+    reduced.groups_membership_omitted =
+      `Member node_ids and box geometry were omitted from all ${groups!.length} group(s) so the WHOLE reply fits \`max_chars\`=${budget} — ` +
+      `the rows answering your query are never dropped to make room for them. Every group is still listed and each node_count is exact. ` +
+      raise +
+      narrow +
+      outline;
+    if (hasRails) reduced.rails = riders.rails;
+    if (render(reduced).length <= budget) return replaceWith(reduced);
+  }
+
+  // Rung 2 — the group index itself goes. Its true size is stated in its place.
+  const noGroups: Record<string, unknown> = { ...answer };
+  if (hasGroups) {
+    // The panel caps its own groups list before we ever see it, so the count we can
+    // vouch for is "what this reply carried", not "what the graph has".
+    const carried =
+      riders.groups_truncated === true
+        ? `the ${groups!.length} group(s) this reply carried (the panel had already capped that list, so that is not the graph's total)`
+        : `all ${groups!.length} group(s)`;
+    noGroups.groups_omitted =
+      `The groups rider was dropped entirely — ${carried} — so the WHOLE reply fits \`max_chars\`=${budget}, ` +
+      `and the rows answering your query are never dropped to make room for it. ` +
+      raise +
+      narrow +
+      outline;
+  }
+  if (hasRails) noGroups.rails = riders.rails;
+  if (render(noGroups).length <= budget) return replaceWith(noGroups);
+
+  // Rung 3 — the subgraph rails go too.
+  const bare: Record<string, unknown> = { ...noGroups };
+  if (hasRails) {
+    delete bare.rails;
+    bare.rails_omitted =
+      `The subgraph boundary rails were dropped so the WHOLE reply fits \`max_chars\`=${budget}. ` +
+      `Re-read them with a narrower query — panel_query_graph {ids:[…], fields:"ids"} on this same subgraph carries them again as soon as the rows leave room.`;
+  }
+  const bareChars = render(bare).length;
+  if (bareChars <= budget) return replaceWith(bare);
+
+  // Every rider is gone and it STILL does not fit. What is left is the rows plus the
+  // sentences saying what was dropped, and neither may be silently cut — so the overrun
+  // is DISCLOSED with the real number rather than left standing behind a `max_chars`
+  // that did not hold. Which of the two is responsible decides the remedy: telling a
+  // caller to narrow a query when the notes are the overflow is the same dead retry
+  // this whole accounting exists to prevent.
+  const answerChars = render(answer).length;
+  const shrink =
+    budget > QUERY_GRAPH_MAX_CHARS_FLOOR
+      ? `For a smaller reply, lower \`max_chars\` (floor ${QUERY_GRAPH_MAX_CHARS_FLOOR}) or narrow the query with \`ids\`/\`types\`/\`where\`/\`limit\`.`
+      : `\`max_chars\` is already at its floor of ${QUERY_GRAPH_MAX_CHARS_FLOOR}, so narrow the query with \`ids\`/\`types\`/\`where\`/\`limit\` for a smaller reply.`;
+  bare.budget_overrun =
+    `This reply is ~${bareChars} chars, over \`max_chars\`=${budget} (the figure counts the JSON framing and escaping). ` +
+    (answerChars > budget
+      ? `The rows that answer your query render to ~${answerChars} chars on their own and are never discarded to meet a budget. ${shrink}`
+      : `The rows render to ~${answerChars} chars; the rest is the note(s) above saying which context was dropped, kept deliberately because a silently missing rider is the defect this budget exists to prevent, and no parameter shrinks them.`);
+  return replaceWith(bare);
+}
+
 // ---- panel_civitai_results inline sample thumbnails (#623) -------------------
 // The agent recommends CivitAI models/LoRAs for a VISUAL medium, so it must be
 // able to SEE the sample images — not just read titles + download counts. The
@@ -2337,29 +2537,10 @@ function comfyWorkflowsDirs(): string[] {
   ];
 }
 
-/**
- * Issue ONE userdata GET and hand back the raw Response.
- *
- * This deliberately bypasses the client's own `fetchApi` (codex/gate MAJOR).
- * `fetchApi` throws for every non-2xx AND calls `response.json()` while building
- * that error — so a refusal with a non-JSON body (a `403 text/plain` from a proxy,
- * an HTML 502) rejects with a STATUSLESS SyntaxError. There is then no way to tell
- * "the server refused" from "the server was never reached", and the resolver's
- * local fallback would re-open for a server that had explicitly refused, loading a
- * different graph (#202).
- *
- * Building the request from the client's own `apiURL` + `apiHeaders` keeps every
- * transport concern identical (host, ssl, base path, clientId, Comfy-User, the
- * injected COMFYUI_AUTH_* fetch) while making the outcome unambiguous:
- *   - a returned Response  = the server ANSWERED; classify by status, decode later
- *   - a thrown error       = no Response exists, so the request never got one
- * Nothing here reads a body, so a body that cannot be decoded can never be
- * mistaken for a transport failure.
- */
-async function userdataFetch(route: string): Promise<Response> {
-  const client = getClient();
-  return await client.fetch(client.apiURL(route), { headers: client.apiHeaders() });
-}
+// The raw-Response userdata GET (why it bypasses `fetchApi`, and what a thrown error
+// vs a returned Response each prove) now lives in services/userdata-library.ts, shared
+// with list_workflows — see #810: the two callers had drifted, one recursing into
+// subfolders and one not.
 
 /**
  * Drop the one leading "workflows/" segment from CALLER input, leaving a key that
@@ -2433,26 +2614,12 @@ const looseName = (name: string): string =>
  * so this needs no version gate.
  */
 async function listUserdataWorkflowKeys(): Promise<string[] | null> {
-  try {
-    const res = await userdataFetch("/api/userdata?dir=workflows&recurse=true");
-    if (!res.ok) return null;
-    const body: unknown = await res.json();
-    if (!Array.isArray(body)) return null;
-    // Tolerate both shapes ComfyUI builds return: bare strings (the default on
-    // 0.29.2), and {path} objects (what full_info=true emits, in case a build
-    // returns that shape by default).
-    return body
-      .map((entry) => {
-        if (typeof entry === "string") return entry;
-        const rec = entry as { path?: unknown; name?: unknown } | null;
-        if (rec && typeof rec.path === "string") return rec.path;
-        if (rec && typeof rec.name === "string") return rec.name;
-        return null;
-      })
-      .filter((k): k is string => typeof k === "string" && k.length > 0);
-  } catch {
-    return null;
-  }
+  // ONE listing read for the whole server (#810): the recursive route, the entry-shape
+  // tolerance and the status classification all live in services/userdata-library.ts.
+  // This resolver only needs "keys, or nothing", so every unreadable flavour collapses
+  // to null here — which is exactly what its refusal path already means.
+  const listing = await listWorkflowLibraryKeys();
+  return listing.ok ? listing.keys : null;
 }
 
 /** Validate a parsed value is a UI/litegraph workflow (a top-level `nodes`
@@ -4485,7 +4652,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
   const defs: PanelToolDef[] = [
     def(
       "panel_query_graph",
-      "FILTER or TRAVERSE a SUBSET of the live canvas, for when you ALREADY KNOW what you're looking for. NOT for 'show me the canvas' or any whole-graph overview — call panel_graph_outline FIRST for that. NOT query_workflow (that queries a saved file or JSON you provide, not the live canvas). Filters, traverses, projects and aggregates over the workflow the user is CURRENTLY VIEWING without dumping the whole graph (replaces the old panel_get_graph full-JSON dump; output is TOKEN-BOUNDED with an explicit truncation marker, so a big graph can never flood your context). Combine: `types` (node type contains any), `title` (contains), `where` widget predicates ANDed ('cfg>7', 'steps<=20', 'sampler_name=euler', 'text~sunset' — ops = != >= <= > < ~contains), `ids` (exact nodes — THE way to read ONE node's exact slot/widget detail: {ids:[42], fields:'detail'}), `upstream_of`/`downstream_of` + `depth` (dependency traversal: upstream = what FEEDS that node, downstream = what CONSUMES it; seed at depth 0), `fields` ('compact' one line per node [default], 'ids', 'detail' = the full node summary with slots + connections + mode), `group_by:'type'` (counts only), `limit` (default 40). detail rows include each node's MODE — a 'bypass' node is skipped and a 'mute' node kills everything downstream, so check modes on the path you care about before running (fix with panel_set_node_mode). Every result also carries `groups` (id, title, member node_ids — groups are geometric, trust this list) and, when viewing a SUBGRAPH (after panel_enter_subgraph), `rails` (boundary rail ids/slots). NOTE: `max_chars` bounds the `text` field ONLY; those two riders are bounded by their own fixed caps and say so in-band when they cut, so lowering `max_chars` shrinks the rows and not the groups list (folding them into one budget is artokun/comfyui-mcp#807). Typical flow: panel_graph_outline to orient → panel_query_graph to pinpoint/inspect → edit. Read-only.",
+      "FILTER or TRAVERSE a SUBSET of the live canvas, for when you ALREADY KNOW what you're looking for. NOT for 'show me the canvas' or any whole-graph overview — call panel_graph_outline FIRST for that. NOT query_workflow (that queries a saved file or JSON you provide, not the live canvas). Filters, traverses, projects and aggregates over the workflow the user is CURRENTLY VIEWING without dumping the whole graph (replaces the old panel_get_graph full-JSON dump; output is TOKEN-BOUNDED with an explicit truncation marker, so a big graph can never flood your context). Combine: `types` (node type contains any), `title` (contains), `where` widget predicates ANDed ('cfg>7', 'steps<=20', 'sampler_name=euler', 'text~sunset' — ops = != >= <= > < ~contains), `ids` (exact nodes — THE way to read ONE node's exact slot/widget detail: {ids:[42], fields:'detail'}), `upstream_of`/`downstream_of` + `depth` (dependency traversal: upstream = what FEEDS that node, downstream = what CONSUMES it; seed at depth 0), `fields` ('compact' one line per node [default], 'ids', 'detail' = the full node summary with slots + connections + mode), `group_by:'type'` (counts only), `limit` (default 40). detail rows include each node's MODE — a 'bypass' node is skipped and a 'mute' node kills everything downstream, so check modes on the path you care about before running (fix with panel_set_node_mode). Every result also carries `groups` (id, title, member node_ids — groups are geometric, trust this list) and, when viewing a SUBGRAPH (after panel_enter_subgraph), `rails` (boundary rail ids/slots). `max_chars` bounds the WHOLE result, those riders included, and the rows you asked for are spent first: on a big graph the riders lose their member ids, then drop out entirely, rather than starving your query — and each says in-band that it did, with the true counts. Typical flow: panel_graph_outline to orient → panel_query_graph to pinpoint/inspect → edit. Read-only.",
       {
         types: z.array(z.string()).optional().describe("Node type contains ANY of these (case-insensitive)."),
         title: z.string().optional().describe("Node title contains this."),
@@ -4520,29 +4687,36 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         max_chars: z
           .number()
           .int()
-          .min(500)
-          .max(60000)
+          .min(QUERY_GRAPH_MAX_CHARS_FLOOR)
+          .max(QUERY_GRAPH_MAX_CHARS_CEILING)
           .optional()
           .describe(
-            "Output character bound for the `text` field (default 12000, max 60000). Raise only for deliberate full reads, e.g. layout passes needing every node's geometry. " +
-              "It bounds `text` ONLY: the `groups` and `rails` riders are bounded separately by their own fixed caps (each marked in-band when it cuts), so lowering this shrinks the rows and not those (artokun/comfyui-mcp#807 tracks folding them into one budget).",
+            `Character bound for the WHOLE result, not just its rows (default ${QUERY_GRAPH_MAX_CHARS_DEFAULT}, max ${QUERY_GRAPH_MAX_CHARS_CEILING}). Raise only for deliberate full reads, e.g. layout passes needing every node's geometry. ` +
+              "The rows answering your query are spent FIRST and are never dropped to fit the contextual groups/rails riders; those are spent from what is left and say in-band when they were reduced or omitted (#807).",
           ),
       },
+      // #807: the reply is fitted to `max_chars` as a WHOLE here — see fitQueryGraphReply.
+      // The panel bounds `text`; the `groups`/`rails` riders were never in that
+      // accounting, so on a large graph the reply could be many times the budget it
+      // announced. Nothing is shed while the whole reply fits.
       async (args: A, ctx) =>
-        ctx.call({
-          cmd: "graph_query",
-          types: args.types,
-          title: args.title,
-          where: args.where,
-          ids: args.ids,
-          upstream_of: args.upstream_of,
-          downstream_of: args.downstream_of,
-          depth: args.depth,
-          fields: args.fields,
-          group_by: args.group_by,
-          limit: args.limit,
-          max_chars: args.max_chars,
-        }),
+        fitQueryGraphReply(
+          await ctx.call({
+            cmd: "graph_query",
+            types: args.types,
+            title: args.title,
+            where: args.where,
+            ids: args.ids,
+            upstream_of: args.upstream_of,
+            downstream_of: args.downstream_of,
+            depth: args.depth,
+            fields: args.fields,
+            group_by: args.group_by,
+            limit: args.limit,
+            max_chars: args.max_chars,
+          }),
+          args.max_chars,
+        ),
     ),
     def(
       "panel_graph_outline",
