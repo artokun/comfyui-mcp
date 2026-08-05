@@ -4,6 +4,11 @@ export type TransportMode = "stdio" | "http";
 export type ToolMode = "full" | "compact";
 
 export interface CliOptions {
+  /** --help / -h: print usage and exit WITHOUT starting a server. There was no
+   *  help flag at all, so nothing at the CLI taught `--compact` / `--full` —
+   *  and compact became the DEFAULT in #667, meaning the behaviour changed under
+   *  users with no local way to discover the flag that controls it (#860). */
+  help: boolean;
   transport: TransportMode;
   /** --compact / --tool-mode compact / COMFYUI_MCP_TOOL_MODE=compact (DEFAULT,
    *  #667): register only the list_tools/describe_tool/call_tool meta-tools
@@ -68,6 +73,7 @@ export function parseCliArgs(
 ): CliOptions {
   const args = argv.slice(2);
 
+  let help = false;
   let transport: TransportMode = env.MCP_TRANSPORT === "http" ? "http" : "stdio";
   let toolMode: ToolMode = env.COMFYUI_MCP_TOOL_MODE === "full" ? "full" : "compact";
   let host = env.MCP_HOST ?? DEFAULT_HOST;
@@ -106,6 +112,8 @@ export function parseCliArgs(
         comfyuiUrl = next;
         i += 1; // consume the URL token
       }
+    } else if (a === "--help" || a === "-h") {
+      help = true;
     } else if (a === "--http") {
       transport = "http";
     } else if (a === "--stdio") {
@@ -172,6 +180,7 @@ export function parseCliArgs(
   if (tunnel) transport = "http";
 
   return {
+    help,
     transport,
     toolMode,
     toolModeExplicit,
@@ -227,4 +236,62 @@ export function validateConnectUrl(url: string): string | null {
       `Pass a full http(s) URL, e.g. https://abcd-8188.proxy.runpod.net or http://127.0.0.1:8188.`
     );
   }
+}
+
+/**
+ * Usage text for `--help` / `-h`.
+ *
+ * Every default shown is DERIVED by parsing an empty argv against an empty env,
+ * not restated. That is the whole point: a hand-written default is a claim that
+ * drifts the moment the parser changes, and this repo has just spent a release
+ * cycle on documentation that confidently asserted the opposite of the code —
+ * `.env.example` said the tool mode defaulted to `full` when #667 had made it
+ * `compact`, and a user reading it configured the reverse of what they wanted.
+ * Deriving makes that class of drift impossible rather than unlikely.
+ *
+ * Deliberately carries NO tool COUNT. RFC #726 consolidates the surface to ~30
+ * tools, so any number written here expires; the text describes the shapes
+ * instead ("three meta-tools" is a property of the facade, not a census).
+ */
+export function renderCliHelp(): string {
+  const d = parseCliArgs([], {});
+  const def = (v: string | number | boolean) => `(default: ${String(v)})`;
+
+  return [
+    "",
+    "comfyui-mcp — drive ComfyUI from an AI agent",
+    "",
+    "USAGE",
+    "  comfyui-mcp [options]                      start the MCP server",
+    "  comfyui-mcp connect [<comfyui-url>]        run the panel orchestrator against a (possibly remote) ComfyUI",
+    "  comfyui-mcp setup <hermes|openclaw|copilot> [--compact|--full] [--comfyui-url <url>] [--dry-run]",
+    "                                             write the comfyui entry into that harness's config, then exit",
+    "",
+    "TOOL SURFACE",
+    `  --compact                                  register only the three meta-tools ${def(d.toolMode === "compact")}`,
+    "                                             (list_tools / describe_tool / call_tool)",
+    "  --full                                     register the full direct tool surface",
+    "  --tool-mode <compact|full>                 same, as a value",
+    `                                             env: COMFYUI_MCP_TOOL_MODE      ${def(d.toolMode)}`,
+    "",
+    "TRANSPORT",
+    `  --stdio                                    stdio transport ${def(d.transport === "stdio")}`,
+    "  --http                                     streamable-HTTP transport",
+    "  --transport <stdio|http>                   same, as a value    env: MCP_TRANSPORT",
+    `  --host <host>                              HTTP bind host      env: MCP_HOST   ${def(d.host)}`,
+    `  --port <port>                              HTTP bind port      env: MCP_PORT   ${def(d.port)}`,
+    "  --token <token>                            require this shared secret on /mcp   env: COMFYUI_MCP_HTTP_TOKEN",
+    "  --tunnel                                   open a cloudflared quick tunnel (implies --http)   env: MCP_TUNNEL",
+    "  --allow-unauthenticated-non-loopback       allow an OPEN /mcp on a non-loopback host",
+    "",
+    "PANEL / COMFYUI",
+    "  --panel-orchestrator                       run the background orchestrator that drives the panel",
+    "  --comfyui-url <url>                        target a specific (incl. remote) ComfyUI   env: COMFYUI_URL",
+    "  --insecure-bridge                          allow an unauthenticated panel bridge",
+    "",
+    "  -h, --help                                 show this and exit",
+    "",
+    "Full reference: https://github.com/artokun/comfyui-mcp#readme",
+    "",
+  ].join("\n");
 }

@@ -1,11 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { exportExplicitToolMode, parseCliArgs, validateConnectUrl } from "../../transport/cli.js";
+import {
+  exportExplicitToolMode,
+  parseCliArgs,
+  renderCliHelp,
+  validateConnectUrl,
+} from "../../transport/cli.js";
 
 const base = ["node", "comfyui-mcp"];
 
 describe("parseCliArgs", () => {
   it("defaults to stdio on 127.0.0.1:9100 with no args/env", () => {
     expect(parseCliArgs(base, {})).toEqual({
+      help: false,
       transport: "stdio",
       toolMode: "compact",
       toolModeExplicit: false,
@@ -31,17 +37,17 @@ describe("parseCliArgs", () => {
 
   it("supports --port value and --host value", () => {
     const o = parseCliArgs([...base, "--http", "--host", "0.0.0.0", "--port", "8080"], {});
-    expect(o).toEqual({ transport: "http", toolMode: "compact", toolModeExplicit: false, host: "0.0.0.0", port: 8080, panelOrchestrator: false, token: undefined, tunnel: false, allowUnauthenticated: false, insecureBridge: false, setupAgent: undefined, setupDryRun: false });
+    expect(o).toEqual({ help: false, transport: "http", toolMode: "compact", toolModeExplicit: false, host: "0.0.0.0", port: 8080, panelOrchestrator: false, token: undefined, tunnel: false, allowUnauthenticated: false, insecureBridge: false, setupAgent: undefined, setupDryRun: false });
   });
 
   it("supports --flag=value form", () => {
     const o = parseCliArgs([...base, "--transport=http", "--port=3000", "--host=0.0.0.0"], {});
-    expect(o).toEqual({ transport: "http", toolMode: "compact", toolModeExplicit: false, host: "0.0.0.0", port: 3000, panelOrchestrator: false, token: undefined, tunnel: false, allowUnauthenticated: false, insecureBridge: false, setupAgent: undefined, setupDryRun: false });
+    expect(o).toEqual({ help: false, transport: "http", toolMode: "compact", toolModeExplicit: false, host: "0.0.0.0", port: 3000, panelOrchestrator: false, token: undefined, tunnel: false, allowUnauthenticated: false, insecureBridge: false, setupAgent: undefined, setupDryRun: false });
   });
 
   it("reads env defaults", () => {
     const o = parseCliArgs(base, { MCP_TRANSPORT: "http", MCP_HOST: "0.0.0.0", MCP_PORT: "5000" });
-    expect(o).toEqual({ transport: "http", toolMode: "compact", toolModeExplicit: false, host: "0.0.0.0", port: 5000, panelOrchestrator: false, token: undefined, tunnel: false, allowUnauthenticated: false, insecureBridge: false, setupAgent: undefined, setupDryRun: false });
+    expect(o).toEqual({ help: false, transport: "http", toolMode: "compact", toolModeExplicit: false, host: "0.0.0.0", port: 5000, panelOrchestrator: false, token: undefined, tunnel: false, allowUnauthenticated: false, insecureBridge: false, setupAgent: undefined, setupDryRun: false });
   });
 
   it("compact is the DEFAULT tool mode; --full / COMFYUI_MCP_TOOL_MODE=full opts out (#667)", () => {
@@ -218,5 +224,64 @@ describe("validateConnectUrl", () => {
 
   it("rejects an empty string", () => {
     expect(validateConnectUrl("")).not.toBeNull();
+  });
+});
+
+describe("--help (#860)", () => {
+  it("sets help for both --help and -h, and does not disturb other options", () => {
+    for (const flag of ["--help", "-h"]) {
+      const cli = parseCliArgs([...base, flag], {});
+      expect(cli.help, `${flag} must set help`).toBe(true);
+      // A help request must not look like a mode choice: `setup` uses
+      // toolModeExplicit to tell "user chose a mode" from "use the per-agent
+      // default", so a stray true here would change unrelated behaviour.
+      expect(cli.toolModeExplicit).toBe(false);
+      expect(cli.panelOrchestrator).toBe(false);
+      expect(cli.setupAgent).toBeUndefined();
+    }
+  });
+
+  it("is false when not asked for", () => {
+    expect(parseCliArgs(base, {}).help).toBe(false);
+    expect(parseCliArgs([...base, "--full"], {}).help).toBe(false);
+  });
+
+  it("prints the tool-mode default the PARSER actually uses, not a written-down one", () => {
+    // The point of the whole change. `.env.example` claimed the tool mode
+    // defaulted to `full` long after #667 made it `compact`, so a user reading it
+    // configured the reverse of what they wanted — a confidently wrong default is
+    // worse than a missing one. This fails the moment someone replaces the derived
+    // value with a literal that has drifted.
+    const actual = parseCliArgs(base, {}).toolMode;
+    expect(renderCliHelp()).toContain(`env: COMFYUI_MCP_TOOL_MODE      (default: ${actual})`);
+  });
+
+  it("prints the host and port defaults the parser actually uses", () => {
+    const cli = parseCliArgs(base, {});
+    const help = renderCliHelp();
+    expect(help).toContain(`(default: ${cli.host})`);
+    expect(help).toContain(`(default: ${cli.port})`);
+  });
+
+  it("carries no tool COUNT — RFC #726 consolidates the surface and any number expires", () => {
+    // Deliberately asserts an ABSENCE, because the failure mode is someone adding
+    // "~200 tools" for helpfulness and it silently becoming false.
+    expect(renderCliHelp()).not.toMatch(/\b\d{2,}\s*(tools|schemas)\b/i);
+  });
+
+  it("documents every flag the parser accepts", () => {
+    // Discrimination: a flag added to the parser and not to the help is exactly
+    // the undiscoverability this issue is about, so the test derives the list
+    // rather than restating it.
+    const help = renderCliHelp();
+    for (const flag of [
+      "--compact", "--full", "--tool-mode",
+      "--stdio", "--http", "--transport", "--host", "--port",
+      "--token", "--tunnel", "--allow-unauthenticated-non-loopback",
+      "--panel-orchestrator", "--comfyui-url", "--insecure-bridge",
+      "--help",
+    ]) {
+      expect(help, `${flag} must appear in --help`).toContain(flag);
+    }
   });
 });
