@@ -191,6 +191,34 @@ const MAX_TOOL_ROUNDS = 32;
  * is short, router-shaped, and (deliberately, for local models) does NOT carry
  * the NSFW consent-gate flow — only the absolute hard limits.
  */
+/**
+ * Retraction appended to OLLAMA_SYSTEM_PROMPT when the panel router was NOT
+ * registered for this session (the loopback panel MCP failed to bind, or this
+ * backend could not connect to it).
+ *
+ * The prompt above opens with "You have exactly six tools" and names all three
+ * panel_* routers. When `panelRouterAvailable()` is false only three of those six
+ * exist, and a small local model told otherwise will call a router that is not
+ * there — the same false capability claim the orchestrator retracts for the
+ * frontier backends, arriving here by a different road because this adapter
+ * deliberately ignores `deps.systemAppend`.
+ *
+ * Kept blunt and short on purpose: this prompt is written for small models, and the
+ * surrounding file's own comment records what happens to them when a prompt names a
+ * tool they cannot reach (they hit "unknown tool" and give up).
+ */
+export function ollamaPanelRetraction(panelRouterAvailable: boolean): string {
+  if (panelRouterAvailable) return "";
+  return [
+    "",
+    "",
+    "CORRECTION — THIS OVERRIDES THE TOOL LIST ABOVE:",
+    "The live-canvas router did not start this session. You have THREE tools, not six: list_tools / describe_tool / call_tool. panel_list_tools, panel_describe_tool and panel_call_tool DO NOT EXIST right now — do not call them, and never claim to have read or edited the user's canvas.",
+    "You can still do everything through the headless server: saved workflow FILES on disk (list_workflows, get_workflow, analyze_workflow, query_workflow), generation, the queue, models, custom nodes.",
+    "If the user asks about the graph open in front of them, say the live-canvas tools failed to start this session and that restarting the agent is what brings them back.",
+  ].join("\n");
+}
+
 export const OLLAMA_SYSTEM_PROMPT = [
   "You are the ComfyUI agent in a sidebar panel, driving the user's live ComfyUI graph and server. Answer in normal Markdown.",
   "",
@@ -410,7 +438,16 @@ export class OllamaBackend implements AgentBackend {
     if (this.panel) this.panelTools = (await this.panel.listTools()).tools;
   }
 
-  /** The six OpenAI-style tool defs the model sees. */
+  /** Whether the three panel_* router tools were actually registered for this
+   *  session. ONE predicate, consulted by both the tool-def builder and the system
+   *  prompt, so the prompt can never promise a router the surface does not carry —
+   *  the two drifting apart is precisely the bug this exists to prevent. */
+  protected panelRouterAvailable(): boolean {
+    return this.panel !== null && this.panelTools.length > 0;
+  }
+
+  /** The six OpenAI-style tool defs the model sees (three, when the panel router
+   *  is unavailable — see panelRouterAvailable). */
   protected buildModelTools(): Array<Record<string, unknown>> {
     const defs: Array<Record<string, unknown>> = [];
     for (const t of this.comfyTools) {
@@ -419,7 +456,7 @@ export class OllamaBackend implements AgentBackend {
         function: { name: t.name, description: t.description ?? "", parameters: t.inputSchema ?? { type: "object", properties: {} } },
       });
     }
-    if (this.panel && this.panelTools.length) {
+    if (this.panelRouterAvailable()) {
       defs.push(
         {
           type: "function",
@@ -820,7 +857,23 @@ export class OllamaBackend implements AgentBackend {
     if (fresh) {
       // deps.systemAppend (the frontier panel prompt) is intentionally NOT
       // used — see OLLAMA_SYSTEM_PROMPT.
-      this.history = [{ role: "system", content: resolvePrompt("backend.ollama", OLLAMA_SYSTEM_PROMPT) }];
+      //
+      // Which is exactly why the orchestrator's panel-tools retraction cannot
+      // reach this lane: it rides on systemAppend, and this adapter drops that.
+      // So the retraction is re-derived HERE from the thing this backend knows
+      // first-hand — whether it actually registered the panel router — and appended
+      // to its own prompt. Without it, OLLAMA_SYSTEM_PROMPT goes on promising
+      // "exactly six tools" including three that were never registered, which is
+      // the same false capability claim for ollama / openrouter / lmstudio /
+      // llamacpp / custom / kimi.
+      this.history = [
+        {
+          role: "system",
+          content:
+            resolvePrompt("backend.ollama", OLLAMA_SYSTEM_PROMPT) +
+            ollamaPanelRetraction(this.panelRouterAvailable()),
+        },
+      ];
     }
     yield { type: "session", sessionId: this.sessionId, model: this.model };
 

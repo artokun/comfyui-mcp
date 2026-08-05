@@ -12,6 +12,7 @@
 
 import { describe, expect, it } from "vitest";
 import { panelToolsRetraction } from "../../orchestrator/index.js";
+import { OLLAMA_SYSTEM_PROMPT, ollamaPanelRetraction } from "../../orchestrator/ollama-backend.js";
 
 describe("panel_* claim is retracted when the loopback panel MCP did not bind", () => {
   it("says nothing at all while the panel tools really are available", () => {
@@ -53,5 +54,34 @@ describe("panel_* claim is retracted when the loopback panel MCP did not bind", 
     // HTTP bind takes nothing away from it — retracting there would be a false
     // claim in the opposite direction.
     expect(panelToolsRetraction("claude", false)).toBe("");
+  });
+});
+
+// The Ollama-family adapter (ollama / openrouter / lmstudio / llamacpp / custom /
+// kimi) deliberately IGNORES deps.systemAppend and uses its own prompt, so the
+// orchestrator-side retraction above can never reach it. That prompt opens by
+// promising "exactly six tools" and names all three panel_* routers — which are
+// registered only when the panel router actually came up.
+describe("the Ollama-family prompt retracts its own panel router claim", () => {
+  it("promises six tools including the panel routers by default", () => {
+    // The claim being corrected — pinned so this fails loudly if the prompt is
+    // reworded and the retraction silently stops matching what it retracts.
+    expect(OLLAMA_SYSTEM_PROMPT).toContain("You have exactly six tools");
+    expect(OLLAMA_SYSTEM_PROMPT).toContain("panel_list_tools / panel_describe_tool / panel_call_tool");
+  });
+
+  it("says nothing while the router really is registered", () => {
+    expect(ollamaPanelRetraction(true)).toBe("");
+  });
+
+  it("corrects the count and names the three tools that do not exist", () => {
+    const note = ollamaPanelRetraction(false);
+    expect(note).toMatch(/THREE tools, not six/);
+    expect(note).toMatch(/panel_list_tools, panel_describe_tool and panel_call_tool DO NOT EXIST/);
+    expect(note).toMatch(/never claim to have read or edited the user's canvas/);
+    // ...and leaves the route that still works, since the headless server is
+    // unaffected — over-retracting is the same defect pointing the other way.
+    expect(note).toMatch(/list_workflows, get_workflow, analyze_workflow, query_workflow/);
+    expect(note).toMatch(/restarting the agent/);
   });
 });
