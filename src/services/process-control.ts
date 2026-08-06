@@ -2775,7 +2775,7 @@ export async function startComfyUI(anchor?: {
               (launchedChildExit
                 ? describeLaunchedChildExit(launchedChildExit)
                 : " The process this call launched is no longer running, so THIS RELAUNCH FAILED — it was not a slow start.")) +
-          " Check the ComfyUI logs, and re-check with health_check before assuming nothing is serving the port — an external launcher or supervisor may have brought one back since." +
+          ' Check the ComfyUI logs, and re-check with get_system_stats (action:"health") before assuming nothing is serving the port — an external launcher or supervisor may have brought one back since.' +
           (env ? ` Launch environment: ${env.note}.` : "") +
           launchEnvWarning(info),
         auto_restart: supervisorResult(info),
@@ -2808,7 +2808,7 @@ export async function startComfyUI(anchor?: {
         "the startup is NOT CONFIRMED YET — it does NOT mean it failed: ComfyUI with a normal " +
         "set of custom nodes routinely answers well after this window. " +
         "Do NOT kill it and do NOT launch a second copy onto this port. " +
-        `Re-check with health_check in another ${RECHECK_HINT_S}s; if it is still silent then, ` +
+        `Re-check with get_system_stats (action:"health") in another ${RECHECK_HINT_S}s; if it is still silent then, ` +
         "the ComfyUI logs will say why. To wait longer next time, raise " +
         `COMFYUI_STARTUP_CHECK_MAX_TRIES (currently ${readiness.max_tries} ` +
         `${readiness.max_tries === 1 ? "probe" : "probes"}, one every ` +
@@ -3339,7 +3339,7 @@ async function restartViaManagerReboot(context: {
         `(${readiness.attempts}/${readiness.max_tries} probes over a ` +
         `COMFYUI_REMOTE_REBOOT_BUDGET_S=${seconds(timing.budgetMs)}s budget). That budget ` +
         "expiring means the restart is NOT CONFIRMED YET — it does NOT mean it failed; a " +
-        "supervised cold start can take longer than this. Re-check with health_check in " +
+        'supervised cold start can take longer than this. Re-check with get_system_stats (action:"health") in ' +
         `another ${RECHECK_HINT_S}s before intervening. If it is still down then, start ` +
         "ComfyUI from whatever supervises it (" +
         (context.label === "Desktop" ? "the ComfyUI Desktop app" : "its host") +
@@ -3427,7 +3427,7 @@ async function restartViaManagerReboot(context: {
           `A ComfyUI-Manager reboot was dispatched but not acknowledged (${reboot.note ?? "no reply"}).`) +
       ` ComfyUI is healthy now (${readiness.waited_ms}ms) — ${context.label}/supervised ` +
       "restart. The cycle itself was not directly observed from here, so verify with " +
-      "health_check if you need certainty that it actually restarted." +
+      'get_system_stats (action:"health") if you need certainty that it actually restarted.' +
       argvNote,
     // We launched nothing on this path — a supervisor is what would have cycled the
     // process — so the listener is never ours to claim. (Nor is it established that

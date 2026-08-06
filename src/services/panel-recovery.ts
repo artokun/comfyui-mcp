@@ -2,30 +2,30 @@
 //
 // When the bridge refuses a graph WRITE because the connected panel is too old
 // to fence the command against the active workflow (#718), the refusal has
-// always ended with "Run install_panel(action:'update')". In a local session
+// always ended with "Run install_comfyui(action:'panel', panel_action:'update')". In a local session
 // with a resolvable ComfyUI that is exactly right. In the two sessions that
 // filed #774 and #784 it is a dead end:
 //
-//  - REMOTE/CLOUD (#774): install_panel is deliberately local-only. It answers
+//  - REMOTE/CLOUD (#774): install_comfyui(action:'panel') is deliberately local-only. It answers
 //    `decision: "not-applicable"` and changes nothing, because the panel lives
 //    on someone else's filesystem. panel_update_node then refuses too — it
 //    cannot verify an on-disk move (#639/#641) — and points BACK at
-//    install_panel. Two tools, one circle, no way out.
+//    install_comfyui(action:'panel'). Two tools, one circle, no way out.
 //
 //  - EMBEDDED PANEL SESSION (#784): the sidebar surface is the disjoint
-//    `panel_*` tool set. install_panel was never in it, so the recommendation
+//    `panel_*` tool set. install_comfyui(action:'panel') was never in it, so the recommendation
 //    named a tool that was not merely unhelpful but absent.
 //
 // A hard version gate is only defensible while its escape hatch works. So the
 // recovery text is built HERE, from the session's actual context, under two
 // rules:
 //
-//  1. Where install_panel provably CANNOT do the job — remote, cloud, or a
+//  1. Where install_comfyui(action:'panel') provably CANNOT do the job — remote, cloud, or a
 //     local install we have positively determined does not exist — it is not
 //     named at all. The text gives the commands to run on the ComfyUI host.
 //
 //  2. Where it can, it is named AND the host-side commands are given as the
-//     alternative, because whether install_panel is actually in the caller's
+//     alternative, because whether install_comfyui(action:'panel') is actually in the caller's
 //     advertised tool set is a property of the client's surface, not of this
 //     process, and is therefore not knowable from here. Offering both costs a
 //     sentence and removes the only way this message can dead-end.
@@ -33,7 +33,7 @@
 // Note what is deliberately NOT done: nothing here weakens the write gate. The
 // panel still cannot make an unfenced write. This module only fixes the remedy.
 //
-// It is the SINGLE source of that advice — the bridge refusal, the install_panel
+// It is the SINGLE source of that advice — the bridge refusal, the install_comfyui(action:'panel')
 // status note, the sync assessment and panel_update_node's refusal all render
 // it, so they cannot drift apart and contradict each other.
 
@@ -66,7 +66,7 @@ export const PANEL_DIR_NAME = "comfyui-agent-panel";
  */
 export const PANEL_DIR_NAMES: readonly string[] = [PANEL_DIR_NAME, "comfyui-mcp-panel"];
 
-/** Why install_panel provably cannot perform the update in this session. */
+/** Why install_comfyui(action:'panel') provably cannot perform the update in this session. */
 export type PanelRecoveryBlocker =
   /** A non-loopback COMFYUI_URL — the pack is on the remote host's disk. */
   | "remote"
@@ -77,7 +77,7 @@ export type PanelRecoveryBlocker =
 
 export interface PanelRecoveryContext {
   /**
-   * False ONLY when we have positively established that install_panel cannot
+   * False ONLY when we have positively established that install_comfyui(action:'panel') cannot
    * act here. "We haven't checked yet" resolves to true — recommending a tool
    * that turns out to be a no-op is a much smaller failure than withholding the
    * one remedy that would have worked.
@@ -95,7 +95,7 @@ export interface PanelRecoveryContext {
  * Deliberately tolerant of a mode helper that cannot be read: this function's
  * only job is to compose an error message, and an error message must never be
  * the thing that throws. An unreadable mode resolves to "local" — the branch
- * that names install_panel AND carries the host-side commands, so the caller is
+ * that names install_comfyui(action:'panel') AND carries the host-side commands, so the caller is
  * still left with something to do either way.
  */
 export function panelRecoveryContext(): PanelRecoveryContext {
@@ -141,22 +141,22 @@ export function panelRecoveryContext(): PanelRecoveryContext {
 }
 
 /**
- * Name an install_panel action ONLY where install_panel can be invoked.
+ * Name an install_comfyui(action:'panel') action ONLY where install_comfyui(action:'panel') can be invoked.
  *
  * The bridge refusal was the loudest instance of the #774/#784 dead end, but it
  * was never the only one: the sync assessment, the pin notes, the auto-sync
- * failure message and the interrupted-swap guidance all named install_panel
+ * failure message and the interrupted-swap guidance all named install_comfyui(action:'panel')
  * unconditionally, and the embedded `panel_*` surface — the very surface those
  * messages are pushed to — does not carry it. Every one of them routes through
  * here so the instruction is a real one wherever it is rendered.
  */
 export function describeInstallPanelAction(
   action: "status" | "sync" | "update" | "install" | "unpin",
-  /** What to say instead when install_panel cannot be invoked here. */
+  /** What to say instead when install_comfyui(action:'panel') cannot be invoked here. */
   hostSide: string,
   ctx: PanelRecoveryContext = panelRecoveryContext(),
 ): string {
-  return ctx.installPanelUsable ? `install_panel(action='${action}')` : hostSide;
+  return ctx.installPanelUsable ? `install_comfyui(action:'panel', panel_action:'${action}')` : hostSide;
 }
 
 function blockerPhrase(blocker: PanelRecoveryBlocker | undefined): string {
@@ -174,7 +174,7 @@ function blockerPhrase(blocker: PanelRecoveryBlocker | undefined): string {
     case "no-local-workspace":
       return "no local ComfyUI install could be resolved from here";
     default:
-      return "install_panel cannot perform the update from here";
+      return "install_comfyui(action:'panel') cannot perform the update from here";
   }
 }
 
@@ -241,7 +241,7 @@ export function manualPanelUpdateCommands(comfyuiPath?: string): string {
  * current. Verified on a live rig: an up-to-date panel does advertise both
  * capabilities, and resource timing shows no versioned module URLs at all.
  *
- * Told to "run install_panel(action:'update')", such a user gets "nothing to
+ * Told to "run install_comfyui(action:'panel', panel_action:'update')", such a user gets "nothing to
  * update" — true, and completely useless, because nothing is wrong with their
  * install. The fix is a cache-bypassing reload of the tab, and saying so is the
  * whole remedy. (The cache-busting itself is #584 / panel #596 and is not
@@ -263,13 +263,13 @@ const RESTART_AND_REFRESH =
   `panel JS; rebinding cannot add the missing capability`;
 
 /**
- * WHY "install_panel does not exist" is usually wrong, and what to do about it.
+ * WHY "install_comfyui(action:'panel') does not exist" is usually wrong, and what to do about it.
  *
- * #812 and #823 both report the same dead end: an error names install_panel, the
+ * #812 and #823 both report the same dead end: an error names install_comfyui(action:'panel'), the
  * agent searches its tool list, finds nothing, and concludes the remedy is
  * impossible. In almost every one of those sessions the tool was there —
  * COMPACT TOOL MODE IS THE DEFAULT (#667). It registers exactly three meta-tools
- * and leaves the other ~200, install_panel among them, reachable only through
+ * and leaves the other ~200, install_comfyui(action:'panel') among them, reachable only through
  * `call_tool`. A tool-name search cannot see it; `call_tool` can run it.
  *
  * Saying so is the difference between a remedy the caller can execute from where
@@ -278,15 +278,16 @@ const RESTART_AND_REFRESH =
  * `panel_*` sidebar set, #784).
  */
 const COMPACT_ROUTER_FALLBACK = (action: string): string =>
-  `If install_panel is not in this session's tool list, it is probably not missing — ` +
+  `If install_comfyui is not in this session's tool list, it is probably not missing — ` +
   `compact tool mode is the DEFAULT and exposes only list_tools / describe_tool / ` +
   `call_tool, with every other tool reachable through them. Try ` +
-  `call_tool {"name": "install_panel", "args": {"action": "${action}"}} before concluding ` +
+  `call_tool {"name": "install_comfyui", "args": {"action": "panel", "panel_action": "${action}"}} ` +
+  `before concluding ` +
   `it is unavailable.`;
 
 /**
  * The recovery sentence for a panel that is too old for the write gate. Names
- * install_panel only where install_panel can really do it, and ALWAYS carries a
+ * install_comfyui(action:'panel') only where install_comfyui(action:'panel') can really do it, and ALWAYS carries a
  * host-side command sequence so the caller is never left without a next step.
  */
 export function describePanelUpdateRecovery(
@@ -295,7 +296,7 @@ export function describePanelUpdateRecovery(
 ): string {
   // STALE BUNDLE FIRST. When the caller has PROVEN the pack on disk already
   // satisfies the requirement, no update of any kind is the answer — not
-  // install_panel, not a host-side git pull. Sending this user to either is
+  // install_comfyui(action:'panel'), not a host-side git pull. Sending this user to either is
   // what makes the loop feel unfixable, so this branch outranks both.
   if (skew) {
     // WHAT IS PROVEN vs WHAT IS INFERRED (codex gate).
@@ -348,7 +349,7 @@ export function describePanelUpdateRecovery(
       // And NO trailing period: every caller appends its own sentence break, and
       // adding one here rendered ".." into a real refusal (codex gate).
       (ctx.installPanelUsable
-        ? `install_panel(action:'update') is not the fix here — it may pull a newer ` +
+        ? `install_comfyui(action:'panel', panel_action:'update') is not the fix here — it may pull a newer ` +
           `panel, but no update replaces the JavaScript an open tab is already running`
         : `No update of any kind fixes this — the install is not the problem`)
     );
@@ -356,7 +357,7 @@ export function describePanelUpdateRecovery(
 
   if (ctx.installPanelUsable) {
     return (
-      `Run install_panel(action:'update'). ${COMPACT_ROUTER_FALLBACK("update")} ` +
+      `Run install_comfyui(action:'panel', panel_action:'update'). ${COMPACT_ROUTER_FALLBACK("update")} ` +
       `If neither route exists on this surface, update the pack on the ComfyUI host: ` +
       // No trailing period: every caller of this function appends its own
       // sentence break, and adding one here rendered ".." to the user.
@@ -372,7 +373,7 @@ export function describePanelUpdateRecovery(
 /**
  * The same advice as a redirect for tools that REFUSE to manage the panel
  * themselves (panel_update_node, install_custom_node (action:"fix")). Those refusals used to end
- * with a flat "Use install_panel instead", which is the #774/#784 dead end in
+ * with a flat "Use install_comfyui(action:'panel') instead", which is the #774/#784 dead end in
  * miniature.
  */
 export function describePanelManagementRedirect(
@@ -380,7 +381,7 @@ export function describePanelManagementRedirect(
 ): string {
   if (ctx.installPanelUsable) {
     return (
-      `Use install_panel instead: install_panel(action='sync') brings the panel in line ` +
+      `Use install_comfyui(action:'panel') instead: install_comfyui(action:'panel', panel_action:'sync') brings the panel in line ` +
       `with this orchestrator and re-reads the installed version from disk, and ` +
       `action='status' reports it. ${COMPACT_ROUTER_FALLBACK("sync")} ` +
       `If neither route exists on this surface, update the pack on the ComfyUI host ` +
@@ -388,7 +389,7 @@ export function describePanelManagementRedirect(
     );
   }
   return (
-    `install_panel cannot help here either — ${blockerPhrase(ctx.blocker)}. Update the ` +
+    `install_comfyui(action:'panel') cannot help here either — ${blockerPhrase(ctx.blocker)}. Update the ` +
     `panel ON THE COMFYUI HOST: ${manualPanelUpdateCommands(ctx.comfyuiPath)}. Then ` +
     `restart ComfyUI and hard-refresh the ComfyUI browser tab (Ctrl+Shift+R).`
   );

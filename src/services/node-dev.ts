@@ -306,7 +306,7 @@ export function customNodesRoot(): string {
   // Resolve the effective LOCAL ComfyUI base the same way every other
   // filesystem-backed tool does: COMFYUI_PATH first, then the saved default
   // workspace (set via workspace action:"set_default") when COMFYUI_PATH is unset. This
-  // is what get_environment / workspace action:"get" already report, so custom-node
+  // is what install_comfyui (action:"environment") / workspace action:"get" already report, so custom-node
   // source tools no longer reject a loopback session that has a saved default
   // workspace as if it were remote (#506). Returns undefined only in remote
   // mode or when no local install is known — then we refuse with a clear error.

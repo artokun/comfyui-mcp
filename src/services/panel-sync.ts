@@ -1,7 +1,7 @@
 // Node-pack auto-sync: decide whether the installed sidebar panel pack
 // (comfyui-agent-panel) is behind what THIS orchestrator build needs, and — when
 // it is, and only when the user has not pinned it — run the sync through the
-// hardened, verified install_panel path.
+// hardened, verified install_comfyui(action:'panel') path.
 //
 // WHY THIS EXISTS. The orchestrator ships on npm; the panel ships on the Comfy
 // Registry. Updating one does not update the other, so users end up running a
@@ -70,7 +70,7 @@ function isComparableVersion(v: string | undefined): v is string {
 /**
  * How to clear a pin, phrased for THIS session. These summaries are pushed
  * straight into the embedded panel chat on every hello, and that surface does
- * not carry install_panel (#784) — naming it there is the same dead end the
+ * not carry install_comfyui(action:'panel') (#784) — naming it there is the same dead end the
  * bridge refusal had.
  */
 const UNPIN_INSTRUCTION = (): string =>
@@ -130,7 +130,7 @@ const PANEL_PYPROJECT_URL =
  * (the update action, and the file where the real latest is published).
  *
  * A function, not a constant: the update instruction depends on whether
- * install_panel can act in THIS session.
+ * install_comfyui(action:'panel') can act in THIS session.
  */
 const FLOOR_IS_NOT_LATEST = (): string =>
   ` NOTE — that is a FLOOR check, not a latest-version check. It compares your panel ` +
@@ -383,7 +383,7 @@ export function evaluatePanelSync(
           `--base-directory, #766) the panel lives in a different tree and installing ` +
           `here would land in a custom_nodes that is never loaded. Make sure ComfyUI is ` +
           `running and reachable so its own install root can be read, or check ` +
-          `get_environment's local.workspace_path, then re-check.` +
+          `install_comfyui (action:"environment")'s local.workspace_path, then re-check.` +
           driftNote,
       };
     }
@@ -455,7 +455,7 @@ export function evaluatePanelSync(
           `(${required}+). You are ${describePanelPin(pin)}; nothing will be changed.` +
           // The pinned reader gets the same honesty, with the step that actually
           // applies to them: an update is gated behind clearing the pin, so
-          // sending them straight at install_panel(action='update') would be the
+          // sending them straight at install_comfyui(action:'panel', panel_action:'update') would be the
           // dead-end shape this cluster exists to remove.
           ` NOTE — that is a FLOOR check, not a latest-version check: a newer panel with ` +
           `fixes you are missing can exist while this still reads "meets the minimum", ` +

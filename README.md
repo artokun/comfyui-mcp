@@ -16,7 +16,7 @@ Works on **macOS**, **Linux**, and **Windows**. Auto-detects your ComfyUI instal
 
 **Stuck or have a question? [Join the Discord](https://discord.gg/cW9arBhzCu)** — help, model tips, and release announcements.
 
-**45 MCP tools** | **37 AI skills** (Flux · WAN · LTX 2.3 video · Qwen · Z-Image · Ideogram 4 · ERNIE · ANIMA · model registry · Civitai · node authoring · launch/perf flags) | **55 installer packs** | **11 slash commands** | **4 autonomous agents** | **3 hooks**
+**37 MCP tools** | **37 AI skills** (Flux · WAN · LTX 2.3 video · Qwen · Z-Image · Ideogram 4 · ERNIE · ANIMA · model registry · Civitai · node authoring · launch/perf flags) | **55 installer packs** | **11 slash commands** | **4 autonomous agents** | **3 hooks**
 
 The plugin ships **expert skills that grow with every release** — model-specific generation guides with curated download URLs, workflow recipes, troubleshooting, and custom-node authoring — so Claude knows the right sampler, CFG, resolution, and model files for each architecture without trial and error.
 
@@ -249,7 +249,7 @@ for the port, the capability matrix, and the per-provider "clink" points, and th
 
 ## MCP Tools
 
-45 tools across workflow execution, generation, iteration, composition, models, and more:
+37 tools across workflow execution, generation, iteration, composition, models, and more:
 
 ### Image Generation (high-level)
 
@@ -355,7 +355,7 @@ Install [comfy-cli](https://docs.comfy.org/comfy-cli/getting-started#install-cli
 
 | Tool | Description |
 |------|-------------|
-| `get_logs` | Get ComfyUI server logs with optional keyword filter (e.g., `error`, `warning`, a node name) |
+| `get_system_stats (action:"logs")` | Get ComfyUI server logs with optional keyword filter (e.g., `error`, `warning`, a node name) |
 | `get_history` `action: "list"` | Get execution history with full error details, Python tracebacks, timing, and cached node info |
 | `get_history` `action: "diagnose"` | Explain a FAILED run in one call — the failed node and traceback PLUS the missing models (file + widget) and missing node types |
 
@@ -815,7 +815,7 @@ src/
     node-management.ts     # install_custom_node (install/update/fix/uninstall/enable/disable/list/…)
     node-pack.ts           # node_pack (scaffold/verify/publish/read/write/patch/git/…)
     generation-tracker.ts  # the get_history suggest/stats jobs
-    diagnostics.ts         # get_logs, get_history
+    diagnostics.ts         # get_system_stats (action:"logs"), get_history
     process-control.ts     # restart_comfyui (restart/start/stop)
     index.ts               # Registers all tool groups
   utils/
@@ -871,7 +871,7 @@ This is informational — the server uses the first one found. Set `COMFYUI_PATH
 For HuggingFace gated models, set `HUGGINGFACE_TOKEN`. For CivitAI, set `CIVITAI_API_TOKEN`.
 
 **Workflow execution errors**
-Use `/comfy:debug` to automatically diagnose failures. Or use `get_history` (`action: "diagnose"`) / `get_logs` directly to see detailed error messages including Python tracebacks from ComfyUI.
+Use `/comfy:debug` to automatically diagnose failures. Or use `get_history` (`action: "diagnose"`) / `get_system_stats (action:"logs")` directly to see detailed error messages including Python tracebacks from ComfyUI.
 
 **Out of memory (OOM)**
 Use `clear_vram` to free GPU memory before running large workflows. The VRAM watchdog hook will warn you automatically if memory is critically low. See the **troubleshooting** skill for model-specific VRAM estimates.

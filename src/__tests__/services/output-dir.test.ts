@@ -411,7 +411,7 @@ describe("models dir + extra-config argv parsing (#345/#346/#369)", () => {
     // Two base conventions coexist and both are legitimate. Only the OUTER
     // launcher-root reading (`<base>/<relDir>/main.py`, ComfyUI Desktop) was
     // implemented, so a Windows portable install whose COMFYUI_PATH is the inner
-    // ComfyUI directory — the value get_environment / list_local_models /
+    // ComfyUI directory — the value install_comfyui (action:"environment") / list_local_models /
     // resolveEffectiveComfyUIBase all already accept — had every download refused.
     describe("#813 the base IS the ComfyUI directory (Windows portable)", () => {
       it("anchors on the base itself when the base is the very directory the server named", async () => {

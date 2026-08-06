@@ -181,7 +181,7 @@ describe("restartComfyUI — remote (Manager reboot)", () => {
     expect(res.message).toMatch(/reboot request was acknowledged/i);
     expect(res.message).toMatch(/NOT CONFIRMED YET/);
     expect(res.message).toMatch(/does NOT mean it failed/i);
-    expect(res.message).toMatch(/health_check/);
+    expect(res.message).toMatch(/get_system_stats \(action:"health"\)/);
     expect(res.message).toMatch(/COMFYUI_REMOTE_REBOOT_BUDGET_S/);
     expect(hoisted.resetClient).not.toHaveBeenCalled();
   });

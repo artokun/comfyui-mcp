@@ -4,167 +4,143 @@ description: "Install/update ComfyUI and the sidebar panel, self-update the MCP 
 icon: "wrench"
 ---
 
-<Info>10 tools. Generated from the live MCP tool schemas — do not edit by hand; run `npm run docs:gen`.</Info>
+<Info>4 tools. Generated from the live MCP tool schemas — do not edit by hand; run `npm run docs:gen`.</Info>
 
 <Tip>**You don't type these calls.** Ask your agent for what you want in ordinary English — it chooses the tool and fills in the arguments. The JSON on this page is what it sends. New here? Start with [Using the tools](/using-tools).</Tip>
 
 ## install_comfyui
 
-Install ComfyUI locally: git-clone it into a target directory, create a dedicated workspace virtualenv (&lt;target&gt;/.venv), and install Python requirements INTO that venv (never the Python running this MCP server) via pip or uv. ComfyUI-Manager is installed from manager_requirements.txt when present, else git-cloned as a fallback. Mirrors `comfy-cli install`. LOCAL, subprocess-only and independent of any remote --comfyui-url target; the target dir must be empty or non-existent (an existing install is never overwritten). Runs SYNCHRONOUSLY and can take several minutes (large git clone + full torch/dependency install); the call blocks until done. On success returns a JSON report &#123; installed, targetPath, venvPath, comfyuiUrl, managerInstalled, managerVia, version, pythonInstaller, steps[] &#125;. Does NOT start ComfyUI.
+Install, update and configure the local ComfyUI installation, its sidebar panel, and this MCP server itself. Driven by the `action` parameter:
+- action:"install" — Install ComfyUI locally: git-clone it into `target_path`, create a dedicated workspace virtualenv (&lt;target&gt;/.venv), and install Python requirements INTO that venv (never the Python running this MCP server) via pip or uv. ComfyUI-Manager is installed from manager_requirements.txt when present, else git-cloned as a fallback. Mirrors `comfy-cli install`. LOCAL, subprocess-only and independent of any remote --comfyui-url target; the target dir must be empty or non-existent (an existing install is never overwritten). Runs SYNCHRONOUSLY and can take several minutes (large git clone + full torch/dependency install); the call blocks until done. On success returns a JSON report &#123; installed, targetPath, venvPath, comfyuiUrl, managerInstalled, managerVia, version, pythonInstaller, steps[] &#125;. Does NOT start ComfyUI. `target_path` is REQUIRED.
+- action:"update" — Update the ComfyUI CORE install: runs `git pull` in the configured ComfyUI directory and reinstalls its Python requirements (auto-detecting uv vs pip). Requires a local install (COMFYUI_PATH); returns a clear error when targeting a remote instance via --comfyui-url. The requirements install targets the running server's own interpreter (recorded when this server launched ComfyUI, or an explicit COMFYUI_PYTHON); when that interpreter cannot be verified the update refuses rather than install into a guessed environment — start ComfyUI or connect first. Does NOT touch custom nodes.
+- action:"update_all" — Update ALL installed CUSTOM NODES via the ComfyUI-Manager HTTP API. Mirrors `comfy-cli update all`. This does NOT update ComfyUI core — use action:"update" for that. Works against the connected instance (local or remote); updates run asynchronously and a ComfyUI restart may be required afterward. REFUSED while the comfyui-mcp sidebar panel is version-pinned, because 'all' would move the pinned panel too and ComfyUI-Manager cannot update everything-except-one-pack — clear the pin with action:"panel" + panel_action:"unpin", or update the other packs individually by id.
+- action:"panel" — Install, update, reinstall, sync, pin, unpin, unlock, or report status of the ComfyUI sidebar panel ('comfyui-agent-panel' on the Comfy Registry; repo comfyui-mcp-panel) in the LOCAL ComfyUI's custom_nodes, selected by `panel_action` (default "status"). Uses the same ComfyUI-Manager path as install_custom_node and always targets the 'nightly' (git-HEAD) channel. Local-only (no-op/refuses in remote/cloud mode) and NEVER modifies a dev install (a symlinked panel dir). After install/update/reinstall/sync, ComfyUI must be RESTARTED to load the new/updated node — this tool does not auto-restart. The panel is also auto-installed-if-missing when the MCP server loads. A version PIN (panel_action:"pin") holds the panel where it is: while a pin is set, install/update/reinstall/sync and the auto-install all refuse, and 'sync' only warns that a newer panel exists. Panel operations are serialized across orchestrator processes by a lock file that is never auto-reclaimed — if a crashed orchestrator wedges it, panel_action:"unlock" reclaims the lock once it is provably abandoned. This is the SIDEBAR PANEL only; it never touches ComfyUI core or this npm package.
+- action:"self_update" — Check or apply a self-update of the comfyui-mcp NPM PACKAGE (this MCP server), selected by `self_update_action` (default "status"). The server also auto-checks on start (opt out with COMFYUI_MCP_AUTOUPDATE=0). Detects the install mode: a dev install (npm link / source checkout) is NEVER updated; global/local installs are updated via npm; npx fetches latest on next run. The running process cannot hot-swap its own code — after an update you must RECONNECT (/mcp) or restart the orchestrator to load the new version. This tool does not auto-restart. This updates comfyui-mcp ITSELF — not ComfyUI (action:"update"), not the sidebar panel (action:"panel"), and not custom nodes (install_comfyui (action:"update_all")).
+- action:"environment" — Report ComfyUI environment info (mirrors `comfy-cli env`): the running instance details from /system_stats (OS, Python, ComfyUI version, GPU/VRAM — works for remote targets) plus local probes when a workspace path is available (Python version, git revision, ComfyUI-Manager version, and key pip packages like torch/CUDA). The local python probe targets the interpreter the RUNNING server uses (its venv / embedded / standalone python, resolved from the live server), never a bare `python` on PATH. Degrades gracefully and NEVER guesses: when the correct interpreter can't be confirmed, `local.python_probe_trusted` is false, `local.packages` is omitted, and `local.python_probe_reason` says why — an absent package list means UNDETERMINED, never 'not installed'. READ-ONLY.
+- action:"configure_manager" — Configure ComfyUI-Manager settings, mirroring `comfy-cli manager` subcommands; `manager_setting` picks which setting and `value` its new value. Most settings use the ComfyUI-Manager HTTP API (works against remote ComfyUI); set_network_mode and set_security_level have no HTTP setter and are written to Manager's config.ini (requires a known local ComfyUI path; restart ComfyUI to apply).
+
+<Tip>**In plain terms:** One tool for everything that INSTALLS or UPDATES: ComfyUI itself, every custom node pack, the Agent sidebar panel, this MCP server, and ComfyUI-Manager's own settings. `action` picks which — and nothing here is read-only except action:"environment" and the two "status" sub-actions.</Tip>
 
 ### Parameters
 
-<ParamField path="target_path" type="string" required>
-  Absolute path to the workspace directory to install ComfyUI into. Must be empty or non-existent.
+<ParamField path="action" type="enum" required>
+  Which install/environment operation to perform. action:"update", action:"update_all" and action:"environment" take no other parameters; action:"install" requires `target_path`; action:"panel" takes `panel_action` (+ `version`/`reason` for a pin); action:"self_update" takes `self_update_action`; action:"configure_manager" requires `manager_setting` (+ `value`). Options: `action:"install"`, `action:"update"`, `action:"update_all"`, `action:"panel"`, `action:"self_update"`, `action:"environment"`, `action:"configure_manager"`.
+</ParamField>
+<ParamField path="target_path" type="string">
+  action:"install" — REQUIRED absolute path to the workspace directory to install ComfyUI into. Must be empty or non-existent.
 </ParamField>
 <ParamField path="skip_manager" type="boolean">
-  If true, do not clone/install ComfyUI-Manager. Default false (Manager is installed).
+  action:"install" — if true, do not clone/install ComfyUI-Manager. Default false (Manager is installed).
 </ParamField>
 <ParamField path="use_uv" type="boolean">
-  If true, prefer `uv pip install` over plain pip when uv is available on PATH. Falls back to pip if uv is missing. Default false.
+  action:"install" — if true, prefer `uv pip install` over plain pip when uv is available on PATH. Falls back to pip if uv is missing. Default false.
 </ParamField>
 <ParamField path="version" type="string">
-  ComfyUI version to install (comfy-cli semantics): "nightly" (default-branch HEAD), "latest" (newest release tag), or a semantic version like "0.3.40" (checked out as tag v0.3.40). Raw git refs/branches are rejected. Omit to track the default branch HEAD.
+  action:"install" — ComfyUI version to install (comfy-cli semantics): "nightly" (default-branch HEAD), "latest" (newest release tag), or a semantic version like "0.3.40" (checked out as tag v0.3.40). Raw git refs/branches are rejected. Omit to track the default branch HEAD. ALSO used by action:"panel" + panel_action:"pin", where it is the PANEL version to hold at, e.g. '0.11.20' (take it from the installedVersion that panel_action:"status" reports).
+</ParamField>
+<ParamField path="panel_action" type="enum" default="status">
+  action:"panel" — which sidebar-panel operation to run. status: report installed/version/dev-symlink/pin plus a sync assessment (never errors). sync: bring the panel up to what this orchestrator needs — no-ops when already current, WARNS ONLY when pinned, and reports the version re-read from disk afterwards. install: add the panel (nightly). update: pull the latest nightly. Works on either install shape — a git checkout is fast-forwarded, and a Comfy Registry ZIP install (which has no .git) is replaced with a verified fresh clone, keeping the previous copy outside custom_nodes. Success is always re-read from disk. reinstall: uninstall + reinstall (nightly). pin: hold the panel at a version (requires `version`). unpin: clear the pin so a sync can proceed. unlock: recover from a crashed/killed orchestrator's leftover panel operation lock — reclaims it ONLY when it is provably abandoned (older than the stale threshold AND its recorded owner process is dead), and refuses with the observed state otherwise. install/update/reinstall/sync refuse on a dev symlink or an active pin, and require a local workspace (COMFYUI_PATH or the saved default workspace). Options: `status`, `install`, `update`, `reinstall`, `sync`, `pin`, `unpin`, `unlock`.
+</ParamField>
+<ParamField path="reason" type="string">
+  action:"panel" + panel_action:"pin" only: why the user is pinning (stored with the pin).
+</ParamField>
+<ParamField path="self_update_action" type="enum" default="status">
+  action:"self_update" — status: report install mode + current vs latest version + dev-link note (never errors). update: update to the latest published version (refuses on a dev link; no-op when already up to date or for npx). Options: `status`, `update`.
+</ParamField>
+<ParamField path="manager_setting" type="enum">
+  action:"configure_manager" — REQUIRED. Which ComfyUI-Manager setting to change. HTTP API: set_preview_method, set_db_mode, set_component_policy, set_update_policy, set_channel, reset_queue. config.ini fallback: set_network_mode, set_security_level. Options: `set_preview_method`, `set_db_mode`, `set_component_policy`, `set_update_policy`, `set_channel`, `reset_queue`, `set_network_mode`, `set_security_level`.
+</ParamField>
+<ParamField path="value" type="string">
+  action:"configure_manager" — value for the chosen `manager_setting` (omit only for reset_queue). Allowed values per setting — set_preview_method: auto | latent2rgb | taesd | none; set_db_mode: local | cache | remote; set_component_policy: workflow | higher | mine; set_update_policy: stable-comfyui | nightly-comfyui; set_channel: a channel name (e.g. default); set_network_mode: public | private | offline; set_security_level: strong | normal | normal- | weak. HTTP-API settings take effect live; the config.ini ones (set_network_mode, set_security_level) apply only after a ComfyUI restart.
 </ParamField>
 
-### Example
+### Examples
 
-<Note>No worked example yet — the call below is a skeleton generated from the required parameters. Real examples live in `scripts/tool-doc-examples.ts`; contributions welcome.</Note>
+**You say:** Tell me about my setup — useful when I'm reporting a bug.
 
 ```json
 {
   "tool": "install_comfyui",
   "arguments": {
-    "target_path": "<target_path>"
+    "action": "environment"
   }
 }
 ```
 
----
-
-## update_comfyui
-
-Update the ComfyUI core install: runs `git pull` in the configured ComfyUI directory and reinstalls its Python requirements (auto-detecting uv vs pip). Requires a local install (COMFYUI_PATH); returns a clear error when targeting a remote instance via --comfyui-url. The requirements install targets the running server's own interpreter (recorded when this server launched ComfyUI, or an explicit COMFYUI_PYTHON); when that interpreter cannot be verified the update refuses rather than install into a guessed environment — start ComfyUI or connect first.
-
-<Note>This tool takes no parameters.</Note>
-
-### Example
-
-<Note>No worked example yet — the call below is a skeleton generated from the required parameters. Real examples live in `scripts/tool-doc-examples.ts`; contributions welcome.</Note>
-
-```json
-{
-  "tool": "update_comfyui",
-  "arguments": {}
-}
-```
-
----
-
-## update_all
-
-Update ALL installed custom nodes via the ComfyUI-Manager HTTP API (queues update_all, then starts the queue worker). Mirrors `comfy-cli update all`. This does NOT update ComfyUI core — use update_comfyui for that. Works against the connected instance (local or remote); updates run asynchronously and a ComfyUI restart may be required afterward. REFUSED while the comfyui-mcp sidebar panel is version-pinned, because 'all' would move the pinned panel too and ComfyUI-Manager cannot update everything-except-one-pack — clear the pin with install_panel(action='unpin'), or update the other packs individually by id.
-
-<Note>This tool takes no parameters.</Note>
-
-### Example
-
-<Note>No worked example yet — the call below is a skeleton generated from the required parameters. Real examples live in `scripts/tool-doc-examples.ts`; contributions welcome.</Note>
-
-```json
-{
-  "tool": "update_all",
-  "arguments": {}
-}
-```
-
----
-
-## install_panel
-
-Install, update, reinstall, sync, pin, unpin, unlock, or report status of the ComfyUI sidebar panel ('comfyui-agent-panel' on the Comfy Registry; repo comfyui-mcp-panel) in the LOCAL ComfyUI's custom_nodes. Uses the same ComfyUI-Manager path as install_custom_node and always targets the 'nightly' (git-HEAD) channel. Local-only (no-op/refuses in remote/cloud mode) and NEVER modifies a dev install (a symlinked panel dir). After install/update/reinstall/sync, ComfyUI must be RESTARTED to load the new/updated node — this tool does not auto-restart. The panel is also auto-installed-if-missing when the MCP server loads. A version PIN (action='pin') holds the panel where it is: while a pin is set, install/update/reinstall/sync and the auto-install all refuse, and 'sync' only warns that a newer panel exists. Panel operations are serialized across orchestrator processes by a lock file that is never auto-reclaimed — if a crashed orchestrator wedges it, action='unlock' reclaims the lock once it is provably abandoned.
-
-<Tip>**In plain terms:** Installs and updates the Agent sidebar inside ComfyUI. This is the fix when a tool refuses with "this panel is too old".</Tip>
-
-### Parameters
-
-<ParamField path="action" type="enum" default="status">
-  status: report installed/version/dev-symlink/pin plus a sync assessment (never errors). sync: bring the panel up to what this orchestrator needs — no-ops when already current, WARNS ONLY when pinned, and reports the version re-read from disk afterwards. install: add the panel (nightly). update: pull the latest nightly. Works on either install shape — a git checkout is fast-forwarded, and a Comfy Registry ZIP install (which has no .git) is replaced with a verified fresh clone, keeping the previous copy outside custom_nodes. Success is always re-read from disk. reinstall: uninstall + reinstall (nightly). pin: hold the panel at a version (requires `version`). unpin: clear the pin so a sync can proceed. unlock: recover from a crashed/killed orchestrator's leftover panel operation lock — reclaims it ONLY when it is provably abandoned (older than the stale threshold AND its recorded owner process is dead), and refuses with the observed state otherwise. install/update/reinstall/sync refuse on a dev symlink or an active pin, and require a local workspace (COMFYUI_PATH or the saved default workspace). Options: `action:"status"`, `action:"install"`, `action:"update"`, `action:"reinstall"`, `action:"sync"`, `action:"pin"`, `action:"unpin"`, `action:"unlock"`.
-</ParamField>
-<ParamField path="version" type="string">
-  action='pin' only: the panel version to hold at, e.g. '0.11.20'. Use the installedVersion from action='status' to pin where you already are.
-</ParamField>
-<ParamField path="reason" type="string">
-  action='pin' only: why the user is pinning (stored with the pin).
-</ParamField>
-
-### Examples
+**You get back:** Where ComfyUI is installed, the Python and torch versions, the GPU, and which settings are in force. The first thing to paste into an issue.
 
 **You say:** What version of the panel have I got?
 
 ```json
 {
-  "tool": "install_panel",
+  "tool": "install_comfyui",
   "arguments": {
-    "action": "status"
+    "action": "panel",
+    "panel_action": "status"
   }
 }
 ```
 
-**You get back:** The installed panel version, where it lives, and whether it is pinned. This action changes nothing.
+**You get back:** The installed panel version, where it lives, and whether it is pinned. This changes nothing.
 
 **You say:** It says my panel is too old — update it.
 
 ```json
 {
-  "tool": "install_panel",
+  "tool": "install_comfyui",
   "arguments": {
-    "action": "update"
+    "action": "panel",
+    "panel_action": "update"
   }
 }
 ```
 
 **You get back:** The update result. Two more steps are yours: restart ComfyUI, then hard-refresh the ComfyUI browser tab (Ctrl+Shift+R). Without that refresh the tab keeps running the old cached panel code and the same refusal comes back.
 
----
-
-## self_update
-
-Check or apply a self-update of the comfyui-mcp npm package against the npm registry. The server also auto-checks on start (opt out with COMFYUI_MCP_AUTOUPDATE=0). Detects the install mode: a dev install (npm link / source checkout) is NEVER updated; global/local installs are updated via npm; npx fetches latest on next run. The running process cannot hot-swap its own code — after an update you must RECONNECT (/mcp) or restart the orchestrator to load the new version. This tool does not auto-restart.
-
-### Parameters
-
-<ParamField path="action" type="enum" default="status">
-  status: report install mode + current vs latest version + dev-link note (never errors). update: update to the latest published version (refuses on a dev link; no-op when already up to date or for npx). Options: `action:"status"`, `action:"update"`.
-</ParamField>
-
-### Examples
-
-**You say:** Am I on the latest version?
+**You say:** Am I on the latest comfyui-mcp?
 
 ```json
 {
-  "tool": "self_update",
+  "tool": "install_comfyui",
   "arguments": {
-    "action": "status"
+    "action": "self_update",
+    "self_update_action": "status"
   }
 }
 ```
 
 **You get back:** Your version, the latest published version, and whether they differ.
 
-**You say:** Update it.
+**You say:** Update comfyui-mcp itself.
 
 ```json
 {
-  "tool": "self_update",
+  "tool": "install_comfyui",
   "arguments": {
-    "action": "update"
+    "action": "self_update",
+    "self_update_action": "update"
   }
 }
 ```
 
 **You get back:** The upgrade result. Your MCP client has to be restarted afterwards to pick up the new server.
+
+<Warning>This updates THIS server, not ComfyUI and not the sidebar panel — those are action:"update" and action:"panel".</Warning>
+
+**You say:** Update every custom node I have installed.
+
+```json
+{
+  "tool": "install_comfyui",
+  "arguments": {
+    "action": "update_all"
+  }
+}
+```
+
+**You get back:** Confirmation that the bulk update was queued with ComfyUI-Manager. It runs asynchronously and ComfyUI usually needs a restart after.
+
+<Warning>This moves EVERY installed pack, not just the one that is broken. It is refused while the sidebar panel is version-pinned.</Warning>
 
 ---
 
@@ -240,55 +216,6 @@ Inspect and manage ComfyUI workspaces (local installs). Driven by the `action` p
 ```
 
 **You get back:** Confirmation, and it sticks across restarts. Later sessions target this install unless something overrides it.
-
----
-
-## get_environment
-
-Report ComfyUI environment info (mirrors `comfy-cli env`): the running instance details from /system_stats (OS, Python, ComfyUI version, GPU/VRAM — works for remote targets) plus local probes when a workspace path is available (Python version, git revision, ComfyUI-Manager version, and key pip packages like torch/CUDA). The local python probe targets the interpreter the RUNNING server uses (its venv / embedded / standalone python, resolved from the live server), never a bare `python` on PATH. Degrades gracefully and NEVER guesses: when the correct interpreter can't be confirmed, `local.python_probe_trusted` is false, `local.packages` is omitted, and `local.python_probe_reason` says why — an absent package list means UNDETERMINED, never 'not installed'.
-
-<Note>This tool takes no parameters.</Note>
-
-### Example
-
-**You say:** Tell me about my setup — useful when I'm reporting a bug.
-
-```json
-{
-  "tool": "get_environment",
-  "arguments": {}
-}
-```
-
-**You get back:** Where ComfyUI is installed, the Python and torch versions, the GPU, and which settings are in force. The first thing to paste into an issue.
-
----
-
-## configure_manager
-
-Configure ComfyUI-Manager settings, mirroring `comfy-cli manager` subcommands. Most actions use the ComfyUI-Manager HTTP API (works against remote ComfyUI); set_network_mode and set_security_level have no HTTP setter and are written to Manager's config.ini (requires a known local ComfyUI path; restart ComfyUI to apply).
-
-### Parameters
-
-<ParamField path="action" type="enum" required>
-  Which setting to change. HTTP API: set_preview_method, set_db_mode, set_component_policy, set_update_policy, set_channel, reset_queue. config.ini fallback: set_network_mode, set_security_level. Options: `action:"set_preview_method"`, `action:"set_db_mode"`, `action:"set_component_policy"`, `action:"set_update_policy"`, `action:"set_channel"`, `action:"reset_queue"`, `action:"set_network_mode"`, `action:"set_security_level"`.
-</ParamField>
-<ParamField path="value" type="string">
-  Value for the chosen action (omit only for reset_queue). Allowed values per action — set_preview_method: auto | latent2rgb | taesd | none; set_db_mode: local | cache | remote; set_component_policy: workflow | higher | mine; set_update_policy: stable-comfyui | nightly-comfyui; set_channel: a channel name (e.g. default); set_network_mode: public | private | offline; set_security_level: strong | normal | normal- | weak. HTTP-API actions take effect live; the config.ini actions (set_network_mode, set_security_level) apply only after a ComfyUI restart.
-</ParamField>
-
-### Example
-
-<Note>No worked example yet — the call below is a skeleton generated from the required parameters. Real examples live in `scripts/tool-doc-examples.ts`; contributions welcome.</Note>
-
-```json
-{
-  "tool": "configure_manager",
-  "arguments": {
-    "action": "set_preview_method"
-  }
-}
-```
 
 ---
 

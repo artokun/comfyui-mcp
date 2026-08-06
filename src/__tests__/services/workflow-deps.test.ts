@@ -282,7 +282,7 @@ describe("installWorkflowDependencies", () => {
 
     expect(result.installed).toEqual([]);
     expect(result.unresolved).toEqual(["comfyui-agent-panel"]);
-    expect(result.panel_notes?.join(" ")).toMatch(/does not queue or mutate.*install_panel/i);
+    expect(result.panel_notes?.join(" ")).toMatch(/does not queue or mutate.*install_comfyui\(action:'panel'/i);
     expect(deps.resetQueue).not.toHaveBeenCalled();
     expect(deps.queueInstall).not.toHaveBeenCalled();
     expect(deps.startQueue).not.toHaveBeenCalled();

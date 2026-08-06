@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
   getWorkspace,
   setDefaultWorkspace,
@@ -86,19 +87,16 @@ export function registerWorkspaceEnvTools(server: McpServer): void {
     },
   );
 
-  server.tool(
-    "get_environment",
-    "Report ComfyUI environment info (mirrors `comfy-cli env`): the running instance details from /system_stats (OS, Python, ComfyUI version, GPU/VRAM — works for remote targets) plus local probes when a workspace path is available (Python version, git revision, ComfyUI-Manager version, and key pip packages like torch/CUDA). The local python probe targets the interpreter the RUNNING server uses (its venv / embedded / standalone python, resolved from the live server), never a bare `python` on PATH. Degrades gracefully and NEVER guesses: when the correct interpreter can't be confirmed, `local.python_probe_trusted` is false, `local.packages` is omitted, and `local.python_probe_reason` says why — an absent package list means UNDETERMINED, never 'not installed'.",
-    {},
-    async () => {
-      try {
-        const info = await getEnvironment();
-        return {
-          content: [{ type: "text" as const, text: JSON.stringify(info, null, 2) }],
-        };
-      } catch (err) {
-        return errorToToolResult(err);
-      }
-    },
-  );
+}
+
+/**
+ * `install_comfyui (action:"environment")` — what the retired `install_comfyui (action:"environment")`
+ * tool did (0.50.0 slice 13). Same workspace-env service, same JSON block; the
+ * `workspace` tool above is untouched.
+ */
+export async function getEnvironmentAction(): Promise<CallToolResult> {
+  const info = await getEnvironment();
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(info, null, 2) }],
+  };
 }

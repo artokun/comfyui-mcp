@@ -242,14 +242,14 @@ function desktopConfigPath(): string {
  * The local ComfyUI root whose `extra_model_paths.yaml` a standalone/manual install
  * uses. Delegates to `resolveEffectiveComfyUIBase()` — the SINGLE source of truth every
  * other filesystem-backed tool (download_model, model lookups, node_pack (action:"verify"),
- * get_environment) already uses — so this file can never disagree with them about where
+ * install_comfyui (action:"environment")) already uses — so this file can never disagree with them about where
  * ComfyUI lives. That order is:
  *
  *   1. `config.comfyuiPath` — COMFYUI_PATH env or auto-detection (wins), then
  *   2. the SAVED DEFAULT WORKSPACE (workspace action:"set_default"), local mode only.
  *
  * Before #648 this read `config.comfyuiPath` DIRECTLY, so with COMFYUI_PATH unset
- * `list_local_models action:"list_paths"` threw while `workspace`/`get_environment` happily reported the
+ * `list_local_models action:"list_paths"` threw while `workspace`/`install_comfyui (action:"environment")` happily reported the
  * saved default workspace — the same install, two different answers.
  *
  * Throws (never guesses) when neither is available, including when the session is not

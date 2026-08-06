@@ -740,7 +740,7 @@ describe("#809 truncation remedies name a lever that actually exists", () => {
   // parameterised tool at all. That is exactly why they need checking: a fixed cap with
   // an invented remedy is the same defect as defect 1, pointing the other way.
 
-  it("the traceback cap states it is fixed, and only says get_logs MAY have the rest", () => {
+  it('the traceback cap states it is fixed, and only says get_system_stats (action:"logs") MAY have the rest', () => {
     const err = extractExecutionError({
       status: {
         messages: [
@@ -765,17 +765,17 @@ describe("#809 truncation remedies name a lever that actually exists", () => {
     // the marker has to say that or the reader trusts a head that names nothing.
     expect(tb).toMatch(/final exception line is likely among the cut frames/);
     // "may still hold" — never a promise. Nothing re-serves the /history traceback.
-    expect(tb).toMatch(/get_logs may still hold/);
+    expect(tb).toMatch(/get_system_stats \(action:"logs"\) may still hold/);
     expect(tb).not.toMatch(/read the full traceback with/);
   });
 
-  it("the crash-block cap states it is fixed and does not promise get_logs has the rest", () => {
+  it('the crash-block cap states it is fixed and does not promise get_system_stats (action:"logs") has the rest', () => {
     const head = "Windows fatal exception: access violation\n";
     const r = parseCrashBlock(head + "F".repeat(9000));
     expect(r.fatal).toBe(true);
     expect(r.block).toContain("crash-block cap");
     expect(r.block).toContain("no parameter raises it");
-    expect(r.block).toMatch(/get_logs may still hold/);
+    expect(r.block).toMatch(/get_system_stats \(action:"logs"\) may still hold/);
   });
 
   it("does not claim full coverage when the outline REFUSED to render", async () => {

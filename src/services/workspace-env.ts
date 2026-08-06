@@ -354,7 +354,7 @@ export interface WorkspaceInfo {
     /**
      * #769 — derived from the RUNNING ComfyUI's own launch argv, because
      * nothing was configured. Not persisted: reported so `workspace(get)` stops
-     * contradicting `get_environment`, which has always surfaced this path.
+     * contradicting `install_comfyui (action:"environment")`, which has always surfaced this path.
      */
     | "live-server"
     | "none";
@@ -383,7 +383,7 @@ export async function getWorkspace(): Promise<WorkspaceInfo> {
   }
 
   const configuredPath = config.comfyuiPath ?? cfg.defaultWorkspace;
-  // #769 — `get_environment` has always reported the live server's own install
+  // #769 — `install_comfyui (action:"environment")` has always reported the live server's own install
   // root as the local workspace, resolved from the process it is talking to.
   // Reporting "none" here for the SAME machine was a straight contradiction,
   // and it sent users hunting for a misconfiguration that did not exist. Only
@@ -489,7 +489,7 @@ export async function listWorkspaces(): Promise<WorkspaceList> {
 }
 
 // ---------------------------------------------------------------------------
-// get_environment — mirrors comfy-cli env
+// install_comfyui (action:"environment") — mirrors comfy-cli env
 // ---------------------------------------------------------------------------
 
 const IS_WIN = platform() === "win32";
@@ -872,7 +872,7 @@ export function hasComfyUIEntrypoint(dir: string): boolean {
  * one level down: `<base>/ComfyUI/main.py` with its own `<base>/ComfyUI/.venv`,
  * while `<base>` itself holds the launcher's `standalone-env` python — a DIFFERENT
  * interpreter whose site-packages the running server never imports. Picking `<base>`
- * is what made `get_environment` report `standalone-env/python.exe` and made pip
+ * is what made `install_comfyui (action:"environment")` report `standalone-env/python.exe` and made pip
  * installs land where custom nodes couldn't see them (#401 recurrence). So when the
  * nested dir actually contains a `main.py`, it IS the server root and wins.
  */
@@ -1217,7 +1217,7 @@ export async function resolveInstallInterpreter(
  * and `pip show a b c` exits 1 whenever ANY named package is missing — which, with
  * xformers and diffusers in the list, is the ordinary state of a real machine. That
  * silently threw away the records for the packages pip DID find (torch among them) and
- * left `packages` empty, so `get_environment` reported no packages on installs that had
+ * left `packages` empty, so `install_comfyui (action:"environment")` reported no packages on installs that had
  * them. A non-zero exit here is a completed run whose output must still be read.
  */
 async function probePipPackages(

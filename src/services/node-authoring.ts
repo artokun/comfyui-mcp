@@ -255,7 +255,7 @@ function toClassName(slug: string): string {
  * way every other filesystem-backed tool does (node-dev, node-verify): COMFYUI_PATH
  * first, then the saved default workspace (set via workspace action:"set_default") when
  * COMFYUI_PATH is unset and we are not targeting a remote ComfyUI. This is what
- * get_environment / workspace action:"get" already report, so scaffold/publish no longer
+ * install_comfyui (action:"environment") / workspace action:"get" already report, so scaffold/publish no longer
  * reject a loopback session that has a saved default workspace as if it were remote
  * (#506). Returns undefined only in remote mode or when no local install is known —
  * then we refuse with a clear, actionable error.

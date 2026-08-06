@@ -53,7 +53,7 @@ export interface AgentSettings {
  * An EXPLICIT user pin holding the sidebar panel node-pack at one version.
  *
  * A pin is a promise: while it is set, nothing in this codebase may move the
- * panel — not the auto-sync skill, not `install_panel(action='update')`, not the
+ * panel — not the auto-sync skill, not `install_comfyui(action:'panel', panel_action:'update')`, not the
  * on-load auto-installer. The user cleared it or nothing happens. See
  * `panel-sync.ts` for the decision logic that honours it.
  */

@@ -1,7 +1,7 @@
-// #689 — a pin written during a pending update_all / snapshot-restore window
+// #689 — a pin written during a pending update-all / snapshot-restore window
 // must CANCEL the queued panel-affecting work, not just warn about it.
 //
-// These tests drive the REAL install_panel(action='pin') tool handler with a
+// These tests drive the REAL install_comfyui(action:'panel', panel_action:'pin') tool handler with a
 // stubbed ComfyUI-Manager and a real temp-dir marker/lock/settings file, and
 // assert the four honesty cases:
 //   1. proven cancel      → resetQueue called ON THE MARKER'S SERVER, pending
@@ -24,7 +24,6 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 // The marker records the server the op was queued on; the cancel must target
 // THAT server even after the orchestrator is retargeted (#689).
@@ -75,7 +74,7 @@ import {
 } from "../../services/node-management.js";
 import { updateAllCustomNodes } from "../../services/update-comfyui.js";
 import { restoreNodeSnapshot } from "../../services/node-snapshots.js";
-import { registerInstallPanelTools } from "../../tools/install-panel.js";
+import { panelAction } from "../../tools/install-panel.js";
 
 let dir: string;
 
@@ -101,30 +100,17 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-// ── Tool-handler capture (mirrors __tests__/tools/batches.test.ts) ──────────
-
-type ToolHandler = (args: Record<string, unknown>) => Promise<{
-  content: Array<{ type: string; text?: string }>;
-  isError?: boolean;
-}>;
-
-function pinHandler(): ToolHandler {
-  const tools: Array<{ name: string; handler: ToolHandler }> = [];
-  const server = {
-    tool: (_name: string, _desc: string, _shape: unknown, handler: ToolHandler) => {
-      tools.push({ name: _name, handler });
-    },
-  } as unknown as McpServer;
-  registerInstallPanelTools(server);
-  const tool = tools.find((t) => t.name === "install_panel");
-  if (!tool) throw new Error("install_panel was not registered");
-  return tool.handler;
-}
+// ── The pin path, driven directly ───────────────────────────────────────────
+// 0.50.0 slice 13 folded the panel tool into
+// install_comfyui (action:"panel", panel_action:"pin"), so the unit under test
+// is the exported action handler rather than a captured server.tool
+// registration. Same body, same locking, same JSON.
 
 async function writePin(): Promise<Record<string, unknown>> {
-  const result = await pinHandler()({ action: "pin", version: "0.11.3" });
+  const result = await panelAction("pin", "0.11.3", undefined);
   expect(result.isError ?? false).toBe(false);
-  return JSON.parse(result.content[0].text ?? "{}") as Record<string, unknown>;
+  const first = result.content[0] as { text?: string };
+  return JSON.parse(first.text ?? "{}") as Record<string, unknown>;
 }
 
 // ── Stub Manager personas ────────────────────────────────────────────────────
@@ -231,7 +217,7 @@ function legacyPersona(state: QueueState) {
 function recordUpdateAllMarker(extra: { base?: string; uiId?: string } = { base: ORIG }) {
   return recordPanelPendingOp(
     "update-all",
-    "an update_all request may have been handed to ComfyUI-Manager",
+    "an update-all request may have been handed to ComfyUI-Manager",
     UPDATE_ALL_PENDING_MS,
     extra,
   );
@@ -258,7 +244,7 @@ const clientStatusGets = () => managerCalls.filter((c) => c.url.includes("client
 
 const historyGets = () => managerCalls.filter((c) => c.url.includes("/manager/queue/history"));
 
-describe("pin write cancels a pending update_all (#689)", () => {
+describe("pin write cancels a pending update-all (#689)", () => {
   it("proven cancel (v4 + ui_id): resets ON THE MARKER'S SERVER after proving our tasks pending, names the counts, clears the marker", async () => {
     recordUpdateAllMarker({ base: ORIG, uiId: "ui-1" });
     // Shared queue has OTHER clients' work too — the report must name it.
@@ -300,7 +286,7 @@ describe("pin write cancels a pending update_all (#689)", () => {
   });
 
   it("shared pending from OTHER clients never triggers a reset — nothing of ours ⇒ already-drained", async () => {
-    // THE finding-1 case: our update_all already drained; only unrelated
+    // THE finding-1 case: our update-all already drained; only unrelated
     // tasks are pending. A reset would clear THOSE (collateral) while
     // claiming the panel was saved.
     recordUpdateAllMarker({ base: ORIG, uiId: "ui-2" });
@@ -379,7 +365,7 @@ describe("pin write cancels a pending update_all (#689)", () => {
     expect(cancel.markerCleared).toBe(false);
     expect(cancel.detail).toMatch(/recorded NO server/);
     expect(cancel.detail).toMatch(/NO reset was sent/);
-    expect(cancel.detail).not.toMatch(/cancelled the queued update_all|best-effort/);
+    expect(cancel.detail).not.toMatch(/cancelled the queued update-all|best-effort/);
     expect(activePanelPendingOps()).toHaveLength(1);
     expect(report.pendingPanelOps).toHaveLength(1);
     expect(report.note as string).toMatch(/WARNING — a panel-affecting operation is still pending/);
@@ -415,7 +401,7 @@ describe("pin write cancels a pending update_all (#689)", () => {
     expect(activePanelPendingOps()).toHaveLength(1);
     expect(report.pendingPanelOps).toHaveLength(1);
     expect(report.note as string).toMatch(/WARNING — a panel-affecting operation is still pending/);
-    expect(report.note as string).not.toMatch(/cancelled the queued update_all/);
+    expect(report.note as string).not.toMatch(/cancelled the queued update-all/);
   });
 
   it("unverifiable pre-reset state: NOTHING is sent, marker KEPT", async () => {
@@ -586,7 +572,7 @@ describe("pin write cancels a pending update_all (#689)", () => {
     // Finding 4: "already finished" alone is not enough — the report must
     // name the possibility that the update already landed.
     expect(cancel.detail).toMatch(/may ALREADY have been moved/);
-    expect(cancel.detail).toMatch(/install_panel\(action='status'\)/);
+    expect(cancel.detail).toMatch(/install_comfyui\(action:'panel', panel_action:'status'\)/);
     expect(cancel.detail).not.toMatch(/cancelled the queued|dropped \d/);
     expect(activePanelPendingOps()).toEqual([]);
   });
@@ -835,7 +821,7 @@ describe("pin write with no pending markers", () => {
   });
 });
 
-describe("the update_all marker captures base + ui_id at enqueue (#689)", () => {
+describe("the update-all marker captures base + ui_id at enqueue (#689)", () => {
   it("records the server it queued on and the ui_id of the attempt that landed", async () => {
     let enqueuedUiId: string | undefined;
     managerHandler = (url, init) => {

@@ -4,7 +4,7 @@ description: "Enqueue workflows — one at a time, from a named template, or as 
 icon: "play"
 ---
 
-<Info>8 tools. Generated from the live MCP tool schemas — do not edit by hand; run `npm run docs:gen`.</Info>
+<Info>6 tools. Generated from the live MCP tool schemas — do not edit by hand; run `npm run docs:gen`.</Info>
 
 <Tip>**You don't type these calls.** Ask your agent for what you want in ordinary English — it chooses the tool and fills in the arguments. The JSON on this page is what it sends. New here? Start with [Using the tools](/using-tools).</Tip>
 
@@ -144,22 +144,91 @@ Submit work to the ComfyUI execution queue — the primary way an agent starts a
 
 ## get_system_stats
 
-Get system information from the connected ComfyUI server: GPU device(s), total/free VRAM, ComfyUI/Python/PyTorch versions, and OS details. Requires a running ComfyUI server (works against local or remote targets); read-only, takes no parameters. Returns the raw /system_stats JSON. Use to confirm connectivity and check available VRAM before enqueuing large workflows. Errors if the server is unreachable.
+Inspect the connected ComfyUI server: what it is running on, what it has logged, and whether it is healthy enough to dispatch work to. All three actions are READ-ONLY — nothing here mutates anything. Driven by the `action` parameter:
+- action:"stats" — Get system information from the connected ComfyUI server: GPU device(s), total/free VRAM, ComfyUI/Python/PyTorch versions, and OS details. Requires a running ComfyUI server (works against local or remote targets); read-only, takes no parameters. Returns the raw /system_stats JSON. Use to confirm connectivity and check available VRAM before enqueuing large workflows. Errors if the server is unreachable.
+- action:"logs" — Get ComfyUI server runtime logs. Useful for debugging execution errors, model loading issues, missing nodes, and Python tracebacks. `max_lines` tails the end (default 100), `keyword` filters case-insensitively.
+- action:"health" — Pre-flight diagnostic for the connected ComfyUI: one call that aggregates the signals an agent should check before dispatching a batch. Reports ComfyUI version/Python/PyTorch, GPU name + VRAM free/total, system RAM free, queue depth (running + pending), per-category /models populations (catches empty dropdowns from a misconfigured extra_model_paths.yaml), and recent errors from /internal/logs. Read-only — no mutation. Use this when a job fails for an unexpected reason, before a long batch run, or to confirm a remote ComfyUI is healthy. Originally contributed by github.com/joaolvivas.
 
-<Note>This tool takes no parameters.</Note>
+<Tip>**In plain terms:** Three read-only views of the connected ComfyUI: action:"stats" for what it is running on, action:"logs" for what it has said, and action:"health" for whether it is fit to dispatch work to. Nothing here changes anything — freeing VRAM is clear_vram, and filing a bug is report_issue.</Tip>
 
-### Example
+### Parameters
+
+<ParamField path="action" type="enum" required>
+  Which read to perform. "stats" takes no other parameters; "logs" takes `max_lines`/`keyword`; "health" takes `model_categories`/`recent_errors`. None of them is required. Options: `action:"stats"`, `action:"logs"`, `action:"health"`.
+</ParamField>
+<ParamField path="max_lines" type="integer">
+  action:"logs" — maximum number of log lines to return from the end (default: 100).
+</ParamField>
+<ParamField path="keyword" type="string">
+  action:"logs" — filter log lines containing this keyword (case-insensitive). Examples: 'error', 'warning', 'VRAM', a node name.
+</ParamField>
+<ParamField path="model_categories" type="string[]">
+  action:"health" — override the model categories to poll (defaults to checkpoints, diffusion_models, loras, vae, text_encoders, controlnet).
+</ParamField>
+<ParamField path="recent_errors" type="integer">
+  action:"health" — how many recent error/traceback lines to include from /internal/logs (default 20, max 200).
+</ParamField>
+
+### Examples
 
 **You say:** How much VRAM have I got left?
 
 ```json
 {
   "tool": "get_system_stats",
-  "arguments": {}
+  "arguments": {
+    "action": "stats"
+  }
 }
 ```
 
 **You get back:** The GPU, its total and free VRAM, system RAM, and the ComfyUI and Python versions.
+
+**You say:** Is everything working?
+
+```json
+{
+  "tool": "get_system_stats",
+  "arguments": {
+    "action": "health"
+  }
+}
+```
+
+**You get back:** Whether the server is reachable, what it is running on, and whether the model folders have anything in them.
+
+**You say:** Check the setup, and tell me if any recent runs blew up.
+
+```json
+{
+  "tool": "get_system_stats",
+  "arguments": {
+    "action": "health",
+    "model_categories": [
+      "checkpoints",
+      "loras"
+    ],
+    "recent_errors": 5
+  }
+}
+```
+
+**You get back:** The same report, narrowed to the two model folders you asked about, with the last five errors from history attached.
+
+**You say:** Show me the last errors from the server log.
+
+```json
+{
+  "tool": "get_system_stats",
+  "arguments": {
+    "action": "logs",
+    "keyword": "error",
+    "max_lines": 50
+  }
+}
+```
+
+**You get back:** The last fifty log lines that mention 'error', ANSI codes stripped.
 
 ---
 
@@ -174,8 +243,6 @@ Inspect and manage the ComfyUI execution queue. Driven by the `action` parameter
 - action:"cancel" — Stop the CURRENTLY RUNNING job ROBUSTLY. Sends an interrupt, then WAITS and verifies the job actually stopped — ComfyUI only honors interrupts BETWEEN steps, so a long single step (e.g. a high-res video sampler) can ignore a plain cancel. If the interrupt isn't honored it escalates to freeing VRAM (POST /free) and re-checks; if it STILL won't die it reports the job as WEDGED and tells you to restart_comfyui (an HTTP cancel cannot kill a stuck step). Set clear_pending:true to also drop ALL pending jobs in the same call — the correct "reset the queue" action, since cancelling alone leaves pending jobs that would run next. The partial result is discarded. With `prompt_id` given, only interrupts the running job when its prompt_id matches; omit to interrupt whatever is currently running. Use action:"cancel_queued" to remove one specific PENDING job instead.
 - action:"cancel_queued" — Remove one specific PENDING job from the queue by prompt_id. Does not affect running jobs.
 - action:"clear" — Clear ALL pending jobs from the queue. Does not affect the currently running job.
-
-<Tip>**In plain terms:** One tool for everything to do with the job queue — see what is waiting, reorder it, cancel something. Which job it does is set by `action`. This is the shape most of the newer tools have; see [Using the tools](/using-tools) for why.</Tip>
 
 ### Parameters
 
@@ -201,9 +268,9 @@ Inspect and manage the ComfyUI execution queue. Driven by the `action` parameter
   action:"cancel" — also clear ALL pending jobs (recommended when resetting after a stuck/slow render, so a re-queue doesn't stack behind a backlog). Default false.
 </ParamField>
 
-### Examples
+### Example
 
-**You say:** What's still running?
+<Note>No worked example yet — the call below is a skeleton generated from the required parameters. Real examples live in `scripts/tool-doc-examples.ts`; contributions welcome.</Note>
 
 ```json
 {
@@ -214,40 +281,6 @@ Inspect and manage the ComfyUI execution queue. Driven by the `action` parameter
 }
 ```
 
-**You get back:** The job currently rendering and everything queued behind it, each with its prompt_id — the receipt you use to ask about one job later.
-
-**You say:** Kill the one that's running, it's wrong.
-
-```json
-{
-  "tool": "queue",
-  "arguments": {
-    "action": "cancel",
-    "prompt_id": "8f3c1a02-6d4e-4b9a-9f21-77c0be5d1e44"
-  }
-}
-```
-
-**You get back:** Confirmation that the job was interrupted.
-
-<Warning>This stops work in progress and you do not get the partial result. If you share this ComfyUI with anyone else, make sure the job is yours.</Warning>
-
-**You say:** Clear the whole queue, I want to start over.
-
-```json
-{
-  "tool": "queue",
-  "arguments": {
-    "action": "clear",
-    "clear_pending": true
-  }
-}
-```
-
-**You get back:** Confirmation of how many jobs were dropped.
-
-<Warning>Destructive and not undoable — every waiting job is discarded, including any that someone else queued.</Warning>
-
 ---
 
 ## get_history
@@ -257,8 +290,6 @@ Read what has already been generated on this machine — execution history, why 
 - action:"diagnose" — WHY DID MY RENDER FAIL / WHAT IS MISSING? Explains a failed run in ONE call, without needing a canvas — the headless counterpart to the panel's panel_get_errors ("why is this red?"), so mobile/remote sessions get the same answer. Returns: the failed node (id, type) with its `exception_type` + message and a trimmed traceback; **missing_models** (the exact model file that is not installed and the widget holding it — feed the filename to download_model action:'search_civitai', then action:'download_civitai' — or action:'search' then action:'download' — to fix it); **missing_node_types** (node classes this install lacks — feed to search_custom_nodes, then install_custom_node); and any other per-input validation errors. Call this whenever a run fails, an enqueue is rejected, or the user asks what is missing — instead of guessing from raw logs. With no prompt_id it diagnoses the most recent FAILED run (falling back to the most recent run). Read-only.
 - action:"stats" — Statistics from this MCP server's LOCAL generation-history database (populated as you run workflows; NOT from ComfyUI, and not the same source as action:"list"): total generations, count of unique sampler/scheduler/steps/CFG combos, a per-model-family breakdown, and the most-reused settings. Read-only; works without a running ComfyUI. Returns empty stats until you have generated images. For concrete recommended settings rather than aggregate counts, use action:"suggest".
 - action:"suggest" — Recommend concrete, proven sampler/scheduler/steps/CFG (and denoise/shift/LoRA) settings derived from that same LOCAL generation-history database. Read-only and works without a running ComfyUI. Narrow results by `model_family`, `lora_hash`, or a name `search`; with no filter it returns the top settings across all history. Returns a ranked list with each combo's reuse count, or a "no history" message until you have generated images. Use this for ready-to-apply values; use action:"stats" for aggregate counts and breakdowns rather than specific suggestions.
-
-<Tip>**In plain terms:** Everything about runs that have already happened: what a run produced, why one failed, and what settings your past renders actually used.</Tip>
 
 ### Parameters
 
@@ -281,122 +312,18 @@ Read what has already been generated on this machine — execution history, why 
   action:"suggest" — max results (default 10).
 </ParamField>
 
-### Examples
-
-**You say:** Did that finish? What did it produce?
-
-```json
-{
-  "tool": "get_history",
-  "arguments": {
-    "action": "list",
-    "prompt_id": "8f3c1a02-6d4e-4b9a-9f21-77c0be5d1e44"
-  }
-}
-```
-
-**You get back:** That run's outcome and the files it wrote. Omit `prompt_id` to get the most recent run instead of one specific one.
-
-**You say:** That render failed and I don't understand the error.
-
-```json
-{
-  "tool": "get_history",
-  "arguments": {
-    "action": "diagnose",
-    "prompt_id": "8f3c1a02-6d4e-4b9a-9f21-77c0be5d1e44"
-  }
-}
-```
-
-**You get back:** A plain reading of what went wrong — a missing model, a bad connection, not enough VRAM — and the suggested fix. Omit `prompt_id` and it looks at the most recent failure. This is the one to reach for when a run fails: it says everything action "list" would, plus what is missing.
-
-**You say:** What sampler settings have actually worked for me on SDXL?
-
-```json
-{
-  "tool": "get_history",
-  "arguments": {
-    "action": "suggest",
-    "model_family": "sdxl"
-  }
-}
-```
-
-**You get back:** A ranked list of sampler/scheduler/steps/CFG combinations you have used before, most-reused first. Read from this machine's own generation log, so it is empty until you have rendered a few things.
-
----
-
-## get_logs
-
-Get ComfyUI server runtime logs. Useful for debugging execution errors, model loading issues, missing nodes, and Python tracebacks.
-
-### Parameters
-
-<ParamField path="max_lines" type="integer">
-  Maximum number of log lines to return from the end (default: 100)
-</ParamField>
-<ParamField path="keyword" type="string">
-  Filter log lines containing this keyword (case-insensitive). Examples: 'error', 'warning', 'VRAM', a node name
-</ParamField>
-
 ### Example
 
 <Note>No worked example yet — the call below is a skeleton generated from the required parameters. Real examples live in `scripts/tool-doc-examples.ts`; contributions welcome.</Note>
 
 ```json
 {
-  "tool": "get_logs",
-  "arguments": {}
-}
-```
-
----
-
-## health_check
-
-Pre-flight diagnostic for the connected ComfyUI: one call that aggregates the signals an agent should check before dispatching a batch. Reports ComfyUI version/Python/PyTorch, GPU name + VRAM free/total, system RAM free, queue depth (running + pending), per-category /models populations (catches empty dropdowns from a misconfigured extra_model_paths.yaml), and recent errors from /internal/logs. Read-only — no mutation. Use this when a job fails for an unexpected reason, before a long batch run, or to confirm a remote ComfyUI is healthy. Originally contributed by github.com/joaolvivas.
-
-<Tip>**In plain terms:** The first thing to try when something is not working. It answers "is ComfyUI actually up, and can it see my models?" in one call.</Tip>
-
-### Parameters
-
-<ParamField path="model_categories" type="string[]">
-  Override the model categories to poll (defaults to checkpoints, diffusion_models, loras, vae, text_encoders, controlnet).
-</ParamField>
-<ParamField path="recent_errors" type="integer">
-  How many recent error/traceback lines to include from /internal/logs (default 20, max 200).
-</ParamField>
-
-### Examples
-
-**You say:** Is everything working?
-
-```json
-{
-  "tool": "health_check",
-  "arguments": {}
-}
-```
-
-**You get back:** Whether the server is reachable, what it is running on, and whether the model folders have anything in them.
-
-**You say:** Check the setup, and tell me if any recent runs blew up.
-
-```json
-{
-  "tool": "health_check",
+  "tool": "get_history",
   "arguments": {
-    "model_categories": [
-      "checkpoints",
-      "loras"
-    ],
-    "recent_errors": 5
+    "action": "list"
   }
 }
 ```
-
-**You get back:** The same report, narrowed to the two model folders you asked about, with the last five errors from history attached.
 
 ---
 

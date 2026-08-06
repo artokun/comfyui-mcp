@@ -592,7 +592,7 @@ function remoteModelTarget(model: ComfyManifest["models"][number]): {
  * #390: resolve a saved default workspace to adopt as the local FS target for
  * THIS apply_manifest call, WITHOUT persisting it process-wide. Returns a path
  * only when: we are in local mode (a loopback/local ComfyUI, not remote/cloud),
- * COMFYUI_PATH is unset, and the saved default (what get_environment resolves)
+ * COMFYUI_PATH is unset, and the saved default (what install_comfyui (action:"environment") resolves)
  * both exists and looks like a ComfyUI install (has models/ or custom_nodes/).
  * The connected server is local (isRemoteMode() === false), so the saved default
  * is a valid local mirror of it. Returns undefined otherwise.
@@ -773,7 +773,7 @@ async function applyManifestSections(
           "failed",
           "apply_manifest does not manage the sidebar panel because it cannot prove that its " +
             "ComfyUI-Manager target and local served-panel filesystem are the same instance. " +
-            "Use install_panel on the selected ComfyUI host, which verifies the served version and .bak shadows.",
+            "Use install_comfyui(action:'panel') on the selected ComfyUI host, which verifies the served version and .bak shadows.",
         ),
       );
       continue;

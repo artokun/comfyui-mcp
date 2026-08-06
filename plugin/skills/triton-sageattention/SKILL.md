@@ -122,7 +122,7 @@ must target:
 Detect it from the **live server** — the surest way to hit the same python ComfyUI
 runs on:
 
-- `get_environment` / `get_system_stats` report `embedded_python` (true →
+- `install_comfyui (action:"environment")` / `get_system_stats` report `embedded_python` (true →
   Portable), the python version and the `pytorch_version` (e.g. `2.10.0+cu130`).
 - Inspect the running process's `argv` (from `get_system_stats`) — the path to
   `main.py` reveals the install root; its sibling `standalone-env` / `python_embeded`
@@ -371,7 +371,7 @@ Verified June 2026 against:
 - **WanVideoWrapper** — kijai `ComfyUI-WanVideoWrapper` nodes: `attention_mode`
   enum `{sdpa, flash_attn_2, flash_attn_3, sageattn, sparse_sage_attention}` and
   the `No module named 'sageattention'` loader crash.
-- **Live env** — `get_environment`/`get_system_stats` on this machine:
+- **Live env** — `install_comfyui (action:"environment")`/`get_system_stats` on this machine:
   py3.13.12, torch 2.10.0+cu130, RTX 4090, Desktop standalone (non-embedded).
 
 **Unverified / caveats:** the exact `.post` suffix and any newer torch variant

@@ -3,7 +3,7 @@
 // The pin was originally enforced only inside `runPanelAction`, which the PR
 // described as "the mutation choke point". It was not: the sidebar panel is an
 // ordinary custom node pack, so the GENERIC node mutations reach the very same
-// ComfyUI-Manager operation without touching install_panel at all. A pinned user
+// ComfyUI-Manager operation without touching install_comfyui(action:'panel') at all. A pinned user
 // was one `install_custom_node(action:"update", id="all")` away from being moved.
 //
 // These tests call the REAL exported service functions (no fs mocking, a real
@@ -58,7 +58,7 @@ let managerFailAfterGate = false;
 // The update paths route through detectManagerApi (#656), and with the generic
 // "{}" answers detection THROWS — which is what most of these tests want (a
 // fast, definite failure right after the guard lets a call through). But the
-// update_all lock test needs the mutation to actually COMPLETE — enqueue +
+// update-all lock test needs the mutation to actually COMPLETE — enqueue +
 // worker start, no drain — so it opts into the stub answering the dialect
 // probes like a legacy 3.x Manager. (Never turn this on for a path that
 // DRAINS the Manager queue: the stub has no queue progression, so the drain
@@ -145,7 +145,7 @@ describe("generic node mutations cannot walk past the panel pin", () => {
     expect(managerCalls).toEqual([]);
   });
 
-  it("update_all REFUSES while pinned — the third door, not a node tool at all", async () => {
+  it("update-all REFUSES while pinned — the third door, not a node tool at all", async () => {
     setPanelVersionPin("0.11.3");
     await expect(updateAllCustomNodes()).rejects.toThrow(PanelPinnedError);
     expect(managerCalls).toEqual([]);
@@ -227,7 +227,7 @@ describe("a pin written MID-mutation cannot slice through it", () => {
     const update = updateCustomNode({ id: "all" });
     await vi.waitFor(() => expect(managerCalls.length).toBeGreaterThan(0));
 
-    // Commit a pin exactly the way install_panel(action='pin') does — through
+    // Commit a pin exactly the way install_comfyui(action:'panel', panel_action:'pin') does — through
     // the shared mutation lock.
     let pinCommitted = false;
     const pinWrite = withPanelMutationLock(async () => {
@@ -254,8 +254,8 @@ describe("a pin written MID-mutation cannot slice through it", () => {
     await expect(updateCustomNode({ id: "all" })).rejects.toThrow(PanelPinnedError);
   });
 
-  it("update_all holds the lock across queue + start, and still only reports 'queued'", async () => {
-    // update_all goes detectManagerApi → enqueueUpdateAll → queue/start with NO
+  it("update-all holds the lock across queue + start, and still only reports 'queued'", async () => {
+    // update-all goes detectManagerApi → enqueueUpdateAll → queue/start with NO
     // drain, so the stub can let it complete: answer the dialect probes like a
     // legacy 3.x Manager (see the stub's comment).
     managerLegacyPersona = true;
@@ -277,7 +277,7 @@ describe("a pin written MID-mutation cannot slice through it", () => {
     expect(pinCommitted).toBe(false);
     expect(getPanelPinState().pinned).toBe(false);
 
-    // update_all is fire-and-forget by design: the lock covers the pin check +
+    // update-all is fire-and-forget by design: the lock covers the pin check +
     // queue + worker start; the Manager-side drain afterwards is outside any
     // process's control, which is exactly why the result must keep saying
     // "queued" and never claim the updates landed.

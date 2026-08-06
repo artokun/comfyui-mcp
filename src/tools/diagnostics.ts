@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
   getLogs,
   getHistory,
@@ -217,53 +218,45 @@ function formatHistoryEntry(
 
 const HISTORY_ACTIONS = ["list", "diagnose", "stats", "suggest"] as const;
 
+/**
+ * `get_system_stats (action:"logs")` — what the retired `get_system_stats (action:"logs")` tool did
+ * (0.50.0 slice 13). Same /internal/logs read, same keyword filter, same
+ * default-100 tail, same ANSI strip, same "No log lines found" text.
+ *
+ * `keyword` keeps its TRUTHINESS check rather than an absence check: an empty
+ * keyword matched every line before this consolidation ("".toLowerCase() is a
+ * substring of everything), and that is the behaviour callers have. This is the
+ * filter's own semantics, not a requiredness guard.
+ */
+export async function getLogsAction(args: {
+  max_lines?: number;
+  keyword?: string;
+}): Promise<CallToolResult> {
+  let lines = await getLogs();
+
+  // Filter by keyword if provided
+  if (args.keyword) {
+    const kw = args.keyword.toLowerCase();
+    lines = lines.filter((line) => line.toLowerCase().includes(kw));
+  }
+
+  // Tail to max_lines
+  const maxLines = args.max_lines ?? 100;
+  if (lines.length > maxLines) {
+    lines = lines.slice(-maxLines);
+  }
+
+  // Strip ANSI escape codes for readability
+  const clean = lines.map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
+
+  const text =
+    clean.length === 0
+      ? `No log lines found${args.keyword ? ` matching \"${args.keyword}\"` : ""}.`
+      : clean.join("\n");
+
+  return { content: [{ type: "text" as const, text }] };
+}
 export function registerDiagnosticsTools(server: McpServer): void {
-  server.tool(
-    "get_logs",
-    "Get ComfyUI server runtime logs. Useful for debugging execution errors, model loading issues, missing nodes, and Python tracebacks.",
-    {
-      max_lines: z
-        .number()
-        .int()
-        .min(1)
-        .max(2000)
-        .optional()
-        .describe("Maximum number of log lines to return from the end (default: 100)"),
-      keyword: z
-        .string()
-        .optional()
-        .describe("Filter log lines containing this keyword (case-insensitive). Examples: 'error', 'warning', 'VRAM', a node name"),
-    },
-    async (args) => {
-      try {
-        let lines = await getLogs();
-
-        // Filter by keyword if provided
-        if (args.keyword) {
-          const kw = args.keyword.toLowerCase();
-          lines = lines.filter((line) => line.toLowerCase().includes(kw));
-        }
-
-        // Tail to max_lines
-        const maxLines = args.max_lines ?? 100;
-        if (lines.length > maxLines) {
-          lines = lines.slice(-maxLines);
-        }
-
-        // Strip ANSI escape codes for readability
-        const clean = lines.map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
-
-        const text = clean.length === 0
-          ? `No log lines found${args.keyword ? ` matching "${args.keyword}"` : ""}.`
-          : clean.join("\n");
-
-        return { content: [{ type: "text", text }] };
-      } catch (err) {
-        return errorToToolResult(err);
-      }
-    },
-  );
-
   server.tool(
     "get_history",
     "Read what has already been generated on this machine — execution history, why a run failed, and the settings your past renders actually used. Driven by the `action` parameter:\n" +

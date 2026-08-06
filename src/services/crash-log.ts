@@ -143,7 +143,7 @@ export function parseCrashBlock(text: string): CrashParseResult {
     const dropped = block.length - MAX_BLOCK_CHARS;
     block =
       block.slice(0, MAX_BLOCK_CHARS) +
-      `\n…(+${dropped} more char(s) cut at the fixed ${MAX_BLOCK_CHARS}-char crash-block cap — no parameter raises it; get_logs may still hold the full crash while it is within the log tail)`;
+      `\n…(+${dropped} more char(s) cut at the fixed ${MAX_BLOCK_CHARS}-char crash-block cap — no parameter raises it; get_system_stats (action:"logs") may still hold the full crash while it is within the log tail)`;
   }
 
   // Culprit: the DEEPEST (innermost / actually-crashing) frame in the fatal

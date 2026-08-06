@@ -11,7 +11,7 @@
 //     install_custom_node(action:"update", id="all")  → updateCustomNode(...)
 //     install_custom_node(action:"reinstall", id="comfyui-mcp-panel")
 //                                                     → reinstallCustomNode(...)
-//     update_all                                      → updateAllCustomNodes()
+//     update-all                                      → updateAllCustomNodes()
 //
 // None of those go through `runPanelAction`, so none of them saw the pin. A
 // pinned user was one `id="all"` away from being moved. The guard therefore
@@ -170,21 +170,21 @@ export function assertPanelPinAllows(action: string, id: string): void {
       : ``;
 
   // #774/#784 — the way out of this refusal must be a way the caller can
-  // actually take. `install_panel(action='unpin')` is the right instruction in a
-  // local session and a dead end in a remote/cloud one, where install_panel
+  // actually take. `install_comfyui(action:'panel', panel_action:'unpin')` is the right instruction in a
+  // local session and a dead end in a remote/cloud one, where install_comfyui(action:'panel')
   // cannot act at all. So the LEAD instruction switches with the session rather
   // than being appended to. An env pin already carries its own instruction (unset
   // the variable), which is host-side either way and needs no substitution.
   const usable = panelRecoveryContext().installPanelUsable;
   const clearIt = usable
-    ? `clear the pin with install_panel(action='unpin')${envNote}`
+    ? `clear the pin with install_comfyui(action:'panel', panel_action:'unpin')${envNote}`
     : pin.source === "env"
       ? // An env pin is not cleared by any tool anywhere, so naming one would be
         // noise on top of a dead end — say plainly where the variable lives.
         `clear the pin ON THE COMFYUI HOST: unset ${PANEL_PIN_ENV_VAR} in that ` +
         `machine's environment (or ~/.comfyui-mcp/.env) and restart the ` +
         `orchestrator running there`
-      : `clear the pin ON THE COMFYUI HOST — install_panel cannot act in this ` +
+      : `clear the pin ON THE COMFYUI HOST — install_comfyui(action:'panel') cannot act in this ` +
         `session, so remove it from that machine's ` +
         `~/.comfyui-mcp/panel-settings.json and restart the orchestrator ` +
         `running there`;
@@ -217,7 +217,7 @@ export function assertPanelPinAllows(action: string, id: string): void {
  * The pin is reported FIRST when set, because that is the more specific reason.
  *
  * #774/#784 — the REDIRECT is resolved from the session context rather than
- * hardcoded to "use install_panel". Pairing this refusal with a pointer at a
+ * hardcoded to "use install_comfyui(action:'panel')". Pairing this refusal with a pointer at a
  * tool that is a no-op here (remote/cloud) or absent here (the embedded
  * `panel_*` surface) is what closed the loop into a deadlock: every door the
  * user tried named another door that was also shut. Refusing remains correct —
@@ -876,7 +876,7 @@ async function acquireFileLock(timeoutMs: number): Promise<() => void> {
             `${describeObservedLock(path, obs)} The lock is never auto-reclaimed: a ` +
             `concurrent pre-upgrade orchestrator could replace an observed stale path ` +
             `with a fresh lock. To recover a proven abandoned lock, run ` +
-            `install_panel(action='unlock') — it re-verifies that the recorded owner is ` +
+            `install_comfyui(action:'panel', panel_action:'unlock') — it re-verifies that the recorded owner is ` +
             `dead and the lock is old before deleting anything, and refuses otherwise. ` +
             `Or do it by hand: stop or restart every comfyui-mcp orchestrator, verify ` +
             `none remain, delete this exact lock file, then retry.`,
@@ -932,7 +932,7 @@ export function withPanelMutationLock<T>(
  * Run a panel-moving mutation atomically with its pin check.
  *
  * assertPanelPinAllows alone is a TOCTOU race: the check passes, and THEN a pin
- * can be written before/while the ComfyUI-Manager operation runs (an update_all
+ * can be written before/while the ComfyUI-Manager operation runs (an update-all
  * drain takes seconds), so the update lands on a by-then-pinned panel. The pin
  * WRITE path takes this same lock, so checking inside it and holding it across
  * the whole mutation means a pin either lands before the op starts (and blocks
@@ -961,7 +961,7 @@ export function withPanelPinGuard<T>(
 // Pending panel-affecting operations
 //
 // Some panel-moving operations are handed to ComfyUI-Manager and then applied
-// OUT OF BAND: update_all drains on the Manager's own worker after we return,
+// OUT OF BAND: update-all drains on the Manager's own worker after we return,
 // and a snapshot restore is deferred to the next ComfyUI restart. The mutation
 // lock cannot be held across that window (it would wedge pinning for minutes
 // to days), and no completion/apply path exists IN THIS PROCESS to re-check a
@@ -975,7 +975,7 @@ export function withPanelPinGuard<T>(
 // PROVABLY cancelled or proven no longer pending, and keeps the warning for
 // the residue — in-flight work, remote hosts, anything unverifiable. The
 // lock-held variants — install_custom_node(action:"update", id="all"), which waits
-// for the drain inside the lock, and every install_panel mutation — need no marker:
+// for the drain inside the lock, and every install_comfyui(action:'panel') mutation — need no marker:
 // no pin can be written inside their window at all.
 // ---------------------------------------------------------------------------
 
@@ -1006,7 +1006,7 @@ export interface PanelPendingOp {
   uiId?: string;
 }
 
-/** update_all drains in minutes on the Manager's worker; an hour is far beyond
+/** update-all drains in minutes on the Manager's worker; an hour is far beyond
  *  a legitimate drain, so reclaiming then cannot cut a live op short. */
 export const UPDATE_ALL_PENDING_MS = 60 * 60_000;
 
@@ -1037,7 +1037,7 @@ function isPanelPendingOp(value: unknown): value is PanelPendingOp {
 }
 
 /** Why a read produced no usable ops. The distinction that matters is `empty`
- *  vs `unparseable`, and it exists because collapsing them wedged `update_all`
+ *  vs `unparseable`, and it exists because collapsing them wedged `update-all`
  *  permanently (#847).
  *
  *  A ZERO-BYTE file is not "a record we cannot read" — it is a file with no
@@ -1114,7 +1114,7 @@ function readPanelPendingOpsFile(): PendingOpsRead {
   }
   // A zero-byte file is the signature of a torn pre-#798 write (crash between
   // truncate and write). It provably contains NO record — reading it as
-  // "unreadable" would refuse every later update_all / warn on every pin
+  // "unreadable" would refuse every later update-all / warn on every pin
   // forever, with no recovery path, over a file we can read perfectly well.
   // (Non-empty unparseable content stays unreadable: it COULD have held a
   // record, and failing closed there is the whole point.)
@@ -1165,7 +1165,7 @@ function readPanelPendingOpsFile(): PendingOpsRead {
  * exactly what this call wrote, so a concurrent recorder's work is never
  * erased, and it is skipped entirely when the caller passes
  * `keepRecordOnFailure: true` — a call that merely RE-RECORDS an operation
- * already handed to the Manager (the update_all base/uiId enrichment), where
+ * already handed to the Manager (the update-all base/uiId enrichment), where
  * the operation IS pending and the marker must survive a failed enrichment.
  */
 export function recordPanelPendingOp(
@@ -1196,7 +1196,7 @@ export function recordPanelPendingOp(
     // loses nothing — and refusing on it was self-perpetuating (#847): this write
     // is gated behind the check, so the only thing that could replace the bad file
     // was the thing the bad file blocked. Because `recordPanelPendingOp` runs
-    // BEFORE the Manager handoff, that wedged `update_all` permanently, until a
+    // BEFORE the Manager handoff, that wedged `update-all` permanently, until a
     // human deleted the file by hand.
     //
     // The path is named either way. A refusal a user cannot act on from where they

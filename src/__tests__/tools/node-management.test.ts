@@ -410,7 +410,7 @@ describe("install_custom_node keeps the panel and remote-mode guards", () => {
     mocks.runPanelAction.mockResolvedValue({ version: "0.11.28" });
     for (const action of ["install", "update", "reinstall"] as const) {
       const res = await handler()({ action, id: "comfyui-agent-panel" });
-      expect(JSON.parse(text(res)).routedVia).toBe("install_panel");
+      expect(JSON.parse(text(res)).routedVia).toBe("install_comfyui(action:'panel')");
     }
     expect(mocks.runPanelAction).toHaveBeenCalledTimes(3);
     expect(mocks.installCustomNode).not.toHaveBeenCalled();

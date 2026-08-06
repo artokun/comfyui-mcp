@@ -264,7 +264,7 @@ export async function saveNodeSnapshot(
   }
 
   // Named snapshot — requires a local install to write the file. Resolve the
-  // install root through the SAME resolver get_environment / list_local_models action:"list_paths" /
+  // install root through the SAME resolver install_comfyui (action:"environment") / list_local_models action:"list_paths" /
   // the comfy-cli wrapper use (#775): config.comfyuiPath, then the saved default
   // workspace — never a bare "comfyuiPath unset ⇒ remote" conclusion, which
   // misclassified a local install connected via --comfyui-url as remote.
@@ -347,7 +347,7 @@ export async function restoreNodeSnapshot(
 
   // PIN GUARD. A snapshot records every pack's commit and restoring reverts them
   // ALL, so this moves the sidebar panel exactly like an "update all" would —
-  // another door that never passes through install_panel. It is inherently bulk
+  // another door that never passes through install_comfyui(action:'panel'). It is inherently bulk
   // (there is no restore-everything-except-one-pack), so a pin refuses it
   // outright and the message explains the two real options. The check and the
   // restore request are atomic under the panel mutation lock (withPanelPinGuard);
@@ -488,7 +488,7 @@ export function cancelPendingSnapshotRestore(): CancelSnapshotRestoreResult {
         "no deferred restore file exists in any ComfyUI-Manager files dir, so " +
         "there was NOTHING left to cancel — the restore already ran at a ComfyUI " +
         "restart (or was never scheduled). The panel may ALREADY have been " +
-        "reverted to its snapshot commit — check install_panel(action='status').",
+        "reverted to its snapshot commit — check install_comfyui(action:'panel', panel_action:'status').",
     };
   }
   const deletedPaths: string[] = [];

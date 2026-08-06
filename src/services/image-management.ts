@@ -242,7 +242,7 @@ export async function listOutputImages(options?: {
   // wrong machine's outputs — but the converse test, `!config.comfyuiPath`, was
   // never a test for "no local path". It reads one ENV VAR, while a local
   // portable install is perfectly well located by the SAVED DEFAULT WORKSPACE,
-  // which `resolveOutputDir` consults and `get_environment` reports. So a local
+  // which `resolveOutputDir` consults and `install_comfyui (action:"environment")` reports. So a local
   // install with `COMFYUI_PATH` unset silently took the remote branch, asked
   // /history — which had been emptied by a restart — and returned `[]` over an
   // output directory holding the files the caller was asking about. A silent

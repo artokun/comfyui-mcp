@@ -91,8 +91,8 @@ const CATEGORIES: Array<{
       // 0.50.0 slice 16 folded the re-run, run-from-URL and template
       // entrypoints into `enqueue_workflow`, and the diagnosis + local
       // settings-history views into `get_history`.
-      "enqueue_workflow", "get_system_stats", "queue", "get_history", "get_logs",
-      "health_check", "calculate",
+      "enqueue_workflow", "get_system_stats", "queue", "get_history",
+      "calculate",
       // Batch execution: submit many prompts under one batch_id, then poll/await it.
       "batch",
     ],
@@ -168,9 +168,9 @@ const CATEGORIES: Array<{
     icon: "wrench",
     description: "Install/update ComfyUI and the sidebar panel, self-update the MCP server, apply a setup manifest, manage workspaces, inspect the environment, configure ComfyUI-Manager, report issues.",
     tools: [
-      "install_comfyui", "update_comfyui", "update_all", "install_panel", "self_update",
+      "install_comfyui",
       "apply_manifest", "workspace",
-      "get_environment", "configure_manager", "report_issue",
+      "report_issue",
     ],
   },
   {

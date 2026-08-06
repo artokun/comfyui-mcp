@@ -405,7 +405,7 @@ describe("#646 Manager API dialect cache invalidation", () => {
     expect(params.files).toBeUndefined();
   });
 
-  it("heals update_all too (its dedicated route bypasses queueManagerTask)", async () => {
+  it("heals update-all too (its dedicated route bypasses queueManagerTask)", async () => {
     let persona: Persona = "v4";
     const calls = stubServer({ persona: () => persona });
 
@@ -460,13 +460,13 @@ describe("#646 Manager API dialect cache invalidation", () => {
     expect(calls.some((call) => call.url.startsWith(targetA) && call.path.startsWith("/customnode/installed"))).toBe(true);
   });
 
-  it("keeps the update_all tool's enqueue + start on its original target after retarget (#656)", async () => {
+  it("keeps the update-all tool's enqueue + start on its original target after retarget (#656)", async () => {
     const targetA = BASE;
     const targetB = "http://127.0.0.1:8282";
     let retargeted = false;
     const calls = stubServer({
       // A serves the 3.x Manager even though the cache pinned v2; B is normal
-      // v4. The update_all tool (queueUpdateAllCustomNodes) pins ONE base for
+      // v4. The update-all tool (queueUpdateAllCustomNodes) pins ONE base for
       // the whole operation, so the panel retarget must not redirect its
       // self-heal retry or queue start to B.
       persona: (url) => (url.startsWith(targetA) ? "legacy" : "v4"),

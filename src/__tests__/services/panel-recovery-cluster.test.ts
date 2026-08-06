@@ -6,7 +6,7 @@
 // guarantee. Nothing here weakens it.
 //
 // What was broken is the REMEDY. Every refusal said "Run
-// install_panel(action:'update')", and install_panel could not actually perform
+// install_comfyui(action:'panel', panel_action:'update')", and install_comfyui(action:'panel') could not actually perform
 // the update in most real deployments: it contradicted its own status on a
 // Comfy Registry zip install (#771), scanned the wrong tree on a Comfy Desktop
 // split install (#766), refused outright when only the live server knew where
@@ -357,26 +357,26 @@ const INCOMING = () => join(root, "custom_nodes", ".comfyui-agent-panel.incoming
 // ---------------------------------------------------------------------------
 
 describe("recovery guidance depends on the session, not on a hardcoded string", () => {
-  it("names install_panel in a LOCAL session — and still gives a host fallback", async () => {
+  it("names install_comfyui(action:'panel') in a LOCAL session — and still gives a host fallback", async () => {
     await primePanelBase();
     const text = describePanelUpdateRecovery();
-    expect(text).toMatch(/install_panel\(action:'update'\)/);
-    // Even here the caller may be on a surface that omits install_panel (#784),
+    expect(text).toMatch(/install_comfyui\(action:'panel', panel_action:'update'\)/);
+    // Even here the caller may be on a surface that omits install_comfyui(action:'panel') (#784),
     // so the concrete alternative travels with it. Never a single point of
     // failure.
     expect(text).toContain(PANEL_REPO_URL);
     expect(text).toMatch(/hard-refresh/i);
   });
 
-  it("REMOTE: does not name install_panel as the remedy — gives host commands (#774)", async () => {
+  it("REMOTE: does not name install_comfyui(action:'panel') as the remedy — gives host commands (#774)", async () => {
     mode.local = false;
     mode.remote = true;
     __resetPanelBaseCache();
     const text = describePanelUpdateRecovery();
     // The exact failure from #774: the message told a remote user to run a tool
     // that answers "not-applicable" and changes nothing.
-    expect(text).not.toMatch(/Run install_panel/);
-    expect(text).not.toMatch(/install_panel\(action:'update'\)/);
+    expect(text).not.toMatch(/Run install_comfyui\(action:'panel'/);
+    expect(text).not.toMatch(/install_comfyui\(action:'panel', panel_action:'update'\)/);
     expect(text).toMatch(/ON THE COMFYUI HOST/);
     expect(text).toMatch(/REMOTE ComfyUI/);
     expect(text).toContain(PANEL_REPO_URL);
@@ -400,7 +400,7 @@ describe("recovery guidance depends on the session, not on a hardcoded string", 
     mode.remote = false; // cloud = not local, not a remote URL
     __resetPanelBaseCache();
     const text = describePanelUpdateRecovery();
-    expect(text).not.toMatch(/Run install_panel/);
+    expect(text).not.toMatch(/Run install_comfyui\(action:'panel'/);
     expect(text).toMatch(/Comfy Cloud/);
   });
 
@@ -418,7 +418,7 @@ describe("recovery guidance depends on the session, not on a hardcoded string", 
     mode.remote = true;
     __resetPanelBaseCache();
     const text = describePanelManagementRedirect();
-    expect(text).not.toMatch(/Use install_panel instead/);
+    expect(text).not.toMatch(/Use install_comfyui\(action:'panel'\) instead/);
     expect(text).toMatch(/cannot help here either/);
     expect(text).toContain(PANEL_REPO_URL);
   });
@@ -448,7 +448,7 @@ describe("disk-current but handshake-old is diagnosed as a stale tab, not a stal
     expect(text).toMatch(/0\.11\.38/); // what is really on disk
     expect(text).toMatch(/0\.11\.34/); // what the tab announced
     // Crucially it does not send them round the loop again.
-    expect(text).not.toMatch(/Run install_panel\(action:'update'\)/);
+    expect(text).not.toMatch(/Run install_comfyui\(action:'panel', panel_action:'update'\)/);
     expect(text).not.toContain(PANEL_REPO_URL);
   });
 
@@ -511,7 +511,7 @@ describe("disk-current but handshake-old is diagnosed as a stale tab, not a stal
     expect(text).not.toMatch(/ON THE COMFYUI HOST/);
     // Even the closing aside must not mention a tool that is not callable in
     // this session.
-    expect(text).not.toMatch(/install_panel/);
+    expect(text).not.toMatch(/install_comfyui\(action:'panel'/);
     expect(text).toMatch(/No update of any kind fixes this/);
     // No trailing period: the bridge appends its own sentence break, and one
     // here rendered ".." to the user (codex gate).
@@ -521,7 +521,7 @@ describe("disk-current but handshake-old is diagnosed as a stale tab, not a stal
   it("without a skew, the ordinary update guidance is unchanged", async () => {
     await primePanelBase();
     const text = describePanelUpdateRecovery(undefined, undefined);
-    expect(text).toMatch(/install_panel\(action:'update'\)/);
+    expect(text).toMatch(/install_comfyui\(action:'panel', panel_action:'update'\)/);
     expect(text).not.toMatch(/Do NOT update the panel/);
   });
 
@@ -2788,7 +2788,7 @@ describe("status does not let a live reading of ANOTHER tree certify the frozen 
       // "Not installed" the flipped resolution used to certify.
       expect(status.note).toMatch(/DIFFERENT tree/);
       expect(status.note).toContain(otherRoot);
-      expect(status.note).not.toMatch(/Not installed\. Run install_panel/);
+      expect(status.note).not.toMatch(/Not installed\. Run install_comfyui\(action:'panel'/);
       // Nor may it attribute this scan to the live root it did not scan.
       expect(status.note).not.toMatch(/Resolved (against|from) the RUNNING/);
     } finally {
@@ -2808,7 +2808,7 @@ describe("status does not let a live reading of ANOTHER tree certify the frozen 
     const status = await panelStatus();
     expect(status.installed).toBe(false);
     expect(status.absenceProven).toBe(true);
-    expect(status.note).toMatch(/Not installed\. Run install_panel/);
+    expect(status.note).toMatch(/Not installed\. Run install_comfyui\(action:'panel'/);
     expect(status.note).toMatch(/Resolved from the RUNNING/);
   });
 });

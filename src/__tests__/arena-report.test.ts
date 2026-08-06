@@ -37,7 +37,7 @@ function result(over: Record<string, unknown>) {
 }
 
 const SCEN = [
-  { id: "health", title: "Server health", primary: ["health_check", "get_system_stats"], partial: [] },
+  { id: "health", title: "Server health", primary: ["get_system_stats"], partial: [] },
   { id: "models", title: "Checkpoint discovery", primary: ["list_local_models"], partial: [] },
 ];
 
@@ -105,7 +105,7 @@ describe("arena-report (#792)", () => {
       leaderboard: [
         entry({ model: "a", results: [mkFail("panel_screenshot")] }),
         entry({ model: "b", results: [mkFail("panel_screenshot")] }),
-        entry({ model: "c", results: [result({ score: 2, attemptedTools: ["health_check"] })] }),
+        entry({ model: "c", results: [result({ score: 2, attemptedTools: ["get_system_stats"] })] }),
       ],
     };
     const lines = suspectScenarioLines(data);
@@ -119,7 +119,7 @@ describe("arena-report (#792)", () => {
       ...data,
       leaderboard: [
         ...data.leaderboard.slice(0, 2),
-        entry({ model: "c", results: [result({ score: 2, attemptedTools: ["health_check", "panel_screenshot"] })] }),
+        entry({ model: "c", results: [result({ score: 2, attemptedTools: ["get_system_stats", "panel_screenshot"] })] }),
       ],
     };
     expect(suspectScenarioLines(withPasser)).toHaveLength(0);
@@ -151,8 +151,8 @@ describe("arena-report (#792)", () => {
     const reachedPrimary = {
       ...data,
       leaderboard: [
-        entry({ model: "a", results: [result({ score: 0, attemptedTools: ["health_check", "panel_screenshot"] })] }),
-        entry({ model: "b", results: [result({ score: 0, attemptedTools: ["health_check", "panel_screenshot"] })] }),
+        entry({ model: "a", results: [result({ score: 0, attemptedTools: ["get_system_stats", "panel_screenshot"] })] }),
+        entry({ model: "b", results: [result({ score: 0, attemptedTools: ["get_system_stats", "panel_screenshot"] })] }),
       ],
     };
     expect(suspectScenarioLines(reachedPrimary)).toHaveLength(0);
@@ -162,7 +162,7 @@ describe("arena-report (#792)", () => {
       ...data,
       leaderboard: [
         ...data.leaderboard.slice(0, 2),
-        entry({ model: "c", results: [result({ score: 1, attemptedTools: ["health_check", "panel_screenshot"] })] }),
+        entry({ model: "c", results: [result({ score: 1, attemptedTools: ["get_system_stats", "panel_screenshot"] })] }),
       ],
     };
     expect(suspectScenarioLines(withPartial)).toHaveLength(1);
@@ -233,8 +233,8 @@ describe("arena-report (#792)", () => {
       // shared by two failing runs must not read as a wrong-tool suspect.
       scenarios: SCEN.map(({ id, title }) => ({ id, title })),
       leaderboard: [
-        entry({ model: "a", results: [mkFail("health_check")] }),
-        entry({ model: "b", results: [mkFail("health_check")] }),
+        entry({ model: "a", results: [mkFail("get_system_stats")] }),
+        entry({ model: "b", results: [mkFail("get_system_stats")] }),
       ],
     };
     expect(suspectScenarioLines(legacy)).toHaveLength(0);
@@ -264,7 +264,7 @@ describe("arena-bestof cross-version merge guard (#792)", () => {
     const extra = join(root, "extra");
     mkdirSync(base, { recursive: true });
     mkdirSync(extra, { recursive: true });
-    const scen = [{ id: "health", title: "Server health", task: "t", primary: ["health_check"], partial: [] }];
+    const scen = [{ id: "health", title: "Server health", task: "t", primary: ["get_system_stats"], partial: [] }];
     writeFileSync(join(base, "arena-results.json"), JSON.stringify({ gpu: "g", scenarios: scen, leaderboard: [baseEntry] }));
     writeFileSync(join(extra, "arena-results.json"), JSON.stringify({ gpu: "g", scenarios: scen, leaderboard: [extraEntry] }));
     return { base, extra };
@@ -354,7 +354,7 @@ describe("arena-bestof cross-version merge guard (#792)", () => {
       join(extra2, "arena-results.json"),
       JSON.stringify({
         gpu: "g",
-        scenarios: [{ id: "health", title: "Server health", task: "t", primary: ["health_check"], partial: [] }],
+        scenarios: [{ id: "health", title: "Server health", task: "t", primary: ["get_system_stats"], partial: [] }],
         leaderboard: [mkEntry("0.50.0", 18)],
       }),
     );

@@ -13,7 +13,7 @@ export const SCENARIOS = [
     id: "health",
     title: "Server health & GPU report",
     task: "Check whether the ComfyUI server is healthy and tell me the GPU name and how much free VRAM it has.",
-    primary: ["health_check", "get_system_stats"],
+    primary: ["get_system_stats"],
     verify: async (_call, t) => /(cuda|nvidia|rtx|gtx|radeon|vram)/i.test(t.finalAnswer),
   },
   {
@@ -44,7 +44,7 @@ export const SCENARIOS = [
     id: "queue",
     title: "Queue inspection",
     task: "How many jobs are currently running or pending in the ComfyUI queue? Answer with the numbers.",
-    primary: ["queue", "health_check", "get_system_stats"],
+    primary: ["queue", "get_system_stats"],
     verify: async (_call, t) => /\d/.test(t.finalAnswer),
   },
   {

@@ -1,6 +1,6 @@
 ---
 name: panel-node-pack-sync
-description: Keep the ComfyUI sidebar panel node-pack (comfyui-agent-panel) in step with the orchestrator after comfyui-mcp updates. Use this whenever the orchestrator was just updated (self_update, npm i -g comfyui-mcp, a new version in the ENVIRONMENT line), when a panel/bridge command fails in a way that smells like version drift ("panel is too old", a graph_/ui_ command the panel doesn't implement, a feature that works in the docs but not in the sidebar), or when the user asks to update/pin/unpin the panel. It checks the installed panel version against what THIS orchestrator build needs, RESPECTS an explicit version pin (warn-only, never move a pinned user), offers a clear way to unset the pin, runs the sync through the verified install_panel path, and reports the version RE-READ from disk. Never claim a sync that did not happen.
+description: Keep the ComfyUI sidebar panel node-pack (comfyui-agent-panel) in step with the orchestrator after comfyui-mcp updates. Use this whenever the orchestrator was just updated (install_comfyui (action:"self_update"), npm i -g comfyui-mcp, a new version in the ENVIRONMENT line), when a panel/bridge command fails in a way that smells like version drift ("panel is too old", a graph_/ui_ command the panel doesn't implement, a feature that works in the docs but not in the sidebar), or when the user asks to update/pin/unpin the panel. It checks the installed panel version against what THIS orchestrator build needs, RESPECTS an explicit version pin (warn-only, never move a pinned user), offers a clear way to unset the pin, runs the sync through the verified install_comfyui(action:'panel') path, and reports the version RE-READ from disk. Never claim a sync that did not happen.
 ---
 
 # Keep the panel node-pack in sync with the orchestrator
@@ -30,7 +30,7 @@ those failures are hard for a user to diagnose. This skill closes that gap.
 ## Step 1 — Look before you touch anything
 
 ```
-install_panel(action='status')
+install_comfyui(action:'panel', panel_action:'status')
 ```
 
 This never errors. Read these fields:
@@ -56,14 +56,14 @@ pin, shadow copies, dev symlinks, remote/cloud mode, and unreadable versions.
 | `sync` | Behind, not pinned, nothing ambiguous. | Step 3 — sync it. |
 | `pinned-warn` | Behind, **but pinned**. | Step 4 — warn only. **Do not sync.** |
 | `blocked` | A shadow copy, or a pin we couldn't read. | Step 5 — get it unblocked first. |
-| `unknown` | The installed version isn't comparable (`nightly`, `dev`, unreadable) **and nothing is pinned**. | Report it, don't guess. Offer a deliberate `install_panel(action='update')` and let the user decide. (If they *were* pinned you'd have got `pinned-warn` instead, so `unknown` never means "quietly ignore a pin".) |
+| `unknown` | The installed version isn't comparable (`nightly`, `dev`, unreadable) **and nothing is pinned**. | Report it, don't guess. Offer a deliberate `install_comfyui(action:'panel', panel_action:'update')` and let the user decide. (If they *were* pinned you'd have got `pinned-warn` instead, so `unknown` never means "quietly ignore a pin".) |
 | `dev-install` | Symlinked dev checkout. | Tell them to `git pull` their own checkout. Change nothing. |
 | `not-applicable` | Remote/cloud, or no local ComfyUI. | Explain the panel is managed on the ComfyUI host. |
 
 ## Step 3 — Sync (`decision: "sync"`)
 
 ```
-install_panel(action='sync')
+install_comfyui(action:'panel', panel_action:'sync')
 ```
 
 That single call re-checks the decision at execution time (the pin may have been
@@ -107,15 +107,15 @@ The user deliberately held the panel where it is. Tell them three things and the
 Only if they say yes:
 
 ```
-install_panel(action='unpin')      # clears the persisted pin
-install_panel(action='sync')       # then Step 3
+install_comfyui(action:'panel', panel_action:'unpin')      # clears the persisted pin
+install_comfyui(action:'panel', panel_action:'sync')       # then Step 3
 ```
 
 **If `pin.source` is `"env"`**, `unpin` cannot clear it — the pin comes from the
 `COMFYUI_MCP_PANEL_PIN` environment variable. Tell the user to unset it (or set
 it to `off`) in their environment or `~/.comfyui-mcp/.env` and restart the
 orchestrator. Do not edit their environment for them, and do not report them as
-unpinned — `install_panel(action='unpin')` returns the still-active pin in that
+unpinned — `install_comfyui(action:'panel', panel_action:'unpin')` returns the still-active pin in that
 case, and its `note` says exactly this.
 
 ## Step 5 — Blocked
@@ -137,7 +137,7 @@ If the user wants to stay on their current panel (they're mid-project, a newer
 panel regressed something, they're testing):
 
 ```
-install_panel(action='pin', version='<installedVersion from status>', reason='<why>')
+install_comfyui(action:'panel')(action='pin', version='<installedVersion from status>', reason='<why>')
 ```
 
 `version` is required — never invent one. Pass the `installedVersion` from
@@ -145,7 +145,7 @@ Step 1 to pin them where they already are. A pin **records intent only**: it doe
 not change what is installed.
 
 While it's set, everything that could move the panel refuses — not just
-`install_panel`. The panel is an ordinary custom node pack, so the generic node
+`install_comfyui(action:'panel')`. The panel is an ordinary custom node pack, so the generic node
 tools are a second door into the same operation, and they are guarded too:
 
 - `install_custom_node` / `install_custom_node` (`action: "update"`) / `install_custom_node` (`action: "reinstall"`)
@@ -154,7 +154,7 @@ tools are a second door into the same operation, and they are guarded too:
   and `…/comfyui-mcp-panel/tree/main`. These also **route through the verified
   path** automatically, so the version they report is re-read from disk like
   `sync`'s.
-- **`id="all"`, and `update_all`** — a bulk update moves the panel along with
+- **`id="all"`, and `install_comfyui (action:"update_all")`** — a bulk update moves the panel along with
   everything else. ComfyUI-Manager can't update everything-except-one-pack, so
   while pinned these refuse outright. If the user wants the rest updated, either
   unpin first or update the other packs individually by id. Say that plainly
@@ -162,15 +162,15 @@ tools are a second door into the same operation, and they are guarded too:
 - `install_custom_node` (`action: "fix"`), `panel_install_node` and `panel_update_node` **refuse** a
   panel target outright — pinned or not. They report success as soon as the
   ComfyUI-Manager queue drains, which proves nothing, and there's no verified
-  equivalent to route them into. Use `install_panel` instead; don't work around
+  equivalent to route them into. Use `install_comfyui(action:'panel')` instead; don't work around
   the refusal.
 
-Prefer `install_panel` throughout — it's the one with `status`, `sync` and the
+Prefer `install_comfyui(action:'panel')` throughout — it's the one with `status`, `sync` and the
 pin.
 
 ## When to run this at all
 
-- Right after the orchestrator updates (`self_update`, a fresh `npm i -g`, or a
+- Right after the orchestrator updates (`install_comfyui (action:"self_update")`, a fresh `npm i -g`, or a
   version in the ENVIRONMENT line that's newer than last you saw).
 - When a panel/bridge command fails in a way that smells like version drift —
   "panel is too old", a `graph_*`/`ui_*` command the panel doesn't implement, a

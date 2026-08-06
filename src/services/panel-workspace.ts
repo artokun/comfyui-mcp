@@ -13,13 +13,13 @@
 //  - #766 (Comfy Desktop dual-path). Desktop launches ComfyUI out of its own
 //    program directory but passes `--base-directory <Documents\ComfyUI>`, and
 //    ComfyUI derives custom_nodes/ from THAT. The configured workspace pointed
-//    at the program directory, so install_panel reported `installed: false`
+//    at the program directory, so install_comfyui(action:'panel') reported `installed: false`
 //    while a perfectly good 0.11.x panel sat in the Documents tree — and any
 //    install would have landed in a custom_nodes the server never reads.
 //
-//  - #769 (no configured workspace at all). `get_environment` already resolves
+//  - #769 (no configured workspace at all). `install_comfyui (action:"environment")` already resolves
 //    the live root from the serving process and reports it as the local
-//    workspace, but install_panel asked the sync resolver, got nothing, and
+//    workspace, but install_comfyui(action:'panel') asked the sync resolver, got nothing, and
 //    refused with "no local ComfyUI (COMFYUI_PATH) is configured" about an
 //    install it had just been told the path to.
 //
@@ -336,7 +336,7 @@ export function __setPanelBaseForTests(
 // session-rebind.js) which also builds the `hello` payload. So a browser tab
 // holding that file from before 0.11.35 sends an OLD capability set — and an
 // old or absent version — while the pack ON DISK is perfectly current. The
-// write gate then correctly refuses, the user runs install_panel(action:
+// write gate then correctly refuses, the user runs install_comfyui(action:'panel')(action:
 // 'update'), and it correctly finds nothing to do, because nothing is wrong
 // with the install. That is the loop that feels unfixable.
 //

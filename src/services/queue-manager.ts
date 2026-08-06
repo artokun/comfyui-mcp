@@ -684,7 +684,7 @@ export async function cancelRunningJobEscalating(opts: {
             ? ` (and a VRAM free)`
             : ``) +
         `, but /queue ${reachability}, so ${unknownWhat}. This is not a confirmed wedge. ` +
-        `Check ComfyUI is up (get_environment) and inspect the queue before deciding anything. ` +
+        `Check ComfyUI is up (install_comfyui (action:"environment")) and inspect the queue before deciding anything. ` +
         (opts.clear_pending
           ? pendingNote
           : `Pending jobs were NOT cleared — pass clear_pending:true or call queue (action:"clear").`),

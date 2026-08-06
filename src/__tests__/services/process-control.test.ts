@@ -429,7 +429,7 @@ describe("process-control startup readiness", () => {
     expect(result.message).not.toMatch(/ComfyUI is DOWN/);
     // …and it must steer the caller AWAY from the destructive response.
     expect(result.message).toMatch(/Do NOT kill it/i);
-    expect(result.message).toMatch(/health_check/);
+    expect(result.message).toMatch(/get_system_stats \(action:"health"\)/);
     expect(result.message).toMatch(/COMFYUI_STARTUP_CHECK_MAX_TRIES/);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
@@ -467,7 +467,7 @@ describe("process-control startup readiness", () => {
     // may have brought one back since the last probe, and the old wording asserted
     // a present global state from a fact about our own process (codex gate).
     expect(result.message).not.toMatch(/ComfyUI is DOWN/);
-    expect(result.message).toMatch(/re-check with health_check/i);
+    expect(result.message).toMatch(/re-check with get_system_stats \(action:"health"\)/i);
     // Nor may it claim the API NEVER came up. A poll establishes only what the
     // SCHEDULED PROBES saw; the server could have answered in a gap between two of
     // them, so the supportable statement is about the probes (codex gate round 3).

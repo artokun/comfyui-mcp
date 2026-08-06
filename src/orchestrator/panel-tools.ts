@@ -786,8 +786,8 @@ interface PanelReadyResult {
 }
 
 /** True when a decoded /system_stats body has the recognizable ComfyUI shape (a
- *  `system` object and/or a `devices` array) — the same fields health_check /
- *  get_environment read. A bare 2xx from a reverse-proxy login page, an SPA
+ *  `system` object and/or a `devices` array) — the same fields get_system_stats (action:"health") /
+ *  install_comfyui (action:"environment") read. A bare 2xx from a reverse-proxy login page, an SPA
  *  catch-all, or a proxy error page is NOT ComfyUI and must NOT certify recovery
  *  (codex #509 P1). */
 function looksLikeSystemStats(body: unknown): boolean {
@@ -8783,7 +8783,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
                 (recovery.ready
                   ? `and it came back healthy in ${(recovery.waited_ms / 1000).toFixed(1)}s` +
                     (observed ? " (observed it go down then come back)." : " (cycle not directly observed).")
-                  : `but it did NOT become healthy within ${Math.round(recovery.waited_ms / 1000)}s — verify with health_check / panel_node_queue_status before assuming it restarted.`),
+                  : `but it did NOT become healthy within ${Math.round(recovery.waited_ms / 1000)}s — verify with get_system_stats (action:"health") / panel_node_queue_status before assuming it restarted.`),
             });
           }
           // Genuine refusal (busy guard / security / no eligible fallback) — return
@@ -8840,7 +8840,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
               "ComfyUI restart was dispatched and accepted; it is restarting out-of-band. " +
               "There is no local boot endpoint I can safely probe from here, so I can't " +
               "confirm it finished coming back — a panel reconnect wouldn't prove this " +
-              "instance actually cycled. Check health_check / panel_node_queue_status in a " +
+              'instance actually cycled. Check get_system_stats (action:"health") / panel_node_queue_status in a ' +
               "few seconds to confirm it's back.",
           });
         }
@@ -8868,8 +8868,8 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             probes: recovery.attempts,
             saw_down: recovery.sawDown,
             note: recovery.sawDown
-              ? `Reboot was dispatched and ComfyUI went down, but it has not become healthy within ${waited}s — it may still be starting or the restart failed. Verify with health_check / panel_node_queue_status before retrying; do NOT assume it is back.`
-              : `The reboot command was sent but I could NOT confirm ComfyUI actually cycled within ${waited}s (it never went down — the panel may have merely disconnected/inferred a reboot without one). Verify with health_check / panel_node_queue_status; do NOT assume it restarted.`,
+              ? `Reboot was dispatched and ComfyUI went down, but it has not become healthy within ${waited}s — it may still be starting or the restart failed. Verify with get_system_stats (action:"health") / panel_node_queue_status before retrying; do NOT assume it is back.`
+              : `The reboot command was sent but I could NOT confirm ComfyUI actually cycled within ${waited}s (it never went down — the panel may have merely disconnected/inferred a reboot without one). Verify with get_system_stats (action:"health") / panel_node_queue_status; do NOT assume it restarted.`,
           });
         }
         // #400/#709: ComfyUI is healthy, but the panel's browser tab re-registers its own

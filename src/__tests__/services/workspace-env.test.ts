@@ -584,7 +584,7 @@ describe("listWorkspaces", () => {
 });
 
 // ---------------------------------------------------------------------------
-// get_environment
+// install_comfyui (action:"environment")
 // ---------------------------------------------------------------------------
 
 describe("resolveEffectiveComfyUIBase vs resolveLocalWorkspaceBase (#490)", () => {
@@ -1086,7 +1086,7 @@ describe("getEnvironment", () => {
     // `pip show a b c` exits 1 whenever ANY name is missing, and KEY_PACKAGES contains
     // xformers and diffusers — absent on most real machines. The shared `probe()` helper
     // discards everything on a non-zero exit, so the records pip HAD produced (torch
-    // among them) were thrown away and get_environment reported no packages at all on
+    // among them) were thrown away and install_comfyui (action:"environment") reported no packages at all on
     // installs that plainly had them.
     const dir = await tmpDir();
     const exe = await stageWorkspace(dir);

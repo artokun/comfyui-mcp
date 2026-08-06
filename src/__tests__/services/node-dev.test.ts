@@ -177,7 +177,7 @@ describe("resolveInJail", () => {
 
   it("resolves against the saved default workspace when COMFYUI_PATH is unset (#506)", () => {
     // No COMFYUI_PATH, but a saved default workspace is set — a loopback session
-    // must be treated as local, mirroring get_environment/workspace action:"get", instead
+    // must be treated as local, mirroring install_comfyui (action:"environment")/workspace action:"get", instead
     // of being rejected as remote.
     config.comfyuiPath = undefined;
     wsMock.saved = workspace;

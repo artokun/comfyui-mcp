@@ -476,7 +476,7 @@ async function installWorkflowDependenciesForAnalysis(
   // target resolved for a workflow dependency may differ from the local root
   // used to establish which panel the browser serves; accepting either one as
   // proof would permit an unverified update or fabricate success. Keep it
-  // unresolved and require install_panel on the selected ComfyUI host instead.
+  // unresolved and require install_comfyui(action:'panel') on the selected ComfyUI host instead.
   const panelTargets: string[] = [];
   const panelNotes: string[] = [];
   for (const pack of analysis.missingPacks) {
@@ -510,7 +510,7 @@ async function installWorkflowDependenciesForAnalysis(
     panelNotes.push(
       `"${pack}" is the sidebar panel pack: workflow dependency installation does not queue or mutate it ` +
         `because this Manager transaction cannot prove the same served-panel target. ` +
-        `Use install_panel on the selected ComfyUI host.`,
+        `Use install_comfyui(action:'panel') on the selected ComfyUI host.`,
     );
   }
 

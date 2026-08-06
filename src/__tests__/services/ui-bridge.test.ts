@@ -815,7 +815,7 @@ describe("UiBridge (multi-tab)", () => {
       // panel can dial, and it carries no token.
       expect(msg).toMatch(/Settings → Advanced → Bridge URL/);
       expect(msg).not.toMatch(/COMFYUI_MCP_BRIDGE_PORT/);
-      // install_panel is named with BOTH its conditions: holding the tool is not
+      // install_comfyui(action:'panel') is named with BOTH its conditions: holding the tool is not
       // enough, since it is local-only and refuses in remote/cloud mode.
       expect(msg).toMatch(/local-only and refuses in remote\/cloud mode/);
     });
@@ -1915,7 +1915,7 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
     // A mutating graph command is refused BEFORE dispatch (never written to the socket).
     await expect(
       bridge.send({ cmd: "graph_add_node", node: "x" } as never, { tabId: "tmp:old" }),
-    ).rejects.toThrow(/enforce.*workflow targeting|install_panel\(action:'update'\)/i);
+    ).rejects.toThrow(/enforce.*workflow targeting|install_comfyui\(action:'panel', panel_action:'update'\)/i);
 
     // …but a READ-ONLY graph command still works (read-only graph access retained).
     await expect(
@@ -1926,7 +1926,7 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
     // refused — the class the graph_-only gate previously missed (#570 P0c, codex cycle 8).
     await expect(
       bridge.send({ cmd: "workflow_close", force: true } as never, { tabId: "tmp:old" }),
-    ).rejects.toThrow(/enforce.*workflow targeting|install_panel\(action:'update'\)/i);
+    ).rejects.toThrow(/enforce.*workflow targeting|install_comfyui\(action:'panel', panel_action:'update'\)/i);
 
     // ALL FOUR workflow mutators are refused on a non-enforcing panel — regardless of path,
     // including an EXPLICIT non-empty path. The server can't resolve the selector or prove it
@@ -1940,14 +1940,14 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
       { cmd: "workflow_close", path: "workflows/other.json", force: true }, // explicit path — still gated
     ]) {
       await expect(bridge.send(cmd as never, { tabId: "tmp:old" })).rejects.toThrow(
-        /enforce.*workflow targeting|install_panel\(action:'update'\)/i,
+        /enforce.*workflow targeting|install_comfyui\(action:'panel', panel_action:'update'\)/i,
       );
     }
     old.close();
   });
 
   it("names the versioned panel-sync remedy when stamp enforcement is absent (#706)", async () => {
-    // The remedy names install_panel ONLY when a local ComfyUI install is
+    // The remedy names install_comfyui(action:'panel') ONLY when a local ComfyUI install is
     // resolvable from here. That used to come from the developer's REAL
     // machine state (COMFYUI_PATH in the real ~/.comfyui-mcp/.env), so the
     // test failed on any machine without one — and under the suite-wide home
@@ -1968,7 +1968,7 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
     await vi.waitFor(() => expect(bridge.tabs().some((t) => t.tab_id === "old-skew")).toBe(true));
     await expect(
       bridge.send({ cmd: "graph_add_node", node: "x" } as never, { tabId: "old-skew" }),
-    ).rejects.toThrow(/reports panel 0\.11\.0.*needs panel 0\.11\.35\+.*install_panel\(action:'update'\).*restart ComfyUI.*rebinding cannot/i);
+    ).rejects.toThrow(/reports panel 0\.11\.0.*needs panel 0\.11\.35\+.*install_comfyui\(action:'panel', panel_action:'update'\).*restart ComfyUI.*rebinding cannot/i);
     old.close();
   });
 
@@ -1977,7 +1977,7 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
     // key and the capability is advertised from the single file that also builds
     // `hello`, so a tab holding the pre-0.11.35 copy announces the old
     // capability set while the pack ON DISK is current. Telling that user to run
-    // install_panel is what closed the loop: it correctly reports nothing to do.
+    // install_comfyui(action:'panel') is what closed the loop: it correctly reports nothing to do.
     // The orchestrator runs the panel sync on this same hello, so the on-disk
     // version is observed alongside the handshake — enough to name it.
     // A REAL pack on disk: the skew resolver re-reads the pyproject at the
@@ -2005,7 +2005,7 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
       expect((err as Error).message).toMatch(/HARD-REFRESH/);
       expect((err as Error).message).toMatch(/0\.11\.38/);
       // It must NOT send them back to the tool that will report nothing to do.
-      expect((err as Error).message).not.toMatch(/Run install_panel\(action:'update'\)/);
+      expect((err as Error).message).not.toMatch(/Run install_comfyui\(action:'panel', panel_action:'update'\)/);
       // …and it must not claim the update would report nothing to do: since #806
       // an update CAN pull a newer panel. What it cannot do is replace the JS an
       // open tab is running, which is what this branch is actually about.
@@ -2048,7 +2048,7 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
         .send({ cmd: "graph_add_node", node: "x" } as never, { tabId: "really-old" })
         .catch((e: Error) => e);
       expect((err as Error).message).not.toMatch(/Do NOT update the panel/);
-      expect((err as Error).message).toMatch(/install_panel\(action:'update'\)|ON THE COMFYUI HOST/);
+      expect((err as Error).message).toMatch(/install_comfyui\(action:'panel', panel_action:'update'\)|ON THE COMFYUI HOST/);
       behind.close();
     } finally {
       clearPanelDiskObservation();
@@ -2116,7 +2116,7 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
       // The PROVEN part is still stated plainly, and still spares them the update.
       expect(msg).toMatch(/Updating the panel will not fix this/);
       expect(msg).toMatch(/already 0\.11\.38/);
-      expect(msg).not.toMatch(/Run install_panel\(action:'update'\)/);
+      expect(msg).not.toMatch(/Run install_comfyui\(action:'panel', panel_action:'update'\)/);
       // The UNPROVEN part is not asserted...
       expect(msg).not.toMatch(/This BROWSER TAB is running an older cached copy/);
       // ...it is ranked, actionable case first, the other named rather than hidden.
@@ -2439,7 +2439,7 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
     old.close();
   });
 
-  it("#812/#823: the remedy names how to reach install_panel when it is not in the tool list", async () => {
+  it("#812/#823: the remedy names how to reach install_comfyui(action:'panel') when it is not in the tool list", async () => {
     const old = new WebSocket(`ws://127.0.0.1:${port}`);
     await new Promise<void>((res, rej) => {
       old.on("open", () => {
@@ -2461,11 +2461,11 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
       .then(() => null)
       .catch((e: Error) => e);
     const msg = (err as Error).message;
-    // #812's reporter searched their tool list for install_panel, found nothing,
+    // #812's reporter searched their tool list for install_comfyui(action:'panel'), found nothing,
     // and concluded the documented recovery was impossible. It was there — behind
     // the compact router, which is the DEFAULT tool mode. Naming the actual call
     // is the difference between a remedy and a dead end.
-    expect(msg).toContain(`call_tool {"name": "install_panel", "args": {"action": "update"}}`);
+    expect(msg).toContain(`call_tool {"name": "install_comfyui", "args": {"action": "panel", "panel_action": "update"}}`);
     // The specific version found and the version required, both named.
     expect(msg).toContain("0.11.32");
     expect(msg).toMatch(/needs panel 0\.11\.35\+/);
@@ -2603,7 +2603,7 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
       const msg = (err as Error).message;
       expect(msg).toMatch(/Updating the panel will not fix this/);
       expect(msg).toMatch(/already 0\.11\.38/);
-      expect(msg).not.toMatch(/Run install_panel\(action:'update'\)/);
+      expect(msg).not.toMatch(/Run install_comfyui\(action:'panel', panel_action:'update'\)/);
       // Still no fabricated cause — the causes are ranked, as for no version.
       expect(msg).not.toMatch(/This BROWSER TAB is running an older cached copy/);
       expect(msg).toMatch(/\(1\) It is a ComfyUI browser tab/);

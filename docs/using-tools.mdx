@@ -34,7 +34,7 @@ Notice the second row: one sentence, two tools, in an order you did not have to 
 
 <Tip>
   You can be as vague as you like. "Something's broken" is a perfectly good
-  opening — the agent will start with `health_check` and narrow down. Being
+  opening — the agent will start with `get_system_stats (action:"health")` and narrow down. Being
   specific gets you there faster, but it is never required.
 </Tip>
 
@@ -238,7 +238,7 @@ The fix is three steps, and **the third is the one people skip**:
 
 <Steps>
   <Step title="Update the panel">
-    Ask the agent to update it (`install_panel` with `action: "update"`), or do it
+    Ask the agent to update it (`install_comfyui(action:'panel')` with `action: "update"`), or do it
     from ComfyUI-Manager, where it is listed as `comfyui-agent-panel`.
   </Step>
   <Step title="Restart ComfyUI">

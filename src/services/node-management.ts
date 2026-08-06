@@ -45,7 +45,7 @@ import { logger } from "../utils/logger.js";
 //          then poll /v2/manager/queue/status until the queue drains.
 //        • RELEASED Manager 3.x (`main`, the registry default): same queue
 //          engine under /manager/queue/* with PER-OPERATION routes
-//          (install/uninstall/update/fix/disable/install_model/update_all)
+//          (install/uninstall/update/fix/disable/install_model/update-all)
 //          and different body shapes — see legacyTaskRequest().
 //   2. Fall back to the cm-cli.py subprocess (against config.comfyuiPath) for
 //      anything the HTTP API can't do, or when the user forces it (local
@@ -764,7 +764,7 @@ export async function fetchManagerQueueCounts(
 
 /**
  * v4-only: queue counts for tasks THIS orchestrator enqueued (every enqueue
- * carries client_id "comfyui-mcp"). This is what separates "the update_all is
+ * carries client_id "comfyui-mcp"). This is what separates "the update-all is
  * still queued" from "UNRELATED tasks are queued" on a shared Manager — the
  * distinction a proven cancel needs (#689 round 3).
  *
@@ -951,7 +951,7 @@ type ManagerTaskParams = Record<string, unknown> | ManagerParamsResolver;
  * dialect to speak and the invalidation epoch the operation started under.
  *
  * EVERY operation routed through here is a MUTATION (install, uninstall, update,
- * fix, enable/disable, install-model, update_all, Manager self-update) and Manager
+ * fix, enable/disable, install-model, update-all, Manager self-update) and Manager
  * has no idempotency key, so a re-sent request is a genuinely second operation.
  * The enqueue is therefore re-sent ONLY when the failure PROVES nothing ran — a
  * 404/405 route rejection — and only when a fresh probe shows the dialect really
@@ -2093,7 +2093,7 @@ async function withObjectInfoInvalidation<T>(op: () => Promise<T>): Promise<T> {
 export async function installCustomNode(opts: InstallOptions): Promise<NodeOpResult> {
   // PIN GUARD (see panel-pin-guard.ts). The panel is an ordinary node pack, so
   // these generic mutations are a second door into the same ComfyUI-Manager
-  // operation that install_panel drives. Guarding here — where the TARGET is
+  // operation that install_comfyui(action:'panel') drives. Guarding here — where the TARGET is
   // known — covers every caller, including a bulk "all". The check and the
   // mutation are atomic under the panel mutation lock (withPanelPinGuard).
   return withPanelPinGuard("install", opts.id, () =>
@@ -2436,7 +2436,7 @@ async function assertPackPresentAfterOp(
   // session) the on-disk custom_nodes scan. The Manager list alone never sees a
   // Comfy Registry zip install or a manual copy, so a list-only miss is NOT
   // proof the pack "is not installed locally" — for the sidebar panel installed
-  // as a zip, that assertion was flatly false while install_panel(action='status')
+  // as a zip, that assertion was flatly false while install_comfyui(action:'panel', panel_action:'status')
   // reported the same pack at a concrete directory and version.
   //
   // The three outcomes stay distinct (this fold is #796's recurring defect):
@@ -2491,7 +2491,7 @@ async function assertPackPresentAfterOp(
           `inspect custom_nodes, so a pack that IS on disk but unknown to the Manager ` +
           `(a Comfy Registry zip install, or a manual copy) reaches here too. Check ` +
           `the pack id with install_custom_node (action:"list"), and for the sidebar panel use ` +
-          `install_panel(action='status'), which reads the directory itself.`,
+          `install_comfyui(action:'panel', panel_action:'status'), which reads the directory itself.`,
         status,
       );
     case "unverifiable":
@@ -2689,12 +2689,12 @@ async function updateManagerSelf(id: string): Promise<NodeOpResult> {
 }
 
 /**
- * ENQUEUE update_all on its dedicated route in the detected dialect, WITHOUT
+ * ENQUEUE update-all on its dedicated route in the detected dialect, WITHOUT
  * draining the queue. Shared by updateCustomNode({id:"all"}) (which drains) and
- * the update_all tool's fire-and-forget path (queueUpdateAllCustomNodes), so
+ * the update-all tool's fire-and-forget path (queueUpdateAllCustomNodes), so
  * both inherit dialect selection, cache invalidation, and the 404/405-only
  * re-send discipline from enqueueWithDialectSelfHeal — a 400 re-detects but is
- * never re-sent, so update_all can never run twice (#656).
+ * never re-sent, so update-all can never run twice (#656).
  *
  * Returns the dialect the enqueue ACTUALLY spoke (so the caller starts/polls
  * the queue holding the task), the route's raw response body, and the ui_id
@@ -2741,7 +2741,7 @@ async function enqueueUpdateAll(
 export async function updateCustomNode(opts: UpdateOptions): Promise<NodeOpResult> {
   // PIN GUARD — covers id="comfyui-agent-panel", the repo-name and git-URL
   // spellings, and id="all" (a bulk update moves the panel too). The check and
-  // the mutation are atomic under the panel mutation lock: update_all waits on
+  // the mutation are atomic under the panel mutation lock: update-all waits on
   // the Manager queue, and a pin written in that window must block the NEXT
   // op, not land inside this one (withPanelPinGuard).
   return withPanelPinGuard("update", opts.id, () =>
@@ -2783,7 +2783,7 @@ async function updateCustomNodeImpl(
   // post-drain gate must read the SAME disk context (codex gate round 11).
   const presenceCtx = capturePackPresenceContext();
   if (all) {
-    // update_all keeps its own dedicated route (so it does NOT go through
+    // update-all keeps its own dedicated route (so it does NOT go through
     // queueManagerTask), but it is just as dialect-dependent — route it through
     // the same enqueue-only self-heal so a stale classification can't wedge it
     // either (#646). Enqueue here, drain once below.
@@ -2806,7 +2806,7 @@ async function updateCustomNodeImpl(
   return {
     mechanism: "manager-http",
     message: all
-      ? "Queued update_all with ComfyUI-Manager. Completion and the sidebar panel's on-disk version are not verified yet."
+      ? "Queued update-all with ComfyUI-Manager. Completion and the sidebar panel's on-disk version are not verified yet."
       : `Queued + updated "${id}" via ComfyUI-Manager.`,
     details: status,
     managerBase: base,
@@ -2814,14 +2814,14 @@ async function updateCustomNodeImpl(
 }
 
 /**
- * Result of the update_all tool's fire-and-forget path (queueUpdateAllCustomNodes).
+ * Result of the update-all tool's fire-and-forget path (queueUpdateAllCustomNodes).
  */
 export interface QueueUpdateAllResult {
-  /** The update_all route the enqueue actually used (dialect-dependent). */
+  /** The update-all route the enqueue actually used (dialect-dependent). */
   endpoint: string;
   /** Whether the queue worker was confirmed started. */
   queueStarted: boolean;
-  /** Raw update_all response body, when the route produced one. */
+  /** Raw update-all response body, when the route produced one. */
   managerResponse?: unknown;
   /** The ComfyUI base the enqueue actually targeted (captured at invocation,
    *  so a later cancel can aim at the same server — #689). */
@@ -2832,7 +2832,7 @@ export interface QueueUpdateAllResult {
 }
 
 /**
- * The update_all MCP tool's path (#656): enqueue update_all in the DETECTED
+ * The update-all MCP tool's path (#656): enqueue update-all in the DETECTED
  * dialect and kick the queue worker, then return WITHOUT draining — the tool
  * reports "queued + started" and the updates run asynchronously (unlike
  * updateCustomNode({id:"all"}), which drains the queue). Routed through the
@@ -2854,10 +2854,10 @@ export async function queueUpdateAllCustomNodes(): Promise<QueueUpdateAllResult>
   try {
     await managerQueueControl(`${prefix}/start`, base);
   } catch (err) {
-    // The update_all IS queued — a start failure must not fail the whole call;
+    // The update-all IS queued — a start failure must not fail the whole call;
     // report it so the user can kick the queue manually.
     queueStarted = false;
-    logger.warn("Queued update_all but failed to start the queue worker", {
+    logger.warn("Queued update-all but failed to start the queue worker", {
       error: err instanceof Error ? err.message : String(err),
     });
   }

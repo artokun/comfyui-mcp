@@ -195,7 +195,7 @@ function noBackendError(mode: Generate3dMode): ValidationError {
       `so 3D generation has no backend to run on. Recent ComfyUI builds ship hosted 3D partner nodes ` +
       `in core (Tripo, Meshy, Rodin, Hunyuan3D — categories like "partner/3d/..."); they may be ` +
       `missing because the ComfyUI build is old or API nodes are disabled (--disable-api-nodes). ` +
-      `Fixes: (1) update ComfyUI (update_comfyui) and remove --disable-api-nodes, then retry; or ` +
+      `Fixes: (1) update ComfyUI (install_comfyui (action:"update")) and remove --disable-api-nodes, then retry; or ` +
       `(2) install a LOCAL 3D pack and build a workflow with it — e.g. install_custom_node with ` +
       `"ComfyUI-Hunyuan3DWrapper" (image-to-3D) or "ComfyUI-Flowty-TripoSR" (image-to-3D). ` +
       `Nothing was installed automatically.`,

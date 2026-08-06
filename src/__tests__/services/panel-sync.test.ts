@@ -67,7 +67,7 @@ function decide(over: Partial<PanelStatus>): PanelSyncDecision {
 describe("requiredPanelVersion", () => {
   it("includes handshake capabilities as well as bridge-command minimums", () => {
     // A capability gate is just as much a version requirement as a command
-    // gate: otherwise install_panel can call the panel current while the bridge
+    // gate: otherwise install_comfyui(action:'panel') can call the panel current while the bridge
     // refuses every active-workflow write (#708).
     expect(BRIDGE_CAPABILITY_MIN_PANEL_VERSION.enforces_workflow_stamp).toBe("0.11.30");
     expect(BRIDGE_CAPABILITY_MIN_PANEL_VERSION.enforces_workflow_stamp_at_write).toBe(REQUIRED);
@@ -218,7 +218,7 @@ describe("evaluatePanelSync — a pin is honoured in every shape", () => {
   });
 
   // #806, pinned variant. The honesty is owed here too — but the step that moves
-  // a PINNED user is clearing the pin, not install_panel(action='update'), which
+  // a PINNED user is clearing the pin, not install_comfyui(action:'panel', panel_action:'update'), which
   // this state would refuse. Naming the wrong one is the dead-end shape again.
   it("a pinned floor-clearing panel is told the floor is not the latest, and to unpin first", () => {
     const pin: PanelPinState = { pinned: true, version: REQUIRED, source: "settings" };
@@ -229,7 +229,7 @@ describe("evaluatePanelSync — a pin is honoured in every shape", () => {
     expect(a.summary).toMatch(/FLOOR check, not a latest-version check/);
     expect(a.summary).toContain("pyproject.toml");
     expect(a.summary).toMatch(/clear the pin/i);
-    expect(a.summary).not.toContain("install_panel(action='update')");
+    expect(a.summary).not.toContain("install_comfyui(action:'panel', panel_action:'update')");
   });
 
   it("a pin blocks even a FRESH install of a missing panel", () => {

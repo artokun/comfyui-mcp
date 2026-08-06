@@ -196,7 +196,7 @@ export async function updateComfyUICore(): Promise<UpdateCoreResult> {
 
 /**
  * Update all installed custom nodes via the ComfyUI-Manager HTTP API.
- * Queues the update_all task then starts the queue worker (fire-and-forget —
+ * Queues the update-all task then starts the queue worker (fire-and-forget —
  * the updates run asynchronously; unlike update_node with id "all", which
  * drains the queue).
  *
@@ -211,7 +211,7 @@ export async function updateComfyUICore(): Promise<UpdateCoreResult> {
 export async function updateAllCustomNodes(): Promise<UpdateNodesResult> {
   // PIN GUARD — "update everything" includes the sidebar panel pack, so this is
   // one of the doors into a pinned panel that does NOT pass through
-  // install_panel/runPanelAction. See panel-pin-guard.ts. The pin check AND the
+  // install_comfyui(action:'panel')/runPanelAction. See panel-pin-guard.ts. The pin check AND the
   // queue/start calls run inside the panel mutation lock, so a pin cannot be
   // written between them (the pin-write path takes the same lock). The Manager
   // then drains the queue ASYNCHRONOUSLY — outside anything this process can
@@ -219,7 +219,7 @@ export async function updateAllCustomNodes(): Promise<UpdateNodesResult> {
   // "updated".
   return withPanelPinGuard("update", "all", async () => {
     // Persist and VERIFY the warning marker BEFORE the remote request. Once the
-    // Manager has accepted update_all, a later pin cannot stop its worker; a
+    // Manager has accepted update-all, a later pin cannot stop its worker; a
     // marker write after that point could fail and leave the later pin claiming
     // protection it cannot provide. If the request itself fails, retain this
     // conservative marker: a transport failure cannot prove Manager did not
@@ -232,7 +232,7 @@ export async function updateAllCustomNodes(): Promise<UpdateNodesResult> {
     // clear as "cancelled" while the update lands elsewhere. A base-unknown
     // marker routes to the unverified/no-reset path instead.
     const detail =
-      `an update_all request may have been handed to ComfyUI-Manager and can update EVERY ` +
+      `an update-all request may have been handed to ComfyUI-Manager and can update EVERY ` +
       `installed pack — the sidebar panel included — on the Manager's own schedule ` +
       `(usually seconds to minutes; a ComfyUI restart then loads the result)`;
     recordPanelPendingOp("update-all", detail, UPDATE_ALL_PENDING_MS);
@@ -241,7 +241,7 @@ export async function updateAllCustomNodes(): Promise<UpdateNodesResult> {
     // Enrich the marker with what the ENQUEUE actually used: the base it
     // captured at invocation and the ui_id of the attempt that landed (a
     // self-heal retry mints a fresh one). On v4 the ui_id identifies the
-    // update_all's per-pack tasks (each `${ui_id}_${pack}`) in the queue
+    // update-all's per-pack tasks (each `${ui_id}_${pack}`) in the queue
     // history, which is what makes a later pin's cancel PROVABLE (#689 round
     // 3). keepRecordOnFailure: the operation is ALREADY with the Manager, so a
     // failed enrichment must leave the marker in place (the pre-handoff
@@ -257,7 +257,7 @@ export async function updateAllCustomNodes(): Promise<UpdateNodesResult> {
       });
     } catch (err) {
       logger.warn(
-        `[panel] update_all is queued, but the enriched pending-op marker could ` +
+        `[panel] update-all is queued, but the enriched pending-op marker could ` +
           `not be confirmed durably written — the marker remains as last ` +
           `successfully written (possibly base-unknown), so a later pin may ` +
           `report it as unverifiable rather than cancel blindly: ${

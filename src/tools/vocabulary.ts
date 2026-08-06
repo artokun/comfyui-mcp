@@ -41,7 +41,6 @@ export const TOOL_NAMES = [
   "search_custom_nodes",
   "download_model",
   "list_local_models",
-  "get_logs",
   "get_history",
   "runpod",
   "runpod_watch",
@@ -58,19 +57,12 @@ export const TOOL_NAMES = [
   "install_custom_node",
   "report_issue",
   "install_comfyui",
-  "update_comfyui",
-  "update_all",
   "model_metadata",
   "workspace",
-  "get_environment",
   "list_api_nodes",
-  "configure_manager",
   "node_pack",
   "apply_manifest",
-  "health_check",
   "list_packs",
-  "install_panel",
-  "self_update",
   "calculate",
   "train_prepare_dataset",
   "train_start",
@@ -202,7 +194,7 @@ export function panelBaselineIntegrity(): { ok: boolean; actual: string } {
  * to the surface. That is the ratchet: not that it cannot rise, but that it cannot
  * rise silently.
  */
-export const MAX_TOOLS = 45;
+export const MAX_TOOLS = 37;
 
 /** Where this is headed, for reference in review. A goal, not enforced. */
 export const TOOL_BUDGET_TARGET = 30;
@@ -1925,6 +1917,143 @@ export const DEAD_NAMES: readonly DeadName[] = [
     name: "diagnose_run",
     since: "0.50.0",
     replacement: 'get_history (action:"diagnose")',
+  },
+  // ─────────────────────────────────────────────────────────────────────────
+  // 0.50.0 slice 13: the install/environment and stats/diagnostics families
+  // folded into TWO action-parameterized tools — the mutating install surface
+  // (ComfyUI core, every custom node pack, the sidebar panel, this npm package,
+  // Manager settings) plus the environment read into the surviving
+  // `install_comfyui` (7 actions), and the connected server's READS into the
+  // surviving `get_system_stats` (3 actions). Same services, same arguments,
+  // same return shapes — only the surface changed, so every mention of the old
+  // names is now rot pointing at a 404.
+  //
+  // FOUR names the slice originally folded are NOT here, because review took
+  // the RFC's documented fallback and left them STANDALONE: `apply_manifest`
+  // (the most-referenced name on the surface, and nearly all of those mentions
+  // are one-line install instructions), `clear_vram` (the OOM panic button,
+  // which belongs at one call's reach), `report_issue` (it FILES A PUBLIC
+  // GITHUB ISSUE and had no business on a tool named "get system stats") and
+  // `calculate` (a pure offline utility with nothing to do with server state).
+  // They are unchanged on the live surface and retire nothing.
+  //
+  // THREE of the folded tools had an `action` parameter of their own, which a
+  // flat schema cannot host twice: install_panel's became `panel_action`,
+  // self_update's `self_update_action`, and configure_manager's
+  // `manager_setting`. The enum VALUES and their defaults are unchanged, so a
+  // caller translating `install_panel(action='sync')` writes
+  // `install_comfyui(action:"panel", panel_action:"sync")`.
+  {
+    name: "update_comfyui",
+    since: "0.50.0",
+    replacement: 'install_comfyui (action:"update")',
+    allowedIn: [
+      {
+        path: "src/services/manager-config.ts",
+        context: "compared server-side (manager_server.py update_comfyui)",
+        why: "Names ComfyUI-Manager's OWN Python handler (manager_server.py's update_comfyui route), which is upstream code this repo does not own and cannot rename. It is not, and never was, a reference to our tool.",
+      },
+    ],
+  },
+  {
+    name: "update_all",
+    since: "0.50.0",
+    replacement: 'install_comfyui (action:"update_all")',
+    // Rule (c): this name is spelled exactly like its own ACTION, so the module
+    // that DEFINES the enum necessarily contains it as a quoted literal — an enum
+    // member and a case label. Licensed there and nowhere else.
+    implementedIn: ["src/tools/install-comfyui.ts"],
+    // NOTE for reviewers: `update_all` is ALSO the name of ComfyUI-Manager's own
+    // bulk-update operation and the tail of its HTTP route
+    // (/manager/queue/update_all). About 120 of the ~134 in-repo occurrences
+    // were that UPSTREAM operation, not our tool. Exempting them one by one
+    // would have meant ~120 ledger entries; exempting them by file would have
+    // been the whole-file exemption this ledger exists to avoid. They were
+    // instead respelled in prose as "update-all" — a hyphen, so not a tool-name
+    // token, and already the spelling the pending-op ledger uses for the op
+    // kind — leaving the literal `update_all` only where it IS the upstream
+    // route string.
+    allowedIn: [
+      // ONE context per file, and it is the upstream ROUTE PATH — which is what
+      // keeps these narrow rather than whole-file: only a line containing
+      // "/manager/queue/update_all" is exempt, and the v4 route
+      // "/v2/manager/queue/update_all" contains it as a substring, so one entry
+      // covers both dialects. A live instruction to call the retired TOOL,
+      // added to any of these files later, still fails the gate.
+      {
+        path: "src/services/node-management.ts",
+        context: "/manager/queue/update_all",
+        why: "ComfyUI-Manager's own HTTP route, which this code POSTs to and its comments enumerate by path. Upstream API surface we cannot rename — rewriting it would break the request.",
+      },
+      {
+        path: "src/services/node-management.ts",
+        context: "endpoint: `${prefix}/update_all`",
+        why: "Builds that same upstream route path to report back as `endpoint`. A URL segment, not a tool name.",
+      },
+      {
+        path: "src/services/update-comfyui.ts",
+        context: "/manager/queue/update_all",
+        why: "A comment naming the two upstream Manager routes (legacy 3.x and v4) by their exact paths, which is the whole point of the line.",
+      },
+      {
+        path: "src/__tests__/services/update-comfyui.test.ts",
+        context: "/manager/queue/update_all",
+        why: "The tests pin WHICH upstream route the enqueue uses per Manager dialect (#656). The literal path is the assertion.",
+      },
+      {
+        path: "src/__tests__/services/manager-dialect-cache.test.ts",
+        context: "/manager/queue/update_all",
+        why: "Same: the dialect-cache tests stub and count calls to the upstream route by path.",
+      },
+      {
+        path: "src/__tests__/services/node-management.test.ts",
+        context: "/manager/queue/update_all",
+        why: "Same: asserts the 'all' id routes to the upstream v4 route with query params rather than a body.",
+      },
+      {
+        path: "src/__tests__/services/panel-pin-cancel.test.ts",
+        context: "/manager/queue/update_all",
+        why: "Same: the Manager persona stubs match on the upstream route path.",
+      },
+    ],
+  },
+  {
+    name: "install_panel",
+    since: "0.50.0",
+    replacement: 'install_comfyui (action:"panel")',
+  },
+  {
+    name: "self_update",
+    since: "0.50.0",
+    replacement: 'install_comfyui (action:"self_update")',
+    // Rule (c): this name is spelled exactly like its own ACTION, so the module
+    // that DEFINES the enum necessarily contains it as a quoted literal — an enum
+    // member and a case label. Licensed there and nowhere else.
+    implementedIn: ["src/tools/install-comfyui.ts"],
+  },
+  {
+    name: "get_environment",
+    since: "0.50.0",
+    replacement: 'install_comfyui (action:"environment")',
+  },
+  {
+    name: "configure_manager",
+    since: "0.50.0",
+    replacement: 'install_comfyui (action:"configure_manager")',
+    // Rule (c): this name is spelled exactly like its own ACTION, so the module
+    // that DEFINES the enum necessarily contains it as a quoted literal — an enum
+    // member and a case label. Licensed there and nowhere else.
+    implementedIn: ["src/tools/install-comfyui.ts"],
+  },
+  {
+    name: "get_logs",
+    since: "0.50.0",
+    replacement: 'get_system_stats (action:"logs")',
+  },
+  {
+    name: "health_check",
+    since: "0.50.0",
+    replacement: 'get_system_stats (action:"health")',
   },
 ];
 

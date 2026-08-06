@@ -347,7 +347,7 @@ describe("saveNodeSnapshot (named — file path)", () => {
   it("#775 resolves a named save from the SAVED DEFAULT WORKSPACE when COMFYUI_PATH is unset", async () => {
     // The reported defect: a local install connected via URL, default workspace
     // saved, was told "remote (--comfyui-url) mode" by code that only checked
-    // config.comfyuiPath. The shared resolver (get_environment / extra_paths)
+    // config.comfyuiPath. The shared resolver (install_comfyui (action:"environment") / extra_paths)
     // knows the workspace — the snapshot must be written under IT.
     (config as { comfyuiPath?: string }).comfyuiPath = undefined;
     wsMock.saved = "/saved/ws";

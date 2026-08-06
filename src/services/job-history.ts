@@ -162,14 +162,14 @@ function truncateTraceback(text: string): { text: string; truncated: boolean } {
   const dropped = text.length - TRACEBACK_MAX_CHARS;
   return {
     // The remedy is deliberately a MAY, not a promise (codex gate): the full text came
-    // from ComfyUI's /history and no tool re-serves it, so claiming get_logs "has" it
+    // from ComfyUI's /history and no tool re-serves it, so claiming get_system_stats (action:"logs") "has" it
     // would be the same lie as naming a parameter that does not exist. What IS certain:
     // this is the HEAD, and a Python traceback prints the exception LAST — so the line
     // that names the failure may be among the cut frames. Say that; it changes what the
     // reader does next.
     text:
       text.slice(0, TRACEBACK_MAX_CHARS) +
-      `\n[... ${dropped} more char(s) cut at the fixed ${TRACEBACK_MAX_CHARS}-char traceback cap — no parameter raises it, and the rest is not retained in this result. This is the HEAD, so the final exception line is likely among the cut frames; get_logs may still hold the full traceback if the run is recent ...]`,
+      `\n[... ${dropped} more char(s) cut at the fixed ${TRACEBACK_MAX_CHARS}-char traceback cap — no parameter raises it, and the rest is not retained in this result. This is the HEAD, so the final exception line is likely among the cut frames; get_system_stats (action:"logs") may still hold the full traceback if the run is recent ...]`,
     truncated: true,
   };
 }

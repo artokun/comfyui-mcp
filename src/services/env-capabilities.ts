@@ -28,7 +28,7 @@ import { detectInstallMode } from "./self-update.js";
 import { logger } from "../utils/logger.js";
 
 // The interpreter resolver lives in workspace-env (which owns ComfyUI-base
-// resolution) so get_environment and this panel probe share ONE live-first
+// resolution) so the environment read and this panel probe share ONE live-first
 // implementation and can never disagree (#401 / PR #433). Re-export for
 // back-compat with existing importers/tests.
 export { resolveComfyuiPython };
@@ -87,7 +87,7 @@ export interface EnvCapabilities {
   panelVersion?: string; // sidebar panel version from the panel's hello, e.g. "0.11.3" / "nightly"
 }
 
-// Shape of the bits of /system_stats we read (mirrors get_environment).
+// Shape of the bits of /system_stats we read (mirrors the environment read).
 interface SystemStatsLike {
   system?: {
     os?: string;
@@ -247,7 +247,7 @@ function classifyLocation(url: string | undefined): "LOCAL" | "REMOTE" {
 }
 
 // ---------------------------------------------------------------------------
-// /system_stats fetch (direct HTTP — no client dependency, mirrors get_environment)
+// /system_stats fetch (direct HTTP — no client dependency, mirrors the environment read)
 // ---------------------------------------------------------------------------
 
 async function fetchSystemStats(
@@ -1018,7 +1018,7 @@ export function formatEnvBlock(caps: EnvCapabilities): string {
     " triton-sageattention skill) and offer to install ONLY where this line says" +
     " \"not installed\". \"UNKNOWN\" means the probe could not verify which interpreter the" +
     " running ComfyUI uses; it is NOT a report of absence. Never disable Triton/" +
-    "SageAttention or edit a user's workflow on an UNKNOWN — call get_environment" +
+    `SageAttention or edit a user's workflow on an UNKNOWN — call install_comfyui (action:"environment")` +
     " (python_probe_reason says what could not be established) or ask the user first.";
   return head + guidance;
 }

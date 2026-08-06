@@ -22,7 +22,7 @@ import { checkAndSelfUpdate } from "./services/self-update.js";
  * Fire-and-forget: ensure the ComfyUI sidebar panel is installed (install-if-
  * missing) on MCP load. LOCAL-only, hard-timed-out, and never throws — it must
  * never block or crash startup. Opt out with COMFYUI_MCP_PANEL_AUTOINSTALL=0.
- * The explicit `install_panel(action='update')` tool refreshes nightly on demand.
+ * The explicit `install_comfyui(action:'panel', panel_action:'update')` tool refreshes nightly on demand.
  */
 function ensurePanelOnLoad(): void {
   if (!isLocalMode()) return;
@@ -41,7 +41,7 @@ function ensurePanelOnLoad(): void {
         case "present":
           logger.info(
             "Panel auto-install: panel already present — NOT a version check. " +
-              "Run install_panel(action='status') to compare it against what this build needs.",
+              "Run install_comfyui(action:'panel', panel_action:'status') to compare it against what this build needs.",
             res,
           );
           break;

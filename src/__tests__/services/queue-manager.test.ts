@@ -91,7 +91,7 @@ describe("getJobStatus history enrichment", () => {
     const tb = status.error?.traceback ?? "";
     expect(tb.slice(0, TRACEBACK_MAX_CHARS)).toHaveLength(TRACEBACK_MAX_CHARS);
     expect(tb.slice(TRACEBACK_MAX_CHARS)).toMatch(/more char\(s\) cut at the fixed 2000-char/);
-    expect(tb.slice(TRACEBACK_MAX_CHARS)).toContain("get_logs");
+    expect(tb.slice(TRACEBACK_MAX_CHARS)).toContain("get_system_stats");
   });
 
   it("adds optional timing stats for successful completed prompts", async () => {

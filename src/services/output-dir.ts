@@ -299,7 +299,7 @@ function samePath(a: string, b: string): boolean {
  *   B. `base` IS the ComfyUI directory (it holds `main.py` directly), and the
  *      server's relative `relDir/main.py` is written from base's PARENT. This is
  *      the classic Windows portable bundle with `COMFYUI_PATH` set to
- *      `...\ComfyUI_windows_portable\ComfyUI` — the value `get_environment`,
+ *      `...\ComfyUI_windows_portable\ComfyUI` — the value `install_comfyui (action:"environment")`,
  *      `list_local_models` and `resolveEffectiveComfyUIBase` all already treat as
  *      correct. Only this resolver rejected it, so every download refused (#813).
  *
@@ -871,7 +871,7 @@ export function localOutputDirFallback(): string {
   // THE SAVED DEFAULT WORKSPACE COUNTS (#877). Reading `config.comfyuiPath`
   // alone asks whether ONE ENVIRONMENT VARIABLE is set, and that is not the
   // question — a local portable install is located perfectly well by the saved
-  // default workspace, which `get_environment` reports and every other resolver
+  // default workspace, which `install_comfyui (action:"environment")` reports and every other resolver
   // in this codebase already consults. Keying off the env var made a perfectly
   // locatable install look pathless, and the caller upstream then fell through
   // to a data source that cannot see the disk and reported no outputs at all.

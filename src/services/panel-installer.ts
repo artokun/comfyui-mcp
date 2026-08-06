@@ -753,7 +753,7 @@ export function assertPinnedTarget(
       `while the operation was in flight, so the local directory it was working in ` +
       `(${deps.comfyuiPath() ?? "unresolved"}) may no longer belong to the install this ` +
       `result would describe. NOT acting on, or reporting, a possibly-wrong tree. ` +
-      `Re-run install_panel(action='status'), then retry.`,
+      `Re-run install_comfyui(action:'panel', panel_action:'status'), then retry.`,
   );
 }
 
@@ -763,7 +763,7 @@ export function assertPinnedTarget(
 // A pin is the user's explicit "hold the panel here". Every mutating path in
 // this file consults it FIRST and refuses while it is in force — the on-load
 // ensure, install, update and reinstall alike. The escape hatch is to clear the
-// pin (install_panel(action='unpin'), or COMFYUI_MCP_PANEL_PIN=off), never for
+// pin (install_comfyui(action:'panel', panel_action:'unpin'), or COMFYUI_MCP_PANEL_PIN=off), never for
 // us to decide the pin was probably fine to ignore.
 // ---------------------------------------------------------------------------
 
@@ -820,7 +820,7 @@ function pinRefusalMessage(action: string, pin: PanelPinState): string {
   return (
     `Refusing to ${action} the panel: it is ${describePanelPin(pin)}. ` +
     `A pin is honoured even when a newer panel exists — clear it first with ` +
-    `install_panel(action='unpin')` +
+    `install_comfyui(action:'panel', panel_action:'unpin')` +
     (pin.source === "env"
       ? ` (this pin comes from the ${PANEL_PIN_ENV_VAR} environment variable, so ` +
         `it must be unset/changed in the environment — unpin cannot remove it)`
@@ -1548,8 +1548,8 @@ async function ensureInner(deps: PanelInstallerDeps): Promise<EnsureResult> {
       `The panel pack is installed${detection.version ? ` (${detection.version})` : ""} and was ` +
       `left untouched — the on-load check only installs a MISSING panel and does not compare ` +
       `versions, so this is not a statement that the panel is current. Run ` +
-      `install_panel(action='status') to compare it against what this orchestrator needs, or ` +
-      `install_panel(action='update') to pull the latest panel.`,
+      `install_comfyui(action:'panel', panel_action:'status') to compare it against what this orchestrator needs, or ` +
+      `install_comfyui(action:'panel', panel_action:'update') to pull the latest panel.`,
     dir: detection.dir,
     installedVersion: detection.version,
   };
@@ -1566,7 +1566,7 @@ export async function ensurePanelInstalled(
   const deps = opts.deps ?? defaultDeps;
   try {
     // Serialized with the explicit actions: the on-load ensure must not race an
-    // install_panel call the user fired at the same moment. Its lock wait is
+    // install_comfyui(action:'panel') call the user fired at the same moment. Its lock wait is
     // SHORT — this is fire-and-forget at startup, so if another process holds
     // the lock we give up quickly (returning `unavailable`) rather than eating
     // the whole ensure budget waiting.
@@ -1920,20 +1920,20 @@ export async function panelStatus(
         `reading available names a DIFFERENT tree (${liveMismatchBase}), so whether ` +
         `the running ComfyUI serves from this one is UNCORROBORATED: "not installed" ` +
         `here may simply be the wrong tree (#766/#820). Check that tree, or ` +
-        `get_environment's local.workspace_path, before installing — a blind install ` +
+        `install_comfyui (action:"environment")'s local.workspace_path, before installing — a blind install ` +
         `here would land in a custom_nodes nothing loads.`
       : `No panel found in ${comfyuiPath ?? "custom_nodes"} — but this is the ` +
         `CONFIGURED path, and the running ComfyUI did not confirm it is the tree it ` +
         `serves from, so "not installed" is UNCORROBORATED. On a split install ` +
         `(Comfy Desktop's --base-directory, #766) the panel lives elsewhere and ` +
         `installing here would land in a custom_nodes nothing loads. Start/reach ` +
-        `ComfyUI so its own install root can be read, or check get_environment's ` +
+        `ComfyUI so its own install root can be read, or check install_comfyui (action:"environment")'s ` +
         `local.workspace_path, before installing.`
-      : `Not installed. Run install_panel(action='install') to add the panel (${PANEL_VERSION}). Restart ComfyUI afterwards.`;
+      : `Not installed. Run install_comfyui(action:'panel', panel_action:'install') to add the panel (${PANEL_VERSION}). Restart ComfyUI afterwards.`;
   } else {
     note = `Installed${
       detection.version ? ` (${detection.version})` : ""
-    }. Run install_panel(action='update') to pull the latest ${PANEL_VERSION}. Restart ComfyUI after updating.`;
+    }. Run install_comfyui(action:'panel', panel_action:'update') to pull the latest ${PANEL_VERSION}. Restart ComfyUI after updating.`;
   }
 
   // Record what we just READ OFF DISK, so the bridge's write-gate refusal can
@@ -2533,7 +2533,7 @@ async function updateViaGitCheckoutFallback(opts: {
         `whether it updated (a nightly advance with no version bump) is ` +
         `UNVERIFIABLE — the git fallback does not fire on an unprovable no-op. ` +
         `Check the panel repo (git log) and ComfyUI-Manager on the host, then ` +
-        `re-check install_panel(action='status').`,
+        `re-check install_comfyui(action:'panel', panel_action:'status').`,
     );
   }
 
@@ -2728,7 +2728,7 @@ async function updateViaGitCheckoutFallback(opts: {
         `is unknown, NOT proof that anything changed. NO git mutation was made — ` +
         `though whether the Manager call itself changed anything is precisely what ` +
         `its own status could not say. Check the panel repo (git status / git log), ` +
-        `then re-check install_panel(action='status').`,
+        `then re-check install_comfyui(action:'panel', panel_action:'status').`,
     );
   }
   if (casRev !== prePullRev || casPorcelain !== "") {
@@ -2741,7 +2741,7 @@ async function updateViaGitCheckoutFallback(opts: {
         `fast-forward would race it. NO git mutation was made by this fallback ` +
         `— but something else evidently DID change the checkout, so re-read it ` +
         `rather than assuming the pre-update state. Let the other operation ` +
-        `finish, then re-check install_panel(action='status').`,
+        `finish, then re-check install_comfyui(action:'panel', panel_action:'status').`,
     );
   }
 
@@ -2889,7 +2889,7 @@ async function updateViaGitCheckoutFallback(opts: {
           `Manager task wrote to the panel directory during the merge is ` +
           `UNKNOWN. NOT reporting success. Let the Manager queue drain, inspect ` +
           `the panel repo (git status / git log), then re-check ` +
-          `install_panel(action='status').`,
+          `install_comfyui(action:'panel', panel_action:'status').`,
       );
     }
   }
@@ -2931,7 +2931,7 @@ async function updateViaGitCheckoutFallback(opts: {
         `so whether it moved (a nightly advance with no version bump) is ` +
         `UNVERIFIABLE. NOT reporting success and NOT reporting "already at ` +
         `tip" — check the panel repo (git log), then re-check ` +
-        `install_panel(action='status').`,
+        `install_comfyui(action:'panel', panel_action:'status').`,
     );
   }
   const verdict = classifyPanelUpdate(
@@ -2992,7 +2992,7 @@ async function updateViaGitCheckoutFallback(opts: {
       `Could not verify the panel is current: the pinned fast-forward ran clean in ` +
         `${dir}, but ${!upstreamRev ? "no upstream is configured, so currency is UNPROVABLE" : `HEAD (${post.gitRev?.slice(0, 8)}) does not match the tracked upstream (${upstreamRev.slice(0, 8)}) — the checkout has committed local work upstream doesn't have`}. ` +
         `NOT reporting "at upstream tip" and NOT reporting an update. Check the ` +
-        `panel repo (git status / git log), then re-check install_panel(action='status').`,
+        `panel repo (git status / git log), then re-check install_comfyui(action:'panel', panel_action:'status').`,
     );
   }
   // HEAD === upstream: git FETCHED the remote and proved the checkout current.
@@ -3031,7 +3031,7 @@ async function updateViaGitCheckoutFallback(opts: {
  * routes at once. ComfyUI-Manager cannot resolve it (its update queue drains
  * having enqueued nothing), and the #724 fast-forward has nothing to
  * fast-forward. The reporter of #771 was therefore hard-blocked: the write gate
- * told them to run install_panel, and install_panel was the thing that could not
+ * told them to run install_comfyui(action:'panel'), and install_comfyui(action:'panel') was the thing that could not
  * work. This closes that loop by doing, under verification, exactly the manual
  * sequence that unblocked them — clone the panel repo fresh and swap it in.
  *
@@ -4783,7 +4783,7 @@ async function updateViaRegistryZipReinstall(opts: {
                       : `version ${still.version}, not the ${previousVersion} this ` +
                         `check was based on`
               }. NOT reporting "already up to date" on a stale reading. Re-run ` +
-              `install_panel(action='status').`,
+              `install_comfyui(action:'panel', panel_action:'status').`,
           );
         }
         // A shadow makes any statement about what the BROWSER loads untrue,
@@ -4859,7 +4859,7 @@ async function updateViaRegistryZipReinstall(opts: {
       `Panel update did NOT apply (${managerReason}), and the reinstall-from-source ` +
         `fallback refused to start: a staged replacement is already sitting at ` +
         `${incomingDir}, which means an earlier update was interrupted and has not been ` +
-        `reconciled yet. Re-run install_panel(action='status') to have it repaired, ` +
+        `reconciled yet. Re-run install_comfyui(action:'panel', panel_action:'status') to have it repaired, ` +
         `then retry.`,
     );
   }
@@ -5013,7 +5013,7 @@ async function updateViaRegistryZipReinstall(opts: {
         servingQualifier(deps, comfyuiPath, `that new copy`) +
         ` Nothing was rolled back, ` +
         `because undoing this would have meant deleting the only panel in custom_nodes ` +
-        `first. Re-run install_panel(action='status') to have it moved into place ` +
+        `first. Re-run install_comfyui(action:'panel', panel_action:'status') to have it moved into place ` +
         `automatically, then RESTART ComfyUI.`,
     );
   }
@@ -5222,7 +5222,7 @@ async function runPanelActionCore(
 
   // PIN GUARD — before any Manager mutation is queued. This is the single choke
   // point that makes "we never move a pinned user" true for every caller (the
-  // sync skill, the panel, a hand-written install_panel call), not just the ones
+  // sync skill, the panel, a hand-written install_comfyui(action:'panel') call), not just the ones
   // that remembered to check. It is re-checked once more immediately before the
   // Manager call, since detection below is not instantaneous.
   //
@@ -5266,7 +5266,7 @@ async function runPanelActionCore(
         `while the operation was in flight, so the local directory it was working in ` +
         `(${comfyPath}) and the server the ComfyUI-Manager request went to may no ` +
         `longer be the same install. NOT reporting a result that could describe the ` +
-        `wrong one. Re-run install_panel(action='status'), then retry.`,
+        `wrong one. Re-run install_comfyui(action:'panel', panel_action:'status'), then retry.`,
     );
   };
 
@@ -5352,7 +5352,7 @@ async function runPanelActionCore(
               `could not be enumerated to check what is actually installed, so whether ` +
               `the panel is present is UNKNOWN. NOT accepting "not installed" from a ` +
               `scan that did not run. Make ${comfyPath}/custom_nodes readable, then ` +
-              `re-run install_panel(action='status').`,
+              `re-run install_comfyui(action:'panel', panel_action:'status').`,
           );
         }
         throw err;
@@ -5550,7 +5550,7 @@ async function runPanelActionCore(
         `Panel update did NOT apply: ${managerReason}. The panel IS installed` +
           `${freshDir ? ` at ${freshDir}` : ""}` +
           `${freshVersion ? ` (version ${freshVersion})` : ""} — whatever the ` +
-          `Manager's error says, that is what install_panel(action='status') reads ` +
+          `Manager's error says, that is what install_comfyui(action:'panel', panel_action:'status') reads ` +
           `off the disk — but no direct update path is available here (it is not a ` +
           `git checkout, so there is nothing to fast-forward). ` +
           `${describePanelUpdateRecovery()} (ComfyUI-Manager reported: ${managerFailure})`,
@@ -5851,7 +5851,7 @@ async function runPanelActionCore(
         `unchanged checkout can't prove the ${action} actually executed versus a ` +
         `silent no-op (stale ComfyUI-Manager 3.x, #424). If you meant to refresh or ` +
         `upgrade, update ComfyUI-Manager on the host and retry, use ` +
-        `install_panel(action='update'), or install the panel from source, then ` +
+        `install_comfyui(action:'panel', panel_action:'update'), or install the panel from source, then ` +
         `RESTART ComfyUI.`,
     );
   }

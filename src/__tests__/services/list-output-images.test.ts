@@ -296,7 +296,7 @@ describe("listOutputImages — remote mode (derived from /history)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// #877 — a LOCAL portable install with COMFYUI_PATH unset. `get_environment`
+// #877 — a LOCAL portable install with COMFYUI_PATH unset. `install_comfyui (action:"environment")`
 // locates it perfectly well from the saved default workspace, but
 // The output listing keyed its remote branch off `!config.comfyuiPath` and so
 // asked /history, which had been emptied by a restart. It returned `[]` over a

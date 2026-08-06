@@ -517,7 +517,7 @@ export async function selfUpdateStatus(
   } else {
     note =
       `${latest} available (current ${info.currentVersion}). ` +
-      `Run self_update(action='update')${autoUpdateDisabled ? "" : " (or it auto-updates on start)"}. ${RECONNECT_NOTE}`;
+      `Run install_comfyui (action:"self_update") with self_update_action:'update'${autoUpdateDisabled ? "" : " (or it auto-updates on start)"}. ${RECONNECT_NOTE}`;
   }
 
   return {

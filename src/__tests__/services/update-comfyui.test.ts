@@ -30,7 +30,7 @@ vi.mock("../../config.js", () => ({
   config: mockConfig,
   getComfyUIBaseUrl: () => "http://127.0.0.1:8188",
   getComfyUIAuthHeaders: () => ({}),
-  // node-management (the update_all dialect path, #656) transitively imports
+  // node-management (the update-all dialect path, #656) transitively imports
   // this; the mock must provide it or the named import fails at load.
   isLoopbackHost: (host?: string) => host === "127.0.0.1" || host === "localhost",
 }));
@@ -45,9 +45,9 @@ vi.mock("node:child_process", () => ({
 
 vi.mock("node:fs", async (importOriginal) => ({
   // existsSync stays mockable per-test; everything else delegates to the REAL
-  // fs because update_all now takes the panel mutation lock (panel-pin-guard),
+  // fs because update-all now takes the panel mutation lock (panel-pin-guard),
   // which is a real file — a partial mock left its mkdir/open/write undefined
-  // and every update_all failed closed.
+  // and every update-all failed closed.
   ...(await importOriginal<typeof import("node:fs")>()),
   existsSync: vi.fn(),
 }));
@@ -115,7 +115,7 @@ function jsonResponse(obj: unknown): Response {
  *   "v4"       = normal pip Manager: the /v2 surface answers, is_legacy_manager_ui
  *                false, and NO bare /manager/* (an unregistered POST there is
  *                answered 405 by ComfyUI's frontend catchall — the misroute the
- *                old hardcoded-legacy update_all hit).
+ *                old hardcoded-legacy update-all hit).
  *   "v2-batch" = pip Manager in legacy-UI mode: /v2 surface, is_legacy_manager_ui
  *                true.
  */
@@ -379,7 +379,7 @@ describe("updateAllCustomNodes", () => {
     expect(countOf(calls, "/v2/manager/queue/start")).toBe(1);
   });
 
-  it("on a v2-batch host (pip Manager in legacy-UI mode): also routes at the /v2 update_all route", async () => {
+  it("on a v2-batch host (pip Manager in legacy-UI mode): also routes at the /v2 update-all route", async () => {
     const calls = stubManager("v2-batch");
 
     const r = await updateAllCustomNodes();
@@ -389,10 +389,10 @@ describe("updateAllCustomNodes", () => {
     expect(countOf(calls, "/v2/manager/queue/start")).toBe(1);
   });
 
-  it("throws when Manager rejects update_all — and does NOT re-send the mutation", async () => {
+  it("throws when Manager rejects update-all — and does NOT re-send the mutation", async () => {
     // A 404 is a route-level rejection: the dialect self-heal re-probes, finds
     // the dialect UNCHANGED (still legacy), and surfaces the original failure
-    // instead of retrying — update_all must never execute twice (#656 caution).
+    // instead of retrying — update-all must never execute twice (#656 caution).
     const calls = stubManager("legacy", { updateAllStatus: 404 });
     await expect(updateAllCustomNodes()).rejects.toThrow(/ComfyUI-Manager API 404/);
     expect(countOf(calls, "/manager/queue/update_all")).toBe(1);
@@ -402,7 +402,7 @@ describe("updateAllCustomNodes", () => {
 
   it("refuses before contacting Manager when the out-of-band pin-warning marker cannot persist", async () => {
     // A marker written after queueing can fail, then a later pin would be
-    // reported as protective even though update_all can still land. Make its
+    // reported as protective even though update-all can still land. Make its
     // parent a regular file so the preflight record is indeterminate/unwritable.
     const blocker = join(tmpdir(), `cmcp-pending-blocker-${process.pid}-${Date.now()}`);
     writeFileSync(blocker, "not a directory");
@@ -437,13 +437,13 @@ describe("updateAllCustomNodes", () => {
   });
 });
 
-// --- update_all semantics: custom nodes only (never core) ---------------
+// --- update-all semantics: custom nodes only (never core) ---------------
 
-describe("update_all is custom-nodes-only", () => {
+describe("update-all is custom-nodes-only", () => {
   it("runs no git/pip core-update commands (mirrors comfy-cli `update all`)", async () => {
     stubManager("legacy");
     await updateAllCustomNodes();
-    // update_all touches ONLY the ComfyUI-Manager HTTP API — it must never
+    // update-all touches ONLY the ComfyUI-Manager HTTP API — it must never
     // git pull / pip install ComfyUI core.
     expect(mockedExec).not.toHaveBeenCalled();
   });

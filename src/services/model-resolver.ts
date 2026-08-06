@@ -153,7 +153,7 @@ export interface LocalModel {
  * COMFYUI_PATH / auto-detection (config.comfyuiPath); when that's unset and we're
  * NOT targeting a remote ComfyUI, falls back to the saved default workspace (set
  * via workspace action:"set_default") so local downloads and model lookups work without
- * COMFYUI_PATH — matching what get_environment / workspace action:"get" already report.
+ * COMFYUI_PATH — matching what install_comfyui (action:"environment") / workspace action:"get" already report.
  * Never falls back to a local workspace in remote mode (that dir isn't the remote
  * target). Returns undefined when no usable local path exists.
  */

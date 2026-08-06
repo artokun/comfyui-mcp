@@ -446,7 +446,7 @@ describe("full mode + facade escape hatch (#616)", () => {
     const client = await fullPair();
     const names = new Set((await client.listTools()).tools.map((t) => t.name));
     // Direct tools survive (the ones that vanished for the reporter).
-    for (const t of ["get_environment", "health_check", "list_local_models", "calculate"]) {
+    for (const t of ["install_comfyui", "get_system_stats", "list_local_models", "calculate"]) {
       expect(names.has(t), `full surface missing direct tool ${t}`).toBe(true);
     }
     // Facade escape hatch is present alongside them.
@@ -458,7 +458,7 @@ describe("full mode + facade escape hatch (#616)", () => {
   it("routes a direct tool through call_tool (transparent fallback for a stale binding)", async () => {
     const client = await fullPair();
     // `calculate` is a pure, offline tool (no ComfyUI connection) — a safe stand-in
-    // for the reporter's get_environment. Reaching it via call_tool proves the
+    // for the reporter's environment read. Reaching it via call_tool proves the
     // facade dispatches to the SAME direct handler, so a client that lost the
     // direct binding across a reconnect never dead-ends.
     const res = await client.callTool({
@@ -474,7 +474,7 @@ describe("full mode + facade escape hatch (#616)", () => {
   it("honors { facade: false } (COMFYUI_MCP_NO_FACADE opt-out) — direct tools only", async () => {
     const client = await fullPair({ facade: false });
     const names = new Set((await client.listTools()).tools.map((t) => t.name));
-    expect(names.has("get_environment")).toBe(true);
+    expect(names.has("install_comfyui")).toBe(true);
     for (const f of ["list_tools", "describe_tool", "call_tool"]) {
       expect(names.has(f), `facade should be absent when opted out (${f})`).toBe(false);
     }
@@ -486,7 +486,7 @@ describe("full mode + facade escape hatch (#616)", () => {
     try {
       const client = await fullPair(); // no opts → env decides
       const names = new Set((await client.listTools()).tools.map((t) => t.name));
-      expect(names.has("get_environment")).toBe(true);
+      expect(names.has("install_comfyui")).toBe(true);
       expect(names.has("call_tool")).toBe(false);
     } finally {
       if (prev === undefined) delete process.env.COMFYUI_MCP_NO_FACADE;
@@ -563,7 +563,7 @@ describe("collectToolCatalog (real tool surface)", () => {
     // now fails where 100 would still have passed. `>=` rather than `===`
     // because autoloaded workflow tools can add names on a dev box.
     expect(catalog.tools.size).toBeGreaterThanOrEqual(TOOL_NAMES.length);
-    for (const expected of ["generate_image", "health_check", "enqueue_workflow", "list_local_models"]) {
+    for (const expected of ["generate_image", "get_system_stats", "enqueue_workflow", "list_local_models"]) {
       expect(catalog.get(expected), `missing ${expected}`).toBeDefined();
       expect(catalog.get(expected)?.description.length).toBeGreaterThan(20);
     }

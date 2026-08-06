@@ -459,7 +459,7 @@ describe("withPanelMutationLock — a FILE lock, so it holds across processes", 
     const message = (err as Error).message;
     expect(message).toContain(String(0x7fffffff));
     expect(message).toMatch(/no longer running/);
-    expect(message).toContain("install_panel(action='unlock')");
+    expect(message).toContain("install_comfyui(action:'panel', panel_action:'unlock')");
     // The manual boundary stays as the fallback.
     expect(message).toMatch(
       /stop or restart every comfyui-mcp orchestrator.*delete this exact lock file/i,
@@ -728,7 +728,7 @@ describe("durable writes (#798) — records that must not outlive the action the
   });
 
   it("recordPanelPendingOp fsyncs the marker's own bytes before the Manager handoff", () => {
-    recordPanelPendingOp("update-all", "a queued update_all may still move the panel", 60_000);
+    recordPanelPendingOp("update-all", "a queued update-all may still move the panel", 60_000);
     // The atomic write fsyncs the temp file the marker is renamed from.
     expect(fsyncTracker.paths.some((p) => p.includes("panel-pending-ops.json"))).toBe(true);
   });
@@ -764,7 +764,7 @@ describe("durable writes (#798) — records that must not outlive the action the
   });
 
   it("a failed POST-HANDOFF enrichment keeps the landed marker (codex gate round 5)", () => {
-    // update_all records the marker BEFORE the Manager handoff, then RE-RECORDS
+    // update-all records the marker BEFORE the Manager handoff, then RE-RECORDS
     // it enriched with base/uiId after the queue accepts. A failure of that
     // second write must NOT roll back: the operation is already pending out of
     // band, and deleting its record is how a later pin claims clean protection
@@ -786,8 +786,8 @@ describe("durable writes (#798) — records that must not outlive the action the
   });
 
   it("a failed re-record restores the REPLACED predecessor, not an empty file (codex gate round 7)", () => {
-    // update_all A is already with the Manager (its marker landed). A second
-    // update_all B records its marker BEFORE its own handoff, replacing A's
+    // update-all A is already with the Manager (its marker landed). A second
+    // update-all B records its marker BEFORE its own handoff, replacing A's
     // same-kind record — and that write fails after landing. B never starts,
     // but A is still pending: the rollback must bring A's record back, not
     // leave the file empty (a later pin would claim clean protection over A's
@@ -815,19 +815,19 @@ describe("assertPanelNotTargetedUnverifiable — paths that cannot verify", () =
     // panel_install_node / panel_update_node / the fix action report success
     // straight off the Manager queue, which a stale Manager drains without doing
     // any work. There is no verified redirect for them, so they refuse and name
-    // install_panel rather than move the panel unverifiably.
+    // install_comfyui(action:'panel') rather than move the panel unverifiably.
     const { assertPanelNotTargetedUnverifiable } = await import(
       "../../services/panel-pin-guard.js"
     );
     expect(() =>
       assertPanelNotTargetedUnverifiable("panel_update_node", "comfyui-agent-panel"),
-    ).toThrow(/install_panel/);
+    ).toThrow(/install_comfyui\(action:'panel'/);
     expect(() =>
       assertPanelNotTargetedUnverifiable(
         "panel_install_node",
         "https://github.com/artokun/comfyui-mcp-panel.git@v1",
       ),
-    ).toThrow(/install_panel/);
+    ).toThrow(/install_comfyui\(action:'panel'/);
   });
 
   it("reports the PIN first when one is set (the more specific reason)", async () => {
@@ -919,7 +919,7 @@ describe("pending-op markers — record, read, and clear (#689)", () => {
     // Two branches reached this case from opposite ends and `main` settled it.
     //
     // #798 argued a 0-byte file provably holds NO record, so reading it as
-    // "unreadable" refuses every later update_all and warns on every pin forever,
+    // "unreadable" refuses every later update-all and warns on every pin forever,
     // with no recovery path. True — that wedge was real.
     //
     // #847 then observed the other half: an INTERRUPTED write cannot be told from
@@ -953,13 +953,13 @@ describe("pending-op markers — record, read, and clear (#689)", () => {
   });
 });
 
-describe("#847 — a zero-byte pending-ops file must not wedge update_all forever", () => {
+describe("#847 — a zero-byte pending-ops file must not wedge update-all forever", () => {
   const pendingPath = () => process.env.COMFYUI_MCP_PANEL_PENDING as string;
 
   it("records a new op over an EMPTY marker instead of refusing forever", () => {
     // The wedge: recordPanelPendingOp threw on any unreadable prior, and it runs
     // BEFORE the Manager handoff — so the only thing that could replace the bad
-    // file was the very operation the bad file blocked. update_all could never
+    // file was the very operation the bad file blocked. update-all could never
     // start again until a human deleted the file by hand.
     writeFileSync(pendingPath(), "", "utf-8");
 

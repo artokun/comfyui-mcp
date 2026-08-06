@@ -114,7 +114,7 @@ async function runVerifiedPanelAction(
         text: JSON.stringify(
           {
             ...result,
-            routedVia: "install_panel",
+            routedVia: "install_comfyui(action:\'panel\')",
             note:
               `"${id}" is the comfyui-mcp sidebar panel pack, so this ${action} ran ` +
               `through the verified panel path: the version above was RE-READ from ` +
@@ -127,7 +127,7 @@ async function runVerifiedPanelAction(
                   : `Your requested version (${version}) was used as the target. `
                 : `It targets the 'nightly' channel. `) +
               `The mode/channel/useCmCli options do not apply on this path. Use ` +
-              `install_panel directly for status/sync/pin.`,
+              `install_comfyui(action:\'panel\') directly for status/sync/pin.`,
           },
           null,
           2,
@@ -262,10 +262,10 @@ export function registerNodeManagementTools(server: McpServer): void {
   server.tool(
     "install_custom_node",
     "Install, repair, enable/disable and remove ComfyUI custom node packs on this ComfyUI. To FIND a pack in the public registry first, use search_custom_nodes. Driven by the `action` parameter:\n" +
-      '- action:"install" — Install a pack by registry id, git URL, or name. Local installs prefer official comfy-cli when available; remote or CLI-unavailable installs use the ComfyUI-Manager HTTP API. A ComfyUI restart may be required. Targeting the comfyui-mcp sidebar panel pack (\'comfyui-agent-panel\' / \'comfyui-mcp-panel\') is routed through the verified install_panel path (the version is re-read from disk afterwards) and is REFUSED while the panel is version-pinned.\n' +
-      '- action:"update" — Update an installed pack, or pass id:\'all\' to update every installed pack. Local operations prefer official comfy-cli; remote operations use Manager HTTP. Targeting the sidebar panel pack is routed through the verified install_panel path. While the panel is version-pinned, BOTH a direct panel target and \'all\' are REFUSED — \'all\' would move the pinned panel too; clear the pin with install_panel(action=\'unpin\') or update other packs individually.\n' +
-      '- action:"reinstall" — Reinstall a pack. Local operations prefer official comfy-cli; remote operations use Manager HTTP. A ComfyUI restart may be required. A panel target is routed through the verified install_panel path and is REFUSED while the panel is version-pinned.\n' +
-      '- action:"fix" — Repair a pack\'s install and Python dependencies, or pass id:\'all\' to repair every pack. Local operations prefer official comfy-cli; remote single-pack repairs use Manager HTTP. REFUSES the sidebar panel pack — \'fix\' has no verified on-disk check, so use install_panel for the panel — and refuses \'all\' while the panel is version-pinned.\n' +
+      '- action:"install" — Install a pack by registry id, git URL, or name. Local installs prefer official comfy-cli when available; remote or CLI-unavailable installs use the ComfyUI-Manager HTTP API. A ComfyUI restart may be required. Targeting the comfyui-mcp sidebar panel pack (\'comfyui-agent-panel\' / \'comfyui-mcp-panel\') is routed through the verified install_comfyui(action:\'panel\') path (the version is re-read from disk afterwards) and is REFUSED while the panel is version-pinned.\n' +
+      '- action:"update" — Update an installed pack, or pass id:\'all\' to update every installed pack. Local operations prefer official comfy-cli; remote operations use Manager HTTP. Targeting the sidebar panel pack is routed through the verified install_comfyui(action:\'panel\') path. While the panel is version-pinned, BOTH a direct panel target and \'all\' are REFUSED — \'all\' would move the pinned panel too; clear the pin with install_comfyui(action:\'panel\')(action=\'unpin\') or update other packs individually.\n' +
+      '- action:"reinstall" — Reinstall a pack. Local operations prefer official comfy-cli; remote operations use Manager HTTP. A ComfyUI restart may be required. A panel target is routed through the verified install_comfyui(action:\'panel\') path and is REFUSED while the panel is version-pinned.\n' +
+      '- action:"fix" — Repair a pack\'s install and Python dependencies, or pass id:\'all\' to repair every pack. Local operations prefer official comfy-cli; remote single-pack repairs use Manager HTTP. REFUSES the sidebar panel pack — \'fix\' has no verified on-disk check, so use install_comfyui(action:\'panel\') for the panel — and refuses \'all\' while the panel is version-pinned.\n' +
       '- action:"uninstall" — Uninstall a pack (removes it). IRREVERSIBLE through this tool — for a cleanup audit prefer action:"disable", which is reversible. The pack must be one ComfyUI-Manager tracks: an id that resolves nowhere is REFUSED before anything is queued (a drained queue would otherwise read exactly like a success), and a pack that is on disk but unmanaged is named so you can remove its directory yourself. After the queue drains the installed-pack list is re-read and the pack must be GONE before anything claims \'uninstalled\'. A ComfyUI restart is required to unload it fully. REFUSES the sidebar panel pack.\n' +
       '- action:"disable" — Disable an installed pack WITHOUT removing it — the reversible first step of a cleanup (re-enable with action:"enable"; action:"uninstall" removes a pack outright). Uses the ComfyUI-Manager HTTP API (works against remote instances) or official comfy-cli locally, and re-reads the installed-pack list afterwards so a Manager no-op is reported as NOT disabled rather than as success. A ComfyUI restart is required for the change to take effect. REFUSES the sidebar panel pack.\n' +
       '- action:"enable" — Re-enable a pack previously disabled with action:"disable". Same Manager/comfy-cli mechanics and the same post-op re-read, so a Manager no-op is reported as NOT enabled rather than as success. A ComfyUI restart is required for the change to take effect. REFUSES the sidebar panel pack.\n' +
@@ -488,7 +488,7 @@ export function registerNodeManagementTools(server: McpServer): void {
             const id = requireId("disable", "the registry id / module name of the installed pack to disable");
             // Same refusal as action:"fix": this path's post-state check reads
             // the Manager list, which cannot see a ".bak" shadow copy (#641) — the
-            // panel goes through the verified install_panel path only.
+            // panel goes through the verified install_comfyui(action:\'panel\') path only.
             if (targetsPanelPackExactly(id)) {
               assertPanelNotTargetedUnverifiable('install_custom_node action:"disable"', id);
             }

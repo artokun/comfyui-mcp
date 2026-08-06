@@ -48,7 +48,7 @@ in doubt during beta, file it and move on.
 
 ## Step 1 — Diagnose (root cause, not symptom)
 
-- Read the exact error + stack. For ComfyUI runs: `get_history(action="diagnose")`, `get_logs`.
+- Read the exact error + stack. For ComfyUI runs: `get_history(action="diagnose")`, `get_system_stats (action:"logs")`.
 - Follow the stack to the actual file/line. Read the code there.
 - Form a concrete root cause + a minimal fix you can defend.
 
@@ -120,7 +120,7 @@ OS / ComfyUI version / GPU+VRAM / **comfyui-mcp version** / **panel version**.
 Always include BOTH our versions — a bug is only actionable if we know which mcp +
 panel build it came from. They're already in your **ENVIRONMENT line** (the
 `mcp <ver> · panel <ver>` segment), so just copy them from there. Fallbacks if the
-ENV line is missing them: mcp = its `package.json` `version` (or `get_environment`);
+ENV line is missing them: mcp = its `package.json` `version` (or `install_comfyui (action:"environment")`);
 panel = `PANEL_VERSION` near the top of the pack's `comfyui-mcp-panel.js`.
 ```
 

@@ -913,3 +913,67 @@ describe("call_tool admission", () => {
     });
   });
 });
+
+describe("0.50.0 slice 13 — install/environment and stats/diagnostics", () => {
+  const INSTALL_ACTIONS = [
+    "install",
+    "update",
+    "update_all",
+    "panel",
+    "self_update",
+    "environment",
+    "configure_manager",
+  ];
+  const STATS_ACTIONS = ["stats", "logs", "health"];
+  const RETIRED = [
+    "update_comfyui",
+    "update_all",
+    "install_panel",
+    "self_update",
+    "get_environment",
+    "configure_manager",
+    "get_logs",
+    "health_check",
+  ];
+
+  // The finding this slice had to establish before folding: NEITHER survivor is
+  // whitelisted, and neither was ANY of the eight names they absorb — so unlike
+  // slice 8's `runpod`, the fold cannot broaden this channel and there is nothing
+  // to action-scope. Pinned in both directions, and for EVERY action, so a later
+  // whitelist edit that admits one has to change this test and be read on its own
+  // terms rather than inheriting admission from a fold.
+  it("neither slice-13 survivor is reachable from the canvas-less channel", () => {
+    for (const [tool, actions] of [
+      ["install_comfyui", INSTALL_ACTIONS],
+      ["get_system_stats", STATS_ACTIONS],
+    ] as const) {
+      expect(CALL_TOOL_WHITELIST.has(tool), `${tool} must stay off the whitelist`).toBe(false);
+      expect(CALL_TOOL_ACTION_WHITELIST.has(tool), `${tool} needs no action scope`).toBe(false);
+      for (const action of actions) {
+        expect(callToolAdmission(tool, { action }), `${tool}/${action}`).toBe(
+          `tool "${tool}" is not permitted`,
+        );
+      }
+      // ...including with no action at all, the shape a stale client would send.
+      expect(callToolAdmission(tool, {})).toBe(`tool "${tool}" is not permitted`);
+    }
+  });
+
+  // #911 made admission answer a RETIRED name from the ledger ahead of the
+  // whitelist, so the refusal for these eight is the self-explaining redirect,
+  // not the generic one. Asserted against retiredToolMessage() rather than a
+  // copied string — plus independent wording anchors, so a ledger entry that
+  // silently lost its replacement cannot make this pass by agreeing with itself.
+  it("the eight retired names answer with the ledger redirect, not the generic refusal", () => {
+    for (const name of RETIRED) {
+      const expected = retiredToolMessage(name);
+      expect(expected, `${name} must be in the ledger`).toBeDefined();
+      expect(callToolAdmission(name, {}), name).toBe(expected);
+      expect(expected, name).toContain(`Unknown tool '${name}'`);
+      expect(expected, name).not.toContain("is not permitted");
+      // and the redirect names a tool that actually exists.
+      const survivor = DEAD_NAMES.find((d) => d.name === name)!.replacement.split(" ")[0];
+      expect(TOOL_NAMES as readonly string[], name).toContain(survivor);
+    }
+  });
+});

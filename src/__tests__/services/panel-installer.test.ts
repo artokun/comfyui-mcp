@@ -20,7 +20,7 @@ vi.mock("../../config.js", () => ({
 }));
 
 // #700: panel management must use the same saved-default workspace resolution
-// as get_environment when COMFYUI_PATH itself is unset.
+// as install_comfyui (action:"environment") when COMFYUI_PATH itself is unset.
 const workspace = vi.hoisted(() => ({ base: undefined as string | undefined }));
 vi.mock("../../services/workspace-env.js", () => ({
   resolveEffectiveComfyUIBase: () => workspace.base,
@@ -479,7 +479,7 @@ describe("ensurePanelInstalled policy matrix", () => {
     expect(res.reason).toMatch(/does not compare versions/i);
     expect(res.reason).toMatch(/not a statement that the panel is current/i);
     // And it names a next step that moves someone who IS behind.
-    expect(res.reason).toContain("install_panel(action='update')");
+    expect(res.reason).toContain("install_comfyui(action:'panel', panel_action:'update')");
   });
 
   it("dev symlink → skipped-dev (never touches it)", async () => {

@@ -1,5 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerWorkflowExecuteTools } from "./workflow-execute.js";
+import { registerSystemStatsTools } from "./system-stats.js";
 import { registerWorkflowVisualizeTools } from "./workflow-visualize.js";
 import { registerWorkflowComposeTools } from "./workflow-compose.js";
 import { registerQueueManagementTools } from "./queue-management.js";
@@ -21,20 +22,15 @@ import { registerNodeManagementTools } from "./node-management.js";
 import { registerReportIssueTools } from "./report-issue.js";
 import { registerNodePackTools } from "./node-pack.js";
 import { registerInstallComfyUITools } from "./install-comfyui.js";
-import { registerUpdateComfyUITools } from "./update-comfyui.js";
 import { registerWorkspaceEnvTools } from "./workspace-env.js";
 import { registerApiNodesTools } from "./api-nodes.js";
-import { registerManagerConfigTools } from "./manager-config.js";
 import { registerManifestTools } from "./manifest.js";
 import { registerModelExplorerTools } from "./model-explorer.js";
 // 0.50.0 slice 15: the image-convert / color-analysis / storage-upload
 // registrars are gone — their three tools became actions on `get_image` and
 // `upload_image` (registerImageManagementTools). The SERVICES they called are
 // untouched and now imported there.
-import { registerHealthCheckTools } from "./health-check.js";
 import { registerSkillsAccessTools } from "./skills-access.js";
-import { registerInstallPanelTools } from "./install-panel.js";
-import { registerSelfUpdateTools } from "./self-update.js";
 import { registerCalculateTools } from "./calculate.js";
 import { registerComfyCliTools } from "./comfy-cli.js";
 import { registerTrainTools } from "./train.js";
@@ -52,6 +48,7 @@ import { logger } from "../utils/logger.js";
 const TOOL_GROUPS: ReadonlyArray<readonly [category: string, register: (server: McpServer) => void]> = [
   ["comfy-cli", registerComfyCliTools],
   ["workflows", registerWorkflowExecuteTools],
+  ["workflows", registerSystemStatsTools],
   ["workflow-authoring", registerWorkflowVisualizeTools],
   ["workflow-authoring", registerWorkflowComposeTools],
   ["workflows", registerQueueManagementTools],
@@ -79,17 +76,12 @@ const TOOL_GROUPS: ReadonlyArray<readonly [category: string, register: (server: 
   // (0.50.0 slice 9: the workflow-deps group's two tools folded into `list_packs`
   // actions "extract_deps"/"install_deps" — same note as skill-generator above.)
   ["server", registerInstallComfyUITools],
-  ["server", registerUpdateComfyUITools],
   ["models", registerModelExplorerTools],
   ["server", registerWorkspaceEnvTools],
   ["generation", registerApiNodesTools],
-  ["server", registerManagerConfigTools],
   ["custom-nodes", registerNodePackTools],
   ["models", registerManifestTools],
-  ["diagnostics", registerHealthCheckTools],
   ["skills-config", registerSkillsAccessTools],
-  ["server", registerInstallPanelTools],
-  ["server", registerSelfUpdateTools],
   ["diagnostics", registerCalculateTools],
   // registerComfyUISettingsTools used to sit here. 0.50.0 slice 7 folded its two
   // tools into `get_defaults` as action:"get_ui"/"set_ui", so the group is gone
@@ -183,7 +175,7 @@ export async function registerAllTools(server: McpServer): Promise<void> {
  * After the user restarts ComfyUI and the panel session resumes, that snapshot
  * can go stale — a previously-bound direct tool is briefly absent from the
  * refreshed surface, and calling the cached binding throws
- * `TypeError: tools.mcp__comfyui__get_environment is not a function` BEFORE
+ * `TypeError: tools.install_comfyui (action:"environment") is not a function` BEFORE
  * dispatch. Layering the facade (`list_tools` / `describe_tool` / `call_tool`)
  * onto the full direct surface guarantees EVERY advertised surface — compact or
  * full — carries a STABLE `call_tool` escape hatch, so such a client can always

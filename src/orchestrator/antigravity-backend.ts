@@ -167,7 +167,7 @@ export function parseGoDurationMs(s: string): number | null {
 /** Strip ANSI escape sequences (agy's TUI heritage may color even -p output). */
 function stripAnsi(s: string): string {
   // eslint-disable-next-line no-control-regex
-  return s.replace(/\[[0-9;?]*[ -/]*[@-~]/g, "");
+  return s.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "");
 }
 
 /**
@@ -344,7 +344,7 @@ function writeFileAtomic(file: string, text: string): void {
  *  the workspace `.agents/mcp_config.json` and `~/.gemini/antigravity-cli/mcp/`
  *  paths circulating in third-party docs are IGNORED by the CLI; only the
  *  global shared `~/.gemini/config/mcp_config.json` attaches servers to a
- *  `-p` session (health_check round-trip confirmed against a live ComfyUI). */
+ *  `-p` session (get_system_stats (action:"health") round-trip confirmed against a live ComfyUI). */
 export function agyMcpConfigPath(home: string = homedir()): string {
   return join(home, ".gemini", "config", "mcp_config.json");
 }

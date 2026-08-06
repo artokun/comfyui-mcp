@@ -393,7 +393,7 @@ describe("#442 defect 4: a MUTATING panel command names the rebind on a no-route
         new Error(
           `"graph_set_widget" cannot be safely targeted to the active workflow: panel tab ` +
             `wf:workflows/x.json does not enforce per-command workflow targeting (detected panel ` +
-            `0.11.20; this MCP requires panel 0.11.35+). Run install_panel(action:'update'), ` +
+            `0.11.20; this MCP requires panel 0.11.35+). Run install_comfyui(action:'panel', panel_action:'update'), ` +
             `restart ComfyUI, then hard-refresh the ComfyUI browser tab (Ctrl+Shift+R); rebinding ` +
             `cannot add the missing capability. Read-only graph commands still work.`,
         ),

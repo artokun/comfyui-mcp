@@ -167,99 +167,39 @@ export const TOOL_DOC_EXAMPLES: Readonly<Record<string, ToolDocEntry>> = {
   // -------------------------------------------------------------------------
   // Workflow Execution
   // -------------------------------------------------------------------------
-  health_check: {
+  get_system_stats: {
     gloss:
-      "The first thing to try when something is not working. It answers \"is " +
-      "ComfyUI actually up, and can it see my models?\" in one call.",
+      'Three read-only views of the connected ComfyUI: action:"stats" for what ' +
+      'it is running on, action:"logs" for what it has said, and ' +
+      'action:"health" for whether it is fit to dispatch work to. Nothing here ' +
+      "changes anything — freeing VRAM is clear_vram, and filing a bug is " +
+      "report_issue.",
     examples: [
       {
+        ask: "How much VRAM have I got left?",
+        args: { action: "stats" },
+        returns:
+          "The GPU, its total and free VRAM, system RAM, and the ComfyUI and " +
+          "Python versions.",
+      },
+      {
         ask: "Is everything working?",
-        args: {},
+        args: { action: "health" },
         returns:
           "Whether the server is reachable, what it is running on, and whether " +
           "the model folders have anything in them.",
       },
       {
         ask: "Check the setup, and tell me if any recent runs blew up.",
-        args: { model_categories: ["checkpoints", "loras"], recent_errors: 5 },
+        args: { action: "health", model_categories: ["checkpoints", "loras"], recent_errors: 5 },
         returns:
           "The same report, narrowed to the two model folders you asked about, " +
           "with the last five errors from history attached.",
       },
-    ],
-  },
-  queue: {
-    gloss:
-      "One tool for everything to do with the job queue — see what is waiting, " +
-      "reorder it, cancel something. Which job it does is set by `action`. This " +
-      "is the shape most of the newer tools have; see " +
-      "[Using the tools](/using-tools) for why.",
-    examples: [
       {
-        ask: "What's still running?",
-        args: { action: "list" },
-        returns:
-          "The job currently rendering and everything queued behind it, each " +
-          "with its prompt_id — the receipt you use to ask about one job later.",
-      },
-      {
-        ask: "Kill the one that's running, it's wrong.",
-        args: { action: "cancel", prompt_id: "8f3c1a02-6d4e-4b9a-9f21-77c0be5d1e44" },
-        returns: "Confirmation that the job was interrupted.",
-        caution:
-          "This stops work in progress and you do not get the partial result. " +
-          "If you share this ComfyUI with anyone else, make sure the job is yours.",
-      },
-      {
-        ask: "Clear the whole queue, I want to start over.",
-        args: { action: "clear", clear_pending: true },
-        returns: "Confirmation of how many jobs were dropped.",
-        caution:
-          "Destructive and not undoable — every waiting job is discarded, " +
-          "including any that someone else queued.",
-      },
-    ],
-  },
-  get_history: {
-    gloss:
-      "Everything about runs that have already happened: what a run produced, " +
-      "why one failed, and what settings your past renders actually used.",
-    examples: [
-      {
-        ask: "Did that finish? What did it produce?",
-        args: { action: "list", prompt_id: "8f3c1a02-6d4e-4b9a-9f21-77c0be5d1e44" },
-        returns:
-          "That run's outcome and the files it wrote. Omit `prompt_id` to get " +
-          "the most recent run instead of one specific one.",
-      },
-      {
-        ask: "That render failed and I don't understand the error.",
-        args: { action: "diagnose", prompt_id: "8f3c1a02-6d4e-4b9a-9f21-77c0be5d1e44" },
-        returns:
-          "A plain reading of what went wrong — a missing model, a bad " +
-          "connection, not enough VRAM — and the suggested fix. Omit " +
-          "`prompt_id` and it looks at the most recent failure. This is the " +
-          "one to reach for when a run fails: it says everything action " +
-          '"list" would, plus what is missing.',
-      },
-      {
-        ask: "What sampler settings have actually worked for me on SDXL?",
-        args: { action: "suggest", model_family: "sdxl" },
-        returns:
-          "A ranked list of sampler/scheduler/steps/CFG combinations you have " +
-          "used before, most-reused first. Read from this machine's own " +
-          "generation log, so it is empty until you have rendered a few things.",
-      },
-    ],
-  },
-  get_system_stats: {
-    examples: [
-      {
-        ask: "How much VRAM have I got left?",
-        args: {},
-        returns:
-          "The GPU, its total and free VRAM, system RAM, and the ComfyUI and " +
-          "Python versions.",
+        ask: "Show me the last errors from the server log.",
+        args: { action: "logs", keyword: "error", max_lines: 50 },
+        returns: "The last fifty log lines that mention 'error', ANSI codes stripped.",
       },
     ],
   },
@@ -956,54 +896,62 @@ export const TOOL_DOC_EXAMPLES: Readonly<Record<string, ToolDocEntry>> = {
       },
     ],
   },
-  install_panel: {
+  install_comfyui: {
     gloss:
-      "Installs and updates the Agent sidebar inside ComfyUI. This is the fix " +
-      "when a tool refuses with \"this panel is too old\".",
+      "One tool for everything that INSTALLS or UPDATES: ComfyUI itself, every " +
+      "custom node pack, the Agent sidebar panel, this MCP server, and " +
+      "ComfyUI-Manager's own settings. `action` picks which — and nothing here " +
+      'is read-only except action:"environment" and the two "status" ' +
+      "sub-actions.",
     examples: [
       {
+        ask: "Tell me about my setup — useful when I'm reporting a bug.",
+        args: { action: "environment" },
+        returns:
+          "Where ComfyUI is installed, the Python and torch versions, the GPU, " +
+          "and which settings are in force. The first thing to paste into an " +
+          "issue.",
+      },
+      {
         ask: "What version of the panel have I got?",
-        args: { action: "status" },
+        args: { action: "panel", panel_action: "status" },
         returns:
           "The installed panel version, where it lives, and whether it is " +
-          "pinned. This action changes nothing.",
+          "pinned. This changes nothing.",
       },
       {
         ask: "It says my panel is too old — update it.",
-        args: { action: "update" },
+        args: { action: "panel", panel_action: "update" },
         returns:
           "The update result. Two more steps are yours: restart ComfyUI, then " +
           "hard-refresh the ComfyUI browser tab (Ctrl+Shift+R). Without that " +
           "refresh the tab keeps running the old cached panel code and the same " +
           "refusal comes back.",
       },
-    ],
-  },
-  get_environment: {
-    examples: [
       {
-        ask: "Tell me about my setup — useful when I'm reporting a bug.",
-        args: {},
-        returns:
-          "Where ComfyUI is installed, the Python and torch versions, the GPU, " +
-          "and which settings are in force. The first thing to paste into an " +
-          "issue.",
-      },
-    ],
-  },
-  self_update: {
-    examples: [
-      {
-        ask: "Am I on the latest version?",
-        args: { action: "status" },
+        ask: "Am I on the latest comfyui-mcp?",
+        args: { action: "self_update", self_update_action: "status" },
         returns: "Your version, the latest published version, and whether they differ.",
       },
       {
-        ask: "Update it.",
-        args: { action: "update" },
+        ask: "Update comfyui-mcp itself.",
+        args: { action: "self_update", self_update_action: "update" },
         returns:
           "The upgrade result. Your MCP client has to be restarted afterwards " +
           "to pick up the new server.",
+        caution:
+          "This updates THIS server, not ComfyUI and not the sidebar panel — " +
+          'those are action:"update" and action:"panel".',
+      },
+      {
+        ask: "Update every custom node I have installed.",
+        args: { action: "update_all" },
+        returns:
+          "Confirmation that the bulk update was queued with ComfyUI-Manager. " +
+          "It runs asynchronously and ComfyUI usually needs a restart after.",
+        caution:
+          "This moves EVERY installed pack, not just the one that is broken. " +
+          "It is refused while the sidebar panel is version-pinned.",
       },
     ],
   },

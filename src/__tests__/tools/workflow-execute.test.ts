@@ -346,18 +346,17 @@ describe("enqueue_workflow — unknown action", () => {
   });
 });
 
-describe("get_system_stats keeps its own registration", () => {
-  it("is still a separate tool", async () => {
-    let handler: ToolHandler | undefined;
-    const server = {
-      tool: (n: string, _d: string, _s: unknown, h: ToolHandler) => {
-        if (n === "get_system_stats") handler = h;
-      },
-    };
+// 0.50.0 slice 13 moved get_system_stats OUT of this module into its own
+// (src/tools/system-stats.ts), where it became a 3-action tool. It is still
+// registered immediately AFTER this group in src/tools/index.ts, so tools/list
+// order is unchanged — registry-surface.test.ts pins that. What this file must
+// now assert is only the module boundary: enqueue_workflow no longer carries it.
+describe("get_system_stats no longer belongs to this module (0.50.0 slice 13)", () => {
+  it("registerWorkflowExecuteTools does not register it", () => {
+    const names: string[] = [];
+    const server = { tool: (n: string) => { names.push(n); } };
     registerWorkflowExecuteTools(server as never);
-    expect(handler).toBeDefined();
-    const res = await handler!({});
-    expect(getSystemInfoMock).toHaveBeenCalled();
-    expect(JSON.parse(res.content[0].text)).toEqual({ ok: true });
+    expect(names).not.toContain("get_system_stats");
+    expect(names).toContain("enqueue_workflow");
   });
 });

@@ -205,8 +205,8 @@ below will show it.
 ## Where to look for logs
 
 - **Orchestrator**: the terminal running `connect` / `--panel-orchestrator`.
-- **ComfyUI-side**: `get_logs` MCP tool, or the pod's log stream on RunPod.
+- **ComfyUI-side**: `get_system_stats (action:"logs")` MCP tool, or the pod's log stream on RunPod.
 - **Panel JS**: the browser devtools console (the bridge client logs
   connect/reconnect transitions).
-- **Health in one call**: the `health_check` tool aggregates
+- **Health in one call**: the `get_system_stats (action:"health")` tool aggregates
   version/GPU/VRAM/queue/model-dirs/recent-errors.

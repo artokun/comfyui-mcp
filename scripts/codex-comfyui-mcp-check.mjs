@@ -35,7 +35,7 @@ try {
     let idle = null;
     ws.on("open", () => {
       ws.send(JSON.stringify({ type: "hello", tab_id: "comfy-check", title: "c" }));
-      setTimeout(() => ws.send(JSON.stringify({ type: "user_message", text: "Use your comfyui MCP tools to run a health_check (or get_system_stats) against the ComfyUI server and report the raw result. Do not use the panel tools." })), 1500);
+      setTimeout(() => ws.send(JSON.stringify({ type: "user_message", text: 'Use your comfyui MCP tools to run get_system_stats (action:"health") against the ComfyUI server and report the raw result. Do not use the panel tools.' })), 1500);
     });
     ws.on("message", (b) => {
       let m; try { m = JSON.parse(b.toString()); } catch { return; }

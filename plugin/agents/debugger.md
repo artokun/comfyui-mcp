@@ -22,8 +22,8 @@ Start by collecting all available information about the failure:
    - Extract: `status.status_str`, error messages, failing node ID, exception traceback
    - Note which nodes executed successfully vs which failed
 
-2. **Get server logs**: Use `get_logs(max_lines=200, keyword="error")` to find error-level messages
-   - Also try: `get_logs(keyword="traceback")`, `get_logs(keyword="warning")`
+2. **Get server logs**: Use `get_system_stats (action:"logs")(max_lines=200, keyword="error")` to find error-level messages
+   - Also try: `get_system_stats (action:"logs")(keyword="traceback")`, `get_system_stats (action:"logs")(keyword="warning")`
    - Look for Python tracebacks, CUDA errors, import failures
 
 3. **Get system state**: Use `get_system_stats()` to check:
@@ -66,7 +66,7 @@ If the failing node type is not found:
 
 1. **Search the registry**: `search_custom_nodes(action="search", query="NodeClassName")`
 2. **Check pack details**: `search_custom_nodes(action="details", id="pack-name")`
-3. **Check import errors in logs**: `get_logs(keyword="import")` — a node pack may be installed but failing to load due to missing dependencies
+3. **Check import errors in logs**: `get_system_stats (action:"logs")(keyword="import")` — a node pack may be installed but failing to load due to missing dependencies
 4. **Verify installation**: Check if the custom node directory exists and contains the expected files
 
 ### Step 6: Analyze the Traceback
@@ -133,7 +133,7 @@ If the user requests it, apply the fix directly:
 ### Scenario: Custom Node Error
 
 1. Get the full traceback from `get_history(action="list")` — or `get_history(action="diagnose")`, which adds the missing models and node types
-2. Check `get_logs(keyword="import")` for load failures
+2. Check `get_system_stats (action:"logs")(keyword="import")` for load failures
 3. Search for the node pack: `search_custom_nodes` (`action: "search"`)
 4. Check if dependencies are met
 5. Look for known issues on the pack's GitHub

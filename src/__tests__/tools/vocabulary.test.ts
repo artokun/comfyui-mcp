@@ -338,16 +338,21 @@ describe("rotMentions", () => {
    * fixture about the SHAPE, which is the stated intent, and immune to every
    * remaining slice.
    */
+  // The four names slice 13 originally folded and then did NOT retire —
+  // apply_manifest, clear_vram, report_issue and calculate — are deliberately
+  // absent from this fixture: they are live tools, so a synthetic DeadName for
+  // them would document a retirement that never happened.
+  // The four names slice 13 originally folded and then did NOT retire —
+  // apply_manifest, clear_vram, report_issue and calculate — are deliberately
+  // absent from this fixture: they are live tools, so a synthetic DeadName for
+  // them would document a retirement that never happened.
   it("passes the slice-13 replacement forms while their bare forms still fail", () => {
     const SURVIVOR = "queue"; // frozen by the 0.50.0 plan; see above
     const folds: Array<[string, string]> = [
+      "update_comfyui",
       "update_all",
       "self_update",
       "configure_manager",
-      "apply_manifest",
-      "clear_vram",
-      "report_issue",
-      "calculate",
     ].map((name) => [name, `${SURVIVOR} (action:"${name}")`]);
     // The fold map is slice 13's, but "the survivor must be a real tool" is not.
     for (const [, replacement] of folds) {

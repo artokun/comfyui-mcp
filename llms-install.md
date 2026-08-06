@@ -128,7 +128,7 @@ see).
   in cloud mode and a local-only tool was called. Either unset the key (to
   use a local install) or stick to cloud-compatible tools.
 - **Empty model lists** — `extra_model_paths.yaml` is misconfigured. Run
-  `health_check` for a diagnostic.
+  `get_system_stats (action:"health")` for a diagnostic.
 
 ## License + repo
 
