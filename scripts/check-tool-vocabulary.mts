@@ -169,6 +169,17 @@ const SELF = new Set([
   // RENAMED (view_image -> action:"view"), so the action-literal rule cannot
   // reach them — they are a migration TABLE under assertion, not guidance.
   "src/__tests__/tools/image-assets.test.ts",
+  // Same, for 0.50.0 slice 13: both spell the retired names as FIXTURES —
+  // install-environment.test.ts asserts the six install/env retirements resolve
+  // to the right `install_comfyui` action (including that the three tools which
+  // already had an `action` of their own map onto `panel_action` /
+  // `self_update_action` / `manager_setting` rather than colliding), and
+  // system-stats.test.ts asserts `get_logs`/`health_check` redirect AND that
+  // apply_manifest / clear_vram / report_issue / calculate stayed LIVE and out
+  // of DEAD_NAMES — the owner's ruling, which cannot be pinned without naming
+  // them.
+  "src/__tests__/tools/install-environment.test.ts",
+  "src/__tests__/tools/system-stats.test.ts",
   // Same, for the #659 retired-name error: these pass dead names to call_tool /
   // the ollama dispatch as FIXTURES and assert the error quotes the ledger's
   // replacement — the names are call arguments under test, not live guidance.
