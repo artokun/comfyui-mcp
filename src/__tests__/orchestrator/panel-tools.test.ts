@@ -6378,3 +6378,35 @@ describe("#754 panel_view_nodes_in_viewport: the character budget is REACHABLE",
     }
   });
 });
+
+describe("#690(3) expose_subgraph_* disclose that `name` is dropped on reuse", () => {
+  // The executor is idempotent-ish: if the slot is ALREADY exposed it returns the
+  // existing boundary slot with `reused:true` and its ORIGINAL name. The tool
+  // descriptions promised `name` "titles the new boundary output" with no mention
+  // of that, so a caller passing a name got a differently-named slot and a success.
+  // Both twins behave identically; the reporter only hit the output one.
+  for (const tool of ["panel_expose_subgraph_output", "panel_expose_subgraph_input"]) {
+    it(`${tool} says the name is IGNORED on reuse`, () => {
+      const def = defByName(tool);
+      expect(def.description).toMatch(/IGNORED when this slot is ALREADY exposed/);
+      expect(def.description).toMatch(/reused:true/);
+      // …and the parameter's own describe() must not contradict the prose.
+      const shape = def.schema as Record<string, { description?: string }>;
+      expect(shape.name?.description ?? "").toMatch(/IGNORED when the slot is already exposed/);
+    });
+  }
+
+  it("cites no tool that does not exist", () => {
+    // An earlier draft of this text pointed at a `panel_rename_subgraph_slot` that
+    // was never built — the #809 "names the wrong lever" defect, in a description
+    // rather than a truncation remedy. There is no boundary-slot rename tool, and
+    // saying so is more useful than inventing one.
+    const names = new Set(buildPanelToolDefs().map((d) => d.name));
+    for (const tool of ["panel_expose_subgraph_output", "panel_expose_subgraph_input"]) {
+      const text = defByName(tool).description;
+      for (const m of text.match(/panel_[a-z_]+/g) ?? []) {
+        expect(names.has(m), `${tool} description cites ${m}, which is not a registered tool`).toBe(true);
+      }
+    }
+  });
+});

@@ -8826,11 +8826,11 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_expose_subgraph_output",
-      "Wire an interior node's OUTPUT to the subgraph's OUTPUT RAIL — i.e. expose it as a SUBGRAPH OUTPUT on the boundary so the PARENT graph can connect to the subgraph node's new output slot. You MUST be INSIDE the subgraph first (panel_enter_subgraph). This is the correct way to \"wire an internal output to the subgraph's output rail\": do NOT panel_connect to a guessed rail node id — call this with the interior node + the output you want exposed. Read panel_query_graph's `rails` to see the resulting boundary slots. `from_output` is an output slot NAME ('IMAGE', 'LATENT') or numeric index. Optional `name` titles the new boundary output (defaults from the source slot). Undoable with Ctrl+Z.",
+      "Wire an interior node's OUTPUT to the subgraph's OUTPUT RAIL — i.e. expose it as a SUBGRAPH OUTPUT on the boundary so the PARENT graph can connect to the subgraph node's new output slot. You MUST be INSIDE the subgraph first (panel_enter_subgraph). This is the correct way to \"wire an internal output to the subgraph's output rail\": do NOT panel_connect to a guessed rail node id — call this with the interior node + the output you want exposed. Read panel_query_graph's `rails` to see the resulting boundary slots. `from_output` is an output slot NAME ('IMAGE', 'LATENT') or numeric index. Optional `name` titles the new boundary output (defaults from the source slot) — but it is IGNORED when this slot is ALREADY exposed: the call then returns the existing boundary output unchanged, with `reused:true` and its ORIGINAL `name`. Check `reused` before relying on the name you asked for — there is currently NO tool that renames an existing boundary slot, so a name is only applied on FIRST exposure. Undoable with Ctrl+Z.",
       {
         from_node_id: nodeId().describe("Interior (inner) node id whose output to expose (from panel_query_graph while inside the subgraph)."),
         from_output: slotRef.describe("Output slot name (e.g. 'IMAGE', 'LATENT') or numeric index on that node."),
-        name: z.string().optional().describe("Optional name for the new subgraph output (boundary slot). Defaults from the source slot."),
+        name: z.string().optional().describe("Optional name for the new subgraph output (boundary slot). Defaults from the source slot. IGNORED when the slot is already exposed — the reply carries reused:true and the existing name."),
       },
       async (args: A, ctx) =>
         ctx.call(
@@ -8845,11 +8845,11 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_expose_subgraph_input",
-      "Wire an interior node's INPUT to the subgraph's INPUT RAIL — i.e. expose it as a SUBGRAPH INPUT on the boundary so the PARENT graph can feed the subgraph node's new input slot. You MUST be INSIDE the subgraph first (panel_enter_subgraph). This is the correct way to wire an internal input to the subgraph's input rail: do NOT panel_connect to a guessed rail node id — call this with the interior node + the input you want exposed. Read panel_query_graph's `rails` to see the resulting boundary slots. `to_input` is an input slot NAME ('model', 'pixels') or numeric index. Optional `name` titles the new boundary input (defaults from the target slot). Undoable with Ctrl+Z.",
+      "Wire an interior node's INPUT to the subgraph's INPUT RAIL — i.e. expose it as a SUBGRAPH INPUT on the boundary so the PARENT graph can feed the subgraph node's new input slot. You MUST be INSIDE the subgraph first (panel_enter_subgraph). This is the correct way to wire an internal input to the subgraph's input rail: do NOT panel_connect to a guessed rail node id — call this with the interior node + the input you want exposed. Read panel_query_graph's `rails` to see the resulting boundary slots. `to_input` is an input slot NAME ('model', 'pixels') or numeric index. Optional `name` titles the new boundary input (defaults from the target slot) — but it is IGNORED when this slot is ALREADY exposed: the call then returns the existing boundary input unchanged, with `reused:true` and its ORIGINAL `name`. Check `reused` before relying on the name you asked for — there is currently NO tool that renames an existing boundary slot, so a name is only applied on FIRST exposure. Undoable with Ctrl+Z.",
       {
         to_node_id: nodeId().describe("Interior (inner) node id whose input to expose (from panel_query_graph while inside the subgraph)."),
         to_input: slotRef.describe("Input slot name (e.g. 'model', 'pixels') or numeric index on that node."),
-        name: z.string().optional().describe("Optional name for the new subgraph input (boundary slot). Defaults from the target slot."),
+        name: z.string().optional().describe("Optional name for the new subgraph input (boundary slot). Defaults from the target slot. IGNORED when the slot is already exposed — the reply carries reused:true and the existing name."),
       },
       async (args: A, ctx) =>
         ctx.call(
