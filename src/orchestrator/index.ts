@@ -42,6 +42,7 @@ import { panelRecoveryContext } from "../services/panel-recovery.js";
 import { isPanelAutoInstallDisabled } from "../services/panel-installer.js";
 import { SelfRestarter, canSelfRestart } from "../services/self-restart.js";
 import { pairUrlDurability } from "./pair-durability.js";
+import { loadOrCreatePairToken } from "./pair-token-store.js";
 import { SessionStore, workflowIdentityParts } from "./session-store.js";
 import { unreachableReason, noPanelTabReason, identityReason } from "./fence-refusal.js";
 import {
@@ -1058,8 +1059,18 @@ export async function runPanelOrchestrator(): Promise<void> {
   let pairToken: string | null = envPairToken;
   let pairListenerStarted = false;
   let pairTunnel: { url: string; stop: () => void } | null = null;
+  // #875 — the token is PERSISTED, not per-session. It used to be minted fresh on
+  // every run, so a self-restart (on by default, hourly npm check) invalidated the
+  // URL the phone had saved. The reporter experienced that as "updating the npm
+  // version bricks my communication with the agent" and asked to pin the version;
+  // the version was never the cause. An explicit COMFYUI_MCP_PAIR_TOKEN still wins.
+  let pairTokenPersisted = envPairToken !== null;
   const ensurePairListener = async (): Promise<string> => {
-    if (!pairToken) pairToken = randomBytes(24).toString("hex");
+    if (!pairToken) {
+      const loaded = loadOrCreatePairToken();
+      pairToken = loaded.token;
+      pairTokenPersisted = loaded.persisted;
+    }
     if (!pairListenerStarted) {
       await bridge.addListener("0.0.0.0", pairPort, pairToken);
       pairListenerStarted = true;
@@ -4244,7 +4255,7 @@ export async function runPanelOrchestrator(): Promise<void> {
         // cause, and nothing here had told them.
         const durability = pairUrlDurability({
           mode,
-          pinnedToken: envPairToken !== null,
+          stableToken: envPairToken !== null || pairTokenPersisted,
           autoRestart: canSelfRestart(),
         });
         logger.info(

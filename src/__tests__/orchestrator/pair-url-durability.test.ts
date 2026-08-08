@@ -19,14 +19,14 @@ import { canSelfRestart } from "../../services/self-restart.js";
 
 describe("#875: what the pairing URL actually promises", () => {
   it("LAN + pinned token is the ONE durable combination", () => {
-    const d = pairUrlDurability({ mode: "lan", pinnedToken: true, autoRestart: true });
+    const d = pairUrlDurability({ mode: "lan", stableToken: true, autoRestart: true });
     expect(d.survivesRestart).toBe(true);
     expect(d.rotates).toEqual([]);
     expect(d.note).toMatch(/survives an orchestrator restart/);
   });
 
   it("LAN without a pinned token rotates the token, and names the fix", () => {
-    const d = pairUrlDurability({ mode: "lan", pinnedToken: false, autoRestart: true });
+    const d = pairUrlDurability({ mode: "lan", stableToken: false, autoRestart: true });
     expect(d.survivesRestart).toBe(false);
     expect(d.rotates).toEqual(["token"]);
     expect(d.note).toMatch(/COMFYUI_MCP_PAIR_TOKEN/);
@@ -34,13 +34,13 @@ describe("#875: what the pairing URL actually promises", () => {
   });
 
   it("tunnel rotates the hostname EVEN WITH a pinned token", () => {
-    const d = pairUrlDurability({ mode: "tunnel", pinnedToken: true, autoRestart: true });
+    const d = pairUrlDurability({ mode: "tunnel", stableToken: true, autoRestart: true });
     expect(d.survivesRestart).toBe(false);
     expect(d.rotates).toEqual(["hostname"]);
   });
 
   it("tunnel without a pinned token rotates both", () => {
-    const d = pairUrlDurability({ mode: "tunnel", pinnedToken: false, autoRestart: true });
+    const d = pairUrlDurability({ mode: "tunnel", stableToken: false, autoRestart: true });
     expect(d.rotates).toEqual(["hostname", "token"]);
     expect(d.note).toMatch(/both its hostname and its token/);
   });
@@ -52,22 +52,22 @@ describe("#875: what the pairing URL actually promises", () => {
   // to stand up a Cloudflare Worker that cannot fix their problem is worse than
   // telling them nothing.
   it("does not offer the relay backend as a tunnel remedy — it does not apply", () => {
-    const d = pairUrlDurability({ mode: "tunnel", pinnedToken: false, autoRestart: true });
+    const d = pairUrlDurability({ mode: "tunnel", stableToken: false, autoRestart: true });
     expect(d.note).toMatch(/COMFYUI_MCP_TUNNEL_BACKEND=relay does not apply/);
     expect(d.note).toMatch(/no way to pin the tunnel hostname/);
   });
 
   it("does not tell a tunnel user that pinning the token will save them", () => {
-    const d = pairUrlDurability({ mode: "tunnel", pinnedToken: false, autoRestart: true });
+    const d = pairUrlDurability({ mode: "tunnel", stableToken: false, autoRestart: true });
     expect(d.note).toMatch(/will not help here/);
   });
 
   // A warning about spontaneous restarts is false when they are switched off.
   it("only blames automatic restarts when they are actually armed", () => {
-    const on = pairUrlDurability({ mode: "lan", pinnedToken: false, autoRestart: true });
+    const on = pairUrlDurability({ mode: "lan", stableToken: false, autoRestart: true });
     expect(on.note).toMatch(/restarts on its own/);
 
-    const off = pairUrlDurability({ mode: "lan", pinnedToken: false, autoRestart: false });
+    const off = pairUrlDurability({ mode: "lan", stableToken: false, autoRestart: false });
     expect(off.note).toMatch(/Automatic restarts are disabled/);
     expect(off.note).not.toMatch(/restarts on its own/);
     // Still not durable — a deliberate restart breaks it just the same.
@@ -76,9 +76,9 @@ describe("#875: what the pairing URL actually promises", () => {
 
   it("rotates is empty exactly when survivesRestart", () => {
     for (const mode of ["lan", "tunnel"] as const) {
-      for (const pinnedToken of [true, false]) {
+      for (const stableToken of [true, false]) {
         for (const autoRestart of [true, false]) {
-          const d = pairUrlDurability({ mode, pinnedToken, autoRestart });
+          const d = pairUrlDurability({ mode, stableToken, autoRestart });
           expect(d.rotates.length === 0).toBe(d.survivesRestart);
         }
       }

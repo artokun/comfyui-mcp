@@ -44,8 +44,11 @@ export interface PairUrlDurability {
 export interface PairDurabilityInput {
   /** "lan" → ws://<lan-ip>:<port>; "tunnel" → a cloudflared quick tunnel. */
   mode: "lan" | "tunnel";
-  /** Whether COMFYUI_MCP_PAIR_TOKEN is pinned (a stable token across restarts). */
-  pinnedToken: boolean;
+  /** Whether the token is STABLE across restarts — persisted to disk by default,
+   *  or pinned via COMFYUI_MCP_PAIR_TOKEN. Either way the phone's saved token
+   *  keeps working; the note below must not name one mechanism as if it were the
+   *  only one (#875). */
+  stableToken: boolean;
   /** Whether the self-restarter can restart this process (default on). When it
    *  cannot, a rotating URL is far less likely to bite — say so rather than
    *  warning about a restart that will not happen on its own. */
@@ -61,15 +64,15 @@ export function pairUrlDurability(input: PairDurabilityInput): PairUrlDurability
   // Tunnel pairing is ALWAYS a quick tunnel (see the note above): the hostname
   // is regenerated per run with no way to pin it.
   if (input.mode === "tunnel") rotates.push("hostname");
-  if (!input.pinnedToken) rotates.push("token");
+  if (!input.stableToken) rotates.push("token");
 
   if (rotates.length === 0) {
     return {
       survivesRestart: true,
       rotates: [],
       note:
-        "This URL survives an orchestrator restart: COMFYUI_MCP_PAIR_TOKEN is pinned and the " +
-        "LAN address does not change per run. (If your router reassigns this machine a different " +
+        "This URL survives an orchestrator restart: the pairing token is stable (persisted, or " +
+        "pinned via COMFYUI_MCP_PAIR_TOKEN) and the LAN address does not change per run. (If your router reassigns this machine a different " +
         "IP, the address changes for that reason, not because of a restart.)",
     };
   }
