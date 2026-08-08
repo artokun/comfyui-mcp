@@ -234,7 +234,7 @@ File or triage a GitHub issue for a bug/problem you hit (ComfyUI, a workflow, a 
   Short, specific issue title.
 </ParamField>
 <ParamField path="body" type="string" required>
-  Issue body: what happened, steps to reproduce, the exact error text, and environment (GPU/VRAM, ComfyUI version, OS) if known. Scrub secrets first.
+  Issue body: what happened, steps to reproduce, the exact error text, and environment (GPU/VRAM, ComfyUI version, ComfyUI FRONTEND version, OS) if known. The FRONTEND version is a SEPARATE package from ComfyUI and they move independently — get_system_stats (action:"health") prints both, and for any panel/UI bug it is often the deciding variable. Scrub secrets first.
 </ParamField>
 <ParamField path="repo" type="string">
   owner/repo (default 'artokun/comfyui-mcp'; use 'artokun/comfyui-mcp-panel' for the sidebar panel).
