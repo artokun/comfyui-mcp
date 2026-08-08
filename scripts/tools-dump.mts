@@ -9,9 +9,13 @@
  *   npx tsx scripts/tools-dump.mts                 # JSON: {count, tools:[…]}
  *   npx tsx scripts/tools-dump.mts --names         # one name per line, registration order
  *   npx tsx scripts/tools-dump.mts --max 30        # exit 1 if count > 30
- *   npx tsx scripts/tools-dump.mts --golden docs/design/tool-surface.txt
+ *   npx tsx scripts/tools-dump.mts --golden path/to/expected.txt
  *                                                  # diff names vs a committed golden
- *   npx tsx scripts/tools-dump.mts --write-golden docs/design/tool-surface.txt
+ *   npx tsx scripts/tools-dump.mts --write-golden path/to/expected.txt
+ *
+ * The golden is a snapshot of the LIVE surface. It is NOT docs/design/tool-surface.txt
+ * or docs/design/panel-surface.txt — those are hash-pinned retirement baselines and
+ * both invocations are refused against them; see RETIREMENT_BASELINES below.
  *
  * COMFYUI_URL is set so src/config.ts skips its network port-probe at import
  * time (same reason npm run docs:gen sets it).
@@ -113,6 +117,48 @@ if (max !== undefined) {
     failed = true;
   } else {
     console.error(`OK: ${tools.length}/${limit} tools.`);
+  }
+}
+
+/**
+ * The two hash-pinned RETIREMENT BASELINES. Neither is a live-surface golden, and
+ * pointing this script at either is a footgun in both directions.
+ *
+ * They are history, not state: docs/design/tool-surface.txt holds every core name
+ * that has EVER existed (195), against which check-tool-vocabulary enforces
+ * `BASELINE \ TOOL_NAMES ⊆ DEAD_NAMES`. The live surface is 37 after the 0.50.0
+ * consolidation and will never equal it again.
+ *
+ * So `--golden docs/design/tool-surface.txt` — an invocation this script's own
+ * usage text used to advertise — reports 158 removals and exits 1 on a perfectly
+ * healthy repo. That alone is only noise. The danger is the remedy printed
+ * underneath it: "re-run with --write-golden", which would overwrite the baseline
+ * with the 37 live names and DELETE the other 158. Deleting a line from a
+ * retirement baseline is exactly how the ratchet is disarmed for that name — every
+ * stale reference to it stops being an error. One typo-free, instruction-following
+ * run would have silently disarmed the repo's main vocabulary gate for 158 names,
+ * leaving only the SHA pin, whose own error text invites updating the hash.
+ *
+ * Refused rather than warned: there is no correct reading of either invocation.
+ * The baseline is maintained by APPENDING a newly shipped name and updating its
+ * SHA deliberately, which is a reviewed edit, not a regenerate.
+ */
+const RETIREMENT_BASELINES = ["tool-surface.txt", "panel-surface.txt"];
+const isRetirementBaseline = (p: string): boolean =>
+  RETIREMENT_BASELINES.some((b) => p.replace(/\\/g, "/").endsWith(`docs/design/${b}`));
+
+for (const opt of ["--golden", "--write-golden"] as const) {
+  const p = value(opt);
+  if (p !== undefined && isRetirementBaseline(p)) {
+    usage(
+      `${p} is a hash-pinned RETIREMENT BASELINE (every name that has ever existed), ` +
+        `not a golden of the live surface — ${opt} would ` +
+        (opt === "--write-golden"
+          ? `overwrite it with today's ${names.length} live names and delete the rest, disarming the dead-name ratchet for every name dropped.`
+          : `report every retired name as a removal and exit 1 on a healthy repo.`) +
+        `\n  What enforces it: npm run check:vocabulary (BASELINE \\ TOOL_NAMES ⊆ DEAD_NAMES).` +
+        `\n  To add a newly shipped tool: append the name, then update BASELINE_SHA256 in src/tools/vocabulary.ts.`,
+    );
   }
 }
 
