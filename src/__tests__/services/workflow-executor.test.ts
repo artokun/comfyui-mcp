@@ -23,6 +23,7 @@ import {
   seedInputRange,
 } from "../../services/workflow-executor.js";
 import type { ObjectInfo, WorkflowJSON } from "../../comfyui/types.js";
+import { logger } from "../../utils/logger.js";
 
 const INT32_MAX = 2147483647;
 
@@ -65,6 +66,10 @@ const OBJECT_INFO: ObjectInfo = {
 
 function enqueuedWorkflow(): WorkflowJSON {
   return enqueuePromptMock.mock.calls[0][0] as WorkflowJSON;
+}
+
+function enqueuedExtraData(): Record<string, unknown> | undefined {
+  return enqueuePromptMock.mock.calls[0][1] as Record<string, unknown> | undefined;
 }
 
 beforeEach(() => {
@@ -244,5 +249,111 @@ describe("enqueueWorkflow seed randomization (#865)", () => {
     expect(watchMock).toHaveBeenCalledTimes(1);
     expect(watchMock.mock.calls[0][0]).toBe("pid-1");
     expect(watchMock.mock.calls[0][1]).toEqual(enqueuedWorkflow());
+  });
+});
+
+describe("enqueueWorkflow UI metadata", () => {
+  it("attaches UI metadata generated from the post-randomization workflow", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+
+    await enqueueWorkflow({
+      "3": { class_type: "KSampler", inputs: { seed: 1 } },
+    });
+
+    const randomizedSeed = enqueuedWorkflow()["3"].inputs.seed;
+    const extraPngInfo = enqueuedExtraData()?.extra_pnginfo as Record<string, unknown>;
+    const ui = extraPngInfo.workflow as {
+      nodes: Array<{ type: string; widgets_values?: unknown[] }>;
+    };
+    const sampler = ui.nodes.find((node) => node.type === "KSampler");
+    expect(randomizedSeed).toBe(0.5 * (Number.MAX_SAFE_INTEGER + 1));
+    expect(sampler?.widgets_values).toContain(randomizedSeed);
+  });
+
+  it("nested-merges generated metadata with existing request data", async () => {
+    const extraData = {
+      api_key_comfy_org: "credential",
+      client_id: "client-123",
+      partial_execution: { targets: ["9"] },
+      extra_pnginfo: { source: "caller" },
+    };
+
+    await enqueueWorkflow(
+      { "1": { class_type: "ClaudeNode", inputs: { prompt: "hi", seed: 7 } } },
+      { disable_random_seed: true, extra_data: extraData },
+    );
+
+    const sent = enqueuedExtraData()!;
+    expect(sent).toMatchObject({
+      api_key_comfy_org: "credential",
+      client_id: "client-123",
+      partial_execution: { targets: ["9"] },
+      extra_pnginfo: { source: "caller" },
+    });
+    const extraPngInfo = sent.extra_pnginfo as Record<string, unknown>;
+    expect((extraPngInfo.workflow as { nodes: unknown[] }).nodes).toHaveLength(1);
+    expect(extraData).toEqual({
+      api_key_comfy_org: "credential",
+      client_id: "client-123",
+      partial_execution: { targets: ["9"] },
+      extra_pnginfo: { source: "caller" },
+    });
+  });
+
+  it("nested-merges metadata without replacing a valid caller workflow", async () => {
+    const callerWorkflow = { nodes: [], links: [], version: 0.4 };
+    const extraData = {
+      api_key_comfy_org: "credential",
+      client_id: "client-123",
+      partial_execution: { targets: ["9"] },
+      extra_pnginfo: {
+        workflow: callerWorkflow,
+        source: "caller",
+      },
+    };
+
+    await enqueueWorkflow(
+      { "1": { class_type: "ClaudeNode", inputs: { prompt: "hi", seed: 7 } } },
+      { disable_random_seed: true, extra_data: extraData },
+    );
+
+    expect(enqueuedExtraData()).toEqual(extraData);
+    expect(extraData.extra_pnginfo.workflow).toBe(callerWorkflow);
+    expect(getObjectInfoMock).not.toHaveBeenCalled();
+  });
+
+  it("logs converter warnings and still attaches the generated UI metadata", async () => {
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+
+    await enqueueWorkflow(
+      { custom: { class_type: "ClaudeNode", inputs: { prompt: "hi", seed: 7 } } },
+      { disable_random_seed: true },
+    );
+
+    const extraPngInfo = enqueuedExtraData()?.extra_pnginfo as Record<string, unknown>;
+    expect((extraPngInfo.workflow as { nodes: unknown[] }).nodes).toHaveLength(1);
+    expect(warn).toHaveBeenCalledWith(
+      "Workflow UI metadata conversion completed with warnings",
+      expect.objectContaining({ warnings: expect.arrayContaining([expect.stringContaining("remapped")]) }),
+    );
+  });
+
+  it("fails open and enqueues the original prompt exactly once when conversion throws", async () => {
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+    const malformed = { "1": null } as unknown as WorkflowJSON;
+    const extraData = { client_id: "client-123" };
+
+    const result = await enqueueWorkflow(malformed, {
+      disable_random_seed: true,
+      extra_data: extraData,
+    });
+
+    expect(result.prompt_id).toBe("pid-1");
+    expect(enqueuePromptMock).toHaveBeenCalledTimes(1);
+    expect(enqueuePromptMock).toHaveBeenCalledWith(malformed, extraData);
+    expect(warn).toHaveBeenCalledWith(
+      "Workflow UI metadata conversion failed; enqueueing without it",
+      expect.objectContaining({ error: expect.any(String) }),
+    );
   });
 });
