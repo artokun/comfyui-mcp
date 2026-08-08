@@ -58,6 +58,51 @@ corpus exists so the **Kimi and local-Ollama arms are blind** — those are the 
 and the comparison across model sizes is the point (does a 4B model still land the right
 tool with 37 choices, where it could not with 154?).
 
+## Measured arms
+
+### qwen3:4b (local Ollama) — 2026-08-07
+
+| outcome | count |
+|---|---|
+| hit (`expect`) | **70** |
+| alt (an `alt` the row lists as reasonable) | 3 |
+| miss | 27 |
+| **unparseable** | **0** |
+
+Run against the 37-tool surface with `benchmarks/run-arm.mjs`, on a machine where nothing
+else held the GPU.
+
+**The headline is not 70%.** It is that a 4B model produced **zero** unparseable answers —
+every response named a real tool from the list. "Could not follow the format" and "picked
+the wrong tool" need different fixes, and only the second one is present here. A surface
+small enough to hold is a surface a small model can at least *address*.
+
+Read the misses, though, because two of them are about the surface rather than the model:
+
+- **#9 "Cancel the job that's running"** → chose `comfy_cli`. Cancelling a run is a live
+  queue operation; the model reached for the tool whose name sounds most like "control the
+  server".
+- **#10 "Clear everything pending"** → chose `clear_vram`. "Clear" is doing the work in
+  that sentence, and the surface has a prominent tool that starts with it.
+
+Both are collisions between a user's verb and a tool's name, not reasoning failures — the
+kind of thing the corpus exists to surface. Neither is a consolidation regression; both
+would have happened at 154 tools too, with more competitors.
+
+### Not yet run
+
+- **Kimi (hosted)** — blocked. Both stored credentials (`MOONSHOT_API_KEY`,
+  `OPENROUTER_API_KEY`) are placeholders that return HTTP 401. Needs a real key; it is the
+  arm most worth having, because it is the one that is genuinely blind to the answer key.
+- **qwen3:8b / llama3.1:8b** — not run. The size ladder is the interesting comparison and
+  a single 4B point does not make one.
+- **`artokun/gemma4-comfyui-mcp:e4b`** — started and abandoned after ~100 minutes with no
+  output while holding the GPU. Not a result, and recorded here only so nobody assumes it
+  was measured.
+
+A caution for whoever runs the rest: launching several arms at once makes them fight over
+one GPU and turns a two-minute run into a timeout. Run them one at a time.
+
 ## What the ambiguity map already shows
 
 Three gaps surfaced while building the corpus. None is a consolidation regression — each
