@@ -141,7 +141,7 @@ if (max !== undefined) {
  *
  * Refused rather than warned: there is no correct reading of either invocation.
  * The baseline is maintained by APPENDING a newly shipped name and updating its
- * SHA deliberately, which is a reviewed edit, not a regenerate.
+ * SHA deliberately, which is a reviewed edit rather than a bulk rewrite.
  */
 const RETIREMENT_BASELINES = ["tool-surface.txt", "panel-surface.txt"];
 const isRetirementBaseline = (p: string): boolean =>
