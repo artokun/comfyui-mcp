@@ -151,7 +151,7 @@ const NEVER_DELIVERED_CODES: ReadonlySet<string> = new Set([
  * Only suppressed when the code POSITIVELY proves non-delivery, or the method is
  * a read. See NEVER_DELIVERED_CODES for why the default runs the other way.
  */
-function deliveryDoubt(code: string | undefined, method: string): string {
+export function deliveryDoubt(code: string | undefined, method: string): string {
   if (method === "GET" || method === "HEAD") return "";
   if (code !== undefined && NEVER_DELIVERED_CODES.has(code)) return "";
   // Says only what is known. Claiming "the connection was established" would be an
@@ -206,17 +206,17 @@ function describeComfyFetchFailure(err: unknown, target: string, method: string)
  */
 const DEFAULT_COMFY_HTTP_TIMEOUT_S = 120;
 
-function comfyHttpTimeoutSeconds(): number {
+export function comfyHttpTimeoutSeconds(): number {
   const raw = Number(process.env.COMFYUI_MCP_HTTP_TIMEOUT_S);
   return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_COMFY_HTTP_TIMEOUT_S;
 }
 
-function defaultComfyTimeoutSignal(): AbortSignal {
+export function defaultComfyTimeoutSignal(): AbortSignal {
   return AbortSignal.timeout(Math.round(comfyHttpTimeoutSeconds() * 1000));
 }
 
 /** True for an abort raised by AbortSignal.timeout (not a caller's own abort). */
-function isTimeoutAbort(err: unknown): boolean {
+export function isTimeoutAbort(err: unknown): boolean {
   return err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
 }
 

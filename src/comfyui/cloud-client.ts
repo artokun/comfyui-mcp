@@ -12,7 +12,17 @@
 // keep working in cloud mode.
 
 import { getApiKey, getCloudUrl } from "../config.js";
-import { ComfyUIError, ConnectionError } from "../utils/errors.js";
+// Shared with the headless client on purpose: one ceiling, one delivery-doubt
+// rule. The cloud client is a parallel implementation, and the last two rounds of
+// hardening (the 0.50.11 timeout ceiling, the delivery-doubt disclosure) reached
+// only its twin — which is exactly how a parallel implementation rots.
+import {
+  comfyHttpTimeoutSeconds,
+  defaultComfyTimeoutSignal,
+  deliveryDoubt,
+  isTimeoutAbort,
+} from "./fetch.js";
+import { ComfyUIError, ConnectionError, describeFetchFailure } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 import type { HistoryEntry } from "./client.js";
 import type { ObjectInfo, QueueStatus, SystemStats } from "./types.js";
@@ -39,8 +49,14 @@ async function cloudFetch(
     ...authHeaders(baseHeaders),
     ...((init?.headers as Record<string, string> | undefined) ?? {}),
   };
+  const method = String(init?.method ?? "GET").toUpperCase();
+  // A CEILING, not a policy — the same one comfyuiFetch got in 0.50.11, which this
+  // client never inherited. Without it a cloud request that never answers hangs the
+  // tool call forever: no timeout, no error, nothing for the caller to act on. A
+  // caller's own signal always wins.
+  const signal = init?.signal ?? defaultComfyTimeoutSignal();
   try {
-    const res = await fetch(url, { ...init, headers });
+    const res = await fetch(url, { ...init, headers, signal });
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       throw new ComfyUIError(
@@ -52,9 +68,27 @@ async function cloudFetch(
     return res;
   } catch (err) {
     if (err instanceof ComfyUIError) throw err;
-    throw new ConnectionError(
-      `Failed to reach Comfy Cloud at ${url}: ${err instanceof Error ? err.message : err}`,
+    // Our own ceiling firing is not the same event as a caller's abort, and must
+    // not be reported as one. Only rewrite when WE supplied the signal.
+    if (init?.signal === undefined && isTimeoutAbort(err)) {
+      throw new ConnectionError(
+        `No reply from Comfy Cloud within ${comfyHttpTimeoutSeconds()}s — while requesting ` +
+          `${url} (${method}).` +
+          deliveryDoubt(undefined, method) +
+          ` Raise COMFYUI_MCP_HTTP_TIMEOUT_S if the cloud is simply slow.`,
+      );
+    }
+    // "Failed to reach" was a claim, not an observation. A transport error on a
+    // POST to /api/prompt does not establish that the submission never landed —
+    // and a blind retry there bills a SECOND cloud render. Same three states as
+    // the headless client: delivered, definitely not delivered, unknown.
+    const { message, code } = describeFetchFailure(err);
+    const wrapped = new ConnectionError(
+      `Could not complete the ${method} to Comfy Cloud at ${url}: ${message}.` +
+        deliveryDoubt(code, method),
     );
+    if (code) (wrapped as { code?: string }).code = code;
+    throw wrapped;
   }
 }
 
