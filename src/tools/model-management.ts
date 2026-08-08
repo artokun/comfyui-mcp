@@ -709,6 +709,11 @@ async function downloadAction(args: {
           // overlay. The listing question IS answerable remotely, so answer it.
           // "not-listed" is deliberately not rendered as failure: the dispatch
           // returns on ACCEPTANCE, so a large file may still be arriving.
+          // unknown-ok: undefined is the COULD-NOT-VERIFY state, and it is kept
+          // distinct from both "visible" and "not-listed" below — the render
+          // appends the note only when one exists, and never upgrades a missing
+          // verification into a confirmation. (verifyManagerVisibility documents
+          // that it never throws, so this catch is belt-and-braces.)
           const managerSeen = job.viaManager
             ? await verifyManagerVisibility(
                 job.target_subfolder,

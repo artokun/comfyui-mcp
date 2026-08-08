@@ -94,6 +94,29 @@ describe("#796 what the gate FLAGS", () => {
     expect(r.out).toContain("d.ts:5");
   });
 
+  it("appended to the closing paren of a WRAPPED argument list", () => {
+    // Found by the gate missing a real site: when a call's arguments are wrapped,
+    // the catch attaches to `)` on its own line, so the text before it is a bare
+    // closer and the text after it is empty. Both of the earlier heuristics read
+    // that as a discarded statement. The site it missed was the #1086 download
+    // verification — the most safety-critical shape in the repo.
+    write(
+      "wrap.ts",
+      `export async function w() {\n` +
+        `  const seen = job.viaManager\n` +
+        `    ? await verify(\n` +
+        `        job.target_subfolder,\n` +
+        `        job.filename,\n` +
+        `      ).catch(() => undefined)\n` +
+        `    : undefined;\n` +
+        `  return seen;\n` +
+        `}\n`,
+    );
+    const r = run();
+    expect(r.code, r.out).toBe(1);
+    expect(r.out).toContain("wrap.ts:6");
+  });
+
   it("chained onward, where the empty value is immediately read", () => {
     write("e.ts", `export async function i() {\n  const n = (await t().catch(() => "")).length;\n  return n;\n}\n`);
     expect(run().code).toBe(1);
@@ -121,6 +144,27 @@ describe("#796 what the gate must stay QUIET about", () => {
     const r = run();
     expect(r.code, r.out).toBe(0);
     expect(r.out).toContain("0 known site");
+  });
+
+  it("a chain whose CALLBACK contains a `return`", () => {
+    // A real false positive this gate produced. Walking back to the statement
+    // start sweeps up the callback body, and a bare `return` inside it read as
+    // the outer statement returning the value — turning a fire-and-forget
+    // readiness probe into a reported defect. Consumption is judged from the line
+    // the statement BEGINS on, not from everything swept up reaching it.
+    write(
+      "cb.ts",
+      `export function p() {\n` +
+        `  fetchIt(url)\n` +
+        `    .then((r) => {\n` +
+        `      if (!r.ok) return;\n` +
+        `      push({ ready: true });\n` +
+        `    })\n` +
+        `    .catch(() => {});\n` +
+        `}\n`,
+    );
+    const r = run();
+    expect(r.code, r.out).toBe(0);
   });
 
   it("a catch that returns a REAL value, not an empty one", () => {

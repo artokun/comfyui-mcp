@@ -109,6 +109,56 @@ function walk(dir, out = []) {
  * practice; a chained expression spanning lines is treated as consumed, because
  * the cautious direction for a gate is to ask rather than to stay quiet.
  */
+/**
+ * Walk back to where the statement containing this `.catch` BEGINS, returning the
+ * joined text and the line it starts on.
+ *
+ * Both consumers need the same answer. `valueIsConsumed` needs the text, since a
+ * binding can be several lines up and mid-line. The waiver needs the LINE, because
+ * a reader writes the explanation above the statement — not above whichever
+ * fragment the catch happens to be glued to:
+ *
+ *     // unknown-ok: <reason>
+ *     const seen = job.viaManager
+ *       ? await verify(a, b, c)
+ *         .catch(() => undefined)      <- the match is here
+ *       : undefined;
+ *
+ * Looking for the comment directly above the match would find `? await verify(...)`
+ * and conclude the site was unmarked.
+ */
+function balance(text) {
+  let n = 0;
+  for (const c of text) {
+    if (c === "(" || c === "[" || c === "{") n++;
+    else if (c === ")" || c === "]" || c === "}") n--;
+  }
+  return n;
+}
+
+function readStatement(line, matchIndex, lines, i) {
+  let stmt = line.slice(0, matchIndex);
+  let start = i;
+  for (let j = i - 1; j >= 0 && j >= i - 12; j--) {
+    // Two things mark text as not-yet-a-statement, and both are needed.
+    //
+    // UNBALANCED CLOSERS. `).catch(() => undefined)` is how a catch attaches to a
+    // call whose arguments were wrapped, and the argument lines above it are part
+    // of the same statement while looking like ordinary code. Counting brackets
+    // is what distinguishes them from the previous statement — while more have
+    // been closed than opened, we are still inside the call that opened them.
+    //
+    // A LEADING CHAIN LINK. `.then(...)` / `?.foo` continue a statement whose
+    // brackets are already balanced, so balance alone would stop one line short.
+    if (balance(stmt) >= 0 && !/^\s*[.?]/.test(stmt) && stmt.trim() !== "") break;
+    const prev = lines[j];
+    if (prev === undefined || prev.trim() === "") break;
+    stmt = prev + " " + stmt;
+    start = j;
+  }
+  return { stmt, start };
+}
+
 function valueIsConsumed(line, matchIndex, matchEnd, lines, i) {
   // Sliced at the regex's own match END. Re-deriving it by pattern cannot work:
   // `.catch(() => {})` has nested parens, and a naive `\([^)]*\)` stops at the
@@ -124,22 +174,25 @@ function valueIsConsumed(line, matchIndex, matchEnd, lines, i) {
   //       .catch(() => false);
   // Testing only the text on the `.catch` line sees leading whitespace and calls
   // it discarded — which hides exactly the long chains most worth looking at.
-  let stmt = line.slice(0, matchIndex);
-  for (let j = i - 1; j >= 0 && j >= i - 10; j--) {
-    // Only walk back while what we have is still a CONTINUATION — a chain link,
-    // or nothing but indentation. Prepending unconditionally would drag the
-    // previous statement in and read its punctuation as this one's context.
-    if (stmt.trim() !== "" && !/^\s*[.?]/.test(stmt)) break;
-    const prev = lines[j];
-    if (prev === undefined || prev.trim() === "") break;
-    stmt = prev + " " + stmt;
-  }
+  const { start } = readStatement(line, matchIndex, lines, i);
+
+  // Judge consumption from the line the STATEMENT BEGINS ON, not from all the
+  // text swept up on the way there. A multi-line chain can enclose a callback
+  //     .then((r) => {
+  //       if (!r.ok) return;      <- belongs to the CALLBACK
+  //       ...
+  //     })
+  //     .catch(() => {});
+  // and reading the joined text finds that `return` and calls the outer statement
+  // consumed. It is not: this is fire-and-forget, and the whole gate depends on
+  // not flagging it.
+  const head = start === i ? line.slice(0, matchIndex) : lines[start];
 
   // The value leaves the statement.
-  if (/\b(return|yield)\b/.test(stmt)) return true;
+  if (/\b(return|yield)\b/.test(head)) return true;
   // Bound to a name — `const x =`, `let [a,b] =`, `this.x =`, `x ||=`, `x ??=`.
-  if (/\b(const|let|var)\s+[\w{}[\],\s:]+=[^=]/.test(stmt)) return true;
-  if (/[\w\])]\s*(\|\||\?\?|&&)?=[^=>]/.test(stmt)) return true;
+  if (/\b(const|let|var)\s+[\w{}[\],\s:]+=[^=]/.test(head)) return true;
+  if (/[\w\])]\s*(\|\||\?\?|&&)?=[^=>]/.test(head)) return true;
   // Chained onward: `.catch(() => []).length`, `.catch(() => null)?.id`
   if (/\)\s*[.?[]/.test(after)) return true;
 
@@ -152,8 +205,9 @@ function valueIsConsumed(line, matchIndex, matchEnd, lines, i) {
   // trailing punctuation can. A terminating `;` on a statement that binds nothing
   // is the one shape where the value provably goes nowhere.
   const tail = after.trim();
-  if (tail === ";" || tail === "") return false;
-  return true;
+  // Nothing after the catch means the STATEMENT CONTINUES on the next line, so
+  // the value has somewhere to go — a discarded call would have terminated.
+  return tail !== ";";
 }
 
 /** Stable across edits: path + exact source text + which occurrence in the file.
@@ -169,9 +223,11 @@ function keyFor(rel, snippet, ordinal) {
  *  a reason WRAP. A good reason is usually two or three lines, which puts the
  *  `unknown-ok:` marker further above the code than any fixed window would allow
  *  — and shortening the reason to fit a linter would defeat the point of it. */
-function waiverContext(lines, i) {
-  const block = [lines[i]];
-  for (let j = i - 1; j >= 0; j--) {
+function waiverContext(lines, i, start) {
+  // Include every line of the statement, so a marker on the `.catch` line
+  // itself still counts, then the contiguous comments above where it BEGINS.
+  const block = lines.slice(start, i + 1);
+  for (let j = start - 1; j >= 0; j--) {
     const l = lines[j];
     if (typeof l !== "string" || !/^\s*(\/\/|\*|\/\*)/.test(l)) break;
     block.unshift(l);
@@ -179,8 +235,8 @@ function waiverContext(lines, i) {
   return block;
 }
 
-function findWaiver(lines, i) {
-  const block = waiverContext(lines, i);
+function findWaiver(lines, i, start) {
+  const block = waiverContext(lines, i, start);
   const at = block.findIndex((l) => /unknown-ok/.test(l));
   if (at === -1) return { marked: false, reasoned: false };
   // Everything from the marker to the end of the comment block is the reason, so
@@ -215,7 +271,7 @@ function scan() {
         const ordinal = (counts.get(snippet) ?? 0) + 1;
         counts.set(snippet, ordinal);
         const rec = { key: keyFor(rel, snippet, ordinal), rel, line: i + 1, text: line.trim() };
-        const waiver = findWaiver(lines, i);
+        const waiver = findWaiver(lines, i, readStatement(line, m.index, lines, i).start);
         if (waiver.reasoned) continue;
         // A bare marker is not a waiver — the reason is the deliverable.
         if (waiver.marked) bare.push(rec);
