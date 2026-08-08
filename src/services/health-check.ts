@@ -22,6 +22,42 @@ export interface HealthCheckOptions {
   recentErrors?: number;
 }
 
+/**
+ * The ComfyUI FRONTEND package version, as reported by /system_stats.
+ *
+ * ComfyUI gives this two ways and they can disagree, which is itself worth
+ * seeing: `comfy_package_versions[comfyui-frontend-package].installed` is what is
+ * actually loaded, and `required_frontend_version` is what this ComfyUI asked
+ * for. A mismatch means someone pinned or overrode the frontend — exactly the
+ * situation in panel#779, where `--front-end-version …@1.47.12` was the fix.
+ *
+ * Returns "?" when neither is present rather than inventing one. An unknown
+ * version must not read as an absent problem.
+ */
+function describeFrontendVersion(stats: Record<string, any>): string {
+  // Both fields live under `system`, verified against a live ComfyUI 0.30.2 —
+  // the first draft read them off the top level and silently produced "?" on a
+  // server that reports them perfectly well. Top-level is still accepted in case
+  // another build puts them there, but `system` is where they actually are.
+  const pkgs = Array.isArray(stats?.system?.comfy_package_versions)
+    ? stats.system.comfy_package_versions
+    : Array.isArray(stats?.comfy_package_versions)
+      ? stats.comfy_package_versions
+      : [];
+  const fe = pkgs.find((p: any) => p?.name === "comfyui-frontend-package");
+  const installed = typeof fe?.installed === "string" ? fe.installed : undefined;
+  const required =
+    typeof stats?.system?.required_frontend_version === "string"
+      ? stats.system.required_frontend_version
+      : typeof stats?.required_frontend_version === "string"
+        ? stats.required_frontend_version
+        : undefined;
+  if (installed && required && installed !== required) {
+    return `${installed} (this ComfyUI expects ${required} — pinned or overridden)`;
+  }
+  return installed ?? required ?? "?";
+}
+
 export async function runHealthCheck(
   options: HealthCheckOptions = {},
 ): Promise<string> {
@@ -44,6 +80,13 @@ export async function runHealthCheck(
       : "?";
     lines.push(
       `**ComfyUI**: ${sys.comfyui_version ?? "?"} | ` +
+        // panel#779 — the FRONTEND package version, which /system_stats reports and
+        // nothing here read. That outage (a blank agent panel on a fresh install)
+        // turned entirely on it: ComfyUI 0.30.0 was identical between the broken
+        // and working machines, and the frontend was 1.50.3 vs 1.47.12. A reporter
+        // had to be asked for it after an hour of eliminating everything else, and
+        // "ComfyUI version" alone will keep hiding this class of skew.
+        `frontend ${describeFrontendVersion(stats)} | ` +
         `Python ${(sys.python_version ?? "").split(" ")[0] || "?"} | ` +
         `PyTorch ${sys.pytorch_version ?? "?"}`,
     );
