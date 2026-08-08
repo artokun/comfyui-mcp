@@ -53,6 +53,11 @@ function maskToken(url: string): string {
   return url.replace(/token=[^&]+/, "token=…");
 }
 
+/** Per-attempt ceiling for the advertise POST. Deliberately well under the retry
+ *  budget: three attempts plus backoff must still finish in a bounded time, and a
+ *  pod route that has not answered in ten seconds is not about to. */
+const ADVERTISE_TIMEOUT_MS = 10_000;
+
 /**
  * POST the bridge URL to the pod's panel pack so its browser panel can fetch it.
  * Retries a few times — the orchestrator may advertise before the pod route is
@@ -74,6 +79,13 @@ export async function advertiseBridge(comfyuiUrl: string, wssUrl: string, should
         method: "POST",
         headers: { "Content-Type": "application/json", ...getComfyUIAuthHeaders() },
         body: JSON.stringify({ url: wssUrl }),
+        // Without this the retry loop could not retry: a pod behind a proxy that
+        // accepts the connection and then answers nothing (the characteristic
+        // RunPod-route failure this function's own comment describes as "not warm
+        // yet") left attempt 1 awaiting forever, so attempts 2 and 3 never ran and
+        // bridge exposure hung with no error. A ceiling turns that hang into the
+        // retry the loop was written to perform.
+        signal: AbortSignal.timeout(ADVERTISE_TIMEOUT_MS),
       });
       if (res.ok) return true;
       logger.warn(`[secure-bridge] advertise got HTTP ${res.status} from the pod panel`);

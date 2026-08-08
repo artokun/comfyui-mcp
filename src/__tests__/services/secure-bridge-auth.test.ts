@@ -80,3 +80,55 @@ describe("advertiseBridge auth headers", () => {
     expect(init.headers).toEqual({ "Content-Type": "application/json" });
   });
 });
+
+// The retry loop could not retry. A pod behind a proxy that accepts the
+// connection and then answers nothing — the characteristic RunPod-route failure
+// the function's own comment calls "not warm yet" — left attempt 1 awaiting
+// forever on a signal-less fetch, so attempts 2 and 3 never ran and bridge
+// exposure hung with no error at all.
+describe("advertiseBridge cannot hang on attempt 1", () => {
+  const OLD = process.env;
+  beforeEach(() => {
+    vi.resetModules();
+    process.env = { ...OLD, COMFYUI_URL: "http://127.0.0.1:8188" };
+  });
+  afterEach(() => {
+    process.env = OLD;
+    vi.unstubAllGlobals();
+  });
+
+  it("bounds each attempt so the loop can reach attempts 2 and 3", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { advertiseBridge } = await import("../../services/secure-bridge.js");
+    await advertiseBridge("https://podid-3000.proxy.runpod.net", "wss://relay/?token=t");
+
+    const [, init] = advertiseCall(fetchMock);
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  // Split deliberately from the assertion above, and NOT written as "wait for the
+  // real ceiling to fire". AbortSignal.timeout is backed by a platform timer that
+  // vitest's fake timers do not drive, so a version of this test using
+  // advanceTimersByTimeAsync sat for the full real 10s and then failed — it was
+  // measuring Node's timer, not our code.
+  //
+  // What is OURS is that an aborted attempt is caught and the loop proceeds. That
+  // is the half the hang broke, and it is what this pins.
+  it("an aborted attempt is caught and the NEXT attempt still runs", async () => {
+    const abortErr = new Error("This operation was aborted");
+    abortErr.name = "TimeoutError";
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(abortErr)
+      .mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { advertiseBridge } = await import("../../services/secure-bridge.js");
+    const ok = await advertiseBridge("https://podid-3000.proxy.runpod.net", "wss://relay/?token=t");
+
+    expect(ok).toBe(true);
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(1);
+  });
+});
