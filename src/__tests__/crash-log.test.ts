@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   parseCrashBlock,
   formatCrashNote,
   comfyuiLogCandidates,
+  readComfyuiCrashLog,
 } from "../services/crash-log.js";
 
 // The MOTIVATING CASE: a Wan2.2 build crashed ComfyUI with a native access
@@ -185,5 +189,107 @@ describe("comfyuiLogCandidates", () => {
     const c = comfyuiLogCandidates("/comfy");
     expect(c[0]).toMatch(/logs[\\/]+comfyui\.log$/);
     expect(c[1]).toMatch(/user[\\/]+comfyui\.log$/);
+  });
+});
+
+// #796's class, in the place it costs most.
+//
+// `fatal: boolean` is a two-valued field carrying THREE states: a crash was
+// found, no crash was found, and NOTHING WAS LOOKED AT. The third rendered as the
+// second — and formatCrashNote returns null for !fatal, so a log that could not be
+// opened (locked mid-write on Windows, permissions, a truncated read) told the
+// agent its restart was CLEAN.
+//
+// That is the worst available direction. The whole feature exists so the agent
+// does not re-run the graph that just killed the server, and silence reads as
+// "safe to proceed".
+describe("an unreadable log is not a clean restart", () => {
+  it("says the outcome is UNKNOWN, and that nothing was scanned", () => {
+    const note = formatCrashNote({
+      fatal: false,
+      block: "",
+      unreadable: { path: "C:/comfy/user/comfyui.log", reason: "EBUSY: resource busy or locked" },
+    });
+
+    expect(note).not.toBeNull();
+    expect(note!).toMatch(/could NOT be read/);
+    expect(note!).toMatch(/UNKNOWN/);
+    // It must not merely hedge — it has to say WHY the silence is uninformative.
+    expect(note!).toMatch(/no crash signature was ruled out, because nothing was scanned/);
+    // And name what it tried, so the user can go and look.
+    expect(note!).toContain("C:/comfy/user/comfyui.log");
+    expect(note!).toContain("EBUSY");
+  });
+
+  it("still stays silent for a genuinely clean restart", () => {
+    // The noise guard: no `unreadable`, no note. A permanent unknown-banner on
+    // every resume is how a real warning stops being read.
+    expect(formatCrashNote({ fatal: false, block: "" })).toBeNull();
+  });
+
+  it("does not displace a REAL crash note", () => {
+    const note = formatCrashNote({
+      fatal: true,
+      block: "Windows fatal exception: access violation",
+      culpritNode: "ComfyUI-WanVideoWrapper",
+      unreadable: { path: "x", reason: "y" },
+    });
+
+    expect(note!).toMatch(/ComfyUI crashed/);
+    expect(note!).not.toMatch(/could NOT be read/);
+  });
+});
+
+// THE WIRING, not just the helper. The tests above hand formatCrashNote a
+// constructed result; they would all still pass if readComfyuiCrashLog never set
+// `unreadable` at all. This drives the real function against a real unreadable
+// path — and pins the fingerprint, because the injection site skips any note
+// without one, so a missing fingerprint would silently suppress the warning.
+describe("readComfyuiCrashLog reports an existing-but-unreadable log", () => {
+  it("sets unreadable + a fingerprint when the log cannot be read", () => {
+    const root = mkdtempSync(join(tmpdir(), "cmcp-crashlog-"));
+    // A DIRECTORY where the log file goes: existsSync passes, statSync succeeds,
+    // readFileSync throws EISDIR. That is the read-catch branch, cross-platform.
+    mkdirSync(join(root, "user", "comfyui.log"), { recursive: true });
+
+    const r = readComfyuiCrashLog(root);
+
+    expect(r.fatal).toBe(false);
+    expect(r.unreadable, "an existing log that cannot be read must be reported").toBeTruthy();
+    expect(r.unreadable!.path).toContain("comfyui.log");
+    expect(r.unreadable!.reason).toBeTruthy();
+    // Without this the note is built and then dropped by the injection site.
+    expect(r.fingerprint, "no fingerprint means the note is never injected").toBeTruthy();
+    expect(r.fingerprint!).toMatch(/^unreadable:/);
+    // End to end: the agent actually gets told.
+    expect(formatCrashNote(r)).toMatch(/could NOT be read/);
+
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("stays silent when there is no log at all — nothing to report, not an unknown", () => {
+    const root = mkdtempSync(join(tmpdir(), "cmcp-crashlog-empty-"));
+
+    const r = readComfyuiCrashLog(root);
+
+    expect(r.fatal).toBe(false);
+    expect(r.unreadable).toBeUndefined();
+    expect(formatCrashNote(r)).toBeNull();
+
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("is unchanged for a readable log with no crash", () => {
+    const root = mkdtempSync(join(tmpdir(), "cmcp-crashlog-clean-"));
+    mkdirSync(join(root, "user"), { recursive: true });
+    writeFileSync(join(root, "user", "comfyui.log"), "[INFO] Prompt executed in 3.2 seconds\n");
+
+    const r = readComfyuiCrashLog(root);
+
+    expect(r.fatal).toBe(false);
+    expect(r.unreadable).toBeUndefined();
+    expect(formatCrashNote(r)).toBeNull();
+
+    rmSync(root, { recursive: true, force: true });
   });
 });

@@ -30,8 +30,27 @@ export interface CrashParseResult {
   culpritFrame?: string;
   /** A stable identifier for THIS crash (signature head + culprit), so the caller
    *  can inject a given crash at most once and not re-surface it on every later
-   *  resume. Absent when !fatal. */
+   *  resume. Also set for the `unreadable` case below — the injection site skips
+   *  any note without one — and otherwise absent. */
   fingerprint?: string;
+  /**
+   * A log candidate EXISTED and could not be read (#796's class).
+   *
+   * `fatal` is a two-valued field carrying three states: a crash was found, no
+   * crash was found, and NOTHING WAS LOOKED AT. The third used to render as the
+   * second, and formatCrashNote returns null for `!fatal` — so a log we could not
+   * open (locked mid-write on Windows, permissions, a truncated read) told the
+   * agent that its restart was CLEAN. That is the worst possible direction here:
+   * the whole feature exists so the agent does not re-run the graph that just
+   * killed the server, and silence is read as "safe to proceed".
+   *
+   * Set ONLY when a candidate file exists and reading or stat-ing it failed.
+   * Deliberately NOT set when there are no candidates at all: that is "no source
+   * to consult", it is the normal state for anyone whose logs live elsewhere, and
+   * a permanent unknown-banner on every resume would be noise — which is how a
+   * real warning stops being read.
+   */
+  unreadable?: { path: string; reason: string };
 }
 
 /** What readComfyuiCrashLog returns: the parse plus where it read from. */
@@ -50,6 +69,21 @@ const CRASH_SIGNATURES = [
 
 /** Hard caps so an enormous log can't blow up memory or the agent's context. */
 const MAX_TAIL_BYTES = 256 * 1024; // read at most the last 256 KiB of the log
+
+/**
+ * The dedupe key for an UNREADABLE log, in the same namespace as a crash
+ * fingerprint (the injection site skips any note without one, and keys on it to
+ * inject at most once per tab).
+ *
+ * Keyed on path + reason so a persistent condition — a permissions problem, say —
+ * is surfaced ONCE rather than on every resume for the rest of the session, while
+ * a genuinely different failure later still gets through. The reason is truncated
+ * so an error string carrying a varying detail (an offset, a handle id) cannot
+ * defeat the dedupe by minting a fresh key each time.
+ */
+function unreadableFingerprint(u: { path: string; reason: string }): string {
+  return `unreadable:${u.path}:${u.reason.slice(0, 60)}`;
+}
 const MAX_BLOCK_CHARS = 4000; // the injected fatal block is capped to this
 
 /**
@@ -227,6 +261,7 @@ export function readComfyuiCrashLog(comfyPath: string | undefined): CrashLogRead
   // Most-recently-modified candidate (the live log after a crash+restart).
   let chosen: string | undefined;
   let chosenMtime = -Infinity;
+  let statFailure: { path: string; reason: string } | undefined;
   for (const p of candidates) {
     try {
       const m = statSync(p).mtimeMs;
@@ -234,11 +269,18 @@ export function readComfyuiCrashLog(comfyPath: string | undefined): CrashLogRead
         chosenMtime = m;
         chosen = p;
       }
-    } catch {
-      // unreadable stat — skip this candidate
+    } catch (err) {
+      // Remember WHY, rather than only skipping. If no candidate survives, this
+      // is the difference between "no crash" and "could not look" (#796).
+      statFailure ??= { path: p, reason: err instanceof Error ? err.message : String(err) };
     }
   }
-  if (!chosen) return { fatal: false, block: "" };
+  // Candidates existed (they passed existsSync) and every one failed to stat.
+  if (!chosen) {
+    return statFailure
+      ? { fatal: false, block: "", unreadable: statFailure, fingerprint: unreadableFingerprint(statFailure) }
+      : { fatal: false, block: "" };
+  }
 
   let text: string;
   try {
@@ -248,8 +290,15 @@ export function readComfyuiCrashLog(comfyPath: string | undefined): CrashLogRead
       size > MAX_TAIL_BYTES
         ? buf.subarray(size - MAX_TAIL_BYTES).toString("utf8")
         : buf.toString("utf8");
-  } catch {
-    return { fatal: false, block: "", logPath: chosen };
+  } catch (err) {
+    const unreadable = { path: chosen, reason: err instanceof Error ? err.message : String(err) };
+    return {
+      fatal: false,
+      block: "",
+      logPath: chosen,
+      unreadable,
+      fingerprint: unreadableFingerprint(unreadable),
+    };
   }
   return { ...parseCrashBlock(text), logPath: chosen };
 }
@@ -259,6 +308,21 @@ export function readComfyuiCrashLog(comfyPath: string | undefined): CrashLogRead
  * null when there's nothing to inject (clean restart). Kept small + capped.
  */
 export function formatCrashNote(result: CrashParseResult): string | null {
+  // A log we could not open is NOT a clean restart (#796). Say so plainly, and
+  // say what it does and does not establish — the agent's next move after a
+  // resume is usually to re-run what it was doing, which is the one thing a
+  // genuine crash makes dangerous.
+  if (!result.fatal && result.unreadable) {
+    return (
+      "⚠️ ComfyUI restarted, and its log could NOT be read — so whether it crashed is UNKNOWN. " +
+      `Tried: ${result.unreadable.path} (${result.unreadable.reason}). ` +
+      "This is not a clean restart, it is an unread one: no crash signature was ruled out, because " +
+      "nothing was scanned. Before re-running the last action, consider whether it was heavy " +
+      "(large model load, a custom node doing native work) — a repeat of a native fault will look " +
+      "identical from here. Reading that file yourself, or checking ComfyUI's console, is the " +
+      "quickest way to settle it."
+    );
+  }
   if (!result.fatal) return null;
   const culprit = result.culpritNode
     ? `Most likely culprit custom node: ${result.culpritNode}${

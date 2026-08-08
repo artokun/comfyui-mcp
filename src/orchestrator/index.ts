@@ -4835,7 +4835,9 @@ export async function runPanelOrchestrator(): Promise<void> {
           injectedCrashes.add(key);
           outText = `${note}\n\n${event.text}`;
           logger.warn(
-            `[panel-orchestrator] tab ${event.tab_id.slice(0, 8)} crash-dump injected on resume — culprit=${crash.culpritNode ?? "?"} frame=${crash.culpritFrame ?? "?"} (log=${crash.logPath ?? "?"})`,
+            crash.unreadable
+              ? `[panel-orchestrator] tab ${event.tab_id.slice(0, 8)} crash-log UNREADABLE note injected on resume — whether ComfyUI crashed is unknown (log=${crash.unreadable.path}: ${crash.unreadable.reason})`
+              : `[panel-orchestrator] tab ${event.tab_id.slice(0, 8)} crash-dump injected on resume — culprit=${crash.culpritNode ?? "?"} frame=${crash.culpritFrame ?? "?"} (log=${crash.logPath ?? "?"})`,
           );
         }
       } catch (err) {
