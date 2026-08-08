@@ -2718,6 +2718,21 @@ export class UiBridge {
 
   /** True when the tab advertised itself as a canvas-less (mobile/remote) client
    *  in its `hello`. Unknown tabs → false. */
+  /**
+   * #875 — is any CURRENTLY-CONNECTED client headless (a paired phone / mirror)?
+   *
+   * Deliberately NOT `isHeadless()`, which is STICKY by design: a tab that ever
+   * connected headless stays "headless" while offline so a render finishing
+   * during a disconnect is byte-inlined for the mailbox. That is right for
+   * rendering decisions and wrong for a LIVENESS gate — using it would report a
+   * phone that paired once and left as still connected, and the self-restarter
+   * would defer updates forever.
+   */
+  hasLiveHeadlessClient(): boolean {
+    for (const c of this.conns.values()) if (c.headless === true) return true;
+    return false;
+  }
+
   isHeadless(tabId: string): boolean {
     // Sticky: a tab that EVER connected headless stays "headless" even while
     // offline, so a render finishing during a disconnect is byte-inlined (not a

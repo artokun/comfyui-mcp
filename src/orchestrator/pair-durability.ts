@@ -95,8 +95,15 @@ export function pairUrlDurability(input: PairDurabilityInput): PairUrlDurability
   const remedy = rotates.includes("hostname")
     ? "There is no way to pin the tunnel hostname today — phone pairing always uses a cloudflared " +
       "quick tunnel, and COMFYUI_MCP_TUNNEL_BACKEND=relay does not apply to it. To keep a link " +
-      "that survives restarts, pair over LAN with COMFYUI_MCP_PAIR_TOKEN set; otherwise re-pair " +
-      "from the panel after a restart." +
+      "that survives restarts, pair over LAN (the token is persisted, so a LAN URL keeps " +
+      "working); otherwise re-pair from the panel after a restart. " +
+      // #875 — the reassurance that matters mid-session: an automatic restart
+      // will NOT yank this tunnel out from under a connected phone. Stated here
+      // because pair time is where the user is looking; the deferral itself is a
+      // gate on the self-restarter, and a log would not reach them.
+      "While a phone is connected over this tunnel, automatic update-restarts are DEFERRED until " +
+      "it disconnects, so an update cannot break the link mid-session (a tunnel left connected " +
+      "indefinitely therefore postpones updates indefinitely)." +
       (rotates.includes("token")
         ? " (Pinning COMFYUI_MCP_PAIR_TOKEN alone will not help here — the hostname still rotates.)"
         : "")

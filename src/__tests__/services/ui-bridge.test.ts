@@ -4714,3 +4714,48 @@ describe("UiBridge.connectedServerOrigins (#952)", () => {
     expect(bridge.connectedServerOrigins()).toEqual([]);
   });
 });
+
+// #875 — the liveness signal the self-restarter's tunnel gate depends on.
+//
+// isHeadless() is STICKY on purpose (a tab that ever connected headless stays so
+// while offline, so a render finishing during a disconnect is byte-inlined for
+// the mailbox). That is right for rendering and WRONG for liveness: using it
+// would report a phone that paired once and left as still connected, and the
+// restarter would defer updates forever instead of until the next disconnect.
+describe("#875: hasLiveHeadlessClient reports the LIVE set, not the sticky one", () => {
+  it("is false with no connections at all", async () => {
+    const { bridge: b } = await startBridgeOnFreePort();
+    expect(b.hasLiveHeadlessClient()).toBe(false);
+    await b.stop();
+  });
+
+  // The POSITIVE case, and the one that makes this suite non-vacuous: without it
+  // every assertion here would pass with the accessor hardcoded to false — a
+  // mutation to the STICKY isHeadless() killed nothing until this existed.
+  it("is TRUE while a headless client is connected, and false once it leaves", async () => {
+    const sock = new WebSocket(`ws://127.0.0.1:${port}`);
+    await new Promise<void>((res, rej) => {
+      sock.on("open", () => res());
+      sock.on("error", rej);
+    });
+    sock.send(JSON.stringify({ type: "hello", tab_id: "phone-live", title: "phone", headless: true }));
+    await new Promise((r) => setTimeout(r, 80));
+
+    expect(bridge.hasLiveHeadlessClient()).toBe(true);
+
+    sock.close();
+    await new Promise((r) => setTimeout(r, 150));
+    // The whole point of not using the sticky isHeadless(): once the phone is
+    // gone the restarter must be free to restart again.
+    expect(bridge.hasLiveHeadlessClient()).toBe(false);
+  });
+
+  it("is false for a connected NON-headless (canvas) tab", async () => {
+    const sock = await connectPanel("tab-desktop");
+    await new Promise((r) => setTimeout(r, 60));
+
+    expect(bridge.hasLiveHeadlessClient()).toBe(false);
+
+    sock.close();
+  });
+});

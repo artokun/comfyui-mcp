@@ -1059,6 +1059,20 @@ export async function runPanelOrchestrator(): Promise<void> {
   let pairToken: string | null = envPairToken;
   let pairListenerStarted = false;
   let pairTunnel: { url: string; stop: () => void } | null = null;
+  /**
+   * #875 — is a phone paired over a TUNNEL right now?
+   *
+   * Gates the self-restarter (see its allIdle below). A tunnel URL cannot survive
+   * a restart: cloudflared mints a fresh quick-tunnel hostname per run and there
+   * is no way to pin it, so restarting under a live tunnel breaks a phone that is
+   * connected at that moment. A LAN URL is fine — the token persists now — which
+   * is why this is narrowed to the tunnel rather than to pairing in general.
+   */
+  // Requires BOTH: a tunnel exists AND a client is connected through it right
+  // now. `pairTunnel` alone is not liveness — nothing stops the tunnel until the
+  // process exits, so gating on it would postpone every future update after a
+  // single pairing, rather than deferring to the next disconnect as intended.
+  const tunnelPairingLive = (): boolean => pairTunnel !== null && bridge.hasLiveHeadlessClient();
   // #875 — the token is PERSISTED, not per-session. It used to be minted fresh on
   // every run, so a self-restart (on by default, hourly npm check) invalidated the
   // URL the phone had saved. The reporter experienced that as "updating the npm
@@ -5876,7 +5890,20 @@ export async function runPanelOrchestrator(): Promise<void> {
       // …and the same for an ask answer the user actually gave that has not
       // reached the agent yet (#486). Restarting would destroy it silently.
       !AskAnswers.hasOutstanding() &&
-      !QueueMonitor.isBusy(),
+      !QueueMonitor.isBusy() &&
+      // #875 — a LIVE TUNNEL PAIRING SESSION defers the restart to the next
+      // disconnect. The token now persists, so a LAN URL survives a restart; a
+      // tunnel URL cannot, because cloudflared mints a fresh quick-tunnel
+      // hostname every run and there is no way to pin it. Restarting under a live
+      // tunnel therefore breaks a phone that is connected RIGHT NOW, to install
+      // an update nobody asked for at that moment — which is what the reporter
+      // experienced and (reasonably) blamed on the npm version.
+      //
+      // Deferral, not cancellation: the update check still runs and the restart
+      // stays armed, so it fires as soon as the tunnel goes away. The cost is
+      // that a tunnel left up indefinitely postpones updates indefinitely, which
+      // is why noteTunnelDeferral announces it rather than doing it silently.
+      !tunnelPairingLive(),
     announce: (text) => void bridge.push({ type: "say", text }),
     teardown: teardownCore,
   });
