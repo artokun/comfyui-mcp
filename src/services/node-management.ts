@@ -171,6 +171,72 @@ interface ManagerFetchOptions {
   soft?: boolean;
 }
 
+/**
+ * #1089 — a Manager 403 already SAYS why; we were dropping it.
+ *
+ * ComfyUI-Manager gates privileged routes behind its own security level and
+ * answers with a machine-readable body (glob/manager_server.py):
+ *
+ *     def security_403_response(flag_token=None):
+ *         if not manager_migration.has_system_user_api():
+ *             return web.json_response({"error": "comfyui_outdated"}, status=403)
+ *         if flag_token is not None:
+ *             return web.json_response({"error": flag_token}, status=403)
+ *         return web.json_response({"error": "security_level"}, status=403)
+ *
+ * Three causes, three different remedies — and the caller saw only
+ * "ComfyUI-Manager API 403 Forbidden for /v2/manager/queue/update_all". The
+ * reporter had to ask which permission was even involved.
+ *
+ * update_all specifically needs is_allowed_security_level("middle"), which passes
+ * only for security_level in weak / normal / normal-. That is a Manager SETTING,
+ * not a credential and not a consequence of being remote.
+ *
+ * NAMES NO REMEDY IT CANNOT SUPPORT. An unrecognised token is reported as the
+ * flag Manager named, with no invented advice — a specific install flag denied it
+ * and only that flag can say more. Guessing here would be the same defect as the
+ * status blaming the filename in a userdata 400.
+ */
+export function explainManagerForbidden(status: number, body: string): string {
+  if (status !== 403) return "";
+  let reason: string | null = null;
+  try {
+    const parsed: unknown = JSON.parse(body);
+    const e = (parsed as { error?: unknown } | null)?.error;
+    if (typeof e === "string" && e.trim()) reason = e.trim();
+  } catch {
+    // Not JSON — Manager always sends JSON here, so an unparseable body means
+    // something else answered (a proxy, an auth gate). Say nothing rather than
+    // attribute a Manager reason to a response Manager may not have sent.
+    return "";
+  }
+  if (reason === "security_level") {
+    return (
+      " — ComfyUI-Manager REFUSED this on its own security level, not on credentials and not" +
+      " because the server is remote. Privileged routes (update_all, install, snapshot removal)" +
+      " require Manager config security_level to be weak, normal or normal-; anything stricter" +
+      " refuses. Change it in ComfyUI-Manager settings (or its config.ini) and restart ComfyUI." +
+      " Loosening it decides who may reach that server, so it is a deliberate choice: the" +
+      " alternative is to run the update from a shell on the machine itself."
+    );
+  }
+  if (reason === "comfyui_outdated") {
+    return (
+      " — ComfyUI-Manager reports this ComfyUI as too OLD for the route: it predates the" +
+      " system-user API that Manager checks first, before it ever consults security_level." +
+      " Update ComfyUI itself; changing Manager settings will not clear this."
+    );
+  }
+  if (reason) {
+    return (
+      ` — ComfyUI-Manager denied this via a specific install flag it names as "${reason}".` +
+      " That flag, not the general security level, is what governs this route; consult" +
+      " ComfyUI-Manager for what it controls."
+    );
+  }
+  return "";
+}
+
 async function managerFetch<T>(
   path: string,
   options: ManagerFetchOptions = {},
@@ -202,7 +268,8 @@ async function managerFetch<T>(
     if (soft) return undefined;
     const text = await res.text().catch(() => "");
     throw new NodeManagementError(
-      `ComfyUI-Manager API ${res.status} ${res.statusText} for ${path}`,
+      `ComfyUI-Manager API ${res.status} ${res.statusText} for ${path}` +
+        explainManagerForbidden(res.status, text),
       { url, status: res.status, body: text },
     );
   }
