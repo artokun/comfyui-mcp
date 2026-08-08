@@ -7,6 +7,7 @@
 // panel JS executors implement), and that the McpServer HTTP path registers the
 // identical set.
 
+import { readFileSync } from "node:fs";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -6443,5 +6444,49 @@ describe("#767 panel_add_node warns against parallel bursts", () => {
     // now safe to parallelise or that the timeout was raised.
     const d = defByName("panel_add_node");
     expect(d.description).not.toMatch(/now safe|no longer times out|timeout (has been )?raised/i);
+  });
+});
+
+describe("panel#769 restart refusal names the tunnelled-remote case", () => {
+  // remoteUrlActive = forceRemote || !isLoopbackHost(host). A REMOTE ComfyUI
+  // reached over a tunnel or port-forward has a LOOPBACK host, so it classifies
+  // as local, this refusal fires, and it correctly reports that it cannot find a
+  // local process to account for — because there is none. The refusal was right
+  // about what it observed and useless about what to do: the reader goes looking
+  // for a local install that does not exist.
+  const refusal = () => {
+    const src = readFileSync(
+      new URL("../../orchestrator/panel-tools.ts", import.meta.url),
+      "utf8",
+    );
+    const i = src.indexOf("Refusing to restart ComfyUI: I could not confirm");
+    expect(i).toBeGreaterThan(-1);
+    return src.slice(i, i + 3000);
+  };
+
+  it("names the classification as HOST-based, not instance-based", () => {
+    const t = refusal();
+    expect(t).toMatch(/reached through a tunnel/);
+    expect(t).toMatch(/proves the route is local, not the instance/);
+  });
+
+  it("names the exact setting that re-classifies it", () => {
+    // A lever that does not exist is worse than no lever (#809's defect in a
+    // description). Both spellings are real: resolveForceRemote() reads
+    // COMFYUI_MCP_FORCE_REMOTE and argv --force-remote.
+    const t = refusal();
+    expect(t).toMatch(/COMFYUI_MCP_FORCE_REMOTE=1/);
+    expect(t).toMatch(/--force-remote/);
+  });
+
+  it("says what the remote path then does, so it is not a blind flag", () => {
+    expect(refusal()).toMatch(/restarts through ComfyUI-Manager/);
+  });
+
+  it("keeps the original alternative — this is additive", () => {
+    // restart_comfyui remains the answer for a genuinely local install that
+    // simply could not be identified; the tunnel note must not displace it.
+    const t = refusal();
+    expect(t).toMatch(/USE restart_comfyui/);
   });
 });

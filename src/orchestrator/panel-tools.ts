@@ -9261,7 +9261,23 @@ export function buildPanelToolDefs(): PanelToolDef[] {
               "INSTEAD: unlike this panel-scoped restart, it is not tied to a browser tab " +
               "— it acts on the ComfyUI this server is configured for, which it CAN " +
               "identify and check before stopping. Or restart ComfyUI from whatever " +
-              "launches it (its own launcher, the Desktop app, or your terminal).",
+              "launches it (its own launcher, the Desktop app, or your terminal)." +
+              // artokun/comfyui-mcp-panel#769 — a REMOTE ComfyUI reached over a
+              // tunnel or port-forward has a LOOPBACK host, and remoteUrlActive is
+              // derived from exactly that (`forceRemote || !isLoopbackHost(host)`).
+              // So a cloud pod fronted at 127.0.0.1:<port> classifies as LOCAL, this
+              // branch runs, and it correctly reports it cannot find a local process
+              // to account for — because there isn't one. The refusal is right about
+              // what it observed and useless about what to do, since the reader is
+              // looking for a local install that does not exist. Name the one setting
+              // that re-classifies it; it is a config fix, not a workaround.
+              " NOTE: if this ComfyUI is actually REMOTE but reached through a tunnel " +
+              "or port-forward (a 127.0.0.1 address that is not this machine), it is " +
+              "being classified as local because that classification reads the HOST — " +
+              "which proves the route is local, not the instance. Set " +
+              "COMFYUI_MCP_FORCE_REMOTE=1 (or pass --force-remote) and this tool takes " +
+              "the remote path, which restarts through ComfyUI-Manager and does not " +
+              "need a local process to account for.",
           });
         }
         if (preflightBound) {
