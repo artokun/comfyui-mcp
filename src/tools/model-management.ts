@@ -730,8 +730,20 @@ async function downloadAction(args: {
             : undefined;
           const text = job.viaManager
             ? `Download DISPATCHED to the remote ComfyUI via ComfyUI-Manager (server-side fetch):\n${job.path}\n\n` +
+              // #473 — "CONFIRMED" was WRONG here, and it was my regression in
+              // 0.50.29. A listing proves a file of that NAME exists; Manager
+              // writes whatever the URL returned under the name you asked for,
+              // and it cannot carry this MCP's credentials. A reporter on 0.50.34
+              // got six byte-identical 10,038-byte CivitAI login pages saved as
+              // models, and said this check "sometimes upgraded the
+              // filename-presence check to CONFIRMED" — which is precisely the
+              // fabricated success #473 has now been reported for three times.
+              //
+              // The word stays out of the Manager branch entirely. LISTED is the
+              // observation; validity is not established here and must not be
+              // implied by the label.
               (managerSeen?.visibility === "visible"
-                ? `CONFIRMED: ${managerSeen.note}`
+                ? `LISTED (placement only, NOT validity): ${managerSeen.note}`
                 : `NOTE: ${placement.warning}` +
                   (managerSeen ? `\n\n${managerSeen.note}` : ""))
             : placement.confirmed

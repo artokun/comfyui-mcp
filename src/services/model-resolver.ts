@@ -1304,7 +1304,13 @@ export async function verifyManagerVisibility(
         visibility: "visible",
         note:
           `The connected ComfyUI now lists ${targetSubfolder}/${filename}, so the dispatch ` +
-          `landed somewhere it reads.`,
+          `landed somewhere it reads. That is PLACEMENT, not validity: a listing proves a file ` +
+          `of that NAME exists, and Manager writes whatever the URL returned under the name you ` +
+          `asked for. #473 is exactly this — a CivitAI login page saved as a .safetensors, ` +
+          `listed happily, and only discovered when LoraLoader failed to deserialize it. ` +
+          `Manager cannot carry this MCP's credentials, so an auth-gated URL is the case to ` +
+          `distrust: if the file is implausibly small for its kind (a login page is ~10KB), ` +
+          `treat it as failed and re-fetch it locally with COMFYUI_PATH set.`,
       };
     }
     if (has === false) asked = true;
