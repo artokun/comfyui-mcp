@@ -6410,3 +6410,38 @@ describe("#690(3) expose_subgraph_* disclose that `name` is dropped on reuse", (
     }
   });
 });
+
+describe("#767 panel_add_node warns against parallel bursts", () => {
+  // Parallel adds each carry a fresh /object_info payload, and the coalescer
+  // registers those SERIALLY (deliberately — joining an older in-flight refresh
+  // once dropped a just-installed node's defs, #289 P2). So N concurrent adds
+  // become N sequential refresh cycles; on a large install that outruns the 30s
+  // per-command deadline and the later adds time out WHILE STILL QUEUED, then
+  // apply when their turn comes. The reporter found "ghost" nodes matching calls
+  // they had been told failed.
+  //
+  // The coalescing fix is a separate, riskier change (its failure mode is
+  // silently dropping node definitions). Telling the caller not to walk into it
+  // costs nothing and is where an agent actually looks.
+  it("tells the caller to add sequentially, and says why", () => {
+    const d = defByName("panel_add_node");
+    expect(d.description).toMatch(/ONE AT A TIME/);
+    expect(d.description).toMatch(/register SERIALLY|SERIALLY/);
+    expect(d.description).toMatch(/30s per-command deadline/);
+  });
+
+  it("names the consequence that makes it worth heeding", () => {
+    // "be careful" is ignorable; "you will be told it failed and it will happen
+    // anyway" is not. That asymmetry is the whole point of the sentence.
+    const d = defByName("panel_add_node");
+    expect(d.description).toMatch(/time out WHILE STILL QUEUED/);
+    expect(d.description).toMatch(/told had failed/);
+  });
+
+  it("does not promise a fix that has not shipped", () => {
+    // The coalescing change is NOT done; the description must not imply adds are
+    // now safe to parallelise or that the timeout was raised.
+    const d = defByName("panel_add_node");
+    expect(d.description).not.toMatch(/now safe|no longer times out|timeout (has been )?raised/i);
+  });
+});
