@@ -5901,8 +5901,12 @@ export async function runPanelOrchestrator(): Promise<void> {
       //
       // Deferral, not cancellation: the update check still runs and the restart
       // stays armed, so it fires as soon as the tunnel goes away. The cost is
-      // that a tunnel left up indefinitely postpones updates indefinitely, which
-      // is why noteTunnelDeferral announces it rather than doing it silently.
+      // that a tunnel left up indefinitely postpones updates indefinitely, so it
+      // is DISCLOSED — in pair-durability's tunnel note, which the panel shows at
+      // pair time. Deliberately not announced from here: this is a predicate the
+      // restarter polls, and emitting from it would either fire repeatedly or
+      // need its own state to suppress itself. Pair time is also where the user
+      // is actually looking (#1077: an orchestrator log may be unreachable).
       !tunnelPairingLive(),
     announce: (text) => void bridge.push({ type: "say", text }),
     teardown: teardownCore,
