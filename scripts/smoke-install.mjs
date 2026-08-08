@@ -198,4 +198,87 @@ if (onlyInstalled.length || onlyRepo.length) {
 }
 console.log(`✅ tarball's ${installedPanel.length} panel tools match this repo's build`);
 
+// 7. The SHIPPED build's data-loss guards actually guard.
+//
+//    Steps 1-6 establish that the tarball installs, boots, and registers the
+//    right names. None of them establish that it still BEHAVES — and the three
+//    checks below are the ones where a silent regression is worst, because each
+//    protects something the user cannot get back:
+//
+//      • the phone pairing token (#875)  — losing it silently breaks a paired
+//        phone, and the user experiences it as "the update bricked my link";
+//      • the defaults config (#1087)     — hand-written, and a read-modify-write
+//        would replace it with one key;
+//      • ~/.claude.json (#1091)          — not even our file: every MCP server
+//        the user has, plus credentials stored in a server's headers/env.
+//
+//    Unit tests cover all three against the SOURCE. This is the only thing that
+//    covers them against what we are about to publish, which is a different
+//    claim — and cheap, because these paths take an env-redirected path and
+//    touch nothing else. Every path below is under a temp dir; a bug here must
+//    never be able to write to a real home directory.
+//
+//    Kept to guards with a stable, one-call API. A behavioural check that needs
+//    elaborate setup does not belong in a release gate — it becomes the reason
+//    people start passing --no-verify.
+const guardDir = mkdtempSync(join(tmpdir(), "cmcp-guards-"));
+const guardEnv = { ...process.env, XDG_CONFIG_HOME: guardDir };
+const guardScript = `
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+// A file:// URL, not a bare path: on Windows \`import("C:/…")\` throws
+// ERR_UNSUPPORTED_ESM_URL_SCHEME.
+const P = ${JSON.stringify(pathToFileURL(join(pkg, "dist")).href)};
+const dir = ${JSON.stringify(guardDir.replace(/\\/g, "/"))};
+const fail = (m) => { console.error("GUARD FAILED: " + m); process.exit(1); };
+
+// #875 — the pairing token must survive a restart (a second load).
+process.env.COMFYUI_MCP_PAIR_TOKEN_FILE = join(dir, "pair-token");
+const { loadOrCreatePairToken } = await import(P + "/orchestrator/pair-token-store.js");
+const a = loadOrCreatePairToken(), b = loadOrCreatePairToken();
+if (!a.persisted || a.token !== b.token) fail("the pairing token did not persist across loads (#875)");
+
+// #1087 — an unloadable defaults config is preserved, never overwritten.
+mkdirSync(join(dir, "comfyui-mcp"), { recursive: true });
+const cfg = join(dir, "comfyui-mcp", "config.json");
+const ORIGINAL = '{ "width": 1024, }';
+writeFileSync(cfg, ORIGINAL);
+const { DefaultsManager } = await import(P + "/services/defaults-manager.js");
+DefaultsManager.configure({ configPath: cfg, env: {} });
+await DefaultsManager.load();
+if (!DefaultsManager.configLoadError()) fail("an unloadable defaults config was not reported (#1087)");
+await DefaultsManager.set({ height: 512 }, { persist: true });
+const kept = readdirSync(join(dir, "comfyui-mcp")).filter((f) => f.includes(".unreadable-"));
+if (kept.length !== 1) fail("the unloadable defaults config was NOT preserved (#1087)");
+if (readFileSync(join(dir, "comfyui-mcp", kept[0]), "utf-8") !== ORIGINAL)
+  fail("the preserved defaults config was not byte-identical (#1087)");
+
+// #1091 — an unreadable ~/.claude.json is REFUSED, not replaced. Not our file.
+const claude = join(dir, "claude.json");
+writeFileSync(claude, ORIGINAL);
+process.env.COMFYUI_MCP_CLAUDE_JSON = claude;
+const umc = await import(P + "/services/user-mcp-config.js");
+let refused = false;
+try { umc.addUserMcpServer("x", { command: "node" }); } catch { refused = true; }
+if (!refused) fail("an unreadable ~/.claude.json was not refused (#1091)");
+if (readFileSync(claude, "utf-8") !== ORIGINAL) fail("~/.claude.json was modified despite the refusal (#1091)");
+
+console.log("guards ok");
+`;
+const guardFile = join(guardDir, "guards.mjs");
+writeFileSync(guardFile, guardScript);
+const guards = spawnSync(process.execPath, [guardFile], {
+  cwd: pkg,
+  env: guardEnv,
+  encoding: "utf8",
+  timeout: 60_000,
+});
+if (guards.status !== 0) {
+  console.error("❌ the shipped build's data-loss guards did not hold");
+  if (guards.stdout) console.error(guards.stdout.trim());
+  if (guards.stderr) console.error(guards.stderr.trim());
+  process.exit(1);
+}
+console.log("✅ shipped build's data-loss guards hold (pair token, defaults config, ~/.claude.json)");
+
 console.log("✅ pack/install smoke passed — tarball installs cleanly, boots, and registers its tools");
