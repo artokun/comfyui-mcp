@@ -2576,8 +2576,10 @@ export type WorkflowFenceRebind =
     }
   /** A live identity was read, but the bridge declined to adopt it (the tab stopped
    *  being reachable, or the uuid failed the orchestrator's shape/origin check).
-   *  A clean `false` — nothing was written. */
-  | { status: "rejected"; uuid: string; before: FenceRead }
+   *  A clean `false` — nothing was written. `refusalReason` names WHICH of the
+   *  validator's three gates tripped when the bridge can tell us (#1077); absent
+   *  on an older bridge, which is why the remedy below must still stand alone. */
+  | { status: "rejected"; uuid: string; before: FenceRead; refusalReason?: string }
   /** The adoption itself THREW. Distinct from `rejected` (codex gate): a refusal
    *  proves the old fence is untouched, whereas a throw can land on either side
    *  of the write, so whether the fence changed is UNKNOWN and must not be
@@ -2738,9 +2740,23 @@ async function rebindWorkflowFence(ctx: PanelToolCtx): Promise<WorkflowFenceRebi
   // write, so `rejected`'s "the previous fence is unchanged" would be a state
   // nobody observed.
   try {
-    return refreshWorkflowUuid(ctx, active)
-      ? { status: "refreshed", uuid, before }
-      : { status: "rejected", uuid, before };
+    if (refreshWorkflowUuid(ctx, active)) return { status: "refreshed", uuid, before };
+    // #1077 — carry WHY. The validator has three independent gates and all of
+    // them used to surface as the same bare "REFUSED", which left a wedged
+    // session with nothing to act on. One of them (no server-observed Origin on
+    // a relay connection) is structurally unsatisfiable, so a caller told only
+    // "refused" will keep refreshing a tab that can never recover.
+    const why = ((): string | undefined => {
+      try {
+        const read = (ctx.bridge as unknown as { lastFenceRefusal?: unknown }).lastFenceRefusal;
+        return typeof read === "function"
+          ? (read.call(ctx.bridge, ctx.tabId) as string | undefined)
+          : undefined;
+      } catch {
+        return undefined; // a diagnostic must never replace the outcome
+      }
+    })();
+    return { status: "rejected", uuid, before, refusalReason: why };
   } catch (err) {
     return {
       status: "adopt_error",
@@ -2891,10 +2907,29 @@ function describeFenceRebind(
         binding: "not_recovered",
         note:
           ` Read the live canvas identity (${r.uuid}) but could NOT adopt it as this session's ` +
-          `graph command fence — the bound tab stopped being reachable, or the panel reported an ` +
-          `identity this orchestrator does not trust. The adoption was REFUSED, so the previous ` +
-          `fence is unchanged and graph tools will keep failing.` +
-          `\n\nWHAT TO DO: ${RELOAD_TAB_REMEDY}`,
+          `graph command fence.` +
+          // #1077 — name the gate when we can. "the bound tab stopped being
+          // reachable, OR the panel reported an identity this orchestrator does
+          // not trust" listed two causes with different remedies and left the
+          // caller to guess which; one of them cannot be fixed by retrying at all.
+          (r.refusalReason
+            ? ` The orchestrator's validator refused it because ${r.refusalReason}.`
+            : ` Either the bound tab stopped being reachable, or the panel reported an identity ` +
+              `this orchestrator does not trust — this bridge could not say which.`) +
+          ` The adoption was REFUSED, so the previous fence is unchanged and graph tools will ` +
+          `keep failing.` +
+          `\n\nWHAT TO DO: ${
+            // A structurally-unsatisfiable gate must not be answered with "refresh
+            // the tab" — the reporter did that repeatedly, including closing and
+            // reopening it, and it could never have worked.
+            r.refusalReason && /no server-observed Origin/i.test(r.refusalReason)
+              ? `Refreshing the tab will NOT help — this one is structural. Reconnect over a ` +
+                `direct/loopback or cloudflared link rather than the relay backend (unset ` +
+                `COMFYUI_MCP_TUNNEL_BACKEND=relay), or continue with reads and non-graph tools, ` +
+                `which do not need the fence. Please also report it: the relay protocol has to ` +
+                `forward the browser's handshake Origin for this path to work at all.`
+              : RELOAD_TAB_REMEDY
+          }`,
       };
     case "adopt_error":
       return {

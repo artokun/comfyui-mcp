@@ -795,6 +795,16 @@ export type TabWorkflowUuidRead =
   | { known: true; uuid?: string }
   | { known: false; reason: string };
 
+/**
+ * What the orchestrator's fence-adoption validator answers (#1077).
+ *
+ * `boolean` is still accepted so the injected resolver can stay simple (and so
+ * every existing test that registers only the read half keeps compiling); the
+ * object form carries the REASON a refusal happened, which is the difference
+ * between "the adoption was refused" and an actionable message.
+ */
+export type FenceAdoptOutcome = boolean | { ok: true } | { ok: false; reason: string };
+
 export const BRIDGE_READONLY_CMDS: ReadonlySet<string> = new Set<string>([
   "graph_serialize",
   "graph_outline",
@@ -1334,7 +1344,12 @@ export class UiBridge {
    * validates it against the server-observed origin; the bridge merely gives a
    * successful tab-bound command a narrow way to ask for that refresh.
    */
-  private refreshTabWorkflowUuid: ((tabId: string, workflowUuid: string) => boolean) | null = null;
+  private refreshTabWorkflowUuid:
+    | ((tabId: string, workflowUuid: string) => FenceAdoptOutcome)
+    | null = null;
+  /** Per-tab reason for the most recent REFUSED fence adoption (#1077). Cleared
+   *  on the next successful adoption, so it never outlives the state it explains. */
+  private readonly fenceRefusals = new Map<string, string>();
   /** #570 P0a — records the mirror subscribers/viewers a same-socket re-hello OPTIMISTICALLY
    *  moved from the retiring id to the new id, keyed by the RETIRING (from) id. The move
    *  happens BEFORE the orchestrator can classify the switch as proven/unproven; if it turns
@@ -3742,10 +3757,31 @@ export class UiBridge {
    *  the orchestrator). Enables the per-command workflow-instance stamp/fence. */
   setTabWorkflowUuidResolver(
     fn: (tabId: string) => string | undefined,
-    refresh?: (tabId: string, workflowUuid: string) => boolean,
+    refresh?: (tabId: string, workflowUuid: string) => FenceAdoptOutcome,
   ): void {
     this.resolveTabWorkflowUuid = fn;
     this.refreshTabWorkflowUuid = refresh ?? null;
+  }
+
+  /**
+   * #1077 — WHY the last adoption for this tab was refused, if it was.
+   *
+   * The validator has three independent gates (the tab is unreachable, it does
+   * not resolve to a real panel tab, or the identity did not validate) and every
+   * one of them returned a bare `false`. The caller could only say "the adoption
+   * was REFUSED", so a permanently-wedged session gave the user no way to tell
+   * which gate tripped — and the reporter who traced this had NO orchestrator log
+   * to fall back on, which is why the reason has to travel to the tool result
+   * rather than only to stderr.
+   *
+   * It matters here more than a diagnostic usually would, because one of those
+   * gates can be structurally unsatisfiable: a relay-backend connection carries
+   * no server Origin (attachRelayConnection has none to pass), so
+   * workflowIdentityParts can NEVER validate and the fence can never be adopted,
+   * no matter how many times the user refreshes the tab.
+   */
+  lastFenceRefusal(tabId: string): string | undefined {
+    return this.fenceRefusals.get(tabId);
   }
 
   /**
@@ -3755,7 +3791,19 @@ export class UiBridge {
    * stamp in place.
    */
   refreshWorkflowUuid(tabId: string, workflowUuid: string): boolean {
-    return this.refreshTabWorkflowUuid?.(tabId, workflowUuid) ?? false;
+    const outcome = this.refreshTabWorkflowUuid?.(tabId, workflowUuid) ?? false;
+    // Accepts the plain boolean too: the resolver is injected by the orchestrator
+    // and by tests, and a bare `false` simply carries no reason to record.
+    if (typeof outcome === "boolean") {
+      if (outcome) this.fenceRefusals.delete(tabId);
+      return outcome;
+    }
+    if (outcome.ok) {
+      this.fenceRefusals.delete(tabId);
+      return true;
+    }
+    this.fenceRefusals.set(tabId, outcome.reason);
+    return false;
   }
 
   /**
