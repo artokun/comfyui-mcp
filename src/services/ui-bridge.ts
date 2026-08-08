@@ -1162,6 +1162,41 @@ export function isRoutingAmbiguity(err: unknown): boolean {
   return (err as Record<symbol, unknown>)[ROUTING_AMBIGUITY] === true;
 }
 
+/**
+ * The disclosure appended to a reply-timeout for a MUTATING command.
+ *
+ * A reply-timeout and a mid-command disconnect carry the SAME risk — the request
+ * was already written to the socket — but only the disconnect said so, in
+ * handleMidCommandDisconnect's "OUTCOME UNKNOWN … verify before retrying". If
+ * anything the timeout is the LIKELIER of the two to have applied: its write
+ * SUCCEEDED on a live socket and the tab merely failed to answer in time, whereas
+ * a drop may have killed the socket before the bytes landed.
+ *
+ * Yet its message ended at "the ComfyUI tab may be backgrounded or frozen", which
+ * reads as an explanation for why nothing happened. A caller acting on that
+ * re-issues the command — adding the node twice, queueing the render twice. The
+ * bridge deliberately does not auto-retry a reply-timeout for exactly this reason
+ * (isTransientReconnectError excludes it, #334); the message simply never told the
+ * caller why, so the caller supplies the retry the bridge refused to.
+ *
+ * DELIBERATELY NOT the words "OUTCOME UNKNOWN". That string is a SENTINEL:
+ * rebootDropped() and isReconnectDrop() in panel-tools.ts both identify a
+ * POST-WRITE drop with /disconnected mid-command|OUTCOME UNKNOWN/i. Using it here
+ * would silently reclassify every frozen-tab timeout as a drop — and
+ * rebootDropped's contract EXPLICITLY excludes "did not reply within N ms",
+ * because treating a live-but-frozen tab as an accepted reboot would let readiness
+ * certify a cycle that was never requested. Same disclosure, different words, on
+ * purpose. A read needs none of this: re-running it cannot double-apply.
+ */
+function mutatedButUnacked(ctx: SendCtx): string {
+  if (!ctx.mutating) return "";
+  return (
+    `. This command MUTATES and was already delivered to the tab, so it may have been ` +
+    `applied despite the missing reply — check the current state before re-issuing it; ` +
+    `a blind retry can apply it twice`
+  );
+}
+
 /** Tag an error as a reply-timeout and return it (for throw/reject). */
 /**
  * Key for a pending "is this tab gone?" clock (#486).
@@ -3473,7 +3508,7 @@ export class UiBridge {
       ctx.reject(
         markReplyTimeout(
           new Error(
-            `Panel tab ${conn.tabId} did not reply to "${cmd.cmd}" within ${ctx.timeoutMs} ms — the ComfyUI tab may be backgrounded or frozen`,
+            `Panel tab ${conn.tabId} did not reply to "${cmd.cmd}" within ${ctx.timeoutMs} ms — the ComfyUI tab may be backgrounded or frozen${mutatedButUnacked(ctx)}`,
           ),
         ),
       );
@@ -3542,7 +3577,7 @@ export class UiBridge {
         markReplyTimeout(
           markDispatched(
             new Error(
-              `Panel tab ${conn.tabId} did not reply to "${cmd.cmd}" within ${ctx.timeoutMs} ms — the ComfyUI tab may be backgrounded or frozen`,
+              `Panel tab ${conn.tabId} did not reply to "${cmd.cmd}" within ${ctx.timeoutMs} ms — the ComfyUI tab may be backgrounded or frozen${mutatedButUnacked(ctx)}`,
             ),
             true,
           ),
