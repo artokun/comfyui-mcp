@@ -99,6 +99,11 @@ export class SessionStore {
    *  would otherwise take an in-memory shortcut and answer `true` consults this
    *  first, so a durability claim always describes the DISK, never just RAM. */
   private undurable = false;
+  /** Set when the on-disk store EXISTED but could not be READ (an I/O error, not
+   *  a parse error). Its contents are unknown and presumed good, so flush() must
+   *  move it aside before overwriting — see read() and flush(). Cleared once it
+   *  has been preserved. */
+  private loadUnreadable: string | undefined;
   /** #884 P1 (confirming gate 3) — the (size, mtime) of the store file as last
    *  READ or WRITTEN by this instance. `undurable === false` alone proved only
    *  that the LAST write succeeded, not that the file is still there: deleted
@@ -226,8 +231,38 @@ export class SessionStore {
       // tmp unreadable/corrupt (a crash mid-tmp-write) — fall through to main.
     }
     if (existsSync(this.path)) {
+      // COULD NOT READ IT and IT IS CORRUPT are different states (#796), and this
+      // catch used to serve both. The difference decides whether the file on disk
+      // is worthless or precious:
+      //
+      //   parse threw     → the bytes really are unusable; starting empty loses
+      //                     nothing that was recoverable.
+      //   readFileSync threw → EACCES / EBUSY / EMFILE. The sessions are INTACT
+      //                     and readable later; we simply could not open the file
+      //                     this instant (antivirus, a backup process, another
+      //                     orchestrator mid-write — all routine on Windows).
+      //
+      // Starting empty on the second one is silent data loss, because flush()
+      // renames over this.path unconditionally: the first new session — or even a
+      // touch() — replaces an intact store with a one-entry one, and every prior
+      // resume id is gone. This file already argues "failing to persist is
+      // strictly better than destroying what's there"; that reasoning simply never
+      // covered a failed LOAD.
+      let text: string | undefined;
       try {
-        const parsed = this.parse(readFileSync(this.path, "utf8"));
+        text = readFileSync(this.path, "utf8");
+      } catch (err) {
+        // Do NOT let the next flush() overwrite a file we never managed to read.
+        this.loadUnreadable = String(err);
+        logger.warn(
+          `[session-store] ${this.path} could NOT be READ (it is not known to be corrupt) — ` +
+            `starting empty for now, and the next persist will move it aside rather than ` +
+            `overwrite it, so nothing in it is lost: ${String(err)}`,
+        );
+        return { sessions: {}, dirty: false };
+      }
+      try {
+        const parsed = this.parse(text);
         // The in-memory state now equals this on-disk file — fingerprint it so
         // a later durability shortcut can verify the file is still in place.
         this.captureDiskFingerprint();
@@ -266,6 +301,33 @@ export class SessionStore {
   private flush(): boolean {
     const payload = JSON.stringify({ v: 2, sessions: this.sessions } satisfies StoreFileV2);
     const tmp = `${this.path}.tmp`;
+    // The store we are about to replace was never read (an I/O failure at load,
+    // not a parse failure), so its contents are unknown and presumed GOOD. Move it
+    // aside before the rename below destroys it. If it cannot even be moved,
+    // REFUSE to persist — the same ruling this method already makes for a failed
+    // write: failing to persist is strictly better than destroying what's there.
+    if (this.loadUnreadable !== undefined) {
+      const aside = `${this.path}.unreadable-${this.now()}`;
+      try {
+        if (existsSync(this.path)) {
+          renameSync(this.path, aside);
+          logger.warn(
+            `[session-store] preserved the unreadable store as ${aside} before writing a fresh one ` +
+              `(it could not be read at startup: ${this.loadUnreadable}). If sessions went missing, ` +
+              `that file holds them.`,
+          );
+        }
+        this.loadUnreadable = undefined; // preserved (or already gone) — safe from here
+      } catch (err) {
+        this.undurable = true;
+        logger.warn(
+          `[session-store] REFUSING to persist: ${this.path} could not be read at startup and cannot ` +
+            `be moved aside either, so overwriting it would destroy sessions that are probably intact ` +
+            `(${String(err)}). State is kept in memory for this run.`,
+        );
+        return false;
+      }
+    }
     try {
       writeFileSync(tmp, payload);
       renameSync(tmp, this.path);

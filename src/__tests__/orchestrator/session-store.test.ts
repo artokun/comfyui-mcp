@@ -17,7 +17,7 @@
 //    v2 file's stable entries are dropped on load.
 
 import { describe, expect, it, afterEach } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionStore, workflowIdentityParts } from "../../orchestrator/session-store.js";
@@ -439,5 +439,75 @@ describe("SessionStore", () => {
         }),
       ).toEqual({ origin: "http://host:8188", uuid: UUID_A });
     });
+  });
+});
+
+// #796's class, with DATA LOSS as the consequence.
+//
+// read() had ONE catch covering both `readFileSync` throwing and `parse` throwing,
+// and returned `{ sessions: {} }` for both. Those are different states:
+//
+//   parse threw        → the bytes really are unusable; nothing recoverable is lost.
+//   readFileSync threw → EACCES / EBUSY / EMFILE. The sessions are INTACT and
+//                        readable later; we just could not open the file this
+//                        instant (antivirus, backup software, another orchestrator
+//                        mid-write — all routine on Windows).
+//
+// Starting empty on the second is silent data loss, because flush() renames over
+// this.path unconditionally: the first new session — or even a touch() — replaces
+// an intact store with a one-entry one, and every prior resume id is gone. The
+// agent forgets every conversation, and nothing says why.
+//
+// This file already argues "failing to persist is strictly better than destroying
+// what's there". That reasoning simply never covered a failed LOAD.
+describe("a store that could not be READ is never overwritten", () => {
+  /** A path that exists and cannot be read: a directory where the file goes.
+   *  existsSync passes, readFileSync throws EISDIR — on every platform. */
+  function unreadableStore(): { dir: string; storePath: string } {
+    const dir = scratchDir();
+    const storePath = join(dir, `panel-sessions-${PORT}.json`);
+    mkdirSync(storePath, { recursive: true });
+    return { dir, storePath };
+  }
+
+  it("starts empty but PRESERVES the file instead of clobbering it", () => {
+    const { dir, storePath } = unreadableStore();
+
+    const store = new SessionStore(PORT, { dir });
+    // It could not read anything, so it has nothing.
+    expect(store.get(sharedAgentKey("claude"))).toBeUndefined();
+
+    // The first persist must move the unreadable original aside, not destroy it.
+    expect(store.set(sharedAgentKey("claude"), "sess-new")).toBe(true);
+
+    const preserved = readdirSync(dir).filter((f) => f.includes(".unreadable-"));
+    expect(preserved, "the unreadable store must be kept, not overwritten").toHaveLength(1);
+    // …and the new store really was written in its place.
+    expect(existsSync(storePath)).toBe(true);
+    expect(readFileSync(storePath, "utf8")).toContain("sess-new");
+  });
+
+  it("preserves only once — later writes are ordinary", () => {
+    const { dir } = unreadableStore();
+    const store = new SessionStore(PORT, { dir });
+
+    store.set(sharedAgentKey("claude"), "sess-1");
+    store.set(sharedAgentKey("claude"), "sess-2");
+    store.set(sharedAgentKey("codex"), "sess-3");
+
+    expect(readdirSync(dir).filter((f) => f.includes(".unreadable-"))).toHaveLength(1);
+  });
+
+  // The other half: a genuinely CORRUPT file is still discarded. Preserving every
+  // parse failure would litter the directory and imply the data was salvageable.
+  it("still starts empty for a corrupt (readable) store, with no preservation copy", () => {
+    const dir = scratchDir();
+    writeFileSync(join(dir, `panel-sessions-${PORT}.json`), "{ this is not json");
+
+    const store = new SessionStore(PORT, { dir });
+    expect(store.get(sharedAgentKey("claude"))).toBeUndefined();
+    store.set(sharedAgentKey("claude"), "sess-1");
+
+    expect(readdirSync(dir).filter((f) => f.includes(".unreadable-"))).toHaveLength(0);
   });
 });
