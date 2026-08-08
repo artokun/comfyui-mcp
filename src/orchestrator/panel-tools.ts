@@ -5219,12 +5219,38 @@ async function resolveWorkflowInput(
   // unverified widget mapping is never presented as a verified one.
   notes?: string[],
 ): Promise<Record<string, unknown>> {
-  if (args.pack) return readPackWorkflow(args.pack as string);
-  if (args.path) return await readWorkflowFromPath(args.path as string);
+  // panel#775 — every caller here (strip / flatten / slice) needs a UI
+  // /litegraph graph, and NONE of them validated the shape. A pack or file
+  // holding API/prompt format therefore reached them raw:
+  //   • panel_strip_workflow CRASHED on ".map of undefined" (no `nodes`);
+  //   • panel_flatten_workflow(apply:true) reported SUCCESS and loaded a
+  //     0-node graph — a false success on a canvas-replacing operation;
+  //   • panel_slice_workflow shares the path and had the same latent bug.
+  // panel_load_workflow already refused this correctly via assertUiWorkflow;
+  // routing the other three through the SAME check makes all four agree
+  // instead of one refusing, one crashing and one lying.
+  //
+  // The LIVE-CANVAS path below is deliberately NOT validated here: it is
+  // built by graph_serialize/graph_get_state and already carries its own
+  // shape handling plus the #384 lossy-fallback notes. Only CALLER-SUPPLIED
+  // sources — which are the ones that can be the wrong format — are checked.
+  if (args.pack) {
+    return assertUiWorkflow(
+      readPackWorkflow(args.pack as string),
+      `Pack "${String(args.pack)}" workflow.json`,
+    );
+  }
+  if (args.path) {
+    return assertUiWorkflow(
+      await readWorkflowFromPath(args.path as string),
+      `Workflow file "${String(args.path)}"`,
+    );
+  }
   if (args.graph != null) {
-    return (typeof args.graph === "string"
-      ? JSON.parse(args.graph as string)
-      : args.graph) as Record<string, unknown>;
+    return assertUiWorkflow(
+      typeof args.graph === "string" ? JSON.parse(args.graph as string) : args.graph,
+      "The supplied `graph`",
+    );
   }
   let reply: unknown;
   try {
