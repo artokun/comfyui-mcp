@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
@@ -32,6 +32,9 @@ const state = {
   cfg: { configPath: defaultConfigPath(), env: defaultEnv() } as ManagerConfig,
   configValues: {} as Record<string, unknown>,
   runtimeValues: {} as Record<string, unknown>,
+  /** Why the on-disk config is not being applied, when it EXISTS and failed to
+   *  load. Undefined = loaded fine, or there is no file. See configLoadError(). */
+  configError: undefined as string | undefined,
 };
 
 function parseEnvValue(raw: string): unknown {
@@ -63,6 +66,7 @@ export const DefaultsManager = {
     state.cfg = { configPath: defaultConfigPath(), env: defaultEnv() };
     state.configValues = {};
     state.runtimeValues = {};
+    state.configError = undefined;
   },
 
   getConfigPath(): string {
@@ -71,6 +75,7 @@ export const DefaultsManager = {
 
   async load(): Promise<void> {
     state.runtimeValues = {};
+    state.configError = undefined;
     if (!existsSync(state.cfg.configPath)) {
       state.configValues = {};
       return;
@@ -85,6 +90,7 @@ export const DefaultsManager = {
           path: state.cfg.configPath,
         });
         state.configValues = {};
+        state.configError = "it is valid JSON but not an object (an array or a bare value)";
       }
     } catch (err) {
       logger.warn("Failed to parse defaults config file, ignoring", {
@@ -92,7 +98,24 @@ export const DefaultsManager = {
         error: err instanceof Error ? err.message : err,
       });
       state.configValues = {};
+      state.configError = err instanceof Error ? err.message : String(err);
     }
+  },
+
+  /**
+   * Why the config file on disk is NOT being applied, if it is not (#796).
+   *
+   * A file that EXISTS and could not be loaded left `configValues` empty with
+   * only a `logger.warn` to show for it. The user wrote that file to change what
+   * gets generated, and the only signal that it stopped applying went to a log
+   * they may have no access to — so their renders quietly used different
+   * settings and `get_defaults action:"get"` reported the built-ins as though
+   * nothing were wrong.
+   *
+   * Undefined means the file was loaded, or there is no file — both fine.
+   */
+  configLoadError(): string | undefined {
+    return state.configError;
   },
 
   /**
@@ -125,6 +148,34 @@ export const DefaultsManager = {
       state.runtimeValues[k] = v;
     }
     if (opts?.persist) {
+      // The file exists and we could not load it, so `state.configValues` is
+      // EMPTY — not because the user has no defaults, but because we could not
+      // read the ones they wrote. Merging into `{}` and writing would replace
+      // their file with just this update, destroying hand-written content whose
+      // only problem may be a trailing comma (#796).
+      //
+      // Unlike the session store, a PARSE failure is preserved here too: that
+      // file is machine-written, this one is typed by a person, so unparseable
+      // means "has a typo in content they care about", not "worthless bytes".
+      if (state.configError !== undefined) {
+        const aside = `${state.cfg.configPath}.unreadable-${Date.now()}`;
+        try {
+          await rename(state.cfg.configPath, aside);
+          logger.warn(
+            `Preserved the unloadable defaults config as ${aside} before writing a fresh one ` +
+              `(it could not be loaded: ${state.configError}). Your previous settings are in that file.`,
+          );
+          state.configError = undefined; // preserved — later writes are ordinary
+        } catch (err) {
+          throw new Error(
+            `Refusing to overwrite ${state.cfg.configPath}: it could not be loaded ` +
+              `(${state.configError}) and could not be moved aside either ` +
+              `(${err instanceof Error ? err.message : String(err)}), so writing would destroy ` +
+              `settings that are probably still there. The values you just set are active for ` +
+              `this session; fix or move that file to persist them.`,
+          );
+        }
+      }
       const merged = { ...state.configValues, ...updates };
       state.configValues = merged;
       const dir = dirname(state.cfg.configPath);

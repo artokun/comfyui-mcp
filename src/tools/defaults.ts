@@ -104,11 +104,30 @@ export function registerDefaultsTools(server: McpServer): void {
         //     the single most common real write this tool performs. A `!value`
         //     guard would refuse exactly that call.
         switch (args.action) {
-          case "get":
+          case "get": {
+            // #796 — a config file that exists and failed to load left this
+            // reporting the built-in/env defaults as though nothing were wrong,
+            // while the user's file sat on disk being ignored. Their renders were
+            // already using different settings; the only signal went to a log.
+            const configError = DefaultsManager.configLoadError?.();
             return json({
               config_path: DefaultsManager.getConfigPath(),
               defaults: DefaultsManager.getAll(),
+              ...(configError
+                ? {
+                    config_not_applied: {
+                      reason: configError,
+                      note:
+                        `The config file at the path above EXISTS but could not be loaded, so NONE of ` +
+                        `its values are in effect — the defaults listed here are the built-in and ` +
+                        `environment ones only. Fix that file (a trailing comma is the usual cause) ` +
+                        `and reload. Until then, persisting a new default moves the unloadable file ` +
+                        `aside rather than overwriting it.`,
+                    },
+                  }
+                : {}),
             });
+          }
           case "set": {
             if (args.values === undefined) {
               throw new Error(
