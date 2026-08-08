@@ -16,8 +16,10 @@ import {
 } from "../utils/errors.js";
 import { comfyuiFetch } from "./fetch.js";
 import {
+  classifyNonJson,
   fetchComfyJson,
   looksLikeHtmlParsedAsJson,
+  NonJsonResponseError,
   readComfyJson,
   redactErrorMessage,
   rethrowWithJsonDiagnosis,
@@ -741,36 +743,56 @@ function settingsVersionDriftError(): ComfyUIError {
   );
 }
 
-/** GET /settings — every stored frontend setting as a raw `id: value` object. */
+/**
+ * GET /settings — every stored frontend setting as a raw `id: value` object.
+ *
+ * An UNREADABLE answer is not an empty one (#796). This used to fall through to
+ * `{}` on any non-JSON body, and `get_defaults action:"get_ui"` renders that as
+ * `count: 0` beside a note saying only explicitly-stored settings appear — i.e.
+ * "you have no settings", asserted from a body nobody could parse. The realistic
+ * trigger is the one this repo keeps meeting: an auth proxy answering with a
+ * sign-in page, or a different service on the host.
+ *
+ * readComfyJson is the vetted path for exactly this — it names the URL and what
+ * actually answered, and scrubs secret-shaped text — and was already imported
+ * here; these two functions simply hand-rolled `res.text()` + `JSON.parse`
+ * instead. `expectShape` also rejects a 200 that parses as JSON but is not a map
+ * (an API gateway's own error envelope), which the old truthiness check accepted
+ * as long as it was any object — including an array.
+ */
 export async function getSettings(): Promise<Record<string, unknown>> {
   requireLocalMode("settings");
   const client = getClient();
   const res = await client.fetchApi("/settings");
   if (res.status === 404) throw settingsVersionDriftError();
-  const text = await res.text();
-  try {
-    const parsed = JSON.parse(text);
-    if (parsed && typeof parsed === "object") {
-      return parsed as Record<string, unknown>;
-    }
-  } catch {
-    // Non-JSON body — fall through to empty.
-  }
-  return {};
+  return await readComfyJson<Record<string, unknown>>(res, {
+    url: "/settings",
+    expectShape: (v) => typeof v === "object" && v !== null && !Array.isArray(v),
+    shapeHint: "the settings map",
+  });
 }
 
 /**
  * GET /settings/{id} — one setting's raw stored value. Returns `undefined` for
  * an unset key: ComfyUI returns an empty body or `null` for unset ids on
  * different versions, and some builds 404 the per-id route, so empty / `null` /
- * 404 / parse-failure are all treated uniformly as "unset (frontend default
- * applies)". Stored values are passed through verbatim — never coerced, so an
- * older frontend's `"true"` string surfaces as a string.
+ * 404 are treated uniformly as "unset (frontend default applies)". Stored values
+ * are passed through verbatim — never coerced, so an older frontend's `"true"`
+ * string surfaces as a string.
+ *
+ * PARSE FAILURE IS NOT IN THAT LIST ANY MORE (#796). Empty, `null` and 404 are
+ * things a ComfyUI build actually SAYS to mean "unset"; a non-empty body that is
+ * not JSON is something else answering — a proxy sign-in page, a gateway error
+ * envelope — and reporting it as unset is a claim nobody observed. It reached the
+ * caller as `value: null, note: "unset (frontend default applies)"`, and worse,
+ * `set_ui` reports `previous: null` from this same call, so a user who then set a
+ * value was told the old one was unset and could not restore it.
  */
 export async function getSetting(id: string): Promise<unknown> {
   requireLocalMode("settings");
   const client = getClient();
-  const res = await client.fetchApi(`/settings/${encodeURIComponent(id)}`);
+  const url = `/settings/${encodeURIComponent(id)}`;
+  const res = await client.fetchApi(url);
   if (res.status === 404) return undefined;
   const text = await res.text();
   if (text.trim() === "") return undefined;
@@ -778,7 +800,18 @@ export async function getSetting(id: string): Promise<unknown> {
     const parsed = JSON.parse(text);
     return parsed === null ? undefined : parsed;
   } catch {
-    return undefined;
+    // Classified rather than swallowed. Same machinery readComfyJson uses, so the
+    // message names the URL and the responder and is secret-scrubbed; it cannot
+    // use readComfyJson directly because an EMPTY body must stay "unset" here and
+    // that helper (correctly) treats an unparseable body as a failure.
+    throw new NonJsonResponseError(
+      classifyNonJson({
+        url,
+        status: res.status,
+        contentType: res.headers.get("content-type") ?? "",
+        body: text,
+      }),
+    );
   }
 }
 
