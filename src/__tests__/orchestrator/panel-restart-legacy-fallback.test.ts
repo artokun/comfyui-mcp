@@ -271,3 +271,71 @@ describe("panel_restart_comfyui — legacy no-endpoint fallback", () => {
     expect(res.content[0].text).toContain("in progress");
   });
 });
+
+// #425 RECURRENCE, reported by the owner against 0.50.27 on a remote RunPod H100:
+// "server-scoped restart_comfyui received HTTP 405 from the Manager reboot routes.
+// The newly installed lee-rife nodes remained unavailable until a provider/host
+// restart."
+//
+// The v0.48.20 fallback is LOCAL-ONLY and correctly does nothing on a remote
+// target — there is no process on this machine to cycle. But the fall-through
+// returned the bare "no reboot endpoint … was NOT restarted", so nothing told
+// them a HOST restart was the actual requirement, or that the nodes they had just
+// installed were not loaded. That silence is what closed my earlier triage of this
+// issue too early.
+describe("#425 remote: the refusal must name what will actually work", () => {
+  beforeEach(() => {
+    hoisted.remoteMode.value = true;
+  });
+
+  it("says the managed local restart does not apply, and why", async () => {
+    const { ctx } = makeCtx(NO_ENDPOINT_REPLY);
+    const text = ((await restartTool().handler({}, ctx)) as ToolResult).content[0].text;
+
+    expect(text).toContain("was NOT restarted"); // the original refusal survives
+    expect(text).toMatch(/REMOTE/);
+    expect(text).toMatch(/no process on this machine to cycle/i);
+  });
+
+  it("explains the 405 as a missing route, not an auth failure", async () => {
+    // The frontend catchall answers every unregistered POST with 405, so a 405 from
+    // a Manager route means the dialect has no reboot API — chasing credentials is
+    // the wrong direction.
+    const { ctx } = makeCtx(NO_ENDPOINT_REPLY);
+    const text = ((await restartTool().handler({}, ctx)) as ToolResult).content[0].text;
+
+    expect(text).toMatch(/not registered on the running Manager/i);
+    expect(text).toMatch(/rather than an auth failure/i);
+  });
+
+  it("names the host restart, including the RunPod cycle, and warns about billing", async () => {
+    const { ctx } = makeCtx(NO_ENDPOINT_REPLY);
+    const text = ((await restartTool().handler({}, ctx)) as ToolResult).content[0].text;
+
+    expect(text).toMatch(/restart the HOST/i);
+    // The note travels inside a JSON envelope, so its quotes arrive ESCAPED —
+    // a regex written around bare quotes never matches (it did not, first try).
+    expect(text).toMatch(/runpod \(action:\\?"stop\\?"\)/);
+    expect(text).toMatch(/runpod \(action:\\?"start\\?"\)/);
+    expect(text).toMatch(/billing/i);
+  });
+
+  it("tells the caller not to report the new nodes as ready", async () => {
+    // The reporter's actual loss: they believed the install had taken effect.
+    const { ctx } = makeCtx(NO_ENDPOINT_REPLY);
+    const text = ((await restartTool().handler({}, ctx)) as ToolResult).content[0].text;
+
+    expect(text).toMatch(/stays unavailable until the ComfyUI process itself restarts/i);
+    expect(text).toMatch(/Do NOT report the newly installed nodes as ready/);
+  });
+
+  it("still does NOT cycle the pod itself", async () => {
+    // stop/resume bills, interrupts everything else on the box, and on a spot
+    // instance may not come back. That is the user's call, not a side effect of
+    // asking to restart ComfyUI.
+    const { ctx } = makeCtx(NO_ENDPOINT_REPLY);
+    await restartTool().handler({}, ctx);
+
+    expect(hoisted.restart).not.toHaveBeenCalled();
+  });
+});

@@ -9516,6 +9516,39 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           // 3.x — #425, panel #253/#266) AND the target is a LOCAL, process-controllable
           // ComfyUI, fall back to the headless managed restart (kill + relaunch). A
           // busy-guard / security refusal is NOT eligible (rebootNoEndpoint excludes them).
+          // #425 RECURRENCE (remote RunPod, 0.50.27). The managed fallback below is
+          // LOCAL-ONLY and correctly does nothing here — there is no process on this
+          // machine to restart. But falling through returned the bare "no reboot
+          // endpoint … was NOT restarted", which is where the owner's report ended:
+          // freshly installed custom nodes stayed unavailable "until a provider/host
+          // restart", and nothing had told them a host restart was the requirement.
+          //
+          // Say what this target actually needs. We do NOT cycle the pod ourselves:
+          // stop/resume bills, interrupts everything else on the box, and on a spot
+          // instance may not come back — that is the user's call, not a side effect
+          // of asking to restart ComfyUI.
+          if (isRemoteMode() && rebootNoEndpoint(res)) {
+            return ok({
+              rebooting: false,
+              ready: false,
+              confirmed_cycle: false,
+              note:
+                `${toolResultText(res)}\n\n` +
+                `This ComfyUI is REMOTE, so the managed restart that covers a local install ` +
+                `does not apply — there is no process on this machine to cycle. A 405 from a ` +
+                `Manager reboot route means that route is not registered on the running ` +
+                `Manager (the frontend catchall answers every unregistered POST with 405), so ` +
+                `it is a Manager version/dialect that exposes no reboot API rather than an ` +
+                `auth failure.\n\n` +
+                `WHAT WILL WORK: restart the HOST. Anything you just installed — custom nodes ` +
+                `especially — stays unavailable until the ComfyUI process itself restarts, and ` +
+                `nothing this MCP can reach will load it. On RunPod, runpod (action:"stop") ` +
+                `then runpod (action:"start") with the pod_id cycles the box (stop ends ` +
+                `billing; start bills again). Otherwise restart the container or provider ` +
+                `however you normally would.\n\n` +
+                `Do NOT report the newly installed nodes as ready: they are not loaded.`,
+            });
+          }
           if (
             !isRemoteMode() &&
             rebootNoEndpoint(res) &&
