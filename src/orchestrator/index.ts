@@ -43,6 +43,7 @@ import { isPanelAutoInstallDisabled } from "../services/panel-installer.js";
 import { SelfRestarter, canSelfRestart } from "../services/self-restart.js";
 import { pairUrlDurability } from "./pair-durability.js";
 import { SessionStore, workflowIdentityParts } from "./session-store.js";
+import { unreachableReason, noPanelTabReason, identityReason } from "./fence-refusal.js";
 import {
   SHARED_SESSION_SCOPE,
   isScopeAddress,
@@ -2774,11 +2775,12 @@ export async function runPanelOrchestrator(): Promise<void> {
       // log to fall back on. One of these is structurally unsatisfiable for a
       // relay-backend session, and that is invisible without this.
       try {
+        // #1077 — an AMBIGUOUS turn is not a dead tab. Both fail canReach, and
+        // calling the first the second sent the caller to reconnect a panel that
+        // was never disconnected. The wording lives in fence-refusal.ts so it is
+        // testable without standing up the orchestrator.
         if (!bridge.canReach(tabId))
-          return {
-            ok: false,
-            reason: `the routed tab (${tabId}) is no longer reachable, so there is nothing to fence`,
-          };
+          return { ok: false, reason: unreachableReason(tabId, bridge.resolveFailure?.(tabId)) };
       } catch (err) {
         return {
           ok: false,
@@ -2786,26 +2788,13 @@ export async function runPanelOrchestrator(): Promise<void> {
         };
       }
       const panelTab = scopeToRealTab(tabId);
-      if (!panelTab)
-        return {
-          ok: false,
-          reason: `${tabId} does not resolve to a live panel tab (a scope address whose tab has gone away)`,
-        };
+      if (!panelTab) return { ok: false, reason: noPanelTabReason(tabId) };
       const origin = bridge.tabServerOrigin(tabId);
       const identity = workflowIdentityParts({ workflowUuid, origin });
       if (!identity)
         return {
           ok: false,
-          reason: !origin
-            ? // The relay case, and the one worth naming precisely: this is not
-              // transient and no amount of refreshing fixes it.
-              `this tab's connection carries no server-observed Origin, and the workflow ` +
-              `identity is bound to one — so the fence can never be adopted for it. This is ` +
-              `structural, not transient: refreshing the tab will not change it. Relay-backend ` +
-              `connections (COMFYUI_MCP_TUNNEL_BACKEND=relay) are the known case, because the ` +
-              `relay protocol does not forward the browser's handshake Origin`
-            : `the workflow identity did not validate (uuid ${String(workflowUuid)} against ` +
-              `origin ${origin}) — a malformed uuid, or one bound to a different origin`,
+          reason: identityReason(tabId, origin, workflowUuid, bridge.resolveFailure?.(tabId)),
         };
       tabCommandWorkflowUuid.set(panelTab, identity.uuid);
       // #716/#884 — an explicit, VALIDATED open/re-pin from the shared agent is

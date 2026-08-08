@@ -18,6 +18,7 @@
 
 import { describe, expect, it } from "vitest";
 import { UiBridge } from "../../services/ui-bridge.js";
+import { unreachableReason, identityReason } from "../../orchestrator/fence-refusal.js";
 import { WorkflowTargetStore } from "../../services/workflow-target-store.js";
 import {
   buildPanelToolDefs,
@@ -185,5 +186,68 @@ describe("the refusal message names the gate and matches the remedy to it", () =
 
     expect(text).toMatch(/this bridge could not say which/);
     expect(text).toMatch(/Ask the user to manually refresh/);
+  });
+});
+
+// #1077 follow-up — a defect in the diagnostic added for #1077 itself.
+//
+// `canReach()` and `tabServerOrigin()` BOTH swallow whatever resolveTarget
+// throws, so a turn issued from several workflows at once (routing ambiguity,
+// #1001) reaches the validator looking identical to (a) a dead tab and (b) a
+// connection carrying no server-observed Origin.
+//
+// (b) is the damaging one: its remedy says the failure is STRUCTURAL, that
+// refreshing cannot help, and that the relay backend is the known cause. For an
+// ambiguous turn all three are wrong — the tabs are connected, the Origin
+// exists, and it clears on the next single-origin message.
+//
+// These drive the REAL reason builders. An earlier version of this block built a
+// fake bridge and asserted it returned what the fake was told to return, which
+// would have passed with the logic deleted.
+describe("the refusal reasons distinguish an AMBIGUOUS turn", () => {
+  const TAB = "orchestrator::claude";
+  const UUID = "621187be-2fa9-49cd-b6af-7402895c89b9";
+
+  it("gate 1: names the ambiguity instead of claiming the tab is gone", () => {
+    const r = unreachableReason(TAB, "ambiguous");
+
+    expect(r).toMatch(/SEVERAL workflows at once/);
+    expect(r).toMatch(/tabs are connected and fine/);
+    expect(r).toMatch(/Do NOT reconnect or refresh/);
+    expect(r).not.toMatch(/no longer reachable/);
+  });
+
+  it("gate 1: still reports a genuinely dead tab as unreachable", () => {
+    const r = unreachableReason(TAB, "unresolved");
+
+    expect(r).toMatch(/no longer reachable/);
+    expect(r).not.toMatch(/SEVERAL workflows/);
+  });
+
+  // THE ONE THAT MATTERS. Ambiguity also yields no origin, so order decides
+  // whether it inherits the relay story.
+  it("gate 3: an ambiguous turn does NOT borrow the structural relay remedy", () => {
+    const r = identityReason(TAB, undefined, UUID, "ambiguous");
+
+    expect(r).toMatch(/SEVERAL workflows at once/);
+    expect(r).not.toMatch(/structural/);
+    expect(r).not.toMatch(/relay/i);
+    expect(r).not.toMatch(/refreshing the tab will not change it/);
+  });
+
+  it("gate 3: a genuine no-Origin connection KEEPS the structural remedy", () => {
+    const r = identityReason(TAB, undefined, UUID, undefined);
+
+    expect(r).toMatch(/no server-observed Origin/);
+    expect(r).toMatch(/structural, not transient/);
+    expect(r).toMatch(/COMFYUI_MCP_TUNNEL_BACKEND=relay/);
+  });
+
+  it("gate 3: an origin that IS present reports a validation failure, not absence", () => {
+    const r = identityReason(TAB, "https://x.trycloudflare.com", "not-a-uuid", undefined);
+
+    expect(r).toMatch(/did not validate/);
+    expect(r).toMatch(/not-a-uuid/);
+    expect(r).not.toMatch(/no server-observed Origin/);
   });
 });

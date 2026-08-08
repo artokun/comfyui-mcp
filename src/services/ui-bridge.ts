@@ -2384,6 +2384,31 @@ export class UiBridge {
     }
   }
 
+  /**
+   * WHY `tabId` does not resolve, or undefined when it does (#1077).
+   *
+   * `canReach()` and `tabServerOrigin()` both swallow the throw, so a turn whose
+   * target is AMBIGUOUS (issued from several workflows at once, #1001) is
+   * indistinguishable from a dead tab or a connection with no Origin. The fence
+   * validator reads exactly those two signals, so an ambiguous turn was reported
+   * as "the routed tab is no longer reachable" — or, worse, as the structural
+   * no-Origin case, whose remedy tells the user that refreshing cannot help and
+   * to stop using the relay backend. Every part of that is wrong here: the tabs
+   * are connected, nothing is structural, and it clears on the next
+   * single-origin message.
+   *
+   * The distinction is available and typed — resolveTarget marks the ambiguity
+   * refusal — it was simply being discarded by the boolean-returning callers.
+   */
+  resolveFailure(tabId: string): "ambiguous" | "unresolved" | undefined {
+    try {
+      this.resolveTarget(tabId);
+      return undefined;
+    } catch (err) {
+      return isRoutingAmbiguity(err) ? "ambiguous" : "unresolved";
+    }
+  }
+
   /** The LIVE tab id `tabId` currently resolves to (exact id, unambiguous
    *  prefix, or the same-socket migration-alias chain — the SAME acceptance
    *  {@link canReach}/resolveTarget use), or undefined when nothing resolves.
