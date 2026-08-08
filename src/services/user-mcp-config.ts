@@ -22,18 +22,64 @@ export function claudeJsonPath(): string {
   return process.env.COMFYUI_MCP_CLAUDE_JSON || join(homedir(), ".claude.json");
 }
 
-function readClaudeJson(): Record<string, unknown> {
+/**
+ * Load the user's Claude config, distinguishing ABSENT from UNREADABLE (#796).
+ *
+ * `{}` is the right answer for a file that is not there. It is the WRONG answer
+ * for one that exists and could not be read — and here that difference destroys
+ * data, because every mutation below is a read-modify-WRITE:
+ *
+ *     const cfg = readClaudeJson();   // {} after a failed parse — the OLD shape
+ *     cfg.mcpServers = servers;
+ *     writeFileSync(claudeJsonPath(), JSON.stringify(cfg, null, 2));
+ *
+ * `~/.claude.json` is the user's entire Claude Code configuration — every MCP
+ * server, plus whatever secrets other tools have written into `headers`/`env`
+ * (this file writes them there itself). One hand-edit with a trailing comma, or
+ * one transient read error, and adding a single MCP server replaced all of it.
+ *
+ * It is also NOT OUR FILE, which decides the remedy: unlike our own configs we do
+ * not move it aside, because another program expects it at that exact path.
+ * Refusing to write is the only safe move.
+ */
+function loadClaudeJson(): { cfg: Record<string, unknown>; unreadable?: string } {
   const p = claudeJsonPath();
-  if (!existsSync(p)) return {};
+  if (!existsSync(p)) return { cfg: {} };
   try {
     const parsed = JSON.parse(readFileSync(p, "utf-8")) as unknown;
-    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return { cfg: parsed as Record<string, unknown> };
+    }
+    return { cfg: {}, unreadable: "it is valid JSON but not an object" };
   } catch (err) {
     logger.warn(
       `[user-mcp] could not parse ${p}: ${err instanceof Error ? err.message : String(err)}`,
     );
-    return {};
+    return { cfg: {}, unreadable: err instanceof Error ? err.message : String(err) };
   }
+}
+
+/** The lenient read, for QUERIES. An unreadable config reads as "no servers",
+ *  which is a wrong answer but not a destructive one — see readUserMcpServers. */
+function readClaudeJson(): Record<string, unknown> {
+  return loadClaudeJson().cfg;
+}
+
+/**
+ * The read that precedes a WRITE. Refuses rather than handing back an empty
+ * object that the caller would then persist over the user's real config.
+ */
+function readClaudeJsonForMutation(): Record<string, unknown> {
+  const { cfg, unreadable } = loadClaudeJson();
+  if (unreadable !== undefined) {
+    throw new Error(
+      `Refusing to modify ${claudeJsonPath()}: it exists but could not be read (${unreadable}). ` +
+        `Writing would replace your whole Claude configuration — every MCP server, and any ` +
+        `credentials stored in a server's headers/env — with just this change. Fix that file ` +
+        `(a trailing comma is the usual cause) and try again; nothing has been changed.`,
+    );
+  }
+  return cfg;
 }
 
 function serversObject(cfg: Record<string, unknown>): Record<string, McpServerConfig> {
@@ -79,7 +125,7 @@ export function addUserMcpServer(name: string, config: McpServerConfig): void {
   if (isConflictingServer(name, config)) {
     throw new Error(`Refusing to add "${name}" — it conflicts with the panel's own comfyui server.`);
   }
-  const cfg = readClaudeJson();
+  const cfg = readClaudeJsonForMutation();
   const servers = serversObject(cfg);
   servers[name] = config;
   cfg.mcpServers = servers;
@@ -104,7 +150,7 @@ export interface McpSecretTarget {
  * straight from the secure input; it is never logged or returned anywhere.
  */
 export function setUserMcpServerSecret(target: McpSecretTarget, value: string): void {
-  const cfg = readClaudeJson();
+  const cfg = readClaudeJsonForMutation();
   const servers = serversObject(cfg);
   const server = servers[target.server];
   if (!server || typeof server !== "object") {
@@ -122,7 +168,7 @@ export function setUserMcpServerSecret(target: McpSecretTarget, value: string): 
 
 /** Remove an MCP server from the user's config. Returns false if absent. */
 export function removeUserMcpServer(name: string): boolean {
-  const cfg = readClaudeJson();
+  const cfg = readClaudeJsonForMutation();
   const servers = serversObject(cfg);
   if (!(name in servers)) return false;
   delete servers[name];
