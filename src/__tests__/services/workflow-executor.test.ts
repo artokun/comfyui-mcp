@@ -357,3 +357,31 @@ describe("enqueueWorkflow UI metadata", () => {
     );
   });
 });
+
+// A non-object extra_pnginfo cannot be merged into, and spreading it would
+// DISCARD whatever the caller put there. Attaching UI metadata is an
+// enhancement; dropping a field the caller set would be a regression.
+describe("enqueueWorkflow UI metadata — a field we cannot merge into is left alone", () => {
+  it("does not drop an ARRAY extra_pnginfo to make room for the workflow", async () => {
+    const extraData = { extra_pnginfo: ["caller", "data"], client_id: "c1" };
+
+    await enqueueWorkflow(
+      { "1": { class_type: "ClaudeNode", inputs: { prompt: "hi", seed: 7 } } },
+      { disable_random_seed: true, extra_data: extraData },
+    );
+
+    expect(enqueuedExtraData()).toEqual(extraData);
+    expect(enqueuedExtraData()!.extra_pnginfo).toEqual(["caller", "data"]);
+  });
+
+  it("does not drop a STRING extra_pnginfo either", async () => {
+    const extraData = { extra_pnginfo: "opaque" };
+
+    await enqueueWorkflow(
+      { "1": { class_type: "ClaudeNode", inputs: { prompt: "hi", seed: 7 } } },
+      { disable_random_seed: true, extra_data: extraData },
+    );
+
+    expect(enqueuedExtraData()).toEqual(extraData);
+  });
+});

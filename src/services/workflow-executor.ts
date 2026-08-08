@@ -138,6 +138,17 @@ async function withWorkflowMetadata(
   workflow: WorkflowJSON,
   extraData?: Record<string, unknown>,
 ): Promise<Record<string, unknown> | undefined> {
+  // Present but not an object (an array, a string) — we cannot merge into it,
+  // and spreading it would DISCARD whatever the caller put there. Attaching this
+  // metadata is an enhancement; silently dropping a field the caller set would be
+  // a regression, so leave the request exactly as it came.
+  if (extraData?.extra_pnginfo !== undefined && !isRecord(extraData.extra_pnginfo)) {
+    logger.debug("extra_pnginfo is not an object; leaving it untouched (no UI metadata attached)", {
+      type: Array.isArray(extraData.extra_pnginfo) ? "array" : typeof extraData.extra_pnginfo,
+    });
+    return extraData;
+  }
+
   const extraPngInfo = isRecord(extraData?.extra_pnginfo)
     ? extraData.extra_pnginfo
     : {};
