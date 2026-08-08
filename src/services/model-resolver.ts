@@ -1231,6 +1231,106 @@ export interface LandedModelVerification {
 const LIVE_VISIBILITY_ATTEMPTS = 3;
 const LIVE_VISIBILITY_RETRY_MS = 1000;
 
+/** What asking the LIVE server whether it can see a Manager-dispatched model
+ *  established. Three states, because "the server did not list it" and "the
+ *  server could not be asked" are different facts (#796). */
+export type ManagerVisibility = "visible" | "not-listed" | "unknown";
+
+/**
+ * Ask the CONNECTED server whether it now lists a model a Manager dispatch was
+ * supposed to fetch (#1086).
+ *
+ * `verifyLandedModel` cannot answer this: it stats the local filesystem first and
+ * returns `unknown` outright in remote mode, because there is no local file to
+ * stat — which is exactly the case a Manager dispatch creates. But the LISTING
+ * question is answerable remotely, since `liveListingHasEntry` asks the server.
+ *
+ * A reporter lost a multi-GB model to this. ComfyUI-Manager picks its own
+ * destination root and does not necessarily honour `extra_model_paths`, so their
+ * file landed in the install's base models directory — an ephemeral 20GB overlay
+ * — while their ComfyUI read from a 100GB volume. Nothing contradicted the
+ * "download complete" until a pod restart made the file simply absent.
+ *
+ * "not-listed" IS NOT FAILURE, and callers must not render it as one. A Manager
+ * dispatch returns when the task is ACCEPTED, so a large file is still arriving
+ * for minutes afterwards, and "not there yet" and "landed somewhere the server
+ * cannot read" are indistinguishable from here. What this does establish is the
+ * difference between those two and a CONFIRMED presence, which is the thing the
+ * caller previously had no way to learn except by asking by hand.
+ *
+ * Never throws: a verification hiccup must not turn a transfer into an error.
+ */
+export async function verifyManagerVisibility(
+  targetSubfolder: string,
+  filename: string,
+  opts?: {
+    attempts?: number;
+    retryMs?: number;
+    listedBefore?: boolean;
+    /** The listing probe, injectable so this is testable without a live server.
+     *  Defaults to liveListingHasEntry — which a test CANNOT intercept by mocking
+     *  the module, because the call below resolves a module-local binding rather
+     *  than going through the namespace object. A first draft of the tests for
+     *  this function silently queried the developer's real ComfyUI instead. */
+    probe?: (subfolder: string, name: string) => Promise<boolean | undefined>;
+  },
+): Promise<{ visibility: ManagerVisibility; note: string }> {
+  const probe = opts?.probe ?? liveListingHasEntry;
+  // It was ALREADY listed before the download, so the listing cannot attribute
+  // what it sees to this dispatch — a pre-existing file of the same name would
+  // read as a successful landing (the same trap verifyLandedModel's `listedBefore`
+  // guards on the local path).
+  if (opts?.listedBefore === true) {
+    return {
+      visibility: "unknown",
+      note:
+        `The connected ComfyUI already listed "${filename}" in ${targetSubfolder} BEFORE this ` +
+        `dispatch, so its presence now does not establish that this download landed — it may ` +
+        `still be the older file. Compare the file size or hash on the server if that matters.`,
+    };
+  }
+  const attempts = Math.max(1, opts?.attempts ?? LIVE_VISIBILITY_ATTEMPTS);
+  const retryMs = opts?.retryMs ?? LIVE_VISIBILITY_RETRY_MS;
+  let asked = false;
+  for (let i = 0; i < attempts; i++) {
+    let has: boolean | undefined;
+    try {
+      has = await probe(targetSubfolder, filename);
+    } catch {
+      has = undefined; // never throws outward — see the docblock
+    }
+    if (has === true) {
+      return {
+        visibility: "visible",
+        note:
+          `The connected ComfyUI now lists ${targetSubfolder}/${filename}, so the dispatch ` +
+          `landed somewhere it reads.`,
+      };
+    }
+    if (has === false) asked = true;
+    if (i < attempts - 1) await new Promise((r) => setTimeout(r, retryMs));
+  }
+  if (!asked) {
+    return {
+      visibility: "unknown",
+      note:
+        `The connected ComfyUI could not be asked whether it lists ${targetSubfolder}/${filename}, ` +
+        `so nothing about this dispatch's destination was established.`,
+    };
+  }
+  return {
+    visibility: "not-listed",
+    note:
+      `The connected ComfyUI does NOT list ${targetSubfolder}/${filename}. That is not proof of ` +
+      `failure — a Manager dispatch returns when the task is ACCEPTED, so a large file may still ` +
+      `be arriving. But if it does not appear shortly, the file landed somewhere this server does ` +
+      `not read: ComfyUI-Manager picks its own destination root and does not necessarily honour ` +
+      `extra_model_paths, which on a container is commonly an ephemeral overlay that loses the ` +
+      `file on restart. Re-check with list_local_models, and check free space on the install's ` +
+      `own models directory rather than your configured model root.`,
+  };
+}
+
 /**
  * Confirm, AFTER a download lands, that the bytes are (a) really on disk and
  * (b) somewhere the LIVE server reads from — then report the path we actually

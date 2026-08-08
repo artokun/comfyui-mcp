@@ -6,6 +6,7 @@ import {
   listLocalModels,
   listLocalModelsWithCoverage,
   currentLiveModelsRoot,
+  verifyManagerVisibility,
   MODEL_SUBDIRS,
 } from "../services/model-resolver.js";
 import type { ModelListingCoverage } from "../services/model-resolver.js";
@@ -702,9 +703,25 @@ async function downloadAction(args: {
           const placement = describePlacement(job, {
             liveModelsDir: await currentLiveModelsRoot(),
           });
+          // #1086 — ASK the server instead of telling the caller to. The Manager
+          // branch could only ever say "confirm with list_local_models yourself",
+          // and a reporter who did not lost a multi-GB model to an ephemeral
+          // overlay. The listing question IS answerable remotely, so answer it.
+          // "not-listed" is deliberately not rendered as failure: the dispatch
+          // returns on ACCEPTANCE, so a large file may still be arriving.
+          const managerSeen = job.viaManager
+            ? await verifyManagerVisibility(
+                job.target_subfolder,
+                job.filename ?? (job.path ?? "").split(/[\\/]/).pop() ?? "",
+                { attempts: 1 },
+              ).catch(() => undefined)
+            : undefined;
           const text = job.viaManager
             ? `Download DISPATCHED to the remote ComfyUI via ComfyUI-Manager (server-side fetch):\n${job.path}\n\n` +
-              `NOTE: ${placement.warning}`
+              (managerSeen?.visibility === "visible"
+                ? `CONFIRMED: ${managerSeen.note}`
+                : `NOTE: ${placement.warning}` +
+                  (managerSeen ? `\n\n${managerSeen.note}` : ""))
             : placement.confirmed
               ? `Model downloaded successfully to${placement.pathQualifier}:\n${job.path}`
               : placement.wrongPlace
