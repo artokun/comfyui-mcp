@@ -2580,6 +2580,10 @@ export type WorkflowFenceRebind =
    *  validator's three gates tripped when the bridge can tell us (#1077); absent
    *  on an older bridge, which is why the remedy below must still stand alone. */
   | { status: "rejected"; uuid: string; before: FenceRead; refusalReason?: string }
+  /** Our read was refused, but the fence CHANGED underneath us while we asked —
+   *  the panel's mismatch re-hello re-advertised its identity and the hello
+   *  handler adopted it (#1043/#932). The session is bound again, just not by us. */
+  | { status: "healed_by_panel"; uuid: string; before: FenceRead }
   /** The adoption itself THREW. Distinct from `rejected` (codex gate): a refusal
    *  proves the old fence is untouched, whereas a throw can land on either side
    *  of the write, so whether the fence changed is UNKNOWN and must not be
@@ -2670,6 +2674,38 @@ function corroborateActiveForFence(
  * NEVER throws and NEVER fabricates: every failure mode gets its own status, and
  * the caller — not this function — decides what that means for its own report.
  */
+/**
+ * A refused read may have REPAIRED the fence on its way out (#1043/#932).
+ *
+ * The panel answers a workflow-instance mismatch by re-advertising its current
+ * identity (noteWorkflowInstanceMismatch → sendHello), and the orchestrator's
+ * hello handler adopts a validated identity into the tab's command stamp. That
+ * budget is per-identity and RESETS when the live uuid changes — so right after a
+ * workflow_new, the very refusal we just collected is what buys the re-hello that
+ * fixes the fence.
+ *
+ * It lands asynchronously, though, so reporting the reading we took BEFORE the
+ * call describes a state that may no longer exist by the time the caller sees it:
+ * "NOT recovered" about a session that is, by then, fine. Wait one settle and
+ * re-read before saying so.
+ *
+ * Only claims a repair when BOTH reads are known and the uuid actually CHANGED —
+ * an unreadable fence proves nothing, and #770/#803 exist precisely because a
+ * failed read used to render as a definite answer.
+ */
+async function unreadableOrHealed(
+  ctx: PanelToolCtx,
+  before: FenceRead,
+  detail: string,
+): Promise<WorkflowFenceRebind> {
+  await sleep(retrySettleMs());
+  const now = currentWorkflowFence(ctx);
+  if (before.known && now.known && now.uuid && now.uuid !== before.uuid) {
+    return { status: "healed_by_panel", uuid: now.uuid, before };
+  }
+  return { status: "unreadable", before, detail };
+}
+
 async function rebindWorkflowFence(ctx: PanelToolCtx): Promise<WorkflowFenceRebind> {
   const tabAtStart = ctx.tabId;
   let before = currentWorkflowFence(ctx);
@@ -2687,23 +2723,19 @@ async function rebindWorkflowFence(ctx: PanelToolCtx): Promise<WorkflowFenceRebi
     const res = await ctx.call({ cmd: "workflow_list" }, 6000);
     syncFenceToCurrentTab();
     if (res?.isError) {
-      return { status: "unreadable", before, detail: toolResultText(res) };
+      return await unreadableOrHealed(ctx, before, toolResultText(res));
     }
     parsed = parseToolResultJson(res);
   } catch (err) {
     syncFenceToCurrentTab();
-    return {
-      status: "unreadable",
+    return await unreadableOrHealed(
+      ctx,
       before,
-      detail: err instanceof Error ? err.message : String(err ?? "unknown error"),
-    };
+      err instanceof Error ? err.message : String(err ?? "unknown error"),
+    );
   }
   if (!parsed) {
-    return {
-      status: "unreadable",
-      before,
-      detail: "the panel's workflow_list reply was not readable as JSON",
-    };
+    return await unreadableOrHealed(ctx, before, "the panel's workflow_list reply was not readable as JSON");
   }
   // CORROBORATE before adopting. The uuid must come from a record the panel's own
   // open-workflow list agrees is the live canvas — otherwise a stale or mixed
@@ -2901,6 +2933,21 @@ function describeFenceRebind(
             : `\n\nWHAT TO DO if graph tools are still failing: call this once more. If the ` +
               `mismatch SURVIVES that repeat, this session and the panel agree on the target ` +
               `and the disagreement is inside the panel — ${RELOAD_TAB_REMEDY}`),
+      };
+    case "healed_by_panel":
+      // Reported as BOUND, and the provenance said out loud: the stamp came from
+      // the panel's own re-advertised identity through the hello handler's
+      // validator — the same path that sets it normally — not from a reading we
+      // took. Calling this "not recovered" because OUR read failed would report a
+      // wedge that no longer exists.
+      return {
+        binding: "bound",
+        note:
+          ` The read was refused, but this session's fence CHANGED while it ran: the panel ` +
+          `re-advertised its live identity (${r.uuid}) and it was adopted, replacing ` +
+          `${r.before.known && r.before.uuid ? r.before.uuid : "the previous stamp"}. Graph tools ` +
+          `should work now — the repair came from the panel, not from this call, so treat the ` +
+          `next graph command as the confirmation.`,
       };
     case "rejected":
       return {

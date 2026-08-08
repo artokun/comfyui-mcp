@@ -340,3 +340,109 @@ describe("the reopen advice names the case it does not cover", () => {
     expect(text).toMatch(/would abandon it/);
   });
 });
+
+// #1043/#932 — the refused read may have REPAIRED the fence on its way out.
+//
+// The panel answers a workflow-instance mismatch by re-advertising its identity
+// (noteWorkflowInstanceMismatch → sendHello), and the orchestrator's hello
+// handler adopts a validated identity into the tab's stamp. That budget is
+// per-identity and RESETS when the live uuid changes — so right after a
+// workflow_new, the very refusal we just collected is what buys the re-hello
+// that fixes the fence.
+//
+// It lands asynchronously, so reporting the reading taken BEFORE the call
+// described a state that no longer existed by the time the caller read it:
+// "NOT recovered" about a session that was, by then, fine.
+describe("a fence repaired by the panel mid-call is not reported as a failure", () => {
+  const setTarget = () => buildPanelToolDefs().find((d) => d.name === "panel_set_workflow_target")!;
+  const HEALED = "33333333-4444-4555-8666-777777777777";
+
+  /** Every read is refused; `fenceNow` models the stamp the hello handler wrote
+   *  while the refusal was in flight. */
+  function wedgedBridge(fenceNow: () => { known: boolean; uuid?: string }) {
+    return {
+      send: async () => {
+        throw new Error("workflow instance mismatch: this command targets a different workflow");
+      },
+      push: () => 1,
+      canReach: () => true,
+      isHeadless: () => false,
+      tabs: () => [{ tab_id: "tab-1", title: "A", connected_at: 0 }],
+      resolveActiveTabId: () => "tab-1",
+      workflowUuidFor: () => fenceNow(),
+      refreshWorkflowUuid: () => false,
+      tabGraphMutationCapability: () => ({ known: true, canMutate: true }),
+    } as unknown as PanelToolCtx["bridge"];
+  }
+
+  const textOf = (res: { content: Array<{ text?: string }> }): string => res.content[0]!.text ?? "";
+
+  it("reports BOUND when the stamp changed while the read was refused", async () => {
+    let calls = 0;
+    // First read (before): the stale fence. Later reads: the panel's new one.
+    const bridge = wedgedBridge(() => (++calls <= 1 ? { known: true, uuid: PRIOR_UUID } : { known: true, uuid: HEALED }));
+
+    const res = await setTarget().handler(
+      { mode: "current" },
+      makePanelToolCtx(bridge, "tab-1", new WorkflowTargetStore()),
+    );
+    const text = textOf(res);
+
+    expect(text).toMatch(/fence CHANGED while it ran/);
+    expect(text).toContain(HEALED);
+    // It must NOT keep telling the user they are wedged.
+    expect(text).not.toMatch(/Could NOT read the live canvas identity/);
+    // …and it says where the repair came from, so the claim is not overstated.
+    expect(text).toMatch(/repair came from the panel, not from this call/);
+  });
+
+  it("still reports UNREADABLE when the stamp did not change", async () => {
+    const bridge = wedgedBridge(() => ({ known: true, uuid: PRIOR_UUID }));
+
+    const text = textOf(
+      await setTarget().handler(
+        { mode: "current" },
+        makePanelToolCtx(bridge, "tab-1", new WorkflowTargetStore()),
+      ),
+    );
+
+    expect(text).toMatch(/Could NOT read the live canvas identity/);
+    expect(text).not.toMatch(/fence CHANGED while it ran/);
+  });
+
+  // The guard that keeps this honest: an UNREADABLE fence is not evidence of a
+  // repair. #770/#803 exist because a failed read used to render as a definite
+  // answer, and claiming "healed" from one would be the same fold.
+  it("never claims a repair from an unreadable fence", async () => {
+    const bridge = wedgedBridge(() => ({ known: false }));
+
+    const text = textOf(
+      await setTarget().handler(
+        { mode: "current" },
+        makePanelToolCtx(bridge, "tab-1", new WorkflowTargetStore()),
+      ),
+    );
+
+    expect(text).not.toMatch(/fence CHANGED while it ran/);
+  });
+
+  // The case that actually EXERCISES the `known` guards. The one above passes
+  // even without them (both reads are undefined, so the comparison is false
+  // either way) — a mutation dropping the guards killed nothing until this
+  // existed. Here the BEFORE read failed and the AFTER read succeeds: the uuids
+  // differ, so a bare comparison would announce a repair from a transition
+  // nobody observed.
+  it("never claims a repair when the BEFORE read failed but the after one worked", async () => {
+    let calls = 0;
+    const bridge = wedgedBridge(() => (++calls <= 1 ? { known: false } : { known: true, uuid: HEALED }));
+
+    const text = textOf(
+      await setTarget().handler(
+        { mode: "current" },
+        makePanelToolCtx(bridge, "tab-1", new WorkflowTargetStore()),
+      ),
+    );
+
+    expect(text).not.toMatch(/fence CHANGED while it ran/);
+  });
+});
