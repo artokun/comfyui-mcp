@@ -2239,7 +2239,6 @@ async function downloadModelViaManagerRemote(
     authHeaders: localAuthHeadersFor(url, auth, wasHfUrl),
   });
   if (signal?.aborted) throw new DOMException("The download was cancelled.", "AbortError");
-  let authGateWarning = "";
   if (probe.verdict === "non-model") {
     const what =
       probe.kind === "html"
@@ -2260,16 +2259,31 @@ async function downloadModelViaManagerRemote(
         `token is applied and the payload is validated on disk`
       : `configure the credential on the ComfyUI host, or download to a LOCAL ComfyUI where the ` +
         `credential is applied and the payload is validated on disk`;
-    authGateWarning =
-      ` WARNING: this URL is AUTHENTICATION-GATED — an unauthenticated fetch (exactly what ` +
-      `ComfyUI-Manager performs server-side, since it cannot carry the MCP's auth headers) ` +
-      `returns ${what}, while the SAME URL fetched WITH the configured credential returns a ` +
-      `real model. ComfyUI-Manager will therefore almost certainly save that auth/error page ` +
-      `under "${resolvedFilename}" as a CORRUPT model (it fails at load time, e.g. "header too ` +
-      `large" / "Expecting value") — do NOT treat it as a real model until verified. To ` +
-      `download it, ${remediation}.`;
+    // #473 — REFUSE, do not dispatch. The probe has PROVEN the gate: the same URL
+    // returns a login/error page unauthenticated and a real model with the
+    // credential, and Manager fetches server-side without our headers. Dispatching
+    // anyway is knowingly writing a corrupt file under the caller's chosen
+    // filename — it then LISTS as a model and fails much later inside a loader
+    // ("header too large" / "Expecting value"), which is how this issue was
+    // reported three times.
+    //
+    // Owner's call (2026-08-08) after weighing the false-refusal risk: a ComfyUI
+    // HOST that carries its OWN token would have succeeded, and is now blocked.
+    // That case is speculative, has two documented ways out (below), and fails
+    // LOUDLY at the point of the request; the corrupt-file case is real,
+    // recurring, and fails silently hours later on someone else's canvas.
     logger.warn(
-      "Remote model dispatch is authentication-gated; ComfyUI-Manager will fetch it unauthenticated",
+      "Refusing an authentication-gated model dispatch to ComfyUI-Manager (it cannot carry our credentials)",
+      { url: redactUrlForLogs(dispatchUrl, sensitiveParams), filename: resolvedFilename },
+    );
+    throw new ModelError(
+      `Refusing to dispatch "${resolvedFilename}" to ComfyUI-Manager: this URL is ` +
+        `AUTHENTICATION-GATED. An unauthenticated fetch returns ${what}, while the SAME URL ` +
+        `fetched WITH the configured credential returns a real model — and ComfyUI-Manager ` +
+        `fetches server-side and cannot carry this MCP's auth headers. It would therefore save ` +
+        `that auth/error page under "${resolvedFilename}" as a CORRUPT model, which lists ` +
+        `normally and only fails later at load time ("header too large" / "Expecting value"). ` +
+        `NOTHING was downloaded and nothing was written. To download it, ${remediation}.`,
       { url: redactUrlForLogs(dispatchUrl, sensitiveParams), filename: resolvedFilename },
     );
   }
@@ -2316,7 +2330,7 @@ async function downloadModelViaManagerRemote(
       "local models directory to stream into (no COMFYUI_PATH, no saved workspace, and the " +
       "running server's launch arguments did not identify one). That is a routing fallback, NOT " +
       "a claim that the server is remote; set COMFYUI_PATH to stream directly instead";
-  return `${normalizedSubfolder}/${resolvedFilename} (${routeNote} — download continues server-side. ${managerDestinationCaveat()})${authGateWarning}${authWarning}`;
+  return `${normalizedSubfolder}/${resolvedFilename} (${routeNote} — download continues server-side. ${managerDestinationCaveat()})${authWarning}`;
 }
 
 /**
