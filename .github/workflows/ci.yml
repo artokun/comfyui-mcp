@@ -39,6 +39,15 @@ jobs:
       # becomes real once the matrix actually varies the OS — comfyui-mcp-bi9.)
       - run: npm run check:vocabulary
 
+      # #796 — the "could not determine" -> "determined not" collapse. A caught
+      # failure answered with [] / null / false tells the caller a negative was
+      # OBSERVED, and the caller then reports it to a user as fact. Twenty-seven
+      # instances were fixed by hand before this gate existed; each had tests, and
+      # each tested a real negative rather than a failed observation. Ratchets down
+      # only — a site is cleared by fixing it or by a reasoned `unknown-ok:` at the
+      # line, never by appending to the baseline.
+      - run: npm run check:unknown-collapse
+
       # docs/design/tool-vocabulary.json is what comfyui-mcp-panel VENDORS to
       # validate its callTool("…") string literals. If the vocabulary changes here
       # and the artefact does not, the panel keeps checking against the old surface

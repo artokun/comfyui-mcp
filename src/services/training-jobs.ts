@@ -1774,6 +1774,8 @@ export async function cancelJob(id: string, deps: TrainingJobDeps = {}): Promise
     if (!job.containerName) return job;
     const probe = deps.containerRunning ?? defaultContainerProbe;
     const cfgPath = jobProbeConfigPath(job);
+    // unknown-ok: null is the UNKNOWN state here, deliberately distinct from a
+    // probed `false`, and the branch below acts on that distinction.
     const alive = await probe(job.containerName, cfgPath).catch(() => null);
     // Only a definitive "gone" short-circuits; unknown (daemon temporarily
     // unreachable) still attempts the stop so a live container can't keep

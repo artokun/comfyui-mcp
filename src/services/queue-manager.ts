@@ -367,6 +367,9 @@ async function waitForRunningCleared(
   let anyPollFailed = false;
   while (Date.now() - start < timeoutMs) {
     await sleep(1500);
+    // unknown-ok: a failed poll is recorded as a FAILED POLL rather than as an
+    // empty queue — `lastPollFailed` / `anyPollFailed` carry the unknown forward
+    // into the returned `continuous` and `observed` flags.
     const q = await getQueueSummary().catch(() => null);
     if (!q) {
       lastPollFailed = true;

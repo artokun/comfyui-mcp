@@ -115,6 +115,17 @@ install stays lean.
 - Keep PRs focused; include tests for behavior changes.
 - **PR checklist:** `npm run build` ✓ · `npm test` ✓ · docs regenerated if tools changed ✓ ·
   a clear description of what and why.
+- **When you add or touch a predicate, ask what it returns when the observation
+  FAILS.** If that is the same value it returns for a genuine negative, you have
+  written the most common defect in this codebase: "I could not determine this"
+  collapsing into "I determined it is not so." The user is then told a confident
+  wrong answer — a pack reported "not installed" by code that never reached the
+  disk, a port reported free by a lookup that failed, a download reported
+  verified after an unverified server swap. Give unknown its own representation
+  (`yes | no | unknown`, or a tagged result), and **test the failed observation,
+  not just the negative answer** — every instance found so far had tests, and
+  none of them tested the probe failing. `npm run check:unknown-collapse` catches
+  the common written form; it cannot catch the shape, only you can.
 
 Open a GitHub issue first for large or potentially-breaking changes so we can align on the approach.
 

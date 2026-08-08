@@ -38,6 +38,7 @@
     "docs:gen": "cross-env COMFYUI_URL=http://127.0.0.1:8188 tsx scripts/gen-tool-docs.ts",
     "tools:dump": "cross-env COMFYUI_URL=http://127.0.0.1:8188 tsx scripts/tools-dump.mts",
     "check:vocabulary": "tsx scripts/check-tool-vocabulary.mts",
+    "check:unknown-collapse": "node scripts/check-unknown-collapse.mjs",
     "vocab:export": "tsx scripts/export-vocabulary.mts",
     "runpod:release": "node scripts/runpod-release.mjs",
     "runpod:release:major": "node scripts/runpod-release.mjs major",
