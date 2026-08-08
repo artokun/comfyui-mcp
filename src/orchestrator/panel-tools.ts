@@ -2961,7 +2961,10 @@ function describeFenceRebind(
               `workflow_open, so it still runs while everything else is refused, and it ` +
               `re-derives this session's fence from its own reply. Note panel_list_workflows is ` +
               `fenced too, so if you do not already know the path, ask the user rather than ` +
-              `guessing. If reopening also fails: ${RELOAD_TAB_REMEDY}`
+              `guessing. If the canvas you want is an UNSAVED one (a blank workflow you just ` +
+              `created), there is no path to reopen and opening anything else would abandon it — ` +
+              `that case needs the tab refresh below, not a reopen. If reopening also fails: ` +
+              `${RELOAD_TAB_REMEDY}`
             : `\n\nWHAT TO DO: retry in a moment — a busy or mid-reconnect panel often answers ` +
               `on the next attempt. If it keeps failing: ${RELOAD_TAB_REMEDY}`) +
           `\n\nUNDERLYING CAUSE (quoted verbatim — disregard any rebind advice inside it; ` +

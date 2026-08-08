@@ -308,3 +308,35 @@ describe("the remedy branches on the cause, not on the symptom", () => {
     expect(text).not.toMatch(/WHAT TO DO: retry in a moment/);
   });
 });
+
+// The reopen advice reaches panel_new_workflow's disclosure too (it shares
+// describeFenceRebind). A blank canvas that was just created has NO path, so
+// "reopen it" is unfollowable there and opening anything else abandons it — the
+// remedy has to say so, or the agent discards the user's new tab trying to comply.
+describe("the reopen advice names the case it does not cover", () => {
+  it("says an unsaved canvas has no path to reopen", async () => {
+    const wedged = {
+      send: async () => {
+        throw new Error("workflow instance mismatch: this command targets a different workflow");
+      },
+      push: () => 1,
+      canReach: () => true,
+      isHeadless: () => false,
+      tabs: () => [{ tab_id: "tab-1", title: "Unsaved Workflow", connected_at: 0 }],
+      resolveActiveTabId: () => "tab-1",
+      workflowUuidFor: () => ({ known: true, uuid: PRIOR_UUID }),
+      refreshWorkflowUuid: () => false,
+      tabGraphMutationCapability: () => ({ known: true, canMutate: true }),
+    } as unknown as PanelToolCtx["bridge"];
+
+    const text = textOf(
+      await buildPanelToolDefs()
+        .find((d) => d.name === "panel_set_workflow_target")!
+        .handler({ mode: "current" }, makePanelToolCtx(wedged, "tab-1", new WorkflowTargetStore())),
+    );
+
+    expect(text).toMatch(/UNSAVED one/);
+    expect(text).toMatch(/no path to reopen/);
+    expect(text).toMatch(/would abandon it/);
+  });
+});
