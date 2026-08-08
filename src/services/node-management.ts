@@ -188,7 +188,7 @@ interface ManagerFetchOptions {
  * "ComfyUI-Manager API 403 Forbidden for /v2/manager/queue/update_all". The
  * reporter had to ask which permission was even involved.
  *
- * update_all specifically needs is_allowed_security_level("middle"), which passes
+ * install_comfyui (action:"update_all") specifically needs is_allowed_security_level("middle"), which passes
  * only for security_level in weak / normal / normal-. That is a Manager SETTING,
  * not a credential and not a consequence of being remote.
  *
@@ -213,7 +213,8 @@ export function explainManagerForbidden(status: number, body: string): string {
   if (reason === "security_level") {
     return (
       " — ComfyUI-Manager REFUSED this on its own security level, not on credentials and not" +
-      " because the server is remote. Privileged routes (update_all, install, snapshot removal)" +
+      " because the server is remote. Privileged Manager routes (its update-all, install and" +
+      " snapshot-removal endpoints)" +
       " require Manager config security_level to be weak, normal or normal-; anything stricter" +
       " refuses. Change it in ComfyUI-Manager settings (or its config.ini) and restart ComfyUI." +
       " Loosening it decides who may reach that server, so it is a deliberate choice: the" +

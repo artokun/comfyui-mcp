@@ -1,6 +1,6 @@
 // #1089 — a Manager 403 already says WHY; we were dropping it.
 //
-// Reported against a remote ComfyUI 0.30.1: install_comfyui(action:'update_all')
+// Reported against a remote ComfyUI 0.30.1: install_comfyui (action:"update_all")
 // got 403 and the tool returned a bare NODE_MANAGEMENT_ERROR, so the reporter had
 // to ask which permission was even involved.
 
