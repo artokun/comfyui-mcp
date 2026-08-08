@@ -124,3 +124,42 @@ describe("the placeholder survives only for a genuinely absent endpoint", () => 
     expect(stats.devices[0]!.name).toMatch(/placeholders, not readings/);
   });
 });
+
+// fetchImage does NOT go through cloudFetch — it needs redirect-following and raw
+// bytes rather than the JSON envelope. That exemption is how it kept the bare,
+// signal-less `fetch` that #1069 removed from cloudFetch one call over: a download
+// from a wedged cloud hung the tool call with nothing for the caller to act on.
+describe("fetchImage cannot hang forever either", () => {
+  it("sends a timeout signal", async () => {
+    const spy = vi
+      .fn()
+      .mockResolvedValue(new Response(new Uint8Array([1, 2, 3]), { status: 200 }));
+    vi.stubGlobal("fetch", spy);
+
+    await cloud.fetchImage("a.png");
+
+    const init = spy.mock.calls.at(-1)![1] as RequestInit;
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    // The exemption itself must survive: /api/view answers with a 302 to a signed URL.
+    expect(init.redirect).toBe("follow");
+  });
+
+  it("reports its ceiling honestly, and does not call a timeout a 'not found'", async () => {
+    const abort = new Error("The operation was aborted");
+    abort.name = "TimeoutError";
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(abort));
+
+    const msg = await cloud.fetchImage("a.png").catch((e: unknown) => (e as Error).message);
+    expect(msg).toMatch(/No reply from Comfy Cloud within \d+s while downloading "a\.png"/);
+    expect(msg).toMatch(/a timeout is not a "not found"/);
+  });
+
+  it("names the file and keeps the cause on a transport failure", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(undiciFailure("ECONNRESET", "read ECONNRESET")));
+
+    const err = await cloud.fetchImage("a.png").catch((e: unknown) => e);
+    expect((err as Error).message).toMatch(/Could not download "a\.png"/);
+    expect((err as Error).message).toMatch(/fetch failed/);
+    expect((err as { code?: string }).code).toBe("ECONNRESET");
+  });
+});

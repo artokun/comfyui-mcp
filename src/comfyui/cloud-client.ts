@@ -304,8 +304,35 @@ export async function fetchImage(
 ): Promise<{ base64: string; mimeType: string }> {
   const params = new URLSearchParams({ filename, type, subfolder });
   const url = cloudUrl(`/api/view?${params.toString()}`);
-  // /api/view returns either bytes or a 302 to a signed URL.
-  const res = await fetch(url, { headers: authHeaders(), redirect: "follow" });
+  // /api/view returns either bytes or a 302 to a signed URL, which is why this
+  // does NOT go through cloudFetch: it needs redirect-following and raw bytes
+  // rather than the JSON envelope. That exemption is also how it kept the bare,
+  // signal-less `fetch` that #1069 removed from cloudFetch one call over — a
+  // download from a wedged cloud hung the tool call with nothing to act on.
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      headers: authHeaders(),
+      redirect: "follow",
+      signal: defaultComfyTimeoutSignal(),
+    });
+  } catch (err) {
+    if (isTimeoutAbort(err)) {
+      throw new ConnectionError(
+        `No reply from Comfy Cloud within ${comfyHttpTimeoutSeconds()}s while downloading ` +
+          `"${filename}" — ${url} (GET). Nothing was learned about the image from this: a ` +
+          `timeout is not a "not found". Raise COMFYUI_MCP_HTTP_TIMEOUT_S if the cloud is ` +
+          `simply slow.`,
+      );
+    }
+    // A read, so no delivery doubt applies — re-requesting an image is safe.
+    const { message, code } = describeFetchFailure(err);
+    const wrapped = new ConnectionError(
+      `Could not download "${filename}" from Comfy Cloud at ${url}: ${message}.`,
+    );
+    if (code) (wrapped as { code?: string }).code = code;
+    throw wrapped;
+  }
   if (!res.ok) {
     throw new ComfyUIError(
       `Cloud /api/view ${res.status} for "${filename}"`,
