@@ -1422,6 +1422,9 @@ export class GrokDirectBackend extends OllamaBackend {
       if (keepalive) clearInterval(keepalive);
     }
     if (!res.ok || !res.body) {
+      // unknown-ok: "" is interpolated into an ERROR MESSAGE and nothing else — the
+      // HTTP status is reported either way, so an unreadable body costs detail in the
+      // text, never a wrong conclusion. Verified there is no branch on this value.
       const bodyText = await res.text().catch(() => "");
       throw new Error(`xAI Responses http ${res.status}: ${redactTokens(bodyText).slice(0, 400)}`);
     }

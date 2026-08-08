@@ -314,6 +314,9 @@ export async function resolveCandidatesDetailed(
 ): Promise<CandidateLookup> {
   const limit = opts.limit ?? 8;
   const query = fileStem(missing.name);
+  // unknown-ok: undefined means "VRAM unknown" and is carried as such — it never
+  // becomes a zero that would filter every candidate out. Compare the CivitAI call
+  // immediately below, which records its failure in failedProviders for the same reason.
   const vram = await deps.vramBytes().catch(() => undefined);
   const out: ModelCandidate[] = [];
   const failedProviders: string[] = [];

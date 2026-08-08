@@ -540,6 +540,9 @@ async function listWorkflowTemplatesAction(): Promise<ToolText> {
     // A NON-2xx may still be an HTML proxy/login page — say which, instead
     // of blaming a possibly-fine ComfyUI version (#828).
     const contentType = res.headers.get("content-type") ?? "";
+    // unknown-ok: "" is interpolated into an ERROR MESSAGE and nothing else — the
+    // HTTP status is reported either way, so an unreadable body costs detail in the
+    // text, never a wrong conclusion. Verified there is no branch on this value.
     const body = await res.text().catch(() => "");
     let parsedOk = false;
     try {

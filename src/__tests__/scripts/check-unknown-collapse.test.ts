@@ -313,3 +313,33 @@ describe("#796 the real repo", () => {
     expect(code, out).toBe(0);
   });
 });
+
+describe("#796 a trailing comment does not make a discarded call look consumed", () => {
+  it("ignores a line comment after the terminating semicolon", () => {
+    // Found by sweeping the baseline: `void p.catch(() => {}); // note` was the one
+    // entry that could not be explained by the code it pointed at. The tail read as
+    // `; // note` instead of `;`, so a plainly fire-and-forget call was flagged.
+    // A gate's false POSITIVES are what get it switched off.
+    const dir = mkdtempSync(join(tmpdir(), "unkcollapse-c-"));
+    try {
+      const s = join(dir, "src");
+      mkdirSync(s, { recursive: true });
+      writeFileSync(
+        join(s, "c.ts"),
+        `export function go() {\n` +
+          `  void poll().catch(() => {}); // self-terminates at the deadline\n` +
+          `  void other().catch(() => undefined); /* block form too */\n` +
+          `}\n`,
+        "utf8",
+      );
+      const out = execFileSync(
+        process.execPath,
+        [SCRIPT, "--src", s, "--baseline-file", join(dir, "b.txt"), "--list"],
+        { encoding: "utf8" },
+      );
+      expect(out).toContain("0 consuming sites");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

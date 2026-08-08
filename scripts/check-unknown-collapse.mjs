@@ -204,7 +204,12 @@ function valueIsConsumed(line, matchIndex, matchEnd, lines, i) {
   // Both begin with `await`, so the leading text cannot tell them apart — the
   // trailing punctuation can. A terminating `;` on a statement that binds nothing
   // is the one shape where the value provably goes nowhere.
-  const tail = after.trim();
+  // A trailing line comment is not part of the statement. Without stripping it,
+  //     void p.catch(() => {}); // self-terminates at the deadline
+  // has a tail of `; // self-terminates…` rather than `;`, and a plainly discarded
+  // fire-and-forget reads as consumed. Found by sweeping the baseline: it was the
+  // one entry that could not be explained by the code it pointed at.
+  const tail = after.replace(/\/\/.*$/, "").replace(/\/\*[^]*$/, "").trim();
   // Nothing after the catch means the STATEMENT CONTINUES on the next line, so
   // the value has somewhere to go — a discarded call would have terminated.
   return tail !== ";";

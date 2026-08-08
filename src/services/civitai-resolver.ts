@@ -200,6 +200,9 @@ async function throwForCivitaiStatus(
   url: string,
   tokenSent: boolean,
 ): Promise<never> {
+  // unknown-ok: "" is interpolated into an ERROR MESSAGE and nothing else — the
+  // HTTP status is reported either way, so an unreadable body costs detail in the
+  // text, never a wrong conclusion. Verified there is no branch on this value.
   const body = await res.text().catch(() => "");
   const status = res.status;
   let message: string;
