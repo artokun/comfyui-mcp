@@ -195,6 +195,16 @@ export function registerRunpodTools(server: McpServer): void {
           'action:"create" — arm the pod-side dead-man watchdog (default true for OUR stock template): the pod STOPS ITSELF if comfyui-mcp\'s heartbeats stop (process crash/offline — boot grace ~45min, then ~20min without beats). Uses the pod-scoped API key RunPod auto-injects into every pod — your account key never leaves this machine. false deploys without the watchdog. With a custom template (RUNPOD_TEMPLATE_ID) the default is OFF — pass true only if that image ships our watchdog.',
         ),
     },
+    // #1106 — the machine-readable half of what this tool already says in prose.
+    // A host can gate on an annotation; it cannot gate on a sentence. DELIBERATELY
+    // only the FRICTION-ADDING hints: destructive/openWorld can be over-applied
+    // safely (worst case is a confirmation nobody needed), whereas readOnlyHint
+    // REMOVES a prompt the host would otherwise show — so it is not set here at all.
+    {
+      destructiveHint: true,
+      openWorldHint: true,
+      idempotentHint: false,
+    },
     async (args) => {
       try {
         // `pod_id` cannot be schema-required in a flat shape, so the handler

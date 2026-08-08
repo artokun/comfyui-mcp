@@ -67,7 +67,11 @@ type ToolHandler = (args: Record<string, unknown>) => Promise<{
 function makeServer() {
   const handlers = new Map<string, ToolHandler>();
   const server = {
-    tool: (name: string, _desc: string, _schema: unknown, handler: ToolHandler) => {
+    // The SDK's `tool()` is overloaded: the callback is the LAST argument, and an
+    // optional annotations object (#1106) sits before it. Resolve by TYPE the way the
+    // real SDK does, so adding annotations to a tool cannot break this fake.
+    tool: (name: string, _desc: string, _schema: unknown, ...rest: unknown[]) => {
+      const handler = rest.find((a) => typeof a === "function") as ToolHandler;
       handlers.set(name, handler);
     },
   };

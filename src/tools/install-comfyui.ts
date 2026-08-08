@@ -168,6 +168,13 @@ export function registerInstallComfyUITools(server: McpServer): void {
             "(set_network_mode, set_security_level) apply only after a ComfyUI restart.",
         ),
     },
+    // #1106 — friction-ADDING hints only; see the note on `runpod`. readOnlyHint is
+    // deliberately never set: it removes a host confirmation rather than adding one.
+    {
+      destructiveHint: true,
+      openWorldHint: true,
+      idempotentHint: false,
+    },
     async (args) => {
       try {
         switch (args.action) {

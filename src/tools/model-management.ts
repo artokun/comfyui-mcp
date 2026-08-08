@@ -336,6 +336,13 @@ export function registerModelManagementTools(server: McpServer): void {
           'REQUIRED for action:"resolve_missing" — the ComfyUI workflow in API format (JSON string or object).',
         ),
     },
+    // #1106 — friction-ADDING hints only; see the note on `runpod`. readOnlyHint is
+    // deliberately never set: it removes a host confirmation rather than adding one.
+    {
+      destructiveHint: true,
+      openWorldHint: true,
+      idempotentHint: false,
+    },
     async (args) => {
       try {
         requireLimitInRange("download_model", args.action, args.limit);

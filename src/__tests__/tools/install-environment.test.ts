@@ -110,7 +110,11 @@ interface Registered {
 function registered(): Registered[] {
   const tools: Registered[] = [];
   const server = {
-    tool: (name: string, _desc: string, shape: z.ZodRawShape, handler: Handler) => {
+    // The SDK's `tool()` is overloaded: the callback is the LAST argument, and an
+    // optional annotations object (#1106) sits before it. Resolve by TYPE the way the
+    // real SDK does, so adding annotations to a tool cannot break this fake.
+    tool: (name: string, _desc: string, shape: z.ZodRawShape, ...rest: unknown[]) => {
+      const handler = rest.find((a) => typeof a === "function") as Handler;
       tools.push({ name, shape, handler });
     },
   };
