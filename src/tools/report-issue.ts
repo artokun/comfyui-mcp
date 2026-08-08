@@ -476,7 +476,7 @@ export function registerReportIssueTools(server: McpServer): void {
         .string()
         .min(1)
         .describe(
-          "Issue body: what happened, steps to reproduce, the exact error text, and environment (GPU/VRAM, ComfyUI version, OS) if known. Scrub secrets first.",
+          "Issue body: what happened, steps to reproduce, the exact error text, and environment (GPU/VRAM, ComfyUI version, ComfyUI FRONTEND version, OS) if known. The FRONTEND version is a SEPARATE package from ComfyUI and they move independently — get_system_stats (action:\"health\") prints both, and for any panel/UI bug it is often the deciding variable. Scrub secrets first.",
         ),
       repo: z
         .string()

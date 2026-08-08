@@ -116,7 +116,17 @@ so we can reproduce and merge:
 <applied locally: yes/no>  <upstream-only: yes/no>
 <the diff / patch, or the precise change needed if upstream-only>
 ### Environment
-OS / ComfyUI version / GPU+VRAM / **comfyui-mcp version** / **panel version**.
+OS / ComfyUI version / **ComfyUI FRONTEND version** / GPU+VRAM / **comfyui-mcp
+version** / **panel version**.
+
+The FRONTEND version is a separate package from ComfyUI itself and they move
+independently — `get_system_stats (action:"health")` prints both on the ComfyUI
+line. Include it for ANY panel/UI bug. It is not a formality: comfyui-mcp-panel#779
+was a blank agent panel on a fresh install where ComfyUI was 0.30.0 on the broken
+machine and 0.30.2 on a working one — indistinguishable, and not the cause. The
+frontend was 1.50.3 vs 1.47.12, which was the whole answer, and it took an hour of
+eliminating the install, two browsers, the cache and the orchestrator to get to a
+number that one line of output already had.
 Always include BOTH our versions — a bug is only actionable if we know which mcp +
 panel build it came from. They're already in your **ENVIRONMENT line** (the
 `mcp <ver> · panel <ver>` segment), so just copy them from there. Fallbacks if the
