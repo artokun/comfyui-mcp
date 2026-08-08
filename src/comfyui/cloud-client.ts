@@ -134,12 +134,48 @@ export async function getHistory(
   return {};
 }
 
+/** HTTP statuses that mean "this cloud has no such endpoint" rather than "the
+ *  request failed". Only these may fall back to the placeholder. */
+const ENDPOINT_ABSENT_STATUSES = new Set([404, 405, 501]);
+
+/**
+ * #1070 — the catch here used to swallow EVERYTHING and return an invented
+ * device, so an expired API key, a 402, a DNS failure, a timeout and a network
+ * partition all came back looking like a successful health check.
+ *
+ * That mattered more than a mislabelled outcome usually does, for two reasons.
+ * `get_system_stats (action:"health")` is the remedy our own error messages send
+ * people to — it is named in describeComfyFetchFailure, in the timeout text, and
+ * in this file's messages — so in cloud mode the remedy could not return a
+ * negative result. And health-check.ts / local-models-fallback.ts both call this
+ * as a REACHABILITY PROBE, which the placeholder answered "yes" to unconditionally.
+ *
+ * It also fabricated data rather than merely mislabelling it: `vram_total: 0` is
+ * not a reading, and a caller sizing a job against it is reading an invention.
+ *
+ * Three states now, not two:
+ *   - answered              → return what the endpoint said
+ *   - endpoint ABSENT (404) → the placeholder, which is the case this was written
+ *                             for, but named so a reader can see it is not a reading
+ *   - could not ask         → propagate, because that is a real failure
+ */
 export async function getSystemStats(): Promise<SystemStats> {
   try {
     const res = await cloudFetch("/system_stats");
     return (await res.json()) as unknown as SystemStats;
-  } catch {
-    logger.info("Cloud: /system_stats unavailable, returning placeholder");
+  } catch (err) {
+    const status =
+      err instanceof ComfyUIError && err.details && typeof err.details === "object"
+        ? (err.details as { status?: unknown }).status
+        : undefined;
+    if (typeof status !== "number" || !ENDPOINT_ABSENT_STATUSES.has(status)) {
+      // Auth, billing, transport, timeout — a real failure. The caller asked
+      // whether the cloud is reachable; inventing a GPU is not an answer.
+      throw err;
+    }
+    logger.info("Cloud: /system_stats not implemented by this cloud, returning placeholder", {
+      status,
+    });
     return {
       system: {
         os: "cloud",
@@ -149,7 +185,9 @@ export async function getSystemStats(): Promise<SystemStats> {
       },
       devices: [
         {
-          name: "Comfy Cloud GPU",
+          // Named, not silent: these are placeholders, not measurements. The
+          // "Comfy Cloud GPU" prefix is kept so anything matching on it still does.
+          name: "Comfy Cloud GPU (no stats endpoint — values below are placeholders, not readings)",
           type: "cloud",
           index: 0,
           vram_total: 0,
