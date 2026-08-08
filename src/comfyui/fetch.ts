@@ -12,6 +12,12 @@ function targetOf(input: string | URL | Request): string {
   }
 }
 
+/** The request's HTTP method, uppercased. `init.method` wins over a Request's own,
+ *  matching what fetch itself does when both are supplied. */
+function methodOf(input: string | URL | Request, init: RequestInit): string {
+  return String(init.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+}
+
 /**
  * What the CONNECTED panels front, for the drift comparison below (#952).
  *
@@ -99,11 +105,72 @@ function describeTargetDrift(target: string): string {
  * the browser is on, while these calls go to the configured COMFYUI_URL. That is
  * not a bug, but it is invisible unless the failure names the address — and,
  * where the bridge can tell us, says whether the two actually differ.
+ *
+ * Header for the three pieces below: the never-delivered code set, the delivery
+ * doubt it gates, and describeComfyFetchFailure itself.
  */
-function describeComfyFetchFailure(err: unknown, target: string): Error {
+/**
+ * Failure codes that prove the request was NEVER DELIVERED.
+ *
+ * Each one fires before any byte of the request could reach the application: the
+ * connection was refused, the name never resolved, the TLS handshake failed, or
+ * the URL was rejected locally. On these the server cannot have acted, so saying
+ * so is accurate and a retry is safe.
+ *
+ * Everything else is deliberately NOT listed. ECONNRESET, EPIPE, "socket hang up"
+ * and UND_ERR_SOCKET all fire on an ESTABLISHED connection, which is precisely the
+ * case where ComfyUI may have received and acted on the request before the socket
+ * died. The default for an unrecognised code is therefore "may have been
+ * delivered": a spurious "verify first" costs one extra read, while a spurious
+ * "it never arrived" costs a duplicate render.
+ */
+const NEVER_DELIVERED_CODES: ReadonlySet<string> = new Set([
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ERR_INVALID_URL",
+  "ERR_UNSUPPORTED_PROTOCOL",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
+  "SELF_SIGNED_CERT_IN_CHAIN",
+  "CERT_HAS_EXPIRED",
+  "ERR_TLS_CERT_ALTNAME_INVALID",
+]);
+
+/**
+ * The transport-failure twin of describeComfyTimeout's OUTCOME UNKNOWN.
+ *
+ * A timeout on a POST already warned that /prompt may have queued the render
+ * before the reply was lost. A CONNECTION ERROR on that same POST carries the
+ * identical risk — an ECONNRESET after the server accepted and enqueued the
+ * prompt is indistinguishable, at this layer, from one before it — yet the
+ * message said only "confirm the server is up", which reads as "it never got
+ * there". The caller retries and the render is queued twice, on the single most
+ * expensive operation this client makes.
+ *
+ * Only suppressed when the code POSITIVELY proves non-delivery, or the method is
+ * a read. See NEVER_DELIVERED_CODES for why the default runs the other way.
+ */
+function deliveryDoubt(code: string | undefined, method: string): string {
+  if (method === "GET" || method === "HEAD") return "";
+  if (code !== undefined && NEVER_DELIVERED_CODES.has(code)) return "";
+  // Says only what is known. Claiming "the connection was established" would be an
+  // overclaim for an unrecognised code — the same folding this function exists to
+  // undo, merely pointed the other way.
+  return (
+    ` This ${method} may already have been received and acted on: a transport failure ` +
+    `does not establish that the request never arrived. Do NOT blindly re-issue it; ` +
+    `check the server's state first (for a queued prompt, queue (action:"list") and ` +
+    `get_history (action:"list")).`
+  );
+}
+
+function describeComfyFetchFailure(err: unknown, target: string, method: string): Error {
   const { message, code } = describeFetchFailure(err);
   const wrapped = new Error(
-    `${message} — while requesting ${target}. ` +
+    `${message} — while requesting ${target} (${method}).` +
+      deliveryDoubt(code, method) +
+      ` ` +
       `That is the headless ComfyUI target (COMFYUI_URL); a CONNECTED sidebar panel does not imply this address is reachable, ` +
       `because the panel talks to whichever ComfyUI its browser tab is on.` +
       describeTargetDrift(target) +
@@ -164,9 +231,7 @@ function isTimeoutAbort(err: unknown): boolean {
  */
 function describeComfyTimeout(input: string | URL | Request, init: RequestInit): Error {
   const target = targetOf(input);
-  const method = String(
-    init.method ?? (input instanceof Request ? input.method : "GET"),
-  ).toUpperCase();
+  const method = methodOf(input, init);
   const seconds = comfyHttpTimeoutSeconds();
   const mutating = method !== "GET" && method !== "HEAD";
   const err = new Error(
@@ -227,6 +292,6 @@ export async function comfyuiFetch(
     // its own message, or anything else already says what happened, and
     // replacing that text would be a downgrade.
     if (!isBareFetchFailure(err)) throw err;
-    throw describeComfyFetchFailure(err, targetOf(input));
+    throw describeComfyFetchFailure(err, targetOf(input), methodOf(input, init));
   }
 }
