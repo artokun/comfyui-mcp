@@ -147,32 +147,55 @@ if (missingMeta.length) {
 console.log(`✅ installed surface registers ${core.length} core tools + ${META.length} compact-mode tools`);
 
 // 6. The PANEL surface too. Those 91 tools are the whole reason the panel can
-//    drive a live canvas, they ship in the same tarball, and until now nothing
-//    checked that the published build still builds them. buildPanelToolDefs is
+//    drive a live canvas, they ship in the same tarball, and nothing else here
+//    checks that the published build still builds them. buildPanelToolDefs is
 //    pure — no server, no socket — so this is a direct call into the INSTALLED
 //    dist rather than another stdio round trip.
-const PANEL_LEDGER = readFileSync(join(process.cwd(), "docs/design/panel-surface.txt"), "utf-8")
-  .split(/\r?\n/)
-  .map((l) => l.trim())
-  .filter((l) => l.startsWith("panel_"));
-let panelCount = null;
-try {
-  const mod = await import(pathToFileURL(join(pkg, "dist/orchestrator/panel-tools.js")).href);
-  panelCount = mod.buildPanelToolDefs?.().length ?? null;
-} catch (err) {
-  console.error(`❌ could not load the installed panel tools: ${err?.message ?? err}`);
+//
+//    Compared against THIS REPO'S build, not against docs/design/panel-surface.txt.
+//    That baseline is frozen HISTORY, not the current surface: check-tool-vocabulary
+//    requires live ⊆ baseline, so the baseline only ever grows, and a retired panel
+//    tool keeps its line there forever. Counting against it passes today only
+//    because nothing has been retired yet — the first legitimate retirement would
+//    read as "installed build makes 90, ledger declares 92" and fail a RELEASE, the
+//    one gate a false alarm is most expensive in. The ledger relationship is already
+//    enforced on every PR by check:vocabulary, from both sides; what only this script
+//    can see is whether the TARBALL carries the same surface the repo builds, which
+//    is a packaging question and is what it now asks.
+//
+//    `prepare: tsc` runs during npm pack in step 1, so ./dist is a fresh build of
+//    this source. Two separate module instances, same process and env.
+async function panelNames(root, label) {
+  try {
+    const mod = await import(pathToFileURL(join(root, "dist/orchestrator/panel-tools.js")).href);
+    if (typeof mod.buildPanelToolDefs !== "function") {
+      console.error(`❌ the ${label} build exports no buildPanelToolDefs`);
+      process.exit(1);
+    }
+    return mod.buildPanelToolDefs().map((d) => d.name);
+  } catch (err) {
+    console.error(`❌ could not load the ${label} panel tools: ${err?.message ?? err}`);
+    process.exit(1);
+  }
+}
+const installedPanel = await panelNames(pkg, "installed");
+const repoPanel = await panelNames(process.cwd(), "repo");
+// A comparison of two empty lists is equal and proves nothing — the vacuous pass
+// that the sibling gate tests each carry a floor assertion against.
+if (repoPanel.length < 50) {
+  console.error(`❌ the repo build makes only ${repoPanel.length} panel tools — check is not looking at a real surface`);
   process.exit(1);
 }
-if (panelCount === null) {
-  console.error("❌ the installed build exports no buildPanelToolDefs");
-  process.exit(1);
-}
-if (PANEL_LEDGER.length > 0 && panelCount !== PANEL_LEDGER.length) {
+const onlyInstalled = installedPanel.filter((n) => !repoPanel.includes(n));
+const onlyRepo = repoPanel.filter((n) => !installedPanel.includes(n));
+if (onlyInstalled.length || onlyRepo.length) {
   console.error(
-    `❌ installed build makes ${panelCount} panel tools, ledger declares ${PANEL_LEDGER.length}`,
+    `❌ the tarball's panel surface differs from this repo's build` +
+      (onlyRepo.length ? `\n   in the repo but NOT in the tarball: ${onlyRepo.join(", ")}` : "") +
+      (onlyInstalled.length ? `\n   in the tarball but NOT in the repo: ${onlyInstalled.join(", ")}` : ""),
   );
   process.exit(1);
 }
-console.log(`✅ installed build makes ${panelCount} panel tools (ledger: ${PANEL_LEDGER.length})`);
+console.log(`✅ tarball's ${installedPanel.length} panel tools match this repo's build`);
 
 console.log("✅ pack/install smoke passed — tarball installs cleanly, boots, and registers its tools");

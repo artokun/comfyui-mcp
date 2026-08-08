@@ -29,10 +29,18 @@
  *
  * `core` is the LEDGER (src/tools/vocabulary.ts), not a live probe: this file is
  * about what the vocabulary is DECLARED to be, and registry-surface.test.ts is
- * what proves the running server matches. `panel` has no ledger yet — it is read
- * live from buildPanelToolDefs() until the canvas_* consolidation gives it one,
- * which means an accidental panel rename or duplicate regenerates cleanly here and
- * is NOT caught.
+ * what proves the running server matches. `panel` has no ledger of its own — it is
+ * read live from buildPanelToolDefs() until the canvas_* consolidation gives it one,
+ * so an accidental panel rename regenerates cleanly HERE and this script will never
+ * flag it.
+ *
+ * That is a statement about THIS script, not about the repo. check-tool-vocabulary.mts
+ * closes it from both sides against the frozen docs/design/panel-surface.txt:
+ * `panelRetiredNotDeclared` (baseline \ live ⊆ DEAD_NAMES) catches the old name
+ * vanishing without a DEAD_NAMES entry, and `panelMissingFromBaseline` (live ⊆
+ * baseline) catches the new name appearing without joining the ratchet. A rename
+ * trips both. Said plainly because the older wording here read as "panel renames are
+ * unguarded" and cost a later reader a re-implementation of a ratchet that exists.
  *
  * What `--check` proves is narrow, and worth stating so it is not over-trusted: the
  * committed artefact matches this repo's ledger. It says nothing about whether the
