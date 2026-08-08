@@ -1,17 +1,14 @@
 # #796 — sites where a failed observation is answered with an empty value.
 #
-# THIS LIST MAY ONLY SHRINK. It is debt, not history: fixing a site means
-# deleting its line. Adding a line to silence a new failure is the documented
-# bypass of this gate — use a reasoned `// unknown-ok:` comment at the site
-# instead, where the next reader will actually see it.
+# THIS LIST IS EMPTY, AND A TEST ASSERTS IT STAYS EMPTY. All 38 original
+# entries have been read: one was a real defect (runpod-ssh reported a sha256
+# MISMATCH when hashing had FAILED), one was a false positive in this gate
+# itself, and the other 36 were already correct and now carry a reasoned
+# `// unknown-ok:` at the site explaining why.
+#
+# So there is no debt left to grandfather, and adding a line here is no longer
+# a slow bypass — it is the only bypass. Clear a new site by fixing it, or by
+# writing the reason at the site where the next reader will actually see it.
 #
 # Regenerate deliberately:  node scripts/check-unknown-collapse.mjs --baseline
-services/download-cache.ts	.catch(() => false)	#1
-services/download-cache.ts	.catch(() => false)	#2
-services/queue-manager.ts	.catch(() => null)	#2
-services/queue-manager.ts	.catch(() => null)	#3
-services/training-jobs.ts	.catch(() => null)	#1
-services/training-jobs.ts	.catch(() => null)	#2
-services/training-jobs.ts	.catch(() => null)	#4
-services/training-jobs.ts	.catch(() => null)	#5
-services/training-jobs.ts	.catch(() => null)	#6
+

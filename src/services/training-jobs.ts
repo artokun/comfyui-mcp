@@ -734,6 +734,9 @@ async function refreshRegistry(deps: TrainingJobDeps = {}): Promise<void> {
     if (handles.has(job.id)) { jobs.set(job.id, jobs.get(job.id) ?? job); continue; } // live here — memory wins
     if ((job.status === "running" || job.status === "queued") && job.containerName) {
       const probe = deps.containerRunning ?? defaultContainerProbe;
+      // unknown-ok: only a probed `false` acts. null is UNKNOWN and takes no action —
+      // the guard below tests `=== false` / `!== false` precisely so an unreachable
+      // daemon can never be read as "the container is gone".
       const running = await probe(job.containerName, jobProbeConfigPath(job)).catch(() => null);
       if (running === false && (!ownerAlive(job) || ownerLeaseStale(job))) {
         // Container gone AND (owner provably dead OR its liveness lease
@@ -943,6 +946,9 @@ export async function reconcileStaleTrainingJobs(deps: TrainingJobDeps = {}): Pr
     if (handles.has(job.id)) continue; // live in THIS process — the owner is us
     if (ownerAlive(job) && !ownerLeaseStale(job)) continue; // healthy owner — not ours to touch
     const probe = deps.containerRunning ?? defaultContainerProbe;
+    // unknown-ok: only a probed `false` acts. null is UNKNOWN and takes no action —
+    // the guard below tests `=== false` / `!== false` precisely so an unreachable
+    // daemon can never be read as "the container is gone".
     const running = await probe(job.containerName, jobProbeConfigPath(job)).catch(() => null);
     if (running !== false) continue; // alive or unknown → err toward "busy" (never stop a live run)
     await recoverOrphanedJob(job.id, deps);
@@ -1787,6 +1793,9 @@ export async function cancelJob(id: string, deps: TrainingJobDeps = {}): Promise
     // daemon honored the stop (codex finding). Only when liveness is unknown
     // do we fall back to the stop command's own result. The probe is scoped to
     // THIS job's config path so an unrelated run.py can't fake still-running.
+    // unknown-ok: null is UNKNOWN and falls through to the stop command's own result
+    // (`probed ?? res.ok === false`), which is the documented intent above — a probe
+    // that could not answer must not overrule what the stop reported.
     const probed = await probe(job.containerName, cfgPath).catch(() => null);
     const stillRunning = probed ?? res.ok === false;
     if (stillRunning === true) {
@@ -1867,6 +1876,9 @@ async function cancelJobBody(id: string, job: TrainingJob, deps: TrainingJobDeps
     const probe = deps.containerRunning ?? defaultContainerProbe;
     // Probe after the stop regardless of its exit status (see above), scoped to
     // THIS job's config path so an unrelated run.py can't fake still-running.
+    // unknown-ok: null is UNKNOWN and falls through to the stop command's own result
+    // (`probed ?? res.ok === false`), which is the documented intent above — a probe
+    // that could not answer must not overrule what the stop reported.
     const probed = await probe(job.containerName, cfgPath).catch(() => null);
     const stillRunning = probed ?? res.ok === false;
     if (stillRunning === true) {
@@ -1912,6 +1924,9 @@ export async function deleteJob(
   }
   if (job.status === "cancelled" && job.containerName) {
     const probe = deps.containerRunning ?? defaultContainerProbe;
+    // unknown-ok: only a probed `false` acts. null is UNKNOWN and takes no action —
+    // the guard below tests `=== false` / `!== false` precisely so an unreachable
+    // daemon can never be read as "the container is gone".
     const alive = await probe(job.containerName, jobProbeConfigPath(job)).catch(() => null);
     if (alive !== false) {
       throw new Error(

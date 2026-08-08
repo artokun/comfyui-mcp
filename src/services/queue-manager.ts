@@ -450,6 +450,9 @@ export async function cancelRunningJobEscalating(opts: {
   let pending_cleared: number | undefined;
   let clearPendingFailed = false;
   if (opts.clear_pending) {
+    // unknown-ok: null suppresses the COUNT rather than reporting a wrong one — see
+    // pending_cleared below, which stays undefined so the message says "cleared"
+    // without a number it never observed.
     const before = await getQueueSummary().catch(() => null);
     await clearAllQueued().catch((err) => {
       clearPendingFailed = true;
@@ -469,6 +472,9 @@ export async function cancelRunningJobEscalating(opts: {
         : `Pending jobs were cleared.`;
 
   // Identify the job we're trying to stop so we can verify it actually clears.
+  // unknown-ok: null makes targetSeenRunning false, and "interrupted" is only
+  // claimed about a job we OBSERVED running (see the comment below). A failed
+  // summary therefore withholds the claim instead of fabricating it.
   const pre = await getQueueSummary().catch(() => null);
   const runningId = opts.prompt_id ?? pre?.running_jobs?.[0]?.prompt_id;
   // "Interrupted" is only a claim we may make about a job we OBSERVED running.
