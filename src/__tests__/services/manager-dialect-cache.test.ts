@@ -537,6 +537,24 @@ describe("#646 Manager API dialect cache invalidation", () => {
     expect(countOf(calls, "/v2/manager/queue/task")).toBe(1);
   });
 
+  // #1089 — THE WIRING, not just the helper. managerStatusHint is unit-tested in
+  // manager-403-hint.test.ts, but removing its call site from managerFetch killed
+  // ZERO of those tests: a pure-function test cannot see whether anyone calls it.
+  // This asserts the explanation actually reaches the caller's error.
+  it("a 403 carries the security-gate explanation to the caller", async () => {
+    stubServer({ persona: () => "v4", taskStatus: () => 403 });
+
+    const err = await downloadAModel().catch((e: unknown) => e);
+    const msg = (err as Error).message;
+
+    // The distinction the reporter needed: nothing to authenticate with.
+    expect(msg).toMatch(/SECURITY GATE/);
+    expect(msg).toMatch(/not an authentication failure/i);
+    expect(msg).toMatch(/security_level/);
+    // …and the original status is still there for anyone matching on it.
+    expect(msg).toMatch(/403/);
+  });
+
   it("a persistently-400ing endpoint cannot buy a probe per call (re-check cooldown)", async () => {
     const calls = stubServer({ persona: () => "v4", taskStatus: () => 400 });
 

@@ -172,6 +172,7 @@ interface ManagerFetchOptions {
 }
 
 /**
+<<<<<<< Updated upstream
  * #1089 — a Manager 403 already SAYS why; we were dropping it.
  *
  * ComfyUI-Manager gates privileged routes behind its own security level and
@@ -236,6 +237,44 @@ export function explainManagerForbidden(status: number, body: string): string {
     );
   }
   return "";
+=======
+ * Turn a bare Manager HTTP status into something the caller can act on (#1089).
+ *
+ * A reporter got `403 Forbidden` from `/v2/manager/queue/update_all?mode=remote`
+ * and a `NODE_MANAGEMENT_ERROR` with nothing else, and asked — reasonably — what
+ * permission they were missing. The answer is that they were missing none: this
+ * is ComfyUI-Manager's OWN security gate, and no credential we could send would
+ * change it. That distinction is the whole value of the message, because the
+ * obvious reading of 403 is "authenticate" and there is nothing to authenticate.
+ *
+ * This code already NAMED the cause internally — two comments in this file call
+ * 403 "security_level gating" while deciding it is not a dialect signal — so the
+ * knowledge was here, just never shown to anyone.
+ *
+ * Deliberately does not tell the user to set a level. Loosening the gate lets
+ * anything that can reach the port install arbitrary packages, and on a server
+ * reachable beyond loopback that is their call to make with the tradeoff stated,
+ * not a step to follow because a tool said so.
+ */
+export function managerStatusHint(status: number, path: string): string {
+  if (status !== 403) return "";
+  const risky = /install|update|uninstall|fix|queue|import-fail/i.test(path);
+  return (
+    `\n\nThis is ComfyUI-Manager's own SECURITY GATE, not an authentication failure — ` +
+    `there is no token or credential this MCP can send that would change it, so do not go ` +
+    `looking for one. Manager refuses ${risky ? "installs, updates and uninstalls" : "this operation"} ` +
+    `when it considers the instance exposed: that is decided by its \`security_level\` setting ` +
+    `(in ComfyUI-Manager's own config.ini, NOT anything this MCP controls), and a server bound ` +
+    `to a non-loopback address — \`--listen\`, a container, a tunnel — is treated as exposed by ` +
+    `default.\n\n` +
+    `Your options, in the order I would try them: run the operation from the machine hosting ` +
+    `ComfyUI (over loopback, where Manager permits it); or update the pack on the host directly ` +
+    `(git pull in custom_nodes, or comfy-cli); or, if you accept that anything able to reach ` +
+    `this port may then install arbitrary packages, lower \`security_level\` on the host and ` +
+    `restart ComfyUI. That last one is a real exposure decision on a reachable server, which is ` +
+    `why it is listed last rather than recommended.`
+  );
+>>>>>>> Stashed changes
 }
 
 async function managerFetch<T>(
@@ -269,8 +308,12 @@ async function managerFetch<T>(
     if (soft) return undefined;
     const text = await res.text().catch(() => "");
     throw new NodeManagementError(
+<<<<<<< Updated upstream
       `ComfyUI-Manager API ${res.status} ${res.statusText} for ${path}` +
         explainManagerForbidden(res.status, text),
+=======
+      `ComfyUI-Manager API ${res.status} ${res.statusText} for ${path}${managerStatusHint(res.status, path)}`,
+>>>>>>> Stashed changes
       { url, status: res.status, body: text },
     );
   }
