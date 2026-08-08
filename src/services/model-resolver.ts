@@ -1991,6 +1991,34 @@ function localAuthHeadersFor(
 }
 
 /**
+ * #1086 — what a Manager dispatch does NOT establish.
+ *
+ * This used to end with "the file lists under /models when complete", which is a
+ * PREDICTION, not an observation, and it was wrong for the reporter: ComfyUI-Manager
+ * installed into the container base root (/opt/ComfyUI/models) while the server READ
+ * models from /workspace/models via extra_model_paths. The file never listed, the
+ * 20 GB overlay was discarded on pod restart, and a multi-GB model was lost — after
+ * we had reported the transfer as proceeding to a destination we never checked.
+ *
+ * We cannot fix the destination from here: extra_model_paths.yaml lives on the
+ * TARGET filesystem, and for a remote install this process cannot read it. What we
+ * can stop doing is asserting where the bytes will land.
+ *
+ * NAMES THE CHECK, not just the risk. "Verify it yourself" without saying how is a
+ * dead end; list_local_models reads through the SAME roots the server reads, so a
+ * file that appears there is genuinely reachable by a workflow.
+ */
+export function managerDestinationCaveat(): string {
+  return (
+    "ComfyUI-Manager chooses the destination root itself and does not necessarily honour " +
+    "extra_model_paths — so this has NOT established where the file lands. Confirm with " +
+    "list_local_models before relying on it. A model that never appears there was written " +
+    "somewhere the server does not read, commonly the install's base models directory; on a " +
+    "container that is often an ephemeral overlay, which loses the file on restart."
+  );
+}
+
+/**
  * Remote-mode download: hand the file off to the connected ComfyUI host via
  * ComfyUI-Manager's `install-model` task. Validates the subfolder/filename with
  * the same guards as the local path (no traversal, bare filename) before
@@ -2179,7 +2207,7 @@ async function downloadModelViaManagerRemote(
       "local models directory to stream into (no COMFYUI_PATH, no saved workspace, and the " +
       "running server's launch arguments did not identify one). That is a routing fallback, NOT " +
       "a claim that the server is remote; set COMFYUI_PATH to stream directly instead";
-  return `${normalizedSubfolder}/${resolvedFilename} (${routeNote} — download continues server-side; the file lists under /models when complete)${authGateWarning}${authWarning}`;
+  return `${normalizedSubfolder}/${resolvedFilename} (${routeNote} — download continues server-side. ${managerDestinationCaveat()})${authGateWarning}${authWarning}`;
 }
 
 /**
