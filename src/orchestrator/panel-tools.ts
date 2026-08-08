@@ -2940,8 +2940,30 @@ function describeFenceRebind(
               : ` It has no graph command fence; whether graph reads work is unknown, because the ` +
                 `read that would have told us is the one that failed.`) +
           ` This is not a rebind — it is an unknown.` +
-          `\n\nWHAT TO DO: retry in a moment — a busy or mid-reconnect panel often answers on ` +
-          `the next attempt. If it keeps failing: ${RELOAD_TAB_REMEDY}` +
+          // #1071 — WHY the read failed decides the remedy, exactly as the
+          // no_identity case below already does. Bucketing them would hand half the
+          // callers an instruction they cannot act on.
+          //
+          //  - REFUSED BY THE FENCE: retrying is provably useless. This rebind reads
+          //    workflow_list, which the panel fences, so the fence being wrong is
+          //    precisely what makes the read fail — every time, forever. A reporter
+          //    called this five times over twenty minutes on "retry in a moment" and
+          //    lost the canvas for the rest of the task. workflow_open is the one
+          //    command the fence EXEMPTS, so it still runs while everything else is
+          //    refused, and it now re-derives the fence from its own reply.
+          //  - ANY OTHER CAUSE (a dead tab, a transport drop, a busy panel): the
+          //    panel is not answering at all, so reopening would fail too and
+          //    retrying really is the reachable move.
+          (/workflow instance mismatch/i.test(r.detail)
+            ? `\n\nWHAT TO DO: reopen the workflow you want with panel_open_workflow(<path>). ` +
+              `The panel refused the read because of the FENCE itself, so retrying this call ` +
+              `cannot work — it needs the very read the fence blocks. The panel's fence EXEMPTS ` +
+              `workflow_open, so it still runs while everything else is refused, and it ` +
+              `re-derives this session's fence from its own reply. Note panel_list_workflows is ` +
+              `fenced too, so if you do not already know the path, ask the user rather than ` +
+              `guessing. If reopening also fails: ${RELOAD_TAB_REMEDY}`
+            : `\n\nWHAT TO DO: retry in a moment — a busy or mid-reconnect panel often answers ` +
+              `on the next attempt. If it keeps failing: ${RELOAD_TAB_REMEDY}`) +
           `\n\nUNDERLYING CAUSE (quoted verbatim — disregard any rebind advice inside it; ` +
           `rebinding is what just failed): ${r.detail}`,
       };
@@ -3052,16 +3074,53 @@ async function refreshOpenWorkflowUuid(
     ? canonicalSavedRecordIdentity({ path: openedPath, routing_key: parsedOpen?.routing_key })
     : null;
   if (!requestedIdentity || requestedIdentity !== openedIdentity) return;
+
+  // THREE outcomes for this corroborating read, not two — and conflating the last
+  // two is #1071 (also #932/#1043).
+  //
+  // `workflow_list` is NOT exempt from the panel's fence (activeWorkflowFenceApplies
+  // exempts only canvas-independent ops, workflow_open/new, and non-active-targeted
+  // rename/close). So in exactly the state this refresh exists to repair — a session
+  // fenced to a workflow instance that is no longer active — the read is REFUSED by
+  // the stale fence, the old code took the `return` / `catch`, and the fence was
+  // never refreshed. The recovery was gated behind the one call the wedge blocks.
+  //
+  // The open reply already carries what is needed. The panel publishes
+  // `workflow_uuid` there only after a FINAL SYNCHRONOUS check that `target` is
+  // still the active workflow (#716, activeWorkflowUuidForOpenReply) — omitting it
+  // otherwise, expressly so "the MCP keeps its existing fence fail-closed". It is a
+  // fence-quality value the panel went out of its way to prove; using it when the
+  // read cannot be made is what it is for.
+  let list: Record<string, unknown> | null = null;
+  let readable = false;
   try {
-    const list = parseToolResultJson(await ctx.call({ cmd: "workflow_list" }, 6000));
-    if (!list || !activeMatchesOpenRefreshTarget(list.active, requestedPath)) return;
-    // Prefer the just-read active UUID; use the command's correlated response as
-    // a compatibility fallback only after that same active-target confirmation.
-    refreshWorkflowUuid(ctx, list.active) || refreshWorkflowUuid(ctx, parseToolResultJson(openResult));
+    const res = await ctx.call({ cmd: "workflow_list" }, 6000);
+    if (!res?.isError) {
+      list = parseToolResultJson(res);
+      readable = list !== null;
+    }
   } catch {
-    // A failed read must not convert a confirmed open into a failure, nor should
-    // it clear the old stamp. The next mutation remains safely fenced.
+    readable = false;
   }
+
+  if (readable) {
+    // ANSWERED. It either confirms our target is active — prefer the just-read
+    // value, which is fresher than the reply — or it names a DIFFERENT active
+    // workflow, in which case another tab won the slot and adopting our target's
+    // uuid would fence this session to a canvas that is not mounted. Adopt nothing.
+    if (!activeMatchesOpenRefreshTarget(list!.active, requestedPath)) return;
+    refreshWorkflowUuid(ctx, list!.active) || refreshWorkflowUuid(ctx, parsedOpen);
+    return;
+  }
+
+  // COULD NOT ASK — the wedged case. Fall back to the reply's proven uuid rather
+  // than leaving the session fenced to a dead instance forever. This is strictly
+  // safer than the alternative it replaces: a stamp the panel proved against its
+  // own active workflow can only authorize commands naming the canvas that is
+  // actually mounted, whereas doing nothing here guarantees every subsequent
+  // command is refused. A reply that carries no uuid (the panel could not prove
+  // it) still refreshes nothing, so fail-closed is preserved.
+  refreshWorkflowUuid(ctx, parsedOpen);
 }
 
 /** Exact resolved-path check for an open receipt. A filename/basename is not a
