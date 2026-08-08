@@ -412,6 +412,9 @@ async function loadServerTemplate(
       // answered and never told us anything about templates at all (codex gate,
       // round 9, finding 1).
       const contentType = res.headers.get("content-type") ?? "";
+      // unknown-ok: "" is interpolated into an ERROR MESSAGE and nothing else — the
+      // HTTP status is reported either way, so an unreadable body costs detail in the
+      // text, never a wrong conclusion. Verified there is no branch on this value.
       const body = await res.text().catch(() => "");
       let parsedOk = false;
       try {

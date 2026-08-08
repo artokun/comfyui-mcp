@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   buildSshTrainingInvocation,
   decodePodContainerName,
@@ -147,5 +149,37 @@ describe("pod archive validation (#263 correctness)", () => {
     expect(validateArchiveEntryNames(["/etc/passwd"])).toMatch(/absolute path/);
     expect(validateArchiveEntryNames(["C:/Windows/win.ini"])).toMatch(/absolute path/);
     expect(validateArchiveEntryNames(["a\\..\\b"])).toMatch(/backslash/);
+  });
+});
+
+describe("#796 a hash that could not be COMPUTED is not a hash that DIFFERED", () => {
+  // Both fail closed, which is right — but they send the reader to different
+  // places. "sha256 mismatch" on a multi-GB pod transfer means re-pull it, and
+  // doing that over an unreadable file or an OOM is expensive and useless. The
+  // old code caught the hash failure into "" and compared that, so every failure
+  // to CHECK was reported as a proven mismatch.
+  const SRC = readFileSync(join(__dirname, "..", "..", "services", "runpod-ssh.ts"), "utf8");
+
+  it("no longer collapses a hashing failure into an empty string", () => {
+    expect(SRC).not.toMatch(/const got = await sha256File\(p\)\.catch\(\(\) => ""\)/);
+  });
+
+  it("reports the failure to check, and says the file may be fine", () => {
+    expect(SRC).toMatch(/could NOT hash \$\{rel\}/);
+    // Asserted as two phrases, each within ONE string literal: the sentence is
+    // spelled across a `+` in the source, so a single regex over the raw file
+    // tests the line breaks rather than the message.
+    expect(SRC).toMatch(/The file may be fine/);
+    expect(SRC).toMatch(/not a proven mismatch/);
+    // The underlying reason is carried, so the reader can act on it.
+    expect(SRC).toMatch(/hashError \?\? "no reason reported"/);
+  });
+
+  it("still refuses — nothing is promoted on an unverified file", () => {
+    const i = SRC.indexOf("could NOT hash");
+    const before = SRC.slice(Math.max(0, i - 400), i);
+    expect(before).toMatch(/return failCleanup\(/);
+    // …and a genuine mismatch keeps its own distinct message.
+    expect(SRC).toMatch(/verification failed: sha256 mismatch on \$\{rel\}/);
   });
 });

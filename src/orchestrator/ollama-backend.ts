@@ -917,6 +917,9 @@ export class OllamaBackend implements AgentBackend {
       // a delivery state nobody observed.
       throw Object.assign(
         new Error(
+          // unknown-ok: "" is interpolated into an ERROR MESSAGE and nothing else — the
+          // HTTP status is reported either way, so an unreadable body costs detail in the
+          // text, never a wrong conclusion. Verified there is no branch on this value.
           `${this.api === "openai" ? `${this.host}/chat/completions` : "ollama /api/chat"} http ${res.status}: ${(await res.text().catch(() => "")).slice(0, 300)}`,
         ),
         { httpStatus: res.status },

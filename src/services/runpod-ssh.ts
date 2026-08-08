@@ -414,7 +414,25 @@ export async function rsyncFromPod(ep: PodSshEndpoint, remoteDir: string, localD
     }
     const want = sums.get(rel);
     if (want) {
-      const got = await sha256File(p).catch(() => "");
+      // #796 — a hash that could not be COMPUTED is not a hash that DIFFERED.
+      // Both fail closed, which is right, but they send the reader to different
+      // places: "sha256 mismatch" on a multi-GB transfer means re-pull it, and
+      // doing that over an unreadable file or an OOM is expensive and useless.
+      let got: string | null = null;
+      let hashError: string | undefined;
+      try {
+        got = await sha256File(p);
+      } catch (err) {
+        hashError = err instanceof Error ? err.message : String(err);
+      }
+      if (got === null) {
+        return failCleanup(
+          1,
+          `verification failed: could NOT hash ${rel} to compare against the pod's checksum ` +
+            `(${hashError ?? "no reason reported"}). The file may be fine — this is a failure to ` +
+            `CHECK, not a proven mismatch. Nothing was promoted.`,
+        );
+      }
       if (got !== want) return failCleanup(1, `verification failed: sha256 mismatch on ${rel}`);
     }
   }

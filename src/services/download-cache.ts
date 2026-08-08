@@ -2983,6 +2983,9 @@ async function renameTempOverDestination(
       await downloadCacheFs.rm(tmp, { force: true }).catch(() => undefined);
       if (backedUp) {
         const restored = await downloadCacheFs
+          // unknown-ok: there is no third state for a rename — it either completed or it
+          // did not, and `.then(() => true)` runs only on completion. false therefore means
+          // "not restored", and the throw below preserves the backup and says where it is.
           .rename(backup, targetPath)
           .then(() => true)
           .catch(() => false);
@@ -3007,6 +3010,9 @@ async function renameTempOverDestination(
       await downloadCacheFs.rm(tmp, { force: true }).catch(() => undefined);
       if (backedUp) {
         const restored = await downloadCacheFs
+          // unknown-ok: there is no third state for a rename — it either completed or it
+          // did not, and `.then(() => true)` runs only on completion. false therefore means
+          // "not restored", and the throw below preserves the backup and says where it is.
           .rename(backup, targetPath)
           .then(() => true)
           .catch(() => false);

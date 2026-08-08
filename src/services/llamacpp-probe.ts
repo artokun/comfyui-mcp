@@ -87,6 +87,9 @@ export async function llamacppToolsReady(
       signal: AbortSignal.timeout(120000),
     });
     if (res.ok) return "yes";
+    // unknown-ok: "" cannot match either marker, so an unreadable body falls
+    // through to the `return "unknown"` below rather than to `return "no"` — the
+    // three states are already distinct and a failed read lands on the right one.
     const text = (await res.text().catch(() => "")).toLowerCase();
     if (text.includes("jinja") || text.includes("tools")) {
       logger.warn(`[llamacpp] tools probe rejected (server without --jinja?): ${text.slice(0, 160)}`);

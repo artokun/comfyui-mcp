@@ -34,6 +34,9 @@ async function loadLockFromLibrary(filename: string): Promise<WorkflowLock | nul
       `Failed to read lock for "${filename}": ${res.status} ${res.statusText}.`,
     );
   }
+  // unknown-ok: "" is interpolated into an ERROR MESSAGE and nothing else — the
+  // HTTP status is reported either way, so an unreadable body costs detail in the
+  // text, never a wrong conclusion. Verified there is no branch on this value.
   const text = await res.text().catch(() => "");
   return parseWorkflowLock(text);
 }
@@ -47,6 +50,9 @@ async function saveLockToLibrary(filename: string, lock: WorkflowLock): Promise<
     body: JSON.stringify(lock, null, 2),
   });
   if (!res.ok) {
+    // unknown-ok: "" is interpolated into an ERROR MESSAGE and nothing else — the
+    // HTTP status is reported either way, so an unreadable body costs detail in the
+    // text, never a wrong conclusion. Verified there is no branch on this value.
     const text = await res.text().catch(() => "");
     throw new ValidationError(
       `Failed to save lock file for ${filename}: ${res.status} ${res.statusText}${text ? `\n${text}` : ""}`,

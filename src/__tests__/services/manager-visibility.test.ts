@@ -24,10 +24,11 @@
 // which is why three of its assertions "failed" with plausible-looking values.
 
 import { describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import { verifyManagerVisibility } from "../../services/model-resolver.js";
 
 describe("verifyManagerVisibility asks the live server", () => {
-  it("CONFIRMS when the server lists the file", async () => {
+  it("reports VISIBLE when the server lists the file", async () => {
     const probe = vi.fn().mockResolvedValue(true);
 
     const r = await verifyManagerVisibility("clip_vision", "clip_vision_h.safetensors", {
@@ -112,5 +113,67 @@ describe("verifyManagerVisibility asks the live server", () => {
 
     // A verification hiccup must not turn a transfer into an error.
     expect(r.visibility).toBe("unknown");
+  });
+});
+
+// #473 — LISTING IS NOT VALIDITY, and saying otherwise was my regression.
+//
+// A reporter on 0.50.34 got six byte-identical 10,038-byte CivitAI Login HTML
+// documents saved as models, and observed that `download_model` "sometimes
+// upgraded the filename-presence check to CONFIRMED". That upgrade was this
+// check, shipped in 0.50.29.
+//
+// Manager writes whatever the URL returned under the name you asked for, and it
+// cannot carry this MCP's credentials — so an auth-gated URL yields a login page
+// with a .safetensors name. It lists perfectly. It deserializes into
+// "SafetensorError: header too large" the moment a LoraLoader touches it.
+//
+// This is #473's original failure (the landing watcher treating presence as
+// success) reintroduced one layer up, which is why the wording is pinned here.
+describe("a visible verdict never implies the payload is a real model", () => {
+  it("says placement, and explicitly disclaims validity", async () => {
+    const probe = vi.fn().mockResolvedValue(true);
+
+    const r = await verifyManagerVisibility("loras", "KNP_000003000.safetensors", {
+      attempts: 1,
+      probe,
+    });
+
+    expect(r.visibility).toBe("visible");
+    expect(r.note).toMatch(/PLACEMENT, not validity/i);
+    // The mechanism, so the reader can tell WHY a listing proves so little.
+    expect(r.note).toMatch(/whatever the URL returned under the name you asked for/i);
+    expect(r.note).toMatch(/cannot carry this MCP's credentials/i);
+    // The tell a caller can actually act on.
+    expect(r.note).toMatch(/login page is ~10KB/i);
+  });
+
+  it("does not use the word CONFIRMED for a Manager dispatch", async () => {
+    const probe = vi.fn().mockResolvedValue(true);
+
+    const r = await verifyManagerVisibility("loras", "x.safetensors", { attempts: 1, probe });
+
+    // The label is the whole defect: "CONFIRMED" reads as "this worked".
+    expect(r.note).not.toMatch(/\bCONFIRMED\b/);
+  });
+});
+
+// THE WIRING. The label lives in the tool's Manager branch, so the helper tests
+// above cannot see a revert to "CONFIRMED:" there — the same call-site blindness
+// that has bitten this suite repeatedly. Read the source, the way the other
+// prose gates in this repo do.
+describe("the tool's Manager branch never labels a listing as confirmation", () => {
+  it("has no CONFIRMED label on the viaManager path", () => {
+    const src = readFileSync(
+      new URL("../../tools/model-management.ts", import.meta.url),
+      "utf-8",
+    );
+    const start = src.indexOf("const text = job.viaManager");
+    expect(start, "the viaManager branch must still exist").toBeGreaterThan(-1);
+    const branch = src.slice(start, start + 1400);
+
+    // The regression, stated exactly: `CONFIRMED: ${managerSeen.note}`.
+    expect(branch).not.toMatch(/`CONFIRMED[:\s]/);
+    expect(branch).toMatch(/LISTED \(placement only, NOT validity\)/);
   });
 });

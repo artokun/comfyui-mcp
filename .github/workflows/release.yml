@@ -132,8 +132,37 @@ jobs:
       - name: Publish to npm
         run: npm publish --provenance --access public --tag "${{ steps.disttag.outputs.value }}"
 
+      # The release body is THIS VERSION's CHANGELOG section, not GitHub's
+      # synthesised "What's Changed".
+      #
+      # `generate_release_notes: true` alone asks GitHub to diff against a
+      # previous release IT chooses. With versions cut back-to-back (and
+      # prereleases interleaved) that base is routinely many versions old, so
+      # v0.50.31 — whose changelog entry is a single line — shipped ~13,600
+      # characters listing every PR across a dozen releases. A reader cannot
+      # tell what changed in the thing they just installed, which is the one
+      # question a release page exists to answer.
+      #
+      # CHANGELOG.md is already curated per version, in our words, so it is both
+      # shorter and more honest. Extraction failing is NOT fatal: we fall back to
+      # the generated notes rather than publishing an empty release body.
+      - name: Build release notes from CHANGELOG
+        id: relnotes
+        run: |
+          set -euo pipefail
+          if node scripts/changelog-section.mjs "${GITHUB_REF_NAME}" > RELEASE_NOTES.md; then
+            echo "from_changelog=true" >> "$GITHUB_OUTPUT"
+            echo "release notes for ${GITHUB_REF_NAME} ($(wc -c < RELEASE_NOTES.md) chars):"
+            cat RELEASE_NOTES.md
+          else
+            echo "from_changelog=false" >> "$GITHUB_OUTPUT"
+            rm -f RELEASE_NOTES.md
+            echo "::warning::No CHANGELOG section for ${GITHUB_REF_NAME}; falling back to generated notes."
+          fi
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
         with:
-          generate_release_notes: true
+          body_path: ${{ steps.relnotes.outputs.from_changelog == 'true' && 'RELEASE_NOTES.md' || '' }}
+          generate_release_notes: ${{ steps.relnotes.outputs.from_changelog != 'true' }}
           prerelease: ${{ steps.disttag.outputs.prerelease == 'true' }}

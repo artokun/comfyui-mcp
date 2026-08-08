@@ -104,6 +104,9 @@ async function managerFetch(
   }
 
   if (!res.ok) {
+    // unknown-ok: "" is interpolated into an ERROR MESSAGE and nothing else — the
+    // HTTP status is reported either way, so an unreadable body costs detail in the
+    // text, never a wrong conclusion. Verified there is no branch on this value.
     const body = await res.text().catch(() => "");
     throw new NodeSnapshotError(
       `ComfyUI-Manager API ${res.status} ${res.statusText} for ${path}`,

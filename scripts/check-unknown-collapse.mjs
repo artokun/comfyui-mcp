@@ -153,6 +153,16 @@ function readStatement(line, matchIndex, lines, i) {
     if (balance(stmt) >= 0 && !/^\s*[.?]/.test(stmt) && stmt.trim() !== "") break;
     const prev = lines[j];
     if (prev === undefined || prev.trim() === "") break;
+    // A comment line inside a chain is not where the statement begins. Including
+    // it made `stmt` start with `//`, which ends the walk and leaves `head` as a
+    // comment — no binding, no return, so the site vanished from the scan
+    // ENTIRELY. That is worse than a missed waiver: any comment placed inside a
+    // chain silently switched the gate off for that site. Found by mutating a
+    // waiver down to a bare marker and getting 0 sites instead of a failure.
+    if (/^\s*(\/\/|\*|\/\*)/.test(prev)) {
+      start = j;
+      continue;
+    }
     stmt = prev + " " + stmt;
     start = j;
   }
@@ -204,7 +214,12 @@ function valueIsConsumed(line, matchIndex, matchEnd, lines, i) {
   // Both begin with `await`, so the leading text cannot tell them apart — the
   // trailing punctuation can. A terminating `;` on a statement that binds nothing
   // is the one shape where the value provably goes nowhere.
-  const tail = after.trim();
+  // A trailing line comment is not part of the statement. Without stripping it,
+  //     void p.catch(() => {}); // self-terminates at the deadline
+  // has a tail of `; // self-terminates…` rather than `;`, and a plainly discarded
+  // fire-and-forget reads as consumed. Found by sweeping the baseline: it was the
+  // one entry that could not be explained by the code it pointed at.
+  const tail = after.replace(/\/\/.*$/, "").replace(/\/\*[^]*$/, "").trim();
   // Nothing after the catch means the STATEMENT CONTINUES on the next line, so
   // the value has somewhere to go — a discarded call would have terminated.
   return tail !== ";";
@@ -313,10 +328,15 @@ if (args.includes("--baseline")) {
   const header = [
     "# #796 — sites where a failed observation is answered with an empty value.",
     "#",
-    "# THIS LIST MAY ONLY SHRINK. It is debt, not history: fixing a site means",
-    "# deleting its line. Adding a line to silence a new failure is the documented",
-    "# bypass of this gate — use a reasoned `// unknown-ok:` comment at the site",
-    "# instead, where the next reader will actually see it.",
+    "# THIS LIST IS EMPTY, AND A TEST ASSERTS IT STAYS EMPTY. All 38 original",
+    "# entries have been read: one was a real defect (runpod-ssh reported a sha256",
+    "# MISMATCH when hashing had FAILED), one was a false positive in this gate",
+    "# itself, and the other 36 were already correct and now carry a reasoned",
+    "# `// unknown-ok:` at the site explaining why.",
+    "#",
+    "# So there is no debt left to grandfather, and adding a line here is no longer",
+    "# a slow bypass — it is the only bypass. Clear a new site by fixing it, or by",
+    "# writing the reason at the site where the next reader will actually see it.",
     "#",
     "# Regenerate deliberately:  node scripts/check-unknown-collapse.mjs --baseline",
     "",

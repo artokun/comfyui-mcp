@@ -119,6 +119,9 @@ async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | undefined>
   let timer: NodeJS.Timeout | undefined;
   try {
     return await Promise.race<T | undefined>([
+      // unknown-ok: undefined IS the unknown value for this helper by design — the
+      // timeout branch below resolves to exactly the same thing, and every caller
+      // treats it as "this probe did not answer".
       p.catch(() => undefined),
       new Promise<undefined>((resolve) => {
         timer = setTimeout(() => resolve(undefined), ms);

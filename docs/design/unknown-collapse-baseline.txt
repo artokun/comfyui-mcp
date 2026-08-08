@@ -1,46 +1,14 @@
 # #796 — sites where a failed observation is answered with an empty value.
 #
-# THIS LIST MAY ONLY SHRINK. It is debt, not history: fixing a site means
-# deleting its line. Adding a line to silence a new failure is the documented
-# bypass of this gate — use a reasoned `// unknown-ok:` comment at the site
-# instead, where the next reader will actually see it.
+# THIS LIST IS EMPTY, AND A TEST ASSERTS IT STAYS EMPTY. All 38 original
+# entries have been read: one was a real defect (runpod-ssh reported a sha256
+# MISMATCH when hashing had FAILED), one was a false positive in this gate
+# itself, and the other 36 were already correct and now carry a reasoned
+# `// unknown-ok:` at the site explaining why.
+#
+# So there is no debt left to grandfather, and adding a line here is no longer
+# a slow bypass — it is the only bypass. Clear a new site by fixing it, or by
+# writing the reason at the site where the next reader will actually see it.
 #
 # Regenerate deliberately:  node scripts/check-unknown-collapse.mjs --baseline
-comfyui/client.ts	.catch(() => "")	#1
-comfyui/client.ts	.catch(() => "")	#2
-comfyui/client.ts	.catch(() => "")	#3
-comfyui/cloud-client.ts	.catch(() => "")	#1
-orchestrator/chatgpt-oauth-backend.ts	.catch(() => "")	#1
-orchestrator/grok-backend.ts	.catch(() => "")	#1
-orchestrator/ollama-backend.ts	.catch(() => "")	#1
-orchestrator/panel-tools.ts	.catch(() => {})	#1
-services/civitai-resolver.ts	.catch(() => "")	#1
-services/download-cache.ts	.catch(() => false)	#1
-services/download-cache.ts	.catch(() => false)	#2
-services/env-capabilities.ts	.catch(() => undefined)	#1
-services/image-convert.ts	.catch(() => undefined)	#1
-services/image-convert.ts	.catch(() => undefined)	#2
-services/llamacpp-probe.ts	.catch(() => "")	#1
-services/manager-config.ts	.catch(() => "")	#1
-services/missing-models.ts	.catch(() => undefined)	#1
-services/model-resolver.ts	.catch(() => "")	#1
-services/node-management.ts	.catch(() => "")	#1
-services/node-snapshots.ts	.catch(() => "")	#1
-services/queue-manager.ts	.catch(() => null)	#2
-services/queue-manager.ts	.catch(() => null)	#3
-services/registry-client.ts	.catch(() => "")	#1
-services/runpod-ssh.ts	.catch(() => "")	#1
-services/storage-upload.ts	.catch(() => undefined)	#1
-services/storage-upload.ts	.catch(() => undefined)	#2
-services/training-jobs.ts	.catch(() => null)	#1
-services/training-jobs.ts	.catch(() => null)	#2
-services/training-jobs.ts	.catch(() => null)	#4
-services/training-jobs.ts	.catch(() => null)	#5
-services/training-jobs.ts	.catch(() => null)	#6
-services/workflow-deps.ts	.catch(() => "")	#1
-tools/memory-management.ts	.catch(() => "")	#1
-tools/skills-access.ts	.catch(() => "")	#1
-tools/template-schema.ts	.catch(() => "")	#1
-tools/workflow-library.ts	.catch(() => "")	#1
-tools/workflow-lock.ts	.catch(() => "")	#1
-tools/workflow-lock.ts	.catch(() => "")	#2
+

@@ -416,13 +416,31 @@ describe("post-write: the reported path is VERIFIED, not intended (#369)", () =>
     expect(res.verifiedPath).toBe(real);
   });
 
-  it("reports NOT-VISIBLE (naming the server's real models dir) when the file is invisible", async () => {
+  // This test's own fixture writes INTO /live/ComfyUI/models — the very root the
+  // running server reported — so its original assertion ("move the file into the
+  // running server's models tree") was pinning #1131: an instruction naming the
+  // directory the file was already in. The verdict is unchanged; the remedy is
+  // the stale-listing one, and the outside-the-root case is covered below.
+  it("reports NOT-VISIBLE and blames the stale listing when the file is inside the live root", async () => {
     h.liveListings["loras"] = ["something-else.safetensors"];
     const res = await verifyLandedModel(target, "loras", { attempts: 2, retryMs: 0 });
     expect(res.liveVisible).toBe("not-visible");
     expect(res.verifiedPath).toBe(target);
+    expect(res.note).toMatch(/does not list "new\.safetensors" under "loras" YET/);
+    expect(res.note).toMatch(/Do NOT move the file/);
+    expect(res.note).not.toMatch(/Move the file into the running server's models tree/);
+    expect(res.note).toContain(resolve("/live/ComfyUI/models"));
+  });
+
+  it("still says MOVE IT when the file is outside the live models root", async () => {
+    const stray = resolve("/somewhere/else/new.safetensors");
+    realpathMock.mockImplementation(async () => stray);
+    h.liveListings["loras"] = ["something-else.safetensors"];
+    const res = await verifyLandedModel(target, "loras", { attempts: 2, retryMs: 0 });
+    expect(res.liveVisible).toBe("not-visible");
     expect(res.note).toMatch(/does NOT list "new\.safetensors"/);
     expect(res.note).toMatch(/will not be usable/);
+    expect(res.note).toMatch(/Move the file into the running server's models tree/);
     expect(res.note).toContain(resolve("/live/ComfyUI/models"));
   });
 

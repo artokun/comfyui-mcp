@@ -313,3 +313,118 @@ describe("#796 the real repo", () => {
     expect(code, out).toBe(0);
   });
 });
+
+describe("#796 a trailing comment does not make a discarded call look consumed", () => {
+  it("ignores a line comment after the terminating semicolon", () => {
+    // Found by sweeping the baseline: `void p.catch(() => {}); // note` was the one
+    // entry that could not be explained by the code it pointed at. The tail read as
+    // `; // note` instead of `;`, so a plainly fire-and-forget call was flagged.
+    // A gate's false POSITIVES are what get it switched off.
+    const dir = mkdtempSync(join(tmpdir(), "unkcollapse-c-"));
+    try {
+      const s = join(dir, "src");
+      mkdirSync(s, { recursive: true });
+      writeFileSync(
+        join(s, "c.ts"),
+        `export function go() {\n` +
+          `  void poll().catch(() => {}); // self-terminates at the deadline\n` +
+          `  void other().catch(() => undefined); /* block form too */\n` +
+          `}\n`,
+        "utf8",
+      );
+      const out = execFileSync(
+        process.execPath,
+        [SCRIPT, "--src", s, "--baseline-file", join(dir, "b.txt"), "--list"],
+        { encoding: "utf8" },
+      );
+      expect(out).toContain("0 consuming sites");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("#796 the baseline is EMPTY, and stays that way", () => {
+  it("grandfathers nothing", () => {
+    // The whole 38-entry list has been read: 1 real defect, 1 gate false
+    // positive, 36 already correct and now carrying a reasoned `unknown-ok:` at
+    // the site. With no debt left to grandfather, a line here is no longer a slow
+    // bypass — it is the ONLY bypass, so it is worth failing loudly on.
+    const raw = readFileSync(
+      join(process.cwd(), "docs", "design", "unknown-collapse-baseline.txt"),
+      "utf8",
+    );
+    const entries = raw
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l && !l.startsWith("#"));
+    expect(
+      entries,
+      `the baseline must stay empty — clear a new site by FIXING it, or with a\n` +
+        `reasoned // unknown-ok: at the site. Entries found:\n${entries.join("\n")}`,
+    ).toEqual([]);
+  });
+});
+
+describe("#796 a comment inside a chain must not switch the gate off", () => {
+  const CHAIN = (comment: string) =>
+    `export async function r() {\n` +
+    `  const restored = await fs\n` +
+    `${comment}` +
+    `    .rename(a, b)\n` +
+    `    .then(() => true)\n` +
+    `    .catch(() => false);\n` +
+    `  return restored;\n` +
+    `}\n`;
+
+  function scan(body: string) {
+    const dir = mkdtempSync(join(tmpdir(), "unkcollapse-chain-"));
+    try {
+      const s = join(dir, "src");
+      mkdirSync(s, { recursive: true });
+      writeFileSync(join(s, "x.ts"), body, "utf8");
+      try {
+        return {
+          code: 0,
+          out: execFileSync(
+            process.execPath,
+            [SCRIPT, "--src", s, "--baseline-file", join(dir, "b.txt")],
+            { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+          ),
+        };
+      } catch (e) {
+        const err = e as { status: number; stdout: string; stderr: string };
+        return { code: err.status, out: (err.stdout ?? "") + (err.stderr ?? "") };
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("still FINDS the site when an ordinary comment sits mid-chain", () => {
+    // The walk-back used to stop on the comment and treat it as the statement
+    // start, leaving `head` as a comment — no binding, no return — so the site
+    // disappeared from the scan entirely. Any comment placed inside a chain
+    // silently switched the gate off for that site. Found by mutating a waiver
+    // down to a bare marker and getting a PASS instead of a failure.
+    const r = scan(CHAIN("    // a note about the rename\n"));
+    expect(r.code, r.out).toBe(1);
+    expect(r.out).toContain("x.ts:6");
+  });
+
+  it("a BARE marker mid-chain is rejected, not honoured", () => {
+    const r = scan(CHAIN("    // unknown-ok\n"));
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("bare 'unknown-ok'");
+  });
+
+  it("a REASONED marker mid-chain still clears it", () => {
+    const r = scan(
+      CHAIN(
+        "    // unknown-ok: a rename either completed or it did not, so false is the\n" +
+          "    // only honest answer and the caller preserves the backup either way.\n",
+      ),
+    );
+    expect(r.code, r.out).toBe(0);
+  });
+});

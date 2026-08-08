@@ -657,45 +657,57 @@ describe("downloadModel — remote mode (Manager install-model dispatch)", () =>
     }
   });
 
-  // ── #473 remote residual: WARN LOUDLY (never block) when a credential flip proves the
-  //    URL is AUTH-GATED — so a dispatched auth page isn't mistaken for a real model, while
-  //    a legitimate download is NEVER refused (the host's fetch vantage may differ). ──
-  it("WARNS but still dispatches when the URL is auth-gated — an HTML page that flips with the token", async () => {
+  // ── #473: REFUSE when a credential flip PROVES the URL is auth-gated. ──
+  //
+  // The probe establishes it — unauthenticated returns a login/error page, the SAME
+  // url with the credential returns a real model — and ComfyUI-Manager fetches
+  // server-side without our headers. Dispatching anyway knowingly writes that page
+  // under the caller's filename, where it LISTS as a model and only fails later
+  // inside a loader. That is the shape this issue was reported for three times.
+  //
+  // These tests previously asserted WARN-and-dispatch. The owner reversed it
+  // (2026-08-08) after weighing the tradeoff: a ComfyUI HOST carrying its own token
+  // would have succeeded and is now blocked — but that case is speculative, has two
+  // documented ways out, and fails LOUDLY at the moment of the request, whereas the
+  // corrupt file fails silently much later on someone else's canvas.
+  it("REFUSES to dispatch when the URL is auth-gated — an HTML page that flips with the token", async () => {
     config.civitaiApiToken = "tok"; // the local token that Manager can't receive
     flipFetch(htmlProbeResponse); // unauth → login HTML; with the token → real model
-    const out = await downloadModel(
-      "https://civitai.com/api/download/models/627113",
-      "loras",
-      "KNP.safetensors",
-    );
-    // NEVER blocks — the dispatch still happens (the host may succeed from its own vantage)…
-    expect(installModelViaManagerMock).toHaveBeenCalledTimes(1);
-    // …but a loud, specific warning is surfaced so the auth page isn't trusted as a model.
-    expect(out).toMatch(/AUTHENTICATION-GATED/i);
-    expect(out).toMatch(/CORRUPT model/i);
+
+    await expect(
+      downloadModel("https://civitai.com/api/download/models/627113", "loras", "KNP.safetensors"),
+    ).rejects.toThrow(/AUTHENTICATION-GATED/i);
+
+    // The point of refusing: nothing is handed to Manager, so no corrupt file exists.
+    expect(installModelViaManagerMock).not.toHaveBeenCalled();
   });
 
-  it("WARNS when an auth-gated URL returns a JSON error unauthenticated but flips with the token", async () => {
-    config.civitaiApiToken = "tok";
-    flipFetch(jsonAuthProbeResponse);
-    const out = await downloadModel(
-      "https://civitai.com/api/download/models/9",
-      "checkpoints",
-      "gated.safetensors",
-    );
-    expect(installModelViaManagerMock).toHaveBeenCalledTimes(1);
-    expect(out).toMatch(/AUTHENTICATION-GATED/i);
-  });
-
-  it("names the CivitAI host-token remediation in the auth-gated warning", async () => {
+  it("says plainly that NOTHING was written, so the caller does not go hunting", async () => {
     config.civitaiApiToken = "tok";
     flipFetch(htmlProbeResponse);
-    const out = await downloadModel(
-      "https://civitai.com/api/download/models/1",
-      "loras",
-      "x.safetensors",
-    );
-    expect(out).toMatch(/CIVITAI_API_TOKEN on the ComfyUI HOST/i);
+
+    await expect(
+      downloadModel("https://civitai.com/api/download/models/2", "loras", "y.safetensors"),
+    ).rejects.toThrow(/NOTHING was downloaded and nothing was written/i);
+  });
+
+  it("REFUSES when an auth-gated URL returns a JSON error unauthenticated but flips with the token", async () => {
+    config.civitaiApiToken = "tok";
+    flipFetch(jsonAuthProbeResponse);
+
+    await expect(
+      downloadModel("https://civitai.com/api/download/models/9", "checkpoints", "gated.safetensors"),
+    ).rejects.toThrow(/AUTHENTICATION-GATED/i);
+    expect(installModelViaManagerMock).not.toHaveBeenCalled();
+  });
+
+  it("names the CivitAI host-token remediation in the refusal", async () => {
+    config.civitaiApiToken = "tok";
+    flipFetch(htmlProbeResponse);
+
+    await expect(
+      downloadModel("https://civitai.com/api/download/models/1", "loras", "x.safetensors"),
+    ).rejects.toThrow(/CIVITAI_API_TOKEN on the ComfyUI HOST/i);
   });
 
   it("does NOT warn (no false alarm) on a location interstitial that does NOT flip with the token", async () => {
@@ -748,18 +760,23 @@ describe("downloadModel — remote mode (Manager install-model dispatch)", () =>
     expect(leaked).toBe(false);
   });
 
-  it("attaches the HF token by PARSED host for a genuine huggingface.co gated URL and warns on the flip", async () => {
+  it("attaches the HF token by PARSED host for a genuine huggingface.co gated URL and REFUSES on the flip", async () => {
     config.huggingfaceToken = "hf-secret";
     fetchMock.mockImplementation((_url: string, opts?: { headers?: Record<string, string> }) =>
       Promise.resolve(opts?.headers?.Authorization ? binaryProbeResponse() : htmlProbeResponse()),
     );
-    const out = await downloadModel(
-      "https://huggingface.co/org/repo/resolve/main/m.safetensors",
-      "checkpoints",
-      "m.safetensors",
-    );
-    expect(installModelViaManagerMock).toHaveBeenCalledTimes(1);
-    expect(out).toMatch(/AUTHENTICATION-GATED/i);
+
+    await expect(
+      downloadModel(
+        "https://huggingface.co/org/repo/resolve/main/m.safetensors",
+        "checkpoints",
+        "m.safetensors",
+      ),
+    ).rejects.toThrow(/AUTHENTICATION-GATED/i);
+
+    expect(installModelViaManagerMock).not.toHaveBeenCalled();
+    // The assertion this test exists for: the probe used the HF token, so the flip
+    // it observed is real rather than an unauthenticated fetch failing twice.
     const sentHf = fetchMock.mock.calls.some(
       (c) => (c[1] as { headers?: Record<string, string> } | undefined)?.headers?.Authorization === "Bearer hf-secret",
     );
@@ -774,15 +791,19 @@ describe("downloadModel — remote mode (Manager install-model dispatch)", () =>
       fetchMock.mockImplementation((_url: string, opts?: { headers?: Record<string, string> }) =>
         Promise.resolve(opts?.headers?.Authorization ? binaryProbeResponse() : htmlProbeResponse()),
       );
-      const out = await downloadModel(
-        "https://huggingface.co/org/repo/resolve/main/m.safetensors",
-        "checkpoints",
-        "m.safetensors",
-      );
-      expect(installModelViaManagerMock).toHaveBeenCalledTimes(1);
+      await expect(
+        downloadModel(
+          "https://huggingface.co/org/repo/resolve/main/m.safetensors",
+          "checkpoints",
+          "m.safetensors",
+        ),
+      ).rejects.toThrow(/AUTHENTICATION-GATED/i);
+
+      expect(installModelViaManagerMock).not.toHaveBeenCalled();
       // The URL was rewritten to the mirror, yet the HF token still applies (threaded
-      // wasHfUrl) → the flip is detected and the auth-gated warning fires.
-      expect(out).toMatch(/AUTHENTICATION-GATED/i);
+      // wasHfUrl) → the flip is detected and the dispatch is refused. Without the
+      // threading the mirror host would drop the token, both probes would return the
+      // page, no flip would be seen, and the corrupt file would ship.
       const sentToMirror = fetchMock.mock.calls.some(
         (c) =>
           String(c[0]).startsWith("https://hf-mirror.example") &&

@@ -86,12 +86,19 @@ function inferMimeType(filename: string): string {
 async function sourceFromPath(path: string): Promise<StorageUploadSource & { bytes: number }> {
   const lexicalPath = resolveOutputPath(path);
   const root = await realpath(getOutputDir());
+  // unknown-ok: the caller REFUSES on undefined (the throw immediately below), so a
+  // failed observation and a genuine absence both fail closed. The only cost is that
+  // the message says "not found" for e.g. a permission error — noted, not dangerous,
+  // because nothing proceeds on the unknown.
   const sourcePath = await realpath(lexicalPath).catch(() => undefined);
   if (!sourcePath) {
     throw new ValidationError(`Upload source not found: ${lexicalPath}`);
   }
   assertInsideOutput(root, sourcePath, "path");
 
+  // unknown-ok: undefined fails the isFile() test below and refuses, same as a
+  // genuine non-file. A path realpath just resolved that cannot then be stat-ed is
+  // not usable either way.
   const info = await stat(sourcePath).catch(() => undefined);
   if (!info?.isFile()) {
     throw new ValidationError(`Upload source not found: ${sourcePath}`);

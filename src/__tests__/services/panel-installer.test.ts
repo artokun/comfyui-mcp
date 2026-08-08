@@ -658,6 +658,78 @@ describe("runPanelAction", () => {
     );
   });
 
+  // #1133 — THE WIRING for the staged-update reading. readManagerReservation is
+  // unit-tested next door; only driving the real update path can show that this
+  // branch consults it at all, and that it sits AHEAD of the no-op cascade.
+  //
+  // Same persona as the #639 test above — the stale-3.x signature, nothing moved
+  // on disk — plus the one thing that changes its meaning: ComfyUI-Manager's own
+  // install-scripts.txt naming this pack for a next-boot switch.
+  it("#1133: Manager RESERVED the switch → reports STAGED + restart, never 'did NOT apply'", async () => {
+    const dir = join(CUSTOM_NODES, "comfyui-mcp-panel");
+    const reserveFile = join(
+      COMFY,
+      "user",
+      "__manager",
+      "startup-scripts",
+      "install-scripts.txt",
+    );
+    const h = makeDeps({
+      comfyuiPath: COMFY,
+      files: {
+        [join(dir, "pyproject.toml")]: pyproject(PANEL_REGISTRY_ID, "0.9.8"),
+        [reserveFile]:
+          `['${PANEL_REGISTRY_ID}', '#LAZY-CNR-SWITCH-SCRIPT', 'https://x/y.zip', ` +
+          `'/from', '/to', False, '/cn', 'python']\n`,
+      },
+      revs: { [dir]: "dddddddddddddddddddddddddddddddddddddddd" },
+      updateDetails: {
+        total_count: 0,
+        done_count: 2,
+        in_progress_count: 0,
+        pending_count: 0,
+        is_processing: false,
+      },
+      // No onUpdate: the pack has NOT moved on disk — which is correct here, and
+      // is exactly what made this read as a failure before.
+    });
+
+    const r = await runPanelAction("update", h.deps);
+
+    expect(r.message).toMatch(/STAGED, not failed/);
+    expect(r.message).toMatch(/RESTART ComfyUI/);
+    expect(r.restartRequired).toBe(true);
+    // The misreport that cost the reporter four attempts and a reinstall path.
+    expect(r.message).not.toMatch(/did NOT apply/);
+    expect(r.message).not.toMatch(/silent no-op/);
+    // It must not invent movement either — the pack IS still the old version.
+    expect(r.installedVersion).toBe("0.9.8");
+  });
+
+  it("#1133: no reservation for OUR pack → the no-op verdict is unchanged", async () => {
+    // The guard against over-reach: a reserve file naming somebody else must not
+    // convert a genuine failure into a pending success.
+    const dir = join(CUSTOM_NODES, "comfyui-mcp-panel");
+    const h = makeDeps({
+      comfyuiPath: COMFY,
+      files: {
+        [join(dir, "pyproject.toml")]: pyproject(PANEL_REGISTRY_ID, "0.9.8"),
+        [join(COMFY, "user", "__manager", "startup-scripts", "install-scripts.txt")]:
+          `['comfyui-impact-pack', '#LAZY-CNR-SWITCH-SCRIPT', 'https://x/y.zip', ` +
+          `'/from', '/to', False, '/cn', 'python']\n`,
+      },
+      revs: { [dir]: "dddddddddddddddddddddddddddddddddddddddd" },
+      updateDetails: {
+        total_count: 0,
+        done_count: 2,
+        in_progress_count: 0,
+        pending_count: 0,
+        is_processing: false,
+      },
+    });
+    await expect(runPanelAction("update", h.deps)).rejects.toBeInstanceOf(PanelInstallError);
+  });
+
   it("#639: unchanged version AND unchanged git-HEAD + coherent counts → fails closed (not success)", async () => {
     // An unchanged LOCAL git-HEAD is NOT proof of being at the upstream tip — it
     // only proves nothing was pulled, which is exactly the no-op. So even a git

@@ -6,6 +6,56 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.50.39] - 2026-08-08
+
+### MCP
+
+#### Fixed
+- a RESERVED Manager update is staged, not failed (#1141)
+
+
+## [0.50.38] - 2026-08-08
+
+### MCP
+
+#### Fixed
+- the GitHub Release body is THIS version's changelog, not every PR since forever (#1138)
+- stop telling users to move a model into the folder it is already in (#1137)
+
+
+## [0.50.37] - 2026-08-08
+
+### RunPod image
+
+#### Fixed
+- a hash that could not be COMPUTED is not a hash that DIFFERED (#1123)
+
+### MCP
+
+#### Added
+- report the ComfyUI FRONTEND version — the field #779 turned on (#1126)
+
+#### Fixed
+- REFUSE an auth-gated Manager dispatch instead of writing a corrupt model (#473) (#1134)
+- finish the #796 review — baseline reaches zero, and a comment could switch the gate off (#1125)
+
+#### Changed
+- ask for the ComfyUI FRONTEND version, and say why (#1127)
+
+
+## [0.50.36] - 2026-08-08
+
+### MCP
+
+#### Fixed
+- a Manager listing is PLACEMENT, never validity — my 0.50.29 regression (#473) (#1120)
+
+#### Changed
+- the shipped build's data-loss guards must actually guard (#1119)
+- pin the env var our errors tell people to set (#1118)
+- the tunnel-deferral comment named a function that does not exist (#1117)
+
+
 ## [0.50.35] - 2026-08-08
 
 ### MCP

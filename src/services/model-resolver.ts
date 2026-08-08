@@ -8,7 +8,7 @@ import { getClient, getSystemStats } from "../comfyui/client.js";
 import { getExtraModelRoots, getLiveExtraModelRoots } from "./extra-paths.js";
 import { resolveEffectiveComfyUIBase, resolveLiveServerRoot } from "./workspace-env.js";
 import { installModelViaManager } from "./node-management.js";
-import { ModelError, ValidationError } from "../utils/errors.js";
+import { ModelError, ValidationError, unreachableHostMessage } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 import { downloadWithCache, probeRemoteModelPayload } from "./download-cache.js";
 import { reportDownloadProgress } from "./download-progress.js";
@@ -224,8 +224,25 @@ export async function searchHuggingFaceModels(
   // Third-party API: bound the wait so a stalled response cannot wedge the
   // turn. Same class as #1026 — an unbounded metadata call has no limit at
   // all and hangs until the caller gives up.
-  const res = await fetch(url, { headers, signal: AbortSignal.timeout(20_000) });
+  //
+  // #1136: an unreachable HuggingFace is the failure most easily mistaken for
+  // "no such model" — this call backs model SEARCH, and its caller renders a
+  // zero-length array as "nothing found". Only errors thrown by fetch() itself
+  // take this path; an HTTP status is a real answer and keeps its own wording.
+  const res = await fetch(url, { headers, signal: AbortSignal.timeout(20_000) }).catch(
+    (err: unknown) => {
+      const { message, code } = unreachableHostMessage(err, url, "the HuggingFace model search", {
+        remedy:
+          "If huggingface.co is blocked in your region, set HF_ENDPOINT to a reachable mirror " +
+          "(e.g. https://hf-mirror.com) and retry.",
+      });
+      throw new ModelError(message, { url, code });
+    },
+  );
   if (!res.ok) {
+    // unknown-ok: "" is interpolated into an ERROR MESSAGE and nothing else — the
+    // HTTP status is reported either way, so an unreadable body costs detail in the
+    // text, never a wrong conclusion. Verified there is no branch on this value.
     const body = await res.text().catch(() => "");
     throw new ModelError(
       `HuggingFace API ${res.status}: ${res.statusText}`,
@@ -1304,7 +1321,13 @@ export async function verifyManagerVisibility(
         visibility: "visible",
         note:
           `The connected ComfyUI now lists ${targetSubfolder}/${filename}, so the dispatch ` +
-          `landed somewhere it reads.`,
+          `landed somewhere it reads. That is PLACEMENT, not validity: a listing proves a file ` +
+          `of that NAME exists, and Manager writes whatever the URL returned under the name you ` +
+          `asked for. #473 is exactly this — a CivitAI login page saved as a .safetensors, ` +
+          `listed happily, and only discovered when LoraLoader failed to deserialize it. ` +
+          `Manager cannot carry this MCP's credentials, so an auth-gated URL is the case to ` +
+          `distrust: if the file is implausibly small for its kind (a login page is ~10KB), ` +
+          `treat it as failed and re-fetch it locally with COMFYUI_PATH set.`,
       };
     }
     if (has === false) asked = true;
@@ -1542,14 +1565,83 @@ export async function verifyLandedModel(
   }
   return {
     verifiedPath,
-    liveVisible: "not-visible",
-    note:
-      `The file IS on disk at ${verifiedPath}, but the connected ComfyUI ` +
-      `(${getComfyUIBaseUrl()}) does NOT list "${wanted}" under "${category}" — it will not be ` +
-      `usable in a workflow from there.` +
-      (liveModelsDir ? ` The models directory that server reads is ${liveModelsDir}.` : "") +
-      " Move the file into the running server's models tree (or point COMFYUI_PATH at that install and re-download).",
+    ...notVisibleVerdict({
+      verifiedPath,
+      liveModelsDir,
+      wanted,
+      category,
+      baseUrl: getComfyUIBaseUrl(),
+    }),
   };
+}
+
+/**
+ * The verdict for a file that is on disk but absent from the live listing (#1131).
+ *
+ * "Not listed" has TWO causes and they take OPPOSITE remedies. If the file sits
+ * UNDER the very models root the server reads, it is not misplaced: the server
+ * simply has not re-read that folder yet. ComfyUI caches its loader option lists
+ * and invalidates them on the directory's mtime, so a check this soon after the
+ * write routinely races it. Telling that user to "move the file into the running
+ * server's models tree" names a directory the file is ALREADY in — a remedy that
+ * cannot be followed, which is what the reporter received. Only a file OUTSIDE
+ * that root is genuinely in the wrong place.
+ *
+ * The DECISION lives here rather than at the call site so it is covered by the
+ * same tests as the wording; a branch chosen upstream and passed in as a boolean
+ * would be exactly the untested wiring this repo keeps getting caught by.
+ */
+export function notVisibleVerdict(args: {
+  verifiedPath: string;
+  liveModelsDir: string | undefined;
+  wanted: string;
+  category: string;
+  baseUrl: string;
+}): { liveVisible: "not-visible"; note: string } {
+  const { verifiedPath, liveModelsDir, wanted, category, baseUrl } = args;
+  const insideLiveRoot = liveModelsDir !== undefined && isUnderRoot(verifiedPath, liveModelsDir);
+  return {
+    // Still not VISIBLE — we did not observe it in the listing, and #369 exists
+    // because an unobserved placement must not render as confirmed. The verdict
+    // is unchanged; what changes is the explanation and the remedy.
+    liveVisible: "not-visible",
+    note: insideLiveRoot
+      ? `The file IS on disk at ${verifiedPath}, which is INSIDE the models directory the ` +
+        `connected ComfyUI reads (${liveModelsDir}) — so it is in the right place. That server ` +
+        `does not list "${wanted}" under "${category}" YET, which almost always means its ` +
+        `cached loader options have not been re-read since the write (ComfyUI invalidates them ` +
+        `on the directory's mtime). Do NOT move the file. Refresh the node/model definitions ` +
+        `— install_comfyui (action:"refresh_nodes"), or the panel's refresh — or restart ` +
+        `ComfyUI, then check list_local_models again.`
+      : `The file IS on disk at ${verifiedPath}, but the connected ComfyUI ` +
+        `(${baseUrl}) does NOT list "${wanted}" under "${category}" — it will not be ` +
+        `usable in a workflow from there.` +
+        (liveModelsDir ? ` The models directory that server reads is ${liveModelsDir}.` : "") +
+        " Move the file into the running server's models tree (or point COMFYUI_PATH at that install and re-download).",
+  };
+}
+
+/**
+ * Is `file` inside `root`? Compared on NORMALIZED paths (#1131).
+ *
+ * Windows mixes separators and is case-insensitive, so `C:\ComfyUI\models` and
+ * `c:/comfyui/models` name the same directory — comparing raw strings would call
+ * a correctly-placed file misplaced and print the "move it there" remedy for a
+ * file already there. The boundary check requires a separator so `…/models2`
+ * never counts as inside `…/models`.
+ */
+export function isUnderRoot(
+  file: string,
+  root: string,
+  platform: string = process.platform,
+): boolean {
+  const norm = (s: string): string => {
+    const slashed = s.replace(/\\/g, "/").replace(/\/+$/, "");
+    return platform === "win32" ? slashed.toLowerCase() : slashed;
+  };
+  const f = norm(file);
+  const r = norm(root);
+  return f === r || f.startsWith(`${r}/`);
 }
 
 /**
@@ -2230,7 +2322,6 @@ async function downloadModelViaManagerRemote(
     authHeaders: localAuthHeadersFor(url, auth, wasHfUrl),
   });
   if (signal?.aborted) throw new DOMException("The download was cancelled.", "AbortError");
-  let authGateWarning = "";
   if (probe.verdict === "non-model") {
     const what =
       probe.kind === "html"
@@ -2251,16 +2342,31 @@ async function downloadModelViaManagerRemote(
         `token is applied and the payload is validated on disk`
       : `configure the credential on the ComfyUI host, or download to a LOCAL ComfyUI where the ` +
         `credential is applied and the payload is validated on disk`;
-    authGateWarning =
-      ` WARNING: this URL is AUTHENTICATION-GATED — an unauthenticated fetch (exactly what ` +
-      `ComfyUI-Manager performs server-side, since it cannot carry the MCP's auth headers) ` +
-      `returns ${what}, while the SAME URL fetched WITH the configured credential returns a ` +
-      `real model. ComfyUI-Manager will therefore almost certainly save that auth/error page ` +
-      `under "${resolvedFilename}" as a CORRUPT model (it fails at load time, e.g. "header too ` +
-      `large" / "Expecting value") — do NOT treat it as a real model until verified. To ` +
-      `download it, ${remediation}.`;
+    // #473 — REFUSE, do not dispatch. The probe has PROVEN the gate: the same URL
+    // returns a login/error page unauthenticated and a real model with the
+    // credential, and Manager fetches server-side without our headers. Dispatching
+    // anyway is knowingly writing a corrupt file under the caller's chosen
+    // filename — it then LISTS as a model and fails much later inside a loader
+    // ("header too large" / "Expecting value"), which is how this issue was
+    // reported three times.
+    //
+    // Owner's call (2026-08-08) after weighing the false-refusal risk: a ComfyUI
+    // HOST that carries its OWN token would have succeeded, and is now blocked.
+    // That case is speculative, has two documented ways out (below), and fails
+    // LOUDLY at the point of the request; the corrupt-file case is real,
+    // recurring, and fails silently hours later on someone else's canvas.
     logger.warn(
-      "Remote model dispatch is authentication-gated; ComfyUI-Manager will fetch it unauthenticated",
+      "Refusing an authentication-gated model dispatch to ComfyUI-Manager (it cannot carry our credentials)",
+      { url: redactUrlForLogs(dispatchUrl, sensitiveParams), filename: resolvedFilename },
+    );
+    throw new ModelError(
+      `Refusing to dispatch "${resolvedFilename}" to ComfyUI-Manager: this URL is ` +
+        `AUTHENTICATION-GATED. An unauthenticated fetch returns ${what}, while the SAME URL ` +
+        `fetched WITH the configured credential returns a real model — and ComfyUI-Manager ` +
+        `fetches server-side and cannot carry this MCP's auth headers. It would therefore save ` +
+        `that auth/error page under "${resolvedFilename}" as a CORRUPT model, which lists ` +
+        `normally and only fails later at load time ("header too large" / "Expecting value"). ` +
+        `NOTHING was downloaded and nothing was written. To download it, ${remediation}.`,
       { url: redactUrlForLogs(dispatchUrl, sensitiveParams), filename: resolvedFilename },
     );
   }
@@ -2307,7 +2413,7 @@ async function downloadModelViaManagerRemote(
       "local models directory to stream into (no COMFYUI_PATH, no saved workspace, and the " +
       "running server's launch arguments did not identify one). That is a routing fallback, NOT " +
       "a claim that the server is remote; set COMFYUI_PATH to stream directly instead";
-  return `${normalizedSubfolder}/${resolvedFilename} (${routeNote} — download continues server-side. ${managerDestinationCaveat()})${authGateWarning}${authWarning}`;
+  return `${normalizedSubfolder}/${resolvedFilename} (${routeNote} — download continues server-side. ${managerDestinationCaveat()})${authWarning}`;
 }
 
 /**

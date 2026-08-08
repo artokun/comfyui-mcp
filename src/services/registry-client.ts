@@ -1,4 +1,4 @@
-import { RegistryError } from "../utils/errors.js";
+import { RegistryError, unreachableHostMessage } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 
 const REGISTRY_BASE = "https://api.comfy.org";
@@ -52,8 +52,21 @@ async function registryFetch<T>(path: string): Promise<T> {
   // Third-party API: bound the wait so a stalled response cannot wedge the
   // turn. Same class as #1026 — an unbounded metadata call has no limit at
   // all and hangs until the caller gives up.
-  const res = await fetch(url, { signal: AbortSignal.timeout(20_000) });
+  //
+  // #1136: a failure to REACH api.comfy.org is the one that misleads worst here,
+  // because this endpoint backs "search for the pack you need" — the surface a
+  // filtered user is most often sent to, and the one whose failure they read as
+  // "the pack does not exist". Only errors thrown by fetch() itself take this
+  // path; an HTTP status is a real answer from the host and keeps its own
+  // wording below.
+  const res = await fetch(url, { signal: AbortSignal.timeout(20_000) }).catch((err: unknown) => {
+    const { message, code } = unreachableHostMessage(err, url, "the ComfyUI Registry lookup");
+    throw new RegistryError(message, { url, code });
+  });
   if (!res.ok) {
+    // unknown-ok: "" is interpolated into an ERROR MESSAGE and nothing else — the
+    // HTTP status is reported either way, so an unreadable body costs detail in the
+    // text, never a wrong conclusion. Verified there is no branch on this value.
     const body = await res.text().catch(() => "");
     throw new RegistryError(
       `Registry API ${res.status}: ${res.statusText}`,

@@ -220,6 +220,9 @@ export class ChatGptOAuthBackend extends OllamaBackend {
     }
     if (!res.ok || !res.body) {
       throw new Error(
+        // unknown-ok: "" is interpolated into an ERROR MESSAGE and nothing else — the
+        // HTTP status is reported either way, so an unreadable body costs detail in the
+        // text, never a wrong conclusion. Verified there is no branch on this value.
         `Codex Responses http ${res.status}: ${(await res.text().catch(() => "")).slice(0, 400)}`,
       );
     }

@@ -533,6 +533,9 @@ async function queueRemainingCount(): Promise<number | undefined> {
  * the expected validation JSON (#485).
  */
 async function buildEnqueueError(res: Response): Promise<ComfyUIError> {
+  // unknown-ok: "" only routes to the GENERIC status message, which reports the
+  // HTTP status and claims nothing about node errors. An unread body and an empty
+  // body get the same honest fallback rather than a fabricated validation result.
   const bodyText = await res.text().catch(() => "");
   const generic = `ComfyUI /prompt returned ${res.status} ${res.statusText}`;
 
@@ -831,6 +834,9 @@ export async function setSetting(id: string, value: unknown): Promise<void> {
   });
   if (res.status === 404) throw settingsVersionDriftError();
   if (!res.ok) {
+    // unknown-ok: "" is interpolated into an ERROR MESSAGE and nothing else — the
+    // HTTP status is reported either way, so an unreadable body costs detail in the
+    // text, never a wrong conclusion. Verified there is no branch on this value.
     const body = await res.text().catch(() => "");
     throw new ConnectionError(
       `ComfyUI /settings/${id} returned ${res.status} ${res.statusText}: ${body.slice(0, 500)}`,
@@ -922,6 +928,9 @@ export async function uploadImageHttp(
     body: formData,
   });
   if (!res.ok) {
+    // unknown-ok: "" is interpolated into an ERROR MESSAGE and nothing else — the
+    // HTTP status is reported either way, so an unreadable body costs detail in the
+    // text, never a wrong conclusion. Verified there is no branch on this value.
     const text = await res.text().catch(() => "");
     throw new Error(`ComfyUI /upload/image returned ${res.status}: ${text}`);
   }

@@ -299,6 +299,84 @@ export interface PanelInstallerDeps {
 }
 
 /**
+ * Did ComfyUI-Manager STAGE this pack's update for the next startup? (#1133)
+ *
+ * When a pack's files are in use — which they always are for the panel, since
+ * the running ComfyUI is serving it — Manager does not swap the directory. It
+ * appends a `#LAZY-CNR-SWITCH-SCRIPT` line naming the pack to
+ * `<user>/__manager/startup-scripts/install-scripts.txt`, prints
+ * "Installation reserved: <pack>", and returns SUCCESS. Its prestartup script
+ * applies the line on the next boot.
+ *
+ * From the outside that is indistinguishable from the stale-3.x silent no-op:
+ * the queue drains, and the pack has not moved on disk. A reporter on ComfyUI
+ * Desktop hit this four times in a row, was told each time that the update "did
+ * NOT apply", and was steered toward reinstall-from-source for something a
+ * plain restart would have finished.
+ *
+ * This is the file Manager itself writes, so its presence is direct evidence of
+ * the staging rather than an inference from the absence of movement. Both
+ * `manager_files_path` layouts are checked (`manager_migration.get_manager_path`
+ * moved it from `user/default/ComfyUI-Manager` to `user/__manager`).
+ *
+ * TRI-STATE, deliberately. "reserved" is proof of staging; "absent" is proof of
+ * none; "unknown" means no candidate file could be read — remote mode, a
+ * relocated user dir, a permissions failure — and must never be reported as
+ * "not staged", which is the very fold this fix exists to undo.
+ */
+export type ManagerReservation = "reserved" | "absent" | "unknown";
+
+export function readManagerReservation(
+  comfyuiPath: string | undefined,
+  packName: string,
+  deps: { existsSync: (p: string) => boolean; readFile: (p: string) => string },
+): ManagerReservation {
+  if (!comfyuiPath) return "unknown";
+  const candidates = [
+    join(comfyuiPath, "user", "__manager", "startup-scripts", "install-scripts.txt"),
+    join(
+      comfyuiPath,
+      "user",
+      "default",
+      "ComfyUI-Manager",
+      "startup-scripts",
+      "install-scripts.txt",
+    ),
+  ];
+
+  let sawDir = false;
+  for (const file of candidates) {
+    // The DIRECTORY existing is what makes an absent file meaningful: Manager
+    // creates startup-scripts/ at boot and only writes the txt when something
+    // is actually reserved, so "dir there, file not" IS proof of no staging.
+    // Without that distinction an install whose user dir we cannot see would
+    // read as "nothing staged" — the wrong half of the tri-state.
+    if (deps.existsSync(dirname(file))) sawDir = true;
+    let contents: string;
+    try {
+      if (!deps.existsSync(file)) continue;
+      contents = deps.readFile(file);
+    } catch {
+      // The file is there and unreadable: strictly "could not determine".
+      return "unknown";
+    }
+    for (const line of contents.split(/\r?\n/)) {
+      if (!line.includes("#LAZY-CNR-SWITCH-SCRIPT")) continue;
+      // Manager writes a repr'd Python list: ['<pack>', '#LAZY-CNR-SWITCH-SCRIPT', …].
+      // Match the pack as a whole quoted token so `comfyui-agent-panel` is not
+      // matched by `comfyui-agent-panel-extras`.
+      if (new RegExp(`['"]${escapeForRegExp(packName)}['"]`).test(line)) return "reserved";
+    }
+  }
+  return sawDir ? "absent" : "unknown";
+}
+
+/** Escape a literal for embedding in a RegExp. */
+function escapeForRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
  * Resolve the current commit sha of a git checkout at `dir` by reading its
  * `.git` metadata directly (no subprocess). Handles a normal `.git/` dir, a
  * `.git` FILE pointer (worktrees/submodules: `gitdir: <path>`), a symbolic HEAD
@@ -5620,6 +5698,50 @@ async function runPanelActionCore(
       assertSameTarget("before reporting the update verdict");
       return finalizeUpdate(verdict, post, result); // throws, honestly
     }
+    // #1133 — STAGED IS NOT FAILED, and it short-circuits every fallback below.
+    //
+    // Manager cannot swap a directory the running server is serving, so for the
+    // panel specifically it reserves the switch for the next startup and returns
+    // success. The pack legitimately has not moved, which is exactly the shape
+    // the no-op/unverified branches read as failure. Reporting that sends the
+    // agent to reinstall-from-source — a destructive path — for something a
+    // restart finishes, and on ComfyUI Desktop (where the reinstall fallback
+    // refuses and restart_comfyui declines to act) it leaves no route at all.
+    //
+    // Only a POSITIVE "reserved" reading diverts here. "absent" and "unknown"
+    // both fall through to the existing verdicts unchanged: an install whose
+    // user directory we cannot read must not have its failure re-labelled as a
+    // pending success, which would be this same defect pointing the other way.
+    //
+    // And only where NOTHING MOVED. install-scripts.txt is append-only until the
+    // next boot consumes it, so on an outcome where the pack demonstrably did
+    // change on disk a leftover line would describe some earlier reservation,
+    // not this update — "moved-unknown-direction" keeps its own verdict.
+    if (verdict.outcome === "no-op" || verdict.outcome === "unverified") {
+      const reservation = readManagerReservation(comfyPath, PANEL_REGISTRY_ID, deps);
+      if (reservation === "reserved") {
+        assertSameTarget("before reporting a staged panel update");
+        const message =
+          `Panel update is STAGED, not failed: ComfyUI-Manager could not swap ` +
+          `${PANEL_REGISTRY_ID} while the running ComfyUI is serving it, so it reserved the ` +
+          `switch for the next startup ("Installation reserved" in the ComfyUI log) and ` +
+          `recorded it in startup-scripts/install-scripts.txt. The pack on disk is still ` +
+          `${post.version ?? "unreadable"} and WILL NOT change until ComfyUI restarts — this ` +
+          `is expected, not a no-op. RESTART ComfyUI to apply it, then confirm with ` +
+          `${describeInstallPanelAction("status", "a re-check on the ComfyUI host")}. ` +
+          `Do NOT reinstall from source and do NOT re-run the update — each retry only ` +
+          `reserves it again.`;
+        return {
+          action: "update",
+          result: { ...result, message },
+          restartRequired: true,
+          message,
+          previousVersion,
+          installedVersion: post.version,
+        };
+      }
+    }
+
     // #724/#824 — the Manager produced no usable verdict (the proven stale
     // legacy-3.x no-op, OR an incoherent-but-provably-idle drained queue), and
     // the panel dir is a real git checkout (a pre-op HEAD resolved; a registry
