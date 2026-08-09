@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const hoisted = vi.hoisted(() => ({
   resolvers: [] as Array<{ resolve: (p: string) => void; reject: (e: Error) => void; url: string }>,
@@ -116,7 +116,8 @@ import {
   downloadIdFor,
   describePlacement,
 } from "../../services/download-jobs.js";
-import { setProgressDir, PERSIST_OWNER } from "../../services/download-progress.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { setProgressDir, PERSIST_OWNER, __resetStableRecordsDir } from "../../services/download-progress.js";
 import * as progressModule from "../../services/download-progress.js";
 import { downloadModel, resolveDownloadTarget } from "../../services/model-resolver.js";
 import { mkdtemp, mkdir, symlink, writeFile, readFile, rm as fsRm } from "node:fs/promises";
@@ -186,6 +187,9 @@ const URL_A = "https://huggingface.co/org/repo/resolve/main/big.safetensors";
 const URL_B = "https://huggingface.co/org/repo/resolve/main/other.safetensors";
 
 describe("download job registry", () => {
+  let storeDir = "";
+  const savedDataDir = process.env.COMFYUI_MCP_DATA_DIR;
+
   beforeEach(() => {
     hoisted.resolvers.length = 0;
     hoisted.calls = 0;
@@ -198,6 +202,25 @@ describe("download job registry", () => {
     hoisted.lastOnTrayId = undefined;
     hoisted.lastOnLanded = undefined;
     resetDownloadJobs();
+    // #1148 — THE PERSISTED STORE IS NOW ON BY DEFAULT, so it needs isolating
+    // like every other on-disk state this suite touches. Without this, records
+    // written by one case are still on disk for the next and show up in
+    // `listDownloadJobs()`, which merges in-memory with persisted rows: cases
+    // asserting an exact job count started seeing the previous case's downloads.
+    //
+    // That accumulation is CORRECT in production — `action:"status"` with no
+    // selector is meant to list every tracked download, and records self-reap
+    // after 6h. It is only a test that needs each case to start empty.
+    storeDir = mkdtempSync(pathJoin(tmpdir(), "djobs-store-"));
+    process.env.COMFYUI_MCP_DATA_DIR = storeDir;
+    __resetStableRecordsDir();
+  });
+
+  afterEach(() => {
+    if (savedDataDir === undefined) delete process.env.COMFYUI_MCP_DATA_DIR;
+    else process.env.COMFYUI_MCP_DATA_DIR = savedDataDir;
+    __resetStableRecordsDir();
+    if (storeDir) rmSync(storeDir, { recursive: true, force: true });
   });
 
   it("reports a download as in flight rather than finished or failed", async () => {
@@ -1981,6 +2004,12 @@ describe("download job registry", () => {
     it("stops a completed job's heartbeat when persistence goes inactive (no forever-retrying interval)", async () => {
       const dir = await mkdtemp(pathJoin(tmpdir(), "djobs-persist-"));
       setProgressDir(dir);
+      // A path whose parent is a FILE, used below to make the fallback store
+      // genuinely unavailable — which is what "persistence goes inactive" means
+      // now that a default records dir exists.
+      const blockedParent = pathJoin(dir, "i-am-a-file");
+      await writeFile(blockedParent, "not a directory");
+      const savedDataForHb = process.env.COMFYUI_MCP_DATA_DIR;
       vi.useFakeTimers();
       const clearSpy = vi.spyOn(globalThis, "clearInterval");
       try {
@@ -1990,7 +2019,12 @@ describe("download job registry", () => {
         // Persistence goes INACTIVE, then the download completes. The settled finally's
         // terminal persist no-ops (no dir → not durable), so it does NOT clear the
         // heartbeat there — the heartbeat itself must stop on its next tick.
+        // #1148 — clearing the progress dir alone no longer makes persistence
+        // inactive: it falls back to the stable records dir. Neutralise that too,
+        // so this still tests what it says it does.
         setProgressDir("");
+        process.env.COMFYUI_MCP_DATA_DIR = pathJoin(blockedParent, "nested");
+        __resetStableRecordsDir();
         hoisted.resolvers[0].resolve("/M/checkpoints/big.safetensors");
         await entry.settled;
         clearSpy.mockClear();
@@ -2001,15 +2035,25 @@ describe("download job registry", () => {
       } finally {
         vi.useRealTimers();
         setProgressDir("");
+        if (savedDataForHb === undefined) delete process.env.COMFYUI_MCP_DATA_DIR;
+        else process.env.COMFYUI_MCP_DATA_DIR = savedDataForHb;
+        __resetStableRecordsDir();
         await fsRm(dir, { recursive: true, force: true });
       }
     });
 
-    it("installs a heartbeat only when the persisted store is active (no leak on non-panel downloads)", async () => {
-      // No progress dir → persistence inactive → NO heartbeat interval (would otherwise
-      // leak, retrying a no-op forever since persist never reports durable).
+    it("installs a heartbeat whenever there is somewhere to persist — including without a panel", async () => {
+      // #1148 — THE PREMISE CHANGED, and the guarantee did not. This used to read
+      // "no progress dir -> no heartbeat", because a plain non-panel download had
+      // nowhere to persist and an interval there would retry a no-op forever.
+      // There is now a stable records dir by default, so a plain download DOES
+      // persist — which is the entire point: a record that was never written
+      // cannot survive a restart.
       const noPanel = await startDownloadJob(URL_A, "checkpoints");
-      expect((noPanel as { heartbeat?: unknown }).heartbeat).toBeUndefined();
+      expect(
+        (noPanel as { heartbeat?: unknown }).heartbeat,
+        "a plain download must persist, or nothing survives a restart",
+      ).toBeDefined();
 
       // With a progress dir → a heartbeat is installed (and cleared by resetDownloadJobs).
       const dir = await mkdtemp(pathJoin(tmpdir(), "djobs-persist-"));
@@ -2020,6 +2064,29 @@ describe("download job registry", () => {
       } finally {
         setProgressDir("");
         await fsRm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("installs NO heartbeat when there is genuinely nowhere to persist", async () => {
+      // The guarantee the old test was really protecting: an interval with no
+      // store retries a no-op forever, because persist never reports durable.
+      // "Nowhere to persist" is now rare rather than the default — the records
+      // dir has to be unusable — so provoke it directly: a data dir whose PARENT
+      // is a file, so the mkdir fails with ENOTDIR.
+      const blockerDir = await mkdtemp(pathJoin(tmpdir(), "djobs-blocked-"));
+      const blocker = pathJoin(blockerDir, "i-am-a-file");
+      await writeFile(blocker, "not a directory");
+      const savedData = process.env.COMFYUI_MCP_DATA_DIR;
+      process.env.COMFYUI_MCP_DATA_DIR = pathJoin(blocker, "nested");
+      __resetStableRecordsDir();
+      try {
+        const nowhere = await startDownloadJob(URL_A, "checkpoints");
+        expect((nowhere as { heartbeat?: unknown }).heartbeat).toBeUndefined();
+      } finally {
+        if (savedData === undefined) delete process.env.COMFYUI_MCP_DATA_DIR;
+        else process.env.COMFYUI_MCP_DATA_DIR = savedData;
+        __resetStableRecordsDir();
+        await fsRm(blockerDir, { recursive: true, force: true });
       }
     });
 

@@ -11,6 +11,7 @@
 
 import { mkdirSync, readFileSync, readdirSync, writeFileSync, renameSync, rmSync } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
+import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
 /** Per-PROCESS owner nonce (#515/#529). Distinguishes THIS session's persisted job
@@ -73,8 +74,78 @@ let lateBoundDir = "";
 export function setProgressDir(dir: string): void {
   lateBoundDir = dir;
 }
+/**
+ * A STABLE per-user directory for persisted job records, used when nothing else
+ * set one (#1148).
+ *
+ * Without it, a plain stdio MCP server — no panel, no orchestrator, no
+ * COMFYUI_MCP_PROGRESS_DIR — had NO channel dir, so `persistedRecordsEnabled()`
+ * was false and not one job record was ever written. Every cross-restart
+ * mechanism built for #1148 was inert in that configuration, while
+ * `download_model action:"status"` went on promising that an interrupted
+ * download stays resolvable by id. A reporter lost a 5 GB transfer to exactly
+ * that gap and was told "No download matching id".
+ *
+ * DELIBERATELY NOT UNDER tmpdir. The orchestrator nonces its progress dir per
+ * start and REAPS earlier ones there — the very deletion #1148's carry-over
+ * exists to survive. A records dir a later orchestrator start could sweep would
+ * reintroduce the bug from the other side.
+ *
+ * SAFE ONLY BECAUSE ADOPTION IS LIVENESS-CHECKED (#1275). Enabling the store
+ * also enables cross-session adoption, and before that fix a record left behind
+ * by a crashed process was adoptable for up to a minute — a new download would
+ * take over a job nobody was running. Turning this on without that guard traded
+ * one silent failure for a worse one.
+ *
+ * Created lazily and memoized: `channelDir()` runs on every persist, and a
+ * failure to create it degrades to "no persistence" — the previous behaviour —
+ * rather than throwing inside a download.
+ */
+let defaultRecordsDir: string | undefined;
+let defaultRecordsDirTried = false;
+
+function stableRecordsDir(): string {
+  if (defaultRecordsDirTried) return defaultRecordsDir ?? "";
+  defaultRecordsDirTried = true;
+  try {
+    const dir = join(
+      process.env.COMFYUI_MCP_DATA_DIR?.trim() || join(homedir(), ".comfyui-mcp"),
+      "download-records",
+    );
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    defaultRecordsDir = dir;
+  } catch {
+    defaultRecordsDir = undefined;
+  }
+  return defaultRecordsDir ?? "";
+}
+
+/** Test seam: forget the memoized default so a case can point it somewhere else. */
+export function __resetStableRecordsDir(): void {
+  defaultRecordsDir = undefined;
+  defaultRecordsDirTried = false;
+}
+
 function channelDir(): string {
   return PROGRESS_DIR || lateBoundDir;
+}
+
+/**
+ * Where the persisted JOB RECORDS live — the channel dir when there is one, else
+ * the stable per-user default (#1148).
+ *
+ * Deliberately SEPARATE from `channelDir()`, which also drives the control
+ * channel (the MCP child's target-change requests, read by an orchestrator).
+ * Falling back for that one too would switch on a channel with nobody at the
+ * other end: a plain stdio server has no orchestrator to read it, and a test
+ * asserting the control channel is inactive without a progress dir caught
+ * exactly that over-reach.
+ *
+ * Only the RECORD store needs somewhere to write regardless of transport,
+ * because only it has to survive a restart.
+ */
+function recordsDir(): string {
+  return channelDir() || stableRecordsDir();
 }
 const lastWriteAt = new Map<string, number>();
 
@@ -228,7 +299,7 @@ export function progressEnabled(): boolean {
  *  when there is actually somewhere to persist/adopt (avoids a leaked no-op interval on
  *  plain non-panel downloads). */
 export function persistedRecordsEnabled(): boolean {
-  return !!channelDir();
+  return !!recordsDir();
 }
 
 function fileFor(id: string, target?: string, attempt?: number): string {
@@ -737,7 +808,7 @@ function sanitizeIdPart(id: string): string {
 /** THIS session's record file for a job id — owner-scoped, so a second session running
  *  the same id writes a DIFFERENT file rather than clobbering ours. */
 function jobFileFor(id: string): string {
-  return join(channelDir(), `${JOB_PREFIX}${sanitizeIdPart(id)}-${PERSIST_OWNER}.json`);
+  return join(recordsDir(), `${JOB_PREFIX}${sanitizeIdPart(id)}-${PERSIST_OWNER}.json`);
 }
 
 let persistSeq = 0;
@@ -760,7 +831,7 @@ let persistSeq = 0;
  *  "downloading" record (bounded by long record retention, but this recovers it sooner). Returns
  *  false when there is no channel dir (nothing to persist) or the replace didn't happen. */
 export function persistDownloadJob(job: Omit<PersistedDownloadJob, "updated">): boolean {
-  const dir = channelDir();
+  const dir = recordsDir();
   if (!dir) return false;
   try {
     mkdirSync(dir, { recursive: true });
@@ -808,7 +879,7 @@ export function persistDownloadJob(job: Omit<PersistedDownloadJob, "updated">): 
 
 /** Remove a persisted job record (e.g. once it's fully retired). Best-effort. */
 export function removePersistedDownloadJob(id: string): void {
-  const dir = channelDir();
+  const dir = recordsDir();
   if (!dir) return;
   try {
     rmSync(jobFileFor(id), { force: true });
@@ -828,7 +899,7 @@ export function removePersistedDownloadJob(id: string): void {
  *  a persistent failure is reported to the caller so it can DISCLOSE the leftover
  *  instead of claiming a clean close it did not observe (codex gate, round 2). */
 export function removePersistedDownloadJobFor(id: string, owner: string): boolean {
-  const dir = channelDir();
+  const dir = recordsDir();
   if (!dir || !owner) return false;
   const path = join(dir, `${JOB_PREFIX}${sanitizeIdPart(id)}-${sanitizeIdPart(owner)}.json`);
   for (let attempt = 0; attempt < 5; attempt++) {
@@ -907,7 +978,7 @@ export function readPersistedDownloadJob(id: string): PersistedDownloadJob | nul
 /** Every persisted job record (freshest not guaranteed; caller sorts). Used to
  *  list in-flight downloads after a reconnect and to look one up by URL/destination. */
 export function listPersistedDownloadJobs(): PersistedDownloadJob[] {
-  const dir = channelDir();
+  const dir = recordsDir();
   if (!dir) return [];
   const out: PersistedDownloadJob[] = [];
   let files: string[] = [];
