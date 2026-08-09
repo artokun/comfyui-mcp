@@ -38,6 +38,14 @@
 // by `id` or by `url`" is real — the status action calls
 // `findDownloadJob({ url })` when no id matches.
 //
+// And the newest claim, that an older record says its route is UNKNOWN rather
+// than guessing: `via_manager` is OPTIONAL in the persisted record, so a
+// pre-field record restores as `undefined`, and `downloadRoute()` maps that to
+// its own third state instead of falling through to "local". Codex review caught
+// the boolean split that sent those records down the local path — telling the
+// reader to re-issue, which is the corrupting move for precisely the records
+// whose route cannot be confirmed.
+//
 // So the tests below check two different things, and the second matters more:
 // that the true claims are present, AND that no absolute claim about survival
 // has crept back in. A test that only requires phrases lets an author append
@@ -192,6 +200,6 @@ describe("download_model action:\"status\" claims only what the code delivers (#
       "The action:\"status\" description changed. That is fine — but every claim in it " +
         "has been wrong at least once (see the header). Re-verify each against " +
         "download-jobs.ts / download-progress.ts / node-management.ts, then update this hash.",
-    ).toBe("8cb4dd59d43fe1c5");
+    ).toBe("e830e08d28a9dde0");
   });
 });

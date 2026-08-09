@@ -177,12 +177,68 @@ function requireLimitInRange(tool: string, action: string, limit: number | undef
   }
 }
 
+/**
+ * How a download's bytes are being fetched — THREE states, not two (#1148).
+ *
+ * The recovery advice for an interrupted download is opposite for the two real
+ * routes: a local stream leaves a `.partial` that a re-issue resumes, while a
+ * ComfyUI-Manager dispatch leaves nothing locally, may still be running on the
+ * HOST, and cannot be recalled — so a re-issue is a duplicate write to the same
+ * destination that CORRUPTS the model (#1197).
+ *
+ * `via_manager` is OPTIONAL in the persisted record, so a record written before
+ * that field existed restores as `undefined`. A boolean split sends it down the
+ * `local` path and tells the reader to re-issue — which is the corrupting move
+ * for exactly the records whose route we cannot confirm. That is this codebase's
+ * recurring defect (#796) reappearing inside its own fix: "could not determine
+ * the route" folded into "determined it is not Manager". Found by codex review.
+ *
+ * Unknown therefore gets its OWN answer, and it is the cautious one.
+ */
+type DownloadRoute = "manager" | "local" | "unknown";
+
+function downloadRoute(j: { viaManager?: boolean }): DownloadRoute {
+  if (j.viaManager === true) return "manager";
+  if (j.viaManager === false) return "local";
+  return "unknown";
+}
+
+/** Why re-issuing RIGHT NOW is unsafe — the thing that may still be writing. */
+function stillWritingClause(route: DownloadRoute): string {
+  switch (route) {
+    case "manager":
+      return "the ComfyUI host may still be fetching this server-side";
+    case "local":
+      return "the original owner may still be writing the same .partial";
+    default:
+      return "something may still be writing it — either the original owner's .partial or, if this was a Manager dispatch, the ComfyUI host server-side";
+  }
+}
+
+/**
+ * What to do once the writer is proven gone. Shared by the stale-record note and
+ * the cancellation reply because they gave CONTRADICTORY advice for the same job
+ * — the cancel reply asserted a resumable partial and told the reader to
+ * re-issue, while the stale note said doing that corrupts the file (codex
+ * review). One function, so they cannot drift again.
+ */
+function afterCancelAdvice(route: DownloadRoute): string {
+  switch (route) {
+    case "manager":
+      return `Do NOT re-issue: this is a ComfyUI-Manager dispatch, so there is no local .partial to resume and the HOST may still be fetching it server-side (a restart here does not touch that, and Manager has no recall API). A re-issue is a duplicate dispatch to the same destination, not a resume, and it CORRUPTS the file. Check list_local_models — or the destination on disk — to see whether it landed before deciding anything.`;
+    case "local":
+      return `Re-issuing action:"download" resumes any .partial the dead writer left, or restarts cleanly.`;
+    default:
+      return `This record predates the route being recorded, so whether it was a local stream or a ComfyUI-Manager dispatch is NOT known — and the two need opposite handling. Treat it as possibly Manager: check list_local_models, or the destination on disk, BEFORE re-issuing. If it was local a re-issue would simply resume the .partial, but if it was a Manager dispatch a re-issue is a duplicate that CORRUPTS the file, so the check comes first.`;
+  }
+}
+
 export function registerModelManagementTools(server: McpServer): void {
   server.tool(
     "download_model",
     "Find model weights and get them onto the connected ComfyUI, and track the transfers. Driven by the `action` parameter:\n" +
       '- action:"download" — Download a model file to the connected ComfyUI\'s models directory from a URL (HuggingFace, direct HTTP(S), s3://, or Azure Blob). Requires `url` + `target_subfolder`. PREFER this over a raw shell download (curl/wget) for model weights: it lands the file in the right models/ subfolder. LOCAL ComfyUI: streams to disk and surfaces live progress in the panel download tray. REMOTE ComfyUI: dispatches the fetch to the ComfyUI host via the ComfyUI-Manager install-model HTTP API (downloaded server-side; a per-request `auth` header can\'t be forwarded). This requires the host\'s Manager to run with network_mode=personal_cloud (or loopback) and a permissive security level — a stricter gate silently rejects the download, and Manager reports the queue task \'done\' even on failure, so a remote dispatch does not guarantee the file landed. target_subfolder accepts any relative subfolder (incl. nested, e.g. \'loras/<subdir>\').\n' +
-      '- action:"status" — Check on downloads started by action:"download" / action:"download_civitai". Reports each download\'s state (downloading / done / error / cancelled), its destination path once it lands, and byte progress when the panel progress channel is enabled. Use this after a download reports it is still running — that means the transfer is in flight, NOT that it failed. Across an AGENT/sidebar session reconnect a download this MCP streams locally keeps running and is normally resolvable by `id` or by `url`. An ORCHESTRATOR RESTART is different: a record carried across one reports only that this MCP STOPPED WATCHING — not that the bytes stopped, which it does not check. READ THE NOTE ON THAT RECORD before acting: it distinguishes a local stream (nothing is writing it; re-issue) from a ComfyUI-Manager dispatch (the fetch runs on the ComfyUI host, which a restart here does not touch, so re-issuing writes a second copy to the same destination and CORRUPTS the model). And NOT FOUND NEVER MEANS STOPPED: both the cross-session record and the carry-over are written best-effort, so their absence is evidence of nothing. Omit `id` and `url` to list every tracked download. A previous session\'s download whose heartbeat has gone stale is reported with a stale-heartbeat NOTE: action:"cancel" can close it once the writer is proven gone. WHAT COMES AFTER THAT CANCEL DEPENDS ON THE ROUTE, and the note says which — for a local stream re-issuing resumes the .partial or restarts cleanly, but for a ComfyUI-Manager dispatch there is no local .partial and the host may still be fetching, so re-issuing is a duplicate dispatch that CORRUPTS the file. Read-only.\n' +
+      '- action:"status" — Check on downloads started by action:"download" / action:"download_civitai". Reports each download\'s state (downloading / done / error / cancelled), its destination path once it lands, and byte progress when the panel progress channel is enabled. Use this after a download reports it is still running — that means the transfer is in flight, NOT that it failed. Across an AGENT/sidebar session reconnect a download this MCP streams locally keeps running and is normally resolvable by `id` or by `url`. An ORCHESTRATOR RESTART is different: a record carried across one reports only that this MCP STOPPED WATCHING — not that the bytes stopped, which it does not check. READ THE NOTE ON THAT RECORD before acting: it distinguishes a local stream (nothing is writing it; re-issue) from a ComfyUI-Manager dispatch (the fetch runs on the ComfyUI host, which a restart here does not touch, so re-issuing writes a second copy to the same destination and CORRUPTS the model). And NOT FOUND NEVER MEANS STOPPED: both the cross-session record and the carry-over are written best-effort, so their absence is evidence of nothing. Omit `id` and `url` to list every tracked download. A previous session\'s download whose heartbeat has gone stale is reported with a stale-heartbeat NOTE: action:"cancel" can close it once the writer is proven gone. WHAT COMES AFTER THAT CANCEL DEPENDS ON THE ROUTE, and the note says which — for a local stream re-issuing resumes the .partial or restarts cleanly, but for a ComfyUI-Manager dispatch there is no local .partial and the host may still be fetching, so re-issuing is a duplicate dispatch that CORRUPTS the file. An older record that predates the route being stored says the route is UNKNOWN and tells you to verify the file before re-issuing, rather than guessing either way. Read-only.\n' +
       '- action:"cancel" — Cancel ONE in-flight download by its `id` (from action:"status" or from the download that started it) — REQUIRED, and it must be the id of the download you mean, since a wrong id stops someone else\'s transfer. Aborts only that download\'s transfer; other downloads keep running. An id that names no tracked download is reported as such, not silently treated as success. The partially-downloaded bytes are left on disk as a resumable .partial and are NEVER reported as a completed file, so nothing corrupt lands in your models directory; re-issuing the same download later resumes where it left off. Idempotent: cancelling an already-finished, failed, or already-cancelled download just reports its current state. A download whose AbortController lives in ANOTHER live session cannot be aborted from here (stop it from the panel download tray) — but a download left \'downloading\' by a session that is PROVEN gone (heartbeat stale AND its process no longer exists) CAN be cancelled from here: the stale record is closed as cancelled, after which re-issuing action:"download" resumes the leftover .partial or restarts cleanly. While the writer cannot be proven gone, the cancel refuses rather than risk two writers on one file. NOTE: for a download dispatched to a REMOTE ComfyUI via ComfyUI-Manager (server-side fetch), the local job is marked cancelled but the host may keep fetching — there is no Manager API to stop it.\n' +
       '- action:"search" — Search HuggingFace Hub for models usable in ComfyUI (checkpoints, LoRAs, VAEs, ControlNets, etc.); `query` is required. Read-only and network-only: queries HuggingFace over HTTP, does NOT require a running ComfyUI or COMFYUI_PATH and does not download anything. Returns a ranked list with modelId, author, downloads, likes, and tags. Pick a result\'s download URL and pass it to action:"download". For CIVITAI searches (\'find a Flux LoRA on Civitai\') use action:"search_civitai" instead — it filters by type + base model and returns ids for action:"download_civitai". For packs of custom nodes (not models) use search_custom_nodes.\n' +
       '- action:"search_civitai" — Search CivitAI by keyword for checkpoints, LoRAs, embeddings, VAEs, and ControlNets — THE action for \'find me a <base model> LoRA on Civitai\'. Read-only and network-only (public CivitAI REST API; no token or running ComfyUI required; CIVITAI_API_TOKEN unlocks gated results). Filter by `types` (LORA, Checkpoint, TextualInversion, VAE, Controlnet, …) and `base_models` (CivitAI labels: \'Flux.1 D\', \'SDXL 1.0\', \'SD 1.5\', \'Pony\', \'Illustrious\', \'Wan Video\') — ALWAYS pass base_models when the user\'s checkpoint family is known, so results actually fit their setup. Each hit returns the model_id and version_id that action:"download_civitai" takes directly, plus trigger words to use in the prompt after installing. Flow: action:"search_civitai" → pick a hit → action:"download_civitai" {model_version_id, target_subfolder} → wire/prompt with the trained words. Pass `creator` (exact username, e.g. from action:"search_creators") to list ONE creator\'s models — with or without a `query`; at least one of the two is required. SFW-only by default. For HuggingFace search use action:"search".\n' +
@@ -980,21 +1036,10 @@ async function statusAction(args: {
                     // restored) — surface it so the user can recover, not mask it.
                     (j.error ? `\n    IMPORTANT: ${j.error}` : "")
                   : `\n    still streaming — started ${Math.round((Date.now() - j.started_at) / 1000)}s ago`;
-          // #1148 — WHAT TO DO AFTER THE CANCEL DEPENDS ON THE ROUTE, and this
-          // note used to give the local answer to both. A ComfyUI-Manager
-          // dispatch has no local .partial to resume, and the fetch runs on the
-          // ComfyUI HOST — which this MCP's own restart never touched — so
-          // "re-issue" means a SECOND server-side dispatch writing to the same
-          // destination, which corrupts the model (#1197). The `cancelled` branch
-          // a few lines above already draws this distinction; the stale note
-          // simply never applied it, and it is the note an agent reads at exactly
-          // the moment it is deciding whether to re-issue.
-          const staleRecovery = j.viaManager
-            ? `After a successful cancel, do NOT re-issue: this is a ComfyUI-Manager dispatch, so there is no local .partial to resume and the HOST may still be fetching it server-side (a restart here does not touch that, and Manager has no recall API). A re-issue is a duplicate dispatch to the same destination, not a resume, and it CORRUPTS the file. Check list_local_models — or the destination on disk — to see whether it landed before deciding anything.`
-            : `After a successful cancel, re-issuing action:"download" resumes any .partial the dead writer left, or restarts cleanly.`;
+          const route = downloadRoute(j);
           const staleNote =
             j.status === "downloading" && j.staleInflight
-              ? `\n    NOTE: heartbeat stale for ${Math.round((j.staleForMs ?? 0) / 1000)}s. The owning session may have reconnected, and the transfer may still be running. Do NOT re-issue download_model action:"download" while this warning remains: ${j.viaManager ? "the ComfyUI host may still be fetching this server-side" : "the original owner may still be writing the same .partial"}. To recover, call download_model \`action:"cancel"\` with this id and tray_id — it closes the stale record once the writer is PROVEN gone (its process no longer exists) and refuses while that cannot be proven. ${staleRecovery} Do not report this download as failed or missing.`
+              ? `\n    NOTE: heartbeat stale for ${Math.round((j.staleForMs ?? 0) / 1000)}s. The owning session may have reconnected, and the transfer may still be running. Do NOT re-issue download_model action:"download" while this warning remains: ${stillWritingClause(route)}. To recover, call download_model \`action:"cancel"\` with this id and tray_id — it closes the stale record once the writer is PROVEN gone (its process no longer exists) and refuses while that cannot be proven. ONCE THAT CANCEL SUCCEEDS: ${afterCancelAdvice(route)} Do not report this download as failed or missing.`
               : "";
           // Surface a declined resume so the agent/user knows a pre-existing
           // .partial was discarded and why — instead of it being silent (#467).
@@ -1083,11 +1128,17 @@ async function cancelAction(args: { id: string; tray_id?: string }): Promise<Cal
               {
                 type: "text",
                 text:
+                  // #1148 (codex review) — this asserted a resumable partial and
+                  // told the reader to re-issue, then mentioned the Manager case
+                  // as a parenthetical afterthought. For a Manager dispatch the
+                  // main sentence is simply false, and acting on it corrupts the
+                  // file — the exact contradiction with the stale-record note
+                  // that #1197 spent four rounds removing elsewhere. Both now
+                  // route through the same advice function.
                   `Cancellation requested for \`${args.id}\` — the transfer is being aborted. ` +
-                  `If it hadn't finished, it stops with a resumable partial and nothing corrupt lands (re-issue the same download later to resume). ` +
                   `If it had ALREADY completed at the moment you cancelled, the finished file is present and the download reports as done — that's expected (cancel lost the race), not a bug. ` +
                   `Check download_model \`action:"status"\` with this id to see the final state. ` +
-                  `(If this was a remote/ComfyUI-Manager server-side download, the host may keep fetching — there's no Manager API to stop it.)`,
+                  `${afterCancelAdvice(downloadRoute(res.job ?? {}))}`,
               },
             ],
           };

@@ -49,8 +49,16 @@ function statusHandler(): Handler {
 }
 
 /** A stale in-flight record left by a session that is no longer heartbeating. */
-async function writeStaleRecord(dir: string, viaManager: boolean): Promise<string> {
-  const id = viaManager ? "managerstale0001" : "localstalexxx001";
+async function writeStaleRecord(
+  dir: string,
+  viaManager: boolean | "omitted",
+): Promise<string> {
+  const id =
+    viaManager === "omitted"
+      ? "legacystalexxx01"
+      : viaManager
+        ? "managerstale0001"
+        : "localstalexxx001";
   const body = {
     id,
     trayId: `tray-${id}`,
@@ -60,7 +68,9 @@ async function writeStaleRecord(dir: string, viaManager: boolean): Promise<strin
     status: "downloading",
     started_at: Date.now() - 600_000,
     owner: "a-session-that-went-away",
-    via_manager: viaManager,
+    // "omitted" writes NO via_manager key at all — a record from before the
+    // field existed, which is what a real legacy record looks like on disk.
+    ...(viaManager === "omitted" ? {} : { via_manager: viaManager }),
     // Well past the staleness window, so the record reports staleInflight.
     updated: Date.now() - 10 * 60_000,
   };
@@ -138,7 +148,15 @@ describe("the stale-heartbeat note is ROUTE-AWARE (#1148)", () => {
     await writeStaleRecord(dir, false);
     const local = await statusText();
 
-    const recovery = (t: string) => t.slice(t.indexOf("After a successful cancel"));
+    // Anchor on a phrase the note is GUARANTEED to contain. The first version
+    // anchored on wording that the shared-helper refactor removed, so indexOf
+    // returned -1, slice(-1) took the last character, and both sides compared
+    // equal as "s" — a test that passed for a reason unrelated to its subject.
+    const recovery = (t: string) => {
+      const at = t.indexOf("NOTE: heartbeat stale");
+      expect(at, "the stale note must be present to compare").toBeGreaterThan(-1);
+      return t.slice(at);
+    };
     expect(recovery(manager)).not.toBe(recovery(local));
   });
 
@@ -154,5 +172,54 @@ describe("the stale-heartbeat note is ROUTE-AWARE (#1148)", () => {
       expect(text, `viaManager=${viaManager}`).toMatch(/PROVEN gone/);
       expect(text, `viaManager=${viaManager}`).toMatch(/Do not report this download as failed/);
     }
+  });
+});
+
+// CODEX REVIEW of this fix found the same fold one level down, inside the fix.
+//
+// `via_manager` is OPTIONAL in the persisted record, so a record written before
+// that field existed restores as `undefined`. A boolean split sends it down the
+// LOCAL path — "re-issuing resumes any .partial" — which is the corrupting move
+// for exactly the records whose route cannot be confirmed. "Could not determine
+// the route" folded into "determined it is not Manager" (#796), in the very
+// change that exists to stop route-blind advice.
+describe("an UNKNOWN route is its own answer, not 'local' (#1148)", () => {
+  it("never tells a route-unknown record to re-issue", async () => {
+    await writeStaleRecord(dir, "omitted");
+    const text = await statusText();
+
+    expect(text).toMatch(/heartbeat stale/);
+    expect(text, "the local resume promise must NOT be made").not.toMatch(/resumes any \.partial/);
+    expect(text).toMatch(/NOT known|not known/);
+  });
+
+  it("says the route is unrecorded and what to check first", async () => {
+    await writeStaleRecord(dir, "omitted");
+    const text = await statusText();
+
+    expect(text).toMatch(/predates the route being recorded/);
+    expect(text).toMatch(/list_local_models/);
+    expect(text, "the destructive outcome must still be named").toMatch(/CORRUPTS/);
+  });
+
+  it("hedges the still-writing reason too, rather than asserting a local writer", async () => {
+    await writeStaleRecord(dir, "omitted");
+    const text = await statusText();
+
+    expect(text).toMatch(/either the original owner's \.partial or/);
+  });
+
+  it("produces a DIFFERENT note from both known routes", async () => {
+    const notes: string[] = [];
+    for (const route of [true, false, "omitted"] as const) {
+      await fsRm(dir, { recursive: true, force: true });
+      dir = await mkdtemp(pathJoin(tmpdir(), "stale-route-"));
+      setProgressDir(dir);
+      resetDownloadJobs();
+      await writeStaleRecord(dir, route);
+      const t = await statusText();
+      notes.push(t.slice(t.indexOf("NOTE: heartbeat stale")));
+    }
+    expect(new Set(notes).size, "all three routes must read differently").toBe(3);
   });
 });
