@@ -64,7 +64,17 @@ const ACTIVE_RECORDS: Record<ActiveShape, unknown> = {
   },
   // An unsaved tab has no saved path — `tmp:` keys are deliberately rejected as
   // saved identities, which is exactly why the adoption gate cannot be reused.
-  unsavedTab: { filename: "Unsaved Workflow", key: "tmp:2522828d", routing_key: "tmp:2522828d" },
+  // THE REAL SHAPE: the panel nulls `path` AND `filename` and puts the human label
+  // on `title`. An earlier fixture here put the label on `filename`, which passed
+  // for the wrong reason — it exercised a payload the panel never sends, and would
+  // have hidden that the warning named a bare `tmp:` handle at the user.
+  unsavedTab: {
+    path: null,
+    filename: null,
+    title: "Unsaved Workflow",
+    key: "tmp:2522828d",
+    routing_key: "tmp:2522828d",
+  },
   empty: {},
   missing: null,
 };
@@ -206,9 +216,13 @@ describe("#887 readOpenActiveAgainstTarget separates cannot-tell from proven-dif
 });
 
 describe("#887 describeActiveRecord names something a human can act on", () => {
-  it("prefers the filename, then the path, then the routing key", () => {
-    expect(describeActiveRecord({ filename: "b.json", path: "workflows/b.json" })).toBe("b.json");
-    expect(describeActiveRecord({ path: "workflows/b.json" })).toBe("workflows/b.json");
+  it("prefers the PATH, then title, then filename, then the routing key", () => {
+    // Path first on purpose: the case this guard exists for is a same-basename
+    // workflow in another directory, and a bare filename makes the warning refute
+    // itself ("workflows/a/foo.json was opened, but foo.json is active now").
+    expect(describeActiveRecord({ filename: "b.json", path: "workflows/b.json" })).toBe("workflows/b.json");
+    expect(describeActiveRecord({ title: "Unsaved Workflow", key: "tmp:abc" })).toBe("Unsaved Workflow");
+    expect(describeActiveRecord({ filename: "b.json" })).toBe("b.json");
     expect(describeActiveRecord({ key: "tmp:abc" })).toBe("tmp:abc");
   });
 
@@ -245,5 +259,157 @@ describe("#887 a same-workflow record whose IDENTITY merely failed to canonicali
         "workflows/a/foo.json",
       ),
     ).toBe("different");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 5. THE REPORTER'S OWN PATH. The first cut of this fix missed it entirely.
+//
+// The panel throws for every open verdict short of PROVEN, so #887's scenario —
+// its step 3 reads "Tool errors saying the requested workflow is active" —
+// arrives as an ERROR result. The corroborating read was gated on success, which
+// left precisely the filed case unexamined. Adversarial review caught it.
+// ---------------------------------------------------------------------------
+
+/** The panel's real CONTENT_UNVERIFIED throw: it ASSERTS the target is active. */
+const PANEL_ASSERTS_ACTIVE =
+  `workflow_open RAN and the canvas IS bound to a.json — that much was proven — but the graph ` +
+  `on it does not match the state that was loaded. You are NOT on the wrong workflow: a.json IS ` +
+  `the active one.`;
+
+function erroringBridge(activeShape: ActiveShape) {
+  return {
+    ...bridgeFor(activeShape),
+    send: async (cmd: Record<string, unknown>) => {
+      if (cmd.cmd === "workflow_open") throw new Error(PANEL_ASSERTS_ACTIVE);
+      if (cmd.cmd === "workflow_list") {
+        return { active: ACTIVE_RECORDS[activeShape], active_confirmed: true, workflows: [] };
+      }
+      return { ok: true };
+    },
+  } as unknown as PanelToolCtx["bridge"];
+}
+
+describe("#887 the reporter's erroring open is checked too", () => {
+  it("contradicts the panel's own 'X IS the active one' assertion when it is false", async () => {
+    const res = await openWorkflow().handler({ path: PATH }, ctxWith(erroringBridge("otherSaved")));
+
+    expect(res.isError).toBe(true);
+    const text = textOf(res);
+    expect(text).toContain(PANEL_ASSERTS_ACTIVE); // the original failure is preserved, not replaced
+    expect(text).toContain("workflows/somethingelse.json"); // named WITH its directory
+    expect(text).toMatch(/is the ACTIVE workflow now/);
+    expect(text).toMatch(/Do NOT save/i);
+  });
+
+  it("adopts NOTHING on the erroring path — observation must not stamp a fence", async () => {
+    await openWorkflow().handler({ path: PATH }, ctxWith(erroringBridge("otherSaved")));
+
+    expect(stamps).toEqual([]);
+    expect(fence).toBe(PRIOR_UUID);
+  });
+
+  it("leaves a failed open alone when the active workflow IS the target", async () => {
+    const res = await openWorkflow().handler({ path: PATH }, ctxWith(erroringBridge("target")));
+
+    expect(textOf(res)).toContain(PANEL_ASSERTS_ACTIVE);
+    expect(textOf(res)).not.toMatch(/is the ACTIVE workflow now/);
+    expect(stamps).toEqual([]); // still no adoption: the open never proved itself
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 6. FALSE ALARMS that would FAIL A HEALTHY OPEN. The dangerous direction.
+// ---------------------------------------------------------------------------
+
+describe("#887 spelling differences are never drift", () => {
+  // Each of these is the SAME file as `workflows/a.json`, reached by a spelling the
+  // strict identity gate rejects when routing_key does not corroborate. Declaring
+  // any of them drift fails a perfectly good open — on Windows, the reporter's
+  // platform, the backslash and case forms are ordinary.
+  const SAME_FILE_SPELLINGS: Array<[string, unknown]> = [
+    ["./ prefix on the request", { path: "workflows/a.json", routing_key: "tmp:abc" }],
+    ["backslash separators", { path: "workflows/a.json", routing_key: null }],
+    ["case difference", { path: "workflows/a.json", routing_key: "wf:workflows/a.json" }],
+  ];
+  const REQUESTS = ["./workflows/a.json", "workflows\a.json", "Workflows/A.json"];
+
+  REQUESTS.forEach((requested, i) => {
+    const [label, active] = SAME_FILE_SPELLINGS[i];
+    it(`${label}: ${requested} vs workflows/a.json is NOT drift`, () => {
+      expect(readOpenActiveAgainstTarget(active, requested)).not.toBe("different");
+    });
+  });
+
+  it("an unconfirmed active record is never used to fail an open", () => {
+    // active_confirmed:false is the panel saying the value is untrustworthy. It is
+    // already refused as adoption evidence; it cannot be better evidence for
+    // failing an open than for stamping one.
+    expect(readOpenActiveAgainstTarget(ACTIVE_RECORDS.otherSaved, PATH, false)).toBe("indeterminate");
+    expect(readOpenActiveAgainstTarget(ACTIVE_RECORDS.otherSaved, PATH, true)).toBe("different");
+  });
+});
+
+describe("#887 the drift message names the DIRECTORY, not just the basename", () => {
+  it("a same-basename workflow elsewhere is named in full", () => {
+    // "workflows/a/foo.json was opened, but foo.json is active" refutes itself.
+    expect(describeActiveRecord({ path: "workflows/b/foo.json", filename: "foo.json" })).toBe(
+      "workflows/b/foo.json",
+    );
+  });
+
+  it("an unsaved tab still gets its human label, where the panel actually puts it", () => {
+    // The panel nulls path AND filename for an unsaved tab and labels it via title.
+    expect(describeActiveRecord({ path: null, filename: null, title: "Unsaved Workflow", key: "tmp:abc" })).toBe(
+      "Unsaved Workflow",
+    );
+  });
+});
+
+describe("#887 a genuine acked failure is left completely alone", () => {
+  // The open never ran, so another workflow being active is the EXPECTED state,
+  // not drift. This repo already pins that a genuine error must not trigger a
+  // workflow_list round trip; a blanket observe-on-every-error broke two existing
+  // tests, which is how this boundary was found.
+  it("a missing-file error neither warns nor makes a corroborating read", async () => {
+    let listCalls = 0;
+    const bridge = {
+      ...bridgeFor("otherSaved"),
+      send: async (cmd: Record<string, unknown>) => {
+        if (cmd.cmd === "workflow_open") throw new Error(`no workflow matching "${PATH}"`);
+        if (cmd.cmd === "workflow_list") {
+          listCalls++;
+          return { active: ACTIVE_RECORDS.otherSaved, active_confirmed: true, workflows: [] };
+        }
+        return { ok: true };
+      },
+    } as unknown as PanelToolCtx["bridge"];
+
+    const res = await openWorkflow().handler({ path: PATH }, ctxWith(bridge));
+
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toMatch(/no workflow matching/i);
+    expect(textOf(res)).not.toMatch(/is the ACTIVE workflow now/);
+    expect(listCalls).toBe(0); // the round trip is not made at all
+  });
+
+  it("but a rebind-unproven error IS examined — the panel says the load RAN", async () => {
+    let listCalls = 0;
+    const bridge = {
+      ...bridgeFor("otherSaved"),
+      send: async (cmd: Record<string, unknown>) => {
+        if (cmd.cmd === "workflow_open") throw new Error(PANEL_ASSERTS_ACTIVE);
+        if (cmd.cmd === "workflow_list") {
+          listCalls++;
+          return { active: ACTIVE_RECORDS.otherSaved, active_confirmed: true, workflows: [] };
+        }
+        return { ok: true };
+      },
+    } as unknown as PanelToolCtx["bridge"];
+
+    const res = await openWorkflow().handler({ path: PATH }, ctxWith(bridge));
+
+    expect(listCalls).toBe(1);
+    expect(textOf(res)).toMatch(/is the ACTIVE workflow now/);
   });
 });
