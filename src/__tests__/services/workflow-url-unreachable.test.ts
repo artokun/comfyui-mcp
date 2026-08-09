@@ -38,13 +38,17 @@ describe("fetchWorkflowFromUrl unreachable-host reporting (#1136)", () => {
     ).rejects.toThrow(/raw\.githubusercontent\.com/);
     await expect(
       fetchWorkflowFromUrl("https://raw.githubusercontent.com/o/r/main/wf.json"),
-    ).rejects.toThrow(/not an empty result|CONNECTIVITY/i);
+    ).rejects.toThrow(/NOT an empty result/i);
   });
 
-  it("does NOT say unreachable for a mid-connection drop — the host WAS reached", async () => {
-    // ECONNRESET fires on an established connection. Claiming "could not reach"
-    // there would be the same overclaim in the other direction, and this branch
-    // must keep falling through to the generic message.
+  it("also covers a mid-connection drop — no response is no response", async () => {
+    // This assertion is INVERTED from its first version, deliberately. I had it
+    // fall through to the generic message on the reasoning that ECONNRESET means
+    // "the host WAS reached". True at the socket layer, irrelevant here: `fetch`
+    // rejected, so nothing was retrieved, so nothing follows about whether the
+    // workflow exists. That is the claim #1136 is about, and drawing the line at
+    // the transport code was how I kept mis-drawing it -- RST injection and
+    // packet drops are two of the three ways a filter actually presents.
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => {
@@ -53,6 +57,21 @@ describe("fetchWorkflowFromUrl unreachable-host reporting (#1136)", () => {
     );
     await expect(
       fetchWorkflowFromUrl("https://raw.githubusercontent.com/o/r/main/wf.json"),
-    ).rejects.toThrow(/Failed to fetch workflow URL/);
+    ).rejects.toThrow(/NOT an empty result/i);
+  });
+
+  it("distinguishes a TIMEOUT from a refusal, which a code list kept getting wrong", async () => {
+    // undici's connect timeout beats this module's own 15s deadline, so the
+    // AbortError branch never fires for a dropped connection and the code is
+    // UND_ERR_CONNECT_TIMEOUT -- absent from the hand-rolled set this replaced.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw transportError("UND_ERR_CONNECT_TIMEOUT");
+      }),
+    );
+    await expect(
+      fetchWorkflowFromUrl("https://raw.githubusercontent.com/o/r/main/wf.json"),
+    ).rejects.toThrow(/did not respond in time/i);
   });
 });

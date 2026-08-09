@@ -32,7 +32,7 @@ import { execFile, spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describeUnreachableHost } from "../comfyui/fetch.js";
+import { unreachableHostMessage } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 
 /** npm package name — authoritative for the registry lookup and update command. */
@@ -159,10 +159,10 @@ async function defaultGetLatestVersion(): Promise<VersionProbe> {
       headers: { accept: "application/json" },
     });
   } catch (err) {
-    const unreachable = describeUnreachableHost(err, url);
-    return unreachable
-      ? { unreachable }
-      : { undetermined: `the version check failed: ${err instanceof Error ? err.message : String(err)}` };
+    // `fetch` rejected: no response at all. That is the `unreachable` state --
+    // the three-way split is about whether we got an answer, not about which
+    // transport code we happened to see.
+    return { unreachable: unreachableHostMessage(err, url, "the version check").message };
   }
   if (!res.ok) {
     // The registry ANSWERED. Whatever went wrong, the host was reachable, so

@@ -1,6 +1,5 @@
 import { lookup } from "node:dns/promises";
-import { ValidationError } from "../utils/errors.js";
-import { describeUnreachableHost } from "../comfyui/fetch.js";
+import { unreachableHostMessage, ValidationError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 
 /** Default cap on how long we wait for a workflow URL to respond. */
@@ -263,13 +262,16 @@ export async function fetchWorkflowFromUrl(
         `Timed out after ${timeoutMs}ms fetching workflow from "${u.hostname}".`,
       );
     }
-    // #1136 — a DNS/TLS/refused failure is a CONNECTIVITY fact and must name the
-    // host, exactly as the AbortError branch above already does. Without this the
-    // message is "Failed to fetch workflow URL: fetch failed", which a filtered
-    // user reads as "my link is wrong" and goes off editing the URL.
-    const unreachable = describeUnreachableHost(err, u.toString());
-    if (unreachable) throw new ValidationError(unreachable);
-    throw new ValidationError(`Failed to fetch workflow URL: ${e?.message ?? err}`);
+    // #1136 — reaching here means `fetch` REJECTED, so no response was received.
+    // Whether the TCP handshake completed (TLS error, RST) is invisible to the
+    // user and irrelevant to the harm: nothing was retrieved, so nothing follows
+    // about whether the workflow exists. The shared helper says exactly that and
+    // names the host; it also separates "did not respond in time" from "could
+    // not reach" using the undici timeout codes, which a hand-rolled code list
+    // kept getting wrong.
+    throw new ValidationError(
+      unreachableHostMessage(err, u.toString(), "fetching the workflow").message,
+    );
   } finally {
     clearTimeout(timer);
   }
