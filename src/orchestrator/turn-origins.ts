@@ -535,8 +535,8 @@ export function makeScopeRepinHandler(opts: {
   backendForTab: (tabId: string) => string;
   backendOfKey: (key: string) => string;
   info: (msg: string) => void;
-}): (scopeId: string) => ScopeRepinOutcome {
-  return (scopeId) => {
+}): (scopeId: string, preferredTab?: string) => ScopeRepinOutcome {
+  return (scopeId, preferredTab) => {
     const key = opts.scopeAgentKeyOf(scopeId);
     // RECOVERY ONLY: a pin that still reaches a live tab OF THIS conversation
     // is healthy — never displace it (null = ambiguous/ownership-refused and
@@ -559,13 +559,43 @@ export function makeScopeRepinHandler(opts: {
       .tabs()
       .map((t) => t.tab_id)
       .filter((t) => opts.bridge.isHeadless?.(t) !== true && opts.backendForTab(t) === backend);
+    // #888 — a NAMED workflow decides which tab, where "current" cannot.
+    //
+    // The refusal below already tells the agent to do exactly this ("Name the
+    // workflow instead — panel_set_workflow_target with a path ... and the pin
+    // follows it"), and until now nothing made the pin follow: `mode:"pinned"`
+    // wrote the workflow-target store and never reached this handler at all, so
+    // a successful pin left the ambiguous turn pin in place and every following
+    // scope-addressed command hit the same ambiguity refusal.
+    //
+    // Eligibility is the SAME as for the active tab — this conversation's
+    // backend, not headless — so naming a workflow cannot reach a tab that
+    // "current" would have been refused for. The healthy-pin gate above still
+    // runs first and is untouched: a live pin is never displaced, however
+    // explicit the request.
+    //
+    // A named tab that is NOT eligible REFUSES rather than falling back to the
+    // active tab. Silently re-aiming an explicit request at a different
+    // workflow is the precise hazard this fence exists for (#884 gate 3, P0).
+    const named = preferredTab && eligible.includes(preferredTab) ? preferredTab : undefined;
+    if (preferredTab && !named) {
+      return {
+        repinned: false,
+        reason:
+          `the named workflow resolves to ${shortTabId(preferredTab)}, which is not a tab of ` +
+          `this conversation's backend (${backend}) — or is headless, or is not connected. The ` +
+          `pin was NOT moved to it, and was not silently redirected to another tab either. ` +
+          `Check panel_list_workflows for which workflows this session can reach`,
+      };
+    }
     const active = opts.bridge.resolveActiveScopeTab();
     const tab =
-      active && eligible.includes(active)
+      named ??
+      (active && eligible.includes(active)
         ? active
         : eligible.length === 1
           ? eligible[0]
-          : undefined;
+          : undefined);
     // #1077 Finding 2 — SAY WHY. Every refusal above and below returned a bare
     // `undefined`, which the caller collapsed to `rebound: false`, so a session
     // stuck here was told only that the adoption was refused. The reporter could

@@ -47,6 +47,7 @@ import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { UiBridge } from "../services/ui-bridge.js";
 import { conversationOfScopeAddress, isScopeAddress, shortTabId } from "../services/session-scope.js";
+import type { ScopeRepinOutcome } from "./turn-origins.js";
 
 /** #884 — journal TICKETS (run completions #468, ask answers #486) must be
  *  keyed by the REAL tab a run/card was routed to: the panel reports back under
@@ -9253,6 +9254,39 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         if (mode === "pinned" && pinnedWorkflowUuid) {
           refreshWorkflowUuid(ctx, { workflow_uuid: pinnedWorkflowUuid });
         }
+        // #888 — make the SCOPE PIN follow the named workflow.
+        //
+        // Pinning wrote the workflow-target store above and, until now, nothing
+        // else. But after a mixed-origin turn the thing refusing every subsequent
+        // scope-addressed command is a DIFFERENT piece of state — the turn-origin
+        // pin, left ambiguous (`null`) by the #884 fence. So this tool reported
+        // success truthfully while the actual blocker went untouched, and the next
+        // `panel_graph_outline` returned the identical ambiguity error.
+        //
+        // The advice to do this is already in the code: the repin handler's own
+        // refusal says "Name the workflow instead — panel_set_workflow_target with
+        // a path, or panel_open_workflow — and the pin follows it." It did not
+        // follow, because only `mode:"current"` ever reached that handler.
+        //
+        // Routed through the SAME handler, so the P0 safety gate is shared rather
+        // than re-implemented: a pin that still reaches a live tab of this
+        // conversation is never displaced, however explicit the request. This can
+        // only ever recover a pin that is dead or ambiguous.
+        //
+        // Best-effort by construction: the pin store write above has already
+        // succeeded and is what the caller asked for. A repin that cannot happen
+        // must not retract it, so the outcome is reported, never thrown.
+        let scopeRepin: ScopeRepinOutcome | undefined;
+        if (mode === "pinned" && pinPath && isScopeAddress(ctx.tabId) && ctx.bridge.repinScopeToTab) {
+          const namedTab = canonicalRequestedSavedIdentity(pinPath);
+          if (namedTab) {
+            try {
+              scopeRepin = ctx.bridge.repinScopeToTab(ctx.tabId, namedTab);
+            } catch {
+              scopeRepin = undefined; // never worse than the pre-#888 silence
+            }
+          }
+        }
         ctx.bridge.push({ type: "workflow_target", target }, ctx.tabId);
         // #770/#803/#716 — ROUTING is only half of "follow the tab that's live now".
         // rebindToActiveTab is a NO-OP whenever the bound tab is still REACHABLE, which
@@ -9388,12 +9422,24 @@ export function buildPanelToolDefs(): PanelToolDef[] {
               `mode:"current"${rebindNote ? `.${rebindNote}` : "."}\n\nNOT APPLIED:${fence.note}`,
           );
         }
+        // #888 — SAY what the scope repin did. A silent success is as unhelpful
+        // here as the silent refusal #1077 fixed: the whole complaint is that
+        // pinning reported success while routing stayed ambiguous, so "the routing
+        // ambiguity is cleared" is the one fact that makes this reply actionable.
+        // A refusal carries its own reason out for the same reason.
+        const scopeRepinNote =
+          typeof scopeRepin === "string"
+            ? ` This session's turn routing was AMBIGUOUS (a reconnect delivered messages from several workflows at once) and is now pinned to this workflow, so graph tools will resolve deterministically.`
+            : scopeRepin && typeof scopeRepin === "object" && scopeRepin.reason
+              ? ` NOTE — the workflow target was set, but this session's turn routing was NOT re-pinned: ${scopeRepin.reason}.`
+              : "";
         return ok({
           ...target,
           ...(deferredBind ? { deferred: true } : {}),
           ...(fence ? { graph_binding: fence.binding } : {}),
           ...(fenceRebind ? { graph_binding_status: fenceRebind.status } : {}),
-          note: hint + rebindNote + (fence?.note ?? ""),
+          ...(typeof scopeRepin === "string" ? { turn_routing: "repinned" } : {}),
+          note: hint + rebindNote + (fence?.note ?? "") + scopeRepinNote,
         });
       },
     ),
