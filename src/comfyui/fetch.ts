@@ -1,5 +1,6 @@
 import { getComfyUIAuthHeaders } from "../config.js";
 import { describeFetchFailure, isBareFetchFailure } from "../utils/errors.js";
+import { sameOrigin } from "../utils/origin.js";
 
 /** The request target, for the diagnostic. Never throws on an odd input. */
 export function targetOf(input: string | URL | Request): string {
@@ -77,9 +78,22 @@ export function describeTargetDrift(target: string): string {
   const want = originOf(target);
   if (!want) return "";
   const distinct = [...new Set(origins)];
-  if (distinct.includes(want)) {
+  // #1175 — `includes` compares spellings, not servers. A panel on
+  // http://127.0.0.1:8188 against a target of http://localhost:8188 is ONE
+  // ComfyUI, and reporting it as "a DIFFERENT address" sent a reporter to point
+  // COMFYUI_URL at the origin it was already pointed at.
+  const match = distinct.find((o) => sameOrigin(o, want));
+  if (match !== undefined) {
+    // Name BOTH spellings when they differ textually. "This same origin" reads
+    // as a contradiction next to two visibly different strings, and the reader
+    // has no way to know the comparison was alias-aware — which is what sent the
+    // #1175 reporter looking for a target mismatch that did not exist.
+    const alias =
+      match === want
+        ? ""
+        : ` (spelled ${match} there and ${want} here — the same host, so this is not a mismatch)`;
     return (
-      ` A connected panel is on this same origin, so this is NOT a wrong-address problem: ` +
+      ` A connected panel is on this same origin${alias}, so this is NOT a wrong-address problem: ` +
       `the browser can reach ${want} and this process cannot (a firewall, a container ` +
       `boundary, or a server bound to one interface).`
     );
