@@ -23,6 +23,15 @@
 //               queue drains at handoff, the record goes terminal `done`, and
 //               nothing migrates. Neither absolute is true.
 //
+// KNOWN SURVIVOR, so the pin below is not read as a clean bill of health: the
+// stale-heartbeat sentence in this paragraph ("re-issuing action:\"download\"
+// then resumes or restarts it") is ROUTE-BLIND. For a Manager dispatch there is
+// no local .partial and a re-issue is a second server-side dispatch — the
+// corrupting move. It is not fixed here because the record's own stale-heartbeat
+// note is route-blind too, and a description-only fix would contradict it, which
+// is the failure #1197 spent four rounds undoing. Both halves ship together, as
+// their own change.
+//
 // So the tests below check two different things, and the second matters more:
 // that the true claims are present, AND that no absolute claim about survival
 // has crept back in. A test that only requires phrases lets an author append
