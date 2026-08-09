@@ -54,10 +54,10 @@ describe("download_model action:\"status\" describes the survival it actually ha
     expect(description()).not.toMatch(/Survives a sidebar\/tool-session reconnect/i);
   });
 
-  it("names the ORCHESTRATOR RESTART case and says the transfer is not running", () => {
+  it("names the ORCHESTRATOR RESTART case and says the transfer is dead", () => {
     const d = description();
     expect(d).toMatch(/ORCHESTRATOR RESTART/);
-    expect(d).toMatch(/NOT running/);
+    expect(d).toMatch(/the transfer is dead/i);
     // And tells the caller what to do about it, which is the opposite of the
     // old text's "instead of starting a duplicate".
     expect(d).toMatch(/re-issuing/i);
@@ -67,16 +67,40 @@ describe("download_model action:\"status\" describes the survival it actually ha
     // Narrowing must not throw away the true half — #529's adoption contract is
     // real, and a caller who stops trusting it starts duplicating live transfers.
     const d = description();
-    expect(d).toMatch(/resolvable by its `id`/);
+    expect(d).toMatch(/resolvable by its `id` OR by `url`/);
     expect(d).toMatch(/still streaming|reads `downloading`/);
   });
 
-  it("does not tell the caller to conclude anything from a MISSING record", () => {
-    // The carry-over that records an interruption is best-effort by design, so
-    // its absence is not evidence the download is alive — the same
-    // "could not determine" / "determined not" fold, one layer over (#796).
+  // The three qualifications below are what the FIRST attempt at this fix got
+  // wrong. It replaced one over-promise with two more (codex gate): it asserted
+  // the carried-over record exists, and it repeated the inherited
+  // "by `id` (or by `url`)" for a record that has no url lookup key. Each is
+  // pinned separately so a future edit cannot quietly drop one.
+
+  it("does not promise the carried-over record EXISTS", () => {
+    // `migrateInFlightJobs` returns 0 on a readdir failure, its caller swallows
+    // that as best-effort, and the old dir is deleted either way — so after a
+    // restart there may be no record at all.
     const d = description();
-    // The registered text must not promise that a missing record means finished.
-    expect(d).not.toMatch(/if it is missing[^.]*it (?:finished|completed)/i);
+    expect(d).toMatch(/may not exist at all|best-effort/i);
+    expect(d).toMatch(/MISSING record is not evidence the download is alive/i);
+  });
+
+  it("does not promise a carried-over record is findable by URL", () => {
+    // `migrateInFlightJobs` copies id/req_key but NOT trayId, and url lookup
+    // matches persisted records by the trayId hash of the url — so a migrated
+    // record is reachable by `id` only. The old text claimed both.
+    const d = description();
+    expect(d).toMatch(/findable by `id` ONLY/);
+    expect(d).toMatch(/not by `url`/);
+  });
+
+  it("does not claim the STATE is the only distinguishing signal", () => {
+    // It is not: the migrated record carries an explicit INTERRUPTED note that
+    // is separately hydrated and rendered. Claiming state is the sole signal
+    // sends a caller looking at the wrong field.
+    const d = description();
+    expect(d).not.toMatch(/state is the only thing/i);
+    expect(d).toMatch(/INTERRUPTED/);
   });
 });
