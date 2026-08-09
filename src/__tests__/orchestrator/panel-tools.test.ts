@@ -3675,8 +3675,18 @@ describe("#716 workflow UUID refresh after reconnect/open/re-pin", () => {
     };
 
     const res = await defByName("panel_open_workflow").handler({ path: requested }, ctx);
-    expect(res.isError).toBeFalsy();
+    // #716 P1's subject — the uuid must NOT be adopted from a same-basename
+    // workflow in another directory — is unchanged and is still the point here.
     expect(refresh).not.toHaveBeenCalled();
+    // #887 — but the OPEN is no longer reported as a success. This assertion was
+    // `toBeFalsy()` and is deliberately inverted: the caller asked for
+    // workflows/a/foo.json, the panel's post-open re-read says workflows/b/foo.json
+    // is active, and answering "opened workflows/a/foo.json" to that is the exact
+    // report that let a reporter Save-As onto the wrong canvas. Suppressing the
+    // refresh protected the FENCE; it never protected the CALLER, who was told the
+    // open landed. Both halves are now covered.
+    expect(res.isError).toBe(true);
+    expect((res.content[0] as { text: string }).text).toContain("workflows/b/foo.json");
   });
 
   it("does not promote an alias request to a reply-resolved path for fast-success refresh (#716 P1)", async () => {

@@ -2697,6 +2697,64 @@ function activeMatchesOpenRefreshTarget(active: unknown, path: string): boolean 
   return !!targetIdentity && canonicalSavedRecordIdentity(active) === targetIdentity;
 }
 
+/**
+ * #887 — THREE readings of the post-open active record, because
+ * `activeMatchesOpenRefreshTarget` returning false is not one answer.
+ *
+ * That predicate is a UUID-adoption gate, and for adoption both "a different
+ * workflow is active" and "I cannot tell what is active" correctly mean *do not
+ * adopt*. Reusing it to WARN would be a different claim on the same evidence:
+ * it returns false whenever `canonicalSavedRecordIdentity(active)` is null, which
+ * includes an ordinary UNSAVED tab (`tmp:` routing keys are deliberately rejected
+ * as saved identities). An open whose caller then has "Unsaved Workflow" active —
+ * the single most common state there is — would raise a wrong-canvas alarm on
+ * every call.
+ *
+ * So `different` is only returned when the panel POSITIVELY identified what is
+ * active and it is not the target. An active record we cannot read at all stays
+ * `indeterminate`, and the caller says nothing: unproven degrades to unknown,
+ * never to the negative. That rule is why the previous attempt at this issue was
+ * withdrawn, and it is the rule this module already states for every other
+ * proof-of-sameness oracle.
+ *
+ * An unsaved tab IS a positive identification: a `tmp:` routing key cannot be the
+ * saved workflow the caller named, so that case is genuinely `different` — but it
+ * reaches that verdict by being READ, not by failing to canonicalize.
+ */
+export type OpenActiveReading = "same" | "different" | "indeterminate";
+
+/** #887 — what the post-open corroborating read OBSERVED, when it contradicts the open. */
+export type OpenDriftNotice = { drifted: true; activeLabel: string };
+
+export function readOpenActiveAgainstTarget(active: unknown, path: string): OpenActiveReading {
+  if (activeMatchesOpenRefreshTarget(active, path)) return "same";
+  if (!canonicalRequestedSavedIdentity(path)) return "indeterminate"; // our own side is unreadable
+  if (!active || typeof active !== "object") return "indeterminate";
+  // The STRICT gate above failing is not enough to warn. It requires a canonical
+  // saved identity on both sides, and it refuses a record whose routing_key is
+  // absent, replayed, or malformed (#716 P1) — even when that record's PATH is the
+  // very workflow we opened. Declining to adopt a uuid on that evidence is right;
+  // telling the caller a different canvas is mounted would be a false alarm on the
+  // same workflow. So a looser positive match still counts as NOT-different.
+  if (activeMatchesTarget(active, path)) return "indeterminate";
+  const a = active as { path?: unknown; filename?: unknown; key?: unknown };
+  const identified =
+    (typeof a.path === "string" && a.path !== "") ||
+    (typeof a.filename === "string" && a.filename !== "") ||
+    (typeof a.key === "string" && a.key !== "");
+  return identified ? "different" : "indeterminate";
+}
+
+/** Human-readable name for whatever the panel says is active, for the #887 warning. */
+export function describeActiveRecord(active: unknown): string {
+  if (!active || typeof active !== "object") return "another workflow";
+  const a = active as { path?: unknown; filename?: unknown; key?: unknown };
+  for (const v of [a.filename, a.path, a.key]) {
+    if (typeof v === "string" && v !== "") return v;
+  }
+  return "another workflow";
+}
+
 /** Normalizes only syntax the panel's saved-path/routing identity normalizes. */
 function canonicalSavedWorkflowPath(value: unknown): string | null {
   if (typeof value !== "string" || !value) return null;
@@ -3524,7 +3582,7 @@ async function refreshOpenWorkflowUuid(
   ctx: PanelToolCtx,
   requestedPath: string,
   openResult: ToolResult,
-): Promise<void> {
+): Promise<OpenDriftNotice | null> {
   const parsedOpen = parseToolResultJson(openResult);
   const opened = parsedOpen?.opened;
   const openedPath =
@@ -3556,7 +3614,7 @@ async function refreshOpenWorkflowUuid(
     if (requestedUnsaved && requestedUnsaved === parsedOpen?.routing_key) {
       refreshWorkflowUuid(ctx, parsedOpen);
     }
-    return;
+    return null;
   }
 
   // THREE outcomes for this corroborating read, not two — and conflating the last
@@ -3592,9 +3650,22 @@ async function refreshOpenWorkflowUuid(
     // value, which is fresher than the reply — or it names a DIFFERENT active
     // workflow, in which case another tab won the slot and adopting our target's
     // uuid would fence this session to a canvas that is not mounted. Adopt nothing.
-    if (!activeMatchesOpenRefreshTarget(list!.active, requestedPath)) return;
+    //
+    // #887 — declining to adopt was right and was never enough. This is the ONLY
+    // genuinely later observation in the whole open path: it sits behind a real
+    // `await ctx.call(...)` round trip to the panel, so unlike anything inside the
+    // panel's own synchronous post-load window it can actually see the active
+    // pointer having settled somewhere else. It saw the contradiction, kept the
+    // session safe, and told the CALLER nothing — the tool result still reported a
+    // plain success naming the path the agent asked for. The agent then had every
+    // reason to Save-As onto what it believed was that canvas.
+    const reading = readOpenActiveAgainstTarget(list!.active, requestedPath);
+    if (reading === "different") {
+      return { drifted: true, activeLabel: describeActiveRecord(list!.active) };
+    }
+    if (reading === "indeterminate") return null;
     refreshWorkflowUuid(ctx, list!.active) || refreshWorkflowUuid(ctx, parsedOpen);
-    return;
+    return null;
   }
 
   // COULD NOT ASK — the wedged case. Fall back to the reply's proven uuid rather
@@ -3604,7 +3675,12 @@ async function refreshOpenWorkflowUuid(
   // actually mounted, whereas doing nothing here guarantees every subsequent
   // command is refused. A reply that carries no uuid (the panel could not prove
   // it) still refreshes nothing, so fail-closed is preserved.
+  //
+  // #887 — and NO drift notice from here, deliberately. This branch is reached
+  // precisely because the corroborating read could not be made, so nothing was
+  // observed about what is active. Warning here would be inventing the finding.
   refreshWorkflowUuid(ctx, parsedOpen);
+  return null;
 }
 
 /** Exact resolved-path check for an open receipt. A filename/basename is not a
@@ -3744,7 +3820,30 @@ async function openWorkflowWithVerify(path: string, ctx: PanelToolCtx): Promise<
     // #716 — re-read the active record after this exact successful open before
     // refreshing the next command's stamp. This prevents a late reply from an
     // earlier open from overwriting the fence after another tab became active.
-    if (!res.isError) await refreshOpenWorkflowUuid(ctx, path, res);
+    if (!res.isError) {
+      const drift = await refreshOpenWorkflowUuid(ctx, path, res);
+      // #887 — the read above is the ONLY observation in this whole path taken
+      // after a real round trip, so it is the only thing that can catch the active
+      // pointer having settled elsewhere. It already declined to adopt the uuid;
+      // reporting a plain success alongside that silence is what let an agent
+      // Save-As onto the wrong canvas.
+      //
+      // This FAILS the open rather than annotating it. The caller asked for a
+      // workflow to be made active and it is not active — a success naming the
+      // requested path is false on the one point the caller acts on, and the next
+      // act is typically a write. The session's fence is untouched (nothing was
+      // adopted), so the tab that IS active keeps its own protection.
+      if (drift) {
+        return fail(
+          `workflow_open: ${path} was opened, but ${drift.activeLabel} is the ACTIVE workflow now — ` +
+            `the panel confirmed this on a re-read after the open completed. This session's ` +
+            `workflow identity was NOT re-pointed at ${path}, so the canvas you would read or ` +
+            `write is ${drift.activeLabel}, not ${path}. Do NOT save, save-as, or edit expecting ` +
+            `${path}. Call panel_list_workflows to see the current state, then re-open ${path} ` +
+            `if you still need it — another tab became active during or after the open.`,
+        );
+      }
+    }
     return res;
   }
 
