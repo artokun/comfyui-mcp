@@ -7,6 +7,7 @@
 import { ConnectionError } from "../utils/errors.js";
 import { isCloudMode } from "../config.js";
 import { getQueue, getSystemStats, comfyApiFetch } from "../comfyui/client.js";
+import { scrubLogLines } from "../comfyui/json-guard.js";
 
 const CRITICAL_MODEL_CATS = [
   "checkpoints",
@@ -168,10 +169,16 @@ export async function runHealthCheck(
       const res = await comfyApiFetch("/internal/logs");
       if (res.ok) {
         const text = await res.text();
-        const errLines = text
-          .split("\n")
-          .filter((l) => /traceback|error|exception/i.test(l))
-          .slice(-recentErrors);
+        // #1206 — these lines go straight into the health report, which is a
+        // DIAGNOSTIC users paste into bug reports. A custom node logging the URL
+        // it fetched can put a CivitAI/HF token in one, so scrub before emitting.
+        // Per line, and fail-closed VISIBLY, for the same reasons as getLogs.
+        const errLines = scrubLogLines(
+          text
+            .split("\n")
+            .filter((l) => /traceback|error|exception/i.test(l))
+            .slice(-recentErrors),
+        );
         if (errLines.length > 0) {
           lines.push(`\n**Recent errors** (last ${errLines.length}):`);
           for (const e of errLines) lines.push(`  ${e.trim()}`);

@@ -28,6 +28,7 @@ import {
   readComfyJson,
   redactErrorMessage,
   rethrowWithJsonDiagnosis,
+  scrubLogLines,
   scrubSecretShapedText,
 } from "./json-guard.js";
 import * as cloudClient from "./cloud-client.js";
@@ -840,13 +841,14 @@ export async function getLogs(): Promise<string[]> {
   try {
     const parsed = JSON.parse(text);
     if (typeof parsed === "string") {
-      return parsed.split("\n").filter(Boolean);
+      return scrubLogLines(parsed.split("\n").filter(Boolean));
     }
   } catch {
     // Not JSON — treat as raw text
   }
-  return text.split("\n").filter(Boolean);
+  return scrubLogLines(text.split("\n").filter(Boolean));
 }
+
 
 /**
  * ComfyUI frontend per-user settings, served by the frontend user manager:
