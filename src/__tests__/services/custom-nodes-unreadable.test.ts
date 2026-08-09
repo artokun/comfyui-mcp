@@ -160,3 +160,35 @@ describe("an UNREADABLE custom_nodes is not an absent one (#796)", () => {
     expect(res.liveRootUnreadable).toBeUndefined();
   });
 });
+
+// THE REMEDY. Recording the state is only half of it: without this, the new
+// field is plumbing nothing reads — and the uncorroborated message would keep
+// offering one of two remedies that cannot apply. The argv was fine (so
+// relaunching with an absolute main.py changes nothing) and ComfyUI is reachable
+// (so "start/reach ComfyUI" is already true).
+describe("the uncorroborated message names the RIGHT remedy (#796)", () => {
+  it("has a distinct branch for an unreadable root, before the underivable one", async () => {
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(
+      new URL("../../services/panel-installer.ts", import.meta.url),
+      "utf-8",
+    );
+
+    const at = src.indexOf("baseResolution?.liveRootUnreadable");
+    expect(at, "the unreadable case must be handled").toBeGreaterThan(-1);
+
+    // ORDER MATTERS: underivable is the fallback of the two, so unreadable has to
+    // be tested first or it can never be reached.
+    const underivableAt = src.indexOf("baseResolution?.liveRootUnderivable");
+    expect(at, "unreadable must be checked before underivable").toBeLessThan(underivableAt);
+
+    const branch = src.slice(at, underivableAt);
+    expect(branch, "it must name the path that could not be read").toContain(
+      "baseResolution.liveRootUnreadable",
+    );
+    expect(branch, "and say what to do about it").toMatch(/readable/);
+    // The remedies that do NOT apply here must not appear in this branch.
+    expect(branch).not.toMatch(/ABSOLUTE path to main\.py/);
+    expect(branch).not.toMatch(/Start\/reach/);
+  });
+});

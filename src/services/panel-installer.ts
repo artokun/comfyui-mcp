@@ -2005,7 +2005,20 @@ export async function panelStatus(
         `serves from, so "not installed" is UNCORROBORATED. On a split install ` +
         `(Comfy Desktop's --base-directory, #766) the panel lives elsewhere and ` +
         `installing here would land in a custom_nodes nothing loads. ` +
-        (baseResolution?.liveRootUnderivable
+        // #796 — THREE causes, three remedies. The unreadable case used to take
+        // one of the other two branches, and both give advice that cannot work:
+        // the argv was fine (so relaunching with an absolute main.py changes
+        // nothing) and ComfyUI is reachable (so "start/reach ComfyUI" is already
+        // true). Naming a remedy that cannot apply is worse than naming none.
+        (baseResolution?.liveRootUnreadable
+          ? `ComfyUI IS running and DID identify an install root — ` +
+            `${baseResolution.liveRootUnreadable} — but its custom_nodes could not be ` +
+            `READ from here (a permission error, an IO error, or a network path that ` +
+            `is not available to this process), so it could not be confirmed as the ` +
+            `serving tree. That is not evidence it lacks one. Make that directory ` +
+            `readable by whoever runs this MCP — or run install_comfyui ` +
+            `(action:"panel") from a process that can read it — before installing.`
+          : baseResolution?.liveRootUnderivable
           ? `ComfyUI IS running, but its reported launch arguments did not identify ` +
             `an install root holding custom_nodes (a relative main.py with no ` +
             `reported working directory), so reaching it again will not change this — ` +
