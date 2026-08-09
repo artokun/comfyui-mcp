@@ -59,6 +59,10 @@ const fetchApi = vi.fn(async () => ({ ok: false, status: 404, json: async () => 
 vi.mock("../../comfyui/client.js", () => ({
   getSystemStats: (...a: unknown[]) => getSystemStats(...a),
   getClient: () => ({ fetchApi: (...a: unknown[]) => fetchApi(...(a as [])) }),
+  // #385 — call sites moved from `client.fetchApi` to `comfyApiFetch`, which
+  // returns a 4xx instead of throwing. Routed to the SAME spy so every
+  // existing "which route did we ask for" assertion still pins the same thing.
+  comfyApiFetch: (...a: unknown[]) => ((...a: unknown[]) => fetchApi(...(a as [])))(...(a as [string])),
 }));
 
 // Two injected root sources, both feeding the code-root VETO only:

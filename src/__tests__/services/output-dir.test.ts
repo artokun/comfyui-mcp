@@ -67,6 +67,10 @@ const fetchApi = vi.fn(defaultFetchApi);
 vi.mock("../../comfyui/client.js", () => ({
   getSystemStats: (...a: unknown[]) => getSystemStats(...a),
   getClient: () => ({ fetchApi: (...a: unknown[]) => fetchApi(...(a as [string])) }),
+  // #385 — call sites moved from `client.fetchApi` to `comfyApiFetch`, which
+  // returns a 4xx instead of throwing. Routed to the SAME spy so every
+  // existing "which route did we ask for" assertion still pins the same thing.
+  comfyApiFetch: (...a: unknown[]) => ((...a: unknown[]) => fetchApi(...(a as [string])))(...(a as [string])),
 }));
 
 // resolveModelsDir's local fallback (COMFYUI_PATH → default workspace) is resolved

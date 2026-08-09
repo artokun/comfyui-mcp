@@ -44,6 +44,10 @@ vi.mock("../../services/workspace-env.js", async () => {
 // pulled in transitively by model-resolver; stub it so the import doesn't fail.
 vi.mock("../../comfyui/client.js", () => ({
   getClient: () => ({ fetchApi: vi.fn() }),
+  // #385 — call sites moved from `client.fetchApi` to `comfyApiFetch`, which
+  // returns a 4xx instead of throwing. Routed to the SAME spy so every
+  // existing "which route did we ask for" assertion still pins the same thing.
+  comfyApiFetch: (...a: unknown[]) => (vi.fn())(...(a as [string])),
   getSystemStats: vi.fn(async () => {
     if (hoisted.statsThrows) throw new Error("ECONNREFUSED");
     return hoisted.stats;

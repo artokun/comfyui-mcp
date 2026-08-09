@@ -51,18 +51,26 @@ vi.mock("../../config.js", () => ({
   isRemoteMode: () => h.remote,
 }));
 
-vi.mock("../../comfyui/client.js", () => ({
-  getSystemStats: vi.fn(async () => ({ system: { argv: [join("ComfyUI", "main.py")] } })),
-  getClient: () => ({
-    fetchApi: async (path: string) => {
-      h.fetchCalls.push(path);
-      const category = path.replace(/^\/models\//, "");
-      const listing = h.liveListings[category];
-      if (listing === undefined) return { ok: false, json: async () => null };
-      return { ok: true, json: async () => listing };
-    },
-  }),
-}));
+vi.mock("../../comfyui/client.js", () => {
+  // Declared INSIDE the factory: `vi.mock` is hoisted above every top-level
+  // const, so a shared double defined out there is read before it exists. `h` is
+  // fine to close over — it is `vi.hoisted`.
+  const listingFetch = async (path: string) => {
+    h.fetchCalls.push(path);
+    const category = path.replace(/^\/models\//, "");
+    const listing = h.liveListings[category];
+    if (listing === undefined) return { ok: false, status: 404, json: async () => null };
+    return { ok: true, status: 200, json: async () => listing };
+  };
+  return {
+    getSystemStats: vi.fn(async () => ({ system: { argv: [join("ComfyUI", "main.py")] } })),
+    getClient: () => ({ fetchApi: listingFetch }),
+    // #385 — call sites moved from `client.fetchApi` to `comfyApiFetch`, which
+    // returns a 4xx instead of throwing. Same double, so `h.fetchCalls` records
+    // the identical routes and every assertion in this file is unchanged.
+    comfyApiFetch: listingFetch,
+  };
+});
 
 vi.mock("../../services/node-management.js", () => ({
   installModelViaManager: vi.fn(),

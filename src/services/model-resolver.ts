@@ -4,7 +4,7 @@ import { platform } from "node:os";
 import { readdir, stat, mkdir, readFile, lstat, realpath } from "node:fs/promises";
 import { dirname, join, basename, normalize, resolve, relative, sep, isAbsolute, extname } from "node:path";
 import { config, getComfyUIBaseUrl, isRemoteMode } from "../config.js";
-import { getClient, getLogs, getSystemStats } from "../comfyui/client.js";
+import { getClient, getLogs, getSystemStats, comfyApiFetch } from "../comfyui/client.js";
 import { getExtraModelRoots, getLiveExtraModelRoots } from "./extra-paths.js";
 import { resolveEffectiveComfyUIBase, resolveLiveServerRoot } from "./workspace-env.js";
 import { installModelViaManager } from "./node-management.js";
@@ -387,7 +387,7 @@ async function discoverExtraCategories(
   client: ReturnType<typeof getClient>,
 ): Promise<string[]> {
   try {
-    const res = await client.fetchApi("/models");
+    const res = await comfyApiFetch("/models");
     if (!res.ok) return [];
     const json = (await res.json()) as unknown;
     if (!Array.isArray(json)) return [];
@@ -540,7 +540,7 @@ export async function listLocalModelsWithCoverage(
  */
 async function otherRegisteredCategories(asked: string): Promise<string[] | undefined> {
   try {
-    const res = await getClient().fetchApi("/models");
+    const res = await comfyApiFetch("/models");
     if (!res.ok) return undefined;
     const json = (await res.json()) as unknown;
     if (!Array.isArray(json)) return undefined;
@@ -601,7 +601,7 @@ async function collectLocalModels(
     const dedup = makeModelDeduper();
     for (const dir of dirsToScan) {
       try {
-        const res = await client.fetchApi(`/models/${dir}`);
+        const res = await comfyApiFetch(`/models/${dir}`);
         // A non-OK status or a non-array body means we did NOT learn what this
         // category holds. Recording the reason is the whole point: continuing
         // silently is what let a warming-up server look like an empty install.
@@ -929,8 +929,7 @@ export async function liveCategoryListing(
   if (!category) return undefined;
   if (categoryCannotEnumerateFiles(category)) return undefined;
   try {
-    const client = getClient();
-    const res = await client.fetchApi(`/models/${encodeURIComponent(category)}`);
+    const res = await comfyApiFetch(`/models/${encodeURIComponent(category)}`);
     if (!res.ok) return undefined;
     const json = (await res.json()) as unknown;
     if (!Array.isArray(json)) return undefined;

@@ -26,6 +26,20 @@ vi.mock("../../config.js", async () => {
 const getNodeDefs = vi.fn();
 vi.mock("@stable-canvas/comfyui-client", () => ({
   Client: class {
+    // #385 — call sites moved to `comfyApiFetch`, which reuses the library's
+    // own routing (apiURL/apiHeaders) and its injected `fetch`, so it can read a
+    // 4xx instead of having `fetchApi` throw it away. The double routes `fetch`
+    // back through its own `fetchApi`, so every existing impl and spy in this
+    // file keeps working and keeps asserting the same route.
+    apiURL(p: string) {
+      return p;
+    }
+    apiHeaders(init?: { headers?: unknown }) {
+      return (init && init.headers) || {};
+    }
+    async fetch(u: string, init?: unknown) {
+      return (this as unknown as { fetchApi: (u: string, i?: unknown) => unknown }).fetchApi(u, init);
+    }
     getNodeDefs = getNodeDefs;
     close() {}
   },

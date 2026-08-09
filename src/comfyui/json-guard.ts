@@ -614,7 +614,7 @@ function looksLikeProxyErrorPage(body: string): boolean {
  * a CDN's "Origin warming up", a gateway's "Backend read timeout". The standard
  * phrase for a code is noise beside the code itself, so it is dropped.
  */
-function describeStatus(status: number, statusText?: string): string {
+export function describeStatus(status: number, statusText?: string): string {
   const text = (statusText ?? "").trim();
   if (!text) return String(status);
   if (STANDARD_REASON_PHRASES.has(text.toLowerCase())) return String(status);

@@ -6,7 +6,7 @@
 
 import { ConnectionError } from "../utils/errors.js";
 import { isCloudMode } from "../config.js";
-import { getClient, getQueue, getSystemStats } from "../comfyui/client.js";
+import { getQueue, getSystemStats, comfyApiFetch } from "../comfyui/client.js";
 
 const CRITICAL_MODEL_CATS = [
   "checkpoints",
@@ -117,12 +117,11 @@ export async function runHealthCheck(
     return lines.join("\n");
   }
 
-  const client = getClient();
   const modelLines: string[] = [];
   let totalModelsSeen = 0;
   for (const cat of categories) {
     try {
-      const res = await client.fetchApi(`/models/${cat}`);
+      const res = await comfyApiFetch(`/models/${cat}`);
       if (!res.ok) {
         modelLines.push(`- ${cat}: REST ${res.status}`);
         continue;
@@ -166,7 +165,7 @@ export async function runHealthCheck(
     lines.push(`\n**Recent errors**: not requested (recent_errors=${recentErrors}) — the log was NOT checked, which is not the same as it being clean.`);
   } else {
     try {
-      const res = await client.fetchApi("/internal/logs");
+      const res = await comfyApiFetch("/internal/logs");
       if (res.ok) {
         const text = await res.text();
         const errLines = text

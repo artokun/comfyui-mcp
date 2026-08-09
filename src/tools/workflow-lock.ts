@@ -1,4 +1,5 @@
-import { getClient } from "../comfyui/client.js";
+import { comfyApiFetch } from "../comfyui/client.js";
+import { bodyPrefixOf, describeStatus } from "../comfyui/json-guard.js";
 import type { WorkflowJSON } from "../comfyui/types.js";
 import {
   diffLocks,
@@ -9,11 +10,20 @@ import {
 import { ValidationError } from "../utils/errors.js";
 
 async function loadWorkflowFromLibrary(filename: string): Promise<WorkflowJSON> {
-  const client = getClient();
   const encoded = encodeURIComponent(`workflows/${filename}`);
-  const res = await client.fetchApi(`/api/userdata/${encoded}`);
+  const res = await comfyApiFetch(`/api/userdata/${encoded}`);
   if (!res.ok) {
-    throw new ValidationError(`Workflow not found in user library: ${filename} (${res.status})`);
+    // Gate the ABSENCE wording on 404, the way fetchImage does (#385 review
+    // finding 4). This branch was dead until #385 made it reachable, so it had
+    // never had to distinguish "the server says it is not there" from "an auth
+    // gate, a 502, or a proxy that does not forward /api/userdata answered".
+    // Reporting the second as the first is the #796 fold, and an agent told its
+    // workflow does not exist is one step from recreating or overwriting it.
+    throw new ValidationError(
+      res.status === 404
+        ? `Workflow not found in user library: ${filename} (404)`
+        : `Could NOT read "${filename}" from the user library: the server answered ${describeStatus(res.status, res.statusText)}. That is not a report that it is missing — nothing was read.`,
+    );
   }
   return (await res.json()) as WorkflowJSON;
 }
@@ -25,13 +35,12 @@ async function loadWorkflowFromLibrary(filename: string): Promise<WorkflowJSON> 
  */
 async function loadLockFromLibrary(filename: string): Promise<WorkflowLock | null> {
   const lockName = `${filename}.lock.json`;
-  const client = getClient();
   const encoded = encodeURIComponent(`workflows/${lockName}`);
-  const res = await client.fetchApi(`/api/userdata/${encoded}`);
+  const res = await comfyApiFetch(`/api/userdata/${encoded}`);
   if (res.status === 404) return null;
   if (!res.ok) {
     throw new ValidationError(
-      `Failed to read lock for "${filename}": ${res.status} ${res.statusText}.`,
+      `Failed to read lock for "${filename}": ${describeStatus(res.status, res.statusText)}.`,
     );
   }
   // unknown-ok: "" is interpolated into an ERROR MESSAGE and nothing else — the
@@ -43,9 +52,8 @@ async function loadLockFromLibrary(filename: string): Promise<WorkflowLock | nul
 
 async function saveLockToLibrary(filename: string, lock: WorkflowLock): Promise<void> {
   const lockName = `${filename}.lock.json`;
-  const client = getClient();
   const encoded = encodeURIComponent(`workflows/${lockName}`);
-  const res = await client.fetchApi(`/api/userdata/${encoded}`, {
+  const res = await comfyApiFetch(`/api/userdata/${encoded}`, {
     method: "POST",
     body: JSON.stringify(lock, null, 2),
   });
@@ -53,9 +61,13 @@ async function saveLockToLibrary(filename: string, lock: WorkflowLock): Promise<
     // unknown-ok: "" is interpolated into an ERROR MESSAGE and nothing else — the
     // HTTP status is reported either way, so an unreadable body costs detail in the
     // text, never a wrong conclusion. Verified there is no branch on this value.
+    //
+    // #385 made this branch REACHABLE, so a body that was never printed before now
+    // can be. A gateway that reflects the request can put our own credential in it,
+    // so it goes through the same scrubber every other printed body goes through.
     const text = await res.text().catch(() => "");
     throw new ValidationError(
-      `Failed to save lock file for ${filename}: ${res.status} ${res.statusText}${text ? `\n${text}` : ""}`,
+      `Failed to save lock file for ${filename}: ${describeStatus(res.status, res.statusText)}${text ? `\n${bodyPrefixOf(text)}` : ""}`,
     );
   }
 }

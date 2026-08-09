@@ -44,6 +44,10 @@ const mocks = vi.hoisted(() => ({
 vi.mock("node:fs/promises", () => ({ readFile: (...a: unknown[]) => mocks.readFile(...a) }));
 vi.mock("../../comfyui/client.js", () => ({
   getClient: () => ({ fetchApi: (...a: unknown[]) => mocks.fetchApi(...a) }),
+  // #385 — call sites moved from `client.fetchApi` to `comfyApiFetch`, which
+  // returns a 4xx instead of throwing. Routed to the SAME spy so every
+  // existing "which route did we ask for" assertion still pins the same thing.
+  comfyApiFetch: (...a: unknown[]) => ((...a: unknown[]) => mocks.fetchApi(...a))(...(a as [string])),
   getObjectInfo: (...a: unknown[]) => mocks.getObjectInfo(...a),
   backfillObjectInfo: (...a: unknown[]) => mocks.backfillObjectInfo(...a),
 }));

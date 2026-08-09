@@ -1,7 +1,7 @@
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { config, isRemoteMode } from "../config.js";
-import { getClient, getSystemStats } from "../comfyui/client.js";
+import { getSystemStats, comfyApiFetch } from "../comfyui/client.js";
 import {
   resolveEffectiveComfyUIBase,
   resolveLiveComfyUIBase,
@@ -469,8 +469,7 @@ async function corroborateBaseByModelInventory(
   for (const category of [targetCategory]) {
     let files: string[];
     try {
-      const client = getClient();
-      const res = await client.fetchApi(`/models/${encodeURIComponent(category)}`);
+      const res = await comfyApiFetch(`/models/${encodeURIComponent(category)}`);
       if (!res.ok) {
         unreadableCategories += 1;
         continue;

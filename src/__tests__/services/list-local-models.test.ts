@@ -23,6 +23,11 @@ const fetchApi = vi.fn();
 const getClient = vi.fn();
 vi.mock("../../comfyui/client.js", () => ({
   getClient: (...args: unknown[]) => getClient(...args),
+  // #385 — call sites moved from `client.fetchApi` to `comfyApiFetch`, which
+  // returns a 4xx instead of throwing. Routed through the SAME double so every
+  // existing impl and route assertion in this file keeps pinning the same thing.
+  comfyApiFetch: (...a: unknown[]) =>
+    (getClient() as { fetchApi: (...x: unknown[]) => unknown }).fetchApi(...a),
 }));
 
 // Filesystem fallback hooks (readFile feeds the CivitAI sidecar enrichment).

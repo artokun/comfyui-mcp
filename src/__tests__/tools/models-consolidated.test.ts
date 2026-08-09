@@ -120,6 +120,10 @@ vi.mock("../../comfyui/client.js", () => ({
   getObjectInfo: (...a: unknown[]) => mocks.getObjectInfo(...a),
   getSystemStats: async () => ({ devices: [] }),
   getClient: () => ({ fetchApi: (...a: unknown[]) => mocks.fetchApi(...a) }),
+  // #385 — call sites moved from `client.fetchApi` to `comfyApiFetch`, which
+  // returns a 4xx instead of throwing. Routed to the SAME spy so every
+  // existing "which route did we ask for" assertion still pins the same thing.
+  comfyApiFetch: (...a: unknown[]) => ((...a: unknown[]) => mocks.fetchApi(...a))(...(a as [string])),
 }));
 
 // The delete path. Mocked at node:fs/promises so "did anything unlink?" is

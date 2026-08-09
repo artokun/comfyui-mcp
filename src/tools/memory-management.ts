@@ -1,8 +1,9 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { getClient, getSystemStats } from "../comfyui/client.js";
-import { errorToToolResult } from "../utils/errors.js";
+import { getSystemStats, comfyApiFetch } from "../comfyui/client.js";
+import { ComfyUIError, errorToToolResult } from "../utils/errors.js";
+import { bodyPrefixOf, describeStatus } from "../comfyui/json-guard.js";
 import { logger } from "../utils/logger.js";
 
 export function registerMemoryManagementTools(server: McpServer): void {
@@ -23,10 +24,9 @@ export function registerMemoryManagementTools(server: McpServer): void {
     },
     async (args) => {
       try {
-        const client = getClient();
 
         // ComfyUI's /free endpoint accepts POST with JSON body
-        const res = await client.fetchApi("/free", {
+        const res = await comfyApiFetch("/free", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -39,12 +39,16 @@ export function registerMemoryManagementTools(server: McpServer): void {
           // unknown-ok: "" is interpolated into an ERROR MESSAGE and nothing else — the
           // HTTP status is reported either way, so an unreadable body costs detail in the
           // text, never a wrong conclusion. Verified there is no branch on this value.
+          //
+          // #385 made this branch REACHABLE. A gateway that reflects the request
+          // can put our own credential in the body it answers with, so it is
+          // scrubbed like every other body this codebase prints (#828).
           const text = await res.text().catch(() => "");
           return {
             content: [
               {
                 type: "text" as const,
-                text: `Failed to free VRAM: ${res.status} ${res.statusText}${text ? `\n${text}` : ""}`,
+                text: `Failed to free VRAM: ${describeStatus(res.status, res.statusText)}${text ? `\n${bodyPrefixOf(text)}` : ""}`,
               },
             ],
           };
@@ -96,8 +100,23 @@ export function registerMemoryManagementTools(server: McpServer): void {
  */
 export async function getEmbeddingsAction(): Promise<CallToolResult> {
       try {
-        const client = getClient();
-        const res = await client.fetchApi("/api/embeddings");
+        const res = await comfyApiFetch("/api/embeddings");
+        // This site had NO status check, because none could ever run — fetchApi
+        // threw first (#385). Converting it without adding one would hand a 4xx
+        // body to the parser, and a JSON-shaped error envelope parses fine and
+        // is not an array — landing on "No embeddings installed." That is the
+        // #796 defect exactly: "could not determine" reported as "determined
+        // not", and here it would tell a user with a full embeddings folder that
+        // they have none. Say what actually happened instead.
+        if (!res.ok) {
+          throw new ComfyUIError(
+            `ComfyUI /api/embeddings answered ${describeStatus(res.status, res.statusText)}, so the installed ` +
+              `embeddings could NOT be listed. This is not a report that none are installed — ` +
+              `nothing was read. Confirm the server is up and exposes this route with ` +
+              `get_system_stats (action:"health").`,
+            "HTTP_ERROR",
+          );
+        }
         const embeddings = (await res.json()) as string[];
 
         if (!Array.isArray(embeddings) || embeddings.length === 0) {

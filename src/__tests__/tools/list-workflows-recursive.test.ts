@@ -86,22 +86,33 @@ function handle(rawUrl: string): Response {
   return new Response("unhandled", { status: 500 });
 }
 
+const fakeClient = {
+  apiURL: (route: string) => `http://comfy.local${route}`,
+  apiHeaders: () => ({ "Comfy-User": "default" }),
+  fetch: async (url: string) => handle(url),
+  // The library client's real contract: throw for any non-2xx, decoding the body as
+  // JSON while building the error — which is why the listing does NOT use it.
+  fetchApi: async (route: string) => {
+    const res = handle(`http://comfy.local${route}`);
+    if (!res.ok) throw new Error(`Endpoint Bad Request (${res.status}): ${route}`);
+    return res;
+  },
+};
+
 vi.mock("../../comfyui/client.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../comfyui/client.js")>();
   return {
     ...actual,
-    getClient: () => ({
-      apiURL: (route: string) => `http://comfy.local${route}`,
-      apiHeaders: () => ({ "Comfy-User": "default" }),
-      fetch: async (url: string) => handle(url),
-      // The library client's real contract: throw for any non-2xx, decoding the body as
-      // JSON while building the error — which is why the listing does NOT use it.
-      fetchApi: async (route: string) => {
-        const res = handle(`http://comfy.local${route}`);
-        if (!res.ok) throw new Error(`Endpoint Bad Request (${res.status}): ${route}`);
-        return res;
-      },
-    }),
+    getClient: () => fakeClient,
+    // MUST be stubbed explicitly, not inherited from `...actual` (#385). The real
+    // `comfyApiFetch` lives inside client.js and calls the module's OWN
+    // `getClient`, not this mocked export — so spreading it would quietly reach
+    // the real client and the network, and the double above would never be used.
+    comfyApiFetch: async (route: string, init?: RequestInit) =>
+      fakeClient.fetch(fakeClient.apiURL(route), {
+        ...init,
+        headers: fakeClient.apiHeaders(),
+      } as RequestInit),
   };
 });
 
