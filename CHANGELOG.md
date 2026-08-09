@@ -6,6 +6,19 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.50.61] - 2026-08-09
+
+### MCP
+
+#### Fixed
+- de-flake two timing-dependent tests (#1216)
+
+
+## [0.50.60] - 2026-08-09
+
+_No user-facing changes._
+
+
 ## [0.50.59] - 2026-08-09
 
 ### MCP
