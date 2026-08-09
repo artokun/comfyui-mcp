@@ -113,11 +113,20 @@ describe("download_model action:\"status\" claims only what the code delivers (#
     expect(d).not.toMatch(/until the file appears and its size stops changing/i);
   });
 
-  it("does not promise the carried-over record EXISTS, or a url lookup for it", () => {
+  it("does not promise the carried-over record EXISTS", () => {
     const d = statusParagraph();
     expect(d).toMatch(/best-effort/i);
     expect(d).toMatch(/NOT FOUND NEVER MEANS STOPPED/);
-    expect(d).toMatch(/findable by `id` ONLY, never by `url`/);
+  });
+
+  it("no longer claims a carried-over record is id-only — #1197 made that FALSE", () => {
+    // This clause was TRUE when written: the migration dropped `trayId`, and
+    // `findPersistedDownloadJob` matches url lookups on `rec.trayId`. Then
+    // #1197 — my own fix, on the branch this one was waiting for — started
+    // carrying `trayId`, which made url lookup work again and this sentence
+    // false. Inherited-and-unchecked is the exact failure mode that produced
+    // #1148 in the first place, so it is pinned rather than merely deleted.
+    expect(statusParagraph()).not.toMatch(/never by `url`/);
   });
 
   // ---------------------------------------------------------------------------
@@ -143,6 +152,6 @@ describe("download_model action:\"status\" claims only what the code delivers (#
       "The action:\"status\" description changed. That is fine — but every claim in it " +
         "has been wrong at least once (see the header). Re-verify each against " +
         "download-jobs.ts / download-progress.ts / node-management.ts, then update this hash.",
-    ).toBe("0409e46e3806d89d");
+    ).toBe("b89ff7a288a4b288");
   });
 });
