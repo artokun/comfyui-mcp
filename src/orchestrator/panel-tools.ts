@@ -1586,6 +1586,68 @@ function withTruncationHints(res: ToolResult, rules: TruncationRule[]): ToolResu
  * the bound this tool advertises did not apply. The flag is stripped again before the
  * result is returned — it exists only to drive the rider.
  */
+/**
+ * A 0-node outline is a CLAIM, and one made mid-restore is not established (#1184).
+ *
+ * Right after a ComfyUI restart and a tab switch, graph_outline returned
+ * `node_count: 0` for a tab holding a 7-node starter graph — the frontend was
+ * still restoring, and the canvas transiently had nothing on it. The agent
+ * trusted the empty read, reported the canvas empty, and BUILT A NEW 9-NODE
+ * PIPELINE alongside the invisible one. A later panel_query_graph showed 16
+ * nodes: ids 1–7 had been there the whole time, which the frontend knew, because
+ * the new adds started at id 8.
+ *
+ * That is the worst shape of this defect class, because the action taken on the
+ * false read DESTROYS WORK: a duplicate pipeline cannot be un-built, and the user
+ * is left with two overlapping graphs and no way to tell which nodes are theirs.
+ *
+ * It is also unusually cheap to get right. Unlike most "could not determine"
+ * cases, an empty outline is trivially RE-VERIFIABLE: read it again, and the
+ * restore has either finished or it has not.
+ *
+ * So an empty first read is re-read once after a short settle:
+ *   - second read non-empty  → the first was a race; report the real graph.
+ *   - second read still empty → "empty" is now OBSERVED TWICE, not assumed, and
+ *     is reported plainly with no hedge (a blank canvas is a normal state and
+ *     must not be narrated as suspicious).
+ *
+ * The whole cost lands on the genuinely-empty case — one extra cheap read — which
+ * is the right place for it: a blank canvas is common but harmless to re-check,
+ * while a false empty is rare and expensive.
+ *
+ * Never throws: a failed re-read leaves the original reply exactly as it was.
+ */
+async function confirmEmptyOutline(
+  res: ToolResult,
+  reread: () => Promise<ToolResult>,
+): Promise<ToolResult> {
+  try {
+    if (res.isError) return res;
+    const first = parseToolResultJson(res);
+    if (!first || first.node_count !== 0) return res;
+    await sleep(EMPTY_OUTLINE_RECHECK_MS);
+    const second = await reread();
+    // Redundant with the parsed-null guard below TODAY — an error result carries
+    // no parseable JSON, so that branch already returns `res` — and kept anyway:
+    // it states the intent directly, and it would still hold if an error result
+    // ever carried a structured body. No test kills this line alone; saying so
+    // beats inventing one that pretends otherwise.
+    if (second.isError) return res;
+    const parsed = parseToolResultJson(second);
+    // Only a NON-empty second read replaces the first. A second empty read is the
+    // same answer, and returning the original keeps every other field it carried.
+    if (!parsed || parsed.node_count === 0) return res;
+    return second;
+  } catch {
+    return res;
+  }
+}
+
+/** How long to let a restoring canvas settle before re-reading an empty outline
+ *  (#1184). Long enough for a frontend mid-restore to finish attaching nodes,
+ *  short enough that a genuinely blank canvas is not a noticeable pause. */
+const EMPTY_OUTLINE_RECHECK_MS = 400;
+
 function markBudgetIgnored(res: ToolResult, requested: unknown): ToolResult {
   if (typeof requested !== "number") return res;
   const payload = parseToolResultJson(res);
@@ -6547,7 +6609,11 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           // The synthetic `__budget_ignored` flag below is derived from the reply, not
           // sent by the panel: a build that supports the budget echoes `max_chars` back.
           markBudgetIgnored(
-            await ctx.call({ cmd: "graph_outline", max_chars: args.max_chars }),
+            // #1184 — an empty outline is re-verified before it is believed.
+            await confirmEmptyOutline(
+              await ctx.call({ cmd: "graph_outline", max_chars: args.max_chars }),
+              () => ctx.call({ cmd: "graph_outline", max_chars: args.max_chars }),
+            ),
             args.max_chars,
           ),
           [
