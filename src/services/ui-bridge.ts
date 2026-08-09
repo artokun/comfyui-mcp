@@ -1528,6 +1528,39 @@ export class UiBridge {
    *  journal the sink feeds — so this stays short. */
   private static readonly LATE_ASK_TTL_MS = 5 * 60 * 1000;
   /**
+   * Mutations whose reply timer fired (rid -> what it was), so a reply arriving
+   * afterwards can be RECOGNISED as the late completion of a known write rather
+   * than an unknown rid to drop (#694).
+   *
+   * Deliberately narrow, and the negatives matter more than the positive:
+   *  - MUTATIONS only. A read that is abandoned costs nothing because you just
+   *    retry it (#1154's asymmetry); retaining reads would make this unbounded
+   *    noise for no recoverable information.
+   *  - populated only when the TIMER fires. A mutation that replies in time
+   *    resolves its caller directly and has nothing to report later.
+   */
+  private timedOutMutations = new Map<string, { cmd: string; tabId: string; ts: number }>();
+  /** Late completions of timed-out mutations (rid -> outcome), drained once via
+   *  takeLateMutation(). Success only: see the recordLateMutation comment. */
+  private lateMutations = new Map<
+    string,
+    { ok: true; cmd: string; tabId: string; ts: number; lateByMs: number }
+  >();
+  /**
+   * TTL for both maps above.
+   *
+   * Unlike the ask mapping below this one CAN have a clock, because the thing it
+   * enables is bounded: telling a caller "your earlier write did land" is only
+   * useful while that caller is still working on the same thing. Ten minutes
+   * comfortably covers an agent turn. Past it the honest state is the one the
+   * caller already has -- outcome unknown, verify by observation -- which is
+   * what the timeout disclosure told them to do in the first place.
+   */
+  private static readonly LATE_MUTATION_TTL_MS = 10 * 60 * 1000;
+  /** Hard cardinality bound, so a pathological tab timing out in a loop cannot
+   *  grow either map without limit even inside the TTL. */
+  private static readonly MAX_LATE_MUTATIONS = 256;
+  /**
    * Ask cards whose rid→ask_id mapping is retained.
    *
    * This mapping is a different thing from the buffer above, with a different
@@ -2248,11 +2281,13 @@ export class UiBridge {
               }
             }
           }
+          this.recordLateMutation(rid, msg);
           return;
         }
         clearTimeout(p.timer);
         this.pending.delete(rid);
         this.askRidToId.delete(rid);
+        this.timedOutMutations.delete(rid);
         if (msg.ok) {
           // #422 — the panel DEMONSTRABLY served this command. Record it on the LIVE
           // connection (following a same-socket tmp:→wf: migration whose reply landed
@@ -2916,6 +2951,74 @@ export class UiBridge {
 
   /** Drop expired late-ask entries (buffered answers + unresolved rid mappings) so
    *  an abandoned card never leaks memory. Cheap; called on each ask send/take. */
+  /**
+   * A reply landed for an rid nothing is waiting on. If it is the late
+   * completion of a mutation we abandoned, keep it (#694).
+   *
+   * SUCCESS ONLY, and that asymmetry is the point. A late `ok:false` says the
+   * write was refused -- which is not news: the caller was already told it did
+   * not complete, and they were told truthfully. Promoting it to "it failed"
+   * would convert "we never found out" into a verdict we did not earn, the same
+   * fold as #796 pointing the other way. Only `ok:true` carries information the
+   * caller does not already have.
+   */
+  private recordLateMutation(rid: string, msg: { ok?: unknown }): void {
+    const started = this.timedOutMutations.get(rid);
+    if (!started) return;
+    this.timedOutMutations.delete(rid);
+    if (msg.ok !== true) return;
+    const now = Date.now();
+    this.pruneLateMutations();
+    this.lateMutations.set(rid, {
+      ok: true,
+      cmd: started.cmd,
+      tabId: started.tabId,
+      ts: now,
+      lateByMs: now - started.ts,
+    });
+    logger.debug(
+      `[ui-bridge] "${started.cmd}" on tab ${started.tabId} completed ${now - started.ts} ms AFTER its reply timeout — retained for the caller (#694)`,
+    );
+  }
+
+  /**
+   * Drain the late outcome for `rid`, if the write landed after its timeout.
+   *
+   * Drains once: this exists so a caller can be TOLD, and telling them twice
+   * would read as two separate recoveries of the same write.
+   */
+  takeLateMutation(
+    rid: string,
+  ): { ok: true; cmd: string; tabId: string; lateByMs: number } | undefined {
+    this.pruneLateMutations();
+    const hit = this.lateMutations.get(rid);
+    if (!hit) return undefined;
+    this.lateMutations.delete(rid);
+    return { ok: true, cmd: hit.cmd, tabId: hit.tabId, lateByMs: hit.lateByMs };
+  }
+
+  /** TTL + cardinality bound for both #694 maps. */
+  private pruneLateMutations(): void {
+    const now = Date.now();
+    for (const [rid, e] of this.timedOutMutations) {
+      if (now - e.ts > UiBridge.LATE_MUTATION_TTL_MS) this.timedOutMutations.delete(rid);
+    }
+    for (const [rid, e] of this.lateMutations) {
+      if (now - e.ts > UiBridge.LATE_MUTATION_TTL_MS) this.lateMutations.delete(rid);
+    }
+    // Map iteration is insertion-ordered, so dropping from the front drops the
+    // oldest. Quiet, unlike the ask-mapping overflow: losing one of 256 late
+    // completions costs the caller a notice they can still get by looking, where
+    // losing an ask mapping loses a user's answer outright.
+    for (const map of [this.timedOutMutations, this.lateMutations]) {
+      while (map.size > UiBridge.MAX_LATE_MUTATIONS) {
+        const oldest = map.keys().next();
+        if (oldest.done) break;
+        map.delete(oldest.value);
+      }
+    }
+  }
+
   private pruneLateAsk(): void {
     const now = Date.now();
     for (const [id, e] of this.lateAskReplies) {
@@ -3778,6 +3881,14 @@ export class UiBridge {
     };
     const timer = setTimeout(() => {
       this.pending.delete(rid);
+      // #694 — remember that THIS rid was a mutation we stopped waiting for. The
+      // panel may still reply; without this the reply is an unknown rid and the
+      // message loop drops it, which is precisely how a write that landed stays
+      // invisible to the caller who was told "outcome unknown".
+      if (ctx.mutating) {
+        this.pruneLateMutations();
+        this.timedOutMutations.set(rid, { cmd: cmd.cmd, tabId: ctx.tabId, ts: Date.now() });
+      }
       // This timer only fires AFTER sock.send() below returned successfully — the command
       // WAS WRITTEN to the socket; the tab (possibly backgrounded/frozen) merely didn't
       // reply in time and may still apply it. So this is a POST-write outcome: tag it
