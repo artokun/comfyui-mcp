@@ -386,3 +386,137 @@ describe("#962: the message names the other categories instead of claiming none"
     expect(text).not.toMatch(/fact about ONE folder/);
   });
 });
+
+// #1015 — a 404 category is an ANSWER, not an unreadable one.
+//
+// A reporter's healthy ComfyUI 0.31 kept saying:
+//
+//   Partial listing — 2 categories could not be read
+//   (clip: Unexpected end of JSON input; unet: Unexpected end of JSON input).
+//
+// Their follow-up gave the precise shape: /models/clip and /models/unet each
+// answer HTTP 404 with an empty body. Reproduced on a live 0.31 server here —
+// clip and unet 404 with 0 bytes while text_encoders and diffusion_models answer
+// 200. Modern ComfyUI renamed those folders (clip → text_encoders, unet →
+// diffusion_models), so a current install does not register the old names at all.
+//
+// A 404 is the server answering DEFINITIVELY. Counting it as unread put a
+// permanent "your inventory is incomplete" on every healthy modern install — and
+// named aliases whose real contents were already listed under the new names. The
+// house defect, pointing the other way.
+describe("#1015: a 404 category does not degrade the listing", () => {
+  function serverWith(byCat: Record<string, { status: number; body?: string }>) {
+    getClient.mockReturnValue({ fetchApi });
+    fetchApi.mockImplementation(async (path: string) => {
+      if (path === "/models") return new Response("[]", { status: 200 });
+      const cat = path.replace(/^\/models\//, "");
+      const spec = byCat[cat] ?? { status: 200, body: "[]" };
+      return new Response(spec.body ?? "", { status: spec.status });
+    });
+    readdir.mockRejectedValue(new Error("ENOENT"));
+  }
+
+  it("records a 404 as ABSENT, never as unanswered", async () => {
+    serverWith({ clip: { status: 404 }, unet: { status: 404 } });
+    const { coverage } = await listLocalModelsWithCoverage();
+    expect(coverage.absent).toEqual(expect.arrayContaining(["clip", "unet"]));
+    // The line the reporter kept seeing.
+    expect(coverage.unanswered.map((u) => u.dir)).not.toContain("clip");
+    expect(coverage.unanswered.map((u) => u.dir)).not.toContain("unet");
+  });
+
+  it("a REAL read failure still degrades the listing", async () => {
+    // The guard must not be blunted: a 502 or a proxy page is genuinely unread.
+    serverWith({ clip: { status: 404 }, vae: { status: 502, body: "bad gateway" } });
+    const { coverage } = await listLocalModelsWithCoverage();
+    expect(coverage.unanswered.map((u) => u.dir)).toContain("vae");
+    expect(coverage.absent).toContain("clip");
+  });
+
+  it("a 404 on a FILTERED call is not a coverage gap either", async () => {
+    serverWith({ clip: { status: 404 } });
+    const { coverage } = await listLocalModelsWithCoverage("clip");
+    expect(coverage.unanswered).toEqual([]);
+    expect(coverage.absent).toEqual(["clip"]);
+  });
+});
+
+describe("#1015: all-404 is NOT a verified empty install", () => {
+  const base = { answered: [], unanswered: [], usedFilesystem: false };
+
+  it("refuses to say 'none' when every category 404'd", async () => {
+    // A server serving no /models route at all is an old build or a proxy — not
+    // an install with no models. Claiming the latter would be the same fabricated
+    // negative this change exists to remove, pointing the other way.
+    const text = describeEmptyModelListing(undefined, {
+      ...base,
+      absent: ["checkpoints", "loras", "vae"],
+    });
+    expect(text).toMatch(/Could not determine/);
+    expect(text).toMatch(/NOT\s+the same as having no models/);
+    expect(text).toMatch(/older\s+ComfyUI, or a proxy/);
+  });
+
+  it("still says 'none' when the server ANSWERED and was genuinely empty", async () => {
+    const text = describeEmptyModelListing(undefined, {
+      ...base,
+      answered: ["checkpoints"],
+      absent: ["clip"],
+    });
+    expect(text).toBe("No local models found.");
+  });
+
+  it("an UNANSWERED category still wins over the all-404 branch", async () => {
+    // "Could not read" says more than "did not serve", so it keeps precedence.
+    const text = describeEmptyModelListing(undefined, {
+      ...base,
+      unanswered: [{ dir: "vae", reason: "HTTP 502" }],
+      absent: ["clip"],
+    });
+    expect(text).toMatch(/could not be read|Could not determine which/);
+    expect(text).toMatch(/vae/);
+  });
+});
+
+// Adversarial review of PR #1196 (my own, before merge) — the all-404 branch
+// answered a FILTERED call with the UNFILTERED diagnosis.
+//
+// list_local_models({model_type:"clip"}) on a healthy modern server returned
+// "usually an older ComfyUI, or a proxy answering in front of it. Check the
+// ComfyUI URL…" — sending someone to debug a URL that works perfectly, when the
+// real answer is that the folder was renamed. A wrong remedy is worse than a
+// vague one: it costs time and teaches distrust of a working setup.
+describe("#1015: a filtered 404 names the RENAME, not a broken server", () => {
+  const base = { answered: [], unanswered: [], usedFilesystem: false };
+
+  it("points clip → text_encoders", () => {
+    const text = describeEmptyModelListing("clip", { ...base, absent: ["clip"] });
+    expect(text).toMatch(/LEGACY name/);
+    expect(text).toContain("text_encoders");
+    // The wrong remedy must be gone.
+    expect(text).not.toMatch(/older\s+ComfyUI, or a proxy/);
+    expect(text).not.toMatch(/Check the ComfyUI URL/);
+  });
+
+  it("points unet → diffusion_models", () => {
+    const text = describeEmptyModelListing("unet", { ...base, absent: ["unet"] });
+    expect(text).toContain("diffusion_models");
+    expect(text).toMatch(/LEGACY name/);
+  });
+
+  it("a NON-legacy 404 category says what to do without inventing a rename", () => {
+    const text = describeEmptyModelListing("gligen", { ...base, absent: ["gligen"] });
+    expect(text).toMatch(/does not serve a "gligen" model category/);
+    expect(text).toMatch(/NO model_type/);
+    expect(text).not.toMatch(/LEGACY name/);
+  });
+
+  it("the UNFILTERED all-404 case keeps the old-server\/proxy diagnosis", () => {
+    // That message is right there and must not be lost to the filtered branch.
+    const text = describeEmptyModelListing(undefined, {
+      ...base,
+      absent: ["checkpoints", "loras"],
+    });
+    expect(text).toMatch(/older\s+ComfyUI, or a proxy/);
+  });
+});

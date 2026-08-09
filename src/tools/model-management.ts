@@ -1143,11 +1143,68 @@ async function cancelAction(args: { id: string; tray_id?: string }): Promise<Cal
  *
  * Exported for tests: the distinction is the fix, so it is pinned directly.
  */
+/**
+ * ComfyUI folder names that were RENAMED, and what they became (#1015).
+ *
+ * These are still in MODEL_SUBDIRS so an OLDER server that serves them keeps
+ * working. On a current server they 404 — which is the definite answer this
+ * change teaches the scan to read, and the reason a caller asking for the old
+ * name deserves to be pointed at the new one rather than told their server
+ * might be broken.
+ */
+const LEGACY_CATEGORY_RENAMES: Record<string, string> = {
+  clip: "text_encoders",
+  unet: "diffusion_models",
+};
+
 export function describeEmptyModelListing(
   modelType: string | undefined,
   coverage: ModelListingCoverage,
 ): string {
   const scope = modelType ? `${modelType} models` : "local models";
+  // #1015 — a 404 is a definite "this server does not register that category",
+  // and treating it as one is the whole fix. But if EVERY category came back 404
+  // and none was ever answered, the definite thing established is not "you have
+  // no models" — it is that this server serves none of these routes at all (an
+  // old build, or something in front of it). Saying "No local models found" there
+  // would be a fabricated negative, which is the same defect this change exists
+  // to remove, pointing the other way.
+  //
+  // Scoped tightly: only when NOTHING was answered, NOTHING was unreadable, and
+  // at least one 404 came back. An unreadable category still belongs to the
+  // "could not determine" path below, which says more.
+  const absent = coverage.absent ?? [];
+  if (coverage.answered.length === 0 && coverage.unanswered.length === 0 && absent.length > 0) {
+    // A FILTERED call is a different question with a different answer, and
+    // bucketing them hands the caller a remedy they cannot act on. Asking for
+    // ONE category and getting a 404 means THAT category is not registered here
+    // — most often because it was RENAMED, which is the whole origin of #1015.
+    // Blaming "an older ComfyUI or a proxy" would send someone to check a URL
+    // that is working perfectly.
+    if (modelType) {
+      const modern = LEGACY_CATEGORY_RENAMES[modelType];
+      return (
+        `The connected ComfyUI does not serve a "${modelType}" model category — it ` +
+        `answered 404 for that route, which is a definite answer, not a failed read.\n\n` +
+        (modern
+          ? `"${modelType}" is the LEGACY name for this folder; current ComfyUI calls it ` +
+            `"${modern}". Ask for "${modern}" instead — the models you are looking for are ` +
+            `almost certainly listed there.`
+          : `Run list_local_models with NO model_type to see every category this server ` +
+            `does register.`)
+      );
+    }
+    return (
+      `Could not determine which ${scope} are installed. The connected ComfyUI answered ` +
+      `404 for every category asked about (${absent.slice(0, 8).join(", ")}` +
+      `${absent.length > 8 ? `, …and ${absent.length - 8} more` : ""}) ` +
+      `and served none of them, so NOTHING was learned about the install — this is NOT ` +
+      `the same as having no models.\n\n` +
+      `A server that serves no /models/<category> route at all is usually an older ` +
+      `ComfyUI, or a proxy answering in front of it. Check the ComfyUI URL with ` +
+      `get_system_stats (action:"health") before concluding anything about the install.`
+    );
+  }
   if (coverage.unanswered.length === 0) {
     // Verified: the server was asked and said zero. For a FILTERED call that is
     // a true statement about ONE folder, and #962 is what it costs when it is

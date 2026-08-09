@@ -436,6 +436,13 @@ export type ModelListingCoverage = {
   /** Categories whose read failed or returned an unusable body, with why. Their
    *  emptiness is UNKNOWN, not zero. */
   unanswered: { dir: string; reason: string }[];
+  /** Categories the server answered 404 for — it does NOT register them (#1015).
+   *  A definite answer, not a gap: modern ComfyUI renamed `clip` → `text_encoders`
+   *  and `unet` → `diffusion_models`, so the old names 404 on every current
+   *  install. Kept distinct from `unanswered` so they never degrade a complete
+   *  listing to "partial", and distinct from `answered` because the server holds
+   *  no such folder at all rather than an empty one. */
+  absent?: string[];
   /** Set when HTTP listing was unavailable as a whole (no client, cloud mode,
    *  category discovery threw) — every category is then unanswered. */
   httpUnavailable?: string;
@@ -520,6 +527,7 @@ export async function listLocalModelsWithCoverage(
   const coverage: ModelListingCoverage = {
     answered: [],
     unanswered: [],
+    absent: [],
     usedFilesystem: false,
   };
   const models = await collectLocalModels(modelType, coverage);
@@ -605,6 +613,30 @@ async function collectLocalModels(
         // A non-OK status or a non-array body means we did NOT learn what this
         // category holds. Recording the reason is the whole point: continuing
         // silently is what let a warming-up server look like an empty install.
+        //
+        // …with ONE exception, and it is the opposite fold (#1015). A 404 is the
+        // server answering DEFINITIVELY that it does not serve this category —
+        // "determined not present", not "could not determine". Modern ComfyUI
+        // renamed two of the folders in MODEL_SUBDIRS (clip → text_encoders,
+        // unet → diffusion_models), so a current install 404s the old names.
+        // Reproduced on a live 0.31 server:
+        //
+        //   clip             HTTP 404 bytes=0
+        //   unet             HTTP 404 bytes=0
+        //   text_encoders    HTTP 200 bytes=297
+        //   diffusion_models HTTP 200 bytes=360
+        //
+        // Counting those as unread put a permanent "Partial listing — 2
+        // categories could not be read" on every healthy modern install, telling
+        // a user their inventory was incomplete when it was complete — and naming
+        // aliases whose real contents were already listed under the new names.
+        //
+        // Recorded as ABSENT rather than dropped silently, so an unfiltered
+        // listing can still say which categories this server does not register.
+        if (res.status === 404) {
+          (coverage.absent ??= []).push(dir);
+          continue;
+        }
         if (!res.ok) {
           coverage.unanswered.push({ dir, reason: `HTTP ${res.status}` });
           continue;
@@ -674,7 +706,13 @@ async function collectLocalModels(
     // The outer throw (no client / cloud mode / GGUF discovery) aborts before any
     // per-category read, so nothing below it was answered either.
     for (const dir of dirsToScan) {
-      if (!coverage.answered.includes(dir) && !coverage.unanswered.some((u) => u.dir === dir)) {
+      if (
+        !coverage.answered.includes(dir) &&
+        // A category already answered 404 was ANSWERED — the later outer failure
+        // does not un-answer it (#1015).
+        !(coverage.absent ?? []).includes(dir) &&
+        !coverage.unanswered.some((u) => u.dir === dir)
+      ) {
         coverage.unanswered.push({ dir, reason: coverage.httpUnavailable });
       }
     }
