@@ -384,6 +384,21 @@ export function scrubSecretShapedText(text: string): string | null {
       `${name}${sep}${scheme ? `${scheme}${gap ?? " "}` : ""}${REDACTED}`,
   );
 
+  // 2b. A credential introduced by its AUTH SCHEME rather than by a field name.
+  //     `Bearer <token>` in a log line has no `=` or `:`, so pass 2 never saw it
+  //     — the flat opaque-run rule was carrying it by accident, and narrowing
+  //     that rule is what made the gap visible (codex review of #1223).
+  //
+  //     Named schemes only, and only for a value long enough and mixed enough to
+  //     be a credential: `Bearer` is also an ordinary English word, and a rule
+  //     that fires on "token authentication failed" would be the same class of
+  //     mistake in the other direction.
+  out = out.replace(
+    /\b(bearer|basic)(\s+)([A-Za-z0-9\-._~+/=%]{16,})/gi,
+    (whole, scheme: string, gap: string, value: string) =>
+      /^[a-z]+$/.test(value) ? whole : `${scheme}${gap}${REDACTED}`,
+  );
+
   // 3. Long opaque runs of the credential alphabet (base64 / hex / url-safe /
   //    percent-encoded). Ordinary prose and HTML break well before 24 chars —
   //    tags, spaces and punctuation are all outside this class.
@@ -429,23 +444,43 @@ export function scrubSecretShapedText(text: string): string | null {
  * is newly allowed through is a run that carries no credential label, matches no
  * configured value, and is spelled like a path or an identifier.
  *
- * ACCEPTED RESIDUAL: an unlabelled, unknown, ALL-ALPHABETIC secret of 24+ chars
- * with no interleaved digits reads as a word and survives. That is a narrow
- * shape — base64 and hex of that length carry digits with overwhelming
- * probability — and it is the deliberate trade for a log tool that can still
- * name the pack that failed to import.
+ * ACCEPTED RESIDUAL, stated precisely because a redaction rule that overstates
+ * its own coverage is worse than one that admits a gap: an unlabelled secret
+ * that this process does not hold, whose separator-delimited parts are EVERY ONE
+ * of them alphabetic (or digit-edged) and under 20 characters, reads as a name
+ * and survives — `ABCDEFGHIJKLMNOPQRS/TUVWXYZabcdefghijklm`.
+ *
+ * No shape rule can close that: a token spelled entirely in path-like parts IS
+ * shaped like a path, and the same rule that redacts it redacts
+ * `/models/upscale_models/4x-UltraSharp.pth`. Base64 and hex reach it with low
+ * probability — every part alphabetic, no digits anywhere — and a credential
+ * that IS held, or that arrives with a name or an auth scheme in front of it, is
+ * caught by passes 1, 2 and 2b regardless of shape. That is the trade, and it is
+ * the right one for a tool whose entire purpose is naming the thing that broke.
  */
 function redactOpaqueRun(run: string): string {
   const parts = run.split(/([/.])/);
   // No separator: one unbroken blob, which is the shape this pass was built for.
   if (parts.length === 1) return REDACTED;
-  return parts
-    .map((part) =>
-      part === "/" || part === "." || part === "" || looksLikeWords(part)
-        ? part
-        : REDACTED,
-    )
-    .join("");
+
+  // The interleave allowance is BUDGETED across the whole run, not granted per
+  // part (codex review of #1223). Granted per part, four of them in a row spell
+  // a credential that every individual test waves through:
+  //
+  //     Bearer AbcD3fGh.IjKl9mNo.PqRs7tUv.WxYz2aBc
+  //
+  // Every chunk there is eight characters of mixed case and digits — a shape a
+  // real name reaches at most once (`t5xxl_fp16`, `umt5_xxl_fp8_e4m3fn`), and a
+  // random token reaches every time. So one is a name and several is a blob.
+  const budget = { mixed: 1 };
+  const kept = parts.map((part) =>
+    part === "/" || part === "." || part === "" || looksLikeWords(part, budget)
+      ? part
+      : REDACTED,
+  );
+  // Over budget means the run was never a name — redact it whole rather than
+  // leave the parts that happened to be judged before the budget ran out.
+  return budget.mixed < 0 ? REDACTED : kept.join("");
 }
 
 /** Longest chunk still plausibly a word and not a blob. `AnimateDiff` is 11. */
@@ -479,17 +514,21 @@ const MAX_MIXED_CHUNK = 8;
  * out as `/basedir/models/upscale_models/«redacted».pth`, reintroducing exactly
  * the bug being fixed on some of the most common filenames in a ComfyUI log.
  */
-function looksLikeWords(part: string): boolean {
+function looksLikeWords(part: string, budget: { mixed: number }): boolean {
   const chunks = part.split(/[-_+=~%]/).filter((c) => c.length > 0);
   if (chunks.length === 0) return false;
-  return chunks.every(isNameChunk);
+  // `every` would short-circuit and stop spending, which would make the budget
+  // depend on which part happened to fail first.
+  return chunks.map((c) => isNameChunk(c, budget)).every(Boolean);
 }
 
-function isNameChunk(c: string): boolean {
+function isNameChunk(c: string, budget: { mixed: number }): boolean {
   if (c.length > MAX_WORD_CHUNK) return false;
   if (/^\d+$/.test(c)) return true; // 768, 12
   if (/^\d*[A-Za-z]+\d*$/.test(c)) return true; // ComfyUI, python3, 4x, v1
-  return c.length <= MAX_MIXED_CHUNK; // t5xxl, x4v3 — see MAX_MIXED_CHUNK
+  if (c.length > MAX_MIXED_CHUNK) return false;
+  budget.mixed -= 1; // t5xxl, x4v3 — see MAX_MIXED_CHUNK and redactOpaqueRun
+  return budget.mixed >= 0;
 }
 
 /**

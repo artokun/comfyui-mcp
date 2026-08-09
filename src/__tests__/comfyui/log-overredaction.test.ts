@@ -131,3 +131,55 @@ describe("credential shapes are still redacted (#1223)", () => {
     expect(one("[INFO] api_key=correcthorsebatterystaple")).not.toContain("correcthorse");
   });
 });
+
+// CODEX REVIEW of this fix. It constructed credentials that the narrowed rule
+// let through, and the two that were real are pinned here.
+describe("codex review: credentials that survived the first draft (#1223)", () => {
+  it("redacts a dotted token whose every part is individually name-shaped", () => {
+    // Four 8-character mixed chunks. Each one passes the short-name allowance on
+    // its own; granting that allowance per PART rather than per RUN let the whole
+    // token out. A real name spends it at most once.
+    //
+    // Deliberately NO `Bearer` in front of it: the first version of this test had
+    // one, so the scheme rule caught the line and the budget mutation survived —
+    // the test proved the wrong mechanism. This is the shape rule alone.
+    const token = "AbcD3fGh.IjKl9mNo.PqRs7tUv.WxYz2aBc";
+    const out = one(`[WARN] upstream rejected ${token}`);
+    expect(out, `leaked: ${out}`).not.toContain(token);
+    // And NOT part-by-part: redacting the parts after the budget ran out would
+    // still emit the first eight characters, which is a partial credential and a
+    // false impression that the line was handled.
+    expect(out, `leaked a fragment: ${out}`).not.toContain("AbcD3fGh");
+  });
+
+  it("redacts a bare `Bearer <token>` with no field name in front of it", () => {
+    // No `=` or `:`, so the by-name pass never saw it — the flat opaque rule was
+    // carrying this case by accident, and narrowing it exposed the gap.
+    const token = "ABCDEFGHIJKLMNOPQRS/TUVWXYZabcdefghijklm";
+    const out = one(`[WARN] upstream rejected Bearer ${token}`);
+    expect(out, `leaked: ${out}`).not.toContain(token);
+  });
+
+  it.each([
+    // Short enough that the scheme rule's length floor already excludes it.
+    "[INFO] bearer authentication succeeded for the configured host",
+    // Long enough to reach the rule — only the all-lowercase guard keeps this
+    // one intact, and without it the log would read "basic «redacted» of ...".
+    "[INFO] basic responsibilities of the node were restored after reload",
+  ])("does NOT fire on an auth-scheme word used as ordinary English: %s", (line) => {
+    // The other direction of the same rule: over-redacting prose would be the
+    // same mistake this whole issue is about.
+    expect(one(line)).toBe(line);
+  });
+
+  it("keeps a model name that spends the mixed allowance exactly once", () => {
+    // The budget must be one, not zero — these are real filenames.
+    for (const line of [
+      "/basedir/models/text_encoders/umt5_xxl_fp8_e4m3fn.safetensors",
+      "/basedir/models/diffusion_models/wan2.1_t2v_1.3B_bf16.safetensors",
+      "/basedir/models/checkpoints/hunyuan_video_t2v_720p_bf16.safetensors",
+    ]) {
+      expect(one(line), line).toBe(line);
+    }
+  });
+});
