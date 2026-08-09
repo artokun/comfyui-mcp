@@ -4,7 +4,7 @@ import { platform } from "node:os";
 import { readdir, stat, mkdir, readFile, lstat, realpath } from "node:fs/promises";
 import { dirname, join, basename, normalize, resolve, relative, sep, isAbsolute, extname } from "node:path";
 import { config, getComfyUIBaseUrl, isRemoteMode } from "../config.js";
-import { getClient, getSystemStats } from "../comfyui/client.js";
+import { getClient, getLogs, getSystemStats } from "../comfyui/client.js";
 import { getExtraModelRoots, getLiveExtraModelRoots } from "./extra-paths.js";
 import { resolveEffectiveComfyUIBase, resolveLiveServerRoot } from "./workspace-env.js";
 import { installModelViaManager } from "./node-management.js";
@@ -2275,6 +2275,106 @@ function localAuthHeadersFor(
  * dead end; list_local_models reads through the SAME roots the server reads, so a
  * file that appears there is genuinely reachable by a workflow.
  */
+/**
+ * The destination ComfyUI-Manager LOGGED for `filename`, read back from
+ * `/internal/logs` (#1086).
+ *
+ * The standing caveat says we cannot know where a Manager dispatch lands, because
+ * `extra_model_paths.yaml` lives on the target filesystem. That is true of the
+ * CONFIG — and the reporter's own evidence shows it is not true of the OUTCOME.
+ * Manager announces the absolute path it picked, in both generations:
+ *
+ *   glob/manager_server.py:1063  f"Install model '{name}' from '{url}' into '{path}'"
+ *   legacy/manager_server.py:634 (identical)
+ *
+ * which is how they discovered their Wan 2.2 file had gone to
+ * `/opt/ComfyUI/models` while the server read `/workspace/models` — a 20GB overlay
+ * that discarded it on the next pod restart.
+ *
+ * So the destination is unknowable only until we look. This looks.
+ *
+ * Returns undefined when the log could not be read OR carried no such line —
+ * DELIBERATELY not distinguished here, because the caller's remedy is identical
+ * (fall back to the caveat) and inventing a distinction the caller cannot act on
+ * would be noise. What must never happen is an unread log rendering as a
+ * destination, which is why undefined is the only other answer.
+ *
+ * Matches the LAST occurrence: a filename can be installed more than once in a
+ * session, and the newest line is the dispatch we just made.
+ */
+export function parseManagerInstallDestination(
+  logText: string,
+  filename: string,
+): string | undefined {
+  if (!logText || !filename) return undefined;
+  // The name is interpolated into the line inside single quotes, so match it as a
+  // whole quoted token — a bare substring would let `clip_vision_h.safetensors`
+  // be matched by a line about `clip_vision_h.safetensors.part`.
+  const esc = filename.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`Install model '${esc}' from '[^']*' into '([^']+)'`, "g");
+  let last: string | undefined;
+  for (const m of logText.matchAll(re)) last = m[1];
+  return last;
+}
+
+/**
+ * Read the live server's log and report where Manager said it put `filename`,
+ * plus whether that is inside the models root the server actually reads (#1086).
+ *
+ * Never throws: this runs after a transfer, and a diagnostic that cannot be
+ * gathered must not turn a completed dispatch into an error.
+ */
+export async function describeManagerDestination(
+  filename: string,
+  opts?: {
+    /** Injectable so this is testable without a live server. */
+    readLog?: () => Promise<string | undefined>;
+    liveModelsDir?: string | undefined;
+  },
+): Promise<string | undefined> {
+  let text: string | undefined;
+  try {
+    // getLogs() already carries the reconnect-and-retry a Manager reboot needs
+    // (#399) — a restart is exactly what precedes many of these reads.
+    text =
+      opts?.readLog !== undefined
+        ? await opts.readLog()
+        : (await getLogs()).join("\n");
+  } catch {
+    return undefined;
+  }
+  if (!text) return undefined;
+  const dest = parseManagerInstallDestination(text, filename);
+  if (!dest) return undefined;
+
+  const root = opts?.liveModelsDir;
+  if (root === undefined) {
+    // We know WHERE, but not whether that is a place the server reads — and the
+    // second half is the one that decides whether the file is usable. Say the
+    // first without implying the second.
+    return (
+      `ComfyUI-Manager reported writing it to ${dest}. Whether that path is one the ` +
+      `connected server reads could not be established from here, so this locates the ` +
+      `file without confirming it is usable — check list_local_models.`
+    );
+  }
+  if (isUnderRoot(dest, root)) {
+    return (
+      `ComfyUI-Manager reported writing it to ${dest}, which is INSIDE the models ` +
+      `directory that server reads (${root}).`
+    );
+  }
+  return (
+    `⚠ ComfyUI-Manager reported writing it to ${dest}, which is OUTSIDE the models ` +
+    `directory the connected server reads (${root}) — so a workflow there will NOT see ` +
+    `it. This is the extra_model_paths case: Manager picks its own destination root ` +
+    `and does not necessarily honour that config. On a container the base models ` +
+    `directory is commonly an EPHEMERAL OVERLAY, which discards the file on the next ` +
+    `restart — move it into ${root} now, or re-download with COMFYUI_PATH set so this ` +
+    `MCP streams it to a destination it controls.`
+  );
+}
+
 export function managerDestinationCaveat(): string {
   return (
     "ComfyUI-Manager chooses the destination root itself and does not necessarily honour " +
