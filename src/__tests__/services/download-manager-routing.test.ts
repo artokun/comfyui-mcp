@@ -18,6 +18,9 @@ const hoisted = vi.hoisted(() => ({
   // Whether an argv-derived live root is present on THIS filesystem. A
   // Docker/forwarded loopback server's container path is not host-local → false.
   liveRootExists: true,
+  /** #1263 — the interpreter the live-process probe "finds", instead of whatever
+   *  is really running on the developer's machine. undefined = nothing found. */
+  livePython: undefined as string | undefined,
 }));
 
 // The live-root routing branch only streams local when the root exists locally.
@@ -38,6 +41,30 @@ vi.mock("../../services/workspace-env.js", async () => {
     "../../services/workspace-env.js",
   );
   return { ...actual, resolveEffectiveComfyUIBase: () => hoisted.base };
+});
+
+// #1263 — THE PROCESS TABLE IS NOT A FIXTURE. `resolveLiveServerRoot` falls back
+// to `observeLivePython()`, which calls `resolveLiveInterpreter` — and that
+// shells out to netstat/WMI to find whatever python is really serving the port
+// on THIS machine. So on a developer box with ComfyUI running, a relative
+// `main.py` argv anchors onto the live interpreter, a root resolves, the mocked
+// `existsSync` says it exists, and the #420 case streams local instead of routing
+// to the Manager. On CI nothing is listening, the probe finds nothing, and the
+// same test passes.
+//
+// That is why this file passed every CI run while failing locally: the assertion
+// depended on whether the machine running it happened to have a ComfyUI up.
+// Stubbed to "found nothing" by default, which is the state these cases describe;
+// `hoisted.livePython` opts a case into the other answer.
+vi.mock("../../services/live-interpreter.js", async () => {
+  const actual = await vi.importActual<typeof import("../../services/live-interpreter.js")>(
+    "../../services/live-interpreter.js",
+  );
+  return {
+    ...actual,
+    resolveLiveInterpreter: () =>
+      hoisted.livePython ? { python: hoisted.livePython, pid: 4242 } : undefined,
+  };
 });
 
 // getSystemStats stands in for the connected server's /system_stats. getClient is
@@ -62,6 +89,7 @@ beforeEach(() => {
   hoisted.stats = undefined;
   hoisted.statsThrows = false;
   hoisted.liveRootExists = true;
+  hoisted.livePython = undefined;
 });
 
 describe("shouldDispatchDownloadToManager (#420 reconnect routing)", () => {
@@ -146,5 +174,30 @@ describe("shouldDispatchDownloadToManager (#420 reconnect routing)", () => {
       system: { argv: ["python", "main.py", "--base-directory", "data"], cwd: "/srv/live" },
     };
     expect(await shouldDispatchDownloadToManager()).toBe(false);
+  });
+  // #1263 — the OTHER side of the live-process probe, which was previously
+  // decided by whatever happened to be running on the developer's machine and so
+  // was never actually asserted. Now that the probe is a fixture, both answers
+  // are reachable on purpose.
+  it("no local base, but the LIVE interpreter anchors a real root → streams local", async () => {
+    hoisted.base = undefined;
+    // A relative main.py with no reported cwd: unresolvable from argv alone, so
+    // the decision falls to the live-process probe.
+    hoisted.stats = { system: { argv: ["main.py", "--listen"] } };
+    hoisted.livePython = "/opt/comfy/.venv/bin/python";
+    hoisted.liveRootExists = true;
+
+    expect(await shouldDispatchDownloadToManager()).toBe(false);
+  });
+
+  it("...and routes to the Manager when that anchored root is NOT on this filesystem", async () => {
+    // A container/forwarded server: the probe reports a python, but its root is a
+    // path that does not exist here, so there is nothing local to stream into.
+    hoisted.base = undefined;
+    hoisted.stats = { system: { argv: ["main.py", "--listen"] } };
+    hoisted.livePython = "/opt/comfy/.venv/bin/python";
+    hoisted.liveRootExists = false;
+
+    expect(await shouldDispatchDownloadToManager()).toBe(true);
   });
 });
