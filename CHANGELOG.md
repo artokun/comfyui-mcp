@@ -21,6 +21,17 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.50.78] - 2026-08-09
+
+### MCP
+
+#### Fixed
+- tell the caller when the post-open read contradicts the open (panel#887) (#1272)
+
+#### Changed
+- 0.50.77 (#1273)
+
+
 ## [0.50.77] - 2026-08-09
 
 ### MCP
