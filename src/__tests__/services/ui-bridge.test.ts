@@ -2513,9 +2513,22 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
     expect(msg).toMatch(/UNCONFIRMED/);
     expect(msg).toMatch(/could not be read just now/);
     // …and the two costless checks must come before the remedy that has a cost.
-    expect(msg.search(/RETRY this command/)).toBeLessThan(
-      msg.search(/panel_action:'update'/),
-    );
+    //
+    // #1208 — this compared two `search()` indices WITHOUT asserting either term
+    // was present, so an absent term (-1) made the comparison meaningless and the
+    // test failed intermittently. The remedy has TWO wordings depending on
+    // `installPanelUsable`: "install_comfyui(action:'panel', panel_action:'update')"
+    // when this surface can drive the update, and "Update the panel ON THE
+    // COMFYUI HOST" when it cannot. Only the first contains `panel_action:'update'`,
+    // so on the other branch the index was -1 and `694 < -1` failed — an
+    // environmental difference, not a regression.
+    //
+    // Assert presence FIRST, and anchor on a pattern that covers both branches.
+    const retryAt = msg.search(/RETRY this command/);
+    const remedyAt = msg.search(/panel_action:'update'|Update the panel ON THE COMFYUI HOST/);
+    expect(retryAt, "the free RETRY check must be present").toBeGreaterThan(-1);
+    expect(remedyAt, "an update remedy must be present in either wording").toBeGreaterThan(-1);
+    expect(retryAt).toBeLessThan(remedyAt);
     expect(msg.search(/HARD-REFRESH/)).toBeLessThan(msg.search(/panel_action:'update'/));
     // The update is DEMOTED, not deleted — it is still right when the install
     // really is behind, and this branch cannot rule that out either.

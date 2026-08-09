@@ -1057,7 +1057,19 @@ export function listDownloadJobCandidates(id: string): DownloadJob[] {
       byKey.set(k, job);
     }
   }
-  return [...byKey.values()].sort((a, b) => b.started_at - a.started_at);
+  // #1208 — a DETERMINISTIC tiebreak. started_at is a millisecond timestamp, so
+  // two jobs begun in the same millisecond compared equal and the order fell back
+  // to Map insertion order: stable locally, evidently not on a loaded CI runner.
+  // "lists newest first" failed on all THREE platforms at once and went green on
+  // an unchanged re-run — and a flake that fails everywhere simultaneously reads
+  // like a regression, which is what it costs to rule out.
+  //
+  // trayId is the right tiebreak: it is unique per physical download (two URLs
+  // sharing an id differ there), so equal timestamps order identically on every
+  // run and in every process.
+  return [...byKey.values()].sort(
+    (a, b) => b.started_at - a.started_at || String(a.trayId).localeCompare(String(b.trayId)),
+  );
 }
 
 /**
@@ -1285,7 +1297,19 @@ export function listDownloadJobs(): DownloadJob[] {
       byKey.set(k, job);
     }
   }
-  return [...byKey.values()].sort((a, b) => b.started_at - a.started_at);
+  // #1208 — a DETERMINISTIC tiebreak. started_at is a millisecond timestamp, so
+  // two jobs begun in the same millisecond compared equal and the order fell back
+  // to Map insertion order: stable locally, evidently not on a loaded CI runner.
+  // "lists newest first" failed on all THREE platforms at once and went green on
+  // an unchanged re-run — and a flake that fails everywhere simultaneously reads
+  // like a regression, which is what it costs to rule out.
+  //
+  // trayId is the right tiebreak: it is unique per physical download (two URLs
+  // sharing an id differ there), so equal timestamps order identically on every
+  // run and in every process.
+  return [...byKey.values()].sort(
+    (a, b) => b.started_at - a.started_at || String(a.trayId).localeCompare(String(b.trayId)),
+  );
 }
 
 /**

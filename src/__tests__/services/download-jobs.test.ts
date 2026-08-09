@@ -416,12 +416,33 @@ describe("download job registry", () => {
     expect(listDownloadJobs()).toHaveLength(1);
   });
 
+  // #1208 — this raced the clock. It started two jobs 2 ms apart and asserted an
+  // order derived from `b.started_at - a.started_at`, a MILLISECOND timestamp
+  // with no tiebreak, so when both landed in the same millisecond the result fell
+  // back to Map insertion order. It failed on all three platforms at once during
+  // a release build and went green on an unchanged re-run.
+  //
+  // Now it controls what it asserts: the timestamps are set explicitly, so the
+  // ordering is a property of the comparator rather than of how busy the machine
+  // was.
   it("lists newest first", async () => {
-    await startDownloadJob(URL_A, "checkpoints");
-    await new Promise((r) => setTimeout(r, 2));
-    await startDownloadJob(URL_B, "loras");
+    const a = await startDownloadJob(URL_A, "checkpoints");
+    const b = await startDownloadJob(URL_B, "loras");
+    a.job.started_at = 1_000;
+    b.job.started_at = 2_000;
     expect(listDownloadJobs()[0].url).toBe(URL_B);
   });
+
+  // NOT unit-tested here, deliberately, and worth saying why rather than
+  // shipping a test that passes for the wrong reason: the comparator's trayId
+  // tiebreak only shows itself when two jobs share a millisecond, and that
+  // cannot be forced through the public API — `listDownloadJobs()` returns FRESH
+  // objects, so assigning `started_at` on the returned array mutates throwaway
+  // copies. An earlier attempt did exactly that and was vacuous.
+  //
+  // The tiebreak is defensive and cheap; what this file DOES pin is the ordering
+  // itself, above, now that the test no longer races a 2 ms gap to establish it.
+
 
   // #467 P1-A: the job layer dedups BEFORE the header-aware cache layer, so it must
   // fold auth into its keys — otherwise two concurrent same-URL+same-dest calls with
