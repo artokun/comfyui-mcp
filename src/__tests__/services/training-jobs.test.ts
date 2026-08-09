@@ -1,4 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+// #1204 — import the REAL progress type instead of restating a narrower one.
+// The local shape omitted `loss`, which `training-jobs.ts:1654` actually reads,
+// so six tests were passing a field their own annotation said could not exist.
+import type { TrainingProgress } from "../../services/ai-toolkit.js";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -377,7 +381,7 @@ describe("startTrainingJob", () => {
     vi.useFakeTimers();
     try {
       const d = deferred<{ code: number; tail: string }>();
-      let tick: ((p: { step?: number; totalSteps?: number; raw: string }) => void) | undefined;
+      let tick: ((p: TrainingProgress) => void) | undefined;
       const dataset = join(mod.datasetsRoot(), "dataset");
       mkdirSync(dataset, { recursive: true });
       makeImage(dataset, "img_00001.png");
@@ -449,7 +453,7 @@ describe("cancelJob", () => {
 
   it("ignores progress ticks that arrive after a cancel (no resurrection)", async () => {
     const d = deferred<{ code: number; tail: string }>();
-    let tick: ((p: { step?: number; totalSteps?: number; raw: string }) => void) | undefined;
+    let tick: ((p: TrainingProgress) => void) | undefined;
     const dataset = join(mod.datasetsRoot(), "dataset");
     mkdirSync(dataset, { recursive: true });
     makeImage(dataset, "img_00001.png");
@@ -480,7 +484,7 @@ describe("cancelJob", () => {
     vi.useFakeTimers();
     try {
       const d = deferred<{ code: number; tail: string }>();
-      let tick: ((p: { step?: number; totalSteps?: number; raw: string }) => void) | undefined;
+      let tick: ((p: TrainingProgress) => void) | undefined;
       const dataset = join(mod.datasetsRoot(), "dataset");
       mkdirSync(dataset, { recursive: true });
       makeImage(dataset, "img_00001.png");
@@ -523,7 +527,7 @@ describe("cancelJob", () => {
     vi.useFakeTimers();
     try {
       const d = deferred<{ code: number; tail: string }>();
-      let tick: ((p: { step?: number; totalSteps?: number; raw: string }) => void) | undefined;
+      let tick: ((p: TrainingProgress) => void) | undefined;
       const catalog = fakeCatalog();
       const lorasDir = join(root, "loras");
       const dataset = join(mod.datasetsRoot(), "dataset");
@@ -1145,7 +1149,7 @@ describe("independent review fixes (PR #237)", () => {
 
   it("progress during a pending cancel does NOT reconcile memory back to running", async () => {
     const d = deferred<{ code: number; tail: string }>();
-    let tick: ((p: { step?: number; totalSteps?: number; raw: string }) => void) | undefined;
+    let tick: ((p: TrainingProgress) => void) | undefined;
     const dataset = join(mod.datasetsRoot(), "dataset");
     mkdirSync(dataset, { recursive: true });
     makeImage(dataset, "img_00001.png");
@@ -1221,7 +1225,7 @@ describe("independent review fixes (PR #237)", () => {
 
   it("a live snapshot never overwrites a terminal disk record", async () => {
     const d = deferred<{ code: number; tail: string }>();
-    let tick: ((p: { step?: number; totalSteps?: number; raw: string }) => void) | undefined;
+    let tick: ((p: TrainingProgress) => void) | undefined;
     const dataset = join(mod.datasetsRoot(), "dataset");
     mkdirSync(dataset, { recursive: true });
     makeImage(dataset, "img_00001.png");
