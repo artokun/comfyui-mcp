@@ -6136,7 +6136,7 @@ function recoveredAskResult(entry: AskEntry): ToolResult {
  * the question at hand, which is the misattribution this whole path exists to
  * prevent. Reporting them beats swallowing them — the user did answer something.
  */
-function askTimeoutResult(
+export function askTimeoutResult(
   tabId: string,
   fingerprint: string,
   recovery: AskRecovery,

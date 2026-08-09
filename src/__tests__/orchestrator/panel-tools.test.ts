@@ -4693,7 +4693,11 @@ describe("panel_ask keeps a validated answer across a tool timeout (#486)", () =
     // NOT answered — the scheduler question has no answer on file.
     expect(res.isError).toBe(true);
     const text = askText(res);
-    expect(text).toMatch(/not answered in time/i);
+    // #1243 — the wording now states the elapsed ceiling rather than a vague
+    // "in time", and distinguishes a timeout from a delivery failure. The
+    // assertion tracks the INTENT (it is reported as unanswered) rather than the
+    // old phrasing.
+    expect(text).toMatch(/went unanswered for \d+s|not answered within \d+s/i);
     // ...but the sampler answer is REPORTED rather than swallowed, quoted with
     // the question it actually answers and an explicit refusal to let it stand in.
     expect(text).toContain(SAMPLER.question);
@@ -4764,7 +4768,7 @@ describe("panel_ask keeps a validated answer across a tool timeout (#486)", () =
     } as unknown as PanelToolCtx;
     const res = await defByName("panel_ask").handler(SAMPLER as Record<string, unknown>, ctx);
     expect(res.isError).toBe(true);
-    expect(askText(res)).toMatch(/not answered in time/i);
+    expect(askText(res)).toMatch(/went unanswered for \d+s|not answered within \d+s/i);
     expect(askText(res)).not.toMatch(/HOWEVER/);
   });
 
