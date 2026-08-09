@@ -528,6 +528,59 @@ export interface ScopeRepinBridge {
  */
 export type ScopeRepinOutcome = string | { repinned: false; reason: string } | undefined;
 
+
+/**
+ * #888 — does this BRIDGE ROUTE address a tab showing `path`?
+ *
+ * The panel's bridge-route module (#640) defines two strings that look alike and
+ * are not interchangeable:
+ *
+ *   saved-workflow HANDLE : `wf:<path>`                 — names a WORKFLOW
+ *   bridge ROUTE (tab_id) : `wf:<tabRouteId>:<path>`    — names a TAB
+ *
+ * The handle is path-only *precisely because* two browser tabs can show the same
+ * file, so it cannot address one of them. `bridge.tabs()` returns ROUTES.
+ *
+ * The first attempt at #888 compared a derived handle against those routes; it
+ * never matched, so the recovery refused every time and the fix was inert — while
+ * a source-text "wiring" assertion passed, because grepping for a call cannot tell
+ * reachable code from dead code. `ui-bridge.ts`'s own comment still describes
+ * tabId as "commonly derived from a saved workflow path", which predates #640 and
+ * is what licensed the wrong derivation.
+ *
+ * Matching is on the PATH SUFFIX of the route, normalized the way every other
+ * saved-path comparison here normalizes (separators, `./`, case), and it also
+ * accepts a legacy handle-shaped id so an older panel is not silently excluded.
+ * Generous on purpose: a miss refuses the recovery, and refusing is the failure
+ * this issue is about — but a match is only ever ACTED on when exactly one tab
+ * matches, so generosity cannot silently redirect to the wrong tab.
+ */
+export function tabRouteCarriesPath(tabId: string, path: string): boolean {
+  if (typeof tabId !== "string" || !tabId.startsWith("wf:")) return false;
+  // Escape-free by construction: split/join instead of a backslash class. An
+  // earlier cut of this line was written through a shell heredoc and arrived with
+  // its escapes mangled — the file stayed valid-looking text and the regex was
+  // silently wrong, which is a documented trap in this repo.
+  const norm = (v: string) =>
+    v
+      .split("\\")
+      .join("/")
+      .replace(/^(?:\.\/)+/, "")
+      .replace(/\/{2,}/g, "/")
+      .replace(/\.json$/i, "")
+      .toLowerCase();
+  const want = norm(path);
+  if (!want) return false;
+  const rest = tabId.slice(3);
+  const sep = rest.indexOf(":");
+  // `wf:<route>:<path>` (current) and `wf:<path>` (legacy/no-route panels).
+  const candidates = sep >= 0 ? [rest.slice(sep + 1), rest] : [rest];
+  return candidates.some((c) => {
+    const got = norm(c);
+    return got === want || got.endsWith(`/${want}`) || want.endsWith(`/${got}`);
+  });
+}
+
 export function makeScopeRepinHandler(opts: {
   bridge: ScopeRepinBridge;
   tracker: TurnOriginTracker;
@@ -535,8 +588,8 @@ export function makeScopeRepinHandler(opts: {
   backendForTab: (tabId: string) => string;
   backendOfKey: (key: string) => string;
   info: (msg: string) => void;
-}): (scopeId: string, preferredTab?: string) => ScopeRepinOutcome {
-  return (scopeId, preferredTab) => {
+}): (scopeId: string, preferredWorkflowPath?: string) => ScopeRepinOutcome {
+  return (scopeId, preferredWorkflowPath) => {
     const key = opts.scopeAgentKeyOf(scopeId);
     // RECOVERY ONLY: a pin that still reaches a live tab OF THIS conversation
     // is healthy — never displace it (null = ambiguous/ownership-refused and
@@ -577,15 +630,21 @@ export function makeScopeRepinHandler(opts: {
     // A named tab that is NOT eligible REFUSES rather than falling back to the
     // active tab. Silently re-aiming an explicit request at a different
     // workflow is the precise hazard this fence exists for (#884 gate 3, P0).
-    const named = preferredTab && eligible.includes(preferredTab) ? preferredTab : undefined;
-    if (preferredTab && !named) {
+    const matches = preferredWorkflowPath ? eligible.filter((t) => tabRouteCarriesPath(t, preferredWorkflowPath)) : [];
+    const named = matches.length === 1 ? matches[0] : undefined;
+    if (preferredWorkflowPath && !named) {
       return {
         repinned: false,
         reason:
-          `the named workflow resolves to ${shortTabId(preferredTab)}, which is not a tab of ` +
-          `this conversation's backend (${backend}) — or is headless, or is not connected. The ` +
-          `pin was NOT moved to it, and was not silently redirected to another tab either. ` +
-          `Check panel_list_workflows for which workflows this session can reach`,
+          matches.length > 1
+            ? `${matches.length} connected tabs are showing that workflow (${matches
+                .map(shortTabId)
+                .join(", ")}), so naming it does not identify ONE of them — the pin was not moved. ` +
+              `Close the duplicate tab, or issue a message from the tab you mean`
+            : `no connected tab of this conversation's backend (${backend}) is showing that ` +
+              `workflow — it may be open in another browser tab, on another backend's ` +
+              `conversation, or not open at all. The pin was NOT moved, and was not silently ` +
+              `redirected to a different workflow either. Check panel_list_workflows`,
       };
     }
     const active = opts.bridge.resolveActiveScopeTab();

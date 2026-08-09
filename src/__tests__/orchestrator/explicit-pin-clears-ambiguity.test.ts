@@ -30,8 +30,13 @@ import { describe, expect, it, vi } from "vitest";
 import { makeScopeRepinHandler, type ScopeRepinBridge } from "../../orchestrator/turn-origins.js";
 
 const KEY = "orchestrator::codex";
-const TAB_A = "wf:workflows/a.json";
-const TAB_B = "wf:workflows/b.json";
+// REAL bridge routes: `wf:<tabRouteId>:<path>` (panel #640). The first cut of
+// this suite used `wf:<path>` — the saved-workflow HANDLE — which production
+// never emits as a tab id, so every test was green on a shape that cannot occur.
+const TAB_A = "wf:tab-one:workflows/a.json";
+const TAB_B = "wf:tab-two:workflows/b.json";
+const PATH_A = "workflows/a.json";
+const PATH_B = "workflows/b.json";
 
 /** `resolvedPinOf` is the real discriminator: string = a pin, null = ambiguous. */
 function harness(opts: {
@@ -70,7 +75,7 @@ describe("#888 naming a workflow recovers an AMBIGUOUS turn pin", () => {
     // The reporter's state: pin is null (mixed-origin batch), several tabs live.
     const { handler, repinTo } = harness({ pin: null, tabs: [TAB_A, TAB_B] });
 
-    expect(handler(KEY, TAB_B)).toBe(TAB_B);
+    expect(handler(KEY, PATH_B)).toBe(TAB_B);
     expect(repinTo).toHaveBeenCalledWith(KEY, TAB_B);
   });
 
@@ -84,14 +89,14 @@ describe("#888 naming a workflow recovers an AMBIGUOUS turn pin", () => {
       active: "wf:workflows/somebody-elses.json",
     });
 
-    expect(handler(KEY, TAB_A)).toBe(TAB_A);
+    expect(handler(KEY, PATH_A)).toBe(TAB_A);
     expect(repinTo).toHaveBeenCalledWith(KEY, TAB_A);
   });
 
   it("recovers a DEAD pin by name too, not just an ambiguous one", () => {
     const { handler } = harness({ pin: "wf:workflows/gone.json", tabs: [TAB_A, TAB_B], reachable: [TAB_A, TAB_B] });
 
-    expect(handler(KEY, TAB_B)).toBe(TAB_B);
+    expect(handler(KEY, PATH_B)).toBe(TAB_B);
   });
 });
 
@@ -105,7 +110,7 @@ describe("#888 a HEALTHY pin is still never displaced", () => {
     // live turn's binding. Naming a workflow must not become a way around it.
     const { handler, repinTo } = harness({ pin: TAB_A, tabs: [TAB_A, TAB_B] });
 
-    const out = handler(KEY, TAB_B);
+    const out = handler(KEY, PATH_B);
     expect(typeof out).toBe("object");
     expect((out as { reason: string }).reason).toMatch(/still reaches a live tab/);
     expect(repinTo).not.toHaveBeenCalled();
@@ -122,9 +127,9 @@ describe("#888 an ineligible named tab refuses loudly", () => {
     // a silent wrong-canvas re-target, worse than the bug being fixed.
     const { handler, repinTo } = harness({ pin: null, tabs: [TAB_A], active: TAB_A });
 
-    const out = handler(KEY, "wf:workflows/not-open.json");
+    const out = handler(KEY, "workflows/not-open.json");
     expect(typeof out).toBe("object");
-    expect((out as { reason: string }).reason).toMatch(/not a tab of this conversation/i);
+    expect((out as { reason: string }).reason).toMatch(/no connected tab .* is showing that/i);
     expect((out as { reason: string }).reason).toMatch(/NOT moved|not silently redirected/i);
     expect(repinTo).not.toHaveBeenCalled();
   });
@@ -136,14 +141,35 @@ describe("#888 an ineligible named tab refuses loudly", () => {
       backendOf: (t) => (t === TAB_B ? "claude" : "codex"),
     });
 
-    expect(typeof handler(KEY, TAB_B)).toBe("object");
+    expect(typeof handler(KEY, PATH_B)).toBe("object");
     expect(repinTo).not.toHaveBeenCalled();
   });
 
   it("refuses a named tab that is headless", () => {
     const { handler, repinTo } = harness({ pin: null, tabs: [TAB_A, TAB_B], headless: [TAB_B] });
 
-    expect(typeof handler(KEY, TAB_B)).toBe("object");
+    expect(typeof handler(KEY, PATH_B)).toBe("object");
+    expect(repinTo).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("#888 naming a workflow open in TWO tabs does not silently pick one", () => {
+  it("refuses, and says which tabs are showing it", () => {
+    // This is the case the panel's own bridge-route module exists for: the
+    // path-only handle cannot address one of two browser tabs showing the same
+    // file. Matching by path inherits that ambiguity, so the match is only ACTED
+    // on when exactly one tab has it. Taking matches[0] would be a silent
+    // wrong-tab choice — the same class of defect as the silent redirect above,
+    // and invisible to the caller because the tool would report success.
+    const { handler, repinTo } = harness({
+      pin: null,
+      tabs: ["wf:tab-one:workflows/a.json", "wf:tab-two:workflows/a.json"],
+    });
+
+    const out = handler(KEY, PATH_A);
+    expect(typeof out).toBe("object");
+    expect((out as { reason: string }).reason).toMatch(/2 connected tabs are showing that workflow/);
     expect(repinTo).not.toHaveBeenCalled();
   });
 });
@@ -174,32 +200,13 @@ describe("#888 mode:'current' is unchanged", () => {
 //    `mode:"pinned"` never calls it — which was the entire bug.
 // ---------------------------------------------------------------------------
 
-describe("#888 WIRING: the pinned path actually reaches the handler", () => {
-  const src = () => {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { readFileSync } = require("node:fs") as typeof import("node:fs");
-    return readFileSync(new URL("../../orchestrator/panel-tools.ts", import.meta.url), "utf8");
-  };
-
-  it("panel_set_workflow_target calls repinScopeToTab on the pinned branch", () => {
-    // The mutation this catches is deleting the call: every behavioural test
-    // above still passes, because they drive the handler directly. Only the call
-    // site can show the production path reaches it — the exact gap that made the
-    // previous attempt at panel#887 a no-op.
-    const s = src();
-    expect(s).toMatch(/scopeRepin = ctx\.bridge\.repinScopeToTab\(ctx\.tabId, namedTab\)/);
-    expect(s).toMatch(/mode === "pinned" && pinPath && isScopeAddress\(ctx\.tabId\)/);
-  });
-
-  it("the named tab is derived from the pinned PATH, not the active tab", () => {
-    // `canonicalRequestedSavedIdentity` yields `wf:<canonical path>` and returns
-    // null for a bare basename, which is why an alias cannot repin.
-    expect(src()).toMatch(/const namedTab = canonicalRequestedSavedIdentity\(pinPath\)/);
-  });
-
-  it("the outcome is reported to the caller, not swallowed", () => {
-    const s = src();
-    expect(s).toMatch(/turn_routing: "repinned"/);
-    expect(s).toMatch(/was NOT re-pinned: \$\{scopeRepin\.reason\}/);
-  });
-});
+// The WIRING assertions that used to live here read panel-tools.ts and regexed
+// it for the call. They passed while the branch was provably inert: a source-text
+// grep cannot tell reachable code from dead code, and one of them even pinned the
+// defective derivation in place, so fixing the bug required deleting the test
+// that claimed to protect it.
+//
+// Replaced by pin-repin-uses-a-real-tab-id.test.ts, which drives the real
+// panel_set_workflow_target handler through the real repin handler and asserts
+// the pin lands on a tab the bridge actually holds. It fails against the broken
+// derivation, three different ways.

@@ -1390,7 +1390,7 @@ export class UiBridge {
    *  in-flight turn onto the tab that is active now (the documented
    *  panel_set_workflow_target({mode:"current"}) consent). Returns the tab it
    *  repinned to, or undefined when nothing is resolvable. */
-  private scopeRepinHandler: ((scopeId: string, preferredTab?: string) => ScopeRepinOutcome) | null = null;
+  private scopeRepinHandler: ((scopeId: string, preferredWorkflowPath?: string) => ScopeRepinOutcome) | null = null;
   /** #884 — orchestrator-injected: normalize a hello's raw `backend` value the
    *  same way the orchestrator does (unknown/absent → the default backend), so
    *  the backend-qualified scope-buffer replay matches the conversation the
@@ -2717,7 +2717,7 @@ export class UiBridge {
   }
 
   /** #884 — inject the explicit-repin recovery handler (see the field doc). */
-  setScopeRepinHandler(fn: (scopeId: string, preferredTab?: string) => ScopeRepinOutcome): void {
+  setScopeRepinHandler(fn: (scopeId: string, preferredWorkflowPath?: string) => ScopeRepinOutcome): void {
     this.scopeRepinHandler = fn;
   }
 
@@ -2743,8 +2743,8 @@ export class UiBridge {
    * which is precisely the state that refusal already tells the agent to escape
    * by naming a workflow. Until now nothing made the pin follow the name.
    */
-  repinScopeToTab(scopeId: string, tabId: string): ScopeRepinOutcome {
-    return this.scopeRepinHandler?.(scopeId, tabId);
+  repinScopeToWorkflow(scopeId: string, workflowPath: string): ScopeRepinOutcome {
+    return this.scopeRepinHandler?.(scopeId, workflowPath);
   }
 
   /** #884 — inject the hello-backend normalizer (see the field doc). */

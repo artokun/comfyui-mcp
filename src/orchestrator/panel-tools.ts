@@ -9277,14 +9277,18 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         // succeeded and is what the caller asked for. A repin that cannot happen
         // must not retract it, so the outcome is reported, never thrown.
         let scopeRepin: ScopeRepinOutcome | undefined;
-        if (mode === "pinned" && pinPath && isScopeAddress(ctx.tabId) && ctx.bridge.repinScopeToTab) {
-          const namedTab = canonicalRequestedSavedIdentity(pinPath);
-          if (namedTab) {
-            try {
-              scopeRepin = ctx.bridge.repinScopeToTab(ctx.tabId, namedTab);
-            } catch {
-              scopeRepin = undefined; // never worse than the pre-#888 silence
-            }
+        if (mode === "pinned" && pinPath && isScopeAddress(ctx.tabId)) {
+          // The PATH, never a tab id derived from it. `wf:<path>` is the saved
+          // workflow HANDLE; a real tab id is a bridge ROUTE, `wf:<route>:<path>`
+          // (panel #640). The first cut of this fix compared the handle against
+          // routes, so it never matched and refused every time — inert, while a
+          // source-text "wiring" assertion passed, because grepping for a call
+          // cannot tell reachable code from dead code. The handler now does the
+          // matching against the routes the bridge actually holds.
+          try {
+            scopeRepin = ctx.bridge.repinScopeToWorkflow?.(ctx.tabId, pinPath);
+          } catch {
+            scopeRepin = undefined; // never worse than the pre-#888 silence
           }
         }
         ctx.bridge.push({ type: "workflow_target", target }, ctx.tabId);
