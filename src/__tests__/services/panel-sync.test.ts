@@ -398,9 +398,26 @@ function makeDeps(opts: {
     },
     // #1204 — this guard used to be on `gitPullFfOnly`, which is NOT a member of
     // PanelInstallerDeps: nothing ever called it, so the assertion could not
-    // fire while the REAL pull path (gitFetch → gitMergeFfOnly) went unguarded.
-    // A safety net that cannot catch anything is worse than none, because it
-    // reads as coverage.
+    // fire at all.
+    //
+    // It is replaced by the deps the fallback ACTUALLY touches, in the order it
+    // touches them. To be accurate about what that buys: the entry point was
+    // already covered — `gitStatusPorcelain` (guarded above) runs at
+    // panel-installer.ts:2675, before `gitFetch` at :2704, and there is no route
+    // to the pull that skips it. So these are belt-and-braces on the only
+    // reachable path, not a hole being closed. `gitWorktreeRoot` is the genuinely
+    // new one: it is the FIRST dep the fallback calls (:2652), and its absence
+    // was also leaving this literal short of PanelInstallerDeps's required
+    // members — a TS2739 the excess `gitPullFfOnly` had been masking.
+    gitWorktreeRoot: () => {
+      throw new Error("git fallback must not run in this persona (not a git checkout)");
+    },
+    gitUpstreamRev: () => {
+      throw new Error("git fallback must not run in this persona (not a git checkout)");
+    },
+    gitIgnoredPullConflicts: () => {
+      throw new Error("git fallback must not run in this persona (not a git checkout)");
+    },
     gitFetch: () => {
       throw new Error("git fallback must not run in this persona (not a git checkout)");
     },
