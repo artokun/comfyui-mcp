@@ -141,9 +141,15 @@ function defaultPackageDir(): string {
  * did not earn -- it sends a user with a rate-limited registry off to debug
  * their network.
  *
- * `unreachable` is claimed ONLY when the transport proves it (see
- * describeUnreachableHost, which returns null for every non-reachability code).
- * Everything else is `undetermined`, which is the honest answer.
+ * The line is drawn HERE, not by the message helper: the `try` below wraps only
+ * `await fetch(...)`, so a rejection means no response was received at all,
+ * while `!res.ok` / an unparseable body mean the host demonstrably answered.
+ * `unreachableHostMessage` draws no such boundary -- it always returns a
+ * message, splitting only timeout wording from refusal wording -- so do not
+ * read this type as "the transport proved unreachability". A slow-but-alive
+ * registry that trips our own AbortSignal also lands in `unreachable`; the text
+ * says "did not respond in time", which is honest, and nothing branches on the
+ * state.
  */
 export type VersionProbe =
   | { version: string }

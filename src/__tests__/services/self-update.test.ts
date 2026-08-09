@@ -913,6 +913,30 @@ describe("selfUpdateStatus and the empty-version guard (#1136 review)", () => {
     }
   });
 
+  it("a fetch REJECTION is unreachable — the swap's own thesis, previously unpinned", async () => {
+    // S3 from the re-review. All three probe tests stubbed fetch to RESOLVE, so
+    // nothing asserted the state this whole change exists to produce: replacing
+    // the catch's {unreachable} with {undetermined} killed zero tests.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        const err = new TypeError("fetch failed");
+        (err as unknown as { cause: unknown }).cause = Object.assign(new Error("ENOTFOUND"), {
+          code: "ENOTFOUND",
+        });
+        throw err;
+      }),
+    );
+    try {
+      const probe = await defaultDeps.getLatestVersion();
+      expect(probe).toHaveProperty("unreachable");
+      expect((probe as { unreachable: string }).unreachable).toContain("registry.npmjs.org");
+      expect((probe as { unreachable: string }).unreachable).toMatch(/NOT an empty result/i);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("a non-2xx says the host IS reachable — never 'unreachable'", async () => {
     // The registry ANSWERED. This is the 429/500 case the review measured
     // still reporting a network failure.

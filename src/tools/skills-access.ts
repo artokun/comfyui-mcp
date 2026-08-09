@@ -732,11 +732,11 @@ async function extractDepsAction(input: string | Record<string, unknown>): Promi
   }
 
   if (result.unresolved.length > 0) {
-    // #1136 — the extract_deps path renders ExtractDepsResult, which does NOT
-    // carry catalogue_unavailable. It is the READ action a user reaches for
-    // first, so it wants the same caveat, but plumbing it means widening a
-    // second result type and its producer -- left for a follow-up rather than
-    // widened blind. The install path below does surface it.
+    // #1136 — extract_deps has its OWN signal: it never calls fetchManagerList,
+    // so catalogue_unavailable is not its fact. Its `unresolved` comes from the
+    // MAPPINGS endpoint, whose failure was previously caught, logged at warn and
+    // discarded -- we held the exception and asserted absence anyway.
+    if (result.mappings_unavailable) lines.push(result.mappings_unavailable, "");
     lines.push(
       `### Unresolved node types (${result.unresolved.length})`,
       "These class_types are neither installed nor known to ComfyUI-Manager:",

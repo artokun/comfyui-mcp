@@ -81,6 +81,14 @@ export interface ExtractDepsResult {
   missingPacks: string[];
   /** class_types that could not be mapped to any pack. */
   unresolved: string[];
+  /**
+   * #1136 — set when the Manager MAPPINGS lookup did not actually answer, which
+   * makes `unresolved` unsafe to read as "not known to ComfyUI-Manager".
+   *
+   * Stronger evidence than the getlist case: there we infer from an empty list,
+   * here we caught a real exception and logged it, then asserted absence anyway.
+   */
+  mappings_unavailable?: string;
 }
 
 export interface InstallDepsResult {
@@ -362,12 +370,31 @@ export async function extractWorkflowDependencies(
     exact: new Map(),
     patterns: [],
   };
+  // #1136 — this catch used to be the whole story: log at warn, carry on, and
+  // let every unmapped class_type render as "neither installed nor known to
+  // ComfyUI-Manager". We KNOW Manager was never consulted -- we are holding the
+  // exception -- and we asserted absence anyway. A warn line is not a user-
+  // facing answer; the caller reads the tool result.
+  let mappingsUnavailable: string | undefined;
   try {
-    mappingIndex = buildMappingIndex(await deps.fetchManagerMappings());
+    const raw = await deps.fetchManagerMappings();
+    mappingIndex = buildMappingIndex(raw);
+    if (mappingIndex.exact.size === 0 && mappingIndex.patterns.length === 0) {
+      // A 200 carrying nothing is the same situation with no exception to hold:
+      // Manager answered, but with no mappings to match against.
+      mappingsUnavailable =
+        "The ComfyUI-Manager node mappings came back EMPTY, so nothing below was matched against " +
+        "the catalogue. This is NOT evidence that these node types are unknown to Manager.";
+    }
   } catch (err) {
     logger.warn("ComfyUI-Manager mappings unavailable; relying on /object_info only", {
       error: err instanceof Error ? err.message : String(err),
     });
+    mappingsUnavailable =
+      `The ComfyUI-Manager node mappings could not be fetched (${err instanceof Error ? err.message : String(err)}), ` +
+      `so nothing below was matched against the catalogue. This is NOT evidence that these node types ` +
+      `are unknown to Manager -- only /object_info was consulted. Manager reaches the registry from the ` +
+      `ComfyUI host, so a blocked or filtered network there looks exactly like "not found" here.`;
   }
 
   const dependencies: NodeDependency[] = [];
@@ -425,6 +452,9 @@ export async function extractWorkflowDependencies(
     requiredPacks: [...requiredPackSet].sort(),
     missingPacks: [...missingPackSet].sort(),
     unresolved: unresolved.sort(),
+    ...(mappingsUnavailable && unresolved.length > 0
+      ? { mappings_unavailable: mappingsUnavailable }
+      : {}),
   };
 }
 
@@ -491,6 +521,8 @@ export async function installWorkflowDependenciesForAnalysis(
   // it is blocked; we know the catalogue is empty and that this is not the
   // same fact as absence.
   const catalogueEmpty = !directInstall && channel !== "local" && packs.length === 0;
+  // Note is only meaningful alongside an unresolved list; gate at the producer
+  // rather than relying on the renderer, per the field docblock.
   const byKey = new Map<string, ManagerNodePack>();
   for (const p of packs) {
     for (const key of [p.id, p.title, p.reference]) {

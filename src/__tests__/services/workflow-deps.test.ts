@@ -387,6 +387,23 @@ describe("empty Manager catalogue is flagged, not read as absence (#1136)", () =
     expect(res.catalogue_unavailable).toBeUndefined();
   });
 
+  it("does NOT flag a Manager v4 host — directInstall is the ONLY production over-fire", async () => {
+    // S1 from the re-review. fetchManagerList returns {packs: [], directInstall:
+    // true} for EVERY v4 host (workflow-deps.ts:188), so `!directInstall` is the
+    // only clause standing between v4 users and this note on every install. My
+    // two original negatives (a `local` channel, a populated catalogue) covered
+    // neither -- dropping `!directInstall` killed zero tests, while the commit
+    // claimed they "keep an over-firing version honest".
+    const res = await installWorkflowDependenciesForAnalysis(base.analysis as never, {
+      fetchManagerList: async () => ({ channel: "default", packs: [], directInstall: true }),
+      queueInstall: async () => "v4",
+      resetQueue: async () => undefined,
+      startQueue: async () => undefined,
+      queueStatus: async () => undefined,
+    } as never);
+    expect(res.catalogue_unavailable).toBeUndefined();
+  });
+
   it("does NOT flag a catalogue that actually returned entries", async () => {
     const res = await installWorkflowDependenciesForAnalysis(base.analysis as never, {
       fetchManagerList: async () => ({
@@ -399,5 +416,49 @@ describe("empty Manager catalogue is flagged, not read as absence (#1136)", () =
       queueStatus: async () => undefined,
     } as never);
     expect(res.catalogue_unavailable).toBeUndefined();
+  });
+});
+
+// P0-1 from the re-review: extract_deps is the READ action the tool description
+// tells callers to use FIRST, and its `unresolved` comes from the MAPPINGS
+// endpoint — whose failure was caught, logged at warn, and discarded, after
+// which we asserted "not known to ComfyUI-Manager". Stronger evidence thrown
+// away than the getlist case: there we infer from an empty list; here we were
+// holding the exception.
+describe("extract_deps flags an unanswered mappings lookup (#1136)", () => {
+  const wf = { nodes: [{ type: "SomeMissingNodeType" }] };
+  const objectInfo = {};
+
+  const mk = (fetchManagerMappings: () => Promise<unknown>) =>
+    ({
+      fetchObjectInfo: async () => objectInfo,
+      fetchManagerMappings,
+      fetchInstalledPacks: async () => [],
+    }) as never;
+
+  it("sets mappings_unavailable when the lookup THROWS", async () => {
+    const err = new TypeError("fetch failed");
+    (err as unknown as { cause: unknown }).cause = Object.assign(new Error("ENOTFOUND"), {
+      code: "ENOTFOUND",
+    });
+    const res = await extractWorkflowDependencies(wf as never, mk(async () => {
+      throw err;
+    }));
+    expect(res.unresolved.length).toBeGreaterThan(0);
+    expect(res.mappings_unavailable).toBeTruthy();
+    expect(res.mappings_unavailable).toMatch(/NOT evidence/i);
+  });
+
+  it("sets it for an EMPTY mappings response too — a 200 carrying nothing", async () => {
+    const res = await extractWorkflowDependencies(wf as never, mk(async () => ({})));
+    expect(res.mappings_unavailable).toBeTruthy();
+  });
+
+  it("stays quiet when the mappings lookup actually answered", async () => {
+    const res = await extractWorkflowDependencies(
+      wf as never,
+      mk(async () => ({ "some-pack": [["SomeMissingNodeType"], { title_aux: "Some Pack" }] })),
+    );
+    expect(res.mappings_unavailable).toBeUndefined();
   });
 });
