@@ -80,9 +80,14 @@ function cleanUserText(raw: string): string {
 }
 
 /**
- * List the agent's saved sessions for [cwd], newest first. Best-effort: a
- * missing dir or unparseable file yields an empty/short list rather than throwing.
- * [limit] caps how many are returned.
+ * List the agent's saved sessions for [cwd], newest first. [limit] caps how many
+ * are returned.
+ *
+ * Best-effort about CONTENT: an unparseable file is skipped rather than failing
+ * the list. NOT best-effort about the DIRECTORY (#796): a missing directory is an
+ * empty list (a first run looks exactly like that), but one that exists and
+ * cannot be read THROWS — reporting "no saved sessions" for a permission or IO
+ * error is a wrong answer that reads as data loss.
  */
 export async function listSessions(
   cwd: string,
@@ -92,8 +97,28 @@ export async function listSessions(
   let files: string[];
   try {
     files = (await readdir(dir)).filter((f) => f.endsWith(".jsonl"));
-  } catch {
-    return [];
+  } catch (err) {
+    // #796 — "you have no saved sessions" and "your sessions could not be read"
+    // are different answers, and this returned the first for both.
+    //
+    // ENOENT/ENOTDIR is genuine: the directory has not been created yet, which is
+    // what a first run looks like, and an empty list is the truth. A permission
+    // error, an IO error or a network path that went away is NOT — and telling
+    // someone their history is empty is the one wrong answer that reads as data
+    // loss. They go looking for conversations they think they lost.
+    //
+    // Thrown rather than returned-with-a-flag because the ONE caller already
+    // wraps this in a `.catch` that pushes `{ sessions: [], error }` to the
+    // panel — plumbing that could never fire for a read failure, because this
+    // swallowed every one of them.
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === "ENOENT" || code === "ENOTDIR") return [];
+    throw new Error(
+      `Could not read the saved-session directory (${dir}): ${
+        err instanceof Error ? err.message : String(err)
+      }. This is NOT the same as having no saved sessions — none could be listed, ` +
+        `so nothing about their existence is known.`,
+    );
   }
 
   const summaries = await Promise.all(
