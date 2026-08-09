@@ -73,3 +73,48 @@ describe("#851 restart-timeout fallback advice", () => {
     expect(advice("http://a:1", "http://b:2")).toContain("http://b:2");
   });
 });
+
+// ---------------------------------------------------------------------------
+// #1233 — a CONFIRMED mismatch must not be lost inside the proof's null.
+// ---------------------------------------------------------------------------
+
+describe("#1233 confirmed mismatch reaches the strong warning", () => {
+  const advise = (headlessBase: string, panelBase: string | null, observedOrigin: string | null) =>
+    restartTimeoutFallbackAdvice({ headlessBase, panelBase, observedOrigin });
+
+  it("a SECOND local instance on another port is proven different, not merely unproven", () => {
+    // panel#851's own motivating case. captureRebootHealthBase returns null here — it
+    // proves sameness with the BOOT base and a :8189 tab is not that — but the observed
+    // origin is positive evidence of a mismatch, and it used to be discarded.
+    const a = advise("http://127.0.0.1:8188", null, "http://127.0.0.1:8189");
+    expect(a).toContain("Do NOT reach for restart_comfyui");
+    expect(a).toContain("http://127.0.0.1:8189");
+  });
+
+  it("an observed origin that MATCHES does not manufacture a warning", () => {
+    // Unproven-but-consistent stays the mild, target-naming advice.
+    const a = advise("http://127.0.0.1:8188", null, "http://127.0.0.1:8188");
+    expect(a).not.toContain("Do NOT");
+    expect(a).toContain("or use restart_comfyui, which restarts http://127.0.0.1:8188");
+  });
+
+  it("no observed origin at all is still unproven — absence is not evidence", () => {
+    const a = advise("http://127.0.0.1:8188", null, null);
+    expect(a).not.toContain("Do NOT");
+    expect(a).toContain("could not confirm which one this panel is running inside");
+  });
+
+  it("the proof still wins when it is available", () => {
+    expect(advise("http://a:1", "http://a:1", "http://zzz:9")).toContain(
+      "or use restart_comfyui to restart the server directly",
+    );
+  });
+
+  it("the warning names the SUCCEED-on-the-wrong-server risk, not only the no-op", () => {
+    // The old text said only "may find nothing there at all". In this branch the other
+    // target is a LIVE server by construction, so succeeding is the worse outcome.
+    const a = advise("http://127.0.0.1:8188", "http://127.0.0.1:8189", null);
+    expect(a).toContain("may find nothing there");
+    expect(a).toContain("SUCCEED and take down a ComfyUI you did not mean to touch");
+  });
+});

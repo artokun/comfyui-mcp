@@ -1207,18 +1207,36 @@ async function probeDeclineRecovery(
 export function restartTimeoutFallbackAdvice({
   headlessBase,
   panelBase,
+  observedOrigin = null,
 }: {
   headlessBase: string;
   panelBase: string | null;
+  /**
+   * #1233 — the tab's SERVER-OBSERVED handshake Origin, read directly rather than
+   * through captureRebootHealthBase's proof.
+   *
+   * That proof answers "is this provably the boot instance", so it collapses a
+   * CONFIRMED MISMATCH into the same `null` as an absent or unprovable origin — and the
+   * confirmed mismatch is exactly the case panel#851 was filed about (a tab fronting a
+   * second local ComfyUI on another port). The evidence was computed and then discarded.
+   * Passing it separately lets a confirmed mismatch reach the strong warning without
+   * loosening the proof, which is correctly strict for its own purpose.
+   */
+  observedOrigin?: string | null;
 }): string {
   if (panelBase != null && sameHttpBase(headlessBase, panelBase)) {
     return "or use restart_comfyui to restart the server directly without a panel card.";
   }
-  if (panelBase != null) {
+  // Proven different: either the proof resolved a base that differs, or the observed
+  // origin — which the browser sets and page JS cannot forge — differs outright.
+  const proven = panelBase ?? (observedOrigin && !sameHttpBase(headlessBase, observedOrigin) ? observedOrigin : null);
+  if (proven != null) {
     return (
       `Do NOT reach for restart_comfyui here without checking: it targets ${headlessBase}, ` +
-      `while this panel is running inside ${panelBase}. Restarting the first would hit a ` +
-      "different server than the one you have been working on — and may find nothing there at all."
+      `while this panel is running inside ${proven}. Restarting the first would hit a ` +
+      "different server than the one you have been working on. That may find nothing there " +
+      "at all — or it may SUCCEED and take down a ComfyUI you did not mean to touch, which " +
+      "on a shared instance is the worse outcome."
     );
   }
   return (
@@ -9629,6 +9647,9 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           const fallback = restartTimeoutFallbackAdvice({
             headlessBase: getComfyUIBaseUrl(),
             panelBase: captureRebootHealthBase(ctx),
+            // #1233 — the raw observed origin, so a CONFIRMED mismatch is not lost inside
+            // the proof's null. Server-observed on the WS upgrade; page JS cannot forge it.
+            observedOrigin: ctx.bridge?.tabServerOrigin?.(ctx.tabId) ?? null,
           });
           return ok(
             `No confirmation received within ${Math.round(confirmBudget / 1000)}s, so I did NOT ` +
