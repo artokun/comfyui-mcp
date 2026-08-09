@@ -27,6 +27,10 @@ import {
 let outlineReplies: Array<Record<string, unknown>>;
 let outlineCalls: number;
 let rereadThrows: boolean;
+/** Successive answers from the session's workflow fence — index 0 before the
+ *  first re-read, index 1 after, so a mid-poll tab switch can be modelled. */
+let fenceUuids: string[];
+let fenceReads: number;
 
 function bridge() {
   return {
@@ -44,7 +48,11 @@ function bridge() {
     isHeadless: () => false,
     tabs: () => [{ tab_id: "tab-1", title: "wf", connected_at: 0 }],
     resolveActiveTabId: () => "tab-1",
-    workflowUuidFor: () => ({ known: true, uuid: undefined }),
+    workflowUuidFor: () => {
+      const uuid = fenceUuids[Math.min(fenceReads, fenceUuids.length - 1)];
+      fenceReads += 1;
+      return { known: true, uuid };
+    },
     tabGraphMutationCapability: () => ({ known: true, canMutate: true }),
   } as unknown as PanelToolCtx["bridge"];
 }
@@ -61,6 +69,8 @@ async function callOutline(): Promise<Record<string, unknown>> {
 beforeEach(() => {
   outlineCalls = 0;
   rereadThrows = false;
+  fenceReads = 0;
+  fenceUuids = ["11111111-2222-4333-8444-555555555555"];
 });
 
 describe("an empty outline is re-verified before it is believed (#1184)", () => {
@@ -74,7 +84,7 @@ describe("an empty outline is re-verified before it is believed (#1184)", () => 
     const out = await callOutline();
 
     expect(out.node_count, "the empty first read must not be reported").toBe(7);
-    expect(outlineCalls, "it must actually re-read").toBe(2);
+    expect(outlineCalls, "it must actually re-read").toBe(2); // stops as soon as nodes appear
   });
 
   it("reports empty plainly when the canvas is GENUINELY empty", async () => {
@@ -86,7 +96,9 @@ describe("an empty outline is re-verified before it is believed (#1184)", () => 
     const out = await callOutline();
 
     expect(out.node_count).toBe(0);
-    expect(outlineCalls, "confirmed by a second read").toBe(2);
+    // The poll runs its full schedule before concluding empty — a single attempt
+    // would be an arbitrary cliff for a slower restore (codex review).
+    expect(outlineCalls, "confirmed by the full re-read schedule").toBeGreaterThan(1);
     expect(JSON.stringify(out)).not.toMatch(/restor|still loading/i);
   });
 
@@ -129,5 +141,36 @@ describe("an empty outline is re-verified before it is believed (#1184)", () => 
 
     expect(out.node_count).toBe(0);
     expect(out.detail_level).toBe("full");
+  });
+
+  it("keeps polling for a SLOWER restore instead of giving up after one try", async () => {
+    // codex review: one fixed retry is an arbitrary cliff. A restore that is
+    // still going at the first re-read must not be reported as an empty canvas.
+    outlineReplies = [
+      { node_count: 0, group_count: 0, outline: "0 nodes" },
+      { node_count: 0, group_count: 0, outline: "0 nodes" },
+      { node_count: 7, group_count: 0, outline: "7 nodes" },
+    ];
+
+    const out = await callOutline();
+
+    expect(out.node_count).toBe(7);
+    expect(outlineCalls).toBe(3);
+  });
+
+  it("does NOT adopt a second read taken after the workflow CHANGED", async () => {
+    // codex review, and the sharper risk: the user can switch tabs during the
+    // poll, so a non-empty second outline may describe a DIFFERENT workflow.
+    // Reporting it as though it confirmed a read of the first is worse than the
+    // empty read this exists to fix — the honest empty answer stands.
+    outlineReplies = [
+      { node_count: 0, group_count: 0, outline: "0 nodes" },
+      { node_count: 9, group_count: 0, outline: "9 nodes of ANOTHER workflow" },
+    ];
+    fenceUuids = ["11111111-2222-4333-8444-555555555555", "99999999-8888-4777-a666-555555555555"];
+
+    const out = await callOutline();
+
+    expect(out.node_count, "another workflow's graph must not be substituted").toBe(0);
   });
 });

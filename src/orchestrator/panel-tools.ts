@@ -1618,6 +1618,7 @@ function withTruncationHints(res: ToolResult, rules: TruncationRule[]): ToolResu
  * Never throws: a failed re-read leaves the original reply exactly as it was.
  */
 async function confirmEmptyOutline(
+  ctx: PanelToolCtx,
   res: ToolResult,
   reread: () => Promise<ToolResult>,
 ): Promise<ToolResult> {
@@ -1625,28 +1626,60 @@ async function confirmEmptyOutline(
     if (res.isError) return res;
     const first = parseToolResultJson(res);
     if (!first || first.node_count !== 0) return res;
-    await sleep(EMPTY_OUTLINE_RECHECK_MS);
-    const second = await reread();
-    // Redundant with the parsed-null guard below TODAY — an error result carries
-    // no parseable JSON, so that branch already returns `res` — and kept anyway:
-    // it states the intent directly, and it would still hold if an error result
-    // ever carried a structured body. No test kills this line alone; saying so
-    // beats inventing one that pretends otherwise.
-    if (second.isError) return res;
-    const parsed = parseToolResultJson(second);
-    // Only a NON-empty second read replaces the first. A second empty read is the
-    // same answer, and returning the original keeps every other field it carried.
-    if (!parsed || parsed.node_count === 0) return res;
-    return second;
+
+    // Which workflow this empty answer is ABOUT (codex review). The re-read is a
+    // second round trip, and the user can switch tabs during it — so a non-empty
+    // second outline might describe a DIFFERENT workflow entirely. Substituting
+    // it would report workflow B's graph as though it confirmed a read of A,
+    // which is a worse failure than the empty read this exists to fix.
+    const identityBefore = currentWorkflowFence(ctx);
+
+    // A BOUNDED POLL, not a single retry (codex review). A restore after a
+    // ComfyUI restart has no guaranteed duration, and one 400ms attempt is an
+    // arbitrary cliff: if the restore is still going at that instant, the fix
+    // silently fails to cover the very report it is for. Poll briefly instead,
+    // stopping the moment nodes appear.
+    for (const waitMs of EMPTY_OUTLINE_RECHECK_STEPS_MS) {
+      await sleep(waitMs);
+      const second = await reread();
+      // Redundant with the parsed-null guard below TODAY — an error result carries
+      // no parseable JSON — and kept anyway: it states the intent directly, and
+      // would still hold if an error result ever carried a structured body.
+      if (second.isError) continue;
+      const parsed = parseToolResultJson(second);
+      if (!parsed || parsed.node_count === 0) continue;
+
+      // Nodes appeared — but only adopt them if the canvas is still the SAME
+      // workflow. A changed identity means the second read answers a different
+      // question, so the original (honest, empty) answer stands.
+      const identityAfter = currentWorkflowFence(ctx);
+      if (
+        identityBefore.known &&
+        identityAfter.known &&
+        identityBefore.uuid !== identityAfter.uuid
+      ) {
+        return res;
+      }
+      return second;
+    }
+    return res;
   } catch {
     return res;
   }
 }
 
-/** How long to let a restoring canvas settle before re-reading an empty outline
- *  (#1184). Long enough for a frontend mid-restore to finish attaching nodes,
- *  short enough that a genuinely blank canvas is not a noticeable pause. */
-const EMPTY_OUTLINE_RECHECK_MS = 400;
+/**
+ * The back-off schedule for re-reading an empty outline (#1184).
+ *
+ * A bounded poll rather than one attempt: a restore after a ComfyUI restart has
+ * no guaranteed duration, so a single fixed wait is an arbitrary cliff that would
+ * silently miss a slower restore (codex review). Stops the moment nodes appear.
+ *
+ * Bounded deliberately at ~1.2s total. A genuinely blank canvas is a COMMON
+ * state and pays this whole cost, so it has to stay small enough not to be felt;
+ * a longer poll would buy rarer restores at the expense of every empty read.
+ */
+const EMPTY_OUTLINE_RECHECK_STEPS_MS = [250, 400, 550] as const;
 
 function markBudgetIgnored(res: ToolResult, requested: unknown): ToolResult {
   if (typeof requested !== "number") return res;
@@ -6611,6 +6644,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           markBudgetIgnored(
             // #1184 — an empty outline is re-verified before it is believed.
             await confirmEmptyOutline(
+              ctx,
               await ctx.call({ cmd: "graph_outline", max_chars: args.max_chars }),
               () => ctx.call({ cmd: "graph_outline", max_chars: args.max_chars }),
             ),
