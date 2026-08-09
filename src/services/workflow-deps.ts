@@ -382,9 +382,18 @@ export async function extractWorkflowDependencies(
     if (mappingIndex.exact.size === 0 && mappingIndex.patterns.length === 0) {
       // A 200 carrying nothing is the same situation with no exception to hold:
       // Manager answered, but with no mappings to match against.
-      mappingsUnavailable =
-        "The ComfyUI-Manager node mappings came back EMPTY, so nothing below was matched against " +
-        "the catalogue. This is NOT evidence that these node types are unknown to Manager.";
+      // Distinguish "the response was empty" from "we could not read it".
+      // buildMappingIndex skips any entry whose value is not an Array, so a v4
+      // shape difference yields an empty index from a NON-empty body -- and
+      // calling that "came back EMPTY" asserts something about the response we
+      // never checked, which is this issue's own defect class one endpoint over.
+      const empty = !raw || typeof raw !== "object" || Object.keys(raw).length === 0;
+      mappingsUnavailable = empty
+        ? "The ComfyUI-Manager node mappings came back EMPTY, so nothing below was matched against " +
+          "the catalogue. This is NOT evidence that these node types are unknown to Manager."
+        : "The ComfyUI-Manager node mappings response carried no usable entries, so nothing below " +
+          "was matched against the catalogue. This is NOT evidence that these node types are " +
+          "unknown to Manager.";
     }
   } catch (err) {
     logger.warn("ComfyUI-Manager mappings unavailable; relying on /object_info only", {
@@ -521,8 +530,6 @@ export async function installWorkflowDependenciesForAnalysis(
   // it is blocked; we know the catalogue is empty and that this is not the
   // same fact as absence.
   const catalogueEmpty = !directInstall && channel !== "local" && packs.length === 0;
-  // Note is only meaningful alongside an unresolved list; gate at the producer
-  // rather than relying on the renderer, per the field docblock.
   const byKey = new Map<string, ManagerNodePack>();
   for (const p of packs) {
     for (const key of [p.id, p.title, p.reference]) {
@@ -601,7 +608,11 @@ export async function installWorkflowDependenciesForAnalysis(
     alreadyInstalled: analysis.requiredPacks.filter((p) => !missingSet.has(p)),
     unresolved: [...new Set(unresolved)].sort(),
     queue,
-    ...(catalogueEmpty
+    // Gated on there being something to mislead about. Round 3 caught a comment
+    // here claiming this gate existed when it did not -- the field's own
+    // docblock says callers rendering `unresolved` must surface it, so setting
+    // it with an empty `unresolved` contradicts the contract.
+    ...(catalogueEmpty && unresolved.length > 0
       ? {
           catalogue_unavailable:
             `The ComfyUI-Manager catalogue came back EMPTY (channel "${channel}"), so nothing below ` +

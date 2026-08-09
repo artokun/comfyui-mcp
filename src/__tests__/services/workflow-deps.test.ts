@@ -404,6 +404,21 @@ describe("empty Manager catalogue is flagged, not read as absence (#1136)", () =
     expect(res.catalogue_unavailable).toBeUndefined();
   });
 
+  it("does not set catalogue_unavailable when nothing is unresolved", async () => {
+    // Round 3: a comment claimed this gate existed; it did not.
+    const res = await installWorkflowDependenciesForAnalysis(
+      { requiredPacks: [], missingPacks: [], unresolved: [], dependencies: [] } as never,
+      {
+        fetchManagerList: async () => ({ channel: "default", packs: [] }),
+        queueInstall: async () => "legacy",
+        resetQueue: async () => undefined,
+        startQueue: async () => undefined,
+        queueStatus: async () => undefined,
+      } as never,
+    );
+    expect(res.catalogue_unavailable).toBeUndefined();
+  });
+
   it("does NOT flag a catalogue that actually returned entries", async () => {
     const res = await installWorkflowDependenciesForAnalysis(base.analysis as never, {
       fetchManagerList: async () => ({
@@ -452,6 +467,27 @@ describe("extract_deps flags an unanswered mappings lookup (#1136)", () => {
   it("sets it for an EMPTY mappings response too — a 200 carrying nothing", async () => {
     const res = await extractWorkflowDependencies(wf as never, mk(async () => ({})));
     expect(res.mappings_unavailable).toBeTruthy();
+  });
+
+  it("says 'no usable entries', NOT 'came back EMPTY', for an unparseable shape", async () => {
+    // buildMappingIndex skips non-Array values, so a v4 shape difference yields
+    // an empty index from a NON-empty body. Claiming the response was empty
+    // asserts something we never checked -- the defect class this issue is
+    // about, one endpoint over.
+    const res = await extractWorkflowDependencies(
+      wf as never,
+      mk(async () => ({ "some-pack": { nodes: ["SomeMissingNodeType"] } })),
+    );
+    expect(res.mappings_unavailable).toBeTruthy();
+    expect(res.mappings_unavailable).not.toMatch(/came back EMPTY/);
+    expect(res.mappings_unavailable).toMatch(/no usable entries/i);
+  });
+
+  it("does not set the note when there is nothing unresolved to mislead about", async () => {
+    // H3 — the producer gate I described in review and had not pinned.
+    const res = await extractWorkflowDependencies({ nodes: [] } as never, mk(async () => ({})));
+    expect(res.unresolved).toEqual([]);
+    expect(res.mappings_unavailable).toBeUndefined();
   });
 
   it("stays quiet when the mappings lookup actually answered", async () => {
