@@ -1068,7 +1068,7 @@ export function listDownloadJobCandidates(id: string): DownloadJob[] {
   // sharing an id differ there), so equal timestamps order identically on every
   // run and in every process.
   return [...byKey.values()].sort(
-    (a, b) => b.started_at - a.started_at || String(a.trayId).localeCompare(String(b.trayId)),
+    (a, b) => b.started_at - a.started_at || compareTrayIds(a.trayId, b.trayId),
   );
 }
 
@@ -1264,6 +1264,27 @@ export function findDownloadJob(query: { url?: string; destKey?: string }): Down
   return persisted ? jobFromPersisted(persisted) : undefined;
 }
 
+/**
+ * The ordering tiebreak for two jobs that share a millisecond (#1208).
+ *
+ * RAW comparison, not localeCompare (codex review). localeCompare is
+ * locale-aware by definition and its collation depends on the runtime's ICU
+ * build, so `tray-B` vs `tray-a` can order differently on Windows and Linux —
+ * which would have traded a timing flake for a portability flake, in a function
+ * whose whole job here is to be identical on every machine.
+ *
+ * A missing trayId sorts LAST rather than colliding on the string "undefined":
+ * two absent ids still compare equal (nothing can separate them), but an absent
+ * one never displaces a present one, so the order stays stable as far as the
+ * data allows.
+ */
+export function compareTrayIds(a: string | undefined, b: string | undefined): number {
+  if (a === b) return 0;
+  if (a === undefined) return 1;
+  if (b === undefined) return -1;
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 export function listDownloadJobs(): DownloadJob[] {
   // One Entry is indexed under multiple keys — dedup by identity so a job appears once
   // regardless of how many keys point at it. Identity is (id, trayId), NOT id alone:
@@ -1308,7 +1329,7 @@ export function listDownloadJobs(): DownloadJob[] {
   // sharing an id differ there), so equal timestamps order identically on every
   // run and in every process.
   return [...byKey.values()].sort(
-    (a, b) => b.started_at - a.started_at || String(a.trayId).localeCompare(String(b.trayId)),
+    (a, b) => b.started_at - a.started_at || compareTrayIds(a.trayId, b.trayId),
   );
 }
 

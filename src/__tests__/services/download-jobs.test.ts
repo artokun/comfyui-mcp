@@ -108,6 +108,7 @@ import {
   startDownloadJob,
   getDownloadJob,
   findDownloadJob,
+  compareTrayIds,
   listDownloadJobs,
   listDownloadJobCandidates,
   cancelDownloadJob,
@@ -2107,5 +2108,41 @@ describe("download job registry", () => {
       expect(r.confirmed).toBe(false);
       expect(r.warning).toMatch(/NOT verified as landed/);
     });
+  });
+});
+
+// #1208 (codex review) — the tiebreak must be DETERMINISTIC ACROSS MACHINES.
+//
+// The first version used `String(a.trayId).localeCompare(String(b.trayId))`.
+// localeCompare is locale-aware by definition and its collation depends on the
+// runtime's ICU build, so `tray-B` vs `tray-a` orders one way here and can order
+// the other way elsewhere:
+//
+//     "tray-B".localeCompare("tray-a")  →  1
+//     "tray-B" < "tray-a"               →  false  (raw: -1 the other direction)
+//
+// That would have traded a timing flake for a portability flake, in the one
+// function whose job is to be identical on every machine.
+describe("compareTrayIds (#1208)", () => {
+  it("orders by RAW string comparison, not locale collation", () => {
+    // The exact pair where the two disagree.
+    expect(compareTrayIds("tray-B", "tray-a")).toBeLessThan(0);
+    expect("tray-B".localeCompare("tray-a")).toBeGreaterThan(0);
+  });
+
+  it("is antisymmetric and reflexive — a sort comparator must be", () => {
+    expect(compareTrayIds("a", "b")).toBeLessThan(0);
+    expect(compareTrayIds("b", "a")).toBeGreaterThan(0);
+    expect(compareTrayIds("a", "a")).toBe(0);
+  });
+
+  it("sorts a MISSING trayId last without colliding on 'undefined'", () => {
+    // String(undefined) === "undefined" would have made every id-less job equal
+    // to every other AND sortable against real ids by that literal.
+    expect(compareTrayIds(undefined, "a")).toBeGreaterThan(0);
+    expect(compareTrayIds("a", undefined)).toBeLessThan(0);
+    expect(compareTrayIds(undefined, undefined)).toBe(0);
+    // …and it must not sort as the literal string.
+    expect(compareTrayIds(undefined, "zzzz")).toBeGreaterThan(0);
   });
 });
