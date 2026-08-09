@@ -5,6 +5,8 @@ import {
   searchHuggingFaceModels,
   listLocalModels,
   listLocalModelsWithCoverage,
+  describeManagerDestination,
+  managerJobFilename,
   currentLiveModelsRoot,
   verifyManagerVisibility,
   MODEL_SUBDIRS,
@@ -707,9 +709,8 @@ async function downloadAction(args: {
           // ONE placement policy for every consumer (#369): only a file the running
           // ComfyUI actually lists may be called a success. A Manager dispatch, a
           // still-pending check and an inconclusive check are all unconfirmed.
-          const placement = describePlacement(job, {
-            liveModelsDir: await currentLiveModelsRoot(),
-          });
+          const liveRoot = await currentLiveModelsRoot();
+          const placement = describePlacement(job, { liveModelsDir: liveRoot });
           // #1086 — ASK the server instead of telling the caller to. The Manager
           // branch could only ever say "confirm with list_local_models yourself",
           // and a reporter who did not lost a multi-GB model to an ephemeral
@@ -724,9 +725,37 @@ async function downloadAction(args: {
           const managerSeen = job.viaManager
             ? await verifyManagerVisibility(
                 job.target_subfolder,
-                job.filename ?? (job.path ?? "").split(/[\\/]/).pop() ?? "",
+                // #1086 (codex review) — was `job.filename ?? path.split(…).pop()`.
+                // For a Manager dispatch `job.path` is a DESCRIPTOR, not a path, so
+                // that returned the whole trailing note and made every URL-only
+                // download unverifiable. Pre-existing; exposed by the review.
+                managerJobFilename(job),
                 { attempts: 1 },
               ).catch(() => undefined)
+            : undefined;
+          // #1086 — the destination is unknowable only until we LOOK.
+          //
+          // The standing caveat says we cannot know where a Manager dispatch
+          // lands, because extra_model_paths.yaml lives on the target filesystem.
+          // True of the CONFIG; not true of the OUTCOME — Manager logs the
+          // absolute path it chose, which is how a reporter found their Wan 2.2
+          // file in /opt/ComfyUI/models while the server read /workspace/models,
+          // a 20GB overlay that discarded it on the next pod restart.
+          //
+          // unknown-ok: undefined here means "no destination line was read" —
+          // from an unreadable log, a Manager build that logs differently, or a
+          // throw — and every one of those leads to the SAME correct behaviour:
+          // append nothing, and leave managerDestinationCaveat()'s standing "this
+          // has NOT established where the file lands" as the answer. That caveat
+          // is already the honest unknown; a second one saying the same thing
+          // would be noise. The state that must never collapse is the opposite
+          // one — a destination we DID read must never be dropped — and that is a
+          // string, never undefined. Verified there is no branch on this value
+          // beyond "append it if present".
+          const managerDest = job.viaManager
+            ? await describeManagerDestination(managerJobFilename(job), {
+                liveModelsDir: liveRoot,
+              }).catch(() => undefined)
             : undefined;
           const text = job.viaManager
             ? `Download DISPATCHED to the remote ComfyUI via ComfyUI-Manager (server-side fetch):\n${job.path}\n\n` +
@@ -745,7 +774,11 @@ async function downloadAction(args: {
               (managerSeen?.visibility === "visible"
                 ? `LISTED (placement only, NOT validity): ${managerSeen.note}`
                 : `NOTE: ${placement.warning}` +
-                  (managerSeen ? `\n\n${managerSeen.note}` : ""))
+                  (managerSeen ? `\n\n${managerSeen.note}` : "")) +
+              // Appended to BOTH Manager arms: a listed file whose destination is
+              // outside the live root is exactly the #1086 shape, so the "LISTED"
+              // arm needs this every bit as much as the unverified one.
+              (managerDest ? `\n\n${managerDest}` : "")
             : placement.confirmed
               ? `Model downloaded successfully to${placement.pathQualifier}:\n${job.path}`
               : placement.wrongPlace

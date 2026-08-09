@@ -4,7 +4,7 @@ import { platform } from "node:os";
 import { readdir, stat, mkdir, readFile, lstat, realpath } from "node:fs/promises";
 import { dirname, join, basename, normalize, resolve, relative, sep, isAbsolute, extname } from "node:path";
 import { config, getComfyUIBaseUrl, isRemoteMode } from "../config.js";
-import { getClient, getSystemStats, comfyApiFetch } from "../comfyui/client.js";
+import { getClient, getLogs, getSystemStats, comfyApiFetch } from "../comfyui/client.js";
 import { getExtraModelRoots, getLiveExtraModelRoots } from "./extra-paths.js";
 import { resolveEffectiveComfyUIBase, resolveLiveServerRoot } from "./workspace-env.js";
 import { installModelViaManager } from "./node-management.js";
@@ -2274,6 +2274,231 @@ function localAuthHeadersFor(
  * dead end; list_local_models reads through the SAME roots the server reads, so a
  * file that appears there is genuinely reachable by a workflow.
  */
+/**
+ * The destination ComfyUI-Manager LOGGED for `filename`, read back from
+ * `/internal/logs` (#1086).
+ *
+ * The standing caveat says we cannot know where a Manager dispatch lands, because
+ * `extra_model_paths.yaml` lives on the target filesystem. That is true of the
+ * CONFIG — and the reporter's own evidence shows it is not true of the OUTCOME.
+ * Manager announces the absolute path it picked, in both generations:
+ *
+ *   glob/manager_server.py:1063  f"Install model '{name}' from '{url}' into '{path}'"
+ *   legacy/manager_server.py:634 (identical)
+ *
+ * which is how they discovered their Wan 2.2 file had gone to
+ * `/opt/ComfyUI/models` while the server read `/workspace/models` — a 20GB overlay
+ * that discarded it on the next pod restart.
+ *
+ * So the destination is unknowable only until we look. This looks.
+ *
+ * Returns undefined when the log could not be read OR carried no such line —
+ * DELIBERATELY not distinguished here, because the caller's remedy is identical
+ * (fall back to the caveat) and inventing a distinction the caller cannot act on
+ * would be noise. What must never happen is an unread log rendering as a
+ * destination, which is why undefined is the only other answer.
+ *
+ * Matches the LAST occurrence: a filename can be installed more than once in a
+ * session, and the newest line is the dispatch we just made.
+ */
+/**
+ * Are these two absolute paths written in the SAME path syntax? (#1086, codex review)
+ *
+ * A destination read from the REMOTE server's log is in that host's syntax, while
+ * a root resolved here has been through node's `resolve()` — which on Windows
+ * turns "/workspace/models" into "C:\workspace\models". Comparing across that
+ * boundary always answers OUTSIDE, for a destination that may be exactly right,
+ * and a false OUTSIDE is the dangerous direction: it cries wolf about a good file
+ * and contradicts a LISTED verdict in the same message.
+ *
+ * Deliberately crude — POSIX-absolute vs drive-letter is the only distinction that
+ * matters here, and anything it cannot classify is treated as incomparable rather
+ * than guessed.
+ */
+/**
+ * The extra_model_paths directories the LIVE server reads, or undefined when that
+ * could not be established (#1086, codex review).
+ *
+ * Undefined is load-bearing: "we could not read the extra roots" must not render
+ * as "there are none", which would let a destination under a perfectly good extra
+ * root be reported as unusable.
+ */
+async function liveExtraRootDirs(): Promise<string[] | undefined> {
+  try {
+    const snapshot = await resolveModelsDirWithBases();
+    const live = await getLiveExtraModelRoots(snapshot.snapshot);
+    if (!live.authoritative) return undefined;
+    return live.roots.map((r) => r.dir).filter((d): d is string => typeof d === "string");
+  } catch {
+    return undefined;
+  }
+}
+
+function samePathDomain(a: string, b: string): boolean {
+  const kind = (p: string): "posix" | "win32" | "unknown" => {
+    if (/^[A-Za-z]:[\/]/.test(p)) return "win32";
+    if (p.startsWith("\\\\")) return "win32"; // UNC
+    if (p.startsWith("/")) return "posix";
+    return "unknown";
+  };
+  const ka = kind(a);
+  const kb = kind(b);
+  return ka !== "unknown" && ka === kb;
+}
+
+/**
+ * The FILENAME a Manager dispatch actually used, from a finished job (#1086,
+ * codex review).
+ *
+ * `job.filename` is OPTIONAL — a URL-only download never sets it — and the
+ * fallback in use was `job.path.split(/[\/]/).pop()`. For a Manager dispatch
+ * `job.path` is not a path at all; it is
+ *
+ *     "checkpoints/foo.safetensors (dispatched to the remote ComfyUI via …)"
+ *
+ * so that fallback returned the whole descriptive tail. Every consumer then
+ * searched for a filename that cannot match anything: the destination read below
+ * misses, and `verifyManagerVisibility` — which used the identical fallback long
+ * before this change — probed a name the server could never list, quietly turning
+ * every URL-only Manager download into an unverifiable one.
+ *
+ * Take the leading "<subfolder>/<filename>" that descriptor is built from,
+ * stopping at the " (" the note begins with.
+ */
+export function managerJobFilename(job: {
+  filename?: string;
+  path?: string;
+}): string {
+  if (job.filename) return job.filename;
+  const head = (job.path ?? "").split(" (")[0];
+  return head.split(/[\/]/).pop() ?? "";
+}
+
+export function parseManagerInstallDestination(
+  logText: string,
+  filename: string,
+): string | undefined {
+  if (!logText || !filename) return undefined;
+  // The name is interpolated into the line inside single quotes, so match it as a
+  // whole quoted token — a bare substring would let `clip_vision_h.safetensors`
+  // be matched by a line about `clip_vision_h.safetensors.part`.
+  const esc = filename.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`Install model '${esc}' from '[^']*' into '([^']+)'`, "g");
+  let last: string | undefined;
+  for (const m of logText.matchAll(re)) last = m[1];
+  return last;
+}
+
+/**
+ * Read the live server's log and report where Manager said it put `filename`,
+ * plus whether that is inside the models root the server actually reads (#1086).
+ *
+ * Never throws: this runs after a transfer, and a diagnostic that cannot be
+ * gathered must not turn a completed dispatch into an error.
+ */
+export async function describeManagerDestination(
+  filename: string,
+  opts?: {
+    /** Injectable so this is testable without a live server. */
+    readLog?: () => Promise<string | undefined>;
+    liveModelsDir?: string | undefined;
+    /** The server's extra_model_paths roots, or undefined when they could not be
+     *  established. Injectable for tests; defaults to the live read. */
+    extraRoots?: () => Promise<string[] | undefined>;
+  },
+): Promise<string | undefined> {
+  let text: string | undefined;
+  try {
+    // getLogs() already carries the reconnect-and-retry a Manager reboot needs
+    // (#399) — a restart is exactly what precedes many of these reads.
+    text =
+      opts?.readLog !== undefined
+        ? await opts.readLog()
+        : (await getLogs()).join("\n");
+  } catch {
+    return undefined;
+  }
+  if (!text) return undefined;
+  const dest = parseManagerInstallDestination(text, filename);
+  if (!dest) return undefined;
+
+  const root = opts?.liveModelsDir;
+  // #1086 (codex review, PR #1190) — ONLY compare when the comparison is
+  // trustworthy, and the two ways it is not are both dangerous in the SAME
+  // direction: a false OUTSIDE cries wolf about a file that is fine, and
+  // contradicts a LISTED verdict sitting in the same message.
+  //
+  //  - PATH DOMAIN. `dest` comes from the REMOTE server's log, so it is that
+  //    host's path syntax. `currentLiveModelsRoot()` runs its value through
+  //    node's `resolve()`, which on a WINDOWS orchestrator turns the remote
+  //    "/workspace/models" into "C:\workspace\models". Comparing those two
+  //    always says OUTSIDE — for a destination that is exactly right.
+  //  - EXTRA ROOTS. This compares one PRIMARY root, while a server can read
+  //    several. A destination under a legitimately-registered extra root would
+  //    be reported as unusable while `verifyManagerVisibility` lists it.
+  //
+  // So the INSIDE/OUTSIDE verdict is asserted only when the domains agree, and
+  // an OUTSIDE reading also has to survive the extra roots. Anything else falls
+  // back to locating the file WITHOUT judging it — which is still far more than
+  // the old "we cannot know where this lands".
+  if (root !== undefined && !samePathDomain(dest, root)) {
+    return (
+      `ComfyUI-Manager reported writing it to ${dest}. That path is on the ComfyUI ` +
+      `host and could not be compared with the models directory known here ` +
+      `(${root}) — they are written in different path syntaxes, so no INSIDE/OUTSIDE ` +
+      `verdict is claimed. Check list_local_models to confirm the server can read it.`
+    );
+  }
+  if (root === undefined) {
+    // We know WHERE, but not whether that is a place the server reads — and the
+    // second half is the one that decides whether the file is usable. Say the
+    // first without implying the second.
+    return (
+      `ComfyUI-Manager reported writing it to ${dest}. Whether that path is one the ` +
+      `connected server reads could not be established from here, so this locates the ` +
+      `file without confirming it is usable — check list_local_models.`
+    );
+  }
+  if (isUnderRoot(dest, root)) {
+    return (
+      `ComfyUI-Manager reported writing it to ${dest}, which is INSIDE the models ` +
+      `directory that server reads (${root}).`
+    );
+  }
+  // An OUTSIDE reading has to survive the EXTRA roots before it is asserted: a
+  // server reads more than one tree, and a destination under a registered extra
+  // root is fine. Unreadable extra roots mean we cannot rule that out, so the
+  // verdict is withheld rather than guessed — the same three-state discipline as
+  // everywhere else here.
+  const extra = await (opts?.extraRoots !== undefined
+    ? opts.extraRoots()
+    : liveExtraRootDirs());
+  if (extra === undefined) {
+    return (
+      `ComfyUI-Manager reported writing it to ${dest}, which is not under the primary ` +
+      `models directory the connected server reads (${root}). Whether that server also ` +
+      `reads it through an extra_model_paths entry could NOT be checked from here, so ` +
+      `this is not being called unusable — confirm with list_local_models.`
+    );
+  }
+  if (extra.some((r) => typeof r === "string" && isUnderRoot(dest, r))) {
+    return (
+      `ComfyUI-Manager reported writing it to ${dest}, which is outside the primary ` +
+      `models directory (${root}) but INSIDE an extra_model_paths root that server ` +
+      `reads — so it is reachable.`
+    );
+  }
+  return (
+    `⚠ ComfyUI-Manager reported writing it to ${dest}, which is OUTSIDE the models ` +
+    `directory the connected server reads (${root}) — so a workflow there will NOT see ` +
+    `it. This is the extra_model_paths case: Manager picks its own destination root ` +
+    `and does not necessarily honour that config. On a container the base models ` +
+    `directory is commonly an EPHEMERAL OVERLAY, which discards the file on the next ` +
+    `restart — move it into ${root} now, or re-download with COMFYUI_PATH set so this ` +
+    `MCP streams it to a destination it controls.`
+  );
+}
+
 export function managerDestinationCaveat(): string {
   return (
     "ComfyUI-Manager chooses the destination root itself and does not necessarily honour " +
