@@ -807,11 +807,30 @@ describe("#809 truncation remedies name a lever that actually exists", () => {
     const hint = legacy.max_chars_hint as string;
     expect(typeof hint).toBe("string");
     expect(hint).toMatch(/does not support `max_chars`/);
-    expect(hint).toMatch(/was NOT applied/);
+    expect(hint).toMatch(/was not applied by the panel/);
     expect(hint).toMatch(/690 node\(s\)/);
     // The synthetic flag is plumbing and must never reach the caller.
     expect(legacy.__budget_ignored).toBeUndefined();
     assertRemedyIsActionable("panel_graph_outline", "panel_graph_outline legacy", hint);
+
+    // #1203 — this fixture's outline is ONE character, so it fits the 4000 bound
+    // and the reply is forwarded. The rider must say that, not warn about a
+    // flood that did not happen. The OTHER branch — an outline that actually
+    // blows the bound — is where the orchestrator now enforces it, and the two
+    // must not share a sentence: this test used to assert wording that described
+    // only the bad case, on a fixture that was the good one.
+    expect(hint).toMatch(/happens to fit within your bound/);
+
+    const flooded = await runPanelTool(
+      "panel_graph_outline",
+      { max_chars: 4000 },
+      { node_count: 690, group_count: 12, outline: "x".repeat(40_000) },
+    );
+    const floodHint = flooded.max_chars_hint as string;
+    expect(flooded.outline, "the 40k outline must not reach the caller").toBe("");
+    expect(floodHint).toMatch(/NO outline is included/);
+    expect(floodHint).not.toMatch(/happens to fit/);
+    assertRemedyIsActionable("panel_graph_outline", "panel_graph_outline enforced", floodHint);
 
     // A current panel echoes the budget back, so the rider stays silent.
     const current = await runPanelTool(

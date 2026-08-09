@@ -1681,6 +1681,97 @@ async function confirmEmptyOutline(
  */
 const EMPTY_OUTLINE_RECHECK_STEPS_MS = [250, 400, 550] as const;
 
+/**
+ * Enforce `max_chars` when the PANEL could not (#1203).
+ *
+ * A panel older than the budget protocol ignores `max_chars` and returns the
+ * whole outline. The orchestrator already noticed — that is what
+ * `markBudgetIgnored` is for — and then forwarded the unbounded reply anyway,
+ * with a note explaining that the bound the caller had explicitly set did not
+ * apply. A 137-node outline arrived that way, which is the exact context flood
+ * `max_chars` exists to prevent, and the disclosure came AFTER the cost was
+ * already paid. A warning is not a bound.
+ *
+ * WHY REFUSE RATHER THAN TRUNCATE. This tool's contract is that coverage is
+ * never traded away: over budget the outline sheds RESOLUTION — widget values,
+ * then titles, then a per-group summary — so whatever comes back still describes
+ * the whole graph, and if even the floor will not fit it returns NO outline
+ * rather than a partial one that reads as complete. Cutting the rendered text at
+ * a character count would break exactly that guarantee: the result would look
+ * like a finished outline that simply ends, and a caller acting on it would
+ * believe the graph stops where the string does — the #1184 failure again, with
+ * the truncation invisible instead of announced.
+ *
+ * Shedding resolution is the panel's job and needs the graph, not its rendering.
+ * The orchestrator has only the rendered text, so the honest move is the one the
+ * panel itself makes at its floor: return no outline, and say precisely what
+ * happened, how big the outline actually was, and which of the three levers
+ * (raise the bound, update the panel, scope the read) will work.
+ *
+ * The counts and `viewing` survive — they are the part of the reply that is
+ * small, true, and independent of the budget.
+ */
+function enforceOutlineBudget(res: ToolResult, requested: unknown): ToolResult {
+  if (typeof requested !== "number") return res;
+  const payload = parseToolResultJson(res);
+  if (!payload) return res;
+  // A panel that supports the budget echoes it back and has already applied its
+  // own ladder. Nothing to enforce, and second-guessing it would be wrong.
+  if (typeof payload.max_chars === "number") return res;
+  const outline = payload.outline;
+  if (typeof outline !== "string") return res;
+  // Within the bound already. The panel ignored the parameter, but the reply
+  // honours it, and refusing a reply that FITS would be a bound in name only.
+  if (outline.length <= requested) return res;
+
+  const idx = res.content.findIndex((c) => c.type === "text");
+  if (idx < 0) return res;
+
+  const nodes = typeof payload.node_count === "number" ? payload.node_count : null;
+  const groups = typeof payload.group_count === "number" ? payload.group_count : null;
+  const shape =
+    nodes != null
+      ? `The graph has ${nodes} node(s)${groups != null ? ` and ${groups} group(s)` : ""}.`
+      : "";
+  payload.outline = "";
+  payload.detail_level = "refused";
+  payload.degraded = true;
+  payload.budget_applied_by = "orchestrator";
+  payload.unbounded_chars = outline.length;
+  payload.degraded_reason =
+    `This panel build ignores \`max_chars\`, so it returned the FULL outline (${outline.length} chars) against a bound of ${requested}. ` +
+    `It is withheld rather than cut: a truncated outline would read as a complete one. ${shape}`.trim();
+
+  return {
+    ...res,
+    content: res.content.map((c, i) =>
+      i === idx && c.type === "text" ? { ...c, text: JSON.stringify(payload, null, 2) } : c,
+    ),
+  };
+}
+
+/** The three levers when the orchestrator had to withhold an outline (#1203),
+ *  in the order worth trying. Shared so the two riders cannot drift. */
+function outlineBudgetRemedies(unbounded: number | null): string {
+  // Every "raise it" must name the ceiling, or a caller already at the maximum
+  // is sent on a retry that cannot change anything (the repo-wide remedy check,
+  // which caught this text before it shipped).
+  // The ceiling has to sit next to the parameter name, not at the end of the
+  // sentence: the remedy check reads "raise `X` … up to N" as one phrase, and it
+  // is right to — a caller skimming for whether the retry is possible should not
+  // have to finish the clause.
+  const raise =
+    unbounded == null
+      ? `Raise \`max_chars\` up to ${OUTLINE_MAX_CHARS_CEILING}`
+      : unbounded <= OUTLINE_MAX_CHARS_CEILING
+        ? `Raise \`max_chars\` up to ${OUTLINE_MAX_CHARS_CEILING} — this outline needs at least ${unbounded} to be accepted whole`
+        : `Raising \`max_chars\` will NOT help — the full outline is past its ceiling of ${OUTLINE_MAX_CHARS_CEILING}`;
+  return (
+    `${raise}; update the ComfyUI Agent Panel, which can shed per-node detail and still cover every node inside a smaller bound; ` +
+    `or scope the read with panel_query_graph {ids:[…], fields:'detail'}.`
+  );
+}
+
 function markBudgetIgnored(res: ToolResult, requested: unknown): ToolResult {
   if (typeof requested !== "number") return res;
   const payload = parseToolResultJson(res);
@@ -6642,11 +6733,16 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           // The synthetic `__budget_ignored` flag below is derived from the reply, not
           // sent by the panel: a build that supports the budget echoes `max_chars` back.
           markBudgetIgnored(
-            // #1184 — an empty outline is re-verified before it is believed.
-            await confirmEmptyOutline(
-              ctx,
-              await ctx.call({ cmd: "graph_outline", max_chars: args.max_chars }),
-              () => ctx.call({ cmd: "graph_outline", max_chars: args.max_chars }),
+            // #1203 — and ENFORCE it here when the panel could not, before the
+            // unbounded outline reaches the caller who asked for a bound.
+            enforceOutlineBudget(
+              // #1184 — an empty outline is re-verified before it is believed.
+              await confirmEmptyOutline(
+                ctx,
+                await ctx.call({ cmd: "graph_outline", max_chars: args.max_chars }),
+                () => ctx.call({ cmd: "graph_outline", max_chars: args.max_chars }),
+              ),
+              args.max_chars,
             ),
             args.max_chars,
           ),
@@ -6659,9 +6755,30 @@ export function buildPanelToolDefs(): PanelToolDef[] {
               // unbounded reply as "this fitted".
               flag: "__budget_ignored",
               key: "max_chars_hint",
-              text: (p) =>
-                `This panel build does not support \`max_chars\` on the outline, so the budget you set (${typeof args.max_chars === "number" ? args.max_chars : OUTLINE_MAX_CHARS_DEFAULT}) was NOT applied and the outline below is the full, unbounded one (${typeof p.node_count === "number" ? p.node_count : "all"} node(s)). ` +
-                `Update the ComfyUI Agent Panel to bound it, or scope the read with panel_query_graph in the meantime.`,
+              text: (p) => {
+                const asked =
+                  typeof args.max_chars === "number" ? args.max_chars : OUTLINE_MAX_CHARS_DEFAULT;
+                const nodes = typeof p.node_count === "number" ? p.node_count : "all";
+                // #1203 — three different situations used to share one sentence
+                // that described only the worst of them. Saying "the outline
+                // below is the full, unbounded one" when it was withheld, or
+                // when it fitted anyway, is its own false report.
+                if (p.budget_applied_by === "orchestrator") {
+                  const unbounded =
+                    typeof p.unbounded_chars === "number" ? p.unbounded_chars : null;
+                  return (
+                    `This panel build does not support \`max_chars\`, so it returned the FULL outline for all ${nodes} node(s)` +
+                    `${unbounded != null ? ` (${unbounded} chars)` : ""} against your bound of ${asked}. ` +
+                    `NO outline is included: it is withheld rather than cut, because a truncated outline would read as a complete one. ` +
+                    outlineBudgetRemedies(unbounded)
+                  );
+                }
+                return (
+                  `This panel build does not support \`max_chars\`, so the budget you set (${asked}) was not applied by the panel — ` +
+                  `the outline below is its full, unbounded reply for all ${nodes} node(s), which happens to fit within your bound. ` +
+                  `Update the ComfyUI Agent Panel to have the budget applied properly; on a larger graph an unbounded reply will not fit.`
+                );
+              },
             },
             {
               // On an older panel this is never set either, so the rider is inert there.
@@ -6682,6 +6799,24 @@ export function buildPanelToolDefs(): PanelToolDef[] {
                 // it "still covers ALL nodes" would describe content the reader cannot
                 // see, which is the same lie as a silent cut.
                 if (p.detail_level === "refused") {
+                  // #1203 — an ORCHESTRATOR refusal is a different situation and
+                  // needs different advice. The panel refuses because even its
+                  // smallest whole-graph form did not fit, so the question is
+                  // whether raising the bound can ever help. Here the panel never
+                  // applied the bound at all: the full outline's size is known
+                  // exactly, updating the panel unlocks the shed ladder, and the
+                  // generic text's "this build does not report how large the
+                  // smallest form would be" would send the reader chasing a
+                  // capability the reply is already explaining is absent.
+                  if (p.budget_applied_by === "orchestrator") {
+                    const unbounded =
+                      typeof p.unbounded_chars === "number" ? p.unbounded_chars : null;
+                    return (
+                      `NO outline was returned: this panel build ignores \`max_chars\`, so its reply${unbounded != null ? ` (${unbounded} chars)` : ""} exceeded \`max_chars\`=${inForce} and a PARTIAL outline is deliberately withheld because it would read as complete. ` +
+                      `The graph has ${nodes} node(s) and ${groups} group(s). ` +
+                      outlineBudgetRemedies(unbounded)
+                    );
+                  }
                   // And if the floor exceeds the CEILING, raising is a guaranteed second
                   // refusal — a dead retry inside the message explaining the first.
                   //
