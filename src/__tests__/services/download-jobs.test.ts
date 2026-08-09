@@ -127,6 +127,19 @@ import { join as pathJoin } from "node:path";
 /** Simulate ANOTHER MCP session's persisted in-flight record on disk: a distinct
  *  owner-scoped control-job- file (owner ≠ this process's PERSIST_OWNER). Used to
  *  exercise cross-session sibling detection without a second process. */
+
+/** A pid nothing answers to, so `writerProcessGone` can return PROVEN gone. */
+function deadPidForTests(): number {
+  for (let pid = 999_000; pid < 999_200; pid++) {
+    try {
+      process.kill(pid, 0);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ESRCH") return pid;
+    }
+  }
+  throw new Error("could not find a pid that is provably gone");
+}
+
 async function writeForeignJobRecord(
   dir: string,
   rec: {
@@ -1790,6 +1803,107 @@ describe("download job registry", () => {
         expect(hoisted.calls).toBe(1);
         // The adopted view is read-only (not registered) — settled resolves immediately.
         await expect(b.settled).resolves.toBeUndefined();
+      } finally {
+        setProgressDir("");
+        await fsRm(dir, { recursive: true, force: true });
+      }
+    });
+
+    // #1148 — A FRESH HEARTBEAT IS NOT A LIVE WRITER.
+    //
+    // Adoption required a heartbeat newer than 60s and never asked whether that
+    // writer still exists. The heartbeat is written every 15s, so a process that
+    // died a moment ago leaves a record that looks current for up to a minute —
+    // and adopting it hands the caller a job nobody is running: "in flight",
+    // polled forever, nothing downloading. That is worse than the duplicate
+    // writer adoption exists to prevent.
+    it("does NOT adopt a fresh record whose writer is PROVEN gone — it starts its own", async () => {
+      const dir = await mkdtemp(pathJoin(tmpdir(), "djobs-persist-"));
+      setProgressDir(dir);
+      try {
+        const a = await startDownloadJob(URL_A, "checkpoints");
+        const id = a.job.id;
+        expect(hoisted.calls).toBe(1);
+        await fsRm(pathJoin(dir, `control-job-${id}-${PERSIST_OWNER}.json`), { force: true });
+        await writeForeignJobRecord(dir, {
+          id,
+          trayId: a.job.trayId,
+          progressId: `prog-${URL_A}`,
+          url: URL_A,
+          owner: `${PERSIST_OWNER}-other`,
+          dest_key: a.job.destKey,
+          // A pid nothing answers to: PROVEN gone (ESRCH), while the record's
+          // `updated` stamp is fresh.
+          pid: deadPidForTests(),
+        });
+        resetDownloadJobs();
+
+        const b = await startDownloadJob(URL_A, "checkpoints");
+
+        // A SECOND writer is exactly right here: the first one is dead.
+        expect(hoisted.calls, "it must start its own writer").toBe(2);
+        expect(b.job.status).toBe("downloading");
+      } finally {
+        setProgressDir("");
+        await fsRm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("still adopts when the writer is ALIVE — the dedup must keep working", async () => {
+      const dir = await mkdtemp(pathJoin(tmpdir(), "djobs-persist-"));
+      setProgressDir(dir);
+      try {
+        const a = await startDownloadJob(URL_A, "checkpoints");
+        const id = a.job.id;
+        await fsRm(pathJoin(dir, `control-job-${id}-${PERSIST_OWNER}.json`), { force: true });
+        await writeForeignJobRecord(dir, {
+          id,
+          trayId: a.job.trayId,
+          progressId: `prog-${URL_A}`,
+          url: URL_A,
+          owner: `${PERSIST_OWNER}-other`,
+          dest_key: a.job.destKey,
+          // This process is alive by definition — the honest stand-in for a live
+          // foreign writer.
+          pid: process.pid,
+        });
+        resetDownloadJobs();
+
+        const b = await startDownloadJob(URL_A, "checkpoints");
+
+        expect(b.job.id).toBe(id);
+        expect(hoisted.calls, "no second writer for a live download").toBe(1);
+      } finally {
+        setProgressDir("");
+        await fsRm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("adopts a record with NO pid — unknown liveness is not death", async () => {
+      // Pre-#858 records carry no pid. Declining on that would start a SECOND
+      // writer for a download that may well be running: the same fold pointed
+      // the other way.
+      const dir = await mkdtemp(pathJoin(tmpdir(), "djobs-persist-"));
+      setProgressDir(dir);
+      try {
+        const a = await startDownloadJob(URL_A, "checkpoints");
+        const id = a.job.id;
+        await fsRm(pathJoin(dir, `control-job-${id}-${PERSIST_OWNER}.json`), { force: true });
+        await writeForeignJobRecord(dir, {
+          id,
+          trayId: a.job.trayId,
+          progressId: `prog-${URL_A}`,
+          url: URL_A,
+          owner: `${PERSIST_OWNER}-other`,
+          dest_key: a.job.destKey,
+          // pid deliberately omitted.
+        });
+        resetDownloadJobs();
+
+        const b = await startDownloadJob(URL_A, "checkpoints");
+
+        expect(b.job.id).toBe(id);
+        expect(hoisted.calls, "unknown must not start a duplicate").toBe(1);
       } finally {
         setProgressDir("");
         await fsRm(dir, { recursive: true, force: true });

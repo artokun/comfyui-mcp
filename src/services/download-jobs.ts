@@ -493,7 +493,21 @@ export async function startDownloadJob(
       rec.status === "downloading" &&
       nowForAdopt - (rec.updated ?? 0) < PERSISTED_INFLIGHT_STALE_MS &&
       rec.trayId === trayId &&
-      (rec.id === id || (rec.req_key !== undefined && rec.req_key === reqKey)),
+      (rec.id === id || (rec.req_key !== undefined && rec.req_key === reqKey)) &&
+      // A FRESH HEARTBEAT IS NOT A LIVE WRITER. The heartbeat is written every
+      // 15s and only goes stale after 60, so a process that died a moment ago
+      // leaves a record that still looks current for up to a minute. Adopting it
+      // hands the caller a job nobody is running: the tool reports "in flight"
+      // and the poll never settles, which is worse than starting a second
+      // writer — the outcome adoption exists to avoid — because nothing
+      // downloads at all.
+      //
+      // PROVEN gone only (ESRCH). `undefined` means the probe could not tell —
+      // no pid on a pre-#858 record, or the probe itself failed — and refusing
+      // to adopt on that would treat "could not determine" as "dead", which is
+      // this codebase's own recurring defect (#796) pointed the other way: it
+      // would start a SECOND writer for a download that is genuinely running.
+      writerProcessGone(rec) !== true,
   );
   if (foreign) {
     logger.info(`Adopting a cross-session in-flight download (no second writer): ${foreign.id}`, {
