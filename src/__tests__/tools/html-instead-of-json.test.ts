@@ -17,6 +17,10 @@ import { describe, expect, it, beforeEach, vi } from "vitest";
 
 const authHeaders = vi.hoisted(() => ({ value: {} as Record<string, string> }));
 vi.mock("../../config.js", () => ({
+  // #1191 — the scrubber now also redacts the CLOUD API KEY and the download
+  // tokens by known value, so it reads `config` directly. Stubbed empty here:
+  // these tests are about the non-JSON diagnosis, not about redaction.
+  config: {},
   getComfyUIBaseUrl: () => "http://remote.example:8188",
   getComfyUIAuthHeaders: () => authHeaders.value,
 }));

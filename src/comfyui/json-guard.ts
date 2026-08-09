@@ -19,7 +19,7 @@
 // diagnosis costs more than an honest "the body is HTML; here is its first line".
 
 import { ComfyUIError } from "../utils/errors.js";
-import { getComfyUIAuthHeaders, getComfyUIBaseUrl } from "../config.js";
+import { config, getComfyUIAuthHeaders, getComfyUIBaseUrl } from "../config.js";
 import { comfyuiFetch, targetOf } from "./fetch.js";
 
 /** What answered instead of the ComfyUI JSON API. */
@@ -246,11 +246,41 @@ function reflectionPatterns(value: string): { pattern: RegExp; length: number }[
  * Passes 2 and 3 run whether or not a credential is configured: a reflected
  * body can carry someone else's secret too, and this text goes to an agent.
  */
+/**
+ * Every credential this process is configured with, as raw values (#1191).
+ *
+ * Deliberately broader than `getComfyUIAuthHeaders()`, which is about what to
+ * SEND: this is about what must never come BACK. A reflected body can echo any
+ * of them, and the scrubber should not have to know which endpoint it is looking
+ * at to redact the right one.
+ *
+ * Empty values are dropped by the caller's own guard; nothing here is logged.
+ */
+function knownCredentialValues(): string[] {
+  const out = Object.values(getComfyUIAuthHeaders());
+  for (const v of [config.comfyuiApiKey, config.huggingfaceToken, config.civitaiApiToken]) {
+    if (typeof v === "string" && v.trim()) out.push(v.trim());
+  }
+  return out;
+}
+
 export function scrubSecretShapedText(text: string): string | null {
   let out = text;
 
   // 1. Known configured values, in every encoding we can anticipate.
-  for (const headerValue of Object.values(getComfyUIAuthHeaders())) {
+  //
+  // #1191 (codex review) — getComfyUIAuthHeaders() carries ONLY the ComfyUI auth
+  // token and the Cloudflare Access pair. It does NOT carry the Comfy Cloud API
+  // key, which cloud-client sends as `X-API-Key` — so the cloud enqueue error
+  // path, the one whose body is most likely to reflect that key back, had no
+  // known-value pass for it at all. The by-name pass below catches a LABELLED
+  // reflection, but an unlabelled echo of a short key has neither a recognized
+  // label nor the 24-char opaque-run shape, and would have gone straight out.
+  //
+  // The download tokens are here for the same reason: a reflected body on any of
+  // these paths reaches the agent, and which credential leaked is not something
+  // to decide per call site.
+  for (const headerValue of knownCredentialValues()) {
     if (!headerValue) continue;
     // The header value may be "Bearer <token>"; handle the whole thing and the
     // bare token, so neither form survives.

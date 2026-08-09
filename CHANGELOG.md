@@ -6,6 +6,14 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.50.55] - 2026-08-09
+
+### MCP
+
+#### Fixed
+- a live ComfyUI-Manager download must not be reported INTERRUPTED (#1200)
+
+
 ## [0.50.54] - 2026-08-09
 
 ### MCP

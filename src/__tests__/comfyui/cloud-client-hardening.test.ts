@@ -20,6 +20,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../config.js", () => ({
+  // #1191 — the scrubber now redacts the CLOUD API KEY by known value, so it
+  // reads `config` directly. Stubbed empty: this test is about the error's
+  // delivery-doubt wording, not about redaction.
+  config: {},
   getApiKey: () => "test-key",
   getCloudUrl: () => "https://cloud.comfy.org",
   getComfyUIAuthHeaders: () => ({}),

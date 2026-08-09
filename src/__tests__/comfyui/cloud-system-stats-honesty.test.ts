@@ -23,6 +23,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../config.js", () => ({
+  // #1191 — the scrubber now also redacts the CLOUD API KEY and the download
+  // tokens by known value, so it reads `config` directly. Stubbed empty here:
+  // these tests are about the non-JSON diagnosis, not about redaction.
+  config: {},
   getApiKey: () => "test-key",
   getCloudUrl: () => "https://cloud.comfy.org",
   getComfyUIAuthHeaders: () => ({}),
