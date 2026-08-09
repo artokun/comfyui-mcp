@@ -827,7 +827,8 @@ describe("#809 truncation remedies name a lever that actually exists", () => {
       { node_count: 690, group_count: 12, outline: "x".repeat(40_000) },
     );
     const floodHint = flooded.max_chars_hint as string;
-    expect(flooded.outline, "the 40k outline must not reach the caller").toBe("");
+    expect(flooded.outline, "the 40k outline must not reach the caller").not.toContain("x".repeat(100));
+    expect(flooded.outline, "and the field says so rather than going blank").toMatch(/NO OUTLINE/);
     expect(floodHint).toMatch(/NO outline is included/);
     expect(floodHint).not.toMatch(/happens to fit/);
     assertRemedyIsActionable("panel_graph_outline", "panel_graph_outline enforced", floodHint);

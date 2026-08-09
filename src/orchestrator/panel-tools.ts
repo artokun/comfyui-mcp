@@ -1733,7 +1733,17 @@ function enforceOutlineBudget(res: ToolResult, requested: unknown): ToolResult {
     nodes != null
       ? `The graph has ${nodes} node(s)${groups != null ? ` and ${groups} group(s)` : ""}.`
       : "";
-  payload.outline = "";
+  // The refusal goes IN the outline field, not an empty string (codex review).
+  // Two reasons. It is what the panel itself does at its own floor, so a caller
+  // that handles one refusal handles both. And an empty outline next to
+  // `node_count: 137` is exactly the contradiction #1184 was about — a consumer
+  // that reads `outline` and finds nothing has been told the canvas is empty by
+  // a reply whose own counts say otherwise. Bounded and fixed-length, so it
+  // cannot itself overrun a budget whose floor is OUTLINE_MAX_CHARS_FLOOR.
+  payload.outline =
+    `NO OUTLINE — this panel build ignores \`max_chars\`, and its full reply (${outline.length} chars) exceeds the bound of ${requested} you set. ` +
+    `It is withheld rather than cut, because a truncated outline would read as a complete one. ` +
+    `${shape} See \`max_chars_hint\` for what to do.`.trim();
   payload.detail_level = "refused";
   payload.degraded = true;
   payload.budget_applied_by = "orchestrator";

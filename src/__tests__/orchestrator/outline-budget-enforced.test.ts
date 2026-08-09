@@ -65,8 +65,13 @@ beforeEach(() => {
 describe("the orchestrator enforces max_chars the panel ignored (#1203)", () => {
   it("does NOT forward an outline that blows the bound", async () => {
     const out = await callOutline({ max_chars: 18_000 });
-    expect(out.outline, "the 60k-char outline must not reach the caller").toBe("");
+    expect(out.outline, "the 60k-char outline must not reach the caller").not.toContain("x".repeat(100));
     expect(out.detail_level).toBe("refused");
+    // codex review: NOT an empty string. An empty outline beside node_count:137
+    // is the #1184 contradiction — a consumer reading `outline` would be told
+    // the canvas is empty by a reply whose own counts say otherwise.
+    expect(out.outline, "the field must SAY it was withheld").toMatch(/NO OUTLINE/);
+    expect(out.outline.length, "and stay small").toBeLessThan(600);
   });
 
   it("says WHO applied the bound and how big the reply actually was", async () => {
@@ -148,15 +153,37 @@ describe("what it must NOT do (#1203)", () => {
     expect(out.detail_level).toBeUndefined();
   });
 
-  it("never truncates — the outline is whole or absent, never cut", async () => {
+  it("never truncates — the outline is whole or withheld, never cut", async () => {
     // The property that makes this fix safe. A cut string would read as a
     // complete outline that simply ends.
     for (const size of [17_999, 18_000, 18_001, 60_000]) {
       reply = oldPanel(size);
       const out = await callOutline({ max_chars: 18_000 });
-      expect([0, size], `size ${size} produced a ${out.outline.length}-char outline`).toContain(
-        out.outline.length,
+      const whole = out.outline.length === size;
+      const withheld = out.outline.startsWith("NO OUTLINE");
+      expect(whole || withheld, `size ${size} produced a ${out.outline.length}-char outline`).toBe(
+        true,
       );
     }
+  });
+
+  // codex review: the loop above accepts EITHER outcome at every size, so it
+  // cannot catch a `<=` becoming `<` — which would refuse an outline that
+  // exactly meets the bound. The boundary needs asserting in one direction each.
+  it.each([
+    [17_999, "under"],
+    [18_000, "exactly at"],
+  ])("forwards an outline %d chars long (%s the bound)", async (size) => {
+    reply = oldPanel(size);
+    const out = await callOutline({ max_chars: 18_000 });
+    expect(out.outline).toHaveLength(size);
+    expect(out.detail_level).toBeUndefined();
+  });
+
+  it("withholds an outline ONE character over the bound", async () => {
+    reply = oldPanel(18_001);
+    const out = await callOutline({ max_chars: 18_000 });
+    expect(out.detail_level).toBe("refused");
+    expect(out.unbounded_chars).toBe(18_001);
   });
 });
