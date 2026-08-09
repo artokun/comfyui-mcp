@@ -1884,9 +1884,14 @@ export class UiBridge {
    *   and any LAN/pairing listener are all `false` — a browser reaching those can
    *   sit on a DIFFERENT machine yet advertise its OWN 127.0.0.1 ComfyUI, which
    *   must never be treated as the orchestrator's local host (#509).
-   * @param serverOrigin SERVER-OBSERVED handshake `Origin` (scheme://host:port), captured
-   *   from the WebSocket upgrade — NOT client-supplied. Undefined for non-browser/relay
-   *   connections. Bound to the tab so the reboot self-probe can trust which page it fronts.
+   * @param serverOrigin The origin (scheme://host:port) this connection's workflow
+   *   identity is scoped to, and which the reboot self-probe trusts to know which page
+   *   it fronts. NEVER client-supplied. Normally SERVER-OBSERVED, captured from the
+   *   WebSocket upgrade's `Origin` header. A relay socket has no upgrade to observe, so
+   *   `attachRelayConnection` passes the one the orchestrator DERIVES from its own
+   *   COMFYUI_URL (#1077) — the panel page is served by that ComfyUI, so it is the same
+   *   origin a browser would send. Undefined only when neither is available, which
+   *   leaves the connection unable to adopt a workflow fence.
    */
   private handleConnection(sock: BridgeSocket, local = false, serverOrigin?: string): void {
     // Track from ACCEPT, not from hello: an anonymous socket is still a socket,

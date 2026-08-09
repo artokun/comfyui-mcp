@@ -50,6 +50,25 @@ describe("relayIdentityOrigin (#1077)", () => {
     expect(relayIdentityOrigin(url as string | undefined)).toBeUndefined();
   });
 
+  it("STRIPS credentials — an origin can be echoed back in a refusal", () => {
+    // COMFYUI_URL legitimately carries basic-auth credentials for a protected
+    // instance, and the refusal message prints the origin. `URL.origin` drops
+    // userinfo, which is what makes that safe; asserting it here means a future
+    // hand-rolled "scheme + host + port" cannot quietly reintroduce the leak.
+    const out = relayIdentityOrigin("http://user:hunter2@host.example:8188/comfy");
+    expect(out).toBe("http://host.example:8188");
+    expect(out).not.toContain("hunter2");
+    expect(out).not.toContain("user");
+  });
+
+  it.each([
+    ["data:text/plain,x", "a data URL"],
+    ["foo://bar", "a non-special scheme"],
+  ])("returns undefined for %s (%s)", (url) => {
+    // Both produce the literal string "null", which is truthy.
+    expect(relayIdentityOrigin(url)).toBeUndefined();
+  });
+
   it("does not invent an origin for a scheme that has none", () => {
     // `new URL("file:///x").origin` is the string "null" — which is truthy, and
     // would sail through as a real origin.
