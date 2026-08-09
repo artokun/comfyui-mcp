@@ -6,6 +6,14 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.50.56] - 2026-08-09
+
+### MCP
+
+#### Fixed
+- redact the response body in the enqueue error builders (#1202)
+
+
 ## [0.50.55] - 2026-08-09
 
 ### MCP
