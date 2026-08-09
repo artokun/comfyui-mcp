@@ -47,4 +47,16 @@ describe("#1243 panel_ask timeout honesty", () => {
     expect(desc).toContain("does NOT block forever");
     expect(desc).toMatch(/~?285s/);
   });
+
+  it("the CALL SITE derives the flag rather than hardcoding it", () => {
+    // Helper-only coverage cannot see this: mutating the call site to `true` left every
+    // behavioural test green, because they call askTimeoutResult directly. The risk here
+    // is someone changing the CALL, so the call shape is what is pinned.
+    const src = readFileSync("src/orchestrator/panel-tools.ts", "utf8");
+    expect(src).toContain('const surfaceConfirmed = typeof ctx.ensureReachable === "function";');
+    expect(src).toContain("askTimeoutResult(tabId, fingerprint, outcome.recovery, surfaceConfirmed)");
+    // A literal would make one branch unreachable in production while the helper tests
+    // still passed — the failure this assertion exists for.
+    expect(src).not.toContain("askTimeoutResult(tabId, fingerprint, outcome.recovery, true)");
+  });
 });
