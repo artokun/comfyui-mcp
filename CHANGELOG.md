@@ -4,7 +4,34 @@ All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) and the format follows
 [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.50.66
+
+### Fixed
+
+- The restart-confirmation timeout no longer points you at a server it never checked. When
+  `panel_restart_comfyui`'s confirmation card times out it suggests the headless
+  `restart_comfyui` as a fallback — but that targets `COMFYUI_URL`, which is not
+  necessarily the ComfyUI the panel is running inside. It now says which server it would
+  restart, and refuses to recommend it outright when it can prove that is a different one.
+  A confirmed origin mismatch (a tab fronting a second local ComfyUI) reaches that strong
+  warning instead of being lost inside a proof that only answers "is it the same"; an
+  origin that merely cannot be proven stays a mild, target-naming note. The warning also
+  now names the worse outcome — restarting a live wrong target can succeed and take down a
+  ComfyUI you did not mean to touch, not merely find nothing there (#1233, panel#851)
+
 ## Unreleased
+
+## [0.50.66] - 2026-08-09
+
+### MCP
+
+#### Fixed
+- a CONFIRMED origin mismatch must not be lost inside the proof (#1235)
+
+#### Changed
+- delete civitai-lookup.ts, which nothing has ever imported (#1236)
+- 0.50.65 (#1232)
+
 
 ## [0.50.65] - 2026-08-09
 
