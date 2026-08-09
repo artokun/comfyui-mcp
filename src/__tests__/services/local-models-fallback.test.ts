@@ -148,12 +148,56 @@ describe("comfy_cli models_* local fallback (#460)", () => {
     await expect(listLocalModelsFallback({ action: "show", name: "flux" })).rejects.toThrow(/was not found/i);
   });
 
-  it("throws a clear error when neither comfy-cli nor a reachable server is available", async () => {
+  it("throws a clear error when neither comfy-cli nor a readable server is available", async () => {
     mocks.listLocalModels.mockResolvedValue([]);
     mocks.getSystemStats.mockRejectedValue(new Error("ECONNREFUSED"));
     await expect(listLocalModelsFallback({ action: "list-folders" })).rejects.toThrow(
-      /no local model source is available/i,
+      /no local model source could be established/i,
     );
+  });
+
+  // #796 — "UNREACHABLE" IS A SPECIFIC CLAIM, and this said it for every way the
+  // probe can fail. The remedy it offered — "connect to a running ComfyUI
+  // server" — is already done in most of them.
+  it("carries the REAL failure instead of asserting the server is unreachable", async () => {
+    mocks.listLocalModels.mockResolvedValue([]);
+    // The shape #828/#952/#954 built: something ANSWERED, and it was not the API.
+    mocks.getSystemStats.mockRejectedValue(
+      new Error(
+        "http://127.0.0.1:8188/system_stats answered 200 with an HTML page where JSON was " +
+          "expected. Content-Type: text/html.",
+      ),
+    );
+
+    const err = await listLocalModelsFallback({ action: "list-folders" }).catch((e) => e as Error);
+
+    expect(err.message, "the diagnosis must survive").toMatch(/HTML page where JSON was expected/);
+    expect(err.message, "and the wrong cause must not be asserted").not.toMatch(/is unreachable/);
+  });
+
+  it("does not tell someone to connect a server that already answered", async () => {
+    mocks.listLocalModels.mockResolvedValue([]);
+    mocks.getSystemStats.mockRejectedValue(new Error("answered 401 Unauthorized"));
+
+    const err = await listLocalModelsFallback({ action: "list-folders" }).catch((e) => e as Error);
+
+    expect(err.message).toMatch(/401/);
+    // "connect to a running ComfyUI server" is a dead remedy when one answered.
+    expect(err.message).not.toMatch(/connect to a running ComfyUI server/);
+    expect(err.message, "point at one whose API answers is the honest ask").toMatch(
+      /API answers/,
+    );
+  });
+
+  it("still names all three ways to fix it", async () => {
+    mocks.listLocalModels.mockResolvedValue([]);
+    mocks.getSystemStats.mockRejectedValue(new Error("ECONNREFUSED"));
+
+    const err = await listLocalModelsFallback({ action: "list-folders" }).catch((e) => e as Error);
+
+    expect(err.message).toMatch(/comfy-cli/);
+    expect(err.message).toMatch(/COMFYUI_PATH/);
+    expect(err.message).toMatch(/ECONNREFUSED/);
   });
 
   it("returns an empty list (not an error) when the server is reachable but empty", async () => {

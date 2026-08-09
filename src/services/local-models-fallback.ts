@@ -70,10 +70,26 @@ async function assertLocalSourceAvailable(): Promise<void> {
   try {
     await getSystemStats();
     return; // server reachable — an empty result is a legitimate answer
-  } catch {
+  } catch (err) {
+    // #796 — "UNREACHABLE" IS A SPECIFIC CLAIM, and this made it for every way
+    // the probe can fail. A 401, a 500, a timeout, and an HTML page from a
+    // reverse proxy that forwards the UI but not the API all produced "the
+    // connected ComfyUI server is unreachable" and the remedy "connect to a
+    // running ComfyUI server" — which the user has already done in three of
+    // those four.
+    //
+    // The irony is that this threw the answer away: `getSystemStats` already
+    // fails with the diagnosis #828/#952/#954 built for exactly this, naming
+    // what answered, with which status and content type, and what to check. It
+    // is scrubbed at the source, so it is safe to carry.
+    //
+    // The claim is now the observation — the probe did not yield readable stats
+    // — and the CAUSE comes from the error rather than from a guess.
+    const why = err instanceof Error ? err.message : String(err);
     throw new Error(
-      "comfy-cli was not found and no local model source is available: COMFYUI_PATH is unset and the connected ComfyUI server is unreachable. " +
-        "Install comfy-cli>=1.11.1 (or set COMFY_CLI_PATH), set COMFYUI_PATH, or connect to a running ComfyUI server.",
+      "comfy-cli was not found and no local model source could be established: COMFYUI_PATH is unset, " +
+        `and the connected ComfyUI's /system_stats could not be read. ${why} ` +
+        "Install comfy-cli>=1.11.1 (or set COMFY_CLI_PATH), set COMFYUI_PATH, or point at a ComfyUI whose API answers.",
     );
   }
 }
