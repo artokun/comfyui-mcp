@@ -8722,8 +8722,21 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           canMutateNow = undefined; // a guard that can throw is not a guard
           refusalCause = undefined;
         }
+        // #1043 (codex review) — NO version note on THIS path, deliberately.
+        //
+        // The note claims that on 0.11.45+ "the command that re-pointed the canvas
+        // repairs the fence from its own reply and never makes this read". That is
+        // true of panel_save_workflow and panel_new_workflow, which DO carry a
+        // workflow_uuid on their reply. panel_set_workflow_target does not — it has
+        // no own-reply uuid to gain, so updating the panel would NOT remove this
+        // failure, and saying it would is a confident wrong remedy.
+        //
+        // A user may well have arrived here recovering from a save/new that hit the
+        // gap — but arriving here does not establish that, and guessing which of
+        // the two it was is exactly the kind of unearned claim this file exists to
+        // avoid. The save/new paths say it at the moment it is provable.
         const fence = fenceRebind
-          ? describeFenceRebind(fenceRebind, canMutateNow, refusalCause, panelTooOldNote(ctx))
+          ? describeFenceRebind(fenceRebind, canMutateNow, refusalCause)
           : undefined;
         if (fence && fence.binding === "not_recovered") {
           return fail(

@@ -2538,11 +2538,21 @@ export class UiBridge {
   } {
     const needed = PANEL_MIN_VERSION_REPLY_UUID;
     let version: string | undefined;
+    let advertised = false;
     try {
-      version = this.resolveTarget(tabId).panelVersion;
+      const t = this.resolveTarget(tabId);
+      version = t.panelVersion;
+      // #1043 (codex review) — the version must come from THIS connection's own
+      // hello. A re-hello that omits `panel_version` INHERITS the previous value,
+      // so a panel that was updated and reloaded without re-advertising would
+      // still show its old version — and we would tell someone to update a panel
+      // they just updated. `panelVersionAdvertised` exists for exactly this, and
+      // the proactive command gate already refuses to act on an inherited value.
+      advertised = t.panelVersionAdvertised === true;
     } catch {
       version = undefined;
     }
+    if (!advertised) return { tooOld: false, needed };
     if (!version || !SEMVER_RE.test(version.trim())) return { tooOld: false, needed };
     return { tooOld: compareSemver(version, needed) < 0, version, needed };
   }

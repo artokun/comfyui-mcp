@@ -18,12 +18,14 @@
 import { describe, expect, it } from "vitest";
 import { UiBridge, PANEL_MIN_VERSION_REPLY_UUID } from "../../services/ui-bridge.js";
 
-/** A bridge whose resolveTarget reports the given advertised panel version. */
-function bridgeWithPanel(version: string | undefined): UiBridge {
+/** A bridge whose resolveTarget reports the given panel version. `advertised`
+ *  models whether THIS connection's hello carried it (vs inheriting it from a
+ *  previous one) — the distinction codex review showed is load-bearing. */
+function bridgeWithPanel(version: string | undefined, advertised = true): UiBridge {
   const b = new UiBridge(0) as UiBridge & {
-    resolveTarget: (id: string) => { panelVersion?: string };
+    resolveTarget: (id: string) => { panelVersion?: string; panelVersionAdvertised?: boolean };
   };
-  b.resolveTarget = () => ({ panelVersion: version });
+  b.resolveTarget = () => ({ panelVersion: version, panelVersionAdvertised: advertised });
   return b;
 }
 
@@ -49,6 +51,15 @@ describe("panelTooOldForReplyUuid (#1043)", () => {
     for (const v of [undefined, "", "dev", "nightly", "not-a-version"]) {
       expect(bridgeWithPanel(v).panelTooOldForReplyUuid("t").tooOld, String(v)).toBe(false);
     }
+  });
+
+  it("an INHERITED version is not narrated as too old (codex review)", () => {
+    // A re-hello that omits panel_version inherits the previous value, so a panel
+    // that was updated and reloaded without re-advertising would still read as
+    // old — and we would tell someone to update a panel they just updated.
+    expect(bridgeWithPanel("0.11.43", false).panelTooOldForReplyUuid("t").tooOld).toBe(false);
+    // …while a freshly advertised old version still is.
+    expect(bridgeWithPanel("0.11.43", true).panelTooOldForReplyUuid("t").tooOld).toBe(true);
   });
 
   it("never throws when the tab cannot be resolved", () => {
@@ -85,18 +96,13 @@ describe("the rebind failure message carries the version gap (#1043)", () => {
     expect(start, "the failure message must still exist").toBeGreaterThan(-1);
     expect(src.slice(start, start + 1400)).toContain("panelGapNote");
 
-    // …and EVERY caller supplies it. A renderer defaulting to "" is silent when a
-    // call site forgets, which is exactly how this would rot.
-    const calls = src.split("describeFenceRebind(").slice(1);
-    const rendererDecl = calls.filter((c) => c.trimStart().startsWith("\n"));
-    const callSites = calls.length - rendererDecl.length;
-    expect(callSites, "expected the known call sites").toBeGreaterThanOrEqual(3);
-    for (const c of calls) {
-      const head = c.slice(0, c.indexOf(")") + 1);
-      // Skip the declaration itself (its "call" text is the parameter list).
-      if (head.includes("r: WorkflowFenceRebind")) continue;
-      expect(head).toContain("panelTooOldNote(ctx)");
-    }
+    // Exactly TWO call sites pass it — panel_save_workflow and panel_new_workflow,
+    // the commands whose replies actually carry a workflow_uuid. Codex review
+    // caught panel_set_workflow_target getting it too, where the claim "updating
+    // removes this failure" is false: that command has no own-reply uuid to gain,
+    // so an updated panel would still make this read.
+    const withNote = src.split("panelTooOldNote(ctx)").length - 1;
+    expect(withNote, "save + new only").toBe(2);
   });
 
   it("the note names the version they have, the one they need, and how to get it", async () => {
