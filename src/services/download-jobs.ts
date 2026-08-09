@@ -1111,6 +1111,62 @@ export function getDownloadJob(id: string, trayId?: string): DownloadJob | undef
   return terminal ? jobFromPersisted(terminal) : undefined;
 }
 
+/**
+ * Why a by-id lookup came back empty — when the answer is NOT "it is gone" (#1183).
+ *
+ * A reporter polled a live 26.5GB local download for ~30 minutes (20% → 95%) and
+ * then got, for ONE poll:
+ *
+ *   No download matching id `cb43b8c206bec9b1`. It has either finished long ago
+ *   … or never started
+ *
+ * The file existed nowhere on disk and nothing had been cancelled. Re-issuing the
+ * same URL immediately re-adopted the SAME id at 97% — the job was alive in
+ * process the entire time.
+ *
+ * getDownloadJob DECLINES in several places rather than guessing, and those
+ * declines are correct: two concurrent physical transfers sharing an id must not
+ * be resolved by picking one. What is not correct is rendering a decline as an
+ * ABSENCE. "I will not choose between two" and "there is nothing here" are
+ * different facts, and only the second justifies telling a user their download
+ * vanished — which is what invites a redundant multi-gigabyte re-download.
+ *
+ * So: when the lookup misses, ask the cheaper question it never asked — is there
+ * a LIVE record for this id at all? Returns undefined when there genuinely is
+ * not, so a real "not found" keeps its existing wording.
+ */
+export function describeUnresolvedDownload(id: string): string | undefined {
+  const now = Date.now();
+  const liveInMemory = jobs.get(id)?.job;
+  const livePersisted = listPersistedDownloadJobs().filter(
+    (r) =>
+      r.id === id &&
+      r.status === "downloading" &&
+      now - (r.updated ?? 0) < PERSISTED_INFLIGHT_STALE_MS,
+  );
+  const inMemoryLive = liveInMemory?.status === "downloading";
+  if (!inMemoryLive && livePersisted.length === 0) return undefined;
+
+  const trays = [
+    ...new Set([
+      ...(inMemoryLive && liveInMemory ? [liveInMemory.trayId] : []),
+      ...livePersisted.map((r) => r.trayId).filter((t): t is string => typeof t === "string"),
+    ]),
+  ];
+  const several = trays.length > 1;
+  return (
+    `A download with id \`${id}\` IS still running — this lookup declined to answer for it, ` +
+    `which is NOT the same as it being gone. ` +
+    (several
+      ? `TWO OR MORE live transfers share that id (tray ids: ${trays.join(", ")}), so answering ` +
+        `by id alone would have picked one arbitrarily. Re-run with \`tray_id\` to select the one ` +
+        `you mean, or omit the selector to list them all.`
+      : `Its record could not be matched by id alone in this session. Re-run with no selector to ` +
+        `list every tracked download, or pass \`tray_id\`${trays[0] ? ` (\`${trays[0]}\`)` : ""}.`) +
+    ` Do NOT re-download: the transfer is in flight and a second one would duplicate it.`
+  );
+}
+
 /** Adopt an in-flight download by URL or destination after a reconnect (#529) —
  *  so a caller can confirm a download is still running (and not start a duplicate)
  *  even without the id. Prefers a LIVE in-memory job, then the persisted store.

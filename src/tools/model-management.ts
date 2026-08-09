@@ -17,6 +17,7 @@ import { isRemoteMode } from "../config.js";
 import {
   startDownloadJob,
   getDownloadJob,
+  describeUnresolvedDownload,
   findDownloadJob,
   listDownloadJobs,
   listDownloadJobCandidates,
@@ -881,11 +882,19 @@ async function statusAction(args: {
             : args.url
               ? `url \`${args.url}\``
               : "";
+          const unresolvedLive = args.id ? describeUnresolvedDownload(args.id) : undefined;
           return {
             content: [
               {
                 type: "text",
-                text: (args.id || args.url)
+                // #1183 — a DECLINE is not an ABSENCE. getDownloadJob refuses to
+                // choose between two live transfers sharing an id, which is
+                // right; rendering that refusal as "no download matching" told a
+                // reporter their live 26GB transfer had vanished. Ask the cheaper
+                // question first: is anything still running under this id?
+                text: unresolvedLive
+                  ? unresolvedLive
+                  : (args.id || args.url)
                   ? `No download matching ${selector}. Several causes reach this same message and it does not distinguish them — treat it as "not found", NOT as "finished": it may have finished long ago (settled records are pruned after a while), never started, been interrupted by an orchestrator restart with the carry-over that records that (#1148) not having run (it is best-effort by design), been given a valid \`id\` with a \`tray_id\` that does not match it, been looked up by a \`url\` that does not match BYTE FOR BYTE (matching includes the query, so a re-signed CDN link or a dropped query misses a record that is still there — retry by \`id\`), or named a \`url\` that TWO live downloads share, which declines rather than guessing: omit the selector to list them both. Check the panel download tray before re-downloading. Within the SAME session, re-issuing an identical in-flight download adopts it rather than duplicating; across a reconnect, confirm via the tray first.`
                   : "No downloads are being tracked.",
               },
