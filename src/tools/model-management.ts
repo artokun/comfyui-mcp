@@ -912,7 +912,17 @@ async function statusAction(args: {
               : p && p.downloaded > 0
                 ? `  ${(p.downloaded / 1024 ** 3).toFixed(2)} GB so far`
                 : "";
-          const head = `- \`${j.id}\` (tray \`${j.trayId}\`) **${j.status}**${bytes}`;
+          // #1197 — the STATUS TOKEN is the first thing read, and for a Manager
+          // dispatch carried across a restart `error` is the wrong word: the
+          // ComfyUI host may still be fetching. Printing "error" here and "very
+          // likely STILL RUNNING" two lines down is a contradiction the caller
+          // resolves by position, so the token has to change too. A fix confined
+          // to the message body never reaches them.
+          const statusToken =
+            j.status === "error" && j.interruptedByRestart && j.viaManager
+              ? "unwatched (host may still be fetching)"
+              : j.status;
+          const head = `- \`${j.id}\` (tray \`${j.trayId}\`) **${statusToken}**${bytes}`;
           const collisionNote = idCounts.get(j.id)! > 1
             ? `\n    AMBIGUOUS id: another row in this listing shares \`${j.id}\` — these are DIFFERENT source URLs writing the SAME destination file, so the last writer wins and the result may be a mix. Select this one with \`tray_id\`: \`${j.trayId}\`. Pass that same tray_id to \`action:"cancel"\` to stop THIS one specifically.`
             : "";
@@ -933,11 +943,17 @@ async function statusAction(args: {
                   : `\n    ${placement.pathLabel}${placement.pathQualifier}: ${j.path}\n    ${placement.wrongPlace ? "WARNING" : "NOTE"}: ${placement.warning}`
               : j.status === "error"
                 ? j.interruptedByRestart
-                  ? // #1148 — NOT a transfer failure. The process it streamed
-                    // inside exited, which the previous behaviour rendered as
-                    // "No download matching id": the job silently ceased to exist
-                    // while the contract told the caller to keep waiting.
-                    `\n    INTERRUPTED — ${j.error}`
+                  ? // #1148 — NOT a transfer failure. The process that was
+                    // TRACKING it exited, which the previous behaviour rendered
+                    // as "No download matching id": the job silently ceased to
+                    // exist while the contract told the caller to keep waiting.
+                    //
+                    // #1197 — and for a Manager dispatch the transfer itself is
+                    // very likely still going, on the ComfyUI host. "INTERRUPTED"
+                    // asserts the opposite, so that label is local-route only.
+                    j.viaManager
+                      ? `\n    NO LONGER WATCHED — ${j.error}`
+                      : `\n    INTERRUPTED — ${j.error}`
                   : `\n    failed: ${j.error}`
                 : j.status === "cancelled"
                   ? (j.reclaimedDead
@@ -1082,11 +1098,29 @@ async function cancelAction(args: { id: string; tray_id?: string }): Promise<Cal
           // refusal — "can't be aborted" about a download that already finished
           // would report failure for work that succeeded.
           if (res.status && res.status !== "downloading") {
+            // #1197 — the third place this had to be fixed, and the one a worried
+            // caller reaches. "already error — nothing to cancel" reads as
+            // confirmation the transfer is over; for a Manager dispatch carried
+            // across a restart the ComfyUI host may still be fetching, and this
+            // MCP has no Manager recall API — so a cancel would not have stopped
+            // it either. Both halves have to be said, or the reply is heard as
+            // "it is finished".
+            //
+            // The flags come off `res.job` (`cancelDownloadJob`'s persisted
+            // fallback builds it with `jobFromPersisted`, so both survive) — the
+            // same `res.job?.viaManager` this handler already reads a few lines
+            // above. An earlier attempt read them off `res` itself, which does
+            // NOT carry them, and I wrongly concluded from the type error that
+            // the data was unavailable.
+            const unwatchedManager =
+              res.status === "error" && res.job?.interruptedByRestart && res.job?.viaManager;
             return {
               content: [
                 {
                   type: "text",
-                  text: `Download \`${args.id}\` is already **${res.status}** — nothing to cancel.`,
+                  text: unwatchedManager
+                    ? `Download \`${args.id}\` is no longer TRACKED here, so there is nothing for this MCP to cancel — but that is NOT the same as stopped. It was dispatched to ComfyUI-Manager, so the ComfyUI HOST may still be fetching it, and there is no Manager recall API, so cancelling could not have stopped it either. Do not read this as a cancellation, and do not re-issue on the strength of it: a second dispatch writes another copy to the same destination and corrupts the model.`
+                    : `Download \`${args.id}\` is already **${res.status}** — nothing to cancel.`,
                 },
               ],
             };

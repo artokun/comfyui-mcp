@@ -91,15 +91,18 @@ const lastWriteAt = new Map<string, number>();
  * on disk and no error event: 40 minutes gone, invisibly, while the documented
  * contract told their agent to keep waiting rather than re-issue.
  *
- * What this does NOT do is decide whether the transfer is dead. That was the
- * original framing and it was WRONG for the case that matters: a download
- * DISPATCHED to ComfyUI-Manager runs on the ComfyUI host, which a restart here
- * does not touch, so the host keeps fetching and re-issuing writes a second copy
- * to the same destination — a corrupt model (#1197). This function reads neither
- * the `pid` nor the `owner` it persists, and `writerProcessGone()` exists to
- * answer exactly the question it skips, so it is in no position to assert death.
- * What it fixes is the SILENCE: a record that says WE STOPPED WATCHING, which
- * `status` can find by the id the caller was handed.
+ * What this does NOT do is decide whether the transfer is dead — the original
+ * framing, and WRONG for the case that matters. A download DISPATCHED to
+ * ComfyUI-Manager is a server-side fetch: the ComfyUI HOST is doing the work and
+ * a restart here does not touch it, so it is very likely still running, and
+ * telling that caller to re-issue writes a second copy to the same destination —
+ * a corrupt model (#1197). This function reads neither the `pid` nor the `owner`
+ * it persists, and `writerProcessGone()` exists to answer exactly the question it
+ * skips, so it is in no position to assert death for EITHER route.
+ *
+ * What it fixes is the SILENCE: a record saying we stopped WATCHING, which
+ * `status` can find by the id the caller was handed — worded per route, which is
+ * why `via_manager` has to survive the copy.
  *
  * Only `downloading` records migrate. A terminal record's outcome was already
  * delivered, and re-landing it would replay a settled event. Fields are copied
@@ -125,31 +128,81 @@ export function migrateInFlightJobs(fromDir: string, toDir: string): number {
         typeof raw[k] === "string" ? (raw[k] as string) : undefined;
       const num = (k: string): number | undefined =>
         typeof raw[k] === "number" ? (raw[k] as number) : undefined;
-      const rec = {
+      // WHO was transferring decides what this record may say, so the flag has to
+      // survive the migration (#1197). A Manager dispatch is a server-side fetch:
+      // the ComfyUI HOST is doing the work and a restart here does not touch it.
+      // Dropping `via_manager` is what made the old text dangerous — it rendered
+      // as a plain local interruption, so a live 12 GB host transfer was reported
+      // stopped and the caller was told to re-issue, which writes a SECOND copy to
+      // the same destination and corrupts the model (node-management.ts:971-979).
+      const viaManager = raw.via_manager === true;
+      // TYPED, not inferred: an annotated object literal gets excess-property
+      // checking, so a key that is NOT on PersistedDownloadJob is a COMPILE
+      // error. The five dead keys that lived here for months (`name`, `dest`,
+      // `target`, `total`, `received` — from the tray-row interface) are caught
+      // this way. `persistDownloadJob` cannot help: it spreads a variable, which
+      // defeats the check.
+      //
+      // The type gate and the round-trip test's key-set assertion are
+      // COMPLEMENTARY, and an earlier version of this comment wrongly said the
+      // type was "the only thing that catches this class":
+      //   - the TYPE catches a key that is not on the interface at all;
+      //   - the TEST catches a key that IS on the interface but that the writer
+      //     never emits (e.g. `notes`), which the type cannot see.
+      // What is true, and worth stating precisely, is that no assertion on the
+      // PERSISTED record can see a dead key: it is always `undefined` and
+      // JSON.stringify drops it before it reaches disk. An assertion on the
+      // literal itself would see it.
+      const rec: PersistedDownloadJob = {
         id: raw.id,
         status: "error" as const,
-        name: str("name"),
-        url: str("url"),
-        dest: str("dest"),
-        target: str("target"),
+        url: str("url") ?? "",
         dest_key: str("dest_key"),
         req_key: str("req_key"),
-        total: num("total"),
-        received: num("received"),
+        // Carried so the record stays USABLE, not just readable: without trayId a
+        // caller passing the tray_id they were handed gets "not found" on a record
+        // that exists, the row renders `(tray undefined)`, and an absent
+        // started_at prints `NaN s ago` in the candidate listing.
+        // `trayId`, NOT `tray_id` — this record's one camelCase key (line ~631),
+        // and the ONLY one url lookup matches on. Getting it wrong yields a
+        // silent `undefined` that a fixture using the same wrong key would not
+        // catch, which is precisely how a test passes for the wrong reason.
+
+        // Required by the interface. A source record missing one is already
+        // unusable for lookup; an empty string keeps the record VALID and
+        // findable by id rather than emitting a malformed one.
+        trayId: str("trayId") ?? "",
+        filename: str("filename"),
+        target_subfolder: str("target_subfolder") ?? "",
+        started_at: num("started_at") ?? Date.now(),
+        pid: num("pid"),
+        via_manager: viaManager,
+        // Real keys that were also being dropped. `resume` is what a re-issue
+        // needs to continue a partial rather than restart it, and `progressId`
+        // links the record back to its tray row.
+        progressId: str("progressId"),
+        resume: raw.resume,
         updated: Date.now(),
         interrupted_by_restart: true,
-        error:
-          `This download is no longer being WATCHED: the orchestrator process that was ` +
-          `tracking it exited (a restart or a session drop), so nothing here is waiting on ` +
-          `it and no further progress will be reported. Any partial file may have been ` +
-          `discarded. What that does NOT establish is whether the bytes stopped — this ` +
-          `record is written without checking the writer. If this download was DISPATCHED ` +
-          `to ComfyUI-Manager the fetch runs on the ComfyUI host, which a restart here does ` +
-          `not touch, and re-issuing it writes a SECOND copy to the same destination and ` +
-          `CORRUPTS the model; a multi-GB fetch can take hours and the file is not listed ` +
-          `until it COMPLETES, so absence proves nothing and a timer is not a test. If it ` +
-          `was streaming locally, nothing is writing it now — re-issue, and it resumes from ` +
-          `any surviving .partial.`,
+        // NEITHER branch asserts the transfer died. This function reads neither
+        // the `pid` nor the `owner` it persists, and `writerProcessGone()` exists
+        // to answer exactly that question — the cancel path refuses to close a
+        // stale record until that probe returns ESRCH (#761/#858). What is
+        // observed is only that we stopped watching.
+        error: viaManager
+          ? `This download is no longer being WATCHED, and it was DISPATCHED to ` +
+            `ComfyUI-Manager — the fetch runs on the ComfyUI host, which the restart ` +
+            `here did not touch, so it is very likely STILL RUNNING. Do NOT re-issue ` +
+            `it: a second dispatch writes another copy to the same destination and ` +
+            `CORRUPTS the model. The file is not listed until it COMPLETES (which can ` +
+            `be hours for a multi-GB model), so an empty list_local_models proves ` +
+            `nothing and a timer is not a test — check the ComfyUI host's own logs or ` +
+            `disk if you need to know where it is.`
+          : `This download is no longer being WATCHED: the orchestrator process that ` +
+            `was streaming it exited, so nothing here is writing those bytes and no ` +
+            `further progress will be reported. Any partial file may have been ` +
+            `discarded. Re-issue the download — it picks up a resumable .partial where ` +
+            `one survives, and otherwise restarts from zero.`,
       };
       writeFileSync(
         join(toDir, `${JOB_PREFIX}${sanitizeIdPart(raw.id)}-${PERSIST_OWNER}.json`),
