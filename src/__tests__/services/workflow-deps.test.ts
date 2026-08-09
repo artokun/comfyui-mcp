@@ -9,6 +9,7 @@ import {
   type WorkflowDepsDeps,
   type ManagerNodePack,
   defaultWorkflowDepsDeps,
+  installWorkflowDependenciesForAnalysis,
 } from "../../services/workflow-deps.js";
 import { resetManagerApiCacheForTests } from "../../services/node-management.js";
 import { setPanelVersionPin } from "../../services/panel-settings.js";
@@ -340,5 +341,63 @@ describe("installWorkflowDependencies", () => {
     expect(result.alreadyInstalled).not.toContain("Remote-Only-Pack");
     expect(result.alreadyInstalled).toEqual(["ComfyUI-Impact-Pack"]);
     expect(deps.queueInstall).not.toHaveBeenCalled();
+  });
+});
+
+// #1136 — an EMPTY Manager catalogue must not read as "these packs do not exist".
+//
+// This is the reported user's actual path. They were told to search ComfyUI
+// Manager, the registry was unreachable FROM THE COMFYUI HOST, and Manager
+// returned a healthy 200 with an empty cache. Every pack then fell to
+// `unresolved` and rendered as "neither installed nor known to ComfyUI-Manager".
+// We cannot see their DNS failure -- it happened in another process -- but an
+// empty legacy catalogue is a strong local signal, because a healthy one
+// carries thousands of entries.
+describe("empty Manager catalogue is flagged, not read as absence (#1136)", () => {
+  const base = {
+    analysis: {
+      requiredPacks: [],
+      missingPacks: ["some-pack"],
+      unresolved: ["SomeNodeType"],
+      dependencies: [],
+    },
+  };
+
+  it("sets catalogue_unavailable when a non-local channel returns zero packs", async () => {
+    const res = await installWorkflowDependenciesForAnalysis(base.analysis as never, {
+      fetchManagerList: async () => ({ channel: "default", packs: [] }),
+      queueInstall: async () => "legacy",
+      resetQueue: async () => undefined,
+      startQueue: async () => undefined,
+      queueStatus: async () => undefined,
+    } as never);
+    expect(res.catalogue_unavailable).toBeTruthy();
+    expect(res.catalogue_unavailable).toMatch(/NOT evidence that these\s+packs do not exist|NOT evidence/i);
+    expect(res.unresolved).toContain("SomeNodeType");
+  });
+
+  it("does NOT flag a local channel — an empty local list is a real answer", async () => {
+    const res = await installWorkflowDependenciesForAnalysis(base.analysis as never, {
+      fetchManagerList: async () => ({ channel: "local", packs: [] }),
+      queueInstall: async () => "legacy",
+      resetQueue: async () => undefined,
+      startQueue: async () => undefined,
+      queueStatus: async () => undefined,
+    } as never);
+    expect(res.catalogue_unavailable).toBeUndefined();
+  });
+
+  it("does NOT flag a catalogue that actually returned entries", async () => {
+    const res = await installWorkflowDependenciesForAnalysis(base.analysis as never, {
+      fetchManagerList: async () => ({
+        channel: "default",
+        packs: [{ id: "other-pack", title: "Other" }],
+      }),
+      queueInstall: async () => "legacy",
+      resetQueue: async () => undefined,
+      startQueue: async () => undefined,
+      queueStatus: async () => undefined,
+    } as never);
+    expect(res.catalogue_unavailable).toBeUndefined();
   });
 });

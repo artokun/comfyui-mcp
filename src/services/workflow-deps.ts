@@ -92,6 +92,13 @@ export interface InstallDepsResult {
   unresolved: string[];
   /** Queue status after processing, if available. */
   queue?: ManagerQueueStatus;
+  /**
+   * #1136 — set when the Manager catalogue came back EMPTY on a non-local
+   * channel, which makes `unresolved` unsafe to read as "these packs do not
+   * exist". Callers rendering `unresolved` must surface this instead of, or
+   * alongside, "not found in ComfyUI-Manager".
+   */
+  catalogue_unavailable?: string;
 }
 
 export interface ManagerQueueStatus {
@@ -457,7 +464,7 @@ export async function installWorkflowDependencies(
   return installWorkflowDependenciesForAnalysis(analysis, deps);
 }
 
-async function installWorkflowDependenciesForAnalysis(
+export async function installWorkflowDependenciesForAnalysis(
   analysis: ExtractDepsResult,
   deps: WorkflowDepsDeps,
 ): Promise<InstallDepsResult> {
@@ -465,6 +472,25 @@ async function installWorkflowDependenciesForAnalysis(
   // Match missing packs to concrete Manager list entries for install payloads,
   // capturing the channel the list resolved against.
   const { channel = "default", packs, directInstall = false } = await deps.fetchManagerList();
+  // #1136 — an EMPTY legacy catalogue is not "these packs do not exist".
+  //
+  // Manager's /customnode/getlist returns dict(channel, node_packs) with no
+  // error and no staleness field, and it is called with mode=cache +
+  // skip_update=true, so a user whose registry is blocked or filtered gets a
+  // healthy HTTP 200 carrying an empty cache. We cannot see their DNS failure:
+  // it happened inside ComfyUI's process.
+  //
+  // What we CAN see is that a healthy legacy catalogue carries thousands of
+  // entries, so zero on a non-local channel is a strong local signal. Without
+  // this, every pack falls to `unresolved` and renders as "neither installed
+  // nor known to ComfyUI-Manager" / "Not found in ComfyUI-Manager" -- the
+  // reported harm verbatim, in the surface the reporting user was sent to
+  // three times.
+  //
+  // Deliberately NOT phrased as a diagnosis of their network. We do not know
+  // it is blocked; we know the catalogue is empty and that this is not the
+  // same fact as absence.
+  const catalogueEmpty = !directInstall && channel !== "local" && packs.length === 0;
   const byKey = new Map<string, ManagerNodePack>();
   for (const p of packs) {
     for (const key of [p.id, p.title, p.reference]) {
@@ -543,6 +569,17 @@ async function installWorkflowDependenciesForAnalysis(
     alreadyInstalled: analysis.requiredPacks.filter((p) => !missingSet.has(p)),
     unresolved: [...new Set(unresolved)].sort(),
     queue,
+    ...(catalogueEmpty
+      ? {
+          catalogue_unavailable:
+            `The ComfyUI-Manager catalogue came back EMPTY (channel "${channel}"), so nothing below ` +
+            `was actually looked up. A healthy catalogue carries thousands of entries, so this is ` +
+            `almost certainly a catalogue that could not be refreshed -- NOT evidence that these ` +
+            `packs do not exist. Manager fetches the registry from the ComfyUI host itself, so a ` +
+            `blocked or filtered network there looks exactly like an empty result here. Refresh the ` +
+            `Manager list on that host before concluding anything from "not found".`,
+        }
+      : {}),
     ...(panelNotes.length ? { panel_notes: panelNotes } : {}),
   };
 }
