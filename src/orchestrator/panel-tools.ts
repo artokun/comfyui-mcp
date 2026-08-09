@@ -6140,12 +6140,26 @@ function askTimeoutResult(
   tabId: string,
   fingerprint: string,
   recovery: AskRecovery,
+  /**
+   * #1243 — did a reachability check actually run before the wait? When it did, the
+   * "maybe nothing rendered the card" alternative has ALREADY been ruled out, and
+   * offering it anyway sends the agent to re-invoke from "an interactive tab" it was
+   * demonstrably already on. `ctx.ensureReachable` is optional-chained at the call
+   * site, so this is threaded rather than assumed — an absent check means the
+   * alternative is still live and is still named.
+   */
+  surfaceConfirmed: boolean,
 ): ToolResult {
-  let text =
-    "The question card was not answered in time (or no interactive panel surface " +
-    "rendered it — e.g. an exec/headless run), so nothing was selected. If you " +
-    "still need the decision, ask the user directly in plain chat text, or " +
-    "re-invoke panel_ask from an interactive ComfyUI tab.";
+  const waited = `${Math.round(ASK_TOTAL_BUDGET_CAP_MS / 1000)}s`;
+  let text = surfaceConfirmed
+    ? `The question card was delivered to the panel and went unanswered for ${waited}, ` +
+      "so nothing was selected — this is a timeout, not a delivery failure. The user " +
+      "may simply not have been at the screen. If you still need the decision, ask them " +
+      "directly in plain chat text, or re-invoke panel_ask when they are present."
+    : `The question card was not answered within ${waited} — either it went unanswered, ` +
+      "or no interactive panel surface rendered it (e.g. an exec/headless run), and this " +
+      "call could not establish which. If you still need the decision, ask the user " +
+      "directly in plain chat text, or re-invoke panel_ask from an interactive ComfyUI tab.";
   // What is surfaced, and why each:
   //  • an answer that reached NO tool call — nobody has it, so it must be told;
   //  • an answer to THIS EXACT question that DID reach a tool call but could not
@@ -6320,7 +6334,9 @@ async function askUserWithGrace(
       // a conversation replaced mid-ask would let the live turn's ack settle a
       // warning that conversation never saw — the debt path reaching a live turn
       // through a helper, which is how it slipped the gate before.
-      const body = askTimeoutResult(tabId, fingerprint, outcome.recovery);
+      // #1243 — ensureReachable ran above (line ~6258), so a surface WAS confirmed for
+      // this ask; say so rather than offering a cause already excluded.
+      const body = askTimeoutResult(tabId, fingerprint, outcome.recovery, true);
       return AskAnswers.askBelongsToLiveConversation(askId)
         ? withDroppedAnswerWarning(tabId, body)
         : body;
@@ -8775,7 +8791,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_ask",
-      "Ask the user to choose between options — renders an interactive question card in the panel chat and BLOCKS until they pick, returning their choice as text. Use this (NOT the AskUserQuestion tool, which never renders here) whenever you need the user to decide between options. Each option may carry a short description. The card always includes an 'Other…' free-text field, so the returned string may be a listed label or whatever the user typed (comma-joined for multi_select). Ask only when the answer genuinely changes what you do.",
+      "Ask the user to choose between options — renders an interactive question card in the panel chat and BLOCKS until they pick, returning their choice as text. It does NOT block forever: if nobody answers within ~285s the call returns an error saying so, and you must then ask in plain chat text or re-invoke when the user is present. Budget for that — a question asked while the user is away costs the better part of five minutes before you learn anything. Use this (NOT the AskUserQuestion tool, which never renders here) whenever you need the user to decide between options. Each option may carry a short description. The card always includes an 'Other…' free-text field, so the returned string may be a listed label or whatever the user typed (comma-joined for multi_select). Ask only when the answer genuinely changes what you do.",
       {
         question: z.string().describe("The question to ask, e.g. 'Which sampler should I use?'"),
         options: z
