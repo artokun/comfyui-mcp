@@ -165,6 +165,71 @@ export function deliveryDoubt(code: string | undefined, method: string): string 
   );
 }
 
+/**
+ * Codes that prove the HOST could not be reached — #1136.
+ *
+ * A deliberate SUBSET of NEVER_DELIVERED_CODES, and the difference is the whole
+ * point. That set answers "could this request have been delivered and acted
+ * on?", for which a malformed URL and a filtered DNS lookup are equivalent:
+ * neither arrived. This one answers "is this host unreachable from here?", for
+ * which they are opposites. `ERR_INVALID_URL` and `ERR_UNSUPPORTED_PROTOCOL` are
+ * therefore excluded — they are caller mistakes, and telling someone with a
+ * typo'd URL that we could not reach the host sends them to inspect a firewall
+ * over a missing character.
+ *
+ * TLS failures ARE included: the user's traffic did not complete to a usable
+ * endpoint, and an intercepting middlebox is a common way a filtered network
+ * presents itself.
+ */
+const UNREACHABLE_HOST_CODES: ReadonlySet<string> = new Set([
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
+  "SELF_SIGNED_CERT_IN_CHAIN",
+  "CERT_HAS_EXPIRED",
+  "ERR_TLS_CERT_ALTNAME_INVALID",
+]);
+
+/**
+ * Describe an EXTERNAL host we could not reach, naming it (#1136).
+ *
+ * Returns null when the failure is not a reachability failure, so a caller can
+ * fall through to its own message rather than mislabelling a 404, a parse error
+ * or a bad URL as "blocked".
+ *
+ * Exists because an unreachable host currently presents as an EMPTY RESULT
+ * across the install/update surfaces. Empty reads as "nothing matched", so a
+ * user behind a filter concludes the thing does not exist and keeps trying
+ * variations of an action that cannot succeed. Naming the host is what lets
+ * them recognise their own situation.
+ */
+export function describeUnreachableHost(err: unknown, url: string): string | null {
+  const { code } = describeFetchFailure(err);
+  const timedOut = isTimeoutAbort(err);
+  if (!timedOut && (code === undefined || !UNREACHABLE_HOST_CODES.has(code))) return null;
+  let host = url;
+  try {
+    host = new URL(url).host || url;
+  } catch {
+    // A URL we built ourselves; show it as given rather than dropping the name.
+  }
+  const why = timedOut
+    ? `timed out`
+    : code === "ECONNREFUSED"
+      ? `refused the connection`
+      : code === "ENOTFOUND" || code === "EAI_AGAIN"
+        ? `could not be resolved (DNS)`
+        : `failed TLS verification`;
+  return (
+    `Could not reach ${host} — the request ${why}. This is a CONNECTIVITY failure, ` +
+    `not an empty result: it does not mean the thing you searched for is absent. ` +
+    `If ${host} is blocked or filtered on your network, every feature that depends ` +
+    `on it will look empty rather than broken.`
+  );
+}
+
 function describeComfyFetchFailure(err: unknown, target: string, method: string): Error {
   const { message, code } = describeFetchFailure(err);
   const wrapped = new Error(
