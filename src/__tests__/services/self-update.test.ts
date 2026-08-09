@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -14,6 +14,7 @@ import {
   selfUpdateStatus,
   SelfUpdateError,
   PACKAGE_NAME,
+  defaultDeps,
   type SelfUpdateDeps,
 } from "../../services/self-update.js";
 
@@ -80,6 +81,7 @@ function makeDeps(opts: {
       // change removes, so an absent `latest` means UNDETERMINED here; the
       // unreachable path is exercised explicitly by opts.unreachable.
       if (opts.unreachable) return { unreachable: opts.unreachable };
+      if (opts.latest === "") return { undetermined: "the registry response carried no usable version field" };
       return opts.latest === undefined
         ? { undetermined: "test harness supplied no version" }
         : { version: opts.latest };
@@ -846,5 +848,81 @@ describe("registry probe distinguishes unreachable from undetermined (#1136)", (
     const res = await runSelfUpdate(h.deps);
     expect(res.note).toMatch(/NOT evidence that you are up to date/i);
     expect(res.action).not.toBe("up-to-date");
+  });
+});
+
+// The two defects the #1136 review measured in my own fix. Both are cases where
+// a NON-answer was rendered as a confident one -- the failure this issue is
+// about, reintroduced by the change meant to remove it.
+describe("selfUpdateStatus and the empty-version guard (#1136 review)", () => {
+  it("action:status must not report a REACHABLE registry as unreachable", () => {
+    // status and the update path are the same tool (tools/self-update.ts:20).
+    // status kept calling getLatestPublishedVersion, which flattens the probe
+    // back to string|undefined, so a 429 read as a network failure -- and
+    // status is the read-only action an agent uses while diagnosing exactly
+    // the "I can't find anything" scenario #1136 reports.
+    const h = makeDeps({ packageDir: GLOBAL_DIR, currentVersion: "1.0.0" });
+    return selfUpdateStatus(h.deps).then((res) => {
+      expect(res.note).not.toMatch(/registry unreachable/i);
+      expect(res.note).toMatch(/could not determine/i);
+      expect(res.note).toMatch(/NOT evidence that you are up to date/i);
+    });
+  });
+
+  it("action:status keeps the composed unreachable message, host name included", async () => {
+    // The old branch replaced it with a fixed string, discarding the host --
+    // the one thing #1136 asks for.
+    const h = makeDeps({
+      packageDir: GLOBAL_DIR,
+      currentVersion: "1.0.0",
+      unreachable: "Could not reach registry.npmjs.org — the request could not be resolved (DNS).",
+    });
+    const res = await selfUpdateStatus(h.deps);
+    expect(res.note).toContain("registry.npmjs.org");
+  });
+
+  it('an empty version string is UNDETERMINED, never "up to date"', async () => {
+    // Drives the REAL probe, not the harness. The first version of this test
+    // configured makeDeps to return `undetermined` for "" -- which tests the
+    // consumer and hand-feeds the answer: deleting the trim guard from
+    // defaultGetLatestVersion killed ZERO tests. Stub fetch instead, so the
+    // guard itself is what stands between {"version":""} and a false
+    // "up to date".
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ version: "" }), { status: 200 })),
+    );
+    try {
+      const probe = await defaultDeps.getLatestVersion();
+      expect("version" in probe, "an empty version must not count as a version").toBe(false);
+      expect(probe).toHaveProperty("undetermined");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("a real successful body still yields a version (the guard must not over-fire)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ version: "9.9.9" }), { status: 200 })),
+    );
+    try {
+      expect(await defaultDeps.getLatestVersion()).toEqual({ version: "9.9.9" });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("a non-2xx says the host IS reachable — never 'unreachable'", async () => {
+    // The registry ANSWERED. This is the 429/500 case the review measured
+    // still reporting a network failure.
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("rate limited", { status: 429 })));
+    try {
+      const probe = await defaultDeps.getLatestVersion();
+      expect(probe).not.toHaveProperty("unreachable");
+      expect((probe as { undetermined: string }).undetermined).toMatch(/host IS reachable/i);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

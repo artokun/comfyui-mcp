@@ -173,8 +173,13 @@ async function defaultGetLatestVersion(): Promise<VersionProbe> {
   }
   try {
     const json = (await res.json()) as { version?: unknown };
-    if (typeof json.version !== "string") {
-      return { undetermined: "the registry response carried no version field" };
+    if (typeof json.version !== "string" || json.version.trim() === "") {
+      // The trim matters. `if (!latest)` on the old string|undefined shape caught
+      // an empty string; `"version" in probe` does not, so without this a body of
+      // {"version":""} reaches the consumer and renders as up-to-date with to:"".
+      // That is a non-answer read as a reassuring answer -- the exact failure the
+      // undetermined branch exists to prevent, reintroduced by its own type.
+      return { undetermined: "the registry response carried no usable version field" };
     }
     return { version: json.version };
   } catch {
@@ -869,7 +874,18 @@ export async function selfUpdateStatus(
   } catch {
     info = { mode: "unknown", packageDir: "", currentVersion: undefined, isDevLink: false };
   }
-  const latest = await getLatestPublishedVersion(deps);
+  // #1136 — ask the PROBE. getLatestPublishedVersion flattens the three states
+  // back to string|undefined, which is the fold this change removes; reading it
+  // here made `action:"status"` report a 429 as "npm registry unreachable" AND
+  // discard the composed message on a genuine outage, losing the host name --
+  // the one thing #1136 asks for. `status` is the read-only action an agent
+  // reaches for while diagnosing exactly that situation.
+  const probe = await deps.getLatestVersion().catch(
+    (err: unknown): VersionProbe => ({
+      undetermined: `the version check threw: ${err instanceof Error ? err.message : String(err)}`,
+    }),
+  );
+  const latest = "version" in probe ? probe.version : undefined;
   const autoUpdateDisabled = isAutoUpdateDisabled(deps.env());
   const updateAvailable =
     !!latest && !!info.currentVersion && isNewer(latest, info.currentVersion);
@@ -878,7 +894,10 @@ export async function selfUpdateStatus(
   if (info.isDevLink || info.mode === "linked") {
     note = "Dev install (npm link / checkout) — self-update is disabled; update via git.";
   } else if (!latest) {
-    note = "npm registry unreachable; cannot determine the latest version.";
+    note =
+      "unreachable" in probe
+        ? probe.unreachable
+        : `Could not determine the latest published version — ${"undetermined" in probe ? probe.undetermined : "the registry did not answer usably"}. This is NOT evidence that you are up to date.`;
   } else if (!updateAvailable) {
     note = `Up to date (${info.currentVersion}).`;
   } else if (info.mode === "npx") {
