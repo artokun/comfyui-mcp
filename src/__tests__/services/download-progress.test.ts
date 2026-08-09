@@ -366,6 +366,83 @@ describe("migrateInFlightJobs (#1148)", () => {
       JSON.stringify(rec),
     );
 
+  // #1197 — the word "manager" appeared NOWHERE in this file, which is why a
+  // live host-side transfer could be reported stopped for months. A Manager
+  // dispatch is a server-side fetch: the ComfyUI HOST does the work, and a
+  // restart of THIS process does not touch it.
+  describe("a ComfyUI-Manager dispatch (#1197)", () => {
+    const managerJob = {
+      id: "mgr-12gb",
+      status: "downloading",
+      via_manager: true,
+      name: "wan22.safetensors",
+      tray_id: "tray-abc",
+      filename: "wan22.safetensors",
+      target_subfolder: "diffusion_models",
+      started_at: 1_700_000_000_000,
+      pid: 4242,
+      updated: Date.now(),
+    };
+
+    it("never tells the caller it stopped, or to re-issue it", () => {
+      // The corrupt-model path: a second dispatch writes another copy to the
+      // same destination (node-management.ts:971-979).
+      writeJob(oldDir, managerJob);
+      mod.migrateInFlightJobs(oldDir, dir);
+      const msg = mod.readPersistedDownloadJob("mgr-12gb")!.error ?? "";
+      expect(msg).toMatch(/STILL RUNNING/);
+      expect(msg).toMatch(/Do NOT re-issue/);
+      expect(msg).toMatch(/CORRUPTS the model/);
+      // The old text said all three of these, and every one was false here.
+      expect(msg).not.toMatch(/the transfer stopped/i);
+      expect(msg).not.toMatch(/will not resume on its own/i);
+      expect(msg).not.toMatch(/Re-issue the download/);
+    });
+
+    it("does not offer a timer or an empty-listing check as proof", () => {
+      // An in-progress file is not listed until it COMPLETES, so "wait N
+      // minutes then decide" fires on a healthy multi-hour transfer.
+      writeJob(oldDir, managerJob);
+      mod.migrateInFlightJobs(oldDir, dir);
+      const msg = mod.readPersistedDownloadJob("mgr-12gb")!.error ?? "";
+      expect(msg).toMatch(/a timer is not a test/);
+      expect(msg).not.toMatch(/couple of minutes|within \d+ ?(?:min|second)/i);
+    });
+
+    it("CARRIES the route flag, so the caller can tell the two apart", () => {
+      // Dropping it is what made the old message render as a plain local
+      // interruption with no way to distinguish them.
+      writeJob(oldDir, managerJob);
+      mod.migrateInFlightJobs(oldDir, dir);
+      expect(mod.readPersistedDownloadJob("mgr-12gb")!.via_manager).toBe(true);
+    });
+
+    it("carries the fields the record needs to stay USABLE", () => {
+      // Without these a caller passing the tray_id they were handed gets
+      // "not found" on a record that exists, the row renders `(tray
+      // undefined)`, and the listing prints `NaN s ago`.
+      writeJob(oldDir, managerJob);
+      mod.migrateInFlightJobs(oldDir, dir);
+      const rec = mod.readPersistedDownloadJob("mgr-12gb")!;
+      expect(rec.tray_id).toBe("tray-abc");
+      expect(rec.filename).toBe("wan22.safetensors");
+      expect(rec.target_subfolder).toBe("diffusion_models");
+      expect(rec.started_at).toBe(1_700_000_000_000);
+      expect(rec.pid).toBe(4242);
+    });
+
+    it("a LOCAL record still gets its affirmative next step", () => {
+      // The other half must not regress: #1148's original harm was an agent
+      // that would not act, so the local case keeps a clear instruction.
+      writeJob(oldDir, { id: "local-1", status: "downloading", updated: Date.now() });
+      mod.migrateInFlightJobs(oldDir, dir);
+      const msg = mod.readPersistedDownloadJob("local-1")!.error ?? "";
+      expect(msg).toMatch(/Re-issue the download — it resumes from any surviving/);
+      expect(msg).not.toMatch(/STILL RUNNING/);
+      expect(mod.readPersistedDownloadJob("local-1")!.via_manager).toBe(false);
+    });
+  });
+
   it("carries an IN-FLIGHT record forward as a findable terminal record", () => {
     writeJob(oldDir, {
       id: "53012d3181fd46b6",
@@ -386,15 +463,25 @@ describe("migrateInFlightJobs (#1148)", () => {
     expect(found!.received).toBe(700000000);
   });
 
-  it("says the transfer is NOT running and will not resume itself", () => {
-    // The whole harm was an agent waiting forever on the documented contract.
+  it("ends the wait for a LOCAL stream without asserting a death it did not check", () => {
+    // The original harm was an agent waiting forever on the documented
+    // contract, so this must still end the wait and still give a next step.
+    //
+    // But this test used to REQUIRE "NOT running", "will not resume on its own"
+    // and a blanket "Re-issue the download" — claims this code cannot make. It
+    // reads neither the `pid` nor the `owner` it persists, `writerProcessGone()`
+    // exists to answer exactly that, and the cancel path refuses to close a
+    // stale record until that probe returns ESRCH (#761/#858). For a Manager
+    // dispatch those claims were not merely unproven but false, and following
+    // them corrupted the model (#1197) — so the test was holding the defect in
+    // place.
     writeJob(oldDir, { id: "abc", status: "downloading", updated: Date.now() });
     mod.migrateInFlightJobs(oldDir, dir);
     const msg = mod.readPersistedDownloadJob("abc")!.error ?? "";
-    expect(msg).toMatch(/INTERRUPTED/);
-    expect(msg).toMatch(/NOT running/);
-    expect(msg).toMatch(/will not resume on its own/);
-    expect(msg).toMatch(/Re-issue the download/);
+    expect(msg).toMatch(/no longer being WATCHED/);
+    expect(msg).toMatch(/nothing here is writing those bytes/);
+    expect(msg).toMatch(/Re-issue the download — it resumes from any surviving/);
+    expect(msg).not.toMatch(/will not resume on its own/);
   });
 
   it("does NOT migrate a TERMINAL record — its outcome was already delivered", () => {

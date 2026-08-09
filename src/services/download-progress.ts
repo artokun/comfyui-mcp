@@ -120,6 +120,14 @@ export function migrateInFlightJobs(fromDir: string, toDir: string): number {
         typeof raw[k] === "string" ? (raw[k] as string) : undefined;
       const num = (k: string): number | undefined =>
         typeof raw[k] === "number" ? (raw[k] as number) : undefined;
+      // WHO was transferring decides what this record may say, so the flag has to
+      // survive the migration (#1197). A Manager dispatch is a server-side fetch:
+      // the ComfyUI HOST is doing the work and a restart here does not touch it.
+      // Dropping `via_manager` is what made the old text dangerous — it rendered
+      // as a plain local interruption, so a live 12 GB host transfer was reported
+      // stopped and the caller was told to re-issue, which writes a SECOND copy to
+      // the same destination and corrupts the model (node-management.ts:971-979).
+      const viaManager = raw.via_manager === true;
       const rec = {
         id: raw.id,
         status: "error" as const,
@@ -129,15 +137,39 @@ export function migrateInFlightJobs(fromDir: string, toDir: string): number {
         target: str("target"),
         dest_key: str("dest_key"),
         req_key: str("req_key"),
+        // Carried so the record stays USABLE, not just readable: without trayId a
+        // caller passing the tray_id they were handed gets "not found" on a record
+        // that exists, the row renders `(tray undefined)`, and an absent
+        // started_at prints `NaN s ago` in the candidate listing.
+        tray_id: str("tray_id"),
+        filename: str("filename"),
+        target_subfolder: str("target_subfolder"),
+        started_at: num("started_at"),
+        pid: num("pid"),
+        via_manager: viaManager,
         total: num("total"),
         received: num("received"),
         updated: Date.now(),
         interrupted_by_restart: true,
-        error:
-          `This download was INTERRUPTED: the orchestrator process it was streaming ` +
-          `inside exited (a restart or a session drop), so the transfer stopped. It is ` +
-          `NOT running and will not resume on its own — nothing is waiting to finish. ` +
-          `Any partial file may also have been discarded. Re-issue the download.`,
+        // NEITHER branch asserts the transfer died. This function reads neither
+        // the `pid` nor the `owner` it persists, and `writerProcessGone()` exists
+        // to answer exactly that question — the cancel path refuses to close a
+        // stale record until that probe returns ESRCH (#761/#858). What is
+        // observed is only that we stopped watching.
+        error: viaManager
+          ? `This download is no longer being WATCHED, and it was DISPATCHED to ` +
+            `ComfyUI-Manager — the fetch runs on the ComfyUI host, which the restart ` +
+            `here did not touch, so it is very likely STILL RUNNING. Do NOT re-issue ` +
+            `it: a second dispatch writes another copy to the same destination and ` +
+            `CORRUPTS the model. The file is not listed until it COMPLETES (which can ` +
+            `be hours for a multi-GB model), so an empty list_local_models proves ` +
+            `nothing and a timer is not a test — check the ComfyUI host's own logs or ` +
+            `disk if you need to know where it is.`
+          : `This download is no longer being WATCHED: the orchestrator process that ` +
+            `was streaming it exited, so nothing here is writing those bytes and no ` +
+            `further progress will be reported. Any partial file may have been ` +
+            `discarded. Re-issue the download — it resumes from any surviving ` +
+            `.partial.`,
       };
       writeFileSync(
         join(toDir, `${JOB_PREFIX}${sanitizeIdPart(raw.id)}-${PERSIST_OWNER}.json`),
