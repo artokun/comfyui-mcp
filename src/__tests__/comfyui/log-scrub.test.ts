@@ -107,10 +107,22 @@ describe("both log consumers scrub (#1206)", () => {
     );
 
     // getLogs has TWO return paths — JSON-encoded and raw text — and both carry
-    // the same exposure.
+    // the same exposure. They now converge on one selectAndScrubLogLines call
+    // (#1223, which moved the caller's keyword filter in front of the scrub), so
+    // what has to be true is that NO return path skips it: every `return` in the
+    // body is either that call or the cloud branch, which throws.
     const start = client.indexOf("export async function getLogs");
     const body = client.slice(start, client.indexOf("\n}", start));
-    expect(body.split("scrubLogLines(").length - 1).toBe(2);
+    const returns = body.match(/return .*/g) ?? [];
+    expect(returns.length).toBeGreaterThan(0);
+    for (const r of returns) {
+      expect(r, `a getLogs return path skips the scrub: ${r}`).toMatch(
+        /selectAndScrubLogLines\(|cloudClient\.getLogs\(\)/,
+      );
+    }
+    // And the helper they converge on actually scrubs.
+    const helper = client.slice(client.indexOf("function selectAndScrubLogLines"));
+    expect(helper.slice(0, helper.indexOf("\n}"))).toContain("scrubLogLines(");
 
     // The health report emits matching error lines into its own text.
     expect(health).toContain("scrubLogLines(");

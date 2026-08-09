@@ -145,27 +145,32 @@ describe("get_system_stats actions call the same services with the same argument
     expect(mocks.runHealthCheck).not.toHaveBeenCalled();
   });
 
-  // The non-matching lines sit LAST on purpose: a tail that ignored `keyword`
-  // would return them, and this assertion catches it. With the noise first, a
-  // broken filter still produced the right two lines and the test passed.
-  it('action:"logs" filters by keyword, tails to max_lines and strips ANSI', async () => {
-    mocks.getLogs.mockResolvedValueOnce([
-      "\x1b[31mERROR one\x1b[0m",
-      "error two",
-      "error three",
-      "boot ok",
-      "shutdown ok",
-    ]);
-    const res = await call({ action: "logs", keyword: "error", max_lines: 2 });
-    expect(text(res)).toBe("error two\nerror three");
+  // #1223 — the keyword filter and the tail MOVED into getLogs, so they run on
+  // the raw log before redaction. Filtering here matched against text the scrub
+  // had already rewritten, and answered "No log lines found" for lines that were
+  // right there. What this tool still owns is FORWARDING them, and the selection
+  // semantics themselves are tested in log-select-order.test.ts.
+  it('action:"logs" forwards the keyword and the tail to getLogs', async () => {
+    mocks.getLogs.mockResolvedValueOnce([]);
+    await call({ action: "logs", keyword: "error", max_lines: 2 });
+    expect(mocks.getLogs).toHaveBeenCalledWith({ keyword: "error", maxLines: 2 });
+  });
 
+  it('action:"logs" forwards the DEFAULT tail of 100 when max_lines is omitted', async () => {
+    // The default has to reach getLogs now — leaving it undefined would return
+    // the whole log, which is the #1146 shape (an omitted limit meaning "all").
+    mocks.getLogs.mockResolvedValueOnce([]);
+    await call({ action: "logs" });
+    expect(mocks.getLogs).toHaveBeenCalledWith({ keyword: undefined, maxLines: 100 });
+  });
+
+  it('action:"logs" strips ANSI from what comes back', async () => {
     mocks.getLogs.mockResolvedValueOnce(["\x1b[31mERROR one\x1b[0m"]);
-    const all = await call({ action: "logs" });
-    expect(text(all)).toBe("ERROR one");
+    expect(text(await call({ action: "logs" }))).toBe("ERROR one");
   });
 
   it('action:"logs" reports the keyword back when nothing matched', async () => {
-    mocks.getLogs.mockResolvedValueOnce(["boot ok"]);
+    mocks.getLogs.mockResolvedValueOnce([]);
     const res = await call({ action: "logs", keyword: "traceback" });
     expect(text(res)).toBe('No log lines found matching "traceback".');
   });
@@ -223,10 +228,10 @@ describe("value constraints are unchanged at the zod layer", () => {
 
   // ...and an explicit max_lines of the schema minimum must not be mistaken for
   // "unset" and replaced by the 100 default.
-  it("max_lines:1 tails to one line rather than falling back to the default", async () => {
-    mocks.getLogs.mockResolvedValueOnce(["a", "b", "c"]);
-    const res = await call({ action: "logs", max_lines: 1 });
-    expect(text(res)).toBe("c");
+  it("max_lines:1 reaches getLogs as 1 rather than falling back to the default", async () => {
+    mocks.getLogs.mockResolvedValueOnce([]);
+    await call({ action: "logs", max_lines: 1 });
+    expect(mocks.getLogs).toHaveBeenCalledWith({ keyword: undefined, maxLines: 1 });
   });
 });
 

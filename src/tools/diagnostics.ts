@@ -232,19 +232,14 @@ export async function getLogsAction(args: {
   max_lines?: number;
   keyword?: string;
 }): Promise<CallToolResult> {
-  let lines = await getLogs();
-
-  // Filter by keyword if provided
-  if (args.keyword) {
-    const kw = args.keyword.toLowerCase();
-    lines = lines.filter((line) => line.toLowerCase().includes(kw));
-  }
-
-  // Tail to max_lines
+  // #1223 — the keyword filter and the tail are handed to getLogs so they run on
+  // the RAW log, BEFORE redaction. Filtering here meant matching against text the
+  // scrub had already rewritten, so `keyword:"ltxvideo"` answered "No log lines
+  // found" for a log that contained it — an absence claim about a line that was
+  // right there. Selection and redaction have to happen in that order, and the
+  // only way to guarantee it is to not have the raw lines here at all.
   const maxLines = args.max_lines ?? 100;
-  if (lines.length > maxLines) {
-    lines = lines.slice(-maxLines);
-  }
+  const lines = await getLogs({ keyword: args.keyword, maxLines });
 
   // Strip ANSI escape codes for readability
   const clean = lines.map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));

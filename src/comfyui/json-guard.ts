@@ -387,9 +387,109 @@ export function scrubSecretShapedText(text: string): string | null {
   // 3. Long opaque runs of the credential alphabet (base64 / hex / url-safe /
   //    percent-encoded). Ordinary prose and HTML break well before 24 chars —
   //    tags, spaces and punctuation are all outside this class.
-  out = out.replace(/[A-Za-z0-9\-._~+/=%]{24,}/g, REDACTED);
+  //
+  //    But a FILESYSTEM PATH and a DOTTED MODULE NAME do not (#1223): `/`, `.`,
+  //    `-` and `_` are all in this alphabet, so `/basedir/custom_nodes/ComfyUI-
+  //    LTXVideo` and `kornia.geometry.transform.pyramid` matched whole and left
+  //    `«redacted»`. See `redactOpaqueRun` — it keeps the structure and redacts
+  //    only the parts that are actually opaque.
+  out = out.replace(/[A-Za-z0-9\-._~+/=%]{24,}/g, redactOpaqueRun);
 
   return out;
+}
+
+/**
+ * Redact the credential-shaped PARTS of a long run, keeping the structure.
+ *
+ * #1223 — the flat 24-char rule assumed "ordinary prose breaks well before 24
+ * chars". True of prose; false of a LOG, where paths and dotted module names are
+ * the dominant content and routinely run past 24. So the pass that exists to
+ * catch an unanticipated credential encoding erased the diagnosis instead:
+ *
+ *     [INFO]  0.0 seconds (IMPORT FAILED): «redacted»
+ *       - «redacted»: ImportError: cannot import name 'pad' from '«redacted»'
+ *
+ * That is 100% of the content of an IMPORT FAILED line — which pack failed and
+ * which module the missing symbol came from are the only two things the line is
+ * for. The reporter had to bypass the tool and curl ComfyUI directly.
+ *
+ * So the run is split on the separators that give it STRUCTURE (`/` and `.`) and
+ * each part judged on its own. A part is kept when it is a WORD rather than a
+ * blob — its `-`/`_`/`+`/`=`/`~`/`%` chunks are each letters-then-optional-digits
+ * (`ComfyUI`, `AnimateDiff`, `python3`, `v1`) or all digits, and none is longer
+ * than a plausible word. A credential fails this: its digits interleave with its
+ * letters (`aBcD3fGh1jKlMnOpQrStUvWxYz`), or it starts with one
+ * (`9f2b7c41aa6e4d0e8b3f5a1c`).
+ *
+ * WHAT THIS DOES AND DOES NOT WEAKEN. Only this pass, and only for unlabelled
+ * runs of unknown value. A configured credential is still matched by VALUE in
+ * pass 1 (exactly, in every encoding, failing closed when it cannot be replaced
+ * safely), and anything introduced by its own name — `token=`, `api_key:`,
+ * `Authorization: Bearer` — is still redacted by pass 2 whatever its shape. What
+ * is newly allowed through is a run that carries no credential label, matches no
+ * configured value, and is spelled like a path or an identifier.
+ *
+ * ACCEPTED RESIDUAL: an unlabelled, unknown, ALL-ALPHABETIC secret of 24+ chars
+ * with no interleaved digits reads as a word and survives. That is a narrow
+ * shape — base64 and hex of that length carry digits with overwhelming
+ * probability — and it is the deliberate trade for a log tool that can still
+ * name the pack that failed to import.
+ */
+function redactOpaqueRun(run: string): string {
+  const parts = run.split(/([/.])/);
+  // No separator: one unbroken blob, which is the shape this pass was built for.
+  if (parts.length === 1) return REDACTED;
+  return parts
+    .map((part) =>
+      part === "/" || part === "." || part === "" || looksLikeWords(part)
+        ? part
+        : REDACTED,
+    )
+    .join("");
+}
+
+/** Longest chunk still plausibly a word and not a blob. `AnimateDiff` is 11. */
+const MAX_WORD_CHUNK = 20;
+
+/**
+ * Longest chunk allowed to INTERLEAVE letters and digits and still read as a
+ * name — `t5xxl`, `x4v3`, `sd3m`.
+ *
+ * Model filenames do this constantly (`t5xxl_fp16.safetensors`,
+ * `umt5_xxl_fp8_e4m3fn.safetensors`), and an interleave rule without this
+ * allowance redacts them — the same class of mistake as the flat 24-char rule,
+ * one level down. Kept SHORT because interleaving is otherwise the strongest
+ * signal of a blob: at eight characters a run carries too little entropy to be
+ * worth protecting on its own, and anything longer must justify itself by having
+ * its digits at the edges like a real name does.
+ */
+const MAX_MIXED_CHUNK = 8;
+
+/**
+ * Is this a human-written identifier rather than an opaque blob?
+ *
+ * Chunk-wise, because real names are compounds: `comfyui-easy-use`,
+ * `custom_nodes`, `sd_xl_base_1`. A chunk is a word when its digits sit at the
+ * EDGES — `python3`, `v1`, `4x`, `768` — and a blob when they INTERLEAVE, which
+ * is what `d41d8cd98f00b204` and `aBcD3fGh1jKl` do and what no human name does.
+ *
+ * The leading-digit half of that is not hypothetical: mutation testing showed
+ * this rule started as letters-then-digits, which reads `4x-UltraSharp` as a
+ * blob — so `/basedir/models/upscale_models/4x-UltraSharp.pth` would have gone
+ * out as `/basedir/models/upscale_models/«redacted».pth`, reintroducing exactly
+ * the bug being fixed on some of the most common filenames in a ComfyUI log.
+ */
+function looksLikeWords(part: string): boolean {
+  const chunks = part.split(/[-_+=~%]/).filter((c) => c.length > 0);
+  if (chunks.length === 0) return false;
+  return chunks.every(isNameChunk);
+}
+
+function isNameChunk(c: string): boolean {
+  if (c.length > MAX_WORD_CHUNK) return false;
+  if (/^\d+$/.test(c)) return true; // 768, 12
+  if (/^\d*[A-Za-z]+\d*$/.test(c)) return true; // ComfyUI, python3, 4x, v1
+  return c.length <= MAX_MIXED_CHUNK; // t5xxl, x4v3 — see MAX_MIXED_CHUNK
 }
 
 /**

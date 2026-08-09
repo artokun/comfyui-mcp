@@ -799,7 +799,20 @@ export function getComfyUIPath(): string | undefined {
   return config.comfyuiPath;
 }
 
-export async function getLogs(): Promise<string[]> {
+/**
+ * Which lines the caller wants — applied to the RAW log, before redaction.
+ * See `selectAndScrubLogLines` for why this cannot be the caller's job (#1223).
+ */
+export interface GetLogsOptions {
+  /** Case-insensitive substring the line must contain. */
+  keyword?: string;
+  /** Keep only the last N matching lines. */
+  maxLines?: number;
+}
+
+export async function getLogs(opts?: GetLogsOptions): Promise<string[]> {
+  // Cloud mode has no /internal/logs equivalent; this always throws
+  // CLOUD_UNSUPPORTED, so there is nothing to select or scrub.
   if (isCloudMode()) return cloudClient.getLogs();
 
   // A managed/panel restart or Manager reboot leaves the cached client bound to
@@ -838,15 +851,43 @@ export async function getLogs(): Promise<string[]> {
 
   // ComfyUI returns logs as a JSON-encoded string with \n separators,
   // or as raw text depending on version. Handle both.
+  let lines: string[];
   try {
     const parsed = JSON.parse(text);
-    if (typeof parsed === "string") {
-      return scrubLogLines(parsed.split("\n").filter(Boolean));
-    }
+    lines = (typeof parsed === "string" ? parsed : text).split("\n").filter(Boolean);
   } catch {
     // Not JSON — treat as raw text
+    lines = text.split("\n").filter(Boolean);
   }
-  return scrubLogLines(text.split("\n").filter(Boolean));
+  return selectAndScrubLogLines(lines, opts);
+}
+
+/**
+ * Select the requested lines, THEN scrub them (#1223).
+ *
+ * The order is the whole point, and getting it backwards is a false ABSENCE:
+ * `get_system_stats action:"logs"` filtered by keyword AFTER this function had
+ * already redacted, so a keyword matching redacted text — `keyword:"ltxvideo"`,
+ * `keyword:"LTXLoopingSampler"` — reported "No log lines found" while the
+ * matching lines sat in the log. Reporting nothing found is much worse than
+ * reporting a redacted match: the caller stops looking.
+ *
+ * Selection lives HERE rather than in the caller so the raw text never leaves
+ * this function. Callers get scrubbed lines and cannot filter on anything else,
+ * which is what makes the ordering a property of the code rather than a rule
+ * every future call site has to remember.
+ */
+function selectAndScrubLogLines(lines: string[], opts?: GetLogsOptions): string[] {
+  let selected = lines;
+  if (opts?.keyword) {
+    const kw = opts.keyword.toLowerCase();
+    selected = selected.filter((line) => line.toLowerCase().includes(kw));
+  }
+  // Tail before scrubbing: strictly less work, and identical output either way.
+  if (typeof opts?.maxLines === "number" && selected.length > opts.maxLines) {
+    selected = selected.slice(-opts.maxLines);
+  }
+  return scrubLogLines(selected);
 }
 
 
