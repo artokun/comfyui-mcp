@@ -23,14 +23,20 @@
 //               queue drains at handoff, the record goes terminal `done`, and
 //               nothing migrates. Neither absolute is true.
 //
-// KNOWN SURVIVOR, so the pin below is not read as a clean bill of health: the
-// stale-heartbeat sentence in this paragraph ("re-issuing action:\"download\"
-// then resumes or restarts it") is ROUTE-BLIND. For a Manager dispatch there is
-// no local .partial and a re-issue is a second server-side dispatch — the
-// corrupting move. It is not fixed here because the record's own stale-heartbeat
-// note is route-blind too, and a description-only fix would contradict it, which
-// is the failure #1197 spent four rounds undoing. Both halves ship together, as
-// their own change.
+// THAT SURVIVOR IS NOW FIXED, and both halves shipped together as the note said
+// they had to: the stale-heartbeat sentence here, and the record's own runtime
+// NOTE in model-management.ts, are both route-aware. For a Manager dispatch there
+// is no local .partial and a re-issue is a second server-side dispatch — the
+// corrupting move (#1197) — so the note says to check whether the file landed
+// instead. Fixing only the description would have contradicted the runtime note,
+// which is the failure #1197 spent four rounds undoing.
+//
+// Claims re-verified against the source when the hash below was last updated:
+// the status union is `"downloading" | "done" | "error" | "cancelled"`
+// (download-jobs.ts); `viaManager` is set at creation from `dispatchToManager`
+// and survives the persist/restore round trip as `via_manager`; and "resolvable
+// by `id` or by `url`" is real — the status action calls
+// `findDownloadJob({ url })` when no id matches.
 //
 // So the tests below check two different things, and the second matters more:
 // that the true claims are present, AND that no absolute claim about survival
@@ -186,6 +192,6 @@ describe("download_model action:\"status\" claims only what the code delivers (#
       "The action:\"status\" description changed. That is fine — but every claim in it " +
         "has been wrong at least once (see the header). Re-verify each against " +
         "download-jobs.ts / download-progress.ts / node-management.ts, then update this hash.",
-    ).toBe("b89ff7a288a4b288");
+    ).toBe("8cb4dd59d43fe1c5");
   });
 });
