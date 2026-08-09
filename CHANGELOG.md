@@ -6,6 +6,14 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.50.54] - 2026-08-09
+
+### MCP
+
+#### Fixed
+- a rebind that fails on an OLD panel says so, and names the version (#1199)
+
+
 ## [0.50.53] - 2026-08-09
 
 ### MCP
