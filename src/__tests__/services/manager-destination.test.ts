@@ -63,9 +63,16 @@ describe("describeManagerDestination", () => {
 
   it("WARNS when the destination is outside the root the server reads", async () => {
     // The reported case, and the one that costs a multi-GB file.
+    //
+    // extraRoots is INJECTED, and must be: without it this falls through to the
+    // live read, which on a developer machine reaches the real ComfyUI and on CI
+    // reaches nothing. That difference is exactly what made this pass locally and
+    // fail on CI — the same "a test silently queried the real server" trap this
+    // suite has hit before. A hermetic test states its own world.
     const note = await describeManagerDestination("clip_vision_h.safetensors", {
       readLog: readLog(LOG("/opt/ComfyUI/models/clip_vision/clip_vision_h.safetensors")),
       liveModelsDir: "/workspace/models",
+      extraRoots: async () => [],
     });
     expect(note).toMatch(/OUTSIDE the models directory/);
     expect(note).toContain("/opt/ComfyUI/models");
@@ -77,6 +84,7 @@ describe("describeManagerDestination", () => {
   it("confirms a destination INSIDE the live root", async () => {
     const note = await describeManagerDestination("clip_vision_h.safetensors", {
       readLog: readLog(LOG("/workspace/models/clip_vision/clip_vision_h.safetensors")),
+      extraRoots: async () => [],
       liveModelsDir: "/workspace/models",
     });
     expect(note).toMatch(/INSIDE the models directory/);
@@ -88,6 +96,7 @@ describe("describeManagerDestination", () => {
     // half is what decides usability. Say the first without implying the second.
     const note = await describeManagerDestination("clip_vision_h.safetensors", {
       readLog: readLog(LOG("/opt/ComfyUI/models/clip_vision/clip_vision_h.safetensors")),
+      extraRoots: async () => [],
       liveModelsDir: undefined,
     });
     expect(note).toContain("/opt/ComfyUI/models");
@@ -101,6 +110,7 @@ describe("describeManagerDestination", () => {
     expect(
       await describeManagerDestination("x.safetensors", {
         readLog: readLog("[INFO] nothing relevant"),
+        extraRoots: async () => [],
         liveModelsDir: "/workspace/models",
       }),
     ).toBeUndefined();
@@ -114,6 +124,7 @@ describe("describeManagerDestination", () => {
         readLog: async () => {
           throw new Error("logs unavailable");
         },
+        extraRoots: async () => [],
         liveModelsDir: "/workspace/models",
       }),
     ).resolves.toBeUndefined();
@@ -174,6 +185,7 @@ describe("review fixes (PR #1190)", () => {
   it("refuses to judge INSIDE/OUTSIDE across path syntaxes", async () => {
     const note = await describeManagerDestination("x.safetensors", {
       readLog: readLog(LINE("/workspace/models/x.safetensors")),
+      extraRoots: async () => [],
       liveModelsDir: "C:\workspace\models",
     });
     expect(note).toContain("/workspace/models/x.safetensors");
@@ -219,5 +231,24 @@ describe("review fixes (PR #1190)", () => {
     });
     expect(note).toMatch(/OUTSIDE the models directory/);
     expect(note).toMatch(/EPHEMERAL OVERLAY/);
+  });
+});
+
+// A test that reaches the developer's real ComfyUI passes locally and fails on
+// CI — which is exactly what happened here: the outside-root case omitted
+// `extraRoots`, fell through to the live read, and was green on this machine and
+// red on ubuntu. Green-because-it-found-a-server is not green.
+//
+// Pin it structurally: every call in this file states its own world.
+describe("this file never reaches a live server", () => {
+  it("injects extraRoots wherever a live models root is given", async () => {
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(new URL(import.meta.url), "utf-8");
+    const calls = src.split("describeManagerDestination(").slice(1);
+    const leaky = calls.filter((c) => {
+      const body = c.slice(0, c.indexOf("});") + 3);
+      return body.includes("liveModelsDir:") && !body.includes("extraRoots:");
+    });
+    expect(leaky, "every call must stub extraRoots or it hits the network").toEqual([]);
   });
 });
