@@ -376,7 +376,7 @@ describe("migrateInFlightJobs (#1148)", () => {
       status: "downloading",
       via_manager: true,
       name: "wan22.safetensors",
-      tray_id: "tray-abc",
+      trayId: "tray-abc",
       filename: "wan22.safetensors",
       target_subfolder: "diffusion_models",
       started_at: 1_700_000_000_000,
@@ -424,7 +424,10 @@ describe("migrateInFlightJobs (#1148)", () => {
       writeJob(oldDir, managerJob);
       mod.migrateInFlightJobs(oldDir, dir);
       const rec = mod.readPersistedDownloadJob("mgr-12gb")!;
-      expect(rec.tray_id).toBe("tray-abc");
+      // Asserted against the REAL persisted key. The first version of this
+      // test used `tray_id` in both the fixture and the assertion, so it
+      // passed while the migration copied nothing.
+      expect(rec.trayId).toBe("tray-abc");
       expect(rec.filename).toBe("wan22.safetensors");
       expect(rec.target_subfolder).toBe("diffusion_models");
       expect(rec.started_at).toBe(1_700_000_000_000);

@@ -91,10 +91,18 @@ const lastWriteAt = new Map<string, number>();
  * on disk and no error event: 40 minutes gone, invisibly, while the documented
  * contract told their agent to keep waiting rather than re-issue.
  *
- * The transfer really is dead — it streamed inside a process that no longer
- * exists — so this does NOT resurrect it, and pretending otherwise would be the
- * worse bug. What it fixes is the SILENCE: a record that says the download was
- * interrupted, which `status` can find by the id the caller was handed.
+ * What this does NOT do is decide whether the transfer is dead — the original
+ * framing, and WRONG for the case that matters. A download DISPATCHED to
+ * ComfyUI-Manager is a server-side fetch: the ComfyUI HOST is doing the work and
+ * a restart here does not touch it, so it is very likely still running, and
+ * telling that caller to re-issue writes a second copy to the same destination —
+ * a corrupt model (#1197). This function reads neither the `pid` nor the `owner`
+ * it persists, and `writerProcessGone()` exists to answer exactly the question it
+ * skips, so it is in no position to assert death for EITHER route.
+ *
+ * What it fixes is the SILENCE: a record saying we stopped WATCHING, which
+ * `status` can find by the id the caller was handed — worded per route, which is
+ * why `via_manager` has to survive the copy.
  *
  * Only `downloading` records migrate. A terminal record's outcome was already
  * delivered, and re-landing it would replay a settled event. Fields are copied
@@ -141,7 +149,11 @@ export function migrateInFlightJobs(fromDir: string, toDir: string): number {
         // caller passing the tray_id they were handed gets "not found" on a record
         // that exists, the row renders `(tray undefined)`, and an absent
         // started_at prints `NaN s ago` in the candidate listing.
-        tray_id: str("tray_id"),
+        // `trayId`, NOT `tray_id` — this record's one camelCase key (line ~631),
+        // and the ONLY one url lookup matches on. Getting it wrong yields a
+        // silent `undefined` that a fixture using the same wrong key would not
+        // catch, which is precisely how a test passes for the wrong reason.
+        trayId: str("trayId"),
         filename: str("filename"),
         target_subfolder: str("target_subfolder"),
         started_at: num("started_at"),
