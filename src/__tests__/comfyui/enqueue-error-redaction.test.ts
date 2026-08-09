@@ -98,3 +98,49 @@ describe("an enqueue error never hands back the credential (#1191)", () => {
     expect(err.message.length).toBeLessThan(400);
   });
 });
+
+// Codex adversarial review of PR #1202 found two real leaks the first fix missed.
+// Both are the same shape as the original: a credential reaching a tool result.
+describe("review findings (PR #1202)", () => {
+  // DEFECT 5 — the STRUCTURED branch runs FIRST and bypassed redaction entirely.
+  // A hostile or reflecting gateway can answer with JSON shaped exactly like a
+  // ComfyUI validation failure, so the "redacted" fallback never ran.
+  it("scrubs a credential reflected in a JSON error.message", async () => {
+    const body = JSON.stringify({ error: { message: `rejected for Bearer ${TOKEN}` } });
+    comfyuiFetch.mockResolvedValueOnce(res(400, body));
+    const err = (await enqueuePrompt({}).catch((e: unknown) => e)) as Error;
+    expect(err.message).not.toContain(TOKEN);
+  });
+
+  it("scrubs a credential reflected in node_errors messages and details", async () => {
+    const body = JSON.stringify({
+      node_errors: {
+        "5": {
+          class_type: "LoadImage",
+          errors: [{ message: `upstream said ${TOKEN}`, details: `header was ${TOKEN}` }],
+        },
+      },
+    });
+    comfyuiFetch.mockResolvedValueOnce(res(400, body));
+    const err = (await enqueuePrompt({}).catch((e: unknown) => e)) as Error;
+    expect(err.message).not.toContain(TOKEN);
+    // …and the useful half of the diagnosis survives.
+    expect(err.message).toContain("LoadImage");
+  });
+
+  it("a genuine validation message is returned UNCHANGED", async () => {
+    // Fail-closed must not mean fail-noisy: a real ComfyUI error carries no
+    // credential and must read exactly as before.
+    const body = JSON.stringify({
+      error: { message: "Prompt outputs failed validation" },
+      node_errors: {
+        "7": { class_type: "KSampler", errors: [{ message: "steps must be >= 1" }] },
+      },
+    });
+    comfyuiFetch.mockResolvedValueOnce(res(400, body));
+    const err = (await enqueuePrompt({}).catch((e: unknown) => e)) as Error;
+    expect(err.message).toContain("Prompt outputs failed validation");
+    expect(err.message).toContain("KSampler");
+    expect(err.message).toContain("steps must be >= 1");
+  });
+});
