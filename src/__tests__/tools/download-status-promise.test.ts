@@ -57,18 +57,35 @@ describe("download_model action:\"status\" describes the survival it actually ha
   it("names the ORCHESTRATOR RESTART case and says the transfer is dead", () => {
     const d = description();
     expect(d).toMatch(/ORCHESTRATOR RESTART/);
-    expect(d).toMatch(/the transfer is dead/i);
+    expect(d).toMatch(/streaming LOCALLY is dead/);
     // And tells the caller what to do about it, which is the opposite of the
     // old text's "instead of starting a duplicate".
     expect(d).toMatch(/re-issuing/i);
   });
 
-  it("still tells the caller the agent-reconnect case IS resolvable", () => {
+  it("still tells the caller the agent-reconnect case IS normally resolvable", () => {
     // Narrowing must not throw away the true half — #529's adoption contract is
     // real, and a caller who stops trusting it starts duplicating live transfers.
+    // But it is NORMALLY, not unconditionally: the cross-session record is
+    // persisted best-effort, so "not found" does not mean "stopped" here either
+    // (round-2 gate, finding 1).
     const d = description();
-    expect(d).toMatch(/resolvable by its `id` OR by `url`/);
-    expect(d).toMatch(/still streaming|reads `downloading`/);
+    expect(d).toMatch(/normally resolvable by `id` or by `url`/);
+    expect(d).toMatch(/keeps running/);
+    expect(d).toMatch(/has NOT established the transfer stopped/);
+  });
+
+  it("exempts a ComfyUI-Manager dispatch from the restart verdict", () => {
+    // Round-2 gate, finding 2 — the most consequential miss in this whole
+    // change. A Manager dispatch is committed done the moment it is ACCEPTED,
+    // and with an aria2 sidecar the host keeps streaming for minutes. Only
+    // `downloading` records migrate, so a restart neither kills it nor produces
+    // an interrupted record — and the previous wording told the caller to
+    // re-issue, which starts a SECOND multi-gigabyte transfer.
+    const d = description();
+    expect(d).toMatch(/ComfyUI-Manager/);
+    expect(d).toMatch(/Do NOT re-issue a Manager download/);
+    expect(d).toMatch(/list_local_models/);
   });
 
   // The three qualifications below are what the FIRST attempt at this fix got
@@ -83,7 +100,7 @@ describe("download_model action:\"status\" describes the survival it actually ha
     // restart there may be no record at all.
     const d = description();
     expect(d).toMatch(/may not exist at all|best-effort/i);
-    expect(d).toMatch(/MISSING record is not evidence the download is alive/i);
+    expect(d).toMatch(/absence is evidence of nothing either way/i);
   });
 
   it("does not promise a carried-over record is findable by URL", () => {
@@ -93,6 +110,19 @@ describe("download_model action:\"status\" describes the survival it actually ha
     const d = description();
     expect(d).toMatch(/findable by `id` ONLY/);
     expect(d).toMatch(/not by `url`/);
+  });
+
+  // Requiring a qualifying phrase does NOT stop someone appending its opposite —
+  // the round-2 gate demonstrated exactly that: adding "a carried-over record
+  // always exists and is resolvable by URL" left all the phrase tests passing.
+  // So scan for the absolutist shapes this description must never contain.
+  it.each([
+    [/\balways (?:exists|carried over|resolvable|survives)\b/i, "an unconditional survival claim"],
+    [/\bnever (?:missing|absent|lost)\b/i, "an unconditional presence claim"],
+    [/carried-over record[^.]*\bby `?url`?\b/i, "url lookup for a carried-over record"],
+    [/\bguaranteed\b/i, "a guarantee"],
+  ])("contains no %s — %s", (pattern) => {
+    expect(description()).not.toMatch(pattern as RegExp);
   });
 
   it("does not claim the STATE is the only distinguishing signal", () => {
