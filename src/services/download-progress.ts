@@ -137,12 +137,22 @@ export function migrateInFlightJobs(fromDir: string, toDir: string): number {
       // the same destination and corrupts the model (node-management.ts:971-979).
       const viaManager = raw.via_manager === true;
       // TYPED, not inferred: an annotated object literal gets excess-property
-      // checking, so a key that is not on PersistedDownloadJob is a COMPILE
-      // error. That is the only thing that catches this class — the five dead
-      // keys here for months were always `undefined`, and JSON.stringify drops
-      // undefined, so they never reached disk and no runtime assertion could
-      // see them. (`persistDownloadJob` cannot help: it spreads a variable,
-      // which defeats the check.)
+      // checking, so a key that is NOT on PersistedDownloadJob is a COMPILE
+      // error. The five dead keys that lived here for months (`name`, `dest`,
+      // `target`, `total`, `received` — from the tray-row interface) are caught
+      // this way. `persistDownloadJob` cannot help: it spreads a variable, which
+      // defeats the check.
+      //
+      // The type gate and the round-trip test's key-set assertion are
+      // COMPLEMENTARY, and an earlier version of this comment wrongly said the
+      // type was "the only thing that catches this class":
+      //   - the TYPE catches a key that is not on the interface at all;
+      //   - the TEST catches a key that IS on the interface but that the writer
+      //     never emits (e.g. `notes`), which the type cannot see.
+      // What is true, and worth stating precisely, is that no assertion on the
+      // PERSISTED record can see a dead key: it is always `undefined` and
+      // JSON.stringify drops it before it reaches disk. An assertion on the
+      // literal itself would see it.
       const rec: PersistedDownloadJob = {
         id: raw.id,
         status: "error" as const,
