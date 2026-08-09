@@ -1229,7 +1229,17 @@ export function restartTimeoutFallbackAdvice({
   }
   // Proven different: either the proof resolved a base that differs, or the observed
   // origin — which the browser sets and page JS cannot forge — differs outright.
-  const proven = panelBase ?? (observedOrigin && !sameHttpBase(headlessBase, observedOrigin) ? observedOrigin : null);
+  // ORIGIN-only compare for the raw Origin, deliberately. `tabServerOrigin` is pathless
+  // (scheme+host+port — the browser sends no path on a WS upgrade), while `headlessBase`
+  // may carry a basePath mount such as :8188/comfy. A path-AWARE compare therefore reads
+  // a correctly-mounted install as a mismatch and fires the strong warning at a server
+  // that IS the right one — the cry-wolf failure this branch exists to avoid, which is
+  // how it was found. A pathless Origin can prove a different host:port; it cannot prove
+  // a different path, so it is only ever used for the claim it can actually support.
+  // (captureRebootHealthBase fails closed on the same ambiguity for the same reason.)
+  const originMismatch =
+    observedOrigin != null && !sameHttpOrigin(headlessBase, observedOrigin) ? observedOrigin : null;
+  const proven = panelBase ?? originMismatch;
   if (proven != null) {
     return (
       `Do NOT reach for restart_comfyui here without checking: it targets ${headlessBase}, ` +

@@ -117,4 +117,22 @@ describe("#1233 confirmed mismatch reaches the strong warning", () => {
     expect(a).toContain("may find nothing there");
     expect(a).toContain("SUCCEED and take down a ComfyUI you did not mean to touch");
   });
+
+  it("#1233 a basePath mount is NOT a mismatch — the Origin is pathless and cannot say", () => {
+    // Found by probing this fix, not by review: tabServerOrigin carries scheme+host+port
+    // only, so a path-aware compare against a :8188/comfy base read a correctly-mounted
+    // install as a different server and fired the strong warning at the right one.
+    const a = advise("http://127.0.0.1:8188/comfy", null, "http://127.0.0.1:8188");
+    expect(a).not.toContain("Do NOT");
+    expect(a).toContain("could not confirm which one this panel is running inside");
+  });
+
+  it("#1233 a genuinely different PORT is still caught despite the origin-only compare", () => {
+    expect(advise("http://127.0.0.1:8188/comfy", null, "http://127.0.0.1:8189")).toContain("Do NOT");
+  });
+
+  it("#1233 loopback family folding does not manufacture a mismatch", () => {
+    // 127.0.0.1 vs a 0.0.0.0 bind is the same instance; sameHttpOrigin folds the family.
+    expect(advise("http://0.0.0.0:8188", null, "http://127.0.0.1:8188")).not.toContain("Do NOT");
+  });
 });
