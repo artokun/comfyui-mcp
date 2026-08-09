@@ -139,10 +139,7 @@ export function migrateInFlightJobs(fromDir: string, toDir: string): number {
       const rec = {
         id: raw.id,
         status: "error" as const,
-        name: str("name"),
         url: str("url"),
-        dest: str("dest"),
-        target: str("target"),
         dest_key: str("dest_key"),
         req_key: str("req_key"),
         // Carried so the record stays USABLE, not just readable: without trayId a
@@ -153,14 +150,18 @@ export function migrateInFlightJobs(fromDir: string, toDir: string): number {
         // and the ONLY one url lookup matches on. Getting it wrong yields a
         // silent `undefined` that a fixture using the same wrong key would not
         // catch, which is precisely how a test passes for the wrong reason.
+        
         trayId: str("trayId"),
         filename: str("filename"),
         target_subfolder: str("target_subfolder"),
         started_at: num("started_at"),
         pid: num("pid"),
         via_manager: viaManager,
-        total: num("total"),
-        received: num("received"),
+        // Real keys that were also being dropped. `resume` is what a re-issue
+        // needs to continue a partial rather than restart it, and `progressId`
+        // links the record back to its tray row.
+        progressId: str("progressId"),
+        resume: raw.resume,
         updated: Date.now(),
         interrupted_by_restart: true,
         // NEITHER branch asserts the transfer died. This function reads neither
@@ -180,8 +181,8 @@ export function migrateInFlightJobs(fromDir: string, toDir: string): number {
           : `This download is no longer being WATCHED: the orchestrator process that ` +
             `was streaming it exited, so nothing here is writing those bytes and no ` +
             `further progress will be reported. Any partial file may have been ` +
-            `discarded. Re-issue the download — it resumes from any surviving ` +
-            `.partial.`,
+            `discarded. Re-issue the download — it picks up a resumable .partial where ` +
+            `one survives, and otherwise restarts from zero.`,
       };
       writeFileSync(
         join(toDir, `${JOB_PREFIX}${sanitizeIdPart(raw.id)}-${PERSIST_OWNER}.json`),

@@ -366,6 +366,50 @@ describe("migrateInFlightJobs (#1148)", () => {
       JSON.stringify(rec),
     );
 
+  // The structural hole that produced BOTH key bugs in this function: every
+  // fixture here is hand-built, so a key the WRITER never emits still reads as
+  // "carried" and the test agrees with the mistake. `tray_id` vs `trayId` was
+  // caught by hand; `name`/`dest`/`target`/`total`/`received` — five keys that
+  // belong to the tray-row interface, not this record — survived for months and
+  // even had an assertion claiming bytes that are always undefined.
+  //
+  // This closes it by ROUND-TRIPPING a record the real writer produced.
+  it("round-trips a REAL persisted record, not a hand-built fixture", async () => {
+    const src = mkdtempSync(join(tmpdir(), "cm-rt-"));
+    const writer = await (async () => {
+      vi.resetModules();
+      process.env.COMFYUI_MCP_PROGRESS_DIR = src;
+      return import("../../services/download-progress.js");
+    })();
+
+    writer.persistDownloadJob({
+      id: "rt-1",
+      trayId: "tray-rt",
+      url: "https://example.invalid/m.safetensors",
+      target_subfolder: "checkpoints",
+      filename: "m.safetensors",
+      status: "downloading",
+      started_at: 1_700_000_000_000,
+      via_manager: true,
+    } as never);
+
+    // Migrate with the module under test (its own dir), reading what the WRITER
+    // actually wrote.
+    mod.migrateInFlightJobs(src, dir);
+    const rec = mod.readPersistedDownloadJob("rt-1");
+    rmSync(src, { recursive: true, force: true });
+
+    expect(rec, "a genuinely-written record must migrate").not.toBeNull();
+    // Every field the migration claims to carry, verified against the writer's
+    // own output rather than a fixture that could share my typo.
+    expect(rec!.trayId).toBe("tray-rt");
+    expect(rec!.filename).toBe("m.safetensors");
+    expect(rec!.target_subfolder).toBe("checkpoints");
+    expect(rec!.started_at).toBe(1_700_000_000_000);
+    expect(rec!.via_manager).toBe(true);
+    expect(rec!.url).toBeTruthy();
+  });
+
   // #1197 — the word "manager" appeared NOWHERE in this file, which is why a
   // live host-side transfer could be reported stopped for months. A Manager
   // dispatch is a server-side fetch: the ComfyUI HOST does the work, and a
@@ -440,19 +484,25 @@ describe("migrateInFlightJobs (#1148)", () => {
       writeJob(oldDir, { id: "local-1", status: "downloading", updated: Date.now() });
       mod.migrateInFlightJobs(oldDir, dir);
       const msg = mod.readPersistedDownloadJob("local-1")!.error ?? "";
-      expect(msg).toMatch(/Re-issue the download — it resumes from any surviving/);
+      expect(msg).toMatch(/picks up a resumable \.partial where one survives, and otherwise restarts/);
       expect(msg).not.toMatch(/STILL RUNNING/);
       expect(mod.readPersistedDownloadJob("local-1")!.via_manager).toBe(false);
     });
   });
 
   it("carries an IN-FLIGHT record forward as a findable terminal record", () => {
+    // Fields are the ones `persistDownloadJob` ACTUALLY writes. The previous
+    // fixture used `name`/`received`/`total`, which belong to the tray-row
+    // interface (`DownloadProgress`), not to this record — so the migration
+    // "carried" them from a hand-built fixture while copying nothing in
+    // production, and the assertion below claimed bytes that are always
+    // undefined. A fixture is not evidence; only the writer's schema is.
     writeJob(oldDir, {
       id: "53012d3181fd46b6",
       status: "downloading",
-      name: "krea2_turbo_fp8.safetensors",
-      received: 700000000,
-      total: 12010000000,
+      filename: "krea2_turbo_fp8.safetensors",
+      url: "https://example.invalid/krea2.safetensors",
+      started_at: 1_700_000_000_000,
       updated: Date.now(),
     });
 
@@ -462,8 +512,7 @@ describe("migrateInFlightJobs (#1148)", () => {
     expect(found).not.toBeNull();
     expect(found!.status).toBe("error");
     expect(found!.interrupted_by_restart).toBe(true);
-    // The bytes it had, so a reader can see what was lost.
-    expect(found!.received).toBe(700000000);
+    expect(found!.filename).toBe("krea2_turbo_fp8.safetensors");
   });
 
   it("ends the wait for a LOCAL stream without asserting a death it did not check", () => {
@@ -483,7 +532,7 @@ describe("migrateInFlightJobs (#1148)", () => {
     const msg = mod.readPersistedDownloadJob("abc")!.error ?? "";
     expect(msg).toMatch(/no longer being WATCHED/);
     expect(msg).toMatch(/nothing here is writing those bytes/);
-    expect(msg).toMatch(/Re-issue the download — it resumes from any surviving/);
+    expect(msg).toMatch(/picks up a resumable \.partial where one survives, and otherwise restarts/);
     expect(msg).not.toMatch(/will not resume on its own/);
   });
 
