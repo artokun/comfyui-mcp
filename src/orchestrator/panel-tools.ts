@@ -6334,9 +6334,13 @@ async function askUserWithGrace(
       // a conversation replaced mid-ask would let the live turn's ack settle a
       // warning that conversation never saw — the debt path reaching a live turn
       // through a helper, which is how it slipped the gate before.
-      // #1243 — ensureReachable ran above (line ~6258), so a surface WAS confirmed for
-      // this ask; say so rather than offering a cause already excluded.
-      const body = askTimeoutResult(tabId, fingerprint, outcome.recovery, true);
+      // #1243 — derive this rather than hardcoding `true`. The reachability call above
+      // is optional-chained (`ctx.ensureReachable?.()`), so on a ctx that does not
+      // provide it NO check ran and the no-surface alternative is still live. Passing a
+      // literal would have made the false branch unreachable in production — dead code
+      // justified by a hypothetical, and a test exercising a path nothing takes.
+      const surfaceConfirmed = typeof ctx.ensureReachable === "function";
+      const body = askTimeoutResult(tabId, fingerprint, outcome.recovery, surfaceConfirmed);
       return AskAnswers.askBelongsToLiveConversation(askId)
         ? withDroppedAnswerWarning(tabId, body)
         : body;
