@@ -142,3 +142,82 @@ describe("the Manager branch reports the destination (#1086)", () => {
     expect(branch).toContain('${managerDest}');
   });
 });
+
+// Codex adversarial review of PR #1190 found three real defects. Each is pinned
+// here, because each was a case where the fix said something CONFIDENT and WRONG
+// — and for two of them, wrong in the dangerous direction: a false OUTSIDE cries
+// wolf about a file that is fine, and contradicts a LISTED verdict in the very
+// same message.
+describe("review fixes (PR #1190)", () => {
+  const readLog = (text: string) => async () => text;
+  const LINE = (dest: string, name = "x.safetensors") =>
+    `Install model '${name}' from 'https://e/x' into '${dest}'`;
+
+  // DEFECT 2, and a PRE-EXISTING bug it exposed: job.filename is optional, and
+  // for a Manager dispatch job.path is a DESCRIPTOR, not a path.
+  it("recovers the filename from a Manager job DESCRIPTOR", async () => {
+    const { managerJobFilename } = await import("../../services/model-resolver.js");
+    expect(
+      managerJobFilename({
+        path: "checkpoints/foo.safetensors (dispatched to the remote ComfyUI via ComfyUI-Manager — download continues server-side. …)",
+      }),
+    ).toBe("foo.safetensors");
+    // An explicit filename still wins.
+    expect(managerJobFilename({ filename: "given.safetensors", path: "a/b (x)" })).toBe(
+      "given.safetensors",
+    );
+  });
+
+  // DEFECT 3: a remote POSIX destination vs a root that node's resolve() turned
+  // into "C:\workspace\models" on a Windows orchestrator. Comparing those always
+  // says OUTSIDE — for a destination that is exactly right.
+  it("refuses to judge INSIDE/OUTSIDE across path syntaxes", async () => {
+    const note = await describeManagerDestination("x.safetensors", {
+      readLog: readLog(LINE("/workspace/models/x.safetensors")),
+      liveModelsDir: "C:\workspace\models",
+    });
+    expect(note).toContain("/workspace/models/x.safetensors");
+    expect(note).toMatch(/different path syntaxes/);
+    // Assert the CLAIM, not the word: the message legitimately contains
+    // "INSIDE/OUTSIDE" while declining to make that call.
+    expect(note).toMatch(/no INSIDE\/OUTSIDE verdict is claimed/);
+    expect(note).not.toMatch(/is OUTSIDE the models directory/);
+    expect(note).not.toMatch(/will NOT see it/);
+  });
+
+  // DEFECT 5: a server reads more than one tree. A destination under a registered
+  // extra root is reachable, and calling it unusable would contradict the LISTED
+  // verdict rendered beside it.
+  it("does not call a destination unusable when an EXTRA root covers it", async () => {
+    const note = await describeManagerDestination("x.safetensors", {
+      readLog: readLog(LINE("/opt/ComfyUI/models/x.safetensors")),
+      liveModelsDir: "/workspace/models",
+      extraRoots: async () => ["/opt/ComfyUI/models"],
+    });
+    expect(note).toMatch(/INSIDE an extra_model_paths root/);
+    expect(note).not.toMatch(/will NOT see it/);
+  });
+
+  it("withholds the verdict when the extra roots could NOT be read", async () => {
+    // "We could not check" must not render as "there are none" — that is the
+    // #796 fold, and here it would produce a false unusable.
+    const note = await describeManagerDestination("x.safetensors", {
+      readLog: readLog(LINE("/opt/ComfyUI/models/x.safetensors")),
+      liveModelsDir: "/workspace/models",
+      extraRoots: async () => undefined,
+    });
+    expect(note).toMatch(/could NOT be checked/);
+    expect(note).toMatch(/not being called unusable/);
+  });
+
+  it("STILL warns for the reported case — outside, with extra roots known and clear", async () => {
+    // The guard rails must not have blunted the actual fix.
+    const note = await describeManagerDestination("x.safetensors", {
+      readLog: readLog(LINE("/opt/ComfyUI/models/x.safetensors")),
+      liveModelsDir: "/workspace/models",
+      extraRoots: async () => [],
+    });
+    expect(note).toMatch(/OUTSIDE the models directory/);
+    expect(note).toMatch(/EPHEMERAL OVERLAY/);
+  });
+});

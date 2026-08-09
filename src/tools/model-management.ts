@@ -6,6 +6,7 @@ import {
   listLocalModels,
   listLocalModelsWithCoverage,
   describeManagerDestination,
+  managerJobFilename,
   currentLiveModelsRoot,
   verifyManagerVisibility,
   MODEL_SUBDIRS,
@@ -724,7 +725,11 @@ async function downloadAction(args: {
           const managerSeen = job.viaManager
             ? await verifyManagerVisibility(
                 job.target_subfolder,
-                job.filename ?? (job.path ?? "").split(/[\\/]/).pop() ?? "",
+                // #1086 (codex review) — was `job.filename ?? path.split(…).pop()`.
+                // For a Manager dispatch `job.path` is a DESCRIPTOR, not a path, so
+                // that returned the whole trailing note and made every URL-only
+                // download unverifiable. Pre-existing; exposed by the review.
+                managerJobFilename(job),
                 { attempts: 1 },
               ).catch(() => undefined)
             : undefined;
@@ -748,10 +753,9 @@ async function downloadAction(args: {
           // string, never undefined. Verified there is no branch on this value
           // beyond "append it if present".
           const managerDest = job.viaManager
-            ? await describeManagerDestination(
-                job.filename ?? (job.path ?? "").split(/[\\/]/).pop() ?? "",
-                { liveModelsDir: liveRoot },
-              ).catch(() => undefined)
+            ? await describeManagerDestination(managerJobFilename(job), {
+                liveModelsDir: liveRoot,
+              }).catch(() => undefined)
             : undefined;
           const text = job.viaManager
             ? `Download DISPATCHED to the remote ComfyUI via ComfyUI-Manager (server-side fetch):\n${job.path}\n\n` +
