@@ -797,7 +797,6 @@ src/
     model-resolver.ts      # HuggingFace search, local models, downloads
     generation-tracker.ts  # SQLite generation log, settings dedup, stats
     file-hasher.ts         # SHA256 hashing of .safetensors with cache
-    civitai-lookup.ts      # CivitAI API lookup by content hash
     workflow-settings-extractor.ts  # Extract settings from workflow JSON
     process-control.ts     # Stop, start, restart ComfyUI process
     registry-client.ts     # ComfyUI Registry API
