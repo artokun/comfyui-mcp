@@ -93,6 +93,19 @@ export interface PanelBaseResolution {
    * is a dead remedy here because ComfyUI is already running (#890/#916).
    */
   liveRootUnderivable?: boolean;
+  /**
+   * The live root that was skipped because its `custom_nodes` could NOT BE READ
+   * — a permission error, an IO error, a share that went away — as distinct from
+   * one that provably has none (#796).
+   *
+   * Both used to end here identically, and the difference decides what the
+   * fallback means: falling back to the CONFIGURED tree after disproving the
+   * live one is a conclusion, while doing it after failing to read the live one
+   * is a guess wearing the same clothes. On a Desktop split install the
+   * configured tree is exactly the one the server does not read, so a caller
+   * about to write needs to know which of the two it is standing on.
+   */
+  liveRootUnreadable?: string;
 }
 
 /**
@@ -116,12 +129,32 @@ export function isLiveDerivedBase(
   );
 }
 
-/** Does this candidate root actually hold a custom_nodes directory? */
-function hasCustomNodes(base: string): boolean {
+/**
+ * Does this candidate root hold a `custom_nodes` directory — THREE answers (#796).
+ *
+ * `statSync` throws for two entirely different reasons and this returned `false`
+ * for both. ENOENT/ENOTDIR is a real answer: nothing is there. EACCES, EPERM,
+ * EIO, EBUSY and a dead UNC share are NOT — they mean the question could not be
+ * asked. This file already knows that hazard; `safeExists` a few hundred lines
+ * down avoids UNC paths precisely because "a dead network share can block
+ * existsSync for seconds".
+ *
+ * Folding them mattered here because of what the caller does next: an unreadable
+ * LIVE root is skipped, the resolution falls back to the CONFIGURED path, and
+ * the panel installer then operates on a different tree — while the caller's own
+ * comment says the point is to accept only a base we can PROVE holds
+ * custom_nodes. A base we could not read is not disproof.
+ */
+type CustomNodesState = "present" | "absent" | "unknown";
+
+function customNodesState(base: string): CustomNodesState {
   try {
-    return statSync(join(base, "custom_nodes")).isDirectory();
-  } catch {
-    return false;
+    return statSync(join(base, "custom_nodes")).isDirectory() ? "present" : "absent";
+  } catch (err) {
+    // Only these two prove absence. Everything else — permissions, IO, a share
+    // that went away — is an unanswered question, not a negative answer.
+    const code = (err as NodeJS.ErrnoException)?.code;
+    return code === "ENOENT" || code === "ENOTDIR" ? "absent" : "unknown";
   }
 }
 
@@ -137,6 +170,9 @@ export async function resolvePanelBase(): Promise<PanelBaseResolution> {
 
   const configured = resolveEffectiveComfyUIBase();
   const snapshot = await getLiveServerSnapshot();
+  /** #796 — a live candidate whose custom_nodes could not be READ (permissions,
+   *  IO, a dead share), as opposed to one that provably lacks it. */
+  let liveRootUnreadable: string | undefined;
   if (snapshot.reachable) {
     // `--base-directory` FIRST: when ComfyUI is launched with it, that flag —
     // not the main.py location — is the root it derives custom_nodes/ from.
@@ -148,7 +184,19 @@ export async function resolvePanelBase(): Promise<PanelBaseResolution> {
       // Only accept a live base we can PROVE holds custom_nodes. An argv root
       // without one is not the tree the panel lives in, and pointing the
       // installer at it would manufacture a false "not installed".
-      if (!candidate || !hasCustomNodes(candidate)) continue;
+      if (!candidate) continue;
+      const state = customNodesState(candidate);
+      if (state === "unknown") {
+        // #796 — STILL SKIPPED: "we could not read it" is not the proof this
+        // branch requires, and loosening a guard on an unread directory is the
+        // wrong direction. But it is not disproof either, so it is recorded
+        // instead of vanishing — the fallback below otherwise hands the caller a
+        // CONFIGURED tree while silently implying the live one was disqualified
+        // on the evidence.
+        liveRootUnreadable ??= candidate;
+        continue;
+      }
+      if (state === "absent") continue;
       return {
         base: candidate,
         source,
@@ -163,9 +211,15 @@ export async function resolvePanelBase(): Promise<PanelBaseResolution> {
   // the remedy for each is different (#916).
   const liveRootUnderivable = snapshot.reachable;
   if (configured) {
-    return { base: configured, source: "configured", liveProbeFailed, liveRootUnderivable };
+    return {
+      base: configured,
+      source: "configured",
+      liveProbeFailed,
+      liveRootUnderivable,
+      liveRootUnreadable,
+    };
   }
-  return { source: "none", liveProbeFailed, liveRootUnderivable };
+  return { source: "none", liveProbeFailed, liveRootUnderivable, liveRootUnreadable };
 }
 
 /*
