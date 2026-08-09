@@ -1,4 +1,5 @@
-import { afterAll, describe, expect, it, vi } from "vitest";
+import { afterAll, describe, expect, it, vi, beforeEach } from "vitest";
+import { __resetPanelBaseCache } from "../../services/panel-workspace.js";
 import { join } from "node:path";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -243,6 +244,18 @@ function makeDeps(opts: {
   };
   return { deps, installs, updates, reinstalls, gitPulls, counters };
 }
+
+beforeEach(() => {
+  // #1222 - this file had no hook at all, so a panel-base resolution primed
+  // by one test was inherited by every later one. panelRecoveryContext() reads
+  // it to choose between two ENTIRELY different remedy wordings, so which
+  // assertion passes depended on execution order.
+  //
+  // Per FILE, not global: setupFiles runs before per-suite vi.mock factories
+  // apply, so importing this module there resolves against the real
+  // environment and defeats the mocks this file installs.
+  __resetPanelBaseCache();
+});
 
 describe("detectPanelInstall", () => {
   it("#700: default deps inspect the saved local workspace when COMFYUI_PATH is unset", async () => {

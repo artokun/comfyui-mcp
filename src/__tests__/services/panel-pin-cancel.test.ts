@@ -14,6 +14,7 @@
 // only); remote reports "cannot cancel — remote host" truthfully.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { __resetPanelBaseCache } from "../../services/panel-workspace.js";
 import {
   existsSync,
   mkdirSync,
@@ -79,6 +80,18 @@ import { panelAction } from "../../tools/install-panel.js";
 let dir: string;
 
 beforeEach(() => {
+  // #1222 - the panel-base cache is module-level. Its production guards
+  // (target key, target generation, 60s TTL) never fire inside one test file,
+  // so a resolution primed by one test is inherited by the next -- and
+  // panelRecoveryContext() reads it to choose between two ENTIRELY different
+  // remedies, making which assertion passes depend on execution order.
+  //
+  // Per FILE, not global: a setup file cannot import this module, because
+  // setupFiles runs before per-suite vi.mock factories apply and the early
+  // import resolves against the real environment instead. Copied from
+  // panel-recovery-cluster.test.ts, which does this correctly and is not
+  // one of the flaky files.
+  __resetPanelBaseCache();
   managerCalls.length = 0;
   managerHandler = () => new Response("not found", { status: 404 });
   currentBase = ORIG;
