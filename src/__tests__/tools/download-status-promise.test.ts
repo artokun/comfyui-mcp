@@ -57,7 +57,7 @@ describe("download_model action:\"status\" describes the survival it actually ha
   it("names the ORCHESTRATOR RESTART case and says the transfer is dead", () => {
     const d = description();
     expect(d).toMatch(/ORCHESTRATOR RESTART/);
-    expect(d).toMatch(/streaming LOCALLY is dead/);
+    expect(d).toMatch(/dies with an ORCHESTRATOR RESTART/);
     // And tells the caller what to do about it, which is the opposite of the
     // old text's "instead of starting a duplicate".
     expect(d).toMatch(/re-issuing/i);
@@ -72,7 +72,7 @@ describe("download_model action:\"status\" describes the survival it actually ha
     const d = description();
     expect(d).toMatch(/normally resolvable by `id` or by `url`/);
     expect(d).toMatch(/keeps running/);
-    expect(d).toMatch(/has NOT established the transfer stopped/);
+    expect(d).toMatch(/NOT FOUND NEVER MEANS STOPPED/);
   });
 
   it("exempts a ComfyUI-Manager dispatch from the restart verdict", () => {
@@ -84,7 +84,7 @@ describe("download_model action:\"status\" describes the survival it actually ha
     // re-issue, which starts a SECOND multi-gigabyte transfer.
     const d = description();
     expect(d).toMatch(/ComfyUI-Manager/);
-    expect(d).toMatch(/Do NOT re-issue a Manager download/);
+    expect(d).toMatch(/do NOT re-issue a Manager download/i);
     expect(d).toMatch(/list_local_models/);
   });
 
@@ -108,8 +108,8 @@ describe("download_model action:\"status\" describes the survival it actually ha
     // matches persisted records by the trayId hash of the url — so a migrated
     // record is reachable by `id` only. The old text claimed both.
     const d = description();
-    expect(d).toMatch(/findable by `id` ONLY/);
-    expect(d).toMatch(/not by `url`/);
+    expect(d).toMatch(/findable by `id` ONLY, never by `url`/);
+    expect(d).toMatch(/never by `url`/);
   });
 
   // Requiring a qualifying phrase does NOT stop someone appending its opposite —
@@ -119,7 +119,12 @@ describe("download_model action:\"status\" describes the survival it actually ha
   it.each([
     [/\balways (?:exists|carried over|resolvable|survives)\b/i, "an unconditional survival claim"],
     [/\bnever (?:missing|absent|lost)\b/i, "an unconditional presence claim"],
-    [/carried-over record[^.]*\bby `?url`?\b/i, "url lookup for a carried-over record"],
+    // Must require an AFFIRMATIVE claim, not mere proximity: the description
+    // legitimately says a carried-over record is "never by `url`", and a
+    // proximity pattern flagged that DENIAL as if it were the promise. A scan
+    // that cannot tell an assertion from its negation fires on the correct text.
+    [/(?:resolvable|findable|reachable) by `?url`?[^.]*carried-over/i, "url lookup for a carried-over record"],
+    [/carried-over[^.]*(?:is|are) (?:resolvable|findable|reachable) by `?url`?/i, "url lookup for a carried-over record (reverse order)"],
     [/\bguaranteed\b/i, "a guarantee"],
   ])("contains no %s — %s", (pattern) => {
     expect(description()).not.toMatch(pattern as RegExp);
