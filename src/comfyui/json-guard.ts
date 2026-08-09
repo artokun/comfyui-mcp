@@ -89,6 +89,62 @@ const URL_REDACTED = "REDACTED";
  * value: anything credential-shaped goes, whether or not we can prove it is
  * ours. A diagnostic that can print a secret is not worth the diagnosis.
  */
+/**
+ * Redact credentials from log lines before they reach a tool result (#1206).
+ *
+ * A ComfyUI log is a plausible place for one to appear: a custom node logging
+ * the URL it fetched (CivitAI and HuggingFace download URLs routinely carry a
+ * token in the query string), ComfyUI-Manager logging an install URL, or any
+ * node logging a request header on failure. `get_system_stats action:"logs"` is
+ * a DIAGNOSTIC tool, so it is called exactly when something is wrong — and its
+ * output is what a user pastes into a bug report.
+ *
+ * PER LINE, deliberately. The log line is the thing being asked for, so this
+ * keeps the line and redacts the match. Scrubbing the whole blob as one string
+ * would let a single unscrubbable line withhold the ENTIRE log, and a diagnostic
+ * that refuses to diagnose is not an improvement.
+ *
+ * Fail-closed is VISIBLE: a line that cannot be scrubbed safely (the credential
+ * is too short to substitute without mangling unrelated text, or it arrived
+ * line-wrapped) is REPLACED by a marker rather than dropped — so the log keeps
+ * its line count and the reader can see that something was withheld, instead of
+ * silently receiving a shorter log.
+ */
+export function scrubLogLines(lines: string[]): string[] {
+  const URL_RE = /https?:\/\/[^\s"'<>]+/g;
+  return lines.map((line) => {
+    // URLs and the rest of the line need DIFFERENT redactors, and running one
+    // over the other is what destroys the diagnostic.
+    //
+    //  - scrubSecretShapedText's opaque-run pass matches 24+ chars of an
+    //    alphabet including `/`, `.` and `-`, so an ordinary log URL collapses to
+    //    `https:«redacted»` — and a log line whose URL is gone has lost the fact
+    //    it exists to report ("which model was it fetching?").
+    //  - redactUrlForDiagnosis was built for exactly that: it keeps origin,
+    //    route and parameter NAMES and fails closed on userinfo, opaque path
+    //    segments and unknown query values — which is where a token lives.
+    //
+    // So: URLs go through the URL redactor, everything BETWEEN them through the
+    // shape/known-value scrubber, and the pieces are rejoined. Neither pass ever
+    // sees text the other owns.
+    const urls = line.match(URL_RE) ?? [];
+    const gaps = line.split(URL_RE);
+    const safeGaps: string[] = [];
+    for (const gap of gaps) {
+      const safe = scrubSecretShapedText(gap);
+      // Fail closed for the whole LINE, not the gap: a half-redacted line is
+      // harder to reason about than one that says it was withheld.
+      if (safe === null) return "(log line withheld: it contains a configured credential)";
+      safeGaps.push(safe);
+    }
+    let out = safeGaps[0] ?? "";
+    for (let i = 0; i < urls.length; i++) {
+      out += redactUrlForDiagnosis(urls[i]) + (safeGaps[i + 1] ?? "");
+    }
+    return out;
+  });
+}
+
 export function bodyPrefixOf(body: string): string {
   const redacted = scrubSecretShapedText(body);
   if (redacted === null) {
