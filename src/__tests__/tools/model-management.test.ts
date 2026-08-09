@@ -4,9 +4,15 @@ const downloadModelMock = vi.fn();
 const listLocalModelsMock = vi.fn();
 /** #369 post-landing verification, controlled per test. Default: the honest
  *  "could not check" verdict, echoing the path back. */
-const verifyLandedModelMock = vi.fn(async (targetPath: string) => ({
+// #1204 — the RETURN type comes from the real verdict, not from whatever this
+// default happens to contain. Inferring it from the literal made the mock's
+// shape narrower than `verifyLandedModel`'s, so a test overriding it with
+// `verifiedAgainstRoot` (real: model-resolver.ts:1349, read at
+// download-jobs.ts:623) was rejected by an annotation the test itself invented.
+type LandedVerdict = Awaited<ReturnType<typeof import("../../services/model-resolver.js").verifyLandedModel>>;
+const verifyLandedModelMock = vi.fn(async (targetPath: string): Promise<LandedVerdict> => ({
   verifiedPath: targetPath,
-  liveVisible: "unknown" as string,
+  liveVisible: "unknown",
   note: "no live server in this test",
 }));
 /** The models root the connected server reads NOW (stubbed; see the mock). */
