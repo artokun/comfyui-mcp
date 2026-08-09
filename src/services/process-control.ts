@@ -5,8 +5,18 @@ import {
   type ChildProcess,
 } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, readlinkSync, statSync } from "node:fs";
-import { platform } from "node:os";
+import {
+  existsSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  statSync,
+  unlinkSync,
+  writeSync,
+} from "node:fs";
+import { homedir, platform } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { getSystemStats, resetClient, resetObjectInfoCache } from "../comfyui/client.js";
 import {
@@ -16,6 +26,7 @@ import {
   isRemoteMode,
 } from "../config.js";
 import { comfyuiFetch, describeTargetDrift } from "../comfyui/fetch.js";
+import { scrubLogLines } from "../comfyui/json-guard.js";
 import { errorText } from "../orchestrator/error-text.js";
 import {
   acquireInstanceWitness,
@@ -846,6 +857,126 @@ function exitCause(exit: {
   return "for an unknown reason";
 }
 
+/**
+ * What the child PRINTED before it died, for a relaunch that failed (#1259).
+ *
+ * A Stability Matrix relaunch exited code 1 and the report carried an exit code
+ * and nothing else, so the user was left offline with nothing to act on. The
+ * process had already said why — into `stdio: "ignore"`.
+ *
+ * A FILE, not a pipe. This child is `detached` and expected to outlive us: piping
+ * means either draining forever or closing a descriptor the server may still
+ * write to, and a closed pipe is an EPIPE that kills a server which was starting
+ * fine. A file descriptor stays valid whatever happens to this process, which is
+ * what "ignore" was buying and what this has to keep.
+ *
+ * Scrubbed through the same redactor as every other log this project surfaces
+ * (#1206/#1223): a launcher command line can carry a token, and this text goes
+ * into a tool result.
+ */
+/**
+ * Open the file a launched child's output is redirected into (#1259).
+ *
+ * Under the app's own config dir, not the OS temp dir, because the PATH IS
+ * REPORTED to the user and has to still be there when they go and look. One file
+ * per launch, named by timestamp and pid-less (the pid does not exist yet), so a
+ * failed launch's log is never overwritten by the retry that follows it.
+ *
+ * Returns undefined on any failure. A diagnostic that prevents a server from
+ * starting is worse than no diagnostic (#776's cardinal rule), so every error
+ * here degrades to the previous behaviour rather than propagating.
+ */
+export function openLaunchLog(cmd: { exe: string; args: string[]; cwd?: string }):
+  | { fd: number; path: string }
+  | undefined {
+  try {
+    // The same data dir the rest of the project uses, honouring the override.
+    const dir = join(
+      process.env.COMFYUI_MCP_DATA_DIR?.trim() || join(homedir(), ".comfyui-mcp"),
+      "launch-logs",
+    );
+    mkdirSync(dir, { recursive: true });
+    pruneLaunchLogs(dir);
+    const path = join(dir, `comfyui-launch-${launchLogStamp()}.log`);
+    const fd = openSync(path, "a");
+    // The command itself is the first thing in the log: an exec failure prints
+    // nothing, and then this header is the only evidence of what was attempted.
+    // Scrubbed, because a launcher command line can carry a credential.
+    writeSync(
+      fd,
+      scrubLogLines([
+        `# comfyui-mcp launch`,
+        `# exe: ${cmd.exe}`,
+        `# args: ${cmd.args.join(" ")}`,
+        `# cwd: ${cmd.cwd ?? "(inherited)"}`,
+      ]).join("\n") + "\n",
+    );
+    return { fd, path };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Sortable, filename-safe, second resolution — enough to keep consecutive
+ *  relaunch attempts in separate files without a pid we do not have yet. */
+function launchLogStamp(): string {
+  return new Date().toISOString().replace(/[:.]/g, "-").replace(/Z$/, "");
+}
+
+/** Keep the newest few. These are written on every relaunch and nothing else
+ *  ever deletes them, so without this the directory grows for the life of the
+ *  install. */
+function pruneLaunchLogs(dir: string): void {
+  try {
+    const keep = 10;
+    const files = readdirSync(dir)
+      .filter((f) => f.startsWith("comfyui-launch-") && f.endsWith(".log"))
+      .sort();
+    for (const stale of files.slice(0, Math.max(0, files.length - keep))) {
+      try {
+        unlinkSync(join(dir, stale));
+      } catch {
+        /* a log we cannot delete is not worth failing a launch over */
+      }
+    }
+  } catch {
+    /* pruning is housekeeping; never let it block the launch */
+  }
+}
+
+export function describeLaunchLog(logPath: string | undefined): string {
+  if (!logPath) return "";
+  let raw: string;
+  try {
+    raw = readFileSync(logPath, "utf-8");
+  } catch {
+    // The log is a diagnostic aid; failing to read it must never replace the
+    // failure being reported.
+    return ` Its output was being written to ${logPath}, which could not be read back.`;
+  }
+  const lines = raw.split(/\r?\n/).filter((l) => l.trim().length > 0);
+  if (lines.length === 0) {
+    // AN EMPTY LOG IS EVIDENCE, and a different kind than a missing one: the
+    // process died without printing, which points at the exec itself rather than
+    // at ComfyUI's startup.
+    return (
+      ` It printed NOTHING before exiting (log: ${logPath}) — so it failed before ComfyUI's own startup produced output, ` +
+      `which points at the command or its environment rather than at ComfyUI.`
+    );
+  }
+  const tail = scrubLogLines(lines.slice(-LAUNCH_LOG_TAIL_LINES));
+  const omitted = lines.length - tail.length;
+  return (
+    ` Its last output before exiting${omitted > 0 ? ` (last ${tail.length} of ${lines.length} lines)` : ""}:\n` +
+    tail.map((l) => `    ${l}`).join("\n") +
+    `\n  Full log: ${logPath}`
+  );
+}
+
+/** Enough to carry a Python traceback, bounded so a chatty startup cannot flood
+ *  a tool result. The full log stays on disk and its path is always named. */
+const LAUNCH_LOG_TAIL_LINES = 40;
+
 function describeLaunchedChildExit(
   exit: { code: number | null; signal: NodeJS.Signals | null } | undefined,
 ): string {
@@ -1035,6 +1166,9 @@ interface SpawnedComfyUI {
    * started, rather than a different program that inherited its pid.
    */
   launchArgv?: string[];
+  /** Where this launch's stdout/stderr were redirected (#1259), so a failure can
+   *  report what the child printed and name a file the user can still read. */
+  launchLogPath?: string;
 }
 
 let recordedLaunchChild: ChildProcess | undefined;
@@ -1082,9 +1216,15 @@ function spawnFromProcessInfo(info: ProcessInfo): SpawnedComfyUI | null {
   // launcher environment is refused earlier, by assessRelaunch, while the server
   // is still UP; here it only downgrades to "inherit + warn".
   const envPlan = ensureLaunchEnvPlan(info, cmd);
+  // #1259 — the child's output goes to a FILE so a failed relaunch can say what
+  // it printed. `stdio: "ignore"` discarded exactly the evidence a user needs
+  // when the launch exits non-zero, which left one offline with only "exit code
+  // 1". Falls back to "ignore" if the log cannot be opened: a diagnostic must
+  // never be the reason a server does not come back up (#776's cardinal rule).
+  const launchLog = openLaunchLog(cmd);
   const child = spawn(cmd.exe, cmd.args, {
     detached: true,
-    stdio: "ignore",
+    stdio: launchLog ? ["ignore", launchLog.fd, launchLog.fd] : "ignore",
     // Omitted (undefined) for a plain install → the child inherits this process's
     // environment, exactly as before #776. Set only when we have a BETTER answer:
     // the live process's own environment, or a launcher environment reconstructed
@@ -1104,7 +1244,7 @@ function spawnFromProcessInfo(info: ProcessInfo): SpawnedComfyUI | null {
   // the moment a different process owns the port. (Desktop-app launches return
   // above: that exe is a launcher, not an interpreter.)
   if (child.pid) recordLaunchedInterpreter(child.pid, cmd.exe);
-  return { child, launchArgv: [cmd.exe, ...cmd.args] };
+  return { child, launchArgv: [cmd.exe, ...cmd.args], launchLogPath: launchLog?.path };
 }
 
 /**
@@ -2822,7 +2962,12 @@ export async function startComfyUI(anchor?: {
               (launchedChildExit
                 ? describeLaunchedChildExit(launchedChildExit)
                 : " The process this call launched is no longer running, so THIS RELAUNCH FAILED — it was not a slow start.")) +
-          ' Check the ComfyUI logs, and re-check with get_system_stats (action:"health") before assuming nothing is serving the port — an external launcher or supervisor may have brought one back since.' +
+          // #1259 — WHAT IT PRINTED, on every failing branch. "exit code 1" and
+          // nothing else is the least actionable thing a failed launch can say,
+          // and it left a reporter offline with no way to diagnose it. The child
+          // had already explained itself; the output was going to `ignore`.
+          describeLaunchLog(launched.launchLogPath) +
+          ' Re-check with get_system_stats (action:"health") before assuming nothing is serving the port — an external launcher or supervisor may have brought one back since.' +
           (env ? ` Launch environment: ${env.note}.` : "") +
           launchEnvWarning(info),
         auto_restart: supervisorResult(info),
