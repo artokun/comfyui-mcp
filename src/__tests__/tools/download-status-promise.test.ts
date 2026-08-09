@@ -78,9 +78,13 @@ describe("download_model action:\"status\" claims only what the code delivers (#
     // migration reads neither. The cancel path REFUSES to close a stale record
     // until that probe returns ESRCH (#761/#858) — this must not claim more.
     const d = statusParagraph();
-    expect(d).toMatch(/INTERRUPTED/);
-    expect(d).toMatch(/stopped watching/i);
-    expect(d).toMatch(/without checking whether the writer is still alive/i);
+    // Deliberately does NOT hardcode a label: since #1197 the record uses
+    // "INTERRUPTED" for a local stream and "NO LONGER WATCHED" for a Manager
+    // dispatch, and a description naming one of them would be wrong half the
+    // time — the fold this whole issue is about.
+    expect(d).toMatch(/STOPPED WATCHING/);
+    expect(d).not.toMatch(/an INTERRUPTED note/);
+    expect(d).toMatch(/not that the bytes stopped, which it does not check/i);
   });
 
   it("warns that re-issuing a Manager dispatch CORRUPTS, rather than exempting it", () => {
@@ -91,19 +95,22 @@ describe("download_model action:\"status\" claims only what the code delivers (#
     // the same destination and corrupts the model.
     const d = statusParagraph();
     expect(d).toMatch(/ComfyUI-Manager/);
-    expect(d).toMatch(/runs on the ComfyUI HOST|on the ComfyUI HOST/);
+    expect(d).toMatch(/runs on the ComfyUI host/i);
     expect(d).toMatch(/corrupts the model/i);
     expect(d).not.toMatch(/produces no interrupted record/i);
     expect(d).not.toMatch(/committed done the moment the dispatch is ACCEPTED/i);
   });
 
-  it("gives a confirmation that works DURING the transfer", () => {
-    // "confirm with list_local_models" alone routes the caller into the harm:
-    // an in-progress file is not listed, and Manager may stage it under its own
-    // type dir, so the only answer available mid-flight is the misleading one.
+  it("defers to the RECORD rather than repeating a route-specific verdict", () => {
+    // Once #1197 made the record itself say the true thing per route, the
+    // description repeating it was both redundant and a liability: this
+    // paragraph still carried "re-check list_local_models until the file
+    // appears and its size stops changing", which #1197 established is
+    // DANGEROUS — an in-progress file is never listed, so that check can only
+    // terminate the wrong way. The description now points at the record.
     const d = statusParagraph();
-    expect(d).toMatch(/until the file appears and its size stops changing/i);
-    expect(d).toMatch(/empty folder mid-download is normal/i);
+    expect(d).toMatch(/READ THE NOTE ON THAT RECORD/);
+    expect(d).not.toMatch(/until the file appears and its size stops changing/i);
   });
 
   it("does not promise the carried-over record EXISTS, or a url lookup for it", () => {
@@ -136,6 +143,6 @@ describe("download_model action:\"status\" claims only what the code delivers (#
       "The action:\"status\" description changed. That is fine — but every claim in it " +
         "has been wrong at least once (see the header). Re-verify each against " +
         "download-jobs.ts / download-progress.ts / node-management.ts, then update this hash.",
-    ).toBe("d598d963ae422c5a");
+    ).toBe("0409e46e3806d89d");
   });
 });
