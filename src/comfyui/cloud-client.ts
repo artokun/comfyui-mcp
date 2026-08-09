@@ -22,6 +22,7 @@ import {
   deliveryDoubt,
   isTimeoutAbort,
 } from "./fetch.js";
+import { bodyPrefixOf, describeStatus } from "./json-guard.js";
 import { ComfyUIError, ConnectionError, describeFetchFailure } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 import type { HistoryEntry } from "./client.js";
@@ -62,8 +63,14 @@ async function cloudFetch(
       // HTTP status is reported either way, so an unreadable body costs detail in the
       // text, never a wrong conclusion. Verified there is no branch on this value.
       const body = await res.text().catch(() => "");
+      // #1191 — same raw-500-byte exposure as the local /prompt builder, on the
+      // path that carries a CLOUD API KEY. A gateway that reflects the request
+      // can echo it in the body it answers with, and this string lands in a tool
+      // result users paste into bug reports. bodyPrefixOf redacts by shape as
+      // well as by known value and withholds entirely when it cannot substitute
+      // safely; describeStatus does the same for the reason phrase.
       throw new ComfyUIError(
-        `Cloud API error: ${res.status} ${res.statusText} — ${body.slice(0, 500)}`,
+        `Cloud API error: ${describeStatus(res.status, res.statusText)} — ${bodyPrefixOf(body)}`,
         "CLOUD_API_ERROR",
         { url, status: res.status },
       );

@@ -621,7 +621,11 @@ async function buildEnqueueError(res: Response): Promise<ComfyUIError> {
   // HTTP status and claims nothing about node errors. An unread body and an empty
   // body get the same honest fallback rather than a fabricated validation result.
   const bodyText = await res.text().catch(() => "");
-  const generic = `ComfyUI /prompt returned ${res.status} ${res.statusText}`;
+  // #1191 — statusText is attacker-influenceable on a hostile proxy and lands in
+  // a message the agent reads, so it gets the same scrub the body does.
+  // describeStatus drops a standard reason phrase entirely (it adds nothing),
+  // clips a long one, and falls back to the bare status if it cannot scrub.
+  const generic = `ComfyUI /prompt returned ${describeStatus(res.status, res.statusText)}`;
 
   let parsed: unknown;
   try {
@@ -668,10 +672,18 @@ async function buildEnqueueError(res: Response): Promise<ComfyUIError> {
     }
   }
 
-  // Empty or unexpected body: fall back to the generic HTTP status, but keep
-  // any raw text so nothing is silently dropped.
+  // Empty or unexpected body: fall back to the generic HTTP status, but keep a
+  // REDACTED prefix of the text so nothing is silently dropped.
+  //
+  // #1191 — this used to interpolate 500 RAW bytes. A gateway that reflects the
+  // request can echo our own credential in the body it answers with, and this
+  // string goes straight into a tool result the agent reads and users paste into
+  // bug reports. /prompt is the worst endpoint to have that on: it is the call
+  // every render makes, so this is the error path most likely to be hit and
+  // shared. bodyPrefixOf redacts by SHAPE as well as by known value, and
+  // withholds the prefix entirely when it cannot substitute safely.
   return new ConnectionError(
-    bodyText ? `${generic}: ${bodyText.slice(0, 500)}` : generic,
+    bodyText ? `${generic}: ${bodyPrefixOf(bodyText)}` : generic,
   );
 }
 

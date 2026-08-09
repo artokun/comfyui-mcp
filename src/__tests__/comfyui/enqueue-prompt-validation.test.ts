@@ -88,7 +88,20 @@ describe("enqueuePrompt — surfaces ComfyUI 400 validation details (#485)", () 
     const err = await enqueuePrompt({}).catch((e) => e);
     expect(err).toBeInstanceOf(ComfyUIError);
     expect((err as Error).message).toContain("400");
-    expect((err as Error).message).toContain("Bad Request");
+    // #1191 — the STATUS is what this test is about, and it is still named.
+    // describeStatus deliberately drops a STANDARD reason phrase ("Bad Request"
+    // adds nothing over 400) and scrubs a non-standard one, because a reason
+    // phrase is attacker-influenceable on a hostile proxy and lands in a message
+    // the agent reads. A NON-standard phrase still comes through, which is the
+    // half that carries information — asserted below.
+    expect((err as Error).message).toContain("ComfyUI /prompt returned 400");
+  });
+
+  it("#1191: keeps a NON-standard reason phrase, which is the informative one", async () => {
+    comfyuiFetch.mockResolvedValueOnce(res(503, "", "Upstream model host unavailable"));
+    const err = await enqueuePrompt({}).catch((e) => e);
+    expect((err as Error).message).toContain("503");
+    expect((err as Error).message).toContain("Upstream model host unavailable");
   });
 
   it("returns prompt_id + the authoritative /queue depth on success", async () => {
