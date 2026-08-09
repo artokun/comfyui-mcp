@@ -220,6 +220,27 @@ export async function setupSecureBridge(opts: SetupSecureBridgeOpts): Promise<Se
  * bridge.attachRelayConnection, making it indistinguishable from a direct
  * loopback socket to the rest of the orchestrator.
  */
+/**
+ * The identity origin for a relay-attached panel connection (#1077).
+ *
+ * `scheme://host[:port]`, lowercased and port-normalised, matching the shape a
+ * browser sends as `Origin` and `workflowIdentityParts()` expects. Returns
+ * undefined when the URL cannot be parsed rather than inventing a string: a
+ * WRONG origin is worse than none, because none refuses adoption visibly while a
+ * wrong one scopes the fence to an identity no other transport will reproduce.
+ */
+export function relayIdentityOrigin(comfyuiUrl: string | undefined): string | undefined {
+  if (typeof comfyuiUrl !== "string" || !comfyuiUrl.trim()) return undefined;
+  try {
+    // `new URL().origin` already omits a default port and lowercases the host,
+    // which is exactly the normalisation the loopback path's header goes through.
+    const origin = new URL(comfyuiUrl.trim()).origin;
+    return origin && origin !== "null" ? origin.toLowerCase() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function setupRelayBridge(opts: SetupSecureBridgeOpts): Promise<SecureBridge> {
   const { comfyuiUrl, token, bridge } = opts;
   const relayUrl = process.env.COMFYUI_MCP_RELAY_URL?.trim();
@@ -238,7 +259,20 @@ async function setupRelayBridge(opts: SetupSecureBridgeOpts): Promise<SecureBrid
     sessionId,
     token,
     accessKey: process.env.COMFYUI_MCP_RELAY_KEY?.trim() || undefined,
-    onAttach: (sock) => bridge.attachRelayConnection(sock),
+    // #1077 — the workflow-instance fence is scoped to the connection's
+    // server-observed Origin, and a relay socket has no handshake to observe one
+    // from: `attachRelayConnection` passed none, so `workflowIdentityParts()`
+    // refused, and every relay-backend session was PERMANENTLY unable to adopt a
+    // fence. The reporter refreshed, closed and reopened the tab, and traced it
+    // to source before finding that nothing could have helped.
+    //
+    // It does not need the relay protocol to forward the browser's Origin. The
+    // Origin identifies WHERE THE PANEL PAGE IS SERVED FROM, and that is the
+    // ComfyUI this session is already pointed at — which the orchestrator holds
+    // right here. It is DERIVED rather than observed, so it asserts what the
+    // loopback path proves; in a single-machine session those are the same fact,
+    // and the alternative is a fence nobody can ever adopt.
+    onAttach: (sock) => bridge.attachRelayConnection(sock, relayIdentityOrigin(comfyuiUrl)),
   });
   client.start();
   try {

@@ -61,12 +61,17 @@ export function identityReason(
     return ambiguousTurn(tabId, "no single tab's identity could be read");
   }
   if (!origin) {
+    // The relay case USED to land here and was told, correctly at the time, that
+    // its problem was permanent. It no longer is: the relay path now supplies the
+    // origin it already knows from COMFYUI_URL, so a relay session adopts fences
+    // like any other. Naming a fixed cause as the "known case" would send a
+    // reader to change a backend that is no longer the reason (#1077).
     return (
       `this tab's connection carries no server-observed Origin, and the workflow identity is ` +
-      `bound to one — so the fence can never be adopted for it. This is structural, not ` +
-      `transient: refreshing the tab will not change it. Relay-backend connections ` +
-      `(COMFYUI_MCP_TUNNEL_BACKEND=relay) are the known case, because the relay protocol does ` +
-      `not forward the browser's handshake Origin.`
+      `bound to one — so the fence cannot be adopted for it. Refreshing the tab will not ` +
+      `change it. This means the connection reached the orchestrator by a path that neither ` +
+      `observed nor was told the panel's origin; if COMFYUI_URL is unset or unparseable for ` +
+      `this session, setting it to the URL the panel is served from is what supplies it.`
     );
   }
   return (

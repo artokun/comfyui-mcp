@@ -7,11 +7,17 @@
 //
 // That is unactionable in general and WRONG in one specific case. Identity is
 // bound to the connection's server-observed Origin, and a relay-backend
-// connection has none: `attachRelayConnection(sock)` calls `handleConnection(sock)`
+// connection had none: `attachRelayConnection(sock)` called `handleConnection(sock)`
 // with no origin argument, and the relay protocol does not forward the browser's
-// handshake Origin. So `workflowIdentityParts()` can never validate, the fence can
-// NEVER be adopted, and no amount of refreshing changes it. The reporter refreshed
-// repeatedly and closed and reopened the tab before tracing it to source.
+// handshake Origin. So `workflowIdentityParts()` could never validate, the fence
+// could NEVER be adopted, and no amount of refreshing changed it. The reporter
+// refreshed repeatedly and closed and reopened the tab before tracing it to source.
+//
+// THE RELAY HALF IS NOW FIXED and the wording moved with it: the Origin identifies
+// where the panel page is SERVED FROM, which is the ComfyUI the session already
+// points at, so `setupRelayBridge` supplies it from COMFYUI_URL and no relay
+// protocol change was needed. What remains here is the diagnosis for a connection
+// that genuinely has no origin from any source.
 //
 // They also had no orchestrator log to read, which is why the reason has to reach
 // the TOOL RESULT and not just stderr.
@@ -235,12 +241,25 @@ describe("the refusal reasons distinguish an AMBIGUOUS turn", () => {
     expect(r).not.toMatch(/refreshing the tab will not change it/);
   });
 
-  it("gate 3: a genuine no-Origin connection KEEPS the structural remedy", () => {
+  it("gate 3: a genuine no-Origin connection says refreshing will not help", () => {
     const r = identityReason(TAB, undefined, UUID, undefined);
 
     expect(r).toMatch(/no server-observed Origin/);
-    expect(r).toMatch(/structural, not transient/);
-    expect(r).toMatch(/COMFYUI_MCP_TUNNEL_BACKEND=relay/);
+    expect(r).toMatch(/[Rr]efreshing the tab will not/);
+    // ...and names something the reader can actually check.
+    expect(r).toMatch(/COMFYUI_URL/);
+  });
+
+  it("gate 3: no longer blames the relay backend, which is FIXED", () => {
+    // The relay path now supplies the origin it already knows from COMFYUI_URL
+    // (#1077), so a relay session adopts fences like any other. Telling a reader
+    // to stop using that backend would send them to change the one thing that is
+    // no longer the reason — a remedy that is worse than none, because it looks
+    // specific.
+    const r = identityReason(TAB, undefined, UUID, undefined);
+
+    expect(r).not.toMatch(/COMFYUI_MCP_TUNNEL_BACKEND/);
+    expect(r).not.toMatch(/can never be adopted/);
   });
 
   it("gate 3: an origin that IS present reports a validation failure, not absence", () => {

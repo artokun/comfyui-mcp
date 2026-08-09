@@ -1810,8 +1810,14 @@ export class UiBridge {
    * exact same hello/rid/tab-routing logic a direct loopback socket gets. From
    * here on the relay shim is indistinguishable from a real connection.
    */
-  attachRelayConnection(sock: BridgeSocket): void {
-    this.handleConnection(sock);
+  /**
+   * @param serverOrigin The origin to scope this connection's workflow identity
+   *   to. A relay socket has no handshake to observe one from (#1077), so the
+   *   caller supplies the one it already knows — see `setupRelayBridge`. Omitting
+   *   it leaves the connection unable to ever adopt a workflow fence.
+   */
+  attachRelayConnection(sock: BridgeSocket, serverOrigin?: string): void {
+    this.handleConnection(sock, false, serverOrigin);
   }
 
   /**
