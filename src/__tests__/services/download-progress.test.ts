@@ -386,15 +386,37 @@ describe("migrateInFlightJobs (#1148)", () => {
     expect(found!.received).toBe(700000000);
   });
 
-  it("says the transfer is NOT running and will not resume itself", () => {
-    // The whole harm was an agent waiting forever on the documented contract.
+  it("tells the caller nothing is WATCHING, without claiming the bytes stopped", () => {
+    // The original harm was an agent waiting forever on the documented contract,
+    // so the record must still end the wait — that half is unchanged.
+    //
+    // But the previous version of this test pinned "NOT running", "will not
+    // resume on its own" and "Re-issue the download", and those are CLAIMS THIS
+    // CODE CANNOT MAKE. The migration reads neither the `pid` nor the `owner` it
+    // persists, and `writerProcessGone()` exists precisely to answer the question
+    // it skips — the cancel path refuses to close a stale record until that probe
+    // returns ESRCH (#761/#858). Worse, a download DISPATCHED to ComfyUI-Manager
+    // runs on the ComfyUI host, which a restart here does not touch: telling that
+    // caller to re-issue starts a second write to the same destination and
+    // corrupts the model (#1197).
+    //
+    // So this test used to enforce the defect. It now pins the honest version:
+    // say what we observed (we stopped watching), and do not order a re-issue.
     writeJob(oldDir, { id: "abc", status: "downloading", updated: Date.now() });
     mod.migrateInFlightJobs(oldDir, dir);
     const msg = mod.readPersistedDownloadJob("abc")!.error ?? "";
-    expect(msg).toMatch(/INTERRUPTED/);
-    expect(msg).toMatch(/NOT running/);
-    expect(msg).toMatch(/will not resume on its own/);
-    expect(msg).toMatch(/Re-issue the download/);
+    // Still ends the wait, and still says the partial may be gone.
+    expect(msg).toMatch(/no longer being WATCHED/);
+    expect(msg).toMatch(/no further progress will be reported/);
+    expect(msg).toMatch(/partial file may have been discarded/);
+    // Says what it does NOT establish, and names the host-side case.
+    expect(msg).toMatch(/does NOT establish is whether the bytes stopped/);
+    expect(msg).toMatch(/ComfyUI-Manager runs on the ComfyUI host/);
+    // Gives a TERMINATING check rather than an unbounded "wait for it".
+    expect(msg).toMatch(/stops appearing over a couple of minutes/);
+    // And must never issue the bare order that made this dangerous.
+    expect(msg).not.toMatch(/^\s*Re-issue the download\.?\s*$/m);
+    expect(msg).not.toMatch(/will not resume on its own/);
   });
 
   it("does NOT migrate a TERMINAL record — its outcome was already delivered", () => {

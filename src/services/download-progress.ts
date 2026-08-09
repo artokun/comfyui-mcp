@@ -134,10 +134,16 @@ export function migrateInFlightJobs(fromDir: string, toDir: string): number {
         updated: Date.now(),
         interrupted_by_restart: true,
         error:
-          `This download was INTERRUPTED: the orchestrator process it was streaming ` +
-          `inside exited (a restart or a session drop), so the transfer stopped. It is ` +
-          `NOT running and will not resume on its own — nothing is waiting to finish. ` +
-          `Any partial file may also have been discarded. Re-issue the download.`,
+          `This download is no longer being WATCHED: the orchestrator process that was ` +
+          `tracking it exited (a restart or a session drop), so nothing here is waiting ` +
+          `on it and no further progress will be reported. Any partial file may have been ` +
+          `discarded. What that does NOT establish is whether the bytes stopped — this ` +
+          `record is written without checking the writer, and a download DISPATCHED to ` +
+          `ComfyUI-Manager runs on the ComfyUI host, which a restart here does not touch. ` +
+          `Before re-issuing, check list_local_models on the connected server until the ` +
+          `file appears and its size stops changing, or stops appearing over a couple of ` +
+          `minutes. Re-issuing a transfer that is still running writes a SECOND copy to ` +
+          `the same destination and corrupts the model.`,
       };
       writeFileSync(
         join(toDir, `${JOB_PREFIX}${sanitizeIdPart(raw.id)}-${PERSIST_OWNER}.json`),

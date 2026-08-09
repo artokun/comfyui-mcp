@@ -24,6 +24,8 @@
 // has crept back in. A test that only requires phrases lets an author append
 // their opposite — the round-2 gate demonstrated exactly that.
 
+import { createHash } from "node:crypto";
+
 import { describe, expect, it } from "vitest";
 
 import { registerModelManagementTools } from "../../tools/model-management.js";
@@ -108,45 +110,28 @@ describe("download_model action:\"status\" claims only what the code delivers (#
   });
 
   // ---------------------------------------------------------------------------
-  // The scans. Requiring phrases does not stop an author appending their
-  // opposite, and an adjective-keyed scan is walked past by a synonym — the
-  // final gate bypassed the previous version with "discoverable by `url`".
-  // These work on SENTENCES and are negation-aware, so they do not depend on
-  // guessing which verb someone will reach for.
+  // A CONTENT PIN, not a keyword scan.
+  //
+  // Three successive keyword gates were each declared fixed and each bypassed:
+  // a proximity scan (fired on the legitimate denial), a verb-keyed scan
+  // ("discoverable by `url`" walked through), and a noun+negation-aware scan —
+  // which the final gate broke twelve different ways, including by using ANY
+  // negation in the sentence to disarm the check, and by reversing the core
+  // claim in wording that matched no keyword at all.
+  //
+  // The lesson is that a keyword scan cannot police prose: the synonym space is
+  // unbounded, so each patch only closes the last hole. This pins the paragraph
+  // by CONTENT instead. It cannot be argued past — any edit fails it, and the
+  // author has to re-read the claims and update the hash deliberately. The
+  // positive assertions above stay as the readable statement of intent.
   // ---------------------------------------------------------------------------
-
-  const sentences = (): string[] =>
-    statusParagraph()
-      .split(/(?<=[.;])\s+/)
-      .map((s) => s.trim())
-      .filter(Boolean);
-
-  const NEGATED = /\b(?:not|never|no|cannot|can't|without|nothing)\b/i;
-
-  it("makes no AFFIRMATIVE claim that a carried-over record is reachable by url", () => {
-    // Verb-agnostic: any sentence that mentions BOTH a carry-over and `url`
-    // must be a denial. "discoverable by url", "a url lookup finds it" and
-    // anything else phrased affirmatively fail here.
-    const offenders = sentences().filter(
-      (s) => /carry-over|carried across|carried-over/i.test(s) && /\burl\b/i.test(s) && !NEGATED.test(s),
-    );
-    expect(offenders, "affirmative url-lookup claim for a carried-over record").toEqual([]);
-  });
-
-  it("makes no unconditional survival claim anywhere in the paragraph", () => {
-    // Not an enumeration of what may follow "always" — the previous version
-    // missed "always written", "always happens", "always carried forward".
-    const offenders = sentences().filter((s) => /\b(?:always|guaranteed|invariably)\b/i.test(s));
-    expect(offenders, "absolute survival wording").toEqual([]);
-  });
-
-  it("never tells the caller a missing record means the download finished or stopped", () => {
-    const offenders = sentences().filter(
-      (s) =>
-        /\b(?:missing|absent|not found|no record)\b/i.test(s) &&
-        /\b(?:finished|completed|stopped|dead|is not running)\b/i.test(s) &&
-        !NEGATED.test(s),
-    );
-    expect(offenders, "absence read as completion").toEqual([]);
+  it("has not changed without re-reading the claims above", () => {
+    const hash = createHash("sha256").update(statusParagraph(), "utf8").digest("hex").slice(0, 16);
+    expect(
+      hash,
+      "The action:\"status\" description changed. That is fine — but every claim in it " +
+        "has been wrong at least once (see the header). Re-verify each against " +
+        "download-jobs.ts / download-progress.ts / node-management.ts, then update this hash.",
+    ).toBe("d598d963ae422c5a");
   });
 });
