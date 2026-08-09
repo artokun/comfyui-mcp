@@ -88,9 +88,14 @@ describe("describeUnresolvedDownload (#1183)", () => {
     expect(mod.describeUnresolvedDownload("done1")).toBeUndefined();
   });
 
-  it("says nothing for a STALE in-flight record — the writer is gone", () => {
-    // Beyond the freshness window this is not evidence of a live transfer, and
-    // claiming it is would be the same defect in the other direction.
+  it("REPORTS a stale in-flight record, hedged — a missed heartbeat is not proof", () => {
+    // This assertion used to demand silence here, and that was the bug in my own
+    // first version: it used the same 60s window the lookup uses, so it went
+    // quiet in exactly the situation most likely to have produced the reporter's
+    // one-poll miss — a heartbeat delayed while the writer was busy at 90% of a
+    // 26GB file. The codebase already states the rule (#761): a missed heartbeat
+    // is a liveness HINT, not proof the transfer stopped, which is why in-flight
+    // records are retained for 6h rather than reaped at 60s.
     writeFileSync(
       join(dir, `${progress.CONTROL_PREFIX}job-stale1-ownerA.json`),
       JSON.stringify({
@@ -101,7 +106,14 @@ describe("describeUnresolvedDownload (#1183)", () => {
         updated: Date.now() - progress.PERSISTED_INFLIGHT_STALE_MS - 1000,
       }),
     );
-    expect(mod.describeUnresolvedDownload("stale1")).toBeUndefined();
+    const note = mod.describeUnresolvedDownload("stale1");
+    expect(note).toBeDefined();
+    expect(note).toMatch(/stopped reporting/);
+    expect(note).toMatch(/liveness HINT, not proof/);
+    expect(note).toMatch(/NOT the same as it being gone/);
+    // Hedged, not asserted: it must not claim the transfer IS running.
+    expect(note).not.toMatch(/IS still running/);
+    expect(note).toMatch(/BEFORE re-downloading/);
   });
 });
 

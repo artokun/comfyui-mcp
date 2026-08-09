@@ -1138,14 +1138,46 @@ export function getDownloadJob(id: string, trayId?: string): DownloadJob | undef
 export function describeUnresolvedDownload(id: string): string | undefined {
   const now = Date.now();
   const liveInMemory = jobs.get(id)?.job;
-  const livePersisted = listPersistedDownloadJobs().filter(
-    (r) =>
-      r.id === id &&
-      r.status === "downloading" &&
-      now - (r.updated ?? 0) < PERSISTED_INFLIGHT_STALE_MS,
+  const inFlight = listPersistedDownloadJobs().filter(
+    (r) => r.id === id && r.status === "downloading",
+  );
+  const livePersisted = inFlight.filter(
+    (r) => now - (r.updated ?? 0) < PERSISTED_INFLIGHT_STALE_MS,
+  );
+  // A STALE in-flight record counts here, hedged — and getting that wrong is
+  // what would have left the REPORTED case uncovered.
+  //
+  // This function first used the same freshness window the lookup uses, which
+  // means it went silent in exactly the situation most likely to have produced a
+  // one-poll miss during a 26GB transfer: a heartbeat delayed past 60s while the
+  // writer was busy. The codebase already states the right rule one file over
+  // (#761): "a missed heartbeat is only a liveness hint, not proof the transfer
+  // stopped" — which is why an in-flight record is retained for 6h rather than
+  // reaped at 60s. Declining to mention such a record would repeat the very fold
+  // this fix exists to remove, one level down.
+  const stalePersisted = inFlight.filter(
+    (r) => now - (r.updated ?? 0) >= PERSISTED_INFLIGHT_STALE_MS,
   );
   const inMemoryLive = liveInMemory?.status === "downloading";
-  if (!inMemoryLive && livePersisted.length === 0) return undefined;
+  if (!inMemoryLive && livePersisted.length === 0 && stalePersisted.length === 0) {
+    return undefined;
+  }
+
+  // Only a stale record to go on: say what is known and what is not, rather than
+  // asserting either "running" or "gone".
+  if (!inMemoryLive && livePersisted.length === 0) {
+    const newest = stalePersisted.sort((a, b) => (b.updated ?? 0) - (a.updated ?? 0))[0];
+    const ageS = Math.round((now - (newest?.updated ?? now)) / 1000);
+    return (
+      `A download with id \`${id}\` has an IN-FLIGHT record that stopped reporting ` +
+      `${ageS}s ago — this lookup declined to answer for it, which is NOT the same as it ` +
+      `being gone. A missed heartbeat is a liveness HINT, not proof the transfer stopped: ` +
+      `the bytes may still be streaming while persistence was interrupted (a reconnect, or ` +
+      `a busy writer). Check the panel download tray, or re-run with no selector to list ` +
+      `every tracked download, BEFORE re-downloading — a second transfer would duplicate ` +
+      `a multi-gigabyte file.`
+    );
+  }
 
   const trays = [
     ...new Set([
