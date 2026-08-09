@@ -67,6 +67,31 @@ describe("scrubLogLines (#1206)", () => {
   it("is a no-op on an empty log", () => {
     expect(scrubLogLines([])).toEqual([]);
   });
+
+  // AWKWARD URL SHAPES. The split sends anything matching /https?:\/\/[^\s"'<>]+/
+  // to the URL redactor and everything else to the shape scrubber, so the cases
+  // worth pinning are the ones that sit awkwardly across that line: trailing
+  // punctuation swallowed into the match, a non-http scheme the URL redactor
+  // refuses, a scheme-relative URL the regex never matches at all, and a bare
+  // token with no URL. Each must be safe by SOME pass — that is the property,
+  // not which pass caught it.
+  it("leaks nothing across awkward URL shapes", () => {
+    const cases: Record<string, string> = {
+      parens: `see (https://hf.co/a/b?token=${HF}) for details`,
+      trailingDot: `url: https://hf.co/a/b?token=${HF}.`,
+      backticks: "url: `https://hf.co/a/b?token=" + HF + "`",
+      wsScheme: `ws://host/ws?token=${HF}`,
+      schemeRelative: `//hf.co/a/b?token=${HF}`,
+      bareToken: `bare token ${HF} with no url`,
+      userinfo: `https://user:${HF}@hf.co/a/b`,
+      fragment: `https://hf.co/a/b#access_token=${HF}`,
+    };
+    const leaked = Object.entries(cases)
+      .map(([name, line]) => [name, scrubLogLines([line])[0]] as const)
+      .filter(([, out]) => out.includes(HF))
+      .map(([name, out]) => `${name}: ${out}`);
+    expect(leaked, `these shapes leaked: ${leaked.join(" | ")}`).toEqual([]);
+  });
 });
 
 // THE WIRING. The helper cannot see whether its two consumers call it — the
