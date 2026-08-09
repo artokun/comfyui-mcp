@@ -2748,6 +2748,37 @@ async function unreadableOrHealed(
   return { status: "unreadable", before, detail };
 }
 
+/**
+ * The version-gap sentence for a fence rebind that failed on an OLD panel (#1043).
+ *
+ * Empty string when the panel is new enough, or when its version is unknown —
+ * an unproven version must never be narrated as "yours is too old", which would
+ * send someone to update a panel that is already current. That is the same
+ * three-state discipline the rest of this file runs on.
+ *
+ * Never throws: this decorates an error path, and a decoration that fails must
+ * not replace the diagnosis it was meant to improve.
+ */
+function panelTooOldNote(ctx: PanelToolCtx): string {
+  try {
+    const v = ctx.bridge?.panelTooOldForReplyUuid?.(ctx.tabId);
+    if (!v?.tooOld) return "";
+    return (
+      `
+
+WHY THIS READ WAS NEEDED AT ALL: this session's panel is ${v.version}, and a ` +
+      `panel only reports the new workflow's identity ON THE REPLY from ${v.needed} ` +
+      `onwards. On ${v.needed}+ the command that re-pointed the canvas repairs the ` +
+      `fence from its own reply and never makes this read — so UPDATING THE PANEL ` +
+      `to ${v.needed} or later removes this failure rather than working around it. ` +
+      `Update it with install_comfyui (action:"panel", panel_action:"sync"), then ` +
+      `restart ComfyUI.`
+    );
+  } catch {
+    return "";
+  }
+}
+
 async function rebindWorkflowFence(ctx: PanelToolCtx): Promise<WorkflowFenceRebind> {
   const tabAtStart = ctx.tabId;
   let before = currentWorkflowFence(ctx);
@@ -2891,6 +2922,13 @@ function describeFenceRebind(
    * first as the second is a bucket standing in for a cause (codex gate P1).
    */
   refusalCause?: "unroutable" | "disconnected" | "no_identity" | "capability",
+  /**
+   * #1043 — the version-gap sentence, when the connected panel is PROVABLY too
+   * old to publish the reply uuid this rebind exists to avoid needing. Passed in
+   * rather than looked up: this renderer is pure, and keeping it that way is what
+   * makes its wording testable without a bridge.
+   */
+  panelGapNote = "",
 ): {
   binding: "bound" | "reads_only" | "unverified" | "not_recovered";
   note: string;
@@ -3052,6 +3090,19 @@ function describeFenceRebind(
         note:
           ` Could NOT read the live canvas identity — the panel did not answer, so NOTHING ` +
           `about this session's graph binding was observed.` +
+          // #1043 — NAME THE VERSION GAP when that is what this is.
+          //
+          // The repair that would have avoided this read entirely
+          // (refreshFenceFromOwnReply, #1161) trusts a workflow_uuid the panel
+          // only publishes from 0.11.45. Three reports — #1043, #1077, #1174 —
+          // deadlocked here on OLDER panels: the fix is present and inert, and
+          // the message said only "could not be read", which reads as a mystery
+          // rather than as "update the panel".
+          //
+          // Only a PARSEABLE version below the minimum says this; an unknown
+          // version stays quiet rather than telling someone to update a panel
+          // that may already be current.
+          panelGapNote +
           // THREE states, not two (codex gate). "We could not read the existing
           // fence either" must not render as "it has no fence" — that absence was
           // never observed, and it is the same fold one level down.
@@ -8421,7 +8472,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           canMutateNow = undefined;
           refusalCause = undefined;
         }
-        const fence = describeFenceRebind(fenceRebind, canMutateNow, refusalCause);
+        const fence = describeFenceRebind(fenceRebind, canMutateNow, refusalCause, panelTooOldNote(ctx));
         if (!fence || fence.binding === "bound") return res;
         return appendNote(res, `The workflow WAS saved.${fence.note}`);
       },
@@ -8672,7 +8723,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           refusalCause = undefined;
         }
         const fence = fenceRebind
-          ? describeFenceRebind(fenceRebind, canMutateNow, refusalCause)
+          ? describeFenceRebind(fenceRebind, canMutateNow, refusalCause, panelTooOldNote(ctx))
           : undefined;
         if (fence && fence.binding === "not_recovered") {
           return fail(
@@ -8737,7 +8788,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           canMutateNow = undefined; // a guard that can throw is not a guard
           refusalCause = undefined;
         }
-        const fence = describeFenceRebind(fenceRebind, canMutateNow, refusalCause);
+        const fence = describeFenceRebind(fenceRebind, canMutateNow, refusalCause, panelTooOldNote(ctx));
         if (!fence || fence.binding === "bound") return res;
         return appendNote(
           res,

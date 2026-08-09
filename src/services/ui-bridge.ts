@@ -1086,6 +1086,16 @@ export const BRIDGE_DEFAULT_TIMEOUT_MS = 20_000;
  * sticky `isHeadless()` unacceptable for this gate.
  */
 export const HEADLESS_RECENCY_MS = 30 * 60_000;
+
+/**
+ * The first panel version whose save / new-workflow replies carry `workflow_uuid`
+ * (panel #800) — the value `refreshFenceFromOwnReply` (#1161) needs to repair a
+ * session fence without the round trip the fence itself refuses.
+ *
+ * Verified against the panel repo rather than assumed: #800 landed after the
+ * 0.11.44 release commit and first shipped in 0.11.45.
+ */
+export const PANEL_MIN_VERSION_REPLY_UUID = "0.11.45";
 /** More tolerant default for a READ (idempotent) command with no explicit timeout.
  *  A legitimately busy-but-alive panel main thread — e.g. Preview3D parsing a large
  *  FBX — can take many seconds to service a graph_query; failing it at the tight
@@ -2500,6 +2510,41 @@ export class UiBridge {
     // state to a human should use tabGraphMutationCapability instead — see below.
     const r = this.tabGraphMutationCapability(tabId);
     return r.known ? r.canMutate : false;
+  }
+
+  /**
+   * Is the connected panel PROVABLY too old to publish a workflow_uuid on the
+   * replies the fence recovery trusts? (#1043)
+   *
+   * `refreshFenceFromOwnReply` (#1161) repairs the session fence from the
+   * command's OWN reply, before attempting the round trip the fence refuses.
+   * That depends on the panel putting `workflow_uuid` on a save / new-workflow
+   * reply, which is panel #800 — first shipped in panel 0.11.45.
+   *
+   * Three reports (#1043, #1077, #1174) hit the same deadlock on panels BELOW
+   * that: the recovery finds nothing to adopt, falls back to the fenced read, and
+   * the user is told only that the identity "could not be read". The fix is
+   * present and inert, and the message names none of that.
+   *
+   * TRI-STATE, and the distinction is load-bearing: an UNKNOWN version must not
+   * render as "your panel is too old", which would send someone to update a panel
+   * that is already current. Only a parseable version below the minimum returns
+   * `{ tooOld: true }`.
+   */
+  panelTooOldForReplyUuid(tabId: string): {
+    tooOld: boolean;
+    version?: string;
+    needed: string;
+  } {
+    const needed = PANEL_MIN_VERSION_REPLY_UUID;
+    let version: string | undefined;
+    try {
+      version = this.resolveTarget(tabId).panelVersion;
+    } catch {
+      version = undefined;
+    }
+    if (!version || !SEMVER_RE.test(version.trim())) return { tooOld: false, needed };
+    return { tooOld: compareSemver(version, needed) < 0, version, needed };
   }
 
   /**
