@@ -396,7 +396,15 @@ function makeDeps(opts: {
     gitStatusPorcelain: () => {
       throw new Error("git fallback must not run in this persona (not a git checkout)");
     },
-    gitPullFfOnly: () => {
+    // #1204 — this guard used to be on `gitPullFfOnly`, which is NOT a member of
+    // PanelInstallerDeps: nothing ever called it, so the assertion could not
+    // fire while the REAL pull path (gitFetch → gitMergeFfOnly) went unguarded.
+    // A safety net that cannot catch anything is worse than none, because it
+    // reads as coverage.
+    gitFetch: () => {
+      throw new Error("git fallback must not run in this persona (not a git checkout)");
+    },
+    gitMergeFfOnly: () => {
       throw new Error("git fallback must not run in this persona (not a git checkout)");
     },
     readPin: () => opts.pin ?? UNPINNED,
