@@ -23,10 +23,14 @@ All notable changes to this project are documented here. This project adheres to
 
 ## [0.50.70] - 2026-08-09
 
+_No user-facing changes._
+
+
+## [0.50.69] - 2026-08-09
+
 ### MCP
 
 #### Fixed
-- get_history shows output VALUES, not just their keys (#1229)
 - 127.0.0.1 and localhost are the same host, not a target drift (#1246)
 
 #### Changed
