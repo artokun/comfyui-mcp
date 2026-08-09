@@ -68,8 +68,12 @@ describe("an untrusted hello RETAINS the tab's command stamp (#689)", () => {
     expect(workflowIdentityParts({ workflowUuid: uuid, origin: "" })).toBeUndefined();
     // A fully-formed hello IS trusted — otherwise the branch above would be the
     // only one ever taken and the test would prove nothing about untrusted input.
+    // #1255 — the returned origin is now CANONICAL, so every loopback spelling
+    // folds to one value and a fence bound under `127.0.0.1` validates against a
+    // panel reached on `localhost`. What this test is about — which identities
+    // are trusted vs untrusted — is unchanged; only the canonical form moved.
     expect(workflowIdentityParts({ workflowUuid: uuid, origin })).toEqual({
-      origin,
+      origin: "http://localhost:8188",
       uuid,
     });
   });

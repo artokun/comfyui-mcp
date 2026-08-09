@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { canonicalOrigin } from "../utils/origin.js";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { logger } from "../utils/logger.js";
@@ -74,8 +75,20 @@ export function workflowIdentityParts(opts: {
   const raw = typeof opts.workflowUuid === "string" ? opts.workflowUuid.trim() : "";
   const uuid = WORKFLOW_UUID_RE.test(raw) ? raw.toLowerCase() : "";
   if (!uuid) return undefined;
+  // #1255 — `localhost` and `127.0.0.1` are the same machine, and this gate did
+  // not know it: a fence bound under one spelling could never validate against
+  // the other. Permanent (nothing re-binds the stored origin), refresh-proof (a
+  // reload re-sends the same Origin header), no relay involved, and invisible to
+  // sibling reads that never consult origin-bound identity.
+  //
+  // Reuses `canonicalOrigin` rather than comparing the pair, so `::1` and the
+  // next spelling nobody has thought of are covered by the same definition
+  // #1246 already established for target drift. Falls back to the previous
+  // normalisation when the input will not parse: an origin we cannot read must
+  // keep failing closed, which is the case this gate exists for.
+  const raw0 = typeof opts.origin === "string" ? opts.origin.trim() : "";
   const origin =
-    typeof opts.origin === "string" ? opts.origin.trim().replace(/\/+$/, "").toLowerCase() : "";
+    canonicalOrigin(raw0) ?? raw0.replace(/\/+$/, "").toLowerCase();
   if (!origin) return undefined;
   return { origin, uuid };
 }

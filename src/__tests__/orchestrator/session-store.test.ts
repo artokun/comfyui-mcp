@@ -425,7 +425,11 @@ describe("SessionStore", () => {
     it("validates the uuid shape and requires a trusted origin", () => {
       expect(
         workflowIdentityParts({ workflowUuid: UUID_A, origin: "http://127.0.0.1:8188" }),
-      ).toEqual({ origin: "http://127.0.0.1:8188", uuid: UUID_A });
+        // #1255 — the loopback spellings now fold to one canonical origin, so a
+        // fence bound under `127.0.0.1` validates against a panel reached on
+        // `localhost` and vice versa. The subject of this assertion is uuid/origin
+        // VALIDATION, which is unchanged; only the canonical form it returns moved.
+      ).toEqual({ origin: "http://localhost:8188", uuid: UUID_A });
       expect(workflowIdentityParts({ workflowUuid: "not-a-uuid", origin: "http://x" })).toBeUndefined();
       expect(workflowIdentityParts({ workflowUuid: UUID_A, origin: "" })).toBeUndefined();
       expect(workflowIdentityParts({ workflowUuid: undefined, origin: "http://x" })).toBeUndefined();
