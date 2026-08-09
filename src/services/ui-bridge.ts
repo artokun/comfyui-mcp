@@ -1540,6 +1540,9 @@ export class UiBridge {
    *    resolves its caller directly and has nothing to report later.
    */
   private timedOutMutations = new Map<string, { cmd: string; tabId: string; ts: number }>();
+  /** Installed by the retry-token layer; see setLateMutationFilter. Null means
+   *  retain nothing. */
+  private lateMutationFilter: ((cmdName: string) => boolean) | null = null;
   /** Late completions of timed-out mutations (rid -> outcome), drained once via
    *  takeLateMutation(). Success only: see the recordLateMutation comment. */
   private lateMutations = new Map<
@@ -2287,7 +2290,6 @@ export class UiBridge {
         clearTimeout(p.timer);
         this.pending.delete(rid);
         this.askRidToId.delete(rid);
-        this.timedOutMutations.delete(rid);
         if (msg.ok) {
           // #422 — the panel DEMONSTRABLY served this command. Record it on the LIVE
           // connection (following a same-socket tmp:→wf: migration whose reply landed
@@ -3080,6 +3082,26 @@ export class UiBridge {
    *  (#486). Called once at orchestrator start-up. */
   setLateAskReplySink(sink: (askId: string, result: unknown, tabId: string) => void): void {
     this.lateAskSink = sink;
+  }
+
+  /**
+   * Declare which commands are worth retaining a late completion for (#694).
+   *
+   * FAIL CLOSED: with no filter installed nothing is retained, because nothing
+   * could drain it either -- the drainer and the filter are the same layer.
+   *
+   * The bridge cannot answer this itself, and the first attempt at this proved
+   * why. It gated on `ctx.mutating`, i.e. `!BRIDGE_READONLY_CMDS.has(cmd)` --
+   * the discriminator this very file documents (see BRIDGE_READONLY_CMDS) as
+   * misclassifying graph_find_nodes, graph_list_subgraphs, graph_screenshot,
+   * graph_canvas, graph_select_nodes, graph_enter/exit_subgraph and
+   * graph_copy_nodes. That is #778, and re-asking it retained seven reads under
+   * a comment claiming reads were excluded. The real question is not "does this
+   * mutate" but "can this rid ever come back to us as a retry token", which only
+   * the retry-token layer knows. So it tells us.
+   */
+  setLateMutationFilter(fn: ((cmdName: string) => boolean) | null): void {
+    this.lateMutationFilter = fn;
   }
 
   /** Notified when a tab's PRIMARY connection is dropped and it leaves the
@@ -3885,7 +3907,7 @@ export class UiBridge {
       // panel may still reply; without this the reply is an unknown rid and the
       // message loop drops it, which is precisely how a write that landed stays
       // invisible to the caller who was told "outcome unknown".
-      if (ctx.mutating) {
+      if (this.lateMutationFilter?.(cmd.cmd)) {
         this.pruneLateMutations();
         this.timedOutMutations.set(rid, { cmd: cmd.cmd, tabId: ctx.tabId, ts: Date.now() });
       }

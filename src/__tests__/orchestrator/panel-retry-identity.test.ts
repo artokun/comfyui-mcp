@@ -458,7 +458,7 @@ describe("late-mutation notice reaches the caller (#694)", () => {
 
   it("prepends 'DID complete' when the retried rid had landed late", async () => {
     const { bridge, taken } = bridgeWithLate({
-      "rid-late": { cmd: "graph_set_node_mode", tabId: "tab-1", lateByMs: 2400 },
+      "rid-late": { cmd: "graph_add_node", tabId: "tab-1", lateByMs: 2400 },
     });
     const ctx = makePanelToolCtx(bridge, "tab-1");
     const res = await addNode().handler(
@@ -468,7 +468,7 @@ describe("late-mutation notice reaches the caller (#694)", () => {
     expect(taken).toContain("rid-late");
     const first = textOf(res);
     expect(first).toMatch(/DID complete/);
-    expect(first).toMatch(/graph_set_node_mode/);
+    expect(first).toMatch(/graph_add_node/);
     expect(first).toMatch(/2\.4s after its reply timeout/);
     // The retry's own result must still be there, not replaced by the notice.
     expect(res.content.length).toBeGreaterThan(1);
@@ -489,13 +489,42 @@ describe("late-mutation notice reaches the caller (#694)", () => {
     // The drain is destructive, so an unconditional probe would consume a notice
     // meant for a caller who has not retried yet.
     const { bridge, taken } = bridgeWithLate({
-      "rid-late": { cmd: "graph_set_node_mode", tabId: "tab-1", lateByMs: 1000 },
+      "rid-late": { cmd: "graph_add_node", tabId: "tab-1", lateByMs: 1000 },
     });
     const ctx = makePanelToolCtx(bridge, "tab-1");
     await addNode().handler({ node_type: "KSampler" }, ctx);
     expect(taken).toEqual([]);
   });
 
+
+  it("stays silent when the token names a DIFFERENT command than this tool sends", async () => {
+    // A token names an attempt. "The attempt you are retrying DID complete" is
+    // only true if the retained completion is for the command this tool
+    // dispatches; pasting a stale token onto another tool must not print a
+    // confident notice about an unrelated write.
+    const { bridge } = bridgeWithLate({
+      "rid-other": { cmd: "graph_set_node_mode", tabId: "tab-1", lateByMs: 1500 },
+    });
+    const ctx = makePanelToolCtx(bridge, "tab-1");
+    const res = await addNode().handler({ node_type: "KSampler", retry_of: "rid-other" }, ctx);
+    expect(textOf(res)).not.toMatch(/DID complete/);
+  });
+
+  it("does not consume the notice when the retry itself throws", async () => {
+    // The drain is destructive and now runs AFTER the handler: a failed retry
+    // must leave the notice for the next attempt, not eat it.
+    const late = { "rid-late": { cmd: "graph_add_node", tabId: "tab-1", lateByMs: 700 } };
+    const { bridge, taken } = bridgeWithLate(late);
+    (bridge as unknown as { send: () => Promise<unknown> }).send = async () => {
+      throw new Error("panel gone");
+    };
+    const ctx = makePanelToolCtx(bridge, "tab-1");
+    await addNode()
+      .handler({ node_type: "KSampler", retry_of: "rid-late" }, ctx)
+      .catch(() => undefined);
+    expect(taken, "a throwing retry must not have drained").toEqual([]);
+    expect(late["rid-late"], "the notice must survive for the next attempt").toBeTruthy();
+  });
   it("does NOT skip the dispatch — the retry still runs (#687 stays reverted)", async () => {
     // Suppressing the write on the strength of a rid would be #683's inference
     // with the arrow reversed: the bridge stores no fingerprint, so a stale or

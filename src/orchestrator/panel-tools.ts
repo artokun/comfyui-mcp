@@ -6367,7 +6367,6 @@ function withRetryToken(d: PanelToolDef): PanelToolDef {
       // #683 mistake with the arrow reversed, and #687 reverted it for cause.
       // Double-apply is already the #521 panel ledger's job; this only makes the
       // outcome VISIBLE, which is the half of #694 nothing else does.
-      const landed = ctx.bridge?.takeLateMutation?.(retryOf);
       const wrapped = Object.create(ctx) as PanelToolCtx;
       wrapped.call = (
         cmd: Record<string, unknown>,
@@ -6395,7 +6394,29 @@ function withRetryToken(d: PanelToolDef): PanelToolDef {
           onDispatchedRid,
         );
       const out = await d.handler(args, wrapped);
-      if (!landed) return out;
+      // Drained AFTER the handler, deliberately, for two measured reasons.
+      //
+      // (1) The drain is destructive. Draining first meant a handler that threw
+      //     consumed the notice permanently: the retry failed, no new token was
+      //     minted, and a later successful retry reported nothing.
+      // (2) It widens the window. A late reply that lands WHILE the retry is in
+      //     flight is now caught; draining first stranded it in the map until
+      //     TTL, which is the common case when an agent retries promptly.
+      //
+      // Matched on COMMAND, not rid alone. A token names an attempt, and the
+      // sentence below claims "the attempt you are retrying" completed -- which
+      // is only true if the retained completion is for the command this tool
+      // actually dispatches. Without the check, pasting a stale token onto a
+      // different tool prints a confident notice about an unrelated write.
+      // …and not at all if the retry FAILED. `ctx.call` converts almost every
+      // dispatch failure into an isError result rather than throwing, so gating
+      // on a thrown exception alone still drained on a failed retry -- the same
+      // permanent loss, one layer over. The caller gets no new token from a
+      // failed retry, so a consumed notice here is unrecoverable.
+      if (out.isError) return out;
+      const expectedCmd = RETRY_TOKEN_CMD_BY_TOOL[d.name];
+      const landed = ctx.bridge?.takeLateMutation?.(retryOf);
+      if (!landed || (expectedCmd !== undefined && landed.cmd !== expectedCmd)) return out;
       const secs = (landed.lateByMs / 1000).toFixed(1);
       return {
         ...out,

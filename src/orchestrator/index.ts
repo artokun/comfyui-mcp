@@ -81,6 +81,7 @@ import {
   makePanelToolCtx,
   resolvePinTarget,
   secretSavedReply,
+  RETRY_TOKEN_CMDS,
 } from "./panel-tools.js";
 import {
   optionsAckFrame,
@@ -2487,6 +2488,10 @@ export async function runPanelOrchestrator(): Promise<void> {
   // unsends; it never deletes, so those answers are still reported.
   bridge.setTabTakenOverListener((tabId) => AskAnswers.closeAsks(tabId));
   bridge.setTabGoneListener((tabId, incarnation) => AskAnswers.retireDebt(tabId, incarnation));
+  // #694 — the bridge retains a late mutation only for commands that can come
+  // back as a retry token, which is the retry-token layer's own set. Installed
+  // here because ui-bridge cannot import panel-tools (panel-tools imports it).
+  bridge.setLateMutationFilter((cmdName) => RETRY_TOKEN_CMDS.has(cmdName));
   bridge.setLateAskReplySink((askId, result, tabId) => {
     if (!AskAnswers.tracks(askId)) return;
     const entry = AskAnswers.record(askId, result, { tabId });

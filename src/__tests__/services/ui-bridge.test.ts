@@ -4689,6 +4689,65 @@ describe("UiBridge (late ask_user answer buffer — #486)", () => {
 // timed out at 6000 ms, and panel_query_graph immediately after showed the node
 // already switched. The write landed. Nothing ever told the caller.
 describe("UiBridge (late MUTATION outcome — #694)", () => {
+  // Retention is FAIL-CLOSED: with no filter the bridge keeps nothing, because
+  // nothing could drain it either. Production installs this from
+  // RETRY_TOKEN_CMDS (orchestrator/index.ts); the suite states the same shape
+  // explicitly rather than importing it, so a change to that set shows up here
+  // as a deliberate decision instead of silently re-scoping these tests.
+  const RETAINED = new Set(["graph_set_node_mode", "graph_add_node"]);
+  beforeEach(() => bridge.setLateMutationFilter((c) => RETAINED.has(c)));
+  afterEach(() => bridge.setLateMutationFilter(null));
+
+  it("retains nothing when no filter is installed (fail closed)", async () => {
+    bridge.setLateMutationFilter(null);
+    const sock = await connectPanel("tab-nofilter", "wf");
+    await vi.waitFor(() =>
+      expect(bridge.tabs().some((t) => t.tab_id === "tab-nofilter")).toBe(true),
+    );
+    let rid = "";
+    sock.on("message", (buf) => {
+      const msg = JSON.parse(buf.toString());
+      if (msg.rid && msg.cmd === "graph_set_node_mode") {
+        rid = msg.rid;
+        setTimeout(() => sock.send(JSON.stringify({ rid: msg.rid, ok: true })), 80);
+      }
+    });
+    await expect(
+      bridge.send(
+        { cmd: "graph_set_node_mode", node_id: 1, mode: "active" },
+        { tabId: "tab-nofilter", timeoutMs: 30 },
+      ),
+    ).rejects.toThrow(/did not reply/i);
+    await new Promise((r) => setTimeout(r, 140));
+    expect(bridge.takeLateMutation(rid)).toBeUndefined();
+    sock.close();
+  });
+
+  it("asks the FILTER, not the mutating flag — the #778 commands stay out", async () => {
+    // ctx.mutating is !BRIDGE_READONLY_CMDS.has(cmd), which this file documents
+    // as misclassifying graph_screenshot &c. The first cut of #694 gated on it
+    // and retained seven reads under a comment claiming reads were excluded.
+    // graph_screenshot is mutating:true AND not retainable — the exact pair that
+    // tells the two discriminators apart.
+    const sock = await connectPanel("tab-778", "wf");
+    await vi.waitFor(() => expect(bridge.tabs().some((t) => t.tab_id === "tab-778")).toBe(true));
+    let rid = "";
+    sock.on("message", (buf) => {
+      const msg = JSON.parse(buf.toString());
+      if (msg.rid && msg.cmd === "graph_screenshot") {
+        rid = msg.rid;
+        setTimeout(() => sock.send(JSON.stringify({ rid: msg.rid, ok: true })), 80);
+      }
+    });
+    await expect(
+      bridge.send({ cmd: "graph_screenshot" }, { tabId: "tab-778", timeoutMs: 30 }),
+    ).rejects.toThrow(/did not reply/i);
+    await new Promise((r) => setTimeout(r, 140));
+    expect(rid, "graph_screenshot should have been dispatched").toBeTruthy();
+    expect(bridge.takeLateMutation(rid)).toBeUndefined();
+    sock.close();
+  });
+
   /** Reply to `cmd` only after `delayMs`, and hand back the rid the bridge minted. */
   function replyLate(sock: WebSocket, cmd: string, delayMs: number): Promise<string> {
     return new Promise((resolve) => {
