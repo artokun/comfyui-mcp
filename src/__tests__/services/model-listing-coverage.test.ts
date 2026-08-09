@@ -477,3 +477,46 @@ describe("#1015: all-404 is NOT a verified empty install", () => {
     expect(text).toMatch(/vae/);
   });
 });
+
+// Adversarial review of PR #1196 (my own, before merge) — the all-404 branch
+// answered a FILTERED call with the UNFILTERED diagnosis.
+//
+// list_local_models({model_type:"clip"}) on a healthy modern server returned
+// "usually an older ComfyUI, or a proxy answering in front of it. Check the
+// ComfyUI URL…" — sending someone to debug a URL that works perfectly, when the
+// real answer is that the folder was renamed. A wrong remedy is worse than a
+// vague one: it costs time and teaches distrust of a working setup.
+describe("#1015: a filtered 404 names the RENAME, not a broken server", () => {
+  const base = { answered: [], unanswered: [], usedFilesystem: false };
+
+  it("points clip → text_encoders", () => {
+    const text = describeEmptyModelListing("clip", { ...base, absent: ["clip"] });
+    expect(text).toMatch(/LEGACY name/);
+    expect(text).toContain("text_encoders");
+    // The wrong remedy must be gone.
+    expect(text).not.toMatch(/older\s+ComfyUI, or a proxy/);
+    expect(text).not.toMatch(/Check the ComfyUI URL/);
+  });
+
+  it("points unet → diffusion_models", () => {
+    const text = describeEmptyModelListing("unet", { ...base, absent: ["unet"] });
+    expect(text).toContain("diffusion_models");
+    expect(text).toMatch(/LEGACY name/);
+  });
+
+  it("a NON-legacy 404 category says what to do without inventing a rename", () => {
+    const text = describeEmptyModelListing("gligen", { ...base, absent: ["gligen"] });
+    expect(text).toMatch(/does not serve a "gligen" model category/);
+    expect(text).toMatch(/NO model_type/);
+    expect(text).not.toMatch(/LEGACY name/);
+  });
+
+  it("the UNFILTERED all-404 case keeps the old-server\/proxy diagnosis", () => {
+    // That message is right there and must not be lost to the filtered branch.
+    const text = describeEmptyModelListing(undefined, {
+      ...base,
+      absent: ["checkpoints", "loras"],
+    });
+    expect(text).toMatch(/older\s+ComfyUI, or a proxy/);
+  });
+});
