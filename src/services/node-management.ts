@@ -1528,6 +1528,58 @@ function stripUrlSuffix(value: string): string {
   return value.replace(/[?#].*$/, "").replace(/\/+$/, "");
 }
 
+/**
+ * Is this version string the "newest, whatever that is" SENTINEL (#1254)?
+ *
+ * Exported for the registry path's own translation of the same word, so the two
+ * cannot drift into disagreeing about what "latest" means. Case- and
+ * whitespace-insensitive because it arrives from a tool argument, not from git.
+ */
+export function isLatestSentinel(version: unknown): boolean {
+  return typeof version === "string" && version.trim().toLowerCase() === "latest";
+}
+
+/**
+ * Which git ref an install should check out, or undefined for "leave the clone
+ * where it landed" (#1254).
+ *
+ * "latest" IS NOT A GIT REF. It is this tool's own word for "whatever is
+ * newest", and `version` defaults to it — so a plain
+ * install_custom_node(source:"git", version:"latest") fell straight through to
+ * `git checkout --detach --end-of-options latest` and failed. Worse than a
+ * failed command: the checkout failure discards the clone as a husk, so a clone
+ * that had already succeeded left a partially installed node behind.
+ *
+ * A fresh clone is ALREADY on the default branch, which is exactly what "latest"
+ * means for a git source, so the answer is to check out nothing. That also
+ * restores the shallow clone — the full history is fetched only because a
+ * concrete ref might need it.
+ *
+ * AN EXPLICIT ref is honoured LITERALLY, sentinel word or not. `ref` and a
+ * `#ref` in the URL are the caller naming a ref, and repositories do carry tags
+ * called `latest`; ignoring one would check out a different commit than the one
+ * asked for — a wrong answer, where the bug this fixes was only a failure.
+ *
+ * A separate exported function rather than an expression inline, so the rule can
+ * be tested as behaviour instead of asserted against source text.
+ */
+export function gitRefForInstall(opts: {
+  /** An explicitly requested ref. */
+  ref?: string;
+  /** A `#ref` parsed out of the repository URL. `null` is how parseGitUrl
+   *  reports "no fragment", and it must read as absent, not as a ref. */
+  urlRef?: string | null;
+  /** The version selector, which defaults to the "latest" sentinel. */
+  version?: string;
+}): string | undefined {
+  // `??` already collapses parseGitUrl's `null` "no fragment" into undefined, so
+  // there is no separate null check here — one would read as load-bearing and
+  // never fire.
+  const explicit = opts.ref ?? opts.urlRef ?? undefined;
+  if (explicit !== undefined) return explicit;
+  return isLatestSentinel(opts.version) ? undefined : opts.version;
+}
+
 function validateGitRef(ref: string): string {
   if (ref.length === 0) {
     throw new ValidationError("Git ref must be a non-empty string.");
@@ -2340,7 +2392,11 @@ async function installCustomNodeImpl(
   const { id, version, mode = "remote", channel = "default" } = opts;
   const parsedGit = parseGitUrl(id);
   const gitId = parsedGit.baseUrl;
-  const gitRefCandidate = opts.ref ?? parsedGit.ref ?? version;
+  const gitRefCandidate = gitRefForInstall({
+    ref: opts.ref,
+    urlRef: parsedGit.ref,
+    version,
+  });
   const source =
     opts.source && opts.source !== "auto"
       ? opts.source
@@ -3883,7 +3939,10 @@ export function normalizeGitUrlInstallArgs(
   // forwarded as both (routing off the id path is the whole point), and
   // id+repository together were refused above.
   const out: NormalizedGitUrlInstallArgs = { repository: gitTarget };
-  if (version === undefined || version.length === 0 || version.toLowerCase() === "latest") {
+  // #1254 — the same sentinel test the git path uses, so "latest" cannot come to
+  // mean one thing here and another there. This site already trimmed; the helper
+  // trims too, which makes " Latest " behave like "latest" on both paths.
+  if (version === undefined || version.length === 0 || isLatestSentinel(version)) {
     out.version = "nightly";
     out.note =
       `"${gitTarget}" is a git repository URL, so this was queued as a from-source ` +
