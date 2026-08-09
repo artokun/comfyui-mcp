@@ -29,6 +29,11 @@ describe("canonicalOrigin (#1175)", () => {
     // A default port is dropped, matching what a browser sends as Origin.
     ["http://localhost:80", "http://localhost"],
     ["https://127.0.0.1:443", "https://localhost"],
+    // A single trailing dot is the fully-qualified spelling of the same name,
+    // and a browser sends it verbatim as an Origin.
+    ["http://localhost.:8188", "http://localhost:8188"],
+    // Non-http schemes keep their scheme rather than being rejected.
+    ["ws://127.0.0.1:8188", "ws://localhost:8188"],
   ])("collapses %s -> %s", (input, expected) => {
     expect(canonicalOrigin(input)).toBe(expected);
   });
@@ -113,5 +118,34 @@ describe("describeTargetDrift with aliased loopback (#1175)", () => {
     // An absent comparison is not a negative result.
     setConnectedPanelOrigins(() => []);
     expect(describeTargetDrift("http://localhost:8188/x")).toBe("");
+  });
+});
+
+// The empirical checks a review asked for, pinned so the answers stay answers.
+describe("canonicalOrigin on inputs that are easy to get wrong (#1175)", () => {
+  it("does not leak userinfo into the origin", () => {
+    // COMFYUI_URL can legitimately carry basic-auth credentials, and this string
+    // is printed in a diagnostic. Building from protocol+hostname+port drops
+    // them; a hand-rolled string split would not.
+    const out = canonicalOrigin("http://user:hunter2@127.0.0.1:8188/x");
+    expect(out).toBe("http://localhost:8188");
+    expect(out).not.toContain("hunter2");
+  });
+
+  it("normalises an uppercase scheme and host", () => {
+    expect(canonicalOrigin("HTTP://LocalHost:8188")).toBe("http://localhost:8188");
+  });
+
+  it("matches the BRACKETED IPv6 form URL.hostname actually produces", () => {
+    // `new URL("http://[::1]:8188").hostname` is "[::1]", with brackets — a bare
+    // "::1" in the alias set would never be reached.
+    expect(canonicalOrigin("http://[::1]:8188")).toBe("http://localhost:8188");
+    expect(sameOrigin("http://[::1]:8188", "http://127.0.0.1:8188")).toBe(true);
+  });
+
+  it("leaves a non-loopback host's spelling alone, trailing dot included", () => {
+    // The dot strip is for the LOOKUP only. Rewriting an unrelated host would
+    // change an origin nobody asked us to normalise.
+    expect(canonicalOrigin("http://example.com.:8188")).toBe("http://example.com.:8188");
   });
 });

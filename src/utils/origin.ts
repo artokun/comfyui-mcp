@@ -32,8 +32,12 @@
  * and this process cannot — a firewall, a container boundary, or a server bound
  * to one interface") is a BETTER description of a v4/v6 split than "point
  * COMFYUI_URL somewhere else" was.
+ *
+ * `[::1]` carries its brackets because that is what `URL.hostname` returns for
+ * an IPv6 literal — a bare `"::1"` here would be dead code, since every input
+ * reaches this set through `new URL()`.
  */
-const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 /** The canonical loopback spelling, so every alias collapses to one key. */
 const LOOPBACK_CANONICAL = "localhost";
@@ -55,8 +59,14 @@ export function canonicalOrigin(url: string | undefined): string | undefined {
   const origin = parsed.origin;
   // A scheme with no authority (file:, data:) has the literal origin "null".
   if (!origin || origin === "null") return undefined;
+  // A single trailing dot is the fully-qualified spelling of the same name
+  // (`localhost.` is `localhost` rooted at the DNS root), and browsers will send
+  // it verbatim as an Origin. Stripped before the lookup, and only for the
+  // lookup — a non-loopback host keeps whatever spelling it arrived with, since
+  // rewriting it would change an origin nobody asked us to normalise.
   const host = parsed.hostname.toLowerCase();
-  const canonHost = LOOPBACK_HOSTS.has(host) ? LOOPBACK_CANONICAL : host;
+  const bare = host.endsWith(".") ? host.slice(0, -1) : host;
+  const canonHost = LOOPBACK_HOSTS.has(bare) ? LOOPBACK_CANONICAL : host;
   // Rebuild rather than string-replace: `parsed.port` is "" for a default port,
   // which is exactly the normalisation `origin` already applies, and a host can
   // otherwise appear inside the scheme or a userinfo section.
