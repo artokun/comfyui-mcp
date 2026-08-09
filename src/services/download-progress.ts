@@ -91,10 +91,15 @@ const lastWriteAt = new Map<string, number>();
  * on disk and no error event: 40 minutes gone, invisibly, while the documented
  * contract told their agent to keep waiting rather than re-issue.
  *
- * The transfer really is dead — it streamed inside a process that no longer
- * exists — so this does NOT resurrect it, and pretending otherwise would be the
- * worse bug. What it fixes is the SILENCE: a record that says the download was
- * interrupted, which `status` can find by the id the caller was handed.
+ * What this does NOT do is decide whether the transfer is dead. That was the
+ * original framing and it was WRONG for the case that matters: a download
+ * DISPATCHED to ComfyUI-Manager runs on the ComfyUI host, which a restart here
+ * does not touch, so the host keeps fetching and re-issuing writes a second copy
+ * to the same destination — a corrupt model (#1197). This function reads neither
+ * the `pid` nor the `owner` it persists, and `writerProcessGone()` exists to
+ * answer exactly the question it skips, so it is in no position to assert death.
+ * What it fixes is the SILENCE: a record that says WE STOPPED WATCHING, which
+ * `status` can find by the id the caller was handed.
  *
  * Only `downloading` records migrate. A terminal record's outcome was already
  * delivered, and re-landing it would replay a settled event. Fields are copied
@@ -135,15 +140,16 @@ export function migrateInFlightJobs(fromDir: string, toDir: string): number {
         interrupted_by_restart: true,
         error:
           `This download is no longer being WATCHED: the orchestrator process that was ` +
-          `tracking it exited (a restart or a session drop), so nothing here is waiting ` +
-          `on it and no further progress will be reported. Any partial file may have been ` +
+          `tracking it exited (a restart or a session drop), so nothing here is waiting on ` +
+          `it and no further progress will be reported. Any partial file may have been ` +
           `discarded. What that does NOT establish is whether the bytes stopped — this ` +
-          `record is written without checking the writer, and a download DISPATCHED to ` +
-          `ComfyUI-Manager runs on the ComfyUI host, which a restart here does not touch. ` +
-          `Before re-issuing, check list_local_models on the connected server until the ` +
-          `file appears and its size stops changing, or stops appearing over a couple of ` +
-          `minutes. Re-issuing a transfer that is still running writes a SECOND copy to ` +
-          `the same destination and corrupts the model.`,
+          `record is written without checking the writer. If this download was DISPATCHED ` +
+          `to ComfyUI-Manager the fetch runs on the ComfyUI host, which a restart here does ` +
+          `not touch, and re-issuing it writes a SECOND copy to the same destination and ` +
+          `CORRUPTS the model; a multi-GB fetch can take hours and the file is not listed ` +
+          `until it COMPLETES, so absence proves nothing and a timer is not a test. If it ` +
+          `was streaming locally, nothing is writing it now — re-issue, and it resumes from ` +
+          `any surviving .partial.`,
       };
       writeFileSync(
         join(toDir, `${JOB_PREFIX}${sanitizeIdPart(raw.id)}-${PERSIST_OWNER}.json`),

@@ -15,9 +15,13 @@
 //               ComfyUI-Manager dispatch running on the HOST.
 //   attempt 3 — asserted the opposite Manager exemption absolutely ("committed
 //               done the moment the dispatch is ACCEPTED … produces no
-//               interrupted record"). Also false: `queueManagerTask` polls until
-//               the queue DRAINS, so the record is `downloading` for the whole
+//               interrupted record"). Also wrong, but CONFIG-DEPENDENTLY:
+//               `queueManagerTask` polls until the queue DRAINS, so WITHOUT an
+//               aria2 sidecar the record is `downloading` for the whole
 //               server-side transfer and IS migrated as INTERRUPTED (#1197).
+//               WITH one — which this project's own RunPod image exports — the
+//               queue drains at handoff, the record goes terminal `done`, and
+//               nothing migrates. Neither absolute is true.
 //
 // So the tests below check two different things, and the second matters more:
 // that the true claims are present, AND that no absolute claim about survival

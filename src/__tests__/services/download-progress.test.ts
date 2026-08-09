@@ -411,11 +411,20 @@ describe("migrateInFlightJobs (#1148)", () => {
     expect(msg).toMatch(/partial file may have been discarded/);
     // Says what it does NOT establish, and names the host-side case.
     expect(msg).toMatch(/does NOT establish is whether the bytes stopped/);
-    expect(msg).toMatch(/ComfyUI-Manager runs on the ComfyUI host/);
+    expect(msg).toMatch(/ComfyUI-Manager the fetch runs on the ComfyUI host/);
     // Gives a TERMINATING check rather than an unbounded "wait for it".
-    expect(msg).toMatch(/stops appearing over a couple of minutes/);
-    // And must never issue the bare order that made this dangerous.
-    expect(msg).not.toMatch(/^\s*Re-issue the download\.?\s*$/m);
+    // No TIMER-based test. An in-progress model file is never listed by the
+    // server (node-management.ts:4093), so "wait N minutes then decide" fires on
+    // a HEALTHY multi-hour Manager transfer and sends the caller into the
+    // corruption the same message warns about.
+    expect(msg).not.toMatch(/couple of minutes|for a (?:few|couple)|within \d+ ?(?:min|second)/i);
+    expect(msg).toMatch(/absence proves nothing and a timer is not a test/);
+    // The LOCAL case keeps an affirmative next step — removing it entirely
+    // recreates #1148's original harm (an agent that will not act).
+    expect(msg).toMatch(/streaming locally, nothing is writing it now — re-issue/);
+    // The old blanket order must not come back. Anchored to the WORD, not to a
+    // whole-line match: `^…$/m` only fired if the entire error was that literal,
+    // so the previous version of this assertion could never trip (review §3).
     expect(msg).not.toMatch(/will not resume on its own/);
   });
 
