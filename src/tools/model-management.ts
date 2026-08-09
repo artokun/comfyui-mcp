@@ -1148,6 +1148,30 @@ export function describeEmptyModelListing(
   coverage: ModelListingCoverage,
 ): string {
   const scope = modelType ? `${modelType} models` : "local models";
+  // #1015 — a 404 is a definite "this server does not register that category",
+  // and treating it as one is the whole fix. But if EVERY category came back 404
+  // and none was ever answered, the definite thing established is not "you have
+  // no models" — it is that this server serves none of these routes at all (an
+  // old build, or something in front of it). Saying "No local models found" there
+  // would be a fabricated negative, which is the same defect this change exists
+  // to remove, pointing the other way.
+  //
+  // Scoped tightly: only when NOTHING was answered, NOTHING was unreadable, and
+  // at least one 404 came back. An unreadable category still belongs to the
+  // "could not determine" path below, which says more.
+  const absent = coverage.absent ?? [];
+  if (coverage.answered.length === 0 && coverage.unanswered.length === 0 && absent.length > 0) {
+    return (
+      `Could not determine which ${scope} are installed. The connected ComfyUI answered ` +
+      `404 for every category asked about (${absent.slice(0, 8).join(", ")}` +
+      `${absent.length > 8 ? `, …and ${absent.length - 8} more` : ""}) ` +
+      `and served none of them, so NOTHING was learned about the install — this is NOT ` +
+      `the same as having no models.\n\n` +
+      `A server that serves no /models/<category> route at all is usually an older ` +
+      `ComfyUI, or a proxy answering in front of it. Check the ComfyUI URL with ` +
+      `get_system_stats (action:"health") before concluding anything about the install.`
+    );
+  }
   if (coverage.unanswered.length === 0) {
     // Verified: the server was asked and said zero. For a FILTERED call that is
     // a true statement about ONE folder, and #962 is what it costs when it is

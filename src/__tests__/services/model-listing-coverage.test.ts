@@ -386,3 +386,94 @@ describe("#962: the message names the other categories instead of claiming none"
     expect(text).not.toMatch(/fact about ONE folder/);
   });
 });
+
+// #1015 — a 404 category is an ANSWER, not an unreadable one.
+//
+// A reporter's healthy ComfyUI 0.31 kept saying:
+//
+//   Partial listing — 2 categories could not be read
+//   (clip: Unexpected end of JSON input; unet: Unexpected end of JSON input).
+//
+// Their follow-up gave the precise shape: /models/clip and /models/unet each
+// answer HTTP 404 with an empty body. Reproduced on a live 0.31 server here —
+// clip and unet 404 with 0 bytes while text_encoders and diffusion_models answer
+// 200. Modern ComfyUI renamed those folders (clip → text_encoders, unet →
+// diffusion_models), so a current install does not register the old names at all.
+//
+// A 404 is the server answering DEFINITIVELY. Counting it as unread put a
+// permanent "your inventory is incomplete" on every healthy modern install — and
+// named aliases whose real contents were already listed under the new names. The
+// house defect, pointing the other way.
+describe("#1015: a 404 category does not degrade the listing", () => {
+  function serverWith(byCat: Record<string, { status: number; body?: string }>) {
+    getClient.mockReturnValue({ fetchApi });
+    fetchApi.mockImplementation(async (path: string) => {
+      if (path === "/models") return new Response("[]", { status: 200 });
+      const cat = path.replace(/^\/models\//, "");
+      const spec = byCat[cat] ?? { status: 200, body: "[]" };
+      return new Response(spec.body ?? "", { status: spec.status });
+    });
+    readdir.mockRejectedValue(new Error("ENOENT"));
+  }
+
+  it("records a 404 as ABSENT, never as unanswered", async () => {
+    serverWith({ clip: { status: 404 }, unet: { status: 404 } });
+    const { coverage } = await listLocalModelsWithCoverage();
+    expect(coverage.absent).toEqual(expect.arrayContaining(["clip", "unet"]));
+    // The line the reporter kept seeing.
+    expect(coverage.unanswered.map((u) => u.dir)).not.toContain("clip");
+    expect(coverage.unanswered.map((u) => u.dir)).not.toContain("unet");
+  });
+
+  it("a REAL read failure still degrades the listing", async () => {
+    // The guard must not be blunted: a 502 or a proxy page is genuinely unread.
+    serverWith({ clip: { status: 404 }, vae: { status: 502, body: "bad gateway" } });
+    const { coverage } = await listLocalModelsWithCoverage();
+    expect(coverage.unanswered.map((u) => u.dir)).toContain("vae");
+    expect(coverage.absent).toContain("clip");
+  });
+
+  it("a 404 on a FILTERED call is not a coverage gap either", async () => {
+    serverWith({ clip: { status: 404 } });
+    const { coverage } = await listLocalModelsWithCoverage("clip");
+    expect(coverage.unanswered).toEqual([]);
+    expect(coverage.absent).toEqual(["clip"]);
+  });
+});
+
+describe("#1015: all-404 is NOT a verified empty install", () => {
+  const base = { answered: [], unanswered: [], usedFilesystem: false };
+
+  it("refuses to say 'none' when every category 404'd", async () => {
+    // A server serving no /models route at all is an old build or a proxy — not
+    // an install with no models. Claiming the latter would be the same fabricated
+    // negative this change exists to remove, pointing the other way.
+    const text = describeEmptyModelListing(undefined, {
+      ...base,
+      absent: ["checkpoints", "loras", "vae"],
+    });
+    expect(text).toMatch(/Could not determine/);
+    expect(text).toMatch(/NOT\s+the same as having no models/);
+    expect(text).toMatch(/older\s+ComfyUI, or a proxy/);
+  });
+
+  it("still says 'none' when the server ANSWERED and was genuinely empty", async () => {
+    const text = describeEmptyModelListing(undefined, {
+      ...base,
+      answered: ["checkpoints"],
+      absent: ["clip"],
+    });
+    expect(text).toBe("No local models found.");
+  });
+
+  it("an UNANSWERED category still wins over the all-404 branch", async () => {
+    // "Could not read" says more than "did not serve", so it keeps precedence.
+    const text = describeEmptyModelListing(undefined, {
+      ...base,
+      unanswered: [{ dir: "vae", reason: "HTTP 502" }],
+      absent: ["clip"],
+    });
+    expect(text).toMatch(/could not be read|Could not determine which/);
+    expect(text).toMatch(/vae/);
+  });
+});
