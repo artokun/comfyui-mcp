@@ -136,10 +136,17 @@ export function migrateInFlightJobs(fromDir: string, toDir: string): number {
       // stopped and the caller was told to re-issue, which writes a SECOND copy to
       // the same destination and corrupts the model (node-management.ts:971-979).
       const viaManager = raw.via_manager === true;
-      const rec = {
+      // TYPED, not inferred: an annotated object literal gets excess-property
+      // checking, so a key that is not on PersistedDownloadJob is a COMPILE
+      // error. That is the only thing that catches this class — the five dead
+      // keys here for months were always `undefined`, and JSON.stringify drops
+      // undefined, so they never reached disk and no runtime assertion could
+      // see them. (`persistDownloadJob` cannot help: it spreads a variable,
+      // which defeats the check.)
+      const rec: PersistedDownloadJob = {
         id: raw.id,
         status: "error" as const,
-        url: str("url"),
+        url: str("url") ?? "",
         dest_key: str("dest_key"),
         req_key: str("req_key"),
         // Carried so the record stays USABLE, not just readable: without trayId a
@@ -150,11 +157,14 @@ export function migrateInFlightJobs(fromDir: string, toDir: string): number {
         // and the ONLY one url lookup matches on. Getting it wrong yields a
         // silent `undefined` that a fixture using the same wrong key would not
         // catch, which is precisely how a test passes for the wrong reason.
-        
-        trayId: str("trayId"),
+
+        // Required by the interface. A source record missing one is already
+        // unusable for lookup; an empty string keeps the record VALID and
+        // findable by id rather than emitting a malformed one.
+        trayId: str("trayId") ?? "",
         filename: str("filename"),
-        target_subfolder: str("target_subfolder"),
-        started_at: num("started_at"),
+        target_subfolder: str("target_subfolder") ?? "",
+        started_at: num("started_at") ?? Date.now(),
         pid: num("pid"),
         via_manager: viaManager,
         // Real keys that were also being dropped. `resume` is what a re-issue

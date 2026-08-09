@@ -391,10 +391,19 @@ describe("migrateInFlightJobs (#1148)", () => {
       status: "downloading",
       started_at: 1_700_000_000_000,
       via_manager: true,
+      progressId: "prog-rt",
+      resume: { etag: 'W/"abc"' },
     } as never);
 
     // Migrate with the module under test (its own dir), reading what the WRITER
     // actually wrote.
+    // Capture the WRITER's own key set before the source dir goes away — that
+    // set, not a fixture, is the schema this migration must not invent keys on.
+    const writerKeys = new Set(
+      Object.keys(
+        JSON.parse(readFileSync(join(src, readdirSync(src).find((f) => f.includes("rt-1"))!), "utf8")),
+      ),
+    );
     mod.migrateInFlightJobs(src, dir);
     const rec = mod.readPersistedDownloadJob("rt-1");
     rmSync(src, { recursive: true, force: true });
@@ -408,6 +417,19 @@ describe("migrateInFlightJobs (#1148)", () => {
     expect(rec!.started_at).toBe(1_700_000_000_000);
     expect(rec!.via_manager).toBe(true);
     expect(rec!.url).toBeTruthy();
+    expect(rec!.progressId).toBe("prog-rt");
+    expect(rec!.resume).toEqual({ etag: "W/\"abc\"" });
+
+    // ...and the half that actually closes the class: NO key may appear that the
+    // writer does not emit. Asserting presence alone is what let five dead keys
+    // (`name`/`dest`/`target`/`total`/`received`, from the tray-row interface)
+    // survive for months — restoring them passed every test AND tsc, because
+    // `persistDownloadJob` spreads a variable (no excess-property check) and
+    // tsconfig EXCLUDES src/__tests__, so no fixture is ever typechecked.
+    // Keys the migration legitimately ADDS rather than carries.
+    for (const added of ["status", "error", "updated", "interrupted_by_restart"]) writerKeys.add(added);
+    const unknown = Object.keys(rec!).filter((k) => !writerKeys.has(k));
+    expect(unknown, "migrated record carries keys the writer never emits").toEqual([]);
   });
 
   // #1197 — the word "manager" appeared NOWHERE in this file, which is why a

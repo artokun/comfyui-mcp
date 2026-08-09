@@ -1098,19 +1098,29 @@ async function cancelAction(args: { id: string; tray_id?: string }): Promise<Cal
           // refusal — "can't be aborted" about a download that already finished
           // would report failure for work that succeeded.
           if (res.status && res.status !== "downloading") {
-            // #1197 — REMAINING: a caller who cancels to be safe is told
-            // "already error — nothing to cancel", which reads as confirmation
-            // the transfer is over. For a Manager dispatch the host may still be
-            // fetching, and this MCP cannot recall a server-side task, so the
-            // honest answer is "not tracked here, and not stopped either".
-            // Not done: this result object carries neither `interruptedByRestart`
-            // nor `viaManager`, so it needs them threaded through
-            // `cancelDownload` — a real change, not a wording one.
+            // #1197 — the third place this had to be fixed, and the one a worried
+            // caller reaches. "already error — nothing to cancel" reads as
+            // confirmation the transfer is over; for a Manager dispatch carried
+            // across a restart the ComfyUI host may still be fetching, and this
+            // MCP has no Manager recall API — so a cancel would not have stopped
+            // it either. Both halves have to be said, or the reply is heard as
+            // "it is finished".
+            //
+            // The flags come off `res.job` (`cancelDownloadJob`'s persisted
+            // fallback builds it with `jobFromPersisted`, so both survive) — the
+            // same `res.job?.viaManager` this handler already reads a few lines
+            // above. An earlier attempt read them off `res` itself, which does
+            // NOT carry them, and I wrongly concluded from the type error that
+            // the data was unavailable.
+            const unwatchedManager =
+              res.status === "error" && res.job?.interruptedByRestart && res.job?.viaManager;
             return {
               content: [
                 {
                   type: "text",
-                  text: `Download \`${args.id}\` is already **${res.status}** — nothing to cancel.`,
+                  text: unwatchedManager
+                    ? `Download \`${args.id}\` is no longer TRACKED here, so there is nothing for this MCP to cancel — but that is NOT the same as stopped. It was dispatched to ComfyUI-Manager, so the ComfyUI HOST may still be fetching it, and there is no Manager recall API, so cancelling could not have stopped it either. Do not read this as a cancellation, and do not re-issue on the strength of it: a second dispatch writes another copy to the same destination and corrupts the model.`
+                    : `Download \`${args.id}\` is already **${res.status}** — nothing to cancel.`,
                 },
               ],
             };
