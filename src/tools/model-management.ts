@@ -886,7 +886,7 @@ async function statusAction(args: {
               {
                 type: "text",
                 text: (args.id || args.url)
-                  ? `No download matching ${selector}. Several causes reach this same message and it does not distinguish them — treat it as "not found", NOT as "finished": it may have finished long ago (settled records are pruned after a while), never started, been interrupted by an orchestrator restart with the carry-over that records that (#1148) not having run (it is best-effort by design), been looked up by \`url\` when only a carried-over record exists (those are findable by \`id\` only), or been given a valid \`id\` with a \`tray_id\` that does not match it. Check the panel download tray before re-downloading. Within the SAME session, re-issuing an identical in-flight download adopts it rather than duplicating; across a reconnect, confirm via the tray first.`
+                  ? `No download matching ${selector}. Several causes reach this same message and it does not distinguish them — treat it as "not found", NOT as "finished": it may have finished long ago (settled records are pruned after a while), never started, been interrupted by an orchestrator restart with the carry-over that records that (#1148) not having run (it is best-effort by design), been given a valid \`id\` with a \`tray_id\` that does not match it. Check the panel download tray before re-downloading. Within the SAME session, re-issuing an identical in-flight download adopts it rather than duplicating; across a reconnect, confirm via the tray first.`
                   : "No downloads are being tracked.",
               },
             ],

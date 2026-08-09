@@ -29,6 +29,7 @@
 // their opposite — the round-2 gate demonstrated exactly that.
 
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 
 import { describe, expect, it } from "vitest";
 
@@ -127,6 +128,30 @@ describe("download_model action:\"status\" claims only what the code delivers (#
     // false. Inherited-and-unchecked is the exact failure mode that produced
     // #1148 in the first place, so it is pinned rather than merely deleted.
     expect(statusParagraph()).not.toMatch(/never by `url`/);
+  });
+
+  // The guard's FIELD OF VIEW, widened after it missed F1.
+  //
+  // `statusParagraph()` slices only the tool description, so when the same false
+  // claim ("findable by `id` only" for a carried-over record — untrue since
+  // #1197 carries `trayId`) also lived in the NOT-FOUND message 700 lines away
+  // in the same file, the pin could not see it. The claim was deleted from one
+  // site and declared fixed while it stayed live at the other. A scan that stops
+  // at the layer you happened to edit reproduces this cluster's whole failure
+  // mode, so this one reads the SOURCE FILE.
+  it("makes no id-only / never-by-url claim ANYWHERE in the tool source", async () => {
+    const src = await readFile(
+      new URL("../../tools/model-management.ts", import.meta.url),
+      "utf8",
+    );
+    // Escape-AGNOSTIC on purpose. Inside a template literal the source spells a
+    // backtick with a leading backslash, so a pattern written against the
+    // RENDERED text matches nothing — which is exactly how this guard was inert
+    // on its first attempt, the same failure as the bug it guards. Strip
+    // backslashes first, then look for the claim as plain text.
+    const plain = src.split("\\").join("");
+    expect(plain).not.toContain("never by `url`");
+    expect(plain.toLowerCase()).not.toContain("findable by `id` only");
   });
 
   // ---------------------------------------------------------------------------
