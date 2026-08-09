@@ -39,7 +39,8 @@ function pkgJson(version: string): string {
 function makeDeps(opts: {
   packageDir: string;
   currentVersion?: string; // written into <packageDir>/package.json
-  latest?: string | undefined; // registry latest; undefined → offline
+  latest?: string | undefined; // registry latest; undefined → UNDETERMINED (#1136)
+  unreachable?: string; // #1136: the transport proved the host unreachable
   symlink?: boolean; // packageDir is a raw symlink
   realpath?: string; // override realpath(packageDir)
   realpathFails?: boolean; // realpath() returns undefined (resolution failed)
@@ -74,7 +75,14 @@ function makeDeps(opts: {
     },
     getLatestVersion: async () => {
       if (opts.registryThrows) throw new Error("network down");
-      return opts.latest;
+      // #1136 — the probe is now three-state. A harness that always returned
+      // `unreachable` for a missing version would re-create the very fold the
+      // change removes, so an absent `latest` means UNDETERMINED here; the
+      // unreachable path is exercised explicitly by opts.unreachable.
+      if (opts.unreachable) return { unreachable: opts.unreachable };
+      return opts.latest === undefined
+        ? { undetermined: "test harness supplied no version" }
+        : { version: opts.latest };
     },
     runNpm: async (args, cwd) => {
       npmCalls.push({ args, cwd });
@@ -796,5 +804,47 @@ describe("selfUpdateStatus", () => {
     const s = await selfUpdateStatus(h.deps);
     expect(s.latestVersion).toBeUndefined();
     expect(s.updateAvailable).toBe(false);
+  });
+});
+
+// ── #1136: "unreachable" is a claim about the USER'S NETWORK. It must not be
+// made on the strength of a registry that answered.
+//
+// Before this, `getLatestVersion` returned `string | undefined` and four
+// conditions collapsed into that `undefined` -- DNS failure, non-2xx, missing
+// `version` field, unparseable body -- after which the consumer reported all
+// four as "npm registry unreachable (offline or timed out)". A user hitting a
+// 429 was told to check their network.
+describe("registry probe distinguishes unreachable from undetermined (#1136)", () => {
+  it("names the host and says unreachable ONLY when the transport proves it", async () => {
+    const h = makeDeps({
+      packageDir: GLOBAL_DIR,
+      currentVersion: "1.0.0",
+      unreachable:
+        "Could not reach registry.npmjs.org — the request could not be resolved (DNS).",
+    });
+    const res = await runSelfUpdate(h.deps);
+    expect(res.action).toBe("unavailable");
+    expect(res.note).toContain("registry.npmjs.org");
+    expect(res.note).toMatch(/could not be resolved/i);
+  });
+
+  it("does NOT say unreachable when the registry ANSWERED but we could not determine a version", async () => {
+    // The discriminating case. `latest: undefined` now means undetermined, not
+    // unreachable -- a 500/429/garbage body must not be reported as a network
+    // problem the user can act on.
+    const h = makeDeps({ packageDir: GLOBAL_DIR, currentVersion: "1.0.0" });
+    const res = await runSelfUpdate(h.deps);
+    expect(res.action).toBe("unavailable");
+    expect(res.note).not.toMatch(/unreachable/i);
+    expect(res.note).toMatch(/could not determine/i);
+  });
+
+  it("says an undetermined check is NOT evidence of being up to date", async () => {
+    // The failure this issue is about: a non-answer read as a reassuring answer.
+    const h = makeDeps({ packageDir: GLOBAL_DIR, currentVersion: "1.0.0" });
+    const res = await runSelfUpdate(h.deps);
+    expect(res.note).toMatch(/NOT evidence that you are up to date/i);
+    expect(res.action).not.toBe("up-to-date");
   });
 });
