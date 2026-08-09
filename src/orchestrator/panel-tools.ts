@@ -897,7 +897,10 @@ function isLoopbackHostName(host: string): boolean {
 
 /** The scheme://host:port origin of a URL (default ports made explicit), or null if
  *  unparseable. Loopback hosts canonicalize to their FAMILY loopback (v4 → 127.0.0.1,
- *  v6 → ::1) — so localhost/127.0.0.1/0.0.0.0 compare equal, and ::1/:: compare equal,
+ *  v6 → ::1) — so 127.0.0.1/0.0.0.0 compare equal, and ::1/:: compare equal. NOTE:
+ *  `localhost` is deliberately NOT folded (loopbackFamily returns null for it), so it
+ *  compares UNEQUAL to a concrete literal — callers that would harm a user by treating
+ *  that as proof of difference must degrade it to "unknown" themselves (#1233),
  *  but a v4 host and a v6 host DIFFER (they may be different instances). Ports differ. */
 function httpOriginOf(rawUrl: string): string | null {
   try {
@@ -1237,8 +1240,28 @@ export function restartTimeoutFallbackAdvice({
   // how it was found. A pathless Origin can prove a different host:port; it cannot prove
   // a different path, so it is only ever used for the claim it can actually support.
   // (captureRebootHealthBase fails closed on the same ambiguity for the same reason.)
+  // #1233 (codex) — a DNS-ambiguous `localhost` on EITHER side is NOT proof of a
+  // different server. loopbackFamily() deliberately excludes it (a coordinator P0: it
+  // can resolve to either family, or to something else entirely), so `localhost:8188`
+  // vs `127.0.0.1:8188` canonicalizes unequal and would fire the strong warning at what
+  // is very likely the same instance. Absence of proof is not proof of difference, so
+  // an ambiguous host degrades to UNPROVEN — the same direction captureRebootHealthBase
+  // takes for the same input.
+  const dnsAmbiguous = (u: string | null) => {
+    if (!u) return false;
+    try {
+      return new URL(u).hostname.toLowerCase().replace(/^\[|\]$/g, "") === "localhost";
+    } catch {
+      return false;
+    }
+  };
   const originMismatch =
-    observedOrigin != null && !sameHttpOrigin(headlessBase, observedOrigin) ? observedOrigin : null;
+    observedOrigin != null &&
+    !dnsAmbiguous(observedOrigin) &&
+    !dnsAmbiguous(headlessBase) &&
+    !sameHttpOrigin(headlessBase, observedOrigin)
+      ? observedOrigin
+      : null;
   const proven = panelBase ?? originMismatch;
   if (proven != null) {
     return (

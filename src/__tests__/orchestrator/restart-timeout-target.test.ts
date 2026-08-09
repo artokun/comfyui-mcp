@@ -135,4 +135,21 @@ describe("#1233 confirmed mismatch reaches the strong warning", () => {
     // 127.0.0.1 vs a 0.0.0.0 bind is the same instance; sameHttpOrigin folds the family.
     expect(advise("http://0.0.0.0:8188", null, "http://127.0.0.1:8188")).not.toContain("Do NOT");
   });
+
+  it("#1233 (codex) `localhost` vs a loopback literal is UNPROVEN, not a mismatch", () => {
+    // loopbackFamily() deliberately excludes localhost (coordinator P0: it can resolve to
+    // either family, or elsewhere), so it canonicalizes unequal to 127.0.0.1 — and firing
+    // the strong warning on that would accuse what is very likely the same instance.
+    expect(advise("http://localhost:8188", null, "http://127.0.0.1:8188")).not.toContain("Do NOT");
+    expect(advise("http://127.0.0.1:8188", null, "http://localhost:8188")).not.toContain("Do NOT");
+    expect(advise("http://localhost:8188", null, "http://[::1]:8188")).not.toContain("Do NOT");
+  });
+
+  it("#1233 (codex) an ambiguous host does not mask a genuinely different PORT", () => {
+    // Degrading to unproven must not become a blanket amnesty: the port still differs.
+    const a = advise("http://localhost:8188", null, "http://localhost:8189");
+    expect(a).not.toContain("Do NOT"); // ambiguous on both sides -> unknown, by design
+    // …but a concrete literal on both sides still proves it.
+    expect(advise("http://127.0.0.1:8188", null, "http://127.0.0.1:8189")).toContain("Do NOT");
+  });
 });
