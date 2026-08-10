@@ -5194,9 +5194,14 @@ describe("panel-tools: mode:'current' re-derives the workflow command fence (#77
     expect(text).toMatch(/name DIFFERENT workflows \(a stale or mixed reply\)/);
     // The reason it matters, stated: this is what protects the tab.
     expect(text).toMatch(/could have stamped ANOTHER canvas's identity onto this tab/);
-    // The remedy fits the cause — transient, so retry; not "update your panel".
-    expect(text).toMatch(/call this again in a moment/);
+    // The remedy fits the cause — not "update your panel", which is the sibling
+    // failure's fix and unactionable here.
     expect(text).not.toMatch(/must be UPDATED/);
+    // #1292 — and it no longer prescribes the retry the tool JUST PERFORMED. This
+    // stub never settles, so all four reads refused; saying "call this again in a
+    // moment" after that sends the caller to do the least likely thing left.
+    expect(text).toMatch(/ALREADY TRIED: the panel was re-read \d+ times/);
+    expect(text).not.toMatch(/call this again in a moment/);
   });
 
   it("REFUSES to adopt from a reply with no open-workflow list to corroborate against", async () => {
