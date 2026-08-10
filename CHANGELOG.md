@@ -23,14 +23,18 @@ All notable changes to this project are documented here. This project adheres to
 
 ## [0.50.86] - 2026-08-09
 
+> Covers changes since 0.50.85.
+
 ### MCP
 
 #### Fixed
-- say why a CivitAI download failed, instead of a bare status (#1303)
 
-#### Changed
-- 0.50.85 (#1302)
-
+- **A failed model download now says WHY (#1300).** `download_model` reported
+  `Download failed: 404 ` and nothing else, so a missing CivitAI token and a genuinely
+  wrong URL were the same sentence — one reporter needed four attempts to download a
+  single file. The server's own explanation is now carried back (bounded and scrubbed),
+  and for CivitAI the message names the actual cause: no token configured, a token that
+  is invalid or unentitled, or a metadata-query URL that needs the `?fileId=` form.
 
 ## [0.50.85] - 2026-08-09
 
