@@ -248,7 +248,7 @@ export interface AskEntry {
   /**
    * Which browser-tab INCARNATION this answer belongs to, captured at arrival.
    *
-   * Entries are keyed by panel tab id, and that id recurs — `wf:<hash>` names a
+   * Entries are keyed by panel tab id, and that id recurs — `wf:` route names a
    * saved workflow, so a second browser tab can hold it. Re-keying every entry by
    * incarnation would break the thing tab-keying is FOR (a reload keeps its
    * answers), so the incarnation is carried alongside and checked at the point of
@@ -456,7 +456,7 @@ export class AskAnswerJournalImpl {
   /**
    * Which browser-tab INCARNATION currently holds a panel tab (#486).
    *
-   * A `wf:<hash>` tab id names a saved workflow, so it recurs: a second browser
+   * A `wf:` route tab id names a saved workflow, so it recurs: a second browser
    * tab opening that workflow takes the key over. Anything that holds or settles
    * per-tab state must therefore be scoped to (tab, incarnation) — otherwise the
    * newcomer reads, reports and ACKS the departed tab's bookkeeping, and the

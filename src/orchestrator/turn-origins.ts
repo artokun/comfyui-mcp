@@ -410,7 +410,7 @@ export class TurnOriginTracker {
    * only at the switch event (codex gate-4 delta, P0). Event-driven
    * invalidation ({@link tabChangedBackend}) fires when a switch is
    * OBSERVABLE, but a pin can land on a foreign-backend tab with no event at
-   * all: wf:<hash> ids are deterministic and recur, so after the pinned
+   * all: wf:<tabRouteId>:<path> ids are deterministic and recur, so after the pinned
    * surface migrates away (deleting its backend record) and disconnects
    * (pruning its alias), a NEW socket can hello under the pin's exact id on
    * another backend — `prev` is gone, no switch is seen, and the stale pin

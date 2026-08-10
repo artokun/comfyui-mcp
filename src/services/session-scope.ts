@@ -175,10 +175,31 @@ export function workflowOriginNote(opts: {
 export function shortTabId(id: string | undefined | null): string {
   if (!id) return String(id ?? "");
   if (!id.startsWith("wf:")) return id.slice(0, 8);
-  const path = id.slice(3);
+  const rest = id.slice(3);
+  // #1285 — A TAB ID IS A ROUTE, NOT A PATH. The panel's own bridge-route.js
+  // (#640) defines two shapes and says they are not interchangeable:
+  //
+  //   savedWorkflowHandle(path)           -> wf:<path>              names a WORKFLOW
+  //   savedWorkflowRoute(tabRouteId,path) -> wf:<tabRouteId>:<path> names a TAB
+  //
+  // `bridge.tabs()` returns ROUTES, and this treated the whole remainder as a
+  // path — so it rendered `wf:<tabRouteId>:<path>` down to just the basename and
+  // threw away the ONE component that distinguishes two tabs showing the SAME
+  // file. That is #934's failure returning by another door: two different tabs
+  // rendering identically, in the messages written to tell them apart.
+  //
+  // The separator is the FIRST colon, because savedWorkflowRoute refuses a
+  // tabRouteId containing one (verified against the live served panel). A path
+  // may contain colons — `C:\…` — so a head that is one character, or that holds
+  // a path separator, is not a route id and the whole remainder stays a path.
+  const sep = rest.indexOf(":");
+  const head = sep === -1 ? "" : rest.slice(0, sep);
+  const isRoute = sep > 1 && !/[/\\]/.test(head);
+  const path = isRoute ? rest.slice(sep + 1) : rest;
   // The basename is what distinguishes two workflow tabs; the directory prefix
   // is shared by all of them and is exactly what the old slice kept.
   const base = path.split(/[/\\]/).pop() || path;
   const MAX = 40;
-  return `wf:${base.length > MAX ? `…${base.slice(-MAX)}` : base}`;
+  const shownPath = base.length > MAX ? `…${base.slice(-MAX)}` : base;
+  return isRoute ? `wf:${head.slice(0, 6)}:${shownPath}` : `wf:${shownPath}`;
 }

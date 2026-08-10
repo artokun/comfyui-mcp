@@ -107,9 +107,16 @@ interface Conn {
    * panel registration rather than mistaking the pre-restart socket for a reconnect. */
   helloGeneration: number;
   /** Browser-tab-scoped session identity supplied by current panel builds.
-   * Unlike `tabId`, which is commonly derived from a saved workflow path and
-   * can therefore recur in a second browser tab, this stays with one browser
-   * tab across a ComfyUI restart. It is used only as an accidental-routing
+   * Unlike `tabId` — a bridge ROUTE, `wf:<tabRouteId>:<path>`, whose shape is
+   * defined by the panel's own bridge-route.js (#640) and which can recur when a
+   * tab route id is reused — this stays with one browser tab across a ComfyUI
+   * restart.
+   *
+   * #1285 — this used to say a tabId is "commonly derived from a saved workflow
+   * path". That is the HANDLE (`wf:<path>`), which bridge-route.js explicitly
+   * marks as NOT a route because two browser tabs can show the same file. A
+   * reader believed this sentence, derived `wf:<path>`, compared it against
+   * `bridge.tabs()`, and shipped a fix that never matched anything. It is used only as an accidental-routing
    * correctness proof for restart readiness; absence fails that proof closed. */
   tabSessionId?: string;
   /**
@@ -1270,7 +1277,8 @@ function mutatedButUnacked(ctx: SendCtx): string {
 /**
  * Key for a pending "is this tab gone?" clock (#486).
  *
- * (tab id, INCARNATION) — a `wf:<hash>` tab id recurs, so it names a workflow,
+ * (tab id, INCARNATION) — a `wf:` route recurs (#1285: it is
+ * `wf:<tabRouteId>:<path>`, not a hash), so it names a workflow,
  * not a browser tab. The incarnation is the panel's sessionStorage-backed
  * `tab_session_id`: unique per browser tab and stable across a reload, which is
  * exactly the distinction the clock has to draw. JSON-encoded so neither part
@@ -1514,7 +1522,7 @@ export class UiBridge {
    * Which (tab, incarnation) each live socket registered as.
    *
    * The close handler needs this because "was I the primary connection?" is the
-   * WRONG question: when a second tab takes over a recurring `wf:<hash>` key the
+   * WRONG question: when a second tab takes over a recurring `wf:` route key the
    * bridge closes the first socket, and by the time that close fires the map
    * already points at the newcomer — so the departing tab was never armed at all
    * and could never be declared gone. The socket knows who it was; ask it.
@@ -1907,7 +1915,7 @@ export class UiBridge {
     // hellos is client-controlled, so a headless viewer could otherwise flip it to
     // `false` to pass the same-kind takeover check and seize a desktop tab's id.
     let socketHeadless: boolean | null = null;
-    // #422: capability proven under a PRE-MIGRATION tab id (tmp:<uuid> → wf:<hash>,
+    // #422: capability proven under a PRE-MIGRATION tab id (tmp:<uuid> → wf:<tabRouteId>:<path>,
     // same socket/panel) so the veto survives the id change. The retiring conn is
     // deleted during migration below; without carrying this, a graph-edit-triggered
     // migration + undercutting-version hello would reintroduce the false "too old" gate.
@@ -1935,11 +1943,11 @@ export class UiBridge {
         // the newly-targeted view (frames carry no tab_id — the socket is the tab).
         if (tabId && tabId !== msg.tab_id && this.conns.get(tabId)?.sock === sock) {
           // PATH-COMPRESS the migration map: the reported field failure chains
-          // ids (random UUID → tmp:<uuid> → wf:<hash>). A single-hop lookup on
+          // ids (random UUID → tmp:<uuid> → wf:<tabRouteId>:<path>). A single-hop lookup on
           // the ORIGINAL id would land on the dead intermediate — rewrite every
           // entry pointing at the id being retired so any historical id resolves
           // to the LIVE tab in one step, and the map never grows chains. Entries
-          // are SOCKET-SCOPED (codex review): wf:<hash> ids are deterministic and
+          // are SOCKET-SCOPED (codex review): wf:<tabRouteId>:<path> ids are deterministic and
           // recur across reconnects, so a migration must only ever route to the
           // socket that created it — compression too stays within this socket.
           for (const [from, entry] of this.tabMigrations) {
@@ -2045,7 +2053,7 @@ export class UiBridge {
         // #486 — THIS tab is back. Cancel its pending "is it gone?" clock, so an
         // ordinary reload never retires state only this tab can be told about.
         //
-        // Matched on the BROWSER-TAB SESSION, not the key: a `wf:<hash>` key
+        // Matched on the BROWSER-TAB SESSION, not the key: a `wf:` route key
         // recurs, so a DIFFERENT tab opening the same saved workflow takes it
         // over. Keyed on the id alone, that stranger's hello would cancel the
         // departed tab's clock — and a later result from the stranger could then
@@ -2136,7 +2144,7 @@ export class UiBridge {
           // window.location the browser was served from — the ComfyUI instance THIS
           // tab fronts. Preserved across a SAME-SOCKET re-hello that omits it, but
           // NEVER inherited by a DIFFERENT socket reusing this (possibly recurring
-          // wf:<hash>) tab id — that could let an unrelated instance's origin certify
+          // wf:<tabRouteId>:<path>) tab id — that could let an unrelated instance's origin certify
           // this tab's restart (#509, codex: cross-ownership inheritance).
           originUrl:
             typeof (msg as { comfyui_url?: unknown }).comfyui_url === "string" &&
@@ -3173,7 +3181,7 @@ export class UiBridge {
   private armTabGone(tabId: string, incarnation: string): void {
     if (!this.onTabGone) return;
     // Keyed per INCARNATION, so two browser tabs that share a recurring
-    // `wf:<hash>` key each get their own clock. Keyed by tab id alone, the
+    // `wf:` route key each get their own clock. Keyed by tab id alone, the
     // second tab's departure would silently drop the first tab's pending
     // signal and it would never be declarable gone at all.
     const slot = tabIncarnationSlot(tabId, incarnation);
@@ -3222,7 +3230,7 @@ export class UiBridge {
    * THIS tab is back (or is being torn down deliberately) — it is not gone.
    *
    * Only the SAME incarnation cancels. A different browser tab taking over a
-   * recurring `wf:<hash>` key must leave the departed tab's clock running, or
+   * recurring `wf:` route key must leave the departed tab's clock running, or
    * the departed tab becomes permanently undeclarable and its disclosure can be
    * settled by a conversation that never owned it. `undefined` cancels
    * unconditionally, for the deliberate teardown path that has no incarnation to
@@ -3250,7 +3258,7 @@ export class UiBridge {
 
   /** The incarnation currently holding `tabId` — the identity every structure
    *  that stores per-tab state must scope to, so a different browser tab taking
-   *  over a recurring `wf:<hash>` key cannot read, settle or inherit it (#486). */
+   *  over a recurring `wf:` route key cannot read, settle or inherit it (#486). */
   tabIncarnation(tabId: string): string | undefined {
     return this.conns.get(tabId)?.incarnationId;
   }
@@ -3403,7 +3411,7 @@ export class UiBridge {
       // Tab-id migration fallback — checked AFTER prefix matching (codex
       // review: a stale alias must never shadow a legitimately connected
       // prefix match), and only honored when the live connection is STILL the
-      // socket that created the migration (wf:<hash> ids recur — an unrelated
+      // socket that created the migration (wf:<tabRouteId>:<path> ids recur — an unrelated
       // later tab reusing the id must not inherit someone else's alias).
       if (prefixed.length === 0) {
         const migrated = this.tabMigrations.get(tabId);
@@ -3490,7 +3498,7 @@ export class UiBridge {
    *  socket, else the socket-scoped migration target it was renamed to (tmp:→wf:). Used
    *  by the #422 proven-supported bookkeeping so an in-flight reply that lands AFTER a
    *  same-socket re-hello migration records/clears on the migrated connection — and NEVER
-   *  on an UNRELATED tab that reused the (recurring wf:<hash> / recycled tmp:) id on a
+   *  on an UNRELATED tab that reused the (recurring wf:<tabRouteId>:<path> / recycled tmp:) id on a
    *  DIFFERENT socket, which the socket check rejects (codex round-4/7 P1). Returns
    *  undefined when neither resolves for this socket. */
   private liveConnForTab(tabId: string, sock: BridgeSocket): Conn | undefined {

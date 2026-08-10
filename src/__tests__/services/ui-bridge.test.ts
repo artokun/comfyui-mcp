@@ -1365,7 +1365,7 @@ describe("UiBridge (multi-tab)", () => {
     });
 
     it("a pin whose id is REVIVED by another backend's tab is refused at resolution (codex gate-4 delta P0)", async () => {
-      // wf:<hash> ids are deterministic and recur. A Claude turn pins tab A;
+      // wf:<tabRouteId>:<path> ids are deterministic and recur. A Claude turn pins tab A;
       // A disconnects (no switch event will ever fire for it); a NEW socket
       // hellos under the SAME id on Codex. The pin now resolves exact-match
       // onto the revived tab, and a provider switch does not change the
@@ -1748,7 +1748,7 @@ describe("UiBridge (multi-tab)", () => {
 
   it("follows MIGRATION CHAINS: uuid → tmp: → wf: (the exact #210 field sequence)", async () => {
     // The reported failure re-helloed TWICE: legacy random UUID, then the
-    // unsaved-tab tmp:<uuid> id, then the saved wf:<hash> id. The ORIGINAL id
+    // unsaved-tab tmp:<uuid> id, then the saved wf:<tabRouteId>:<path> id. The ORIGINAL id
     // must still resolve after both hops (single-hop lookup lands on the dead
     // tmp: id) — the map path-compresses so every historical id points at the
     // live tab.
@@ -4168,7 +4168,7 @@ describe("UiBridge.send (graceful gate end-to-end)", () => {
   });
 
   // #422 — the proven veto must SURVIVE a same-socket tab-id MIGRATION (tmp:<uuid> →
-  // wf:<hash>), which is exactly what a workflow-tab switch / graph edit triggers. A
+  // wf:<tabRouteId>:<path>), which is exactly what a workflow-tab switch / graph edit triggers. A
   // command served under the pre-migration id, then an undercutting-version hello under
   // the migrated id, must NOT be re-gated. FAIL-before: the migration deletes the old
   // conn, so the new conn started with an empty proven set and the gate fired.
@@ -4476,7 +4476,7 @@ describe("UiBridge (late ask_user answer buffer — #486)", () => {
     bridge.setTabGoneListener(() => {});
   });
 
-  // Coordinator gate: SAME KEY IS NOT THE SAME TAB. A `wf:<hash>` id names a
+  // Coordinator gate: SAME KEY IS NOT THE SAME TAB. A `wf:` route id names a
   // saved workflow, so a different browser tab opening that workflow takes the
   // key over. Keyed on the id alone, that stranger's hello cancelled the
   // departed tab's clock (and satisfied the timer's re-check), so the departed
