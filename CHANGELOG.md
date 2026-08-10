@@ -21,6 +21,18 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.50.83] - 2026-08-09
+
+### MCP
+
+#### Fixed
+- say 'could not determine' instead of asserting the tab did not reconnect (panel#654) (#1289)
+
+#### Changed
+- fail when a test reaches the live-process probe unstubbed (#1291)
+- 0.50.82 (#1288)
+
+
 ## [0.50.82] - 2026-08-09
 
 ### MCP
