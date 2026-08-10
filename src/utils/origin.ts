@@ -7,11 +7,22 @@
 // orchestrator still reported "a DIFFERENT address" and advised pointing
 // COMFYUI_URL at an origin it was already pointed at.
 //
-// The same blindness scopes the workflow-instance fence, which is keyed by
-// origin: a fence adopted under one spelling would refuse under the other. That
-// half is not hypothetical either, because the relay path now DERIVES its origin
-// from COMFYUI_URL (#1077) while the loopback path OBSERVES the browser's — two
-// independent sources that can easily disagree only in spelling.
+// NOT the workflow-instance fence — this header used to claim it was, and the
+// claim was wrong. `workflowIdentityParts` (orchestrator/session-store.ts) treats
+// the origin as a PRESENCE gate: it requires one to exist and never compares it
+// against a previously bound value. Both of its callers read `.uuid` and nothing
+// in the repo has ever read `identity.origin`, so two spellings of one host
+// cannot make a fence "adopted under one spelling refuse under the other".
+//
+// That sentence is deleted rather than softened because of what believing it
+// costs. The same false lead, in the pre-#1255 wording of the fence refusal
+// itself, already burned one full investigation and a closed-unmerged PR; it
+// then burned a second (#1321) via a stale quote of that message preserved in an
+// issue thread. A comment asserting a caller that does not exist is the same
+// defect as a message describing a check that does not run.
+//
+// If a fence ever does start comparing origins, wire it to `sameOrigin` and say
+// so here — but the wiring must come first, and the sentence second.
 //
 // WHY THIS IS ITS OWN MODULE. Three loopback notions already exist
 // (`isLoopbackServerUrl`, `port-owner`'s LOOPBACK/WILDCARD split,
