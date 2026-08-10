@@ -3043,8 +3043,11 @@ export type WorkflowFenceRebind =
       why: string;
       /** #1292 — how hard we already tried, so the remedy can stop telling a
        *  caller to do the thing this function just did. Present only on the
-       *  `uncorroborated` path, which is the one that rechecks. */
-      rechecks?: { attempts: number; waitedMs: number };
+       *  `uncorroborated` path, which is the one that rechecks. `settles` is
+       *  whether waiting could EVER have helped: false means the reply's SHAPE
+       *  is wrong (an older build sends no open-workflow list), and telling that
+       *  caller to try again in a moment is advice that can never come true. */
+      rechecks?: { attempts: number; waitedMs: number; settles: boolean };
     }
   /** A live identity was read, but the bridge declined to adopt it (the tab stopped
    *  being reachable, or the uuid failed the orchestrator's shape/origin check).
@@ -3086,23 +3089,52 @@ export type WorkflowFenceRebind =
  */
 function corroborateActiveForFence(
   parsed: Record<string, unknown>,
-): { ok: true; active: Record<string, unknown> } | { ok: false; why: string } {
+):
+  | { ok: true; active: Record<string, unknown> }
+  /** `settles` — could a LATER read of the same panel answer differently? #1292
+   *  rechecks, and rechecking a fact that cannot change only makes the same
+   *  error slower. A SNAPSHOT fact (what is open, which entry is flagged, whether
+   *  the panel has finished confirming) settles; a SHAPE fact (this build does
+   *  not send a `workflows` array; these records share no comparable identity
+   *  field) does not, no matter how long anyone waits. */
+  | { ok: false; why: string; settles: boolean } {
   const active = parsed.active;
   if (!active || typeof active !== "object") {
-    return { ok: false, why: "the reply carried no active-workflow record" };
+    // SETTLES: mid-restore the frontend genuinely has no active workflow yet —
+    // that is #1184's finding in this reply's terms, and it is the window here.
+    return { ok: false, why: "the reply carried no active-workflow record", settles: true };
   }
   // #514: the panel says so itself when its active record is not confirmed. An
   // explicit `false` is the panel telling us the value is untrustworthy — never
   // adopt through that. (Absent = an older panel that cannot say; the list
   // corroboration below then has to carry the whole weight.)
   if (parsed.active_confirmed === false) {
-    return { ok: false, why: "the panel reported its active workflow as UNCONFIRMED" };
+    // SETTLES: this is the reported window itself — the panel says "not yet",
+    // and a moment later it says otherwise (#1292).
+    return {
+      ok: false,
+      why: "the panel reported its active workflow as UNCONFIRMED",
+      settles: true,
+    };
   }
   const list = parsed.workflows;
-  if (!Array.isArray(list) || list.length === 0) {
+  // TWO DIFFERENT FACTS, and #1292 made the difference cost real time. An ABSENT
+  // `workflows` field is a property of the installed build — it will not appear
+  // by waiting — while an EMPTY list is a snapshot of what is open right now,
+  // which a mid-restore panel reports before its tabs come back. Folding them
+  // would make every recovery on an older panel 2.9s slower for nothing.
+  if (!Array.isArray(list)) {
     return {
       ok: false,
       why: "the reply carried no open-workflow list to corroborate the active record against",
+      settles: false,
+    };
+  }
+  if (list.length === 0) {
+    return {
+      ok: false,
+      why: "the reply's open-workflow list was empty, so nothing corroborates the active record",
+      settles: true,
     };
   }
   // Only an AFFIRMATIVE per-record flag can nominate the corroborating entry;
@@ -3112,7 +3144,12 @@ function corroborateActiveForFence(
       !!w && typeof w === "object" && (w as { active?: unknown }).active === true,
   );
   if (flaggedActive.length === 0) {
-    return { ok: false, why: "no entry in the open-workflow list is marked active" };
+    // SETTLES: a snapshot taken before the panel re-flagged its active tab.
+    return {
+      ok: false,
+      why: "no entry in the open-workflow list is marked active",
+      settles: true,
+    };
   }
   if (flaggedActive.length > 1) {
     // A mixed/partial snapshot. Exactly the shape that would let another canvas's
@@ -3120,6 +3157,8 @@ function corroborateActiveForFence(
     return {
       ok: false,
       why: `${flaggedActive.length} entries in the open-workflow list are marked active (a mixed reply)`,
+      // SETTLES: "mixed" IS the half-reconciled state, by definition.
+      settles: true,
     };
   }
   // Same tri-state primitive the pin path uses. `false` = they name DIFFERENT
@@ -3130,12 +3169,17 @@ function corroborateActiveForFence(
     return {
       ok: false,
       why: "the active record and the entry marked active in the open-workflow list name DIFFERENT workflows (a stale or mixed reply)",
+      // SETTLES: a stale half of the snapshot catches up.
+      settles: true,
     };
   }
   if (verdict !== true) {
     return {
       ok: false,
       why: "the active record and the open-workflow list share no comparable identity field, so nothing corroborates it",
+      // DOES NOT SETTLE: a field the records do not carry will not appear by
+      // waiting — that is the reply's SHAPE, not its timing.
+      settles: false,
     };
   }
   return { ok: true, active: active as Record<string, unknown> };
@@ -3300,8 +3344,13 @@ async function rebindWorkflowFence(ctx: PanelToolCtx): Promise<WorkflowFenceRebi
   let attempts = 1;
   let waitedMs = 0;
   // #1292 — recheck the RECONCILIATION WINDOW with a fresh read, never a lower bar.
+  // Only a failure that CAN settle is worth re-reading (codex review, P2): a reply
+  // whose SHAPE is wrong — an older build that sends no `workflows` array, records
+  // sharing no comparable identity field — will say exactly the same thing 2.9s
+  // later, so retrying it just makes the identical error slower. That is the same
+  // reasoning that keeps `no_uuid` out of this loop, applied one level down.
   for (const waitMs of FENCE_CORROBORATION_RECHECK_STEPS_MS) {
-    if (corroborated.ok) break;
+    if (corroborated.ok || !corroborated.settles) break;
     await sleep(waitMs);
     waitedMs += waitMs;
     attempts++;
@@ -3315,7 +3364,7 @@ async function rebindWorkflowFence(ctx: PanelToolCtx): Promise<WorkflowFenceRebi
       before,
       kind: "uncorroborated",
       why: corroborated.why,
-      rechecks: { attempts, waitedMs },
+      rechecks: { attempts, waitedMs, settles: corroborated.settles },
     };
   }
   const active = corroborated.active;
@@ -3676,7 +3725,15 @@ function describeFenceRebind(
             // taking it a fourth time is the least likely thing left to work.
             // When the rechecks ran, say so and move on to the remedy that has
             // not been tried.
-            (r.rechecks && r.rechecks.attempts > 1
+            (r.rechecks && !r.rechecks.settles
+              ? // Waiting cannot fix a reply whose SHAPE is wrong, so do not
+                // prescribe waiting. This said "call this again in a moment" to
+                // a caller whose panel will answer identically forever.
+                `\n\nWHY RETRYING WILL NOT HELP: this is the shape of the panel's reply, not a ` +
+                `moment in its reconciliation — a later read answers the same way. ` +
+                `${RELOAD_TAB_REMEDY} If it survives a hard refresh, the installed pack is too ` +
+                `old to corroborate its own active workflow and must be UPDATED.`
+              : r.rechecks && r.rechecks.attempts > 1
               ? `\n\nALREADY TRIED: the panel was re-read ${r.rechecks.attempts} times over ` +
                 `~${(r.rechecks.waitedMs / 1000).toFixed(1)}s and never corroborated. That window ` +
                 `covers the usual post-restart reconciliation, so this is probably NOT the ` +

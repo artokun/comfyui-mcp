@@ -5012,6 +5012,9 @@ describe("panel-tools: mode:'current' re-derives the workflow command fence (#77
      *  a safe fixture: it is the exact reply shape that let another canvas's uuid
      *  overwrite this tab's stamp, so the default must not encode it. */
     workflows?: Array<Record<string, unknown>>;
+    /** Send NO `workflows` field at all — an older build, as distinct from a
+     *  build that sends an empty one (#1292). */
+    omitWorkflows?: boolean;
     activeConfirmed?: boolean;
     listThrows?: string;
     refreshReturns?: boolean;
@@ -5034,6 +5037,14 @@ describe("panel-tools: mode:'current' re-derives the workflow command fence (#77
           // Mirror `active` into a corroborating `active:true` entry unless the
           // test is deliberately modelling a stale/mixed/absent list.
           const workflows = opts.workflows ?? [{ ...opts.active, active: true }];
+          if (opts.omitWorkflows) {
+            return {
+              active: opts.active,
+              ...(opts.activeConfirmed === undefined
+                ? {}
+                : { active_confirmed: opts.activeConfirmed }),
+            };
+          }
           return {
             active: opts.active,
             workflows,
@@ -5215,7 +5226,31 @@ describe("panel-tools: mode:'current' re-derives the workflow command fence (#77
     expect(refresh).not.toHaveBeenCalled();
     expect(currentStamp()).toBe(STALE);
     expect(res.isError).toBe(true);
+    // #1292 split what this message used to fold. An EMPTY list is a snapshot of
+    // what is open right now — a mid-restore panel reports it before its tabs
+    // come back, so it is worth re-reading. An ABSENT `workflows` field is a
+    // property of the installed build and will never change; that one keeps the
+    // original wording and is NOT re-read. Both still refuse.
+    expect(text).toMatch(/open-workflow list was empty, so nothing corroborates the active record/);
+  });
+
+  it("REFUSES — and does not re-read — a reply that carries NO open-workflow field at all", async () => {
+    // The other half of the split above: rechecking a build that cannot answer
+    // differently would only make the identical error ~2.9s slower (#1292).
+    const { bridge, refresh, tab, currentStamp, sent } = fenceBridge({
+      fence: STALE,
+      active: { path: "workflows/a.json", routing_key: "wf:workflows/a.json", workflow_uuid: LIVE },
+      workflows: undefined as unknown as Array<Record<string, unknown>>,
+      omitWorkflows: true,
+    });
+    const { res, text } = await setCurrent(bridge, tab);
+
+    expect(refresh).not.toHaveBeenCalled();
+    expect(currentStamp()).toBe(STALE);
+    expect(res.isError).toBe(true);
     expect(text).toMatch(/no open-workflow list to corroborate the active record against/);
+    expect(sent.filter((c) => c.cmd === "workflow_list")).toHaveLength(1);
+    expect(text).toMatch(/WHY RETRYING WILL NOT HELP/);
   });
 
   it("REFUSES a MIXED list with two entries marked active, rather than arbitrating", async () => {

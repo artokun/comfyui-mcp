@@ -102,8 +102,11 @@ describe("mode:'current' absorbs the post-restart reconciliation window (#1292)"
     expect(stamp, "the live canvas's identity was adopted").toBe(LIVE);
     expect(res.isError).toBeFalsy();
     expect(text).toMatch(/"graph_binding": "bound"/);
-    // It re-read rather than reasoning its way past the refusal.
-    expect(listCalls).toBeGreaterThan(1);
+    // It re-read rather than reasoning its way past the refusal — and STOPPED at
+    // the read that succeeded. No further round trip happens between the read we
+    // corroborated and the stamp we write from it, which is what keeps the
+    // adopted record and the tab being stamped the same tab (codex review, P1).
+    expect(listCalls, "one recheck, then adopt — no read after the good one").toBe(2);
   });
 
   it("recovers from a MIXED list too — same window, different symptom", async () => {
@@ -186,6 +189,45 @@ describe("mode:'current' absorbs the post-restart reconciliation window (#1292)"
     expect(text).not.toMatch(/call this again in a moment/);
     // The remedy that HAS not been tried is the one offered.
     expect(text).toMatch(/manually refresh/);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Rechecking a fact that CANNOT change is just a slower version of the same
+  // error (codex review, P2). The split is snapshot-vs-shape, not failure-vs-
+  // success: what is open and which entry is flagged can change in 400ms; which
+  // FIELDS a build sends cannot.
+  // ---------------------------------------------------------------------------
+
+  it("does NOT recheck a reply whose SHAPE can never corroborate", async () => {
+    // An older panel that sends no open-workflow list at all. Every later read
+    // says exactly the same thing, so the rechecks would only add ~2.9s to an
+    // error the caller was going to get anyway.
+    const active = { path: "workflows/a.json", routing_key: "wf:workflows/a.json", workflow_uuid: LIVE };
+    listReplies = [{ active }];
+
+    const started = Date.now();
+    const { text } = await setCurrent();
+
+    expect(listCalls, "nothing to wait for — one read").toBe(1);
+    expect(Date.now() - started).toBeLessThan(400);
+    expect(stamp, "still refused — not rechecking is not accepting").toBe(STALE);
+    // …and the remedy stops promising that waiting helps.
+    expect(text).toMatch(/WHY RETRYING WILL NOT HELP/);
+    expect(text).not.toMatch(/call this again in a moment/);
+  });
+
+  it("DOES recheck an EMPTY open-workflow list — that one is a snapshot", async () => {
+    // The neighbouring case, and the reason the two are not folded: an absent
+    // `workflows` field is a property of the build, an empty one is a mid-restore
+    // panel that has not re-listed its tabs yet.
+    const active = { path: "workflows/a.json", routing_key: "wf:workflows/a.json", workflow_uuid: LIVE };
+    listReplies = [{ active, workflows: [] }, settled(LIVE)];
+
+    const { res } = await setCurrent();
+
+    expect(listCalls).toBe(2);
+    expect(stamp).toBe(LIVE);
+    expect(res.isError).toBeFalsy();
   });
 
   it("does not recheck a panel that reports NO identity — a different failure", async () => {
