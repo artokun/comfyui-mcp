@@ -10727,12 +10727,16 @@ export function buildPanelToolDefs(): PanelToolDef[] {
                     (!tabBack
                       ? tabReconnect === "unknown"
                         ? "whether the panel tab reconnected could NOT be determined — no pre-restart " +
-                          "baseline was captured for it, so nothing was watched (this happens when the " +
-                          "tab's socket was not open at the moment the restart was dispatched, e.g. " +
-                          "right after a node install). It may well be back. Graph tools are withheld " +
-                          "(ready:false) because that is unproven, NOT because the tab is known to be " +
-                          'gone: call panel_list_workflows — it is fence-exempt — or panel_set_workflow_target({mode:"current"}) ' +
-                          "to find out, and only refresh the browser if those also fail."
+                          "baseline was captured for it, so nothing was watched. WHY is not established " +
+                          "here, and it is one of: the tab's socket was not open at the instant the " +
+                          "restart was dispatched; the panel advertised no tab session id (an older " +
+                          "build, or its browser-tab lease was refused because a duplicate tab holds " +
+                          "it); or the tab did not resolve at all. The tab may well be back. Graph " +
+                          "tools are withheld (ready:false) because that is unproven, NOT because the " +
+                          'tab is known to be gone: call panel_list_workflows or panel_set_workflow_target({mode:"current"}) ' +
+                          "to find out, and only refresh the browser if those also fail. If this " +
+                          "repeats on every restart, the panel is probably too old to advertise a tab " +
+                          "session id — update it."
                         : "the panel tab has NOT reconnected yet (ready:false). Wait a moment then retry, or " +
                           'rebind with panel_set_workflow_target({mode:"current"}) before issuing graph tools.'
                       : "the panel tab reconnected but cannot safely run graph mutations (ready:false), usually " +
@@ -10919,12 +10923,15 @@ export function buildPanelToolDefs(): PanelToolDef[] {
               ? "; the panel tab reconnected — graph tools are ready."
               : tabReconnect === "unknown"
                 ? "; ComfyUI is back, but whether the panel tab reconnected could NOT be determined — no " +
-                  "pre-restart baseline was captured for it, so nothing was watched (its socket was not " +
-                  "open at the moment the restart was dispatched). The tab may well be back. Graph tools " +
-                  "are withheld (ready:false) because that is UNPROVEN, not because the tab is known to " +
-                  "be gone: call panel_list_workflows (it is fence-exempt) or " +
+                  "pre-restart baseline was captured for it, so nothing was watched. WHY is not " +
+                  "established here, and it is one of: its socket was not open at the instant the " +
+                  "restart was dispatched; the panel advertised no tab session id (an older build, or " +
+                  "a refused browser-tab lease); or the tab did not resolve at all. The tab may well " +
+                  "be back. Graph tools are withheld (ready:false) because that is UNPROVEN, not " +
+                  "because the tab is known to be gone: call panel_list_workflows or " +
                   'panel_set_workflow_target({mode:"current"}) to find out, and refresh the browser only ' +
-                  "if those also fail."
+                  "if those also fail. If this repeats on every restart, the panel is probably too old " +
+                  "to advertise a tab session id — update it."
                 : "; ComfyUI is back but the panel tab has NOT reconnected yet (ready:false) — " +
                   'wait a moment then retry, or rebind with panel_set_workflow_target({mode:"current"}) ' +
                   "before issuing graph tools.") +

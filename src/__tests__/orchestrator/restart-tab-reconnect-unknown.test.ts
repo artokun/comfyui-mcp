@@ -110,13 +110,28 @@ describe("#654 WIRING: both restart replies report the classification", () => {
     // hostage to any other line that happens to say it (there is already a third).
     // The invariant is "both notes say it", not "the file says it twice".
     expect((s.match(/could NOT be determined/g) ?? []).length).toBeGreaterThanOrEqual(2);
-    // Both notes name the cheap fence-exempt check first. Asserted as an
-    // invariant, not a phrase: these notes are built by concatenating string
-    // literals, so any sentence long enough to be worth matching is split across
-    // a `+` and a source regex silently fails to find it. That is a property of
-    // matching source text, and the reason the assertions above pin identifiers
-    // rather than prose.
-    expect((s.match(/fence-exempt/g) ?? []).length).toBeGreaterThanOrEqual(2);
+    // Both notes point at the cheap probe first, and neither ASSERTS which of the
+    // three causes applied — the whole point of this fix is not asserting an
+    // unobserved fact, and the first cut of these very notes did exactly that.
+    expect((s.match(/panel_list_workflows/g) ?? []).length).toBeGreaterThanOrEqual(2);
+    // "WHY is not" and NOT the fuller phrase: these notes are built by
+    // concatenating literals, and the sentence splits across a `+` at a different
+    // word in each one. I wrote the caveat above and then matched a longer phrase
+    // anyway; it found 0 of 2. Short tokens that cannot straddle a break are the
+    // only prose worth asserting on — which is itself the argument for the
+    // behavioural test below rather than more of these.
+    expect((s.match(/WHY is not/g) ?? []).length).toBe(2);
+    expect(/watched \(its socket was not/.test(s), "a note still states one cause as fact").toBe(false);
     expect((s.match(/UNPROVEN|unproven/g) ?? []).length).toBeGreaterThanOrEqual(2);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 4. The BEHAVIOURAL coverage lives in panel-restart-legacy-fallback.test.ts,
+//    which already has the hoisted config/process-control mocks needed to reach
+//    the restart reply. A first attempt here rebuilt that harness from scratch,
+//    could not get past the preflight refusal, and guarded its assertions with
+//    `if (text.includes("panel_tab_reconnected"))` — which made it pass
+//    vacuously. It survived the very gate refactor it claimed to catch. Deleted
+//    rather than left looking like coverage.
+// ---------------------------------------------------------------------------

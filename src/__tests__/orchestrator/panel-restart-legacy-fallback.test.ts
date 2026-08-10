@@ -339,3 +339,48 @@ describe("#425 remote: the refusal must name what will actually work", () => {
     expect(hoisted.restart).not.toHaveBeenCalled();
   });
 });
+
+// panel#654 — `panel_tab_reconnected:false` was emitted for a reconnect that was
+// never watched. `awaitPostRestartReachable` opens with `if (before == null)
+// return false`, and `before` is undefined whenever the panel advertised no tab
+// session id, the socket was not OPEN at capture time, or the tab did not
+// resolve. The reporter's output is reproducible with the panel never failing.
+//
+// These live here because this file already owns the scaffolding that reaches a
+// restart REPLY. A pure-function assertion cannot show the gate held: routing
+// `ready` through the classification left the whole suite green when measured.
+describe("#654 an unwatched reconnect is reported as unknown, and is still not ready", () => {
+  it("no pre-restart baseline ⇒ panel_tab_reconnected:'unknown', ready stays false", async () => {
+    const { ctx } = makeCtx(NO_ENDPOINT_REPLY);
+    ctx.panelConnectionIdentity = () => undefined; // panel advertised no tab session id
+    ctx.awaitPostRestartReachable = async () => false; // and so nothing is watched
+    ctx.tabCanMutateGraph = () => true; // isolate: capability is NOT the reason
+
+    const res = (await restartTool().handler({}, ctx)) as ToolResult;
+    const out = JSON.parse(res.content.find((c) => c.type === "text")!.text as string);
+
+    expect(out.server_ready).toBe(true);
+    expect(out.panel_tab_reconnected).toBe("unknown"); // not a bare false
+    // THE GATE. Unknown must never buy readiness — this is the assertion that
+    // catches `ready: graphToolsReady || tabReconnect === "unknown"`.
+    expect(out.ready).toBe(false);
+    expect(out.graph_tools_ready).toBe(false);
+    expect(String(out.note)).toMatch(/could NOT be determined/);
+    // …and it must not narrate a cause nobody observed.
+    expect(String(out.note)).toMatch(/WHY is not/);
+  });
+
+  it("a WATCHED reconnect that did not return is still a real false", async () => {
+    const { ctx } = makeCtx(NO_ENDPOINT_REPLY);
+    ctx.panelConnectionIdentity = () => ({ generation: 1, tabSessionId: "browser-tab-a" });
+    ctx.awaitPostRestartReachable = async () => false;
+    ctx.tabCanMutateGraph = () => true;
+
+    const res = (await restartTool().handler({}, ctx)) as ToolResult;
+    const out = JSON.parse(res.content.find((c) => c.type === "text")!.text as string);
+
+    expect(out.panel_tab_reconnected).toBe(false); // the honest negative survives
+    expect(out.ready).toBe(false);
+    expect(String(out.note)).not.toMatch(/could NOT be determined/);
+  });
+});
