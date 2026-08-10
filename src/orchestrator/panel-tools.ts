@@ -1208,6 +1208,57 @@ async function probeDeclineRecovery(
  *
  * Pure, so the three-way decision is testable without a live panel.
  */
+/**
+ * panel#654 — did the browser tab come back after the restart, and DO WE KNOW?
+ *
+ * `panel_tab_reconnected` was a bare boolean, and `false` meant two unrelated
+ * things:
+ *
+ *   - the tab was watched for a newer hello and did not come back;
+ *   - **nothing was ever watched**, so there is no observation to report.
+ *
+ * The second is the common one and it is silent. `awaitPostRestartReachable`
+ * opens with `if (before == null) return false` — immediate, nothing awaited —
+ * and `before` is `bridge.tabConnectionIdentity(tabId)`, which is `undefined`
+ * whenever the socket is not OPEN **at capture time** (captured BEFORE the
+ * restart dispatch, so a socket still settling after a Manager install lands
+ * exactly there), or the tab session id is absent, or resolveTarget throws.
+ * The reporter's output — `server_ready:true` with `panel_tab_reconnected:false`
+ * — is reproducible with the panel never having failed at all, which is why
+ * every panel-side measurement in that thread showed healthy recovery: the
+ * panel was reconnecting fine and the orchestrator never looked.
+ *
+ * A reader who sees `false` concludes the panel is dead and hard-refreshes the
+ * browser. That is the manual step this issue is about, and on this path it may
+ * have been unnecessary every time.
+ *
+ * THE GATE IS NOT WEAKENED. `ready` and `graph_tools_ready` are still computed
+ * from the boolean, so an undetermined reconnect still withholds graph tools —
+ * failing closed on capability is right, and a weaker proof would be worse. What
+ * changes is that the REPLY stops asserting an observation that was never made.
+ * `"unknown"` follows the shape this file already uses for exactly this
+ * distinction (`stale: true | "unknown"`), rather than inventing a second field
+ * that a reader could miss while still acting on the misleading boolean.
+ *
+ * `serverReady:false` is undetermined too, and for the same reason: the tab is
+ * only watched once the server is back, so nothing was observed about it.
+ */
+export type TabReconnectReport = true | false | "unknown";
+
+export function classifyTabReconnect({
+  serverReady,
+  baselineCaptured,
+  tabBack,
+}: {
+  serverReady: boolean;
+  baselineCaptured: boolean;
+  tabBack: boolean;
+}): TabReconnectReport {
+  if (tabBack === true) return true; // a newer hello from the same tab was seen
+  if (!serverReady) return "unknown"; // never watched — the server never came back
+  return baselineCaptured ? false : "unknown";
+}
+
 export function restartTimeoutFallbackAdvice({
   headlessBase,
   panelBase,
@@ -10650,12 +10701,20 @@ export function buildPanelToolDefs(): PanelToolDef[] {
                   : true
               : false;
             const graphToolsReady = tabBack && (ctx.tabCanMutateGraph ? ctx.tabCanMutateGraph() : true);
+            // #654 — `ready`/`graph_tools_ready` still come from the BOOLEAN, so an
+            // undetermined reconnect withholds graph tools exactly as before. Only
+            // the reported observation changes.
+            const tabReconnect = classifyTabReconnect({
+              serverReady: recovery.ready,
+              baselineCaptured: preRestartPanelIdentity != null,
+              tabBack,
+            });
             return ok({
               rebooting: true,
               ready: graphToolsReady,
               graph_tools_ready: graphToolsReady,
               server_ready: recovery.ready,
-              panel_tab_reconnected: tabBack,
+              panel_tab_reconnected: tabReconnect,
               confirmed_cycle: observed, // true = we directly observed the down→up cycle
               recovered_ms: recovery.waited_ms,
               probes: recovery.attempts,
@@ -10666,8 +10725,16 @@ export function buildPanelToolDefs(): PanelToolDef[] {
                   ? "ComfyUI-Manager (legacy 3.x) had no reboot endpoint; the headless managed restart " +
                     `came back healthy in ${(recovery.waited_ms / 1000).toFixed(1)}s, but ` +
                     (!tabBack
-                      ? "the panel tab has NOT reconnected yet (ready:false). Wait a moment then retry, or " +
-                        'rebind with panel_set_workflow_target({mode:"current"}) before issuing graph tools.'
+                      ? tabReconnect === "unknown"
+                        ? "whether the panel tab reconnected could NOT be determined — no pre-restart " +
+                          "baseline was captured for it, so nothing was watched (this happens when the " +
+                          "tab's socket was not open at the moment the restart was dispatched, e.g. " +
+                          "right after a node install). It may well be back. Graph tools are withheld " +
+                          "(ready:false) because that is unproven, NOT because the tab is known to be " +
+                          'gone: call panel_list_workflows — it is fence-exempt — or panel_set_workflow_target({mode:"current"}) ' +
+                          "to find out, and only refresh the browser if those also fail."
+                        : "the panel tab has NOT reconnected yet (ready:false). Wait a moment then retry, or " +
+                          'rebind with panel_set_workflow_target({mode:"current"}) before issuing graph tools.'
                       : "the panel tab reconnected but cannot safely run graph mutations (ready:false), usually " +
                         "because it is still running a stale panel bundle. Hard-refresh the ComfyUI browser tab " +
                         "(Ctrl+Shift+R) before issuing graph tools; if that does not restore it, update the panel " +
@@ -10791,6 +10858,14 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         // Old/lightweight contexts have no capability accessor, so preserve their historical
         // contract rather than claiming a production tab passed a check it never ran.
         const graphToolsReady = tabBack && (ctx.tabCanMutateGraph ? ctx.tabCanMutateGraph() : true);
+        // #654 — same split as the legacy path above. The gate is unchanged:
+        // `ready`/`graph_tools_ready` still key off the boolean, so an undetermined
+        // reconnect still withholds graph tools. Only the reported observation changes.
+        const tabReconnect = classifyTabReconnect({
+          serverReady: true, // this branch only runs on a confirmed healthy cycle
+          baselineCaptured: preRestartPanelIdentity != null,
+          tabBack,
+        });
         // #848: WHAT THIS RESTART DID NOT DO. "It came back healthy" answers a
         // different question from "did it come back with the launch arguments I just
         // configured?", and a user who had edited ComfyUI Desktop's saved launch args
@@ -10829,7 +10904,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           probes: recovery.attempts,
           saw_down: recovery.sawDown,
           via: recovery.via,
-          panel_tab_reconnected: tabBack,
+          panel_tab_reconnected: tabReconnect,
           note:
             (tabBack && !graphToolsReady
               ? `ComfyUI restart accepted and it is healthy again in ${(recovery.waited_ms / 1000).toFixed(1)}s` +
@@ -10842,9 +10917,17 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             (dropped ? "; connection dropped as expected while it went down" : "") +
             (tabBack
               ? "; the panel tab reconnected — graph tools are ready."
-              : "; ComfyUI is back but the panel tab has NOT reconnected yet (ready:false) — " +
-                'wait a moment then retry, or rebind with panel_set_workflow_target({mode:"current"}) ' +
-                "before issuing graph tools.") +
+              : tabReconnect === "unknown"
+                ? "; ComfyUI is back, but whether the panel tab reconnected could NOT be determined — no " +
+                  "pre-restart baseline was captured for it, so nothing was watched (its socket was not " +
+                  "open at the moment the restart was dispatched). The tab may well be back. Graph tools " +
+                  "are withheld (ready:false) because that is UNPROVEN, not because the tab is known to " +
+                  "be gone: call panel_list_workflows (it is fence-exempt) or " +
+                  'panel_set_workflow_target({mode:"current"}) to find out, and refresh the browser only ' +
+                  "if those also fail."
+                : "; ComfyUI is back but the panel tab has NOT reconnected yet (ready:false) — " +
+                  'wait a moment then retry, or rebind with panel_set_workflow_target({mode:"current"}) ' +
+                  "before issuing graph tools.") +
             ".") + argvNote,
         });
       },
