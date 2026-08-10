@@ -21,6 +21,17 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.50.81] - 2026-08-09
+
+### MCP
+
+#### Fixed
+- an explicit workflow pin must clear an AMBIGUOUS turn pin (panel#888) (#1279)
+
+#### Changed
+- 0.50.80 (#1283)
+
+
 ## [0.50.80] - 2026-08-09
 
 ### MCP
