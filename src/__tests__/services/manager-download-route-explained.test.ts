@@ -83,6 +83,22 @@ describe("the download route explains ITSELF when Manager is the reason (#1374)"
     expect(explainManagerDownloadRoute()).toBe("");
   });
 
+  it("a record that would have routed LOCAL explains nothing (codex: the stale-record case)", async () => {
+    // The record is process-global. Interleaving alone cannot make two downloads disagree —
+    // every routing input is process-wide or reads the one connected server — but a server
+    // restarting between two decisions can, and concurrency widens that window.
+    //
+    // So the failure is made unreachable rather than argued about: a record that would have
+    // chosen LOCAL cannot be why Manager was chosen, and silence beats a confident wrong
+    // story. That is this issue's own lesson applied to its own fix.
+    hoisted.stats.value = {
+      // An ABSOLUTE models dir: this is a record that would have routed LOCAL.
+      system: { argv: ["main.py", "--models-directory", "/srv/comfy/models"], cwd: "/srv/comfy" },
+    };
+    await shouldDispatchDownloadToManager();
+    expect(explainManagerDownloadRoute()).toBe("");
+  });
+
   it("names the ARGV AND CWD it actually saw, because that is what identifies the case", async () => {
     // The reporter's report had no argv, and without it neither they nor I can tell which
     // of the conditions fired. Putting the observation in the message is the whole point.

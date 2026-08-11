@@ -2715,17 +2715,36 @@ async function downloadModelViaManagerRemote(
     filename: resolvedFilename,
   });
 
-  await installModelViaManager({
-    // Manager's do_install_model reads json_data['name'] (required, non-empty).
-    // We only have the filename to identify the model here, so use it.
-    name: resolvedFilename,
-    url: dispatchUrl,
-    filename: resolvedFilename,
-    type: managerType,
-    save_path: managerSavePath,
-    // Panel tray: watch OUR canonical category for the file to land (#143).
-    trayCategory: modelType,
-  });
+  try {
+    await installModelViaManager({
+      // Manager's do_install_model reads json_data['name'] (required, non-empty).
+      // We only have the filename to identify the model here, so use it.
+      name: resolvedFilename,
+      url: dispatchUrl,
+      filename: resolvedFilename,
+      type: managerType,
+      save_path: managerSavePath,
+      // Panel tray: watch OUR canonical category for the file to land (#143).
+      trayCategory: modelType,
+    });
+  } catch (err) {
+    // #1374 — the ONLY failure entitled to the route explanation: Manager was contacted
+    // and Manager is what failed. Scoped to this call rather than the whole function
+    // because everything above it — target resolution, the remote payload preflight — can
+    // fail for reasons unrelated to the route. The first version wrapped the lot and
+    // matched on error text; the preflight's own auth-gated refusal mentions
+    // ComfyUI-Manager, so it was misattributed anyway. A flag at the call site cannot be
+    // fooled by prose.
+    if (err instanceof DOMException && err.name === "AbortError") throw err;
+    const why = explainManagerDownloadRoute();
+    if (!why) throw err;
+    const raw = err instanceof Error ? err.message : String(err);
+    throw new ModelError(`${raw}
+
+WHY THIS WENT THROUGH ComfyUI-Manager AT ALL: ${why}`, {
+      url,
+    });
+  }
 
   // Cancelled while the dispatch was in flight (#515): the local job is cancelled.
   // We CAN'T recall a Manager queue task, so the host may keep fetching — but this
@@ -2851,6 +2870,22 @@ export function explainManagerDownloadRoute(): string {
     return "";
   }
   const { argv, cwd } = obs;
+  // THE RECORD MUST BE CONSISTENT WITH HAVING CHOSEN MANAGER, or say nothing.
+  //
+  // Codex called the process-global record unsafe under concurrent downloads. Measured
+  // against the predicate's inputs, interleaving alone cannot produce a disagreement: the
+  // route is decided from isRemoteMode() (process-wide), one connected server's
+  // /system_stats, and process-wide config — so two downloads in one process observe the
+  // same thing. What CAN differ is time: a server restarting between two decisions, which
+  // concurrency widens the window for.
+  //
+  // Rather than argue the odds, the failure is made unreachable. If the recorded
+  // observation would have routed LOCAL, it cannot be why Manager was chosen, so there is
+  // nothing truthful to say and this returns "". A stale record now costs a missing
+  // explanation instead of a confident wrong one — which is the whole subject of this
+  // issue, applied to my own diagnostic.
+  if (resolveEffectiveComfyUIBase()) return "";
+  if (parseModelsDirFromArgv(argv, cwd)) return "";
   const detail =
     `The server reported argv[0]=${argv?.[0] ?? "(none)"} and cwd=${cwd ?? "(not reported)"} ` +
     `when this route was chosen.`;
@@ -3005,35 +3040,11 @@ export async function downloadModel(
   if (routeToManager) {
     // Thread the PRE-rewrite HF identity so the flip probe's credential derivation keeps the
     // HF token flowing to an HF_ENDPOINT mirror (matches the local path below).
-    try {
-      return await downloadModelViaManagerRemote(url, targetSubfolder, filename, auth, signal, wasHfUrl);
-    } catch (err) {
-      // #1374 — SAY WHAT MADE MANAGER NECESSARY, but ONLY when Manager was actually the
-      // thing that failed.
-      //
-      // The first version wrapped every error out of this call, and the remote payload
-      // PREFLIGHT runs before any Manager request is made — so a DNS or HTTP failure
-      // fetching the model source got "WHY THIS WENT THROUGH ComfyUI-Manager AT ALL"
-      // appended to it, attributing a source-host problem to a dispatch that never
-      // happened. Building a diagnostic to fix a message that named the wrong cause, and
-      // having it name the wrong cause, is not a mistake worth repeating quietly.
-      //
-      // A cancel is not a routing problem either and passes through untouched.
-      if (err instanceof DOMException && err.name === "AbortError") throw err;
-      const raw = err instanceof Error ? err.message : String(err);
-      // Only a failure to REACH Manager's API earns the explanation. Anything else — a bad
-      // source URL, an auth refusal from the model host, a disk error server-side — is
-      // about the download, and the route is not the interesting fact.
-      const managerWasTheProblem = /ComfyUI-Manager|manager\/queue|\/v2\/manager/i.test(raw);
-      if (!managerWasTheProblem) throw err;
-      const why = explainManagerDownloadRoute();
-      throw new ModelError(
-        why ? `${raw}
-
-WHY THIS WENT THROUGH ComfyUI-Manager AT ALL: ${why}` : raw,
-        { url },
-      );
-    }
+    // The route explanation lives INSIDE the dispatch (see downloadModelViaManagerRemote),
+    // where a flag records whether Manager was actually contacted. Matching on error text
+    // from out here could not tell a Manager failure from a preflight refusal that happens
+    // to mention Manager.
+    return await downloadModelViaManagerRemote(url, targetSubfolder, filename, auth, signal, wasHfUrl);
   }
 
   // Root the destination at the LIVE server's models dir (its --base-directory),
