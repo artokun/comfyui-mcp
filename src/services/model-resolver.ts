@@ -2795,124 +2795,56 @@ WHY THIS WENT THROUGH ComfyUI-Manager AT ALL: ${why}`, {
  * rather than silently succeeding.
  */
 /**
- * What `shouldDispatchDownloadToManager()` actually saw when it last chose a route (#1374).
+ * WHY a download went to ComfyUI-Manager, reported as CURRENT STATE (#1374).
  *
- * Single-process, single-decision: the predicate is deliberately evaluated ONCE per
- * download and threaded to the writer (#420), so the error path must describe THAT
- * evaluation rather than take a second look. Re-reading was a real defect — a server that
- * restarted between the two reads produced an explanation of a state that would have routed
- * LOCAL, i.e. an explanation for a decision that never happened.
+ * The reporter's LOCAL install could not download at all: every attempt died on
+ * "ComfyUI-Manager's queue API is not reachable", for a capability that needs no Manager.
+ * That error is raised in generic Manager code which cannot know it is serving a download,
+ * so it named the thing that BROKE and not the decision that made Manager necessary --
+ * this MCP could not work out where the connected server keeps its models. Only the second
+ * has a remedy the user can apply.
+ *
+ * FOUR REVIEW ROUNDS WENT INTO A MESSAGE, and every one found the same shape of fault: a
+ * diagnostic claiming to narrate the routing DECISION while reading state that might not
+ * be the state that decision was made from. A second /system_stats read could describe a
+ * different server. A process-global record of the first read could be overwritten by a
+ * concurrent download. Stamping the target closed the simple overwrite but not an
+ * A -> B -> A retarget.
+ *
+ * Each fix made the window smaller instead of closing it, so what changes here is the
+ * CLAIM. This reports the state as it is now and says so. It cannot be stale, because it
+ * no longer asserts it was ever anything else -- and the argv/cwd a reporter needs in
+ * order to say which case they hit is exactly as useful either way.
  */
-type RouteObservation = { target: string } & (
-  | { remote: true }
-  | { remote: false; unreachable: true }
-  | { remote: false; argv?: string[]; cwd?: string }
-);
-let lastRouteObservation: RouteObservation | undefined;
-
-/**
- * SCOPE, stated because a diagnostic that overstates its own reach is the thing this issue
- * is about: the record is process-global and describes the MOST RECENT routing decision.
- * `downloadModel` is usually handed a route decided earlier by `startDownloadJob` (#420
- * threads it so the writer cannot diverge from the job key), so the observation belongs to
- * that decision — correct for the common case, and capable of describing a previous
- * download if the connected server restarted with different arguments in between. The text
- * therefore says "when this route was chosen" rather than asserting a current state, and
- * every branch that cannot support a claim returns "" instead of guessing.
- */
-export function resetRouteObservationForTests(): void {
-  lastRouteObservation = undefined;
-}
-
-/**
- * WHY a download was routed to ComfyUI-Manager (#1374).
- *
- * The reporter's LOCAL Windows-portable install could not download anything: every attempt
- * died on "ComfyUI-Manager's queue API is not reachable", for a capability that needs no
- * Manager at all. ~45 GB of weights, worked around with `curl`.
- *
- * The routing decision itself is a bare boolean produced by six conditions, and the error
- * they saw is raised deep in generic Manager code that cannot know it is serving a
- * download — so the message named the thing that failed (Manager) rather than the thing
- * that made Manager necessary (an install root this MCP could not resolve). Nothing in the
- * reply distinguished "your ComfyUI is remote" from "I could not work out where your local
- * ComfyUI keeps its models", and only the second has a remedy the user can apply.
- *
- * This re-derives the decision for the ERROR PATH only, and reports which condition sent
- * it to Manager. It is deliberately a separate read rather than a value threaded through
- * the predicate: the predicate is on the hot path for every download and is already
- * carefully single-evaluation for split-brain reasons (#420), and a diagnostic must not
- * change what it returns.
- *
- * NOT a routing change. I could not reproduce the reporter's decision on this machine — a
- * live ComfyUI here reports a relative `main.py` and NO cwd, and still resolves, because
- * the process-table probe anchors it. So I do not yet know which of the six conditions
- * fires for them, and guessing at the fix would be exactly the unverified confidence this
- * codebase keeps paying for. This makes the answer visible in their next report.
- */
-export function explainManagerDownloadRoute(): string {
-  const obs = lastRouteObservation;
-  // THE RECORD MUST BELONG TO THE TARGET WE ARE TALKING ABOUT (codex round 3).
-  //
-  // I argued this could not go wrong: every routing input looked process-wide, so two
-  // concurrent downloads had to observe the same thing. That was wrong on a checkable
-  // fact. `setComfyuiTarget()` mutates host, port, remoteUrlActive and config.comfyuiPath
-  // at RUNTIME — a desktop `hello` invokes it — so download A can record a Manager route,
-  // the target can be retargeted, download B can overwrite the record, and A's failure
-  // then gets explained with B's observation.
-  //
-  // Stamping the target makes the mismatch detectable instead of arguable: a record from a
-  // different target explains nothing.
-  if (obs && obs.target !== getComfyUIBaseUrl()) return "";
-  if (!obs) {
-    // No recorded decision. Say that rather than taking a fresh reading and narrating it as
-    // though it were the one that mattered.
-    return "";
-  }
-  if (obs.remote) {
+export async function explainManagerDownloadRoute(): Promise<string> {
+  if (isRemoteMode()) {
     return (
       "This MCP is in REMOTE mode (--comfyui-url), so a download is dispatched to the " +
-      "connected ComfyUI's Manager by design — there is no local models directory to " +
+      "connected ComfyUI's Manager by design -- there is no local models directory to " +
       "stream into. Manager must be installed and enabled on that host."
     );
   }
-  if ("unreachable" in obs) {
-    // This state routes LOCAL, so it can never be why Manager was chosen. Reaching here
-    // means the recorded observation and the route disagree, which is worth saying rather
-    // than inventing a reason.
+  let argv: string[] | undefined;
+  let cwd: string | undefined;
+  try {
+    const stats = await getSystemStats();
+    argv = (stats as { system?: { argv?: string[] } })?.system?.argv;
+    cwd = (stats as { system?: { cwd?: string } })?.system?.cwd;
+  } catch {
+    // Nothing observed now. Say nothing rather than guess why the route was taken.
     return "";
   }
-  const { argv, cwd } = obs;
-  // THE RECORD MUST BE CONSISTENT WITH HAVING CHOSEN MANAGER, or say nothing.
-  //
-  // The record can go stale in TIME (a server restarting between two decisions). I also
-  // argued it could not go stale under concurrency, because every routing input looked
-  // process-wide — that was wrong, setComfyuiTarget() mutates them at runtime, and the
-  // target stamp above is what closes that. This guard covers the remaining case.
-  //
-  // Rather than argue the odds, the failure is made unreachable. If the recorded
-  // observation would have routed LOCAL, it cannot be why Manager was chosen, so there is
-  // nothing truthful to say and this returns "". A stale record now costs a missing
-  // explanation instead of a confident wrong one — which is the whole subject of this
-  // issue, applied to my own diagnostic.
-  // ORDER MATTERS, and mine did not match the predicate's (codex round 3). The route is
-  // decided with `hasUnresolvableRelativeModelDirFlag` FIRST — it deliberately wins over
-  // the configured-base short-circuit — so a configured COMFYUI_PATH alongside an
-  // unresolvable relative model-dir flag legitimately routes to Manager. My guard checked
-  // the base first and suppressed the explanation for exactly that case: a false negative
-  // introduced by a consistency check.
-  if (!hasUnresolvableRelativeModelDirFlag(argv, cwd)) {
-    if (resolveEffectiveComfyUIBase()) return "";
-    if (parseModelsDirFromArgv(argv, cwd)) return "";
-  }
+  // Rendered RAW rather than JSON.stringify'd: a Windows argv comes back with doubled
+  // backslashes, in the one line that exists to be pasted into a bug report.
   const detail =
-    `The server reported argv[0]=${argv?.[0] ?? "(none)"} and cwd=${cwd ?? "(not reported)"} ` +
-    `when this route was chosen.`;
+    `Reading the connected server NOW: argv[0]=${argv?.[0] ?? "(none)"} and ` +
+    `cwd=${cwd ?? "(not reported)"}. (Current state -- if the server was restarted or ` +
+    `retargeted since this download started, it may not be what the routing decision saw.)`;
   if (hasUnresolvableRelativeModelDirFlag(argv, cwd)) {
     return (
       `Your ComfyUI was started with a RELATIVE --base-directory/--models-directory and did ` +
       `not report its working directory, so this MCP cannot tell where its models actually ` +
-      `live — writing locally would put the file somewhere the server never reads. ${detail} ` +
+      `live -- writing locally would put the file somewhere the server never reads. ${detail} ` +
       `FIX: restart ComfyUI with an ABSOLUTE --base-directory, or set COMFYUI_PATH to the ` +
       `install root, and a local download will stream directly with no Manager involved.`
     );
@@ -2921,7 +2853,7 @@ export function explainManagerDownloadRoute(): string {
   if (liveRoot.root && !existsSync(liveRoot.root)) {
     return (
       `The connected ComfyUI reports its install root as ${liveRoot.root}, which does not ` +
-      `exist on THIS machine — it is a container-side or remote path (a Docker/SSH-forwarded ` +
+      `exist on THIS machine -- it is a container-side or remote path (a Docker/SSH-forwarded ` +
       `loopback server looks local but is not). Writing there would create a bogus directory ` +
       `instead of reaching the server, so the fetch is handed to its Manager. ${detail} ` +
       `FIX: enable Manager on that host, or run this MCP where the models directory really is.`
@@ -2930,7 +2862,7 @@ export function explainManagerDownloadRoute(): string {
   return (
     `This MCP could not resolve where the connected ComfyUI keeps its models, so it handed ` +
     `the fetch to that server's Manager instead of streaming locally. ${detail} ` +
-    `FIX: set COMFYUI_PATH to the ComfyUI install root (the directory containing main.py) — ` +
+    `FIX: set COMFYUI_PATH to the ComfyUI install root (the directory containing main.py) -- ` +
     `a local download then streams directly and needs no Manager. Please include this whole ` +
     `paragraph if you report it (#1374): the argv/cwd above is what identifies which case ` +
     `this is.`
@@ -2938,21 +2870,11 @@ export function explainManagerDownloadRoute(): string {
 }
 
 export async function shouldDispatchDownloadToManager(): Promise<boolean> {
-  if (isRemoteMode()) {
-    lastRouteObservation = { target: getComfyUIBaseUrl(), remote: true };
-    return true;
-  }
+  if (isRemoteMode()) return true;
   try {
     const stats = await getSystemStats();
     const argv = (stats as { system?: { argv?: string[] } })?.system?.argv;
     const cwd = (stats as { system?: { cwd?: string } })?.system?.cwd;
-    // THE OBSERVATION THE DECISION WAS MADE FROM (#1374, codex round 1). The explainer used
-    // to re-read /system_stats on the error path, which can report a DIFFERENT state than
-    // the one that chose the route — a server that restarted in between would be described
-    // as "did not answer /system_stats", a state that would have routed LOCAL and so cannot
-    // be why Manager was chosen. A diagnostic that narrates a decision must narrate the
-    // decision that happened, not a fresh one.
-    lastRouteObservation = { target: getComfyUIBaseUrl(), remote: false, argv, cwd };
     // Ask the LIVE server FIRST. A server launched with a RELATIVE
     // --base-directory/--models-directory that did NOT report its cwd has an UNKNOWN
     // real models dir: any local guess (COMFYUI_PATH or the main.py root) would be
@@ -2992,7 +2914,6 @@ export async function shouldDispatchDownloadToManager(): Promise<boolean> {
   } catch {
     // No reachable server → nothing to dispatch to. A configured local base still
     // streams local; otherwise let the local resolver surface its clear error.
-    lastRouteObservation = { target: getComfyUIBaseUrl(), remote: false, unreachable: true };
     return false;
   }
 }

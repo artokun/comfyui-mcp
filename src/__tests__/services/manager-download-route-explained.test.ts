@@ -49,78 +49,27 @@ vi.mock("../../comfyui/client.js", async (orig) => ({
   },
 }));
 
-const { explainManagerDownloadRoute, shouldDispatchDownloadToManager, resetRouteObservationForTests } =
-  await import("../../services/model-resolver.js");
+const { explainManagerDownloadRoute } = await import("../../services/model-resolver.js");
 
 afterEach(() => {
   hoisted.remote.value = false;
   hoisted.stats.value = undefined;
-  // The observation is process-global, so a test that does not clear it inherits the
-  // previous test's decision — which is the same staleness the production comment calls out.
-  resetRouteObservationForTests();
-  hoisted.target.value = "http://127.0.0.1:8188";
   hoisted.base.value = undefined;
 });
 
 describe("the download route explains ITSELF when Manager is the reason (#1374)", () => {
   it("REMOTE mode is normal and says so — not a misconfiguration", async () => {
     hoisted.remote.value = true;
-    await shouldDispatchDownloadToManager();
-    const why = explainManagerDownloadRoute();
+    const why = await explainManagerDownloadRoute();
     expect(why).toMatch(/REMOTE mode/);
     expect(why).toMatch(/by design/);
     // Must NOT tell a remote user to set COMFYUI_PATH — there is no local dir to stream to.
     expect(why).not.toMatch(/set COMFYUI_PATH/);
   });
 
-  it("explains NOTHING when no route was decided — it does not take a fresh reading", () => {
-    // The round-1 defect: the explainer re-read /system_stats on the error path, so a server
-    // that restarted in between was described as "did not answer", a state that routes LOCAL
-    // and therefore cannot be why Manager was chosen. It narrated a decision that never
-    // happened. With no recorded decision there is nothing truthful to say.
-    expect(explainManagerDownloadRoute()).toBe("");
-  });
 
-  it("an UNREACHABLE server explains nothing, because that state routes LOCAL", async () => {
-    // Reaching the explainer with this observation would mean the record and the route
-    // disagree. Inventing a reason there is how a diagnostic starts lying.
-    hoisted.stats.value = undefined;
-    await shouldDispatchDownloadToManager();
-    expect(explainManagerDownloadRoute()).toBe("");
-  });
 
-  it("a record that would have routed LOCAL explains nothing (codex: the stale-record case)", async () => {
-    // A record that would have chosen LOCAL cannot be why Manager was chosen, so there is
-    // nothing truthful to say and silence beats a confident wrong story.
-    //
-    // I originally justified this by arguing the record could not go stale under
-    // concurrency, since every routing input looked process-wide. That was wrong —
-    // setComfyuiTarget() mutates them at runtime — and the target stamp below is what
-    // actually closes it. The guard still earns its place for the time-based case, but the
-    // reasoning it shipped with did not survive review, which is worth leaving on the
-    // record next to it.
-    hoisted.stats.value = {
-      // An ABSOLUTE models dir: this is a record that would have routed LOCAL.
-      system: { argv: ["main.py", "--models-directory", "/srv/comfy/models"], cwd: "/srv/comfy" },
-    };
-    await shouldDispatchDownloadToManager();
-    expect(explainManagerDownloadRoute()).toBe("");
-  });
 
-  it("a record made against a DIFFERENT target explains nothing (codex round 3)", async () => {
-    // I argued this could not happen: every routing input looked process-wide, so two
-    // concurrent downloads had to observe the same thing. Wrong on a checkable fact —
-    // setComfyuiTarget() mutates host, port, remoteUrlActive and config.comfyuiPath at
-    // runtime, and a desktop `hello` invokes it. So download A records a Manager route,
-    // the target is retargeted, download B overwrites the record, and A's failure would be
-    // explained with B's observation.
-    hoisted.stats.value = { system: { argv: ["main.py"], cwd: undefined } };
-    await shouldDispatchDownloadToManager();
-    expect(explainManagerDownloadRoute()).not.toBe("");
-    // …the target moves under us.
-    hoisted.target.value = "http://127.0.0.1:8190";
-    expect(explainManagerDownloadRoute()).toBe("");
-  });
 
   it("a configured base does NOT suppress the relative-flag case (codex round 3)", async () => {
     // The predicate checks hasUnresolvableRelativeModelDirFlag FIRST — it deliberately
@@ -135,9 +84,21 @@ describe("the download route explains ITSELF when Manager is the reason (#1374)"
     hoisted.stats.value = {
       system: { argv: ["main.py", "--base-directory", "./models"], cwd: undefined },
     };
-    await shouldDispatchDownloadToManager();
-    const why = explainManagerDownloadRoute();
+    const why = await explainManagerDownloadRoute();
     expect(why).toMatch(/RELATIVE --base-directory/);
+  });
+
+  it("says the state is CURRENT, so it never claims to describe the routing decision", async () => {
+    // The whole subject of four review rounds. Every earlier version asserted it was
+    // narrating the decision — via a second /system_stats read, then a process-global
+    // record, then a target-stamped one — and each was shown to be describable-stale by a
+    // route the previous fix had not considered. The claim is what changed: this reports
+    // what it can see now, and says so, which cannot be wrong about a decision it does not
+    // mention.
+    hoisted.stats.value = { system: { argv: ["main.py"], cwd: undefined } };
+    const why = await explainManagerDownloadRoute();
+    expect(why).toMatch(/Reading the connected server NOW/);
+    expect(why).toMatch(/may not be what the routing decision saw/);
   });
 
   it("names the ARGV AND CWD it actually saw, because that is what identifies the case", async () => {
@@ -146,8 +107,7 @@ describe("the download route explains ITSELF when Manager is the reason (#1374)"
     // The real shape a Windows ComfyUI reports: a RELATIVE main.py and no cwd at all.
     const argv0 = String.raw`ComfyUI\main.py`;
     hoisted.stats.value = { system: { argv: [argv0, "--listen"], cwd: undefined } };
-    await shouldDispatchDownloadToManager();
-    const why = explainManagerDownloadRoute();
+    const why = await explainManagerDownloadRoute();
     expect(why).toContain(argv0);
     expect(why).toMatch(/cwd=\(not reported\)/);
     expect(why).toMatch(/set COMFYUI_PATH/);
@@ -164,8 +124,7 @@ describe("the download route explains ITSELF when Manager is the reason (#1374)"
     hoisted.stats.value = {
       system: { argv: ["main.py", "--base-directory", "./models"], cwd: undefined },
     };
-    await shouldDispatchDownloadToManager();
-    const why = explainManagerDownloadRoute();
+    const why = await explainManagerDownloadRoute();
     expect(why).toMatch(/RELATIVE --base-directory/);
     expect(why).toMatch(/ABSOLUTE --base-directory/);
   });
