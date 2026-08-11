@@ -2776,6 +2776,35 @@ async function downloadModelViaManagerRemote(
  * rather than silently succeeding.
  */
 /**
+ * What `shouldDispatchDownloadToManager()` actually saw when it last chose a route (#1374).
+ *
+ * Single-process, single-decision: the predicate is deliberately evaluated ONCE per
+ * download and threaded to the writer (#420), so the error path must describe THAT
+ * evaluation rather than take a second look. Re-reading was a real defect — a server that
+ * restarted between the two reads produced an explanation of a state that would have routed
+ * LOCAL, i.e. an explanation for a decision that never happened.
+ */
+type RouteObservation =
+  | { remote: true }
+  | { remote: false; unreachable: true }
+  | { remote: false; argv?: string[]; cwd?: string };
+let lastRouteObservation: RouteObservation | undefined;
+
+/**
+ * SCOPE, stated because a diagnostic that overstates its own reach is the thing this issue
+ * is about: the record is process-global and describes the MOST RECENT routing decision.
+ * `downloadModel` is usually handed a route decided earlier by `startDownloadJob` (#420
+ * threads it so the writer cannot diverge from the job key), so the observation belongs to
+ * that decision — correct for the common case, and capable of describing a previous
+ * download if the connected server restarted with different arguments in between. The text
+ * therefore says "when this route was chosen" rather than asserting a current state, and
+ * every branch that cannot support a claim returns "" instead of guessing.
+ */
+export function resetRouteObservationForTests(): void {
+  lastRouteObservation = undefined;
+}
+
+/**
  * WHY a download was routed to ComfyUI-Manager (#1374).
  *
  * The reporter's LOCAL Windows-portable install could not download anything: every attempt
@@ -2801,31 +2830,30 @@ async function downloadModelViaManagerRemote(
  * fires for them, and guessing at the fix would be exactly the unverified confidence this
  * codebase keeps paying for. This makes the answer visible in their next report.
  */
-export async function explainManagerDownloadRoute(): Promise<string> {
-  if (isRemoteMode()) {
+export function explainManagerDownloadRoute(): string {
+  const obs = lastRouteObservation;
+  if (!obs) {
+    // No recorded decision. Say that rather than taking a fresh reading and narrating it as
+    // though it were the one that mattered.
+    return "";
+  }
+  if (obs.remote) {
     return (
       "This MCP is in REMOTE mode (--comfyui-url), so a download is dispatched to the " +
       "connected ComfyUI's Manager by design — there is no local models directory to " +
       "stream into. Manager must be installed and enabled on that host."
     );
   }
-  let argv: string[] | undefined;
-  let cwd: string | undefined;
-  try {
-    const stats = await getSystemStats();
-    argv = (stats as { system?: { argv?: string[] } })?.system?.argv;
-    cwd = (stats as { system?: { cwd?: string } })?.system?.cwd;
-  } catch {
-    return (
-      "The connected ComfyUI did not answer /system_stats, so its install layout could " +
-      "not be read at all."
-    );
+  if ("unreachable" in obs) {
+    // This state routes LOCAL, so it can never be why Manager was chosen. Reaching here
+    // means the recorded observation and the route disagree, which is worth saying rather
+    // than inventing a reason.
+    return "";
   }
-  // Rendered RAW, not JSON.stringify'd: a Windows argv comes back as
-  // `"ComfyUI\main.py"` with doubled backslashes, which the reader then has to mentally
-  // un-escape in the one line that exists to be pasted into a bug report.
+  const { argv, cwd } = obs;
   const detail =
-    `The server reports argv[0]=${argv?.[0] ?? "(none)"} and cwd=${cwd ?? "(not reported)"}.`;
+    `The server reported argv[0]=${argv?.[0] ?? "(none)"} and cwd=${cwd ?? "(not reported)"} ` +
+    `when this route was chosen.`;
   if (hasUnresolvableRelativeModelDirFlag(argv, cwd)) {
     return (
       `Your ComfyUI was started with a RELATIVE --base-directory/--models-directory and did ` +
@@ -2856,11 +2884,21 @@ export async function explainManagerDownloadRoute(): Promise<string> {
 }
 
 export async function shouldDispatchDownloadToManager(): Promise<boolean> {
-  if (isRemoteMode()) return true;
+  if (isRemoteMode()) {
+    lastRouteObservation = { remote: true };
+    return true;
+  }
   try {
     const stats = await getSystemStats();
     const argv = (stats as { system?: { argv?: string[] } })?.system?.argv;
     const cwd = (stats as { system?: { cwd?: string } })?.system?.cwd;
+    // THE OBSERVATION THE DECISION WAS MADE FROM (#1374, codex round 1). The explainer used
+    // to re-read /system_stats on the error path, which can report a DIFFERENT state than
+    // the one that chose the route — a server that restarted in between would be described
+    // as "did not answer /system_stats", a state that would have routed LOCAL and so cannot
+    // be why Manager was chosen. A diagnostic that narrates a decision must narrate the
+    // decision that happened, not a fresh one.
+    lastRouteObservation = { remote: false, argv, cwd };
     // Ask the LIVE server FIRST. A server launched with a RELATIVE
     // --base-directory/--models-directory that did NOT report its cwd has an UNKNOWN
     // real models dir: any local guess (COMFYUI_PATH or the main.py root) would be
@@ -2900,6 +2938,7 @@ export async function shouldDispatchDownloadToManager(): Promise<boolean> {
   } catch {
     // No reachable server → nothing to dispatch to. A configured local base still
     // streams local; otherwise let the local resolver surface its clear error.
+    lastRouteObservation = { remote: false, unreachable: true };
     return false;
   }
 }
@@ -2969,27 +3008,29 @@ export async function downloadModel(
     try {
       return await downloadModelViaManagerRemote(url, targetSubfolder, filename, auth, signal, wasHfUrl);
     } catch (err) {
-      // #1374 — SAY WHAT MADE MANAGER NECESSARY, not just that Manager failed.
+      // #1374 — SAY WHAT MADE MANAGER NECESSARY, but ONLY when Manager was actually the
+      // thing that failed.
       //
-      // The reporter's LOCAL install could not download at all: every attempt died on
-      // "ComfyUI-Manager's queue API is not reachable", raised deep in generic Manager code
-      // that cannot know it is serving a download. The message named the thing that broke
-      // and not the decision that put them there, so a local-only capability read as
-      // "install Manager" when the real answer was "this MCP could not find your models
-      // directory". They downloaded 45 GB with curl instead.
+      // The first version wrapped every error out of this call, and the remote payload
+      // PREFLIGHT runs before any Manager request is made — so a DNS or HTTP failure
+      // fetching the model source got "WHY THIS WENT THROUGH ComfyUI-Manager AT ALL"
+      // appended to it, attributing a source-host problem to a dispatch that never
+      // happened. Building a diagnostic to fix a message that named the wrong cause, and
+      // having it name the wrong cause, is not a mistake worth repeating quietly.
       //
-      // A cancel is not a routing problem and must pass through untouched.
+      // A cancel is not a routing problem either and passes through untouched.
       if (err instanceof DOMException && err.name === "AbortError") throw err;
-      // unknown-ok: this is a DIAGNOSTIC wrapped around a real error, and the empty
-      // string is consumed one line below as "append nothing", not as "there is no
-      // reason". If the explainer itself fails, the caller must still receive the
-      // original Manager failure verbatim — swallowing that to report a diagnostic's
-      // failure would replace the user's actual problem with mine. The raw error is
-      // never conditional on this succeeding.
-      const why = await explainManagerDownloadRoute().catch(() => "");
       const raw = err instanceof Error ? err.message : String(err);
+      // Only a failure to REACH Manager's API earns the explanation. Anything else — a bad
+      // source URL, an auth refusal from the model host, a disk error server-side — is
+      // about the download, and the route is not the interesting fact.
+      const managerWasTheProblem = /ComfyUI-Manager|manager\/queue|\/v2\/manager/i.test(raw);
+      if (!managerWasTheProblem) throw err;
+      const why = explainManagerDownloadRoute();
       throw new ModelError(
-        why ? `${raw}\n\nWHY THIS WENT THROUGH ComfyUI-Manager AT ALL: ${why}` : raw,
+        why ? `${raw}
+
+WHY THIS WENT THROUGH ComfyUI-Manager AT ALL: ${why}` : raw,
         { url },
       );
     }
