@@ -4,6 +4,7 @@ import type {
   NodeInputSpec,
   WorkflowJSON,
 } from "../comfyui/types.js";
+import { NON_EXECUTING_NODE_TYPES } from "./workflow-converter.js";
 import { getObjectInfo } from "../comfyui/client.js";
 import { enqueueWorkflow } from "./workflow-executor.js";
 import { config } from "../config.js";
@@ -221,7 +222,34 @@ export async function checkWorkflowRuntime(
   const apiNodes: string[] = [];
   const unknownNodes: string[] = [];
   for (const ct of classTypes) {
+    // A FRONTEND-ONLY NODE IS NOT AN UNKNOWN ONE (#1372). MarkdownNote, Note, Reroute and
+    // PrimitiveNode are LiteGraph-native: the frontend registers them, /object_info never
+    // lists them, and they are stripped before a prompt is queued.
+    //
+    // The "unknown" verdict exists to express a specific doubt — this class_type is absent
+    // from the server's registry, so it COULD be a paid partner node the server does not
+    // expose, and claiming "local/free" would be a guess with someone's money on it. That
+    // caution is right and stays. It just cannot apply to a node that does not execute at
+    // all: a virtual node can no more be a paid API node than it can be a checkpoint
+    // loader, so it earns none of the doubt while collapsing the whole verdict to
+    // "unknown" and stopping the safety flow to ask an unanswerable question.
+    //
+    // The set is IMPORTED from the converter rather than restated here. It already had to
+    // know which types never reach the backend, and a second copy drifting from the first
+    // is exactly how this bug happened.
     const def = objectInfo[ct];
+    // …but ONLY when the server does not register it (codex P1). The skip used to run
+    // BEFORE this lookup, which meant a third-party backend node legitimately named `Note`
+    // or `PrimitiveNode` — and registered with api_node:true — was skipped unexamined and
+    // the workflow reported "local / usesApiNodes:false". That tells the agent the run is
+    // confirmed free and skips the credit confirmation, which is the one outcome this
+    // classifier exists to prevent. A safety check that can be bypassed by a name
+    // collision is worse than the false "unknown" it was fixing.
+    //
+    // Absence from /object_info is not a heuristic for "virtual", it is the definition:
+    // the frontend registers these, the backend does not. So a REGISTERED node of the same
+    // name is a real node and is classified as one.
+    if (!def && NON_EXECUTING_NODE_TYPES.has(ct)) continue;
     if (!def) {
       unknownNodes.push(ct);
       continue;
@@ -230,7 +258,13 @@ export async function checkWorkflowRuntime(
   }
   const hasApiNodes = apiNodes.length > 0;
   // "api" only if EVERY classifiable node is an API node; "mixed" if some are.
-  const classifiable = classTypes.length - unknownNodes.length;
+  // Virtual nodes are not classifiable EITHER WAY, so they leave the denominator too —
+  // otherwise a workflow of one KSampler plus three Notes reads as 1-of-4 API and reports
+  // "mixed" when it is entirely local.
+  const virtualCount = classTypes.filter(
+    (ct) => !objectInfo[ct] && NON_EXECUTING_NODE_TYPES.has(ct),
+  ).length;
+  const classifiable = classTypes.length - unknownNodes.length - virtualCount;
   let runtime: "local" | "api" | "mixed" | "unknown";
   let usesApiNodes: boolean | null;
   if (hasApiNodes) {

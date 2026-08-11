@@ -4,6 +4,78 @@ All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) and the format follows
 [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.50.113
+
+### Fixed
+
+- **A frontend-only node no longer makes a workflow's runtime "unknown" (#1372).**
+  `list_packs(action:"check_runtime")` counted `MarkdownNote` as an unclassifiable node and
+  refused to say the workflow was free, stopping the paid-API safety flow to ask a question
+  that already had an answer.
+
+  `MarkdownNote`, `Note`, `Reroute` and `PrimitiveNode` are LiteGraph-native: the frontend
+  registers them, `/object_info` never lists them, and they are stripped before a prompt is
+  queued. A node that does not execute cannot be a paid partner node, so it earns none of
+  the doubt the "unknown" verdict exists to express. They are also removed from the
+  classifiable denominator — one API node beside three Notes used to read as "mixed".
+
+  The caution itself is unchanged: a genuinely unrecognised node still collapses the
+  verdict, and a node the server DOES register under one of those names is classified
+  normally rather than skipped — a safety check that a name collision can bypass would be
+  worse than the false "unknown" it replaced.
+
+  The type list is imported from the workflow converter, which has always known which types
+  never reach the backend. The two disagreeing was the bug.
+
+  Not covered: third-party virtual nodes (KJNodes `GetNode`/`SetNode`, rgthree's
+  canvas-only nodes) still report "unknown". They have the same property but a hardcoded
+  list of third-party names goes stale silently — tracked in #1400.
+
+## 0.50.112
+
+### Fixed
+
+- **A remote panel can convert its own live canvas (#1359).** `panel_strip_workflow` read the
+  graph from the connected panel but fetched node definitions over `COMFYUI_URL` — the same
+  machine locally, two different ones whenever the panel is remote. A canvas on a proxy URL
+  could not be stripped at all: the definitions request went to `127.0.0.1:8188`.
+
+  The live canvas now takes its definitions from the ComfyUI the PANEL is connected to,
+  which the panel has been able to serve since 0.13.0. In a tunnel or loopback-only
+  topology the browser is the only thing that can reach that server, so this is not a
+  workaround for the remote case — it is the correct source for every case.
+
+  There is deliberately **no fallback** to `COMFYUI_URL`. Both hosts can answer, and when
+  they disagree a fallback returns a workflow converted against the wrong server's schema —
+  wrong widget order, wrong input names — with no error at all. That is worse than the
+  connection failure this issue was filed about, which at least announced itself. A panel
+  that cannot serve definitions, an empty map, an error body, and a map that describes some
+  other install are each refused with the reason.
+
+  Requires panel 0.13.0+; an older panel is refused by the version gate with the version it
+  needs, rather than an "unknown command" error that reads like a broken ComfyUI.
+
+## 0.50.111
+
+### Fixed
+
+- **`download_model` no longer promises a resumable partial it never looked for (#1370).**
+  Cancelling a download reported "the partial was left on disk and can be resumed by
+  re-issuing" purely from the job's status — nothing stat'd the file. A reporter paused a
+  33 GB download because of that sentence, found no partial anywhere, and restarted from
+  zero.
+
+  Both cancelled branches now report what is actually staged: the partial's SIZE when there
+  is one, so "resumable" is something you can weigh against restarting, or its absence, so
+  you learn it before re-spending the bandwidth rather than after. A cancel that leaves
+  nothing is not an error; telling you it left something is.
+
+  The lookup derives the staged path from the same function the writer uses, so the two
+  cannot drift. Getting there took two corrections — the file is keyed by the download's
+  CACHE identity rather than its destination filename, and it is HIDDEN (a leading dot) —
+  and each wrong version would have reported "no partial found" to someone holding tens of
+  gigabytes of resumable bytes.
+
 ## 0.50.110
 
 ### Fixed
@@ -98,6 +170,30 @@ All notable changes to this project are documented here. This project adheres to
   ComfyUI you did not mean to touch, not merely find nothing there (#1233, panel#851)
 
 ## Unreleased
+
+## [0.50.113] - 2026-08-11
+
+### MCP
+
+#### Fixed
+- a frontend-only node is not an unknown runtime (#1396)
+
+
+## [0.50.112] - 2026-08-11
+
+### MCP
+
+#### Fixed
+- the live canvas gets its node definitions from its own ComfyUI (#1390)
+
+
+## [0.50.111] - 2026-08-11
+
+### MCP
+
+#### Fixed
+- stat the partial instead of asserting it (#1392)
+
 
 ## [0.50.110] - 2026-08-11
 

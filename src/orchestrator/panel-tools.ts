@@ -127,6 +127,7 @@ import {
   resetObjectInfoCache,
 } from "../comfyui/client.js";
 import { convertUiToApi, collectNodeTypes } from "../services/workflow-converter.js";
+import type { ObjectInfo } from "../comfyui/types.js";
 import {
   restartComfyUI,
   preflightLocalRestart,
@@ -1422,66 +1423,231 @@ export function restartTimeoutFallbackAdvice({
 }
 
 /**
- * #1359 — an /object_info failure that names WHICH host it asked, and why that host.
+ * Node definitions from the ComfyUI the PANEL is connected to (#1359 / #1006).
  *
- * `panel_strip_workflow` reads the graph from the connected panel and then fetches node
- * definitions through the global headless client, which resolves COMFYUI_URL. For a
- * local session those are one machine. For a connected REMOTE panel they are two, and
- * the tool fails with a bare
+ * The panel has served these since 0.13.0 and the orchestrator never asked. Everything
+ * that pairs a panel-captured graph with definitions was reading the graph from the tab
+ * and the schema from COMFYUI_URL — one machine locally, two for a remote panel, and no
+ * way at all to convert a live canvas in a tunnel or loopback-only topology, where the
+ * browser is the only thing that can reach that ComfyUI.
  *
- *   fetch failed: connect ECONNREFUSED 127.0.0.1:8188 — while requesting
- *   http://127.0.0.1:8188/object_info
+ * FAIL CLOSED, DELIBERATELY, AND ALL THE WAY THROUGH. Every failure here returns a
+ * message instead of falling back to `getObjectInfo()`. A fallback is the tempting move
+ * and it is the dangerous one: both hosts can answer, and if they disagree the caller
+ * gets a confident workflow converted against the wrong ComfyUI's schema — wrong widget
+ * order, wrong input names, silently. That is worse than the ECONNREFUSED this issue was
+ * filed about, which at least announced itself. The panel makes the same choice on its
+ * side and says so in its own comment.
  *
- * which says nothing about the canvas being on a different host. The reporter of #1359
- * had to read the compiled orchestrator to find that out.
- *
- * This does NOT fix the split authority — that needs the panel to serve its own
- * /object_info, a protocol change tracked separately. It makes the existing failure
- * diagnosable, and names the workaround that works today.
- *
- * The panel's origin is the SERVER-OBSERVED handshake Origin where available: the
- * browser sets it on the WS upgrade and page JS cannot forge it. It is only being
- * PRINTED here, never fetched from, so an unreadable one costs a detail rather than a
- * wrong conclusion.
+ * An OLD PANEL is handled upstream and authoritatively: BRIDGE_CMD_MIN_PANEL_VERSION
+ * carries `graph_get_object_info: "0.13.0"`, so a panel predating the command is refused
+ * by the version gate with the version it needs — rather than answering the raw
+ * `Unknown command "graph_get_object_info"`, which reads like a broken ComfyUI.
  */
-function objectInfoHostMismatchMessage(
+async function panelObjectInfo(
   ctx: PanelToolCtx,
-  err: unknown,
-  liveCanvasSource: boolean,
-): string {
-  const raw = err instanceof Error ? err.message : String(err);
-  let panelOrigin: string | null = null;
+  /** The node types on the canvas being converted, so the reply can be judged against the
+   *  graph it is supposed to define rather than against its own shape. */
+  neededTypes: readonly string[] = [],
+): Promise<{ ok: true; objectInfo: ObjectInfo } | { ok: false; message: string }> {
+  let reply: unknown;
   try {
-    panelOrigin = ctx.bridge?.tabServerOrigin?.(ctx.tabId) ?? null;
-  } catch {
-    /* best effort — the message stands without it */
+    // NO `if_none_match`, DELIBERATELY, EVEN THOUGH THE PAYLOAD IS LARGE.
+    //
+    // The panel offers a fingerprint cache and this caller declines it. Its fingerprint is
+    // computed over the SORTED TYPE NAMES and nothing else (object-info-fingerprint.js), so
+    // `unchanged: true` establishes only that the same node types exist. `convertUiToApi`
+    // maps `widgets_values` POSITIONALLY onto each def's declared input order — so a
+    // renamed widget, a reordered input, or an edited combo list changes the conversion
+    // while leaving the type set, and therefore the fingerprint, identical.
+    //
+    // Reusing a cached map on `unchanged` would convert this canvas against a schema that
+    // has since moved and return a confidently wrong workflow — the same failure this whole
+    // change exists to prevent, bought back for a saved download. The panel's own reply
+    // says as much: "That does not establish that individual definitions are identical …
+    // Re-read without if_none_match if you need those."
+    //
+    // So the cost is accepted: a strip is user-initiated and infrequent, and correctness
+    // here is worth more than the transfer.
+    //
+    // The panel fetches a full /object_info here — megabytes on a large install — so it
+    // needs the bounded refresh budget, not the default ack. A false timeout would read as
+    // "the panel cannot serve definitions" for a panel that served them.
+    reply = await ctx.bridge.send(
+      { cmd: "graph_get_object_info" },
+      { tabId: ctx.tabId, timeoutMs: OBJECT_INFO_REFRESH_ACK_TIMEOUT_MS },
+    );
+  } catch (err) {
+    const raw = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      message:
+        `Could not read node definitions from the panel's own ComfyUI: ${raw}
+
+` +
+        `The live canvas is converted using definitions from the ComfyUI the PANEL is ` +
+        `connected to, not from COMFYUI_URL — those are different machines whenever the ` +
+        `panel is remote, and only the browser can reach a tunnelled or loopback-only host. ` +
+        `Or pass an explicit \`pack\`/\`path\`/\`graph\` source, which is read from ` +
+        `COMFYUI_URL by design.
+
+No fallback to COMFYUI_URL is attempted on purpose ` +
+        `(#1359): both hosts can answer, and converting this canvas against a different ` +
+        `ComfyUI's schema would return a confidently wrong workflow instead of an error.`,
+    };
   }
-  const configured = getComfyUIBaseUrl();
-  if (!liveCanvasSource) {
-    // pack / path / inline: COMFYUI_URL is the right authority, so the bare failure is
-    // already about the host the caller asked for. Say only what is true.
-    return `${raw}\n\nNode definitions are read from COMFYUI_URL (${configured}) for a pack/path/inline source. That host did not answer /object_info.`;
+
+  const r = (reply ?? {}) as {
+    ok?: boolean;
+    served_by?: string;
+    detail?: string;
+    object_info?: ObjectInfo;
+  };
+  if (r.ok === false) {
+    return {
+      ok: false,
+      message:
+        `The panel could not obtain node definitions from its own ComfyUI` +
+        (r.served_by ? ` (${r.served_by})` : "") +
+        `. ${r.detail ?? ""}
+
+The conversion is refused rather than retried against ` +
+        `COMFYUI_URL, which would convert this canvas against a different server's schema.`,
+    };
   }
-  const differs =
-    panelOrigin != null && configured != null && !sameHttpBase(panelOrigin, configured);
-  return (
-    `${raw}\n\nTHE GRAPH AND ITS NODE DEFINITIONS CAME FROM DIFFERENT PLACES. The workflow was ` +
-    `captured from the connected panel` +
-    (panelOrigin ? ` (ComfyUI at ${panelOrigin})` : "") +
-    `, but node definitions are fetched over COMFYUI_URL (${configured}) — and that is the ` +
-    `request that failed` +
-    (differs
-      ? `. Those are two different hosts, which is why this could not work: the orchestrator ` +
-        `has no route to the panel's ComfyUI for /object_info.`
-      : `.`) +
-    `\n\nWORKAROUND: point COMFYUI_URL at the same ComfyUI the panel is connected to` +
-    (panelOrigin ? ` (${panelOrigin})` : "") +
-    ` and retry, or pass an explicit \`graph\`/\`pack\`/\`path\` source instead of the live ` +
-    `canvas. This is a known split of authority (#1359): stripping the LIVE canvas needs ` +
-    `the definitions to come from the panel's own ComfyUI, which needs a panel-side change.`
-  );
+  if (!r.object_info || typeof r.object_info !== "object") {
+    // `unchanged: true` lands here too, and that is correct: this caller sends no
+    // if_none_match, so a payload-free reply means the contract was not met.
+    return {
+      ok: false,
+      message:
+        `The panel replied without node definitions` +
+        (r.served_by ? ` (it reported serving from ${r.served_by})` : "") +
+        `. Nothing was converted — a partial or absent schema produces a wrong workflow, ` +
+        `so this refuses instead of guessing.`,
+    };
+  }
+  // AN EMPTY MAP IS NOT A SCHEMA, and accepting one was the hole in the first version of
+  // this "fail closed" path. `{ok: true, object_info: {}}` passed every check above, and
+  // convertUiToApi SKIPS every node whose type it cannot find — so the caller got a
+  // successful reply containing an empty or gutted workflow, with no error anywhere. A
+  // silent wrong answer, which is the outcome this whole change exists to prevent, reached
+  // through the success branch instead of the failure one.
+  //
+  // A running ComfyUI always defines core nodes, so zero entries cannot be a true schema;
+  // it is a regressed panel, a proxy rewriting the body, or an error page. Nothing weaker
+  // is asserted here — a map that is merely MISSING some of this graph's types is a real
+  // and legitimate case (an uninstalled custom node), and convertUiToApi already reports
+  // those as warnings rather than pretending they converted.
+  if (Object.keys(r.object_info).length === 0) {
+    return {
+      ok: false,
+      message:
+        `The panel returned an EMPTY node-definition map` +
+        (r.served_by ? ` from ${r.served_by}` : "") +
+        `. A running ComfyUI always defines its core nodes, so this is a regressed panel, a ` +
+        `proxy rewriting the response, or an error page — not a real schema. Converting ` +
+        `against it would silently drop every node and hand back an empty workflow that ` +
+        `looks like a success, so nothing was converted.`,
+    };
+  }
+  // …and "non-empty" is not the same as "a schema" (codex, round 2). A proxy or a backend
+  // that answers 200 with `{"error": "..."}` produces a map with ONE key, which sailed
+  // through a zero-length check and was handed to the converter — which then skips every
+  // node it cannot find and returns a successful, empty workflow. The same silent loss,
+  // one key up from the case I had just fixed.
+  //
+  // So the test is STRUCTURAL: at least one entry that actually looks like a node
+  // definition (an object carrying `input` or `output`, which every real /object_info entry
+  // does). Deliberately not "every entry" — a single malformed record among thousands is a
+  // pack's problem and the converter reports it per node, whereas requiring perfection here
+  // would refuse a working install over one bad custom node.
+  //
+  // AND THE TEST HAS TO BE ABOUT THIS GRAPH (codex, round 3). "at least one entry that
+  // looks like a definition" is satisfied by a single unrelated record — `{meta: {input:
+  // {}}}` passes — while none of the types this canvas actually uses are present, and the
+  // converter then skips every node and returns the same empty workflow. A structural
+  // decoy is still a decoy.
+  //
+  // So the question asked is the one that matters for a conversion: does this map define
+  // ANY of the node types on the canvas? Zero coverage of a non-empty graph is not a
+  // schema for it, whatever else the payload contains.
+  const looksLikeNodeDef = (v: unknown): boolean =>
+    !!v && typeof v === "object" && ("input" in (v as object) || "output" in (v as object));
+  if (!Object.values(r.object_info).some(looksLikeNodeDef)) {
+    return {
+      ok: false,
+      message:
+        `The panel returned something that is not a node-definition map` +
+        (r.served_by ? ` from ${r.served_by}` : "") +
+        ` — ${Object.keys(r.object_info).length} key(s), none of which look like a node ` +
+        `definition. That is characteristic of a proxy or backend answering 200 with an ` +
+        `error body. Converting against it would silently drop every node and hand back an ` +
+        `empty workflow that reads as success, so nothing was converted.`,
+    };
+  }
+  // ZERO COVERAGE OF THIS GRAPH is the decisive test, and the one a structural check
+  // cannot make on its own. A payload can be well-formed, non-empty, and about something
+  // else entirely — at which point the converter skips every node and returns an empty
+  // workflow that reads as a success.
+  //
+  // Only a total miss refuses. PARTIAL coverage converts and warns, and that is not a
+  // judgement call — MEASURED against this machine's live /object_info and three real pack
+  // workflows:
+  //
+  //   anima              52 types, 36 covered, 16 missing
+  //   anima-img2img      39 types, 33 covered,  6 missing
+  //   krea2-identity     14 types, 13 covered,  1 missing
+  //
+  // Every real workflow has misses, and all of them are legitimate: frontend-only virtual
+  // nodes (Note, GetNode, SetNode, "Label (rgthree)"), UUID-typed SUBGRAPH nodes, and
+  // uninstalled packs. So "refuse if ANY type is missing" would refuse ALL THREE — the
+  // over-broad direction is not hypothetical here, it is the default outcome. Zero coverage
+  // never occurred, which is what makes it a usable signal for "this payload is not about
+  // this canvas".
+  //
+  // That measurement also settles the direction that would have been catastrophic:
+  // `collectNodeTypes` does return the same strings that appear as /object_info KEYS. If it
+  // did not, `t in object_info` would always be false and this would refuse EVERY
+  // live-canvas strip.
+  if (neededTypes.length > 0) {
+    const covered = neededTypes.filter((t) => t in (r.object_info as Record<string, unknown>));
+    if (covered.length === 0) {
+      return {
+        ok: false,
+        message:
+          `The panel returned node definitions that do not describe this canvas` +
+          (r.served_by ? ` (served from ${r.served_by})` : "") +
+          `: none of its ${neededTypes.length} node type(s) — e.g. ${neededTypes.slice(0, 3).join(", ")} — ` +
+          `appear among the ${Object.keys(r.object_info).length} definition(s) returned. ` +
+          `Converting against it would drop every node and hand back an empty workflow that ` +
+          `reads as success, so nothing was converted.`,
+      };
+    }
+  }
+  return { ok: true, objectInfo: r.object_info };
 }
 
+/**
+ * #1359 — an /object_info failure that names WHICH host it asked.
+ *
+ * ONLY pack/path/inline sources reach this now. The live-canvas branch it used to carry —
+ * "THE GRAPH AND ITS NODE DEFINITIONS CAME FROM DIFFERENT PLACES", with a WORKAROUND
+ * telling the user to repoint COMFYUI_URL — described a split that no longer exists: the
+ * live canvas takes its definitions from the panel that supplied the graph. That message
+ * was the best available answer while the split stood, and keeping it would now be a
+ * confident explanation of a situation the code cannot produce.
+ *
+ * For a pack/path/inline source COMFYUI_URL genuinely IS the right authority, so the bare
+ * failure is already about the host the caller asked for. Say only what is true.
+ */
+function objectInfoHostMismatchMessage(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  const configured = getComfyUIBaseUrl();
+  return `${raw}
+
+Node definitions are read from COMFYUI_URL (${configured}) for a pack/path/inline source. That host did not answer /object_info.`;
+}
 function captureRebootHealthBase(ctx: PanelToolCtx): string | null {
   if (isCloudMode() || isRemoteMode()) return null;
   const bootBase = getBootLocalComfyUIBaseUrl(); // server-authorized, hello-immutable
@@ -8155,15 +8321,51 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         // deliberately tied to COMFYUI_URL, so its definitions belong there.
         const liveCanvasSource = args.pack == null && args.path == null && args.graph == null;
         let bulk: Awaited<ReturnType<typeof getObjectInfo>>;
-        try {
-          bulk = await getObjectInfo();
-        } catch (err) {
-          // Returned as a tool ERROR rather than thrown: a throw here escapes the
-          // handler and reaches the caller as a transport-shaped failure, which is how
-          // the bare ECONNREFUSED got to the reporter in the first place.
-          return fail(objectInfoHostMismatchMessage(ctx, err, liveCanvasSource));
+        if (liveCanvasSource) {
+          // THE DEFINITIONS NOW COME FROM THE SAME PLACE AS THE GRAPH (#1359).
+          //
+          // The panel has served its own /object_info since 0.13.0 (#1006) and nothing
+          // here called it. Asking the browser is not a workaround for the remote case —
+          // it is the only correct source for ANY case, because the tab that drew this
+          // canvas is by definition able to reach the ComfyUI that defines its nodes. In a
+          // tunnel or loopback-only topology the browser is the sole thing that can.
+          //
+          // FAIL CLOSED. If the panel cannot serve definitions we surface that; we do NOT
+          // fall back to COMFYUI_URL. A fallback would convert the live canvas against a
+          // DIFFERENT ComfyUI's schema and return a confident, wrong workflow — silently,
+          // since the two hosts can both answer and disagree. That is strictly worse than
+          // the ECONNREFUSED this issue was filed about, which at least failed loudly.
+          const reply = await panelObjectInfo(ctx, collectNodeTypes(ui));
+          if (!reply.ok) return fail(reply.message);
+          bulk = reply.objectInfo;
+        } else {
+          try {
+            bulk = await getObjectInfo();
+          } catch (err) {
+            // Returned as a tool ERROR rather than thrown: a throw here escapes the
+            // handler and reaches the caller as a transport-shaped failure, which is how
+            // the bare ECONNREFUSED got to the reporter in the first place.
+            return fail(objectInfoHostMismatchMessage(err));
+          }
         }
-        const objectInfo = await backfillObjectInfo(bulk, collectNodeTypes(ui));
+        // THE FAIL-CLOSED GUARANTEE LEAKED ONE LINE LATER, so this branches too.
+        //
+        // `backfillObjectInfo` fetches each type it is missing from
+        // `${getComfyUIBaseUrl()}/object_info/<Type>` — COMFYUI_URL, the exact authority
+        // the live-canvas path just refused to consult. Refusing the bulk fetch and then
+        // backfilling from that host would merge a DIFFERENT ComfyUI's definitions into
+        // the panel's map, silently, which is the outcome the branch above exists to
+        // prevent. It fails soft (each miss is swallowed), so on an unreachable
+        // COMFYUI_URL it degrades to "type absent" — but when that host IS reachable and
+        // is a different server, the schema is quietly wrong.
+        //
+        // For a panel-sourced map a miss is not something to repair from elsewhere: the
+        // panel returned that ComfyUI's WHOLE /object_info, so a type absent from it is
+        // absent from the server that will run the workflow. convertUiToApi already
+        // reports unknown types as warnings, which is the honest outcome.
+        const objectInfo = liveCanvasSource
+          ? bulk
+          : await backfillObjectInfo(bulk, collectNodeTypes(ui));
         const converted = convertUiToApi(ui, objectInfo);
         const workflow = converted.workflow;
         const warnings = [...captureNotes, ...converted.warnings];

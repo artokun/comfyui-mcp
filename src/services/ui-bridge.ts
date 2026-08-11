@@ -259,6 +259,15 @@ export const BRIDGE_CMD_MIN_PANEL_VERSION: Readonly<Record<string, string>> = {
   graph_find_nodes: "0.4.6",
   graph_query: "0.7.0",
   graph_serialize: "0.8.2",
+  // #1006 — the panel serving its OWN /object_info first shipped in panel 0.13.0. An
+  // AUTHORITATIVE entry, because without one the command falls back to the bridge
+  // baseline and an older panel answers the raw dispatch error `Unknown command
+  // "graph_get_object_info"`, which reads like a broken ComfyUI rather than an old panel.
+  //
+  // Established from the release commit, not from tags: this repo does not tag its
+  // releases (`git tag --contains` finds nothing), so ancestry would have pointed at the
+  // first tag that happens to exist and named a version four releases too late.
+  graph_get_object_info: "0.13.0",
   // #608 forced-refresh executor shipped in panel 0.11.28. Older panels (e.g. the
   // 0.11.20 in #619) register no `refresh_nodes` handler and reply with the raw
   // dispatch error `Unknown command "refresh_nodes"`. Without this AUTHORITATIVE
@@ -824,6 +833,8 @@ export type FenceAdoptOutcome = boolean | { ok: true } | { ok: false; reason: st
 
 export const BRIDGE_READONLY_CMDS: ReadonlySet<string> = new Set<string>([
   "graph_serialize",
+  // Reads the tab's own /object_info and returns it. Touches nothing.
+  "graph_get_object_info",
   "graph_outline",
   "graph_get_errors",
   "graph_get_state",
@@ -887,6 +898,7 @@ export type GraphCmdEffect = "inert" | "targeted";
 export const GRAPH_CMD_EFFECT: Readonly<Record<string, GraphCmdEffect>> = {
   // ---- inert: reads -------------------------------------------------------
   graph_serialize: "inert",
+  graph_get_object_info: "inert",
   graph_outline: "inert",
   graph_get_errors: "inert",
   graph_get_state: "inert",

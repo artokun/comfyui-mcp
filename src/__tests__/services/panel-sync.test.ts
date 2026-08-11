@@ -37,7 +37,11 @@ import {
   type PanelStatus,
 } from "../../services/panel-installer.js";
 import type { PanelPinState } from "../../services/panel-settings.js";
-import { BRIDGE_CAPABILITY_MIN_PANEL_VERSION } from "../../services/ui-bridge.js";
+import { compareSemver } from "../../services/self-update.js";
+import {
+  BRIDGE_CAPABILITY_MIN_PANEL_VERSION,
+  BRIDGE_CMD_MIN_PANEL_VERSION,
+} from "../../services/ui-bridge.js";
 
 const REQUIRED = "0.11.35";
 const ORCH = "0.48.32";
@@ -72,7 +76,24 @@ describe("requiredPanelVersion", () => {
     // refuses every active-workflow write (#708).
     expect(BRIDGE_CAPABILITY_MIN_PANEL_VERSION.enforces_workflow_stamp).toBe("0.11.30");
     expect(BRIDGE_CAPABILITY_MIN_PANEL_VERSION.enforces_workflow_stamp_at_write).toBe(REQUIRED);
-    expect(requiredPanelVersion()).toBe(REQUIRED);
+    // The aggregate is the max across BOTH tables, asserted as such rather than as a
+    // literal. It used to be pinned to REQUIRED, which was true only while no COMMAND
+    // declared a higher minimum than the capabilities did — #1359 added
+    // graph_get_object_info at 0.13.0 and the literal broke for a reason unrelated to what
+    // this test checks. The claim is "capabilities are included too", and that survives.
+    const everyMinimum = [
+      ...Object.values(BRIDGE_CMD_MIN_PANEL_VERSION),
+      ...Object.values(BRIDGE_CAPABILITY_MIN_PANEL_VERSION),
+    ];
+    expect(everyMinimum).toContain(REQUIRED);
+    const aggregate = requiredPanelVersion();
+    for (const v of everyMinimum) {
+      expect(
+        compareSemver(aggregate, v) >= 0,
+        `requiredPanelVersion() ${aggregate} must be >= every declared minimum, saw ${v}`,
+      ).toBe(true);
+    }
+    expect(everyMinimum).toContain(aggregate);
   });
 
   it("marks a 0.11.28 panel behind without a caller-supplied requirement (#708)", () => {
@@ -82,7 +103,12 @@ describe("requiredPanelVersion", () => {
     const assessment = evaluatePanelSync(status({ installedVersion: "0.11.28" }), {
       orchestratorVersion: ORCH,
     });
-    expect(assessment.requiredPanelVersion).toBe(REQUIRED);
+    // Asserted against the DERIVED floor, which is this test's actual claim — "it must use
+    // the same derived floor as the bridge's refusal, rather than reporting the old 0.11.28
+    // panel up-to-date". Pinning the literal made it break when #1359 raised the aggregate,
+    // for a reason with nothing to do with 0.11.28 being behind.
+    expect(assessment.requiredPanelVersion).toBe(requiredPanelVersion());
+    expect(compareSemver(assessment.requiredPanelVersion, "0.11.28")).toBeGreaterThan(0);
     expect(assessment.decision).toBe("sync");
     expect(assessment.behind).toBe(true);
   });

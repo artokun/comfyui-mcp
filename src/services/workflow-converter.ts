@@ -2254,6 +2254,25 @@ export function convertApiToUi(
 }
 
 /**
+ * Frontend-only node types that never reach the backend (#1372).
+ *
+ * LiteGraph-native: the ComfyUI frontend registers them, the server's node registry does
+ * not, and they are stripped before a prompt is queued. `panel_add_node`'s own description
+ * says the same — they "legitimately bypass the backend class_type check".
+ *
+ * EXPORTED because a second copy is how two lists drift, and #1372 is what that cost: the
+ * converter knew MarkdownNote does not execute while the runtime classifier called it an
+ * unknown node and refused to say the workflow was free — stopping the paid-API safety
+ * flow to ask a question that already had an answer.
+ */
+export const NON_EXECUTING_NODE_TYPES: ReadonlySet<string> = new Set([
+  "Reroute",
+  "Note",
+  "MarkdownNote",
+  "PrimitiveNode",
+]);
+
+/**
  * Convert a ComfyUI UI-format workflow to API format.
  * Requires objectInfo from /object_info to map widgets_values to named inputs.
  */
@@ -2294,7 +2313,7 @@ export function convertUiToApi(
   }
 
   // Node types that are purely visual/internal and have no API equivalent
-  const SKIP_TYPES = new Set(["Reroute", "Note", "PrimitiveNode", "MarkdownNote"]);
+  const SKIP_TYPES = NON_EXECUTING_NODE_TYPES;
 
   // Get/Set node types that need special handling (not in object_info)
   const GET_SET_TYPES = new Set([

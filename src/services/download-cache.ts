@@ -2347,7 +2347,7 @@ async function downloadIntoCache(
     // resumes from the byte it left off on the next call, rather than
     // restarting from zero. (See streamUrlToFile for the Range + flags
     // handshake.) Cleanup on terminal failure stays unchanged.
-    const partial = join(cacheDir(), `.${basename(target)}.partial`);
+    const partial = stagedPartialPathForTarget(target);
     const rejectedMarker = `${partial}.rejected`;
 
     /**
@@ -3301,4 +3301,78 @@ export async function downloadWithCache(
     }
     return { targetPath: options.targetPath, usedCache: false };
   }
+}
+
+/**
+ * The staged `.partial` path for a cache target. THE ONE DEFINITION (#1370).
+ *
+ * It is a HIDDEN file — `.<basename>.partial`, leading dot — in the cache dir. That dot
+ * cost two rounds. My first lookup searched for `.<destination filename>.partial` (wrong
+ * key: the writer stages by CACHE identity, not destination). The correction derived the
+ * cache path properly and then dropped the leading dot, so it looked for `hash.ext.partial`
+ * while the writer wrote `.hash.ext.partial` — still missing every real partial, still
+ * reporting "no partial found" to someone holding 30 GB of resumable bytes.
+ *
+ * Both times my tests agreed with me, because the fixtures were built by calling the same
+ * helper being tested. A fixture derived from the code under test cannot falsify it.
+ *
+ * So there is now exactly one expression, and the WRITER uses it too. Not a parallel
+ * derivation that happens to agree today — the same function, so they cannot disagree.
+ */
+export function stagedPartialPathForTarget(target: string): string {
+  return join(cacheDir(), `.${basename(target)}.partial`);
+}
+
+/**
+ * Where a download's resumable `.partial` is staged, derived the way the writer derives it
+ * (#1370).
+ *
+ * MY FIRST VERSION OF THIS GUESSED THE NAME AND GUESSED WRONG. It looked for
+ * `.<destination filename>.partial`, because that is what "the partial for this download"
+ * sounds like. The writer stages under `.<sha256(cacheIdentity)[0:32]><ext>.partial` —
+ * keyed by the CACHE identity, not the destination — so the lookup would have missed every
+ * time and reported "no partial was found" for downloads that had one. That is the same
+ * false claim this issue is about, pointing the other way, and it would have been worse:
+ * the original at least erred toward "your bytes are safe".
+ *
+ * The tests missed it because the fixtures created files under the name I was searching
+ * for. They encoded my belief about the naming rather than the naming, which is the third
+ * time that shape has cost me today. Building the path from `cachePathForUrl` — the same
+ * function the writer uses — is what makes the two definitions impossible to disagree.
+ *
+ * SCOPE, stated because the caller has to phrase its answer around it: `cacheIdentity`
+ * folds in representation-affecting request headers and cloud credentials, which a job
+ * record deliberately does not keep. So this reproduces the staged path exactly for an
+ * unauthenticated public download (the reporter's case, and the common one) and cannot for
+ * an authenticated variant. A miss therefore means "none found under this URL's staged
+ * name", never "none exists" — and the caller must not upgrade it to the latter.
+ */
+export function stagedPartialPathForUrl(url: string): string {
+  return stagedPartialPathForTarget(cachePathForUrl(url));
+}
+
+/**
+ * Stat the staged `.partial` for a URL. Returns null when there is nothing usable there.
+ *
+ * A zero-byte partial reports as absent: resuming from it saves nothing, and calling it
+ * resumable would restate this issue's bug in miniature — a claim of retained bytes where
+ * there are none.
+ */
+export async function findResumablePartial(
+  url: string | undefined,
+): Promise<{ path: string; bytes: number } | null> {
+  if (typeof url !== "string" || !url.trim()) return null;
+  let candidate: string;
+  try {
+    candidate = stagedPartialPathForUrl(url.trim());
+  } catch {
+    return null;
+  }
+  try {
+    const st = await stat(candidate);
+    if (st.isFile() && st.size > 0) return { path: candidate, bytes: st.size };
+  } catch {
+    // ENOENT is the common, expected answer.
+  }
+  return null;
 }
