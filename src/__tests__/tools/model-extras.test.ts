@@ -12,6 +12,10 @@ vi.mock("../../config.js", () => {
     config,
     isLocalMode: () => Boolean(config.comfyuiPath),
     isRemoteMode: () => !config.comfyuiPath,
+    // #1374 — the route decision stamps the target it was made against, so this mock
+    // has to provide it. Faked rather than spread from the real config: these suites
+    // control `config` themselves and a real base URL would not match what they set.
+    getComfyUIBaseUrl: () => `http://127.0.0.1:8188`,
   };
 });
 

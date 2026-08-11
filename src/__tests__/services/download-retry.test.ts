@@ -21,7 +21,12 @@ vi.mock("../../config.js", () => {
     huggingfaceToken: undefined as string | undefined,
     civitaiApiToken: undefined as string | undefined,
   };
-  return { config, isRemoteMode: () => !config.comfyuiPath };
+  // #1374 — the route decision stamps the target it was made against.
+  return {
+    config,
+    isRemoteMode: () => !config.comfyuiPath,
+    getComfyUIBaseUrl: () => `http://127.0.0.1:8188`,
+  };
 });
 
 /** Every progress row the download machinery publishes. Recorded through a module

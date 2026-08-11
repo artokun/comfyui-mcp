@@ -19,11 +19,15 @@ import { describe, expect, it, vi, afterEach } from "vitest";
 const hoisted = vi.hoisted(() => ({
   remote: { value: false },
   stats: { value: undefined as unknown },
+  target: { value: "http://127.0.0.1:8188" },
+  base: { value: undefined as string | undefined },
 }));
 
 vi.mock("../../config.js", async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
   isRemoteMode: () => hoisted.remote.value,
+  getComfyUIBaseUrl: () => hoisted.target.value,
+  config: { get comfyuiPath() { return hoisted.base.value; } },
 }));
 
 // The live-probe gate (#1263) is right to demand this: `resolveLiveInterpreter` shells out
@@ -54,6 +58,8 @@ afterEach(() => {
   // The observation is process-global, so a test that does not clear it inherits the
   // previous test's decision — which is the same staleness the production comment calls out.
   resetRouteObservationForTests();
+  hoisted.target.value = "http://127.0.0.1:8188";
+  hoisted.base.value = undefined;
 });
 
 describe("the download route explains ITSELF when Manager is the reason (#1374)", () => {
@@ -84,19 +90,54 @@ describe("the download route explains ITSELF when Manager is the reason (#1374)"
   });
 
   it("a record that would have routed LOCAL explains nothing (codex: the stale-record case)", async () => {
-    // The record is process-global. Interleaving alone cannot make two downloads disagree —
-    // every routing input is process-wide or reads the one connected server — but a server
-    // restarting between two decisions can, and concurrency widens that window.
+    // A record that would have chosen LOCAL cannot be why Manager was chosen, so there is
+    // nothing truthful to say and silence beats a confident wrong story.
     //
-    // So the failure is made unreachable rather than argued about: a record that would have
-    // chosen LOCAL cannot be why Manager was chosen, and silence beats a confident wrong
-    // story. That is this issue's own lesson applied to its own fix.
+    // I originally justified this by arguing the record could not go stale under
+    // concurrency, since every routing input looked process-wide. That was wrong —
+    // setComfyuiTarget() mutates them at runtime — and the target stamp below is what
+    // actually closes it. The guard still earns its place for the time-based case, but the
+    // reasoning it shipped with did not survive review, which is worth leaving on the
+    // record next to it.
     hoisted.stats.value = {
       // An ABSOLUTE models dir: this is a record that would have routed LOCAL.
       system: { argv: ["main.py", "--models-directory", "/srv/comfy/models"], cwd: "/srv/comfy" },
     };
     await shouldDispatchDownloadToManager();
     expect(explainManagerDownloadRoute()).toBe("");
+  });
+
+  it("a record made against a DIFFERENT target explains nothing (codex round 3)", async () => {
+    // I argued this could not happen: every routing input looked process-wide, so two
+    // concurrent downloads had to observe the same thing. Wrong on a checkable fact —
+    // setComfyuiTarget() mutates host, port, remoteUrlActive and config.comfyuiPath at
+    // runtime, and a desktop `hello` invokes it. So download A records a Manager route,
+    // the target is retargeted, download B overwrites the record, and A's failure would be
+    // explained with B's observation.
+    hoisted.stats.value = { system: { argv: ["main.py"], cwd: undefined } };
+    await shouldDispatchDownloadToManager();
+    expect(explainManagerDownloadRoute()).not.toBe("");
+    // …the target moves under us.
+    hoisted.target.value = "http://127.0.0.1:8190";
+    expect(explainManagerDownloadRoute()).toBe("");
+  });
+
+  it("a configured base does NOT suppress the relative-flag case (codex round 3)", async () => {
+    // The predicate checks hasUnresolvableRelativeModelDirFlag FIRST — it deliberately
+    // wins over the configured-base short-circuit — so this combination legitimately
+    // routes to Manager. My consistency guard checked the base first and suppressed the
+    // explanation for exactly the case that most needs it: a false negative introduced by
+    // a check meant to prevent false positives.
+    // A CONFIGURED BASE IS PRESENT — without it this test cannot see the defect at all,
+    // because the guard it is about only fires when resolveEffectiveComfyUIBase() is
+    // truthy. Mutation testing caught that: reordering the guards left it green.
+    hoisted.base.value = "/some/configured/install";
+    hoisted.stats.value = {
+      system: { argv: ["main.py", "--base-directory", "./models"], cwd: undefined },
+    };
+    await shouldDispatchDownloadToManager();
+    const why = explainManagerDownloadRoute();
+    expect(why).toMatch(/RELATIVE --base-directory/);
   });
 
   it("names the ARGV AND CWD it actually saw, because that is what identifies the case", async () => {
@@ -116,6 +157,10 @@ describe("the download route explains ITSELF when Manager is the reason (#1374)"
   it("a RELATIVE --base-directory with no cwd is called out specifically", async () => {
     // This one has a different remedy (an absolute --base-directory), and lumping it in
     // with the generic case would send the user to a fix that does not apply.
+    // A CONFIGURED BASE IS PRESENT — without it this test cannot see the defect at all,
+    // because the guard it is about only fires when resolveEffectiveComfyUIBase() is
+    // truthy. Mutation testing caught that: reordering the guards left it green.
+    hoisted.base.value = "/some/configured/install";
     hoisted.stats.value = {
       system: { argv: ["main.py", "--base-directory", "./models"], cwd: undefined },
     };

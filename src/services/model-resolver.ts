@@ -2803,10 +2803,11 @@ WHY THIS WENT THROUGH ComfyUI-Manager AT ALL: ${why}`, {
  * restarted between the two reads produced an explanation of a state that would have routed
  * LOCAL, i.e. an explanation for a decision that never happened.
  */
-type RouteObservation =
+type RouteObservation = { target: string } & (
   | { remote: true }
   | { remote: false; unreachable: true }
-  | { remote: false; argv?: string[]; cwd?: string };
+  | { remote: false; argv?: string[]; cwd?: string }
+);
 let lastRouteObservation: RouteObservation | undefined;
 
 /**
@@ -2851,6 +2852,18 @@ export function resetRouteObservationForTests(): void {
  */
 export function explainManagerDownloadRoute(): string {
   const obs = lastRouteObservation;
+  // THE RECORD MUST BELONG TO THE TARGET WE ARE TALKING ABOUT (codex round 3).
+  //
+  // I argued this could not go wrong: every routing input looked process-wide, so two
+  // concurrent downloads had to observe the same thing. That was wrong on a checkable
+  // fact. `setComfyuiTarget()` mutates host, port, remoteUrlActive and config.comfyuiPath
+  // at RUNTIME — a desktop `hello` invokes it — so download A can record a Manager route,
+  // the target can be retargeted, download B can overwrite the record, and A's failure
+  // then gets explained with B's observation.
+  //
+  // Stamping the target makes the mismatch detectable instead of arguable: a record from a
+  // different target explains nothing.
+  if (obs && obs.target !== getComfyUIBaseUrl()) return "";
   if (!obs) {
     // No recorded decision. Say that rather than taking a fresh reading and narrating it as
     // though it were the one that mattered.
@@ -2872,20 +2885,26 @@ export function explainManagerDownloadRoute(): string {
   const { argv, cwd } = obs;
   // THE RECORD MUST BE CONSISTENT WITH HAVING CHOSEN MANAGER, or say nothing.
   //
-  // Codex called the process-global record unsafe under concurrent downloads. Measured
-  // against the predicate's inputs, interleaving alone cannot produce a disagreement: the
-  // route is decided from isRemoteMode() (process-wide), one connected server's
-  // /system_stats, and process-wide config — so two downloads in one process observe the
-  // same thing. What CAN differ is time: a server restarting between two decisions, which
-  // concurrency widens the window for.
+  // The record can go stale in TIME (a server restarting between two decisions). I also
+  // argued it could not go stale under concurrency, because every routing input looked
+  // process-wide — that was wrong, setComfyuiTarget() mutates them at runtime, and the
+  // target stamp above is what closes that. This guard covers the remaining case.
   //
   // Rather than argue the odds, the failure is made unreachable. If the recorded
   // observation would have routed LOCAL, it cannot be why Manager was chosen, so there is
   // nothing truthful to say and this returns "". A stale record now costs a missing
   // explanation instead of a confident wrong one — which is the whole subject of this
   // issue, applied to my own diagnostic.
-  if (resolveEffectiveComfyUIBase()) return "";
-  if (parseModelsDirFromArgv(argv, cwd)) return "";
+  // ORDER MATTERS, and mine did not match the predicate's (codex round 3). The route is
+  // decided with `hasUnresolvableRelativeModelDirFlag` FIRST — it deliberately wins over
+  // the configured-base short-circuit — so a configured COMFYUI_PATH alongside an
+  // unresolvable relative model-dir flag legitimately routes to Manager. My guard checked
+  // the base first and suppressed the explanation for exactly that case: a false negative
+  // introduced by a consistency check.
+  if (!hasUnresolvableRelativeModelDirFlag(argv, cwd)) {
+    if (resolveEffectiveComfyUIBase()) return "";
+    if (parseModelsDirFromArgv(argv, cwd)) return "";
+  }
   const detail =
     `The server reported argv[0]=${argv?.[0] ?? "(none)"} and cwd=${cwd ?? "(not reported)"} ` +
     `when this route was chosen.`;
@@ -2920,7 +2939,7 @@ export function explainManagerDownloadRoute(): string {
 
 export async function shouldDispatchDownloadToManager(): Promise<boolean> {
   if (isRemoteMode()) {
-    lastRouteObservation = { remote: true };
+    lastRouteObservation = { target: getComfyUIBaseUrl(), remote: true };
     return true;
   }
   try {
@@ -2933,7 +2952,7 @@ export async function shouldDispatchDownloadToManager(): Promise<boolean> {
     // as "did not answer /system_stats", a state that would have routed LOCAL and so cannot
     // be why Manager was chosen. A diagnostic that narrates a decision must narrate the
     // decision that happened, not a fresh one.
-    lastRouteObservation = { remote: false, argv, cwd };
+    lastRouteObservation = { target: getComfyUIBaseUrl(), remote: false, argv, cwd };
     // Ask the LIVE server FIRST. A server launched with a RELATIVE
     // --base-directory/--models-directory that did NOT report its cwd has an UNKNOWN
     // real models dir: any local guess (COMFYUI_PATH or the main.py root) would be
@@ -2973,7 +2992,7 @@ export async function shouldDispatchDownloadToManager(): Promise<boolean> {
   } catch {
     // No reachable server → nothing to dispatch to. A configured local base still
     // streams local; otherwise let the local resolver surface its clear error.
-    lastRouteObservation = { remote: false, unreachable: true };
+    lastRouteObservation = { target: getComfyUIBaseUrl(), remote: false, unreachable: true };
     return false;
   }
 }
