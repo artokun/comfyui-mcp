@@ -2736,7 +2736,7 @@ async function downloadModelViaManagerRemote(
     // ComfyUI-Manager, so it was misattributed anyway. A flag at the call site cannot be
     // fooled by prose.
     if (err instanceof DOMException && err.name === "AbortError") throw err;
-    const why = explainManagerDownloadRoute();
+    const why = await explainManagerDownloadRoute();
     if (!why) throw err;
     const raw = err instanceof Error ? err.message : String(err);
     throw new ModelError(`${raw}
@@ -2819,9 +2819,11 @@ WHY THIS WENT THROUGH ComfyUI-Manager AT ALL: ${why}`, {
 export async function explainManagerDownloadRoute(): Promise<string> {
   if (isRemoteMode()) {
     return (
-      "This MCP is in REMOTE mode (--comfyui-url), so a download is dispatched to the " +
-      "connected ComfyUI's Manager by design -- there is no local models directory to " +
-      "stream into. Manager must be installed and enabled on that host."
+      "This MCP is in REMOTE mode (--comfyui-url) RIGHT NOW, so downloads are dispatched " +
+      "to the connected ComfyUI's Manager by design -- there is no local models directory " +
+      "to stream into. Manager must be installed and enabled on that host. (Current state: " +
+      "if the target was changed since this download started, it may not be why this one " +
+      "took that route.)"
     );
   }
   let argv: string[] | undefined;

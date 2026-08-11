@@ -19,14 +19,12 @@ import { describe, expect, it, vi, afterEach } from "vitest";
 const hoisted = vi.hoisted(() => ({
   remote: { value: false },
   stats: { value: undefined as unknown },
-  target: { value: "http://127.0.0.1:8188" },
   base: { value: undefined as string | undefined },
 }));
 
 vi.mock("../../config.js", async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
   isRemoteMode: () => hoisted.remote.value,
-  getComfyUIBaseUrl: () => hoisted.target.value,
   config: { get comfyuiPath() { return hoisted.base.value; } },
 }));
 
@@ -55,6 +53,25 @@ afterEach(() => {
   hoisted.remote.value = false;
   hoisted.stats.value = undefined;
   hoisted.base.value = undefined;
+});
+
+describe("the explanation is AWAITED before it reaches the message (#1374)", () => {
+  it("the dispatch site awaits it — an un-awaited call renders [object Promise]", async () => {
+    // Codex P1, and it would have shipped. The explainer became async while its single
+    // caller still treated it as a string, so every non-abort Manager failure would have
+    // appended "WHY THIS WENT THROUGH ComfyUI-Manager AT ALL: [object Promise]" — the
+    // message this whole issue is about, replaced by a worse one.
+    //
+    // My `await` edit was in a shell command that died with a syntax error, so it never
+    // applied, and nothing else in the suite renders the final string. This asserts on the
+    // SOURCE because the failure is at the call site, not in the function.
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(new URL("../../services/model-resolver.ts", import.meta.url), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/.*/g, "");
+    expect(src).toMatch(/await explainManagerDownloadRoute\(\)/);
+    expect(src).not.toMatch(/[^t] explainManagerDownloadRoute\(\);/);
+  });
 });
 
 describe("the download route explains ITSELF when Manager is the reason (#1374)", () => {
