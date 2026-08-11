@@ -2775,6 +2775,86 @@ async function downloadModelViaManagerRemote(
  * no server is reachable, so the local resolver surfaces its clear, actionable error
  * rather than silently succeeding.
  */
+/**
+ * WHY a download was routed to ComfyUI-Manager (#1374).
+ *
+ * The reporter's LOCAL Windows-portable install could not download anything: every attempt
+ * died on "ComfyUI-Manager's queue API is not reachable", for a capability that needs no
+ * Manager at all. ~45 GB of weights, worked around with `curl`.
+ *
+ * The routing decision itself is a bare boolean produced by six conditions, and the error
+ * they saw is raised deep in generic Manager code that cannot know it is serving a
+ * download — so the message named the thing that failed (Manager) rather than the thing
+ * that made Manager necessary (an install root this MCP could not resolve). Nothing in the
+ * reply distinguished "your ComfyUI is remote" from "I could not work out where your local
+ * ComfyUI keeps its models", and only the second has a remedy the user can apply.
+ *
+ * This re-derives the decision for the ERROR PATH only, and reports which condition sent
+ * it to Manager. It is deliberately a separate read rather than a value threaded through
+ * the predicate: the predicate is on the hot path for every download and is already
+ * carefully single-evaluation for split-brain reasons (#420), and a diagnostic must not
+ * change what it returns.
+ *
+ * NOT a routing change. I could not reproduce the reporter's decision on this machine — a
+ * live ComfyUI here reports a relative `main.py` and NO cwd, and still resolves, because
+ * the process-table probe anchors it. So I do not yet know which of the six conditions
+ * fires for them, and guessing at the fix would be exactly the unverified confidence this
+ * codebase keeps paying for. This makes the answer visible in their next report.
+ */
+export async function explainManagerDownloadRoute(): Promise<string> {
+  if (isRemoteMode()) {
+    return (
+      "This MCP is in REMOTE mode (--comfyui-url), so a download is dispatched to the " +
+      "connected ComfyUI's Manager by design — there is no local models directory to " +
+      "stream into. Manager must be installed and enabled on that host."
+    );
+  }
+  let argv: string[] | undefined;
+  let cwd: string | undefined;
+  try {
+    const stats = await getSystemStats();
+    argv = (stats as { system?: { argv?: string[] } })?.system?.argv;
+    cwd = (stats as { system?: { cwd?: string } })?.system?.cwd;
+  } catch {
+    return (
+      "The connected ComfyUI did not answer /system_stats, so its install layout could " +
+      "not be read at all."
+    );
+  }
+  // Rendered RAW, not JSON.stringify'd: a Windows argv comes back as
+  // `"ComfyUI\main.py"` with doubled backslashes, which the reader then has to mentally
+  // un-escape in the one line that exists to be pasted into a bug report.
+  const detail =
+    `The server reports argv[0]=${argv?.[0] ?? "(none)"} and cwd=${cwd ?? "(not reported)"}.`;
+  if (hasUnresolvableRelativeModelDirFlag(argv, cwd)) {
+    return (
+      `Your ComfyUI was started with a RELATIVE --base-directory/--models-directory and did ` +
+      `not report its working directory, so this MCP cannot tell where its models actually ` +
+      `live — writing locally would put the file somewhere the server never reads. ${detail} ` +
+      `FIX: restart ComfyUI with an ABSOLUTE --base-directory, or set COMFYUI_PATH to the ` +
+      `install root, and a local download will stream directly with no Manager involved.`
+    );
+  }
+  const liveRoot = resolveLiveServerRoot(argv, cwd, { remote: false });
+  if (liveRoot.root && !existsSync(liveRoot.root)) {
+    return (
+      `The connected ComfyUI reports its install root as ${liveRoot.root}, which does not ` +
+      `exist on THIS machine — it is a container-side or remote path (a Docker/SSH-forwarded ` +
+      `loopback server looks local but is not). Writing there would create a bogus directory ` +
+      `instead of reaching the server, so the fetch is handed to its Manager. ${detail} ` +
+      `FIX: enable Manager on that host, or run this MCP where the models directory really is.`
+    );
+  }
+  return (
+    `This MCP could not resolve where the connected ComfyUI keeps its models, so it handed ` +
+    `the fetch to that server's Manager instead of streaming locally. ${detail} ` +
+    `FIX: set COMFYUI_PATH to the ComfyUI install root (the directory containing main.py) — ` +
+    `a local download then streams directly and needs no Manager. Please include this whole ` +
+    `paragraph if you report it (#1374): the argv/cwd above is what identifies which case ` +
+    `this is.`
+  );
+}
+
 export async function shouldDispatchDownloadToManager(): Promise<boolean> {
   if (isRemoteMode()) return true;
   try {
@@ -2886,7 +2966,33 @@ export async function downloadModel(
   if (routeToManager) {
     // Thread the PRE-rewrite HF identity so the flip probe's credential derivation keeps the
     // HF token flowing to an HF_ENDPOINT mirror (matches the local path below).
-    return downloadModelViaManagerRemote(url, targetSubfolder, filename, auth, signal, wasHfUrl);
+    try {
+      return await downloadModelViaManagerRemote(url, targetSubfolder, filename, auth, signal, wasHfUrl);
+    } catch (err) {
+      // #1374 — SAY WHAT MADE MANAGER NECESSARY, not just that Manager failed.
+      //
+      // The reporter's LOCAL install could not download at all: every attempt died on
+      // "ComfyUI-Manager's queue API is not reachable", raised deep in generic Manager code
+      // that cannot know it is serving a download. The message named the thing that broke
+      // and not the decision that put them there, so a local-only capability read as
+      // "install Manager" when the real answer was "this MCP could not find your models
+      // directory". They downloaded 45 GB with curl instead.
+      //
+      // A cancel is not a routing problem and must pass through untouched.
+      if (err instanceof DOMException && err.name === "AbortError") throw err;
+      // unknown-ok: this is a DIAGNOSTIC wrapped around a real error, and the empty
+      // string is consumed one line below as "append nothing", not as "there is no
+      // reason". If the explainer itself fails, the caller must still receive the
+      // original Manager failure verbatim — swallowing that to report a diagnostic's
+      // failure would replace the user's actual problem with mine. The raw error is
+      // never conditional on this succeeding.
+      const why = await explainManagerDownloadRoute().catch(() => "");
+      const raw = err instanceof Error ? err.message : String(err);
+      throw new ModelError(
+        why ? `${raw}\n\nWHY THIS WENT THROUGH ComfyUI-Manager AT ALL: ${why}` : raw,
+        { url },
+      );
+    }
   }
 
   // Root the destination at the LIVE server's models dir (its --base-directory),
