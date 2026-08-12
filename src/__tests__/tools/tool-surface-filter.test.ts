@@ -17,6 +17,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   resolveToolSurfacePolicy,
+  toolActionAllowed,
   toolAllowed,
   toolMatches,
   TOOL_PRESETS,
@@ -66,6 +67,14 @@ describe("the operator's policy is read from the environment (#873)", () => {
   it("reads deny, allow and a preset", () => {
     expect(resolveToolSurfacePolicy({ COMFYUI_MCP_TOOL_DENY: "a, b ,c" }).deny).toEqual(["a", "b", "c"]);
     expect(resolveToolSurfacePolicy({ COMFYUI_MCP_TOOL_ALLOW: "x" }).allow).toEqual(["x"]);
+    expect(
+      resolveToolSurfacePolicy({
+        COMFYUI_MCP_TOOL_ACTION_ALLOW: "queue:list, queue:status,queue:list",
+      }).actionAllow,
+    ).toEqual([
+      { tool: "queue", action: "list" },
+      { tool: "queue", action: "status" },
+    ]);
     const preset = resolveToolSurfacePolicy({ COMFYUI_MCP_TOOL_PRESET: "safe" });
     expect(preset.preset).toBe("safe");
     // The preset's patterns live in presetDeny, kept apart from an explicit DENY because
@@ -178,7 +187,12 @@ describe("allow wins, and is absolute (#873)", () => {
     // unset expands to "". Reading that as "no rules configured" produces the full
     // surface with no log — the identical failure the unknown-preset throw exists to
     // prevent, reached from a different direction.
-    for (const v of ["COMFYUI_MCP_TOOL_ALLOW", "COMFYUI_MCP_TOOL_DENY", "COMFYUI_MCP_TOOL_PRESET"]) {
+    for (const v of [
+      "COMFYUI_MCP_TOOL_ALLOW",
+      "COMFYUI_MCP_TOOL_DENY",
+      "COMFYUI_MCP_TOOL_PRESET",
+      "COMFYUI_MCP_TOOL_ACTION_ALLOW",
+    ]) {
       expect(() => resolveToolSurfacePolicy({ [v]: "" }), v).toThrow(/set but empty/);
       expect(() => resolveToolSurfacePolicy({ [v]: "  ,  " }), v).toThrow(/Refusing to start|set but empty/);
     }
@@ -191,6 +205,82 @@ describe("allow wins, and is absolute (#873)", () => {
     // Not a full glob — a mid-string wildcard is NOT silently honoured, because a rule
     // that matches more than it reads like is worse than one that matches nothing.
     expect(toolMatches("generate_image", "gen*image")).toBe(false);
+  });
+});
+
+describe("action-level allow lists fail closed", () => {
+  it("requires exact tool:action pairs and rejects wildcard or malformed rules", () => {
+    for (const value of ["queue:*", "queue", ":list", "queue:", "Queue:list", "queue:list:extra"]) {
+      expect(
+        () => resolveToolSurfacePolicy({ COMFYUI_MCP_TOOL_ACTION_ALLOW: value }),
+        value,
+      ).toThrow(/invalid rule|Refusing to start/);
+    }
+  });
+
+  it("bounds every call that carries an action while leaving ordinary tools alone", () => {
+    const p = resolveToolSurfacePolicy({
+      COMFYUI_MCP_TOOL_ACTION_ALLOW: "queue:list,enqueue_workflow:enqueue",
+    });
+    expect(toolActionAllowed("queue", { action: "list" }, p)).toBe(true);
+    expect(toolActionAllowed("queue", { action: "clear" }, p)).toBe(false);
+    expect(toolActionAllowed("enqueue_workflow", { action: "rerun" }, p)).toBe(false);
+    expect(toolActionAllowed("get_system_stats", { action: "stats" }, p)).toBe(false);
+    expect(toolActionAllowed("panel_graph_outline", {}, p)).toBe(true);
+  });
+
+  it("blocks before the registered handler on the direct and catalog registration boundary", async () => {
+    const p = resolveToolSurfacePolicy({
+      COMFYUI_MCP_TOOL_ACTION_ALLOW: "queue:list",
+    });
+    let called = 0;
+    let registeredHandler: ((args: Record<string, unknown>) => Promise<unknown>) | undefined;
+    const registrar = {
+      tool: (...args: unknown[]) => {
+        registeredHandler = args[args.length - 1] as typeof registeredHandler;
+        return { name: args[0] };
+      },
+    };
+    const wrapped = withToolSurfaceFilter(registrar, p);
+    wrapped.tool("queue", "queue", {}, async () => {
+      called++;
+      return { content: [{ type: "text", text: "ran" }] };
+    });
+
+    const denied = (await registeredHandler?.({ action: "clear" })) as {
+      isError?: boolean;
+      content?: Array<{ text?: string }>;
+    };
+    expect(denied.isError).toBe(true);
+    expect(denied.content?.[0]?.text).toContain('queue:clear');
+    expect(called).toBe(0);
+
+    await registeredHandler?.({ action: "list" });
+    expect(called).toBe(1);
+  });
+
+  it("also blocks a denied action in the real compact call_tool catalog", async () => {
+    const previous = process.env.COMFYUI_MCP_TOOL_ACTION_ALLOW;
+    process.env.COMFYUI_MCP_TOOL_ACTION_ALLOW = "queue:list";
+    try {
+      const { collectToolCatalog } = await import("../../tools/index.js");
+      const catalog = await collectToolCatalog();
+      const queue = catalog.get("queue");
+      expect(queue).toBeDefined();
+
+      // This would call ComfyUI's destructive queue-clear endpoint if the catalog
+      // route bypassed the wrapper. No fetch mock is installed deliberately: the test
+      // can only pass when policy denial happens before the real handler.
+      const denied = await queue!.handler({ action: "clear" });
+      expect(denied.isError).toBe(true);
+      expect(denied.content[0]).toMatchObject({
+        type: "text",
+        text: expect.stringContaining("queue:clear"),
+      });
+    } finally {
+      if (previous === undefined) delete process.env.COMFYUI_MCP_TOOL_ACTION_ALLOW;
+      else process.env.COMFYUI_MCP_TOOL_ACTION_ALLOW = previous;
+    }
   });
 });
 
@@ -435,6 +525,7 @@ describe("WIRING: the filter covers the call_tool route, not just registration (
     const body = src.slice(at, at + 1400);
     expect(body).toContain("resolveToolSurfacePolicy()");
     expect(body).toContain("toolAllowed(d.name, policy)");
+    expect(body).toContain("toolActionPolicyError(d.name, args, policy)");
   });
 
   it("is applied to the OTHER panel registration path as well — createPanelMcpServer", async () => {
@@ -450,9 +541,10 @@ describe("WIRING: the filter covers the call_tool route, not just registration (
     const src = codeOnly(await readFile(new URL("../../orchestrator/panel-tools.ts", import.meta.url), "utf-8"));
     const at = src.indexOf("export function createPanelMcpServer");
     expect(at).toBeGreaterThan(-1);
-    const body = src.slice(at, at + 1800);
+    const body = src.slice(at, at + 2600);
     expect(body).toContain("resolveToolSurfacePolicy()");
     expect(body).toContain("toolAllowed(d.name, policy)");
+    expect(body).toContain("toolActionPolicyError(d.name, args, policy)");
   });
 
   it("the policy reaches the SPAWNED comfyui child through the env builder BOTH lanes share", async () => {
@@ -469,7 +561,12 @@ describe("WIRING: the filter covers the call_tool route, not just registration (
     const at = src.indexOf("export function buildComfyuiMcpEnv");
     expect(at).toBeGreaterThan(-1);
     const body = src.slice(at, at + 3200);
-    for (const v of ["COMFYUI_MCP_TOOL_PRESET", "COMFYUI_MCP_TOOL_ALLOW", "COMFYUI_MCP_TOOL_DENY"]) {
+    for (const v of [
+      "COMFYUI_MCP_TOOL_PRESET",
+      "COMFYUI_MCP_TOOL_ALLOW",
+      "COMFYUI_MCP_TOOL_DENY",
+      "COMFYUI_MCP_TOOL_ACTION_ALLOW",
+    ]) {
       // Assert the ASSIGNMENT, not that the name appears somewhere. Checking only for the
       // name passed with the forwarding deleted, because the `process.env.X ?` guard on
       // the line above still mentions X — the test matched the condition and called it

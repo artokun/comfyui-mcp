@@ -113,6 +113,17 @@ describe("panel-secrets (canonical .env store)", () => {
     expect((base as Record<string, string>).CIVITAI_API_TOKEN).toBeUndefined();
   });
 
+  it("forwards even an empty action policy so the child refuses it instead of opening up", () => {
+    const previous = process.env.COMFYUI_MCP_TOOL_ACTION_ALLOW;
+    try {
+      process.env.COMFYUI_MCP_TOOL_ACTION_ALLOW = "";
+      expect(buildComfyuiMcpEnv({}).COMFYUI_MCP_TOOL_ACTION_ALLOW).toBe("");
+    } finally {
+      if (previous === undefined) delete process.env.COMFYUI_MCP_TOOL_ACTION_ALLOW;
+      else process.env.COMFYUI_MCP_TOOL_ACTION_ALLOW = previous;
+    }
+  });
+
   it("lets a saved secret OVERRIDE a base env default of the same key", () => {
     const base = { CIVITAI_API_TOKEN: "from-process-env" };
     setComfyuiSecret("CIVITAI_API_TOKEN", "from-panel");

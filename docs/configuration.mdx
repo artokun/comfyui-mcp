@@ -277,9 +277,11 @@ available, HTTP polling otherwise).
 ## Restricting the tool surface
 
 For a **hosted** deployment — a shared Open WebUI, a team frontend — the operator is not
-the person prompting. These variables withhold tools from the model entirely: a withheld
-tool is never registered, so it is absent from `tools/list`, absent from `call_tool`, and
-the model never learns it exists.
+the person prompting. The tool preset/allow/deny variables withhold tools from the model
+entirely: a withheld tool is never registered, so it is absent from `tools/list`, absent
+from `call_tool`, and the model never learns it exists. The action allow list is the
+narrower companion for a tool that must remain visible: the tool stays registered, but
+an unlisted action is rejected before its handler runs.
 
 <ParamField path="COMFYUI_MCP_TOOL_PRESET" type="string">
   `safe` — everything except tools that change the machine or the model library.
@@ -306,9 +308,27 @@ the model never learns it exists.
   `ALLOW=list_*` would re-admit `list_packs`, whose `install_deps` action installs and
   runs third-party code, and `ALLOW=*` would make every preset inert.
 </ParamField>
+<ParamField path="COMFYUI_MCP_TOOL_ACTION_ALLOW" type="string">
+  Comma-separated, exact `tool:action` pairs. When set, every tool call carrying an
+  `action` field must match one of these pairs; action-bearing tools omitted from the
+  list cannot dispatch any action. This restricts consolidated tools whose names alone
+  no longer reveal their blast radius—for example, allow queue inspection and targeted
+  cancellation without also allowing queue edits or a global clear:
+
+  `queue:list,queue:status,queue:cancel,enqueue_workflow:enqueue`
+
+  Pair this with `COMFYUI_MCP_TOOL_ALLOW` to bound both dimensions. Rules are exact;
+  wildcards are rejected so a newly-added action cannot become allowed after an upgrade.
+</ParamField>
 
 ```bash A hosted deployment that cannot install or restart anything
 COMFYUI_MCP_TOOL_PRESET=safe npx comfyui-mcp@latest --http --host 0.0.0.0 --port 9100
+```
+
+```bash A generation operator that can inspect, enqueue, and cancel—but not install or clear queues
+COMFYUI_MCP_TOOL_ALLOW=get_system_stats,get_history,create_workflow,enqueue_workflow,queue \
+COMFYUI_MCP_TOOL_ACTION_ALLOW=get_system_stats:stats,get_system_stats:logs,get_system_stats:health,get_history:list,get_history:diagnose,create_workflow:create,create_workflow:modify,create_workflow:validate,create_workflow:node_info,enqueue_workflow:enqueue,queue:list,queue:status,queue:cancel \
+npx comfyui-mcp@latest
 ```
 
 <Warning>

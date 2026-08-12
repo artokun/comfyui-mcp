@@ -177,7 +177,10 @@ export async function registerAllTools(server: McpServer): Promise<void> {
     logger.info(
       `[tools] surface restricted by policy${policy.preset ? ` (preset "${policy.preset}")` : ""} — ` +
         `${filtered.length} tool(s) withheld` +
-        (filtered.length ? `: ${filtered.slice(0, 12).join(", ")}${filtered.length > 12 ? ", …" : ""}` : ""),
+        (filtered.length ? `: ${filtered.slice(0, 12).join(", ")}${filtered.length > 12 ? ", …" : ""}` : "") +
+        (policy.actionAllow.length
+          ? `; ${policy.actionAllow.length} exact tool action(s) allowed`
+          : ""),
     );
   }
 }

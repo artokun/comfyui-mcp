@@ -26,7 +26,11 @@
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 // #873 — the operator's tool-surface policy also governs the panel surface.
-import { resolveToolSurfacePolicy, toolAllowed } from "../tools/tool-surface-filter.js";
+import {
+  resolveToolSurfacePolicy,
+  toolActionPolicyError,
+  toolAllowed,
+} from "../tools/tool-surface-filter.js";
 import { logger as toolPolicyLogger } from "../utils/logger.js";
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import type { Stats } from "node:fs";
@@ -13509,10 +13513,13 @@ export function createPanelMcpServer(
     }
     return true;
   });
-  if (withheldSdk.length) {
+  if (withheldSdk.length || policy.actionAllow.length) {
     toolPolicyLogger.info(
       `[panel-tools] surface restricted by policy${policy.preset ? ` (preset "${policy.preset}")` : ""} — ` +
-        `${withheldSdk.length} panel tool(s) withheld from the in-process server`,
+        `${withheldSdk.length} panel tool(s) withheld from the in-process server` +
+        (policy.actionAllow.length
+          ? `; ${policy.actionAllow.length} exact tool action(s) allowed`
+          : ""),
     );
   }
   // The Anthropic SDK's tool() accepts (name, description, zodRawShape, cb). The
@@ -13534,7 +13541,8 @@ export function createPanelMcpServer(
       // rejected). The cast documents that the type is being widened past what
       // TS can express here, not past what the SDK actually accepts.
       strictPanelSchema(d.schema) as unknown as typeof d.schema,
-      (args: Record<string, unknown>) => d.handler(args, ctx),
+      async (args: Record<string, unknown>) =>
+        toolActionPolicyError(d.name, args, policy) ?? (await d.handler(args, ctx)),
     ),
   ) as unknown as SdkTool[];
   const server = createSdkMcpServer({
@@ -13582,19 +13590,24 @@ export function registerPanelTools(server: McpServer, ctx: PanelToolCtx): void {
         inputSchema: strictPanelSchema(d.schema),
       },
       (async (args: Record<string, unknown>) => {
+        const policyError = toolActionPolicyError(d.name, args, policy);
+        if (policyError) return policyError as never;
         const res = await d.handler(args ?? {}, ctx);
         // ToolResult is already the MCP CallToolResult shape (content[] + isError).
         return res as never;
       }) as never,
     );
   }
-  if (withheld.length) {
+  if (withheld.length || policy.actionAllow.length) {
     // Logged for the OPERATOR, never surfaced to the model — the point is that it does
     // not learn these exist. Silence here is how a policy that withholds the whole panel
     // becomes an afternoon of "why can't it see my canvas".
     toolPolicyLogger.info(
       `[panel-tools] surface restricted by policy${policy.preset ? ` (preset "${policy.preset}")` : ""} — ` +
-        `${withheld.length} panel tool(s) withheld`,
+        `${withheld.length} panel tool(s) withheld` +
+        (policy.actionAllow.length
+          ? `; ${policy.actionAllow.length} exact tool action(s) allowed`
+          : ""),
     );
   }
 }

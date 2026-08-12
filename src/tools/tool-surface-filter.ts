@@ -245,10 +245,21 @@ export interface ToolSurfacePolicy {
   deny: string[];
   /** The preset's deny patterns, if a preset was named. */
   presetDeny: string[];
+  /**
+   * Exact `tool:action` pairs permitted when action-level restriction is active.
+   * An empty list means action-level restriction is inactive. When non-empty,
+   * every call carrying a string `action` must match one of these pairs.
+   */
+  actionAllow: ToolActionRule[];
   /** True when the operator configured anything at all. */
   active: boolean;
   /** The preset name, when one was named — for disclosure in logs. */
   preset?: string;
+}
+
+export interface ToolActionRule {
+  tool: string;
+  action: string;
 }
 
 /**
@@ -276,6 +287,35 @@ function splitList(raw: string | undefined, varName: string): string[] {
     );
   }
   return items;
+}
+
+/**
+ * Parse a fail-closed action allow list.
+ *
+ * Rules are exact `tool:action` pairs. Globs are deliberately unsupported: allowing
+ * `queue:*` would silently admit a newly-added destructive action after an upgrade,
+ * which is exactly the release-drift problem an allow list is meant to prevent.
+ */
+function splitActionAllow(raw: string | undefined): ToolActionRule[] {
+  const items = splitList(raw, "COMFYUI_MCP_TOOL_ACTION_ALLOW");
+  const rules: ToolActionRule[] = [];
+  const seen = new Set<string>();
+  for (const item of items) {
+    const match = /^([a-z_][a-z0-9_]*):([a-z_][a-z0-9_]*)$/.exec(item);
+    if (!match) {
+      throw new Error(
+        `COMFYUI_MCP_TOOL_ACTION_ALLOW contains invalid rule "${item}". ` +
+          `Expected exact tool:action pairs such as "queue:list"; wildcards and empty ` +
+          `names are not allowed. Refusing to start because ignoring a malformed rule ` +
+          `could expose an action the operator meant to withhold.`,
+      );
+    }
+    const key = `${match[1]}:${match[2]}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rules.push({ tool: match[1], action: match[2] });
+  }
+  return rules;
 }
 
 /**
@@ -310,6 +350,7 @@ export function toolMatches(name: string, pattern: string): boolean {
 export function resolveToolSurfacePolicy(env: NodeJS.ProcessEnv = process.env): ToolSurfacePolicy {
   const allow = splitList(env.COMFYUI_MCP_TOOL_ALLOW, "COMFYUI_MCP_TOOL_ALLOW");
   const denyRaw = splitList(env.COMFYUI_MCP_TOOL_DENY, "COMFYUI_MCP_TOOL_DENY");
+  const actionAllow = splitActionAllow(env.COMFYUI_MCP_TOOL_ACTION_ALLOW);
   const presetName = (env.COMFYUI_MCP_TOOL_PRESET ?? "").trim();
   if (env.COMFYUI_MCP_TOOL_PRESET !== undefined && presetName === "") {
     throw new Error(
@@ -333,8 +374,56 @@ export function resolveToolSurfacePolicy(env: NodeJS.ProcessEnv = process.env): 
     allow,
     deny: denyRaw,
     presetDeny: preset ?? [],
-    active: allow.length > 0 || denyRaw.length > 0 || preset !== undefined,
+    actionAllow,
+    active:
+      allow.length > 0 ||
+      denyRaw.length > 0 ||
+      actionAllow.length > 0 ||
+      preset !== undefined,
     ...(preset ? { preset: presetName } : {}),
+  };
+}
+
+/**
+ * Decide whether one parsed tool invocation may dispatch.
+ *
+ * The policy is absolute for calls that carry `action`: once configured, an action on
+ * ANY tool must be named. Calls without an action field are unchanged and remain governed
+ * by the tool-level surface policy. This makes a partial list fail closed: forgetting
+ * `enqueue_workflow:rerun` disables reruns instead of leaving every rerun variant open.
+ */
+export function toolActionAllowed(
+  name: string,
+  args: unknown,
+  policy: ToolSurfacePolicy,
+): boolean {
+  if (policy.actionAllow.length === 0) return true;
+  if (!args || typeof args !== "object" || Array.isArray(args)) return true;
+  const action = (args as Record<string, unknown>).action;
+  if (typeof action !== "string") return true;
+  return policy.actionAllow.some((rule) => rule.tool === name && rule.action === action);
+}
+
+export function toolActionPolicyError(
+  name: string,
+  args: unknown,
+  policy: ToolSurfacePolicy,
+): { content: Array<{ type: "text"; text: string }>; isError: true } | undefined {
+  if (toolActionAllowed(name, args, policy)) return undefined;
+  const action =
+    args && typeof args === "object"
+      ? String((args as Record<string, unknown>).action)
+      : "unknown";
+  return {
+    content: [
+      {
+        type: "text",
+        text:
+          `Action "${name}:${action}" is withheld by ` +
+          "COMFYUI_MCP_TOOL_ACTION_ALLOW.",
+      },
+    ],
+    isError: true,
   };
 }
 
@@ -412,6 +501,15 @@ export function withToolSurfaceFilter<T extends object>(
       // Registration is skipped entirely. The SDK's `tool()` returns a handle some
       // callers chain on, so hand back something inert rather than undefined.
       return { name, disabled: true } as unknown;
+    }
+    const handler = args[args.length - 1];
+    if (name && typeof handler === "function" && policy.actionAllow.length > 0) {
+      const wrapped = async (...handlerArgs: unknown[]) => {
+        const policyError = toolActionPolicyError(name, handlerArgs[0], policy);
+        if (policyError) return policyError;
+        return await (handler as (...handlerArgs: unknown[]) => unknown)(...handlerArgs);
+      };
+      return orig(...args.slice(0, -1), wrapped);
     }
     return orig(...args);
   };

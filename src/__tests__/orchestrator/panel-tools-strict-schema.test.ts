@@ -146,3 +146,42 @@ describe("panel-tools #754: strict schemas reject unknown argument keys", () => 
     expect(createBlock).toMatch(/strictPanelSchema\(d\.schema\)/);
   });
 });
+
+describe("panel-tools: action policy survives real MCP dispatch", () => {
+  let client: Client;
+  let server: McpServer;
+  const previous = process.env.COMFYUI_MCP_TOOL_ACTION_ALLOW;
+
+  beforeAll(async () => {
+    process.env.COMFYUI_MCP_TOOL_ACTION_ALLOW = "panel_canvas:fit";
+    server = new McpServer({ name: "panel-action-policy-test", version: "1.0.0" });
+    registerPanelTools(server, makeFakeCtx());
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    client = new Client({ name: "panel-action-policy-test-client", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  });
+
+  afterAll(async () => {
+    await client.close();
+    await server.close();
+    if (previous === undefined) delete process.env.COMFYUI_MCP_TOOL_ACTION_ALLOW;
+    else process.env.COMFYUI_MCP_TOOL_ACTION_ALLOW = previous;
+  });
+
+  it("allows an exact pair and rejects another valid action before the handler", async () => {
+    const allowed = await client.callTool({
+      name: "panel_canvas",
+      arguments: { action: "fit" },
+    });
+    expect(allowed.isError).not.toBe(true);
+
+    const denied = await client.callTool({
+      name: "panel_canvas",
+      arguments: { action: "zoom", scale: 1.5 },
+    });
+    expect(denied.isError).toBe(true);
+    expect((denied.content as Array<{ text?: string }>)[0]?.text).toContain(
+      "panel_canvas:zoom",
+    );
+  });
+});
