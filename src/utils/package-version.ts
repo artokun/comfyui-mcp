@@ -1,7 +1,14 @@
 import { readFileSync } from "node:fs";
 
-/** The version reported when our own manifest cannot be read or parsed. */
-export const UNKNOWN_VERSION = "0.0.0";
+/**
+ * The version reported when our own manifest cannot be read or parsed.
+ *
+ * `0.0.0` was used first and codex was right to reject it: it is a legal SemVer that a real
+ * manifest could carry, so the fallback was indistinguishable from a genuine value — the
+ * same ambiguity the hardcoded "0.1.0" created. A prerelease tag cannot collide with a
+ * published release of this package and still parses as SemVer for any client that tries.
+ */
+export const UNKNOWN_VERSION = "0.0.0-unknown";
 
 /**
  * #1447 — the version this build actually is, for `serverInfo.version`.
@@ -36,8 +43,8 @@ export function readPackageVersion(
     return typeof version === "string" && version ? version : UNKNOWN_VERSION;
   } catch {
     // Deliberately NOT a plausible-looking version. The literal this replaced was "0.1.0",
-    // which read as data and made every bug report ambiguous; an impossible version is a
-    // signal that something is wrong.
+    // which read as data and made every bug report ambiguous; a sentinel no release of this
+    // package can carry is a signal that something is wrong.
     return UNKNOWN_VERSION;
   }
 }

@@ -40,8 +40,10 @@ describe("readPackageVersion resolves the REAL version (#1447)", () => {
     );
   });
 
-  it("an unreadable, malformed, or version-less manifest yields an IMPOSSIBLE version", () => {
-    // Not a plausible one. The literal this replaced was "0.1.0", which read as data.
+  it("an unreadable, malformed, or version-less manifest yields a NON-COLLIDING sentinel", () => {
+    // Not a plausible one. The literal this replaced was "0.1.0", which read as data —
+    // and plain "0.0.0" was rejected in review for the same reason: it is a legal SemVer a
+    // real manifest could carry, so it could not be told apart from a genuine value.
     const boom = (): string => {
       throw new Error("ENOENT");
     };
@@ -55,7 +57,11 @@ describe("readPackageVersion resolves the REAL version (#1447)", () => {
     expect(
       readPackageVersion(new URL("file:///x/package.json"), fakeManifest('{"version":""}')),
     ).toBe(UNKNOWN_VERSION);
-    expect(UNKNOWN_VERSION).toBe("0.0.0");
+    expect(UNKNOWN_VERSION).toBe("0.0.0-unknown");
+    // A real manifest reading 0.0.0 must NOT be mistaken for the failure sentinel.
+    expect(
+      readPackageVersion(new URL("file:///x/package.json"), () => '{"version":"0.0.0"}'),
+    ).toBe("0.0.0");
   });
 });
 
