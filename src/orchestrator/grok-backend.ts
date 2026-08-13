@@ -417,13 +417,14 @@ interface AcpInitializeResult {
 // Grok's reasoning control is not exposed as a discrete effort scale here, so we do
 // NOT advertise supportsEffort/supportedEffortLevels: the panel's normalizeModels
 // then hides the effort dropdown (omission is the documented "no effort control"
-// signal). grok-4.5 is the current CLI default.
+// signal). grok-4.6 is the current CLI default.
 const GROK_MODELS: ModelChoice[] = [
+  { id: "grok-4.6", label: "Grok 4.6" },
   { id: "grok-4.5", label: "Grok 4.5" },
   { id: "grok-composer-2.5-fast", label: "Grok Composer 2.5 Fast" },
   { id: "grok-build", label: "Grok Build" },
 ];
-const GROK_DEFAULT_MODEL = "grok-4.5";
+const GROK_DEFAULT_MODEL = "grok-4.6";
 
 /** Does this id look like a Grok model (vs. the Claude panel model PanelAgent
  *  unconditionally passes as opts.model)? Used so the configured Grok model

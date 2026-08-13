@@ -178,13 +178,14 @@ vi.mock("node:child_process", async (importOriginal) => {
 
 let GrokBackend: typeof import("../../orchestrator/grok-backend.js").GrokBackend;
 let buildAcpMcpServers: typeof import("../../orchestrator/grok-backend.js").buildAcpMcpServers;
+let GROK_DEFAULT_MODEL: typeof import("../../orchestrator/grok-backend.js").GROK_DEFAULT_MODEL;
 
 beforeEach(async () => {
   hoisted.procs.length = 0;
   hoisted.spawnArgs.length = 0;
   hoisted.received.length = 0;
   hoisted.config.mode = "complete";
-  ({ GrokBackend, buildAcpMcpServers } = await import("../../orchestrator/grok-backend.js"));
+  ({ GrokBackend, buildAcpMcpServers, GROK_DEFAULT_MODEL } = await import("../../orchestrator/grok-backend.js"));
 });
 
 describe("buildAcpMcpServers", () => {
@@ -355,7 +356,8 @@ describe("GrokBackend (ACP over stdio)", () => {
   it("listModels returns the static Grok catalog (no effort metadata)", async () => {
     const backend = new GrokBackend();
     const models = await backend.listModels();
-    expect(models.map((m) => m.id)).toEqual(["grok-4.5", "grok-composer-2.5-fast", "grok-build"]);
+    expect(models.map((m) => m.id)).toEqual(["grok-4.6", "grok-4.5", "grok-composer-2.5-fast", "grok-build"]);
+    expect(GROK_DEFAULT_MODEL).toBe("grok-4.6");
     // Grok has no discrete effort scale → no effort metadata (panel hides picker).
     expect(models.every((m) => m.supportsEffort === undefined && m.supportedEffortLevels === undefined)).toBe(true);
   });
