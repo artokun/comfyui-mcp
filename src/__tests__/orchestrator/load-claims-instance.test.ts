@@ -100,10 +100,17 @@ describe("a load discloses the fence it just invalidated (#1478)", () => {
 
     expect(out.isError).toBe(false);
     expect(out.text).toMatch(/loaded/i);
-    expect(out.text).toMatch(/instance fence now names the OLD one/);
+    expect(out.text).toMatch(/CAN re-mint the canvas workflow instance/);
     expect(out.text).toMatch(/panel_set_workflow_target/);
     // The specific misdirection this replaces: the downstream refusal blames a tab switch.
-    expect(out.text).toMatch(/not by the user switching tabs/);
+    expect(out.text).toMatch(/NOT the user switching tabs/);
+    // CONDITIONAL, never categorical. Four review rounds falsified every version that
+    // asserted the fence IS stale: a UI load preserves the instance outright, and a second
+    // API load into the same already-active workflow reuses the object so its uuid does
+    // not change either. The reply cannot tell those apart, so the note must not pretend to.
+    expect(out.text).toMatch(/If your next graph command is refused/);
+    expect(out.text).toMatch(/If the next command is not refused, nothing needs doing/);
+    expect(out.text).not.toMatch(/will be refused/);
   });
 
   it("does NOT adopt whatever is active — the P0 an auto-rebind would have created", async () => {
@@ -132,7 +139,7 @@ describe("a load discloses the fence it just invalidated (#1478)", () => {
     // unmeasured-claim defect this note exists to remove.
     const out = await load({ loaded: false, error: "nothing was applied" });
 
-    expect(out.text).not.toMatch(/instance fence now names the OLD one/);
+    expect(out.text).not.toMatch(/CAN re-mint the canvas workflow instance/);
     expect(out.text).not.toMatch(/panel_set_workflow_target/);
   });
 
@@ -147,7 +154,7 @@ describe("a load discloses the fence it just invalidated (#1478)", () => {
     const out = await load({ loaded: true, node_count: 12 });
 
     expect(out.text).toMatch(/loaded/i);
-    expect(out.text).not.toMatch(/instance fence now names the OLD one/);
+    expect(out.text).not.toMatch(/CAN re-mint the canvas workflow instance/);
     expect(out.text).not.toMatch(/panel_set_workflow_target/);
   });
 });

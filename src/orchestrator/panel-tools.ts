@@ -3892,47 +3892,48 @@ WHY THIS READ WAS NEEDED AT ALL: this session's panel is ${v.version}, and a ` +
 const FENCE_CORROBORATION_RECHECK_STEPS_MS = [400, 900, 1600] as const;
 
 /**
- * #1478 — A LOAD INVALIDATES ITS OWN FENCE, AND MUST SAY SO.
+ * #1478 — NAME THE CAUSE OF A MISMATCH THE LOAD MAY HAVE CREATED.
  *
- * `graph_load` replaces the graph, which mints a NEW canvas instance id — so the session's
- * fence is stale the instant the load succeeds, and the very next `panel_graph_outline`
- * fails with `workflow instance mismatch`. Worse, that refusal reports "NO PANEL COMMAND
- * CLAIMED IT", which points the reader at "the user switched tabs" when a panel command
- * one call earlier is what actually moved it.
+ * An API-format `graph_load` can re-mint the canvas workflow instance, which leaves this
+ * session's fence naming the old one — so the very next `panel_graph_outline` is refused
+ * with `workflow instance mismatch`. The reporter hit that twice, deterministically. The
+ * refusal then says "NO PANEL COMMAND CLAIMED IT", pointing at "the user switched tabs"
+ * when a panel command one call earlier is the actual cause.
  *
- * WHY THIS DOES NOT AUTO-REPAIR THE FENCE, having tried to (codex P1). The obvious fix is
- * to run the same re-derivation the documented recovery runs. It is not safe here: that
- * call adopts WHATEVER IS ACTIVE NOW, and it has no tie to the load. If the user switches
- * to canvas B in the window between the load's ack and the follow-up read, a perfectly
- * coherent reply for B passes corroboration, the session gets stamped to B, and the next
- * edit lands on B though the load modified A. That is a wrong-graph write — the exact
- * thing the fence exists to prevent — traded for a saved round trip.
+ * WHAT THIS DELIBERATELY DOES NOT DO — and four review rounds are the reason:
  *
- * `panel_set_workflow_target({mode:"current"})` runs that same adoption, and it is sound
- * THERE precisely because it is explicit: the user asked to follow whatever is live.
- * Doing it implicitly on their behalf is a different act.
+ *  1. It does NOT auto-repair the fence. The obvious fix runs the same re-derivation the
+ *     documented recovery runs, and that adopts WHATEVER IS ACTIVE NOW with no tie to the
+ *     load: a user switching canvases in the window would stamp the session to a different
+ *     workflow and the next edit would land on the wrong graph. `panel_set_workflow_target`
+ *     is sound doing this only because the user explicitly asked to follow what is live.
+ *  2. It does NOT claim the fence IS stale. Every categorical version of that sentence was
+ *     falsified: a UI-format load with an active workflow passes `__cmcpKeepInstance: true`
+ *     and preserves the instance outright; and a second API load into the same
+ *     already-active `graph_load.json` workflow reuses that object, so its uuid — which is
+ *     object-keyed — does not change either. The reply carries nothing that separates
+ *     "re-minted" from "reused", so asserting staleness is a guess dressed as a fact.
  *
- * The honest repair is panel-side: give `graph_load`'s reply a `workflow_uuid`, as #762/#800
- * did for `workflow_new` / `workflow_save`, and the load can then claim the identity IT
- * created rather than whatever happens to be active — refused-proof and race-proof, which
- * is why those two do it that way. Until then this states the fact plainly at the moment it
- * becomes true, so the caller acts on an accurate sentence instead of decoding a mismatch
- * one call later.
+ * So it states the CONDITIONAL, which is true on every path: this kind of load can move
+ * the instance, here is the symptom, here is the cause, here is the one call that clears
+ * it. A reader who is not refused ignores it; a reader who is refused stops hunting a tab
+ * switch that never happened.
  *
- * Deliberately NO round trip: an earlier version called the re-derivation and, on a panel
- * that cannot corroborate, spent up to four 6-second probes plus recheck sleeps to arrive
- * at an answer it must not use anyway.
+ * The categorical version needs the panel's help: give `graph_load`'s reply a
+ * `workflow_uuid`, as #762/#800 did for `workflow_new` / `workflow_save`, and the load can
+ * then compare it against the fence and say exactly what happened — or claim the identity
+ * it created outright, which is race-proof and refusal-proof and is why those two work
+ * that way.
  */
 function noteStaleFenceAfterLoad(): string {
   return (
     `
 
-NOTE: loading REPLACED the canvas graph, which mints a new workflow instance, so ` +
-    `this session's instance fence now names the OLD one and the next graph command will be ` +
-    `refused with "workflow instance mismatch". This is expected and is caused by the load ` +
-    `you just ran — not by the user switching tabs. Clear it with ` +
-    `panel_set_workflow_target({mode:"current"}), which re-derives the fence from the live ` +
-    `canvas, then continue.`
+NOTE: an API-format load CAN re-mint the canvas workflow instance. If your next ` +
+    `graph command is refused with "workflow instance mismatch", that is why — the cause is ` +
+    `this load, NOT the user switching tabs (the refusal's own text suggests otherwise). ` +
+    `Clear it with panel_set_workflow_target({mode:"current"}), which re-derives the fence ` +
+    `from the live canvas, then retry. If the next command is not refused, nothing needs doing.`
   );
 }
 
