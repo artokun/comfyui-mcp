@@ -918,6 +918,94 @@ function isNoTrustedIdentityRefusal(err: unknown): boolean {
   return /no trusted identity/i.test(msg);
 }
 
+/**
+ * #1480 — the panel's GRAPH-BINDING guard refused: the live canvas carries a different
+ * workflow's identity tag than the active workflow (`graphBindingRefusalMessage`'s
+ * `root-workflow-uuid-mismatch` verdict).
+ *
+ * A THIRD distinct refusal, and the trio is easy to conflate. The two above are the
+ * bridge's per-command STAMP fence (`workflow instance mismatch`) and the bridge having
+ * NO identity to stamp with (`no trusted identity`); this one is the panel comparing the
+ * tag on the mounted LiteGraph root against the active workflow's identity and finding
+ * two tags that disagree. It is raised by the panel, before every executor, so its
+ * "was NOT applied" claim is structural — the same property that makes the two above
+ * safe to annotate.
+ *
+ * Matched on the bracketed leading token the panel emits for exactly this purpose
+ * (`[root-workflow-uuid-mismatch] …`), not on the prose after it.
+ */
+function isRootWorkflowUuidMismatch(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  return /\[root-workflow-uuid-mismatch\]/i.test(msg);
+}
+
+/**
+ * #1480 — WHICH `panel_open_workflow` SELECTOR EXISTS FOR THE ACTIVE TAB.
+ *
+ * The mismatch refusal's remedy is `panel_open_workflow(<path>)`, and for a NEVER-SAVED
+ * tab there is no path to pass: `workflow_list` reports `path: null` and `filename: null`
+ * for it by contract, because native ComfyUI reuses the "Unsaved Workflow" title across
+ * unsaved tabs (#186). The reporter followed the remedy with the tab's TITLE, got "no
+ * workflow matching", and every other documented exit was blocked too — reload refuses on
+ * unsaved changes, save refuses under this very guard (#708) — so the session dead-ended
+ * with the canvas readable and unedittable.
+ *
+ * The exit was there the whole time and nothing named it: the per-instance ROUTING KEY
+ * (`tmp:<uuid>`) is a valid `workflow_open` selector — for an unsaved tab it is the ONLY
+ * one it has (`workflowRecordMatchesSelector`) — and `workflow_list` already publishes it
+ * as `routing_key` on every record. So this reads the ONE fact that decides which remedy
+ * is followable, and the caller names that one instead of the generic `<path>`.
+ *
+ * Read-only, and `workflow_list` is exempt from the fence being reported on, so this can
+ * run on the refusal path without being refused by it. Anything unreadable answers
+ * "unknown" and the caller says so rather than picking a selector it cannot support.
+ */
+interface ActiveTabRebindSelector {
+  status: "unsaved" | "saved" | "unknown";
+  /** The selector to pass to `panel_open_workflow`, when one is established. */
+  selector: string | null;
+  /** Display label, for a message that has to refer to the tab a human is looking at. */
+  title: string | null;
+  /** Why the answer is "unknown" — never a guess dressed as a reason. */
+  why: string;
+}
+
+async function readActiveTabRebindSelector(ctx: PanelToolCtx): Promise<ActiveTabRebindSelector> {
+  const unknown = (why: string): ActiveTabRebindSelector => ({
+    status: "unknown",
+    selector: null,
+    title: null,
+    why,
+  });
+  let parsed: Record<string, unknown> | null = null;
+  try {
+    const res = await ctx.call({ cmd: "workflow_list" }, 6000);
+    if (res?.isError) return unknown(`the workflow list read failed (${toolResultText(res)})`);
+    parsed = parseToolResultJson(res);
+  } catch (err) {
+    return unknown(
+      `the workflow list read threw (${err instanceof Error ? err.message : String(err)})`,
+    );
+  }
+  const active = parsed?.active;
+  if (!active || typeof active !== "object") {
+    return unknown("the workflow list reported no active workflow");
+  }
+  const rec = active as Record<string, unknown>;
+  const str = (v: unknown): string | null => (typeof v === "string" && v ? v : null);
+  const title = str(rec.title);
+  const path = str(rec.path);
+  const routingKey = str(rec.routing_key) ?? str(rec.key);
+  // SAVED is decided by the presence of a real path, the same fact the panel keys
+  // `persisted` on — never by the routing key's spelling, which is panel-owned and
+  // would silently reclassify every tab if its prefix ever changed.
+  if (path) return { status: "saved", selector: path, title, why: "" };
+  if (!routingKey) {
+    return unknown("the active tab reported neither a path nor a routing key");
+  }
+  return { status: "unsaved", selector: routingKey, title, why: "" };
+}
+
 let retrySettleMsOverride: number | null = null;
 /** Short pause before the single post-drop retry, letting the replacement tab
  *  finish its reconnect hello so ensureReachable can resolve it. Test-overridable. */
@@ -6396,6 +6484,57 @@ export function makePanelToolCtx(
             `stands on its own terms. (${rebindErr instanceof Error ? rebindErr.message : String(rebindErr)})`;
         }
         return fail(`${name} was NOT applied — nothing changed. ${raw}${verdict}`);
+      }
+      // #1480 — NAME A REMEDY THE TAB CAN ACTUALLY ACCEPT.
+      //
+      // The panel's own remedy for this verdict is `panel_open_workflow(<path>)`, which
+      // is right for a saved tab and unfollowable for a never-saved one: that tab has no
+      // path, and its title is not a selector. The reporter tried the title, was told
+      // "no workflow matching", and found every other exit closed as well — reload
+      // refuses while unsaved, save refuses under this same guard (#708). Canvas
+      // readable, canvas unedittable, and the only way out was a human pressing Ctrl+S.
+      //
+      // Nothing here is auto-applied and the guard is NOT weakened. One read-only
+      // `workflow_list` (exempt from this fence) establishes the single fact that decides
+      // which remedy is reachable, and the refusal then names THAT one. Applied to reads
+      // as well as mutations on purpose: `panel_graph_outline` refusing was half of the
+      // reported dead end, and this verdict is raised before every executor, so the
+      // "NOT applied" claim it rides on is equally true either way.
+      if (isRootWorkflowUuidMismatch(err)) {
+        const raw = err instanceof Error ? err.message : String(err);
+        try {
+          const tab = await readActiveTabRebindSelector(ctx);
+          if (tab.status === "unsaved" && tab.selector) {
+            return fail(
+              `${raw}\n\nCHECKED, so this is not a guess: the active tab has NEVER BEEN SAVED ` +
+                `(the workflow list reports path: null, filename: null${
+                  tab.title ? `, title: ${JSON.stringify(tab.title)}` : ""
+                }). The remedy above names a <path> that DOES NOT EXIST for this tab, and its ` +
+                `title is not a selector — passing either fails with "no workflow matching". ` +
+                `USE ITS ROUTING KEY, which is the only selector an unsaved tab has and needs ` +
+                `no file on disk: panel_open_workflow({path: ${JSON.stringify(tab.selector)}}). ` +
+                `Do NOT reach for panel_save_workflow first — under this same guard it refuses ` +
+                `too (#708) — and do NOT reload while the tab is unsaved. If re-opening by ` +
+                `routing key still refuses, the two identities genuinely disagree and the user ` +
+                `has to save or reload the tab by hand.`,
+            );
+          }
+          if (tab.status === "saved" && tab.selector) {
+            return fail(
+              `${raw}\n\nCHECKED: the active tab IS saved, so the remedy above is reachable as ` +
+                `written — panel_open_workflow({path: ${JSON.stringify(tab.selector)}}).`,
+            );
+          }
+          return fail(
+            `${raw}\n\nCHECKED, and the answer is UNKNOWN: which panel_open_workflow selector ` +
+              `this tab accepts could not be established (${tab.why}). If it turns out to have ` +
+              `never been saved, <path> will not name it — read panel_list_workflows and pass ` +
+              `the active record's routing_key instead.`,
+          );
+        } catch {
+          // The diagnosis must never change how the call failed.
+          return fail(raw);
+        }
       }
       if (isCapabilityRefusal(err)) {
         return fail(err instanceof Error ? err.message : String(err));
