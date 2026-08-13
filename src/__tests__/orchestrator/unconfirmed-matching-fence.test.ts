@@ -40,7 +40,12 @@ let sent: string[] = [];
  * UNCONFIRMED, so nothing may be adopted. `activeUuid` decides whether that record names the
  * fence this session already holds. `graphReadOk` decides whether the settling probe passes.
  */
-function bridge(opts: { activeUuid: string; graphReadOk: boolean }) {
+function bridge(opts: {
+  activeUuid: string;
+  /** "ok" passes; "mismatch" is a real fence refusal; "timeout" is an inconclusive failure. */
+  graphRead: "ok" | "mismatch" | "timeout";
+  canMutate?: boolean;
+}) {
   return {
     send: async (cmd: Record<string, unknown>) => {
       sent.push(String(cmd.cmd));
@@ -61,7 +66,17 @@ function bridge(opts: { activeUuid: string; graphReadOk: boolean }) {
         };
       }
       if (cmd.cmd === "graph_query") {
-        if (!opts.graphReadOk) throw new Error("workflow instance mismatch: refused");
+        if (opts.graphRead === "mismatch") {
+          throw new Error(
+            "workflow instance mismatch: this command was issued for workflow instance X, " +
+              "and the active canvas reports Y. Nothing was applied.",
+          );
+        }
+        if (opts.graphRead === "timeout") {
+          // NOT a fence verdict: the tab was backgrounded and never answered. ctx.call turns
+          // this into an error result too, which is exactly the conflation being guarded.
+          throw new Error("timed out after 8000ms waiting for the panel to answer graph_query");
+        }
         return { ids: [1] };
       }
       return { ok: true };
@@ -73,12 +88,20 @@ function bridge(opts: { activeUuid: string; graphReadOk: boolean }) {
     resolveActiveTabId: () => TAB,
     refreshWorkflowUuid: () => true,
     workflowUuidFor: () => ({ known: true, uuid: SAME_UUID }),
-    tabCanMutateGraph: () => true,
-    tabGraphMutationCapability: () => ({ known: true, canMutate: true }),
+    tabCanMutateGraph: () => opts.canMutate !== false,
+    tabGraphMutationCapability: () => ({
+      known: true,
+      canMutate: opts.canMutate !== false,
+      ...(opts.canMutate === false ? { because: "capability" as const } : {}),
+    }),
   } as unknown as PanelToolCtx["bridge"];
 }
 
-async function setTargetCurrent(opts: { activeUuid: string; graphReadOk: boolean }) {
+async function setTargetCurrent(opts: {
+  activeUuid: string;
+  graphRead: "ok" | "mismatch" | "timeout";
+  canMutate?: boolean;
+}) {
   const ctx = makePanelToolCtx(bridge(opts), TAB, new WorkflowTargetStore());
   const def = buildPanelToolDefs().find((d) => d.name === "panel_set_workflow_target");
   if (!def) throw new Error("panel_set_workflow_target is not registered");
@@ -92,7 +115,7 @@ beforeEach(() => {
 
 describe("an UNCONFIRMED record whose uuid matches the fence gets its answer up front (#1473)", () => {
   it("probes a graph read and reports what it found", async () => {
-    const out = await setTargetCurrent({ activeUuid: SAME_UUID, graphReadOk: true });
+    const out = await setTargetCurrent({ activeUuid: SAME_UUID, graphRead: "ok" });
 
     // The probe really ran — without this the assertions could pass on a branch that
     // simply stopped failing, which would be a claim rather than a measurement.
@@ -105,6 +128,7 @@ describe("an UNCONFIRMED record whose uuid matches the fence gets its answer up 
     expect(out.isError).toBe(true);
     expect(out.text).toMatch(/CHECKED FOR YOU/);
     expect(out.text).toMatch(/it SUCCEEDED/);
+    expect(out.text).toMatch(/READS work against it/);
     expect(out.text).toMatch(/reconciliation race/);
     expect(out.text).toMatch(/No recovery step is needed/);
     // And it does not overclaim: the rebind itself is still reported as not having happened.
@@ -114,23 +138,51 @@ describe("an UNCONFIRMED record whose uuid matches the fence gets its answer up 
   it("keeps the failure when the graph read is REFUSED", async () => {
     // Then the reply really was stale and graph tools really are wedged — today's verdict
     // is correct and stays, remedy and all.
-    const out = await setTargetCurrent({ activeUuid: SAME_UUID, graphReadOk: false });
+    const out = await setTargetCurrent({ activeUuid: SAME_UUID, graphRead: "mismatch" });
 
     expect(sent).toContain("graph_query");
     expect(out.isError).toBe(true);
     expect(out.text).toMatch(/did NOT restore/);
     // The probe's answer is reported either way — a refused read CONFIRMS the wedge, which
     // is worth saying rather than leaving the caller to re-derive it.
-    expect(out.text).toMatch(/it was REFUSED/);
+    expect(out.text).toMatch(/REFUSED by the instance fence/);
   });
 
   it("does NOT probe when the reported identity differs from the fence", async () => {
     // The other path is a genuine certain failure: the session is fenced to a different
     // instance and graph tools will keep failing. Probing there would spend a round trip to
     // learn something already known, and a passing read would not make the fence right.
-    const out = await setTargetCurrent({ activeUuid: OTHER_UUID, graphReadOk: true });
+    const out = await setTargetCurrent({ activeUuid: OTHER_UUID, graphRead: "ok" });
 
     expect(sent).not.toContain("graph_query");
     expect(out.isError).toBe(true);
+  });
+
+  it("an INCONCLUSIVE probe claims nothing in either direction (codex P1)", async () => {
+    // `ctx.call` turns a transport failure into an error result too, so reading every error
+    // as "refused" would invent a wedge out of a backgrounded tab — and would contradict
+    // this block's own rule that an unknown answer says nothing.
+    const out = await setTargetCurrent({ activeUuid: SAME_UUID, graphRead: "timeout" });
+
+    expect(sent).toContain("graph_query");
+    expect(out.isError).toBe(true);
+    expect(out.text).not.toMatch(/CHECKED FOR YOU/);
+    expect(out.text).not.toMatch(/REFUSED by the instance fence/);
+    expect(out.text).not.toMatch(/it SUCCEEDED/);
+  });
+
+  it("a passing READ does not promise MUTATIONS work (codex P1)", async () => {
+    // The write fence is a separate capability: a panel can serve reads while refusing every
+    // mutation. Saying "no recovery step is needed" there would send someone to edit a graph
+    // that will refuse them.
+    const out = await setTargetCurrent({
+      activeUuid: SAME_UUID,
+      graphRead: "ok",
+      canMutate: false,
+    });
+
+    expect(out.text).toMatch(/READS work against it/);
+    expect(out.text).toMatch(/MUTATIONS are a separate matter/);
+    expect(out.text).not.toMatch(/No recovery step is needed/);
   });
 });

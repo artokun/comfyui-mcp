@@ -10821,33 +10821,58 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         // issue rather than decided here.
         let settledNote = "";
         if (fence && fence.binding === "not_recovered" && fence.settleByRead) {
-          let probeOk: boolean | undefined;
+          // WHAT THE PROBE PROVES, AND ONLY THAT (codex).
+          //
+          // Two ways to overclaim here, and the first version did both:
+          //
+          //  • EVERY error read as "refused". `ctx.call` turns a transport failure into an
+          //    error result too, so a `graph_query` that merely TIMED OUT on a backgrounded
+          //    tab would have been reported as a confirmed fence refusal — inventing a wedge
+          //    out of a slow tab, and contradicting this block's own "unknown says nothing"
+          //    rule. Only an actual instance-mismatch refusal proves the fence rejected it.
+          //  • A passing READ read as "graph tools work". The write fence is a SEPARATE
+          //    capability: a panel can serve reads while refusing every mutation, and the
+          //    capability probe above already knows. So the claim is scoped to reads, and the
+          //    known-negative write case is stated rather than papered over.
+          let probeRefused: boolean | undefined;
+          let probeOk = false;
           try {
             // The cheapest fenced read there is: ids only, one row. It is refused by the
             // same instance fence every graph command carries, which is exactly the
             // question — a full outline would answer it no better and would cost the caller
             // a page of graph on a recovery path.
             const probe = await ctx.call({ cmd: "graph_query", fields: "ids", limit: 1 }, 8000);
-            probeOk = !probe.isError;
-          } catch {
-            probeOk = undefined; // a probe that throws settles nothing, and says nothing
+            if (!probe.isError) probeOk = true;
+            else probeRefused = isWorkflowInstanceMismatch(toolResultText(probe));
+          } catch (err) {
+            probeRefused = isWorkflowInstanceMismatch(err);
           }
-          settledNote =
-            probeOk === true
-              ? `
+          if (probeOk) {
+            settledNote =
+              `
 
-CHECKED FOR YOU: the graph read this message prescribes was just run, and ` +
-                `it SUCCEEDED — so graph tools do work against the fence this session already ` +
-                `holds. This was a reconciliation race after the reconnect, not a broken ` +
-                `binding. No recovery step is needed; carry on. (The rebind itself still did ` +
-                `not happen, which is why this is reported as a failure.)`
-              : probeOk === false
-                ? `
+CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
+              `SUCCEEDED — so this fence does NOT reject graph commands, and READS work against ` +
+              `it right now. This was a reconciliation race after the reconnect, not a broken ` +
+              `binding.` +
+              (canMutateNow === false
+                ? ` MUTATIONS are a separate matter and remain refused on this tab — that is the ` +
+                  `write-fence capability above, not the binding, and re-running this will not ` +
+                  `change it.`
+                : ` No recovery step is needed for the binding; carry on.`) +
+              ` (The rebind itself still did not happen, which is why this is reported as a ` +
+              `failure.)`;
+          } else if (probeRefused === true) {
+            settledNote =
+              `
 
-CHECKED FOR YOU: the graph read this message prescribes was just run, and ` +
-                  `it was REFUSED — so the reply was stale after all and graph tools really are ` +
-                  `wedged. The remedy above applies.`
-                : "";
+CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
+              `was REFUSED by the instance fence — so the reply was stale after all and graph ` +
+              `commands really are being rejected. The remedy above applies.`;
+          }
+          // Anything else — a timeout, a dropped tab, an error that is not a fence refusal —
+          // settles NOTHING and says nothing. An inconclusive probe must not become evidence
+          // in either direction.
         }
         if (fence && fence.binding === "not_recovered") {
           return fail(
