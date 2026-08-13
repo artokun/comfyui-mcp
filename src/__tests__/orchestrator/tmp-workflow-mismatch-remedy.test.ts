@@ -161,6 +161,36 @@ describe("root-workflow-uuid-mismatch names a remedy the tab can accept (#1480)"
     expect(text).not.toContain("tmp:");
   });
 
+  it("a message that merely QUOTES the token is not this refusal (codex)", async () => {
+    // The classifier is anchored, so it keys on the panel's real shape — its executor
+    // error text becomes the Error message verbatim, no prefix — instead of on any
+    // message that happens to contain the token. Unanchored, a wrapped or re-surfaced
+    // refusal would burn a workflow_list round trip and be told to re-open a workflow.
+    const ctx = makePanelToolCtx(
+      {
+        ...bridge(UNSAVED_LIST),
+        send: async (cmd: Record<string, unknown>) => {
+          if (cmd.cmd === "workflow_list") {
+            listCalls += 1;
+            return UNSAVED_LIST;
+          }
+          throw new Error(`Validation failed: "[root-workflow-uuid-mismatch]" is reserved`);
+        },
+      } as unknown as PanelToolCtx["bridge"],
+      TAB,
+      new WorkflowTargetStore(),
+    );
+    const def = buildPanelToolDefs().find((d) => d.name === "panel_connect");
+    if (!def) throw new Error("panel_connect is not registered");
+    const res: ToolResult = await def.handler({ from_node_id: 1, to_node_id: 2 } as never, ctx);
+    const text = res.content.map((c) => (c as { text?: string }).text ?? "").join(" ");
+
+    // The probe never ran, which is the whole point: no round trip, no remedy invented.
+    expect(listCalls).toBe(0);
+    expect(text).not.toMatch(/NEVER BEEN SAVED/);
+    expect(text).not.toContain(ROUTING_KEY);
+  });
+
   it("UNREADABLE: promises nothing, because nothing was established", async () => {
     // The failure direction that matters. Naming a selector we could not establish would
     // send the agent to "no workflow matching" — the exact turn #1480 wasted.

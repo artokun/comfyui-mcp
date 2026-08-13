@@ -931,12 +931,17 @@ function isNoTrustedIdentityRefusal(err: unknown): boolean {
  * "was NOT applied" claim is structural — the same property that makes the two above
  * safe to annotate.
  *
- * Matched on the bracketed leading token the panel emits for exactly this purpose
- * (`[root-workflow-uuid-mismatch] …`), not on the prose after it.
+ * Matched on the bracketed token the panel emits for exactly this purpose
+ * (`[root-workflow-uuid-mismatch] …`), not on the prose after it, and ANCHORED to the
+ * start (codex): a bare `contains` also fires on any message that merely QUOTES the
+ * token — a wrapped or re-surfaced refusal, an error about the token as a value — and
+ * would then spend a round trip telling that caller to re-open a workflow. The anchor is
+ * the panel's real shape, not a hopeful one: a panel executor's error text becomes this
+ * Error's message verbatim, with no prefix (ui-bridge's reply-error reject).
  */
 function isRootWorkflowUuidMismatch(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err ?? "");
-  return /\[root-workflow-uuid-mismatch\]/i.test(msg);
+  return /^\s*\[root-workflow-uuid-mismatch\]/i.test(msg);
 }
 
 /**
