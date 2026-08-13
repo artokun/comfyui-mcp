@@ -274,7 +274,9 @@ export function registerImageManagementTools(server: McpServer): void {
         .describe(
           'action:"get" — ceiling on the inline preview\'s longest side in pixels ' +
             "(default 4096). Applies even when the byte budget is satisfied, since some " +
-            "consumers reject by dimension. Does not affect the saved file.",
+            "consumers reject by dimension — but only for an image this server can decode; " +
+            "an undecodable one under the byte budget is passed through as-is. Does not " +
+            "affect the saved file.",
         ),
       path: z
         .string()
@@ -474,6 +476,11 @@ export function registerImageManagementTools(server: McpServer): void {
             // payload that will fail in transport — where the error names a byte count and
             // not the image, which is how the reporter ended up debugging their own
             // workflow instead of this tool.
+            // The disk claim is conditional on the save actually having happened (codex).
+            // Telling someone their full-resolution file is "on disk — open it directly"
+            // after an EACCES save is the same class of defect as the inline failure this
+            // whole change is about: a confident sentence about something nobody checked.
+            const savedOnDisk = !saveError && savePath;
             if (bounded.refused) {
               return {
                 content: [
@@ -481,9 +488,14 @@ export function registerImageManagementTools(server: McpServer): void {
                     type: "text" as const,
                     text:
                       (saveError ? `${saveError} ` : `Saved to: ${savePath}. `) +
-                      `NOT rendered inline: ${bounded.refused.reason}. The full-resolution ` +
-                      `file is on disk and unaffected — open it directly, or re-run ` +
-                      `get_image with a smaller max_preview_dimension.`,
+                      `NOT rendered inline: ${bounded.refused.reason}. ` +
+                      (savedOnDisk
+                        ? `The full-resolution file is on disk and unaffected — open it ` +
+                          `directly, or re-run get_image with a smaller max_preview_dimension.`
+                        : `NOTHING was written locally either, so this image is not available ` +
+                          `here at all — fix the save destination above and retry, or re-run ` +
+                          `get_image with a smaller max_preview_dimension. The output is still ` +
+                          `intact on the ComfyUI server; do NOT re-run the render.`),
                   },
                 ],
               };
@@ -497,9 +509,25 @@ export function registerImageManagementTools(server: McpServer): void {
                 `${bounded.preview.width}×${bounded.preview.height} because the original ` +
                 `(${bounded.preview.originalWidth}×${bounded.preview.originalHeight}, ` +
                 `~${Math.round(bounded.preview.originalEncodedBytes / 1_048_576)} MB encoded) ` +
-                `exceeds what can be sent inline. Do NOT judge fine detail, small text, or ` +
-                `pixel-level artefacts from it — read the full-resolution file at the path ` +
-                `above for that.`
+                `exceeds what can be sent inline.` +
+                // Every way the preview differs from the source gets said, not just the
+                // resize (codex). An agent that is told "downscaled" and hands back a
+                // verdict on a video's motion, or on 16-bit banding, was misled by an
+                // accurate-but-incomplete sentence.
+                (bounded.preview.sourceMayBeAnimated
+                  ? ` The source format can hold ANIMATION and this preview is a single still ` +
+                    `PNG — if it was animated you are seeing ONE frame, so do not judge motion, ` +
+                    `timing, or any later frame from it.`
+                  : "") +
+                (bounded.preview.recoded
+                  ? ` It was also re-encoded to 8-bit RGB PNG, so colour depth and colour space ` +
+                    `differ from the source — do not judge banding or colour accuracy from it.`
+                  : "") +
+                ` Do NOT judge fine detail, small text, or pixel-level artefacts from it — ` +
+                (savedOnDisk
+                  ? `read the full-resolution file at the path above for that.`
+                  : `and note the full-resolution file was NOT saved locally (see above), so ` +
+                    `re-fetch it once the save destination is fixed.`)
               : "";
 
             return {

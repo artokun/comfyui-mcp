@@ -8,6 +8,7 @@
 // to trust.
 import { describe, expect, it } from "vitest";
 import sharp from "sharp";
+import { readFileSync } from "node:fs";
 import {
   boundInlineImage,
   DEFAULT_MAX_PREVIEW_DIMENSION,
@@ -98,6 +99,59 @@ describe("boundInlineImage caps what goes on the wire (#1495)", () => {
     expect(out.refused).not.toBeNull();
     expect(out.refused?.originalEncodedBytes).toBe(junk.length);
     expect(out.preview).toBeNull();
+  });
+
+  it("the pixel guard is NOT disabled (codex High)", () => {
+    // A 20000x20000 solid-colour PNG encodes to a couple of MB, sails under the byte
+    // budget, and decodes to a ~1.5 GiB RGBA surface. An early version passed
+    // `limitInputPixels: false` — unnecessary, since the reported 145 MP image is well
+    // under sharp's ~268 MP default — and it would have traded a transport failure for an
+    // out-of-memory one.
+    //
+    // Asserted on the SOURCE because a real fixture cannot be built: sharp refuses to
+    // CREATE an image past the same guard, so there is no way to hand one to the function
+    // from a test. What is checkable is that the opt-out is absent, and that is the whole
+    // regression.
+    // COMMENTS STRIPPED FIRST. The explanation of why the guard is on names the option,
+    // and asserting over raw text would fail on the very comment documenting the fix —
+    // the same trap as a lint that reads prose as code.
+    const src = readFileSync(new URL("../../services/inline-preview.ts", import.meta.url), "utf-8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/.*/g, "");
+    expect(src).toMatch(/sharp\(/);
+    expect(src).not.toMatch(/limitInputPixels/);
+  });
+
+  it("an ANIMATABLE source format is flagged as a single still (codex High)", async () => {
+    // Keyed on the FORMAT, not on frame metadata — measured: this sharp/libvips build
+    // reports no `pages`, `delay`, `loop` or `pageHeight` at all for a real animated WebP,
+    // so a `meta.pages > 1` check could never fire. Shipping that would have been a
+    // disclosure that looks present and is dead.
+    const w = 300;
+    const h = 300;
+    const px = Buffer.alloc(w * h * 3);
+    let seed = 4242;
+    for (let i = 0; i < px.length; i++) {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      px[i] = seed & 0xff;
+    }
+    const webp = (
+      await sharp(px, { raw: { width: w, height: h, channels: 3 } }).webp({ lossless: true }).toBuffer()
+    ).toString("base64");
+
+    // Budget chosen by MEASURING this fixture, not guessed: lossless WebP squeezes this
+    // pseudo-noise to ~8.4 KB, so a 20 KB budget left it under the bar and produced no
+    // preview at all — a test that passed for no reason.
+    const out = await boundInlineImage(webp, "image/webp", { budgetBytes: 4_000 });
+
+    expect(out.preview).not.toBeNull();
+    expect(out.preview?.sourceMayBeAnimated).toBe(true);
+
+    // …and a PNG source is NOT flagged, so the caveat means something when it appears.
+    const png = await noisyPng(300, 300);
+    const stillOut = await boundInlineImage(png, "image/png", { budgetBytes: 4_000 });
+    expect(stillOut.preview).not.toBeNull();
+    expect(stillOut.preview?.sourceMayBeAnimated).toBe(false);
   });
 
   it("an absurd budget refuses rather than looping or emitting an over-budget payload", async () => {

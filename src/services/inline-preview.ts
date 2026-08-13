@@ -18,6 +18,15 @@ import type { Metadata } from "sharp";
  * WHAT THIS DOES NOT DO: it does not touch the saved file, and it does not claim to satisfy
  * any particular model's image limits (those differ per provider and this code cannot know
  * its consumer). It bounds the TRANSPORT, which is the failure in the report.
+ *
+ * SHARP'S PIXEL GUARD IS LEFT ON (codex). An early version passed
+ * `limitInputPixels: false`, which was both unnecessary and dangerous: the reported
+ * 8504×17008 image is ~145 MP, comfortably under sharp's ~268 MP default, so nothing in
+ * this bug required disabling it — while a 20000×20000 solid-colour PNG encodes to a few MB,
+ * sails under the byte budget, and would decode to a ~1.5 GiB RGBA surface. Turning the
+ * guard off to fix an image it never blocked would have traded a transport failure for an
+ * out-of-memory one. An image past the guard now REFUSES with its reason, which is a
+ * survivable answer.
  */
 
 /** Default ceiling on the base64 payload handed back inline. */
@@ -28,6 +37,9 @@ export const DEFAULT_MAX_PREVIEW_DIMENSION = 4096;
 
 /** How many shrink attempts before giving up and reporting honestly. */
 const MAX_ATTEMPTS = 5;
+
+/** Source formats that CAN hold multiple frames. See `sourceMayBeAnimated`. */
+const ANIMATABLE_MIME = /^image\/(gif|webp|apng)$/i;
 
 export interface BoundInlineImageOptions {
   /** Max base64 length to emit. */
@@ -55,6 +67,24 @@ export interface BoundInlineImage {
     originalHeight: number | null;
     encodedBytes: number;
     originalEncodedBytes: number;
+    /**
+     * True when the SOURCE FORMAT can carry animation (GIF/WebP/APNG) and the preview is
+     * therefore a single still (codex).
+     *
+     * Keyed on the format, NOT on frame metadata, because measuring showed there is no
+     * frame metadata to key on: this sharp/libvips build returns no `pages`, `delay`,
+     * `loop` or `pageHeight` for a real animated WebP — the whole animation surface is
+     * absent from `metadata()`. A `meta.pages > 1` check therefore could never fire, and
+     * shipping it would have been a disclosure that looks present and is dead.
+     *
+     * The format is always known, so this can over-warn on a single-frame GIF and can
+     * never under-warn on an animated one. For a caveat whose job is to stop an agent
+     * judging motion from a still, that is the correct direction to be wrong in.
+     */
+    sourceMayBeAnimated: boolean;
+    /** True when the preview is a lossy representation of the source's colour beyond the
+     *  resize: 16-bit depth flattened to 8-bit, or CMYK re-expressed as RGB (codex). */
+    recoded: boolean;
   };
   /** Set when the image was over budget and could NOT be reduced — nothing is inlined. */
   refused: null | { reason: string; originalEncodedBytes: number };
@@ -85,7 +115,7 @@ export async function boundInlineImage(
     // metadata is cheap (a header parse), and a failure here is not a reason to withhold
     // an image that already fits.
     try {
-      const meta = await sharp(Buffer.from(base64, "base64"), { limitInputPixels: false }).metadata();
+      const meta = await sharp(Buffer.from(base64, "base64")).metadata();
       width = meta.width ?? null;
       height = meta.height ?? null;
     } catch {
@@ -99,7 +129,7 @@ export async function boundInlineImage(
   const source = Buffer.from(base64, "base64");
   let meta: Metadata;
   try {
-    meta = await sharp(source, { limitInputPixels: false }).metadata();
+    meta = await sharp(source).metadata();
   } catch (err) {
     return {
       base64,
@@ -132,7 +162,7 @@ export async function boundInlineImage(
 
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     try {
-      const buf = await sharp(source, { limitInputPixels: false })
+      const buf = await sharp(source)
         .resize({ width: target, height: target, fit: "inside", withoutEnlargement: true })
         .png({ compressionLevel: 9 })
         .toBuffer({ resolveWithObject: true });
@@ -148,6 +178,8 @@ export async function boundInlineImage(
             originalHeight: oh,
             encodedBytes: encoded.length,
             originalEncodedBytes,
+            sourceMayBeAnimated: ANIMATABLE_MIME.test(mimeType),
+            recoded: (meta.depth != null && meta.depth !== "uchar") || meta.space === "cmyk",
           },
           refused: null,
         };
