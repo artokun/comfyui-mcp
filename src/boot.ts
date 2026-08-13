@@ -11,6 +11,7 @@ import { collectToolCatalog, registerFullTools } from "./tools/index.js";
 import { registerCompactTools } from "./tools/compact.js";
 import { tryInstallRetiredNameRedirect } from "./tools/retired-redirect.js";
 import { logger } from "./utils/logger.js";
+import { detectInstallMode } from "./services/self-update.js";
 import { JobWatcher } from "./services/job-watcher.js";
 import { parseCliArgs, validateConnectUrl, exportExplicitToolMode, type ToolMode } from "./transport/cli.js";
 import { startHttpServer } from "./transport/http.js";
@@ -107,11 +108,37 @@ function selfUpdateOnLoad(): void {
     .catch(() => {});
 }
 
+/**
+ * #1447 — THE VERSION WE ADVERTISE MUST BE THE VERSION WE ARE.
+ *
+ * This was hardcoded `0.1.0`, so every `initialize` response told the client a version
+ * this package has never shipped. The reporter noticed while filing a bug about something
+ * else, and that is exactly the cost: `serverInfo.version` is what a client shows and what
+ * a bug report quotes, so a constant here makes every report ambiguous about which build
+ * produced it — including the reports we ask people to send us.
+ *
+ * Resolved the SAME way the orchestrator and the issue reporter already resolve it
+ * (`detectInstallMode().currentVersion`), read ONCE at module load rather than per call: a
+ * running process cannot hot-swap its own code, so a later read could only drift if the
+ * files changed underneath it, which would report a version this process is not running.
+ *
+ * Falls back to `0.0.0` — deliberately not `0.1.0`. If detection ever fails, an obviously
+ * impossible version is a signal that something is wrong; a plausible one is a lie that
+ * looks like data.
+ */
+const SERVER_VERSION: string = ((): string => {
+  try {
+    return detectInstallMode().currentVersion ?? "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+})();
+
 async function createConfiguredServer(toolMode: ToolMode = "compact"): Promise<McpServer> {
   const server = new McpServer(
     {
       name: "comfyui-mcp",
-      version: "0.1.0",
+      version: SERVER_VERSION,
     },
     {
       // We declare `resources` and `prompts` (with noop list handlers below)
