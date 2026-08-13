@@ -216,6 +216,13 @@ export interface QueueItem {
    *  them. Measured on a cancelled 27-scene batch: turn lengths 419 → 827 → 1237 chars
    *  for three prompts, carrying the user's original message along at the bottom. */
   runError?: boolean;
+  /** #1489 — the TAB this run-error notice came from. Coalescing is scoped to it: the
+   *  item keeps ONE `mid`, and that mid is what pins the error-handling turn to the
+   *  erroring workflow's tab (#884 P0 — "a render error on A silently editing B"). Folding
+   *  a notice from tab B into tab A's item would discard B's origin and route "diagnose and
+   *  fix it" at A's graph, which is that exact P0 reintroduced (codex). Same tab, same pin,
+   *  safe to merge; different tab, keep them apart. */
+  runErrorOriginTab?: string;
 }
 
 /** The turn currently in flight, captured at dispatch so an interrupt or a
@@ -872,7 +879,10 @@ export class PanelAgent {
    *  run succeeded. INTERRUPT any live turn (re-queued so it resumes AFTER the
    *  error), then put the error at the FRONT of the queue so the agent addresses
    *  it before anything else. */
-  async injectRunError(error: string, opts?: { mid?: string }): Promise<void> {
+  async injectRunError(
+    error: string,
+    opts?: { mid?: string; originTab?: string },
+  ): Promise<void> {
     if (this.closed) return;
     // #889 — "the workflow run YOU JUST QUEUED" was a fixed template, sent to a
     // session whose agent had never called panel_run at all. It then burned a
@@ -900,7 +910,14 @@ export class PanelAgent {
     //   • an error turn is already IN FLIGHT — queue normally and let it be picked up
     //     next. Interrupting the agent's error handling to hand it another error just
     //     restarts the work with more text.
-    const queuedError = this.queue.find((item) => item.runError);
+    // ORIGIN-SCOPED (codex P0). Not keyed on `mid`: `mintInjectionOrigin` returns a fresh
+    // `evt-<uuid>` per event, so mid equality is never true and would disable coalescing
+    // outright. The tab is the thing that must match, because the tab is what the pin
+    // resolves to.
+    const originTab = opts?.originTab;
+    const queuedError = originTab
+      ? this.queue.find((item) => item.runError && item.runErrorOriginTab === originTab)
+      : undefined;
     if (queuedError) {
       queuedError.text = `${queuedError.text}\n\n${text}`;
       return;
@@ -924,7 +941,12 @@ export class PanelAgent {
     // edits the graph that failed — never whichever tab happens to be active.
     // `runError` marks this as an error notice so a following burst folds into it
     // (#1489) instead of interrupting again and re-queueing this turn.
-    this.queue.unshift({ text, runError: true, ...(opts?.mid ? { mid: opts.mid } : {}) }); // front: ahead of any re-queued interrupted turn
+    this.queue.unshift({
+      text,
+      runError: true,
+      ...(originTab ? { runErrorOriginTab: originTab } : {}),
+      ...(opts?.mid ? { mid: opts.mid } : {}),
+    }); // front: ahead of any re-queued interrupted turn
     const wake = this.waiting;
     this.waiting = null;
     wake?.();
@@ -2523,7 +2545,11 @@ export class PanelAgentManager {
 
   /** Push a ComfyUI execution error to a tab's agent — interrupt the live turn
    *  and front-queue the error so the agent stops and addresses it. */
-  async injectRunError(tabId: string, error: string, opts?: { mid?: string }): Promise<boolean> {
+  async injectRunError(
+    tabId: string,
+    error: string,
+    opts?: { mid?: string; originTab?: string },
+  ): Promise<boolean> {
     const agent = this.agents.get(tabId);
     if (!agent || agent.isStopped) return false;
     await agent.injectRunError(error, opts);

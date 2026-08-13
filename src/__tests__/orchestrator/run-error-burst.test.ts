@@ -90,11 +90,11 @@ describe("a BURST of run_errors coalesces instead of nesting (#1489)", () => {
 
     // Three cleared prompts land in quick succession, as they do when a cancelled batch is
     // reconciled after a reconnect.
-    await agent.injectRunError("PROMPT_ONE could not be confirmed");
+    await agent.injectRunError("PROMPT_ONE could not be confirmed", { originTab: "tab1", mid: "m1" });
     await settle();
-    await agent.injectRunError("PROMPT_TWO could not be confirmed");
+    await agent.injectRunError("PROMPT_TWO could not be confirmed", { originTab: "tab1", mid: "m2" });
     await settle();
-    await agent.injectRunError("PROMPT_THREE could not be confirmed");
+    await agent.injectRunError("PROMPT_THREE could not be confirmed", { originTab: "tab1", mid: "m3" });
     await settle();
 
     // Drain: let each held turn finish so everything queued is actually delivered.
@@ -139,7 +139,7 @@ describe("a BURST of run_errors coalesces instead of nesting (#1489)", () => {
 
     agent.send("USER_PROMPT");
     await settle();
-    await agent.injectRunError("ONLY_PROMPT could not be confirmed");
+    await agent.injectRunError("ONLY_PROMPT could not be confirmed", { originTab: "tab1", mid: "m1" });
     await settle();
 
     // The error turn was dispatched ahead of the user's work rather than waiting for it.
@@ -150,5 +150,54 @@ describe("a BURST of run_errors coalesces instead of nesting (#1489)", () => {
     await settle();
     void running;
     await agent.stop().catch(() => {});
+  });
+
+  it("notices from DIFFERENT tabs are never merged (codex P0)", async () => {
+    // The origin `mid` pins the error-handling turn to the ERRORING workflow's tab —
+    // #884's P0, "a render error on A silently editing B". Coalescing keeps ONE mid per
+    // item, so folding tab B's notice into tab A's item would discard B's origin and aim
+    // "diagnose and fix it" at A's graph. That is the P0 reintroduced, and it is why
+    // coalescing is scoped to the origin tab rather than applied to any pending error.
+    const { backend, releaseNow } = holdingBackend();
+    // ASSERTED ON THE ORIGINS, not on the text. `onSeen` fires once per queue ITEM at
+    // dequeue, carrying that item's `mid` — and the mid is what pins the turn. Two items
+    // batching into one turn text is normal and harmless; losing a mid is the P0, because
+    // the batch's mixed-origin fail-closed handling can only run on origins it was given.
+    // An earlier version of this test asserted the two notices never share a turn, which
+    // is not the invariant and failed against the correct implementation.
+    const seenMids: string[] = [];
+    const agent = new PanelAgent(
+      "tab1",
+      {
+        mcpServers: undefined,
+        systemAppend: "",
+        model: "m",
+        onSay: () => {},
+        onSeen: (_tab, mid) => seenMids.push(mid),
+      },
+      backend,
+    );
+    // The agent is NOT started yet, deliberately. Both notices must be sitting in the
+    // QUEUE together, which is the only state where the merge path runs at all — with the
+    // agent draining, the first is dequeued before the second arrives and B takes the
+    // in-flight branch instead. Two earlier versions of this test did exactly that and
+    // passed under a mutation that un-scoped the merge, i.e. they proved nothing.
+    await agent.injectRunError("FROM_TAB_A could not be confirmed", { originTab: "tabA", mid: "mA" });
+    await agent.injectRunError("FROM_TAB_B could not be confirmed", { originTab: "tabB", mid: "mB" });
+
+    const running = agent.start();
+    for (let i = 0; i < 6; i++) {
+      await settle();
+      releaseNow();
+    }
+    await settle();
+    void running;
+    await agent.stop().catch(() => {});
+
+    // BOTH origins reach the dequeue. If B had been folded into A's item, only mA would
+    // fire and the whole turn would be pinned to tab A — "diagnose and fix it" aimed at
+    // the wrong graph, which is #884's P0.
+    expect(seenMids, `origins seen: ${seenMids.join(",")}`).toContain("mA");
+    expect(seenMids, `origins seen: ${seenMids.join(",")}`).toContain("mB");
   });
 });

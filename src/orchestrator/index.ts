@@ -4814,6 +4814,9 @@ export async function runPanelOrchestrator(): Promise<void> {
         // exact sequence — a render error on A silently editing B.
         void manager.injectRunError(agentKeyFor(event.tab_id), ev.error ?? "unknown error", {
           mid: turnOrigins.mintInjectionOrigin(event.tab_id),
+          // #1489 — coalescing a burst is scoped to this tab, so a notice from ANOTHER
+          // tab is never folded in and can never lose its own origin pin (#884 P0).
+          originTab: event.tab_id,
         });
         logger.info(`[panel-orchestrator] tab ${event.tab_id.slice(0, 8)} run_error → agent (interrupt)`);
         return;
