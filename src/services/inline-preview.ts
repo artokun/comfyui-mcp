@@ -38,14 +38,35 @@ export const DEFAULT_MAX_PREVIEW_DIMENSION = 4096;
 /** How many shrink attempts before giving up and reporting honestly. */
 const MAX_ATTEMPTS = 5;
 
-/** Source formats that CAN hold multiple frames. See `sourceMayBeAnimated`. */
-const ANIMATABLE_MIME = /^image\/(gif|webp|apng)$/i;
+/** Source formats that CAN hold multiple frames/pages. See `sourceMayBeAnimated`.
+ *  AVIF sequences and multi-page HEIF/TIFF belong here too (codex r2) — sharp reads all of
+ *  them as multi-page, and each collapses to one still exactly like an animated GIF. */
+const ANIMATABLE_MIME = /^image\/(gif|webp|apng|avif|heic|heif|tiff?)$/i;
+
+/**
+ * Ceiling on the DECODED pixel count of a source we will try to preview.
+ *
+ * sharp's own default (~268 MP) is a PIXEL ceiling, not a memory one (codex r2): a
+ * 16383x16383 16-bit RGBA PNG passes it and still needs roughly 2 GiB of decoded surface,
+ * which is enough to stall or kill an ordinary process. So the limit here is derived from
+ * a MEMORY budget instead — ~768 MB at 4 bytes per pixel.
+ *
+ * The number is chosen to cover the case in the report with headroom: 8504x17008 is
+ * ~144.6 MP, so it previews, while anything materially larger refuses and says so. That
+ * ordering is the whole point — a limit that protected memory by rejecting the very image
+ * this issue is about would be a fix in name only.
+ */
+export const DEFAULT_MAX_INPUT_PIXELS = 192_000_000;
 
 export interface BoundInlineImageOptions {
   /** Max base64 length to emit. */
   budgetBytes?: number;
   /** Max width/height of the preview. */
   maxDimension?: number;
+  /** Ceiling on the source's decoded pixel count. Exposed so the refusal path can be
+   *  tested by BEHAVIOUR rather than by reading the source (codex r2) — sharp will not
+   *  create an image past its own guard, so an oversized fixture cannot be built. */
+  maxInputPixels?: number;
 }
 
 export interface BoundInlineImage {
@@ -105,6 +126,7 @@ export async function boundInlineImage(
 ): Promise<BoundInlineImage> {
   const budget = Math.max(1, opts.budgetBytes ?? DEFAULT_INLINE_BUDGET_BYTES);
   const maxDim = Math.max(1, opts.maxDimension ?? DEFAULT_MAX_PREVIEW_DIMENSION);
+  const limitInputPixels = Math.max(1, opts.maxInputPixels ?? DEFAULT_MAX_INPUT_PIXELS);
   const originalEncodedBytes = base64.length;
 
   let width: number | null = null;
@@ -115,7 +137,7 @@ export async function boundInlineImage(
     // metadata is cheap (a header parse), and a failure here is not a reason to withhold
     // an image that already fits.
     try {
-      const meta = await sharp(Buffer.from(base64, "base64")).metadata();
+      const meta = await sharp(Buffer.from(base64, "base64"), { limitInputPixels }).metadata();
       width = meta.width ?? null;
       height = meta.height ?? null;
     } catch {
@@ -129,7 +151,7 @@ export async function boundInlineImage(
   const source = Buffer.from(base64, "base64");
   let meta: Metadata;
   try {
-    meta = await sharp(source).metadata();
+    meta = await sharp(source, { limitInputPixels }).metadata();
   } catch (err) {
     return {
       base64,
@@ -162,7 +184,7 @@ export async function boundInlineImage(
 
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     try {
-      const buf = await sharp(source)
+      const buf = await sharp(source, { limitInputPixels })
         .resize({ width: target, height: target, fit: "inside", withoutEnlargement: true })
         .png({ compressionLevel: 9 })
         .toBuffer({ resolveWithObject: true });
@@ -179,7 +201,13 @@ export async function boundInlineImage(
             encodedBytes: encoded.length,
             originalEncodedBytes,
             sourceMayBeAnimated: ANIMATABLE_MIME.test(mimeType),
-            recoded: (meta.depth != null && meta.depth !== "uchar") || meta.space === "cmyk",
+            // An ICC profile counts too (codex r2): sharp's default output converts to
+            // sRGB and drops the profile, so a Display-P3 or Adobe-RGB source comes back
+            // materially different in colour while being 8-bit and non-CMYK.
+            recoded:
+              (meta.depth != null && meta.depth !== "uchar") ||
+              meta.space === "cmyk" ||
+              meta.hasProfile === true,
           },
           refused: null,
         };

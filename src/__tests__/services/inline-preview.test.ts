@@ -8,9 +8,9 @@
 // to trust.
 import { describe, expect, it } from "vitest";
 import sharp from "sharp";
-import { readFileSync } from "node:fs";
 import {
   boundInlineImage,
+  DEFAULT_MAX_INPUT_PIXELS,
   DEFAULT_MAX_PREVIEW_DIMENSION,
 } from "../../services/inline-preview.js";
 
@@ -101,28 +101,43 @@ describe("boundInlineImage caps what goes on the wire (#1495)", () => {
     expect(out.preview).toBeNull();
   });
 
-  it("the pixel guard is NOT disabled (codex High)", () => {
-    // A 20000x20000 solid-colour PNG encodes to a couple of MB, sails under the byte
-    // budget, and decodes to a ~1.5 GiB RGBA surface. An early version passed
-    // `limitInputPixels: false` — unnecessary, since the reported 145 MP image is well
-    // under sharp's ~268 MP default — and it would have traded a transport failure for an
-    // out-of-memory one.
-    //
-    // Asserted on the SOURCE because a real fixture cannot be built: sharp refuses to
-    // CREATE an image past the same guard, so there is no way to hand one to the function
-    // from a test. What is checkable is that the opt-out is absent, and that is the whole
-    // regression.
-    // COMMENTS STRIPPED FIRST. The explanation of why the guard is on names the option,
-    // and asserting over raw text would fail on the very comment documenting the fix —
-    // the same trap as a lint that reads prose as code.
-    const src = readFileSync(new URL("../../services/inline-preview.ts", import.meta.url), "utf-8")
-      .replace(/\/\*[\s\S]*?\*\//g, "")
-      .replace(/\/\/.*/g, "");
-    expect(src).toMatch(/sharp\(/);
-    expect(src).not.toMatch(/limitInputPixels/);
+  it("a source past the DECODED-PIXEL budget refuses instead of decoding (codex)", async () => {
+    // sharp's own default is a PIXEL ceiling, not a memory one: a 16383x16383 16-bit RGBA
+    // PNG passes it and still needs ~2 GiB of decoded surface. The limit here is derived
+    // from a memory budget instead, and it is EXPOSED so this can be tested by behaviour —
+    // sharp refuses to CREATE an image past its own guard, so an oversized fixture cannot
+    // be built and the earlier source-text assertion could only prove the opt-out was
+    // absent, never that a big image is actually turned away.
+    const img = await noisyPng(400, 400); // 160,000 px
+
+    const out = await boundInlineImage(img, "image/png", {
+      budgetBytes: 1_000,
+      maxInputPixels: 10_000, // far below this image
+    });
+
+    expect(out.refused).not.toBeNull();
+    expect(out.preview).toBeNull();
+    // The full-resolution bytes are handed back untouched for the caller to save/report.
+    expect(out.base64).toBe(img);
+  });
+
+  it("the same image previews fine when the pixel budget allows it", async () => {
+    // The other half of the guard: it must not be refusing things it should handle. The
+    // real default covers the reported 8504x17008 (~144.6 MP) with headroom.
+    const img = await noisyPng(400, 400);
+
+    const out = await boundInlineImage(img, "image/png", { budgetBytes: 5_000 });
+
+    expect(out.refused).toBeNull();
+    expect(out.preview).not.toBeNull();
+    expect(DEFAULT_MAX_INPUT_PIXELS).toBeGreaterThan(8504 * 17008);
   });
 
   it("an ANIMATABLE source format is flagged as a single still (codex High)", async () => {
+    // NOTE: this fixture is a ONE-FRAME WebP (codex r2 called that out). It proves the
+    // format-keyed wiring, which is the whole mechanism — the flag is deliberately keyed
+    // on the format rather than on frame count, because this build reports no frame
+    // metadata at all, so a multi-frame fixture would not exercise anything extra.
     // Keyed on the FORMAT, not on frame metadata — measured: this sharp/libvips build
     // reports no `pages`, `delay`, `loop` or `pageHeight` at all for a real animated WebP,
     // so a `meta.pages > 1` check could never fire. Shipping that would have been a
