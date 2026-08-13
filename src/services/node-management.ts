@@ -1672,6 +1672,31 @@ export function isLatestSentinel(version: unknown): boolean {
 }
 
 /**
+ * #1470 — "nightly" IS NOT A GIT REF EITHER. It is this tool's name for the git-HEAD
+ * channel, and one of our own code paths MINTS it: a git-URL install with an absent or
+ * "latest" version is rewritten to `version: "nightly"` on purpose, because
+ * ComfyUI-Manager rejects a registry "latest" for a repository-style entry.
+ *
+ * Two pieces, each right on its own, made the bug: that site means "git HEAD" by the word,
+ * and the ref resolver read the same word as a ref — so a direct Git URL with
+ * version:"nightly" reached `git checkout --detach --end-of-options nightly` and died. The
+ * clone is then discarded as a husk, which is exactly the reported experience: cloned
+ * successfully, failed, clone removed.
+ *
+ * Deliberately SEPARATE from `isLatestSentinel` rather than folded into it: that helper is
+ * also the test at the git-URL normalisation site, where "latest" and "nightly" mean
+ * different things (one is the input being translated, the other is the result). Widening
+ * it there would make the translation match its own output.
+ *
+ * And it is applied to `version` ONLY. An explicit `ref:"nightly"` still checks out a ref:
+ * a repository may genuinely have a branch or tag by that name, and silently ignoring the
+ * caller's explicit ref would be a new bug in place of this one.
+ */
+export function isGitHeadChannel(version: unknown): boolean {
+  return typeof version === "string" && version.trim().toLowerCase() === "nightly";
+}
+
+/**
  * Which git ref an install should check out, or undefined for "leave the clone
  * where it landed" (#1254).
  *
@@ -1709,7 +1734,11 @@ export function gitRefForInstall(opts: {
   // never fire.
   const explicit = opts.ref ?? opts.urlRef ?? undefined;
   if (explicit !== undefined) return explicit;
-  return isLatestSentinel(opts.version) ? undefined : opts.version;
+  // A CHANNEL is not a ref (#1254 for "latest", #1470 for "nightly"). Only `version` is
+  // collapsed here — `ref`/`urlRef` returned above are the caller's explicit git refs.
+  return isLatestSentinel(opts.version) || isGitHeadChannel(opts.version)
+    ? undefined
+    : opts.version;
 }
 
 function validateGitRef(ref: string): string {
