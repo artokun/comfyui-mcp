@@ -8,26 +8,29 @@
 //   $ git checkout --detach --end-of-options nightly
 //   fatal: git checkout: --detach does not take a path argument 'nightly'
 //
-// With `--end-of-options` an unresolvable ref is treated as a PATH and `--detach` rejects
-// paths; an older git phrases that as the -b/-B/--orphan clash.
+// THE WORD IS OVERLOADED IN OUR OWN SURFACE. For a Manager install "nightly" names the
+// git-HEAD channel — one of our paths mints it, rewriting an absent/"latest" version because
+// the Manager rejects a registry "latest" for a repository-style entry. For a from-source
+// git install, `version` is documented as a git ref. A caller typing version:"nightly" may
+// mean either, so the meaning is resolved by ASKING the repository, not by guessing.
 //
-// THE WORD IS OVERLOADED IN OUR OWN SURFACE, which is the whole difficulty. For a Manager
-// install "nightly" names the git-HEAD channel — one of our paths even MINTS it, rewriting
-// an absent/"latest" version to "nightly" because the Manager rejects a registry "latest"
-// for a repository-style entry. For a from-source git install, `version` is documented as a
-// git ref. A caller typing version:"nightly" may mean either.
-//
-// A first fix collapsed the word to "no ref" up front. codex found the P1: a repository that
-// genuinely HAS a `nightly` branch would then silently install its DEFAULT branch, and a
-// quietly-wrong version is worse than the loud failure being fixed. So the meaning is
-// resolved by TRYING the ref and handling the failure, not by guessing.
+// Two review findings shaped this, both worth keeping visible:
+//   • collapsing the word to "no ref" up front would silently install the DEFAULT branch of
+//     a repository that genuinely HAS a `nightly` branch — a quietly-wrong version, worse
+//     than the loud failure being fixed;
+//   • deciding by CATCHING the checkout failure swallowed unrelated errors (corrupt repo,
+//     permissions) as "no such branch", and claimed a usable HEAD after a checkout that had
+//     just failed in an unknown way.
 import { describe, expect, it } from "vitest";
-import { gitRefForInstall, isGitHeadChannel, isLatestSentinel } from "../../services/node-management.js";
+import {
+  checkoutPlanForMissingRef,
+  gitRefForInstall,
+  isGitHeadChannel,
+  isLatestSentinel,
+} from "../../services/node-management.js";
 
-describe("the channel word is still offered to git as a ref (#1470)", () => {
+describe("the ref resolver keeps 'nightly' as a ref (#1470)", () => {
   it("version:'nightly' is NOT collapsed — a real nightly branch must still win", () => {
-    // The P1 direction. If this returns undefined, a repo with a `nightly` branch gets its
-    // default branch instead and nobody is told.
     expect(gitRefForInstall({ version: "nightly" })).toBe("nightly");
   });
 
@@ -40,14 +43,33 @@ describe("the channel word is still offered to git as a ref (#1470)", () => {
     expect(gitRefForInstall({ ref: "v2", version: "nightly" })).toBe("v2");
     expect(gitRefForInstall({ urlRef: "abc123", version: "latest" })).toBe("abc123");
   });
+});
+
+describe("what a MISSING ref means depends on where it came from (#1470)", () => {
+  it("a version-derived 'nightly' the repo lacks falls back to HEAD", () => {
+    // The reported case: the repository has no such branch, and the clone already sits at
+    // the default HEAD — which is what the channel reading of the word asks for.
+    expect(checkoutPlanForMissingRef({ ref: "nightly", fromVersion: true })).toBe("skip-at-head");
+    expect(checkoutPlanForMissingRef({ ref: " Nightly ", fromVersion: true })).toBe("skip-at-head");
+  });
+
+  it("an EXPLICIT ref:'nightly' the repo lacks still FAILS", () => {
+    // The caller named a git ref. Installing something else because the name happens to
+    // spell a channel word would be the wrong-version bug in a new place.
+    expect(checkoutPlanForMissingRef({ ref: "nightly", fromVersion: false })).toBe("fail");
+  });
+
+  it("any other missing ref fails, whatever its provenance", () => {
+    // Asking for v1.2.3 and silently getting HEAD is exactly what must not happen.
+    expect(checkoutPlanForMissingRef({ ref: "v1.2.3", fromVersion: true })).toBe("fail");
+    expect(checkoutPlanForMissingRef({ ref: "main", fromVersion: true })).toBe("fail");
+    expect(checkoutPlanForMissingRef({ ref: "v1.2.3", fromVersion: false })).toBe("fail");
+  });
 
   it("the channel test recognises what a caller actually types", () => {
-    // Used only to decide what a FAILED checkout means, so its spelling tolerance is what
-    // keeps " Nightly " from being treated as a hard error.
     expect(isGitHeadChannel("nightly")).toBe(true);
     expect(isGitHeadChannel("Nightly")).toBe(true);
     expect(isGitHeadChannel(" NIGHTLY ")).toBe(true);
-    expect(isGitHeadChannel("v1.2.3")).toBe(false);
     expect(isGitHeadChannel("main")).toBe(false);
     expect(isGitHeadChannel(undefined)).toBe(false);
   });
@@ -59,28 +81,5 @@ describe("the channel word is still offered to git as a ref (#1470)", () => {
     expect(isLatestSentinel("latest")).toBe(true);
     expect(isLatestSentinel("nightly")).toBe(false);
     expect(isGitHeadChannel("latest")).toBe(false);
-  });
-});
-
-describe("a failed checkout of the CHANNEL word keeps the clone (#1470)", () => {
-  it("the clone path treats it as a warning, not a husk-and-throw", async () => {
-    // Asserted on the source: this branch needs a real clone + a real git repo to drive,
-    // and what is being pinned is the DECISION — that the channel word does not take the
-    // discard path — which is a fact about the code.
-    const { readFileSync } = await import("node:fs");
-    const src = readFileSync(
-      new URL("../../services/node-management.ts", import.meta.url),
-      "utf-8",
-    );
-    const at = src.indexOf("Cloned \"${gitId}\" but could not check out");
-    expect(at, "the checkout-failure site moved — re-anchor this test").toBeGreaterThan(-1);
-    // Look BACK from the throw: the channel-word branch must sit between the catch and it,
-    // so a failure of that word never reaches discardFailedClone.
-    const before = src.slice(Math.max(0, at - 1800), at);
-    expect(before).toMatch(/isGitHeadChannel\(gitRef\)/);
-    expect(before).toMatch(/warnings\.push/);
-    // And the ordinary ref path still discards, which is what stops "asked for v1.2.3,
-    // silently got HEAD".
-    expect(src.slice(at - 400, at)).toMatch(/discardFailedClone/);
   });
 });

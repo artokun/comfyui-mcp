@@ -1690,6 +1690,28 @@ export function isGitHeadChannel(version: unknown): boolean {
   return typeof version === "string" && version.trim().toLowerCase() === "nightly";
 }
 
+/**
+ * #1470 — what to do with a ref the freshly-cloned repository does NOT have.
+ *
+ * Decided from a rev-parse BEFORE the checkout, never by catching its failure (codex r2).
+ * Catching was wrong twice over: it swallowed unrelated failures — a corrupt repo, a
+ * permissions error — as "no such branch", and it claimed the clone was left at a usable
+ * HEAD after a checkout that had just failed in an unknown way. Asking first means a real
+ * checkout error still throws, and the skip path never runs a command at all, so the clone
+ * is exactly as `git clone` left it.
+ *
+ * Only a ref that came from `version` may be skipped. An explicit `ref:` is the caller
+ * naming a git ref, and quietly installing something else because the name happens to spell
+ * a channel word would be the wrong-version bug in a new place.
+ */
+export function checkoutPlanForMissingRef(opts: {
+  ref: string;
+  /** True when the ref came from the `version` selector rather than an explicit `ref`. */
+  fromVersion: boolean;
+}): "skip-at-head" | "fail" {
+  return opts.fromVersion && isGitHeadChannel(opts.ref) ? "skip-at-head" : "fail";
+}
+
 
 /**
  * Which git ref an install should check out, or undefined for "leave the clone
@@ -1735,6 +1757,30 @@ export function gitRefForInstall(opts: {
   // checkout of it means. Collapsing it here would silently install the default branch of a
   // repository that genuinely has one (codex).
   return isLatestSentinel(opts.version) ? undefined : opts.version;
+}
+
+/**
+ * #1470 — does the cloned repository actually have this ref? Asked BEFORE the checkout so a
+ * missing ref is distinguishable from a checkout that failed for any other reason.
+ *
+ * `--verify --quiet` with a `^{commit}` peel answers only "resolves to a commit", which is
+ * the question. A THROW here is read as "cannot tell", and the caller then takes the normal
+ * checkout path — so an unreadable repo produces git's own error from the checkout rather
+ * than a fabricated "no such branch".
+ */
+function gitRefExists(nodeDir: string, ref: string, cwd: string): boolean {
+  try {
+    execFileSync("git", ["-C", nodeDir, "rev-parse", "--verify", "--quiet", "--end-of-options", `${ref}^{commit}`], {
+      cwd,
+      encoding: "utf-8",
+      timeout: GIT_CLONE_TIMEOUT,
+      env: nonInteractiveGitEnv(),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function validateGitRef(ref: string): string {
@@ -2274,7 +2320,12 @@ async function cloneCustomNodeFallback(
    * policy refusal would be a wrong explanation for a correct action; the caller
    * that knows better passes its own.
    */
-  opts?: { managerRefusalNote?: string },
+  opts?: {
+    managerRefusalNote?: string;
+    /** #1470 — did `gitRef` come from the `version` selector rather than an explicit
+     *  `ref`? Only a version-derived ref may be skipped when the repo does not have it. */
+    refFromVersion?: boolean;
+  },
 ): Promise<NodeOpResult> {
   const because =
     opts?.managerRefusalNote ?? `"${repoName}" is not in the ComfyUI-Manager registry`;
@@ -2354,33 +2405,26 @@ async function cloneCustomNodeFallback(
       );
     }
     if (gitRef) {
-      // The checkout is part of producing the pack, so its failure leaves the
-      // same husk as a failed clone — and the clone directory is ours either way.
-      try {
-        runGitCheckout(gitId, gitRef, comfyuiBase);
-      } catch (err) {
-        // #1470 — "nightly" IS BOTH A CHANNEL AND A POSSIBLE REF, so it is resolved by
-        // TRYING it rather than by guessing which the caller meant.
-        //
-        // A git install documents `version` as a git ref, and a repository may genuinely
-        // have a `nightly` branch — collapsing the word to "no ref" up front would install
-        // that repo's DEFAULT branch instead, and a quietly-wrong version is worse than the
-        // failure being fixed here. But the word is ALSO this tool's name for the git-HEAD
-        // channel (one of our own paths mints it for exactly that meaning), so a repository
-        // without such a branch is not a caller error — it is the other reading of the same
-        // word, and the clone already sits at HEAD, which is what that reading asks for.
-        //
-        // So: a failed checkout of the CHANNEL word keeps the clone and discloses, instead
-        // of deleting a working install over a word. Any other ref keeps the old behaviour —
-        // asking for `v1.2.3` and silently getting HEAD would be the wrong-version bug.
-        if (isGitHeadChannel(gitRef)) {
-          warnings.push(
-            `"${gitRef}" is not a ref in ${gitId}, so the clone was left at the repository's ` +
-              `default HEAD — which is what "nightly" means as a channel. If you meant a ref ` +
-              `by that name, this repository does not have one; pass ref:<branch-or-tag> for ` +
-              `an exact checkout.`,
-          );
-        } else {
+      // #1470 — ASK WHETHER THE REF EXISTS, then act. "nightly" is overloaded in this
+      // tool's own surface: it names the git-HEAD channel for a Manager install (one of
+      // our paths mints it), and `version` is documented as a git ref for a from-source
+      // install. A repository that HAS a `nightly` branch must get it; one that does not
+      // is not a caller error, it is the other reading of the same word — and the clone
+      // already sits at HEAD, which is what that reading asks for.
+      const refMissing = !gitRefExists(nodeDir, gitRef, comfyuiBase);
+      if (refMissing && checkoutPlanForMissingRef({ ref: gitRef, fromVersion: opts?.refFromVersion === true }) === "skip-at-head") {
+        warnings.push(
+          `"${gitRef}" is not a branch or tag in ${gitId}, so the clone was left at the ` +
+            `repository's default HEAD — which is what "nightly" means as a channel here. ` +
+            `If you meant a ref by that name, this repository does not have one; pass ` +
+            `ref:<branch-or-tag> for an exact checkout.`,
+        );
+      } else {
+        // The checkout is part of producing the pack, so its failure leaves the
+        // same husk as a failed clone — and the clone directory is ours either way.
+        try {
+          runGitCheckout(gitId, gitRef, comfyuiBase);
+        } catch (err) {
           const leftover = discardFailedClone(nodeDir, alreadyPresent);
           throw new NodeManagementError(
             `Cloned "${gitId}" but could not check out "${gitRef}": ` +
@@ -2587,6 +2631,11 @@ async function installCustomNodeImpl(
     source === "git" && gitRefCandidate
       ? validateGitRef(gitRefCandidate)
       : gitRefCandidate;
+  // #1470 — provenance, not spelling. `gitRefForInstall` prefers an explicit ref/urlRef, so
+  // the candidate came from `version` exactly when neither was supplied. Only that case may
+  // fall back to HEAD for a repo that lacks the ref; an explicit `ref:` is the caller naming
+  // a git ref and must fail loudly if it is absent.
+  const refFromVersion = opts.ref === undefined && parsedGit.ref == null;
 
   // SECURITY: validate a git URL ONCE, up front, before it can reach ANY install
   // path — cm-cli (`cm-cli install <url>`), the Manager queue, or the clone
@@ -2724,6 +2773,7 @@ async function installCustomNodeImpl(
       });
       return withCliNote(
         await cloneCustomNodeFallback(gitId, repoName, gitRef, { manager_refused: refusedBy }, cliWorkspace, {
+          refFromVersion,
           managerRefusalNote:
             `ComfyUI-Manager REFUSED the git-URL install (HTTP ${refusedBy}) — on a legacy 3.x ` +
             `host that is its security_level / allow_git_url_install gate, or a build that does ` +
@@ -2745,7 +2795,9 @@ async function installCustomNodeImpl(
         details: status,
       });
     }
-    return withCliNote(await cloneCustomNodeFallback(gitId, repoName, gitRef, status, cliWorkspace));
+    return withCliNote(
+      await cloneCustomNodeFallback(gitId, repoName, gitRef, status, cliWorkspace, { refFromVersion }),
+    );
   }
 
   // Registry (plain CNR id). Keep the prior defaults channel "default" /
