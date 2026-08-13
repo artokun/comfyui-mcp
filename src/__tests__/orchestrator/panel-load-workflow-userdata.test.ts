@@ -104,8 +104,12 @@ describe("panel_load_workflow: userdata fallback for a custom --user-directory (
     expect(fetchApi).toHaveBeenCalledWith(
       `/api/userdata/${encodeURIComponent("workflows/722-gordo-10Eros_10SNodes_I2V_DMD_v1.json")}`,
     );
-    // And the fetched graph was dropped on the canvas.
-    expect(calls).toHaveLength(1);
+    // And the fetched graph was dropped on the canvas — EXACTLY once. Counted by command
+    // rather than by total calls (#1478): the load now also claims the workflow-instance
+    // fence it just invalidated, so a bare length check would fail on the extra
+    // workflow_list while proving nothing about what this test guards, which is that the
+    // graph is not loaded twice.
+    expect(calls.filter((c) => c.cmd === "graph_load")).toHaveLength(1);
     expect(calls[0]).toMatchObject({ cmd: "graph_load" });
     expect(calls[0].graph).toMatchObject(graph);
   });
@@ -156,7 +160,7 @@ describe("panel_load_workflow: userdata fallback for a custom --user-directory (
 
       expect(res.isError).toBeUndefined();
       expect(fetchApi).toHaveBeenCalled(); // authoritative source was consulted first
-      expect(calls).toHaveLength(1);
+      expect(calls.filter((c) => c.cmd === "graph_load")).toHaveLength(1);
       expect(calls[0].graph).toMatchObject(runtime); // NOT the stale default-dir file
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -531,7 +535,7 @@ describe("readWorkflowFromPath: a refusal is never mistaken for an unreachable s
       const res = await loadWorkflow().handler({ path: "staged.json" }, ctx);
 
       expect(res.isError).toBeUndefined();
-      expect(calls).toHaveLength(1);
+      expect(calls.filter((c) => c.cmd === "graph_load")).toHaveLength(1);
       expect(calls[0].graph).toMatchObject(staged);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -639,7 +643,7 @@ describe("readWorkflowFromPath: near-miss names resolve via the server's OWN lis
     const res = await loadWorkflow().handler({ path: nfd }, ctx);
 
     expect(res.isError).toBeUndefined();
-    expect(calls).toHaveLength(1);
+    expect(calls.filter((c) => c.cmd === "graph_load")).toHaveLength(1);
     expect(calls[0].graph).toMatchObject(graph);
     // It fetched the SERVER's key, not a locally reconstructed path.
     expect(fetchApi).toHaveBeenCalledWith(`/api/userdata/${encodeURIComponent(`workflows/${nfc}`)}`);
@@ -659,7 +663,7 @@ describe("readWorkflowFromPath: near-miss names resolve via the server's OWN lis
     const res = await loadWorkflow().handler({ path: nfc }, ctx);
 
     expect(res.isError).toBeUndefined();
-    expect(calls).toHaveLength(1);
+    expect(calls.filter((c) => c.cmd === "graph_load")).toHaveLength(1);
     expect(calls[0].graph).toMatchObject(graph);
     expect(fetchApi).toHaveBeenCalledWith(`/api/userdata/${encodeURIComponent(`workflows/${nfd}`)}`);
   });
@@ -960,7 +964,7 @@ describe("readWorkflowFromPath: near-miss names resolve via the server's OWN lis
     const res = await loadWorkflow().handler({ path: nfd }, ctx);
 
     expect(res.isError).toBeUndefined();
-    expect(calls).toHaveLength(1);
+    expect(calls.filter((c) => c.cmd === "graph_load")).toHaveLength(1);
     expect(calls[0].graph).toMatchObject(graph);
     expect(fetchApi).not.toHaveBeenCalledWith(
       `/api/userdata/${encodeURIComponent(`workflows/${upper}`)}`,
@@ -1062,7 +1066,7 @@ describe("readWorkflowFromPath: a list-style 'workflows/…' path is not double-
     expect(fetchApi).not.toHaveBeenCalledWith(
       `/api/userdata/${encodeURIComponent("workflows/workflows/Daily Anime Portrait - Fast Preview.json")}`,
     );
-    expect(calls).toHaveLength(1);
+    expect(calls.filter((c) => c.cmd === "graph_load")).toHaveLength(1);
     expect(calls[0].graph).toMatchObject(graph);
   });
 
@@ -1095,7 +1099,7 @@ describe("readWorkflowFromPath: a list-style 'workflows/…' path is not double-
       const res = await loadWorkflow().handler({ path: "workflows/Foo.json" }, ctx);
 
       expect(res.isError).toBeUndefined();
-      expect(calls).toHaveLength(1);
+      expect(calls.filter((c) => c.cmd === "graph_load")).toHaveLength(1);
       expect(calls[0].graph).toMatchObject(staged);
     } finally {
       rmSync(root, { recursive: true, force: true });

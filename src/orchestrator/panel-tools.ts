@@ -3891,6 +3891,70 @@ WHY THIS READ WAS NEEDED AT ALL: this session's panel is ${v.version}, and a ` +
  */
 const FENCE_CORROBORATION_RECHECK_STEPS_MS = [400, 900, 1600] as const;
 
+/**
+ * #1478 — A LOAD MUST CLAIM THE INSTANCE IT JUST CREATED.
+ *
+ * `graph_load` replaces the graph, which mints a NEW canvas instance id — so the session's
+ * fence is stale the instant the load succeeds, and the very next `panel_graph_outline`
+ * fails with `workflow instance mismatch`. Reproduced deterministically by the reporter,
+ * twice in one session; the recovery is always the same
+ * `panel_set_workflow_target({mode:"current"})`.
+ *
+ * WHY NOT #814'S PATTERN. `workflow_new` / `workflow_save` / `workflow_save_as` repair
+ * their own fence from THEIR OWN REPLY, which is strictly better because it cannot be
+ * refused by the fence it is repairing. That is unavailable here: `graph_load`'s reply
+ * carries no `workflow_uuid` at all (checked — it returns `loaded`/`format`/`node_count`),
+ * because #762/#800 added that field to the save/new replies and nobody added it to this
+ * one. Giving `graph_load` a uuid-bearing reply is the better long-term shape and is a
+ * PANEL change; this is the half that can ship on its own.
+ *
+ * So it uses the generic re-derivation — the SAME call the reporter's manual recovery
+ * makes, which they observed returning `refreshed` and working. #814 warns that this read
+ * can be refused by the fence it repairs (#1071), and that warning describes a different
+ * starting state: there the session had no trustworthy identity at all. Here the load has
+ * just minted one and `workflow_list` is not a fenced command, which is exactly why the
+ * manual recovery works today.
+ *
+ * DISCLOSED, NEVER ASSUMED. A load that could not re-claim its own fence returns
+ * `loaded:true` plus the reason and the manual recovery, rather than a bare success that
+ * leaves the next call to discover it.
+ */
+/** The rebind's own reason, when its variant carries one — the union does not share a
+ *  single field, and inventing one would report "undefined" as a cause. */
+function describeRebindReason(rebind: WorkflowFenceRebind): string {
+  if ("why" in rebind && typeof rebind.why === "string" && rebind.why) return `: ${rebind.why}`;
+  if ("detail" in rebind && typeof rebind.detail === "string" && rebind.detail) {
+    return `: ${rebind.detail}`;
+  }
+  return "";
+}
+
+async function claimLoadedInstance(ctx: PanelToolCtx): Promise<string> {
+  let rebind: WorkflowFenceRebind;
+  try {
+    rebind = await rebindWorkflowFence(ctx);
+  } catch (err) {
+    return (
+      `\n\nNOTE: the graph was loaded, but re-claiming this session's workflow-instance ` +
+      `fence THREW (${err instanceof Error ? err.message : String(err)}), so the next graph ` +
+      `call may fail with a workflow instance mismatch. Recover with ` +
+      `panel_set_workflow_target({mode:"current"}).`
+    );
+  }
+  if (rebind.status === "refreshed" || rebind.status === "already_current") {
+    // The common path, and it is worth stating: the load moved the canvas AND claimed it,
+    // so the caller can go straight on to reading or editing the graph.
+    return "";
+  }
+  return (
+    `\n\nNOTE: the graph was loaded, but this session's workflow-instance fence could NOT ` +
+    `be re-claimed (${rebind.status}${describeRebindReason(rebind)}). Loading replaces ` +
+    `the graph and mints a new canvas instance, so the next graph call may fail with a ` +
+    `workflow instance mismatch — clear it with panel_set_workflow_target({mode:"current"}), ` +
+    `then retry.`
+  );
+}
+
 async function rebindWorkflowFence(ctx: PanelToolCtx): Promise<WorkflowFenceRebind> {
   const tabAtStart = ctx.tabId;
   let before = currentWorkflowFence(ctx);
@@ -8850,7 +8914,9 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             throw new Error("Provide one of `pack` (a bundled pack name), `path` (a workflow .json on disk), or `graph` (a UI workflow).");
           }
           // Generous timeout — loading a large graph onto the live canvas can take a moment.
-          return await ctx.call({ cmd: "graph_load", graph: data }, 30000);
+          const loaded = await ctx.call({ cmd: "graph_load", graph: data }, 30000);
+          if (loaded.isError) return loaded;
+          return appendNote(loaded, await claimLoadedInstance(ctx));
         } catch (err) {
           return fail(err);
         }

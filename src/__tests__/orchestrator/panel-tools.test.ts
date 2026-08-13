@@ -532,10 +532,15 @@ describe("panel-tools: panel_load_workflow path (server-side disk read)", () => 
     const res = await defByName("panel_load_workflow").handler({ path: file }, ctx);
 
     expect(res.isError).toBeUndefined();
-    expect(calls).toHaveLength(1);
-    expect(calls[0]).toMatchObject({ cmd: "graph_load" });
+    // Counted by COMMAND, not by total calls (#1478): the load now also claims the
+    // workflow-instance fence it just invalidated, and on a fake ctx that cannot
+    // corroborate an identity the rebind rechecks a few times. What this test guards is
+    // that the graph is loaded EXACTLY once — a second graph_load would replace the
+    // user's canvas twice — and that is now asserted directly.
+    const loads = calls.filter((c) => c.cmd === "graph_load");
+    expect(loads).toHaveLength(1);
     // The big JSON was read SERVER-SIDE and handed to graph_load verbatim.
-    expect(calls[0].graph).toMatchObject(graph);
+    expect(loads[0].graph).toMatchObject(graph);
   });
 
   it("rejects a non-existent path WITHOUT firing graph_load", async () => {
