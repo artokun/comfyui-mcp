@@ -3,53 +3,78 @@
 // so it made every report ambiguous about which build produced it — the reporter found it
 // while filing a report about something else entirely.
 //
-// ASSERTED ON THE SOURCE, deliberately. The obvious functional test — start the server and
-// read its initialize response — cannot run here: `boot.ts` is a program, not a module you
-// can import without it taking over stdio. And the failure mode being guarded is a literal
-// creeping back into one specific object, which the source is the honest place to check.
-// (The behaviour itself was verified live: a real `initialize` against the built server
-// returns the package version, where it returned "0.1.0" before this change.)
+// The resolution is EXECUTED here, not described. A first version of this file asserted on
+// `boot.ts`'s source text, which codex correctly rejected: source text cannot distinguish
+// "reads the manifest" from "reads the manifest and then returns something else". Pulling
+// the logic into `readPackageVersion` made it runnable — `boot.ts` itself is a program that
+// seizes stdio, so a test can never import it.
+//
+// The wiring is still checked textually, because that IS a text fact: the one line in
+// boot.ts that decides whether any of this reaches the handshake.
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
+import { readPackageVersion, UNKNOWN_VERSION } from "../utils/package-version.js";
 
 const bootSrc = readFileSync(new URL("../boot.ts", import.meta.url), "utf-8");
+const manifest = JSON.parse(
+  readFileSync(new URL("../../package.json", import.meta.url), "utf-8"),
+) as { version: string };
 
-describe("the MCP server advertises its REAL version (#1447)", () => {
+const fakeManifest = (body: string) => (): string => body;
+
+describe("readPackageVersion resolves the REAL version (#1447)", () => {
+  it("reads this package's actual version by default", () => {
+    // No injection: the default URL must land on our own manifest from wherever this
+    // module ends up, which is the whole point of resolving from import.meta.url.
+    expect(readPackageVersion()).toBe(manifest.version);
+    expect(readPackageVersion()).not.toBe("0.1.0");
+  });
+
+  it("survives a UTF-8 BOM (codex)", () => {
+    // npm writes manifests without one, but a hand-edited file on Windows can carry it,
+    // and JSON.parse throws on the BOM — losing the real version to an editor's byte-order
+    // mark would reintroduce exactly the ambiguity this fixes.
+    const withBom = "﻿" + JSON.stringify({ version: "1.2.3" });
+    expect(readPackageVersion(new URL("file:///x/package.json"), fakeManifest(withBom))).toBe(
+      "1.2.3",
+    );
+  });
+
+  it("an unreadable, malformed, or version-less manifest yields an IMPOSSIBLE version", () => {
+    // Not a plausible one. The literal this replaced was "0.1.0", which read as data.
+    const boom = (): string => {
+      throw new Error("ENOENT");
+    };
+    expect(readPackageVersion(new URL("file:///x/package.json"), boom)).toBe(UNKNOWN_VERSION);
+    expect(
+      readPackageVersion(new URL("file:///x/package.json"), fakeManifest("{not json")),
+    ).toBe(UNKNOWN_VERSION);
+    expect(
+      readPackageVersion(new URL("file:///x/package.json"), fakeManifest('{"name":"x"}')),
+    ).toBe(UNKNOWN_VERSION);
+    expect(
+      readPackageVersion(new URL("file:///x/package.json"), fakeManifest('{"version":""}')),
+    ).toBe(UNKNOWN_VERSION);
+    expect(UNKNOWN_VERSION).toBe("0.0.0");
+  });
+});
+
+describe("the MCP server is wired to it (#1447)", () => {
   it("the McpServer identity block carries no hardcoded version literal", () => {
-    // Anchor on the construction itself rather than scanning the whole file: a version
-    // string elsewhere (a comment, a compatibility floor) is not this bug.
+    // WIRING, not behaviour: a correct helper nothing calls would leave the bug shipped.
     const at = bootSrc.indexOf('name: "comfyui-mcp",');
     expect(at, "the McpServer identity block moved — re-anchor this test").toBeGreaterThan(-1);
     const block = bootSrc.slice(at, at + 200);
 
     expect(block).toMatch(/version:\s*SERVER_VERSION/);
-    // The specific regression: any quoted semver back in that slot.
     expect(block).not.toMatch(/version:\s*["'`]\d+\.\d+\.\d+/);
   });
 
-  it("SERVER_VERSION is resolved from the install, not written down", () => {
-    const at = bootSrc.indexOf("const SERVER_VERSION");
-    expect(at, "SERVER_VERSION was removed or renamed").toBeGreaterThan(-1);
-    const decl = bootSrc.slice(at, at + 400);
-
-    // It must READ our own manifest, resolved from this module's own URL so it cannot
-    // pick up a parent directory's package.json.
-    expect(decl).toMatch(/readFileSync\(new URL\("\.\.\/package\.json", import\.meta\.url\)/);
-    // And it must NOT reach for detectInstallMode: that helper lstat/realpath-walks the
-    // install, and this value is built on the handshake path — the very thing #1447 is
-    // about (codex). Cheap here is not a nicety, it is the point.
-    expect(decl).not.toMatch(/detectInstallMode/);
-    // And its fallback must be an OBVIOUSLY impossible version. A plausible-looking one
-    // (like the 0.1.0 this replaced) is a lie that reads as data.
-    expect(decl).toMatch(/["'`]0\.0\.0["'`]/);
-    expect(decl).not.toMatch(/["'`]0\.1\.0["'`]/);
-  });
-
-  it("the resolution happens ONCE, at module load", () => {
-    // A per-call read could only ever differ if the files changed under a running
-    // process, which would report a version this process is not executing.
-    const at = bootSrc.indexOf("const SERVER_VERSION");
-    const decl = bootSrc.slice(at, at + 400);
-    expect(decl).toMatch(/const SERVER_VERSION: string = \(\(\)/);
+  it("SERVER_VERSION comes from the helper, once, and not from the install walk", () => {
+    expect(bootSrc).toMatch(/const SERVER_VERSION: string = readPackageVersion\(\);/);
+    // detectInstallMode() lstat/realpath-walks the install. It is fine after a transport is
+    // up (the orchestrator and the issue reporter both use it there) and wrong HERE, on the
+    // handshake path — which is the very thing #1447 is about (codex).
+    expect(bootSrc).not.toMatch(/detectInstallMode/);
   });
 });

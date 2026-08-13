@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import { randomBytes } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -12,6 +11,7 @@ import { collectToolCatalog, registerFullTools } from "./tools/index.js";
 import { registerCompactTools } from "./tools/compact.js";
 import { tryInstallRetiredNameRedirect } from "./tools/retired-redirect.js";
 import { logger } from "./utils/logger.js";
+import { readPackageVersion } from "./utils/package-version.js";
 import { JobWatcher } from "./services/job-watcher.js";
 import { parseCliArgs, validateConnectUrl, exportExplicitToolMode, type ToolMode } from "./transport/cli.js";
 import { startHttpServer } from "./transport/http.js";
@@ -117,36 +117,14 @@ function selfUpdateOnLoad(): void {
  * a bug report quotes, so a constant here makes every report ambiguous about which build
  * produced it — including the reports we ask people to send us.
  *
- * READ DIRECTLY, NOT VIA `detectInstallMode()` (codex). That helper answers a bigger
- * question — which install mode is this, global vs npx vs checkout — and pays for it with
- * an `lstatSync`/`realpathSync` chain. The orchestrator and the issue reporter can afford
- * that because they run it AFTER their transport is up; this value is needed while
- * building the server, i.e. on the handshake path. Putting a symlink-resolving directory
- * walk in front of the handshake would be self-defeating in a fix filed under "startup
- * exceeds the client's timeout", even though the cost is normally microseconds.
- *
- * What is left is ONE small read of our own manifest, resolved from this module's own URL
- * so it cannot pick up a parent directory's package.json: `dist/boot.js` → `dist/../` and
- * `src/boot.ts` → the repo root, both the package root. Node already performed far more
- * I/O importing this file, so this adds no meaningful class of risk.
+ * Resolution lives in `readPackageVersion` (utils/package-version.ts) — cheap enough to sit
+ * on the handshake path, and testable by execution rather than by reading this file's text.
  *
  * Read ONCE at module load rather than per call: a running process cannot hot-swap its own
  * code, so a later read could only differ if the files changed underneath it — which would
  * report a version this process is not executing.
- *
- * Falls back to `0.0.0` — deliberately not `0.1.0`. If the read ever fails, an obviously
- * impossible version is a signal that something is wrong; a plausible one is a lie that
- * looks like data.
  */
-const SERVER_VERSION: string = ((): string => {
-  try {
-    const raw = readFileSync(new URL("../package.json", import.meta.url), "utf-8");
-    const version = (JSON.parse(raw) as { version?: unknown }).version;
-    return typeof version === "string" && version ? version : "0.0.0";
-  } catch {
-    return "0.0.0";
-  }
-})();
+const SERVER_VERSION: string = readPackageVersion();
 
 async function createConfiguredServer(toolMode: ToolMode = "compact"): Promise<McpServer> {
   const server = new McpServer(
