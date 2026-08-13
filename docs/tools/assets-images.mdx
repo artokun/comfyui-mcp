@@ -43,6 +43,12 @@ Fetch, browse and inspect ComfyUI images and registered assets. Driven by the `a
 <ParamField path="save_dir" type="string">
   action:"get" — absolute local directory to save the file in. Defaults to a 'comfyui-images' folder inside the platform temp directory (os.tmpdir()), which is created if missing. A RELATIVE value is resolved against this MCP process's working directory, which is the client's choice and may not be writable. On Windows a drive-less path like \out is resolved against this process's CURRENT DRIVE, not a drive you chose. Prefer a fully-qualified path (C:\... or \\server\share); the returned 'Saved to:' line always names the resolved absolute path.
 </ParamField>
+<ParamField path="max_preview_bytes" type="integer">
+  action:"get" — ceiling on the base64 payload returned INLINE (default ~16MB). The file saved to disk is never affected. Lower it when your client rejects or truncates large tool results; the reply says when it downscaled and by how much.
+</ParamField>
+<ParamField path="max_preview_dimension" type="integer">
+  action:"get" — ceiling on the inline preview's longest side in pixels (default 4096). Applies even when the byte budget is satisfied, since some consumers reject by dimension — but only for an image this server can decode; an undecodable one under the byte budget is passed through as-is. Does not affect the saved file.
+</ParamField>
 <ParamField path="path" type="string">
   A source image path. action:"convert" — a path under COMFYUI_PATH/output (provide exactly one of asset_id or path). action:"analyze_color" — an absolute image path, or a path under the ComfyUI output dir (videos: extract a frame to PNG first).
 </ParamField>
