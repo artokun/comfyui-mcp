@@ -105,12 +105,22 @@ describe("a remote ComfyUI that never comes back is reported, not described as r
 
     expect(out.saw_down).toBe(true);
     expect(String(out.note)).toMatch(/WENT DOWN/);
-    expect(String(out.note)).toMatch(/has NOT come back/);
+    expect(String(out.note)).toMatch(/has NOT come back within/);
     // The recovery the reporter had to work out for themselves.
     expect(String(out.note)).toMatch(/start ComfyUI again from its own launcher/i);
     expect(String(out.note)).toMatch(/Pinokio/);
     // The claim that was wrong for them is gone.
     expect(String(out.note)).not.toMatch(/restarting out-of-band/);
+
+    // AND IT MUST NOT OVER-CLAIM IN THE NEW DIRECTION (codex P1). A bounded window
+    // cannot establish that a server is permanently gone — a remote host may simply be
+    // slower to boot than the budget — so the note names both explanations and the check
+    // that separates them, and never tells the reader to stop waiting.
+    expect(String(out.note)).toMatch(/does NOT prove it is gone for good/i);
+    expect(String(out.note)).toMatch(/can take longer than this to boot/i);
+    expect(String(out.note)).toMatch(/get_system_stats/);
+    expect(String(out.note)).not.toMatch(/do not wait/i);
+    expect(String(out.note)).not.toMatch(/will stay down/i);
 
     // And it still promises nothing about readiness.
     expect(out.ready).toBe(false);

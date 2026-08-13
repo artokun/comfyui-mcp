@@ -12094,32 +12094,40 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           // remote dispatch could sit here far longer than a local one.
           gate.deadline = Math.min(Date.now() + timing.budgetMs, overallDeadline);
           const remote = remoteProbeBase != null ? await recoveryPromise : null;
-          const stillDown =
-            remote != null && remote.sawDown && !remote.ready
-              ? normalizeProbe(
-                  await (healthProbeOverride ?? probeComfyEndpoint)(
-                    remoteProbeBase as string,
-                    Math.max(1, Math.min(timing.probeTimeoutMs, overallDeadline - Date.now())),
-                  ).catch(() => "unknown" as ProbeStatus),
-                ) === "down"
-              : false;
-          if (stillDown) {
+          if (remote != null && remote.sawDown && !remote.ready) {
+            const waited = Math.round(remote.waited_ms / 1000);
+            // SAY WHAT WAS MEASURED, AND NOT ONE STEP FURTHER (codex P1).
+            //
+            // A first version told the reader "do not wait for it — it will stay down". That
+            // is a claim about the FUTURE built from a bounded window: a remote host can take
+            // longer than this budget to boot, and it would have sent someone off to hand-start
+            // a server that was seconds from coming back. Unmeasured advice stated confidently
+            // is the exact defect #742 is about; making it point the other way is not a fix.
+            //
+            // What IS established: this address went down and did not answer again inside the
+            // window. Both explanations are named, and so is the one cheap check that separates
+            // them — which is all the caller needs to pick a next step.
+            //
+            // (A second probe after the window was tried and dropped: it added a call that
+            // could start past the handler's own deadline (codex P2) to support a "still not
+            // answering RIGHT NOW" phrasing that this wording no longer needs.)
             return ok({
               rebooting: true,
               ready: false,
               confirmed_cycle: false,
               dispatched: true,
               saw_down: true,
-              probes: remote?.attempts,
+              probes: remote.attempts,
               note:
                 `ComfyUI restart was dispatched and accepted, and ${remoteProbeBase} WENT DOWN — ` +
-                `but it has NOT come back, and it is still not answering now. Do not wait for it: ` +
-                `nothing here restarts it, and if whatever launches it does not do so automatically ` +
-                `it will stay down. This is the common outcome for an externally-managed install ` +
-                `(e.g. Pinokio, which only re-launches on the Manager's dependency-install signal) — ` +
-                `start ComfyUI again from its own launcher, then reload the browser tab so the panel ` +
-                `reconnects. If it is merely slow to boot, get_system_stats (action:"health") will ` +
-                `start answering on its own.`,
+                `but it has NOT come back within ${waited}s. That does NOT prove it is gone for ` +
+                `good: a remote host can take longer than this to boot. It is also exactly what a ` +
+                `restart that nothing relaunches looks like, which is common for an externally- ` +
+                `managed install (e.g. Pinokio, whose launcher only re-launches on the Manager's ` +
+                `dependency-install signal). To tell the two apart, check get_system_stats ` +
+                `(action:"health") in a moment: if it starts answering, it was just slow. If it ` +
+                `stays unreachable, nothing is going to bring it back on its own — start ComfyUI ` +
+                `again from its own launcher, then reload the browser tab so the panel reconnects.`,
             });
           }
           // Unchanged for every other case — including "it answered", which is NOT promoted
