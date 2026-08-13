@@ -10849,17 +10849,24 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           }
           if (probeOk) {
             settledNote =
+              // ONE OBSERVATION, STATED AS ONE (codex r2). A passing graph_query proves that
+              // read passed this fence just now — not that every command will, and not that
+              // the cause "was" a race. The earlier wording generalised to "READS work" and
+              // asserted the cause outright, which is the same overclaim this reply exists to
+              // stop making.
               `
 
-CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
-              `SUCCEEDED — so this fence does NOT reject graph commands, and READS work against ` +
-              `it right now. This was a reconciliation race after the reconnect, not a broken ` +
-              `binding.` +
+CHECKED FOR YOU: the graph read this message prescribes was just run — a ` +
+              `graph_query against this fence — and it SUCCEEDED. So the fence did not reject ` +
+              `THAT command a moment ago, which is the single fact this settles: it is evidence ` +
+              `of a reconciliation race after the reconnect rather than a broken binding, not a ` +
+              `guarantee about the next command.` +
               (canMutateNow === false
                 ? ` MUTATIONS are a separate matter and remain refused on this tab — that is the ` +
                   `write-fence capability above, not the binding, and re-running this will not ` +
                   `change it.`
-                : ` No recovery step is needed for the binding; carry on.`) +
+                : ` Nothing suggests a recovery step is needed for the binding; the next graph ` +
+                  `command is still the authority.`) +
               ` (The rebind itself still did not happen, which is why this is reported as a ` +
               `failure.)`;
           } else if (probeRefused === true) {

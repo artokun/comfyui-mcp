@@ -128,9 +128,12 @@ describe("an UNCONFIRMED record whose uuid matches the fence gets its answer up 
     expect(out.isError).toBe(true);
     expect(out.text).toMatch(/CHECKED FOR YOU/);
     expect(out.text).toMatch(/it SUCCEEDED/);
-    expect(out.text).toMatch(/READS work against it/);
-    expect(out.text).toMatch(/reconciliation race/);
-    expect(out.text).toMatch(/No recovery step is needed/);
+    expect(out.text).toMatch(/did not reject THAT command/);
+    expect(out.text).toMatch(/evidence of a reconciliation race/);
+    // ONE observation stated as one: no generalisation to every command (codex r2).
+    expect(out.text).toMatch(/not a\s+guarantee about the next command/);
+    expect(out.text).not.toMatch(/READS work/);
+    expect(out.text).toMatch(/Nothing suggests a recovery step is needed/);
     // And it does not overclaim: the rebind itself is still reported as not having happened.
     expect(out.text).toMatch(/rebind itself still did not happen/);
   });
@@ -181,8 +184,8 @@ describe("an UNCONFIRMED record whose uuid matches the fence gets its answer up 
       canMutate: false,
     });
 
-    expect(out.text).toMatch(/READS work against it/);
+    expect(out.text).toMatch(/did not reject THAT command/);
     expect(out.text).toMatch(/MUTATIONS are a separate matter/);
-    expect(out.text).not.toMatch(/No recovery step is needed/);
+    expect(out.text).not.toMatch(/Nothing suggests a recovery step is needed/);
   });
 });
