@@ -16,6 +16,7 @@ import { AssetRegistry } from "../services/asset-registry.js";
 import { reconcileAssetsFromHistory } from "../services/asset-reconcile.js";
 import { viewAssetImage } from "../services/view-image.js";
 import { convertImage } from "../services/image-convert.js";
+import { boundInlineImage } from "../services/inline-preview.js";
 import { analyzeColor } from "../services/color-analysis.js";
 import { uploadOutput } from "../services/storage-upload.js";
 import type { UploadOutputOptions } from "../services/storage-upload.js";
@@ -255,6 +256,26 @@ export function registerImageManagementTools(server: McpServer): void {
             "you chose. Prefer a fully-qualified path (C:\\... or \\\\server\\share); " +
             "the returned 'Saved to:' line always names the resolved absolute path.",
         ),
+      max_preview_bytes: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe(
+          'action:"get" — ceiling on the base64 payload returned INLINE (default ~16MB). ' +
+            "The file saved to disk is never affected. Lower it when your client rejects " +
+            "or truncates large tool results; the reply says when it downscaled and by how much.",
+        ),
+      max_preview_dimension: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe(
+          'action:"get" — ceiling on the inline preview\'s longest side in pixels ' +
+            "(default 4096). Applies even when the byte budget is satisfied, since some " +
+            "consumers reject by dimension. Does not affect the saved file.",
+        ),
       path: z
         .string()
         .optional()
@@ -440,18 +461,60 @@ export function registerImageManagementTools(server: McpServer): void {
               };
             }
 
+            // #1495 — BOUND THE INLINE PAYLOAD. An 8504×17008 render encoded to ~267 MB and
+            // blew the caller's 64 MB IPC frame, so a perfectly good output could not be
+            // looked at. The saved file above is untouched; only what goes on the wire is
+            // capped.
+            const bounded = await boundInlineImage(base64, mimeType, {
+              budgetBytes: args.max_preview_bytes,
+              maxDimension: args.max_preview_dimension,
+            });
+
+            // Could not be reduced: say so and keep the saved path, rather than emitting a
+            // payload that will fail in transport — where the error names a byte count and
+            // not the image, which is how the reporter ended up debugging their own
+            // workflow instead of this tool.
+            if (bounded.refused) {
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text:
+                      (saveError ? `${saveError} ` : `Saved to: ${savePath}. `) +
+                      `NOT rendered inline: ${bounded.refused.reason}. The full-resolution ` +
+                      `file is on disk and unaffected — open it directly, or re-run ` +
+                      `get_image with a smaller max_preview_dimension.`,
+                  },
+                ],
+              };
+            }
+
+            // A silently downscaled image is a worse failure than the one being fixed: an
+            // agent reads fine detail off it and reports confidently. So the preview
+            // ANNOUNCES itself, with the true dimensions and where the real file is.
+            const previewNote = bounded.preview
+              ? ` PREVIEW ONLY: the inline image was downscaled to ` +
+                `${bounded.preview.width}×${bounded.preview.height} because the original ` +
+                `(${bounded.preview.originalWidth}×${bounded.preview.originalHeight}, ` +
+                `~${Math.round(bounded.preview.originalEncodedBytes / 1_048_576)} MB encoded) ` +
+                `exceeds what can be sent inline. Do NOT judge fine detail, small text, or ` +
+                `pixel-level artefacts from it — read the full-resolution file at the path ` +
+                `above for that.`
+              : "";
+
             return {
               content: [
                 {
                   type: "text" as const,
-                  text: saveError
-                    ? `${saveError} The image itself is returned inline below.`
-                    : `Saved to: ${savePath}`,
+                  text:
+                    (saveError
+                      ? `${saveError} The image itself is returned inline below.`
+                      : `Saved to: ${savePath}`) + previewNote,
                 },
                 {
                   type: "image" as const,
-                  data: base64,
-                  mimeType,
+                  data: bounded.base64,
+                  mimeType: bounded.mimeType,
                 },
               ],
             };

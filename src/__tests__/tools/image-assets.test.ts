@@ -178,6 +178,11 @@ describe("image/asset registration", () => {
       "histogram",
       "limit",
       "lossless",
+      // #1495 — the two knobs on the inline preview budget. Listed here on purpose: this
+      // assertion is the surface gate, so a parameter cannot appear without someone
+      // deciding it should.
+      "max_preview_bytes",
+      "max_preview_dimension",
       "out_path",
       "path",
       "pattern",
