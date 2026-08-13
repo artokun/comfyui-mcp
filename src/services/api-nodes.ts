@@ -101,23 +101,59 @@ export function isApiNode(def: ComfyUINodeDef): boolean {
  * image before upload and spend nothing. A named list is auditable and each entry is a
  * claim someone can check.
  */
-const EXTERNAL_SERVICE_PACKS: ReadonlyArray<{
+interface ExternalServicePack {
   /** Lower-cased substring matched against `python_module`. */
   module: string;
+  /** Lower-cased category prefixes that identify this pack's nodes even when the module
+   *  path does not. A user who clones the pack into a differently-named directory changes
+   *  `python_module` and nothing else (codex P1) — the category is baked into the pack's
+   *  own source, so it survives the rename. */
+  categoryPrefixes?: readonly string[];
   /** Lower-cased category prefixes within the pack that are genuinely local (helpers,
    *  utilities) and must NOT be flagged — the false-positive direction costs a real
    *  confirmation prompt on a free node. */
   localCategoryPrefixes?: readonly string[];
-  why: string;
-}> = [
-  { module: "comfyui-fal-api", localCategoryPrefixes: ["fal/utils"], why: "fal.ai — billed per request (#1483)" },
-  { module: "comfyui-pvl-fal-nodes", localCategoryPrefixes: ["fal/utils"], why: "fal.ai — billed per request" },
-  { module: "comfyui_fal_api", localCategoryPrefixes: ["fal/utils"], why: "fal.ai — billed per request" },
-  { module: "comfyui-fal-api-flux", why: "fal.ai — billed per request" },
+  /** Who bills the user. Named in the guidance, because "that provider" tells a reader
+   *  nothing they can act on and they cannot check a balance they cannot name. */
+  provider: string;
+}
+
+const EXTERNAL_SERVICE_PACKS: readonly ExternalServicePack[] = [
+  {
+    module: "comfyui-fal-api",
+    categoryPrefixes: ["fal"],
+    localCategoryPrefixes: ["fal/utils"],
+    provider: "fal.ai",
+  },
+  { module: "comfyui-pvl-fal-nodes", localCategoryPrefixes: ["fal/utils"], provider: "fal.ai" },
+  { module: "comfyui_fal_api", localCategoryPrefixes: ["fal/utils"], provider: "fal.ai" },
+  { module: "comfyui-fal-api-flux", provider: "fal.ai" },
 ];
 
-/** Input names that mean the node authenticates to a service the user pays for. */
-const CREDENTIAL_INPUT_RE = /^(?:.*_)?(?:api_?key|access_?token|auth_?token|api_?secret|secret_?key)$/i;
+/**
+ * Input names that mean the node authenticates to a service the user pays for.
+ *
+ * Widened past `api_key` (codex P1): a paid node is just as likely to ask for `api_token`,
+ * `client_secret` or camelCase `apiToken`, and `/i` folds case but not word shape — so the
+ * name is normalised to snake_case before matching rather than the pattern being asked to
+ * cover every spelling.
+ *
+ * Bare `secret_key` was tried and REMOVED (codex P2): a local hashing/crypto node
+ * legitimately takes one, and flagging it would report a free graph as `api`. Every term
+ * kept here names a REMOTE-service credential specifically (`api_*`, `client_secret`,
+ * bearer/access/auth tokens), so authentication that is not obviously to a service does
+ * not, on its own, spend the user's confirmation budget.
+ */
+const CREDENTIAL_INPUT_RE =
+  /^(?:.*_)?(?:api_key|api_token|api_secret|access_token|auth_token|bearer_token|client_secret)$/;
+
+/** camelCase/PascalCase → snake_case, so `apiToken` and `api_token` match the same rule. */
+function normalizeInputName(name: string): string {
+  return name
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+}
 
 function declaresCredentialInput(def: ComfyUINodeDef): boolean {
   const input = (def as { input?: { required?: unknown; optional?: unknown } }).input;
@@ -125,10 +161,44 @@ function declaresCredentialInput(def: ComfyUINodeDef): boolean {
   for (const group of [input.required, input.optional]) {
     if (!group || typeof group !== "object") continue;
     for (const name of Object.keys(group as Record<string, unknown>)) {
-      if (CREDENTIAL_INPUT_RE.test(name)) return true;
+      if (CREDENTIAL_INPUT_RE.test(normalizeInputName(name))) return true;
     }
   }
   return false;
+}
+
+function packMatches(pack: ExternalServicePack, category: string, pythonModule: string): boolean {
+  if (pack.module && pythonModule.includes(pack.module)) return true;
+  return (
+    pack.categoryPrefixes?.some((p) => category === p || category.startsWith(`${p}/`)) === true
+  );
+}
+
+/**
+ * Which known paid pack does this node belong to, if any — or null.
+ *
+ * EVERY matching entry is considered, and a single one that does NOT exempt the node wins
+ * (codex P1). Returning on the first match let `ComfyUI-fal-API-Flux` bind to the broader
+ * `comfyui-fal-api` entry and inherit ITS `FAL/Utils` exemption, so a paid Flux node in
+ * that category answered "free" while the stricter entry written for that very pack was
+ * never reached. Resolving toward PAID is also the correct direction for a money guard:
+ * disagreement between two entries is not evidence of free.
+ */
+function externalServicePackFor(def: ComfyUINodeDef): ExternalServicePack | null {
+  const category = (def.category ?? "").toLowerCase();
+  const pythonModule = (def.python_module ?? "").toLowerCase();
+  let exemptedBy: ExternalServicePack | null = null;
+  for (const pack of EXTERNAL_SERVICE_PACKS) {
+    if (!packMatches(pack, category, pythonModule)) continue;
+    const exempt = pack.localCategoryPrefixes?.some(
+      (p) => category === p || category.startsWith(`${p}/`),
+    );
+    if (!exempt) return pack;
+    exemptedBy = pack;
+  }
+  // Matched only packs that call this one of their own local helpers.
+  void exemptedBy;
+  return null;
 }
 
 /**
@@ -138,20 +208,16 @@ function declaresCredentialInput(def: ComfyUINodeDef): boolean {
  */
 export function isExternalServiceNode(def: ComfyUINodeDef): boolean {
   if (isApiNode(def)) return false;
-  const category = (def.category ?? "").toLowerCase();
-  const pythonModule = (def.python_module ?? "").toLowerCase();
-  for (const pack of EXTERNAL_SERVICE_PACKS) {
-    if (!pythonModule.includes(pack.module)) continue;
-    // A pack's own local helpers are exempt — being shipped alongside paid nodes is not
-    // evidence that this node spends anything.
-    if (pack.localCategoryPrefixes?.some((p) => category === p || category.startsWith(`${p}/`))) {
-      return false;
-    }
-    return true;
-  }
+  if (externalServicePackFor(def)) return true;
   // The general catch: a node that asks for a service credential cannot be CONFIRMED free,
   // whichever pack it came from.
   return declaresCredentialInput(def);
+}
+
+/** The provider that bills for `def`, when a known pack identifies one. */
+export function externalServiceProvider(def: ComfyUINodeDef): string | null {
+  if (isApiNode(def)) return null;
+  return externalServicePackFor(def)?.provider ?? null;
 }
 
 export interface ApiNodeSummary {
@@ -283,9 +349,14 @@ export interface WorkflowRuntime {
    *  credential). Kept separate from `apiNodes` because these are NOT Comfy partner nodes
    *  and do not share its auth model — but they count the same way for `usesApiNodes` and
    *  `runtime`, because the caller's question is "will this spend money", not "whose API
-   *  is it". Absent from the result when empty, so an unrelated caller reading this shape
-   *  sees nothing new. */
-  externalApiNodes?: string[];
+   *  is it". ALWAYS PRESENT, empty when there are none (codex): the tool documents it as
+   *  an array, and a reader that follows the documented shape must not have to guard for
+   *  it going missing on exactly the graphs that look safe. */
+  externalApiNodes: string[];
+  /** Who bills for the `externalApiNodes`, when a known pack names them (e.g. "fal.ai").
+   *  Omitted when nothing recognised a provider — a node caught only by its credential
+   *  input proves it authenticates somewhere, not to whom. */
+  externalProviders?: string[];
   /** All class_types found in the workflow. */
   classTypes: string[];
   /** class_types not present in the connected server's /object_info (can't be
@@ -323,6 +394,7 @@ export async function checkWorkflowRuntime(
   const objectInfo = await deps.getObjectInfo();
   const apiNodes: string[] = [];
   const externalApiNodes: string[] = [];
+  const externalProviders: string[] = [];
   const unknownNodes: string[] = [];
   for (const ct of classTypes) {
     // A FRONTEND-ONLY NODE IS NOT AN UNKNOWN ONE (#1372). MarkdownNote, Note, Reroute and
@@ -360,7 +432,11 @@ export async function checkWorkflowRuntime(
     if (isApiNode(def)) apiNodes.push(ct);
     // #1483 — a paid third-party node is not a partner node, but it spends the user's
     // money just the same, so it must reach the same verdict.
-    else if (isExternalServiceNode(def)) externalApiNodes.push(ct);
+    else if (isExternalServiceNode(def)) {
+      externalApiNodes.push(ct);
+      const provider = externalServiceProvider(def);
+      if (provider && !externalProviders.includes(provider)) externalProviders.push(provider);
+    }
   }
   const paidNodes = [...apiNodes, ...externalApiNodes];
   const hasApiNodes = paidNodes.length > 0;
@@ -393,7 +469,8 @@ export async function checkWorkflowRuntime(
     runtime,
     usesApiNodes,
     apiNodes,
-    ...(externalApiNodes.length > 0 ? { externalApiNodes } : {}),
+    externalApiNodes,
+    ...(externalProviders.length > 0 ? { externalProviders } : {}),
     classTypes,
     unknownNodes,
     subgraphCount: countSubgraphs(graph),

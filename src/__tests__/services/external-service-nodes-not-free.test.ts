@@ -93,6 +93,8 @@ describe("a paid external-service node is never reported as local/free (#1483)",
     expect(out.runtime).toBe("mixed");
     expect(out.usesApiNodes).toBe(true);
     expect(out.externalApiNodes).toEqual(["NanoBananaPro_fal"]);
+    // The provider is NAMED, so the reader knows whose balance to check (codex).
+    expect(out.externalProviders).toEqual(["fal.ai"]);
     // It is NOT a Comfy partner node and must not be described as one.
     expect(out.apiNodes).toEqual([]);
     // The report's `unknownNodes: []` was correct and stays correct — the node IS
@@ -119,7 +121,7 @@ describe("a paid external-service node is never reported as local/free (#1483)",
     });
     expect(out.runtime).toBe("local");
     expect(out.usesApiNodes).toBe(false);
-    expect(out.externalApiNodes).toBeUndefined();
+    expect(out.externalApiNodes).toEqual([]);
   });
 
   it("a paid pack's OWN local helper is not flagged", async () => {
@@ -140,7 +142,7 @@ describe("a paid external-service node is never reported as local/free (#1483)",
     expect(isExternalServiceNode(PARTNER)).toBe(false);
     const out = await runtimeOf(["ClaudeNode"], { ClaudeNode: PARTNER });
     expect(out.apiNodes).toEqual(["ClaudeNode"]);
-    expect(out.externalApiNodes).toBeUndefined();
+    expect(out.externalApiNodes).toEqual([]);
     expect(out.runtime).toBe("api");
   });
 
@@ -148,5 +150,64 @@ describe("a paid external-service node is never reported as local/free (#1483)",
     const out = await runtimeOf(["NanoBananaPro_fal"], { NanoBananaPro_fal: NANO_BANANA_PRO_FAL });
     expect(out.runtime).toBe("api");
     expect(out.usesApiNodes).toBe(true);
+  });
+
+  // ── codex review: the three false-NEGATIVE holes, each a way to keep spending money ──
+
+  it("a RENAMED install directory is still caught (codex P1)", async () => {
+    // `python_module` is just the folder the user cloned into. Cloning ComfyUI-fal-API as
+    // `my_fal_install` changes it and nothing else, and a module-only registry answered
+    // "free". The pack's CATEGORY is baked into its source, so it survives the rename.
+    const renamed = def({
+      ...NANO_BANANA_PRO_FAL,
+      python_module: "custom_nodes.my_fal_install",
+    } as Partial<ComfyUINodeDef>);
+    expect(isExternalServiceNode(renamed)).toBe(true);
+    const out = await runtimeOf(["NanoBananaPro_fal"], { NanoBananaPro_fal: renamed });
+    expect(out.runtime).toBe("api");
+    expect(out.externalProviders).toEqual(["fal.ai"]);
+  });
+
+  it("other credential spellings are caught — api_token, camelCase, client_secret (codex P1)", async () => {
+    // `/i` folds case but not word shape, so `apiToken` slipped through an `api_?key`-only
+    // pattern; the name is normalised to snake_case before matching now.
+    for (const inputName of ["api_token", "apiToken", "client_secret", "accessToken", "bearer_token"]) {
+      const node = def({
+        name: `Paid_${inputName}`,
+        category: "misc",
+        python_module: "custom_nodes.some-unlisted-pack",
+        input: { required: { prompt: ["STRING", {}] }, optional: { [inputName]: ["STRING", {}] } },
+      });
+      expect(isExternalServiceNode(node), `${inputName} must be treated as a credential`).toBe(true);
+    }
+  });
+
+  it("a more specific pack entry is not defeated by a broader one's exemption (codex P1)", async () => {
+    // `custom_nodes.ComfyUI-fal-API-Flux` also contains the substring `comfyui-fal-api`.
+    // Returning on the FIRST match let it inherit that entry's FAL/Utils exemption, so a
+    // paid Flux node in that category answered "free" while the stricter entry written for
+    // this very pack was never reached. Every match is considered and PAID wins.
+    const fluxInUtils = def({
+      name: "FluxPro_fal",
+      category: "FAL/Utils",
+      python_module: "custom_nodes.ComfyUI-fal-API-Flux",
+      input: { required: { prompt: ["STRING", {}] } },
+    });
+    expect(isExternalServiceNode(fluxInUtils)).toBe(true);
+  });
+
+  it("a local crypto node taking `secret_key` is NOT called paid (codex P2)", async () => {
+    // The false-positive direction. Authentication is not proof of a paid service — this
+    // hashes locally and spends nothing, and reporting it as `api` would teach the reader
+    // that the warning is noise.
+    const hasher = def({
+      name: "HMACSign",
+      category: "utils/crypto",
+      python_module: "custom_nodes.comfyui-logicutils",
+      input: { required: { text: ["STRING", {}], secret_key: ["STRING", {}] } },
+    });
+    expect(isExternalServiceNode(hasher)).toBe(false);
+    const out = await runtimeOf(["HMACSign", "KSampler"], { HMACSign: hasher, KSampler: CORE_SAMPLER });
+    expect(out.runtime).toBe("local");
   });
 });

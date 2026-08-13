@@ -658,6 +658,14 @@ async function checkRuntimeAction(args: {
   const classTypes = extractWorkflowClassTypes(graph);
   try {
     const runtime = await checkWorkflowRuntime(graph, undefined, { bundledLocalPack });
+    // NAME THE PROVIDER (codex P2). "billed by that provider" is unactionable — the reader
+    // cannot check a balance they cannot name, and a user who goes looking at their Comfy
+    // credits, finds them untouched, and concludes the warning was wrong is exactly the
+    // failure this whole verdict exists to prevent. When only the credential signal fired
+    // we genuinely do not know WHO bills, and it says that instead of inventing a name.
+    const billedBy = runtime.externalProviders?.length
+      ? runtime.externalProviders.join(" / ")
+      : "the service it authenticates to";
     const guidance =
       runtime.runtime === "local"
         ? "Local-GPU / free — every node runs on the user's own GPU, no paid credits."
@@ -670,8 +678,8 @@ async function checkRuntimeAction(args: {
             // untouched may conclude the warning was wrong and proceed.
             (runtime.externalApiNodes?.length
               ? runtime.apiNodes.length
-                ? `This workflow uses BOTH hosted Comfy API nodes (PAID api credits) and third-party service nodes billed by their own provider: ${runtime.externalApiNodes.join(", ")}. `
-                : `This workflow calls a PAID THIRD-PARTY SERVICE — ${runtime.externalApiNodes.join(", ")} — billed by that provider on the user's own account with them (not Comfy api credits), so it is NOT free even though every node is installed locally. `
+                ? `This workflow uses BOTH hosted Comfy API nodes (PAID api credits) and third-party service nodes billed by ${billedBy}: ${runtime.externalApiNodes.join(", ")}. `
+                : `This workflow calls a PAID THIRD-PARTY SERVICE — ${runtime.externalApiNodes.join(", ")} — billed by ${billedBy} on the user's own account with them (NOT Comfy api credits), so it is NOT free even though every node is installed locally. `
               : "This workflow uses hosted API nodes that consume PAID api credits. ") +
             "ASK the user (free local GPU vs paid credits) BEFORE building or loading it; prefer a local pack unless they opt in.";
     return {
