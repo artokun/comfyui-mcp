@@ -1057,6 +1057,14 @@ interface PanelReadyResult {
   via?: "observed-cycle";
   /** True once the boot endpoint was observed unreachable after the accepted dispatch. */
   sawDown: boolean;
+  /** The status of the LAST sample taken, or undefined if none was.
+   *
+   *  `sawDown` LATCHES on a single "down" and never clears, which is right for proving a
+   *  cycle STARTED and wrong for describing where things ended up: a transient refusal
+   *  followed by an endpoint that answers (or answers 5xx, i.e. "unknown") leaves sawDown
+   *  true forever (codex #742 r2). Anything reporting a server as not-back must read this
+   *  instead — it is the only field that says what the last observation actually saw. */
+  lastStatus?: ProbeStatus;
 }
 
 /** True when a decoded /system_stats body has the recognizable ComfyUI shape (a
@@ -1939,6 +1947,7 @@ async function observeRecovery(
   const probe = healthProbeOverride ?? probeComfyEndpoint;
   const currentDeadline = () => gate?.deadline ?? deadline;
   let sawDown = false;
+  let lastStatus: ProbeStatus | undefined;
   let attempts = 0;
   for (;;) {
     if (gate?.cancelled) break;
@@ -1970,10 +1979,18 @@ async function observeRecovery(
     // COUNTING gate: a sample contributes to the cycle only if taken at/after the post-write
     // dispatched instant (defensive — the observer also defers its first probe to dispatch).
     if (gate == null || sampleAt >= gate.dispatchedAt) {
+      lastStatus = status;
       if (status === "down") {
         sawDown = true;
       } else if (status === "healthy" && sawDown) {
-        return { ready: true, waited_ms: Date.now() - start, attempts, via: "observed-cycle", sawDown };
+        return {
+          ready: true,
+          waited_ms: Date.now() - start,
+          attempts,
+          via: "observed-cycle",
+          sawDown,
+          lastStatus,
+        };
       }
       // "healthy" without a prior down, and "unknown", are ignored — keep looking.
     }
@@ -1982,7 +1999,7 @@ async function observeRecovery(
     if (left <= 0) break;
     await sleep(Math.min(intervalMs, left));
   }
-  return { ready: false, waited_ms: Date.now() - start, attempts, sawDown };
+  return { ready: false, waited_ms: Date.now() - start, attempts, sawDown, lastStatus };
 }
 
 // ---- workflow_open verify-after-timeout (#215/#319/#496/#661) --------------
@@ -12094,7 +12111,19 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           // remote dispatch could sit here far longer than a local one.
           gate.deadline = Math.min(Date.now() + timing.budgetMs, overallDeadline);
           const remote = remoteProbeBase != null ? await recoveryPromise : null;
-          if (remote != null && remote.sawDown && !remote.ready) {
+          // The trigger reads the LAST observation, not the latched `sawDown` (codex r2):
+          // a remote tunnel/NAT can refuse one connection and then answer — 401, 503, a
+          // timeout, all of which classify "unknown" — leaving `sawDown` true for the rest
+          // of the window while the endpoint was responding the whole time. Reporting a
+          // dead server from that is a false alarm about someone's live install. Requiring
+          // the final sample to still be "down" means the claim describes where the window
+          // actually ENDED, which is the only thing this note asserts.
+          if (
+            remote != null &&
+            remote.sawDown &&
+            !remote.ready &&
+            remote.lastStatus === "down"
+          ) {
             const waited = Math.round(remote.waited_ms / 1000);
             // SAY WHAT WAS MEASURED, AND NOT ONE STEP FURTHER (codex P1).
             //
@@ -12120,14 +12149,14 @@ export function buildPanelToolDefs(): PanelToolDef[] {
               probes: remote.attempts,
               note:
                 `ComfyUI restart was dispatched and accepted, and ${remoteProbeBase} WENT DOWN — ` +
-                `but it has NOT come back within ${waited}s. That does NOT prove it is gone for ` +
-                `good: a remote host can take longer than this to boot. It is also exactly what a ` +
-                `restart that nothing relaunches looks like, which is common for an externally- ` +
-                `managed install (e.g. Pinokio, whose launcher only re-launches on the Manager's ` +
-                `dependency-install signal). To tell the two apart, check get_system_stats ` +
-                `(action:"health") in a moment: if it starts answering, it was just slow. If it ` +
-                `stays unreachable, nothing is going to bring it back on its own — start ComfyUI ` +
-                `again from its own launcher, then reload the browser tab so the panel reconnects.`,
+                `it has NOT come back within ${waited}s and was still not answering on the last ` +
+                `check. That does NOT prove it is gone for good: a remote host can take longer ` +
+                `than this to boot. It is also what a restart that nothing relaunches looks like, ` +
+                `which is common for an externally-managed install (e.g. Pinokio, whose launcher ` +
+                `only re-launches on the Manager's dependency-install signal). Check ` +
+                `get_system_stats (action:"health") in a moment. If it is still unreachable then, ` +
+                `start ComfyUI from its own launcher (Pinokio, the Desktop app, your terminal) ` +
+                `and reload the browser tab so the panel reconnects.`,
             });
           }
           // Unchanged for every other case — including "it answered", which is NOT promoted

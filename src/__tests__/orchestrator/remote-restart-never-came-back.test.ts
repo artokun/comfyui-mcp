@@ -107,7 +107,7 @@ describe("a remote ComfyUI that never comes back is reported, not described as r
     expect(String(out.note)).toMatch(/WENT DOWN/);
     expect(String(out.note)).toMatch(/has NOT come back within/);
     // The recovery the reporter had to work out for themselves.
-    expect(String(out.note)).toMatch(/start ComfyUI again from its own launcher/i);
+    expect(String(out.note)).toMatch(/start ComfyUI from its own launcher/i);
     expect(String(out.note)).toMatch(/Pinokio/);
     // The claim that was wrong for them is gone.
     expect(String(out.note)).not.toMatch(/restarting out-of-band/);
@@ -121,6 +121,9 @@ describe("a remote ComfyUI that never comes back is reported, not described as r
     expect(String(out.note)).toMatch(/get_system_stats/);
     expect(String(out.note)).not.toMatch(/do not wait/i);
     expect(String(out.note)).not.toMatch(/will stay down/i);
+    // No prediction about what a supervisor will or won't do after the window closes.
+    expect(String(out.note)).not.toMatch(/nothing is going to bring it back/i);
+    expect(String(out.note)).not.toMatch(/it was just slow/i);
 
     // And it still promises nothing about readiness.
     expect(out.ready).toBe(false);
@@ -139,6 +142,24 @@ describe("a remote ComfyUI that never comes back is reported, not described as r
     // A responding address is not proof this instance cycled, so readiness stays withheld.
     expect(out.ready).toBe(false);
     expect(out.confirmed_cycle).toBe(false);
+  });
+
+  it("ONE TRANSIENT REFUSAL then a responding endpoint: no death is claimed (codex r2)", async () => {
+    // `sawDown` LATCHES on a single "down" and never clears. A remote tunnel/NAT can
+    // refuse one connection and then answer — a 401/503/timeout all classify "unknown" —
+    // and keying the failure note on `sawDown` alone reported a live install as dead.
+    // The trigger reads the LAST sample instead, so this window ends "unknown", not "down".
+    let n = 0;
+    __panelToolsTestHooks.setHealthProbe(async () => (++n === 1 ? "down" : "unknown"));
+
+    const out = parse(await reboot()({ force: false }, ctxReboot()));
+
+    // The latch really did fire — otherwise this test would pass for the wrong reason,
+    // proving nothing about the trigger that reads past it.
+    expect(out.saw_down).toBe(true);
+    expect(String(out.note)).not.toMatch(/WENT DOWN/);
+    expect(String(out.note)).not.toMatch(/has NOT come back/);
+    expect(out.ready).toBe(false);
   });
 
   it("NEVER OBSERVED DOWN: no failure is claimed", async () => {
