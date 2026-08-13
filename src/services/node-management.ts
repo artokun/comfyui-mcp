@@ -1672,29 +1672,24 @@ export function isLatestSentinel(version: unknown): boolean {
 }
 
 /**
- * #1470 — "nightly" IS NOT A GIT REF EITHER. It is this tool's name for the git-HEAD
- * channel, and one of our own code paths MINTS it: a git-URL install with an absent or
- * "latest" version is rewritten to `version: "nightly"` on purpose, because
- * ComfyUI-Manager rejects a registry "latest" for a repository-style entry.
+ * #1470 — is this the CHANNEL word "nightly" rather than a git ref?
  *
- * Two pieces, each right on its own, made the bug: that site means "git HEAD" by the word,
- * and the ref resolver read the same word as a ref — so a direct Git URL with
- * version:"nightly" reached `git checkout --detach --end-of-options nightly` and died. The
- * clone is then discarded as a husk, which is exactly the reported experience: cloned
- * successfully, failed, clone removed.
+ * The word is overloaded in our own surface, which is what made the bug: for a Manager
+ * install it names the git-HEAD channel — one of our paths even MINTS it, rewriting an
+ * absent/"latest" version to "nightly" because the Manager rejects a registry "latest" for
+ * a repository-style entry — while for a from-source git install `version` is documented as
+ * a git ref. A user who types `version:"nightly"` may mean either.
  *
- * Deliberately SEPARATE from `isLatestSentinel` rather than folded into it: that helper is
- * also the test at the git-URL normalisation site, where "latest" and "nightly" mean
- * different things (one is the input being translated, the other is the result). Widening
- * it there would make the translation match its own output.
- *
- * And it is applied to `version` ONLY. An explicit `ref:"nightly"` still checks out a ref:
- * a repository may genuinely have a branch or tag by that name, and silently ignoring the
- * caller's explicit ref would be a new bug in place of this one.
+ * So this does NOT decide the meaning on its own (codex): collapsing it to "no ref" would
+ * silently install the DEFAULT branch of a repository that genuinely has a `nightly` branch,
+ * and a quietly-wrong version is worse than the loud failure being fixed. It is used only to
+ * choose what happens when the checkout FAILS — see the clone path, which keeps the clone at
+ * HEAD and says so instead of deleting it.
  */
 export function isGitHeadChannel(version: unknown): boolean {
   return typeof version === "string" && version.trim().toLowerCase() === "nightly";
 }
+
 
 /**
  * Which git ref an install should check out, or undefined for "leave the clone
@@ -1734,11 +1729,12 @@ export function gitRefForInstall(opts: {
   // never fire.
   const explicit = opts.ref ?? opts.urlRef ?? undefined;
   if (explicit !== undefined) return explicit;
-  // A CHANNEL is not a ref (#1254 for "latest", #1470 for "nightly"). Only `version` is
-  // collapsed here — `ref`/`urlRef` returned above are the caller's explicit git refs.
-  return isLatestSentinel(opts.version) || isGitHeadChannel(opts.version)
-    ? undefined
-    : opts.version;
+  // "latest" is collapsed because it is NEVER a ref anyone means (#1254). "nightly" is
+  // deliberately NOT (#1470): it is overloaded — this tool's git-HEAD channel AND a plausible
+  // branch name — so it is offered to git as a ref, and the clone path decides what a FAILED
+  // checkout of it means. Collapsing it here would silently install the default branch of a
+  // repository that genuinely has one (codex).
+  return isLatestSentinel(opts.version) ? undefined : opts.version;
 }
 
 function validateGitRef(ref: string): string {
@@ -2363,11 +2359,34 @@ async function cloneCustomNodeFallback(
       try {
         runGitCheckout(gitId, gitRef, comfyuiBase);
       } catch (err) {
-        const leftover = discardFailedClone(nodeDir, alreadyPresent);
-        throw new NodeManagementError(
-          `Cloned "${gitId}" but could not check out "${gitRef}": ` +
-            `${err instanceof Error ? err.message : String(err)}${leftover}`,
-        );
+        // #1470 — "nightly" IS BOTH A CHANNEL AND A POSSIBLE REF, so it is resolved by
+        // TRYING it rather than by guessing which the caller meant.
+        //
+        // A git install documents `version` as a git ref, and a repository may genuinely
+        // have a `nightly` branch — collapsing the word to "no ref" up front would install
+        // that repo's DEFAULT branch instead, and a quietly-wrong version is worse than the
+        // failure being fixed here. But the word is ALSO this tool's name for the git-HEAD
+        // channel (one of our own paths mints it for exactly that meaning), so a repository
+        // without such a branch is not a caller error — it is the other reading of the same
+        // word, and the clone already sits at HEAD, which is what that reading asks for.
+        //
+        // So: a failed checkout of the CHANNEL word keeps the clone and discloses, instead
+        // of deleting a working install over a word. Any other ref keeps the old behaviour —
+        // asking for `v1.2.3` and silently getting HEAD would be the wrong-version bug.
+        if (isGitHeadChannel(gitRef)) {
+          warnings.push(
+            `"${gitRef}" is not a ref in ${gitId}, so the clone was left at the repository's ` +
+              `default HEAD — which is what "nightly" means as a channel. If you meant a ref ` +
+              `by that name, this repository does not have one; pass ref:<branch-or-tag> for ` +
+              `an exact checkout.`,
+          );
+        } else {
+          const leftover = discardFailedClone(nodeDir, alreadyPresent);
+          throw new NodeManagementError(
+            `Cloned "${gitId}" but could not check out "${gitRef}": ` +
+              `${err instanceof Error ? err.message : String(err)}${leftover}`,
+          );
+        }
       }
     }
   }
