@@ -3892,66 +3892,47 @@ WHY THIS READ WAS NEEDED AT ALL: this session's panel is ${v.version}, and a ` +
 const FENCE_CORROBORATION_RECHECK_STEPS_MS = [400, 900, 1600] as const;
 
 /**
- * #1478 — A LOAD MUST CLAIM THE INSTANCE IT JUST CREATED.
+ * #1478 — A LOAD INVALIDATES ITS OWN FENCE, AND MUST SAY SO.
  *
  * `graph_load` replaces the graph, which mints a NEW canvas instance id — so the session's
  * fence is stale the instant the load succeeds, and the very next `panel_graph_outline`
- * fails with `workflow instance mismatch`. Reproduced deterministically by the reporter,
- * twice in one session; the recovery is always the same
- * `panel_set_workflow_target({mode:"current"})`.
+ * fails with `workflow instance mismatch`. Worse, that refusal reports "NO PANEL COMMAND
+ * CLAIMED IT", which points the reader at "the user switched tabs" when a panel command
+ * one call earlier is what actually moved it.
  *
- * WHY NOT #814'S PATTERN. `workflow_new` / `workflow_save` / `workflow_save_as` repair
- * their own fence from THEIR OWN REPLY, which is strictly better because it cannot be
- * refused by the fence it is repairing. That is unavailable here: `graph_load`'s reply
- * carries no `workflow_uuid` at all (checked — it returns `loaded`/`format`/`node_count`),
- * because #762/#800 added that field to the save/new replies and nobody added it to this
- * one. Giving `graph_load` a uuid-bearing reply is the better long-term shape and is a
- * PANEL change; this is the half that can ship on its own.
+ * WHY THIS DOES NOT AUTO-REPAIR THE FENCE, having tried to (codex P1). The obvious fix is
+ * to run the same re-derivation the documented recovery runs. It is not safe here: that
+ * call adopts WHATEVER IS ACTIVE NOW, and it has no tie to the load. If the user switches
+ * to canvas B in the window between the load's ack and the follow-up read, a perfectly
+ * coherent reply for B passes corroboration, the session gets stamped to B, and the next
+ * edit lands on B though the load modified A. That is a wrong-graph write — the exact
+ * thing the fence exists to prevent — traded for a saved round trip.
  *
- * So it uses the generic re-derivation — the SAME call the reporter's manual recovery
- * makes, which they observed returning `refreshed` and working. #814 warns that this read
- * can be refused by the fence it repairs (#1071), and that warning describes a different
- * starting state: there the session had no trustworthy identity at all. Here the load has
- * just minted one and `workflow_list` is not a fenced command, which is exactly why the
- * manual recovery works today.
+ * `panel_set_workflow_target({mode:"current"})` runs that same adoption, and it is sound
+ * THERE precisely because it is explicit: the user asked to follow whatever is live.
+ * Doing it implicitly on their behalf is a different act.
  *
- * DISCLOSED, NEVER ASSUMED. A load that could not re-claim its own fence returns
- * `loaded:true` plus the reason and the manual recovery, rather than a bare success that
- * leaves the next call to discover it.
+ * The honest repair is panel-side: give `graph_load`'s reply a `workflow_uuid`, as #762/#800
+ * did for `workflow_new` / `workflow_save`, and the load can then claim the identity IT
+ * created rather than whatever happens to be active — refused-proof and race-proof, which
+ * is why those two do it that way. Until then this states the fact plainly at the moment it
+ * becomes true, so the caller acts on an accurate sentence instead of decoding a mismatch
+ * one call later.
+ *
+ * Deliberately NO round trip: an earlier version called the re-derivation and, on a panel
+ * that cannot corroborate, spent up to four 6-second probes plus recheck sleeps to arrive
+ * at an answer it must not use anyway.
  */
-/** The rebind's own reason, when its variant carries one — the union does not share a
- *  single field, and inventing one would report "undefined" as a cause. */
-function describeRebindReason(rebind: WorkflowFenceRebind): string {
-  if ("why" in rebind && typeof rebind.why === "string" && rebind.why) return `: ${rebind.why}`;
-  if ("detail" in rebind && typeof rebind.detail === "string" && rebind.detail) {
-    return `: ${rebind.detail}`;
-  }
-  return "";
-}
-
-async function claimLoadedInstance(ctx: PanelToolCtx): Promise<string> {
-  let rebind: WorkflowFenceRebind;
-  try {
-    rebind = await rebindWorkflowFence(ctx);
-  } catch (err) {
-    return (
-      `\n\nNOTE: the graph was loaded, but re-claiming this session's workflow-instance ` +
-      `fence THREW (${err instanceof Error ? err.message : String(err)}), so the next graph ` +
-      `call may fail with a workflow instance mismatch. Recover with ` +
-      `panel_set_workflow_target({mode:"current"}).`
-    );
-  }
-  if (rebind.status === "refreshed" || rebind.status === "already_current") {
-    // The common path, and it is worth stating: the load moved the canvas AND claimed it,
-    // so the caller can go straight on to reading or editing the graph.
-    return "";
-  }
+function noteStaleFenceAfterLoad(): string {
   return (
-    `\n\nNOTE: the graph was loaded, but this session's workflow-instance fence could NOT ` +
-    `be re-claimed (${rebind.status}${describeRebindReason(rebind)}). Loading replaces ` +
-    `the graph and mints a new canvas instance, so the next graph call may fail with a ` +
-    `workflow instance mismatch — clear it with panel_set_workflow_target({mode:"current"}), ` +
-    `then retry.`
+    `
+
+NOTE: loading REPLACED the canvas graph, which mints a new workflow instance, so ` +
+    `this session's instance fence now names the OLD one and the next graph command will be ` +
+    `refused with "workflow instance mismatch". This is expected and is caused by the load ` +
+    `you just ran — not by the user switching tabs. Clear it with ` +
+    `panel_set_workflow_target({mode:"current"}), which re-derives the fence from the live ` +
+    `canvas, then continue.`
   );
 }
 
@@ -8916,7 +8897,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           // Generous timeout — loading a large graph onto the live canvas can take a moment.
           const loaded = await ctx.call({ cmd: "graph_load", graph: data }, 30000);
           if (loaded.isError) return loaded;
-          return appendNote(loaded, await claimLoadedInstance(ctx));
+          return appendNote(loaded, noteStaleFenceAfterLoad());
         } catch (err) {
           return fail(err);
         }
