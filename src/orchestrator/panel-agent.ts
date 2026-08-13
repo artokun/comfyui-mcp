@@ -209,6 +209,13 @@ export interface QueueItem {
    *  (see PanelAgent.inFlight), so this stays accurate across an interrupt or a
    *  crash re-queue. */
   completionOnly?: boolean;
+  /** #1489 — this item is an injected RUN-ERROR notice. Marked so a burst of them
+   *  coalesces into one turn instead of nesting: each `injectRunError` used to
+   *  interrupt the live turn and RE-QUEUE it, and after the first error that live turn
+   *  is itself an error turn — so error N re-queued errors 1..N-1 and the drain batched
+   *  them. Measured on a cancelled 27-scene batch: turn lengths 419 → 827 → 1237 chars
+   *  for three prompts, carrying the user's original message along at the bottom. */
+  runError?: boolean;
 }
 
 /** The turn currently in flight, captured at dispatch so an interrupt or a
@@ -873,7 +880,39 @@ export class PanelAgent {
     // imperative made that costly rather than cosmetic: told to STOP and to
     // relate the error to its work, an agent will find a relation.
     const text = runErrorNotice(error);
-    if (this.inFlight) {
+
+    // #1489 — A BURST MUST COALESCE, NOT NEST.
+    //
+    // One error interrupting a user turn is the intended behaviour and stays. The defect
+    // is what happens to the SECOND one: the interrupt re-queues the turn it stopped, and
+    // after the first error that turn is an error turn — so error N re-queued errors
+    // 1..N-1 and the drain batched them into one message. A cancelled 27-scene batch
+    // therefore produced a block that grew by one prompt every turn and dragged the user's
+    // original message along at the bottom. Reproduced against this method: three prompts
+    // gave turns of 419 → 827 → 1237 chars, the last carrying all three plus the user's.
+    //
+    // Note this is NOT a deduplication problem and a dedupe would not have helped — each
+    // notice names a different prompt id, so all N texts are distinct.
+    //
+    // Two cases, both of which avoid a second interrupt:
+    //   • an error turn is already QUEUED and has not started — fold this notice into it,
+    //     so N errors arrive as one turn listing N prompts;
+    //   • an error turn is already IN FLIGHT — queue normally and let it be picked up
+    //     next. Interrupting the agent's error handling to hand it another error just
+    //     restarts the work with more text.
+    const queuedError = this.queue.find((item) => item.runError);
+    if (queuedError) {
+      queuedError.text = `${queuedError.text}\n\n${text}`;
+      return;
+    }
+    // `some`, NOT `every` — and that distinction is the whole fix. The in-flight turn is a
+    // BATCH: the drain merges the re-queued user message with the error notice, so an
+    // error turn's items are [error, USER_PROMPT] and `every` is false. Written with
+    // `every` first, this branch never fired and the measured turn lengths were
+    // byte-identical to the bug (419 → 827 → 1237). The question worth asking is "is the
+    // agent already being told about an error", and `some` asks it.
+    const inFlightIsError = !!this.inFlight && this.inFlight.items.some((i) => i.runError);
+    if (this.inFlight && !inFlightIsError) {
       // Stop the live turn and re-queue it so the agent handles the error FIRST,
       // then resumes whatever it was doing.
       await this.interrupt({ requeueInFlight: true });
@@ -883,7 +922,9 @@ export class PanelAgent {
     // #884 P0 — the synthetic origin mid pins the error-handling turn to the
     // ERRORING workflow's tab (via onSeen at dequeue), so "diagnose and fix it"
     // edits the graph that failed — never whichever tab happens to be active.
-    this.queue.unshift({ text, ...(opts?.mid ? { mid: opts.mid } : {}) }); // front: ahead of any re-queued interrupted turn
+    // `runError` marks this as an error notice so a following burst folds into it
+    // (#1489) instead of interrupting again and re-queueing this turn.
+    this.queue.unshift({ text, runError: true, ...(opts?.mid ? { mid: opts.mid } : {}) }); // front: ahead of any re-queued interrupted turn
     const wake = this.waiting;
     this.waiting = null;
     wake?.();
