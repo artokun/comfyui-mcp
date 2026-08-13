@@ -44,29 +44,44 @@ const MAX_ATTEMPTS = 5;
 const ANIMATABLE_MIME = /^image\/(gif|webp|apng|avif|heic|heif|tiff?)$/i;
 
 /**
- * Ceiling on the DECODED pixel count of a source we will try to preview.
+ * Coarse pixel ceiling, applied by sharp while it parses the header.
  *
- * sharp's own default (~268 MP) is a PIXEL ceiling, not a memory one (codex r2): a
- * 16383x16383 16-bit RGBA PNG passes it and still needs roughly 2 GiB of decoded surface,
- * which is enough to stall or kill an ordinary process. So the limit here is derived from
- * a MEMORY budget instead — ~768 MB at 4 bytes per pixel.
+ * This is NOT the memory bound — a pixel count cannot be one (codex r3). It only keeps a
+ * absurdly-dimensioned file from reaching the decoder at all; the real check is
+ * `DEFAULT_MAX_DECODED_BYTES` below, which is applied once the header has told us the
+ * depth and channel count.
  *
- * The number is chosen to cover the case in the report with headroom: 8504x17008 is
- * ~144.6 MP, so it previews, while anything materially larger refuses and says so. That
- * ordering is the whole point — a limit that protected memory by rejecting the very image
- * this issue is about would be a fix in name only.
+ * Set above the reported 8504x17008 (~144.6 MP) on purpose: a guard that protected memory
+ * by rejecting the very image this issue is about would be a fix in name only.
  */
 export const DEFAULT_MAX_INPUT_PIXELS = 192_000_000;
+
+/**
+ * Ceiling on the DECODED SIZE of a source we will try to preview.
+ *
+ * A pixel limit is the wrong unit and sharp's own default proves it: ~268 MP passes a
+ * 16383x16383 image whose 16-bit RGBA surface is ~2 GiB. My first attempt repeated the
+ * mistake one step down — 192 MP was justified as "~768 MB at 4 bytes/px", which is only
+ * true for 8-bit RGBA; the SAME 144.6 MP image at 16-bit RGBA decodes to ~1.08 GiB (codex).
+ *
+ * So the budget is expressed in BYTES and computed from the header's actual depth and
+ * channel count, which makes it hold for every input rather than for the one I pictured.
+ * 1.25 GiB clears the reported image at 8-bit RGBA (~578 MB) and at 16-bit RGBA (~1.08 GiB)
+ * while still turning away the surfaces that would stall a process.
+ */
+export const DEFAULT_MAX_DECODED_BYTES = 1_342_177_280;
 
 export interface BoundInlineImageOptions {
   /** Max base64 length to emit. */
   budgetBytes?: number;
   /** Max width/height of the preview. */
   maxDimension?: number;
-  /** Ceiling on the source's decoded pixel count. Exposed so the refusal path can be
-   *  tested by BEHAVIOUR rather than by reading the source (codex r2) — sharp will not
-   *  create an image past its own guard, so an oversized fixture cannot be built. */
+  /** Coarse pixel ceiling handed to sharp's header parser. */
   maxInputPixels?: number;
+  /** Ceiling on the source's DECODED byte size. Exposed so the refusal path can be tested
+   *  by BEHAVIOUR rather than by reading the source — sharp will not create an image past
+   *  its own guard, so an oversized fixture cannot be built. */
+  maxDecodedBytes?: number;
 }
 
 export interface BoundInlineImage {
@@ -127,6 +142,7 @@ export async function boundInlineImage(
   const budget = Math.max(1, opts.budgetBytes ?? DEFAULT_INLINE_BUDGET_BYTES);
   const maxDim = Math.max(1, opts.maxDimension ?? DEFAULT_MAX_PREVIEW_DIMENSION);
   const limitInputPixels = Math.max(1, opts.maxInputPixels ?? DEFAULT_MAX_INPUT_PIXELS);
+  const maxDecodedBytes = Math.max(1, opts.maxDecodedBytes ?? DEFAULT_MAX_DECODED_BYTES);
   const originalEncodedBytes = base64.length;
 
   let width: number | null = null;
@@ -174,6 +190,27 @@ export async function boundInlineImage(
     };
   }
 
+  // THE MEMORY CHECK, made from the header rather than from an assumed pixel format. The
+  // resize below is what allocates the full surface, so this is the last point at which a
+  // refusal is still cheap.
+  const bytesPerChannel = meta.depth != null && meta.depth !== "uchar" ? 2 : 1;
+  const channels = meta.channels ?? 4;
+  const decodedBytes = ow * oh * channels * bytesPerChannel;
+  if (decodedBytes > maxDecodedBytes) {
+    return {
+      base64,
+      mimeType,
+      preview: null,
+      refused: {
+        reason:
+          `decoding it would need about ${Math.round(decodedBytes / 1_048_576)} MB of memory ` +
+          `(${ow}x${oh}, ${channels} channels, ${bytesPerChannel * 8}-bit), over the ` +
+          `${Math.round(maxDecodedBytes / 1_048_576)} MB preview limit`,
+        originalEncodedBytes,
+      },
+    };
+  }
+
   // First target: the dimension cap, or a byte-driven guess when the cap alone is not the
   // binding constraint. The guess only picks a STARTING point — the loop below measures.
   let target = Math.min(maxDim, Math.max(ow, oh));
@@ -207,7 +244,11 @@ export async function boundInlineImage(
             recoded:
               (meta.depth != null && meta.depth !== "uchar") ||
               meta.space === "cmyk" ||
-              meta.hasProfile === true,
+              // An ICC profile only counts when it is NOT already sRGB (codex r3): ComfyUI
+              // PNGs routinely embed an sRGB profile, and flagging every one of them would
+              // make the recode warning noise on the common case — which is how a caveat
+              // stops being read.
+              (meta.hasProfile === true && meta.space !== "srgb"),
           },
           refused: null,
         };

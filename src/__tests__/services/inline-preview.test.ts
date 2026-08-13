@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import sharp from "sharp";
 import {
   boundInlineImage,
+  DEFAULT_MAX_DECODED_BYTES,
   DEFAULT_MAX_INPUT_PIXELS,
   DEFAULT_MAX_PREVIEW_DIMENSION,
 } from "../../services/inline-preview.js";
@@ -112,13 +113,43 @@ describe("boundInlineImage caps what goes on the wire (#1495)", () => {
 
     const out = await boundInlineImage(img, "image/png", {
       budgetBytes: 1_000,
-      maxInputPixels: 10_000, // far below this image
+      maxDecodedBytes: 1_000, // far below this image's decoded surface
     });
 
     expect(out.refused).not.toBeNull();
+    expect(out.refused?.reason).toMatch(/MB of memory/);
     expect(out.preview).toBeNull();
     // The full-resolution bytes are handed back untouched for the caller to save/report.
     expect(out.base64).toBe(img);
+  });
+
+  it("the memory budget is computed from the HEADER, not an assumed pixel size (codex r3)", async () => {
+    // The mistake this replaced: justifying a PIXEL limit as a memory bound. The same
+    // 144.6 MP image is ~578 MB at 8-bit RGBA and ~1.08 GiB at 16-bit, so a pixel count
+    // cannot express the budget.
+    //
+    // Proven on the arithmetic rather than with a 16-bit fixture — sharp re-encodes a
+    // 16-bit raw input to an 8-bit PNG, so the file would not carry the depth the test
+    // claimed. A 400x400 3-channel 8-bit image decodes to exactly 480,000 bytes: the
+    // budget must bite one byte below that and clear one byte above it, which is only
+    // true if channels and depth come from the header (a hardcoded 4 bytes/px would put
+    // the boundary at 640,000).
+    const img = await noisyPng(400, 400);
+    const exact = 400 * 400 * 3;
+
+    const under = await boundInlineImage(img, "image/png", {
+      budgetBytes: 1_000,
+      maxDecodedBytes: exact - 1,
+    });
+    expect(under.refused).not.toBeNull();
+    expect(under.refused?.reason).toMatch(/3 channels, 8-bit/);
+
+    const over = await boundInlineImage(img, "image/png", {
+      budgetBytes: 1_000,
+      maxDecodedBytes: exact,
+    });
+    expect(over.refused).toBeNull();
+    expect(over.preview).not.toBeNull();
   });
 
   it("the same image previews fine when the pixel budget allows it", async () => {
@@ -130,7 +161,11 @@ describe("boundInlineImage caps what goes on the wire (#1495)", () => {
 
     expect(out.refused).toBeNull();
     expect(out.preview).not.toBeNull();
+    // The reported image must still get through, at BOTH depths — a guard that rejected
+    // the very image this issue is about would be a fix in name only.
     expect(DEFAULT_MAX_INPUT_PIXELS).toBeGreaterThan(8504 * 17008);
+    expect(DEFAULT_MAX_DECODED_BYTES).toBeGreaterThan(8504 * 17008 * 4); // 8-bit RGBA
+    expect(DEFAULT_MAX_DECODED_BYTES).toBeGreaterThan(8504 * 17008 * 8); // 16-bit RGBA
   });
 
   it("an ANIMATABLE source format is flagged as a single still (codex High)", async () => {
