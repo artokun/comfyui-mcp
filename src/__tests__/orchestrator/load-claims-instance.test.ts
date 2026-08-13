@@ -35,12 +35,12 @@ const textOf = (res: ToolResult): string =>
 
 let sent: string[] = [];
 
-function bridge() {
+function bridge(loadReply: Record<string, unknown> = { loaded: true, node_count: 59 }) {
   let stamp = PRE_LOAD_UUID;
   return {
     send: async (cmd: Record<string, unknown>) => {
       sent.push(String(cmd.cmd));
-      if (cmd.cmd === "graph_load") return { loaded: true, node_count: 59 };
+      if (cmd.cmd === "graph_load") return loadReply;
       if (cmd.cmd === "workflow_list") {
         // The hazard shape: by the time anyone asks, the ACTIVE canvas is a different
         // workflow. Adopting this would retarget the session away from what was loaded.
@@ -78,8 +78,8 @@ function bridge() {
   } as unknown as PanelToolCtx["bridge"] & { __stamp: () => string };
 }
 
-async function load() {
-  const b = bridge();
+async function load(loadReply?: Record<string, unknown>) {
+  const b = bridge(loadReply);
   const ctx = makePanelToolCtx(b, TAB, new WorkflowTargetStore());
   const def = buildPanelToolDefs().find((d) => d.name === "panel_load_workflow");
   if (!def) throw new Error("panel_load_workflow is not registered");
@@ -123,5 +123,16 @@ describe("a load discloses the fence it just invalidated (#1478)", () => {
     await load();
 
     expect(sent).toEqual(["graph_load"]);
+  });
+
+  it("a reply that did NOT replace the graph gets no stale-fence claim (codex r2)", async () => {
+    // Keyed on the reply saying `loaded:true`, not merely on the call not erroring. A
+    // non-error envelope reporting `loaded:false` replaced nothing, and asserting a stale
+    // fence there would invent a consequence of a load that never happened — the same
+    // unmeasured-claim defect this note exists to remove.
+    const out = await load({ loaded: false, error: "nothing was applied" });
+
+    expect(out.text).not.toMatch(/instance fence now names the OLD one/);
+    expect(out.text).not.toMatch(/panel_set_workflow_target/);
   });
 });

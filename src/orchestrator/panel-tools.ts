@@ -8897,7 +8897,13 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           // Generous timeout — loading a large graph onto the live canvas can take a moment.
           const loaded = await ctx.call({ cmd: "graph_load", graph: data }, 30000);
           if (loaded.isError) return loaded;
-          return appendNote(loaded, noteStaleFenceAfterLoad());
+          // Keyed on the reply SAYING the graph was replaced, not merely on the call not
+          // erroring (codex r2). A non-error envelope that reports `loaded:false` did not
+          // replace anything, and telling that caller their fence is stale would be a
+          // fabricated consequence of a load that never happened — the same
+          // unmeasured-claim defect this note exists to remove.
+          const replaced = parseToolResultJson(loaded)?.loaded === true;
+          return replaced ? appendNote(loaded, noteStaleFenceAfterLoad()) : loaded;
         } catch (err) {
           return fail(err);
         }
