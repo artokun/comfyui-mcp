@@ -1768,6 +1768,30 @@ export function gitRefForInstall(opts: {
  * checkout path — so an unreadable repo produces git's own error from the checkout rather
  * than a fabricated "no such branch".
  */
+function gitFetchAllTags(nodeDir: string, cwd: string): void {
+  // The SAME fetch runGitCheckout performs, hoisted so the existence probe below sees
+  // everything a checkout would (codex r3). A clone does not necessarily bring down every
+  // tag, so probing first would report an orphan/unreachable `nightly` TAG as missing and
+  // silently leave the clone at HEAD — while the original checkout would have fetched it and
+  // succeeded. That is the silent-wrong-version failure this whole change exists to avoid,
+  // reintroduced by the probe meant to prevent it.
+  //
+  // Best-effort: a fetch that fails leaves the probe to answer from what is already local,
+  // and a genuinely missing ref then still reaches the checkout, which reports git's own
+  // error. runGitCheckout fetches again; a second fetch is a cheap no-op next to being wrong.
+  try {
+    execFileSync("git", ["-C", nodeDir, "fetch", "--all", "--tags"], {
+      cwd,
+      encoding: "utf-8",
+      timeout: GIT_CLONE_TIMEOUT,
+      env: nonInteractiveGitEnv(),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch {
+    /* probe falls back to what is local */
+  }
+}
+
 function gitRefExists(nodeDir: string, ref: string, cwd: string): boolean {
   try {
     execFileSync("git", ["-C", nodeDir, "rev-parse", "--verify", "--quiet", "--end-of-options", `${ref}^{commit}`], {
@@ -2411,6 +2435,7 @@ async function cloneCustomNodeFallback(
       // install. A repository that HAS a `nightly` branch must get it; one that does not
       // is not a caller error, it is the other reading of the same word — and the clone
       // already sits at HEAD, which is what that reading asks for.
+      gitFetchAllTags(nodeDir, comfyuiBase);
       const refMissing = !gitRefExists(nodeDir, gitRef, comfyuiBase);
       if (refMissing && checkoutPlanForMissingRef({ ref: gitRef, fromVersion: opts?.refFromVersion === true }) === "skip-at-head") {
         warnings.push(
