@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -11,7 +12,6 @@ import { collectToolCatalog, registerFullTools } from "./tools/index.js";
 import { registerCompactTools } from "./tools/compact.js";
 import { tryInstallRetiredNameRedirect } from "./tools/retired-redirect.js";
 import { logger } from "./utils/logger.js";
-import { detectInstallMode } from "./services/self-update.js";
 import { JobWatcher } from "./services/job-watcher.js";
 import { parseCliArgs, validateConnectUrl, exportExplicitToolMode, type ToolMode } from "./transport/cli.js";
 import { startHttpServer } from "./transport/http.js";
@@ -117,18 +117,32 @@ function selfUpdateOnLoad(): void {
  * a bug report quotes, so a constant here makes every report ambiguous about which build
  * produced it — including the reports we ask people to send us.
  *
- * Resolved the SAME way the orchestrator and the issue reporter already resolve it
- * (`detectInstallMode().currentVersion`), read ONCE at module load rather than per call: a
- * running process cannot hot-swap its own code, so a later read could only drift if the
- * files changed underneath it, which would report a version this process is not running.
+ * READ DIRECTLY, NOT VIA `detectInstallMode()` (codex). That helper answers a bigger
+ * question — which install mode is this, global vs npx vs checkout — and pays for it with
+ * an `lstatSync`/`realpathSync` chain. The orchestrator and the issue reporter can afford
+ * that because they run it AFTER their transport is up; this value is needed while
+ * building the server, i.e. on the handshake path. Putting a symlink-resolving directory
+ * walk in front of the handshake would be self-defeating in a fix filed under "startup
+ * exceeds the client's timeout", even though the cost is normally microseconds.
  *
- * Falls back to `0.0.0` — deliberately not `0.1.0`. If detection ever fails, an obviously
+ * What is left is ONE small read of our own manifest, resolved from this module's own URL
+ * so it cannot pick up a parent directory's package.json: `dist/boot.js` → `dist/../` and
+ * `src/boot.ts` → the repo root, both the package root. Node already performed far more
+ * I/O importing this file, so this adds no meaningful class of risk.
+ *
+ * Read ONCE at module load rather than per call: a running process cannot hot-swap its own
+ * code, so a later read could only differ if the files changed underneath it — which would
+ * report a version this process is not executing.
+ *
+ * Falls back to `0.0.0` — deliberately not `0.1.0`. If the read ever fails, an obviously
  * impossible version is a signal that something is wrong; a plausible one is a lie that
  * looks like data.
  */
 const SERVER_VERSION: string = ((): string => {
   try {
-    return detectInstallMode().currentVersion ?? "0.0.0";
+    const raw = readFileSync(new URL("../package.json", import.meta.url), "utf-8");
+    const version = (JSON.parse(raw) as { version?: unknown }).version;
+    return typeof version === "string" && version ? version : "0.0.0";
   } catch {
     return "0.0.0";
   }

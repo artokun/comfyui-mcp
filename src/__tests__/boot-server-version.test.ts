@@ -32,9 +32,13 @@ describe("the MCP server advertises its REAL version (#1447)", () => {
     expect(at, "SERVER_VERSION was removed or renamed").toBeGreaterThan(-1);
     const decl = bootSrc.slice(at, at + 400);
 
-    // It must READ the running install — the same source the orchestrator and the issue
-    // reporter already use, so all three cannot disagree about which build is running.
-    expect(decl).toMatch(/detectInstallMode\(\)\.currentVersion/);
+    // It must READ our own manifest, resolved from this module's own URL so it cannot
+    // pick up a parent directory's package.json.
+    expect(decl).toMatch(/readFileSync\(new URL\("\.\.\/package\.json", import\.meta\.url\)/);
+    // And it must NOT reach for detectInstallMode: that helper lstat/realpath-walks the
+    // install, and this value is built on the handshake path — the very thing #1447 is
+    // about (codex). Cheap here is not a nicety, it is the point.
+    expect(decl).not.toMatch(/detectInstallMode/);
     // And its fallback must be an OBVIOUSLY impossible version. A plausible-looking one
     // (like the 0.1.0 this replaced) is a lie that reads as data.
     expect(decl).toMatch(/["'`]0\.0\.0["'`]/);
