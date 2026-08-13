@@ -8902,8 +8902,17 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           // replace anything, and telling that caller their fence is stale would be a
           // fabricated consequence of a load that never happened — the same
           // unmeasured-claim defect this note exists to remove.
-          const replaced = parseToolResultJson(loaded)?.loaded === true;
-          return replaced ? appendNote(loaded, noteStaleFenceAfterLoad()) : loaded;
+          // ONLY THE API-FORMAT LOAD MINTS A NEW INSTANCE (codex r3, checked in the panel).
+          // The UI-format path passes `__cmcpKeepInstance: true` whenever a workflow is
+          // active, deliberately PRESERVING the instance so the agent's own follow-up
+          // commands are not rejected — so a note claiming the fence went stale would be
+          // false for the commonest load. The API path (`app.loadApiJson`) passes no such
+          // option and does re-mint, and it is the path the reporter hit: their reply reads
+          // `format:"api"`. That field is present only on this branch, which makes it the
+          // signal rather than an inference.
+          const reply = parseToolResultJson(loaded);
+          const remintedInstance = reply?.loaded === true && reply?.format === "api";
+          return remintedInstance ? appendNote(loaded, noteStaleFenceAfterLoad()) : loaded;
         } catch (err) {
           return fail(err);
         }

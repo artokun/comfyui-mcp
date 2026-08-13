@@ -35,7 +35,7 @@ const textOf = (res: ToolResult): string =>
 
 let sent: string[] = [];
 
-function bridge(loadReply: Record<string, unknown> = { loaded: true, node_count: 59 }) {
+function bridge(loadReply: Record<string, unknown> = { loaded: true, format: "api", node_count: 59 }) {
   let stamp = PRE_LOAD_UUID;
   return {
     send: async (cmd: Record<string, unknown>) => {
@@ -132,6 +132,21 @@ describe("a load discloses the fence it just invalidated (#1478)", () => {
     // unmeasured-claim defect this note exists to remove.
     const out = await load({ loaded: false, error: "nothing was applied" });
 
+    expect(out.text).not.toMatch(/instance fence now names the OLD one/);
+    expect(out.text).not.toMatch(/panel_set_workflow_target/);
+  });
+
+  it("a UI-format load PRESERVES the instance, so it gets no note (codex r3)", async () => {
+    // Checked in the panel: the UI path passes `__cmcpKeepInstance: true` whenever a
+    // workflow is active, deliberately keeping the instance so the agent's own follow-up
+    // commands are not rejected. Only the API path (`loadApiJson`) re-mints — and it is
+    // the one the reporter hit, whose reply reads `format:"api"`.
+    //
+    // A blanket note would therefore have been FALSE for the commonest load, which is the
+    // same fabricated-consequence defect this whole change exists to remove.
+    const out = await load({ loaded: true, node_count: 12 });
+
+    expect(out.text).toMatch(/loaded/i);
     expect(out.text).not.toMatch(/instance fence now names the OLD one/);
     expect(out.text).not.toMatch(/panel_set_workflow_target/);
   });
