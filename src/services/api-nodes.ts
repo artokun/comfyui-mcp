@@ -60,6 +60,100 @@ export function isApiNode(def: ComfyUINodeDef): boolean {
   return category === API_CATEGORY_PREFIX || category.startsWith(`${API_CATEGORY_PREFIX}/`);
 }
 
+/**
+ * #1483 — THIRD-PARTY PACKS THAT CALL A PAID EXTERNAL SERVICE.
+ *
+ * `isApiNode` recognises ComfyUI's PARTNER marker, and measured against a live
+ * /object_info (4304 nodes) **not one of the 3464 custom-node-registered classes carries
+ * `api_node: true`** — all 220 marked nodes are core. So the marker cannot fire for any
+ * third-party pack, and a pack whose whole job is to bill a remote API was reported as
+ * `local` / "no paid credits". That is the one verdict this classifier exists to prevent.
+ *
+ * WHY NOT THE OBVIOUS FIXES. Both were measured and both fail:
+ *
+ *  - "registered by a custom node, so unclassifiable" flags 3464 of 4304 nodes — Impact
+ *    Pack, KJNodes, RES4LYF. It would turn ~every real workflow into "possibly paid",
+ *    which trains the reader to click through the warning and protects nobody.
+ *  - "takes an api-key input" is the appealing structural signal and it is NOT sufficient
+ *    on its own: the pack in the report (`ComfyUI-fal-API`) reads its credential from the
+ *    ENVIRONMENT, so its NanoBanana classes expose only `prompt`/`aspect_ratio`/`seed`.
+ *    Shipping just this would have closed #1483 with the reporter's own graph still
+ *    reported as free.
+ *
+ * So it takes both, and they cover different populations: the registry catches packs whose
+ * nodes advertise nothing at all, the credential signal catches packs nobody has
+ * enumerated yet (49 classes on the measured install — Novita, Gemini, joyCaption…).
+ *
+ * DELIBERATELY SEPARATE FROM `isApiNode`, not folded into it: that predicate also drives
+ * `listApiNodes` and the 3D-generation picker, which enumerate COMFY PARTNER nodes and
+ * hand their schemas to callers that assume Comfy's auth model. A FAL node is paid, but it
+ * is not a partner node, and merging the two would quietly change what those tools return.
+ */
+
+/**
+ * Packs whose nodes bill a remote service. Matched on `python_module` — the pack's own
+ * identity — with the category as a secondary, because a category string is cosmetic and
+ * a pack can restyle it between releases while the module path stays put.
+ *
+ * ENUMERATED, NOT A KEYWORD PATTERN, on purpose. A `/fal/i` regex over categories reads as
+ * broad coverage and is wrong in both directions at once: it misses a pack that does not
+ * put the vendor in its category, and it catches `FAL/Utils` — local helpers that resize an
+ * image before upload and spend nothing. A named list is auditable and each entry is a
+ * claim someone can check.
+ */
+const EXTERNAL_SERVICE_PACKS: ReadonlyArray<{
+  /** Lower-cased substring matched against `python_module`. */
+  module: string;
+  /** Lower-cased category prefixes within the pack that are genuinely local (helpers,
+   *  utilities) and must NOT be flagged — the false-positive direction costs a real
+   *  confirmation prompt on a free node. */
+  localCategoryPrefixes?: readonly string[];
+  why: string;
+}> = [
+  { module: "comfyui-fal-api", localCategoryPrefixes: ["fal/utils"], why: "fal.ai — billed per request (#1483)" },
+  { module: "comfyui-pvl-fal-nodes", localCategoryPrefixes: ["fal/utils"], why: "fal.ai — billed per request" },
+  { module: "comfyui_fal_api", localCategoryPrefixes: ["fal/utils"], why: "fal.ai — billed per request" },
+  { module: "comfyui-fal-api-flux", why: "fal.ai — billed per request" },
+];
+
+/** Input names that mean the node authenticates to a service the user pays for. */
+const CREDENTIAL_INPUT_RE = /^(?:.*_)?(?:api_?key|access_?token|auth_?token|api_?secret|secret_?key)$/i;
+
+function declaresCredentialInput(def: ComfyUINodeDef): boolean {
+  const input = (def as { input?: { required?: unknown; optional?: unknown } }).input;
+  if (!input || typeof input !== "object") return false;
+  for (const group of [input.required, input.optional]) {
+    if (!group || typeof group !== "object") continue;
+    for (const name of Object.keys(group as Record<string, unknown>)) {
+      if (CREDENTIAL_INPUT_RE.test(name)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * True when a node runs on a PAID EXTERNAL SERVICE without carrying Comfy's partner
+ * marker. Never returns true for a node `isApiNode` already claims — the caller keeps the
+ * two lists distinct so a reader can tell a Comfy partner node from a third-party one.
+ */
+export function isExternalServiceNode(def: ComfyUINodeDef): boolean {
+  if (isApiNode(def)) return false;
+  const category = (def.category ?? "").toLowerCase();
+  const pythonModule = (def.python_module ?? "").toLowerCase();
+  for (const pack of EXTERNAL_SERVICE_PACKS) {
+    if (!pythonModule.includes(pack.module)) continue;
+    // A pack's own local helpers are exempt — being shipped alongside paid nodes is not
+    // evidence that this node spends anything.
+    if (pack.localCategoryPrefixes?.some((p) => category === p || category.startsWith(`${p}/`))) {
+      return false;
+    }
+    return true;
+  }
+  // The general catch: a node that asks for a service credential cannot be CONFIRMED free,
+  // whichever pack it came from.
+  return declaresCredentialInput(def);
+}
+
 export interface ApiNodeSummary {
   class_type: string;
   display_name: string;
@@ -184,6 +278,14 @@ export interface WorkflowRuntime {
   usesApiNodes: boolean | null;
   /** The class_types in the workflow that are hosted API/partner nodes. */
   apiNodes: string[];
+  /** #1483 — class_types that bill a PAID EXTERNAL SERVICE but carry none of Comfy's
+   *  partner markers (a third-party pack like fal.ai, or any node asking for a service
+   *  credential). Kept separate from `apiNodes` because these are NOT Comfy partner nodes
+   *  and do not share its auth model — but they count the same way for `usesApiNodes` and
+   *  `runtime`, because the caller's question is "will this spend money", not "whose API
+   *  is it". Absent from the result when empty, so an unrelated caller reading this shape
+   *  sees nothing new. */
+  externalApiNodes?: string[];
   /** All class_types found in the workflow. */
   classTypes: string[];
   /** class_types not present in the connected server's /object_info (can't be
@@ -220,6 +322,7 @@ export async function checkWorkflowRuntime(
   const classTypes = extractWorkflowClassTypes(graph);
   const objectInfo = await deps.getObjectInfo();
   const apiNodes: string[] = [];
+  const externalApiNodes: string[] = [];
   const unknownNodes: string[] = [];
   for (const ct of classTypes) {
     // A FRONTEND-ONLY NODE IS NOT AN UNKNOWN ONE (#1372). MarkdownNote, Note, Reroute and
@@ -255,8 +358,12 @@ export async function checkWorkflowRuntime(
       continue;
     }
     if (isApiNode(def)) apiNodes.push(ct);
+    // #1483 — a paid third-party node is not a partner node, but it spends the user's
+    // money just the same, so it must reach the same verdict.
+    else if (isExternalServiceNode(def)) externalApiNodes.push(ct);
   }
-  const hasApiNodes = apiNodes.length > 0;
+  const paidNodes = [...apiNodes, ...externalApiNodes];
+  const hasApiNodes = paidNodes.length > 0;
   // "api" only if EVERY classifiable node is an API node; "mixed" if some are.
   // Virtual nodes are not classifiable EITHER WAY, so they leave the denominator too —
   // otherwise a workflow of one KSampler plus three Notes reads as 1-of-4 API and reports
@@ -268,7 +375,7 @@ export async function checkWorkflowRuntime(
   let runtime: "local" | "api" | "mixed" | "unknown";
   let usesApiNodes: boolean | null;
   if (hasApiNodes) {
-    runtime = apiNodes.length >= classifiable && classifiable > 0 ? "api" : "mixed";
+    runtime = paidNodes.length >= classifiable && classifiable > 0 ? "api" : "mixed";
     usesApiNodes = true;
   } else if (unknownNodes.length > 0 && !opts.bundledLocalPack) {
     // No recognized API nodes, but some class_types aren't in /object_info — they
@@ -282,7 +389,15 @@ export async function checkWorkflowRuntime(
     runtime = "local";
     usesApiNodes = false;
   }
-  return { runtime, usesApiNodes, apiNodes, classTypes, unknownNodes, subgraphCount: countSubgraphs(graph) };
+  return {
+    runtime,
+    usesApiNodes,
+    apiNodes,
+    ...(externalApiNodes.length > 0 ? { externalApiNodes } : {}),
+    classTypes,
+    unknownNodes,
+    subgraphCount: countSubgraphs(graph),
+  };
 }
 
 export interface ApiNodeInputDescriptor {
