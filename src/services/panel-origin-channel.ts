@@ -134,6 +134,25 @@ let lastWriteAt = 0;
 /** Distinguishes concurrent temp files from this process. */
 let publishSeq = 0;
 
+/**
+ * A temp path no other writer can be using.
+ *
+ * pid + sequence alone is not unique: Node worker threads share `process.pid`
+ * and each initialises its own module state, so two workers both start at
+ * sequence 0 and pick the same name — one then renames the other's payload
+ * (review r3). Only one publisher exists today, which is exactly why this is
+ * worth making unconditional rather than relying on that staying true.
+ *
+ * NOT covered by a test, and mutation testing says so: stripping the entropy
+ * kills nothing, because a single-publisher suite cannot observe a collision.
+ * Kept as cheap insurance against a condition the tests cannot create, and
+ * recorded here so the next reader does not mistake the survivor for dead code.
+ */
+function tempPathFor(file: string): string {
+  const entropy = Math.random().toString(36).slice(2, 10);
+  return `${file}.${process.pid}-${publishSeq++}-${entropy}.tmp`;
+}
+
 /** Refresh the record at least this often even when the set is UNCHANGED, so a
  *  reader can tell "still true" from "nobody has touched this since the
  *  orchestrator died". 30s against a 700ms tick is ~2 writes a minute — the
@@ -260,25 +279,32 @@ export function publishConnectedPanelOrigins(
     // makes rename fail transiently. On persistent failure the PRIOR complete
     // record is left untouched and the temp dropped — the next tick retries, so
     // this self-heals rather than degrading to a torn write.
-    const tmp = `${file}.${process.pid}-${publishSeq++}.tmp`;
-    writeFileSync(tmp, payload);
+    const tmp = tempPathFor(file);
     let renamed = false;
-    for (let attempt = 0; attempt < 5 && !renamed; attempt++) {
-      try {
-        renameSync(tmp, file);
-        renamed = true;
-      } catch {
-        /* transient (e.g. Windows sharing violation) — retry */
+    try {
+      writeFileSync(tmp, payload);
+      for (let attempt = 0; attempt < 5 && !renamed; attempt++) {
+        try {
+          renameSync(tmp, file);
+          renamed = true;
+        } catch {
+          /* transient (e.g. Windows sharing violation) — retry */
+        }
+      }
+    } finally {
+      // In a `finally`, so a THROWING write is cleaned up too. With the removal
+      // sitting after the loop instead, a `writeFileSync` that failed partway —
+      // a full disk is the ordinary cause — left its partial temp behind and
+      // added another on every tick thereafter (review r3).
+      if (!renamed) {
+        try {
+          rmSync(tmp, { force: true });
+        } catch {
+          /* ignore — a stray .tmp is not the channel file and is never read */
+        }
       }
     }
-    if (!renamed) {
-      try {
-        rmSync(tmp, { force: true });
-      } catch {
-        /* ignore — a stray .tmp is not the channel file and is never read */
-      }
-      return; // do NOT record it as published; the next tick tries again
-    }
+    if (!renamed) return; // do NOT record it as published; the next tick retries
     lastPublished = key;
     lastWriteAt = now;
   } catch {
