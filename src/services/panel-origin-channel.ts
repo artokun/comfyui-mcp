@@ -52,11 +52,55 @@
 // is the pre-#952 behaviour and costs a diagnostic sentence rather than
 // producing a wrong one.
 //
+// ### What this still does NOT close, stated rather than implied
+//
+// Both remaining holes are the SAME shape — a dead publisher whose record is
+// younger than PANEL_ORIGINS_MAX_AGE_MS — and both are bounded by it:
+//
+//   - PID REUSE inside the window. The orchestrator crashes, the OS hands its
+//     pid to something unrelated that is alive, and the record has not yet aged
+//     out. Both checks pass for the remainder of the window.
+//   - A ZOMBIE publisher on Linux. A terminated-but-unreaped process still has a
+//     pid that `kill(pid, 0)` answers for, so liveness says yes while the
+//     orchestrator is gone. The heartbeat stopped when it died, so this expires
+//     on the same clock.
+//
+// Neither is closed by more checking of the same kind — a pid cannot prove it is
+// the same process that wrote, and only a lock or a handle the reader can
+// interrogate would settle it. That is not worth building here: the payload is a
+// DIAGNOSTIC SENTENCE, the worst outcome is naming an origin that stopped being
+// connected up to two minutes ago, it self-heals on the next read, and the
+// realistic path needs a child that outlived its own parent orchestrator (a live
+// one republishes within 30s, and within 700ms of starting). Recorded so the
+// next reader does not have to re-derive it — and so the bound is a number
+// somebody chose, not one that fell out.
+//
 // No-ops entirely when COMFYUI_MCP_PROGRESS_DIR is unset — a plain (non-panel)
 // MCP server keeps the pre-#952 "" exactly as before.
 
-import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, mkdirSync, openSync, readSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+
+/**
+ * The open flags, resolved at CALL time and defensively.
+ *
+ * Destructuring `constants` at module scope broke ten unrelated suites: this
+ * module is pulled in transitively by comfyui/fetch.ts, and a partial
+ * `vi.mock("node:fs")` that does not re-export `constants` makes the destructure
+ * throw during IMPORT — every test in the file then collects zero tests, with an
+ * error that names this line rather than the mock. Reading it inside the
+ * function means a mocked fs is simply a mocked fs.
+ *
+ * Falls back to the "r" string flag when the numbers are unavailable, so the
+ * open still happens; O_NONBLOCK is undefined on Windows, where the FIFO case it
+ * guards does not arise.
+ */
+function readFlags(): number | string {
+  const rd = constants?.O_RDONLY;
+  if (typeof rd !== "number") return "r";
+  const nonblock = constants?.O_NONBLOCK;
+  return rd | (typeof nonblock === "number" ? nonblock : 0);
+}
 
 /** File name inside the progress dir. The `control-` prefix is load-bearing:
  *  pollDownloads and listTargetChangeRequests both filter on it, so this file is
@@ -96,6 +140,43 @@ export const PANEL_ORIGINS_MAX_AGE_MS = 120_000;
  *  origins; anything past this is not the file we wrote. */
 const MAX_CHANNEL_BYTES = 64 * 1024;
 
+/**
+ * Read the channel file with a hard byte bound, through a single descriptor.
+ *
+ * Throws on anything unreadable, which the caller's catch turns into [] — the
+ * "say nothing" answer.
+ *
+ * O_NONBLOCK is part of the OPEN, not a detail of the read. A FIFO at this path
+ * blocks `openSync` itself until a writer arrives, so an fstat-based "is this a
+ * regular file?" check placed after the open can never run — the process is
+ * already parked, inside the error path, forever. (Written the other way first,
+ * with a comment claiming the fstat covered it. It did not.) Undefined on
+ * Windows, where the case does not arise, so it falls back to 0.
+ */
+function readChannelFile(file: string): string {
+  const fd = openSync(file, readFlags());
+  try {
+    const stat = fstatSync(fd);
+    // NOT covered by a portable test, and deliberately kept anyway. On Windows
+    // `openSync` already rejects a directory, and mkfifo does not exist there, so
+    // nothing this suite can build reaches this line — mutation testing correctly
+    // reports deleting it as killing no test. It states the POSIX case (a FIFO
+    // survives the non-blocking open and is not something to read), which is the
+    // reason the guard exists rather than an accident of the file layout.
+    if (!stat.isFile()) throw new Error("panel-origins channel is not a regular file");
+    if (stat.size > MAX_CHANNEL_BYTES) throw new Error("panel-origins channel is oversized");
+    // Sized from the fstat above, NOT re-clamped. A `Math.min(size, MAX)` here
+    // was removed: it is unreachable behind the check on the previous line, and
+    // worse, it MASKED it — an oversized file was truncated into a parse error,
+    // so the suite passed with either guard deleted and neither was proven.
+    const buf = Buffer.allocUnsafe(stat.size);
+    const read = readSync(fd, buf, 0, buf.length, 0);
+    return buf.subarray(0, read).toString("utf-8");
+  } finally {
+    closeSync(fd);
+  }
+}
+
 /** Is the process that published this record still running?
  *
  *  `process.kill(pid, 0)` sends no signal — it only asks. EPERM means the pid
@@ -129,9 +210,19 @@ export function publishConnectedPanelOrigins(
 ): void {
   const file = channelFile(dir);
   if (!file) return;
+  // What actually gets published: filtered, deduped, ordered. The comparison and
+  // the payload are both built from THIS, so they cannot disagree.
+  const published = [...new Set(origins.filter((o) => typeof o === "string" && o !== ""))].sort();
   // Compare WITHOUT the timestamp — otherwise every tick differs and this writes
   // 86k files an hour to say nothing changed.
-  const key = JSON.stringify(origins);
+  //
+  // …and compare the SET, not the caller's array. The key used to be
+  // `JSON.stringify(origins)` while the payload was the filtered list, so two
+  // ticks reporting the same connected panels in a different order — or with a
+  // duplicate, or with an empty string appearing and vanishing — rewrote the
+  // file to say exactly the same thing (review r2). `connectedServerOrigins()`
+  // walks a live socket collection, so ordering is not something to assume.
+  const key = JSON.stringify(published);
   // …but DO write when the heartbeat is due, even unchanged: an unrefreshed
   // record is exactly what a dead orchestrator leaves behind, so "unchanged" and
   // "nobody is home" have to be distinguishable on disk.
@@ -139,7 +230,7 @@ export function publishConnectedPanelOrigins(
   const heartbeatDue = now - lastWriteAt >= PANEL_ORIGINS_HEARTBEAT_MS;
   if (!changed && !heartbeatDue) return;
   const payload = JSON.stringify({
-    origins: origins.filter((o) => typeof o === "string" && o !== ""),
+    origins: published,
     updated: now,
     pid: process.pid,
   });
@@ -170,11 +261,14 @@ export function readPublishedPanelOrigins(now: number = Date.now()): string[] {
   const file = channelFile();
   if (!file) return [];
   try {
-    // Size FIRST. This runs while formatting a network failure, so a file that
-    // is huge (or is not our file at all) must not delay the error it exists to
-    // explain (review, finding 3).
-    if (statSync(file).size > MAX_CHANNEL_BYTES) return [];
-    const raw = JSON.parse(readFileSync(file, "utf-8")) as {
+    // Bounded read through ONE descriptor. `statSync` then `readFileSync` names
+    // the path twice, so the thing measured need not be the thing read — the
+    // file can grow or be replaced in between, and the bound applies to neither
+    // (review r2). Opening once and asking that fd for its size closes the gap,
+    // and reading into a fixed buffer bounds the work even if the answer is a
+    // lie. This runs while formatting a network failure; it must not delay the
+    // error it exists to explain.
+    const raw = JSON.parse(readChannelFile(file)) as {
       origins?: unknown;
       updated?: unknown;
       pid?: unknown;

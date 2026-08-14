@@ -7,7 +7,7 @@
 // file covers the small file channel that carries the set across.
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -226,6 +226,30 @@ describe("panel-origin channel — heartbeat", () => {
     expect(readPublishedPanelOrigins(now + 700)).toEqual(["http://127.0.0.1:8189"]);
   });
 
+  it("does not rewrite when only the ORDER or duplication changed", () => {
+    // The change key used to be the caller's raw array while the payload was the
+    // filtered list, so the same connected panels arriving in a different order
+    // rewrote the file to say exactly the same thing (review r2).
+    // `connectedServerOrigins()` walks a live socket collection — ordering is not
+    // something to assume stable.
+    const now = Date.now();
+    publishConnectedPanelOrigins(dir, ["http://a:1", "http://b:2"], now);
+    const first = readFileSync(join(dir, PANEL_ORIGINS_FILE), "utf-8");
+    publishConnectedPanelOrigins(dir, ["http://b:2", "http://a:1"], now + 700);
+    publishConnectedPanelOrigins(dir, ["http://a:1", "http://a:1", "http://b:2"], now + 1_400);
+    publishConnectedPanelOrigins(dir, ["http://a:1", "", "http://b:2"], now + 2_100);
+    expect(readFileSync(join(dir, PANEL_ORIGINS_FILE), "utf-8")).toBe(first);
+  });
+
+  it("publishes a deduped, ordered set — and a real change still writes", () => {
+    // The other direction, so the test above cannot be satisfied by never writing.
+    const now = Date.now();
+    publishConnectedPanelOrigins(dir, ["http://b:2", "http://a:1", "http://a:1"], now);
+    expect(readPublishedPanelOrigins(now)).toEqual(["http://a:1", "http://b:2"]);
+    publishConnectedPanelOrigins(dir, ["http://a:1"], now + 700);
+    expect(readPublishedPanelOrigins(now + 700)).toEqual(["http://a:1"]);
+  });
+
   it("the heartbeat stays comfortably inside the age limit", () => {
     // The two constants are only correct RELATIVE to each other: a heartbeat
     // slower than the limit would expire a live orchestrator's record between
@@ -242,6 +266,16 @@ describe("panel-origin channel — bounded read (review, finding 3)", () => {
       join(dir, PANEL_ORIGINS_FILE),
       JSON.stringify({ origins: ["http://127.0.0.1:8188"], updated: Date.now(), pid: process.pid, pad: "x".repeat(70_000) }),
     );
+    expect(readPublishedPanelOrigins()).toEqual([]);
+  });
+
+  it("refuses a path that is not a regular file", () => {
+    // The bound is only meaningful if the thing opened is a file. A directory at
+    // this path used to reach readFileSync; now fstat on the opened descriptor
+    // answers first. (The FIFO case this also covers cannot be built portably —
+    // Windows has no mkfifo — so a directory stands in for "not a regular file".)
+    rmSync(join(dir, PANEL_ORIGINS_FILE), { force: true });
+    mkdirSync(join(dir, PANEL_ORIGINS_FILE));
     expect(readPublishedPanelOrigins()).toEqual([]);
   });
 
