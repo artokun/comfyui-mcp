@@ -830,6 +830,45 @@ let persistSeq = 0;
  *  the terminal state is durable — otherwise a done/cancelled job could linger as a fresh
  *  "downloading" record (bounded by long record retention, but this recovers it sooner). Returns
  *  false when there is no channel dir (nothing to persist) or the replace didn't happen. */
+/**
+ * Delays between the atomic-replace retries, in ms (#1545).
+ *
+ * The escalation is intent, not a guarantee: MEASURED on Windows, the platform
+ * timer granularity floors every sleep at ~15 ms, so this schedule totals ~73 ms
+ * while a flat [2,2,2,2] totals ~62 ms — nearly the same. What actually matters
+ * here is that a delay EXISTS at all (the loop previously had none, so all five
+ * attempts collided with one reader open) and that there are several of them.
+ * The ordering still helps where timers are finer-grained, and costs nothing.
+ */
+const RENAME_BACKOFF_MS = [2, 5, 10, 20];
+
+/**
+ * Sleep without yielding the event loop.
+ *
+ * `commitDone` publishes the terminal status and persists it in ONE synchronous
+ * step precisely so no reader can observe a landed file with a "downloading"
+ * job, so this path may not await. `Atomics.wait` on a throwaway buffer is the
+ * supported way to block a Node thread; a busy spin would burn a core for the
+ * same delay. Falls back to a bounded spin where `Atomics.wait` is disallowed
+ * (it throws on the main thread in some embeddings).
+ */
+function sleepSyncMs(ms: number): void {
+  if (!(ms > 0)) return;
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  } catch {
+    // performance.now() is MONOTONIC; Date.now() is not. A backward wall-clock
+    // adjustment (NTP step, DST on some platforms) during this loop would make
+    // the exit condition unreachable and freeze the event loop in the very
+    // fallback meant to be safe (review finding). The iteration cap is a second
+    // belt: even a pathological clock cannot make this run forever.
+    const until = performance.now() + ms;
+    for (let i = 0; performance.now() < until && i < 5_000_000; i++) {
+      /* bounded spin — only reached where Atomics.wait is unavailable */
+    }
+  }
+}
+
 export function persistDownloadJob(job: Omit<PersistedDownloadJob, "updated">): boolean {
   const dir = recordsDir();
   if (!dir) return false;
@@ -854,8 +893,21 @@ export function persistDownloadJob(job: Omit<PersistedDownloadJob, "updated">): 
     // the temp; the next ~15s heartbeat retries the atomic replace (self-healing). A
     // terminal persist that can't replace ages out via long record retention instead
     // of ever corrupting the scanned .json.
+    // #1545 — the retries need to be SPREAD OUT to be retries at all. This loop
+    // had no delay, so all five attempts completed within microseconds of each
+    // other and lost to the same reader's `readFileSync` open: "retried a few
+    // times" was effectively one attempt. A reporter polling
+    // `download_model action:"status"` — i.e. opening this exact file — while a
+    // download completed saw the terminal record fail to land, and `status` kept
+    // answering "downloading" from the prior record until the ~15s heartbeat.
+    //
+    // The backoff is SYNCHRONOUS on purpose: `commitDone` publishes the terminal
+    // state and persists it in one step with no await in between, so nothing may
+    // yield here. Worst case is ~37 ms, and only under actual contention — the
+    // first attempt is unchanged and does not sleep.
     let renamed = false;
     for (let attempt = 0; attempt < 5 && !renamed; attempt++) {
+      if (attempt > 0) sleepSyncMs(RENAME_BACKOFF_MS[attempt - 1] ?? 20);
       try {
         renameSync(tmpPath, finalPath); // readers see old or new complete record, never torn
         renamed = true;

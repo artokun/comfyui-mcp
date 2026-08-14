@@ -588,7 +588,29 @@ export async function startDownloadJob(
     // session reading the record — can ever see a completed local download with no
     // verification field and render it as confirmed success (#369, codex gate).
     if (!dispatchToManager) job.live_visible = "pending";
-    persistJobRecord(job);
+    // #1545 — this return value was DISCARDED, and it is the one that says
+    // whether any OTHER process can see the job finish. `persistDownloadJob`
+    // returns false when the atomic replace loses to a reader holding the record
+    // open, and it deliberately keeps the PRIOR complete record rather than
+    // risking a torn write — so the durable answer stays "downloading" until the
+    // ~15s heartbeat retries.
+    //
+    // That is the whole of #1545: the completion event is raised from THIS
+    // process's memory, while `download_model action:"status"` reads the record
+    // from the spawned stdio child. Silently dropping the failure is what let
+    // those two disagree for seconds with nothing to explain it.
+    //
+    // One immediate re-attempt (the call has its own backing-off retries), then
+    // say so. The heartbeat still heals it; the log is what makes a stale read
+    // explicable instead of mysterious.
+    if (!persistJobRecord(job) && !persistJobRecord(job)) {
+      logger.warn(
+        `[download] job ${job.id} finished but its record could not be published ` +
+          `(${job.filename}). Until the next heartbeat, download_model action:"status" ` +
+          `may still report "downloading" for it — the file itself has landed at ` +
+          `${landedPath}.`,
+      );
+    }
   };
   const settled = (async () => {
     // Wait for the prior same-destination job to fully finish (never fail THIS job

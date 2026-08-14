@@ -1,6 +1,7 @@
 import { getComfyUIAuthHeaders } from "../config.js";
 import { describeFetchFailure, isBareFetchFailure } from "../utils/errors.js";
 import { sameOrigin } from "../utils/origin.js";
+import { readPublishedPanelOrigins } from "../services/panel-origin-channel.js";
 
 /** The request target, for the diagnostic. Never throws on an odd input. */
 export function targetOf(input: string | URL | Request): string {
@@ -34,6 +35,25 @@ function methodOf(input: string | URL | Request, init: RequestInit): string {
  */
 let connectedPanelOrigins: (() => string[]) | null = null;
 
+/**
+ * #1415 — WHERE THESE CALLS ACTUALLY RUN.
+ *
+ * Injection covers the orchestrator process, and almost nothing that fails this
+ * way lives there: every headless comfyui tool runs in the SPAWNED stdio child,
+ * which never loads orchestrator/index.js and has no bridge to inject from. So
+ * the comparison #952 built was silently skipped in exactly the sessions it was
+ * written for — the reporter's panel worked, `list_packs (action:"list_templates")`
+ * failed against a dead COMFYUI_URL, and the error made no comparison at all.
+ *
+ * The child reads the set the orchestrator publishes into the progress dir it
+ * already shares with it (services/panel-origin-channel.ts). Still a leaf
+ * dependency — a file read, not the bridge. An INJECTED source always wins: where
+ * the bridge is in the same process it is both fresher and authoritative.
+ */
+function panelOrigins(): string[] {
+  return connectedPanelOrigins ? connectedPanelOrigins() : readPublishedPanelOrigins();
+}
+
 /** Install the panel-origin source. Pass null to clear (tests, shutdown). */
 export function setConnectedPanelOrigins(fn: (() => string[]) | null): void {
   connectedPanelOrigins = fn;
@@ -62,14 +82,15 @@ function originOf(target: string): string | undefined {
  *                   the reader chasing the explanation the old text volunteered.
  *                   The panel reaches it from the browser; this process does not
  *                   (a firewall, a container boundary, a bound interface).
- *   - UNKNOWN     → no panel connected, no origin source installed, or the
- *                   handshake carried no usable Origin. Say nothing about drift;
- *                   an absent comparison is not a negative result.
+ *   - UNKNOWN     → no panel connected, no origin source installed AND nothing
+ *                   published on the channel, or the handshake carried no usable
+ *                   Origin. Say nothing about drift; an absent comparison is not
+ *                   a negative result.
  */
 export function describeTargetDrift(target: string): string {
   const origins = (() => {
     try {
-      return connectedPanelOrigins?.() ?? [];
+      return panelOrigins();
     } catch {
       return []; // a broken source must never replace the real network error
     }

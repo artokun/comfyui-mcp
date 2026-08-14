@@ -745,6 +745,14 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.51.42] - 2026-08-14
+
+### MCP
+
+#### Fixed
+- let the spawned child make the #952 drift comparison (#1553)
+
+
 ## [0.51.29] - 2026-08-13
 
 ### MCP
