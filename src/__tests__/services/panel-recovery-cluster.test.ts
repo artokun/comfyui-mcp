@@ -55,6 +55,7 @@ const generation = vi.hoisted(() => ({ value: 0 }));
 vi.mock("../../services/live-interpreter.js", async () => ({
   ...(await vi.importActual("../../services/live-interpreter.js")),
   resolveLiveInterpreter: () => undefined,
+  observeLiveServerProcess: () => undefined,
 }));
 
 vi.mock("../../config.js", () => ({

@@ -20,6 +20,9 @@ import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 const resolveLiveInterpreterMock = vi.fn();
 vi.mock("../../services/live-interpreter.js", () => ({
   resolveLiveInterpreter: (...a: unknown[]) => resolveLiveInterpreterMock(...a),
+  // The same observation, uncollapsed (#1374). Stubbed alongside its wrapper so
+  // nothing this file loads can reach the real netstat/WMI probe.
+  observeLiveServerProcess: (...a: unknown[]) => resolveLiveInterpreterMock(...a),
 }));
 
 const comfyuiFetchMock = vi.fn();

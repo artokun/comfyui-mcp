@@ -22,6 +22,7 @@ import { vi } from "vitest";
 vi.mock("../../services/live-interpreter.js", async () => ({
   ...(await vi.importActual("../../services/live-interpreter.js")),
   resolveLiveInterpreter: () => undefined,
+  observeLiveServerProcess: () => undefined,
 }));
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";

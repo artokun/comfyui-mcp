@@ -40,6 +40,7 @@ const hoisted = vi.hoisted(() => ({
 vi.mock("../../services/live-interpreter.js", async () => ({
   ...(await vi.importActual("../../services/live-interpreter.js")),
   resolveLiveInterpreter: () => undefined,
+  observeLiveServerProcess: () => undefined,
 }));
 
 vi.mock("../../config.js", async () => {

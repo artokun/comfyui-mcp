@@ -28,6 +28,7 @@ import { fileURLToPath } from "node:url";
 vi.mock("../../services/live-interpreter.js", async () => ({
   ...(await vi.importActual("../../services/live-interpreter.js")),
   resolveLiveInterpreter: () => undefined,
+  observeLiveServerProcess: () => undefined,
 }));
 
 const { armStartupDeadline } = await import("../../orchestrator/index.js");

@@ -22,13 +22,19 @@ type ExecResult = { stdout?: string; stderr?: string } | Error;
 // Shared mutable state created via vi.hoisted so the vi.mock factories (which
 // are hoisted to the top of the module) can safely reference it.
 const h = vi.hoisted(() => {
+  // GROUND TRUTH seam (#401): undefined = "we could not observe the interpreter",
+  // which is the default and must always degrade to unknown.
+  const mockLiveInterpreter = vi.fn(() => undefined as unknown);
   return {
     mockConfig: { comfyuiPath: undefined as string | undefined, resolvedPort: 8188 },
     mockGetSystemStats: vi.fn(),
     remoteMode: { value: false },
-    // GROUND TRUTH seam (#401): undefined = "we could not observe the interpreter",
-    // which is the default and must always degrade to unknown.
-    mockLiveInterpreter: vi.fn(() => undefined as unknown),
+    mockLiveInterpreter,
+    // The SAME observation, reported without collapsing it to the interpreter
+    // (#1374). Defaults to whatever the interpreter seam says, so every case that
+    // only cares about the interpreter keeps configuring one thing; the cases that
+    // exercise the OS-image fallback override this one directly.
+    mockLiveProcess: vi.fn((...args: unknown[]) => mockLiveInterpreter(...(args as []))),
     execFileResponder: (() => new Error("not configured")) as (
       cmd: string,
       args: string[],
@@ -50,6 +56,7 @@ vi.mock("../../comfyui/client.js", () => ({
 
 vi.mock("../../services/live-interpreter.js", () => ({
   resolveLiveInterpreter: (...args: unknown[]) => h.mockLiveInterpreter(...(args as [])),
+  observeLiveServerProcess: (...args: unknown[]) => h.mockLiveProcess(...(args as [])),
 }));
 
 // execFile is wrapped by promisify() at module load. The mock invokes the
@@ -109,6 +116,12 @@ beforeEach(() => {
   h.remoteMode.value = false;
   h.mockLiveInterpreter.mockReset();
   h.mockLiveInterpreter.mockReturnValue(undefined); // no observation by default
+  h.mockLiveProcess.mockReset();
+  // Reinstalled here (mockReset drops the factory default): the process observation
+  // follows the interpreter seam unless a case overrides it.
+  h.mockLiveProcess.mockImplementation((...args: unknown[]) =>
+    h.mockLiveInterpreter(...(args as [])),
+  );
   mockGetSystemStats.mockReset();
   setExecFileResponder(() => new Error("not configured"));
   resetWorkspaceConfig();
@@ -1695,6 +1708,102 @@ describe("resolveLiveServerRoot (#369)", () => {
       });
       expect(res.source).toBe("unresolved");
       expect(res.root).toBeUndefined();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // #1374 — the tier above is built for the portable bundle, and on the stock
+  // portable bundle it did not run. `run_nvidia_gpu.bat` launches
+  // `.\python_embeded\python.exe -s ComfyUI\main.py`, so the command line the OS
+  // records has a RELATIVE argv[0] and the interpreter answer fails closed (#401,
+  // correctly — a relative argv[0] names no file). The install root then stayed
+  // unresolved, download_model routed to ComfyUI-Manager, and on an install where
+  // Manager is not serving its routes that is a hard failure for a capability that
+  // needs no Manager at all.
+  //
+  // These pin the fallback and its LIMIT: the OS image resolves the root, and a
+  // reading that cannot be placed inside the install still resolves nothing.
+  it("anchors on the OS IMAGE when the launcher spelled the interpreter relatively", async () => {
+    const dir = await tmpDir();
+    try {
+      const { python, serverRoot } = await makePortableBundle(dir);
+      // What the process table reports for the stock portable launch: no usable
+      // argv[0], but the OS's own record of the same binary.
+      h.mockLiveProcess.mockReturnValue({ pid: 4242, image: python });
+
+      const res = resolveLiveServerRoot(
+        [join("ComfyUI", "main.py"), "--windows-standalone-build"],
+        undefined,
+        {},
+      );
+      expect(res.source).toBe("observed-process");
+      expect(res.root).toBe(serverRoot);
+      expect(res.observedPid).toBe(4242);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("anchors a BARE main.py on the OS image when that image is inside the install", async () => {
+    const dir = await tmpDir();
+    try {
+      // The shape the reopened report describes: argv[0] is `main.py` with no cwd,
+      // so the server's install root IS its working directory.
+      await writeFile(join(dir, "main.py"), "", "utf-8");
+      const python = await makeVenvPython(dir);
+      h.mockLiveProcess.mockReturnValue({ pid: 7, image: python });
+
+      const res = resolveLiveServerRoot(["main.py"], undefined, {});
+      expect(res.source).toBe("observed-process");
+      expect(res.root).toBe(dir);
+      expect(res.relDir).toBe(".");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("still REFUSES an image that sits outside the install — the containment test is what gates it", async () => {
+    const dir = await tmpDir();
+    try {
+      // A system python with an unrelated ComfyUI somewhere above it: exactly the
+      // reading `interpreterBelongsToInstall` exists to reject, and the OS image is
+      // no more privileged than argv[0] was. Windows reports a venv's BASE
+      // interpreter here, so this is the ordinary case, not an exotic one.
+      await mkdir(join(dir, "ComfyUI"), { recursive: true });
+      await writeFile(join(dir, "ComfyUI", "main.py"), "", "utf-8");
+      const systemPython = join(dir, "Python313", IS_WIN ? "python.exe" : "python3");
+      await mkdir(dirname(systemPython), { recursive: true });
+      await writeFile(systemPython, "", "utf-8");
+      h.mockLiveProcess.mockReturnValue({ pid: 9, image: systemPython });
+
+      const res = resolveLiveServerRoot([join("ComfyUI", "main.py")], undefined, {});
+      expect(res.source).toBe("unresolved");
+      expect(res.root).toBeUndefined();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("prefers the INTERPRETER over the image when both were observed", async () => {
+    const dir = await tmpDir();
+    try {
+      const { python, serverRoot } = await makePortableBundle(dir);
+      const venvPython = await makeVenvPython(serverRoot);
+      // Windows reports the bundle's base interpreter as the image while argv[0] is
+      // the venv python. Both anchor to the same root here — what is pinned is that
+      // the weaker reading never displaces the stronger one.
+      h.mockLiveProcess.mockReturnValue({
+        pid: 11,
+        python: venvPython,
+        source: "process-table",
+        image: python,
+      });
+
+      const res = resolveLiveServerRoot([join("ComfyUI", "main.py")], undefined, {});
+      expect(res.source).toBe("observed-process");
+      expect(res.root).toBe(serverRoot);
+      expect(res.observedPython).toBe(venvPython);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

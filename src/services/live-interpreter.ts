@@ -27,7 +27,7 @@
 
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readlinkSync } from "node:fs";
-import { isAbsolute } from "node:path";
+import { isAbsolute, resolve as pathResolve } from "node:path";
 import { platform } from "node:os";
 import { findPidByPort } from "./port-owner.js";
 import { logger } from "./../utils/logger.js";
@@ -461,6 +461,39 @@ export interface ResolveOptions {
   readIdentity?: (pid: number) => ProcessIdentity | undefined;
 }
 
+/** What the OS could establish about the ComfyUI holding our port. TWO readings,
+ *  because they answer two different questions and one is routinely available when
+ *  the other is not — see `image`. */
+export interface LiveServerProcess {
+  /** PID of the identified server process. */
+  pid: number;
+  /** The INTERPRETER answer (#401): argv[0] of the running process, when that is an
+   *  absolute path that exists. Absent when argv[0] is relative or bare. */
+  python?: string;
+  /** How `python` was established. Absent exactly when `python` is. */
+  source?: InterpreterSource;
+  /**
+   * The OS's OWN record of the running image (`Win32_Process.ExecutablePath`,
+   * `/proc/<pid>/exe`), absolute and normalized — usable when argv[0] is NOT (#1374).
+   *
+   * A Windows launcher routinely spells the interpreter RELATIVELY: the stock
+   * portable bundle runs `.\python_embeded\python.exe -s ComfyUI\main.py`, and a
+   * shell with an activated venv runs a bare `python`. The command line the OS
+   * records is that literal string, so argv[0] names no file we can probe and the
+   * interpreter answer fails closed — correctly, because this field is NOT a
+   * substitute for it: for a venv Windows reports the BASE interpreter the
+   * trampoline loads (measured live: `…\standalone-env\python.exe` while argv[0] is
+   * `…\ComfyUI\.venv\Scripts\python.exe`), whose site-packages are not the ones the
+   * server imports.
+   *
+   * It IS an answer to the weaker question "where does this process live?", which is
+   * all an install-root ANCHOR needs. Callers must use it only that way, and only
+   * behind a containment test — a base interpreter that sits outside the install
+   * simply fails it, so this reading can add a resolution but never redirect one.
+   */
+  image?: string;
+}
+
 /**
  * The interpreter the running ComfyUI is ACTUALLY using, or `undefined` when we
  * cannot observe it. Never infers from install layout.
@@ -476,6 +509,22 @@ export interface ResolveOptions {
  * confidently wrong package list is the entire bug (#401).
  */
 export function resolveLiveInterpreter(opts: ResolveOptions): LiveInterpreter | undefined {
+  const observed = observeLiveServerProcess(opts);
+  if (!observed?.python || !observed.source) return undefined;
+  return { python: observed.python, source: observed.source, pid: observed.pid };
+}
+
+/**
+ * The same single observation `resolveLiveInterpreter` makes, reported WITHOUT
+ * collapsing it to the interpreter answer — so a caller that only needs to anchor an
+ * install root still gets something when argv[0] cannot supply it (#1374).
+ *
+ * Identity is established exactly as before (the two tiers above); all that differs
+ * is what is handed back. In particular the OS image is returned only AFTER the argv
+ * correlation has passed, so a proxy on the port can no more contribute an anchor
+ * than it can contribute an interpreter.
+ */
+export function observeLiveServerProcess(opts: ResolveOptions): LiveServerProcess | undefined {
   if (opts.remote) return undefined;
   const findPid = opts.findPid ?? findPidByPort;
   const readIdentity = opts.readIdentity ?? readProcessIdentity;
@@ -494,6 +543,16 @@ export function resolveLiveInterpreter(opts: ResolveOptions): LiveInterpreter | 
   } catch {
     identity = undefined;
   }
+
+  // The OS's own record of the image, normalized: Windows reports it verbatim from
+  // the launch, so a relative spelling comes back as an absolute path that still
+  // contains the `..` it was written with (measured: `…\ComfyUI\..\python_embeded\
+  // python.exe`).
+  const rawImage = identity?.executablePath;
+  const image =
+    rawImage && isAbsolute(rawImage) && existsSync(rawImage)
+      ? pathResolve(rawImage)
+      : undefined;
 
   // Tier 1 — the process we launched, confirmed by PID *and* start time.
   // The recorded interpreter must be ABSOLUTE: a bare `python` would be
@@ -521,7 +580,7 @@ export function resolveLiveInterpreter(opts: ResolveOptions): LiveInterpreter | 
       launchRecord.startedAt === identity.startedAt &&
       corroborated
     ) {
-      return { python: launchRecord.python, source: "launched-by-us", pid };
+      return { python: launchRecord.python, source: "launched-by-us", pid, image };
     }
     // Same PID, different (or unreadable) start time → this is NOT our process, or
     // we cannot prove it is. Fall through to tier 2 rather than trust the record.
@@ -538,9 +597,10 @@ export function resolveLiveInterpreter(opts: ResolveOptions): LiveInterpreter | 
   const argv0 = argv0FromCommandLine(identity?.commandLine ?? "");
   // A relative or bare argv[0] ("python", "./python") does not identify a file we
   // can probe — the process's cwd is not ours. Only an absolute path that exists
-  // is usable; anything else is honestly unknown.
+  // is usable; anything else is honestly unknown as an INTERPRETER. The OS image
+  // still travels with the result for the weaker anchor question (#1374).
   if (argv0 && isAbsolute(argv0) && existsSync(argv0)) {
-    return { python: argv0, source: "process-table", pid };
+    return { python: argv0, source: "process-table", pid, image };
   }
-  return undefined;
+  return { pid, image };
 }

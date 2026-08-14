@@ -123,6 +123,30 @@ const PROBES: Probe[] = [
       "  }));\n",
   },
   {
+    // #1374 — SAME MODULE, SECOND DOOR. The shell-out moved down into
+    // `observeLiveServerProcess`, which reports the OS's own image record as well as
+    // the interpreter, and `resolveLiveInterpreter` is now a wrapper around it. A
+    // file that stubs only the wrapper (which six of them did, verbatim from the
+    // remedy above) still reaches the real process table through the other export —
+    // and the probe above cannot see that, because its `moduleHint` is satisfied by
+    // any mention of the module. So this one is keyed on the FUNCTION NAME: a file
+    // is exempt only if it actually names the export it has to replace.
+    id: "live process table (uncollapsed observation)",
+    callee: "observeLiveServerProcess",
+    privateSeeds: ["resolveLiveServerRoot"],
+    moduleHint: "observeLiveServerProcess",
+    expectEntries: ["resolveLiveServerRoot", "resolveLiveInterpreter"],
+    remedy:
+      "`observeLiveServerProcess` is where the netstat/WMI shell-out now lives, and " +
+      "`resolveLiveInterpreter` only wraps it — so stubbing the wrapper alone leaves " +
+      "these reading the REAL process table. Stub BOTH:\n\n" +
+      '  vi.mock("../../services/live-interpreter.js", async () => ({\n' +
+      '    ...(await vi.importActual("../../services/live-interpreter.js")),\n' +
+      "    resolveLiveInterpreter: () => undefined,\n" +
+      "    observeLiveServerProcess: () => undefined,\n" +
+      "  }));\n",
+  },
+  {
     id: "instance witness (real WebSocket)",
     callee: "acquireInstanceWitness",
     // Both call sites sit in NON-exported functions (`gatherProcessInfo`,
@@ -214,6 +238,16 @@ function unstubbedTests(probe: Probe): string[] {
  */
 const KNOWN_UNSTUBBED: Record<string, string[]> = {
   "live process table": ["__tests__/orchestrator/late-mutation-e2e.test.ts"],
+  // Pre-existing, and a finding about the FIRST probe rather than about #1374:
+  // `env-capabilities.test.ts` has read the real process table all along, and was
+  // exempted only because its prose mentions "live-interpreter" —
+  // `moduleHint` cannot tell a stub from a comment. The name-keyed probe below sees
+  // it. Ratcheted rather than fixed here for the reason the list exists: that file
+  // deliberately runs the real probe set to prove a per-gather read is not cached,
+  // and deciding what the process probe should answer for it is its own judgement.
+  "live process table (uncollapsed observation)": [
+    "__tests__/services/env-capabilities.test.ts",
+  ],
   // The witness channel as it stands today. Ratcheted rather than fixed wholesale, for
   // the same reason as the list above: five passing files is a large diff with no
   // observable failure behind it, and each needs its own judgement about what the

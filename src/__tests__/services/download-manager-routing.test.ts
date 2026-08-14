@@ -21,10 +21,14 @@ const hoisted = vi.hoisted(() => ({
   /** #1263 — the interpreter the live-process probe "finds", instead of whatever
    *  is really running on the developer's machine. undefined = nothing found. */
   livePython: undefined as string | undefined,
+  /** #1374 — the OS's own record of the running image, which is what the probe has
+   *  to work with when the launcher spelled the interpreter relatively (the stock
+   *  Windows portable bundle). undefined = the OS gave none either. */
+  liveImage: undefined as string | undefined,
   /** The stub itself, created here so the spec can assert BY IDENTITY that this
    *  is the function in force, and count the calls the code under test makes to
    *  it (codex). Its behaviour is installed in `beforeEach`. */
-  liveInterpreter: vi.fn() as ReturnType<typeof vi.fn>,
+  liveProcess: vi.fn() as ReturnType<typeof vi.fn>,
 }));
 
 // The live-root routing branch only streams local when the root exists locally.
@@ -48,7 +52,7 @@ vi.mock("../../services/workspace-env.js", async () => {
 });
 
 // #1263 — THE PROCESS TABLE IS NOT A FIXTURE. `resolveLiveServerRoot` falls back
-// to `observeLivePython()`, which calls `resolveLiveInterpreter` — and that
+// to `observeLivePython()`, which calls `observeLiveServerProcess` — and that
 // shells out to netstat/WMI to find whatever python is really serving the port
 // on THIS machine. So on a developer box with ComfyUI running, a relative
 // `main.py` argv anchors onto the live interpreter, a root resolves, the mocked
@@ -59,7 +63,7 @@ vi.mock("../../services/workspace-env.js", async () => {
 // That is why this file passed every CI run while failing locally: the assertion
 // depended on whether the machine running it happened to have a ComfyUI up.
 // Stubbed to "found nothing" by default, which is the state these cases describe;
-// `hoisted.livePython` opts a case into the other answer.
+// `hoisted.livePython` / `hoisted.liveImage` opt a case into the other answers.
 vi.mock("../../services/live-interpreter.js", async () => {
   const actual = await vi.importActual<typeof import("../../services/live-interpreter.js")>(
     "../../services/live-interpreter.js",
@@ -67,7 +71,7 @@ vi.mock("../../services/live-interpreter.js", async () => {
   // The stub is created in `vi.hoisted` and handed over here, so the spec can
   // assert BY IDENTITY that this is the function in force, and count the calls
   // the code under test makes to it (codex).
-  return { ...actual, resolveLiveInterpreter: hoisted.liveInterpreter };
+  return { ...actual, observeLiveServerProcess: hoisted.liveProcess };
 });
 
 // getSystemStats stands in for the connected server's /system_stats. getClient is
@@ -84,7 +88,7 @@ vi.mock("../../comfyui/client.js", () => ({
   }),
 }));
 
-import { resolveLiveInterpreter } from "../../services/live-interpreter.js";
+import { observeLiveServerProcess } from "../../services/live-interpreter.js";
 import { shouldDispatchDownloadToManager } from "../../services/model-resolver.js";
 
 beforeEach(() => {
@@ -94,12 +98,19 @@ beforeEach(() => {
   hoisted.statsThrows = false;
   hoisted.liveRootExists = true;
   hoisted.livePython = undefined;
+  hoisted.liveImage = undefined;
   // The stub is a spy now (so its calls can be counted), so its behaviour has to
   // be (re)installed here rather than living in the mock factory.
-  hoisted.liveInterpreter.mockReset();
-  hoisted.liveInterpreter.mockImplementation(() =>
-    hoisted.livePython ? { python: hoisted.livePython, pid: 4242 } : undefined,
-  );
+  hoisted.liveProcess.mockReset();
+  hoisted.liveProcess.mockImplementation(() => {
+    if (hoisted.livePython) {
+      return { python: hoisted.livePython, source: "process-table", pid: 4242, image: hoisted.liveImage };
+    }
+    // Only the OS image: the process was identified, but its argv[0] named no file
+    // we could probe (#1374).
+    if (hoisted.liveImage) return { pid: 4242, image: hoisted.liveImage };
+    return undefined;
+  });
 });
 
 // #1263 — THE STUB MUST BE PROVEN, NOT ASSUMED.
@@ -117,15 +128,15 @@ beforeEach(() => {
 // see whether the mock takes effect. This can, and it fails with its own name on
 // it rather than as a confusing routing assertion.
 describe("the live-process stub is actually in force (#1263)", () => {
-  it("the imported resolveLiveInterpreter IS this file's stub, by identity", () => {
+  it("the imported observeLiveServerProcess IS this file's stub, by identity", () => {
     // Identity, not behaviour (codex): a different implementation returning the
     // same two values would satisfy an output check.
     expect(
-      resolveLiveInterpreter,
+      observeLiveServerProcess,
       "vi.mock is not intercepting ../../services/live-interpreter.js — this file is " +
         "reading the REAL process table, so its assertions now depend on whether this " +
         "machine happens to have ComfyUI running (#1263).",
-    ).toBe(hoisted.liveInterpreter);
+    ).toBe(hoisted.liveProcess);
   });
 
   it("and the CODE UNDER TEST reaches that same stub — not another copy", async () => {
@@ -142,7 +153,7 @@ describe("the live-process stub is actually in force (#1263)", () => {
     await shouldDispatchDownloadToManager();
 
     expect(
-      hoisted.liveInterpreter.mock.calls.length,
+      hoisted.liveProcess.mock.calls.length,
       "the routing code never called the stubbed probe, so it is resolving a DIFFERENT " +
         "copy of live-interpreter than this file mocked — the stub is inert for the " +
         "assertions that depend on it (#1263).",
@@ -154,7 +165,10 @@ describe("the live-process stub is actually in force (#1263)", () => {
     // default proves nothing on its own.
     try {
       hoisted.livePython = "C:/probe/python.exe";
-      expect(resolveLiveInterpreter()).toEqual({ python: "C:/probe/python.exe", pid: 4242 });
+      expect(observeLiveServerProcess()).toMatchObject({
+        python: "C:/probe/python.exe",
+        pid: 4242,
+      });
     } finally {
       // Restored here rather than left to beforeEach, so a failure above cannot
       // leave the fixture mutated for anything that runs before it (codex).
@@ -267,6 +281,37 @@ describe("shouldDispatchDownloadToManager (#420 reconnect routing)", () => {
     hoisted.base = undefined;
     hoisted.stats = { system: { argv: ["main.py", "--listen"] } };
     hoisted.livePython = "/opt/comfy/.venv/bin/python";
+    hoisted.liveRootExists = false;
+
+    expect(await shouldDispatchDownloadToManager()).toBe(true);
+  });
+
+  // #1374 — THE ROUTE, not just the anchor. A LOCAL Windows install could download
+  // nothing: no COMFYUI_PATH, a relative `main.py` with no cwd, and a launcher that
+  // spelled the interpreter relatively (`.\python_embeded\python.exe`, or a bare
+  // `python` from an activated venv). argv[0] then named no file, the probe reported
+  // no interpreter, no root resolved, and every download was handed to a
+  // ComfyUI-Manager that was not serving its routes — a hard failure for a capability
+  // that needs no Manager at all.
+  //
+  // This is the decision that has to change, so it is asserted here and not only on
+  // the resolver: the OS image is enough to keep the download LOCAL.
+  it("#1374: no local base + a probe that could only report the OS IMAGE → streams local", async () => {
+    hoisted.base = undefined;
+    hoisted.stats = { system: { argv: ["main.py", "--windows-standalone-build"] } };
+    hoisted.livePython = undefined; // relative argv[0] — no interpreter answer
+    hoisted.liveImage = "/portable/python_embeded/python.exe";
+    hoisted.liveRootExists = true;
+
+    expect(await shouldDispatchDownloadToManager()).toBe(false);
+  });
+
+  it("#1374: an OS image whose anchored root is NOT on this filesystem still routes to Manager", async () => {
+    // The image is a weaker reading, not a privileged one: it earns a LOCAL route on
+    // exactly the same evidence an interpreter does, and no more.
+    hoisted.base = undefined;
+    hoisted.stats = { system: { argv: ["main.py", "--windows-standalone-build"] } };
+    hoisted.liveImage = "/portable/python_embeded/python.exe";
     hoisted.liveRootExists = false;
 
     expect(await shouldDispatchDownloadToManager()).toBe(true);

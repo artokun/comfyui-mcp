@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import { config, getComfyUIBaseUrl, isRemoteMode } from "../config.js";
 import { normalizeInstallPathEnv } from "../utils/install-path-env.js";
 import { getSystemStats } from "../comfyui/client.js";
-import { resolveLiveInterpreter } from "./live-interpreter.js";
+import { observeLiveServerProcess, resolveLiveInterpreter } from "./live-interpreter.js";
 import { logger } from "../utils/logger.js";
 import { ValidationError } from "../utils/errors.js";
 
@@ -644,7 +644,10 @@ export interface LiveServerRootResolution {
    *  argv named a relative script. Present even when the root stays unresolved —
    *  callers use it to anchor a corroborated fallback and to explain a refusal. */
   relDir?: string;
-  /** The interpreter the OS reports for the process on our port, when observed. */
+  /** The binary the OS reports for the process on our port, when observed — its
+   *  interpreter (argv[0]), or the OS's own image record when argv[0] was written
+   *  relatively and names no probeable file (#1374). Reported so a refusal can name
+   *  what WAS seen; it is the anchor input, not a runnable interpreter. */
   observedPython?: string;
   /**
    * The directory `relDir` was resolved AGAINST to produce `root` — i.e. the
@@ -762,9 +765,21 @@ function anchorRelDirOnInterpreter(
 }
 
 /**
- * The interpreter the OS reports for the ComfyUI on our port.
+ * The BINARY the OS reports for the ComfyUI on our port — to anchor its install
+ * root on, which is the only thing this file does with it.
  *
- * DELIBERATELY NOT CACHED. `resolveLiveInterpreter` shells out (netstat/WMI on
+ * Prefers the interpreter (argv[0] of the running process). Falls back to the OS's
+ * own image record when argv[0] is relative or bare (#1374): the stock Windows
+ * portable bundle launches `.\python_embeded\python.exe`, and an activated venv
+ * launches a bare `python`, so on those installs argv[0] names no file to anchor on
+ * — the tier built for the relative-`main.py` shape then failed closed on the very
+ * layouts it exists to serve, and the download bounced to ComfyUI-Manager (a hard
+ * failure wherever Manager is not loaded). The fallback is weaker on purpose: for a
+ * venv Windows reports the BASE interpreter, which sits OUTSIDE the install and is
+ * rejected by anchorRelDirOnInterpreter's containment test — so it can only ever add
+ * a resolution, never move one.
+ *
+ * DELIBERATELY NOT CACHED. `observeLiveServerProcess` shells out (netstat/WMI on
  * Windows, lsof on POSIX), so memoizing it is tempting — but this answer decides
  * WHERE A DOWNLOAD IS WRITTEN. A cache keyed on port+argv cannot tell a restarted
  * server apart from the one it replaced (a relaunch of ComfyUI reports the same
@@ -783,16 +798,17 @@ function observeLivePython(
     /* unparseable target → no host filter */
   }
   try {
-    const live = resolveLiveInterpreter({
+    const live = observeLiveServerProcess({
       port: config.resolvedPort,
       host: statsHost,
       remote: false,
       serverArgv: argv,
     });
+    const binary = live?.python ?? live?.image;
     // The PID travels with the interpreter (#535). A caller that is about to STOP
     // a process must be able to confirm the anchor describes that very process
     // and not some other ComfyUI — an interpreter path alone cannot prove it.
-    return live ? { python: live.python, pid: live.pid } : undefined;
+    return live && binary ? { python: binary, pid: live.pid } : undefined;
   } catch {
     return undefined;
   }
@@ -814,10 +830,12 @@ function observeLivePython(
  *     both report (`ComfyUI\main.py`), and it is exactly why #369 kept recurring:
  *     with argv unresolvable, the download destination silently fell through to
  *     COMFYUI_PATH — a DIFFERENT, stale install — and the model landed where the
- *     running server never reads. So we ask the OS instead: `resolveLiveInterpreter`
+ *     running server never reads. So we ask the OS instead: `observeLiveServerProcess`
  *     identifies the process listening on our port (correlated against the server's
- *     own argv, so a proxy can't impersonate it) and reports its interpreter; the
- *     relative `main.py` dir is re-anchored on that interpreter's install tree.
+ *     own argv, so a proxy can't impersonate it) and reports the binary it runs — its
+ *     interpreter, or the OS's own image record when the launcher spelled the
+ *     interpreter relatively (#1374); the relative `main.py` dir is re-anchored on
+ *     that binary's install tree.
  *
  * Anything else is `unresolved`. There is deliberately NO layout-guess tier: a
  * COMFYUI_PATH that merely looks plausible is what wrote 4.88 GB into the wrong

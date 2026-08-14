@@ -37,6 +37,7 @@ vi.mock("../../config.js", async (orig) => ({
 vi.mock("../../services/live-interpreter.js", async () => ({
   ...(await vi.importActual<Record<string, unknown>>("../../services/live-interpreter.js")),
   resolveLiveInterpreter: () => undefined,
+  observeLiveServerProcess: () => undefined,
 }));
 
 vi.mock("../../comfyui/client.js", async (orig) => ({

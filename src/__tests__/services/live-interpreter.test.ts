@@ -1,7 +1,7 @@
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 
 import {
   argv0FromCommandLine,
@@ -9,6 +9,7 @@ import {
   recordLaunchedInterpreter,
   clearLaunchedInterpreter,
   getLaunchedInterpreterRecord,
+  observeLiveServerProcess,
   resolveLiveInterpreter,
 } from "../../services/live-interpreter.js";
 
@@ -294,6 +295,136 @@ describe("resolveLiveInterpreter — ground truth only (#401)", () => {
         readIdentity: () => {
           throw new Error("wmi exploded");
         },
+      }),
+    ).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #1374 — THE OS KNOWS WHERE THE PROCESS LIVES EVEN WHEN argv[0] DOES NOT SAY.
+//
+// A LOCAL Windows install could not download anything: every attempt was routed to
+// ComfyUI-Manager and died on "Manager's queue API is not reachable". The route is
+// chosen when no local models directory can be resolved, and the tier built for the
+// relative-`main.py` shape re-anchors that path on the interpreter the OS reports —
+// but it fails closed on a RELATIVE argv[0], which is exactly how the stock Windows
+// portable bundle launches (`.\python_embeded\python.exe -s ComfyUI\main.py`) and
+// how an activated venv launches (a bare `python`). Measured on Windows 11: the
+// command line the OS records is the literal launch string, so argv[0] comes back
+// relative, while `Win32_Process.ExecutablePath` is absolute for the same process.
+//
+// Failing closed is RIGHT for the interpreter question (#401) and wrong for the
+// anchor question, so the two answers are now reported separately rather than one
+// being widened.
+// ---------------------------------------------------------------------------
+describe("observeLiveServerProcess — the OS image survives a relative argv[0] (#1374)", () => {
+  it("reports NO interpreter but DOES report the image for a relative argv[0]", async () => {
+    const exe = await makeExe("python.exe");
+    const opts = {
+      port: 8188,
+      remote: false,
+      serverArgv: ["main.py"],
+      findPid: () => 5,
+      // The portable shape: a relative interpreter on the command line, and the OS's
+      // own absolute record of the same binary.
+      readIdentity: () => ({
+        commandLine: ".\\python_embeded\\python.exe main.py",
+        executablePath: exe,
+        startedAt: "t1",
+      }),
+    };
+    // The #401 line holds: nothing that could be mistaken for the interpreter.
+    expect(resolveLiveInterpreter(opts)).toBeUndefined();
+    expect(observeLiveServerProcess(opts)).toEqual({ pid: 5, image: exe });
+  });
+
+  it("NORMALIZES the image — Windows records it exactly as the launcher wrote it", async () => {
+    // Measured: a process launched as `..\python_embeded\python.exe` reports
+    // `…\ComfyUI\..\python_embeded\python.exe` — absolute, but not yet a path an
+    // install-root ascent can walk.
+    const exe = await makeExe("python.exe");
+    // Assembled with `sep`, NOT join(): join() collapses the `..` itself, so the
+    // fixture would already be normalized and the assertion would pass with the
+    // normalization deleted (it did — caught by mutating pathResolve away).
+    await mkdir(join(dir, "sub"), { recursive: true }); // POSIX stat() walks it for real
+    const detoured = `${dir}${sep}sub${sep}..${sep}python.exe`;
+    const res = observeLiveServerProcess({
+      port: 8188,
+      remote: false,
+      serverArgv: ["main.py"],
+      findPid: () => 5,
+      readIdentity: () => ({
+        commandLine: "python main.py",
+        executablePath: detoured,
+        startedAt: "t1",
+      }),
+    });
+    expect(res).toEqual({ pid: 5, image: exe });
+  });
+
+  it("still carries the image alongside an interpreter it COULD read", async () => {
+    const exe = await makeExe("venv-python.exe");
+    const base = await makeExe("base-python.exe");
+    const res = observeLiveServerProcess({
+      port: 8188,
+      remote: false,
+      serverArgv: ["main.py"],
+      findPid: () => 5,
+      readIdentity: () => ({
+        commandLine: `${exe} main.py`,
+        executablePath: base,
+        startedAt: "t1",
+      }),
+    });
+    // The interpreter still wins for the #401 question; the image is the weaker
+    // reading a caller may fall back to, never a replacement.
+    expect(res).toEqual({ pid: 5, python: exe, source: "process-table", image: base });
+  });
+
+  it("reports NO image for a PROXY on the port — the correlation still gates it", async () => {
+    const proxy = await makeExe("proxy-python.exe");
+    expect(
+      observeLiveServerProcess({
+        port: 8188,
+        remote: false,
+        serverArgv: COMFY_ARGV,
+        findPid: () => 999,
+        readIdentity: () => ({
+          commandLine: "python -m myproxy --listen 8188",
+          executablePath: proxy,
+          startedAt: "t1",
+        }),
+      }),
+    ).toBeUndefined();
+  });
+
+  it("reports NO image when the OS gave none, or one that is relative / absent", () => {
+    for (const executablePath of [undefined, ".\\python.exe", join(dir, "gone.exe")]) {
+      expect(
+        observeLiveServerProcess({
+          port: 8188,
+          remote: false,
+          serverArgv: ["main.py"],
+          findPid: () => 5,
+          readIdentity: () => ({
+            commandLine: "python main.py",
+            executablePath,
+            startedAt: "t1",
+          }),
+        }),
+      ).toEqual({ pid: 5 });
+    }
+  });
+
+  it("reports nothing at all for a REMOTE server", async () => {
+    const exe = await makeExe("remote-python.exe");
+    expect(
+      observeLiveServerProcess({
+        port: 8188,
+        remote: true,
+        serverArgv: ["main.py"],
+        findPid: () => 5,
+        readIdentity: () => ({ commandLine: "python main.py", executablePath: exe }),
       }),
     ).toBeUndefined();
   });
