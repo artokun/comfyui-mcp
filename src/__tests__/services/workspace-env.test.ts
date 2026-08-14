@@ -1785,6 +1785,46 @@ describe("resolveLiveServerRoot (#369)", () => {
     }
   });
 
+  // ── The gap this does NOT close, measured rather than assumed ─────────────
+  //
+  // Worth being exact, because the two shapes look alike in a report and behave
+  // differently, and the difference decides whether #1374's recurring reporter is
+  // helped:
+  //
+  //   argv[0] = "ComfyUI\main.py"  → relDir "ComfyUI". Walking up from
+  //     <bundle>/python_embeded reaches <bundle>, and <bundle>/ComfyUI/main.py
+  //     exists — RESOLVED. This is what run_nvidia_gpu.bat produces, so the stock
+  //     portable bundle IS served by this tier.
+  //
+  //   argv[0] = "main.py"          → relDir ".". Walking up asks whether
+  //     <bundle>/python_embeded or <bundle> is itself the install root; neither
+  //     holds main.py, so it stays UNRESOLVED. This is the shape the recurrence
+  //     comment reports, and it is only helped when the interpreter lives INSIDE
+  //     the install (a venv at <install>/.venv), which the test above pins.
+  //
+  // Anchoring "." on a sibling would mean guessing which of <bundle>'s children is
+  // the install — the layout-guess tier this file deliberately does not have, and
+  // the one that wrote 4.88 GB into the wrong install in #369. So the gap stays,
+  // and stays recorded.
+  it("does NOT resolve a BARE main.py when the interpreter is a SIBLING of the install", async () => {
+    const dir = await tmpDir();
+    try {
+      const { python, serverRoot } = await makePortableBundle(dir);
+      h.mockLiveProcess.mockReturnValue({ pid: 4242, image: python });
+
+      // Same bundle, same image — only argv[0] differs from the resolving case.
+      const bare = resolveLiveServerRoot(["main.py"], undefined, {});
+      expect(bare.source).toBe("unresolved");
+      expect(bare.root).toBeUndefined();
+      // …and the contrast, so this cannot pass by the whole tier being broken.
+      const withDir = resolveLiveServerRoot([join("ComfyUI", "main.py")], undefined, {});
+      expect(withDir.source).toBe("observed-process");
+      expect(withDir.root).toBe(serverRoot);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("prefers the INTERPRETER over the image when both were observed", async () => {
     const dir = await tmpDir();
     try {
