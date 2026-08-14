@@ -7,7 +7,7 @@
 // file covers the small file channel that carries the set across.
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -255,6 +255,62 @@ describe("panel-origin channel — heartbeat", () => {
     // slower than the limit would expire a live orchestrator's record between
     // refreshes, silently losing the diagnostic on every long-stable session.
     expect(PANEL_ORIGINS_HEARTBEAT_MS * 2).toBeLessThanOrEqual(PANEL_ORIGINS_MAX_AGE_MS);
+  });
+});
+
+describe("panel-origin channel — the write is atomic (review r2)", () => {
+  it("leaves no .tmp behind, and the channel file is the only artefact", () => {
+    publishConnectedPanelOrigins(dir, ["http://127.0.0.1:8188"]);
+    expect(readdirSync(dir)).toEqual([PANEL_ORIGINS_FILE]);
+  });
+
+  it("replaces rather than truncating — a reader never sees an empty file", () => {
+    // The torn-read this exists to prevent: `writeFileSync` on the live path
+    // truncates and refills, so a child reading mid-write parses nothing and
+    // answers [] — dropping every live origin at exactly the moment it is
+    // formatting the error those origins explain.
+    //
+    // Asserted through inode/identity rather than by racing a real write, which
+    // would be a flaky test: a rename REPLACES the directory entry, so the file
+    // seen before the second publish is not the file seen after.
+    const now = Date.now();
+    publishConnectedPanelOrigins(dir, ["http://a:1"], now);
+    const before = statSync(join(dir, PANEL_ORIGINS_FILE));
+    publishConnectedPanelOrigins(dir, ["http://b:2"], now + 700);
+    const after = statSync(join(dir, PANEL_ORIGINS_FILE));
+    // Precondition asserted SEPARATELY and loudly. Folding it into the check
+    // below (`ino === ino && ino !== 0`) would make this pass silently on any
+    // platform that reports 0, which is how a test quietly stops testing.
+    // Windows and Linux both report a real value; if one ever does not, this
+    // fails and asks for a decision instead of going green.
+    expect(before.ino).not.toBe(0);
+    expect(after.ino).not.toBe(before.ino);
+    expect(readPublishedPanelOrigins(now + 700)).toEqual(["http://b:2"]);
+  });
+
+  it("cleans up and stays unpublished when the replace cannot happen", () => {
+    // Reaches the retry-then-give-up path WITHOUT mocking: a directory at the
+    // destination makes every `renameSync` attempt fail on both platforms.
+    // (`vi.spyOn(fsModule, "renameSync")` cannot do this — an ES module
+    // namespace object is frozen, so redefining a member throws.)
+    //
+    // Two things must hold, and the second is the one that matters: the temp is
+    // dropped rather than accumulating one file per tick, and the publisher does
+    // NOT record the set as published — otherwise the change-only rule would
+    // suppress every retry and the channel would be stuck on the old record for
+    // as long as the set stayed the same.
+    const now = Date.now();
+    const blocked = join(dir, PANEL_ORIGINS_FILE);
+    mkdirSync(blocked);
+    publishConnectedPanelOrigins(dir, ["http://b:2"], now);
+    expect(readdirSync(dir)).toEqual([PANEL_ORIGINS_FILE]); // no stray .tmp
+    expect(readdirSync(blocked)).toEqual([]); // …and nothing written inside it
+
+    // Clear the obstruction; the SAME set must still be written, proving the
+    // failed attempt did not mark it published.
+    rmSync(blocked, { recursive: true, force: true });
+    publishConnectedPanelOrigins(dir, ["http://b:2"], now + 700);
+    expect(readPublishedPanelOrigins(now + 700)).toEqual(["http://b:2"]);
   });
 });
 

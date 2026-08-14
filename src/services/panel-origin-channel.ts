@@ -78,7 +78,17 @@
 // No-ops entirely when COMFYUI_MCP_PROGRESS_DIR is unset — a plain (non-panel)
 // MCP server keeps the pre-#952 "" exactly as before.
 
-import { closeSync, constants, fstatSync, mkdirSync, openSync, readSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  mkdirSync,
+  openSync,
+  readSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 
 /**
@@ -121,6 +131,8 @@ function channelFile(dir?: string): string | null {
 let lastPublished: string | null = null;
 /** When this process last wrote the file, for the heartbeat below. */
 let lastWriteAt = 0;
+/** Distinguishes concurrent temp files from this process. */
+let publishSeq = 0;
 
 /** Refresh the record at least this often even when the set is UNCHANGED, so a
  *  reader can tell "still true" from "nobody has touched this since the
@@ -236,7 +248,37 @@ export function publishConnectedPanelOrigins(
   });
   try {
     mkdirSync(dir, { recursive: true });
-    writeFileSync(file, payload);
+    // Write-then-rename, NOT an in-place rewrite. `writeFileSync(file, …)`
+    // truncates and refills, so a child reading during that window sees a
+    // partial record, fails to parse, and answers [] — dropping every live
+    // origin at exactly the moment it is formatting the error those origins
+    // explain (review r2). A rename makes readers see the old record or the new
+    // one, never a torn one.
+    //
+    // Same shape as persistDownloadJob (download-progress.ts), including its
+    // reason for retrying: on Windows a reader briefly holding the target open
+    // makes rename fail transiently. On persistent failure the PRIOR complete
+    // record is left untouched and the temp dropped — the next tick retries, so
+    // this self-heals rather than degrading to a torn write.
+    const tmp = `${file}.${process.pid}-${publishSeq++}.tmp`;
+    writeFileSync(tmp, payload);
+    let renamed = false;
+    for (let attempt = 0; attempt < 5 && !renamed; attempt++) {
+      try {
+        renameSync(tmp, file);
+        renamed = true;
+      } catch {
+        /* transient (e.g. Windows sharing violation) — retry */
+      }
+    }
+    if (!renamed) {
+      try {
+        rmSync(tmp, { force: true });
+      } catch {
+        /* ignore — a stray .tmp is not the channel file and is never read */
+      }
+      return; // do NOT record it as published; the next tick tries again
+    }
     lastPublished = key;
     lastWriteAt = now;
   } catch {
