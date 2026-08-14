@@ -746,6 +746,28 @@ function interpreterBelongsToInstall(python: string, base: string, root: string)
  * Linux and nothing supplied on Windows (#535). It falls out of the walk for free;
  * discarding it was why the restart path had no Windows anchor to use.
  */
+/**
+ * KNOWN GAP, measured and filed rather than implied — this anchors on where the
+ * BINARY lives, which is not proof of where the SCRIPT was resolved from.
+ *
+ * Review raised it against the #1374 image fallback: with a stale portable
+ * bundle's python on PATH, `cd D:\live && python ComfyUI\main.py` reports the
+ * STALE interpreter while the server runs the LIVE script, and the bundle-shape
+ * containment happily accepts `C:\stale\ComfyUI` — the #369 failure mode.
+ *
+ * Measured on this branch, both readings behave IDENTICALLY: an absolute argv[0]
+ * naming that same stale python anchors the stale root exactly as the image does.
+ * So the image fallback does not introduce this; it is a property of anchoring on
+ * the interpreter at all, and it has been reachable via argv[0] since that tier
+ * shipped. What the fallback changes is how many launch shapes reach the tier.
+ *
+ * Not fixed here because the fix is not local to this function: it needs a
+ * corroboration the server itself can supply (the models dir it actually reads),
+ * which is a different change from "make the relative-argv case resolvable".
+ * Tracked separately; do NOT paper over it by tightening the containment test,
+ * which would only shrink the set of installs that work without making any
+ * remaining answer more trustworthy.
+ */
 function anchorRelDirOnInterpreter(
   python: string,
   relDir: string,
