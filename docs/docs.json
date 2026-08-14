@@ -11,8 +11,7 @@
   "favicon": "/favicon.svg",
   "logo": {
     "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg",
-    "href": "https://github.com/artokun/comfyui-mcp"
+    "dark": "/logo/dark.svg"
   },
   "appearance": {
     "default": "system"
