@@ -229,6 +229,84 @@ describe("action-level allow lists fail closed", () => {
     expect(toolActionAllowed("panel_graph_outline", {}, p)).toBe(true);
   });
 
+  // THE OVER-PERMISSIVE DIRECTION IS THE ONLY ONE THAT MATTERS HERE.
+  //
+  // Every test above this point asserts that an ALLOWED action is allowed and that a
+  // plainly-different one is not. Neither can see the failures that actually ship: a
+  // compare that was loosened to `startsWith`, lowercased "to be forgiving", or split
+  // into two independent `.some()` calls. Each of those keeps every existing assertion
+  // green while widening the allowlist, so the near-misses get their own tests.
+  it("does not admit a near-miss tool or action name", () => {
+    const p = resolveToolSurfacePolicy({
+      COMFYUI_MCP_TOOL_ACTION_ALLOW: "queue:list",
+    });
+    expect(toolActionAllowed("queue", { action: "list" }, p)).toBe(true);
+
+    // PREFIX / EXTRA SEGMENT — `startsWith` in either position would pass these.
+    for (const action of ["list_all", "listall", "lis", "list ", " list", "list:extra"]) {
+      expect(toolActionAllowed("queue", { action }, p), `action ${JSON.stringify(action)}`).toBe(
+        false,
+      );
+    }
+    for (const tool of ["queue_admin", "queuex", "que", "my_queue", "enqueue"]) {
+      expect(toolActionAllowed(tool, { action: "list" }, p), `tool ${tool}`).toBe(false);
+    }
+
+    // CASE — the rule grammar rejects an uppercase RULE, but nothing there constrains
+    // the incoming CALL, which is the side an attacker controls.
+    for (const [tool, action] of [
+      ["queue", "LIST"],
+      ["queue", "List"],
+      ["QUEUE", "list"],
+      ["Queue", "List"],
+    ]) {
+      expect(toolActionAllowed(tool, { action }, p), `${tool}:${action}`).toBe(false);
+    }
+  });
+
+  it("does not let two separate rules be recombined into a pair nobody allowed", () => {
+    // The classic allowlist bug: `some(r => r.tool === name) && some(r => r.action === a)`
+    // reads correct, passes every single-rule test, and quietly permits the CROSS product.
+    // Here that would hand an operator who allowed queue INSPECTION a model download, and
+    // an operator who allowed a download the ability to CLEAR someone else's queue.
+    const p = resolveToolSurfacePolicy({
+      COMFYUI_MCP_TOOL_ACTION_ALLOW: "queue:list,download_model:download",
+    });
+    expect(toolActionAllowed("queue", { action: "list" }, p)).toBe(true);
+    expect(toolActionAllowed("download_model", { action: "download" }, p)).toBe(true);
+
+    expect(toolActionAllowed("queue", { action: "download" }, p)).toBe(false);
+    expect(toolActionAllowed("download_model", { action: "list" }, p)).toBe(false);
+  });
+
+  it("refuses an action that is present but not a string, instead of waving it through", () => {
+    // The one shape this function cannot classify. Resolving it as "no action here" is
+    // the permissive answer, and permissive is the direction that ships a hole.
+    const p = resolveToolSurfacePolicy({ COMFYUI_MCP_TOOL_ACTION_ALLOW: "queue:list" });
+    for (const action of [["list"], { toString: () => "list" }, 1, true]) {
+      expect(toolActionAllowed("queue", { action }, p), JSON.stringify(action)).toBe(false);
+    }
+    // ABSENT is genuinely not an action call and stays governed by the tool-level policy.
+    expect(toolActionAllowed("queue", {}, p)).toBe(true);
+    expect(toolActionAllowed("queue", { action: undefined }, p)).toBe(true);
+    expect(toolActionAllowed("queue", { action: null }, p)).toBe(true);
+  });
+
+  it("an action list ALONE makes the policy active, or the whole gate is dead code", () => {
+    // `withToolSurfaceFilter` returns the registrar UNWRAPPED when `active` is false, so
+    // an operator who sets only COMFYUI_MCP_TOOL_ACTION_ALLOW would get a server that
+    // logs nothing and enforces nothing. Asserted directly because it is one `||` term
+    // away from being true, and losing it is invisible in every allowed/denied test.
+    const p = resolveToolSurfacePolicy({ COMFYUI_MCP_TOOL_ACTION_ALLOW: "queue:list" });
+    expect(p.active).toBe(true);
+    expect(p.allow).toEqual([]);
+    expect(p.deny).toEqual([]);
+    expect(p.preset).toBeUndefined();
+
+    const registrar = { tool: (...args: unknown[]) => ({ name: args[0] }) };
+    expect(withToolSurfaceFilter(registrar, p)).not.toBe(registrar);
+  });
+
   it("blocks before the registered handler on the direct and catalog registration boundary", async () => {
     const p = resolveToolSurfacePolicy({
       COMFYUI_MCP_TOOL_ACTION_ALLOW: "queue:list",
@@ -276,6 +354,34 @@ describe("action-level allow lists fail closed", () => {
       expect(denied.content[0]).toMatchObject({
         type: "text",
         text: expect.stringContaining("queue:clear"),
+      });
+    } finally {
+      if (previous === undefined) delete process.env.COMFYUI_MCP_TOOL_ACTION_ALLOW;
+      else process.env.COMFYUI_MCP_TOOL_ACTION_ALLOW = previous;
+    }
+  });
+
+  it("does not let a PREFIX near-miss through on the real catalog route either", async () => {
+    // `cancel` and `cancel_queued` are both real members of queue's action enum, so this
+    // near-miss survives schema validation and reaches the gate — which the synthetic
+    // names above cannot do. An operator allowing targeted `cancel` (one prompt_id) has
+    // not allowed `cancel_queued`, which drops the ENTIRE pending queue, someone else's
+    // work included. A `startsWith` compare admits it and every other test stays green.
+    const previous = process.env.COMFYUI_MCP_TOOL_ACTION_ALLOW;
+    process.env.COMFYUI_MCP_TOOL_ACTION_ALLOW = "queue:cancel";
+    try {
+      const { collectToolCatalog } = await import("../../tools/index.js");
+      const catalog = await collectToolCatalog();
+      const queue = catalog.get("queue");
+      expect(queue).toBeDefined();
+
+      // No fetch mock, deliberately: reaching the handler means reaching ComfyUI, so this
+      // can only pass by being refused first.
+      const denied = await queue!.handler({ action: "cancel_queued" });
+      expect(denied.isError).toBe(true);
+      expect(denied.content[0]).toMatchObject({
+        type: "text",
+        text: expect.stringContaining("queue:cancel_queued"),
       });
     } finally {
       if (previous === undefined) delete process.env.COMFYUI_MCP_TOOL_ACTION_ALLOW;

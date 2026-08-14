@@ -400,7 +400,25 @@ export function toolActionAllowed(
   if (policy.actionAllow.length === 0) return true;
   if (!args || typeof args !== "object" || Array.isArray(args)) return true;
   const action = (args as Record<string, unknown>).action;
-  if (typeof action !== "string") return true;
+  // ABSENT is not an action call. Those stay governed by the tool-level surface policy,
+  // which is the documented composition: bound the tools with ALLOW/PRESET, bound the
+  // actions with this list.
+  if (action === undefined || action === null) return true;
+  // PRESENT BUT NOT A STRING IS REFUSED, not waved through. Every one of the 34 live
+  // `action` fields is a REQUIRED `z.enum([...])` and both dispatch routes validate
+  // before the handler runs (the SDK on the direct route, an explicit safeParse in
+  // compact.ts), so nothing real reaches here with a non-string action — which is
+  // exactly why the branch has to be decided rather than defaulted. "Not a string" was
+  // returning ALLOWED, so the one shape this function cannot classify was resolved in
+  // the permissive direction, and it would stay that way if a future tool ever widened
+  // an action field or a caller reused this helper somewhere the schema is looser. An
+  // unclassifiable call is not an allowed call.
+  if (typeof action !== "string") return false;
+  // EXACT on BOTH halves, and both halves of the SAME rule. Matching `tool` against one
+  // rule and `action` against another would let `ALLOW=queue:list,download_model:download`
+  // admit `queue:download`; a prefix or case-insensitive compare would let `list_all`,
+  // `LIST` or `queue_admin` through. See the over-permissive tests, which are the only
+  // thing that can see any of those.
   return policy.actionAllow.some((rule) => rule.tool === name && rule.action === action);
 }
 
