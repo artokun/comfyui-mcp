@@ -417,7 +417,12 @@ interface AcpInitializeResult {
 // Grok's reasoning control is not exposed as a discrete effort scale here, so we do
 // NOT advertise supportsEffort/supportedEffortLevels: the panel's normalizeModels
 // then hides the effort dropdown (omission is the documented "no effort control"
-// signal). grok-4.6 is the current CLI default.
+// signal). grok-4.6 is the current CLI default: xAI shipped it on 2026-08-12 and
+// Grok Build now defaults to it. Verified against docs.x.ai/developers/grok-4-6 on
+// 2026-08-14 — it is a real id in BOTH namespaces this file spans (the CLI's
+// `--model` flag and the raw xAI `/v1` API), which matters because
+// GROK_DEFAULT_MODEL below also seeds GROK_XAI_DEFAULT_MODEL on the direct-token
+// path. The older ids stay listed so a session pinned to one keeps resolving.
 const GROK_MODELS: ModelChoice[] = [
   { id: "grok-4.6", label: "Grok 4.6" },
   { id: "grok-4.5", label: "Grok 4.5" },
@@ -1200,14 +1205,15 @@ export class GrokBackend implements AgentBackend {
 //     (redactTokens, from oauth-flow.ts — the single shared redactor) before
 //     it can reach a thrown message or a log line — the access token itself
 //     is never logged anywhere in this path.
-//   - Model slug + exact endpoint sub-path are UNVERIFIED against the live xAI
-//     API (no network access at authoring time, and no Task-1 research
-//     artifact survived for this session to consult). GROK_XAI_DEFAULT_MODEL
-//     reuses the ACP CLI's existing composer alias as a placeholder rather
-//     than inventing a new model string; listModels() prefers a live
-//     `GET /v1/models` probe over any hardcoded catalog. CONFIRM both against
-//     xAI's docs (or override via COMFYUI_MCP_GROK_XAI_MODEL) before relying
-//     on this path in production — see the task-6 report for the flagged risk.
+//   - The exact endpoint SUB-PATH is still UNVERIFIED against the live xAI API
+//     (no network access at authoring time, and no Task-1 research artifact
+//     survived for this session to consult); override it via
+//     COMFYUI_MCP_GROK_XAI_RESPONSES_URL if the real path differs.
+//     The MODEL SLUG is no longer in that bucket: GROK_XAI_DEFAULT_MODEL
+//     inherits GROK_DEFAULT_MODEL, which is `grok-4.6` — documented by
+//     docs.x.ai/developers/grok-4-6 as a real xAI `/v1` API model id (verified
+//     2026-08-14). listModels() still prefers a live `GET /v1/models` probe over
+//     any hardcoded catalog, and COMFYUI_MCP_GROK_XAI_MODEL still overrides.
 // ---------------------------------------------------------------------------
 
 export const GROK_XAI_API_BASE = "https://api.x.ai/v1";
@@ -1226,10 +1232,13 @@ function grokApiHostAllowlist(): string[] {
   return OAUTH_PROVIDERS.grok?.apiHostAllowlist ?? ["x.ai"];
 }
 
-// UNVERIFIED against the live xAI model catalog (see the divergences note
-// above) — reuses the ACP CLI's default composer alias as a safe, non-invented
-// placeholder rather than guessing a raw-API model slug. Override with
-// COMFYUI_MCP_GROK_XAI_MODEL once confirmed, or rely on listModels()'s live
+// Inherits the ACP CLI default (GROK_DEFAULT_MODEL). That used to be an
+// UNVERIFIED placeholder, but as of grok-4.6 the two namespaces coincide:
+// docs.x.ai/developers/grok-4-6 documents `grok-4.6` as a real xAI `/v1` API
+// model id (verified 2026-08-14), so this fallback is now a valid raw-API slug
+// rather than a CLI alias borrowed on faith. The endpoint SUB-PATH is a separate
+// question and remains unverified — see the divergences note above. Override the
+// model with COMFYUI_MCP_GROK_XAI_MODEL, or rely on listModels()'s live
 // /v1/models probe to surface the account's real slugs.
 export const GROK_XAI_DEFAULT_MODEL =
   process.env.COMFYUI_MCP_GROK_XAI_MODEL?.trim() || GROK_DEFAULT_MODEL;
