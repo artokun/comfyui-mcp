@@ -62,6 +62,7 @@ import {
 import { listSessions, loadTranscript } from "./history.js";
 import { uploadImageHttp, resetClient } from "../comfyui/client.js";
 import { setConnectedPanelOrigins } from "../comfyui/fetch.js";
+import { publishConnectedPanelOrigins } from "../services/panel-origin-channel.js";
 import { logger } from "../utils/logger.js";
 import { assembleVocabularyHash, describeVocabularySkew } from "../tools/vocabulary.js";
 import { buildPanelToolDefs } from "./panel-tools.js";
@@ -5572,6 +5573,15 @@ export async function runPanelOrchestrator(): Promise<void> {
     // no saved state
   }
   const pollDownloads = () => {
+    // #1415 — the OTHER half of the #952 drift comparison installed above. That
+    // source only serves THIS process, and the tools that fail with `fetch
+    // failed` run in the spawned comfyui children, which have no bridge. Publish
+    // the current set into the progress dir they already share so a child's
+    // failure can make the same comparison. Level-triggered on this tick (not on
+    // connect/disconnect events) so a tab that goes away blanks it within 700ms —
+    // the child must never quote a panel that has since disconnected. Writes only
+    // when the set changed.
+    publishConnectedPanelOrigins(progressDir, bridge.connectedServerOrigins());
     let files: string[] = [];
     try {
       files = readdirSync(progressDir).filter((f) => f.endsWith(".json"));
