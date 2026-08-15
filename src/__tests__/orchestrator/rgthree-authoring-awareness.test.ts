@@ -108,6 +108,18 @@ describe("the rgthree skill states the facts that were verified against the pack
     expect(SKILL).toContain("missing_node_ids");
   });
 
+  it("does not claim the stripper dissolves rgthree Context buses", () => {
+    // Gate P1. The report said panel_strip_workflow "resolves them when you need the
+    // true graph". It does not: Context* are REAL EXECUTABLE backend nodes (they are in
+    // rgthree's NODE_CLASS_MAPPINGS), and panel_flatten_workflow's own description says
+    // "Real executable nodes (rgthree Context/Context Switch, Seed Everywhere) are KEPT
+    // — they run." Only VIRTUAL wiring (Get/Set, Reroute, UE) is resolved. An agent told
+    // otherwise waits for a flattening that never happens.
+    expect(SKILL).toMatch(/\*\*These are NOT virtual\s+wiring\.\*\*/);
+    expect(SKILL).toMatch(/deliberately \*\*keep\*\* them/);
+    expect(SKILL).not.toMatch(/`panel_strip_workflow` resolves them/);
+  });
+
   it("does not send the agent to panel_move_group to fix membership", () => {
     // It cannot: move_nodes defaults to true, so the box AND its contents move together
     // and the same nodes stay inside. The panel's own warning names panel_edit_node /

@@ -109,13 +109,20 @@ confirm. Turning a LoRA **off** (`on: false`) is usually safer than removing the
 ## Other commonly-seen rgthree nodes
 
 - **Context / Context Big / Context Switch / Context Merge** — bundle
-  MODEL/CLIP/VAE/conditioning into one `RGTHREE_CONTEXT` wire. Like Get/Set buses they
-  hide the real wiring; `panel_strip_workflow` resolves them when you need the true
-  graph, and `panel_slice_workflow` carves one pipeline out of a toggled monolith.
-- **Seed (rgthree)** — seed plus `control_after_generate`. The value is rewritten
-  between runs, so a re-read seed is not evidence of user intent.
-- **Any Switch (rgthree)** — first non-null input wins; a common A/B toggle paired
-  with bypassed branches.
+  MODEL/CLIP/VAE/conditioning into one `RGTHREE_CONTEXT` wire. **These are NOT virtual
+  wiring.** Unlike Get/Set buses they are real executable backend nodes, so
+  `panel_strip_workflow` and `panel_flatten_workflow` deliberately **keep** them — they
+  run. Do not expect either tool to dissolve a Context chain. There is no hidden edge to
+  resolve: every link is a real link, traceable with `panel_query_graph`. What a Context
+  hides is *which field* a downstream node pulls out of the bundle, so read the chain
+  node by node. (`panel_slice_workflow` still carves one pipeline out of a toggled
+  monolith, and `panel_strip_workflow` still resolves any genuine Get/Set buses and
+  Reroutes around it.)
+- **Seed (rgthree)** — seed plus `control_after_generate`. The node generates a fresh
+  seed server-side between runs, so a re-read seed is not evidence of user intent.
+- **Any Switch (rgthree)** — the first non-null input wins; a common A/B toggle paired
+  with bypassed branches. An **empty Context counts as null**, so an unfilled Context
+  branch is skipped rather than selected.
 
 ## Gotchas
 
