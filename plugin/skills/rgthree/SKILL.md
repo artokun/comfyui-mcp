@@ -132,10 +132,19 @@ panel_set_widget(node_id=<id>, widget="lora_1", value='{"on":false,"strength":0.
 ```
 
 Fields are schema-checked: `on` non-nullable boolean, `strength` non-nullable number,
-`lora` nullable string (`null` clears the slot), `strengthTwo` nullable number. An
-unknown field name (a typo like `lora_1.strenght`) is **refused**, not silently created,
-and nested paths are unsupported. Turning a LoRA **off** (`lora_N.on = false`) is
-usually safer than clearing it.
+`lora` nullable string, `strengthTwo` nullable number. An unknown field name (a typo like
+`lora_1.strenght`) is **refused**, not silently created, and nested paths are unsupported.
+
+**Clearing a nullable field takes the JSON-string form, not a dotted write.** The panel
+accepts `null` for `lora` / `strengthTwo`, but `value` is typed `string | number |
+boolean`, so a bare `value=null` is rejected by tool-arg validation before any write
+happens — the same schema limit as the whole-row case above. Clear it through the string:
+
+```
+panel_set_widget(node_id=<id>, widget="lora_1", value='{"lora":null}')
+```
+
+Turning a LoRA **off** (`lora_N.on = false`) is usually safer than clearing it anyway.
 
 ## Other commonly-seen rgthree nodes
 

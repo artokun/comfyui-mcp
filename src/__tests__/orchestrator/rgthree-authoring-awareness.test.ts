@@ -140,6 +140,19 @@ describe("the rgthree skill states the facts that were verified against the pack
     expect(SKILL).toMatch(/widget="lora_1", value='\{"on":false,"strength":0\.6\}'/);
   });
 
+  it("clears a nullable lora field through the JSON string, not a bare null", () => {
+    // Gate P1. The panel DOES accept null for the nullable `lora`/`strengthTwo` fields
+    // (widget-write.js allows null through for a SUB-FIELD write), but panel_set_widget's
+    // `value` is z.union([string, number, boolean]) — no z.null() — so the dotted write
+    // `lora_1.lora = null` the text implied is rejected by tool-arg validation before the
+    // composite writer ever runs. The reachable clear is the whole-row JSON string, whose
+    // string value passes the schema and is JSON.parsed + merged.
+    expect(SKILL).toMatch(/Clearing a nullable field takes the JSON-string form/);
+    expect(SKILL).toMatch(/widget="lora_1", value='\{"lora":null\}'/);
+    // And it must NOT still advertise a bare null as the way to clear the slot.
+    expect(SKILL).not.toMatch(/nullable string \(`null` clears the slot\)/);
+  });
+
   it("does not point the agent at Seed's control_after_generate widget", () => {
     // Gate P1. rgthree's Seed SPLICES control_after_generate out of its widgets in
     // onNodeCreated and drives behaviour through special seed values instead (-1/-2/-3).
