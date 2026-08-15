@@ -120,6 +120,17 @@ describe("the rgthree skill states the facts that were verified against the pack
     expect(SKILL).not.toMatch(/`panel_strip_workflow` resolves them/);
   });
 
+  it("does not point the agent at Seed's control_after_generate widget", () => {
+    // Gate P1. rgthree's Seed SPLICES control_after_generate out of its widgets in
+    // onNodeCreated and drives behaviour through special seed values instead (-1/-2/-3).
+    // Naming that widget sends a write at something that does not exist; and claiming
+    // the seed is regenerated every run would have an agent discard a user's fixed seed,
+    // which main() returns unchanged.
+    expect(SKILL).toMatch(/deletes the built-in `control_after_generate` widget/);
+    expect(SKILL).toMatch(/`-1` randomize, `-2` increment,\s+`-3` decrement/);
+    expect(SKILL).toMatch(/returned \*\*unchanged\*\*/);
+  });
+
   it("does not send the agent to panel_move_group to fix membership", () => {
     // It cannot: move_nodes defaults to true, so the box AND its contents move together
     // and the same nodes stay inside. The panel's own warning names panel_edit_node /

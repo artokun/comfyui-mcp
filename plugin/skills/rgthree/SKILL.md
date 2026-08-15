@@ -20,8 +20,9 @@ among them.
 **2. They are configured through PROPERTIES, not widgets.** `matchTitle`,
 `toggleRestriction` and `sort` live in `node.properties` (right-click → Properties),
 not in `widgets`. Use **`panel_set_property`**. `panel_set_widget` does not silently
-half-work — it **refuses** with an error naming the widget and node type, because
-there is no such widget to write. Read the refusal instead of retrying it.
+half-work — it **refuses**, with `has no widget "matchTitle" (available: …)` listing
+the widgets that do exist. That refusal is the fastest confirmation you are on the
+properties path; read it rather than retrying the write.
 
 **3. Fast Groups nodes take NO wiring and enumerate GROUPS by title.** Leave the
 `OPT_CONNECTION` output unconnected. The node renders one toggle per matching group,
@@ -89,7 +90,8 @@ All of the following are node properties — set them with `panel_set_property`:
    then re-check. `panel_move_group` does **not** help: by default it drags the
    contained nodes along with the box, so the same nodes stay inside it.
 
-3. `panel_add_node("Fast Groups Bypasser (rgthree)")`. Leave its output unwired.
+3. `panel_add_node(class_type="Fast Groups Bypasser (rgthree)")`. Leave its output
+   unwired. Add nodes one at a time, not as a parallel batch.
 
 4. `panel_set_property` → `matchTitle` = `^STAGE`, and `sort` = `alphanumeric`.
 
@@ -97,14 +99,29 @@ All of the following are node properties — set them with `panel_set_property`:
 
 ## Power Lora Loader (rgthree)
 
-A **backend** node (present in `/object_info`) that stacks N LoRAs in one node. Each
-LoRA is one entry in `widgets_values` shaped
+A **backend** node (present in `/object_info`) that stacks N LoRAs in one node. Each row
+is a widget named **`lora_1`, `lora_2`, …** whose value is a composite object
 `{on: bool, lora: "subdir\\name.safetensors", strength: float, strengthTwo: float|null}`
-(`strengthTwo` is the separate CLIP strength, `null` in the simple view). The node
-identifies its LoRA rows by the **presence of a `lora` key**, not by position, and its
-non-LoRA control widgets are appended *after* them — so **positional indexing is
-fragile**. Resolve the slot you mean, write with `panel_set_widget`, and re-read to
-confirm. Turning a LoRA **off** (`on: false`) is usually safer than removing the row.
+(`strengthTwo` is the separate CLIP strength, `null` in the simple view). Rows are
+identified by the **presence of a `lora` key**, and the node's control widgets are
+appended *after* them, so do not index positionally — **address the row by name**.
+
+Write ONE field at a time with **dotted sub-field addressing**, which merges onto the
+current object and preserves every other field:
+
+```
+panel_set_widget(node_id=<id>, widget="lora_1.strength", value=0.8)
+panel_set_widget(node_id=<id>, widget="lora_2.on",       value=false)
+panel_set_widget(node_id=<id>, widget="lora_1.lora",     value="style/foo.safetensors")
+```
+
+Writing a **bare scalar to `lora_1` itself** is the trap: it sets one field and nulls
+the rest, corrupting the row. Pass a sub-field, or a full JSON object for the whole row.
+The fields are schema-checked — `on` is a non-nullable boolean, `strength` a non-nullable
+number, `lora` a nullable string (`null` clears the slot), `strengthTwo` a nullable
+number — and an unknown field name (a typo like `lora_1.strenght`) is **refused**, not
+silently created. Nested paths are not supported. Turning a LoRA **off**
+(`lora_N.on = false`) is usually safer than removing the row.
 
 ## Other commonly-seen rgthree nodes
 
@@ -118,8 +135,14 @@ confirm. Turning a LoRA **off** (`on: false`) is usually safer than removing the
   node by node. (`panel_slice_workflow` still carves one pipeline out of a toggled
   monolith, and `panel_strip_workflow` still resolves any genuine Get/Set buses and
   Reroutes around it.)
-- **Seed (rgthree)** — seed plus `control_after_generate`. The node generates a fresh
-  seed server-side between runs, so a re-read seed is not evidence of user intent.
+- **Seed (rgthree)** — it **deletes the built-in `control_after_generate` widget** on
+  creation, so do not try to write it; the widget is not there. Control is by SPECIAL
+  SEED VALUES written to the `seed` widget instead: **`-1` randomize, `-2` increment,
+  `-3` decrement**. Any concrete seed is returned **unchanged** — `42` stays `42` every
+  run — so to pin a run, write the number; to re-randomize, write `-1`. The frontend
+  resolves a special value into a real seed *before* queueing and shows the result in a
+  read-only `last_seed` widget, so a `seed` re-read after a run may not be the special
+  value the user set (a fixed seed, however, is stable).
 - **Any Switch (rgthree)** — the first non-null input wins; a common A/B toggle paired
   with bypassed branches. An **empty Context counts as null**, so an unfilled Context
   branch is skipped rather than selected.
