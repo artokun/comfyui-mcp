@@ -120,6 +120,26 @@ describe("the rgthree skill states the facts that were verified against the pack
     expect(SKILL).not.toMatch(/`panel_strip_workflow` resolves them/);
   });
 
+  it("warns that a fresh Power Lora Loader has NO lora_N rows to write", () => {
+    // Gate P1. addNewLoraWidget runs only from configure() (loading a saved graph) and
+    // from the on-canvas "➕ Add Lora" button, which needs a mouse event and a chooser
+    // dialog. No panel tool presses it, so the documented write would be the agent's
+    // FIRST call after adding a loader — and it fails with `has no widget`.
+    expect(SKILL).toMatch(/no `lora_N` widgets at all/);
+    expect(SKILL).toMatch(/No panel tool can press it/);
+  });
+
+  it("writes a whole row as a JSON STRING, which is what the schema accepts", () => {
+    // Gate P1. panel_set_widget's `value` is z.union([string, number, boolean]) — a
+    // literal object is rejected by tool-arg validation before any write happens. The
+    // panel JSON.parses a string value for a composite widget and merges it, so the
+    // JSON-string form is the one that actually works.
+    expect(SKILL).toMatch(/JSON\s*\n?\s*object STRING/);
+    expect(SKILL).toMatch(/only string\/number\/boolean/);
+    // And the example must not hand over a bare object literal.
+    expect(SKILL).toMatch(/widget="lora_1", value='\{"on":false,"strength":0\.6\}'/);
+  });
+
   it("does not point the agent at Seed's control_after_generate widget", () => {
     // Gate P1. rgthree's Seed SPLICES control_after_generate out of its widgets in
     // onNodeCreated and drives behaviour through special seed values instead (-1/-2/-3).

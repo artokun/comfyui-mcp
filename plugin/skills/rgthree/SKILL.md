@@ -106,8 +106,15 @@ is a widget named **`lora_1`, `lora_2`, …** whose value is a composite object
 identified by the **presence of a `lora` key**, and the node's control widgets are
 appended *after* them, so do not index positionally — **address the row by name**.
 
-Write ONE field at a time with **dotted sub-field addressing**, which merges onto the
-current object and preserves every other field:
+**You can only edit rows that ALREADY EXIST.** A freshly added Power Lora Loader has
+**no `lora_N` widgets at all** — rows are created by the node's on-canvas "➕ Add Lora"
+button, which opens a chooser on a mouse event. No panel tool can press it, so
+`panel_set_widget` on `lora_1` right after `panel_add_node` fails with `has no widget`.
+Read the node's real widget list first (`panel_query_graph`), and to build a stack from
+scratch either ask the user to add the rows, or wire plain `LoraLoader` nodes instead.
+
+On an existing row, write ONE field with **dotted sub-field addressing** — it merges
+onto the current object and preserves every other field:
 
 ```
 panel_set_widget(node_id=<id>, widget="lora_1.strength", value=0.8)
@@ -115,13 +122,20 @@ panel_set_widget(node_id=<id>, widget="lora_2.on",       value=false)
 panel_set_widget(node_id=<id>, widget="lora_1.lora",     value="style/foo.safetensors")
 ```
 
-Writing a **bare scalar to `lora_1` itself** is the trap: it sets one field and nulls
-the rest, corrupting the row. Pass a sub-field, or a full JSON object for the whole row.
-The fields are schema-checked — `on` is a non-nullable boolean, `strength` a non-nullable
-number, `lora` a nullable string (`null` clears the slot), `strengthTwo` a nullable
-number — and an unknown field name (a typo like `lora_1.strenght`) is **refused**, not
-silently created. Nested paths are not supported. Turning a LoRA **off**
-(`lora_N.on = false`) is usually safer than removing the row.
+Writing a **bare scalar to `lora_1` itself** is the trap: it would set one field and
+null the rest, so it is refused. To change several fields at once, pass a **JSON
+object STRING** (the `value` argument accepts only string/number/boolean, so a literal
+object fails tool validation before any write) — it is parsed and merged:
+
+```
+panel_set_widget(node_id=<id>, widget="lora_1", value='{"on":false,"strength":0.6}')
+```
+
+Fields are schema-checked: `on` non-nullable boolean, `strength` non-nullable number,
+`lora` nullable string (`null` clears the slot), `strengthTwo` nullable number. An
+unknown field name (a typo like `lora_1.strenght`) is **refused**, not silently created,
+and nested paths are unsupported. Turning a LoRA **off** (`lora_N.on = false`) is
+usually safer than clearing it.
 
 ## Other commonly-seen rgthree nodes
 
