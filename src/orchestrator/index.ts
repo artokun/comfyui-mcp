@@ -2476,6 +2476,11 @@ export async function runPanelOrchestrator(): Promise<void> {
     // stamp downloads with the OWNING agent key; the static set above stays as
     // the fallback.
     makeMcpServers: (key) => buildMcpServers(key),
+    // Blind (issue #90) — the env above only gates the comfyui MCP subprocess;
+    // the Claude SDK agent ALSO holds native Read/WebFetch, which deliver
+    // pixels with no MCP tool in the path. This live predicate feeds the
+    // backend's PreToolUse deny gate (conversation-wide per #884, like the env).
+    isBlind: () => anyTabBlind(),
     // NOTE: manager callbacks fire with the composite agent key
     // `orchestrator::<backend>`; pushToConversation fans each frame out to every
     // connected tab participating in that backend's conversation (#884) — the
@@ -4834,6 +4839,28 @@ export async function runPanelOrchestrator(): Promise<void> {
                   "say.blind_off",
                   "Blind mode OFF — the agent's image tools deliver pixels again (applies after the current turn).",
                 )}`,
+          },
+          tabId,
+        );
+      }
+      // Honesty (the #90 lesson): Blind's enforcement is the MCP scrub + the
+      // Claude backend's native-tool PreToolUse gate + attachment withholding.
+      // The CLI lanes run THEIR OWN agent binaries whose built-in file tools we
+      // cannot hook in-process — a promise we can't enforce must say so out
+      // loud, exactly like the old-orchestrator ack warning. API/local lanes
+      // (ollama/glm/kimi/…) carry only our tool surface, so they get no scare.
+      const CLI_NATIVE_TOOL_BACKENDS = new Set(["codex", "gemini", "grok", "antigravity", "pi", "copilot"]);
+      const tabBackend = backendForTab(tabId);
+      if (changed && nextBlind && CLI_NATIVE_TOOL_BACKENDS.has(tabBackend)) {
+        bridge.push(
+          {
+            type: "say",
+            text: `⚠️ ${trFor(
+              bridge.tabLocale(tabId),
+              "say.blind_cli_native_tools",
+              "Heads-up: the {backend} CLI keeps its own built-in file tools, which Blind cannot gate mechanically — the comfyui tools still withhold pixels, but the CLI itself could read image files. For a hard no-pixels guarantee use the Claude backend or an API/local provider.",
+              { backend: tabBackend },
+            )}`,
           },
           tabId,
         );

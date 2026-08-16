@@ -136,6 +136,7 @@
     "unauthorized": "Unauthorized — reconnect the panel."
   },
   "say": {
+    "blind_cli_native_tools": "Heads-up: the {backend} CLI keeps its own built-in file tools, which Blind cannot gate mechanically — the comfyui tools still withhold pixels, but the CLI itself could read image files. For a hard no-pixels guarantee use the Claude backend or an API/local provider.",
     "blind_off": "Blind mode OFF — the agent's image tools deliver pixels again (applies after the current turn).",
     "blind_on": "Blind mode ON — the agent's image tools now withhold pixels (applies after the current turn; the session resumes automatically).",
     "custom_no_base_url": "No endpoint configured — set the base URL in Settings → Custom endpoint (include the /v1, e.g. http://192.168.1.20:8000/v1 for vLLM, or a hosted provider's OpenAI-compatible URL), plus “Set API key…” if the server needs one. Both apply immediately — then Connect again.",

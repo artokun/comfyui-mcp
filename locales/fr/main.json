@@ -136,6 +136,7 @@
     "unauthorized": "Non autorisé — reconnectez le panneau."
   },
   "say": {
+    "blind_cli_native_tools": "Attention : la CLI {backend} conserve ses propres outils de fichiers intégrés, que le mode aveugle ne peut pas verrouiller mécaniquement — les outils comfyui continuent de retenir les pixels, mais la CLI elle-même pourrait lire des fichiers image. Pour une garantie stricte sans pixels, utilisez le backend Claude ou un fournisseur API/local.",
     "blind_off": "Mode aveugle DÉSACTIVÉ — les outils d'image de l'agent renvoient de nouveau les pixels (effectif après le tour en cours).",
     "blind_on": "Mode aveugle ACTIVÉ — les outils d'image de l'agent ne renvoient plus les pixels (effectif après le tour en cours ; la session reprend automatiquement).",
     "custom_no_base_url": "Aucun point de terminaison configuré — indiquez l'URL de base dans Paramètres → Point de terminaison personnalisé (avec le /v1, par exemple http://192.168.1.20:8000/v1 pour vLLM, ou l'URL compatible OpenAI d'un fournisseur hébergé), plus « Définir la clé API… » si le serveur en exige une. Les deux s'appliquent immédiatement — reconnectez-vous ensuite.",

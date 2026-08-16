@@ -346,6 +346,11 @@ export interface PanelAgentDeps {
    * expert out of the box. Omitted if the plugin can't be found.
    */
   pluginPath?: string;
+  /** Live Blind-mode predicate (issue #90, conversation-wide per #884). The
+   *  Claude backend's PreToolUse gate reads it at each NATIVE tool call —
+   *  the SDK subprocess's own Read/WebFetch deliver pixels outside the MCP
+   *  scrub, so per-spawn env alone cannot keep the Blind promise. */
+  isBlind?: () => boolean;
 }
 
 /**
@@ -530,6 +535,7 @@ export class PanelAgent {
         systemAppend: deps.systemAppend,
         panelServer: deps.panelServer,
         pluginPath: deps.pluginPath,
+        isBlind: deps.isBlind,
       });
   }
 
@@ -2187,6 +2193,8 @@ export interface PanelAgentManagerOptions {
   makeSystemAppend?: (key: string) => string | undefined;
   /** Bundled plugin dir whose skills make the agent an expert (optional). */
   pluginPath?: string;
+  /** Live Blind-mode predicate (issue #90) — see PanelAgentDeps.isBlind. */
+  isBlind?: () => boolean;
   /**
    * Optional backend factory (per agent key `panelTabId::backend`). The manager
    * injects the returned backend into the PanelAgent; returning undefined selects
@@ -2388,6 +2396,7 @@ export class PanelAgentManager {
       onEventUndelivered: this.opts.onEventUndelivered,
       panelServer: this.opts.makePanelServer?.(tabId),
       pluginPath: this.opts.pluginPath,
+      isBlind: this.opts.isBlind,
     }, backend);
   }
 

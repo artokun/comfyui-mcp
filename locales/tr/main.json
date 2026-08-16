@@ -136,6 +136,7 @@
     "unauthorized": "Yetkisiz — paneli yeniden bağlayın."
   },
   "say": {
+    "blind_cli_native_tools": "Uyarı: {backend} CLI kendi yerleşik dosya araçlarını korur ve Kör kip bunları mekanik olarak engelleyemez — comfyui araçları pikselleri vermemeye devam eder, ancak CLI'nin kendisi görüntü dosyalarını okuyabilir. Kesin pikselsiz garanti için Claude arka ucunu veya bir API/yerel sağlayıcı kullanın.",
     "blind_off": "Kör kip KAPALI — aracının görsel araçları yeniden piksel veriyor (bu turdan sonra geçerli olur).",
     "blind_on": "Kör kip AÇIK — aracının görsel araçları artık piksel vermiyor (bu turdan sonra geçerli olur; oturum otomatik devam eder).",
     "custom_no_base_url": "Yapılandırılmış uç nokta yok — temel URL'yi Ayarlar → Özel uç nokta bölümünde belirtin (/v1 dahil olmalı; örneğin vLLM için http://192.168.1.20:8000/v1 ya da barındırılan bir sağlayıcının OpenAI uyumlu URL'si) ve sunucu istiyorsa “API anahtarını ayarla…” ile anahtarı da girin. İkisi de hemen geçerli olur — ardından yeniden bağlanın.",

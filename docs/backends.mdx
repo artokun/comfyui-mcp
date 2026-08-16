@@ -205,6 +205,18 @@ because a silently dropped attachment is worse than a refused one:
 The **Blind** toggle is about *pixels*: it withholds images and does **not**
 withhold audio.
 
+Blind's enforcement reaches the agent's **native tools** too, not just the
+comfyui MCP surface: the built-in Claude backend runs with a PreToolUse gate
+that denies its own `Read`/`WebFetch` on image content (raster files by
+extension *and* magic bytes, PDFs, notebook outputs, and ComfyUI `/view` URLs)
+whenever Blind is on — read live per call, so a mid-session toggle binds the
+very next tool call. The API/local lanes (Ollama family, GLM, Kimi, custom
+endpoints) carry only our tool surface, so the MCP scrub covers them fully. The
+**CLI lanes** (Codex, Gemini, Grok, Antigravity, pi, Copilot) run their own
+agent binaries whose built-in file tools we cannot hook — turning Blind on
+there posts a visible warning saying exactly that, rather than implying a
+guarantee we can't keep.
+
 #### How an audio file gets onto a turn
 
 The orchestrator accepts audio on a panel `message` frame in two ways:

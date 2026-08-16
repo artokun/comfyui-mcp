@@ -136,6 +136,7 @@
     "unauthorized": "Não autorizado — reconecte o painel."
   },
   "say": {
+    "blind_cli_native_tools": "Atenção: a CLI {backend} mantém suas próprias ferramentas de arquivo integradas, que o modo cego não consegue bloquear mecanicamente — as ferramentas do comfyui continuam retendo os pixels, mas a própria CLI poderia ler arquivos de imagem. Para uma garantia rígida sem pixels, use o backend Claude ou um provedor API/local.",
     "blind_off": "Modo cego DESLIGADO — as ferramentas de imagem do agente voltam a entregar pixels (vale a partir do próximo turno).",
     "blind_on": "Modo cego LIGADO — as ferramentas de imagem do agente deixam de entregar pixels (vale a partir do próximo turno; a sessão continua automaticamente).",
     "custom_no_base_url": "Nenhum endpoint configurado — defina a URL base em Configurações → Endpoint personalizado (inclua o /v1, por exemplo http://192.168.1.20:8000/v1 para vLLM, ou a URL compatível com OpenAI de um provedor hospedado), além de “Definir chave de API…” se o servidor exigir uma. Os dois valem imediatamente — depois conecte novamente.",

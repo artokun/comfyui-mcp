@@ -32,6 +32,7 @@ import {
   type NeutralTurn,
   CLAUDE_CAPABILITIES,
 } from "./agent-backend.js";
+import { makeBlindNativeHook } from "./blind-native-gate.js";
 import type { Effort, ImageRef } from "./panel-agent.js";
 
 // ---- reasoning effort mapping ----
@@ -227,6 +228,11 @@ export interface ClaudeBackendDeps {
   panelServer?: McpSdkServerConfigWithInstance;
   /** Absolute path to the bundled comfyui-mcp plugin dir (skills), if found. */
   pluginPath?: string;
+  /** Live Blind-mode predicate (issue #90, conversation-wide per #884). Read at
+   *  each NATIVE tool call by the PreToolUse gate — the SDK subprocess keeps
+   *  Claude Code's own Read/WebFetch, which deliver pixels without any MCP tool
+   *  in the path, so the env-based MCP scrub alone cannot keep the promise. */
+  isBlind?: () => boolean;
 }
 
 /** Bound on unresolved turn traces (wedged turns whose result never arrives).
@@ -449,6 +455,14 @@ export class ClaudeBackend implements AgentBackend {
       // Only our comfyui MCP — never inherit the user's project/user MCP config
       // (which may run a second comfyui that grabs the bridge port).
       strictMcpConfig: true,
+      // Blind (issue #90) must also bind the subprocess's NATIVE tools: Read
+      // renders image files (and PDFs / notebook outputs) and WebFetch can hand
+      // back ComfyUI's own /view content, both entirely outside the MCP scrub.
+      // The hook consults isBlind() per call, so a live toggle applies to the
+      // NEXT tool call — no respawn required, unlike the env gate.
+      hooks: {
+        PreToolUse: [{ hooks: [makeBlindNativeHook(this.deps.isBlind) as never] }],
+      },
       systemPrompt: {
         type: "preset",
         preset: "claude_code",
