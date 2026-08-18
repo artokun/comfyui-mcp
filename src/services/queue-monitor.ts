@@ -32,6 +32,7 @@ import WebSocket from "ws";
 import { logger } from "../utils/logger.js";
 import { getComfyUIAuthHeaders } from "../config.js";
 import { comfyuiFetch } from "../comfyui/fetch.js";
+import { sameOrigin } from "../utils/origin.js";
 
 interface MonitorState {
   connected: boolean;
@@ -124,6 +125,35 @@ export interface QueueSnapshot {
    *  reported depth is fully accounted for — the coarse recent-self-queue
    *  fallback never counts here. */
   selfAttributedProven: boolean;
+}
+
+/**
+ * `new URL(...).pathname` with trailing slashes stripped, "" when unparseable.
+ * Only ever reached for parseable input — `sameComfyTarget` calls `sameOrigin`
+ * first, which rejects everything `new URL` cannot take.
+ */
+function basePathOf(url: string): string {
+  try {
+    return new URL(url).pathname.replace(/\/+$/, "");
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * True when `next` names the ComfyUI this monitor is already pointed at, differing
+ * only in SPELLING (#1615) — `http://127.0.0.1:8188` and `http://localhost:8188`
+ * are one server, and a panel hello can re-spell the target without moving it.
+ *
+ * The base path is compared separately because it is not part of an origin, and
+ * two ComfyUI can genuinely sit behind one reverse proxy at /comfy-a and /comfy-b
+ * — collapsing those would be a FALSE identity, the mirror of the bug this fixes.
+ * A null previous target never matches: there is no prior server to have owned
+ * anything on.
+ */
+function sameComfyTarget(prev: string | null, next: string): boolean {
+  if (!prev || !sameOrigin(prev, next)) return false;
+  return basePathOf(prev) === basePathOf(next);
 }
 
 const RECONNECT_MS = 5000;
@@ -223,6 +253,13 @@ class QueueMonitorImpl {
    *  NOT early-return — that left the watchdog permanently disconnected. */
   start(comfyuiUrl: string): void {
     if (this.url === comfyuiUrl && !this.stopped) return; // already live on this URL
+    // #1615 — read BEFORE `this.url` is overwritten below, and before our own
+    // stop() (which leaves the url intact). It has to be captured here rather
+    // than checked at the top, because the production retarget path in
+    // orchestrator/index.ts calls QueueMonitor.stop() ITSELF and only then
+    // start(url): by then `this.stopped` is true, so any early-return guarded on
+    // it would never fire on the one path that matters.
+    const respelledSameTarget = sameComfyTarget(this.url, comfyuiUrl);
     this.stop(); // tear down any prior socket/reconnect timer (also on URL change)
     this.url = comfyuiUrl;
     this.stopped = false;
@@ -239,8 +276,20 @@ class QueueMonitorImpl {
     this.state.lastCompleted = null;
     // Self-queued prompt ids belong to the OLD target — a fresh ComfyUI's jobs are
     // foreign to us until we queue them, so drop the attribution (#559).
-    this.selfQueuedIds.clear();
-    this.lastSelfQueueTs = null;
+    //
+    // #1615 — but ONLY when the target actually moved. A panel hello arriving as
+    // `localhost:8188` while we are live on `127.0.0.1:8188` is a retarget by
+    // string and the same server in fact, and clearing here made every render
+    // STILL IN FLIGHT ON IT unattributable. panel_run's duplicate fence keys on
+    // exactly that ledger (`selfAttributedProven`), so it then refused every run
+    // — including a scoped to_node_id preview — until the queue drained. Those
+    // jobs never became foreign; only their spelling changed. Ownership is a
+    // property of the SERVER, so it survives a re-spelling, and a genuine
+    // retarget still drops it.
+    if (!respelledSameTarget) {
+      this.selfQueuedIds.clear();
+      this.lastSelfQueueTs = null;
+    }
     // Liveness heartbeats belong to the OLD target — reset so a fresh target's
     // stall clock doesn't inherit a stale "alive" (or a stale "dark") reading.
     this.state.lastFrameTs = null;

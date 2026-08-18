@@ -21,8 +21,18 @@
 // issue thread. A comment asserting a caller that does not exist is the same
 // defect as a message describing a check that does not run.
 //
-// If a fence ever does start comparing origins, wire it to `sameOrigin` and say
-// so here — but the wiring must come first, and the sentence second.
+// WIRED, #1615 — and stated only because the wiring landed with it. Nothing else
+// changed: `QueueMonitor.start()` (services/queue-monitor.ts) is the consumer, and
+// it compares the PREVIOUS target against the new one to tell a real retarget from
+// a re-spelling of the same server, so the self-queue ledger survives the latter.
+// It pairs `sameOrigin` with its own base-path check, because a path prefix is not
+// part of an origin and two ComfyUI can share one reverse proxy.
+//
+// panel_run's duplicate fence then reads that ledger through
+// `selfAttributedProven` — the fence itself still compares no origins. The two
+// non-test importers of this module are that one and `comfyui/fetch.ts`. If a
+// third starts comparing origins, wire it to `sameOrigin` and say so here — but
+// the wiring must come first, and the sentence second.
 //
 // WHY THIS IS ITS OWN MODULE. Three loopback notions already exist
 // (`isLoopbackServerUrl`, `port-owner`'s LOOPBACK/WILDCARD split,

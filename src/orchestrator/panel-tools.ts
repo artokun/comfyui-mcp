@@ -10104,7 +10104,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_run",
-      "Queue the workflow the user has OPEN — exactly like them pressing Queue Prompt (current widget values, the live graph they can see). On success it confirms the run was queued; if ComfyUI REFUSES the prompt (validation failure on either channel — per-node node_errors OR a top-level error like a missing node type) it returns a FAILURE with that rejection detail, never a false 'queued'. Pass to_node_id to RUN ONLY ONE BRANCH ('run to node'): ComfyUI renders just that output node plus everything upstream of it and SKIPS every other output branch — handy for previewing or debugging part of a big graph without rendering the whole thing. to_node_id MUST be an OUTPUT node (SaveImage, PreviewImage, SaveVideo, …) — pick the one at the END of the branch you want; nodes are tagged is_output:true in panel_query_graph's detail rows. The output node may be NESTED inside a subgraph — just pass its id (resolved in the scope you're currently viewing, then anywhere in the workflow); the tool builds the nested execution path for you. Omit it to run the whole graph. DUPLICATE FENCE (#862): if a render this session cannot account for is already in flight (after a reconnect this is usually YOUR earlier render still running — the queue record does not survive a restart), the run is REFUSED before anything is queued and the in-flight prompt is named; inspect queue (action:'list') first, or pass allow_duplicate:true only to deliberately stack behind it. Use this so the render runs on THEIR canvas and they see the result.",
+      "Queue the workflow the user has OPEN — exactly like them pressing Queue Prompt (current widget values, the live graph they can see). On success it confirms the run was queued; if ComfyUI REFUSES the prompt (validation failure on either channel — per-node node_errors OR a top-level error like a missing node type) it returns a FAILURE with that rejection detail, never a false 'queued'. Pass to_node_id to RUN ONLY ONE BRANCH ('run to node'): ComfyUI renders just that output node plus everything upstream of it and SKIPS every other output branch — handy for previewing or debugging part of a big graph without rendering the whole thing. to_node_id MUST be an OUTPUT node (SaveImage, PreviewImage, SaveVideo, …) — pick the one at the END of the branch you want; nodes are tagged is_output:true in panel_query_graph's detail rows. The output node may be NESTED inside a subgraph — just pass its id (resolved in the scope you're currently viewing, then anywhere in the workflow); the tool builds the nested execution path for you. Omit it to run the whole graph. DUPLICATE FENCE (#862): if a render this session cannot account for is already in flight (after a reconnect this is usually YOUR earlier render still running — the queue record does not survive a restart), the run is REFUSED before anything is queued and the in-flight prompt is named; inspect queue (action:'list') first, then pass allow_duplicate:true once you have decided it is fine to run behind what is there — a scoped to_node_id preview after a reconnect is the ordinary case for it, a deliberate sweep/batch the other. Use this so the render runs on THEIR canvas and they see the result.",
       {
         batch_count: z
           .number()
@@ -10124,7 +10124,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           .boolean()
           .optional()
           .describe(
-            "Queue even when a render this session cannot account for is already in flight (default false). When work is in flight that this session has no record of queueing — e.g. YOUR OWN earlier render still running after a reconnect, whose record does not survive the restart — panel_run REFUSES to stack a duplicate and names the in-flight prompt instead. Pass true only to deliberately queue behind it (a sweep/batch).",
+            "Queue even when a render this session cannot account for is already in flight (default false). When work is in flight that this session has no record of queueing — e.g. YOUR OWN earlier render still running after a reconnect, whose record does not survive the restart — panel_run REFUSES to stack a duplicate and names the in-flight prompt instead. Pass true once you have LOOKED at what is in flight (queue action:'list') and decided it is fine to run behind it. After a reconnect that is the ordinary case, not an exotic one: you confirmed the in-flight job is your own earlier render or the user's, and you still want the next run — a scoped to_node_id preview, the next step of the task. Deliberately stacking a sweep/batch uses the same override.",
           ),
       },
       async (args: A, ctx) => {
@@ -10195,9 +10195,12 @@ export function buildPanelToolDefs(): PanelToolDef[] {
               `no prompt id) even YOUR OWN earlier render reads as unconfirmable, and queueing now ` +
               `would stack a DUPLICATE behind it (#862). Nothing was queued. Inspect with queue ` +
               `(action:"list"): if the in-flight job is the render you already started, wait for it ` +
-              `and confirm the outcome with get_history instead of re-running it. If you genuinely ` +
-              `intend to stack another render behind it (a deliberate sweep/batch), re-call panel_run ` +
-              `with allow_duplicate:true. If the in-flight job is actually wedged, queue ` +
+              `and confirm the outcome with get_history instead of re-running it. Once you HAVE ` +
+              `looked and decided it is fine to run behind what is there, re-call panel_run with ` +
+              `allow_duplicate:true — after a reconnect that is the ORDINARY case, not an exotic ` +
+              `one: the in-flight job is your own earlier render or the user's, and you still want ` +
+              `the next run (a scoped to_node_id preview, the next step of the task). Deliberately ` +
+              `stacking a sweep/batch uses the same override. If the in-flight job is actually wedged, queue ` +
               `(action:"cancel") with clear_pending:true interrupts it AND drops everything pending.`,
           );
         }
