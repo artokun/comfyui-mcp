@@ -30,7 +30,7 @@
 import { processLocale, trFor } from "../i18n/index.js";
 
 /** The simple OpenAI-compatible API-key providers, by id. */
-export type OpenAiKeyProviderId = "glm" | "kimi" | "moonshot" | "minimax";
+export type OpenAiKeyProviderId = "glm" | "kimi" | "moonshot" | "minimax" | "atlascloud";
 
 export interface OpenAiKeyProvider {
   /** Panel backend id (a member of orchestrator BackendId). */
@@ -168,6 +168,25 @@ export const OPENAI_KEY_PROVIDERS: OpenAiKeyProvider[] = [
       ),
     degradedMessage:
       "⚠️ The background agent isn't responding — MiniMax couldn't start. Set MINIMAX_API_KEY from platform.minimax.io, then Disconnect → Connect to retry.",
+    simpleKeyAuth: true,
+  },
+  {
+    id: "atlascloud",
+    slotLabel: "Atlas Cloud",
+    slotHelp: "Atlas Cloud OpenAI-compatible LLM API",
+    envKeys: ["ATLASCLOUD_API_KEY"],
+    modelEnv: "COMFYUI_MCP_ATLASCLOUD_MODEL",
+    defaultModel: process.env.COMFYUI_MCP_ATLASCLOUD_MODEL?.trim() || "qwen/qwen3.5-flash",
+    ackFallbackLabel: "Atlas Cloud",
+    readyMessage: (agentLabel, locale) =>
+      trFor(
+        locale || processLocale(),
+        "banner.ready.atlascloud",
+        "🟢 comfyui-mcp agent ready — {label} via Atlas Cloud. Ask away.",
+        { label: agentLabel },
+      ),
+    degradedMessage:
+      "⚠️ The background agent isn't responding — Atlas Cloud couldn't start. Set ATLASCLOUD_API_KEY, then Disconnect → Connect to retry.",
     simpleKeyAuth: true,
   },
 ];

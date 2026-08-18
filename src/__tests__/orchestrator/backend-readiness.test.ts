@@ -193,6 +193,18 @@ describe("backendReadiness", () => {
     else process.env.MINIMAX_API_KEY = real;
   });
 
+  it("atlascloud: ready when ATLASCLOUD_API_KEY is set", () => {
+    const real = process.env.ATLASCLOUD_API_KEY;
+    delete process.env.ATLASCLOUD_API_KEY;
+    expect(backendReadiness("atlascloud", { home: tmp }).ready).toBe(false);
+    process.env.ATLASCLOUD_API_KEY = "atlas-test-key";
+    const r = backendReadiness("atlascloud", { home: tmp });
+    expect(r.auth).toBe(true);
+    expect(r.ready).toBe(true);
+    if (real === undefined) delete process.env.ATLASCLOUD_API_KEY;
+    else process.env.ATLASCLOUD_API_KEY = real;
+  });
+
   it("unknown backend is never ready", () => {
     expect(backendReadiness("bogus").ready).toBe(false);
   });

@@ -3299,7 +3299,7 @@ export async function runPanelOrchestrator(): Promise<void> {
   // the next probe uses the new key, and re-push readiness + models to every
   // live tab so the OpenRouter provider flips to "ready" and lists its models
   // without a reconnect.
-  const KEYED_PROVIDERS = ["openrouter", "custom", "glm", "kimi", "moonshot", "minimax"];
+  const KEYED_PROVIDERS = ["openrouter", "custom", ...OPENAI_KEY_PROVIDER_IDS];
   const unsubscribeAgentSecrets = onAgentSecretsChanged(() => {
     hydrateAgentSecretsIntoEnv();
     // A key change can affect ANY keyed provider (OpenRouter/Custom endpoints and

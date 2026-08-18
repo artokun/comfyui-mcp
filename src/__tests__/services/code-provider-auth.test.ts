@@ -7,6 +7,7 @@ import {
   resolveKimiCodeOAuth,
   resolveMoonshotCredentials,
   resolveMiniMaxCredentials,
+  resolveAtlasCloudCredentials,
   resolveOpenAICodexOAuth,
   __testing,
 } from "../../services/code-provider-auth.js";
@@ -76,6 +77,30 @@ describe("resolveMiniMaxCredentials", () => {
 
   it("throws when MINIMAX_API_KEY is not set", () => {
     expect(() => resolveMiniMaxCredentials()).toThrow(/MINIMAX_API_KEY/);
+  });
+});
+
+describe("resolveAtlasCloudCredentials", () => {
+  afterEach(() => {
+    delete process.env.ATLASCLOUD_API_KEY;
+    delete process.env.COMFYUI_MCP_ATLASCLOUD_BASE_URL;
+  });
+
+  it("reads ATLASCLOUD_API_KEY and default base URL", () => {
+    process.env.ATLASCLOUD_API_KEY = "atlas-test-key";
+    const creds = resolveAtlasCloudCredentials();
+    expect(creds.apiKey).toBe("atlas-test-key");
+    expect(creds.baseUrl).toBe(__testing.ATLASCLOUD_DEFAULT_BASE);
+  });
+
+  it("honors a base URL override (trailing slash stripped)", () => {
+    process.env.ATLASCLOUD_API_KEY = "atlas-test-key";
+    process.env.COMFYUI_MCP_ATLASCLOUD_BASE_URL = "https://atlas.example/v1/";
+    expect(resolveAtlasCloudCredentials().baseUrl).toBe("https://atlas.example/v1");
+  });
+
+  it("throws when ATLASCLOUD_API_KEY is not set", () => {
+    expect(() => resolveAtlasCloudCredentials()).toThrow(/ATLASCLOUD_API_KEY/);
   });
 });
 

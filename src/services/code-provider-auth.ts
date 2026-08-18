@@ -22,6 +22,7 @@ export const GLM_CODE_DEFAULT_BASE = "https://api.z.ai/api/coding/paas/v4";
 export const KIMI_CODE_DEFAULT_BASE = "https://api.kimi.com/coding/v1";
 export const MOONSHOT_DEFAULT_BASE = "https://api.moonshot.ai/v1";
 export const MINIMAX_DEFAULT_BASE = "https://api.minimax.io/v1";
+export const ATLASCLOUD_DEFAULT_BASE = "https://api.atlascloud.ai/v1";
 
 const TOKEN_REFRESH_SKEW_MS = 120_000;
 
@@ -567,6 +568,17 @@ export function resolveMiniMaxCredentials(): MoonshotCredentials {
   });
 }
 
+/** Atlas Cloud OpenAI-compatible LLM API. Env: ATLASCLOUD_API_KEY. */
+export function resolveAtlasCloudCredentials(): MoonshotCredentials {
+  return resolveKeyedCredentials({
+    envKeys: ["ATLASCLOUD_API_KEY"],
+    missingMessage:
+      "Atlas Cloud requires ATLASCLOUD_API_KEY from https://www.atlascloud.ai/console/api-keys.",
+    baseUrlEnv: "COMFYUI_MCP_ATLASCLOUD_BASE_URL",
+    defaultBaseUrl: ATLASCLOUD_DEFAULT_BASE,
+  });
+}
+
 /**
  * Resolve credentials for a simple OpenAI-compatible api-key provider by its
  * registry id (see services/openai-provider-registry). This is the one place
@@ -578,6 +590,7 @@ export function resolveOpenAiKeyCredentials(id: string): { apiKey: string; baseU
   if (id === "glm") return resolveGlmCodeCredentials();
   if (id === "moonshot") return resolveMoonshotCredentials();
   if (id === "minimax") return resolveMiniMaxCredentials();
+  if (id === "atlascloud") return resolveAtlasCloudCredentials();
   throw new ValidationError(`No OpenAI api-key credential resolver for provider "${id}".`);
 }
 
@@ -813,6 +826,7 @@ export const __testing = {
   KIMI_CODE_DEFAULT_BASE,
   MOONSHOT_DEFAULT_BASE,
   MINIMAX_DEFAULT_BASE,
+  ATLASCLOUD_DEFAULT_BASE,
   codexAuthPath,
   kimiCodeAuthPath,
   grokAuthPath,

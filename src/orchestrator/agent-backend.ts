@@ -22,6 +22,7 @@ export type BackendId =
   | "kimi"
   | "moonshot"
   | "minimax"
+  | "atlascloud"
   | "ollama"
   | "openrouter"
   | "copilot";
