@@ -74,6 +74,13 @@ import {
   resolveInnerPromotedTarget,
 } from "./promoted-widget.js";
 import {
+  isPlainObject,
+  isStampMismatchSaveRefusal,
+  patchOpenIdentity,
+  shouldRebindOpenIdentity,
+  workflowFromSerializeReply,
+} from "./open-identity-normalization.js";
+import {
   clearSwitchHold,
   describeSwitchHold,
   recordSwitchHold,
@@ -4425,6 +4432,87 @@ function identityClaimedContentUnverifiedNote(detail: string): string {
   );
 }
 
+type OpenIdentityRebind =
+  | { status: "rebound"; destPath: string; destUuid?: string; restoredWidgets: number }
+  | { status: "skipped" };
+
+/**
+ * #1710 — restamp extra.comfyui_mcp onto the dest the tab is already bound to,
+ * and copy dest-file promoted widgets onto any live empty slots.
+ *
+ * Fail-closed: dest file unreadable, node-set mismatch, or a non-empty live
+ * widget that disagrees with dest (#1639 previous graph) leaves extra alone.
+ */
+async function tryRebindConfirmedOpenIdentity(
+  ctx: PanelToolCtx,
+  destPath: string,
+): Promise<OpenIdentityRebind> {
+  let live: Record<string, unknown> | null = null;
+  try {
+    const serialized = await ctx.call({ cmd: "graph_serialize" }, 8000);
+    live = workflowFromSerializeReply(parseToolResultJson(serialized));
+  } catch {
+    return { status: "skipped" };
+  }
+  if (!live) return { status: "skipped" };
+
+  let dest: Record<string, unknown>;
+  try {
+    dest = await readWorkflowFromPath(destPath);
+  } catch {
+    return { status: "skipped" };
+  }
+  if (!shouldRebindOpenIdentity({ live, dest, destPath })) return { status: "skipped" };
+
+  const destUuid = await activeWorkflowUuidForPath(ctx, destPath);
+  const { graph, restoredWidgets } = patchOpenIdentity(live, dest, destPath, destUuid);
+  const loaded = await ctx.call({ cmd: "graph_load", graph }, 30000);
+  if (loaded.isError) return { status: "skipped" };
+  if (destUuid) refreshWorkflowUuid(ctx, { workflow_uuid: destUuid });
+  return { status: "rebound", destPath, destUuid, restoredWidgets };
+}
+
+async function activeWorkflowUuidForPath(ctx: PanelToolCtx, destPath: string): Promise<string | undefined> {
+  try {
+    const list = parseToolResultJson(await ctx.call({ cmd: "workflow_list" }, 6000));
+    if (!list) return undefined;
+    if (readOpenActiveAgainstTarget(list.active, destPath, list.active_confirmed) !== "same") {
+      return undefined;
+    }
+    return responseWorkflowUuid(list.active);
+  } catch {
+    return undefined;
+  }
+}
+
+async function activeSavedPath(ctx: PanelToolCtx): Promise<string | undefined> {
+  try {
+    const list = parseToolResultJson(await ctx.call({ cmd: "workflow_list" }, 6000));
+    const path = isPlainObject(list?.active) ? list.active.path : undefined;
+    return typeof path === "string" && path ? path : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function openedIdentityReboundResult(
+  destPath: string,
+  rebound: Extract<OpenIdentityRebind, { status: "rebound" }>,
+): ToolResult {
+  return ok({
+    opened: { path: destPath },
+    identity_rebound: true,
+    restored_promoted_widgets: rebound.restoredWidgets,
+    note:
+      `Opened ${destPath}. Frontend-normalized presentation/widget fields differed after load; ` +
+      `extra.comfyui_mcp.workflow_path/workflow_uuid were rebound to this workflow so a later ` +
+      `save will not refuse a source-stamp mismatch.` +
+      (rebound.restoredWidgets > 0
+        ? ` Restored ${rebound.restoredWidgets} empty promoted widget value(s) from the saved graph.`
+        : ""),
+  });
+}
+
 function identityClaimedButLiveGraphUnchangedNote(ctx: PanelToolCtx): string {
   const fence = currentWorkflowFence(ctx);
   const fenceTxt =
@@ -4446,6 +4534,7 @@ function identityClaimedButLiveGraphUnchangedNote(ctx: PanelToolCtx): string {
 async function clearFenceOnIdentityProvenOpen(
   ctx: PanelToolCtx,
   res: ToolResult,
+  requestedPath?: string,
 ): Promise<{ res: ToolResult; repaired: boolean }> {
   const text = toolResultText(res);
   // ONLY the class that states identity was proven. The UNPROVEN verdict ("could not
@@ -4455,6 +4544,15 @@ async function clearFenceOnIdentityProvenOpen(
 
   const canvas = await probeLiveGraphUnderCurrentFence(ctx);
   if (canvas.status === "answered") {
+    // #1710 — the old stamp still answering is ALSO what a save-as copy looks
+    // like: dest tab, dest nodes, extra.comfyui_mcp still naming the source.
+    // Confirm dest file content before touching extra (#1639 stays fail-closed).
+    if (requestedPath) {
+      const rebound = await tryRebindConfirmedOpenIdentity(ctx, requestedPath);
+      if (rebound.status === "rebound") {
+        return { res: openedIdentityReboundResult(requestedPath, rebound), repaired: true };
+      }
+    }
     return { res: appendToolResultText(res, identityClaimedButLiveGraphUnchangedNote(ctx)), repaired: false };
   }
   if (canvas.status === "unanswered") {
@@ -6144,7 +6242,7 @@ async function openWorkflowWithVerify(path: string, ctx: PanelToolCtx): Promise<
       if (!/workflow_open RAN/i.test(toolResultText(res))) return res;
       const probe = await observeActiveAfterOpen(ctx, path);
       if (probe.status !== "different") {
-        const cleared = await clearFenceOnIdentityProvenOpen(ctx, res);
+        const cleared = await clearFenceOnIdentityProvenOpen(ctx, res, path);
         // #1560 — the probe's SILENCE, reported. Suppressed when the fence was in fact
         // repaired: that re-derivation is itself a `workflow_list` round trip, so a
         // success there proves the channel answered and the note would contradict the
@@ -12651,9 +12749,23 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         if (ctx.awaitReachable && !(await ctx.awaitReachable())) {
           return noReachableTabFail(args.name ? "workflow_save_as" : "workflow_save", ctx);
         }
-        const res = args.name
-          ? await ctx.call({ cmd: "workflow_save_as", name: args.name }, 15000)
-          : await ctx.call({ cmd: "workflow_save" }, 15000);
+        const saveOnce = () =>
+          args.name
+            ? ctx.call({ cmd: "workflow_save_as", name: args.name }, 15000)
+            : ctx.call({ cmd: "workflow_save" }, 15000);
+        let res = await saveOnce();
+        // #1710 — dest tab + dest nodes, extra still stamped as the save-as SOURCE.
+        // Rebind extra to the confirmed dest, then retry the same save once.
+        if (res.isError && isStampMismatchSaveRefusal(toolResultText(res))) {
+          const destPath = await activeSavedPath(ctx);
+          if (destPath) {
+            const rebound = await tryRebindConfirmedOpenIdentity(ctx, destPath);
+            if (rebound.status === "rebound") {
+              const retried = await saveOnce();
+              if (!retried.isError) res = retried;
+            }
+          }
+        }
         if (res.isError) return res;
         // #1045 — a SAVE-AS replaces the active workflow instance: the canvas is
         // now the NEW file, with its own identity, while this session's command
