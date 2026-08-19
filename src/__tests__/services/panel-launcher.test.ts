@@ -539,5 +539,9 @@ describe("launcher paths", () => {
     const paths = panelLauncherPaths(home);
     expect(paths.config.startsWith(home)).toBe(true);
     expect(paths.broker.startsWith(home)).toBe(true);
+    // The one that escaped: a one-arg call must NOT resolve the Startup entry
+    // to the real user's %APPDATA%, or a sandboxed caller writes a persistent
+    // autostart outside the home it chose.
+    expect(paths.windowsStartup.startsWith(home)).toBe(true);
   });
 });

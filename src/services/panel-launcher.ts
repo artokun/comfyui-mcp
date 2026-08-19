@@ -53,7 +53,10 @@ export type LauncherPaths = {
 
 export function panelLauncherPaths(
   home: string = homedir(),
-  appData: string = roamingAppData({}),
+  // Derive from `home`, not the process environment: a caller passing only a
+  // home (test harness, sandbox, per-user install) must get every artifact
+  // under that home, not a Startup entry in the REAL user's %APPDATA%.
+  appData: string = roamingAppData({ home }),
 ): LauncherPaths {
   const root = join(home, ".comfyui-mcp");
   const launcherDir = join(root, "launcher");
