@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { detectInstallMode } from "../services/self-update.js";
+import { agentLabel, readAgentIdentity, stampAgentIdentity } from "../services/agent-identity.js";
 
 // Issue reporting. For OUR repos (comfyui-mcp / comfyui-mcp-panel) this FILES the
 // issue through the async AI-triage Worker: submit (with the reporter's versions)
@@ -499,10 +500,31 @@ export function registerReportIssueTools(server: McpServer): void {
     async (args) => {
       try {
         const repo = normalizeRepo(args.repo);
-        const prefilledUrl = buildIssueUrl(repo, args.title, args.body, args.labels);
+        const ours = isOurRepo(repo);
+        // WHICH LLM WROTE THIS REPORT. Published by the orchestrator from the
+        // panel's provider/model chips (services/agent-identity.ts) and read
+        // here, in the subprocess the reporting agent's tools run in — NOT asked
+        // of the model, which cannot reliably name itself and was never told its
+        // own model in the first place (the ENVIRONMENT block carries only
+        // `Backend:`). Report quality varies enormously across the providers the
+        // panel can drive, and until this line existed there was no way to tell a
+        // thin report from a local 4B model apart from a thin report from a
+        // frontier one.
+        //
+        // OUR repos only: someone else's tracker is not the place for our
+        // provider telemetry, and a prefilled `agent:*` label would be a label
+        // their repo has never heard of. Absent identity (every non-panel spawn:
+        // plain stdio, CLI, tests) changes nothing — body and labels pass
+        // through as before.
+        const identity = ours ? readAgentIdentity() : undefined;
+        const body = stampAgentIdentity(args.body, identity);
+        const labels = identity
+          ? Array.from(new Set([...(args.labels ?? []), agentLabel(identity)]))
+          : args.labels;
+        const prefilledUrl = buildIssueUrl(repo, args.title, body, labels);
 
         // Third-party (or explicitly disabled): prefilled link only, as before.
-        if (!isOurRepo(repo) || args.no_file) {
+        if (!ours || args.no_file) {
           return jsonResult({
             url: prefilledUrl,
             repo,
@@ -539,8 +561,8 @@ export function registerReportIssueTools(server: McpServer): void {
             clientKey,
             repoName,
             title: args.title,
-            body: args.body,
-            labels: args.labels,
+            body,
+            labels,
             reporterVersions,
             timeoutMs,
             maxPolls,

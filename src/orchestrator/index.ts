@@ -144,6 +144,11 @@ import { tryInstallRetiredNameRedirect } from "../tools/retired-redirect.js";
 import { isForceRemoteFlagSet, isLoopbackHost, detectLocalComfyUIPath, setComfyuiTarget, onComfyuiTargetChanged, isTargetingLocal, isTargetingLocalOrLan, isTargetingPod, getComfyUIBaseUrl, getLocalComfyuiUrl, rescopeLocalTargetFile, getComfyUIAuthHeaders } from "../config.js";
 import { normalizeInstallPathEnv } from "../utils/install-path-env.js";
 import {
+  AGENT_IDENTITY_ENV,
+  agentIdentityPath,
+  publishAgentIdentity,
+} from "../services/agent-identity.js";
+import {
   buildComfyuiMcpEnv,
   comfyuiSecretKeys,
   onComfyuiSecretsChanged,
@@ -2117,6 +2122,16 @@ export async function runPanelOrchestrator(): Promise<void> {
   // tools don't saturate the backend's tool budget and make codex silently drop
   // the panel_* HTTP-MCP tools (overridable via COMFYUI_MCP_TOOL_MODE=full).
   const httpLaneComfyToolMode = resolveHttpLaneComfyToolMode();
+  // WHICH LLM IS DRIVING THIS AGENT — pointed at the file the orchestrator
+  // republishes on every turn dispatch (see the onTurn handler). report_issue
+  // reads it in the subprocess and stamps the model into the issue body, so a
+  // report can be judged against the model that wrote it instead of being
+  // attributed by asking the model itself (which answers with a guess). BOTH
+  // spawn lanes need it: the HTTP lane below and the Claude lane's
+  // buildMcpServers() — a var forwarded on only one of them is the recurring
+  // defect this file already carries two separate warnings about.
+  const agentIdentityEnv = (agentKey: string | undefined): Record<string, string> =>
+    agentKey ? { [AGENT_IDENTITY_ENV]: agentIdentityPath(bridgePort, agentKey) } : {};
   // #788 — `toolMode: null` OMITS the key entirely, which is NOT the same as
   // passing "compact": a pre-baked value is read downstream as a caller-explicit
   // pin and outranks per-model auto-selection, so the Ollama-family backends
@@ -2143,6 +2158,8 @@ export async function runPanelOrchestrator(): Promise<void> {
         // downloads resolved to nobody and the owning conversation stalled).
         // `tabId` here IS the agent key (the scope address the lane binds).
         COMFYUI_MCP_TAB: tabId,
+        // …and the same key addresses this agent's published identity.
+        ...agentIdentityEnv(tabId),
       }),
     },
     // Live-graph panel_* tools for THIS tab over the loopback HTTP MCP.
@@ -2446,6 +2463,9 @@ export async function runPanelOrchestrator(): Promise<void> {
         // child stamps its own COMFYUI_MCP_TAB into each progress row, and the
         // settle path resolves an agent-key-shaped stamp directly.
         ...(agentKey ? { COMFYUI_MCP_TAB: agentKey } : {}),
+        // Which LLM is driving this agent, for report_issue's stamp (see
+        // agentIdentityEnv). Same key, same reason it is keyed by agent.
+        ...agentIdentityEnv(agentKey),
         // Local mode → enables download_model, apply_manifest (installer packs),
         // and model scans so the agent installs the right way instead of curl.
         ...(comfyuiPath ? { COMFYUI_PATH: comfyuiPath } : forceRemoteEnv()),
@@ -2542,6 +2562,13 @@ export async function runPanelOrchestrator(): Promise<void> {
       // #884 P0 — the turn ended: release its routing pin so idle-time scope
       // resolution follows the active tab again (the next turn re-pins).
       if (state === "done") turnOrigins.turnEnded(key);
+      // Publish WHICH LLM this turn runs on, for report_issue's stamp. Here
+      // because "working" fires at DISPATCH — before the backend starts the
+      // turn, and therefore before any tool the turn calls — so the file the
+      // subprocess reads always describes the turn doing the reporting. A
+      // spawn-time env var could not: setModel is live and never respawns, so
+      // it would stamp reports with the model the user switched AWAY from.
+      if (state === "working") republishAgentIdentity(key);
       pushToConversation(key, { type: "turn", state });
     },
     // Live extended-thinking token count → "thinking… (N)" indicator.
@@ -3449,6 +3476,35 @@ export async function runPanelOrchestrator(): Promise<void> {
     if (reg) return openAiKeyProviderModel(reg); // glm / kimi / moonshot
     if (backend === "copilot") return copilotModel;
     return model;
+  }
+  /**
+   * Publish WHICH LLM is driving an agent, so report_issue can stamp it into the
+   * issue body from the comfyui MCP subprocess (services/agent-identity.ts).
+   *
+   * Read from THE CHIPS — the same expression pushModels() sends the panel as
+   * `current`, so the stamp names exactly what the picker shows rather than a
+   * second, drifting notion of "the model". The alternative was asking the model
+   * to name itself in the report, which is a guess: the ENVIRONMENT block has
+   * never carried the model at all, only `Backend:`.
+   *
+   * Called on every turn dispatch; the last-published value is remembered per key
+   * so an unchanged identity costs no write.
+   */
+  const lastPublishedIdentity = new Map<string, string>();
+  function republishAgentIdentity(key: string): void {
+    const backend = backendOf(key);
+    const identity = {
+      backend,
+      model: manager.modelOverrideFor(key) ?? currentModelFor(backend),
+      effort: manager.currentEffortFor(key),
+    };
+    const fingerprint = JSON.stringify(identity);
+    if (lastPublishedIdentity.get(key) === fingerprint) return;
+    // Only remember it as published if the write actually landed — otherwise a
+    // single failed write would suppress every later attempt for this key.
+    if (publishAgentIdentity(agentIdentityPath(bridgePort, key), identity)) {
+      lastPublishedIdentity.set(key, fingerprint);
+    }
   }
   function pushModels(panelTabId: string): void {
     const backend = backendForTab(panelTabId);

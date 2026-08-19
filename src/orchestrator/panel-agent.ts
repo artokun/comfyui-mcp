@@ -2571,6 +2571,15 @@ export class PanelAgentManager {
     return this.modelByKey.get(tabId);
   }
 
+  /** The reasoning effort this key runs at — its picker override when set, else
+   *  the shared default. Unlike {@link modelOverrideFor} this folds the default
+   *  in, because there is no second source to fall back to: the caller (the
+   *  orchestrator publishing the agent's identity for report_issue) wants the
+   *  value in force, not whether it was overridden. */
+  currentEffortFor(tabId: string): Effort | undefined {
+    return this.effortFor(tabId);
+  }
+
   private makeAgent(tabId: string): PanelAgent {
     // Inject the toggle-selected backend (Codex) when provided; otherwise the
     // PanelAgent constructor defaults to ClaudeBackend (existing behavior).

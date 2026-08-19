@@ -1,4 +1,7 @@
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, afterAll } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { normalizeRepo, buildIssueUrl, isOurRepo, submitAndPoll, registerReportIssueTools, REPORT_UA } from "./report-issue.js";
 
 const noSleep = async () => {};
@@ -504,5 +507,102 @@ describe("#937: every intake request carries a named User-Agent", () => {
     // The poll is a separate request and would be judged by the WAF separately.
     expect(seen.length).toBeGreaterThan(1);
     expect(seen[1]["User-Agent"]).toBe(REPORT_UA);
+  });
+});
+
+// ── WHICH LLM FILED IT ───────────────────────────────────────────────────────
+// The panel can be driven by anything from a frontier model to a local 4B, and
+// report quality follows. The orchestrator publishes the provider/model chips to
+// a file (services/agent-identity.ts) and the handler stamps them into the body
+// it actually SENDS — the worker pins that body verbatim into the created issue
+// (triage.ts: `sanitized.body = opts.report.body`), so the body is the one
+// channel that reaches the issue without a worker deploy.
+//
+// These drive the REGISTERED HANDLER, not the stamping helper: a helper that
+// works and a call site that never runs it is the same defect as no helper at
+// all, and the body/labels the handler forwards are what a reader ends up
+// judging the report by.
+describe("report_issue stamps the reporting model (mechanical, not self-reported)", () => {
+  const IDENTITY_DIR = mkdtempSync(join(tmpdir(), "cmcp-report-identity-"));
+  const identityFile = join(IDENTITY_DIR, "identity.json");
+  const savedEnv = process.env.COMFYUI_MCP_AGENT_IDENTITY;
+
+  const publish = (identity: Record<string, unknown>) => {
+    writeFileSync(identityFile, JSON.stringify(identity), "utf8");
+    process.env.COMFYUI_MCP_AGENT_IDENTITY = identityFile;
+  };
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    if (savedEnv === undefined) delete process.env.COMFYUI_MCP_AGENT_IDENTITY;
+    else process.env.COMFYUI_MCP_AGENT_IDENTITY = savedEnv;
+  });
+  afterAll(() => {
+    try {
+      rmSync(IDENTITY_DIR, { recursive: true, force: true });
+    } catch {
+      /* best-effort */
+    }
+  });
+
+  /** The submit payload the handler actually put on the wire. */
+  async function submittedPayload(args: Record<string, unknown>) {
+    const spy = vi.fn(async (_url: string, _init: RequestInit) =>
+      res({ state: "CLOSED", payload: { issue: { number: 7, url: "https://gh/7" } }, url: "https://gh/7" }),
+    );
+    vi.stubGlobal("fetch", spy);
+    const out = await callTool(args);
+    const init = spy.mock.calls[0]?.[1] as RequestInit | undefined;
+    return { payload: init ? (JSON.parse(init.body as string) as Record<string, unknown>) : undefined, out };
+  }
+
+  it("sends the model in the body and the provider as a label", async () => {
+    publish({ backend: "ollama", model: "gemma3:4b", effort: "low" });
+    const { payload } = await submittedPayload({ title: "t", body: "It broke." });
+    const body = payload?.body as string;
+    expect(body).toContain("It broke.");
+    // The exact model is the whole point — "ollama" alone cannot distinguish a
+    // 4B from a 235B, which is the comparison this exists to enable.
+    expect(body).toContain("gemma3:4b");
+    expect(body).toContain("not self-reported");
+    expect(payload?.labels).toContain("agent:ollama");
+  });
+
+  it("keeps the caller's labels alongside the provider label", async () => {
+    publish({ backend: "kimi", model: "kimi-k2-thinking" });
+    const { payload } = await submittedPayload({ title: "t", body: "b", labels: ["bug"] });
+    expect(payload?.labels).toEqual(expect.arrayContaining(["bug", "agent:kimi"]));
+  });
+
+  it("changes NOTHING when no identity was published (every non-panel spawn)", async () => {
+    delete process.env.COMFYUI_MCP_AGENT_IDENTITY;
+    const { payload } = await submittedPayload({ title: "t", body: "It broke.", labels: ["bug"] });
+    // Byte-identical, not merely "contains": a plain stdio/CLI report has no
+    // panel behind it, so there is no model to name and nothing to append.
+    expect(payload?.body).toBe("It broke.");
+    expect(payload?.labels).toEqual(["bug"]);
+  });
+
+  it("never stamps a THIRD-PARTY tracker", async () => {
+    publish({ backend: "ollama", model: "gemma3:4b" });
+    const spy = vi.fn();
+    vi.stubGlobal("fetch", spy);
+    const { json } = await callTool({ title: "t", body: "It broke.", repo: "someone/their-node", labels: ["bug"] });
+    // The prefilled URL is what the user posts to someone else's repo. Our
+    // provider telemetry is not their business, and `agent:ollama` is a label
+    // their repo has never heard of.
+    const url = new URL(json.url as string);
+    expect(url.searchParams.get("body")).toBe("It broke.");
+    expect(url.searchParams.get("labels")).toBe("bug");
+  });
+
+  it("stamps the PREFILLED fallback for our repos too", async () => {
+    publish({ backend: "claude", model: "claude-opus-4-5" });
+    // no_file and the worker-unreachable fallback share this URL — a report that
+    // arrives by the fallback path is no less in need of attribution.
+    const { json } = await callTool({ title: "t", body: "It broke.", no_file: true });
+    const url = new URL(json.url as string);
+    expect(url.searchParams.get("body")).toContain("claude-opus-4-5");
+    expect(url.searchParams.get("labels")).toBe("agent:claude");
   });
 });
