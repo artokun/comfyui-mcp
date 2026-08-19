@@ -509,7 +509,20 @@ describe("#442 defect 4: a MUTATING panel command names the rebind on a no-route
       tabs: () => [...live].map((t) => ({ tab_id: t, title: t, connected_at: 0 })),
       resolveActiveTabId: () => [...live][0],
       refreshWorkflowUuid: () => true,
-      workflowUuidFor: () => ({ known: true, uuid: LIVE_UUID }),
+      // panel#1339 — THE HARNESS WAS DESCRIBING A STATE THE BRIDGE CANNOT BE IN, and the
+      // collapsed message is what hid it. This said `{ known: true, uuid: LIVE_UUID }`:
+      // a fence PRESENT on this tab and already equal to the live canvas. But the
+      // refusal above is raised only when `resolveTabWorkflowUuid(tabId)` is EMPTY
+      // (ui-bridge: `hasTrustedStamp` false), and `workflowUuidFor` reads that same
+      // resolver — so a real bridge cannot refuse with "no trusted identity" AND report
+      // a fence for the same tab in the same breath.
+      //
+      // With that shape the rebind returned `already_current`, not `refreshed` — the
+      // opposite state — and the assertions below still passed, because ONE sentence
+      // covered both. The test was pinning the wrong branch and could not tell.
+      // `{ known: true }` is the read that matches the refusal: the fence is definitively
+      // ABSENT (FenceRead's own contract), which is #709's state and yields `refreshed`.
+      workflowUuidFor: () => ({ known: true }),
     } as unknown as PanelToolCtx["bridge"];
     const ctx = makePanelToolCtx(bridge, "wf:workflows/x.json", new WorkflowTargetStore());
 
@@ -528,6 +541,13 @@ describe("#442 defect 4: a MUTATING panel command names the rebind on a no-route
     expect(text).toMatch(/CHECKED: the live canvas DOES carry an identity/);
     expect(text).toContain(LIVE_UUID);
     expect(text).toMatch(/RETRY THIS EXACT CALL ONCE/);
+    // panel#1339 — and pin WHICH branch produced that, structurally. Asserting only on
+    // the sentence is how this test silently drifted onto `already_current` above; the
+    // field is the thing that can tell the two apart, so it is what the test reads.
+    expect(
+      (res.structuredContent as { panel_fence?: { rebind_status?: string } } | undefined)
+        ?.panel_fence?.rebind_status,
+    ).toBe("refreshed");
   });
 
   it("does NOT mis-wrap a POST-dispatch executor failure that merely quotes 'no connected tab' as 'nothing applied'", async () => {    // A LIVE tab that ACCEPTS the command (it IS dispatched, pushed to `sent`) but whose
