@@ -1,9 +1,8 @@
 {
   "comfyui": {
-    "command": "npx",
+    "command": "node",
     "args": [
-      "-y",
-      "comfyui-mcp",
+      "${CLAUDE_PLUGIN_ROOT}/scripts/launch-server.mjs",
       "--full"
     ],
     "env": {

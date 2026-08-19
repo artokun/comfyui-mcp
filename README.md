@@ -860,6 +860,7 @@ plugin/
     job-complete-notify.mjs # Job completion notification via temp files
   scripts/                 # Background scripts
     monitor-progress.mjs   # Real-time WebSocket progress monitor
+    launch-server.mjs      # MCP server launcher — prefers a global install over cold `npx` (#1447)
 ```
 
 ---
