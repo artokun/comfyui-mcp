@@ -382,6 +382,33 @@ function samePath(a: string, b: string): boolean {
   }
 }
 
+/**
+ * Do these two spellings name the SAME config file? Used only by the #1788 divergence
+ * disclosure, where the harmful direction is the opposite of `samePath`'s.
+ *
+ * `samePath` is deliberately lexical, and its false negatives are safe there: they demote
+ * a root from "explicit" to "inferred", i.e. more checking. Here a false negative would
+ * declare a file the server DOES read to be inert and tell the user their edit will not
+ * apply — a confident wrong answer on a correct action. A junction, an 8.3 short name, or
+ * a UNC-vs-mapped-drive spelling of one file is ordinary on the platform this was
+ * reported from, so the comparison is collapsed through `realpath` as well.
+ *
+ * `realpath` is best-effort: a path that does not exist yet (the implicit
+ * `<root>/extra_model_paths.yaml` a caller is about to create) simply falls back to its
+ * lexical form, which is what `samePath` already compared.
+ */
+function sameConfigFile(a: string, b: string): boolean {
+  if (samePath(a, b)) return true;
+  const real = (p: string): string => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return p;
+    }
+  };
+  return samePath(real(a), real(b));
+}
+
 function standaloneRoot(): {
   root: string;
   source: StandaloneRootSource;
@@ -455,7 +482,13 @@ interface ResolvedTarget {
   guard?: GuardedRoot;
   /** Every config file the RUNNING server loads, when this resolution was anchored to
    *  that server. Only a `complete` set can support the #1788 divergence disclosure —
-   *  a path's ABSENCE from a partial set is not evidence the server does not read it. */
+   *  a path's ABSENCE from a partial set is not evidence the server does not read it.
+   *
+   *  INVARIANT, relied on by `notePinnedDivergence`: this field is set ONLY by a branch
+   *  that also reports `serverResolved: true`. Its presence is therefore the proof that
+   *  the running server — not a local heuristic, not a #764 display fallback — named
+   *  these files. A branch that sets it without that anchoring would turn a guess into a
+   *  confident "the running ComfyUI does not read your file". */
   liveLoaded?: LiveLoadedConfigs;
   /** Set ONLY when the caller PINNED a file (`target`/`config_path`) and the running
    *  server was proven to read a DIFFERENT, completely-enumerated set of configs — i.e.
@@ -1135,7 +1168,7 @@ async function resolveTargetPathPreferServer(
   //   • `unlocatable` relative flags make the set INCOMPLETE, so a pinned path's absence
   //     proves nothing and no divergence may be claimed.
   const liveLoadedPaths = [serverConfig, ...alsoLoaded];
-  if (implicitConfig && !liveLoadedPaths.some((p) => samePath(p, implicitConfig))) {
+  if (implicitConfig && !liveLoadedPaths.some((p) => sameConfigFile(p, implicitConfig))) {
     liveLoadedPaths.push(implicitConfig);
   }
   const isDesktop = looksLikeDesktopConfig(serverConfig);
@@ -1204,10 +1237,16 @@ async function notePinnedDivergence(
   } catch {
     return pinned; // the server established nothing — the pin is all there is
   }
-  if (!live.serverResolved) return pinned;
+  // `liveLoaded` IS the proof of anchoring: only the two server-anchored branches
+  // produce it (see its declaration), and it is the predicate this decision actually
+  // needs — the complete set of files the running server reads. An additional
+  // `serverResolved` check beside it was redundant by construction: a mutation deleting
+  // it killed zero tests, because no input can make the two disagree. An untestable
+  // guard is not defence in depth, it is an unpinned claim, so the invariant lives on
+  // the field's contract where a future branch has to read it.
   const loaded = live.liveLoaded;
   if (!loaded?.complete) return pinned;
-  if (loaded.paths.some((p) => samePath(p, pinned.path))) return pinned;
+  if (loaded.paths.some((p) => sameConfigFile(p, pinned.path))) return pinned;
   return {
     ...pinned,
     notes: [

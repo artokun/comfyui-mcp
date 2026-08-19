@@ -1178,6 +1178,26 @@ describe("#1788 — a PINNED target discloses that the running server reads else
     expect(added.message).toMatch(/Restart ComfyUI to apply it/);
   });
 
+  // Real symlinks need privileges/Developer Mode on Windows; skipped rather than
+  // silently passing, so it can never read as a vacuous confirmation.
+  it.skipIf(!CAN_SYMLINK)(
+    "says NOTHING when the pinned path is a SYMLINK to a config the server loads",
+    async () => {
+      // The harmful direction for THIS comparison is the false negative: telling a user
+      // their edit is inert when it lands in the very file the server reads. A lexical
+      // compare says these two spellings differ; they are one file.
+      const liveRoot = await trackTmp();
+      const serverCfg = await liveConfigAt(liveRoot, "instance-model-paths.yaml");
+      await liveServer(liveRoot, serverCfg);
+      const alias = join(await trackTmp(), "alias.yaml");
+      symlinkSync(serverCfg, alias, "file");
+
+      const added = await addExtraPath({ configPath: alias, category: "vae", path: "D:/vae" });
+      expect(added.notes.some((n) => /does not read this file/.test(n))).toBe(false);
+      expect(added.message).toMatch(/Restart ComfyUI to apply it/);
+    },
+  );
+
   it("remove_path carries the disclosure too (an inert removal is equally a no-op)", async () => {
     const appData = await trackTmp();
     process.env.APPDATA = appData;

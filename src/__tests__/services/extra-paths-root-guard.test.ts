@@ -286,6 +286,52 @@ describe("inferred root revalidation at the point of use", () => {
     expect(script.consumed).toBe(4);
   });
 
+  // #1788 — the divergence disclosure compares a PINNED config path against every file
+  // the running server loads. That comparison is realpath-collapsed on purpose: here the
+  // harmful direction is the false NEGATIVE, i.e. telling a user their edit is inert when
+  // it lands in the very file the server reads. Scripted realpathSync so it is proven on
+  // every platform (a real file symlink needs privileges on Windows).
+  it("pinned config: a realpath ALIAS of the server's own config is not called inert", async () => {
+    const liveRoot = await trackTmp();
+    await writeFile(join(liveRoot, "main.py"), "# comfyui\n", "utf-8");
+    const serverCfg = join(liveRoot, "instance-model-paths.yaml");
+    await writeFile(serverCfg, "live:\n  ipadapter: D:/shared/ipadapter\n", "utf-8");
+    const aliasDir = await trackTmp();
+    const alias = join(aliasDir, "alias.yaml");
+    await writeFile(alias, "live:\n  ipadapter: D:/shared/ipadapter\n", "utf-8");
+    script.realpath[alias] = serverCfg;
+    mockGetSystemStats.mockResolvedValue({
+      system: {
+        argv: ["python", join(liveRoot, "main.py"), "--extra-model-paths-config", serverCfg],
+      },
+    });
+
+    const added = await addExtraPath({ configPath: alias, category: "vae", path: "D:/vae" });
+    expect(added.notes.some((n) => /does not read this file/.test(n))).toBe(false);
+    expect(added.message).toMatch(/Restart ComfyUI to apply it/);
+  });
+
+  it("pinned config: a path that is NOT an alias of any server config IS called inert", async () => {
+    // The control for the test above: without it, a disclosure that never fires at all
+    // would pass it just as well.
+    const liveRoot = await trackTmp();
+    await writeFile(join(liveRoot, "main.py"), "# comfyui\n", "utf-8");
+    const serverCfg = join(liveRoot, "instance-model-paths.yaml");
+    await writeFile(serverCfg, "live:\n  ipadapter: D:/shared/ipadapter\n", "utf-8");
+    const other = join(await trackTmp(), "unrelated.yaml");
+    await writeFile(other, "local:\n  vae: D:/vae\n", "utf-8");
+    mockGetSystemStats.mockResolvedValue({
+      system: {
+        argv: ["python", join(liveRoot, "main.py"), "--extra-model-paths-config", serverCfg],
+      },
+    });
+
+    const added = await addExtraPath({ configPath: other, category: "vae", path: "D:/vae2" });
+    expect(added.notes.some((n) => /RUNNING ComfyUI does not read this file/.test(n))).toBe(true);
+    expect(added.message).not.toMatch(/Restart ComfyUI to apply it/);
+    expect(added.message).toContain(serverCfg);
+  });
+
   it("live root: a SYMLINKED main.py resolves to the real install root (platform-independent)", async () => {
     // ComfyUI reads the implicit config next to os.path.realpath(__file__). Scripted
     // realpathSync stands in for a symlink so this runs everywhere, including on a
