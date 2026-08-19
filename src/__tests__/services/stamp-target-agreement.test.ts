@@ -19,6 +19,7 @@ import { createServer } from "node:net";
 import WebSocket from "ws";
 import {
   UiBridge,
+  commandStampAddress,
   dispatchOutcomeOf,
   requiresStampTargetAgreement,
 } from "../../services/ui-bridge.js";
@@ -84,6 +85,25 @@ describe("requiresStampTargetAgreement (#1656)", () => {
     ).toBe(false);
     expect(requiresStampTargetAgreement({ cmd: "show_media" })).toBe(false);
     expect(requiresStampTargetAgreement({})).toBe(false);
+  });
+
+  it("stamps graph ops from the caller address and exempt ops from the routed tab (#1815)", () => {
+    const caller = "orchestrator::claude";
+    const routed = "wf:route1:workflows/live.json";
+    expect(commandStampAddress({ cmd: "graph_outline" }, caller, routed)).toBe(caller);
+    expect(commandStampAddress({ cmd: "graph_add_node" }, caller, routed)).toBe(caller);
+    expect(commandStampAddress({ cmd: "workflow_save" }, caller, routed)).toBe(caller);
+    // The reporter's blocked tools, plus the recovery probe that made
+    // mode:"current" a dead end: a stale conversation stamp on these is what
+    // the panel compared and refused.
+    expect(commandStampAddress({ cmd: "nodes_search" }, caller, routed)).toBe(routed);
+    expect(commandStampAddress({ cmd: "nodes_install" }, caller, routed)).toBe(routed);
+    expect(commandStampAddress({ cmd: "comfy_reboot" }, caller, routed)).toBe(routed);
+    expect(commandStampAddress({ cmd: "workflow_list" }, caller, routed)).toBe(routed);
+    expect(commandStampAddress({ cmd: "workflow_open", path: "x" }, caller, routed)).toBe(routed);
+    // No caller address (a real-tab send) still resolves.
+    expect(commandStampAddress({ cmd: "graph_outline" }, undefined, routed)).toBe(routed);
+    expect(commandStampAddress({ cmd: "nodes_search" }, undefined, routed)).toBe(routed);
   });
 });
 
@@ -210,6 +230,10 @@ describe("dispatch-time stamp/target agreement gate (#1656)", () => {
     const probe = await bridge.send({ cmd: "workflow_list" }, { tabId: SCOPE });
     expect(probe).toEqual({ cmd: "workflow_list" });
     expect(received.map((f) => f.cmd)).toEqual(["workflow_list"]);
+    // #1815 — and it is stamped with the LIVE tab, not the stale conversation
+    // stamp. The reporter's mode:"current" asked this probe under UUID_A and
+    // the panel refused it as a mismatch, so recovery never ran.
+    expect(received[0].workflow_uuid).toBe(UUID_B);
 
     // After the documented rebind adopts the live identity, the same calls dispatch.
     sessionStamp = UUID_B;
@@ -230,6 +254,41 @@ describe("dispatch-time stamp/target agreement gate (#1656)", () => {
     const res = await bridge.send({ cmd: "graph_outline" }, { tabId: SCOPE });
     expect(res).toEqual({ cmd: "graph_outline" });
     expect(received[0].workflow_uuid).toBeUndefined();
+    sock.close();
+  });
+
+  it("stamps Manager/reboot/list from the live tab so a stale session fence cannot refuse them (#1815)", async () => {
+    advertised.set(TAB_A, UUID_A);
+    sessionStamp = UUID_A;
+    const sock = await connectPanel(TAB_A);
+    await waitFor(() => expect(bridge.tabs().map((t) => t.tab_id)).toContain(TAB_A));
+
+    hello(sock, TAB_B);
+    await waitFor(() => expect(bridge.tabs().map((t) => t.tab_id)).toContain(TAB_B));
+    advertised.delete(TAB_A);
+    advertised.set(TAB_B, UUID_B);
+    received.length = 0;
+
+    // The reporter's first call of the turn — a read-only Manager search — and
+    // the install / reboot that the same fence also blocked. None of them
+    // reads or writes the graph; they must still reach the panel, stamped as
+    // the canvas that is actually mounted.
+    for (const cmd of ["nodes_search", "nodes_install", "comfy_reboot"] as const) {
+      received.length = 0;
+      const res = await bridge.send({ cmd }, { tabId: SCOPE });
+      expect(res).toEqual({ cmd });
+      expect(received).toHaveLength(1);
+      expect(received[0].cmd).toBe(cmd);
+      expect(received[0].workflow_uuid).toBe(UUID_B);
+    }
+
+    // A graph read is still refused: that is the fence doing its job.
+    const readErr = await bridge.send({ cmd: "graph_outline" }, { tabId: SCOPE }).then(
+      () => null,
+      (err) => err as Error,
+    );
+    expect(readErr).not.toBeNull();
+    expect(readErr!.message).toMatch(/^workflow instance mismatch:/);
     sock.close();
   });
 });

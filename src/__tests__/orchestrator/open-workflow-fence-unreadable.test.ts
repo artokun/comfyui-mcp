@@ -290,6 +290,9 @@ describe("the remedy branches on the cause, not on the symptom", () => {
     expect(text).toMatch(/WHAT TO DO: retry in a moment/);
     // Reopening needs a tab too, so it must NOT be advertised as the fix here.
     expect(text).not.toMatch(/reopen the workflow you want/);
+    // Silence is still silence — #1815 only rewords a fence refusal.
+    expect(text).toMatch(/the panel did not answer/);
+    expect(text).not.toMatch(/the panel ANSWERED, but it refused/);
   });
 
   it("switches to the reopen lead when the FENCE is what refused", async () => {
@@ -306,6 +309,10 @@ describe("the remedy branches on the cause, not on the symptom", () => {
 
     expect(text).toMatch(/reopen the workflow you want/);
     expect(text).not.toMatch(/WHAT TO DO: retry in a moment/);
+    // #1815 — a fence refusal is an answer. Saying "the panel did not answer"
+    // here sent the reporter hunting a dead bridge while panel_ask still worked.
+    expect(text).toMatch(/the panel ANSWERED, but it refused/);
+    expect(text).not.toMatch(/the panel did not answer/);
   });
 });
 

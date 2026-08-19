@@ -5932,8 +5932,18 @@ function describeFenceRebind(
       return {
         binding: "not_recovered",
         note:
-          ` Could NOT read the live canvas identity — the panel did not answer, so NOTHING ` +
-          `about this session's graph binding was observed.` +
+          // #1815 — a fence refusal is an ANSWER, not a silence. The lead used
+          // to say "the panel did not answer" for every unreadable, and the
+          // reporter (whose panel_ask / panel_set_todo / panel_show_media were
+          // all working) treated that as a dead bridge and never found the
+          // reopen exit. The WHAT TO DO already split on this; the lead must.
+          (/workflow instance mismatch/i.test(r.detail)
+            ? ` Could NOT read the live canvas identity — the panel ANSWERED, but it refused ` +
+              `the identity read because of the workflow-instance fence this call exists to ` +
+              `clear. That is not a dead bridge: non-graph tools (panel_search_nodes, ` +
+              `panel_ask, panel_set_todo) can still round-trip.`
+            : ` Could NOT read the live canvas identity — the panel did not answer, so NOTHING ` +
+              `about this session's graph binding was observed.`) +
           // #1043 — NAME THE VERSION GAP when that is what this is.
           //
           // The repair that would have avoided this read entirely

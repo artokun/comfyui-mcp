@@ -5847,6 +5847,27 @@ describe("panel-tools: mode:'current' re-derives the workflow command fence (#77
     expect(text).toMatch(/Do NOT use panel_reload/);
   });
 
+  it("a fence-refused identity read is NOT narrated as a dead panel (#1815)", async () => {
+    // The reporter's mode:"current" hit this exact throw: workflow_list came
+    // back as a mismatch, and the lead said "the panel did not answer" while
+    // panel_ask was still working.
+    const { bridge, refresh, tab, currentStamp } = fenceBridge({
+      fence: STALE,
+      listThrows:
+        "workflow instance mismatch: this command targets a different workflow than the active canvas",
+    });
+    const { res, text } = await setCurrent(bridge, tab);
+
+    expect(res.isError).toBe(true);
+    expect(text).toMatch(/did NOT restore this session's graph binding/);
+    expect(text).toMatch(/the panel ANSWERED, but it refused/);
+    expect(text).not.toMatch(/the panel did not answer/);
+    expect(text).toMatch(/reopen the workflow you want/);
+    expect(text).toContain(STALE);
+    expect(refresh).not.toHaveBeenCalled();
+    expect(currentStamp()).toBe(STALE);
+  });
+
   it("an UNREADABLE read is an unknown even with NO prior fence — it never claims reads work", async () => {
     // The read that would have told us whether this session is usable is the one
     // that failed. Reporting "graph READS work" from a failed observation is the

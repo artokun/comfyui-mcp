@@ -1127,6 +1127,27 @@ export function requiresStampTargetAgreement(cmd: { cmd?: unknown }): boolean {
 }
 
 /**
+ * #1815 — which resolver address a command's `workflow_uuid` is taken from.
+ *
+ * Graph reads/writes and the four active-workflow mutators are issued FOR a
+ * workflow: they keep the caller's address so a switch fails closed (#570/#1656).
+ * Everything else (Manager search/install/reboot, the workflow_list recovery
+ * probe, open/new) does not act on that workflow. Stamping those with the
+ * conversation's issue-time identity is what wedged the reporter: the panel
+ * compared the stale stamp and refused even `nodes_search`, and the documented
+ * rebind then asked `workflow_list` under the same stamp and reported "the
+ * panel did not answer". Those commands take the routed tab's last-advertised
+ * identity instead — the live canvas, not the turn they were conceived in.
+ */
+export function commandStampAddress(
+  cmd: { cmd?: unknown },
+  callerTabId: string | undefined,
+  routedTabId: string,
+): string {
+  return requiresStampTargetAgreement(cmd) ? (callerTabId ?? routedTabId) : routedTabId;
+}
+
+/**
  * Default reply timeout for a MUTATING command with no explicit timeout.
  *
  * This was 6000 ms — the flat pre-#574 default, kept when reads were raised to
@@ -4713,13 +4734,21 @@ export class UiBridge {
         tabId: conn.tabId,
         mutating: !UiBridge.READONLY_CMDS.has(cmd.cmd),
         deadline: Date.now() + timeoutMs,
-        // #570 — resolve from the CALLER'S intended tab (opts.tabId), NOT the canonical
-        // conn.tabId: after a same-socket switch the two differ, and we must stamp the
-        // workflow the command was ISSUED FOR (so the panel, now showing a different one,
-        // declines it) — never the workflow it happens to have landed on. #884: for the
-        // SHARED SCOPE the orchestrator's resolver answers with the current TURN's
-        // issue-time workflow — same rule, conversation-level.
-        workflowUuid: this.resolveTabWorkflowUuid?.(opts.tabId ?? conn.tabId) ?? undefined,
+        // #570 — graph ops resolve from the CALLER'S intended tab (opts.tabId), NOT
+        // the canonical conn.tabId: after a same-socket switch the two differ, and
+        // we must stamp the workflow the command was ISSUED FOR (so the panel, now
+        // showing a different one, declines it) — never the workflow it happens to
+        // have landed on. #884: for the SHARED SCOPE the orchestrator's resolver
+        // answers with the current TURN's issue-time workflow — same rule,
+        // conversation-level.
+        //
+        // #1815 — Manager / recovery / navigation commands do not act on that
+        // workflow. They take the routed tab's advertised identity so a stale
+        // conversation stamp cannot refuse a search, an install, a reboot, or the
+        // workflow_list the documented rebind needs.
+        workflowUuid:
+          this.resolveTabWorkflowUuid?.(commandStampAddress(cmd, opts.tabId, conn.tabId)) ??
+          undefined,
         onDispatchedRid: opts.onDispatchedRid,
       };
       this.dispatch(conn, ctx);
