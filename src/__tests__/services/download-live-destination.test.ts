@@ -905,8 +905,15 @@ describe("post-write: the reported path is VERIFIED, not intended (#369)", () =>
   // file — and the verdict STILL claimed "it is in the right place … Do NOT
   // move the file", because resolveModelsDir() returned that same configured/
   // inferred root and the lexical containment check against it passes for any
-  // file the download itself just wrote there. Only a root the SERVER NAMED may
-  // anchor the refresh remedy; anything else keeps the move remedy.
+  // file the download itself just wrote there.
+  //
+  // #1735 settled what REPLACES that claim, and it is not the move remedy: this
+  // state is the THIRD one (inside a root nobody vouched for), so the verdict says
+  // UNCONFIRMED, names both candidates — stale listing vs. different install — and
+  // names the ONE check that separates them. Asserting the move remedy here would
+  // re-import #1131's harm: on the ordinary Windows-portable shape this file landed
+  // exactly right, and "move it" with no destination is an instruction nobody can
+  // follow. These expectations are read off what main actually emits.
   it.each(["configured-base", "observed-root", "base-anchored"] as const)(
     "#369 (0.52.1): a not-listed file under a root the server never named is NOT called 'in the right place' (%s)",
     async (source) => {
@@ -918,7 +925,17 @@ describe("post-write: the reported path is VERIFIED, not intended (#369)", () =>
       expect(res.liveVisible).toBe("not-visible");
       expect(res.note).not.toMatch(/in the right place/);
       expect(res.note).not.toMatch(/Do NOT move the file/);
-      expect(res.note).toMatch(/Move the file/);
+      // The honest third answer, not either remedy (#1735).
+      expect(res.note).toMatch(/UNCONFIRMED/);
+      expect(res.note).toMatch(/STALE LISTING/);
+      expect(res.note).toMatch(/DIFFERENT INSTALL/);
+      expect(res.note).toMatch(/list_local_models \(action:"list_paths"\)/);
+      // Not the unfollowable move instruction — the destination is unknown here, so
+      // there is no tree to name, and #1131's reporter got exactly that sentence.
+      expect(res.note).not.toMatch(/Move the file into the running server's models tree/);
+      // It must still NAME the root the bytes are in: that is where the user looks,
+      // and a verdict that withholds it is not actionable either.
+      expect(res.note).toContain(resolve("/stale/ComfyUI/models"));
       // …and it must not name the unvouched root as "the models directory that
       // server reads" — that assertion is the false claim being fixed.
       expect(res.note).not.toMatch(/models directory (the connected ComfyUI|that server) reads/);
