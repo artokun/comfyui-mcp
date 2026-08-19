@@ -202,6 +202,8 @@ function stubFetch(opts: {
    * The response describes the REQUEST, so nothing was queued.
    */
   queueOpStatus?: number;
+  /** Body for `https://api.comfy.org/nodes/:id` (registry-zip empty-pack fallback). */
+  registryDetails?: unknown;
 } = {}) {
   const calls: Call[] = [];
   let statusIdx = 0;
@@ -215,8 +217,12 @@ function stubFetch(opts: {
       const body = init?.body ? JSON.parse(init.body as string) : undefined;
       calls.push({ url, method, body });
 
-      const path = new URL(url).pathname + (new URL(url).search || "");
+      const parsed = new URL(url);
+      const path = parsed.pathname + (parsed.search || "");
 
+      if (parsed.hostname === "api.comfy.org") {
+        return jsonResponse(opts.registryDetails ?? {});
+      }
       if (path.startsWith("/v2/customnode/installed")) {
         return jsonResponse(opts.installedBody ?? {});
       }
@@ -1632,8 +1638,85 @@ describe("node-management service", () => {
       expect(res.message).toMatch(/is now present on disk/);
       expect(res.message).toMatch(/was NOT there before this call/);
       expect(res.message).toMatch(/another agent/i);
+      expect(res.message).not.toMatch(/so it was installed/);
       expect(res.message).not.toMatch(/ALREADY/);
       expect(res.message).not.toMatch(/resolved to nothing/);
+    });
+
+    it("REFUSES a registry zip that left only .tracking — directory-exists is not installed (#1816)", async () => {
+      // The reporter's case: install_custom_node action:"install" source:"registry"
+      // of comfyui-chatterbox created custom_nodes/comfyui-chatterbox/ containing
+      // only an empty .tracking file, then reported success because the directory
+      // was absent before and present after. ComfyUI cannot import that.
+      const packDir = join(COMFY, "custom_nodes", "comfyui-chatterbox");
+      const repo = "https://github.com/sm079/comfyui-chatterbox";
+      let installed = false;
+      fsCtl.readdirSync = (p) => {
+        if (!installed) return [];
+        const norm = p.replace(/\\/g, "/");
+        if (norm.endsWith("/custom_nodes")) return [dirEnt("comfyui-chatterbox")];
+        if (norm.endsWith("/comfyui-chatterbox")) return [".tracking"];
+        return [];
+      };
+      fsCtl.readFileSync = () => {
+        throw new Error("ENOENT");
+      };
+      stubFetch({
+        installedBody: {},
+        onQueue: () => {
+          installed = true;
+        },
+        registryDetails: { id: "comfyui-chatterbox", repository: repo },
+      });
+
+      const err = await installCustomNode({
+        id: "comfyui-chatterbox",
+        source: "registry",
+        version: "latest",
+      }).catch((e: Error) => e);
+
+      expect(err).toBeInstanceOf(NodeManagementError);
+      expect((err as Error).message).toMatch(/no loadable pack/);
+      expect((err as Error).message).toMatch(/NOT reporting this as installed/);
+      expect((err as Error).message).not.toMatch(/so it was installed/);
+      expect((err as Error).message).not.toMatch(/is now present on disk/);
+      // Names the fallback that actually worked for the reporter.
+      expect((err as Error).message).toContain(repo);
+      expect((err as Error).message).toMatch(/source:"git"/);
+      // The husk this call created must not block the subsequent clone.
+      expect(fsCtl.removed).toContain(packDir);
+    });
+
+    it("REFUSES a pre-existing .tracking-only husk and does not delete it (#1816)", async () => {
+      // A retry over the empty dir the previous call left behind. The directory
+      // was already there, so it is the user's — refuse, name it, leave it.
+      fsCtl.readdirSync = (p) => {
+        const norm = p.replace(/\\/g, "/");
+        if (norm.endsWith("/custom_nodes")) return [dirEnt("comfyui-chatterbox")];
+        if (norm.endsWith("/comfyui-chatterbox")) return [".tracking"];
+        return [];
+      };
+      fsCtl.readFileSync = () => {
+        throw new Error("ENOENT");
+      };
+      stubFetch({
+        installedBody: {},
+        registryDetails: {
+          id: "comfyui-chatterbox",
+          repository: "https://github.com/sm079/comfyui-chatterbox",
+        },
+      });
+
+      const err = await installCustomNode({
+        id: "comfyui-chatterbox",
+        source: "registry",
+      }).catch((e: Error) => e);
+
+      expect(err).toBeInstanceOf(NodeManagementError);
+      expect((err as Error).message).toMatch(/no loadable pack/);
+      expect((err as Error).message).toMatch(/left untouched/);
+      expect((err as Error).message).not.toMatch(/is now present on disk/);
+      expect(fsCtl.removed).not.toContain(join(COMFY, "custom_nodes", "comfyui-chatterbox"));
     });
 
     it("the install post-verify scans the CALL-SCOPED adopted root, not the global one", async () => {

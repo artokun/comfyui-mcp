@@ -7,6 +7,7 @@ import { comfyuiFetch } from "../comfyui/fetch.js";
 import { resetObjectInfoCache } from "../comfyui/client.js";
 import { progressEnabled, reportDownloadProgress } from "./download-progress.js";
 import { parsePyproject } from "./node-authoring.js";
+import { getNodePackDetails } from "./registry-client.js";
 import {
   type ManagerApi,
   cacheManagerApi,
@@ -2277,21 +2278,102 @@ export function assertSafeRepoName(repoName: string): void {
  * warnings. A clone failure throws NodeManagementError.
  */
 /**
+ * Filename that is an install/VCS marker, not pack code. A Comfy Registry zip
+ * that extracted nothing still leaves `.tracking`; a timed-out git clone leaves
+ * `.git`. ComfyUI loads DIRECTORIES, so either husk is imported on every start
+ * and fails — forever, silently (#900, #1816). Hidden files and `__pycache__`
+ * are the same class: they are not `__init__.py` / `pyproject.toml` / `*.py`.
+ */
+function isPackMarkerName(name: string): boolean {
+  const n = name.toLowerCase();
+  return n.startsWith(".") || n === "__pycache__";
+}
+
+function readdirEntryName(entry: string | { name: string }): string {
+  return typeof entry === "string" ? entry : entry.name;
+}
+
+function isLoadablePackFileName(name: string): boolean {
+  const n = name.toLowerCase();
+  return n === "pyproject.toml" || n === "__init__.py" || n.endsWith(".py");
+}
+
+/**
  * Does this directory hold something ComfyUI could actually load?
  *
  * A clone that git created and then abandoned leaves a directory containing only
- * `.git`. ComfyUI loads DIRECTORIES, so it will try to import that on every
- * start and fail — forever, silently, long after whoever ran the install has
- * forgotten about it (#900). "The directory exists" was never the question.
+ * `.git`. A Comfy Registry zip that downloaded nothing leaves only `.tracking`.
+ * ComfyUI loads DIRECTORIES, so it will try to import that on every start and
+ * fail — forever, silently, long after whoever ran the install has forgotten
+ * about it (#900, #1816). "The directory exists" was never the question.
+ *
+ * An empty listing is inconclusive (callers/tests may only have enumerated
+ * `custom_nodes/`): fall through to the two files every loadable pack has.
+ * Unreadable is not a finding either way.
  */
 function looksLikeAPack(dir: string): boolean {
   try {
-    return readdirSync(dir).some((entry) => entry !== ".git");
+    const names = readdirSync(dir).map((entry) =>
+      readdirEntryName(entry as string | { name: string }),
+    );
+    if (names.length === 0) {
+      return existsSync(join(dir, "__init__.py")) || existsSync(join(dir, "pyproject.toml"));
+    }
+    return names.some((name) => !isPackMarkerName(name) && isLoadablePackFileName(name));
   } catch {
-    // Unreadable is not a finding either way; let the caller's other checks
-    // speak rather than condemning a pack we could not look at.
     return true;
   }
+}
+
+/**
+ * Registry-zip post-verify: the target directory exists but holds no pack code.
+ * Look up the registry entry's repository so the error can name the git-clone
+ * fallback that actually works; a lookup failure must not hide the empty dir.
+ */
+async function refuseEmptyRegistryPack(
+  id: string,
+  dir: string,
+  status: unknown,
+  createdThisCall: boolean,
+): Promise<NodeManagementError> {
+  let leftover = "";
+  if (createdThisCall) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch (rmErr) {
+      leftover =
+        ` NOTE: the empty pack directory at ${dir} could NOT be removed ` +
+        `(${rmErr instanceof Error ? rmErr.message : String(rmErr)}). Delete it by hand ` +
+        `before cloning.`;
+    }
+  }
+  let cloneHint =
+    `search_custom_nodes (action:"details", id:"${id}") reports the repository URL; ` +
+    `then install_custom_node (action:"install", source:"git") with that URL`;
+  try {
+    const details = await getNodePackDetails(id);
+    const repo = typeof details.repository === "string" ? details.repository.trim() : "";
+    if (repo) {
+      cloneHint =
+        `install_custom_node (action:"install", id:"${repo}", source:"git") ` +
+        `— or \`git clone --depth 1 ${repo}\` into custom_nodes/ after removing any empty leftover`;
+    }
+  } catch {
+    // The empty directory is the finding; the URL is additive.
+  }
+  const createdNote = createdThisCall
+    ? leftover ||
+      ` The empty directory at ${dir} was removed so a git clone can use that path.`
+    : ` This call did not create ${dir}, so it was left untouched. Delete it by hand before retrying.`;
+  return new NodeManagementError(
+    `"${id}" was queued as a Comfy Registry zip install, but ${dir} holds no loadable pack ` +
+      `— only install markers (e.g. .tracking), with no __init__.py, pyproject.toml, or *.py. ` +
+      `NOT reporting this as installed: ComfyUI cannot import an empty directory.` +
+      createdNote +
+      ` The registry zip is empty or broken; install from the pack's git repository instead: ` +
+      `${cloneHint}. Then restart ComfyUI to load it.`,
+    status,
+  );
 }
 
 /**
@@ -2954,6 +3036,19 @@ async function installCustomNodeImpl(
         details: status,
       });
     case "on-disk":
+      // #1816 — a registry zip that extracted nothing still creates the target
+      // directory (Manager writes `.tracking` first). Directory-exists is not
+      // "installed": ComfyUI cannot import a marker-only folder. Fail before
+      // any success wording, including the unreadable-list / already-there
+      // branches, so a retry over the husk cannot report success either.
+      if (!looksLikeAPack(presence.dir)) {
+        throw await refuseEmptyRegistryPack(
+          id,
+          presence.dir,
+          status,
+          diskBefore?.state === "not-found",
+        );
+      }
       if (!presence.managerListReadable) {
         // Present on disk, but the Manager list could not be read — claiming
         // "already installed, nothing new happened" would assert an outcome
@@ -2972,25 +3067,25 @@ async function installCustomNodeImpl(
       // those two stories it is depends entirely on the PRE-state, which is why
       // it is read here and not inferred.
       if (diskBefore?.state === "not-found") {
-        // It was NOT there before and it is now: the install worked. Reporting
-        // "already installed" here hid a successful install behind a no-op.
-        // STATES THE OBSERVATION, NOT A CAUSE (codex gate P1). `diskBefore` is a
-        // filesystem snapshot with nothing binding it to this operation, so under
-        // two concurrent agents on one rig — which is in scope — the pack could
-        // have been created by the OTHER agent between our pre-check and our
-        // post-check. "It was absent before and is present now" is exactly what we
-        // saw; "this call installed it" is an inference the evidence does not
-        // support, and it is the same bucket-narrated-as-cause fold this cluster
-        // is about. The user's next action (restart to load it) is identical
-        // either way, so the weaker claim costs them nothing.
+        // It was NOT there before and it is now, AND the directory holds pack
+        // files (the empty-husk gate above already ran). Reporting "already
+        // installed" here hid a successful install behind a no-op.
+        // STATES THE OBSERVATION, NOT A CAUSE (codex gate P1, #1816). `diskBefore`
+        // is a filesystem snapshot with nothing binding it to this operation, so
+        // under two concurrent agents on one rig — which is in scope — the pack
+        // could have been created by the OTHER agent between our pre-check and
+        // our post-check. "It was absent before and is present now" is exactly
+        // what we saw; "this call installed it" is an inference the evidence
+        // does not support. The user's next action (restart to load it) is
+        // identical either way, so the weaker claim costs them nothing.
         return withCliNote({
           mechanism: "manager-http",
           message:
             `"${id}" is now present on disk at ${presence.dir}, and was NOT there before ` +
-            `this call — so it was installed, though ComfyUI-Manager does not track it (a ` +
-            `Comfy Registry zip install is not in its installed-pack list). If another agent ` +
-            `is working on this ComfyUI, it may have been the one that installed it. Restart ` +
-            `ComfyUI to load it.`,
+            `this call, though ComfyUI-Manager does not track it (a Comfy Registry zip ` +
+            `install is not in its installed-pack list). If another agent is working on ` +
+            `this ComfyUI, it may have been the one that put it there. Restart ComfyUI ` +
+            `to load it.`,
           details: status,
         });
       }
