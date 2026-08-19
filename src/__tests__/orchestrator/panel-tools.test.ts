@@ -347,6 +347,124 @@ describe("panel-tools: panel_set_widget echo summary (#1695)", () => {
   });
 });
 
+describe("panel-tools: panel_set_widget Anima regional textarea (#1658)", () => {
+  // #1658: AnimaRegionalCanvasInline (LC123) stores prompts in
+  // node.properties.animaPrompts + custom textareas. panel#1363 only verifies
+  // widgets that declare options.property, so applyWidgetWrite still reports
+  // success and APPLY / savePrompts() puts the old textarea back. The MCP
+  // tool used to relay that lie. The shipped handler now identifies the node
+  // via graph_query and refuses before graph_set_widget.
+
+  const SET_OK = {
+    set: { node_id: 2768, widget: "red_prompt", previous: "old", value: "NEW" },
+  };
+
+  async function run(
+    args: { node_id?: unknown; widget: string; value?: unknown },
+    queryReply: unknown,
+  ): Promise<{ res: ToolResult; cmds: string[] }> {
+    const cmds: string[] = [];
+    const res = (await defByName("panel_set_widget").handler(
+      { node_id: 2768, value: "NEW", ...args },
+      {
+        call: async (cmd: Record<string, unknown>) => {
+          cmds.push(String(cmd.cmd));
+          if (cmd.cmd === "graph_query") {
+            if (typeof queryReply === "object" && queryReply !== null && "isError" in queryReply) {
+              return queryReply;
+            }
+            return { content: [{ type: "text" as const, text: JSON.stringify(queryReply, null, 2) }] };
+          }
+          return { content: [{ type: "text" as const, text: JSON.stringify(SET_OK, null, 2) }] };
+        },
+      } as unknown as PanelToolCtx,
+    )) as ToolResult;
+    return { res, cmds };
+  }
+
+  it("refuses red_prompt on AnimaRegionalCanvasInline and never writes", async () => {
+    const { res, cmds } = await run(
+      { widget: "red_prompt" },
+      { text: '1 match(es)\n#2768 AnimaRegionalCanvasInline "canvas" · red_prompt=old' },
+    );
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/cannot set "red_prompt" on AnimaRegionalCanvasInline/);
+    expect(res.content[0].text).toMatch(/animaPrompts/);
+    expect(res.content[0].text).toMatch(/no input socket/);
+    expect(res.content[0].text).toMatch(/Do not retry panel_set_widget/);
+    expect(cmds).toEqual(["graph_query"]);
+  });
+
+  it("names the wired quality_prompt_in socket for quality_prompt", async () => {
+    const { res, cmds } = await run(
+      { widget: "quality_prompt" },
+      { text: "#2768 Krea2RegionalCanvasInline" },
+    );
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/quality_prompt_in/);
+    expect(res.content[0].text).toMatch(/PrimitiveStringMultiline/);
+    expect(cmds).toEqual(["graph_query"]);
+  });
+
+  it.each([
+    "AnimaRegionalCanvasInline",
+    "Krea2RegionalCanvasInline",
+    "AnimaRegionalCanvas",
+    "AnimaRegionalInpaintCanvas",
+  ])("refuses every LC123 regional-canvas type (%s)", async (type) => {
+    const { res, cmds } = await run({ widget: "scene_prompt" }, { text: `#9 ${type}` });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toContain(type);
+    expect(res.content[0].text).toMatch(/scene_prompt_in/);
+    expect(cmds).toEqual(["graph_query"]);
+  });
+
+  it("reads type from a structured nodes[] probe (not only compact text)", async () => {
+    const { res, cmds } = await run(
+      { widget: "blue_prompt" },
+      { nodes: [{ id: 2768, type: "AnimaRegionalCanvasInline" }] },
+    );
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/blue_prompt/);
+    expect(cmds).toEqual(["graph_query"]);
+  });
+
+  it("writes red_prompt on a node that is NOT an LC123 regional canvas", async () => {
+    const { res, cmds } = await run({ widget: "red_prompt" }, { text: "#3 KSampler" });
+    expect(res.isError).toBeUndefined();
+    expect(JSON.parse(res.content[0].text!).set.value).toBe("NEW");
+    expect(cmds).toEqual(["graph_query", "graph_set_widget"]);
+  });
+
+  it("does not probe a generic widget (existing writes stay one hop)", async () => {
+    const { res, cmds } = await run({ widget: "text" }, { text: "#2768 AnimaRegionalCanvasInline" });
+    expect(res.isError).toBeUndefined();
+    expect(cmds).toEqual(["graph_set_widget"]);
+  });
+
+  it("fail-open: an unreadable probe still writes (identity unknown, not a refusal)", async () => {
+    const { res, cmds } = await run(
+      { widget: "red_prompt" },
+      { isError: true, content: [{ type: "text", text: "Error: no connected tab" }] },
+    );
+    expect(res.isError).toBeUndefined();
+    expect(cmds).toEqual(["graph_query", "graph_set_widget"]);
+  });
+
+  it("fail-open: a probe with no type still writes", async () => {
+    const { res, cmds } = await run({ widget: "negative_prompt" }, { text: "0 match(es)" });
+    expect(res.isError).toBeUndefined();
+    expect(cmds).toEqual(["graph_query", "graph_set_widget"]);
+  });
+
+  it("documents the refusal and the wired-input route on the tool itself", () => {
+    const desc = defByName("panel_set_widget").description;
+    expect(desc).toContain("AnimaRegionalCanvasInline");
+    expect(desc).toContain("animaPrompts");
+    expect(desc).toContain("quality_prompt_in");
+  });
+});
+
 describe("panel-tools: panel_add_node frontend-only virtual types (#741)", () => {
   // #741: Note/MarkdownNote/Reroute/PrimitiveNode are frontend-only virtual types —
   // they exist only in LiteGraph, never in the backend /object_info. The MCP side

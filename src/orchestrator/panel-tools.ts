@@ -3172,6 +3172,114 @@ function summarizeSetWidgetEcho(res: ToolResult, full: boolean): ToolResult {
   };
 }
 
+// ---- #1658: Anima/Krea2 regional canvas prompt textareas --------------------------
+//
+// ComfyUI_LC123_nodes `web/inline_regional_canvas.js` hides the prompt widgets
+// and keeps the authoritative string in `node.properties.animaPrompts[name]`
+// plus a custom <textarea>. `promptValue()` prefers the map; APPLY /
+// `savePrompts()` copies the textarea back over `widget.value`. The widgets
+// do NOT declare `options.property`, so the panel#1363 bound-property verify
+// never fires and `applyWidgetWrite`'s `w.value` read-back is a tautology.
+//
+// `savePrompts` / `setPromptValue` are closures, not methods on the node —
+// there is no route (the LTXDirector / PromptRelay shape). This is the
+// node-keyed refusal (#983 rgthree Fast Groups, #1569 Ideogram4). quality /
+// scene / negative have a real Python-side escape: execute() prefers the
+// `*_prompt_in` sockets. red / green / blue have none.
+
+const ANIMA_REGIONAL_CANVAS_TYPES = new Set([
+  "AnimaRegionalCanvasInline",
+  "Krea2RegionalCanvasInline",
+  "AnimaRegionalCanvas",
+  "AnimaRegionalInpaintCanvas",
+]);
+
+const ANIMA_REGIONAL_PROMPT_WIDGETS = new Set([
+  "quality_prompt",
+  "scene_prompt",
+  "red_prompt",
+  "green_prompt",
+  "blue_prompt",
+  "negative_prompt",
+]);
+
+const ANIMA_REGIONAL_WIRED_PROMPT_INPUT: Record<string, string> = {
+  quality_prompt: "quality_prompt_in",
+  scene_prompt: "scene_prompt_in",
+  negative_prompt: "negative_prompt_in",
+};
+
+function isAnimaRegionalPromptWidget(widget: string): boolean {
+  return ANIMA_REGIONAL_PROMPT_WIDGETS.has(widget);
+}
+
+/** Type of the single node a compact/detail `graph_query` named, or null when
+ *  the reply does not identify one. Fail-open on an unreadable probe. */
+function parseQueriedNodeType(payload: Record<string, unknown> | null): string | null {
+  if (!payload) return null;
+  const nodes = payload.nodes;
+  if (Array.isArray(nodes)) {
+    for (const n of nodes) {
+      if (!n || typeof n !== "object" || Array.isArray(n)) continue;
+      const rec = n as Record<string, unknown>;
+      const t = rec.type ?? rec.class_type;
+      if (typeof t === "string" && t) return t;
+    }
+  }
+  const text = typeof payload.text === "string" ? payload.text : "";
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    // Compact: `#2768 AnimaRegionalCanvasInline "title" · …`
+    const compact = trimmed.match(/^#\S+\s+(\S+)/);
+    if (compact) return compact[1];
+    // Detail JSON line: `{"id":2768,"type":"AnimaRegionalCanvasInline",…}`
+    if (trimmed.startsWith("{")) {
+      try {
+        const row = JSON.parse(trimmed) as { type?: unknown; class_type?: unknown };
+        const t = row.type ?? row.class_type;
+        if (typeof t === "string" && t) return t;
+      } catch {
+        /* not a detail row */
+      }
+    }
+  }
+  return null;
+}
+
+function animaRegionalPromptRefusal(type: string, widget: string): ToolResult {
+  const wired = ANIMA_REGIONAL_WIRED_PROMPT_INPUT[widget];
+  const route = wired
+    ? `Wire a PrimitiveStringMultiline into this node's \`${wired}\` socket — execute() prefers that input over the widget.`
+    : `There is no input socket for "${widget}"; the custom textarea is the only durable store.`;
+  return fail(
+    `panel_set_widget cannot set "${widget}" on ${type}. ` +
+      `The node's custom JS stores the prompt in node.properties.animaPrompts["${widget}"] and a hidden textarea; ` +
+      `APPLY / savePrompts() copies the textarea back over widget.value, so a success here would be a lie. ` +
+      `${route} Do not retry panel_set_widget on this widget.`,
+  );
+}
+
+/** Refuse the known LC123 regional-canvas prompt widgets. Identity is read
+ *  from a one-node `graph_query`; anything else (query failed, type unreadable,
+ *  some other node that happens to own `negative_prompt`) is fail-open. */
+async function refuseAnimaRegionalPromptWrite(
+  ctx: PanelToolCtx,
+  nodeId: unknown,
+  widget: string,
+): Promise<ToolResult | null> {
+  if (!isAnimaRegionalPromptWidget(widget)) return null;
+  const probe = await ctx.call({
+    cmd: "graph_query",
+    ids: [nodeId],
+    fields: "compact",
+    limit: 1,
+  });
+  if (probe.isError) return null;
+  const type = parseQueriedNodeType(parseToolResultJson(probe));
+  if (!type || !ANIMA_REGIONAL_CANVAS_TYPES.has(type)) return null;
+  return animaRegionalPromptRefusal(type, widget);
+}
+
 // ---- #809: turn the panel's silent `truncated: true` booleans into a remedy --------
 //
 // A bare boolean is the WORST truncation signal there is: it is a field, not prose, so
@@ -11273,7 +11381,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_set_widget",
-      "Set a widget value on a node in the user's open graph (steps, cfg, seed, ckpt_name, text prompts, …). Returns the previous and new value (a string longer than 1000 chars is echoed as {chars, sha256, preview} so batched calls stay inside the outer tool-result budget — pass `echo: \"full\"` for the verbatim string). Undoable with Ctrl+Z. To CLEAR a text widget to an empty string, pass `clear: true` (some MCP clients drop an empty-string `value` from the serialized payload, so `value: \"\"` may not arrive — `clear: true` always works). For the LTXDirector timeline node (WhatDreamsCost CSGlide), set `timeline_data` with the FULL timeline JSON (segments + global_prompt) to drive its custom timeline UI — this re-syncs the editor and regenerates its derived `local_prompts`/`segment_lengths`/`guide_strength` widgets; setting those derived widgets directly is refused (they are silently reverted).",
+      "Set a widget value on a node in the user's open graph (steps, cfg, seed, ckpt_name, text prompts, …). Returns the previous and new value (a string longer than 1000 chars is echoed as {chars, sha256, preview} so batched calls stay inside the outer tool-result budget — pass `echo: \"full\"` for the verbatim string). Undoable with Ctrl+Z. To CLEAR a text widget to an empty string, pass `clear: true` (some MCP clients drop an empty-string `value` from the serialized payload, so `value: \"\"` may not arrive — `clear: true` always works). For the LTXDirector timeline node (WhatDreamsCost CSGlide), set `timeline_data` with the FULL timeline JSON (segments + global_prompt) to drive its custom timeline UI — this re-syncs the editor and regenerates its derived `local_prompts`/`segment_lengths`/`guide_strength` widgets; setting those derived widgets directly is refused (they are silently reverted). For AnimaRegionalCanvasInline / Krea2RegionalCanvasInline (LC123), quality/scene/red/green/blue/negative prompt writes are refused: the custom textarea and node.properties.animaPrompts overwrite widget.value on APPLY. Drive quality/scene/negative via a PrimitiveStringMultiline wired into quality_prompt_in / scene_prompt_in / negative_prompt_in; red/green/blue have no socket.",
       {
         node_id: nodeId().describe("Node id from panel_graph_outline / panel_query_graph."),
         widget: z.string().describe("Widget name (e.g. 'steps', 'cfg', 'text')."),
@@ -11302,6 +11410,17 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             "panel_set_widget needs a `value`. To set an empty string, pass `clear: true` (some clients drop an empty-string `value`).",
           );
         }
+        // #1658: LC123 regional-canvas prompt widgets store the text in a
+        // custom textarea + node.properties.animaPrompts; writing widget.value
+        // reports success and is overwritten on APPLY. Refuse before the write
+        // so the reply is not a lie. Identity is a one-node graph_query; an
+        // unreadable probe is fail-open (some other node may own negative_prompt).
+        const blocked = await refuseAnimaRegionalPromptWrite(
+          ctx,
+          args.node_id,
+          args.widget as string,
+        );
+        if (blocked) return blocked;
         // #599: the frontend runs refresh-before-validate here (pulls a fresh
         // /object_info so a just-staged/-downloaded/-installed value is accepted on
         // a single revalidation, #338/#458) — that authoritative fetch can outlast
