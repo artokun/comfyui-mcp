@@ -99,3 +99,8 @@ handles auth:
   subdir; check the Target column and `model-compatibility`.
 - Downloads resume automatically on retry (HTTP Range) — re-run the same
   `download_model` call after a network drop.
+
+## Sources
+
+- **Official:** Hugging Face resolve-URL convention https://huggingface.co/<repo>/resolve/main/<path>
+- **Empirical:** the curated list and Civitai notes are ours, not a vendor catalog.

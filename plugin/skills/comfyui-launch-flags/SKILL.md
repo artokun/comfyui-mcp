@@ -196,8 +196,5 @@ Operational facts worth carrying:
 
 ## Sources
 
-- ComfyUI CLI args (authoritative): <https://github.com/comfyanonymous/ComfyUI/blob/master/comfy/cli_args.py>
-- ComfyUI startup flags docs: <https://docs.comfy.org/development/comfyui-server/startup-flags>
-- Operational flag/stack guidance distilled from community ComfyUI auto-installer
-  changelogs (SECourses) — flags cross-checked against upstream above; no
-  third-party scripts, presets, or model files are reproduced here.
+- **Official:** ComfyUI CLI args at https://github.com/comfyanonymous/ComfyUI/blob/master/comfy/cli_args.py and startup flags at https://docs.comfy.org/development/comfyui-server/startup-flags
+- **Empirical:** operational flag/stack recipes distilled from community auto-installer changelogs (SECourses); flags cross-checked against upstream above.

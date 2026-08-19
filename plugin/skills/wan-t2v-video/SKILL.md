@@ -332,3 +332,8 @@ Include motion cues: "slowly walks", "camera pans", "wind blowing", "gradually r
 | Lightning LoRAs | T2V-specific | I2V-specific |
 | Creativity | Full creative freedom | Constrained by input frames |
 | Use case | Original content | Transitions, animations |
+
+## Sources
+
+- **Official:** none found.
+- **Empirical:** sampler values, wiring, and prompt notes from working graphs in `packs/` and observed renders; not a vendor prompting guide.

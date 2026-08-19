@@ -160,3 +160,8 @@ accelerate launch \
 
 - `sd-scripts/anima_train_network.py` and `networks.lora_anima` come from the kohya fork pulled at install time — present per `app.py`'s expectations but not in the local downloaded files here.
 - Exact LoRA output filename is `<project_name>.safetensors` per `output_name`; confirm in your Output Directory after a run.
+
+## Sources
+
+- **Official:** https://github.com/citronlegacy/citron-anima-lora-trainer-ui and https://github.com/kohya-ss/sd-scripts
+- **Empirical:** installer/launch notes from the pack scripts; training defaults from the UI's app.py as observed.

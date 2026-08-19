@@ -34,7 +34,7 @@ Steps:
 
 ## Notes
 
-- The generated skill includes node class types, input/output specs, and usage examples
+- The generated skill includes node class types, input/output specs, usage examples, and a `## Sources` section (official repo README vs empirically-tuned composition patterns)
 - Skills are saved as `SKILL.md` files in subdirectories under the plugin's `skills/` folder
 - If the node pack isn't found in the registry, suggest the user provide a GitHub URL instead
 - If nodes from the pack are installed locally, the skill will include live `/object_info` data

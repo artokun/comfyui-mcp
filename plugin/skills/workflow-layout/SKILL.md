@@ -133,3 +133,8 @@ nodes expanded — and consider `panel_promote_widget` to surface the one key wi
 - Color-code by stage (e.g. all loaders `blue`, sampler `green`) and `collapsed` rarely-touched
   loaders to cut visual noise — cheap wins once the positions are right.
 - Don't over-tidy a graph that's mid-build for the user — confirm if a big reorg is wanted.
+
+## Sources
+
+- **Official:** comfyui-mcp panel layout tools (this repo).
+- **Empirical:** spacing/grouping recipes from observed unreadable canvases.

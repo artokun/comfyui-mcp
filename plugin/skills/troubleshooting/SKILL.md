@@ -492,3 +492,8 @@ list_local_models({ action: "list", model_type: "controlnet" })    # Installed C
 | Image looks garbled/noisy | Wrong model+VAE combo, wrong sampler settings |
 | `Connection refused` on port 8188 | ComfyUI not running, or using Desktop (port 8000) |
 | `Prompt outputs failed validation` | Node inputs don't match schema — check `create_workflow (action:"node_info")` |
+
+## Sources
+
+- **Official:** none found as a vendor error catalog. Launch-flag names cross-check against `comfyui-launch-flags` (upstream cli_args.py).
+- **Empirical:** error→fix table from observed ComfyUI failures.

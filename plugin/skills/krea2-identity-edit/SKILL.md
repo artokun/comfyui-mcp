@@ -82,3 +82,8 @@ sexual, to undress someone, or to place an identifiable real person in a context
 not consent to as out of scope, and say so plainly rather than producing a degraded
 result. Ordinary clothing changes — a jacket, a dress, a uniform, a costume — are the
 point of the tool and need no hedging.
+
+## Sources
+
+- **Official:** none found.
+- **Empirical:** sampler values, wiring, and prompt notes from working graphs in `packs/` and observed renders; not a vendor prompting guide.

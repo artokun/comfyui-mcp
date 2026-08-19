@@ -194,3 +194,8 @@ sentence.
 - **Never touch a dev symlink** — it's someone's working repo.
 - **Always say a restart is required** after a sync lands; nothing here
   auto-restarts ComfyUI.
+
+## Sources
+
+- **Official:** comfyui-mcp panel product behavior (this repo).
+- **Empirical:** sync/mismatch recipes from observed panel vs disk drift.

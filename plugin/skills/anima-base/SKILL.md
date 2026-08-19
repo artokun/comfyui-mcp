@@ -238,3 +238,8 @@ The pack upscales with `UltimateSDUpscale` (`4x_foolhardy_Remacri.pth`, 2x, **de
 ## Training custom LoRAs
 
 To train your own Anima LoRA (character/style) on <6GB VRAM, use the **Citron Anima LoRA Trainer** — see the `anima-lora-trainer` skill. Trained `.safetensors` LoRAs drop into `models/loras/` and load via `Power Lora Loader` / `LoraLoaderModelOnly` exactly like the bundled LoRAs above.
+
+## Sources
+
+- **Official:** model weights at https://huggingface.co/circlestone-labs/Anima — no vendor prompting guide cited.
+- **Empirical:** tag-order / @artist prompting and sampler wiring from working graphs; Anima Style Explorer is community, not vendor docs.

@@ -327,3 +327,8 @@ run**, so `models[]` can be left light — note that in `pack.yaml`. Install nod
 ad-hoc with **`panel_install_node`** or apply a manifest with
 **`apply_manifest`**. Offer to contribute a finished pack upstream
 (`github.com/artokun/comfyui-mcp`).
+
+## Sources
+
+- **Official:** none found.
+- **Empirical:** sampler values, wiring, and prompt notes from working graphs in `packs/` and observed renders; not a vendor prompting guide.

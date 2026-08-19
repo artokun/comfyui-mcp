@@ -79,3 +79,8 @@ asked.
 - `model-registry` — curated direct download URLs (HF + Civitai notes)
 - `model-compatibility` — base-model / VAE / CLIP pairing (why a LoRA won't load)
 - `prompt-engineering` — Civitai image params are a prompt goldmine
+
+## Sources
+
+- **Official:** Civitai REST API https://civitai.com/api/v1 and Civitai MCP https://mcp.civitai.com/mcp
+- **Empirical:** find→install→generate wiring is comfyui-mcp product guidance, not Civitai's prompting docs.

@@ -86,3 +86,8 @@ and a `defaultCaption`.
   job's `output/<name>/` dir — copy it into `models/loras/` manually and upsert the catalog.
 - **First run is slow before step 1** — FLUX.1-dev download (~24GB) + latent caching. As
   long as the log tail moves, it's fine. The HF cache persists across runs.
+
+## Sources
+
+- **Official:** none found.
+- **Empirical:** sampler values, wiring, and prompt notes from working graphs in `packs/` and observed renders; not a vendor prompting guide.

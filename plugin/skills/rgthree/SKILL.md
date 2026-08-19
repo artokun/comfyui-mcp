@@ -178,3 +178,8 @@ Turning a LoRA **off** (`lora_N.on = false`) is usually safer than clearing it a
 - Always `panel_graph_outline` before a run — a stale toggle is a top cause of a wrong
   render, and the outline marks `[bypass]` / `[mute]` explicitly.
 - rgthree's `Bookmark` nodes respond to keypresses and are inert to agents.
+
+## Sources
+
+- **Official:** https://github.com/rgthree/rgthree-comfy
+- **Empirical:** frontend-only allowlist and properties-not-widgets notes verified against the installed pack and the panel guard.

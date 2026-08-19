@@ -174,3 +174,8 @@ PrimitiveStringMultiline ─ global_prompt ─┘
 More broadly: any node whose controls are DOM widgets over hidden state is
 invisible to clicking and must be driven through its state widget. LTX Director
 is just the clearest example.
+
+## Sources
+
+- **Official:** none found.
+- **Empirical:** timeline_data schema and edge rules from a working LTX 2.3 Director graph.

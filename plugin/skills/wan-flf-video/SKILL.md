@@ -466,3 +466,8 @@ get_workflow(action="analyze", filename="Wan FirstLastFrame Advanced.json", view
 ```
 
 Only use `get_workflow` when you need the raw JSON for `enqueue_workflow` or `create_workflow (action:"modify")`.
+
+## Sources
+
+- **Official:** none found.
+- **Empirical:** sampler values, wiring, and prompt notes from working graphs in `packs/` and observed renders; not a vendor prompting guide.

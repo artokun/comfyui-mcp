@@ -332,3 +332,8 @@ Use distinctive visual elements that transfer between characters/forms to create
 - AVOID: "magical", "enchanted", "mystical" (causes sparkle effects)
 - USE: "smoothly transforms", "seamlessly reshapes", "gradually"
 - Include scale cues: "grows into", "expands upward"
+
+## Sources
+
+- **Official:** none found.
+- **Empirical:** 8-phase pipeline, models-per-phase, and prompt rules from working graphs.

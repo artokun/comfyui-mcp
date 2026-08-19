@@ -285,3 +285,8 @@ the temporary workaround is, if any.
 - Patches stay **minimal and reversible**; never touch the user's workflow data
   without asking.
 - Don't claim a fix you didn't verify (Step 4).
+
+## Sources
+
+- **Official:** comfyui-mcp intake Worker and this skill (this repo).
+- **Empirical:** none — product reporting policy, not reverse-engineered from a vendor graph.

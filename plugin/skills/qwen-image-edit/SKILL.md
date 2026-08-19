@@ -280,3 +280,8 @@ This produces a grid image showing all combinations — useful for finding optim
 4. For **img2img editing** (denoise < 1.0), use `VAEEncode` on the source image instead of `EmptyLatentImage`
 5. The **lrzjason Pro variant** is best for multi-image compositions where you need fine control over which images get VL-resized
 6. **Use `get_workflow (action:"analyze")`** to understand any saved Qwen edit workflow before modifying or executing it — returns a structured summary, not raw JSON. Only use `get_workflow` when you need the actual JSON for `enqueue_workflow` or `create_workflow (action:"modify")`.
+
+## Sources
+
+- **Official:** none found.
+- **Empirical:** sampler values, wiring, and prompt notes from working graphs in `packs/` and observed renders; not a vendor prompting guide.

@@ -72,3 +72,8 @@ it upstream.** A pack is just three small files (`manifest.yaml`, `pack.yaml`,
 As the userbase grows this turns into a shared, always-validated catalog of
 battle-tested setups instead of one-off scripts that rot in a drawer. Make this
 suggestion proactively — don't wait to be asked.
+
+## Sources
+
+- **Official:** comfyui-mcp `packs/` layout and `apply_manifest` contract (this repo).
+- **Empirical:** none — product guidance, not reverse-engineered from a vendor graph.

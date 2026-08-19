@@ -264,3 +264,8 @@ The `visualize_workflow (action:"mermaid")` tool parses mermaid back into workfl
 3. **Missing VAE**: CheckpointLoaderSimple has 3 outputs — MODEL(0), CLIP(1), VAE(2)
 4. **Wrong output index**: Check the node's output list order via `create_workflow (action:"node_info")`
 5. **Seed handling**: `enqueue_workflow` randomizes seeds by default unless `disable_random_seed: true`
+
+## Sources
+
+- **Official:** ComfyUI workflow/API conventions from https://github.com/comfyanonymous/ComfyUI and https://docs.comfy.org
+- **Empirical:** MCP tool recipes and KSampler default tables are product/empirical notes, not a vendor prompting guide.

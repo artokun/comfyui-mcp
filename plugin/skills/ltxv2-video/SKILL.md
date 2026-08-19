@@ -467,3 +467,8 @@ To verify a third-party model is usable before wiring it up:
 ### LTXVideo version / workflow mismatch
 
 The RunPod installer pins **ComfyUI-LTXVideo to commit `cd5d371518afb07d6b3641be8012f644f25269fc`** for workflow compatibility. If 2.3 workflows error on the latest LTXVideo, check out that commit. Torch is pinned to 2.4.0 + cu121; do not let a node's `requirements.txt` upgrade torch (the installers sanitize requirements to prevent this).
+
+## Sources
+
+- **Official:** none found.
+- **Empirical:** sampler values, wiring, and prompt notes from working graphs in `packs/` and observed renders; not a vendor prompting guide.

@@ -52,7 +52,8 @@ those, never the generated files.
    truth for exact download URLs → target folders.
 3. Run `npm run packs:gen`.
 4. (Optional) Pair the pack with a `plugin/skills/<name>/SKILL.md` so agents know
-   how to drive it.
+   how to drive it. The skill must end with a `## Sources` section labeling
+   **Official** vs **Empirical** prompting/wiring guidance (see CONTRIBUTING).
 
 ## Contributing a pack back
 

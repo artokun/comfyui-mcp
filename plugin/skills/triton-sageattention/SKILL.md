@@ -360,24 +360,5 @@ rather than trying to satisfy the dependency.
 
 ## Sources
 
-Verified June 2026 against:
-
-- **triton-windows** — `github.com/woct0rdho/triton-windows` (install command
-  `pip install -U "triton-windows<3.7"`, the torch↔triton table, bundled CUDA
-  toolchain, MSVC/vcredist + embedded `include`/`libs` requirements).
-- **SageAttention Windows wheels** — `github.com/woct0rdho/SageAttention/releases`
-  tag `v2.2.0-windows.post5` (the four `cu128/cu130 × torch2.9.1/2.10 cp310-abi3`
-  filenames; import name `sageattention`).
-- **WanVideoWrapper** — kijai `ComfyUI-WanVideoWrapper` nodes: `attention_mode`
-  enum `{sdpa, flash_attn_2, flash_attn_3, sageattn, sparse_sage_attention}` and
-  the `No module named 'sageattention'` loader crash.
-- **Live env** — `install_comfyui (action:"environment")`/`get_system_stats` on this machine:
-  py3.13.12, torch 2.10.0+cu130, RTX 4090, Desktop standalone (non-embedded).
-
-**Unverified / caveats:** the exact `.post` suffix and any newer torch variant
-will drift — re-check the releases page for a tag past `.post5` and a wheel for
-your torch minor before installing. Linux `pip install sageattention` wheel
-availability depends on your torch/CUDA combo; if no wheel matches, building needs
-CUDA Toolkit + nvcc (flag the cost). Always confirm the chosen wheel's
-`cu<line>`/`torch<minor>` against the live `torch.__version__`/`torch.version.cuda`
-rather than trusting this doc's pinned examples.
+- **Official:** triton-windows https://github.com/woct0rdho/triton-windows and SageAttention Windows wheels https://github.com/woct0rdho/SageAttention/releases
+- **Empirical:** sdpa / no-compile fallback, wheel-matching recipes, and WanVideoWrapper attention_mode notes from observed loader crashes.

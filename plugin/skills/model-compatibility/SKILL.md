@@ -432,3 +432,8 @@ Most samplers work across all models, but some combinations are optimal:
 | SD3 | 512x512 | 1024x1024 | 1536x1536 |
 
 Going below the recommended resolution produces blurry/low-quality results. Going above the maximum risks OOM errors or quality degradation (tiling artifacts).
+
+## Sources
+
+- **Official:** none found as a vendor pairing matrix.
+- **Empirical:** base-model / VAE / CLIP pairing rules from observed load failures.

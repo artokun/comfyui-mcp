@@ -54,3 +54,8 @@ Connect. `:e4b` is the built-in default — zero further config once pulled.
 - For non-panel MCP harnesses (Hermes, OpenClaw, any Ollama-speaking client),
   pair these models with **compact tool mode** (`--compact`) — full docs:
   https://comfyui-mcp.artokun.io/docs/local-llms
+
+## Sources
+
+- **Official:** https://ollama.com/download and https://comfyui-mcp.artokun.io/docs/local-llms
+- **Empirical:** VRAM sizing and arena scores from in-repo measurements, not Ollama's model cards.

@@ -63,6 +63,12 @@ plugin/         # the Claude Code plugin (skills, agents, slash commands, hooks)
   - Validate filesystem paths against traversal/symlink escapes (resolve + contain to the intended root).
   - Validate values that reach a subprocess argv (reject leading `-` / control chars; use
     `--end-of-options` for git, etc.).
+- **Plugin skills** (`plugin/skills/<name>/SKILL.md`) — every skill ends with a
+  `## Sources` section that distinguishes **Official** (vendor docs, node README,
+  `/object_info`) from **Empirical** (working graphs, observed behaviour). A skill
+  with no vendor documentation says so (`none found`) rather than leaving the
+  question unanswered. `list_packs` `action:"generate_skill"` emits this section
+  automatically.
 
 ## Adding a new MCP tool
 

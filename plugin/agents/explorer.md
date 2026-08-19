@@ -50,6 +50,7 @@ Given a custom node pack name or GitHub URL, you will:
   - **Node Reference**: Every node with its class_type, inputs, outputs, and description
   - **Workflow Patterns**: Common ways to wire these nodes into pipelines
   - **Tips and Gotchas**: Common mistakes, required models, compatibility notes
+  - **Sources**: a `## Sources` section with `- **Official:**` (vendor URL, node README, or "none found") and `- **Empirical:**` (what was inferred from working graphs / observed behaviour). Cited vs uncited, not right vs wrong — never leave the question unanswered.
 
 ### Step 6: Save and Report
 
@@ -63,3 +64,4 @@ Given a custom node pack name or GitHub URL, you will:
 - Input/output types must be accurate (from `/object_info` when possible)
 - Workflow patterns should be concrete and executable, not vague descriptions
 - Include connection format examples: `["nodeId", outputIndex]`
+- End with `## Sources` labeling **Official** vs **Empirical** prompting/wiring guidance

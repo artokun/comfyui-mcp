@@ -95,3 +95,8 @@ the Wav2Vec + VAE round-trips.
 - If lips look under-driven, check the MultiTalk embeds are actually wired into
   `WanVideoImageToVideoMultiTalk` (not bypassed), and that the audio isn't silent
   after AudioCrop.
+
+## Sources
+
+- **Official:** none found.
+- **Empirical:** sampler values, wiring, and prompt notes from working graphs in `packs/` and observed renders; not a vendor prompting guide.

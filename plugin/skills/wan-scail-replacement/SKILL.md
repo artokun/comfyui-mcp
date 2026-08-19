@@ -93,3 +93,8 @@ VRAM: ~22.2 GB peak at 576x1024 / 81-frame chunks on a 24 GB card.
 
 - `wan-t2v-video`, `wan-flf-video` — other WAN 2.x video pipelines
 - `director` — multi-shot scene direction for video pipelines
+
+## Sources
+
+- **Official:** none found.
+- **Empirical:** sampler values, wiring, and prompt notes from working graphs in `packs/` and observed renders; not a vendor prompting guide.

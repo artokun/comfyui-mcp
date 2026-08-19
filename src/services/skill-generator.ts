@@ -593,7 +593,41 @@ export function renderSkillMarkdown(data: SkillData): string {
   );
   lines.push("");
 
+  // #1155 — cited vs uncited. A generated skill that omits this leaves the
+  // reader unable to tell README-derived node I/O from the LoRA/ControlNet
+  // boilerplate below, which is empirically tuned and not vendor documentation.
+  const official = data.repository
+    ? `repository README and node definitions at ${data.repository}`
+    : "none found.";
+  const empirical =
+    "composition patterns (LoRA / ControlNet boilerplate) are empirically tuned, not vendor documentation. " +
+    "Node I/O types come from `/object_info` when a ComfyUI server was reachable, otherwise from the pack's Python `NODE_CLASS_MAPPINGS`.";
+  lines.push(renderSkillSourcesSection({ official, empirical }));
+
   return lines.join("\n");
+}
+
+/**
+ * #1155 — the citation block every skill ends with.
+ *
+ * The distinction is *cited* vs *uncited*, not right vs wrong: a skill that
+ * says "this is the vendor README" and one that says "this was inferred from
+ * a working graph" are both useful; one that says nothing is not.
+ */
+export const SKILL_SOURCES_HEADING = "## Sources";
+
+export function renderSkillSourcesSection(opts: {
+  official: string;
+  empirical: string;
+}): string {
+  const official = opts.official.trim() || "none found.";
+  const empirical = opts.empirical.trim() || "none stated.";
+  return [
+    SKILL_SOURCES_HEADING,
+    "",
+    `- **Official:** ${official}`,
+    `- **Empirical:** ${empirical}`,
+  ].join("\n");
 }
 
 // ---------------------------------------------------------------------------

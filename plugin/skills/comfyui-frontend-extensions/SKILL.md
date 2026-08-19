@@ -110,13 +110,9 @@ export default defineNode({
 | `on('configured', fn)` | method | Loaded from saved workflow (after widget values restored). |
 | `on('beforeSerialize', fn)` | method | **Deprecated** — use widget-level `beforeSerialize` (ADR-0010). |
 
-> Position/size/title/mode getters and slot/connection events are **deferred in
-> Phase A** (excluded per the project's AXIOMS). Do not rely on `getPosition`,
-> `setSize`, `getMode`, `on('connected')`, etc. — they are not yet on the surface.
-
-> Nodes **cannot enumerate or reference their widgets** (`node.getWidget(name)` was
-> removed). To attach per-widget behavior, register a widget type with `defineWidget`
-> and use the `mount` context's `ctx.widget` handle.
+> Position/size/title/mode getters and slot/connection events are **deferred in Phase A**. Do not rely on `getPosition`, `setSize`, `getMode`, `on('connected')`.
+>
+> Nodes **cannot enumerate or reference their widgets** (`node.getWidget(name)` was removed). Use `defineWidget` and the `mount` context's `ctx.widget` handle.
 
 ## `defineExtension` — app lifecycle + shell UI
 
@@ -500,3 +496,8 @@ for (const h of handles.reverse()) h.dispose()
 9. **Using node-level `beforeSerialize`.** Deprecated (ADR-0010). Store extension state in a widget and use widget-level `beforeSerialize`.
 10. **Forgetting to dispose.** Long-lived subscriptions made outside a `setup()` context, and every `defineX` handle, leak unless you call the returned `Unsubscribe` / `dispose()`. Inside `setup()` they auto-dispose on unmount.
 11. **Relying on deferred Phase A surface.** Position/size/title/mode getters and slot/connection events are not yet exported. Don't write code against them.
+
+## Sources
+
+- **Official:** npm package `@comfyorg/extension-api` at https://www.npmjs.com/package/@comfyorg/extension-api
+- **Empirical:** none — API surface transcribed from the published package, not reverse-engineered from a working graph.

@@ -103,3 +103,8 @@ Build a tap with `panel_add_node` + `panel_connect`, run to it, inspect, then
 - **Subgraphs.** Output nodes nested inside a subgraph can't be targeted yet;
   probe at the root graph (add the tap outside the subgraph, fed by an exposed
   output rail).
+
+## Sources
+
+- **Official:** comfyui-mcp `panel_run` to_node_id product behavior (this repo).
+- **Empirical:** probe-point recipes from observed wrong-render cases.

@@ -135,3 +135,8 @@ fix and rerun. Gotchas learned the hard way:
 - `CLIPLoader: 'krea2' not in list` → ComfyUI too old; update to ≥ v0.26.0.
 - `Torch not compiled with CUDA enabled` → reinstall torch for your CUDA tag
   (`--index-url https://download.pytorch.org/whl/cu128`).
+
+## Sources
+
+- **Official:** none found.
+- **Empirical:** sampler values, wiring, and prompt notes from working graphs in `packs/` and observed renders; not a vendor prompting guide.

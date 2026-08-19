@@ -297,3 +297,8 @@ Bad: "masterpiece, best quality, 1girl, businesswoman, studio"
 3. The `Z-Image-Aesthetic-Base v1` LoRA at 0.6–0.8 strength noticeably improves output quality across all Z-Image Base variants
 4. Z-Image excels at photorealistic human generation — it's the go-to for portrait and fashion photography
 5. When switching between Turbo and Base LoRAs, use the matching base model variant
+
+## Sources
+
+- **Official:** none found.
+- **Empirical:** sampler values, wiring, and prompt notes from working graphs in `packs/` and observed renders; not a vendor prompting guide.

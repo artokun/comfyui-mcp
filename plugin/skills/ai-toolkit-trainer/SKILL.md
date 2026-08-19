@@ -143,3 +143,8 @@ Z-Image is a ~6B **single-stream** model — **no hi/lo multi-stage** (leave Mul
 - **Ports:** Windows UI port is whatever the launcher binds (the installer doesn't print it — check the launcher window). RunPod **8675**/**8888** are per the template.
 - The launcher `.bat` files are downloaded from a **third-party HuggingFace repo** (`Aitrepreneur/FLX`); review before running on a security-sensitive machine.
 - Model weights are fetched at job time by AI-Toolkit/HF, not by the installer — confirm the model selector lists your target WAN variant or Z-Image model before a long run.
+
+## Sources
+
+- **Official:** https://github.com/ostris/ai-toolkit
+- **Empirical:** Windows/RunPod installer steps and VRAM notes from the pack installers, not the vendor's training guide.

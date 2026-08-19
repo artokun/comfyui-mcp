@@ -352,3 +352,8 @@ Optional upstream: Ideogram4PromptBuilderKJ  OR  TextGenerate(gemma4) ─► CLI
 - **CLIPLoader type missing `ideogram4`** — update ComfyUI; the `ideogram4` CLIP type and the Flux2/Ideogram nodes require a recent build (installer pins ComfyUI portable `v0.24.0`).
 - **`Ideogram4PromptBuilderKJ` / `DualModelGuider` not found** — update KJNodes (`git pull` in `custom_nodes/ComfyUI-KJNodes`); these are recent additions.
 ```
+
+## Sources
+
+- **Official:** none found as a prompting guide. Weights listed from https://huggingface.co/Comfy-Org/Ideogram-4 are download URLs, not prompting docs.
+- **Empirical:** sampler values, wiring, and prompt notes from working graphs in `packs/` and observed renders; not a vendor prompting guide.

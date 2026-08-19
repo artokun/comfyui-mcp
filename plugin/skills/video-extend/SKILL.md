@@ -479,3 +479,8 @@ LoRAs in `models[]` (from `Kijai/WanVideo_comfy/Pusa/`). The big T2V A14B models
 are shared with `wan-t2v-video` — don't re-download. Install nodes ad-hoc with
 `panel_install_node` or apply a manifest with `apply_manifest`. Contribute a
 finished pack upstream (`github.com/artokun/comfyui-mcp`).
+
+## Sources
+
+- **Official:** none found.
+- **Empirical:** sampler values, wiring, and prompt notes from working graphs in `packs/` and observed renders; not a vendor prompting guide.

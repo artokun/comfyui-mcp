@@ -302,3 +302,8 @@ Where `haircolor.txt`, `clothing.txt`, and `location.txt` are in the wildcards d
 6. **Embedding without file**: Using `embedding:name` without the `.safetensors` file installed causes errors
 7. **Wrong LoRA trigger words**: The prompt must contain the exact trigger word(s) for the LoRA to activate
 8. **Quality tags in Flux prompts**: `masterpiece, best quality` are meaningless for Flux — describe quality naturally
+
+## Sources
+
+- **Official:** none found as a dedicated vendor prompting guide. CLIP `(word:1.2)` attention is community convention (A1111/ComfyUI), not a model-vendor spec.
+- **Empirical:** model-specific notes (Flux CFG=1, SD 1.5 quality tags, BREAK token) from observed ComfyUI behaviour.

@@ -235,3 +235,8 @@ Insert a `Power Lora Loader (rgthree)` between the UNet loader and `ModelSamplin
 4. Most groups are **bypassed (mode 4)** by default in the source file — enable only the pipeline you want via the group bypasser, or build the clean API workflow above.
 5. To choose a model: **ERNIE = text/layout T2I**, **Z-Image Turbo = fast general T2I**, **Qwen-Image-Edit / Flux Kontext = actual editing**.
 ```
+
+## Sources
+
+- **Official:** https://github.com/baidu/ERNIE-Image and https://docs.comfy.org/tutorials/image/ernie-image/ernie-image
+- **Empirical:** sampler values and combo wiring from the pack graphs (see Source of truth above); installer scripts are Z-Image-derived.

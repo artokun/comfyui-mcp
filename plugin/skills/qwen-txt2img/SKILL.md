@@ -330,3 +330,8 @@ Tips:
 4. For **video pipeline** output (feeding into WAN FLF), set resolution to 832x480
 5. **CopaxTimeless pick**: res_multistep + sgm_uniform at CFG 4.0 for ultra-realistic results
 6. Multiple concept LoRAs can stack — reduce individual strength to 0.5-0.7 when combining
+
+## Sources
+
+- **Official:** none found.
+- **Empirical:** sampler values, wiring, and prompt notes from working graphs in `packs/` and observed renders; not a vendor prompting guide.

@@ -288,3 +288,8 @@ Klein 9B LoRAs go in `loras/Flux.2 Klein 9B/` subfolder:
 3. For **short prompts** (1-2 sentences), increase guidance to 3.5–4.0. For **long prompts** (paragraph), decrease to 1.0–1.5
 4. Flux generates excellent text in images — put text to render in quotes within your prompt
 5. Klein 9B is the fastest option at 4 steps — use it for rapid iteration, then switch to SRPO for final quality
+
+## Sources
+
+- **Official:** none found.
+- **Empirical:** sampler values, wiring, and prompt notes from working graphs in `packs/` and observed renders; not a vendor prompting guide.

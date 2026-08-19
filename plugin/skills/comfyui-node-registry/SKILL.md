@@ -216,3 +216,8 @@ If your pack adds custom UI (widgets, sidebar tabs, menu items), set `WEB_DIRECT
 8. **Oversized icon** — must be square and ≤ 400×400px; larger images are rejected.
 9. **Renaming class keys in `NODE_CLASS_MAPPINGS`** — the key is the `class_type` stored in workflow JSON. Changing it breaks every saved workflow that used the node.
 10. **Committing the API key** — store it as the `REGISTRY_ACCESS_TOKEN` secret; never in `pyproject.toml` or the repo.
+
+## Sources
+
+- **Official:** Comfy Registry at https://registry.comfy.org and comfy-cli publishing docs used by `comfy node publish`.
+- **Empirical:** field-rule notes verified against the live spec; common-mistakes list is from observed publish failures.

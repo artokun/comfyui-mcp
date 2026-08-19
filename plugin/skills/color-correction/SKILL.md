@@ -186,3 +186,8 @@ get_image (action:"analyze_color") on the frame
 
 Always **re-measure after the fix.** If `get_image (action:"analyze_color")` still flags it, the fix was wrong —
 adjust and measure again. Numbers over vibes.
+
+## Sources
+
+- **Official:** comfyui-mcp `get_image` action:"analyze_color" product behavior (this repo).
+- **Empirical:** washed-out signature and levels-stretch recipes from observed renders.
