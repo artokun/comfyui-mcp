@@ -21,6 +21,7 @@ import { modelNotFoundMessage } from "./model-root-scope.js";
 import {
   resolveModelsDirWithBases,
   parseModelsDirFromArgv,
+  parseExtraModelPathsConfigsFromArgvRaw,
   hasUnresolvableRelativeModelDirFlag,
   isLiveAuthoritativeModelsDir,
   modelsDirNamedByServer,
@@ -1349,29 +1350,53 @@ export async function isUnderLiveModelRoots(
   // "visible" and gives it the qualified note instead. That is the right trade:
   // the note names the file, the root, and the remedy, whereas the false positive
   // is silent and the user discovers it at queue time.
-  if (!modelsDirNamedByServer(dest.source)) return { inRoots: undefined };
+  //
+  // One exception (#369, the 0.52.1 reports): an extra model root is vouched for by
+  // the server's OWN command line when argv carries an ABSOLUTE
+  // --extra-model-paths-config — that statement is independent of how the PRIMARY
+  // root was derived, and a download redirected onto such a root
+  // (resolveModelSubfolderWithLiveRoot) must be able to confirm here, or the file
+  // lands exactly where the server reads and is STILL reported unconfirmed. With no
+  // argv-named config the extra roots may come from the auto-loaded config beside
+  // an INFERRED main.py — that inherits the inference and vouches for nothing, so
+  // the early UNKNOWN stands. The unvouched primary still cannot support a
+  // NEGATIVE answer below: unknown stays unknown, never "outside the live roots".
+  const primaryNamed = modelsDirNamedByServer(dest.source);
+  if (
+    !primaryNamed &&
+    !parseExtraModelPathsConfigsFromArgvRaw(dest.snapshot.argv).some((p) => isAbsolute(p))
+  ) {
+    return { inRoots: undefined };
+  }
   const liveRoot = resolve(dest.modelsDir);
+
+  let extra: Awaited<ReturnType<typeof getLiveExtraModelRoots>> | undefined;
+  try {
+    extra = await getLiveExtraModelRoots(dest.snapshot);
+  } catch {
+    extra = undefined;
+  }
+  const wantCat = (category ?? "").trim().toLowerCase();
 
   // A negative answer is only honest when everything it rests on could actually be
   // canonicalized; otherwise say UNKNOWN rather than accuse a correct placement.
   let fullyCanonical = target.ok;
-  const primary = await canon(dest.modelsDir);
-  fullyCanonical = fullyCanonical && primary.ok;
-  if (under(primary)) return { inRoots: true, liveRoot };
+  if (primaryNamed) {
+    const primary = await canon(dest.modelsDir);
+    fullyCanonical = fullyCanonical && primary.ok;
+    if (under(primary)) return { inRoots: true, liveRoot };
+  }
 
-  let extra: Awaited<ReturnType<typeof getLiveExtraModelRoots>>;
-  try {
-    extra = await getLiveExtraModelRoots(dest.snapshot);
-  } catch {
-    return { inRoots: undefined, liveRoot };
+  if (extra?.authoritative) {
+    for (const r of extra.roots) {
+      if (wantCat && String(r.category ?? "").trim().toLowerCase() !== wantCat) continue;
+      const rc = await canon(r.dir);
+      fullyCanonical = fullyCanonical && rc.ok;
+      if (under(rc)) return { inRoots: true, liveRoot };
+    }
   }
-  const wantCat = (category ?? "").trim().toLowerCase();
-  for (const r of extra.roots) {
-    if (wantCat && String(r.category ?? "").trim().toLowerCase() !== wantCat) continue;
-    const rc = await canon(r.dir);
-    fullyCanonical = fullyCanonical && rc.ok;
-    if (under(rc)) return { inRoots: true, liveRoot };
-  }
+  if (!primaryNamed) return { inRoots: undefined, liveRoot };
+  if (!extra) return { inRoots: undefined, liveRoot };
   // The live roots are known and this path is in none of them.
   if (!extra.authoritative) return { inRoots: undefined, liveRoot };
   return { inRoots: fullyCanonical ? false : undefined, liveRoot };
@@ -2116,28 +2141,89 @@ export async function resolveModelSubfolderWithLiveRoot(
   const { modelsDir, baseDirs, snapshot, source } = await resolveModelsDirWithBases({
     targetCategory: escapes ? "" : categoryOf(normalizedSub),
   });
-  const modelsRoot = resolve(modelsDir);
-  const targetDir = resolve(modelsRoot, raw);
+  let modelsRoot = resolve(modelsDir);
+  let targetDir = resolve(modelsRoot, raw);
   if (targetDir !== modelsRoot && !targetDir.startsWith(modelsRoot + sep)) {
     throw new ModelError(`Refusing to write outside the models directory: ${raw}`);
   }
-  // The root did NOT come from the running server (it could not tell us where it
-  // lives, so we fell back to local config). Before writing, check the one thing
-  // that can still expose a stale-install destination: the server's own listing for
-  // this category. #369 shipped 4.88 GB into a directory the live ComfyUI had never
-  // heard of; refusing here costs nothing and saves the transfer.
-  await assertDestinationVisibleToLiveServer(modelsRoot, raw, source, snapshot);
+  // #369 (the 0.52.1 reports) — a root the SERVER NAMED beats our best inference.
+  //
+  // When the primary root came from local configuration or from an INFERRED live
+  // root, every guard below can do no better than fail OPEN on an empty tree
+  // (#1147's deliberate trade: an empty listing contradicts nothing), so a stale
+  // second install received the write whenever its evidence was silent — the
+  // 0.52.1 reports had gigabytes land in the non-running install while the
+  // connected Desktop server's models lived in the shared root its
+  // --extra-model-paths-config declares (the very root list_paths shows).
+  //
+  // That config flag is the server's OWN command line naming a root it reads this
+  // category from — a statement, not an inference — so it outranks the unvouched
+  // primary and the download goes THERE instead. The gate is deliberately the
+  // exact evidence: an ABSOLUTE --extra-model-paths-config in argv (a relative
+  // one cannot be located from this process and fails closed, per extra-paths),
+  // an AUTHORITATIVE read of it, and a MODEL category (never custom_nodes — a
+  // download must not become a Python import). Anything less keeps the existing
+  // resolution and its corroboration guards untouched.
+  const serverNamedPrimary = modelsDirNamedByServer(source);
+  let redirectedToExtraRoot = false;
+  if (!serverNamedPrimary && snapshot.reachable && !isRemoteMode()) {
+    const category = categoryOf(normalizedSub).toLowerCase();
+    const argvNamesConfig = parseExtraModelPathsConfigsFromArgvRaw(snapshot.argv).some(
+      (p) => isAbsolute(p),
+    );
+    if (argvNamesConfig && category && !NON_MODEL_EXTRA_CATEGORIES.has(category)) {
+      const extra = await getLiveExtraModelRoots(snapshot);
+      const namedRoot = extra.authoritative
+        ? extra.roots.find((r) => r.category.trim().toLowerCase() === category)
+        : undefined;
+      if (namedRoot) {
+        const extraRoot = resolve(namedRoot.dir);
+        const redirected = resolve(extraRoot, subfolderRemainder(normalizedSub));
+        if (redirected !== extraRoot && !redirected.startsWith(extraRoot + sep)) {
+          throw new ModelError(`Refusing to write outside the models directory: ${raw}`);
+        }
+        logger.info(
+          `Downloading into the extra model root the connected server named for "${category}" ` +
+            `(${extraRoot}) instead of the unvouched primary root (${modelsRoot}) — the root the ` +
+            `server's --extra-model-paths-config declares is where it actually reads (#369).`,
+        );
+        modelsRoot = extraRoot;
+        targetDir = redirected;
+        redirectedToExtraRoot = true;
+      }
+    }
+  }
+  if (!redirectedToExtraRoot) {
+    // The root did NOT come from the running server (it could not tell us where it
+    // lives, so we fell back to local config). Before writing, check the one thing
+    // that can still expose a stale-install destination: the server's own listing for
+    // this category. #369 shipped 4.88 GB into a directory the live ComfyUI had never
+    // heard of; refusing here costs nothing and saves the transfer. (A server-named
+    // primary is not skipped here either — the guard itself decides, because a named
+    // root that does not EXIST locally, e.g. a container-side --models-directory,
+    // still gets the cheap check. Only the REDIRECTED destination is exempt: the
+    // server's own config named it, so disagreeing with our inference is moot.)
+    await assertDestinationVisibleToLiveServer(modelsRoot, raw, source, snapshot);
+  }
   // Path-string containment (above) is not enough: an EXISTING symlink somewhere
   // between modelsRoot and targetDir could redirect the real write OUTSIDE the
   // models dir. Because THIS resolver is the single canonical write-target for
   // every local download (startDownloadJob keying AND downloadModel's write), the
   // guard belongs here — co-located with the resolution the write actually uses —
   // so it can never diverge from a caller's separate pre-validation (e.g.
-  // apply_manifest resolving the root a second time; #490 codex review).
+  // apply_manifest resolving the root a second time; #490 codex review). Runs on
+  // the REDIRECTED root too: its code-root veto is what keeps a malicious or
+  // miswritten extra-paths entry from turning this into a write into custom_nodes.
   await assertNoEscapingSymlinkAncestor(modelsRoot, targetDir, raw, baseDirs, snapshot);
   return {
     targetDir,
-    liveRootAtResolve: isLiveAuthoritativeModelsDir(source) ? modelsRoot : undefined,
+    // A redirected destination is bound to the EXTRA root, but the writer's
+    // mid-flight swap check compares PRIMARY roots (currentLiveModelsRoot), so
+    // there is no honest value to bind here — leave it unknown, exactly like any
+    // other non-server-named primary. The post-write check still verifies the
+    // landed file against the connected server.
+    liveRootAtResolve:
+      !redirectedToExtraRoot && isLiveAuthoritativeModelsDir(source) ? modelsRoot : undefined,
   };
 }
 

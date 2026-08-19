@@ -135,6 +135,7 @@ vi.mock("node:fs/promises", () => ({
 import {
   currentLiveModelsRoot,
   resolveModelSubfolderPreferServer,
+  resolveModelSubfolderWithLiveRoot,
   verifyLandedModel,
 } from "../../services/model-resolver.js";
 import { ModelError } from "../../utils/errors.js";
@@ -533,6 +534,114 @@ describe("pre-write: a destination the LIVE server does not read from is refused
   });
 });
 
+describe("pre-write: a SERVER-NAMED extra model root wins over an unvouched primary (#369, 0.52.1)", () => {
+  // The 0.52.1 reports: ComfyUI Desktop launched with an ABSOLUTE
+  // --extra-model-paths-config whose base_path is the shared models root, while the
+  // primary models root could only be INFERRED (or came from stale local config).
+  // Every listing-based guard fails open on an empty tree by design, so the write
+  // landed in the install-local / non-running tree the server never reads. The
+  // server's own command line had already named the right root — use it.
+  const sharedVae = resolve("/shared/models/vae");
+  const configPath = resolve("/live/ComfyUI/extra_models_config.yaml");
+
+  beforeEach(() => {
+    // The Desktop shape: primary root NOT server-named, argv names the config,
+    // and that config maps the target category to the shared root.
+    h.modelsDirSource = "observed-root";
+    h.destModelsDir = "/comfy/models";
+    h.snapshotArgv = [resolve("/live/ComfyUI/main.py"), "--extra-model-paths-config", configPath];
+    h.liveExtraRoots = {
+      authoritative: true,
+      roots: [{ category: "vae", dir: sharedVae, group: "desktop" }],
+    };
+  });
+
+  it("downloads into the extra root the server's --extra-model-paths-config names", async () => {
+    const res = await resolveModelSubfolderWithLiveRoot("vae");
+    expect(res.targetDir).toBe(sharedVae);
+    // The mid-flight swap check compares PRIMARY roots; a redirected destination
+    // has no honest value to bind, so it must report none.
+    expect(res.liveRootAtResolve).toBeUndefined();
+  });
+
+  it("keeps the nested remainder under the extra root", async () => {
+    await expect(resolveModelSubfolderPreferServer("vae/sub")).resolves.toBe(
+      resolve("/shared/models/vae/sub"),
+    );
+  });
+
+  it("never runs the stale-install disagreement guard against a server-named destination", async () => {
+    // This evidence WOULD refuse the unvouched primary (a populated tree the server
+    // does not list). The redirect decides first, so the guard is moot and the
+    // server is never even asked.
+    h.onDisk = { vae: ["stale.safetensors"] };
+    h.liveListings["vae"] = ["someone-elses.safetensors"];
+    await expect(resolveModelSubfolderPreferServer("vae")).resolves.toBe(sharedVae);
+    expect(h.fetchCalls).toEqual([]);
+  });
+
+  it("does NOT redirect a category the config does not map", async () => {
+    await expect(resolveModelSubfolderPreferServer("loras")).resolves.toBe(
+      resolve("/comfy/models/loras"),
+    );
+  });
+
+  it("does NOT redirect when the argv flag value is RELATIVE (cannot locate the server's file)", async () => {
+    h.snapshotArgv = [resolve("/live/ComfyUI/main.py"), "--extra-model-paths-config", "extra.yaml"];
+    await expect(resolveModelSubfolderPreferServer("vae")).resolves.toBe(
+      resolve("/comfy/models/vae"),
+    );
+  });
+
+  it("does NOT redirect on a non-authoritative read of the live config", async () => {
+    h.liveExtraRoots = { authoritative: false, roots: [{ category: "vae", dir: sharedVae }] };
+    await expect(resolveModelSubfolderPreferServer("vae")).resolves.toBe(
+      resolve("/comfy/models/vae"),
+    );
+  });
+
+  it("does NOT redirect into a CODE category (custom_nodes is never a download destination)", async () => {
+    const sharedCustomNodes = resolve("/shared/models/custom_nodes");
+    h.liveExtraRoots = {
+      authoritative: true,
+      roots: [{ category: "custom_nodes", dir: sharedCustomNodes, group: "desktop" }],
+    };
+    await expect(resolveModelSubfolderPreferServer("custom_nodes")).resolves.toBe(
+      resolve("/comfy/models/custom_nodes"),
+    );
+  });
+
+  it("keeps the primary root when the SERVER NAMED it (live-root needs no redirect)", async () => {
+    h.modelsDirSource = "live-root";
+    h.destModelsDir = "/live/ComfyUI/models";
+    await expect(resolveModelSubfolderPreferServer("vae")).resolves.toBe(
+      resolve("/live/ComfyUI/models/vae"),
+    );
+  });
+
+  it("post-write: a landed file under the server-named extra root verifies VISIBLE", async () => {
+    // The other half of the 0.52.1 report: the file landed where the server's
+    // config says it reads, the server lists it — yet the verdict stayed
+    // "unconfirmed" because the PRIMARY root was unvouched. The argv-named config
+    // vouches for the extra root independently, so the listing is decisive.
+    const landed = resolve("/shared/models/vae/new.safetensors");
+    h.liveListings["vae"] = ["new.safetensors"];
+    const res = await verifyLandedModel(landed, "vae", { attempts: 1, retryMs: 0 });
+    expect(res.liveVisible).toBe("visible");
+    expect(res.note).toBeUndefined();
+  });
+
+  it("post-write control: WITHOUT an argv-named config, the same extra root still vouches NOTHING", async () => {
+    // The auto-loaded config beside an INFERRED main.py inherits the inference —
+    // it is not a statement by the server, so the listing stays untieable.
+    h.snapshotArgv = [resolve("/live/ComfyUI/main.py")];
+    const landed = resolve("/shared/models/vae/new.safetensors");
+    h.liveListings["vae"] = ["new.safetensors"];
+    const res = await verifyLandedModel(landed, "vae", { attempts: 1, retryMs: 0 });
+    expect(res.liveVisible).toBe("unknown");
+    expect(res.note).toMatch(/not named by the running server/);
+  });
+});
 describe("currentLiveModelsRoot — only a LIVE-AUTHORITATIVE answer (#369)", () => {
   it("returns the root when the models dir came from the running server", async () => {
     h.modelsDirSource = "observed-root";
@@ -789,6 +898,43 @@ describe("post-write: the reported path is VERIFIED, not intended (#369)", () =>
     expect(res.liveVisible).toBe("unknown");
     expect(res.note).toMatch(/inferred from where the server's interpreter lives/);
     expect(res.note).toMatch(/already listed that name before this download/);
+  });
+
+  // #369, the 0.52.1 report: a download landed in a stale second install whose
+  // root the server never named, the listing (correctly) did not contain the
+  // file — and the verdict STILL claimed "it is in the right place … Do NOT
+  // move the file", because resolveModelsDir() returned that same configured/
+  // inferred root and the lexical containment check against it passes for any
+  // file the download itself just wrote there. Only a root the SERVER NAMED may
+  // anchor the refresh remedy; anything else keeps the move remedy.
+  it.each(["configured-base", "observed-root", "base-anchored"] as const)(
+    "#369 (0.52.1): a not-listed file under a root the server never named is NOT called 'in the right place' (%s)",
+    async (source) => {
+      const staleLanded = resolve("/stale/ComfyUI/models/loras/new.safetensors");
+      h.modelsDirSource = source;
+      h.destModelsDir = "/stale/ComfyUI/models";
+      h.liveListings["loras"] = ["something-else.safetensors"]; // answered; ours absent
+      const res = await verifyLandedModel(staleLanded, "loras", { attempts: 2, retryMs: 0 });
+      expect(res.liveVisible).toBe("not-visible");
+      expect(res.note).not.toMatch(/in the right place/);
+      expect(res.note).not.toMatch(/Do NOT move the file/);
+      expect(res.note).toMatch(/Move the file/);
+      // …and it must not name the unvouched root as "the models directory that
+      // server reads" — that assertion is the false claim being fixed.
+      expect(res.note).not.toMatch(/models directory (the connected ComfyUI|that server) reads/);
+    },
+  );
+
+  it("#369 (0.52.1): a root the server NAMED keeps the refresh remedy on a listing miss", async () => {
+    // The control: gating the remedy on modelsDirNamedByServer must not take the
+    // #1131 fix away from a correctly-placed file whose listing is merely stale.
+    h.modelsDirSource = "live-root";
+    h.destModelsDir = "/live/ComfyUI/models";
+    h.liveListings["loras"] = ["something-else.safetensors"];
+    const res = await verifyLandedModel(target, "loras", { attempts: 2, retryMs: 0 });
+    expect(res.liveVisible).toBe("not-visible");
+    expect(res.note).toMatch(/it is in the right place/);
+    expect(res.note).toMatch(/Do NOT move the file/);
   });
 
   it("DOES confirm a re-download into a LIVE-AUTHORITATIVE root even though the name pre-existed", async () => {
