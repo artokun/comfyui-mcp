@@ -43,6 +43,9 @@ export type LauncherPaths = {
   config: string;
   broker: string;
   windowsScript: string;
+  /** Windows fallback autostart, for accounts that may not create scheduled
+   *  tasks. The Startup folder is per-user and needs no elevation. */
+  windowsStartup: string;
   macPlist: string;
   linuxService: string;
   linuxAutostart: string;
@@ -57,6 +60,17 @@ export function panelLauncherPaths(home: string = homedir()): LauncherPaths {
     config: join(root, "launcher.json"),
     broker: join(launcherDir, "broker.mjs"),
     windowsScript: join(launcherDir, "start-launcher.cmd"),
+    windowsStartup: join(
+      home,
+      "AppData",
+      "Roaming",
+      "Microsoft",
+      "Windows",
+      "Start Menu",
+      "Programs",
+      "Startup",
+      "comfyui-mcp-launcher.cmd",
+    ),
     macPlist: join(home, "Library", "LaunchAgents", `${PANEL_LAUNCHER_LABEL}.plist`),
     linuxService: join(home, ".config", "systemd", "user", "comfyui-mcp-launcher.service"),
     linuxAutostart: join(home, ".config", "autostart", "comfyui-mcp-launcher.desktop"),
@@ -102,12 +116,35 @@ function xml(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
 
+/**
+ * Why a service manager refused, as a single line fit for a CLI message.
+ *
+ * `execFileSync` throws an Error whose `stderr` holds the tool's own words
+ * ("ERROR: Access is denied."), but only when the caller piped it; the generic
+ * `message` is just the command line, which tells the user nothing they can act
+ * on. Prefer the tool's reason and fall back to the message.
+ */
+function schtasksReason(err: unknown): string {
+  const stderr = (err as { stderr?: unknown })?.stderr;
+  const text =
+    typeof stderr === "string"
+      ? stderr
+      : stderr && typeof (stderr as Buffer).toString === "function"
+        ? (stderr as Buffer).toString("utf8")
+        : "";
+  const line = text.split(/\r?\n/).find((l) => l.trim().length > 0);
+  return line?.trim() || (err instanceof Error ? err.message : String(err));
+}
+
 export type InstallLauncherOptions = {
   home?: string;
   platform?: NodeJS.Platform;
   nodePath?: string;
   brokerSource?: string;
   exec?: typeof execFileSync;
+  /** Injected for the tests, so a fallback case can assert the broker was
+   *  started without actually starting one. */
+  spawnImpl?: typeof spawn;
 };
 
 export function installPanelLauncher(options: InstallLauncherOptions = {}): LauncherPaths {
@@ -116,11 +153,36 @@ export function installPanelLauncher(options: InstallLauncherOptions = {}): Laun
   const nodePath = options.nodePath ?? process.execPath;
   const source = options.brokerSource ?? fileURLToPath(import.meta.url);
   const run = options.exec ?? execFileSync;
+  const spawnBroker = options.spawnImpl ?? spawn;
   const paths = panelLauncherPaths(home);
   mkdirSync(paths.launcherDir, { recursive: true });
   copyFileSync(source, paths.broker);
 
   const previous = readPanelLauncherConfig(home);
+
+  /**
+   * Start the broker unless the previous one is still alive.
+   *
+   * Every fallback path needs this: without a service manager nothing else will
+   * start the broker, so the install would "succeed" and leave the panel with
+   * nothing to talk to until the next logon. Shared by the Windows and Linux
+   * fallbacks rather than duplicated — they answer the identical question.
+   */
+  const startBrokerIfIdle = (): void => {
+    if (previous?.pid) {
+      try {
+        process.kill(previous.pid, 0);
+        return; // still running — a second broker would fight it for the port
+      } catch {
+        // Dead pid: fall through and start a replacement.
+      }
+    }
+    const child = spawnBroker(nodePath, [paths.broker, "run"], {
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref?.();
+  };
   writePanelLauncherConfig(
     {
       protocol: PANEL_LAUNCHER_PROTOCOL,
@@ -138,24 +200,58 @@ export function installPanelLauncher(options: InstallLauncherOptions = {}): Laun
       `@echo off\r\n"${nodePath}" "${paths.broker}" run\r\n`,
       "utf8",
     );
-    run(
-      "schtasks.exe",
-      [
-        "/Create",
-        "/F",
-        "/SC",
-        "ONLOGON",
-        "/IT",
-        "/RL",
-        "LIMITED",
-        "/TN",
-        PANEL_LAUNCHER_TASK,
-        "/TR",
-        `"${paths.windowsScript}"`,
-      ],
-      { stdio: "ignore" },
-    );
-    run("schtasks.exe", ["/Run", "/TN", PANEL_LAUNCHER_TASK], { stdio: "ignore" });
+    // A scheduled task is the preferred registration, but it is NOT available to
+    // every account: creating one can be denied outright by machine policy or by
+    // the ACL on the task store, and the denial has nothing to do with this task
+    // in particular (a throwaway probe task is refused identically). On such a
+    // machine the install used to throw here, having already written every file
+    // it needed, and the panel's Connect button kept telling the user to run an
+    // install that could never succeed.
+    //
+    // So Windows now gets the same shape Linux has had all along: try the
+    // service manager, and when it refuses, fall back to a per-user autostart
+    // and start the broker directly. The Startup folder is user-writable and
+    // needs no elevation, which is exactly the constraint the scheduled task
+    // could not satisfy.
+    try {
+      run(
+        "schtasks.exe",
+        [
+          "/Create",
+          "/F",
+          "/SC",
+          "ONLOGON",
+          "/IT",
+          "/RL",
+          "LIMITED",
+          "/TN",
+          PANEL_LAUNCHER_TASK,
+          "/TR",
+          `"${paths.windowsScript}"`,
+        ],
+        // NOT "ignore" (codex-taxonomy class 1): schtasks reports WHY it refused
+        // on stderr, and swallowing it left the CLI printing a bare "Command
+        // failed: schtasks.exe …" — indistinguishable from a missing binary, a
+        // bad argument, or a denial, which is the one that actually happens.
+        { stdio: ["ignore", "ignore", "pipe"] },
+      );
+      run("schtasks.exe", ["/Run", "/TN", PANEL_LAUNCHER_TASK], { stdio: "ignore" });
+    } catch (err) {
+      mkdirSync(dirname(paths.windowsStartup), { recursive: true });
+      writeFileSync(
+        paths.windowsStartup,
+        `@echo off\r\nstart "" /min "${paths.windowsScript}"\r\n`,
+        "utf8",
+      );
+      startBrokerIfIdle();
+      // Not silent: the user asked for a launcher and got a different mechanism
+      // than the one this tool normally installs, which changes how they would
+      // later remove or debug it.
+      process.stderr?.write?.(
+        `[comfyui-mcp] scheduled task refused (${schtasksReason(err)}); ` +
+          `registered a Startup-folder autostart instead: ${paths.windowsStartup}\n`,
+      );
+    }
     return paths;
   }
 
@@ -204,19 +300,7 @@ export function installPanelLauncher(options: InstallLauncherOptions = {}): Laun
         `Exec="${nodePath}" "${paths.broker}" run\nTerminal=false\nX-GNOME-Autostart-enabled=true\n`,
       "utf8",
     );
-    let previousStillRunning = false;
-    if (previous?.pid) {
-      try {
-        process.kill(previous.pid, 0);
-        previousStillRunning = true;
-      } catch {
-        previousStillRunning = false;
-      }
-    }
-    if (!previousStillRunning) {
-      const child = spawn(nodePath, [paths.broker, "run"], { detached: true, stdio: "ignore" });
-      child.unref();
-    }
+    startBrokerIfIdle();
   }
   return paths;
 }
@@ -239,6 +323,10 @@ export function uninstallPanelLauncher(options: UninstallLauncherOptions = {}): 
     } catch {
       // Already absent is the desired end state.
     }
+    // …and the fallback autostart, which is what an account that could not
+    // create the task actually has. Removing only the task would leave those
+    // users with a launcher that keeps coming back after every uninstall.
+    rmSync(paths.windowsStartup, { force: true });
   } else if (platform === "darwin") {
     try {
       run("launchctl", ["bootout", `gui/${process.getuid?.() ?? 0}`, paths.macPlist], { stdio: "ignore" });
