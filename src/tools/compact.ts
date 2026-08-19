@@ -281,6 +281,11 @@ export function registerCompactTools(
           "The tool's parameters as an object matching its describe_tool schema. A JSON-encoded string is also accepted. Omit for tools without parameters.",
         ),
       arguments: z.unknown().optional().describe("Alias for args."),
+      // #1824 — ChatGPT's multi_tool_use.parallel wrapper names its payload
+      // `parameters`. After the first call_tool in a batch the model often
+      // copies that key inward instead of `args`, and Zod would strip the
+      // unknown field so the inner tool saw an empty object (`action` missing).
+      parameters: z.unknown().optional().describe("Alias for args."),
     },
     async (params) => {
       const name = params.name ?? params.tool_name;
@@ -297,7 +302,7 @@ export function registerCompactTools(
       const facadeMeta = !tool && (name === "list_tools" || name === "describe_tool") ? name : null;
       if (!tool && !facadeMeta) return errorText(unknownToolMessage(catalog, name));
 
-      const args = params.args ?? params.arguments;
+      const args = params.args ?? params.arguments ?? params.parameters;
       let rawArgs: Record<string, unknown> = {};
       if (typeof args === "string") {
         if (args.trim()) {

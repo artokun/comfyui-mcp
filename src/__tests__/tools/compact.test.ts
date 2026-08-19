@@ -330,6 +330,35 @@ describe("compact mode over a real MCP client/server pair", () => {
     expect(textOf(res as never)).toBe("generated:a dog:default");
   });
 
+  // #1824 — ChatGPT multi_tool_use.parallel names each recipient payload
+  // `parameters`. After the first functions.call_tool in a batch the model
+  // copies that key inward instead of `args`. The SDK Zod shape used to
+  // strip the unknown field, so download_model (and anything with a required
+  // action) saw an empty object and failed with "action: Invalid option".
+  it("call_tool accepts parameters as an alias for args (#1824)", async () => {
+    const client = await compactPair(fakeCatalog());
+    const res = (await client.callTool({
+      name: "call_tool",
+      arguments: { name: "gen_image", parameters: { prompt: "a cat", steps: 4 } },
+    })) as { isError?: boolean };
+    expect(res.isError).not.toBe(true);
+    expect(textOf(res as never)).toBe("generated:a cat:4");
+  });
+
+  it("call_tool prefers args over a colliding parameters wrapper (#1824)", async () => {
+    const client = await compactPair(fakeCatalog());
+    const res = (await client.callTool({
+      name: "call_tool",
+      arguments: {
+        name: "gen_image",
+        args: { prompt: "from-args", steps: 2 },
+        parameters: { prompt: "from-parameters", steps: 9 },
+      },
+    })) as { isError?: boolean };
+    expect(res.isError).not.toBe(true);
+    expect(textOf(res as never)).toBe("generated:from-args:2");
+  });
+
   it("call_tool works with omitted args for zero-arg tools", async () => {
     const client = await compactPair(fakeCatalog());
     const res = await client.callTool({ name: "call_tool", arguments: { name: "ping" } });
