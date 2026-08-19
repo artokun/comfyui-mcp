@@ -52,9 +52,23 @@ export interface AgentIdentity {
   updated?: number;
 }
 
-/** Machine-readable marker line. Doubles as the idempotency guard: a body that
- *  already carries one is never stamped twice. */
+/** Machine-readable marker: the form an analysis pass greps for. */
 const STAMP_MARKER = "<!-- reporter-agent:";
+
+/**
+ * What a marker becomes when it arrives INSIDE a caller's body — i.e. quoted
+ * from some other issue, which is ordinary agent behaviour ("related to #1234,
+ * whose body reads: …"). Every stamped issue in the tracker carries the marker
+ * as quotable text, so a body that already contains one says nothing about who
+ * is filing THIS report.
+ *
+ * An earlier version treated any marker as proof this body was already stamped
+ * and returned it untouched — which filed the report under the QUOTED model's
+ * name, in a sentence explicitly vouching that the attribution is mechanical.
+ * That is the exact harm this module exists to prevent, arriving through its own
+ * guard (fallback merge gate, P1).
+ */
+const QUOTED_MARKER = "<!-- quoted-reporter-agent:";
 
 /**
  * Where the identity for one agent lives.
@@ -146,11 +160,20 @@ export function formatAgentIdentity(identity: AgentIdentity): string {
  * NOT the model's own claim about itself — a reader comparing report quality
  * across models has to be able to trust it the way they trust the version line.
  *
- * Idempotent: a body that already carries the marker is returned unchanged, so a
- * retry (or an agent that pasted a previous report) cannot double-stamp.
+ * ALWAYS appended when the identity is known. There is no "already stamped"
+ * shortcut, because nothing in the body can establish that: the only marker a
+ * caller's text can carry is one QUOTED from another issue, and skipping on it
+ * files the report under someone else's model. The one caller passes the raw
+ * argument and forwards the stamped result, so a body cannot reach here twice.
+ *
+ * A quoted marker is REWRITTEN as it passes through, so exactly one live marker
+ * survives and it is this report's — an analysis pass counting `reporter-agent`
+ * across the tracker can never read a quotation as a second reporter. The quoted
+ * line stays readable; only its machine prefix changes.
  */
 export function stampAgentIdentity(body: string, identity: AgentIdentity | undefined): string {
-  if (!identity || body.includes(STAMP_MARKER)) return body;
+  if (!identity) return body;
+  body = body.replaceAll(STAMP_MARKER, QUOTED_MARKER);
   const machine = [
     `backend=${identity.backend}`,
     identity.model ? `model=${identity.model}` : "model=unknown",

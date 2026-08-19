@@ -568,6 +568,23 @@ describe("report_issue stamps the reporting model (mechanical, not self-reported
     expect(payload?.labels).toContain("agent:ollama");
   });
 
+  it("a body QUOTING another issue's stamp is still filed under THIS model (gate P1)", async () => {
+    publish({ backend: "ollama", model: "gemma3:4b" });
+    const { payload } = await submittedPayload({
+      title: "t",
+      body:
+        "Related to #1234, whose body reads:\n" +
+        "> <!-- reporter-agent: backend=claude model=claude-opus-5 -->",
+    });
+    const body = payload?.body as string;
+    // Quoting a related issue is ordinary agent behaviour. Reading the quoted
+    // marker as "already stamped" filed the report asserting claude-opus-5 wrote
+    // it — while the label on the same issue said agent:ollama.
+    expect(body).toContain("<!-- reporter-agent: backend=ollama model=gemma3:4b -->");
+    expect(body.match(/<!-- reporter-agent:/g)?.length).toBe(1);
+    expect(payload?.labels).toContain("agent:ollama");
+  });
+
   it("keeps the caller's labels alongside the provider label", async () => {
     publish({ backend: "kimi", model: "kimi-k2-thinking" });
     const { payload } = await submittedPayload({ title: "t", body: "b", labels: ["bug"] });

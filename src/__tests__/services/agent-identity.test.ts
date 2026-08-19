@@ -153,13 +153,36 @@ describe("stampAgentIdentity", () => {
     expect(out).toContain("<!-- reporter-agent: backend=ollama model=gemma3:4b effort=low -->");
   });
 
-  it("is idempotent — a retry or a pasted prior report never double-stamps", () => {
+  it("stamps a body that QUOTES another issue's stamp — with THIS model (gate P1)", () => {
+    // Quoting a related issue is ordinary agent behaviour, and every stamped
+    // issue in the tracker carries the marker as quotable text. Treating that
+    // marker as "already stamped" filed the report under the QUOTED model's
+    // name, inside a sentence vouching the attribution is mechanical — the
+    // exact mis-attribution this module exists to prevent.
+    const quoting =
+      "Related to #1234, whose body reads:\n" +
+      "> Filed from the ComfyUI panel by **claude** · model `claude-opus-5`\n" +
+      "> <!-- reporter-agent: backend=claude model=claude-opus-5 -->";
+    const out = stampAgentIdentity(quoting, identity);
+    expect(out).toContain("gemma3:4b");
+    expect(out.trimEnd().endsWith("-->")).toBe(true);
+    // EXACTLY ONE live marker, and it is this report's: an analysis pass
+    // counting attributions across the tracker cannot read a quotation as a
+    // second reporter.
+    expect(out.match(/<!-- reporter-agent:/g)?.length).toBe(1);
+    expect(out).toContain("<!-- reporter-agent: backend=ollama model=gemma3:4b effort=low -->");
+    // The quoted line survives, readable, as a quotation.
+    expect(out).toContain("<!-- quoted-reporter-agent: backend=claude model=claude-opus-5 -->");
+  });
+
+  it("has no 'already stamped' shortcut — the stamp is always this call's", () => {
+    // Nothing in a body can establish that WE stamped it; the one caller passes
+    // the raw argument and forwards the result, so a double-stamp is not
+    // reachable. Stamping unconditionally is what makes suppression impossible.
     const once = stampAgentIdentity("It broke.", identity);
-    expect(stampAgentIdentity(once, identity)).toBe(once);
-    // Including when a DIFFERENT identity would be appended: the body already
-    // carries an attribution, and appending a second one leaves the reader with
-    // two answers and no way to pick.
-    expect(stampAgentIdentity(once, { backend: "claude", model: "claude-opus-4-5" })).toBe(once);
+    const twice = stampAgentIdentity(once, { backend: "claude", model: "claude-opus-4-5" });
+    expect(twice).toContain("claude-opus-4-5");
+    expect(twice.match(/<!-- reporter-agent:/g)?.length).toBe(1);
   });
 
   it("passes the body through untouched when there is no identity", () => {
