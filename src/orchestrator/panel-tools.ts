@@ -1077,6 +1077,58 @@ function isFencedGraphRead(cmd: Record<string, unknown>): boolean {
   return name.startsWith("graph_") && !MUTATING_GRAPH_EDIT_CMDS.has(name);
 }
 
+/**
+ * #1778 — THE FOUR FENCED COMMANDS THAT ARE NOT `graph_*`.
+ *
+ * The panel's `activeWorkflowFenceApplies` does not key on the `graph_` prefix at
+ * all: it fences everything that is not canvas-TARGETLESS, `workflow_open` or
+ * `workflow_new`. Alongside every `graph_*` that covers the four ACTIVE-workflow
+ * mutators — `workflow_save`, `workflow_save_as`, `workflow_rename`,
+ * `workflow_close` — which the panel's own comment names explicitly ("workflow_save*
+ * ignore any path, so they are ALWAYS active").
+ *
+ * Orchestrator-side both repair branches for that refusal WERE keyed on the prefix:
+ * `isMutatingGraphCmd`'s allowlist holds only `graph_*` names, and `isFencedGraphRead`
+ * requires the prefix outright. So these four matched NEITHER. A fence refusal on
+ * `workflow_save` fell past both, past the routing/capability branches, and landed in
+ * the generic `dispatched:false` wrapper — which fires no probe, so
+ * `rebindWorkflowFence`'s `corroborateTabStamp` (#1656, the promotion that lets a
+ * CARRIED-but-confirmed stamp dispatch) never ran.
+ *
+ * That is the reported dead end. In the same session, on the same stamp,
+ * `panel_graph_outline` probed, corroborated and its retry went through, while
+ * `panel_save_workflow({})` was refused with an EMPTY corroboration every time — so a
+ * caller whose loop only retries the save never self-heals. Nothing is written by
+ * either state (the refusal is pre-dispatch, `dispatched:false`), so the cost is a
+ * stuck loop, not data.
+ *
+ * EXPLICIT LIST, deliberately NOT "every non-`graph_` command". Most non-graph
+ * commands the orchestrator sends are canvas-INDEPENDENT Manager/server ops that the
+ * panel exempts from this fence (`CANVAS_INDEPENDENT_COMMANDS`, #602); a negation rule
+ * would claim a fence repair for commands this fence can never raise. Mirrors the
+ * MUTATING_GRAPH_EDIT_CMDS maintenance model — keep in sync with the panel's
+ * `activeWorkflowFenceApplies`.
+ *
+ * `workflow_rename`/`workflow_close` are listed even though the panel EXEMPTS them
+ * when their selector resolves to a genuinely non-active workflow: the exemption
+ * means no refusal is raised in that case, so this predicate is simply never
+ * consulted for it. When one of them IS refused, it was targeting the active canvas —
+ * exactly the state this repairs.
+ */
+const FENCED_WORKFLOW_MUTATOR_CMDS = new Set<string>([
+  "workflow_save",
+  "workflow_save_as",
+  "workflow_rename",
+  "workflow_close",
+]);
+
+/** #1778 — a non-`graph_*` command the panel's active-workflow fence still covers, so
+ *  its refusal deserves the same read-only corroboration a fenced graph edit gets. */
+function isFencedWorkflowMutator(cmd: Record<string, unknown>): boolean {
+  const name = typeof cmd.cmd === "string" ? cmd.cmd : "";
+  return FENCED_WORKFLOW_MUTATOR_CMDS.has(name);
+}
+
 /** True when an error is a TRANSIENT transport/reconnect drop (the tab went away
  *  or was replaced), NOT a genuine command error or a live-but-frozen reply
  *  timeout. Deliberately EXCLUDES "did not reply within N ms" (a backgrounded/
@@ -8328,7 +8380,20 @@ export function makePanelToolCtx(
       //
       // Safe to recommend a retry because a fence refusal is checked BEFORE the handler
       // runs — "Nothing was applied" is structural here, not an echoed claim.
-      if (isWorkflowInstanceMismatch(err) && isMutatingGraphCmd(cmd)) {
+      //
+      // #1778 — and the same is true of the four workflow mutators the panel fences
+      // identically. `isMutatingGraphCmd` alone read this branch's scope off the
+      // `graph_` allowlist rather than off the fence, so `workflow_save` /
+      // `workflow_save_as` / `workflow_rename` / `workflow_close` fell through to the
+      // generic dispatched:false wrapper: no probe, no `corroborateTabStamp`, and a
+      // caller retrying only the save stayed refused forever. They are mutations
+      // refused PRE-dispatch exactly as a graph edit is, so every claim this branch
+      // makes — "NOT applied", the read-only probe, the retry advice — holds for them
+      // verbatim. See isFencedWorkflowMutator.
+      if (
+        isWorkflowInstanceMismatch(err) &&
+        (isMutatingGraphCmd(cmd) || isFencedWorkflowMutator(cmd))
+      ) {
         const name = typeof cmd.cmd === "string" ? cmd.cmd : "panel command";
         const raw = err instanceof Error ? err.message : String(err);
         // The uuid the command CARRIED, read from the panel's own refusal rather than
