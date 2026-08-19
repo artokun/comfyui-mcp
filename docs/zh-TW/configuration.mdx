@@ -1,0 +1,335 @@
+---
+title: "設定"
+description: "環境變數、傳輸方式，以及連線目標的指定。"
+icon: "gear"
+---
+
+所有設定都透過環境變數（寫在伺服器在 `~/.claude/settings.json` 裡的 `env` 塊中）或
+CLI 旗標完成。ComfyUI 目標的優先順序：
+`--comfyui-url` / `COMFYUI_URL` → `COMFYUI_HOST`/`COMFYUI_PORT` → 自動偵測。
+
+## 部署模式
+
+`comfyui-mcp` 在三種模式之一下執行，由環境自動選定：
+
+| 模式 | 觸發條件 | 本機 FS？ | 行程控制？ | WebSocket？ |
+| --- | --- | --- | --- | --- |
+| **本機** | 預設 | 是 | 是 | 是 |
+| **遠端** | `--comfyui-url` / `COMFYUI_URL` 指向非回送主機 | 否 | 否 | 是 |
+| **雲端** | 設定了 `COMFYUI_API_KEY`（指向 Comfy Cloud） | 否 | 否 | 否（HTTP 輪詢） |
+
+需要本機安裝的工具（`restart_comfyui` 配合 `action: "start"` / `apply_manifest` /
+`list_local_models`（`action:"remove"`）/ `get_image (action:"list_outputs")` / 等等）
+在遠端或雲端模式下會回傳明確錯誤。遠端和雲端模式下伺服器會跳過本機 `COMFYUI_PATH`
+自動偵測，這樣過時的本機安裝就不會悄悄把代理本想發給實際目標的上傳或模型下載吃掉
+—— 如果你想混搭，請顯式設定 `COMFYUI_PATH`。
+
+## 連線
+
+<ParamField path="COMFYUI_URL" type="string">
+  ComfyUI 執行個體的完整 URL，例如 `https://my-comfy.example.com`。等價於
+  `--comfyui-url` CLI 旗標。優先於 host/port，並跳過連接埠自動偵測。
+  **路徑前綴會被保留**（例如 `https://host/comfyapi`），這樣反代執行個體能正確路由。當主機
+  是非回送（除 `127.0.0.1` / `localhost` / `::1` / `0.0.0.0` 以外的任何地址）時，
+  伺服器進入**遠端模式**並跳過 `COMFYUI_PATH` 自動偵測。
+</ParamField>
+<ParamField path="COMFYUI_HOST" type="string" default="127.0.0.1">
+  ComfyUI 伺服器的主機。
+</ParamField>
+<ParamField path="COMFYUI_PORT" type="number">
+  ComfyUI 伺服器的連接埠。未設定時自動偵測（先 8188，再 8000）。
+</ParamField>
+<ParamField path="COMFYUI_SSL" type="boolean" default="false">
+  使用 `https`/`wss` 而不是 `http`/`ws`。
+</ParamField>
+<ParamField path="COMFYUI_PATH" type="string">
+  本機 ComfyUI 安裝的絕對路徑。未設定時從常見位置自動偵測（遠端 / 雲端模式下被抑制）。
+  僅本機工具需要它（安裝 / 管理節點、刪除模型、讀記錄、列出輸出檔案）。
+</ParamField>
+
+## 反向代理 / API 閘道後面的遠端執行個體
+
+面向暴露在路徑前綴和 / 或自有驗證層後面的自建 ComfyUI（nginx 路由、API 閘道、SSO 邊緣）
+—— 這**不是** Comfy Cloud：
+
+- `COMFYUI_URL` **會保留路徑前綴**（例如 `https://host/comfyapi`），於是請求走在它下面，
+  而不是打到根上的 `/prompt`、`/system_stats`……
+- `COMFYUI_AUTH_*` 變數給**每一次** ComfyUI 請求掛上通用驗證頭（直接 HTTP 呼叫以及底層
+  用戶端 / WebSocket 庫）。這與雲端模式無關，所以走閘道驗證的執行個體永遠不會被誤讀成
+  Comfy Cloud。
+
+<ParamField path="COMFYUI_AUTH_TOKEN" type="string">
+  給擋在閘道後面的自建 ComfyUI 用的驗證權杖。設定後，會發在每一次 ComfyUI 請求上。
+  從不記入記錄。
+</ParamField>
+<ParamField path="COMFYUI_AUTH_HEADER" type="string" default="Authorization">
+  攜帶權杖的頭名稱，例如 `X-API-Key`。
+</ParamField>
+<ParamField path="COMFYUI_AUTH_SCHEME" type="string" default="Bearer for Authorization, else none">
+  權杖值上的方案前綴，例如 `Bearer`、`Token`。
+</ParamField>
+<ParamField path="CF_ACCESS_CLIENT_ID" type="string">
+  Cloudflare Access **服務權杖** Client ID。與 `CF_ACCESS_CLIENT_SECRET` 一起設定，
+  才能到達擋在 Cloudflare Access 前面的 ComfyUI —— 兩者會（作為
+  `CF-Access-Client-Id` / `CF-Access-Client-Secret`）發在**每一次** ComfyUI 請求上
+  （HTTP 和佇列監視器 WebSocket），於是連接器能過 Access 門，而不是拿到互動式登入頁。
+  與 `COMFYUI_AUTH_TOKEN` 相加；兩者都設定時都生效。從不記入記錄。
+</ParamField>
+<ParamField path="CF_ACCESS_CLIENT_SECRET" type="string">
+  Cloudflare Access 服務權杖 Client Secret（`CF_ACCESS_CLIENT_ID` 的配對）。
+  只有**兩者都設定**時才會傳送 —— 配了一半的權杖會被忽略。從不記入記錄。
+</ParamField>
+
+```bash
+# Authorization: Bearer <token>, requests under /comfyapi
+COMFYUI_URL=https://gateway.example.com/comfyapi COMFYUI_AUTH_TOKEN=<token> npx -y comfyui-mcp@latest
+# custom header: X-API-Key: <token>
+COMFYUI_URL=https://gateway.example.com/comfyapi COMFYUI_AUTH_HEADER=X-API-Key COMFYUI_AUTH_TOKEN=<token> npx -y comfyui-mcp@latest
+# ComfyUI behind Cloudflare Access — pass a service token (keeps the human sign-in page up)
+COMFYUI_URL=https://comfy.example.com CF_ACCESS_CLIENT_ID=<id>.access CF_ACCESS_CLIENT_SECRET=<secret> npx -y comfyui-mcp@latest
+```
+
+## Comfy Cloud
+
+設定 `COMFYUI_API_KEY` 會把伺服器切進**雲端模式**：所有基於 HTTP 的原語（排入佇列、歷史、
+系統狀態、佇列、檢視、上傳）經 HTTPS 路由到 `cloud.comfy.org`，並用 `X-API-Key` 驗證；
+WebSocket 和本機 FS / 行程工具會擲出明確的 `CLOUD_UNSUPPORTED` 錯誤。架構和
+`cloud-client` 排程最初由 [@picoSols](https://github.com/picoSols) 貢獻。
+
+<Note>
+  **Comfy-Org 提供 [官方代理工具](https://docs.comfy.org/agent-tools)** —— Comfy Cloud MCP（公開測試版）和 Comfy In-App Agent（私有內測版），都由 Comfy 團隊維護，都跑在 Comfy Cloud 上。如果你只瞄準 Comfy Cloud，那多半是正確選擇；請看[本機 vs. Comfy Cloud](/docs/zh-TW/local-vs-comfy-cloud)。下面 `comfyui-mcp` 的雲端模式最適合你想用一個 MCP 覆寫本機 / 遠端 / 雲端，或你今天就需要它的時候（MIT，現在就在發貨）。
+</Note>
+
+<ParamField path="COMFYUI_API_KEY" type="string">
+  Comfy Cloud API 金鑰。設定後，伺服器進入雲端模式，與設定的雲端 URL 通訊，而不是本機
+  ComfyUI。從不記入記錄。
+</ParamField>
+<ParamField path="COMFYUI_CLOUD_URL" type="string" default="https://cloud.comfy.org">
+  覆寫 Comfy Cloud 端點（主要用於測試 / 預發）。
+</ParamField>
+
+## 權杖
+
+<ParamField path="CIVITAI_API_TOKEN" type="string">
+  CivitAI API 權杖。用於有門禁 / 搶先體驗的下載。作為 bearer 頭髮送（從不放進 URL）。
+</ParamField>
+<ParamField path="HUGGINGFACE_TOKEN" type="string">
+  HuggingFace 權杖，用於更高的搜尋 / 下載速率限制。
+</ParamField>
+<ParamField path="HF_ENDPOINT" type="string">
+  面向網路受限地區的 HuggingFace 鏡像端點（例如
+  `https://hf-mirror.com`）。所有 `huggingface.co` API 和下載 URL 都會改寫到這個主機；
+  你的 `HUGGINGFACE_TOKEN` 仍會跟著走，給有門禁的儲存庫用。這是事實上的標準變數 ——
+  `huggingface_hub` 認的就是它。
+</ParamField>
+<ParamField path="CIVITAI_ENABLED" type="string">
+  設為 `0` 可完全停用 Civitai 存取（civitai.com 不可達的地區）。使用者主動發起的
+  Civitai 工具會立刻以明確的「已被設定停用」訊息失敗；背景出處查詢會安靜地空操作。
+</ParamField>
+<ParamField path="GITHUB_TOKEN" type="string">
+  技能生成和節點中繼資料獲取用來避開速率限制的 GitHub 權杖。
+</ParamField>
+<ParamField path="COMFY_API_KEY" type="string">
+  透過 `/prompt` 的 `extra_data` 酬載轉發給託管 API 節點的 comfy.org API 金鑰。
+  如果環境變數未設定，金鑰會從 `~/.comfy-api-key` 讀取（去掉首尾空白的檔案內容；
+  建議 `chmod 600`）—— 方便無介面環境把秘密留在環境 / 行程清單之外。
+</ParamField>
+<ParamField path="REGISTRY_ACCESS_TOKEN" type="string">
+  `node_pack`（`action: "publish"`）發布節點包時使用的 Comfy Registry API 金鑰。
+  透過環境變數傳給 comfy-cli，從不放進參數或記錄。
+</ParamField>
+
+## 行為
+
+<ParamField path="COMFYUI_WORKFLOWS_DIR" type="string" default="~/.comfyui-mcp/workflows">
+  掃描 `*.json` 工作流程的目錄。每個都會變成自動載入的執行工具。
+</ParamField>
+<ParamField path="LOG_LEVEL" type="string" default="info">
+  記錄詳細程度：`debug`、`info`、`warn`、`error`。
+</ParamField>
+
+## 模型下載
+
+<ParamField path="COMFYUI_DOWNLOAD_CACHE_DIR" type="string" default="~/.comfyui-mcp/cache">
+  模型下載的內容定址快取。同一 URL 的重複或併發下載會重用快取檔案；目標模型路徑透過
+  硬連結物化（失敗則回退到複製）。
+</ParamField>
+<ParamField path="COMFYUI_LRU_CACHE_SIZE_GB" type="number" default="0">
+  下載快取的最大體積，單位 GB。`0` 停用驅逐；超過上限後，下載完成時會刪除最近最少使用
+  的快取檔案。
+</ParamField>
+
+## 行程監管（本機安裝）
+
+適用於 comfyui-mcp 管理本機 ComfyUI 行程時的 `restart_comfyui`（動作 `start` 和
+`restart`）。
+
+<ParamField path="COMFYUI_STARTUP_CHECK_INTERVAL_S" type="number" default="1">
+  拉起 ComfyUI 後，就緒探測之間的秒數。
+</ParamField>
+<ParamField path="COMFYUI_STARTUP_CHECK_MAX_TRIES" type="number" default="60">
+  報告啟動尚未確認之前的最大就緒探測次數。按預設 1 秒間隔，這是大約 60 秒的預算。
+  它從 20 提高過來，因為帶一套正常自訂節點的 ComfyUI 冷啟動時，經常超過 20 秒才
+  回答 `/system_stats`，更短的預算會在健康執行個體即將就緒的前一刻報告啟動未確認。
+
+  預算耗盡意味著啟動**尚未確認** —— 不是它失敗了。
+</ParamField>
+<ParamField path="COMFYUI_ALWAYS_RESTART" type="boolean" default="false">
+  啟用後，意外退出的 ComfyUI 行程會自動重新啟動。故意的 `restart_comfyui` 配合
+  `action: "stop"` 永遠不會被重新啟動。
+</ParamField>
+<ParamField path="COMFYUI_RESTART_MAX_ATTEMPTS" type="number" default="3">
+  重新啟動視窗內允許的最大自動重新啟動次數，超過就放棄。
+</ParamField>
+<ParamField path="COMFYUI_RESTART_WINDOW_S" type="number" default="60">
+  統計自動重新啟動次數的滑動視窗（秒）。
+</ParamField>
+
+## 面板協調器與橋接
+
+[comfyui-mcp-panel](https://github.com/artokun/comfyui-mcp-panel) 側邊欄由**面板協調器**
+驅動 —— 一個背景行程，擁有回送 WebSocket 橋接，並在你的 **Claude 訂閱**上為每個面板
+分頁跑一個自主 Claude Agent SDK 工作階段（不需要 API 金鑰）。面板包會在 ComfyUI 載入時
+自動啟動它，所以通常不用手跑任何東西 —— 請看[側邊欄面板](/docs/zh-TW/panel)。要自己跑：
+
+```bash
+npx -y comfyui-mcp@latest connect
+```
+
+<ParamField path="COMFYUI_MCP_PANEL_ORCHESTRATOR" type="boolean" default="false">
+  跑面板協調器而不是 MCP 伺服器（與 `--panel-orchestrator` 相同）。
+</ParamField>
+<ParamField path="COMFYUI_MCP_PANEL_MODEL" type="string" default="claude-opus-5">
+  背景面板代理用的模型。
+</ParamField>
+<ParamField path="COMFYUI_MCP_BRIDGE_PORT" type="number" default="9180">
+  **面板協調器**擁有的面板 WebSocket 橋接的回送連接埠（預設 **9180**）。
+</ParamField>
+<ParamField path="COMFYUI_MCP_STALL_S" type="number" default="180">
+  協調器佇列 / 算圖看門狗的算圖停滯門檻值（秒）：正在跑的任務如果節點 / 進度這麼久沒有
+  推進，就會被標成停滯，並在代理下一輪前面預置一行 STALL/BACKLOG 說明。影片步驟
+  本來就慢，所以預設值偏高。夾在 **15–3600 秒**。面板的**算圖停滯警告（秒）**設定
+  （設定 → Comfy MCP Agent → General）會透過 `set_config` 橋接幀**即時**覆寫它 ——
+  不用重新連線 —— 並優先於這個環境變數值。
+</ParamField>
+
+### 安全橋接（驅動遠端 / 雲端執行個體）
+
+當 `connect <url>` 瞄準一台**遠端 https** ComfyUI（例如 RunPod 執行個體）時，執行個體的 HTTPS
+面板頁面沒法對你機器上的橋接開啟普通 `ws://127.0.0.1` 通訊端 —— 瀏覽器會攔（混合內容 /
+Private Network Access）。協調器會自動升級到安全 `wss://` 通道，於是不用提示、任何
+瀏覽器都能用。完整走查請看[雲端部署](/docs/zh-TW/cloud-deployment)；要跑自己的通道基礎
+設施而不是預設 cloudflared 快速通道，請看[自架中繼](/docs/zh-TW/self-hosted-relay)。
+
+<ParamField path="COMFYUI_MCP_INSECURE_BRIDGE" type="boolean" default="false">
+  即使在驅動遠端 https 目標時，也強制使用普通回送 `ws://` 橋接，而不是自動升級到安全
+  通道。如果你透過自己的 SSH 連接埠轉送到達執行個體（於是它的頁面已經是回送源），又不想有
+  Cloudflare 相依，就用這個。與 `--insecure-bridge` 相同。
+</ParamField>
+<ParamField path="COMFYUI_MCP_TUNNEL_BACKEND" type="string" default="cloudflared">
+  遠端目標用哪一種安全橋接後端：`cloudflared`（預設 —— 一條臨時快速通道，零設定）或
+  `relay`（撥到你運維的 [自架中繼](/docs/zh-TW/self-hosted-relay)，換穩定域名、沒有第三方
+  快速通道相依）。只在安全模式啟用時生效（遠端 https 目標，且沒有
+  `COMFYUI_MCP_INSECURE_BRIDGE`）。
+</ParamField>
+<ParamField path="COMFYUI_MCP_RELAY_URL" type="string">
+  你中繼的 `wss://` URL。`COMFYUI_MCP_TUNNEL_BACKEND=relay` 時必填。
+</ParamField>
+<ParamField path="COMFYUI_MCP_RELAY_KEY" type="string">
+  選用的共享金鑰，從根上限制誰能在你的中繼上開工作階段（`?key=`），與按工作階段的橋接權杖無關。
+  只在中繼模式下有意義，並且只在你的中繼部署設定了 `RELAY_ACCESS_KEY` 時才有用。
+</ParamField>
+
+## 任務監視
+
+排入佇列任務的完成通知由監視器追蹤（有 WebSocket 就用，否則 HTTP 輪詢）。
+
+<ParamField path="COMFYUI_JOB_TIMEOUT_S" type="number" default="1800">
+  監視器在放棄之前等待任務完成的最大秒數。很長的影片算圖或很重的多階段工作流程請調高。
+  （任務本身會繼續在 ComfyUI 裡跑 —— 被放棄的只是完成通知。）
+</ParamField>
+<ParamField path="COMFYUI_JOB_POLL_INTERVAL_S" type="number" default="2">
+  監視任務時，HTTP 歷史輪詢之間的秒數。
+</ParamField>
+<ParamField path="COMFYUI_MCP_INTERRUPT_S" type="number" default="30">
+  `queue`（action:"cancel"）的取消兌現視窗（秒）：等待中斷真正停下正在跑的任務多久，
+  再升級（到 `/free`，然後報告算圖 WEDGED）。ComfyUI 只在節點 / 步驟之間檢查中斷旗標，
+  所以持續好幾分鐘的單步不會立刻理會它 —— 這段等待就是用來偵測真正楔死的。
+</ParamField>
+
+## 限制工具面
+
+對**託管**部署 —— 共享的 Open WebUI、團隊前端 —— 操作員不是那個在提示的人。工具預設 /
+允許 / 拒絕變數會把工具從模型那裡完全扣下：被扣下的工具從不註冊，所以它不在
+`tools/list` 裡，不在 `call_tool` 裡，模型也永遠不知道它存在。動作允許清單是必須保持
+可見的工具的更窄伴侶：工具仍註冊，但未列出的動作會在處理器跑之前被拒絕。
+
+<ParamField path="COMFYUI_MCP_TOOL_PRESET" type="string">
+  `safe` —— 除了會改機器或模型庫的工具之外的一切。安裝、刪除和重新啟動被扣下。**算圖仍然
+  能用，隨之而來的那些也能用**：排入佇列生成、`list_api_nodes`（會花付費額度的託管合作
+  節點），以及 `report_issue`（提交公開 GitHub issue）。如果共享前端的使用者不能花錢或
+  發布，請用 `readonly`。
+  `readonly` —— 只檢查：不排入佇列算圖，不寫任何東西，不花錢。
+  兩者也會扣下整塊 `panel_*` 面，因為它驅動的是即時共享畫布。
+</ParamField>
+<ParamField path="COMFYUI_MCP_TOOL_DENY" type="string">
+  要扣下的逗號分隔工具名，例如 `restart_comfyui,download_model`。末尾 `*` 匹配一族：
+  `train_*`。疊在任何預設**以及**允許清單之上。
+</ParamField>
+<ParamField path="COMFYUI_MCP_TOOL_ALLOW" type="string">
+  逗號分隔的允許清單。設定後，工具面**正好**是這些工具 —— 沒點名的一律扣下，即使沒有任何
+  拒絕規則提到它。用它把個別工具從預設裡撈回來：`COMFYUI_MCP_TOOL_PRESET=safe` 加上
+  `COMFYUI_MCP_TOOL_ALLOW=panel_graph_outline,panel_query_graph`。
+
+  只有**確切名字**才能把工具從預設裡撈回來。通配（`list_*`）會像其他條目一樣收窄工具面，
+  但不能重新開啟預設關掉的東西 —— 否則 `ALLOW=list_*` 會把 `list_packs` 重新放進來，
+  它的 `install_deps` 動作會安裝並執行第三方程式碼，而 `ALLOW=*` 會讓每個預設都失效。
+</ParamField>
+<ParamField path="COMFYUI_MCP_TOOL_ACTION_ALLOW" type="string">
+  逗號分隔、確切的 `tool:action` 對。設定後，每一個帶 `action` 欄位的工具呼叫都必須匹配
+  其中一對；沒出現在清單裡的帶動作工具不能派發任何動作。這用來限制名字本身已經看不出
+  殺傷半徑的合併工具 —— 例如，允許佇列檢查和定向取消，同時不允許佇列編輯或全域清空：
+
+  `queue:list,queue:status,queue:cancel,enqueue_workflow:enqueue`
+
+  把它和 `COMFYUI_MCP_TOOL_ALLOW` 配對，兩個維度都能圈住。規則是確切的；通配會被拒絕，
+  這樣升級後新加的動作不會自動被允許。
+</ParamField>
+
+```bash A hosted deployment that cannot install or restart anything
+COMFYUI_MCP_TOOL_PRESET=safe npx comfyui-mcp@latest --http --host 0.0.0.0 --port 9100
+```
+
+```bash A generation operator that can inspect, enqueue, and cancel—but not install or clear queues
+COMFYUI_MCP_TOOL_ALLOW=get_system_stats,get_history,create_workflow,enqueue_workflow,queue \
+COMFYUI_MCP_TOOL_ACTION_ALLOW=get_system_stats:stats,get_system_stats:logs,get_system_stats:health,get_history:list,get_history:diagnose,create_workflow:create,create_workflow:modify,create_workflow:validate,create_workflow:node_info,enqueue_workflow:enqueue,queue:list,queue:status,queue:cancel \
+npx comfyui-mcp@latest
+```
+
+<Warning>
+  這是對著**模型**和在提示它的人的邊界 —— 不是對著設定環境的人，那個人可以直接取消設定；
+  也不是把不受信任的一方擋在 ComfyUI 主機外的替代品。
+
+  錯誤設定會**拒絕啟動**，而不是無限制地啟動：未知的預設名，或已設定但為空的變數
+  （compose 檔案裡未展開的 `${VAR}`），會帶著原因中止。在你以為它被限制時帶著完整工具面
+  起來，比完全沒有過濾器更糟。
+</Warning>
+
+## 傳輸
+
+伺服器預設說 **stdio**（Claude Code 期望的）。它也可以為遠端 / 多用戶端設定提供
+**streamable-HTTP** 傳輸。
+
+<ParamField path="MCP_TRANSPORT" type="string" default="stdio">
+  `stdio` 或 `http`。等價旗標：`--stdio`、`--http`。
+</ParamField>
+<ParamField path="MCP_HOST" type="string" default="127.0.0.1">
+  HTTP 繫結主機（配合 `--http`）。旗標：`--host`。
+</ParamField>
+<ParamField path="MCP_PORT" type="number" default="9100">
+  HTTP 繫結連接埠（配合 `--http`）。旗標：`--port`。
+</ParamField>
+
+```bash Run the HTTP transport
+npx comfyui-mcp@latest --http --host 0.0.0.0 --port 9100 --comfyui-url https://my-comfy.example.com
+```

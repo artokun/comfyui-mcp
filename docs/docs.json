@@ -361,8 +361,29 @@
                 "pages": [
                   "es/index",
                   "es/quickstart",
+                  "es/using-tools",
+                  "es/local-vs-comfy-cloud",
                   "es/installation",
+                  "es/roadmap"
+                ]
+              },
+              {
+                "group": "Configuración",
+                "pages": [
+                  "es/configuration",
+                  "es/remote-connector",
+                  "es/cloud-deployment",
+                  "es/docker",
+                  "es/self-hosted-relay",
+                  "es/concepts",
+                  "es/plugin",
                   "es/panel",
+                  "es/apps",
+                  "es/mobile",
+                  "es/third-party-hosts",
+                  "es/backends",
+                  "es/local-llms",
+                  "es/arena",
                   "es/troubleshooting"
                 ]
               }
@@ -381,8 +402,29 @@
                 "pages": [
                   "zh-TW/index",
                   "zh-TW/quickstart",
+                  "zh-TW/using-tools",
+                  "zh-TW/local-vs-comfy-cloud",
                   "zh-TW/installation",
+                  "zh-TW/roadmap"
+                ]
+              },
+              {
+                "group": "設定",
+                "pages": [
+                  "zh-TW/configuration",
+                  "zh-TW/remote-connector",
+                  "zh-TW/cloud-deployment",
+                  "zh-TW/docker",
+                  "zh-TW/self-hosted-relay",
+                  "zh-TW/concepts",
+                  "zh-TW/plugin",
                   "zh-TW/panel",
+                  "zh-TW/apps",
+                  "zh-TW/mobile",
+                  "zh-TW/third-party-hosts",
+                  "zh-TW/backends",
+                  "zh-TW/local-llms",
+                  "zh-TW/arena",
                   "zh-TW/troubleshooting"
                 ]
               }
@@ -401,8 +443,29 @@
                 "pages": [
                   "ru/index",
                   "ru/quickstart",
+                  "ru/using-tools",
+                  "ru/local-vs-comfy-cloud",
                   "ru/installation",
+                  "ru/roadmap"
+                ]
+              },
+              {
+                "group": "Настройки",
+                "pages": [
+                  "ru/configuration",
+                  "ru/remote-connector",
+                  "ru/cloud-deployment",
+                  "ru/docker",
+                  "ru/self-hosted-relay",
+                  "ru/concepts",
+                  "ru/plugin",
                   "ru/panel",
+                  "ru/apps",
+                  "ru/mobile",
+                  "ru/third-party-hosts",
+                  "ru/backends",
+                  "ru/local-llms",
+                  "ru/arena",
                   "ru/troubleshooting"
                 ]
               }
@@ -421,8 +484,29 @@
                 "pages": [
                   "ar/index",
                   "ar/quickstart",
+                  "ar/using-tools",
+                  "ar/local-vs-comfy-cloud",
                   "ar/installation",
+                  "ar/roadmap"
+                ]
+              },
+              {
+                "group": "الإعدادات",
+                "pages": [
+                  "ar/configuration",
+                  "ar/remote-connector",
+                  "ar/cloud-deployment",
+                  "ar/docker",
+                  "ar/self-hosted-relay",
+                  "ar/concepts",
+                  "ar/plugin",
                   "ar/panel",
+                  "ar/apps",
+                  "ar/mobile",
+                  "ar/third-party-hosts",
+                  "ar/backends",
+                  "ar/local-llms",
+                  "ar/arena",
                   "ar/troubleshooting"
                 ]
               }
@@ -441,8 +525,29 @@
                 "pages": [
                   "pt-BR/index",
                   "pt-BR/quickstart",
+                  "pt-BR/using-tools",
+                  "pt-BR/local-vs-comfy-cloud",
                   "pt-BR/installation",
+                  "pt-BR/roadmap"
+                ]
+              },
+              {
+                "group": "Configuração",
+                "pages": [
+                  "pt-BR/configuration",
+                  "pt-BR/remote-connector",
+                  "pt-BR/cloud-deployment",
+                  "pt-BR/docker",
+                  "pt-BR/self-hosted-relay",
+                  "pt-BR/concepts",
+                  "pt-BR/plugin",
                   "pt-BR/panel",
+                  "pt-BR/apps",
+                  "pt-BR/mobile",
+                  "pt-BR/third-party-hosts",
+                  "pt-BR/backends",
+                  "pt-BR/local-llms",
+                  "pt-BR/arena",
                   "pt-BR/troubleshooting"
                 ]
               }
@@ -461,8 +566,29 @@
                 "pages": [
                   "tr/index",
                   "tr/quickstart",
+                  "tr/using-tools",
+                  "tr/local-vs-comfy-cloud",
                   "tr/installation",
+                  "tr/roadmap"
+                ]
+              },
+              {
+                "group": "Yapılandırma",
+                "pages": [
+                  "tr/configuration",
+                  "tr/remote-connector",
+                  "tr/cloud-deployment",
+                  "tr/docker",
+                  "tr/self-hosted-relay",
+                  "tr/concepts",
+                  "tr/plugin",
                   "tr/panel",
+                  "tr/apps",
+                  "tr/mobile",
+                  "tr/third-party-hosts",
+                  "tr/backends",
+                  "tr/local-llms",
+                  "tr/arena",
                   "tr/troubleshooting"
                 ]
               }

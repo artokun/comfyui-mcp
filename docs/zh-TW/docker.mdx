@@ -1,0 +1,107 @@
+---
+title: "Docker 與 Compose"
+description: "把 ComfyUI 當作 docker-compose 服務來跑，並把 comfyui-mcp 連上去 —— 以及為什麼 comfyui-mcp 本身永遠不該做成 compose 服務。"
+icon: "docker"
+---
+
+## comfyui-mcp 是 stdio —— 它不能做成 compose 服務
+
+`comfyui-mcp` 是一個 **stdio MCP 伺服器**。它沒有連接埠，也不在網路上暴露任何東西：
+MCP 用戶端（Claude Code、Cursor、MCP 橋接……）會**把它作為子行程拉起**，透過
+stdin/stdout 交談。
+
+所以在 `docker-compose.yml` 里加一個 `comfyui-mcp` 服務是死衚衕 —— 它會啟動，沒人
+跟它說話，然後退出。幾乎每個把 ComfyUI 接到 compose 的人都會踩這個坑，因為一份正確的
+compose 檔案看起來像是「少」了一個服務。其實沒有：你 compose 的是 **ComfyUI**，MCP
+伺服器跑在 MCP 用戶端所在的地方，透過普通 HTTP 用 `COMFYUI_URL` 到達 ComfyUI。
+
+<Note>
+  啟動伺服器的 `npx` 命令要求跑它的那台機器（或容器）上有 **Node.js >= 22** ——
+  精簡基礎映像檔最容易踩的坑。
+</Note>
+
+## 兩種部署形態
+
+<CardGroup cols={2}>
+  <Card title="本機 npx + 本機 ComfyUI" icon="laptop">
+    預設形態。ComfyUI 直接跑在你的機器上；MCP 用戶端拉起
+    `npx -y comfyui-mcp@latest`，它會自動偵測本機安裝和連接埠。不需要設定。請看
+    [安裝](/docs/zh-TW/installation)。
+  </Card>
+  <Card title="本機 npx + 容器化 / 遠端 ComfyUI" icon="docker">
+    ComfyUI 跑在容器裡（或另一台主機上）；MCP 用戶端仍然在本機拉起 `comfyui-mcp`，
+    用 `COMFYUI_URL`（或 `--comfyui-url`）指向它。非回送 URL 會讓伺服器進入
+    **遠端模式**：所有 HTTP 工具都能用 —— 包括透過 ComfyUI-Manager HTTP API 安裝
+    自訂節點。需要檔案系統或本機行程的工具（安裝 ComfyUI 本身、comfy-cli 操作、
+    讀記錄、刪除模型檔案）會回傳明確錯誤。
+  </Card>
+</CardGroup>
+
+## 範例：docker-compose 裡的 ComfyUI
+
+儲存庫裡有一份開箱即用的例子，在
+[`docker/compose/`](https://github.com/artokun/comfyui-mcp/tree/main/docker/compose)
+—— ComfyUI 作為一個服務（預設 NVIDIA，AMD/ROCm 變體在註釋裡），模型與輸出的繫結
+掛載，以及寫在檔案頭註釋裡的用戶端設定：
+
+```yaml
+services:
+  comfyui:
+    image: yanwk/comfyui-boot:cu130-slim-v2   # community image; :rocm for AMD
+    ports:
+      - "8188:8188"
+    volumes:
+      - ./storage/models:/root/ComfyUI/models
+      - ./storage/custom_nodes:/root/ComfyUI/custom_nodes
+      - ./storage/input:/root/ComfyUI/input
+      - ./storage/output:/root/ComfyUI/output
+      - ./storage/user:/root/ComfyUI/user
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+```
+
+然後把 MCP 用戶端指向這個容器。在**主機**上（常見情況 —— Claude Code 和容器在同一台
+機器），用發布出來的連接埠：
+
+```json
+{
+  "mcpServers": {
+    "comfyui": {
+      "command": "npx",
+      "args": ["-y", "comfyui-mcp@latest"],
+      "env": {
+        "COMFYUI_URL": "http://localhost:8188"
+      }
+    }
+  }
+}
+```
+
+如果 MCP 用戶端跑在**同一網路上的另一個 compose 服務裡**（例如給 Open WebUI 做前端的
+MCP-to-HTTP 橋接），請用 **compose 服務名**，不要用 `localhost`：
+
+```
+COMFYUI_URL=http://comfyui:8188
+```
+
+這種佈局裡，拉起 `comfyui-mcp` 的是橋接服務，所以它的映像檔必須帶 Node.js >= 22，並且能
+透過 `npx -y comfyui-mcp@latest` 啟動伺服器。橋接是第三方軟體 —— 按它自己的文件設定；
+範例 compose 檔案裡有一段註釋掉的草圖。
+
+## AMD / ROCm 注意事項
+
+- 使用 `yanwk/comfyui-boot:rocm` 映像檔標籤，並在範例裡取消註釋 ROCm 透傳 —— 人們常漏
+  的幾處：`devices: [/dev/kfd, /dev/dri]`、`group_add: [video]`、
+  `security_opt: [seccomp:unconfined]`。
+- `comfyui-mcp` 本身**沒有 GPU/CUDA 相依** —— ROCm 主機完全支援。
+  [代理面板](/docs/zh-TW/panel) 是一個 **ComfyUI 擴充**，不是服務；當你用外部前端當
+  介面時，它可以不裝。
+- 本儲存庫的 [`docker/runpod/`](https://github.com/artokun/comfyui-mcp/tree/main/docker/runpod)
+  是一份 **面向 CUDA 的 RunPod 雲端映像檔**（請看
+  [雲端部署](/docs/zh-TW/cloud-deployment)），不是通用 ComfyUI 映像檔 ——
+  AMD 使用者不該從那裡起步。

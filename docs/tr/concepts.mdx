@@ -1,0 +1,95 @@
+---
+title: "Nasıl çalışır"
+description: "Araçların ardındaki model — taşımalar, ComfyUI-Manager API'si ve yerel/uzak/bulut kipleri."
+icon: "diagram-project"
+---
+
+## Zihinsel model
+
+ComfyUI MCP, **çalışan bir ComfyUI örneği** üzerinde ince, iyi tanımlanmış bir
+katmandır. Araçların çoğu o örnekle HTTP/WebSocket API'si üzerinden konuşur;
+bu yüzden ComfyUI yerel, uzak (`--comfyui-url`) ya da
+[Comfy Cloud](https://cloud.comfy.org) (`COMFYUI_API_KEY`) olsun aynı şekilde
+çalışırlar.
+
+<Steps>
+  <Step title="Üretim ve iş akışları → ComfyUI HTTP API">
+    `generate_image`, `enqueue_workflow`, kuyruk/geçmiş/sistem-istatistikleri ve
+    iş akışı oluşturma araçları ComfyUI'nin `/prompt`, `/queue`, `/history`,
+    `/object_info` vb. uç noktalarını çağırır. Kuyruğa alma ateşle-unut:
+    hemen bir `prompt_id` alırsınız ve sonuçlar bir tamamlanma bildirimiyle
+    gelir. Bulut kipinde alternatif bir `cloud-client` aynı işlemleri
+    `X-API-Key` üzerinden `cloud.comfy.org`'a dağıtır.
+  </Step>
+  <Step title="Özel düğümler ve modeller → ComfyUI-Manager (HTTP), alt süreç yedeğiyle">
+    Düğüm kur/güncelle/anlık görüntü/bisect ve iş akışı bağımlılık kurulumları
+    [ComfyUI-Manager](https://github.com/Comfy-Org/ComfyUI-Manager) HTTP API'sini
+    yeğler (böylece uzak örneklere karşı da çalışırlar); API işi yapamadığında
+    yerel bir kurulumda `cm-cli` / `git` / `pip`/`uv` yedeğine düşer.
+  </Step>
+  <Step title="Kurulum ve dosya sistemi işlemleri → yalnızca yerel">
+    ComfyUI kurmak, çekirdeği güncellemek, model dosyalarını silmek, sunucu
+    günlüklerini okumak ve çıktı dizinini listelemek yerel dosya sisteminde
+    iş görür. Bilinen bir `COMFYUI_PATH` gerektirirler ve uzak ya da bulut
+    kipinde açık bir hata döndürürler.
+  </Step>
+  <Step title="WebSocket → yerel + uzak, bulut değil">
+    İş tamamlanma bildirimleri varsa ComfyUI'nin WebSocket'ine tutunur. Comfy
+    Cloud'un WebSocket'i yoktur — iş izleyici mevcut HTTP yoklama yoluna düşer.
+  </Step>
+</Steps>
+
+<Note>
+  Parmak kuralı: bağlı sunucuyu **okuyan ya da çalıştıran** her şey her kipte
+  çalışır; **yazılım kuran ya da diskteki dosyalara dokunan** her şey yerel bir
+  kurulum ister. Tam özellik denklik tablosu
+  [Yapılandırma → Dağıtım kipleri](/docs/tr/configuration#dağıtım-kipleri)
+  sayfasındadır.
+</Note>
+
+## Kendini onarma: kuyruk/işleme gözcüsü
+
+Sıkışmış yüksek çözünürlüklü bir örnekleyici adımı, ajanın göremediği ya da
+öldüremediği bir zombi işlemenin arkasına iş yığmasına izin verirdi. Üç elden
+geldiğince koruma o boşluğu kapatır; böylece ajan sıkışmış bir işlemenin
+arkasına körlemesine yeniden kuyruk eklemeyi bırakır:
+
+- **Geri basınç** — `panel_run`, bir işleme zaten çalışıyorken sonucuna bir
+  QUEUE WARNING ekler; böylece ajan onun arkasına yığılmaz.
+- **Takılma saptama** — ComfyUI'ye edilgen bir WebSocket çalışan istemi /
+  düğümü / ilerlemeyi izler; eşiğin ötesinde ilerlemeyi bırakan bir adım
+  ([`COMFYUI_MCP_STALL_S`](/docs/tr/configuration#panel-orkestratörü-ve-köprü),
+  varsayılan 180 sn) ajanın sonraki turuna tek satırlık bir STALL/BACKLOG notu
+  ekler.
+- **Yükselen iptal** — `queue` (action:"cancel") keser, işin gerçekten
+  durduğunu **doğrular**
+  ([`COMFYUI_MCP_INTERRUPT_S`](/docs/tr/configuration#görev-izleme) içinde,
+  varsayılan 30 sn), sonra `/free`'ye yükselir ve hâlâ ölmüyorsa işlemeyi
+  WEDGED bildirir (`restart_comfyui` önererek); `clear_pending` bekleyen tüm
+  işleri aynı çağrıda düşürür.
+
+Hepsi başarısızlığa dayanıklıdır: gözcü WebSocket'i hiç açılmazsa hiçbir şey
+değişmez. Ajan ayrıca `get_image (action:"analyze_color")` ile bir görselin
+renkleri hakkında bir görüş gidiş-dönüşü olmadan akıl yürütebilir (baskın
+palet, ortalama + parlaklık istatistikleri, karşıtlık denetimleri).
+
+## Araç kategorileri
+
+<CardGroup cols={2}>
+  <Card title="Görsel üretimi" icon="image" href="/docs/tools/image-generation" />
+  <Card title="İş akışı çalıştırma" icon="play" href="/docs/tools/workflow-execution" />
+  <Card title="İş akışı oluşturma" icon="pen-ruler" href="/docs/tools/workflow-authoring" />
+  <Card title="İş akışı kitaplığı" icon="folder-open" href="/docs/tools/workflow-library" />
+  <Card title="Varlıklar ve görseller" icon="images" href="/docs/tools/assets-images" />
+  <Card title="Modeller" icon="box" href="/docs/tools/models" />
+  <Card title="Özel düğümler" icon="puzzle" href="/docs/tools/custom-nodes" />
+  <Card title="API düğümleri" icon="cloud" href="/docs/tools/api-nodes" />
+  <Card title="Kurulum ve ortam" icon="wrench" href="/docs/tools/install-environment" />
+  <Card title="Süreç denetimi" icon="power" href="/docs/tools/process-control" />
+  <Card title="Varsayılanlar, istatistikler ve beceriler" icon="sliders" href="/docs/tools/defaults-stats-skills" />
+</CardGroup>
+
+<Info>
+  Araç referansı canlı MCP araç şemalarından üretilir (`npm run docs:gen`);
+  böylece koddan asla sapmaz.
+</Info>

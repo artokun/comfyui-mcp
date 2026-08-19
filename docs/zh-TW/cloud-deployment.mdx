@@ -1,0 +1,198 @@
+---
+title: "雲端部署（RunPod）"
+description: "不用離開代理面板，就能為 ComfyUI 部署、連線、監視並停止一台雲 GPU 執行個體 —— 一鍵部署、誠實的本機⇄執行個體主機切換、即時費用 / GPU 狀態，以及空閒自動停止。或者一條命令驅動已有執行個體。"
+icon: "cloud"
+---
+
+沒有本機 GPU —— 或者想按需要一塊更大的？把 ComfyUI 部署到一台 **雲 GPU 執行個體**，再用
+跑在**你**機器上、用你自己的 Claude 或 ChatGPT 訂閱的代理，用自然語言驅動它。
+
+<Note>
+執行個體只提供 **ComfyUI + Manager + 代理面板 UI**。代理的大腦
+（[面板協調器](/docs/zh-TW/panel)）跑在**你自己的機器上**，用你自己的訂閱 —— 所以雲執行個體
+絕不會把 GPU 小時燒掉在 LLM 上，API 金鑰和代理登入也永遠不會碰到那台盒子。請看
+[拓撲](#拓撲代理跑在哪)。
+</Note>
+
+## 一鍵模板（最快路徑）
+
+預建映像檔啟動時就**準備好被代理面板驅動** —— ComfyUI +
+[代理面板](https://github.com/artokun/comfyui-mcp-panel) +
+ComfyUI-Manager v2 已經烤進去，不用再設定：
+
+[![Deploy on RunPod](https://img.shields.io/badge/Deploy_on-RunPod-673AB7?style=for-the-badge)](https://console.runpod.io/deploy?template=bnqtkvcer3&ref=dkx71w9b)
+
+1. 點 **Deploy on RunPod** 並選一塊 GPU（RTX 5090 / 任何 Blackwell 或 Ada 卡都能用
+   —— 映像檔帶 cu128 torch）。
+2. 保持模板預設：暴露 HTTP 連接埠 **3000**，並把網路磁碟區掛在 **`/workspace`**。
+3. 等執行個體起來。一張會自動重新整理的「ComfyUI is starting…」頁面會一直服務到準備好
+   （ComfyUI 初始化大約 30–60 秒）。
+
+然後跳到 [從你的機器連線](#從你的機器連線)。
+
+## 從代理面板部署並控制（v0.44+）
+
+從 **comfyui-mcp 0.44** 起，你完全不用碰 RunPod 控制台，也不用跑 CLI ——
+[代理面板](/docs/zh-TW/panel) 裡有一塊 **RunPod 控制面板**，替你部署、連線、監視和停止
+執行個體，同一張控制表也隨 [手機 App](/docs/zh-TW/mobile) 一起發貨。
+
+1. **金鑰設一次。** 在面板的 **API 金鑰** 卡片裡貼上你的 `RUNPOD_API_KEY`。它儲存在
+   服務端的 `~/.comfyui-mcp/.env` —— 絕不會進瀏覽器。
+2. 從面板工具列的主機指示開啟 **RunPod 控制面板**（一開始讀作 **🟢 本機 · 你的機器**）。
+3. **部署或連線。** 點**部署**做一鍵執行個體（它走模板的部署連結，容量緊時會在 GPU 型別 /
+   COMMUNITY→SECURE 之間回退），或從下拉選單**按名稱**選一台已有執行個體再點**連線**。
+4. **即時看著。** 狀態卡片顯示 GPU / VRAM / 執行時長 / **$·hr** 和**空閒自動停止**
+   倒計時，主機指示翻成 **🔵 RunPod · `<pod>` · GPU · $/hr** —— 算圖跑在哪永遠不會
+   含糊。代理會把你的自訂節點 + LoRA 裝上，並把模型下載到執行個體上，於是你得到和本機
+   機器**完全一致的畫布**。
+5. **切回去並停止。** **使用本機**會立刻把算圖改回你自己的機器；**停止**會關掉執行個體。
+   空閒自動停止（`RUNPOD_IDLE_STOP_MINUTES`，預設 15；只在你真的在執行個體上算圖時計數）
+   是你忘了關時的費用兜底。
+
+**死人開關（v0.47+）。** 空閒自動停止活在 comfyui-mcp 行程裡 —— 那個行程一死
+（崩潰、合上筆記本），兜底以前也會跟著死，執行個體就會一直計費。現在**透過連接器建立的**
+執行個體會帶上執行個體側的看門狗：comfyui-mcp 在照看執行個體時每隔幾秒心跳一次；心跳停了，執行個體會在
+寬限期之後**自己停掉**（從不銷燬 —— `/workspace` 還在。啟動後 45 分鐘沒有心跳，之後
+心跳間隔 20 分鐘；`RUNPOD_DEADMAN_BOOT_GRACE_S` / `RUNPOD_DEADMAN_BEAT_GRACE_S`）。
+「照看」會熬過**使用本機**和**取消監視** —— 那些只改 UI 顯示什麼；看門狗只有在
+comfyui-mcp 自己沒了（或執行個體退出）時才會開火。看門狗用 **RunPod 自動注入到每臺執行個體的
+執行個體作用域 API 金鑰** 停掉執行個體 —— 你的賬戶級金鑰永遠不離開本機，憑據上也沒有什麼需要
+退出的。不想武裝它，就在 `runpod` / `action: "create"` 上設 `deadman:false`
+（或 `RUNPOD_DEADMAN=0`），或把 `DEADMAN_DISABLE=1` 當作執行個體環境變數。控制台部署的
+執行個體從不帶心跳權杖，自訂模板部署（`RUNPOD_TEMPLATE_ID`）預設**關閉** —— 只有那份
+映像檔帶了我們的看門狗時才傳 `deadman:true`。
+
+<Note>
+第一次租 GPU 跑 ComfyUI？部落格把整條流程從頭走到尾：
+[在租來的雲 GPU 上執行 ComfyUI](/docs/blog/runpod-comfyui)。
+</Note>
+
+本頁剩下的是**手動 / CLI 路徑** —— 仍然完全支援，也是控制面板在底層驅動的東西。
+
+## 從你的機器連線
+
+執行個體起來之後，拿到它的公網代理 URL（RunPod → 你的執行個體 → **:3000** HTTP 端點，例如
+`https://<pod-id>-3000.proxy.runpod.net`），在筆記本上跑**一條命令**：
+
+```bash
+npx -y comfyui-mcp@latest connect https://<pod-id>-3000.proxy.runpod.net
+```
+
+對**遠端 HTTPS 執行個體**，`connect` 會自動開啟一條**安全加密的 `wss://` 通道**
+（經 Cloudflare）連到你機器上的代理橋接，並把那個 URL 交給執行個體的面板 —— 於是執行個體的
+HTTPS 頁面到達代理時**沒有瀏覽器提示、不用複製任何東西，任何瀏覽器都行**。對
+**本機** ComfyUI 它用普通的 `ws://127.0.0.1:9180` 回送橋接。無論哪種，代理 —— 以及
+你的 Claude/ChatGPT 登入 —— 只跑在**你的**機器上；執行個體上什麼都不會安裝。
+
+收尾：讓 `connect` 繼續在你自己的機器上跑著，在瀏覽器裡開啟執行個體的 ComfyUI，開啟
+**代理面板**側邊欄，點**連線**。
+
+然後用自然語言驅動節點圖。
+
+<Note>
+**為什麼要通道？** 執行個體頁面透過 `https://` 提供，瀏覽器會擋下安全頁面開啟一條到你機器
+的不安全 `ws://` 通訊端（混合內容 / Private Network Access）。通道給橋接一個有效 TLS
+的 `wss://` URL —— 由每個工作階段的隨機權杖把門 —— 於是到處都能用，不用提示。
+</Note>
+
+<Note>
+如果執行個體在驗證後面，在本機 `connect` 命令上設定 `COMFYUI_AUTH_TOKEN`（選用再加上
+`COMFYUI_AUTH_HEADER` / `COMFYUI_AUTH_SCHEME`）。對擋在 **Cloudflare Access** 前面的
+執行個體，建立一把 Access **服務權杖** 並設定 `CF_ACCESS_CLIENT_ID` +
+`CF_ACCESS_CLIENT_SECRET` —— 兩者會騎在每一次 ComfyUI 請求上（HTTP + 佇列監視器
+WebSocket），於是連接器能過門，而給人看的登入頁仍然留給瀏覽器。
+</Note>
+
+### 全部留在你的機器上（不用 Cloudflare）
+
+不想讓橋接走 Cloudflare？用你自己的 **SSH 連接埠轉送** 到達執行個體，讓頁面變成回送源
+（普通 `ws://` 就能用，不用通道）：
+
+```bash
+ssh <pod-ssh> -L 3000:localhost:3000   # grab the SSH command from RunPod → Connect
+npx -y comfyui-mcp@latest connect http://localhost:3000
+```
+
+然後開啟 **http://localhost:3000**。或者連到執行個體的直接 https URL，但用
+**`--insecure-bridge`** 強制普通回送橋接（然後你自己安排執行個體頁面到達
+`ws://127.0.0.1:9180` 的路徑）。
+
+想要預設 Cloudflare 快速通道之外的**穩定、自建替代** —— 你自己的域名、沒有臨時主機名、
+完全擁有那一跳 —— 而不是上面兩種？請看[自架中繼](/docs/zh-TW/self-hosted-relay)。
+
+## 拓撲：代理跑在哪
+
+```
+  YOUR LAPTOP                                   CLOUD GPU POD (RunPod)
+  ┌───────────────────────────┐                ┌───────────────────────────────────┐
+  │ npx comfyui-mcp connect …  │  HTTP/WS  ───▶ │ nginx :3000 ─▶ ComfyUI :3001        │
+  │  └─ panel orchestrator     │                │   ├─ Manager v2 (--enable-manager) │
+  │     (Claude/ChatGPT Agent  │ ◀───  events   │   └─ Agent Panel (sidebar)         │
+  │      SDK on YOUR sub)      │                │                                     │
+  └───────────────────────────┘                └───────────────────────────────────┘
+```
+
+執行個體故意**不帶 Node.js 代理、不帶 Agent SDK、也不帶 LLM 用戶端** —— 它們只會白白燒掉
+GPU 小時。推理迴圈住在你的機器上；執行個體是純 ComfyUI 後端。這和本機代理面板用的是同一套
+[遠端驅動模型](/docs/zh-TW/panel)，只是 ComfyUI 在雲 GPU 上而不是 localhost。
+
+## 什麼會持久化（什麼不會）
+
+映像檔為**快速停 / 啟**做了最佳化。重的軟體 —— ComfyUI、它的 venv、Manager v2 —— 烤進
+不可變映像檔並從 `/opt/ComfyUI` 執行，而 `custom_nodes` 住在 `/workspace` 磁碟區上
+（符號連結），所以你的安裝會留下來。熱重新啟動不做完整安裝 / 同步 / 種子，只是重新拉起
+ComfyUI。
+
+| 什麼 | 住在哪 | 重新啟動後還在？ |
+|------|----------------|---------------------|
+| 模型（含 Manager 下載） | 卷 `/workspace/models` | **是** |
+| 工作流程 + ComfyUI 設定 + Manager 設定 | 卷 `/workspace/user` | **是** |
+| 輸入 / 輸出 | 卷 `/workspace/input`、`/output` | **是** |
+| **自訂節點**（代理 / Manager 安裝） | 卷 `/workspace/custom_nodes`（符號連結） | **是** |
+| ComfyUI 安裝 + venv + Manager | 映像檔 `/opt/ComfyUI` | 隨映像檔重新拉取 |
+
+<Note>
+**執行時安裝的自訂節點能熬過重新啟動。** `custom_nodes` 符號連結到
+`/workspace/custom_nodes`；每次啟動時映像檔裡烤好的節點（代理面板 + 內建）會被種子 /
+重新整理進去（於是映像檔升級會帶上當前面板，同時保留你自己的節點），每個節點的 Python
+相依會從磁碟區上的**持久 pip 快取**重新裝進 venv —— 第一次之後很快。模型也會留下。要把
+一個節點烤進去、啟動時零工作，把它加到 `Dockerfile` 並重新建置映像檔（請看下方）。
+</Note>
+
+## 建置並部署你自己的映像檔
+
+一鍵模板就是預建映像檔。還有一份**精簡預建映像檔** —— 同樣的 ComfyUI + 代理面板 +
+Manager，但沒有選用的捐贈附加（`runpod-uploader`/`croc`/`app-manager`），也沒有烤進去
+的 SDXL 抽查 checkpoint，在 CI 裡持續構建 —— 同樣公開在
+[`ghcr.io/artokun/comfyui-mcp-runpod:cu128-lean`](https://github.com/artokun/comfyui-mcp/pkgs/container/comfyui-mcp-runpod)，
+如果你只想把 RunPod 模板指過去、自己什麼都不構建。
+
+要定製它 —— 釘版本、烤進額外自訂節點、改模型佈局 —— 從
+[`docker/runpod/`](https://github.com/artokun/comfyui-mcp/tree/main/docker/runpod)
+自己構建並推送：
+
+```bash
+cd docker/runpod
+docker build -t <your-registry>/comfyui-mcp-runpod:cu128 .
+docker push     <your-registry>/comfyui-mcp-runpod:cu128
+```
+
+構建時不需要 GPU。然後建立一份指向你的映像檔的 RunPod **Pod 模板**，暴露 **HTTP 連接埠 3000**，
+並在 **`/workspace` 掛網路磁碟區**。
+
+[`docker/runpod/README.md`](https://github.com/artokun/comfyui-mcp/blob/main/docker/runpod/README.md)
+是完整的構建參考 —— 多階段 Dockerfile、確切的 ComfyUI 啟動旗標、
+`extra_model_paths.yaml` 卷對映、Manager 遠端安裝門、環境變數，以及體積 / 釘死的取捨。
+
+## 其他雲端目標
+
+`connect` 流程不是 RunPod 專用 —— 它對**任何**能提供代理面板、且能到達的 ComfyUI
+都有效（另一家雲主機、VPS、區域網上的盒子）。把 `connect` 指向它的 URL，並開啟外部
+協調器開關：
+
+```bash
+npx -y comfyui-mcp@latest connect https://your-comfyui.example.com
+```
+
+要把 **comfyui-mcp 本身**暴露成託管、帶驗證的 MCP 伺服器（而不是部署 ComfyUI），見
+[遠端 / 託管連接器](/docs/zh-TW/remote-connector)。

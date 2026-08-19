@@ -1,0 +1,204 @@
+---
+title: "第三方主機"
+description: "在手機 App 所用的同一套配對協定上，構建你自己的前端（Blender 面板、瀏覽器擴充、另一個應用）—— 一個代理、共享上下文、薄用戶端。訊息形狀、端點、安全不變量，以及一段可貼上的提示，讓 LLM 給你搭轉接器腳手架。"
+icon: "plug"
+---
+
+代理面板、[手機 App](/docs/zh-TW/mobile)，以及任何與正在執行的工作階段配對的工具，都對協調器
+的配對監聽器說**同一種小型 WebSocket 協定**。**第三方主機**是你在那套協定上構建的任何
+用戶端 —— Blender 面板、瀏覽器擴充、CLI、另一個編輯器 —— 它**附著到一個即時桌面分頁
+並驅動那個代理工作階段**。同一個代理，同一段上下文，沒有第二個 Claude Code 行程，使用者
+也不用額外安裝任何東西。
+
+<Note>
+這正是手機 App 建在上面的那一面。只要你能開啟 WebSocket 並發送 JSON，就能構建主機。
+</Note>
+
+## 運作原理
+
+<Steps>
+<Step title="桌面已經在聽">
+代理面板開啟時，協調器會在區域網上跑一個**權杖把門的配對監聽器**（請看
+[端點](#端點)）。每個開啟的面板分頁都是一個帶穩定 `tab_id` 和即時代理工作階段的
+**桌面分頁**。
+</Step>
+<Step title="你的主機帶著配對權杖連線">
+用查詢字串裡的權杖開啟到配對 URL 的 WebSocket。沒有有效權杖，連線會被拒絕 ——
+配對就是整條安全邊界。
+</Step>
+<Step title="列出並附著到一個分頁">
+傳送 `list_tabs` 發現開啟的桌面分頁，再發 `attach_tab` 鏡像其中一個。你的主機現在
+**接收那個分頁的活動**（流式），並且可以**驅動它**。
+</Step>
+<Step title="驅動共享工作階段">
+傳送 `user_message` 幀。附著期間，伺服器把它們路由到**被鏡像的分頁** —— 於是你的
+訊息進入桌面代理所在的*同一段*對話。這才是「一個代理、共享上下文」，而不是第二個
+工作階段。
+</Step>
+</Steps>
+
+## 端點
+
+配對監聽器從橋接連接埠派生（`COMFYUI_MCP_BRIDGE_PORT`，預設 **9180**）：
+
+| 連接埠 | 用途 |
+|---|---|
+| `bridge`（9180） | 面板 ⇄ 協調器 UI 橋接（桌面自己的連線）。 |
+| `bridge + 1`（9181） | `panel_*` HTTP-MCP 面 —— **不是**本協定。 |
+| **`bridge + 2`（9182）** | **你要連的配對 / 遠端控制監聽器。** 權杖把門，綁在 `0.0.0.0`（區域網可達）。 |
+
+**配對 URL：**
+
+```
+ws://<desktop-machine-ip>:9182/?token=<PAIR_TOKEN>
+```
+
+- 權杖要麼由使用者透過 `COMFYUI_MCP_PAIR_TOKEN` **釘死**（始終開啟配對），要麼**按工作階段
+  鑄造**並透過面板的二維碼 / 配對流程發出。你的主機拿到它的方式和手機 App 一樣：
+  使用者配對一次。
+- **預設綁在區域網上**，但使用者要求時也內建了公網暴露：面板的配對對話框提供
+  **Internet** 模式，開啟一條加密的 cloudflared 快速通道；企業也可以把它走自架中繼
+  （`COMFYUI_MCP_TUNNEL_BACKEND=relay`）。無論哪種，權杖都把門。
+
+## 訊息形狀
+
+所有幀都是帶 `type` 的 JSON 物件。請求 / 響應幀攜帶一個你自己選的 `cid`（關聯 id），
+在對應回覆上原樣回顯。
+
+### 入站 —— 主機 → 協調器
+
+| `type` | 欄位 | 效果 |
+|---|---|---|
+| `hello` | `tab_id`，`headless: true` | 註冊你的連線。第三方主機是**無頭**用戶端（自己沒有畫布）。 |
+| `list_tabs` | `cid` | 詢問開啟的桌面分頁。 |
+| `attach_tab` | `cid`，`target_tab_id` | 映像檔並驅動那個桌面分頁。只對**真實、非無頭**的桌面分頁有效。 |
+| `detach_tab` | — | 停止鏡像 / 驅動；你的輸入回到你自己的（空）工作階段。 |
+| `user_message` | `text`（+ 你平時的訊息欄位） | **被鏡像**分頁對話裡的一輪。由伺服器蓋戳到已附著的分頁。 |
+
+附著期間你傳送的任何其他面板事件，同樣會路由到被鏡像的分頁。
+
+### 出站 —— 協調器 → 主機
+
+| `type` | 欄位 | 含義 |
+|---|---|---|
+| `tab_list` | `cid`，`tabs[]` | 對 `list_tabs` 的回覆：可附著的桌面分頁。 |
+| `tab_attached` | `cid`，`tab_id`，`ok`，`error?` | 對 `attach_tab` 的回覆。目標過期 / 無頭時是 `ok:false` + `error`。 |
+| `mailbox_flush` | 緩衝的幀 | 你沒有即時連線時該分頁產出的任何內容的回放。 |
+
+再加上被鏡像分頁的即時代理活動（流式回覆、狀態、卡片），由你的主機來算圖。
+
+<Warning>
+**`attach_tab` 是權威的 —— 你不能偽造目標。** 伺服器會用你實際附著到的分頁覆寫你
+在出站幀上放的任何 `tab_id`。主機永遠只能驅動它顯式附著過的分頁。這是故意的；見下。
+</Warning>
+
+## 安全不變量 —— 主機必須守住這些
+
+這些保證讓配對是安全的。構建一個尊重它們的主機就是整份合約；試圖繞過它們的主機，正是
+監聽器設計來拒絕的東西。
+
+<Note>
+守住這些不是對你主機的約束 —— 它*就是*功能本身。它們擋下用戶端劫持它從未配對過的
+工作階段。
+</Note>
+
+1. **權杖門。** 監聽器拒絕任何沒有有效配對權杖的連線（`verifyClient`）。永遠不要做
+   自動下發或內嵌權杖的流程 —— 使用者配對，一次，故意的。
+2. **權威的 `attach_tab` 蓋戳。** 決定你的幀打向哪個分頁的是伺服器，不是用戶端。
+   不要相依用戶端提供的 `tab_id` 做路由；先附著，再發送。
+3. **只允許非無頭目標。** 你可以附著到真實桌面分頁，永遠不能附著到另一個無頭用戶端
+   （你不能映像檔另一部手機 / 主機）。
+4. **一次一個分頁。** 附著到 B 會丟掉你對 A 的訂閱。按每個連線一個活動鏡像來建模。
+5. **釘死的通訊端種類。** 連線的種類（無頭 vs 桌面）在第一次 `hello` 時固定；不要試圖
+   翻轉它來逃過接管護欄。
+
+## 最小參考用戶端
+
+```js
+const token = "<PAIR_TOKEN>";            // obtained via the user's pair flow
+const ws = new WebSocket(`ws://192.168.1.50:9182/?token=${token}`);
+let cid = 0;
+
+ws.onopen = () => {
+  ws.send(JSON.stringify({ type: "hello", tab_id: "myhost:" + crypto.randomUUID(), headless: true }));
+  ws.send(JSON.stringify({ type: "list_tabs", cid: ++cid }));
+};
+
+ws.onmessage = (ev) => {
+  const m = JSON.parse(ev.data);
+  if (m.type === "tab_list") {
+    // pick a desktop tab and attach to it
+    const target = m.tabs[0]?.tab_id;
+    if (target) ws.send(JSON.stringify({ type: "attach_tab", cid: ++cid, target_tab_id: target }));
+  } else if (m.type === "tab_attached" && m.ok) {
+    // now you're driving that tab's session
+    ws.send(JSON.stringify({ type: "user_message", text: "Add a KSampler and wire it up." }));
+  } else {
+    // render streamed agent activity for the mirrored tab
+    console.log("from session:", m);
+  }
+};
+```
+
+## 教 LLM 構建你的轉接器
+
+把下面的提示粘進 Claude、ChatGPT 或你的編碼代理，讓它為你的平台搭一份主機轉接器
+腳手架。它帶著完整的協定合約，模型不用猜。
+
+```text Copy this into your LLM
+You are building a THIRD-PARTY HOST ("adapter") for comfyui-mcp. A host connects
+to a running comfyui-mcp orchestrator over WebSocket, attaches to a live desktop
+"tab", and drives that tab's agent session — same agent, shared context, no second
+session. Build the adapter for THIS platform: <describe your platform, e.g. a
+Blender sidebar panel / a Chrome extension / a Neovim plugin>.
+
+CONNECTION
+- WebSocket to:  ws://<desktop-ip>:9182/?token=<PAIR_TOKEN>
+  (port = bridge port + 2; bridge default 9180. Token is provided by the user via
+  their pairing flow — NEVER hardcode, embed, or auto-provision it.)
+- On open, send:  {"type":"hello","tab_id":"<your-unique-id>","headless":true}
+
+DISCOVER + ATTACH
+- Send {"type":"list_tabs","cid":1}; you receive {"type":"tab_list","cid":1,"tabs":[...]}.
+- Send {"type":"attach_tab","cid":2,"target_tab_id":"<a tab_id from tab_list>"};
+  you receive {"type":"tab_attached","cid":2,"tab_id":"...","ok":true|false,"error"?}.
+  Only real, non-headless desktop tabs are attachable.
+
+DRIVE
+- Send {"type":"user_message","text":"..."} to post a turn into the ATTACHED tab's
+  conversation. The server routes it to the mirrored tab automatically.
+- Send {"type":"detach_tab"} to stop.
+
+RENDER
+- After attaching you receive the mirrored tab's live activity (streamed agent
+  replies, status, interactive cards) and a {"type":"mailbox_flush"} replay of
+  anything produced while you were disconnected. Render these in your UI.
+
+SECURITY — these are non-negotiable; preserve every one:
+1. Only connect with a user-provided pair token; never embed or auto-ship it.
+2. Never assume you can target a tab you did not attach_tab to — the server stamps
+   the target authoritatively; trust tab_attached.ok, don't spoof tab_id.
+3. Attach only to non-headless desktop tabs; never to another headless client.
+4. One active attachment per connection (attaching to a new tab drops the old).
+5. Do not try to change your connection's kind after the first hello.
+
+DELIVERABLE
+- A minimal, working adapter for the platform above: connect → list → attach →
+  send a user_message → render streamed replies → detach. Handle reconnects and
+  the mailbox_flush replay. Keep the pairing/token handling explicit and
+  user-driven.
+```
+
+## 登記你的整合
+
+做出了什麼？**登記它**，這樣它可以被列出，我們也能在協定變更發貨前通知你：
+
+<Card title="登記第三方主機" icon="plug" href="https://github.com/artokun/comfyui-mcp/issues/new?template=third-party-host.yml">
+在 GitHub 上開啟登記模板 —— 名稱、平台、儲存庫，以及你對照構建的協定版本。
+</Card>
+
+<Note>
+**穩定性：** 上面的幀是手機 App 發貨時用的，但這還不是一份凍結、帶版本的合約 ——
+以原始碼（[`src/services/ui-bridge.ts`](https://github.com/artokun/comfyui-mcp/blob/main/src/services/ui-bridge.ts)）
+為準，並登記你的主機，形狀變動時你會收到通知。
+</Note>

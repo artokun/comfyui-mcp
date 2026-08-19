@@ -1,0 +1,56 @@
+---
+title: "手機 App（測試版）"
+description: "ComfyUI-MCP Mobile —— 用手機和你的 ComfyUI 代理對話。用代理面板的二維碼配對，從你網路上的任何地方驅動生成、工作流程和模型。目前在 Android 和 iOS 上封閉測試。"
+icon: "mobile"
+---
+
+<Note>
+**加入測試。** ComfyUI-MCP 手機 App 正在封閉測試 —— 為你的平台安裝構建：
+
+- **Android** — [Firebase App Distribution](https://appdistribution.firebase.dev/i/27a5cccde72ffb42)
+- **iOS** — [TestFlight](https://testflight.apple.com/join/ws65s4a2)
+</Note>
+
+手機 App 是驅動 [側邊欄面板](/docs/zh-TW/panel) 的同一個代理的手機原生前端。它連到面板協調器
+的橋接，所以面板能做的事 —— 生成圖片、執行並檢查工作流程、切換模型 —— 都可以從手機完成，
+真正動手的仍是桌面上的 ComfyUI。
+
+## 配對
+
+App 透過面板橋接和代理主機通訊，所以配對一次就能用：
+
+1. 在桌面上安裝並執行 [comfyui-mcp](/docs/zh-TW/quickstart)，並裝上
+   [代理面板](/docs/zh-TW/panel)。
+2. 在 ComfyUI 的**設定**裡開啟 **「透過手機 App 控制（測試版）」** —— **預設關閉**，
+   開啟之前配對按鈕會一直隱藏。
+3. 開啟面板，點標題列裡的 **QR** 按鈕，顯示**配對二維碼**。
+4. 在手機 App 裡點 **掃描面板上的二維碼** —— 或者手動貼上橋接 URL
+   （`ws://…?token=…`）。
+
+二維碼編碼的是一個落地頁 URL，配對資料走 URL fragment，所以主機和權杖不會離開你的裝置。
+App 還為落地頁的 **在 App 中開啟** 按鈕註冊了 `comfyui-mcp://pair` 深層連結。
+
+<Note>
+手機和桌面之間需要有網路通路 —— 簡單情況下是同一區域網路，主機不能直達時則用
+[安全中繼](/docs/zh-TW/self-hosted-relay) /
+[雲端部署](/docs/zh-TW/cloud-deployment)。
+</Note>
+
+## App 裡有什麼
+
+- **代理聊天** —— 和面板側邊欄裡同一段對話，從手機進行。
+- **模型選擇器** —— 協調器上的即時模型目錄；工作階段中途就能換模型。
+- **Civitai 瀏覽** —— 搜尋模型和創作者，按讚和收藏。
+- **遠端控制** —— 鏡像桌面面板分頁，出門也能看工作流程診斷。
+
+## 回饋
+
+測試回饋和缺陷報告歡迎發到
+[Discord](https://discord.gg/cW9arBhzCu) 或
+[issue 追蹤器](https://github.com/artokun/comfyui-mcp/issues)。
+
+## 參見
+
+- [側邊欄面板](/docs/zh-TW/panel) —— App 所配對的 ComfyUI 內代理
+- [雲端部署](/docs/zh-TW/cloud-deployment) —— 驅動遠端 ComfyUI 執行個體
+- [自架中繼](/docs/zh-TW/self-hosted-relay) —— 自己擁有安全橋接路徑

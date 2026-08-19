@@ -1,0 +1,137 @@
+---
+title: "Yerel ile Comfy Cloud ajanı"
+description: "Comfy-Org'un In-App Agent'ı ve Comfy Cloud MCP'si Comfy Cloud üzerinde çalışır; comfyui-mcp sizin kendi ComfyUI kurulumunuzda, herhangi bir LLM ile çalışır — mevcut aboneliğinizdeki Claude ya da ChatGPT veya Ollama üzerinden hesapsız, ağsız ücretsiz bir yerel model. Hangisini ne zaman kullanacağınıza dair dürüst bir karşılaştırma; Comfy Cloud'un daha iyi yanıt olduğu durumlar dahil."
+icon: "scale-balanced"
+---
+
+Comfy-Org'un resmî ajan araçları ile bu proje arasında karar veriyorsanız kısa
+yanıt, **farklı sorunları çözdükleri**dir — ve hatırı sayılır sayıda insan için
+resmî seçenek doğru karardır. Bu sayfa ikisini de dürüstçe ortaya koyar; bir
+kez seçip devam edebilesiniz.
+
+<Note>
+Comfy-Org hızlı yayımlar ve aşağıdaki durumlar **Temmuz 2026** itibarıyladır.
+Bunlardan herhangi birini kesin saymadan önce güncel durum için
+[docs.comfy.org/agent-tools](https://docs.comfy.org/agent-tools) adresine bakın.
+</Note>
+
+## Tek satırlık yanıt
+
+**Yerel GPU yok ya da sıfır kurulum mu istiyorsunuz?** Comfy Cloud kullanın.
+Birinci taraf, ComfyUI'yi yapan ekip tarafından sürdürülüyor ve sürücüler,
+VRAM ya da model indirmeleri hakkında düşünmeniz gerekmiyor.
+
+**ComfyUI zaten kendi makinenizde mi çalışıyor?** Bu projenin konusu budur.
+GPU'nuz zaten ödenmiş, modelleriniz zaten diskte ve Claude ya da ChatGPT
+aboneliğiniz akıl yürütmeyi zaten karşılıyor.
+
+## Comfy-Org ne sunuyor
+
+Comfy-Org'un [Agent Tools](https://docs.comfy.org/agent-tools) sayfası üç ilgili
+ürün listeler:
+
+| Ürün | Nedir | Durum (Tem 2026) |
+|---|---|---|
+| **Comfy Cloud MCP** | Barındırılan MCP sunucusu; üretim Comfy Cloud GPU'larında çalışır | herkese açık beta |
+| **Comfy In-App Agent** | Comfy Cloud içinde sohbetle grafiğinizi kuran ve düzenleyen ajan | özel alfa |
+| **Comfy Local MCP** | Kendi ComfyUI kurulumunuzu süren birinci taraf yerel MCP sunucusu | özel test; henüz herkese açık değil |
+
+Comfy Cloud MCP yaptığı işte gerçekten iyidir: ComfyUI motorunu MCP üzerinden
+dışa açar, Claude Code, Claude Desktop ve Codex'ten OAuth ile giriş yapar ve
+Kling, Veo, Seedance, Flux ve ElevenLabs gibi modellere, bir GPU'ya sahip
+olmadan yönetilen erişim verir.
+
+## Bu proje ne sunuyor
+
+`comfyui-mcp` bir MCP sunucusu artı **sizin** ComfyUI kurulumunuzu — yerel,
+LAN, VPS ya da RunPod — süren bir kenar çubuğu ajanıdır. 37 MCP aracı, 39
+modele özel beceri ve canlı grafiğinizi doğal dille düzenleyen bir panel ajanı.
+
+Yapısal fark **akıl yürütmenin nereden geldiğidir**. Bu proje sağlayıcıdan
+bağımsızdır: aynı araçlar ve aynı panel Claude, ChatGPT, Gemini, Grok ya da
+Kimi üzerinde zaten ödediğiniz bir abonelikle, herhangi bir OpenAI uyumlu uç
+noktada ya da Ollama, LM Studio veya llama.cpp üzerinden ücretsiz bir yerel
+modelde çalışır — hiç hesap ve hiç giden ağ olmadan.
+
+## Yan yana
+
+| | Comfy Cloud (In-App Agent / Cloud MCP) | comfyui-mcp |
+|---|---|---|
+| Üretim şurada çalışır | Comfy Cloud GPU'ları | Sizin GPU'nuz (ya da VPS / RunPod podunuz) |
+| Comfy hesabı gerektirir | Evet | Hayır |
+| Tamamen çevrimdışı çalışır | Hayır | Evet, yerel bir modelle |
+| Akıl yürütme modeli | Hizmet tarafından sağlanır | **Sizin** — herhangi bir LLM, ücretsiz yerel dahil |
+| Maliyet modeli | Bulut kredileri | Mevcut aboneliğiniz ya da 0 $ yerel |
+| Görselleriniz/istemleriniz makineden çıkar | Evet | Yalnızca barındırılan bir LLM seçerseniz |
+| Özel düğümlerinizi ve model dosyalarınızı yönetir | Yok (yönetilen ortam) | Evet — düğüm kurar, model indirir |
+| Kullanılabilirlik | Cloud MCP herkese açık beta; ajan özel alfa | Şimdi kullanılabilir |
+| Birinci taraf destek | Evet | Topluluk projesi |
+
+## Comfy Cloud'u seçin eğer…
+
+- GPU'nuz yoksa ya da istediğiniz modeller için çok küçükse
+- Kurulumsuz ve bakımsız çalışmasını istiyorsanız
+- CUDA, VRAM ve checkpoint indirmelerini yönetmektense kredi satın almayı
+  yeğliyorsanız
+- Ekibiniz zaten Comfy Cloud'daysa ve tek satıcı, tek fatura istiyorsanız
+- ComfyUI'yi yapanlardan birinci taraf destek istiyorsanız
+
+Bunlar iyi nedenlerdir. Birkaçı size uyuyorsa okumayı bırakın ve
+[Comfy Cloud](https://comfy.org/) kullanın — daha iyi vakit geçirirsiniz.
+
+## comfyui-mcp'yi seçin eğer…
+
+- **Zaten bir GPU'nuz var.** Onu ödediniz; bulut kredileri zaten sahip
+  olduğunuz hesaplama için ikinci bir faturadır.
+- **İşiniz makineden çıkamaz.** NDA altındaki müşteri malzemesi, lisanslı
+  eğitim verisi, yükleyemeyeceğiniz her şey. Yerel bir modelle hiçbir şey
+  çıkmaz.
+- **Zaten sahip olduğunuz LLM aboneliğini kullanmak istiyorsunuz.** Claude ya
+  da ChatGPT planınız akıl yürütmeyi zaten karşılıyor — ajan için ikinci bir
+  sayaç yok.
+- **Ücretsiz ya da çevrimdışı istiyorsunuz.** Ollama, LM Studio ve llama.cpp
+  hesapsız ve ağsız çalışır. Bkz. [Yerel LLM'ler](/docs/tr/local-llms).
+- **Kurulumunuz asıl noktadır.** Özel düğümleriniz, LoRA'larınız, checkpoint
+  koleksiyonunuz. Ajan [düğüm kurar ve modelleri indirir](/docs/tools/models)
+  — gerçekten kullandığınız kuruluma.
+- **Modeli siz seçmek istiyorsunuz.** Farklı LLM'ler farklı işlerde daha
+  iyidir; [LLM Arenası](/docs/tr/arena) onları gerçek ComfyUI görevlerinde
+  puanlar, böylece kanıta göre seçebilirsiniz. Bkz. [Arka uçlar](/docs/tr/backends).
+
+## "Resmî yerel MCP bunu gereksiz kılmaz mı?"
+
+Adil bir soru ve aksini varsaymak yerine doğrudan yanıtlamaya değer.
+
+Comfy Local MCP bir **yerel kurulum için birinci taraf sürücüdür** ve
+yayımlanınca iyi bir sürücü olacaktır. Ama bu projeden farklı bir katmandır:
+bir ajanı ComfyUI'ye bağlar; `comfyui-mcp` ise ajanı, onu on bir sağlayıcı ve
+yerel çalışma zamanı boyunca çalıştıran sağlayıcı-yansız arka ucu, kenar
+çubuğu arayüzünü, modele özel becerileri ve düğüm/model yönetimini de getirir.
+
+Dürüst okuma: istediğiniz tek şey "Claude Code'un yerel ComfyUI'mle konuşmasına
+izin ver" ise, birinci taraf araçlar bunu zamanla kapsayacaktır ve muhtemelen
+onu kullanmalısınız. Kendi modelinizi — ücretsiz yerel bir model dahil —
+getirmek, ajanın ComfyUI'nin içinde yaşamasını ve kurulumu kendisinin
+yönetmesini istiyorsanız, bu projenin doldurduğu boşluk budur.
+
+Ayrıca birleşirler. Bu proje Comfy Cloud'u da hedefleyebilir (`COMFYUI_API_KEY`
+ayarla — bkz. [Bulut dağıtımı](/docs/tr/cloud-deployment)); böylece tek bir
+yapılandırma yerel bir kurulumu, bir LAN kutusunu, bir VPS'i ve Comfy Cloud'u
+kapsar.
+
+## Başlarken
+
+<CardGroup cols={2}>
+  <Card title="Hızlı başlangıç" icon="rocket" href="/docs/tr/quickstart">
+    Yerel ComfyUI'nize karşı çalışan MCP sunucusu, yaklaşık bir dakikada.
+  </Card>
+  <Card title="Yerel LLM'ler" icon="microchip" href="/docs/tr/local-llms">
+    Ollama, LM Studio ya da llama.cpp üzerinde tamamen çevrimdışı — hesap yok.
+  </Card>
+  <Card title="Arka uçlar" icon="shuffle" href="/docs/tr/backends">
+    Claude, ChatGPT, Gemini, Grok, Kimi ya da herhangi bir OpenAI uyumlu uç nokta.
+  </Card>
+  <Card title="Ajan paneli" icon="window" href="/docs/tr/panel">
+    Canlı grafiğinizi süren kenar çubuğu ajanı.
+  </Card>
+</CardGroup>

@@ -1,0 +1,100 @@
+---
+title: "Cómo funciona"
+description: "El modelo detrás de las herramientas — transportes, la API de ComfyUI-Manager y los modos local/remoto/nube."
+icon: "diagram-project"
+---
+
+## El modelo mental
+
+ComfyUI MCP es una capa fina y bien descrita sobre una **instancia de ComfyUI
+en ejecución**. La mayoría de las herramientas hablan con esa instancia a
+través de su API HTTP/WebSocket, así que funcionan igual tanto si ComfyUI es
+local, remoto (`--comfyui-url`) o [Comfy Cloud](https://cloud.comfy.org)
+(`COMFYUI_API_KEY`).
+
+<Steps>
+  <Step title="Generación y flujos de trabajo → API HTTP de ComfyUI">
+    `generate_image`, `enqueue_workflow`, cola/historial/stats del sistema, y las
+    herramientas de autoría de flujos de trabajo llaman a `/prompt`, `/queue`,
+    `/history`, `/object_info`, etc. de ComfyUI. Encolar es disparar-y-olvidar:
+    recibes un `prompt_id` al momento y los resultados llegan mediante una
+    notificación de finalización. En modo nube, un `cloud-client` alternativo
+    despacha las mismas operaciones a `cloud.comfy.org` con `X-API-Key`.
+  </Step>
+  <Step title="Nodos personalizados y modelos → ComfyUI-Manager (HTTP), con un respaldo de subproceso">
+    Instalar/actualizar/instantánea/bisección de nodos y las instalaciones de
+    dependencias de flujos de trabajo prefieren la API HTTP de
+    [ComfyUI-Manager](https://github.com/Comfy-Org/ComfyUI-Manager) (así que
+    también funcionan contra instancias remotas), con un respaldo a
+    `cm-cli` / `git` / `pip`/`uv` contra una instalación local allí donde la API
+    no puede hacer el trabajo.
+  </Step>
+  <Step title="Instalación y operaciones de sistema de archivos → solo local">
+    Instalar ComfyUI, actualizar el núcleo, eliminar archivos de modelos, leer
+    los registros del servidor y listar el directorio de salida operan sobre el
+    sistema de archivos local. Exigen un `COMFYUI_PATH` conocido y devuelven un
+    error claro en modo remoto o nube.
+  </Step>
+  <Step title="WebSocket → local + remoto, no nube">
+    Las notificaciones de finalización de trabajo se enganchan al WebSocket de
+    ComfyUI donde está disponible. Comfy Cloud no tiene WebSocket — el
+    vigilante de trabajos cae a su camino existente de sondeo HTTP.
+  </Step>
+</Steps>
+
+<Note>
+  Regla práctica: todo lo que **lee o ejecuta** el servidor conectado funciona
+  en cualquier modo; todo lo que **instala software o toca archivos en disco**
+  necesita una instalación local. La matriz completa de paridad de funciones
+  está en
+  [Configuración → Modos de despliegue](/docs/es/configuration#modos-de-despliegue).
+</Note>
+
+## Autorreparación: el watchdog de cola/render
+
+Un paso de sampler de alta resolución atascado dejaba que el agente apilara
+trabajos detrás de un render zombi que no podía ver ni matar. Tres guardas
+de mejor esfuerzo cierran ese hueco, para que el agente deje de reencolar a
+ciegas detrás de un render atascado:
+
+- **Contrapresión** — `panel_run` añade un QUEUE WARNING a su resultado cuando
+  ya hay un render en marcha, para que el agente no apile detrás.
+- **Detección de atasco** — un WebSocket pasivo hacia ComfyUI sigue el prompt /
+  nodo / progreso en curso; un paso que deja de avanzar más allá del umbral
+  ([`COMFYUI_MCP_STALL_S`](/docs/es/configuration#el-orquestador-del-panel-y-el-puente),
+  180 s por defecto) antepone una nota STALL/BACKLOG de una línea al siguiente
+  turno del agente.
+- **Cancelación que escala** — `queue` (action:"cancel") interrumpe,
+  **verifica** que el trabajo se detuvo de verdad
+  (dentro de [`COMFYUI_MCP_INTERRUPT_S`](/docs/es/configuration#vigilancia-de-trabajos),
+  30 s por defecto), luego escala a `/free` y reporta el render WEDGED
+  (sugiriendo `restart_comfyui`) si sigue sin morir; `clear_pending` tira
+  todos los trabajos pendientes en la misma llamada.
+
+Todo es a prueba de fallos: si el WebSocket del watchdog nunca se abre, no
+cambia nada. El agente también puede razonar sobre los colores de una imagen
+sin un ida y vuelta de visión mediante `get_image (action:"analyze_color")`
+(paleta dominante, estadísticas de media + luminancia, comprobaciones de
+contraste).
+
+## Categorías de herramientas
+
+<CardGroup cols={2}>
+  <Card title="Generación de imágenes" icon="image" href="/docs/tools/image-generation" />
+  <Card title="Ejecución de flujos de trabajo" icon="play" href="/docs/tools/workflow-execution" />
+  <Card title="Autoría de flujos de trabajo" icon="pen-ruler" href="/docs/tools/workflow-authoring" />
+  <Card title="Biblioteca de flujos de trabajo" icon="folder-open" href="/docs/tools/workflow-library" />
+  <Card title="Assets e imágenes" icon="images" href="/docs/tools/assets-images" />
+  <Card title="Modelos" icon="box" href="/docs/tools/models" />
+  <Card title="Nodos personalizados" icon="puzzle" href="/docs/tools/custom-nodes" />
+  <Card title="Nodos API" icon="cloud" href="/docs/tools/api-nodes" />
+  <Card title="Instalación y entorno" icon="wrench" href="/docs/tools/install-environment" />
+  <Card title="Control de procesos" icon="power" href="/docs/tools/process-control" />
+  <Card title="Valores por defecto, stats y skills" icon="sliders" href="/docs/tools/defaults-stats-skills" />
+</CardGroup>
+
+<Info>
+  La referencia de herramientas se genera a partir de los esquemas de
+  herramientas MCP en vivo (`npm run docs:gen`), así que nunca se desvía del
+  código.
+</Info>

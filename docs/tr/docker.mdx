@@ -1,0 +1,118 @@
+---
+title: "Docker ve Compose"
+description: "ComfyUI'yi bir docker-compose hizmeti olarak çalıştırın ve comfyui-mcp'yi ona bağlayın — ve comfyui-mcp'nin kendisinin neden asla bir compose hizmeti olmadığı."
+icon: "docker"
+---
+
+## comfyui-mcp stdio'dur — bir compose hizmeti olamaz
+
+`comfyui-mcp` bir **stdio MCP sunucusudur**. Portu yoktur ve ağ üzerinden
+hiçbir şey dışa açmaz: MCP istemcisi (Claude Code, Cursor, bir MCP köprüsü, …)
+**onu bir alt süreç olarak başlatır** ve stdin/stdout üzerinden konuşur.
+
+Bu yüzden bir `docker-compose.yml` içinde bir `comfyui-mcp` hizmeti çıkmaz
+sokaktır — başlar, konuşacak kimse bulamaz ve çıkar. Bu, ComfyUI'yi compose'a
+bağlayan neredeyse herkesi yanıltır; çünkü doğru bir compose dosyası bir
+hizmetin "eksik" olduğu gibi görünür. Değildir: compose ettiğiniz şey
+**ComfyUI**'dir ve MCP sunucusu, MCP istemcinizin çalıştığı yerde çalışır;
+ComfyUI'ye düz HTTP üzerinden `COMFYUI_URL` ile ulaşır.
+
+<Note>
+  Sunucuyu başlatan `npx` komutu, onu çalıştıran makinede (ya da konteynerde)
+  **Node.js >= 22** ister — ince temel imajlar için asıl tuzak budur.
+</Note>
+
+## İki dağıtım biçimi
+
+<CardGroup cols={2}>
+  <Card title="Yerel npx + yerel ComfyUI" icon="laptop">
+    Varsayılan. ComfyUI doğrudan makinenizde çalışır; MCP istemcisi
+    `npx -y comfyui-mcp@latest` başlatır; bu da yerel kurulumu ve portunu
+    kendiliğinden algılar. Yapılandırma gerekmez. Bkz. [Kurulum](/docs/tr/installation).
+  </Card>
+  <Card title="Yerel npx + docker'lanmış / uzak ComfyUI" icon="docker">
+    ComfyUI bir konteynerde (ya da başka bir ana makinede) çalışır; MCP
+    istemcisi yine `comfyui-mcp`'yi yerelde başlatır, `COMFYUI_URL` (ya da
+    `--comfyui-url`) ile ona yöneltilir. Loopback olmayan bir URL sunucuyu
+    **uzak kipe** sokar: tüm HTTP araçları çalışır — özel düğüm kurulumu da
+    dahil, bu ComfyUI-Manager HTTP API'si üzerinden gider. Dosya sistemi ya da
+    yerel bir süreç gerektiren araçlar (ComfyUI'nin kendisini kurmak, comfy-cli
+    işlemleri, günlükleri okumak, model dosyalarını silmek) açık bir hata
+    döndürür.
+  </Card>
+</CardGroup>
+
+## Örnek: docker-compose içinde ComfyUI
+
+Kullanıma hazır bir örnek depoda
+[`docker/compose/`](https://github.com/artokun/comfyui-mcp/tree/main/docker/compose)
+adresinde durur — bir hizmet olarak ComfyUI (NVIDIA varsayılan, AMD/ROCm
+varyantı yorum satırında), modeller ve çıktılar için bağlama bağları ve üst
+yorumlarda istemci yapılandırması:
+
+```yaml
+services:
+  comfyui:
+    image: yanwk/comfyui-boot:cu130-slim-v2   # community image; :rocm for AMD
+    ports:
+      - "8188:8188"
+    volumes:
+      - ./storage/models:/root/ComfyUI/models
+      - ./storage/custom_nodes:/root/ComfyUI/custom_nodes
+      - ./storage/input:/root/ComfyUI/input
+      - ./storage/output:/root/ComfyUI/output
+      - ./storage/user:/root/ComfyUI/user
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+```
+
+Sonra MCP istemcinizi konteynere yöneltin. **Ana makinede** (yaygın durum —
+aynı makinedeki Claude Code) yayımlanan portu kullanın:
+
+```json
+{
+  "mcpServers": {
+    "comfyui": {
+      "command": "npx",
+      "args": ["-y", "comfyui-mcp@latest"],
+      "env": {
+        "COMFYUI_URL": "http://localhost:8188"
+      }
+    }
+  }
+}
+```
+
+MCP istemcisi aynı ağda **başka bir compose hizmetinin içinde** çalışıyorsa
+(ör. Open WebUI'nin önündeki bir MCP-HTTP köprüsü) `localhost` değil
+**compose hizmet adını** kullanın:
+
+```
+COMFYUI_URL=http://comfyui:8188
+```
+
+O düzende `comfyui-mcp`'yi başlatan köprü hizmetidir; dolayısıyla imajında
+Node.js >= 22 olmalı ve sunucu `npx -y comfyui-mcp@latest` ile başlatılabilir
+olmalıdır. Köprüler üçüncü taraf yazılımdır — sizinkini kendi belgelerine göre
+yapılandırın; örnek compose dosyasında yorumlu bir taslak vardır.
+
+## AMD / ROCm notları
+
+- `yanwk/comfyui-boot:rocm` imaj etiketini kullanın ve örnekteki ROCm
+  geçişini yorumdan çıkarın — insanların kaçırdığı parçalar:
+  `devices: [/dev/kfd, /dev/dri]`, `group_add: [video]`,
+  `security_opt: [seccomp:unconfined]`.
+- `comfyui-mcp`'nin kendisinin **GPU/CUDA bağımlılığı yoktur** — ROCm ana
+  makineleri tam desteklenir. [Ajan paneli](/docs/tr/panel) bir **ComfyUI
+  eklentisidir**, bir hizmet değil ve dış bir ön yüz sizin yüzeyinizse
+  isteğe bağlıdır.
+- Bu depodaki
+  [`docker/runpod/`](https://github.com/artokun/comfyui-mcp/tree/main/docker/runpod)
+  bir **CUDA odaklı RunPod bulut imajıdır** (bkz.
+  [Bulut dağıtımı](/docs/tr/cloud-deployment)), genel amaçlı bir ComfyUI imajı
+  değil — AMD kullanıcıları oradan başlamamalıdır.

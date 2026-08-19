@@ -1,0 +1,157 @@
+---
+title: "الموصّل البعيد / المستضاف"
+description: "اعرض comfyui-mcp خادم MCP عبر Streamable-HTTP بمصادقة ويمكن الوصول إليه علنًا — أضِفه إلى الموصّلات المخصّصة في Claude Desktop أو أي عميل بعيد، بأمر واحد."
+icon: "globe"
+---
+
+يتحدث `comfyui-mcp` نقل MCP نفسه عبر **Streamable-HTTP** الذي تستخدمه الموصّلات
+المستضافة (مثل الموصّل المخصّص في Comfy على `cloud.comfy.org/mcp`). وبأمر واحد
+يعمل خادمًا بمصادقة رمز خلف نفق HTTPS عام، فتقدر أن تضيفه إلى **Claude Desktop
+← الموصّلات** أو تستدعيه بلا واجهة من أي مكان.
+
+<Note>
+هذا اختياري. نقل `stdio` الافتراضي (و`--http` العادي على العنوان المحلي) يتصرّف
+تمامًا كما كان — مفتوح ومحلي. ولا تُفعَّل المصادقة والنفق إلا عندما تضبط رمزًا
+أو تمرّر `--tunnel`.
+</Note>
+
+<Note>
+**أتبحث عن قيادة Pod بعيد يشغّل ComfyUI (مثل RunPod) بلوحة الوكيل بدلًا من
+ذلك؟** تلك ميزة مختلفة — راجع [النشر السحابي](/docs/ar/cloud-deployment). هذه
+الصفحة عن عرض **خادم MCP الخاص بـ comfyui-mcp نفسه** لعملاء بعيدين مثل Claude
+Desktop؛ ولا تمسّ ComfyUI ولا جسر اللوحة على الإطلاق. وكلاهما يستخدم نفق
+cloudflared سريعًا تحت الغطاء، وهذا أسهل سبيل للخلط بينهما.
+</Note>
+
+## نفق بأمر واحد
+
+```bash
+npx -y comfyui-mcp@latest --tunnel
+```
+
+يفعل هذا أربعة أشياء:
+
+1. يفرض نقل HTTP (`MCP_TRANSPORT=http`).
+2. يولّد رمز مصادقة عشوائيًا قويًا إن لم تكن قد ضبطت واحدًا.
+3. يبدأ نفق [cloudflared](https://github.com/cloudflare/cloudflared) سريعًا
+   إلى منفذ MCP المحلي.
+4. يطبع كتلة جاهزة للصق: رابط `https://…/mcp` العام، والرمز، ومقتطف موصّل
+   Claude Desktop.
+
+يبدو المخرج هكذا:
+
+```text
+════════════════════════════════════════════════════════════════════
+ ComfyUI MCP — Remote / Hosted Connector is LIVE
+════════════════════════════════════════════════════════════════════
+ Public MCP URL : https://shiny-otter-1234.trycloudflare.com/mcp
+ Auth token     : 9f2c…<redacted>
+ ...
+════════════════════════════════════════════════════════════════════
+```
+
+<Warning>
+أبقِ الطرفية مفتوحة. فنفق cloudflared **السريع** عابر — يتغيّر رابطه في كل
+تشغيل ويُغلق عند انتهاء العملية. ولاسم مضيف ثابت، شغّل [نفق cloudflared
+مسمّى](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)
+خاصًا بك موجَّهًا إلى منفذ HTTP المحلي بدلًا من ذلك.
+</Warning>
+
+### cloudflared غير مثبَّت؟
+
+يُشحن `cloudflared` اعتمادًا اختياريًا. إن تعذّر العثور على الملف التنفيذي،
+يظل الخادم يعمل محليًا ويطبع إرشاد التثبيت:
+
+```bash
+npm install -g cloudflared          # cross-platform
+brew install cloudflared            # macOS
+winget install cloudflare.cloudflared  # Windows
+```
+
+ثم أعد التشغيل مع `--tunnel`.
+
+## أضِفه إلى Claude Desktop
+
+افتح **Claude Desktop ← Settings ← Connectors ← إضافة موصّل مخصّص** واملأ:
+
+| الحقل  | القيمة |
+|--------|-------|
+| Name   | `ComfyUI` |
+| URL    | الرابط المطبوع `https://…/mcp` |
+| Header | `X-API-Key: <token>` (أو `Authorization: Bearer <token>`) |
+
+احفظ، ثم فعّل الموصّل في محادثة. تظهر أدوات ComfyUI كما تظهر لخادم stdio المحلي.
+
+## إعداد بلا واجهة / برمجي
+
+أي عميل MCP يدعم خادم Streamable-HTTP بعيدًا يعمل. وفّر الرابط وترويسة المصادقة:
+
+```json
+{
+  "mcpServers": {
+    "comfyui": {
+      "url": "https://shiny-otter-1234.trycloudflare.com/mcp",
+      "headers": { "X-API-Key": "<token>" }
+    }
+  }
+}
+```
+
+يُقبل شكلا الترويسة على **كل** طلب إلى `/mcp`:
+
+```bash
+# X-API-Key (matches Comfy Cloud's convention)
+curl -H "X-API-Key: <token>" https://…/mcp
+
+# Authorization: Bearer
+curl -H "Authorization: Bearer <token>" https://…/mcp
+```
+
+## إعداد يدوي (أحضر نفقك / وكيلك الخاص)
+
+إن فضّلت إدارة نقطة النهاية العامة بنفسك، شغّل نقل HTTP برمز ثابت وضعه خلف
+وكيلك العكسي أو نفقك أو VPN الخاص:
+
+```bash
+COMFYUI_MCP_HTTP_TOKEN=my-long-random-secret \
+  npx -y comfyui-mcp@latest --http --host 0.0.0.0 --port 9100
+```
+
+ثم وجّه نفقك/وكيلك إلى `http://127.0.0.1:9100/mcp`.
+
+<Warning>
+الربط على مضيف غير محلي (مثل `0.0.0.0`) **بدون** رمز هو **فشل قاطع** — يرفض
+الخادم البدء بدل أن يعرض نقطة نهاية `/mcp` مفتوحة خارج الجهاز. اضبط
+`COMFYUI_MCP_HTTP_TOKEN` (موصى به)، أو استخدم `--tunnel`، أو اربط مضيفًا محليًا.
+وإن أردت حقًا نقطة نهاية مفتوحة (مثلًا خلف وكيلك المصادق)، فاشترك صراحةً بـ
+`--allow-unauthenticated-non-loopback` (المتغيّر `COMFYUI_MCP_ALLOW_UNAUTH=1`)،
+الذي يخفّض الفشل إلى تحذير.
+</Warning>
+
+## مرجع المصادقة
+
+| الإعداد | الأثر |
+|---------|--------|
+| `COMFYUI_MCP_HTTP_TOKEN` | رمز سرّ مشترك مطلوب على `/mcp`. غير مضبوط → نقطة النهاية مفتوحة. |
+| `--token <value>` | الأمر نفسه كمتغيّر البيئة؛ وتتفوّق راية سطر الأوامر على المتغيّر. |
+| `--tunnel` / `MCP_TUNNEL=1` | افرض HTTP، وولّد رمزًا تلقائيًا إن لم يكن مضبوطًا، وافتح نفق cloudflared. |
+| `--http` / `MCP_TRANSPORT=http` | نقل HTTP بلا نفق (تظل المصادقة سارية إن كان رمز مضبوطًا). |
+| `--host`، `--port` | عنوان الربط (الافتراضي `127.0.0.1:9100`). |
+| `--allow-unauthenticated-non-loopback` / `COMFYUI_MCP_ALLOW_UNAUTH=1` | اشترك في `/mcp` مفتوح على مضيف غير محلي. وبدونه يكون ذلك المزيج فشل بدء قاطعًا. |
+
+تُقارَن الرموز بزمن ثابت، ويُفرَض البوابة على كل طريقة HTTP (`POST`/`GET`/`DELETE`)
+عند نقطة نهاية MCP. ويُرفَض الربط على مضيف غير محلي بلا رمز عند البدء ما لم
+يُضبَط مخرج الطوارئ أعلاه.
+
+## خارطة الطريق: OAuth
+
+مصادقة اليوم هي **رمز سرّ مشترك يدوي** (Bearer / `X-API-Key`)، وهي تغطّي مسار
+بلا الواجهة ومسار الموصّل المخصّص في Claude Desktop معًا. أمّا تدفّق **OAuth**
+كامل عبر المتصفح (مثل الموصّل المستضاف لدى Comfy) فمتابعة مخطَّط لها — وهو
+تغيير أثقل وليس مطلوبًا للاتصال يدويًا.
+
+## اطّلع أيضًا
+
+- [النشر السحابي](/docs/ar/cloud-deployment) — قُد Podًا بعيدًا يشغّل ComfyUI
+  بلوحة الوكيل (نفق مختلف، وغرض مختلف)
+- [الإعدادات](/docs/ar/configuration) — المرجع الكامل لمتغيّرات البيئة

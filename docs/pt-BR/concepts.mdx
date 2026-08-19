@@ -1,0 +1,100 @@
+---
+title: "Como funciona"
+description: "O modelo por trás das ferramentas — transportes, a API do ComfyUI-Manager, e os modos local/remoto/nuvem."
+icon: "diagram-project"
+---
+
+## O modelo mental
+
+O ComfyUI MCP é uma camada fina e bem descrita sobre uma **instância do
+ComfyUI em execução**. A maioria das ferramentas fala com essa instância
+pela API HTTP/WebSocket dela, então funcionam igual seja o ComfyUI local,
+remoto (`--comfyui-url`), ou [Comfy Cloud](https://cloud.comfy.org)
+(`COMFYUI_API_KEY`).
+
+<Steps>
+  <Step title="Geração e workflows → API HTTP do ComfyUI">
+    `generate_image`, `enqueue_workflow`, fila/histórico/system-stats, e as
+    ferramentas de autoria de workflow chamam `/prompt`, `/queue`,
+    `/history`, `/object_info` etc. do ComfyUI. O enqueue é fire-and-forget:
+    você recebe um `prompt_id` na hora e os resultados chegam por uma
+    notificação de conclusão. No modo cloud, um `cloud-client` alternativo
+    despacha as mesmas operações para `cloud.comfy.org` com `X-API-Key`.
+  </Step>
+  <Step title="Nós personalizados e modelos → ComfyUI-Manager (HTTP), com fallback de subprocesso">
+    Instalar/atualizar/snapshot/bisect de nós e instalações de dependências
+    de workflow preferem a API HTTP do
+    [ComfyUI-Manager](https://github.com/Comfy-Org/ComfyUI-Manager) (então
+    também funcionam contra instâncias remotas), caindo para `cm-cli` /
+    `git` / `pip`/`uv` contra uma instalação local quando a API não dá
+    conta.
+  </Step>
+  <Step title="Instalação e operações de sistema de arquivos → só local">
+    Instalar o ComfyUI, atualizar o núcleo, remover arquivos de modelo, ler
+    logs do servidor e listar o diretório de saída operam no sistema de
+    arquivos local. Exigem um `COMFYUI_PATH` conhecido e retornam um erro
+    claro no modo remoto ou cloud.
+  </Step>
+  <Step title="WebSocket → local + remoto, não cloud">
+    As notificações de conclusão de job se ligam ao WebSocket do ComfyUI
+    quando disponível. O Comfy Cloud não tem WebSocket — o observador de
+    jobs cai no caminho existente de sondagem HTTP.
+  </Step>
+</Steps>
+
+<Note>
+  Regra prática: qualquer coisa que **lê ou executa** o servidor conectado
+  funciona em qualquer modo; qualquer coisa que **instala software ou toca
+  arquivos no disco** precisa de uma instalação local. A matriz completa de
+  paridade de recursos está em
+  [Configuração → Modos de implantação](/docs/pt-BR/configuration#modos-de-implantação).
+</Note>
+
+## Autocura: o watchdog de fila/renderização
+
+Um passo de sampler em alta resolução emperrado costumava deixar o agente
+empilhar jobs atrás de uma renderização zumbi que ele não conseguia ver
+nem matar. Três proteções de melhor esforço fecham essa lacuna, para o
+agente parar de reenfileirar às cegas atrás de uma renderização travada:
+
+- **Contrapeso** — `panel_run` acrescenta um QUEUE WARNING ao resultado
+  quando uma renderização já está rodando, para o agente não empilhar
+  atrás dela.
+- **Detecção de stall** — um WebSocket passivo para o ComfyUI acompanha o
+  prompt / nó / progresso em execução; um passo que para de avançar além
+  do limiar
+  ([`COMFYUI_MCP_STALL_S`](/docs/pt-BR/configuration#orquestrador-do-painel-e-a-ponte),
+  padrão 180s) prefixa uma nota de uma linha STALL/BACKLOG no próximo
+  turno do agente.
+- **Cancelamento em escalada** — `queue` (action:"cancel") interrompe,
+  **verifica** se o job de fato parou (dentro de
+  [`COMFYUI_MCP_INTERRUPT_S`](/docs/pt-BR/configuration#acompanhamento-de-jobs),
+  padrão 30s), depois escala para `/free` e reporta a renderização WEDGED
+  (sugerindo `restart_comfyui`) se ela ainda não morrer; `clear_pending`
+  descarta todos os jobs pendentes na mesma chamada.
+
+Tudo é fail-safe: se o WebSocket do watchdog nunca abre, nada muda. O
+agente também consegue raciocinar sobre as cores de uma imagem sem uma
+ida e volta de visão via `get_image (action:"analyze_color")` (paleta
+dominante, estatísticas de média + luminância, checagens de contraste).
+
+## Categorias de ferramentas
+
+<CardGroup cols={2}>
+  <Card title="Geração de imagens" icon="image" href="/docs/tools/image-generation" />
+  <Card title="Execução de workflows" icon="play" href="/docs/tools/workflow-execution" />
+  <Card title="Autoria de workflows" icon="pen-ruler" href="/docs/tools/workflow-authoring" />
+  <Card title="Biblioteca de workflows" icon="folder-open" href="/docs/tools/workflow-library" />
+  <Card title="Assets e imagens" icon="images" href="/docs/tools/assets-images" />
+  <Card title="Modelos" icon="box" href="/docs/tools/models" />
+  <Card title="Nós personalizados" icon="puzzle" href="/docs/tools/custom-nodes" />
+  <Card title="Nós de API" icon="cloud" href="/docs/tools/api-nodes" />
+  <Card title="Instalação e ambiente" icon="wrench" href="/docs/tools/install-environment" />
+  <Card title="Controle de processo" icon="power" href="/docs/tools/process-control" />
+  <Card title="Padrões, estatísticas e skills" icon="sliders" href="/docs/tools/defaults-stats-skills" />
+</CardGroup>
+
+<Info>
+  A Referência de ferramentas é gerada a partir dos schemas ao vivo das
+  ferramentas MCP (`npm run docs:gen`), então nunca se descola do código.
+</Info>

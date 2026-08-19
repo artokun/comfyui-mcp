@@ -1,0 +1,138 @@
+---
+title: "Arena de LLM"
+description: "Evalúa CUALQUIER LLM agente en tareas reales de ComfyUI — local (Ollama), alojado (OpenRouter/DeepSeek/GLM/MiMo) o frontier. Cada puntuación se verifica contra el servidor ComfyUI, no contra las afirmaciones del modelo. Un comando, informes listos para compartir."
+icon: "trophy"
+---
+
+La **Arena de LLM de ComfyUI** responde una pregunta con honestidad: *¿puede
+este modelo controlar ComfyUI de verdad?* No «¿suena seguro de sí mismo» —
+el resultado de cada escenario se **verifica contra el propio servidor
+ComfyUI** (historial de trabajos, parámetros del grafo ejecutado, archivos
+de salida reales y sus tamaños en píxeles). Se ejecuta sobre el mismo
+[router compacto de herramientas](/docs/es/local-llms) que usan el panel y
+los clientes MCP, así que una puntuación de arena predice el comportamiento
+real del agente.
+
+```bash
+npm run arena          # scores the default local field via Ollama
+```
+
+## La escala de tareas
+
+Diez escenarios, tres bandas de dificultad, PASS = 2 (hecho y verificado por
+el servidor), PARTIAL = 1 (familia de herramientas correcta, resultado
+incompleto), FAIL = 0 — máximo **20**:
+
+| Banda | Escenario | Lo que demuestra |
+| --- | --- | --- |
+| Basics | `health` · `models` · `registry` · `queue` | descubrimiento de herramientas + tareas de una sola llamada |
+| Gauntlet | `generate` (render asíncrono + sondeo) · `precision` (los steps/tamaño exactos aterrizan en el grafo ejecutado) · `breakfix` (fallo deliberado → diagnosticar → recuperar) · `provenance` (encontrar el registro de assets, volver a renderizarlo vía generate_image (action:"regenerate") con un override) | cadenas de varios saltos, fidelidad de parámetros, recuperación de errores |
+| Crucible | `multiout` (UN grafo que guarda salidas de 512px + 1024px — verificado leyendo las cabeceras PNG) · `pipeline` (img2img en dos etapas encadenado a través de `upload_image (action:"stage")`) | composición de grafo en bruto — ninguna plantilla cubre esto |
+
+Los empates se deshacen por **empujones → rondas de herramientas → tiempo
+de reloj**, así que un modelo que clava una tarea a la primera queda por
+encima de uno que se revolvió hasta la misma puntuación.
+
+## Trae tu propio modelo
+
+La arena habla dos dialectos — Ollama local y cualquier cosa compatible con
+OpenAI:
+
+```bash
+# Local models (Ollama)
+ARENA_MODELS="gemma4:e4b,qwen3:4b" npm run arena
+
+# Any hosted model — one OpenRouter key covers most of the market
+ARENA_API=openai ARENA_BASE_URL=https://openrouter.ai/api/v1 \
+ARENA_API_KEY=sk-or-... ARENA_TIER=B-tier \
+ARENA_MODELS="deepseek/deepseek-v3.2,z-ai/glm-5.1,xiaomi/mimo-v2.5" \
+npm run arena
+
+# Direct providers work too (any /v1/chat/completions endpoint):
+#   DeepSeek:  ARENA_BASE_URL=https://api.deepseek.com/v1
+#   vLLM/LM Studio: point ARENA_BASE_URL at your server
+```
+
+Los resultados **se fusionan entre invocaciones** (ejecuta un modelo cada
+vez si quieres) en `arena-results/`: un JSON, transcripciones completas por
+escenario y un `arena-report.md` listo para compartir. Genera el gráfico de
+clasificación con:
+
+```bash
+node scripts/arena-graphic.mjs    # light + dark SVGs from your own results
+```
+
+Mandos útiles: `ARENA_TIER` etiqueta los modelos de una ejecución (SoTA /
+B-tier / local); `ARENA_OUT` redirige la salida; `ARENA_MAX_ROUNDS` y
+`ARENA_SCENARIO_TIMEOUT_MS` acotan los modelos desbocados;
+`COMFYUI_DEFAULT_CHECKPOINT` fija el checkpoint de render (hazlo si tu
+carpeta de checkpoints empieza por un modelo que no es txt2img).
+
+**Requisitos**: un ComfyUI en ejecución con un checkpoint txt2img (SD 1.5
+basta — los escenarios se verifican por contenido, no por calidad),
+`npm run build` una vez, y o bien Ollama o una clave API.
+
+## Lo que registra cada ejecución
+
+Más allá de la puntuación, cada entrada de la clasificación lleva los ejes
+que hacen un resultado accionable (#792):
+
+- **Cuantización y tamaño de parámetros** (Ollama `/api/show`) y **VRAM
+  residente** (`/api/ps`, muestreada mientras el modelo sigue cargado) —
+  así «¿qué puede ejecutar de verdad mi tarjeta de 8 GB, y vale un q4?» se
+  responde desde la tabla. Ejecutar el mismo modelo en q4 / q8 / fp16 por
+  la escala muestra dónde cae de verdad la puntuación. Estos campos quedan
+  en blanco cuando la sonda no puede responder (los endpoints alojados no
+  tienen equivalente) — nunca se adivinan.
+- **La versión de comfyui-mcp**, sellada en cada entrada cuya ejecución
+  pudo leerla (una ejecución que no puede leer su propia versión de paquete
+  se registra *sin versión*, exactamente como una ejecución anterior al
+  sello). Las puntuaciones absolutas se mueven cuando cambia la superficie
+  de herramientas, así que el informe marca cualquier clasificación que
+  mezcle versiones (o ejecuciones sin versión) como **no directamente
+  comparable**.
+- **Cada herramienta a la que el modelo tendió la mano** en un fallo, no
+  solo las que acertaron. Cuando 2+ modelos fallan el mismo escenario
+  después de elegir la misma herramienta incorrecta (y ninguna ejecución
+  que pasó la usó), el informe marca un **escenario sospechoso** — una
+  selección incorrecta en todo el campo es un sospechoso de
+  *descripción* de herramienta, no un hueco de capacidad (precedente:
+  #557/#654, donde era nuestro propio texto, no los modelos, el que
+  estaba mal). Comprueba la descripción antes de fiarte de las
+  puntuaciones de ese escenario.
+
+## Clasificación actual
+
+<img className="block dark:hidden" src="/images/arena-leaderboard-light.svg" alt="Clasificación de la Arena de LLM de ComfyUI" />
+<img className="hidden dark:block" src="/images/arena-leaderboard-dark.svg" alt="Clasificación de la Arena de LLM de ComfyUI" />
+
+14 modelos, mejor-de-3 en el clúster de arriba. Los hallazgos de cabecera:
+
+- **gemini-3.1-pro-preview es el único modelo perfecto en cada
+  ejecución** (20-20-20).
+- claude-opus-4.8 y gpt-5.5 llegan ambos a 20 pero perdieron un punto en
+  otras ejecuciones.
+- **El B-tier está a un punto del frontier** — GLM-5.1 (19-19-19, el
+  modelo más regular del campo), Kimi-k2.5 y MiMo-v2.5 a 19 — por una
+  pequeña fracción del precio frontier.
+- Los modelos locales pequeños superan lo básico y partes del gauntlet
+  pero se atascan en la composición de grafo del crucible; llama3.1:8b no
+  puede sostener el formato de herramientas en absoluto.
+
+Nos encantarían ejecuciones de la comunidad de modelos que no hemos cubierto
+— publica tu `arena-report.md` (y el gráfico) en una
+[discusión de GitHub](https://github.com/artokun/comfyui-mcp/discussions) o
+una incidencia, con tu GPU + las etiquetas de modelo para que los resultados
+sean comparables.
+
+## Prueba de humo del panel
+
+Una puntuación de arena demuestra el control headless de herramientas;
+`npm run smoke:panel` demuestra que el mismo modelo sobrevive al **panel
+lateral en vivo** (streaming, gating de turnos, el router de 6 herramientas
+sobre el puente). Lanza un orquestador aislado por modelo en su propio
+puerto y conduce un turno real:
+
+```bash
+SMOKE_MODELS="gemma4:e4b,xiaomi/mimo-v2.5" npm run smoke:panel
+```

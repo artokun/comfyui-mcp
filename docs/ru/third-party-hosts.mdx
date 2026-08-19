@@ -1,0 +1,231 @@
+---
+title: "Сторонние хосты"
+description: "Соберите свой фронтенд (панель Blender, расширение браузера, другое приложение) на том же протоколе сопряжения, которым пользуется мобильное приложение — один агент, общий контекст, тонкий клиент. Формы сообщений, эндпоинты, инварианты безопасности и промпт copy-paste, чтобы LLM собрал каркас вашего адаптера."
+icon: "plug"
+---
+
+Панель агента, [мобильное приложение](/docs/ru/mobile) и любой инструмент,
+который сопрягается с работающей сессией, говорят на **одном небольшом
+WebSocket-протоколе** со слушателем сопряжения оркестратора. **Сторонний хост**
+— любой клиент, который вы строите на этом протоколе: панель Blender,
+расширение браузера, CLI, другой редактор, — который **присоединяется к живой
+вкладке рабочего стола и управляет её сессией агента**. Тот же агент, тот же
+контекст, без второго процесса Claude Code, ничего лишнего пользователю
+ставить не нужно.
+
+<Note>
+Это ровно та поверхность, на которой построено мобильное приложение. Если вы
+умеете открыть WebSocket и отправить JSON, вы можете построить хост.
+</Note>
+
+## Как это работает
+
+<Steps>
+<Step title="Рабочий стол уже слушает">
+Когда панель агента открыта, оркестратор запускает **слушатель сопряжения с
+гейтингом по токену** в LAN (см. [Эндпоинты](#эндпоинты)). Каждая открытая
+вкладка панели — это **вкладка рабочего стола** со стабильным `tab_id` и живой
+сессией агента.
+</Step>
+<Step title="Ваш хост подключается с токеном сопряжения">
+Откройте WebSocket к URL сопряжения с токеном в query string. Без валидного
+токена соединение отклоняется — сопряжение и есть вся граница безопасности.
+</Step>
+<Step title="Перечислите вкладки и присоединитесь">
+Отправьте `list_tabs`, чтобы узнать открытые вкладки рабочего стола, затем
+`attach_tab`, чтобы зеркалировать одну. Ваш хост теперь **получает активность
+этой вкладки** (стримом) и может **ею управлять**.
+</Step>
+<Step title="Управляйте общей сессией">
+Отправляйте кадры `user_message`. Пока вы присоединены, сервер направляет их
+на **зеркалируемую вкладку** — так что ваше сообщение входит в *тот же*
+разговор, в котором находится агент рабочего стола. Именно это делает это
+«один агент, общий контекст», а не второй сессией.
+</Step>
+</Steps>
+
+## Эндпоинты
+
+Слушатель сопряжения выводится из порта моста (`COMFYUI_MCP_BRIDGE_PORT`,
+по умолчанию **9180**):
+
+| Порт | Назначение |
+|---|---|
+| `bridge` (9180) | UI-мост панель ⇄ оркестратор (собственное соединение рабочего стола). |
+| `bridge + 1` (9181) | HTTP-MCP поверхность `panel_*` — **не** этот протокол. |
+| **`bridge + 2` (9182)** | **Слушатель сопряжения / удалённого управления, к которому вы подключаетесь.** С гейтингом по токену, привязан к `0.0.0.0` (доступен из LAN). |
+
+**URL сопряжения:**
+
+```
+ws://<desktop-machine-ip>:9182/?token=<PAIR_TOKEN>
+```
+
+- Токен либо **закреплён** пользователем через `COMFYUI_MCP_PAIR_TOKEN`
+  (сопряжение всегда включено), либо **чеканится на сессию** и раздаётся через
+  QR / поток сопряжения панели. Ваш хост получает его так же, как мобильное
+  приложение: пользователь сопрягает его один раз.
+- **По умолчанию в LAN**, но публичная экспозиция встроена, когда пользователь
+  её просит: модальное окно сопряжения панели предлагает режим **«Интернет»**,
+  который открывает зашифрованный быстрый туннель cloudflared, а предприятия
+  могут направить его через собственный релей
+  (`COMFYUI_MCP_TUNNEL_BACKEND=relay`). Токен гейтит в любом случае.
+
+## Формы сообщений
+
+Все кадры — JSON-объекты с `type`. Кадры запрос/ответ несут `cid`
+(correlation id), который выбираете вы, и который эхом возвращается в
+соответствующем ответе.
+
+### Входящие — хост → оркестратор
+
+| `type` | Поля | Эффект |
+|---|---|---|
+| `hello` | `tab_id`, `headless: true` | Зарегистрировать ваше соединение. Сторонние хосты — **headless**-клиенты (своего холста нет). |
+| `list_tabs` | `cid` | Запросить открытые вкладки рабочего стола. |
+| `attach_tab` | `cid`, `target_tab_id` | Зеркалировать + управлять этой вкладкой рабочего стола. Валидно только для **настоящей, не-headless** вкладки рабочего стола. |
+| `detach_tab` | — | Перестать зеркалировать/управлять; ваш ввод возвращается к вашей собственной (пустой) сессии. |
+| `user_message` | `text` (+ ваши обычные поля сообщения) | Ход в разговоре **зеркалируемой** вкладки. Сервер ставит штамп на присоединённую вкладку. |
+
+Любое другое событие панели, которое вы отправляете, пока присоединены,
+точно так же направляется на зеркалируемую вкладку.
+
+### Исходящие — оркестратор → хост
+
+| `type` | Поля | Значение |
+|---|---|---|
+| `tab_list` | `cid`, `tabs[]` | Ответ на `list_tabs`: вкладки рабочего стола, к которым можно присоединиться. |
+| `tab_attached` | `cid`, `tab_id`, `ok`, `error?` | Ответ на `attach_tab`. `ok:false` + `error`, если цель устарела/headless. |
+| `mailbox_flush` | буферизованные кадры | Повтор всего, что вкладка произвела, пока у вас не было живого соединения. |
+
+Плюс живая активность агента зеркалируемой вкладки (стриминг ответов, статус,
+карточки), которую ваш хост отрисовывает.
+
+<Warning>
+**`attach_tab` авторитетен — цель нельзя подделать.** Сервер перезаписывает
+любой `tab_id`, который вы кладёте на исходящий кадр, вкладкой, к которой вы
+реально присоединились. Хост может управлять только вкладкой, к которой явно
+присоединился. Это нарочно; см. ниже.
+</Warning>
+
+## Инварианты безопасности — хост ДОЛЖЕН их сохранять
+
+Это гарантии, которые делают сопряжение безопасным. Построить хост, который
+их соблюдает, и есть весь контракт; хост, который пытается их обойти, — ровно
+то, что слушатель спроектирован отвергать.
+
+<Note>
+Сохранять их — не ограничение вашего хоста: это *и есть* возможность. Они
+останавливают клиента от захвата сессии, с которой он никогда не сопрягался.
+</Note>
+
+1. **Гейт токена.** Слушатель отклоняет любое соединение без валидного токена
+   сопряжения (`verifyClient`). Никогда не стройте поток, который сам возит
+   или встраивает токен — пользователь сопрягает, один раз, намеренно.
+2. **Авторитетный штамп `attach_tab`.** Сервер, а не клиент, решает, на какую
+   вкладку целятся ваши кадры. Не полагайтесь на клиентский `tab_id` для
+   маршрутизации; сначала присоединитесь, потом отправляйте.
+3. **Только не-headless цели.** Можно присоединиться к настоящей вкладке
+   рабочего стола, никогда к другому headless-клиенту (нельзя зеркалировать
+   другой телефон/хост).
+4. **Одна вкладка за раз.** Присоединение к B сбрасывает подписку на A.
+   Моделируйте одно активное зеркало на соединение.
+5. **Закреплённый вид сокета.** Вид соединения (headless vs рабочий стол)
+   фиксируется на первом `hello`; не пытайтесь его перевернуть, чтобы обойти
+   защиту от захвата.
+
+## Минимальный эталонный клиент
+
+```js
+const token = "<PAIR_TOKEN>";            // obtained via the user's pair flow
+const ws = new WebSocket(`ws://192.168.1.50:9182/?token=${token}`);
+let cid = 0;
+
+ws.onopen = () => {
+  ws.send(JSON.stringify({ type: "hello", tab_id: "myhost:" + crypto.randomUUID(), headless: true }));
+  ws.send(JSON.stringify({ type: "list_tabs", cid: ++cid }));
+};
+
+ws.onmessage = (ev) => {
+  const m = JSON.parse(ev.data);
+  if (m.type === "tab_list") {
+    // pick a desktop tab and attach to it
+    const target = m.tabs[0]?.tab_id;
+    if (target) ws.send(JSON.stringify({ type: "attach_tab", cid: ++cid, target_tab_id: target }));
+  } else if (m.type === "tab_attached" && m.ok) {
+    // now you're driving that tab's session
+    ws.send(JSON.stringify({ type: "user_message", text: "Add a KSampler and wire it up." }));
+  } else {
+    // render streamed agent activity for the mirrored tab
+    console.log("from session:", m);
+  }
+};
+```
+
+## Научите LLM собрать ваш адаптер
+
+Вставьте промпт ниже в Claude, ChatGPT или вашего агента для кода, чтобы он
+собрал каркас хост-адаптера для вашей платформы. Он несёт полный контракт
+протокола, так что модели не нужно гадать.
+
+```text Copy this into your LLM
+You are building a THIRD-PARTY HOST ("adapter") for comfyui-mcp. A host connects
+to a running comfyui-mcp orchestrator over WebSocket, attaches to a live desktop
+"tab", and drives that tab's agent session — same agent, shared context, no second
+session. Build the adapter for THIS platform: <describe your platform, e.g. a
+Blender sidebar panel / a Chrome extension / a Neovim plugin>.
+
+CONNECTION
+- WebSocket to:  ws://<desktop-ip>:9182/?token=<PAIR_TOKEN>
+  (port = bridge port + 2; bridge default 9180. Token is provided by the user via
+  their pairing flow — NEVER hardcode, embed, or auto-provision it.)
+- On open, send:  {"type":"hello","tab_id":"<your-unique-id>","headless":true}
+
+DISCOVER + ATTACH
+- Send {"type":"list_tabs","cid":1}; you receive {"type":"tab_list","cid":1,"tabs":[...]}.
+- Send {"type":"attach_tab","cid":2,"target_tab_id":"<a tab_id from tab_list>"};
+  you receive {"type":"tab_attached","cid":2,"tab_id":"...","ok":true|false,"error"?}.
+  Only real, non-headless desktop tabs are attachable.
+
+DRIVE
+- Send {"type":"user_message","text":"..."} to post a turn into the ATTACHED tab's
+  conversation. The server routes it to the mirrored tab automatically.
+- Send {"type":"detach_tab"} to stop.
+
+RENDER
+- After attaching you receive the mirrored tab's live activity (streamed agent
+  replies, status, interactive cards) and a {"type":"mailbox_flush"} replay of
+  anything produced while you were disconnected. Render these in your UI.
+
+SECURITY — these are non-negotiable; preserve every one:
+1. Only connect with a user-provided pair token; never embed or auto-ship it.
+2. Never assume you can target a tab you did not attach_tab to — the server stamps
+   the target authoritatively; trust tab_attached.ok, don't spoof tab_id.
+3. Attach only to non-headless desktop tabs; never to another headless client.
+4. One active attachment per connection (attaching to a new tab drops the old).
+5. Do not try to change your connection's kind after the first hello.
+
+DELIVERABLE
+- A minimal, working adapter for the platform above: connect → list → attach →
+  send a user_message → render streamed replies → detach. Handle reconnects and
+  the mailbox_flush replay. Keep the pairing/token handling explicit and
+  user-driven.
+```
+
+## Зарегистрируйте свою интеграцию
+
+Построили что-то? **Зарегистрируйте** — чтобы её можно было перечислить и
+чтобы мы могли предупреждать вас об изменениях протокола до выпуска:
+
+<Card title="Зарегистрировать сторонний хост" icon="plug" href="https://github.com/artokun/comfyui-mcp/issues/new?template=third-party-host.yml">
+Откройте шаблон регистрации на GitHub — имя, платформа, репозиторий и против
+какой версии протокола вы строили.
+</Card>
+
+<Note>
+**Стабильность:** кадры выше — то, на чём едет мобильное приложение, но это
+ещё не замороженный, версионированный контракт — читайте исходник
+([`src/services/ui-bridge.ts`](https://github.com/artokun/comfyui-mcp/blob/main/src/services/ui-bridge.ts))
+как авторитет и регистрируйте хост, чтобы вас уведомляли, когда формы
+сдвинутся.
+</Note>

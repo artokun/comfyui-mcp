@@ -1,0 +1,68 @@
+---
+title: "App móvil (beta)"
+description: "ComfyUI-MCP Mobile — chatea con tu agente de ComfyUI desde el teléfono. Empareja con el código QR del panel del agente y controla generaciones, flujos de trabajo y modelos desde cualquier sitio de tu red. Ahora en beta cerrada en Android e iOS."
+icon: "mobile"
+---
+
+<Note>
+**Únete a la beta.** La app móvil de ComfyUI-MCP está en beta cerrada — instala
+una build para tu plataforma:
+
+- **Android** — [Firebase App Distribution](https://appdistribution.firebase.dev/i/27a5cccde72ffb42)
+- **iOS** — [TestFlight](https://testflight.apple.com/join/ws65s4a2)
+</Note>
+
+La app móvil es un frontal nativo de teléfono para el mismo agente que impulsa
+el [panel lateral](/docs/es/panel). Se conecta al puente del orquestador del
+panel, así que todo lo que el panel puede hacer — generar imágenes, ejecutar e
+inspeccionar flujos de trabajo, cambiar modelos — está disponible desde tu
+teléfono, con el ComfyUI de tu escritorio haciendo el trabajo.
+
+## Emparejamiento
+
+La app habla con el host del agente a través del puente del panel, así que
+emparejas una vez y ya estás dentro:
+
+1. Instala y ejecuta [comfyui-mcp](/docs/es/quickstart) con el
+   [panel del agente](/docs/es/panel) en tu escritorio.
+2. En los **Ajustes** de ComfyUI, activa **"Control via Mobile app (beta)"** —
+   está **desactivado por defecto**, y el botón de emparejamiento se queda
+   oculto hasta que lo actives.
+3. Abre el panel y pulsa el botón **QR** de su cabecera para mostrar el
+   **QR de emparejamiento**.
+4. En la app móvil, pulsa **Scan QR from panel** — o pega a mano la URL del
+   puente (`ws://…?token=…`).
+
+El QR codifica una URL de aterrizaje cuyos datos de emparejamiento van en el
+fragmento, así que el host y el token nunca salen de tus dispositivos. La app
+también registra el deep link `comfyui-mcp://pair` para el botón **Open in app**
+del aterrizaje.
+
+<Note>
+El teléfono y el escritorio necesitan un camino de red entre ellos — la misma
+LAN en el caso sencillo, o un [relé seguro](/docs/es/self-hosted-relay) /
+[despliegue en la nube](/docs/es/cloud-deployment) cuando el host no es
+alcanzable de forma directa.
+</Note>
+
+## Qué hay en la app
+
+- **Chat del agente** — la misma conversación que tendrías en la barra
+  lateral del panel, desde tu teléfono.
+- **Selector de modelo** — catálogo de modelos en vivo desde el orquestador;
+  cambia de modelo a mitad de sesión.
+- **Navegación de Civitai** — busca modelos y creadores, likes y favoritos.
+- **Control remoto** — refleja la pestaña del panel de escritorio y consulta
+  diagnósticos del flujo de trabajo sobre la marcha.
+
+## Comentarios
+
+Los comentarios de la beta y los informes de errores son bienvenidos en
+[Discord](https://discord.gg/cW9arBhzCu) o en el
+[tracker de incidencias](https://github.com/artokun/comfyui-mcp/issues).
+
+## Ver también
+
+- [Panel lateral](/docs/es/panel) — el agente dentro de ComfyUI con el que se empareja la app
+- [Despliegue en la nube](/docs/es/cloud-deployment) — controla un pod de ComfyUI remoto
+- [Relé autoalojado](/docs/es/self-hosted-relay) — sé dueño del camino del puente seguro

@@ -1,0 +1,574 @@
+---
+title: "Usando as ferramentas"
+description: "O que são as ferramentas, por que você nunca chama uma você mesmo, e o que fazer quando uma diz não. Escrito para pessoas, não para engenheiros."
+icon: "hand-pointer"
+---
+
+A [Referência de ferramentas](/docs/tools/image-generation) lista tudo o que este
+projeto consegue fazer, na forma que a IA lê. Esta página é a versão para você.
+
+<Note>
+  Nada aqui exige que você escreva código, digite JSON ou aprenda uma API. Se
+  você já pediu a alguém para "abrir o meu workflow de retrato e subir os steps
+  para 30", você já conhece a interface.
+</Note>
+
+## Uma ferramenta é o que o agente consegue fazer, não o que você digita
+
+Por conta própria, um modelo de chat só consegue produzir texto. Ele pode
+descrever um workflow; não consegue abrir um.
+
+Uma **ferramenta** é uma ação específica e nomeada que entregamos ao modelo
+para que ele realmente alcance o seu ComfyUI — carregar um arquivo, enfileirar
+uma renderização, instalar um pacote de nós, olhar a imagem que saiu. O modelo
+não tem o direito de inventar essas ações. Ele recebe um menu fixo, e cada
+item do menu diz exatamente do que precisa.
+
+**Você nunca escolhe nesse menu.** Você diz o que quer, com as palavras que
+vierem naturalmente, e o agente escolhe.
+
+| Você diz | Ele executa em silêncio |
+| --- | --- |
+| "O que eu tenho salvo?" | `get_workflow` with `action: "list"` |
+| "Abre o de retrato e me diz o que ele faz" | `get_workflow` with `action: "list"`, then `action: "analyze"` |
+| "Faz uma raposa vermelha na neve" | `generate_image` (the `image` job) |
+| "Já terminou?" | `queue` (the `list` job) |
+| "Falhou e eu não entendo o porquê" | `get_history` (the `diagnose` job) |
+| "Metade dos nós está vermelha" | `list_packs` (the `install_deps` job) |
+| "Estou sem espaço em disco, o que está grande?" | `list_local_models` |
+
+Repare na segunda linha: uma frase, duas ferramentas, numa ordem que você não
+precisava saber. Esse é o ponto de todo o arranjo. Não se espera que você saiba
+que encontrar um arquivo e ler um arquivo são operações separadas.
+
+<Tip>
+  Você pode ser tão vago quanto quiser. "Alguma coisa está quebrada" é um
+  começo perfeitamente bom — o agente começa com
+  `get_system_stats (action:"health")` e vai afunilando. Ser específico chega
+  mais rápido, mas nunca é obrigatório.
+</Tip>
+
+### Então para que serve todo aquele JSON nas páginas de referência?
+
+Toda página de ferramenta mostra um bloco assim:
+
+```json
+{
+  "tool": "generate_image",
+  "arguments": {
+    "prompt": "a red fox in deep snow, golden hour, sharp focus",
+    "steps": 30
+  }
+}
+```
+
+Isso é a transcrição do que o agente enviou, não uma instrução para você. Você
+disse "faz uma raposa vermelha na neve, e coloca um pouco mais de detalhe"; foi
+isso que saiu do outro lado.
+
+Vale a pena saber ler um, por dois motivos: quando você quer conferir se o
+agente entendeu, e quando alguma coisa deu errado e você está descrevendo para
+outra pessoa. Não vale a pena decorar.
+
+## As ferramentas vêm de dois lugares
+
+Há duas superfícies, e elas existem porque respondem a perguntas diferentes.
+
+<CardGroup cols={2}>
+  <Card title="O painel lateral" icon="window-maximize">
+    Vive **dentro do ComfyUI**, na aba Agente. As ferramentas dele (`panel_*`)
+    agem sobre o grafo que você está vendo agora — o canvas de verdade, com as
+    suas mudanças não salvas em cima.
+  </Card>
+  <Card title="Um cliente de fora" icon="terminal">
+    Claude Desktop, Claude Code, um editor, o seu celular. As ferramentas
+    dele agem sobre o **servidor**: arquivos no disco, a fila de jobs, modelos,
+    pacotes de nós, o próprio processo do ComfyUI.
+  </Card>
+</CardGroup>
+
+A cisão é mesmo sobre a palavra "isto". Quando você diz "adiciona um LoRA a
+**isto**", o painel sabe o que é "isto", porque ele vê a sua tela. Um cliente
+de fora não consegue — precisa que lhe digam um nome de arquivo.
+
+Então o painel cuida de coisas como:
+
+- ler o grafo à sua frente (`panel_graph_outline`)
+- executá-lo, exatamente como se você tivesse apertado Queue Prompt
+  (`panel_run`)
+- ligar um nó, mudar um widget, dizer por que um nó ficou vermelho
+  (`panel_add_node`, `panel_set_widget`, `panel_get_errors`)
+- carregar um workflow inteiro no canvas, ou salvar o que está lá
+  (`panel_load_workflow`, `panel_save_workflow`)
+
+E um cliente de fora cuida de gerar uma imagem do zero, gerenciar modelos e
+pacotes de nós, trabalhar com arquivos salvos, e reiniciar o ComfyUI.
+
+<Tip>
+  **Se você está começando, use o painel.** É uma instalação só, fica bem ao
+  lado do seu grafo, e não precisa de um app separado. Veja
+  [o guia do painel](/docs/pt-BR/panel) para configurar. Adicione um cliente
+  de fora depois, quando quiser o agente envolvido em coisas que não são um
+  canvas.
+</Tip>
+
+Eles não são rivais — o painel fala com o mesmo servidor por baixo, e uma
+sessão pode usar os dois. Alguém editando um grafo no desktop enquanto um
+celular conduz a mesma sessão é uma coisa suportada, não um hack.
+
+## Uma ferramenta, várias tarefas
+
+Você vai notar que algumas ferramentas recebem uma `action`:
+
+```json
+{ "tool": "workspace", "arguments": { "action": "get" } }
+```
+
+Isso parece criptico e não é. `workspace` é um assunto — *de qual instalação
+do ComfyUI estamos falando* — e `action` diz qual pergunta você está fazendo
+sobre esse assunto: ler, mudar o padrão, listar o que está disponível.
+
+Lê exatamente como a fala comum, em que o verbo e o objeto são palavras
+separadas:
+
+| Você diz | Action |
+| --- | --- |
+| "Qual ComfyUI eu estou usando?" | `get` |
+| "Usa sempre o do meu disco D" | `set_default` |
+| "Que instalações você consegue ver?" | `list` |
+
+### Nada foi removido
+
+Essa forma é relativamente nova, e é fácil lê-la como capacidade sendo
+cortada. Não é, e a confusão vale ser afastada de cara, porque ela já
+apareceu.
+
+Antes havia uma ferramenta por pergunta — um nome para ler um workspace,
+outro para defini-lo, outro para listá-los. Esses nomes sumiram, e se você
+acompanhar a contagem de ferramentas vai vê-la caindo, com força.
+
+O que de fato aconteceu é que ferramentas relacionadas foram **fundidas**,
+não apagadas:
+
+| The old name | The same thing today |
+| --- | --- |
+| `get_workspace` | `workspace` with `action: "get"` |
+| `get_queue` | `queue` with `action: "list"` |
+| `apps_run_status` | `apps` with `action: "run_status"` |
+| `install_workflow_dependencies` | `list_packs` with `action: "install_deps"` |
+| `list_workflows` | `get_workflow` with `action: "list"` |
+| `analyze_workflow` | `get_workflow` with `action: "analyze"` |
+| `validate_workflow` | `create_workflow` with `action: "validate"` |
+
+O mesmo código por baixo, o mesmo comportamento, as mesmas respostas. Só o
+rótulo da frente mudou.
+
+O motivo é que o menu ficou longo o bastante para doer. A descrição completa
+de cada ferramenta tem que ser entregue ao modelo antes de ele escolher, e
+passado um certo tamanho a própria escolha se degrada — modelos menores em
+especial começam a pegar um vizinho plausível em vez do certo. Menos
+ferramentas, mais largas, com uma `action` clara, corrige isso de forma
+mensurável. Também significa que o modelo gasta a atenção no seu pedido em
+vez de na leitura de um catálogo.
+
+Você não deveria perceber nada disso. Você também nunca digitou o nome
+antigo; você dizia "qual ComfyUI eu estou usando?", e isso ainda funciona.
+
+<Note>
+  Se algum guia mais antigo ou a memória própria de um modelo for atrás de um
+  nome que não existe mais, você recebe um erro específico nomeando o
+  substituto em vez de um "unknown tool" em branco — por exemplo: *removed in
+  0.49.0. Call workspace (action:"get") instead.* O agente em geral consegue
+  se corrigir e tentar de novo sem você fazer nada.
+</Note>
+
+## Pedir algo diferente
+
+Toda página de ferramenta lista parâmetros — `max_chars`, `limit`, `depth`,
+`fields`. É uma pergunta justa saber onde você deveria digitá-los, e a
+resposta honesta é: em lugar nenhum. Não existe uma caixa de configurações
+para `max_chars`, porque não é uma configuração. É um argumento que o
+**agente** preenche, do zero, cada vez que chama a ferramenta.
+
+Isso não te tira da jogada. Muda a cara do controle:
+
+<Note>
+  Você não define um parâmetro. Você pede um — na mesma frase que você já
+  ia escrever de qualquer jeito.
+</Note>
+
+### Dois jeitos de pedir
+
+Os dois funcionam. Eles falham de jeitos diferentes, e essa é a única razão
+para conhecer os dois.
+
+| | Soa como | Use quando |
+| --- | --- | --- |
+| **Simples** | "Lê o nó 42 em detalhe — só esse nó, não o grafo inteiro." | Comece sempre aqui. É o que as pessoas de fato digitam, e costuma funcionar. |
+| **Explícito** | "Usa `panel_query_graph` com `ids` [42] e `max_chars` 20000." | O modelo já errou uma vez e você não quer deixar margem. |
+
+Nomear a ferramenta e o argumento não é a forma *correta* — é a forma
+*forçosa*. Guarde para a nova tentativa.
+
+### Quando a resposta é cortada
+
+Leituras longas são limitadas para que um grafo enorme não engula a conversa
+inteira. Dois tetos diferentes podem parar a mesma leitura — o número de nós
+listados (`limit`) e o orçamento de caracteres (`max_chars`) — e subir o que
+não era o problema não muda nada, o que se lê exatamente como se a nova
+tentativa tivesse falhado.
+
+Não se espera que você descubra qual. Num arquivo salvo, a nota **nomeia a
+alavanca que disparou e descarta a outra**, por extenso:
+
+> … truncated at 40 of 300 by `limit`=40 — raise `limit` up to 200, or narrow with `types`/`where`/`ids`/`depth`. `max_chars` is not the constraint here.
+
+E quando a alavanca já está no teto ela diz isso em vez de te mandar subir de
+novo, porque não resta nada para subir.
+
+<Note>
+  No canvas ao vivo (`panel_query_graph`) a mesma leitura é executada pela
+  cópia deste motor no próprio painel, que ainda não acompanhou esse
+  texto. Se uma nota lá nomeia um argumento e subi-lo não muda nada, tente o
+  outro antes de concluir que a ferramenta está quebrada.
+</Note>
+
+O agente deve ler a própria nota e tentar de novo sozinho. Quando ele não
+faz isso, você é o plano B, e esta é a frase:
+
+> Isso foi truncado — lê a nota e tenta de novo a mesma consulta, subindo o
+> limite que ela nomeia.
+
+### Onde estão as paredes
+
+Estes são os números das duas ferramentas que leem um grafo com orçamento —
+`panel_query_graph` (o canvas ao vivo) e `get_workflow` com
+`action: "query"` (um arquivo salvo):
+
+| Argumento | Padrão | O máximo que você pode pedir |
+| --- | --- | --- |
+| `max_chars` | 12000 | 60000 |
+| `limit` (nós listados) | 40 | 200 |
+
+Nessas duas ferramentas, pedir além de um teto é rejeitado como argumento
+inválido em vez de ser arredondado para baixo em silêncio, então o agente
+descobre na hora e pode se corrigir. Os números também não são universais:
+várias outras ferramentas recebem um `max_chars` e definem o próprio teto,
+declarado na descrição daquela ferramenta.
+
+### O recorte vence o orçamento
+
+Subir o teto é a segunda coisa a tentar, não a primeira. Num workflow de 600
+nós, um orçamento maior na prática compra mais nós errados, e enterrar a
+resposta entre centenas de irrelevantes degrada a resposta mesmo quando ela
+cabe tecnicamente.
+
+Afunile primeiro, com as palavras que vierem naturalmente:
+
+| Você diz | No que isso afunila |
+| --- | --- |
+| "Olha só os nós 42 e 43." | só esses ids |
+| "O que alimenta o sampler?" | o lado a montante de um nó |
+| "…só dois pulos para trás." | uma distância limitada a partir daí |
+| "Quantos de cada tipo de nó tem aqui?" | contagens em vez de uma listagem |
+
+Depois, se ainda estiver cortado, alargue.
+
+## Quando ele diz não
+
+Uma ferramenta recusar em geral não é um bug. A maioria das recusas é uma
+proteção que disparou porque a chamada teria feito alguma coisa que você não
+pediu.
+
+### "Recusou e eu não sei por quê"
+
+Você vai ver texto em linguagem clara em vez de um stack trace — alguma coisa
+nomeando o que ele não faria e o que fazer no lugar. Leia como o agente
+sendo cuidadoso, não travado. Recusas honestas comuns:
+
+- **Ele não consegue dizer de qual workflow você está falando.** Mais de uma
+  aba está aberta, ou o grafo ainda não tem identidade salva. Salve, ou diga
+  qual.
+- **Isso sobrescreveria alguma coisa.** Peça um nome de arquivo novo e ele
+  segue.
+- **A coisa de fato não está lá.** Um arquivo de modelo, um pacote de nós, um
+  servidor em execução.
+
+Se uma recusa se lê como bobagem em vez de cautela, vale reportar — peça ao
+agente para abrir, e ele anexa os detalhes da sua configuração para você.
+
+### "Este painel está velho demais"
+
+A recusa mais comum com um conserto de verdade. Lê mais ou menos assim:
+
+> This ComfyUI-MCP panel is too old for *"…"* — update the ComfyUI-MCP panel, then reconnect.
+
+O painel lateral e este servidor são peças separadas que saem separadas,
+então uma pode atrasar a outra. Quando o servidor pede alguma coisa que o
+painel instalado não consegue fazer com segurança, ele recusa em vez de
+adivinhar — um painel antigo que não consegue confirmar *qual* workflow
+recebe um comando poderia aplicar a sua edição na aba errada, então ele fica
+restrito a leituras até ser atualizado.
+
+O conserto tem três passos, e **o terceiro é o que as pessoas pulam**:
+
+<Steps>
+  <Step title="Atualize o painel">
+    Peça ao agente para atualizar (`install_comfyui(action:'panel', panel_action:'update')`), ou faça
+    pelo ComfyUI-Manager, onde ele aparece como `comfyui-agent-panel`.
+  </Step>
+  <Step title="Reinicie o ComfyUI">
+    A atualização não reinicia nada por conta própria. Peça ao agente, ou
+    reinicie você mesmo.
+  </Step>
+  <Step title="Force o recarregamento da aba do navegador do ComfyUI">
+    **Ctrl+Shift+R** (**Cmd+Shift+R** num Mac). O seu navegador tem o código
+    antigo do painel em cache, e um reinício sozinho não solta isso. Pule
+    este passo e a mesma mensagem volta na hora, o que parece que a
+    atualização falhou quando não falhou.
+  </Step>
+</Steps>
+
+### "Nenhum painel conectado"
+
+Problema diferente, mensagem de cara parecida. Isso significa que o agente
+de fora não encontra a aba do navegador do seu ComfyUI. Quase sempre é um
+destes:
+
+- O ComfyUI não está aberto em navegador nenhum — abra e olhe a aba Agente
+  na barra lateral.
+- O ComfyUI acabou de ser reiniciado, ou você recarregou a aba. Isso derruba
+  a conexão. **Recarregue a aba do ComfyUI** e ela volta na hora.
+- A aba Agente está aberta mas nunca foi conectada. O painel se liga quando
+  você escolhe um provedor e clica em **Conectar**, nunca no carregamento,
+  então uma aba recém-aberta sem nada é o estado comum, não uma falha.
+- O painel ainda não está instalado. Veja [o guia do painel](/docs/pt-BR/panel).
+
+A mensagem separa isso em dois grupos para você — ela distingue "conectou
+antes e caiu" de "nada conectou ainda". Ela não vai além disso, e diz isso
+em vez de escolher uma causa que não tem como observar. Uma aba que já
+conectou prova que o painel está instalado e estava funcionando, então
+recarregar a aba do ComfyUI é a primeira coisa a tentar e em geral a única;
+se o recarregamento não trouxer de volta, trate como o segundo grupo e
+desça as checagens acima.
+
+## Quando ele não diz nada
+
+A falha mais difícil é a que não tem erro nenhum. O agente não chama uma
+ferramenta, não recusa, não reclama. Ele só conversa: descreve o que o seu
+workflow provavelmente contém, ou se oferece para escrever um script. Parece
+útil, e ele nunca olhou nada.
+
+Três situações completamente diferentes produzem o mesmo comportamento, e de
+onde você está sentado elas são indistinguíveis:
+
+<CardGroup cols={3}>
+  <Card title="Ausente" icon="circle-minus">
+    O seu cliente nunca recebeu as ferramentas. Elas não estão na lista que
+    ele entrega ao modelo, então não há o que chamar.
+  </Card>
+  <Card title="Bloqueado" icon="hand">
+    O seu cliente tem as ferramentas e não deixa o modelo executá-las. A
+    chamada é interrompida dentro do seu cliente.
+  </Card>
+  <Card title="Não pedido" icon="eye-slash">
+    Tudo funciona. A coisa que você queria existe sob um nome que nunca
+    apareceu, então ninguém foi atrás.
+  </Card>
+</CardGroup>
+
+Os remédios apontam para três direções diferentes, e dois deles são
+ativamente prejudiciais se você chutar errado: reinstalar o que já está
+instalado, ou afrouxar permissões que nunca foram o problema. Então o
+primeiro movimento não é consertar nada. É descobrir em qual você está.
+
+### Duas perguntas que separam os casos
+
+Pergunte ao agente, em palavras simples:
+
+<Steps>
+  <Step title="Pergunte o que ele consegue ver">
+    > Quais ferramentas você tem do comfyui-mcp? Só lista os nomes.
+
+    Uma lista de algumas dezenas de nomes é normal e saudável — essa é a
+    superfície direta, que é o padrão desde 0.50.0.
+
+    **Três nomes** — `list_tools`, `describe_tool`, `call_tool` — também é
+    *normal e saudável*. Esse é o [modo compacto](#se-você-usa-um-modelo-local-pequeno),
+    que você obtém passando `--compact`, e que modelos locais pequenos ainda
+    selecionam automaticamente. O resto do catálogo está a uma chamada
+    `list_tools` de distância, então peça para ele rodar isso e você vai ver
+    a lista de verdade. Nenhuma das duas respostas significa que alguma
+    coisa está sendo retida.
+
+    **Nenhum nome**, ou "Eu não tenho nenhuma ferramenta para o ComfyUI",
+    descarta o terceiro caso e mais nada. Isso **não** significa ausente.
+    Uma política de permissão pode reter ferramentas da lista mostrada ao
+    modelo, então um servidor instalado, conectado e funcionando produz
+    exatamente essa resposta. Ausente e bloqueado são indistinguíveis neste
+    passo, e esta é a ramificação que custou dias a um usuário — ter
+    certeza de que era a fiação.
+
+    Uma checagem afunila, e não é alguma coisa que o agente consegue ver:
+    **abra a própria lista de servidores MCP do seu cliente** — o lugar em
+    que ele mostra a quais servidores se conectou, que é uma lista
+    diferente das ferramentas que ele entrega ao modelo.
+
+    - **comfyui-mcp não está lá, ou aparece como falhou** → **ausente**. Um
+      problema de fiação do lado do cliente, não uma falha do painel ou do
+      servidor. Cinde de novo em dois — nunca foi ligado, ou um host que
+      não consegue segurá-las de jeito nenhum — e a lista
+      [abaixo](#de-onde-costuma-vir-cada-resposta) distingue esses.
+    - **Está lá e conectado, e o modelo ainda não lista nada** → as
+      ferramentas chegaram ao seu cliente. Onde elas pararam depois disso
+      ainda está em aberto: podem estar retidas do modelo por uma regra de
+      permissão, ou o modelo pode simplesmente ter falhado ou recusado
+      listá-las, o que parece exatamente igual daqui. **Não** comece a
+      afrouxar permissões só com isso.
+
+      Se essa lista de servidores também mostra **quais ferramentas ela
+      pegou do comfyui-mcp**, isso decide: ferramentas listadas lá mas não
+      pelo modelo significam que o modelo é o problema, não as suas
+      permissões; nenhuma listada lá significa que elas estão sendo
+      filtradas antes de o modelo vê-las. Se o seu cliente não mostra isso
+      — e muitos não mostram — nada ao seu alcance distingue os dois aqui,
+      e o passo 2 é a melhor chance, porque uma recusa volta em palavras.
+  </Step>
+  <Step title="Peça para ele tentar, e relatar de volta ao pé da letra">
+    > Agora chama a que você usaria para a coisa que não está funcionando, e
+    > cola exatamente o que voltar — inclusive qualquer erro. Não contorna.
+
+    Dois detalhes nessa frase fazem o trabalho.
+
+    **A ferramenta que você usaria para a coisa que não está funcionando**,
+    especificamente. Regras de permissão em geral são escritas por
+    ferramenta, então outra ferramenta funcionando não prova nada sobre a
+    que te interessa — é exatamente assim que um bloqueio se esconde. Se é
+    o canvas que não está sendo lido, o teste tem que ser uma leitura de
+    canvas.
+
+    **Não contorna.** Todo o modo de falha é um agente desviando em silêncio
+    de um obstáculo em vez de nomeá-lo, e deixado por conta própria ele faz
+    isso de novo.
+
+    - **Um resultado de verdade** — essa ferramenta funciona. Você está no
+      terceiro caso.
+    - **"Isso foi negado" / "não permitido" / "preciso de permissão"** —
+      **bloqueado**, dentro do seu cliente. Este é conclusivo: o agente
+      pediu e foi recusado.
+    - **"Eu não tenho essa ferramenta"** — ausente *ou* bloqueado, ainda.
+      Uma ferramenta retida e uma faltando parecem idênticas do assento do
+      modelo, então não aja só com isso: leve de volta à lista de
+      servidores do passo 1, e se essa lista também não mostrar
+      ferramentas por servidor, então nada que você alcance separa os dois
+      e o próximo passo honesto é perguntar no rastreador de issues em vez
+      de começar a mudar configurações.
+    - **Mais prosa, ainda nenhuma chamada** — pergunte seco: *"Você chamou
+      uma ferramenta? Se não, por quê?"* Um agente que desvia duas vezes em
+      geral está contornando alguma coisa que não mencionou.
+  </Step>
+</Steps>
+
+### O que dá para ver daqui, e o que não dá
+
+<Warning>
+  Quando o seu cliente recusa uma chamada de ferramenta, essa chamada nunca
+  sai do seu cliente. Nada chega a este servidor, então nada aparece no log
+  dele e nenhum erro é produzido em lugar nenhum que a gente alcance. Nós
+  não conseguimos detectar um bloqueio, e não vamos fingir: qualquer página
+  ou mensagem que pretenda te dizer "o seu cliente bloqueou isto" estaria
+  chutando.
+</Warning>
+
+O mesmo fato corta no outro sentido, e é a parte que engana as pessoas: um
+log quieto não é evidência de que nada foi tentado. Ausente, bloqueado e
+nunca-pedido todos parecem silêncio daqui.
+
+É por isso que as duas perguntas acima são o diagnóstico de verdade. Elas
+funcionam porque pedem ao único participante que *estava* na sala — o seu
+agente — para dizer o que tentou, e recusam a ele a opção de desviar da
+resposta.
+
+### De onde costuma vir cada resposta
+
+**Bloqueado — as próprias regras de permissão do seu cliente.** No Claude
+Code isso é o bloco `permissions` de `settings.json` (`~/.claude/settings.json`,
+ou o `.claude/settings.json` do projeto); as ferramentas MCP aparecem lá sob
+os nomes com namespace, `mcp__comfyui__<tool>`. Uma lista `allow` estrita que
+nunca as menciona para cada chamada antes de ela ser enviada. Este é o caso
+que custou vários dias a um usuário: as ferramentas pareciam estar
+funcionando, justamente porque os erros que ele caçava nunca podiam
+aparecer.
+
+**Ausente, e consertável — nunca foi ligado.** O cliente fala MCP mas nunca
+foi informado deste servidor, ou foi e a entrada está errada. Este é o caso
+comum e é uma edição de config; veja o [Início rápido](/docs/pt-BR/quickstart)
+para a entrada que o seu cliente espera.
+
+**Ausente, e não consertável — um host sem cliente MCP nenhum.** Alguns
+agentes não falam MCP, e nenhuma quantidade de configuração muda isso. O
+`pi` é um: ele tem as próprias ferramentas de shell-e-editor embutidas e
+nenhum cliente MCP, então não dá para entregar as nossas o que mais esteja
+instalado. O painel diz isso de frente quando você o escolhe — *"o pi não
+tem ferramentas do ComfyUI (sem MCP)"*. Essa linha é a resposta, não um
+sintoma para depurar; o conserto é escolher outro backend.
+
+**Um ou outro — alguma coisa no meio.** Um gateway, proxy ou roteador
+carregando o seu tráfego MCP pode passar só parte da superfície. Se o
+catálogo e o que de fato roda discordam um do outro, suspeite do meio.
+
+### Se for o terceiro caso
+
+Então nada estava quebrado e ninguém configurou nada errado: uma capacidade
+existia e você não tinha como descobrir. Isso é falha nossa, não sua, e vale
+nos contar — peça ao agente para abrir e ele anexa a sua configuração para
+você. Um recurso que ninguém encontra é, de onde você está sentado, um
+recurso que a gente não enviou.
+
+## Se você usa um modelo local pequeno
+
+Entregar o menu inteiro a um modelo custa muita leitura antes de ele dizer
+uma palavra. Num modelo hospedado grande isso é tranquilo. Num modelo
+pequeno rodando na sua própria máquina, muitas vezes é a diferença entre
+funcionar e não funcionar.
+
+Então por padrão o agente recebe **três** ferramentas em vez do conjunto
+completo: uma para navegar o catálogo, uma para consultar uma única
+ferramenta em detalhe, e uma para executá-la. Ele busca o que precisa,
+quando precisa, em vez de ler tudo de antemão.
+
+Você não precisa fazer nada para obter isso — é o padrão. Os controles
+existem se você quiser:
+
+```bash
+# force the small three-tool mode
+npx -y comfyui-mcp --compact
+
+# or hand the model everything at once
+npx -y comfyui-mcp --full
+```
+
+Qualquer um dos dois também pode ser definido com `COMFYUI_MCP_TOOL_MODE=compact`
+ou `COMFYUI_MCP_TOOL_MODE=full`.
+
+O acordo é algumas idas e voltas a mais antes da primeira ação de verdade, em
+troca de um modelo com espaço sobrando para pensar. Modelos grandes em geral
+ficam mais à vontade com `--full`. Veja [LLMs locais](/docs/pt-BR/local-llms)
+para quais modelos aguentam o quê.
+
+## Para onde ir depois
+
+<CardGroup cols={2}>
+  <Card title="Início rápido" icon="rocket" href="/docs/pt-BR/quickstart">
+    Instale e gere a sua primeira imagem.
+  </Card>
+  <Card title="O painel lateral" icon="window-maximize" href="/docs/pt-BR/panel">
+    O agente dentro do ComfyUI, e o que ele consegue fazer no seu canvas.
+  </Card>
+  <Card title="Referência de ferramentas" icon="book" href="/docs/tools/image-generation">
+    Cada ferramenta, com exemplos concretos de como uma chamada de verdade se parece.
+  </Card>
+  <Card title="Solução de problemas" icon="wrench" href="/docs/pt-BR/troubleshooting">
+    Quando não é uma recusa e alguma coisa está de fato quebrada.
+  </Card>
+</CardGroup>

@@ -1,0 +1,232 @@
+---
+title: "Üçüncü taraf ana makineler"
+description: "Mobil uygulamanın kullandığı aynı eşleştirme protokolü üzerine kendi ön yüzünüzü (Blender paneli, tarayıcı eklentisi, başka bir uygulama) kurun — bir ajan, paylaşılan bağlam, ince istemci. Mesaj biçimleri, uç noktalar, güvenlik değişmezleri ve bir LLM'nin adaptörünüzü iskeletlemesi için yapıştır-çalıştır bir istem."
+icon: "plug"
+---
+
+Ajan Paneli, [mobil uygulama](/docs/tr/mobile) ve çalışan bir oturumla
+eşleşen herhangi bir araç, orkestratörün eşleştirme dinleyicisine **tek küçük
+bir WebSocket protokolü** konuşur. Bir **üçüncü taraf ana makine**, o protokol
+üzerine kurduğunuz herhangi bir istemcidir — bir Blender paneli, bir tarayıcı
+eklentisi, bir CLI, başka bir düzenleyici — **canlı bir masaüstü sekmesine
+tutunur ve onun ajan oturumunu sürer**. Aynı ajan, aynı bağlam, ikinci bir
+Claude Code süreci yok, kullanıcının kuracağı ekstra bir şey yok.
+
+<Note>
+Bu, mobil uygulamanın üzerine kurulduğu tam yüzeydir. Bir WebSocket açıp JSON
+gönderebiliyorsanız bir ana makine kurabilirsiniz.
+</Note>
+
+## Nasıl çalışır
+
+<Steps>
+<Step title="Masaüstü zaten dinliyor">
+Ajan Paneli açıkken orkestratör LAN'da **token kapılı bir eşleştirme
+dinleyicisi** çalıştırır (bkz. [Uç noktalar](#uç-noktalar)). Açık her panel
+sekmesi, kararlı bir `tab_id` ve canlı bir ajan oturumu olan bir **masaüstü
+sekmesidir**.
+</Step>
+<Step title="Ana makineniz eşleştirme token'ıyla bağlanır">
+Eşleştirme URL'sine token sorgu dizisinde bir WebSocket açın. Geçerli bir
+token olmadan bağlantı reddedilir — eşleştirme bütün güvenlik sınırıdır.
+</Step>
+<Step title="Sekmeleri listeleyin ve birine tutunun">
+Açık masaüstü sekmelerini keşfetmek için `list_tabs` gönderin, sonra birini
+yansıtmak için `attach_tab`. Ana makineniz artık **o sekmenin etkinliğini**
+(akışlı) **alır** ve **onu sürebilir**.
+</Step>
+<Step title="Paylaşılan oturumu sürün">
+`user_message` çerçeveleri gönderin. Tutunmuşken sunucu onları **yansıtılan
+sekmeye** yönlendirir — böylece mesajınız masaüstü ajanının içinde olduğu
+*aynı* konuşmaya girer. Onu "bir ajan, paylaşılan bağlam" yapan, ikinci bir
+oturum değil, budur.
+</Step>
+</Steps>
+
+## Uç noktalar
+
+Eşleştirme dinleyicisi köprü portundan türetilir (`COMFYUI_MCP_BRIDGE_PORT`,
+varsayılan **9180**):
+
+| Port | Amaç |
+|---|---|
+| `bridge` (9180) | Panel ⇄ orkestratör UI köprüsü (masaüstünün kendi bağlantısı). |
+| `bridge + 1` (9181) | `panel_*` HTTP-MCP yüzeyi — **bu** protokol değil. |
+| **`bridge + 2` (9182)** | **Bağlandığınız eşleştirme / uzaktan denetim dinleyicisi.** Token kapılı, `0.0.0.0` üzerine bağlı (LAN'dan erişilebilir). |
+
+**Eşleştirme URL'si:**
+
+```
+ws://<desktop-machine-ip>:9182/?token=<PAIR_TOKEN>
+```
+
+- Token ya kullanıcı tarafından `COMFYUI_MCP_PAIR_TOKEN` ile **sabitlenir**
+  (her zaman açık eşleştirme) ya da **oturum başına basılır** ve panelin QR /
+  eşleştirme akışıyla dağıtılır. Ana makineniz onu mobil uygulamanın aldığı
+  şekilde alır: kullanıcı bir kez eşleştirir.
+- **Varsayılan olarak LAN'a bağlıdır**, ama kullanıcı istediğinde herkese açık
+  dışa açma yerleşiktir: panelin eşleştirme kutusı şifreli bir cloudflared
+  hızlı tünel açan bir **İnternet** kipi sunar ve kuruluşlar onu kendi
+  barındırdıkları bir röle üzerinden yönlendirebilir
+  (`COMFYUI_MCP_TUNNEL_BACKEND=relay`). Token her iki yolda da kapılamaya
+  devam eder.
+
+## Mesaj biçimleri
+
+Tüm çerçeveler bir `type` taşıyan JSON nesneleridir. İstek/yanıt çerçeveleri
+sizin seçtiğiniz, eşleşen yanıtta yankılanan bir `cid` (bağıntı kimliği)
+taşır.
+
+### Gelen — ana makine → orkestratör
+
+| `type` | Alanlar | Etki |
+|---|---|---|
+| `hello` | `tab_id`, `headless: true` | Bağlantınızı kaydedin. Üçüncü taraf ana makineler **başsız** istemcilerdir (kendi tuvalleri yoktur). |
+| `list_tabs` | `cid` | Açık masaüstü sekmelerini isteyin. |
+| `attach_tab` | `cid`, `target_tab_id` | O masaüstü sekmesini yansıt + sürün. Yalnızca **gerçek, başsız olmayan** bir masaüstü sekmesi için geçerlidir. |
+| `detach_tab` | — | Yansıtmayı/sürmeyi durdurun; girdiniz kendi (boş) oturumunuza döner. |
+| `user_message` | `text` (+ olağan mesaj alanlarınız) | **Yansıtılan** sekmenin konuşmasında bir tur. Sunucu tarafından tutunulan sekmeye damgalanır. |
+
+Tutunmuşken gönderdiğiniz diğer panel olayları da aynı şekilde yansıtılan
+sekmeye yönlendirilir.
+
+### Giden — orkestratör → ana makine
+
+| `type` | Alanlar | Anlam |
+|---|---|---|
+| `tab_list` | `cid`, `tabs[]` | `list_tabs`'e yanıt: tutunulabilir masaüstü sekmeleri. |
+| `tab_attached` | `cid`, `tab_id`, `ok`, `error?` | `attach_tab`'e yanıt. Hedef bayat/başsızsa `ok:false` + `error`. |
+| `mailbox_flush` | tamponlanmış çerçeveler | Canlı bağlantınız yokken sekmenin ürettiği her şeyin yeniden oynatılması. |
+
+Artı yansıtılan sekmenin canlı ajan etkinliği (akışlı yanıtlar, durum, kartlar);
+ana makineniz bunları çizer.
+
+<Warning>
+**`attach_tab` yetkilidir — hedefi sahteleyemezsiniz.** Sunucu, giden bir
+çerçeveye koyduğunuz herhangi bir `tab_id`'yi gerçekten tutunduğunuz
+sekmeyle üzerine yazar. Bir ana makine yalnızca açıkça tutunduğu bir sekmeyi
+sürebilir. Bu kasıtlıdır; aşağıya bakın.
+</Warning>
+
+## Güvenlik değişmezleri — bir ana makine BUNLARI korumalıdır
+
+Bunlar eşleştirmeyi güvenli kılan garantilerdir. Onlara saygı duyan bir ana
+makine kurmak bütün sözleşmedir; onları atlatmaya çalışan bir ana makine,
+dinleyicinin reddetmek üzere tasarladığı şeydir.
+
+<Note>
+Bunları korumak ana makineniz üzerinde bir kısıt değildir — *özelliğin
+kendisidir*. Bir istemcinin hiç eşleşmediği bir oturumu ele geçirmesini
+durdururlar.
+</Note>
+
+1. **Token kapısı.** Dinleyici geçerli bir eşleştirme token'ı olmadan herhangi
+   bir bağlantıyı reddeder (`verifyClient`). Token'ı otomatik gönderen ya da
+   gömen bir akış asla kurmayın — kullanıcı bir kez, kasıtlı eşleştirir.
+2. **Yetkili `attach_tab` damgalama.** Çerçevelerinizin hangi sekmeyi
+   hedeflediğine istemci değil sunucu karar verir. Yönlendirme için
+   istemcinin verdiği `tab_id`'ye bel bağlamayın; önce tutunun, sonra gönderin.
+3. **Yalnızca başsız olmayan hedefler.** Gerçek bir masaüstü sekmesine
+   tutunabilirsiniz, başka bir başsız istemciye asla (başka bir telefonu/ana
+   makineyi yansıtamazsınız).
+4. **Aynı anda bir sekme.** B'ye tutunmak A'ya aboneliğinizi düşürür. Bağlantı
+   başına tek etkin yansımayı modelleyin.
+5. **Sabit soket türü.** Bir bağlantının türü (başsız ya da masaüstü) ilk
+   `hello`'sunda sabittir; ele geçirme korumalarından kaçmak için onu
+   çevirmeye çalışmayın.
+
+## Asgari başvuru istemcisi
+
+```js
+const token = "<PAIR_TOKEN>";            // obtained via the user's pair flow
+const ws = new WebSocket(`ws://192.168.1.50:9182/?token=${token}`);
+let cid = 0;
+
+ws.onopen = () => {
+  ws.send(JSON.stringify({ type: "hello", tab_id: "myhost:" + crypto.randomUUID(), headless: true }));
+  ws.send(JSON.stringify({ type: "list_tabs", cid: ++cid }));
+};
+
+ws.onmessage = (ev) => {
+  const m = JSON.parse(ev.data);
+  if (m.type === "tab_list") {
+    // pick a desktop tab and attach to it
+    const target = m.tabs[0]?.tab_id;
+    if (target) ws.send(JSON.stringify({ type: "attach_tab", cid: ++cid, target_tab_id: target }));
+  } else if (m.type === "tab_attached" && m.ok) {
+    // now you're driving that tab's session
+    ws.send(JSON.stringify({ type: "user_message", text: "Add a KSampler and wire it up." }));
+  } else {
+    // render streamed agent activity for the mirrored tab
+    console.log("from session:", m);
+  }
+};
+```
+
+## Adaptörünüzü bir LLM'ye yaptırın
+
+Aşağıdaki istemi Claude, ChatGPT ya da kodlama ajanınıza yapıştırın; sizin
+platformunuz için bir ana makine adaptörü iskeletlesin. Tam protokol
+sözleşmesini taşır, böylece modelin tahmin etmesi gerekmez.
+
+```text Copy this into your LLM
+You are building a THIRD-PARTY HOST ("adapter") for comfyui-mcp. A host connects
+to a running comfyui-mcp orchestrator over WebSocket, attaches to a live desktop
+"tab", and drives that tab's agent session — same agent, shared context, no second
+session. Build the adapter for THIS platform: <describe your platform, e.g. a
+Blender sidebar panel / a Chrome extension / a Neovim plugin>.
+
+CONNECTION
+- WebSocket to:  ws://<desktop-ip>:9182/?token=<PAIR_TOKEN>
+  (port = bridge port + 2; bridge default 9180. Token is provided by the user via
+  their pairing flow — NEVER hardcode, embed, or auto-provision it.)
+- On open, send:  {"type":"hello","tab_id":"<your-unique-id>","headless":true}
+
+DISCOVER + ATTACH
+- Send {"type":"list_tabs","cid":1}; you receive {"type":"tab_list","cid":1,"tabs":[...]}.
+- Send {"type":"attach_tab","cid":2,"target_tab_id":"<a tab_id from tab_list>"};
+  you receive {"type":"tab_attached","cid":2,"tab_id":"...","ok":true|false,"error"?}.
+  Only real, non-headless desktop tabs are attachable.
+
+DRIVE
+- Send {"type":"user_message","text":"..."} to post a turn into the ATTACHED tab's
+  conversation. The server routes it to the mirrored tab automatically.
+- Send {"type":"detach_tab"} to stop.
+
+RENDER
+- After attaching you receive the mirrored tab's live activity (streamed agent
+  replies, status, interactive cards) and a {"type":"mailbox_flush"} replay of
+  anything produced while you were disconnected. Render these in your UI.
+
+SECURITY — these are non-negotiable; preserve every one:
+1. Only connect with a user-provided pair token; never embed or auto-ship it.
+2. Never assume you can target a tab you did not attach_tab to — the server stamps
+   the target authoritatively; trust tab_attached.ok, don't spoof tab_id.
+3. Attach only to non-headless desktop tabs; never to another headless client.
+4. One active attachment per connection (attaching to a new tab drops the old).
+5. Do not try to change your connection's kind after the first hello.
+
+DELIVERABLE
+- A minimal, working adapter for the platform above: connect → list → attach →
+  send a user_message → render streamed replies → detach. Handle reconnects and
+  the mailbox_flush replay. Keep the pairing/token handling explicit and
+  user-driven.
+```
+
+## Entegrasyonunuzu kaydedin
+
+Bir şey mi kurdunuz? **Kaydedin**; listelenebilsin ve protokol değişikliklerini
+yayımlanmadan önce size işaretleyebilelim:
+
+<Card title="Üçüncü taraf bir ana makine kaydedin" icon="plug" href="https://github.com/artokun/comfyui-mcp/issues/new?template=third-party-host.yml">
+GitHub'da kayıt şablonunu açın — ad, platform, depo ve hangi protokol
+sürümüne karşı kurduğunuz.
+</Card>
+
+<Note>
+**Kararlılık:** yukarıdaki çerçeveler mobil uygulamanın üzerine yayımladığı
+şeydir, ama bu henüz dondurulmuş, sürümlenmiş bir sözleşme değildir — yetke
+olarak kaynağı okuyun
+([`src/services/ui-bridge.ts`](https://github.com/artokun/comfyui-mcp/blob/main/src/services/ui-bridge.ts))
+ve biçimler hareket ettiğinde haberdar edilmek için ana makinenizi kaydedin.
+</Note>

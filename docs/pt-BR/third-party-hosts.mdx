@@ -1,0 +1,236 @@
+---
+title: "Hosts de terceiros"
+description: "Construa o seu próprio front-end (painel do Blender, extensão de navegador, outro app) no mesmo protocolo de pareamento que o app de celular usa — um agente, contexto compartilhado, cliente fino. As formas das mensagens, os endpoints, os invariantes de segurança, e um prompt para colar e ter um LLM escorar o seu adapter."
+icon: "plug"
+---
+
+O Painel do Agente, o [app de celular](/docs/pt-BR/mobile), e qualquer
+ferramenta que se pareia com uma sessão em execução falam **um protocolo
+WebSocket pequeno** com o listener de pareamento do orquestrador. Um
+**host de terceiros** é qualquer cliente que você constrói nesse protocolo
+— um painel do Blender, uma extensão de navegador, uma CLI, outro editor
+— que **se liga a uma aba viva do desktop e conduz a sessão do agente
+dela**. O mesmo agente, o mesmo contexto, nenhum segundo processo do
+Claude Code, nada extra para o usuário instalar.
+
+<Note>
+Esta é exatamente a superfície em que o app de celular é construído. Se
+você consegue abrir um WebSocket e enviar JSON, você consegue construir um
+host.
+</Note>
+
+## Como funciona
+
+<Steps>
+<Step title="O desktop já está escutando">
+Quando o Painel do Agente está aberto, o orquestrador roda um **listener
+de pareamento protegido por token** na LAN (veja [Endpoints](#endpoints)).
+Cada aba aberta do painel é uma **aba de desktop** com um `tab_id` estável
+e uma sessão de agente ao vivo.
+</Step>
+<Step title="O seu host se conecta com o token de pareamento">
+Abra um WebSocket para a URL de pareamento com o token na query string.
+Sem um token válido a conexão é recusada — o pareamento é a fronteira de
+segurança inteira.
+</Step>
+<Step title="Liste e ligue-se a uma aba">
+Envie `list_tabs` para descobrir as abas de desktop abertas, depois
+`attach_tab` para espelhar uma. O seu host agora **recebe a atividade
+dessa aba** (em stream) e pode **conduzi-la**.
+</Step>
+<Step title="Conduza a sessão compartilhada">
+Envie frames `user_message`. Enquanto ligado, o servidor os roteia para a
+**aba espelhada** — então a sua mensagem entra na *mesma* conversa em que
+o agente do desktop está. É isso que faz ser "um agente, contexto
+compartilhado" em vez de uma segunda sessão.
+</Step>
+</Steps>
+
+## Endpoints
+
+O listener de pareamento é derivado da porta da ponte
+(`COMFYUI_MCP_BRIDGE_PORT`, padrão **9180**):
+
+| Porta | Propósito |
+|---|---|
+| `bridge` (9180) | A ponte de UI painel ⇄ orquestrador (a conexão própria do desktop). |
+| `bridge + 1` (9181) | A superfície HTTP-MCP `panel_*` — **não** este protocolo. |
+| **`bridge + 2` (9182)** | **O listener de pareamento / controle remoto ao qual você se conecta.** Protegido por token, bind em `0.0.0.0` (alcançável na LAN). |
+
+**URL de pareamento:**
+
+```
+ws://<desktop-machine-ip>:9182/?token=<PAIR_TOKEN>
+```
+
+- O token é ou **pinado** pelo usuário via `COMFYUI_MCP_PAIR_TOKEN`
+  (pareamento sempre ligado) ou **cunhado por sessão** e entregue pelo
+  fluxo de QR / pareamento do painel. O seu host o obtém do mesmo jeito
+  que o app de celular: o usuário pareia uma vez.
+- **Restrito à LAN por padrão**, mas a exposição pública está embutida
+  quando o usuário pede: o modal de pareamento do painel oferece um modo
+  **Internet** que abre um túnel rápido criptografado do cloudflared, e
+  empresas podem roteá-lo por um relay auto-hospedado
+  (`COMFYUI_MCP_TUNNEL_BACKEND=relay`). O token protege de qualquer jeito.
+
+## Formas das mensagens
+
+Todos os frames são objetos JSON com um `type`. Frames de
+requisição/resposta carregam um `cid` (id de correlação) que você
+escolhe, ecoado de volta na resposta correspondente.
+
+### Entrada — host → orquestrador
+
+| `type` | Fields | Efeito |
+|---|---|---|
+| `hello` | `tab_id`, `headless: true` | Registra a sua conexão. Hosts de terceiros são clientes **headless** (sem canvas próprio). |
+| `list_tabs` | `cid` | Pede as abas de desktop abertas. |
+| `attach_tab` | `cid`, `target_tab_id` | Espelha + conduz aquela aba de desktop. Válido só para uma aba de desktop **real, não headless**. |
+| `detach_tab` | — | Para de espelhar/conduzir; a sua entrada volta para a sua própria sessão (vazia). |
+| `user_message` | `text` (+ os seus campos usuais de mensagem) | Um turno na conversa da aba **espelhada**. Carimbado pelo servidor na aba ligada. |
+
+Qualquer outro evento de painel que você envie enquanto ligado é
+igualmente roteado para a aba espelhada.
+
+### Saída — orquestrador → host
+
+| `type` | Fields | Significado |
+|---|---|---|
+| `tab_list` | `cid`, `tabs[]` | Resposta a `list_tabs`: as abas de desktop ligáveis. |
+| `tab_attached` | `cid`, `tab_id`, `ok`, `error?` | Resposta a `attach_tab`. `ok:false` + `error` se o alvo está velho/headless. |
+| `mailbox_flush` | frames em buffer | Replay de qualquer coisa que a aba produziu enquanto você não tinha conexão ao vivo. |
+
+Mais a atividade ao vivo do agente da aba espelhada (respostas em stream,
+status, cartões), que o seu host renderiza.
+
+<Warning>
+**`attach_tab` é autoritativo — você não consegue forjar o alvo.** O
+servidor sobrescreve qualquer `tab_id` que você coloque num frame de
+saída com a aba à qual você de fato se ligou. Um host só consegue
+conduzir uma aba à qual se ligou explicitamente. Isto é de propósito;
+veja abaixo.
+</Warning>
+
+## Invariantes de segurança — um host DEVE preservar estes
+
+Estas são as garantias que tornam o pareamento seguro. Construir um host
+que as respeita é o contrato inteiro; um host que tenta desviá-las é
+exatamente o que o listener foi desenhado para rejeitar.
+
+<Note>
+Preservar isto não é uma restrição sobre o seu host — *é* o recurso. Elas
+impedem um cliente de sequestrar uma sessão com a qual nunca se pareou.
+</Note>
+
+1. **Portão de token.** O listener recusa qualquer conexão sem um token de
+   pareamento válido (`verifyClient`). Nunca construa um fluxo que envie
+   ou embuta o token automaticamente — o usuário pareia, uma vez, de
+   propósito.
+2. **Carimbo autoritativo de `attach_tab`.** O servidor, não o cliente,
+   decide qual aba os seus frames miram. Não se apoie num `tab_id`
+   fornecido pelo cliente para o roteamento; ligue primeiro, depois
+   envie.
+3. **Só alvos não headless.** Você pode se ligar a uma aba real de
+   desktop, nunca a outro cliente headless (você não consegue espelhar
+   outro celular/host).
+4. **Uma aba por vez.** Ligar-se a B derruba a sua inscrição em A. Modele
+   um único espelho ativo por conexão.
+5. **Tipo de socket pinado.** O tipo de uma conexão (headless vs desktop)
+   é fixado no primeiro `hello`; não tente virá-lo para escapar das
+   proteções de takeover.
+
+## Cliente de referência mínimo
+
+```js
+const token = "<PAIR_TOKEN>";            // obtained via the user's pair flow
+const ws = new WebSocket(`ws://192.168.1.50:9182/?token=${token}`);
+let cid = 0;
+
+ws.onopen = () => {
+  ws.send(JSON.stringify({ type: "hello", tab_id: "myhost:" + crypto.randomUUID(), headless: true }));
+  ws.send(JSON.stringify({ type: "list_tabs", cid: ++cid }));
+};
+
+ws.onmessage = (ev) => {
+  const m = JSON.parse(ev.data);
+  if (m.type === "tab_list") {
+    // pick a desktop tab and attach to it
+    const target = m.tabs[0]?.tab_id;
+    if (target) ws.send(JSON.stringify({ type: "attach_tab", cid: ++cid, target_tab_id: target }));
+  } else if (m.type === "tab_attached" && m.ok) {
+    // now you're driving that tab's session
+    ws.send(JSON.stringify({ type: "user_message", text: "Add a KSampler and wire it up." }));
+  } else {
+    // render streamed agent activity for the mirrored tab
+    console.log("from session:", m);
+  }
+};
+```
+
+## Ensine um LLM a construir o seu adapter
+
+Cole o prompt abaixo no Claude, no ChatGPT, ou no seu agente de código
+para ele escorar um adapter de host para a sua plataforma. Ele carrega o
+contrato completo do protocolo, então o modelo não precisa chutar.
+
+```text Copy this into your LLM
+You are building a THIRD-PARTY HOST ("adapter") for comfyui-mcp. A host connects
+to a running comfyui-mcp orchestrator over WebSocket, attaches to a live desktop
+"tab", and drives that tab's agent session — same agent, shared context, no second
+session. Build the adapter for THIS platform: <describe your platform, e.g. a
+Blender sidebar panel / a Chrome extension / a Neovim plugin>.
+
+CONNECTION
+- WebSocket to:  ws://<desktop-ip>:9182/?token=<PAIR_TOKEN>
+  (port = bridge port + 2; bridge default 9180. Token is provided by the user via
+  their pairing flow — NEVER hardcode, embed, or auto-provision it.)
+- On open, send:  {"type":"hello","tab_id":"<your-unique-id>","headless":true}
+
+DISCOVER + ATTACH
+- Send {"type":"list_tabs","cid":1}; you receive {"type":"tab_list","cid":1,"tabs":[...]}.
+- Send {"type":"attach_tab","cid":2,"target_tab_id":"<a tab_id from tab_list>"};
+  you receive {"type":"tab_attached","cid":2,"tab_id":"...","ok":true|false,"error"?}.
+  Only real, non-headless desktop tabs are attachable.
+
+DRIVE
+- Send {"type":"user_message","text":"..."} to post a turn into the ATTACHED tab's
+  conversation. The server routes it to the mirrored tab automatically.
+- Send {"type":"detach_tab"} to stop.
+
+RENDER
+- After attaching you receive the mirrored tab's live activity (streamed agent
+  replies, status, interactive cards) and a {"type":"mailbox_flush"} replay of
+  anything produced while you were disconnected. Render these in your UI.
+
+SECURITY — these are non-negotiable; preserve every one:
+1. Only connect with a user-provided pair token; never embed or auto-ship it.
+2. Never assume you can target a tab you did not attach_tab to — the server stamps
+   the target authoritatively; trust tab_attached.ok, don't spoof tab_id.
+3. Attach only to non-headless desktop tabs; never to another headless client.
+4. One active attachment per connection (attaching to a new tab drops the old).
+5. Do not try to change your connection's kind after the first hello.
+
+DELIVERABLE
+- A minimal, working adapter for the platform above: connect → list → attach →
+  send a user_message → render streamed replies → detach. Handle reconnects and
+  the mailbox_flush replay. Keep the pairing/token handling explicit and
+  user-driven.
+```
+
+## Registre a sua integração
+
+Construiu alguma coisa? **Registre** para poder ser listada e para
+podermos avisar você de mudanças de protocolo antes de saírem:
+
+<Card title="Registrar um host de terceiros" icon="plug" href="https://github.com/artokun/comfyui-mcp/issues/new?template=third-party-host.yml">
+Abra o template de registro no GitHub — nome, plataforma, repo, e contra
+qual versão do protocolo você construiu.
+</Card>
+
+<Note>
+**Estabilidade:** os frames acima são o que o app de celular sai usando,
+mas isto ainda não é um contrato congelado e versionado — leia o código
+([`src/services/ui-bridge.ts`](https://github.com/artokun/comfyui-mcp/blob/main/src/services/ui-bridge.ts))
+como a autoridade, e registre o seu host para ser avisado quando as formas
+se moverem.
+</Note>

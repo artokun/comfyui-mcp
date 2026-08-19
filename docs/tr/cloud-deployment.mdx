@@ -1,0 +1,243 @@
+---
+title: "Bulut dağıtımı (RunPod)"
+description: "Ajan Panelinden çıkmadan ComfyUI için bir bulut GPU podunu dağıtın, bağlanın, izleyin ve durdurun — tek dokunuşla dağıtım, dürüst bir yerel⇄pod ana makine anahtarı, canlı maliyet/GPU durumu ve boşta otomatik durdurma. Ya da mevcut bir podu tek komutla sürün."
+icon: "cloud"
+---
+
+Yerel bir GPU'nuz yok mu — ya da isteğe bağlı daha büyük bir tane mi
+istiyorsunuz? ComfyUI'yi bir **bulut GPU poduna** dağıtın ve onu **sizin**
+makinenizde, kendi Claude ya da ChatGPT aboneliğinizde çalışan ajandan doğal
+dille sürün.
+
+<Note>
+Pod yalnızca **ComfyUI + Manager + Ajan Paneli arayüzünü** sunar. Ajanın beyni
+([panel orkestratörü](/docs/tr/panel)) **kendi makinenizde**, kendi
+aboneliğinizde çalışır — böylece bir bulut podu LLM üzerinde GPU-saat yakmaz ve
+hiçbir API anahtarı ya da ajan girişi kutuya dokunmaz. Bkz.
+[Topoloji](#topoloji-ajan-nerede-çalışır).
+</Note>
+
+## Tek tıklık şablon (en hızlı yol)
+
+Önceden derlenmiş imaj **Ajan Paneli tarafından sürülmeye hazır** açılır —
+ComfyUI + [Ajan Paneli](https://github.com/artokun/comfyui-mcp-panel) +
+ComfyUI-Manager v2 gömülüdür, kurulum yok:
+
+[![Deploy on RunPod](https://img.shields.io/badge/Deploy_on-RunPod-673AB7?style=for-the-badge)](https://console.runpod.io/deploy?template=bnqtkvcer3&ref=dkx71w9b)
+
+1. **Deploy on RunPod**'a tıklayın ve bir GPU seçin (bir RTX 5090 / herhangi bir
+   Blackwell ya da Ada kartı çalışır — imaj cu128 torch ile gelir).
+2. Şablon varsayılanlarını koruyun: HTTP portu **3000** dışa açık ve
+   **`/workspace`** altına bağlanmış bir ağ birimi.
+3. Podun ayağa kalkmasını bekleyin. Kendiliğinden yenilenen bir "ComfyUI is
+   starting…" sayfası hazır olana kadar hizmet verir (~30–60 sn ComfyUI
+   başlangıcı).
+
+Sonra [Makinenizden bağlanın](#makinenizden-bağlanın) bölümüne atlayın.
+
+## Ajan Panelinden dağıtın ve denetleyin (v0.44+)
+
+**comfyui-mcp 0.44**'ten beri RunPod konsoluna dokunmanız ya da bir CLI komutu
+çalıştırmanız gerekmez — [Ajan Paneli](/docs/tr/panel) sizin için bir podu
+dağıtan, bağlayan, izleyen ve durduran bir **RunPod denetim paneline** sahiptir
+ve aynı denetim sayfası [mobil uygulamada](/docs/tr/mobile) da gelir.
+
+1. **Anahtarınızı bir kez ayarlayın.** Panelin **API Anahtarları** kartına
+   `RUNPOD_API_KEY` değerinizi yapıştırın. Sunucu tarafında
+   `~/.comfyui-mcp/.env` içinde saklanır — asla tarayıcıda değil.
+2. **RunPod denetim panelini** panel araç çubuğundaki host rozetinden açın
+   (başlangıçta **🟢 Yerel · kendi makineniz** okur).
+3. **Dağıtın ya da bağlanın.** Tek dokunuşluk bir pod için **Dağıt**'a basın
+   (şablonun dağıtım bağlantısından geçer ve kapasite daraldığında GPU
+   türleri / COMMUNITY→SECURE arasında düşer) ya da açılır menüden mevcut bir
+   podu **ada göre** seçip **Bağlan**'a basın.
+4. **Canlı izleyin.** Durum kartı GPU / VRAM / çalışma süresi / **$·sa** ve bir
+   **boşta otomatik durdurma** geri sayımı gösterir; host rozeti **🔵 RunPod ·
+   `<pod>` · GPU · $/sa** olur — böylece bir işlemenin nerede çalıştığı asla
+   belirsiz değildir. Ajan özel düğümlerinizi + LoRA'larınızı kurar ve
+   modellerinizi poda indirir; böylece yerel donanımınızla **tam tuval
+   paritesi** elde edersiniz.
+5. **Geri geçin ve durdurun.** **Yereli kullan** işlemeyi anında kendi
+   donanımınıza yöneltir; **Durdur** podu kapatır. Boşta otomatik durdurma
+   (`RUNPOD_IDLE_STOP_MINUTES`, varsayılan 15; yalnızca podda gerçekten işleme
+   yaparken sayar) unutursanız maliyet durdurucusudur.
+
+**Ölü adam anahtarı (v0.47+).** Boşta otomatik durdurma comfyui-mcp sürecinde
+yaşar — o süreç ölürse (çökme, kapanan dizüstü), durdurucu onunla ölürdü ve
+pod sonsuza dek faturalanırdı. **Bağlayıcı üzerinden oluşturulan** podlar
+artık pod tarafında bir gözcü taşır: comfyui-mcp podu gözettiği sürece birkaç
+saniyede bir kalp atışı gönderir; atışlar durursa pod bir lütuf süresinden
+sonra **kendini durdurur** (asla sonlandırmaz — `/workspace` hayatta kalır)
+(kalp atışı olmadan açılıştan 45 dk sonra, sonra atışlar arasında 20 dk;
+`RUNPOD_DEADMAN_BOOT_GRACE_S` / `RUNPOD_DEADMAN_BEAT_GRACE_S`). "Gözetmek"
+**Yereli kullan** ve **İzlemeyi bırak**'tan sağ çıkar — onlar yalnızca
+arayüzün gösterdiğini değiştirir; gözcü yalnızca comfyui-mcp'nin kendisi
+gittiğinde (ya da pod çıktığında) ateşler. Gözcü podu **RunPod'un her poda
+otomatik enjekte ettiği pod kapsamlı API anahtarıyla** durdurur — hesabınız
+çapındaki anahtar makinenizden hiç çıkmaz ve kimlik bilgisi açısından
+vazgeçilecek bir şey yoktur. `runpod` / `action: "create"` üzerinde
+`deadman:false` (ya da `RUNPOD_DEADMAN=0`) ile silahsız bırakın ya da pod
+ortamı olarak `DEADMAN_DISABLE=1`. Konsoldan dağıtılan podlar kalp atışı
+token'ı taşımaz ve özel şablon dağıtımları (`RUNPOD_TEMPLATE_ID`) bunu
+varsayılan olarak **kapalı** tutar — `deadman:true` yalnızca o imaj bizim
+gözcümüzü taşıyorsa geçirin.
+
+<Note>
+ComfyUI için GPU kiralamaya yeni misiniz? Blog bütün akışı baştan sona anlatır:
+[ComfyUI'yi kiralık bir bulut GPU'da çalıştırın](/docs/blog/runpod-comfyui).
+</Note>
+
+Bu sayfanın geri kalanı **elle / CLI yoludur** — hâlâ tam desteklenir ve denetim
+panelinin perde arkasında sürdüğü şeydir.
+
+## Makinenizden bağlanın
+
+Pod ayağa kalkınca herkese açık vekil URL'sini alın (RunPod → podunuz →
+**:3000** HTTP uç noktası, ör. `https://<pod-id>-3000.proxy.runpod.net`) ve
+dizüstü bilgisayarınızda **tek bir komut** çalıştırın:
+
+```bash
+npx -y comfyui-mcp@latest connect https://<pod-id>-3000.proxy.runpod.net
+```
+
+**Uzak bir HTTPS pod** için `connect` otomatik olarak makinenizdeki ajan
+köprüsüne (Cloudflare üzerinden) **güvenli şifreli bir `wss://` tüneli** açar
+ve o URL'yi podun paneline sizin için verir — böylece podun HTTPS sayfası
+ajana **tarayıcı istemi olmadan, kopyalanacak bir şey olmadan, herhangi bir
+tarayıcıda** ulaşır. **Yerel** bir ComfyUI için düz `ws://127.0.0.1:9180`
+loopback köprüsünü kullanır. Her iki durumda da ajan — ve Claude/ChatGPT
+girişiniz — yalnızca **sizin** makinenizde çalışır; poda hiçbir şey kurulmaz.
+
+Bitirmek için, `connect` hâlâ kendi makinenizde çalışırken podun ComfyUI'sini
+tarayıcınızda açın, **Ajan Paneli** kenar çubuğunu açın ve **Bağlan**'a tıklayın.
+
+Şimdi grafiği doğal dille sürün.
+
+<Note>
+**Neden bir tünel?** Bir pod sayfası `https://` üzerinden sunulur ve tarayıcılar
+güvenli bir sayfanın makinenize güvensiz bir `ws://` soketi açmasını engeller
+(karışık içerik / Private Network Access). Tünel köprüye geçerli TLS'li bir
+`wss://` URL'si verir — oturum başına rastgele bir token ile kapılı — böylece
+her yerde istem olmadan çalışır.
+</Note>
+
+<Note>
+Pod kimlik doğrulamanın arkasındaysa yerel `connect` komutunda
+`COMFYUI_AUTH_TOKEN` (artı isteğe bağlı `COMFYUI_AUTH_HEADER` /
+`COMFYUI_AUTH_SCHEME`) ayarlayın. **Cloudflare Access** öndeki bir pod için bir
+Access **hizmet token'ı** oluşturun ve `CF_ACCESS_CLIENT_ID` +
+`CF_ACCESS_CLIENT_SECRET` ayarlayın — ikisi de her ComfyUI isteğine (HTTP +
+kuyruk izleyici WebSocket) biner, böylece bağlayıcı kapıdan geçer; tarayıcılar
+için insan giriş sayfası ayakta kalır.
+</Note>
+
+### Her şeyi kendi makinenizde tutun (Cloudflare yok)
+
+Köprüyü Cloudflare üzerinden yönlendirmek istemiyor musunuz? Pod'a kendi **SSH
+port yönlendirmenizle** ulaşın; böylece sayfa bir loopback kökenidir (düz
+`ws://` çalışır, tünel yok):
+
+```bash
+ssh <pod-ssh> -L 3000:localhost:3000   # grab the SSH command from RunPod → Connect
+npx -y comfyui-mcp@latest connect http://localhost:3000
+```
+
+Sonra **http://localhost:3000** adresini açın. Ya da podun doğrudan https
+URL'sine bağlanın ama düz loopback köprüsünü **`--insecure-bridge`** ile
+zorlayın (o zaman pod sayfasının `ws://127.0.0.1:9180`'e ulaşması için kendi
+yolunuzu siz düzenlersiniz).
+
+Yukarıdakilerin yerine varsayılan Cloudflare hızlı tüneline **kararlı, kendi
+barındırdığınız bir alternatif** mi istiyorsunuz — kendi alan adınız, geçici
+ana makine adı yok, o sıçramanın tam sahipliği? Bkz.
+[Kendi barındırdığınız röle](/docs/tr/self-hosted-relay).
+
+## Topoloji: ajan nerede çalışır
+
+```
+  YOUR LAPTOP                                   CLOUD GPU POD (RunPod)
+  ┌───────────────────────────┐                ┌───────────────────────────────────┐
+  │ npx comfyui-mcp connect …  │  HTTP/WS  ───▶ │ nginx :3000 ─▶ ComfyUI :3001        │
+  │  └─ panel orchestrator     │                │   ├─ Manager v2 (--enable-manager) │
+  │     (Claude/ChatGPT Agent  │ ◀───  events   │   └─ Agent Panel (sidebar)         │
+  │      SDK on YOUR sub)      │                │                                     │
+  └───────────────────────────┘                └───────────────────────────────────┘
+```
+
+Pod kasıtlı olarak **Node.js ajanı, Agent SDK ve LLM istemcisi taşımaz** —
+GPU-saatleri boşuna yakardı. Akıl yürütme döngüsü sizin makinenizde yaşar;
+pod saf bir ComfyUI arka ucudur. Bu, yerel Ajan Panelinin kullandığı aynı
+[uzak sürme modelidir](/docs/tr/panel); yalnızca ComfyUI localhost yerine bir
+bulut GPU'dadır.
+
+## Ne kalıcıdır (ne değildir)
+
+İmaj **hızlı durdur/başlat** için eniyilenmiştir. Ağır yazılım — ComfyUI, venv'i,
+Manager v2 — değişmez imaja gömülüdür ve `/opt/ComfyUI`'den çalıştırılır;
+`custom_nodes` `/workspace` biriminde yaşar (sembolik bağ), böylece
+kurulumlarınız kalır. Sıcak bir yeniden başlatma tam kurulum/eşitleme/tohum
+yapmaz ve yalnızca ComfyUI'yi yeniden başlatır.
+
+| Ne | Nerede yaşar | Yeniden başlatmadan sağ çıkar mı? |
+|------|----------------|---------------------|
+| Modeller (Manager indirmeleri dahil) | birim `/workspace/models` | **Evet** |
+| İş akışları + ComfyUI ayarları + Manager yapılandırması | birim `/workspace/user` | **Evet** |
+| Girişler / çıktılar | birim `/workspace/input`, `/output` | **Evet** |
+| **Özel düğümler** (ajan/Manager kurulumları) | birim `/workspace/custom_nodes` (sembolik bağ) | **Evet** |
+| ComfyUI kurulumu + venv + Manager | imaj `/opt/ComfyUI` | İmajla yeniden çekilir |
+
+<Note>
+**Çalışma zamanında kurulan özel düğümler bir yeniden başlatmadan sağ çıkar.**
+`custom_nodes` `/workspace/custom_nodes`'a sembolik bağlanır; her açılışta
+imajın gömülü düğümleri (Ajan Paneli + yerleşikler) ona tohumlanır/yenilenir
+(böylece bir imaj yükseltmesi güncel bir panel getirirken sizin düğümleriniz
+korunur) ve her düğümün Python bağımlılıkları birimdeki **kalıcı bir pip
+önbelleğinden** venv'e yeniden kurulur — ilk seferden sonra hızlı. Modeller de
+kalır. Bir düğümü açılışta sıfır iş gerekecek biçimde gömmek için onu
+`Dockerfile`'a ekleyin ve imajı yeniden derleyin (aşağıda).
+</Note>
+
+## Kendi imajınızı derleyin ve dağıtın
+
+Tek tıklık şablon önceden derlenmiş imajdır. **Yalın, önceden derlenmiş bir
+imaj** — aynı ComfyUI + Ajan Paneli + Manager, ama isteğe bağlı bağışçı
+ekstraları (`runpod-uploader`/`croc`/`app-manager`) ya da gömülü SDXL spotcheck
+checkpoint'i olmadan, CI'de sürekli derlenen — ayrıca
+[`ghcr.io/artokun/comfyui-mcp-runpod:cu128-lean`](https://github.com/artokun/comfyui-mcp/pkgs/container/comfyui-mcp-runpod)
+adresinde herkese açıktır; bir şey derlemeden bir RunPod şablonunu bir şeye
+yöneltmek istiyorsanız.
+
+Özelleştirmek için — sürümleri sabitleyin, ekstra özel düğümler gömün, model
+yerleşimini değiştirin —
+[`docker/runpod/`](https://github.com/artokun/comfyui-mcp/tree/main/docker/runpod)
+adresinden kendi imajınızı derleyip itin:
+
+```bash
+cd docker/runpod
+docker build -t <your-registry>/comfyui-mcp-runpod:cu128 .
+docker push     <your-registry>/comfyui-mcp-runpod:cu128
+```
+
+Derleme zamanında GPU gerekmez. Sonra imajınıza işaret eden, **HTTP portu
+3000** dışa açık ve **`/workspace` altında bir ağ birimi** olan bir RunPod
+**Pod şablonu** oluşturun.
+
+[`docker/runpod/README.md`](https://github.com/artokun/comfyui-mcp/blob/main/docker/runpod/README.md)
+tam derleme başvurusudur — çok aşamalı Dockerfile, tam ComfyUI başlatma
+bayrakları, `extra_model_paths.yaml` birim eşlemesi, Manager uzak kurulum
+kapısı, ortam değişkenleri ve boyut/sabitleme ödünleşimleri.
+
+## Diğer bulut hedefleri
+
+`connect` akışı RunPod'a özgü değildir — Ajan Panelini sunan **herhangi** bir
+erişilebilir ComfyUI'ye karşı çalışır (başka bir bulut ana makinesi, bir VPS,
+LAN'ınızdaki bir kutu). `connect`'i URL'sine yöneltin ve dış orkestratör
+anahtarını çevirin:
+
+```bash
+npx -y comfyui-mcp@latest connect https://your-comfyui.example.com
+```
+
+**comfyui-mcp'nin kendisini** barındırılan, kimlik doğrulamalı bir MCP
+sunucusu olarak dışa açmak için (ComfyUI dağıtmak yerine) bkz.
+[Uzak / barındırılan bağlayıcı](/docs/tr/remote-connector).

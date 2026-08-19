@@ -1,0 +1,262 @@
+---
+title: "Despliegue en la nube (RunPod)"
+description: "Despliega, conecta, supervisa y detén un pod GPU en la nube para ComfyUI sin salir del panel del agente — despliegue de un toque, un conmutador de host local⇄pod honesto, estado de coste/GPU en vivo y parada automática por inactividad. O controla un pod existente con un comando."
+icon: "cloud"
+---
+
+¿No tienes GPU local — o quieres una más grande bajo demanda? Despliega
+ComfyUI en un **pod GPU en la nube** y contrólalo en lenguaje natural desde
+el agente que se ejecuta en **tu** máquina, con tu propia suscripción de
+Claude o ChatGPT.
+
+<Note>
+El pod solo sirve **ComfyUI + Manager + la UI del panel del agente**. El
+cerebro del agente (el [orquestador del panel](/docs/es/panel)) se ejecuta
+**en local en tu máquina** con tu propia suscripción — así que un pod en la
+nube nunca quema horas de GPU en el LLM, y ninguna clave API ni inicio de
+sesión del agente toca nunca la caja. Consulta
+[Topología](#topología-dónde-se-ejecuta-el-agente).
+</Note>
+
+## Plantilla de un clic (el camino más rápido)
+
+La imagen preconstruida arranca **lista para ser controlada por el panel
+del agente** — ComfyUI +
+[Agent Panel](https://github.com/artokun/comfyui-mcp-panel) +
+ComfyUI-Manager v2 van horneados, sin configuración:
+
+[![Deploy on RunPod](https://img.shields.io/badge/Deploy_on-RunPod-673AB7?style=for-the-badge)](https://console.runpod.io/deploy?template=bnqtkvcer3&ref=dkx71w9b)
+
+1. Pulsa **Deploy on RunPod** y elige una GPU (una RTX 5090 / cualquier
+   tarjeta Blackwell o Ada funciona — la imagen entrega torch cu128).
+2. Conserva los valores por defecto de la plantilla: puerto HTTP **3000**
+   expuesto y un volumen de red montado en **`/workspace`**.
+3. Espera a que el pod arranque. Una página «ComfyUI is starting…» que se
+   refresca sola sirve hasta que está listo (~30–60 s de init de ComfyUI).
+
+Después salta a [Conectar desde tu máquina](#conectar-desde-tu-máquina).
+
+## Despliégalo y contrólalo desde el panel del agente (v0.44+)
+
+Desde **comfyui-mcp 0.44**, no tienes que tocar la consola de RunPod ni
+ejecutar un comando CLI — el [panel del agente](/docs/es/panel) tiene un
+**panel de control de RunPod** que despliega, conecta, supervisa y detiene
+un pod por ti, y la misma hoja de control se entrega en la
+[app móvil](/docs/es/mobile).
+
+1. **Define tu clave una vez.** En la tarjeta **Claves API** del panel,
+   pega tu `RUNPOD_API_KEY`. Se guarda en el servidor en
+   `~/.comfyui-mcp/.env` — nunca en el navegador.
+2. **Abre el panel de control de RunPod** desde la píldora de host en la
+   barra de herramientas del panel (al principio lee **🟢 Local · tu
+   equipo**).
+3. **Despliega o conecta.** Pulsa **Desplegar** para un pod de un toque
+   (pasa por el enlace de despliegue de la plantilla y se repliega entre
+   tipos de GPU / COMMUNITY→SECURE cuando la capacidad está justa), o elige
+   un pod existente **por nombre** en el desplegable y **Conectar**.
+4. **Míralo en vivo.** La tarjeta de estado muestra GPU / VRAM / tiempo
+   activo / **$·h** y una cuenta atrás de **parada automática por
+   inactividad**, y la píldora de host pasa a
+   **🔵 RunPod · `<pod>` · GPU · $/h** — así que dónde se ejecuta un render
+   nunca es ambiguo. El agente instala tus nodos personalizados + LoRAs y
+   descarga tus modelos en el pod, para que tengas **paridad exacta del
+   lienzo** con tu equipo local.
+5. **Vuelve a local y detén.** **Usar local** retargetea el render a tu
+   propio equipo al instante; **Detener** apaga el pod. La parada
+   automática por inactividad (`RUNPOD_IDLE_STOP_MINUTES`, 15 por defecto;
+   solo cuenta mientras estás renderizando de verdad en el pod) es el
+   tope de coste si te olvidas.
+
+**Interruptor hombre muerto (v0.47+).** La parada automática por
+inactividad vive en el proceso comfyui-mcp — si ese proceso muere (crash,
+portátil cerrado), el tope se moría con él y el pod facturaba para
+siempre. Los pods **creados a través del conector** llevan ahora un
+watchdog en el lado del pod: mientras comfyui-mcp cuida el pod envía un
+latido cada pocos segundos; si los latidos paran, el pod **se detiene a
+sí mismo** (nunca se termina — tu `/workspace` sobrevive) tras un periodo
+de gracia (45 min después del arranque sin latido, luego 20 min entre
+latidos; `RUNPOD_DEADMAN_BOOT_GRACE_S` /
+`RUNPOD_DEADMAN_BEAT_GRACE_S`). «Cuidar» sobrevive a **Usar local** y
+**Dejar de vigilar** — esos solo cambian lo que muestra la UI; el
+watchdog dispara solo cuando comfyui-mcp mismo ha desaparecido (o el pod
+sale). El watchdog detiene el pod con la **clave API de alcance de pod
+que RunPod inyecta automáticamente en cada pod** — tu clave de cuenta
+nunca sale de tu máquina, y no hay nada de lo que optar a salir en
+materia de credenciales. Déjalo desarmado con `deadman:false` en
+`runpod` / `action: "create"` (o `RUNPOD_DEADMAN=0`), o
+`DEADMAN_DISABLE=1` como env del pod. Los pods desplegados desde la
+consola nunca llevan el token de latido, y los despliegues de plantilla
+personalizada (`RUNPOD_TEMPLATE_ID`) lo dejan **apagado** por defecto —
+pasa `deadman:true` solo si esa imagen entrega nuestro watchdog.
+
+<Note>
+¿Nuevo en alquilar GPUs para ComfyUI? El blog recorre todo el flujo de
+punta a punta:
+[Ejecuta ComfyUI en una GPU alquilada en la nube](/docs/blog/runpod-comfyui).
+</Note>
+
+El resto de esta página es el **camino manual / CLI** — sigue
+plenamente soportado, y es lo que el panel de control impulsa bajo el
+capó.
+
+## Conectar desde tu máquina
+
+Cuando el pod está arriba, coge su URL de proxy pública (RunPod → tu pod
+→ el endpoint HTTP **:3000**, p. ej.
+`https://<pod-id>-3000.proxy.runpod.net`) y ejecuta **un comando** en tu
+portátil:
+
+```bash
+npx -y comfyui-mcp@latest connect https://<pod-id>-3000.proxy.runpod.net
+```
+
+Para un **pod HTTPS remoto**, `connect` abre automáticamente un **túnel
+cifrado seguro `wss://`** (vía Cloudflare) hacia el puente del agente en
+tu máquina y le entrega esa URL al panel del pod por ti — así que la
+página HTTPS del pod alcanza al agente con **ningún aviso del navegador,
+nada que copiar, en cualquier navegador**. Para un ComfyUI **local** usa
+el puente loopback `ws://127.0.0.1:9180` en claro. En ambos casos el
+agente — y tu inicio de sesión de Claude/ChatGPT — se ejecuta solo en
+**tu** máquina; en el pod no se instala nada.
+
+Para terminar, con `connect` todavía en marcha en tu propia máquina, abre
+el ComfyUI del pod en el navegador, abre la barra lateral **Agente** y
+pulsa **Conectar**.
+
+Ahora controla el grafo en lenguaje natural.
+
+<Note>
+**¿Por qué un túnel?** Una página de pod se sirve por `https://`, y los
+navegadores bloquean que una página segura abra un socket `ws://`
+inseguro hacia tu máquina (contenido mixto / Private Network Access). El
+túnel le da al puente una URL `wss://` con TLS válido — filtrada por un
+token aleatorio por sesión — para que funcione en todas partes sin aviso.
+</Note>
+
+<Note>
+Si el pod está detrás de autenticación, define `COMFYUI_AUTH_TOKEN` (más
+opcionales `COMFYUI_AUTH_HEADER` / `COMFYUI_AUTH_SCHEME`) en el comando
+`connect` local. Para un pod delante de **Cloudflare Access**, crea un
+**token de servicio** de Access y define `CF_ACCESS_CLIENT_ID` +
+`CF_ACCESS_CLIENT_SECRET` — ambos viajan en cada petición a ComfyUI
+(HTTP + el WebSocket del vigilante de cola), así que el conector pasa la
+puerta mientras la página de inicio de sesión humana se queda arriba para
+los navegadores.
+</Note>
+
+### Quédate todo en tu máquina (sin Cloudflare)
+
+¿Prefieres no enrutar el puente por Cloudflare? Alcanza el pod a través
+de tu propio **reenvío de puertos SSH** para que la página sea un origen
+loopback (`ws://` en claro funciona, sin túnel):
+
+```bash
+ssh <pod-ssh> -L 3000:localhost:3000   # grab the SSH command from RunPod → Connect
+npx -y comfyui-mcp@latest connect http://localhost:3000
+```
+
+Después abre **http://localhost:3000**. O conéctate a la URL https
+directa del pod pero fuerza el puente loopback en claro con
+**`--insecure-bridge`** (entonces organizas tu propio camino para que la
+página del pod alcance `ws://127.0.0.1:9180`).
+
+¿Quieres una **alternativa autoalojada y estable** al túnel rápido de
+Cloudflare por defecto — tu propio dominio, sin nombre de host efímero,
+propiedad completa de ese salto — en lugar de cualquiera de los de
+arriba? Consulta [Relé autoalojado](/docs/es/self-hosted-relay).
+
+## Topología: dónde se ejecuta el agente
+
+```
+  YOUR LAPTOP                                   CLOUD GPU POD (RunPod)
+  ┌───────────────────────────┐                ┌───────────────────────────────────┐
+  │ npx comfyui-mcp connect …  │  HTTP/WS  ───▶ │ nginx :3000 ─▶ ComfyUI :3001        │
+  │  └─ panel orchestrator     │                │   ├─ Manager v2 (--enable-manager) │
+  │     (Claude/ChatGPT Agent  │ ◀───  events   │   └─ Agent Panel (sidebar)         │
+  │      SDK on YOUR sub)      │                │                                     │
+  └───────────────────────────┘                └───────────────────────────────────┘
+```
+
+El pod entrega a propósito **ningún agente Node.js, ningún Agent SDK y
+ningún cliente LLM** — quemarían horas de GPU para nada. El bucle de
+razonamiento vive en tu máquina; el pod es un backend puro de ComfyUI.
+Este es el mismo [modelo de control remoto](/docs/es/panel) que usa el
+panel del agente local, solo que con ComfyUI en una GPU en la nube en
+lugar de localhost.
+
+## Qué persiste (y qué no)
+
+La imagen está optimizada para un **parada/arranque rápido**. El software
+pesado — ComfyUI, su venv, Manager v2 — está horneado en la imagen
+inmutable y se ejecuta desde `/opt/ComfyUI`, mientras que `custom_nodes`
+vive en el volumen `/workspace` (enlace simbólico) para que tus
+instalaciones persistan. Un rearranque en caliente no hace ninguna
+instalación/sync/semilla completa y solo relanza ComfyUI.
+
+| Qué | Dónde vive | ¿Sobrevive a un rearranque? |
+|------|----------------|---------------------|
+| Modelos (incl. descargas de Manager) | volumen `/workspace/models` | **Sí** |
+| Flujos de trabajo + ajustes de ComfyUI + config de Manager | volumen `/workspace/user` | **Sí** |
+| Entradas / salidas | volumen `/workspace/input`, `/output` | **Sí** |
+| **Nodos personalizados** (instalaciones de agente/Manager) | volumen `/workspace/custom_nodes` (enlace simbólico) | **Sí** |
+| Instalación de ComfyUI + venv + Manager | imagen `/opt/ComfyUI` | Se vuelve a tirar con la imagen |
+
+<Note>
+**Los nodos personalizados instalados en tiempo de ejecución sobreviven a
+un rearranque.** `custom_nodes` está enlazado simbólicamente a
+`/workspace/custom_nodes`; en cada arranque los nodos horneados de la
+imagen (panel del agente + builtins) se siembran/refrescan en él (así
+que una actualización de imagen entrega un panel actual mientras se
+conservan tus propios nodos), y las dependencias Python de cada nodo se
+reinstalan en el venv desde una **caché pip persistente** en el volumen —
+rápido después de la primera vez. Los modelos también persisten. Para
+hornear un nodo de modo que no necesite trabajo al arrancar, añádelo al
+`Dockerfile` y reconstruye la imagen (abajo).
+</Note>
+
+## Construye y despliega tu propia imagen
+
+La plantilla de un clic es la imagen preconstruida. Una **imagen
+preconstruida ligera** — el mismo ComfyUI + panel del agente + Manager,
+pero sin los extras donantes opcionales
+(`runpod-uploader`/`croc`/`app-manager`) ni el checkpoint SDXL de
+spotcheck horneado, construida de forma continua en CI — también es
+pública en
+[`ghcr.io/artokun/comfyui-mcp-runpod:cu128-lean`](https://github.com/artokun/comfyui-mcp/pkgs/container/comfyui-mcp-runpod)
+si solo quieres apuntar una plantilla de RunPod a algo sin construir nada
+tú mismo.
+
+Para personalizarla — fijar versiones, hornear nodos personalizados extra,
+cambiar la disposición de modelos — construye y sube la tuya desde
+[`docker/runpod/`](https://github.com/artokun/comfyui-mcp/tree/main/docker/runpod):
+
+```bash
+cd docker/runpod
+docker build -t <your-registry>/comfyui-mcp-runpod:cu128 .
+docker push     <your-registry>/comfyui-mcp-runpod:cu128
+```
+
+No hace falta GPU en el momento de la construcción. Después crea una
+**plantilla de pod** de RunPod apuntada a tu imagen con el **puerto HTTP
+3000** expuesto y un **volumen de red en `/workspace`**.
+
+El [`docker/runpod/README.md`](https://github.com/artokun/comfyui-mcp/blob/main/docker/runpod/README.md)
+es la referencia completa de construcción — el Dockerfile multi-etapa, los
+flags exactos de lanzamiento de ComfyUI, el mapeo de volumen
+`extra_model_paths.yaml`, la puerta de instalación remota de Manager, las
+variables de entorno y los compromisos de tamaño/pin.
+
+## Otros destinos en la nube
+
+El flujo `connect` no es específico de RunPod — funciona contra
+**cualquier** ComfyUI alcanzable que sirva el panel del agente (otro host
+en la nube, un VPS, una caja en tu LAN). Apunta `connect` a su URL y
+voltea el conmutador de orquestador externo:
+
+```bash
+npx -y comfyui-mcp@latest connect https://your-comfyui.example.com
+```
+
+Para exponer **el propio comfyui-mcp** como servidor MCP alojado y
+autenticado (en lugar de desplegar ComfyUI), consulta
+[Conector remoto / alojado](/docs/es/remote-connector).

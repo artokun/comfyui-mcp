@@ -1,0 +1,119 @@
+---
+title: "Docker e Compose"
+description: "Rode o ComfyUI como um serviço docker-compose e conecte o comfyui-mcp a ele — e por que o próprio comfyui-mcp nunca é um serviço do compose."
+icon: "docker"
+---
+
+## o comfyui-mcp é stdio — ele não pode ser um serviço do compose
+
+O `comfyui-mcp` é um **servidor MCP stdio**. Ele não tem porta e não
+expõe nada pela rede: o cliente MCP (Claude Code, Cursor, uma ponte MCP, …)
+**sobe ele como um processo filho** e conversa com ele por stdin/stdout.
+
+Então num `docker-compose.yml`, um serviço `comfyui-mcp` é um beco sem
+saída — ele iniciaria, não teria com quem falar, e sairia. Isso pega quase
+todo mundo ligando o ComfyUI no compose, porque um arquivo de compose
+correto parece que está "faltando" um serviço. Não está: o que você
+compõe é o **ComfyUI**, e o servidor MCP roda onde o seu cliente MCP
+roda, alcançando o ComfyUI por HTTP simples via `COMFYUI_URL`.
+
+<Note>
+  O comando `npx` que lança o servidor exige **Node.js >= 22** na máquina
+  (ou no contêiner) que o executa — o principal peguinha de imagens-base
+  enxutas.
+</Note>
+
+## As duas formas de implantação
+
+<CardGroup cols={2}>
+  <Card title="npx local + ComfyUI local" icon="laptop">
+    O padrão. O ComfyUI roda direto na sua máquina; o cliente MCP sobe
+    `npx -y comfyui-mcp@latest`, que detecta automaticamente a instalação
+    local e a porta dela. Sem config. Veja [Instalação](/docs/pt-BR/installation).
+  </Card>
+  <Card title="npx local + ComfyUI dockerizado / remoto" icon="docker">
+    O ComfyUI roda num contêiner (ou em outro host); o cliente MCP ainda
+    sobe o `comfyui-mcp` localmente, apontado para ele com `COMFYUI_URL`
+    (ou `--comfyui-url`). Uma URL que não seja loopback coloca o servidor
+    em **modo remoto**: todas as ferramentas HTTP funcionam — inclusive
+    instalar nós personalizados, que passa pela API HTTP do
+    ComfyUI-Manager. Ferramentas que precisam do sistema de arquivos ou de
+    um processo local (instalar o próprio ComfyUI, operações do comfy-cli,
+    ler logs, remover arquivos de modelo) retornam um erro claro.
+  </Card>
+</CardGroup>
+
+## Exemplo: ComfyUI no docker-compose
+
+Um exemplo pronto para usar mora no repositório em
+[`docker/compose/`](https://github.com/artokun/comfyui-mcp/tree/main/docker/compose)
+— ComfyUI como serviço (NVIDIA por padrão, variante AMD/ROCm comentada),
+bind mounts para modelos e saídas, e a config do cliente nos comentários
+do cabeçalho:
+
+```yaml
+services:
+  comfyui:
+    image: yanwk/comfyui-boot:cu130-slim-v2   # community image; :rocm for AMD
+    ports:
+      - "8188:8188"
+    volumes:
+      - ./storage/models:/root/ComfyUI/models
+      - ./storage/custom_nodes:/root/ComfyUI/custom_nodes
+      - ./storage/input:/root/ComfyUI/input
+      - ./storage/output:/root/ComfyUI/output
+      - ./storage/user:/root/ComfyUI/user
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+```
+
+Depois aponte o seu cliente MCP para o contêiner. No **host** (o caso
+comum — Claude Code na mesma máquina), use a porta publicada:
+
+```json
+{
+  "mcpServers": {
+    "comfyui": {
+      "command": "npx",
+      "args": ["-y", "comfyui-mcp@latest"],
+      "env": {
+        "COMFYUI_URL": "http://localhost:8188"
+      }
+    }
+  }
+}
+```
+
+Se o cliente MCP roda **dentro de outro serviço do compose** na mesma
+rede (por exemplo uma ponte MCP-para-HTTP na frente do Open WebUI), use o
+**nome do serviço do compose**, não `localhost`:
+
+```
+COMFYUI_URL=http://comfyui:8188
+```
+
+Nesse layout o serviço da ponte é quem sobe o `comfyui-mcp`, então a
+imagem dele precisa conter Node.js >= 22 com o servidor lançável via
+`npx -y comfyui-mcp@latest`. Pontes são software de terceiros — configure
+a sua segundo a documentação dela; o arquivo de compose de exemplo tem um
+esboço comentado.
+
+## Notas AMD / ROCm
+
+- Use a tag de imagem `yanwk/comfyui-boot:rocm` e descomente o
+  passthrough ROCm no exemplo — os pedaços que as pessoas esquecem:
+  `devices: [/dev/kfd, /dev/dri]`, `group_add: [video]`,
+  `security_opt: [seccomp:unconfined]`.
+- O próprio `comfyui-mcp` **não tem dependência de GPU/CUDA** — hosts
+  ROCm são totalmente suportados. O [Painel do Agente](/docs/pt-BR/panel)
+  é uma **extensão do ComfyUI**, não um serviço, e é opcional quando um
+  front-end externo é a sua superfície.
+- [`docker/runpod/`](https://github.com/artokun/comfyui-mcp/tree/main/docker/runpod)
+  neste repositório é uma **imagem de nuvem RunPod orientada a CUDA**
+  (veja [Implantação na nuvem](/docs/pt-BR/cloud-deployment)), não uma
+  imagem ComfyUI de uso geral — usuários AMD não deveriam começar por aí.

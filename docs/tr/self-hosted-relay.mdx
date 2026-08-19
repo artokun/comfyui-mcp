@@ -1,0 +1,77 @@
+---
+title: "Kendi barındırdığınız güvenli köprü rölesi (kurumsal)"
+description: "Döngünün tamamına sahip olun: üçüncü taraf bir hizmete bağımlı olmak yerine güvenli wss:// köprüsü için kendi rölenizi çalıştırın — veri yerleşimi, uyumluluk ya da dış bağımlılık olmaması gereksinimi için."
+icon: "building-columns"
+---
+
+[`connect`](/docs/tr/cloud-deployment) uzak bir HTTPS podunu sürdüğünde
+comfyui-mcp, podun tarayıcı panelinden makinenizdeki ajan köprüsüne geçerli
+TLS'li bir `wss://` yolu ister (`https://` bir sayfadan düz bir `ws://`
+tarayıcı tarafından engellenir). Varsayılan bu bir **cloudflared hızlı
+tünelidir** — sıfır kurulum, ama geçici (her çalıştırmada taze rastgele bir
+ana makine adı).
+
+O yolu **uçtan uca sahiplenmesi** gereken kuruluşlar için — denetim kanalı
+hiçbir üçüncü taraftan geçmez, güvenlik duvarı/denetim kuralları için sabit
+bir alan adı ya da altyapınızın dışındaki bir hizmete bağımlılık yok —
+comfyui-mcp güvenli köprüyü varsayılan hızlı tünel yerine **sizin
+işlettiğiniz** bir röle üzerinden yönlendirmeyi destekler.
+
+<Note>
+Referans uygulama açık kaynaktır:
+**[artokun/comfyui-mcp-relay](https://github.com/artokun/comfyui-mcp-relay)** —
+bir Cloudflare Worker + Durable Object, MIT lisanslı, GitHub şablonu olarak
+işaretli; **Use this template**'e tıklayıp saniyeler içinde kendi kopyanıza
+sahip olabilirsiniz. Çatallayın, olduğu gibi dağıtın ya da kuruluşunuzun
+zaten çalıştırdığı WebSocket yetenekli herhangi bir altyapıya uyarlayın —
+README tel protokolünü, oturum yaşam döngüsünü ve tasarım ödünleşimlerini
+(çoğullama, kimlik doğrulama, uykuya geçme) tam belgeler.
+</Note>
+
+## Neden kendi barındırmalısınız
+
+- **Veri yerleşimi / uyumluluk** — köprü araç çağrılarını ve grafik
+  işlemlerini taşır (görsel baytlarını değil; onlar pod↔tarayıcı doğrudan
+  akar), ama bazı kuruluşlar o denetim kanalının yine de işlettikleri
+  altyapının içinde kalmasını ister.
+- **Üçüncü taraf çalışma zamanı bağımlılığı yok** — dış bir rölenin
+  kullanılabilirliğine bel bağlamak yerine sabit, sahip olunan bir uç nokta.
+- **Güvenlik duvarı / denetim kuralları** — denetlediğiniz kararlı bir alan
+  adı, her oturumda değişen geçici bir ana makine adından daha kolay izin
+  listesine alınır ve günlüğe yazılır.
+
+## Nasıl bir araya gelir
+
+Köprünün iki tarafı da **dışarı** arar — hiçbir yerde gelen bir portun açık
+olması gerekmez. Rölenizin işi bir orkestratörü (bir kullanıcının makinesinde
+çalışan) sürdüğü poddaki tarayıcı panel bağlantılarıyla eşleştirmek ve baytları
+aralarında taşımak; üstünde giden comfyui-mcp'nin kendi araç çağrı
+protokolünü anlaması gerekmez.
+
+Bir röle dağıtıldıktan sonra comfyui-mcp'yi ona yöneltmek birkaç ortam
+değişkenidir:
+
+```bash
+export COMFYUI_MCP_TUNNEL_BACKEND=relay
+export COMFYUI_MCP_RELAY_URL=wss://your-relay.internal.example.com
+# optional: a shared secret gating who can open a session on your relay at all
+export COMFYUI_MCP_RELAY_KEY=your-shared-deploy-secret
+```
+
+`COMFYUI_MCP_TUNNEL_BACKEND` ayarlı değilken comfyui-mcp varsayılan geçici
+hızlı tünel davranışını kullanmayı sürdürür — bu tamamen isteğe bağlıdır.
+
+## Referans uygulamayı dağıtın
+
+```bash
+gh repo create your-org/your-relay --template artokun/comfyui-mcp-relay --clone
+cd your-relay
+npm install
+wrangler login
+npm run deploy
+```
+
+Tam README için —
+tel protokolü, kimlik doğrulama modeli ve dağıtım adımları —
+**[artokun/comfyui-mcp-relay](https://github.com/artokun/comfyui-mcp-relay)**
+adresine bakın.

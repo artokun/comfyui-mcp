@@ -1,0 +1,233 @@
+---
+title: "後端 / 供應商"
+description: "面板代理可以跑在任意 LLM 上：用你自己的訂閱 / 套餐跑 Claude、ChatGPT、Gemini、Grok、Kimi 或 GLM；透過 Ollama / LM Studio / llama.cpp 跑免費本機模型（連帳號都不用）；或經相容 OpenAI 的端點接入任何託管模型。供應商無關的 AgentBackend 介面、選擇器，以及能力對照表怎麼工作。"
+icon: "shuffle"
+---
+
+[側邊欄面板](/docs/zh-TW/panel) 代理是**與供應商無關的**。選 **Claude**、**ChatGPT**、
+**Gemini** 或 **Ollama（本機）**，對應的代理就會在背景跑 —— 訂閱類不需要 API 金鑰，
+本機模型連帳號都不需要。Ollama 後端還能說**任何相容 OpenAI 的端點**（OpenRouter、
+DeepSeek、GLM、MiMo、vLLM、LM Studio），所以「帶上你自己的模型」涵蓋從自己 GPU 上
+免費的 4B 到前沿的一切。所有供應商共享同一套即時畫布工具、同一份模型知識、同一種
+一次性工作流程載入、同一道成本護欄。[LLM 競技場](/docs/zh-TW/arena) 用真實 ComfyUI 任務
+給其中任何一個打分。
+
+```
+panel (pick a provider) ⇄ loopback bridge ⇄ orchestrator (Claude · ChatGPT · Gemini · any LLM) ⇄ your graph
+```
+
+## 選供應商，不是選介面
+
+面板展示一個**後端選擇器** —— Claude / ChatGPT / Gemini / Antigravity / Grok / Kimi /
+GLM / Ollama / LM Studio / llama.cpp / OpenRouter / 自訂端點
+小標籤（Copilot 這類實驗性供應商藏在實驗性開關後面）。點其中一個，就在那一個共享協調器
+上連線該供應商（一個橋接連接埠服務所有供應商；每個面板分頁在交握時選定自己的供應商）。
+橋接 URL 住在**進階**下面，給使用者自己管的協調器用。
+
+切換供應商會**開一段新對話** —— 對話不跨供應商共享 —— 面板會發一條系統說明這麼說。
+輸入框佔位會跟著當前後端走（「問 Claude…」/「問 Ollama…」）。
+
+## 登入（每個供應商一次 —— 或者完全不用）
+
+- **Claude** — `claude`（或 `claude setup-token`）— claude.ai OAuth（訂閱）。
+- **ChatGPT（Codex）** — `codex login` — ChatGPT 登入（訂閱）；經 Codex app-server
+  跑。
+- **ChatGPT（直接 OAuth）** — 如果你曾經跑過 `codex login`，不用再多一步：`chatgpt`
+  後端重用 `~/.codex/auth.json`，直接和 ChatGPT 說話（沒有 Codex 行程）。如果 ack
+  說驗證檔案缺失，跑一次 `codex login`。
+- **Gemini** — `gemini` — Google 登入。注意個人免費 Google 登入已於 2026-06-18
+  退役：Gemini CLI 後端現在需要 `GEMINI_API_KEY` 或企業 / Code Assist 帳號。個人
+  訂閱使用者：用下面的 **Antigravity**。
+- **Antigravity（Google 訂閱）** — 從 [antigravity.google](https://antigravity.google)
+  安裝官方 Antigravity CLI，跑一次 `agy` 並完成 Google 登入（AI Pro/Ultra 和免費檔）。
+  後端每輪用 `agy -p` 驅動，帶 `--continue` 對話連續性，從 `agy models` 讀即時模型
+  目錄，並透過一份合併安全的工作區 `.agents/mcp_config.json` 接上 ComfyUI + 面板
+  MCP 工具。能力按設計減少（沒有文件化的機器可讀事件流）：最終答覆文本會流進來，
+  但沒有按工具的進度，也沒有影像輸入。對話連續性用 `agy --continue`（帳號最近的那段
+  對話），所以一次只跑一個 antigravity 分頁 —— 第二個分頁，或終端裡一個互動式
+  `agy` 工作階段，可能搶走執行緒。`COMFYUI_MCP_ANTIGRAVITY_MODEL` 釘死模型，
+  `COMFYUI_MCP_ANTIGRAVITY_PATH` 指向非標準安裝。
+- **Grok** — 安裝 Grok CLI（xAI / Grok Build）並跑一次 `grok` 登入；後端以 ACP 模式
+  驅動它。Grok 沒就緒時，面板也提供一行面板內 OAuth 登入。
+- **Kimi（推薦）** — 安裝 [Kimi Code CLI](https://moonshotai.github.io/kimi-code/)
+  並跑 `kimi login`（裝置碼流程）；後端從
+  `~/.kimi-code/credentials/kimi-code.json` 重用那次登入（舊的 `~/.kimi` 路徑仍作為
+  回退讀取）。這用的是你的 **Kimi Code 訂閱**，是跑 Kimi 的首選方式 —— 比下面按
+  token 計費的 Moonshot 金鑰更便宜、限額更高。只在 CI / 無 CLI 時改設
+  `KIMI_API_KEY`，或用 `KIMI_CODE_HOME` 指向非預設憑據目錄（設過舊名字的人，
+  `KIMI_SHARE_DIR` 仍被尊重）。也提供面板內 OAuth 登入。
+- **GLM** — 設定 `ZAI_API_KEY`（Z.AI Coding Plan；也接受 `GLM_API_KEY` /
+  `ZHIPUAI_API_KEY`）。沒有 CLI。
+- **Kimi K3（Moonshot）** — 沒有 Kimi Code 訂閱時的**按 token 計費替代**（有的話優先
+  走上面的 **Kimi** 路徑）。從
+  [platform.kimi.ai](https://platform.kimi.ai/console/api-keys) 設定
+  `MOONSHOT_API_KEY`。沒有 CLI。這是 Moonshot **平台**金鑰（預設模型 `kimi-k3`，
+  基址 `https://api.moonshot.ai/v1`）—— 和上面的 **Kimi** 供應商不同，那是 Kimi Code
+  程式設計訂閱。用 `COMFYUI_MCP_MOONSHOT_MODEL` 覆寫模型，用
+  `COMFYUI_MCP_MOONSHOT_BASE_URL` 覆寫基址。
+- **MiniMax** — 從 [platform.minimax.io](https://platform.minimax.io/console/api-keys)
+  設定 `MINIMAX_API_KEY`。沒有 CLI。預設模型是 `MiniMax-M3`，預設基址是全球端點
+  `https://api.minimax.io/v1`（相容 OpenAI，普通 Bearer 驗證）。中國區請設
+  `COMFYUI_MCP_MINIMAX_BASE_URL=https://api.minimaxi.com/v1`。用
+  `COMFYUI_MCP_MINIMAX_MODEL` 覆寫模型。
+- **Copilot（實驗性）** — 從面板的實驗性供應商行登入。預設關閉；先在設定裡啟用實驗性
+  後端。
+- **Ollama（本機）** — 不用登入。安裝 Ollama 並拉取一個支援工具呼叫的模型
+  （`ollama pull gemma4:e4b`）。如果要改用**託管**模型，設定
+  `COMFYUI_MCP_OLLAMA_API=openai`、`COMFYUI_MCP_OLLAMA_BASE_URL`（例如
+  `https://openrouter.ai/api/v1`），以及一把 API 金鑰
+  （`COMFYUI_MCP_OLLAMA_API_KEY` / `OPENROUTER_API_KEY`）。
+- **自訂端點** — 沒有登入流程。在 設定 → 自訂端點 把它指向任何相容 OpenAI 的
+  `/v1`（vLLM、DeepSeek、Together、Azure、遠端 llama-server）；伺服器需要金鑰就在那裡
+  加上（遮罩輸入，由協調器按 0600 儲存）。請看
+  [本機 LLM → 自訂端點](/docs/zh-TW/local-llms#自訂端點任何相容-openai-的伺服器)。
+
+### 連線時的就緒與引導
+
+每個供應商小標籤在沒就緒時都會誠實降級：連線 ack 告訴你確切缺哪一步（「設定
+ZAI_API_KEY…」、「跑 `codex login`…」、「從實驗性那一行登入…」），而不是在你第一條
+訊息上失敗 —— 憑據後來出現的供應商，下次連線就會翻成就緒，不用重新啟動。
+
+面板在**連線**時偵測每個供應商的就緒 —— 訂閱類是 `PATH` 上的 CLI 加上磁碟上的登入，
+Ollama 是存在的二進位（守護程式停了會在連線時體面降級）。你不用猜哪個供應商配好了：
+
+- **引導卡片**只在**沒有任何**供應商就緒時出現，帶著每個供應商的一次性設定步驟
+  （對 Ollama 那是安裝 + 拉模型，不是登入）。
+- 如果你儲存的供應商選擇不可用，面板會**自動切到一個就緒的供應商**（你儲存的偏好在
+  你配好之後會恢復）。
+- 未就緒供應商的那一行會變成**「去設定」動作**，給正在工作的代理種一條設定提示。
+
+## 每個供應商怎麼驅動
+
+協調器相依一個與供應商無關的 **`AgentBackend`** 介面（相依注入）。每個供應商是一個
+轉接器：
+
+| | Claude | ChatGPT（Codex） | Gemini | Ollama / 任意 LLM |
+|---|---|---|---|---|
+| 驅動 | Claude Agent SDK —— 持久流式工作階段 | `codex app-server` JSON-RPC | `gemini --acp`（Agent Client Protocol） | 直接 HTTP —— Ollama `/api/chat` 或任何相容 OpenAI 的 `/v1/chat/completions`；後端擁有整個代理迴圈 |
+| 驗證 | claude.ai OAuth | ChatGPT 登入 | Google 登入 | 無（本機）/ bearer 金鑰（託管） |
+| 即時畫布工具 | 行程內 SDK MCP 伺服器 | 回送 streamable-HTTP MCP | 回送 streamable-HTTP MCP | 同一回送 MCP 上的 [6 工具路由器](/docs/zh-TW/local-llms) |
+| 無介面 `comfyui` MCP | 行程內 | 設定宣告的 stdio | 設定宣告的 stdio | 路由器後面的精簡工具模式 stdio 子行程 |
+
+`panel_*` 工具定義住在**一份共享清單**裡，註冊到每一條路徑上，所以即時畫布面
+（包括 `panel_clear` / `panel_restart_comfyui` 的破壞性確認門禁）在各供應商之間
+完全一樣。對等是自動的 —— 沒有哪條路徑重新實作一個工具。Ollama / 任意 LLM 後端還會
+把兩套工具面都包在六個路由器工具後面，免得小型模型被 schema 淹死 —— 請看
+[本機 LLM 與其他代理](/docs/zh-TW/local-llms)。
+
+## 能力對照表
+
+每個後端一份能力描述符，讓面板在供應商做不到的功能上**體面降級**：
+
+| 能力 | Claude | ChatGPT（Codex） | Gemini | Ollama / 任意 LLM |
+|---|---|---|---|---|
+| 持久通道（隨時間推送輪次） | ✅ | ✅（執行緒 + `turn/start`） | ✅ | ✅（記憶體中的歷史） |
+| 流式增量 | ✅ | ✅ | ✅ | ✅（NDJSON / SSE） |
+| 輪次中途打斷 | ✅ | ✅（`turn/interrupt`） | ✅（`session/cancel`） | ✅（請求中止） |
+| 對話回滾（在某一輪分叉） | ✅ `forkSession` | ⚠️ 關掉 | ⚠️ 關掉 | ⚠️ 關掉 |
+| 行程內 MCP 工具 | ✅ | ❌ | ❌ | ❌（MCP 用戶端上的路由器） |
+| 模型列舉 | ✅ | ✅（`config/read`） | 靜態目錄 | ✅（`/api/tags` 或 `/models`） |
+| 視覺（影像輸入） | ✅ | ✅ | ✅ | ❌（取決於模型；目前關掉） |
+| 音訊輸入 | ❌ | ❌ | ❌ | ✅ Ollama（已檢查） · ⚠️ 其他（未核實） |
+| 供應商斜線指令 | ✅ | ❌ | ❌ | ❌ |
+
+### 音訊輸入 —— 哪些後端，老實說
+
+代理在每個後端上都能驅動 ComfyUI 的音訊工具。**聽見**一個音訊檔案的範圍更窄，上面
+那張表故意保守，因為靜默丟掉附件比拒絕更糟：
+
+- **Ollama（`ollama` 後端，原生 `/api/chat`）—— 支援，按能力檢查，並且端到端核實過。**
+  音訊走 `images[]` 陣列，那是 Ollama 自己的音訊載體，不是旁門。已對著本機 Ollama 和
+  `gemma4:e2b` 現場確認，它轉錄了一份真實 WAV。
+  - **按模型，不是按供應商。** 傳送任何東西之前，後端會問 `POST /api/show` *這個*
+    模型是否報告 `audio` 能力。如果沒有，附件會按名字被拒絕，伺服器報告的能力清單會
+    回引給你，並告訴你哪些模型能聽（`ollama pull gemma4:e2b` / `gemma4:e4b` /
+    `nemotron3:33b`）。注意 `GET /api/tags` 也回傳一個 `capabilities` 陣列，而且
+    **不是**同一個答案 —— 同一個模型在那裡報告沒有 audio，從 `/api/show` 卻有 ——
+    所以只諮詢 `/api/show`。
+  - 每一輪帶著音訊都會重新檢查能力，因為 Ollama 標籤是可變的：`ollama pull` 可以在
+    同一個名字下替換權重，快取的結論可能比它描述的模型活得更久。
+- **LM Studio / llama.cpp / OpenRouter / GLM / Kimi / Moonshot / MiniMax /
+  Copilot / 自訂相容 OpenAI 的端點 —— 會嘗試，不按能力檢查。** 這些都說
+  `/v1/chat/completions`，沒有可以問的能力端點，所以音訊作為 `input_audio` 內容塊
+  傳送，並且在那一輪告訴你投遞**未確認**：*「我無法確認模型真的收到了它們 —— 如果
+  回覆沒有反映檔案裡的內容，它就沒聽見。」* 反過來拒絕，會把音訊拒給每一個只是沒有
+  能力 API 的端點；跑不起來的護欄不是判決。`input_audio` 形狀本身已對著 Ollama 相容
+  OpenAI 的端點核實過；某個*給定*第三方主機是否尊重它，我們查不了，也不聲稱能查。
+- **Claude、ChatGPT（Codex）、Codex CLI、Gemini、Grok、Antigravity、pi** —— 本構建
+  沒有音訊輸入。附著音訊會在輪次建好之前被拒絕，你和模型都會被告知，點名供應商以及
+  什麼可以替代。
+
+  在 Gemini/Grok 上這是故意省略，而不是協定缺口：ACP *確實*定義了 `audio`
+  ContentBlock，但它要求代理先廣告 `audio` 提示能力，而這兩個 CLI 都沒被觀察到
+  這麼做。一條永遠練不到的傳送路徑，失敗模式是使用者從沒被告知沒到達的附件，比誠實
+  拒絕更糟 —— 所以沒發出去。
+
+**盲視**開關管的是*像素*：它扣下影像，**不**扣下音訊。
+
+盲視的強制也到達代理的**原生工具**，不只是 comfyui MCP 面：內建 Claude 後端帶著
+一道 PreToolUse 門跑，盲視開啟時會拒絕它自己對影像內容的 `Read`/`WebFetch`（按副檔名
+*和*魔數的柵格檔案、PDF、筆記本輸出，以及 ComfyUI `/view` URL）—— 每次呼叫即時讀取，
+所以工作階段中途撥動會綁上下一次工具呼叫。API / 本機通道（Ollama 家族、GLM、Kimi、自訂
+端點）只帶著我們的工具面，所以 MCP 擦除完全覆寫它們。**CLI 通道**（Codex、Gemini、
+Grok、Antigravity、pi、Copilot）跑的是它們自己的代理二進位，內建檔案工具我們鉤
+不上 —— 在那裡開啟盲視會貼一條可見警告，原樣說明這一點，而不是暗示一份我們守不住的
+保證。
+
+#### 音訊檔案怎麼上到一輪
+
+協調器在面板 `message` 幀上用兩種方式接受音訊：
+
+```jsonc
+{ "type": "message", "text": "what key is this in?",
+  "audio":  [{ "filename": "song.mp3", "type": "input" }],   // preferred
+  "images": [{ "filename": "song.mp3", "type": "input" }] }  // also routed to audio
+```
+
+第二種形式存在，是因為一份只知道 `images` 的面板構建否則會把音訊檔案交給視覺內容塊。
+任何帶音訊副檔名的東西都會自動挪到音訊路徑 —— 包括我們無法編碼的格式（`.wma`、
+`.mid`、`.aiff`），於是你得到「把它轉成……之一」，而不是一條影像錯誤。
+
+把同一個檔案放進**兩個**陣列（就像上面的例子）是安全的：引用按檔名 + 子資料夾 +
+型別識別，所以只投遞一次，也只按每輪兩個附件的上限計一次。它不會被誤當成第二個檔案，
+再因為裝不下被拒絕。
+
+<Note>
+挑選音訊檔案的**輸入框控制項**住在面板（`comfyui-mcp-panel`）裡，那是另一個儲存庫 ——
+那一部分不在這次發布裡。在它落地之前，上面的線路合約就是用戶端傳送的東西，這條路徑
+從協調器一側端到端練過。
+</Note>
+
+只有上面原生 Ollama 路徑端到端核實過，也只有在那裡「這個模型能聽」是成立的而不是
+假定的。相容 OpenAI 的路徑是一次誠實的嘗試，帶著誠實的附註；本節其餘部分描述的是
+拒絕，不是一項能力。
+
+**對話回滾**（把聊天分叉回過去某一輪）只屬於 Claude；**程式碼 / 節點圖**回滾
+（`/revert`、連按 Esc、按輪次的快照）在每個後端都能用，因為它住在協調器裡，不在
+供應商裡。
+
+## 切換時的推理強度
+
+強度 / 模型選擇器是**按供應商**的。選中的強度在供應商切換時，會對映到目標後端最近的
+有效檔（面板和協調器後端做同樣的對映）：
+
+- **Claude：** `low` · `medium` · `high` · `xhigh` · `max`
+- **ChatGPT（Codex）：** `none` · `minimal` · `low` · `medium` · `high` · `xhigh` · `max` · `ultra`
+  （`max` / `ultra` 在 GPT-5.6 級模型上）
+- **Gemini / Ollama：** 沒有面向使用者的強度標尺 —— 選擇器被隱藏。
+
+## 知識與成本對等
+
+因為只有 Claude 能載入原生技能，捆綁的專長作為任何一個後端都能呼叫的一個 MCP 工具
+發布 —— `list_packs`，它的動作覆寫技能（`skill_list`、`skill_read`）、安裝包
+（`list`、`read_workflow`）和伺服器的模板（`list_templates`）—— 再加上本機 GPU vs
+付費 API 護欄（`action: "check_runtime"`）以及一次性 `panel_load_workflow`。請看
+[技能、包與執行成本](/docs/tools/skills-knowledge)。
+
+## 參見
+
+- [側邊欄面板](/docs/zh-TW/panel) —— 完整的面板體驗
+- [本機 LLM 與其他代理](/docs/zh-TW/local-llms) —— 6 工具路由器、模型要求、Hermes / OpenClaw / Copilot 設定
+- [LLM 競技場](/docs/zh-TW/arena) —— 用真實 ComfyUI 任務給你的模型打分
+- [技能、包與執行成本](/docs/tools/skills-knowledge) —— 對等 + 成本工具
+- 設計文件：[`design/agent-backend-injection.md`](https://github.com/artokun/comfyui-mcp/blob/main/design/agent-backend-injection.md)

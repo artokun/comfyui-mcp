@@ -1,0 +1,151 @@
+---
+title: "遠端 / 託管連接器"
+description: "把 comfyui-mcp 暴露成帶驗證、可公網存取的 Streamable-HTTP MCP 伺服器 —— 一條命令，就能加到 Claude Desktop 的自訂連接器或任何遠端用戶端。"
+icon: "globe"
+---
+
+`comfyui-mcp` 說的是託管連接器所用的同一種 **Streamable-HTTP** MCP 傳輸（例如 Comfy
+自己的 `cloud.comfy.org/mcp` 自訂連接器）。一條命令就能把它跑成帶權杖驗證、掛在公網
+HTTPS 通道後面的伺服器，於是你可以把它加到 **Claude Desktop → Connectors**，或從任何
+地方無介面呼叫。
+
+<Note>
+這是選用的。預設的 `stdio` 傳輸（以及回送上的普通 `--http`）行為和以前完全一樣 ——
+開放且本機。只有你設定了權杖或傳入 `--tunnel` 時，驗證和通道才會啟用。
+</Note>
+
+<Note>
+**其實是想用代理面板驅動遠端 ComfyUI 執行個體（例如 RunPod）？** 那是另一個功能 ——
+請看[雲端部署](/docs/zh-TW/cloud-deployment)。本頁講的是把 **comfyui-mcp MCP 伺服器本身**
+暴露給 Claude Desktop 這類遠端用戶端；它完全不碰 ComfyUI 或面板橋接。兩者碰巧都在底層
+用 cloudflared 快速通道，這也是最容易把它們搞混的地方。
+</Note>
+
+## 一條命令的通道
+
+```bash
+npx -y comfyui-mcp@latest --tunnel
+```
+
+它會做四件事：
+
+1. 強制使用 HTTP 傳輸（`MCP_TRANSPORT=http`）。
+2. 如果你還沒設定權杖，就生成一個足夠強的隨機驗證權杖。
+3. 啟動一條 [cloudflared](https://github.com/cloudflare/cloudflared) 快速通道，
+   指向本機 MCP 連接埠。
+4. 印出一塊可直接貼上的內容：公網 `https://…/mcp` URL、權杖，以及 Claude Desktop
+   連接器片段。
+
+輸出看起來像：
+
+```text
+════════════════════════════════════════════════════════════════════
+ ComfyUI MCP — Remote / Hosted Connector is LIVE
+════════════════════════════════════════════════════════════════════
+ Public MCP URL : https://shiny-otter-1234.trycloudflare.com/mcp
+ Auth token     : 9f2c…<redacted>
+ ...
+════════════════════════════════════════════════════════════════════
+```
+
+<Warning>
+保持終端開啟。cloudflared **快速通道**是臨時的 —— 每次執行 URL 都會變，行程結束時通道
+關閉。要穩定主機名，請自己跑一條指向本機 HTTP 連接埠的
+[具名 cloudflared 通道](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)。
+</Warning>
+
+### 沒有安裝 cloudflared？
+
+`cloudflared` 作為選用相依隨包提供。找不到二進位時，伺服器會繼續在本機執行，並印出安裝
+指引：
+
+```bash
+npm install -g cloudflared          # cross-platform
+brew install cloudflared            # macOS
+winget install cloudflare.cloudflared  # Windows
+```
+
+然後帶 `--tunnel` 再跑一次。
+
+## 新增到 Claude Desktop
+
+開啟 **Claude Desktop → Settings → Connectors → Add custom connector**，填入：
+
+| 欄位  | 值 |
+|--------|-------|
+| Name   | `ComfyUI` |
+| URL    | 打印出來的 `https://…/mcp` URL |
+| Header | `X-API-Key: <token>`（或 `Authorization: Bearer <token>`） |
+
+儲存，然後在聊天裡啟用該連接器。ComfyUI 工具會出現，和本機 stdio 伺服器一樣。
+
+## 無介面 / 程式化設定
+
+任何支援遠端 Streamable-HTTP 伺服器的 MCP 用戶端都能用。提供 URL 和驗證頭：
+
+```json
+{
+  "mcpServers": {
+    "comfyui": {
+      "url": "https://shiny-otter-1234.trycloudflare.com/mcp",
+      "headers": { "X-API-Key": "<token>" }
+    }
+  }
+}
+```
+
+對 `/mcp` 的**每一次**請求都接受兩種頭形式：
+
+```bash
+# X-API-Key (matches Comfy Cloud's convention)
+curl -H "X-API-Key: <token>" https://…/mcp
+
+# Authorization: Bearer
+curl -H "Authorization: Bearer <token>" https://…/mcp
+```
+
+## 手動設定（自帶通道 / 代理）
+
+如果更想自己管公網端點，就用固定權杖跑 HTTP 傳輸，再把它放在自己的反向代理、通道或 VPN
+後面：
+
+```bash
+COMFYUI_MCP_HTTP_TOKEN=my-long-random-secret \
+  npx -y comfyui-mcp@latest --http --host 0.0.0.0 --port 9100
+```
+
+然後把通道/代理指到 `http://127.0.0.1:9100/mcp`。
+
+<Warning>
+繫結到非回送主機（例如 `0.0.0.0`）且**沒有**權杖是**硬失敗** —— 伺服器會拒絕啟動，
+而不是把一個開放的 `/mcp` 端點暴露到機器外。請設定 `COMFYUI_MCP_HTTP_TOKEN`（推薦）、
+使用 `--tunnel`，或繫結回送主機。如果你確實想要開放端點（例如已經在自己的驗證代理後面），
+請用 `--allow-unauthenticated-non-loopback`（環境變數 `COMFYUI_MCP_ALLOW_UNAUTH=1`）
+顯式選擇，這會把失敗降成警告。
+</Warning>
+
+## 驗證參考
+
+| 設定 | 效果 |
+|---------|--------|
+| `COMFYUI_MCP_HTTP_TOKEN` | `/mcp` 上要求的共享金鑰權杖。未設定 → 端點開放。 |
+| `--token <value>` | 與環境變數相同；CLI 旗標優先於環境變數。 |
+| `--tunnel` / `MCP_TUNNEL=1` | 強制 HTTP，未設定時自動生成權杖，開啟一條 cloudflared 通道。 |
+| `--http` / `MCP_TRANSPORT=http` | 不帶通道的 HTTP 傳輸（設了權杖時驗證仍然生效）。 |
+| `--host`, `--port` | 繫結地址（預設 `127.0.0.1:9100`）。 |
+| `--allow-unauthenticated-non-loopback` / `COMFYUI_MCP_ALLOW_UNAUTH=1` | 選擇在非回送主機上開放 `/mcp`。沒有它，這種組合就是啟動硬失敗。 |
+
+權杖按常量時間比較，門禁對 MCP 端點上的每一種 HTTP 方法（`POST`/`GET`/`DELETE`）都強制
+執行。繫結非回送主機且沒有權杖時，除非設定了上面的逃生口，否則啟動會被拒絕。
+
+## 路線圖：OAuth
+
+今天的驗證是**手動共享金鑰權杖**（Bearer / `X-API-Key`），無介面路徑和 Claude Desktop
+自訂連接器都能涵蓋。完整的瀏覽器 **OAuth** 登入流程（類似 Comfy 的託管連接器）是規劃中
+的後續 —— 改動更重，手動連線並不需要它。
+
+## 參見
+
+- [雲端部署](/docs/zh-TW/cloud-deployment) —— 用代理面板驅動遠端 ComfyUI 執行個體
+  （另一條通道，另一個目的）
+- [設定](/docs/zh-TW/configuration) —— 完整的環境變數參考

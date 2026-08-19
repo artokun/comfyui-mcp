@@ -1,0 +1,441 @@
+---
+title: "Configuración"
+description: "Variables de entorno, transportes y destino de la conexión."
+icon: "gear"
+---
+
+Toda la configuración pasa por variables de entorno (definidas en el bloque
+`env` del servidor en `~/.claude/settings.json`) o flags CLI. Precedencia
+para el destino de ComfyUI:
+`--comfyui-url` / `COMFYUI_URL` → `COMFYUI_HOST`/`COMFYUI_PORT` →
+detección automática.
+
+## Modos de despliegue
+
+`comfyui-mcp` opera en uno de tres modos, auto-seleccionado desde el
+entorno:
+
+| Modo | Disparador | ¿FS local? | ¿Control de procesos? | ¿WebSocket? |
+| --- | --- | --- | --- | --- |
+| **Local** | por defecto | sí | sí | sí |
+| **Remoto** | `--comfyui-url` / `COMFYUI_URL` apunta a un host que no es loopback | no | no | sí |
+| **Nube** | `COMFYUI_API_KEY` está definida (apunta a Comfy Cloud) | no | no | no (sondeo HTTP) |
+
+Las herramientas que exigen una instalación local (`restart_comfyui` con
+`action: "start"` / `apply_manifest` / `list_local_models` (`action:"remove"`) /
+`get_image (action:"list_outputs")` / etc.)
+devuelven un error claro al ejecutarse en modo remoto o nube. En modos
+remoto y nube el servidor omite la detección automática local de
+`COMFYUI_PATH` para que una instalación local obsoleta no pueda absorber
+en silencio las subidas o las descargas de modelos que el agente destina
+al destino real — define `COMFYUI_PATH` de forma explícita si quieres
+mezclar.
+
+## Conexión
+
+<ParamField path="COMFYUI_URL" type="string">
+  URL completa de la instancia de ComfyUI, p. ej. `https://my-comfy.example.com`.
+  Equivalente al flag CLI `--comfyui-url`. Tiene precedencia sobre host/puerto
+  y omite la detección automática del puerto. Un **prefijo de ruta se
+  conserva** (p. ej. `https://host/comfyapi`) para que las instancias detrás
+  de un reverse-proxy se enruten bien. Cuando el host no es loopback
+  (cualquier cosa que no sea `127.0.0.1` / `localhost` / `::1` /
+  `0.0.0.0`), el servidor entra en **modo remoto** y omite la detección
+  automática de `COMFYUI_PATH`.
+</ParamField>
+<ParamField path="COMFYUI_HOST" type="string" default="127.0.0.1">
+  Host del servidor ComfyUI.
+</ParamField>
+<ParamField path="COMFYUI_PORT" type="number">
+  Puerto del servidor ComfyUI. Se detecta automáticamente (8188, luego 8000)
+  cuando no está definido.
+</ParamField>
+<ParamField path="COMFYUI_SSL" type="boolean" default="false">
+  Usar `https`/`wss` en lugar de `http`/`ws`.
+</ParamField>
+<ParamField path="COMFYUI_PATH" type="string">
+  Ruta absoluta a la instalación local de ComfyUI. Se detecta automáticamente
+  desde ubicaciones habituales cuando no está definida (suprimida en modos
+  remoto/nube). La exigen las herramientas solo locales (instalar/gestionar
+  nodos, eliminar modelos, leer registros, listar archivos de salida).
+</ParamField>
+
+## Remoto detrás de un reverse proxy / pasarela API
+
+Para un ComfyUI autoalojado expuesto bajo un prefijo de ruta y/o su propia
+capa de autenticación (una ruta nginx, una pasarela API, un borde SSO) —
+esto **no** es Comfy Cloud:
+
+- `COMFYUI_URL` **conserva un prefijo de ruta** (p. ej. `https://host/comfyapi`),
+  así que las peticiones se enrutan debajo en lugar de golpear `/prompt`,
+  `/system_stats`, … en la raíz.
+- Las variables `COMFYUI_AUTH_*` adjuntan una cabecera de autenticación
+  genérica a **cada** petición a ComfyUI (las llamadas HTTP directas y la
+  biblioteca subyacente de cliente/WebSocket). Esto es independiente del
+  modo nube, así que una instancia autenticada por pasarela nunca se lee
+  por error como Comfy Cloud.
+
+<ParamField path="COMFYUI_AUTH_TOKEN" type="string">
+  Token de autenticación para un ComfyUI autoalojado detrás de una pasarela.
+  Cuando está definido, se envía en cada petición a ComfyUI. Nunca se
+  registra.
+</ParamField>
+<ParamField path="COMFYUI_AUTH_HEADER" type="string" default="Authorization">
+  Nombre de la cabecera que lleva el token, p. ej. `X-API-Key`.
+</ParamField>
+<ParamField path="COMFYUI_AUTH_SCHEME" type="string" default="Bearer for Authorization, else none">
+  Prefijo de esquema del valor del token, p. ej. `Bearer`, `Token`.
+</ParamField>
+<ParamField path="CF_ACCESS_CLIENT_ID" type="string">
+  Client ID del **token de servicio** de Cloudflare Access. Defínelo junto
+  con `CF_ACCESS_CLIENT_SECRET` para alcanzar un ComfyUI delante de
+  Cloudflare Access — ambos se envían (como `CF-Access-Client-Id` /
+  `CF-Access-Client-Secret`) en **cada** petición a ComfyUI (HTTP y el
+  WebSocket del vigilante de cola), así que el conector pasa la puerta de
+  Access en lugar de recibir la página interactiva de inicio de sesión.
+  Aditivo a `COMFYUI_AUTH_TOKEN`; ambos surten efecto si ambos están
+  definidos. Nunca se registra.
+</ParamField>
+<ParamField path="CF_ACCESS_CLIENT_SECRET" type="string">
+  Client Secret del token de servicio de Cloudflare Access (el par de
+  `CF_ACCESS_CLIENT_ID`). Solo se envía cuando **ambos** están definidos —
+  un token a medias se ignora. Nunca se registra.
+</ParamField>
+
+```bash
+# Authorization: Bearer <token>, requests under /comfyapi
+COMFYUI_URL=https://gateway.example.com/comfyapi COMFYUI_AUTH_TOKEN=<token> npx -y comfyui-mcp@latest
+# custom header: X-API-Key: <token>
+COMFYUI_URL=https://gateway.example.com/comfyapi COMFYUI_AUTH_HEADER=X-API-Key COMFYUI_AUTH_TOKEN=<token> npx -y comfyui-mcp@latest
+# ComfyUI behind Cloudflare Access — pass a service token (keeps the human sign-in page up)
+COMFYUI_URL=https://comfy.example.com CF_ACCESS_CLIENT_ID=<id>.access CF_ACCESS_CLIENT_SECRET=<secret> npx -y comfyui-mcp@latest
+```
+
+## Comfy Cloud
+
+Definir `COMFYUI_API_KEY` cambia el servidor a **modo nube**: todos los
+primitivos respaldados por HTTP (encolar, historial, stats del sistema,
+cola, view, upload) se enrutan a `cloud.comfy.org` por HTTPS con
+autenticación `X-API-Key`; las herramientas de WebSocket y de FS/proceso
+local lanzan un error `CLOUD_UNSUPPORTED` claro. Arquitectura y despachador
+`cloud-client` aportados originalmente por
+[@picoSols](https://github.com/picoSols).
+
+<Note>
+  **Comfy-Org entrega [herramientas oficiales para agentes](https://docs.comfy.org/agent-tools)** — Comfy Cloud MCP (beta pública) y el Comfy In-App Agent (alfa privada), ambos mantenidos por el equipo de Comfy y ambos ejecutándose en Comfy Cloud. Si solo apuntas a Comfy Cloud, esa es probablemente la elección correcta; consulta [Local vs. Comfy Cloud](/docs/es/local-vs-comfy-cloud). El modo nube de `comfyui-mcp` de abajo es lo mejor cuando quieres un único MCP para local / remoto / nube, o lo necesitas hoy (es MIT y se publica ahora).
+</Note>
+
+<ParamField path="COMFYUI_API_KEY" type="string">
+  Clave API de Comfy Cloud. Cuando está definida, el servidor entra en modo
+  nube y habla con la URL de nube configurada en lugar de un ComfyUI local.
+  Nunca se registra.
+</ParamField>
+<ParamField path="COMFYUI_CLOUD_URL" type="string" default="https://cloud.comfy.org">
+  Sobreescribe el endpoint de Comfy Cloud (sobre todo para pruebas /
+  staging).
+</ParamField>
+
+## Tokens
+
+<ParamField path="CIVITAI_API_TOKEN" type="string">
+  Token de API de CivitAI. Se usa para descargas restringidas/de acceso
+  anticipado. Se envía como cabecera bearer (nunca en URLs).
+</ParamField>
+<ParamField path="HUGGINGFACE_TOKEN" type="string">
+  Token de HuggingFace para límites de búsqueda/descarga más altos.
+</ParamField>
+<ParamField path="HF_ENDPOINT" type="string">
+  Endpoint espejo de HuggingFace para regiones con red restringida (p. ej.
+  `https://hf-mirror.com`). Todas las URLs de API y descarga de
+  `huggingface.co` se reescriben a este host; tu `HUGGINGFACE_TOKEN` sigue
+  viajando para repos restringidos. La variable de facto estándar — la
+  misma que honra `huggingface_hub`.
+</ParamField>
+<ParamField path="CIVITAI_ENABLED" type="string">
+  Ponlo a `0` para desactivar el acceso a Civitai por completo (regiones
+  donde civitai.com no es alcanzable). Las herramientas de Civitai
+  iniciadas por el usuario fallan rápido con un mensaje claro de
+  "disabled by config" en lugar de colgarse; las búsquedas de procedencia
+  en segundo plano no hacen nada en silencio.
+</ParamField>
+<ParamField path="GITHUB_TOKEN" type="string">
+  Token de GitHub usado por la generación de skills y las consultas de
+  metadatos de nodos para evitar límites de ritmo.
+</ParamField>
+<ParamField path="COMFY_API_KEY" type="string">
+  Clave API de comfy.org reenviada a nodos API alojados mediante la carga
+  `extra_data` de `/prompt`. Si la variable de entorno no está definida,
+  la clave se lee de `~/.comfy-api-key` (contenido del archivo recortado;
+  se recomienda `chmod 600`) — práctico para configuraciones headless que
+  mantienen los secretos fuera de los listados de entorno/proceso.
+</ParamField>
+<ParamField path="REGISTRY_ACCESS_TOKEN" type="string">
+  Clave API del Comfy Registry usada por `node_pack` (`action: "publish"`)
+  para publicar un pack de nodos. Se pasa a comfy-cli por env, nunca se
+  coloca en args ni registros.
+</ParamField>
+
+## Comportamiento
+
+<ParamField path="COMFYUI_WORKFLOWS_DIR" type="string" default="~/.comfyui-mcp/workflows">
+  Directorio escaneado en busca de flujos de trabajo `*.json`. Cada uno se
+  convierte en una herramienta de ejecución autocargada.
+</ParamField>
+<ParamField path="LOG_LEVEL" type="string" default="info">
+  Verbosidad de registro: `debug`, `info`, `warn`, `error`.
+</ParamField>
+
+## Descargas de modelos
+
+<ParamField path="COMFYUI_DOWNLOAD_CACHE_DIR" type="string" default="~/.comfyui-mcp/cache">
+  Caché direccionada por contenido para descargas de modelos. Descargas
+  repetidas o concurrentes de la misma URL reutilizan el archivo cacheado;
+  la ruta de modelo de destino se materializa mediante hardlink (con
+  respaldo a copia).
+</ParamField>
+<ParamField path="COMFYUI_LRU_CACHE_SIZE_GB" type="number" default="0">
+  Tamaño máximo de la caché de descargas en GB. `0` desactiva el desalojo;
+  por encima del límite, los archivos cacheados menos usados recientemente
+  se eliminan después de que termina una descarga.
+</ParamField>
+
+## Supervisión de procesos (instalaciones locales)
+
+Se aplica a `restart_comfyui` (acciones `start` y `restart`) cuando
+comfyui-mcp gestiona un proceso local de ComfyUI.
+
+<ParamField path="COMFYUI_STARTUP_CHECK_INTERVAL_S" type="number" default="1">
+  Segundos entre sondas de preparación después de lanzar ComfyUI.
+</ParamField>
+<ParamField path="COMFYUI_STARTUP_CHECK_MAX_TRIES" type="number" default="60">
+  Máximo de sondas de preparación antes de informar de que el arranque no
+  está confirmado. Con el intervalo por defecto de 1 s esto es un
+  presupuesto de ~60 s. Se subió de 20 porque ComfyUI con un conjunto
+  normal de nodos personalizados tarda de forma rutinaria más de 20 s en
+  responder a `/system_stats` en un arranque en frío, y el presupuesto más
+  corto informaba de un arranque como no confirmado momentos antes de que
+  una instancia sana estuviera lista.
+
+  Agotar el presupuesto significa que el arranque **aún no está
+  confirmado** — no que falló.
+</ParamField>
+<ParamField path="COMFYUI_ALWAYS_RESTART" type="boolean" default="false">
+  Cuando está activado, un proceso de ComfyUI que sale de forma inesperada
+  se rearranca automáticamente. Un `restart_comfyui` deliberado con
+  `action: "stop"` nunca se rearranca.
+</ParamField>
+<ParamField path="COMFYUI_RESTART_MAX_ATTEMPTS" type="number" default="3">
+  Máximo de rearranques automáticos permitidos dentro de la ventana de
+  rearranque antes de rendirse.
+</ParamField>
+<ParamField path="COMFYUI_RESTART_WINDOW_S" type="number" default="60">
+  Ventana deslizante (segundos) sobre la que se cuentan los intentos de
+  rearranque automático.
+</ParamField>
+
+## El orquestador del panel y el puente
+
+La barra lateral [comfyui-mcp-panel](https://github.com/artokun/comfyui-mcp-panel)
+la impulsa el **orquestador del panel** — un proceso en segundo plano que
+posee un puente WebSocket de loopback y ejecuta una sesión autónoma del
+Claude Agent SDK por pestaña del panel con tu **suscripción de Claude**
+(sin claves API). El pack del panel lo arranca automáticamente al cargar
+ComfyUI, así que normalmente no ejecutas nada a mano — consulta
+[Panel lateral](/docs/es/panel). Para ejecutarlo tú mismo:
+
+```bash
+npx -y comfyui-mcp@latest connect
+```
+
+<ParamField path="COMFYUI_MCP_PANEL_ORCHESTRATOR" type="boolean" default="false">
+  Ejecutar el orquestador del panel en lugar de un servidor MCP (igual que
+  `--panel-orchestrator`).
+</ParamField>
+<ParamField path="COMFYUI_MCP_PANEL_MODEL" type="string" default="claude-opus-5">
+  Modelo para los agentes de panel en segundo plano.
+</ParamField>
+<ParamField path="COMFYUI_MCP_BRIDGE_PORT" type="number" default="9180">
+  Puerto loopback del puente WebSocket del panel que posee el
+  **orquestador del panel** (por defecto **9180**).
+</ParamField>
+<ParamField path="COMFYUI_MCP_STALL_S" type="number" default="180">
+  Umbral de aviso de render atascado (segundos) para el watchdog de
+  cola/render del orquestador: un trabajo en marcha cuyo nodo/progreso no
+  ha avanzado durante tanto tiempo se marca como atascado, y se antepone
+  una nota STALL/BACKLOG de una línea al siguiente turno del agente. Los
+  pasos de video son lentos de forma legítima, así que el valor por
+  defecto es alto. Acotado a **15–3600 s**. El ajuste **Aviso de render
+  atascado (segundos)** del panel (Ajustes → Comfy MCP Agent → General) lo
+  sobreescribe **en vivo** mediante una trama de puente `set_config` — no
+  hace falta reconectar — y tiene precedencia sobre este valor de entorno.
+</ParamField>
+
+### Puente seguro (controlar un pod remoto o en la nube)
+
+Cuando `connect <url>` apunta a un ComfyUI **https remoto** (p. ej. un pod
+de RunPod), la página HTTPS del panel del pod no puede abrir un socket
+`ws://127.0.0.1` en claro hacia el puente en tu máquina — los navegadores
+lo bloquean (contenido mixto / Private Network Access). El orquestador
+pasa automáticamente a un túnel seguro `wss://` para que funcione sin
+aviso, en cualquier navegador. Consulta
+[Despliegue en la nube](/docs/es/cloud-deployment) para el recorrido
+completo y [Relé autoalojado](/docs/es/self-hosted-relay) para ejecutar tu
+propia infraestructura de túnel en lugar del túnel rápido de cloudflared
+por defecto.
+
+<ParamField path="COMFYUI_MCP_INSECURE_BRIDGE" type="boolean" default="false">
+  Forzar el puente loopback `ws://` en claro incluso al controlar un
+  destino https remoto, en lugar de pasar automáticamente a un túnel
+  seguro. Úsalo si alcanzas el pod a través de tu propio reenvío de
+  puertos SSH (así que su página ya es un origen loopback) y no quieres
+  una dependencia de Cloudflare. Igual que `--insecure-bridge`.
+</ParamField>
+<ParamField path="COMFYUI_MCP_TUNNEL_BACKEND" type="string" default="cloudflared">
+  Qué backend de puente seguro usar para un destino remoto: `cloudflared`
+  (por defecto — un túnel rápido efímero, cero configuración) o `relay`
+  (marcar a un [relé autoalojado](/docs/es/self-hosted-relay) que operas
+  tú, para un dominio estable y ninguna dependencia de un túnel rápido de
+  terceros). Solo surte efecto cuando el modo seguro está activo (destino
+  https remoto, no `COMFYUI_MCP_INSECURE_BRIDGE`).
+</ParamField>
+<ParamField path="COMFYUI_MCP_RELAY_URL" type="string">
+  La URL `wss://` de tu relé. Obligatoria cuando
+  `COMFYUI_MCP_TUNNEL_BACKEND=relay`.
+</ParamField>
+<ParamField path="COMFYUI_MCP_RELAY_KEY" type="string">
+  Secreto compartido opcional que filtra quién puede abrir una sesión en
+  tu relé (`?key=`), independiente del token de puente por sesión. Solo
+  relevante en modo relé, y solo si tu despliegue de relé define
+  `RELAY_ACCESS_KEY`.
+</ParamField>
+
+## Vigilancia de trabajos
+
+Las notificaciones de finalización de los trabajos encolados las sigue un
+vigilante (WebSocket donde está disponible, sondeo HTTP si no).
+
+<ParamField path="COMFYUI_JOB_TIMEOUT_S" type="number" default="1800">
+  Segundos máximos que el vigilante espera a que un trabajo termine antes
+  de rendirse. Súbelo para renders de video muy largos o flujos de trabajo
+  pesados de varias etapas. (El propio trabajo sigue ejecutándose en
+  ComfyUI — solo se abandona la notificación de finalización.)
+</ParamField>
+<ParamField path="COMFYUI_JOB_POLL_INTERVAL_S" type="number" default="2">
+  Segundos entre sondeos HTTP del historial mientras se vigila un trabajo.
+</ParamField>
+<ParamField path="COMFYUI_MCP_INTERRUPT_S" type="number" default="30">
+  Ventana de honor de cancelación (segundos) para `queue`
+  (action:"cancel"): cuánto esperar a que una interrupción detenga de
+  verdad el trabajo en marcha antes de escalar (a `/free`, luego informar
+  el render WEDGED). ComfyUI solo comprueba el flag de interrupción entre
+  nodos/pasos, así que un solo paso de varios minutos no lo honrará al
+  momento — esta espera es lo que detecta un atasco de verdad.
+</ParamField>
+
+## Restringir la superficie de herramientas
+
+Para un despliegue **alojado** — un Open WebUI compartido, un frontal de
+equipo — el operador no es quien hace el prompt. Las variables de preset /
+allow / deny de herramientas retienen las herramientas del modelo por
+completo: una herramienta retenida nunca se registra, así que está ausente
+de `tools/list`, ausente de `call_tool`, y el modelo nunca se entera de
+que existe. La lista de allow de acciones es la compañera más estrecha
+para una herramienta que debe seguir visible: la herramienta se queda
+registrada, pero una acción no listada se rechaza antes de que se ejecute
+su manejador.
+
+<ParamField path="COMFYUI_MCP_TOOL_PRESET" type="string">
+  `safe` — todo excepto las herramientas que cambian la máquina o la
+  biblioteca de modelos. Instalar, eliminar y rearrancar se retienen. **El
+  render sigue funcionando, y también lo que viene con él**: encolar
+  generaciones, `list_api_nodes` (nodos partner alojados que gastan
+  créditos DE PAGO), y `report_issue` (abre una incidencia pública de
+  GitHub). Usa `readonly` si los usuarios de un frontal compartido no
+  deben poder gastar ni publicar.
+  `readonly` — solo inspección: ningún render encolado, nada escrito, nada
+  gastado.
+  Ambos también retienen toda la superficie `panel_*`, que controla un
+  lienzo compartido en vivo.
+</ParamField>
+<ParamField path="COMFYUI_MCP_TOOL_DENY" type="string">
+  Nombres de herramientas separados por comas a retener, p. ej.
+  `restart_comfyui,download_model`. Un `*` final coincide con una familia:
+  `train_*`. Se aplica encima de cualquier preset **y** encima de una
+  lista de allow.
+</ParamField>
+<ParamField path="COMFYUI_MCP_TOOL_ALLOW" type="string">
+  Lista de allow separada por comas. Cuando está definida, la superficie
+  es **exactamente** estas herramientas — cualquier cosa no nombrada se
+  retiene aunque ninguna regla de deny la mencione. Úsala para readmitir
+  herramientas individuales más allá de un preset:
+  `COMFYUI_MCP_TOOL_PRESET=safe` más
+  `COMFYUI_MCP_TOOL_ALLOW=panel_graph_outline,panel_query_graph`.
+
+  Solo un **nombre exacto** readmite una herramienta más allá de un
+  preset. Un glob (`list_*`) estrecha la superficie como cualquier otra
+  entrada pero no puede reabrir lo que un preset cerró — si no,
+  `ALLOW=list_*` readmitiría `list_packs`, cuya acción `install_deps`
+  instala y ejecuta código de terceros, y `ALLOW=*` dejaría inerte cada
+  preset.
+</ParamField>
+<ParamField path="COMFYUI_MCP_TOOL_ACTION_ALLOW" type="string">
+  Pares exactos `tool:action` separados por comas. Cuando está definido,
+  cada llamada a herramienta que lleve un campo `action` debe coincidir
+  con uno de estos pares; las herramientas con acción omitidas de la
+  lista no pueden despachar ninguna acción. Esto restringe las
+  herramientas consolidadas cuyo nombre solo ya no revela su radio de
+  acción — por ejemplo, permitir la inspección de la cola y una
+  cancelación dirigida sin permitir también las ediciones de cola o un
+  vaciado global:
+
+  `queue:list,queue:status,queue:cancel,enqueue_workflow:enqueue`
+
+  Empareja esto con `COMFYUI_MCP_TOOL_ALLOW` para acotar ambas
+  dimensiones. Las reglas son exactas; los comodines se rechazan para que
+  una acción recién añadida no pueda volverse permitida después de una
+  actualización.
+</ParamField>
+
+```bash A hosted deployment that cannot install or restart anything
+COMFYUI_MCP_TOOL_PRESET=safe npx comfyui-mcp@latest --http --host 0.0.0.0 --port 9100
+```
+
+```bash A generation operator that can inspect, enqueue, and cancel—but not install or clear queues
+COMFYUI_MCP_TOOL_ALLOW=get_system_stats,get_history,create_workflow,enqueue_workflow,queue \
+COMFYUI_MCP_TOOL_ACTION_ALLOW=get_system_stats:stats,get_system_stats:logs,get_system_stats:health,get_history:list,get_history:diagnose,create_workflow:create,create_workflow:modify,create_workflow:validate,create_workflow:node_info,enqueue_workflow:enqueue,queue:list,queue:status,queue:cancel \
+npx comfyui-mcp@latest
+```
+
+<Warning>
+  Esto es una frontera contra el **modelo** y las personas que le hacen
+  prompts — no contra quien define el entorno, que puede simplemente
+  quitarlo, y no un sustituto de mantener a una parte no de confianza
+  fuera del host de ComfyUI.
+
+  Una mala configuración **se niega a arrancar** en lugar de arrancar sin
+  restricción: un nombre de preset desconocido, o una variable que está
+  definida pero vacía (un `${VAR}` no expandido en un archivo compose),
+  aborta con la razón. Arrancar con una superficie de herramientas
+  completa mientras crees que está restringida es peor que no tener
+  ningún filtro.
+</Warning>
+
+## Transporte
+
+El servidor habla **stdio** por defecto (lo que espera Claude Code).
+También puede servir el transporte **streamable-HTTP** para
+configuraciones remotas / de varios clientes.
+
+<ParamField path="MCP_TRANSPORT" type="string" default="stdio">
+  `stdio` o `http`. Flags equivalentes: `--stdio`, `--http`.
+</ParamField>
+<ParamField path="MCP_HOST" type="string" default="127.0.0.1">
+  Host de enlace HTTP (con `--http`). Flag: `--host`.
+</ParamField>
+<ParamField path="MCP_PORT" type="number" default="9100">
+  Puerto de enlace HTTP (con `--http`). Flag: `--port`.
+</ParamField>
+
+```bash Run the HTTP transport
+npx comfyui-mcp@latest --http --host 0.0.0.0 --port 9100 --comfyui-url https://my-comfy.example.com
+```

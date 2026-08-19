@@ -1,0 +1,91 @@
+---
+title: "كيف يعمل"
+description: "النموذج الذي تقوم عليه الأدوات — آليات النقل، وواجهة ComfyUI-Manager البرمجية، وأوضاع المحلي/البعيد/السحابة."
+icon: "diagram-project"
+---
+
+## النموذج الذهني
+
+ComfyUI MCP طبقة رقيقة موصوفة جيدًا فوق **نسخة ComfyUI قيد التشغيل**. تتحدّث
+معظم الأدوات إلى تلك النسخة عبر واجهتها البرمجية على HTTP/WebSocket، فتعمل
+بالطريقة نفسها سواء كان ComfyUI محليًا أو بعيدًا (`--comfyui-url`) أو على
+[Comfy Cloud](https://cloud.comfy.org) (`COMFYUI_API_KEY`).
+
+<Steps>
+  <Step title="التوليد ومسارات سير العمل → واجهة ComfyUI البرمجية على HTTP">
+    تستدعي `generate_image` و`enqueue_workflow` وأدوات قائمة الانتظار/السجل/إحصاءات
+    النظام وأدوات تأليف مسارات سير العمل مسارات ComfyUI مثل `/prompt` و`/queue`
+    و`/history` و`/object_info` وغيرها. والإدراج في قائمة الانتظار إطلاق ونسيان:
+    تحصل على `prompt_id` فورًا وتصل النتائج عبر إشعار اكتمال. وفي وضع السحابة،
+    يوجّه عميل `cloud-client` بديل العمليات نفسها إلى `cloud.comfy.org` عبر
+    `X-API-Key`.
+  </Step>
+  <Step title="العقد المخصّصة والنماذج → ComfyUI-Manager (HTTP)، مع تراجع إلى عملية فرعية">
+    يفضّل تثبيت العقد وتحديثها ولقطاتها والتنصيف وتثبيت اعتماديات سير العمل واجهة
+    [ComfyUI-Manager](https://github.com/Comfy-Org/ComfyUI-Manager) البرمجية على
+    HTTP (فتعمل ضد النسخ البعيدة أيضًا)، متراجعًا إلى `cm-cli` / `git` /
+    `pip`/`uv` ضد تثبيت محلي حيث تعجز الواجهة عن أداء المهمة.
+  </Step>
+  <Step title="التثبيت وعمليات نظام الملفات → محلي فقط">
+    تثبيت ComfyUI، وتحديث النواة، وحذف ملفات النماذج، وقراءة سجلات الخادم، وسرد
+    مجلد المخرجات تعمل على نظام الملفات المحلي. وتتطلّب `COMFYUI_PATH` معروفًا
+    وترجع خطأً واضحًا في الوضع البعيد أو السحابي.
+  </Step>
+  <Step title="WebSocket → محلي + بعيد، لا سحابة">
+    تُرفَق إشعارات اكتمال المهام بـ WebSocket الخاص بـ ComfyUI حيث يتوفّر. وليس
+    لدى Comfy Cloud WebSocket — فيتراجع مراقب المهام إلى مسار استطلاع HTTP
+    القائم.
+  </Step>
+</Steps>
+
+<Note>
+  قاعدة تقريبية: أي شيء **يقرأ أو يشغّل** الخادم المتصل يعمل في أي وضع؛ وأي شيء
+  **يثبّت برمجيات أو يمسّ ملفات على القرص** يحتاج إلى تثبيت محلي. ومصفوفة تكافؤ
+  الميزات الكاملة في [الإعدادات ← أوضاع النشر](/docs/ar/configuration#أوضاع-النشر).
+</Note>
+
+## الشفاء الذاتي: مراقب قائمة الانتظار/المعالجة
+
+كانت خطوة عينات عالية الدقة المتعثّرة تدع الوكيل يكدّس المهام خلف معالجة زومبي
+لا يستطيع رؤيتها ولا قتلها. ثلاثة حرّاس بأفضل جهد يسدّون تلك الفجوة، فيكفّ
+الوكيل عن إعادة الإدراج عميانًا خلف معالجة عالقة:
+
+- **الضغط الخلفي** — تُلحق `panel_run` تحذير QUEUE WARNING بنتيجتها حين تكون
+  معالجة قيد التشغيل أصلًا، فلا يكدّس الوكيل خلفها.
+- **كشف التعثّر** — يتتبّع WebSocket سلبي إلى ComfyUI الموجّه / العقدة /
+  التقدّم الجاري؛ فخطوة تتوقّف عن التقدّم بعد العتبة
+  ([`COMFYUI_MCP_STALL_S`](/docs/ar/configuration#منسّق-اللوحة-والجسر)،
+  الافتراضي 180 ثانية) تُصدِّر ملاحظة STALL/BACKLOG بسطر واحد إلى دور الوكيل
+  التالي.
+- **إلغاء متصاعد** — يقاطع `queue` (action:"cancel")، و**يتحقّق** من أن المهمة
+  توقّفت فعلًا
+  (ضمن [`COMFYUI_MCP_INTERRUPT_S`](/docs/ar/configuration#مراقبة-المهام)،
+  الافتراضي 30 ثانية)، ثم يصعّد إلى `/free` ويبلّغ أن المعالجة WEDGED (مقترحًا
+  `restart_comfyui`) إن لم تمت بعد؛ و`clear_pending` يسقط كل المهام المعلّقة
+  في الاستدعاء نفسه.
+
+كل ذلك آمن عند الفشل: إن لم يُفتح WebSocket المراقب أصلًا، لا يتغيّر شيء. كما
+يستطيع الوكيل الاستدلال على ألوان صورة دون جولة رؤية عبر
+`get_image (action:"analyze_color")` (لوحة مهيمنة، ومتوسط + إحصاءات الإضاءة،
+وفحوصات التباين).
+
+## فئات الأدوات
+
+<CardGroup cols={2}>
+  <Card title="توليد الصور" icon="image" href="/docs/tools/image-generation" />
+  <Card title="تنفيذ مسارات سير العمل" icon="play" href="/docs/tools/workflow-execution" />
+  <Card title="تأليف مسارات سير العمل" icon="pen-ruler" href="/docs/tools/workflow-authoring" />
+  <Card title="مكتبة مسارات سير العمل" icon="folder-open" href="/docs/tools/workflow-library" />
+  <Card title="الأصول والصور" icon="images" href="/docs/tools/assets-images" />
+  <Card title="النماذج" icon="box" href="/docs/tools/models" />
+  <Card title="العقد المخصّصة" icon="puzzle" href="/docs/tools/custom-nodes" />
+  <Card title="عقد واجهة API" icon="cloud" href="/docs/tools/api-nodes" />
+  <Card title="التثبيت والبيئة" icon="wrench" href="/docs/tools/install-environment" />
+  <Card title="التحكّم في العمليات" icon="power" href="/docs/tools/process-control" />
+  <Card title="الافتراضيات والإحصاءات والمهارات" icon="sliders" href="/docs/tools/defaults-stats-skills" />
+</CardGroup>
+
+<Info>
+  يُولَّد مرجع الأدوات من مخططات أدوات MCP الحيّة (`npm run docs:gen`)، فلا
+  ينحرف عن الشيفرة أبدًا.
+</Info>

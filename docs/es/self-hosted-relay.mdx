@@ -1,0 +1,79 @@
+---
+title: "Relé autoalojado del puente seguro (empresas)"
+description: "Sé dueño del bucle completo: ejecuta tu propio relé para el puente seguro wss:// en lugar de depender de un servicio de terceros — por residencia de datos, cumplimiento o un requisito de cero dependencias externas."
+icon: "building-columns"
+---
+
+Cuando [`connect`](/docs/es/cloud-deployment) controla un pod HTTPS remoto,
+comfyui-mcp necesita un camino `wss://` con TLS válido desde el panel del
+navegador del pod de vuelta al puente del agente en tu máquina (un `ws://`
+plano desde una página `https://` lo bloquea el navegador). Por defecto esto
+es un **túnel rápido de cloudflared** — cero configuración, pero efímero (un
+nombre de host aleatorio nuevo en cada ejecución).
+
+Para organizaciones que necesitan **ser dueñas de ese camino de extremo a
+extremo** — el canal de control nunca transita por un tercero, un dominio fijo
+para reglas de cortafuegos/auditoría, o ninguna dependencia de un servicio
+fuera de tu infraestructura — comfyui-mcp admite enrutar el puente seguro a
+través de un relé **que operas tú**, en lugar del túnel rápido por defecto.
+
+<Note>
+La implementación de referencia es de código abierto:
+**[artokun/comfyui-mcp-relay](https://github.com/artokun/comfyui-mcp-relay)** —
+un Cloudflare Worker + Durable Object, licencia MIT, marcado como plantilla de
+GitHub para que puedas pulsar **Use this template** y tener tu propia copia en
+segundos. Bifúrcala, despliégala tal cual, o adáptala a cualquier
+infraestructura con capacidad WebSocket que tu organización ya ejecute — el
+README documenta el protocolo de cable, el ciclo de vida de la sesión y los
+compromisos de diseño (multiplexado, autenticación, hibernación) al completo.
+</Note>
+
+## Por qué autoalojar
+
+- **Residencia de datos / cumplimiento** — el puente transporta llamadas a
+  herramientas y operaciones de grafo (no bytes de imagen, que fluyen
+  pod↔navegador de forma directa), pero algunas organizaciones siguen
+  necesitando que ese canal de control se quede dentro de la infraestructura
+  que operan.
+- **Sin dependencia de un runtime de terceros** — un endpoint fijo y propio
+  en lugar de confiar en la disponibilidad de un relé externo.
+- **Reglas de cortafuegos / auditoría** — un dominio estable que controlas es
+  más fácil de poner en lista blanca y registrar que un nombre de host efímero
+  que cambia en cada sesión.
+
+## Cómo encaja
+
+Ambos lados del puente marcan **hacia fuera** — nadie necesita un puerto de
+entrada abierto en ningún sitio. El trabajo de tu relé es emparejar un
+orquestador (que se ejecuta en la máquina de un usuario) con las conexiones
+del panel del navegador en el pod que está controlando, y pasar bytes entre
+ellos; nunca necesita entender el propio protocolo de llamadas a herramientas
+de comfyui-mcp que viaja por encima.
+
+Una vez desplegado un relé, apuntar comfyui-mcp a él son un par de variables
+de entorno:
+
+```bash
+export COMFYUI_MCP_TUNNEL_BACKEND=relay
+export COMFYUI_MCP_RELAY_URL=wss://your-relay.internal.example.com
+# optional: a shared secret gating who can open a session on your relay at all
+export COMFYUI_MCP_RELAY_KEY=your-shared-deploy-secret
+```
+
+Con `COMFYUI_MCP_TUNNEL_BACKEND` sin definir, comfyui-mcp sigue usando el
+comportamiento por defecto del túnel rápido efímero — esto es completamente
+opt-in.
+
+## Desplegar la implementación de referencia
+
+```bash
+gh repo create your-org/your-relay --template artokun/comfyui-mcp-relay --clone
+cd your-relay
+npm install
+wrangler login
+npm run deploy
+```
+
+Consulta **[artokun/comfyui-mcp-relay](https://github.com/artokun/comfyui-mcp-relay)**
+para el README completo — el protocolo de cable, el modelo de autenticación y
+los pasos de despliegue.

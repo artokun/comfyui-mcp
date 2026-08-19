@@ -1,0 +1,321 @@
+---
+title: "Backends / provedores"
+description: "O agente do painel roda em QUALQUER LLM: Claude, ChatGPT, Gemini, Grok, Kimi ou GLM na sua própria assinatura/plano, um modelo local gratuito via Ollama / LM Studio / llama.cpp (sem conta nenhuma), ou qualquer modelo hospedado num endpoint compatível com a OpenAI. Como funcionam a porta AgentBackend neutra em relação ao provedor, o seletor e a matriz de capacidades."
+icon: "shuffle"
+---
+
+O agente do [painel lateral](/docs/pt-BR/panel) é **agnóstico em relação
+ao provedor**. Escolha **Claude**, **ChatGPT**, **Gemini** ou **Ollama
+(local)** e o agente correspondente roda em segundo plano — assinaturas
+não precisam de chave de API, e modelos locais não precisam de conta
+nenhuma. O backend do Ollama também fala **qualquer endpoint compatível
+com a OpenAI** (OpenRouter, DeepSeek, GLM, MiMo, vLLM, LM Studio), então
+"traga o seu próprio modelo" cobre tudo de um 4B gratuito na sua GPU até
+a fronteira. Todos os provedores compartilham as mesmas ferramentas de
+canvas ao vivo, o mesmo conhecimento de modelos, os mesmos carregamentos
+de workflow de uma vez, a mesma proteção de custo. A
+[Arena de LLMs](/docs/pt-BR/arena) pontua qualquer um deles em tarefas
+reais do ComfyUI.
+
+```
+panel (pick a provider) ⇄ loopback bridge ⇄ orchestrator (Claude · ChatGPT · Gemini · any LLM) ⇄ your graph
+```
+
+## Escolha um provedor, não uma porta
+
+O painel mostra um **seletor de backend** — chips de Claude / ChatGPT /
+Gemini / Antigravity / Grok / Kimi / GLM / Ollama / LM Studio / llama.cpp
+/ OpenRouter / Endpoint personalizado
+(provedores experimentais como o Copilot aparecem atrás do toggle
+experimental). Clicar num conecta aquele provedor no único orquestrador
+compartilhado (uma porta de ponte atende todos os provedores; cada aba do
+painel escolhe o seu provedor no handshake). A URL da Ponte fica em
+**Avançado** para orquestradores gerenciados pelo usuário.
+
+Trocar de provedor **inicia um chat novo** — as conversas não são
+compartilhadas entre provedores — e o painel posta uma nota de sistema
+dizendo isso. O placeholder do compositor segue o backend ativo
+("Pergunte ao Claude…" / "Pergunte ao Ollama…").
+
+## Entre (uma vez por provedor — ou de jeito nenhum)
+
+- **Claude** — `claude` (ou `claude setup-token`) — OAuth do claude.ai
+  (assinatura).
+- **ChatGPT (Codex)** — `codex login` — login do ChatGPT (assinatura);
+  roda pelo app-server do Codex.
+- **ChatGPT (OAuth direto)** — nenhum passo extra se você já rodou
+  `codex login`: o backend `chatgpt` reusa `~/.codex/auth.json` e fala
+  com o ChatGPT direto (sem processo do Codex). Se o ack diz que o arquivo
+  de auth está faltando, rode `codex login` uma vez.
+- **Gemini** — `gemini` — login do Google. Note que o login individual
+  gratuito do Google foi aposentado em 2026-06-18: o backend da CLI do
+  Gemini agora precisa de uma `GEMINI_API_KEY` ou de uma conta
+  enterprise/Code Assist. Assinantes individuais: usem **Antigravity**
+  abaixo.
+- **Antigravity (assinatura Google)** — instale a CLI oficial do
+  Antigravity em [antigravity.google](https://antigravity.google), rode
+  `agy` uma vez e conclua o Google Sign-In (AI Pro/Ultra e faixas
+  gratuitas). O backend conduz `agy -p` por turno com continuidade de
+  conversa `--continue`, lê o catálogo de modelos ao vivo de `agy models`,
+  e liga as ferramentas MCP do ComfyUI + painel por um
+  `.agents/mcp_config.json` de workspace seguro para merge. Capacidades
+  reduzidas de propósito (sem stream de eventos documentado e legível por
+  máquina): o texto da resposta final entra em stream, mas não há
+  progresso por ferramenta nem entrada de imagem. A continuidade da
+  conversa usa `agy --continue` (a conversa mais recente da conta), então
+  rode UMA aba do antigravity por vez — uma segunda aba, ou uma sessão
+  interativa `agy` num terminal, pode roubar o fio.
+  `COMFYUI_MCP_ANTIGRAVITY_MODEL` pina um modelo,
+  `COMFYUI_MCP_ANTIGRAVITY_PATH` aponta para uma instalação não padrão.
+- **Grok** — instale a CLI do Grok (xAI / Grok Build) e rode `grok` uma
+  vez para entrar; o backend a conduz em modo ACP. O painel também oferece
+  uma linha de login OAuth no painel quando o Grok não está pronto.
+- **Kimi (recomendado)** — instale a [CLI do Kimi Code](https://moonshotai.github.io/kimi-code/)
+  e rode `kimi login` (fluxo de device-code); o backend reusa esse login
+  de `~/.kimi-code/credentials/kimi-code.json` (o caminho legado `~/.kimi`
+  ainda é lido como fallback). Isto usa a sua **assinatura do Kimi Code**
+  e é o jeito preferido de rodar o Kimi — mais barato e com limite maior
+  do que a chave Moonshot paga por token abaixo. Defina `KIMI_API_KEY` só
+  para uso em CI / sem CLI, ou `KIMI_CODE_HOME` para apontar para um
+  diretório de credenciais não padrão (`KIMI_SHARE_DIR` ainda é honrado
+  para quem definiu o nome mais antigo). Login OAuth no painel também é
+  oferecido.
+- **GLM** — defina `ZAI_API_KEY` (Z.AI Coding Plan; `GLM_API_KEY` /
+  `ZHIPUAI_API_KEY` também aceitos). Sem CLI.
+- **Kimi K3 (Moonshot)** — a **alternativa paga por token** quando você
+  não tem uma assinatura do Kimi Code (prefira a rota **Kimi** acima se
+  tiver). Defina `MOONSHOT_API_KEY` em
+  [platform.kimi.ai](https://platform.kimi.ai/console/api-keys). Sem CLI.
+  Esta é a chave da **plataforma** Moonshot (modelo padrão `kimi-k3`, base
+  `https://api.moonshot.ai/v1`) — distinta do provedor **Kimi** acima,
+  que é a assinatura de coding do Kimi Code. Sobrescreva o modelo com
+  `COMFYUI_MCP_MOONSHOT_MODEL` e a base com `COMFYUI_MCP_MOONSHOT_BASE_URL`.
+- **MiniMax** — defina `MINIMAX_API_KEY` em
+  [platform.minimax.io](https://platform.minimax.io/console/api-keys). Sem
+  CLI. O modelo padrão é `MiniMax-M3` e a base padrão é o endpoint global
+  `https://api.minimax.io/v1` (compatível com a OpenAI, Bearer simples).
+  Para a região da China, defina
+  `COMFYUI_MCP_MINIMAX_BASE_URL=https://api.minimaxi.com/v1`.
+  Sobrescreva o modelo com `COMFYUI_MCP_MINIMAX_MODEL`.
+- **Copilot (experimental)** — entre a partir da linha experimental de
+  provedor do painel. Desligado por padrão; ative backends experimentais
+  em Configurações primeiro.
+- **Ollama (local)** — sem login. Instale o Ollama e puxe um modelo com
+  chamada de ferramentas (`ollama pull gemma4:e4b`). Para um modelo
+  **hospedado** em vez disso, defina `COMFYUI_MCP_OLLAMA_API=openai`,
+  `COMFYUI_MCP_OLLAMA_BASE_URL` (por exemplo
+  `https://openrouter.ai/api/v1`), e uma chave de API
+  (`COMFYUI_MCP_OLLAMA_API_KEY` / `OPENROUTER_API_KEY`).
+- **Endpoint personalizado** — sem fluxo de login. Aponte para qualquer
+  `/v1` compatível com a OpenAI (vLLM, DeepSeek, Together, Azure, um
+  llama-server remoto) em Configurações → Endpoint personalizado;
+  adicione uma chave de API lá se o servidor precisar (entrada mascarada,
+  guardada 0600 pelo orquestrador). Veja
+  [LLMs locais → Endpoint personalizado](/docs/pt-BR/local-llms#endpoint-personalizado-qualquer-servidor-compatível-com-a-openai).
+
+### Prontidão e onboarding no Conectar
+
+Cada chip de provedor degrada COM HONESTIDADE quando não está pronto: o
+ack do Conectar te diz o passo exato que falta (“Defina ZAI_API_KEY…”,
+“rode `codex login`…”, “Entre pela linha experimental…”) em vez de
+falhar na sua primeira mensagem — e um provedor cujas credenciais
+aparecem depois vira pronto no próximo Conectar sem reinício.
+
+O painel detecta a prontidão de cada provedor na hora do **Conectar** —
+uma CLI no `PATH` mais um login no disco para os provedores por
+assinatura, um binário presente para o Ollama (um daemon parado degrada
+com graça no conectar). Você não precisa chutar qual provedor está
+configurado:
+
+- Um **cartão de onboarding** aparece só quando **nenhum** provedor está
+  pronto, com o passo único de configuração por provedor (para o Ollama
+  isso é uma instalação + um pull de modelo, não um login).
+- Se a sua escolha salva de provedor não estiver utilizável, o painel
+  **muda automaticamente para um provedor pronto** (a sua preferência
+  salva é restaurada quando você configurar).
+- A linha de um provedor que não está pronto vira uma ação **"configurar"**
+  que planta um prompt de setup no agente que está funcionando.
+
+## Como cada provedor é conduzido
+
+O orquestrador depende de uma porta **`AgentBackend`** neutra em relação
+ao provedor (injeção de dependência). Cada provedor é um adapter:
+
+| | Claude | ChatGPT (Codex) | Gemini | Ollama / qualquer LLM |
+|---|---|---|---|---|
+| Driver | Claude Agent SDK — sessão persistente em stream | JSON-RPC do `codex app-server` | `gemini --acp` (Agent Client Protocol) | HTTP direto — `/api/chat` do Ollama ou qualquer `/v1/chat/completions` compatível com a OpenAI; o backend possui o loop agentic inteiro |
+| Auth | OAuth do claude.ai | login do ChatGPT | login do Google | nenhuma (local) / chave bearer (hospedado) |
+| Ferramentas de canvas ao vivo | servidor MCP SDK em processo | MCP streamable-HTTP de loopback | MCP streamable-HTTP de loopback | o [roteador de 6 ferramentas](/docs/pt-BR/local-llms) sobre o mesmo MCP de loopback |
+| MCP `comfyui` headless | em processo | stdio declarado na config | stdio declarado na config | subprocesso stdio em modo compacto atrás do roteador |
+
+As definições de ferramenta `panel_*` vivem numa **lista compartilhada**,
+registrada em todo caminho, então a superfície de canvas ao vivo
+(incluindo o gating de confirmação destrutiva para `panel_clear` /
+`panel_restart_comfyui`) é idêntica entre provedores. A paridade é
+automática — nenhum caminho reimplementa uma ferramenta. O backend
+Ollama/qualquer-LLM adicionalmente envolve as duas superfícies de
+ferramenta atrás de seis ferramentas de roteador para modelos pequenos
+não afogarem em schemas — veja
+[LLMs locais e outros agentes](/docs/pt-BR/local-llms).
+
+## Matriz de capacidades
+
+Um descritor de capacidade por backend deixa o painel **degradar com
+graça** nos recursos que um provedor não consegue fazer:
+
+| Capability | Claude | ChatGPT (Codex) | Gemini | Ollama / qualquer LLM |
+|---|---|---|---|---|
+| Canal persistente (empurrar turnos ao longo do tempo) | ✅ | ✅ (thread + `turn/start`) | ✅ | ✅ (histórico em memória) |
+| Deltas em stream | ✅ | ✅ | ✅ | ✅ (NDJSON / SSE) |
+| Interromper no meio do turno | ✅ | ✅ (`turn/interrupt`) | ✅ (`session/cancel`) | ✅ (abort da requisição) |
+| Rollback de conversa (bifurcar num turno) | ✅ `forkSession` | ⚠️ gated off | ⚠️ gated off | ⚠️ gated off |
+| Ferramentas MCP em processo | ✅ | ❌ | ❌ | ❌ (roteador sobre clientes MCP) |
+| Enumeração de modelos | ✅ | ✅ (`config/read`) | catálogo estático | ✅ (`/api/tags` ou `/models`) |
+| Visão (entrada de imagem) | ✅ | ✅ | ✅ | ❌ (depende do modelo; desligada por agora) |
+| Entrada de áudio | ❌ | ❌ | ❌ | ✅ Ollama (checado) · ⚠️ outros (não verificado) |
+| Comandos de barra do provedor | ✅ | ❌ | ❌ | ❌ |
+
+### Entrada de áudio — quais backends, com honestidade
+
+O agente consegue conduzir as ferramentas de áudio do ComfyUI em todo
+backend. **Ouvir** um arquivo de áudio é mais estreito, e a tabela acima
+é conservadora de propósito porque um anexo dropado em silêncio é pior do
+que um recusado:
+
+- **Ollama (o backend `ollama`, `/api/chat` nativo) — suportado, checado
+  por capacidade, e verificado de ponta a ponta.** O áudio viaja no array
+  `images[]`, que é o próprio carrier de áudio do Ollama em vez de um
+  hack. Confirmado ao vivo contra um Ollama local com `gemma4:e2b`, que
+  transcreveu um WAV de verdade.
+  - **Por modelo, não por provedor.** Antes de enviar qualquer coisa, o
+    backend pergunta `POST /api/show` se *este* modelo reporta a
+    capacidade `audio`. Se não reporta, o anexo é recusado pelo nome, a
+    lista de capacidades reportada é citada de volta para você, e você é
+    informado de quais modelos conseguem ouvir (`ollama pull gemma4:e2b`
+    / `gemma4:e4b` / `nemotron3:33b`). Note que `GET /api/tags` também
+    devolve um array `capabilities` e **não** é a mesma resposta — o
+    mesmo modelo reportou nenhum áudio lá e áudio a partir de `/api/show`
+    — então só `/api/show` é consultado.
+  - A capacidade é rechecada em todo turno que carrega áudio, porque uma
+    tag do Ollama é mutável: `ollama pull` pode substituir os pesos sob
+    o mesmo nome, e um veredito em cache poderia sobreviver ao modelo
+    que descrevia.
+- **LM Studio / llama.cpp / OpenRouter / GLM / Kimi / Moonshot / MiniMax
+  / Copilot / endpoints personalizados compatíveis com a OpenAI —
+  tentado, NÃO checado por capacidade.** Todos estes falam
+  `/v1/chat/completions`, que não tem um endpoint de capacidade para
+  perguntar, então o áudio é enviado como uma parte de conteúdo
+  `input_audio` e você é informado, naquele turno, que a entrega está
+  **não confirmada**: *"Não consigo confirmar que o modelo de fato os
+  recebe — se a resposta não refletir o que está no arquivo, ele não
+  ouviu."* Recusar em vez disso negaria áudio a todo endpoint que
+  simplesmente não tem uma API de capacidade; uma proteção que não
+  consegue rodar não é um veredito. A forma `input_audio` em si foi
+  verificada contra o endpoint compatível com a OpenAI do Ollama; se um
+  host de terceiros *dado* a honra não é alguma coisa que a gente
+  consiga checar, e não afirmamos.
+- **Claude, ChatGPT (Codex), Codex CLI, Gemini, Grok, Antigravity, pi** —
+  nenhuma entrada de áudio neste build. Anexar áudio é recusado antes de
+  o turno ser montado, e tanto você quanto o modelo são informados,
+  nomeando o provedor e o que funcionaria no lugar.
+
+  No Gemini/Grok isto é uma omissão deliberada em vez de um buraco de
+  protocolo: o ACP *define* um ContentBlock `audio`, mas exige que o
+  agente anuncie primeiro uma capacidade de prompt `audio`, e nenhuma das
+  duas CLIs foi observada fazendo isso. Um caminho de envio que nunca
+  consegue ser exercido, cujo modo de falha é um anexo que o usuário
+  nunca é informado de que não chegou, é pior do que uma recusa honesta
+  — então não sai.
+
+O toggle **Cego** é sobre *pixels*: ele retém imagens e **não** retém
+áudio.
+
+A imposição do Cego alcança as **ferramentas nativas** do agente também,
+não só a superfície MCP do comfyui: o backend Claude embutido roda com
+um portão PreToolUse que nega o próprio `Read`/`WebFetch` em conteúdo de
+imagem (arquivos raster por extensão *e* magic bytes, PDFs, saídas de
+notebook, e URLs `/view` do ComfyUI) sempre que o Cego está ligado — lido
+ao vivo por chamada, então um toggle no meio da sessão vale na próxima
+chamada de ferramenta. As faixas de API/local (família Ollama, GLM, Kimi,
+endpoints personalizados) carregam só a nossa superfície de ferramentas,
+então a limpeza MCP as cobre por completo. As **faixas de CLI** (Codex,
+Gemini, Grok, Antigravity, pi, Copilot) rodam os próprios binários de
+agente cujas ferramentas de arquivo embutidas a gente não consegue
+enganchar — ligar o Cego lá posta um aviso visível dizendo exatamente
+isso, em vez de implicar uma garantia que a gente não consegue manter.
+
+#### Como um arquivo de áudio entra num turno
+
+O orquestrador aceita áudio num frame `message` do painel de dois jeitos:
+
+```jsonc
+{ "type": "message", "text": "what key is this in?",
+  "audio":  [{ "filename": "song.mp3", "type": "input" }],   // preferred
+  "images": [{ "filename": "song.mp3", "type": "input" }] }  // also routed to audio
+```
+
+A segunda forma existe porque um build do painel que só conhece `images`
+senão entregaria um arquivo de áudio a uma parte de conteúdo de visão.
+Qualquer coisa com uma extensão de áudio é movida para o caminho de
+áudio automaticamente — inclusive formatos que a gente não consegue
+codificar (`.wma`, `.mid`, `.aiff`), então você recebe "converta para um
+de…" em vez de um erro de imagem.
+
+Enviar o mesmo arquivo nos **dois** arrays (como o exemplo acima faz) é
+seguro: uma ref é identificada por filename + subfolder + type, então é
+entregue uma vez e conta uma vez contra o limite de dois anexos por
+turno. Não é confundida com um segundo arquivo e depois recusada por não
+caber.
+
+<Note>
+Um **controle do compositor** para escolher um arquivo de áudio vive no
+painel (`comfyui-mcp-panel`), que é um repositório separado — essa parte
+não está nesta release. Até chegar, o contrato de fio acima é o que um
+cliente envia, e a rota é exercida de ponta a ponta do lado do
+orquestrador.
+</Note>
+
+Só o caminho nativo do Ollama acima é verificado de ponta a ponta, e é o
+único em que "este modelo consegue ouvir" é estabelecido em vez de
+assumido. O caminho compatível com a OpenAI é uma tentativa honesta com
+uma ressalva honesta; todo o resto desta seção descreve uma recusa, não
+uma capacidade.
+
+O **rollback de conversa** (bifurcar o chat de volta a um turno passado)
+é só do Claude; o rollback de **código/grafo** (`/revert`, Esc duplo,
+snapshots por turno) funciona em todo backend porque vive no
+orquestrador, não no provedor.
+
+## Esforço de raciocínio numa troca
+
+O seletor de esforço/modelo é **por provedor**. Um esforço escolhido
+sobrevive a uma troca de provedor mapeando para o nível válido mais
+próximo do backend de destino (o painel e os backends do orquestrador
+fazem o mesmo mapeamento):
+
+- **Claude:** `low` · `medium` · `high` · `xhigh` · `max`
+- **ChatGPT (Codex):** `none` · `minimal` · `low` · `medium` · `high` · `xhigh` · `max` · `ultra`
+  (`max` / `ultra` em modelos da classe GPT-5.6)
+- **Gemini / Ollama:** nenhuma escala de esforço visível ao usuário — o
+  seletor fica escondido.
+
+## Paridade de conhecimento e custo
+
+Como só o Claude consegue carregar skills nativas, a expertise inclusa é
+publicada como uma ferramenta MCP que qualquer backend pode chamar —
+`list_packs`, cujas ações cobrem as skills (`skill_list`, `skill_read`),
+os pacotes de instalador (`list`, `read_workflow`) e os templates do
+servidor (`list_templates`) — mais a proteção local-GPU-vs-API-paga
+(`action: "check_runtime"`) e o `panel_load_workflow` de uma vez. Veja
+[Skills, pacotes e custo de runtime](/docs/tools/skills-knowledge).
+
+## Veja também
+
+- [Painel lateral](/docs/pt-BR/panel) — a UX completa do painel
+- [LLMs locais e outros agentes](/docs/pt-BR/local-llms) — o roteador de 6
+  ferramentas, requisitos do modelo, setup Hermes/OpenClaw/Copilot
+- [Arena de LLMs](/docs/pt-BR/arena) — pontue O SEU modelo em tarefas reais
+  do ComfyUI
+- [Skills, pacotes e custo de runtime](/docs/tools/skills-knowledge) — as
+  ferramentas de paridade + custo
+- Design doc: [`design/agent-backend-injection.md`](https://github.com/artokun/comfyui-mcp/blob/main/design/agent-backend-injection.md)

@@ -1,0 +1,170 @@
+---
+title: "Uzak / barındırılan bağlayıcı"
+description: "comfyui-mcp'yi kimlik doğrulamalı, herkese açık erişilebilir bir Streamable-HTTP MCP sunucusu olarak dışa açın — Claude Desktop'ın Özel bağlayıcılarına ya da herhangi bir uzak istemciye tek komutla ekleyin."
+icon: "globe"
+---
+
+`comfyui-mcp`, barındırılan bağlayıcıların kullandığı aynı **Streamable-HTTP**
+MCP taşımasını konuşur (örneğin Comfy'nin kendi `cloud.comfy.org/mcp` Özel
+Bağlayıcısı). Tek bir komutla herkese açık bir HTTPS tüneli arkasında
+token ile kimlik doğrulamalı bir sunucu olarak çalışır; böylece onu **Claude
+Desktop → Connectors** altına ekleyebilir ya da her yerden arayüzsüz
+çağırabilirsiniz.
+
+<Note>
+Bu isteğe bağlıdır. Varsayılan `stdio` taşıması (ve loopback üzerindeki düz
+`--http`) eskisi gibi davranır — açık ve yerel. Kimlik doğrulama ve tünel
+yalnızca bir token ayarladığınızda ya da `--tunnel` geçirdiğinizde etkinleşir.
+</Note>
+
+<Note>
+**Bunun yerine Ajan Paneliyle uzak bir ComfyUI podunu (ör. RunPod) sürmek mi
+istiyorsunuz?** O farklı bir özelliktir — bkz. [Bulut dağıtımı](/docs/tr/cloud-deployment).
+Bu sayfa **comfyui-mcp MCP sunucusunun kendisini** Claude Desktop gibi uzak
+istemcilere dışa açmak hakkındadır; ComfyUI'ye ya da panel köprüsüne hiç
+dokunmaz. İkisi de perde arkasında bir cloudflared hızlı tüneli kullanır; bu da
+ikisini karıştırmanın en kolay yoludur.
+</Note>
+
+## Tek komutluk tünel
+
+```bash
+npx -y comfyui-mcp@latest --tunnel
+```
+
+Bu dört şey yapar:
+
+1. HTTP taşımasını zorlar (`MCP_TRANSPORT=http`).
+2. Siz bir tane ayarlamadıysanız güçlü rastgele bir kimlik doğrulama token'ı
+   üretir.
+3. Yerel MCP portuna bir [cloudflared](https://github.com/cloudflare/cloudflared)
+   hızlı tüneli başlatır.
+4. Yapıştırmaya hazır bir blok yazdırır: herkese açık `https://…/mcp` URL'si,
+   token ve bir Claude Desktop bağlayıcı parçacığı.
+
+Çıktı şuna benzer:
+
+```text
+════════════════════════════════════════════════════════════════════
+ ComfyUI MCP — Remote / Hosted Connector is LIVE
+════════════════════════════════════════════════════════════════════
+ Public MCP URL : https://shiny-otter-1234.trycloudflare.com/mcp
+ Auth token     : 9f2c…<redacted>
+ ...
+════════════════════════════════════════════════════════════════════
+```
+
+<Warning>
+Terminali açık tutun. Bir cloudflared **hızlı tüneli** geçicidir — URL'si her
+çalıştırmada değişir ve süreç çıktığında kapanır. Kararlı bir ana makine adı
+için, yerel HTTP portuna işaret eden kendi
+[adlı cloudflared tünelinizi](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)
+çalıştırın.
+</Warning>
+
+### cloudflared kurulu değil mi?
+
+`cloudflared` isteğe bağlı bir bağımlılık olarak gelir. İkili bulunamazsa
+sunucu yerelde çalışmayı sürdürür ve kurulum rehberi yazdırır:
+
+```bash
+npm install -g cloudflared          # cross-platform
+brew install cloudflared            # macOS
+winget install cloudflare.cloudflared  # Windows
+```
+
+Sonra `--tunnel` ile yeniden çalıştırın.
+
+## Claude Desktop'a ekleyin
+
+**Claude Desktop → Settings → Connectors → Add custom connector** yolunu açın
+ve doldurun:
+
+| Alan  | Değer |
+|--------|-------|
+| Name   | `ComfyUI` |
+| URL    | yazdırılan `https://…/mcp` URL'si |
+| Header | `X-API-Key: <token>` (ya da `Authorization: Bearer <token>`) |
+
+Kaydedin, sonra bir sohbette bağlayıcıyı etkinleştirin. ComfyUI araçları,
+yerel stdio sunucusundaki gibi görünür.
+
+## Arayüzsüz / programatik yapılandırma
+
+Uzak bir Streamable-HTTP sunucusunu destekleyen herhangi bir MCP istemcisi
+çalışır. URL'yi ve kimlik doğrulama başlığını verin:
+
+```json
+{
+  "mcpServers": {
+    "comfyui": {
+      "url": "https://shiny-otter-1234.trycloudflare.com/mcp",
+      "headers": { "X-API-Key": "<token>" }
+    }
+  }
+}
+```
+
+İki başlık biçimi de `/mcp` üzerindeki **her** istekte kabul edilir:
+
+```bash
+# X-API-Key (matches Comfy Cloud's convention)
+curl -H "X-API-Key: <token>" https://…/mcp
+
+# Authorization: Bearer
+curl -H "Authorization: Bearer <token>" https://…/mcp
+```
+
+## Elle kurulum (kendi tünelinizi / vekilinizi getirin)
+
+Herkese açık uç noktayı kendiniz yönetmeyi yeğliyorsanız, HTTP taşımasını sabit
+bir token ile çalıştırın ve kendi ters vekilinizin, tünelinizin ya da
+VPN'inizin arkasına koyun:
+
+```bash
+COMFYUI_MCP_HTTP_TOKEN=my-long-random-secret \
+  npx -y comfyui-mcp@latest --http --host 0.0.0.0 --port 9100
+```
+
+Sonra tünelinizi/vekilinizi `http://127.0.0.1:9100/mcp` adresine yöneltin.
+
+<Warning>
+Loopback olmayan bir ana makineye (ör. `0.0.0.0`) token **olmadan** bağlanmak
+**kesin bir başarısızlıktır** — sunucu, kutu dışında açık bir `/mcp` uç
+noktası dışarıya açmak yerine başlamayı reddeder. `COMFYUI_MCP_HTTP_TOKEN`
+ayarlayın (önerilir), `--tunnel` kullanın ya da bir loopback ana makineye
+bağlayın. Gerçekten açık bir uç nokta istiyorsanız (ör. kendi kimlik
+doğrulayan vekilinizin arkasında), açıkça
+`--allow-unauthenticated-non-loopback` ile katılın (ortam
+`COMFYUI_MCP_ALLOW_UNAUTH=1`); bu, başarısızlığı bir uyarıya düşürür.
+</Warning>
+
+## Kimlik doğrulama başvurusu
+
+| Ayar | Etki |
+|---------|--------|
+| `COMFYUI_MCP_HTTP_TOKEN` | `/mcp` üzerinde gereken paylaşılan gizli token. Ayarlı değil → uç nokta açıktır. |
+| `--token <value>` | Ortam değişkeniyle aynı; CLI bayrağı ortam değişkenini yener. |
+| `--tunnel` / `MCP_TUNNEL=1` | HTTP'yi zorla, ayarlı değilse bir token otomatik üret, bir cloudflared tüneli aç. |
+| `--http` / `MCP_TRANSPORT=http` | Tünelsiz HTTP taşıması (bir token ayarlıysa kimlik doğrulama yine uygulanır). |
+| `--host`, `--port` | Bağlanma adresi (varsayılan `127.0.0.1:9100`). |
+| `--allow-unauthenticated-non-loopback` / `COMFYUI_MCP_ALLOW_UNAUTH=1` | Loopback olmayan bir ana makinede AÇIK bir `/mcp`'ye katılın. O olmadan bu birleşim kesin bir başlatma başarısızlığıdır. |
+
+Token'lar sabit zamanda karşılaştırılır ve kapı MCP uç noktasında her HTTP
+yönteminde (`POST`/`GET`/`DELETE`) uygulanır. Token'sız loopback olmayan bir
+ana makineye bağlanmak, yukarıdaki kaçış kapağı ayarlanmadıkça başlangıçta
+reddedilir.
+
+## Yol haritası: OAuth
+
+Bugünkü kimlik doğrulama **elle paylaşılan gizli bir tokendir** (Bearer /
+`X-API-Key`); bu hem arayüzsüz hem de Claude Desktop Özel Bağlayıcı yollarını
+kapsar. Tam tarayıcı tabanlı bir **OAuth** giriş akışı (Comfy'nin barındırılan
+bağlayıcısı gibi) planlanmış bir devamdır — daha ağır bir değişikliktir ve elle
+bağlanmak için gerekmez.
+
+## Ayrıca bakın
+
+- [Bulut dağıtımı](/docs/tr/cloud-deployment) — Ajan Paneliyle uzak bir
+  ComfyUI podunu sürün (farklı bir tünel, farklı bir amaç)
+- [Yapılandırma](/docs/tr/configuration) — tam ortam değişkeni başvurusu

@@ -1,0 +1,71 @@
+---
+title: "Mobil uygulama (beta)"
+description: "ComfyUI-MCP Mobile — ComfyUI ajanınızla telefonunuzdan sohbet edin. Ajan Panelinin QR koduyla eşleştirin ve üretimleri, iş akışlarını ve modelleri ağınızın her yerinden sürün. Android ve iOS'ta kapalı betada."
+icon: "mobile"
+---
+
+<Note>
+**Betaya katılın.** ComfyUI-MCP mobil uygulaması kapalı betadadır — platformunuz
+için bir sürüm kurun:
+
+- **Android** — [Firebase App Distribution](https://appdistribution.firebase.dev/i/27a5cccde72ffb42)
+- **iOS** — [TestFlight](https://testflight.apple.com/join/ws65s4a2)
+</Note>
+
+Mobil uygulama, [Kenar Çubuğu Paneli](/docs/tr/panel)ni güçlendiren aynı
+ajanın telefon yerlisi bir ön yüzüdür. Panel orkestratörünün köprüsüne
+bağlanır; böylece panelin yapabileceği her şey — görsel üretmek, iş akışlarını
+çalıştırıp incelemek, model değiştirmek — telefonunuzdan kullanılabilir;
+işleri masaüstünüzün ComfyUI'si yapar.
+
+## Eşleştirme
+
+Uygulama ajan ana makinesiyle panel köprüsü üzerinden konuşur; bir kez
+eşleştirirsiniz ve içindesiniz:
+
+1. Masaüstünüzde [comfyui-mcp](/docs/tr/quickstart)'yi
+   [Ajan Paneli](/docs/tr/panel) ile kurun ve çalıştırın.
+2. ComfyUI'nin **Ayarlar**ında **"Control via Mobile app (beta)"** seçeneğini
+   açın — **varsayılan olarak kapalıdır** ve eşleştirme düğmesi siz onu
+   açana kadar gizli kalır.
+3. Paneli açın ve başlığındaki **QR** düğmesine tıklayarak **eşleştirme
+   QR**'ını gösterin.
+4. Mobil uygulamada **Scan QR from panel**'e dokunun — ya da köprü URL'sini
+   (`ws://…?token=…`) elle yapıştırın.
+
+QR, eşleştirme verisinin URL parçası üzerinde gittiği bir iniş URL'sini kodlar;
+böylece ana makine ve token cihazlarınızdan hiç çıkmaz. Uygulama ayrıca
+inişin **Open in app** düğmesi için `comfyui-mcp://pair` derin bağlantısını da
+kaydeder.
+
+<Note>
+Telefon ile masaüstünün aralarında bir ağ yolu olması gerekir — basit durumda
+aynı LAN ya da ana makine doğrudan erişilebilir değilse
+[güvenli bir röle](/docs/tr/self-hosted-relay) /
+[bulut dağıtımı](/docs/tr/cloud-deployment).
+</Note>
+
+## Uygulamada neler var
+
+- **Ajan sohbeti** — panel kenar çubuğunda yapacağınız aynı konuşma,
+  telefonunuzdan.
+- **Model seçici** — orkestratörden canlı model kataloğu; oturum ortasında
+  model değiştirin.
+- **Civitai gezintisi** — modelleri ve üreticileri arayın, beğeniler ve
+  favoriler.
+- **Uzaktan denetim** — masaüstü panel sekmesini yansıtın ve iş akışı
+  tanılamasını yolda denetleyin.
+
+## Geri bildirim
+
+Beta geri bildirimi ve hata raporları
+[Discord](https://discord.gg/cW9arBhzCu) ya da
+[issue izleyicisi](https://github.com/artokun/comfyui-mcp/issues) üzerinde
+hoş karşılanır.
+
+## Ayrıca bakın
+
+- [Kenar Çubuğu Paneli](/docs/tr/panel) — uygulamanın eşleştiği ComfyUI içi ajan
+- [Bulut dağıtımı](/docs/tr/cloud-deployment) — uzak bir ComfyUI podunu sürün
+- [Kendi barındırdığınız röle](/docs/tr/self-hosted-relay) — güvenli köprü
+  yoluna sahip olun

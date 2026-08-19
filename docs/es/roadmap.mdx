@@ -1,0 +1,191 @@
+---
+title: "Hoja de ruta"
+description: "Lo que ya está publicado, lo que se está construyendo, lo que viene después — y lo que hemos decidido no construir, con el razonamiento. Ordenado por prioridad, no por fecha."
+icon: "map"
+---
+
+## Qué cubre esto
+
+**Todo el proyecto, no un solo repositorio.** comfyui-mcp son varias piezas
+que se publican por separado y se versionan de forma independiente:
+
+| Pieza | Repo | Qué es |
+|---|---|---|
+| **Servidor MCP + plugin** | [`comfyui-mcp`](https://github.com/artokun/comfyui-mcp) | las herramientas y el orquestador — el plano de control |
+| **Panel** | [`comfyui-mcp-panel`](https://github.com/artokun/comfyui-mcp-panel) | la barra lateral del agente dentro de ComfyUI |
+| **App móvil** | [`comfyui-mcp-mobile`](https://github.com/artokun/comfyui-mcp-mobile) | chat, cola, LoRAs y reflejo de pestaña de escritorio |
+| **Relé** | [`comfyui-mcp-relay`](https://github.com/artokun/comfyui-mcp-relay) | Cloudflare Worker para un puente remoto `wss://` estable |
+
+Los elementos de abajo se etiquetan por pieza cuando importa. Todo se
+planifica como un solo producto aunque aterrice en cuatro sitios.
+
+<Warning>
+  Los números de versión de [Cómo se llegó hasta aquí](#cómo-se-llegó-hasta-aquí)
+  son los del **servidor MCP**. El panel y la app móvil llevan sus propias
+  líneas de versión, sin relación — el panel 0.9.x no va «por detrás» del
+  servidor v0.44. No los compares.
+</Warning>
+
+## Cómo leer esta página
+
+**No hay fechas en esta página, y es deliberado.**
+
+Este proyecto publica rápido y reordena a menudo — el arco de RunPod se
+saltó la cola en una sola semana. Una hoja de ruta con trimestres encima
+estaría mal en cuestión de días, y una fecha incorrecta es peor que ninguna
+fecha: convierte un plan en una promesa que nadie hizo.
+
+Así que esta página se compromete con el **orden, no con el calendario**.
+«Siguiente» significa el siguiente en la fila, no el mes que viene. Si algo
+de aquí te importa, dilo en [Discord](https://discord.gg/cW9arBhzCu) — lo
+que la gente hace de verdad día a día sube las cosas en esta lista con mucha
+más fiabilidad que el tamaño de la petición.
+
+La sección más útil es probablemente la última. **[No previsto](#no-previsto)**
+dice contra qué hemos decidido *y por qué*, para que dejes de esperarlo.
+
+---
+
+## Publicado
+
+Todo esto funciona hoy y está cubierto por la documentación.
+
+| Área | Lo que obtienes |
+|---|---|
+| **Agente en ComfyUI** | El panel pone un agente junto a tu lienzo — lee el grafo, edita nodos, ejecuta flujos de trabajo y explica los fallos. Consulta [Panel](/docs/es/panel). |
+| **Trae tu propio modelo** | Claude, ChatGPT/Codex, Gemini, Antigravity, Grok, Kimi, GLM, Ollama, LM Studio, llama.cpp, OpenRouter, o un endpoint personalizado — un selector, un orquestador. Consulta [Backends](/docs/es/backends). |
+| **Modelos locales** | Operación totalmente local a través de Ollama / LM Studio / llama.cpp, incluidos modelos pequeños. Consulta [LLMs locales](/docs/es/local-llms). |
+| **Autoría de flujos de trabajo** | Construye, parchea, recorta, valida y bloquea flujos de trabajo desde lenguaje natural; importa desde los metadatos de una imagen. |
+| **Modelos y nodos personalizados** | Busca, instala y repara packs de nodos; encuentra y descarga modelos — incluido averiguar qué modelos le faltan a un flujo de trabajo y qué cuantización cabe en tu VRAM. |
+| **Navegador de Civitai** | Navega imágenes, videos y modelos en el panel, filtra por modelo base y creador, y trae un flujo de trabajo directo al lienzo. |
+| **App móvil** | Chatea con el agente, mira la cola, navega LoRAs y refleja una pestaña de escritorio para controlar tu equipo desde el teléfono. Consulta [Móvil](/docs/es/mobile). |
+| **Apps (micro-apps)** | Convierte un flujo de trabajo en una app de un clic con un formulario de verdad: convierte y publica en el panel, ejecútala en local o en un pod, instala apps de otros desde el registro público — y ejecuta las mismas apps desde la pestaña Apps del teléfono o un agente mediante las herramientas `apps_*`. Consulta [Apps](/docs/es/apps). |
+| **Remoto y nube** | Apunta el panel a un ComfyUI remoto, un relé autoalojado o Comfy Cloud. Consulta [Conector remoto](/docs/es/remote-connector). |
+| **Pods de RunPod** | Crea, conéctate y detén pods de RunPod desde el panel, con valores por defecto seguros para la facturación y un indicador de host honesto. |
+| **Entrenamiento de LoRA (local)** | LoRAs de personaje en FLUX.1-dev, impulsados por el agente a través de las herramientas `train_*` en un contenedor Docker con GPU — dataset entra, `.safetensors` en `models/loras/` sale. |
+
+## En construcción ahora
+
+Activamente en marcha. Estas son las cosas más propensas a moverse a
+continuación.
+
+| Elemento | Dónde está |
+|---|---|
+| **Entrenamiento de LoRA en pods de RunPod** | El transporte ya aterrizó; el trabajo de seguimiento continúa en el alcance del idle-stop y un camino nativo sin Docker para máquinas sin Docker. |
+| **Entrenamiento más allá de LoRAs de personaje** | Flujos de estilo, slider y edición, y modelos base más allá de FLUX.1-dev. La capa de configuración se construyó para ampliar; los flujos aún no están escritos. |
+
+## Siguiente
+
+En cola y especificados, no empezados. Ordenados.
+
+| Elemento | Por qué está aquí |
+|---|---|
+| **Previsualizaciones honestas en la app móvil** | La pestaña **Training** sigue siendo UI de marcador de posición inerte — seis tarjetas que se leen como una función publicada y ya han inducido a la gente a preguntar hasta dónde llega. O se etiqueta con claridad o se oculta — el arreglo más barato de esta lista. (La pestaña **Apps** era la otra mitad de este elemento y ahora es real; consulta [Apps](/docs/es/apps).) |
+| **Entrenamiento en móvil** | Cablea la pestaña Training del móvil al entrenador que ya funciona. Lo difícil está hecho; esto es sobre todo fontanería, y retira el elemento de arriba. |
+| **Diseño para tablet** | Trabajo responsive de verdad, sin glamour. Merece la pena cuando las pantallas de arriba tengan algo que valga la pena mostrar. |
+
+## En estudio
+
+Querido, pero bloqueado en una pregunta de diseño más que en el esfuerzo.
+Sin compromiso.
+
+### Sesiones multiusuario
+
+Dejar que otra persona se conecte a *tu* sesión y controle *tu* máquina —
+depurar en pareja un flujo de trabajo roto, o un equipo de estudio
+compartido.
+
+Merece la pena ser preciso sobre el bloqueo, porque no es el obvio: **el
+transporte ya existe.** El emparejamiento, el fan-out de sockets y la
+autenticación por sesión se construyeron todos para el reflejo
+teléfono-a-escritorio, que es la misma fontanería.
+
+Lo que falta es un **modelo de confianza**. ¿Quién puede controlar? ¿Qué
+pueden ver de tu lienzo, tu historial, tu sistema de archivos? ¿Cómo
+revocas el acceso a alguien a mitad de una ejecución? Esas preguntas hay
+que responderlas antes de construir nada — publicar una respuesta a medias
+en la GPU de otra persona es cómo la gente sale herida.
+
+---
+
+## No previsto
+
+Decidido en contra, con el razonamiento, para que nadie los espere. No es
+permanente — un buen argumento reabre cualquiera de estos — pero nada de
+aquí está en cola.
+
+### Fechas e hitos numerados por versión
+
+Consulta [el principio de esta página](#cómo-leer-esta-página). Orden, no
+calendario.
+
+### Control solo por voz (gafas inteligentes, cascos)
+
+Controlar el agente de escritorio por voz desde gafas sale a menudo, y la
+fontanería reutilizaría sobre todo el transporte de reflejo.
+
+La razón de que no esté en cola es que una superficie solo de voz **no
+tiene lienzo**. No hay previsualización a la que echar un vistazo, no hay
+forma de resolver *«usa el otro LoRA»* cuando hay dos cargados, y no hay
+deshacer visible cuando el agente hace lo incorrecto a tu grafo. Esos son
+los problemas de verdad, y añadir un micrófono no resuelve ninguno. Hasta
+que haya una respuesta, esto se publicaría como una demo desagradable de
+la que depender.
+
+### Reloj inteligente
+
+Todo lo de arriba se aplica, en una pantalla más pequeña con un presupuesto
+de energía más ajustado. Nadie ha descrito todavía un trabajo que haga
+mejor que el teléfono.
+
+### Un servicio alojado que ejecuta ComfyUI por ti
+
+Este proyecto es un **plano de control local-first**. Se conecta a tu
+ComfyUI — en tu máquina, tu caja remota, tu pod o Comfy Cloud — y no quiere
+tus archivos ni tus prompts. Ejecutar inferencia en tu nombre es otro
+producto con otro modelo de confianza, y no es este.
+
+---
+
+## Cómo se llegó hasta aquí
+
+El arco hasta ahora, para contexto sobre dónde se sientan los siguientes
+elementos. Es deliberadamente grosero — para lo que cambió en una versión
+concreta, consulta el [Changelog](/docs/changelog).
+
+<Note>
+  Las versiones públicas empiezan en **v0.2.0**. No hay v0.0.1 ni v0.1.x —
+  las dos primeras semanas de trabajo aterrizaron directo en `main` antes
+  de publicar el paquete, a partir del commit inicial del **2026-02-15**.
+</Note>
+
+Las versiones mostradas son las del **servidor MCP** — el panel y la app
+móvil se versionan por separado, y las eras de abajo describen el proyecto
+como un todo.
+
+| Era | Versiones del servidor | De qué iba |
+|---|---|---|
+| **El servidor MCP**<br/>feb. 2026 | v0.2 – v0.3 | La idea original: controlar ComfyUI desde un agente. Generación de imágenes, análisis de flujos de trabajo, un convertidor UI→API de flujos de trabajo, visualización jerárquica, skills de modelo, y el paso de ejecuciones bloqueantes a una cola no bloqueante con progreso en segundo plano y control de procesos. |
+| **Tramo silencioso**<br/>mar. – abr. 2026 | v0.3.x | Tres commits de funciones en dos meses. ComfyUI remoto por HTTP, expansión de subgrafos/componentes en el convertidor, soporte HTTPS/WSS. Cimientos, no titulares. |
+| **Entorno y ciclo de vida**<br/>may. 2026 | v0.4 – v0.8 | Hacer que sobreviva a instalaciones reales: verificar/andamiar nodos personalizados con CI, instalaciones fijadas a un git ref, autenticación para modelos restringidos y privados, manifiestos de entorno declarativos, proveedores de almacenamiento en la nube, conversión de imágenes en el servidor y descubrimiento cacheado de skills de nodos. El panel embebido se diseñó al final de este tramo. |
+| **La era del panel**<br/>jun. 2026 | v0.9 – v0.22 | El mes más grande por volumen (~102 commits de funciones). El agente se mudó *dentro* de ComfyUI junto al lienzo, ganó varios proveedores y creció la infraestructura para ejecutarse en cualquier sitio: packs de instalador de un clic, una imagen de RunPod, un puente seguro `wss://` con un relé opt-in, y visibilidad del razonamiento en vivo. |
+| **Alcance y profundidad**<br/>jul. 2026 | v0.23 – v0.44 | Dos direcciones a la vez. **Alcance:** la app móvil, el reflejo de pestaña de escritorio, el navegador de Civitai, más proveedores (Antigravity, GLM, Kimi) y el modo compacto de herramientas para que los modelos locales pequeños puedan controlar las herramientas. **Profundidad:** la Arena de LLM, pods de RunPod de primera parte con valores por defecto seguros para la facturación, entrenamiento de LoRA y resolución de modelos que faltan teniendo en cuenta tu VRAM. |
+
+Dos cosas que esa tabla no te dirá. El ritmo es irregular a propósito —
+una calma de dos meses en primavera, luego ~180 commits de funciones entre
+junio y julio. Y el orden nunca se ha fijado por adelantado: RunPod y el
+entrenamiento se saltaron ambos la cola porque resultó que importaban más
+que lo que iba a ser lo siguiente de nombre. Esa es la razón principal de
+que esta página no lleve fechas.
+
+## ¿Falta algo?
+
+Si estás esperando algo que no está listado, o una de las llamadas de «no
+previsto» se ve mal para cómo trabajas de verdad, abre una incidencia en
+[GitHub](https://github.com/artokun/comfyui-mcp/issues) o dilo en
+[Discord](https://discord.gg/cW9arBhzCu).
+
+Las peticiones que describen **lo que estás intentando hacer** son mucho
+más útiles que las que nombran una función — varios elementos de esta
+página están ordenados como lo están porque alguien explicó su día, no
+porque pidió más alto.

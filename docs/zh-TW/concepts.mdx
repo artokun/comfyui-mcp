@@ -1,0 +1,80 @@
+---
+title: "運作原理"
+description: "工具背後的運作模型 —— 傳輸方式、ComfyUI-Manager API，以及本機 / 遠端 / 雲端三種模式。"
+icon: "diagram-project"
+---
+
+## 心智模型
+
+ComfyUI MCP 是蓋在**正在執行的 ComfyUI 執行個體**上面的一層薄、描述清楚的封裝。大多數工具
+透過它的 HTTP/WebSocket API 交談，所以無論 ComfyUI 在本機、遠端（`--comfyui-url`）還是
+[Comfy Cloud](https://cloud.comfy.org)（`COMFYUI_API_KEY`），行為都一樣。
+
+<Steps>
+  <Step title="生成與工作流程 → ComfyUI HTTP API">
+    `generate_image`、`enqueue_workflow`、佇列 / 歷史 / 系統狀態，以及工作流程編寫工具，
+    都會呼叫 ComfyUI 的 `/prompt`、`/queue`、`/history`、`/object_info` 等。排入佇列是
+    fire-and-forget：你立刻拿到一個 `prompt_id`，結果透過完成通知到達。雲端模式下，
+    另一套 `cloud-client` 把同樣的操作用 `X-API-Key` 派發到 `cloud.comfy.org`。
+  </Step>
+  <Step title="自訂節點與模型 → ComfyUI-Manager（HTTP），並帶回退到子行程">
+    節點安裝 / 更新 / 快照 / 二分，以及工作流程相依安裝，優先走
+    [ComfyUI-Manager](https://github.com/Comfy-Org/ComfyUI-Manager) HTTP API
+    （因此對遠端執行個體也能用），API 做不到的部分再回退到對著本機安裝跑 `cm-cli` / `git` /
+    `pip`/`uv`。
+  </Step>
+  <Step title="安裝與檔案系統操作 → 僅本機">
+    安裝 ComfyUI、更新核心、刪除模型檔案、讀伺服器記錄、列出輸出目錄，都作用在本機
+    檔案系統上。它們需要已知的 `COMFYUI_PATH`，在遠端或雲端模式下會回傳明確錯誤。
+  </Step>
+  <Step title="WebSocket → 本機 + 遠端，不含雲端">
+    任務完成通知在可用時掛到 ComfyUI 的 WebSocket。Comfy Cloud 沒有 WebSocket ——
+    任務監視器會落到已有的 HTTP 輪詢路徑。
+  </Step>
+</Steps>
+
+<Note>
+  經驗法則：任何**讀取或執行**已連線伺服器的事情，三種模式都能用；任何**安裝軟體或
+  碰磁碟上檔案**的事情，都需要本機安裝。完整功能對照表請看
+  [設定 → 部署模式](/docs/zh-TW/configuration#部署模式)。
+</Note>
+
+## 自愈：佇列 / 算圖看門狗
+
+以前，一個卡住的高解析度取樣步驟會讓代理在它看不見也殺不掉的殭屍算圖後面繼續堆任務。
+三道盡力而為的護欄補上這個缺口，於是代理不會再對著卡住的算圖盲目重排入佇列：
+
+- **背壓** —— 已經有算圖在跑時，`panel_run` 會在結果裡追加一條 QUEUE WARNING，
+  這樣代理就不會再往後面堆。
+- **停滯偵測** —— 一條被動 WebSocket 追蹤正在跑的 prompt / 節點 / 進度；某一步超過
+  門檻值還沒推進
+  （[`COMFYUI_MCP_STALL_S`](/docs/zh-TW/configuration#面板協調器與橋接)，預設 180 秒）
+  時，會在代理下一輪前面預置一行 STALL/BACKLOG 說明。
+- **升級取消** —— `queue`（action:"cancel"）會中斷、**核實**任務確實停了
+  （在 [`COMFYUI_MCP_INTERRUPT_S`](/docs/zh-TW/configuration#任務監視) 內，預設 30 秒），
+  然後升級到 `/free`，如果它還不肯死就報告算圖 WEDGED（並建議 `restart_comfyui`）；
+  `clear_pending` 在同一次呼叫裡丟掉所有待處理任務。
+
+全部是故障安全：看門狗 WebSocket 如果從沒開啟，什麼都不會變。代理也可以透過
+`get_image (action:"analyze_color")` 在不走視覺往返的情況下推理一張圖的顏色
+（主色板、平均 + 亮度統計、對比度檢查）。
+
+## 工具分類
+
+<CardGroup cols={2}>
+  <Card title="圖片生成" icon="image" href="/docs/tools/image-generation" />
+  <Card title="工作流程執行" icon="play" href="/docs/tools/workflow-execution" />
+  <Card title="工作流程編寫" icon="pen-ruler" href="/docs/tools/workflow-authoring" />
+  <Card title="工作流程庫" icon="folder-open" href="/docs/tools/workflow-library" />
+  <Card title="素材與圖片" icon="images" href="/docs/tools/assets-images" />
+  <Card title="模型" icon="box" href="/docs/tools/models" />
+  <Card title="自訂節點" icon="puzzle" href="/docs/tools/custom-nodes" />
+  <Card title="API 節點" icon="cloud" href="/docs/tools/api-nodes" />
+  <Card title="安裝與環境" icon="wrench" href="/docs/tools/install-environment" />
+  <Card title="行程控制" icon="power" href="/docs/tools/process-control" />
+  <Card title="預設值、統計與技能" icon="sliders" href="/docs/tools/defaults-stats-skills" />
+</CardGroup>
+
+<Info>
+  工具參考由即時 MCP 工具 schema 生成（`npm run docs:gen`），所以它不會和程式碼脫節。
+</Info>

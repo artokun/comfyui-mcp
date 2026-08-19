@@ -1,0 +1,263 @@
+---
+title: "Apps (micro-apps)"
+description: "Transforme um workflow num app de um clique: um manifest, um formulário de execução exposto, e um snapshot de prompt da API no qual os valores são aplicados por execução. Converta no painel, rode pelo painel, pelo celular ou por um agente, e publique num registro público."
+icon: "layout-grid"
+---
+
+Um **app** é um workflow empacotado para execuções de um clique **sem
+canvas**. É um diretório na sua máquina contendo quatro coisas:
+
+| Arquivo | O que é |
+|---|---|
+| `manifest.json` | nome, descrição, `appMode {inputs, outputs}`, `deps`, `hideWorkflow`, `published` |
+| `prompt.json` | o **snapshot** do prompt no formato API — os valores são aplicados nisto por execução |
+| `workflow.json` | o grafo UI do litegraph — **ausente** quando `hideWorkflow` está definido |
+| `thumbnail.png` | arte opcional do cartão |
+
+Os bundles vivem no diretório de usuário do ComfyUI em
+`<user>/comfyui-mcp-panel/apps/<app-id>/` — de propósito **não** o
+diretório de workflows, para um app escondido nunca aparecer no navegador
+de workflows.
+
+```
+workflow ⇄ convert (panel) ⇄ app bundle on disk ⇄ run form ⇄ patch snapshot ⇄ ComfyUI queue
+                                    ⇅
+                        publish / install ⇄ public registry
+```
+
+O motivo de os apps existirem como camada própria: o canvas é a interface
+errada para *rodar* um workflow em que você já confia. Um formulário com
+cinco campos rotulados é a certa, e é a única interface que um celular ou
+um agente consegue conduzir.
+
+<Note>
+  Há **uma** implementação de armazenamento e execução — as rotas HTTP do
+  pacote do painel (`/comfyui_mcp_panel/apps/*`). O painel do desktop, a
+  aba Apps do celular e as ferramentas MCP `apps_*` são todos clientes
+  dela, então um app se comporta de forma idêntica de onde você o lançar.
+</Note>
+
+## Requisitos
+
+Os apps são servidos pelo **pacote do painel** (`comfyui-mcp-panel`), não
+pelo servidor MCP sozinho. Se o pacote no seu ComfyUI é anterior ao
+recurso, `apps` com `action:"list"` falha com uma mensagem explícita
+*"the panel pack on this ComfyUI predates the Apps
+feature"* — atualize o pacote e reinicie o ComfyUI.
+
+## Converter um workflow num app
+
+No painel, o botão **Apps** da barra de ferramentas (ao lado do Civitai)
+abre a grade de apps. Converter o workflow aberto faz três coisas:
+
+1. **Importa a config APP-mode do ComfyUI** se o workflow já carrega uma,
+   e caso contrário escolhe entradas e saídas **heuristicamente** (widgets
+   de prompt, seeds, configurações de sampler; nós da classe `SaveImage`
+   como saídas). Entradas APP-mode importadas são honradas em **qualquer**
+   tipo de nó, então endpoints de nós personalizados sobrevivem à
+   conversão.
+2. **Varre as dependências** — os modelos e pacotes de nós personalizados
+   de que o grafo precisa — para `manifest.deps`.
+3. **Tira um snapshot do prompt** no formato API. Os valores dos widgets
+   no momento da conversão viram o `default` de formulário de cada
+   entrada.
+
+Cada entrada em `appMode.inputs` carrega `nodeId`, `widget`, `label`, e um
+`kind` de `text`, `number`, `combo`, `toggle`, `image` ou `model`; combos
+também carregam `choices`. É isso que o formulário de execução renderiza
+— no desktop e no celular.
+
+### Esconder o workflow
+
+`hideWorkflow` tira o `workflow.json` do bundle por completo, então o
+grafo não é entregue a quem roda ou instala o app.
+
+<Warning>
+  **`hideWorkflow` é ofuscação, nunca segurança.** O prompt da API ainda
+  fica visível para qualquer um que rode o app via o próprio `/history`
+  do ComfyUI, e os modelos e nós personalizados que o app instala revelam
+  as dependências do grafo. Trate como "não bagunce o meu navegador de
+  workflows", não como proteção para um grafo que você não pode se dar ao
+  luxo de vazar.
+</Warning>
+
+## Rodar um app
+
+Uma execução aplica os seus valores de formulário no snapshot guardado e
+enfileira o resultado. As chaves de patch são `"<nodeId>.<widget>"` — por
+exemplo `{"6.text": "a cat",
+"3.seed": 42}`. A chave parte só no **primeiro** ponto, então nomes de
+widget que eles mesmos contêm pontos (pilhas de LoRA, `lora_1.model`)
+permanecem intactos.
+
+O patch é **estrito**: uma chave que endereça um nó ou uma entrada que não
+existe no snapshot é um erro duro, não um skip silencioso. Um erro
+significa que o manifest se descolou do snapshot, e falhar alto vence
+rodar com valores velhos. Entradas que você omite mantêm os defaults da
+hora da conversão.
+
+A execução devolve um `prompt_id`; sonde-o para o status (`pending` →
+`running` → `done`, ou `unknown` se o ComfyUI nunca ouviu falar dele) e
+para as saídas agrupadas sob cada nó de saída.
+
+### Rodar num pod RunPod
+
+O caminho **Run on RunPod** do painel reusa o mesmo motor de patch em
+modo **dry**: o painel pede o prompt aplicado *sem* enfileirá-lo
+localmente, empurra quaisquer dependências pinadas para o pod, e
+enfileira o prompt lá.
+
+<Warning>
+  Apps com uma **entrada de imagem** recusam rodar num pod. Os uploads
+  caem no ComfyUI **local**, que o pod não alcança — então o painel recusa
+  com honestidade em vez de enfileirar uma execução que falharia por um
+  arquivo faltando.
+</Warning>
+
+## Publicar e Explorar
+
+A aba **Explore** do painel é um registro público (um Cloudflare Worker
+apoiado em D1 + R2) com listagens de em alta / novos / mais estrelados e
+busca. O trending é `stars * 3 + runs` em 7 dias. Publicar envia o bundle
+— manifest, prompt, workflow a menos que escondido, thumbnail — sob uma
+identidade de criador chaveada por sha256.
+
+Instalar a partir de Explore mostra primeiro um **diálogo de consentimento
+de dependências**: as `deps` de um app são *reportadas*, nunca instaladas
+em silêncio. Nada instala um modelo ou um pacote de nós personalizados na
+sua máquina porque você tocou num cartão.
+
+<Note>
+  `pricing_json` e `hosted_only` existem no schema do manifest e são
+  passados adiante sem mudança, mas nada os lê. Eles reservam espaço para
+  uma fase de monetização só de design — não há comportamento de app pago
+  hoje.
+</Note>
+
+## A ferramenta MCP `apps`
+
+Uma ferramenta com cinco ações, todas proxies finos sobre a API Apps do
+painel. É a superfície **sem canvas**: o que o app de celular e um agente
+conduzido direto usam. Está na whitelist de `call_tool` do orquestrador —
+`list`/`get`/`run_status` são só leitura, e `run` carrega a mesma postura
+de risco que `enqueue_workflow` (enfileira um job que o usuário tocou de
+propósito).
+
+| Action | Efeito |
+|---|---|
+| `action:"list"` | Lista cada app registrado neste ComfyUI — cada entrada é o manifest completo mais `has_workflow` / `has_prompt` / `has_thumbnail`. Sem outros parâmetros. Só leitura. |
+| `action:"get"` | Manifest + fatos do bundle de um app por id. `appMode.inputs` é o formulário de execução. Só leitura. |
+| `action:"run"` | Aplica `values` no snapshot e enfileira. Devolve `prompt_id`. |
+| `action:"run_status"` | Sonda uma execução por `prompt_id`: `status` mais as saídas da execução (refs de arquivo de imagem/vídeo por nó de saída, saídas de texto). Só leitura. |
+| `action:"import"` | Instala um app a partir do registro público neste ComfyUI. |
+
+### Parâmetros
+
+`action` é o único parâmetro exigido pelo schema — cada ação precisa de um
+subconjunto diferente, então o resto é opcional no schema e a presença é
+imposta pelo handler, que nomeia o campo que está faltando.
+
+| Action | Parameter | Type | Notes |
+|---|---|---|---|
+| `get` | `app_id` | `string` (uuid), obrigatório | de `action:"list"` |
+| `run` | `app_id` | `string` (uuid), obrigatório | |
+| | `values` | `object`, opcional | chaves `"<nodeId>.<widget>"`; chaves desconhecidas falham alto |
+| `run_status` | `app_id` | `string` (uuid), obrigatório | |
+| | `prompt_id` | `string`, obrigatório | precisa casar com `^[0-9a-zA-Z-]{1,64}$` |
+| `import` | `registry_url` | `string` (URL), obrigatório | precisa ser o registro padrão ou uma origem na lista de permissão |
+| | `app_id` | `string` (uuid), obrigatório | o uuid do app no **registro** |
+| | `slug` | `string`, opcional | gravado nos metadados locais |
+| | `version` | `integer`, opcional | gravado nos metadados locais |
+
+A restrição de forma do `prompt_id` é imposta **duas vezes** — na fronteira
+do schema e de novo dentro do handler — porque o id é interpolado num
+caminho de URL. Um "prompt id" com cara de traversal nunca deve chegar ao
+construtor de URL mesmo se um caller desviar do schema.
+
+Para a referência gerada de schema por ferramenta, veja
+[Ferramentas de Apps](/docs/tools/apps).
+
+### Importar a partir do registro
+
+`action:"import"` busca o bundle do registro no lado do servidor e o cria
+como um app local. O **id do registro vira o id local**, então reimportar
+um app que você já tem reporta um conflito de id em vez de duplicá-lo. O
+thumbnail vive num endpoint separado do registro e é buscado e
+encaminhado à parte, então um app instalado mantém a arte do cartão.
+
+As dependências **não** são instaladas. A ferramenta devolve as `deps` do
+manifest para o caller reportá-las e deixar o usuário instalá-las de
+propósito.
+
+<Warning>
+  `registry_url` é uma lista de permissão, não uma URL livre. A busca
+  acontece **no servidor**, então uma URL arbitrária seria uma primitiva
+  SSRF — endereços de loopback ou LAN, ou uma URL pública redirecionando
+  para um. Só o registro público padrão é aceito a menos que o operador
+  permita origens extras via `COMFYUI_MCP_REGISTRY_URLS` (separadas por
+  vírgula, pensado para dev/staging). Redirects são recusados de cara em
+  vez de seguidos.
+</Warning>
+
+## Limites e validação
+
+Coisas que você de fato consegue bater:
+
+| Limite | Valor | Onde |
+|---|---|---|
+| Bundle / prompt JSON | 16 MB | mais folgado que um grafo simples porque um prompt pode carregar imagens em base64 |
+| Thumbnail | 5 MB | decodificado e validado **antes** de qualquer coisa ser escrita, então um thumbnail ruim não deixa um bundle pela metade para trás |
+| Nome do app | 120 caracteres | truncado |
+| Descrição | 4000 caracteres | truncado |
+| `choices` de combo | 200 entradas | truncado |
+| Busca no registro | 16 MB, 30s | conferido no `content-length` declarado **e** nos bytes reais |
+
+Validação que você vai notar:
+
+- **Ids de app precisam ser uuids.** Qualquer outra coisa é rejeitada
+  antes de um caminho ser construído, e o caminho de bundle resolvido é
+  rechecado por contenção sob a raiz de apps.
+- **Um prompt precisa estar no formato API** — chaves de id de nó
+  numéricas, cada nó um objeto `{class_type, inputs}`. Grafos no formato
+  UI são rejeitados.
+- **Um workflow UI é obrigatório a menos que `hideWorkflow`** esteja
+  definido.
+- **Criar um app que já existe** é um conflito, não uma sobrescrita.
+- **Atualizações parciais de manifest são de fato parciais.** Publicar ou
+  esconder um app envia só os próprios campos e não vai apagar o seu nome,
+  descrição ou `appMode`.
+- **Chaves de manifest desconhecidas são descartadas**, exceto os campos
+  reservados de pass-through, então uma máquina mais antiga ignora campos
+  que não entende em vez de falhar.
+
+A raiz de apps é sobrescrevível com `COMFYUI_MCP_APPS_DIR` (principalmente
+para testes); por padrão é derivada do próprio diretório de usuário do
+ComfyUI, então sobrevive a instalações portáteis.
+
+## No celular
+
+O app de celular traz uma aba **Apps** de verdade — não uma prévia. Tem
+duas metades:
+
+- **My Apps** — os apps instalados na sua máquina, listados pela ponte via
+  `action:"list"`. Tocar num abre um formulário de execução gerado,
+  enfileira com `action:"run"`, e sonda `action:"run_status"` a cada 2s
+  (limitado a 30 minutos) até as saídas renderizarem.
+- **Explore** — o registro público, acessado **direto por HTTPS** a partir
+  do celular (sem salto pela ponte, então navegar funciona antes de você
+  ter pareado). Instalar vai na outra direção: a máquina busca o bundle
+  ela mesma via `action:"import"`.
+
+Isto é a coisa mais clara que o celular consegue fazer e o chat não —
+rodar um workflow de verdade, com entradas de verdade, sem canvas à vista.
+
+## Veja também
+
+- [Ferramentas de Apps](/docs/tools/apps) — a referência gerada de schema
+  por ferramenta
+- [Painel lateral](/docs/pt-BR/panel) — onde os apps são convertidos,
+  publicados e explorados
+- [App de celular](/docs/pt-BR/mobile) — a aba Apps no contexto
+- [Pods RunPod](/docs/tools/runpod) — o pod que o caminho "Run on RunPod"
+  mira
+- [Roadmap](/docs/pt-BR/roadmap)

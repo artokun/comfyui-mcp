@@ -1,0 +1,129 @@
+---
+title: "LLM Arenası"
+description: "Herhangi bir ajan LLM'ini gerçek ComfyUI görevlerinde kıyaslayın — yerel (Ollama), barındırılan (OpenRouter/DeepSeek/GLM/MiMo) ya da öncü. Her puan modelin iddialarına değil ComfyUI sunucusuna karşı doğrulanır. Tek komut, paylaşmaya hazır raporlar."
+icon: "trophy"
+---
+
+**ComfyUI LLM Arenası** bir soruyu dürüstçe yanıtlar: *bu model gerçekten
+ComfyUI sürebilir mi?* "Kendinden emin mi duruyor" değil — her senaryonun
+sonucu **ComfyUI sunucusunun kendisine karşı doğrulanır** (iş geçmişi,
+çalıştırılan grafik parametreleri, gerçek çıktı dosyaları ve piksel
+boyutları). Panel ve MCP istemcilerinin kullandığı aynı
+[kompakt araç yönlendiricisi](/docs/tr/local-llms) üzerinden çalışır; böylece
+bir arena puanı gerçek ajan davranışını öngörür.
+
+```bash
+npm run arena          # scores the default local field via Ollama
+```
+
+## Görev merdiveni
+
+On senaryo, üç zorluk bandı, PASS = 2 (bitti ve sunucu doğrulamalı),
+PARTIAL = 1 (doğru araç ailesi, eksik sonuç), FAIL = 0 — azami **20**:
+
+| Bant | Senaryo | Ne kanıtlar |
+| --- | --- | --- |
+| Temeller | `health` · `models` · `registry` · `queue` | araç keşfi + tek çağrılı görevler |
+| Arena | `generate` (eşzamansız işleme + yoklama) · `precision` (tam steps/boyut çalıştırılan grafiğe iner) · `breakfix` (kasıtlı başarısızlık → tanıla → kurtar) · `provenance` (varlık kayıt defterini bul, generate_image (action:"regenerate") ile bir geçersiz kılmayla yeniden işle) | çok sıçramalı zincirler, parametre sadakati, hata kurtarma |
+| Crucible | `multiout` (512px + 1024px çıktı kaydeden TEK grafik — PNG başlıklarını okuyarak doğrulanır) · `pipeline` (`upload_image (action:"stage")` üzerinden zincirlenen iki aşamalı img2img) | ham grafik kompozisyonu — bunları hiçbir şablon kapsamaz |
+
+Beraberlikler **dürtme → araç turu → duvar saati** ile bozulur; böylece bir
+görevi ilk denemede çözen bir model, aynı puana savrularak gelen birinin
+önüne geçer.
+
+## Kendi modelinizi getirin
+
+Arena iki lehçe konuşur — yerel Ollama ve OpenAI uyumlu her şey:
+
+```bash
+# Local models (Ollama)
+ARENA_MODELS="gemma4:e4b,qwen3:4b" npm run arena
+
+# Any hosted model — one OpenRouter key covers most of the market
+ARENA_API=openai ARENA_BASE_URL=https://openrouter.ai/api/v1 \
+ARENA_API_KEY=sk-or-... ARENA_TIER=B-tier \
+ARENA_MODELS="deepseek/deepseek-v3.2,z-ai/glm-5.1,xiaomi/mimo-v2.5" \
+npm run arena
+
+# Direct providers work too (any /v1/chat/completions endpoint):
+#   DeepSeek:  ARENA_BASE_URL=https://api.deepseek.com/v1
+#   vLLM/LM Studio: point ARENA_BASE_URL at your server
+```
+
+Sonuçlar çağrılar **arasında birleşir** (isterseniz bir seferde bir model
+çalıştırın) `arena-results/` altına: bir JSON, tam senaryo başına dökümler ve
+paylaşmaya hazır bir `arena-report.md`. Sıralama grafiğini şununla üretin:
+
+```bash
+node scripts/arena-graphic.mjs    # light + dark SVGs from your own results
+```
+
+Yararlı düğmeler: `ARENA_TIER` bir çalıştırmanın modellerini etiketler
+(SoTA / B-tier / local); `ARENA_OUT` çıktıyı yönlendirir;
+`ARENA_MAX_ROUNDS` ve `ARENA_SCENARIO_TIMEOUT_MS` kaçan modelleri sınırlar;
+`COMFYUI_DEFAULT_CHECKPOINT` işleme checkpoint'ini sabitler (checkpoint
+klasörünüz txt2img olmayan bir modelle başlıyorsa bunu yapın).
+
+**Gereksinimler**: txt2img checkpoint'li çalışan bir ComfyUI (SD 1.5 yeter —
+senaryolar nitelik değil içerik üzerinde doğrulanır), bir kez `npm run build`
+ve ya Ollama ya da bir API anahtarı.
+
+## Her çalıştırmanın kaydettikleri
+
+Puanın ötesinde her sıralama girdisi bir sonucu eyleme geçirilebilir kılan
+eksenleri taşır (#792):
+
+- **Nicemleme ve parametre boyutu** (Ollama `/api/show`) ve **oturmuş VRAM**
+  (`/api/ps`, model hâlâ yüklüyken örneklenir) — böylece "8 GB kartım gerçekten
+  ne çalıştırabilir ve bir q4 yeterince iyi mi?" tablodan yanıtlanır. Aynı
+  modeli merdivenden q4 / q8 / fp16 ile geçirmek puanın gerçekten nerede
+  düştüğünü gösterir. Bu alanlar sonda yanıt veremediğinde boştur
+  (barındırılan uç noktaların dengi yoktur) — asla tahmin edilmez.
+- **comfyui-mcp sürümü**, okuyabilen her girdinin üzerine damgalanır
+  (kendi paket sürümünü okuyamayan bir çalıştırma *sürümsüz* kaydedilir,
+  tıpkı damgalama öncesi bir çalıştırma gibi). Mutlak puanlar araç yüzeyi
+  değişince hareket eder, bu yüzden rapor sürümleri (ya da sürümsüz
+  çalıştırmaları) karıştıran herhangi bir sıralamayı **doğrudan
+  karşılaştırılamaz** olarak işaretler.
+- **Bir başarısızlıkta modelin uzandığı her araç**, yalnızca başarılı olanlar
+  değil. 2+ model aynı senaryoda aynı yanlış aracı seçtikten sonra
+  başarısız olursa (ve geçen hiçbir çalıştırma onu kullanmadıysa) rapor bir
+  **kuşkulu senaryo** işaretler — alan çapında yanlış bir seçim bir
+  yetenek boşluğu değil bir araç-*açıklaması* kuşkusudur (emsal: #557/#654,
+  yanlış olan modeller değil bizim kendi ifademizdi). O senaryonun
+  puanlarına güvenmeden önce açıklamayı denetleyin.
+
+## Güncel sıralama
+
+<img className="block dark:hidden" src="/images/arena-leaderboard-light.svg" alt="ComfyUI LLM Arena sıralaması" />
+<img className="hidden dark:block" src="/images/arena-leaderboard-dark.svg" alt="ComfyUI LLM Arena sıralaması" />
+
+14 model, üst kümede 3'ün en iyisi. Manşet bulgular:
+
+- **gemini-3.1-pro-preview her çalıştırmada kusursuz olan tek modeldir**
+  (20-20-20).
+- claude-opus-4.8 ve gpt-5.5 ikisi de 20'ye ulaşır ama diğer çalıştırmalarda
+  bir puan düşürdü.
+- **B katmanı öncüden bir puan geridedir** — GLM-5.1 (19-19-19, alandaki en
+  kararlı model), Kimi-k2.5 ve MiMo-v2.5 19'da — öncü fiyatlandırmasının küçük
+  bir kesrinde.
+- Küçük yerel modeller temelleri ve arenanin bir kısmını geçer ama
+  crucible'ın grafik kompozisyonunda takılır; llama3.1:8b araç biçimini hiç
+  tutamaz.
+
+Kapsamadığımız modellerin topluluk çalıştırmalarını çok isteriz —
+`arena-report.md` (ve grafiği) bir
+[GitHub tartışmasında](https://github.com/artokun/comfyui-mcp/discussions)
+ya da issue'da yayımlayın, GPU + model etiketlerinizle; böylece sonuçlar
+karşılaştırılabilir olur.
+
+## Panel duman testi
+
+Bir arena puanı başsız araç sürmeyi kanıtlar; `npm run smoke:panel` aynı
+modelin **canlı kenar çubuğu panelinde** (akış, tur kapısı, köprü üzerindeki
+6 araçlı yönlendirici) ayakta kaldığını kanıtlar. Model başına kendi
+portunda yalıtılmış bir orkestratör başlatır ve gerçek bir tur sürer:
+
+```bash
+SMOKE_MODELS="gemma4:e4b,xiaomi/mimo-v2.5" npm run smoke:panel
+```

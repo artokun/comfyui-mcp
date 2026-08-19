@@ -677,6 +677,36 @@ export const DEAD_NAMES: readonly DeadName[] = [
         why: "Same migration table as docs/using-tools.mdx, French translation. Cells stay English.",
       },
       {
+        path: "docs/es/using-tools.mdx",
+        context: "| `get_workspace` | `workspace` with `action: \"get\"` |",
+        why: "Same migration table as docs/using-tools.mdx, es translation. Cells stay English.",
+      },
+      {
+        path: "docs/zh-TW/using-tools.mdx",
+        context: "| `get_workspace` | `workspace` with `action: \"get\"` |",
+        why: "Same migration table as docs/using-tools.mdx, zh-TW translation. Cells stay English.",
+      },
+      {
+        path: "docs/ru/using-tools.mdx",
+        context: "| `get_workspace` | `workspace` with `action: \"get\"` |",
+        why: "Same migration table as docs/using-tools.mdx, ru translation. Cells stay English.",
+      },
+      {
+        path: "docs/ar/using-tools.mdx",
+        context: "| `get_workspace` | `workspace` with `action: \"get\"` |",
+        why: "Same migration table as docs/using-tools.mdx, ar translation. Cells stay English.",
+      },
+      {
+        path: "docs/pt-BR/using-tools.mdx",
+        context: "| `get_workspace` | `workspace` with `action: \"get\"` |",
+        why: "Same migration table as docs/using-tools.mdx, pt-BR translation. Cells stay English.",
+      },
+      {
+        path: "docs/tr/using-tools.mdx",
+        context: "| `get_workspace` | `workspace` with `action: \"get\"` |",
+        why: "Same migration table as docs/using-tools.mdx, tr translation. Cells stay English.",
+      },
+      {
         path: "src/tools/retired-redirect.ts",
         context: '"Tool get_workspace not found"',
         why: "A verbatim quotation of MEASURED output: the three-row table in that module's header records what each call path actually answered on 0.49.0 for an already-retired name, which is the evidence the module exists at all. Quoting the SDK's bare 404 is the opposite of instructing anyone to call the name — it is the defect being removed. Deliberately the ONLY mention left in that file: the surrounding prose was reworded to say 'a name the 0.49.0 slices had already retired', and its test file derives the name from this ledger rather than spelling it, so this exemption covers one quoted line instead of seven comments. Pinned to the quotation because a quotation is the part least likely to be reworded — and if it IS reworded the gate should fire.",
@@ -745,6 +775,36 @@ export const DEAD_NAMES: readonly DeadName[] = [
         path: "docs/fr/using-tools.mdx",
         context: "| `get_queue` | `queue` with `action: \"list\"` |",
         why: "Same migration table as docs/using-tools.mdx, French translation. Cells stay English.",
+      },
+      {
+        path: "docs/es/using-tools.mdx",
+        context: "| `get_queue` | `queue` with `action: \"list\"` |",
+        why: "Same migration table as docs/using-tools.mdx, es translation. Cells stay English.",
+      },
+      {
+        path: "docs/zh-TW/using-tools.mdx",
+        context: "| `get_queue` | `queue` with `action: \"list\"` |",
+        why: "Same migration table as docs/using-tools.mdx, zh-TW translation. Cells stay English.",
+      },
+      {
+        path: "docs/ru/using-tools.mdx",
+        context: "| `get_queue` | `queue` with `action: \"list\"` |",
+        why: "Same migration table as docs/using-tools.mdx, ru translation. Cells stay English.",
+      },
+      {
+        path: "docs/ar/using-tools.mdx",
+        context: "| `get_queue` | `queue` with `action: \"list\"` |",
+        why: "Same migration table as docs/using-tools.mdx, ar translation. Cells stay English.",
+      },
+      {
+        path: "docs/pt-BR/using-tools.mdx",
+        context: "| `get_queue` | `queue` with `action: \"list\"` |",
+        why: "Same migration table as docs/using-tools.mdx, pt-BR translation. Cells stay English.",
+      },
+      {
+        path: "docs/tr/using-tools.mdx",
+        context: "| `get_queue` | `queue` with `action: \"list\"` |",
+        why: "Same migration table as docs/using-tools.mdx, tr translation. Cells stay English.",
       },
     ],
   },
@@ -943,6 +1003,36 @@ export const DEAD_NAMES: readonly DeadName[] = [
         path: "docs/fr/using-tools.mdx",
         context: "| `apps_run_status` | `apps` with `action: \"run_status\"` |",
         why: "Same migration table as docs/using-tools.mdx, French translation. Cells stay English.",
+      },
+      {
+        path: "docs/es/using-tools.mdx",
+        context: "| `apps_run_status` | `apps` with `action: \"run_status\"` |",
+        why: "Same migration table as docs/using-tools.mdx, es translation. Cells stay English.",
+      },
+      {
+        path: "docs/zh-TW/using-tools.mdx",
+        context: "| `apps_run_status` | `apps` with `action: \"run_status\"` |",
+        why: "Same migration table as docs/using-tools.mdx, zh-TW translation. Cells stay English.",
+      },
+      {
+        path: "docs/ru/using-tools.mdx",
+        context: "| `apps_run_status` | `apps` with `action: \"run_status\"` |",
+        why: "Same migration table as docs/using-tools.mdx, ru translation. Cells stay English.",
+      },
+      {
+        path: "docs/ar/using-tools.mdx",
+        context: "| `apps_run_status` | `apps` with `action: \"run_status\"` |",
+        why: "Same migration table as docs/using-tools.mdx, ar translation. Cells stay English.",
+      },
+      {
+        path: "docs/pt-BR/using-tools.mdx",
+        context: "| `apps_run_status` | `apps` with `action: \"run_status\"` |",
+        why: "Same migration table as docs/using-tools.mdx, pt-BR translation. Cells stay English.",
+      },
+      {
+        path: "docs/tr/using-tools.mdx",
+        context: "| `apps_run_status` | `apps` with `action: \"run_status\"` |",
+        why: "Same migration table as docs/using-tools.mdx, tr translation. Cells stay English.",
       },
     ],
   },
@@ -1204,6 +1294,36 @@ export const DEAD_NAMES: readonly DeadName[] = [
         path: "docs/fr/using-tools.mdx",
         context: '| `install_workflow_dependencies` | `list_packs` with `action: "install_deps"` |',
         why: "Same migration table as docs/using-tools.mdx, French translation. Cells stay English.",
+      },
+      {
+        path: "docs/es/using-tools.mdx",
+        context: '| `install_workflow_dependencies` | `list_packs` with `action: "install_deps"` |',
+        why: "Same migration table as docs/using-tools.mdx, es translation. Cells stay English.",
+      },
+      {
+        path: "docs/zh-TW/using-tools.mdx",
+        context: '| `install_workflow_dependencies` | `list_packs` with `action: "install_deps"` |',
+        why: "Same migration table as docs/using-tools.mdx, zh-TW translation. Cells stay English.",
+      },
+      {
+        path: "docs/ru/using-tools.mdx",
+        context: '| `install_workflow_dependencies` | `list_packs` with `action: "install_deps"` |',
+        why: "Same migration table as docs/using-tools.mdx, ru translation. Cells stay English.",
+      },
+      {
+        path: "docs/ar/using-tools.mdx",
+        context: '| `install_workflow_dependencies` | `list_packs` with `action: "install_deps"` |',
+        why: "Same migration table as docs/using-tools.mdx, ar translation. Cells stay English.",
+      },
+      {
+        path: "docs/pt-BR/using-tools.mdx",
+        context: '| `install_workflow_dependencies` | `list_packs` with `action: "install_deps"` |',
+        why: "Same migration table as docs/using-tools.mdx, pt-BR translation. Cells stay English.",
+      },
+      {
+        path: "docs/tr/using-tools.mdx",
+        context: '| `install_workflow_dependencies` | `list_packs` with `action: "install_deps"` |',
+        why: "Same migration table as docs/using-tools.mdx, tr translation. Cells stay English.",
       },
     ],
   },
@@ -1524,6 +1644,36 @@ export const DEAD_NAMES: readonly DeadName[] = [
         context: "| `validate_workflow` | `create_workflow` with `action: \"validate\"` |",
         why: "Same migration table as docs/using-tools.mdx, French translation. Cells stay English.",
       },
+      {
+        path: "docs/es/using-tools.mdx",
+        context: "| `validate_workflow` | `create_workflow` with `action: \"validate\"` |",
+        why: "Same migration table as docs/using-tools.mdx, es translation. Cells stay English.",
+      },
+      {
+        path: "docs/zh-TW/using-tools.mdx",
+        context: "| `validate_workflow` | `create_workflow` with `action: \"validate\"` |",
+        why: "Same migration table as docs/using-tools.mdx, zh-TW translation. Cells stay English.",
+      },
+      {
+        path: "docs/ru/using-tools.mdx",
+        context: "| `validate_workflow` | `create_workflow` with `action: \"validate\"` |",
+        why: "Same migration table as docs/using-tools.mdx, ru translation. Cells stay English.",
+      },
+      {
+        path: "docs/ar/using-tools.mdx",
+        context: "| `validate_workflow` | `create_workflow` with `action: \"validate\"` |",
+        why: "Same migration table as docs/using-tools.mdx, ar translation. Cells stay English.",
+      },
+      {
+        path: "docs/pt-BR/using-tools.mdx",
+        context: "| `validate_workflow` | `create_workflow` with `action: \"validate\"` |",
+        why: "Same migration table as docs/using-tools.mdx, pt-BR translation. Cells stay English.",
+      },
+      {
+        path: "docs/tr/using-tools.mdx",
+        context: "| `validate_workflow` | `create_workflow` with `action: \"validate\"` |",
+        why: "Same migration table as docs/using-tools.mdx, tr translation. Cells stay English.",
+      },
     ],
   },
   {
@@ -1581,6 +1731,36 @@ export const DEAD_NAMES: readonly DeadName[] = [
         context: "| `list_workflows` | `get_workflow` with `action: \"list\"` |",
         why: "Same migration table as docs/using-tools.mdx, French translation. Cells stay English.",
       },
+      {
+        path: "docs/es/using-tools.mdx",
+        context: "| `list_workflows` | `get_workflow` with `action: \"list\"` |",
+        why: "Same migration table as docs/using-tools.mdx, es translation. Cells stay English.",
+      },
+      {
+        path: "docs/zh-TW/using-tools.mdx",
+        context: "| `list_workflows` | `get_workflow` with `action: \"list\"` |",
+        why: "Same migration table as docs/using-tools.mdx, zh-TW translation. Cells stay English.",
+      },
+      {
+        path: "docs/ru/using-tools.mdx",
+        context: "| `list_workflows` | `get_workflow` with `action: \"list\"` |",
+        why: "Same migration table as docs/using-tools.mdx, ru translation. Cells stay English.",
+      },
+      {
+        path: "docs/ar/using-tools.mdx",
+        context: "| `list_workflows` | `get_workflow` with `action: \"list\"` |",
+        why: "Same migration table as docs/using-tools.mdx, ar translation. Cells stay English.",
+      },
+      {
+        path: "docs/pt-BR/using-tools.mdx",
+        context: "| `list_workflows` | `get_workflow` with `action: \"list\"` |",
+        why: "Same migration table as docs/using-tools.mdx, pt-BR translation. Cells stay English.",
+      },
+      {
+        path: "docs/tr/using-tools.mdx",
+        context: "| `list_workflows` | `get_workflow` with `action: \"list\"` |",
+        why: "Same migration table as docs/using-tools.mdx, tr translation. Cells stay English.",
+      },
     ],
   },
   {
@@ -1627,6 +1807,36 @@ export const DEAD_NAMES: readonly DeadName[] = [
         path: "docs/fr/using-tools.mdx",
         context: "| `analyze_workflow` | `get_workflow` with `action: \"analyze\"` |",
         why: "Same migration table as docs/using-tools.mdx, French translation. Cells stay English.",
+      },
+      {
+        path: "docs/es/using-tools.mdx",
+        context: "| `analyze_workflow` | `get_workflow` with `action: \"analyze\"` |",
+        why: "Same migration table as docs/using-tools.mdx, es translation. Cells stay English.",
+      },
+      {
+        path: "docs/zh-TW/using-tools.mdx",
+        context: "| `analyze_workflow` | `get_workflow` with `action: \"analyze\"` |",
+        why: "Same migration table as docs/using-tools.mdx, zh-TW translation. Cells stay English.",
+      },
+      {
+        path: "docs/ru/using-tools.mdx",
+        context: "| `analyze_workflow` | `get_workflow` with `action: \"analyze\"` |",
+        why: "Same migration table as docs/using-tools.mdx, ru translation. Cells stay English.",
+      },
+      {
+        path: "docs/ar/using-tools.mdx",
+        context: "| `analyze_workflow` | `get_workflow` with `action: \"analyze\"` |",
+        why: "Same migration table as docs/using-tools.mdx, ar translation. Cells stay English.",
+      },
+      {
+        path: "docs/pt-BR/using-tools.mdx",
+        context: "| `analyze_workflow` | `get_workflow` with `action: \"analyze\"` |",
+        why: "Same migration table as docs/using-tools.mdx, pt-BR translation. Cells stay English.",
+      },
+      {
+        path: "docs/tr/using-tools.mdx",
+        context: "| `analyze_workflow` | `get_workflow` with `action: \"analyze\"` |",
+        why: "Same migration table as docs/using-tools.mdx, tr translation. Cells stay English.",
       },
     ],
   },

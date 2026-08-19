@@ -1,0 +1,214 @@
+---
+title: "المضيفون من أطراف ثالثة"
+description: "ابنِ واجهتك الأمامية الخاصة (لوحة Blender، أو امتداد متصفح، أو تطبيقًا آخر) على بروتوكول الاقتران نفسه الذي يستخدمه تطبيق الجوّال — وكيل واحد، وسياق مشترك، وعميل رقيق. أشكال الرسائل، ونقاط النهاية، وثوابت الأمان، وموجّه جاهز للصق حتى يسند نموذج لغوي محوّلك."
+icon: "plug"
+---
+
+تتحدث لوحة الوكيل، و[تطبيق الجوّال](/docs/ar/mobile)، وأي أداة تقترن بجلسة قيد
+التشغيل **بروتوكول WebSocket صغير واحد** إلى مستمع الاقتران لدى المنسّق.
+و**مضيف طرف ثالث** أي عميل تبنيه على ذلك البروتوكول — لوحة Blender، أو امتداد
+متصفح، أو واجهة سطر أوامر، أو محرّر آخر — **يلتصق بتبويب سطح مكتب حيّ ويقود جلسة
+وكيله**. الوكيل نفسه، والسياق نفسه، بلا عملية Claude Code ثانية، ولا شيء إضافي
+يثبّته المستخدم.
+
+<Note>
+هذا هو السطح نفسه الذي بُني عليه تطبيق الجوّال. إن استطعت فتح WebSocket وإرسال
+JSON، تستطيع بناء مضيف.
+</Note>
+
+## كيف يعمل
+
+<Steps>
+<Step title="سطح المكتب يستمع أصلًا">
+عندما تكون لوحة الوكيل مفتوحة، يشغّل المنسّق **مستمع اقتران مقيَّد برمز** على
+الشبكة المحلية (راجع [نقاط النهاية](#نقاط-النهاية)). وكل تبويب لوحة مفتوح هو
+**تبويب سطح مكتب** بـ `tab_id` ثابت وجلسة وكيل حيّة.
+</Step>
+<Step title="يتصل مضيفك برمز الاقتران">
+افتح WebSocket إلى رابط الاقتران والرمز في سلسلة الاستعلام. وبدون رمز صالح يُرفَض
+الاتصال — فالاقتران هو حد الأمان كله.
+</Step>
+<Step title="اسرد والتصق بتبويب">
+أرسل `list_tabs` لاكتشاف تبويبات سطح المكتب المفتوحة، ثم `attach_tab` لعكس واحد.
+ويستقبل مضيفك الآن **نشاط ذلك التبويب** (متدفّقًا) ويستطيع **قيادته**.
+</Step>
+<Step title="قُد الجلسة المشتركة">
+أرسل إطارات `user_message`. وأثناء الالتصاق، يوجّهها الخادم إلى **التبويب المعكوس**
+— فتدخل رسالتك *المحادثة نفسها* التي فيها وكيل سطح المكتب. وهذا ما يجعله «وكيلًا
+واحدًا، سياقًا مشتركًا» لا جلسة ثانية.
+</Step>
+</Steps>
+
+## نقاط النهاية
+
+يُشتَق مستمع الاقتران من منفذ الجسر (`COMFYUI_MCP_BRIDGE_PORT`، الافتراضي
+**9180**):
+
+| المنفذ | الغرض |
+|---|---|
+| `bridge` (9180) | جسر الواجهة بين اللوحة ⇄ المنسّق (اتصال سطح المكتب نفسه). |
+| `bridge + 1` (9181) | سطح `panel_*` عبر HTTP-MCP — **ليس** هذا البروتوكول. |
+| **`bridge + 2` (9182)** | **مستمع الاقتران / التحكّم عن بُعد الذي تتصل به.** مقيَّد برمز، مربوط على `0.0.0.0` (قابل للوصول على الشبكة المحلية). |
+
+**رابط الاقتران:**
+
+```
+ws://<desktop-machine-ip>:9182/?token=<PAIR_TOKEN>
+```
+
+- الرمز إمّا **مثبَّت** من المستخدم عبر `COMFYUI_MCP_PAIR_TOKEN` (اقتران دائم) أو
+  **يُسكّ لكل جلسة** ويُوزَّع عبر تدفّق QR / الاقتران في اللوحة. ويحصل مضيفك عليه
+  بالطريقة نفسها التي يحصل بها تطبيق الجوّال: يقترنه المستخدم مرة واحدة.
+- **مربوط بالشبكة المحلية افتراضيًا**، لكن التعريض العام مدمج حين يطلبه المستخدم:
+  يعرض مربع الاقتران في اللوحة وضع **الإنترنت** الذي يفتح نفق cloudflared سريعًا
+  مشفَّرًا، وتستطيع المؤسسات توجيهه عبر مُرحِّل ذاتي الاستضافة
+  (`COMFYUI_MCP_TUNNEL_BACKEND=relay`). والرمز يقيّده في الحالين.
+
+## أشكال الرسائل
+
+كل الإطارات كائنات JSON بـ `type`. وتحمل إطارات الطلب/الرد `cid` (معرّف ارتباط)
+تختاره أنت، ويُعاد صداه في الرد المطابق.
+
+### وارد — المضيف → المنسّق
+
+| `type` | الحقول | الأثر |
+|---|---|---|
+| `hello` | `tab_id`، `headless: true` | سجّل اتصالك. ومضيفو الأطراف الثالثة عملاء **بلا واجهة** (لا لوحة رسم خاصة بهم). |
+| `list_tabs` | `cid` | اطلب تبويبات سطح المكتب المفتوحة. |
+| `attach_tab` | `cid`، `target_tab_id` | اعكس + قُد ذلك التبويب. صالح فقط لتبويب سطح مكتب **حقيقي غير بلا واجهة**. |
+| `detach_tab` | — | توقّف عن العكس/القيادة؛ ويعود إدخالك إلى جلستك الخاصة (الفارغة). |
+| `user_message` | `text` (+ حقول رسالتك المعتادة) | دور في محادثة التبويب **المعكوس**. يختمه الخادم إلى التبويب الملتصق. |
+
+وأي حدث لوحة آخر ترسله أثناء الالتصاق يُوجَّه كذلك إلى التبويب المعكوس.
+
+### صادر — المنسّق → المضيف
+
+| `type` | الحقول | المعنى |
+|---|---|---|
+| `tab_list` | `cid`، `tabs[]` | رد على `list_tabs`: تبويبات سطح المكتب القابلة للالتصاق. |
+| `tab_attached` | `cid`، `tab_id`، `ok`، `error?` | رد على `attach_tab`. `ok:false` + `error` إن كان الهدف قديمًا/بلا واجهة. |
+| `mailbox_flush` | إطارات مخزَّنة | إعادة تشغيل لأي شيء أنتجه التبويب وأنت بلا اتصال حيّ. |
+
+إضافةً إلى نشاط الوكيل الحيّ للتبويب المعكوس (ردود متدفّقة، وحالة، وبطاقات)،
+الذي يعرضه مضيفك.
+
+<Warning>
+**`attach_tab` سلطة — لا تستطيع تزوير الهدف.** يكتب الخادم فوق أي `tab_id` تضعه
+على إطار صادر بالتبويب الذي التصقت به فعلًا. ولا يستطيع مضيف أبدًا قيادة تبويب لم
+يلتصق به صراحة. وهذا متعمَّد؛ راجع أدناه.
+</Warning>
+
+## ثوابت الأمان — يجب أن يحافظ عليها المضيف
+
+هذه الضمانات التي تجعل الاقتران آمنًا. وبناء مضيف يحترمها هو العقد كله؛ ومضيف
+يحاول تجاوزها هو بالضبط ما صُمِّم المستمع لرفضه.
+
+<Note>
+الحفاظ على هذه ليس قيدًا على مضيفك — إنه *هو* الميزة. توقف عميلًا عن اختطاف جلسة
+لم يقترن بها قط.
+</Note>
+
+1. **بوابة الرمز.** يرفض المستمع أي اتصال بلا رمز اقتران صالح (`verifyClient`).
+   لا تبنِ تدفّقًا يشحن الرمز أو يضمّنه تلقائيًا — يقترن المستخدم، مرة، عن عمد.
+2. **ختم `attach_tab` السلطوي.** الخادم، لا العميل، يقرّر أي تبويب تستهدفه
+   إطاراتك. لا تعتمد على `tab_id` الذي يوفّره العميل للتوجيه؛ التصق أولًا، ثم أرسل.
+3. **أهداف غير بلا واجهة فقط.** يجوز لك الالتصاق بتبويب سطح مكتب حقيقي، لا بعميل
+   بلا واجهة آخر (لا تستطيع عكس هاتف/مضيف آخر).
+4. **تبويب واحد في كل مرة.** الالتصاق بـ B يسقط اشتراكك في A. نمذج عكسًا نشطًا
+   واحدًا لكل اتصال.
+5. **نوع مقبس مثبَّت.** نوع الاتصال (بلا واجهة مقابل سطح مكتب) ثابت عند أول
+   `hello`؛ لا تحاول قلبه للهروب من حرّاس الاستيلاء.
+
+## عميل مرجعي أدنى
+
+```js
+const token = "<PAIR_TOKEN>";            // obtained via the user's pair flow
+const ws = new WebSocket(`ws://192.168.1.50:9182/?token=${token}`);
+let cid = 0;
+
+ws.onopen = () => {
+  ws.send(JSON.stringify({ type: "hello", tab_id: "myhost:" + crypto.randomUUID(), headless: true }));
+  ws.send(JSON.stringify({ type: "list_tabs", cid: ++cid }));
+};
+
+ws.onmessage = (ev) => {
+  const m = JSON.parse(ev.data);
+  if (m.type === "tab_list") {
+    // pick a desktop tab and attach to it
+    const target = m.tabs[0]?.tab_id;
+    if (target) ws.send(JSON.stringify({ type: "attach_tab", cid: ++cid, target_tab_id: target }));
+  } else if (m.type === "tab_attached" && m.ok) {
+    // now you're driving that tab's session
+    ws.send(JSON.stringify({ type: "user_message", text: "Add a KSampler and wire it up." }));
+  } else {
+    // render streamed agent activity for the mirrored tab
+    console.log("from session:", m);
+  }
+};
+```
+
+## علّم نموذجًا لغويًا بناء المحوّل الخاص بك
+
+الصق الموجّه أدناه في Claude أو ChatGPT أو وكيل البرمجة لديك حتى يسند محوّل مضيف
+لمنصّتك. يحمل عقد البروتوكول كاملًا، فلا يحتاج النموذج إلى التخمين.
+
+```text Copy this into your LLM
+You are building a THIRD-PARTY HOST ("adapter") for comfyui-mcp. A host connects
+to a running comfyui-mcp orchestrator over WebSocket, attaches to a live desktop
+"tab", and drives that tab's agent session — same agent, shared context, no second
+session. Build the adapter for THIS platform: <describe your platform, e.g. a
+Blender sidebar panel / a Chrome extension / a Neovim plugin>.
+
+CONNECTION
+- WebSocket to:  ws://<desktop-ip>:9182/?token=<PAIR_TOKEN>
+  (port = bridge port + 2; bridge default 9180. Token is provided by the user via
+  their pairing flow — NEVER hardcode, embed, or auto-provision it.)
+- On open, send:  {"type":"hello","tab_id":"<your-unique-id>","headless":true}
+
+DISCOVER + ATTACH
+- Send {"type":"list_tabs","cid":1}; you receive {"type":"tab_list","cid":1,"tabs":[...]}.
+- Send {"type":"attach_tab","cid":2,"target_tab_id":"<a tab_id from tab_list>"};
+  you receive {"type":"tab_attached","cid":2,"tab_id":"...","ok":true|false,"error"?}.
+  Only real, non-headless desktop tabs are attachable.
+
+DRIVE
+- Send {"type":"user_message","text":"..."} to post a turn into the ATTACHED tab's
+  conversation. The server routes it to the mirrored tab automatically.
+- Send {"type":"detach_tab"} to stop.
+
+RENDER
+- After attaching you receive the mirrored tab's live activity (streamed agent
+  replies, status, interactive cards) and a {"type":"mailbox_flush"} replay of
+  anything produced while you were disconnected. Render these in your UI.
+
+SECURITY — these are non-negotiable; preserve every one:
+1. Only connect with a user-provided pair token; never embed or auto-ship it.
+2. Never assume you can target a tab you did not attach_tab to — the server stamps
+   the target authoritatively; trust tab_attached.ok, don't spoof tab_id.
+3. Attach only to non-headless desktop tabs; never to another headless client.
+4. One active attachment per connection (attaching to a new tab drops the old).
+5. Do not try to change your connection's kind after the first hello.
+
+DELIVERABLE
+- A minimal, working adapter for the platform above: connect → list → attach →
+  send a user_message → render streamed replies → detach. Handle reconnects and
+  the mailbox_flush replay. Keep the pairing/token handling explicit and
+  user-driven.
+```
+
+## سجّل تكاملك
+
+بنيت شيئًا؟ **سجّله** حتى يُدرَج وحتى نستطيع تنبيهك بتغييرات البروتوكول قبل
+شحنها:
+
+<Card title="سجّل مضيف طرف ثالث" icon="plug" href="https://github.com/artokun/comfyui-mcp/issues/new?template=third-party-host.yml">
+افتح قالب التسجيل على GitHub — الاسم، والمنصّة، والمستودع، وإصدار البروتوكول
+الذي بنيت عليه.
+</Card>
+
+<Note>
+**الاستقرار:** الإطارات أعلاه هي ما يشحن عليه تطبيق الجوّال، لكن هذا ليس عقدًا
+مجمَّدًا ومُرقَّمًا بعد — اقرأ المصدر
+([`src/services/ui-bridge.ts`](https://github.com/artokun/comfyui-mcp/blob/main/src/services/ui-bridge.ts))
+بوصفه السلطة، وسجّل مضيفك حتى تُبلَّغ عندما تتحرّك الأشكال.
+</Note>

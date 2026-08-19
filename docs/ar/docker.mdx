@@ -1,0 +1,112 @@
+---
+title: "Docker وCompose"
+description: "شغّل ComfyUI كخدمة docker-compose وصل comfyui-mcp بها — ولماذا لا يكون comfyui-mcp نفسه خدمة compose أبدًا."
+icon: "docker"
+---
+
+## comfyui-mcp يعمل عبر stdio — ولا يمكن أن يكون خدمة compose
+
+`comfyui-mcp` هو **خادم MCP عبر stdio**. لا منفذ له ولا يعرض شيئًا عبر الشبكة:
+فعميل MCP (Claude Code أو Cursor أو جسر MCP أو غيرها) **يشغّله عمليةً فرعية**
+ويتحدّث إليه عبر stdin/stdout.
+
+لذا فإن خدمة `comfyui-mcp` في `docker-compose.yml` طريق مسدود — ستبدأ، ولن تجد
+من تتحدّث إليه، ثم تخرج. وهذا يُربك تقريبًا كل من يوصل ComfyUI بـ compose،
+لأن ملف compose الصحيح يبدو وكأنه «يفتقد» خدمة. وهو لا يفتقدها: فما تركّبه
+هو **ComfyUI**، وخادم MCP يعمل حيث يعمل عميل MCP لديك، ويصل إلى ComfyUI عبر
+HTTP العادي بواسطة `COMFYUI_URL`.
+
+<Note>
+  أمر `npx` الذي يطلق الخادم يتطلّب **Node.js >= 22** على الجهاز (أو الحاوية)
+  الذي يشغّله — وهذا أبرز مطبّ لصور الأساس النحيفة.
+</Note>
+
+## شكلي النشر
+
+<CardGroup cols={2}>
+  <Card title="npx محلي + ComfyUI محلي" icon="laptop">
+    الافتراضي. يعمل ComfyUI مباشرة على جهازك؛ ويشغّل عميل MCP الأمر
+    `npx -y comfyui-mcp@latest`، الذي يكتشف التثبيت المحلي ومنفذه تلقائيًا.
+    لا حاجة إلى إعداد. راجع [التثبيت](/docs/ar/installation).
+  </Card>
+  <Card title="npx محلي + ComfyUI في Docker / بعيد" icon="docker">
+    يعمل ComfyUI في حاوية (أو على مضيف آخر)؛ وما يزال عميل MCP يشغّل
+    `comfyui-mcp` محليًا، موجَّهًا إليه بـ `COMFYUI_URL` (أو `--comfyui-url`).
+    ورابط ليس على العنوان المحلي يضع الخادم في **الوضع البعيد**: تعمل كل
+    أدوات HTTP — بما فيها تثبيت العقد المخصّصة، الذي يمر عبر واجهة
+    ComfyUI-Manager البرمجية على HTTP. أمّا الأدوات التي تحتاج إلى نظام
+    الملفات أو عملية محلية (تثبيت ComfyUI نفسه، وعمليات comfy-cli، وقراءة
+    السجلات، وحذف ملفات النماذج) فترجع خطأً واضحًا.
+  </Card>
+</CardGroup>
+
+## مثال: ComfyUI في docker-compose
+
+يعيش مثال جاهز للاستخدام في المستودع على
+[`docker/compose/`](https://github.com/artokun/comfyui-mcp/tree/main/docker/compose)
+— ComfyUI كخدمة (NVIDIA افتراضيًا، ومتغير AMD/ROCm معلَّق في التعليق)،
+ومجلدات ربط للنماذج والمخرجات، وإعداد العميل في تعليقات الترويسة:
+
+```yaml
+services:
+  comfyui:
+    image: yanwk/comfyui-boot:cu130-slim-v2   # community image; :rocm for AMD
+    ports:
+      - "8188:8188"
+    volumes:
+      - ./storage/models:/root/ComfyUI/models
+      - ./storage/custom_nodes:/root/ComfyUI/custom_nodes
+      - ./storage/input:/root/ComfyUI/input
+      - ./storage/output:/root/ComfyUI/output
+      - ./storage/user:/root/ComfyUI/user
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+```
+
+ثم وجّه عميل MCP إلى الحاوية. على **المضيف** (الحالة الشائعة — Claude Code
+على الجهاز نفسه)، استخدم المنفذ المنشور:
+
+```json
+{
+  "mcpServers": {
+    "comfyui": {
+      "command": "npx",
+      "args": ["-y", "comfyui-mcp@latest"],
+      "env": {
+        "COMFYUI_URL": "http://localhost:8188"
+      }
+    }
+  }
+}
+```
+
+إن كان عميل MCP يعمل **داخل خدمة compose أخرى** على الشبكة نفسها (مثل جسر
+MCP-إلى-HTTP أمام Open WebUI)، فاستخدم **اسم خدمة compose**، لا `localhost`:
+
+```
+COMFYUI_URL=http://comfyui:8188
+```
+
+في ذلك التخطيط، خدمة الجسر هي التي تشغّل `comfyui-mcp`، لذا يجب أن تحتوي
+صورتها على Node.js >= 22 مع إمكانية إطلاق الخادم عبر
+`npx -y comfyui-mcp@latest`. والجسور برمجيات طرف ثالث — أعدّ جسرك وفق
+وثائقه؛ ويتضمّن ملف compose النموذجي رسمًا معلَّقًا.
+
+## ملاحظات AMD / ROCm
+
+- استخدم وسم الصورة `yanwk/comfyui-boot:rocm` وألغِ تعليق تمرير ROCm في
+  المثال — وهي التفاصيل التي يفوتها الناس:
+  `devices: [/dev/kfd, /dev/dri]`، و`group_add: [video]`،
+  و`security_opt: [seccomp:unconfined]`.
+- لا يملك `comfyui-mcp` نفسه **أي اعتماد على GPU/CUDA** — ومضيفات ROCm
+  مدعومة بالكامل. و[لوحة الوكيل](/docs/ar/panel) هي **امتداد لـ ComfyUI**،
+  لا خدمة، وهي اختيارية حين تكون واجهتك الأمامية سطحًا خارجيًا.
+- [`docker/runpod/`](https://github.com/artokun/comfyui-mcp/tree/main/docker/runpod)
+  في هذا المستودع هو **صورة RunPod سحابية موجَّهة لـ CUDA** (راجع
+  [النشر السحابي](/docs/ar/cloud-deployment))، وليست صورة ComfyUI عامة
+  الغرض — فلا ينبغي لمستخدمي AMD أن يبدأوا منها.

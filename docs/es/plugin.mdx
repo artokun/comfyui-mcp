@@ -1,0 +1,128 @@
+---
+title: "Plugin de Claude Code"
+description: "comfyui-mcp es un plugin completo de Claude Code: 39 skills de IA, 11 comandos slash, 4 agentes autónomos y 3 hooks encima de las 37 herramientas MCP — conocimiento experto de ComfyUI que crece con cada versión."
+icon: "puzzle-piece"
+---
+
+`comfyui-mcp` no es solo un servidor MCP — se entrega como un **plugin de
+Claude Code** completo. Instalar el plugin le da a Claude conocimiento
+experto y específico de cada modelo sobre ComfyUI para que elija el sampler,
+el CFG, la resolución y los archivos de modelo correctos sin prueba y error.
+
+```bash
+# In Claude Code
+/plugin marketplace add artokun/comfyui-mcp
+/plugin install comfy
+```
+
+## 39 skills de IA — y creciendo
+
+Las skills son documentos de conocimiento curados que Claude carga bajo
+demanda. Cada familia de modelos recibe parámetros de generación, grafos de
+nodos, URLs curadas de descarga de modelos y guía de modos de fallo:
+
+| Skill | Lo que aprende Claude |
+|---|---|
+| `flux-txt2img` | Flux.1 Dev/Schnell + Flux 2 Klein — trampas de BF16 vs FP8, cableado dual-CLIP, selección de VAE |
+| `wan-t2v-video` / `wan-flf-video` | Flujos de trabajo WAN 2.x de texto a video y de primer-último-fotograma |
+| `wan-scail-replacement` | Reemplazo de personaje en video con SCAIL-2 — regla de encuadre de referencia→escala, ajuste y trampas de composición |
+| `ltxv2-video` | LTX-2.3 (y LTX-2 19B) — GGUF UNet, modelo destilado, LoRAs de control de cámara, upscaling en dos etapas, arreglo de kornia |
+| `qwen-txt2img` / `qwen-image-edit` | Generación Qwen-Image y edición basada en instrucciones |
+| `z-image-txt2img` | Flujos de trabajo Z-Image Turbo |
+| `ideogram-ultra` | Ideogram 4 — texto a imagen de pesos abiertos, area prompting, logos / pósters / texto legible |
+| `ernie-image` | ERNIE-Image — texto a imagen rápido, renderizado preciso de texto multilingüe, se ejecuta con menos de 8 GB de VRAM |
+| `anima-base` | ANIMA 1.0 — modelo de anime/ilustración de ~2B, tags de Danbooru + lenguaje natural, inpainting de anime, menos de 6 GB de VRAM |
+| `anima-lora-trainer` | Entrena LoRAs de anime personalizados — entrenador Gradio de kohya `sd-scripts`, menos de 6 GB de VRAM |
+| `ai-toolkit-trainer` | Entrena LoRAs personalizados de WAN 2.2 + Z-Image (personas / estilos / movimiento) — ostris AI-Toolkit, local o RunPod |
+| `installer-packs` | Usa, construye y deriva packs de instalador de un comando — e invita a los usuarios a aportar packs nuevos aguas arriba |
+| `panel-node-pack-sync` | Mantén el pack de nodos del panel lateral al día con el orquestador después de una actualización — detección de desajuste de versión, un pin de versión del que se avisa en lugar de sobreescribir, y una sincronización cuyo resultado se relee del disco |
+| `model-compatibility` | Qué pares VAE/CLIP/codificador de texto van con qué arquitectura — la fuente nº 1 de flujos de trabajo rotos |
+| `model-registry` | URLs de descarga curadas + directorios de destino para cada modelo que referencian las skills — crece en cada versión |
+| `civitai` | Bucle nativo de descubrimiento Civitai → descarga/cableado/generación local mediante `download_model` `action:"search_civitai"` integrado (sin clave, sin servidor extra); el [Civitai MCP](https://mcp.civitai.com/mcp) oficial es un extra opcional de superficie comunitaria, no va incluido |
+| `comfyui-core` | Semántica de cola, historial y API |
+| `comfyui-node-registry` | Autoría + publicación de packs de nodos personalizados en el Comfy Registry |
+| `comfyui-frontend-extensions` | Autoría de extensiones de frontend v1/v2 (pestañas de barra lateral, widgets) |
+| `rgthree` | Configurar rgthree-comfy — conmutadores de grupo Fast Groups Bypasser/Muter (nodos solo de frontend ausentes de `/object_info`, se definen vía PROPIEDADES del nodo no widgets), apilado de Power Lora Loader, buses Context |
+| `director` | Dirección de escena en varios planos para pipelines de video |
+| `prompt-engineering` | Prompting específico de arquitectura (lenguaje natural vs tags) |
+| `troubleshooting` | OOM, nodos que faltan, deriva de versiones — árboles de diagnóstico |
+| `comfyui-launch-flags` | La matriz de flags de arranque VRAM/atención/caché/rendimiento — `--reserve-vram`, `--novram`+`--cache-none`, `--use-sage-attention` vs `--use-pytorch-cross-attention` (Z-Image), más notas del stack de aceleración Blackwell/RTX 5000 |
+
+Las skills nuevas llegan con cada versión — generadas a partir de packs
+populares del registro mediante la herramienta integrada `list_packs`
+(`action: "generate_skill"`), y luego curadas por humanos.
+
+**Prueba el conocimiento antes de cablear nada** — cada skill es un archivo
+markdown plano, útil por sí solo. El más aplicable en general es
+[`prompt-engineering`](https://github.com/artokun/comfyui-mcp/blob/main/plugin/skills/prompt-engineering/SKILL.md)
+— el límite de 77 tokens de CLIP y el troceado `BREAK`, la sintaxis de
+pesos y la estrategia por arquitectura (por qué Flux quiere lenguaje natural
+y ningún prompt negativo mientras que SD1.5 quiere tags). Léelo en el
+navegador, o pégalo en el contexto de cualquier agente como system prompt —
+no hace falta ComfyUI, MCP ni instalación. Cuando conectes el plugin
+completo, los agentes cargan los mismos archivos automáticamente
+(`list_packs` con `action: "skill_read"`).
+
+### Búsqueda en Civitai — integrada
+
+`download_model` `action:"search_civitai"` busca en Civitai de forma nativa
+(API REST pública, sin clave, sin servidor extra): filtros de palabra clave +
+`types` + `base_models` («un LoRA de **Flux**»), solo SFW por defecto, y cada
+resultado devuelve el `model_version_id` que `action:"download_civitai"` toma
+directamente — más las **palabras disparadoras** del modelo para el prompt.
+Como es una herramienta de primera clase funciona en **todos los backends**,
+incluidos los modelos locales pequeños detrás del router compacto. La skill
+`civitai` enseña el relevo completo de descubrimiento → descarga → generación.
+
+**Clave API opcional.** La búsqueda no necesita ninguna. `CIVITAI_API_TOKEN`
+desbloquea descargas restringidas/de acceso anticipado y resultados de
+búsqueda restringidos — una sola variable alimenta tanto la búsqueda como la
+descarga.
+
+**Opcional: el Civitai MCP oficial.** Para la superficie comunitaria más allá
+de buscar→instalar (navegar imágenes de ejemplo + sus parámetros de
+generación, publicar, colecciones), empareja el
+[servidor remoto oficial](https://mcp.civitai.com/mcp) de Civitai
+— ya no se incluye automáticamente, añádelo una vez:
+
+```bash
+claude mcp add --transport http civitai https://mcp.civitai.com/mcp \
+  --header "Authorization: Bearer YOUR_CIVITAI_API_KEY"
+```
+
+## 11 comandos slash
+
+`/comfy:gen` (generar a partir de un prompt), `/comfy:debug` (diagnosticar un
+flujo de trabajo fallido), `/comfy:install` (instalar packs de nodos),
+`/comfy:viz` (flujo de trabajo → Mermaid), `/comfy:batch`, `/comfy:compare`,
+`/comfy:convert`, `/comfy:gallery`, `/comfy:recipe`, `/comfy:director`,
+`/comfy:node-skill`.
+
+## 4 agentes autónomos
+
+- **comfy-explorer** — profundiza en el código fuente de un pack de nodos para documentarlo
+- **comfy-researcher** — enunciado del problema → recomendaciones de packs ordenadas
+- **comfy-debugger** — encuentra la causa raíz de flujos de trabajo fallidos a partir del historial + registros
+- **comfy-optimizer** — ajuste de VRAM y velocidad para una GPU dada
+
+## El panel lateral — sin claves API
+
+<Note>
+  El panel lateral se entrega como pack propio, **en el Comfy Registry y en
+  ComfyUI-Manager como `comfyui-agent-panel`** — búscalo ahí y elige
+  **Latest**, no Nightly. Guía completa: [Panel lateral](/docs/es/panel).
+</Note>
+
+La barra lateral de [comfyui-mcp-panel](https://github.com/artokun/comfyui-mcp-panel)
+ejecuta un agente autónomo con tu **suscripción de Claude** (sin facturación
+API por token). Instala el pack, abre la pestaña Agente y pulsa **Conectar**
+— arranca el [orquestador del panel](/docs/es/configuration) bajo demanda;
+pídele una imagen, un flujo de trabajo o un cambio y trabaja contra tu
+ComfyUI.
+
+## Hooks
+
+Tres hooks mantienen las sesiones de generación ajustadas: **comprobaciones
+previas de VRAM** antes de encolar un flujo de trabajo, **notificaciones de
+finalización de trabajo** y **avisos de guardado** antes de operaciones
+destructivas.

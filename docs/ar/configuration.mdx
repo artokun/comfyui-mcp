@@ -1,0 +1,368 @@
+---
+title: "الإعدادات"
+description: "متغيّرات البيئة، وآليات النقل، واستهداف الاتصال."
+icon: "gear"
+---
+
+كل الإعداد عبر متغيّرات البيئة (تُضبَط في كتلة `env` الخاصة بالخادم في
+`~/.claude/settings.json`) أو رايات سطر الأوامر. أولوية هدف ComfyUI:
+`--comfyui-url` / `COMFYUI_URL` → `COMFYUI_HOST`/`COMFYUI_PORT` → الاكتشاف
+التلقائي.
+
+## أوضاع النشر
+
+يعمل `comfyui-mcp` في واحد من ثلاثة أوضاع، يُختار تلقائيًا من البيئة:
+
+| الوضع | المحفّز | نظام ملفات محلي؟ | تحكّم في العمليات؟ | WebSocket؟ |
+| --- | --- | --- | --- | --- |
+| **محلي** | الافتراضي | نعم | نعم | نعم |
+| **بعيد** | يشير `--comfyui-url` / `COMFYUI_URL` إلى مضيف غير محلي | لا | لا | نعم |
+| **سحابة** | `COMFYUI_API_KEY` مضبوط (يستهدف Comfy Cloud) | لا | لا | لا (استطلاع HTTP) |
+
+الأدوات التي تتطلّب تثبيتًا محليًا (`restart_comfyui` مع `action: "start"` / `apply_manifest` / `list_local_models` (`action:"remove"`) / `get_image (action:"list_outputs")` / إلخ)
+ترجع خطأً واضحًا عند التشغيل في الوضع البعيد أو السحابي. وفي الوضعين البعيد والسحابي يتخطّى
+الخادم الاكتشاف التلقائي لـ `COMFYUI_PATH` المحلي حتى لا يبتلع تثبيت محلي قديم عمليات الرفع أو
+تنزيلات النماذج التي يقصدها الوكيل للهدف الفعلي — اضبط `COMFYUI_PATH` صراحة إن أردت
+الخلط والمطابقة.
+
+## الاتصال
+
+<ParamField path="COMFYUI_URL" type="string">
+  الرابط الكامل لنسخة ComfyUI، مثل `https://my-comfy.example.com`. معادل لراية
+  `--comfyui-url`. يتقدّم على المضيف/المنفذ ويتخطّى اكتشاف المنفذ التلقائي.
+  **يُحفَظ بادئة مسار** (مثل `https://host/comfyapi`) حتى تُوجَّه النسخ خلف وكيل
+  عكسي بشكل صحيح. وحين لا يكون المضيف محليًا (أي شيء غير `127.0.0.1` / `localhost` /
+  `::1` / `0.0.0.0`)، يدخل الخادم في **الوضع البعيد** ويتخطّى الاكتشاف التلقائي لـ
+  `COMFYUI_PATH`.
+</ParamField>
+<ParamField path="COMFYUI_HOST" type="string" default="127.0.0.1">
+  مضيف خادم ComfyUI.
+</ParamField>
+<ParamField path="COMFYUI_PORT" type="number">
+  منفذ خادم ComfyUI. يُكتشَف تلقائيًا (8188، ثم 8000) حين لا يكون مضبوطًا.
+</ParamField>
+<ParamField path="COMFYUI_SSL" type="boolean" default="false">
+  استخدم `https`/`wss` بدل `http`/`ws`.
+</ParamField>
+<ParamField path="COMFYUI_PATH" type="string">
+  المسار المطلق لتثبيت ComfyUI المحلي. يُكتشَف تلقائيًا من المواقع الشائعة حين لا
+  يكون مضبوطًا (ويُكبت في الوضعين البعيد/السحابي). مطلوب للأدوات المحلية فقط
+  (تثبيت/إدارة العقد، وحذف النماذج، وقراءة السجلات، وسرد ملفات المخرجات).
+</ParamField>
+
+## بعيد خلف وكيل عكسي / بوابة API
+
+لتثبيت ComfyUI ذاتي الاستضافة معروض تحت بادئة مسار و/أو طبقة مصادقة خاصة به (مسار
+nginx، أو بوابة API، أو حافة SSO) — وهذا **ليس** Comfy Cloud:
+
+- **يحفظ** `COMFYUI_URL` **بادئة مسار** (مثل `https://host/comfyapi`)، فتُوجَّه
+  الطلبات تحتها بدل ضرب `/prompt` و`/system_stats` و… عند الجذر.
+- ترفق متغيّرات `COMFYUI_AUTH_*` ترويسة مصادقة عامة بـ **كل** طلب ComfyUI
+  (الاستدعاءات المباشرة على HTTP ومكتبة العميل/WebSocket التحتية). وهذا مستقل عن
+  وضع السحابة، فلا تُقرأ نسخة بمصادقة بوابة خطأً على أنها Comfy Cloud.
+
+<ParamField path="COMFYUI_AUTH_TOKEN" type="string">
+  رمز مصادقة لتثبيت ComfyUI ذاتي الاستضافة خلف بوابة. حين يُضبَط، يُرسَل على كل
+  طلب ComfyUI. لا يُسجَّل أبدًا.
+</ParamField>
+<ParamField path="COMFYUI_AUTH_HEADER" type="string" default="Authorization">
+  اسم الترويسة التي تحمل الرمز، مثل `X-API-Key`.
+</ParamField>
+<ParamField path="COMFYUI_AUTH_SCHEME" type="string" default="Bearer for Authorization, else none">
+  بادئة المخطط على قيمة الرمز، مثل `Bearer`، `Token`.
+</ParamField>
+<ParamField path="CF_ACCESS_CLIENT_ID" type="string">
+  معرّف عميل **رمز الخدمة** في Cloudflare Access. اضبطه مع
+  `CF_ACCESS_CLIENT_SECRET` للوصول إلى ComfyUI أمامه Cloudflare Access — يُرسلان
+  كلاهما (كـ `CF-Access-Client-Id` / `CF-Access-Client-Secret`) على **كل** طلب
+  ComfyUI (HTTP وWebSocket مراقب قائمة الانتظار)، فيمرّ الموصّل بوابة Access بدل
+  الحصول على صفحة تسجيل الدخول التفاعلية. إضافي إلى `COMFYUI_AUTH_TOKEN`؛ ويأخذان
+  أثرهما إن ضُبطا معًا. لا يُسجَّل أبدًا.
+</ParamField>
+<ParamField path="CF_ACCESS_CLIENT_SECRET" type="string">
+  سر عميل رمز خدمة Cloudflare Access (زوج `CF_ACCESS_CLIENT_ID`). لا يُرسل إلا
+  حين يُضبَط **كلاهما** — يُتجاهَل رمز نصف معدّ. لا يُسجَّل أبدًا.
+</ParamField>
+
+```bash
+# Authorization: Bearer <token>, requests under /comfyapi
+COMFYUI_URL=https://gateway.example.com/comfyapi COMFYUI_AUTH_TOKEN=<token> npx -y comfyui-mcp@latest
+# custom header: X-API-Key: <token>
+COMFYUI_URL=https://gateway.example.com/comfyapi COMFYUI_AUTH_HEADER=X-API-Key COMFYUI_AUTH_TOKEN=<token> npx -y comfyui-mcp@latest
+# ComfyUI behind Cloudflare Access — pass a service token (keeps the human sign-in page up)
+COMFYUI_URL=https://comfy.example.com CF_ACCESS_CLIENT_ID=<id>.access CF_ACCESS_CLIENT_SECRET=<secret> npx -y comfyui-mcp@latest
+```
+
+## Comfy Cloud
+
+ضبط `COMFYUI_API_KEY` يحوّل الخادم إلى **وضع السحابة**: تُوجَّه كل البدائيات
+المعتمدة على HTTP (الإدراج، والسجل، وإحصاءات النظام، وقائمة الانتظار، والعرض،
+والرفع) إلى `cloud.comfy.org` عبر HTTPS بمصادقة `X-API-Key`؛ وتطلق أدوات WebSocket
+ونظام الملفات/العمليات المحلية خطأ `CLOUD_UNSUPPORTED` واضحًا. ساهم
+[@picoSols](https://github.com/picoSols) أصلًا في المعمارية وموجّه `cloud-client`.
+
+<Note>
+  **تشحن Comfy-Org [أدوات وكلاء رسمية](https://docs.comfy.org/agent-tools)** — Comfy Cloud MCP (نسخة تجريبية عامة) وComfy In-App Agent (نسخة ألفا خاصة)، يصونهما فريق Comfy ويعملان على Comfy Cloud. إن كنت تستهدف Comfy Cloud فقط، فهذا على الأرجح الخيار الصحيح؛ راجع [المحلي مقابل Comfy Cloud](/docs/ar/local-vs-comfy-cloud). ووضع السحابة في `comfyui-mcp` أدناه أفضل حين تريد MCP واحدًا عبر المحلي / البعيد / السحابي، أو تحتاجه اليوم (برخصة MIT ويُشحن الآن).
+</Note>
+
+<ParamField path="COMFYUI_API_KEY" type="string">
+  مفتاح API لـ Comfy Cloud. حين يُضبَط، يدخل الخادم وضع السحابة ويتحدّث إلى رابط
+  السحابة المضبوط بدل ComfyUI محلي. لا يُسجَّل أبدًا.
+</ParamField>
+<ParamField path="COMFYUI_CLOUD_URL" type="string" default="https://cloud.comfy.org">
+  تجاوز نقطة نهاية Comfy Cloud (أساسًا للاختبار / التجهيز).
+</ParamField>
+
+## الرموز
+
+<ParamField path="CIVITAI_API_TOKEN" type="string">
+  رمز API لـ CivitAI. يُستخدم للتنزيلات المحجوبة/ذات الوصول المبكر. يُرسل ترويسة
+  bearer (لا في الروابط أبدًا).
+</ParamField>
+<ParamField path="HUGGINGFACE_TOKEN" type="string">
+  رمز HuggingFace لحدود معدّل أعلى على البحث/التنزيل.
+</ParamField>
+<ParamField path="HF_ENDPOINT" type="string">
+  نقطة نهاية مرآة HuggingFace للمناطق مقيَّدة الشبكة (مثل
+  `https://hf-mirror.com`). تُعاد كتابة كل روابط واجهة `huggingface.co` البرمجية
+  والتنزيل إلى هذا المضيف؛ وما يزال `HUGGINGFACE_TOKEN` لديك يركب للمستودعات
+  المحجوبة. المتغيّر المعياري فعليًا — نفسه الذي يحترمه `huggingface_hub`.
+</ParamField>
+<ParamField path="CIVITAI_ENABLED" type="string">
+  اضبطه على `0` لتعطيل الوصول إلى Civitai بالكامل (مناطق يتعذّر فيها الوصول إلى
+  civitai.com). تفشل أدوات Civitai التي يبدأها المستخدم بسرعة برسالة «معطَّل
+  بالإعداد» واضحة بدل التعليق؛ وتتعطّل عمليات بحث المصدر في الخلفية بهدوء.
+</ParamField>
+<ParamField path="GITHUB_TOKEN" type="string">
+  رمز GitHub تستخدمه عمليات توليد المهارات وجلب بيانات العقد الوصفية لتفادي حدود
+  المعدّل.
+</ParamField>
+<ParamField path="COMFY_API_KEY" type="string">
+  مفتاح API لـ comfy.org يُمرَّر إلى عقد الواجهة البرمجية المستضافة عبر حمولة
+  `extra_data` في `/prompt`. إن لم يكن متغيّر البيئة مضبوطًا، يُقرأ المفتاح من
+  `~/.comfy-api-key` (محتويات الملف بعد التشذيب؛ يُوصى بـ `chmod 600`) — مفيد
+  لإعدادات بلا واجهة تُبقي الأسرار خارج قوائم البيئة/العمليات.
+</ParamField>
+<ParamField path="REGISTRY_ACCESS_TOKEN" type="string">
+  مفتاح API لـ Comfy Registry تستخدمه `node_pack` (`action: "publish"`) لنشر حزمة
+  عقد. يُمرَّر إلى comfy-cli عبر البيئة، ولا يُوضَع في الوسائط أو السجلات أبدًا.
+</ParamField>
+
+## السلوك
+
+<ParamField path="COMFYUI_WORKFLOWS_DIR" type="string" default="~/.comfyui-mcp/workflows">
+  الدليل الذي يُمسَح بحثًا عن مسارات سير عمل `*.json`. ويصير كل منها أداة تشغيل
+  تُحمَّل تلقائيًا.
+</ParamField>
+<ParamField path="LOG_LEVEL" type="string" default="info">
+  إسهاب التسجيل: `debug`، `info`، `warn`، `error`.
+</ParamField>
+
+## تنزيلات النماذج
+
+<ParamField path="COMFYUI_DOWNLOAD_CACHE_DIR" type="string" default="~/.comfyui-mcp/cache">
+  ذاكرة مؤقّتة معنونة بالمحتوى لتنزيلات النماذج. تعيد التنزيلات المتكرّرة أو
+  المتزامنة للرابط نفسه استخدام الملف المخزَّن؛ ويُجسَّد مسار النموذج الهدف عبر
+  رابط صلب (متراجعًا إلى النسخ).
+</ParamField>
+<ParamField path="COMFYUI_LRU_CACHE_SIZE_GB" type="number" default="0">
+  الحجم الأقصى لذاكرة التنزيل المؤقّتة بالغيغابايت. `0` يعطّل الإخلاء؛ وفوق الحد،
+  تُحذف الملفات المخزَّنة الأقل استخدامًا مؤخّرًا بعد اكتمال تنزيل.
+</ParamField>
+
+## الإشراف على العمليات (التثبيتات المحلية)
+
+ينطبق على `restart_comfyui` (الإجراءان `start` و`restart`) حين يدير comfyui-mcp
+عملية ComfyUI محلية.
+
+<ParamField path="COMFYUI_STARTUP_CHECK_INTERVAL_S" type="number" default="1">
+  الثواني بين مسابير الجاهزية بعد إطلاق ComfyUI.
+</ParamField>
+<ParamField path="COMFYUI_STARTUP_CHECK_MAX_TRIES" type="number" default="60">
+  الحد الأقصى لمسابير الجاهزية قبل الإبلاغ بأن البدء غير مؤكَّد. مع الفاصل
+  الافتراضي 1 ثانية تكون هذه ميزانية نحو 60 ثانية. رُفعت من 20 لأن ComfyUI مع
+  مجموعة عادية من العقد المخصّصة يستغرق روتينيًا أكثر من 20 ثانية للإجابة عن
+  `/system_stats` عند بدء بارد، وكانت الميزانية الأقصر تبلغ عن بدء غير مؤكَّد
+  لحظات قبل أن تصير نسخة سليمة جاهزة.
+
+  استنفاد الميزانية يعني أن البدء **غير مؤكَّد بعد** — لا أنه فشل.
+</ParamField>
+<ParamField path="COMFYUI_ALWAYS_RESTART" type="boolean" default="false">
+  حين يُفعَّل، تُعاد تشغيل عملية ComfyUI تخرج على نحو غير متوقَّع تلقائيًا. ولا
+  يُعاد أبدًا تشغيل `restart_comfyui` متعمَّد مع `action: "stop"`.
+</ParamField>
+<ParamField path="COMFYUI_RESTART_MAX_ATTEMPTS" type="number" default="3">
+  الحد الأقصى لإعادات التشغيل التلقائية المسموح بها ضمن نافذة إعادة التشغيل قبل
+  التخلّي.
+</ParamField>
+<ParamField path="COMFYUI_RESTART_WINDOW_S" type="number" default="60">
+  نافذة منزلقة (ثوانٍ) تُعدّ عليها محاولات إعادة التشغيل التلقائية.
+</ParamField>
+
+## منسّق اللوحة والجسر
+
+يقود الشريط الجانبي [comfyui-mcp-panel](https://github.com/artokun/comfyui-mcp-panel)
+**منسّق اللوحة** — عملية خلفية تملك جسر WebSocket على العنوان المحلي وتشغّل جلسة
+Claude Agent SDK مستقلة لكل تبويب لوحة على **اشتراك Claude** لديك (بلا مفاتيح
+API). وتبدأ حزمة اللوحة تشغيله تلقائيًا عند تحميل ComfyUI، لذا لا تشغّل عادة
+شيئًا يدويًا — راجع
+[اللوحة الجانبية](/docs/ar/panel). لتشغيله بنفسك:
+
+```bash
+npx -y comfyui-mcp@latest connect
+```
+
+<ParamField path="COMFYUI_MCP_PANEL_ORCHESTRATOR" type="boolean" default="false">
+  شغّل منسّق اللوحة بدل خادم MCP (الأمر نفسه كـ `--panel-orchestrator`).
+</ParamField>
+<ParamField path="COMFYUI_MCP_PANEL_MODEL" type="string" default="claude-opus-5">
+  النموذج لوكلاء اللوحة في الخلفية.
+</ParamField>
+<ParamField path="COMFYUI_MCP_BRIDGE_PORT" type="number" default="9180">
+  منفذ العنوان المحلي لجسر WebSocket الخاص باللوحة الذي يملكه **منسّق اللوحة**
+  (الافتراضي **9180**).
+</ParamField>
+<ParamField path="COMFYUI_MCP_STALL_S" type="number" default="180">
+  عتبة تعثّر المعالجة (ثوانٍ) لمراقب قائمة الانتظار/المعالجة لدى المنسّق: مهمة
+  قيد التشغيل لم يتقدّم عقدتها/تقدّمها لهذه المدة تُعلَّم بأنها متعثّرة، وتُصدَّر
+  ملاحظة STALL/BACKLOG بسطر واحد إلى دور الوكيل التالي. وخطوات الفيديو بطيئة
+  بشرعية، لذا فالافتراضي مرتفع. يُثبَّت عند **15–3600 ثانية**. ويتجاوز إعداد
+  اللوحة **تحذير تعثّر التوليد (بالثواني)** (الإعدادات ← Comfy MCP Agent ← عام)
+  هذا **حيًّا** عبر إطار جسر `set_config` — بلا حاجة إلى إعادة اتصال —
+  متقدّمًا على قيمة البيئة هذه.
+</ParamField>
+
+### الجسر الآمن (قيادة Pod بعيد/سحابي)
+
+حين يستهدف `connect <url>` نسخة ComfyUI **بعيدة عبر https** (مثل Pod في RunPod)،
+لا تستطيع صفحة اللوحة عبر HTTPS على الـ Pod فتح مقبس `ws://127.0.0.1` عادي إلى
+الجسر على جهازك — تحظره المتصفحات (محتوى مختلط / وصول الشبكة الخاصة). فيرقّي
+المنسّق تلقائيًا إلى نفق `wss://` آمن فيعمل بلا موجه، في أي متصفح. راجع
+[النشر السحابي](/docs/ar/cloud-deployment) للشرح الكامل و[المُرحِّل ذاتي
+الاستضافة](/docs/ar/self-hosted-relay) لتشغيل بنية النفق الخاصة بك بدل نفق
+cloudflared السريع الافتراضي.
+
+<ParamField path="COMFYUI_MCP_INSECURE_BRIDGE" type="boolean" default="false">
+  افرض جسر `ws://` العادي على العنوان المحلي حتى عند قيادة هدف بعيد عبر https،
+  بدل الترقية التلقائية إلى نفق آمن. استخدم هذا إن وصلت إلى الـ Pod عبر تمرير منفذ
+  SSH خاص بك (فصفحته أصل عنوان محلي أصلًا) ولا تريد اعتمادًا على Cloudflare.
+  الأمر نفسه كـ `--insecure-bridge`.
+</ParamField>
+<ParamField path="COMFYUI_MCP_TUNNEL_BACKEND" type="string" default="cloudflared">
+  أي خلفية جسر آمن تُستخدم لهدف بعيد: `cloudflared` (الافتراضي — نفق سريع عابر،
+  بلا إعداد) أو `relay` (اتصل بـ
+  [مُرحِّل ذاتي الاستضافة](/docs/ar/self-hosted-relay) تشغّله، لنطاق ثابت وبلا
+  اعتماد على نفق سريع لطرف ثالث). لا يأخذ أثره إلا حين يكون الوضع الآمن نشطًا
+  (هدف بعيد عبر https، وليس `COMFYUI_MCP_INSECURE_BRIDGE`).
+</ParamField>
+<ParamField path="COMFYUI_MCP_RELAY_URL" type="string">
+  رابط `wss://` لمُرحِّلك. مطلوب حين `COMFYUI_MCP_TUNNEL_BACKEND=relay`.
+</ParamField>
+<ParamField path="COMFYUI_MCP_RELAY_KEY" type="string">
+  سرّ مشترك اختياري يقيّد من يستطيع فتح جلسة على مُرحِّلك أصلًا (`?key=`)، مستقل
+  عن رمز الجسر لكل جلسة. لا يعني إلا في وضع المُرحِّل، وفقط إن ضبط نشر مُرحِّلك
+  `RELAY_ACCESS_KEY`.
+</ParamField>
+
+## مراقبة المهام
+
+تتتبّع إشعارات اكتمال المهام المدرجة مراقب (WebSocket حيث يتوفّر، واستطلاع HTTP
+وإلا).
+
+<ParamField path="COMFYUI_JOB_TIMEOUT_S" type="number" default="1800">
+  الحد الأقصى للثواني التي ينتظرها المراقب حتى تكتمل مهمة قبل التخلّي. ارفعه
+  لمعالجات فيديو طويلة جدًا أو مسارات عمل ثقيلة متعدّدة المراحل. (تظل المهمة
+  نفسها تعمل في ComfyUI — يُتخلَّى عن إشعار الاكتمال فقط).
+</ParamField>
+<ParamField path="COMFYUI_JOB_POLL_INTERVAL_S" type="number" default="2">
+  الثواني بين استطلاعات سجل HTTP أثناء مراقبة مهمة.
+</ParamField>
+<ParamField path="COMFYUI_MCP_INTERRUPT_S" type="number" default="30">
+  نافذة احترام الإلغاء (ثوانٍ) لـ `queue` (action:"cancel"): كم تنتظر حتى توقف
+  مقاطعة المهمة الجارية فعلًا قبل التصعيد (إلى `/free`، ثم الإبلاغ أن المعالجة
+  WEDGED). لا يفحص ComfyUI راية المقاطعة إلا بين العقد/الخطوات، فخطوة واحدة
+  لعدّة دقائق لن تحترمها فورًا — وهذا الانتظار هو ما يكشف تعثّرًا حقيقيًا.
+</ParamField>
+
+## تقييد مجموعة الأدوات
+
+لنشر **مستضاف** — Open WebUI مشترك، أو واجهة فريق — المشغّل ليس من يوجّه. تحجب
+متغيّرات الإعداد المسبق/السماح/المنع الأدوات عن النموذج بالكامل: أداة محجوبة لا
+تُسجَّل أبدًا، فتغيب عن `tools/list`، وتغيب عن `call_tool`، ولا يعلم النموذج أنها
+موجودة. وقائمة سماح الإجراءات الرفيق الأضيق لأداة يجب أن تبقى مرئية: تظل الأداة
+مسجَّلة، لكن إجراءً غير مدرج يُرفَض قبل تشغيل معالجه.
+
+<ParamField path="COMFYUI_MCP_TOOL_PRESET" type="string">
+  `safe` — كل شيء ما عدا الأدوات التي تغيّر الجهاز أو مكتبة النماذج. يُحجَب
+  التثبيت والحذف وإعادة التشغيل. **ما تزال المعالجة تعمل، وكذلك ما يأتي معها**:
+  إدراج عمليات التوليد، و`list_api_nodes` (عقد شركاء مستضافة تنفق أرصدة
+  مدفوعة)، و`report_issue` (تقدّم مشكلة GitHub عامة). استخدم `readonly` إن وجب
+  ألا يستطيع مستخدمو واجهة مشتركة الإنفاق أو النشر.
+  `readonly` — فحص فقط: لا تُدرَج معالجات، ولا يُكتب شيء، ولا يُنفَق شيء.
+  ويحجب كلاهما سطح `panel_*` كله، الذي يقود لوحة رسم مشتركة حيّة.
+</ParamField>
+<ParamField path="COMFYUI_MCP_TOOL_DENY" type="string">
+  أسماء أدوات مفصولة بفواصل لحجبها، مثل `restart_comfyui,download_model`. و`*`
+  ختامية تطابق عائلة: `train_*`. تُطبَّق فوق أي إعداد مسبق **وفوق** قائمة سماح.
+</ParamField>
+<ParamField path="COMFYUI_MCP_TOOL_ALLOW" type="string">
+  قائمة سماح مفصولة بفواصل. حين تُضبَط، تكون المجموعة **بالضبط** هذه الأدوات —
+  أي شيء غير مسمّى يُحجَب حتى لو لم تذكره قاعدة منع. استخدمها لإعادة إدخال أدوات
+  فردية بعد إعداد مسبق: `COMFYUI_MCP_TOOL_PRESET=safe` إضافةً إلى
+  `COMFYUI_MCP_TOOL_ALLOW=panel_graph_outline,panel_query_graph`.
+
+  لا يعيد إدخال أداة بعد إعداد مسبق إلا **اسم مطابق**. يضيّق glob (`list_*`)
+  المجموعة كأي مدخل آخر لكنه لا يستطيع إعادة فتح ما أغلقه إعداد مسبق — وإلا
+  لأعاد `ALLOW=list_*` قبول `list_packs`، الذي يثبّت إجراء `install_deps` فيه
+  شيفرة طرف ثالث ويشغّلها، ولجعل `ALLOW=*` كل إعداد مسبق بلا أثر.
+</ParamField>
+<ParamField path="COMFYUI_MCP_TOOL_ACTION_ALLOW" type="string">
+  أزواج `tool:action` مطابقة مفصولة بفواصل. حين تُضبَط، يجب أن يطابق كل استدعاء
+  أداة يحمل حقل `action` واحدًا من هذه الأزواج؛ ولا تستطيع الأدوات الحاملة
+  لإجراء المحذوفة من القائمة إرسال أي إجراء. يقيّد هذا الأدوات المدمجة التي لم
+  تعد أسماؤها وحدها تكشف نصف قطر انفجارها — مثلًا، اسمح بفحص قائمة الانتظار
+  والإلغاء المستهدف دون السماح أيضًا بتعديلات القائمة أو مسح عام:
+
+  `queue:list,queue:status,queue:cancel,enqueue_workflow:enqueue`
+
+  اقرن هذا بـ `COMFYUI_MCP_TOOL_ALLOW` لتقييد البعدين. والقواعد مطابقة؛
+  وتُرفَض البدائل حتى لا يصير إجراء مضاف حديثًا مسموحًا بعد ترقية.
+</ParamField>
+
+```bash A hosted deployment that cannot install or restart anything
+COMFYUI_MCP_TOOL_PRESET=safe npx comfyui-mcp@latest --http --host 0.0.0.0 --port 9100
+```
+
+```bash A generation operator that can inspect, enqueue, and cancel—but not install or clear queues
+COMFYUI_MCP_TOOL_ALLOW=get_system_stats,get_history,create_workflow,enqueue_workflow,queue \
+COMFYUI_MCP_TOOL_ACTION_ALLOW=get_system_stats:stats,get_system_stats:logs,get_system_stats:health,get_history:list,get_history:diagnose,create_workflow:create,create_workflow:modify,create_workflow:validate,create_workflow:node_info,enqueue_workflow:enqueue,queue:list,queue:status,queue:cancel \
+npx comfyui-mcp@latest
+```
+
+<Warning>
+  هذا حد ضد **النموذج** ومن يوجّهه — لا ضد من يضبط البيئة، الذي يستطيع ببساطة
+  إلغاء ضبطه، وليس بديلًا عن إبقاء طرف غير موثوق بعيدًا عن مضيف ComfyUI.
+
+  ي**رفض إعداد خاطئ البدء** بدل البدء بلا قيد: اسم إعداد مسبق مجهول، أو متغيّر
+  مضبوط لكنه فارغ (`${VAR}` غير موسَّع في ملف compose)، يُجهض مع السبب. والظهور
+  بمجموعة أدوات كاملة وأنت تعتقد أنها مقيَّدة أسوأ من عدم وجود مرشّح أصلًا.
+</Warning>
+
+## النقل
+
+يتحدث الخادم **stdio** افتراضيًا (ما يتوقّعه Claude Code). ويستطيع أيضًا خدمة
+نقل **streamable-HTTP** لإعدادات بعيدة/متعدّدة العملاء.
+
+<ParamField path="MCP_TRANSPORT" type="string" default="stdio">
+  `stdio` أو `http`. الرايات المعادلة: `--stdio`، `--http`.
+</ParamField>
+<ParamField path="MCP_HOST" type="string" default="127.0.0.1">
+  مضيف ربط HTTP (مع `--http`). الراية: `--host`.
+</ParamField>
+<ParamField path="MCP_PORT" type="number" default="9100">
+  منفذ ربط HTTP (مع `--http`). الراية: `--port`.
+</ParamField>
+
+```bash Run the HTTP transport
+npx comfyui-mcp@latest --http --host 0.0.0.0 --port 9100 --comfyui-url https://my-comfy.example.com
+```

@@ -1,0 +1,143 @@
+---
+title: "Local vs. agente de Comfy Cloud"
+description: "El In-App Agent y el Comfy Cloud MCP de Comfy-Org se ejecutan en Comfy Cloud; comfyui-mcp se ejecuta en tu propia instalación de ComfyUI, con cualquier LLM — Claude o ChatGPT con tu suscripción existente, o un modelo local gratuito mediante Ollama sin cuenta ni red. Una comparativa honesta de cuándo usar cuál, incluidos los casos en los que Comfy Cloud es la mejor respuesta."
+icon: "scale-balanced"
+---
+
+Si estás decidiendo entre las herramientas oficiales para agentes de Comfy-Org
+y este proyecto, la versión corta es que **resuelven problemas distintos** —
+y para un buen número de personas la opción oficial es la adecuada. Esta
+página pone ambas con honestidad para que elijas una vez y pases a otra cosa.
+
+<Note>
+Comfy-Org entrega rápido, y los estados de abajo son de **julio de 2026**.
+Consulta [docs.comfy.org/agent-tools](https://docs.comfy.org/agent-tools) para
+el estado actual antes de tratar nada de esto como cerrado.
+</Note>
+
+## La respuesta en una línea
+
+**¿Sin GPU local, o quieres cero configuración?** Usa Comfy Cloud. Es de
+primera parte, lo mantiene el equipo que construye ComfyUI, y no tienes que
+pensar en controladores, VRAM ni descargas de modelos.
+
+**¿Ya ejecutas ComfyUI en tu propia máquina?** Para eso existe este proyecto.
+Tu GPU ya está pagada, tus modelos ya están en disco, y tu suscripción de
+Claude o ChatGPT ya cubre el razonamiento.
+
+## Lo que ofrece Comfy-Org
+
+La página de [Agent Tools](https://docs.comfy.org/agent-tools) de Comfy-Org
+lista tres productos relevantes:
+
+| Producto | Qué es | Estado (jul. 2026) |
+|---|---|---|
+| **Comfy Cloud MCP** | Servidor MCP alojado; la generación se ejecuta en GPUs de Comfy Cloud | en beta pública |
+| **Comfy In-App Agent** | Agente por chat dentro de Comfy Cloud que construye y edita tu grafo | en alfa privada |
+| **Comfy Local MCP** | Servidor MCP local de primera parte que controla tu propia instalación de ComfyUI | en prueba privada; aún no está disponible públicamente |
+
+Comfy Cloud MCP es realmente bueno en lo que hace: expone el motor de ComfyUI
+por MCP, inicia sesión con OAuth desde Claude Code, Claude Desktop y Codex, y
+te da acceso gestionado a modelos como Kling, Veo, Seedance, Flux y
+ElevenLabs sin poseer una GPU.
+
+## Lo que ofrece este proyecto
+
+`comfyui-mcp` es un servidor MCP más un agente de barra lateral que controla
+**tu** instalación de ComfyUI — local, LAN, VPS o RunPod. 37 herramientas MCP,
+39 skills específicas de modelo, y un agente de panel que edita tu grafo en
+vivo en lenguaje natural.
+
+La diferencia estructural es **de dónde viene el razonamiento**. Este proyecto
+es agnóstico respecto al proveedor: las mismas herramientas y el mismo panel
+se ejecutan en Claude, ChatGPT, Gemini, Grok o Kimi con una suscripción que ya
+pagas, en cualquier endpoint compatible con OpenAI, o en un modelo local
+gratuito a través de Ollama, LM Studio o llama.cpp — sin cuenta y sin ninguna
+red de salida.
+
+## Cara a cara
+
+| | Comfy Cloud (In-App Agent / Cloud MCP) | comfyui-mcp |
+|---|---|---|
+| La generación se ejecuta en | GPUs de Comfy Cloud | Tu GPU (o tu VPS / pod de RunPod) |
+| Exige una cuenta Comfy | Sí | No |
+| Funciona totalmente sin conexión | No | Sí, con un modelo local |
+| Modelo de razonamiento | Lo proporciona el servicio | **El tuyo** — cualquier LLM, incl. local gratuito |
+| Modelo de coste | Créditos cloud | Tu suscripción existente, o 0 $ en local |
+| Tus imágenes/prompts salen de la máquina | Sí | Solo si eliges un LLM alojado |
+| Gestiona tus nodos personalizados y archivos de modelos | N/A (entorno gestionado) | Sí — instala nodos, descarga modelos |
+| Disponibilidad | Cloud MCP en beta pública; agente en alfa privada | Disponible ahora |
+| Soporte de primera parte | Sí | Proyecto de la comunidad |
+
+## Elige Comfy Cloud si…
+
+- No tienes GPU, o la tuya es demasiado pequeña para los modelos que quieres
+- Quieres que funcione sin configuración ni mantenimiento
+- Prefieres comprar créditos antes que gestionar CUDA, VRAM y descargas de
+  checkpoints
+- Tu equipo ya está en Comfy Cloud y quieres un solo proveedor y una sola
+  factura
+- Quieres soporte de primera parte de la gente que construye ComfyUI
+
+Son buenas razones. Si te aplican varias, deja de leer y usa
+[Comfy Cloud](https://comfy.org/) — lo pasarás mejor.
+
+## Elige comfyui-mcp si…
+
+- **Ya tienes una GPU.** La has pagado; los créditos cloud son una segunda
+  factura por cómputo que ya posees.
+- **Tu trabajo no puede salir de la máquina.** Material de cliente bajo NDA,
+  datos de entrenamiento con licencia, cualquier cosa que no puedas subir. Con
+  un modelo local, no sale nada.
+- **Quieres usar la suscripción de LLM que ya tienes.** Tu plan de Claude o
+  ChatGPT ya cubre el razonamiento — sin un segundo contador para el agente.
+- **Lo quieres gratis, o lo quieres sin conexión.** Ollama, LM Studio y
+  llama.cpp se ejecutan sin cuenta y sin red. Consulta
+  [LLMs locales](/docs/es/local-llms).
+- **Tu instalación es el punto.** Tus nodos personalizados, tus LoRAs, tu
+  colección de checkpoints. El agente
+  [instala nodos y descarga modelos](/docs/tools/models) en la instalación
+  que usas de verdad.
+- **Quieres elegir el modelo.** Distintos LLM son mejores en cosas distintas;
+  la [Arena de LLM](/docs/es/arena) los puntúa en tareas reales de ComfyUI
+  para que elijas con evidencia. Consulta [Backends](/docs/es/backends).
+
+## «¿El MCP local oficial no hará esto redundante?»
+
+Pregunta justa, y merece una respuesta directa en lugar de fingir otra cosa.
+
+Comfy Local MCP es un **controlador de primera parte para una instalación
+local**, y cuando se publique será bueno. Pero es una capa distinta de este
+proyecto: conecta un agente a ComfyUI, mientras que `comfyui-mcp` también
+trae el agente, el backend neutro respecto al proveedor que lo ejecuta en
+once proveedores y runtimes locales, la UI de barra lateral, las skills
+específicas de modelo y la gestión de nodos/modelos.
+
+La lectura honesta: si todo lo que quieres es «que Claude Code hable con mi
+ComfyUI local», las herramientas de primera parte acabarán cubriéndolo, y
+probablemente deberías usarlas. Si quieres traer tu propio modelo —
+incluido uno local gratuito — y que el agente viva dentro de ComfyUI y
+gestione la propia instalación, ese es el hueco que este proyecto existe
+para llenar.
+
+También se componen. Este proyecto también puede apuntar a Comfy Cloud
+(define `COMFYUI_API_KEY` — consulta [Despliegue en la nube](/docs/es/cloud-deployment)),
+así que una sola configuración cubre una instalación local, una caja en LAN,
+un VPS y Comfy Cloud.
+
+## Primeros pasos
+
+<CardGroup cols={2}>
+  <Card title="Inicio rápido" icon="rocket" href="/docs/es/quickstart">
+    Servidor MCP ejecutándose contra tu ComfyUI local en alrededor de un minuto.
+  </Card>
+  <Card title="LLMs locales" icon="microchip" href="/docs/es/local-llms">
+    Totalmente sin conexión en Ollama, LM Studio o llama.cpp — sin cuenta.
+  </Card>
+  <Card title="Backends" icon="shuffle" href="/docs/es/backends">
+    Claude, ChatGPT, Gemini, Grok, Kimi, o cualquier endpoint compatible con OpenAI.
+  </Card>
+  <Card title="Panel del agente" icon="window" href="/docs/es/panel">
+    El agente de barra lateral que controla tu grafo en vivo.
+  </Card>
+</CardGroup>

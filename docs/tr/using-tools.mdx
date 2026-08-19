@@ -1,0 +1,546 @@
+---
+title: "Araçları kullanmak"
+description: "Araçların ne olduğu, neden hiçbirini kendiniz çağırmadığınız ve biri hayır dediğinde ne yapacağınız. İnsanlar için yazıldı, mühendisler için değil."
+icon: "hand-pointer"
+---
+
+[Araç referansı](/docs/tools/image-generation) bu projenin yapabileceği her şeyi,
+yapay zekânın okuduğu biçimde listeler. Bu sayfa sizin için olan sürüm.
+
+<Note>
+  Burada kod yazmanız, JSON girmeniz ya da bir API öğrenmeniz gerekmez. Birine
+  "portre iş akışımı aç ve steps'i 30'a çıkar" diye sordunuzsa arayüzü zaten
+  biliyorsunuz.
+</Note>
+
+## Bir araç, ajanın yapabileceği bir şeydir; sizin yazdığınız bir şey değil
+
+Kendi başına bir sohbet modeli yalnızca metin üretebilir. Bir iş akışını
+anlatabilir; birini açamaz.
+
+Bir **araç**, modele verdiğimiz belirli, adlı bir eylemdir; böylece gerçekten
+sizin ComfyUI'nize ulaşabilir — bir dosya yüklemek, bir işlemeyi kuyruğa almak,
+bir düğüm paketi kurmak, çıkan resmi bakmak. Model bunları uyduramaz. Sabit bir
+menü alır ve menüdeki her madde tam olarak neye ihtiyacı olduğunu söyler.
+
+**O menüden asla siz seçmezsiniz.** Ne istediğinizi, aklınıza gelen sözcüklerle
+söylersiniz; ajan seçer.
+
+| Siz dersiniz | O sessizce çalıştırır |
+| --- | --- |
+| "Kayıtlı neyim var?" | `get_workflow` with `action: "list"` |
+| "Portre olanı aç ve ne yaptığını söyle" | `get_workflow` with `action: "list"`, then `action: "analyze"` |
+| "Bana karda kırmızı bir tilki yap" | `generate_image` (the `image` job) |
+| "Bitti mi?" | `queue` (the `list` job) |
+| "O başarısız oldu ve nedenini anlamıyorum" | `get_history` (the `diagnose` job) |
+| "Düğümlerin yarısı kırmızı" | `list_packs` (the `install_deps` job) |
+| "Diskim doldu, ne büyük?" | `list_local_models` |
+
+İkinci satıra bakın: bir cümle, iki araç, bilmeniz gerekmeyen bir sırada. Bütün
+düzenlemenin amacı budur. Bir dosyayı bulmak ile okumanın ayrı işlemler olduğunu
+bilmeniz beklenmez.
+
+<Tip>
+  İstediğiniz kadar belirsiz olabilirsiniz. "Bir şey bozuldu" mükemmel bir
+  başlangıçtır — ajan `get_system_stats (action:"health")` ile başlar ve daraltır.
+  Belirgin olmak sizi daha hızlı götürür ama asla zorunlu değildir.
+</Tip>
+
+### Peki referans sayfalarındaki tüm o JSON ne işe yarıyor?
+
+Her araç sayfası şöyle bir blok gösterir:
+
+```json
+{
+  "tool": "generate_image",
+  "arguments": {
+    "prompt": "a red fox in deep snow, golden hour, sharp focus",
+    "steps": 30
+  }
+}
+```
+
+Bu, ajanın gönderdiğinin dökümüdür; size bir talimat değildir. Siz "bana karda
+kırmızı bir tilki yap, biraz daha ayrıntı kat" dediniz; diğer uçta çıkan budur.
+
+Birini okuyabilmek iki nedenle değerlidir: ajanın sizi anladığını denetlemek
+istediğinizde ve bir şey ters gidip bunu başkasına anlattığınızda. Ezberlemeye
+değmez.
+
+## Araçlar iki yerden gelir
+
+İki yüzey vardır ve bunlar farklı soruları yanıtladıkları için vardır.
+
+<CardGroup cols={2}>
+  <Card title="Kenar çubuğu paneli" icon="window-maximize">
+    **ComfyUI'nin içinde**, Ajan sekmesinde yaşar. Araçları (`panel_*`) şu anda
+    baktığınız grafikte — kaydedilmemiş değişikliklerinizle birlikte gerçek
+    tuvalde — iş görür.
+  </Card>
+  <Card title="Dış bir istemci" icon="terminal">
+    Claude Desktop, Claude Code, bir düzenleyici, telefonunuz. Araçları
+    **sunucuda** iş görür: diskteki dosyalar, iş kuyruğu, modeller, düğüm
+    paketleri, ComfyUI sürecinin kendisi.
+  </Card>
+</CardGroup>
+
+Ayrım aslında "bu" sözcüğü üzerinedir. "**Buna** bir LoRA ekle" dediğinizde
+panel "bunun" ne olduğunu bilir, çünkü ekranınızı görebilir. Dış bir istemci
+göremez — bir dosya adı söylenmesi gerekir.
+
+Dolayısıyla panel şunları halleder:
+
+- önünüzdeki grafiği okumak (`panel_graph_outline`)
+- onu çalıştırmak, Queue Prompt'a basmışsınız gibi (`panel_run`)
+- bir düğüm bağlamak, bir widget değiştirmek, bir düğümün neden kırmızı olduğunu
+  söylemek (`panel_add_node`, `panel_set_widget`, `panel_get_errors`)
+- tuvale bütün bir iş akışı yüklemek ya da orada olanı kaydetmek
+  (`panel_load_workflow`, `panel_save_workflow`)
+
+Dış bir istemci ise sıfırdan görsel üretmek, modelleri ve düğüm paketlerini
+yönetmek, kayıtlı dosyalar üzerinde çalışmak ve ComfyUI'yi yeniden başlatmak
+gibi işleri halleder.
+
+<Tip>
+  **Yeniseniz paneli kullanın.** Tek bir kurulumdur, grafiğinizin hemen
+  yanındadır ve ayrı bir uygulamaya ihtiyaç duymaz. Kurmak için
+  [panel kılavuzuna](/docs/tr/panel) bakın. Dış bir istemciyi, ajanı tuval
+  olmayan işlere katmak istediğinizde ekleyin.
+</Tip>
+
+Bunlar rakip değildir — panel alttaki aynı sunucuyla konuşur ve bir oturum
+ikisini de kullanabilir. Birinin masaüstünde grafiği düzenlerken bir telefonun
+aynı oturumu sürmesi desteklenen bir şeydir, bir hile değil.
+
+## Bir araç, birkaç iş
+
+Bazı araçların bir `action` aldığını fark edeceksiniz:
+
+```json
+{ "tool": "workspace", "arguments": { "action": "get" } }
+```
+
+Bu şifreli görünür ve değildir. `workspace` bir konudur — *hangi ComfyUI
+kurulumundan söz ediyoruz* — ve `action` o konu hakkında hangi soruyu
+sorduğunuzu söyler: oku, varsayılanı değiştir, neler var listele.
+
+Sıradan konuşma gibi okunur; fiil ile nesne ayrı sözcüklerdir:
+
+| Siz dersiniz | Action |
+| --- | --- |
+| "Hangi ComfyUI'yi kullanıyorum?" | `get` |
+| "Hep D sürücümdekini kullan" | `set_default` |
+| "Hangi kurulumları görebiliyorsun?" | `list` |
+
+### Hiçbir şey kaldırılmadı
+
+Bu biçim oldukça yenidir ve yeteneğin kesildiği gibi okunması kolaydır. Öyle
+değildir ve kafa karışıklığını doğrudan savuşturmak gerekir, çünkü bu zaten
+ortaya çıktı.
+
+Eskiden soru başına bir araç vardı — bir çalışma alanını okumak için ayrı bir
+ad, ayarlamak için başka, listelemek için başka. O adlar gitti ve araç sayısına
+bakarsanız keskin biçimde düştüğünü görürsünüz.
+
+Gerçekte olan, ilgili araçların **silinmesi değil birleştirilmesi**dir:
+
+| The old name | The same thing today |
+| --- | --- |
+| `get_workspace` | `workspace` with `action: "get"` |
+| `get_queue` | `queue` with `action: "list"` |
+| `apps_run_status` | `apps` with `action: "run_status"` |
+| `install_workflow_dependencies` | `list_packs` with `action: "install_deps"` |
+| `list_workflows` | `get_workflow` with `action: "list"` |
+| `analyze_workflow` | `get_workflow` with `action: "analyze"` |
+| `validate_workflow` | `create_workflow` with `action: "validate"` |
+
+Alttaki kod aynı, davranış aynı, yanıtlar aynı. Yalnızca öndeki etiket değişti.
+
+Nedeni, menünün incitecek kadar uzamasıdır. Her aracın tam açıklaması, model
+seçebilsin diye önceden modele verilmek zorundadır ve belli bir boyuttan sonra
+seçimin kendisi bozulur — özellikle küçük modeller doğru olan yerine makul
+görünen komşuyu seçmeye başlar. Daha az, daha geniş araç ve net bir `action`
+bunu ölçülebilir biçimde düzeltir. Ayrıca modelin dikkatini bir katalog
+okumaktan çok sizin isteğinize harcaması anlamına gelir.
+
+Bunun hiçbirini fark etmemelisiniz. Eski adı da siz yazmıyordunuz; "hangi
+ComfyUI'deyim?" diyordunuz ve bu hâlâ işe yarar.
+
+<Note>
+  Daha eski bir kılavuz ya da bir modelin kendi belleği artık var olmayan bir
+  ada uzanırsa, boş bir "unknown tool" yerine yerine geçen adı veren belirli bir
+  hata alırsınız — örneğin: *removed in 0.49.0. Call workspace (action:"get")
+  instead.* Ajan genellikle kendini düzeltir ve siz hiçbir şey yapmadan yeniden
+  dener.
+</Note>
+
+## Farklı bir şey istemek
+
+Her araç sayfası parametreler listeler — `max_chars`, `limit`, `depth`,
+`fields`. Bunları nereye yazmanız gerektiği adil bir sorudur ve dürüst yanıt
+şudur: hiçbir yere. `max_chars` için bir ayarlar kutusu yoktur, çünkü o bir
+ayar değildir. Ajanın her araç çağrısında taze taze doldurduğu bir argümandır.
+
+Bu sizi dışarıda bırakmaz. Denetimin nasıl göründüğünü değiştirir:
+
+<Note>
+  Bir parametre ayarlamazsınız. Bir parametre istersiniz — zaten yazacağınız
+  aynı cümlede.
+</Note>
+
+### İki isteme yolu
+
+İkisi de işe yarar. Farklı biçimde başarısız olurlar; ikisini de bilmenin tek
+nedeni budur.
+
+| | Şöyle duyulur | Şuna uzanın |
+| --- | --- | --- |
+| **Düz** | "42 numaralı düğümü ayrıntılı oku — yalnızca o düğüm, bütün grafik değil." | Her zaman buradan başlayın. İnsanların gerçekten yazdığı budur ve genellikle işe yarar. |
+| **Açık** | "`panel_query_graph` kullan, `ids` [42] ve `max_chars` 20000." | Model bir kez yanlış anladı ve ona hiç yer bırakmak istemiyorsunuz. |
+
+Aracı ve argümanı adlandırmak *doğru* biçim değildir — *zorlayıcı* biçimdir.
+Bunu yeniden deneme için saklayın.
+
+### Yanıt kesildiğinde
+
+Uzun okumalar tavanlanır; böylece devasa bir grafik bütün konuşmayı yutamaz.
+Aynı okumayı iki farklı tavan durdurabilir — listelenen düğüm sayısı (`limit`)
+ve karakter bütçesi (`max_chars`) — ve sorun olmayanı yükseltmek hiçbir şeyi
+değiştirmez; bu da tam olarak yeniden denemenin başarısız olduğu gibi okunur.
+
+Hangisi olduğunu çözmeniz beklenmez. Kayıtlı bir dosyada not, **ateşlenen
+kaldıracı adlandırır ve diğerini eleer**, açık açık:
+
+> … truncated at 40 of 300 by `limit`=40 — raise `limit` up to 200, or narrow with `types`/`where`/`ids`/`depth`. `max_chars` is not the constraint here.
+
+Ve kaldıraç zaten tavanındaysa, sizi yeniden yükseltmeye göndermek yerine bunu
+söyler; çünkü yükseltilecek bir şey kalmamıştır.
+
+<Note>
+  Canlı tuvalde (`panel_query_graph`) aynı okuma, panelin bu motorun henüz o
+  ifadeye yetişmemiş kendi kopyası tarafından çalıştırılır. Oradaki bir not bir
+  argümanı adlandırıyor ve onu yükseltmek hiçbir şeyi değiştirmiyorsa, aracın
+  bozuk olduğu sonucuna varmadan önce diğerini deneyin.
+</Note>
+
+Ajan kendi notunu okuyup kendi kendine yeniden denemelidir. Yapmadığında yedek
+sizsiniz ve cümle şudur:
+
+> That got truncated — read the note and retry the same query, raising the limit it names.
+
+### Duvarlar nerede
+
+Bunlar, bir grafiği bütçeyle okuyan iki araç için sayılardır — `panel_query_graph`
+(canlı tuval) ve `get_workflow` with `action: "query"` (kayıtlı bir dosya):
+
+| Argüman | Varsayılan | İsteyebileceğiniz en çoğu |
+| --- | --- | --- |
+| `max_chars` | 12000 | 60000 |
+| `limit` (nodes listed) | 40 | 200 |
+
+Bu iki araçta bir tavanın ötesini istemek sessizce aşağı yuvarlanmak yerine
+geçersiz argüman olarak reddedilir; böylece ajan hemen öğrenir ve kendini
+düzeltebilir. Sayılar evrensel de değildir: birkaç başka araç bir `max_chars`
+alır ve kendi tavanını koyar; bu da o aracın kendi açıklamasında belirtilir.
+
+### Kapsam, bütçeyi yener
+
+Tavanı yükseltmek denenecek ikinci şeydir, birincisi değil. 600 düğümlü bir iş
+akışında daha büyük bir bütçe çoğunlukla size daha çok yanlış düğüm alır ve
+yanıtı yüzlerce ilgisizin arasına gömmek, teknik olarak sığsa bile yanıtı
+bozar.
+
+Önce daraltın, doğal gelen sözcüklerle:
+
+| Siz dersiniz | Neye daraltır |
+| --- | --- |
+| "Yalnızca 42 ve 43 numaralı düğümlere bak." | yalnızca o id'ler |
+| "Örnekleyiciye ne giriyor?" | bir düğümün yukarı akışı |
+| "…yalnızca iki sıçrama geri." | oradan sınırlı bir uzaklık |
+| "Burada her düğüm türünden kaç tane var?" | liste yerine sayımlar |
+
+Sonra hâlâ kesiliyorsa genişletin.
+
+## Hayır dediğinde
+
+Bir aracın reddetmesi genellikle bir hata değildir. Reddetmelerin çoğu, çağrı
+sizin istemediğiniz bir şeyi yapacağı için ateşlenen bir korumadır.
+
+### "Reddetti ve nedenini bilmiyorum"
+
+Yığın izi değil, düz dil görürsünüz — neyi yapmayacağını ve yerine ne
+yapılacağını adlandıran bir şey. Bunu ajanın sıkışmış değil, dikkatli olduğu
+olarak okuyun. Yaygın dürüst reddetmeler:
+
+- **Hangi iş akışını kastettiğinizi anlayamaz.** Birden fazla sekme açıktır ya
+  da grafiğin henüz kayıtlı bir kimliği yoktur. Kaydedin ya da hangisi olduğunu
+  söyleyin.
+- **Bir şeyin üzerine yazardı.** Yeni bir dosya adı isteyin, devam eder.
+- **O şey gerçekten orada değildir.** Bir model dosyası, bir düğüm paketi,
+  çalışan bir sunucu.
+
+Bir reddetme temkin değil saçmalık gibi okunuyorsa bunu bildirmek gerekir —
+ajandan bunu dosyalamasını isteyin; kurulum ayrıntılarınızı sizin yerinize
+ekler.
+
+### "Bu panel çok eski"
+
+Gerçek bir çözümü olan en yaygın reddetme. Kabaca şöyle okunur:
+
+> This ComfyUI-MCP panel is too old for *"…"* — update the ComfyUI-MCP panel, then reconnect.
+
+Kenar çubuğu paneli ile bu sunucu ayrı ayrı yayımlanan ayrı parçalardır; biri
+diğerinin gerisinde kalabilir. Sunucu, kurulu panelin güvenle yapamayacağı bir
+şey istediğinde tahmin etmek yerine geri çevirir — hangi iş akışına bir
+komutun düştüğünü doğrulayamayan eski bir panel düzenlemenizi yanlış sekmeye
+uygulayabilirdi, bu yüzden güncellenene kadar okumalarla sınırlanır.
+
+Düzeltme üç adımdır ve **üçüncüsü insanların atladığıdır**:
+
+<Steps>
+  <Step title="Paneli güncelleyin">
+    Ajandan güncellemesini isteyin (`install_comfyui(action:'panel', panel_action:'update')`)
+    ya da ComfyUI-Manager'dan yapın; orada `comfyui-agent-panel` olarak listelenir.
+  </Step>
+  <Step title="ComfyUI'yi yeniden başlatın">
+    Güncelleme kendi başına hiçbir şeyi yeniden başlatmaz. Ajandan isteyin ya da
+    kendiniz yeniden başlatın.
+  </Step>
+  <Step title="ComfyUI tarayıcı sekmesini zorla yenileyin">
+    **Ctrl+Shift+R** (Mac'te **Cmd+Shift+R**). Tarayıcınız eski panel kodunu
+    önbelleğe almıştır ve yalnızca yeniden başlatmak onu sökmez. Bunu atlayın,
+    aynı ileti hemen geri gelir; bu yüzden güncelleme başarısız olmuş gibi
+    görünür, oysa olmamıştır.
+  </Step>
+</Steps>
+
+### "Bağlı panel yok"
+
+Farklı bir sorun, benzer görünen bir ileti. Bu, dış ajanın ComfyUI tarayıcı
+sekmenizi bulamadığı anlamına gelir. Neredeyse her zaman şunlardan biridir:
+
+- ComfyUI hiç bir tarayıcıda açık değildir — açın ve kenar çubuğundaki Ajan
+  sekmesine bakın.
+- ComfyUI yeni yeniden başlatıldı ya da sekmeyi yenilediniz. Bu bağlantıyı
+  düşürür. **ComfyUI sekmesini yenileyin**, hemen geri gelir.
+- Ajan sekmesi açıktır ama hiç bağlanmamıştır. Panel, bir sağlayıcı seçip
+  **Bağlan**'a tıkladığınızda tutunur, yüklemede asla; dolayısıyla yeni açılmış
+  ve hiçbir şey göstermeyen bir sekme bir arıza değil sıradan durumdur.
+- Panel henüz kurulu değildir. Bkz. [panel kılavuzu](/docs/tr/panel).
+
+İleti bunları sizin için iki gruba ayırır — "daha önce bağlandı ve koptu" ile
+"henüz hiçbir şey bağlanmadı"yı ayırt eder. Bundan öteye gitmez ve
+gözlemleyemeyeceği bir neden seçmek yerine bunu söyler. Daha önce bağlanmış bir
+sekme, panelin kurulu ve çalışır olduğunu kanıtlar; bu yüzden ilk denenecek ve
+genellikle tek gereken şey ComfyUI sekmesini yenilemektir. Yenileme geri
+getirmezse ikinci grup gibi davranın ve yukarıdaki denetimleri sırayla yapın.
+
+## Hiçbir şey söylemediğinde
+
+Daha zor başarısızlık, içinde hiç hata olmayanıdır. Ajan bir araç çağırmaz,
+reddetmez, şikayet etmez. Yalnızca konuşur: iş akışınızın muhtemelen ne
+içerdiğini anlatır ya da size bir betik yazmayı teklif eder. Yardımcı
+görünür ve hiçbir şeye bakmamıştır.
+
+Tamamen farklı üç durum aynı davranışı üretir ve sizin oturduğunuz yerden
+ayırt edilemezler:
+
+<CardGroup cols={3}>
+  <Card title="Yok" icon="circle-minus">
+    İstemciniz araçları hiç almadı. Modele verdiği listede yokturlar, dolayısıyla
+    çağrılacak bir şey yoktur.
+  </Card>
+  <Card title="Engelli" icon="hand">
+    İstemcinizde araçlar vardır ve modelin onları çalıştırmasına izin vermez.
+    Çağrı istemcinizin içinde durdurulur.
+  </Card>
+  <Card title="İstenmedi" icon="eye-slash">
+    Her şey çalışır. İstediğiniz şey, hiç gündeme gelmemiş bir adın altında
+    vardır; kimse ona uzanmamıştır.
+  </Card>
+</CardGroup>
+
+Çözümler üç farklı yöne işaret eder ve ikisi yanlış tahmin edilirse aktif
+olarak zararlıdır: zaten kurulu olanı yeniden kurmak ya da hiç sorun olmayan
+izinleri gevşetmek. Bu yüzden ilk hamle bir şeyi düzeltmek değildir. Hangisinde
+olduğunuzu öğrenmektir.
+
+### Bunları ayıran iki soru
+
+Ajana, düz sözcüklerle sorun:
+
+<Steps>
+  <Step title="Neyi görebildiğini sorun">
+    > comfyui-mcp'den hangi araçların var? Yalnızca adları listele.
+
+    Birkaç düzine adlık bir liste normal ve sağlıklıdır — 0.50.0'dan beri
+    varsayılan olan doğrudan yüzey budur.
+
+    **Üç ad** — `list_tools`, `describe_tool`, `call_tool` — *de* normal ve
+    sağlıklıdır. Bu, `--compact` geçirerek aldığınız
+    [kompakt kiptir](#küçük-bir-yerel-model-çalıştırıyorsanız) ve küçük yerel
+    modeller hâlâ bunu kendiliğinden seçer. Katalogun geri kalanı bir
+    `list_tools` çağrısı uzaktadır; onu çalıştırmasını isteyin, gerçek listeyi
+    görürsünüz. İki yanıt da bir şeyin saklandığı anlamına gelmez.
+
+    **Hiç ad yoksa** ya da "ComfyUI için hiç aracım yok" ise, üçüncü durumu
+    eleyen ve başka hiçbir şeyi elemeyen yanıttır. **Yok** anlamına **gelmez**.
+    Bir izin politikası, modele gösterilen listeden araçları saklayabilir; bu
+    yüzden kurulu, bağlı ve çalışan bir sunucu tam olarak bu yanıtı üretir. Yok
+    ile engelli bu adımda ayırt edilemez ve bir kullanıcıya günler kaybettiren
+    dal budur — kablonun bozuk olduğundan emin olmak.
+
+    Bunu daraltan bir denetim vardır ve ajanın görebileceği bir şey değildir:
+    **istemcinizin kendi MCP sunucuları listesini açın** — hangi sunuculara
+    bağlandığını gösterdiği yer; bu, modele verdiği araç listesinden farklı bir
+    listedir.
+
+    - **comfyui-mcp orada değil ya da başarısız görünüyor** → **yok**. İstemci
+      tarafında bir kablolama sorunu, panel ya da sunucu arızası değil. Yine
+      ikiye ayrılır — hiç bağlanmamış ya da onları hiç tutamayan bir ana makine
+      — ve [aşağıdaki](#her-yanıt-genellikle-nereden-gelir) liste bunları ayırır.
+    - **Orada ve bağlı, model hâlâ hiçbir şey listelemiyor** → araçlar
+      istemcinize ulaştı. Ondan sonra nerede durdukları hâlâ açıktır: bir izin
+      kuralıyla modelden saklanmış olabilirler ya da model onları listelemeyi
+      başaramamış veya reddetmiş olabilir; buradan birebir aynı görünür. Yalnızca
+      buna dayanarak izinleri **gevşetmeye başlamayın**.
+
+      O sunucu listesi ayrıca **comfyui-mcp'den hangi araçları aldığını** da
+      gösteriyorsa mesele kapanır: orada listelenip model tarafından
+      listelenmeyen araçlar, sorunun izinleriniz değil model olduğu anlamına
+      gelir; orada hiçbiri yoksa modele ulaşmadan önce süzülüyorlardır.
+      İstemciniz bunu göstermiyorsa — ve çoğu göstermez — buradan ikisini
+      ayıracak bir şey yoktur ve 2. adım daha iyi bir şanstır, çünkü bir
+      reddetme sözcüklerle geri gelir.
+  </Step>
+  <Step title="Denenmesini ve birebir rapor etmesini isteyin">
+    > Şimdi çalışmayan şey için kullanacağın aracı çağır ve geri gelenin
+    > tam olarak ne olduğunu yapıştır — hata varsa o da dahil. Etrafından
+    > dolaşma.
+
+    O cümledeki iki ayrıntı işi yapar.
+
+    **Çalışmayan şey için kullanacağın araç**, özellikle. İzin kuralları
+    genellikle araç başına yazılır; farklı bir aracın başarılı olması umursadığınız
+    hakkında hiçbir şey kanıtlamaz — bir engelin gizlenmesi tam olarak böyledir.
+    Okunmayan tuval ise, sınama bir tuval okuması olmak zorundadır.
+
+    **Etrafından dolaşma.** Bütün başarısızlık kipi, bir ajanın bir engeli
+    adlandırmak yerine sessizce etrafından dolanmasıdır; kendi haline bırakılırsa
+    bunu yine yapar.
+
+    - **Gerçek bir sonuç** — o araç çalışıyor. Üçüncü durumdasınız.
+    - **"That was denied" / "not permitted" / "I need permission"** —
+      **engelli**, istemcinizin içinde. Bu kesindir: ajan sordu ve reddedildi.
+    - **"I don't have that tool"** — hâlâ yok *ya da* engelli. Saklanan bir araç
+      ile eksik bir araç, modelin koltuğundan özdeş görünür; bu yüzden buna tek
+      başına harekete geçmeyin: 1. adımın sunucu listesine geri götürün ve o
+      liste de sunucu başına araç göstermiyorsa, ikisini ayıracak bir şeye
+      ulaşamazsınız ve dürüst sonraki hamle ayarları değiştirmeye başlamak
+      değil, issue izleyicisinde sormaktır.
+    - **Daha fazla düzyazı, hâlâ çağrı yok** — düz sorun: *"Bir araç çağırdın
+      mı? Çağırmadıysan neden?"* İki kez kaçıran bir ajan genellikle
+      bahsetmediği bir şeyin etrafından dolaşıyordur.
+  </Step>
+</Steps>
+
+### Buradan görebildiklerimiz ve göremediklerimiz
+
+<Warning>
+  İstemciniz bir araç çağrısını reddettiğinde o çağrı istemcinizden hiç
+  çıkmaz. Bu sunucuya hiçbir şey ulaşmaz; dolayısıyla günlüğünde hiçbir şey
+  görünmez ve ulaşabileceğimiz hiçbir yerde hata üretilmez. Bir engeli
+  saptayamayız ve saptıyormuş gibi yapmayız: "istemciniz bunu engelledi"
+  dediğini iddia eden herhangi bir sayfa ya da ileti tahmin yürütüyor olurdu.
+</Warning>
+
+Aynı olgu diğer yöne de keser ve insanları yanıltan kısım budur: sessiz bir
+günlük, hiçbir şeyin denenmediğinin kanıtı değildir. Yok, engelli ve hiç
+istenmemiş, buradan hepsi sessizlik gibi görünür.
+
+Bu yüzden asıl tanı yukarıdaki iki sorudur. İşe yararlar çünkü odada *olan* tek
+katılımcıya — ajanınıza — ne denediğini söyletir ve yanıtın etrafından dolaşma
+seçeneğini reddederler.
+
+### Her yanıt genellikle nereden gelir
+
+**Engelli — istemcinizin kendi izin kuralları.** Claude Code'da bu,
+`settings.json` dosyasının `permissions` bloğudur (`~/.claude/settings.json`
+ya da projenin `.claude/settings.json` dosyası); MCP araçları orada ad alanlı
+adlarıyla görünür, `mcp__comfyui__<tool>`. Onlardan hiç söz etmeyen katı bir
+`allow` listesi her çağrıyı gönderilmeden durdurur. Bir kullanıcıya birkaç gün
+kaybettiren durum budur: araçlar çalışıyor gibi görünüyordu, tam da avladığı
+hatalar hiçbir zaman ortaya çıkamayacağı için.
+
+**Yok ve düzeltilebilir — hiç kablolanmamış.** İstemci MCP konuşur ama bu
+sunucudan hiç haberdar edilmemiştir ya da edilmiş ve girdi yanlıştır. Yaygın
+olan budur ve bir yapılandırma düzenlemesidir; istemcinizin beklediği girdi
+için [Hızlı başlangıç](/docs/tr/quickstart) sayfasına bakın.
+
+**Yok ve düzeltilemez — hiç MCP istemcisi olmayan bir ana makine.** Bazı
+ajanlar MCP konuşmaz ve hiçbir yapılandırma bunu değiştirmez. `pi` bunlardan
+biridir: kendi yerleşik kabuk-ve-düzenleyici araçları vardır, MCP istemcisi
+yoktur; dolayısıyla kurulu olan her ne olursa olsun bizimkiler ona verilemez.
+Panel, onu seçtiğinizde bunu açıkça söyler — *"pi has no ComfyUI tools (no
+MCP)"*. O satır yanıttır, ayıklanacak bir belirti değil; çözüm farklı bir arka
+uç seçmektir.
+
+**İkisi de — arada oturan bir şey.** MCP trafiğinizi taşıyan bir ağ geçidi,
+vekil ya da yönlendirici yüzeyin yalnızca bir kısmını iletebilir. Katalog ile
+gerçekten çalışanlar birbirini tutmuyorsa ortadakinden kuşkulanın.
+
+### Üçüncü durum çıkarsa
+
+O zaman hiçbir şey bozuk değildi ve kimse yanlış yapılandırmadı: bir yetenek
+vardı ve sizin bunu öğrenmenizin bir yolu yoktu. Bu sizin değil bizim
+başarısızlığımızdır ve bize söylemeye değer — ajandan bunu dosyalamasını
+isteyin; kurulumunuzu sizin yerinize ekler. Kimsenin bulamadığı bir özellik,
+sizin oturduğunuz yerden, yayımlamadığımız bir özelliktir.
+
+## Küçük bir yerel model çalıştırıyorsanız
+
+Bütün menüyü bir modele vermek, bir söz söylemeden önce çok okuma pahasına
+gelir. Büyük, barındırılan bir modelde bu sorun değildir. Kendi makinenizde
+çalışan küçük bir modelde çoğu zaman çalışmak ile çalışmamak arasındaki
+farktır.
+
+Bu yüzden varsayılan olarak ajan tam küme yerine **üç** araç alır: kataloğa
+göz atmak için biri, tek bir aracı ayrıntılı bakmak için biri, çalıştırmak
+için biri. İhtiyacı olanı, ihtiyaç duyduğu anda getirir; her şeyi baştan
+okumak yerine.
+
+Bunu almak için bir şey yapmanız gerekmez — varsayılandır. Kontroller, onları
+isterseniz vardır:
+
+```bash
+# force the small three-tool mode
+npx -y comfyui-mcp --compact
+
+# or hand the model everything at once
+npx -y comfyui-mcp --full
+```
+
+İkisi de `COMFYUI_MCP_TOOL_MODE=compact` ya da `COMFYUI_MCP_TOOL_MODE=full`
+ile de ayarlanabilir.
+
+Takas, ilk gerçek eylemden önce birkaç ekstra gidiş-dönüş karşılığında
+düşünmeye yer kalmış bir modeldir. Büyük modeller genellikle `--full` ile
+daha mutludur. Hangi modellerin hangisiyle baş ettiğini [yerel LLM'ler](/docs/tr/local-llms)
+sayfasında görün.
+
+## Sırada nereye gidilir
+
+<CardGroup cols={2}>
+  <Card title="Hızlı başlangıç" icon="rocket" href="/docs/tr/quickstart">
+    Kurun ve ilk görselinizi üretin.
+  </Card>
+  <Card title="Kenar çubuğu paneli" icon="window-maximize" href="/docs/tr/panel">
+    ComfyUI içindeki ajan ve tuvalinize neler yapabileceği.
+  </Card>
+  <Card title="Araç referansı" icon="book" href="/docs/tools/image-generation">
+    Her araç, gerçek bir çağrının nasıl göründüğüne dair işlenmiş örneklerle.
+  </Card>
+  <Card title="Sorun giderme" icon="wrench" href="/docs/tr/troubleshooting">
+    Reddetme değil de gerçekten bir şey bozulduğunda.
+  </Card>
+</CardGroup>

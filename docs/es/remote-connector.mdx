@@ -1,0 +1,174 @@
+---
+title: "Conector remoto / alojado"
+description: "Expón comfyui-mcp como un servidor MCP Streamable-HTTP autenticado y alcanzable en público — añádelo a los conectores personalizados de Claude Desktop o a cualquier cliente remoto, un solo comando."
+icon: "globe"
+---
+
+`comfyui-mcp` habla el mismo transporte MCP **Streamable-HTTP** que usan los
+conectores alojados (por ejemplo el conector personalizado propio de Comfy
+`cloud.comfy.org/mcp`). Con un comando se ejecuta como servidor autenticado
+por token detrás de un túnel HTTPS público, así que puedes añadirlo a
+**Claude Desktop → Connectors** o llamarlo de forma headless desde cualquier
+sitio.
+
+<Note>
+Esto es opt-in. El transporte `stdio` por defecto (y el `--http` plano en
+loopback) se comporta exactamente como antes — abierto y local. La
+autenticación y el túnel solo se activan cuando defines un token o pasas
+`--tunnel`.
+</Note>
+
+<Note>
+**¿Buscas controlar un pod de ComfyUI remoto (p. ej. RunPod) con el panel
+del agente en su lugar?** Eso es otra función — consulta
+[Despliegue en la nube](/docs/es/cloud-deployment). Esta página trata de
+exponer **el propio servidor MCP comfyui-mcp** a clientes remotos como Claude
+Desktop; no toca ComfyUI ni el puente del panel en absoluto. Ambos usan un
+túnel rápido de cloudflared por debajo, que es la forma más fácil de
+confundirlos.
+</Note>
+
+## Túnel con un comando
+
+```bash
+npx -y comfyui-mcp@latest --tunnel
+```
+
+Esto hace cuatro cosas:
+
+1. Fuerza el transporte HTTP (`MCP_TRANSPORT=http`).
+2. Genera un token de autenticación aleatorio fuerte si no has definido uno.
+3. Arranca un túnel rápido de [cloudflared](https://github.com/cloudflare/cloudflared)
+   hacia el puerto MCP local.
+4. Imprime un bloque listo para pegar: la URL pública `https://…/mcp`, el
+   token y un fragmento de conector de Claude Desktop.
+
+La salida se parece a:
+
+```text
+════════════════════════════════════════════════════════════════════
+ ComfyUI MCP — Remote / Hosted Connector is LIVE
+════════════════════════════════════════════════════════════════════
+ Public MCP URL : https://shiny-otter-1234.trycloudflare.com/mcp
+ Auth token     : 9f2c…<redacted>
+ ...
+════════════════════════════════════════════════════════════════════
+```
+
+<Warning>
+Deja la terminal abierta. Un **túnel rápido** de cloudflared es efímero — su
+URL cambia en cada ejecución y se cierra cuando termina el proceso. Para un
+nombre de host estable, ejecuta tu propio
+[túnel con nombre de cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)
+apuntando al puerto HTTP local.
+</Warning>
+
+### ¿cloudflared no está instalado?
+
+`cloudflared` se entrega como dependencia opcional. Si no se encuentra el
+binario, el servidor sigue ejecutándose en local e imprime la guía de
+instalación:
+
+```bash
+npm install -g cloudflared          # cross-platform
+brew install cloudflared            # macOS
+winget install cloudflare.cloudflared  # Windows
+```
+
+Después vuelve a ejecutarlo con `--tunnel`.
+
+## Añádelo a Claude Desktop
+
+Abre **Claude Desktop → Settings → Connectors → Add custom connector** y
+rellena:
+
+| Campo  | Valor |
+|--------|-------|
+| Name   | `ComfyUI` |
+| URL    | la URL impresa `https://…/mcp` |
+| Header | `X-API-Key: <token>` (o `Authorization: Bearer <token>`) |
+
+Guarda y luego activa el conector en un chat. Las herramientas de ComfyUI
+aparecen igual que en el servidor stdio local.
+
+## Configuración headless / programática
+
+Cualquier cliente MCP que admita un servidor Streamable-HTTP remoto funciona.
+Proporciona la URL y la cabecera de autenticación:
+
+```json
+{
+  "mcpServers": {
+    "comfyui": {
+      "url": "https://shiny-otter-1234.trycloudflare.com/mcp",
+      "headers": { "X-API-Key": "<token>" }
+    }
+  }
+}
+```
+
+Se aceptan ambas formas de cabecera en **cada** petición a `/mcp`:
+
+```bash
+# X-API-Key (matches Comfy Cloud's convention)
+curl -H "X-API-Key: <token>" https://…/mcp
+
+# Authorization: Bearer
+curl -H "Authorization: Bearer <token>" https://…/mcp
+```
+
+## Configuración manual (trae tu propio túnel / proxy)
+
+Si prefieres gestionar el endpoint público tú mismo, ejecuta el transporte
+HTTP con un token fijo y ponlo detrás de tu propio reverse proxy, túnel o
+VPN:
+
+```bash
+COMFYUI_MCP_HTTP_TOKEN=my-long-random-secret \
+  npx -y comfyui-mcp@latest --http --host 0.0.0.0 --port 9100
+```
+
+Después apunta tu túnel/proxy a `http://127.0.0.1:9100/mcp`.
+
+<Warning>
+Enlazar a un host que no sea loopback (p. ej. `0.0.0.0`) **sin** un token es
+un **fallo duro** — el servidor se niega a arrancar en lugar de exponer un
+endpoint `/mcp` abierto fuera de la caja. Define `COMFYUI_MCP_HTTP_TOKEN`
+(recomendado), usa `--tunnel`, o enlaza un host loopback. Si de verdad
+quieres un endpoint abierto (p. ej. detrás de tu propio proxy que autentica),
+actívalo de forma explícita con
+`--allow-unauthenticated-non-loopback` (env `COMFYUI_MCP_ALLOW_UNAUTH=1`),
+que degrada el fallo a una advertencia.
+</Warning>
+
+## Referencia de autenticación
+
+| Ajuste | Efecto |
+|---------|--------|
+| `COMFYUI_MCP_HTTP_TOKEN` | Token de secreto compartido exigido en `/mcp`. Sin definir → el endpoint está abierto. |
+| `--token <value>` | Igual que la variable de entorno; el flag CLI gana sobre la variable. |
+| `--tunnel` / `MCP_TUNNEL=1` | Fuerza HTTP, genera un token si no hay uno, abre un túnel de cloudflared. |
+| `--http` / `MCP_TRANSPORT=http` | Transporte HTTP sin túnel (la autenticación sigue aplicándose si hay un token). |
+| `--host`, `--port` | Dirección de enlace (por defecto `127.0.0.1:9100`). |
+| `--allow-unauthenticated-non-loopback` / `COMFYUI_MCP_ALLOW_UNAUTH=1` | Optar por un `/mcp` ABIERTO en un host que no es loopback. Sin él, esa combinación es un fallo duro de arranque. |
+
+Los tokens se comparan en tiempo constante, y la puerta se aplica en cada
+método HTTP (`POST`/`GET`/`DELETE`) en el endpoint MCP. Enlazar un host que
+no es loopback sin token se rechaza al arrancar a menos que se active la
+escotilla de escape de arriba.
+
+## Hoja de ruta: OAuth
+
+La autenticación de hoy es un **token manual de secreto compartido** (Bearer /
+`X-API-Key`), que cubre tanto el camino headless como el de conector
+personalizado de Claude Desktop. Un flujo completo de inicio de sesión
+**OAuth** en el navegador (como el conector alojado de Comfy) es un
+seguimiento previsto — es un cambio más pesado y no hace falta para conectar
+a mano.
+
+## Ver también
+
+- [Despliegue en la nube](/docs/es/cloud-deployment) — controla un pod de
+  ComfyUI remoto con el panel del agente (otro túnel, otro propósito)
+- [Configuración](/docs/es/configuration) — la referencia completa de
+  variables de entorno

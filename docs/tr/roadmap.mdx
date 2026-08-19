@@ -1,0 +1,183 @@
+---
+title: "Yol haritası"
+description: "Ne teslim edildi, ne inşa ediliyor, sırada ne var — ve inşa etmemeye karar verdiğimiz şeyler, gerekçesiyle. Tarihe göre değil, önceliğe göre sıralı."
+icon: "map"
+---
+
+## Bu sayfa neyi kapsar
+
+**Bütün proje, tek bir depo değil.** comfyui-mcp ayrı ayrı yayımlanan ve
+bağımsız sürümlenen birkaç parçadır:
+
+| Parça | Depo | Nedir |
+|---|---|---|
+| **MCP sunucusu + eklenti** | [`comfyui-mcp`](https://github.com/artokun/comfyui-mcp) | araçlar ve orkestratör — kontrol düzlemi |
+| **Panel** | [`comfyui-mcp-panel`](https://github.com/artokun/comfyui-mcp-panel) | ComfyUI içindeki ajan kenar çubuğu |
+| **Mobil uygulama** | [`comfyui-mcp-mobile`](https://github.com/artokun/comfyui-mcp-mobile) | sohbet, kuyruk, LoRA'lar ve masaüstü sekmesi yansıtma |
+| **Röle** | [`comfyui-mcp-relay`](https://github.com/artokun/comfyui-mcp-relay) | kararlı bir `wss://` uzak köprü için Cloudflare Worker |
+
+Aşağıdaki maddeler, önemli olduğu yerde parçaya göre etiketlenir. Dört yere
+inmesine rağmen her şey tek bir ürün olarak planlanır.
+
+<Warning>
+  [Buraya nasıl gelindi](#buraya-nasıl-gelindi) içindeki sürüm numaraları
+  **MCP sunucusununundur**. Panel ve mobil uygulama kendi, ilişkisiz sürüm
+  hatlarını taşır — panel 0.9.x, sunucu v0.44'ün "gerisinde" değildir. Onları
+  karşılaştırmayın.
+</Warning>
+
+## Nasıl okunur
+
+**Bu sayfada tarih yoktur ve bu kasıtlıdır.**
+
+Bu proje hızlı yayımlar ve sık yeniden sıralar — RunPod yayı bir haftada
+kuyruğu atladı. Üzerinde çeyrekler olan bir yol haritası günler içinde yanlış
+olur ve yanlış bir tarih, hiç tarihten kötüdür: bir planı kimsenin vermediği
+bir vaade çevirir.
+
+Bu yüzden bu sayfa **sıraya, zamana değil** bağlanır. "Sırada" sıradaki
+anlamına gelir, gelecek ay anlamına değil. Buradaki bir şey sizin için
+önemliyse [Discord](https://discord.gg/cW9arBhzCu)'da söyleyin — insanların
+günden güne gerçekten yaptığı şeyler, isteğin büyüklüğünden çok daha güvenilir
+biçimde bu listede yukarı çıkar.
+
+En yararlı bölüm muhtemelen sonuncusudur. **[Planlanmayanlar](#planlanmayanlar)**
+neye *karşı* karar verdiğimizi ve nedenini söyler; böylece onu beklemeyi
+bırakabilirsiniz.
+
+---
+
+## Teslim edildi
+
+Buradaki her şey bugün çalışır ve belgelerle kapsanır.
+
+| Alan | Ne alırsınız |
+|---|---|
+| **ComfyUI'de ajan** | Panel, ajanı tuvalinizin yanına koyar — grafiği okur, düğümleri düzenler, iş akışlarını çalıştırır ve başarısızlıkları açıklar. Bkz. [Panel](/docs/tr/panel). |
+| **Kendi modelinizi getirin** | Claude, ChatGPT/Codex, Gemini, Antigravity, Grok, Kimi, GLM, Ollama, LM Studio, llama.cpp, OpenRouter ya da özel bir uç nokta — bir seçici, bir orkestratör. Bkz. [Arka uçlar](/docs/tr/backends). |
+| **Yerel modeller** | Ollama / LM Studio / llama.cpp üzerinden tamamen yerel çalışma, küçük modeller dahil. Bkz. [Yerel LLM'ler](/docs/tr/local-llms). |
+| **İş akışı oluşturma** | Doğal dilden iş akışı kurun, yamalayın, dilimleyin, doğrulayın ve kilitleyin; bir görselin meta verisinden içe aktarın. |
+| **Modeller ve özel düğümler** | Düğüm paketlerini arayın, kurun ve onarın; modelleri bulun ve indirin — bir iş akışının hangi modellerinin eksik olduğunu ve hangi nicemlemenin VRAM'inize uyduğunu çözmek dahil. |
+| **Civitai tarayıcısı** | Panel içinde görsellere, videolara ve modellere göz atın, temel modele ve üreticiye göre süzün ve bir iş akışını doğrudan tuvale çekin. |
+| **Mobil uygulama** | Ajanla sohbet edin, kuyruğu izleyin, LoRA'lara göz atın ve bir masaüstü sekmesini yansıtarak donanımınızı telefonunuzdan sürün. Bkz. [Mobil](/docs/tr/mobile). |
+| **Uygulamalar (mikro uygulamalar)** | Bir iş akışını gerçek bir formlu tek tıklık uygulamaya dönüştürün: panelde dönüştürüp yayımlayın, yerelde ya da bir poda çalıştırın, herkese açık kayıt defterinden başkalarının uygulamalarını kurun — ve aynı uygulamaları telefonun Uygulamalar sekmesinden ya da `apps_*` araçlarıyla bir ajandan çalıştırın. Bkz. [Uygulamalar](/docs/tr/apps). |
+| **Uzak ve bulut** | Paneli uzak bir ComfyUI'ye, kendi barındırdığınız bir röleye ya da Comfy Cloud'a yöneltin. Bkz. [Uzak bağlayıcı](/docs/tr/remote-connector). |
+| **RunPod podları** | Panelden RunPod podları oluşturun, bağlanın ve durdurun; faturalamaya güvenli varsayılanlar ve dürüst bir ana makine göstergesiyle. |
+| **LoRA eğitimi (yerel)** | FLUX.1-dev üzerinde karakter LoRA'ları, ajanın bir GPU Docker konteynerinde `train_*` araçlarıyla sürdüğü — veri kümesi girer, `models/loras/` altına `.safetensors` çıkar. |
+
+## Şimdi inşa ediliyor
+
+Etkin olarak ilerliyor. Bundan sonra hareket etmesi en olası şeyler bunlar.
+
+| Madde | Nerede duruyor |
+|---|---|
+| **RunPod podlarında LoRA eğitimi** | Taşıma katmanı indi; boşta durdurma kapsamı ve Docker'sız makineler için docker'sız yerel yol üzerinde takip çalışması sürüyor. |
+| **Karakter LoRA'larının ötesinde eğitim** | Stil, kaydırıcı ve düzenleme akışları ve FLUX.1-dev'in ötesindeki temel modeller. Yapılandırma katmanı genişlemek üzere kuruldu; akışlar henüz yazılmadı. |
+
+## Sırada
+
+Kuyruğa alındı ve belirtildi, başlanmadı. Sıralı.
+
+| Madde | Neden burada |
+|---|---|
+| **Mobil uygulamada dürüst önizlemeler** | **Eğitim** sekmesi hâlâ cansız yer tutucu arayüzdür — teslim edilmiş bir özellik gibi okunan ve insanları ne kadar ilerlediğini sormaya zaten yanıltmış altı kart. Ya düzgün etiketleyin ya da gizleyin — bu listedeki en ucuz düzeltme. (**Uygulamalar** sekmesi bu maddenin diğer yarısıydı ve artık gerçektir; bkz. [Uygulamalar](/docs/tr/apps).) |
+| **Mobil eğitim** | Mobil Eğitim sekmesini zaten çalışan eğiticiye bağlayın. Zor kısım bitti; bu çoğunlukla tesisattır ve yukarıdaki maddeyi emekliye ayırır. |
+| **Tablet yerleşimi** | Gerçek, gösterişsiz duyarlı iş. Yukarıdaki ekranların göstermeye değer bir şeyi olduğunda yapmaya değer. |
+
+## Değerlendirme altında
+
+İsteniyor, ama efordan çok bir tasarım sorusunda kilitli. Taahhüt yok.
+
+### Çok kullanıcılı oturumlar
+
+Başka birinin *sizin* oturumunuza bağlanıp *sizin* makinenizi sürmesine izin
+vermek — bozuk bir iş akışını birlikte ayıklamak ya da paylaşılan bir stüdyo
+donanımı.
+
+Engeli netleştirmek gerekir, çünkü bariz olan değildir: **taşıma zaten
+vardır.** Eşleştirme, soket yayılımı ve oturum başına kimlik doğrulama, aynı
+tesisat olan telefon-masaüstü yansıtması için kuruldu.
+
+Eksik olan bir **güven modelidir**. Kimin sürmesine izin vardır? Tuvalinizden,
+geçmişinizden, dosya sisteminizden ne görebilirler? Çalışma ortasında birinden
+erişimi nasıl geri alırsınız? Bunlar inşa edilmeden önce yanıtlanmalıdır —
+başkasının GPU'sunda yarı tasarlanmış bir yanıt yayımlamak, insanların zarar
+gördüğü yoldur.
+
+---
+
+## Planlanmayanlar
+
+Karar verildi, gerekçesiyle; kimse onları beklemesin. Kalıcı değil — iyi bir
+argüman herhangi birini yeniden açar — ama burada hiçbir şey kuyrukta değildir.
+
+### Tarihler ve sürüm numaralı kilometre taşları
+
+Bkz. [bu sayfanın başı](#nasıl-okunur). Sıra, zamanlama değil.
+
+### Yalnızca sesle denetim (akıllı gözlükler, kulaklıklar)
+
+Masaüstü ajanını gözlüklerden sesle sürmek düzenli olarak gelir ve tesisat
+çoğunlukla yansıtma taşımasını yeniden kullanırdı.
+
+Kuyruğa alınmamasının nedeni, yalnızca sesli bir yüzeyin **tuvali olmamasıdır**.
+Göz atılacak bir önizleme yoktur, iki LoRA yüklüyken *"diğer LoRA'yı kullan"*
+sözünü çözecek bir yol yoktur ve ajan grafiğinize yanlış bir şey yaptığında
+görünür bir geri alma yoktur. Asıl sorunlar bunlardır ve bir mikrofon eklemek
+hiçbirini çözmez. Bir yanıt olana kadar bu, güvenilmez bir demo olarak
+yayımlanırdı.
+
+### Akıllı saat
+
+Yukarıdakilerin hepsi geçerlidir, daha küçük bir ekranda ve daha sıkı bir güç
+bütçesiyle. Henüz kimse telefonun zaten yaptığından daha iyi yaptığı bir iş
+anlatmadı.
+
+### Sizin için ComfyUI çalıştıran barındırılan bir hizmet
+
+Bu proje **yerel öncelikli bir kontrol düzlemidir**. Sizin ComfyUI'nize
+bağlanır — makinenizde, uzak kutunuzda, podunuzda ya da Comfy Cloud'da — ve
+dosyalarınızı ya da istemlerinizi istemez. Sizin adınıza çıkarım çalıştırmak
+farklı bir güven modeli olan farklı bir üründür ve bu değildir.
+
+---
+
+## Buraya nasıl gelindi
+
+Sıradaki maddelerin nerede durduğuna bağlam için şimdiye kadarki yay. Bu
+kasıtlı olarak kabadır — belirli bir sürümde ne değiştiği için
+[Sürüm notları](/docs/changelog) sayfasına bakın.
+
+<Note>
+  Herkese açık sürümler **v0.2.0** ile başlar. v0.0.1 ya da v0.1.x yoktur —
+  ilk iki haftalık iş, paket yayımlanmadan doğrudan `main` üzerine indi;
+  **2026-02-15** tarihli ilk commit'ten başlayarak.
+</Note>
+
+Gösterilen sürümler **MCP sunucusununundur** — panel ve mobil uygulama ayrı
+sürümlenir ve aşağıdaki dönemler projeyi bir bütün olarak anlatır.
+
+| Dönem | Sunucu sürümleri | Neydi |
+|---|---|---|
+| **MCP sunucusu**<br/>Şub 2026 | v0.2 – v0.3 | Özgün fikir: ComfyUI'yi bir ajandan sürün. Görsel üretimi, iş akışı çözümlemesi, bir UI→API iş akışı dönüştürücüsü, hiyerarşik görselleştirme, model becerileri ve engelleyen çalıştırmalardan, arka plan ilerlemesi ve süreç denetimi olan engellemeyen bir kuyruğa geçiş. |
+| **Sessiz dönem**<br/>Mar – Nis 2026 | v0.3.x | İki ayda üç özellik commit'i. HTTP üzerinden uzak ComfyUI, dönüştürücüde alt grafik/bileşen genişletmesi, HTTPS/WSS desteği. Manşet değil, zemin. |
+| **Ortam ve yaşam döngüsü**<br/>May 2026 | v0.4 – v0.8 | Gerçek kurulumlarda ayakta kalmasını sağlamak: CI ile özel düğüm doğrulama/iskele, bir git ref'ine sabitlenen kurulumlar, kısıtlı ve özel modeller için kimlik doğrulama, bildirimsel ortam bildirgeleri, bulut depolama sağlayıcıları, sunucu tarafı görsel dönüştürme ve önbellekli düğüm-beceri keşfi. Gömülü panel bu dönemin sonunda tasarlandı. |
+| **Panel dönemi**<br/>Haz 2026 | v0.9 – v0.22 | Hacimce en büyük ay (~102 özellik commit'i). Ajan *ComfyUI'nin içine*, tuvalin yanına taşındı, birden fazla sağlayıcı kazandı ve her yerde çalışacak altyapıyı büyüttü: tek tıklık kurulum paketleri, bir RunPod imajı, isteğe bağlı röleli güvenli bir `wss://` köprü ve canlı akıl yürütme görünürlüğü. |
+| **Erişim ve derinlik**<br/>Tem 2026 | v0.23 – v0.44 | Aynı anda iki yön. **Erişim:** mobil uygulama, masaüstü sekmesi yansıtma, Civitai tarayıcısı, daha fazla sağlayıcı (Antigravity, GLM, Kimi) ve küçük yerel modellerin araçları sürebilmesi için kompakt araç kipi. **Derinlik:** LLM Arenası, faturalamaya güvenli varsayılanlarla birinci taraf RunPod podları, LoRA eğitimi ve VRAM'inizi hesaba katan eksik-model çözümü. |
+
+O tablonun size söylemeyeceği iki şey. Tempo kasıtlı olarak düzensizdir —
+ilkbaharda iki aylık bir durgunluk, sonra Haziran ve Temmuz boyunca ~180
+özellik commit'i. Ve sıralama hiçbir zaman önceden sabitlenmedi: RunPod ve
+eğitim ikisi de kuyruğu atladı, çünkü sözde sıradakinden daha önemli
+çıktılar. Bu sayfanın tarih taşımamasının asıl nedeni budur.
+
+## Eksik bir şey mi var?
+
+Listelenmeyen bir şeyi bekliyorsanız ya da "planlanmayan" çağrılardan biri
+gerçekten nasıl çalıştığınıza yanlış görünüyorsa
+[GitHub](https://github.com/artokun/comfyui-mcp/issues)'da bir issue açın ya da
+[Discord](https://discord.gg/cW9arBhzCu)'da söyleyin.
+
+**Ne yapmaya çalıştığınızı** anlatan istekler, bir özellik adlandıranlardan
+çok daha yararlıdır — bu sayfadaki birkaç madde sıralarını, birinin en yüksek
+sesle istemesinden değil gününü anlatmasından alır.

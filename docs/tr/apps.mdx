@@ -1,0 +1,258 @@
+---
+title: "Uygulamalar (mikro uygulamalar)"
+description: "Bir iş akışını tek tıklık bir uygulamaya dönüştürün: bir bildirge, dışa açılmış bir çalıştırma formu ve değerlerin her çalıştırmada yamalandığı bir API istem anlık görüntüsü. Panelde dönüştürün, panelden, telefondan ya da bir ajandan çalıştırın ve herkese açık bir kayıt defterine yayımlayın."
+icon: "layout-grid"
+---
+
+Bir **uygulama**, **tuval olmadan** tek tıklık çalıştırmalar için paketlenmiş
+bir iş akışıdır. Donanımınızda dört şey tutan bir dizindir:
+
+| Dosya | Nedir |
+|---|---|
+| `manifest.json` | ad, açıklama, `appMode {inputs, outputs}`, `deps`, `hideWorkflow`, `published` |
+| `prompt.json` | API biçimindeki istem **anlık görüntüsü** — değerler her çalıştırmada buna yamalanır |
+| `workflow.json` | litegraph UI grafiği — `hideWorkflow` ayarlıysa **yoktur** |
+| `thumbnail.png` | isteğe bağlı kart görseli |
+
+Paketler ComfyUI'nin kullanıcı dizini altında
+`<user>/comfyui-mcp-panel/apps/<app-id>/` adresinde yaşar — kasıtlı olarak iş
+akışları dizini **değildir**; böylece gizli bir uygulama iş akışı tarayıcısında
+hiç görünmez.
+
+```
+workflow ⇄ convert (panel) ⇄ app bundle on disk ⇄ run form ⇄ patch snapshot ⇄ ComfyUI queue
+                                    ⇅
+                        publish / install ⇄ public registry
+```
+
+Uygulamaların kendi katmanı olarak var olmasının nedeni: tuval, *zaten
+güvendiğiniz* bir iş akışını çalıştırmak için yanlış arayüzdür. Beş etiketli
+alanlı bir form doğrusudur ve bir telefonun ya da bir ajanın sürebildiği tek
+arayüzdür.
+
+<Note>
+  **Tek** bir depolama ve çalıştırma uygulaması vardır — panel paketinin HTTP
+  rotaları (`/comfyui_mcp_panel/apps/*`). Masaüstü paneli, mobil Uygulamalar
+  sekmesi ve `apps_*` MCP araçlarının hepsi onun istemcisidir; böylece bir
+  uygulama nereden başlatırsanız başlatın özdeş davranır.
+</Note>
+
+## Gereksinimler
+
+Uygulamaları **panel paketi** (`comfyui-mcp-panel`) sunar, tek başına MCP
+sunucusu değil. ComfyUI'nizdeki paket özellikten önceyse `apps` with
+`action:"list"` açık bir *"the panel pack on this ComfyUI predates the Apps
+feature"* ile başarısız olur — paketi güncelleyin ve ComfyUI'yi yeniden
+başlatın.
+
+## Bir iş akışını uygulamaya dönüştürmek
+
+Panelde **Uygulamalar** araç çubuğu düğmesi (Civitai'nin yanında) uygulama
+ızgarasını açar. Açık iş akışını dönüştürmek üç şey yapar:
+
+1. İş akışı zaten bir tane taşıyorsa **ComfyUI APP kipi yapılandırmasını içe
+   aktarır**, aksi halde girişleri ve çıkışları **sezgisel** seçer (istem
+   widget'ları, seed'ler, örnekleyici ayarları; çıkış olarak `SaveImage`
+   sınıfı düğümler). İçe aktarılan APP kipi girişleri **her** düğüm türünde
+   onurlandırılır; böylece özel düğüm uç noktaları dönüşümden sağ çıkar.
+2. **Bağımlılıkları tarar** — grafiğin ihtiyaç duyduğu modeller ve özel düğüm
+   paketleri — `manifest.deps` içine.
+3. İstemi API biçiminde **anlık görüntüler**. Dönüşüm anındaki widget değerleri
+   her girişin form `default` değeri olur.
+
+`appMode.inputs` içindeki her giriş `nodeId`, `widget`, `label` ve `text`,
+`number`, `combo`, `toggle`, `image` ya da `model` türünde bir `kind` taşır;
+combo'lar ayrıca `choices` taşır. Çalıştırma formunun masaüstünde ve mobilde
+bundan çizdiği şey budur.
+
+### İş akışını gizlemek
+
+`hideWorkflow` `workflow.json`'u paketten tamamen düşürür; böylece grafik,
+uygulamayı çalıştırana ya da kurana verilmez.
+
+<Warning>
+  **`hideWorkflow` gizlemedir, asla güvenlik değildir.** API istemi uygulamayı
+  ComfyUI'nin kendi `/history` yolu üzerinden çalıştıran herkese hâlâ
+  görünürdür ve uygulamanın kurduğu modeller ile özel düğümler grafiğin
+  bağımlılıklarını açığa vurur. Bunu "iş akışı tarayıcımı kalabalıklaştırma"
+  olarak görün, sızdırmayı göze alamayacağınız bir grafik için koruma olarak
+  değil.
+</Warning>
+
+## Bir uygulamayı çalıştırmak
+
+Bir çalıştırma form değerlerinizi saklanan anlık görüntüye yamalar ve sonucu
+kuyruğa alır. Yama anahtarları `"<nodeId>.<widget>"` biçimindedir — örneğin
+`{"6.text": "a cat", "3.seed": 42}`. Anahtar yalnızca **ilk** noktada
+bölünür; böylece kendilerinde nokta bulunan widget adları (LoRA yığınları,
+`lora_1.model`) bozulmadan kalır.
+
+Yamalama **katıdır**: anlık görüntüde var olmayan bir düğümü ya da girişi
+adresleyen bir anahtar sessiz bir atlama değil kesin bir hatadır. Bir ıskalama,
+bildirgenin anlık görüntüden saptığı anlamına gelir ve yüksek sesle
+başarısız olmak bayat değerlerle çalışmaktan iyidir. Atladığınız girişler
+dönüşüm anındaki varsayılanlarını korur.
+
+Çalıştırma bir `prompt_id` döndürür; durumu yoklayın (`pending` → `running` →
+`done` ya da ComfyUI ondan hiç haberdar olmadıysa `unknown`) ve her çıkış
+düğümü altında gruplanan çıktılar için yoklayın.
+
+### Bir RunPod podunda çalıştırmak
+
+Panelin **RunPod'da çalıştır** yolu aynı yama motorunu **kuru** kipte yeniden
+kullanır: panel yamalanmış istemi yerelde kuyruğa *almadan* ister, sabitlenmiş
+bağımlılıkları poda iter ve istemi orada kuyruğa alır.
+
+<Warning>
+  Bir **görsel girişi** olan uygulamalar bir poda çalıştırmayı reddeder.
+  Yüklemeler **yerel** ComfyUI'ye iner, pod oraya ulaşamaz — bu yüzden panel
+  eksik bir dosyada başarısız olacak bir çalıştırmayı kuyruğa almak yerine
+  dürüstçe geri çevirir.
+</Warning>
+
+## Yayımla ve Keşfet
+
+Panelin **Keşfet** sekmesi herkese açık bir kayıt defteridir (D1 + R2 destekli
+bir Cloudflare Worker) yükselen / yeni / en çok yıldızlı listeler ve aramayla.
+Yükselen, 7 günlük `stars * 3 + runs`'tır. Yayımlamak paketi — bildirge, istem,
+gizli değilse iş akışı, küçük resim — sha256 anahtarlı bir üretici kimliği
+altına yükler.
+
+Keşfet'ten kurmak önce bir **bağımlılık onayı iletişim kutusu** gösterir: bir
+uygulamanın `deps` değerleri *bildirilir*, asla sessizce kurulmaz. Bir karta
+dokundunuz diye donanımınıza hiçbir şey bir model ya da özel düğüm paketi
+kurmaz.
+
+<Note>
+  `pricing_json` ve `hosted_only` bildirge şemasında vardır ve değişmeden
+  geçirilir, ama hiçbir şey onları okumaz. Yalnızca tasarım aşamasındaki bir
+  ticarileştirme evresi için yer ayırırlar — bugün ücretli uygulama davranışı
+  yoktur.
+</Note>
+
+## `apps` MCP aracı
+
+Beş eylemli bir araç, hepsi panelin Apps API'si üzerinde ince vekillerdir.
+**Tuvalsiz** yüzeydir: mobil uygulamanın ve doğrudan sürülen bir ajanın
+kullandığı. Orkestratörün `call_tool` izin listesindedir — `list`/`get`/
+`run_status` salt okunurdur ve `run`, `enqueue_workflow` ile aynı risk
+duruşunu taşır (kullanıcının açıkça dokunduğu bir işi kuyruğa alır).
+
+| Eylem | Etki |
+|---|---|
+| `action:"list"` | Bu ComfyUI'de kayıtlı her uygulamayı listele — her girdi tam bildirge artı `has_workflow` / `has_prompt` / `has_thumbnail`. Başka parametre yok. Salt okunur. |
+| `action:"get"` | Kimliğe göre bir uygulamanın bildirgesi + paket olguları. `appMode.inputs` çalıştırma formudur. Salt okunur. |
+| `action:"run"` | `values` değerlerini anlık görüntüye yamala ve kuyruğa al. `prompt_id` döndürür. |
+| `action:"run_status"` | Bir çalıştırmayı `prompt_id` ile yokla: `status` artı çalıştırmanın çıktıları (çıkış düğümü başına görsel/video dosya başvuruları, metin çıktıları). Salt okunur. |
+| `action:"import"` | Herkese açık kayıt defterinden bu ComfyUI'ye bir uygulama kur. |
+
+### Parametreler
+
+`action` şemada gereken tek parametredir — her eylem farklı bir alt kümeye
+ihtiyaç duyar, bu yüzden geri kalanı şemada isteğe bağlıdır ve varlıkları
+eksik alanı adlandıran işleyici tarafından zorlanır.
+
+| Eylem | Parametre | Tür | Notlar |
+|---|---|---|---|
+| `get` | `app_id` | `string` (uuid), gerekli | `action:"list"`ten |
+| `run` | `app_id` | `string` (uuid), gerekli | |
+| | `values` | `object`, isteğe bağlı | anahtarlar `"<nodeId>.<widget>"`; bilinmeyen anahtarlar yüksek sesle başarısız olur |
+| `run_status` | `app_id` | `string` (uuid), gerekli | |
+| | `prompt_id` | `string`, gerekli | `^[0-9a-zA-Z-]{1,64}$` ile eşleşmelidir |
+| `import` | `registry_url` | `string` (URL), gerekli | varsayılan kayıt defteri ya da izin listeli bir köken olmalıdır |
+| | `app_id` | `string` (uuid), gerekli | **kayıt defteri** uygulamasının uuid'si |
+| | `slug` | `string`, isteğe bağlı | yerel meta veride kaydedilir |
+| | `version` | `integer`, isteğe bağlı | yerel meta veride kaydedilir |
+
+`prompt_id` biçim kısıtı **iki kez** zorlanır — şema sınırında ve yine
+işleyicinin içinde — çünkü kimlik bir URL yoluna yerleştirilir. Dolaşma
+biçimli bir "prompt id" bir çağıran şemayı atlatırsa bile URL kurucusuna
+asla ulaşmamalıdır.
+
+Üretilen araç başına şema başvurusu için bkz.
+[Uygulama araçları](/docs/tools/apps).
+
+### Kayıt defterinden içe aktarmak
+
+`action:"import"` kayıt defteri paketini sunucu tarafında getirir ve onu yerel
+bir uygulama olarak oluşturur. **Kayıt defteri kimliği yerel kimlik olur**;
+böylece zaten sahip olduğunuz bir uygulamayı yeniden içe aktarmak onu
+çoğaltmak yerine bir kimlik çatışması bildirir. Küçük resim ayrı bir kayıt
+defteri uç noktasında yaşar ve ayrı ayrı getirilip iletilir; böylece kurulan
+bir uygulama kart görselini korur.
+
+Bağımlılıklar **kurulmaz**. Araç bildirgenin `deps` değerini döndürür; böylece
+çağıran onları bildirebilir ve kullanıcının onları kasıtlı kurmasına izin
+verebilir.
+
+<Warning>
+  `registry_url` bir izin listesidir, serbest bir URL değil. Getirme
+  **sunucuda** olur; bu yüzden rastgele bir URL bir SSRF ilkel öğesi olurdu —
+  loopback ya da LAN adresleri ya da birine yönlendiren herkese açık bir URL.
+  İşleten `COMFYUI_MCP_REGISTRY_URLS` (virgülle ayrılmış, geliştirme/ön üretim
+  için) ile ekstra kökenleri izin listesine almadıkça yalnızca varsayılan
+  herkese açık kayıt defteri kabul edilir. Yönlendirmeler izlenmek yerine
+  açıkça reddedilir.
+</Warning>
+
+## Sınırlar ve doğrulama
+
+Gerçekten çarpabileceğiniz şeyler:
+
+| Sınır | Değer | Nerede |
+|---|---|---|
+| Paket / istem JSON | 16 MB | düz bir grafikten daha ferah çünkü bir istem base64 görseller taşıyabilir |
+| Küçük resim | 5 MB | **hiçbir şey yazılmadan önce** çözülür ve doğrulanır; böylece kötü bir küçük resim yarı oluşturulmuş bir paketi geride bırakamaz |
+| Uygulama adı | 120 karakter | kırpılır |
+| Açıklama | 4000 karakter | kırpılır |
+| Combo `choices` | 200 girdi | kırpılır |
+| Kayıt defteri getirme | 16 MB, 30 sn | bildirilen `content-length` **ve** gerçek baytlar üzerinde denetlenir |
+
+Fark edeceğiniz doğrulama:
+
+- **Uygulama kimlikleri uuid olmalıdır.** Başka her şey bir yol kurulmadan
+  reddedilir ve çözümlenen paket yolu uygulamalar kökü altında kapsama için
+  yeniden denetlenir.
+- **Bir istem API biçiminde olmalıdır** — sayısal düğüm kimliği anahtarları,
+  her düğüm bir `{class_type, inputs}` nesnesi. UI biçimli grafikler
+  reddedilir.
+- **`hideWorkflow` ayarlı değilse bir UI iş akışı gerekir.**
+- **Zaten var olan bir uygulama oluşturmak** üzerine yazma değil bir
+  çatışmadır.
+- **Kısmi bildirge güncellemeleri gerçekten kısmidir.** Bir uygulamayı
+  yayımlamak ya da gizlemek yalnızca kendi alanlarını gönderir ve adınızı,
+  açıklamanızı ya da `appMode`'unuzu silmez.
+- **Bilinmeyen bildirge anahtarları düşürülür**, ayrılmış geçiş alanları
+  dışında; böylece daha eski bir donanım anlamadığı alanlarda başarısız olmak
+  yerine onları yok sayar.
+
+Uygulamalar kökü `COMFYUI_MCP_APPS_DIR` ile geçersiz kılınabilir (öncelikle
+testler için); varsayılan olarak ComfyUI'nin kendi kullanıcı dizininden
+türetilir, böylece taşınabilir kurulumlardan sağ çıkar.
+
+## Telefonda
+
+Mobil uygulama gerçek bir **Uygulamalar** sekmesi taşır — bir önizleme değil.
+İki yarısı vardır:
+
+- **Uygulamalarım** — donanımınıza kurulu uygulamalar, köprü üzerinden
+  `action:"list"` ile listelenir. Birine dokunmak üretilmiş bir çalıştırma
+  formu açar, `action:"run"` ile kuyruğa alır ve çıktılar çizilene kadar her
+  2 sn'de (30 dakikada sınırlı) `action:"run_status"` yoklar.
+- **Keşfet** — herkese açık kayıt defteri, telefondan **doğrudan HTTPS**
+  üzerinden vurulur (köprü sıçraması yok, böylece eşleştirmeden önce göz atma
+  çalışır). Kurmak diğer yönden gider: donanım paketi kendisi
+  `action:"import"` ile getirir.
+
+Bu, telefonun sohbetin yapamayacağı en net şeydir — gerçek girişlerle, hiçbir
+yerde tuval olmadan gerçek bir iş akışı çalıştırmak.
+
+## Ayrıca bakın
+
+- [Uygulama araçları](/docs/tools/apps) — üretilen araç başına şema başvurusu
+- [Kenar Çubuğu Paneli](/docs/tr/panel) — uygulamaların dönüştürüldüğü,
+  yayımlandığı ve keşfedildiği yer
+- [Mobil uygulama](/docs/tr/mobile) — bağlamında Uygulamalar sekmesi
+- [RunPod podları](/docs/tools/runpod) — "RunPod'da çalıştır" yolunun
+  hedeflediği pod
+- [Yol haritası](/docs/tr/roadmap)

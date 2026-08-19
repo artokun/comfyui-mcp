@@ -1,0 +1,263 @@
+---
+title: "Apps (micro-apps)"
+description: "Convierte un flujo de trabajo en una app de un clic: un manifiesto, un formulario de ejecución expuesto y una instantánea de prompt API en la que se parchean los valores en cada ejecución. Convierte en el panel, ejecuta desde el panel, el teléfono o un agente, y publica en un registro público."
+icon: "layout-grid"
+---
+
+Una **app** es un flujo de trabajo empaquetado para ejecuciones de un clic
+**sin lienzo**. Es un directorio en tu equipo que contiene cuatro cosas:
+
+| Archivo | Qué es |
+|---|---|
+| `manifest.json` | nombre, descripción, `appMode {inputs, outputs}`, `deps`, `hideWorkflow`, `published` |
+| `prompt.json` | la **instantánea** del prompt en formato API — los valores se parchean aquí en cada ejecución |
+| `workflow.json` | el grafo UI de litegraph — **ausente** cuando `hideWorkflow` está definido |
+| `thumbnail.png` | arte de tarjeta opcional |
+
+Los paquetes viven bajo el directorio de usuario de ComfyUI en
+`<user>/comfyui-mcp-panel/apps/<app-id>/` — deliberadamente **no** el
+directorio de flujos de trabajo, para que una app oculta nunca aparezca en
+el navegador de flujos de trabajo.
+
+```
+workflow ⇄ convert (panel) ⇄ app bundle on disk ⇄ run form ⇄ patch snapshot ⇄ ComfyUI queue
+                                    ⇅
+                        publish / install ⇄ public registry
+```
+
+La razón de que las apps existan como capa propia: el lienzo es la interfaz
+equivocada para *ejecutar* un flujo de trabajo en el que ya confías. Un
+formulario con cinco campos etiquetados es la correcta, y es la única
+interfaz que un teléfono o un agente pueden controlar en absoluto.
+
+<Note>
+  Hay **una** implementación de almacenamiento y ejecución — las rutas HTTP
+  del pack del panel (`/comfyui_mcp_panel/apps/*`). El panel de escritorio,
+  la pestaña Apps del móvil y las herramientas MCP `apps_*` son todos
+  clientes de ella, así que una app se comporta igual de donde la lances.
+</Note>
+
+## Requisitos
+
+Las apps las sirve el **pack del panel** (`comfyui-mcp-panel`), no el
+servidor MCP solo. Si el pack de tu ComfyUI es anterior a la función,
+`apps` con `action:"list"` falla con un mensaje explícito *"the panel pack
+on this ComfyUI predates the Apps feature"* — actualiza el pack y reinicia
+ComfyUI.
+
+## Convertir un flujo de trabajo en una app
+
+En el panel, el botón **Apps** de la barra de herramientas (junto a Civitai)
+abre la cuadrícula de apps. Convertir el flujo de trabajo abierto hace tres
+cosas:
+
+1. **Importa la configuración APP-mode de ComfyUI** si el flujo de trabajo
+   ya lleva una, y si no elige entradas y salidas **heurísticamente**
+   (widgets de prompt, seeds, ajustes del sampler; nodos de clase
+   `SaveImage` como salidas). Las entradas APP-mode importadas se respetan
+   en **cualquier** tipo de nodo, así que los endpoints de nodos
+   personalizados sobreviven a la conversión.
+2. **Escanea las dependencias** — los modelos y packs de nodos
+   personalizados que el grafo necesita — en `manifest.deps`.
+3. **Hace una instantánea del prompt** en formato API. Los valores de los
+   widgets en el momento de la conversión se convierten en el `default` del
+   formulario de cada entrada.
+
+Cada entrada de `appMode.inputs` lleva `nodeId`, `widget`, `label` y un
+`kind` de `text`, `number`, `combo`, `toggle`, `image` o `model`; los
+combos también llevan `choices`. Eso es de lo que el formulario de
+ejecución pinta — en escritorio y en móvil.
+
+### Ocultar el flujo de trabajo
+
+`hideWorkflow` elimina `workflow.json` del paquete por completo, así que el
+grafo no se entrega a quien ejecute o instale la app.
+
+<Warning>
+  **`hideWorkflow` es ofuscación, nunca seguridad.** El prompt API sigue
+  visible para cualquiera que ejecute la app a través del propio
+  `/history` de ComfyUI, y los modelos y nodos personalizados que la app
+  instala revelan las dependencias del grafo. Trátalo como «no ensucies mi
+  navegador de flujos de trabajo», no como protección de un grafo que no
+  te puedes permitir filtrar.
+</Warning>
+
+## Ejecutar una app
+
+Una ejecución parchea los valores de tu formulario en la instantánea
+guardada y encola el resultado. Las claves de parche son
+`"<nodeId>.<widget>"` — por ejemplo `{"6.text": "a cat",
+"3.seed": 42}`. La clave se parte solo en el **primer** punto, así que los
+nombres de widget que ellos mismos contienen puntos (pilas de LoRA,
+`lora_1.model`) se quedan intactos.
+
+El parcheo es **estricto**: una clave que apunta a un nodo o una entrada
+que no existe en la instantánea es un error duro, no un salto silencioso.
+Un fallo significa que el manifiesto se ha desviado de la instantánea, y
+fallar en alto gana a ejecutar con valores viejos. Las entradas que omites
+conservan sus valores por defecto del momento de la conversión.
+
+La ejecución devuelve un `prompt_id`; sóndealo para el estado (`pending` →
+`running` → `done`, o `unknown` si ComfyUI nunca ha oído hablar de él) y
+para las salidas agrupadas bajo cada nodo de salida.
+
+### Ejecutar en un pod de RunPod
+
+El camino **Run on RunPod** del panel reutiliza el mismo motor de parcheo
+en modo **dry**: el panel pide el prompt parcheado *sin* encolarlo en
+local, empuja cualquier dependencia fijada al pod y encola el prompt allí
+en su lugar.
+
+<Warning>
+  Las apps con una **entrada de imagen** se niegan a ejecutarse en un pod.
+  Las subidas aterrizan en el ComfyUI **local**, al que el pod no puede
+  llegar — así que el panel declina con honestidad en lugar de encolar una
+  ejecución que fallaría por un archivo que falta.
+</Warning>
+
+## Publicar y Explorar
+
+La pestaña **Explore** del panel es un registro público (un Cloudflare
+Worker respaldado por D1 + R2) con listados de tendencias / nuevos / más
+estrellados y búsqueda. Las tendencias son `stars * 3 + runs` a 7 días.
+Publicar sube el paquete — manifiesto, prompt, flujo de trabajo salvo que
+esté oculto, miniatura — bajo una identidad de creador con clave sha256.
+
+Instalar desde Explore muestra primero un **diálogo de consentimiento de
+dependencias**: los `deps` de una app se *reportan*, nunca se instalan en
+silencio. Nada instala un modelo o un pack de nodos personalizados en tu
+equipo porque hayas pulsado una tarjeta.
+
+<Note>
+  `pricing_json` y `hosted_only` existen en el esquema del manifiesto y se
+  pasan sin cambios, pero nada los lee. Reservan espacio para una fase de
+  monetización solo de diseño — hoy no hay comportamiento de app de pago.
+</Note>
+
+## La herramienta MCP `apps`
+
+Una herramienta con cinco acciones, todas proxies finos sobre la API Apps
+del panel. Es la superficie **sin lienzo**: lo que usan la app móvil y un
+agente controlado de forma directa. Está en la lista blanca `call_tool`
+del orquestador — `list`/`get`/`run_status` son de solo lectura, y `run`
+lleva la misma postura de riesgo que `enqueue_workflow` (encola un trabajo
+que el usuario pulsó de forma explícita).
+
+| Acción | Efecto |
+|---|---|
+| `action:"list"` | Lista cada app registrada en este ComfyUI — cada entrada es el manifiesto completo más `has_workflow` / `has_prompt` / `has_thumbnail`. Sin otros parámetros. Solo lectura. |
+| `action:"get"` | Manifiesto + hechos del paquete de una app por id. `appMode.inputs` es el formulario de ejecución. Solo lectura. |
+| `action:"run"` | Parchea `values` en la instantánea y la encola. Devuelve `prompt_id`. |
+| `action:"run_status"` | Sonda una ejecución por `prompt_id`: `status` más las salidas de la ejecución (refs de archivo de imagen/video por nodo de salida, salidas de texto). Solo lectura. |
+| `action:"import"` | Instala una app del registro público en este ComfyUI. |
+
+### Parámetros
+
+`action` es el único parámetro exigido por el esquema — cada acción necesita
+un subconjunto distinto, así que el resto son opcionales en el esquema y su
+presencia la impone el manejador, que nombra el campo que le falta.
+
+| Acción | Parámetro | Tipo | Notas |
+|---|---|---|---|
+| `get` | `app_id` | `string` (uuid), obligatorio | de `action:"list"` |
+| `run` | `app_id` | `string` (uuid), obligatorio | |
+| | `values` | `object`, opcional | claves `"<nodeId>.<widget>"`; las claves desconocidas fallan en alto |
+| `run_status` | `app_id` | `string` (uuid), obligatorio | |
+| | `prompt_id` | `string`, obligatorio | debe coincidir con `^[0-9a-zA-Z-]{1,64}$` |
+| `import` | `registry_url` | `string` (URL), obligatorio | debe ser el registro por defecto o un origen en lista blanca |
+| | `app_id` | `string` (uuid), obligatorio | el uuid de la app del **registro** |
+| | `slug` | `string`, opcional | se registra en los metadatos locales |
+| | `version` | `integer`, opcional | se registra en los metadatos locales |
+
+La restricción de forma de `prompt_id` se impone **dos veces** — en el
+borde del esquema y otra vez dentro del manejador — porque el id se
+interpola en una ruta URL. Un «prompt id» con forma de traversal no debe
+llegar nunca al constructor de URL aunque un llamador se salte el esquema.
+
+Para la referencia de esquema generada por herramienta, consulta
+[Herramientas de apps](/docs/tools/apps).
+
+### Importar desde el registro
+
+`action:"import"` trae el paquete del registro en el servidor y lo crea
+como app local. El **id del registro se convierte en el id local**, así que
+reimportar una app que ya tienes informa de un conflicto de id en lugar de
+duplicarla. La miniatura vive en un endpoint separado del registro y se
+trae y reenvía por separado, así que una app instalada conserva su arte de
+tarjeta.
+
+Las dependencias **no** se instalan. La herramienta devuelve los `deps` del
+manifiesto para que el llamador los reporte y deje que el usuario los
+instale a propósito.
+
+<Warning>
+  `registry_url` es una lista blanca, no una URL libre. La obtención ocurre
+  **en el servidor**, así que una URL arbitraria sería un primitivo SSRF —
+  direcciones loopback o LAN, o una URL pública que redirige a una. Solo se
+  acepta el registro público por defecto a menos que el operador ponga
+  orígenes extra en lista blanca mediante `COMFYUI_MCP_REGISTRY_URLS`
+  (separados por comas, pensado para dev/staging). Las redirecciones se
+  rechazan de plano en lugar de seguirse.
+</Warning>
+
+## Límites y validación
+
+Cosas con las que te puedes encontrar de verdad:
+
+| Límite | Valor | Dónde |
+|---|---|---|
+| JSON del paquete / prompt | 16 MB | más holgado que un grafo plano porque un prompt puede llevar imágenes en base64 |
+| Miniatura | 5 MB | se decodifica y valida **antes** de escribir nada, para que una miniatura mala no deje un paquete a medias |
+| Nombre de la app | 120 caracteres | se trunca |
+| Descripción | 4000 caracteres | se trunca |
+| `choices` de combo | 200 entradas | se trunca |
+| Obtención del registro | 16 MB, 30 s | se comprueba el `content-length` declarado **y** los bytes reales |
+
+Validación que notarás:
+
+- **Los ids de app deben ser uuids.** Cualquier otra cosa se rechaza antes
+  de construir una ruta, y la ruta del paquete resuelta se vuelve a
+  comprobar para contención bajo la raíz de apps.
+- **Un prompt debe ser formato API** — claves de id de nodo numéricas, cada
+  nodo un objeto `{class_type, inputs}`. Los grafos en formato UI se
+  rechazan.
+- **Se exige un flujo de trabajo UI a menos que `hideWorkflow`** esté
+  definido.
+- **Crear una app que ya existe** es un conflicto, no una
+  sobreescritura.
+- **Las actualizaciones parciales del manifiesto son de verdad
+  parciales.** Publicar u ocultar una app envía solo sus propios campos y
+  no borrará tu nombre, descripción o `appMode`.
+- **Las claves desconocidas del manifiesto se descartan**, salvo los
+  campos reservados de paso, así que un equipo más antiguo ignora los
+  campos que no entiende en lugar de fallar.
+
+La raíz de apps se puede sobreescribir con `COMFYUI_MCP_APPS_DIR`
+(principalmente para pruebas); por defecto se deriva del propio directorio
+de usuario de ComfyUI, así que sobrevive a instalaciones portátiles.
+
+## En el teléfono
+
+La app móvil entrega una pestaña **Apps** de verdad — no una previsualización.
+Tiene dos mitades:
+
+- **My Apps** — las apps instaladas en tu equipo, listadas por el puente
+  mediante `action:"list"`. Pulsar una abre un formulario de ejecución
+  generado, la encola con `action:"run"` y sonda `action:"run_status"` cada
+  2 s (acotado a 30 minutos) hasta que se pintan las salidas.
+- **Explore** — el registro público, alcanzado **directamente por HTTPS**
+  desde el teléfono (sin salto de puente, así que navegar funciona antes de
+  haber emparejado). Instalar va en la otra dirección: el equipo trae el
+  paquete él mismo mediante `action:"import"`.
+
+Esto es lo más claro que el teléfono puede hacer y el chat no — ejecutar un
+flujo de trabajo de verdad, con entradas de verdad, sin un lienzo a la
+vista.
+
+## Ver también
+
+- [Herramientas de apps](/docs/tools/apps) — la referencia de esquema generada por herramienta
+- [Panel lateral](/docs/es/panel) — donde se convierten, publican y exploran las apps
+- [App móvil](/docs/es/mobile) — la pestaña Apps en contexto
+- [Pods de RunPod](/docs/tools/runpod) — el pod al que apunta el camino «Run on RunPod»
+- [Hoja de ruta](/docs/es/roadmap)

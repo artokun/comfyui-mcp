@@ -1,0 +1,294 @@
+---
+title: "Arka uçlar / sağlayıcılar"
+description: "Panel ajanı HERHANGİ bir LLM üzerinde çalışır: kendi aboneliğinizde/planınızda Claude, ChatGPT, Gemini, Grok, Kimi ya da GLM, Ollama / LM Studio / llama.cpp üzerinden ücretsiz bir yerel model (hiç hesap yok) ya da OpenAI uyumlu bir uç nokta üzerinden barındırılan herhangi bir model. Sağlayıcı-yansız AgentBackend portunun, seçicinin ve yetenek matrisinin nasıl çalıştığı."
+icon: "shuffle"
+---
+
+[Kenar çubuğu paneli](/docs/tr/panel) ajanı **sağlayıcıdan bağımsızdır**.
+**Claude**, **ChatGPT**, **Gemini** ya da **Ollama (yerel)** seçin; eşleşen
+ajan arka planda çalışır — aboneliklerde API anahtarı gerekmez, yerel
+modellerde hiç hesap gerekmez. Ollama arka ucu ayrıca **herhangi bir OpenAI
+uyumlu uç noktayı** da konuşur (OpenRouter, DeepSeek, GLM, MiMo, vLLM, LM
+Studio); böylece "kendi modelinizi getirin" kendi GPU'nuzdaki ücretsiz bir
+4B'den öncü modele kadar her şeyi kapsar. Tüm sağlayıcılar aynı canlı tuval
+araçlarını, aynı model bilgisini, aynı tek seferlik iş akışı yüklemelerini,
+aynı maliyet korumasını paylaşır. [LLM Arenası](/docs/tr/arena) bunlardan
+herhangi birini gerçek ComfyUI görevlerinde puanlar.
+
+```
+panel (pick a provider) ⇄ loopback bridge ⇄ orchestrator (Claude · ChatGPT · Gemini · any LLM) ⇄ your graph
+```
+
+## Bir bağlantı noktası değil, bir sağlayıcı seçin
+
+Panel bir **arka uç seçicisi** gösterir — Claude / ChatGPT / Gemini /
+Antigravity / Grok / Kimi / GLM / Ollama / LM Studio / llama.cpp /
+OpenRouter / Özel uç nokta
+çipleri (Copilot gibi deneysel sağlayıcılar deneysel anahtarın arkasında
+görünür). Birine tıklamak o sağlayıcıyı tek paylaşılan orkestratörde bağlar
+(bir köprü portu tüm sağlayıcılara hizmet eder; her panel sekmesi
+el sıkışmada kendi sağlayıcısını seçer). Köprü adresi, kullanıcı yönetimli
+orkestratörler için **Gelişmiş** altında yaşar.
+
+Sağlayıcı değiştirmek **taze bir sohbet başlatır** — konuşmalar sağlayıcılar
+arasında paylaşılmaz — ve panel bunu söyleyen bir sistem notu gönderir. Yazma
+alanı yer tutucusu etkin arka ucu izler ("Ask Claude…" / "Ask Ollama…").
+
+## Giriş yapın (sağlayıcı başına bir kez — ya da hiç)
+
+- **Claude** — `claude` (ya da `claude setup-token`) — claude.ai OAuth
+  (abonelik).
+- **ChatGPT (Codex)** — `codex login` — ChatGPT girişi (abonelik); Codex
+  app-server üzerinden çalışır.
+- **ChatGPT (doğrudan OAuth)** — `codex login` çalıştırdıysanız ekstra adım
+  yok: `chatgpt` arka ucu `~/.codex/auth.json` dosyasını yeniden kullanır ve
+  ChatGPT ile doğrudan konuşur (Codex süreci yok). Onay kimlik dosyasının
+  eksik olduğunu söylerse `codex login` bir kez çalıştırın.
+- **Gemini** — `gemini` — Google girişi. Bireysel ücretsiz Google girişinin
+  2026-06-18'de emekli edildiğini unutmayın: Gemini CLI arka ucu artık bir
+  `GEMINI_API_KEY` ya da bir kurumsal/Code Assist hesabı ister. Bireysel
+  aboneler: aşağıdaki **Antigravity**'yi kullanın.
+- **Antigravity (Google aboneliği)** — resmî Antigravity CLI'yi
+  [antigravity.google](https://antigravity.google) adresinden kurun, `agy`'yi
+  bir kez çalıştırın ve Google Girişini tamamlayın (AI Pro/Ultra ve ücretsiz
+  katmanlar). Arka uç her turda `agy -p` sürer, `--continue` konuşma
+  sürekliliğiyle, canlı model kataloğunu `agy models`'tan okur ve ComfyUI +
+  panel MCP araçlarını birleştirmeye güvenli bir çalışma alanı
+  `.agents/mcp_config.json` dosyası üzerinden bağlar. Tasarım gereği azaltılmış
+  yetenekler (belgelenmiş makine okunabilir olay akışı yok): nihai yanıt metni
+  akar, ama araç başına ilerleme ve görsel girişi yoktur. Konuşma sürekliliği
+  `agy --continue` kullanır (hesabın en son konuşması); bu yüzden aynı anda
+  BİR antigravity sekmesi çalıştırın — ikinci bir sekme ya da bir terminaldeki
+  etkileşimli bir `agy` oturumu ipliği çalabilir.
+  `COMFYUI_MCP_ANTIGRAVITY_MODEL` bir modeli sabitler,
+  `COMFYUI_MCP_ANTIGRAVITY_PATH` standart olmayan bir kurulumu gösterir.
+- **Grok** — Grok CLI'yi (xAI / Grok Build) kurun ve giriş için `grok`'u bir
+  kez çalıştırın; arka uç onu ACP kipinde sürer. Panel ayrıca Grok hazır
+  değilken panel içi bir OAuth giriş satırı da sunar.
+- **Kimi (önerilir)** — [Kimi Code CLI](https://moonshotai.github.io/kimi-code/)
+  kurun ve `kimi login` çalıştırın (cihaz kodu akışı); arka uç o girişi
+  `~/.kimi-code/credentials/kimi-code.json` dosyasından yeniden kullanır
+  (eski `~/.kimi` yolu hâlâ yedek olarak okunur). Bu **Kimi Code
+  aboneliğinizi** kullanır ve Kimi çalıştırmanın yeğlenen yoludur —
+  aşağıdaki token başına ödenen Moonshot anahtarından daha ucuz ve daha yüksek
+  sınırlı. Yalnızca CI / CLI'sız kullanım için `KIMI_API_KEY` ayarlayın ya da
+  varsayılan olmayan bir kimlik bilgileri dizinini göstermek için
+  `KIMI_CODE_HOME` (`KIMI_SHARE_DIR` eski adı ayarlayanlar için hâlâ onur
+  duyulur). Panel içi OAuth girişi de sunulur.
+- **GLM** — `ZAI_API_KEY` ayarlayın (Z.AI Coding Plan; `GLM_API_KEY` /
+  `ZHIPUAI_API_KEY` de kabul edilir). CLI yok.
+- **Kimi K3 (Moonshot)** — Kimi Code aboneliğiniz yoksa **token başına ödenen
+  alternatif** (varsa yukarıdaki **Kimi** yolunu yeğleyin).
+  [platform.kimi.ai](https://platform.kimi.ai/console/api-keys) adresinden
+  `MOONSHOT_API_KEY` ayarlayın. CLI yok. Bu Moonshot **platform** anahtarıdır
+  (varsayılan model `kimi-k3`, temel `https://api.moonshot.ai/v1`) — yukarıdaki
+  **Kimi** sağlayıcısından ayrıdır, o Kimi Code kodlama aboneliğidir. Modeli
+  `COMFYUI_MCP_MOONSHOT_MODEL`, temeli `COMFYUI_MCP_MOONSHOT_BASE_URL` ile
+  geçersiz kılın.
+- **MiniMax** — [platform.minimax.io](https://platform.minimax.io/console/api-keys)
+  adresinden `MINIMAX_API_KEY` ayarlayın. CLI yok. Varsayılan model
+  `MiniMax-M3` ve varsayılan temel küresel uç nokta
+  `https://api.minimax.io/v1`'dir (OpenAI uyumlu, düz Bearer kimlik
+  doğrulama). Çin bölgesi için
+  `COMFYUI_MCP_MINIMAX_BASE_URL=https://api.minimaxi.com/v1` ayarlayın. Modeli
+  `COMFYUI_MCP_MINIMAX_MODEL` ile geçersiz kılın.
+- **Copilot (deneysel)** — panelin deneysel sağlayıcı satırından giriş yapın.
+  Varsayılan kapalıdır; önce Ayarlar'da deneysel arka uçları açın.
+- **Ollama (yerel)** — giriş yok. Ollama'yı kurun ve araç çağıran bir model
+  çekin (`ollama pull gemma4:e4b`). Bunun yerine **barındırılan** bir model
+  için `COMFYUI_MCP_OLLAMA_API=openai`, `COMFYUI_MCP_OLLAMA_BASE_URL` (ör.
+  `https://openrouter.ai/api/v1`) ve bir API anahtarı
+  (`COMFYUI_MCP_OLLAMA_API_KEY` / `OPENROUTER_API_KEY`) ayarlayın.
+- **Özel uç nokta** — giriş akışı yok. Herhangi bir OpenAI uyumlu `/v1`'e
+  yöneltin (vLLM, DeepSeek, Together, Azure, uzak bir llama-server) Ayarlar →
+  Özel uç nokta; sunucu istiyorsa orada bir API anahtarı ekleyin (maskeli
+  giriş, orkestratör tarafından 0600 saklanır). Bkz.
+  [Yerel LLM'ler → Özel uç nokta](/docs/tr/local-llms#özel-uç-nokta-openai-uyumlu-herhangi-bir-sunucu).
+
+### Bağlan anında hazır olma ve ilk kurulum
+
+Her sağlayıcı çipi hazır değilken DÜRÜSTçe düşer: bağlanma onayı tam eksik
+adımı söyler ("Set ZAI_API_KEY…", "`codex login` çalıştırın…", "Deneysel
+satırdan giriş yapın…") ilk mesajınızda başarısız olmak yerine — ve kimlik
+bilgileri sonra görünen bir sağlayıcı yeniden başlatmadan sonraki Bağlan'da
+hazıra döner.
+
+Panel her sağlayıcının hazırlığını **Bağlan** anında saptar — abonelik
+sağlayıcıları için `PATH` üzerindeki bir CLI artı diskte bir giriş, Ollama
+için mevcut bir ikili (durmuş bir arka plan hizmeti bağlanmada zarifçe
+düşer). Hangi sağlayıcının kurulduğunu tahmin etmeniz gerekmez:
+
+- Bir **ilk kurulum kartı** yalnızca **hiçbir** sağlayıcı hazır değilken
+  görünür, sağlayıcı başına tek seferlik kurulum adımıyla (Ollama için bu bir
+  giriş değil, kurulum + bir model çekmedir).
+- Kayıtlı sağlayıcı seçiminiz kullanılabilir değilse panel **hazır bir
+  sağlayıcıya kendiliğinden geçer** (kayıtlı tercihiniz onu kurduğunuzda geri
+  yüklenir).
+- Hazır olmayan bir sağlayıcının satırı, çalışan ajana bir kurulum istemi
+  tohumlayan bir **"kur"** eylemi olur.
+
+## Her sağlayıcı nasıl sürülür
+
+Orkestratör sağlayıcı-yansız bir **`AgentBackend`** portuna bağlıdır
+(bağımlılık enjeksiyonu). Her sağlayıcı bir adaptördür:
+
+| | Claude | ChatGPT (Codex) | Gemini | Ollama / herhangi bir LLM |
+|---|---|---|---|---|
+| Sürücü | Claude Agent SDK — kalıcı akan oturum | `codex app-server` JSON-RPC | `gemini --acp` (Agent Client Protocol) | doğrudan HTTP — Ollama `/api/chat` ya da herhangi bir OpenAI uyumlu `/v1/chat/completions`; arka uç bütün ajan döngüsüne sahiptir |
+| Kimlik | claude.ai OAuth | ChatGPT girişi | Google girişi | yok (yerel) / bearer anahtar (barındırılan) |
+| Canlı tuval araçları | süreç içi SDK MCP sunucusu | loopback streamable-HTTP MCP | loopback streamable-HTTP MCP | aynı loopback MCP üzerinde [6 araçlı yönlendirici](/docs/tr/local-llms) |
+| Başsız `comfyui` MCP | süreç içi | yapılandırmada bildirilen stdio | yapılandırmada bildirilen stdio | yönlendiricinin arkasında kompakt kip stdio alt süreci |
+
+`panel_*` araç tanımları **tek bir paylaşılan listede** yaşar, her yola
+kaydedilir; böylece canlı tuval yüzeyi (`panel_clear` / `panel_restart_comfyui`
+için yıkıcı onay kapısı dahil) sağlayıcılar arasında özdeştir. Parite
+kendiliğindendir — hiçbir yol bir aracı yeniden uygulamaz. Ollama/herhangi bir
+LLM arka ucu ayrıca her iki araç yüzeyini altı yönlendirici aracın arkasına
+sarar; böylece küçük modeller şemalarda boğulmaz — bkz.
+[Yerel LLM'ler ve diğer ajanlar](/docs/tr/local-llms).
+
+## Yetenek matrisi
+
+Arka uç başına bir yetenek tanımlayıcısı, panelin bir sağlayıcının yapamayacağı
+özelliklerde **zarifçe düşmesine** izin verir:
+
+| Yetenek | Claude | ChatGPT (Codex) | Gemini | Ollama / herhangi bir LLM |
+|---|---|---|---|---|
+| Kalıcı kanal (zaman içinde tur itmek) | ✅ | ✅ (iş parçacığı + `turn/start`) | ✅ | ✅ (bellek içi geçmiş) |
+| Akan deltalar | ✅ | ✅ | ✅ | ✅ (NDJSON / SSE) |
+| Tur ortasında kesme | ✅ | ✅ (`turn/interrupt`) | ✅ (`session/cancel`) | ✅ (istek iptali) |
+| Konuşma geri alma (bir turda çatalla) | ✅ `forkSession` | ⚠️ kapalı | ⚠️ kapalı | ⚠️ kapalı |
+| Süreç içi MCP araçları | ✅ | ❌ | ❌ | ❌ (MCP istemcileri üzerinde yönlendirici) |
+| Model sayımı | ✅ | ✅ (`config/read`) | durağan katalog | ✅ (`/api/tags` ya da `/models`) |
+| Görüş (görsel girişi) | ✅ | ✅ | ✅ | ❌ (modele bağlı; şimdilik kapalı) |
+| Ses girişi | ❌ | ❌ | ❌ | ✅ Ollama (denetlendi) · ⚠️ diğerleri (doğrulanmadı) |
+| Sağlayıcı eğik çizgi komutları | ✅ | ❌ | ❌ | ❌ |
+
+### Ses girişi — hangi arka uçlar, dürüstçe
+
+Ajan ComfyUI'nin ses araçlarını her arka uçta sürebilir. Bir ses dosyasını
+**duymak** daha dardır ve yukarıdaki tablo kasıtlı olarak tutucudur; çünkü
+sessizce düşen bir ek, reddedilenden kötüdür:
+
+- **Ollama (`ollama` arka ucu, yerel `/api/chat`) — desteklenir, yetenek
+  denetlenir ve uçtan uca doğrulanmıştır.** Ses `images[]` dizisine biner;
+  bu Ollama'nın ses için kendi taşıyıcısıdır, bir hile değil. Yerel bir
+  Ollama'ya karşı `gemma4:e2b` ile canlı doğrulandı; gerçek bir WAV'ı
+  yazıya döktü.
+  - **Sağlayıcı başına değil, model başına.** Herhangi bir şey göndermeden
+    önce arka uç `POST /api/show` ile *bu* modelin `audio` yeteneğini
+    bildirip bildirmediğini sorar. Bildirmezse ek ada göre reddedilir,
+    bildirilen yetenek listesi size alıntılanır ve hangi modellerin
+    duyabileceği söylenir (`ollama pull gemma4:e2b` / `gemma4:e4b` /
+    `nemotron3:33b`). `GET /api/tags` da bir `capabilities` dizisi döndürür
+    ve **aynı yanıt değildir** — aynı model orada ses yok, `/api/show`'dan
+    ses bildirdi — bu yüzden yalnızca `/api/show` danışılır.
+  - Yetenek, ses taşıyan her turda yeniden denetlenir; çünkü bir Ollama
+    etiketi değişkendir: `ollama pull` aynı adın altındaki ağırlıkları
+    değiştirebilir ve önbellekli bir hüküm anlattığı modelden daha uzun
+    yaşayabilir.
+- **LM Studio / llama.cpp / OpenRouter / GLM / Kimi / Moonshot / MiniMax /
+  Copilot / özel OpenAI uyumlu uç noktalar — denenir, yetenek DENETLENMEZ.**
+  Bunların hepsi `/v1/chat/completions` konuşur, soracak bir yetenek uç
+  noktası yoktur; bu yüzden ses bir `input_audio` içerik parçası olarak
+  gönderilir ve o turda teslimatın **doğrulanmadığı** size söylenir: *"I cannot
+  confirm the model actually receives them — if the reply does not reflect
+  what is in the file, it did not hear it."* Reddetmek, yalnızca yetenek
+  API'si olmayan her uç noktaya sesi yasaklardı; çalışamayan bir koruma bir
+  hüküm değildir. `input_audio` biçiminin kendisi Ollama'nın OpenAI uyumlu
+  uç noktasına karşı doğrulandı; herhangi bir *verilen* üçüncü taraf ana
+  makinenin onu onurlandırıp onurlandırmadığı denetleyebileceğimiz bir şey
+  değildir ve öyle olduğunu iddia etmeyiz.
+- **Claude, ChatGPT (Codex), Codex CLI, Gemini, Grok, Antigravity, pi** — bu
+  derlemede ses girişi yok. Ses eklemek tur kurulmadan reddedilir ve hem size
+  hem modele, sağlayıcıyı ve yerine neyin çalışacağını adlandırarak söylenir.
+
+  Gemini/Grok'ta bu bir protokol boşluğu değil kasıtlı bir eksiltmedir: ACP
+  bir `audio` ContentBlock *tanımlar*, ama ajanın önce bir `audio` istem
+  yeteneği ilan etmesini ister ve iki CLI'nin de bunu yaptığı gözlemlenmemiştir.
+  Hiç çalıştırılamayan, başarısızlık kipi kullanıcının hiç gelmediği
+  söylenmeyen bir ek olan bir gönderme yolu, dürüst bir reddetmeden kötüdür —
+  bu yüzden yayımlanmaz.
+
+**Kör** anahtarı *pikseller* hakkındadır: görselleri saklar ve sesi **saklamaz**.
+
+Kör'ün uygulaması ajanın **yerel araçlarına** da ulaşır, yalnızca comfyui MCP
+yüzeyine değil: yerleşik Claude arka ucu, Kör açıkken kendi `Read`/`WebFetch`
+çağrılarını görsel içerikte reddeden bir PreToolUse kapısıyla çalışır
+(uzantıya *ve* sihirli baytlara göre raster dosyalar, PDF'ler, defter
+çıktıları ve ComfyUI `/view` URL'leri) — çağrı başına canlı okunur, böylece
+oturum ortası bir anahtar bir sonraki araç çağrısını bağlar. API/yerel şeritler
+(Ollama ailesi, GLM, Kimi, özel uç noktalar) yalnızca bizim araç yüzeyimizi
+taşır, bu yüzden MCP temizliği onları tam kapsar. **CLI şeritleri** (Codex,
+Gemini, Grok, Antigravity, pi, Copilot) yerleşik dosya araçlarını kancalayamayacağımız
+kendi ajan ikililerini çalıştırır — orada Kör'ü açmak tam olarak bunu söyleyen
+görünür bir uyarı gönderir, tutamayacağımız bir garantiyi ima etmek yerine.
+
+#### Bir ses dosyası bir tura nasıl girer
+
+Orkestratör bir panel `message` çerçevesinde sesi iki yolla kabul eder:
+
+```jsonc
+{ "type": "message", "text": "what key is this in?",
+  "audio":  [{ "filename": "song.mp3", "type": "input" }],   // preferred
+  "images": [{ "filename": "song.mp3", "type": "input" }] }  // also routed to audio
+```
+
+İkinci biçim vardır çünkü yalnızca `images` bilen bir panel derlemesi aksi
+halde bir ses dosyasını bir görüş içerik parçasına verirdi. Ses uzantılı her
+şey otomatik olarak ses yoluna taşınır — kodlayamayacağımız biçimler dahil
+(`.wma`, `.mid`, `.aiff`); böylece bir görsel hatası yerine "bunlardan birine
+dönüştür…" alırsınız.
+
+Aynı dosyayı **her iki** dizide göndermek (yukarıdaki örneğin yaptığı gibi)
+güvenlidir: bir başvuru dosya adı + alt klasör + tür ile tanımlanır, böylece
+bir kez teslim edilir ve tur başına iki ek sınırına bir kez sayılır. İkinci
+bir dosya sanılıp sığmadığı için reddedilmez.
+
+<Note>
+Bir ses dosyası seçmek için bir **yazma alanı denetimi** panelde yaşar
+(`comfyui-mcp-panel`); bu ayrı bir depodur — o kısım bu sürümde yoktur. İnene
+kadar yukarıdaki tel sözleşmesi bir istemcinin gönderdiği şeydir ve yol
+orkestratör tarafından uçtan uca çalıştırılır.
+</Note>
+
+Yalnızca yukarıdaki yerel-Ollama yolu uçtan uca doğrulanmıştır ve "bu model
+duyabilir"in varsayıldığı değil kurulduğu tek yoldur. OpenAI uyumlu yol
+dürüst bir denemedir, dürüst bir uyarıyla; bu bölümdeki diğer her şey bir
+reddetmeyi anlatır, bir yeteneği değil.
+
+**Konuşma geri alma** (sohbeti geçmiş bir tura çatallamak) yalnızca Claude'dadır;
+**kod/grafik** geri alma (`/revert`, çift Esc, tur başına anlık görüntüler) her
+arka uçta çalışır çünkü orkestratörde yaşar, sağlayıcıda değil.
+
+## Geçişte akıl yürütme çabası
+
+Çaba/model seçicisi **sağlayıcı başınadır**. Seçilen bir çaba, bir sağlayıcı
+geçişinde hedef arka ucun en yakın geçerli düzeyine eşlenerek sağ kalır
+(panel ve orkestratör arka uçları aynı eşlemeyi yapar):
+
+- **Claude:** `low` · `medium` · `high` · `xhigh` · `max`
+- **ChatGPT (Codex):** `none` · `minimal` · `low` · `medium` · `high` · `xhigh` · `max` · `ultra`
+  (GPT-5.6 sınıfı modellerde `max` / `ultra`)
+- **Gemini / Ollama:** kullanıcıya dönük çaba ölçeği yok — seçici gizlidir.
+
+## Bilgi ve maliyet paritesi
+
+Yalnızca Claude yerel becerileri yükleyebildiği için birlikte gelen uzmanlık,
+herhangi bir arka ucun çağırabileceği tek bir MCP aracı olarak yayımlanır —
+`list_packs`; eylemleri becerileri (`skill_list`, `skill_read`), kurulum
+paketlerini (`list`, `read_workflow`) ve sunucunun şablonlarını
+(`list_templates`) kapsar — artı yerel-GPU-ücretli-API koruması
+(`action: "check_runtime"`) ve tek seferlik `panel_load_workflow`. Bkz.
+[Beceriler, Paketler ve Çalışma Zamanı Maliyeti](/docs/tools/skills-knowledge).
+
+## Ayrıca bakın
+
+- [Kenar Çubuğu Paneli](/docs/tr/panel) — tam panel deneyimi
+- [Yerel LLM'ler ve diğer ajanlar](/docs/tr/local-llms) — 6 araçlı
+  yönlendirici, model gereksinimleri, Hermes/OpenClaw/Copilot kurulumu
+- [LLM Arenası](/docs/tr/arena) — SİZİN modelinizi gerçek ComfyUI görevlerinde
+  puanlayın
+- [Beceriler, Paketler ve Çalışma Zamanı Maliyeti](/docs/tools/skills-knowledge)
+  — parite + maliyet araçları
+- Tasarım belgesi: [`design/agent-backend-injection.md`](https://github.com/artokun/comfyui-mcp/blob/main/design/agent-backend-injection.md)

@@ -1,0 +1,442 @@
+---
+title: "Yerel LLM'ler ve diğer ajanlar"
+description: "Hermes Agent, OpenClaw ve Copilot CLI için birinci sınıf destek — artı yerel (Ollama) ya da barındırılan bir modeldeki herhangi bir MCP istemcisi. Tek komutluk kurulum ve ~200 araç şemasını 3 meta araca indiren kompakt araç kipi."
+icon: "microchip"
+---
+
+comfyui-mcp standart bir stdio MCP sunucusudur; bu yüzden **MCP yetenekli
+herhangi bir ajan onu sürebilir** — yalnızca Claude Code değil. Bu sayfa
+birinci sınıf desteklediğimiz koşumları (**Hermes Agent, OpenClaw, Copilot
+CLI**), modelinizin getirmesi gerekenleri ve küçük/yerel modelleri yaşatır
+kılan **kompakt araç kipini** kapsar.
+
+## Model gereksinimleri
+
+Getirdiğiniz model hakkında kendinize karşı açık olun. *Tam* deneyim için asgari
+şart **araç çağırma + düşünme + görüş** olan bir modeldir:
+
+| Yetenek | O olmadan |
+| --- | --- |
+| **Araç çağırma** (yerel işlev çağırma) | **Çalışmaz.** Her comfyui-mcp eylemi bir araç çağrısıdır. Bazı koşumlarda istemle öykünen araç çağırma teknik olarak çalışır, ama güvenilirlik çöker — desteklenmiyor sayın. |
+| **Düşünme / akıl yürütme** | Çalışır, bozulmuş. Çok adımlı zincirler (araç seç → şema getir → argüman kur → hatalardan kurtul) belirgin biçimde kötüleşir; ajanın yeniden istem / dürtme ihtiyacı bekleyin. |
+| **Görüş** | Çalışır, bozulmuş. Ajan üretebilir ama *göremez* — `get_image (action:"view")` eleştiri döngüleri, `get_workflow (action:"from_image")` ve görsel karşılaştırmalar kullanılamaz, bu yüzden kendi çıktılarında kör uçar. |
+
+Tam şarta uyan barındırılan modeller aylık değişir — bir listeye güvenmek
+yerine sağlayıcınızın model kartında üç yeteneği denetleyin. 2026 ortası
+itibarıyla: **Xiaomi MiMo-V2.5** (görüş + araçlar + uzun bağlam) tam şarta
+ucuza uyar; **DeepSeek-V3.x / GLM / MiniMax** sınıfı modeller güçlü araç
+çağırma + düşünmeye sahiptir ama yalnızca metin varyantları görüş döngüsünü
+yitirir; küçük yerel modeller (aşağıda) genellikle araç çağırmayı tutar ve
+gerisini düşürür.
+
+## Kompakt araç kipi
+
+Tam yüzey, zengin JSON şemalı 37 araçtır (`tools/list` başına ~200 KB, kabaca
+50k token). Claude olmayan çoğu koşum her kayıtlı şemayı doğrudan modelin
+bağlamına enjekte eder — öncü modeller için sorun değil, 4B yerel bir model
+için ölümcül. **Kompakt araç kipi** tam olarak **üç meta araç** kaydeder ve
+gerçek kataloğu onların arkasında tutar:
+
+| Meta araç | Ne yapar |
+| --- | --- |
+| `list_tools` | Token hafif katalog: her araç adı + tek satırlık özet, kategoriye göre gruplu. `category` ve `search` süzgeçlerini destekler. |
+| `describe_tool` | Bir araç için tam açıklama + JSON Schema, yalnızca gerektiğinde getirilir. |
+| `call_tool` | Katalogdaki herhangi bir aracı çalıştırır: `{"name": "generate_image", "args": {...}}`. Alttaki aracın döndürdüğünün aynısını döndürür. |
+
+Modelin döngüsü: `list_tools` → seç → `describe_tool` → `call_tool`. Şemalar
+bağlama araç başına girer. Meta araçlar küçük model tuhaflıklarına kasıtlı
+olarak hoşgörülüdür: `args` bir nesne **ya da** JSON kodlu bir dize olabilir,
+yaygın alan takma adları (`tool_name`, `arguments`) kabul edilir ve doğrulama
+hataları beklenen şemayla geri gelir; böylece model opak bir protokol
+hatasında ölmek yerine kendini düzeltebilir.
+
+Kompakt **isteğe bağlıdır** — doğrudan yüzey varsayılandır, bu yüzden küçük
+bir model bunlardan birine ihtiyaç duyar (bayrak ortam değişkenini yener):
+
+```bash
+npx -y comfyui-mcp --compact
+# or
+COMFYUI_MCP_TOOL_MODE=compact npx -y comfyui-mcp
+```
+
+Varsayılan, büyük araç listelerini iyi işleyen öncü model koşumlarına
+(Claude Code / Cursor / Claude Desktop) uyar. `--full` hâlâ kabul edilir ve
+artık bir no-op'tur.
+
+### Otomatik seçim: modele göre, sağlayıcıya göre değil
+
+Panelin yerel LLM arka uçlarında (Ollama / LM Studio / llama.cpp /
+OpenAI uyumlu), **siz bir kip seçmediyseniz**, *model* birini seçer:
+
+- kimliği **70B** ya da üzerinde bir parametre sayısı taşıyan bir model
+  (`llama3.3:70b`, `gpt-oss:120b`, `mixtral:8x22b`) **tam** yüzeyi alır;
+- daha küçük her şey **kompakt** kalır;
+- okunabilir parametre sayısı olmayan bir model kimliği
+  (`moonshotai/kimi-k2.5`) küçük değil **bilinmeyen** sayılır ve belgelenen
+  kompakt yedeği alır.
+
+"Ollama ⇒ kompakt" her iki yönde de yanlış olurdu — 70B yerel bir model tam
+yüzeyi kaldırır ve gereksiz yere sakatlanırdı ve bazı küçük barındırılan
+modeller kompakt ister. Bu yüzden sinyal modeldir.
+
+**Sizin seçiminiz her zaman, her iki yönde de yener.**
+`COMFYUI_MCP_TOOL_MODE=full` tam yüzeyi bir 4B modele zorlar;
+`COMFYUI_MCP_TOOL_MODE=compact` yönlendiriciyi bir 405B'ye zorlar. Otomatik
+seçim yalnızca hiçbir şey seçilmediği boşluğu doldurur.
+
+70B eşiği kasıtlı olarak tutucudur: bu eksen hakkında birinin gerçekten
+ileri sürdüğü tek rakamdır, bu yüzden hiçbir şey tahminle yükseltilmez.
+`COMFYUI_MCP_FULL_SURFACE_MIN_PARAMS_B=30` donanımınızın tavanının gerçekten
+nerede olduğunu bulmak istiyorsanız onu düşürür.
+
+**Sistem istemi kipi izler.** Kompakt istem modele altı aracı olduğunu söyler
+ve ComfyUI'yi `call_tool` üzerinden yönlendirir; tam yüzey seçildiğinde bu
+basitçe yanlıştır, bu yüzden tam kip istemi ComfyUI araçlarının doğrudan
+ilan edildiğini söyler ve yönlendirici açıklamasını yalnızca `panel_*` için
+tutar. Tamı otomatik seçerken araçların var olduğunu yadsımak, yerine geçtiği
+varsayılandan kötü olurdu.
+
+Etkin kip **ve gerekçesi** arka ucun hazır satırında yazdırılır, ör. `Tool
+mode: compact — chosen for this MODEL: "qwen3:4b" is ~4B parameters, below
+the 70B full-surface threshold…`; böylece kaldıraç bir daha görünmez olmaz.
+
+<Note>
+Bu otomatik seçim panelin yerel LLM şeridini kapsar. Codex / Gemini / Grok /
+Copilot HTTP şeridi farklı bir nedenle kompaktta sabit kalır — kendi araç
+bütçeleri aksi halde `panel_*` araçlarını dışarı iter — ve bağımsız MCP
+sunucusunun varsayılanı değişmez.
+</Note>
+
+## Ses girişi
+
+**`ollama` arka ucunda (yerel `/api/chat`)**, ses modele yalnızca model
+gerçekten duyabildiğini bildirdiğinde ulaşır. Göndermeden önce arka uç o
+modelin yetenekleri için `POST /api/show` sorar:
+
+```bash
+ollama pull gemma4:e2b      # capabilities: completion, vision, audio, tools, thinking
+```
+
+Seçilen modelin `audio` yeteneği yoksa ek **yüksek sesle reddedilir** —
+sunucunun bildirdiği yetenek listesi ve duyabilen bir model için bir pull
+komutuyla — modelin yalnızca metninizden yanıt vereceği isteğe düşürülmek
+yerine. Aynı şey ses biçimi olmayan ya da var ama sıfır bayt olan bir dosya
+için de geçerlidir.
+
+Baytları teslim etmek işin tamamı değildir. `gemma4:e2b`'ye karşı canlı
+ölçüldü: WAV kanıtlanabilir biçimde bağlamdayken (555 istem token'ı,
+`/api/show` `audio` bildiriyor), model yine de *"I do not have the
+capability to transcribe audio — my functions are limited to operating
+ComfyUI"* yanıtını verdi. Panel sistem istemi onu bir grafik işleteni olarak
+kasteder ve küçük bir model gerçekten sahip olduğu bir duyuyu kendi
+kendinden çıkarır. Bu yüzden sesi yetenek denetlenmiş ve eklenmiş bir tur,
+ayrıca modele sesin orada olduğunu ve duyduğundan yanıt vermesi gerektiğini
+söyleyen kısa bir not taşır. O notla aynı model dört çalıştırmanın dördünde
+doğru yazıya döktü.
+
+**OpenAI uyumlu arka uçlarda** (LM Studio, llama.cpp, OpenRouter, özel)
+soracak bir yetenek uç noktası yoktur. Ses bir `input_audio` içerik parçası
+olarak gönderilir ve tur açık bir *"I cannot confirm the model actually
+receives them"* satırı taşır. Reddetmek, yalnızca yetenek API'si olmayan her
+uç noktaya sesi yasaklardı; çalışamayan bir koruma bir hüküm değildir — ama
+bir onay da değildir ve ifade bunu söyler.
+
+Diğer her sağlayıcının ne yaptığı için
+[Arka uçlar → Ses girişi](/docs/tr/backends#ses-girişi--hangi-arka-uçlar-dürüstçe)
+sayfasına bakın.
+
+## Tek komutluk kurulum
+
+`comfyui-mcp setup <agent>` sunucu girdisini koşumun kendi yapılandırma
+dosyasına yazar (zaten orada olanla birleştirir — mevcut sunucular, YAML'deki
+yorumlar, hepsi korunur):
+
+```bash
+npx -y comfyui-mcp setup hermes     # → ~/.hermes/config.yaml      (compact by default)
+npx -y comfyui-mcp setup openclaw   # → ~/.openclaw/openclaw.json  (compact by default)
+npx -y comfyui-mcp setup copilot    # → ~/.copilot/mcp-config.json (full by default)
+```
+
+Bayraklar: `--compact` / `--full` ajan başına varsayılanı geçersiz kılar,
+`--comfyui-url <url>` ComfyUI hedefinizi gömer (yerel, LAN ya da RunPod vekil
+URL'si), `--dry-run` yazmak yerine birleştirilmiş yapılandırmayı yazdırır.
+
+## Hermes Agent
+
+```bash
+npx -y comfyui-mcp setup hermes --comfyui-url http://127.0.0.1:8188
+```
+
+bu da `~/.hermes/config.yaml` içinde şunu üretir (isterseniz elle ekleyin):
+
+```yaml
+mcp_servers:
+  comfyui:
+    command: "npx"
+    args: ["-y", "comfyui-mcp", "--compact"]
+    env:
+      COMFYUI_URL: "http://127.0.0.1:8188"
+```
+
+`/reload-mcp` ile yeniden yükleyin (ya da Hermes'i yeniden başlatın). Hermes
+araçları önekler, böylece model `mcp_comfyui_list_tools`,
+`mcp_comfyui_describe_tool` ve `mcp_comfyui_call_tool` görür — iki yüz yerine
+bağlamda üç tanım.
+
+<Note>
+Bir öncü modelde (Nous Portal / OpenRouter üzerinden) kurulumu `--full` ile
+yeniden çalıştırabilir ve isteğe bağlı Hermes'in kendi `tools.include` izin
+listesini kullanabilirsiniz. Daha küçük her şey için doğru varsayılan
+kompaktır.
+</Note>
+
+Hermes ayrıca Python betiklerinden ham REST üzerinden ComfyUI süren paketlenmiş
+bir `comfyui` *becerisi* de taşır. Çalışır, ama bu sunucudan öncedir — MCP yolu
+size iş akışı oluşturma/doğrulama, model + özel düğüm yönetimi, kurulum
+paketleri, kuyruk denetimi ve kendi kendini tanı verir. Ajan MCP araçları
+yerine ona uzanmayı sürdürürse beceriyi kapatın.
+
+## OpenClaw
+
+```bash
+npx -y comfyui-mcp setup openclaw
+```
+
+bu da `~/.openclaw/openclaw.json` içinde şunu üretir:
+
+```json
+{
+  "mcpServers": {
+    "comfyui": {
+      "command": "npx",
+      "args": ["-y", "comfyui-mcp", "--compact"],
+      "transport": "stdio"
+    }
+  }
+}
+```
+
+Sunucuyu almak için OpenClaw ağ geçidini yeniden başlatın. OpenClaw belgeleri
+MCP araç sayısını düşük tutmayı önerir — kompakt kip tam olarak bunun içindir
+ve burada varsayılan olmasının nedeni budur.
+
+## Copilot CLI
+
+```bash
+npx -y comfyui-mcp setup copilot
+# or use Copilot's own command:
+copilot mcp add comfyui -- npx -y comfyui-mcp
+```
+
+bu da `~/.copilot/mcp-config.json` içinde şunu üretir:
+
+```json
+{
+  "mcpServers": {
+    "comfyui": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "comfyui-mcp"],
+      "env": {},
+      "tools": ["*"]
+    }
+  }
+}
+```
+
+Copilot CLI öncü modeller çalıştırır, bu yüzden kurulum varsayılan olarak
+**tam** araç yüzeyine gider (Copilot'u daha küçük bir modele yönlendiriyorsanız
+`--compact` geçirin). `copilot` içinde `/mcp show` ile denetleyin.
+
+## Kendi ince ayarlı yerel modellerimiz (ücretsiz, önerilir)
+
+Ajanı **yerelde ücretsiz** çalıştırmak istiyorsanız buradan başlayın. Gemma 4
+ailesini özellikle comfyui-mcp için ince ayarladık: canlı bir ComfyUI'ye karşı
+üretilmiş **1.055 sunucu doğrulamalı araç kullanım yörüngesi** üzerinde
+QLoRA ile eğitildi — **tam 178 araçlık yüzeyi** (113 MCP + 65 panel aracı)
+kapsar — böylece model bu tam araç takımını soğuk karşılamak yerine yerelde
+bilir.
+
+```bash
+# 1. Install Ollama (once):  https://ollama.com/download
+# 2. Pull the size that fits your GPU:
+ollama pull artokun/gemma4-comfyui-mcp:e4b     # default — ~3.5 GB VRAM at q4
+ollama pull artokun/gemma4-comfyui-mcp:12b     # ~8 GB VRAM
+ollama pull artokun/gemma4-comfyui-mcp:e2b     # smallest — ~2 GB VRAM (see caveat)
+```
+
+**Vaat değil, ölçülmüş** — [LLM Arenası](/docs/tr/arena) gerçek 10 senaryolu
+merdivende puanlar (3'ün en iyisi, her sonuç canlı bir ComfyUI sunucusuna
+karşı doğrulanır, RTX 4090):
+
+| Etiket | VRAM (q4) | Arena puanı | stoğa karşı |
+|---|---|---|---|
+| `:e4b` | ~3,5 GB | **14/20** (13–14) — denediğimiz en iyi yerel model | stok gemma4:e4b: 12/20 |
+| `:12b` | ~8 GB | 13/20 (12–13) | stok 12b kıyaslanmadı |
+| `:e2b` (v2) | ~2 GB | 10/20 (7–10) | stok gemma4:e2b: 8/20 |
+
+Her basamak artık stok temelini geçer. `:e2b` v2 yeniden eğitimi (çift bakışlı
+eğitim: doğrudan araç çağrıları VE dağıtılan yönlendirici zarfı) v1'in
+`call_tool` biçim gerilemesini düzeltti — hüküm çalıştırmalarında sıfır bozuk
+zarf. Boyutlandırma rehberi duruyor: `:e4b` tatlı noktadır (e2b'den yalnızca
+~1,5 GB fazla ve arenada +4); `:e2b` artık sıkı VRAM için meşru bir seçimdir;
+`:12b` ham puan değil, uzun çok adımlı görevlerde kararlılık satın alır.
+
+| Etiket | Temel | VRAM (q4) | Notlar |
+| --- | --- | --- | --- |
+| `:e4b` | Gemma 4 E4B | ~3,5 GB | **Varsayılan** — en iyi boyut/nitelik dengesi |
+| `:e2b` | Gemma 4 E2B | ~2 GB | Sözlü düşünür — cömert `max_tokens` (≥512) verin |
+| `:12b` | Gemma 4 12B | ~8 GB | En güçlü basamak |
+
+Panelin Ollama arka ucu **varsayılan olarak `:e4b`'dir** — arka uç seçicisinde
+**Ollama (yerel)** seçin, model çekildikten sonra çalışır. Hesap yok, API
+anahtarı yok, token başına maliyet yok.
+
+**Bağlam penceresi:** etiketler gömülü **65.536 token**'lık bir pencereyle
+gelir ve orkestratör ona uyar (stok modeller 16K alır). Mimari **128K**
+(`:e2b`/`:e4b`) ve **256K** (`:12b`) destekler — VRAM'iniz varsa
+`COMFYUI_MCP_OLLAMA_NUM_CTX=131072` ile yükseltin (KV önbelleği pencereyle
+büyür). Ajan konuşma ortasında "unutmaya" başlarsa orkestratör günlüğünü
+izleyin: bir tur pencerenin ≥%85'ini doldurduğunda uyarır. Ağırlıklar, LoRA
+adaptörleri ve eğitim hattı açıktır:
+[`artokun/gemma4-comfyui-mcp`](https://huggingface.co/artokun/gemma4-comfyui-mcp)
+(veri kümesi:
+[`artokun/comfyui-mcp-trajectories`](https://huggingface.co/datasets/artokun/comfyui-mcp-trajectories)).
+
+## LM Studio
+
+Panel LM Studio'yu yerelde konuşur: arka uç seçicisinde **LM Studio** seçin ve
+orkestratör yerel sunucusunu sürer (`http://127.0.0.1:1234/v1`,
+`COMFYUI_MCP_LMSTUDIO_HOST` ile geçersiz kılın). Kurulum iki tıklamadır:
+[lmstudio.ai](https://lmstudio.ai) adresinden kurun, sonra **araç çağıran bir
+model** yüklüyken **Developer → Start Server**. Model seçici sunucunun
+sunduğunu yansıtır; varsayılan ayarlı değilse ilk sunulan model kendiliğinden
+benimsenir. Orkestratör **tam yaşam döngüsünü** el değmeden yönetir:
+gerektiğinde sunucuyu kendiliğinden başlatır, modelinizi JIT yükler, bir
+ComfyUI işleme çalışırken VRAM'ini boşaltır (sohbet tutulur ve işleme bitince
+yanıtlanır), bir model geçişinde giden modeli boşaltır ve farklı bir
+sağlayıcıya geçtiğinizde her şeyi serbest bırakır.
+
+İnce ayarlı GGUF'larımız burada da çalışır — LM Studio'nun model indiricisinde
+`artokun/gemma4-comfyui-mcp` arayın ve bir `model-q4_k_m.gguf` alın. Ollama'daki
+gibi ilk mesajda aynı JIT soğuk yükleme duraklamasını bekleyin (30 sn+
+normaldir).
+
+## llama.cpp (llama-server)
+
+Ham `llama.cpp` mi çalıştırıyorsunuz? Arka uç seçicisinde **llama.cpp** seçin —
+orkestratör `llama-server`'ın OpenAI uyumlu uç noktasını sürer
+(`http://127.0.0.1:8080/v1`, `COMFYUI_MCP_LLAMACPP_HOST` ile geçersiz kılın):
+
+```bash
+llama-server -m gemma4-comfyui-mcp-e2b.Q4_K_M.gguf -c 16384
+```
+
+Sahadan notlar: bağlam bir **başlatma bayrağıdır** (`-c`) — sunucu 16K
+altında çalışıyorsa ajan uyarır (araç yükü bunu ister). Araç çağırma güncel
+derlemelerde varsayılan açıktır; **eski derlemeler `--jinja` ister** (panel
+bağlanmada araç yeteneksiz bir sunucuyu saptar ve tam olarak bunu söyler).
+Yüklü tek model kendiliğinden benimsenir — seçim gerekmez.
+
+Tek GPU'lu bir kutuda **yerel** bir llama-server (ya da önünde llama-swap)
+Ollama ve LM Studio ile aynı VRAM teslimine katılır: bir ComfyUI işleme
+çalışırken sohbetiniz tutulur ve işleme biter bitmez yanıtlanır. llama-server
+boşaltma API'si olmadığı için (ve llama-swap modelleri yukarı akışta isteğe
+bağlı değiştirir) teslim yalnızca tutmadır — hiçbir şey açıkça boşaltılmaz
+ya da ısıtılmaz. **Uzak** bir `COMFYUI_MCP_LLAMACPP_HOST` başkasının GPU'sudur
+ve asla kapılanmaz. Teslim üç yerel arka uç için varsayılan açıktır;
+`COMFYUI_MCP_PAUSE_LOCAL_ON_GEN=0` ile vazgeçin (eski
+`COMFYUI_MCP_OLLAMA_PAUSE_ON_GEN=0` hâlâ onur duyulur).
+
+## Özel uç nokta (OpenAI uyumlu herhangi bir sunucu)
+
+`/v1/chat/completions` konuşan her şey — vLLM, DeepSeek, Together, Azure
+OpenAI, başka bir kutudaki bir llama-server, şirketinizin ağ geçidi —
+**Özel uç nokta** sağlayıcısı olarak takılır:
+
+1. ComfyUI Ayarları → **Comfy MCP Agent → Özel uç nokta** → **Uç nokta temel
+   URL'sini** ayarlayın (`/v1` dahil, ör. `http://192.168.1.20:8000/v1`).
+2. Sunucu bir anahtar istiyorsa: **API anahtarını ayarla…** — maskeli bir
+   giriş; anahtar orkestratör tarafından `~/.comfyui-mcp` içinde `0600`
+   saklanır, asla ComfyUI ayarlarında ya da sohbette değil.
+3. Arka uç seçicisinde **Özel uç nokta** seçin ve Bağlan'a tıklayın.
+
+Model listesi sunucunun `/v1/models` yolundan gelir; tek modellerli sunucular
+kendiliğinden benimsenir ya da model listelemeyen uç noktalar için bir
+**Varsayılan model** kimliğini açıkça ayarlayın. Ortam kaçış kapakları:
+`COMFYUI_MCP_CUSTOM_BASE_URL`, `COMFYUI_MCP_CUSTOM_MODEL`,
+`COMFYUI_MCP_CUSTOM_API_KEY`. Model **araç çağırma** desteklemelidir.
+
+## Ollama ve yerel modeller — LLM Arenası
+
+Ollama (ya da OpenAI uyumlu bir uç nokta) konuşan herhangi bir MCP koşumu
+yerel bir modelle kompakt kipi sürebilir. Depoda iki yinelenebilir koşum
+gelir: `npm run test:local-llm` (hızlı tek model denetimi) ve
+`node scripts/llm-arena.mjs` — **ComfyUI LLM Arenası**, bir model alanını
+*canlı* bir ComfyUI'ye karşı özdeş bir görev kümesinden geçirir ve her sonucu
+sunucuya karşı doğrular, modelin iddialarına asla değil.
+
+Tam 10 senaryolu merdivende yerel katman puanları (RTX 4090, ComfyUI 0.27,
+sıcaklık 0 — görev merdiveni ve öncü ile barındırılan modeller dahil tüm
+katman sıralaması için [Arena sayfasına](/docs/tr/arena) bakın):
+
+| Model | Boyut | Puan /20 |
+| --- | --- | --- |
+| `qwen3:4b` | 2,6 GB | **13** |
+| `gemma4:e4b` | 9,6 GB | **12** |
+| `qwen3:8b` | 5,2 GB | **11** |
+| `gemma4:e2b` | 7,2 GB | **8** |
+| `llama3.1:8b` | 4,9 GB | **2** |
+| `gemma3` (any size) | — | ❌ yerel araç çağırma yok — desteklenmiyor |
+
+Çıkarımlar: qwen3/gemma4 sınıfı tek araçlı görevleri (sağlık, kurulu modeller,
+kayıt defteri araması, kuyruk) sağlam geçer ve daha zor bantlarda puan toplar,
+ama çok aşamalı grafik kompozisyonu (iki borulu çıktılı bir grafik, evreli iki
+aşamalı img2img hattı) hâlâ öncü/B katmanı bölgesidir. llama3.1:8b'nin araç
+biçim disiplini bu katalogda çöker (araç adları uydurur ve araç çağrı
+JSON'unu metin olarak yazdırır). Gemma 4 aile boyunca yerel işlev çağırma
+yayımladı (Ollama ≥ v0.20); `e4b` ya da daha büyüğü tatlı noktadır.
+
+Yukarıdaki yetenek merdivenini unutmayın: bu küçük modeller araç çağırmayı
+tutar ama sınırlı/yok görüş ve düşünmeye sahiptir, bu yüzden üretebilir ve iş
+akışlarını yönetebilir ama sonuçları görsel olarak eleştiremez.
+
+## Kenar çubuğu paneli yerel bir modelde
+
+[Panel ajanı](/docs/tr/panel) Claude / ChatGPT / Gemini'nin yanında bir
+**Ollama arka ucu** kazanır: arka uç seçicisinde **Ollama (yerel)** seçin ve
+orkestratör canlı grafiğinizi yerel bir modelle sürer — hesap yok, API anahtarı
+yok, tamamen çevrimdışı. Model 6 araçlı yönlendiriciyi görür (3 kompakt
+comfyui meta aracı artı canlı tuval için `panel_list_tools` /
+`panel_describe_tool` / `panel_call_tool`); böylece 4B bir model bile
+şemalarda boğulmaz. Varsayılan model:
+**`artokun/gemma4-comfyui-mcp:e4b`** — [gemma4 ince ayarımız](#kendi-ince-ayarlı-yerel-modellerimiz-ücretsiz-önerilir),
+bu tam araç takımı üzerinde eğitilmiş (stok `gemma4:e4b`'nin, önceki Arena
+birincisinin yerini alır); `COMFYUI_MCP_OLLAMA_MODEL` ya da panelin model
+seçicisiyle geçersiz kılın, yerelde çektiğiniz her şeyi listeler. Öncü arka
+uçlara karşı dürüst ödünleşimler bekleyin: daha yavaş turlar (özellikle ilki,
+model yüklenirken), görüş yok, konuşma geri alma yok.
+
+## Ne alırsınız (ve almazsınız)
+
+Herhangi bir MCP istemcisi **tam araç yüzeyini** alır — üretim, iş akışı
+oluşturma, modeller, özel düğümler, kuyruk, tanı — her iki araç kipinde.
+Claude Code **eklenti ekstraları** (beceriler, eğik çizgi komutları, kancalar,
+kurulum paketleri, kenar çubuğu panel ajanı) eklenti özellikleridir ve diğer
+koşumlara gitmez. `list_tools` kataloğu, o bilgi katmanı olmayan ajanların
+yine de yollarını bulabileceği kadar yönlendirme taşımak üzere tasarlanmıştır.
+
+## Sorun giderme
+
+- **Model `call_tool`'u dizgeleştirilmiş bir `args` ile çağırıyor** —
+  desteklenir; sunucu JSON kodlu dizeleri kendiliğinden ayrıştırır.
+- **Model araç adları uyduruyor** — bilinmeyen adlar yakın eşleşme önerileri
+  artı `list_tools`'a bir işaretçi döndürür.
+- **Yanlış/eksik parametreler** — hata aracın JSON Schema'sını içerir;
+  yetenekli modeller sonraki denemede kendini düzeltir.
+- **Model hiçbir şey çalıştırmadan katalogdan yanıt veriyor** — bilinen bir
+  küçük model başarısızlık kipidir; onu dürtün ("catalog entries are tool
+  names, not data — run the tool with call_tool").
+- **ComfyUI'ye ulaşılamıyor** — kompakt kip yalnızca araç *kaydını*
+  değiştirir; bağlantı yapılandırması diğer her kurulumla özdeştir (bkz.
+  [Yapılandırma](/docs/tr/configuration)).

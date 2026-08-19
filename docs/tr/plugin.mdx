@@ -1,0 +1,123 @@
+---
+title: "Claude Code Eklentisi"
+description: "comfyui-mcp tam bir Claude Code eklentisidir: 37 MCP aracının üstüne 39 yapay zekâ becerisi, 11 eğik çizgi komutu, 4 otonom ajan ve 3 kanca — her sürümle büyüyen uzman ComfyUI bilgisi."
+icon: "puzzle-piece"
+---
+
+`comfyui-mcp` yalnızca bir MCP sunucusu değildir — eksiksiz bir **Claude Code
+eklentisi** olarak gelir. Eklentiyi kurmak Claude'a ComfyUI hakkında uzman,
+modele özel bilgi verir; böylece doğru örnekleyiciyi, CFG'yi, çözünürlüğü ve
+model dosyalarını deneme-yanılma olmadan seçer.
+
+```bash
+# In Claude Code
+/plugin marketplace add artokun/comfyui-mcp
+/plugin install comfy
+```
+
+## 39 yapay zekâ becerisi — ve büyüyor
+
+Beceriler, Claude'un isteğe bağlı yüklediği derlenmiş bilgi belgeleridir. Her
+model ailesi üretim parametreleri, düğüm grafikleri, derlenmiş model indirme
+URL'leri ve başarısızlık kipi rehberi alır:
+
+| Beceri | Claude'un öğrendiği |
+|---|---|
+| `flux-txt2img` | Flux.1 Dev/Schnell + Flux 2 Klein — BF16'ya karşı FP8 tuzakları, çift-CLIP kablolama, VAE seçimi |
+| `wan-t2v-video` / `wan-flf-video` | WAN 2.x metinden videoya ve ilk-son kare iş akışları |
+| `wan-scail-replacement` | SCAIL-2 video içi karakter değiştirme — referans-çerçeveleme→ölçek kuralı, ayar ve birleştirme tuzakları |
+| `ltxv2-video` | LTX-2.3 (ve LTX-2 19B) — GGUF UNet, damıtılmış model, kamera denetimi LoRA'ları, iki aşamalı yükseltme, kornia düzeltmesi |
+| `qwen-txt2img` / `qwen-image-edit` | Qwen-Image üretimi ve yönerge tabanlı düzenleme |
+| `z-image-txt2img` | Z-Image Turbo iş akışları |
+| `ideogram-ultra` | Ideogram 4 — açık ağırlıklı metinden görsele, alan istemi, logolar / posterler / okunabilir metin |
+| `ernie-image` | ERNIE-Image — hızlı metinden görsele, kesin çok dilli metin işleme, 8 GB VRAM altında çalışır |
+| `anima-base` | ANIMA 1.0 — ~2B anime/illüstrasyon modeli, Danbooru etiketleri + doğal dil, anime inpainting, 6 GB VRAM altında |
+| `anima-lora-trainer` | Özel anime LoRA'ları eğitin — kohya `sd-scripts` Gradio eğitici, 6 GB VRAM altında |
+| `ai-toolkit-trainer` | Özel WAN 2.2 + Z-Image LoRA'ları eğitin (kişiler / stiller / hareket) — ostris AI-Toolkit, yerel ya da RunPod |
+| `installer-packs` | Tek komutluk kurulum paketlerini kullanın, kurun ve türetin — ve kullanıcıları yeni paketleri yukarı akışa katkılamaya davet edin |
+| `panel-node-pack-sync` | Kenar çubuğu paneli düğüm paketini bir güncellemeden sonra orkestratörle adım adım tutun — sürüm uyuşmazlığı saptama, geçersiz kılınmak yerine uyarılan bir sürüm sabiti ve sonucu diskten yeniden okunan bir eşitleme |
+| `model-compatibility` | Hangi VAE/CLIP/metin kodlayıcının hangi mimariyle eşleştiği — bozuk iş akışlarının 1 numaralı kaynağı |
+| `model-registry` | Becerilerin başvurduğu her model için derlenmiş indirme URL'leri + hedef dizinler — her sürümle büyür |
+| `civitai` | Yerleşik `download_model` `action:"search_civitai"` ile yerel Civitai keşfi → indirme/bağlama/üretme döngüsü (anahtar yok, ekstra sunucu yok); resmî [Civitai MCP](https://mcp.civitai.com/mcp) isteğe bağlı bir topluluk yüzeyi eklentisidir, paketlenmez |
+| `comfyui-core` | Kuyruk, geçmiş ve API semantiği |
+| `comfyui-node-registry` | Comfy Registry'ye özel düğüm paketleri yazmak + yayımlamak |
+| `comfyui-frontend-extensions` | v1/v2 ön yüz eklentisi yazımı (kenar çubuğu sekmeleri, widget'lar) |
+| `rgthree` | rgthree-comfy yapılandırma — Fast Groups Bypasser/Muter grup anahtarları (`/object_info`'da olmayan yalnızca ön yüz düğümleri, widget değil düğüm PROPERTIES üzerinden ayarlanır), Power Lora Loader yığma, Context otobüsleri |
+| `director` | Video hatları için çok çekimli sahne yönetimi |
+| `prompt-engineering` | Mimariye özgü istem (doğal dile karşı etiketler) |
+| `troubleshooting` | OOM, eksik düğümler, sürüm sapması — tanı ağaçları |
+| `comfyui-launch-flags` | VRAM/dikkat/önbellek/performans başlatma bayrağı matrisi — `--reserve-vram`, `--novram`+`--cache-none`, `--use-sage-attention` ile `--use-pytorch-cross-attention` (Z-Image) karşılaştırması, artı Blackwell/RTX 5000 ivme yığını notları |
+
+Yeni beceriler her sürümle iner — yerleşik `list_packs` aracı (`action:
+"generate_skill"`) üzerinden popüler kayıt defteri paketlerinden üretilir,
+sonra insan eliyle derlenir.
+
+**Hiçbir şey kablolamadan bilgiyi deneyin** — her beceri kendi başına yararlı
+düz bir markdown dosyasıdır. En geniş uygulanabilir olan
+[`prompt-engineering`](https://github.com/artokun/comfyui-mcp/blob/main/plugin/skills/prompt-engineering/SKILL.md)
+becerisidir — CLIP'in 77 token sınırı ve `BREAK` parçalama, ağırlık sözdizimi
+ve mimari başına strateji (neden Flux doğal dil ve negatif istem istemezken
+SD1.5 etiket ister). Tarayıcıda okuyun ya da herhangi bir ajanın bağlamına
+sistem istemi olarak yapıştırın — ComfyUI, MCP ya da kurulum gerekmez. Tam
+eklentiyi bağladığınızda ajanlar aynı dosyaları kendiliğinden yükler
+(`list_packs` with `action: "skill_read"`).
+
+### Civitai araması — yerleşik
+
+`download_model` `action:"search_civitai"` Civitai'de yerelde arar (herkese açık
+REST API, anahtar yok, ekstra sunucu yok): anahtar sözcük + `types` +
+`base_models` süzgeçleri ("bir **Flux** LoRA'sı"), varsayılan olarak yalnızca
+SFW ve her isabet, `action:"download_civitai"`'nin doğrudan aldığı
+`model_version_id`'yi — artı istem için modelin **tetik sözcüklerini** —
+döndürür. Birinci sınıf bir araç olduğu için **her arka uçta** çalışır, kompakt
+yönlendiricinin arkasındaki küçük yerel modeller dahil. `civitai` becerisi tam
+keşif → indirme → üretme teslimini öğretir.
+
+**İsteğe bağlı API anahtarı.** Arama hiçbirine ihtiyaç duymaz.
+`CIVITAI_API_TOKEN` kısıtlı/erken erişim indirmelerini ve kısıtlı arama
+sonuçlarını açar — tek değişken hem aramayı hem indirmeyi güçlendirir.
+
+**İsteğe bağlı: resmî Civitai MCP.** Arama→kurulumun ötesindeki topluluk yüzeyi
+için (örnek görsellere + üretim parametrelerine göz atmak, göndermek,
+koleksiyonlar) Civitai'nin [resmî uzak sunucusunu](https://mcp.civitai.com/mcp)
+eşleştirin — artık otomatik paketlenmez, bir kez ekleyin:
+
+```bash
+claude mcp add --transport http civitai https://mcp.civitai.com/mcp \
+  --header "Authorization: Bearer YOUR_CIVITAI_API_KEY"
+```
+
+## 11 eğik çizgi komutu
+
+`/comfy:gen` (bir istemden üret), `/comfy:debug` (başarısız bir iş akışını
+tanıla), `/comfy:install` (düğüm paketleri kur), `/comfy:viz` (iş akışı →
+Mermaid), `/comfy:batch`, `/comfy:compare`, `/comfy:convert`, `/comfy:gallery`,
+`/comfy:recipe`, `/comfy:director`, `/comfy:node-skill`.
+
+## 4 otonom ajan
+
+- **comfy-explorer** — belgelemek için bir düğüm paketinin kaynağına derinlemesine iner
+- **comfy-researcher** — problem tanımı → sıralı paket önerileri
+- **comfy-debugger** — geçmiş + günlüklerden başarısız iş akışlarının kök nedenini bulur
+- **comfy-optimizer** — verilen bir GPU için VRAM ve hız ayarı
+
+## Kenar çubuğu paneli — API anahtarı yok
+
+<Note>
+  Kenar çubuğu paneli kendi paketi olarak gelir, **Comfy Registry'de ve
+  ComfyUI-Manager'da `comfyui-agent-panel` olarak** — orada arayın ve
+  **Nightly değil Latest** seçin. Tam kılavuz: [Kenar Çubuğu Paneli](/docs/tr/panel).
+</Note>
+
+[comfyui-mcp-panel](https://github.com/artokun/comfyui-mcp-panel) kenar çubuğu,
+**Claude aboneliğinizde** otonom bir ajan çalıştırır (token başına API
+faturalandırması yok). Paketi kurun, Ajan sekmesini açın ve **Bağlan**'a
+tıklayın — [panel orkestratörünü](/docs/tr/configuration) isteğe bağlı başlatır;
+ondan bir görsel, bir iş akışı ya da bir değişiklik isteyin, ComfyUI'nize karşı
+çalışır.
+
+## Kancalar
+
+Üç kanca üretim oturumlarını sıkı tutar: bir iş akışını kuyruğa almadan önce
+**VRAM ön uçuş denetimleri**, **iş tamamlanma bildirimleri** ve yıkıcı
+işlemlerden önce **kaydetme uyarıları**.

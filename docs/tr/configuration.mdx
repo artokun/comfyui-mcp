@@ -1,0 +1,406 @@
+---
+title: "Yapılandırma"
+description: "Ortam değişkenleri, taşımalar ve bağlantı hedefleme."
+icon: "gear"
+---
+
+Tüm yapılandırma ortam değişkenleriyle (sunucunun `~/.claude/settings.json`
+içindeki `env` bloğunda ayarlanır) ya da CLI bayraklarıyla yapılır. ComfyUI
+hedefi için öncelik:
+`--comfyui-url` / `COMFYUI_URL` → `COMFYUI_HOST`/`COMFYUI_PORT` → otomatik
+algılama.
+
+## Dağıtım kipleri
+
+`comfyui-mcp` ortamdan otomatik seçilen üç kipten birinde çalışır:
+
+| Kip | Tetikleyici | Yerel FS? | Süreç denetimi? | WebSocket? |
+| --- | --- | --- | --- | --- |
+| **Yerel** | varsayılan | evet | evet | evet |
+| **Uzak** | `--comfyui-url` / `COMFYUI_URL` loopback olmayan bir ana makineyi gösterir | hayır | hayır | evet |
+| **Bulut** | `COMFYUI_API_KEY` ayarlıdır (Comfy Cloud'u hedefler) | hayır | hayır | hayır (HTTP yoklama) |
+
+Yerel bir kurulum gerektiren araçlar (`restart_comfyui` with `action: "start"` / `apply_manifest` / `list_local_models` (`action:"remove"`) / `get_image (action:"list_outputs")` / vb.)
+uzak ya da bulut kipinde açık bir hata döndürür. Uzak ve bulut kiplerinde sunucu
+yerel `COMFYUI_PATH` otomatik algılamasını atlar; böylece eski kalmış bir yerel
+kurulum, ajanın asıl hedefe yönelik yüklemelerini ya da model indirmelerini
+sessizce içine çekemez — karıştırmak istiyorsanız `COMFYUI_PATH` değerini açıkça
+ayarlayın.
+
+## Bağlantı
+
+<ParamField path="COMFYUI_URL" type="string">
+  ComfyUI örneğinin tam URL'si, ör. `https://my-comfy.example.com`. `--comfyui-url`
+  CLI bayrağına denktir. Ana makine/port üzerinde önceliklidir ve port otomatik
+  algılamasını atlar. Bir **yol öneki korunur** (ör. `https://host/comfyapi`);
+  böylece ters vekil arkasındaki örnekler doğru yönlenir. Ana makine loopback
+  değilse (`127.0.0.1` / `localhost` / `::1` / `0.0.0.0` dışındaki her şey),
+  sunucu **uzak kipe** girer ve `COMFYUI_PATH` otomatik algılamasını atlar.
+</ParamField>
+<ParamField path="COMFYUI_HOST" type="string" default="127.0.0.1">
+  ComfyUI sunucusunun ana makinesi.
+</ParamField>
+<ParamField path="COMFYUI_PORT" type="number">
+  ComfyUI sunucusunun portu. Ayarlı değilken otomatik algılanır (önce 8188,
+  sonra 8000).
+</ParamField>
+<ParamField path="COMFYUI_SSL" type="boolean" default="false">
+  `http`/`ws` yerine `https`/`wss` kullan.
+</ParamField>
+<ParamField path="COMFYUI_PATH" type="string">
+  Yerel ComfyUI kurulumunun mutlak yolu. Ayarlı değilken yaygın konumlardan
+  otomatik algılanır (uzak/bulut kiplerinde bastırılır). Yalnızca yerel araçlar
+  gerektirir (düğüm kur/yönet, modelleri kaldır, günlükleri oku, çıktı
+  dosyalarını listele).
+</ParamField>
+
+## Ters vekil / API geçidi arkasındaki uzak
+
+Bir yol öneki ve/veya kendi kimlik doğrulama katmanı altında dışa açılmış kendi
+barındırdığınız bir ComfyUI için (bir nginx rotası, bir API geçidi, bir SSO
+kenarı) — bu **Comfy Cloud değildir**:
+
+- `COMFYUI_URL` bir **yol önekini korur** (ör. `https://host/comfyapi`); böylece
+  istekler kökteki `/prompt`, `/system_stats`, … yerine onun altına yönlenir.
+- `COMFYUI_AUTH_*` değişkenleri **her** ComfyUI isteğine genel bir kimlik
+  doğrulama başlığı ekler (doğrudan HTTP çağrıları ve alttaki istemci/WebSocket
+  kitaplığı). Bu bulut kipinden bağımsızdır; böylece geçit kimlik doğrulamalı
+  bir örnek asla Comfy Cloud sanılmaz.
+
+<ParamField path="COMFYUI_AUTH_TOKEN" type="string">
+  Bir geçidin arkasındaki kendi barındırdığınız ComfyUI için kimlik doğrulama
+  token'ı. Ayarlıysa her ComfyUI isteğinde gönderilir. Asla günlüğe yazılmaz.
+</ParamField>
+<ParamField path="COMFYUI_AUTH_HEADER" type="string" default="Authorization">
+  Token'ı taşıyan başlık adı, ör. `X-API-Key`.
+</ParamField>
+<ParamField path="COMFYUI_AUTH_SCHEME" type="string" default="Bearer for Authorization, else none">
+  Token değerindeki şema öneki, ör. `Bearer`, `Token`.
+</ParamField>
+<ParamField path="CF_ACCESS_CLIENT_ID" type="string">
+  Cloudflare Access **hizmet token'ı** İstemci Kimliği.
+  `CF_ACCESS_CLIENT_SECRET` ile birlikte ayarlayın; Cloudflare Access öndeki
+  bir ComfyUI'ye ulaşmak için ikisi de (`CF-Access-Client-Id` /
+  `CF-Access-Client-Secret` olarak) **her** ComfyUI isteğinde (HTTP ve kuyruk
+  izleyici WebSocket) gönderilir, böylece bağlayıcı etkileşimli giriş sayfası
+  yerine Access kapısından geçer. `COMFYUI_AUTH_TOKEN`'a eklenir; ikisi de
+  ayarlıysa ikisi de etkili olur. Asla günlüğe yazılmaz.
+</ParamField>
+<ParamField path="CF_ACCESS_CLIENT_SECRET" type="string">
+  Cloudflare Access hizmet token'ı İstemci Sırrı (`CF_ACCESS_CLIENT_ID` çifti).
+  Yalnızca **ikisi de** ayarlıysa gönderilir — yarı yapılandırılmış bir token
+  yok sayılır. Asla günlüğe yazılmaz.
+</ParamField>
+
+```bash
+# Authorization: Bearer <token>, requests under /comfyapi
+COMFYUI_URL=https://gateway.example.com/comfyapi COMFYUI_AUTH_TOKEN=<token> npx -y comfyui-mcp@latest
+# custom header: X-API-Key: <token>
+COMFYUI_URL=https://gateway.example.com/comfyapi COMFYUI_AUTH_HEADER=X-API-Key COMFYUI_AUTH_TOKEN=<token> npx -y comfyui-mcp@latest
+# ComfyUI behind Cloudflare Access — pass a service token (keeps the human sign-in page up)
+COMFYUI_URL=https://comfy.example.com CF_ACCESS_CLIENT_ID=<id>.access CF_ACCESS_CLIENT_SECRET=<secret> npx -y comfyui-mcp@latest
+```
+
+## Comfy Cloud
+
+`COMFYUI_API_KEY` ayarlamak sunucuyu **bulut kipe** geçirir: HTTP tabanlı tüm
+temel işlemler (kuyruğa alma, geçmiş, sistem istatistikleri, kuyruk, görüntüleme,
+yükleme) `X-API-Key` kimlik doğrulamasıyla HTTPS üzerinden `cloud.comfy.org`'a
+yönlenir; WebSocket ve yerel dosya sistemi/süreç araçları açık bir
+`CLOUD_UNSUPPORTED` hatası fırlatır. Mimari ve `cloud-client` dağıtıcısı özgün
+olarak [@picoSols](https://github.com/picoSols) tarafından katkılandı.
+
+<Note>
+  **Comfy-Org [resmî ajan araçlarını](https://docs.comfy.org/agent-tools) yayımlıyor** — Comfy Cloud MCP (herkese açık beta) ve Comfy In-App Agent (özel alfa); ikisini de Comfy ekibi sürdürür ve ikisi de Comfy Cloud üzerinde çalışır. Yalnızca Comfy Cloud hedefliyorsanız o muhtemelen doğru seçimdir; bkz. [Yerel ile Comfy Cloud](/docs/tr/local-vs-comfy-cloud). Aşağıdaki `comfyui-mcp` bulut kipi, yerel / uzak / bulut için tek bir MCP istediğinizde ya da bugün ihtiyacınız olduğunda en iyisidir (MIT'tir ve şimdi yayımlanıyor).
+</Note>
+
+<ParamField path="COMFYUI_API_KEY" type="string">
+  Comfy Cloud API anahtarı. Ayarlıysa sunucu bulut kipe girer ve yerel bir
+  ComfyUI yerine yapılandırılmış bulut URL'siyle konuşur. Asla günlüğe yazılmaz.
+</ParamField>
+<ParamField path="COMFYUI_CLOUD_URL" type="string" default="https://cloud.comfy.org">
+  Comfy Cloud uç noktasını geçersiz kıl (çoğunlukla test / ön üretim için).
+</ParamField>
+
+## Token'lar
+
+<ParamField path="CIVITAI_API_TOKEN" type="string">
+  CivitAI API token'ı. Kısıtlı/erken erişim indirmeleri için kullanılır. Bir
+  bearer başlığı olarak gönderilir (asla URL'lerde değil).
+</ParamField>
+<ParamField path="HUGGINGFACE_TOKEN" type="string">
+  Daha yüksek arama/indirme hız sınırları için HuggingFace token'ı.
+</ParamField>
+<ParamField path="HF_ENDPOINT" type="string">
+  Ağ kısıtlı bölgeler için HuggingFace ayna uç noktası (ör.
+  `https://hf-mirror.com`). Tüm `huggingface.co` API ve indirme URL'leri bu
+  ana makineye yeniden yazılır; `HUGGINGFACE_TOKEN` kısıtlı depolar için yine
+  birlikte gider. Fiilî standart değişken — `huggingface_hub`'ın da onur
+  duyduğu aynı değişken.
+</ParamField>
+<ParamField path="CIVITAI_ENABLED" type="string">
+  Civitai erişimini tamamen kapatmak için `0` yapın (civitai.com'a
+  ulaşılamayan bölgeler). Kullanıcının başlattığı Civitai araçları asılı
+  kalmak yerine açık bir "disabled by config" ile hızlı başarısız olur; arka
+  plan köken bakışları sessizce no-op olur.
+</ParamField>
+<ParamField path="GITHUB_TOKEN" type="string">
+  Hız sınırlarından kaçınmak için beceri üretimi ve düğüm meta verisi
+  çekmelerinde kullanılan GitHub token'ı.
+</ParamField>
+<ParamField path="COMFY_API_KEY" type="string">
+  Barındırılan API düğümlerine `/prompt` `extra_data` yükü üzerinden iletilen
+  comfy.org API anahtarı. Ortam değişkeni ayarlı değilse anahtar
+  `~/.comfy-api-key` dosyasından okunur (kırpılmış dosya içeriği; `chmod 600`
+  önerilir) — sırları ortam/süreç listelerinden uzak tutan arayüzsüz kurulumlar
+  için elverişli.
+</ParamField>
+<ParamField path="REGISTRY_ACCESS_TOKEN" type="string">
+  `node_pack` (`action: "publish"`) tarafından bir düğüm paketi yayımlamak
+  için kullanılan Comfy Registry API anahtarı. comfy-cli'ye ortam üzerinden
+  geçirilir, asla argümanlara ya da günlüklere konmaz.
+</ParamField>
+
+## Davranış
+
+<ParamField path="COMFYUI_WORKFLOWS_DIR" type="string" default="~/.comfyui-mcp/workflows">
+  `*.json` iş akışları için taranan dizin. Her biri otomatik yüklenen bir
+  çalıştırma aracı olur.
+</ParamField>
+<ParamField path="LOG_LEVEL" type="string" default="info">
+  Günlük ayrıntı düzeyi: `debug`, `info`, `warn`, `error`.
+</ParamField>
+
+## Model indirmeleri
+
+<ParamField path="COMFYUI_DOWNLOAD_CACHE_DIR" type="string" default="~/.comfyui-mcp/cache">
+  Model indirmeleri için içerik adresli önbellek. Aynı URL'nin yinelenen ya da
+  eşzamanlı indirmeleri önbellekteki dosyayı yeniden kullanır; hedef model yolu
+  hardlink ile (kopyaya düşerek) somutlaştırılır.
+</ParamField>
+<ParamField path="COMFYUI_LRU_CACHE_SIZE_GB" type="number" default="0">
+  İndirme önbelleğinin GB cinsinden azami boyutu. `0` dışarı atmayı kapatır;
+  sınırın üzerinde, bir indirme bittikten sonra en az kullanılan önbellek
+  dosyaları silinir.
+</ParamField>
+
+## Süreç gözetimi (yerel kurulumlar)
+
+comfyui-mcp yerel bir ComfyUI sürecini yönetirken `restart_comfyui` (`start` ve
+`restart` eylemleri) için geçerlidir.
+
+<ParamField path="COMFYUI_STARTUP_CHECK_INTERVAL_S" type="number" default="1">
+  ComfyUI başlatıldıktan sonra hazırlık sondaları arasındaki saniye.
+</ParamField>
+<ParamField path="COMFYUI_STARTUP_CHECK_MAX_TRIES" type="number" default="60">
+  Başlangıcın doğrulanmadığı bildirilmeden önceki azami hazırlık sondası.
+  Varsayılan 1 sn aralıkla bu ~60 sn'lik bir bütçedir. 20'den yükseltildi;
+  çünkü normal bir özel düğüm kümesiyle ComfyUI soğuk başlangıçta
+  `/system_stats`'e yanıt vermek için rutin olarak 20 sn'den uzun sürer ve daha
+  kısa bütçe, sağlıklı bir örneğin hazır olmasından birkaç an önce başlangıcı
+  doğrulanmamış bildiriyordu.
+
+  Bütçeyi tüketmek, başlangıcın **henüz doğrulanmadığı** anlamına gelir — başarısız
+  olduğu anlamına değil.
+</ParamField>
+<ParamField path="COMFYUI_ALWAYS_RESTART" type="boolean" default="false">
+  Etkinleştirildiğinde beklenmedik biçimde çıkan bir ComfyUI süreci otomatik
+  olarak yeniden başlatılır. Kasıtlı bir `restart_comfyui` with `action: "stop"`
+  asla yeniden başlatılmaz.
+</ParamField>
+<ParamField path="COMFYUI_RESTART_MAX_ATTEMPTS" type="number" default="3">
+  Vazgeçmeden önce yeniden başlatma penceresi içinde izin verilen azami otomatik
+  yeniden başlatma.
+</ParamField>
+<ParamField path="COMFYUI_RESTART_WINDOW_S" type="number" default="60">
+  Otomatik yeniden başlatma denemelerinin sayıldığı kayan pencere (saniye).
+</ParamField>
+
+## Panel orkestratörü ve köprü
+
+[comfyui-mcp-panel](https://github.com/artokun/comfyui-mcp-panel) kenar çubuğu,
+**panel orkestratörü** tarafından sürülür — bir loopback WebSocket köprüsüne
+sahip olan ve her panel sekmesi için **Claude aboneliğinizde** (API anahtarı
+yok) otonom bir Claude Agent SDK oturumu çalıştıran bir arka plan sürecidir.
+Panel paketi ComfyUI yüklenirken onu kendiliğinden başlatır; dolayısıyla
+normalde elle hiçbir şey çalıştırmazsınız — bkz.
+[Kenar Çubuğu Paneli](/docs/tr/panel). Kendiniz çalıştırmak için:
+
+```bash
+npx -y comfyui-mcp@latest connect
+```
+
+<ParamField path="COMFYUI_MCP_PANEL_ORCHESTRATOR" type="boolean" default="false">
+  Bir MCP sunucusu yerine panel orkestratörünü çalıştır (`--panel-orchestrator`
+  ile aynı).
+</ParamField>
+<ParamField path="COMFYUI_MCP_PANEL_MODEL" type="string" default="claude-opus-5">
+  Arka plan panel ajanları için model.
+</ParamField>
+<ParamField path="COMFYUI_MCP_BRIDGE_PORT" type="number" default="9180">
+  **Panel orkestratörünün** sahip olduğu panel WebSocket köprüsü için loopback
+  portu (varsayılan **9180**).
+</ParamField>
+<ParamField path="COMFYUI_MCP_STALL_S" type="number" default="180">
+  Orkestratörün kuyruk/işleme gözcüsü için işleme takılma eşiği (saniye):
+  düğümü/ilerlemesi bu kadar süredir ilerlemeyen çalışan bir iş takılmış olarak
+  işaretlenir ve ajanın sonraki turuna tek satırlık bir STALL/BACKLOG notu
+  eklenir. Video adımları meşru olarak yavaştır, bu yüzden varsayılan yüksektir.
+  **15–3600 sn** aralığına kıstırılır. Panelin **İşleme takılma uyarısı
+  (saniye)** ayarı (Ayarlar → Comfy MCP Agent → Genel) bunu bir `set_config`
+  köprü çerçevesiyle **canlı** olarak geçersiz kılar — yeniden bağlanma gerekmez
+  — ve bu ortam değerinin önüne geçer.
+</ParamField>
+
+### Güvenli köprü (uzak/bulut pod sürmek)
+
+`connect <url>` **uzak https** bir ComfyUI'yi (ör. bir RunPod podu) hedeflediğinde
+podun HTTPS panel sayfası makinenizdeki köprüye düz bir `ws://127.0.0.1` soketi
+açamaz — tarayıcılar bunu engeller (karışık içerik / Private Network Access).
+Orkestratör otomatik olarak güvenli bir `wss://` tüneline yükselir; böylece
+istem olmadan, herhangi bir tarayıcıda çalışır. Tam anlatım için
+[Bulut dağıtımı](/docs/tr/cloud-deployment), varsayılan cloudflared hızlı tüneli
+yerine kendi tünel altyapınızı çalıştırmak için
+[Kendi barındırdığınız röle](/docs/tr/self-hosted-relay) sayfalarına bakın.
+
+<ParamField path="COMFYUI_MCP_INSECURE_BRIDGE" type="boolean" default="false">
+  Uzak bir https hedefi sürülürken bile güvenli tünele otomatik yükselmek yerine
+  düz loopback `ws://` köprüsünü zorla. Pod'a kendi SSH port yönlendirmenizle
+  ulaşıyorsanız (sayfası zaten bir loopback kökenidir) ve bir Cloudflare
+  bağımlılığı istemiyorsanız bunu kullanın. `--insecure-bridge` ile aynı.
+</ParamField>
+<ParamField path="COMFYUI_MCP_TUNNEL_BACKEND" type="string" default="cloudflared">
+  Uzak bir hedef için hangi güvenli köprü arka ucunun kullanılacağı:
+  `cloudflared` (varsayılan — geçici bir hızlı tünel, sıfır kurulum) ya da
+  `relay` (kararlı bir alan adı ve üçüncü taraf hızlı tünel bağımlılığı olmadan
+  sizin işlettiğiniz bir [kendi barındırdığınız röleyi](/docs/tr/self-hosted-relay)
+  ara). Yalnızca güvenli kip etkinken işe yarar (uzak https hedefi, 
+  `COMFYUI_MCP_INSECURE_BRIDGE` değil).
+</ParamField>
+<ParamField path="COMFYUI_MCP_RELAY_URL" type="string">
+  Rölenizin `wss://` URL'si. `COMFYUI_MCP_TUNNEL_BACKEND=relay` iken gerekir.
+</ParamField>
+<ParamField path="COMFYUI_MCP_RELAY_KEY" type="string">
+  Rölenizde kimlerin oturum açabileceğini kapıyan isteğe bağlı paylaşılan sır
+  (`?key=`), oturum başına köprü token'ından bağımsız. Yalnızca röle kipinde
+  ve yalnızca röle dağıtımınız `RELAY_ACCESS_KEY` ayarlıysa ilgilidir.
+</ParamField>
+
+## Görev izleme
+
+Kuyruğa alınan işler için tamamlanma bildirimlerini bir izleyici takip eder
+(varsa WebSocket, yoksa HTTP yoklama).
+
+<ParamField path="COMFYUI_JOB_TIMEOUT_S" type="number" default="1800">
+  İzleyicinin bir işin tamamlanmasını beklemeden önce vazgeçeceği azami saniye.
+  Çok uzun video işlemeleri ya da ağır çok aşamalı iş akışları için bunu
+  yükseltin. (İşin kendisi ComfyUI'de çalışmayı sürdürür — yalnızca tamamlanma
+  bildirimi bırakılır.)
+</ParamField>
+<ParamField path="COMFYUI_JOB_POLL_INTERVAL_S" type="number" default="2">
+  Bir iş izlenirken HTTP geçmiş yoklamaları arasındaki saniye.
+</ParamField>
+<ParamField path="COMFYUI_MCP_INTERRUPT_S" type="number" default="30">
+  `queue` (action:"cancel") için iptal onur penceresi (saniye): çalışan işi
+  gerçekten durdurmak için bir kesmenin ne kadar bekleneceği, sonra yükseltme
+  (önce `/free`, sonra işlemeyi WEDGED bildirme). ComfyUI kesme bayrağını
+  yalnızca düğümler/adımlar arasında denetler; bu yüzden birkaç dakikalık tek
+  bir adım onu hemen onurlandırmaz — bu bekleme gerçek bir sıkışmayı saptayan
+  şeydir.
+</ParamField>
+
+## Araç yüzeyini kısıtlama
+
+**Barındırılan** bir dağıtım için — paylaşılan bir Open WebUI, bir ekip ön yüzü —
+işleten, istemi yazan kişi değildir. Araç ön ayarı/izin/red değişkenleri
+araçları modelden tamamen saklar: saklanan bir araç hiç kaydedilmez, dolayısıyla
+`tools/list`'te yoktur, `call_tool`'da yoktur ve model onun var olduğunu hiç
+öğrenmez. Eylem izin listesi, görünür kalması gereken bir araç için daha dar
+arkadaştır: araç kayıtlı kalır, ama listelenmeyen bir eylem işleyicisi
+çalışmadan reddedilir.
+
+<ParamField path="COMFYUI_MCP_TOOL_PRESET" type="string">
+  `safe` — makineyi ya da model kitaplığını değiştiren araçlar dışında her şey.
+  Kurmak, silmek ve yeniden başlatmak saklanır. **İşleme hâlâ çalışır ve onunla
+  gelenler de**: üretimleri kuyruğa almak, `list_api_nodes` (ÜCRETLİ kredi
+  harcayan barındırılan ortak düğümler) ve `report_issue` (herkese açık bir
+  GitHub issue'su açar). Paylaşılan bir ön yüzün kullanıcıları harcayamamalı
+  ya da yayımlamamalıysa `readonly` kullanın.
+  `readonly` — yalnızca inceleme: kuyruğa alınan işleme yok, yazılan yok,
+  harcanan yok.
+  İkisi de canlı paylaşılan bir tuvali süren bütün `panel_*` yüzeyini de
+  saklar.
+</ParamField>
+<ParamField path="COMFYUI_MCP_TOOL_DENY" type="string">
+  Saklanacak virgülle ayrılmış araç adları, ör. `restart_comfyui,download_model`.
+  Sondaki bir `*` bir aileyi eşleştirir: `train_*`. Herhangi bir ön ayarın
+  **ve** bir izin listesinin üzerine uygulanır.
+</ParamField>
+<ParamField path="COMFYUI_MCP_TOOL_ALLOW" type="string">
+  Virgülle ayrılmış izin listesi. Ayarlıysa yüzey **tam olarak** bu
+  araçlardır — adı geçmeyen her şey, hiçbir red kuralı onu anmasa bile
+  saklanır. Tek tek araçları bir ön ayarın ötesine geri almak için kullanın:
+  `COMFYUI_MCP_TOOL_PRESET=safe` artı
+  `COMFYUI_MCP_TOOL_ALLOW=panel_graph_outline,panel_query_graph`.
+
+  Bir aracı bir ön ayarın ötesine yalnızca **tam bir ad** geri alır. Bir glob
+  (`list_*`) yüzeyi diğer girdiler gibi daraltır ama bir ön ayarın kapattığını
+  yeniden açamaz — aksi halde `ALLOW=list_*` `list_packs`'i yeniden kabul
+  ederdi; onun `install_deps` eylemi üçüncü taraf kodu kurar ve çalıştırır ve
+  `ALLOW=*` her ön ayarı etkisiz kılardı.
+</ParamField>
+<ParamField path="COMFYUI_MCP_TOOL_ACTION_ALLOW" type="string">
+  Virgülle ayrılmış, tam `tool:action` çiftleri. Ayarlıysa bir `action` alanı
+  taşıyan her araç çağrısı bu çiftlerden biriyle eşleşmelidir; listeden
+  çıkarılan eylem taşıyan araçlar hiçbir eylemi dağıtamaz. Bu, adları artık
+  patlama yarıçaplarını açığa vurmayan birleştirilmiş araçları kısıtlar —
+  örneğin kuyruk incelemesine ve hedefli iptale izin verin, kuyruk
+  düzenlemelerine ya da genel bir temizlemeye izin vermeden:
+
+  `queue:list,queue:status,queue:cancel,enqueue_workflow:enqueue`
+
+  Her iki boyutu da sınırlamak için bunu `COMFYUI_MCP_TOOL_ALLOW` ile
+  eşleştirin. Kurallar tamdır; jokerler reddedilir, böylece yeni eklenen bir
+  eylem bir yükseltmeden sonra izinli olamaz.
+</ParamField>
+
+```bash A hosted deployment that cannot install or restart anything
+COMFYUI_MCP_TOOL_PRESET=safe npx comfyui-mcp@latest --http --host 0.0.0.0 --port 9100
+```
+
+```bash A generation operator that can inspect, enqueue, and cancel—but not install or clear queues
+COMFYUI_MCP_TOOL_ALLOW=get_system_stats,get_history,create_workflow,enqueue_workflow,queue \
+COMFYUI_MCP_TOOL_ACTION_ALLOW=get_system_stats:stats,get_system_stats:logs,get_system_stats:health,get_history:list,get_history:diagnose,create_workflow:create,create_workflow:modify,create_workflow:validate,create_workflow:node_info,enqueue_workflow:enqueue,queue:list,queue:status,queue:cancel \
+npx comfyui-mcp@latest
+```
+
+<Warning>
+  Bu, **modele** ve ona istem yazanlara karşı bir sınırdır — ortamı ayarlayan
+  kimseye karşı değil, o basitçe onu kaldırabilir; ve güvenilmeyen bir tarafı
+  ComfyUI ana makinesinden uzak tutmanın yerine geçmez.
+
+  Yanlış bir yapılandırma kısıtsız başlamak yerine **başlamayı reddeder**:
+  bilinmeyen bir ön ayar adı ya da ayarlı ama boş bir değişken (bir compose
+  dosyasında genişlememiş bir `${VAR}`) gerekçesiyle durur. Kısıtlı olduğuna
+  inanırken tam bir araç yüzeyiyle ayağa kalkmak, hiç süzgeç olmamasından
+  kötüdür.
+</Warning>
+
+## Taşıma
+
+Sunucu varsayılan olarak **stdio** konuşur (Claude Code'un beklediği). Uzak /
+çok istemcili kurulumlar için **streamable-HTTP** taşımasını da sunabilir.
+
+<ParamField path="MCP_TRANSPORT" type="string" default="stdio">
+  `stdio` ya da `http`. Denk bayraklar: `--stdio`, `--http`.
+</ParamField>
+<ParamField path="MCP_HOST" type="string" default="127.0.0.1">
+  HTTP bağlanma ana makinesi (`--http` ile). Bayrak: `--host`.
+</ParamField>
+<ParamField path="MCP_PORT" type="number" default="9100">
+  HTTP bağlanma portu (`--http` ile). Bayrak: `--port`.
+</ParamField>
+
+```bash Run the HTTP transport
+npx comfyui-mcp@latest --http --host 0.0.0.0 --port 9100 --comfyui-url https://my-comfy.example.com
+```

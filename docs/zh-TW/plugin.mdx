@@ -1,0 +1,110 @@
+---
+title: "Claude Code 外掛"
+description: "comfyui-mcp 是一套完整的 Claude Code 外掛：39 個 AI 技能、11 條斜線指令、4 個自主代理，以及 3 個鉤子，疊在 37 個 MCP 工具之上 —— 專家級 ComfyUI 知識，隨每次發布增長。"
+icon: "puzzle-piece"
+---
+
+`comfyui-mcp` 不只是一個 MCP 伺服器 —— 它作為完整的 **Claude Code 外掛** 發布。
+安裝外掛會給 Claude 帶上針對具體模型的 ComfyUI 專家知識，讓它不用試錯就能選對
+sampler、CFG、解析度和模型檔案。
+
+```bash
+# In Claude Code
+/plugin marketplace add artokun/comfyui-mcp
+/plugin install comfy
+```
+
+## 39 個 AI 技能 —— 還在增加
+
+技能是 Claude 按需載入的精選知識文件。每個模型家族都有生成參數、節點圖、精選模型
+下載 URL，以及失敗模式指引：
+
+| 技能 | Claude 會學到什麼 |
+|---|---|
+| `flux-txt2img` | Flux.1 Dev/Schnell + Flux 2 Klein — BF16 vs FP8 坑點、雙 CLIP 接線、VAE 選擇 |
+| `wan-t2v-video` / `wan-flf-video` | WAN 2.x 文生影片和首尾幀工作流程 |
+| `wan-scail-replacement` | SCAIL-2 影片內角色替換 — 參考取景→縮放規則、調參與合成坑點 |
+| `ltxv2-video` | LTX-2.3（以及 LTX-2 19B）— GGUF UNet、蒸餾模型、鏡頭控制 LoRA、兩階段放大、kornia 修復 |
+| `qwen-txt2img` / `qwen-image-edit` | Qwen-Image 生成和基於指令的編輯 |
+| `z-image-txt2img` | Z-Image Turbo 工作流程 |
+| `ideogram-ultra` | Ideogram 4 — 開權文生圖、區域提示、logo / 海報 / 可讀文字 |
+| `ernie-image` | ERNIE-Image — 快速文生圖、精確多語言文字算圖，8 GB 以下VRAM就能跑 |
+| `anima-base` | ANIMA 1.0 — 約 2B 的動漫/插畫模型，Danbooru 標籤 + 自然語言，動漫區域性重繪，6 GB 以下VRAM |
+| `anima-lora-trainer` | 訓練自訂動漫 LoRA — kohya `sd-scripts` Gradio 訓練器，6 GB 以下VRAM |
+| `ai-toolkit-trainer` | 訓練自訂 WAN 2.2 + Z-Image LoRA（人物 / 風格 / 運動）— ostris AI-Toolkit，本機或 RunPod |
+| `installer-packs` | 使用、構建和派生一條命令的安裝包 —— 並邀請使用者把新包裝回上游 |
+| `panel-node-pack-sync` | 更新後讓側邊欄面板節點包跟上協調器 —— 版本不匹配偵測、會警告而不是覆寫的版本釘，以及結果會從磁碟重新讀回的同步 |
+| `model-compatibility` | 哪種 VAE/CLIP/文本編碼器配哪種架構 —— 壞工作流程的頭號來源 |
+| `model-registry` | 技能引用的每個模型的精選下載 URL + 目標目錄 —— 隨每次發布增長 |
+| `civitai` | 原生 Civitai 發現 → 透過內建 `download_model` `action:"search_civitai"` 的本機下載 / 接線 / 生成迴圈（不需要金鑰，不需要額外伺服器）；官方 [Civitai MCP](https://mcp.civitai.com/mcp) 是選用的社群面附加，不捆綁 |
+| `comfyui-core` | 佇列、歷史和 API 語義 |
+| `comfyui-node-registry` | 向 Comfy Registry 編寫並發布自訂節點包 |
+| `comfyui-frontend-extensions` | v1/v2 前端擴充編寫（側邊欄分頁、控制項） |
+| `rgthree` | 設定 rgthree-comfy — Fast Groups Bypasser/Muter 組開關（`/object_info` 裡沒有的純前端節點，透過節點 PROPERTIES 而不是控制項設定）、Power Lora Loader 堆疊、Context 匯流排 |
+| `director` | 影片管線的多鏡頭場面排程 |
+| `prompt-engineering` | 按架構的提示（自然語言 vs 標籤） |
+| `troubleshooting` | OOM、缺失節點、版本漂移 —— 診斷樹 |
+| `comfyui-launch-flags` | VRAM / 注意力 / 快取 / 效能啟動旗標對照表 — `--reserve-vram`、`--novram`+`--cache-none`、`--use-sage-attention` vs `--use-pytorch-cross-attention`（Z-Image），以及 Blackwell/RTX 5000 加速棧說明 |
+
+新技能隨每次發布落地 —— 透過內建 `list_packs` 工具（`action: "generate_skill"`）從熱門
+registry 包生成，再經人工精選。
+
+**在接上任何東西之前先試試這些知識** —— 每個技能都是普通 markdown 檔案，單獨讀也有用。
+適用範圍最廣的是
+[`prompt-engineering`](https://github.com/artokun/comfyui-mcp/blob/main/plugin/skills/prompt-engineering/SKILL.md)
+—— CLIP 的 77 token 限制和 `BREAK` 分塊、權重語法，以及按架構的策略（為什麼 Flux
+要自然語言且不要負向提示，而 SD1.5 要標籤）。在瀏覽器裡讀，或粘進任何代理的上下文當
+系統提示 —— 不需要 ComfyUI、MCP 或安裝。接上完整外掛後，代理會自動載入同樣的檔案
+（`list_packs` 配合 `action: "skill_read"`）。
+
+### Civitai 搜尋 —— 內建
+
+`download_model` `action:"search_civitai"` 原生搜尋 Civitai（公開 REST API，不需要金鑰，
+不需要額外伺服器）：關鍵詞 + `types` + `base_models` 過濾（「一個 **Flux** LoRA」），
+預設僅 SFW，每條結果都回傳 `action:"download_civitai"` 直接使用的 `model_version_id`
+—— 外加模型的**觸發詞**給提示用。因為它是一等工具，所以**每個後端**都能用，包括緊湊
+路由器後面的小型本機模型。`civitai` 技能會教完整的發現 → 下載 → 生成交接。
+
+**選用 API 金鑰。** 搜尋不需要。`CIVITAI_API_TOKEN` 解鎖有門禁 / 搶先體驗的下載和有門禁
+的搜尋結果 —— 一個變數同時驅動搜尋和下載。
+
+**選用：官方 Civitai MCP。** 面向搜尋→安裝之外的社群面（瀏覽範例圖 + 它們的生成參數、
+發帖、合集），配對 Civitai 的[官方遠端伺服器](https://mcp.civitai.com/mcp)
+—— 不再自動捆綁，加一次即可：
+
+```bash
+claude mcp add --transport http civitai https://mcp.civitai.com/mcp \
+  --header "Authorization: Bearer YOUR_CIVITAI_API_KEY"
+```
+
+## 11 條斜線指令
+
+`/comfy:gen`（從提示生成）、`/comfy:debug`（診斷失敗的工作流程）、`/comfy:install`
+（安裝節點包）、`/comfy:viz`（工作流程 → Mermaid）、`/comfy:batch`、`/comfy:compare`、
+`/comfy:convert`、`/comfy:gallery`、`/comfy:recipe`、`/comfy:director`、
+`/comfy:node-skill`。
+
+## 4 個自主代理
+
+- **comfy-explorer** —— 深挖一個節點包的原始碼並寫成文件
+- **comfy-researcher** —— 問題陳述 → 按排名的包推薦
+- **comfy-debugger** —— 從歷史 + 記錄根因分析失敗的工作流程
+- **comfy-optimizer** —— 針對給定 GPU 的VRAM和速度調優
+
+## 側邊欄面板 —— 不需要 API 金鑰
+
+<Note>
+  側邊欄面板作為獨立包發布，**已上架 Comfy Registry，並在 ComfyUI-Manager 里名為
+  `comfyui-agent-panel`** —— 在那裡搜尋它，選 **Latest**，不要選 Nightly。完整指南：
+  [側邊欄面板](/docs/zh-TW/panel)。
+</Note>
+
+[comfyui-mcp-panel](https://github.com/artokun/comfyui-mcp-panel) 側邊欄在你的
+**Claude 訂閱**上跑一個自主代理（沒有按 token 的 API 計費）。安裝這個包，開啟
+代理分頁，點**連線** —— 它會按需啟動[面板協調器](/docs/zh-TW/configuration)；向它
+要一張圖、一條工作流程或一處改動，它就會對著你的 ComfyUI 動手。
+
+## 鉤子
+
+三個鉤子讓生成工作階段保持緊湊：排入佇列工作流程前的 **VRAM 預檢**、**任務完成通知**，以及破壞性
+操作前的**儲存警告**。

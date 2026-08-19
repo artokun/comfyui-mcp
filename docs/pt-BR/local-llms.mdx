@@ -1,0 +1,478 @@
+---
+title: "LLMs locais e outros agentes"
+description: "Suporte de primeira classe para Hermes Agent, OpenClaw e Copilot CLI — mais qualquer cliente MCP num modelo local (Ollama) ou hospedado. Setup com um comando, e um modo compacto de ferramentas que colapsa ~200 schemas de ferramenta em 3 meta-ferramentas."
+icon: "microchip"
+---
+
+O comfyui-mcp é um servidor MCP stdio padrão, então **qualquer agente
+capaz de MCP consegue conduzi-lo** — não só o Claude Code. Esta página
+cobre os harnesses que suportamos de primeira classe (**Hermes Agent,
+OpenClaw, Copilot CLI**), o que o seu modelo precisa trazer, e o **modo
+compacto de ferramentas** que torna modelos pequenos/locais viáveis.
+
+## Requisitos do modelo
+
+Seja franco consigo mesmo sobre o modelo que você está trazendo. A spec
+mínima para a experiência *completa* é um modelo com **chamada de
+ferramentas + thinking + visão**:
+
+| Capacidade | Sem ela |
+| --- | --- |
+| **Chamada de ferramentas** (function calling nativo) | **Não vai funcionar.** Toda ação do comfyui-mcp é uma chamada de ferramenta. Chamada de ferramentas emulada por prompt em alguns harnesses tecnicamente roda, mas a confiabilidade desaba — trate como não suportado. |
+| **Thinking / raciocínio** | Funciona, degradado. Cadeias de vários passos (escolher ferramenta → buscar schema → montar args → se recuperar de erros) pioram de forma perceptível; espere o agente precisar de re-prompt / empurrão. |
+| **Visão** | Funciona, degradado. O agente consegue gerar mas não consegue *ver* — loops de crítica de `get_image (action:"view")`, `get_workflow (action:"from_image")`, e comparações visuais ficam indisponíveis, então ele voa cego nas próprias saídas. |
+
+Modelos hospedados que cabem na spec completa mudam todo mês — confira o
+card do modelo no seu provedor para as três capacidades em vez de
+confiar numa lista. Em meados de 2026: **Xiaomi MiMo-V2.5** (visão +
+ferramentas + contexto longo) cabe na spec completa barato;
+**DeepSeek-V3.x / GLM / MiniMax** têm chamada de ferramentas + thinking
+fortes, mas variantes só-texto perdem o loop de visão; modelos locais
+pequenos (abaixo) em geral mantêm a chamada de ferramentas e largam o
+resto.
+
+## Modo compacto de ferramentas
+
+A superfície completa são 37 ferramentas com schemas JSON ricos (~200 KB,
+cerca de 50k tokens, por `tools/list`). A maioria dos harnesses que não
+são Claude injeta cada schema registrado direto no contexto do modelo —
+tranquilo para modelos de fronteira, fatal para um 4B local. O **modo
+compacto de ferramentas** registra exatamente **três meta-ferramentas** e
+mantém o catálogo de verdade atrás delas:
+
+| Meta-ferramenta | O que faz |
+| --- | --- |
+| `list_tools` | Catálogo leve em tokens: cada nome de ferramenta + resumo de uma linha, agrupado por categoria. Suporta filtros `category` e `search`. |
+| `describe_tool` | Descrição completa + JSON Schema de uma ferramenta, buscado só quando precisa. |
+| `call_tool` | Roda qualquer ferramenta catalogada: `{"name": "generate_image", "args": {...}}`. Devolve exatamente o que a ferramenta de baixo devolve. |
+
+O loop do modelo é: `list_tools` → escolher → `describe_tool` →
+`call_tool`. Os schemas entram no contexto uma ferramenta por vez. As
+meta-ferramentas são de propósito perdoadoras das manias de modelos
+pequenos: `args` pode ser um objeto **ou** uma string JSON-encoded,
+aliases comuns de campo (`tool_name`, `arguments`) são aceitos, e erros
+de validação voltam com o schema esperado para o modelo se corrigir em
+vez de morrer num erro opaco de protocolo.
+
+O compacto é **opt-in** — a superfície direta é o padrão, então um
+modelo pequeno precisa de um destes (a flag vence a variável de
+ambiente):
+
+```bash
+npx -y comfyui-mcp --compact
+# or
+COMFYUI_MCP_TOOL_MODE=compact npx -y comfyui-mcp
+```
+
+O padrão serve harnesses de modelo de fronteira (Claude Code / Cursor /
+Claude Desktop), cujos clientes lidam bem com listas grandes de
+ferramentas. `--full` ainda é aceito e agora é um no-op.
+
+### Auto-seleção: baseada no modelo, não no provedor
+
+Nos backends de LLM local do painel (Ollama / LM Studio / llama.cpp /
+compatível com a OpenAI), quando **você não escolheu um modo**, o
+*modelo* escolhe um:
+
+- um modelo cujo id carrega uma contagem de parâmetros de **70B** ou
+  mais (`llama3.3:70b`, `gpt-oss:120b`, `mixtral:8x22b`) recebe a
+  superfície **completa**;
+- qualquer coisa menor fica **compacto**;
+- um id de modelo sem contagem de parâmetros legível
+  (`moonshotai/kimi-k2.5`) é tratado como **desconhecido**, não como
+  pequeno, e recebe o fallback compacto documentado.
+
+"Ollama ⇒ compacto" estaria errado nos dois sentidos — um modelo local
+70B dá conta da superfície completa e seria aleijado à toa, e alguns
+modelos hospedados pequenos querem compacto. Então o sinal é o modelo.
+
+**A sua escolha sempre vence, nos dois sentidos.**
+`COMFYUI_MCP_TOOL_MODE=full` força a superfície completa num modelo 4B;
+`COMFYUI_MCP_TOOL_MODE=compact` força o roteador num 405B. A
+auto-seleção só preenche a lacuna em que nada foi escolhido.
+
+O limiar de 70B é conservador de propósito: é o único número que alguém
+de fato afirmou sobre este eixo, então nada é promovido no chute.
+`COMFYUI_MCP_FULL_SURFACE_MIN_PARAMS_B=30` abaixa se você quiser
+descobrir onde o teto do seu hardware realmente está.
+
+O **system prompt segue o modo**. O prompt compacto diz ao modelo que
+ele tem seis ferramentas e roteia o ComfyUI por `call_tool`; quando a
+superfície completa é selecionada isso simplesmente é mentira, então o
+prompt do modo completo diz que as ferramentas do ComfyUI são anunciadas
+direto e mantém a descrição do roteador só para `panel_*`. Auto-selecionar
+completo enquanto nega que as ferramentas existem seria pior do que o
+padrão que substituiu.
+
+O modo ativo **e o motivo dele** são impressos na linha de pronto do
+backend, por exemplo `Tool mode: compact — chosen for this MODEL: "qwen3:4b" is ~4B
+parameters, below the 70B full-surface threshold…`, então a alavanca
+nunca fica invisível de novo.
+
+<Note>
+Esta auto-seleção cobre a faixa de LLM local do painel. A faixa HTTP do
+Codex / Gemini / Grok / Copilot fica pinada no compacto por outro motivo
+— os próprios orçamentos de ferramenta deles expulsam as ferramentas
+`panel_*` caso contrário — e o padrão do servidor MCP standalone não
+muda.
+</Note>
+
+## Entrada de áudio
+
+**No backend `ollama` (`/api/chat` nativo)**, o áudio chega ao modelo só
+onde o modelo de fato reporta que consegue ouvir. Antes de enviar, o
+backend pergunta `POST /api/show` pelas capacidades daquele modelo:
+
+```bash
+ollama pull gemma4:e2b      # capabilities: completion, vision, audio, tools, thinking
+```
+
+Se o modelo selecionado não tem a capacidade `audio`, o anexo é
+**recusado em voz alta** — com a lista de capacidades que o servidor
+reportou e um comando de pull para um modelo que consegue ouvir — em vez
+de ser dropado na requisição onde o modelo responderia só do seu texto.
+O mesmo vale para um arquivo que não é um formato de áudio, ou que está
+presente mas tem zero bytes.
+
+Entregar os bytes não é bem o trabalho inteiro. Medido ao vivo contra
+`gemma4:e2b`: com o WAV comprovadamente no contexto (555 tokens de
+prompt, `/api/show` reportando `audio`), o modelo ainda respondeu *"I do
+not have the capability to transcribe audio — my functions are limited
+to operating ComfyUI"*. O system prompt do painel o trata como operador
+de grafo e um modelo pequeno se racionaliza para fora de um sentido que
+ele de fato tem. Então um turno cujo áudio foi checado por capacidade e
+anexado também carrega uma nota curta dizendo ao modelo que o áudio está
+lá e que ele deve responder a partir do que ouve. Com essa nota o mesmo
+modelo transcreveu corretamente em quatro execuções de quatro.
+
+**Nos backends compatíveis com a OpenAI** (LM Studio, llama.cpp,
+OpenRouter, personalizado) não há um endpoint de capacidade para
+perguntar. O áudio é enviado como uma parte de conteúdo `input_audio` e
+o turno carrega uma linha explícita *"I cannot confirm the model
+actually receives them"*. Recusar negaria áudio a todo endpoint que
+simplesmente não tem uma API de capacidade; uma proteção que não
+consegue rodar não é um veredito — mas também não é uma confirmação, e
+o texto diz isso.
+
+Veja [Backends → Entrada de áudio](/docs/pt-BR/backends#entrada-de-áudio--quais-backends-com-honestidade)
+para o que cada outro provedor faz.
+
+## Configuração com um comando
+
+`comfyui-mcp setup <agent>` grava a entrada do servidor no próprio
+arquivo de configuração do harness (fundindo com o que já está lá —
+servidores existentes, comentários em YAML, tudo preservado):
+
+```bash
+npx -y comfyui-mcp setup hermes     # → ~/.hermes/config.yaml      (compact by default)
+npx -y comfyui-mcp setup openclaw   # → ~/.openclaw/openclaw.json  (compact by default)
+npx -y comfyui-mcp setup copilot    # → ~/.copilot/mcp-config.json (full by default)
+```
+
+Flags: `--compact` / `--full` sobrescrevem o padrão por agente,
+`--comfyui-url <url>` embute o seu alvo ComfyUI (URL local, LAN, ou
+proxy RunPod), `--dry-run` imprime a config fundida em vez de gravá-la.
+
+## Hermes Agent
+
+```bash
+npx -y comfyui-mcp setup hermes --comfyui-url http://127.0.0.1:8188
+```
+
+o que produz isto em `~/.hermes/config.yaml` (adicione na mão se
+preferir):
+
+```yaml
+mcp_servers:
+  comfyui:
+    command: "npx"
+    args: ["-y", "comfyui-mcp", "--compact"]
+    env:
+      COMFYUI_URL: "http://127.0.0.1:8188"
+```
+
+Recarregue com `/reload-mcp` (ou reinicie o Hermes). O Hermes prefixa as
+ferramentas, então o modelo vê `mcp_comfyui_list_tools`,
+`mcp_comfyui_describe_tool` e `mcp_comfyui_call_tool` — três definições
+no contexto em vez de duzentas.
+
+<Note>
+Num modelo de fronteira (via Nous Portal / OpenRouter) você pode rodar o
+setup de novo com `--full` e opcionalmente usar a allowlist
+`tools.include` do próprio Hermes. Compacto é o padrão certo para
+qualquer coisa menor.
+</Note>
+
+O Hermes também traz uma *skill* `comfyui` inclusa que conduz o ComfyUI
+por REST cru a partir de scripts Python. Funciona, mas é anterior a este
+servidor — a rota MCP te dá autoria/validação de workflows, gerenciamento
+de modelos + nós personalizados, pacotes de instalador, controle de fila
+e autodiagnóstico. Desative a skill se o agente continuar indo atrás
+dela em vez das ferramentas MCP.
+
+## OpenClaw
+
+```bash
+npx -y comfyui-mcp setup openclaw
+```
+
+o que produz isto em `~/.openclaw/openclaw.json`:
+
+```json
+{
+  "mcpServers": {
+    "comfyui": {
+      "command": "npx",
+      "args": ["-y", "comfyui-mcp", "--compact"],
+      "transport": "stdio"
+    }
+  }
+}
+```
+
+Reinicie o gateway do OpenClaw para pegar o servidor. A documentação do
+OpenClaw recomenda manter a contagem de ferramentas MCP baixa — é
+exatamente para isso que o modo compacto existe, e por isso é o padrão
+aqui.
+
+## Copilot CLI
+
+```bash
+npx -y comfyui-mcp setup copilot
+# or use Copilot's own command:
+copilot mcp add comfyui -- npx -y comfyui-mcp
+```
+
+o que produz isto em `~/.copilot/mcp-config.json`:
+
+```json
+{
+  "mcpServers": {
+    "comfyui": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "comfyui-mcp"],
+      "env": {},
+      "tools": ["*"]
+    }
+  }
+}
+```
+
+A Copilot CLI roda modelos de fronteira, então o setup assume por padrão
+a superfície **completa** de ferramentas (passe `--compact` se estiver
+roteando o Copilot para um modelo menor). Confira com `/mcp show` dentro
+de `copilot`.
+
+## Nossos modelos locais com fine-tune (gratuitos, recomendados)
+
+Se você quer rodar o agente **localmente de graça**, comece aqui. Fizemos
+fine-tune da família Gemma 4 especificamente para o comfyui-mcp:
+treinada em QLoRA em **1.055 trajetórias de uso de ferramenta
+verificadas no servidor** sintetizadas contra um ComfyUI ao vivo —
+cobrindo a **superfície completa de 178 ferramentas** (113 MCP + 65 do
+painel) — então o modelo conhece este conjunto exato de ferramentas de
+forma nativa em vez de encontrá-lo frio.
+
+```bash
+# 1. Install Ollama (once):  https://ollama.com/download
+# 2. Pull the size that fits your GPU:
+ollama pull artokun/gemma4-comfyui-mcp:e4b     # default — ~3.5 GB VRAM at q4
+ollama pull artokun/gemma4-comfyui-mcp:12b     # ~8 GB VRAM
+ollama pull artokun/gemma4-comfyui-mcp:e2b     # smallest — ~2 GB VRAM (see caveat)
+```
+
+**Medido, não prometido** — pontuações da [Arena de LLMs](/docs/pt-BR/arena)
+na escada real de 10 cenários (melhor de 3, cada resultado verificado
+contra um servidor ComfyUI ao vivo, RTX 4090):
+
+| Tag | VRAM (q4) | Pontuação da arena | vs. estoque |
+|---|---|---|---|
+| `:e4b` | ~3.5 GB | **14/20** (13–14) — melhor modelo local que testamos | gemma4:e4b de estoque: 12/20 |
+| `:12b` | ~8 GB | 13/20 (12–13) | 12b de estoque sem benchmark |
+| `:e2b` (v2) | ~2 GB | 10/20 (7–10) | gemma4:e2b de estoque: 8/20 |
+
+Cada degrau agora vence a base de estoque. O retrain v2 do `:e2b`
+(treino em duas visões: chamadas diretas de ferramenta E o envelope do
+roteador implantado) consertou a regressão de formato `call_tool` da v1
+— zero envelopes malformados nas execuções de veredito. A orientação de
+tamanho se mantém: `:e4b` é o ponto ideal (só ~1.5 GB a mais que o e2b e
++4 na arena); `:e2b` agora é uma escolha legítima para VRAM apertada;
+`:12b` compra estabilidade em tarefas longas de vários passos, não
+pontuação crua.
+
+| Tag | Base | VRAM (q4) | Notes |
+| --- | --- | --- | --- |
+| `:e4b` | Gemma 4 E4B | ~3.5 GB | **O padrão** — melhor equilíbrio tamanho/qualidade |
+| `:e2b` | Gemma 4 E2B | ~2 GB | Pensa de forma verbosa — dê um `max_tokens` generoso (≥512) |
+| `:12b` | Gemma 4 12B | ~8 GB | Degrau mais forte |
+
+O backend Ollama do painel **assume `:e4b` por padrão** — escolha
+**Ollama (local)** no seletor de backend e funciona assim que o modelo
+é puxado. Sem conta, sem chave de API, sem custo por token.
+
+**Janela de contexto:** as tags saem com uma janela de **65.536 tokens**
+assada, e o orquestrador cede a ela (modelos de estoque recebem 16K). A
+arquitetura suporta até **128K** (`:e2b`/`:e4b`) e **256K** (`:12b`) —
+suba com `COMFYUI_MCP_OLLAMA_NUM_CTX=131072` se você tem a VRAM (o cache
+KV cresce com a janela). Se o agente começar a "esquecer" no meio da
+conversa, olhe o log do orquestrador: ele avisa quando um turno enche
+≥85% da janela. Pesos, adapters LoRA e o pipeline de treino são abertos:
+[`artokun/gemma4-comfyui-mcp`](https://huggingface.co/artokun/gemma4-comfyui-mcp)
+(dataset: [`artokun/comfyui-mcp-trajectories`](https://huggingface.co/datasets/artokun/comfyui-mcp-trajectories)).
+
+## LM Studio
+
+O painel fala LM Studio nativamente: escolha **LM Studio** no seletor de
+backend e o orquestrador conduz o servidor local dele
+(`http://127.0.0.1:1234/v1`, sobrescreva com
+`COMFYUI_MCP_LMSTUDIO_HOST`). O setup são dois cliques: instale em
+[lmstudio.ai](https://lmstudio.ai), depois **Developer → Start Server**
+com um **modelo com chamada de ferramentas** carregado. O seletor de
+modelos espelha o que o servidor oferece; sem um padrão definido, o
+primeiro modelo servido é adotado automaticamente. O orquestrador
+gerencia o **ciclo de vida completo** sem as mãos: inicia o servidor
+automaticamente quando precisa, faz JIT-load do seu modelo, libera a
+VRAM dele enquanto uma renderização do ComfyUI roda (o chat fica em
+espera e é respondido quando a renderização termina), descarrega o
+modelo de saída numa troca de modelo, e libera tudo quando você troca
+para outro provedor.
+
+Os nossos GGUFs com fine-tune funcionam aqui também — busque
+`artokun/gemma4-comfyui-mcp` no downloader de modelos do LM Studio e pegue
+um `model-q4_k_m.gguf`. Espere a mesma pausa de cold-load JIT na primeira
+mensagem que o Ollama tem (30s+ é normal).
+
+## llama.cpp (llama-server)
+
+Rodando `llama.cpp` cru? Escolha **llama.cpp** no seletor de backend — o
+orquestrador conduz o endpoint compatível com a OpenAI do `llama-server`
+(`http://127.0.0.1:8080/v1`, sobrescreva com
+`COMFYUI_MCP_LLAMACPP_HOST`):
+
+```bash
+llama-server -m gemma4-comfyui-mcp-e2b.Q4_K_M.gguf -c 16384
+```
+
+Notas de campo: o contexto é uma **flag de lançamento** (`-c`) — o
+agente avisa se o servidor roda abaixo de 16K (o payload de ferramentas
+precisa disso). A chamada de ferramentas vem ligada por padrão nos
+builds atuais; **builds mais antigos precisam de `--jinja`** (o painel
+detecta um servidor incapaz de ferramentas no conectar e diz exatamente
+isso). O único modelo carregado é adotado automaticamente — sem precisar
+escolher.
+
+Numa caixa de uma GPU só, um llama-server **local** (ou llama-swap na
+frente) entra no mesmo handoff de VRAM que o Ollama e o LM Studio:
+enquanto uma renderização do ComfyUI roda, o seu chat fica em espera e é
+respondido no momento em que a renderização termina. Como o llama-server
+não tem uma API de unload (e o llama-swap troca modelos no upstream sob
+demanda), o handoff é só espera — nada é descarregado ou aquecido de
+forma explícita. Um `COMFYUI_MCP_LLAMACPP_HOST` **remoto** é a GPU de
+outra pessoa e nunca é bloqueado. O handoff vem ligado por padrão nos
+três backends locais; saia com `COMFYUI_MCP_PAUSE_LOCAL_ON_GEN=0` (o
+legado `COMFYUI_MCP_OLLAMA_PAUSE_ON_GEN=0` ainda é honrado).
+
+## Endpoint personalizado (qualquer servidor compatível com a OpenAI)
+
+Qualquer coisa que fale `/v1/chat/completions` — vLLM, DeepSeek,
+Together, Azure OpenAI, um llama-server em outra caixa, o gateway da sua
+empresa — entra como o provedor **Endpoint personalizado**:
+
+1. Configurações do ComfyUI → **Comfy MCP Agent → Endpoint personalizado**
+   → defina a **URL base do endpoint** (inclua o `/v1`, por exemplo
+   `http://192.168.1.20:8000/v1`).
+2. Se o servidor precisa de uma chave: **Definir chave de API…** — uma
+   entrada mascarada; a chave é guardada `0600` pelo orquestrador em
+   `~/.comfyui-mcp`, nunca nas configurações do ComfyUI ou no chat.
+3. Escolha **Endpoint personalizado** no seletor de backend e Conectar.
+
+A lista de modelos vem de `/v1/models` do servidor; servidores de um
+modelo só são adotados automaticamente, ou defina um id de **Modelo
+padrão** explicitamente para endpoints que não listam modelos. Válvulas
+de escape de env: `COMFYUI_MCP_CUSTOM_BASE_URL`,
+`COMFYUI_MCP_CUSTOM_MODEL`, `COMFYUI_MCP_CUSTOM_API_KEY`. O modelo precisa
+suportar **chamada de ferramentas**.
+
+## Ollama e modelos locais — a Arena de LLMs
+
+Qualquer harness MCP que fale com o Ollama (ou um endpoint compatível
+com a OpenAI) consegue conduzir o modo compacto com um modelo local.
+Dois harnesses repetíveis vêm no repositório: `npm run test:local-llm`
+(checagem rápida de um modelo) e `node scripts/llm-arena.mjs` — a
+**Arena de LLMs do ComfyUI**, que passa um campo de modelos por um
+conjunto idêntico de tarefas contra um ComfyUI *ao vivo* e verifica cada
+desfecho contra o servidor, nunca contra as afirmações do modelo.
+
+Pontuações da faixa local na escada completa de 10 cenários (RTX 4090,
+ComfyUI 0.27, temperature 0 — veja a [página da Arena](/docs/pt-BR/arena)
+para a escada de tarefas e o ranking de todas as faixas inclusive
+fronteira e hospedados):
+
+| Modelo | Tamanho | Pontuação /20 |
+| --- | --- | --- |
+| `qwen3:4b` | 2.6 GB | **13** |
+| `gemma4:e4b` | 9.6 GB | **12** |
+| `qwen3:8b` | 5.2 GB | **11** |
+| `gemma4:e2b` | 7.2 GB | **8** |
+| `llama3.1:8b` | 4.9 GB | **2** |
+| `gemma3` (qualquer tamanho) | — | ❌ sem chamada nativa de ferramentas — não suportado |
+
+O que fica: a classe qwen3/gemma4 passa com folga as tarefas de uma
+ferramenta (saúde, modelos instalados, busca no registro, fila) e pega
+pontos nas faixas mais duras, mas a composição de grafo em vários
+estágios (um grafo com duas saídas encadeadas, um pipeline img2img
+estagiado em dois estágios) ainda é território de fronteira/B-tier. A
+disciplina de formato de ferramenta do llama3.1:8b desaba neste catálogo
+(ele alucina nomes de ferramenta e imprime JSON de chamada como texto).
+O Gemma 4 saiu com function calling nativo na família toda (Ollama ≥
+v0.20); `e4b` ou maior é o ponto ideal.
+
+Lembre da escada de capacidades acima: esses modelos pequenos mantêm a
+chamada de ferramentas mas têm visão e thinking limitados/nenhum, então
+conseguem gerar e gerenciar workflows mas não conseguem criticar
+visualmente os resultados.
+
+## O painel lateral num modelo local
+
+O [agente do painel](/docs/pt-BR/panel) ganha um **backend Ollama** ao
+lado de Claude / ChatGPT / Gemini: escolha **Ollama (local)** no seletor
+de backend e o orquestrador conduz o seu grafo ao vivo com um modelo
+local — sem conta, sem chave de API, totalmente offline. O modelo vê o
+roteador de 6 ferramentas (as 3 meta-ferramentas compactas do comfyui
+mais `panel_list_tools` / `panel_describe_tool` / `panel_call_tool` para
+o canvas ao vivo), então mesmo um modelo 4B não afoga em schemas. Modelo
+padrão: **`artokun/gemma4-comfyui-mcp:e4b`** — [o nosso fine-tune do
+gemma4](#nossos-modelos-locais-com-fine-tune-gratuitos-recomendados),
+treinado neste conjunto exato de ferramentas (substitui o `gemma4:e4b`
+de estoque, o melhor anterior da Arena); sobrescreva com
+`COMFYUI_MCP_OLLAMA_MODEL` ou o seletor de modelos do painel, que lista
+o que você puxou localmente. Espere trocas honestas em relação aos
+backends de fronteira: turnos mais lentos (especialmente o primeiro,
+enquanto o modelo carrega), sem visão, sem rollback de conversa.
+
+## O que você ganha (e o que não ganha)
+
+Qualquer cliente MCP recebe a **superfície completa de ferramentas** —
+geração, autoria de workflows, modelos, nós personalizados, fila,
+diagnósticos — em qualquer modo de ferramenta. Os **extras do plugin**
+do Claude Code (skills, comandos de barra, hooks, pacotes de instalador,
+o agente do painel lateral) são recursos do plugin e não viajam para
+outros harnesses. O catálogo `list_tools` é desenhado para carregar
+orientação suficiente para agentes sem aquela camada de conhecimento
+ainda encontrarem o caminho.
+
+## Solução de problemas
+
+- **O modelo chama `call_tool` com um `args` stringificado** — suportado;
+  o servidor parseia strings JSON-encoded automaticamente.
+- **O modelo inventa nomes de ferramenta** — nomes desconhecidos devolvem
+  sugestões de match próximo mais um ponteiro de volta para `list_tools`.
+- **Parâmetros errados/faltando** — o erro inclui o JSON Schema da
+  ferramenta; modelos capazes se corrigem na próxima tentativa.
+- **O modelo responde a partir do catálogo sem rodar nada** — um modo de
+  falha conhecido de modelo pequeno; empurre-o ("entradas do catálogo são
+  nomes de ferramenta, não dados — rode a ferramenta com call_tool").
+- **ComfyUI inalcançável** — o modo compacto só muda o *registro* de
+  ferramentas; a config de conexão é idêntica a qualquer outro setup
+  (veja [Configuração](/docs/pt-BR/configuration)).
