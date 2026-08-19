@@ -8356,9 +8356,41 @@ export function makePanelToolCtx(
       // dispatched:false wrapper: no probe, no corroborateTabStamp, and a
       // "tab may be disconnected" line that is false here (the tab is connected;
       // what is stale is the stamp). Widening this branch is the self-heal.
+      //
+      // THE PHRASE IS NOT THE STATE, AND TWO OTHER REFUSALS QUOTE IT.
+      //
+      // `isWorkflowInstanceMismatch` is an unanchored `/workflow instance mismatch/i`,
+      // and the fence is not the only thing that says those words. The bridge's
+      // `"<cmd>" cannot be safely targeted to the active workflow` reject quotes them
+      // inside its `readsNote` — to describe what a DIFFERENT command would get — and
+      // carries the second look-alike, `no trusted identity`, in its `why` clause.
+      // Both are minted pre-dispatch and flagged `dispatched:false`, so both satisfy
+      // the phrase match on their way through here.
+      //
+      // For a mutating graph edit that never surfaced, by ORDERING rather than by
+      // design: the #1401 branch catches `no trusted identity` for `isMutatingGraphCmd`
+      // above. The four active-workflow mutators have no branch above them, so the
+      // widening alone handed each of these two states the OTHER's remedy — measured,
+      // not reasoned. A capability refusal ending "Update the panel and hard-refresh
+      // the browser tab" came back with "Retry once — … panel_open_workflow is the way
+      // to settle which one you mean" appended to it: the futile retry #709 exists to
+      // suppress, contradicting the sentence directly above it, plus a wasted
+      // workflow_list round trip. And a fence-less session got #1330's "the fence
+      // already names the live canvas" for the state whose own docstring says "a
+      // mismatch may clear by itself, this never does".
+      //
+      // So the arm carries the discriminators the graph arm gets from ordering. Both
+      // are TYPED-or-explicit, never a second reading of the same prose:
+      // `isCapabilityRefusal` is the bridge's own symbol marker, and
+      // `isNoTrustedIdentityRefusal` matches a distinct phrase a mismatch refusal never
+      // contains. Scoped to THIS arm on purpose — `isMutatingGraphCmd` keeps its exact
+      // prior behaviour, so nothing about the graph path moves here.
       if (
         isWorkflowInstanceMismatch(err) &&
-        (isMutatingGraphCmd(cmd) || isFencedActiveWorkflowMutator(cmd))
+        (isMutatingGraphCmd(cmd) ||
+          (isFencedActiveWorkflowMutator(cmd) &&
+            !isCapabilityRefusal(err) &&
+            !isNoTrustedIdentityRefusal(err)))
       ) {
         const name = typeof cmd.cmd === "string" ? cmd.cmd : "panel command";
         const raw = err instanceof Error ? err.message : String(err);
