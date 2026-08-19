@@ -105,6 +105,7 @@ import {
   resolveLiveComfyUIBase,
   resolveLiveServerRoot,
   resolveRootInterpreter,
+  torchVersionsAgree,
 } from "../../services/workspace-env.js";
 
 async function tmpDir(): Promise<string> {
@@ -1255,6 +1256,150 @@ describe("getEnvironment", () => {
     }
   });
 
+  it("untrusts a process-table hit that has no torch while /system_stats reports pytorch (#401)", async () => {
+    // 0.52.1 recurrence: macOS Homebrew base marked trusted (versions agree with
+    // the venv by construction), pip answers, none of torch/vision/audio are
+    // there, while the reachable server's /system_stats reports PyTorch 2.12.1.
+    // Reporting that as "not installed" is the same false capability as Triton.
+    const dir = await tmpDir();
+    const exe = await stageWorkspace(dir);
+    try {
+      mockGetSystemStats.mockResolvedValueOnce({
+        system: {
+          os: "darwin",
+          python_version: "3.12.13",
+          comfyui_version: "0.27.0",
+          pytorch_version: "2.12.1",
+          embedded_python: false,
+          argv: [],
+        },
+        devices: [],
+      });
+      h.mockLiveInterpreter.mockReturnValue({ python: exe, source: "process-table", pid: 88 });
+      setExecFileResponder((_cmd, args) => {
+        if (args.includes("--version") && !args.includes("pip")) {
+          return { stdout: "Python 3.12.13\n" };
+        }
+        if (args.includes("pip")) {
+          return Object.assign(new Error("Command failed: exit 1"), {
+            stdout: "",
+            stderr: "WARNING: Package(s) not found: torch, torchvision, torchaudio, xformers, numpy, transformers, diffusers, comfyui-frontend-package\n",
+          });
+        }
+        return new Error("nope");
+      });
+
+      const env = await getEnvironment();
+      expect(env.running_instance.pytorch_version).toBe("2.12.1");
+      expect(env.local.python_probe_trusted).toBe(false);
+      expect(env.local.packages).toBeUndefined();
+      expect(env.local.python_probe_reason).toMatch(/none of torch/i);
+      expect(env.local.python_probe_reason).toMatch(/2\.12\.1/);
+      expect(env.local.note).toMatch(/#401/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("untrusts a process-table hit whose torch disagrees with /system_stats", async () => {
+    const dir = await tmpDir();
+    const exe = await stageWorkspace(dir);
+    try {
+      mockGetSystemStats.mockResolvedValueOnce({
+        system: {
+          os: "darwin",
+          python_version: "3.12.13",
+          comfyui_version: "0.27.0",
+          pytorch_version: "2.12.1",
+          embedded_python: false,
+          argv: [],
+        },
+        devices: [],
+      });
+      h.mockLiveInterpreter.mockReturnValue({ python: exe, source: "process-table", pid: 89 });
+      setExecFileResponder((_cmd, args) => {
+        if (args.includes("--version") && !args.includes("pip")) {
+          return { stdout: "Python 3.12.13\n" };
+        }
+        if (args.includes("pip")) return { stdout: "Name: torch\nVersion: 2.4.0\n" };
+        return new Error("nope");
+      });
+
+      const env = await getEnvironment();
+      expect(env.local.python_probe_trusted).toBe(false);
+      expect(env.local.packages).toBeUndefined();
+      expect(env.local.python_probe_reason).toMatch(/does not match the running ComfyUI pytorch/i);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("still reports packages when the probed torch matches /system_stats", async () => {
+    const dir = await tmpDir();
+    const exe = await stageWorkspace(dir);
+    try {
+      mockGetSystemStats.mockResolvedValueOnce({
+        system: {
+          os: "darwin",
+          python_version: "3.12.13",
+          comfyui_version: "0.27.0",
+          pytorch_version: "2.12.1+cpu",
+          embedded_python: false,
+          argv: [],
+        },
+        devices: [],
+      });
+      h.mockLiveInterpreter.mockReturnValue({ python: exe, source: "process-table", pid: 90 });
+      setExecFileResponder((_cmd, args) => {
+        if (args.includes("--version") && !args.includes("pip")) {
+          return { stdout: "Python 3.12.13\n" };
+        }
+        if (args.includes("pip")) return { stdout: "Name: torch\nVersion: 2.12.1\n" };
+        return new Error("nope");
+      });
+
+      const env = await getEnvironment();
+      expect(env.local.python_probe_trusted).toBe(true);
+      expect(env.local.packages?.torch).toBe("2.12.1");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not treat a failed pip query as a torch contradiction", async () => {
+    // uv venvs often have no pip. Silence is "we could not tell", not "torch is absent".
+    const dir = await tmpDir();
+    const exe = await stageWorkspace(dir);
+    try {
+      mockGetSystemStats.mockResolvedValueOnce({
+        system: {
+          os: "darwin",
+          python_version: "3.12.13",
+          pytorch_version: "2.12.1",
+          embedded_python: false,
+          argv: [],
+        },
+        devices: [],
+      });
+      h.mockLiveInterpreter.mockReturnValue({ python: exe, source: "process-table", pid: 91 });
+      setExecFileResponder((_cmd, args) => {
+        if (args.includes("--version") && !args.includes("pip")) {
+          return { stdout: "Python 3.12.13\n" };
+        }
+        if (args.includes("pip")) return new Error("No module named pip");
+        return new Error("nope");
+      });
+
+      const env = await getEnvironment();
+      expect(env.local.python_probe_trusted).toBe(true);
+      expect(env.local.packages).toBeUndefined();
+      expect(env.local.note).toMatch(/pip did not answer at all/);
+      expect(env.local.python_probe_reason).not.toMatch(/none of torch/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("never trusts anything for a REMOTE server (#401 / #433 round 3)", async () => {
     const dir = await tmpDir();
     const rootB = join(dir, "B");
@@ -1291,6 +1436,19 @@ describe("getEnvironment", () => {
   });
 });
 
+
+describe("torchVersionsAgree (#401)", () => {
+  it("treats local suffixes as the same build", () => {
+    expect(torchVersionsAgree("2.12.1", "2.12.1+cpu")).toBe(true);
+    expect(torchVersionsAgree("2.12.1+cu130", "2.12.1")).toBe(true);
+  });
+
+  it("rejects a different version, and never agrees on a missing side", () => {
+    expect(torchVersionsAgree("2.11.0", "2.12.1")).toBe(false);
+    expect(torchVersionsAgree("2.12.1", undefined)).toBe(false);
+    expect(torchVersionsAgree(undefined, "2.12.1")).toBe(false);
+  });
+});
 
 describe("liveRootFromArgv (#401 / #433 — robust argv parsing)", () => {
   it("returns the absolute dir of an absolute main.py", () => {

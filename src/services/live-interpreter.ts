@@ -27,7 +27,7 @@
 
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readlinkSync } from "node:fs";
-import { isAbsolute, resolve as pathResolve } from "node:path";
+import { isAbsolute, join, resolve as pathResolve } from "node:path";
 import { platform } from "node:os";
 import { findPidByPort } from "./port-owner.js";
 import { logger } from "./../utils/logger.js";
@@ -242,6 +242,18 @@ export interface ProcessIdentity {
    * that does not depend on WHEN it is read.
    */
   parentPid?: number;
+  /**
+   * The interpreter implied by the process's OWN environment, when that names a
+   * file we can probe. On macOS a venv python is a symlink into the Homebrew
+   * framework; Python.app re-execs and `ps` then reports the BASE interpreter as
+   * argv[0]. The original venv path survives as `__PYVENV_LAUNCHER__` (CPython's
+   * framework hook) or `VIRTUAL_ENV`. Those are observations of the running
+   * process, not layout guesses (#401 recurrence, 0.52.1).
+   *
+   * Only those two keys are read; the rest of the environment is discarded and
+   * never logged.
+   */
+  venvPython?: string;
 }
 
 /**
@@ -307,14 +319,14 @@ export function readProcessIdentity(pid: number): ProcessIdentity | undefined {
       const executablePath = out.match(/^EXE=(.*)$/m)?.[1]?.trim();
       const commandLine = out.match(/^CMD=([\s\S]*)$/m)?.[1]?.trim();
       if (!startedAt && !commandLine) return undefined;
-      return {
+      return withVenvPython(pid, {
         commandLine: commandLine || undefined,
         argv: commandLine ? tokenizeCommandLine(commandLine) : undefined,
         argvFidelity: "exact",
         executablePath: executablePath || undefined,
         startedAt: startedAt || undefined,
         parentPid,
-      };
+      });
     }
     if (platform() === "linux") {
       // argv entries are "\u0000"-separated; rejoin them as a command line.
@@ -345,14 +357,14 @@ export function readProcessIdentity(pid: number): ProcessIdentity | undefined {
         /* not ours to read → undefined, and the caller falls back to argv[0] */
       }
       if (!commandLine && !startedAt) return undefined;
-      return {
+      return withVenvPython(pid, {
         commandLine: commandLine || undefined,
         argv: argv.length > 0 ? argv : undefined,
         argvFidelity: "exact",
         executablePath: executablePath || undefined,
         startedAt,
         parentPid,
-      };
+      });
     }
     const out = execFileSync(
       "ps",
@@ -364,14 +376,20 @@ export function readProcessIdentity(pid: number): ProcessIdentity | undefined {
     const m = out.match(
       /^\s*(\d+)\s+(\w{3}\s+\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+([\s\S]*)$/,
     );
-    if (!m) return { commandLine: out, argv: tokenizeCommandLine(out), argvFidelity: "flattened" };
-    return {
+    if (!m) {
+      return withVenvPython(pid, {
+        commandLine: out,
+        argv: tokenizeCommandLine(out),
+        argvFidelity: "flattened",
+      });
+    }
+    return withVenvPython(pid, {
       parentPid: parsePid(m[1]),
       startedAt: m[2].replace(/\s+/g, " "),
       commandLine: m[3].trim(),
       argv: tokenizeCommandLine(m[3].trim()),
       argvFidelity: "flattened",
-    };
+    });
   } catch {
     return undefined;
   }
@@ -381,6 +399,110 @@ export function readProcessIdentity(pid: number): ProcessIdentity | undefined {
 export function readProcessArgv0(pid: number): string | undefined {
   const cmd = readProcessIdentity(pid)?.commandLine;
   return cmd ? argv0FromCommandLine(cmd) : undefined;
+}
+
+/**
+ * The two process-env keys that name the venv the process is actually importing
+ * from. Everything else in the environment is discarded here — we never want a
+ * capability probe to carry secrets just to recover an interpreter.
+ */
+export interface VenvEnvHints {
+  pyvenvLauncher?: string;
+  virtualEnv?: string;
+}
+
+/** Pull only `__PYVENV_LAUNCHER__` and `VIRTUAL_ENV` out of `KEY=VALUE` entries. */
+export function venvHintsFromEnvEntries(entries: Iterable<string>): VenvEnvHints {
+  const out: VenvEnvHints = {};
+  for (const raw of entries) {
+    if (raw.startsWith("__PYVENV_LAUNCHER__=")) {
+      const v = raw.slice("__PYVENV_LAUNCHER__=".length).trim();
+      if (v) out.pyvenvLauncher = v;
+    } else if (raw.startsWith("VIRTUAL_ENV=")) {
+      const v = raw.slice("VIRTUAL_ENV=".length).trim();
+      if (v) out.virtualEnv = v;
+    }
+    if (out.pyvenvLauncher && out.virtualEnv) break;
+  }
+  return out;
+}
+
+/** Linux `/proc/<pid>/environ` is NUL-separated `KEY=VALUE`. */
+export function venvHintsFromEnvironBuffer(buf: Buffer): VenvEnvHints {
+  return venvHintsFromEnvEntries(buf.toString("utf8").split("\0"));
+}
+
+/**
+ * macOS `kern.procargs2.<pid>`: int32 argc, exec path, argv[argc], then envp.
+ * Padding NULs sit between the exec path and argv, and between argv and envp.
+ * We only need the env keys; argv is already read from `ps`.
+ */
+export function venvHintsFromProcArgs2(buf: Buffer): VenvEnvHints {
+  if (buf.length < 8) return {};
+  const argc = buf.readInt32LE(0);
+  if (argc < 0 || argc > 4096) return {};
+  let i = 4;
+  const nextNul = (from: number): number => {
+    const at = buf.indexOf(0, from);
+    return at < 0 ? buf.length : at;
+  };
+  // Skip the exec path and the padding that follows it.
+  i = nextNul(i) + 1;
+  while (i < buf.length && buf[i] === 0) i++;
+  const strings: string[] = [];
+  while (i < buf.length) {
+    const end = nextNul(i);
+    if (end === i) {
+      i++;
+      continue;
+    }
+    strings.push(buf.toString("utf8", i, end));
+    i = end + 1;
+  }
+  return venvHintsFromEnvEntries(strings.slice(Math.max(0, argc)));
+}
+
+/**
+ * Reconstruct the venv interpreter the PROCESS recorded. `__PYVENV_LAUNCHER__`
+ * is the original argv[0] CPython saved before the macOS framework re-exec;
+ * `VIRTUAL_ENV` is the activate-script / uv equivalent. Either is an observation
+ * of the running process. Layout guesses do not belong here.
+ */
+export function interpreterFromVenvHints(hints: VenvEnvHints): string | undefined {
+  const launcher = hints.pyvenvLauncher;
+  if (launcher && isAbsolute(launcher) && existsSync(launcher)) return pathResolve(launcher);
+  const venv = hints.virtualEnv;
+  if (!venv || !isAbsolute(venv)) return undefined;
+  const candidates = IS_WIN
+    ? [join(venv, "Scripts", "python.exe"), join(venv, "python.exe")]
+    : [join(venv, "bin", "python"), join(venv, "bin", "python3")];
+  for (const c of candidates) {
+    if (existsSync(c)) return pathResolve(c);
+  }
+  return undefined;
+}
+
+function venvPythonFromPid(pid: number): string | undefined {
+  try {
+    if (IS_WIN) return undefined;
+    if (platform() === "linux") {
+      return interpreterFromVenvHints(venvHintsFromEnvironBuffer(readFileSync(`/proc/${pid}/environ`)));
+    }
+    const buf = execFileSync("sysctl", ["-b", `kern.procargs2.${pid}`], {
+      timeout: 8000,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    if (!Buffer.isBuffer(buf) || buf.length === 0) return undefined;
+    return interpreterFromVenvHints(venvHintsFromProcArgs2(buf));
+  } catch {
+    return undefined;
+  }
+}
+
+function withVenvPython(pid: number, identity: ProcessIdentity): ProcessIdentity {
+  const venvPython = venvPythonFromPid(pid);
+  if (venvPython) identity.venvPython = venvPython;
+  return identity;
 }
 
 /**
@@ -593,6 +715,15 @@ export function observeLiveServerProcess(opts: ResolveOptions): LiveServerProces
 
   // Tier 2 — the OS process table, correlated against the server's own argv.
   if (!commandLineMatchesArgv(identity?.commandLine, opts.serverArgv)) return undefined;
+
+  // Prefer the venv the process itself recorded. After a macOS Python.app re-exec,
+  // argv[0] is the Homebrew/framework BASE interpreter — it exists, versions match
+  // the venv by construction, and probing it reports torch/Triton missing while
+  // /system_stats shows they are there (#401 recurrence, 0.52.1).
+  const fromEnv = identity?.venvPython;
+  if (fromEnv && isAbsolute(fromEnv) && existsSync(fromEnv)) {
+    return { python: fromEnv, source: "process-table", pid, image };
+  }
 
   const argv0 = argv0FromCommandLine(identity?.commandLine ?? "");
   // A relative or bare argv[0] ("python", "./python") does not identify a file we

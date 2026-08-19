@@ -21,7 +21,7 @@ import { join } from "node:path";
 import { comfyuiFetch } from "../comfyui/fetch.js";
 import { platform, release, totalmem, cpus } from "node:os";
 import { isForceRemoteFlagSet } from "../config.js";
-import { resolveComfyuiPython, pythonVersionsAgree } from "./workspace-env.js";
+import { resolveComfyuiPython, pythonVersionsAgree, torchVersionsAgree } from "./workspace-env.js";
 import { resolveLiveInterpreter } from "./live-interpreter.js";
 import { parsePyproject } from "./node-authoring.js";
 import { detectInstallMode } from "./self-update.js";
@@ -387,10 +387,16 @@ export function findComfyuiPython(
 export function probeTritonSage(
   pythonExe: string | undefined,
   timeoutMs = 5000,
-): Promise<{ triton: TriState; sageattention: TriState; pythonVersion?: string }> {
+): Promise<{
+  triton: TriState;
+  sageattention: TriState;
+  torch: TriState;
+  torchVersion?: string;
+  pythonVersion?: string;
+}> {
   return new Promise((resolve) => {
     if (!pythonExe) {
-      resolve({ triton: "unknown", sageattention: "unknown" });
+      resolve({ triton: "unknown", sageattention: "unknown", torch: "unknown" });
       return;
     }
     // Print a clear per-package marker so we can tell which imported, even if one
@@ -401,11 +407,16 @@ export function probeTritonSage(
     // Print the FULL `sys.version` banner (single line) — the same string
     // /system_stats reports — so the caller can spot a build/compiler disagreement,
     // not just a major.minor one (#401 review).
+    // torch is the 0.52.1 discriminator: a venv and its Homebrew/uv base share a
+    // python banner, but only the venv has the torch /system_stats reports.
     const code =
       "import importlib.util as u,sys;" +
       "print('python', ' '.join(sys.version.split()));" +
       "print('triton', u.find_spec('triton') is not None);" +
-      "print('sageattention', u.find_spec('sageattention') is not None)";
+      "print('sageattention', u.find_spec('sageattention') is not None);" +
+      "ts=u.find_spec('torch');" +
+      "print('torch', ts is not None);" +
+      "print('torch_version', (ts and getattr(__import__('torch'), '__version__', '')) or '')";
     let done = false;
     const child = execFile(
       pythonExe,
@@ -417,7 +428,7 @@ export function probeTritonSage(
         // Spawn failure (ENOENT) or non-import error with no output → unknown.
         const out = (stdout || "").toString();
         if (!out.trim()) {
-          resolve({ triton: "unknown", sageattention: "unknown" });
+          resolve({ triton: "unknown", sageattention: "unknown", torch: "unknown" });
           return;
         }
         const read = (name: string): TriState => {
@@ -426,12 +437,15 @@ export function probeTritonSage(
           return m[1] === "True" ? "installed" : "not-installed";
         };
         const pyMatch = out.match(/^python\s+(.+)$/m);
+        const torchVer = out.match(/^torch_version\s+(\S+)/m)?.[1];
         // If python ran but errored AFTER printing partial output, still trust
         // whatever lines we got; missing lines stay "unknown".
         void err;
         resolve({
           triton: read("triton"),
           sageattention: read("sageattention"),
+          torch: read("torch"),
+          torchVersion: torchVer || undefined,
           pythonVersion: pyMatch ? pyMatch[1].trim() : undefined,
         });
       },
@@ -439,7 +453,7 @@ export function probeTritonSage(
     child.on?.("error", () => {
       if (done) return;
       done = true;
-      resolve({ triton: "unknown", sageattention: "unknown" });
+      resolve({ triton: "unknown", sageattention: "unknown", torch: "unknown" });
     });
   });
 }
@@ -509,12 +523,31 @@ export function packagesProvenByServerArgv(
  * when it carried no information at all.
  */
 export function contradictedPackage(
-  probe: { triton: TriState; sageattention: TriState } | undefined,
+  probe:
+    | {
+        triton: TriState;
+        sageattention: TriState;
+        torch?: TriState;
+        torchVersion?: string;
+      }
+    | undefined,
   proven: Set<"triton" | "sageattention">,
-): "triton" | "sageattention" | undefined {
+  serverTorch?: string,
+): "triton" | "sageattention" | "torch" | undefined {
   if (!probe) return undefined;
   for (const pkg of proven) {
     if (probe[pkg] === "not-installed") return pkg;
+  }
+  // /system_stats.pytorch_version is what the RUNNING server imported. A probe
+  // that finds no torch — or a different build — is looking at the base
+  // interpreter, not the venv. Python versions agree in that case by
+  // construction, so this is the discriminator the version check cannot be
+  // (#401 recurrence, 0.52.1). An honest "unknown" (we could not ask) is not
+  // a contradiction.
+  const reported = serverTorch?.trim();
+  if (reported) {
+    if (probe.torch === "not-installed") return "torch";
+    if (probe.torchVersion && !torchVersionsAgree(probe.torchVersion, reported)) return "torch";
   }
   return undefined;
 }
@@ -771,11 +804,15 @@ export async function gatherEnvCapabilities(opts: GatherOptions): Promise<EnvCap
   // RAW sys.version banner — caps.python is truncated to major.minor for DISPLAY, so
   // the contradiction check needs the untruncated string (#401 review).
   let statsPythonRaw: string | undefined;
+  // RAW pytorch_version — caps.torch is cleaned for DISPLAY; contradiction needs
+  // the string the server actually reported (#401 recurrence, 0.52.1).
+  let statsTorchRaw: string | undefined;
   if (stats) {
     applyStats(caps, stats);
     statsArgv = stats.system?.argv;
     statsCwd = stats.system?.cwd;
     statsPythonRaw = stats.system?.python_version?.trim() || undefined;
+    statsTorchRaw = stats.system?.pytorch_version?.trim() || undefined;
     statsEmbedded =
       typeof stats.system?.embedded_python === "boolean"
         ? stats.system.embedded_python
@@ -846,7 +883,7 @@ export async function gatherEnvCapabilities(opts: GatherOptions): Promise<EnvCap
   // The genuinely observed positives survive anyway: the argv-proven flag is re-applied
   // immediately below, and the ComfyUI-log markers after it.
   const provenByArgv = packagesProvenByServerArgv(statsArgv);
-  const contradicted = contradictedPackage(ts, provenByArgv);
+  const contradicted = contradictedPackage(ts, provenByArgv, statsTorchRaw);
   if (contradicted) {
     logger.info(
       "Discarding this interpreter's capability results entirely: it contradicts the running ComfyUI's own launch flags",

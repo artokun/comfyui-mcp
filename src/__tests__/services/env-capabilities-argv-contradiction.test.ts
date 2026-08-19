@@ -64,7 +64,7 @@ function statsPayload(argv: string[]): unknown {
  * same python banner the server reports — the venv/base pair the version check cannot
  * tell apart.
  */
-function probeSays(triton: boolean, sage: boolean): void {
+function probeSays(triton: boolean, sage: boolean, torch?: boolean): void {
   execFileMock.mockImplementation(
     (
       _file: string,
@@ -72,11 +72,16 @@ function probeSays(triton: boolean, sage: boolean): void {
       _opts: unknown,
       cb: (e: Error | null, stdout: string, stderr: string) => void,
     ) => {
+      const torchLine =
+        torch === undefined
+          ? ""
+          : `torch ${torch ? "True" : "False"}\ntorch_version ${torch ? "2.4.0" : ""}\n`;
       cb(
         null,
         `python 3.13.12 (main, Feb 12 2026, 00:38:53) [MSC v.1944 64 bit (AMD64)]\n` +
           `triton ${triton ? "True" : "False"}\n` +
-          `sageattention ${sage ? "True" : "False"}\n`,
+          `sageattention ${sage ? "True" : "False"}\n` +
+          torchLine,
         "",
       );
       return { on: () => undefined };
@@ -148,6 +153,26 @@ describe("contradictedPackage (pure)", () => {
     expect(contradictedPackage({ triton: "not-installed", sageattention: "installed" }, proven)).toBeUndefined();
     expect(contradictedPackage({ triton: "installed", sageattention: "unknown" }, proven)).toBeUndefined();
     expect(contradictedPackage(undefined, proven)).toBeUndefined();
+  });
+
+  it("flags a probe that finds no torch while /system_stats reports pytorch", () => {
+    expect(
+      contradictedPackage(
+        { triton: "not-installed", sageattention: "not-installed", torch: "not-installed" },
+        new Set(),
+        "2.12.1",
+      ),
+    ).toBe("torch");
+  });
+
+  it("does not flag an honest unknown torch, even when the server reports pytorch", () => {
+    expect(
+      contradictedPackage(
+        { triton: "not-installed", sageattention: "not-installed", torch: "unknown" },
+        new Set(),
+        "2.12.1",
+      ),
+    ).toBeUndefined();
   });
 });
 
@@ -257,5 +282,43 @@ describe("gatherEnvCapabilities — a contradicted probe cannot state ANY negati
     });
 
     expect(caps.sageattention).toBe("not-installed");
+  });
+
+  it("voids Triton when the probe has no torch but /system_stats reports pytorch (#401)", async () => {
+    // 0.52.1: Homebrew base, versions agree, no --use-sage-attention to contradict
+    // anything, and the ENVIRONMENT banner said Triton is not installed. The
+    // server's own pytorch_version is the observation that discredits the source.
+    comfyuiFetchMock.mockImplementation(async (url: string) => {
+      if (String(url).includes("/system_stats")) {
+        return {
+          ok: true,
+          json: async () => ({
+            system: {
+              os: "darwin",
+              python_version: "3.12.13 (main, Feb 12 2026) [Clang 17.0.0]",
+              comfyui_version: "0.27.0",
+              pytorch_version: "2.12.1",
+              embedded_python: false,
+              argv: ["python", "main.py"],
+            },
+            devices: [{ name: "Apple M4 Max", type: "mps" }],
+          }),
+        };
+      }
+      return { ok: false, json: async () => ({}) };
+    });
+    probeSays(false, false, false);
+
+    const caps = await gatherEnvCapabilities({
+      comfyuiUrl: "http://127.0.0.1:8188",
+      statsTimeoutMs: 50,
+      tritonTimeoutMs: 50,
+    });
+
+    expect(caps.torch).toBe("2.12.1");
+    expect(caps.triton).toBe("unknown");
+    expect(caps.triton).not.toBe("not-installed");
+    expect(caps.sageattention).toBe("unknown");
+    expect(caps.sageattention).not.toBe("not-installed");
   });
 });

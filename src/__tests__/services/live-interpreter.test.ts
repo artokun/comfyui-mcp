@@ -6,11 +6,14 @@ import { join, sep } from "node:path";
 import {
   argv0FromCommandLine,
   commandLineMatchesArgv,
+  interpreterFromVenvHints,
   recordLaunchedInterpreter,
   clearLaunchedInterpreter,
   getLaunchedInterpreterRecord,
   observeLiveServerProcess,
   resolveLiveInterpreter,
+  venvHintsFromEnvironBuffer,
+  venvHintsFromProcArgs2,
 } from "../../services/live-interpreter.js";
 
 /** ComfyUI Desktop's real shape, as measured on the machine that filed #401. */
@@ -427,5 +430,103 @@ describe("observeLiveServerProcess — the OS image survives a relative argv[0] 
         readIdentity: () => ({ commandLine: "python main.py", executablePath: exe }),
       }),
     ).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #401 recurrence 0.52.1 — macOS Homebrew / Python.app re-exec.
+//
+// argv[0] is the BASE interpreter (it exists; versions match the venv by
+// construction). The venv path survives only in the process environment.
+// Probing argv[0] reports torch/Triton missing while /system_stats shows them.
+// ---------------------------------------------------------------------------
+describe("venv env hints recover the interpreter Python.app hid (#401)", () => {
+  it("reads only the two venv keys out of a Linux environ buffer", () => {
+    const buf = Buffer.from(
+      ["PATH=/usr/bin", "VIRTUAL_ENV=/opt/comfy/.venv", "SECRET=do-not-keep", "__PYVENV_LAUNCHER__=/opt/comfy/.venv/bin/python", ""].join(
+        "\0",
+      ),
+    );
+    expect(venvHintsFromEnvironBuffer(buf)).toEqual({
+      pyvenvLauncher: "/opt/comfy/.venv/bin/python",
+      virtualEnv: "/opt/comfy/.venv",
+    });
+  });
+
+  it("parses kern.procargs2 envp after argc/argv padding", () => {
+    const argv = ["/opt/homebrew/Cellar/python@3.12/Python.app/Contents/MacOS/Python", "main.py"];
+    const env = [
+      "HOME=/Users/a",
+      "__PYVENV_LAUNCHER__=/Users/a/ComfyUI/.venv/bin/python",
+      "VIRTUAL_ENV=/Users/a/ComfyUI/.venv",
+    ];
+    const argc = Buffer.alloc(4);
+    argc.writeInt32LE(argv.length);
+    const parts = [
+      argc,
+      Buffer.from("/opt/homebrew/bin/python3\0"),
+      Buffer.from("\0"),
+      ...argv.map((a) => Buffer.from(a + "\0")),
+      Buffer.from("\0"),
+      ...env.map((e) => Buffer.from(e + "\0")),
+      Buffer.from("\0"),
+    ];
+    expect(venvHintsFromProcArgs2(Buffer.concat(parts))).toEqual({
+      pyvenvLauncher: "/Users/a/ComfyUI/.venv/bin/python",
+      virtualEnv: "/Users/a/ComfyUI/.venv",
+    });
+  });
+
+  it("prefers an existing __PYVENV_LAUNCHER__ over VIRTUAL_ENV", async () => {
+    const launcher = await makeExe("venv-python");
+    const venvRoot = join(dir, "other-venv");
+    expect(
+      interpreterFromVenvHints({
+        pyvenvLauncher: launcher,
+        virtualEnv: venvRoot,
+      }),
+    ).toBe(launcher);
+  });
+
+  it("reconstructs python from VIRTUAL_ENV when the launcher path is gone", async () => {
+    const bin = join(dir, ".venv", process.platform === "win32" ? "Scripts" : "bin");
+    await mkdir(bin, { recursive: true });
+    const exe = join(bin, process.platform === "win32" ? "python.exe" : "python");
+    await writeFile(exe, "", "utf-8");
+    expect(interpreterFromVenvHints({ virtualEnv: join(dir, ".venv") })).toBe(exe);
+  });
+
+  it("probes the venv python even when argv[0] is a real Homebrew base", async () => {
+    const homebrew = await makeExe("homebrew-python");
+    const venvPy = await makeExe("venv-python");
+    const res = resolveLiveInterpreter({
+      port: 8188,
+      remote: false,
+      serverArgv: ["main.py"],
+      findPid: () => 77,
+      readIdentity: () => ({
+        commandLine: `${homebrew} main.py`,
+        venvPython: venvPy,
+        startedAt: "t1",
+      }),
+    });
+    expect(res).toEqual({ python: venvPy, source: "process-table", pid: 77 });
+    expect(res?.python).not.toBe(homebrew);
+  });
+
+  it("falls back to argv[0] when the venv hint names nothing on disk", async () => {
+    const homebrew = await makeExe("homebrew-python");
+    const res = resolveLiveInterpreter({
+      port: 8188,
+      remote: false,
+      serverArgv: ["main.py"],
+      findPid: () => 77,
+      readIdentity: () => ({
+        commandLine: `${homebrew} main.py`,
+        venvPython: join(dir, "gone-venv-python"),
+        startedAt: "t1",
+      }),
+    });
+    expect(res).toEqual({ python: homebrew, source: "process-table", pid: 77 });
   });
 });

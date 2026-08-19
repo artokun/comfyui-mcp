@@ -1249,6 +1249,33 @@ export function pythonVersionsAgree(a: string | undefined, b: string | undefined
   return true;
 }
 
+/**
+ * Do two torch version strings describe the same install?
+ *
+ * `/system_stats.pytorch_version` (e.g. "2.12.1" or "2.11.0.dev20260123+cu130")
+ * is what the RUNNING server imported. A pip/import probe reports
+ * `torch.__version__` from whichever interpreter we asked. Compare the version
+ * token and ignore local suffixes (`+cu130`, `+cpu`): those are the same build
+ * with a different local tag, not a different install.
+ *
+ * CONTRADICTION check only — agreement does not prove identity. A Homebrew
+ * base and its venv share a python banner, but only the venv has torch
+ * (#401 recurrence, 0.52.1).
+ */
+export function torchVersionsAgree(a: string | undefined, b: string | undefined): boolean {
+  if (!a || !b) return false;
+  const norm = (v: string): string =>
+    v
+      .replace(/^torch\s+/i, "")
+      .split("+")[0]!
+      .split(/\s/)[0]!
+      .trim()
+      .toLowerCase();
+  const na = norm(a);
+  const nb = norm(b);
+  return na.length > 0 && na === nb;
+}
+
 /** A bundle root may contain its actual server in `ComfyUI/`; do not confuse a
  * nested independent checkout with that bundle layout. */
 function targetsLiveInstall(serverRoot: string, requestedRoot: string | undefined): boolean {
@@ -1702,7 +1729,43 @@ export async function getEnvironment(): Promise<EnvironmentInfo> {
     if (trusted && probeExe) {
       const probed = await probePipPackages(probeExe, KEY_PACKAGES);
       pkgs = probed.packages;
-      if (Object.keys(pkgs).length > 0) {
+      // A venv and its base interpreter report the SAME sys.version, so the
+      // version check above cannot tell them apart. /system_stats.pytorch_version
+      // can: the running server imported that torch. A probe that finds none (or a
+      // different build) is looking at the wrong environment — typically the
+      // Homebrew/uv BASE python after the process table lost the venv context
+      // (#401 recurrence, 0.52.1). Absence only counts when pip actually answered.
+      const serverTorch = running.pytorch_version?.trim();
+      const torchContradiction =
+        serverTorch &&
+        (probed.ran && !pkgs.torch
+          ? "absent"
+          : pkgs.torch && !torchVersionsAgree(pkgs.torch, serverTorch)
+            ? "version"
+            : undefined);
+      if (torchContradiction) {
+        trusted = false;
+        const observedAs = groundTruth?.source ?? "process-table";
+        reason =
+          torchContradiction === "absent"
+            ? `the observed interpreter (${observedAs}) has none of torch while ` +
+              `the running ComfyUI reports pytorch ${serverTorch} — this is the base ` +
+              `interpreter, not the venv the server imports from. Refusing to attribute ` +
+              `its packages to the server`
+            : `the observed interpreter (${observedAs}) reports torch ${pkgs.torch}, ` +
+              `which does not match the running ComfyUI pytorch ${serverTorch} — ` +
+              `refusing to attribute its packages to the server`;
+        local.python_probe_trusted = false;
+        local.python_probe_reason = reason;
+        local.note = [
+          local.note,
+          `Package versions omitted: ${reason}, so reporting them would be a false ` +
+            `capability report (#401). Start ComfyUI through restart_comfyui (action:"start"), or run it ` +
+            `locally where this process can read its command line, for an accurate report.`,
+        ]
+          .filter(Boolean)
+          .join(" ");
+      } else if (Object.keys(pkgs).length > 0) {
         local.packages = pkgs;
       } else {
         // An absent `packages` field otherwise reads identically to the deliberate
