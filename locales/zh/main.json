@@ -164,7 +164,8 @@
       "minimax": "后台智能体没有响应 —— MiniMax 无法启动。请设置在 platform.minimax.io 获取的 MINIMAX_API_KEY ，然后依次“断开连接”→“连接”重试。",
       "moonshot": "后台智能体没有响应 —— Moonshot（Kimi K3）无法启动。请设置在 platform.kimi.ai 获取的 MOONSHOT_API_KEY ，然后依次“断开连接”→“连接”重试。",
       "ollama": "后台智能体没有响应 —— 连不上 Ollama 。请用 `ollama serve` 启动，并拉取我们的微调模型（`ollama pull artokun/gemma4-comfyui-mcp:e4b` —— 基于 comfyui-mcp 工具套件训练的 gemma4，竞技场里表现最好的本地模型；显存约 8 GB 可用 `:12b`），然后依次“断开连接”→“连接”重试。",
-      "pi": "后台智能体没有响应 —— pi CLI 无法运行 `pi --list-models` 。请从 https://pi.dev 安装（`curl -fsSL https://pi.dev/install.sh | sh`），配置一个服务商（设置服务商 API 密钥，或运行一次 `pi` 再执行 `/login`），然后依次“断开连接”→“连接”重试。"
+      "pi": "后台智能体没有响应 —— pi CLI 无法运行 `pi --list-models` 。请从 https://pi.dev 安装（`curl -fsSL https://pi.dev/install.sh | sh`），配置一个服务商（设置服务商 API 密钥，或运行一次 `pi` 再执行 `/login`），然后依次“断开连接”→“连接”重试。",
+      "qwen": "后台智能体没有响应 —— Qwen Code CLI 无法启动。请确认已安装 Qwen Code（npm i -g @qwen-code/qwen-code）并已登录（运行一次 `qwen` 并完成 /auth，或设置 DASHSCOPE_API_KEY），然后依次“断开连接”→“连接”重试。"
     },
     "llamacpp_no_jinja": "你的 llama-server 没有带 `--jinja` 运行，因此工具调用被禁用 —— 智能体的每个动作都会失败。请带上工具支持重新启动：`llama-server -m <model>.gguf --jinja -c 16384` （较新的版本默认启用 jinja，旧版本需要显式加这个参数），然后依次“断开连接”→“连接”。",
     "llamacpp_small_context": "你的 llama-server 上下文为 {tokens} 个 token（启动参数 -c）。智能体的工具负载需要不少于 16384，低于这个值时较长的对话会被悄悄截断。建议用 `-c 16384` 或更高重新启动。",

@@ -164,7 +164,8 @@
       "minimax": "背景代理程式沒有回應 —— MiniMax 無法啟動。請設定在 platform.minimax.io 取得的 MINIMAX_API_KEY ，然後依序「中斷連線」→「連線」重試。",
       "moonshot": "背景代理程式沒有回應 —— Moonshot（Kimi K3）無法啟動。請設定在 platform.kimi.ai 取得的 MOONSHOT_API_KEY ，然後依序「中斷連線」→「連線」重試。",
       "ollama": "背景代理程式沒有回應 —— 連不上 Ollama 。請用 `ollama serve` 啟動，並拉取我們的微調模型（`ollama pull artokun/gemma4-comfyui-mcp:e4b` —— 以 comfyui-mcp 工具套件訓練的 gemma4，競技場中表現最好的本機模型；顯示記憶體約 8 GB 可用 `:12b`），然後依序「中斷連線」→「連線」重試。",
-      "pi": "背景代理程式沒有回應 —— pi CLI 無法執行 `pi --list-models` 。請從 https://pi.dev 安裝（`curl -fsSL https://pi.dev/install.sh | sh`），設定一個供應商（設定供應商 API 金鑰，或執行一次 `pi` 再執行 `/login`），然後依序「中斷連線」→「連線」重試。"
+      "pi": "背景代理程式沒有回應 —— pi CLI 無法執行 `pi --list-models` 。請從 https://pi.dev 安裝（`curl -fsSL https://pi.dev/install.sh | sh`），設定一個供應商（設定供應商 API 金鑰，或執行一次 `pi` 再執行 `/login`），然後依序「中斷連線」→「連線」重試。",
+      "qwen": "背景代理程式沒有回應 —— Qwen Code CLI 無法啟動。請確認已安裝 Qwen Code（npm i -g @qwen-code/qwen-code）並已登入（執行一次 `qwen` 並完成 /auth，或設定 DASHSCOPE_API_KEY），然後依序「中斷連線」→「連線」重試。"
     },
     "llamacpp_no_jinja": "你的 llama-server 沒有帶 `--jinja` 執行，因此工具呼叫被停用 —— 代理程式的每個動作都會失敗。請帶上工具支援重新啟動：`llama-server -m <model>.gguf --jinja -c 16384` （較新的版本預設啟用 jinja，較舊的版本需要明確加上這個旗標），然後依序「中斷連線」→「連線」。",
     "llamacpp_small_context": "你的 llama-server 上下文為 {tokens} 個 token（啟動旗標 -c）。代理程式的工具內容需要至少 16384，低於這個值時較長的回合會被無聲截斷。建議用 `-c 16384` 或更高重新啟動。",

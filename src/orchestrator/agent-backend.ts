@@ -18,6 +18,7 @@ export type BackendId =
   | "antigravity"
   | "pi"
   | "grok"
+  | "qwen"
   | "glm"
   | "kimi"
   | "moonshot"
@@ -425,6 +426,24 @@ export const GROK_CAPABILITIES: AgentCapabilities = {
   // arrive. Shipping that is the overclaim #790 exists to remove, so this is false
   // and the attachment is refused centrally, naming a path that works.
   audio: false,
+  turnMarkers: true, // stampTurn() wraps each per-turn stream
+};
+
+/** Capability descriptor for the Qwen Code CLI ACP backend (`qwen --acp`,
+ *  issue #1417). Same ACP posture as Gemini: persistent session, streaming
+ *  deltas, interrupt via session/cancel, config-declared MCP servers, static
+ *  model catalog pinned at spawn. */
+export const QWEN_CAPABILITIES: AgentCapabilities = {
+  persistentChannel: true, // session/new + repeated session/prompt
+  streamingDeltas: true, // session/update agent_message_chunk / agent_thought_chunk
+  interruptMidTurn: true, // session/cancel
+  forkAtAnchor: false, // session/load is whole-session only (no anchor fork)
+  inProcessMcp: false, // ACP session/new declares config MCP servers only
+  modelEnumeration: true, // static catalog — ACP exposes no catalog
+  slashCommands: false,
+  hooks: false,
+  vision: true, // delivered as inline base64 image ContentBlocks (when the agent advertises image input)
+  audio: false, // same overclaim rationale as GEMINI_CAPABILITIES.audio (#790)
   turnMarkers: true, // stampTurn() wraps each per-turn stream
 };
 

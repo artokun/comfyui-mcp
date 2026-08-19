@@ -165,6 +165,7 @@ import { GeminiBackend, GEMINI_DEFAULT_MODEL } from "./gemini-backend.js";
 import { AntigravityBackend } from "./antigravity-backend.js";
 import { PiBackend } from "./pi-backend.js";
 import { GrokBackend, GROK_DEFAULT_MODEL } from "./grok-backend.js";
+import { QwenBackend, QWEN_DEFAULT_MODEL } from "./qwen-backend.js";
 import { OllamaBackend, OLLAMA_SYSTEM_PROMPT, type OllamaBackendDeps } from "./ollama-backend.js";
 import { ChatGptOAuthBackend, CHATGPT_DEFAULT_MODEL } from "./chatgpt-oauth-backend.js";
 import { KimiBackend } from "./kimi-backend.js";
@@ -1603,6 +1604,10 @@ export async function runPanelOrchestrator(): Promise<void> {
   const piModel = process.env.COMFYUI_MCP_PI_MODEL;
   const piProvider = process.env.COMFYUI_MCP_PI_PROVIDER;
   const grokModel = process.env.COMFYUI_MCP_GROK_MODEL ?? GROK_DEFAULT_MODEL;
+  // Qwen Code (issue #1417): same spawn-pinned posture as Gemini — the panel
+  // model is a Claude id, so the Qwen model comes from COMFYUI_MCP_QWEN_MODEL
+  // (default qwen3-coder-plus), applied at spawn via the CLI `--model` flag.
+  const qwenModel = process.env.COMFYUI_MCP_QWEN_MODEL ?? QWEN_DEFAULT_MODEL;
   // Ollama (local LLMs, issue #97): the model is a local tag applied PER
   // REQUEST — switching live is free. Default = OUR FINE-TUNE,
   // artokun/gemma4-comfyui-mcp:e4b — gemma4 QLoRA-trained on 1055
@@ -1754,6 +1759,7 @@ export async function runPanelOrchestrator(): Promise<void> {
     "antigravity",
     "pi",
     "grok",
+    "qwen",
     // Simple api-key providers (glm/kimi/moonshot) come from the registry.
     ...OPENAI_KEY_PROVIDER_IDS,
     "ollama",
@@ -2286,6 +2292,15 @@ export async function runPanelOrchestrator(): Promise<void> {
         mcpServers: makeHttpBackendMcpServers(key),
       });
     }
+    if (backend === "qwen") {
+      return new QwenBackend({
+        cwd: comfyuiPath ?? process.cwd(),
+        model: qwenModel,
+        systemAppend: sysAppend,
+        comfyuiUrl,
+        mcpServers: makeHttpBackendMcpServers(key),
+      });
+    }
     if (backend === "ollama") {
       return new OllamaBackend({
         cwd: comfyuiPath ?? process.cwd(),
@@ -2385,7 +2400,7 @@ export async function runPanelOrchestrator(): Promise<void> {
   };
   logger.info(
     `[panel-orchestrator] single-port multi-provider: default backend=${defaultBackend}; ` +
-      `codex/gemini/grok panel_* live-graph tools via loopback HTTP MCP${panelMcpHttp ? ` on :${panelMcpHttp.port}` : " UNAVAILABLE"} + headless comfyui MCP`,
+      `codex/gemini/grok/qwen panel_* live-graph tools via loopback HTTP MCP${panelMcpHttp ? ` on :${panelMcpHttp.port}` : " UNAVAILABLE"} + headless comfyui MCP`,
   );
   // Readiness/model probing routes through the SELECTED backend PER TAB — a
   // codex/gemini tab's "ready" must NOT depend on Claude SDK/login health. Claude
@@ -2422,7 +2437,9 @@ export async function runPanelOrchestrator(): Promise<void> {
               })
           : backend === "grok"
               ? new GrokBackend({ cwd: comfyuiPath ?? process.cwd(), model: grokModel })
-              : backend === "openrouter"
+              : backend === "qwen"
+                ? new QwenBackend({ cwd: comfyuiPath ?? process.cwd(), model: qwenModel })
+                : backend === "openrouter"
                 ? new OllamaBackend({ cwd: comfyuiPath ?? process.cwd(), model: openrouterModel, ...openrouterDeps() })
                 : backend === "lmstudio"
                   ? new OllamaBackend({ cwd: comfyuiPath ?? process.cwd(), model: lmstudioModel, ...lmstudioDeps() })
@@ -3515,6 +3532,7 @@ export async function runPanelOrchestrator(): Promise<void> {
     if (backend === "antigravity") return antigravityModel;
     if (backend === "pi") return piModel;
     if (backend === "grok") return grokModel;
+    if (backend === "qwen") return qwenModel;
     if (backend === "ollama") return ollamaModel;
     if (backend === "openrouter") return openrouterModel;
     if (backend === "lmstudio") return lmstudioModel || undefined;
@@ -4174,6 +4192,7 @@ export async function runPanelOrchestrator(): Promise<void> {
       const isAg = backend === "antigravity";
       const isPi = backend === "pi";
       const isGk = backend === "grok";
+      const isQw = backend === "qwen";
       // glm/kimi/moonshot share one registry-driven ack (label + ready + degraded).
       const reg = openAiKeyProvider(backend);
       const isOl = backend === "ollama";
@@ -4274,6 +4293,8 @@ export async function runPanelOrchestrator(): Promise<void> {
                   ? (piModel ?? (models[0] as { value?: string }).value ?? "Pi")
                 : isGk
                   ? (grokModel ?? (models[0] as { value?: string }).value ?? "Grok")
+                : isQw
+                  ? (qwenModel ?? (models[0] as { value?: string }).value ?? "Qwen Code")
                 : isOl
                   ? (ollamaModel ?? (models[0] as { value?: string }).value ?? "Ollama")
                   : isLs
@@ -4378,6 +4399,8 @@ export async function runPanelOrchestrator(): Promise<void> {
                   ? dtr("pi", "The background agent isn't responding — the pi CLI couldn't run `pi --list-models`. Install it from https://pi.dev (`curl -fsSL https://pi.dev/install.sh | sh`), configure a provider (set a provider API key or run `pi` once and `/login`), then Disconnect → Connect to retry.")
                 : isGk
                   ? dtr("grok", "The background agent isn't responding — the Grok CLI couldn't start. Make sure Grok is installed and signed in (run `grok` once and complete the xAI sign-in), then Disconnect → Connect to retry.")
+                : isQw
+                  ? dtr("qwen", "The background agent isn't responding — the Qwen Code CLI couldn't start. Make sure Qwen Code is installed (npm i -g @qwen-code/qwen-code) and signed in (run `qwen` once and complete /auth, or set DASHSCOPE_API_KEY), then Disconnect → Connect to retry.")
                 : isOl
                   ? dtr("ollama", "The background agent isn't responding — Ollama isn't reachable. Start it with `ollama serve` and pull our fine-tuned model (`ollama pull artokun/gemma4-comfyui-mcp:e4b` — gemma4 trained on the comfyui-mcp tool suite — arena-best local model; `:12b` for ~8 GB VRAM), then Disconnect → Connect to retry.")
                   : isLs
@@ -5007,7 +5030,7 @@ export async function runPanelOrchestrator(): Promise<void> {
       // cannot hook in-process — a promise we can't enforce must say so out
       // loud, exactly like the old-orchestrator ack warning. API/local lanes
       // (ollama/glm/kimi/…) carry only our tool surface, so they get no scare.
-      const CLI_NATIVE_TOOL_BACKENDS = new Set(["codex", "gemini", "grok", "antigravity", "pi", "copilot"]);
+      const CLI_NATIVE_TOOL_BACKENDS = new Set(["codex", "gemini", "grok", "qwen", "antigravity", "pi", "copilot"]);
       const tabBackend = backendForTab(tabId);
       if (changed && nextBlind && CLI_NATIVE_TOOL_BACKENDS.has(tabBackend)) {
         bridge.push(

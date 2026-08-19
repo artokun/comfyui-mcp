@@ -85,6 +85,73 @@ describe("backendReadiness", () => {
     expect(r.ready).toBe(true);
   });
 
+  it("qwen: not ready with neither CLI nor credential (#1417)", () => {
+    const real = { d: process.env.DASHSCOPE_API_KEY, b: process.env.BAILIAN_CODING_PLAN_API_KEY };
+    delete process.env.DASHSCOPE_API_KEY;
+    delete process.env.BAILIAN_CODING_PLAN_API_KEY;
+    try {
+      const r = backendReadiness("qwen", { home: tmp });
+      expect(r.cli).toBe(false);
+      expect(r.auth).toBe(false);
+      expect(r.ready).toBe(false);
+    } finally {
+      if (real.d !== undefined) process.env.DASHSCOPE_API_KEY = real.d;
+      if (real.b !== undefined) process.env.BAILIAN_CODING_PLAN_API_KEY = real.b;
+    }
+  });
+
+  it("qwen: CLI on PATH but no credential of any kind → cli true, not ready", () => {
+    const real = { d: process.env.DASHSCOPE_API_KEY, b: process.env.BAILIAN_CODING_PLAN_API_KEY };
+    delete process.env.DASHSCOPE_API_KEY;
+    delete process.env.BAILIAN_CODING_PLAN_API_KEY;
+    try {
+      putOnPath(process.platform === "win32" ? "qwen.cmd" : "qwen");
+      const r = backendReadiness("qwen", { home: tmp });
+      expect(r.cli).toBe(true);
+      expect(r.auth).toBe(false);
+      expect(r.ready).toBe(false);
+    } finally {
+      if (real.d !== undefined) process.env.DASHSCOPE_API_KEY = real.d;
+      if (real.b !== undefined) process.env.BAILIAN_CODING_PLAN_API_KEY = real.b;
+    }
+  });
+
+  it("qwen: CLI on PATH AND DASHSCOPE_API_KEY in env → ready", () => {
+    const real = process.env.DASHSCOPE_API_KEY;
+    process.env.DASHSCOPE_API_KEY = "sk-test";
+    try {
+      putOnPath(process.platform === "win32" ? "qwen.cmd" : "qwen");
+      const r = backendReadiness("qwen", { home: tmp });
+      expect(r.cli).toBe(true);
+      expect(r.auth).toBe(true);
+      expect(r.ready).toBe(true);
+    } finally {
+      if (real === undefined) delete process.env.DASHSCOPE_API_KEY;
+      else process.env.DASHSCOPE_API_KEY = real;
+    }
+  });
+
+  it("qwen: CLI on PATH AND ~/.qwen/settings.json selects an auth type → ready (env-independent signal)", () => {
+    const real = { d: process.env.DASHSCOPE_API_KEY, b: process.env.BAILIAN_CODING_PLAN_API_KEY };
+    delete process.env.DASHSCOPE_API_KEY;
+    delete process.env.BAILIAN_CODING_PLAN_API_KEY;
+    try {
+      putOnPath(process.platform === "win32" ? "qwen.cmd" : "qwen");
+      mkdirSync(join(tmp, ".qwen"), { recursive: true });
+      writeFileSync(
+        join(tmp, ".qwen", "settings.json"),
+        JSON.stringify({ security: { auth: { selectedType: "openai" } } }),
+      );
+      const r = backendReadiness("qwen", { home: tmp });
+      expect(r.cli).toBe(true);
+      expect(r.auth).toBe(true);
+      expect(r.ready).toBe(true);
+    } finally {
+      if (real.d !== undefined) process.env.DASHSCOPE_API_KEY = real.d;
+      if (real.b !== undefined) process.env.BAILIAN_CODING_PLAN_API_KEY = real.b;
+    }
+  });
+
   it("gemini: honors GEMINI_CLI_HOME for the oauth creds path", () => {
     putOnPath(process.platform === "win32" ? "gemini.cmd" : "gemini");
     const gh = join(tmp, "geminihome");

@@ -60,6 +60,7 @@ const CLI_NAMES: Record<string, string[]> = {
   codex: ["codex", "codex.cmd", "codex.exe"],
   gemini: ["gemini", "gemini.cmd", "gemini.exe"],
   grok: ["grok", "grok.cmd", "grok.exe"],
+  qwen: ["qwen", "qwen.cmd", "qwen.exe"],
   pi: ["pi", "pi.exe"], // no .cmd — Node can't shell-lessly spawn it (see resolvePiBin)
   ollama: ["ollama", "ollama.exe"],
   lmstudio: ["lms", "lms.exe"],
@@ -131,6 +132,27 @@ function geminiSettingsUsesApiKey(geminiHome: string): boolean {
       security?: { auth?: { selectedType?: unknown } };
     };
     return parsed?.security?.auth?.selectedType === "gemini-api-key";
+  } catch {
+    return false;
+  }
+}
+
+/** True if <home>/.qwen/settings.json selects an auth type
+ *  (security.auth.selectedType is a non-empty string) — the env-independent
+ *  "configured" signal for Qwen Code, mirroring geminiSettingsUsesApiKey. `/auth`
+ *  writes it and it persists across processes, unlike DASHSCOPE_API_KEY which
+ *  the orchestrator only inherits if set before launch. A stale or keyless
+ *  selection still surfaces via the connect ack's model probe (degraded), same
+ *  as every other provider. Never throws — a missing/corrupt file just means
+ *  "no signal". */
+function qwenSettingsConfigured(home: string): boolean {
+  try {
+    const raw = readFileSync(join(home, ".qwen", "settings.json"), "utf8");
+    const parsed = JSON.parse(raw) as {
+      security?: { auth?: { selectedType?: unknown } };
+    };
+    const t = parsed?.security?.auth?.selectedType;
+    return typeof t === "string" && t.trim().length > 0;
   } catch {
     return false;
   }
@@ -386,6 +408,32 @@ export function backendReadiness(
       fileExists(home, ".grok", "auth.json") ||
       hasValidPanelOAuth("grok", panelOAuthRecords(opts), nowMs);
     return { backend: "grok", cli, auth, ready: cli && auth };
+  }
+  if (b === "qwen") {
+    // Qwen Code CLI (`qwen --acp`, issue #1417). `.cmd` IS probed — unlike pi,
+    // we spawn through the shell on Windows (see qwen-backend resolveSpawn), so
+    // a `qwen.cmd` shim is genuinely runnable. Auth (the CLI owns it) reads as
+    // present when ANY of: a Qwen-side key is in the orchestrator's env
+    // (DASHSCOPE_API_KEY / BAILIAN_CODING_PLAN_API_KEY / OPENAI_API_KEY), cached
+    // OAuth creds exist at <home>/.qwen/oauth_creds.json (the free tier ended
+    // 2026-04-15, but a Coding Plan key configured via /auth lands in
+    // settings.json — covered by the next signal), or ~/.qwen/settings.json
+    // selects an auth type (the env-independent "configured" signal, mirroring
+    // the gemini branch's settings check — this also covers the generic
+    // OPENAI_API_KEY + selectedType:"openai" setup, which a bare env probe
+    // can't distinguish from an unrelated OPENAI_API_KEY the user set for
+    // something else). A stale/bad credential still surfaces via the connect
+    // ack's model probe → degraded, same as every other provider.
+    const cli = onPath(CLI_NAMES.qwen);
+    const envKey = !!(
+      process.env.DASHSCOPE_API_KEY?.trim() ||
+      process.env.BAILIAN_CODING_PLAN_API_KEY?.trim()
+    );
+    const auth =
+      envKey ||
+      fileExists(home, ".qwen", "oauth_creds.json") ||
+      qwenSettingsConfigured(home);
+    return { backend: "qwen", cli, auth, ready: cli && auth };
   }
   if (b === "copilot") {
     // No external CLI/native-file concept for Copilot — the in-panel device-

@@ -164,7 +164,8 @@
       "minimax": "백그라운드 에이전트가 응답하지 않습니다 — MiniMax를 시작할 수 없습니다. platform.minimax.io 에서 발급한 MINIMAX_API_KEY 를 설정한 뒤, 연결 해제 → 연결로 다시 시도하세요.",
       "moonshot": "백그라운드 에이전트가 응답하지 않습니다 — Moonshot(Kimi K3)을 시작할 수 없습니다. platform.kimi.ai 에서 발급한 MOONSHOT_API_KEY 를 설정한 뒤, 연결 해제 → 연결로 다시 시도하세요.",
       "ollama": "백그라운드 에이전트가 응답하지 않습니다 — Ollama에 연결할 수 없습니다. `ollama serve` 로 실행하고 저희 파인튜닝 모델을 받으세요 (`ollama pull artokun/gemma4-comfyui-mcp:e4b` — comfyui-mcp 도구 모음으로 학습한 gemma4이며 아레나 기준 최고의 로컬 모델입니다. VRAM 8GB 정도라면 `:12b`). 그런 다음 연결 해제 → 연결로 다시 시도하세요.",
-      "pi": "백그라운드 에이전트가 응답하지 않습니다 — pi CLI가 `pi --list-models` 를 실행하지 못했습니다. https://pi.dev 에서 설치하고 (`curl -fsSL https://pi.dev/install.sh | sh`), 제공자를 설정한 뒤 (제공자 API 키를 설정하거나 `pi` 를 한 번 실행해 `/login`), 연결 해제 → 연결로 다시 시도하세요."
+      "pi": "백그라운드 에이전트가 응답하지 않습니다 — pi CLI가 `pi --list-models` 를 실행하지 못했습니다. https://pi.dev 에서 설치하고 (`curl -fsSL https://pi.dev/install.sh | sh`), 제공자를 설정한 뒤 (제공자 API 키를 설정하거나 `pi` 를 한 번 실행해 `/login`), 연결 해제 → 연결로 다시 시도하세요.",
+      "qwen": "백그라운드 에이전트가 응답하지 않습니다 — Qwen Code CLI를 시작하지 못했습니다. Qwen Code가 설치되어 있고 (npm i -g @qwen-code/qwen-code) 로그인되어 있는지 확인한 뒤 (`qwen` 을 한 번 실행해 /auth 를 완료하거나 DASHSCOPE_API_KEY 를 설정), 연결 해제 → 연결로 다시 시도하세요."
     },
     "llamacpp_no_jinja": "llama-server 가 `--jinja` 없이 실행 중이라 도구 호출이 비활성화되어 있습니다 — 모든 에이전트 동작이 실패합니다. 도구 지원을 켜서 다시 시작하세요: `llama-server -m <model>.gguf --jinja -c 16384` (최신 빌드는 jinja가 기본이며, 예전 빌드는 이 플래그가 필요합니다). 그런 다음 연결 해제 → 연결하세요.",
     "llamacpp_small_context": "llama-server 컨텍스트가 {tokens} 토큰입니다 (실행 플래그 -c). 에이전트의 도구 페이로드에는 16384 이상이 필요하며, 그보다 작으면 긴 턴이 조용히 잘립니다. `-c 16384` 이상으로 다시 시작하는 것을 고려하세요.",

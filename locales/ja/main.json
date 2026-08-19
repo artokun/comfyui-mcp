@@ -164,7 +164,8 @@
       "minimax": "バックグラウンドエージェントが応答しません — MiniMax を起動できませんでした。platform.minimax.io で取得した MINIMAX_API_KEY を設定してから、切断 → 接続でやり直してください。",
       "moonshot": "バックグラウンドエージェントが応答しません — Moonshot（Kimi K3）を起動できませんでした。platform.kimi.ai で取得した MOONSHOT_API_KEY を設定してから、切断 → 接続でやり直してください。",
       "ollama": "バックグラウンドエージェントが応答しません — Ollama に接続できません。`ollama serve` で起動し、私たちのファインチューンモデルを取得してください（`ollama pull artokun/gemma4-comfyui-mcp:e4b` — comfyui-mcp のツール群で学習した gemma4 で、アリーナ最高のローカルモデルです。VRAM 8 GB 程度なら `:12b`）。そのあと切断 → 接続でやり直してください。",
-      "pi": "バックグラウンドエージェントが応答しません — pi CLI が `pi --list-models` を実行できませんでした。https://pi.dev からインストールし（`curl -fsSL https://pi.dev/install.sh | sh`）、プロバイダーを設定してから（プロバイダーの API キーを設定するか、`pi` を一度実行して `/login`）、切断 → 接続でやり直してください。"
+      "pi": "バックグラウンドエージェントが応答しません — pi CLI が `pi --list-models` を実行できませんでした。https://pi.dev からインストールし（`curl -fsSL https://pi.dev/install.sh | sh`）、プロバイダーを設定してから（プロバイダーの API キーを設定するか、`pi` を一度実行して `/login`）、切断 → 接続でやり直してください。",
+      "qwen": "バックグラウンドエージェントが応答しません — Qwen Code CLI を起動できませんでした。Qwen Code がインストール済みで（npm i -g @qwen-code/qwen-code）、サインイン済み（`qwen` を一度実行して /auth を完了するか、DASHSCOPE_API_KEY を設定）であることを確認してから、切断 → 接続でやり直してください。"
     },
     "llamacpp_no_jinja": "あなたの llama-server は `--jinja` なしで動いているため、ツール呼び出しが無効です — エージェントの操作はすべて失敗します。ツール対応を有効にして起動し直してください: `llama-server -m <model>.gguf --jinja -c 16384` （最近のビルドは既定で jinja が有効ですが、古いビルドはこのフラグが必要です）。そのあと切断 → 接続してください。",
     "llamacpp_small_context": "あなたの llama-server のコンテキストは {tokens} トークンです（起動フラグ -c）。エージェントのツールのペイロードには 16384 以上が必要で、それより小さいと長いターンが黙って切り詰められます。`-c 16384` 以上で起動し直すことを検討してください。",
