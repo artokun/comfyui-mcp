@@ -87,6 +87,8 @@ panel_training_set_field
 panel_training_set_target
 panel_ui_render
 panel_ui_update
+panel_unexpose_subgraph_input
+panel_unexpose_subgraph_output
 panel_unpack_subgraph
 panel_update_node
 panel_view_nodes_in_viewport

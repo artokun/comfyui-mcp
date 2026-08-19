@@ -986,6 +986,10 @@ export const GRAPH_CMD_EFFECT: Readonly<Record<string, GraphCmdEffect>> = {
   graph_subgraph_group: "targeted",
   graph_expose_subgraph_input: "targeted",
   graph_expose_subgraph_output: "targeted",
+  // Removes a boundary slot and drops the wires crossing it (artokun/comfyui-mcp#1294)
+  // — a content edit, same class as the expose pair it inverts.
+  graph_unexpose_subgraph_input: "targeted",
+  graph_unexpose_subgraph_output: "targeted",
   graph_promote_widget: "targeted",
   graph_move_rail: "targeted",
   graph_paste_nodes: "targeted",

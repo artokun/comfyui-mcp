@@ -1050,6 +1050,8 @@ const MUTATING_GRAPH_EDIT_CMDS = new Set<string>([
   "graph_subgraph_group",
   "graph_expose_subgraph_input",
   "graph_expose_subgraph_output",
+  "graph_unexpose_subgraph_input",
+  "graph_unexpose_subgraph_output",
   "graph_promote_widget",
   "graph_move_rail",
   "graph_paste_nodes",
@@ -10431,6 +10433,8 @@ export const RETRY_TOKEN_CMD_BY_TOOL: Readonly<Record<string, string>> = {
   panel_promote_widget: "graph_promote_widget",
   panel_expose_subgraph_output: "graph_expose_subgraph_output",
   panel_expose_subgraph_input: "graph_expose_subgraph_input",
+  panel_unexpose_subgraph_output: "graph_unexpose_subgraph_output",
+  panel_unexpose_subgraph_input: "graph_unexpose_subgraph_input",
   panel_unpack_subgraph: "graph_unpack_subgraph",
   panel_update_node: "graph_update_node",
 };
@@ -14262,6 +14266,24 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
           },
           15000,
         ),
+    ),
+    def(
+      "panel_unexpose_subgraph_output",
+      "REMOVE a subgraph's OUTPUT boundary slot — UN-expose it (the inverse of panel_expose_subgraph_output), so the PARENT graph's subgraph node loses that output slot. You MUST be INSIDE the subgraph first (panel_enter_subgraph). Identify the slot by `name` — the boundary slot name exactly as panel_query_graph lists it under `rails.output.accepts_inputs` (a numeric index also works). A rail_node_id such as -20 is REFUSED: that is the synthetic id of the whole rail, not of a slot on it. DESTRUCTIVE: the interior wire feeding the slot and any parent-graph wires on host subgraph nodes' matching slot are dropped with it — the reply's `removed.interior_links_dropped` / `removed.host_links_dropped` say how many went. An unknown name refuses and lists the slots that DO exist; nothing is removed on a refusal. Undoable with Ctrl+Z.",
+      {
+        name: z.string().describe("Boundary output slot name (e.g. 'IMAGE') exactly as panel_query_graph lists it under rails.output.accepts_inputs — NOT a rail_node_id."),
+      },
+      async (args: A, ctx) =>
+        ctx.call({ cmd: "graph_unexpose_subgraph_output", name: args.name }, 15000),
+    ),
+    def(
+      "panel_unexpose_subgraph_input",
+      "REMOVE a subgraph's INPUT boundary slot — UN-expose it (the inverse of panel_expose_subgraph_input), so the PARENT graph's subgraph node loses that input slot. You MUST be INSIDE the subgraph first (panel_enter_subgraph). Identify the slot by `name` — the boundary slot name exactly as panel_query_graph lists it under `rails.input.provides_outputs` (a numeric index also works). A rail_node_id such as -10 is REFUSED: that is the synthetic id of the whole rail, not of a slot on it. DESTRUCTIVE: the interior wire the slot fed and any parent-graph wires on host subgraph nodes' matching slot are dropped with it — the reply's `removed.interior_links_dropped` / `removed.host_links_dropped` say how many went. An unknown name refuses and lists the slots that DO exist; nothing is removed on a refusal. Undoable with Ctrl+Z.",
+      {
+        name: z.string().describe("Boundary input slot name (e.g. 'model') exactly as panel_query_graph lists it under rails.input.provides_outputs — NOT a rail_node_id."),
+      },
+      async (args: A, ctx) =>
+        ctx.call({ cmd: "graph_unexpose_subgraph_input", name: args.name }, 15000),
     ),
     def(
       "panel_unpack_subgraph",

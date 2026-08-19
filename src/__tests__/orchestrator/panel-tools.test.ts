@@ -728,6 +728,44 @@ describe("panel-tools: subgraph I/O (expose rails + unpack)", () => {
     });
   });
 
+  it("registers the unexpose pair (artokun/comfyui-mcp#1294) in the shared def list", () => {
+    const names = buildPanelToolDefs().map((d) => d.name);
+    for (const expected of [
+      "panel_unexpose_subgraph_output",
+      "panel_unexpose_subgraph_input",
+    ]) {
+      expect(names).toContain(expected);
+    }
+  });
+
+  it("panel_unexpose_subgraph_output exposes a single name string schema", () => {
+    const def = defByName("panel_unexpose_subgraph_output");
+    expect(Object.keys(def.schema).sort()).toEqual(["name", "retry_of"]);
+    const name = def.schema.name as { safeParse: (v: unknown) => { success: boolean } };
+    expect(name.safeParse("IMAGE").success).toBe(true);
+    expect(name.safeParse(3).success).toBe(false);
+  });
+
+  it("panel_unexpose_subgraph_output forwards graph_unexpose_subgraph_output", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_unexpose_subgraph_output").handler({ name: "IMAGE" }, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "graph_unexpose_subgraph_output", name: "IMAGE" });
+  });
+
+  it("panel_unexpose_subgraph_input exposes a single name string schema", () => {
+    const def = defByName("panel_unexpose_subgraph_input");
+    expect(Object.keys(def.schema).sort()).toEqual(["name", "retry_of"]);
+    const name = def.schema.name as { safeParse: (v: unknown) => { success: boolean } };
+    expect(name.safeParse("model").success).toBe(true);
+    expect(name.safeParse(3).success).toBe(false);
+  });
+
+  it("panel_unexpose_subgraph_input forwards graph_unexpose_subgraph_input", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_unexpose_subgraph_input").handler({ name: "model" }, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "graph_unexpose_subgraph_input", name: "model" });
+  });
+
   it("panel_unpack_subgraph exposes a single node_id int schema", () => {
     const def = defByName("panel_unpack_subgraph");
     expect(Object.keys(def.schema)).toEqual(["node_id", "retry_of"]);
