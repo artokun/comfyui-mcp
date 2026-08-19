@@ -2,6 +2,7 @@
   "banner": {
     "ready": {
       "antigravity": "🟢 comfyui-mcp agent ready — {label} on your Google AI subscription via Antigravity CLI. Note: agy turns show final answers only (no live tool progress). Ask away.",
+      "atlascloud": "🟢 comfyui-mcp agent ready — {label} via Atlas Cloud. Ask away.",
       "chatgpt": "🟢 comfyui-mcp agent ready — {label} on your ChatGPT subscription (direct OAuth). Ask away.",
       "claude": "🟢 comfyui-mcp agent ready — {label} on your Claude subscription. Ask away.",
       "codex": "🟢 comfyui-mcp agent ready — {label} on your Codex (ChatGPT) account. Ask away.",
@@ -148,6 +149,7 @@
     "custom_no_base_url": "No endpoint configured — set the base URL in Settings → Custom endpoint (include the /v1, e.g. http://192.168.1.20:8000/v1 for vLLM, or a hosted provider's OpenAI-compatible URL), plus “Set API key…” if the server needs one. Both apply immediately — then Connect again.",
     "degraded": {
       "antigravity": "The background agent isn't responding — the Antigravity CLI couldn't answer `agy models`. Install it from https://antigravity.google, run `agy` once and complete the Google Sign-In, then Disconnect → Connect to retry.",
+      "atlascloud": "The background agent isn't responding — Atlas Cloud couldn't start. Set ATLASCLOUD_API_KEY, then Disconnect → Connect to retry.",
       "chatgpt": "The background agent isn't responding — ChatGPT direct OAuth couldn't start. Make sure ~/.codex/auth.json exists (run `codex login`), then Disconnect → Connect to retry.",
       "claude": "The background agent isn't responding — the Claude Agent SDK couldn't start. Make sure you're signed in (run `claude` once), then Disconnect → Connect to retry.",
       "codex": "The background agent isn't responding — the Codex app-server couldn't start. Make sure Codex is installed and signed in (run `codex login`), then Disconnect → Connect to retry.",

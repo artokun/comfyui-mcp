@@ -2,6 +2,7 @@
   "banner": {
     "ready": {
       "antigravity": "🟢 comfyui-mcp 代理程式已就緒 —— 透過 Antigravity CLI 執行的 {label}，使用你的 Google AI 訂閱。注意：agy 的每一輪只會顯示最終回覆，不會即時顯示工具進度。有什麼需要儘管說。",
+      "atlascloud": "🟢 comfyui-mcp 代理程式已就緒 —— {label}，透過 Atlas Cloud 執行。有什麼需要儘管說。",
       "chatgpt": "🟢 comfyui-mcp 代理程式已就緒 —— {label}，執行在你的 ChatGPT 訂閱上（直接 OAuth）。有什麼需要儘管說。",
       "claude": "🟢 comfyui-mcp 代理程式已就緒 —— {label}，執行在你的 Claude 訂閱上。有什麼需要儘管說。",
       "codex": "🟢 comfyui-mcp 代理程式已就緒 —— {label}，執行在你的 Codex（ChatGPT）帳號上。有什麼需要儘管說。",
@@ -148,6 +149,7 @@
     "custom_no_base_url": "尚未設定端點 —— 請在設定 → 自訂端點中填寫基礎網址（要帶上 /v1 ，例如 vLLM 用 http://192.168.1.20:8000/v1 ，或託管供應商的 OpenAI 相容網址）；如果伺服器需要金鑰，再加上「設定 API 金鑰…」。兩者都會立即生效 —— 然後重新連線。",
     "degraded": {
       "antigravity": "背景代理程式沒有回應 —— Antigravity CLI 無法回應 `agy models` 。請從 https://antigravity.google 安裝，執行一次 `agy` 並完成 Google 登入，然後依序「中斷連線」→「連線」重試。",
+      "atlascloud": "背景代理程式沒有回應 —— Atlas Cloud 無法啟動。請設定 ATLASCLOUD_API_KEY ，然後依序「中斷連線」→「連線」重試。",
       "chatgpt": "背景代理程式沒有回應 —— ChatGPT 直接 OAuth 無法啟動。請確認 ~/.codex/auth.json 存在（執行 `codex login`），然後依序「中斷連線」→「連線」重試。",
       "claude": "背景代理程式沒有回應 —— Claude Agent SDK 無法啟動。請確認你已登入（執行一次 `claude`），然後依序「中斷連線」→「連線」重試。",
       "codex": "背景代理程式沒有回應 —— Codex 的 app-server 無法啟動。請確認已安裝 Codex 並已登入（執行 `codex login`），然後依序「中斷連線」→「連線」重試。",

@@ -2,6 +2,7 @@
   "banner": {
     "ready": {
       "antigravity": "🟢 comfyui-mcp aracısı hazır — Antigravity CLI üzerinden {label}, Google AI aboneliğinizle. Not: agy turları yalnızca nihai yanıtı gösterir, araç ilerlemesi canlı görünmez. Sorularınızı bekliyorum.",
+      "atlascloud": "🟢 comfyui-mcp aracısı hazır — Atlas Cloud üzerinden {label}. Sorularınızı bekliyorum.",
       "chatgpt": "🟢 comfyui-mcp aracısı hazır — {label}, ChatGPT aboneliğinizle (doğrudan OAuth). Sorularınızı bekliyorum.",
       "claude": "🟢 comfyui-mcp aracısı hazır — {label}, Claude aboneliğinizle. Sorularınızı bekliyorum.",
       "codex": "🟢 comfyui-mcp aracısı hazır — {label}, Codex (ChatGPT) hesabınızla. Sorularınızı bekliyorum.",
@@ -148,6 +149,7 @@
     "custom_no_base_url": "Yapılandırılmış uç nokta yok — temel URL'yi Ayarlar → Özel uç nokta bölümünde belirtin (/v1 dahil olmalı; örneğin vLLM için http://192.168.1.20:8000/v1 ya da barındırılan bir sağlayıcının OpenAI uyumlu URL'si) ve sunucu istiyorsa “API anahtarını ayarla…” ile anahtarı da girin. İkisi de hemen geçerli olur — ardından yeniden bağlanın.",
     "degraded": {
       "antigravity": "Arka plandaki aracı yanıt vermiyor — Antigravity CLI `agy models` komutuna yanıt veremedi. https://antigravity.google adresinden kurun, `agy` komutunu bir kez çalıştırıp Google girişini tamamlayın, sonra Bağlantıyı kes → Bağlan ile yeniden deneyin.",
+      "atlascloud": "Arka plandaki aracı yanıt vermiyor — Atlas Cloud başlatılamadı. ATLASCLOUD_API_KEY değerini ayarlayın, sonra Bağlantıyı kes → Bağlan ile yeniden deneyin.",
       "chatgpt": "Arka plandaki aracı yanıt vermiyor — ChatGPT doğrudan OAuth başlatılamadı. ~/.codex/auth.json dosyasının bulunduğundan emin olun (`codex login` çalıştırın), sonra Bağlantıyı kes → Bağlan ile yeniden deneyin.",
       "claude": "Arka plandaki aracı yanıt vermiyor — Claude Agent SDK başlatılamadı. Oturum açtığınızdan emin olun (`claude` komutunu bir kez çalıştırın), sonra Bağlantıyı kes → Bağlan ile yeniden deneyin.",
       "codex": "Arka plandaki aracı yanıt vermiyor — Codex app-server başlatılamadı. Codex'in kurulu ve oturumunun açık olduğundan emin olun (`codex login`), sonra Bağlantıyı kes → Bağlan ile yeniden deneyin.",

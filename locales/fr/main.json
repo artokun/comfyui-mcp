@@ -2,6 +2,7 @@
   "banner": {
     "ready": {
       "antigravity": "🟢 Agent comfyui-mcp prêt — {label} via Antigravity CLI, sur votre abonnement Google AI. Remarque : les tours agy n'affichent que la réponse finale (pas de progression des outils en direct). Posez vos questions.",
+      "atlascloud": "🟢 Agent comfyui-mcp prêt — {label} via Atlas Cloud. Posez vos questions.",
       "chatgpt": "🟢 Agent comfyui-mcp prêt — {label} sur votre abonnement ChatGPT (OAuth direct). Posez vos questions.",
       "claude": "🟢 Agent comfyui-mcp prêt — {label} sur votre abonnement Claude. Posez vos questions.",
       "codex": "🟢 Agent comfyui-mcp prêt — {label} sur votre compte Codex (ChatGPT). Posez vos questions.",
@@ -148,6 +149,7 @@
     "custom_no_base_url": "Aucun point de terminaison configuré — indiquez l'URL de base dans Paramètres → Point de terminaison personnalisé (avec le /v1, par exemple http://192.168.1.20:8000/v1 pour vLLM, ou l'URL compatible OpenAI d'un fournisseur hébergé), plus « Définir la clé API… » si le serveur en exige une. Les deux s'appliquent immédiatement — reconnectez-vous ensuite.",
     "degraded": {
       "antigravity": "L'agent d'arrière-plan ne répond pas — le CLI Antigravity n'a pas pu répondre à `agy models`. Installez-le depuis https://antigravity.google, lancez `agy` une fois et terminez la connexion Google, puis Déconnecter → Connecter pour réessayer.",
+      "atlascloud": "L'agent d'arrière-plan ne répond pas — Atlas Cloud n'a pas pu démarrer. Définissez ATLASCLOUD_API_KEY, puis Déconnecter → Connecter pour réessayer.",
       "chatgpt": "L'agent d'arrière-plan ne répond pas — l'OAuth direct de ChatGPT n'a pas pu démarrer. Vérifiez que ~/.codex/auth.json existe (lancez `codex login`), puis Déconnecter → Connecter pour réessayer.",
       "claude": "L'agent d'arrière-plan ne répond pas — le Claude Agent SDK n'a pas pu démarrer. Vérifiez que vous êtes connecté (lancez `claude` une fois), puis Déconnecter → Connecter pour réessayer.",
       "codex": "L'agent d'arrière-plan ne répond pas — l'app-server Codex n'a pas pu démarrer. Vérifiez que Codex est installé et que vous y êtes connecté (`codex login`), puis Déconnecter → Connecter pour réessayer.",

@@ -185,7 +185,7 @@ because a silently dropped attachment is worse than a refused one:
     Ollama tag is mutable: `ollama pull` can replace the weights under the same
     name, and a cached verdict could outlive the model it described.
 - **LM Studio / llama.cpp / OpenRouter / GLM / Kimi / Moonshot / MiniMax /
-  Copilot / custom OpenAI-compatible endpoints — attempted, NOT
+  Atlas Cloud / Copilot / custom OpenAI-compatible endpoints — attempted, NOT
   capability-checked.** These all speak `/v1/chat/completions`,
   which has no capability endpoint to ask, so audio is sent as an `input_audio`
   content part and you are told, on that turn, that the delivery is

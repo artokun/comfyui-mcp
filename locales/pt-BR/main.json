@@ -2,6 +2,7 @@
   "banner": {
     "ready": {
       "antigravity": "🟢 Agente comfyui-mcp pronto — {label} via Antigravity CLI, na sua assinatura do Google AI. Observação: os turnos do agy mostram apenas a resposta final (sem progresso das ferramentas ao vivo). Pode perguntar.",
+      "atlascloud": "🟢 Agente comfyui-mcp pronto — {label} via Atlas Cloud. Pode perguntar.",
       "chatgpt": "🟢 Agente comfyui-mcp pronto — {label} na sua assinatura do ChatGPT (OAuth direto). Pode perguntar.",
       "claude": "🟢 Agente comfyui-mcp pronto — {label} na sua assinatura do Claude. Pode perguntar.",
       "codex": "🟢 Agente comfyui-mcp pronto — {label} na sua conta do Codex (ChatGPT). Pode perguntar.",
@@ -148,6 +149,7 @@
     "custom_no_base_url": "Nenhum endpoint configurado — defina a URL base em Configurações → Endpoint personalizado (inclua o /v1, por exemplo http://192.168.1.20:8000/v1 para vLLM, ou a URL compatível com OpenAI de um provedor hospedado), além de “Definir chave de API…” se o servidor exigir uma. Os dois valem imediatamente — depois conecte novamente.",
     "degraded": {
       "antigravity": "O agente em segundo plano não está respondendo — a CLI do Antigravity não conseguiu responder a `agy models`. Instale a partir de https://antigravity.google, rode `agy` uma vez e conclua o login do Google; depois Desconectar → Conectar para tentar de novo.",
+      "atlascloud": "O agente em segundo plano não está respondendo — o Atlas Cloud não conseguiu iniciar. Defina ATLASCLOUD_API_KEY; depois Desconectar → Conectar para tentar de novo.",
       "chatgpt": "O agente em segundo plano não está respondendo — o OAuth direto do ChatGPT não conseguiu iniciar. Verifique se o arquivo ~/.codex/auth.json existe (rode `codex login`); depois Desconectar → Conectar para tentar de novo.",
       "claude": "O agente em segundo plano não está respondendo — o Claude Agent SDK não conseguiu iniciar. Verifique se você está autenticado (rode `claude` uma vez); depois Desconectar → Conectar para tentar de novo.",
       "codex": "O agente em segundo plano não está respondendo — o app-server do Codex não conseguiu iniciar. Verifique se o Codex está instalado e autenticado (`codex login`); depois Desconectar → Conectar para tentar de novo.",

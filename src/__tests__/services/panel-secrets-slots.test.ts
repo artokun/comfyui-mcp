@@ -68,6 +68,12 @@ describe("panel-secrets credential slots (canonical .env)", () => {
     expect(process.env.MINIMAX_API_KEY).toBe("minimax-abc123");
   });
 
+  it("the atlascloud slot writes ATLASCLOUD_API_KEY", async () => {
+    const m = await import("../../services/panel-secrets.js");
+    m.setPanelSecret("atlascloud", "atlascloud-abc123");
+    expect(process.env.ATLASCLOUD_API_KEY).toBe("atlascloud-abc123");
+  });
+
   it("rejects an unknown slot", async () => {
     const m = await import("../../services/panel-secrets.js");
     expect(() => m.setPanelSecret("not-a-slot", "x")).toThrow(/unknown credential slot/i);

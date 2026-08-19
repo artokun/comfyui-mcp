@@ -2,6 +2,7 @@
   "banner": {
     "ready": {
       "antigravity": "🟢 comfyui-mcp 智能体已就绪 —— 通过 Antigravity CLI 运行的 {label}，使用你的 Google AI 订阅。注意：agy 的每轮只显示最终答复，不会实时显示工具进度。有什么需要尽管说。",
+      "atlascloud": "🟢 comfyui-mcp 智能体已就绪 —— {label}，通过 Atlas Cloud 运行。有什么需要尽管说。",
       "chatgpt": "🟢 comfyui-mcp 智能体已就绪 —— {label}，运行在你的 ChatGPT 订阅上（直接 OAuth）。有什么需要尽管说。",
       "claude": "🟢 comfyui-mcp 智能体已就绪 —— {label}，运行在你的 Claude 订阅上。有什么需要尽管说。",
       "codex": "🟢 comfyui-mcp 智能体已就绪 —— {label}，运行在你的 Codex（ChatGPT）账号上。有什么需要尽管说。",
@@ -148,6 +149,7 @@
     "custom_no_base_url": "尚未配置端点 —— 请在设置 → 自定义端点中填写基础地址（要带上 /v1 ，例如 vLLM 用 http://192.168.1.20:8000/v1 ，或托管服务商的 OpenAI 兼容地址）；如果服务器需要密钥，再加上“设置 API 密钥…”。两者都会立即生效 —— 然后重新连接。",
     "degraded": {
       "antigravity": "后台智能体没有响应 —— Antigravity CLI 无法回应 `agy models` 。请从 https://antigravity.google 安装，运行一次 `agy` 并完成 Google 登录，然后依次“断开连接”→“连接”重试。",
+      "atlascloud": "后台智能体没有响应 —— Atlas Cloud 无法启动。请设置 ATLASCLOUD_API_KEY ，然后依次“断开连接”→“连接”重试。",
       "chatgpt": "后台智能体没有响应 —— ChatGPT 直接 OAuth 无法启动。请确认 ~/.codex/auth.json 存在（运行 `codex login`），然后依次“断开连接”→“连接”重试。",
       "claude": "后台智能体没有响应 —— Claude Agent SDK 无法启动。请确认你已登录（运行一次 `claude`），然后依次“断开连接”→“连接”重试。",
       "codex": "后台智能体没有响应 —— Codex 的 app-server 无法启动。请确认已安装 Codex 并已登录（运行 `codex login`），然后依次“断开连接”→“连接”重试。",

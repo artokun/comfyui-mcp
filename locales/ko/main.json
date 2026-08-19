@@ -2,6 +2,7 @@
   "banner": {
     "ready": {
       "antigravity": "🟢 comfyui-mcp 에이전트 준비 완료 — Antigravity CLI를 통해 {label}, 회원님의 Google AI 구독으로 실행됩니다. 참고: agy 턴은 최종 답변만 보여 주며 도구 진행 상황은 실시간으로 표시되지 않습니다. 무엇이든 물어보세요.",
+      "atlascloud": "🟢 comfyui-mcp 에이전트 준비 완료 — Atlas Cloud를 통해 {label} 실행됩니다. 무엇이든 물어보세요.",
       "chatgpt": "🟢 comfyui-mcp 에이전트 준비 완료 — {label}, 회원님의 ChatGPT 구독(직접 OAuth)으로 실행됩니다. 무엇이든 물어보세요.",
       "claude": "🟢 comfyui-mcp 에이전트 준비 완료 — {label}, 회원님의 Claude 구독으로 실행됩니다. 무엇이든 물어보세요.",
       "codex": "🟢 comfyui-mcp 에이전트 준비 완료 — {label}, 회원님의 Codex(ChatGPT) 계정으로 실행됩니다. 무엇이든 물어보세요.",
@@ -148,6 +149,7 @@
     "custom_no_base_url": "엔드포인트가 설정되지 않았습니다 — 설정 → 커스텀 엔드포인트에서 기본 URL을 지정하세요 (/v1 까지 포함하세요. 예: vLLM은 http://192.168.1.20:8000/v1, 또는 호스팅 제공자의 OpenAI 호환 URL). 서버에 키가 필요하면 “API 키 설정…”도 함께 설정하세요. 둘 다 즉시 적용됩니다 — 그런 다음 다시 연결하세요.",
     "degraded": {
       "antigravity": "백그라운드 에이전트가 응답하지 않습니다 — Antigravity CLI가 `agy models` 에 응답하지 못했습니다. https://antigravity.google 에서 설치하고 `agy` 를 한 번 실행해 Google 로그인을 완료한 뒤, 연결 해제 → 연결로 다시 시도하세요.",
+      "atlascloud": "백그라운드 에이전트가 응답하지 않습니다 — Atlas Cloud를 시작할 수 없습니다. ATLASCLOUD_API_KEY 를 설정한 뒤, 연결 해제 → 연결로 다시 시도하세요.",
       "chatgpt": "백그라운드 에이전트가 응답하지 않습니다 — ChatGPT 직접 OAuth를 시작할 수 없습니다. ~/.codex/auth.json 이 있는지 확인하고 (`codex login` 실행), 연결 해제 → 연결로 다시 시도하세요.",
       "claude": "백그라운드 에이전트가 응답하지 않습니다 — Claude Agent SDK를 시작할 수 없습니다. 로그인되어 있는지 확인하고 (`claude` 를 한 번 실행), 연결 해제 → 연결로 다시 시도하세요.",
       "codex": "백그라운드 에이전트가 응답하지 않습니다 — Codex app-server를 시작할 수 없습니다. Codex가 설치되어 있고 로그인되어 있는지 확인한 뒤 (`codex login` 실행), 연결 해제 → 연결로 다시 시도하세요.",

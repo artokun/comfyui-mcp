@@ -2,6 +2,7 @@
   "banner": {
     "ready": {
       "antigravity": "🟢 comfyui-mcp エージェントの準備ができました — Antigravity CLI 経由の {label}、あなたの Google AI サブスクリプションで動きます。注意: agy のターンは最終回答のみを表示し、ツールの進捗はリアルタイムには出ません。何でも聞いてください。",
+      "atlascloud": "🟢 comfyui-mcp エージェントの準備ができました — Atlas Cloud 経由の {label}。何でも聞いてください。",
       "chatgpt": "🟢 comfyui-mcp エージェントの準備ができました — {label}、あなたの ChatGPT サブスクリプション（直接 OAuth）で動きます。何でも聞いてください。",
       "claude": "🟢 comfyui-mcp エージェントの準備ができました — {label}、あなたの Claude サブスクリプションで動きます。何でも聞いてください。",
       "codex": "🟢 comfyui-mcp エージェントの準備ができました — {label}、あなたの Codex（ChatGPT）アカウントで動きます。何でも聞いてください。",
@@ -148,6 +149,7 @@
     "custom_no_base_url": "エンドポイントが設定されていません — 設定 → カスタムエンドポイントでベース URL を指定してください（/v1 まで含めます。例: vLLM なら http://192.168.1.20:8000/v1、またはホスト型プロバイダーの OpenAI 互換 URL）。サーバーがキーを必要とする場合は「API キーを設定…」も設定してください。どちらもすぐに反映されます — そのあとで接続し直してください。",
     "degraded": {
       "antigravity": "バックグラウンドエージェントが応答しません — Antigravity CLI が `agy models` に応答できませんでした。https://antigravity.google からインストールし、`agy` を一度実行して Google サインインを完了してから、切断 → 接続でやり直してください。",
+      "atlascloud": "バックグラウンドエージェントが応答しません — Atlas Cloud を起動できませんでした。ATLASCLOUD_API_KEY を設定してから、切断 → 接続でやり直してください。",
       "chatgpt": "バックグラウンドエージェントが応答しません — ChatGPT の直接 OAuth を起動できませんでした。~/.codex/auth.json があるか確認し（`codex login` を実行）、切断 → 接続でやり直してください。",
       "claude": "バックグラウンドエージェントが応答しません — Claude Agent SDK を起動できませんでした。サインインしているか確認し（`claude` を一度実行）、切断 → 接続でやり直してください。",
       "codex": "バックグラウンドエージェントが応答しません — Codex の app-server を起動できませんでした。Codex がインストールされサインイン済みか確認し（`codex login` を実行）、切断 → 接続でやり直してください。",
