@@ -1202,6 +1202,50 @@ describe("#1788 — a PINNED target discloses that the running server reads else
     expect(added.message).toMatch(/Restart ComfyUI to apply it/);
   });
 
+  // Gate round 2 test gap: the test above exercises the SINGLE-flag arm, where an
+  // unresolvable relative value means there is no server config at all. The
+  // multi-flag arm computes completeness differently — `unlocatable` is filled from
+  // flags 2..n — and forcing `complete: true` there killed no test. That is the shape
+  // that matters most: a FIRST flag we can resolve makes everything downstream look
+  // proven, while the second names a file we cannot see and may well be the pinned one.
+  it("says NOTHING when a LATER relative flag is unlocatable, even though the FIRST resolved", async () => {
+    const appData = await trackTmp();
+    process.env.APPDATA = appData;
+    const liveRoot = await trackTmp();
+    const serverCfg = await liveConfigAt(liveRoot, "instance-model-paths.yaml");
+    // Absolute first (resolves), relative second (does not — no server cwd reported).
+    await liveServer(liveRoot, serverCfg, "relative-second.yaml");
+
+    const added = await addExtraPath({
+      target: "desktop",
+      category: "ipadapter",
+      path: "D:/ipadapter",
+    });
+    expect(added.notes.some((n) => /does not read this file/.test(n))).toBe(false);
+    expect(added.message).toMatch(/Restart ComfyUI to apply it/);
+  });
+
+  it("DOES speak when every one of several flags resolved (the control for the gap above)", async () => {
+    // Same multi-flag shape, but nothing is unlocatable — the set is complete, so the
+    // pinned file's absence from it really is evidence. Without this, a disclosure that
+    // had simply stopped firing for multi-flag servers would pass the test above.
+    const appData = await trackTmp();
+    process.env.APPDATA = appData;
+    const liveRoot = await trackTmp();
+    const first = await liveConfigAt(liveRoot, "first.yaml");
+    const second = await liveConfigAt(liveRoot, "second.yaml");
+    await liveServer(liveRoot, first, second);
+
+    const added = await addExtraPath({
+      target: "desktop",
+      category: "ipadapter",
+      path: "D:/ipadapter",
+    });
+    expect(added.notes.some((n) => /RUNNING ComfyUI does not read this file/.test(n))).toBe(true);
+    expect(added.message).not.toMatch(/Restart ComfyUI to apply it/);
+    expect(added.message).toContain(second);
+  });
+
   it("says NOTHING when the server is UNREACHABLE (the pin is all there is)", async () => {
     const appData = await trackTmp();
     process.env.APPDATA = appData;
