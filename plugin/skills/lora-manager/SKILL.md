@@ -57,3 +57,8 @@ If LoRA Manager is not installed, use core `LoraLoader` and set `lora_name` /
   created. The working widget name is `lora_syntax`.
 - A freshly added Text Loader still needs `lora_syntax` written; an empty
   string loads no LoRA.
+
+## Sources
+
+- **Official:** https://github.com/willmiao/ComfyUI-Lora-Manager — node class names and `lora_syntax` format from the pack; no vendor panel-authoring guide exists.
+- **Empirical:** the `panel_add_node` AUTOCOMPLETE_TEXT_* refusal, which nodes add cleanly, and the widget-store explanation from observed panel behavior in this repo.
