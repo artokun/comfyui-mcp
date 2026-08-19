@@ -580,6 +580,38 @@ describe("pre-write: a SERVER-NAMED extra model root wins over an unvouched prim
     expect(h.fetchCalls).toEqual([]);
   });
 
+  // #1788 — the same report, one release later, on `ipadapter`: a CUSTOM category
+  // that no ComfyUI core folder list contains. The redirect must be keyed on the
+  // config's OWN keys, never on a known-category set: a hardcoded set would leave
+  // every custom category (ipadapter, instantid, ultralytics, the categories custom
+  // node packs register) writing into the unvouched primary while loras worked.
+  it.each(["ipadapter", "instantid", "ultralytics", "clip_vision"])(
+    "redirects the CUSTOM category %s exactly like a core one (#1788)",
+    async (category) => {
+      const sharedRoot = resolve(`/shared/models/${category}`);
+      h.liveExtraRoots = {
+        authoritative: true,
+        roots: [{ category, dir: sharedRoot, group: "desktop" }],
+      };
+      await expect(resolveModelSubfolderPreferServer(category)).resolves.toBe(sharedRoot);
+    },
+  );
+
+  it("post-write: a landed ipadapter file under the named extra root verifies VISIBLE (#1788)", async () => {
+    const sharedIpadapter = resolve("/shared/models/ipadapter");
+    h.liveExtraRoots = {
+      authoritative: true,
+      roots: [{ category: "ipadapter", dir: sharedIpadapter, group: "desktop" }],
+    };
+    h.liveListings["ipadapter"] = ["ip-adapter-faceid_sdxl.bin"];
+    const res = await verifyLandedModel(
+      resolve(sharedIpadapter, "ip-adapter-faceid_sdxl.bin"),
+      "ipadapter",
+      { attempts: 1, retryMs: 0 },
+    );
+    expect(res.liveVisible).toBe("visible");
+  });
+
   it("does NOT redirect a category the config does not map", async () => {
     await expect(resolveModelSubfolderPreferServer("loras")).resolves.toBe(
       resolve("/comfy/models/loras"),
