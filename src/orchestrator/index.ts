@@ -3487,24 +3487,22 @@ export async function runPanelOrchestrator(): Promise<void> {
    * to name itself in the report, which is a guess: the ENVIRONMENT block has
    * never carried the model at all, only `Backend:`.
    *
-   * Called on every turn dispatch; the last-published value is remembered per key
-   * so an unchanged identity costs no write.
+   * Called on every turn dispatch, and it WRITES every time. A dedupe cache
+   * ("skip when the identity is unchanged") was here and is deliberately gone:
+   * it made the write conditional on a belief about the FILE that this process
+   * has no way to hold — delete the file underneath a live orchestrator and the
+   * cache suppresses the rewrite for the rest of the process's life, leaving
+   * every later report from that agent unattributed (fallback merge gate, a
+   * dropped P2). The thing it saved is ~100 bytes once per turn, on a path that
+   * is already standing up an LLM turn.
    */
-  const lastPublishedIdentity = new Map<string, string>();
   function republishAgentIdentity(key: string): void {
     const backend = backendOf(key);
-    const identity = {
+    publishAgentIdentity(agentIdentityPath(bridgePort, key), {
       backend,
       model: manager.modelOverrideFor(key) ?? currentModelFor(backend),
       effort: manager.currentEffortFor(key),
-    };
-    const fingerprint = JSON.stringify(identity);
-    if (lastPublishedIdentity.get(key) === fingerprint) return;
-    // Only remember it as published if the write actually landed — otherwise a
-    // single failed write would suppress every later attempt for this key.
-    if (publishAgentIdentity(agentIdentityPath(bridgePort, key), identity)) {
-      lastPublishedIdentity.set(key, fingerprint);
-    }
+    });
   }
   function pushModels(panelTabId: string): void {
     const backend = backendForTab(panelTabId);

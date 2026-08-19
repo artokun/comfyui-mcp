@@ -2,7 +2,7 @@ import { describe, it, expect, vi, afterEach, afterAll } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { normalizeRepo, buildIssueUrl, isOurRepo, submitAndPoll, registerReportIssueTools, REPORT_UA } from "./report-issue.js";
+import { normalizeRepo, buildIssueUrl, isOurRepo, submitAndPoll, registerReportIssueTools, REPORT_UA, WORKER_MAX_BODY_LEN } from "./report-issue.js";
 
 const noSleep = async () => {};
 
@@ -598,6 +598,31 @@ describe("report_issue stamps the reporting model (mechanical, not self-reported
     // panel behind it, so there is no model to name and nothing to append.
     expect(payload?.body).toBe("It broke.");
     expect(payload?.labels).toEqual(["bug"]);
+  });
+
+  it("an oversized body keeps its stamp — the worker would have cut it off", async () => {
+    publish({ backend: "ollama", model: "gemma3:4b" });
+    const huge = "x".repeat(WORKER_MAX_BODY_LEN + 5_000);
+    const { payload } = await submittedPayload({ title: "t", body: huge });
+    const body = payload?.body as string;
+    // The worker truncates at 60k BEFORE filing, and the stamp is last — so the
+    // attribution would vanish server-side on exactly the longest reports, with
+    // nothing anywhere saying it had been there.
+    expect(body.length).toBeLessThanOrEqual(WORKER_MAX_BODY_LEN);
+    expect(body).toContain("<!-- reporter-agent: backend=ollama model=gemma3:4b -->");
+    expect(body).toContain("trimmed to keep the reporting-agent stamp");
+    // The caller's own text is still nearly all of it — this trims by the
+    // stamp's width, it does not summarize.
+    expect(body.length).toBeGreaterThan(WORKER_MAX_BODY_LEN - 1_000);
+  });
+
+  it("leaves an oversized body ALONE when there is no identity to protect", async () => {
+    delete process.env.COMFYUI_MCP_AGENT_IDENTITY;
+    const huge = "x".repeat(WORKER_MAX_BODY_LEN + 5_000);
+    const { payload } = await submittedPayload({ title: "t", body: huge });
+    // No stamp to save, so the worker's own truncation is the only one that
+    // should ever apply. Trimming here would drop the caller's text for nothing.
+    expect(payload?.body).toBe(huge);
   });
 
   it("never stamps a THIRD-PARTY tracker", async () => {

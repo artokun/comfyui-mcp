@@ -467,6 +467,34 @@ export function normalizeReportedVersion(
   return asVersionToken(trimmed);
 }
 
+/**
+ * The intake worker truncates a submitted body at 60_000 chars (index.ts:
+ * MAX_BODY_LEN) before anything is stored or filed.
+ *
+ * The identity stamp is the LAST thing in the body, so an oversized report — a
+ * pasted log, the diff the report-bug skill asks for — would have its
+ * attribution cut off server-side, silently, and precisely on the reports with
+ * the most in them. Trim the caller's own text by the stamp's width instead: the
+ * worker was going to cut that tail anyway, so the content lost is the same
+ * either way, and the attribution survives.
+ *
+ * Exported for the covering test — nothing else calls it.
+ */
+export const WORKER_MAX_BODY_LEN = 60_000;
+
+export function fitUnderWorkerCap(
+  body: string,
+  identity: Parameters<typeof stampAgentIdentity>[1],
+): string {
+  if (!identity || stampAgentIdentity(body, identity).length <= WORKER_MAX_BODY_LEN) return body;
+  const note = "\n\n…[trimmed to keep the reporting-agent stamp]";
+  // Measure the stamp against THIS identity rather than assuming a width — the
+  // model name is provider-supplied and unbounded in principle.
+  const stampWidth = stampAgentIdentity("", identity).length;
+  const room = WORKER_MAX_BODY_LEN - stampWidth - note.length;
+  return room > 0 ? body.slice(0, room) + note : note;
+}
+
 export function registerReportIssueTools(server: McpServer): void {
   server.tool(
     "report_issue",
@@ -517,7 +545,7 @@ export function registerReportIssueTools(server: McpServer): void {
         // plain stdio, CLI, tests) changes nothing — body and labels pass
         // through as before.
         const identity = ours ? readAgentIdentity() : undefined;
-        const body = stampAgentIdentity(args.body, identity);
+        const body = stampAgentIdentity(fitUnderWorkerCap(args.body, identity), identity);
         const labels = identity
           ? Array.from(new Set([...(args.labels ?? []), agentLabel(identity)]))
           : args.labels;

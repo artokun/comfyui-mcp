@@ -99,15 +99,19 @@ describe("the identity is republished at TURN DISPATCH", () => {
     );
   });
 
-  it("SOURCE: a failed write is not remembered as published", () => {
+  it("SOURCE: the publish is UNCONDITIONAL — no cache can suppress a rewrite", () => {
     const publisher = blockAfter(
       indexSrc(),
       "function republishAgentIdentity(key: string): void {",
       "function pushModels(",
     );
-    // The dedupe cache exists to skip redundant writes, not to latch a failure:
-    // caching the fingerprint unconditionally would let one transient EPERM
-    // suppress every later publish for that agent, for the life of the process.
-    expect(publisher).toContain("if (publishAgentIdentity(");
+    // A "skip when unchanged" cache made the write conditional on a belief about
+    // the FILE that this process cannot hold: delete the file underneath a live
+    // orchestrator and every later report from that agent files unattributed,
+    // for the life of the process. What it saved was ~100 bytes once per turn,
+    // on a path that is already standing up an LLM turn.
+    expect(publisher).toContain("publishAgentIdentity(agentIdentityPath(bridgePort, key)");
+    expect(publisher).not.toMatch(/fingerprint|lastPublished/);
+    expect(publisher).not.toMatch(/\breturn;/);
   });
 });
