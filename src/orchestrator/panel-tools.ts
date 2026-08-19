@@ -1136,6 +1136,16 @@ function isWorkflowInstanceMismatch(err: unknown): boolean {
   return /workflow instance mismatch/i.test(msg);
 }
 
+/** Would the next graph command still resolve `ctx.tabId` to a live tab? */
+function sessionRouteIsLive(ctx: PanelToolCtx): boolean {
+  if (typeof ctx.bridge.canReach !== "function") return true;
+  try {
+    return ctx.bridge.canReach(ctx.tabId) === true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * #1331 — the bridge refused a mutation because the active workflow has no identity to
  * fence against (ui-bridge's `no trusted identity` branch).
@@ -13096,16 +13106,45 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           //    known-negative write case is stated rather than papered over.
           let probeRefused: boolean | undefined;
           let probeOk = false;
-          try {
-            // The cheapest fenced read there is: ids only, one row. It is refused by the
-            // same instance fence every graph command carries, which is exactly the
-            // question — a full outline would answer it no better and would cost the caller
-            // a page of graph on a recovery path.
-            const probe = await ctx.call({ cmd: "graph_query", fields: "ids", limit: 1 }, 8000);
-            if (!probe.isError) probeOk = true;
-            else probeRefused = isWorkflowInstanceMismatch(toolResultText(probe));
-          } catch (err) {
-            probeRefused = isWorkflowInstanceMismatch(err);
+          const probeOnce = async (): Promise<void> => {
+            probeRefused = undefined;
+            probeOk = false;
+            try {
+              // The cheapest fenced read there is: ids only, one row. It is refused by the
+              // same instance fence every graph command carries, which is exactly the
+              // question — a full outline would answer it no better and would cost the caller
+              // a page of graph on a recovery path.
+              const probe = await ctx.call({ cmd: "graph_query", fields: "ids", limit: 1 }, 8000);
+              if (!probe.isError) probeOk = true;
+              else probeRefused = isWorkflowInstanceMismatch(toolResultText(probe));
+            } catch (err) {
+              probeRefused = isWorkflowInstanceMismatch(err);
+            }
+          };
+          await probeOnce();
+          // #1703 — a passing graph_query is not evidence the NEXT graph command
+          // will route. After a restart the scope pin can still name the OLD
+          // wf:<route>:<path> while the reconnect has already hellod under a new
+          // one; ensureReachable will not move a scope-bound ctx, so claiming
+          // "no recovery needed" stranded the following panel_graph_outline with
+          // "no connected tab". Confirm the live route; if it is dead, take the
+          // same explicit rebind the caller would get from repeating this tool,
+          // and only then re-probe on the tab the next command will use.
+          if (probeOk && !sessionRouteIsLive(ctx)) {
+            try {
+              ctx.rebindToActiveTab?.({ scopeRecoveryConsent: true });
+            } catch {
+              // a failed rebind is not a fence verdict
+            }
+            if (sessionRouteIsLive(ctx)) await probeOnce();
+            else {
+              probeOk = false;
+              probeRefused = undefined;
+            }
+          }
+          if (probeOk && !sessionRouteIsLive(ctx)) {
+            probeOk = false;
+            probeRefused = undefined;
           }
           if (probeOk) {
             probePassed = true;
