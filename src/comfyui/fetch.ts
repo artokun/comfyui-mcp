@@ -255,6 +255,55 @@ export function isTimeoutAbort(err: unknown): boolean {
   return err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
 }
 
+function abortReasonOf(signal: AbortSignal): unknown {
+  return (
+    signal.reason ??
+    Object.assign(new Error("The operation was aborted"), { name: "AbortError" })
+  );
+}
+
+/**
+ * Reject as soon as `signal` aborts, even if `work` is still running.
+ *
+ * `AbortSignal.timeout` on `fetch` only cancels the HTTP exchange. Once headers
+ * have arrived, `Response.text()` / `JSON.parse` can keep the caller pending for
+ * as long as the body takes to finish — and a ComfyUI that is mid-decode
+ * (VAEDecodeAudio, a long VAE, …) often accepts `/system_stats` and then stalls
+ * on the body. The abort event IS fired; the decode does not observe it. Racing
+ * the abort against the whole fetch+decode is what lets `call_tool` settle
+ * instead of hanging until the decode ends or the process is killed (#1672).
+ *
+ * The inner promise is attached so a late rejection (the decode finally
+ * noticing the abort) cannot become an unhandledRejection after we already
+ * settled.
+ */
+export function raceAbort<T>(signal: AbortSignal | undefined, work: () => Promise<T>): Promise<T> {
+  if (!signal) return work();
+  if (signal.aborted) return Promise.reject(abortReasonOf(signal));
+  const workPromise = work();
+  workPromise.catch(() => {
+    /* settled via abort, or the then-path below already observed this */
+  });
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      cleanup();
+      reject(abortReasonOf(signal));
+    };
+    const cleanup = () => signal.removeEventListener("abort", onAbort);
+    signal.addEventListener("abort", onAbort, { once: true });
+    workPromise.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (err) => {
+        cleanup();
+        reject(err);
+      },
+    );
+  });
+}
+
 /**
  * Say what the ceiling did and did NOT establish.
  *

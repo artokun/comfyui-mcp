@@ -13,7 +13,7 @@ import {
   ConnectionError,
   WorkflowExecutionError,
 } from "../utils/errors.js";
-import { comfyuiFetch } from "./fetch.js";
+import { comfyuiFetch, isTimeoutAbort, raceAbort } from "./fetch.js";
 import {
   bodyPrefixOf,
   classifyNonJson,
@@ -196,6 +196,11 @@ function looksLikeSystemStats(body: unknown): boolean {
   return (b.system != null && typeof b.system === "object") || Array.isArray(b.devices);
 }
 
+/** Budget for the /system_stats probe. Short on purpose: this is a liveness
+ *  read, and a ComfyUI mid-decode will not answer in time. Exported so the
+ *  call_tool timeout test can shrink only THIS deadline. */
+export const SYSTEM_STATS_TIMEOUT_MS = 15_000;
+
 export async function getSystemStats(): Promise<SystemStats> {
   if (isCloudMode()) return cloudClient.getSystemStats();
   requireLocalMode("getSystemStats");
@@ -205,16 +210,40 @@ export async function getSystemStats(): Promise<SystemStats> {
   // getComfyUIBaseUrl() carries the same path prefix, so a proxied/prefixed
   // remote resolves identically.
   const url = `${getComfyUIBaseUrl()}/system_stats`;
-  const stats = await fetchComfyJson<SystemStats>(url, {
-    init: { signal: AbortSignal.timeout(15000) },
-    expectShape: looksLikeSystemStats,
-    shapeHint: "a ComfyUI /system_stats document (it has no `system` object and no `devices` array)",
-  });
-  // Shape-valid /system_stats is the in-session proof that this base URL is a
-  // ComfyUI API root. A later empty 502 must not be reported as a misconfigured
-  // URL (#1670).
-  noteComfyApiRootValidated(getComfyUIBaseUrl());
-  return stats;
+  // The 15s signal used to sit only on `fetch`. Headers arriving before the
+  // deadline left `readComfyJson` (`res.text()` + `JSON.parse`) unbounded, so
+  // the abort fired, the nested call reported "The operation was aborted due
+  // to timeout", and the enclosing call_tool stayed pending until something
+  // killed it (#1672). Race the WHOLE fetch+decode against the same signal.
+  const signal = AbortSignal.timeout(SYSTEM_STATS_TIMEOUT_MS);
+  try {
+    const stats = await raceAbort(signal, () =>
+      fetchComfyJson<SystemStats>(url, {
+        init: { signal },
+        expectShape: looksLikeSystemStats,
+        shapeHint:
+          "a ComfyUI /system_stats document (it has no `system` object and no `devices` array)",
+      }),
+    );
+    // Shape-valid /system_stats is the in-session proof that this base URL is a
+    // ComfyUI API root. A later empty 502 must not be reported as a misconfigured
+    // URL (#1670). A timeout is not that proof — do not stamp on the abort path.
+    noteComfyApiRootValidated(getComfyUIBaseUrl());
+    return stats;
+  } catch (err) {
+    if (!isTimeoutAbort(err)) throw err;
+    // Structured, not the raw AbortSignal.timeout string: call_tool must
+    // settle with a result the caller can act on, not hang and not dump
+    // "The operation was aborted due to timeout" with no endpoint.
+    throw new ComfyUIError(
+      `No reply from ComfyUI within ${SYSTEM_STATS_TIMEOUT_MS / 1000}s — while requesting ${url} (GET). ` +
+        `Nothing was learned about the server from this — a timeout is not a refusal and not a "not found". ` +
+        `The connection was accepted but the body never finished, which is common while a long decode ` +
+        `occupies the server. The request was aborted; retry after the current job finishes.`,
+      "COMFYUI_HTTP_TIMEOUT",
+      { endpoint: "/system_stats", timeout_ms: SYSTEM_STATS_TIMEOUT_MS },
+    );
+  }
 }
 
 // /object_info is large (~MBs) and slow (300-800 ms) but only changes when
