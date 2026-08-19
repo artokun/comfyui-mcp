@@ -49,20 +49,27 @@ const LIVE_UUID = "55555555-5555-4555-8555-555555555555";
 
 type Fence = { known: false } | { known: true; uuid?: string };
 
-/** The refusal the bridge really mints for this state: `markDispatched(err, false)`
- *  — the typed proof that the frame never reached the socket (ui-bridge.ts). */
-const identityRefusal = (tagged = true): Error => {
+/** The dispatch flag the error carries. `no` is what the bridge really mints for this
+ *  state (`markDispatched(err, false)` — typed proof the frame never reached the
+ *  socket). The other two are the hostile cases: an error whose TEXT satisfies the
+ *  branch's phrase match while the flag says the opposite, or is absent entirely. */
+type Dispatch = "no" | "yes" | "untagged";
+
+const identityRefusal = (dispatch: Dispatch = "no"): Error => {
   const err = new Error(
     `"graph_set_widget" cannot be safely targeted to the active workflow: this workflow has ` +
       `no trusted identity for the panel to fence the command against. Reads and view-only ` +
       `commands still work (graph_outline, graph_query, graph_get_state).`,
   );
-  // `tagged:false` is the hostile case: an error whose TEXT satisfies the branch's
-  // phrase match but which carries no dispatch flag at all.
-  return tagged ? markDispatched(err, false) : err;
+  return dispatch === "untagged" ? err : markDispatched(err, dispatch === "yes");
 };
 
-function bridge(opts: { fence: Fence; activeUuid: string | null | "throw"; tagged?: boolean }) {
+function bridge(opts: {
+  fence: Fence;
+  activeUuid: string | null | "throw";
+  dispatch?: Dispatch;
+  adoptThrows?: boolean;
+}) {
   const b = {
     send: async (cmd: Record<string, unknown>) => {
       if (cmd.cmd === "workflow_list") {
@@ -74,14 +81,19 @@ function bridge(opts: { fence: Fence; activeUuid: string | null | "throw"; tagge
         };
         return { active, workflows: [{ ...active, active: true }], active_confirmed: true };
       }
-      throw identityRefusal(opts.tagged ?? true);
+      throw identityRefusal(opts.dispatch ?? "no");
     },
     push: () => 1,
     canReach: (id: string) => id === TAB,
     isHeadless: () => false,
     tabs: () => [{ tab_id: TAB, title: "wf", connected_at: 0 }],
     resolveActiveTabId: () => TAB,
-    refreshWorkflowUuid: () => true,
+    // A THROW out of the adoption is `adopt_error`: it can land on either side of the
+    // fence write, so whether the fence moved is genuinely unknown.
+    refreshWorkflowUuid: () => {
+      if (opts.adoptThrows) throw new Error("the fence validator threw mid-write");
+      return true;
+    },
     workflowUuidFor: () => opts.fence,
     tabCanMutateGraph: () => true,
     tabGraphMutationCapability: () => ({ known: true, canMutate: true }),
@@ -92,7 +104,8 @@ function bridge(opts: { fence: Fence; activeUuid: string | null | "throw"; tagge
 async function setWidget(opts: {
   fence: Fence;
   activeUuid: string | null | "throw";
-  tagged?: boolean;
+  dispatch?: Dispatch;
+  adoptThrows?: boolean;
 }): Promise<{ text: string; res: ToolResult; fence: Record<string, unknown> | undefined }> {
   const ctx = makePanelToolCtx(bridge(opts), TAB, new WorkflowTargetStore());
   const def = buildPanelToolDefs().find((d) => d.name === "panel_set_widget");
@@ -106,8 +119,22 @@ async function setWidget(opts: {
   };
 }
 
-/** THE ONE THIS CALL REPAIRED: no fence on the tab, live canvas has an identity. */
-const REFRESHED = { fence: { known: false } as Fence, activeUuid: LIVE_UUID };
+/** THE ONE THIS CALL REPAIRED, with the prior fence DEFINITIVELY ABSENT.
+ *  `{known: true}` and not `{known: false}` — FenceRead's contract makes the first
+ *  "there is no fence" and the second "the read failed", and mislabelling the second
+ *  as the first is the exact fold this file is about. It is also the read that matches
+ *  the refusal: the bridge raises "no trusted identity" only when the resolver answered
+ *  and answered empty. */
+const REFRESHED = { fence: { known: true } as Fence, activeUuid: LIVE_UUID };
+/** Same `refreshed` verdict, DIFFERENT prior: the read itself failed. */
+const REFRESHED_UNREADABLE_PRIOR = { fence: { known: false } as Fence, activeUuid: LIVE_UUID };
+/** Same `refreshed` verdict, DIFFERENT prior again: a fence naming ANOTHER workflow,
+ *  which the adoption replaced. Reachable when the session is re-bound mid-check. */
+const OTHER_UUID = "99999999-9999-4999-8999-999999999999";
+const REFRESHED_OTHER_PRIOR = {
+  fence: { known: true, uuid: OTHER_UUID } as Fence,
+  activeUuid: LIVE_UUID,
+};
 /** THE ONE IT DID NOT: a fence read back already present and already equal. */
 const ALREADY_CURRENT = { fence: { known: true, uuid: LIVE_UUID } as Fence, activeUuid: LIVE_UUID };
 
@@ -125,7 +152,109 @@ describe("the two states behind one sentence are told apart (panel#1339)", () =>
     expect(fence?.retry_clears_refusal).toBe("yes");
     expect(fence?.next_action).toBe("retry_same_call");
     expect(fence?.workflow_uuid).toBe(LIVE_UUID);
+    expect(fence?.prior_fence).toBe("absent");
   });
+});
+
+// `refreshed` is returned for EVERY prior that is not a known-equal fence, which is
+// three different priors. Only one of them is an absence, and FenceRead's own contract
+// forbids reporting the other two as one ("an absence nobody observed"). The first draft
+// of this fix said "this session had NO fence for it" on all three — the same collapse
+// this PR removes, reintroduced inside its own replacement message.
+describe("a refreshed fence reports the prior it actually observed (panel#1339)", () => {
+  it("ABSENT: the only prior that may be called 'no fence'", async () => {
+    const { text, fence } = await setWidget(REFRESHED);
+    expect(fence?.prior_fence).toBe("absent");
+    expect(fence?.prior_fence_uuid).toBeUndefined();
+    expect(text).toMatch(/this session had NO fence for it/);
+  });
+
+  it("UNREADABLE: the read FAILED, so no absence is claimed", async () => {
+    const { text, fence } = await setWidget(REFRESHED_UNREADABLE_PRIOR);
+    expect(fence?.rebind_status).toBe("refreshed");
+    expect(fence?.prior_fence).toBe("unreadable");
+    // The exact false claim.
+    expect(text).not.toMatch(/had NO fence/);
+    expect(text).toMatch(/prior fence could not be read/);
+    // …and it still says the repair happened, which IS established.
+    expect(text).toMatch(/THIS CALL installed one/);
+  });
+
+  it("PRESENT: a DIFFERENT workflow's fence was replaced, and it says which", async () => {
+    const { text, fence } = await setWidget(REFRESHED_OTHER_PRIOR);
+    expect(fence?.rebind_status).toBe("refreshed");
+    expect(fence?.prior_fence).toBe("present");
+    expect(fence?.prior_fence_uuid).toBe(OTHER_UUID);
+    expect(text).not.toMatch(/had NO fence/);
+    expect(text).toMatch(/named a DIFFERENT workflow/);
+    expect(text).toContain(OTHER_UUID);
+  });
+
+  it("THE FOLD: the three priors are distinguishable in the field", async () => {
+    const priors = await Promise.all(
+      [REFRESHED, REFRESHED_UNREADABLE_PRIOR, REFRESHED_OTHER_PRIOR].map(async (s) =>
+        (await setWidget(s)).fence?.prior_fence,
+      ),
+    );
+    expect(new Set(priors).size).toBe(3);
+  });
+});
+
+describe("a retry is never ORDERED while the write's fate is open (panel#1339)", () => {
+  it("dispatched:yes — no retry order, and no claim that the flag is absent", async () => {
+    // Latent today (the `markDispatched(…, true)` sites mint their own text and never
+    // carry this phrase), but the branch is new code and reproduced the collapse:
+    // a two-way ternary printed "carries no dispatch flag" for a flag that said `true`,
+    // beside `retry_safe:"no"` and an unconditional "RETRY THIS EXACT CALL ONCE".
+    const { text, fence } = await setWidget({ ...REFRESHED, dispatch: "yes" });
+
+    expect(fence?.dispatched).toBe("yes");
+    expect(fence?.retry_safe).toBe("no");
+    // The verdict must not contradict retry_safe.
+    expect(fence?.next_action).toBe("verify_applied_then_decide");
+    expect(text).not.toMatch(/RETRY THIS EXACT CALL ONCE/);
+    expect(text).not.toMatch(/carries no dispatch flag/);
+    expect(text).not.toMatch(/cannot double-apply/);
+    expect(text).toMatch(/WAS written to the socket/);
+  });
+
+  it("dispatched:unknown — also declines to order one", async () => {
+    const { text, fence } = await setWidget({ ...REFRESHED, dispatch: "untagged" });
+    expect(fence?.retry_safe).toBe("unknown");
+    expect(fence?.next_action).toBe("verify_applied_then_decide");
+    expect(text).not.toMatch(/RETRY THIS EXACT CALL ONCE/);
+  });
+
+  it("the three dispatch states produce three different verdicts", async () => {
+    const seen = await Promise.all(
+      (["no", "yes", "untagged"] as const).map(async (d) => {
+        const { fence } = await setWidget({ ...REFRESHED, dispatch: d });
+        return `${String(fence?.dispatched)}/${String(fence?.retry_safe)}`;
+      }),
+    );
+    expect(new Set(seen).size).toBe(3);
+  });
+});
+
+describe("adopt_error is the one status that may not claim nothing was repaired", () => {
+  it("a THROW out of the adoption reports fence_repaired_by_this_call:unknown", async () => {
+    // The throw can land on either side of the fence write, so "no" would be a state
+    // nobody observed — the same rule rebindWorkflowFence applies one level down when
+    // it declines to reuse `rejected`.
+    const { fence } = await setWidget({ ...REFRESHED, adoptThrows: true });
+    expect(fence?.rebind_status).toBe("adopt_error");
+    expect(fence?.fence_repaired_by_this_call).toBe("unknown");
+    expect(fence?.retry_clears_refusal).toBe("unknown");
+  });
+
+  it("…and every OTHER tail status still says no", async () => {
+    const { fence } = await setWidget({ fence: { known: false }, activeUuid: "throw" });
+    expect(fence?.rebind_status).not.toBe("adopt_error");
+    expect(fence?.fence_repaired_by_this_call).toBe("no");
+  });
+});
+
+describe("the two states behind one sentence are told apart, continued", () => {
 
   it("already_current: says NOTHING was repaired, and does not order a blind retry", async () => {
     const { text, fence } = await setWidget(ALREADY_CURRENT);
@@ -196,7 +325,7 @@ describe("the retry-safety claim stands on the bridge's typed flag, never on the
     // re-surfaced error can contain. Deciding "it is safe to re-run this mutation"
     // off that match is precisely the move this repo forbids. The word match may
     // choose WHAT TO EXPLAIN; only the bridge's flag may authorise a re-run.
-    const { text, fence } = await setWidget({ ...REFRESHED, tagged: false });
+    const { text, fence } = await setWidget({ ...REFRESHED, dispatch: "untagged" });
 
     expect(fence?.dispatched).toBe("unknown");
     expect(fence?.retry_safe).toBe("unknown");

@@ -317,13 +317,25 @@ type FenceRepairDiagnosis = {
   /** Is a bare re-issue expected to get PAST the fence? Independent of `retry_safe`,
    *  which only says a re-issue is harmless. */
   retry_clears_refusal: "yes" | "no" | "unknown";
-  /** The one next call to make. */
+  /** The one next call to make. `verify_applied_then_decide` is what any branch
+   *  degrades to when `dispatched` is not `no`: the fence question may be settled,
+   *  but ordering a re-issue while the original write's fate is open is how a
+   *  mutation gets double-applied. */
   next_action:
     | "retry_same_call"
     | "confirm_target_then_retry"
+    | "verify_applied_then_decide"
     | "open_workflow"
     | "open_or_save_workflow"
     | "unknown";
+  /** WHAT THIS SESSION'S FENCE WAS before the check, as its own tri-state — because
+   *  `refreshed` covers three different priors and only one of them is an absence:
+   *  `absent` = definitively none; `present` = a fence naming a DIFFERENT workflow,
+   *  which the adoption replaced (`prior_fence_uuid` names it); `unreadable` = the
+   *  read failed, so nothing is claimed either way. Folding `unreadable` into
+   *  `absent` is the fold FenceRead's own contract forbids. */
+  prior_fence: "absent" | "present" | "unreadable";
+  prior_fence_uuid?: string;
   /** The live workflow identity the check read, when it read one. */
   workflow_uuid?: string;
   /** RAW EVIDENCE, not a verdict: the routing key this session was bound to before and
@@ -7581,21 +7593,56 @@ export function makePanelToolCtx(
           dispatchFlag === false ? "no" : dispatchFlag === true ? "yes" : "unknown";
         const retrySafe: FenceRepairDiagnosis["retry_safe"] =
           dispatched === "no" ? "yes" : dispatched === "yes" ? "no" : "unknown";
-        // Stated only when the bridge PROVED it. The old wording promised "nothing was
-        // applied, so a retry cannot double-apply" on the strength of the phrase match.
+        // THREE-WAY, because the flag is three-way. A two-way ternary here printed
+        // "this refusal carries no dispatch flag" for a refusal whose flag was
+        // present and said `true` — the same collapse this whole branch exists to
+        // remove, reintroduced one level up (review of this PR). Each arm states the
+        // observation it actually has.
         const nothingApplied =
           dispatched === "no"
             ? ` Nothing was applied (the bridge reports this frame was never written to the ` +
               `socket), so re-issuing cannot double-apply.`
-            : ` Whether anything was applied is NOT established here — this refusal carries no ` +
-              `dispatch flag — so do not re-issue on the strength of this message alone.`;
+            : dispatched === "yes"
+              ? ` CAUTION — the bridge reports this frame WAS written to the socket, so the ` +
+                `mutation may ALREADY have been applied. Do not re-issue it blindly; establish ` +
+                `what landed first (read the node back with panel_query_graph).`
+              : ` Whether anything was applied is NOT established here — this refusal carries no ` +
+                `dispatch flag — so do not re-issue on the strength of this message alone.`;
+        // A retry may only be ORDERED when the bridge proved nothing was written.
+        // Otherwise the instruction contradicts `retry_safe`, which is exactly what a
+        // caller keys on: "RETRY THIS EXACT CALL ONCE" beside `retry_safe:"no"` is a
+        // self-contradictory verdict, and the prose is the half an agent obeys.
+        const mayOrderRetry = dispatched === "no";
+        const retryOrder = mayOrderRetry
+          ? `RETRY THIS EXACT CALL ONCE.`
+          : `The fence is repaired, so the same call should now pass it — but re-issue only ` +
+            `after settling the question below.`;
+        // …and the machine-readable step follows the same rule.
+        const retryAction = (fallback: FenceRepairDiagnosis["next_action"]) =>
+          mayOrderRetry ? fallback : ("verify_applied_then_decide" as const);
         const tabBefore = ctx.tabId;
         try {
           const rebind = await rebindWorkflowFence(ctx);
+          // WHAT WAS THERE BEFORE, reported as the tri-state it is rather than folded
+          // into an absence. `refreshed` is returned for every `before` that is not a
+          // known-equal fence, which is THREE different priors: definitively none, a
+          // read that FAILED, and a fence naming a DIFFERENT workflow that was then
+          // replaced. FenceRead's own contract forbids collapsing the second into the
+          // first ("an absence nobody observed"), and a first draft of this message did
+          // exactly that by saying "this session had NO fence for it" on all three.
+          const priorFence: FenceRepairDiagnosis["prior_fence"] = !rebind.before.known
+            ? "unreadable"
+            : rebind.before.uuid
+              ? "present"
+              : "absent";
           const base = {
             dispatched,
             retry_safe: retrySafe,
             rebind_status: rebind.status,
+            prior_fence: priorFence,
+            ...(rebind.before.known && rebind.before.uuid
+              ? { prior_fence_uuid: rebind.before.uuid }
+              : {}),
             tab_before: tabBefore,
             tab_after: ctx.tabId,
           } as const;
@@ -7618,17 +7665,29 @@ export function makePanelToolCtx(
             );
           }
           if (rebind.status === "refreshed") {
+            // Only what was OBSERVED about the prior fence. Each arm is a different
+            // fact with a different implication, and "no fence" is true for exactly
+            // one of them.
+            const wasBefore =
+              priorFence === "absent"
+                ? `this session had NO fence for it`
+                : priorFence === "present"
+                  ? `this session's fence named a DIFFERENT workflow (${
+                      rebind.before.known ? rebind.before.uuid : ""
+                    }), which has been REPLACED`
+                  : `this session's prior fence could not be read, so whether there was one is ` +
+                    `not claimed here`;
             return failWithFenceDiagnosis(
-              `${raw}\n\nCHECKED: the live canvas DOES carry an identity (${rebind.uuid}), this ` +
-                `session had NO fence for it, and THIS CALL installed one — the refusal you are ` +
-                `reading is what repaired it, which is why the same call refused now and ` +
-                `succeeds next. RETRY THIS EXACT CALL ONCE.${nothingApplied}`,
+              `${raw}\n\nCHECKED: the live canvas DOES carry an identity (${rebind.uuid}), ` +
+                `${wasBefore}, and THIS CALL installed one derived from that canvas — the ` +
+                `refusal you are reading is what repaired it, which is why the same call ` +
+                `refused now and passes the fence next. ${retryOrder}${nothingApplied}`,
               {
                 ...base,
                 workflow_uuid: rebind.uuid,
                 fence_repaired_by_this_call: "yes",
                 retry_clears_refusal: "yes",
-                next_action: "retry_same_call",
+                next_action: retryAction("retry_same_call"),
               },
             );
           }
@@ -7653,7 +7712,7 @@ export function makePanelToolCtx(
                 // NOT "yes". A retry would carry the fence this read saw, but nothing
                 // here establishes that it belongs to the tab the caller addressed.
                 retry_clears_refusal: "unknown",
-                next_action: "confirm_target_then_retry",
+                next_action: retryAction("confirm_target_then_retry"),
               },
             );
           }
@@ -7683,6 +7742,9 @@ export function makePanelToolCtx(
             dispatched,
             retry_safe: retrySafe,
             rebind_status: "check_threw",
+            // The check threw, so it never reported a `before` — that is not an
+            // absence, it is an unmade observation.
+            prior_fence: "unreadable",
             tab_before: tabBefore,
             tab_after: ctx.tabId,
             fence_repaired_by_this_call: "unknown",
