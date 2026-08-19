@@ -167,8 +167,10 @@ export function formatAgentIdentity(identity: AgentIdentity): string {
  * argument and forwards the stamped result, so a body cannot reach here twice.
  *
  * A quoted marker is REWRITTEN as it passes through, so exactly one live marker
- * survives and it is this report's — an analysis pass counting `reporter-agent`
- * across the tracker can never read a quotation as a second reporter. The quoted
+ * survives and it is this report's — an analysis pass counting the full
+ * `<!-- reporter-agent:` literal across the tracker can never read a quotation as
+ * a second reporter (a looser grep for `reporter-agent` still matches the quoted
+ * form, by design — it stays findable). The quoted
  * line stays readable; only its machine prefix changes.
  */
 export function stampAgentIdentity(body: string, identity: AgentIdentity | undefined): string {

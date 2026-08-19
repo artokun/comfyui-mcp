@@ -616,6 +616,31 @@ describe("report_issue stamps the reporting model (mechanical, not self-reported
     expect(body.length).toBeGreaterThan(WORKER_MAX_BODY_LEN - 1_000);
   });
 
+  it("…and keeps it when the oversized body QUOTES stamps (gate P1, round 3)", async () => {
+    publish({ backend: "ollama", model: "gemma3:4b", effort: "high" });
+    // The previous test's body was marker-free, so it could not see this at all:
+    // stamping also REWRITES each quoted marker (+7 chars), so budgeting the
+    // stamp's width against the raw text put the shipped body 7·n OVER the cap —
+    // and the worker cuts the tail, which is the stamp. Blind by construction is
+    // how a covering test ships the bug it covers.
+    for (const markers of [1, 88]) {
+      const quote = "> <!-- reporter-agent: backend=claude model=opus -->\n".repeat(markers);
+      const { payload } = await submittedPayload({
+        title: "t",
+        body: `Related to #1234:\n${quote}${"LOG\n".repeat(20_000)}`,
+      });
+      const body = payload?.body as string;
+      expect(body.length, `markers=${markers}`).toBeLessThanOrEqual(WORKER_MAX_BODY_LEN);
+      // Present AND terminated: a marker cut mid-token is not an attribution.
+      expect(body, `markers=${markers}`).toContain(
+        "<!-- reporter-agent: backend=ollama model=gemma3:4b effort=high -->",
+      );
+      expect(body, `markers=${markers}`).toContain("Filed from the ComfyUI panel");
+      // Still exactly one live marker: the quoted ones stayed neutralized.
+      expect(body.match(/<!-- reporter-agent:/g)?.length, `markers=${markers}`).toBe(1);
+    }
+  });
+
   it("leaves an oversized body ALONE when there is no identity to protect", async () => {
     delete process.env.COMFYUI_MCP_AGENT_IDENTITY;
     const huge = "x".repeat(WORKER_MAX_BODY_LEN + 5_000);
