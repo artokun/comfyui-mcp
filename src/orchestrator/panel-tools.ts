@@ -278,6 +278,72 @@ function fail(err: unknown): ToolResult {
   const msg = err instanceof Error ? err.message : String(err);
   return { content: [{ type: "text", text: `Error: ${msg}` }], isError: true };
 }
+
+/**
+ * panel#1339 — the MACHINE-READABLE half of a `no trusted identity` refusal.
+ *
+ * The prose half of this refusal used ONE sentence for two opposite outcomes
+ * (`refreshed` and `already_current`), so the caller could not tell "answering you
+ * is what installed your fence — retry" from "this call repaired nothing, and the
+ * identity quoted is not necessarily the one you were refused against". Splitting
+ * the sentence fixes the reading; it does not fix the DECIDING, because deciding
+ * from a sentence means an agent re-runs a mutation by pattern-matching an error
+ * message. That is the one thing this project never does. So the discriminator is
+ * carried as a field.
+ *
+ * EVERY field is tri-state on purpose. A boolean here would recreate the exact
+ * collapse this exists to remove: `false` would have to mean both "no" and "we
+ * could not find out", and those demand different next actions.
+ *
+ * `dispatched` is read from the BRIDGE'S OWN typed flag (`dispatchOutcomeOf`), never
+ * from the message text. The predicate that selects this whole branch
+ * (`isNoTrustedIdentityRefusal`) IS a text match, which is fine for choosing what to
+ * explain and unfit for authorising a re-run: any error that merely quotes the phrase
+ * would satisfy it. So the "nothing was applied" claim — the claim a caller would act
+ * on — stands on the typed flag alone, and says `unknown` when the flag is absent.
+ */
+type FenceRepairDiagnosis = {
+  /** Was the mutation written to the panel socket? From the bridge's typed flag only. */
+  dispatched: "no" | "yes" | "unknown";
+  /** May this exact call be re-issued without risking a DOUBLE-APPLY? `yes` only
+   *  when `dispatched` is `no` — i.e. only when the bridge itself said so. */
+  retry_safe: "yes" | "no" | "unknown";
+  /** The read-only re-derivation's own verdict, verbatim, so a caller never has to
+   *  re-derive it from the wording. `check_threw` = the diagnosis itself failed. */
+  rebind_status: WorkflowFenceRebind["status"] | "check_threw";
+  /** THE DISCRIMINATOR. `yes` = this refusal is what installed the fence, so the
+   *  retry works because of it. `no` = nothing was repaired for you. */
+  fence_repaired_by_this_call: "yes" | "no" | "unknown";
+  /** Is a bare re-issue expected to get PAST the fence? Independent of `retry_safe`,
+   *  which only says a re-issue is harmless. */
+  retry_clears_refusal: "yes" | "no" | "unknown";
+  /** The one next call to make. */
+  next_action:
+    | "retry_same_call"
+    | "confirm_target_then_retry"
+    | "open_workflow"
+    | "open_or_save_workflow"
+    | "unknown";
+  /** The live workflow identity the check read, when it read one. */
+  workflow_uuid?: string;
+  /** RAW EVIDENCE, not a verdict: the routing key this session was bound to before and
+   *  after the check. `tab_before === tab_after` does NOT prove the session never
+   *  moved — a move-and-return is invisible to it — which is precisely why
+   *  `retry_clears_refusal` stays `unknown` on the `already_current` path rather than
+   *  being derived from this pair. */
+  tab_before: string;
+  tab_after: string;
+};
+
+/** A refusal that also carries {@link FenceRepairDiagnosis}. The text is unchanged by
+ *  this wrapper: the field is ADDITIVE, so a client that ignores structuredContent
+ *  reads exactly what it read before. */
+function failWithFenceDiagnosis(text: string, diagnosis: FenceRepairDiagnosis): ToolResult {
+  const res = fail(text);
+  res.structuredContent = { panel_fence: diagnosis };
+  return res;
+}
+
 /**
  * #971 — the AMBIGUOUS-rebind refusal, worded so it can be acted on.
  *
@@ -7463,12 +7529,71 @@ export function makePanelToolCtx(
       // The bridge cannot tell them apart — from its side both are "no identity". The
       // orchestrator can, with the same read-only re-derivation the documented recovery
       // performs. So it is measured, once, and the answer names the remedy that fits.
+      // panel#1339 — `refreshed` AND `already_current` ARE NOT THE SAME ANSWER.
+      //
+      // The branch below used to return ONE sentence for both: "the live canvas DOES
+      // carry an identity (<uuid>) and this session's fence has been re-derived onto
+      // it. RETRY THIS EXACT CALL ONCE". The reporter read that as a contradiction —
+      // told the identity had *already* been re-derived, yet refused anyway — and the
+      // two states it covers want opposite next moves:
+      //
+      //   refreshed        the tab had NO fence and THIS CALL installed one, derived
+      //                    from the live canvas. The refusal you are holding is the
+      //                    repair. A bare retry is the right move and works because
+      //                    of it — which is why it looked "transient": the first call
+      //                    did the work and reported failure.
+      //   already_current  the fence read back as ALREADY PRESENT AND EQUAL. It
+      //                    cannot have been that for the tab the command was refused
+      //                    on (the refusal proves that tab's stamp was empty, and
+      //                    currentWorkflowFence reads the same resolver), so this is
+      //                    a fence for a tab this session reached DURING the check —
+      //                    rebindWorkflowFence's own workflow_list round trip is
+      //                    retry-safe, and its retry runs ensureReachable, which can
+      //                    move an orphaned mode:"current" session onto another tab.
+      //                    NOTHING WAS REPAIRED for the caller, and the uuid quoted is
+      //                    not necessarily the one they were refused against.
+      //
+      // Splitting the sentence is half the fix. The other half is that the answer must
+      // be readable WITHOUT parsing the sentence: an agent deciding to re-run a
+      // mutation off matched error prose is how a write gets double-applied. See
+      // FenceRepairDiagnosis — the verdict, and the bridge-owned dispatch flag the
+      // "nothing was applied" claim rests on, ride in structuredContent.
+      //
+      // What does NOT change: every branch still REFUSES. The call really did not
+      // perform the widget write — it performed the repair — and a refusal that
+      // repairs and REPORTS is a different risk from one that repairs and PROCEEDS
+      // (#1646 removed exactly that from the neighbouring branch). Nothing here
+      // auto-continues the mutation.
       if (isNoTrustedIdentityRefusal(err) && isMutatingGraphCmd(cmd)) {
         const raw = err instanceof Error ? err.message : String(err);
+        // The TYPED flag, not the text predicate above: `isNoTrustedIdentityRefusal`
+        // is a phrase match and would fire on anything that merely quotes the phrase.
+        // Only the bridge can say whether the frame reached the socket.
+        const dispatchFlag = dispatchOutcomeOf(err);
+        const dispatched: FenceRepairDiagnosis["dispatched"] =
+          dispatchFlag === false ? "no" : dispatchFlag === true ? "yes" : "unknown";
+        const retrySafe: FenceRepairDiagnosis["retry_safe"] =
+          dispatched === "no" ? "yes" : dispatched === "yes" ? "no" : "unknown";
+        // Stated only when the bridge PROVED it. The old wording promised "nothing was
+        // applied, so a retry cannot double-apply" on the strength of the phrase match.
+        const nothingApplied =
+          dispatched === "no"
+            ? ` Nothing was applied (the bridge reports this frame was never written to the ` +
+              `socket), so re-issuing cannot double-apply.`
+            : ` Whether anything was applied is NOT established here — this refusal carries no ` +
+              `dispatch flag — so do not re-issue on the strength of this message alone.`;
+        const tabBefore = ctx.tabId;
         try {
           const rebind = await rebindWorkflowFence(ctx);
+          const base = {
+            dispatched,
+            retry_safe: retrySafe,
+            rebind_status: rebind.status,
+            tab_before: tabBefore,
+            tab_after: ctx.tabId,
+          } as const;
           if (rebind.status === "no_identity") {
-            return fail(
+            return failWithFenceDiagnosis(
               `${raw}\n\nCHECKED, so this is not a guess: the live canvas was re-read and it ` +
                 `carries no workflow identity either (${rebind.why}). ` +
                 `panel_set_workflow_target({mode:"current"}) will NOT clear this — it chooses ` +
@@ -7477,26 +7602,84 @@ export function makePanelToolCtx(
                 `panel_open_workflow(<path>) on this same workflow; re-opening it is what gives ` +
                 `it an identity. If it has never been saved there is no path to re-open — save ` +
                 `it first with panel_save_workflow, which also gives it a stable identity.`,
+              {
+                ...base,
+                fence_repaired_by_this_call: "no",
+                retry_clears_refusal: "no",
+                next_action: "open_or_save_workflow",
+              },
             );
           }
-          if (rebind.status === "refreshed" || rebind.status === "already_current") {
-            return fail(
-              `${raw}\n\nCHECKED: the live canvas DOES carry an identity (${rebind.uuid}) and ` +
-                `this session's fence has been re-derived onto it. RETRY THIS EXACT CALL ONCE — ` +
-                `nothing was applied, so a retry cannot double-apply.`,
+          if (rebind.status === "refreshed") {
+            return failWithFenceDiagnosis(
+              `${raw}\n\nCHECKED: the live canvas DOES carry an identity (${rebind.uuid}), this ` +
+                `session had NO fence for it, and THIS CALL installed one — the refusal you are ` +
+                `reading is what repaired it, which is why the same call refused now and ` +
+                `succeeds next. RETRY THIS EXACT CALL ONCE.${nothingApplied}`,
+              {
+                ...base,
+                workflow_uuid: rebind.uuid,
+                fence_repaired_by_this_call: "yes",
+                retry_clears_refusal: "yes",
+                next_action: "retry_same_call",
+              },
+            );
+          }
+          if (rebind.status === "already_current") {
+            return failWithFenceDiagnosis(
+              `${raw}\n\nCHECKED, and THIS CALL REPAIRED NOTHING: the re-read found a fence that ` +
+                `was ALREADY present and already named the live canvas (${rebind.uuid}). That ` +
+                `cannot be the fence your command was refused against — the refusal is proof ` +
+                `that one was missing — so this session reached a DIFFERENT tab while the check ` +
+                `ran, and ${rebind.uuid} is that tab's identity, not necessarily the one you ` +
+                `asked for. CONFIRM THE TARGET BEFORE RETRYING: ` +
+                `panel_set_workflow_target({mode:"current"}) if you mean the canvas that is live ` +
+                `now, or panel_open_workflow(<path>) for the workflow you actually meant; then ` +
+                `re-issue.${nothingApplied} A bare retry is not refused by this message — it is ` +
+                `simply not aimed at anything this check verified.`,
+              {
+                ...base,
+                workflow_uuid: rebind.uuid,
+                fence_repaired_by_this_call: "no",
+                // NOT "yes". A retry would carry the fence this read saw, but nothing
+                // here establishes that it belongs to the tab the caller addressed.
+                retry_clears_refusal: "unknown",
+                next_action: "confirm_target_then_retry",
+              },
             );
           }
           // unreadable / uncorroborated — say so rather than picking a remedy.
-          return fail(
+          return failWithFenceDiagnosis(
             `${raw}\n\nCHECKED, and the answer is UNKNOWN: the live canvas could not be re-read ` +
               `well enough to say whether it has an identity. Try ` +
               `panel_open_workflow(<path>) on the workflow you mean — it is the only recovery ` +
               `that works in BOTH states, because it gives the workflow an identity rather than ` +
               `adopting one that may not exist.`,
+            {
+              ...base,
+              ...(("uuid" in rebind) ? { workflow_uuid: rebind.uuid } : {}),
+              // `adopt_error` is the one status that cannot say which side of the write
+              // it threw on, so it is the one that may not claim "nothing was repaired".
+              fence_repaired_by_this_call: rebind.status === "adopt_error" ? "unknown" : "no",
+              retry_clears_refusal: "unknown",
+              next_action: "open_workflow",
+            },
           );
         } catch {
-          // The diagnosis must never change how the call failed.
-          return fail(raw);
+          // The diagnosis must never change how the call failed — so the TEXT is the
+          // bare cause, exactly as before. The field is still emitted, saying unknown:
+          // a caller that has to distinguish "no field" from "field says unknown" is
+          // back to inferring, which is the defect this fix is about.
+          return failWithFenceDiagnosis(raw, {
+            dispatched,
+            retry_safe: retrySafe,
+            rebind_status: "check_threw",
+            tab_before: tabBefore,
+            tab_after: ctx.tabId,
+            fence_repaired_by_this_call: "unknown",
+            retry_clears_refusal: "unknown",
+            next_action: "unknown",
+          });
         }
       }
       // #1330 — CORROBORATE A FENCE MISMATCH INSTEAD OF LETTING IT REPEAT.
