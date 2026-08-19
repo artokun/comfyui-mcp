@@ -50,8 +50,16 @@
 // names the directories it actually checked rather than claiming no directory
 // could serve the file.
 
-import { realpath } from "node:fs/promises";
-import { basename, dirname, relative, resolve, sep } from "node:path";
+import { constants as fsConstants } from "node:fs";
+import {
+  copyFile,
+  mkdir,
+  readdir,
+  realpath,
+  rm,
+  stat,
+} from "node:fs/promises";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { isCloudMode, isRemoteMode } from "../config.js";
 import { resolveInputDir, resolveOutputDir } from "./output-dir.js";
 
@@ -330,6 +338,267 @@ export async function resolveServableViewRef(
   return { status: "outside", checked: roots };
 }
 
+// ---- opt-in staging into a served directory (#802) --------------------------
+//
+// The `outside` verdict used to end in "copy the file yourself". Staging does
+// that copy FOR the caller — and it is deliberately OPT-IN (panel_show_media's
+// stage:true), because it is a filesystem WRITE into the user's ComfyUI output
+// directory made as a side effect of a display call. The default behaviour is
+// unchanged: a refusal that names the manual remedy.
+//
+// The staged copy lands in <output>/_panel_staged/ with a timestamped name, so
+// a repeat staging never overwrites an earlier copy, and the copies PERSIST —
+// no automatic cleanup, because every lifecycle this codebase has tried for
+// shared temp files has raced a reader that had not finished (#1152). The
+// reply discloses the write and where the copies live; deleting them is the
+// user's call, not ours.
+
+/** Subfolder of ComfyUI's output directory that staged copies are written to. */
+export const STAGED_SUBFOLDER = "_panel_staged";
+
+/** Per-file staging cap — a guardrail on disk use, not the transport limit. */
+export const STAGE_MAX_FILE_BYTES = 512 * 1024 * 1024; // 512 MB
+
+/** Total cap on the staging folder, so repeated staging cannot grow without bound. */
+export const STAGE_MAX_DIR_BYTES = 2 * 1024 * 1024 * 1024; // 2 GB
+
+export type StageIntoServedDirResult =
+  | { status: "staged"; ref: ComfyServableRef; stagedPath: string }
+  | { status: "failed"; reason: string };
+
+/**
+ * Copy a LOCAL file into <output>/_panel_staged/ so ComfyUI can serve it over
+ * /view, and return the ref for the COPY.
+ *
+ * Never throws: like the resolver above, every step is an operation that can
+ * fail, and a staging failure must come back as a reason the caller can report,
+ * not as a transport error. Fails CLOSED on the copy itself — COPYFILE_EXCL
+ * (never overwrite), and a size check after the copy with the partial file
+ * removed when it does not match, so a raced or truncated copy is never
+ * forwarded as if it were the file the caller asked to show.
+ */
+export async function stageFileIntoServedDir(
+  absPath: string,
+  opts?: { maxFileBytes?: number; maxDirBytes?: number },
+): Promise<StageIntoServedDirResult> {
+  const maxFileBytes = opts?.maxFileBytes ?? STAGE_MAX_FILE_BYTES;
+  const maxDirBytes = opts?.maxDirBytes ?? STAGE_MAX_DIR_BYTES;
+  try {
+    // Same guard as the resolver, and first for the same reason: on a remote or
+    // cloud target a copy made HERE would land on a machine ComfyUI cannot see.
+    if (isCloudMode()) {
+      return {
+        status: "failed",
+        reason:
+          "this session targets ComfyUI Cloud — a copy made on this machine would not be reachable by that server",
+      };
+    }
+    if (isRemoteMode()) {
+      return {
+        status: "failed",
+        reason:
+          "this session targets a REMOTE ComfyUI on a different host — a copy made on this machine would not be reachable by that server",
+      };
+    }
+
+    let outputDir: string;
+    try {
+      outputDir = await resolveOutputDir();
+    } catch (err) {
+      return {
+        status: "failed",
+        reason: `ComfyUI's output directory could not be resolved (${errText(err)})`,
+      };
+    }
+    if (typeof outputDir !== "string" || outputDir.length === 0) {
+      return {
+        status: "failed",
+        reason: "ComfyUI's output directory resolved to an empty value",
+      };
+    }
+    const root = await canonical(resolve(outputDir));
+    if (!root.resolved) {
+      return {
+        status: "failed",
+        reason: `ComfyUI's output directory (${outputDir}) could not be canonicalised (${root.why ?? "unknown error"})`,
+      };
+    }
+
+    const file = await canonical(resolve(absPath));
+    if (!file.resolved) {
+      return {
+        status: "failed",
+        reason: `the file's real location could not be resolved (${file.why ?? "unknown error"})`,
+      };
+    }
+    if (isStrictlyInside(file.path, root.path)) {
+      // The caller stages only files it believes are outside every served
+      // directory; finding the file INSIDE the output root means that belief
+      // is stale, and copying it under a second name would deposit a duplicate
+      // the user never asked for.
+      return {
+        status: "failed",
+        reason:
+          "the file is ALREADY under ComfyUI's output directory, so it needs no staging — call panel_show_media with the same path again (it should take the by-reference route) and do NOT pass stage",
+      };
+    }
+
+    const srcStat = await stat(file.path);
+    if (!srcStat.isFile()) {
+      return { status: "failed", reason: `not a regular file: ${absPath}` };
+    }
+    if (srcStat.size > maxFileBytes) {
+      return {
+        status: "failed",
+        reason:
+          `the file is ${mb(srcStat.size)}, over the ${mb(maxFileBytes)} per-file staging cap — ` +
+          `staging is for ordinary oversized media, not unbounded disk use; copy it under a served directory yourself if it really must be shown`,
+      };
+    }
+
+    const stagingDir = join(root.path, STAGED_SUBFOLDER);
+    // Total-usage guardrail. Entries that vanish or refuse a stat between the
+    // readdir and here are simply not counted — undercounting a transient is
+    // fine; this cap exists to stop unbounded growth, not to audit the folder.
+    let stagedBytes = 0;
+    try {
+      for (const entry of await readdir(stagingDir)) {
+        try {
+          stagedBytes += (await stat(join(stagingDir, entry))).size;
+        } catch {
+          // unknown-ok: an entry that disappeared mid-scan contributes nothing
+          // to current usage; the guardrail tolerates the undercount.
+        }
+      }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+        return {
+          status: "failed",
+          reason: `the staging folder (${stagingDir}) could not be read (${errText(err)})`,
+        };
+      }
+      // ENOENT: nothing staged yet — usage is zero.
+    }
+    if (stagedBytes + srcStat.size > maxDirBytes) {
+      return {
+        status: "failed",
+        reason:
+          `the staging folder (${stagingDir}) already holds ${mb(stagedBytes)} and this ${mb(srcStat.size)} file would pass the ${mb(maxDirBytes)} total cap — ` +
+          `ask the user to clear out old staged copies, then retry`,
+      };
+    }
+
+    await mkdir(stagingDir, { recursive: true });
+
+    // Timestamped so staging the same basename twice never collides; the retry
+    // loop covers two calls landing in the same millisecond.
+    const base = basename(file.path);
+    let stagedPath = "";
+    let stagedName = "";
+    let copied = false;
+    let lastErr: unknown = null;
+    for (let attempt = 0; attempt < 3 && !copied; attempt++) {
+      stagedName =
+        attempt === 0
+          ? `${Date.now()}-${base}`
+          : `${Date.now()}-${attempt}-${base}`;
+      stagedPath = join(stagingDir, stagedName);
+      try {
+        await copyFile(file.path, stagedPath, fsConstants.COPYFILE_EXCL);
+        copied = true;
+      } catch (err) {
+        lastErr = err;
+        if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") break;
+      }
+    }
+    if (!copied) {
+      return {
+        status: "failed",
+        reason: `the copy into ${stagingDir} failed (${errText(lastErr)}) — the original file was not modified`,
+      };
+    }
+
+    // The copy must BE the file: a source rewritten mid-copy, or a truncated
+    // write, must not be forwarded as if it were what the caller asked to show.
+    const dstStat = await stat(stagedPath);
+    if (dstStat.size !== srcStat.size) {
+      await rm(stagedPath, { force: true }).catch(() => {
+        // unknown-ok: the partial copy is already rejected; failing to remove
+        // it leaves harmless scratch, and masking the real failure (the size
+        // mismatch) with a cleanup error would misreport what went wrong.
+      });
+      return {
+        status: "failed",
+        reason:
+          `the staged copy came out ${mb(dstStat.size)} against a ${mb(srcStat.size)} source — the file may have changed while it was being copied; ` +
+          `the partial copy was removed and nothing was forwarded`,
+      };
+    }
+
+    const problem = refShapeProblem(stagedName, STAGED_SUBFOLDER);
+    if (problem) {
+      await rm(stagedPath, { force: true }).catch(() => {
+        // unknown-ok: same as above — the ref rejection is the failure that
+        // matters; leftover scratch is disclosed by the folder's existence.
+      });
+      return {
+        status: "failed",
+        reason: `the staged ref was rejected by the shape check (${problem}) — the copy was removed and nothing was forwarded`,
+      };
+    }
+
+    return {
+      status: "staged",
+      ref: { filename: stagedName, subfolder: STAGED_SUBFOLDER, type: "output" },
+      stagedPath,
+    };
+  } catch (err) {
+    return {
+      status: "failed",
+      reason: `staging failed (${errText(err)}) — the original file was not modified`,
+    };
+  }
+}
+
+/** One item that was staged into a served directory and forwarded by reference. */
+export type StagedForDisplay = {
+  /** The original path the caller passed. */
+  path: string;
+  /** The copy the panel was pointed at. */
+  stagedPath: string;
+  sizeBytes: number;
+  kind: "image" | "video";
+  ref: ComfyServableRef;
+};
+
+/**
+ * What the agent is told about items that took the staging route (#802).
+ *
+ * The disclosure is the point: staging is a real filesystem WRITE into the
+ * user's ComfyUI output directory, and the copies PERSIST. The note states the
+ * write, where it landed, that nothing cleans it up, and — as with every
+ * reference route — that this process forwarded a reference and did not
+ * observe the panel displaying anything.
+ */
+export function stagedForDisplayNote(
+  items: StagedForDisplay[],
+  capBytes: number,
+): string {
+  const one = items.length === 1;
+  const lines = items.map((it) => {
+    return `  - ${it.ref.filename} (${mb(it.sizeBytes)}, ${it.kind}) — copied from ${it.path} to ${it.stagedPath}`;
+  });
+  return (
+    `NOTE — ${one ? "1 item was" : `${items.length} items were`} over the ${mb(capBytes)} inline cap and ${one ? "was" : "were"} STAGED, ` +
+    `because stage:true was passed: the orchestrator COPIED ${one ? "the file" : "each file"} into a directory ComfyUI serves ` +
+    `and sent the panel a /view reference to the copy (that route has no size limit):\n${lines.join("\n")}\n` +
+    `That was a real filesystem WRITE, done only because stage:true opted in. The ${one ? "copy persists" : "copies persist"} — ` +
+    `nothing cleans ${one ? "it" : "them"} up automatically; ${one ? "it lives" : "they live"} in the ${STAGED_SUBFOLDER} folder ` +
+    `above and the user can delete that folder when done. Say so if you mention the file's location.\n` +
+    `You were NOT sent the bytes of ${one ? "this file" : "these files"}. Whether the panel displayed ${one ? "it" : "them"} is in its reply above, not here.`
+  );
+}
+
 const mb = (bytes: number): string => `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 
 /**
@@ -386,12 +655,20 @@ export function oversizedInlineRefusal(opts: {
     const list = resolution.checked
       .map((r) => `    - ${r.kind}: ${r.dir}`)
       .join("\n");
+    const outputDir = resolution.checked.find((r) => r.kind === "output")?.dir;
+    // Staging is named FIRST because it is the one remedy that is a single
+    // retried call — but it is disclosed as the disk write it is, caps and
+    // persistence included, so choosing it is an informed choice (#802).
+    const staging = outputDir
+      ? `  1. Retry THIS call with stage:true on the item — the orchestrator will COPY the file into ${outputDir}${outputDir.endsWith("/") || outputDir.endsWith("\\") ? "" : "/"}${STAGED_SUBFOLDER} and display the copy by reference. That is a real disk write (caps: ${mb(STAGE_MAX_FILE_BYTES)} per file, ${mb(STAGE_MAX_DIR_BYTES)} total staged) and the copy PERSISTS until someone deletes it.\n`
+      : "";
     return (
       `${head}\n` +
       `This file is not under any directory this ComfyUI serves. Checked:\n${list}\n` +
       `What you can do:\n` +
-      `  1. Copy or move it under one of the directories above (a subfolder is fine) and call panel_show_media again with the NEW path. ${seeItYourself}\n` +
-      `  2. Ask the user to move it, or to open it themselves; it is on the machine they are at.`
+      staging +
+      `  ${staging ? "2" : "1"}. Copy or move it under one of the directories above (a subfolder is fine) and call panel_show_media again with the NEW path. ${seeItYourself}\n` +
+      `  ${staging ? "3" : "2"}. Ask the user to move it, or to open it themselves; it is on the machine they are at.`
     );
   }
 

@@ -7,7 +7,7 @@
 // it needs to be, so the tests below assert the REASON, not just the outcome.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -76,6 +76,8 @@ const {
   oversizedInlineRefusal,
   forwardedByReferenceNote,
   unverifiedViewRefNote,
+  stageFileIntoServedDir,
+  stagedForDisplayNote,
 } = await import("../../services/comfy-view-ref.js");
 
 let root: string;
@@ -518,5 +520,157 @@ describe("unverifiedViewRefNote (#941)", () => {
     const note = unverifiedViewRefNote(many);
     expect(note).toMatch(/…and 4 more/);
     expect(note).not.toContain("f11.png");
+  });
+});
+
+// #802 — the parked half of the original report: the `outside` verdict used to
+// end in "copy the file yourself". stageFileIntoServedDir does that copy for a
+// caller who explicitly opted in (stage:true), into <output>/_panel_staged,
+// and the tests below pin the things that make it safe to offer: it is a
+// disclosed, never-overwriting, size-checked write — and it fails closed.
+describe("stageFileIntoServedDir (#802)", () => {
+  it("copies an outside file under _panel_staged and returns a ref to the COPY", async () => {
+    const src = touch(join(root, "elsewhere", "clip.mp4"));
+    writeFileSync(src, "video-bytes");
+    const res = await stageFileIntoServedDir(src);
+    expect(res.status).toBe("staged");
+    if (res.status !== "staged") return;
+    expect(res.ref.type).toBe("output");
+    expect(res.ref.subfolder).toBe("_panel_staged");
+    // Timestamped name, original basename preserved, and the copy really is
+    // the file — the by-reference route shows the copy, so it must BE it.
+    expect(res.ref.filename).toMatch(/^\d+-clip\.mp4$/);
+    expect(readFileSync(res.stagedPath, "utf8")).toBe("video-bytes");
+    expect(res.stagedPath).toBe(join(outDir, "_panel_staged", res.ref.filename));
+    // The ORIGINAL was not modified or moved.
+    expect(readFileSync(src, "utf8")).toBe("video-bytes");
+  });
+
+  it("staging the same file twice never overwrites the first copy", async () => {
+    const src = touch(join(root, "elsewhere", "clip.mp4"));
+    const first = await stageFileIntoServedDir(src);
+    const second = await stageFileIntoServedDir(src);
+    expect(first.status).toBe("staged");
+    expect(second.status).toBe("staged");
+    if (first.status !== "staged" || second.status !== "staged") return;
+    expect(second.ref.filename).not.toBe(first.ref.filename);
+    expect(existsSync(first.stagedPath)).toBe(true);
+    expect(existsSync(second.stagedPath)).toBe(true);
+  });
+
+  it("refuses to stage a file that is ALREADY under the output directory", async () => {
+    const inside = touch(join(outDir, "clip.mp4"));
+    const res = await stageFileIntoServedDir(inside);
+    expect(res.status).toBe("failed");
+    if (res.status !== "failed") return;
+    expect(res.reason).toContain("ALREADY under");
+    // No duplicate may have been deposited.
+    expect(existsSync(join(outDir, "_panel_staged"))).toBe(false);
+  });
+
+  it("fails closed on a REMOTE target — a copy made here would be unreachable", async () => {
+    state.remote = true;
+    const src = touch(join(root, "elsewhere", "clip.mp4"));
+    const res = await stageFileIntoServedDir(src);
+    expect(res.status).toBe("failed");
+    if (res.status !== "failed") return;
+    expect(res.reason).toContain("REMOTE");
+    expect(existsSync(join(outDir, "_panel_staged"))).toBe(false);
+  });
+
+  it("fails closed on ComfyUI Cloud", async () => {
+    state.cloud = true;
+    const src = touch(join(root, "elsewhere", "clip.mp4"));
+    const res = await stageFileIntoServedDir(src);
+    expect(res.status).toBe("failed");
+    if (res.status !== "failed") return;
+    expect(res.reason).toContain("Cloud");
+  });
+
+  it("fails, rather than throwing, when the output directory cannot be resolved", async () => {
+    state.outputError = "the server did not answer /system_stats";
+    const src = touch(join(root, "elsewhere", "clip.mp4"));
+    const res = await stageFileIntoServedDir(src);
+    expect(res.status).toBe("failed");
+    if (res.status !== "failed") return;
+    expect(res.reason).toContain("could not be resolved");
+    expect(res.reason).toContain("the server did not answer /system_stats");
+  });
+
+  it("refuses a file over the per-file staging cap and copies nothing", async () => {
+    const src = touch(join(root, "elsewhere", "clip.mp4"));
+    const res = await stageFileIntoServedDir(src, { maxFileBytes: 0 });
+    expect(res.status).toBe("failed");
+    if (res.status !== "failed") return;
+    expect(res.reason).toContain("per-file staging cap");
+    expect(existsSync(join(outDir, "_panel_staged"))).toBe(false);
+  });
+
+  it("refuses when the staging folder would pass the total cap, and names the folder", async () => {
+    mkdirSync(join(outDir, "_panel_staged"), { recursive: true });
+    writeFileSync(join(outDir, "_panel_staged", "old.mp4"), "x".repeat(64));
+    const src = touch(join(root, "elsewhere", "clip.mp4"));
+    const res = await stageFileIntoServedDir(src, { maxDirBytes: 16 });
+    expect(res.status).toBe("failed");
+    if (res.status !== "failed") return;
+    expect(res.reason).toContain("total cap");
+    expect(res.reason).toContain("_panel_staged");
+  });
+});
+
+describe("oversizedInlineRefusal — the outside branch names staging (#802)", () => {
+  const base = {
+    path: "/refs/clip.mp4",
+    sizeBytes: 72 * 1024 * 1024,
+    capBytes: 20 * 1024 * 1024,
+    kind: "video" as const,
+  };
+
+  it("offers stage:true as the one-call remedy, disclosed as a persistent disk write", () => {
+    const msg = oversizedInlineRefusal({
+      ...base,
+      resolution: { status: "outside", checked: [{ kind: "output", dir: "/c/output" }] },
+    });
+    expect(msg).toContain("stage:true");
+    expect(msg).toContain("/c/output/_panel_staged");
+    // The write's cost is stated where it is offered, not buried.
+    expect(msg).toMatch(/disk write/);
+    expect(msg).toContain("PERSISTS");
+  });
+
+  it("does NOT offer staging to a remote caller, who it cannot help", () => {
+    const msg = oversizedInlineRefusal({
+      ...base,
+      resolution: { status: "remote", reason: "this session targets a REMOTE ComfyUI on a different host" },
+    });
+    expect(msg).not.toContain("stage:true");
+  });
+});
+
+describe("stagedForDisplayNote (#802)", () => {
+  const item = {
+    path: "/refs/clip.mp4",
+    stagedPath: "/c/output/_panel_staged/1724000000000-clip.mp4",
+    sizeBytes: 72 * 1024 * 1024,
+    kind: "video" as const,
+    ref: { filename: "1724000000000-clip.mp4", subfolder: "_panel_staged", type: "output" as const },
+  };
+
+  it("discloses the write, its location, and that the copy PERSISTS", () => {
+    const note = stagedForDisplayNote([item], 20 * 1024 * 1024);
+    expect(note).toContain("COPIED");
+    expect(note).toContain("stage:true");
+    expect(note).toContain("/refs/clip.mp4");
+    expect(note).toContain(item.stagedPath);
+    expect(note).toMatch(/real filesystem WRITE/);
+    expect(note).toMatch(/persists/);
+    expect(note).toContain("_panel_staged");
+  });
+
+  it("never claims the panel displayed anything, and says the bytes were not sent", () => {
+    const note = stagedForDisplayNote([item], 20 * 1024 * 1024);
+    expect(note).toContain("NOT sent the bytes");
+    expect(note).toContain("in its reply above");
+    expect(note).not.toMatch(/was displayed to the user/i);
   });
 });

@@ -10,7 +10,7 @@
 // oversized fixtures are real files above the cap.
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { PanelToolCtx, ToolResult } from "../../orchestrator/panel-tools.js";
@@ -235,6 +235,8 @@ describe("panel_show_media: an oversized file NOT under a root is refused with a
     expect(text).toContain(inDir);
     expect(text).toMatch(/Copy or move it/);
     expect(text).toContain("panel_show_media");
+    // #802 — the refusal also names the opt-in one-call remedy.
+    expect(text).toContain("stage:true");
   });
 
   it("does not blame the file's location when the roots could not be resolved", async () => {
@@ -258,6 +260,82 @@ describe("panel_show_media: an oversized file NOT under a root is refused with a
     expect(text).toContain("REMOTE ComfyUI");
     expect(text).not.toMatch(/Copy or move it/);
     expect(text).toContain('type: "input"');
+  });
+});
+
+// #802 — with stage:true the caller opts into the orchestrator copying an
+// oversized OUTSIDE file into <output>/_panel_staged and displaying the copy
+// by reference. These cover the WIRING; the staging mechanics and their
+// failure modes are pinned in comfy-view-ref.test.ts.
+describe("panel_show_media: stage:true stages an oversized outside file (#802)", () => {
+  it("copies the file under _panel_staged and forwards a ref to the COPY", async () => {
+    const { res, calls } = await showMedia([{ source: { path: bigVideoOutside, stage: true } }]);
+    expect(res.isError).toBeFalsy();
+    expect(calls).toHaveLength(1);
+    const items = calls[0].items as Array<Record<string, unknown>>;
+    expect(items).toHaveLength(1);
+    expect(items[0].kind).toBe("viewRef");
+    expect(items[0].viewRef).toMatchObject({
+      subfolder: "_panel_staged",
+      type: "output",
+    });
+    const ref = items[0].viewRef as { filename: string };
+    expect(ref.filename).toMatch(/^\d+-reference\.mp4$/);
+    // The copy exists, is the full file, and the ORIGINAL was left alone.
+    expect(statSync(join(outDir, "_panel_staged", ref.filename)).size).toBe(OVERSIZE);
+    expect(statSync(bigVideoOutside).size).toBe(OVERSIZE);
+  });
+
+  it("discloses the write, its location, and that the copy persists", async () => {
+    const { res } = await showMedia([{ source: { path: bigVideoOutside, stage: true } }]);
+    const text = textOf(res);
+    expect(text).toContain("COPIED");
+    expect(text).toContain("_panel_staged");
+    expect(text).toMatch(/persists/);
+    expect(text).toContain("NOT sent the bytes");
+  });
+
+  it("without stage the same file is still refused — the write stays opt-in", async () => {
+    const before = existsSync(join(outDir, "_panel_staged"))
+      ? readdirSync(join(outDir, "_panel_staged")).length
+      : 0;
+    const { res, calls } = await showMedia([{ source: { path: bigVideoOutside } }]);
+    expect(res.isError).toBe(true);
+    expect(calls).toHaveLength(0);
+    const after = existsSync(join(outDir, "_panel_staged"))
+      ? readdirSync(join(outDir, "_panel_staged")).length
+      : 0;
+    expect(after).toBe(before);
+  });
+
+  it("a staging failure falls through to the refusal WITH the reason attached", async () => {
+    state.remote = true;
+    const { res, calls } = await showMedia([{ source: { path: bigVideoOutside, stage: true } }]);
+    expect(res.isError).toBe(true);
+    expect(calls).toHaveLength(0);
+    const text = textOf(res);
+    expect(text).toContain("Staging WAS requested");
+    expect(text).toContain("REMOTE");
+  });
+
+  it("stage:true does not copy a file that is already servable by reference", async () => {
+    const { res, calls } = await showMedia([{ source: { path: bigVideoUnderRoot, stage: true } }]);
+    expect(res.isError).toBeFalsy();
+    const items = calls[0].items as Array<Record<string, unknown>>;
+    // The ORIGINAL location's ref — not a staged copy.
+    expect(items[0].viewRef).toEqual({
+      filename: "reference.mp4",
+      subfolder: "takes",
+      type: "output",
+    });
+  });
+
+  it("stage:true is ignored for a file small enough to inline", async () => {
+    const { res, calls } = await showMedia([{ source: { path: smallImage, stage: true } }]);
+    expect(res.isError).toBeFalsy();
+    const items = calls[0].items as Array<Record<string, unknown>>;
+    expect(items[0].kind).toBe("image");
+    expect(String(items[0].dataUrl)).toMatch(/^data:image\/png;base64,/);
   });
 });
 

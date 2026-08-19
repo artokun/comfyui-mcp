@@ -38,8 +38,11 @@ import {
   forwardedByReferenceNote,
   oversizedInlineRefusal,
   resolveServableViewRef,
+  stageFileIntoServedDir,
+  stagedForDisplayNote,
   unverifiedViewRefNote,
   type ForwardedByReference,
+  type StagedForDisplay,
   type UnverifiedViewRef,
   type ViewRefProbe,
 } from "../services/comfy-view-ref.js";
@@ -15636,14 +15639,22 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
     ),
     def(
       "panel_show_media",
-      "Display one or more images or videos directly in the panel chat. Use this whenever the user asks to SEE or SHOW a file — a disk path you composited/downloaded/generated (absolute path on the orchestrator host) OR a ComfyUI output ref ({ filename, subfolder?, type? }). Items are rendered as media cards in the agent chat area; supply optional captions. Max 8 items per call. NEVER describe an image with emoji or text placeholders — call this tool instead.",
+      "Display one or more images or videos directly in the panel chat. Use this whenever the user asks to SEE or SHOW a file — a disk path you composited/downloaded/generated (absolute path on the orchestrator host) OR a ComfyUI output ref ({ filename, subfolder?, type? }). Items are rendered as media cards in the agent chat area; supply optional captions. Max 8 items per call. A path item OVER the 20 MB inline cap that is not under any directory ComfyUI serves can still be shown by passing stage:true on that item — the orchestrator COPIES it into <output>/_panel_staged (an opt-in, persistent disk write; 512 MB per-file and 2 GB total caps) and displays the copy by reference. NEVER describe an image with emoji or text placeholders — call this tool instead.",
       {
         items: z
           .array(
             z.object({
               source: z.union([
                 // Absolute file path on the orchestrator host
-                z.object({ path: z.string().min(1) }),
+                z.object({
+                  path: z.string().min(1),
+                  stage: z
+                    .boolean()
+                    .optional()
+                    .describe(
+                      "OPT-IN for a file over the 20 MB inline cap that is NOT under any directory ComfyUI serves: the orchestrator COPIES it into <output>/_panel_staged (a real disk write — caps 512 MB per file, 2 GB total staged; the copy persists until someone deletes it) and displays the copy by reference. Ignored for files already servable or small enough to inline.",
+                    ),
+                }),
                 // ComfyUI /view ref
                 z.object({
                   filename: z.string().min(1),
@@ -15660,7 +15671,7 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
       async (args: A, ctx) => {
         const items = args.items as Array<{
           source:
-            | { path: string }
+            | { path: string; stage?: boolean }
             | { filename: string; subfolder?: string; type?: string };
           caption?: string;
         }>;
@@ -15704,6 +15715,8 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         const resolved: Array<Record<string, unknown>> = [];
         /** Oversized items that took the /view reference route instead (#648). */
         const forwarded: ForwardedByReference[] = [];
+        /** Oversized items the caller opted into staging into a served dir (#802). */
+        const stagedItems: StagedForDisplay[] = [];
         // #941 — /view references handed to a BROWSER panel, whose rendering this
         // process never observes. Collected so the reply can say what "painted"
         // does and does not establish.
@@ -15777,6 +15790,42 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
                 });
                 forwarded.push({ path: p, sizeBytes: stat.size, kind, ref: servable.ref });
                 continue;
+              }
+              // #802 — the reference route needs the file to ALREADY sit under a
+              // served directory. With stage:true the caller has opted into the
+              // one remaining move: the orchestrator copies it into
+              // <output>/_panel_staged and forwards a ref to the COPY. Opt-in
+              // because it is a real disk write; the copy and its persistence
+              // are disclosed in the reply, and any staging failure falls
+              // through to the ordinary refusal with the reason attached.
+              if (src.stage === true) {
+                const staged = await stageFileIntoServedDir(p);
+                if (staged.status === "staged") {
+                  resolved.push({
+                    kind: "viewRef",
+                    viewRef: staged.ref,
+                    filename: staged.ref.filename,
+                    caption: item.caption,
+                  });
+                  stagedItems.push({
+                    path: p,
+                    stagedPath: staged.stagedPath,
+                    sizeBytes: stat.size,
+                    kind,
+                    ref: staged.ref,
+                  });
+                  continue;
+                }
+                return fail(
+                  oversizedInlineRefusal({
+                    path: p,
+                    sizeBytes: stat.size,
+                    capBytes: MAX_BYTES,
+                    kind,
+                    resolution: servable,
+                  }) +
+                    `\nStaging WAS requested (stage:true) but could not be done: ${staged.reason}`,
+                );
               }
               return fail(
                 oversizedInlineRefusal({
@@ -15880,6 +15929,15 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
           res.content.push({
             type: "text",
             text: forwardedByReferenceNote(forwarded, MAX_BYTES),
+          });
+        }
+        // #802 — staged items took the same reference route, but the reference
+        // points at a COPY this process wrote into the user's output directory.
+        // That write, its location, and its persistence must be disclosed.
+        if (stagedItems.length > 0 && !res.isError) {
+          res.content.push({
+            type: "text",
+            text: stagedForDisplayNote(stagedItems, MAX_BYTES),
           });
         }
         // #941 — a forwarded /view reference is DISPATCHED, not displayed. Probe a
