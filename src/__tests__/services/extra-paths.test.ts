@@ -1198,6 +1198,57 @@ describe("#1788 — a PINNED target discloses that the running server reads else
     },
   );
 
+  // #1788 gate round 1, P1. Removing the promise from the headline `message` was not
+  // enough: `summarize` appends "Restart ComfyUI after editing this file so startup path
+  // registration is rebuilt." to EVERY answer. That is the same promise in different
+  // words — different enough that the `/Restart ComfyUI to apply it/` assertions above
+  // never saw it — and an agent reads `notes` and acts on it. So the payload contained
+  // both "restarting will not apply this" and "restart to apply this".
+  it("withdraws the generic restart INSTRUCTION from notes too, not just the message", async () => {
+    const appData = await trackTmp();
+    process.env.APPDATA = appData;
+    const liveRoot = await trackTmp();
+    const serverCfg = await liveConfigAt(liveRoot, "instance-model-paths.yaml");
+    await liveServer(liveRoot, serverCfg);
+
+    const added = await addExtraPath({
+      target: "desktop",
+      category: "ipadapter",
+      path: "D:/ComfyUI-Shared/models/ipadapter",
+    });
+
+    // Nothing in the whole payload may still instruct a restart to apply this edit.
+    expect(added.notes.some((n) => /Restart ComfyUI after editing this file/.test(n))).toBe(
+      false,
+    );
+    expect(JSON.stringify(added)).not.toMatch(/Restart ComfyUI after editing/);
+    // …and the disclosure that replaces it is still there.
+    expect(added.notes.some((n) => /RUNNING ComfyUI does not read this file/.test(n))).toBe(true);
+  });
+
+  it("KEEPS the generic restart instruction when the pin is not inert", async () => {
+    // The control: the note is withdrawn for divergence specifically, not deleted.
+    const liveRoot = await trackTmp();
+    const serverCfg = await liveConfigAt(liveRoot, "instance-model-paths.yaml");
+    await liveServer(liveRoot, serverCfg);
+
+    const added = await addExtraPath({ configPath: serverCfg, category: "vae", path: "D:/vae" });
+    expect(added.notes.some((n) => /Restart ComfyUI after editing this file/.test(n))).toBe(true);
+  });
+
+  it("list_paths withdraws it too (a READ of an inert file must not instruct a restart)", async () => {
+    const appData = await trackTmp();
+    process.env.APPDATA = appData;
+    const liveRoot = await trackTmp();
+    const serverCfg = await liveConfigAt(liveRoot, "instance-model-paths.yaml");
+    await liveServer(liveRoot, serverCfg);
+
+    const listed = await listExtraPaths({ target: "desktop" });
+    expect(listed.notes.some((n) => /Restart ComfyUI after editing this file/.test(n))).toBe(
+      false,
+    );
+  });
+
   it("remove_path carries the disclosure too (an inert removal is equally a no-op)", async () => {
     const appData = await trackTmp();
     process.env.APPDATA = appData;

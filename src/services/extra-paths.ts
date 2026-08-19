@@ -1,7 +1,7 @@
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir, platform } from "node:os";
-import { dirname, join, isAbsolute, resolve } from "node:path";
+import { basename, dirname, join, isAbsolute, resolve } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { config, isRemoteMode } from "../config.js";
 import { normalizeInstallPathEnv } from "../utils/install-path-env.js";
@@ -393,15 +393,29 @@ function samePath(a: string, b: string): boolean {
  * a UNC-vs-mapped-drive spelling of one file is ordinary on the platform this was
  * reported from, so the comparison is collapsed through `realpath` as well.
  *
- * `realpath` is best-effort: a path that does not exist yet (the implicit
- * `<root>/extra_model_paths.yaml` a caller is about to create) simply falls back to its
- * lexical form, which is what `samePath` already compared.
+ * `realpath` on the FILE is not enough, and the gap is not academic: `realpathSync`
+ * throws on a path that does not exist, and "does not exist yet" is the ordinary state
+ * here — the implicit `<root>/extra_model_paths.yaml` a caller is about to CREATE. In
+ * that state the file-level collapse silently degrades to the lexical compare it was
+ * added to fix, so a junctioned `COMFYUI_PATH` naming the very file the server reads was
+ * declared inert (gate round 1, P1, reproduced with a real Windows junction).
+ *
+ * So resolve the DIRECTORY and rejoin the basename when the file itself does not
+ * resolve. The aliasing that matters lives in the parent — a junctioned/symlinked
+ * install root, an 8.3 short name, a mapped drive — and the parent of a config a caller
+ * can write to normally exists. Only when even the parent does not resolve does this
+ * fall back to the lexical form, i.e. to exactly what `samePath` already compared.
  */
 function sameConfigFile(a: string, b: string): boolean {
   if (samePath(a, b)) return true;
   const real = (p: string): string => {
     try {
       return realpathSync(p);
+    } catch {
+      // The file is absent/unreadable — resolve its directory instead.
+    }
+    try {
+      return join(realpathSync(dirname(p)), basename(p));
     } catch {
       return p;
     }
@@ -662,6 +676,18 @@ function summarize(
    * be reported as `exists: false` about a file we had just finished reading.
    */
   exists = false,
+  /**
+   * Set when this file was PINNED and the running server provably reads elsewhere
+   * (#1788). The headline `message` is not the only place that promised an effect: the
+   * generic "Restart ComfyUI after editing this file" note below is appended to EVERY
+   * summary, and it is the same promise in different words — different enough that the
+   * `message`-level assertions did not see it (gate round 1, P1). An agent reads `notes`
+   * and acts on it, so the promise is withdrawn HERE too, keyed on the same structured
+   * observation `inertEditSuffix` uses rather than on re-read prose. Nothing is lost:
+   * the divergence warning already in `extraNotes` states what a restart will and will
+   * not do, so the two can never disagree.
+   */
+  divergesFromLive?: { serverPaths: string[] },
 ): ExtraPathsConfigInfo {
   const groups: ExtraPathGroup[] = [];
   for (const [name, value] of Object.entries(raw)) {
@@ -682,7 +708,9 @@ function summarize(
             : "Standalone/manual installs use extra_model_paths.yaml in the ComfyUI root.",
         ]),
     "Categories are generic ComfyUI search-path keys, so model folders and custom_nodes can both be represented when supported by the running ComfyUI build.",
-    "Restart ComfyUI after editing this file so startup path registration is rebuilt.",
+    ...(divergesFromLive
+      ? []
+      : ["Restart ComfyUI after editing this file so startup path registration is rebuilt."]),
   ];
   return { target, path, exists, groups, notes };
 }
@@ -1284,6 +1312,7 @@ async function readExtraPathsConfig(
     resolved.notes,
     resolved.serverResolved,
     exists,
+    resolved.divergesFromLive,
   );
 }
 
@@ -1542,6 +1571,7 @@ export async function addExtraPath(
     resolved.notes,
     resolved.serverResolved,
     existedBefore || changed,
+    resolved.divergesFromLive,
   );
   const inert = inertEditSuffix(resolved);
   return {
@@ -1588,6 +1618,7 @@ export async function removeExtraPath(
     resolved.notes,
     resolved.serverResolved,
     existedBefore || changed,
+    resolved.divergesFromLive,
   );
   const inert = inertEditSuffix(resolved);
   return {
