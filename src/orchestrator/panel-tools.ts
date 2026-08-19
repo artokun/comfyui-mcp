@@ -55,6 +55,12 @@ import { parse as parseYaml } from "yaml";
 import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { UiBridge } from "../services/ui-bridge.js";
+import { SEMVER_RE } from "../services/ui-bridge.js";
+import { compareSemver } from "../services/self-update.js";
+import {
+  primePanelBase,
+  verifiedPanelDiskVersion,
+} from "../services/panel-workspace.js";
 import { conversationOfScopeAddress, isScopeAddress, shortTabId } from "../services/session-scope.js";
 import type { ScopeRepinOutcome } from "./turn-origins.js";
 import { NODE_ID_MESSAGE, NODE_ID_PATTERN, normalizeNodeId } from "./node-id.js";
@@ -4721,6 +4727,48 @@ WORTH CHECKING — THE PANEL'S VERSION IS UNKNOWN HERE: this session's panel has
       );
     }
     if (!v?.tooOld) return "";
+    // #1229 — IS THE INSTALL EVEN BEHIND, OR ONLY WHAT COMFYUI IS SERVING?
+    //
+    // This branch compares the RUNNING panel against the minimum and concludes
+    // "pack is out of date" — but the reporter's pack on disk was 0.14.37 while
+    // the session ran 0.11.38: ComfyUI-Manager had updated the pack IN PLACE
+    // after ComfyUI started, and ComfyUI keeps serving the web assets it
+    // registered at startup. Prescribing `sync` there is a no-op remedy — the
+    // disk already clears the floor — and it cost the reporter a full
+    // pack-version investigation to discover that. The actual fix is a RESTART
+    // plus a hard-refresh, and a hard-refresh ALONE provably does not work,
+    // because the new assets are registered server-side at startup, not re-read
+    // from disk on reload.
+    //
+    // Same proof discipline as resolveStaleBundleSkew (#774): only a disk
+    // version re-read NOW from the observed install dir may override the update
+    // advice. Anything unproven — no observation, an unparseable version, or a
+    // disk version genuinely below the floor — falls through to the sync remedy
+    // unchanged, which is correct for a pack that really is behind.
+    const disk = verifiedPanelDiskVersion()?.trim();
+    if (!disk) {
+      // The observation is missing or stale (most often the live-base
+      // resolution lapsed and this refusal is the first thing to ask in a
+      // while). Refresh it in the background — never awaited, since building
+      // an error message must not block on I/O — so a retry can answer.
+      void primePanelBase().catch(() => {});
+    }
+    if (disk && SEMVER_RE.test(disk) && compareSemver(disk, v.needed) >= 0) {
+      return (
+        `
+
+WHY THIS READ WAS NEEDED AT ALL: this session's RUNNING panel is ${v.version}, ` +
+        `and a panel only reports the new workflow's identity ON THE REPLY from ` +
+        `${v.needed} onwards — but DO NOT SYNC THE PANEL: the pack ON DISK is ` +
+        `${disk}, which already meets ${v.needed}, so a sync would change nothing. ` +
+        `What is stale is what ComfyUI is SERVING: the pack was updated after ` +
+        `ComfyUI started, and ComfyUI keeps serving the web assets it registered ` +
+        `at startup. Restart ComfyUI so it serves ${disk}, then HARD-REFRESH the ` +
+        `browser tab (Ctrl+Shift+R) — a hard refresh ALONE does not fix this, ` +
+        `because the assets are registered server-side at startup, not re-read ` +
+        `from disk on reload.`
+      );
+    }
     return (
       `
 

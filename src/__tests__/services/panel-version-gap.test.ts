@@ -124,6 +124,81 @@ describe("the rebind failure message carries the version gap (#1043)", () => {
     expect(body).toMatch(/if \(!v\?\.tooOld\) return ""/);
   });
 
+  // ── #1229: disk already current → sync is a no-op remedy ────────────────────
+  //
+  // The reporter's pack on disk was 0.14.37 while the session ran 0.11.38:
+  // ComfyUI-Manager had updated the pack in place after ComfyUI started, and
+  // ComfyUI keeps serving the web assets it registered at startup. Every
+  // affected tool reply prescribed `sync` — a no-op there — and the reporter
+  // had to run a full pack-version investigation to learn that. The remedy for
+  // a stale SERVED bundle is restart + hard-refresh, never a sync.
+
+  it("the too-old note checks the ON-DISK version before prescribing a sync", async () => {
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(
+      new URL("../../orchestrator/panel-tools.ts", import.meta.url),
+      "utf-8",
+    );
+    const start = src.indexOf("function panelTooOldNote");
+    const end = src.indexOf("\n}", src.indexOf("if (!v?.tooOld) return \"\"", start));
+    const body = src.slice(start, end);
+
+    // The disk read must come from the same proof machinery the write gate
+    // uses (#774): a version re-read NOW from the observed install dir, never
+    // a recorded one trusted on its own.
+    expect(body).toContain("verifiedPanelDiskVersion()");
+    // …and it must run BEFORE the sync remedy is rendered, so the remedy can
+    // be overridden. Asserted on order, not just presence: a disk check added
+    // after the return would be dead code that still passes a grep. The search
+    // starts AT the disk check because the neverAdvertised branch above (#1560)
+    // legitimately names the sync remedy first — it is deliberately weaker and
+    // its remedy is not the one this override governs.
+    const diskCheck = body.indexOf("verifiedPanelDiskVersion()");
+    const syncRemedy = body.indexOf('panel_action:"sync"', diskCheck);
+    expect(diskCheck).toBeGreaterThan(-1);
+    expect(syncRemedy).toBeGreaterThan(diskCheck);
+  });
+
+  it("a disk version that clears the floor renders DO NOT SYNC, restart + hard-refresh", async () => {
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(
+      new URL("../../orchestrator/panel-tools.ts", import.meta.url),
+      "utf-8",
+    );
+    const start = src.indexOf("function panelTooOldNote");
+    const end = src.indexOf("\n}", src.indexOf("if (!v?.tooOld) return \"\"", start));
+    const body = src.slice(start, end);
+
+    // The override fires only on positive proof: the disk version parses and
+    // meets the minimum. An unproven disk state must fall through to the sync
+    // remedy, which is correct for a pack that really is behind.
+    expect(body).toMatch(/SEMVER_RE\.test\(disk\) && compareSemver\(disk, v\.needed\) >= 0/);
+    // The note names what is on disk, says a sync changes nothing, and gives
+    // the remedy that actually works for the reporter's exact trap — including
+    // that a hard-refresh ALONE does not, which they verified the hard way.
+    expect(body).toContain("${disk}");
+    expect(body).toMatch(/DO NOT SYNC THE PANEL/);
+    expect(body).toMatch(/Restart ComfyUI so it serves \$\{disk\}/);
+    expect(body).toMatch(/HARD-REFRESH/);
+    expect(body).toMatch(/a hard refresh ALONE does not fix this/);
+  });
+
+  it("a missing disk reading re-primes in the background, never awaited", async () => {
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(
+      new URL("../../orchestrator/panel-tools.ts", import.meta.url),
+      "utf-8",
+    );
+    const start = src.indexOf("function panelTooOldNote");
+    const end = src.indexOf("\n}", src.indexOf("if (!v?.tooOld) return \"\"", start));
+    const body = src.slice(start, end);
+    // Same pattern as resolveStaleBundleSkew (#973): building an error message
+    // must not block on I/O, and the retry an agent reliably makes is what
+    // renders the corrected note.
+    expect(body).toMatch(/void primePanelBase\(\)/);
+    expect(body).not.toMatch(/await primePanelBase\(\)/);
+  });
+
   // ── #1560: a panel too old to help is also too old to say so ────────────────
 
   it("a panel that NEVER advertised a version is reported as never-advertised", async () => {
