@@ -8,6 +8,7 @@ on:
       - "scripts/validate-manifests.mjs"
       - "scripts/test-packs.sh"
       - "scripts/check-model-urls.mjs"
+      - "scripts/check-pack-models.mjs"
       - "src/services/manifest.ts"
       - ".github/workflows/packs.yml"
   pull_request:
@@ -17,6 +18,7 @@ on:
       - "scripts/validate-manifests.mjs"
       - "scripts/test-packs.sh"
       - "scripts/check-model-urls.mjs"
+      - "scripts/check-pack-models.mjs"
       - "src/services/manifest.ts"
       - ".github/workflows/packs.yml"
 
@@ -58,6 +60,9 @@ jobs:
 
       - name: Dry-run install scripts (offline, git/curl stubbed)
         run: bash scripts/test-packs.sh
+
+      - name: Workflows only reference models their manifest downloads
+        run: npm run packs:check-models
 
       - name: Validate model URLs + payload sizes (network, no full downloads)
         run: node scripts/check-model-urls.mjs

@@ -613,7 +613,7 @@
         }
       },
       "widgets_values": [
-        "01margott_W_000001000.safetensors",
+        "YOUR-LORA-step1000.safetensors",
         1,
         1
       ],
@@ -1146,7 +1146,7 @@
         }
       },
       "widgets_values": [
-        "01margott_W_000001000.safetensors",
+        "YOUR-LORA-step1500.safetensors",
         1,
         1
       ]
@@ -1734,7 +1734,7 @@
         }
       },
       "widgets_values": [
-        "01margott_W_000001000.safetensors",
+        "YOUR-LORA-step2000.safetensors",
         1,
         1
       ]
@@ -2464,7 +2464,7 @@
         }
       },
       "widgets_values": [
-        "01margott_W_000001000.safetensors",
+        "YOUR-LORA-step2500.safetensors",
         1,
         1
       ]
@@ -3121,7 +3121,7 @@
         }
       },
       "widgets_values": [
-        "01margott_W_000001000.safetensors",
+        "YOUR-LORA-final.safetensors",
         1,
         1
       ]
@@ -4254,7 +4254,7 @@
         }
       },
       "widgets_values": [
-        "Margot-Robbie-Z3_000001000.safetensors"
+        "YOUR-LORA-step1000.safetensors"
       ]
     },
     {
@@ -4292,7 +4292,7 @@
         }
       },
       "widgets_values": [
-        "Margot-Robbie-Z3_000001500.safetensors"
+        "YOUR-LORA-step1500.safetensors"
       ]
     },
     {
@@ -4330,7 +4330,7 @@
         }
       },
       "widgets_values": [
-        "Margot-Robbie-Z3_000002000.safetensors"
+        "YOUR-LORA-step2000.safetensors"
       ]
     },
     {
@@ -4368,7 +4368,7 @@
         }
       },
       "widgets_values": [
-        "Margot-Robbie-Z3_000002500.safetensors"
+        "YOUR-LORA-step2500.safetensors"
       ]
     },
     {
@@ -4406,7 +4406,7 @@
         }
       },
       "widgets_values": [
-        "Margot-Robbie-Z3.safetensors"
+        "YOUR-LORA-final.safetensors"
       ]
     },
     {
@@ -4445,7 +4445,7 @@
         "ttNnodeVersion": "1.0.0"
       },
       "widgets_values": [
-        "margot robbie cyberpunk portrait, neon rim-lights, rain-soaked city backdrop, vivid colors, photoreal.\n"
+        "a woman cyberpunk portrait, neon rim-lights, rain-soaked city backdrop, vivid colors, photoreal.\n"
       ],
       "color": "#232",
       "bgcolor": "#353"

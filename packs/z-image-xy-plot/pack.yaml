@@ -22,16 +22,20 @@ notes:
   - >-
     Bring your own trained LoRAs. This pack installs NO LoRAs — drop your trained
     Z-Image LoRA .safetensors into models/loras/, then pick them in the workflow's
-    "easy loraNames" selector nodes to compare them on the XY grid.
+    "easy loraNames" selector nodes to compare them on the XY grid. The five
+    selectors ship the placeholders YOUR-LORA-step1000/1500/2000/2500 and
+    YOUR-LORA-final.safetensors; ComfyUI reports those missing until you replace
+    them, which is expected.
   - >-
     Need to train a Z-Image LoRA first? See the anima-lora-trainer skill (Citron's
     local kohya trainer) or an ai-toolkit-based trainer; export the resulting
     .safetensors into models/loras/.
   - >-
-    GGUF quant tier - the upstream installer prompts Q5_K_S (<8GB, recommended) /
-    Q6_K (8-12GB) / Q8_0 (12-16GB+). The manifest ships Q5_K_S active; the bundled
-    workflow defaults to z_image_turbo-Q8_0.gguf, so either uncomment the Q8_0 tier
-    in manifest.yaml or just select your installed GGUF in the UnetLoaderGGUF node.
+    GGUF quant tier - the upstream installer prompts Q5_K_S (<8GB) / Q6_K
+    (8-12GB) / Q8_0 (12-16GB+). The manifest ships Q8_0 active, matching the
+    bundled workflow's UnetLoaderGGUF and every other z-image-* pack. For a
+    smaller tier, swap the commented line in manifest.yaml and select your
+    installed GGUF in the UnetLoaderGGUF node.
   - >-
     The text encoder loads via CLIPLoaderGGUF with type "lumina2"; the VAE is
     z-image-ae.safetensors. Both are downloaded by this pack.
@@ -47,3 +51,11 @@ post_install:
   - >-
     Load workflow.json, then set each "easy loraNames" node to one of your trained
     LoRAs in models/loras/ to populate the comparison grid.
+# Declared external so packs:check-models knows they're intentionally not shipped.
+# Placeholders, not real weights — see the "bring your own" note above (#1767).
+external_models:
+  - YOUR-LORA-step1000.safetensors
+  - YOUR-LORA-step1500.safetensors
+  - YOUR-LORA-step2000.safetensors
+  - YOUR-LORA-step2500.safetensors
+  - YOUR-LORA-final.safetensors

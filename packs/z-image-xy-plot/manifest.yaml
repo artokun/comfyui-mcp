@@ -5,15 +5,19 @@
 # Mirror base: https://huggingface.co/Aitrepreneur/FLX/resolve/main
 # Official Z-Image Turbo weights: https://huggingface.co/Tongyi-MAI/Z-Image-Turbo
 #
-# GGUF QUANT TIER: the installer prompts Q5_K_S (GPUs <8GB, recommended) /
-# Q6_K (8-12GB) / Q8_0 (12-16GB+) for the Z-Image Turbo UNet. This manifest ships
-# the Q5_K_S tier active (matches the pack's <8GB target); the bundled workflow
-# selects z_image_turbo-Q8_0.gguf, so uncomment the Q8_0 line below to match it
-# exactly, or just pick your tier's GGUF in the UnetLoaderGGUF node after install.
+# GGUF QUANT TIER: the installer prompts Q5_K_S (GPUs <8GB) / Q6_K (8-12GB) /
+# Q8_0 (12-16GB+, best quality) for the Z-Image Turbo UNet. This manifest ships
+# the Q8_0 tier active, which is what the bundled workflow's UnetLoaderGGUF
+# selects and what every other z-image-* pack ships. Until #1767 this pack alone
+# activated Q5_K_S while the workflow asked for Q8_0, so a fresh install opened
+# to a missing-model error. To run a smaller tier, comment the Q8_0 line below,
+# uncomment the tier you want, and pick it in the UnetLoaderGGUF node.
 #
 # This pack compares USER-TRAINED Z-Image LoRAs on an XY grid. The LoRAs the
-# workflow references (e.g. Margot-Robbie-Z3_*.safetensors) are user-supplied and
-# are NOT downloaded here — drop your own trained LoRAs into models/loras/.
+# workflow references (the YOUR-LORA-*.safetensors placeholders, declared in
+# pack.yaml external_models) are user-supplied and are NOT downloaded here —
+# drop your own trained LoRAs into models/loras/ and select them in the
+# "easy loraNames" nodes.
 
 pip: []
 
@@ -39,15 +43,15 @@ models:
   - url: https://huggingface.co/Aitrepreneur/FLX/resolve/main/ae.safetensors
     local_path: vae/z-image-ae.safetensors
 
-  # --- Diffusion UNet (UnetLoaderGGUF) — Q5_K_S tier active (<8GB, recommended) ---
-  - url: https://huggingface.co/Aitrepreneur/FLX/resolve/main/z_image_turbo-Q5_K_S.gguf
-    local_path: unet/z_image_turbo-Q5_K_S.gguf
-  # Q6_K tier (8-12GB) — uncomment to use, comment the Q5_K_S line above
+  # --- Diffusion UNet (UnetLoaderGGUF) — Q8_0 tier active (matches the workflow) ---
+  - url: https://huggingface.co/Aitrepreneur/FLX/resolve/main/z_image_turbo-Q8_0.gguf
+    local_path: unet/z_image_turbo-Q8_0.gguf
+  # Q5_K_S tier (<8GB) — uncomment to use, comment the Q8_0 line above
+  # - url: https://huggingface.co/Aitrepreneur/FLX/resolve/main/z_image_turbo-Q5_K_S.gguf
+  #   local_path: unet/z_image_turbo-Q5_K_S.gguf
+  # Q6_K tier (8-12GB) — uncomment to use, comment the Q8_0 line above
   # - url: https://huggingface.co/Aitrepreneur/FLX/resolve/main/z_image_turbo-Q6_K.gguf
   #   local_path: unet/z_image_turbo-Q6_K.gguf
-  # Q8_0 tier (12-16GB+, best quality; matches the bundled workflow selection)
-  # - url: https://huggingface.co/Aitrepreneur/FLX/resolve/main/z_image_turbo-Q8_0.gguf
-  #   local_path: unet/z_image_turbo-Q8_0.gguf
 
   # --- Upscalers (in the installer's shared Turbo bundle; NOT used by this
   #     XY-plot comparison workflow — uncomment if you want them) ---
