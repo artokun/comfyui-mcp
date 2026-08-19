@@ -377,3 +377,95 @@ describe("#646 workflow navigation has a reader too", () => {
     expect(block).not.toMatch(/workflow_open|workflow_new/);
   });
 });
+
+
+// ===========================================================================
+// panel#1217 — a media card was told to "verify that it applied", and nothing
+// can.
+//
+// `panel_show_media` was interrupted by a mobile tab disconnect after dispatch
+// and got the DEFAULT branch: "Verify that it applied before retrying, rather
+// than re-issuing it blindly". That is the same defect shape as #952 and #646 —
+// a check named that cannot hold the answer. The panel's chat has no read-back,
+// so no tool can say whether the card painted; and the warning against retrying
+// is backwards here, because a duplicate media card is the one duplicate that
+// costs the user nothing (no GPU time, no answer owed). The honest settlement
+// is to re-issue and disclose the possible repeat.
+// ===========================================================================
+describe("#1217 show_media gets a remedy that can actually settle it", () => {
+  const MEDIA = { short: "mobile-c", cmd: "show_media" };
+
+  it("does NOT fall to the generic default — that is the reported defect", () => {
+    const msg = midCommandDisconnectMessage(MEDIA);
+    expect(msg).not.toMatch(/Verify that it applied/);
+    expect(msg).not.toMatch(/a retry may apply it twice/);
+    // And none of the other branches' readers — none of them can see the chat.
+    expect(msg).not.toMatch(/queue action:"list"/);
+    expect(msg).not.toMatch(/panel_query_graph/);
+    expect(msg).not.toMatch(/panel_list_workflows/);
+  });
+
+  it("says WHY it is unverifiable instead of pretending a check exists", () => {
+    // Same honesty as the interactive branch: name the missing reader, so the
+    // caller stops looking for one.
+    const msg = midCommandDisconnectMessage(MEDIA);
+    expect(msg).toMatch(/chat cannot be read back/);
+  });
+
+  it("makes re-issuing the settlement, and says what a duplicate costs", () => {
+    // The property that distinguishes show_media from ask_user: the retry is
+    // safe, not merely unavoidable. The cost comparison is what lets the agent
+    // reason instead of memorise — a run would cost GPU time, a question would
+    // be owed an answer, a media card asks for neither.
+    const msg = midCommandDisconnectMessage(MEDIA);
+    expect(msg).toMatch(/Re-issue the same panel_show_media/);
+    expect(msg).toMatch(/shows the same media twice|same media twice/);
+    expect(msg).toMatch(/GPU time/);
+    expect(msg).toMatch(/answer owed/);
+  });
+
+  it("discloses the duplicate instead of hiding it — suppression is keyed to the dead socket", () => {
+    // The retry runs fresh (the dedupe ledger does not carry across the
+    // reconnect), so if the original DID paint, the user sees two. Said plainly,
+    // with what to tell the user — the same disclosure the interactive branch
+    // makes, inverted: there it is the reason NOT to retry, here it is the
+    // price OF the retry.
+    const msg = midCommandDisconnectMessage(MEDIA);
+    expect(msg).toMatch(/keyed to the socket that dropped/);
+    expect(msg).toMatch(/may see two/);
+    expect(msg).toMatch(/not new content/);
+  });
+
+  it("offers the zero-duplicate route: ask the user first", () => {
+    // The one observer of the panel's chat that always exists is the person
+    // looking at it.
+    expect(midCommandVerifyClause("show_media")).toMatch(/ask the user whether it appeared/);
+  });
+
+  it("the applied half names the media, not a generic write", () => {
+    // "the panel may have applied it (for a run, ComfyUI may already be
+    // rendering)" describes a render; for show_media the thing that may have
+    // happened is the card painting.
+    const msg = midCommandDisconnectMessage(MEDIA);
+    expect(msg).toMatch(/media may already be on screen/);
+    expect(msg).not.toMatch(/ComfyUI may already be rendering/);
+  });
+
+  it("still reports OUTCOME UNKNOWN and the tab, like every other branch", () => {
+    const msg = midCommandDisconnectMessage(MEDIA);
+    expect(msg).toMatch(/disconnected mid-command \("show_media"\)/);
+    expect(msg).toMatch(/OUTCOME UNKNOWN/);
+    expect(msg).toContain("mobile-c");
+  });
+
+  it("show_media is NOT classified as interactive — the advice differs for a reason", () => {
+    // An ask card and a media card share the missing reader, but the remedies
+    // are opposites (retry endangers one, settles the other). If these
+    // classifiers ever merge, one of them gets the other's advice.
+    expect(isInteractiveCommand("show_media")).toBe(false);
+    const media = midCommandVerifyClause("show_media");
+    const ask = midCommandVerifyClause("ask_user");
+    expect(media).not.toBe(ask);
+    expect(media).not.toMatch(/will NOT reach you/);
+  });
+});

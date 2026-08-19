@@ -65,8 +65,11 @@ export function isInteractiveCommand(cmd: string): boolean {
  *    identical after a blueprint save, so both graph readers show what they showed
  *    before and prove nothing (codex review).
  *  • a CLIPBOARD write (`graph_copy_nodes`) — nothing can read the clipboard, and
- *    the graph is unchanged. This is the one interrupted write where re-issuing is
- *    the right answer: a second copy of the same nodes is the same clipboard.
+ *    the graph is unchanged. Re-issuing is the right answer: a second copy of the
+ *    same nodes is the same clipboard.
+ *  • a MEDIA display (`show_media`) — nothing can read the chat back either, but
+ *    re-issuing is safe in a different way: a duplicate media card costs the user
+ *    nothing, so the retry IS the settlement (panel#1217).
  *  • anything else — say to verify without naming tools that may not apply.
  *    Naming a plausible-but-wrong check is what this fix exists to remove; doing
  *    it again in the default branch would be the same defect with a different tool.
@@ -88,10 +91,22 @@ const LIBRARY_COMMANDS = new Set<string>(["graph_save_subgraph"]);
 
 /** Writes the CLIPBOARD, which nothing in the tool surface can read (codex review).
  *  Copying leaves the graph identical, so a canvas read is no evidence at all —
- *  but unlike everything else here, re-issuing is harmless: a second copy of the
+ *  but re-issuing is harmless: a second copy of the
  *  same nodes produces the same clipboard. That makes "just do it again" the
  *  correct advice rather than a dangerous one. */
 const CLIPBOARD_COMMANDS = new Set<string>(["graph_copy_nodes"]);
+
+/** Media display into the panel's chat (`show_media`, panel#1217). Like the
+ *  interactive branch, nothing in the tool surface can READ BACK whether the
+ *  card painted — the chat has no reader — so the interrupted command is
+ *  unverifiable. Unlike the interactive branch, a blind retry is not dangerous:
+ *  the source file is unchanged, so re-issuing either paints the card that
+ *  never landed or shows the same media twice, and a duplicate media card asks
+ *  nothing of the user — no GPU time (a run), no answer owed (a question).
+ *  That makes "re-issue, and say the repeat may appear" the honest settlement
+ *  rather than the generic "verify first", which names a check that cannot
+ *  exist. */
+const MEDIA_COMMANDS = new Set<string>(["show_media"]);
 
 /** The four active-workflow mutators. A canvas read cannot see these — they change
  *  which workflows exist or are open, not what is on the current graph. Mirrors
@@ -206,6 +221,18 @@ export function midCommandVerifyClause(cmd: string): string {
       `clipboard, so a retry here costs nothing and settles it.`
     );
   }
+  if (MEDIA_COMMANDS.has(cmd)) {
+    return (
+      `Nothing in the tool surface can check that — the panel's chat cannot be read back, ` +
+      `so you cannot see whether the card painted. Re-issue the same panel_show_media on the ` +
+      `current connection: the source file is unchanged, so the retry either paints the card ` +
+      `that never landed or shows the same media twice — and a duplicate media card asks ` +
+      `nothing of the user, unlike a second render (GPU time) or a second question card (an ` +
+      `answer owed). Retry suppression is keyed to the socket that dropped, so the retry runs ` +
+      `fresh and the user may see two; if it appears twice, tell them the repeat is the retry, ` +
+      `not new content. If even that is unwanted, ask the user whether it appeared first.`
+    );
+  }
   if (cmd.startsWith("graph_")) {
     return (
       `Verify with a graph READ before retrying — panel_query_graph on the node(s) this ` +
@@ -228,9 +255,12 @@ export function midCommandVerifyClause(cmd: string): string {
 /** The full OUTCOME UNKNOWN sentence for a mid-command disconnect. */
 export function midCommandDisconnectMessage(opts: { short: string; cmd: string }): string {
   const interactive = isInteractiveCommand(opts.cmd);
+  const media = MEDIA_COMMANDS.has(opts.cmd);
   const applied = interactive
     ? `the command was already sent, so the card may already be on screen`
-    : `the command was already sent, so the panel may have applied it (for a run, ComfyUI may already be rendering)`;
+    : media
+      ? `the command was already sent, so the media may already be on screen in the panel's chat`
+      : `the command was already sent, so the panel may have applied it (for a run, ComfyUI may already be rendering)`;
   return (
     `panel tab ${opts.short} disconnected mid-command ("${opts.cmd}") — OUTCOME UNKNOWN: ` +
     `${applied}. ${midCommandVerifyClause(opts.cmd)}`
