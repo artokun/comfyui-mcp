@@ -12329,63 +12329,85 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         let rebindNote = "";
         let deferredBind = false;
         let fenceRebind: WorkflowFenceRebind | undefined;
+        // panel#1292 — a scope ctx stays scope-bound, so ctx.tabId never changes
+        // on a successful turn-pin recovery. Track that separately from the
+        // real-tab rebind note below.
+        let currentModeTurnRepinned = false;
         if (mode === "current" && ctx.rebindToActiveTab) {
           const before = ctx.tabId;
-          // Give an in-flight reconnect (a ComfyUI restart / panel reload still
-          // settling) a brief chance to bind immediately, since this IS the recovery
-          // signal the agent reaches for in exactly that window (#474). awaitReachable
-          // rebinds via ensureReachable when a tab is (re)connected.
-          if (ctx.awaitReachable) await ctx.awaitReachable();
+          const recoveringScope = isScopeAddress(before);
+          // Hold the send() wait BEFORE the first await so a same-batch sibling
+          // that already hit the null pin waits instead of minting #884.
+          if (recoveringScope) ctx.bridge.beginScopeRecovery?.(before);
+          const tryRebind = (): ToolResult | undefined => {
+            try {
+              // mode:"current" is THE explicit scope-recovery consent (#884 gate 3)
+              // — the only caller that may escape a DEAD scope pin (a healthy pin
+              // still stays put; see rebindToActiveTab's double gate).
+              const rebind = ctx.rebindToActiveTab!({ scopeRecoveryConsent: true });
+              // #1077 Finding 2 — a scope repin that declined now says WHY.
+              if (rebind?.repinRefusal && !/pin was NOT moved/.test(rebindNote)) {
+                rebindNote += ` The session pin was NOT moved: ${rebind.repinRefusal}.`;
+              }
+              if (rebind?.rebound) currentModeTurnRepinned = true;
+            } catch (err) {
+              // #474: with 2+ live tabs the rebind is AMBIGUOUS — fail so the user picks.
+              // But with ZERO tabs connected (the "Connected: none" window right after a
+              // restart/reload where the old tmp: tab is gone) the recovery call must NOT
+              // hard-fail: clear the stale binding and record the current-mode intent so
+              // the session binds onto the tab the moment one reconnects, instead of
+              // stranding the agent with no way to recover.
+              const live = typeof ctx.bridge.tabs === "function" ? ctx.bridge.tabs() : undefined;
+              let noTabsConnected: boolean;
+              if (Array.isArray(live)) {
+                // Count only INTERACTIVE (canvas-owning) tabs: a headless-only reconnect is
+                // NOT a usable graph binding, so it defers (binds once a real canvas tab
+                // connects) rather than failing as if a tab were pickable. Call isHeadless
+                // THROUGH the bridge (it reads `this.conns`) — a detached reference would
+                // lose `this` and throw "reading 'conns'" (the same #478 unbound-method bug).
+                const isHeadlessTab = (id: string): boolean =>
+                  typeof ctx.bridge.isHeadless === "function" && ctx.bridge.isHeadless(id);
+                const interactive = live.filter((t) => !isHeadlessTab(t.tab_id));
+                noTabsConnected = interactive.length === 0;
+              } else {
+                // No tab enumeration — classify by the resolve error: only "nothing
+                // connected" defers; an AMBIGUOUS multi-tab error must still fail so the
+                // user picks (never silently defer a routable-but-ambiguous session).
+                const msg = err instanceof Error ? err.message : String(err ?? "");
+                noTabsConnected =
+                  /no panel connected|not reachable|connected:\s*none|no connected tab/i.test(msg) &&
+                  !/multiple|last active|pass tab_id/i.test(msg);
+              }
+              if (!noTabsConnected) return fail(ambiguousRebindGuidance(ctx, err));
+              deferredBind = true;
+              rebindNote =
+                " No panel tab is connected yet — cleared the stale binding; this session will " +
+                "follow (bind onto) the tab as soon as one reconnects. Retry your graph tool in a " +
+                "moment; if nothing reconnects shortly, ask the user to refresh (reload) the ComfyUI " +
+                "browser tab, which reconnects the Agent panel after a restart (not an install issue).";
+            }
+            return undefined;
+          };
           try {
-            // completes the rebind if awaitReachable didn't. mode:"current" is
-            // THE explicit scope-recovery consent (#884 gate 3) — the only
-            // caller that may escape a DEAD scope pin (a healthy pin still
-            // stays put; see rebindToActiveTab's double gate).
-            const rebind = ctx.rebindToActiveTab({ scopeRecoveryConsent: true });
-            // #1077 Finding 2 — a scope repin that declined now says WHY, and
-            // this is where the user reads it. The refusal used to be a bare
-            // boolean, so a session stuck in the one state that repeats forever
-            // (the active tab belongs to another backend's conversation while
-            // this one has several eligible tabs) saw no difference from a
-            // healthy pin being correctly left alone.
-            if (rebind?.repinRefusal) {
-              rebindNote += ` The session pin was NOT moved: ${rebind.repinRefusal}.`;
+            // panel#1292 hole 1 — recover the turn pin SYNCHRONOUSLY, before
+            // awaitReachable yields to same-batch siblings.
+            const failed = tryRebind();
+            if (failed) return failed;
+            // Give an in-flight reconnect (a ComfyUI restart / panel reload still
+            // settling) a brief chance to bind immediately, since this IS the recovery
+            // signal the agent reaches for in exactly that window (#474). awaitReachable
+            // rebinds via ensureReachable when a tab is (re)connected.
+            if (!deferredBind && ctx.awaitReachable) await ctx.awaitReachable();
+            // A first attempt that found no canvas (or a dead pin that is still
+            // dead after the wait) gets one more recovery now that a tab may exist.
+            const pinStillDead =
+              typeof ctx.bridge.canReach === "function" && !ctx.bridge.canReach(ctx.tabId);
+            if (!deferredBind && !currentModeTurnRepinned && pinStillDead) {
+              const failed2 = tryRebind();
+              if (failed2) return failed2;
             }
-          } catch (err) {
-            // #474: with 2+ live tabs the rebind is AMBIGUOUS — fail so the user picks.
-            // But with ZERO tabs connected (the "Connected: none" window right after a
-            // restart/reload where the old tmp: tab is gone) the recovery call must NOT
-            // hard-fail: clear the stale binding and record the current-mode intent so
-            // the session binds onto the tab the moment one reconnects, instead of
-            // stranding the agent with no way to recover.
-            const live = typeof ctx.bridge.tabs === "function" ? ctx.bridge.tabs() : undefined;
-            let noTabsConnected: boolean;
-            if (Array.isArray(live)) {
-              // Count only INTERACTIVE (canvas-owning) tabs: a headless-only reconnect is
-              // NOT a usable graph binding, so it defers (binds once a real canvas tab
-              // connects) rather than failing as if a tab were pickable. Call isHeadless
-              // THROUGH the bridge (it reads `this.conns`) — a detached reference would
-              // lose `this` and throw "reading 'conns'" (the same #478 unbound-method bug).
-              const isHeadlessTab = (id: string): boolean =>
-                typeof ctx.bridge.isHeadless === "function" && ctx.bridge.isHeadless(id);
-              const interactive = live.filter((t) => !isHeadlessTab(t.tab_id));
-              noTabsConnected = interactive.length === 0;
-            } else {
-              // No tab enumeration — classify by the resolve error: only "nothing
-              // connected" defers; an AMBIGUOUS multi-tab error must still fail so the
-              // user picks (never silently defer a routable-but-ambiguous session).
-              const msg = err instanceof Error ? err.message : String(err ?? "");
-              noTabsConnected =
-                /no panel connected|not reachable|connected:\s*none|no connected tab/i.test(msg) &&
-                !/multiple|last active|pass tab_id/i.test(msg);
-            }
-            if (!noTabsConnected) return fail(ambiguousRebindGuidance(ctx, err));
-            deferredBind = true;
-            rebindNote =
-              " No panel tab is connected yet — cleared the stale binding; this session will " +
-              "follow (bind onto) the tab as soon as one reconnects. Retry your graph tool in a " +
-              "moment; if nothing reconnects shortly, ask the user to refresh (reload) the ComfyUI " +
-              "browser tab, which reconnects the Agent panel after a restart (not an install issue).";
+          } finally {
+            if (recoveringScope) ctx.bridge.endScopeRecovery?.(before);
           }
           // Detect the rebind regardless of whether awaitReachable or rebindToActiveTab
           // performed it (either mutates ctx.tabId), so the note is never swallowed.
@@ -12396,6 +12418,12 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             // DIFFERENT workflows. In the middle of a wedge whose entire question
             // was whether the retarget did anything, it read as a no-op.
             rebindNote = ` Rebound this session from tab ${shortTabId(before)} onto the active tab ${shortTabId(ctx.tabId)}.`;
+          }
+          if (currentModeTurnRepinned) {
+            rebindNote +=
+              ` This session's turn routing was AMBIGUOUS (a reconnect delivered messages from ` +
+              `several workflows at once) and is now pinned to the active tab, so graph tools ` +
+              `will resolve deterministically.`;
           }
         }
         // PIN: bind to the EXACT open-workflow identity from the authoritative
@@ -12593,6 +12621,24 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         const fence = fenceRebind
           ? describeFenceRebind(fenceRebind, canMutateNow, refusalCause)
           : undefined;
+        // panel#1292 hole 2 — `graph_binding:"bound"` is a fence verdict, not a
+        // statement that the turn-origin pin was recovered. A null pin still
+        // mints the #884 refusal on the next scope-addressed graph call.
+        const turnPinStillAmbiguous = (): boolean =>
+          isScopeAddress(ctx.tabId) &&
+          typeof ctx.bridge.resolveFailure === "function" &&
+          ctx.bridge.resolveFailure(ctx.tabId) === "ambiguous";
+        const refuseBoundWhileAmbiguous = (): ToolResult =>
+          fail(
+            `panel_set_workflow_target({mode:"current"}) did NOT restore this session's turn ` +
+              `routing.\n\nAPPLIED (do not repeat this part): the workflow target is now ` +
+              `mode:"current"${rebindNote ? `.${rebindNote}` : "."}\n\nNOT APPLIED: the ` +
+              `workflow-instance fence could be described as bound, but the turn-origin pin ` +
+              `is still ambiguous, so the next graph call would fail with "issued from ` +
+              `multiple workflows at once". Name a workflow with ` +
+              `panel_set_workflow_target({mode:"pinned", path:...}) or wait for the next ` +
+              `single-origin message.`,
+          );
         // #1473 — TAKE THE ADVICE THIS MESSAGE GIVES, instead of assigning it as homework.
         //
         // The reporter restarted ComfyUI, called this, was told the binding was NOT
@@ -12694,10 +12740,12 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
               fenceRebind && fenceRebind.status === "no_identity" && fenceRebind.before.known
                 ? fenceRebind.before.uuid
                 : undefined;
+            if (turnPinStillAmbiguous()) return refuseBoundWhileAmbiguous();
             return ok({
               ...target,
               graph_binding: "bound",
               ...(fenceRebind ? { graph_binding_status: fenceRebind.status } : {}),
+              ...(currentModeTurnRepinned ? { turn_routing: "repinned" } : {}),
               note:
                 hint +
                 rebindNote +
@@ -12732,12 +12780,17 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
             : scopeRepin && typeof scopeRepin === "object" && scopeRepin.reason
               ? ` NOTE — the workflow target was set, but this session's turn routing was NOT re-pinned: ${scopeRepin.reason}.`
               : "";
+        if (fence?.binding === "bound" && turnPinStillAmbiguous()) {
+          return refuseBoundWhileAmbiguous();
+        }
         return ok({
           ...target,
           ...(deferredBind ? { deferred: true } : {}),
           ...(fence ? { graph_binding: fence.binding } : {}),
           ...(fenceRebind ? { graph_binding_status: fenceRebind.status } : {}),
-          ...(typeof scopeRepin === "string" ? { turn_routing: "repinned" } : {}),
+          ...(typeof scopeRepin === "string" || currentModeTurnRepinned
+            ? { turn_routing: "repinned" }
+            : {}),
           note: hint + rebindNote + (fence?.note ?? "") + scopeRepinNote,
         });
       },

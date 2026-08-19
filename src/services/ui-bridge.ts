@@ -1536,6 +1536,17 @@ export class UiBridge {
    *  panel_set_workflow_target({mode:"current"}) consent). Returns the tab it
    *  repinned to, or undefined when nothing is resolvable. */
   private scopeRepinHandler: ((scopeId: string, preferredWorkflowPath?: string) => ScopeRepinOutcome) | null = null;
+  /**
+   * panel#1292 — an in-flight `mode:"current"` bind that is recovering a null
+   * turn pin. Same-batch siblings (`panel_graph_outline`, `panel_set_todo`)
+   * start while the pin is still ambiguous; `send()` waits here instead of
+   * minting the #884 refusal the bind is about to clear. Ref-counted so two
+   * overlapping binds on one scope do not drop the wait early.
+   */
+  private scopeRecovery = new Map<
+    string,
+    { count: number; done: Promise<void>; finish: () => void }
+  >();
   /** #884 — orchestrator-injected: normalize a hello's raw `backend` value the
    *  same way the orchestrator does (unknown/absent → the default backend), so
    *  the backend-qualified scope-buffer replay matches the conversation the
@@ -3278,6 +3289,52 @@ export class UiBridge {
     return this.scopeRepinHandler?.(scopeId, workflowPath);
   }
 
+  /**
+   * panel#1292 — mark that this scope's turn pin is being recovered. `send()`
+   * waits for {@link endScopeRecovery} before minting the mixed-origin refusal
+   * so a same-batch sibling can ride the bind rather than lose the race.
+   */
+  beginScopeRecovery(scopeId: string): void {
+    const rec = this.scopeRecovery.get(scopeId);
+    if (rec) {
+      rec.count += 1;
+      return;
+    }
+    let finish!: () => void;
+    const done = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    this.scopeRecovery.set(scopeId, { count: 1, done, finish });
+  }
+
+  /** panel#1292 — the matching close for {@link beginScopeRecovery}. */
+  endScopeRecovery(scopeId: string): void {
+    const rec = this.scopeRecovery.get(scopeId);
+    if (!rec) return;
+    rec.count -= 1;
+    if (rec.count > 0) return;
+    rec.finish();
+    this.scopeRecovery.delete(scopeId);
+  }
+
+  /**
+   * Wait for an in-flight scope recovery, or (if none is registered yet) yield
+   * once so a same-tick bind can register. Always returns: the caller retries
+   * `resolveTarget` and throws the original refusal if the pin is still null.
+   */
+  private awaitScopePinRecovery(scopeId: string): Promise<void> {
+    const rec = this.scopeRecovery.get(scopeId);
+    if (rec) return rec.done;
+    return Promise.resolve().then(() => {
+      const rec2 = this.scopeRecovery.get(scopeId);
+      if (rec2) return rec2.done;
+      return new Promise<void>((resolve) => setTimeout(resolve, 0)).then(() => {
+        const rec3 = this.scopeRecovery.get(scopeId);
+        if (rec3) return rec3.done;
+      });
+    });
+  }
+
   /** #884 — inject the hello-backend normalizer (see the field doc). */
   setHelloBackendNormalizer(fn: (raw: unknown) => string): void {
     this.helloBackendNormalizer = fn;
@@ -4208,28 +4265,46 @@ export class UiBridge {
     }
   }
 
-  send(cmd: BridgeCommand, opts: { tabId?: string; timeoutMs?: number; onDispatchedRid?: (rid: string) => void } = {}): Promise<unknown> {
+  async send(cmd: BridgeCommand, opts: { tabId?: string; timeoutMs?: number; onDispatchedRid?: (rid: string) => void } = {}): Promise<unknown> {
     // #357: read (idempotent) ops get a more tolerant default so a busy-but-alive
     // panel main thread (e.g. Preview3D loading a large FBX) isn't declared frozen;
     // mutating ops keep the tight default. An explicit opts.timeoutMs always wins.
     const timeoutMs = opts.timeoutMs ?? defaultBridgeTimeoutMs(cmd.cmd);
     let conn: Conn;
-    try {
-      conn = this.resolveTarget(opts.tabId);
-    } catch (err) {
-      // Offline target: buffer a finished-render delivery for reconnect instead of
-      // failing, so the agent's "here's your image" isn't lost while the phone is away.
-      if (opts.tabId && UiBridge.isMailboxable(cmd)) {
-        this.storeMailbox(opts.tabId, cmd);
-        return Promise.resolve({ ok: true, mailboxed: true });
+    // panel#1292 — a mixed-origin pin is decided once per batch, but
+    // `mode:"current"` is the advertised recovery and may be running in THIS
+    // same batch. Wait for that recovery once before minting the refusal;
+    // `canReach` stays sync (it swallows the throw) so the wait is send-only.
+    let waitedForScopeRecovery = false;
+    for (;;) {
+      try {
+        conn = this.resolveTarget(opts.tabId);
+        break;
+      } catch (err) {
+        if (
+          !waitedForScopeRecovery &&
+          isRoutingAmbiguity(err) &&
+          opts.tabId &&
+          isScopeAddress(opts.tabId)
+        ) {
+          await this.awaitScopePinRecovery(opts.tabId);
+          waitedForScopeRecovery = true;
+          continue;
+        }
+        // Offline target: buffer a finished-render delivery for reconnect instead of
+        // failing, so the agent's "here's your image" isn't lost while the phone is away.
+        if (opts.tabId && UiBridge.isMailboxable(cmd)) {
+          this.storeMailbox(opts.tabId, cmd);
+          return { ok: true, mailboxed: true };
+        }
+        // resolveTarget threw BEFORE any socket write — no tab could be routed to (no
+        // connected tab / ambiguous / multiple / not reachable), so nothing was
+        // transmitted. Tag the rejection with the AUTHORITATIVE typed flag
+        // dispatched:false so a caller classifies "nothing applied" categorically (reboot
+        // readiness; the mutating-command rebind hint, panel #442) — never by
+        // string-matching a message whose text a post-dispatch executor error could quote.
+        throw markDispatched(err instanceof Error ? err : new Error(String(err)), false);
       }
-      // resolveTarget threw BEFORE any socket write — no tab could be routed to (no
-      // connected tab / ambiguous / multiple / not reachable), so nothing was
-      // transmitted. Tag the rejection with the AUTHORITATIVE typed flag
-      // dispatched:false so a caller classifies "nothing applied" categorically (reboot
-      // readiness; the mutating-command rebind hint, panel #442) — never by
-      // string-matching a message whose text a post-dispatch executor error could quote.
-      return Promise.reject(markDispatched(err instanceof Error ? err : new Error(String(err)), false));
     }
     // #236 — proactively gate a command this exact connection has already proven
     // unsupported (see Conn.unsupportedCmds), instead of dispatching it again just
