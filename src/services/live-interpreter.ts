@@ -470,16 +470,22 @@ export function venvHintsFromProcArgs2(buf: Buffer): VenvEnvHints {
   return venvHintsFromEnvEntries(strings.slice(Math.max(0, argc)));
 }
 
-/** Normalize a path for comparison: resolve symlinks where we can, and fold case
- *  and separators on Windows. */
+/** Fold case and separators so two spellings of one path compare equal. */
+function literal(p: string): string {
+  const out = pathResolve(p).replace(/\\/g, "/");
+  return IS_WIN ? out.toLowerCase() : out;
+}
+
+/** `literal`, plus symlink resolution where the filesystem allows it. Both forms
+ *  are compared, because either one alone gives a wrong answer: unresolved misses a
+ *  base install reached through a symlinked prefix, and resolved collapses a venv's
+ *  `bin/python` onto the base it links to. */
 function canonical(p: string): string {
-  let out = p;
   try {
-    out = realpathSync(p);
+    return literal(realpathSync(p));
   } catch {
-    out = pathResolve(p);
+    return literal(p);
   }
-  return IS_WIN ? out.toLowerCase().replace(/\\/g, "/") : out;
 }
 
 /**
@@ -551,17 +557,41 @@ export function interpreterFromVenvHints(
   if (!found) return undefined;
   // Nothing usable to contradict → the hint is the only observation we have.
   if (!argv0 || !isAbsolute(argv0) || !existsSync(argv0)) return pathResolve(found);
-  // argv[0] is usable. Only let the venv displace it if the venv says argv[0] is
-  // its base — otherwise this is an inherited VIRTUAL_ENV and argv[0] is right.
-  // `executable` is the base interpreter itself, so an exact match settles it.
+
+  // argv[0] is ALREADY a venv interpreter → there is nothing to recover, so the
+  // environment gets no say. This override exists for one situation only: argv[0]
+  // came back as a BASE interpreter (the macOS framework re-exec) and the venv it
+  // belongs to survives just in the environment. When argv[0] names a venv python,
+  // that story cannot apply, and any VIRTUAL_ENV pointing elsewhere is inherited.
+  //
+  // This is also what closes a hole the base comparison below cannot: on POSIX a
+  // venv's `bin/python` is a SYMLINK to its base, so resolving argv[0] collapses it
+  // onto that base — and two venvs built from one interpreter would then corroborate
+  // each other. Checking for argv[0]'s own `pyvenv.cfg` asks the question directly
+  // instead of inferring it from paths.
+  if (existsSync(join(argv0, "..", "..", "pyvenv.cfg"))) {
+    logger.info("Ignoring VIRTUAL_ENV: argv[0] is itself a venv interpreter", {
+      virtualEnv: venv,
+      argv0,
+    });
+    return undefined;
+  }
+
+  // Otherwise let the venv displace argv[0] only if the venv says argv[0] is its
+  // base. `executable` is the base interpreter itself, so an exact match settles it.
   // `home` is the DIRECTORY that interpreter lives in, so argv[0] must sit directly
   // in it — a prefix test would accept anything anywhere beneath a shared bin dir
   // (`/usr/bin`), which is far too weak to license overriding argv[0].
-  const target = canonical(argv0);
-  const targetDir = target.slice(0, target.lastIndexOf("/"));
+  //
+  // Compared BOTH as written and as resolved: a base install reached through a
+  // symlinked prefix (`/opt/homebrew/opt/python@3.12` → `../Cellar/...`) would
+  // otherwise fail to match the spelling `pyvenv.cfg` recorded.
+  const targets = new Set([canonical(argv0), literal(argv0)]);
+  const dirsOf = (p: string): string => p.slice(0, p.lastIndexOf("/"));
+  for (const t of [...targets]) targets.add(dirsOf(t));
   const corroborated = venvBaseInterpreters(venv)
-    .map(canonical)
-    .some((b) => b === target || b === targetDir);
+    .flatMap((b) => [canonical(b), literal(b)])
+    .some((b) => targets.has(b));
   if (corroborated) return pathResolve(found);
   logger.info("Ignoring VIRTUAL_ENV: it is not the venv argv[0] is the base of", {
     virtualEnv: venv,

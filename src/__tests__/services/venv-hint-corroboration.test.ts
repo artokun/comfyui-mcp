@@ -106,6 +106,27 @@ describe("VIRTUAL_ENV may only displace argv[0] when the venv says argv[0] is it
     expect(interpreterFromVenvHints({ pyvenvLauncher: launcher }, argv0)).toBe(launcher);
   });
 
+  it("REFUSES to displace an argv[0] that is itself a venv interpreter", async () => {
+    // On POSIX a venv's bin/python is a SYMLINK to the base it was built from, so
+    // resolving argv[0] collapses it onto that base — and a second venv built from
+    // the same interpreter then records exactly that path as its `executable`, so
+    // the two compare EQUAL and the base check licenses the override. Symlinks are
+    // not available on this platform, so the collapsed state is expressed directly:
+    // the stale venv names argv[0] itself as its base, which is what the comparison
+    // sees after resolution on the platforms where this code runs.
+    //
+    // The guard answers the question without going through paths at all: argv[0]
+    // has its own pyvenv.cfg, so it is already a venv interpreter and there is no
+    // base interpreter to recover from.
+    const running = await makeVenv("comfy-venv", await makeExe("shared-base-python"));
+    const argv0 = join(running, BIN, PY);
+    const stale = await makeVenv("other-venv", argv0);
+
+    // Sanity: without the guard this is precisely the corroborated shape.
+    expect(venvBaseInterpreters(stale)).toContain(argv0);
+    expect(interpreterFromVenvHints({ virtualEnv: stale }, argv0)).toBeUndefined();
+  });
+
   it("reads the base interpreter a real pyvenv.cfg records", async () => {
     const base = await makeExe("base-python");
     const venv = await makeVenv("v", base);
