@@ -37,7 +37,11 @@ import {
   type PanelToolCtx,
   type ToolResult,
 } from "../../orchestrator/panel-tools.js";
-import { markDispatched } from "../../services/ui-bridge.js";
+import {
+  isCapabilityRefusal,
+  markCapabilityRefusal,
+  markDispatched,
+} from "../../services/ui-bridge.js";
 import { WorkflowTargetStore } from "../../services/workflow-target-store.js";
 
 const TAB = "wf:route1:workflows/krea2_lora_ab_compare.json";
@@ -59,7 +63,60 @@ const fenceRefusal = (): Error =>
     false,
   );
 
-function harness(liveUuid: string) {
+// ── The two LOOK-ALIKES, quoted from the bridge's own templates ───────────────
+//
+// Both are minted by the SAME `"<cmd>" cannot be safely targeted to the active
+// workflow` reject in ui-bridge, both are `dispatched:false`, and both carry the
+// literal words "workflow instance mismatch" inside the `readsNote` that describes
+// what a DIFFERENT command would get. `isWorkflowInstanceMismatch` is an unanchored
+// phrase match, so it fires on both — which is why the new arm needs discriminators
+// the `graph_*` arm gets for free from the #1401 branch sitting above it.
+
+/** `capabilityMissing` — the panel does not enforce the fence contract a write needs.
+ *  Typed with the bridge's own symbol marker. NEITHER a retry NOR a rebind can add
+ *  the missing capability (#709), so appending that suffix contradicts the refusal. */
+const capabilityRefusal = (): Error =>
+  markCapabilityRefusal(
+    markDispatched(
+      new Error(
+        `"workflow_save" cannot be safely targeted to the active workflow: panel tab ` +
+          `${TAB} does not recheck workflow targeting at the graph write boundary after ` +
+          `asynchronous work (detected panel 0.11.40; a graph WRITE needs panel 0.11.62+, ` +
+          `the first build that rechecks the fence after an await). Update the panel and ` +
+          `hard-refresh the browser tab. WHETHER GRAPH READS STILL WORK IS NOT KNOWN FROM ` +
+          `HERE, and is not claimed: a read carries this session's stamp (${CARRIED_UUID}), ` +
+          `and this tab's panel runs it only while that stamp still names the ACTIVE canvas ` +
+          `— a comparison only the panel can make. If the workflow was switched or replaced ` +
+          `after this session bound to it, graph_outline / graph_query are refused with ` +
+          `"workflow instance mismatch" as well; if it was not, they work. Try ` +
+          `panel_list_workflows — the panel exempts that read from this fence (it is the ` +
+          `recovery probe), though a build predating the exemption fences it too. Non-graph ` +
+          `tools are unaffected.`,
+      ),
+      false,
+    ),
+  );
+
+/** The #1331 state: the fence contract IS advertised, but the workflow has no identity
+ *  to fence against. NOT capability-marked — the panel is fine, the canvas is not — so
+ *  the discriminating phrase is the only thing that separates it. And the separation
+ *  matters: "a mismatch may clear by itself, this never does". */
+const noTrustedIdentityRefusal = (): Error =>
+  markDispatched(
+    new Error(
+      `"workflow_save" cannot be safely targeted to the active workflow: this workflow has ` +
+        `no trusted identity for the panel to fence the command against. GRAPH READS ARE ` +
+        `REFUSED TOO, for this same missing stamp: this tab's panel enforces the ` +
+        `per-command fence and refuses an UNSTAMPED command rather than fail open, so ` +
+        `graph_outline / graph_query answer "workflow instance mismatch: this command ` +
+        `carries no workflow-instance stamp" as well. Try panel_list_workflows — the panel ` +
+        `exempts that read from this fence (it is the recovery probe), though a build ` +
+        `predating the exemption fences it too. Non-graph tools are unaffected.`,
+    ),
+    false,
+  );
+
+function harness(liveUuid: string, refusal: () => Error = fenceRefusal) {
   /** Every uuid offered to the provenance-only corroborator — the self-heal. */
   const corroborated: string[] = [];
   /** Every uuid handed to the RETARGETING fence write — must stay empty (#1646). */
@@ -77,7 +134,7 @@ function harness(liveUuid: string) {
         };
         return { active, workflows: [{ ...active, active: true }], active_confirmed: true };
       }
-      throw fenceRefusal();
+      throw refusal();
     },
     push: () => 1,
     canReach: (id: string) => id === TAB,
@@ -103,6 +160,7 @@ async function runTool(
   tool: string,
   args: Record<string, unknown>,
   liveUuid: string,
+  refusal: () => Error = fenceRefusal,
 ): Promise<{
   text: string;
   res: ToolResult;
@@ -110,7 +168,7 @@ async function runTool(
   retargeted: string[];
   sent: string[];
 }> {
-  const { bridge, corroborated, retargeted, sent } = harness(liveUuid);
+  const { bridge, corroborated, retargeted, sent } = harness(liveUuid, refusal);
   const ctx = makePanelToolCtx(bridge, TAB, new WorkflowTargetStore());
   const def = buildPanelToolDefs().find((d) => d.name === tool);
   if (!def) throw new Error(`${tool} is not registered`);
@@ -186,6 +244,59 @@ describe("#1778 — a fenced workflow SAVE corroborates like a fenced graph edit
     expect(corroborated).toEqual([CARRIED_UUID]);
     expect(text).toMatch(/CHECKED/);
     expect(text).toMatch(/RETRY THIS EXACT CALL ONCE/);
+  });
+
+  it("does NOT hijack a CAPABILITY refusal that merely quotes the phrase", async () => {
+    // The bridge's capability refusal names "workflow instance mismatch" inside its
+    // readsNote, to say what a graph READ would get. The phrase match cannot tell that
+    // apart from the fence actually having refused — for `graph_*` the ordering above
+    // hides it, and these four have nothing above them.
+    const raw = capabilityRefusal();
+    // The fixture is only meaningful if it really does trip the phrase match; assert
+    // that, or this test could pass for the wrong reason.
+    expect(/workflow instance mismatch/i.test(raw.message)).toBe(true);
+    expect(isCapabilityRefusal(raw)).toBe(true);
+
+    const { text, corroborated, sent } = await runTool(
+      "panel_save_workflow",
+      {},
+      CARRIED_UUID,
+      capabilityRefusal,
+    );
+
+    // No probe: there is no fence state to corroborate, and the round trip is wasted.
+    expect(sent).not.toContain("workflow_list");
+    expect(corroborated).toEqual([]);
+    // The capability branch's verbatim surfacing, not #1330's verdict.
+    expect(text).not.toMatch(/CHECKED/);
+    expect(text).not.toMatch(/RETRY THIS EXACT CALL ONCE/);
+    // #709: neither a retry nor a rebind can add the missing capability, so the
+    // suffix that orders one must not be appended three lines after the refusal
+    // says so.
+    expect(text).toMatch(/cannot be safely targeted to the active workflow/);
+  });
+
+  it("does NOT hand a NO-TRUSTED-IDENTITY refusal the mismatch remedy", async () => {
+    // The pair the repo forbids conflating: a mismatch may clear by itself, this
+    // never does. Answering it with "retry once, the fence already names the live
+    // canvas" is the wrong half.
+    const raw = noTrustedIdentityRefusal();
+    expect(/workflow instance mismatch/i.test(raw.message)).toBe(true);
+    expect(isCapabilityRefusal(raw)).toBe(false); // the marker cannot separate this one
+
+    const { text, corroborated, sent } = await runTool(
+      "panel_save_workflow",
+      {},
+      CARRIED_UUID,
+      noTrustedIdentityRefusal,
+    );
+
+    expect(sent).not.toContain("workflow_list");
+    expect(corroborated).toEqual([]);
+    expect(text).not.toMatch(/CHECKED/);
+    expect(text).not.toMatch(/RETRY THIS EXACT CALL ONCE/);
+    // The refusal's own words survive, which is where the real remedy lives.
+    expect(text).toMatch(/no trusted identity/);
   });
 
   it("CONTROL: a canvas-INDEPENDENT command is left alone", async () => {

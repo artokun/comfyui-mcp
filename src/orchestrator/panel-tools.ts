@@ -8390,9 +8390,37 @@ export function makePanelToolCtx(
       // refused PRE-dispatch exactly as a graph edit is, so every claim this branch
       // makes — "NOT applied", the read-only probe, the retry advice — holds for them
       // verbatim. See isFencedWorkflowMutator.
+      //
+      // THE PHRASE IS NOT THE STATE, AND TWO OTHER REFUSALS QUOTE IT (gate, P1).
+      // `isWorkflowInstanceMismatch` is an unanchored `/workflow instance mismatch/i`,
+      // and the bridge's own capability refusal embeds those exact words in its
+      // `readsNote` — "graph_outline / graph_query are refused with «workflow instance
+      // mismatch» as well" — to describe what a DIFFERENT command would get. Its
+      // `why` clause carries the second look-alike, `no trusted identity`. Both are
+      // minted by the same `cannot be safely targeted` reject, both are
+      // `dispatched:false`, and both would satisfy the phrase match.
+      //
+      // For `graph_*` that never surfaced, by ordering rather than by design: the
+      // #1401 branch above catches `no trusted identity` for a mutating graph edit
+      // first. These four have no such branch above them, so the widening alone would
+      // have HIJACKED both states and answered each with the other's remedy — the
+      // precise conflation `isNoTrustedIdentityRefusal`'s docstring forbids ("a
+      // mismatch may clear by itself, this never does"), and for the capability state
+      // it would re-append the futile retry/rebind suffix #709 exists to suppress,
+      // three lines after the refusal says rebinding cannot help.
+      //
+      // So the new arm carries the discriminators the old one got from ordering. Both
+      // are TYPED-or-explicit, never a second reading of the same prose:
+      // `isCapabilityRefusal` is the bridge's own symbol marker, and
+      // `isNoTrustedIdentityRefusal` matches the distinct phrase the mismatch refusal
+      // never contains. Scoped to THIS arm on purpose — `isMutatingGraphCmd` keeps its
+      // exact prior behaviour, so nothing about the graph path moves here.
       if (
         isWorkflowInstanceMismatch(err) &&
-        (isMutatingGraphCmd(cmd) || isFencedWorkflowMutator(cmd))
+        (isMutatingGraphCmd(cmd) ||
+          (isFencedWorkflowMutator(cmd) &&
+            !isCapabilityRefusal(err) &&
+            !isNoTrustedIdentityRefusal(err)))
       ) {
         const name = typeof cmd.cmd === "string" ? cmd.cmd : "panel command";
         const raw = err instanceof Error ? err.message : String(err);
