@@ -1019,6 +1019,180 @@ describe("a reachable server with NO --extra-model-paths-config is still authori
   });
 });
 
+describe("#1788 — a PINNED target discloses that the running server reads elsewhere", () => {
+  // The report: on ComfyUI Desktop, `list_local_models action:"add_path" target:"desktop"`
+  // wrote %APPDATA%/ComfyUI/extra_models_config.yaml and answered "Added … Restart
+  // ComfyUI to apply it", while `action:"list_paths"` on the same tool had already named
+  // the DIFFERENT file the running server was launched with. The write target is the
+  // documented escape hatch and stays where the caller pinned it — what changes is that
+  // the answer stops promising an effect the running server will never see.
+
+  /** A reachable server launched from `root`/main.py with the given config flags. */
+  async function liveServer(root: string, ...flags: string[]): Promise<void> {
+    await writeFile(join(root, "main.py"), "# comfyui\n", "utf-8");
+    const argv = ["python", join(root, "main.py")];
+    for (const f of flags) argv.push("--extra-model-paths-config", f);
+    mockGetSystemStats.mockResolvedValue({ system: { argv } });
+  }
+
+  async function liveConfigAt(dir: string, name: string): Promise<string> {
+    const cfg = join(dir, name);
+    await writeFile(cfg, "live:\n  ipadapter: D:/ComfyUI-Shared/models/ipadapter\n", "utf-8");
+    return cfg;
+  }
+
+  it('add_path target:"desktop" still writes the pinned file but refuses to promise a restart applies it', async () => {
+    const appData = await trackTmp();
+    process.env.APPDATA = appData;
+    const liveRoot = await trackTmp();
+    const serverCfg = await liveConfigAt(liveRoot, "instance-model-paths.yaml");
+    await liveServer(liveRoot, serverCfg);
+
+    const added = await addExtraPath({
+      target: "desktop",
+      category: "ipadapter",
+      path: "D:/ComfyUI-Shared/models/ipadapter",
+    });
+
+    // The escape hatch is intact: the bytes landed exactly where the caller pinned.
+    expect(added.path).toBe(join(appData, "ComfyUI", "extra_models_config.yaml"));
+    expect(added.changed).toBe(true);
+    expect(existsSync(added.path)).toBe(true);
+    // …and the answer says the running server does not read it.
+    expect(added.notes.some((n) => /RUNNING ComfyUI does not read this file/.test(n))).toBe(true);
+    expect(added.notes.join(" ")).toContain(serverCfg);
+    expect(added.message).not.toMatch(/Restart ComfyUI to apply it/);
+    expect(added.message).toMatch(/does NOT read/);
+    expect(added.message).toContain(serverCfg);
+  });
+
+  it('list_paths target:"desktop" carries the same disclosure (the READ was never wrong, only silent)', async () => {
+    const appData = await trackTmp();
+    process.env.APPDATA = appData;
+    const liveRoot = await trackTmp();
+    const serverCfg = await liveConfigAt(liveRoot, "instance-model-paths.yaml");
+    await liveServer(liveRoot, serverCfg);
+
+    const listed = await listExtraPaths({ target: "desktop" });
+    expect(listed.path).toBe(join(appData, "ComfyUI", "extra_models_config.yaml"));
+    expect(listed.notes.some((n) => /RUNNING ComfyUI does not read this file/.test(n))).toBe(true);
+  });
+
+  it("says NOTHING when the pinned file IS the one the server was launched with", async () => {
+    const liveRoot = await trackTmp();
+    const serverCfg = await liveConfigAt(liveRoot, "instance-model-paths.yaml");
+    await liveServer(liveRoot, serverCfg);
+
+    const added = await addExtraPath({
+      configPath: serverCfg,
+      category: "loras",
+      path: "D:/loras",
+    });
+    expect(added.notes.some((n) => /does not read this file/.test(n))).toBe(false);
+    expect(added.message).toMatch(/Restart ComfyUI to apply it/);
+  });
+
+  it("says NOTHING when the pinned file is the SECOND --extra-model-paths-config (not just the first)", async () => {
+    // The guard must compare the pinned path against EVERY config the server loads.
+    // Comparing only the primary resolution — the first flag — would call a live file
+    // inert, which is the same wrong-pair defect one level out.
+    const liveRoot = await trackTmp();
+    const first = await liveConfigAt(liveRoot, "first.yaml");
+    const second = await liveConfigAt(liveRoot, "second.yaml");
+    await liveServer(liveRoot, first, second);
+
+    const added = await addExtraPath({ configPath: second, category: "vae", path: "D:/vae" });
+    expect(added.notes.some((n) => /does not read this file/.test(n))).toBe(false);
+    expect(added.message).toMatch(/Restart ComfyUI to apply it/);
+  });
+
+  it("says NOTHING about the implicit <root>/extra_model_paths.yaml that does not exist YET", async () => {
+    // Pinning it is how a user CREATES it; the next restart then loads it. Calling that
+    // edit inert would be exactly backwards.
+    const liveRoot = await trackTmp();
+    const serverCfg = await liveConfigAt(liveRoot, "instance-model-paths.yaml");
+    await liveServer(liveRoot, serverCfg);
+    const implicit = join(liveRoot, "extra_model_paths.yaml");
+    expect(existsSync(implicit)).toBe(false);
+
+    const added = await addExtraPath({ configPath: implicit, category: "vae", path: "D:/vae" });
+    expect(added.notes.some((n) => /does not read this file/.test(n))).toBe(false);
+    expect(added.message).toMatch(/Restart ComfyUI to apply it/);
+  });
+
+  it("says NOTHING when a RELATIVE flag leaves the server's config set INCOMPLETE", async () => {
+    // The server names a config this process cannot locate, so the pinned file's absence
+    // from what we CAN name is not evidence the server does not read it. Unknown stays
+    // unknown — never a confident "it does not read this".
+    const appData = await trackTmp();
+    process.env.APPDATA = appData;
+    const liveRoot = await trackTmp();
+    await liveServer(liveRoot, "relative-cfg.yaml");
+
+    const added = await addExtraPath({
+      target: "desktop",
+      category: "ipadapter",
+      path: "D:/ipadapter",
+    });
+    expect(added.notes.some((n) => /does not read this file/.test(n))).toBe(false);
+    expect(added.message).toMatch(/Restart ComfyUI to apply it/);
+  });
+
+  it("says NOTHING when the server is UNREACHABLE (the pin is all there is)", async () => {
+    const appData = await trackTmp();
+    process.env.APPDATA = appData;
+    mockGetSystemStats.mockRejectedValue(new Error("ECONNREFUSED"));
+
+    const added = await addExtraPath({
+      target: "desktop",
+      category: "ipadapter",
+      path: "D:/ipadapter",
+    });
+    expect(added.path).toBe(join(appData, "ComfyUI", "extra_models_config.yaml"));
+    expect(added.notes.some((n) => /does not read this file/.test(n))).toBe(false);
+    expect(added.message).toMatch(/Restart ComfyUI to apply it/);
+  });
+
+  it("says NOTHING when the server's tree is not proven to be this machine's", async () => {
+    // Reachable, but its main.py does not resolve here (container/WSL/another host). The
+    // absolute flag value would name a same-spelled file on ITS disk; nothing is proven.
+    const appData = await trackTmp();
+    process.env.APPDATA = appData;
+    mockGetSystemStats.mockResolvedValue({
+      system: {
+        argv: [
+          "python",
+          join(await trackTmp(), "not-mounted", "main.py"),
+          "--extra-model-paths-config",
+          "/srv/comfy/extra.yaml",
+        ],
+      },
+    });
+
+    const added = await addExtraPath({
+      target: "desktop",
+      category: "ipadapter",
+      path: "D:/ipadapter",
+    });
+    expect(added.notes.some((n) => /does not read this file/.test(n))).toBe(false);
+    expect(added.message).toMatch(/Restart ComfyUI to apply it/);
+  });
+
+  it("remove_path carries the disclosure too (an inert removal is equally a no-op)", async () => {
+    const appData = await trackTmp();
+    process.env.APPDATA = appData;
+    const liveRoot = await trackTmp();
+    const serverCfg = await liveConfigAt(liveRoot, "instance-model-paths.yaml");
+    await liveServer(liveRoot, serverCfg);
+    await addExtraPath({ target: "desktop", category: "vae", path: "D:/vae" });
+
+    const removed = await removeExtraPath({ target: "desktop", category: "vae", path: "D:/vae" });
+    expect(removed.changed).toBe(true);
+    expect(removed.message).not.toMatch(/Restart ComfyUI to apply it/);
+    expect(removed.message).toMatch(/does NOT read/);
+  });
+});
+
 describe("expandVars — single-pass %VAR% scanner (no placeholder round-trip)", () => {
   const VAR = "CMCP_EXPAND_TEST_VAR";
   const oldValue = process.env[VAR];

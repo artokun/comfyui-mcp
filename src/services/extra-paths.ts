@@ -453,6 +453,32 @@ interface ResolvedTarget {
   createParents: boolean;
   /** Set for an inferred root — re-proved before every read and every write. */
   guard?: GuardedRoot;
+  /** Every config file the RUNNING server loads, when this resolution was anchored to
+   *  that server. Only a `complete` set can support the #1788 divergence disclosure —
+   *  a path's ABSENCE from a partial set is not evidence the server does not read it. */
+  liveLoaded?: LiveLoadedConfigs;
+  /** Set ONLY when the caller PINNED a file (`target`/`config_path`) and the running
+   *  server was proven to read a DIFFERENT, completely-enumerated set of configs — i.e.
+   *  this edit cannot affect the running server. Structured, never re-parsed from the
+   *  note: the mutation messages key on this field to stop promising "Restart ComfyUI
+   *  to apply it" for a file no ComfyUI will read (#1788). */
+  divergesFromLive?: { serverPaths: string[] };
+}
+
+/**
+ * The config files the RUNNING ComfyUI loads, established from ONE /system_stats
+ * snapshot. ComfyUI's set is exactly: every `--extra-model-paths-config` it was launched
+ * with, PLUS `<its own main.py root>/extra_model_paths.yaml`.
+ *
+ * `complete: false` means this process could NOT name them all — a RELATIVE
+ * `--extra-model-paths-config` with no reported server cwd resolves only against the
+ * SERVER's working directory. In that state a file's absence from `paths` says nothing
+ * about whether the server reads it, so no caller may conclude divergence from it. Same
+ * rule the rest of this file runs on: "could not determine" is never "determined not".
+ */
+interface LiveLoadedConfigs {
+  paths: string[];
+  complete: boolean;
 }
 
 function standaloneConfigPath(): Omit<ResolvedTarget, "target"> {
@@ -753,6 +779,10 @@ function implicitLiveTarget(
     serverResolved: true,
     createParents: false, // the root is proven; only the YAML itself may be missing
     guard: { path: liveRoot, identity: seen.identity, source: "live-root" },
+    // With no flag at all this IS the server's whole set. With an UNRESOLVABLE relative
+    // flag there is a second file we cannot name, so the set is incomplete and a pinned
+    // path's absence from it concludes nothing.
+    liveLoaded: { paths: [path], complete: unresolvableFlag === undefined },
   };
 }
 
@@ -802,9 +832,11 @@ async function resolveTargetPathPreferServer(
   opts: ExtraPathOptions = {},
   allowUnprovenLocalListFallback = false,
 ): Promise<ResolvedTarget & { serverResolved: boolean }> {
-  // Explicit config_path or an explicit non-auto target: honor the caller.
+  // Explicit config_path or an explicit non-auto target: honor the caller — and then
+  // say so honestly when the running server reads somewhere else (#1788). The write
+  // target is UNCHANGED by that check; only the reporting is.
   if (opts.configPath || (opts.target && opts.target !== "auto")) {
-    return { ...resolveTargetPath(opts), serverResolved: false };
+    return await notePinnedDivergence({ ...resolveTargetPath(opts), serverResolved: false });
   }
 
   const snapshot = await getLiveServerSnapshot(); // remote/unreachable → reachable:false
@@ -1095,6 +1127,17 @@ async function resolveTargetPathPreferServer(
   } catch {
     // No static guess available — the server-resolved path stands on its own.
   }
+  // The COMPARISON set for the #1788 divergence disclosure — deliberately NOT the
+  // `alsoLoaded` display list. Two differences, both load-bearing:
+  //   • the implicit `<root>/extra_model_paths.yaml` is included even when it does not
+  //     exist yet. Pinning it is how a user CREATES it, and the next restart then loads
+  //     it — calling that edit inert would be exactly backwards.
+  //   • `unlocatable` relative flags make the set INCOMPLETE, so a pinned path's absence
+  //     proves nothing and no divergence may be claimed.
+  const liveLoadedPaths = [serverConfig, ...alsoLoaded];
+  if (implicitConfig && !liveLoadedPaths.some((p) => samePath(p, implicitConfig))) {
+    liveLoadedPaths.push(implicitConfig);
+  }
   const isDesktop = looksLikeDesktopConfig(serverConfig);
   if (isDesktopGeneratedConfig(serverConfig)) {
     notes.push(
@@ -1108,6 +1151,75 @@ async function resolveTargetPathPreferServer(
     serverResolved: true,
     // The live server told us this file, so its directory exists by construction.
     createParents: true,
+    liveLoaded: { paths: liveLoadedPaths, complete: unlocatable.length === 0 },
+  };
+}
+
+/**
+ * #1788 — a PINNED target (`target: "desktop"` / `"standalone"` / an explicit
+ * `config_path`) deliberately bypasses the live resolution above: it is the documented
+ * escape hatch, and it must keep writing exactly where the caller said.
+ *
+ * What it must NOT keep doing is reporting that edit as though the running server will
+ * pick it up. The reporter called `list_local_models action:"add_path" target:"desktop"`
+ * on ComfyUI Desktop; the static heuristic wrote
+ * `%APPDATA%/ComfyUI/extra_models_config.yaml` and answered "Added … Restart ComfyUI to
+ * apply it", while the very same tool's `action:"list_paths"` had already reported the
+ * DIFFERENT file the running server was launched with. Two code paths, one question,
+ * two answers — and only the one that was right said so. Every live-anchored branch
+ * above pushes a divergence note when the STATIC guess would have differed; the pinned
+ * branch, which is the direction that actually loses data, pushed none.
+ *
+ * So: still write where the caller pinned, but ASK the same canonical resolver what the
+ * running server reads and disclose the divergence. Deliberately conservative — it can
+ * only ever ADD a note:
+ *   • the resolver is re-entered with NO pin, so this is the ONE canonical live
+ *     resolution, not a second copy of it that could drift (one level of recursion only:
+ *     `{}` cannot re-enter this branch);
+ *   • anything short of `serverResolved` proof — unreachable, remote, an unproven tree,
+ *     the #764 display fallbacks — yields NO note. Silence is the honest answer to "we
+ *     could not establish what the server reads";
+ *   • an INCOMPLETE loaded set yields no note either (see LiveLoadedConfigs);
+ *   • a pinned path that IS one of the server's configs yields no note — a caller
+ *     pinning the second `--extra-model-paths-config` file is editing a live one.
+ */
+async function notePinnedDivergence(
+  pinned: ResolvedTarget & { serverResolved: boolean },
+): Promise<ResolvedTarget & { serverResolved: boolean }> {
+  // Reachability is checked FIRST, before any resolution work. Without a reachable
+  // local server no note is possible, and the full resolution is not free: it stats the
+  // caller's own guarded root, and that root's TOCTOU revalidation counts every stat it
+  // takes (#648). Burning one there to learn nothing would turn a stable root into a
+  // spurious "REPLACED while this call was running" refusal.
+  //
+  // This is a second /system_stats read, and it is deliberately only a GATE — the inner
+  // resolution takes its own authoritative snapshot. A server that stops or starts
+  // between the two can therefore only ever SUPPRESS the note (gate says unreachable, or
+  // the inner call finds nothing proven); it can never manufacture one from a state the
+  // resolver did not itself observe.
+  if (!(await getLiveServerSnapshot()).reachable) return pinned;
+  let live: (ResolvedTarget & { serverResolved: boolean }) | undefined;
+  try {
+    live = await resolveTargetPathPreferServer({});
+  } catch {
+    return pinned; // the server established nothing — the pin is all there is
+  }
+  if (!live.serverResolved) return pinned;
+  const loaded = live.liveLoaded;
+  if (!loaded?.complete) return pinned;
+  if (loaded.paths.some((p) => samePath(p, pinned.path))) return pinned;
+  return {
+    ...pinned,
+    notes: [
+      ...pinned.notes,
+      `WARNING: the RUNNING ComfyUI does not read this file. You pinned it explicitly ` +
+        `(target/config_path), so it was selected by the local heuristic, not from the ` +
+        `server; the connected server reports it loads ${loaded.paths.join(", ")}. An ` +
+        `edit here does NOT reach the running server — restarting will not apply it. ` +
+        `Omit target/config_path to act on the config the running server actually reads, ` +
+        `or pass config_path with one of the paths above.`,
+    ],
+    divergesFromLive: { serverPaths: loaded.paths },
   };
 }
 
@@ -1339,6 +1451,22 @@ async function writeConfigFile(
   await writeFile(path, stringifyYaml(raw, { lineWidth: 0 }), "utf-8");
 }
 
+/**
+ * What a mutation's headline `message` must say when the file was PINNED and the running
+ * server provably reads elsewhere (#1788). Built from the STRUCTURED `divergesFromLive`
+ * field, never from re-reading a note: "Restart ComfyUI to apply it" is a promise about
+ * an effect, and it was being made for a file no running ComfyUI reads.
+ */
+function inertEditSuffix(resolved: ResolvedTarget): string {
+  const d = resolved.divergesFromLive;
+  if (!d) return "";
+  return (
+    ` WARNING: the running ComfyUI does NOT read ${resolved.path} — it loads ` +
+    `${d.serverPaths.join(", ")}. Restarting will NOT apply this change; you pinned this ` +
+    `file with target/config_path. Omit those to edit the config the running server reads.`
+  );
+}
+
 export async function addExtraPath(
   opts: ExtraPathMutationOptions,
 ): Promise<ExtraPathMutationResult> {
@@ -1376,12 +1504,16 @@ export async function addExtraPath(
     resolved.serverResolved,
     existedBefore || changed,
   );
+  const inert = inertEditSuffix(resolved);
   return {
     ...info,
     changed,
-    message: changed
-      ? `Added ${nextPath} to ${groupName}.${category}. Restart ComfyUI to apply it.`
-      : `${nextPath} is already present in ${groupName}.${category}.`,
+    message:
+      (changed
+        ? inert
+          ? `Added ${nextPath} to ${groupName}.${category}.`
+          : `Added ${nextPath} to ${groupName}.${category}. Restart ComfyUI to apply it.`
+        : `${nextPath} is already present in ${groupName}.${category}.`) + inert,
   };
 }
 
@@ -1418,11 +1550,15 @@ export async function removeExtraPath(
     resolved.serverResolved,
     existedBefore || changed,
   );
+  const inert = inertEditSuffix(resolved);
   return {
     ...info,
     changed,
-    message: changed
-      ? `Removed ${removePath} from ${groupName}.${category}. Restart ComfyUI to apply it.`
-      : `${removePath} was not present in ${groupName}.${category}.`,
+    message:
+      (changed
+        ? inert
+          ? `Removed ${removePath} from ${groupName}.${category}.`
+          : `Removed ${removePath} from ${groupName}.${category}. Restart ComfyUI to apply it.`
+        : `${removePath} was not present in ${groupName}.${category}.`) + inert,
   };
 }
