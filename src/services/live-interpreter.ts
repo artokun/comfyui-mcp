@@ -26,7 +26,7 @@
 // should be added here as tier 0 — it works for remote servers too.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, readlinkSync } from "node:fs";
 import { isAbsolute, join, resolve as pathResolve } from "node:path";
 import { platform } from "node:os";
 import { findPidByPort } from "./port-owner.js";
@@ -470,50 +470,6 @@ export function venvHintsFromProcArgs2(buf: Buffer): VenvEnvHints {
   return venvHintsFromEnvEntries(strings.slice(Math.max(0, argc)));
 }
 
-/** Fold case and separators so two spellings of one path compare equal. */
-function literal(p: string): string {
-  const out = pathResolve(p).replace(/\\/g, "/");
-  return IS_WIN ? out.toLowerCase() : out;
-}
-
-/** `literal`, plus symlink resolution where the filesystem allows it. Both forms
- *  are compared, because either one alone gives a wrong answer: unresolved misses a
- *  base install reached through a symlinked prefix, and resolved collapses a venv's
- *  `bin/python` onto the base it links to. */
-function canonical(p: string): string {
-  try {
-    return literal(realpathSync(p));
-  } catch {
-    return literal(p);
-  }
-}
-
-/**
- * The BASE interpreter a venv was built from, as the venv itself records it.
- *
- * `pyvenv.cfg` is written at creation time and names the interpreter that created
- * it — `executable` (the full path, CPython 3.11+) and `home` (its directory).
- * Measured on a real venv:
- *
- *     home = C:\Users\A\miniconda3
- *     executable = C:\Users\A\miniconda3\python.exe
- *
- * This is what lets us tell a venv that argv[0] is the base OF from a venv that
- * merely happens to be named in the environment.
- */
-export function venvBaseInterpreters(venvRoot: string): string[] {
-  try {
-    const cfg = readFileSync(join(venvRoot, "pyvenv.cfg"), "utf-8");
-    const out: string[] = [];
-    const exe = cfg.match(/^\s*executable\s*=\s*(.+)$/m)?.[1]?.trim();
-    if (exe) out.push(exe);
-    const home = cfg.match(/^\s*home\s*=\s*(.+)$/m)?.[1]?.trim();
-    if (home) out.push(home);
-    return out;
-  } catch {
-    return [];
-  }
-}
 
 /**
  * Reconstruct the venv interpreter the PROCESS recorded. `__PYVENV_LAUNCHER__`
@@ -542,62 +498,63 @@ export function venvBaseInterpreters(venvRoot: string): string[] {
  */
 export function interpreterFromVenvHints(
   hints: VenvEnvHints,
-  /** argv[0] of the process, when it is an absolute path that exists. Supplied only
-   *  to corroborate `VIRTUAL_ENV`; it never affects `__PYVENV_LAUNCHER__`. */
+  /** argv[0] of the process, when it is an absolute path that exists. Its presence
+   *  DISQUALIFIES `VIRTUAL_ENV`; it never affects `__PYVENV_LAUNCHER__`. */
   argv0?: string,
 ): string | undefined {
+  // `__PYVENV_LAUNCHER__` is written by CPython during THIS process's own macOS
+  // framework re-exec, to preserve the `sys.executable` it started with. It is a
+  // statement about this interpreter, so it is authoritative.
   const launcher = hints.pyvenvLauncher;
   if (launcher && isAbsolute(launcher) && existsSync(launcher)) return pathResolve(launcher);
+
   const venv = hints.virtualEnv;
   if (!venv || !isAbsolute(venv)) return undefined;
-  const candidates = IS_WIN
-    ? [join(venv, "Scripts", "python.exe"), join(venv, "python.exe")]
-    : [join(venv, "bin", "python"), join(venv, "bin", "python3")];
-  const found = candidates.find((c) => existsSync(c));
-  if (!found) return undefined;
-  // Nothing usable to contradict → the hint is the only observation we have.
-  if (!argv0 || !isAbsolute(argv0) || !existsSync(argv0)) return pathResolve(found);
 
-  // argv[0] is ALREADY a venv interpreter → there is nothing to recover, so the
-  // environment gets no say. This override exists for one situation only: argv[0]
-  // came back as a BASE interpreter (the macOS framework re-exec) and the venv it
-  // belongs to survives just in the environment. When argv[0] names a venv python,
-  // that story cannot apply, and any VIRTUAL_ENV pointing elsewhere is inherited.
+  // `VIRTUAL_ENV` is a statement about the SHELL, not about this process. `activate`
+  // exports it and every descendant inherits it whatever interpreter it happens to
+  // run, so it can never establish which python is executing.
   //
-  // This is also what closes a hole the base comparison below cannot: on POSIX a
-  // venv's `bin/python` is a SYMLINK to its base, so resolving argv[0] collapses it
-  // onto that base — and two venvs built from one interpreter would then corroborate
-  // each other. Checking for argv[0]'s own `pyvenv.cfg` asks the question directly
-  // instead of inferring it from paths.
-  if (existsSync(join(argv0, "..", "..", "pyvenv.cfg"))) {
-    logger.info("Ignoring VIRTUAL_ENV: argv[0] is itself a venv interpreter", {
+  // An earlier revision tried to license it by checking the venv's `pyvenv.cfg`
+  // against argv[0] — "was this venv built FROM argv[0]?". That is a different
+  // question from "is this process running IN that venv?", and the two come apart
+  // exactly where it matters. Measured on Ubuntu 24.04 (gate round 1):
+  //
+  //     $ VIRTUAL_ENV=/tmp/ve402 /usr/bin/python3 main.py
+  //     sys.executable            = /usr/bin/python3        <- NOT in ve402
+  //     readlink -f /usr/bin/python3 = /usr/bin/python3.14
+  //     /tmp/ve402/pyvenv.cfg     executable = /usr/bin/python3.14   <- matches
+  //
+  // Every stock `python -m venv` records the base it was built from, so a system
+  // python launching ComfyUI "corroborates" any venv on the machine. That check
+  // re-filed #401 on configurations `main` handles correctly today. Comparing paths
+  // cannot answer this; there is no path fact that distinguishes the two cases.
+  //
+  // So the rule is positional, not evidential: `VIRTUAL_ENV` is consulted ONLY when
+  // argv[0] gave us nothing to probe (a bare `python`, a relative spelling, a path
+  // that no longer exists). Then it displaces nothing and is strictly better than
+  // the `undefined` we would otherwise return. Whenever argv[0] IS usable it wins,
+  // because it is an observation of the process rather than of the shell.
+  //
+  // The macOS Homebrew case this feature exists for is unaffected: that is a
+  // framework re-exec, which sets `__PYVENV_LAUNCHER__` above. And when neither
+  // hint applies, the interpreter stays argv[0] and the caller's /system_stats
+  // contradiction check discredits the probe — reporting Triton as UNKNOWN, which
+  // is what #401 asked for ("a false `not installed` ... is worse than saying
+  // nothing at all").
+  if (argv0 && isAbsolute(argv0) && existsSync(argv0)) {
+    logger.info("Ignoring VIRTUAL_ENV: it describes the shell, and argv[0] is usable", {
       virtualEnv: venv,
       argv0,
     });
     return undefined;
   }
 
-  // Otherwise let the venv displace argv[0] only if the venv says argv[0] is its
-  // base. `executable` is the base interpreter itself, so an exact match settles it.
-  // `home` is the DIRECTORY that interpreter lives in, so argv[0] must sit directly
-  // in it — a prefix test would accept anything anywhere beneath a shared bin dir
-  // (`/usr/bin`), which is far too weak to license overriding argv[0].
-  //
-  // Compared BOTH as written and as resolved: a base install reached through a
-  // symlinked prefix (`/opt/homebrew/opt/python@3.12` → `../Cellar/...`) would
-  // otherwise fail to match the spelling `pyvenv.cfg` recorded.
-  const targets = new Set([canonical(argv0), literal(argv0)]);
-  const dirsOf = (p: string): string => p.slice(0, p.lastIndexOf("/"));
-  for (const t of [...targets]) targets.add(dirsOf(t));
-  const corroborated = venvBaseInterpreters(venv)
-    .flatMap((b) => [canonical(b), literal(b)])
-    .some((b) => targets.has(b));
-  if (corroborated) return pathResolve(found);
-  logger.info("Ignoring VIRTUAL_ENV: it is not the venv argv[0] is the base of", {
-    virtualEnv: venv,
-    argv0,
-  });
-  return undefined;
+  const candidates = IS_WIN
+    ? [join(venv, "Scripts", "python.exe"), join(venv, "python.exe")]
+    : [join(venv, "bin", "python"), join(venv, "bin", "python3")];
+  const found = candidates.find((c) => existsSync(c));
+  return found ? pathResolve(found) : undefined;
 }
 
 function venvHintsFromPid(pid: number): VenvEnvHints | undefined {
