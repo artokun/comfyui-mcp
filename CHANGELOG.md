@@ -745,6 +745,20 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.3] - 2026-08-19
+
+### MCP
+
+#### Fixed
+- a workflow-instance mismatch is diagnosed read-only, so a refused edit can no longer re-aim the fence onto the live canvas the caller did not name (#1646)
+- free_vram on a frozen tab is settled against the ComfyUI server itself instead of left outcome-unknown (#1249)
+- a Manager reboot whose loopback witness saw the down-up cycle reports the restart confirmed, not unconfirmed (#1642)
+- bootstrap finds git in the Git for Windows install roots when the orchestrator's PATH predates the install, and says a full restart is required when git is truly absent (#1640)
+- node_pack scaffold/publish adopt the live workspace install_comfyui already detected instead of refusing that no local install is configured (#1653)
+- apply_manifest stops refusing junctioned model folders, so a StabilityMatrix install resolves every model category (#870)
+- a re-spelled ComfyUI target keeps its self-queue ledger, so a post-reconnect scoped preview is not refused as a duplicate (#1615)
+
+
 ## [0.52.2] - 2026-08-18
 
 ### MCP
