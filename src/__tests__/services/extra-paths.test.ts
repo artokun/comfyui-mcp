@@ -1150,6 +1150,26 @@ describe("#1788 — a PINNED target discloses that the running server reads else
     expect(added.message).toMatch(/Restart ComfyUI to apply it/);
   });
 
+  it("says NOTHING for the second value of ONE nargs='+' flag occurrence", async () => {
+    // `--extra-model-paths-config` is argparse `nargs="+"`, so ONE occurrence can carry
+    // SEVERAL files and ComfyUI loads them all. The sibling test above spells the flag
+    // twice; this spells it once with two values, which is a different argv shape and a
+    // different parser path. Both must count as configs the server reads.
+    const liveRoot = await trackTmp();
+    await writeFile(join(liveRoot, "main.py"), "# comfyui\n", "utf-8");
+    const first = await liveConfigAt(liveRoot, "first.yaml");
+    const second = await liveConfigAt(liveRoot, "second.yaml");
+    mockGetSystemStats.mockResolvedValue({
+      system: {
+        argv: ["python", join(liveRoot, "main.py"), "--extra-model-paths-config", first, second],
+      },
+    });
+
+    const added = await addExtraPath({ configPath: second, category: "vae", path: "D:/vae" });
+    expect(added.notes.some((n) => /does not read this file/.test(n))).toBe(false);
+    expect(added.message).toMatch(/Restart ComfyUI to apply it/);
+  });
+
   it("says NOTHING about the implicit <root>/extra_model_paths.yaml that does not exist YET", async () => {
     // Pinning it is how a user CREATES it; the next restart then loads it. Calling that
     // edit inert would be exactly backwards.
