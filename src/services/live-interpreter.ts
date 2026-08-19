@@ -26,7 +26,7 @@
 // should be added here as tier 0 — it works for remote servers too.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, readlinkSync } from "node:fs";
+import { existsSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
 import { isAbsolute, join, resolve as pathResolve } from "node:path";
 import { platform } from "node:os";
 import { findPidByPort } from "./port-owner.js";
@@ -254,6 +254,14 @@ export interface ProcessIdentity {
    * never logged.
    */
   venvPython?: string;
+  /**
+   * The RAW venv hints, uninterpreted. Carried separately from `venvPython` because
+   * `VIRTUAL_ENV` can only be judged against argv[0], and argv[0] is chosen in
+   * `observeLiveServerProcess`, not here. Resolving at the decision point is what
+   * keeps the corroboration reachable — behind the OS read it would be invisible to
+   * every caller that injects a `readIdentity` seam.
+   */
+  venvHints?: VenvEnvHints;
 }
 
 /**
@@ -462,13 +470,76 @@ export function venvHintsFromProcArgs2(buf: Buffer): VenvEnvHints {
   return venvHintsFromEnvEntries(strings.slice(Math.max(0, argc)));
 }
 
+/** Normalize a path for comparison: resolve symlinks where we can, and fold case
+ *  and separators on Windows. */
+function canonical(p: string): string {
+  let out = p;
+  try {
+    out = realpathSync(p);
+  } catch {
+    out = pathResolve(p);
+  }
+  return IS_WIN ? out.toLowerCase().replace(/\\/g, "/") : out;
+}
+
+/**
+ * The BASE interpreter a venv was built from, as the venv itself records it.
+ *
+ * `pyvenv.cfg` is written at creation time and names the interpreter that created
+ * it — `executable` (the full path, CPython 3.11+) and `home` (its directory).
+ * Measured on a real venv:
+ *
+ *     home = C:\Users\A\miniconda3
+ *     executable = C:\Users\A\miniconda3\python.exe
+ *
+ * This is what lets us tell a venv that argv[0] is the base OF from a venv that
+ * merely happens to be named in the environment.
+ */
+export function venvBaseInterpreters(venvRoot: string): string[] {
+  try {
+    const cfg = readFileSync(join(venvRoot, "pyvenv.cfg"), "utf-8");
+    const out: string[] = [];
+    const exe = cfg.match(/^\s*executable\s*=\s*(.+)$/m)?.[1]?.trim();
+    if (exe) out.push(exe);
+    const home = cfg.match(/^\s*home\s*=\s*(.+)$/m)?.[1]?.trim();
+    if (home) out.push(home);
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Reconstruct the venv interpreter the PROCESS recorded. `__PYVENV_LAUNCHER__`
  * is the original argv[0] CPython saved before the macOS framework re-exec;
- * `VIRTUAL_ENV` is the activate-script / uv equivalent. Either is an observation
- * of the running process. Layout guesses do not belong here.
+ * `VIRTUAL_ENV` is the activate-script / uv equivalent.
+ *
+ * The two are NOT equally trustworthy, and treating them as if they were is its own
+ * #401. `__PYVENV_LAUNCHER__` is set by CPython itself, during this process's own
+ * re-exec, so it describes THIS interpreter. `VIRTUAL_ENV` is set by `activate` and
+ * then INHERITED by every child regardless of which interpreter that child is —
+ * measured:
+ *
+ *     $ VIRTUAL_ENV=/tmp/ve401 python -c "import sys,os; print(sys.executable)"
+ *     sys.executable = C:\Users\A\miniconda3\python.exe     <- what it really imports
+ *     VIRTUAL_ENV    = /tmp/ve401                           <- an unrelated venv
+ *
+ * So a server launched by explicit absolute path from a shell with some other venv
+ * active would be probed against that other venv — reporting `Triton: not installed`
+ * off an interpreter the server never loaded, which is the original bug verbatim.
+ *
+ * `VIRTUAL_ENV` may therefore only OVERRIDE a usable argv[0] when the venv's own
+ * `pyvenv.cfg` names argv[0] as the base it was built from. That is exactly the
+ * macOS Python.app re-exec case (argv[0] IS the framework base of this venv), and
+ * exactly not the stale-inheritance case. When there is no usable argv[0] to
+ * contradict, the hint is better than nothing and is used as before.
  */
-export function interpreterFromVenvHints(hints: VenvEnvHints): string | undefined {
+export function interpreterFromVenvHints(
+  hints: VenvEnvHints,
+  /** argv[0] of the process, when it is an absolute path that exists. Supplied only
+   *  to corroborate `VIRTUAL_ENV`; it never affects `__PYVENV_LAUNCHER__`. */
+  argv0?: string,
+): string | undefined {
   const launcher = hints.pyvenvLauncher;
   if (launcher && isAbsolute(launcher) && existsSync(launcher)) return pathResolve(launcher);
   const venv = hints.virtualEnv;
@@ -476,32 +547,51 @@ export function interpreterFromVenvHints(hints: VenvEnvHints): string | undefine
   const candidates = IS_WIN
     ? [join(venv, "Scripts", "python.exe"), join(venv, "python.exe")]
     : [join(venv, "bin", "python"), join(venv, "bin", "python3")];
-  for (const c of candidates) {
-    if (existsSync(c)) return pathResolve(c);
-  }
+  const found = candidates.find((c) => existsSync(c));
+  if (!found) return undefined;
+  // Nothing usable to contradict → the hint is the only observation we have.
+  if (!argv0 || !isAbsolute(argv0) || !existsSync(argv0)) return pathResolve(found);
+  // argv[0] is usable. Only let the venv displace it if the venv says argv[0] is
+  // its base — otherwise this is an inherited VIRTUAL_ENV and argv[0] is right.
+  // `executable` is the base interpreter itself, so an exact match settles it.
+  // `home` is the DIRECTORY that interpreter lives in, so argv[0] must sit directly
+  // in it — a prefix test would accept anything anywhere beneath a shared bin dir
+  // (`/usr/bin`), which is far too weak to license overriding argv[0].
+  const target = canonical(argv0);
+  const targetDir = target.slice(0, target.lastIndexOf("/"));
+  const corroborated = venvBaseInterpreters(venv)
+    .map(canonical)
+    .some((b) => b === target || b === targetDir);
+  if (corroborated) return pathResolve(found);
+  logger.info("Ignoring VIRTUAL_ENV: it is not the venv argv[0] is the base of", {
+    virtualEnv: venv,
+    argv0,
+  });
   return undefined;
 }
 
-function venvPythonFromPid(pid: number): string | undefined {
+function venvHintsFromPid(pid: number): VenvEnvHints | undefined {
   try {
     if (IS_WIN) return undefined;
     if (platform() === "linux") {
-      return interpreterFromVenvHints(venvHintsFromEnvironBuffer(readFileSync(`/proc/${pid}/environ`)));
+      return venvHintsFromEnvironBuffer(readFileSync(`/proc/${pid}/environ`));
     }
     const buf = execFileSync("sysctl", ["-b", `kern.procargs2.${pid}`], {
       timeout: 8000,
       maxBuffer: 2 * 1024 * 1024,
     });
     if (!Buffer.isBuffer(buf) || buf.length === 0) return undefined;
-    return interpreterFromVenvHints(venvHintsFromProcArgs2(buf));
+    return venvHintsFromProcArgs2(buf);
   } catch {
     return undefined;
   }
 }
 
+/** Attach the raw venv hints. Deliberately does NOT resolve them: `VIRTUAL_ENV` is
+ *  only meaningful next to argv[0], which the resolver picks. */
 function withVenvPython(pid: number, identity: ProcessIdentity): ProcessIdentity {
-  const venvPython = venvPythonFromPid(pid);
-  if (venvPython) identity.venvPython = venvPython;
+  const hints = venvHintsFromPid(pid);
+  if (hints && (hints.pyvenvLauncher || hints.virtualEnv)) identity.venvHints = hints;
   return identity;
 }
 
@@ -716,21 +806,32 @@ export function observeLiveServerProcess(opts: ResolveOptions): LiveServerProces
   // Tier 2 — the OS process table, correlated against the server's own argv.
   if (!commandLineMatchesArgv(identity?.commandLine, opts.serverArgv)) return undefined;
 
-  // Prefer the venv the process itself recorded. After a macOS Python.app re-exec,
-  // argv[0] is the Homebrew/framework BASE interpreter — it exists, versions match
-  // the venv by construction, and probing it reports torch/Triton missing while
-  // /system_stats shows they are there (#401 recurrence, 0.52.1).
-  const fromEnv = identity?.venvPython;
-  if (fromEnv && isAbsolute(fromEnv) && existsSync(fromEnv)) {
-    return { python: fromEnv, source: "process-table", pid, image };
-  }
-
-  const argv0 = argv0FromCommandLine(identity?.commandLine ?? "");
   // A relative or bare argv[0] ("python", "./python") does not identify a file we
   // can probe — the process's cwd is not ours. Only an absolute path that exists
   // is usable; anything else is honestly unknown as an INTERPRETER. The OS image
   // still travels with the result for the weaker anchor question (#1374).
-  if (argv0 && isAbsolute(argv0) && existsSync(argv0)) {
+  const rawArgv0 = argv0FromCommandLine(identity?.commandLine ?? "");
+  const argv0 =
+    rawArgv0 && isAbsolute(rawArgv0) && existsSync(rawArgv0) ? rawArgv0 : undefined;
+
+  // Prefer the venv the process itself recorded. After a macOS Python.app re-exec,
+  // argv[0] is the Homebrew/framework BASE interpreter — it exists, versions match
+  // the venv by construction, and probing it reports torch/Triton missing while
+  // /system_stats shows they are there (#401 recurrence, 0.52.1).
+  //
+  // Resolved HERE, with argv[0] in hand, because `VIRTUAL_ENV` is only meaningful
+  // beside it: inherited from an activating shell, it names a venv this process may
+  // have nothing to do with, and letting that displace a good argv[0] would re-file
+  // #401 on machines that never had it. `venvPython` remains honoured when a caller
+  // supplied one directly.
+  const fromEnv = identity?.venvHints
+    ? interpreterFromVenvHints(identity.venvHints, argv0)
+    : identity?.venvPython;
+  if (fromEnv && isAbsolute(fromEnv) && existsSync(fromEnv)) {
+    return { python: fromEnv, source: "process-table", pid, image };
+  }
+
+  if (argv0) {
     return { python: argv0, source: "process-table", pid, image };
   }
   return { pid, image };

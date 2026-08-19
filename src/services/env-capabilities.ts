@@ -378,6 +378,31 @@ export function findComfyuiPython(
 }
 
 /**
+ * The exact python source the capability probe runs. Exported so a test can assert
+ * on the SOURCE: the guarantee that matters most here is a NEGATIVE one — that we
+ * never import torch inside a 5s budget — and no behavioural assertion can notice a
+ * future edit that quietly puts the import back.
+ */
+export const TRITON_PROBE_SOURCE = [
+  "import importlib.util as u, sys",
+  "print('python', ' '.join(sys.version.split()))",
+  "print('triton', u.find_spec('triton') is not None)",
+  "print('sageattention', u.find_spec('sageattention') is not None)",
+  "ts = u.find_spec('torch')",
+  "print('torch', ts is not None)",
+  "tv = ''",
+  "if ts is not None:",
+  "    try:",
+  "        import importlib.metadata as md",
+  "        tv = md.version('torch')",
+  "    except Exception:",
+  // torch present but with no dist-info (a hand-copied tree). "installed" still
+  // stands; only the version comparison is skipped.
+  "        tv = ''",
+  "print('torch_version', tv)",
+].join("\n");
+
+/**
  * Probe whether triton + sageattention are importable in the ComfyUI python.
  * Best-effort, hard ~5s timeout. Returns one tri-state per package:
  *   installed | not-installed | unknown
@@ -409,18 +434,26 @@ export function probeTritonSage(
     // not just a major.minor one (#401 review).
     // torch is the 0.52.1 discriminator: a venv and its Homebrew/uv base share a
     // python banner, but only the venv has the torch /system_stats reports.
-    const code =
-      "import importlib.util as u,sys;" +
-      "print('python', ' '.join(sys.version.split()));" +
-      "print('triton', u.find_spec('triton') is not None);" +
-      "print('sageattention', u.find_spec('sageattention') is not None);" +
-      "ts=u.find_spec('torch');" +
-      "print('torch', ts is not None);" +
-      "print('torch_version', (ts and getattr(__import__('torch'), '__version__', '')) or '')";
+    //
+    // The version comes from DIST METADATA, never `import torch`. Importing torch
+    // initializes CUDA/MPS and loads a stack of native libraries: measured at 1.89s
+    // warm on a local NVMe RTX box, i.e. 38% of this probe's entire 5s budget, and
+    // multiples of that cold or on a network-mounted venv. Blowing the budget is not
+    // a partial loss — CPython block-buffers stdout when it is a pipe, so the kill
+    // discards the triton/sageattention lines that had ALREADY been computed, and
+    // the caller's `if (!out.trim())` branch reports everything as "unknown". That
+    // would degrade a working `Triton: installed` to unknown on exactly the
+    // heavy-CUDA machines #401 is about. `importlib.metadata.version` returns the
+    // identical string ("2.10.0+cu130" both ways, measured) for 43ms.
+    //
+    // Written with real newlines because the metadata lookup needs a try/except,
+    // which has no inline form. `-u` keeps stdout unbuffered so that if the child
+    // is killed anyway, the lines printed before the kill still reach us.
+    const code = TRITON_PROBE_SOURCE;
     let done = false;
     const child = execFile(
       pythonExe,
-      ["-c", code],
+      ["-u", "-c", code],
       { timeout: timeoutMs, windowsHide: true },
       (err, stdout) => {
         if (done) return;
