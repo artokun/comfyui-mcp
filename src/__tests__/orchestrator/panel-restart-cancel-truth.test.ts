@@ -39,7 +39,7 @@ vi.mock("../../config.js", async (importOriginal) => {
   };
 });
 
-const { buildPanelToolDefs, __panelToolsTestHooks } = await import(
+const { buildPanelToolDefs, makePanelToolCtx, __panelToolsTestHooks } = await import(
   "../../orchestrator/panel-tools.js"
 );
 import { getBootLocalComfyUIBaseUrl } from "../../config.js";
@@ -49,6 +49,7 @@ import {
   PROCESS_WIDE_RESTART_DISPATCH_TOKEN,
 } from "../../services/process-control.js";
 import type { PanelToolCtx, ToolResult } from "../../orchestrator/panel-tools.js";
+import { WorkflowTargetStore } from "../../services/workflow-target-store.js";
 
 // The orchestrator's immutable boot endpoint — what the decline-probe and the
 // refuse-safe preflight bind to when the tab provably fronts our boot instance.
@@ -425,46 +426,56 @@ describe("panel_restart_comfyui — decline truthfulness (#742)", () => {
     expect(sends.some((c) => c.cmd === "comfy_reboot")).toBe(false);
   });
 
-  it("an UNBOUND probe target gets a generic unreachable report — never a causation claim (codex gate)", async () => {
-    // The bound tab does NOT provably front our boot instance, so the only probe
-    // is the configured endpoint — no proven relationship to the restart. The
-    // report may say the server is unreachable, but must NEVER claim a restart
-    // (ours or an earlier one) stopped it.
+  it("an UNBOUND probe target is refused BEFORE the card, so a decline never claims causation (#1819)", async () => {
+    // Used to show the card, take a "no", then probe the configured endpoint
+    // and talk about whether it was down. That is the reporter's sequence:
+    // ask first, then refuse identity. A live unbindable tab is now refused
+    // without asking, so the decline probe — and any causation it could mint —
+    // never runs.
     let probes = 0;
     __panelToolsTestHooks.setHealthProbe(async () => {
       probes++;
       return "down";
     });
+    let confirmCalled = false;
     const { ctx, sends } = makeCtx({ confirm: "no", frontsBoot: false });
+    ctx.confirm = async () => {
+      confirmCalled = true;
+      return "no";
+    };
 
     const res = await restartTool().handler({}, ctx);
-    const t = text(res);
+    const out = parse(res);
 
     expect(res.isError).toBeFalsy();
-    expect(t).not.toMatch(/^Cancelled/);
-    expect(t).toMatch(/appears to be DOWN|unreachable/i);
-    // NO causation: not "stopped by a restart", not "did not come back".
-    expect(t).not.toMatch(/restart initiated earlier/i);
-    expect(t).not.toMatch(/STOPPED and did not come back/i);
-    expect(t).not.toMatch(/was NOT what stopped it/i);
-    expect(t).toMatch(/can't tell|can't confirm|isn't provably/i);
-    expect(probes).toBeGreaterThan(1);
+    expect(confirmCalled).toBe(false);
+    expect(out.refused).toBe(true);
+    expect(out.rebooting).toBe(false);
+    expect(String(out.note)).not.toMatch(/restart initiated earlier/i);
+    expect(String(out.note)).not.toMatch(/STOPPED and did not come back/i);
+    expect(String(out.note)).not.toMatch(/was NOT what stopped it/i);
+    expect(probes).toBe(0);
     expect(sends.some((c) => c.cmd === "comfy_reboot")).toBe(false);
   });
 
-  it("an UNBOUND probe target that recovers keeps the plain cancel line", async () => {
-    const seq: Array<"down" | "healthy"> = ["down", "healthy"];
+  it("an UNBOUND probe target that would have recovered is still refused without asking (#1819)", async () => {
     let probes = 0;
     __panelToolsTestHooks.setHealthProbe(async () => {
-      const s = seq[Math.min(probes, seq.length - 1)];
       probes++;
-      return s;
+      return "healthy";
     });
+    let confirmCalled = false;
     const { ctx, sends } = makeCtx({ confirm: "no", frontsBoot: false });
+    ctx.confirm = async () => {
+      confirmCalled = true;
+      return "no";
+    };
 
-    const res = await restartTool().handler({}, ctx);
+    const out = parse(await restartTool().handler({}, ctx));
 
-    expect(text(res)).toBe("Cancelled — ComfyUI was not restarted.");
+    expect(confirmCalled).toBe(false);
+    expect(out.refused).toBe(true);
+    expect(probes).toBe(0);
     expect(sends.some((c) => c.cmd === "comfy_reboot")).toBe(false);
   });
 
@@ -912,6 +923,97 @@ describe("panel_restart_comfyui — Pinokio-style refuse-safe preflight (#742)",
     // r4/r5: the dispatch was recorded on acceptance AND cleared when the
     // restart was observed back — a completed restart explains no later down.
     expect(__panelToolsTestHooks.getSessionRestartDispatch(ctx)).toBeNull();
+  });
+});
+
+describe("panel_restart_comfyui — identity is resolved BEFORE the confirmation card (#1819)", () => {
+  // The reporter: first call timed out at 90s ("did NOT restart"), second call was
+  // confirmed then refused ("could not confirm that this panel's ComfyUI is the
+  // local instance"), then every graph call failed with Connected: none. The card
+  // was shown before identity was known, so the same unbindable target produced
+  // two outcomes, and the wait left graph tools looking like a reconnect.
+
+  it("an unbindable local target refuses WITHOUT showing a confirmation card", async () => {
+    let confirmCalled = false;
+    const preflight = vi.fn(async () => ({ ok: true }));
+    __panelToolsTestHooks.setLocalRestartPreflight(preflight);
+    const { ctx, sends } = makeCtx({ confirm: "yes", frontsBoot: false });
+    ctx.confirm = async () => {
+      confirmCalled = true;
+      return "yes";
+    };
+
+    const out = parse(await restartTool().handler({}, ctx));
+
+    expect(confirmCalled).toBe(false);
+    expect(sends).toEqual([]);
+    expect(preflight).not.toHaveBeenCalled();
+    expect(out.refused).toBe(true);
+    expect(out.rebooting).toBe(false);
+    expect(out.confirmed_cycle).toBe(false);
+    expect(String(out.note)).toMatch(/cannot tell which server the restart would stop/i);
+  });
+
+  it("a refused restart keeps the live tab and reports one terminal state, not a reconnect", async () => {
+    const { ctx, sends } = makeCtx({ confirm: "yes", frontsBoot: false });
+    const identityBefore = ctx.panelConnectionIdentity();
+
+    const out = parse(await restartTool().handler({}, ctx));
+
+    expect(out.refused).toBe(true);
+    expect(out.rebooting).toBe(false);
+    // Nothing was restarted, so graph tools stay usable on the same tab.
+    expect(out.ready).toBe(true);
+    expect(out.graph_tools_ready).toBe(true);
+    expect(out.panel_tab_reconnected).toBe(true);
+    expect(ctx.tabId).toBe("bound-tab");
+    expect(ctx.bridge.canReach(ctx.tabId)).toBe(true);
+    expect(ctx.panelConnectionIdentity()).toEqual(identityBefore);
+    expect(resetClient).not.toHaveBeenCalled();
+    expect(resetObjectInfoCache).not.toHaveBeenCalled();
+    await ctx.bridge.send({ cmd: "graph_get_errors" } as { cmd: string }, {
+      tabId: ctx.tabId,
+    } as never);
+    expect(sends).toEqual([{ cmd: "graph_get_errors" }]);
+  });
+
+  it("panel_get_errors still reaches the live tab after an identity refusal (real ctx)", async () => {
+    // Drive the shipped handler AND the next graph tool the reporter hit, on the
+    // real makePanelToolCtx path — not a stub that skips confirm/call wiring.
+    const TAB = "bound-tab";
+    const sends: Array<Record<string, unknown>> = [];
+    const bridge = {
+      send: async (cmd: Record<string, unknown>) => {
+        sends.push(cmd);
+        if (cmd.cmd === "graph_get_errors") return { nodes: [], missing_models: [] };
+        return { ok: true };
+      },
+      canReach: () => true,
+      isHeadless: () => false,
+      tabs: () => [{ tab_id: TAB, title: "wf", connected_at: 0 }],
+      resolveActiveTabId: () => TAB,
+      tabIsLocal: () => true,
+      tabServerOrigin: () => "http://127.0.0.1:8189",
+      tabCanMutateGraph: () => true,
+      tabGraphMutationCapability: () => ({ known: true, canMutate: true }),
+    } as unknown as PanelToolCtx["bridge"];
+    const ctx = makePanelToolCtx(bridge, TAB, new WorkflowTargetStore());
+
+    const restart = parse(await restartTool().handler({}, ctx));
+    expect(restart.refused).toBe(true);
+    expect(restart.rebooting).toBe(false);
+    expect(restart.ready).toBe(true);
+    expect(restart.panel_tab_reconnected).toBe(true);
+    expect(sends.some((c) => c.cmd === "ask_user")).toBe(false);
+    expect(sends.some((c) => c.cmd === "comfy_reboot")).toBe(false);
+
+    const getErrors = buildPanelToolDefs().find((d) => d.name === "panel_get_errors");
+    if (!getErrors) throw new Error("panel_get_errors not found");
+    const errors = await getErrors.handler({}, ctx);
+    expect(errors.isError).toBeFalsy();
+    expect(sends.some((c) => c.cmd === "graph_get_errors")).toBe(true);
+    expect(ctx.tabId).toBe(TAB);
+    expect(ctx.bridge.canReach(TAB)).toBe(true);
   });
 });
 

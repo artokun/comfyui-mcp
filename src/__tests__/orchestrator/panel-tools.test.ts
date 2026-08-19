@@ -4474,6 +4474,15 @@ describe("confirm-card timeout is honest, bounded, and late-answer-safe (#360)",
     return (res.content[0] as { text: string }).text;
   }
 
+  // #1819 refuses an unbindable local target before the confirmation card, so
+  // tests that exercise the card itself must model the ordinary bound panel.
+  const boundLocalTab = {
+    tabIsLocal: () => true as const,
+    tabServerOrigin: () =>
+      (getBootLocalComfyUIBaseUrl() ?? "http://127.0.0.1:8188").replace(/[/]+$/, ""),
+    canReach: () => true,
+  };
+
   // #814 widened the refuse-safe preflight to EVERY local target, not only a
   // tab-bound one, so panel_restart_comfyui now consults it on this path too.
   // These tests are about the confirm card, and the real preflight would do live
@@ -4503,6 +4512,7 @@ describe("confirm-card timeout is honest, bounded, and late-answer-safe (#360)",
         dispatched.push(cmd);
         return { rebooting: true };
       },
+      ...boundLocalTab,
     } as unknown as PanelToolCtx["bridge"];
     const ctx = makePanelToolCtx(bridge, "abcd1234");
 
@@ -4531,6 +4541,7 @@ describe("confirm-card timeout is honest, bounded, and late-answer-safe (#360)",
         }
         return { rebooting: true };
       },
+      ...boundLocalTab,
     } as unknown as PanelToolCtx["bridge"];
     const ctx = makePanelToolCtx(bridge, "abcd1234");
 
@@ -4557,6 +4568,7 @@ describe("confirm-card timeout is honest, bounded, and late-answer-safe (#360)",
         }
         return { rebooting: true };
       },
+      ...boundLocalTab,
     } as unknown as PanelToolCtx["bridge"];
     const ctx = makePanelToolCtx(bridge, "abcd1234");
 
@@ -4583,6 +4595,7 @@ describe("confirm-card timeout is honest, bounded, and late-answer-safe (#360)",
         dispatched.push(cmd);
         return { rebooting: true };
       },
+      ...boundLocalTab,
     } as unknown as PanelToolCtx["bridge"];
     const ctx = makePanelToolCtx(bridge, "abcd1234");
 

@@ -1928,6 +1928,80 @@ export function restartRefusalHandoffAdvice(args: {
 }
 
 /**
+ * #1819 — a restart that was NOT dispatched must not look like a reconnect.
+ *
+ * Showing the confirmation card before instance identity was resolved produced two
+ * contradictory outcomes for the same unbindable target (a 90s timeout, then a
+ * yes that refused). The card wait is also what left graph tools reporting
+ * "still reconnecting after a restart/reload" about a panel that never restarted.
+ * Re-heal the current tab, then report one terminal state: refused, not rebooting,
+ * and the live tab's actual graph-tool readiness — including `panel_tab_reconnected`
+ * so a caller can tell this apart from a real reload.
+ */
+function restartRefusedPreservingBinding(ctx: PanelToolCtx, note: string): ToolResult {
+  ctx.ensureReachable?.();
+  const tabReady =
+    typeof ctx.bridge?.canReach === "function" ? ctx.bridge.canReach(ctx.tabId) === true : true;
+  const graphToolsReady =
+    tabReady && (ctx.tabCanMutateGraph ? ctx.tabCanMutateGraph() : true);
+  return ok({
+    rebooting: false,
+    ready: graphToolsReady,
+    graph_tools_ready: graphToolsReady,
+    confirmed_cycle: false,
+    refused: true,
+    panel_tab_reconnected: tabReady ? true : ("unknown" as const),
+    note,
+  });
+}
+
+function unboundLocalRestartRefusalNote(ctx: PanelToolCtx, panelBase: string | null): string {
+  return (
+    "Refusing to restart ComfyUI: I could not confirm that this panel's ComfyUI is " +
+    "the local instance I can account for, so I cannot tell which server the restart " +
+    "would stop — and it STOPS it, relying on whatever supervises it to start it " +
+    // A claim about what I DID, not about a server I have just said I cannot
+    // identify: "it is still running" would be exactly the unvalidated
+    // assertion the stale-target rule forbids (r8).
+    "again. Nothing was dispatched, so nothing was stopped. " +
+    // The alternative is NAMED and the difference EXPLAINED (coordinator
+    // ruling): this tool restarts whatever the calling TAB fronts, which is
+    // exactly the thing that could not be identified here. restart_comfyui is
+    // not tab-scoped — it acts on the ComfyUI this server is configured for,
+    // which it can identify and assess — so it remains available. A user who
+    // loses one entry point must be told the other one works, and why.
+    //
+    // #1593 — but only when it is actually the other one. This line used to
+    // recommend restart_comfyui unconditionally, which is #851's defect
+    // exactly: it targets COMFYUI_URL, not the ComfyUI the panel is inside,
+    // and this branch fires precisely when those are most likely to differ.
+    // The discriminator #851 built has been next door ever since and was
+    // never consulted here; now it is, and both addresses are named.
+    restartRefusalHandoffAdvice({
+      headlessBase: getComfyUIBaseUrl(),
+      panelBase,
+      observedOrigin: ctx.bridge?.tabServerOrigin?.(ctx.tabId) ?? null,
+    }) +
+    // artokun/comfyui-mcp-panel#769 — a REMOTE ComfyUI reached over a
+    // tunnel or port-forward has a LOOPBACK host, and remoteUrlActive is
+    // derived from exactly that (`forceRemote || !isLoopbackHost(host)`).
+    // So a cloud pod fronted at 127.0.0.1:<port> classifies as LOCAL, this
+    // branch runs, and it correctly reports it cannot find a local process
+    // to account for — because there isn't one. The refusal is right about
+    // what it observed and useless about what to do, since the reader is
+    // looking for a local install that does not exist. Name the one setting
+    // that re-classifies it; it is a config fix, not a workaround.
+    " NOTE: if this ComfyUI is actually REMOTE but reached through a tunnel " +
+    "or port-forward (a 127.0.0.1 address that is not this machine), it is " +
+    "being classified as local because that classification reads the HOST — " +
+    "which proves the route is local, not the instance. Set " +
+    "COMFYUI_MCP_FORCE_REMOTE=1 (or pass --force-remote) and this tool takes " +
+    "the remote path, which restarts through ComfyUI-Manager and does not " +
+    "need a local process to account for."
+  );
+}
+
+/**
  * Node definitions from the ComfyUI the PANEL is connected to (#1359 / #1006).
  *
  * The panel has served these since 0.13.0 and the orchestrator never asked. Everything
@@ -14329,6 +14403,34 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
               " To restart the server without a panel confirmation card, use restart_comfyui.",
           );
         }
+        // #1819: resolve instance identity BEFORE the confirmation card. Asking the
+        // user to confirm a restart, then refusing because we cannot tell which
+        // ComfyUI this tab fronts, is two contradictory outcomes (timeout vs refuse)
+        // for the same unbindable target — and the card wait is what left graph
+        // tools reporting a reconnect/reload that never happened. Remote/cloud skip
+        // this gate (the Manager reboot is their only restart path). This is a READ
+        // of the current binding: a silent rebind here would confirm a restart of
+        // a tab the user was not working in. Healing belongs on the refusal path.
+        if (!isRemoteMode() && !isCloudMode()) {
+          const identityHealthBase = captureRebootHealthBase(ctx);
+          const identityBound =
+            identityHealthBase != null &&
+            sameHttpBase(getComfyUIBaseUrl(), identityHealthBase);
+          if (!identityBound) {
+            const tabStillHere =
+              typeof ctx.bridge?.canReach === "function"
+                ? ctx.bridge.canReach(ctx.tabId) === true
+                : true;
+            if (tabStillHere) {
+              return restartRefusedPreservingBinding(
+                ctx,
+                unboundLocalRestartRefusalNote(ctx, identityHealthBase),
+              );
+            }
+            // Tab is gone: confirm will be unreachable and #1671 crash-recovery
+            // decides whether a headless restart can still be accounted for.
+          }
+        }
         // #404: BOUND the confirmation wait. It previously inherited the full remaining
         // ~255s budget, so an unanswered/undelivered card (the panel tab backgrounded or
         // still reconnecting after a PRIOR restart — the second-restart-in-one-turn repro)
@@ -15033,54 +15135,13 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         // a supervised remote (the tunnelled Desktop app) restarts through it by
         // design, so refusing there would remove a path that works.
         if (!preflightBound && !isRemoteMode() && !isCloudMode()) {
-          return ok({
-            rebooting: false,
-            ready: false,
-            confirmed_cycle: false,
-            refused: true,
-            note:
-              "Refusing to restart ComfyUI: I could not confirm that this panel's ComfyUI is " +
-              "the local instance I can account for, so I cannot tell which server the restart " +
-              "would stop — and it STOPS it, relying on whatever supervises it to start it " +
-              // A claim about what I DID, not about a server I have just said I cannot
-              // identify: "it is still running" would be exactly the unvalidated
-              // assertion the stale-target rule forbids (r8).
-              "again. Nothing was dispatched, so nothing was stopped. " +
-              // The alternative is NAMED and the difference EXPLAINED (coordinator
-              // ruling): this tool restarts whatever the calling TAB fronts, which is
-              // exactly the thing that could not be identified here. restart_comfyui is
-              // not tab-scoped — it acts on the ComfyUI this server is configured for,
-              // which it can identify and assess — so it remains available. A user who
-              // loses one entry point must be told the other one works, and why.
-              //
-              // #1593 — but only when it is actually the other one. This line used to
-              // recommend restart_comfyui unconditionally, which is #851's defect
-              // exactly: it targets COMFYUI_URL, not the ComfyUI the panel is inside,
-              // and this branch fires precisely when those are most likely to differ.
-              // The discriminator #851 built has been next door ever since and was
-              // never consulted here; now it is, and both addresses are named.
-              restartRefusalHandoffAdvice({
-                headlessBase: getComfyUIBaseUrl(),
-                panelBase: preflightHealthBase,
-                observedOrigin: ctx.bridge?.tabServerOrigin?.(ctx.tabId) ?? null,
-              }) +
-              // artokun/comfyui-mcp-panel#769 — a REMOTE ComfyUI reached over a
-              // tunnel or port-forward has a LOOPBACK host, and remoteUrlActive is
-              // derived from exactly that (`forceRemote || !isLoopbackHost(host)`).
-              // So a cloud pod fronted at 127.0.0.1:<port> classifies as LOCAL, this
-              // branch runs, and it correctly reports it cannot find a local process
-              // to account for — because there isn't one. The refusal is right about
-              // what it observed and useless about what to do, since the reader is
-              // looking for a local install that does not exist. Name the one setting
-              // that re-classifies it; it is a config fix, not a workaround.
-              " NOTE: if this ComfyUI is actually REMOTE but reached through a tunnel " +
-              "or port-forward (a 127.0.0.1 address that is not this machine), it is " +
-              "being classified as local because that classification reads the HOST — " +
-              "which proves the route is local, not the instance. Set " +
-              "COMFYUI_MCP_FORCE_REMOTE=1 (or pass --force-remote) and this tool takes " +
-              "the remote path, which restarts through ComfyUI-Manager and does not " +
-              "need a local process to account for.",
-          });
+          // Identity was proven before the card; landing here means the binding
+          // was lost during the confirm wait. Same refusal, and the tab that is
+          // still here must stay usable (#1819).
+          return restartRefusedPreservingBinding(
+            ctx,
+            unboundLocalRestartRefusalNote(ctx, preflightHealthBase),
+          );
         }
         if (preflightBound) {
           // Snapshot the target GENERATION at the decision (r11): a final-state
@@ -15208,13 +15269,9 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         const dispatchBound =
           healthBase != null && sameHttpBase(getComfyUIBaseUrl(), healthBase);
         if (!dispatchBound && !isRemoteMode() && !isCloudMode()) {
-          return ok({
-            rebooting: false,
-            ready: false,
-            confirmed_cycle: false,
-            refused: true,
-            note:
-              "Refusing to restart ComfyUI: the panel connection changed while the restart " +
+          return restartRefusedPreservingBinding(
+            ctx,
+            "Refusing to restart ComfyUI: the panel connection changed while the restart " +
               "was being prepared, and I can no longer confirm which ComfyUI this tab " +
               "fronts — a restart STOPS a server, so it is never sent to one I cannot " +
               // Again: what I did, not what an unidentified instance is doing.
@@ -15229,7 +15286,7 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
                 panelBase: healthBase,
                 observedOrigin: ctx.bridge?.tabServerOrigin?.(ctx.tabId) ?? null,
               }),
-          });
+          );
         }
         const timing = getPanelRebootTiming();
         const dispatchTimeout = Math.max(1, Math.min(15000, overallDeadline - Date.now()));

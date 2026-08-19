@@ -29,9 +29,11 @@ import {
   type PanelToolCtx,
   type ToolResult,
 } from "../../orchestrator/panel-tools.js";
+import { getBootLocalComfyUIBaseUrl } from "../../config.js";
 import { WorkflowTargetStore } from "../../services/workflow-target-store.js";
 
 const TAB = "wf:workflows/a.json";
+const BOOT_BASE = (getBootLocalComfyUIBaseUrl() ?? "http://127.0.0.1:8188").replace(/\/+$/, "");
 
 function bridge() {
   return {
@@ -41,7 +43,10 @@ function bridge() {
     isHeadless: () => false,
     tabs: () => [{ tab_id: TAB, title: "wf", connected_at: 0 }],
     resolveActiveTabId: () => TAB,
-    tabServerOrigin: () => null,
+    // Bound to the local boot instance so panel_restart_comfyui reaches its
+    // confirmation card (#1819 refuses unbindable targets before asking).
+    tabIsLocal: () => true,
+    tabServerOrigin: () => BOOT_BASE,
     tabCanMutateGraph: () => true,
     tabGraphMutationCapability: () => ({ known: true, canMutate: true }),
   } as unknown as PanelToolCtx["bridge"];
