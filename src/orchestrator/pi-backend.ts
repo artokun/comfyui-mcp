@@ -357,11 +357,23 @@ export class PiBackend implements AgentBackend {
    *  tool_call events, the session header reveals the resumable id. Exit 0 commits
    *  the accumulated text + a successful result; a non-zero exit (or spawn
    *  failure) surfaces an error + failed result. Exactly one terminal result per
-   *  turn (PanelAgent's gate depends on it). */
+   *  turn (PanelAgent's gate depends on it).
+   *
+   *  RESUME-MISS SELF-HEAL (artokun/comfyui-mcp-panel#1235): a RESUMED turn that
+   *  dies with pi's "No session found matching '<id>'" has a dead resume target
+   *  (pruned session store, different cwd/home, a foreign id armed from the
+   *  panel's hello.resume hint). Retrying the SAME resume would fail every turn
+   *  forever — the panel's `/new` workaround exists precisely because nothing
+   *  dropped the dead id. So drop it and re-run THIS turn once as a fresh
+   *  session (isRetry guards against a loop); the new header re-persists a valid
+   *  id up the stack. The claude/codex equivalents self-heal in PanelAgent's
+   *  catch (#277); pi yields error EVENTS instead of throwing, so the heal lives
+   *  here. */
   private async *runTurn(
     turn: NeutralTurn,
     cwd: string,
     onActivity?: () => void,
+    isRetry = false,
   ): AsyncGenerator<AgentEvent> {
     let text = promptText(turn.text);
     // System blocks, in order: the heavy panel preamble (FIRST fresh turn only)
@@ -560,6 +572,9 @@ export class PiBackend implements AgentBackend {
 
     let settled = false;
     let exitFallback: ReturnType<typeof setTimeout> | null = null;
+    // Set by settle() when the failure IS the resume-miss: the dead id is dropped
+    // and this turn re-runs once as a fresh session (see the runTurn docstring).
+    let resumeMiss = false;
     const settle = (code: number | null, spawnErr?: Error) => {
       if (settled) return;
       settled = true;
@@ -585,20 +600,26 @@ export class PiBackend implements AgentBackend {
         push({ type: "result", ok: false, subtype: "timeout" });
       } else if (spawnErr || code !== 0) {
         const stderrTail = stripAnsi(errOut).trim().split(/\r?\n/).slice(-3).join(" ").trim();
-        const authish = looksLikeAuthFailure(stderrTail + finalText);
-        // #948 — pi's own text says "please run /login", which in a chat panel
-        // reads as "type this here" and sends the user somewhere it cannot work.
-        // Every path that passes the child's words through is qualified, not just
-        // the auth one: a non-auth failure can name a slash command too.
-        const message = spawnErr
-          ? /ENOENT/i.test(spawnErr.message)
-            ? "pi CLI (`pi`) could not be launched — it may have been uninstalled. Reinstall from https://pi.dev and reconnect."
-            : `pi failed to start: ${spawnErr.message}`
-          : authish
-            ? providerAuthRemedy("pi", stderrTail)
-            : `pi exited with code ${code}.${stderrTail ? ` ${qualifySlashCommands(stderrTail, "pi")}` : ""}`;
-        push({ type: "error", message });
-        push({ type: "result", ok: false, subtype: "error" });
+        if (!spawnErr && resuming && !isRetry && /no session found matching/i.test(stderrTail)) {
+          // RESUME-MISS (#1235): drop the dead id and retry fresh below — push NO
+          // error/result, so the turn's single terminal event comes from the retry.
+          resumeMiss = true;
+        } else {
+          const authish = looksLikeAuthFailure(stderrTail + finalText);
+          // #948 — pi's own text says "please run /login", which in a chat panel
+          // reads as "type this here" and sends the user somewhere it cannot work.
+          // Every path that passes the child's words through is qualified, not just
+          // the auth one: a non-auth failure can name a slash command too.
+          const message = spawnErr
+            ? /ENOENT/i.test(spawnErr.message)
+              ? "pi CLI (`pi`) could not be launched — it may have been uninstalled. Reinstall from https://pi.dev and reconnect."
+              : `pi failed to start: ${spawnErr.message}`
+            : authish
+              ? providerAuthRemedy("pi", stderrTail)
+              : `pi exited with code ${code}.${stderrTail ? ` ${qualifySlashCommands(stderrTail, "pi")}` : ""}`;
+          push({ type: "error", message });
+          push({ type: "result", ok: false, subtype: "error" });
+        }
       } else {
         if (finalText) push({ type: "assistant", text: finalText });
         push({ type: "result", ok: true, subtype: "end_turn" });
@@ -646,6 +667,17 @@ export class PiBackend implements AgentBackend {
         this.turnActive = false;
         this.interrupted = false;
       }
+    }
+
+    if (resumeMiss) {
+      // The dead resume id must NEVER be retried, and the fresh session needs the
+      // panel preamble a resume suppresses. The retried turn re-reads both.
+      logger.warn(
+        `[pi-backend] resume target ${this.piSessionId} is gone (pi: no session found matching) — dropping it and retrying the turn as a fresh session (#1235)`,
+      );
+      this.piSessionId = null;
+      this.needsSystemPreamble = !!this.deps.systemAppend;
+      yield* this.runTurn(turn, cwd, onActivity, true);
     }
   }
 

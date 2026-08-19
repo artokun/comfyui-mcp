@@ -492,6 +492,63 @@ describe("PiBackend turns", () => {
     expect(events[0]).toMatchObject({ type: "session", sessionId: "sess-existing" });
   });
 
+  // #1235 — a resumed turn whose session pi no longer has ("No session found
+  // matching '<id>'": pruned store, different cwd/home, or a foreign id armed
+  // from the panel's hello.resume hint) must drop the dead id and re-run the
+  // turn ONCE as a fresh session — the pre-fix behavior failed every turn until
+  // the user typed /new.
+  it("self-heals a resume-miss: drops the dead id and retries the turn fresh (#1235)", async () => {
+    hoisted.script.push(
+      { stdout: [], stderr: "Error: No session found matching 'dead-id'", exit: 1 },
+      { stdout: [header("fresh-id"), delta("Recovered"), END], exit: 0 },
+    );
+    const backend = new PiBackend({ cwd: workDir, systemAppend: "PERSONA" });
+    const events = await collect(backend.run({ resume: "dead-id", channel: channelOf([{ text: "hi" }]) }));
+
+    // The miss produced NO error/failed result — the retry's success is the
+    // turn's single terminal outcome.
+    expect(events.some((e) => e.type === "error")).toBe(false);
+    expect(events.filter((e) => e.type === "result")).toEqual([
+      { type: "result", ok: true, subtype: "end_turn", turn: 1 },
+    ]);
+    // The retry ran FRESH (no --session), re-armed the suppressed preamble, and
+    // re-sent the user's message.
+    expect(hoisted.spawns.length).toBe(2);
+    expect(hoisted.spawns[0]!.args[hoisted.spawns[0]!.args.indexOf("--session") + 1]).toBe("dead-id");
+    expect(hoisted.spawns[1]!.args).not.toContain("--session");
+    expect(hoisted.spawns[1]!.args.at(-1)).toContain("PERSONA");
+    expect(hoisted.spawns[1]!.args.at(-1)).toContain("hi");
+    // The fresh session's id replaced the dead one, so the NEXT turn resumes it.
+    expect(events.some((e) => e.type === "session" && (e as { sessionId: string }).sessionId === "fresh-id")).toBe(true);
+  });
+
+  it("a resume-miss whose FRESH retry also fails surfaces the retry's error once (#1235)", async () => {
+    hoisted.script.push(
+      { stdout: [], stderr: "Error: No session found matching 'dead-id'", exit: 1 },
+      { stdout: [], stderr: "boom: quota exceeded", exit: 7 },
+    );
+    const backend = new PiBackend({ cwd: workDir });
+    const events = await collect(backend.run({ resume: "dead-id", channel: channelOf([{ text: "hi" }]) }));
+    // Exactly one retry (no loop), and the surfaced failure is the FRESH
+    // attempt's — the more accurate cause.
+    expect(hoisted.spawns.length).toBe(2);
+    const err = events.find((e) => e.type === "error") as { message: string };
+    expect(err.message).toContain("code 7");
+    expect(events.filter((e) => e.type === "result")).toEqual([
+      { type: "result", ok: false, subtype: "error", turn: 1 },
+    ]);
+  });
+
+  it("a FRESH turn failing with the miss text is NOT retried (nothing was resumed)", async () => {
+    hoisted.script.push({ stdout: [], stderr: "Error: No session found matching 'x'", exit: 1 });
+    const backend = new PiBackend({ cwd: workDir });
+    const events = await collect(backend.run({ channel: channelOf([{ text: "hi" }]) }));
+    expect(hoisted.spawns.length).toBe(1);
+    expect(events.filter((e) => e.type === "result")).toEqual([
+      { type: "result", ok: false, subtype: "error", turn: 1 },
+    ]);
+  });
+
   it("maps a credential-looking failure to provider-setup guidance", async () => {
     hoisted.script.push({ stdout: [], stderr: "no provider configured: set an API key", exit: 1 });
     const backend = new PiBackend({ cwd: workDir });

@@ -285,6 +285,18 @@ The panel's Ollama backend **defaults to `:e4b`** — pick **Ollama (local)**
 in the backend picker and it just works once the model is pulled. No account,
 no API key, no per-token cost.
 
+**Vision caveat: these tags are text-only today.** The current GGUF export
+dropped Gemma 4's multimodal projector
+([#642](https://github.com/artokun/comfyui-mcp/issues/642)), so the default
+driver can't *see* — `get_image (action:"view")` critique loops,
+`get_workflow (action:"from_image")`, and visual comparison are unavailable,
+exactly the "flies blind" row in the [capability
+table](#model-requirements) above. Tool calling, generation, and graph
+management are unaffected. The fix on our side is shipping the `mmproj` with
+the next publish, not retraining. If the vision loop matters to you today,
+pick a vision-capable model per [Model requirements](#model-requirements)
+instead of the default.
+
 **Context window:** the tags ship a **65,536-token** window baked in, and the
 orchestrator defers to it (stock models get 16K). The architecture supports up
 to **128K** (`:e2b`/`:e4b`) and **256K** (`:12b`) — raise it with

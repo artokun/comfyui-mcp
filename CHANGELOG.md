@@ -759,6 +759,28 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.5] - 2026-08-19
+
+### MCP
+
+#### Added
+- add Atlas Cloud agent provider (#1726)
+- stamp WHICH LLM filed a panel bug report, mechanically (#1753)
+
+#### Fixed
+- opening a save-as copy rebinds dest identity so save and the promoted prompt stick (#1764)
+- set_workflow_target no longer reports a successful reconnect check when the next graph call has no tab (#1763)
+- node_pack authors into the runtime's --base-directory, not the code install root (#1770)
+- a self-nested panel_call_tool unwraps once or names the correct shape (#1769)
+- name a partial install when custom_nodes were never submitted (#1755)
+- restart_comfyui relaunches the Stability Matrix package venv, not Assets CPython (#1761)
+- a download-complete event now means the dest file exists (#1760)
+- report a non-ASCII CIVITAI_API_TOKEN as a credential fault, not a network outage (#1759)
+- panel_remove_mcp + panel_reload drops the removed server (#1758)
+- panel_set_widget summarizes long previous/new echo strings (#1756)
+- drop vrgamedevgirl from z-image-turbo-controlnet to skip llama-cpp-python source builds (#1754)
+
+
 ## [0.52.4] - 2026-08-19
 
 ### MCP

@@ -16,9 +16,20 @@ notes:
   - Run the generated installer from your ComfyUI root.
   - Sliced + un-bypassed from the LTX-2.3 ULTRA workflow.
   - Needs the kornia fix (fix-ltxvideo-kornia.sh) if ComfyUI-LTXVideo's pyramid import breaks.
+  - >-
+    Bring your own trained LTX-2.3 LoRAs. This pack installs NO subject LoRAs —
+    the two "easy loraNames" selectors ship the placeholders
+    YOUR-LTX-LORA-a/b.safetensors, which are the two axes of the comparison grid.
+    Drop your own .safetensors into models/loras/ and pick them there. The
+    detailer and distill LoRAs the graph also loads ARE downloaded by this pack.
 post_install:
   - Restart ComfyUI, load workflow.json.
+  - >-
+    Set the two "easy loraNames" nodes to your own trained LoRAs — until you do,
+    they point at YOUR-LTX-LORA-a/b.safetensors placeholders and ComfyUI will
+    report them missing.
+# Declared external so packs:check-models knows they're intentionally not shipped.
+# Placeholders, not real weights — see the "bring your own" note above (#1767).
 external_models:
-  - Paulie-Walnuts-LTX23_000004250.safetensors
-  - Paulie-Walnuts-LTX23_000008000.safetensors
-  - paulie-walnuts-ltx23-03.safetensors
+  - YOUR-LTX-LORA-a.safetensors
+  - YOUR-LTX-LORA-b.safetensors

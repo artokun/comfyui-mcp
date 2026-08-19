@@ -1,0 +1,35 @@
+{
+  "gpu": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync",
+  "source": "Published 4090 leaderboard (`docs/images/arena-leaderboard-*.svg`, recorded 2026-07-09). These runs predate version stamping and the 0.50 tool-surface consolidation (#726); VRAM and quantization were not probed, so those cells stay em-dash rather than guessed. Absolute scores are not comparable to a current-surface run.",
+  "scenarios": [
+    "health",
+    "models",
+    "registry",
+    "queue",
+    "generate",
+    "precision",
+    "breakfix",
+    "provenance",
+    "multiout",
+    "pipeline"
+  ],
+  "leaderboard": [
+    { "model": "google/gemini-3.1-pro-preview", "tier": "SoTA", "total": 20, "max": 20 },
+    { "model": "anthropic/claude-opus-4.8", "tier": "SoTA", "total": 20, "max": 20 },
+    { "model": "openai/gpt-5.5", "tier": "SoTA", "total": 20, "max": 20 },
+    { "model": "z-ai/glm-5.1", "tier": "B-tier", "total": 19, "max": 20 },
+    { "model": "moonshotai/kimi-k2.5", "tier": "B-tier", "total": 19, "max": 20 },
+    { "model": "xiaomi/mimo-v2.5", "tier": "SoTA", "total": 19, "max": 20 },
+    { "model": "deepseek/deepseek-v3.2", "tier": "B-tier", "total": 17, "max": 20 },
+    { "model": "minimax/minimax-m3", "tier": "B-tier", "total": 17, "max": 20 },
+    { "model": "x-ai/grok-4.3", "tier": "SoTA", "total": 15, "max": 20 },
+    { "model": "artokun/gemma4-comfyui-mcp:e4b", "tier": "local", "total": 14, "max": 20 },
+    { "model": "qwen3:4b", "tier": "local", "total": 13, "max": 20 },
+    { "model": "artokun/gemma4-comfyui-mcp:12b", "tier": "local", "total": 13, "max": 20 },
+    { "model": "gemma4:e4b", "tier": "local", "total": 12, "max": 20 },
+    { "model": "qwen3:8b", "tier": "local", "total": 11, "max": 20 },
+    { "model": "gemma4:e2b", "tier": "local", "total": 8, "max": 20 },
+    { "model": "artokun/gemma4-comfyui-mcp:e2b", "tier": "local", "total": 4, "max": 20 },
+    { "model": "llama3.1:8b", "tier": "local", "total": 2, "max": 20 }
+  ]
+}

@@ -8,7 +8,7 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 // @ts-expect-error plain-JS module under scripts/, no type declarations
-import { axisCell, buildArenaReport, mergeRunAxes, suspectScenarioLines, vramLabel } from "../../scripts/arena-report.mjs";
+import { axisCell, buildArenaReport, buildCommunityBaseline, fitsVramCap, graphicAxisHint, mergeRunAxes, suspectScenarioLines, vramLabel } from "../../scripts/arena-report.mjs";
 
 function entry(over: Record<string, unknown>) {
   return {
@@ -424,5 +424,90 @@ describe("a best-of range must not display ONE condition it did not all run unde
     expect(md).toContain("| mixed |"); // the quant cell
     expect(md).toContain("5.0–6.0 GiB");
     expect(md).toContain("not tied");
+  });
+});
+
+describe("community baseline (#792 ask 3)", () => {
+  const GIB = 1024 * 1024 * 1024;
+  const ROOT = join(__dirname, "..", "..");
+
+  it("groups a measured 8 GB-or-under model as a fit and prints the same VRAM cell the report uses", () => {
+    const small = entry({
+      model: "gemma4:e4b",
+      params: "4B",
+      quant: "Q4_K_M",
+      vramResidentBytes: Math.round(6.3 * GIB),
+      total: 14,
+      max: 20,
+      mcpVersion: "0.52.4",
+    });
+    const md = buildCommunityBaseline({ gpu: "RTX 3070", leaderboard: [small] }, { capGiB: 8 });
+    expect(fitsVramCap(small, 8)).toBe(true);
+    expect(md).toContain("| Model | Tier | Params | Quant | VRAM | Score |");
+    expect(md).toContain(axisCell(small, "vram"));
+    expect(md).toContain(axisCell(small, "quant"));
+    expect(md).toContain("`gemma4:e4b`");
+    expect(md).toMatch(new RegExp(`Fits 8 GB[\\s\\S]*${axisCell(small, "vram").replace(".", "\\.")}`));
+    expect(md).toContain("v0.52.4");
+    expect(md).toContain("RTX 3070");
+  });
+
+  it("does not list a model that needs more VRAM as a fit, and never guesses unmeasured VRAM into Fits", () => {
+    const big = entry({ model: "big:70b", vramResidentBytes: 12 * GIB, total: 16, max: 20 });
+    const tiny = entry({ model: "tiny:1b", vramResidentBytes: 3 * GIB, total: 8, max: 20 });
+    const hosted = entry({ model: "openai/gpt-5.5", tier: "SoTA", total: 20, max: 20 });
+    const md = buildCommunityBaseline({ leaderboard: [big, tiny, hosted] }, { capGiB: 8 });
+    const [fitsPart, afterFits] = md.split("**Needs more than 8 GB**");
+    const [overPart, unknownPart] = afterFits.split("**VRAM not recorded");
+    expect(fitsPart).toContain("`tiny:1b`");
+    expect(fitsPart).not.toContain("`big:70b`");
+    expect(fitsPart).not.toContain("`openai/gpt-5.5`");
+    expect(overPart).toContain("`big:70b`");
+    expect(overPart).not.toContain("`tiny:1b`");
+    expect(unknownPart).toContain("`openai/gpt-5.5`");
+    expect(unknownPart).toMatch(/\| `openai\/gpt-5.5` \| SoTA \| — \| — \| — \|/);
+    expect(fitsVramCap(hosted, 8)).toBeNull();
+    expect(fitsVramCap({ mixedAxes: ["vram"], vramResidentBytes: 4 * GIB }, 8)).toBeNull();
+  });
+
+  it("the published arena page embeds the table rendered from the committed baseline JSON", () => {
+    const data = JSON.parse(readFileSync(join(ROOT, "benchmarks", "arena-baseline.json"), "utf8"));
+    const table = buildCommunityBaseline(data, { capGiB: 8 });
+    const page = readFileSync(join(ROOT, "docs", "arena.mdx"), "utf8").replace(/\r\n/g, "\n");
+    expect(page).toContain(table.trim());
+    expect(table).toContain("| Params | Quant | VRAM | Score |");
+    for (const m of data.leaderboard) {
+      expect(table).toContain(`\`${m.model}\``);
+      expect(table).toContain(axisCell(m, "vram"));
+    }
+  });
+
+  it("graphicAxisHint names only recorded axes", () => {
+    const measured = entry({ params: "4B", quant: "Q4_K_M", vramResidentBytes: 4 * GIB });
+    expect(graphicAxisHint(measured)).toBe(`${axisCell(measured, "params")} · ${axisCell(measured, "quant")} · ${axisCell(measured, "vram")}`);
+    expect(graphicAxisHint(entry({}))).toBe("");
+  });
+});
+
+describe("arena graphic VRAM hint (#792)", () => {
+  const GIB = 1024 * 1024 * 1024;
+  const GRAPHIC = join(__dirname, "..", "..", "scripts", "arena-graphic.mjs");
+
+  it("prints the VRAM cell on the row when results recorded it", () => {
+    const row = {
+      model: "gemma4:e4b",
+      tier: "local",
+      total: 14,
+      max: 20,
+      quant: "Q4_K_M",
+      vramResidentBytes: Math.round(6.3 * GIB),
+    };
+    const dir = mkdtempSync(join(tmpdir(), "arena-graphic-"));
+    writeFileSync(join(dir, "arena-results.json"), JSON.stringify({ gpu: "RTX 3070", leaderboard: [row] }));
+    const r = spawnSync(process.execPath, [GRAPHIC, join(dir, "arena-results.json")], { encoding: "utf8" });
+    expect(r.status).toBe(0);
+    const svg = readFileSync(join(dir, "arena-leaderboard-light.svg"), "utf8");
+    expect(svg).toContain(axisCell(row, "vram"));
+    expect(svg).toContain(axisCell(row, "quant"));
   });
 });

@@ -2750,7 +2750,7 @@
         "secondTabWidth": 65
       },
       "widgets_values": [
-        "Paulie Walnuts sitting at Satriale's in a beige bomber jacket. He raises his right hand with a flat palm in a \"stop\" gesture and says, \"that was different, Chrissy was shot. That was a paranormal event.\"\n"
+        "A man sitting in a diner booth in a beige bomber jacket. He raises his right hand with a flat palm in a \"stop\" gesture and says, \"that was different, my cousin was shot. That was a paranormal event.\"\n"
       ],
       "color": "#009933",
       "bgcolor": "#353"
@@ -5720,7 +5720,7 @@
         "secondTabWidth": 65
       },
       "widgets_values": [
-        "Paulie Walnuts sitting at Satriale's in a beige bomber jacket. He raises his right hand with a flat palm in a \"stop\" gesture and says, \"that was different, Chrissy was shot. That was a paranormal event.\"\n"
+        "A man sitting in a diner booth in a beige bomber jacket. He raises his right hand with a flat palm in a \"stop\" gesture and says, \"that was different, my cousin was shot. That was a paranormal event.\"\n"
       ],
       "color": "#009933",
       "bgcolor": "#353"
@@ -5851,7 +5851,7 @@
         }
       },
       "widgets_values": [
-        "Paulie-Walnuts-LTX23_000004250.safetensors",
+        "YOUR-LTX-LORA-b.safetensors",
         1,
         1
       ],
@@ -6508,7 +6508,7 @@
         }
       },
       "widgets_values": [
-        "Paulie-Walnuts-LTX23_000008000.safetensors"
+        "YOUR-LTX-LORA-a.safetensors"
       ]
     },
     {
@@ -6546,7 +6546,7 @@
         }
       },
       "widgets_values": [
-        "paulie-walnuts-ltx23-03.safetensors"
+        "YOUR-LTX-LORA-b.safetensors"
       ]
     },
     {
@@ -6799,7 +6799,7 @@
         }
       },
       "widgets_values": [
-        "Paulie-Walnuts-LTX23_000004250.safetensors",
+        "YOUR-LTX-LORA-a.safetensors",
         1,
         1
       ],

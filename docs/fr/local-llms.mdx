@@ -312,6 +312,17 @@ Le backend Ollama du panneau **se met par défaut à `:e4b`** — choisissez
 **Ollama (local)** dans le sélecteur de backend et ça marche une fois le
 modèle tiré. Pas de compte, pas de clé API, pas de coût au jeton.
 
+**Avertissement vision : ces tags sont uniquement textuels aujourd'hui.**
+L'export GGUF actuel a perdu le projecteur multimodal de Gemma 4
+([#642](https://github.com/artokun/comfyui-mcp/issues/642)), donc le driver
+par défaut ne peut pas *voir* : les boucles de critique
+`get_image (action:"view")`, `get_workflow (action:"from_image")` et les
+comparaisons visuelles sont indisponibles — exactement la ligne **Vision**
+« vole à l'aveugle » du tableau de capacités ci-dessus. L'appel d'outils, la
+génération et la gestion du graphe ne sont pas affectés. Si la boucle de
+vision compte pour vous aujourd'hui, prenez un modèle capable de vision selon
+« Exigences du modèle » plutôt que le tag par défaut.
+
 **Fenêtre de contexte :** les tags livrent une fenêtre de **65 536
 jetons** intégrée, et l'orchestrateur s'y fie (les modèles d'origine
 obtiennent 16K). L'architecture tient jusqu'à **128K** (`:e2b`/`:e4b`)

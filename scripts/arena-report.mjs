@@ -13,6 +13,10 @@
 // Plus the methodology guard: a scenario where EVERY model failed after
 // reaching for the same wrong tool reads as OUR description bug, not a
 // field-wide capability gap (#557/#654 precedent) — flagged, never asserted.
+//
+// Ask 3 is the published community baseline: buildCommunityBaseline renders a
+// consultable table (grouped by card capacity when VRAM was recorded) from
+// benchmarks/arena-baseline.json, which docs/arena.mdx embeds verbatim.
 
 /** Resident VRAM as "GiB" with one decimal, or null when unknown. */
 export function vramLabel(bytes) {
@@ -102,6 +106,107 @@ export function axisCell(entry, axis) {
     return one ? `${one} GiB` : "—";
   }
   return entry[axis] ?? "—";
+}
+
+const GIB = 1024 * 1024 * 1024;
+
+/**
+ * Whether an entry's measured resident VRAM fits a card of `capGiB`.
+ * `true` / `false` only when VRAM was recorded as one condition; `null` when
+ * it was never recorded or the best-of range mixed two different footprints
+ * — unknown is not a fit.
+ */
+export function fitsVramCap(entry, capGiB) {
+  if (!entry || entry.mixedAxes?.includes("vram")) return null;
+  const bytes = entry.vramResidentBytes;
+  if (typeof bytes !== "number" || !Number.isFinite(bytes) || bytes <= 0) return null;
+  if (typeof capGiB !== "number" || !Number.isFinite(capGiB) || capGiB <= 0) return null;
+  return bytes <= capGiB * GIB;
+}
+
+/**
+ * Partition a leaderboard by card capacity. Order inside each group is the
+ * input order (already ranked). Unknown VRAM is its own group so an 8 GB
+ * reader never has an unmeasured row presented as a fit.
+ */
+export function communityBaselineGroups(leaderboard, capGiB) {
+  const fits = [];
+  const over = [];
+  const unknown = [];
+  for (const m of leaderboard ?? []) {
+    const fit = fitsVramCap(m, capGiB);
+    if (fit === true) fits.push(m);
+    else if (fit === false) over.push(m);
+    else unknown.push(m);
+  }
+  return { fits, over, unknown };
+}
+
+/** Second-line hint for the leaderboard graphic: params/quant/VRAM when known. */
+export function graphicAxisHint(entry) {
+  const bits = [];
+  for (const axis of ["params", "quant", "vram"]) {
+    const cell = axisCell(entry, axis);
+    if (cell !== "—") bits.push(cell);
+  }
+  return bits.join(" · ");
+}
+
+function scoreCell(m) {
+  const totals = m.runs?.totals;
+  if (Array.isArray(totals) && totals.length > 1) {
+    return `${m.total}/${m.max} (best of ${totals.length}: ${Math.min(...totals)}–${Math.max(...totals)})`;
+  }
+  return `${m.total}/${m.max}`;
+}
+
+function baselineRows(entries) {
+  return entries.map(
+    (m) =>
+      `| \`${m.model}\` | ${m.tier ?? "local"} | ${axisCell(m, "params")} | ${axisCell(m, "quant")} | ${axisCell(m, "vram")} | ${scoreCell(m)} |`,
+  );
+}
+
+function versionCaveat(board) {
+  const versions = [...new Set(board.map((m) => m.mcpVersion).filter(Boolean))];
+  const unversioned = board.some((m) => !m.mcpVersion);
+  if (versions.length === 1 && !unversioned) {
+    return `Recorded with comfyui-mcp v${versions[0]} — scores are only directly comparable within the same comfyui-mcp version.`;
+  }
+  if (!versions.length) {
+    return "These runs were recorded before version stamping (or could not read their package version). Absolute scores move when the tool surface changes — do not compare them to a current-surface run as if they were one ladder.";
+  }
+  return `⚠️ This baseline mixes recordings (versions ${versions.map((v) => `v${v}`).join(", ")}${unversioned ? " and unversioned runs — recorded before version stamping, or whose own version could not be read" : ""}) — do NOT compare scores across them directly.`;
+}
+
+/**
+ * Compact community baseline (#792 ask 3): a table someone can consult
+ * without running the arena. Groups by card capacity when VRAM was recorded
+ * (default 8 GB — the reporter's question) and leaves unmeasured rows in
+ * their own group rather than guessing them into a fit.
+ */
+export function buildCommunityBaseline(data, opts = {}) {
+  const capGiB = opts.capGiB ?? 8;
+  const board = data.leaderboard ?? [];
+  const { fits, over, unknown } = communityBaselineGroups(board, capGiB);
+  const header = "| Model | Tier | Params | Quant | VRAM | Score |";
+  const sep = "| --- | --- | --- | --- | --- | --- |";
+  const md = [];
+  md.push(
+    "Consultable without running the ladder. Resident VRAM is the model's footprint while it is loaded (Ollama `/api/ps`), not remaining headroom — ComfyUI shares the same card. Params/Quant come from `/api/show`. Hosted endpoints have no equivalent; those cells stay `—`, never guessed.",
+    "",
+  );
+  md.push(versionCaveat(board), "");
+  if (data.gpu) md.push(`Hardware: ${data.gpu}.`, "");
+  if (data.source) md.push(data.source, "");
+  const section = (title, rows) => {
+    if (!rows.length) return;
+    md.push(`**${title}**`, "", header, sep, ...baselineRows(rows), "");
+  };
+  section(`Fits ${capGiB} GB (resident VRAM ${capGiB} GiB or under)`, fits);
+  section(`Needs more than ${capGiB} GB`, over);
+  section("VRAM not recorded — hosted models, or runs from before the VRAM axis", unknown);
+  return `${md.join("\n")}\n`;
 }
 
 const nudgesOf = (m) => m.results.reduce((s, r) => s + (r.nudges ?? 0), 0);

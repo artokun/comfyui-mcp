@@ -1526,6 +1526,22 @@ export class UiBridge {
    *  to (the generation-bound-command leak: the server can't retract a frame already
    *  delivered to the browser, but the browser can decline to APPLY a stale one). */
   private resolveTabWorkflowUuid: ((tabId: string) => string | undefined) | null = null;
+  /** #1656 — orchestrator-injected: is this tab's CURRENT stamp one that was CARRIED
+   *  from a tab id the same socket retired (carryWorkflowCommandStamp), rather than one
+   *  the tab itself has proven under this id?
+   *
+   *  The stamp map answers "what uuid is on this tab" but not "who said so", and the two
+   *  are different facts. On a same-socket re-hello that mints a new tab id — a workflow
+   *  switch, or the tmp: -> wf: transition of a save/rename — the retiring id's uuid is
+   *  copied onto the new id and overwritten only if THAT hello resolved an identity. When
+   *  it did not, the value sitting on the new tab id was advertised by a tab that no longer
+   *  exists, about a canvas that is no longer mounted. The dispatch-time agreement gate
+   *  below must not read it as this tab's advertisement. Absent predicate = the mechanism
+   *  is not wired (tests/embedders): treated as PROVEN, which is exactly the pre-#1656
+   *  behaviour. */
+  private isCarriedTabStamp: ((tabId: string) => boolean) | null = null;
+  /** #1656 — orchestrator-injected: see {@link corroborateTabStamp}. */
+  private corroborateTabStampFn: ((tabId: string, workflowUuid: string) => boolean) | null = null;
   /** #884 P0 — orchestrator-injected: the tab a conversation's IN-FLIGHT turn is
    *  PINNED to (string), `null` when the turn's origin is ambiguous (refuse), or
    *  undefined when no turn is in flight (fall back to active-tab resolution).
@@ -4610,9 +4626,36 @@ export class UiBridge {
     // either value missing keeps the existing behaviour and lets the panel fence
     // judge. And a caller addressing the connection by its canonical id is skipped
     // outright — both answers then come from the same lookup and can only agree.
+    //
+    // #1656 (recurrence) — the gate above compares two VALUES and calls equality
+    // "agreement". That inference is only sound when the routed tab's value is
+    // something THAT TAB advertised. `carryWorkflowCommandStamp` copies the retiring
+    // id's uuid onto the new id on every same-socket re-hello that mints one, and the
+    // hello handler overwrites it only `if (newIdentity)`. Its docstring's promise —
+    // "carrying cannot widen authorization" — was written about the PANEL's fence,
+    // which tests the carried value against the live canvas; this gate instead treats
+    // it as an observation about the new canvas, and there the promise fails. Worse
+    // than "may agree": the conversation's issue-time stamp is captured from that same
+    // map (`turnOrigins.recordForMid(mid, tabCommandWorkflowUuid.get(tab), tab)`), so a
+    // carry makes both sides the SAME STRING by construction — the gate is guaranteed
+    // to pass in exactly the window where the canvas changed, and starts refusing only
+    // once some later hello finally proves a different identity. That is the reported
+    // shape verbatim: six mutations accepted onto the previous canvas, the seventh
+    // refused.
+    //
+    // So a CARRIED stamp is not agreement, it is an absence of evidence about a canvas
+    // this command is about to read or mutate — and #570's rule for that is to refuse
+    // the dispatch, because a delivered frame cannot be retracted. Deliberately narrow:
+    // only the commands requiresStampTargetAgreement() already covers (workflow_list,
+    // workflow_open/new, canvas-independent ops and path-selectored rename/close stay
+    // exempt, so the documented rebind is reachable and clears this by proving an
+    // identity for the tab's CURRENT id), and only while the carry is unproven — the
+    // instant any hello or validated reply establishes an identity for this tab id, the
+    // provenance flips to proven and nothing about the pre-#1656 behaviour changes.
     if (opts.tabId && opts.tabId !== conn.tabId && requiresStampTargetAgreement(cmd)) {
       const issuedFor = this.resolveTabWorkflowUuid?.(opts.tabId);
       const landedOn = this.resolveTabWorkflowUuid?.(conn.tabId);
+      const carried = this.isCarriedTabStamp?.(conn.tabId) === true;
       if (issuedFor && landedOn && issuedFor !== landedOn) {
         return Promise.reject(
           markDispatched(
@@ -4621,6 +4664,21 @@ export class UiBridge {
                 `but the tab it routed to has since reported a different active workflow (${landedOn}). ` +
                 `Nothing was dispatched. Re-target with panel_set_workflow_target({mode:"current"}), ` +
                 `then retry.`,
+            ),
+            false,
+          ),
+        );
+      }
+      if (issuedFor && landedOn && carried) {
+        return Promise.reject(
+          markDispatched(
+            new Error(
+              `workflow instance mismatch: this command was issued for workflow instance ${issuedFor}, ` +
+                `and the tab it routed to has not re-established its workflow identity since it ` +
+                `re-registered under a new id — the uuid it currently carries (${landedOn}) was ` +
+                `inherited from the tab id it replaced, so it is not evidence about the canvas now ` +
+                `mounted there. Nothing was dispatched. Re-target with ` +
+                `panel_set_workflow_target({mode:"current"}), then retry.`,
             ),
             false,
           ),
@@ -4958,6 +5016,41 @@ export class UiBridge {
   ): void {
     this.resolveTabWorkflowUuid = fn;
     this.refreshTabWorkflowUuid = refresh ?? null;
+  }
+
+  /** #1656 — inject the stamp-PROVENANCE predicate (see {@link isCarriedTabStamp}).
+   *  Separate from the resolver on purpose: the resolver's value is still used to STAMP
+   *  the frame (a carried stamp is better than none — #1331), and only the agreement
+   *  gate is forbidden to accept it as evidence about the routed tab's canvas. */
+  setCarriedTabStampPredicate(fn: (tabId: string) => boolean): void {
+    this.isCarriedTabStamp = fn;
+  }
+
+  /** #1656 — inject the CORROBORATION half: "the live canvas was read and it is this
+   *  instance". Deliberately NOT `refreshWorkflowUuid`. That one WRITES a stamp (and a
+   *  conversation's issue-time stamp with it), which is a retarget the read-only mismatch
+   *  probe must never perform (#1646); this one may only promote the PROVENANCE of a value
+   *  that already matches, and the orchestrator's implementation refuses outright when it
+   *  does not match. Nothing it can do changes which workflow anything is fenced to. */
+  setTabStampCorroborator(fn: (tabId: string, workflowUuid: string) => boolean): void {
+    this.corroborateTabStampFn = fn;
+  }
+
+  /**
+   * #1656 — record that the routed tab's CURRENT stamp has been confirmed by a live read
+   * of the canvas, so a value that was inherited on a same-socket re-hello stops being
+   * treated as inherited by the dispatch-time agreement gate.
+   *
+   * Returns whether the corroboration was accepted. Never throws: this is a diagnostic
+   * running inside a refusal path, and a diagnostic must never replace the outcome it is
+   * describing.
+   */
+  corroborateTabStamp(tabId: string, workflowUuid: string): boolean {
+    try {
+      return this.corroborateTabStampFn?.(tabId, workflowUuid) === true;
+    } catch {
+      return false;
+    }
   }
 
   /**

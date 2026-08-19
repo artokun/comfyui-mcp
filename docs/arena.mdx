@@ -95,7 +95,39 @@ actionable (#792):
 <img className="block dark:hidden" src="./images/arena-leaderboard-light.svg" alt="ComfyUI LLM Arena leaderboard" />
 <img className="hidden dark:block" src="./images/arena-leaderboard-dark.svg" alt="ComfyUI LLM Arena leaderboard" />
 
-14 models, best-of-3 on the top cluster. The headline findings:
+Consultable without running the ladder. Resident VRAM is the model's footprint while it is loaded (Ollama `/api/ps`), not remaining headroom — ComfyUI shares the same card. Params/Quant come from `/api/show`. Hosted endpoints have no equivalent; those cells stay `—`, never guessed.
+
+These runs were recorded before version stamping (or could not read their package version). Absolute scores move when the tool surface changes — do not compare them to a current-surface run as if they were one ladder.
+
+Hardware: cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync.
+
+Published 4090 leaderboard (`docs/images/arena-leaderboard-*.svg`, recorded 2026-07-09). These runs predate version stamping and the 0.50 tool-surface consolidation (#726); VRAM and quantization were not probed, so those cells stay em-dash rather than guessed. Absolute scores are not comparable to a current-surface run.
+
+**VRAM not recorded — hosted models, or runs from before the VRAM axis**
+
+| Model | Tier | Params | Quant | VRAM | Score |
+| --- | --- | --- | --- | --- | --- |
+| `google/gemini-3.1-pro-preview` | SoTA | — | — | — | 20/20 |
+| `anthropic/claude-opus-4.8` | SoTA | — | — | — | 20/20 |
+| `openai/gpt-5.5` | SoTA | — | — | — | 20/20 |
+| `z-ai/glm-5.1` | B-tier | — | — | — | 19/20 |
+| `moonshotai/kimi-k2.5` | B-tier | — | — | — | 19/20 |
+| `xiaomi/mimo-v2.5` | SoTA | — | — | — | 19/20 |
+| `deepseek/deepseek-v3.2` | B-tier | — | — | — | 17/20 |
+| `minimax/minimax-m3` | B-tier | — | — | — | 17/20 |
+| `x-ai/grok-4.3` | SoTA | — | — | — | 15/20 |
+| `artokun/gemma4-comfyui-mcp:e4b` | local | — | — | — | 14/20 |
+| `qwen3:4b` | local | — | — | — | 13/20 |
+| `artokun/gemma4-comfyui-mcp:12b` | local | — | — | — | 13/20 |
+| `gemma4:e4b` | local | — | — | — | 12/20 |
+| `qwen3:8b` | local | — | — | — | 11/20 |
+| `gemma4:e2b` | local | — | — | — | 8/20 |
+| `artokun/gemma4-comfyui-mcp:e2b` | local | — | — | — | 4/20 |
+| `llama3.1:8b` | local | — | — | — | 2/20 |
+
+Replace `benchmarks/arena-baseline.json` with a current-surface `arena-results.json` and re-run `node scripts/arena-baseline.mjs` to refresh this table. A run that recorded resident VRAM groups itself into **Fits 8 GB**.
+
+17 models, best-of-3 on the top cluster. The headline findings:
 
 - **gemini-3.1-pro-preview is the only model that's perfect every run** (20-20-20).
 - claude-opus-4.8 and gpt-5.5 both reach 20 but dropped a point in other runs.

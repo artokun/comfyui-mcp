@@ -299,6 +299,8 @@ RESOLVING A TANGLED / TOGGLE-HEAVY WORKFLOW (Get/Set buses + rgthree-bypassed pi
 
 AUTHORING rgthree TOGGLES (the counterpart to reading them, above). Fast Groups Bypasser/Muter are FRONTEND-ONLY — registered by the pack's JS and absent from /object_info BY DESIGN, so their absence there is NOT evidence they're unavailable; panel_add_node adds them (it exempts a small allowlist of genuinely frontend-only types, which covers the Fast (Groups) Bypasser/Muter, Label, Reroute and Node Collector — but NOT Bookmark, the Mute/Bypass Relay/Repeater, Fast Actions Button or Random Unmuter, which it refuses fail-closed). They are configured with panel_set_property, NOT panel_set_widget (matchTitle/matchColors/sort/toggleRestriction are node PROPERTIES; panel_set_widget refuses them). They take no wiring and enumerate GROUPS by title, so create and NAME the groups FIRST, and always set matchTitle or the node lists every group in the workflow. Group membership is GEOMETRIC (any node whose centre lands in the box) — when panel_create_group returns extra_node_ids/missing_node_ids and a warning, FIX IT before toggling, or a toggle disables part of the wrong stage. Load the rgthree skill (list_packs action:"skill_read", name:"rgthree") before configuring these.
 
+LORA MANAGER AUTOCOMPLETE NODES. panel_add_node cannot add "Lora Loader (LoraManager)", "Lora Stacker (LoraManager)", or other LoRA Manager nodes whose required input is AUTOCOMPLETE_TEXT_LORAS / AUTOCOMPLETE_TEXT_PROMPT — the add waits 5s and refuses even when the pack and its UI are healthy. That is not a missing extension: reload, panel_refresh_nodes, and retry will keep failing. Use "LoRA Text Loader (LoraManager)" (lora_syntax is a STRING socket you can drive) or core LoraLoader. Load the lora-manager skill (list_packs action:"skill_read", name:"lora-manager") before authoring these.
+
 RECOMMENDING CIVITAI MODELS — SHOW, DON'T JUST TELL. When the user asks about or you're recommending specific CivitAI resources (a "good relight LoRA?", "which Flux checkpoint?", "find me an anime style"), LEAN TOWARD opening the docked CivitAI browser and highlighting your picks rather than answering with only a text table. Flow: panel_open_civitai (docked, matched query/tab/filters) → panel_civitai_search to refine → panel_civitai_results to read the metadata + URLs → panel_civitai_highlight the one(s) you recommend, with a BRIEF text summary of why each fits. This docks beside the chat so both stay visible, and lets the user SEE the actual cards. (Note: you read metadata + URLs only, not the images.) It's a nudge, not a mandate — a quick factual answer or a resource the user already named is fine as text; reach for the browser when they're choosing between options or exploring.
 
 DOWNLOADING MODELS — use the download_model tool, NOT a raw shell download. When a workflow needs model weights you don't have (checkpoints, LoRAs, VAEs, text encoders, etc.), download them with the comfyui MCP download_model tool, action:"download" (or action:"download_civitai" for CivitAI): it streams the file into the correct ComfyUI models/ subfolder AND surfaces live progress in the panel's download tray so the user can watch it. Pass target_subfolder to land the file exactly where it belongs (e.g. 'loras', 'checkpoints', 'vae', 'text_encoders', or a nested path like 'loras/<subdir>'). Do NOT shell out to curl/wget/aria2 for model files — a raw shell download has no progress in the panel and can drop the file in the wrong place. Reserve the shell for things download_model can't do.
@@ -1780,6 +1782,14 @@ export async function runPanelOrchestrator(): Promise<void> {
   // Set from each hello's trusted identity; #716 lets a successful explicit
   // open/re-pin refresh it between hellos.
   const tabCommandWorkflowUuid = new Map<string, string>();
+  // #1656 — WHO said so, for the entries above. A tab id in this set holds a stamp that
+  // was CARRIED from the tab id a same-socket re-hello retired and has NOT been proven
+  // under its current id. The value is still used to stamp frames (#1331 — an absent
+  // stamp is the unrecoverable half), but the dispatch-time agreement gate may not read
+  // it as this tab's own advertisement: the conversation's issue-time stamp is captured
+  // from this very map, so a carry makes that gate's two sides identical by construction
+  // in exactly the window where the canvas changed.
+  const tabStampCarried = new Set<string>();
   const scopeAgentKeyOf = (scopeId: string): string =>
     scopeId === SHARED_SESSION_SCOPE ? sharedKeyFor(defaultBackend) : scopeId;
   // #884 — each shared conversation's last message origin (tab + workflow uuid),
@@ -3113,6 +3123,10 @@ export async function runPanelOrchestrator(): Promise<void> {
           reason: identityReason(tabId, origin, workflowUuid, bridge.resolveFailure?.(tabId)),
         };
       tabCommandWorkflowUuid.set(panelTab, identity.uuid);
+      // A VALIDATED refresh (an explicit open / panel_set_workflow_target({mode:"current"})
+      // / a save reply's workflow_uuid) is an observation about this tab id — it is the
+      // documented way out of the carried state (#1656).
+      tabStampCarried.delete(panelTab);
       // #716/#884 — an explicit, VALIDATED open/re-pin from the shared agent is
       // the agent deliberately moving its turn to another workflow: refresh
       // that CONVERSATION's issue-time stamp too, so its subsequent edits
@@ -3122,6 +3136,40 @@ export async function runPanelOrchestrator(): Promise<void> {
       return true;
     },
   );
+  // #1656 — the provenance half of the same answer. A SCOPE address never carries: its
+  // stamp is the conversation's issue-time value, not a tab advertisement. A real tab id
+  // is resolved through panelTabOf exactly like the resolver above, so an agent-key
+  // address and the bare tab id give the same verdict.
+  bridge.setCarriedTabStampPredicate((tabId) => {
+    if (isScopeAddress(tabId)) return false;
+    const t = panelTabOf(tabId);
+    return t ? tabStampCarried.has(t) : false;
+  });
+  // #1656 — and the way OUT of the carried state that does not move anything. The
+  // fence-mismatch probe reads the live canvas with workflow_list; when the corroborated
+  // active record names the instance this tab's stamp ALREADY holds, the inherited value
+  // has been confirmed by an observation of the tab under its CURRENT id.
+  //
+  // The equality test is the whole safety argument, and it is enforced HERE rather than
+  // trusted from the caller: no stamp is written, no conversation stamp is touched, and a
+  // uuid that does not already match is REFUSED outright. So this can never retarget a
+  // session — which is exactly why it is not routed through refreshWorkflowUuid (#1646:
+  // a read-only diagnosis that re-points the fence is the corruption the fence exists to
+  // prevent, delivered as recovery).
+  bridge.setTabStampCorroborator((tabId, workflowUuid) => {
+    const panelTab = scopeToRealTab(tabId);
+    if (!panelTab) return false;
+    // Same validator as every other identity acceptance: server-observed origin +
+    // the uuid's shape/origin binding. Never a bare string from a reply.
+    const identity = workflowIdentityParts({
+      workflowUuid,
+      origin: bridge.tabServerOrigin(tabId),
+    });
+    if (!identity) return false;
+    if (tabCommandWorkflowUuid.get(panelTab) !== identity.uuid) return false;
+    tabStampCarried.delete(panelTab);
+    return true;
+  });
 
   // ── Local-agent VRAM pause during generation ────────────────────────────
   // On a single-GPU box the local chat model and ComfyUI fight for VRAM:
@@ -3927,7 +3975,15 @@ export async function runPanelOrchestrator(): Promise<void> {
         //
         // If THIS hello does resolve an identity, the `set` below overwrites what
         // we carried — new evidence always wins over old.
-        carryWorkflowCommandStamp(tabCommandWorkflowUuid, migratedFrom, panelTab);
+        if (carryWorkflowCommandStamp(tabCommandWorkflowUuid, migratedFrom, panelTab)) {
+          // Inherited, not proven — see tabStampCarried.
+          tabStampCarried.add(panelTab);
+        } else {
+          // The new id kept its OWN entry (newer evidence) or there was nothing to
+          // carry; either way nothing was inherited onto it here.
+          tabStampCarried.delete(panelTab);
+        }
+        tabStampCarried.delete(migratedFrom);
         logger.info(
           `[panel-orchestrator] same-socket re-hello ${migratedFrom.slice(0, 12)} → ${panelTab.slice(0, 12)} — routing state carried; the shared session continues (#884)`,
         );
@@ -3967,6 +4023,9 @@ export async function runPanelOrchestrator(): Promise<void> {
       // it on equality, which is the only test that decides authorization.
       if (newIdentity) {
         tabCommandWorkflowUuid.set(panelTab, newIdentity.uuid);
+        // THIS tab, under THIS id, just advertised an identity — whatever was inherited
+        // is superseded by an observation (#1656).
+        tabStampCarried.delete(panelTab);
       }
       // Blind content mode rides the hello (issue #90) so the FIRST agent spawn
       // already carries the right tool-server env. A CHANGE against a live

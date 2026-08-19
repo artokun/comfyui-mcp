@@ -9,6 +9,7 @@
 // names its tier in ink.
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { graphicAxisHint } from "./arena-report.mjs";
 
 const resultsPath = process.argv[2] ?? join(process.cwd(), "arena-results", "arena-results.json");
 const data = JSON.parse(readFileSync(resultsPath, "utf8"));
@@ -88,9 +89,11 @@ function render(mode) {
     const runs = m.runs?.totals;
     const range = runs && runs.length > 1 ? `${Math.min(...runs)}–${Math.max(...runs)}` : null;
     const name = m.model.length > 34 ? `${m.model.slice(0, 33)}…` : m.model;
+    const hint = graphicAxisHint(m);
+    const sub = hint ? `${m.tier ?? "local"} · ${hint}` : (m.tier ?? "local");
     parts.push(
       `<text x="${PAD}" y="${cy - 1}" font-size="12.5" font-weight="600" fill="${c.inkPrimary}">${esc(name)}</text>`,
-      `<text x="${PAD}" y="${cy + 12}" font-size="10" fill="${c.inkSecondary}">${esc(m.tier ?? "local")}</text>`,
+      `<text x="${PAD}" y="${cy + 12}" font-size="10" fill="${c.inkSecondary}">${esc(sub)}</text>`,
       // track + bar: thin mark, 4px rounded DATA end only (square baseline end)
       `<rect x="${plotX}" y="${cy - BAR_H / 2}" width="${plotW}" height="${BAR_H}" fill="${c.track}"/>`,
       `<path d="M ${plotX} ${cy - BAR_H / 2} H ${plotX + w - 4} a 4 4 0 0 1 4 4 v ${BAR_H - 8} a 4 4 0 0 1 -4 4 H ${plotX} Z" fill="${color}"/>`,

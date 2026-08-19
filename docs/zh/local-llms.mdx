@@ -247,6 +247,13 @@ ollama pull artokun/gemma4-comfyui-mcp:e2b     # smallest — ~2 GB VRAM (see ca
 面板的 Ollama 后端**默认 `:e4b`** —— 在后端选择器里选 **Ollama（本地）**，模型拉下来
 就能用。无需账号，无需 API 密钥，没有按 token 费用。
 
+**视觉提醒：这些标签目前只有文本能力。** 当前的 GGUF 导出丢掉了 Gemma 4 的多模态
+投影器（[#642](https://github.com/artokun/comfyui-mcp/issues/642)），所以默认驱动
+看不见 —— `get_image (action:"view")` 批评循环、
+`get_workflow (action:"from_image")` 以及视觉对比都不可用，正是上面能力表里
+**视觉** 那一行的「盲飞」。工具调用、生成和图管理都不受影响。如果你现在就需要视觉
+回路，请按「模型要求」挑一个支持视觉的模型，而不是用默认标签。
+
 **上下文窗口：** 这些标签烤进了 **65,536 token** 窗口，编排器听从它（原版模型拿 16K）。
 架构支持到 **128K**（`:e2b`/`:e4b`）和 **256K**（`:12b`）—— 有显存就用
 `COMFYUI_MCP_OLLAMA_NUM_CTX=131072` 调高（KV 缓存随窗口涨）。如果智能体开始在对话

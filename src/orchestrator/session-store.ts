@@ -581,16 +581,32 @@ export class SessionStore {
  *
  * Extracted and CALLED by the hello handler rather than inlined, so the tests exercise the
  * function production runs instead of a re-implementation of what it ought to do.
+ *
+ * RETURNS whether it actually carried (#1656). "CARRYING CANNOT WIDEN AUTHORIZATION" was
+ * true of the ONE authorizer that existed when it was written: the panel's
+ * `stamp === live active uuid` test, which judges the carried value against the canvas
+ * actually mounted. #1682 then added a SECOND authorizer -- the orchestrator's
+ * dispatch-time agreement gate -- which reads this same map as "the identity the routed
+ * tab last ADVERTISED". A carried entry was advertised by the tab that was RETIRED, so
+ * for that gate the sentence stops holding: the conversation's issue-time stamp is
+ * captured from this very map (`turnOrigins.recordForMid(mid, stamps.get(tab), tab)`),
+ * so a carry makes the gate's two sides equal BY CONSTRUCTION exactly in the window
+ * where the canvas changed. Callers therefore have to be able to tell a CARRIED stamp
+ * from a PROVEN one, and only a proven one may satisfy an agreement check. The carry
+ * itself is unchanged -- #1331 still needs it, so the frame keeps its stamp and the
+ * panel's own fence keeps judging it.
  */
 export function carryWorkflowCommandStamp(
   stamps: Map<string, string>,
   migratedFrom: string,
   panelTab: string,
-): void {
+): boolean {
   const carried = stamps.get(migratedFrom);
   // An entry already recorded for the new id is NEWER evidence than anything held under
   // the old one, so it wins.
-  if (carried !== undefined && !stamps.has(panelTab)) stamps.set(panelTab, carried);
+  const didCarry = carried !== undefined && !stamps.has(panelTab);
+  if (didCarry) stamps.set(panelTab, carried as string);
   // The old id is still retired: a straggler command addressed to it must not resolve.
   stamps.delete(migratedFrom);
+  return didCarry;
 }

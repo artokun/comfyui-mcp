@@ -3056,6 +3056,35 @@ function isStaleNodeSchemaRefusal(res: ToolResult): boolean {
   return /added or retyped since this page loaded its node schema/i.test(textOfToolResult(res));
 }
 
+/**
+ * #1708 — the panel's add-node guard polls `app.widgets` for a constructor. ComfyUI
+ * 1.49+ puts `getCustomWidgets()` results in the Pinia widget store, so
+ * AUTOCOMPLETE_TEXT_* (LoRA Manager Vue widgets) never appears there. The 5s wait
+ * always expires and the refusal names a reload that cannot help.
+ */
+function isLoraManagerAutocompleteRefusal(res: ToolResult): boolean {
+  if (!res.isError) return false;
+  const text = textOfToolResult(res);
+  return (
+    /had no widget after .+ waiting for node extensions to register/i.test(text) &&
+    /AUTOCOMPLETE_TEXT_/i.test(text)
+  );
+}
+
+const LORA_MANAGER_AUTOCOMPLETE_NOTE =
+  `\n\nThis is NOT a missing pack and NOT a widget that is still loading. ` +
+  `ComfyUI-LoRA-Manager registers AUTOCOMPLETE_TEXT_* via getCustomWidgets() into ` +
+  `the frontend widget store; the add-node guard only looks at app.widgets (core types), ` +
+  `so reload / panel_refresh_nodes / retry will keep failing. ` +
+  `Add "LoRA Text Loader (LoraManager)" instead — same MODEL/CLIP/trigger_words outputs, ` +
+  `but its lora_syntax input is a standard STRING socket you can drive with panel_set_widget ` +
+  `or a wired string. Core LoraLoader also works. Do not retry this class_type.`;
+
+function withLoraManagerAutocompleteNote(res: ToolResult): ToolResult {
+  if (!isLoraManagerAutocompleteRefusal(res)) return res;
+  return appendToolResultText(res, LORA_MANAGER_AUTOCOMPLETE_NOTE);
+}
+
 function appendToolResultText(res: ToolResult, extra: string): ToolResult {
   const idx = res?.content?.findIndex((c) => c.type === "text") ?? -1;
   const block = idx >= 0 ? res.content[idx] : undefined;
@@ -4793,6 +4822,19 @@ function responseWorkflowUuid(value: unknown): string | undefined {
 }
 
 /** Refresh only the bridge-owned command stamp, never caller data. */
+/** #1656 — tell the orchestrator that a live read confirmed the routed tab's CURRENT
+ *  stamp, so a value inherited on a same-socket re-hello stops being treated as
+ *  inherited. Never throws, and can never move a fence (see the bridge method). */
+function corroborateTabStamp(ctx: PanelToolCtx, workflowUuid: string): boolean {
+  const fn = (ctx.bridge as unknown as { corroborateTabStamp?: unknown }).corroborateTabStamp;
+  if (typeof fn !== "function") return false;
+  try {
+    return (fn as (t: string, u: string) => boolean).call(ctx.bridge, ctx.tabId, workflowUuid) === true;
+  } catch {
+    return false;
+  }
+}
+
 function refreshWorkflowUuid(ctx: PanelToolCtx, value: unknown): boolean {
   const uuid = responseWorkflowUuid(value);
   const refresh = (ctx.bridge as unknown as { refreshWorkflowUuid?: unknown }).refreshWorkflowUuid;
@@ -5446,7 +5488,29 @@ async function rebindWorkflowFence(
   // "already current" requires a KNOWN prior fence equal to the live uuid. An
   // UNKNOWN prior fence must not short-circuit the adoption: we would be claiming
   // the stamp already matched without ever having read it.
-  if (before.known && before.uuid === uuid) return { status: "already_current", uuid, before };
+  if (before.known && before.uuid === uuid) {
+    // #1656 — THE FENCE DOES NOT MOVE HERE, BUT THE EVIDENCE DOES.
+    //
+    // Reaching this line means the panel's own corroborated workflow_list says the
+    // LIVE canvas is this very instance. If the routed tab's stamp was one CARRIED
+    // onto a new tab id by a same-socket re-hello that could not resolve an identity,
+    // that carried value has now been confirmed by an observation of the tab under its
+    // CURRENT id — so the dispatch-time agreement gate must stop treating it as
+    // inherited. Without this, a rename/save whose hello merely RACED the canvas
+    // identity would leave the session refusing edits to a canvas the panel agrees is
+    // the right one: the fix would be worse than the bug.
+    //
+    // This is NOT the retarget #1646 removed, and deliberately not `refreshWorkflowUuid`
+    // either — that one WRITES a stamp (and a conversation's issue-time stamp with it).
+    // `corroborateTabStamp` can only promote the provenance of a uuid the orchestrator
+    // has itself confirmed already equals the tab's current stamp; it writes no stamp and
+    // refuses outright when the values differ, so no target changes and no later edit is
+    // re-aimed. The uuid still goes through the orchestrator's identity validator, never
+    // off parsed prose, and the result is ignored: this is corroboration, and a diagnostic
+    // must never replace the outcome it is describing.
+    corroborateTabStamp(ctx, uuid);
+    return { status: "already_current", uuid, before };
+  }
   // #1646 — a READ-ONLY probe never moves the fence: the live canvas naming a
   // DIFFERENT workflow is reported, not adopted. Only a deliberate rebind
   // (panel_set_workflow_target, open/new) may replace the fence — a mismatch
@@ -10583,7 +10647,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_add_node",
-      "Add a node to the user's OPEN ComfyUI graph by class_type (e.g. 'KSampler', 'CheckpointLoaderSimple'). The user sees it appear live; Ctrl+Z undoes it. Returns the created node's id, slots, and default widget values. Frontend-only virtual types are addable too: 'Note' and 'MarkdownNote' — the supported way to ANNOTATE a workflow with on-canvas instructions (add the node, then put the text in its 'text' widget via panel_set_widget) — plus 'Reroute' and 'PrimitiveNode'. These are LiteGraph-native and never appear in the backend node registry, so they legitimately bypass the backend class_type check. ADD NODES ONE AT A TIME, not as a parallel batch: each add carries a fresh /object_info payload and those register SERIALLY, so N concurrent adds become N sequential refresh cycles. On a large install that outruns the 30s per-command deadline and the later adds time out WHILE STILL QUEUED — they then apply when their turn arrives, leaving nodes you were told had failed (panel#767). Sequential adds each get the refresh to themselves and stay well inside the deadline.",
+      "Add a node to the user's OPEN ComfyUI graph by class_type (e.g. 'KSampler', 'CheckpointLoaderSimple'). The user sees it appear live; Ctrl+Z undoes it. Returns the created node's id, slots, and default widget values. Frontend-only virtual types are addable too: 'Note' and 'MarkdownNote' — the supported way to ANNOTATE a workflow with on-canvas instructions (add the node, then put the text in its 'text' widget via panel_set_widget) — plus 'Reroute' and 'PrimitiveNode'. These are LiteGraph-native and never appear in the backend node registry, so they legitimately bypass the backend class_type check. ComfyUI-LoRA-Manager's 'Lora Loader (LoraManager)' (and other AUTOCOMPLETE_TEXT_* nodes) cannot be added: the pack is healthy, but the add-node guard cannot see its Vue autocomplete widget. Use 'LoRA Text Loader (LoraManager)' — same outputs, lora_syntax is a STRING — or core LoraLoader; reload/retry will not clear it. ADD NODES ONE AT A TIME, not as a parallel batch: each add carries a fresh /object_info payload and those register SERIALLY, so N concurrent adds become N sequential refresh cycles. On a large install that outruns the 30s per-command deadline and the later adds time out WHILE STILL QUEUED — they then apply when their turn arrives, leaving nodes you were told had failed (panel#767). Sequential adds each get the refresh to themselves and stay well inside the deadline.",
       {
         class_type: z.string().describe("Exact ComfyUI node class_type to create."),
         pos: xy()
@@ -10602,7 +10666,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             OBJECT_INFO_REFRESH_ACK_TIMEOUT_MS,
           );
         const first = await add();
-        if (!isStaleNodeSchemaRefusal(first)) return first;
+        if (!isStaleNodeSchemaRefusal(first)) return withLoraManagerAutocompleteNote(first);
 
         // #1329 — DO THE REFRESH THE REFUSAL ASKS FOR, instead of billing the caller.
         //
@@ -10621,23 +10685,27 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           // The refusal is the better error: it names what is wrong with the SCHEMA and
           // what clears it. Carry the refresh failure alongside so the caller knows the
           // automatic attempt happened and why it did not help.
-          return appendToolResultText(
-            first,
-            `\n\n(Tried to clear this automatically: panel_refresh_nodes was dispatched and FAILED, ` +
-              `so the schema is unchanged and retrying the add will refuse again. ` +
-              `${textOfToolResult(refreshed)})`,
+          return withLoraManagerAutocompleteNote(
+            appendToolResultText(
+              first,
+              `\n\n(Tried to clear this automatically: panel_refresh_nodes was dispatched and FAILED, ` +
+                `so the schema is unchanged and retrying the add will refuse again. ` +
+                `${textOfToolResult(refreshed)})`,
+            ),
           );
         }
         const second = await add();
-        if (!isStaleNodeSchemaRefusal(second)) return second;
+        if (!isStaleNodeSchemaRefusal(second)) return withLoraManagerAutocompleteNote(second);
         // Still stale after a successful refresh: report THAT, because it means the
         // remedy the refusal prescribes does not fix this instance and a caller
         // following it by hand would loop.
-        return appendToolResultText(
-          second,
-          `\n\n(This was already retried ONCE automatically: panel_refresh_nodes reported success ` +
-            `and the add still refuses, so repeating panel_refresh_nodes will not clear it. ` +
-            `Reload the ComfyUI browser tab, which rebuilds the page's node registry from scratch.)`,
+        return withLoraManagerAutocompleteNote(
+          appendToolResultText(
+            second,
+            `\n\n(This was already retried ONCE automatically: panel_refresh_nodes reported success ` +
+              `and the add still refuses, so repeating panel_refresh_nodes will not clear it. ` +
+              `Reload the ComfyUI browser tab, which rebuilds the page's node registry from scratch.)`,
+          ),
         );
       },
     ),

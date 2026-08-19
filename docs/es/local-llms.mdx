@@ -318,6 +318,17 @@ El backend de Ollama del panel **usa `:e4b` por defecto** — elige
 **Ollama (local)** en el selector de backend y funciona en cuanto el
 modelo está descargado. Sin cuenta, sin clave API, sin coste por token.
 
+**Aviso de visión: hoy estas etiquetas son solo texto.** La exportación GGUF
+actual perdió el proyector multimodal de Gemma 4
+([#642](https://github.com/artokun/comfyui-mcp/issues/642)), así que el
+driver por defecto no puede *ver*: los bucles de crítica de
+`get_image (action:"view")`, `get_workflow (action:"from_image")` y las
+comparaciones visuales no están disponibles — exactamente la fila
+**Visión** «vuela a ciegas» de la tabla de capacidades de arriba. Las
+llamadas a herramientas, la generación y la gestión del grafo no se ven
+afectadas. Si el bucle de visión te importa hoy, elige un modelo con visión
+según «Requisitos del modelo» en lugar del predeterminado.
+
 **Ventana de contexto:** las etiquetas entregan una ventana de
 **65.536 tokens** horneada, y el orquestador se remite a ella (los
 modelos de serie reciben 16K). La arquitectura admite hasta **128K**

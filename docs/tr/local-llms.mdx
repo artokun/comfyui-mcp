@@ -292,6 +292,16 @@ Panelin Ollama arka ucu **varsayılan olarak `:e4b`'dir** — arka uç seçicisi
 **Ollama (yerel)** seçin, model çekildikten sonra çalışır. Hesap yok, API
 anahtarı yok, token başına maliyet yok.
 
+**Görüş uyarısı: bu etiketler bugün yalnızca metin.** Mevcut GGUF dışa
+aktarımı Gemma 4'ün çok kipli projektörünü düşürdü
+([#642](https://github.com/artokun/comfyui-mcp/issues/642)); bu yüzden
+varsayılan sürücü *göremez*: `get_image (action:"view")` eleştiri döngüleri,
+`get_workflow (action:"from_image")` ve görsel karşılaştırmalar kullanılamaz —
+tam olarak yukarıdaki yetenek tablosunun **Görüş** "kör uçar" satırı. Araç
+çağırma, üretim ve grafik yönetimi etkilenmez. Görüş döngüsü bugün sizin için
+önemliyse, varsayılan etiket yerine "Model gereksinimleri" uyarınca görüş
+yeteneği olan bir model seçin.
+
 **Bağlam penceresi:** etiketler gömülü **65.536 token**'lık bir pencereyle
 gelir ve orkestratör ona uyar (stok modeller 16K alır). Mimari **128K**
 (`:e2b`/`:e4b`) ve **256K** (`:12b`) destekler — VRAM'iniz varsa
