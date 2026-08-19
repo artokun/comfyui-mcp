@@ -759,6 +759,24 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.6] - 2026-08-19
+
+### MCP
+
+#### Fixed
+- a workflow edit can no longer land silently on the canvas you switched away from: a stamp CARRIED onto a freshly minted tab id is no longer accepted as that tab's advertised identity, so panel_save_workflow and the other active-canvas commands refuse before the socket write and name the documented rebind, instead of passing a gate that compared the carried value against itself (#1775)
+- a pi turn whose session the CLI no longer has drops the dead session id and retries once as a fresh session, instead of failing every turn until you type /new (#1774)
+- three packs whose workflows asked for models their manifests never downloaded now install clean — z-image-xy-plot ships the Q8_0 GGUF its loader actually loads, leaked personal LoRAs are replaced with declared bring-your-own placeholders, and packs:check-models runs as a CI gate instead of never running at all (#1771)
+- adding Lora Loader (LoraManager) from autocomplete names the STRING-socket LoRA Text Loader instead of stalling five seconds and refusing a healthy pack on ComfyUI 1.49+ (#1762)
+- the local-llms docs flag the default :e4b fine-tune as text-only, so nobody picks it expecting the panel to see its own generated images (#1777)
+
+#### Added
+- consult the maintained arena baseline table — model, params, quant, VRAM and score, grouped by 8 GB fit — from the docs without running the benchmark yourself (#1773)
+
+#### Changed
+- the same vision caveat is mirrored into all ten translated local-llms pages, so a non-English reader is warned too (#1779)
+
+
 ## [0.52.5] - 2026-08-19
 
 ### MCP
