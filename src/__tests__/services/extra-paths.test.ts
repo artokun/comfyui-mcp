@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -58,6 +59,49 @@ const CAN_SYMLINK = (() => {
     return true;
   } catch {
     return false;
+  }
+})();
+
+/**
+ * The 8.3 short spelling of a path, or undefined when this volume does not generate one.
+ * `Scripting.FileSystemObject.ShortPath` is the only reliable way to ask Windows for it;
+ * when 8.3 generation is disabled (`fsutil 8dot3name`, the default on some volumes) it
+ * answers with the LONG path, which is the signal to skip rather than assert nothing.
+ */
+function shortPathOf(target: string, kind: "GetFile" | "GetFolder"): string | undefined {
+  if (process.platform !== "win32") return undefined;
+  try {
+    const quoted = target.replace(/'/g, "''");
+    const out = execFileSync(
+      "powershell",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `(New-Object -ComObject Scripting.FileSystemObject).${kind}('${quoted}').ShortPath`,
+      ],
+      { encoding: "utf-8", windowsHide: true, timeout: 30_000 },
+    ).trim();
+    if (!out || out.toLowerCase() === target.toLowerCase()) return undefined;
+    return out;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Does this machine generate 8.3 aliases in tmpdir at all? Probed once, like CAN_SYMLINK,
+ *  so the tests below SKIP on a volume with 8dot3name disabled instead of passing
+ *  vacuously against a path that was never short. */
+const CAN_SHORT_PATH = (() => {
+  if (process.platform !== "win32") return false;
+  let dir: string | undefined;
+  try {
+    dir = mkdtempSync(join(tmpdir(), "comfyui-1788-a-very-long-install-name-"));
+    return shortPathOf(dir, "GetFolder") !== undefined;
+  } catch {
+    return false;
+  } finally {
+    if (dir) rmSync(dir, { recursive: true, force: true });
   }
 })();
 
@@ -1246,6 +1290,77 @@ describe("#1788 — a PINNED target discloses that the running server reads else
     const listed = await listExtraPaths({ target: "desktop" });
     expect(listed.notes.some((n) => /Restart ComfyUI after editing this file/.test(n))).toBe(
       false,
+    );
+  });
+
+  // GATE ROUND 2, P1 — `fs.realpathSync` collapses junctions but does NOT expand a
+  // Windows 8.3 short name; only `.native` asks the OS (this repo already uses `.native`
+  // for exactly that in panel-installer.ts and node-dev.ts). With the JS binding, pinning
+  // the server's OWN config by its short spelling emitted "the running ComfyUI does NOT
+  // read …\AVERYL~1\instance.yaml" for a file it demonstrably reads — a confident wrong
+  // negative replacing harmless silence, on the platform this was reported from.
+  describe.runIf(process.platform === "win32")("Windows 8.3 short names", () => {
+    it.skipIf(!CAN_SHORT_PATH)(
+      "says NOTHING when the server's own config is pinned by its 8.3 short spelling",
+      async () => {
+        const liveRoot = await trackTmp();
+        const serverCfg = await liveConfigAt(liveRoot, "instance-model-paths.yaml");
+        await liveServer(liveRoot, serverCfg);
+        const short = shortPathOf(serverCfg, "GetFile");
+        expect(short).toBeDefined();
+        expect(short!.toLowerCase()).not.toBe(serverCfg.toLowerCase());
+
+        const added = await addExtraPath({
+          configPath: short!,
+          category: "ipadapter",
+          path: "D:/ipadapter",
+        });
+        expect(added.notes.some((n) => /does not read this file/.test(n))).toBe(false);
+        expect(added.message).toMatch(/Restart ComfyUI to apply it/);
+      },
+    );
+
+    it.skipIf(!CAN_SHORT_PATH)(
+      "says NOTHING for the not-yet-created implicit yaml under an 8.3 directory",
+      async () => {
+        // Both failing channels at once: the leaf does not exist (so the collapse falls
+        // to the PARENT) and the parent is spelled 8.3 (so only `.native` expands it).
+        const liveRoot = await trackTmp();
+        const serverCfg = await liveConfigAt(liveRoot, "instance-model-paths.yaml");
+        await liveServer(liveRoot, serverCfg);
+        const shortDir = shortPathOf(liveRoot, "GetFolder");
+        expect(shortDir).toBeDefined();
+        const pinned = join(shortDir!, "extra_model_paths.yaml");
+        expect(existsSync(join(liveRoot, "extra_model_paths.yaml"))).toBe(false);
+
+        const added = await addExtraPath({ configPath: pinned, category: "vae", path: "D:/vae" });
+        expect(added.notes.some((n) => /does not read this file/.test(n))).toBe(false);
+        expect(added.message).toMatch(/Restart ComfyUI to apply it/);
+      },
+    );
+
+    it.skipIf(!CAN_SHORT_PATH)(
+      "still DOES flag an unrelated file under the same 8.3 directory (no over-collapsing)",
+      async () => {
+        // The control. Without it, a disclosure that had stopped firing entirely would
+        // pass both tests above — expanding short names must not collapse two distinct
+        // files in one directory into each other.
+        const liveRoot = await trackTmp();
+        const serverCfg = await liveConfigAt(liveRoot, "instance-model-paths.yaml");
+        await liveServer(liveRoot, serverCfg);
+        const shortDir = shortPathOf(liveRoot, "GetFolder");
+        expect(shortDir).toBeDefined();
+
+        const added = await addExtraPath({
+          configPath: join(shortDir!, "unrelated.yaml"),
+          category: "vae",
+          path: "D:/vae",
+        });
+        expect(added.notes.some((n) => /RUNNING ComfyUI does not read this file/.test(n))).toBe(
+          true,
+        );
+        expect(added.message).not.toMatch(/Restart ComfyUI to apply it/);
+      },
     );
   });
 

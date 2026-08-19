@@ -393,12 +393,23 @@ function samePath(a: string, b: string): boolean {
  * a UNC-vs-mapped-drive spelling of one file is ordinary on the platform this was
  * reported from, so the comparison is collapsed through `realpath` as well.
  *
- * `realpath` on the FILE is not enough, and the gap is not academic: `realpathSync`
- * throws on a path that does not exist, and "does not exist yet" is the ordinary state
- * here — the implicit `<root>/extra_model_paths.yaml` a caller is about to CREATE. In
- * that state the file-level collapse silently degrades to the lexical compare it was
- * added to fix, so a junctioned `COMFYUI_PATH` naming the very file the server reads was
- * declared inert (gate round 1, P1, reproduced with a real Windows junction).
+ * WHICH realpath is load-bearing, and the previous version of this comment was simply
+ * WRONG about it: `fs.realpathSync` collapses junctions and symlinks but does NOT expand
+ * a Windows 8.3 short name — only `fs.realpathSync.native` asks the OS and gets back the
+ * long, real-case path. This repo already learned that (`panel-installer.ts`,
+ * `node-dev.ts` both use `.native` for exactly this). With the JS binding, pinning the
+ * server's OWN config by its short spelling produced "the running ComfyUI does NOT read
+ * `…\AVERYL~1\instance.yaml`" for a file it demonstrably reads (gate round 2, P1) —
+ * the disqualifying direction, on the platform this was reported from. `.native` first,
+ * with the JS binding as a fallback so an environment where the native call is
+ * unavailable still collapses junctions rather than nothing.
+ *
+ * `realpath` on the FILE is not enough either, and that gap is not academic: it throws
+ * on a path that does not exist, and "does not exist yet" is the ordinary state here —
+ * the implicit `<root>/extra_model_paths.yaml` a caller is about to CREATE. In that
+ * state the file-level collapse silently degrades to the lexical compare it was added to
+ * fix, so a junctioned `COMFYUI_PATH` naming the very file the server reads was declared
+ * inert (gate round 1, P1, reproduced with a real Windows junction).
  *
  * So resolve the DIRECTORY and rejoin the basename when the file itself does not
  * resolve. The aliasing that matters lives in the parent — a junctioned/symlinked
@@ -408,17 +419,32 @@ function samePath(a: string, b: string): boolean {
  */
 function sameConfigFile(a: string, b: string): boolean {
   if (samePath(a, b)) return true;
-  const real = (p: string): string => {
+  /** Canonicalize one path, or `undefined` if it cannot be resolved at all. `.native`
+   *  is FIRST and is the only binding that expands a Windows 8.3 short name; the JS
+   *  binding is a fallback that still collapses junctions/symlinks. Returning
+   *  `undefined` rather than the input keeps "could not resolve" distinguishable from
+   *  "resolved to itself", so the caller can try the parent instead of silently
+   *  comparing an unresolved path against a resolved one. */
+  const canon = (p: string): string | undefined => {
+    try {
+      return realpathSync.native(p);
+    } catch {
+      // Native unavailable, or the path is absent/unreadable — try the JS binding.
+    }
     try {
       return realpathSync(p);
     } catch {
-      // The file is absent/unreadable — resolve its directory instead.
+      return undefined;
     }
-    try {
-      return join(realpathSync(dirname(p)), basename(p));
-    } catch {
-      return p;
-    }
+  };
+  const real = (p: string): string => {
+    const direct = canon(p);
+    if (direct !== undefined) return direct;
+    // Absent/unreadable — and absent is the ORDINARY state, since pinning a config is
+    // how a caller creates it. The aliasing lives in the parent, so resolve the
+    // directory and rejoin the basename.
+    const parent = canon(dirname(p));
+    return parent === undefined ? p : join(parent, basename(p));
   };
   return samePath(real(a), real(b));
 }
