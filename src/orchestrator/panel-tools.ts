@@ -74,6 +74,10 @@ import {
   resolveInnerPromotedTarget,
 } from "./promoted-widget.js";
 import {
+  fastGroupsFilterPropertyNote,
+  isFastGroupsFilterProperty,
+} from "./rgthree-fast-groups-property.js";
+import {
   isPlainObject,
   isStampMismatchSaveRefusal,
   patchOpenIdentity,
@@ -11556,7 +11560,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_set_property",
-      "Set a node's LiteGraph PROPERTY (the right-click → Properties panel), NOT a widget — the counterpart to panel_set_widget, which only reaches `widgets`. Many custom nodes are configured entirely through node properties: e.g. the rgthree Fast Groups Bypasser's filters `matchTitle`, `matchColors`, `sort`, and `toggleRestriction` are node properties, and without `matchTitle` the node enumerates EVERY group in the workflow (a footgun). Sets node.properties[name] and, when the node defines an onPropertyChanged callback (rgthree and many LiteGraph nodes do), invokes it so the change takes effect LIVE (e.g. rgthree re-filters its group list). Returns the previous and new value. Undoable with Ctrl+Z.",
+      "Set a node's LiteGraph PROPERTY (the right-click → Properties panel), NOT a widget — the counterpart to panel_set_widget, which only reaches `widgets`. Many custom nodes are configured entirely through node properties: e.g. the rgthree Fast Groups Bypasser's filters `matchTitle`, `matchColors`, `sort`, and `toggleRestriction` are node properties, and without `matchTitle` the node enumerates EVERY group in the workflow (a footgun). Sets node.properties[name] and, when the node defines an onPropertyChanged callback (many LiteGraph nodes do), invokes it. Fast Groups Bypasser/Muter do NOT implement onPropertyChanged — their toggle list is rebuilt by rgthree's own refreshWidgets on a service tick, which can leave leftover Enable rows or an empty widgets:{} (the list has not been built yet, not 'no matches'). After setting matchTitle/matchColors, re-read the node with panel_query_graph; if the canvas still shows groups that do not match, set the property again. Do not delete and re-add the node. Returns the previous and new value. Undoable with Ctrl+Z.",
       {
         node_id: nodeId().describe("Node id from panel_graph_outline / panel_query_graph."),
         name: z
@@ -11566,8 +11570,16 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           .union([z.string(), z.number(), z.boolean(), z.null()])
           .describe("New property value (string/number/boolean/null). For the rgthree Fast Groups Bypasser, matchTitle is a title substring/regex filter."),
       },
-      async (args: A, ctx) =>
-        ctx.call({ cmd: "graph_set_node_property", node_id: args.node_id, name: args.name, value: args.value }),
+      async (args: A, ctx) => {
+        const res = await ctx.call({
+          cmd: "graph_set_node_property",
+          node_id: args.node_id,
+          name: args.name,
+          value: args.value,
+        });
+        if (res.isError || !isFastGroupsFilterProperty(args.name)) return res;
+        return appendToolResultText(res, fastGroupsFilterPropertyNote());
+      },
     ),
     def(
       "panel_edit_node",

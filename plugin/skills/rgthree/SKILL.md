@@ -71,6 +71,28 @@ All of the following are node properties — set them with `panel_set_property`:
 | `showNav` | bool | `true` | Per-row jump-to-group arrow. |
 | `showAllGraphs` | bool | `true` | Include groups that live inside subgraphs. |
 
+### matchTitle does not rebuild the toggle list on the first write
+
+`panel_set_property` stores `matchTitle` (and `matchColors` / `sort` / …) and
+the reply `from`/`to` is truthful. Fast Groups nodes **do not implement
+`onPropertyChanged`**. The toggle list is rebuilt by rgthree's
+`refreshWidgets()` on a service tick (~8 ms after add, then every ~500 ms),
+and leftover-row removal increments the index while splicing — a 22-group
+list can stall at 13 with non-matching `Enable …` rows still present. A
+never-drawn node can also come back as `widgets:{}` — that means the list
+has **not been built yet**, not that there are no matching groups.
+`panel_query_graph` also keys widgets by name, and every toggle is named
+`RGTHREE_TOGGLE_AND_NAV`, so a built list collapses to one key.
+
+**Do this:**
+
+1. Set `matchTitle` **immediately** after `panel_add_node` (before the first
+   unfiltered refresh paints every group).
+2. Re-read with `panel_query_graph {ids:[<id>], fields:'detail'}`.
+3. If `widgets` is empty **or** the canvas still shows `Enable` rows that do
+   not match the regex, **set `matchTitle` again**. Do **not** delete and
+   re-add the node — that is slower and still needs a second set.
+
 ### Recipe — make pipeline stages toggleable
 
 1. `panel_create_group` per stage, with a **prefixed title** (`STAGE 1 — …`) so one
@@ -94,6 +116,9 @@ All of the following are node properties — set them with `panel_set_property`:
    unwired. Add nodes one at a time, not as a parallel batch.
 
 4. `panel_set_property` → `matchTitle` = `^STAGE`, and `sort` = `alphanumeric`.
+   Set them immediately after the add, then re-read the node. If `widgets` is
+   empty or leftover `Enable` rows remain, set `matchTitle` again — do not
+   delete and re-add.
 
 5. Toggle, then verify with `panel_graph_outline` — it tags nodes `[bypass]` / `[mute]`.
 
@@ -182,4 +207,4 @@ Turning a LoRA **off** (`lora_N.on = false`) is usually safer than clearing it a
 ## Sources
 
 - **Official:** https://github.com/rgthree/rgthree-comfy
-- **Empirical:** frontend-only allowlist and properties-not-widgets notes verified against the installed pack and the panel guard.
+- **Empirical:** frontend-only allowlist and properties-not-widgets notes verified against the installed pack and the panel guard. `#1808` matchTitle rebuild: Fast Groups have no `onPropertyChanged`; `refreshWidgets()` leftover removal is `removeWidget(index++)` in `fast_groups_muter.ts`; first unfiltered tick is scheduled from `addFastGroupNode` in `fast_groups_service.ts`.

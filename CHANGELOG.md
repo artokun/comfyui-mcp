@@ -770,6 +770,15 @@ All notable changes to this project are documented here. This project adheres to
 
 ### Fixed
 
+- **`panel_set_property(matchTitle)` on Fast Groups Bypasser/Muter no longer claims a live toggle-list rebuild (#1808).**
+  The write stores the property and the `from`/`to` reply is truthful, but rgthree
+  does not implement `onPropertyChanged` — `refreshWidgets()` runs on its own
+  service tick and leftover-row removal skips every other `Enable` row. A first
+  set can leave a partial list or `widgets:{}` (unbuilt, not "no matches").
+  The tool now says so, appends that note on Fast Groups filter writes, and the
+  rgthree skill / authoring prompt tell the agent to re-read and set again
+  instead of delete+re-add.
+
 - **MiniMax H3 skill load path (#1167 / #1801).** `plugin/skills/minimax-h3-video/SKILL.md`
   no longer tells the agent to `panel_load_workflow` / `run_template` a Template
   Library basename. Core `video_minimax_h3_*` graphs open from the frontend

@@ -53,6 +53,14 @@ describe("the system prompt teaches AUTHORING rgthree toggles, not just reading 
     const section = PROMPT_SRC.slice(PROMPT_SRC.indexOf("AUTHORING rgthree TOGGLES"));
     expect(section).toMatch(/skill_read", name:"rgthree"/);
   });
+
+  it("does not claim the first matchTitle write rebuilds the toggle list (#1808)", () => {
+    const section = PROMPT_SRC.slice(PROMPT_SRC.indexOf("AUTHORING rgthree TOGGLES"));
+    expect(section).toMatch(/do NOT implement onPropertyChanged/);
+    expect(section).toMatch(/set matchTitle again/);
+    expect(section).toMatch(/do NOT delete and re-add/);
+    expect(section).toMatch(/widgets:\{\}/);
+  });
 });
 
 describe("the rgthree skill states the facts that were verified against the pack (#1551)", () => {
@@ -171,6 +179,15 @@ describe("the rgthree skill states the facts that were verified against the pack
     expect(SKILL).toMatch(/deletes the built-in `control_after_generate` widget/);
     expect(SKILL).toMatch(/`-1` randomize, `-2` increment,\s+`-3` decrement/);
     expect(SKILL).toMatch(/returned \*\*unchanged\*\*/);
+  });
+
+  it("says matchTitle does not rebuild the toggle list on the first write (#1808)", () => {
+    expect(SKILL).toMatch(/do not implement\s+`onPropertyChanged`/);
+    expect(SKILL).toMatch(/widgets:\{\}/);
+    expect(SKILL).toMatch(/has \*\*not been built yet\*\*/);
+    expect(SKILL).toMatch(/set `matchTitle` again/);
+    expect(SKILL).toMatch(/Do \*\*not\*\* delete and\s+re-add/);
+    expect(SKILL).toContain("RGTHREE_TOGGLE_AND_NAV");
   });
 
   it("does not send the agent to panel_move_group to fix membership", () => {
