@@ -7542,16 +7542,23 @@ export function makePanelToolCtx(
       //                    repair. A bare retry is the right move and works because
       //                    of it — which is why it looked "transient": the first call
       //                    did the work and reported failure.
-      //   already_current  the fence read back as ALREADY PRESENT AND EQUAL. It
-      //                    cannot have been that for the tab the command was refused
-      //                    on (the refusal proves that tab's stamp was empty, and
-      //                    currentWorkflowFence reads the same resolver), so this is
-      //                    a fence for a tab this session reached DURING the check —
-      //                    rebindWorkflowFence's own workflow_list round trip is
-      //                    retry-safe, and its retry runs ensureReachable, which can
-      //                    move an orphaned mode:"current" session onto another tab.
-      //                    NOTHING WAS REPAIRED for the caller, and the uuid quoted is
-      //                    not necessarily the one they were refused against.
+      //   already_current  the fence read back as ALREADY PRESENT AND EQUAL. It cannot
+      //                    have been that at dispatch — the refusal is proof the stamp
+      //                    was empty, and currentWorkflowFence reads the same resolver
+      //                    the bridge consulted — so a fence appeared between the two
+      //                    reads, and NOT because of this call: `already_current`
+      //                    returns BEFORE any adoption. Two things produce it and this
+      //                    code cannot tell them apart, which is why it asserts
+      //                    neither: the session was moved onto a DIFFERENT tab while
+      //                    the check ran (rebindWorkflowFence's workflow_list round
+      //                    trip is retry-safe, its retry runs ensureReachable, and
+      //                    `before` is then re-read for the new tab), or a fence for
+      //                    THIS tab was installed in that window by something else (a
+      //                    concurrent rebind, or the panel's own mismatch re-hello,
+      //                    #1043/#932). Either way NOTHING WAS REPAIRED for the caller
+      //                    and the uuid quoted may not be the one they were refused
+      //                    against — so the remedy is to confirm the target, not to
+      //                    name a mechanism nobody measured.
       //
       // Splitting the sentence is half the fix. The other half is that the answer must
       // be readable WITHOUT parsing the sentence: an agent deciding to re-run a
@@ -7630,9 +7637,11 @@ export function makePanelToolCtx(
               `${raw}\n\nCHECKED, and THIS CALL REPAIRED NOTHING: the re-read found a fence that ` +
                 `was ALREADY present and already named the live canvas (${rebind.uuid}). That ` +
                 `cannot be the fence your command was refused against — the refusal is proof ` +
-                `that one was missing — so this session reached a DIFFERENT tab while the check ` +
-                `ran, and ${rebind.uuid} is that tab's identity, not necessarily the one you ` +
-                `asked for. CONFIRM THE TARGET BEFORE RETRYING: ` +
+                `that one was missing — so a fence appeared between the two reads, and not ` +
+                `through this call. It is EITHER a fence for a different tab this session was ` +
+                `moved onto while the check ran, OR one installed for this tab by something ` +
+                `else in that window; nothing here can tell which, so ${rebind.uuid} is not ` +
+                `claimed to be the identity you asked for. CONFIRM THE TARGET BEFORE RETRYING: ` +
                 `panel_set_workflow_target({mode:"current"}) if you mean the canvas that is live ` +
                 `now, or panel_open_workflow(<path>) for the workflow you actually meant; then ` +
                 `re-issue.${nothingApplied} A bare retry is not refused by this message — it is ` +
