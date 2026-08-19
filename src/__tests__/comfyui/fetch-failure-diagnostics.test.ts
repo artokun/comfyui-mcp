@@ -258,8 +258,7 @@ describe("comfyuiFetch bounds a call that brought no budget", () => {
     expect((spy.mock.calls.at(-1)![1] as RequestInit).signal).toBeInstanceOf(AbortSignal);
   });
 
-  // The caller's own budget is the informed one — 8s for the template listing,
-  // and so on. Ours must never shorten or replace it.
+  // The caller's own budget is the informed one. Ours must never shorten or replace it.
   it("NEVER overrides a caller's own signal", async () => {
     const mine = AbortSignal.timeout(5_000);
     const spy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}", { status: 200 }));

@@ -228,8 +228,8 @@ function describeComfyFetchFailure(err: unknown, target: string, method: string)
  * fix bounded three calls, and this bounds the rest.
  *
  * DELIBERATELY GENEROUS. Every caller that knows its own budget already passes a
- * signal (8s for the template listing, and so on) and keeps it — `init.signal`
- * always wins. This value only has to be shorter than "forever" and longer than
+ * signal and keeps it — `init.signal` always wins. This value only has to be
+ * shorter than "forever" and longer than
  * any healthy request: `/object_info` on a large custom-node install is
  * legitimately slow, and a ceiling that fires on a working server would be a
  * worse bug than the one being fixed.

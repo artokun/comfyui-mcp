@@ -3,8 +3,8 @@
 //
 // The reporter named action:"list" and action:"skill_list", but neither can hang:
 // both are synchronous local filesystem enumeration with no network and no await.
-// The pack catalog's one live-server action (list_templates) already carries
-// AbortSignal.timeout(8000).
+// The pack catalog's one live-server action (list_templates) is bounded by
+// comfyuiFetch's COMFYUI_MCP_HTTP_TIMEOUT_S ceiling.
 //
 // The actual unbounded path on that tool is action:"generate_skill", which
 // reaches GitHub and api.comfy.org — and all three of those calls were a bare

@@ -74,8 +74,9 @@ function githubHeaders(): Record<string, string> {
  * shape: not a failure that was mis-described, but no answer at all.
  *
  * Every other network path on that tool is already bounded (the live-server
- * template listing carries AbortSignal.timeout(8000); comfyuiFetch callers pass
- * their own). These three were the gap.
+ * template listing goes through comfyuiFetch, which applies
+ * COMFYUI_MCP_HTTP_TIMEOUT_S; other comfyuiFetch callers pass their own). These
+ * three were the gap.
  *
  * Generous by default — a cold GitHub API call over a slow link is legitimately
  * slow, and a timeout that fires on a working connection would be its own bug.

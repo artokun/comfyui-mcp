@@ -586,9 +586,11 @@ async function listWorkflowTemplatesAction(): Promise<ToolText> {
   // symptom, from a session where the panel bridge was connected and this
   // headless address was not. comfyuiFetch names the target on a network throw,
   // and it is the same auth path every other ComfyUI call uses.
-  const res = await comfyuiFetch(url, {
-    signal: AbortSignal.timeout(8000),
-  });
+  //
+  // NO SIGNAL (#1415). comfyuiFetch applies COMFYUI_MCP_HTTP_TIMEOUT_S only
+  // when the caller passed none. A hard-coded AbortSignal.timeout(8000) always
+  // won, so raising the env for a slow remote still aborted this read at 8s.
+  const res = await comfyuiFetch(url);
   if (!res.ok) {
     // A NON-2xx may still be an HTML proxy/login page — say which, instead
     // of blaming a possibly-fine ComfyUI version (#828).
