@@ -117,6 +117,7 @@ import {
   BRIDGE_DEFAULT_TIMEOUT_MS,
   BRIDGE_READ_DEFAULT_TIMEOUT_MS,
   dispatchOutcomeOf,
+  GRAPH_CMD_EFFECT,
   isCapabilityRefusal,
   isPanelCmdUnsupportedError,
   isReplyTimeoutTagged,
@@ -8495,21 +8496,24 @@ export function makePanelToolCtx(
       // downstream of here, so that field is undefined at this point for BOTH states
       // (the trap that silently disabled #1330's transient branch one block up).
       //
-      // NOTHING IS ADOPTED. The probe is the same read-only one (`adopt:false`), so
-      // this reports which state it found and the fence moves only on an explicit
-      // rebind. The refusal itself is preserved verbatim and the call still fails.
+      // AN UNSTAMPED INERT READ IS ADMITTED by minting a first fence from the
+      // live canvas and retrying once. That is not the retarget #1646 removed:
+      // there is no named workflow to abandon, and a pinned session is left
+      // alone. The panel fence is unchanged (#718). A WRONG stamp still fails.
+      // The probe stays read-only until this branch decides to mint.
       if (isWorkflowInstanceMismatch(err) && isFencedGraphRead(cmd)) {
         const name = typeof cmd.cmd === "string" ? cmd.cmd : "panel command";
         const raw = err instanceof Error ? err.message : String(err);
-        const stamped = /issued for workflow instance ([0-9a-f-]{36})/i.exec(raw)?.[1] ?? null;
-        const unstamped = /carries no workflow-instance stamp/i.test(raw);
-        // Three-valued on purpose. A panel whose wording matches neither is not
-        // evidence for either state, and this branch must not manufacture one.
-        const shape: "unstamped" | "stamped" | "unstated" = unstamped
-          ? "unstamped"
-          : stamped
-            ? "stamped"
-            : "unstated";
+        // Anchored to the panel's own clause so a message that quotes BOTH
+        // wordings cannot collapse into the missing-stamp state.
+        const stamped =
+          /this command was issued for workflow instance ([0-9a-f-]{36})/i.exec(raw)?.[1] ?? null;
+        const unstamped = /this command carries no workflow-instance stamp/i.test(raw);
+        // Three-valued on purpose. A panel whose wording matches neither — or
+        // both — is not evidence for either state, and this branch must not
+        // manufacture one.
+        const shape: "unstamped" | "stamped" | "unstated" =
+          unstamped === Boolean(stamped) ? "unstated" : unstamped ? "unstamped" : "stamped";
         // Naming `mode:"current"` to a PINNED session is naming something that also
         // RELEASES the pin. Say so where it applies rather than letting the caller
         // discover it by losing their target.
@@ -8520,13 +8524,61 @@ export function makePanelToolCtx(
               `RELEASES that pin. To keep it, bring that workflow back to the canvas with ` +
               `panel_open_workflow(${JSON.stringify(pin.path)}) and retry instead.`
             : "";
-        const RETRY_IS_FREE =
-          `RETRY THIS EXACT CALL ONCE — this is a read, so re-issuing it cannot double-apply ` +
-          `anything.`;
+        // graph_run is fenced like a read (the panel refuses it before it queues)
+        // but it is not one: GRAPH_CMD_EFFECT lists it as targeted, and calling
+        // it a read would tell the caller a retry cannot double-apply a prompt.
+        const inertRead = GRAPH_CMD_EFFECT[name] === "inert";
+        const RETRY_IS_FREE = inertRead
+          ? `RETRY THIS EXACT CALL ONCE — this is a read, so re-issuing it cannot double-apply ` +
+            `anything.`
+          : `RETRY THIS EXACT CALL ONCE — the panel refused it before it ran, so re-issuing it ` +
+            `cannot double-apply anything.`;
+        const refusedLead = inertRead
+          ? `${name} was refused before it ran — no graph data was read.`
+          : `${name} was refused before it ran — nothing was applied.`;
         let verdict: string;
         try {
           const probe = await rebindWorkflowFence(ctx, { adopt: false });
           const live = "uuid" in probe ? probe.uuid : null;
+          const priorAbsent =
+            "before" in probe && probe.before.known === true && !probe.before.uuid;
+          const admitUnstampedRead =
+            inertRead && shape === "unstamped" && pin?.mode !== "pinned";
+          // Mint a first stamp only when this session has none. A fence naming
+          // some other workflow is the retarget #1646 removed; we do not move it.
+          if (
+            admitUnstampedRead &&
+            probe.status === "diverged" &&
+            priorAbsent &&
+            typeof live === "string" &&
+            refreshWorkflowUuid(ctx, { workflow_uuid: live })
+          ) {
+            try {
+              const retried = ok(await sendRouted(cmd, timeoutMs, observeRid));
+              if (successProvesSwitchCleared(cmd.cmd)) clearSwitchHold(ctx.tabId);
+              return retried;
+            } catch (retryErr) {
+              onFailure?.(retryErr);
+              return fail(retryErr instanceof Error ? retryErr : new Error(String(retryErr)));
+            }
+          }
+          // The fence appeared between dispatch and this probe. Retrying the
+          // inert read now carries that stamp; nothing is adopted here.
+          if (
+            admitUnstampedRead &&
+            (probe.status === "already_current" || probe.status === "healed_by_panel")
+          ) {
+            try {
+              const retried = ok(await sendRouted(cmd, timeoutMs, observeRid));
+              if (successProvesSwitchCleared(cmd.cmd)) clearSwitchHold(ctx.tabId);
+              return retried;
+            } catch (retryErr) {
+              onFailure?.(retryErr);
+              if (!isWorkflowInstanceMismatch(retryErr)) {
+                return fail(retryErr instanceof Error ? retryErr : new Error(String(retryErr)));
+              }
+            }
+          }
           verdict =
             probe.status === "no_identity"
               // Worded without reference to the session's own side, because this
@@ -8606,7 +8658,7 @@ export function makePanelToolCtx(
             `refusal stands on its own terms and the fence is unchanged. ` +
             `(${probeErr instanceof Error ? probeErr.message : String(probeErr)})`;
         }
-        return fail(`${name} was refused before it ran — no graph data was read. ${raw}${verdict}`);
+        return fail(`${refusedLead} ${raw}${verdict}`);
       }
       // #1480 — NAME A REMEDY THE TAB CAN ACTUALLY ACCEPT.
       //

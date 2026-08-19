@@ -1,5 +1,5 @@
-// #1519 — a live graph READ refused by the workflow fence said nothing about how to fix it,
-// and the two states behind that refusal are not the same state.
+// #1519 — a live graph READ refused by the workflow fence because it carried no
+// instance stamp, and the two states behind that refusal are not the same state.
 //
 // The reporter's session resumed onto a different workflow and the first live-canvas read
 // came back
@@ -7,28 +7,13 @@
 //   workflow instance mismatch: this command carries no workflow-instance stamp, and the
 //   active canvas reports 2b3f4684-…. Nothing was applied.
 //
-// MEASURED on main before this change: that sentence was the ENTIRE tool result. The
-// corroboration #1330 added is gated on `isMutatingGraphCmd`, so a READ refused by the very
-// same fence fell through every branch of the catch and the panel's raw refusal was
-// surfaced verbatim — no verdict, no remedy. The reporter found
-// `panel_set_workflow_target({mode:"current"})` themselves; that discovery is the report.
-//
-// TWO REFUSALS, NOT ONE — the part these assertions exist to pin. `isWorkflowInstanceMismatch`
-// matches both of the panel's states and they have OPPOSITE remedies:
-//
-//   "carries no workflow-instance stamp"  → no identity at all. Nothing was compared.
-//                                           Deriving a fence from the live canvas fixes it.
-//   "issued for workflow instance <uuid>" → an identity the canvas disagrees with. Deriving
-//                                           a fence from the live canvas ABANDONS the
-//                                           workflow the caller named (the retarget #1646
-//                                           removed for cause).
-//
-// So each case asserts its OWN remedy AND asserts the other case's remedy is absent. A
-// verdict that merely mentioned rebinding would satisfy a one-sided test while re-collapsing
-// the two states, which is the defect this issue is about.
-//
-// THE FENCE IS NOT MOVED. Every case asserts `refreshWorkflowUuid` was never called: the probe
-// is the read-only one, the refusal still fails the call, and the caller decides.
+// A missing stamp is not a wrong one. Deriving a fence from the live canvas is what
+// fixes the first; doing that for the second ABANDONS the workflow the caller named
+// (the retarget #1646 removed for cause). An inert read refused for a missing stamp,
+// against a canvas that has an identity, and a session that has none, is therefore
+// admitted: the first fence is minted from that canvas and the read is retried once.
+// A wrong stamp, a pin, and a canvas with no identity still fail and name only the
+// remedy that applies.
 
 import { beforeEach, describe, expect, it } from "vitest";
 
@@ -46,7 +31,12 @@ const STALE = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"; // a fence that has gone s
 
 let listCalls: number;
 let adopted: string[];
+let sent: string[];
 let fence: { known: boolean; uuid?: string };
+
+/** What the panel returns once an unstamped outline is admitted. Distinctive so
+ *  a green assertion cannot come from the diagnosis text. */
+const OUTLINE = { node_count: 3, outline: "1 CheckpointLoaderSimple \"ckpt\"" };
 
 /** A self-corroborating workflow_list reply: the active record also appears in the
  *  open-workflow list flagged active, which is what corroboration requires. */
@@ -59,13 +49,23 @@ function settled(uuid: string | null): Record<string, unknown> {
   return { active, workflows: [{ ...active, active: true }], active_confirmed: true };
 }
 
+type BridgeOpts = {
+  issuedFor: string | null;
+  liveUuid: string | null;
+  probeRefused?: boolean;
+  /** Serve the outline after a first fence is minted (the reporter's remaining case). */
+  serveOutlineWhen?: "adopted" | "retry";
+  /** The validator refuses to mint — diagnosis must still name the rebind. */
+  refuseAdopt?: boolean;
+};
+
 /**
  * `issuedFor` — what the panel's refusal states: a uuid (the WRONG-stamp wording) or
  * `null` (the MISSING-stamp wording). `liveUuid` — what workflow_list reports for the
  * live canvas, `null` for a canvas that has no identity of its own. `probeRefused` —
  * a build predating panel #759 that fences the recovery probe too.
  */
-function bridge(opts: { issuedFor: string | null; liveUuid: string | null; probeRefused?: boolean }) {
+function bridge(opts: BridgeOpts) {
   const refusal =
     `workflow instance mismatch: ` +
     (opts.issuedFor
@@ -74,12 +74,22 @@ function bridge(opts: { issuedFor: string | null; liveUuid: string | null; probe
     `, and the active canvas reports ${LIVE}. Nothing was applied.`;
   return {
     send: async (cmd: Record<string, unknown>) => {
-      if (cmd.cmd === "workflow_list") {
+      const name = typeof cmd.cmd === "string" ? cmd.cmd : "";
+      sent.push(name);
+      if (name === "workflow_list") {
         listCalls += 1;
         // A build predating panel #759 fences the recovery probe too. It must
         // surface its own refusal, NOT re-enter the diagnosis that called it.
         if (opts.probeRefused) throw new Error(refusal);
         return settled(opts.liveUuid);
+      }
+      const outlineSends = sent.filter((c) => c === "graph_outline").length;
+      if (
+        name === "graph_outline" &&
+        ((opts.serveOutlineWhen === "adopted" && adopted.length > 0) ||
+          (opts.serveOutlineWhen === "retry" && outlineSends > 1))
+      ) {
+        return OUTLINE;
       }
       throw new Error(refusal);
     },
@@ -89,7 +99,9 @@ function bridge(opts: { issuedFor: string | null; liveUuid: string | null; probe
     tabs: () => [{ tab_id: TAB, title: "wf", connected_at: 0 }],
     resolveActiveTabId: () => TAB,
     refreshWorkflowUuid: (_tabId: string, uuid: string) => {
+      if (opts.refuseAdopt) return false;
       adopted.push(uuid);
+      fence = { known: true, uuid };
       return true;
     },
     workflowUuidFor: () => fence,
@@ -100,14 +112,17 @@ function bridge(opts: { issuedFor: string | null; liveUuid: string | null; probe
 
 /** Drive a real READ tool (panel_graph_outline) through the real ctx.call path. */
 async function outline(
-  opts: { issuedFor: string | null; liveUuid: string | null; probeRefused?: boolean },
+  opts: BridgeOpts,
   store = new WorkflowTargetStore(),
-): Promise<string> {
+): Promise<{ text: string; isError: boolean }> {
   const ctx = makePanelToolCtx(bridge(opts), TAB, store);
   const def = buildPanelToolDefs().find((d) => d.name === "panel_graph_outline");
   if (!def) throw new Error("panel_graph_outline is not registered");
   const res: ToolResult = await def.handler({} as never, ctx);
-  return res.content.map((c) => (c as { text?: string }).text ?? "").join(" ");
+  return {
+    text: res.content.map((c) => (c as { text?: string }).text ?? "").join(" "),
+    isError: res.isError === true,
+  };
 }
 
 /** The remedy that is right ONLY for an absent stamp. */
@@ -118,28 +133,47 @@ const CHOOSE = /to read the workflow you issued for, bring it back with panel_op
 beforeEach(() => {
   listCalls = 0;
   adopted = [];
+  sent = [];
   fence = { known: true, uuid: undefined }; // definitively NOT fenced — #1519's state
 });
 
 describe("a fenced graph READ is diagnosed, and a missing stamp is not a wrong one (#1519)", () => {
-  it("MISSING STAMP: says the stamp was absent and names the rebind that mints one", async () => {
-    const text = await outline({ issuedFor: null, liveUuid: LIVE });
+  it("MISSING STAMP: mints a first fence from the live canvas and the outline runs", async () => {
+    const { text, isError } = await outline({
+      issuedFor: null,
+      liveUuid: LIVE,
+      serveOutlineWhen: "adopted",
+    });
 
     // The live canvas really was re-read — without this every assertion below could
     // be satisfied by a message that never consulted the panel.
     expect(listCalls).toBeGreaterThan(0);
+    // The first fence was minted from that reading, not from a guessed uuid.
+    expect(adopted).toEqual([LIVE]);
+    // And the outline the panel served after that mint is what the caller got —
+    // not a diagnosis of the refusal that provoked it.
+    expect(isError).toBe(false);
+    expect(text).toContain("CheckpointLoaderSimple");
+    expect(text).not.toMatch(/Error:/);
+    expect(text).not.toMatch(REBIND);
+    expect(text).not.toMatch(CHOOSE);
+    expect(sent.filter((c) => c === "graph_outline").length).toBeGreaterThan(1);
+  });
 
-    expect(text).toMatch(/CHECKED/);
+  it("MISSING STAMP, mint refused: still names the rebind and does not invent a wrong-stamp target", async () => {
+    const { text, isError } = await outline({
+      issuedFor: null,
+      liveUuid: LIVE,
+      refuseAdopt: true,
+    });
+
+    expect(listCalls).toBeGreaterThan(0);
+    expect(isError).toBe(true);
     expect(text).toMatch(/MISSING stamp rather than a wrong one/);
     expect(text).toMatch(REBIND);
     expect(text).toContain(LIVE);
-    // The panel's own refusal is preserved verbatim — it is the evidence.
     expect(text).toContain("carries no workflow-instance stamp");
-    // The OTHER state's remedy must not appear: there is no workflow this read was
-    // "issued for", so telling the caller to bring one back is a fabricated target.
     expect(text).not.toMatch(CHOOSE);
-    // The call still FAILS, and the fence was not moved.
-    expect(text.startsWith("Error:")).toBe(true);
     expect(adopted).toEqual([]);
   });
 
@@ -148,7 +182,7 @@ describe("a fenced graph READ is diagnosed, and a missing stamp is not a wrong o
     // canvas that disagrees is a different fact, and mode:"current" abandons the
     // workflow the caller named rather than repairing anything.
     fence = { known: true, uuid: STALE };
-    const text = await outline({ issuedFor: STALE, liveUuid: LIVE });
+    const { text } = await outline({ issuedFor: STALE, liveUuid: LIVE });
 
     expect(listCalls).toBeGreaterThan(0);
     expect(text).toMatch(/WRONG stamp, not a missing one/);
@@ -165,7 +199,7 @@ describe("a fenced graph READ is diagnosed, and a missing stamp is not a wrong o
   it("NO IDENTITY ANYWHERE: says the rebind will NOT clear it, and sends the caller to re-open", async () => {
     // #1331's lesson, applied to the read path: when the live canvas has no identity
     // either, mode:"current" reports success while the read keeps failing.
-    const text = await outline({ issuedFor: null, liveUuid: null });
+    const { text } = await outline({ issuedFor: null, liveUuid: null });
 
     expect(listCalls).toBeGreaterThan(0);
     expect(text).toMatch(/will NOT clear this/);
@@ -182,7 +216,7 @@ describe("a fenced graph READ is diagnosed, and a missing stamp is not a wrong o
     // verdict that describes the caller's state wrongly is the class of claim this
     // whole issue is about.
     fence = { known: true, uuid: STALE };
-    const text = await outline({ issuedFor: STALE, liveUuid: null });
+    const { text } = await outline({ issuedFor: STALE, liveUuid: null });
 
     expect(text).toMatch(/no workflow identity of its own/);
     expect(text).not.toMatch(/no workflow identity either/);
@@ -196,7 +230,7 @@ describe("a fenced graph READ is diagnosed, and a missing stamp is not a wrong o
     // out by editing the wrong workflow later.
     const store = new WorkflowTargetStore();
     store.set(TAB, { mode: "pinned", path: "workflows/b.json", filename: "b.json" });
-    const text = await outline({ issuedFor: null, liveUuid: LIVE }, store);
+    const { text } = await outline({ issuedFor: null, liveUuid: LIVE }, store);
 
     expect(text).toMatch(REBIND);
     expect(text).toMatch(/PINNED to b\.json/);
@@ -283,10 +317,7 @@ describe("classified against the panel's REAL wording, not the fixture's short f
         isHeadless: () => false,
         tabs: () => [{ tab_id: TAB, title: "wf", connected_at: 0 }],
         resolveActiveTabId: () => TAB,
-        refreshWorkflowUuid: (_t: string, u: string) => {
-          adopted.push(u);
-          return true;
-        },
+        refreshWorkflowUuid: () => false,
         workflowUuidFor: () => fence,
         tabCanMutateGraph: () => true,
         tabGraphMutationCapability: () => ({ known: true, canMutate: true }),
@@ -334,7 +365,7 @@ describe("the #1519 diagnosis cannot re-enter itself, and changes no other path"
     // `graph_` prefix precisely so that reply cannot re-enter the diagnosis. Bounded
     // recursion would show up here as an exploding call count (or a hang), not as
     // wrong wording.
-    const text = await outline({ issuedFor: null, liveUuid: LIVE, probeRefused: true });
+    const { text } = await outline({ issuedFor: null, liveUuid: LIVE, probeRefused: true });
 
     expect(listCalls).toBeLessThanOrEqual(4); // one read + at most the #1292 rechecks
     expect(text).toMatch(/UNKNOWN/);
@@ -358,6 +389,90 @@ describe("the #1519 diagnosis cannot re-enter itself, and changes no other path"
 
     expect(text).toMatch(/NOT applied — nothing changed/);
     expect(text).not.toMatch(/no graph data was read/);
+    expect(adopted).toEqual([]);
+  });
+
+  it("WRONG STAMP is not retried and is not adopted", async () => {
+    fence = { known: true, uuid: STALE };
+    await outline({ issuedFor: STALE, liveUuid: LIVE, serveOutlineWhen: "adopted" });
+    expect(adopted).toEqual([]);
+    expect(sent.filter((c) => c === "graph_outline")).toEqual(["graph_outline"]);
+  });
+});
+
+describe("an unstamped inert read is admitted (#1519 remaining)", () => {
+  it("already_current: retries the outline without minting a new fence", async () => {
+    // The fence appeared between dispatch and the probe. Retrying now carries it;
+    // minting again would be claiming a repair this call did not make.
+    fence = { known: true, uuid: LIVE };
+    const { text, isError } = await outline({
+      issuedFor: null,
+      liveUuid: LIVE,
+      serveOutlineWhen: "retry",
+    });
+    expect(isError).toBe(false);
+    expect(text).toContain("CheckpointLoaderSimple");
+    expect(adopted).toEqual([]);
+    expect(sent.filter((c) => c === "graph_outline").length).toBeGreaterThan(1);
+  });
+
+  it("a refusal that quotes BOTH clauses is UNKNOWN, not a missing stamp", async () => {
+    // Unanchored regexes let `unstamped` win whenever both phrases appear.
+    // The panel does not emit that naturally; the classifier must still not guess.
+    const both =
+      `workflow instance mismatch: this command carries no workflow-instance stamp, ` +
+      `and this command was issued for workflow instance ${STALE}, and the active ` +
+      `canvas reports ${LIVE}. Nothing was applied.`;
+    const ctx = makePanelToolCtx(
+      {
+        send: async (cmd: Record<string, unknown>) => {
+          if (cmd.cmd === "workflow_list") {
+            listCalls += 1;
+            return settled(LIVE);
+          }
+          throw new Error(both);
+        },
+        push: () => 1,
+        canReach: (id: string) => id === TAB,
+        isHeadless: () => false,
+        tabs: () => [{ tab_id: TAB, title: "wf", connected_at: 0 }],
+        resolveActiveTabId: () => TAB,
+        refreshWorkflowUuid: (_t: string, u: string) => {
+          adopted.push(u);
+          return true;
+        },
+        workflowUuidFor: () => fence,
+        tabCanMutateGraph: () => true,
+        tabGraphMutationCapability: () => ({ known: true, canMutate: true }),
+      } as unknown as PanelToolCtx["bridge"],
+      TAB,
+      new WorkflowTargetStore(),
+    );
+    const def = buildPanelToolDefs().find((d) => d.name === "panel_graph_outline");
+    if (!def) throw new Error("panel_graph_outline is not registered");
+    const res: ToolResult = await def.handler({} as never, ctx);
+    const text = res.content.map((c) => (c as { text?: string }).text ?? "").join(" ");
+
+    expect(text).toMatch(/is NOT known from here/);
+    expect(text).not.toMatch(REBIND);
+    expect(text).not.toMatch(CHOOSE);
+    expect(adopted).toEqual([]);
+  });
+
+  it("graph_run refused by the same fence is not called a read", async () => {
+    // isFencedGraphRead is true for graph_run (it is not a canvas edit), but
+    // GRAPH_CMD_EFFECT lists it as targeted. The advice must not say a retry
+    // cannot double-apply a prompt, and the lead must not say no graph data
+    // was read — a run that never queued is "nothing was applied".
+    fence = { known: true, uuid: LIVE };
+    const ctx = makePanelToolCtx(bridge({ issuedFor: null, liveUuid: LIVE }), TAB);
+    const res: ToolResult = await ctx.call({ cmd: "graph_run" });
+    const text = res.content.map((c) => (c as { text?: string }).text ?? "").join(" ");
+
+    expect(res.isError).toBe(true);
+    expect(text).toMatch(/nothing was applied/);
+    expect(text).not.toMatch(/no graph data was read/);
+    expect(text).not.toMatch(/this is a read/);
     expect(adopted).toEqual([]);
   });
 });

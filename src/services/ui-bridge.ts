@@ -4862,10 +4862,11 @@ export class UiBridge {
       // carries no workflow-instance stamp`, which is what #1519 reports.
       //
       // The two halves therefore hold incompatible contracts, both deliberate: this side expects
-      // an unstamped read to run, that side refuses it. Which one gives is an OPEN DESIGN
-      // QUESTION on #1519 — weakening #718, adopting the active workflow automatically (removed
-      // from #1478 for cause: it can bind the session to a DIFFERENT workflow), or refusing here
-      // with a better message all trade different risks. Recorded rather than silently picked.
+      // an unstamped read to run, that side refuses it. #1519's remaining slice is taken in the
+      // orchestrator, not here: an inert graph read refused for a missing stamp has a first
+      // fence minted from the live canvas and is retried once. This dispatch is still unstamped
+      // when this side has no trusted identity — weakening #718, or adopting a WRONG stamp onto
+      // a different workflow (removed from #1478 / #1646 for cause), is still not done here.
       // What is settled is that the old sentence described behaviour that does not happen —
       // and the USER-FACING half of the same claim is fixed: the write refusal above no longer
       // promises that graph reads still work when this side has no stamp to give them (see
