@@ -6,6 +6,7 @@
 // Everything else here is supporting detail.
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { existsSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -472,7 +473,17 @@ function makeDeps(opts: {
 const RUN = { requiredVersion: REQUIRED, orchestratorVersion: ORCH } as const;
 
 describe("performPanelSync", () => {
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => {
+    vi.restoreAllMocks();
+    const lockPath = process.env.COMFYUI_MCP_PANEL_LOCK;
+    if (lockPath && existsSync(lockPath)) {
+      try {
+        unlinkSync(lockPath);
+      } catch {
+        // leftover lock must not fail the next test's setup
+      }
+    }
+  });
 
   it("syncs a behind, unpinned panel and reports the version RE-READ from disk", async () => {
     const h = makeDeps({
@@ -688,6 +699,39 @@ describe("performPanelSync", () => {
     expect(r.synced).toBe(false);
     expect(r.decision).toBe("dev-install");
     expect(h.updates).toBe(0);
+  });
+
+  it("reclaims a provably-abandoned lock and proceeds instead of failing for days (#1828)", async () => {
+    // The reporter's auto-sync sat behind panel-op.lock for 54h: owner pid dead,
+    // lock well past the stale threshold, acquire fast-failed and named
+    // panel_action:'unlock' as the recovery nobody was there to run. Hello
+    // auto-sync IS performPanelSync, so this is the unattended path.
+    const lockPath = process.env.COMFYUI_MCP_PANEL_LOCK!;
+    const deadPid = 0x7ffffffe;
+    const ageMs = 20 * 60_000;
+    writeFileSync(
+      lockPath,
+      JSON.stringify({
+        pid: deadPid,
+        startedAt: new Date(Date.now() - ageMs).toISOString(),
+        token: "abandoned-test",
+      }),
+    );
+    const when = (Date.now() - ageMs) / 1000;
+    utimesSync(lockPath, when, when);
+    expect(existsSync(lockPath)).toBe(true);
+
+    const h = makeDeps({
+      installedVersion: "0.11.3",
+      onUpdate: (files) => {
+        files[join(PANEL_DIR, "pyproject.toml")] = pyproject(REQUIRED);
+      },
+    });
+    const r = await performPanelSync({ deps: h.deps, ...RUN });
+
+    expect(r.synced).toBe(true);
+    expect(h.updates).toBe(1);
+    expect(existsSync(lockPath)).toBe(false);
   });
 });
 

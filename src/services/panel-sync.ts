@@ -34,6 +34,7 @@ import {
   type PanelInstallerDeps,
   type PanelStatus,
 } from "./panel-installer.js";
+import { reclaimAbandonedPanelLock } from "./panel-pin-guard.js";
 import {
   describePanelPin,
   PANEL_PIN_ENV_VAR,
@@ -617,6 +618,14 @@ export async function performPanelSync(
   opts: PerformSyncOptions = {},
 ): Promise<PanelSyncResult> {
   const deps = opts.deps ?? defaultDeps;
+  // #1828 — hello auto-sync is unattended. An abandoned panel-op.lock (dead
+  // owner AND past the stale threshold) used to fail it every session for
+  // days, while the timeout named panel_action:'unlock' as the recovery
+  // nobody was there to run. Reclaim uses that same verified path (owner
+  // re-checked dead + age, rename-aside + byte compare); a live or fresh
+  // lock still refuses and acquire waits/times out as before. Explicit
+  // panel_action:'sync' shares this function, so it unblocks the same way.
+  reclaimAbandonedPanelLock();
   // The status read, the DECISION, and the mutation all run inside the op
   // lock: a decision made outside could go stale before the lock is acquired,
   // and a newer panel installed in that gap would be blindly overwritten by

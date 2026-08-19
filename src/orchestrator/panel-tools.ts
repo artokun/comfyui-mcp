@@ -62,9 +62,10 @@ import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { parse as parseYaml } from "yaml";
 import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { UiBridge } from "../services/ui-bridge.js";
-import { SEMVER_RE } from "../services/ui-bridge.js";
+import type { UiBridge, PanelVersionReading } from "../services/ui-bridge.js";
+import { requiredPanelVersion, SEMVER_RE } from "../services/ui-bridge.js";
 import { compareSemver } from "../services/self-update.js";
+import { describeInstallPanelAction } from "../services/panel-recovery.js";
 import {
   primePanelBase,
   verifiedPanelDiskVersion,
@@ -3188,6 +3189,88 @@ const LORA_MANAGER_AUTOCOMPLETE_NOTE =
 function withLoraManagerAutocompleteNote(res: ToolResult): ToolResult {
   if (!isLoraManagerAutocompleteRefusal(res)) return res;
   return appendToolResultText(res, LORA_MANAGER_AUTOCOMPLETE_NOTE);
+}
+
+/**
+ * Types the CURRENT panel's add-node guard allowlists (comfyui-mcp-panel
+ * `web/js/lib/node-resolve.js` `FRONTEND_ONLY_NODE_TYPES`). An older panel
+ * without that allowlist refuses them as "the ComfyUI backend does not provide
+ * it" and points at unrelated failed-import packs (#1828).
+ *
+ * Kept as a copy of the panel's list rather than the orchestrator's
+ * `FRONTEND_ONLY_NODE_TYPES` (workflow-converter): that set is the runtime
+ * classifier's skip list and deliberately omits third-party names. Adding
+ * rgthree types there would change check_runtime, which is not this bug.
+ */
+const PANEL_ADD_NODE_FRONTEND_ONLY_TYPES: ReadonlySet<string> = new Set([
+  "Note",
+  "MarkdownNote",
+  "Reroute",
+  "PrimitiveNode",
+  "Fast Bypasser (rgthree)",
+  "Fast Muter (rgthree)",
+  "Fast Groups Bypasser (rgthree)",
+  "Fast Groups Muter (rgthree)",
+  "Label (rgthree)",
+  "Reroute (rgthree)",
+  "Node Collector (rgthree)",
+  "SetNode",
+  "GetNode",
+]);
+
+function isUnknownBackendNodeRefusal(res: ToolResult): boolean {
+  if (!res.isError) return false;
+  return /Unknown node type .+ — the ComfyUI backend does not provide it/i.test(
+    textOfToolResult(res),
+  );
+}
+
+function tabAdvertisedPanelVersion(ctx: PanelToolCtx): string | undefined {
+  const fn = ctx.bridge.advertisedPanelVersion;
+  if (typeof fn !== "function") return undefined;
+  let reading: PanelVersionReading;
+  try {
+    reading = fn.call(ctx.bridge, ctx.tabId);
+  } catch {
+    return undefined;
+  }
+  const v = reading?.version;
+  return typeof v === "string" && SEMVER_RE.test(v.trim()) ? v.trim() : undefined;
+}
+
+/**
+ * #1828 — an allowlisted frontend-only type refused as "backend does not
+ * provide it" is version skew when the tab's advertised panel is below this
+ * orchestrator's floor, not a missing pack. Keep the panel's refusal and name
+ * the pack update + hard-refresh; a restart alone leaves cached JS running the
+ * old guard.
+ */
+function withFrontendOnlyPanelSkewNote(
+  res: ToolResult,
+  classType: unknown,
+  ctx: PanelToolCtx,
+): ToolResult {
+  if (typeof classType !== "string") return res;
+  if (!isUnknownBackendNodeRefusal(res)) return res;
+  if (!PANEL_ADD_NODE_FRONTEND_ONLY_TYPES.has(classType)) return res;
+  const advertised = tabAdvertisedPanelVersion(ctx);
+  if (!advertised) return res;
+  const required = requiredPanelVersion();
+  if (compareSemver(advertised, required) >= 0) return res;
+  const update = describeInstallPanelAction(
+    "update",
+    "update the panel pack on the ComfyUI host",
+  );
+  return appendToolResultText(
+    res,
+    `\n\nThis is NOT a missing backend pack. "${classType}" is a frontend-only type ` +
+      `that current panels (${required}+) allowlist, so its absence from /object_info is ` +
+      `expected. This tab announced panel ${advertised}, which is below that floor — ` +
+      `the add-node guard in this tab's JavaScript does not have the allowlist. ` +
+      `${update}, restart ComfyUI, then HARD-REFRESH the ComfyUI browser tab ` +
+      `(Ctrl+Shift+R, or Cmd+Shift+R on macOS). A restart alone leaves the tab running ` +
+      `cached old JS, which is why this error can persist after an update.`,
+  );
 }
 
 function appendToolResultText(res: ToolResult, extra: string): ToolResult {
@@ -10987,7 +11070,13 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             OBJECT_INFO_REFRESH_ACK_TIMEOUT_MS,
           );
         const first = await add();
-        if (!isStaleNodeSchemaRefusal(first)) return withLoraManagerAutocompleteNote(first);
+        if (!isStaleNodeSchemaRefusal(first)) {
+          return withFrontendOnlyPanelSkewNote(
+            withLoraManagerAutocompleteNote(first),
+            args.class_type,
+            ctx,
+          );
+        }
 
         // #1329 — DO THE REFRESH THE REFUSAL ASKS FOR, instead of billing the caller.
         //
@@ -11006,27 +11095,41 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           // The refusal is the better error: it names what is wrong with the SCHEMA and
           // what clears it. Carry the refresh failure alongside so the caller knows the
           // automatic attempt happened and why it did not help.
-          return withLoraManagerAutocompleteNote(
-            appendToolResultText(
-              first,
-              `\n\n(Tried to clear this automatically: panel_refresh_nodes was dispatched and FAILED, ` +
-                `so the schema is unchanged and retrying the add will refuse again. ` +
-                `${textOfToolResult(refreshed)})`,
+          return withFrontendOnlyPanelSkewNote(
+            withLoraManagerAutocompleteNote(
+              appendToolResultText(
+                first,
+                `\n\n(Tried to clear this automatically: panel_refresh_nodes was dispatched and FAILED, ` +
+                  `so the schema is unchanged and retrying the add will refuse again. ` +
+                  `${textOfToolResult(refreshed)})`,
+              ),
             ),
+            args.class_type,
+            ctx,
           );
         }
         const second = await add();
-        if (!isStaleNodeSchemaRefusal(second)) return withLoraManagerAutocompleteNote(second);
+        if (!isStaleNodeSchemaRefusal(second)) {
+          return withFrontendOnlyPanelSkewNote(
+            withLoraManagerAutocompleteNote(second),
+            args.class_type,
+            ctx,
+          );
+        }
         // Still stale after a successful refresh: report THAT, because it means the
         // remedy the refusal prescribes does not fix this instance and a caller
         // following it by hand would loop.
-        return withLoraManagerAutocompleteNote(
-          appendToolResultText(
-            second,
-            `\n\n(This was already retried ONCE automatically: panel_refresh_nodes reported success ` +
-              `and the add still refuses, so repeating panel_refresh_nodes will not clear it. ` +
-              `Reload the ComfyUI browser tab, which rebuilds the page's node registry from scratch.)`,
+        return withFrontendOnlyPanelSkewNote(
+          withLoraManagerAutocompleteNote(
+            appendToolResultText(
+              second,
+              `\n\n(This was already retried ONCE automatically: panel_refresh_nodes reported success ` +
+                `and the add still refuses, so repeating panel_refresh_nodes will not clear it. ` +
+                `Reload the ComfyUI browser tab, which rebuilds the page's node registry from scratch.)`,
+            ),
           ),
+          args.class_type,
+          ctx,
         );
       },
     ),

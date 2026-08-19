@@ -3126,6 +3126,22 @@ export class UiBridge {
   }
 
   /**
+   * The version THIS connection advertised in its own hello (#1828).
+   *
+   * Routed through `connPanelVersionReading` so an inherited reconnect value is
+   * `.inherited` and never `.version` — a caller comparing against
+   * `requiredPanelVersion()` must not treat a stale inherited reading as this
+   * tab's current build. Unroutable tabs and omitted-version hellos yield `{}`.
+   */
+  advertisedPanelVersion(tabId: string): PanelVersionReading {
+    try {
+      return connPanelVersionReading(this.resolveTarget(tabId));
+    } catch {
+      return {};
+    }
+  }
+
+  /**
    * Is the connected panel PROVABLY too old to publish a workflow_uuid on the
    * replies the fence recovery trusts? (#1043)
    *

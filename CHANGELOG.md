@@ -759,13 +759,17 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- Panel auto-sync reclaims a provably-abandoned operation lock instead of failing for days; panel_add_node names version skew (pack update + hard tab refresh) when an allowlisted frontend-only type is refused as a missing backend node (#1828)
+
 ## [0.52.18] - 2026-08-19
 
 ### MCP
 
 #### Added
 - panel_unexpose_subgraph_input/output — remove a subgraph boundary slot by name (#1812)
-
 
 ## [0.52.17] - 2026-08-19
 
