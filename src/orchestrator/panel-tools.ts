@@ -12339,7 +12339,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           // Hold the send() wait BEFORE the first await so a same-batch sibling
           // that already hit the null pin waits instead of minting #884.
           if (recoveringScope) ctx.bridge.beginScopeRecovery?.(before);
-          const tryRebind = (): ToolResult | undefined => {
+          const tryRebind = (deferIfNoTabs: boolean): ToolResult | undefined => {
             try {
               // mode:"current" is THE explicit scope-recovery consent (#884 gate 3)
               // — the only caller that may escape a DEAD scope pin (a healthy pin
@@ -12379,6 +12379,9 @@ export function buildPanelToolDefs(): PanelToolDef[] {
                   !/multiple|last active|pass tab_id/i.test(msg);
               }
               if (!noTabsConnected) return fail(ambiguousRebindGuidance(ctx, err));
+              // The first pass is BEFORE awaitReachable. Deferring here skipped the
+              // wait, so a tab that reconnects mid-call (#474) was never adopted.
+              if (!deferIfNoTabs) return undefined;
               deferredBind = true;
               rebindNote =
                 " No panel tab is connected yet — cleared the stale binding; this session will " +
@@ -12391,19 +12394,19 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           try {
             // panel#1292 hole 1 — recover the turn pin SYNCHRONOUSLY, before
             // awaitReachable yields to same-batch siblings.
-            const failed = tryRebind();
+            const failed = tryRebind(false);
             if (failed) return failed;
             // Give an in-flight reconnect (a ComfyUI restart / panel reload still
             // settling) a brief chance to bind immediately, since this IS the recovery
             // signal the agent reaches for in exactly that window (#474). awaitReachable
             // rebinds via ensureReachable when a tab is (re)connected.
-            if (!deferredBind && ctx.awaitReachable) await ctx.awaitReachable();
+            if (ctx.awaitReachable) await ctx.awaitReachable();
             // A first attempt that found no canvas (or a dead pin that is still
             // dead after the wait) gets one more recovery now that a tab may exist.
             const pinStillDead =
               typeof ctx.bridge.canReach === "function" && !ctx.bridge.canReach(ctx.tabId);
-            if (!deferredBind && !currentModeTurnRepinned && pinStillDead) {
-              const failed2 = tryRebind();
+            if (!currentModeTurnRepinned && pinStillDead) {
+              const failed2 = tryRebind(true);
               if (failed2) return failed2;
             }
           } finally {
