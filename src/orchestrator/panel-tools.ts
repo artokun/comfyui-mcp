@@ -2047,6 +2047,46 @@ function captureRebootHealthBase(ctx: PanelToolCtx): string | null {
   return loopbackProbeUrl(base);
 }
 
+/**
+ * #1671 — the configured LOCAL boot instance, when that is a known loopback
+ * process this orchestrator can account for without a live panel tab.
+ *
+ * `captureRebootHealthBase` requires a live tab handshake. After a crash that
+ * takes the panel bridge offline that proof is gone — the tab is the component
+ * that disappeared. The configured boot URL is still known, and it is the same
+ * target `restart_comfyui` would act on. Returning it is NOT a claim that the
+ * vanished tab fronted this instance; callers must still refuse a proven
+ * mismatch (see offlineRestartHealthBase).
+ */
+function configuredBootRestartBase(): string | null {
+  if (isCloudMode() || isRemoteMode()) return null;
+  const bootBase = getBootLocalComfyUIBaseUrl();
+  if (!bootBase || !isLoopbackOrigin(bootBase)) return null;
+  const base = bootBase.replace(/\/+$/, "");
+  if (!sameHttpBase(getComfyUIBaseUrl(), base)) return null;
+  return loopbackProbeUrl(base);
+}
+
+/**
+ * #1671 — which base, if any, a panel-offline crash recovery may restart.
+ *
+ * Prefer a still-provable tab binding. If the tab is gone, fall back to the
+ * configured boot instance UNLESS the last-known handshake Origin proves the
+ * panel was on a DIFFERENT server (#851/#1593: never restart the wrong one).
+ */
+function offlineRestartHealthBase(ctx: PanelToolCtx): string | null {
+  const bound = captureRebootHealthBase(ctx);
+  if (bound != null && sameHttpBase(getComfyUIBaseUrl(), bound)) return bound;
+  const observed = ctx.bridge?.tabServerOrigin?.(ctx.tabId) ?? null;
+  const verdict = classifyRestartFallbackTarget({
+    headlessBase: getComfyUIBaseUrl(),
+    panelBase: bound,
+    observedOrigin: observed,
+  });
+  if (verdict.kind === "different") return null;
+  return configuredBootRestartBase();
+}
+
 let healthProbeOverride:
   | ((base: string | null, timeoutMs: number) => Promise<boolean | ProbeStatus>)
   | null = null;
@@ -13269,7 +13309,7 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
     ),
     def(
       "panel_restart_comfyui",
-      "Restart the user's ComfyUI server via the built-in Manager — needed to load newly installed/updated custom nodes. CALL THIS DIRECTLY when a restart is needed: it pops a confirm card and only restarts on a yes (don't ask separately first). ComfyUI and this agent go down briefly, then the panel auto-reconnects and you resume. ⚠️ BUSY GUARD: a restart ABORTS any in-progress or queued generation — if ComfyUI is generating, this tool REFUSES and tells you (it does NOT restart). When that happens, tell the user a render is running and WAIT for it (poll panel_node_queue_status), or pass force:true ONLY if the user explicitly confirms they want to kill the running generation. Best practice: before restarting after an install, check the queue is idle first. Only call when a restart is actually needed. On an externally-managed install whose relaunch can't be proven from here (e.g. Pinokio), the restart is REFUSED before anything is stopped — restart from the launcher that owns the server instead, or set COMFYUI_RESTART_COMMAND to the exact command that restarts the instance (e.g. `docker restart <container>`): the restart then runs through that command (the busy guard above still applies) instead of needing the launch path.",
+      "Restart the user's ComfyUI server via the built-in Manager — needed to load newly installed/updated custom nodes. CALL THIS DIRECTLY when a restart is needed: it pops a confirm card and only restarts on a yes (don't ask separately first). ComfyUI and this agent go down briefly, then the panel auto-reconnects and you resume. ⚠️ BUSY GUARD: a restart ABORTS any in-progress or queued generation — if ComfyUI is generating, this tool REFUSES and tells you (it does NOT restart). When that happens, tell the user a render is running and WAIT for it (poll panel_node_queue_status), or pass force:true ONLY if the user explicitly confirms they want to kill the running generation. Best practice: before restarting after an install, check the queue is idle first. Only call when a restart is actually needed. If a crash takes the panel bridge offline so the confirmation card cannot be shown, this tool falls back to a headless restart of the configured local process (or COMFYUI_RESTART_COMMAND) instead of depending on the dead bridge — it still refuses a readable busy queue without force:true, and still refuses when a relaunch cannot be proven. On an externally-managed install whose relaunch can't be proven from here (e.g. Pinokio), the restart is REFUSED before anything is stopped — restart from the launcher that owns the server instead, or set COMFYUI_RESTART_COMMAND to the exact command that restarts the instance (e.g. `docker restart <container>`): the restart then runs through that command (the busy guard above still applies) instead of needing the launch path.",
       { force: z.boolean().optional() },
       async ({ force }, ctx) => {
         // Whole-handler budget (#536): confirm + dispatch + readiness — INCLUDING
@@ -13335,6 +13375,12 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
               `and I'll re-ask. ${fallback}`,
           );
         }
+        // #1671 — set when the confirmation card was UNREACHABLE and ComfyUI is
+        // not healthy: the crash took the panel bridge offline, so recovery
+        // must not depend on asking that bridge. The headless path below runs
+        // instead. An explicit decline, a still-healthy server, and remote/
+        // cloud keep the existing reports (confirmation + busy-queue stay).
+        let recoverWithoutPanel = false;
         if (decision !== "yes") {
           // #742: NEVER claim "not restarted" while the server is actually DOWN —
           // and NEVER declare a loss from ONE probe (codex gate): a genuinely
@@ -13403,7 +13449,20 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
               clearSessionRestartDispatchIfSame(ctx, declineHeldToken);
             }
           }
-          if (outcome.status === "down") {
+          // #1671: the recovery command must not depend on the component a crash
+          // takes offline. UNREACHABLE + not-healthy (down, or ambiguous — the
+          // reporter's empty-body HTTP 502) on a LOCAL target falls through to
+          // the headless restart. An explicit decline still reports and does
+          // NOT restart (confirmation). A still-healthy server still does not
+          // auto-restart (#1332). Remote/cloud have no local process to cycle.
+          const crashTookBridgeOffline =
+            decision === "unreachable" &&
+            (outcome.status === "down" || outcome.status === "ambiguous") &&
+            !isRemoteMode() &&
+            !isCloudMode();
+          if (crashTookBridgeOffline) {
+            recoverWithoutPanel = true;
+          } else if (outcome.status === "down") {
             const secs = Math.max(1, Math.round(outcome.waited_ms / 1000));
             if (boundToRestartTarget) {
               // r4: causation may be named ONLY against a RECORDED restart
@@ -13451,7 +13510,11 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
                 "manually if it is down, then reload the panel tab so it reconnects.",
             );
           }
-          if (outcome.status === "recovered" && boundToRestartTarget) {
+          if (recoverWithoutPanel) {
+            // Fall through to the headless path once runHeadlessManagedRestart
+            // is defined. Do not claim the server is reachable, and do not ask
+            // the dead panel to reboot it.
+          } else if (outcome.status === "recovered" && boundToRestartTarget) {
             // r14: the recovery CLAIM ("a restart initiated earlier appears to
             // have completed") passes the SAME causation gate as the DOWN
             // report — a session-held, bound-confirmed record, recent, and
@@ -13472,29 +13535,40 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
                 : "Cancelled — no new restart was dispatched. ComfyUI was briefly " +
                     "unreachable but is healthy again.",
             );
+          } else {
+            // #1332 — the reporter's exact string, and it was FALSE. They accepted the
+            // restart, ComfyUI restarted (a fresh startup in the server log), and this
+            // said it had not — because the restart dropped the socket the answer had to
+            // travel back on, and a transport failure used to arrive here as "no".
+            //
+            // The probes above already refuse to claim "not restarted" while the server
+            // is DOWN. This is the remaining case: the server is HEALTHY, which is
+            // equally true of "nothing happened" and of "it restarted and came back".
+            // With an explicit decline we know which; without one we do not, and the
+            // sentence must stop asserting it.
+            const fallback =
+              decision === "unreachable"
+                ? " " +
+                  restartTimeoutFallbackAdvice({
+                    headlessBase: getComfyUIBaseUrl(),
+                    panelBase: declineBootBase,
+                    observedOrigin: ctx.bridge?.tabServerOrigin?.(ctx.tabId) ?? null,
+                  })
+                : "";
+            return ok(
+              decision === "unreachable"
+                ? "This call did NOT dispatch a restart. Whether ComfyUI restarted for some " +
+                    "other reason cannot be told from here: the panel could not be reached to " +
+                    "ask for confirmation — the question never appeared — so no decision was " +
+                    "made either way, and the server is reachable now, which looks the same " +
+                    "whether it never went down or went down and came back. If you asked for a " +
+                    "restart and one has already happened, this is that transport loss, not a " +
+                    "cancellation. Check the ComfyUI log for a fresh startup line before " +
+                    "restarting again." +
+                    fallback
+                : "Cancelled — ComfyUI was not restarted.",
+            );
           }
-          // #1332 — the reporter's exact string, and it was FALSE. They accepted the
-          // restart, ComfyUI restarted (a fresh startup in the server log), and this
-          // said it had not — because the restart dropped the socket the answer had to
-          // travel back on, and a transport failure used to arrive here as "no".
-          //
-          // The probes above already refuse to claim "not restarted" while the server
-          // is DOWN. This is the remaining case: the server is HEALTHY, which is
-          // equally true of "nothing happened" and of "it restarted and came back".
-          // With an explicit decline we know which; without one we do not, and the
-          // sentence must stop asserting it.
-          return ok(
-            decision === "unreachable"
-              ? "This call did NOT dispatch a restart. Whether ComfyUI restarted for some " +
-                  "other reason cannot be told from here: the panel could not be reached to " +
-                  "ask for confirmation — the question never appeared — so no decision was " +
-                  "made either way, and the server is reachable now, which looks the same " +
-                  "whether it never went down or went down and came back. If you asked for a " +
-                  "restart and one has already happened, this is that transport loss, not a " +
-                  "cancellation. Check the ComfyUI log for a fresh startup line before " +
-                  "restarting again."
-              : "Cancelled — ComfyUI was not restarted.",
-          );
         }
         // Heal an orphaned session onto the live tab FIRST, then bind the reboot dispatch
         // to that ONE tab id (no await between capture and dispatch, so JS run-to-
@@ -13505,11 +13579,12 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         // Run the HEADLESS managed restart (restartComfyUI) from inside this tool and
         // report its outcome against OUR OWN independent boot-endpoint observation
         // (never restartComfyUI's self-reported readiness, which a first-healthy
-        // no-op would flunk). Shared by two call sites that must not dispatch the tab
-        // reboot: the legacy no-endpoint fallback below (#425), and a configured
-        // COMFYUI_RESTART_COMMAND (panel#1262). Both require a BOUND-CONFIRMED local
-        // target: restartComfyUI acts on the orchestrator's GLOBAL config target, so
-        // it may run only when the bound tab provably fronts our own boot instance.
+        // no-op would flunk). Shared by three call sites that must not dispatch the
+        // tab reboot: the legacy no-endpoint fallback below (#425), a configured
+        // COMFYUI_RESTART_COMMAND (panel#1262), and #1671 crash recovery when the
+        // panel bridge is already gone. restartComfyUI acts on the orchestrator's
+        // GLOBAL config target, so the first two require a BOUND-CONFIRMED local
+        // tab; #1671 may also use the configured boot instance when the tab is gone.
         const runHeadlessManagedRestart = async (args: {
           healthBase: string;
           preRestartPanelIdentity: { generation: number; tabSessionId: string } | undefined;
@@ -13686,6 +13761,119 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
                     : `but it did NOT become healthy within ${Math.round(recovery.waited_ms / 1000)}s — verify with get_system_stats (action:"health") / panel_node_queue_status before assuming it restarted.`),
           });
         };
+        // #1671: panel-offline crash recovery. The confirmation card could not
+        // be shown because the bridge is gone, and ComfyUI is not healthy
+        // (down, or an empty-body 502). Restart the configured local process
+        // through the same headless path the Manager-missing and
+        // COMFYUI_RESTART_COMMAND cases already use. Do NOT send comfy_reboot
+        // — that is the dead bridge. A readable busy queue still refuses
+        // without force:true; an unreadable queue on an already-unhealthy
+        // server is the crash, not "idle", and is not a reason to refuse.
+        // A proven-different panel origin, or a process we cannot relaunch,
+        // fails with the true cause instead of claiming success.
+        if (recoverWithoutPanel) {
+          const healthBase = offlineRestartHealthBase(ctx);
+          if (healthBase == null || !sameHttpBase(getComfyUIBaseUrl(), healthBase)) {
+            return ok({
+              rebooting: false,
+              ready: false,
+              confirmed_cycle: false,
+              refused: true,
+              note:
+                "This call did NOT dispatch a restart. The panel could not be reached to " +
+                "ask for confirmation (the crash took the panel bridge offline) and I " +
+                "cannot identify a local ComfyUI process I can account for, so I will " +
+                "not stop a server I cannot prove I can bring back. Nothing was " +
+                "stopped. " +
+                restartRefusalHandoffAdvice({
+                  headlessBase: getComfyUIBaseUrl(),
+                  panelBase: captureRebootHealthBase(ctx),
+                  observedOrigin: ctx.bridge?.tabServerOrigin?.(ctx.tabId) ?? null,
+                }),
+            });
+          }
+          if (force !== true) {
+            let busyCount: number | null = null;
+            try {
+              const queue = await getQueueVerified();
+              busyCount = queue.queue_running.length + queue.queue_pending.length;
+            } catch {
+              // Unreadable queue + already-unhealthy server is the crash itself.
+              // Unlike the configured-command YES path, "cannot check" is not a
+              // reason to refuse: the generation that might have been running
+              // is the one that took the bridge down.
+              busyCount = null;
+            }
+            if (busyCount != null && busyCount !== 0) {
+              return ok({
+                rebooting: false,
+                ready: false,
+                confirmed_cycle: false,
+                refused: true,
+                note:
+                  `Refusing to restart ComfyUI: ${busyCount} generation(s) are in progress ` +
+                  "or queued, and a restart ABORTS them. The panel could not be reached " +
+                  "to ask, so nothing was stopped. Wait for the queue to drain, or retry " +
+                  "with force:true ONLY if the user explicitly confirms they want to kill " +
+                  "the running generation.",
+              });
+            }
+          }
+          const configuredCmd = config.comfyuiRestartCommand;
+          if (!configuredCmd) {
+            const preflight = await (localRestartPreflightOverride ?? preflightLocalRestart)();
+            if (!preflight.ok) {
+              return ok({
+                rebooting: false,
+                ready: false,
+                confirmed_cycle: false,
+                refused: true,
+                note:
+                  "The panel could not be reached to ask for confirmation (the crash " +
+                  "took the panel bridge offline). Refusing to restart ComfyUI: " +
+                  `${preflight.reason} A restart from here would STOP ComfyUI and ` +
+                  "nothing would bring it back automatically, so it was refused " +
+                  "BEFORE anything was stopped. Restart it from whatever launches it, " +
+                  "or set COMFYUI_RESTART_COMMAND to the exact command that restarts " +
+                  "the instance.",
+              });
+            }
+          }
+          const postHealthBase = offlineRestartHealthBase(ctx);
+          if (postHealthBase == null || !sameHttpBase(healthBase, postHealthBase)) {
+            return ok({
+              rebooting: false,
+              ready: false,
+              confirmed_cycle: false,
+              refused: true,
+              note:
+                "Refusing to restart ComfyUI: the ComfyUI target changed while the " +
+                "offline recovery was being prepared, so I can no longer confirm the " +
+                "headless restart would act on the instance this session accounts for. " +
+                "Nothing was stopped.",
+            });
+          }
+          return runHeadlessManagedRestart({
+            healthBase,
+            preRestartPanelIdentity: ctx.panelConnectionIdentity?.(),
+            why:
+              "The panel could not be reached to ask for confirmation (the crash took " +
+              "the panel bridge offline)",
+            mechanism: configuredCmd
+              ? "the configured restart command"
+              : "the headless managed restart (kill + relaunch)",
+            noteHealthyLead: configuredCmd
+              ? "The panel bridge was offline after the crash, so the restart ran " +
+                "through COMFYUI_RESTART_COMMAND; ComfyUI"
+              : "The panel bridge was offline after the crash, so the restart ran " +
+                "through the headless managed restart; ComfyUI",
+            noteRanLead: configuredCmd
+              ? "The panel bridge was offline after the crash, so the restart ran " +
+                "through COMFYUI_RESTART_COMMAND (not a panel confirmation card)"
+              : "The panel bridge was offline after the crash, so the restart ran " +
+                "through the headless managed restart (not a panel confirmation card)",
+          });
+        }
         // panel#1262: A CONFIGURED RESTART COMMAND REPLACES THE TAB REBOOT.
         //
         // On an externally-managed local install (a container, a systemd unit, a
