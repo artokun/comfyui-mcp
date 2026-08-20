@@ -19,6 +19,7 @@ import {
   rmSync,
   appendFileSync,
 } from "node:fs";
+import { stripBlindCompletion } from "./blind-completion.js";
 import { execFileSync } from "node:child_process";
 import { tmpdir, homedir, networkInterfaces } from "node:os";
 import { dirname, join } from "node:path";
@@ -1975,6 +1976,18 @@ export async function runPanelOrchestrator(): Promise<void> {
     }
     return blind;
   };
+
+  /**
+   * Blind, applied to a run completion — the SAME implementation at every door.
+   *
+   * #1861: the panel's `executed` frame arrives at the ingress below; the #1789 watchdog
+   * SYNTHESISES one when that frame never comes, and that door recorded the raw payload.
+   * Inert while its `images` was always empty, live once #1853 filled it from /history.
+   * The logic lives in blind-completion.ts so a new arrival point cannot get a
+   * near-copy that drifts, and so it is testable without the orchestrator.
+   */
+  const blindStrippedCompletion = <T extends { images?: unknown; note?: unknown }>(ev: T): T =>
+    stripBlindCompletion(ev, anyTabBlind());
 
   // ---- live ENVIRONMENT-CAPABILITIES block ----
   // Gather the machine's facts ONCE at startup (CACHED) — OS/CPU/RAM from node,
@@ -5242,23 +5255,7 @@ export async function runPanelOrchestrator(): Promise<void> {
       // stores the stripped copy. Only the SILENCE is fixed, by appending the
       // disclosure to the note the composer already renders verbatim, which also
       // overrides a sighted "review this" instruction that must not be obeyed.
-      const blindWithheldCount = anyTabBlind() && Array.isArray(ev.images) ? ev.images.length : 0;
-      const evForTab = anyTabBlind()
-        ? {
-            ...ev,
-            images: [],
-            ...(blindWithheldCount > 0
-              ? {
-                  note:
-                    `${typeof ev.note === "string" && ev.note.trim() ? `${ev.note.trim()} ` : ""}` +
-                    `⚠️ Blind mode is ON: ${blindWithheldCount} image(s) from this run were withheld ` +
-                    `from you and are NOT attached — they ARE shown to the user in the panel. Do NOT ` +
-                    `comment on motion, sharpness, composition or any other visual quality, and do not ` +
-                    `claim you reviewed them; ask the user to describe what they see, or to turn Blind off.`,
-                }
-              : {}),
-          }
-        : ev;
+      const evForTab = blindStrippedCompletion(ev);
       // #468 — a RUN COMPLETION is a promise `panel_run` made ("end your turn,
       // you WILL be notified"), so it goes through the journal: correlated by
       // exact prompt id ONCE, here, and replayed until the turn that carries it
@@ -6378,7 +6375,8 @@ export async function runPanelOrchestrator(): Promise<void> {
       // The SAME arrival path the panel's frame takes: correlated once, here,
       // against the ticket that is still open — so the agent is told this is the
       // run IT queued, and the journal's replay/ack durability covers it too.
-      const entry = RunCompletions.record(ticket.tabId, payload, {
+      // #1861 — the SAME strip the panel ingress applies. Blind is conversation-wide.
+      const entry = RunCompletions.record(ticket.tabId, blindStrippedCompletion(payload), {
         ...(ticket.conversation !== undefined ? { conversation: ticket.conversation } : {}),
       });
       logger.info(

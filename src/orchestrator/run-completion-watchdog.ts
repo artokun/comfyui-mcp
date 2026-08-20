@@ -118,6 +118,33 @@ export interface RunCompletionWatchdog {
   armedCount(): number;
 }
 
+/**
+ * Extensions the completion `images` array may carry.
+ *
+ * #1861 — an ALLOWLIST, not a video denylist. The only consumer of `images` attaches
+ * them inline with the media type forced to `image/png` ("ComfyUI outputs are PNG by
+ * default"), so anything that is not actually an image is sent to the model as PNG bytes
+ * that are not PNG. A SaveVideo `.mp4` from /history took that path: the panel never
+ * produced this shape — its video ref is an uploaded `storyboard_<base>.png` or
+ * note-only — which is why the coercion was safe until the watchdog began reading
+ * /history directly. An unknown extension therefore fails CLOSED: named in the note,
+ * never attached.
+ */
+const ATTACHABLE_IMAGE_EXT_RE = /\.(?:png|jpe?g|webp|gif|bmp)$/i;
+
+/** Split media refs into what may be attached inline and what may only be named. */
+export function partitionAttachableMedia(refs: CompletionImage[]): {
+  images: CompletionImage[];
+  other: CompletionImage[];
+} {
+  const images: CompletionImage[] = [];
+  const other: CompletionImage[] = [];
+  for (const ref of refs) {
+    (ATTACHABLE_IMAGE_EXT_RE.test(ref.filename) ? images : other).push(ref);
+  }
+  return { images, other };
+}
+
 function usableHistoryImages(images: CompletionPayload["images"]): CompletionImage[] {
   if (!Array.isArray(images)) return [];
   const out: CompletionImage[] = [];
@@ -211,21 +238,28 @@ export function synthesizeCompletionPayload(
   opts: { deliveredAt: number; images?: CompletionPayload["images"] },
 ): CompletionPayload {
   const waitedS = Math.max(0, Math.round((opts.deliveredAt - armed.observedAt) / 1000));
-  const images = usableHistoryImages(opts.images);
+  const { images, other: otherMedia } = partitionAttachableMedia(usableHistoryImages(opts.images));
   const outcome =
     armed.status === "success"
       ? "finished SUCCESSFULLY"
       : armed.status === "interrupted"
         ? "was INTERRUPTED (cancelled before it finished)"
         : "FAILED";
-  const names = images
-    .map((img) => (img.subfolder ? `${img.subfolder}/${img.filename}` : img.filename))
-    .join(", ");
+  const refName = (m: CompletionImage) => (m.subfolder ? `${m.subfolder}/${m.filename}` : m.filename);
+  const names = images.map(refName).join(", ");
+  // Named, never attached — the agent still learns the render produced them.
+  const otherNote =
+    otherMedia.length > 0
+      ? ` NOT attached (not an inline-attachable image): ${otherMedia.map(refName).join(", ")}.`
+      : "";
   const next =
     armed.status === "success"
       ? images.length > 0
-        ? `The output file(s) from ComfyUI history are attached: ${names}.`
-        : `The output file(s) are NOT attached to this notice — the orchestrator read the run's terminal ` +
+        ? `The output file(s) from ComfyUI history are attached: ${names}.${otherNote}`
+        : otherMedia.length > 0
+          ? `The output(s) are NOT attached — this run produced media that cannot be sent inline.${otherNote} ` +
+            `Fetch with get_image (action:"list_outputs") or get_history for this prompt id.`
+          : `The output file(s) are NOT attached to this notice — the orchestrator read the run's terminal ` +
           `status, not its images. Fetch them with get_image (action:"list_outputs") ` +
           `or get_history for this prompt id before describing or using the result.`
       : armed.status === "interrupted"

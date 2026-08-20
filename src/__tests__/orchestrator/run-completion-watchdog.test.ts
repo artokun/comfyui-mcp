@@ -281,11 +281,14 @@ describe("#1789: the synthesised note claims only what was observed", () => {
       { promptId: PID, status: "success", observedAt: 1000 },
       { deliveredAt: 1000 + 46_000, images: refs },
     );
-    expect(payload.images).toEqual(refs);
-    expect(payload.images.some((img) => img.filename === VIDEO_FILENAME)).toBe(true);
+    // #1861 — the refs still ride, but a VIDEO is NAMED, never attached. `images` is
+    // consumed by attaching inline with the media type forced to image/png, so an .mp4
+    // in it becomes ftyp bytes sent as a PNG. This test previously asserted exactly that.
+    expect(payload.images.some((img) => img.filename === VIDEO_FILENAME)).toBe(false);
     expect(String(payload.note)).toContain(VIDEO_FILENAME);
-    expect(String(payload.note)).not.toContain("NOT attached");
-    expect(String(payload.note)).not.toContain('get_image (action:"list_outputs")');
+    expect(String(payload.note)).toContain("NOT attached (not an inline-attachable image)");
+    // The agent still learns the run produced output and how to get it.
+    expect(String(payload.note)).toContain("get_image");
   });
 
   it("empty or malformed image refs are dropped, never forwarded as outputs", () => {
@@ -296,18 +299,20 @@ describe("#1789: the synthesised note claims only what was observed", () => {
         images: [
           { filename: "" },
           { filename: "   " },
-          { filename: VIDEO_FILENAME, subfolder: VIDEO_SUBFOLDER, type: "output" },
-          { filename: VIDEO_FILENAME, subfolder: VIDEO_SUBFOLDER, type: "output" },
+          // An IMAGE here: this test is about blanks and dedup, and a video fixture would
+          // now be filtered for an unrelated reason and prove nothing about either.
+          { filename: "render_00001_.png", subfolder: "out", type: "output" },
+          { filename: "render_00001_.png", subfolder: "out", type: "output" },
         ],
       },
     );
     expect(payload.images).toHaveLength(1);
-    expect(payload.images[0].filename).toBe(VIDEO_FILENAME);
+    expect(payload.images[0].filename).toBe("render_00001_.png");
   });
 });
 
 describe("#1853: a dropped panel frame still yields the completed prompt's history outputs", () => {
-  it("the synthesised completion attaches SaveVideo outputs resolved from /history", async () => {
+  it("the synthesised completion NAMES SaveVideo outputs from /history, and never attaches them", async () => {
     const clock = { t: 9_000_000 };
     const entry = saveVideoHistoryEntry(PID);
     const { wd, delivered } = makeWatchdog(clock, {
@@ -323,17 +328,19 @@ describe("#1853: a dropped panel frame still yields the completed prompt's histo
     expect(delivered).toHaveLength(1);
     const payload = delivered[0].payload;
     expect(payload.prompt_id).toBe(PID);
-    expect(payload.images.some((img) => img.filename === VIDEO_FILENAME)).toBe(true);
-    expect(payload.images.some((img) => img.subfolder === VIDEO_SUBFOLDER)).toBe(true);
+    // #1861 — a video must never reach `images`: its only consumer attaches inline with
+    // the type forced to image/png.
+    expect(payload.images.some((img) => img.filename === VIDEO_FILENAME)).toBe(false);
     expect(String(payload.note)).toContain(VIDEO_FILENAME);
-    expect(String(payload.note)).not.toContain("NOT attached");
+    expect(String(payload.note)).toContain("NOT attached (not an inline-attachable image)");
 
     const seen: CompletionPayload[] = [];
     RunCompletions.deliverPending(TAB, (p) => {
       seen.push(p);
       return true;
     });
-    expect(seen[0].images.some((img) => img.filename === VIDEO_FILENAME)).toBe(true);
+    expect(seen[0].images.some((img) => img.filename === VIDEO_FILENAME)).toBe(false);
+    expect(String(seen[0].note)).toContain(VIDEO_FILENAME);
   });
 
   it("history with no media stays status-only — nothing is invented", async () => {
