@@ -759,6 +759,15 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.26] - 2026-08-20
+
+### MCP
+
+#### Fixed
+- a Blind conversation no longer receives run-completion pixels through the synthesised (watchdog) door — the strip now applies wherever a completion enters, and video refs are named rather than attached as `image/png` (#1863)
+- `panel_add_node`'s automatic refresh no longer reports a reply TIMEOUT as a failed refresh: a refresh that outruns its ack keeps running, so the reply now says the schema may already be current and to retry, instead of telling the caller a retry will refuse again (#1864)
+- `panel_load_workflow` loads a saved workflow after a confirmed restart instead of failing with ECONNREFUSED (#1850)
+
 ## [0.52.25] - 2026-08-20
 
 ### MCP
