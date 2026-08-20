@@ -380,7 +380,11 @@ describe("panel#1529 — a pin may not claim a graph target it did not establish
     const outline = await tool("panel_graph_outline").handler({}, ctx);
     expect(outline.isError).toBeFalsy();
     expect(textOf(outline)).toContain("Wan2VideoEditApi");
-    expect(page.seen.filter((f) => f.cmd === "graph_outline")[0]?.workflow_path).toBeUndefined();
+    // Assert the frame EXISTS before asserting what it lacks — `[0]?.workflow_path`
+    // on an empty array is undefined too, and would pass this vacuously.
+    const outlineFrames = page.seen.filter((f) => f.cmd === "graph_outline");
+    expect(outlineFrames).toHaveLength(1);
+    expect(outlineFrames[0].workflow_path).toBeUndefined();
   });
 
   it("does NOT claim the graph target for a pin it could not verify", async () => {
