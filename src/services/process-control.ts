@@ -192,8 +192,18 @@ interface ProcessInfo {
    * identify a supervisor, but every launch component resolved on disk.
    * spawnFromProcessInfo must not spawn the Desktop exe (#400); the python
    * command is what Desktop itself uses to start the backend.
+   *
+   * Spawn is still gated on this parent being GONE after Manager stops: a live
+   * parent we failed to identify is almost always the Electron shell, and a
+   * free port is what a supervised cold start looks like.
    */
   selfRelaunch?: boolean;
+  /**
+   * The first-hop parent PID captured while the backend was still up (#1847).
+   * After Manager stops, this number is the evidence that distinguishes
+   * "gone for good" (spawn) from "coming back" (do not spawn).
+   */
+  selfRelaunchParentPid?: number;
 }
 
 /**
@@ -2294,8 +2304,11 @@ function assessDesktopSupervision(info: ProcessInfo): {
   /**
    * #1847: proceed by spawning the proven python command after Manager stops
    * the old server, rather than by inferring a live Desktop supervisor.
+   * Spawn still requires that parent to be gone — see `selfRelaunchParentPid`.
    */
   selfRelaunch?: boolean;
+  /** Captured while the backend is up, so the post-stop spawn can re-check it. */
+  selfRelaunchParentPid?: number;
   supervision: SupervisorRelaunch;
 } {
   const cannotAssess = (because: string): {
@@ -2390,7 +2403,9 @@ function assessDesktopSupervision(info: ProcessInfo): {
   // the FIRST hop. #1647 must not fire here: inferring Desktop from argv would
   // be a guess about a live process we failed to identify. If every launch
   // component is proven on disk, we can stop via Manager and spawn that exact
-  // command ourselves. Any missing file keeps the refusal.
+  // command ourselves — but only once this parent is proven gone. A free port
+  // cannot tell "gone for good" from a supervised cold start still importing.
+  // Any missing file keeps the refusal.
   if (parentIdentityUnreadableAt === info.pid) {
     const proven = proveDesktopSelfRelaunch(info);
     if (proven.ok) {
@@ -2398,12 +2413,16 @@ function assessDesktopSupervision(info: ProcessInfo): {
         ok: true,
         supervision: verdict,
         selfRelaunch: true,
+        selfRelaunchParentPid: readParentPid(info.pid),
         note:
           `NOTE: Desktop supervision was not proven — ${because ?? `PID ${info.pid}'s parent exists but what it is running could not be read`}. ` +
           `The restart proceeds because the launch command is proven on disk ` +
           `(interpreter, main.py, sys.argv, instance-model-paths config). After Manager ` +
-          `stops the old server, that exact command is what brings it back. If those ` +
-          `files have moved since this check, start ComfyUI from the Desktop app.`,
+          `stops the old server, that command is spawned only if that parent process is ` +
+          `gone and the port is free. A live parent may already be bringing the backend ` +
+          `back, and this call will not start a second one. Occupied or unreadable ports ` +
+          `are left alone. If those files have moved since this check, start ComfyUI from ` +
+          `the Desktop app.`,
       };
     }
     return {
@@ -3971,8 +3990,9 @@ async function restartViaManagerReboot(context: {
   supervisionNote?: string;
   /**
    * #1847: after Manager stops the old server, spawn the proven python command
-   * if nothing is listening. The ProcessInfo (with `selfRelaunch`) must already
-   * be in `lastProcessInfo` so startComfyUI can rebuild that command.
+   * only if that parent is proven gone and the port is free. The ProcessInfo
+   * (with `selfRelaunch` / `selfRelaunchParentPid`) must already be in
+   * `lastProcessInfo` so startComfyUI can rebuild that command.
    */
   selfRelaunch?: boolean;
 }): Promise<RestartResult> {
@@ -4146,50 +4166,65 @@ async function restartViaManagerRebootDispatch(
 
   if (!readiness.ready) {
     const waitedS = seconds(readiness.waited_ms);
-    // #1847: Manager stopped (or we could not confirm a return). If the port is
-    // FREE, spawn the proven python command. Occupied or unreadable: do not
-    // guess — the original unconfirmed report stands.
+    // #1847: Manager stopped (or we could not confirm a return). A free port
+    // cannot tell "gone for good" from "coming back" — a live parent we failed
+    // to identify is almost always the Electron shell, and a backend still
+    // importing presents as exactly `free`. Spawn only when that parent is
+    // PROVEN GONE and the port is free. Occupied, unreadable, or a still-live
+    // parent: do not guess — the original unconfirmed report stands.
+    let selfRelaunchHoldback = "";
     if (context.selfRelaunch && lastProcessInfo?.selfRelaunch) {
-      const port = lastProcessInfo.port;
-      const probe = probePortOwner(port);
-      if (probe.state === "free") {
-        const spawned = await startComfyUI({
-          port,
-          probeUrl: `${anchoredBase}/system_stats`,
-        });
-        const note = context.supervisionNote ? ` ${context.supervisionNote}` : "";
-        if (spawned.ready) {
+      const parentPid = lastProcessInfo.selfRelaunchParentPid;
+      const parentAlive =
+        parentPid != null && parentPid > 0 ? processExists(parentPid) : undefined;
+      if (parentAlive === false) {
+        const port = lastProcessInfo.port;
+        const probe = probePortOwner(port);
+        if (probe.state === "free") {
+          const spawned = await startComfyUI({
+            port,
+            probeUrl: `${anchoredBase}/system_stats`,
+          });
+          const note = context.supervisionNote ? ` ${context.supervisionNote}` : "";
+          if (spawned.ready) {
+            return {
+              stopped: true,
+              started: spawned.started === true,
+              ready: true,
+              startup: spawned.startup,
+              readiness: spawned.readiness,
+              message:
+                (reboot.acked
+                  ? "The ComfyUI-Manager reboot request was acknowledged"
+                  : `A ComfyUI-Manager reboot was dispatched but not acknowledged (${reboot.note ?? "no reply"})`) +
+                ", the parent process was gone, the port freed, and ComfyUI was relaunched with the proven launch command." +
+                (spawned.message ? ` ${spawned.message}` : "") +
+                note,
+              listener_ownership: spawned.listener_ownership ?? unclassifiedOwnership(),
+            };
+          }
           return {
             stopped: true,
             started: spawned.started === true,
-            ready: true,
-            startup: spawned.startup,
-            readiness: spawned.readiness,
+            ready: false,
+            startup: spawned.startup ?? "unconfirmed",
+            readiness: spawned.readiness ?? readiness,
             message:
               (reboot.acked
                 ? "The ComfyUI-Manager reboot request was acknowledged"
                 : `A ComfyUI-Manager reboot was dispatched but not acknowledged (${reboot.note ?? "no reply"})`) +
-              ", the port freed, and ComfyUI was relaunched with the proven launch command." +
-              (spawned.message ? ` ${spawned.message}` : "") +
+              `, no readiness probe got a healthy response within ${waitedS}s, the parent process was gone, the port was free, ` +
+              `and the proven launch command was spawned. ${spawned.message}` +
               note,
             listener_ownership: spawned.listener_ownership ?? unclassifiedOwnership(),
           };
         }
-        return {
-          stopped: true,
-          started: spawned.started === true,
-          ready: false,
-          startup: spawned.startup ?? "unconfirmed",
-          readiness: spawned.readiness ?? readiness,
-          message:
-            (reboot.acked
-              ? "The ComfyUI-Manager reboot request was acknowledged"
-              : `A ComfyUI-Manager reboot was dispatched but not acknowledged (${reboot.note ?? "no reply"})`) +
-            `, no readiness probe got a healthy response within ${waitedS}s, the port was free, ` +
-            `and the proven launch command was spawned. ${spawned.message}` +
-            note,
-          listener_ownership: spawned.listener_ownership ?? unclassifiedOwnership(),
-        };
+      } else if (parentAlive === true) {
+        selfRelaunchHoldback =
+          " The parent process is still running, so the proven launch command was not spawned — a free port is what a supervised cold start looks like, and a second backend under that parent is the worse outcome.";
+      } else {
+        selfRelaunchHoldback =
+          " Whether the parent process is still running could not be established, so the proven launch command was not spawned.";
       }
     }
     return {
@@ -4226,7 +4261,8 @@ async function restartViaManagerRebootDispatch(
         // #1647: when the dispatch was allowed on inferred supervision, that
         // caveat is part of the outcome — especially here, where nothing
         // confirmed the server came back.
-        (context.supervisionNote ? ` ${context.supervisionNote}` : ""),
+        (context.supervisionNote ? ` ${context.supervisionNote}` : "") +
+        selfRelaunchHoldback,
       listener_ownership: unclassifiedOwnership(),
     };
   }
@@ -4722,8 +4758,10 @@ export async function restartComfyUI(): Promise<RestartResult> {
     }
     if (desktop.selfRelaunch) {
       info.selfRelaunch = true;
+      info.selfRelaunchParentPid = desktop.selfRelaunchParentPid;
       // Captured NOW, while the process is still up: startComfyUI after the
-      // Manager stop rebuilds the proven command from this record.
+      // Manager stop rebuilds the proven command from this record, and the
+      // post-stop spawn re-checks this parent pid.
       lastProcessInfo = info;
     }
     // #848: hand over the argv already gathered by acquireProcessInfo moments ago —
@@ -5051,8 +5089,8 @@ export async function preflightLocalRestart(): Promise<{
   note?: string;
   /**
    * #1847: the pass is a proven python-command relaunch, not inferred Desktop
-   * supervision. The panel should Manager-stop then spawn rather than wait for
-   * a supervisor that could not be identified.
+   * supervision. The panel should Manager-stop, then spawn only if that parent
+   * is gone — a live parent may already be relaunching.
    */
   selfRelaunch?: boolean;
 }> {
@@ -5110,9 +5148,9 @@ async function assessLocalRestart(): Promise<{
   /**
    * #1847 — forwarded from assessDesktopSupervision, which already declares it: the
    * pass is a proven python-command relaunch, not inferred Desktop supervision, so the
-   * panel should Manager-stop then spawn rather than wait for a supervisor it could not
-   * identify. Declared HERE too because this is the shape the caller reads; the value
-   * was being built and then dropped by the type on the way out.
+   * panel should Manager-stop, then spawn only if that parent is gone. Declared HERE
+   * too because this is the shape the caller reads; the value was being built and then
+   * dropped by the type on the way out.
    */
   selfRelaunch?: boolean;
 }> {

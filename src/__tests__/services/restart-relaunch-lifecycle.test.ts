@@ -1509,15 +1509,16 @@ describe("restart_comfyui — a Desktop reboot needs a supervisor that is actual
 
     expect(result.message).not.toMatch(/refusing to restart/i);
     expect(result.message).toMatch(/launch command is proven on disk/i);
+    expect(result.message).toMatch(/spawned only if that parent process is gone/i);
+    expect(result.message).not.toMatch(/that exact command is what brings it back/i);
     expect(fetchSpy).toHaveBeenCalled();
     expect(killWasIssued()).toBe(false);
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 
-  it("#1847: after Manager stops and the port frees, relaunches the proven command", async () => {
-    desktopServer();
-    unreadableParentIdentity();
-    proveLaunchFilesOnDisk();
+  function managerStopFreesPort(opts: { parentAfterStop: boolean | undefined }): {
+    fetchSpy: ReturnType<typeof vi.fn>;
+  } {
     __processControlTestHooks.setRemoteRebootTimingForTests({
       settleMs: 0,
       budgetMs: 40,
@@ -1525,6 +1526,10 @@ describe("restart_comfyui — a Desktop reboot needs a supervisor that is actual
     });
     let managerStopped = false;
     let spawned = false;
+    __processControlTestHooks.setProcessExistsProbe((pid) => {
+      if (pid === 300) return managerStopped ? opts.parentAfterStop : true;
+      return true;
+    });
     mockExecSync.mockImplementation((cmd: string) => {
       if (/taskkill|pkill|\bkill\b/i.test(cmd)) return "";
       if (/netstat/i.test(cmd)) {
@@ -1556,6 +1561,35 @@ describe("restart_comfyui — a Desktop reboot needs a supervisor that is actual
       child.pid = 9999;
       return child;
     });
+    return { fetchSpy };
+  }
+
+  it("#1847: a free port under a live parent is a cold start in flight — does not spawn", async () => {
+    // The gate P1: parent PID alive, command line unreadable, Manager reboot
+    // ACKed, Desktop relaunching, cold start outruns the budget, netstat shows
+    // nothing on 8188 because the child is still importing. A free-port check
+    // cannot tell that apart from "gone for good"; spawning here starts a
+    // second backend under the first.
+    desktopServer();
+    unreadableParentIdentity();
+    proveLaunchFilesOnDisk();
+    managerStopFreesPort({ parentAfterStop: true });
+
+    const result = await restartComfyUI();
+
+    expect(result.message).not.toMatch(/refusing to restart/i);
+    expect(mockSpawn).not.toHaveBeenCalled();
+    expect(killWasIssued()).toBe(false);
+    expect(result.message).toMatch(/NOT CONFIRMED YET/i);
+    expect(result.message).toMatch(/parent process is still running/i);
+    expect(result.message).toMatch(/was not spawned/i);
+  });
+
+  it("#1847: after Manager stops and the parent is gone, relaunches the proven command", async () => {
+    desktopServer();
+    unreadableParentIdentity();
+    proveLaunchFilesOnDisk();
+    managerStopFreesPort({ parentAfterStop: false });
 
     const result = await restartComfyUI();
 
@@ -1568,6 +1602,21 @@ describe("restart_comfyui — a Desktop reboot needs a supervisor that is actual
     expect(args).toContain(DESKTOP_MODELS);
     expect(killWasIssued()).toBe(false);
     expect(result.message).toMatch(/proven launch command/i);
+    expect(result.message).toMatch(/parent process was gone/i);
+  });
+
+  it("#1847: unreadable parent existence after the stop does not spawn", async () => {
+    desktopServer();
+    unreadableParentIdentity();
+    proveLaunchFilesOnDisk();
+    managerStopFreesPort({ parentAfterStop: undefined });
+
+    const result = await restartComfyUI();
+
+    expect(mockSpawn).not.toHaveBeenCalled();
+    expect(killWasIssued()).toBe(false);
+    expect(result.message).toMatch(/NOT CONFIRMED YET/i);
+    expect(result.message).toMatch(/could not be established, so the proven launch command was not spawned/i);
   });
 
   it("a wedged DESKTOP instance is recognised from the OS command line and never killed", async () => {

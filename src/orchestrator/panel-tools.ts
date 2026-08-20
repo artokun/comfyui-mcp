@@ -15694,8 +15694,8 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         // to the outcome note below — a dispatch allowed on an inference says so.
         let preflightNote: string | undefined;
         // #1847: proven python-command relaunch when Desktop parent inspection
-        // could not identify a supervisor. Routes to Manager-stop + spawn
-        // instead of waiting for a shell we could not prove.
+        // could not identify a supervisor. Routes to Manager-stop, then spawn
+        // only if that parent is gone — a live parent may already be relaunching.
         let preflightSelfRelaunch = false;
         // The target generation as of BEFORE the preflight resolved that argv, so the
         // whole span up to the post-restart reading sits inside one instance fence.
@@ -15860,19 +15860,21 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
           );
         }
         // #1847: parent-process inspection could not identify a Desktop
-        // supervisor, but the launch command is proven on disk. Do not wait for
-        // a shell we failed to identify — Manager-stop then spawn that command.
+        // supervisor, but the launch command is proven on disk. Manager-stop,
+        // then spawn that command only if the parent is gone — a live parent
+        // may already be relaunching, and a free port is not proof it isn't.
         if (preflightSelfRelaunch && healthBase != null && dispatchBound) {
           return runHeadlessManagedRestart({
             healthBase,
             preRestartPanelIdentity,
             why:
               "Desktop parent-process inspection could not identify a supervisor, and the launch command is proven on disk",
-            mechanism: "a Manager stop followed by that proven launch command",
+            mechanism:
+              "a Manager stop, then the proven launch command only if that parent process is gone",
             noteHealthyLead:
               "Desktop parent-process inspection could not identify a supervisor; the proven launch command",
             noteRanLead:
-              "Desktop parent-process inspection could not identify a supervisor; ran a Manager stop then the proven launch command",
+              "Desktop parent-process inspection could not identify a supervisor; ran a Manager stop (and the proven launch command only if that parent process was gone)",
           });
         }
         const timing = getPanelRebootTiming();

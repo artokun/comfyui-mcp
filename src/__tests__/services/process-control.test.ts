@@ -1132,6 +1132,8 @@ describe("restart truthfulness + Pinokio-shaped refusal (#742)", () => {
     expect(preflight.selfRelaunch).toBe(true);
     expect(preflight.note).toMatch(/launch command is proven on disk/i);
     expect(preflight.note).toMatch(/exists but what it is running could not be read/i);
+    expect(preflight.note).toMatch(/spawned only if that parent process is gone/i);
+    expect(preflight.note).not.toMatch(/that exact command is what brings it back/i);
   });
 
   it("preflightLocalRestart REFUSES that same unreadable parent when the instance-model-paths config is missing (#1847)", async () => {
