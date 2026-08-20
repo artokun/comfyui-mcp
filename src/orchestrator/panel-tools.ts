@@ -11153,13 +11153,39 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           // The refusal is the better error: it names what is wrong with the SCHEMA and
           // what clears it. Carry the refresh failure alongside so the caller knows the
           // automatic attempt happened and why it did not help.
+          //
+          // #1491 — but a reply TIMEOUT is not a failed refresh, and the two need opposite
+          // advice. `joinMs` never cancels work already in flight; the panel coalescer says
+          // so outright ("The run keeps going, registers whatever it fetched"), and its own
+          // worked example is a join ending at 20,000 ms plus a run adding ~13,000 ms —
+          // ~33 s against a 30 s relay window, every per-step bound respected. On a large
+          // install the refresh legitimately outlives this ack and then COMPLETES, which is
+          // exactly what the reporter saw: the automatic refresh "failed" at 30 s and an
+          // explicit panel_refresh_nodes moments later succeeded immediately.
+          //
+          // Telling that caller the schema is unchanged and a retry will refuse again is
+          // wrong twice, and the second half is the damaging one — it talks them out of the
+          // one action that works.
+          //
+          // Decided on the BRIDGE-OWNED tag (#1468), never on message text: two codex rounds
+          // rejected text-matching here and both were right, because an acked panel error can
+          // carry any sentence the bridge can write and ctx.call flattens both into one
+          // text-only result.
+          const stillRunning = isReplyTimeoutResult(refreshed);
           return withFrontendOnlyPanelSkewNote(
             withLoraManagerAutocompleteNote(
               appendToolResultText(
                 first,
-                `\n\n(Tried to clear this automatically: panel_refresh_nodes was dispatched and FAILED, ` +
-                  `so the schema is unchanged and retrying the add will refuse again. ` +
-                  `${textOfToolResult(refreshed)})`,
+                stillRunning
+                  ? `\n\n(Tried to clear this automatically: panel_refresh_nodes was dispatched and did ` +
+                    `NOT answer within its window — but a refresh that outruns its ack is NOT cancelled: it ` +
+                    `keeps running and registers what it fetched. On a large install it can take ~33s against ` +
+                    `a 30s window. So the schema may already be current, or become current in a moment. ` +
+                    `RETRY the add — that is the action that clears this. Nothing here observed the tab being ` +
+                    `frozen. ${textOfToolResult(refreshed)})`
+                  : `\n\n(Tried to clear this automatically: panel_refresh_nodes was dispatched and FAILED, ` +
+                    `so the schema is unchanged and retrying the add will refuse again. ` +
+                    `${textOfToolResult(refreshed)})`,
               ),
             ),
             args.class_type,

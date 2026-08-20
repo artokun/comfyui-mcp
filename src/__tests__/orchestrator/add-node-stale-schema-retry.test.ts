@@ -18,6 +18,7 @@
 // unknown, which is exactly why those are never re-issued on our own initiative.
 
 import { describe, expect, it } from "vitest";
+import { markReplyTimeout } from "../../services/ui-bridge.js";
 
 import {
   buildPanelToolDefs,
@@ -39,13 +40,21 @@ const STALE = () =>
  * `addOutcomes` is consumed one per graph_add_node call: "stale" throws the refusal,
  * "ok" succeeds. `refreshFails` makes refresh_nodes throw.
  */
-function bridge(addOutcomes: Array<"stale" | "ok">, refreshFails = false) {
+function bridge(addOutcomes: Array<"stale" | "ok">, refreshFails: boolean | "timeout" = false) {
   const calls: string[] = [];
   let addIdx = 0;
   const b = {
     send: async (cmd: Record<string, unknown>) => {
       calls.push(String(cmd.cmd));
       if (cmd.cmd === "refresh_nodes") {
+        // #1491 — THREE outcomes, not two. A reply TIMEOUT is tagged by the bridge
+        // itself (markReplyTimeout); an acked executor error is a plain throw. The
+        // orchestrator must tell them apart, because the correct advice is opposite.
+        if (refreshFails === "timeout") {
+          throw markReplyTimeout(
+            new Error(`Panel tab ${TAB} did not reply to "refresh_nodes" within 30000 ms`),
+          );
+        }
         if (refreshFails) throw new Error("panel did not answer the refresh");
         return { refreshed: true };
       }
@@ -68,7 +77,7 @@ function bridge(addOutcomes: Array<"stale" | "ok">, refreshFails = false) {
   return { b, calls };
 }
 
-async function addNode(addOutcomes: Array<"stale" | "ok">, refreshFails = false) {
+async function addNode(addOutcomes: Array<"stale" | "ok">, refreshFails: boolean | "timeout" = false) {
   const { b, calls } = bridge(addOutcomes, refreshFails);
   const ctx = makePanelToolCtx(b, TAB, new WorkflowTargetStore());
   const def = buildPanelToolDefs().find((d) => d.name === "panel_add_node");
@@ -150,5 +159,34 @@ describe("a stale node schema is refreshed and retried once (#1329)", () => {
     expect(res.isError).toBe(true);
     expect(calls.filter((c) => c === "graph_add_node")).toHaveLength(1);
     expect(calls).not.toContain("refresh_nodes");
+  });
+});
+
+describe("#1491: an auto-refresh that outran its ack is NOT a failed refresh", () => {
+  it("a reply TIMEOUT tells the caller to retry, and never says the schema is unchanged", async () => {
+    // The reported case: the automatic refresh "failed" at 30s and an explicit
+    // panel_refresh_nodes moments later succeeded immediately. `joinMs` does not cancel
+    // work already in flight — the panel's coalescer keeps running and registers what it
+    // fetched — so on a large install the refresh legitimately outlives this ack.
+    const { text } = await addNode(["stale", "stale"], "timeout");
+
+    expect(text).toContain("did NOT answer within its window");
+    expect(text).toContain("RETRY the add");
+    // The two claims that were false, and the second is the damaging one: it argues the
+    // caller out of the only action that works.
+    expect(text).not.toContain("so the schema is unchanged");
+    expect(text).not.toContain("retrying the add will refuse again");
+    // And it must not assert a frozen tab it never observed.
+    expect(text).toContain("Nothing here observed the tab being frozen");
+  });
+
+  it("a GENUINE refresh failure keeps the original advice", async () => {
+    // An acked executor error is not a timeout: the refresh really did not happen, so a
+    // retry really will refuse again. Softening this case would be the opposite defect.
+    const { text } = await addNode(["stale", "stale"], true);
+
+    expect(text).toContain("was dispatched and FAILED");
+    expect(text).toContain("so the schema is unchanged");
+    expect(text).not.toContain("RETRY the add");
   });
 });
