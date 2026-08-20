@@ -976,10 +976,13 @@ const OBJECT_INFO_REFRESH_ACK_TIMEOUT_MS = 30_000;
 // running render was rejected unsent, forcing queue-polling and a later retry
 // just to LOOK at the graph.
 //
-// It also asserted more than we know. Execution is server-side Python; a
-// foregrounded tab's main thread is usually free to answer a read while the GPU
-// works, and in practice it does. "The tab typically cannot answer" was a
-// prediction, and the refusal made it unfalsifiable by never letting a read try.
+// It also asserted more than we know, in BOTH directions. "The tab typically
+// cannot answer" is a prediction, not a measurement — and refusing the call made
+// it unfalsifiable, because no read ever got to try. The architectural reason to
+// doubt it is that ComfyUI executes in server-side Python, so the browser main
+// thread is not the thing doing the work; how often a real tab answers mid-render
+// is NOT measured here, and nothing below depends on a number for it. Attempting
+// the read is what turns the question back into something observable.
 //
 // Note what #1639 actually asked for: "(a) keep the panel's command channel
 // responsive during execution (the reads at minimum should never be blocked by a
