@@ -76,7 +76,7 @@
     "zod": "^4.0.0"
   },
   "optionalDependencies": {
-    "@ai-sdk/anthropic": "^3.0.79",
+    "@ai-sdk/anthropic": "^4.0.39",
     "@ai-sdk/google": "^3.0.79",
     "@ai-sdk/openai": "^3.0.65",
     "@anthropic-ai/claude-agent-sdk": "^0.3.233",
