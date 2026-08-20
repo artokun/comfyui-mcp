@@ -21,3 +21,11 @@ docs/design/tool-vocabulary.json text eol=lf
 # suggest. The translations are pinned alongside it so every catalog in the
 # directory is the same shape on every platform.
 locales/**/*.json text eol=lf
+
+# Shebang .mjs files imported by vitest fail to COLLECT on Windows when
+# core.autocrlf checks them out as CRLF (#1857). The transform treats
+# `#!/usr/bin/env node\r` as a syntax error; the file reports "1 failed /
+# Tests no tests" and the tests that exist never run. `node --check` is
+# fine either way — it strips shebangs itself. CI is Linux, so the hole
+# is invisible there. Force LF the same way we do for the ratchet files.
+*.mjs text eol=lf

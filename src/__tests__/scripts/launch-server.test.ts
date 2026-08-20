@@ -7,13 +7,18 @@
 //
 // The decisions are exercised against the REAL exports — the launcher is
 // import-safe by design, so importing it here is also the proof that importing
-// it spawns nothing.
+// it spawns nothing. The import is inside beforeAll, not at collection: a
+// top-level `await import` of a CRLF shebang is a SyntaxError during
+// transform, which vitest reports as "1 failed / Tests no tests" (#1857).
 
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
-const launcher = await import("../../../plugin/scripts/launch-server.mjs");
-const { globalEntry, serverSpec } = launcher as {
+const LAUNCHER_REL = "plugin/scripts/launch-server.mjs";
+const LAUNCHER_URL = new URL("../../../plugin/scripts/launch-server.mjs", import.meta.url);
+
+type Launcher = {
   globalEntry: (stdout: unknown, opts?: { exists?: (p: string) => boolean }) => string | null;
   serverSpec: (
     entry: string | null,
@@ -22,10 +27,40 @@ const { globalEntry, serverSpec } = launcher as {
   ) => { command: string; args: string[]; shell: boolean };
 };
 
+let globalEntry!: Launcher["globalEntry"];
+let serverSpec!: Launcher["serverSpec"];
+
+async function loadLauncher(): Promise<void> {
+  const launcher = (await import("../../../plugin/scripts/launch-server.mjs")) as Launcher;
+  globalEntry = launcher.globalEntry;
+  serverSpec = launcher.serverSpec;
+}
+
 const mcpJson = (): { comfyui: { command: string; args: string[] } } =>
   JSON.parse(readFileSync(new URL("../../../plugin/.mcp.json", import.meta.url), "utf8"));
 
+describe("launch-server shebang checkout (#1857)", () => {
+  it("the shebang has no CR — vitest's transform treats `#!...\\r` as a syntax error", () => {
+    const bytes = readFileSync(LAUNCHER_URL);
+    const nl = bytes.indexOf(0x0a);
+    expect(nl).toBeGreaterThan(0);
+    expect(bytes[nl - 1], "CR before LF on the shebang").not.toBe(0x0d);
+    expect(bytes.subarray(0, nl).toString("utf8")).toBe("#!/usr/bin/env node");
+  });
+
+  it("gitattributes pins the launcher to LF so a Windows clone cannot reintroduce the CR", () => {
+    // git check-attr is the real matcher — reading .gitattributes and guessing
+    // which pattern applies would reimplement the thing under test.
+    const out = execFileSync("git", ["check-attr", "eol", "--", LAUNCHER_REL], {
+      encoding: "utf8",
+    });
+    expect(out.trim()).toMatch(/eol: lf$/);
+  });
+});
+
 describe("launch-server global resolution (#1447)", () => {
+  beforeAll(loadLauncher);
+
   it("resolves the global entry point when the install is present", () => {
     const entry = globalEntry("/usr/local/lib/node_modules\n", { exists: () => true });
     expect(entry).toMatch(/node_modules[\\/]comfyui-mcp[\\/]dist[\\/]index\.js$/);
@@ -54,6 +89,8 @@ describe("launch-server global resolution (#1447)", () => {
 });
 
 describe("launch-server spawn spec (#1447)", () => {
+  beforeAll(loadLauncher);
+
   it("warm path: spawns node on the resolved entry, no shell", () => {
     const spec = serverSpec("/global/node_modules/comfyui-mcp/dist/index.js", ["--full"], {
       platform: "linux",
@@ -108,22 +145,16 @@ describe("plugin/.mcp.json (#1447)", () => {
   });
 
   it("the wrapper is import-safe — side effects sit behind the main guard", () => {
-    // The dynamic import at the top of this file is the behavioural half: had
-    // main() run, the test process would have spawned an npx install. This
-    // pins the source shape that makes the import safe.
-    const src = readFileSync(
-      new URL("../../../plugin/scripts/launch-server.mjs", import.meta.url),
-      "utf8",
-    );
+    // loadLauncher() is the behavioural half: had main() run, the test process
+    // would have spawned an npx install. This pins the source shape that makes
+    // the import safe.
+    const src = readFileSync(LAUNCHER_URL, "utf8");
     expect(src).toMatch(/import\.meta\.url === pathToFileURL\(process\.argv\[1\]\)\.href/);
     expect(src).toMatch(/if \(isMain\) \{/);
   });
 
   it("the wrapper never writes to stdout — stdio is the MCP transport", () => {
-    const src = readFileSync(
-      new URL("../../../plugin/scripts/launch-server.mjs", import.meta.url),
-      "utf8",
-    );
+    const src = readFileSync(LAUNCHER_URL, "utf8");
     expect(src).not.toMatch(/console\.log\(/);
     expect(src).not.toMatch(/process\.stdout\.write\(/);
     // stdio must be inherited verbatim, or the handshake frames never reach the client.
