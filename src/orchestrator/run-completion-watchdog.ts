@@ -37,13 +37,16 @@
 //                real frame would have used.
 //
 // WHY A GRACE RATHER THAN IMMEDIATELY. The panel's frame is the better one — it
-// carries the output images, the duration and the metadata; ours carries a
-// terminal status and a pointer. The normal path lands within a second or two,
-// and the panel's OWN recovery sweep re-reconciles every 20 s, so a grace
-// comfortably past both lets the real frame win every time it is coming. Past
-// the grace there are exactly two shapes, and NEITHER loses anything — stated
-// precisely, because the coalescing one is the narrower case, not the general
-// one (gate finding):
+// carries the output images, the duration and the metadata. Ours used to carry
+// only a terminal status and a pointer (#1789); #1853 fills the images from
+// the same completed /history record JobWatcher already parses, so a dropped
+// panel frame still yields the output filenames. Never fabricated: no history
+// entry, no usable media refs, or a fetch failure ⇒ images stay []. The normal
+// path lands within a second or two, and the panel's OWN recovery sweep
+// re-reconciles every 20 s, so a grace comfortably past both lets the real
+// frame win every time it is coming. Past the grace there are exactly two
+// shapes, and NEITHER loses anything — stated precisely, because the coalescing
+// one is the narrower case, not the general one (gate finding):
 //   • nothing took the synthesised entry (no live agent at that instant), so it
 //     is still `pending` — the journal COALESCES the real payload onto it
 //     (record()), and the agent sees ONE turn, with the images. This is the only
@@ -60,9 +63,13 @@
 // nothing — the same silence as before, which is why the rider also stopped
 // promising more than this can keep.
 
+import { getHistory, type HistoryEntry } from "../comfyui/client.js";
+import { buildCompletionNotification } from "../services/job-watcher.js";
 import { logger } from "../utils/logger.js";
 import type { CompletionStatus } from "../services/queue-monitor.js";
 import type { CompletionPayload, RunTicket } from "./run-completion-journal.js";
+
+type CompletionImage = NonNullable<CompletionPayload["images"]>[number];
 
 /** One completion QueueMonitor observed, held until its grace expires. */
 interface ArmedCompletion {
@@ -79,6 +86,12 @@ export interface RunCompletionWatchdogDeps {
   awaiting: (promptId: string) => RunTicket | undefined;
   /** Journal + flush a synthesised completion for `ticket`. */
   deliver: (payload: CompletionPayload, ticket: RunTicket) => void;
+  /**
+   * Resolve output refs from the completed prompt's ComfyUI history. Wired to
+   * `resolveHistoryCompletionImages` in production. Missing / throwing / empty
+   * is the #1789 status-only notice, never a fabricated image.
+   */
+  resolveOutputs?: (promptId: string) => Promise<CompletionPayload["images"]>;
   /** How long to let the panel's own frame (and its 20 s reconcile sweep) win
    *  before filling in. */
   graceMs?: number;
@@ -100,22 +113,91 @@ export interface RunCompletionWatchdog {
   /** Feed QueueMonitor's drained completions in. Never throws. */
   observe(events: ReadonlyArray<{ promptId: string; status: CompletionStatus }>): void;
   /** Expire armed observations; synthesise for the ones still unanswered. */
-  tick(): void;
+  tick(): Promise<void>;
   /** Diagnostics/tests: how many completions are currently armed. */
   armedCount(): number;
+}
+
+function usableHistoryImages(images: CompletionPayload["images"]): CompletionImage[] {
+  if (!Array.isArray(images)) return [];
+  const out: CompletionImage[] = [];
+  const seen = new Set<string>();
+  for (const img of images) {
+    const filename = typeof img?.filename === "string" ? img.filename.trim() : "";
+    if (!filename) continue;
+    const subfolder = typeof img.subfolder === "string" ? img.subfolder : "";
+    const type = typeof img.type === "string" && img.type ? img.type : "output";
+    const key = `${subfolder}\0${type}\0${filename}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      filename,
+      ...(subfolder ? { subfolder } : {}),
+      type,
+    });
+  }
+  return out;
+}
+
+/**
+ * Flatten a history entry's media into the completion-payload `images` shape.
+ * Extraction is `buildCompletionNotification` — the same parse JobWatcher and
+ * asset reconcile already ship — so a SaveVideo `videos` ref and a SaveImage
+ * `images` ref take the same path a watched completion would.
+ */
+export function historyOutputRefsFromEntry(
+  promptId: string,
+  entry: HistoryEntry,
+): CompletionImage[] {
+  const notification = buildCompletionNotification(promptId, entry, 0);
+  const refs: CompletionImage[] = [];
+  for (const node of notification.outputs) {
+    for (const img of node.images) {
+      refs.push({ filename: img.filename, subfolder: img.subfolder, type: img.type });
+    }
+  }
+  for (const node of notification.video_outputs) {
+    for (const vid of node.videos) {
+      refs.push({ filename: vid.filename, subfolder: vid.subfolder, type: vid.type });
+    }
+  }
+  return usableHistoryImages(refs);
+}
+
+/**
+ * Fetch `/history/<promptId>` and return the real output refs, or [] when the
+ * record is missing, unreadable, or lists no usable media. Never fabricates.
+ */
+export async function resolveHistoryCompletionImages(
+  promptId: string,
+  fetchHistory: (id: string) => Promise<Record<string, HistoryEntry>> = getHistory,
+): Promise<CompletionImage[]> {
+  const id = typeof promptId === "string" ? promptId.trim() : "";
+  if (!id) return [];
+  try {
+    const history = await fetchHistory(id);
+    const entry = history?.[id];
+    if (!entry) return [];
+    return historyOutputRefsFromEntry(id, entry);
+  } catch (err) {
+    logger.debug(
+      `[run-completion-watchdog] history fetch for ${id} failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return [];
+  }
 }
 
 /**
  * Compose the synthesised completion payload.
  *
- * Every claim in it is one the orchestrator actually observed. It does NOT say
- * "here is your image" — a CompletionEvent carries a prompt id, a terminal
- * status and a timestamp, never outputs — and it does not name WHICH channel
- * saw the finish, because recordCompletion is fed by both the WS execution
- * events and the /history diff and does not record which one won. It does not
- * say the panel is broken, only that its completion
- * never arrived here. Naming the delay is what lets the agent tell this apart
- * from a fresh render finishing now.
+ * Every claim in it is one the orchestrator actually observed. Output refs are
+ * only those resolved from the completed prompt's /history record (#1853);
+ * without them the notice stays status-only (#1789) and points at get_image /
+ * get_history. It does not name WHICH channel saw the finish, because
+ * recordCompletion is fed by both the WS execution events and the /history
+ * diff and does not record which one won. It does not say the panel is broken,
+ * only that its completion never arrived here. Naming the delay is what lets
+ * the agent tell this apart from a fresh render finishing now.
  *
  * A FAILED run is reported through this same non-urgent `executed` shape rather
  * than `run_error`: run_error INTERRUPTS the live turn and front-queues "your
@@ -126,20 +208,26 @@ export interface RunCompletionWatchdog {
  */
 export function synthesizeCompletionPayload(
   armed: ArmedCompletion,
-  opts: { deliveredAt: number },
+  opts: { deliveredAt: number; images?: CompletionPayload["images"] },
 ): CompletionPayload {
   const waitedS = Math.max(0, Math.round((opts.deliveredAt - armed.observedAt) / 1000));
+  const images = usableHistoryImages(opts.images);
   const outcome =
     armed.status === "success"
       ? "finished SUCCESSFULLY"
       : armed.status === "interrupted"
         ? "was INTERRUPTED (cancelled before it finished)"
         : "FAILED";
+  const names = images
+    .map((img) => (img.subfolder ? `${img.subfolder}/${img.filename}` : img.filename))
+    .join(", ");
   const next =
     armed.status === "success"
-      ? `The output file(s) are NOT attached to this notice — the orchestrator read the run's terminal ` +
-        `status, not its images. Fetch them with get_image (action:"list_outputs") ` +
-        `or get_history for this prompt id before describing or using the result.`
+      ? images.length > 0
+        ? `The output file(s) from ComfyUI history are attached: ${names}.`
+        : `The output file(s) are NOT attached to this notice — the orchestrator read the run's terminal ` +
+          `status, not its images. Fetch them with get_image (action:"list_outputs") ` +
+          `or get_history for this prompt id before describing or using the result.`
       : armed.status === "interrupted"
         ? `Nothing crashed; it did not run to completion. Re-queue it if the cancellation was unintended.`
         : `Read the failure with panel_get_errors, or get_history for this prompt id. Do NOT report the ` +
@@ -147,7 +235,7 @@ export function synthesizeCompletionPayload(
   return {
     kind: "executed",
     prompt_id: armed.promptId,
-    images: [],
+    images,
     // Machine-readable provenance: this completion was NOT reported by the panel.
     completion_source: "orchestrator-history-watchdog",
     run_status: armed.status,
@@ -161,6 +249,7 @@ export function synthesizeCompletionPayload(
 export function createRunCompletionWatchdog({
   awaiting,
   deliver,
+  resolveOutputs,
   graceMs = DEFAULT_SYNTHESIS_GRACE_MS,
   now = () => Date.now(),
 }: RunCompletionWatchdogDeps): RunCompletionWatchdog {
@@ -194,7 +283,7 @@ export function createRunCompletionWatchdog({
       }
     },
 
-    tick() {
+    async tick() {
       if (armed.size === 0) return;
       const at = now();
       for (const entry of [...armed.values()]) {
@@ -215,16 +304,36 @@ export function createRunCompletionWatchdog({
         // The panel's own frame landed inside the grace — the normal case, and
         // the one this must stay quiet for.
         if (!ticket) continue;
-        // #1789 item 3 — the failure is OBSERVABLE from here on. Until now the
-        // only detector of a lost completion was a human noticing the agent had
-        // gone quiet.
-        logger.warn(
-          `[run-completion-watchdog] prompt ${entry.promptId} finished (${entry.status}) ${Math.round(
-            (at - entry.observedAt) / 1000,
-          )}s ago and the panel NEVER reported its completion — synthesising one from the orchestrator's own ComfyUI observation so the agent that was told to end its turn and wait is not left idle (#1789)`,
-        );
         try {
-          deliver(synthesizeCompletionPayload(entry, { deliveredAt: at }), ticket);
+          let images: CompletionImage[] = [];
+          if (resolveOutputs) {
+            try {
+              images = usableHistoryImages(await resolveOutputs(entry.promptId));
+            } catch (err) {
+              logger.debug(
+                `[run-completion-watchdog] history outputs for ${entry.promptId} unavailable: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            }
+            // A panel frame that landed DURING the fetch still wins.
+            try {
+              ticket = awaiting(entry.promptId);
+            } catch (err) {
+              logger.debug(
+                `[run-completion-watchdog] could not re-check prompt ${entry.promptId} after history fetch: ${err instanceof Error ? err.message : String(err)}`,
+              );
+              continue;
+            }
+            if (!ticket) continue;
+          }
+          // #1789 item 3 — the failure is OBSERVABLE from here on. Until now the
+          // only detector of a lost completion was a human noticing the agent had
+          // gone quiet.
+          logger.warn(
+            `[run-completion-watchdog] prompt ${entry.promptId} finished (${entry.status}) ${Math.round(
+              (at - entry.observedAt) / 1000,
+            )}s ago and the panel NEVER reported its completion — synthesising one from the orchestrator's own ComfyUI observation so the agent that was told to end its turn and wait is not left idle (#1789)`,
+          );
+          deliver(synthesizeCompletionPayload(entry, { deliveredAt: at, images }), ticket);
         } catch (err) {
           logger.warn(
             `[run-completion-watchdog] could not deliver the synthesised completion for prompt ${entry.promptId}: ${err instanceof Error ? err.message : String(err)}`,

@@ -33,13 +33,17 @@ describe("#1789 — the history fallback is WIRED into the orchestrator, not mer
     const src = indexSrc();
     expect(src).toContain("createRunCompletionWatchdog({");
     const start = src.indexOf("createRunCompletionWatchdog({");
-    const block = src.slice(start, start + 1600);
+    const block = src.slice(start, start + 1800);
     // It asks the journal whether the run is still owed a completion…
     expect(block).toContain("RunCompletions.awaitingCompletion(");
     // …and delivers through the SAME arrival path the panel's frame uses, so the
     // completion is correlated, journaled and replayable rather than pushed raw.
     expect(block).toContain("RunCompletions.record(");
     expect(block).toContain("flushRunCompletions(");
+    // #1853 — outputs come from the shipped /history parse, not a status-only
+    // pointer. A second path that invented filenames would be the over-claim.
+    expect(block).toContain("resolveOutputs:");
+    expect(block).toContain("resolveHistoryCompletionImages(");
   });
 
   it("SOURCE: QueueMonitor's completions are TEED to the watchdog from the broadcaster's single drain", () => {

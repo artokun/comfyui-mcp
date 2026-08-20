@@ -17,9 +17,12 @@
 // on) fails here rather than shipping.
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { HistoryEntry } from "../../comfyui/client.js";
 import {
   createRunCompletionWatchdog,
   synthesizeCompletionPayload,
+  resolveHistoryCompletionImages,
+  historyOutputRefsFromEntry,
   DEFAULT_SYNTHESIS_GRACE_MS,
 } from "../../orchestrator/run-completion-watchdog.js";
 import { RunCompletions, type CompletionPayload, type RunTicket } from "../../orchestrator/run-completion-journal.js";
@@ -32,7 +35,12 @@ beforeEach(() => RunCompletions.reset());
 afterEach(() => RunCompletions.reset());
 
 /** A watchdog wired to the real journal, with a controllable clock. */
-function makeWatchdog(clock: { t: number }) {
+function makeWatchdog(
+  clock: { t: number },
+  extras: {
+    resolveOutputs?: (promptId: string) => Promise<CompletionPayload["images"]>;
+  } = {},
+) {
   const delivered: Array<{ payload: CompletionPayload; ticket: RunTicket }> = [];
   const wd = createRunCompletionWatchdog({
     awaiting: (id) => RunCompletions.awaitingCompletion(id),
@@ -43,8 +51,31 @@ function makeWatchdog(clock: { t: number }) {
       });
     },
     now: () => clock.t,
+    ...(extras.resolveOutputs ? { resolveOutputs: extras.resolveOutputs } : {}),
   });
   return { wd, delivered };
+}
+
+const VIDEO_FILENAME = "perfume_citrus_spring_00001_.mp4";
+const VIDEO_SUBFOLDER = "video";
+
+function saveVideoHistoryEntry(promptId: string): HistoryEntry {
+  return {
+    prompt: {},
+    outputs: {
+      "12": {
+        videos: [{ filename: VIDEO_FILENAME, subfolder: VIDEO_SUBFOLDER, type: "output" }],
+      },
+    },
+    status: {
+      status_str: "success",
+      completed: true,
+      messages: [
+        ["execution_start", { prompt_id: promptId, timestamp: 1_000 }],
+        ["execution_success", { prompt_id: promptId, timestamp: 503_060 }],
+      ],
+    },
+  } as HistoryEntry;
 }
 
 describe("#1789: a completion the panel never reported is filled in from ComfyUI's history", () => {
@@ -242,5 +273,145 @@ describe("#1789: the synthesised note claims only what was observed", () => {
     );
     expect(note).toContain("INTERRUPTED");
     expect(note).toContain("Nothing crashed");
+  });
+
+  it("#1853: history output refs ride the synthesised payload, and the note stops claiming they are missing", () => {
+    const refs = historyOutputRefsFromEntry(PID, saveVideoHistoryEntry(PID));
+    const payload = synthesizeCompletionPayload(
+      { promptId: PID, status: "success", observedAt: 1000 },
+      { deliveredAt: 1000 + 46_000, images: refs },
+    );
+    expect(payload.images).toEqual(refs);
+    expect(payload.images.some((img) => img.filename === VIDEO_FILENAME)).toBe(true);
+    expect(String(payload.note)).toContain(VIDEO_FILENAME);
+    expect(String(payload.note)).not.toContain("NOT attached");
+    expect(String(payload.note)).not.toContain('get_image (action:"list_outputs")');
+  });
+
+  it("empty or malformed image refs are dropped, never forwarded as outputs", () => {
+    const payload = synthesizeCompletionPayload(
+      { promptId: PID, status: "success", observedAt: 0 },
+      {
+        deliveredAt: 45_000,
+        images: [
+          { filename: "" },
+          { filename: "   " },
+          { filename: VIDEO_FILENAME, subfolder: VIDEO_SUBFOLDER, type: "output" },
+          { filename: VIDEO_FILENAME, subfolder: VIDEO_SUBFOLDER, type: "output" },
+        ],
+      },
+    );
+    expect(payload.images).toHaveLength(1);
+    expect(payload.images[0].filename).toBe(VIDEO_FILENAME);
+  });
+});
+
+describe("#1853: a dropped panel frame still yields the completed prompt's history outputs", () => {
+  it("the synthesised completion attaches SaveVideo outputs resolved from /history", async () => {
+    const clock = { t: 9_000_000 };
+    const entry = saveVideoHistoryEntry(PID);
+    const { wd, delivered } = makeWatchdog(clock, {
+      resolveOutputs: (id) =>
+        resolveHistoryCompletionImages(id, async (promptId) => ({ [promptId]: entry })),
+    });
+    expect(RunCompletions.openRun(PID, { tabId: TAB, conversation: CONV })).toBe(true);
+
+    wd.observe([{ promptId: PID, status: "success" }]);
+    clock.t += DEFAULT_SYNTHESIS_GRACE_MS;
+    await wd.tick();
+
+    expect(delivered).toHaveLength(1);
+    const payload = delivered[0].payload;
+    expect(payload.prompt_id).toBe(PID);
+    expect(payload.images.some((img) => img.filename === VIDEO_FILENAME)).toBe(true);
+    expect(payload.images.some((img) => img.subfolder === VIDEO_SUBFOLDER)).toBe(true);
+    expect(String(payload.note)).toContain(VIDEO_FILENAME);
+    expect(String(payload.note)).not.toContain("NOT attached");
+
+    const seen: CompletionPayload[] = [];
+    RunCompletions.deliverPending(TAB, (p) => {
+      seen.push(p);
+      return true;
+    });
+    expect(seen[0].images.some((img) => img.filename === VIDEO_FILENAME)).toBe(true);
+  });
+
+  it("history with no media stays status-only — nothing is invented", async () => {
+    const clock = { t: 10_000_000 };
+    const empty: HistoryEntry = {
+      prompt: {},
+      outputs: {},
+      status: { status_str: "success", completed: true, messages: [] },
+    };
+    const { wd, delivered } = makeWatchdog(clock, {
+      resolveOutputs: (id) =>
+        resolveHistoryCompletionImages(id, async (promptId) => ({ [promptId]: empty })),
+    });
+    RunCompletions.openRun(PID, { tabId: TAB, conversation: CONV });
+    wd.observe([{ promptId: PID, status: "success" }]);
+    clock.t += DEFAULT_SYNTHESIS_GRACE_MS;
+    await wd.tick();
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0].payload.images).toEqual([]);
+    expect(String(delivered[0].payload.note)).toContain("NOT attached");
+  });
+
+  it("a history fetch failure still delivers the status-only notice", async () => {
+    const clock = { t: 11_000_000 };
+    const { wd, delivered } = makeWatchdog(clock, {
+      resolveOutputs: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+    });
+    RunCompletions.openRun(PID, { tabId: TAB, conversation: CONV });
+    wd.observe([{ promptId: PID, status: "success" }]);
+    clock.t += DEFAULT_SYNTHESIS_GRACE_MS;
+    await wd.tick();
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0].payload.images).toEqual([]);
+    expect(String(delivered[0].payload.note)).toContain("NOT attached");
+  });
+
+  it("a panel frame that lands during the history fetch still wins", async () => {
+    const clock = { t: 12_000_000 };
+    let release!: (refs: NonNullable<CompletionPayload["images"]>) => void;
+    const { wd, delivered } = makeWatchdog(clock, {
+      resolveOutputs: () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    });
+    RunCompletions.openRun(PID, { tabId: TAB, conversation: CONV });
+    wd.observe([{ promptId: PID, status: "success" }]);
+    clock.t += DEFAULT_SYNTHESIS_GRACE_MS;
+    const pending = wd.tick();
+    RunCompletions.record(
+      TAB,
+      { kind: "executed", prompt_id: PID, images: [{ filename: "storyboard.png" }] },
+      { conversation: CONV },
+    );
+    release([{ filename: VIDEO_FILENAME, subfolder: VIDEO_SUBFOLDER, type: "output" }]);
+    await pending;
+    expect(delivered).toHaveLength(0);
+    expect(RunCompletions.outstanding(TAB)[0].payload.images).toEqual([{ filename: "storyboard.png" }]);
+  });
+
+  it("resolveHistoryCompletionImages returns [] when /history has no entry for the prompt", async () => {
+    const refs = await resolveHistoryCompletionImages(PID, async () => ({}));
+    expect(refs).toEqual([]);
+  });
+
+  it("historyOutputRefsFromEntry reads images AND videos through the shipped parser", () => {
+    const entry = {
+      prompt: {},
+      outputs: {
+        "9": { images: [{ filename: "still.png", subfolder: "", type: "output" }] },
+        "12": { videos: [{ filename: VIDEO_FILENAME, subfolder: VIDEO_SUBFOLDER, type: "output" }] },
+      },
+      status: { status_str: "success", completed: true, messages: [] },
+    } as HistoryEntry;
+    const refs = historyOutputRefsFromEntry(PID, entry);
+    expect(refs.some((img) => img.filename === "still.png")).toBe(true);
+    expect(refs.some((img) => img.filename === VIDEO_FILENAME && img.subfolder === VIDEO_SUBFOLDER)).toBe(true);
   });
 });

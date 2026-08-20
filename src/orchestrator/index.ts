@@ -215,7 +215,7 @@ import {
   describe as describeCorrelation,
   type CompletionPayload,
 } from "./run-completion-journal.js";
-import { createRunCompletionWatchdog } from "./run-completion-watchdog.js";
+import { createRunCompletionWatchdog, resolveHistoryCompletionImages } from "./run-completion-watchdog.js";
 import { AskAnswers, preview as previewQuestion } from "./ask-answer-journal.js";
 import { initRunpodWatcher, getRunpodWatcher, type RunpodStatusFrame, type RunpodAlertFrame } from "../services/runpod-watch.js";
 import { getPod } from "../services/runpod-client.js";
@@ -6373,6 +6373,7 @@ export async function runPanelOrchestrator(): Promise<void> {
   // still wins whenever it is coming.
   const runCompletionWatchdog = createRunCompletionWatchdog({
     awaiting: (promptId) => RunCompletions.awaitingCompletion(promptId),
+    resolveOutputs: (promptId) => resolveHistoryCompletionImages(promptId),
     deliver: (payload, ticket) => {
       // The SAME arrival path the panel's frame takes: correlated once, here,
       // against the ticket that is still open — so the agent is told this is the
