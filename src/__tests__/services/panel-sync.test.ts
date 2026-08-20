@@ -363,6 +363,49 @@ describe("evaluatePanelSync — cases where we must not guess", () => {
     expect(decide({ isDevSymlink: true, installedVersion: "0.1.0" })).toBe("dev-install");
   });
 
+  // #1834 — `behind` is a version fact, not a permission to act. A 0.15.3
+  // checkout under a 0.15.11 floor is proven older than the floor even though
+  // we will never touch a dev symlink. Hardcoding `behind: false` on this
+  // branch made that gap indistinguishable from an up-to-date checkout.
+  it("a dev symlink BELOW the floor is behind:true and names the gap, without telling them to unpin (#1834)", () => {
+    const a = evaluatePanelSync(
+      status({ isDevSymlink: true, installedVersion: "0.15.3" }),
+      { requiredVersion: "0.15.11", orchestratorVersion: ORCH },
+    );
+    expect(a.decision).toBe("dev-install");
+    expect(a.behind).toBe(true);
+    expect(a.installedVersion).toBe("0.15.3");
+    expect(a.requiredPanelVersion).toBe("0.15.11");
+    expect(a.summary).toMatch(/BEHIND/);
+    expect(a.summary).toContain("0.15.3");
+    expect(a.summary).toContain("0.15.11");
+    expect(a.summary).toMatch(/pull its checkout/i);
+    // Unpin is the pinned-install remedy. A developer owns this checkout;
+    // telling them to unpin would be the wrong advice.
+    expect(a.summary).not.toMatch(/unpin/i);
+  });
+
+  it("a dev symlink AT the floor is behind:false and does not invent a gap (#1834)", () => {
+    const a = evaluatePanelSync(
+      status({ isDevSymlink: true, installedVersion: "0.15.11" }),
+      { requiredVersion: "0.15.11", orchestratorVersion: ORCH },
+    );
+    expect(a.decision).toBe("dev-install");
+    expect(a.behind).toBe(false);
+    expect(a.summary).not.toMatch(/BEHIND/);
+    expect(a.summary).not.toMatch(/unpin/i);
+  });
+
+  it("a dev symlink with an uncomparable version is never claimed behind (#1834)", () => {
+    const a = evaluatePanelSync(
+      status({ isDevSymlink: true, installedVersion: "nightly" }),
+      { requiredVersion: "0.15.11", orchestratorVersion: ORCH },
+    );
+    expect(a.decision).toBe("dev-install");
+    expect(a.behind).toBe(false);
+    expect(a.summary).not.toMatch(/BEHIND/);
+  });
+
   it("remote/cloud → not-applicable", () => {
     expect(decide({ applicable: false, installed: false })).toBe("not-applicable");
   });
@@ -699,6 +742,12 @@ describe("performPanelSync", () => {
     expect(r.synced).toBe(false);
     expect(r.decision).toBe("dev-install");
     expect(h.updates).toBe(0);
+    // #1834 — declining to TOUCH it is not the same as reporting it current.
+    // The refusal message must still name the proven version gap.
+    expect(r.message).toMatch(/BEHIND/);
+    expect(r.message).toContain("0.11.3");
+    expect(r.message).toContain(REQUIRED);
+    expect(r.message).not.toMatch(/unpin/i);
   });
 
   it("reclaims a provably-abandoned lock and proceeds instead of failing for days (#1828)", async () => {

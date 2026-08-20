@@ -261,6 +261,13 @@ export function evaluatePanelSync(
   // The skill PROMISES visible drift when a user sits on a pinned version —
   // that warning is owed in every state, including the early-return ones
   // (remote / dev install), not only on paths that could act.
+  // Proven-behind is a VERSION fact, independent of whether we are allowed to
+  // act on it. Kept separate from `driftNote` (which is about a PIN) so a branch
+  // that declines to touch the install still reports the drift honestly.
+  const provenBehind =
+    !!status.installedVersion &&
+    isComparableVersion(status.installedVersion) &&
+    compareSemver(status.installedVersion, required) < 0;
   const driftNote = (() => {
     if (!pin.pinned || pin.indeterminate) return "";
     if (!status.installedVersion || !isComparableVersion(status.installedVersion)) return "";
@@ -291,10 +298,20 @@ export function evaluatePanelSync(
     return {
       ...base,
       decision: "dev-install",
-      behind: false,
+      // A dev checkout is one we never TOUCH — that is not a reason to report it
+      // as current. `behind` is documented as "we PROVED the panel is older than
+      // requiredPanelVersion", and a comparable dev version below the floor is
+      // exactly that proof. Hardcoding false here made a 0.15.3 checkout under a
+      // 0.15.11 floor indistinguishable from an up-to-date one, so a panel
+      // carrying already-fixed bugs read as healthy in every status call.
+      behind: provenBehind,
       summary:
         `The panel at ${status.dir ?? "custom_nodes"} is a dev symlink — update it ` +
         `through its own git checkout. Nothing here will modify it.` +
+        (provenBehind
+          ? ` NOTE: it is BEHIND what ${orch} expects ` +
+            `(${status.installedVersion} < ${required}) — pull its checkout to close the gap.`
+          : "") +
         driftNote,
     };
   }
