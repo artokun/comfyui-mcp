@@ -36,11 +36,23 @@ const STALE = () =>
       `schema, so creating it now would build the OLD shape. Call panel_refresh_nodes and retry.`,
   );
 
+/** panel#1518 — a realistic NON-stale failure of the retried add: the panel's own
+ *  `addNodeRefreshBusyMessage`, which is what a second add hits when the refresh this
+ *  path abandoned is still holding the coalescer slot. */
+const BUSY = () =>
+  new Error(
+    `Cannot add "LoadImage" right now: a node-def refresh was still running, and waiting for ` +
+      `it would have used up this command's 25s budget. NOTHING WAS ADDED. RETRY in a few seconds.`,
+  );
+
+type AddOutcome = "stale" | "ok" | "busy";
+
 /**
  * `addOutcomes` is consumed one per graph_add_node call: "stale" throws the refusal,
- * "ok" succeeds. `refreshFails` makes refresh_nodes throw.
+ * "busy" throws an unrelated (non-stale) refusal, "ok" succeeds. `refreshFails` makes
+ * refresh_nodes throw.
  */
-function bridge(addOutcomes: Array<"stale" | "ok">, refreshFails: boolean | "timeout" | "acked-error-quoting-timeout" = false) {
+function bridge(addOutcomes: AddOutcome[], refreshFails: boolean | "timeout" | "acked-error-quoting-timeout" = false) {
   const calls: string[] = [];
   let addIdx = 0;
   const b = {
@@ -70,6 +82,7 @@ function bridge(addOutcomes: Array<"stale" | "ok">, refreshFails: boolean | "tim
         const outcome = addOutcomes[Math.min(addIdx, addOutcomes.length - 1)];
         addIdx += 1;
         if (outcome === "stale") throw STALE();
+        if (outcome === "busy") throw BUSY();
         return { ok: true, node_id: 42 };
       }
       return { ok: true };
@@ -85,7 +98,7 @@ function bridge(addOutcomes: Array<"stale" | "ok">, refreshFails: boolean | "tim
   return { b, calls };
 }
 
-async function addNode(addOutcomes: Array<"stale" | "ok">, refreshFails: boolean | "timeout" | "acked-error-quoting-timeout" = false) {
+async function addNode(addOutcomes: AddOutcome[], refreshFails: boolean | "timeout" | "acked-error-quoting-timeout" = false) {
   const { b, calls } = bridge(addOutcomes, refreshFails);
   const ctx = makePanelToolCtx(b, TAB, new WorkflowTargetStore());
   const def = buildPanelToolDefs().find((d) => d.name === "panel_add_node");
@@ -176,10 +189,13 @@ describe("#1491: an auto-refresh that outran its ack is NOT a failed refresh", (
     // panel_refresh_nodes moments later succeeded immediately. `joinMs` does not cancel
     // work already in flight — the panel's coalescer keeps running and registers what it
     // fetched — so on a large install the refresh legitimately outlives this ack.
-    const { text } = await addNode(["stale", "stale"], "timeout");
+    const { text, calls } = await addNode(["stale", "stale"], "timeout");
 
     expect(text).toContain("did NOT answer within its window");
     expect(text).toContain("RETRY the add");
+    // panel#1518 — and the advice is only reached because the tool TOOK the retry first
+    // and it was still stale. Bounded: exactly two adds, one refresh, never a loop.
+    expect(calls).toEqual(["graph_add_node", "refresh_nodes", "graph_add_node"]);
     // The two claims that were false, and the second is the damaging one: it argues the
     // caller out of the only action that works.
     expect(text).not.toContain("so the schema is unchanged");
@@ -210,5 +226,72 @@ describe("#1491: an auto-refresh that outran its ack is NOT a failed refresh", (
     expect(text).toContain("was dispatched and FAILED");
     expect(text).toContain("so the schema is unchanged");
     expect(text).not.toContain("RETRY the add");
+  });
+});
+
+describe("panel#1518: after an ack timeout the add is retried, not billed to the caller", () => {
+  it("the reporter's case: refuse → refresh times out → retry → SUCCESS, no error surfaced", async () => {
+    // Reported verbatim: "the tool returned an error, although the refresh continued. An
+    // immediate identical panel_add_node retry succeeded." #1491 taught this branch to SAY
+    // "retry the add"; this takes the retry instead of charging a round trip for it.
+    const { text, isError, calls } = await addNode(["stale", "ok"], "timeout");
+
+    expect(isError).toBe(false);
+    expect(calls).toEqual(["graph_add_node", "refresh_nodes", "graph_add_node"]);
+    // The false terminal failure is gone in both directions: no error flag, and the
+    // refusal that caused it never reaches the caller.
+    expect(text).not.toMatch(/added or retyped since this page loaded/);
+    expect(text).not.toContain("did NOT answer within its window");
+  });
+
+  it("a GENUINE refresh failure is still never retried — the schema really is unchanged", async () => {
+    // The duplicate-safety argument licenses ONE retry off a refusal that created nothing;
+    // it does not license retrying whenever an add fails. This is the case where a retry
+    // is known to be pointless, and softening it would be the opposite defect.
+    const { isError, calls } = await addNode(["stale", "ok"], true);
+
+    expect(isError).toBe(true);
+    expect(calls).toEqual(["graph_add_node", "refresh_nodes"]);
+  });
+
+  it("an ACKED error QUOTING the timeout wording is not retried either — the tag decides", async () => {
+    // #1468's rule, re-pinned at the new fork: the retry is now the consequence of
+    // isReplyTimeoutResult, so a text-matching implementation would issue a real second
+    // mutating add off a sentence the panel is free to write.
+    const { isError, calls } = await addNode(["stale", "ok"], "acked-error-quoting-timeout");
+
+    expect(isError).toBe(true);
+    expect(calls).toEqual(["graph_add_node", "refresh_nodes"]);
+  });
+
+  it("an unrelated failure of the RETRY says which attempt it came from", async () => {
+    // Without this the caller sees a bare second-attempt error on a path they never asked
+    // to be retried, and cannot tell how many adds are unaccounted for.
+    const { text, isError, calls } = await addNode(["stale", "busy"], "timeout");
+
+    expect(isError).toBe(true);
+    expect(calls).toEqual(["graph_add_node", "refresh_nodes", "graph_add_node"]);
+    expect(text).toContain("NOTHING WAS ADDED"); // the panel's own error, verbatim
+    expect(text).toContain("This add was an AUTOMATIC retry");
+    expect(text).toContain("at most ONE add is unaccounted for");
+  });
+
+  it("…and that disclosure is NOT bolted onto a successful retry", async () => {
+    const { text, isError } = await addNode(["stale", "ok"], "timeout");
+
+    expect(isError).toBe(false);
+    expect(text).not.toContain("This add was an AUTOMATIC retry");
+  });
+
+  it("still stale after the retry: does not overclaim a refresh it never saw finish", async () => {
+    // The acked-success wording ("panel_refresh_nodes reported success", "repeating it will
+    // not clear it", "reload the tab") is false here — nothing observed that refresh
+    // finish, and it is still running.
+    const { text } = await addNode(["stale", "stale"], "timeout");
+
+    expect(text).toContain("the add was then retried ONCE anyway");
+    expect(text).toContain("Neither attempt added anything");
+    expect(text).not.toContain("panel_refresh_nodes reported success");
+    expect(text).not.toContain("repeating panel_refresh_nodes will not clear it");
   });
 });

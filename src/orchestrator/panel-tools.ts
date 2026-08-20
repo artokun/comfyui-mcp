@@ -11702,67 +11702,107 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         // on our own initiative, and that rule is intact — this is not a transport
         // failure with an unknown outcome, it is a refusal that states its own.
         const refreshed = await ctx.call({ cmd: "refresh_nodes" }, OBJECT_INFO_REFRESH_ACK_TIMEOUT_MS);
-        if (refreshed.isError) {
-          // The refusal is the better error: it names what is wrong with the SCHEMA and
-          // what clears it. Carry the refresh failure alongside so the caller knows the
-          // automatic attempt happened and why it did not help.
-          //
-          // #1491 — but a reply TIMEOUT is not a failed refresh, and the two need opposite
-          // advice. `joinMs` never cancels work already in flight; the panel coalescer says
-          // so outright ("The run keeps going, registers whatever it fetched"), and its own
-          // worked example is a join ending at 20,000 ms plus a run adding ~13,000 ms —
-          // ~33 s against a 30 s relay window, every per-step bound respected. On a large
-          // install the refresh legitimately outlives this ack and then COMPLETES, which is
-          // exactly what the reporter saw: the automatic refresh "failed" at 30 s and an
-          // explicit panel_refresh_nodes moments later succeeded immediately.
-          //
-          // Telling that caller the schema is unchanged and a retry will refuse again is
-          // wrong twice, and the second half is the damaging one — it talks them out of the
-          // one action that works.
-          //
-          // Decided on the BRIDGE-OWNED tag (#1468), never on message text: two codex rounds
-          // rejected text-matching here and both were right, because an acked panel error can
-          // carry any sentence the bridge can write and ctx.call flattens both into one
-          // text-only result.
-          const stillRunning = isReplyTimeoutResult(refreshed);
+        // #1491 — a reply TIMEOUT is not a failed refresh, and the two need opposite
+        // handling. `joinMs` never cancels work already in flight; the panel coalescer says
+        // so outright ("The run keeps going, registers whatever it fetched"), and its own
+        // worked example is a join ending at 20,000 ms plus a run adding ~13,000 ms —
+        // ~33 s against a 30 s relay window, every per-step bound respected. On a large
+        // install the refresh legitimately outlives this ack and then COMPLETES, which is
+        // exactly what the reporter saw: the automatic refresh "failed" at 30 s and an
+        // explicit panel_refresh_nodes moments later succeeded immediately.
+        //
+        // Decided on the BRIDGE-OWNED tag (#1468), never on message text: two codex rounds
+        // rejected text-matching here and both were right, because an acked panel error can
+        // carry any sentence the bridge can write and ctx.call flattens both into one
+        // text-only result.
+        const refreshOutranItsAck = isReplyTimeoutResult(refreshed);
+        if (refreshed.isError && !refreshOutranItsAck) {
+          // A GENUINELY failed refresh — the panel acked and said no. The refusal is the
+          // better error: it names what is wrong with the SCHEMA and what clears it. Carry
+          // the refresh failure alongside so the caller knows the automatic attempt
+          // happened and why it did not help. No retry here, because the schema really is
+          // unchanged and a second add really would refuse again.
           return withFrontendOnlyPanelSkewNote(
             withLoraManagerAutocompleteNote(
               appendToolResultText(
                 first,
-                stillRunning
-                  ? `\n\n(Tried to clear this automatically: panel_refresh_nodes was dispatched and did ` +
-                    `NOT answer within its window — but a refresh that outruns its ack is NOT cancelled: it ` +
-                    `keeps running and registers what it fetched. On a large install it can take ~33s against ` +
-                    `a 30s window. So the schema may already be current, or become current in a moment. ` +
-                    `RETRY the add — that is the action that clears this. Nothing here observed the tab being ` +
-                    `frozen. ${textOfToolResult(refreshed)})`
-                  : `\n\n(Tried to clear this automatically: panel_refresh_nodes was dispatched and FAILED, ` +
-                    `so the schema is unchanged and retrying the add will refuse again. ` +
-                    `${textOfToolResult(refreshed)})`,
+                `\n\n(Tried to clear this automatically: panel_refresh_nodes was dispatched and FAILED, ` +
+                  `so the schema is unchanged and retrying the add will refuse again. ` +
+                  `${textOfToolResult(refreshed)})`,
               ),
             ),
             args.class_type,
             ctx,
           );
         }
+        // panel#1518 — TAKE THE RETRY, instead of telling the caller to take it.
+        //
+        // #1491 stopped this branch from LYING about an ack timeout (it used to claim the
+        // schema was unchanged) and replaced that with "RETRY the add — that is the action
+        // that clears this". The follow-up report is that the advice is right and the tool
+        // still returns an error: the reporter retried the identical add by hand and it
+        // succeeded immediately. A tool that knows the single correct next action, and
+        // whose only reason not to take it was a lost ACK, should take it.
+        //
+        // SAME duplicate-safety argument as the acked-success path below, not a new one:
+        // the ONLY way control reaches here is `isStaleNodeSchemaRefusal(first)`, which
+        // requires an acked refusal whose own text says the guard threw BEFORE creating
+        // anything ("Refuse before creating anything" — comfyui-mcp-panel.js). A first add
+        // whose outcome is UNKNOWN — a timeout, a dead socket — is not a stale-schema
+        // refusal and returned long before this line, so this retry can never be the
+        // re-issue of a mutation that may already have landed.
+        //
+        // And the retry is not a hope: `graph_add_node` gates itself on a FRESH
+        // /object_info (assertAddNodeResolvableRefreshing, #599), so the second add
+        // re-fetches the schema itself — it does not merely re-read what the abandoned
+        // refresh left behind.
         const second = await add();
         if (!isStaleNodeSchemaRefusal(second)) {
           return withFrontendOnlyPanelSkewNote(
-            withLoraManagerAutocompleteNote(second),
+            withLoraManagerAutocompleteNote(
+              // An error from the RETRY, on the path where the caller never asked for a
+              // retry, must say which attempt it came from — otherwise a bare
+              // `graph_add_node` timeout reads as the first add's outcome and leaves the
+              // count of in-flight mutations ambiguous. Only on this path: after an acked
+              // success the retry is pre-existing behaviour that #1518 does not touch.
+              refreshOutranItsAck && second.isError
+                ? appendToolResultText(
+                    second,
+                    `\n\n(This add was an AUTOMATIC retry: the first attempt was refused for a stale ` +
+                      `node schema and created NOTHING, then panel_refresh_nodes was dispatched and did ` +
+                      `NOT answer within its window. The error above is from the second attempt, so at ` +
+                      `most ONE add is unaccounted for here.)`,
+                  )
+                : second,
+            ),
             args.class_type,
             ctx,
           );
         }
-        // Still stale after a successful refresh: report THAT, because it means the
-        // remedy the refusal prescribes does not fix this instance and a caller
-        // following it by hand would loop.
+        // Still stale after the refresh: report THAT, because it means the remedy the
+        // refusal prescribes does not fix this instance and a caller following it by hand
+        // would loop.
         return withFrontendOnlyPanelSkewNote(
           withLoraManagerAutocompleteNote(
             appendToolResultText(
               second,
-              `\n\n(This was already retried ONCE automatically: panel_refresh_nodes reported success ` +
-                `and the add still refuses, so repeating panel_refresh_nodes will not clear it. ` +
-                `Reload the ComfyUI browser tab, which rebuilds the page's node registry from scratch.)`,
+              refreshOutranItsAck
+                ? // The refresh was never observed to finish, so "repeating it will not clear
+                  // it" and "reload the tab" would both overclaim. What IS known: it was not
+                  // cancelled, it is still registering the definitions this add needs, and the
+                  // retry simply landed before it did.
+                  `\n\n(Tried to clear this automatically: panel_refresh_nodes was dispatched and did ` +
+                  `NOT answer within its window, and the add was then retried ONCE anyway — a refresh ` +
+                  `that outruns its ack is NOT cancelled: it keeps running and registers what it ` +
+                  `fetched. On a large install it can take ~33s against a 30s window. The retry still ` +
+                  `refuses, which means that registration had not landed YET — not that the schema is ` +
+                  `stuck. Neither attempt added anything. RETRY the add in a few seconds; that is the ` +
+                  `action that clears this. Only if it keeps refusing is the page's registry actually ` +
+                  `stuck, and reloading the ComfyUI browser tab is the fallback. Nothing here observed ` +
+                  `the tab being frozen. ${textOfToolResult(refreshed)})`
+                : `\n\n(This was already retried ONCE automatically: panel_refresh_nodes reported success ` +
+                  `and the add still refuses, so repeating panel_refresh_nodes will not clear it. ` +
+                  `Reload the ComfyUI browser tab, which rebuilds the page's node registry from scratch.)`,
             ),
           ),
           args.class_type,
