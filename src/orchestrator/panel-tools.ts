@@ -931,9 +931,13 @@ export const __panelToolsTestHooks = {
   setRetrySettleMs(ms: number | null): void {
     retrySettleMsOverride = ms;
   },
-  /** Inject fast reconnect-wait timing so #400/#402 tests don't wait the real ~20s. */
+  /** Inject fast reconnect-wait timing so #400/#402 tests don't wait the real ~35s. */
   setReconnectWaitTiming(timing: { budgetMs: number; intervalMs: number } | null): void {
     reconnectWaitTimingOverride = timing;
+  },
+  /** The reconnect wait the tools actually use (env/default, or the test override). */
+  getReconnectWaitTiming(): { budgetMs: number; intervalMs: number } {
+    return reconnectWaitTiming();
   },
   /** Shrink the #1175 late-acknowledgement grace so a reconcile test doesn't wait 10s. */
   setRunLateAckGraceMs(ms: number | null): void {
@@ -1434,12 +1438,17 @@ let reconnectWaitTimingOverride: ReconnectWaitTiming | null = null;
 /** Hard ceiling on the reconnect wait so an oversized env value can never make a
  *  tool block near/over the outer MCP tools/call deadline (~300s). */
 const RECONNECT_WAIT_MAX_MS = 60_000;
+/** Default seconds to wait for a tab re-hello after restart/reload.
+ *  20s lost to ComfyUI Desktop recoveries of 26–28s after the server was already
+ *  healthy (panel#654): `panel_graph_outline` reported Connected: none and only a
+ *  hard refresh restored the tab. 35s covers those recoveries; the 60s ceiling stays. */
+const RECONNECT_WAIT_DEFAULT_S = 35;
 function reconnectWaitTiming(): ReconnectWaitTiming {
   if (reconnectWaitTimingOverride) return reconnectWaitTimingOverride;
   return {
     budgetMs: Math.min(
       RECONNECT_WAIT_MAX_MS,
-      Math.round(parsePositiveNumberEnv("COMFYUI_PANEL_RECONNECT_WAIT_S", 20) * 1000),
+      Math.round(parsePositiveNumberEnv("COMFYUI_PANEL_RECONNECT_WAIT_S", RECONNECT_WAIT_DEFAULT_S) * 1000),
     ),
     intervalMs: Math.round(parsePositiveNumberEnv("COMFYUI_PANEL_RECONNECT_POLL_S", 0.5) * 1000),
   };

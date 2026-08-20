@@ -94,7 +94,7 @@ beforeEach(() => {
   // panel-recovery-cluster.test.ts, which does this correctly and is not
   // one of the flaky files.
   __resetPanelBaseCache();
-  // Keep the reconnect wait fast so tests don't sit through the real ~20s budget.
+  // Keep the reconnect wait fast so tests don't sit through the real ~35s budget.
   __panelToolsTestHooks.setReconnectWaitTiming({ budgetMs: 500, intervalMs: 5 });
   // The #742 refuse-safe preflight passes by default here (the live one would
   // probe real processes/ports); these tests exercise the post-dispatch paths.
@@ -987,5 +987,63 @@ describe("#1881 a retry-safe READ waits out the post-restart 0-tab window", () =
     const res = await defByName("panel_list_subgraphs").handler({}, ctx);
     expect(res.isError).toBe(true);
     expect(Date.now() - t0).toBeLessThan(1000);
+  });
+});
+
+// panel#654 — ComfyUI Desktop recoveries of 26–28s after the server was already
+// healthy expired the 20s reconnectWaitTiming default. panel_graph_outline then
+// reported still reconnecting / Connected: none, and only a hard refresh restored
+// the tab. The default is 35s; this pins that number AND drives the shipped
+// panel_graph_outline path through reconnectWaitTiming() (env, not the test
+// override) so a hello landing after a 20s-scaled budget still answers.
+describe("#654 reconnect wait covers a 26-28s Desktop recover", () => {
+  const prevWait = (): string | undefined => process.env.COMFYUI_PANEL_RECONNECT_WAIT_S;
+  const prevPoll = (): string | undefined => process.env.COMFYUI_PANEL_RECONNECT_POLL_S;
+  const restoreEnv = (wait: string | undefined, poll: string | undefined): void => {
+    if (wait === undefined) delete process.env.COMFYUI_PANEL_RECONNECT_WAIT_S;
+    else process.env.COMFYUI_PANEL_RECONNECT_WAIT_S = wait;
+    if (poll === undefined) delete process.env.COMFYUI_PANEL_RECONNECT_POLL_S;
+    else process.env.COMFYUI_PANEL_RECONNECT_POLL_S = poll;
+  };
+
+  it("default budget is 35s — past the 26-28s Desktop recover, under the 60s ceiling", () => {
+    const wait = prevWait();
+    const poll = prevPoll();
+    delete process.env.COMFYUI_PANEL_RECONNECT_WAIT_S;
+    delete process.env.COMFYUI_PANEL_RECONNECT_POLL_S;
+    __panelToolsTestHooks.setReconnectWaitTiming(null);
+    try {
+      const t = __panelToolsTestHooks.getReconnectWaitTiming();
+      expect(t.budgetMs).toBe(35_000);
+      expect(t.budgetMs).toBeGreaterThan(28_000);
+      expect(t.budgetMs).toBeLessThanOrEqual(60_000);
+    } finally {
+      restoreEnv(wait, poll);
+    }
+  });
+
+  it("panel_graph_outline recovers when the re-hello lands after a 20s wait would have given up", async () => {
+    // Scale: 35s default → 350ms here; a 22s Desktop hello → 220ms, which is past
+    // the old 200ms (20s) budget and inside the new one. No override hook — the
+    // shipped reconnectWaitTiming() reads the env the production path reads.
+    const wait = prevWait();
+    const poll = prevPoll();
+    process.env.COMFYUI_PANEL_RECONNECT_WAIT_S = "0.35";
+    process.env.COMFYUI_PANEL_RECONNECT_POLL_S = "0.02";
+    __panelToolsTestHooks.setReconnectWaitTiming(null);
+    __panelToolsTestHooks.setRetrySettleMs(5);
+    try {
+      expect(__panelToolsTestHooks.getReconnectWaitTiming().budgetMs).toBe(350);
+      const { bridge, live, sent } = reconnectingBridge([]);
+      const ctx = makePanelToolCtx(bridge, "wf:workflows/x.json", new WorkflowTargetStore());
+      setTimeout(() => live.add("reconnected-tab"), 220);
+      const res = await defByName("panel_graph_outline").handler({}, ctx);
+      expect(res.isError).toBeFalsy();
+      expect(sent.at(-1)?.cmd).toMatchObject({ cmd: "graph_outline" });
+      expect(sent.at(-1)?.tabId).toBe("reconnected-tab");
+    } finally {
+      restoreEnv(wait, poll);
+      __panelToolsTestHooks.setRetrySettleMs(null);
+    }
   });
 });

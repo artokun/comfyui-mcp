@@ -5998,7 +5998,7 @@ describe("panel-tools: mode:'current' re-derives the workflow command fence (#77
   it("does NOT read the live canvas at all when the rebind DEFERRED (zero tabs connected)", async () => {
     // There is nothing to read from yet, and the deferred note already says so.
     // Probing anyway would turn a truthful deferral into a spurious failure.
-    // Collapse the real ~20s reconnect wait — this asserts a branch, not a clock.
+    // Collapse the real ~35s reconnect wait — this asserts a branch, not a clock.
     __panelToolsTestHooks.setReconnectWaitTiming({ budgetMs: 1, intervalMs: 1 });
     const sent: Array<Record<string, unknown>> = [];
     const refresh = vi.fn(() => true);

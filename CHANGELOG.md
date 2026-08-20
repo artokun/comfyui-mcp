@@ -759,13 +759,18 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- **`panel_graph_outline` after `panel_restart_comfyui` waits out a 26–28s Desktop recover (panel#654).**
+  The post-restart tab wait defaulted to 20s (`COMFYUI_PANEL_RECONNECT_WAIT_S`). ComfyUI Desktop recoveries of 26–28s after the server was already healthy expired that budget, so `panel_graph_outline` reported still reconnecting / `Connected: none` and only a hard browser refresh restored the tab. The default is now 35s (still capped at 60s).
+
 ## [0.52.34] - 2026-08-20
 
 ### MCP
 
 #### Fixed
 - mode:"current" may not claim a routing target the turn pin holds elsewhere (#1919)
-
 
 ## [0.52.33] - 2026-08-20
 
