@@ -1508,6 +1508,33 @@ export function isReplyTimeoutTagged(err: unknown): boolean {
 }
 
 /**
+ * panel#1524 — a POST-write mid-command disconnect: the request was written to a
+ * socket that then died before a reply. Distinct from a reply-timeout (the tab
+ * stayed connected and simply never answered) and from a pre-write send failure
+ * (`dispatched:false`). Callers that wait for a late mutation receipt — panel_run
+ * reconciling a `graph_run` that already queued — key on THIS marker rather than
+ * parsing "OUTCOME UNKNOWN" out of the message, for the same reason reply-timeout
+ * has a typed mark: an acked panel error can quote that sentence verbatim.
+ */
+const MID_COMMAND_DISCONNECT = Symbol.for("comfyui-mcp.bridge.mid-command-disconnect");
+
+/** Tag an error as a mid-command disconnect and return it (for throw/reject). */
+export function markMidCommandDisconnect<E extends Error>(err: E): E {
+  Object.defineProperty(err, MID_COMMAND_DISCONNECT, {
+    value: true,
+    enumerable: false,
+    configurable: true,
+  });
+  return err;
+}
+
+/** True when `err` carries the typed mid-command-disconnect marker. */
+export function isMidCommandDisconnectTagged(err: unknown): boolean {
+  if (err == null || (typeof err !== "object" && typeof err !== "function")) return false;
+  return (err as Record<symbol, unknown>)[MID_COMMAND_DISCONNECT] === true;
+}
+
+/**
  * Frame `type`s that are safe to MIRROR to a tab's viewers — genuine shared-session
  * activity a remote-control phone should see. This is an ALLOWLIST (default-deny):
  * a `cid`-based denylist leaked cid-less correlated replies (pair_url, secret_saved,
@@ -1790,8 +1817,12 @@ export class UiBridge {
    *  - MUTATIONS only. A read that is abandoned costs nothing because you just
    *    retry it (#1154's asymmetry); retaining reads would make this unbounded
    *    noise for no recoverable information.
-   *  - populated only when the TIMER fires. A mutation that replies in time
-   *    resolves its caller directly and has nothing to report later.
+   *  - populated when we STOP WAITING for a reply we already wrote — the reply
+   *    timer firing (#694), OR a mid-command disconnect of a filtered mutation
+   *    (panel#1524). A mutation that replies in time resolves its caller directly
+   *    and has nothing to report later. Without the disconnect arm, the panel's
+   *    lost-reply replay of a `graph_run` that already queued is an unknown rid
+   *    and is dropped — the caller is stuck with OUTCOME UNKNOWN for a paid render.
    */
   private timedOutMutations = new Map<string, { cmd: string; tabId: string; ts: number }>();
   /** Installed by the retry-token layer; see setLateMutationFilter. Null means
@@ -3008,7 +3039,7 @@ export class UiBridge {
         if (p.sock === sock) {
           clearTimeout(p.timer);
           this.pending.delete(rid);
-          this.handleMidCommandDisconnect(p);
+          this.handleMidCommandDisconnect(p, rid);
         }
       }
     });
@@ -4950,10 +4981,7 @@ export class UiBridge {
       // panel may still reply; without this the reply is an unknown rid and the
       // message loop drops it, which is precisely how a write that landed stays
       // invisible to the caller who was told "outcome unknown".
-      if (this.lateMutationFilter?.(cmd.cmd)) {
-        this.pruneLateMutations();
-        this.timedOutMutations.set(rid, { cmd: cmd.cmd, tabId: ctx.tabId, ts: Date.now() });
-      }
+      this.retainAbandonedMutation(rid, cmd.cmd, ctx.tabId);
       // This timer only fires AFTER sock.send() below returned successfully — the command
       // WAS WRITTEN to the socket; the tab (possibly backgrounded/frozen) merely didn't
       // reply in time and may still apply it. So this is a POST-write outcome: tag it
@@ -5051,10 +5079,21 @@ export class UiBridge {
     }
   }
 
+  /**
+   * Remember that we stopped waiting for `rid` so a later reply — a frozen tab
+   * catching up, or a lost-reply replay after reconnect — is retained instead of
+   * dropped as an unknown rid (#694, panel#1524).
+   */
+  private retainAbandonedMutation(rid: string, cmd: string, tabId: string): void {
+    if (!rid || !this.lateMutationFilter?.(cmd)) return;
+    this.pruneLateMutations();
+    this.timedOutMutations.set(rid, { cmd, tabId, ts: Date.now() });
+  }
+
   /** A pending command's socket died before its reply arrived. Decide, WITHOUT
    *  ever risking double execution, whether to wait for the tab to reconnect and
    *  resume (idempotent reads) or surface an honest outcome-unknown/gone error. */
-  private handleMidCommandDisconnect(pend: Pending): void {
+  private handleMidCommandDisconnect(pend: Pending, rid: string): void {
     const { ctx, cmd } = pend;
     const short = ctx.tabId.slice(0, 8);
     // Idempotent read, still within its deadline → park it for a bounded grace and
@@ -5098,15 +5137,21 @@ export class UiBridge {
     // bare failure invites a blind retry that double-applies the action (e.g. a
     // second render). Say the outcome is UNKNOWN so the caller verifies first.
     if (ctx.mutating) {
+      // panel#1524 — keep the rid so a lost-reply replay of a write that already
+      // applied (a `graph_run` that queued a paid render) is retained, not dropped.
+      // NEVER re-dispatch: resumeAwaitingReconnect is for idempotent reads only.
+      this.retainAbandonedMutation(rid, cmd, ctx.tabId);
       ctx.reject(
-        markDispatched(
-          new Error(
-            // #952 — the remedy depends on WHAT was interrupted. An interactive
-            // card cannot be checked with queue/get_image, and a retry after a
-            // reconnect duplicates it in front of a human.
-            midCommandDisconnectMessage({ short, cmd }),
+        markMidCommandDisconnect(
+          markDispatched(
+            new Error(
+              // #952 — the remedy depends on WHAT was interrupted. An interactive
+              // card cannot be checked with queue/get_image, and a retry after a
+              // reconnect duplicates it in front of a human.
+              midCommandDisconnectMessage({ short, cmd }),
+            ),
+            true,
           ),
-          true,
         ),
       );
     } else {

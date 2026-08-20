@@ -25,7 +25,11 @@ import {
   type ToolResult,
 } from "../../orchestrator/panel-tools.js";
 import { QueueMonitor } from "../../services/queue-monitor.js";
-import { markReplyTimeout } from "../../services/ui-bridge.js";
+import {
+  markDispatched,
+  markMidCommandDisconnect,
+  markReplyTimeout,
+} from "../../services/ui-bridge.js";
 import { WorkflowTargetStore } from "../../services/workflow-target-store.js";
 
 const TAB = "11111111-2222-4333-8444-555555555555";
@@ -316,5 +320,80 @@ describe("a graph_* timeout while a prompt is running is named QUEUE BUSY (#1639
     expect(res.isError).toBe(true);
     expect(text).toMatch(/did not reply to "graph_run"/);
     expect(text).not.toMatch(/QUEUE BUSY/);
+  });
+});
+
+describe("panel_run treats a post-queue disconnect as queued when the prompt is new (panel#1524)", () => {
+  function makeDisconnectBridge(afterDispatch?: () => void) {
+    const sent: string[] = [];
+    const bridge = {
+      send: async (cmd: Record<string, unknown>, o?: { onDispatchedRid?: (rid: string) => void }) => {
+        sent.push(String(cmd.cmd));
+        o?.onDispatchedRid?.("rid-disco-1");
+        afterDispatch?.();
+        throw markMidCommandDisconnect(
+          markDispatched(
+            new Error(
+              `panel tab ${TAB.slice(0, 8)} disconnected mid-command ("${cmd.cmd}") — OUTCOME UNKNOWN: ` +
+                `the command was already sent, so the panel may have applied it (for a run, ComfyUI may already be rendering).`,
+            ),
+            true,
+          ),
+        );
+      },
+      push: () => 1,
+      canReach: () => true,
+      isHeadless: () => false,
+      tabs: () => [{ tab_id: TAB, title: "wf", connected_at: 0 }],
+      resolveActiveTabId: () => TAB,
+      refreshWorkflowUuid: () => true,
+      workflowUuidFor: () => ({ known: true, uuid: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }),
+      tabCanMutateGraph: () => true,
+      tabGraphMutationCapability: () => ({ known: true, canMutate: true }),
+    } as unknown as PanelToolCtx["bridge"];
+    return { bridge, sent };
+  }
+
+  it("a NEW running prompt after graph_run disconnects is returned as queued:true", async () => {
+    const { bridge, sent } = makeDisconnectBridge(() => {
+      qm.state.runningPromptId = "p-poyo-queued";
+      qm.state.queueRemaining = 1;
+    });
+    const ctx = makePanelToolCtx(bridge, TAB, new WorkflowTargetStore());
+    const res = await defByName("panel_run").handler({ to_node_id: 3 } as never, ctx);
+    const text = textOf(res);
+
+    expect(sent).toEqual(["graph_run"]);
+    expect(res.isError, `expected queued success, got: ${text}`).toBeFalsy();
+    expect(text).toContain("p-poyo-queued");
+    expect(text).toContain("[RECOVERED]");
+    expect(text).toMatch(/queued:true|"queued":\s*true/);
+    expect(text).toContain("notified automatically");
+    expect(text).toMatch(/Do NOT re-run/i);
+  });
+
+  it("the SAME prompt that was already running is NOT claimed as this run", async () => {
+    startRender("p-already");
+    QueueMonitor.markSelfQueued("p-already");
+    const { bridge } = makeDisconnectBridge();
+    const ctx = makePanelToolCtx(bridge, TAB, new WorkflowTargetStore());
+    const res = await defByName("panel_run").handler({ allow_duplicate: true } as never, ctx);
+    const text = textOf(res);
+
+    expect(res.isError).toBe(true);
+    expect(text).toMatch(/OUTCOME UNKNOWN/);
+    expect(text).not.toContain("[RECOVERED]");
+  });
+
+  it("an idle queue after disconnect stays unknown — does not invent a prompt id", async () => {
+    const { bridge } = makeDisconnectBridge();
+    const ctx = makePanelToolCtx(bridge, TAB, new WorkflowTargetStore());
+    const res = await defByName("panel_run").handler({} as never, ctx);
+    const text = textOf(res);
+
+    expect(res.isError).toBe(true);
+    expect(text).toMatch(/OUTCOME UNKNOWN/);
+    expect(text).not.toContain("[RECOVERED]");
+    expect(text).not.toMatch(/"queued":\s*true/);
   });
 });

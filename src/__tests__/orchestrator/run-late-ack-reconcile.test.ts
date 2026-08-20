@@ -295,6 +295,60 @@ describe("panel_run reconciles a late graph_run acknowledgement (#1175)", () => 
   });
 });
 
+describe("panel_run reconciles a graph_run whose tab dropped after queueing (panel#1524)", () => {
+  it("THE REPORT: a paid run that queued then lost the tab is queued:true, not UNKNOWN", async () => {
+    const sock = await connectPanel("tab-disco-run");
+    const rids: string[] = [];
+    sock.on("message", (buf) => {
+      const msg = JSON.parse(buf.toString()) as { rid?: string; cmd?: string };
+      if (typeof msg.rid !== "string" || msg.cmd !== "graph_run") return;
+      rids.push(msg.rid);
+      sock.close();
+    });
+    const ctx = fastCtx("tab-disco-run", 5_000);
+    const runP = panelRun().handler({ to_node_id: 3 }, ctx);
+
+    for (let i = 0; i < 100 && rids.length === 0; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(rids, "graph_run must have been written before the drop").toHaveLength(1);
+    await settle();
+
+    const sock2 = await connectPanel("tab-disco-run");
+    sock2.send(
+      JSON.stringify({
+        rid: rids[0],
+        ok: true,
+        result: { queued: true, prompt_id: "p-poyo-1", ran_to_node: 3 },
+      }),
+    );
+
+    const res = await runP;
+    const text = textOf(res);
+    expect(res.isError, `expected a recovered success, got: ${text}`).toBeFalsy();
+    expect(text).toContain("p-poyo-1");
+    expect(text).toContain("[RECOVERED]");
+    expect(text).toContain("notified automatically");
+    expect(rids).toHaveLength(1);
+  });
+
+  it("a disconnect that never acknowledges and whose queue did not change stays unknown", async () => {
+    const sock = await connectPanel("tab-disco-silent");
+    sock.on("message", (buf) => {
+      const msg = JSON.parse(buf.toString()) as { rid?: string; cmd?: string };
+      if (typeof msg.rid === "string" && msg.cmd === "graph_run") sock.close();
+    });
+    __panelToolsTestHooks.setRunLateAckGraceMs(200);
+    const ctx = fastCtx("tab-disco-silent", 5_000);
+    const res = await panelRun().handler({}, ctx);
+    const text = textOf(res);
+    expect(res.isError).toBe(true);
+    expect(text).not.toContain("[RECOVERED]");
+    expect(text).toMatch(/disconnected mid-command \("graph_run"\)/);
+    expect(text).toMatch(/OUTCOME UNKNOWN/);
+  });
+});
+
 describe("UiBridge late-mutation retention keeps the reply body (#1175)", () => {
   it("peek does not drain, take does", async () => {
     const sock = await connectPanel("tab-peek");

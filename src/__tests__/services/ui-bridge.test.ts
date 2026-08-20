@@ -5068,6 +5068,46 @@ describe("UiBridge (late MUTATION outcome — #694)", () => {
     expect(bridge.takeLateMutation(rid)).toBeUndefined();
     sock.close();
   });
+
+  it("retains a mutation that completed after a mid-command disconnect (panel#1524)", async () => {
+    // The timeout path already retains. A disconnect used to reject immediately
+    // WITHOUT stashing the rid, so the panel's lost-reply replay of a write that
+    // already applied (graph_run that queued) was an unknown rid and was dropped.
+    const sock = await connectPanel("tab-disco-mut", "wf");
+    await waitFor(() =>
+      expect(bridge.tabs().some((t) => t.tab_id === "tab-disco-mut")).toBe(true),
+    );
+    let rid = "";
+    sock.on("message", (buf) => {
+      const msg = JSON.parse(buf.toString());
+      if (msg.rid && msg.cmd === "graph_set_node_mode") {
+        rid = msg.rid;
+        sock.close();
+      }
+    });
+    await expect(
+      bridge.send(
+        { cmd: "graph_set_node_mode", node_id: 1, mode: "active" },
+        { tabId: "tab-disco-mut", timeoutMs: 5000 },
+      ),
+    ).rejects.toThrow(/disconnected mid-command/);
+    expect(rid, "the command must have been written before the drop").toBeTruthy();
+
+    const sock2 = await connectPanel("tab-disco-mut", "wf");
+    await waitFor(() =>
+      expect(bridge.tabs().some((t) => t.tab_id === "tab-disco-mut")).toBe(true),
+    );
+    sock2.send(JSON.stringify({ rid, ok: true, result: { mode: "active" } }));
+    const late = await waitFor(() => {
+      const got = bridge.peekLateMutation(rid);
+      expect(got, "disconnect must retain the late receipt, not drop it").toBeTruthy();
+      return got;
+    });
+    expect(late?.ok).toBe(true);
+    expect(late?.cmd).toBe("graph_set_node_mode");
+    expect(late?.result).toEqual({ mode: "active" });
+    sock2.close();
+  });
 });
 
 // #952 — the headless tools failed with `fetch failed` while every panel tool

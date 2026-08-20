@@ -137,6 +137,7 @@ import {
   GRAPH_CMD_EFFECT,
   isCapabilityRefusal,
   isPanelCmdUnsupportedError,
+  isMidCommandDisconnectTagged,
   isReplyTimeoutTagged,
   isRoutingAmbiguity,
   requiresWorkflowStampEnforcement,
@@ -2681,6 +2682,32 @@ function carryReplyTimeoutMark(err: unknown, res: ToolResult): ToolResult {
  *  error can never carry this, whatever its text says. */
 function isReplyTimeoutResult(res: ToolResult): boolean {
   return res?.isError === true && (res as Record<symbol, unknown>)[REPLY_TIMEOUT_RESULT] === true;
+}
+
+/** panel#1524 — carry the bridge's typed mid-command-disconnect marker onto the
+ *  ToolResult the same way reply-timeout is carried: an acked panel error can
+ *  quote "OUTCOME UNKNOWN", so the reconcile must not key on message text. */
+const MID_COMMAND_DISCONNECT_RESULT = Symbol("panel.midCommandDisconnectResult");
+
+function carryMidCommandDisconnectMark(err: unknown, res: ToolResult): ToolResult {
+  if (!isMidCommandDisconnectTagged(err)) return res;
+  Object.defineProperty(res, MID_COMMAND_DISCONNECT_RESULT, {
+    value: true,
+    enumerable: false,
+    configurable: true,
+  });
+  return res;
+}
+
+function isMidCommandDisconnectResult(res: ToolResult): boolean {
+  return (
+    res?.isError === true && (res as Record<symbol, unknown>)[MID_COMMAND_DISCONNECT_RESULT] === true
+  );
+}
+
+/** A `graph_run` we wrote and then lost the reply for — timeout or disconnect. */
+function isUnackedGraphRunResult(res: ToolResult): boolean {
+  return isReplyTimeoutResult(res) || isMidCommandDisconnectResult(res);
 }
 
 /**
@@ -9489,7 +9516,7 @@ export function makePanelToolCtx(
     const res = await callOnce(cmd, timeoutMs, onDispatchedRid, (err) => {
       failure = err;
     });
-    return carryPanelAnsweredMark(failure, res);
+    return carryMidCommandDisconnectMark(failure, carryPanelAnsweredMark(failure, res));
   };
   // Human-in-the-loop confirmation for a DESTRUCTIVE op: render a yes/no card in
   // the panel and block on the user's pick. Returns false on decline, timeout, or
@@ -10291,44 +10318,84 @@ function runLateAckGraceMs(): number {
 }
 
 /**
- * Wait, bounded, for the panel to acknowledge a `graph_run` we stopped waiting
- * for — and hand back the reply it would have produced on time (#1175).
+ * Wait, bounded, for evidence that a `graph_run` we stopped waiting for still
+ * queued — and hand back the reply it would have produced on time (#1175,
+ * panel#1524).
  *
- * Returns null when there is nothing to reconcile, which is every case except a
- * retained `graph_run` success WITH its body. The negatives are deliberate:
+ * Two receipts, in this order:
  *
- *  - NOT a reply timeout ⇒ nothing to wait for. Gated on the bridge's own typed
- *    mark, never on message text: an acked panel error can quote our timeout
- *    sentence verbatim (#1468 round 2), and the difference between the two is
- *    whether the tab answered, which only the bridge knows.
- *  - NO retained body ⇒ leave the entry ALONE. The retry-token layer drains this
- *    same rid to tell the caller their earlier attempt landed; consuming it here
- *    to answer a question we then could not act on would delete the recovery the
- *    caller still had. Hence peek-then-take.
- *  - A DIFFERENT command's entry ⇒ leave it alone for the same reason. The rid is
- *    ours, so this should not happen; if it ever does, the safe reading of a
- *    surprise is not to spend someone else's notice on it.
+ *  1. The panel's own late `graph_run` body, retained by the bridge after a
+ *     reply-timeout (#1175) or a mid-command disconnect (panel#1524). Stronger:
+ *     it is the executor's answer, rid-correlated.
+ *  2. A prompt id that appeared in ComfyUI's queue AFTER this dispatch, which
+ *     was not the in-flight prompt when we sent `graph_run`. Weaker: inferred
+ *     from the watchdog, not the panel. Used when the tab dropped before
+ *     acknowledging a paid render that is observably running.
+ *
+ * Returns null when there is nothing to reconcile. The negatives are deliberate:
+ *
+ *  - NOT an unacked post-write (timeout or disconnect) ⇒ nothing to wait for.
+ *    Gated on the bridge's own typed marks, never on message text: an acked
+ *    panel error can quote our timeout/OUTCOME UNKNOWN sentence verbatim
+ *    (#1468 round 2), and the difference is whether the tab answered, which
+ *    only the bridge knows.
+ *  - NO retained body AND no new queue prompt ⇒ leave any unusable late-mutation
+ *    entry ALONE. The retry-token layer drains this same rid to tell the caller
+ *    their earlier attempt landed; consuming it here to answer a question we
+ *    then could not act on would delete the recovery the caller still had.
+ *    Hence peek-then-take.
+ *  - A DIFFERENT command's entry ⇒ leave it alone for the same reason.
+ *  - The SAME prompt that was already running at dispatch ⇒ not this command's
+ *    receipt. Claiming it would launder a prior render as this run.
  */
+function promptAppearedAfterDispatch(preRunningPromptId: string | null | undefined): string | null {
+  const id = QueueMonitor.snapshot().runningPromptId;
+  if (typeof id !== "string") return null;
+  const now = id.trim();
+  if (now === "") return null;
+  const pre =
+    typeof preRunningPromptId === "string" && preRunningPromptId.trim() !== ""
+      ? preRunningPromptId.trim()
+      : null;
+  if (pre !== null && now === pre) return null;
+  return now;
+}
+
 async function reconcileLateRunAck(
   ctx: PanelToolCtx,
   res: ToolResult,
   rid: string | undefined,
-): Promise<{ result: unknown; lateByMs: number } | null> {
-  if (!rid || !isReplyTimeoutResult(res)) return null;
+  preRunningPromptId?: string | null,
+): Promise<{ result: unknown; lateByMs: number; via: "ack" | "queue" } | null> {
+  if (!isUnackedGraphRunResult(res)) return null;
+  const fromQueue = (): { result: unknown; lateByMs: number; via: "queue" } | null => {
+    const promptId = promptAppearedAfterDispatch(preRunningPromptId);
+    if (!promptId) return null;
+    return { result: { queued: true, prompt_id: promptId }, lateByMs: 0, via: "queue" };
+  };
   const bridge = ctx.bridge;
-  if (typeof bridge?.peekLateMutation !== "function") return null;
-  if (typeof bridge?.takeLateMutation !== "function") return null;
-  const deadline = Date.now() + runLateAckGraceMs();
+  const canPeek =
+    Boolean(rid) &&
+    typeof bridge?.peekLateMutation === "function" &&
+    typeof bridge?.takeLateMutation === "function";
+  // Stubbed bridges in unit tests have no late-mutation map. One-shot the queue
+  // (no grace wait) so a timeout whose prompt did not change still returns in
+  // the same tick it always has.
+  if (!canPeek) return fromQueue();
+  const startedAt = Date.now();
+  const deadline = startedAt + runLateAckGraceMs();
   for (;;) {
-    const seen = bridge.peekLateMutation(rid);
+    const seen = bridge.peekLateMutation(rid!);
     if (seen) {
-      if (seen.cmd !== "graph_run" || !("result" in seen)) return null;
+      if (seen.cmd !== "graph_run" || !("result" in seen)) return fromQueue();
       // Only now is it certain this entry will be USED, so draining it costs the
       // caller nothing: they are about to be handed its contents.
-      const taken = bridge.takeLateMutation(rid);
-      if (!taken || !("result" in taken)) return null;
-      return { result: taken.result, lateByMs: taken.lateByMs };
+      const taken = bridge.takeLateMutation(rid!);
+      if (!taken || !("result" in taken)) return fromQueue();
+      return { result: taken.result, lateByMs: taken.lateByMs, via: "ack" };
     }
+    const queued = fromQueue();
+    if (queued) return { ...queued, lateByMs: Date.now() - startedAt };
     const left = deadline - Date.now();
     if (left <= 0) return null;
     await sleep(Math.max(1, Math.min(RUN_LATE_ACK_POLL_MS, left)));
@@ -10347,6 +10414,18 @@ function lateRunAckNote(lateByMs: number): string {
     `duplicate render. You may see the earlier attempt described as outcome-unknown in a log; ` +
     `this is its outcome. (A queue listing taken in the moments after a run is accepted can still ` +
     `be empty, so an empty queue would not have settled this either way.)`
+  );
+}
+
+/** panel#1524 — the panel never acknowledged, but the queue holds a prompt this
+ *  dispatch created. Names the id and says we did not re-issue. */
+function queueRunReceiptNote(promptId: string): string {
+  return (
+    `\n\n[RECOVERED] The panel tab disconnected (or missed its ack) before acknowledging this ` +
+    `graph_run, but ComfyUI's queue now contains prompt ${promptId} — which was not the in-flight ` +
+    `prompt when this command was dispatched. Treating that as this run's receipt (queued:true). ` +
+    `Nothing was dispatched a second time. Do NOT re-run: a second panel_run would bill/queue ` +
+    `another render behind the one already running.`
   );
 }
 
@@ -12541,10 +12620,17 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         // guidance. Rebuilding the reply here (rather than describing it) is what
         // makes that possible — `ok()` is exactly what ctx.call would have produced.
         const reconcileRun = async (): Promise<void> => {
-          const recovered = await reconcileLateRunAck(ctx, res, runRid);
+          const recovered = await reconcileLateRunAck(ctx, res, runRid, pre.runningPromptId);
           if (!recovered) return;
           res = ok(recovered.result);
-          lateAckNote = lateRunAckNote(recovered.lateByMs);
+          lateAckNote =
+            recovered.via === "queue"
+              ? queueRunReceiptNote(
+                  typeof (recovered.result as { prompt_id?: unknown }).prompt_id === "string"
+                    ? (recovered.result as { prompt_id: string }).prompt_id
+                    : "?",
+                )
+              : lateRunAckNote(recovered.lateByMs);
         };
         await reconcileRun();
         // Derive the verdict from the AUTHORITATIVE reply, not a bare `queued`
