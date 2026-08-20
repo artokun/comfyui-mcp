@@ -314,6 +314,22 @@ describe("classifyDesktopSupervision — is anything going to start this again? 
     expect(parentUnreadableAt).toBe(500);
   });
 
+  it("a parent that exists but cannot be identified is unconfirmed at that hop (#1847)", () => {
+    // Distinct from parentUnreadableAt: the parent PID was read and is alive.
+    // #1647 must not treat this as "the host cannot read parentage at all".
+    const { verdict, parentUnreadableAt, parentIdentityUnreadableAt, because } =
+      classifyDesktopSupervision(
+        tree({
+          500: { parent: 300, started: "5000" },
+          300: { started: "2000" },
+        }),
+      );
+    expect(verdict).toBe("unconfirmed");
+    expect(parentUnreadableAt).toBeUndefined();
+    expect(parentIdentityUnreadableAt).toBe(500);
+    expect(because).toMatch(/exists but what it is running could not be read/i);
+  });
+
   it("an unreadable parent DEEPER in the chain is marked at that hop, not the first", () => {
     // The walk read one link fine (a wrapper), then ran out of road. The marker
     // names the hop that actually failed, so the #1647 fallback — which exists for
@@ -1435,6 +1451,123 @@ describe("restart_comfyui — a Desktop reboot needs a supervisor that is actual
     expect(result.message).toMatch(/the parent process of PID 300 could not be read/i);
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(killWasIssued()).toBe(false);
+  });
+
+  const DESKTOP_MODELS =
+    "C:\\Users\\u\\AppData\\Roaming\\Comfy Desktop\\shared_model_paths.yaml";
+
+  function unreadableParentIdentity(): void {
+    __processControlTestHooks.setProcessIdentityResolver((pid) =>
+      pid === 4321 ? { startedAt: "5000", parentPid: 300 } : undefined,
+    );
+    __processControlTestHooks.setParentPidResolver((pid) => (pid === 4321 ? 300 : undefined));
+    __processControlTestHooks.setProcessExistsProbe(() => true);
+  }
+
+  function proveLaunchFilesOnDisk(): void {
+    mockExistsSync.mockImplementation((p: string) => {
+      const s = String(p);
+      return s === ABS_MAIN || s === ABS_PYTHON || s === DESKTOP_MODELS;
+    });
+  }
+
+  it("#1847: parent exists but is unreadable — REFUSES when the instance-model-paths config is missing", async () => {
+    // The reporter's shape minus one proven file: parent PID is alive, its
+    // command line cannot be read, and the extra-model-paths config is not on
+    // disk. Fail closed — nothing is stopped.
+    desktopServer();
+    unreadableParentIdentity();
+    const fetchSpy = vi.fn(async () => ({ ok: true }) as Response);
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const result = await restartComfyUI();
+
+    expect(result.message).toMatch(/refusing to restart/i);
+    expect(result.message).toMatch(/exists but what it is running could not be read/i);
+    expect(result.message).toMatch(/instance-model-paths config does not exist on disk/i);
+    expect(result.stopped).toBe(false);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(killWasIssued()).toBe(false);
+  });
+
+  it("#1847: parent exists but is unreadable — proven launch files allow Manager reboot", async () => {
+    // The reporter's case: sys.argv, interpreter, main.py, and the Desktop
+    // instance-model-paths config all resolve on disk. Confirmation/preflight
+    // may proceed; nothing is killed locally (#400).
+    desktopServer();
+    unreadableParentIdentity();
+    proveLaunchFilesOnDisk();
+    __processControlTestHooks.setRemoteRebootTimingForTests({
+      settleMs: 0,
+      budgetMs: 50,
+      intervalMs: 10,
+    });
+    const fetchSpy = vi.fn(async () => ({ ok: true, status: 200 }) as Response);
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const result = await restartComfyUI();
+
+    expect(result.message).not.toMatch(/refusing to restart/i);
+    expect(result.message).toMatch(/launch command is proven on disk/i);
+    expect(fetchSpy).toHaveBeenCalled();
+    expect(killWasIssued()).toBe(false);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it("#1847: after Manager stops and the port frees, relaunches the proven command", async () => {
+    desktopServer();
+    unreadableParentIdentity();
+    proveLaunchFilesOnDisk();
+    __processControlTestHooks.setRemoteRebootTimingForTests({
+      settleMs: 0,
+      budgetMs: 40,
+      intervalMs: 10,
+    });
+    let managerStopped = false;
+    let spawned = false;
+    mockExecSync.mockImplementation((cmd: string) => {
+      if (/taskkill|pkill|\bkill\b/i.test(cmd)) return "";
+      if (/netstat/i.test(cmd)) {
+        if (spawned) return "  TCP    0.0.0.0:8188   0.0.0.0:0   LISTENING       9999";
+        if (managerStopped) return "";
+        return "  TCP    0.0.0.0:8188   0.0.0.0:0   LISTENING       4321";
+      }
+      if (/lsof/i.test(cmd)) {
+        if (spawned) return "p9999\nn127.0.0.1:8188\n";
+        if (managerStopped) throw noListener();
+        return "p4321\nn127.0.0.1:8188\n";
+      }
+      return "";
+    });
+    const fetchSpy = vi.fn(async (input: unknown) => {
+      const url = String(input);
+      if (/reboot/i.test(url)) {
+        managerStopped = true;
+        return { ok: true, status: 200 } as Response;
+      }
+      if (spawned) return { ok: true, status: 200 } as Response;
+      if (managerStopped) throw new Error("ECONNREFUSED");
+      return { ok: true, status: 200 } as Response;
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    mockSpawn.mockImplementation(() => {
+      spawned = true;
+      const child = new FakeChild();
+      child.pid = 9999;
+      return child;
+    });
+
+    const result = await restartComfyUI();
+
+    expect(result.message).not.toMatch(/refusing to restart/i);
+    expect(mockSpawn).toHaveBeenCalled();
+    const [exe, args] = mockSpawn.mock.calls[0] as [string, string[]];
+    expect(exe).toBe(ABS_PYTHON);
+    expect(args[0]).toBe(ABS_MAIN);
+    expect(args).toContain("--extra-model-paths-config");
+    expect(args).toContain(DESKTOP_MODELS);
+    expect(killWasIssued()).toBe(false);
+    expect(result.message).toMatch(/proven launch command/i);
   });
 
   it("a wedged DESKTOP instance is recognised from the OS command line and never killed", async () => {

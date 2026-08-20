@@ -1106,6 +1106,63 @@ describe("restart truthfulness + Pinokio-shaped refusal (#742)", () => {
     expect(preflight.note).toMatch(/could not be read/i);
   });
 
+  it("preflightLocalRestart PASSES a Desktop app whose parent exists but is unreadable when launch files are proven (#1847)", async () => {
+    mockLivePortNoKill();
+    mockGetSystemStats.mockResolvedValue({
+      system: {
+        argv: [
+          "C:\\Users\\x\\AppData\\Local\\Programs\\Comfy Desktop\\resources\\ComfyUI\\main.py",
+          "--enable-manager",
+          "--extra-model-paths-config",
+          "C:\\Users\\x\\AppData\\Roaming\\Comfy Desktop\\instance-model-paths.yaml",
+          "--port",
+          "8188",
+        ],
+      },
+    });
+    __processControlTestHooks.setProcessIdentityResolver((pid) =>
+      pid === 4321 ? { startedAt: "5000", parentPid: 300 } : undefined,
+    );
+    __processControlTestHooks.setParentPidResolver((pid) => (pid === 4321 ? 300 : undefined));
+    __processControlTestHooks.setProcessExistsProbe(() => true);
+
+    const preflight = await preflightLocalRestart();
+
+    expect(preflight.ok).toBe(true);
+    expect(preflight.selfRelaunch).toBe(true);
+    expect(preflight.note).toMatch(/launch command is proven on disk/i);
+    expect(preflight.note).toMatch(/exists but what it is running could not be read/i);
+  });
+
+  it("preflightLocalRestart REFUSES that same unreadable parent when the instance-model-paths config is missing (#1847)", async () => {
+    mockLivePortNoKill();
+    mockGetSystemStats.mockResolvedValue({
+      system: {
+        argv: [
+          "C:\\Users\\x\\AppData\\Local\\Programs\\Comfy Desktop\\resources\\ComfyUI\\main.py",
+          "--enable-manager",
+          "--extra-model-paths-config",
+          "C:\\Users\\x\\AppData\\Roaming\\Comfy Desktop\\instance-model-paths.yaml",
+          "--port",
+          "8188",
+        ],
+      },
+    });
+    mockExistsSync.mockImplementation(
+      (p: string) => !/instance-model-paths\.yaml/i.test(String(p)),
+    );
+    __processControlTestHooks.setProcessIdentityResolver((pid) =>
+      pid === 4321 ? { startedAt: "5000", parentPid: 300 } : undefined,
+    );
+    __processControlTestHooks.setParentPidResolver((pid) => (pid === 4321 ? 300 : undefined));
+    __processControlTestHooks.setProcessExistsProbe(() => true);
+
+    const preflight = await preflightLocalRestart();
+
+    expect(preflight.ok).toBe(false);
+    expect(preflight.reason).toMatch(/instance-model-paths config does not exist on disk/i);
+  });
+
   it("preflightLocalRestart REFUSES when no running process can be identified", async () => {
     // The door beside the gate: an instance whose listener cannot be attributed — a
     // container with no `lsof`, a permission wall — used to resolve to NOTHING and

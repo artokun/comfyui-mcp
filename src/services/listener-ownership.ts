@@ -100,6 +100,16 @@ export interface SupervisionAssessment {
    * read and found ambiguous partway up.
    */
   parentUnreadableAt?: number;
+  /**
+   * Set when a parent PID was read and exists, but neither its command line nor
+   * its executable could be identified. Distinct from `parentUnreadableAt` on
+   * purpose: that one is "the host cannot read parentage at all" (#1647). This
+   * one is "a live parent is sitting there and we cannot tell what it is"
+   * (#1847). Inferring Desktop supervision from argv would be a guess about a
+   * process we failed to identify; the caller may still relaunch if every
+   * launch component is proven on disk.
+   */
+  parentIdentityUnreadableAt?: number;
 }
 
 export interface SupervisionEvidence {
@@ -263,7 +273,12 @@ export function classifyDesktopSupervision(
     // authenticated evidence that exists precisely to settle this question would
     // never be consulted (codex gate round 4).
     if (!identity || (!identity.commandLine && !identity.executablePath)) {
-      return unconfirmed(`PID ${parent} (the parent of PID ${current}) exists but what it is running could not be read`);
+      return {
+        ...unconfirmed(
+          `PID ${parent} (the parent of PID ${current}) exists but what it is running could not be read`,
+        ),
+        parentIdentityUnreadableAt: current,
+      };
     }
     // IS THIS REALLY THE PARENT, or just whoever holds that number now? A pid
     // recorded in a child's record outlives the process that earned it, and the

@@ -762,6 +762,10 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Fixed
+- **`panel_restart_comfyui` relaunches a Desktop instance when the parent PID exists but its command line cannot be read (#1847).**
+  The parent-process walk used to refuse as soon as a live parent could not be identified, even when the connected server had already exposed a complete `sys.argv`, the live ComfyUI path, the `.venv` interpreter, `main.py`, and the instance-model-paths config. Newly installed custom nodes then needed a manual Desktop restart.
+
+  When that first-hop identity is unreadable, the restart now fail-closes on disk proof instead of guessing that Desktop is still supervising: if the interpreter, `main.py`, `sys.argv`, and every `--extra-model-paths-config` file resolve on disk, the confirmation card is offered and Manager stops the old server; the proven command is what brings it back. Any missing file keeps the current refusal. A parent proven gone (#814) and a chain that went unreadable deeper than the first hop are unchanged.
 - a queued tool-session respawn sees the downloads started after the save, instead of killing them with no warning (#1567)
 - it waits on those transfers' live byte counts rather than treating every one as already stalled (#1567)
 

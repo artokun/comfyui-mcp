@@ -838,6 +838,7 @@ export const __panelToolsTestHooks = {
           observedArgv?: string[];
           isDesktopApp?: boolean;
           note?: string;
+          selfRelaunch?: boolean;
         }>)
       | null,
   ): void {
@@ -2331,6 +2332,7 @@ let localRestartPreflightOverride:
       observedArgv?: string[];
       isDesktopApp?: boolean;
       note?: string;
+      selfRelaunch?: boolean;
     }>)
   | null = null;
 
@@ -15691,6 +15693,10 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         // process tree was unreadable, so the launch signatures stood in). Appended
         // to the outcome note below — a dispatch allowed on an inference says so.
         let preflightNote: string | undefined;
+        // #1847: proven python-command relaunch when Desktop parent inspection
+        // could not identify a supervisor. Routes to Manager-stop + spawn
+        // instead of waiting for a shell we could not prove.
+        let preflightSelfRelaunch = false;
         // The target generation as of BEFORE the preflight resolved that argv, so the
         // whole span up to the post-restart reading sits inside one instance fence.
         let preflightArgvGeneration = -1;
@@ -15723,6 +15729,7 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
           preflightArgv = preflight.observedArgv;
           preflightIsDesktop = preflight.isDesktopApp === true;
           preflightNote = preflight.note;
+          preflightSelfRelaunch = preflight.selfRelaunch === true;
           preflightArgvGeneration = preflightTargetGeneration;
           // r8/r9/r10: the preflight AWAIT makes the pre-decision captures
           // STALE — and the preflight itself reads MUTABLE config (target URL,
@@ -15851,6 +15858,22 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
                 observedOrigin: ctx.bridge?.tabServerOrigin?.(ctx.tabId) ?? null,
               }),
           );
+        }
+        // #1847: parent-process inspection could not identify a Desktop
+        // supervisor, but the launch command is proven on disk. Do not wait for
+        // a shell we failed to identify — Manager-stop then spawn that command.
+        if (preflightSelfRelaunch && healthBase != null && dispatchBound) {
+          return runHeadlessManagedRestart({
+            healthBase,
+            preRestartPanelIdentity,
+            why:
+              "Desktop parent-process inspection could not identify a supervisor, and the launch command is proven on disk",
+            mechanism: "a Manager stop followed by that proven launch command",
+            noteHealthyLead:
+              "Desktop parent-process inspection could not identify a supervisor; the proven launch command",
+            noteRanLead:
+              "Desktop parent-process inspection could not identify a supervisor; ran a Manager stop then the proven launch command",
+          });
         }
         const timing = getPanelRebootTiming();
         const dispatchTimeout = Math.max(1, Math.min(15000, overallDeadline - Date.now()));
