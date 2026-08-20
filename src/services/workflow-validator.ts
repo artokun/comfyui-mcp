@@ -2,6 +2,7 @@ import type { WorkflowJSON, ObjectInfo, NodeInputSpec } from "../comfyui/types.j
 import { getObjectInfo } from "../comfyui/client.js";
 import { logger } from "../utils/logger.js";
 import { analyzeGraphHealth, type GraphHealth } from "./workflow-health.js";
+import { convertUiToApi, isUiFormat } from "./workflow-converter.js";
 
 export interface ValidationIssue {
   severity: "error" | "warning" | "info";
@@ -36,7 +37,9 @@ export interface ValidationResult {
  * Validate a workflow without executing it.
  * Checks for missing nodes, broken connections, type mismatches, and missing models.
  *
- * @param workflow The workflow to validate (API format).
+ * @param workflow The workflow to validate (API format, or a UI-format graph with
+ *   nodes[]/links[] — converted via convertUiToApi so saved canvas exports can be
+ *   checked without a prior strip).
  * @param options.health Merge graph-health heuristics (disconnected nodes, duplicate
  *   model loads, orphaned branches, muted/bypassed) as info/warning issues plus a
  *   structured `health` section. Health findings NEVER flip `valid`. Default true.
@@ -67,11 +70,27 @@ export async function validateWorkflow(
     };
   }
 
-  const nodeIds = Object.keys(workflow);
+  // Saved UI exports pair widgets_values against object_info. Convert first so
+  // validate_workflow on a canvas JSON hits the same alignment as /prompt (#1869).
+  let graph: WorkflowJSON = workflow;
+  if (isUiFormat(workflow)) {
+    const converted = convertUiToApi(workflow, objectInfo);
+    graph = converted.workflow;
+    for (const message of converted.warnings) {
+      issues.push({
+        severity: "warning",
+        node_id: "",
+        node_type: "",
+        message,
+      });
+    }
+  }
+
+  const nodeIds = Object.keys(graph);
 
   // 2. Check each node
   for (const nodeId of nodeIds) {
-    const node = workflow[nodeId];
+    const node = graph[nodeId];
     const classType = node.class_type;
 
     // 2a. Check node type exists
@@ -113,7 +132,7 @@ export async function validateWorkflow(
         typeof value[1] === "number"
       ) {
         const [sourceId, outputIndex] = value;
-        if (!workflow[sourceId]) {
+        if (!graph[sourceId]) {
           issues.push({
             severity: "error",
             node_id: nodeId,
@@ -124,7 +143,7 @@ export async function validateWorkflow(
         }
 
         // Check output index is valid
-        const sourceNode = workflow[sourceId];
+        const sourceNode = graph[sourceId];
         const sourceDef = objectInfo[sourceNode.class_type];
         if (sourceDef && sourceDef.output) {
           if (outputIndex >= sourceDef.output.length) {
@@ -145,7 +164,7 @@ export async function validateWorkflow(
 
   // 3. Check for cycles (basic: no self-references)
   for (const nodeId of nodeIds) {
-    const node = workflow[nodeId];
+    const node = graph[nodeId];
     for (const [inputName, value] of Object.entries(node.inputs)) {
       if (
         Array.isArray(value) &&
@@ -164,7 +183,7 @@ export async function validateWorkflow(
 
   // 4. Check for output nodes
   const hasOutput = nodeIds.some((id) => {
-    const ct = workflow[id].class_type;
+    const ct = graph[id].class_type;
     return (
       ct === "SaveImage" ||
       ct === "PreviewImage" ||
@@ -185,7 +204,7 @@ export async function validateWorkflow(
   // 5. Graph-health heuristics (merged as info/warning issues — never flip `valid`).
   let health: GraphHealth | undefined;
   if (includeHealth) {
-    health = analyzeGraphHealth(workflow, objectInfo);
+    health = analyzeGraphHealth(graph, objectInfo);
     for (const f of health.findings) {
       // Authoritative missing_required_input is already reported as an error above
       // (step 2b) for installed nodes — don't double-report. The heuristic variant

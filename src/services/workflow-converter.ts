@@ -575,6 +575,191 @@ function getOrderedInputNames(def: ComfyUINodeDef): string[] {
   return names;
 }
 
+function widgetSpecOf(def: ComfyUINodeDef, name: string): unknown {
+  return (
+    (def.input?.required as Record<string, unknown> | undefined)?.[name] ??
+    (def.input?.optional as Record<string, unknown> | undefined)?.[name]
+  );
+}
+
+function isAssetComboSpec(name: string, spec: unknown, classType: string): boolean {
+  return (
+    ASSET_WIDGET_NAMES.has(name) ||
+    isKnownLoaderInput(classType, name) ||
+    isUploadSelectorSpec(spec)
+  );
+}
+
+/**
+ * INT / FLOAT / BOOLEAN (including combined FLOAT,INT). These can never
+ * legitimately hold a serialized action-button token, so a type mismatch is
+ * always safe to skip — even when the row length already matches the schema.
+ */
+function numericOrBooleanParts(spec: unknown): string[] | undefined {
+  if (!Array.isArray(spec)) return undefined;
+  const type = spec[0];
+  const cfg = spec[1] as { widgetType?: unknown } | undefined;
+  const t = typeof cfg?.widgetType === "string" ? cfg.widgetType : type;
+  if (typeof t !== "string") return undefined;
+  const parts = t.split(",").map((s) => s.trim()).filter(Boolean);
+  if (parts.length === 0) return undefined;
+  if (!parts.every((p) => p === "INT" || p === "FLOAT" || p === "BOOLEAN")) {
+    return undefined;
+  }
+  return parts;
+}
+
+function valueFitsNumericOrBoolean(value: unknown, parts: string[]): boolean {
+  if (parts.length === 1 && parts[0] === "BOOLEAN") return typeof value === "boolean";
+  if (parts.includes("INT") && !parts.includes("FLOAT")) {
+    return typeof value === "number" && Number.isInteger(value);
+  }
+  return typeof value === "number";
+}
+
+function valueFitsEnum(value: unknown, spec: unknown): boolean {
+  const comboOpts = getComboOptions(spec);
+  return Array.isArray(comboOpts) && comboOpts.includes(value as never);
+}
+
+/**
+ * Saved-row length vs remaining schema slots. Undefined when a later
+ * dynamic combo makes nested arity unknowable — extras-skipping must then
+ * stay off (a guess would be the same silent shift this exists to prevent).
+ */
+function remainingPositionalSlots(
+  widgetNames: string[],
+  fromIdx: number,
+  def: ComfyUINodeDef,
+): number | undefined {
+  let n = 0;
+  for (let i = fromIdx; i < widgetNames.length; i++) {
+    const spec = widgetSpecOf(def, widgetNames[i]);
+    const type = Array.isArray(spec) ? spec[0] : undefined;
+    if (type === "COMFY_DYNAMICCOMBO_V3") return undefined;
+    n += 1;
+    if (hasControlAfterGenerate(widgetNames[i], def)) n += 1;
+  }
+  return n;
+}
+
+/**
+ * Frontend-only action buttons (`addWidget("button", …)`) serialize their
+ * value token into `widgets_values` and are absent from /object_info, so
+ * pairing from slot 0 lands `browse`/`open_in_explorer`/`copy_path` on
+ * real inputs and shifts the rest — including an interspersed `detect_range`
+ * sitting between a combo and an INT (#1869).
+ *
+ * Snake-case identifier matching the LiteGraph button default-value shape.
+ * Used only when the saved row is LONGER than the schema, so a same-length
+ * stale combo (the #504 substitute path) is left alone.
+ */
+const SERIALIZED_ACTION_BUTTON_VALUE = /^[a-z][a-z0-9_]*$/;
+
+function looksLikeSerializedActionButton(value: unknown): boolean {
+  return typeof value === "string" && SERIALIZED_ACTION_BUTTON_VALUE.test(value);
+}
+
+/**
+ * Advance past serialized frontend-only extras that cannot belong to this
+ * schema widget. Returns the index of the first value that should be paired.
+ */
+function skipSerializedActionWidgets(opts: {
+  values: unknown[];
+  widgetIdx: number;
+  spec: unknown;
+  name: string;
+  classType: string;
+  def: ComfyUINodeDef;
+  widgetNames: string[];
+  nameIdx: number;
+}): number {
+  let widgetIdx = opts.widgetIdx;
+  const { values, spec, name, classType, def, widgetNames, nameIdx } = opts;
+  const nbParts = numericOrBooleanParts(spec);
+
+  while (widgetIdx < values.length) {
+    const candidate = values[widgetIdx];
+    if (nbParts && !valueFitsNumericOrBoolean(candidate, nbParts)) {
+      widgetIdx++;
+      continue;
+    }
+
+    const remainingSlots = remainingPositionalSlots(widgetNames, nameIdx, def);
+    const extras =
+      remainingSlots === undefined
+        ? 0
+        : Math.max(0, values.length - widgetIdx - remainingSlots);
+    if (extras <= 0) break;
+
+    const comboOpts = getComboOptions(spec);
+    if (Array.isArray(comboOpts) && comboOpts.length > 0) {
+      if (comboOpts.includes(candidate as never)) break;
+      if (!isAssetComboSpec(name, spec, classType)) {
+        widgetIdx++;
+        continue;
+      }
+    }
+
+    if (!looksLikeSerializedActionButton(candidate)) break;
+
+    let nextStrictSpec: unknown;
+    let nextStrictNameIdx = -1;
+    for (let i = nameIdx + 1; i < widgetNames.length; i++) {
+      const laterSpec = widgetSpecOf(def, widgetNames[i]);
+      if (numericOrBooleanParts(laterSpec)) {
+        nextStrictSpec = laterSpec;
+        nextStrictNameIdx = i;
+        break;
+      }
+      const laterCombo = getComboOptions(laterSpec);
+      if (
+        Array.isArray(laterCombo) &&
+        laterCombo.length > 0 &&
+        !isAssetComboSpec(widgetNames[i], laterSpec, classType)
+      ) {
+        nextStrictSpec = laterSpec;
+        nextStrictNameIdx = i;
+        break;
+      }
+    }
+
+    if (nextStrictNameIdx < 0) {
+      const laterNonAction = values.slice(widgetIdx + 1).some(
+        (v) =>
+          typeof v === "string" &&
+          !looksLikeSerializedActionButton(v) &&
+          !CONTROL_AFTER_GENERATE_MODES.has(v),
+      );
+      if (laterNonAction) {
+        widgetIdx++;
+        continue;
+      }
+      break;
+    }
+
+    let fitAt = -1;
+    for (let i = widgetIdx + 1; i < values.length; i++) {
+      const laterNb = numericOrBooleanParts(nextStrictSpec);
+      if (laterNb ? valueFitsNumericOrBoolean(values[i], laterNb) : valueFitsEnum(values[i], nextStrictSpec)) {
+        fitAt = i;
+        break;
+      }
+    }
+    if (fitAt < 0) break;
+
+    const gap = values.slice(widgetIdx, fitAt);
+    const looseWidgetsUntilStrict = nextStrictNameIdx - nameIdx;
+    const gapStrings = gap.filter((v) => typeof v === "string").length;
+    if (gapStrings > looseWidgetsUntilStrict) {
+      widgetIdx++;
+      continue;
+    }
+    break;
+  }
+  return widgetIdx;
+}
+
 // ── De-virtualization (Get/Set/Reroute) pre-pass ────────────────────────────
 
 /**
@@ -2719,6 +2904,22 @@ export function convertUiToApi(
     const nestedKeysFromDynamic: string[] = [];
     for (let nameIdx = 0; nameIdx < widgetNames.length; nameIdx++) {
       const name = widgetNames[nameIdx];
+      const spec =
+        (def.input?.required as Record<string, unknown>)?.[name] ??
+        (def.input?.optional as Record<string, unknown>)?.[name];
+      // #1869 — frontend-only action buttons serialize into widgets_values but
+      // are absent from object_info. Skip them before pairing this schema widget
+      // so `browse`/`detect_range` cannot land on file_path/first_frame.
+      widgetIdx = skipSerializedActionWidgets({
+        values: widgetValues,
+        widgetIdx,
+        spec,
+        name,
+        classType,
+        def,
+        widgetNames,
+        nameIdx,
+      });
       if (widgetIdx >= widgetValues.length) break;
       // A widget mapped AFTER a still-valid dynamic combo is positionally
       // downstream of its (unverifiable) nested arity — record it for the
@@ -2739,9 +2940,6 @@ export function convertUiToApi(
 
       // V3 dynamic combo: the selected option adds nested required inputs whose
       // values follow in widgets_values (e.g. method="rcas" -> strength=0.55).
-      const spec =
-        (def.input?.required as Record<string, unknown>)?.[name] ??
-        (def.input?.optional as Record<string, unknown>)?.[name];
 
       // Classic combo widget: if the saved value isn't one of the valid options
       // (a stale UI-helper combo like Impact's "Select to add Wildcard", or a

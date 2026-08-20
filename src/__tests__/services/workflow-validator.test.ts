@@ -182,3 +182,59 @@ describe("validateWorkflow — graph-health merge", () => {
     expect(r.issues.some((i) => i.kind)).toBe(false);
   });
 });
+
+// #1869 — validate_workflow on a saved UI graph used to report false
+// type/enum errors because action-button tokens serialized into
+// widgets_values were paired against /object_info from slot 0.
+describe("validateWorkflow — UI graph with serialized action buttons (#1869)", () => {
+  const AM_OBJECT_INFO = {
+    AMVideoRead: {
+      input: {
+        required: {
+          file_path: ["STRING", { default: "" }],
+          frame_mode: [["single", "range", "all"], { default: "all" }],
+          first_frame: ["INT", { default: 1 }],
+          last_frame: ["INT", { default: -1 }],
+        },
+      },
+      output: ["IMAGE"],
+      output_node: true,
+    },
+  } as const;
+
+  const FILE_PATH = "D:/shots/plate.mov";
+  const uiWorkflow = {
+    nodes: [
+      {
+        id: 1,
+        type: "AMVideoRead",
+        mode: 0,
+        inputs: [],
+        outputs: [{ name: "IMAGE", type: "IMAGE", links: null }],
+        widgets_values: [
+          "browse",
+          "open_in_explorer",
+          "copy_path",
+          FILE_PATH,
+          "range",
+          "detect_range",
+          12,
+          48,
+        ],
+      },
+    ],
+    links: [],
+  } as unknown as WorkflowJSON;
+
+  it("does not report action-button tokens as combo/enum errors", async () => {
+    getObjectInfoMock.mockResolvedValue(AM_OBJECT_INFO);
+    const r = await validateWorkflow(uiWorkflow, { health: false });
+    const text = r.issues.map((i) => i.message).join("\n");
+    expect(text).not.toMatch(/open_in_explorer/);
+    expect(text).not.toMatch(/copy_path/);
+    expect(text).not.toMatch(/detect_range/);
+    expect(r.issues.filter((i) => i.kind === "value_not_in_list")).toHaveLength(0);
+    expect(r.issues.filter((i) => i.severity === "error")).toHaveLength(0);
+    expect(r.valid).toBe(true);
+  });
+});

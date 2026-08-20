@@ -133,7 +133,7 @@ export function registerWorkflowComposeTools(server: McpServer): void {
         .union([z.string(), z.record(z.string(), z.any())])
         .optional()
         .describe(
-          'ComfyUI workflow JSON (as a JSON string or object). REQUIRED for action:"modify" and action:"validate" — API format for "validate".',
+          'ComfyUI workflow JSON (as a JSON string or object). REQUIRED for action:"modify" and action:"validate". action:"validate" accepts API format or a saved UI export (nodes[]/links[]).',
         ),
       operations: z
         .array(operationSchema)

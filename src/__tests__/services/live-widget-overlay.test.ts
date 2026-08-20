@@ -71,13 +71,17 @@ const nameKeyedState = () => ({
 });
 
 describe("#959: the bug, reproduced", () => {
-  // This is the failure the three reports describe. It is asserted deliberately:
-  // if this test ever stops failing on its own, the positional path changed and
-  // the overlay below is no longer testing what it claims to.
-  it("without the capture, the wildcard STRING is emitted as the seed", () => {
+  // #1869 taught the positional path to skip a STRING sitting on an INT, so the
+  // seed now gets 101 instead of the wildcard token. The FRONTEND still serializes
+  // wildcards BEFORE seed, so that skipped token is never offered to `wildcards`
+  // — the combo falls back to its default. Named capture remains the only path
+  // that can recover a reordered widget the schema has already walked past.
+  // If wildcards starts matching without a capture, the overlay below is no
+  // longer testing the disagreement it claims to.
+  it("without the capture, the reordered wildcard never lands on its own widget", () => {
     const { workflow } = convertUiToApi(serializedCanvas() as never, OBJECT_INFO);
-    expect(workflow["296"].inputs.seed).toBe(WILDCARD);
-    expect(workflow["296"].inputs.seed).not.toBe(101);
+    expect(workflow["296"].inputs.seed).toBe(101);
+    expect(workflow["296"].inputs.wildcards).not.toBe(WILDCARD);
   });
 });
 
@@ -97,12 +101,10 @@ describe("#959: the capture fixes it", () => {
     expect(workflow["296"].inputs.wildcard_text).toBe("a cat");
   });
 
-  // The shift compounds: `seed` is an INT with control_after_generate, so the
-  // positional pass consumes a PHANTOM slot after it. Having already taken the
-  // wildcard string as the seed, it then swallows the real seed as that phantom
-  // and runs out of values — so `wildcards` is never assigned at all and falls
-  // back to the node default. One inverted pair costs BOTH widgets, and nothing
-  // in the output says so.
+  // The frontend serializes wildcards BEFORE seed. The positional pass now
+  // skips that STRING off the INT seed (#1869) and assigns 101, but the skipped
+  // token is gone — `wildcards` is never offered it and falls back to the node
+  // default. Named capture is what restores both widgets.
   it("the trailing widget is lost entirely, not merely misassigned", () => {
     const before = convertUiToApi(serializedCanvas() as never, OBJECT_INFO);
     expect(before.workflow["296"].inputs.wildcards).not.toBe(WILDCARD);

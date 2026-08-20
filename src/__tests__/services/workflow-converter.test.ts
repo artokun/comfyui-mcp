@@ -3453,3 +3453,102 @@ describe("convertUiToApi — option-bearing / dynamic nested combo validation (P
     ).toBe(true);
   });
 });
+
+// #1869 — AMVideoRead/AMVideoWrite serialize frontend action buttons into
+// widgets_values (`browse`, `open_in_explorer`, `copy_path` above file_path,
+// and interspersed `detect_range` before first_frame). Those buttons are
+// absent from /object_info, so pairing from slot 0 used to land them on
+// real inputs (`frame_mode='open_in_explorer'`, `first_frame='copy_path'`).
+describe("convertUiToApi — serialized action buttons must not shift widget values (#1869)", () => {
+  const AM_VIDEO_READ = {
+    input: {
+      required: {
+        file_path: ["STRING", { default: "" }],
+        frame_mode: [["single", "range", "all"], { default: "all" }],
+        first_frame: ["INT", { default: 1 }],
+        last_frame: ["INT", { default: -1 }],
+      },
+    },
+    output: ["IMAGE"],
+    output_node: true,
+  };
+
+  const FILE_PATH = "D:/shots/plate.mov";
+  const FRAME_MODE = "range";
+  const FIRST_FRAME = 12;
+  const LAST_FRAME = 48;
+
+  it("skips prefix and interspersed action-button tokens on AMVideoRead", () => {
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "AMVideoRead",
+          mode: 0,
+          inputs: [],
+          outputs: [],
+          widgets_values: [
+            "browse",
+            "open_in_explorer",
+            "copy_path",
+            FILE_PATH,
+            FRAME_MODE,
+            "detect_range",
+            FIRST_FRAME,
+            LAST_FRAME,
+          ],
+        },
+      ],
+      links: [],
+    } as never;
+    const { workflow } = convertUiToApi(ui, { AMVideoRead: AM_VIDEO_READ } as never);
+    expect(workflow["1"].inputs.file_path).toBe(FILE_PATH);
+    expect(workflow["1"].inputs.frame_mode).toBe(FRAME_MODE);
+    expect(workflow["1"].inputs.first_frame).toBe(FIRST_FRAME);
+    expect(workflow["1"].inputs.last_frame).toBe(LAST_FRAME);
+    expect(workflow["1"].inputs.file_path).not.toBe("browse");
+    expect(workflow["1"].inputs.frame_mode).not.toBe("open_in_explorer");
+    expect(workflow["1"].inputs.first_frame).not.toBe("copy_path");
+    expect(workflow["1"].inputs.first_frame).not.toBe("detect_range");
+  });
+
+  it("skips prefix action-button tokens on AMVideoWrite (no detect_range)", () => {
+    const codec = "h264";
+    const outPath = "D:/out/shot.mov";
+    const ui = {
+      nodes: [
+        {
+          id: 2,
+          type: "AMVideoWrite",
+          mode: 0,
+          inputs: [],
+          outputs: [],
+          widgets_values: [
+            "browse",
+            "open_in_explorer",
+            "copy_path",
+            outPath,
+            codec,
+          ],
+        },
+      ],
+      links: [],
+    } as never;
+    const { workflow } = convertUiToApi(ui, {
+      AMVideoWrite: {
+        input: {
+          required: {
+            file_path: ["STRING", { default: "" }],
+            codec: [["h264", "prores", "dnxhr"], { default: "h264" }],
+          },
+        },
+        output: [],
+        output_node: true,
+      },
+    } as never);
+    expect(workflow["2"].inputs.file_path).toBe(outPath);
+    expect(workflow["2"].inputs.codec).toBe(codec);
+    expect(workflow["2"].inputs.file_path).not.toBe("browse");
+    expect(workflow["2"].inputs.codec).not.toBe("open_in_explorer");
+  });
+});
