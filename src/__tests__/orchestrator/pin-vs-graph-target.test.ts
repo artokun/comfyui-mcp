@@ -108,7 +108,8 @@ const B: Wf = {
 type ListShape =
   | "full" // current panel: enumerable tabs + a top-level active record
   | "active-only" // no `workflows` array, but the active canvas IS reported
-  | "opaque"; // neither — nothing about the live canvas can be established
+  | "opaque" // neither — nothing about the live canvas can be established
+  | "errors"; // the probe itself fails: no evidence of any kind comes back
 
 let bridge: UiBridge;
 let port: number;
@@ -203,6 +204,10 @@ class FakePanel {
 
     switch (cmd) {
       case "workflow_list": {
+        if (this.listShape === "errors") {
+          refuse("workflow_list failed on this tab");
+          return;
+        }
         if (this.listShape === "opaque") {
           reply({});
           return;
@@ -401,6 +406,28 @@ describe("panel#1529 — a pin may not claim a graph target it did not establish
     // …and it hands back the cheap read that settles it, rather than leaving the
     // caller to believe the routing question was answered.
     expect(note).toContain("panel_graph_outline");
+  });
+
+  it("makes no claim when the verifying probe itself FAILED", async () => {
+    // The route that reaches a CURRENT panel. `workflows` has been emitted since
+    // panel 0.11.20, so a modern build is never the "no enumerable list" shape — but
+    // `resolveOpenWorkflow` also returns indeterminate whenever the `workflow_list`
+    // probe does not come back at all (a transient reconnect, a busy canvas past the
+    // 6 s budget). There is no evidence to refuse on there, and inventing one would
+    // fail healthy pins — so the pin is written and the REPORT is what changes.
+    const page = new FakePanel("tmp:2fb3aaaa-1111-4111-8111-111111111111", [A], 0, "errors");
+    await page.connect();
+    tabStamp.set(page.tabId, A.uuid);
+    tracker.repinTo(SCOPE, page.tabId);
+    const ctx = ctxFor(SCOPE);
+
+    const res = await pin(ctx, B);
+
+    expect(res.isError).toBeFalsy();
+    const body = jsonOf(res);
+    expect(body.pin_verified_active).toBe(false);
+    expect(String(body.note ?? "")).not.toContain(GRAPH_TARGET_CLAIM);
+    expect(String(body.note ?? "")).toContain("NOT CONFIRMED");
   });
 
   it("a BARE KEY token is not refused on this evidence — the boundary, on purpose", async () => {
