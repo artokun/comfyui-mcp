@@ -15091,6 +15091,8 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
       },
       // #1877 — a collapsed node can sit inside the auto-fit box and still be
       // reported missing (size[1]===0 vs membership's 100px body fallback).
+      // #1921 — SaveImage/preview nodes grow after DOM rehydration; expand
+      // auto-bounds to the stable full height before persisting.
       async (args: A, ctx) =>
         includeRequestedCreateGroupMembers(
           await ctx.call(

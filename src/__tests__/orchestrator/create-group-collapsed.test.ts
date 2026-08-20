@@ -190,21 +190,33 @@ describe("#1877 collapsed node membership (panel_create_group)", () => {
     expect(group.node_ids).toEqual([]);
   });
 
-  it("passes a successful create through without extra round trips", async () => {
+  it("does not edit when requested members already fit their live size", async () => {
     const calls: Forwarded[] = [];
     const ctx: PanelToolCtx = {
       call: async (cmd) => {
         calls.push(cmd);
-        return jsonResult({
-          group: { id: 1, bounding: [0, 0, 400, 300], node_count: 2, node_ids: [1, 2] },
-        });
+        if (cmd.cmd === "graph_create_group") {
+          return jsonResult({
+            group: { id: 1, bounding: [0, 0, 400, 300], node_count: 2, node_ids: [1, 2] },
+          });
+        }
+        if (cmd.cmd === "graph_query") {
+          return jsonResult({
+            text:
+              `2 match(es)\n` +
+              JSON.stringify({ id: 1, type: "KSampler", pos: [20, 20], size: [210, 80] }) +
+              "\n" +
+              JSON.stringify({ id: 2, type: "CLIPTextEncode", pos: [20, 140], size: [210, 80] }),
+          });
+        }
+        return jsonResult({ ok: true });
       },
       confirm: async () => "yes" as const,
       bridge: {} as PanelToolCtx["bridge"],
       tabId: "test-tab",
     };
     const res = await defByName("panel_create_group").handler({ node_ids: [1, 2] }, ctx);
-    expect(calls.map((c) => c.cmd)).toEqual(["graph_create_group"]);
+    expect(calls.map((c) => c.cmd)).toEqual(["graph_create_group", "graph_query"]);
     expect((parseResult(res).group as Record<string, unknown>).node_ids).toEqual([1, 2]);
   });
 

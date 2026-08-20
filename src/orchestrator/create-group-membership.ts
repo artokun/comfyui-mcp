@@ -1,17 +1,23 @@
 /**
- * #1877 — panel_create_group can wrap a collapsed node and still report it
- * missing.
+ * #1877 / #1921 — panel_create_group auto-bounds from live `pos`/`size` can
+ * miss a requested node whose origin is already inside the box.
  *
- * The panel sizes the box from live `pos`/`size`. A collapsed node often has
- * `size[1] === 0` (title-chip only), so the box is ~100px tall around the
- * node's origin. Membership then tests the CENTRE of a boundingRect rebuilt
- * with the panel's `finiteExtent` fallback (0 is not a usable height, so the
- * body becomes 100px plus a 30px title). That centre sits a few pixels below
- * the box, so the group is empty even though the node's coordinates are inside.
+ * #1877: a collapsed node often has `size[1] === 0` (title-chip only), so the
+ * box is ~100px tall around the origin. Membership then tests the CENTRE of a
+ * boundingRect rebuilt with the panel's `finiteExtent` fallback (0 is not a
+ * usable height, so the body becomes 100px plus a 30px title). That centre
+ * sits a few pixels below the box, so the group is empty even though the
+ * node's coordinates are inside.
+ *
+ * #1921: SaveImage / other DOM-preview nodes start compact (`size[1] === 58`)
+ * and rehydrate to ~326px after the image widget mounts (save/reopen). The
+ * compact auto-box still reports them as members; after rehydrate their centre
+ * drops below the persisted bottom and they fall out.
  *
  * These helpers expand a created group's bounds just enough to contain every
  * membership-plausible centre of a requested node whose origin is already in
- * the box — then the caller writes those bounds with graph_edit_group.
+ * the box — including the stable full-height centre of a DOM-preview node —
+ * then the caller writes those bounds with graph_edit_group.
  *
  * Constants match comfyui-mcp-panel `web/js/lib/group-geometry.js`
  * (`COLLAPSED_TITLE_HEIGHT`, `COLLAPSED_PILL_WIDTH`, `finiteExtent` fallbacks)
@@ -28,6 +34,18 @@ export const NODE_TITLE_HEIGHT = 30;
 export const COLLAPSED_PILL_WIDTH = 80;
 export const DEFAULT_NODE_WIDTH = 200;
 export const DEFAULT_NODE_BODY_HEIGHT = 100;
+/** Compact SaveImage body is ~58px; after the image-preview DOM widget mounts it is 326px (#1921). */
+export const DOM_PREVIEW_NODE_MIN_BODY_HEIGHT = 326;
+/** Node types whose LiteGraph size grows when a DOM/preview widget rehydrates. */
+export const DOM_PREVIEW_NODE_TYPES = new Set([
+  "SaveImage",
+  "PreviewImage",
+  "LoadImage",
+  "LoadImageMask",
+  "SaveVideo",
+  "VHS_LoadVideo",
+  "VHS_VideoCombine",
+]);
 
 export type GroupQuad = [number, number, number, number];
 
@@ -35,6 +53,7 @@ export type QueriedNodeGeom = {
   id: string | number;
   pos: [number, number];
   size: [number, number];
+  type?: string;
   collapsed?: boolean;
   full_height?: number;
 };
@@ -58,9 +77,13 @@ export function nodePosInsideGroupBounds(pos: [number, number], bounds: GroupQua
   return x >= gx && x <= gx + gw && y >= gy && y <= gy + gh;
 }
 
+export function isDomPreviewNodeType(type: unknown): boolean {
+  return typeof type === "string" && DOM_PREVIEW_NODE_TYPES.has(type);
+}
+
 /**
  * Centres LiteGraph / the panel might use for containsCentre, given only the
- * geometry panel_query_graph actually returns (pos, size, collapsed, full_height).
+ * geometry panel_query_graph actually returns (pos, size, type, collapsed, full_height).
  */
 export function membershipCandidateCenters(node: QueriedNodeGeom): Array<{ x: number; y: number }> {
   const x = node.pos[0];
@@ -69,7 +92,7 @@ export function membershipCandidateCenters(node: QueriedNodeGeom): Array<{ x: nu
   const fullW = finiteExtent(node.size[0], DEFAULT_NODE_WIDTH);
   const fullH = finiteExtent(node.size[1], DEFAULT_NODE_BODY_HEIGHT);
   const chipH = finiteExtent(node.full_height, NODE_TITLE_HEIGHT);
-  return [
+  const points: Array<{ x: number; y: number }> = [
     // Collapsed title-chip (syncNodeArea without forceCollapsed).
     { x: x + pillW / 2, y: y - NODE_TITLE_HEIGHT + chipH / 2 },
     // forceCollapsed wantedNodeArea: size[1]===0 falls back to DEFAULT_NODE_BODY_HEIGHT.
@@ -77,6 +100,15 @@ export function membershipCandidateCenters(node: QueriedNodeGeom): Array<{ x: nu
     // Raw pos + stored size (degenerate when size[1] is 0 — origin itself).
     { x: x + fullW / 2, y: y + (node.size[1] > 0 ? node.size[1] : 0) / 2 },
   ];
+  // #1921 — expanded DOM-preview body after widget rehydrate. Collapsed chips stay chips.
+  if (!node.collapsed && isDomPreviewNodeType(node.type)) {
+    const previewH = Math.max(fullH, DOM_PREVIEW_NODE_MIN_BODY_HEIGHT);
+    if (previewH > fullH) {
+      points.push({ x: x + fullW / 2, y: y + previewH / 2 });
+      points.push({ x: x + fullW / 2, y: y - NODE_TITLE_HEIGHT + (previewH + NODE_TITLE_HEIGHT) / 2 });
+    }
+  }
+  return points;
 }
 
 /** Grow `bounds` so every point is a containsCentre member (max edge exclusive). */
@@ -173,6 +205,7 @@ export function parseDetailNodesFromQueryText(text: unknown): QueriedNodeGeom[] 
       const h = Number(size[1]);
       if (![x, y, w, h].every(Number.isFinite)) continue;
       const geom: QueriedNodeGeom = { id, pos: [x, y], size: [w, h] };
+      if (typeof row.type === "string" && row.type) geom.type = row.type;
       if (row.collapsed === true) geom.collapsed = true;
       if (typeof row.full_height === "number" && Number.isFinite(row.full_height)) {
         geom.full_height = row.full_height;
@@ -223,9 +256,10 @@ type Call = (
 ) => Promise<ToolResultLike>;
 
 /**
- * After graph_create_group, if requested ids are missing AND their origin sits
- * inside the new box, expand the box so those centres are members and rewrite
- * the reply. Never throws: a failed repair returns the original create result.
+ * After graph_create_group, query the requested nodes and expand the box so
+ * every origin-inside node stays a containsCentre member — including collapsed
+ * fallback centres (#1877) and DOM-preview full height after rehydrate (#1921).
+ * Never throws: a failed repair returns the original create result.
  */
 export async function includeRequestedCreateGroupMembers<T extends ToolResultLike>(
   created: T,
@@ -242,26 +276,20 @@ export async function includeRequestedCreateGroupMembers<T extends ToolResultLik
     if (!group) return created;
     const bounds = finiteQuad(group.bounding);
     if (!bounds) return created;
-    const live = asIdList(group.node_ids);
-    const reportedMissing = asIdList(group.missing_node_ids);
-    const missing = reportedMissing.length
-      ? reportedMissing.filter((id) => requested.some((r) => idKey(r) === idKey(id)))
-      : classifyRequestedMembership(requested, live).missing;
-    if (!missing.length) return created;
 
     const query = await call(
       {
         cmd: "graph_query",
-        ids: missing,
+        ids: requested,
         fields: "detail",
-        limit: Math.min(Math.max(missing.length, 1), 200),
+        limit: Math.min(Math.max(requested.length, 1), 200),
       },
       8000,
     );
     if (query.isError) return created;
     const qPayload = parseToolJson(query);
     const nodes = parseDetailNodesFromQueryText(qPayload?.text).filter((n) =>
-      missing.some((id) => idKey(id) === idKey(n.id)),
+      requested.some((id) => idKey(id) === idKey(n.id)),
     );
     const repairable = nodes.filter((n) => nodePosInsideGroupBounds(n.pos, bounds));
     if (!repairable.length) return created;
