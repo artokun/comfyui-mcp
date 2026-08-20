@@ -84,6 +84,7 @@ import {
 import {
   isPlainObject,
   isStampMismatchSaveRefusal,
+  openLiveMatchesDestContent,
   patchOpenIdentity,
   shouldRebindOpenIdentity,
   workflowFromSerializeReply,
@@ -4848,6 +4849,50 @@ function openedIdentityReboundResult(
   });
 }
 
+function openedNormalizedContentResult(destPath: string): ToolResult {
+  return ok({
+    opened: { path: destPath },
+    content_normalized: true,
+    note:
+      `Opened ${destPath}. The live canvas matches the saved workflow's nodes, connections, ` +
+      `and widget values. Node-definition and widget-schema fields differed after load ` +
+      `(placeholder rehydration / frontend normalization) and are not treated as an unknown open.`,
+  });
+}
+
+/**
+ * #1846 — the panel's identity-proven CONTENT_UNVERIFIED reply is not unknown
+ * when dest's structural content is already on the canvas.
+ *
+ * Fail closed: dest unreadable, a missing/extra node, a rewired link, or a dest
+ * widget value the live graph does not hold leaves the panel error in place.
+ */
+async function tryAcceptNormalizedOpenContent(
+  ctx: PanelToolCtx,
+  destPath: string,
+): Promise<{ status: "accepted" } | { status: "skipped" }> {
+  let live: Record<string, unknown> | null = null;
+  try {
+    const serialized = await ctx.call({ cmd: "graph_serialize" }, 8000);
+    live = workflowFromSerializeReply(parseToolResultJson(serialized));
+  } catch {
+    return { status: "skipped" };
+  }
+  if (!live) return { status: "skipped" };
+
+  let dest: Record<string, unknown>;
+  try {
+    dest = await readWorkflowFromPath(destPath);
+  } catch {
+    return { status: "skipped" };
+  }
+  if (!openLiveMatchesDestContent(live, dest)) return { status: "skipped" };
+
+  const destUuid = await activeWorkflowUuidForPath(ctx, destPath);
+  if (destUuid) refreshWorkflowUuid(ctx, { workflow_uuid: destUuid });
+  return { status: "accepted" };
+}
+
 function identityClaimedButLiveGraphUnchangedNote(ctx: PanelToolCtx): string {
   const fence = currentWorkflowFence(ctx);
   const fenceTxt =
@@ -4887,6 +4932,11 @@ async function clearFenceOnIdentityProvenOpen(
       if (rebound.status === "rebound") {
         return { res: openedIdentityReboundResult(requestedPath, rebound), repaired: true };
       }
+      // #1846 — dest already on the canvas; only definitions/schema normalized.
+      const accepted = await tryAcceptNormalizedOpenContent(ctx, requestedPath);
+      if (accepted.status === "accepted") {
+        return { res: openedNormalizedContentResult(requestedPath), repaired: true };
+      }
     }
     return { res: appendToolResultText(res, identityClaimedButLiveGraphUnchangedNote(ctx)), repaired: false };
   }
@@ -4919,6 +4969,14 @@ async function clearFenceOnIdentityProvenOpen(
     note =
       `\n\nFENCE: NOT cleared — the re-derivation threw, so the fence state is UNKNOWN and graph ` +
       `commands may still be refused. (${err instanceof Error ? err.message : String(err)})`;
+  }
+  // #1846 — after the fence is live again, dest-vs-live can still prove this was
+  // definition/schema normalization rather than a lost graph.
+  if (repaired && requestedPath) {
+    const accepted = await tryAcceptNormalizedOpenContent(ctx, requestedPath);
+    if (accepted.status === "accepted") {
+      return { res: openedNormalizedContentResult(requestedPath), repaired: true };
+    }
   }
   return { res: appendToolResultText(res, note), repaired };
 }

@@ -258,3 +258,160 @@ export function patchOpenIdentity(
 export function isStampMismatchSaveRefusal(text: string): boolean {
   return /stamped as belonging to/i.test(text) && /extra\.comfyui_mcp\.workflow_path/i.test(text);
 }
+
+/**
+ * #1846 — dest vs live after a load that only rewrote node definitions / widget
+ * schema (unknown placeholders rehydrated after a custom-node install).
+ *
+ * The panel compares the just-loaded state to the live serialize and treats an
+ * unexplained `definitions` difference as unknown. This asks a narrower question:
+ * does the live canvas still hold dest's nodes, connections, and non-empty widget
+ * values? Schema fields (inputs/outputs/properties/size/order) and the
+ * definitions store's widget-schema filling are ignored. Fail closed on anything
+ * else — a rewired link, a missing node, a dest widget value live does not hold.
+ */
+function isUnknownPlaceholderType(type: string): boolean {
+  const t = type.trim().toLowerCase();
+  return t === "unknown" || t === "unknownnode";
+}
+
+function typesCompatibleForRehydration(destType: string, liveType: string): boolean {
+  return destType === liveType || isUnknownPlaceholderType(destType);
+}
+
+function nodesById(graph: unknown): Map<string, Record<string, unknown>> | null {
+  if (!isPlainObject(graph) || !Array.isArray(graph.nodes)) return null;
+  const byId = new Map<string, Record<string, unknown>>();
+  for (const raw of graph.nodes) {
+    if (!isPlainObject(raw) || raw.id == null) return null;
+    const id = String(raw.id);
+    if (byId.has(id)) return null;
+    byId.set(id, raw);
+  }
+  return byId;
+}
+
+function nodeIdentitiesMatchAllowingRehydration(dest: unknown, live: unknown): boolean {
+  const destById = nodesById(dest);
+  const liveById = nodesById(live);
+  if (!destById || !liveById || destById.size !== liveById.size) return false;
+  for (const [id, destNode] of destById) {
+    const liveNode = liveById.get(id);
+    if (!liveNode) return false;
+    if (typeof destNode.type !== "string" || typeof liveNode.type !== "string") return false;
+    if (!typesCompatibleForRehydration(destNode.type, liveNode.type)) return false;
+  }
+  return true;
+}
+
+function linkEndpointKey(link: unknown): string | null {
+  if (Array.isArray(link) && link.length >= 5) {
+    const origin = link[1];
+    const target = link[3];
+    if (origin == null || target == null) return null;
+    return `${String(origin)}\0${String(link[2])}\0${String(target)}\0${String(link[4])}`;
+  }
+  if (!isPlainObject(link)) return null;
+  const origin = link.origin_id ?? link.from;
+  const target = link.target_id ?? link.to;
+  if (origin == null || target == null) return null;
+  const originSlot = link.origin_slot ?? link.from_slot ?? 0;
+  const targetSlot = link.target_slot ?? link.to_slot ?? 0;
+  return `${String(origin)}\0${String(originSlot)}\0${String(target)}\0${String(targetSlot)}`;
+}
+
+function linkTopologySet(graph: unknown): Set<string> | null {
+  if (!isPlainObject(graph)) return null;
+  if (graph.links == null) return new Set();
+  if (!Array.isArray(graph.links)) return null;
+  const keys = new Set<string>();
+  for (const link of graph.links) {
+    const key = linkEndpointKey(link);
+    if (key == null) return null;
+    keys.add(key);
+  }
+  return keys;
+}
+
+function linkTopologiesMatch(dest: unknown, live: unknown): boolean {
+  const destLinks = linkTopologySet(dest);
+  const liveLinks = linkTopologySet(live);
+  if (!destLinks || !liveLinks || destLinks.size !== liveLinks.size) return false;
+  for (const key of destLinks) if (!liveLinks.has(key)) return false;
+  return true;
+}
+
+function stableWidgetsDisagree(destNode: Record<string, unknown>, liveNode: Record<string, unknown>): boolean {
+  const destNamed = namedWidgets(destNode);
+  if (destNamed) {
+    const liveMap = namedWidgets(liveNode) ?? {};
+    for (const [key, destVal] of Object.entries(destNamed)) {
+      if (isEmptyWidgetValue(destVal)) continue;
+      const liveVal = liveMap[key];
+      if (isEmptyWidgetValue(liveVal) || valuesDiffer(liveVal, destVal)) return true;
+    }
+    return false;
+  }
+  if (!Array.isArray(destNode.widgets_values)) return false;
+  const destWv = destNode.widgets_values;
+  const liveWv = Array.isArray(liveNode.widgets_values) ? liveNode.widgets_values : [];
+  for (let i = 0; i < destWv.length; i++) {
+    if (isEmptyWidgetValue(destWv[i])) continue;
+    if (isEmptyWidgetValue(liveWv[i]) || valuesDiffer(liveWv[i], destWv[i])) return true;
+  }
+  return false;
+}
+
+function graphStableWidgetsDisagree(dest: unknown, live: unknown): boolean {
+  const destById = nodesById(dest);
+  const liveById = nodesById(live);
+  if (!destById || !liveById) return true;
+  for (const [id, destNode] of destById) {
+    const liveNode = liveById.get(id);
+    if (!liveNode || stableWidgetsDisagree(destNode, liveNode)) return true;
+  }
+  return false;
+}
+
+function subgraphEntries(graph: unknown): unknown[] | null {
+  if (!isPlainObject(graph)) return null;
+  if (!Object.prototype.hasOwnProperty.call(graph, "definitions")) return [];
+  const defs = graph.definitions;
+  if (defs == null) return [];
+  if (!isPlainObject(defs)) return null;
+  if (!Object.prototype.hasOwnProperty.call(defs, "subgraphs")) return [];
+  const subgraphs = defs.subgraphs;
+  if (subgraphs == null) return [];
+  if (Array.isArray(subgraphs)) return subgraphs;
+  if (isPlainObject(subgraphs)) return Object.values(subgraphs);
+  return null;
+}
+
+function subgraphsById(graph: unknown): Map<string, Record<string, unknown>> | null {
+  const entries = subgraphEntries(graph);
+  if (!entries) return null;
+  const byId = new Map<string, Record<string, unknown>>();
+  for (const raw of entries) {
+    if (!isPlainObject(raw)) return null;
+    if (typeof raw.id !== "string" && typeof raw.id !== "number") return null;
+    const id = String(raw.id);
+    if (byId.has(id)) return null;
+    byId.set(id, raw);
+  }
+  return byId;
+}
+
+export function openLiveMatchesDestContent(live: unknown, dest: unknown): boolean {
+  if (!nodeIdentitiesMatchAllowingRehydration(dest, live)) return false;
+  if (!linkTopologiesMatch(dest, live)) return false;
+  if (graphStableWidgetsDisagree(dest, live)) return false;
+  const destSgs = subgraphsById(dest);
+  const liveSgs = subgraphsById(live);
+  if (!destSgs || !liveSgs) return false;
+  for (const [id, destSg] of destSgs) {
+    const liveSg = liveSgs.get(id);
+    if (!liveSg) return false;
+    if (!openLiveMatchesDestContent(liveSg, destSg)) return false;
+  }
+  return true;
+}
