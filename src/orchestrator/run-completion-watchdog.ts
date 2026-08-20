@@ -129,8 +129,15 @@ export interface RunCompletionWatchdog {
  * note-only — which is why the coercion was safe until the watchdog began reading
  * /history directly. An unknown extension therefore fails CLOSED: named in the note,
  * never attached.
+ *
+ * The question this asks is NOT "is it an image" — it is "can the attach path label
+ * these bytes honestly?" `claude-backend.ts:390` keeps only `image/{png,jpeg,gif,webp}`
+ * and rewrites everything else to `image/png`. So `.bmp` is excluded even though it IS
+ * an image: ComfyUI serves it `image/bmp` (WAS-Suite `Image Save` writes them), and it
+ * would ship as PNG-declared BMP — a smaller lie than an .mp4, but the same one.
+ * Widening this set is only safe alongside the backend's.
  */
-const ATTACHABLE_IMAGE_EXT_RE = /\.(?:png|jpe?g|webp|gif|bmp)$/i;
+const ATTACHABLE_IMAGE_EXT_RE = /\.(?:png|jpe?g|webp|gif)$/i;
 
 /** Split media refs into what may be attached inline and what may only be named. */
 export function partitionAttachableMedia(refs: CompletionImage[]): {

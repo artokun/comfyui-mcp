@@ -291,6 +291,30 @@ describe("#1789: the synthesised note claims only what was observed", () => {
     expect(String(payload.note)).toContain("get_image");
   });
 
+  it("#1861: the allowlist tracks what the ATTACH PATH can label, not what is an image", () => {
+    // claude-backend.ts keeps only image/{png,jpeg,gif,webp} and rewrites everything else
+    // to image/png. .bmp IS an image, and ComfyUI serves it image/bmp — so attaching it
+    // would declare PNG over BMP bytes. A smaller lie than an .mp4, the same lie.
+    const payload = synthesizeCompletionPayload(
+      { promptId: PID, status: "success", observedAt: 0 },
+      {
+        deliveredAt: 45_000,
+        images: [
+          { filename: "keep_00001_.png", type: "output" },
+          { filename: "keep_00002_.WEBP", type: "output" },
+          { filename: "name_only_00001_.bmp", type: "output" },
+          { filename: "name_only_00002_.avif", type: "output" },
+          { filename: "no_extension_at_all", type: "output" },
+        ],
+      },
+    );
+    expect(payload.images.map((i) => i.filename)).toEqual(["keep_00001_.png", "keep_00002_.WEBP"]);
+    for (const named of ["name_only_00001_.bmp", "name_only_00002_.avif", "no_extension_at_all"]) {
+      expect(String(payload.note)).toContain(named);
+    }
+    expect(String(payload.note)).toContain("NOT attached (not an inline-attachable image)");
+  });
+
   it("empty or malformed image refs are dropped, never forwarded as outputs", () => {
     const payload = synthesizeCompletionPayload(
       { promptId: PID, status: "success", observedAt: 0 },
