@@ -5107,6 +5107,14 @@ async function assessLocalRestart(): Promise<{
   observedArgv?: string[];
   isDesktopApp?: boolean;
   note?: string;
+  /**
+   * #1847 — forwarded from assessDesktopSupervision, which already declares it: the
+   * pass is a proven python-command relaunch, not inferred Desktop supervision, so the
+   * panel should Manager-stop then spawn rather than wait for a supervisor it could not
+   * identify. Declared HERE too because this is the shape the caller reads; the value
+   * was being built and then dropped by the type on the way out.
+   */
+  selfRelaunch?: boolean;
 }> {
   const { info, diagnostic } = await acquireProcessInfo();
   // NOTHING COULD BE RESOLVED — and that is not a pass (coordinator gate).
