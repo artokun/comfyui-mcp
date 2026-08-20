@@ -759,6 +759,12 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- a queued tool-session respawn sees the downloads started after the save, instead of killing them with no warning (#1567)
+- it waits on those transfers' live byte counts rather than treating every one as already stalled (#1567)
+
 ## [0.52.28] - 2026-08-20
 
 ### MCP

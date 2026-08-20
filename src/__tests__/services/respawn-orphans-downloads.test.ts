@@ -17,7 +17,10 @@
 // not its internal binding — my first version of this file mocked it and got an empty list
 // back from working code.
 
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
 const hoisted = vi.hoisted(() => ({
   progress: {} as Record<string, { downloaded: number }>,
@@ -29,6 +32,7 @@ vi.mock("../../services/download-progress.js", async (orig) => ({
 }));
 
 const { downloadsAtRiskOfRespawn } = await import("../../services/download-jobs.js");
+const { setProgressDir, CONTROL_PREFIX } = await import("../../services/download-progress.js");
 
 type Job = Parameters<typeof downloadsAtRiskOfRespawn>[0];
 const jobs = (...list: Record<string, unknown>[]): Job => list as unknown as Job;
@@ -341,5 +345,103 @@ describe("downloadsAtRiskOfRespawn (#1378)", () => {
     expect(src).toMatch(/atRiskNote\(receipt\.atRiskDownloads/);
     const receiptRenderer = code("../../orchestrator/panel-tools.ts");
     expect(receiptRenderer).not.toMatch(/downloadsAtRiskOfRespawn\(\)/);
+  });
+});
+
+describe("downloadsAtRiskOfRespawn sees live tray rows (#1567)", () => {
+  // The save-time job list cannot see a transfer that starts after the save:
+  // downloads run in the MCP child, persist can lag a heartbeat, and the
+  // orchestrator's in-memory registry is empty. The tray files are the child's
+  // live writes. Re-calling this function at respawn on the job list alone still
+  // reported nothing for the nine downloads started in that window.
+  let dir = "";
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "at-risk-tray-"));
+    setProgressDir(dir);
+  });
+
+  afterEach(() => {
+    setProgressDir("");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const writeTray = (row: {
+    id: string;
+    name: string;
+    downloaded: number;
+    status: "downloading" | "done" | "error";
+  }) => {
+    writeFileSync(
+      join(dir, `${row.id}-deadbeef.json`),
+      JSON.stringify({
+        id: row.id,
+        name: row.name,
+        downloaded: row.downloaded,
+        total: row.downloaded + 1,
+        bytes_per_sec: 1,
+        status: row.status,
+        updated: Date.now(),
+      }),
+    );
+  };
+
+  it("names a transfer that exists only as a live tray row — the ones started AFTER save", () => {
+    writeTray({
+      id: "d5819adcd02a4257",
+      name: "flux-dev.safetensors",
+      downloaded: 4_000_000_000,
+      status: "downloading",
+    });
+    // Empty job list: the save-time snapshot, and the orchestrator's registry.
+    const at = downloadsAtRiskOfRespawn(jobs());
+    expect(at).toEqual([
+      { id: "d5819adcd02a4257", filename: "flux-dev.safetensors", bytes: 4_000_000_000 },
+    ]);
+  });
+
+  it("does not double a transfer already in the job list", () => {
+    writeTray({
+      id: "a",
+      name: "flux-dev.safetensors",
+      downloaded: 9_000_000_000,
+      status: "downloading",
+    });
+    hoisted.progress = { a: { downloaded: 4_000_000_000 } };
+    const at = downloadsAtRiskOfRespawn(
+      jobs({ filename: "flux-dev.safetensors", status: "downloading", trayId: "a" }),
+    );
+    expect(at).toHaveLength(1);
+    // Live tray bytes win when they are further along than the (possibly stale) job read.
+    expect(at[0]).toEqual({ id: "a", filename: "flux-dev.safetensors", bytes: 9_000_000_000 });
+  });
+
+  it("ignores a settled tray row and a control-channel file", () => {
+    writeTray({
+      id: "done-id",
+      name: "finished.safetensors",
+      downloaded: 1,
+      status: "done",
+    });
+    writeFileSync(
+      join(dir, `${CONTROL_PREFIX}job-not-a-tray-owner.json`),
+      JSON.stringify({
+        id: "not-a-tray",
+        name: "secret.safetensors",
+        downloaded: 99,
+        status: "downloading",
+        updated: Date.now(),
+      }),
+    );
+    expect(downloadsAtRiskOfRespawn(jobs())).toEqual([]);
+  });
+
+  it("WIRING: the respawn-time enumerator unions the live tray", async () => {
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(new URL("../../services/download-jobs.ts", import.meta.url), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/.*/g, "");
+    const fn = src.slice(src.indexOf("export function downloadsAtRiskOfRespawn"));
+    expect(fn).toMatch(/listInFlightDownloadProgress\(\)/);
   });
 });

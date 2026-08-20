@@ -397,20 +397,26 @@ export function reportDownloadProgress(
  * bytes/throughput instead of a bare "still going". Progress files are
  * TARGET-SCOPED ({id}-{disc}.json — the same URL can download for local AND a
  * pod at once), so scan every variant for this id and return the most recently
- * updated snapshot. Returns null when progress reporting is off (no
- * COMFYUI_MCP_PROGRESS_DIR) or nothing has been written yet — callers must
- * treat byte counts as decoration, never as the source of truth for whether a
- * download finished.
+ * updated snapshot. Returns null when progress reporting is off (no channel
+ * dir — neither COMFYUI_MCP_PROGRESS_DIR nor the orchestrator's late-bound
+ * dir) or nothing has been written yet — callers must treat byte counts as
+ * decoration, never as the source of truth for whether a download finished.
  */
 export function readDownloadProgress(id: string): DownloadProgress | null {
-  if (!PROGRESS_DIR) return null;
+  // `channelDir()`, not the import-time env capture: the orchestrator has no
+  // COMFYUI_MCP_PROGRESS_DIR and late-binds via setProgressDir. A respawn-time
+  // at-risk snapshot runs in THAT process (#1567); reading only PROGRESS_DIR
+  // made every transfer look like 0 bytes, so the hold treated live downloads
+  // as already stalled.
+  const dir = channelDir();
+  if (!dir) return null;
   try {
     const prefix = `${id.replace(/[^a-zA-Z0-9_.-]/g, "_")}-`;
     let best: DownloadProgress | null = null;
-    for (const f of readdirSync(PROGRESS_DIR)) {
+    for (const f of readdirSync(dir)) {
       if (!f.startsWith(prefix) || !f.endsWith(".json")) continue;
       try {
-        const parsed = JSON.parse(readFileSync(join(PROGRESS_DIR, f), "utf8")) as DownloadProgress;
+        const parsed = JSON.parse(readFileSync(join(dir, f), "utf8")) as DownloadProgress;
         if (parsed && typeof parsed === "object" && typeof parsed.updated === "number") {
           if (!best || parsed.updated > best.updated) best = parsed;
         }
@@ -527,12 +533,13 @@ export function isSupersededAttempt(row: AttemptRowLike, newest: Map<string, num
 /** Remove a download's progress file(s) (e.g. on cancel). Target-scoped files
  *  share the id prefix, so clear every variant for the logical download. */
 export function clearDownloadProgress(id: string): void {
-  if (!PROGRESS_DIR) return;
+  const dir = channelDir();
+  if (!dir) return;
   lastWriteAt.delete(id);
   try {
     const prefix = `${id.replace(/[^a-zA-Z0-9_.-]/g, "_")}-`;
-    for (const f of readdirSync(PROGRESS_DIR)) {
-      if (f.startsWith(prefix) && f.endsWith(".json")) rmSync(join(PROGRESS_DIR, f), { force: true });
+    for (const f of readdirSync(dir)) {
+      if (f.startsWith(prefix) && f.endsWith(".json")) rmSync(join(dir, f), { force: true });
     }
   } catch {
     // ignore
@@ -599,6 +606,52 @@ export const CONTROL_PREFIX = "control-";
 const REQUEST_PREFIX = `${CONTROL_PREFIX}target-`;
 const APPLIED_PREFIX = `${CONTROL_PREFIX}applied-`;
 let controlSeq = 0;
+
+/**
+ * Live tray rows that a tool-session respawn would kill, enumerated NOW.
+ *
+ * `downloadsAtRiskOfRespawn` used to read only the job registry. That list is
+ * what existed at save time in the orchestrator (usually nothing — downloads
+ * run in the MCP child, and persist can lag a heartbeat). The tray files are
+ * the child's live writes, so they are the ones that exist for a transfer
+ * started AFTER the save and BEFORE the queued respawn fires (#1567).
+ *
+ * Control-channel files are skipped: those are not downloads. Terminal rows
+ * are skipped: they have already settled and a respawn does not orphan them.
+ */
+export function listInFlightDownloadProgress(): DownloadProgress[] {
+  const dir = channelDir();
+  if (!dir) return [];
+  const best = new Map<string, DownloadProgress>();
+  let files: string[] = [];
+  try {
+    files = readdirSync(dir);
+  } catch {
+    return [];
+  }
+  for (const f of files) {
+    if (!f.endsWith(".json") || f.startsWith(CONTROL_PREFIX)) continue;
+    try {
+      const parsed = JSON.parse(readFileSync(join(dir, f), "utf8")) as DownloadProgress;
+      if (!parsed || typeof parsed !== "object") continue;
+      if (typeof parsed.id !== "string" || !parsed.id) continue;
+      if (parsed.status !== "downloading") continue;
+      const downloaded = typeof parsed.downloaded === "number" ? parsed.downloaded : 0;
+      const updated = typeof parsed.updated === "number" ? parsed.updated : 0;
+      const prev = best.get(parsed.id);
+      if (
+        !prev ||
+        downloaded > (typeof prev.downloaded === "number" ? prev.downloaded : 0) ||
+        (downloaded === prev.downloaded && updated > (prev.updated ?? 0))
+      ) {
+        best.set(parsed.id, parsed);
+      }
+    } catch {
+      // mid-write or corrupt — not a download we can name
+    }
+  }
+  return [...best.values()];
+}
 
 function controlDirPath(dir: string = channelDir()): string | null {
   return dir || null;

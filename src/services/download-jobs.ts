@@ -33,6 +33,7 @@ import type { ResumeDiagnostic } from "./download-resume-diag.js";
 import { ModelError } from "../utils/errors.js";
 import {
   readDownloadProgress,
+  listInFlightDownloadProgress,
   persistDownloadJob,
   readPersistedDownloadJob,
   listPersistedDownloadJobs,
@@ -2162,18 +2163,44 @@ export function downloadsAtRiskOfRespawn(
   jobs: readonly DownloadJob[] = listDownloadJobs(),
 ): { id: string; filename: string; bytes: number }[] {
   const at: { id: string; filename: string; bytes: number }[] = [];
+  const byId = new Map<string, number>();
   for (const job of jobs) {
     if (job.status !== "downloading") continue;
     const progress = readDownloadProgress(job.progressId ?? job.trayId);
-    at.push({
+    const id = job.progressId ?? job.trayId ?? job.filename ?? "";
+    const entry = {
       // AN IDENTITY THAT IS NOT THE DISPLAY NAME (codex P2). Two different downloads
       // whose names are both credential-shaped redact to the SAME string, so a consumer
       // deduplicating on the filename collapsed them into one entry and reported the
       // larger byte count instead of both files and their total — under-reporting the
       // loss precisely when the names are least informative.
-      id: job.progressId ?? job.trayId ?? job.filename ?? "",
+      id,
       filename: redactSecretishFilename(job.filename),
       bytes: progress?.downloaded ?? 0,
+    };
+    byId.set(id, at.length);
+    at.push(entry);
+  }
+  // #1567 — UNION the live tray. The job list is what a SAVE-TIME snapshot can
+  // see, and for a queued respawn that list is taken in the orchestrator, which
+  // does not run the downloads: persist can lag a heartbeat, and a transfer
+  // started AFTER the save is not in the in-memory registry at all. The tray
+  // files are written by the child as it streams, so they are what exists at
+  // respawn-execution time. A first version that only re-called this function
+  // on the job list still reported nothing for the reporter's nine downloads.
+  for (const row of listInFlightDownloadProgress()) {
+    const id = row.id;
+    const bytes = typeof row.downloaded === "number" ? row.downloaded : 0;
+    const existing = byId.get(id);
+    if (existing !== undefined) {
+      if (bytes > at[existing].bytes) at[existing] = { ...at[existing], bytes };
+      continue;
+    }
+    byId.set(id, at.length);
+    at.push({
+      id,
+      filename: redactSecretishFilename(row.name),
+      bytes,
     });
   }
   return at;

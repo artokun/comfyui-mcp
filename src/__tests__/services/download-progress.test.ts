@@ -26,6 +26,41 @@ function pendingFiles(): string[] {
   return readdirSync(dir).filter((f) => f.startsWith(mod.CONTROL_PREFIX));
 }
 
+describe("readDownloadProgress uses the late-bound dir (#1567)", () => {
+  // The orchestrator has no COMFYUI_MCP_PROGRESS_DIR; it late-binds via
+  // setProgressDir. A respawn-time snapshot runs in that process, so a reader
+  // that only looked at the import-time env capture returned null for every
+  // live transfer and the hold treated them as already stalled.
+  it("finds a row written into the dir the orchestrator actually uses", async () => {
+    vi.resetModules();
+    const lateDir = mkdtempSync(join(tmpdir(), "dl-late-"));
+    const saved = process.env.COMFYUI_MCP_PROGRESS_DIR;
+    delete process.env.COMFYUI_MCP_PROGRESS_DIR;
+    try {
+      const late = await import("../../services/download-progress.js");
+      late.setProgressDir(lateDir);
+      writeFileSync(
+        join(lateDir, "abc-deadbeef.json"),
+        JSON.stringify({
+          id: "abc",
+          name: "m.safetensors",
+          downloaded: 42,
+          total: 100,
+          bytes_per_sec: 1,
+          status: "downloading",
+          updated: Date.now(),
+        }),
+      );
+      expect(late.readDownloadProgress("abc")?.downloaded).toBe(42);
+      expect(late.listInFlightDownloadProgress().map((r) => r.id)).toEqual(["abc"]);
+    } finally {
+      if (saved === undefined) delete process.env.COMFYUI_MCP_PROGRESS_DIR;
+      else process.env.COMFYUI_MCP_PROGRESS_DIR = saved;
+      rmSync(lateDir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("download target stamping (#269)", () => {
   it("stamps the row with the writer's COMFYUI_URL at write time", () => {
     process.env.COMFYUI_URL = "https://podabc-3000.proxy.runpod.net";
