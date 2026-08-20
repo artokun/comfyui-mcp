@@ -14660,9 +14660,18 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         // addressed. What changes is the CLAIM: when two selectors name different
         // tabs, say so and name both, rather than silently reporting one of them.
         // Compared as CANONICAL connection ids on both sides — see
-        // turnPinRoutesElsewhereFor. `turn_routing:"repinned"` and
-        // `"pinned_elsewhere"` are mutually exclusive by construction: this arm
-        // requires `!currentModeTurnRepinned`.
+        // turnPinRoutesElsewhereFor.
+        //
+        // `!currentModeTurnRepinned` is REDUNDANT on every ordinary path and is kept
+        // deliberately: a repin moves the pin ONTO the active tab, so the equality
+        // check inside the helper already returns undefined. It earns its place only
+        // in the race where the active tab changes between the repin and this line —
+        // there the helper WOULD report a split, and the note attached to it says
+        // "that pin was NOT displaced", which had just stopped being true. Suppressing
+        // it there keeps `turn_routing:"repinned"` and `"pinned_elsewhere"` mutually
+        // exclusive and keeps the reply from contradicting itself. Staging that race
+        // deterministically is not worth a test, so a mutation dropping this condition
+        // survives the suite; that is a known and accepted gap, not an oversight.
         const turnPinRoutesElsewhere =
           mode === "current" && !currentModeTurnRepinned
             ? turnPinRoutesElsewhereFor(ctx)
