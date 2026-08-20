@@ -137,14 +137,16 @@ describe("status branches after a ComfyUI API call are reachable (#385)", () => 
     // Making this branch reachable must not cost the #1160 diagnosis, and must
     // not print a raw body — a gateway that reflects the request can put our own
     // credential in it. So it classifies instead of interpolating.
+    // #1905: 413 is a size limit, not a non-JSON stranger / bad base URL.
     answer(413, "too large", "text/plain");
     const err = await uploadImageHttp("big.png", Buffer.from("x")).then(
       () => null,
       (e: unknown) => e,
     );
-    expect((err as { code?: string }).code).toBe("NON_JSON_RESPONSE");
+    expect((err as { code?: string }).code).toBe("UPLOAD_TOO_LARGE");
     expect((err as Error).message).toContain("/upload/image");
     expect((err as Error).message).toContain("413");
+    expect((err as Error).message).not.toContain("Confirm the configured ComfyUI base URL");
   });
 
   it("uploadImageHttp still names a sign-in gate on a 401 (#1160 must not regress)", async () => {

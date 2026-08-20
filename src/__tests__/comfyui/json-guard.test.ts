@@ -350,6 +350,22 @@ describe("classifyNonJson names what answered instead of ComfyUI (#828)", () => 
     expect(d.message).not.toContain("really is a ComfyUI API root");
   });
 
+  it("does not prescribe a base-URL check for HTTP 413 (#1905)", () => {
+    const d = classifyNonJson({
+      url: "http://remote.example:8188/upload/image",
+      status: 413,
+      statusText: "Content Too Large",
+      contentType: "text/plain",
+      body: "Maximum request body size 104857600 exceeded, actual body size 104923136",
+    });
+    expect(d.message).toContain("413");
+    expect(d.message).toMatch(/request-size limit/i);
+    expect(d.message).toMatch(/trim or compress/i);
+    expect(d.message).not.toContain("Confirm the configured ComfyUI base URL");
+    expect(d.message).not.toContain("the same catch-all that produced this page");
+    expect(d.message).not.toContain("really is a ComfyUI API root");
+  });
+
   it("names a previously-validated root as an outage, not a misconfiguration", () => {
     noteComfyApiRootValidated(getComfyUIBaseUrl());
     const d = classifyNonJson({

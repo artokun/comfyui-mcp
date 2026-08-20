@@ -913,6 +913,75 @@ const STANDARD_REASON_PHRASES: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * aiohttp / ComfyUI: "Maximum request body size 104857600 exceeded, actual body size 104923136"
+ * (#1905). Capture the configured ceiling and, when present, the observed body.
+ */
+const MAX_BODY_SIZE_RE =
+  /Maximum request body size (\d+) exceeded(?:,\s*actual body size (\d+))?/i;
+
+function parseRequestBodySizeLimit(body: string): {
+  limitBytes: number;
+  actualBytes?: number;
+} | null {
+  const m = body.match(MAX_BODY_SIZE_RE);
+  if (!m) return null;
+  const limitBytes = Number(m[1]);
+  if (!Number.isFinite(limitBytes) || limitBytes < 0) return null;
+  const actualBytes = m[2] !== undefined ? Number(m[2]) : undefined;
+  return {
+    limitBytes,
+    actualBytes:
+      actualBytes !== undefined && Number.isFinite(actualBytes) && actualBytes >= 0
+        ? actualBytes
+        : undefined,
+  };
+}
+
+function formatByteCount(n: number): string {
+  const mib = n / (1024 * 1024);
+  const pretty = Number.isInteger(mib) ? String(mib) : mib.toFixed(1);
+  return `${n} bytes (${pretty} MiB)`;
+}
+
+/**
+ * HTTP 413 on an upload is a size limit, not a wrong ComfyUI API root (#1905).
+ *
+ * Classify this BEFORE JSON parsing: ComfyUI/aiohttp answers 413 as plain text,
+ * and feeding that body to the non-JSON catch-all produced NON_JSON_RESPONSE
+ * plus "confirm the configured ComfyUI base URL" — even when /system_stats was
+ * healthy JSON. Return null for any other status so callers keep their own path.
+ */
+export function uploadTooLargeError(args: {
+  url: string;
+  status: number;
+  statusText?: string;
+  body: string;
+}): ComfyUIError | null {
+  if (args.status !== 413) return null;
+  const url = redactUrlForDiagnosis(args.url);
+  const reason = describeStatus(args.status, args.statusText);
+  const parsed = parseRequestBodySizeLimit(args.body);
+  const sizes = parsed
+    ? parsed.actualBytes !== undefined
+      ? ` The configured request-body limit is ${formatByteCount(parsed.limitBytes)}; this request was ${formatByteCount(parsed.actualBytes)}.`
+      : ` The configured request-body limit is ${formatByteCount(parsed.limitBytes)}.`
+    : "";
+  let evidence = "";
+  if (!parsed) {
+    const prefix = bodyPrefixOf(args.body);
+    if (prefix && prefix !== "(empty)") evidence = ` Body starts: ${prefix}.`;
+  }
+  const message =
+    `${url} answered ${reason}: the upload was rejected because the request body exceeded the server's size limit.${sizes}${evidence} ` +
+    `This is a file-size limit, not a sign that the configured ComfyUI base URL is pointing at the wrong place. ` +
+    `Trim or compress the media (for video, FFmpeg) and retry.`;
+  return new ComfyUIError(message, "UPLOAD_TOO_LARGE", {
+    status: 413,
+    ...(parsed ?? {}),
+  });
+}
+
+/**
  * Classify a non-JSON response body. Pure (no I/O) so the classification rules
  * are unit-testable without a server.
  */
@@ -1038,14 +1107,22 @@ export function classifyNonJson(args: {
   // ComfyUI API root" — sent operators to reconfigure a working COMFYUI_URL
   // after a CUDA crash took the server down (#1670). Name the outage; only
   // HTML/wrong-responder answers still get the base-URL check.
+  //
+  // HTTP 413 is the same class of wrong next-step (#1905): ComfyUI/aiohttp
+  // answers "Maximum request body size … exceeded" as plain text, which this
+  // classifier used to treat as a non-JSON stranger and then recommend checking
+  // the base URL. Connectivity was fine; the file was too big.
   const statsCheck = `${redactUrlForDiagnosis(getComfyUIBaseUrl())}/system_stats`;
   const gatewayOutage = kind === "proxy-error";
+  const requestTooLarge = status === 413;
   const nextStep = gatewayOutage
     ? wasComfyApiRootValidated()
       ? `This same ComfyUI API root already served ${statsCheck} JSON this session, so the base URL is not newly misconfigured. Treat this as a temporary server outage (crash, restart, or a proxy that cannot reach ComfyUI) and retry after the server is back`
       : `This is a temporary server outage — ComfyUI crashed, is restarting, or a proxy in front of it could not reach it — not evidence that the configured ComfyUI base URL is pointing at the wrong place. Retry after the server is back; if ${statsCheck} then returns JSON, the base URL was fine`
-    : `Confirm the configured ComfyUI base URL really is a ComfyUI API root — a URL that loads the ComfyUI UI in a browser is not proof, because the UI is served by the same catch-all that produced this page. ` +
-      `The check is that ${statsCheck} returns JSON with a "system"/"devices" shape; if it returns HTML too, the base URL, its path prefix, or the proxy's route map is wrong`;
+    : requestTooLarge
+      ? `This is a request-size limit (HTTP 413), not evidence that the configured ComfyUI base URL is pointing at the wrong place. Trim or compress the media and retry`
+      : `Confirm the configured ComfyUI base URL really is a ComfyUI API root — a URL that loads the ComfyUI UI in a browser is not proof, because the UI is served by the same catch-all that produced this page. ` +
+        `The check is that ${statsCheck} returns JSON with a "system"/"devices" shape; if it returns HTML too, the base URL, its path prefix, or the proxy's route map is wrong`;
   const message =
     `${url} answered ${reason} with ${what} where JSON was expected. This means ${cause}. ` +
     `Content-Type: ${contentType || "(none)"}. Body starts: ${bodyPrefix || "(empty)"}. ` +

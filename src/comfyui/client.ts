@@ -30,6 +30,7 @@ import {
   rethrowWithJsonDiagnosis,
   scrubLogLines,
   scrubSecretShapedText,
+  uploadTooLargeError,
 } from "./json-guard.js";
 import * as cloudClient from "./cloud-client.js";
 import type { ObjectInfo, SystemStats, QueueStatus } from "./types.js";
@@ -1221,6 +1222,16 @@ export async function uploadImageHttp(
     // unknown-ok: "" only means an unreadable body, which classifyNonJson reports
     // as an empty one — a loss of detail, never a wrong conclusion.
     const text = await res.text().catch(() => "");
+    // #1905 — HTTP 413 is a size limit. Classifying it as NON_JSON_RESPONSE
+    // (plain-text aiohttp body) then recommended checking the ComfyUI base URL,
+    // even when /system_stats was healthy JSON. Name the limit before any parse.
+    const tooLarge = uploadTooLargeError({
+      url: "/upload/image",
+      status: res.status,
+      statusText: res.statusText,
+      body: text,
+    });
+    if (tooLarge) throw tooLarge;
     throw new NonJsonResponseError(
       classifyNonJson({
         url: "/upload/image",
