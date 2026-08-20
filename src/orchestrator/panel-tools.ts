@@ -5655,13 +5655,13 @@ function currentWorkflowFence(ctx: PanelToolCtx): FenceRead {
  */
 export type WorkflowFenceRebind =
   /** Read the live identity; it differed from the stamp and has REPLACED it. */
-  | { status: "refreshed"; uuid: string; before: FenceRead }
+  | { status: "refreshed"; uuid: string; before: FenceRead; active?: Record<string, unknown> }
   /** #1646 — a READ-ONLY probe (`adopt:false`) found the live identity differs
    *  from the fence and deliberately did NOT adopt it: a mismatch diagnosis
    *  must never re-point mutation routing on its own authority. */
-  | { status: "diverged"; uuid: string; before: FenceRead }
+  | { status: "diverged"; uuid: string; before: FenceRead; active?: Record<string, unknown> }
   /** Read the live identity; the stamp already named it. Nothing to repair. */
-  | { status: "already_current"; uuid: string; before: FenceRead }
+  | { status: "already_current"; uuid: string; before: FenceRead; active?: Record<string, unknown> }
   /** The panel did not answer, or its reply was not readable. Unknown, not "fine". */
   | { status: "unreadable"; before: FenceRead; detail: string }
   /** The panel answered, but no usable identity could be adopted from it. TWO
@@ -6201,14 +6201,14 @@ async function rebindWorkflowFence(
     // off parsed prose, and the result is ignored: this is corroboration, and a diagnostic
     // must never replace the outcome it is describing.
     corroborateTabStamp(ctx, uuid);
-    return { status: "already_current", uuid, before };
+    return { status: "already_current", uuid, before, active };
   }
   // #1646 — a READ-ONLY probe never moves the fence: the live canvas naming a
   // DIFFERENT workflow is reported, not adopted. Only a deliberate rebind
   // (panel_set_workflow_target, open/new) may replace the fence — a mismatch
   // diagnosis that re-pointed the session on its own authority routed the
   // caller's NEXT edits onto the very canvas the refusal named as the wrong one.
-  if (opts?.adopt === false) return { status: "diverged", uuid, before };
+  if (opts?.adopt === false) return { status: "diverged", uuid, before, active };
   // refreshWorkflowUuid routes through the orchestrator's validator, which
   // re-checks reachability and the uuid's shape/origin binding. A `false` here is
   // a REFUSAL, not a no-op, so it gets its own status rather than being reported
@@ -6222,7 +6222,7 @@ async function rebindWorkflowFence(
   // write, so `rejected`'s "the previous fence is unchanged" would be a state
   // nobody observed.
   try {
-    if (refreshWorkflowUuid(ctx, active)) return { status: "refreshed", uuid, before };
+    if (refreshWorkflowUuid(ctx, active)) return { status: "refreshed", uuid, before, active };
     // #1077 — carry WHY. The validator has three independent gates and all of
     // them used to surface as the same bare "REFUSED", which left a wedged
     // session with nothing to act on. One of them (no server-observed Origin on
@@ -6247,6 +6247,36 @@ async function rebindWorkflowFence(
       detail: err instanceof Error ? err.message : String(err ?? "unknown error"),
     };
   }
+}
+
+/** Corroborated live-canvas record from a fence probe, when the probe published one. */
+function liveActiveFromProbe(probe: WorkflowFenceRebind): Record<string, unknown> | undefined {
+  if (
+    probe.status === "diverged" ||
+    probe.status === "already_current" ||
+    probe.status === "refreshed"
+  ) {
+    return probe.active;
+  }
+  return undefined;
+}
+
+/**
+ * #1913 — a pin is a PATH, not an instance stamp. After a ComfyUI reconnect the
+ * canvas can still be that path while this session has no workflow-instance uuid
+ * to stamp commands with. Honoring the pin means the live canvas IS the pinned
+ * workflow, so minting a first stamp from it does not abandon the named target
+ * and does not require `mode:"current"` (which would release the pin). A pin to
+ * any other canvas, or a pin we cannot positively match, is left alone (#1519).
+ */
+function pinHonorsLiveCanvas(
+  pin: { mode?: string; path?: string } | undefined,
+  liveActive: Record<string, unknown> | undefined,
+): boolean {
+  if (pin?.mode !== "pinned") return true;
+  if (typeof pin.path !== "string" || pin.path.length === 0) return false;
+  if (!liveActive) return false;
+  return readOpenActiveAgainstTarget(liveActive, pin.path) === "same";
 }
 
 /**
@@ -9377,9 +9407,12 @@ export function makePanelToolCtx(
       //
       // AN UNSTAMPED INERT READ IS ADMITTED by minting a first fence from the
       // live canvas and retrying once. That is not the retarget #1646 removed:
-      // there is no named workflow to abandon, and a pinned session is left
-      // alone. The panel fence is unchanged (#718). A WRONG stamp still fails.
-      // The probe stays read-only until this branch decides to mint.
+      // there is no named workflow to abandon. A PIN to a DIFFERENT workflow
+      // is still left alone (#1519). #1913: a PIN whose workflow is still the
+      // live canvas is not an abandonment — reconnect dropped the instance
+      // stamp, not the pin — so the stamp is minted and the pin is kept. A
+      // WRONG stamp still fails. The probe stays read-only until this branch
+      // decides to mint.
       if (isWorkflowInstanceMismatch(err) && isFencedGraphRead(cmd)) {
         const name = typeof cmd.cmd === "string" ? cmd.cmd : "panel command";
         const raw = err instanceof Error ? err.message : String(err);
@@ -9422,7 +9455,9 @@ export function makePanelToolCtx(
           const priorAbsent =
             "before" in probe && probe.before.known === true && !probe.before.uuid;
           const admitUnstampedRead =
-            inertRead && shape === "unstamped" && pin?.mode !== "pinned";
+            inertRead &&
+            shape === "unstamped" &&
+            pinHonorsLiveCanvas(pin, liveActiveFromProbe(probe));
           // Mint a first stamp only when this session has none. A fence naming
           // some other workflow is the retarget #1646 removed; we do not move it.
           if (

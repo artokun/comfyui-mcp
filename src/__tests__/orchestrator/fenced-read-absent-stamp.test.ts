@@ -38,6 +38,13 @@ let fence: { known: boolean; uuid?: string };
  *  a green assertion cannot come from the diagnosis text. */
 const OUTLINE = { node_count: 3, outline: "1 CheckpointLoaderSimple \"ckpt\"" };
 
+/** Distinctive `graph_get_errors` payload so a green assertion cannot come from
+ *  the diagnosis text either. The reporter's other refused read (#1913). */
+const ERRORS = {
+  nodes: [{ id: 7, type: "LoadImage", reasons: ["missing_media: input.png"] }],
+  errored_count: 1,
+};
+
 /** A self-corroborating workflow_list reply: the active record also appears in the
  *  open-workflow list flagged active, which is what corroboration requires. */
 function settled(uuid: string | null): Record<string, unknown> {
@@ -84,13 +91,13 @@ function bridge(opts: BridgeOpts) {
         return settled(opts.liveUuid);
       }
       const outlineSends = sent.filter((c) => c === "graph_outline").length;
-      if (
-        name === "graph_outline" &&
-        ((opts.serveOutlineWhen === "adopted" && adopted.length > 0) ||
-          (opts.serveOutlineWhen === "retry" && outlineSends > 1))
-      ) {
-        return OUTLINE;
-      }
+      const errorSends = sent.filter((c) => c === "graph_get_errors").length;
+      const admitted =
+        (opts.serveOutlineWhen === "adopted" && adopted.length > 0) ||
+        (opts.serveOutlineWhen === "retry" &&
+          (name === "graph_outline" ? outlineSends > 1 : errorSends > 1));
+      if (admitted && name === "graph_outline") return OUTLINE;
+      if (admitted && name === "graph_get_errors") return ERRORS;
       throw new Error(refusal);
     },
     push: () => 1,
@@ -110,19 +117,28 @@ function bridge(opts: BridgeOpts) {
   } as unknown as PanelToolCtx["bridge"];
 }
 
-/** Drive a real READ tool (panel_graph_outline) through the real ctx.call path. */
-async function outline(
+/** Drive a real READ tool through the real ctx.call path. */
+async function callRead(
+  name: "panel_graph_outline" | "panel_get_errors",
   opts: BridgeOpts,
   store = new WorkflowTargetStore(),
 ): Promise<{ text: string; isError: boolean }> {
   const ctx = makePanelToolCtx(bridge(opts), TAB, store);
-  const def = buildPanelToolDefs().find((d) => d.name === "panel_graph_outline");
-  if (!def) throw new Error("panel_graph_outline is not registered");
+  const def = buildPanelToolDefs().find((d) => d.name === name);
+  if (!def) throw new Error(`${name} is not registered`);
   const res: ToolResult = await def.handler({} as never, ctx);
   return {
     text: res.content.map((c) => (c as { text?: string }).text ?? "").join(" "),
     isError: res.isError === true,
   };
+}
+
+/** Drive a real READ tool (panel_graph_outline) through the real ctx.call path. */
+async function outline(
+  opts: BridgeOpts,
+  store = new WorkflowTargetStore(),
+): Promise<{ text: string; isError: boolean }> {
+  return callRead("panel_graph_outline", opts, store);
 }
 
 /** The remedy that is right ONLY for an absent stamp. */
@@ -224,10 +240,12 @@ describe("a fenced graph READ is diagnosed, and a missing stamp is not a wrong o
     expect(adopted).toEqual([]);
   });
 
-  it("PINNED: naming mode:\"current\" also discloses that it releases the pin", async () => {
+  it("PINNED to a DIFFERENT workflow: naming mode:\"current\" also discloses that it releases the pin", async () => {
     // mode:"current" is the right remedy for a missing stamp AND it silently drops a
     // pin. A caller who followed it to fix a read would lose their target and find
-    // out by editing the wrong workflow later.
+    // out by editing the wrong workflow later. This is NOT the reconnect case
+    // (#1913) where the pin still names the live canvas — minting from live
+    // here would abandon b.json.
     const store = new WorkflowTargetStore();
     store.set(TAB, { mode: "pinned", path: "workflows/b.json", filename: "b.json" });
     const { text } = await outline({ issuedFor: null, liveUuid: LIVE }, store);
@@ -237,6 +255,11 @@ describe("a fenced graph READ is diagnosed, and a missing stamp is not a wrong o
     expect(text).toMatch(/RELEASES that pin/);
     expect(text).toMatch(/panel_open_workflow\("workflows\/b\.json"\)/);
     expect(adopted).toEqual([]);
+    expect(store.get(TAB)).toEqual({
+      mode: "pinned",
+      path: "workflows/b.json",
+      filename: "b.json",
+    });
   });
 
   it("UNSTATED SHAPE: a refusal that names neither state gets NO remedy invented for it", async () => {
@@ -474,5 +497,81 @@ describe("an unstamped inert read is admitted (#1519 remaining)", () => {
     expect(text).not.toMatch(/no graph data was read/);
     expect(text).not.toMatch(/this is a read/);
     expect(adopted).toEqual([]);
+  });
+});
+
+describe("a PIN to the live canvas does not block minting a missing stamp (#1913)", () => {
+  // After ComfyUI restarted and the panel reconnected, the session was still
+  // pinned to the active workflow, the live canvas had a valid instance identity,
+  // and both panel_graph_outline and panel_get_errors were refused for carrying
+  // no stamp. The documented recovery (mode:"current") restored the fence AND
+  // released the pin. Minting from the live canvas while the pin still names
+  // that canvas keeps the pin.
+
+  function pinToLive(): WorkflowTargetStore {
+    const store = new WorkflowTargetStore();
+    store.set(TAB, { mode: "pinned", path: "workflows/a.json", filename: "a.json" });
+    return store;
+  }
+
+  function pinStillHeld(store: WorkflowTargetStore): void {
+    expect(store.get(TAB)).toEqual({
+      mode: "pinned",
+      path: "workflows/a.json",
+      filename: "a.json",
+    });
+  }
+
+  it("panel_graph_outline runs, the stamp is minted from the live canvas, and the pin is kept", async () => {
+    const store = pinToLive();
+    const { text, isError } = await outline(
+      { issuedFor: null, liveUuid: LIVE, serveOutlineWhen: "adopted" },
+      store,
+    );
+
+    expect(listCalls).toBeGreaterThan(0);
+    expect(adopted).toEqual([LIVE]);
+    expect(isError).toBe(false);
+    expect(text).toContain("CheckpointLoaderSimple");
+    expect(text).not.toMatch(/Error:/);
+    expect(text).not.toMatch(REBIND);
+    expect(text).not.toMatch(/RELEASES that pin/);
+    expect(sent.filter((c) => c === "graph_outline").length).toBeGreaterThan(1);
+    pinStillHeld(store);
+  });
+
+  it("panel_get_errors runs the same way — the other refused read", async () => {
+    const store = pinToLive();
+    const { text, isError } = await callRead(
+      "panel_get_errors",
+      { issuedFor: null, liveUuid: LIVE, serveOutlineWhen: "adopted" },
+      store,
+    );
+
+    expect(listCalls).toBeGreaterThan(0);
+    expect(adopted).toEqual([LIVE]);
+    expect(isError).toBe(false);
+    expect(text).toContain("missing_media: input.png");
+    expect(text).not.toMatch(/Error:/);
+    expect(text).not.toMatch(REBIND);
+    expect(sent.filter((c) => c === "graph_get_errors").length).toBeGreaterThan(1);
+    pinStillHeld(store);
+  });
+
+  it("already_current: retries without minting and without releasing the pin", async () => {
+    // The fence appeared between dispatch and the probe. Retrying now carries it;
+    // minting again would claim a repair this call did not make, and mode:"current"
+    // would drop the pin for nothing.
+    fence = { known: true, uuid: LIVE };
+    const store = pinToLive();
+    const { text, isError } = await outline(
+      { issuedFor: null, liveUuid: LIVE, serveOutlineWhen: "retry" },
+      store,
+    );
+    expect(isError).toBe(false);
+    expect(text).toContain("CheckpointLoaderSimple");
+    expect(adopted).toEqual([]);
+    expect(sent.filter((c) => c === "graph_outline").length).toBeGreaterThan(1);
+    pinStillHeld(store);
   });
 });
