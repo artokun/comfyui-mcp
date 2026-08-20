@@ -249,16 +249,37 @@ describe("a paid external-service node is never reported as local/free (#1483)",
     expect(out.externalProviders).toEqual(["PoYo"]);
   });
 
+  it("#1855: a REGISTRY install is caught too, where the module string alone would miss", async () => {
+    // The Comfy Registry id is `poyo-nodes` (pyproject name), not the GitHub repo name
+    // `poyo-comfyui`, so a registry install reports python_module
+    // "custom_nodes.poyo-nodes" — which does not contain the module substring at all.
+    // The category prefix is the only thing that catches that path.
+    const registryInstalled = def({
+      name: "PoYo_GenerateImage",
+      category: "PoYo AI/Generate",
+      python_module: "custom_nodes.poyo-nodes",
+      input: { required: { prompt: ["STRING", {}] } },
+    });
+    const out = await runtimeOf(["PoYo_GenerateImage"], {
+      PoYo_GenerateImage: registryInstalled,
+    });
+    expect(out.usesApiNodes).toBe(true);
+    expect(out.externalProviders).toEqual(["PoYo"]);
+  });
+
   it("#1855: a merely SIMILAR category is not swept in", async () => {
     // "poyo ai" must not match a different pack that happens to start with the same
     // letters — the prefix rule is exact-or-followed-by-slash, and this asserts it.
+    // "PoYoAlpha/Mask" would NOT have tested this: it diverges from "poyo ai" at the
+    // space, so even a naive startsWith(prefix) passes it. "PoYo AI Extras/Mask" shares
+    // the whole prefix and differs only after it, which is the boundary the rule is.
     const other = def({
-      name: "PoyoaMasker",
-      category: "PoYoAlpha/Mask",
-      python_module: "custom_nodes.poyoalpha-masker",
+      name: "PoyoExtrasMasker",
+      category: "PoYo AI Extras/Mask",
+      python_module: "custom_nodes.poyo-ai-extras",
       input: { required: { image: ["IMAGE", {}] } },
     });
-    const out = await runtimeOf(["PoyoaMasker"], { PoyoaMasker: other });
+    const out = await runtimeOf(["PoyoExtrasMasker"], { PoyoExtrasMasker: other });
     expect(out.runtime).toBe("local");
     expect(out.usesApiNodes).toBe(false);
     // The field is OMITTED when there is nothing to name, not emitted empty — asserting
