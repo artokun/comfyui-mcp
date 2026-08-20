@@ -110,11 +110,14 @@ function scriptProbe(samples: Array<"healthy" | "down" | "unknown">): void {
  * leftover "unknown" samples on a 50ms Windows timer would eat the budget.
  */
 function scriptCrashThenRecover(decline: "unknown" | "down"): void {
-  const started = Date.now();
+  let firstProbeAt: number | undefined;
   let recoverySamples = 0;
   __panelToolsTestHooks.setHealthProbe(async () => {
-    // 80ms covers the 40ms decline window plus timer slop.
-    if (Date.now() - started < 80) return decline;
+    // Measured from the FIRST probe, not fixture setup: handler work before
+    // decline sampling (Windows CI especially) used to eat the 80ms budget so
+    // every sample looked healthy and the crash path folded into #1332.
+    firstProbeAt ??= Date.now();
+    if (Date.now() - firstProbeAt < 120) return decline;
     recoverySamples++;
     return recoverySamples < 2 ? "down" : "healthy";
   });
