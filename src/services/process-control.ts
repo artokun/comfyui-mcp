@@ -1485,6 +1485,61 @@ function observedInterpreterFromIdentity(
 }
 
 /**
+ * A package venv interpreter: `<root>/venv/Scripts/python.exe` or
+ * `<root>/.venv/bin/python`. The Windows trampoline that actually owns the
+ * environment; its child is the BASE CPython `pyvenv.cfg` named, which has no
+ * ComfyUI site-packages.
+ */
+function isVenvInterpreterPath(exe: string): boolean {
+  const segs = exe.replace(/\\/g, "/").split("/").filter(Boolean);
+  if (segs.length < 3) return false;
+  const file = segs[segs.length - 1]!.toLowerCase();
+  if (!/^python(w)?(?:\d+(?:\.\d+)*)?(?:\.exe)?$/.test(file)) return false;
+  const dir = segs[segs.length - 2]!.toLowerCase();
+  const env = segs[segs.length - 3]!.toLowerCase();
+  return (dir === "scripts" || dir === "bin") && (env === "venv" || env === ".venv");
+}
+
+/**
+ * Windows venv trampoline (#1704 recurrence): the port owner is the BASE
+ * CPython child; its parent is `<install>/venv/Scripts/python.exe`; both carry
+ * the same `main.py …` arguments. Spawning the child image relaunches an
+ * interpreter with no sqlalchemy/torch (Assets CPython or any other `home`).
+ *
+ * The parent is an OS observation of THIS tree, not a layout guess — an
+ * observed *venv* interpreter on the port owner is left alone (#1654).
+ */
+function observedInterpreterFromTrampolineParent(
+  child: ProcessIdentity,
+  serverArgv: string[],
+): string | undefined {
+  const childExe = observedInterpreterFromIdentity(child);
+  if (childExe && isVenvInterpreterPath(childExe)) return undefined;
+  const parentPid = child.parentPid;
+  if (!parentPid || parentPid <= 0) return undefined;
+  const parent = resolveProcessIdentity(parentPid);
+  if (!parent) return undefined;
+  const parentExe = observedInterpreterFromIdentity(parent);
+  if (!parentExe || !isVenvInterpreterPath(parentExe)) return undefined;
+  if (childExe && sameInterpreterPath(childExe, parentExe)) return undefined;
+  const matchArgv =
+    serverArgv.length > 0
+      ? serverArgv
+      : child.argv && child.argv.length > 1
+        ? child.argv.slice(1)
+        : [];
+  if (matchArgv.length === 0) return undefined;
+  if (!commandLineMatchesArgv(parent.commandLine, matchArgv)) return undefined;
+  return parentExe;
+}
+
+function sameInterpreterPath(a: string, b: string): boolean {
+  const norm = (s: string): string =>
+    s.replace(/[\\/]+$/, "").replace(/[\\/]/g, "/").toLowerCase();
+  return norm(a) === norm(b);
+}
+
+/**
  * The live environment of a pid we can still PROVE is the process we identified.
  *
  * Reading `/proc/<pid>/environ` from a bare number is not enough: between the port
@@ -2755,14 +2810,18 @@ async function gatherProcessInfo(): Promise<ProcessInfo> {
   // unreadable — the same observation `install_comfyui(action:"environment")`
   // already reports — so a server started outside this session is not relaunched
   // with Stability Matrix's unused Assets CPython.
+  //
+  // #1704 recurrence: the port owner can be the trampoline's BASE child. argv[0]
+  // of that child is the home CPython (Assets or otherwise); the parent is the
+  // package venv that actually has site-packages. Prefer that parent.
   const interpreterIdentity =
     corroboration.kind === "confirmed"
       ? corroboration.identity
       : (osIdentity ?? resolveProcessIdentity(pid));
-  const observedInterpreter =
-    !desktop && interpreterIdentity
-      ? observedInterpreterFromIdentity(interpreterIdentity)
-      : undefined;
+  const observedInterpreter = !desktop && interpreterIdentity
+    ? (observedInterpreterFromTrampolineParent(interpreterIdentity, argv) ??
+      observedInterpreterFromIdentity(interpreterIdentity))
+    : undefined;
   const startedAt = desktop
     ? undefined
     : corroboration.kind === "confirmed"

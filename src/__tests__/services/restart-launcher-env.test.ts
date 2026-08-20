@@ -862,6 +862,145 @@ describe("restart_comfyui — Stability Matrix package venv, not Assets CPython 
   });
 });
 
+describe("restart_comfyui — Windows venv trampoline parent, not the base child (#1704)", () => {
+  // Recurrence 2026-08-20: the port owner was a base CPython CHILD while its
+  // parent was `<install>/venv/Scripts/python.exe`; both had matching
+  // `main.py --port 8190 --use-sage-attention`. Restart stopped the tree and
+  // relaunched the child's image — a home interpreter with no sqlalchemy.
+  // #1761 only remaps Stability Matrix Assets CPython; this is the generic
+  // trampoline shape, including when the home happens to be Assets.
+  const TRAMPOLINE_ROOT = resolve("VenvTrampolineComfy");
+  const TRAMPOLINE_MAIN = join(TRAMPOLINE_ROOT, "main.py");
+  const TRAMPOLINE_VENV_PY = join(
+    TRAMPOLINE_ROOT,
+    "venv",
+    "Scripts",
+    "python.exe",
+  );
+  const TRAMPOLINE_BASE_PY = join(resolve("CPythonHome"), "python.exe");
+  const TRAMPOLINE_ARGV = [
+    TRAMPOLINE_MAIN,
+    "--port",
+    "8190",
+    "--use-sage-attention",
+  ];
+  const PARENT_PID = 1001;
+
+  function useTrampolineTree(opts?: {
+    childCommandLine?: string;
+    parentCommandLine?: string;
+    parentPid?: number;
+  }): void {
+    mockFindComfyuiPython.mockReturnValue(TRAMPOLINE_BASE_PY);
+    mockLiveRootFromArgv.mockReturnValue(TRAMPOLINE_ROOT);
+    mockGetSystemStats.mockResolvedValue({ system: { argv: TRAMPOLINE_ARGV } });
+    mockExistsSync.mockImplementation((p: string) => {
+      const s = String(p);
+      return (
+        s === TRAMPOLINE_MAIN ||
+        s === TRAMPOLINE_VENV_PY ||
+        s === TRAMPOLINE_BASE_PY
+      );
+    });
+    const childCL =
+      opts?.childCommandLine ??
+      `"${TRAMPOLINE_BASE_PY}" "${TRAMPOLINE_MAIN}" --port 8190 --use-sage-attention`;
+    const parentCL =
+      opts?.parentCommandLine ??
+      `"${TRAMPOLINE_VENV_PY}" "${TRAMPOLINE_MAIN}" --port 8190 --use-sage-attention`;
+    const parentPid = opts?.parentPid ?? PARENT_PID;
+    __processControlTestHooks.setProcessIdentityResolver((pid) => {
+      if (pid === 4321) {
+        return {
+          startedAt: "child-stamp",
+          commandLine: childCL,
+          parentPid,
+        };
+      }
+      if (pid === parentPid) {
+        return { startedAt: "parent-stamp", commandLine: parentCL };
+      }
+      return undefined;
+    });
+  }
+
+  async function restartAndReturnSpawn(): Promise<{
+    exe: string;
+    args: string[];
+  }> {
+    mockLivePortThenFree();
+    spawnCapturingChildren();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ ok: true }) as Response),
+    );
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
+    const result = await restartComfyUI();
+    expect(result.stopped).toBe(true);
+    expect(result.started).toBe(true);
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    const [exe, args] = mockSpawn.mock.calls[0];
+    killSpy.mockRestore();
+    return { exe: String(exe), args: args as string[] };
+  }
+
+  it("relaunches the venv parent when the port owner is the trampoline's base CPython child", async () => {
+    useTrampolineTree();
+
+    const { exe, args } = await restartAndReturnSpawn();
+
+    expect(exe).toBe(TRAMPOLINE_VENV_PY);
+    expect(exe).not.toBe(TRAMPOLINE_BASE_PY);
+    expect(args).toEqual(TRAMPOLINE_ARGV);
+  });
+
+  it("relaunches the package venv when the trampoline child is Stability Matrix Assets CPython", async () => {
+    // Same tree shape, home = SM Assets. #1761 remapping also covers Assets
+    // when a Packages path is already in argv; the parent walk is what remains
+    // when the observation is this child/parent pair.
+    mockFindComfyuiPython.mockReturnValue(SM_ASSETS_PY);
+    mockLiveRootFromArgv.mockReturnValue(SM_PKG);
+    const argv = [SM_MAIN, "--port", "8190", "--use-sage-attention"];
+    mockGetSystemStats.mockResolvedValue({ system: { argv } });
+    mockExistsSync.mockImplementation((p: string) => {
+      const s = String(p);
+      return s === SM_MAIN || s === SM_PY || s === SM_ASSETS_PY;
+    });
+    __processControlTestHooks.setProcessIdentityResolver((pid) => {
+      if (pid === 4321) {
+        return {
+          startedAt: "child-stamp",
+          commandLine: `"${SM_ASSETS_PY}" "${SM_MAIN}" --port 8190 --use-sage-attention`,
+          parentPid: PARENT_PID,
+        };
+      }
+      if (pid === PARENT_PID) {
+        return {
+          startedAt: "parent-stamp",
+          commandLine: `"${SM_PY}" "${SM_MAIN}" --port 8190 --use-sage-attention`,
+        };
+      }
+      return undefined;
+    });
+
+    const { exe } = await restartAndReturnSpawn();
+
+    expect(exe).toBe(SM_PY);
+    expect(exe).not.toBe(SM_ASSETS_PY);
+  });
+
+  it("does not adopt a venv parent whose command line is a different ComfyUI", async () => {
+    useTrampolineTree({
+      parentCommandLine: `"${TRAMPOLINE_VENV_PY}" "${join(resolve("OtherComfy"), "main.py")}" --port 8190 --use-sage-attention`,
+    });
+
+    const { exe } = await restartAndReturnSpawn();
+
+    expect(exe).toBe(TRAMPOLINE_BASE_PY);
+    expect(exe).not.toBe(TRAMPOLINE_VENV_PY);
+  });
+});
+
 describe("launcher layout detection — path-root handling (#776)", () => {
   // The paths come from the running ComfyUI's sys.argv, which is WINDOWS-flavored
   // whenever ComfyUI runs on Windows regardless of this host. These are pure
