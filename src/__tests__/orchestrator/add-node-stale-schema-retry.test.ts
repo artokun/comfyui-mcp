@@ -40,7 +40,7 @@ const STALE = () =>
  * `addOutcomes` is consumed one per graph_add_node call: "stale" throws the refusal,
  * "ok" succeeds. `refreshFails` makes refresh_nodes throw.
  */
-function bridge(addOutcomes: Array<"stale" | "ok">, refreshFails: boolean | "timeout" = false) {
+function bridge(addOutcomes: Array<"stale" | "ok">, refreshFails: boolean | "timeout" | "acked-error-quoting-timeout" = false) {
   const calls: string[] = [];
   let addIdx = 0;
   const b = {
@@ -50,6 +50,14 @@ function bridge(addOutcomes: Array<"stale" | "ok">, refreshFails: boolean | "tim
         // #1491 — THREE outcomes, not two. A reply TIMEOUT is tagged by the bridge
         // itself (markReplyTimeout); an acked executor error is a plain throw. The
         // orchestrator must tell them apart, because the correct advice is opposite.
+        // An ACKED executor error that merely QUOTES the bridge's timeout wording. The
+        // panel relays arbitrary error text, so this shape is reachable — and it is the
+        // only input that separates "read the bridge's tag" from "match the message".
+        if (refreshFails === "acked-error-quoting-timeout") {
+          throw new Error(
+            `refresh aborted: last attempt reported Panel tab ${TAB} did not reply to "refresh_nodes" within 30000 ms`,
+          );
+        }
         if (refreshFails === "timeout") {
           throw markReplyTimeout(
             new Error(`Panel tab ${TAB} did not reply to "refresh_nodes" within 30000 ms`),
@@ -77,7 +85,7 @@ function bridge(addOutcomes: Array<"stale" | "ok">, refreshFails: boolean | "tim
   return { b, calls };
 }
 
-async function addNode(addOutcomes: Array<"stale" | "ok">, refreshFails: boolean | "timeout" = false) {
+async function addNode(addOutcomes: Array<"stale" | "ok">, refreshFails: boolean | "timeout" | "acked-error-quoting-timeout" = false) {
   const { b, calls } = bridge(addOutcomes, refreshFails);
   const ctx = makePanelToolCtx(b, TAB, new WorkflowTargetStore());
   const def = buildPanelToolDefs().find((d) => d.name === "panel_add_node");
@@ -178,6 +186,20 @@ describe("#1491: an auto-refresh that outran its ack is NOT a failed refresh", (
     expect(text).not.toContain("retrying the add will refuse again");
     // And it must not assert a frozen tab it never observed.
     expect(text).toContain("Nothing here observed the tab being frozen");
+  });
+
+  it("an ACKED error that QUOTES the timeout wording is still a failure", async () => {
+    // #1468's point, and the reason this decision may not be made from message text: the
+    // panel relays arbitrary error text, and ctx.call flattens a tagged timeout and an
+    // acked error into the same text-only result. Only the bridge-owned tag separates
+    // them. Without this fixture a text-matching implementation passes every other test
+    // here — verified: it did.
+    const { text } = await addNode(["stale", "stale"], "acked-error-quoting-timeout");
+
+    expect(text).toContain("was dispatched and FAILED");
+    expect(text).toContain("so the schema is unchanged");
+    expect(text).not.toContain("RETRY the add");
+    expect(text).not.toContain("did NOT answer within its window");
   });
 
   it("a GENUINE refresh failure keeps the original advice", async () => {
