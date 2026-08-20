@@ -1,0 +1,63 @@
+# Dependency and CVE tracking.
+#
+# WHY THIS EXISTS: the publish path here is fast and wide — releases are tagged
+# by automation and every install runs a self-updater that polls npm hourly, so a
+# dependency problem reaches the whole fleet about as quickly as a fix does. The
+# repo's existing security gates all look INWARD (the panel's bandit and
+# YARA-parity passes scan our own shipped files for malicious patterns); nothing
+# was watching for a published advisory against something we already depend on.
+#
+# WEEKLY AND GROUPED, deliberately. A daily per-package firehose trains everyone
+# to rubber-stamp bumps, which is worse than not having them: the point is that
+# each PR gets read. One grouped PR a week for minor/patch is a thing a human
+# actually reviews. Majors are left ungrouped on purpose — they break things and
+# deserve to arrive alone.
+#
+# OUT OF SCOPE FOR THE AUTOPILOT, by decision. The swarm's finisher only adopts
+# PRs whose issue it dispatched, and it now also skips bot-authored PRs outright
+# — necessary, because its issue-number extraction reads the PR body and falls
+# back to digits in the branch name, and a bump quoting an upstream "#1524" in
+# its changelog resolves to a real issue number in this repo. Dependency bumps
+# are reviewed by a human, not driven to merge by an agent.
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore(deps)"
+      prefix-development: "chore(deps-dev)"
+    labels:
+      - "dependencies"
+    groups:
+      # One PR for the routine stuff. Majors deliberately excluded so they land
+      # on their own and get read on their own.
+      npm-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # The workflows are part of the supply chain too: a compromised action runs
+  # with the release job's credentials, which is the one place in this repo that
+  # can publish.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore(actions)"
+    labels:
+      - "dependencies"
+    groups:
+      actions-all:
+        patterns:
+          - "*"
