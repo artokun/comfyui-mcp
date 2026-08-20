@@ -6,11 +6,19 @@
 //
 // The frontend main thread is what cannot answer. The orchestrator CAN see the
 // running prompt via QueueMonitor (HTTP /queue, independent of the panel tab).
-// Fail closed BEFORE dispatch for canvas-touching graph commands so the agent
-// gets an explicit QUEUE BUSY instead of a 20/30s unknown-outcome timeout.
-// `graph_run` is excluded: queuing behind an in-flight job is the documented
-// sweep path. A timeout that still happens (graph_run, or a lagging snapshot)
-// is annotated with the same QUEUE BUSY rather than "backgrounded or frozen".
+// Fail closed BEFORE dispatch for graph EDITS so the agent gets an explicit
+// QUEUE BUSY instead of a 20/30s unknown-outcome timeout. `graph_run` is
+// excluded: queuing behind an in-flight job is the documented sweep path. A
+// timeout that still happens is annotated with the same QUEUE BUSY rather than
+// "backgrounded or frozen".
+//
+// panel#1517 — #1745 applied that refusal to READS too, which cost read-only
+// inspection for the whole duration of a render: an agent could not read the
+// prompt warning it was trying to correct for the next run. A read has no
+// mutation outcome to be unknown about, so an `inert` command (GRAPH_CMD_EFFECT)
+// is DISPATCHED while a prompt runs; if the tab genuinely cannot answer it, the
+// bounded read budget produces the same QUEUE BUSY text on the timeout path.
+// The edit refusal is unchanged — that is what the unknown outcome is about.
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -21,7 +29,7 @@ import {
   type ToolResult,
 } from "../../orchestrator/panel-tools.js";
 import { QueueMonitor } from "../../services/queue-monitor.js";
-import { markReplyTimeout } from "../../services/ui-bridge.js";
+import { isMutatingGraphCommand, markReplyTimeout } from "../../services/ui-bridge.js";
 import { WorkflowTargetStore } from "../../services/workflow-target-store.js";
 
 const TAB = "11111111-2222-4333-8444-555555555555";
@@ -106,43 +114,10 @@ afterEach(() => {
   qm.url = null;
 });
 
-describe("graph_* fail fast while a prompt is running (#1639)", () => {
-  it("a read-only graph_query is NOT sent — QUEUE BUSY names the running prompt", async () => {
-    qm.state.runningPromptId = "p-in-flight";
-    qm.state.currentNode = "42";
-    qm.state.queueRemaining = 1;
-
-    const { bridge, sent } = makeBridge();
-    const ctx = makePanelToolCtx(bridge, TAB, new WorkflowTargetStore());
-    const res = await defByName("panel_query_graph").handler({ ids: [1], fields: "ids" } as never, ctx);
-    const text = textOf(res);
-
-    expect(sent).toEqual([]);
-    expect(res.isError).toBe(true);
-    expect(text).toMatch(/QUEUE BUSY/);
-    expect(text).toMatch(/running prompt p-in-flight/);
-    expect(text).toMatch(/currently at node 42/);
-    expect(text).toMatch(/was NOT sent — nothing was applied/);
-    expect(text).toMatch(/running: 0/);
-    // Mentions the generic frozen-tab wording only as the diagnosis it refuses to
-    // surface — the actual headline is QUEUE BUSY, not a backgrounded tab.
-  });
-
-  it("panel_graph_outline is the same — reads are not exempt", async () => {
-    qm.state.runningPromptId = "p-in-flight";
-    qm.state.queueRemaining = 1;
-
-    const { bridge, sent } = makeBridge();
-    const ctx = makePanelToolCtx(bridge, TAB, new WorkflowTargetStore());
-    const res = await defByName("panel_graph_outline").handler({} as never, ctx);
-
-    expect(sent).toEqual([]);
-    expect(res.isError).toBe(true);
-    expect(textOf(res)).toMatch(/QUEUE BUSY/);
-  });
-
+describe("graph EDITS fail fast while a prompt is running (#1639)", () => {
   it("panel_set_widget is NOT delivered — outcome is known (nothing applied)", async () => {
     qm.state.runningPromptId = "p-in-flight";
+    qm.state.currentNode = "42";
     qm.state.queueRemaining = 1;
 
     const { bridge, sent } = makeBridge();
@@ -156,10 +131,32 @@ describe("graph_* fail fast while a prompt is running (#1639)", () => {
     expect(sent).toEqual([]);
     expect(res.isError).toBe(true);
     expect(text).toMatch(/QUEUE BUSY/);
+    expect(text).toMatch(/running prompt p-in-flight/);
+    expect(text).toMatch(/currently at node 42/);
     expect(text).toMatch(/was NOT sent — nothing was applied/);
+    expect(text).toMatch(/running: 0/);
     // A mutation that never left must not invite retry_of / unknown-outcome.
     expect(text).not.toMatch(/may have been applied/);
     expect(text).not.toMatch(/retry_of/);
+  });
+
+  it("the edit refusal points at the reads that ARE still available (panel#1517)", async () => {
+    qm.state.runningPromptId = "p-in-flight";
+    qm.state.queueRemaining = 1;
+
+    const { bridge } = makeBridge();
+    const ctx = makePanelToolCtx(bridge, TAB, new WorkflowTargetStore());
+    const res = await defByName("panel_set_widget").handler(
+      { node_id: 3, widget: "text", value: "a cat" } as never,
+      ctx,
+    );
+    const text = textOf(res);
+
+    expect(text).toMatch(/panel_graph_outline/);
+    expect(text).toMatch(/panel_query_graph/);
+    // The pre-#1517 wording told the agent reads were refused too. If that ever
+    // comes back the message is lying about the behaviour this file pins below.
+    expect(text).not.toMatch(/including read-only graph_query \/ graph_outline/);
   });
 
   it("idle queue: the same read is dispatched", async () => {
@@ -183,6 +180,72 @@ describe("graph_* fail fast while a prompt is running (#1639)", () => {
 
     expect(sent).toContain("graph_run");
     expect(textOf(res)).not.toMatch(/was NOT sent/);
+  });
+});
+
+// panel#1517 — the reported defect: a live-canvas READ is refused while a prompt
+// runs, so an agent cannot inspect or correct a prompt warning for the next run.
+// These pin that reads are DISPATCHED. Delete the `isMutatingGraphCommand` line
+// in graphCmdBlockedByRunningPrompt and every one of them fails on `sent`.
+describe("read-only graph commands are dispatched while a prompt runs (panel#1517)", () => {
+  beforeEach(() => {
+    qm.state.runningPromptId = "p-in-flight";
+    qm.state.currentNode = "42";
+    qm.state.queueRemaining = 1;
+  });
+
+  it("panel_graph_outline is sent and answers — the reported call", async () => {
+    const { bridge, sent } = makeBridge();
+    const ctx = makePanelToolCtx(bridge, TAB, new WorkflowTargetStore());
+    const res = await defByName("panel_graph_outline").handler({} as never, ctx);
+
+    expect(sent).toEqual(["graph_outline"]);
+    expect(res.isError).not.toBe(true);
+    expect(textOf(res)).not.toMatch(/was NOT sent/);
+  });
+
+  it("panel_query_graph is sent — the other call named in the report", async () => {
+    const { bridge, sent } = makeBridge();
+    const ctx = makePanelToolCtx(bridge, TAB, new WorkflowTargetStore());
+    const res = await defByName("panel_query_graph").handler({ ids: [1], fields: "ids" } as never, ctx);
+
+    expect(sent).toEqual(["graph_query"]);
+    expect(res.isError).not.toBe(true);
+  });
+
+  it("panel_get_errors is sent — the prompt-warning surface the reporter wanted", async () => {
+    const { bridge, sent } = makeBridge();
+    const ctx = makePanelToolCtx(bridge, TAB, new WorkflowTargetStore());
+    const res = await defByName("panel_get_errors").handler({} as never, ctx);
+
+    expect(sent).toContain("graph_get_errors");
+    expect(textOf(res)).not.toMatch(/was NOT sent/);
+  });
+
+  it("a read that DOES time out still gets the QUEUE BUSY explanation, not a frozen tab", async () => {
+    const { bridge, sent } = makeBridge({ timeoutCmds: new Set(["graph_outline"]) });
+    const ctx = makePanelToolCtx(bridge, TAB, new WorkflowTargetStore());
+    const res = await defByName("panel_graph_outline").handler({} as never, ctx);
+    const text = textOf(res);
+
+    // It was ATTEMPTED — that is the whole change. The outcome when the tab
+    // really cannot answer is no worse than the old refusal, only later.
+    expect(sent).toContain("graph_outline");
+    expect(res.isError).toBe(true);
+    expect(text).toMatch(/QUEUE BUSY/);
+    expect(text).toMatch(/running prompt p-in-flight/);
+    expect(text).toMatch(/not a backgrounded or frozen tab/i);
+  });
+
+  it("an UNCLASSIFIED graph_* command still fails closed as an edit", async () => {
+    // The ledger fails closed, so a command nobody classified is refused here —
+    // the same rule GRAPH_CMD_EFFECT applies at the workflow fence. Asserted
+    // through the predicate the guard actually consults.
+    expect(isMutatingGraphCommand("graph_some_future_mutator")).toBe(true);
+    expect(isMutatingGraphCommand("graph_outline")).toBe(false);
+    expect(isMutatingGraphCommand("graph_query")).toBe(false);
+    expect(isMutatingGraphCommand("graph_get_errors")).toBe(false);
+    expect(isMutatingGraphCommand("graph_set_widget")).toBe(true);
   });
 });
 
