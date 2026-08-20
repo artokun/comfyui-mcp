@@ -65,13 +65,13 @@
     "check:blog-structure": "node scripts/check-blog-structure.mjs"
   },
   "dependencies": {
-    "@comfyorg/sdk": "^0.1.5",
-    "@modelcontextprotocol/sdk": "~1.29.0",
+    "@comfyorg/sdk": "^0.1.7",
+    "@modelcontextprotocol/sdk": "~1.30.0",
     "@stable-canvas/comfyui-client": "^1.5.9",
     "better-sqlite3": "^12.6.2",
     "dotenv": "^16.4.7",
     "sharp": "^0.35.3",
-    "ws": "^8.21.0",
+    "ws": "^8.21.3",
     "yaml": "^2.9.0",
     "zod": "^4.0.0"
   },
@@ -79,21 +79,21 @@
     "@ai-sdk/anthropic": "^3.0.79",
     "@ai-sdk/google": "^3.0.79",
     "@ai-sdk/openai": "^3.0.65",
-    "@anthropic-ai/claude-agent-sdk": "^0.3.197",
-    "@aws-sdk/client-s3": "^3.1053.0",
-    "@azure/storage-blob": "^12.31.0",
-    "@openai/codex": "0.145.0-alpha.24",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.233",
+    "@aws-sdk/client-s3": "^3.1111.0",
+    "@azure/storage-blob": "^12.33.0",
+    "@openai/codex": "0.147.0",
     "ai": "^6.0.191",
-    "cloudflared": "^0.7.1"
+    "cloudflared": "^0.7.3"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.13.4",
     "@types/ws": "^8.18.1",
     "cross-env": "^10.1.0",
-    "tsx": "^4.19.2",
+    "tsx": "^4.23.12",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.8"
+    "vitest": "^4.1.10"
   },
   "repository": {
     "type": "git",
