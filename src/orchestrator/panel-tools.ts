@@ -8546,6 +8546,38 @@ export function makePanelToolCtx(
         let holdTab = ctx.tabId;
         try {
           await sleep(retrySettleMs());
+          // #1881 — a retry-safe READ that failed on an EMPTY tab registry gets the
+          // same bounded reconnect wait a mutating edit already gets, instead of
+          // spending its one re-issue ~400ms in.
+          //
+          // #436 gated mutations here and deliberately left the read path alone, on
+          // the reasoning that "a read survives that window (it is parked mid-command
+          // and is retry-safe)". Parking is what happens to a command the bridge
+          // ACCEPTED and cannot answer yet. This failure happens strictly earlier:
+          // resolveTarget throws before any socket write (dispatched:false), so there
+          // is no parked command — the read just gets one re-issue after the settle,
+          // and reconnectWaitTiming's own docstring says why that loses: "the browser
+          // reconnects its own socket seconds-to-tens-of-seconds after ComfyUI comes
+          // back, so the existing single ~400ms retry always loses the race."
+          //
+          // Reported shape: after a full ComfyUI Desktop restart the panel's chat
+          // frame is delivered (deliverPanelEvent runs whether or not the socket has
+          // re-registered) while its `hello` — the ONLY writer of the connected-tab
+          // registry — has not landed yet. So the turn is live, `Connected: none` is
+          // true, and panel_graph_outline failed both immediately and 3s later; only
+          // a manual browser refresh cleared it.
+          //
+          // awaitReachable() is SELF-GATING, which is the whole safety argument: it
+          // returns at once when the bound tab is reachable, and it loops ONLY while
+          // zero interactive tabs are connected. So this adds latency in exactly one
+          // state — the genuine post-restart empty registry — and changes nothing for
+          // a healthy session, a multi-tab session, or a panel that answered (a
+          // pre-executor / workflow-switch refusal reaches here with its tab still
+          // connected, so the wait is a no-op for those). The command is idempotent
+          // and NOTHING was dispatched, so waiting cannot double-apply. Reads outside
+          // RETRY_SAFE_CMDS never enter this branch at all, so graph_list_subgraphs
+          // and training_get_state keep failing fast.
+          await awaitReachable();
           ensureReachable(); // rebinds a current-mode session onto the reconnected tab
           holdTab = ctx.tabId;
           const retried = ok(await sendRouted(cmd, timeoutMs, observeRid));

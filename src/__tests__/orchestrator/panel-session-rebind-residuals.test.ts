@@ -908,3 +908,84 @@ describe("#436 a MUTATING graph edit awaits the reconnect before dispatch", () =
     expect(Date.now() - t0).toBeLessThan(1000);
   });
 });
+
+// #1881 — the other half of #436's flap, on the READ side.
+//
+// After a full ComfyUI Desktop restart the panel's chat frame is delivered while its
+// `hello` (the only writer of the connected-tab registry) has not landed yet: the turn
+// is live, `Connected: none` is literally true, and panel_graph_outline failed both
+// immediately and on a 3s retry. #436 gated MUTATIONS behind awaitReachable() and left
+// reads on the flat ~400ms settle, on the reasoning that a read "survives that window
+// (it is parked mid-command and is retry-safe)" — but a resolveTarget refusal happens
+// BEFORE any socket write, so nothing is parked and the single re-issue simply loses
+// the same race reconnectWaitTiming's docstring describes.
+describe("#1881 a retry-safe READ waits out the post-restart 0-tab window", () => {
+  // The reconnect must land AFTER the settle, or the pre-fix single re-issue would
+  // catch it and the test would pass without the fix.
+  const settleBeatsReconnect = (): void => {
+    __panelToolsTestHooks.setRetrySettleMs(5);
+    __panelToolsTestHooks.setReconnectWaitTiming({ budgetMs: 2000, intervalMs: 5 });
+  };
+
+  it("graph_outline recovers: waits for the re-hello, rebinds, and answers", async () => {
+    settleBeatsReconnect();
+    const { bridge, live, sent } = reconnectingBridge([]); // Connected: none
+    const ctx = makePanelToolCtx(bridge, "wf:workflows/x.json", new WorkflowTargetStore());
+    setTimeout(() => live.add("reconnected-tab"), 120); // the browser re-hellos, post-settle
+    const res = await defByName("panel_graph_outline").handler({}, ctx);
+    expect(res.isError).toBeFalsy();
+    // Dispatched to the RECONNECTED tab — not into the dead binding, and not refused.
+    expect(sent.at(-1)?.cmd).toMatchObject({ cmd: "graph_outline" });
+    expect(sent.at(-1)?.tabId).toBe("reconnected-tab");
+    expect(ctx.tabId).toBe("reconnected-tab");
+  });
+
+  it("workflow_list recovers too — the wait lives in ctx.call, not in one tool", async () => {
+    settleBeatsReconnect();
+    const { bridge, live, sent } = reconnectingBridge([]);
+    const ctx = makePanelToolCtx(bridge, "wf:workflows/x.json", new WorkflowTargetStore());
+    setTimeout(() => live.add("reconnected-tab"), 120);
+    const res = await defByName("panel_list_workflows").handler({}, ctx);
+    expect(res.isError).toBeFalsy();
+    expect(sent.at(-1)?.tabId).toBe("reconnected-tab");
+  });
+
+  it("still FAILS — bounded — when nothing ever reconnects", async () => {
+    settleBeatsReconnect();
+    const { bridge, sent } = reconnectingBridge([]); // stays Connected: none
+    const ctx = makePanelToolCtx(bridge, "wf:workflows/x.json", new WorkflowTargetStore());
+    const t0 = Date.now();
+    const res = await defByName("panel_graph_outline").handler({}, ctx);
+    expect(res.isError).toBe(true);
+    expect(sent.length).toBe(0); // never dispatched into the dead binding
+    // Bounded by the reconnect budget — it must not hang, and must not silently
+    // succeed. (Budget 2000ms + settle; a generous ceiling keeps this off the
+    // wall-clock-flake list while still catching an unbounded wait.)
+    expect(Date.now() - t0).toBeLessThan(15_000);
+  });
+
+  it("a HEALTHY read is untouched — no wait, no extra round trip", async () => {
+    __panelToolsTestHooks.setReconnectWaitTiming({ budgetMs: 5000, intervalMs: 50 });
+    const { bridge, sent } = reconnectingBridge(["live-tab"]);
+    const ctx = makePanelToolCtx(bridge, "live-tab", new WorkflowTargetStore());
+    const t0 = Date.now();
+    const res = await defByName("panel_graph_outline").handler({}, ctx);
+    expect(res.isError).toBeFalsy();
+    expect(Date.now() - t0).toBeLessThan(1000); // did NOT wait the 5s budget
+    expect(sent.filter((s) => s.cmd.cmd === "graph_outline").length).toBe(1); // first try
+  });
+
+  it("a read whose tab is live but which is NOT retry-safe keeps failing fast", async () => {
+    // The wait is inside the retry-safe branch, so a read absent from RETRY_SAFE_CMDS
+    // must never reach it — pinned here as well as in the #436 block above, because
+    // this is the exact regression the new await could introduce.
+    settleBeatsReconnect();
+    __panelToolsTestHooks.setReconnectWaitTiming({ budgetMs: 5000, intervalMs: 5 });
+    const { bridge } = reconnectingBridge([]);
+    const ctx = makePanelToolCtx(bridge, "stale-tab", new WorkflowTargetStore());
+    const t0 = Date.now();
+    const res = await defByName("panel_list_subgraphs").handler({}, ctx);
+    expect(res.isError).toBe(true);
+    expect(Date.now() - t0).toBeLessThan(1000);
+  });
+});
