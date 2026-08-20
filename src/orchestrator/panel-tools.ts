@@ -7186,13 +7186,24 @@ interface ResolvedOpenWorkflow {
  *    array (indeterminate — caller should fall back to the raw path, NOT fail);
  *  - the sentinel `NOT_OPEN` when the list IS known but the target is absent, so
  *    the caller can FAIL CLOSED instead of letting the panel silently route the
- *    pin to some other open tab.
+ *    pin to some other open tab;
+ *  - `{targetNotActive}` (panel#1529) when the tab list is NOT enumerable but the
+ *    panel's own top-level `active` record POSITIVELY names a different workflow.
+ *    "Which tabs exist" is unknown there, but "the target is not the live canvas"
+ *    is known — and that alone is enough to refuse, because a pin that is not the
+ *    active canvas can never be what graph tools reach.
  */
 const NOT_OPEN = Symbol("workflow-not-open");
+/** panel#1529 — the target is positively NOT the active canvas, established from
+ *  the top-level `active` record alone (no enumerable tab list to say more). */
+interface TargetNotActive {
+  targetNotActive: true;
+  activeLabel?: string;
+}
 async function resolveOpenWorkflow(
   ctx: PanelToolCtx,
   path: string,
-): Promise<ResolvedOpenWorkflow | null | typeof NOT_OPEN> {
+): Promise<ResolvedOpenWorkflow | TargetNotActive | null | typeof NOT_OPEN> {
   let parsed: Record<string, unknown> | null = null;
   try {
     parsed = parseToolResultJson(await ctx.call({ cmd: "workflow_list" }, 6000));
@@ -7202,7 +7213,36 @@ async function resolveOpenWorkflow(
   if (!parsed) return null;
   const rawList = (parsed as { workflows?: unknown }).workflows;
   if (!Array.isArray(rawList) || rawList.length === 0) {
-    // No enumerable tab list (older panel / stub) — can't verify, don't fail closed.
+    // No enumerable tab list (older panel / stub) — can't verify WHICH tabs exist.
+    //
+    // panel#1529 — but the reply's TOP-LEVEL `active` record is a separate,
+    // direct report of the live canvas, and "is the target the active canvas?"
+    // is the ONE question a pin has to answer (the panel edits the in-view
+    // workflow and nothing else — #349/#186). Discarding it because a DIFFERENT
+    // field was missing turned a readable POSITIVE mismatch into "indeterminate",
+    // and indeterminate is LENIENT: the pin was accepted unverified against a tab
+    // showing another workflow, panel_set_workflow_target then reported "Graph
+    // tools will target that workflow", and the very next graph command was
+    // refused by the panel's pin guard (or, on a build whose guard does not fire
+    // for that pin form, silently read the OTHER canvas) — the reported
+    // "pin reports success but graph tools stay on the previous tab".
+    //
+    // Only a POSITIVE identification refuses. `readOpenActiveAgainstTarget` is the
+    // #887 oracle already used for the post-open drift notice, and it is generous
+    // in exactly the direction that matters here: an active record it cannot read,
+    // or one that plausibly IS the requested workflow, stays "indeterminate" and
+    // keeps today's lenient behaviour. An older panel that reports no usable
+    // active identity is therefore untouched.
+    const activeOnly = (parsed as { active?: unknown }).active;
+    if (
+      readOpenActiveAgainstTarget(
+        activeOnly,
+        path,
+        (parsed as { active_confirmed?: unknown }).active_confirmed,
+      ) === "different"
+    ) {
+      return { targetNotActive: true, activeLabel: workflowRecordLabel(activeOnly) };
+    }
     return null;
   }
   const activeObj = (parsed as { active?: unknown }).active;
@@ -7502,9 +7542,22 @@ function workflowRecordLabel(rec: unknown): string | undefined {
   return undefined;
 }
 
-/** Outcome of validating + canonicalizing a pin target. */
+/** Outcome of validating + canonicalizing a pin target.
+ *
+ *  `verifiedActive` (panel#1529) says whether the panel POSITIVELY confirmed the
+ *  target is the live canvas. It is false on every LENIENT acceptance — an
+ *  unreachable/unparseable `workflow_list`, a panel that enumerates no tabs, a
+ *  record with no comparable active identity. Those pins are still written (older
+ *  panels must keep working), but the caller must not report them as a settled
+ *  graph target: that unearned claim is the whole of #1529. */
 export type PinTargetResolution =
-  | { ok: true; pinPath: string; pinFilename?: string; workflowUuid?: string }
+  | {
+      ok: true;
+      pinPath: string;
+      pinFilename?: string;
+      workflowUuid?: string;
+      verifiedActive: boolean;
+    }
   | { ok: false; error: string };
 
 /**
@@ -7535,7 +7588,26 @@ export async function resolvePinTarget(
         `never land on the wrong tab.)`,
     };
   }
-  if (resolved && resolved.isActive === false) {
+  // panel#1529 — the tab list was not enumerable, so we cannot say whether the
+  // target is OPEN; the panel's own active record says it is not the LIVE CANVAS,
+  // and that is the fact a pin turns on. Refuse with exactly what was observed —
+  // never "it is open but not active", which this branch has no evidence for.
+  if (resolved && "targetNotActive" in resolved) {
+    const activeName = resolved.activeLabel ? ` — "${resolved.activeLabel}" is` : " — a different workflow is";
+    return {
+      ok: false,
+      error:
+        `Cannot pin to "${filename ?? path}"${activeName} the active canvas right now. ` +
+        `Graph tools run against the ACTIVE canvas (the panel cannot read or edit a background ` +
+        `tab), so this pin could not make graph tools target that workflow — it would report ` +
+        `success and then fail, or read the other canvas, on your next panel_* graph call. ` +
+        `Switch to it first with panel_open_workflow (that makes it the active canvas), then ` +
+        `pin — or pin the workflow already in view. (This panel build did not enumerate its ` +
+        `open tabs, so whether your target is open at all could not be checked; ` +
+        `panel_list_workflows shows what it does report.)`,
+    };
+  }
+  if (resolved && "isActive" in resolved && resolved.isActive === false) {
     const activeName = resolved.activeLabel ? ` (currently "${resolved.activeLabel}")` : "";
     return {
       ok: false,
@@ -7566,10 +7638,15 @@ export async function resolvePinTarget(
       pinPath: rec.key ?? rec.path ?? path,
       pinFilename: filename ?? rec.filename ?? rec.path,
       workflowUuid,
+      // panel#1529 — VERIFIED only on a positive `true`. `undefined` is the
+      // indeterminate rung (no per-record flag AND nothing comparable), which is
+      // accepted leniently and must not be reported as a confirmed graph target.
+      verifiedActive: resolved.isActive === true,
     };
   }
-  // Indeterminate list — stay lenient (older/partial panel).
-  return { ok: true, pinPath: path, pinFilename: filename };
+  // Indeterminate list — stay lenient (older/partial panel), but say so: nothing
+  // here established that the target is the canvas graph tools will reach.
+  return { ok: true, pinPath: path, pinFilename: filename, verifiedActive: false };
 }
 
 export const __openWorkflowTestHooks = {
@@ -14277,12 +14354,19 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         let pinPath = path;
         let pinFilename = filename;
         let pinnedWorkflowUuid: string | undefined;
+        // panel#1529 — did the panel POSITIVELY confirm the target is the live
+        // canvas? A lenient (indeterminate) acceptance still writes the pin, but
+        // it establishes nothing about where graph tools land, so it may not be
+        // narrated as one. Defaults to false: an unpinned/`current` call makes no
+        // graph-target claim either.
+        let pinVerifiedActive = false;
         if (mode === "pinned" && path) {
           const res = await resolvePinTarget(ctx, path, filename);
           if (!res.ok) return fail(res.error);
           pinPath = res.pinPath;
           pinFilename = res.pinFilename;
           pinnedWorkflowUuid = res.workflowUuid;
+          pinVerifiedActive = res.verifiedActive;
         }
         const target = ctx.workflowTarget.set(ctx.tabId, {
           mode,
@@ -14407,9 +14491,22 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             rebindNote += ` The panel dropped mid-call: this session moved from tab ${tabBeforeProbe} onto tab ${ctx.tabId}, and mode:"current" was applied there too.`;
           }
         }
+        // panel#1529 — "Graph tools will target that workflow" is a CLAIM ABOUT
+        // ROUTING, and this call only ever wrote the workflow-target store. It is
+        // true when the panel confirmed the target IS the live canvas, because a
+        // graph command then reaches it. It was being said unconditionally — including
+        // on the lenient rung, where nothing about the active canvas was established —
+        // and the reporter's session was pinned to one workflow while every graph call
+        // kept landing on the tab the turn-routing pin still names. Two selectors, one
+        // sentence, no way for the caller to tell they disagreed. So the claim is now
+        // made only on the evidence that supports it; without that evidence the reply
+        // says what IS true (the pin is set and acts as a GUARD) and hands back the
+        // cheap read that settles it.
         const hint =
           target.mode === "pinned"
-            ? `Pinned to "${target.filename ?? target.path}". Graph tools will target that workflow without switching the user's view.`
+            ? pinVerifiedActive
+              ? `Pinned to "${target.filename ?? target.path}". Graph tools will target that workflow without switching the user's view.`
+              : `Pinned to "${target.filename ?? target.path}" — but NOT CONFIRMED: this panel did not report which workflow is the active canvas, so the pin could not be checked against it, and this call does NOT establish that graph tools will reach that workflow. The pin travels on graph commands as a GUARD: if the active canvas is a different workflow, the next graph call FAILS with a workflow mismatch rather than editing it. Settle it with one cheap read — panel_graph_outline — before relying on this.`
             : "Following the user's current workflow tab.";
         // #803 — this used to END here for every mode:"current" call, with the
         // unconditional "Following the user's current workflow tab." Reporters followed
@@ -14658,6 +14755,10 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         return ok({
           ...target,
           ...(deferredBind ? { deferred: true } : {}),
+          // panel#1529 — the same verdict the note carries, MACHINE-READABLE, so a
+          // caller never has to parse prose to learn whether the graph target was
+          // actually established. Only for a pin: `current` makes no such claim.
+          ...(target.mode === "pinned" ? { pin_verified_active: pinVerifiedActive } : {}),
           ...(fence ? { graph_binding: fence.binding } : {}),
           ...(fenceRebind ? { graph_binding_status: fenceRebind.status } : {}),
           ...(typeof scopeRepin === "string" || currentModeTurnRepinned
