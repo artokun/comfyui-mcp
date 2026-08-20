@@ -85,6 +85,20 @@ export async function validateWorkflow(
         message,
       });
     }
+    // The converter DROPS a node whose type object_info doesn't know, so step 2a
+    // below can never see it. Without this the same uninstalled custom node is an
+    // ERROR in API format and a mere warning in UI format — and the UI graph
+    // reports `valid: true`, which is a false green on the one thing validation
+    // exists to catch.
+    for (const { nodeId, classType } of converted.missingNodeTypes) {
+      issues.push({
+        severity: "error",
+        node_id: nodeId,
+        node_type: classType,
+        kind: "missing_node_type",
+        message: `Unknown node type "${classType}". This node may not be installed.`,
+      });
+    }
   }
 
   const nodeIds = Object.keys(graph);

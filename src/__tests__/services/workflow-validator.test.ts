@@ -237,4 +237,35 @@ describe("validateWorkflow — UI graph with serialized action buttons (#1869)",
     expect(r.issues.filter((i) => i.severity === "error")).toHaveLength(0);
     expect(r.valid).toBe(true);
   });
+
+  // The converter DROPS a node whose type object_info doesn't know, so the
+  // per-node check never sees it. Reporting only a conversion warning made the
+  // SAME uninstalled custom node an error in API format and a `valid: true`
+  // workflow in UI format — a false green on the one thing validation is for.
+  it("still reports an uninstalled custom node as an ERROR, not a warning", async () => {
+    getObjectInfoMock.mockResolvedValue({
+      SaveImage: { input: { required: { images: ["IMAGE"] } }, output: [] },
+    });
+    const ui = {
+      nodes: [
+        {
+          id: 1,
+          type: "TotallyNotInstalled",
+          mode: 0,
+          inputs: [],
+          outputs: [],
+          widgets_values: [],
+        },
+      ],
+      links: [],
+    } as unknown as WorkflowJSON;
+
+    const r = await validateWorkflow(ui, { health: false });
+    const missing = r.issues.filter((i) => i.kind === "missing_node_type");
+    expect(missing).toHaveLength(1);
+    expect(missing[0].severity).toBe("error");
+    expect(missing[0].node_id).toBe("1");
+    expect(missing[0].node_type).toBe("TotallyNotInstalled");
+    expect(r.valid).toBe(false);
+  });
 });

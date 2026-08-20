@@ -18,6 +18,15 @@ import { isSelfProducingUeSender, isUeSender } from "./flatten-workflow.js";
 export interface ConversionResult {
   workflow: WorkflowJSON;
   warnings: string[];
+  /**
+   * Nodes DROPPED because their class_type is absent from object_info. Reported
+   * structurally so a caller can raise the same authoritative "unknown node type"
+   * error the API-format path raises, instead of parsing it back out of the
+   * warning prose — a UI export with an uninstalled custom node must not be able
+   * to validate as `valid: true` just because it arrived in the other format
+   * (#1869).
+   */
+  missingNodeTypes: Array<{ nodeId: string; classType: string }>;
 }
 
 interface LinkInfo {
@@ -575,25 +584,12 @@ function getOrderedInputNames(def: ComfyUINodeDef): string[] {
   return names;
 }
 
-function widgetSpecOf(def: ComfyUINodeDef, name: string): unknown {
-  return (
-    (def.input?.required as Record<string, unknown> | undefined)?.[name] ??
-    (def.input?.optional as Record<string, unknown> | undefined)?.[name]
-  );
-}
-
-function isAssetComboSpec(name: string, spec: unknown, classType: string): boolean {
-  return (
-    ASSET_WIDGET_NAMES.has(name) ||
-    isKnownLoaderInput(classType, name) ||
-    isUploadSelectorSpec(spec)
-  );
-}
-
 /**
- * INT / FLOAT / BOOLEAN (including combined FLOAT,INT). These can never
- * legitimately hold a serialized action-button token, so a type mismatch is
- * always safe to skip — even when the row length already matches the schema.
+ * INT / FLOAT / BOOLEAN (including a combined "FLOAT,INT"). A serialized action
+ * button can never legitimately occupy one of these, so a value that cannot be
+ * the declared type is the one skip signal that needs no vocabulary at all —
+ * and it is what recovers an INTERSPERSED button (`detect_range` sitting
+ * between a combo and an INT), which no prefix rule can see.
  */
 function numericOrBooleanParts(spec: unknown): string[] | undefined {
   if (!Array.isArray(spec)) return undefined;
@@ -609,17 +605,30 @@ function numericOrBooleanParts(spec: unknown): string[] | undefined {
   return parts;
 }
 
+/**
+ * Deliberately PERMISSIVE: this decides whether a value could belong to a
+ * numeric/boolean widget, and a false "no" SKIPS a real value. ComfyUI itself
+ * coerces `"1024"` to an INT and `0`/`1` to a BOOLEAN, and frontends serialize
+ * both shapes, so accepting them is what the runtime does — treating them as
+ * mismatches would drop a legitimate widget value (#1869 review).
+ */
 function valueFitsNumericOrBoolean(value: unknown, parts: string[]): boolean {
-  if (parts.length === 1 && parts[0] === "BOOLEAN") return typeof value === "boolean";
-  if (parts.includes("INT") && !parts.includes("FLOAT")) {
-    return typeof value === "number" && Number.isInteger(value);
+  const numeric = (v: unknown): number | undefined => {
+    if (typeof v === "number") return Number.isFinite(v) ? v : undefined;
+    if (typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v))) {
+      return Number(v);
+    }
+    return undefined;
+  };
+  if (parts.length === 1 && parts[0] === "BOOLEAN") {
+    if (typeof value === "boolean") return true;
+    if (value === 0 || value === 1) return true;
+    return value === "true" || value === "false";
   }
-  return typeof value === "number";
-}
-
-function valueFitsEnum(value: unknown, spec: unknown): boolean {
-  const comboOpts = getComboOptions(spec);
-  return Array.isArray(comboOpts) && comboOpts.includes(value as never);
+  const n = numeric(value);
+  if (n === undefined) return false;
+  if (parts.includes("INT") && !parts.includes("FLOAT")) return Number.isInteger(n);
+  return true;
 }
 
 /**
@@ -634,7 +643,9 @@ function remainingPositionalSlots(
 ): number | undefined {
   let n = 0;
   for (let i = fromIdx; i < widgetNames.length; i++) {
-    const spec = widgetSpecOf(def, widgetNames[i]);
+    const spec =
+      (def.input?.required as Record<string, unknown> | undefined)?.[widgetNames[i]] ??
+      (def.input?.optional as Record<string, unknown> | undefined)?.[widgetNames[i]];
     const type = Array.isArray(spec) ? spec[0] : undefined;
     if (type === "COMFY_DYNAMICCOMBO_V3") return undefined;
     n += 1;
@@ -644,24 +655,20 @@ function remainingPositionalSlots(
 }
 
 /**
- * Frontend-only action buttons (`addWidget("button", …)`) serialize their
- * value token into `widgets_values` and are absent from /object_info, so
- * pairing from slot 0 lands `browse`/`open_in_explorer`/`copy_path` on
- * real inputs and shifts the rest — including an interspersed `detect_range`
- * sitting between a combo and an INT (#1869).
+ * Button tokens observed serialized into a real `widgets_values` row (#1869,
+ * comfyui-am-vfx-tools AMVideoRead/AMVideoWrite).
  *
- * Snake-case identifier matching the LiteGraph button default-value shape.
- * Used only when the saved row is LONGER than the schema, so a same-length
- * stale combo (the #504 substitute path) is left alone.
- */
-const SERIALIZED_ACTION_BUTTON_VALUE = /^[a-z][a-z0-9_]*$/;
-
-/**
- * Button tokens actually observed in a saved `widgets_values` row (#1869,
- * comfyui-am-vfx-tools AMVideoRead/AMVideoWrite). Used ONLY where no strict
- * downstream widget can corroborate the skip; everywhere else the general
- * shape above is checked against a value that demonstrably fits a later
- * INT/FLOAT/BOOLEAN or non-asset combo.
+ * This is a CLOSED vocabulary on purpose. The first cut matched the general
+ * shape of an identifier (`/^[a-z][a-z0-9_]*$/`) and tried to corroborate the
+ * skip by finding a later value that fits a strict widget. Independent review
+ * broke that three ways, because most ordinary values match that shape too:
+ * `["my_path", "label", "detect_range", 12]` skipped `my_path`, and
+ * `["my_model", "detect_range", 12]` skipped a stale checkpoint name that #361
+ * requires be preserved. The corroboration could tell that SOMETHING in the gap
+ * did not belong; it could not tell WHICH — and it always dropped the first.
+ *
+ * Guessing wrong here writes a silently wrong graph, which is worse than the
+ * misalignment being fixed. So an unrecognised token is left alone.
  */
 const KNOWN_ACTION_BUTTON_TOKENS = new Set([
   "browse",
@@ -670,37 +677,32 @@ const KNOWN_ACTION_BUTTON_TOKENS = new Set([
   "detect_range",
 ]);
 
-function looksLikeSerializedActionButton(value: unknown): boolean {
-  return typeof value === "string" && SERIALIZED_ACTION_BUTTON_VALUE.test(value);
-}
-
 /**
  * Advance past serialized frontend-only extras that cannot belong to this
  * schema widget. Returns the index of the first value that should be paired.
+ *
+ * Two signals only, both requiring the saved row to have MORE values left than
+ * the schema has slots left:
+ *   1. the value cannot be the declared numeric/boolean type, or
+ *   2. the value is a known serialized button token.
  */
 function skipSerializedActionWidgets(opts: {
   values: unknown[];
   widgetIdx: number;
   spec: unknown;
-  name: string;
-  classType: string;
   def: ComfyUINodeDef;
   widgetNames: string[];
   nameIdx: number;
 }): number {
   let widgetIdx = opts.widgetIdx;
-  const { values, spec, name, classType, def, widgetNames, nameIdx } = opts;
+  const { values, spec, def, widgetNames, nameIdx } = opts;
   const nbParts = numericOrBooleanParts(spec);
 
   while (widgetIdx < values.length) {
-    const candidate = values[widgetIdx];
-
-    // Skipping is only ever safe when the saved row has MORE values left than
-    // the schema has slots left. When it does not, every remaining value still
-    // has a home and dropping one would be the same silent shift this exists to
-    // prevent — a reordered widget (#959) or a stringly-typed INT would be
-    // eaten instead of merely misassigned. Undefined arity (a later dynamic
-    // combo) is treated as "no extras" for the same reason.
+    // Skipping is only ever safe when the row has more values left than the
+    // schema has slots left. Otherwise every remaining value still has a home
+    // and dropping one is the same silent shift this exists to prevent — a
+    // REORDERED widget (#959) is dropped rather than merely misassigned.
     const remainingSlots = remainingPositionalSlots(widgetNames, nameIdx, def);
     const extras =
       remainingSlots === undefined
@@ -708,87 +710,12 @@ function skipSerializedActionWidgets(opts: {
         : Math.max(0, values.length - widgetIdx - remainingSlots);
     if (extras <= 0) break;
 
-    // INT/FLOAT/BOOLEAN can never legitimately hold an action-button token, so
-    // a hard type mismatch is the one signal that needs no further corroboration
-    // — it is what recovers an INTERSPERSED button (`detect_range` before
-    // first_frame), which no prefix rule can see.
-    if (nbParts && !valueFitsNumericOrBoolean(candidate, nbParts)) {
-      widgetIdx++;
-      continue;
-    }
-
-    const comboOpts = getComboOptions(spec);
-    if (Array.isArray(comboOpts) && comboOpts.length > 0) {
-      if (comboOpts.includes(candidate as never)) break;
-      if (!isAssetComboSpec(name, spec, classType)) {
-        widgetIdx++;
-        continue;
-      }
-    }
-
-    if (!looksLikeSerializedActionButton(candidate)) break;
-
-    let nextStrictSpec: unknown;
-    let nextStrictNameIdx = -1;
-    for (let i = nameIdx + 1; i < widgetNames.length; i++) {
-      const laterSpec = widgetSpecOf(def, widgetNames[i]);
-      if (numericOrBooleanParts(laterSpec)) {
-        nextStrictSpec = laterSpec;
-        nextStrictNameIdx = i;
-        break;
-      }
-      const laterCombo = getComboOptions(laterSpec);
-      if (
-        Array.isArray(laterCombo) &&
-        laterCombo.length > 0 &&
-        !isAssetComboSpec(widgetNames[i], laterSpec, classType)
-      ) {
-        nextStrictSpec = laterSpec;
-        nextStrictNameIdx = i;
-        break;
-      }
-    }
-
-    if (nextStrictNameIdx < 0) {
-      // No strict widget downstream, so nothing can CORROBORATE the skip: the
-      // shape of `["hello", "Extra Thing"]` on a lone STRING widget is identical
-      // to `["browse", "D:/out.mov"]` on a lone file_path. Skipping on the
-      // general snake_case shape here picks a widget by coin flip and writes the
-      // wrong value silently, so an uncorroborated skip demands a token we have
-      // actually SEEN serialized as a button (#1869), not merely one that looks
-      // like an identifier.
-      if (!KNOWN_ACTION_BUTTON_TOKENS.has(candidate as string)) break;
-      const laterNonAction = values.slice(widgetIdx + 1).some(
-        (v) =>
-          typeof v === "string" &&
-          !looksLikeSerializedActionButton(v) &&
-          !CONTROL_AFTER_GENERATE_MODES.has(v),
-      );
-      if (laterNonAction) {
-        widgetIdx++;
-        continue;
-      }
-      break;
-    }
-
-    let fitAt = -1;
-    for (let i = widgetIdx + 1; i < values.length; i++) {
-      const laterNb = numericOrBooleanParts(nextStrictSpec);
-      if (laterNb ? valueFitsNumericOrBoolean(values[i], laterNb) : valueFitsEnum(values[i], nextStrictSpec)) {
-        fitAt = i;
-        break;
-      }
-    }
-    if (fitAt < 0) break;
-
-    const gap = values.slice(widgetIdx, fitAt);
-    const looseWidgetsUntilStrict = nextStrictNameIdx - nameIdx;
-    const gapStrings = gap.filter((v) => typeof v === "string").length;
-    if (gapStrings > looseWidgetsUntilStrict) {
-      widgetIdx++;
-      continue;
-    }
-    break;
+    const candidate = values[widgetIdx];
+    const typeRefutes = nbParts !== undefined && !valueFitsNumericOrBoolean(candidate, nbParts);
+    const knownButton =
+      typeof candidate === "string" && KNOWN_ACTION_BUTTON_TOKENS.has(candidate);
+    if (!typeRefutes && !knownButton) break;
+    widgetIdx++;
   }
   return widgetIdx;
 }
@@ -2539,6 +2466,7 @@ export function convertUiToApi(
   // real links, then expand component/subgraph nodes. Every step reports what it
   // could NOT preserve into the same warnings list (#361).
   const warnings: string[] = [];
+  const missingNodeTypes: Array<{ nodeId: string; classType: string }> = [];
   const cleaned = structuredClone(ui);
   // Only definitions this workflow actually instantiates can affect the result;
   // an unused one's wiring problems are not this graph's losses.
@@ -2728,6 +2656,7 @@ export function convertUiToApi(
       warnings.push(
         `Node ${nodeId} (${classType}): not found in object_info — custom node may not be installed. Skipping.`,
       );
+      missingNodeTypes.push({ nodeId: String(nodeId), classType });
       continue;
     }
 
@@ -2947,8 +2876,6 @@ export function convertUiToApi(
         values: widgetValues,
         widgetIdx,
         spec,
-        name,
-        classType,
         def,
         widgetNames,
         nameIdx,
@@ -3708,5 +3635,5 @@ export function convertUiToApi(
   // duplicates are pure noise. Distinct nodes/inputs keep their own warnings.
   const dedupedWarnings = [...new Set(warnings)];
 
-  return { workflow, warnings: dedupedWarnings };
+  return { workflow, warnings: dedupedWarnings, missingNodeTypes };
 }
