@@ -32,7 +32,7 @@ Author and check ComfyUI workflow JSON. Driven by the `action` parameter:
   action:"create" — Template parameters; recognized keys depend on the template. txt2img: checkpoint, positive_prompt, negative_prompt, width, height, steps, cfg, seed, sampler_name, scheduler. img2img/inpaint add image_path (and mask_path for inpaint) and denoise. upscale adds upscale_model. Unknown keys are ignored; omitted keys use template defaults.
 </ParamField>
 <ParamField path="workflow" type="string | object">
-  ComfyUI workflow JSON (as a JSON string or object). REQUIRED for action:"modify" and action:"validate" — API format for "validate".
+  ComfyUI workflow JSON (as a JSON string or object). REQUIRED for action:"modify" and action:"validate". action:"validate" accepts API format or a saved UI export (nodes[]/links[]).
 </ParamField>
 <ParamField path="operations" type="object[]">
   action:"modify" (REQUIRED) — Array of operations to apply in order. Each has an 'op' field: set_input, add_node, remove_node, connect, or insert_between
