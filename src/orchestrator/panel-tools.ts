@@ -863,6 +863,10 @@ export const __panelToolsTestHooks = {
   ): void {
     readVramDevicesOverride = fn;
   },
+  /** #1895 tests drive these, not a copy. A mutation of either that the
+   *  tool-handler suite never reaches must still fail. */
+  annotateFreeVramAck,
+  deviceStillPinned,
   /** Direct access to the #742 decline recheck loop so its hard-deadline
    *  guarantee (codex gate r2) can be unit-tested with a custom deadline. */
   probeDeclineRecovery,
@@ -2918,6 +2922,11 @@ function sampleVramDevice(d: unknown): VramDeviceSample {
  *  H3 case was device 2 with the torch pool at ~0.24% free — that occupancy
  *  is what this threshold names.
  *
+ *  The ratio is pool FULLNESS, not the reserved share of the card
+ *  (`torch_vram_total / vram_total`). A 5 GiB reservation with 4 GiB unused
+ *  inside the pool is not pinned here — that shape was not observed live
+ *  after /free (#1895 item 3).
+ *
  *  Unknown/unreadable torch counters are NOT pinned: an unknown answer
  *  claims nothing in either direction (#1473). Device-global counters
  *  alone also claim nothing — they cannot tell ComfyUI from another process. */
@@ -2938,25 +2947,83 @@ function pinnedVramDevices(devices: VramDeviceSample[]): VramDeviceSample[] {
   return devices.filter(deviceStillPinned);
 }
 
-/** /free only unloads ComfyUI's model manager. Ray workers, parallel CLIP
- *  loaders, and other custom-node allocations survive it and keep the GPU
- *  occupied — which is why a 2xx from /free is not evidence VRAM is free. */
-function pinnedVramAfterFreeNote(pinned: VramDeviceSample[]): string {
-  const named = pinned
+/** Device-global occupancy (`vram_free` / `vram_total`). Same 1 GiB / 20%
+ *  thresholds as the torch pin, applied to the WHOLE card. Used to disclose
+ *  an occupied card that is not this ComfyUI's torch pin (#1895) — never to
+ *  flip freed:true to a /free failure. */
+function deviceOccupiedGlobally(d: VramDeviceSample): boolean {
+  const total = d.vram_total;
+  const free = d.vram_free;
+  if (typeof total !== "number" || typeof free !== "number") return false;
+  if (!Number.isFinite(total) || !Number.isFinite(free)) return false;
+  if (total < PINNED_VRAM_MIN_TOTAL_BYTES) return false;
+  if (free < 0) return true;
+  return free / total <= PINNED_VRAM_FREE_RATIO;
+}
+
+function occupiedVramDevices(devices: VramDeviceSample[]): VramDeviceSample[] {
+  return devices.filter(deviceOccupiedGlobally);
+}
+
+function nameVramDevices(devices: VramDeviceSample[]): string {
+  return devices
     .map((d) => {
       if (typeof d.index === "number") return `device ${d.index}`;
       if (typeof d.name === "string" && d.name) return d.name;
       return "an unnamed device";
     })
     .join(", ");
+}
+
+/** /free only unloads ComfyUI's model manager. Ray workers, parallel CLIP
+ *  loaders, and other custom-node allocations survive it and keep the GPU
+ *  occupied — which is why a 2xx from /free is not evidence VRAM is free. */
+function pinnedVramAfterFreeNote(pinned: VramDeviceSample[]): string {
   return (
     `ComfyUI /free accepted (unload_models + free_memory) but VRAM is STILL PINNED on ` +
-    `${named}. /free only unloads ComfyUI's model manager — it does not terminate Ray ` +
+    `${nameVramDevices(pinned)}. /free only unloads ComfyUI's model manager — it does not terminate Ray ` +
     `workers or custom-node allocations (Raylight sequence-parallel, parallel CLIP loaders). ` +
     `This is not a successful VRAM recovery. Next: panel_restart_comfyui (last resort; ` +
     `refuses mid-render) after confirming with get_system_stats (action:"stats").`
   );
 }
+
+/** #1895 — the free DID succeed (torch pool not pinned) but the card is still
+ *  occupied. /system_stats is device-global and cannot name the holder, so
+ *  the wording asserts neither (a) this ComfyUI outside torch nor (b) another
+ *  process. */
+function occupiedCardAfterFreeNote(occupied: VramDeviceSample[]): string {
+  const named = nameVramDevices(occupied);
+  const verb = occupied.length === 1 ? "is" : "are";
+  return (
+    `ComfyUI /free accepted and THIS instance's torch pool is not pinned, so the free DID succeed. ` +
+    `${named} ${verb} still occupied. /system_stats reports the device globally and cannot name ` +
+    `which process holds it. Two shapes this reading cannot distinguish: (a) allocations this ` +
+    `ComfyUI made outside torch's allocator (Ray workers, sequence-parallel / parallel CLIP ` +
+    `loaders) — panel_restart_comfyui of THIS instance can clear those; (b) a different process ` +
+    `on the host (a second ComfyUI, a trainer, the browser) — restarting THIS instance will not ` +
+    `free that VRAM.`
+  );
+}
+
+function occupiedCardAfterFreeResult(
+  occupied: VramDeviceSample[],
+  extra: Record<string, unknown>,
+): ToolResult {
+  return ok({
+    freed: true,
+    unload_models: true,
+    free_memory: true,
+    model_manager_freed: true,
+    occupied_devices: occupied,
+    ...extra,
+    note: occupiedCardAfterFreeNote(occupied),
+  });
+}
+
+const UNOBSERVED_OCCUPANCY_NOTE =
+  `freed:true is the panel's /free receipt, not a measured device — this tab's server could ` +
+  `not be proven as the local boot instance, so /system_stats was never re-read.`;
 
 function pinnedVramAfterFreeResult(
   pinned: VramDeviceSample[],
@@ -3091,10 +3158,16 @@ async function settleFreeVramAfterAckTimeout(
   };
   // #1866 — a 2xx from /free is not a free GPU. Ray/CLIP workers can keep a
   // device pinned. When we have occupancy numbers, they are the verdict.
+  // #1895 — a card that is occupied while THIS instance's torch pool is empty
+  // is not a /free failure; disclose the device instead of a bare freed:true.
   if (direct.after != null) {
     const pinned = pinnedVramDevices(direct.after);
     if (pinned.length > 0) {
       return pinnedVramAfterFreeResult(pinned, extra);
+    }
+    const occupied = occupiedVramDevices(direct.after);
+    if (occupied.length > 0) {
+      return occupiedCardAfterFreeResult(occupied, extra);
     }
   }
   const statsNote =
@@ -3125,22 +3198,42 @@ async function settleFreeVramAfterAckTimeout(
  * settle uses (`captureRebootHealthBase(ctx)`), never `getComfyUIBaseUrl()`.
  * A hello from another tab can retarget the global base asynchronously;
  * reporting that GPU as this command's failure is the wrong-target failure
- * the gate exists to prevent. No proven local server → leave the ack.
+ * the gate exists to prevent.
+ *
+ * #1895 — no proven local server must not look like a measured GPU: disclose
+ * that occupancy was never re-read. An occupied card whose torch pool is
+ * empty is not a /free failure (isError stays false, freed stays true) but
+ * MUST name the device and that /system_stats is device-global.
  */
 async function annotateFreeVramAck(ctx: PanelToolCtx, res: ToolResult): Promise<ToolResult> {
   if (res.isError) return res;
   const parsed = parseToolResultJson(res);
   if (!parsed || parsed.freed !== true) return res;
   const base = captureRebootHealthBase(ctx);
-  if (!base) return res;
+  if (!base) {
+    return ok({
+      ...parsed,
+      occupancy_reread: false,
+      note: UNOBSERVED_OCCUPANCY_NOTE,
+    });
+  }
   const devices = await readVramDevicesMaybe(base, FREE_VRAM_DIRECT_TIMEOUT_MS);
   if (devices == null) return res;
   const pinned = pinnedVramDevices(devices);
-  if (pinned.length === 0) return res;
-  return pinnedVramAfterFreeResult(pinned, {
-    acknowledged: true,
-    devices,
-  });
+  if (pinned.length > 0) {
+    return pinnedVramAfterFreeResult(pinned, {
+      acknowledged: true,
+      devices,
+    });
+  }
+  const occupied = occupiedVramDevices(devices);
+  if (occupied.length > 0) {
+    return occupiedCardAfterFreeResult(occupied, {
+      acknowledged: true,
+      devices,
+    });
+  }
+  return res;
 }
 
 // ---- panel_install_node: accepted-but-never-enqueued (#1129) ---------------
@@ -16392,7 +16485,7 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
     ),
     def(
       "panel_free_vram",
-      "Unload all loaded models and free VRAM (ComfyUI /free). Use to unwedge a stuck/OOM ComfyUI when a cancel didn't free memory — before retrying or, last resort, restarting (panel_restart_comfyui). Does NOT restart ComfyUI; it just drops resident models and frees cached memory. After /free, THIS instance's torch-pool occupancy is re-read from /system_stats on the server this tab provably fronts: if a device remains pinned (Ray workers, parallel CLIP, custom-node allocations /free cannot terminate), the reply names those devices and does NOT claim VRAM was freed — next step is panel_restart_comfyui. Device-global occupancy held by another process is not this free failing. If the panel tab is frozen and cannot acknowledge, the free is instead issued DIRECTLY to the ComfyUI server and verified there (same /free, idempotent) whenever the tab provably fronts the local server — otherwise the outcome is reported unknown rather than claimed.",
+      "Unload all loaded models and free VRAM (ComfyUI /free). Use to unwedge a stuck/OOM ComfyUI when a cancel didn't free memory — before retrying or, last resort, restarting (panel_restart_comfyui). Does NOT restart ComfyUI; it just drops resident models and frees cached memory. After /free, THIS instance's torch-pool occupancy is re-read from /system_stats on the server this tab provably fronts: if a device remains pinned (Ray workers, parallel CLIP, custom-node allocations /free cannot terminate), the reply names those devices and does NOT claim VRAM was freed — next step is panel_restart_comfyui. Device-global occupancy with an empty torch pool is not this free failing (freed:true) but the reply still names the device and that /system_stats cannot say which process holds the card. If this tab's server cannot be proven, freed:true is the panel's /free receipt — occupancy was not re-read. If the panel tab is frozen and cannot acknowledge, the free is instead issued DIRECTLY to the ComfyUI server and verified there (same /free, idempotent) whenever the tab provably fronts the local server — otherwise the outcome is reported unknown rather than claimed.",
       {},
       async (_args, ctx) => {
         const res = await ctx.call({ cmd: "free_vram" }, 15000);

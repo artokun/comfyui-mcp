@@ -18,6 +18,10 @@
 // These tests pass `base` into the injected reader and assert it. Discarding
 // the argument is what made a `const base = "http://wrong.example:1"` mutation
 // of annotateFreeVramAck leave every test green.
+//
+// #1895 — an occupied card whose torch pool is empty must still NAME the
+// device (isError stays false). An unproven tab must not look like a
+// measured GPU. Tests drive annotateFreeVramAck / deviceStillPinned directly.
 
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 
@@ -123,6 +127,14 @@ function expectQueriedProven(ctx: PanelToolCtx): void {
   const proven = __panelToolsTestHooks.captureRebootHealthBase(ctx);
   expect(proven).toBeTruthy();
   expect(queriedBases).toEqual([proven]);
+}
+
+const FREED_ACK_BODY = { freed: true, unload_models: true, free_memory: true };
+
+function ackFreed(): ToolResult {
+  return {
+    content: [{ type: "text", text: JSON.stringify(FREED_ACK_BODY, null, 2) }],
+  };
 }
 
 /** Reporter: 4× RTX 2080 Ti, 21 GB. GPU 2 at vram_free=187552724 and
@@ -264,6 +276,9 @@ describe("panel_free_vram reads occupancy from this tab's server, not the global
     // Tab fronts a DIFFERENT local instance than boot. Global is the boot
     // server. Returning pinned devices if that host is queried makes a
     // wrong-target read fail this test — the #1878 tests were blind to it.
+    // #1895 — the ack is no longer byte-identical to a measured GPU: it must
+    // say occupancy was never re-read. Swapping the gate to getComfyUIBaseUrl()
+    // still fails: queriedBases would be non-empty and GPU 2 would be named.
     setDevices(reporterDevices);
     expect(setComfyuiTarget(BOOT_BASE)).toBe(true);
     const out = await run("ok", { origin: OTHER_BASE });
@@ -276,6 +291,8 @@ describe("panel_free_vram reads occupancy from this tab's server, not the global
     expect(out.text).not.toMatch(/STILL PINNED/);
     expect(out.text).not.toMatch(/panel_restart_comfyui/);
     expect(out.text).not.toMatch(/"index": 2/);
+    expect(out.text).toMatch(/"occupancy_reread": false/);
+    expect(out.text).toMatch(/never re-read/);
   });
 });
 
@@ -289,7 +306,15 @@ describe("panel_free_vram attributes a pin to this ComfyUI's torch pool, not the
     expect(out.text).toMatch(/"freed": true/);
     expect(out.text).not.toMatch(/"freed": false/);
     expect(out.text).not.toMatch(/STILL PINNED/);
-    expect(out.text).not.toMatch(/panel_restart_comfyui/);
+    // #1895 — silence was the bug. Keep isError false but name the device,
+    // the live counter, and that /system_stats cannot say which process.
+    expect(out.text).toContain("795579336");
+    expect(out.text).toMatch(/device 0/);
+    expect(out.text).toMatch(/device globally/);
+    expect(out.text).toMatch(/cannot name which process/);
+    expect(out.text).toMatch(/Ray/);
+    expect(out.text).toMatch(/second ComfyUI/);
+    expect(out.text).toMatch(/will not/);
   });
 
   it("does not treat device-global vram_free as a pin when torch counters are absent", async () => {
@@ -299,7 +324,11 @@ describe("panel_free_vram attributes a pin to this ComfyUI's torch pool, not the
     expectQueriedProven(out.ctx);
     expect(out.isError).toBe(false);
     expect(out.text).toMatch(/"freed": true/);
-    expect(out.text).not.toMatch(/panel_restart_comfyui/);
+    expect(out.text).not.toMatch(/"freed": false/);
+    expect(out.text).not.toMatch(/STILL PINNED/);
+    expect(out.text).toContain("795579336");
+    expect(out.text).toMatch(/device 0/);
+    expect(out.text).toMatch(/cannot name which process/);
   });
 
   it("still names a pin when THIS instance's torch pool is occupied even if the card looks free", async () => {
@@ -320,5 +349,116 @@ describe("panel_free_vram attributes a pin to this ComfyUI's torch pool, not the
     expect(out.text).toMatch(/device 2/);
     expect(out.text).toMatch(/panel_restart_comfyui/);
     expect(out.text).not.toMatch(/device 0/);
+  });
+});
+
+describe("annotateFreeVramAck discloses occupied-but-not-torch-pinned (#1895)", () => {
+  it("keeps isError false, names device 0, and prints the live 795579336 counter", async () => {
+    setDevices(otherProcessHoldsCard);
+    const ctx = makePanelToolCtx(bridge({ reply: "ok" }), TAB, new WorkflowTargetStore());
+    const out = await __panelToolsTestHooks.annotateFreeVramAck(ctx, ackFreed());
+
+    expectQueriedProven(ctx);
+    expect(out.isError === true).toBe(false);
+    const text = textOf(out);
+    expect(text).toMatch(/"freed": true/);
+    expect(text).not.toMatch(/"freed": false/);
+    expect(text).toContain("795579336");
+    expect(text).toMatch(/device 0/);
+    expect(text).toMatch(/"occupied_devices"/);
+    expect(text).toMatch(/device globally/);
+    expect(text).toMatch(/cannot name which process/);
+    expect(text).toMatch(/Ray/);
+    expect(text).toMatch(/second ComfyUI/);
+    expect(text).toMatch(/will not/);
+    expect(text).not.toMatch(/STILL PINNED/);
+    expect(text).not.toMatch(/Next: panel_restart_comfyui/);
+  });
+
+  it("reads occupancy from captureRebootHealthBase, not getComfyUIBaseUrl", async () => {
+    setDevices(otherProcessHoldsCard);
+    expect(setComfyuiTarget(OTHER_BASE)).toBe(true);
+    const ctx = makePanelToolCtx(bridge({ reply: "ok" }), TAB, new WorkflowTargetStore());
+    const out = await __panelToolsTestHooks.annotateFreeVramAck(ctx, ackFreed());
+
+    const proven = __panelToolsTestHooks.captureRebootHealthBase(ctx);
+    expect(proven).toBeTruthy();
+    expect(__panelToolsTestHooks.sameHttpBase(proven, getComfyUIBaseUrl())).toBe(false);
+    expect(queriedBases).toEqual([proven]);
+    expect(out.isError === true).toBe(false);
+    expect(textOf(out)).toContain("795579336");
+  });
+
+  it("does not return a byte-identical freed:true when the tab's server is unproven", async () => {
+    setDevices(reporterDevices);
+    const ctx = makePanelToolCtx(
+      bridge({ reply: "ok", origin: OTHER_BASE }),
+      TAB,
+      new WorkflowTargetStore(),
+    );
+    const ack = ackFreed();
+    const out = await __panelToolsTestHooks.annotateFreeVramAck(ctx, ack);
+
+    expect(__panelToolsTestHooks.captureRebootHealthBase(ctx)).toBeNull();
+    expect(queriedBases).toEqual([]);
+    expect(out.isError === true).toBe(false);
+    const text = textOf(out);
+    expect(text).toMatch(/"freed": true/);
+    expect(text).not.toBe(textOf(ack));
+    expect(text).toMatch(/"occupancy_reread": false/);
+    expect(text).toMatch(/never re-read/);
+    expect(text).toMatch(/receipt/);
+    expect(text).not.toMatch(/"index": 2/);
+    expect(text).not.toMatch(/STILL PINNED/);
+    expect(text).not.toMatch(/panel_restart_comfyui/);
+  });
+
+  it("discloses an occupied card after a server-side settle without blaming the torch pool", async () => {
+    __panelToolsTestHooks.setFreeVramDirect(async (base: string) => {
+      queriedBases.push(base);
+      return { ok: true, before: otherProcessHoldsCard, after: otherProcessHoldsCard };
+    });
+    const out = await run("timeout");
+
+    expectQueriedProven(out.ctx);
+    expect(out.isError).toBe(false);
+    expect(out.text).toMatch(/"freed": true/);
+    expect(out.text).not.toMatch(/"freed": false/);
+    expect(out.text).toContain("795579336");
+    expect(out.text).toMatch(/device 0/);
+    expect(out.text).toMatch(/"verified": "server-side"/);
+    expect(out.text).not.toMatch(/STILL PINNED/);
+    expect(out.text).not.toMatch(/Next: panel_restart_comfyui/);
+  });
+});
+
+describe("deviceStillPinned (#1887 / #1895)", () => {
+  const pin = (d: Parameters<typeof __panelToolsTestHooks.deviceStillPinned>[0]) =>
+    __panelToolsTestHooks.deviceStillPinned(d);
+
+  it("is false for the live 32 MiB torch pool next to a 97% occupied card", () => {
+    expect(pin(otherProcessHoldsCard[0])).toBe(false);
+  });
+
+  it("is true for the reporter's GPU 2 torch pool (~0.24% free)", () => {
+    expect(pin(reporterDevices[2])).toBe(true);
+  });
+
+  it("is false when torch counters are absent", () => {
+    expect(pin(deviceGlobalOccupiedTorchAbsent[0])).toBe(false);
+  });
+
+  it("measures pool fullness, not reserved share of the card (predicate-shape note)", () => {
+    // #1895 item 3: 24 GiB card at 3% device-free, this ComfyUI still reserves
+    // 5 GiB of which 4 GiB is unused inside the pool. NOT observed live after
+    // /free — documents the current predicate, does not invent a measurement.
+    expect(
+      pin({
+        vram_total: 24 * GIB,
+        vram_free: Math.round(0.03 * 24 * GIB),
+        torch_vram_total: 5 * GIB,
+        torch_vram_free: 4 * GIB,
+      }),
+    ).toBe(false);
   });
 });
