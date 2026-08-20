@@ -183,8 +183,8 @@ describe("validateWorkflow — graph-health merge", () => {
   });
 });
 
-// #1869 — validate_workflow on a saved UI graph used to report false
-// type/enum errors because action-button tokens serialized into
+// #1869 — create_workflow (action:"validate") on a saved UI graph used to report
+// false type/enum errors because action-button tokens serialized into
 // widgets_values were paired against /object_info from slot 0.
 describe("validateWorkflow — UI graph with serialized action buttons (#1869)", () => {
   const AM_OBJECT_INFO = {

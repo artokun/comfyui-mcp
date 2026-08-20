@@ -680,17 +680,28 @@ function skipSerializedActionWidgets(opts: {
 
   while (widgetIdx < values.length) {
     const candidate = values[widgetIdx];
-    if (nbParts && !valueFitsNumericOrBoolean(candidate, nbParts)) {
-      widgetIdx++;
-      continue;
-    }
 
+    // Skipping is only ever safe when the saved row has MORE values left than
+    // the schema has slots left. When it does not, every remaining value still
+    // has a home and dropping one would be the same silent shift this exists to
+    // prevent — a reordered widget (#959) or a stringly-typed INT would be
+    // eaten instead of merely misassigned. Undefined arity (a later dynamic
+    // combo) is treated as "no extras" for the same reason.
     const remainingSlots = remainingPositionalSlots(widgetNames, nameIdx, def);
     const extras =
       remainingSlots === undefined
         ? 0
         : Math.max(0, values.length - widgetIdx - remainingSlots);
     if (extras <= 0) break;
+
+    // INT/FLOAT/BOOLEAN can never legitimately hold an action-button token, so
+    // a hard type mismatch is the one signal that needs no further corroboration
+    // — it is what recovers an INTERSPERSED button (`detect_range` before
+    // first_frame), which no prefix rule can see.
+    if (nbParts && !valueFitsNumericOrBoolean(candidate, nbParts)) {
+      widgetIdx++;
+      continue;
+    }
 
     const comboOpts = getComboOptions(spec);
     if (Array.isArray(comboOpts) && comboOpts.length > 0) {

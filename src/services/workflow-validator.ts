@@ -71,7 +71,8 @@ export async function validateWorkflow(
   }
 
   // Saved UI exports pair widgets_values against object_info. Convert first so
-  // validate_workflow on a canvas JSON hits the same alignment as /prompt (#1869).
+  // create_workflow (action:"validate") on a canvas JSON hits the same alignment
+  // as /prompt (#1869).
   let graph: WorkflowJSON = workflow;
   if (isUiFormat(workflow)) {
     const converted = convertUiToApi(workflow, objectInfo);
