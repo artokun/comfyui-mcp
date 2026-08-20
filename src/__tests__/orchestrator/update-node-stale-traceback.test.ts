@@ -239,6 +239,79 @@ describe("#1870 panel_update_node does not attach a stale generation traceback",
   });
 });
 
+describe("#1888 reinstall note requires observed Manager evidence, not version", () => {
+  // The sanitizer is sound; the defect is the gate. wantsNonGitReroute fired
+  // on version==="nightly" alone, so a zip-installed pack got a reinstall NOTE
+  // on every isError — including failures that never reached Manager.
+  const DISCONNECTED = 'Error: no connected tab with id "dead". Connected: none';
+  const REPLY_TIMEOUT =
+    'Error: Panel tab tab-1 did not reply to "graph_update_node" within 30000 ms — the ComfyUI tab may be backgrounded or frozen\n\n' +
+    'To retry this exact mutation, re-issue identical args plus retry_of:"11111111-2222-3333-4444-555555555555"; otherwise call normally.';
+
+  it("THE REPORT: a disconnected-tab error with version nightly does not get the reinstall note", async () => {
+    disk.root = zipPackRoot();
+    const { ctx } = makeCtx({
+      content: [{ type: "text", text: DISCONNECTED }],
+      isError: true,
+    });
+    const res = await defByName("panel_update_node").handler(
+      { id: PACK, version: "nightly" },
+      ctx,
+    );
+    expect(res.isError).toBe(true);
+    const text = textOf(res);
+    expect(text).toBe(DISCONNECTED);
+    expect(text).not.toMatch(/Comfy Registry zip/);
+    expect(text).not.toMatch(/The pack was NOT git-updated/);
+    expect(text).not.toMatch(/install_custom_node \(action:"reinstall"/);
+  });
+
+  it("a reply-timeout (outcome unknown) with version nightly does not get the reinstall note", async () => {
+    disk.root = zipPackRoot();
+    const { ctx } = makeCtx({
+      content: [{ type: "text", text: REPLY_TIMEOUT }],
+      isError: true,
+    });
+    const res = await defByName("panel_update_node").handler(
+      { id: PACK, version: "nightly" },
+      ctx,
+    );
+    const text = textOf(res);
+    expect(text).toBe(REPLY_TIMEOUT);
+    expect(text).toMatch(/retry_of:"11111111-2222-3333-4444-555555555555"/);
+    expect(text).not.toMatch(/Comfy Registry zip/);
+    expect(text).not.toMatch(/The pack was NOT git-updated/);
+  });
+
+  it("update-git evidence still re-routes a zip pack when version is not nightly", async () => {
+    disk.root = zipPackRoot();
+    const { ctx } = makeCtx({
+      content: [{ type: "text", text: reportedFailure(`${FAL_TB}\n${UPDATE_GIT_LINE}`) }],
+      isError: true,
+    });
+    const res = await defByName("panel_update_node").handler({ id: PACK }, ctx);
+    const text = textOf(res);
+    expect(text).toMatch(/res\.action=update-git/);
+    expect(text).toMatch(/Comfy Registry zip/);
+    expect(text).toMatch(/install_custom_node \(action:"reinstall"/);
+    expect(text).not.toMatch(/FalApiError/);
+  });
+
+  it("the generic Manager update line still re-routes a zip pack without nightly or update-git", async () => {
+    disk.root = zipPackRoot();
+    const { ctx } = makeCtx({
+      content: [{ type: "text", text: reportedFailure(FAL_TB) }],
+      isError: true,
+    });
+    const res = await defByName("panel_update_node").handler({ id: PACK, version: "latest" }, ctx);
+    const text = textOf(res);
+    expect(text).toMatch(/An error occurred while updating 'fal-api'/);
+    expect(text).toMatch(/Comfy Registry zip/);
+    expect(text).not.toMatch(/FalApiError/);
+    expect(text).not.toMatch(/res\.action=update-git/);
+  });
+});
+
 describe("#1870 WIRING: the handler actually sanitizes", () => {
   it("panel_update_node calls sanitizePanelUpdateNodeResult on the panel reply", () => {
     const src = readFileSync(

@@ -12,9 +12,11 @@
  *
  * The orchestrator keeps Manager task evidence (the generic update ERROR line,
  * `res.action`/`res.result`, `do_update` / `repo_update` frames) and drops
- * ComfyUI execution history. When `update-git` failed and the pack is a
- * registry zip (no nested `.git`), it names that and re-routes to reinstall
- * rather than leaving the reader debugging a stale generation error.
+ * ComfyUI execution history. When that evidence shows an update-git (or
+ * generic update) failure and the pack is a registry zip (no nested `.git`),
+ * it names that and re-routes to reinstall rather than leaving the reader
+ * debugging a stale generation error. The reinstall note is gated on that
+ * observed Manager evidence, not on the caller's `version` argument (#1888).
  *
  * Never throws: this runs on an error path, and a guard that becomes the error
  * is strictly worse than the message it was improving.
@@ -158,9 +160,15 @@ export function keepManagerUpdateEvidence(traceback: string): {
   return { kept: kept.join("\n").trim(), droppedExecution };
 }
 
-function wantsNonGitReroute(message: string, version: string | undefined): boolean {
-  if (UPDATE_GIT.test(message)) return true;
-  return typeof version === "string" && version.trim().toLowerCase() === "nightly";
+/**
+ * #1888 — the reinstall note is a claim about Manager's update, so it fires
+ * only when the message itself carries that evidence. `version === "nightly"`
+ * is the caller's argument, not an observation: on a zip-installed pack it
+ * bolted the note onto every `isError`, including a disconnected tab and a
+ * reply-timeout whose own text says the mutation's outcome is unknown.
+ */
+function wantsNonGitReroute(message: string): boolean {
+  return UPDATE_GIT.test(message) || GENERIC_UPDATE_LINE.test(message);
 }
 
 /**
@@ -188,7 +196,7 @@ export function sanitizePanelUpdateFailure(
     }
   }
 
-  if (wantsNonGitReroute(out, opts.version) && observePackNestedGit(opts.id) === false) {
+  if (wantsNonGitReroute(out) && observePackNestedGit(opts.id) === false) {
     const note = nonGitRegistryNote(opts.id);
     if (!out.includes(note)) out = `${out.trimEnd()}\n\n${note}`;
   }
