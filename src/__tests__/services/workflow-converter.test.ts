@@ -3551,4 +3551,56 @@ describe("convertUiToApi — serialized action buttons must not shift widget val
     expect(workflow["2"].inputs.file_path).not.toBe("browse");
     expect(workflow["2"].inputs.codec).not.toBe("open_in_explorer");
   });
+
+  // The two cases below are the SAME SHAPE to a positional pass — one loose
+  // STRING slot, one extra value, a lowercase-identifier candidate. Only the
+  // token itself distinguishes them, so the uncorroborated path is allowed to
+  // skip a button we have actually seen serialized and nothing else.
+  it("skips an action prefix when no downstream widget can corroborate it", () => {
+    const ui = {
+      nodes: [
+        {
+          id: 3,
+          type: "AMPathOnly",
+          mode: 0,
+          inputs: [],
+          outputs: [],
+          widgets_values: ["browse", "D:/out.mov", "final take"],
+        },
+      ],
+      links: [],
+    } as never;
+    const { workflow } = convertUiToApi(ui, {
+      AMPathOnly: {
+        input: {
+          required: { file_path: ["STRING", {}], note: ["STRING", {}] },
+        },
+        output: [],
+      },
+    } as never);
+    expect(workflow["3"].inputs.file_path).toBe("D:/out.mov");
+    expect(workflow["3"].inputs.note).toBe("final take");
+  });
+
+  it("leaves an ordinary lowercase STRING alone when nothing corroborates a skip", () => {
+    const ui = {
+      nodes: [
+        {
+          id: 4,
+          type: "PlainText",
+          mode: 0,
+          inputs: [],
+          outputs: [],
+          widgets_values: ["hello", "Extra Thing"],
+        },
+      ],
+      links: [],
+    } as never;
+    const { workflow } = convertUiToApi(ui, {
+      PlainText: { input: { required: { text: ["STRING", {}] } }, output: [] },
+    } as never);
+    // `hello` is a plain value, not a button token — the extra trailing entry
+    // must NOT promote it out of its own slot.
+    expect(workflow["4"].inputs.text).toBe("hello");
+  });
 });

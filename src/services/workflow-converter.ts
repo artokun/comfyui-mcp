@@ -656,6 +656,20 @@ function remainingPositionalSlots(
  */
 const SERIALIZED_ACTION_BUTTON_VALUE = /^[a-z][a-z0-9_]*$/;
 
+/**
+ * Button tokens actually observed in a saved `widgets_values` row (#1869,
+ * comfyui-am-vfx-tools AMVideoRead/AMVideoWrite). Used ONLY where no strict
+ * downstream widget can corroborate the skip; everywhere else the general
+ * shape above is checked against a value that demonstrably fits a later
+ * INT/FLOAT/BOOLEAN or non-asset combo.
+ */
+const KNOWN_ACTION_BUTTON_TOKENS = new Set([
+  "browse",
+  "open_in_explorer",
+  "copy_path",
+  "detect_range",
+]);
+
 function looksLikeSerializedActionButton(value: unknown): boolean {
   return typeof value === "string" && SERIALIZED_ACTION_BUTTON_VALUE.test(value);
 }
@@ -736,6 +750,14 @@ function skipSerializedActionWidgets(opts: {
     }
 
     if (nextStrictNameIdx < 0) {
+      // No strict widget downstream, so nothing can CORROBORATE the skip: the
+      // shape of `["hello", "Extra Thing"]` on a lone STRING widget is identical
+      // to `["browse", "D:/out.mov"]` on a lone file_path. Skipping on the
+      // general snake_case shape here picks a widget by coin flip and writes the
+      // wrong value silently, so an uncorroborated skip demands a token we have
+      // actually SEEN serialized as a button (#1869), not merely one that looks
+      // like an identifier.
+      if (!KNOWN_ACTION_BUTTON_TOKENS.has(candidate as string)) break;
       const laterNonAction = values.slice(widgetIdx + 1).some(
         (v) =>
           typeof v === "string" &&
