@@ -82,3 +82,72 @@ export function normalizeNodeId(v: number | string): number | string {
  *  caller holding `263:78` needs to know whether it is unsupported or malformed. */
 export const NODE_ID_MESSAGE =
   "a node id must be an integer (e.g. 42) or a subgraph-qualified id (e.g. 120:104)";
+
+/**
+ * #1889 — a bare `z.union` renders as the word `Invalid input` and nothing else.
+ *
+ * Zod 4 reports a failed union as ONE `invalid_union` issue whose own `message`
+ * is the constant `"Invalid input"`; the per-member messages (NODE_ID_MESSAGE
+ * among them) live in a nested `errors` array. Every renderer that reaches an
+ * agent flattens `issue.message` and drops that nest — the MCP SDK's
+ * `getParseErrorMessage` (1.30) joins `` `${i.message} at ${path}` ``, zod's own
+ * `prettifyError` prints `✖ ${i.message}`, and 1.29 JSON-stringifies the issues.
+ * So a node-id rejection read:
+ *
+ *     Invalid input at node_id
+ *     Invalid input: expected string, received undefined at title
+ *
+ * NODE_ID_MESSAGE was never dead prose — a BAD STRING (`"42px"`) fails only the
+ * string member, zod collapses that to a plain `invalid_format` issue, and the
+ * message prints. It is unreachable only for inputs that fail EVERY member
+ * (undefined, null, 4.5, an object), which is the common case and the reported
+ * one. This is what makes the union say the same thing there.
+ *
+ * `received` is carried too, because the complaint was the asymmetry with the
+ * sibling `title`, and half of what `title` said was what it actually got.
+ */
+export function unionErrorFor(expected: string): (iss: { input: unknown }) => string {
+  return (iss) => `${expected}; received ${describeReceived(iss.input)}`;
+}
+
+/** How long a rendered value may get before it is cut. A node id is a handful of
+ *  characters; anything near this is a caller error worth showing, not quoting. */
+const RECEIVED_MAX = 60;
+
+/**
+ * Render an arbitrary rejected input for a message, TOTALLY.
+ *
+ * This runs inside zod's error path, so it must never throw: a formatter that
+ * throws converts a clean validation refusal into a 500. `JSON.stringify` alone
+ * is not safe here — it throws on a BigInt and on a circular object, returns the
+ * bare `undefined` value for a symbol or a function, and renders NaN/Infinity as
+ * `null`, which would tell a caller who passed NaN that they passed null. Each
+ * of those is handled before the stringify, and the stringify itself is caught.
+ */
+export function describeReceived(input: unknown): string {
+  if (input === null) return "null";
+  switch (typeof input) {
+    case "undefined":
+      return "undefined";
+    case "bigint":
+      return `${input}n`;
+    case "symbol":
+      return input.toString();
+    case "function":
+      return "a function";
+    case "number":
+    case "boolean":
+      // `String` and not `JSON.stringify`: the latter renders NaN and ±Infinity
+      // as `null`, which would tell a caller who passed NaN that they passed null.
+      return String(input);
+    default:
+      break;
+  }
+  let rendered: string;
+  try {
+    rendered = JSON.stringify(input) ?? String(input);
+  } catch {
+    return Array.isArray(input) ? "an array" : "an object";
+  }
+  return rendered.length > RECEIVED_MAX ? `${rendered.slice(0, RECEIVED_MAX)}…` : rendered;
+}
