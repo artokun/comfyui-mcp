@@ -122,6 +122,7 @@ beforeEach(() => {
 
 afterEach(() => {
   __panelToolsTestHooks.setFreeVramDirect(null);
+  __panelToolsTestHooks.setReadVramDevices(null);
 });
 
 describe("panel_free_vram on a frozen tab is settled server-side (#1249)", () => {
@@ -229,6 +230,8 @@ describe("panel_free_vram on a frozen tab is settled server-side (#1249)", () =>
       directCalls.push(base);
       return DIRECT_OK;
     });
+    // Occupancy unreadable → #1866 claims nothing extra and leaves the ack.
+    __panelToolsTestHooks.setReadVramDevices(async () => null);
     const out = await run({ reply: "ok" });
 
     expect(directCalls).toEqual([]);

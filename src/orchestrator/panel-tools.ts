@@ -853,6 +853,13 @@ export const __panelToolsTestHooks = {
   setFreeVramDirect(fn: ((base: string) => Promise<FreeVramDirectOutcome>) | null): void {
     freeVramDirectOverride = fn;
   },
+  /** Inject a fake post-/free /system_stats read so #1866 occupancy checks can
+   *  be driven without real HTTP. null restores the live readVramDevices. */
+  setReadVramDevices(
+    fn: ((base: string, timeoutMs: number) => Promise<VramDeviceSample[] | null>) | null,
+  ): void {
+    readVramDevicesOverride = fn;
+  },
   /** Direct access to the #742 decline recheck loop so its hard-deadline
    *  guarantee (codex gate r2) can be unit-tested with a custom deadline. */
   probeDeclineRecovery,
@@ -2781,8 +2788,11 @@ const FREE_VRAM_DIRECT_TIMEOUT_MS = 10_000;
 /** The VRAM counters of one /system_stats device entry, read when present. */
 interface VramDeviceSample {
   name?: string;
+  index?: number;
   vram_total?: number;
   vram_free?: number;
+  torch_vram_total?: number;
+  torch_vram_free?: number;
 }
 
 /** GET `${base}/system_stats` and return its device VRAM counters, or null when
@@ -2811,19 +2821,108 @@ async function readVramDevices(
     if (!looksLikeSystemStats(body)) return null;
     const devices = (body as { devices?: unknown }).devices;
     if (!Array.isArray(devices)) return null;
-    return devices.map((d) => {
-      const dev = (d ?? {}) as Record<string, unknown>;
-      const sample: VramDeviceSample = {};
-      if (typeof dev.name === "string") sample.name = dev.name;
-      if (typeof dev.vram_total === "number") sample.vram_total = dev.vram_total;
-      if (typeof dev.vram_free === "number") sample.vram_free = dev.vram_free;
-      return sample;
-    });
+    return devices.map((d) => sampleVramDevice(d));
   } catch {
     return null; // unreachable/timed out — no numbers to report
   } finally {
     clearTimeout(timer);
   }
+}
+
+function sampleVramDevice(d: unknown): VramDeviceSample {
+  const dev = (d ?? {}) as Record<string, unknown>;
+  const sample: VramDeviceSample = {};
+  if (typeof dev.name === "string") sample.name = dev.name;
+  if (typeof dev.index === "number") sample.index = dev.index;
+  if (typeof dev.vram_total === "number") sample.vram_total = dev.vram_total;
+  if (typeof dev.vram_free === "number") sample.vram_free = dev.vram_free;
+  if (typeof dev.torch_vram_total === "number") sample.torch_vram_total = dev.torch_vram_total;
+  if (typeof dev.torch_vram_free === "number") sample.torch_vram_free = dev.torch_vram_free;
+  return sample;
+}
+
+/** A device with at least 1 GiB of VRAM is still PINNED when less than 20% is
+ *  free after /free. CUDA context leftover on an unloaded GPU is a few hundred
+ *  MB to a couple of GiB, not 80%+ of a 21 GiB card. The reporter's Raylight
+ *  MiniMax H3 case was device 2 at ~0.8% free (~179 MiB of 21 GiB) next to
+ *  siblings at ~44% free — that occupancy is what this threshold names.
+ *
+ *  Unknown/unreadable counters are NOT pinned: an unknown answer claims
+ *  nothing in either direction (#1473). */
+const PINNED_VRAM_MIN_TOTAL_BYTES = 1024 * 1024 * 1024;
+const PINNED_VRAM_FREE_RATIO = 0.2;
+
+function deviceStillPinned(d: VramDeviceSample): boolean {
+  const total = d.vram_total;
+  const free = d.vram_free;
+  if (typeof total !== "number" || typeof free !== "number") return false;
+  if (!Number.isFinite(total) || !Number.isFinite(free)) return false;
+  if (total < PINNED_VRAM_MIN_TOTAL_BYTES) return false;
+  if (free < 0) return true;
+  return free / total <= PINNED_VRAM_FREE_RATIO;
+}
+
+function pinnedVramDevices(devices: VramDeviceSample[]): VramDeviceSample[] {
+  return devices.filter(deviceStillPinned);
+}
+
+/** /free only unloads ComfyUI's model manager. Ray workers, parallel CLIP
+ *  loaders, and other custom-node allocations survive it and keep the GPU
+ *  occupied — which is why a 2xx from /free is not evidence VRAM is free. */
+function pinnedVramAfterFreeNote(pinned: VramDeviceSample[]): string {
+  const named = pinned
+    .map((d) => {
+      if (typeof d.index === "number") return `device ${d.index}`;
+      if (typeof d.name === "string" && d.name) return d.name;
+      return "an unnamed device";
+    })
+    .join(", ");
+  return (
+    `ComfyUI /free accepted (unload_models + free_memory) but VRAM is STILL PINNED on ` +
+    `${named}. /free only unloads ComfyUI's model manager — it does not terminate Ray ` +
+    `workers or custom-node allocations (Raylight sequence-parallel, parallel CLIP loaders). ` +
+    `This is not a successful VRAM recovery. Next: panel_restart_comfyui (last resort; ` +
+    `refuses mid-render) after confirming with get_system_stats (action:"stats").`
+  );
+}
+
+function pinnedVramAfterFreeResult(
+  pinned: VramDeviceSample[],
+  extra: Record<string, unknown>,
+): ToolResult {
+  return {
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify(
+          {
+            freed: false,
+            unload_models: true,
+            free_memory: true,
+            model_manager_freed: true,
+            pinned_devices: pinned,
+            ...extra,
+            note: pinnedVramAfterFreeNote(pinned),
+          },
+          null,
+          2,
+        ),
+      },
+    ],
+    isError: true,
+  };
+}
+
+/** Test injection for the post-/free /system_stats occupancy read (#1866). */
+let readVramDevicesOverride:
+  | ((base: string, timeoutMs: number) => Promise<VramDeviceSample[] | null>)
+  | null = null;
+
+async function readVramDevicesMaybe(
+  base: string,
+  timeoutMs: number,
+): Promise<VramDeviceSample[] | null> {
+  return (readVramDevicesOverride ?? readVramDevices)(base, timeoutMs);
 }
 
 interface FreeVramDirectOutcome {
@@ -2840,7 +2939,7 @@ interface FreeVramDirectOutcome {
  *  settle can degrade to the honest outcome-unknown instead of masking the
  *  original timeout behind a new error. */
 async function freeVramDirect(base: string): Promise<FreeVramDirectOutcome> {
-  const before = await readVramDevices(base, FREE_VRAM_DIRECT_TIMEOUT_MS);
+  const before = await readVramDevicesMaybe(base, FREE_VRAM_DIRECT_TIMEOUT_MS);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FREE_VRAM_DIRECT_TIMEOUT_MS);
   timer.unref?.();
@@ -2863,7 +2962,7 @@ async function freeVramDirect(base: string): Promise<FreeVramDirectOutcome> {
   } finally {
     clearTimeout(timer);
   }
-  const after = await readVramDevices(base, FREE_VRAM_DIRECT_TIMEOUT_MS);
+  const after = await readVramDevicesMaybe(base, FREE_VRAM_DIRECT_TIMEOUT_MS);
   return { ok: true, before, after };
 }
 
@@ -2911,6 +3010,21 @@ async function settleFreeVramAfterAckTimeout(
       ],
     };
   }
+  const extra = {
+    acknowledged: false,
+    verified: "server-side",
+    via: `POST ${base}/free`,
+    ...(direct.before != null ? { vram_before: direct.before } : {}),
+    ...(direct.after != null ? { vram_after: direct.after } : {}),
+  };
+  // #1866 — a 2xx from /free is not a free GPU. Ray/CLIP workers can keep a
+  // device pinned. When we have occupancy numbers, they are the verdict.
+  if (direct.after != null) {
+    const pinned = pinnedVramDevices(direct.after);
+    if (pinned.length > 0) {
+      return pinnedVramAfterFreeResult(pinned, extra);
+    }
+  }
   const statsNote =
     direct.before != null && direct.after != null
       ? "vram_before/vram_after are the server's own /system_stats counters around the free."
@@ -2919,17 +3033,35 @@ async function settleFreeVramAfterAckTimeout(
     freed: true,
     unload_models: true,
     free_memory: true,
-    acknowledged: false,
-    verified: "server-side",
-    via: `POST ${base}/free`,
-    ...(direct.before != null ? { vram_before: direct.before } : {}),
-    ...(direct.after != null ? { vram_after: direct.after } : {}),
+    ...extra,
     note:
       `The panel tab never acknowledged (frozen or backgrounded), so the free was issued ` +
       `DIRECTLY to the ComfyUI server this tab provably fronts — the same /free endpoint the ` +
       `panel would have called — and the server confirmed it. /free is idempotent: if the tab's ` +
       `queued copy still executes when the tab wakes, it is a no-op, so nothing was applied ` +
       `twice. ${statsNote}`,
+  });
+}
+
+/**
+ * #1866 — a panel ack of `{freed:true}` is the /free HTTP 2xx, not a measured
+ * GPU. After the tab says it posted /free, re-read /system_stats and refuse to
+ * claim VRAM was freed when a device is still occupied. Unreadable stats leave
+ * the original ack UNTOUCHED: an unknown answer claims nothing extra.
+ */
+async function annotateFreeVramAck(res: ToolResult): Promise<ToolResult> {
+  if (res.isError) return res;
+  const parsed = parseToolResultJson(res);
+  if (!parsed || parsed.freed !== true) return res;
+  const base = (getComfyUIBaseUrl() || "").replace(/\/+$/, "");
+  if (!base) return res;
+  const devices = await readVramDevicesMaybe(base, FREE_VRAM_DIRECT_TIMEOUT_MS);
+  if (devices == null) return res;
+  const pinned = pinnedVramDevices(devices);
+  if (pinned.length === 0) return res;
+  return pinnedVramAfterFreeResult(pinned, {
+    acknowledged: true,
+    devices,
   });
 }
 
@@ -16110,7 +16242,7 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
     ),
     def(
       "panel_free_vram",
-      "Unload all loaded models and free VRAM (ComfyUI /free). Use to unwedge a stuck/OOM ComfyUI when a cancel didn't free memory — before retrying or, last resort, restarting (panel_restart_comfyui). Does NOT restart ComfyUI; it just drops resident models and frees cached memory. If the panel tab is frozen and cannot acknowledge, the free is instead issued DIRECTLY to the ComfyUI server and verified there (same /free, idempotent) whenever the tab provably fronts the local server — otherwise the outcome is reported unknown rather than claimed.",
+      "Unload all loaded models and free VRAM (ComfyUI /free). Use to unwedge a stuck/OOM ComfyUI when a cancel didn't free memory — before retrying or, last resort, restarting (panel_restart_comfyui). Does NOT restart ComfyUI; it just drops resident models and frees cached memory. After /free, occupancy is re-read from /system_stats: if a device remains pinned (Ray workers, parallel CLIP, custom-node allocations /free cannot terminate), the reply names those devices and does NOT claim VRAM was freed — next step is panel_restart_comfyui. If the panel tab is frozen and cannot acknowledge, the free is instead issued DIRECTLY to the ComfyUI server and verified there (same /free, idempotent) whenever the tab provably fronts the local server — otherwise the outcome is reported unknown rather than claimed.",
       {},
       async (_args, ctx) => {
         const res = await ctx.call({ cmd: "free_vram" }, 15000);
@@ -16119,8 +16251,10 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         // received and relayed; it already says what failed, and re-issuing from
         // out here would fire a second mutation behind a verdict the caller was
         // given. A tagged reply-timeout is the one case where nothing answered.
-        if (!isReplyTimeoutResult(res)) return res;
-        return settleFreeVramAfterAckTimeout(ctx, res);
+        if (isReplyTimeoutResult(res)) return settleFreeVramAfterAckTimeout(ctx, res);
+        // #1866 — a successful /free ack is not a free GPU. Re-read occupancy
+        // and refuse to report freed:true when a device is still pinned.
+        return annotateFreeVramAck(res);
       },
     ),
     def(
