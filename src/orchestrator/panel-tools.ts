@@ -113,6 +113,33 @@ import { NO_ORIGIN_REMEDY } from "./fence-refusal.js";
  *  labeled "foreign" and boundary sweeps could never close the ticket (codex
  *  round 3, P1). Resolves the scope to the active tab; a real-tab ctx is
  *  returned unchanged. */
+/**
+ * #1917 — the CANONICAL tab id a SCOPE-addressed session's commands are dispatched
+ * to right now: the in-flight turn's routing pin, resolved onward through any
+ * same-socket migration alias, else the active-tab fallback when no turn is
+ * pinned. Undefined when nothing resolves — and, deliberately, for a REAL-TAB ctx,
+ * which routes by its own id and has no second selector to disagree with.
+ *
+ * Canonical on purpose: `resolveSharedTabId` answers with `conn.tabId`, the same
+ * value `resolveActiveScopeTab` answers with, so the two can be compared for
+ * "different TAB" rather than "different id string". A pin naming a retired
+ * `wf:<route>:<path>` id that still reaches the same live socket resolves to that
+ * socket's current canonical id and is therefore NOT a disagreement.
+ *
+ * Never throws: an unresolvable pin is the bridge's own loud failure at dispatch
+ * time, and a reporting helper must not turn it into a different one here.
+ */
+function scopeRoutedTabId(ctx: PanelToolCtx): string | undefined {
+  if (!isScopeAddress(ctx.tabId)) return undefined;
+  const b = ctx.bridge as { resolveSharedTabId?: (scopeId?: string) => string | undefined };
+  if (typeof b.resolveSharedTabId !== "function") return undefined;
+  try {
+    return b.resolveSharedTabId(ctx.tabId);
+  } catch {
+    return undefined;
+  }
+}
+
 function journalTabFor(ctx: PanelToolCtx): string {
   if (!isScopeAddress(ctx.tabId)) return ctx.tabId;
   // Pass the ctx's own (backend-qualified) scope address so the RIGHT
@@ -14537,6 +14564,55 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         // made only on the evidence that supports it; without that evidence the reply
         // says what IS true (the pin is set and acts as a GUARD) and hands back the
         // cheap read that settles it.
+        //
+        // #1917 — the SAME rule for the `mode:"current"` arm, which panel#1529's fix
+        // deliberately did not take. "Following the user's current workflow tab." is
+        // also a claim about ROUTING, and it was likewise unconditional. It is FALSE
+        // whenever this conversation's in-flight turn pin is holding routing on a
+        // different tab: `rebindToActiveTab` short-circuits for a scope ctx whose pin
+        // still reaches a live tab (#884 — a live pin is never displaced) and returns
+        // `{rebound:false}` with no `repinRefusal` at all, so nothing in the reply
+        // mentioned the pin. Measured on clean main over a real bridge: with the pin
+        // on the tab showing Basic_V37 and the active-scope resolution naming the tab
+        // showing PHOTO, this call answered «Following the user's current workflow
+        // tab.» with `graph_binding:"bound"`, and the next `panel_graph_outline` AND
+        // the next `panel_remove_node` were both dispatched to Basic_V37.
+        //
+        // The pin is NOT moved to make the sentence true — that is #884's P0, and
+        // widening "displace" from dead-or-ambiguous to dead-or-ambiguous-or-different
+        // would re-aim an in-flight conversation's mutations at a tab it never
+        // addressed. What changes is the CLAIM: when two selectors name different
+        // tabs, say so and name both, rather than silently reporting one of them.
+        const routedTab = scopeRoutedTabId(ctx);
+        const activeScopeTab =
+          typeof ctx.bridge.resolveActiveScopeTab === "function"
+            ? ctx.bridge.resolveActiveScopeTab()
+            : undefined;
+        // Compared as CANONICAL connection ids on both sides (resolveSharedTabId and
+        // resolveActiveScopeTab both answer with `conn.tabId`), so a pin that merely
+        // names a RETIRED per-workflow route id but still resolves onto the same live
+        // socket does not read as a split — only a genuinely different tab does.
+        const turnPinRoutesElsewhere =
+          mode === "current" &&
+          !currentModeTurnRepinned &&
+          isScopeAddress(ctx.tabId) &&
+          typeof routedTab === "string" &&
+          typeof activeScopeTab === "string" &&
+          routedTab !== activeScopeTab
+            ? { routedTab, activeScopeTab }
+            : undefined;
+        // panel#1529's `pin_verified_active` rule, applied to the routing half: the
+        // same verdict the note carries, MACHINE-READABLE, so an agent never has to
+        // read "the two selectors disagree" out of prose. `turn_routing:"repinned"`
+        // and `"pinned_elsewhere"` are mutually exclusive by construction — the
+        // predicate above requires `!currentModeTurnRepinned`.
+        const turnRoutingSplitFields = turnPinRoutesElsewhere
+          ? {
+              turn_routing: "pinned_elsewhere" as const,
+              turn_routing_tab: turnPinRoutesElsewhere.routedTab,
+              current_would_route_to: turnPinRoutesElsewhere.activeScopeTab,
+            }
+          : {};
         const hint =
           target.mode === "pinned"
             ? pinVerifiedActive
@@ -14548,7 +14624,24 @@ export function buildPanelToolDefs(): PanelToolDef[] {
               // be a confident wrong diagnosis; what is true in all three is that the
               // check did not happen.
               : `Pinned to "${target.filename ?? target.path}" — but NOT CONFIRMED: the live canvas could not be read back to check this pin against it, so this call does NOT establish that graph tools will reach that workflow. The pin travels on graph commands as a GUARD: if the active canvas is a different workflow, the next graph call FAILS with a workflow mismatch rather than editing it. Settle it with one cheap read — panel_graph_outline — before relying on this.`
-            : "Following the user's current workflow tab.";
+            : turnPinRoutesElsewhere
+              ? `The workflow target is now mode:"current" — but graph tools will NOT ` +
+                `follow the tab this session would otherwise resolve to. This ` +
+                `conversation's IN-FLIGHT TURN is pinned to tab ` +
+                `${shortTabId(turnPinRoutesElsewhere.routedTab)}, and that pin was NOT ` +
+                `displaced: a pin that still reaches a live tab of this conversation is ` +
+                `never displaced, however explicit the request (#884). So every graph ` +
+                `command — READS AND MUTATIONS ALIKE — is dispatched to ` +
+                `${shortTabId(turnPinRoutesElsewhere.routedTab)}, not to ` +
+                `${shortTabId(turnPinRoutesElsewhere.activeScopeTab)}, which is where ` +
+                `"current" would resolve. TWO SELECTORS NAME DIFFERENT TABS and this ` +
+                `call moved neither, so do not read it as "graph tools now follow the ` +
+                `user's current tab". WHAT TO DO: read the pinned tab first ` +
+                `(panel_graph_outline) and work there if that is the workflow you mean; ` +
+                `otherwise ask the user to send a message from the tab they want — the ` +
+                `turn pin is released at the end of this turn and the next message's ` +
+                `origin establishes routing. Retrying this tool will not move it.`
+              : "Following the user's current workflow tab.";
         // #803 — this used to END here for every mode:"current" call, with the
         // unconditional "Following the user's current workflow tab." Reporters followed
         // that as the documented recovery, read it as success, and stayed wedged. The
@@ -14756,6 +14849,7 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
               graph_binding: "bound",
               ...(fenceRebind ? { graph_binding_status: fenceRebind.status } : {}),
               ...(currentModeTurnRepinned ? { turn_routing: "repinned" } : {}),
+              ...turnRoutingSplitFields,
               note:
                 hint +
                 rebindNote +
@@ -14805,6 +14899,7 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
           ...(typeof scopeRepin === "string" || currentModeTurnRepinned
             ? { turn_routing: "repinned" }
             : {}),
+          ...turnRoutingSplitFields,
           note: hint + rebindNote + (fence?.note ?? "") + scopeRepinNote,
         });
       },
