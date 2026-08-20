@@ -139,6 +139,14 @@ const EXTERNAL_SERVICE_PACKS: readonly ExternalServicePack[] = [
   { module: "comfyui-pvl-fal-nodes", localCategoryPrefixes: ["fal/utils"], provider: "fal.ai" },
   { module: "comfyui_fal_api", localCategoryPrefixes: ["fal/utils"], provider: "fal.ai" },
   { module: "comfyui-fal-api-flux", provider: "fal.ai" },
+  // #1855 — PoYo's OFFICIAL pack (github.com/PoyoAPI/poyo-comfyui) for its hosted
+  // image/video/music/3D API, which requires an account API key created at
+  // poyo.ai/dashboard/api-key. Every generic signal says "free" here: the pack keeps
+  // the credential OUT of its workflow inputs, so declaresCredentialInput() cannot see
+  // it, and api_node is false — so check_runtime called it local while the node spends
+  // the user's balance. The category prefix carries the match through a directory
+  // rename the way the fal entries do.
+  { module: "poyo-comfyui", categoryPrefixes: ["poyo ai"], provider: "PoYo" },
 ];
 
 /**
