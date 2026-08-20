@@ -44,6 +44,7 @@ import { judgeHelloRetarget, canonComfyuiTargetUrl } from "../services/hello-ret
 import { startQuickTunnel } from "../services/tunnel.js";
 import { detectInstallMode } from "../services/self-update.js";
 import { performPanelSync, reassessPanelAfterSyncFailure } from "../services/panel-sync.js";
+import { resolveBlindTabGate } from "./blind-tab-gate.js";
 import { clearPanelDiskObservation } from "../services/panel-workspace.js";
 import { panelRecoveryContext } from "../services/panel-recovery.js";
 import { isPanelAutoInstallDisabled } from "../services/panel-installer.js";
@@ -1950,7 +1951,30 @@ export async function runPanelOrchestrator(): Promise<void> {
   // pixels. The agent is now shared, so the promise is conversation-wide: pixels
   // are withheld while ANY tab has Blind on (a per-tab gate would leak pixels to
   // the shared agent through the other tabs).
-  const anyTabBlind = (): boolean => blindTabs.size > 0;
+  // #1841 — `blindTabs.size > 0` never retired a tab that WENT AWAY: every
+  // delete site needs an explicit blind-off from that same id (or the hello
+  // migration path), so one departed blind tab pinned the whole conversation
+  // blind for the life of this process while the user's live tab reported Blind
+  // OFF. The sweep retires an id only after it has been continuously unreachable
+  // past a grace window — unreachability starts a clock, it does not decide —
+  // so a routine websocket drop still fails CLOSED. See blind-tab-gate.ts.
+  const blindUnreachableSince = new Map<string, number>();
+  const anyTabBlind = (): boolean => {
+    const { blind, pruned } = resolveBlindTabGate({
+      blindTabs,
+      unreachableSince: blindUnreachableSince,
+      canReach: (tabId) => bridge.canReach(tabId),
+      now: Date.now(),
+    });
+    if (pruned.length) {
+      logger.info(
+        `[panel-orchestrator] Blind gate: retired ${pruned.length} departed blind tab(s) ` +
+          `(${pruned.map((t) => t.slice(0, 8)).join(", ")}) — unreachable past the grace window; ` +
+          `conversation blind = ${blind}`,
+      );
+    }
+    return blind;
+  };
 
   // ---- live ENVIRONMENT-CAPABILITIES block ----
   // Gather the machine's facts ONCE at startup (CACHED) — OS/CPU/RAM from node,
@@ -5203,7 +5227,38 @@ export async function runPanelOrchestrator(): Promise<void> {
       // agent_event frames with images onto a blinded desktop tab.
       // #884 — the receiving agent is shared, so the pixel gate is conversation-
       // wide: any tab with Blind on withholds pixels from the shared agent.
-      const evForTab = anyTabBlind() ? { ...ev, images: [] } : ev;
+      // #884 followup — emptying `images` is INVISIBLE downstream. Every
+      // "withheld / attached below" sentence the completion composer can emit is
+      // gated on `imgs.length`, so a blind-stripped completion produced NO
+      // disclosure at all: the agent received the panel's SIGHTED storyboard note
+      // ("Review motion, sharpness, and temporal consistency") with zero pixels
+      // and no reason, which is precisely the confabulation the blind note exists
+      // to prevent. The panel picks its blind/sighted note from ITS OWN tab
+      // (`agentReceivesImages()`), while this gate is conversation-wide
+      // (`anyTabBlind()`), so the two disagree whenever any OTHER tab is blind —
+      // and the disagreement was unobservable.
+      //
+      // Fail-closed is unchanged: pixels are still removed, and the journal still
+      // stores the stripped copy. Only the SILENCE is fixed, by appending the
+      // disclosure to the note the composer already renders verbatim, which also
+      // overrides a sighted "review this" instruction that must not be obeyed.
+      const blindWithheldCount = anyTabBlind() && Array.isArray(ev.images) ? ev.images.length : 0;
+      const evForTab = anyTabBlind()
+        ? {
+            ...ev,
+            images: [],
+            ...(blindWithheldCount > 0
+              ? {
+                  note:
+                    `${typeof ev.note === "string" && ev.note.trim() ? `${ev.note.trim()} ` : ""}` +
+                    `⚠️ Blind mode is ON: ${blindWithheldCount} image(s) from this run were withheld ` +
+                    `from you and are NOT attached — they ARE shown to the user in the panel. Do NOT ` +
+                    `comment on motion, sharpness, composition or any other visual quality, and do not ` +
+                    `claim you reviewed them; ask the user to describe what they see, or to turn Blind off.`,
+                }
+              : {}),
+          }
+        : ev;
       // #468 — a RUN COMPLETION is a promise `panel_run` made ("end your turn,
       // you WILL be notified"), so it goes through the journal: correlated by
       // exact prompt id ONCE, here, and replayed until the turn that carries it
