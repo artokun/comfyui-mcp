@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -438,5 +438,78 @@ describe("getLocalComfyuiUrl (#269 LAN fallback)", () => {
     expect(seen[0].url).toBe("http://192.168.1.50:8188");
     expect(seen[0].generation).toBe(g0 + 1);
     expect(seen[0].generation).toBe(mod.getComfyuiTargetGeneration());
+  });
+});
+
+describe("rescopeLocalTargetFile (#1909 non-default loopback port)", () => {
+  let fakeHome: string;
+  beforeEach(() => {
+    vi.resetModules();
+    process.env = { ...OLD_ENV };
+    process.argv = [...OLD_ARGV];
+    fakeHome = mkdtempSync(join(tmpdir(), "config-home-"));
+    process.env.COMFYUI_MCP_LOCAL_TARGET_FILE = join(fakeHome, "local-target.json");
+    process.env.COMFYUI_API_KEY = "";
+    process.env.COMFYUI_PATH = "";
+    process.env.COMFYUI_CODE_PATH = "";
+    process.env.COMFYUI_HOST = "";
+    process.env.COMFYUI_PORT = "8188";
+    process.env.COMFYUI_MCP_FORCE_REMOTE = "";
+    process.env.COMFYUI_URL = "";
+  });
+  afterEach(() => {
+    process.env = OLD_ENV;
+    process.argv = OLD_ARGV;
+  });
+
+  function writtenUrl(path: string): unknown {
+    return (JSON.parse(readFileSync(path, "utf-8")) as { url?: unknown }).url;
+  }
+
+  it("records a loopback COMFYUI_URL assigned after config init, not the :8188 default", async () => {
+    // Production order: config.ts is imported first (boot.ts static import),
+    // then boot.ts assigns COMFYUI_URL from `connect` / --comfyui-url, then
+    // the orchestrator calls rescopeLocalTargetFile. The default-seeded
+    // lastNonPodTarget must not win over the live configured origin.
+    const mod = await import("../config.js");
+    const configured = "http://127.0.0.1:18188";
+    process.env.COMFYUI_URL = configured;
+    const scoped = join(fakeHome, "local-target-9180.json");
+    mod.rescopeLocalTargetFile(scoped);
+    expect(writtenUrl(scoped)).toBe(configured);
+    expect(mod.getLocalComfyuiUrl()).toBe(configured);
+    // Restart identity reads these — they must name the configured instance
+    // or panel_restart_comfyui still refuses a panel that is on that port.
+    expect(mod.getBootLocalComfyUIBaseUrl()).toBe(configured);
+    expect(mod.getComfyUIBaseUrl()).toBe(configured);
+  });
+
+  it("overwrites a stale scoped file that still says :8188", async () => {
+    const configured = "http://127.0.0.1:18188";
+    const scoped = join(fakeHome, "local-target-9180.json");
+    writeFileSync(scoped, JSON.stringify({ url: "http://127.0.0.1:8188" }));
+    const mod = await import("../config.js");
+    process.env.COMFYUI_URL = configured;
+    mod.rescopeLocalTargetFile(scoped);
+    expect(writtenUrl(scoped)).toBe(configured);
+  });
+
+  it("records the configured URL when it is already set at import", async () => {
+    const configured = "http://127.0.0.1:18188";
+    process.env.COMFYUI_URL = configured;
+    const mod = await import("../config.js");
+    const scoped = join(fakeHome, "local-target-9180.json");
+    mod.rescopeLocalTargetFile(scoped);
+    expect(writtenUrl(scoped)).toBe(configured);
+    expect(mod.getBootLocalComfyUIBaseUrl()).toBe(configured);
+  });
+
+  it("keeps :8188 when that is the configured loopback URL", async () => {
+    const configured = "http://127.0.0.1:8188";
+    process.env.COMFYUI_URL = configured;
+    const mod = await import("../config.js");
+    const scoped = join(fakeHome, "local-target-9180.json");
+    mod.rescopeLocalTargetFile(scoped);
+    expect(writtenUrl(scoped)).toBe(configured);
   });
 });

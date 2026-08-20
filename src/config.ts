@@ -775,6 +775,29 @@ export function getBootLocalComfyUIBaseUrl(): string | null {
   return `${bootComfyui.ssl ? "https" : "http"}://${bootComfyui.host}:${bootComfyui.port}${bootComfyui.basePath}`;
 }
 
+/** #1909: COMFYUI_URL / --comfyui-url may be assigned after this module's init
+ *  (boot.ts `connect` writes it after the static import). Re-read so a loopback
+ *  host on a non-default port is persisted as that origin, not :8188. This is
+ *  still process-start — rescope runs once before hellos, and setComfyuiTarget
+ *  still cannot mutate bootComfyui. */
+function adoptLiveConfiguredLocalTarget(): void {
+  const live = resolveUrlOverride();
+  if (!live || !isLocalOrLanHost(live.host) || !(live.port > 0)) return;
+  const liveUrl = `${live.ssl ? "https" : "http"}://${live.host}:${live.port}${live.basePath}`;
+  lastNonPodTarget = liveUrl;
+  if (!isLoopbackHost(live.host)) return;
+  // The configured loopback origin IS the process-start local instance.
+  bootComfyui.host = live.host;
+  bootComfyui.port = live.port;
+  bootComfyui.ssl = live.ssl;
+  bootComfyui.basePath = live.basePath;
+  config.comfyuiHost = live.host;
+  config.comfyuiPort = live.port;
+  config.resolvedPort = live.port;
+  config.comfyuiSsl = live.ssl;
+  config.comfyuiBasePath = live.basePath;
+}
+
 /** Orchestrator startup hook: re-point the saved-target file (port-scoped, so
  *  parallel orchestrators for different rigs never restore each other's rig)
  *  and re-restore when booted on a pod — the module-init restore ran before
@@ -799,6 +822,9 @@ export function rescopeLocalTargetFile(path: string): void {
     // finding: a headless session's global save defeated the port isolation).
     lastNonPodTarget = readSavedLocalTarget();
   }
+  // A live loopback/LAN COMFYUI_URL is not a pod URL, so this will not clobber
+  // a pod boot's scoped LAN restore above.
+  adoptLiveConfiguredLocalTarget();
   if (lastNonPodTarget !== null) {
     // Persist into the scoped file so the next restart restores it — a direct
     // LAN boot otherwise lives in memory only and the pod-inherited restart
