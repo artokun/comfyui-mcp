@@ -7318,7 +7318,13 @@ function comfyWorkflowsDirs(): string[] {
     const p = normalizeInstallPathEnv(raw).path;
     if (p && !bases.includes(p)) bases.push(p);
   };
-  add(process.env.COMFYUI_PATH);
+  // Wrapped AT THE READ even though `add` normalizes: #1512's guard is line-level by
+  // design, because a proximity rule passes when the normalized result is discarded
+  // and the raw value forwarded anyway. It cannot see into `add`, and making it try
+  // would be the weakening that lets the next raw read through. normalizeInstallPathEnv
+  // is idempotent (trim + unquote), so the second pass inside `add` is a no-op and
+  // reports changed:false, emitting no duplicate ingestion warning.
+  add(normalizeInstallPathEnv(process.env.COMFYUI_PATH).path);
   add(resolveEffectiveComfyUIBase());
   add(peekResolvedPanelBase());
   const dirs: string[] = [];
