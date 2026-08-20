@@ -403,6 +403,32 @@ describe("panel#1529 — a pin may not claim a graph target it did not establish
     expect(note).toContain("panel_graph_outline");
   });
 
+  it("a BARE KEY token is not refused on this evidence — the boundary, on purpose", async () => {
+    // Where the refusal above STOPS, measured rather than assumed. The oracle needs a
+    // canonical saved identity on our side, and a bare basename/key is deliberately not
+    // one: it is an alias selector that can name two files in different directories.
+    // Widening it is not free — a `tmp:` routing token would then read as "different"
+    // from any named active tab and start refusing valid pins to unsaved workflows.
+    //
+    // So on a key-shaped token the pin is still accepted leniently — and the SECOND
+    // half of the fix is what protects the caller there: no routing claim is made.
+    const page = new FakePanel("tmp:2fb3aaaa-1111-4111-8111-111111111111", [A], 0, "active-only");
+    await page.connect();
+    tabStamp.set(page.tabId, A.uuid);
+    tracker.repinTo(SCOPE, page.tabId);
+    const ctx = ctxFor(SCOPE);
+
+    const res = await tool("panel_set_workflow_target").handler(
+      { mode: "pinned", path: B.key, filename: B.filename },
+      ctx,
+    );
+
+    expect(res.isError).toBeFalsy();
+    const body = jsonOf(res);
+    expect(body.pin_verified_active).toBe(false);
+    expect(String(body.note ?? "")).not.toContain(GRAPH_TARGET_CLAIM);
+  });
+
   it("still makes the claim — and delivers it — when the pin IS verified active", async () => {
     // The healthy path this must not over-refuse: the agent opens B, the panel
     // re-helloes under B's route on the same socket, the turn pin follows through

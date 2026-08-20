@@ -14506,7 +14506,13 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           target.mode === "pinned"
             ? pinVerifiedActive
               ? `Pinned to "${target.filename ?? target.path}". Graph tools will target that workflow without switching the user's view.`
-              : `Pinned to "${target.filename ?? target.path}" — but NOT CONFIRMED: this panel did not report which workflow is the active canvas, so the pin could not be checked against it, and this call does NOT establish that graph tools will reach that workflow. The pin travels on graph commands as a GUARD: if the active canvas is a different workflow, the next graph call FAILS with a workflow mismatch rather than editing it. Settle it with one cheap read — panel_graph_outline — before relying on this.`
+              // The CAUSE is deliberately not named. `verifiedActive:false` covers a
+              // workflow_list that never answered, one that answered without an
+              // enumerable tab list, and one whose records share no comparable
+              // identity with the active canvas. Picking one of those to print would
+              // be a confident wrong diagnosis; what is true in all three is that the
+              // check did not happen.
+              : `Pinned to "${target.filename ?? target.path}" — but NOT CONFIRMED: the live canvas could not be read back to check this pin against it, so this call does NOT establish that graph tools will reach that workflow. The pin travels on graph commands as a GUARD: if the active canvas is a different workflow, the next graph call FAILS with a workflow mismatch rather than editing it. Settle it with one cheap read — panel_graph_outline — before relying on this.`
             : "Following the user's current workflow tab.";
         // #803 — this used to END here for every mode:"current" call, with the
         // unconditional "Following the user's current workflow tab." Reporters followed
