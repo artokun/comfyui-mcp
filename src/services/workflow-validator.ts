@@ -77,7 +77,12 @@ export async function validateWorkflow(
   if (isUiFormat(workflow)) {
     const converted = convertUiToApi(workflow, objectInfo);
     graph = converted.workflow;
+    // A dropped unknown node is promoted to an authoritative error below. Drop
+    // its conversion warning by IDENTITY so the same node is not reported twice
+    // — API-format validation reports it once, and these two paths must agree.
+    const promoted = new Set(converted.missingNodeTypes.map((m) => m.warning));
     for (const message of converted.warnings) {
+      if (promoted.has(message)) continue;
       issues.push({
         severity: "warning",
         node_id: "",

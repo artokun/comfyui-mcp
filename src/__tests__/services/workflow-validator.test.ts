@@ -229,13 +229,33 @@ describe("validateWorkflow — UI graph with serialized action buttons (#1869)",
   it("does not report action-button tokens as combo/enum errors", async () => {
     getObjectInfoMock.mockResolvedValue(AM_OBJECT_INFO);
     const r = await validateWorkflow(uiWorkflow, { health: false });
-    const text = r.issues.map((i) => i.message).join("\n");
+    // The bug was false ERRORS naming button tokens as widget values. Scope
+    // the assertion to errors: those tokens now appear in WARNINGS on
+    // purpose, because a skip must never be silent (asserted below).
+    const text = r.issues
+      .filter((i) => i.severity === "error")
+      .map((i) => i.message)
+      .join("\n");
     expect(text).not.toMatch(/open_in_explorer/);
     expect(text).not.toMatch(/copy_path/);
     expect(text).not.toMatch(/detect_range/);
     expect(r.issues.filter((i) => i.kind === "value_not_in_list")).toHaveLength(0);
     expect(r.issues.filter((i) => i.severity === "error")).toHaveLength(0);
     expect(r.valid).toBe(true);
+  });
+
+  // Which entry in a run is the button is not always decidable, so a skip
+  // that happens silently is unrecoverable for the user. Name every one.
+  it("reports each skipped action-button token as a warning", async () => {
+    getObjectInfoMock.mockResolvedValue(AM_OBJECT_INFO);
+    const r = await validateWorkflow(uiWorkflow, { health: false });
+    const warningText = r.issues
+      .filter((i) => i.severity === "warning")
+      .map((i) => i.message)
+      .join("\n");
+    for (const t of ["browse", "open_in_explorer", "copy_path", "detect_range"]) {
+      expect(warningText).toContain(t);
+    }
   });
 
   // The converter DROPS a node whose type object_info doesn't know, so the
@@ -267,5 +287,11 @@ describe("validateWorkflow — UI graph with serialized action buttons (#1869)",
     expect(missing[0].node_id).toBe("1");
     expect(missing[0].node_type).toBe("TotallyNotInstalled");
     expect(r.valid).toBe(false);
+    // ...and reported ONCE. The converter also warns about the node it
+    // dropped; surfacing both made the UI path report the same node twice
+    // where the API path reports it once.
+    expect(
+      r.issues.filter((i) => i.message.includes("TotallyNotInstalled")),
+    ).toHaveLength(1);
   });
 });
