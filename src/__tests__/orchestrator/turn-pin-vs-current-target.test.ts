@@ -141,6 +141,12 @@ class FakePanel {
     public route: string,
     public open: Wf[],
     public activeIdx: number,
+    /** When false, `workflow_list` omits the open-workflow LIST. The active record
+     *  and its uuid are still reported, so corroboration fails as a SHAPE fact
+     *  (`settles:false`, no recheck sleeps) while `seenUuid` still equals the
+     *  session's held fence — the panel#980 "uncorroborated but MATCHING" shape
+     *  that reaches the early `ok()` return. */
+    public corroborates = true,
   ) {}
 
   get active(): Wf {
@@ -224,7 +230,7 @@ class FakePanel {
 
     switch (cmd) {
       case "workflow_list": {
-        reply({
+        const body: Record<string, unknown> = {
           active: {
             path: this.active.path,
             filename: this.active.filename,
@@ -240,7 +246,9 @@ class FakePanel {
           mutations_ready: true,
           canvas_binding: "bound",
           graph_binding: "bound",
-        });
+        };
+        if (!this.corroborates) delete body.workflows;
+        reply(body);
         return;
       }
       case "workflow_open": {
@@ -361,12 +369,20 @@ const setCurrent = (ctx: PanelToolCtx): Promise<ToolResult> =>
  *  and a second browser tab showing the saved PHOTO copy connected after it — so the
  *  active-scope (pin-bypassing) resolution names PHOTO's tab while the in-flight
  *  turn's pin still names Basic_V37's. */
-async function twoTabsPinnedElsewhere(): Promise<{
+async function twoTabsPinnedElsewhere(
+  opts: { corroborates?: boolean } = {},
+): Promise<{
   tabA: FakePanel;
   tabB: FakePanel;
   ctx: PanelToolCtx;
 }> {
-  const tabA = new FakePanel("wf:rA:workflows/Basic_V37.json", "rA", [BASIC], 0);
+  const tabA = new FakePanel(
+    "wf:rA:workflows/Basic_V37.json",
+    "rA",
+    [BASIC],
+    0,
+    opts.corroborates ?? true,
+  );
   await tabA.connect();
   tabStamp.set(tabA.tabId, BASIC.uuid);
   const tabB = new FakePanel("wf:rB:workflows/PHOTO.json", "rB", [PHOTO], 0);
@@ -496,5 +512,39 @@ describe("mcp#1917 — mode:'current' may not claim a routing target the turn pi
     const body = jsonOf(await setCurrent(ctx));
     expect(String(body.note ?? "")).toContain(CURRENT_CLAIM);
     expect(body.turn_routing).toBeUndefined();
+  });
+
+  // THE SECOND `ok()` SITE. `panel_set_workflow_target({mode:"current"})` has two
+  // success returns, and #1919's tests only reached one: deleting the spread at the
+  // panel#980 early return left all six green, so a regression that dropped it would
+  // ship silently. The site is NOT dead code — fence-matching-uuid.test.ts drives it
+  // today ("reports BOUND: the held fence was PROVEN live") — it was simply never
+  // driven while the turn pin pointed somewhere else. A caller hitting the recovery
+  // shape in the reported two-tab state would then get the split in PROSE with no
+  // machine-readable field, which is the one thing the fields exist to prevent.
+  it("carries the split on the panel#980 recovery return TOO — the other ok() site", async () => {
+    // Same two-tab split, plus the uncorroborated-but-MATCHING fence shape: tabA
+    // answers workflow_list with its active record and uuid but no open-workflow
+    // LIST, so corroboration fails on a SHAPE fact (no recheck sleeps) while the
+    // uuid it reported still equals this session's held fence. That is
+    // `no_identity`/`uncorroborated` + `settleByRead`, the graph_query probe then
+    // passes on the pinned tab, writes are confirmed, and the verdict flips to
+    // BOUND through the EARLY return rather than the one at the end of the handler.
+    const { tabA, tabB, ctx } = await twoTabsPinnedElsewhere({ corroborates: false });
+
+    const body = jsonOf(await setCurrent(ctx));
+    const note = String(body.note ?? "");
+
+    // Assert we are on the early return before asserting what it carries — against
+    // the final return this test would pass for the wrong reason and pin nothing.
+    // This sentence belongs to that return and to nothing else in the handler.
+    expect(note, note).toContain("That acceptance is the binding-health question itself");
+    expect(body.graph_binding).toBe("bound");
+    // …and the split is reported there in BOTH registers, exactly as at the other site.
+    expect(note).not.toContain(CURRENT_CLAIM);
+    expect(note).toContain("READS AND MUTATIONS ALIKE");
+    expect(body.turn_routing).toBe("pinned_elsewhere");
+    expect(body.turn_routing_tab).toBe(tabA.tabId);
+    expect(body.current_would_route_to).toBe(tabB.tabId);
   });
 });
