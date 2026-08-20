@@ -234,6 +234,45 @@ describe("#1889 describeReceived is TOTAL — it runs inside zod's error path", 
     arr.push(arr);
     expect(describeReceived(arr)).toBe("an array");
   });
+
+  // The list below is the probe that found the last hole rather than a
+  // decoration on a fix already believed complete. The REVOKED PROXY case threw:
+  // `Array.isArray` is itself a proxy trap, so the recovery path inside the
+  // catch was another way out of this function. Nine of ten hostile inputs were
+  // already handled; enumerating them is what surfaced the tenth.
+  //
+  // None of these can arrive over the MCP wire, where input is parsed JSON. They
+  // are here because the CONTRACT is "cannot throw", and a contract that holds
+  // only for the inputs one happened to imagine is not one worth stating.
+  const hostile: Array<[string, () => unknown]> = [
+    ["a proxy whose get trap throws", () => new Proxy({}, { get: () => { throw new Error("boom"); } })],
+    ["a proxy whose ownKeys trap throws", () => new Proxy({}, { ownKeys: () => { throw new Error("boom"); } })],
+    ["a REVOKED proxy", () => { const p = Proxy.revocable({}, {}); p.revoke(); return p.proxy; }],
+    ["an object whose toJSON throws", () => ({ toJSON: () => { throw new Error("boom"); } })],
+    ["an object with a throwing getter", () =>
+      Object.defineProperty({}, "x", { get: () => { throw new Error("boom"); }, enumerable: true })],
+    ["a null-prototype object", () => Object.create(null)],
+    ["a Map", () => new Map([[1, 2]])],
+    ["an object whose Symbol.toPrimitive throws", () =>
+      ({ [Symbol.toPrimitive]: () => { throw new Error("boom"); } })],
+  ];
+
+  it.each(hostile)("survives %s", (_label, make) => {
+    let out: string | undefined;
+    expect(() => {
+      out = describeReceived(make());
+    }).not.toThrow();
+    expect(typeof out).toBe("string");
+  });
+
+  it("a revoked proxy specifically — the one that got past the outer catch", () => {
+    const { proxy, revoke } = Proxy.revocable({}, {});
+    revoke();
+    // Both the stringify AND the naive `Array.isArray` fallback throw on this.
+    expect(() => JSON.stringify(proxy)).toThrow();
+    expect(() => Array.isArray(proxy)).toThrow(); // the trap, stated outright
+    expect(describeReceived(proxy)).toBe("an object");
+  });
 });
 
 describe("#1889 unionErrorFor composes the two halves", () => {

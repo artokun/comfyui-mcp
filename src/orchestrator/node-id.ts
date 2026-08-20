@@ -147,7 +147,16 @@ export function describeReceived(input: unknown): string {
   try {
     rendered = JSON.stringify(input) ?? String(input);
   } catch {
-    return Array.isArray(input) ? "an array" : "an object";
+    // The fallback needs its own guard: `Array.isArray` THROWS on a revoked
+    // proxy ("Cannot perform 'IsArray' on a proxy that has been revoked"), so
+    // the naive recovery path was itself a way for this function to throw.
+    // Measured, not assumed — it is the one hostile input of ten that got past
+    // the outer catch.
+    try {
+      return Array.isArray(input) ? "an array" : "an object";
+    } catch {
+      return "an object";
+    }
   }
   return rendered.length > RECEIVED_MAX ? `${rendered.slice(0, RECEIVED_MAX)}…` : rendered;
 }
