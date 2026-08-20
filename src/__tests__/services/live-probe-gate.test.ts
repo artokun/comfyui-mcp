@@ -248,23 +248,11 @@ const KNOWN_UNSTUBBED: Record<string, string[]> = {
   "live process table (uncollapsed observation)": [
     "__tests__/services/env-capabilities.test.ts",
   ],
-  // The witness channel as it stands today. Ratcheted rather than fixed wholesale, for
-  // the same reason as the list above: five passing files is a large diff with no
-  // observable failure behind it, and each needs its own judgement about what the
-  // witness should return for the case it drives.
-  //
-  // `restart-live-first.test.ts` is the one that already cost three red CI runners
-  // (#1315). Note what its fix was: keeping the `startedAt` stamp so the #914 branch is
-  // not taken — a PER-TEST avoidance, not a stub. That is why it still appears here and
-  // should: the file can reach the channel again the moment a case omits the stamp, and
-  // nothing but this list would notice.
-  "instance witness (real WebSocket)": [
-    "__tests__/orchestrator/panel-restart-legacy-fallback.test.ts",
-    "__tests__/services/restart-launcher-env.test.ts",
-    "__tests__/services/restart-live-first.test.ts",
-    "__tests__/services/restart-posix-port-release.test.ts",
-    "__tests__/services/restart-relaunch-lifecycle.test.ts",
-  ],
+  // Empty on purpose (#1904): the five restart/stop files that used to live here
+  // now stub `acquireInstanceWitness`, so a future test that reaches the real
+  // WebSocket without stubbing fails the "NO NEW" assertion instead of joining
+  // a ratchet that had already named the known offenders.
+  "instance witness (real WebSocket)": [],
 };
 
 describe.each(PROBES)("host-reaching probe: $id (#1290/#1263)", (probe) => {

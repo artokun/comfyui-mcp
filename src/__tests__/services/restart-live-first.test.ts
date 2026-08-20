@@ -149,6 +149,14 @@ vi.mock("../../services/workspace-env.js", () => ({
   resetLocalComfyUILaunchState: vi.fn(),
 }));
 
+// #1904: acquireInstanceWitness opens a REAL WebSocket to COMFYUI_URL. Stub
+// it so this file takes the no-witness branch whether or not something is
+// listening on the configured ComfyUI port.
+vi.mock("../../services/instance-witness.js", async () => ({
+  ...(await vi.importActual("../../services/instance-witness.js")),
+  acquireInstanceWitness: async () => undefined,
+}));
+
 import {
   __processControlTestHooks,
   restartComfyUI,

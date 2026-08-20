@@ -26,6 +26,14 @@ vi.mock("../../services/process-control.js", async (importOriginal) => {
   return { ...actual, restartComfyUI: hoisted.restart };
 });
 
+// #1904 live-probe gate: nothing here may open a REAL WebSocket. The branch
+// under test stubs restartComfyUI itself, so the witness is never reached —
+// pin that by stubbing the acquisition outright.
+vi.mock("../../services/instance-witness.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../services/instance-witness.js")>()),
+  acquireInstanceWitness: async () => undefined,
+}));
+
 import {
   buildPanelToolDefs,
   rebootNoEndpoint,
