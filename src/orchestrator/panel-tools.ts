@@ -5984,10 +5984,12 @@ function describeFenceRebind(
   const mutationsUnknown = canMutate === undefined;
   // #1494 — `reads_only` would be a FALSE consolation for this one cause. The
   // dispatch-time agreement gate covers `graph_*` READS as well as mutations
-  // (requiresStampTargetAgreement), so a session in that state has no working graph
-  // tools at all — and the whole report is that this call answered "bound" while
-  // every one of them was being refused. It is `not_recovered`: the caller must not
-  // read success out of it.
+  // (requiresStampTargetAgreement), so a session in that state has neither working
+  // graph reads NOR writes — only the canvas-INDEPENDENT ops that predicate exempts
+  // (graph_update_node, the virtual-type reads) still dispatch, which is not what a
+  // caller reads "reads_only" as. And the whole report is that this call answered
+  // "bound" while everything the gate covers was being refused. It is
+  // `not_recovered`: the caller must not read success out of it.
   const okBinding: "bound" | "reads_only" | "unverified" | "not_recovered" = mutationsRefused
     ? refusalCause === "target_disagreement"
       ? "not_recovered"

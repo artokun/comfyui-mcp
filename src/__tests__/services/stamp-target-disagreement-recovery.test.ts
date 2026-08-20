@@ -178,6 +178,26 @@ describe("a stale tab advertisement is REPORTED, not papered over (#1494)", () =
     sock.close();
   });
 
+  it("a CANONICAL-ID caller is exempt here because `send` exempts it — the same short-circuit", async () => {
+    // The one state that separates the two: `send()` never runs the gate for a caller
+    // addressing the connection by its canonical id, so the capability probe must not
+    // either — both answers would come from ONE lookup, which cannot be a
+    // disagreement. Carried is set precisely because it is the arm that would
+    // otherwise fire on a pair that IS equal, making this the input that catches a
+    // missing short-circuit rather than one that merely happens to agree.
+    advertised.set(TAB, LIVE);
+    sessionStamp = LIVE;
+    carried = true;
+    const sock = await connectPanel(TAB);
+    await waitFor(() => expect(bridge.tabs().map((t) => t.tab_id)).toContain(TAB));
+    expect(bridge.tabGraphMutationCapability(TAB)).toEqual({ known: true, canMutate: true });
+    // …and that IS what send does: addressed canonically, the command dispatches.
+    received.length = 0;
+    await expect(bridge.send({ cmd: "graph_add_node" }, { tabId: TAB })).resolves.toBeTruthy();
+    expect(received.map((f) => f.cmd)).toEqual(["graph_add_node"]);
+    sock.close();
+  });
+
   it("does NOT fire when the two agree — the settled session is untouched", async () => {
     advertised.set(TAB, LIVE);
     sessionStamp = LIVE;
