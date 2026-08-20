@@ -12539,8 +12539,32 @@ export function buildPanelToolDefs(): PanelToolDef[] {
       "panel_get_errors",
       "WHY IS THAT NODE RED / WHY DID THE RUN FAIL? The single error surface for the user's open tab: every errored node JOINED TO ITS CAUSE, which ComfyUI itself does not show — LiteGraph only paints a red outline and stores no reason, which is why users report \"red node, no error message\". Call this whenever the user mentions a red/highlighted/erroring node, a failed run, or \"required models are missing\" — instead of guessing from widget values. Each entry in `nodes[]` is the node's full detail summary plus `red_outline` and `reasons[]`, drawn from every source: `missing_model` (exact file, its models directory, the widget holding it, and a download URL when known), `missing_media` (a referenced input image/video that isn't on disk — the usual cause of a red LoadImage), `validation` (per-input errors from the last queue attempt: message, details, offending input), and `execution` (runtime failure with `exception_type`, e.g. PIL.UnidentifiedImageError). TWO THINGS THAT MAKE THIS ESSENTIAL: (1) missing model/media assets paint nodes red AS SOON AS THE WORKFLOW LOADS, long before any queue attempt — so the raw validation map is still EMPTY while the user is staring at red nodes; (2) a node that throws AT RUNTIME is never painted red at all, so it can't be spotted on the canvas — it appears here with red_outline:false. Also returns graph-level `missing_models`, `missing_media`, `missing_node_types` (or `missing_node_count`), plus the raw `node_errors` map and `last_execution_error` for reference. A ⚠️ GRAPH VALIDATION block is auto-injected at your turn start when this state changes; call this to re-check on demand (e.g. after you edit widgets/links). Read-only.",
       {},
+      // #1493 — graph_get_errors belongs to the #599 refresh-ack cohort above, and was the
+      // one member of it left on the generic read default.
+      //
+      // Its frontend handler deliberately awaits a FORCED /object_info re-register before it
+      // will trust a combo to clear a resolved missing-model candidate (#610), and it spends a
+      // shared 18 000 ms elective budget across that refresh race, the /system_stats probe and the
+      // /view media probes (GET_ERRORS_TOTAL_BUDGET_MS, panel web/js/lib/get-errors-budget.js).
+      // That budget was sized to sit under BRIDGE_READ_DEFAULT_TIMEOUT_MS — which leaves 2 000 ms
+      // for everything the call still has to do AFTER the waits: collectMissingAssets over the
+      // whole graph, the per-node live combo scan, the subgraph walk, and serializing a reply big
+      // enough that this tool ships two truncation riders for it.
+      //
+      // The reported sequence spends that budget exactly as designed — panel_refresh_nodes, three
+      // promoted-widget writes on a model-loader subgraph, a save — and panel_get_errors was then
+      // declared "backgrounded or frozen" at 20 000 ms by a tab that had just answered four
+      // commands and did reply, late. That is the precise failure the shared budget exists to
+      // prevent (#589): an agent left with NO error surface for a workflow whose nodes are red.
+      //
+      // The margin has to come from THIS side. The panel's 18 s bound must stay where it is — it
+      // is what keeps a current panel safe in front of an OLDER orchestrator still using the 20 s
+      // default — so the orchestrator widens its own wait to the same bounded budget its
+      // refresh-before-validate siblings already use. This read is idempotent, so waiting longer
+      // costs a slow reply and never a double-applied write; it stays BOUNDED (never Infinity), so
+      // a genuinely frozen tab still fails, just at 30 s instead of 20 s.
       async (_args, ctx) =>
-        withTruncationHints(await ctx.call({ cmd: "graph_get_errors" }), [
+        withTruncationHints(await ctx.call({ cmd: "graph_get_errors" }, OBJECT_INFO_REFRESH_ACK_TIMEOUT_MS), [
           {
             flag: "truncated",
             key: "truncation_hint",
