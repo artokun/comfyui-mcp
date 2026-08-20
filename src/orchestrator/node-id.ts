@@ -22,8 +22,18 @@
  * reader printed, all the way to the panel.
  */
 
-/** A plain integer id, the form the wire has always carried. */
-const PLAIN = /^-?\d+$/;
+/**
+ * A plain integer id, the form the wire has always carried.
+ *
+ * Exported because one argument needs this shape ON ITS OWN: panel_run's
+ * `to_node_id` (#1497). Everything else takes NODE_ID_PATTERN, which admits the
+ * qualified form too — but a run-to-node target is resolved by NUMBER all the way
+ * down (the panel's findNodeInScopes does `Number(id)`, and its reply reports
+ * `ran_to_node: Number(to_node_id)`), so admitting `"120:104"` there would trade a
+ * clear schema refusal for a panel-side "node not found" about a node that exists.
+ * The shape lives here so the two patterns cannot drift apart.
+ */
+export const PLAIN_NODE_ID_PATTERN = /^-?\d+$/;
 
 /**
  * A subgraph-qualified id: integer segments joined by colons (`120:104`,

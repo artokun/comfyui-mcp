@@ -919,12 +919,14 @@ describe("panel-tools: panel_run (run-to-node partial execution)", () => {
       "retry_of",
       "to_node_id",
     ]);
-    // to_node_id is an optional int — accepts a node id, rejects non-numbers,
-    // and (being optional) accepts undefined for a normal full run.
+    // to_node_id takes a node id in EITHER spelling the readers print (#1497 —
+    // 27 and "27" both mean node 27), rejects a non-id, and (being optional)
+    // accepts undefined for a normal full run.
     const toNode = def.schema.to_node_id as {
       safeParse: (v: unknown) => { success: boolean };
     };
     expect(toNode.safeParse(27).success).toBe(true);
+    expect(toNode.safeParse("27").success).toBe(true);
     expect(toNode.safeParse("x").success).toBe(false);
     expect(toNode.safeParse(undefined).success).toBe(true);
     // allow_duplicate is an optional boolean — defaults to the fenced behavior.

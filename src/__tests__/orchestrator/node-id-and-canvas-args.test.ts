@@ -186,3 +186,68 @@ describe("#845(3): which args each action consumes", () => {
     expect(ignoredCanvasArgs("teleport", { node_id: 42, scale: 1 })).toEqual([]);
   });
 });
+
+// #1497 — the ONE argument #845 never reached.
+//
+// The reporter did exactly what the tool descriptions tell an agent to do: read
+// the id back out of panel_add_node (`"11"`, because summarizeNode returns
+// `id: node.id` and LiteGraph ids are strings on the modern frontend) and hand it
+// to panel_run as `to_node_id`. That call died in zod with
+// `expected number, received string` — the identical failure #845 fixed for the
+// other 27 node-id arguments and #427 hit on panel_create_group. A canonical
+// validator is adopted per CALL SITE; this call site was missed.
+//
+// The wire is unchanged: what the panel receives is still the NUMBER it has
+// always received. That matters beyond tidiness — two branches in panel_run gate
+// on `typeof args.to_node_id === "number"` (#772's stamp-race re-issue and #468's
+// run ticket), so a to_node_id that stayed a string would silently skip both.
+describe("#1497: panel_run accepts the node id its own tools printed", () => {
+  it("takes the string spelling panel_add_node returns", async () => {
+    const res = await callTool("panel_run", { to_node_id: "11" });
+    expect(res.isError).toBeFalsy();
+    expect(sent).toHaveLength(1);
+    expect(sent[0].cmd).toBe("graph_run");
+    // Normalized to the number the panel has always been sent…
+    expect(sent[0].to_node_id).toBe(11);
+    // …and it really is a number, not the string that merely prints as one:
+    // #772/#468 both branch on typeof === "number".
+    expect(typeof sent[0].to_node_id).toBe("number");
+  });
+
+  it("still takes the numeric spelling", async () => {
+    const res = await callTool("panel_run", { to_node_id: 11 });
+    expect(res.isError).toBeFalsy();
+    expect(sent[0].to_node_id).toBe(11);
+  });
+
+  it("leaves a full run alone — an omitted to_node_id stays undefined", async () => {
+    const res = await callTool("panel_run", { batch_count: 2 });
+    expect(res.isError).toBeFalsy();
+    expect(sent[0].to_node_id).toBeUndefined();
+    expect(sent[0].batch_count).toBe(2);
+  });
+
+  // The half that must NOT widen. A run-to-node target is an EXECUTION ROOT, and
+  // the panel resolves it numerically the whole way down (findNodeInScopes matches
+  // on Number(id); the reply reports ran_to_node: Number(to_node_id)). Accepting
+  // "120:104" here would swap a clear schema refusal for a panel-side
+  // "node 120:104 was not found" about a node that plainly exists — and drop the
+  // #468 run ticket on the way. So it is still refused, but now BY NAME.
+  it("refuses a subgraph-qualified id, and says why", async () => {
+    const res = await callTool("panel_run", { to_node_id: "120:104" });
+    expect(res.isError).toBe(true);
+    expect(sent).toHaveLength(0); // nothing was dispatched
+    const msg = textOf(res);
+    expect(msg).toContain("plain integer node id");
+    expect(msg).toContain("execution root");
+  });
+
+  it("refuses ids that are not ids at all", async () => {
+    for (const bad of ["11px", "1.5", "", "abc", "1:", " 11"]) {
+      sent = [];
+      const res = await callTool("panel_run", { to_node_id: bad });
+      expect(res.isError, JSON.stringify(bad)).toBe(true);
+      expect(sent, JSON.stringify(bad)).toHaveLength(0);
+    }
+  });
+});

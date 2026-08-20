@@ -73,7 +73,12 @@ import {
 } from "../services/panel-workspace.js";
 import { conversationOfScopeAddress, isScopeAddress, shortTabId } from "../services/session-scope.js";
 import type { ScopeRepinOutcome } from "./turn-origins.js";
-import { NODE_ID_MESSAGE, NODE_ID_PATTERN, normalizeNodeId } from "./node-id.js";
+import {
+  NODE_ID_MESSAGE,
+  NODE_ID_PATTERN,
+  normalizeNodeId,
+  PLAIN_NODE_ID_PATTERN,
+} from "./node-id.js";
 import {
   parseContradictoryPromotedWidgetRefusal,
   resolveInnerPromotedTarget,
@@ -10545,6 +10550,42 @@ const nodeId = () =>
     .transform(normalizeNodeId);
 
 /**
+ * #1497 — the ONE node-id argument #845 never reached: panel_run's `to_node_id`.
+ *
+ * #845 made every panel tool accept back an id it had PRINTED, because the graph
+ * readers hand out ids as strings (`summarizeNode` returns `id: node.id`, and on
+ * the modern ComfyUI frontend that is `"11"`, not `11`). Twenty-seven node-id
+ * arguments adopted `nodeId()`; this one kept `z.number().int()` and was missed,
+ * so the documented round trip — take the id `panel_add_node` just returned, hand
+ * it to panel_run — failed with a raw `expected number, received string`, exactly
+ * as #845 described and #427 hit for panel_create_group. A canonical validator is
+ * adopted per CALL SITE, and this call site never adopted it.
+ *
+ * NOT `nodeId()`, deliberately. That helper also admits the subgraph-QUALIFIED
+ * shape (`"120:104"`, #1425) and passes it through as a string, which is right for
+ * a write that addresses a node by key. A run-to-node target is not addressed by
+ * key — it is an EXECUTION ROOT, resolved numerically the whole way down:
+ * the panel's `findNodeInScopes` matches on `Number(id)`, its reply reports
+ * `ran_to_node: Number(to_node_id)`, and two branches here (#772's stamp-race
+ * re-issue and #468's run ticket) gate on `typeof args.to_node_id === "number"`.
+ * Widening this argument to the qualified form would therefore turn a clear schema
+ * refusal into a panel-side "node 120:104 was not found" about a node that plainly
+ * exists, and silently drop the run ticket that correlates the completion. So the
+ * spelling widens and the SHAPE does not: `11` and `"11"` both mean node 11, and
+ * a qualified id is still refused — now by name, with a reason.
+ */
+const RUN_TO_NODE_ID_MESSAGE =
+  'a run-to-node target must be a plain integer node id — 42 or "42" both work. A subgraph-qualified id (e.g. "120:104") is not an execution root: pass the output node\'s own plain id, which is what panel_query_graph prints for it even when it is nested inside a subgraph';
+
+const runToNodeId = () =>
+  z
+    .union([
+      z.number().int(),
+      z.string().regex(PLAIN_NODE_ID_PATTERN, RUN_TO_NODE_ID_MESSAGE),
+    ])
+    .transform((v) => (typeof v === "number" ? v : Number.parseInt(v, 10)));
+
+/**
  * #845 — which `panel_canvas` arguments the chosen action actually consumes.
  *
  * The tool accepted node_id/dx/dy/scale for every action and forwarded them all,
@@ -12134,12 +12175,10 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           .max(100)
           .optional()
           .describe("Times to queue (default 1)."),
-        to_node_id: z
-          .number()
-          .int()
+        to_node_id: runToNodeId()
           .optional()
           .describe(
-            "Output node id to render UP TO (partial execution). Omit to run the whole graph. Must be an OUTPUT node — one with is_output:true in panel_query_graph's detail rows. May be nested inside a subgraph (pass the node's own id).",
+            "Output node id to render UP TO (partial execution). Omit to run the whole graph. Must be an OUTPUT node — one with is_output:true in panel_query_graph's detail rows. May be nested inside a subgraph (pass the node's own id). Takes the id EXACTLY as the readers print it: 11 and \"11\" both mean node 11 (#1497). A subgraph-qualified id (\"120:104\") is not an execution root and is refused.",
           ),
         allow_duplicate: z
           .boolean()
