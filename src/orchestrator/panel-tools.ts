@@ -84,6 +84,7 @@ import {
   parseContradictoryPromotedWidgetRefusal,
   resolveInnerPromotedTarget,
 } from "./promoted-widget.js";
+import { includeRequestedCreateGroupMembers } from "./create-group-membership.js";
 import {
   fastGroupsFilterPropertyNote,
   isFastGroupsFilterProperty,
@@ -14516,17 +14517,23 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         color: z.string().optional().describe("Box/header color, e.g. '#3f789e'."),
         font_size: z.number().optional().describe("Title font size (default 24)."),
       },
+      // #1877 — a collapsed node can sit inside the auto-fit box and still be
+      // reported missing (size[1]===0 vs membership's 100px body fallback).
       async (args: A, ctx) =>
-        ctx.call(
-          {
-            cmd: "graph_create_group",
-            title: args.title,
-            node_ids: args.node_ids,
-            bounds: args.bounds,
-            color: args.color,
-            font_size: args.font_size,
-          },
-          15000,
+        includeRequestedCreateGroupMembers(
+          await ctx.call(
+            {
+              cmd: "graph_create_group",
+              title: args.title,
+              node_ids: args.node_ids,
+              bounds: args.bounds,
+              color: args.color,
+              font_size: args.font_size,
+            },
+            15000,
+          ),
+          args.node_ids,
+          (cmd, timeoutMs) => ctx.call(cmd, timeoutMs),
         ),
     ),
     def(
