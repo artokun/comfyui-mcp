@@ -639,6 +639,23 @@ function valueFitsNumericOrBoolean(value: unknown, parts: string[]): boolean {
 }
 
 /**
+ * A known action-button spelling is still a legitimate value when the declared
+ * widget explicitly offers it as a combo option. STRING/file-path collisions
+ * remain ambiguous and are handled by the warning attached to a skip; combo
+ * membership is evidence we can safely use without guessing.
+ */
+function declaredSpecAcceptsValue(spec: unknown, value: unknown): boolean {
+  if (!Array.isArray(spec)) return false;
+  const type = spec[0];
+  if (Array.isArray(type)) return type.some((option) => option === value);
+  if (type !== "COMBO") return false;
+  const cfg = spec[1];
+  if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) return false;
+  const values = (cfg as { values?: unknown }).values;
+  return Array.isArray(values) && values.some((option) => option === value);
+}
+
+/**
  * Saved-row length vs remaining schema slots. Undefined when a later
  * dynamic combo makes nested arity unknowable — extras-skipping must then
  * stay off (a guess would be the same silent shift this exists to prevent).
@@ -722,7 +739,9 @@ function skipSerializedActionWidgets(opts: {
     const candidate = values[widgetIdx];
     const typeRefutes = nbParts !== undefined && !valueFitsNumericOrBoolean(candidate, nbParts);
     const knownButton =
-      typeof candidate === "string" && KNOWN_ACTION_BUTTON_TOKENS.has(candidate);
+      typeof candidate === "string" &&
+      KNOWN_ACTION_BUTTON_TOKENS.has(candidate) &&
+      !declaredSpecAcceptsValue(spec, candidate);
     if (!typeRefutes && !knownButton) break;
     skipped.push(candidate);
     widgetIdx++;

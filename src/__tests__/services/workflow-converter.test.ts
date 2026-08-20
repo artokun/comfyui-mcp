@@ -3611,6 +3611,28 @@ describe("convertUiToApi — serialized action buttons must not shift widget val
     // must NOT promote it out of its own slot.
     expect(workflow["4"].inputs.text).toBe("hello");
   });
+
+  it("preserves a known button spelling when the declared COMBO explicitly accepts it", () => {
+    const { workflow } = convertUiToApi(
+      ({
+        nodes: [{ id: 1, type: "ComboCollision", mode: 0, inputs: [], outputs: [], widgets_values: ["browse", "other", "42"] }],
+        links: [],
+      }) as never,
+      {
+        ComboCollision: {
+          input: {
+            required: {
+              mode: [["browse", "other"], {}],
+              note: ["STRING", {}],
+            },
+          },
+          output: [],
+        },
+      } as never,
+    );
+    expect(workflow["1"].inputs.mode).toBe("browse");
+    expect(workflow["1"].inputs.note).toBe("other");
+  });
 });
 
 // Independent review of the first cut broke it four ways. Every case below is a
