@@ -149,7 +149,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { registerAllTools } from "../tools/index.js";
 import { tryInstallRetiredNameRedirect } from "../tools/retired-redirect.js";
-import { isForceRemoteFlagSet, isLoopbackHost, detectLocalComfyUIPath, setComfyuiTarget, onComfyuiTargetChanged, isTargetingLocal, isTargetingLocalOrLan, isTargetingPod, getComfyUIBaseUrl, getLocalComfyuiUrl, rescopeLocalTargetFile, getComfyUIAuthHeaders } from "../config.js";
+import { config, isForceRemoteFlagSet, isLoopbackHost, detectLocalComfyUIPath, setComfyuiTarget, onComfyuiTargetChanged, isTargetingLocal, isTargetingLocalOrLan, isTargetingPod, getComfyUIBaseUrl, getLocalComfyuiUrl, rescopeLocalTargetFile, getComfyUIAuthHeaders } from "../config.js";
 import { normalizeInstallPathEnv } from "../utils/install-path-env.js";
 import {
   AGENT_IDENTITY_ENV,
@@ -1463,6 +1463,12 @@ export async function runPanelOrchestrator(): Promise<void> {
         `base_path from the panel status route: ${comfyuiPath} (#296).`,
     );
   }
+  // #1845 — panel_load_workflow runs IN this process and reconstructs the
+  // workflow library from config.comfyuiPath, not from the spawn env handed to
+  // child MCP servers. A recovered path that never reached config left the
+  // local fallback claiming "COMFYUI_PATH not set" while install_comfyui
+  // environment (the child) reported the same trusted workspace.
+  if (comfyuiPath && !config.comfyuiPath) config.comfyuiPath = comfyuiPath;
   // Force the child remote only when opted in (--force-remote) or the target is
   // non-loopback; a default loopback panel user with no COMFYUI_PATH is left to
   // auto-detect its local install (keeps download_model/apply_manifest/scans).
@@ -3416,6 +3422,7 @@ export async function runPanelOrchestrator(): Promise<void> {
         if (canonTargetUrl(comfyuiUrl) !== canonTargetUrl(next)) return;
         if (comfyuiPath === recovered) return;
         comfyuiPath = recovered;
+        if (!config.comfyuiPath) config.comfyuiPath = recovered;
         logger.info(
           `[panel-orchestrator] recovered ComfyUI base_path from panel status route ` +
             `after retarget: ${recovered} (#296).`,

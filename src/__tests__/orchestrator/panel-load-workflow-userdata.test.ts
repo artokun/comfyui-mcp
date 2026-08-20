@@ -50,11 +50,14 @@ vi.mock("../../comfyui/client.js", async (importOriginal) => {
 const { buildPanelToolDefs } = await import("../../orchestrator/panel-tools.js");
 // #810: the listing route is now shared with get_workflow (action:"list"), so pinning the literal
 // here would let the two drift apart again — which is how one recursed and one did not.
-const { WORKFLOW_LIBRARY_LISTING_ROUTE } = await import("../../services/userdata-library.js");
+const { WORKFLOW_LIBRARY_LISTING_ROUTE, __userdataLibraryTestHooks } = await import(
+  "../../services/userdata-library.js"
+);
 import type { PanelToolCtx } from "../../orchestrator/panel-tools.js";
+import { config } from "../../config.js";
 
 type Forwarded = Record<string, unknown>;
-function makeCtx(): { ctx: PanelToolCtx; calls: Forwarded[] } {
+function makeCtx(opts?: { panelOrigin?: string }): { ctx: PanelToolCtx; calls: Forwarded[] } {
   const calls: Forwarded[] = [];
   const ctx = {
     call: async (cmd: Forwarded) => {
@@ -62,7 +65,12 @@ function makeCtx(): { ctx: PanelToolCtx; calls: Forwarded[] } {
       return { content: [{ type: "text", text: "ok" }] };
     },
     confirm: async () => "yes" as const,
-    bridge: { send: async (cmd: Forwarded) => { calls.push(cmd); return {}; } },
+    bridge: {
+      send: async (cmd: Forwarded) => { calls.push(cmd); return {}; },
+      ...(opts?.panelOrigin
+        ? { tabServerOrigin: () => opts.panelOrigin }
+        : {}),
+    },
     tabId: "test-tab",
   } as unknown as PanelToolCtx;
   return { ctx, calls };
@@ -75,17 +83,26 @@ function loadWorkflow() {
 }
 
 let savedComfyPath: string | undefined;
+let savedConfigPath: string | undefined;
 beforeEach(() => {
   fetchApi.mockReset();
   fetchInit.mockReset();
   savedComfyPath = process.env.COMFYUI_PATH;
+  savedConfigPath = config.comfyuiPath;
   // No local COMFYUI_PATH → the guessed workflows dirs are empty, so a relative
   // name misses on disk and MUST fall through to the userdata API.
   delete process.env.COMFYUI_PATH;
+  config.comfyuiPath = undefined;
+  // Existing tests assert a single fetch; #1845 retries are exercised separately.
+  __userdataLibraryTestHooks.setRetryDelays([]);
+  __userdataLibraryTestHooks.setSleep(async () => {});
 });
 afterEach(() => {
   if (savedComfyPath === undefined) delete process.env.COMFYUI_PATH;
   else process.env.COMFYUI_PATH = savedComfyPath;
+  config.comfyuiPath = savedConfigPath;
+  __userdataLibraryTestHooks.setRetryDelays(null);
+  __userdataLibraryTestHooks.setSleep(null);
 });
 
 describe("panel_load_workflow: userdata fallback for a custom --user-directory (#202)", () => {
@@ -1185,6 +1202,85 @@ describe("readWorkflowFromPath: refuses a '..' traversal segment (#414 hardening
     } finally {
       rmSync(root, { recursive: true, force: true });
       rmSync(external, { recursive: true, force: true });
+    }
+  });
+});
+
+// #1845 — immediately after panel_restart_comfyui reports server_ready, a
+// relative panel_load_workflow can ECONNREFUSED the headless userdata GET and
+// then claim COMFYUI_PATH is unset even though the trusted workspace is known.
+describe("panel_load_workflow after a confirmed restart (#1845)", () => {
+  it("retries a refused userdata GET and loads the graph once the listener is back", async () => {
+    __userdataLibraryTestHooks.setRetryDelays([0]);
+    const graph = { nodes: [{ id: 1, type: "AfterRestartKSampler" }], links: [] };
+    fetchApi
+      .mockRejectedValueOnce(Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:8188"), { code: "ECONNREFUSED" }))
+      .mockResolvedValue({ ok: true, status: 200, text: async () => JSON.stringify(graph) });
+
+    const { ctx, calls } = makeCtx();
+    const res = await loadWorkflow().handler(
+      { path: "workflows/minimaxH3InfiniteVideoRef2va9Img3_v2Turbo.json" },
+      ctx,
+    );
+
+    expect(res.isError).toBeUndefined();
+    expect(fetchApi).toHaveBeenCalledTimes(2);
+    expect(calls.filter((c) => c.cmd === "graph_load")).toHaveLength(1);
+    expect(calls[0].graph).toMatchObject(graph);
+  });
+
+  it("reads the library through the connected panel origin when the headless target is refused", async () => {
+    const graph = { nodes: [{ id: 2, type: "PanelOriginLoad" }], links: [] };
+    fetchApi.mockImplementation(async (url: string) => {
+      if (String(url).startsWith("http://localhost:8188/")) {
+        return { ok: true, status: 200, text: async () => JSON.stringify(graph) };
+      }
+      throw Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:8188"), { code: "ECONNREFUSED" });
+    });
+
+    const { ctx, calls } = makeCtx({ panelOrigin: "http://localhost:8188" });
+    const res = await loadWorkflow().handler(
+      { path: "workflows/minimaxH3InfiniteVideoRef2va9Img3_v2Turbo.json" },
+      ctx,
+    );
+
+    expect(res.isError).toBeUndefined();
+    expect(fetchApi).toHaveBeenCalledWith(
+      `http://localhost:8188/api/userdata/${encodeURIComponent("workflows/minimaxH3InfiniteVideoRef2va9Img3_v2Turbo.json")}`,
+    );
+    expect(calls.filter((c) => c.cmd === "graph_load")).toHaveLength(1);
+    expect(calls[0].graph).toMatchObject(graph);
+  });
+
+  it("loads from the trusted workspace when COMFYUI_PATH env is unset", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cmcp-trusted-ws-"));
+    try {
+      const defaultDir = join(root, "user", "default", "workflows");
+      mkdirSync(defaultDir, { recursive: true });
+      const staged = { nodes: [{ id: 9, type: "TrustedWorkspaceNode" }], links: [] };
+      writeFileSync(
+        join(defaultDir, "minimaxH3InfiniteVideoRef2va9Img3_v2Turbo.json"),
+        JSON.stringify(staged),
+        "utf8",
+      );
+      // Reporter shape: env unset, but the workspace install_comfyui environment
+      // reports is already on config.comfyuiPath.
+      config.comfyuiPath = root;
+      fetchApi.mockRejectedValue(
+        Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:8188"), { code: "ECONNREFUSED" }),
+      );
+
+      const { ctx, calls } = makeCtx();
+      const res = await loadWorkflow().handler(
+        { path: "workflows/minimaxH3InfiniteVideoRef2va9Img3_v2Turbo.json" },
+        ctx,
+      );
+
+      expect(res.isError).toBeUndefined();
+      expect(calls.filter((c) => c.cmd === "graph_load")).toHaveLength(1);
+      expect(calls[0].graph).toMatchObject(staged);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

@@ -13,6 +13,8 @@
 // for #202) while get_workflow (action:"list") did not, which is exactly the drift a shared helper
 // removes.
 import { getClient } from "../comfyui/client.js";
+import { getComfyUIBasePath } from "../config.js";
+import { describeFetchFailure } from "../utils/errors.js";
 
 /**
  * The listing route for the workflow library.
@@ -60,11 +62,77 @@ export const WORKFLOW_LIBRARY_LISTING_ROUTE =
  *   - a thrown error       = no Response exists, so the request never got one
  * Nothing here reads a body, so a body that cannot be decoded can never be mistaken
  * for a transport failure.
+ *
+ * #1845 — a confirmed ComfyUI restart can still leave the next userdata GET
+ * racing the listener (ECONNREFUSED on 127.0.0.1:8188 while the panel tab is
+ * already talking to the same server). Transient connection failures retry a
+ * bounded number of times. When a connected panel origin is supplied AND its
+ * spelling differs from the headless client URL (localhost vs 127.0.0.1, a
+ * different port), that origin is tried after the headless URL is exhausted —
+ * the browser's origin is the one that just proved reachable.
  */
-export async function userdataFetch(route: string): Promise<Response> {
+export async function userdataFetch(
+  route: string,
+  opts?: { panelOrigin?: string },
+): Promise<Response> {
   const client = getClient();
-  return await client.fetch(client.apiURL(route), { headers: client.apiHeaders() });
+  const headers = client.apiHeaders();
+  const primary = client.apiURL(route);
+  const urls = [primary];
+  const origin = opts?.panelOrigin?.trim();
+  if (origin) {
+    const alt = userdataUrlAtOrigin(origin, route);
+    if (alt && alt !== primary) urls.push(alt);
+  }
+
+  let lastErr: unknown;
+  for (const url of urls) {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await client.fetch(url, { headers });
+      } catch (err) {
+        lastErr = err;
+        if (!isTransientUnreachable(err)) throw err;
+        if (attempt >= retryDelaysMs.length) break;
+        await sleepImpl(retryDelaysMs[attempt]!);
+      }
+    }
+  }
+  throw lastErr;
 }
+
+/** Connection-level failures that a just-restarted listener commonly produces. */
+function isTransientUnreachable(err: unknown): boolean {
+  const { code, message } = describeFetchFailure(err);
+  return /ECONNREFUSED|ECONNRESET|ETIMEDOUT|UND_ERR_CONNECT_TIMEOUT|EPIPE/i.test(
+    `${code ?? ""} ${message}`,
+  );
+}
+
+function userdataUrlAtOrigin(origin: string, route: string): string {
+  let basePath = "";
+  try {
+    basePath = getComfyUIBasePath().replace(/\/$/, "");
+  } catch {
+    basePath = "";
+  }
+  const path = route.startsWith("/") ? route : `/${route}`;
+  return `${origin.replace(/\/$/, "")}${basePath}${path}`;
+}
+
+const DEFAULT_RETRY_DELAYS_MS: readonly number[] = [200, 600, 1500];
+let retryDelaysMs: readonly number[] = DEFAULT_RETRY_DELAYS_MS;
+let sleepImpl = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
+export const __userdataLibraryTestHooks = {
+  setRetryDelays(delays: readonly number[] | null): void {
+    retryDelaysMs = delays ?? DEFAULT_RETRY_DELAYS_MS;
+  },
+  setSleep(fn: ((ms: number) => Promise<void>) | null): void {
+    sleepImpl = fn ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  },
+};
 
 /**
  * The outcome of one library listing, with "the library is empty" kept DISTINCT from

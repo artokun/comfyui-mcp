@@ -400,6 +400,15 @@ function targetGeneration(): number {
   }
 }
 
+/**
+ * The already-resolved panel ComfyUI base, or undefined when nothing is cached.
+ * Sync on purpose: panel_load_workflow's local fallback must not issue HTTP
+ * after the userdata library has just been unreachable (#1845).
+ */
+export function peekResolvedPanelBase(): string | undefined {
+  return cachedResolution()?.base;
+}
+
 function cachedResolution(): PanelBaseResolution | undefined {
   if (!cached) return undefined;
   if (cached.target !== targetKey()) return undefined;

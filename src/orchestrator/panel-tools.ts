@@ -67,6 +67,7 @@ import { requiredPanelVersion, SEMVER_RE } from "../services/ui-bridge.js";
 import { compareSemver } from "../services/self-update.js";
 import { describeInstallPanelAction } from "../services/panel-recovery.js";
 import {
+  peekResolvedPanelBase,
   primePanelBase,
   verifiedPanelDiskVersion,
 } from "../services/panel-workspace.js";
@@ -156,6 +157,7 @@ import { describeUnappliedFilters } from "./civitai-filter-guard.js";
 import { recordTodo, normalizeTodoItems, TODO_STATUS_INPUTS } from "./todo-state.js";
 import { applyCapturedWidgetValues } from "../services/live-widget-overlay.js";
 import { listWorkflowLibraryKeys, userdataFetch } from "../services/userdata-library.js";
+import { resolveEffectiveComfyUIBase } from "../services/workspace-env.js";
 import { getNsfwConsent, setNsfwConsent } from "../services/panel-settings.js";
 import { QueueMonitor } from "../services/queue-monitor.js";
 import { RunCompletions } from "./run-completion-journal.js";
@@ -4793,7 +4795,7 @@ async function tryRebindConfirmedOpenIdentity(
 
   let dest: Record<string, unknown>;
   try {
-    dest = await readWorkflowFromPath(destPath);
+    dest = await readWorkflowFromPath(destPath, ctx);
   } catch {
     return { status: "skipped" };
   }
@@ -7304,12 +7306,27 @@ function comfyWorkflowsDirs(): string[] {
   // #1512 — a trailing space here does not fail loudly: it silently builds
   // `<path> /user/default/workflows`, a directory that does not exist, so the
   // workflow library simply appears empty and every lookup misses.
-  const base = normalizeInstallPathEnv(process.env.COMFYUI_PATH).path;
-  if (!base) return [];
-  return [
-    join(base, "user", "default", "workflows"),
-    join(base, "user", "workflows"),
-  ];
+  //
+  // #1845 — process.env.COMFYUI_PATH is not the only trusted root. The
+  // orchestrator often knows the workspace via auto-detect, a saved default, or
+  // the already-primed panel base, while the env var itself stays unset in this
+  // process (it is forwarded to spawned MCP children). Claiming "COMFYUI_PATH
+  // not set" then hid a tree install_comfyui(action:"environment") had just
+  // reported.
+  const bases: string[] = [];
+  const add = (raw: string | undefined): void => {
+    const p = normalizeInstallPathEnv(raw).path;
+    if (p && !bases.includes(p)) bases.push(p);
+  };
+  add(process.env.COMFYUI_PATH);
+  add(resolveEffectiveComfyUIBase());
+  add(peekResolvedPanelBase());
+  const dirs: string[] = [];
+  for (const base of bases) {
+    dirs.push(join(base, "user", "default", "workflows"));
+    dirs.push(join(base, "user", "workflows"));
+  }
+  return dirs;
 }
 
 // The raw-Response userdata GET (why it bypasses `fetchApi`, and what a thrown error
@@ -7445,7 +7462,10 @@ function assertUiWorkflow(parsed: unknown, sourceLabel: string): Record<string, 
  * Guards: must be .json and must parse to a UI workflow (a top-level `nodes`
  * array). Every failure names exactly what was tried.
  */
-async function readWorkflowFromPath(rawPath: string): Promise<Record<string, unknown>> {
+async function readWorkflowFromPath(
+  rawPath: string,
+  ctx?: PanelToolCtx,
+): Promise<Record<string, unknown>> {
   const p = (rawPath ?? "").trim();
   if (!p) throw new Error("Provide a non-empty `path` to a workflow .json file.");
   if (!/\.json$/i.test(p)) {
@@ -7523,7 +7543,9 @@ async function readWorkflowFromPath(rawPath: string): Promise<Record<string, unk
   const fetchUserdataKey = async (key: string): Promise<Outcome> => {
     let res: Response;
     try {
-      res = await userdataFetch(`/api/userdata/${encodeURIComponent(key)}`);
+      res = await userdataFetch(`/api/userdata/${encodeURIComponent(key)}`, {
+        panelOrigin: ctx?.bridge?.tabServerOrigin?.(ctx.tabId) ?? undefined,
+      });
     } catch (err) {
       // No Response object exists — the request never received an answer
       // (connection refused, DNS, TLS, timeout), or no client could be built at
@@ -7860,7 +7882,7 @@ async function readWorkflowFromPath(rawPath: string): Promise<Record<string, unk
 
   throw new Error(
     `No workflow file at "${p}". It ${outcome.detail}, and it is not under the orchestrator's ` +
-      `reconstructed workflows dir (${comfyWorkflowsDirs().join(" or ") || "COMFYUI_PATH not set"}).` +
+      `reconstructed workflows dir (${comfyWorkflowsDirs().join(" or ") || "COMFYUI_PATH not set and no trusted workspace/user-directory was known"}).` +
       (misspelled.length
         ? ` A file exists on disk as ${misspelled.map((f) => `"${f}"`).join(", ")}, which is` +
           ` not how you spelled it (letter case, repeated separator, or Unicode` +
@@ -9458,7 +9480,7 @@ async function resolveWorkflowInput(
   }
   if (args.path) {
     return assertUiWorkflow(
-      await readWorkflowFromPath(args.path as string),
+      await readWorkflowFromPath(args.path as string, ctx),
       `Workflow file "${String(args.path)}"`,
     );
   }
@@ -11488,7 +11510,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             // Read an arbitrary workflow JSON server-side — a local disk path, or
             // (for a relative name under a custom --user-directory) the connected
             // ComfyUI's userdata API — keeping the big JSON out of chat (#202).
-            data = await readWorkflowFromPath(args.path as string);
+            data = await readWorkflowFromPath(args.path as string, ctx);
           } else if (args.graph != null) {
             data = typeof args.graph === "string" ? JSON.parse(args.graph as string) : args.graph;
           } else {
