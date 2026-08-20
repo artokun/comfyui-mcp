@@ -145,6 +145,27 @@ export class TurnOriginTracker {
 
   constructor(private readonly deps: TurnOriginDeps) {}
 
+  /**
+   * The tab a recorded origin ROUTES to today — the one view every ownership
+   * check in this class judges backends on.
+   *
+   * A same-socket migration (a workflow switch, a save, tmp:→wf:) re-keys the
+   * orchestrator's backend map onto the NEW id and DELETES the old one, so
+   * `backendForTab(<retired id>)` answers with the DEFAULT backend rather than
+   * the tab's real one. Judged on the raw id, a conversation whose backend is
+   * not the default therefore reads its own healthy migrated tab as foreign.
+   *
+   * An id that resolves NOWHERE falls back to itself, deliberately: unprovable
+   * ownership must stay unprovable, not become a way to launder an origin whose
+   * tab is gone (see the "resolves NOWHERE" case in the requeue path).
+   *
+   * `liveTabOf` is optional only for lightweight test trackers; production
+   * always wires it to the bridge's own resolution.
+   */
+  private routedTabOf(tab: string): string {
+    return this.deps.liveTabOf ? (this.deps.liveTabOf(tab) ?? tab) : tab;
+  }
+
   /** Record a message's issue-time origin, keyed by its mid, to be applied at
    *  dequeue. Captures the tab's backend NOW so the application can verify the
    *  tab still belongs to the same conversation then. `injected` marks an
@@ -250,7 +271,7 @@ export class TurnOriginTracker {
       // (independent gate on gate 4, P1 — a false refusal, not a leak). When the
       // origin resolves nowhere at all we keep the strict reading: unprovable
       // ownership still fails closed.
-      const liveOrigin = this.deps.liveTabOf ? (this.deps.liveTabOf(rec.tab) ?? rec.tab) : rec.tab;
+      const liveOrigin = this.routedTabOf(rec.tab);
       if (rec.backend !== backend || this.deps.backendForTab(liveOrigin) !== backend) {
         // Dropped from BOTH maps: a re-queue of this item must fail closed
         // again (unknown), not silently inherit the last established origin.
@@ -359,8 +380,28 @@ export class TurnOriginTracker {
           // issue-time uuid, so the panel fence (and the dispatch-time
           // stamp-target agreement gate, #1656) refuse it loudly if the routed
           // canvas is not the one the stamp names.
+          //
+          // Ownership is judged on the tab the inherited origin ROUTES to
+          // today (routedTabOf), NOT on the id it was recorded under — the
+          // same view the message-origin check above and resolvedPinOf() have
+          // always used, and the one place that was still left on the raw id
+          // (panel#1292 recurrence). The last established origin is written at
+          // batch close and keeps its issue-time identity, so a same-socket
+          // migration after it — a WORKFLOW SWITCH, the exact thing the report
+          // starts with — leaves it naming a retired id that `tabBackends` no
+          // longer knows. `backendForTab` then answers with the DEFAULT
+          // backend, so every conversation NOT on the default backend read its
+          // own healthy tab as another backend's and failed the turn closed:
+          // an async download completing after a workflow switch nulled the
+          // pin, and panel_refresh_nodes / panel_graph_outline /
+          // panel_list_workflows all hit "no connected tab can be chosen …
+          // issued from multiple workflows at once" until an explicit
+          // mode:"current" rebind. Cross-backend safety is untouched: the
+          // bridge resolves an id a live foreign tab currently holds to THAT
+          // tab (exact match beats the migration alias), and an origin that
+          // resolves nowhere still falls back to its raw id and fails closed.
           const last = this.lastOriginByKey.get(key);
-          if (last && this.deps.backendForTab(last.tab) === this.deps.backendOfKey(key)) {
+          if (last && this.deps.backendForTab(this.routedTabOf(last.tab)) === this.deps.backendOfKey(key)) {
             this.lastTurnUuidByKey.set(key, last.uuid);
             this.turnTargetTabByKey.set(key, last.tab);
             if (closed.routes.size > 1) {
@@ -373,7 +414,12 @@ export class TurnOriginTracker {
             this.turnTargetTabByKey.set(key, null);
             this.deps.warn(
               last
-                ? `[panel-orchestrator] ${key} dispatched ${closed.routes.size > 1 ? "a multi-workflow event replay (#1001)" : "an origin-less turn"} whose last established origin tab ${last.tab.slice(0, 8)} now belongs to another backend's conversation — scope routing FAILS CLOSED until an explicit target or an origin-bearing message (#884 confirming gate 3)`
+                ? `[panel-orchestrator] ${key} dispatched ${closed.routes.size > 1 ? "a multi-workflow event replay (#1001)" : "an origin-less turn"} whose last established origin tab ${last.tab.slice(0, 8)}${
+                    // Name the tab the verdict was actually reached on. Judging
+                    // moved to the ROUTED id (panel#1292), so reporting only the
+                    // recorded one would blame an id this branch never looked at.
+                    this.routedTabOf(last.tab) !== last.tab ? ` (routing to ${this.routedTabOf(last.tab).slice(0, 8)})` : ""
+                  } now belongs to another backend's conversation — scope routing FAILS CLOSED until an explicit target or an origin-bearing message (#884 confirming gate 3)`
                 : `[panel-orchestrator] ${key} dispatched a turn with no ${closed.routes.size > 1 ? "user origin (a multi-workflow event replay, #1001) and no" : "origin and no"} established prior origin — scope routing FAILS CLOSED until an explicit target or an origin-bearing message (#884)`,
             );
           }

@@ -309,6 +309,151 @@ describe("TurnOriginTracker — inherited origins for tab-less turns (gate 3, P1
     expect(warnings.join("\n")).toMatch(/no origin and no established prior origin/);
   });
 
+  // panel#1292 RECURRENCE — the reported sequence end to end: a workflow switch
+  // (a same-socket re-hello that re-keys the tab id), then an async model
+  // download settles and injects an origin-less turn. Inheritance judged
+  // ownership on the RECORDED id while every other ownership check in the class
+  // judged it on the ROUTED one, so the retired id — deleted from `tabBackends`
+  // by the migration — answered with the DEFAULT backend and a conversation on
+  // any other backend read its own healthy tab as foreign.
+  //
+  // Default backend is claude and this conversation is codex, exactly as in the
+  // requeue-after-migration test above: that is what makes a default-backend
+  // fallback observable at all. The original coverage for this branch used the
+  // DEFAULT backend and no migration, where the raw lookup happens to agree —
+  // which is why the hole survived.
+  it("a download_done turn AFTER a workflow switch still inherits — ownership is judged on the live id, not the retired one (panel#1292)", async () => {
+    const KEY_CODEX = "orchestrator::codex";
+    const { tracker, tabBackends, tabAliases, warnings } = makeTracker({ defaultBackend: "claude" });
+    tabBackends.set("tmp:abc", "codex");
+    tracker.recordForMid("m-user", "uuid-a", "tmp:abc");
+    tracker.onSeen(KEY_CODEX, "m-user");
+    await flushMicrotasks();
+    expect(tracker.pinOf(KEY_CODEX)).toBe("tmp:abc");
+    tracker.turnEnded(KEY_CODEX);
+
+    // The user switches workflow. The panel re-hellos the SAME socket under a
+    // new id; the orchestrator carries the backend mapping onto it and deletes
+    // the predecessor's, and the bridge keeps the migration alias.
+    tabAliases.set("tmp:abc", "wf:r1:foo.json");
+    tabBackends.delete("tmp:abc");
+    tabBackends.set("wf:r1:foo.json", "codex");
+
+    // A model download settles and injects its tab-less turn.
+    const mid = tracker.mintInheritedOrigin();
+    tracker.onSeen(KEY_CODEX, mid);
+    await flushMicrotasks();
+
+    // Inherits, at the recorded identity the bridge resolves onward. Before the
+    // fix this was a null pin, and every scope-addressed call in that turn
+    // (panel_refresh_nodes / panel_graph_outline / panel_list_workflows) hit
+    // "no connected tab can be chosen … issued from multiple workflows at once".
+    expect(tracker.pinOf(KEY_CODEX)).toBe("tmp:abc");
+    expect(tracker.stampOf(KEY_CODEX)).toBe("uuid-a");
+    // And the pin survives resolution-time re-verification, which is what the
+    // bridge actually consults — a pin that only passes at batch close and is
+    // nulled on first use would reproduce the same refusal one step later.
+    expect(tracker.resolvedPinOf(KEY_CODEX)).toBe("tmp:abc");
+    expect(warnings.join("\n")).not.toMatch(/FAILS CLOSED/);
+  });
+
+  it("inheritance after a migration still refuses when the tab genuinely changed hands (panel#1292 keeps gate 3 closed)", async () => {
+    // Same shape as above, but the migrated surface is now on ANOTHER backend.
+    // Routing through the alias must not become a way to adopt it.
+    const KEY_CODEX = "orchestrator::codex";
+    const { tracker, tabBackends, tabAliases, warnings } = makeTracker({ defaultBackend: "claude" });
+    tabBackends.set("tmp:abc", "codex");
+    tracker.recordForMid("m-user", "uuid-a", "tmp:abc");
+    tracker.onSeen(KEY_CODEX, "m-user");
+    await flushMicrotasks();
+    tracker.turnEnded(KEY_CODEX);
+
+    tabAliases.set("tmp:abc", "wf:r1:foo.json");
+    tabBackends.delete("tmp:abc");
+    tabBackends.set("wf:r1:foo.json", "gemini");
+
+    const mid = tracker.mintInheritedOrigin();
+    tracker.onSeen(KEY_CODEX, mid);
+    await flushMicrotasks();
+    expect(tracker.pinOf(KEY_CODEX)).toBeNull();
+    expect(tracker.stampOf(KEY_CODEX)).toBeUndefined();
+    // The refusal names the tab the verdict was reached on, not only the id the
+    // origin was recorded under.
+    expect(warnings.join("\n")).toMatch(/last established origin tab tmp:abc \(routing to wf:r1:fo\)/);
+  });
+
+  it("a RECORDED origin id that a LIVE tab of another backend now holds is refused — exact identity beats the alias (panel#1292)", async () => {
+    // wf:<tabRouteId>:<path> ids are deterministic and RECUR. If the id the
+    // origin names is currently held by another backend's live tab, that tab is
+    // what it routes to, and inheritance must refuse — the revived-id hazard
+    // resolvedPinOf() already guards, now guarded at the inherit step too.
+    const KEY_CODEX = "orchestrator::codex";
+    const { tracker, tabBackends } = makeTracker({ defaultBackend: "claude" });
+    tabBackends.set("wf:r1:foo.json", "codex");
+    tracker.recordForMid("m-user", "uuid-a", "wf:r1:foo.json");
+    tracker.onSeen(KEY_CODEX, "m-user");
+    await flushMicrotasks();
+    tracker.turnEnded(KEY_CODEX);
+    // The surface goes away and a NEW socket helloes under the same id, on
+    // claude. No alias is involved: the id resolves to ITSELF, at a foreign tab.
+    tabBackends.set("wf:r1:foo.json", "claude");
+
+    const mid = tracker.mintInheritedOrigin();
+    tracker.onSeen(KEY_CODEX, mid);
+    await flushMicrotasks();
+    expect(tracker.pinOf(KEY_CODEX)).toBeNull();
+    expect(tracker.stampOf(KEY_CODEX)).toBeUndefined();
+  });
+
+  it("an inherited origin whose surface resolves NOWHERE still fails closed — unprovable ownership is not ownership (panel#1292)", async () => {
+    // The raw-id fallback is deliberate: routing through liveTabOf must not
+    // become a laundering path for an origin whose tab is simply gone.
+    const KEY_CODEX = "orchestrator::codex";
+    const { tracker, tabBackends, tabAliases, warnings } = makeTracker({ defaultBackend: "claude" });
+    tabBackends.set("tmp:abc", "codex");
+    tracker.recordForMid("m-user", "uuid-a", "tmp:abc");
+    tracker.onSeen(KEY_CODEX, "m-user");
+    await flushMicrotasks();
+    tracker.turnEnded(KEY_CODEX);
+    tabAliases.set("tmp:abc", null);
+    tabBackends.delete("tmp:abc");
+
+    const mid = tracker.mintInheritedOrigin();
+    tracker.onSeen(KEY_CODEX, mid);
+    await flushMicrotasks();
+    expect(tracker.pinOf(KEY_CODEX)).toBeNull();
+    expect(tracker.stampOf(KEY_CODEX)).toBeUndefined();
+    // No alias to report, so the refusal names the recorded id alone.
+    expect(warnings.join("\n")).toMatch(/last established origin tab tmp:abc now belongs to another backend/);
+  });
+
+  it("a MULTI-WORKFLOW event replay after a workflow switch inherits too (#1001 path, panel#1292 fix)", async () => {
+    // routes.size > 1, all injected — the other shape that reaches the inherit
+    // branch. It was refused for the same raw-id reason.
+    const KEY_CODEX = "orchestrator::codex";
+    const { tracker, tabBackends, tabAliases, warnings } = makeTracker({ defaultBackend: "claude" });
+    tabBackends.set("tmp:abc", "codex");
+    tracker.recordForMid("m-user", "uuid-a", "tmp:abc");
+    tracker.onSeen(KEY_CODEX, "m-user");
+    await flushMicrotasks();
+    tracker.turnEnded(KEY_CODEX);
+
+    tabAliases.set("tmp:abc", "wf:r1:foo.json");
+    tabBackends.delete("tmp:abc");
+    tabBackends.set("wf:r1:foo.json", "codex");
+    tabBackends.set("wf:r1:bar.json", "codex");
+
+    // Two journaled completions from two workflows replay into ONE turn.
+    tracker.recordForMid("e1", "uuid-a", "wf:r1:foo.json", true);
+    tracker.recordForMid("e2", "uuid-b", "wf:r1:bar.json", true);
+    tracker.onSeen(KEY_CODEX, "e1");
+    tracker.onSeen(KEY_CODEX, "e2");
+    await flushMicrotasks();
+    expect(tracker.pinOf(KEY_CODEX)).toBe("tmp:abc");
+    expect(tracker.stampOf(KEY_CODEX)).toBe("uuid-a");
+    expect(warnings.join("\n")).toMatch(/inherits the conversation's last established origin/);
+  });
+
   it("a REWIND kills the last established origin — a download landing before the edited message REFUSES, never resurrects the dropped branch (gate-3 confirm P1)", async () => {
     const { tracker } = makeTracker();
     // The dropped branch established an origin…
