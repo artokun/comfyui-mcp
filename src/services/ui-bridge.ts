@@ -1118,6 +1118,25 @@ const STAMP_TARGET_CANVAS_INDEPENDENT = new Set<string>([
   "free_vram",
 ]);
 
+/**
+ * #1656/#1494 — the dispatch-time agreement gate's verdict, as a value.
+ *
+ * FOUR outcomes, not two, because the three non-refusing ones have to stay
+ * distinguishable: `agrees` is an observation that the two identities match,
+ * `unreadable` is an observation NOT MADE (a missing value is not divergence — the
+ * panel's own fence judges those), and `same_address` means both answers came from
+ * one lookup and could only ever agree. Collapsing them into a bare boolean is how a
+ * "no refusal" would come to be reported as "the target was confirmed".
+ */
+export type StampTargetVerdict =
+  | {
+      refuses: false;
+      kind: "agrees" | "unreadable" | "same_address";
+      issuedFor?: string;
+      landedOn?: string;
+    }
+  | { refuses: true; kind: "disagrees" | "carried"; issuedFor: string; landedOn: string };
+
 /** #1656 — commands that read or mutate whichever canvas the routed tab has ACTIVE,
  *  and therefore may only be dispatched when the session's workflow stamp and the
  *  tab's reported active workflow AGREE (see the dispatch gate in send()).
@@ -3229,6 +3248,40 @@ export class UiBridge {
   }
 
   /**
+   * #1656/#1494 — the dispatch-time agreement question, with ONE implementation.
+   *
+   * `send()` asks it to decide whether a fenced command may be written, and
+   * `tabGraphMutationCapability` asks it so the fence-rebind recovery can report the
+   * same answer. They used to be unable to: the gate compares the session's stamp
+   * against the routed tab's LAST ADVERTISED identity, while the recovery compares
+   * the session's stamp against the LIVE canvas it reads with `workflow_list`. Those
+   * are different facts, and when only the advertisement is stale they disagree —
+   * the recovery reported `already_current` / `graph_binding:"bound"` on the very
+   * uuid the gate was refusing against, so it announced success and cleared nothing
+   * (#1494's report, verbatim). Sharing the predicate is what keeps them honest.
+   *
+   * `refuses:false` is returned for every state the gate itself lets through,
+   * including an UNREADABLE side — a missing value is not evidence of divergence,
+   * and the panel's own fence is the judge there (unchanged from #1656).
+   */
+  private stampTargetVerdict(
+    callerTabId: string,
+    routedTabId: string,
+  ): StampTargetVerdict {
+    // A caller addressing the connection by its canonical id reads BOTH answers from
+    // the same lookup, so they can only agree — never a disagreement to report.
+    if (callerTabId === routedTabId) return { refuses: false, kind: "same_address" };
+    const issuedFor = this.resolveTabWorkflowUuid?.(callerTabId);
+    const landedOn = this.resolveTabWorkflowUuid?.(routedTabId);
+    if (!issuedFor || !landedOn) return { refuses: false, kind: "unreadable" };
+    if (issuedFor !== landedOn) return { refuses: true, kind: "disagrees", issuedFor, landedOn };
+    if (this.isCarriedTabStamp?.(routedTabId) === true) {
+      return { refuses: true, kind: "carried", issuedFor, landedOn };
+    }
+    return { refuses: false, kind: "agrees", issuedFor, landedOn };
+  }
+
+  /**
    * #770/#803 — the same question, TRI-STATE, for anyone who has to REPORT the
    * answer rather than act on it.
    *
@@ -3253,7 +3306,12 @@ export class UiBridge {
     | {
         known: true;
         canMutate: false;
-        because: "unroutable" | "disconnected" | "no_identity" | "capability";
+        because:
+          | "unroutable"
+          | "disconnected"
+          | "no_identity"
+          | "capability"
+          | "target_disagreement";
       }
     | { known: false; reason: string } {
     let conn: Conn;
@@ -3286,6 +3344,18 @@ export class UiBridge {
       }
       if (typeof stamp !== "string" || stamp.length === 0) {
         return { known: true, canMutate: false, because: "no_identity" };
+      }
+      // #1494 — LAST, because it presupposes everything above it: a routable, open,
+      // fence-advertising tab that DOES have a stamp, whose stamp nevertheless
+      // disagrees with what the routed tab last advertised. `send()` refuses every
+      // fenced command in that state, so answering `canMutate:true` here made the
+      // rebind recovery report a working binding while nothing could be dispatched.
+      // Reported as its own cause, never folded into `no_identity`: there IS an
+      // identity, and the remedy is the opposite one (prove an identity for the
+      // ROUTED tab, rather than acquire one for the session).
+      const verdict = this.stampTargetVerdict(tabId, conn.tabId);
+      if (verdict.refuses) {
+        return { known: true, canMutate: false, because: "target_disagreement" };
       }
       return { known: true, canMutate: true };
     } catch (err) {
@@ -4717,15 +4787,20 @@ export class UiBridge {
     // instant any hello or validated reply establishes an identity for this tab id, the
     // provenance flips to proven and nothing about the pre-#1656 behaviour changes.
     if (opts.tabId && opts.tabId !== conn.tabId && requiresStampTargetAgreement(cmd)) {
-      const issuedFor = this.resolveTabWorkflowUuid?.(opts.tabId);
-      const landedOn = this.resolveTabWorkflowUuid?.(conn.tabId);
-      const carried = this.isCarriedTabStamp?.(conn.tabId) === true;
-      if (issuedFor && landedOn && issuedFor !== landedOn) {
+      // #1494 — ONE implementation of the question, asked here and by
+      // `tabGraphMutationCapability`. The recovery this refusal names used to answer
+      // "bound / already_current" while this gate went on refusing every fenced
+      // command, because the two sides read DIFFERENT facts: the gate compares the
+      // session stamp against the routed tab's advertisement, the recovery compares
+      // the session stamp against the LIVE canvas. Sharing the predicate is what
+      // stops them contradicting each other again.
+      const verdict = this.stampTargetVerdict(opts.tabId, conn.tabId);
+      if (verdict.refuses && verdict.kind === "disagrees") {
         return Promise.reject(
           markDispatched(
             new Error(
-              `workflow instance mismatch: this command was issued for workflow instance ${issuedFor}, ` +
-                `but the tab it routed to has since reported a different active workflow (${landedOn}). ` +
+              `workflow instance mismatch: this command was issued for workflow instance ${verdict.issuedFor}, ` +
+                `but the tab it routed to has since reported a different active workflow (${verdict.landedOn}). ` +
                 `Nothing was dispatched. Re-target with panel_set_workflow_target({mode:"current"}), ` +
                 `then retry.`,
             ),
@@ -4733,13 +4808,13 @@ export class UiBridge {
           ),
         );
       }
-      if (issuedFor && landedOn && carried) {
+      if (verdict.refuses && verdict.kind === "carried") {
         return Promise.reject(
           markDispatched(
             new Error(
-              `workflow instance mismatch: this command was issued for workflow instance ${issuedFor}, ` +
+              `workflow instance mismatch: this command was issued for workflow instance ${verdict.issuedFor}, ` +
                 `and the tab it routed to has not re-established its workflow identity since it ` +
-                `re-registered under a new id — the uuid it currently carries (${landedOn}) was ` +
+                `re-registered under a new id — the uuid it currently carries (${verdict.landedOn}) was ` +
                 `inherited from the tab id it replaced, so it is not evidence about the canvas now ` +
                 `mounted there. Nothing was dispatched. Re-target with ` +
                 `panel_set_workflow_target({mode:"current"}), then retry.`,

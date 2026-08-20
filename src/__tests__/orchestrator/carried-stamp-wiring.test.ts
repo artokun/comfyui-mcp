@@ -105,10 +105,16 @@ describe("#1656 — carried-stamp provenance is WIRED, not merely available", ()
   it("SOURCE: the gate consults the predicate, and the recovery probe stays exempt", () => {
     const src = bridgeSrc();
     // The gate reads provenance for the CONNECTION's canonical id — the tab the
-    // frame would actually land on — not for the caller's address.
-    expect(src).toContain("this.isCarriedTabStamp?.(conn.tabId) === true");
+    // frame would actually land on — not for the caller's address. #1494 moved the
+    // comparison into one shared helper, so the property is pinned in BOTH halves:
+    // the helper reads provenance from its ROUTED-tab parameter…
+    expect(src).toContain("this.isCarriedTabStamp?.(routedTabId) === true");
+    // …and send() passes the caller's address and the connection's canonical id in
+    // that order. Swapping them would read provenance for the wrong tab and is
+    // invisible to a behavioural test that installs its own predicate.
+    expect(src).toContain("this.stampTargetVerdict(opts.tabId, conn.tabId)");
     // The refusal is pre-dispatch and typed, like #1682's.
-    const idx = src.indexOf("if (issuedFor && landedOn && carried) {");
+    const idx = src.indexOf('if (verdict.refuses && verdict.kind === "carried") {');
     expect(idx, "carried refusal branch not found").toBeGreaterThan(-1);
     const branch = src.slice(idx, idx + 1200);
     expect(branch).toContain("markDispatched(");

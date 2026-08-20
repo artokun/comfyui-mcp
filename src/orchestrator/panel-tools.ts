@@ -5962,7 +5962,7 @@ function describeFenceRebind(
    * both yield `canMutate:false` but need opposite advice, and narrating the
    * first as the second is a bucket standing in for a cause (codex gate P1).
    */
-  refusalCause?: "unroutable" | "disconnected" | "no_identity" | "capability",
+  refusalCause?: "unroutable" | "disconnected" | "no_identity" | "capability" | "target_disagreement",
   /**
    * #1043 — the version-gap sentence, when the connected panel is PROVABLY too
    * old to publish the reply uuid this rebind exists to avoid needing. Passed in
@@ -5982,8 +5982,16 @@ function describeFenceRebind(
   // A panel that cannot fence a WRITE gives reads only, however good the stamp is.
   const mutationsRefused = canMutate === false;
   const mutationsUnknown = canMutate === undefined;
-  const okBinding: "bound" | "reads_only" | "unverified" = mutationsRefused
-    ? "reads_only"
+  // #1494 — `reads_only` would be a FALSE consolation for this one cause. The
+  // dispatch-time agreement gate covers `graph_*` READS as well as mutations
+  // (requiresStampTargetAgreement), so a session in that state has no working graph
+  // tools at all — and the whole report is that this call answered "bound" while
+  // every one of them was being refused. It is `not_recovered`: the caller must not
+  // read success out of it.
+  const okBinding: "bound" | "reads_only" | "unverified" | "not_recovered" = mutationsRefused
+    ? refusalCause === "target_disagreement"
+      ? "not_recovered"
+      : "reads_only"
     : mutationsUnknown
       ? "unverified"
       : "bound";
@@ -6009,6 +6017,20 @@ function describeFenceRebind(
       `\n\nWHAT TO DO: call this tool again to bind an identity. If it keeps coming back ` +
       `without one, have the user click into the workflow tab so the panel reports an active ` +
       `canvas, then call this again.`
+    : mutationsRefused && refusalCause === "target_disagreement"
+    ? `\n\nBUT THIS DID NOT CLEAR THE REFUSAL, and saying otherwise is the bug this ` +
+      `wording exists to stop (#1494). Graph commands are refused BEFORE they are ` +
+      `dispatched, by a comparison this call does not perform: the session's stamp against ` +
+      `the identity the ROUTED TAB last advertised in its handshake. This call compared the ` +
+      `stamp against the LIVE canvas instead, and those are different facts — the live ` +
+      `canvas agreeing is exactly why nothing above says "rebound". Graph READS are refused ` +
+      `by the same gate, so this is not a reads-only session.` +
+      `\n\nWHAT TO DO: re-open the workflow you mean with panel_open_workflow(<path>) — an ` +
+      `open proves an identity for the tab under its current id, which is what the gate is ` +
+      `missing; for a never-saved canvas use its routing_key from panel_list_workflows. The ` +
+      `panel also re-advertises on its own when it notices the drift, so a command that ` +
+      `keeps failing here may start working without you doing anything — do NOT read that as ` +
+      `this call having repaired it.`
     : mutationsRefused && refusalCause === "unroutable"
     ? `\n\nBUT this tab is NOT REACHABLE from the orchestrator right now, so graph mutations ` +
       `are refused — and reads are not working either, whatever this note says about them. ` +
@@ -8105,7 +8127,7 @@ export interface PanelToolCtx {
     | {
         known: true;
         canMutate: false;
-        because: "unroutable" | "disconnected" | "no_identity" | "capability";
+        because: "unroutable" | "disconnected" | "no_identity" | "capability" | "target_disagreement";
       }
     | { known: false; reason: string };
 }
@@ -8777,14 +8799,52 @@ export function makePanelToolCtx(
         let verdict: string;
         try {
           const probe = await rebindWorkflowFence(ctx, { adopt: false });
+          // #1494 — WHICH COMPARISON IS REFUSING, asked of the gate itself rather than
+          // inferred from the probe.
+          //
+          // The probe reads the LIVE canvas. The dispatch-time agreement gate refuses on
+          // the identity the ROUTED TAB last advertised. When the advertisement is the
+          // stale side, those two disagree — the probe reports `already_current` on the
+          // very uuid the command carried, which reads as "transient, retry" while every
+          // retry is compared against the same unchanged advertisement and refused
+          // identically. That is the reported contradiction: an immediate rebind
+          // confirming the original instance, next to a refusal naming another one.
+          //
+          // Typed, from `tabGraphMutationCapability` (the bridge's own verdict, sharing
+          // one predicate with `send()`), never a second reading of the refusal's prose.
+          let gateStillRefuses = false;
+          try {
+            const cap = ctx.tabGraphMutationCapability?.();
+            gateStillRefuses =
+              cap?.known === true &&
+              cap.canMutate === false &&
+              cap.because === "target_disagreement";
+          } catch {
+            gateStillRefuses = false; // a diagnostic must never replace the outcome
+          }
           verdict =
             probe.status === "already_current" && stamped && probe.uuid === stamped
-              ? `\n\nCHECKED: the live canvas now reports the SAME workflow instance this ` +
-                `command carried (${stamped}), so the mismatch was TRANSIENT: the identity ` +
-                `flipped and settled back, which happens while a new unsaved workflow is still ` +
-                `materialising. RETRY THIS EXACT CALL ONCE. Nothing was applied, so a retry ` +
-                `cannot double-apply, and re-issuing the whole build would duplicate the work ` +
-                `that already succeeded.`
+              ? gateStillRefuses
+                ? `\n\nCHECKED, and the two claims are BOTH true of different things: the live ` +
+                  `canvas does report the SAME workflow instance this command carried ` +
+                  `(${stamped}), and the refusal above is not about the live canvas — it is ` +
+                  `the pre-dispatch check on the identity the ROUTED TAB last advertised, ` +
+                  `which is the stale side here. So a bare retry is compared against that ` +
+                  `same unchanged value and is refused the same way; ` +
+                  `panel_set_workflow_target({mode:"current"}) reports "already current" for ` +
+                  `the same reason and does not clear it either. Nothing was applied. WHAT TO ` +
+                  `DO: re-open the workflow you mean with panel_open_workflow(<path>) — that ` +
+                  `proves an identity for the tab under its CURRENT id, which is what is ` +
+                  `missing; for a never-saved canvas use its routing_key from ` +
+                  `panel_list_workflows. The panel also re-advertises on its own once it ` +
+                  `notices the drift, so a retry may start working shortly — that is the ` +
+                  `panel repairing it, not this call.`
+                : `\n\nCHECKED: the live canvas now reports the SAME workflow instance this ` +
+                  `command carried (${stamped}), so the mismatch was TRANSIENT: the identity ` +
+                  `flipped and settled back, which happens while a new unsaved workflow is still ` +
+                  `materialising. RETRY THIS EXACT CALL ONCE. Nothing was applied, so a retry ` +
+                  `cannot double-apply, and re-issuing the whole build would duplicate the work ` +
+                  `that already succeeded.`
               : probe.status === "already_current"
                 ? `\n\nCHECKED: the session's fence already names the live canvas ` +
                   `(${probe.uuid}), so it was not the stale side. Retry once — if it refuses ` +
@@ -13511,7 +13571,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         // which can be refused by the exact fence this repairs.
         const fenceRebind = refreshFenceFromOwnReply(ctx, res) ?? (await rebindWorkflowFence(ctx));
         let canMutateNow: boolean | undefined;
-        let refusalCause: "unroutable" | "disconnected" | "no_identity" | "capability" | undefined;
+        let refusalCause: "unroutable" | "disconnected" | "no_identity" | "capability" | "target_disagreement" | undefined;
         try {
           if (ctx.tabGraphMutationCapability) {
             const cap = ctx.tabGraphMutationCapability();
@@ -13838,7 +13898,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         // fence" — a claim about the panel built from our own failure to look
         // (codex gate). Only an OBSERVED negative may say that.
         let canMutateNow: boolean | undefined;
-        let refusalCause: "unroutable" | "disconnected" | "no_identity" | "capability" | undefined;
+        let refusalCause: "unroutable" | "disconnected" | "no_identity" | "capability" | "target_disagreement" | undefined;
         try {
           if (ctx.tabGraphMutationCapability) {
             const cap = ctx.tabGraphMutationCapability();
@@ -14107,7 +14167,7 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         // it one confusing mismatch at a time.
         const fenceRebind = refreshFenceFromOwnReply(ctx, res) ?? (await rebindWorkflowFence(ctx));
         let canMutateNow: boolean | undefined;
-        let refusalCause: "unroutable" | "disconnected" | "no_identity" | "capability" | undefined;
+        let refusalCause: "unroutable" | "disconnected" | "no_identity" | "capability" | "target_disagreement" | undefined;
         try {
           if (ctx.tabGraphMutationCapability) {
             const cap = ctx.tabGraphMutationCapability();
