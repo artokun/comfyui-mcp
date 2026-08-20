@@ -957,12 +957,44 @@ function sleep(ms: number): Promise<void> {
 const OBJECT_INFO_REFRESH_ACK_TIMEOUT_MS = 30_000;
 
 // #1639 — while a ComfyUI prompt is running the frontend main thread often
-// cannot service graph_* at all (reads included). Waiting out the 20/30 s ack
-// bound only surfaces "tab may be backgrounded or frozen" with an unknown
-// mutation outcome. Fail closed BEFORE dispatch for canvas-touching graph
-// commands so the agent gets an explicit QUEUE BUSY instead. `graph_run` is
-// excluded: queuing behind an in-flight job is the documented sweep path, and
-// panel_run already has its own duplicate fence.
+// cannot service graph_* at all. Waiting out the 20/30 s ack bound only
+// surfaces "tab may be backgrounded or frozen" with an unknown mutation
+// outcome. Fail closed BEFORE dispatch for canvas-touching graph commands so
+// the agent gets an explicit QUEUE BUSY instead. `graph_run` is excluded:
+// queuing behind an in-flight job is the documented sweep path, and panel_run
+// already has its own duplicate fence.
+//
+// panel#1489 — that fence was applied to READS too, and it should not have been.
+//
+// The harm #1639 names is specific to a WRITE: a delivered frame cannot be
+// retracted, so a write that times out mid-render leaves the caller unable to say
+// whether it applied. A read carries no such outcome. Abandoning one costs a
+// retry and nothing else — the asymmetry BRIDGE_DEFAULT_TIMEOUT_MS's own doc
+// spells out ("a read abandoned too early costs a retry; a write abandoned too
+// early is UNRECOVERABLE ambiguity"). So fencing reads bought no safety at all,
+// and it cost the reporter the thing they needed: panel_graph_outline on a
+// running render was rejected unsent, forcing queue-polling and a later retry
+// just to LOOK at the graph.
+//
+// It also asserted more than we know. Execution is server-side Python; a
+// foregrounded tab's main thread is usually free to answer a read while the GPU
+// works, and in practice it does. "The tab typically cannot answer" was a
+// prediction, and the refusal made it unfalsifiable by never letting a read try.
+//
+// Note what #1639 actually asked for: "(a) keep the panel's command channel
+// responsive during execution (the reads at minimum should never be blocked by a
+// running prompt), or (b) ... say so explicitly instead of a generic timeout."
+// It shipped (b) and applied it to reads as well, which is the one combination
+// the reporter did not ask for. Reads now get BOTH halves: the call is attempted,
+// and if the tab really cannot answer, queueBusyTimeoutNote still names the
+// running prompt instead of surfacing a bare "backgrounded or frozen".
+//
+// Reads keep their normal tolerant ack budget on purpose. Shortening it mid-render
+// is tempting — a frozen tab costs the caller 20 s instead of 0 — but that is the
+// trade #357 and #589 were both regressions of, in a file whose read-timeout policy
+// is "reads get MORE patience, not less, because a false timeout costs an agent its
+// only look at a broken graph". #589 is precisely this: panel_get_errors was given a
+// 30 s budget because the panel's own bound is 18 s. A cap here would re-break it.
 function queueBusySnapshotNote(): string {
   const snap = QueueMonitor.snapshot();
   if (!snap.running) return "";
@@ -972,27 +1004,55 @@ function queueBusySnapshotNote(): string {
   return `${prompt}${node}${close}`;
 }
 
+/**
+ * panel#1489 — is this `graph_*` command one the queue-busy fence must let past?
+ *
+ * Answered from GRAPH_CMD_EFFECT, which is the ledger that classifies a graph
+ * command by exactly the property this gate turns on: `targeted` means "changes
+ * workflow content, publishes from it, or queues a render of it — a delivered
+ * frame cannot be retracted", which IS the unknown-outcome hazard #1639 fenced.
+ * `inert` means it cannot change workflow content and cannot act on it, so a
+ * frame delivered into a busy tab has nothing to leave half-done.
+ *
+ * NOT `BRIDGE_READONLY_CMDS`: that set answers re-dispatch safety (which default
+ * timeout, may a mid-command socket drop be parked), and #778 is the standing
+ * record of what reading one list for the other question costs — `graph_canvas`
+ * is inert but not idempotent, `refresh_nodes` is idempotent but not a read.
+ *
+ * Fail-closed by construction: an unlisted command has no entry, `undefined` is
+ * not `"inert"`, and it stays fenced. A new mutator is never waved past this gate
+ * by omission.
+ */
+function graphCmdIsInertUnderQueueBusy(name: string): boolean {
+  return GRAPH_CMD_EFFECT[name] === "inert";
+}
+
 function graphCmdBlockedByRunningPrompt(cmd: Record<string, unknown>): string | null {
   const name = typeof cmd.cmd === "string" ? cmd.cmd : "";
   if (!name.startsWith("graph_") || name === "graph_run") return null;
+  // panel#1489 — reads and view/selection changes go through. Only a command
+  // that could leave the workflow half-changed is worth refusing unsent.
+  if (graphCmdIsInertUnderQueueBusy(name)) return null;
   const snap = QueueMonitor.snapshot();
   if (!snap.running) return null;
   return (
     `${name} was NOT sent — nothing was applied. QUEUE BUSY: a ComfyUI prompt is running` +
-    `${queueBusySnapshotNote()}. The panel tab typically cannot answer graph_* commands ` +
-    `(including read-only graph_query / graph_outline) while a prompt is executing — ` +
-    `waiting out the ack timeout would only surface a generic "tab may be backgrounded ` +
-    `or frozen" with an unknown outcome. Retry after queue (action:"list") shows running: 0.`
+    `${queueBusySnapshotNote()}. ${name} MUTATES the workflow, and the panel tab often ` +
+    `cannot service a graph edit while a prompt is executing — delivering it would only ` +
+    `surface a generic "tab may be backgrounded or frozen" timeout with an unknown ` +
+    `outcome, leaving you unable to say whether the edit applied. Read-only graph calls ` +
+    `(graph_outline / graph_query / graph_get_errors) are NOT fenced and can be used right ` +
+    `now to inspect the graph. Retry this edit after queue (action:"list") shows running: 0.`
   );
 }
 
 function queueBusyTimeoutNote(): string {
   if (!QueueMonitor.snapshot().running) return "";
   return (
-    `\n\nQUEUE BUSY: a ComfyUI prompt is still running${queueBusySnapshotNote()}. ` +
-    `The panel tab typically cannot answer graph_* (including read-only queries) while a ` +
-    `prompt is executing — this is not a backgrounded or frozen tab. Retry after queue ` +
-    `(action:"list") shows running: 0.`
+    `\n\nQUEUE BUSY: a ComfyUI prompt is still running${queueBusySnapshotNote()}, which is the ` +
+    `most likely reason the tab did not answer in time — a render can occupy the panel's main ` +
+    `thread. Retry after queue (action:"list") shows running: 0; if it still does not answer ` +
+    `once the queue is idle, THEN treat the tab as backgrounded or frozen.`
   );
 }
 
@@ -8508,9 +8568,11 @@ export function makePanelToolCtx(
         await awaitReachable();
       }
       ensureReachable();
-      // #1639 — a running prompt freezes the tab's graph_* channel. Refuse
-      // BEFORE dispatch so a mutation is known-not-applied rather than
+      // #1639 — a running prompt can freeze the tab's graph_* channel. Refuse a
+      // MUTATION before dispatch so it is known-not-applied rather than
       // delivered-into-a-frozen-tab with a 20/30s unknown-outcome timeout.
+      // panel#1489 — reads are NOT refused here: they carry no unknown outcome,
+      // so they are dispatched on the bounded budget above instead.
       const blocked = graphCmdBlockedByRunningPrompt(cmd);
       if (blocked) return fail(blocked);
       const firstTry = ok(await sendRouted(cmd, timeoutMs, observeRid));
