@@ -113,6 +113,14 @@ import { NO_ORIGIN_REMEDY } from "./fence-refusal.js";
  *  labeled "foreign" and boundary sweeps could never close the ticket (codex
  *  round 3, P1). Resolves the scope to the active tab; a real-tab ctx is
  *  returned unchanged. */
+function journalTabFor(ctx: PanelToolCtx): string {
+  if (!isScopeAddress(ctx.tabId)) return ctx.tabId;
+  // Pass the ctx's own (backend-qualified) scope address so the RIGHT
+  // conversation's in-flight-turn pin is consulted (#884 P0).
+  const b = ctx.bridge as { resolveSharedTabId?: (scopeId?: string) => string | undefined };
+  return b.resolveSharedTabId?.(ctx.tabId) ?? ctx.tabId;
+}
+
 /**
  * #1917 — the CANONICAL tab id a SCOPE-addressed session's commands are dispatched
  * to right now: the in-flight turn's routing pin, resolved onward through any
@@ -140,12 +148,49 @@ function scopeRoutedTabId(ctx: PanelToolCtx): string | undefined {
   }
 }
 
-function journalTabFor(ctx: PanelToolCtx): string {
-  if (!isScopeAddress(ctx.tabId)) return ctx.tabId;
-  // Pass the ctx's own (backend-qualified) scope address so the RIGHT
-  // conversation's in-flight-turn pin is consulted (#884 P0).
-  const b = ctx.bridge as { resolveSharedTabId?: (scopeId?: string) => string | undefined };
-  return b.resolveSharedTabId?.(ctx.tabId) ?? ctx.tabId;
+/**
+ * #1917 — the two selectors a `mode:"current"` session routes by, WHEN THEY
+ * DISAGREE: the tab this conversation's in-flight turn pin is holding every graph
+ * command on, and the tab "current" would otherwise resolve to. Undefined when
+ * they agree, when either cannot be resolved, or for a real-tab ctx — i.e. the
+ * disclosure is made only on the evidence that supports it.
+ *
+ * Both sides are CANONICAL connection ids (`resolveSharedTabId` and
+ * `resolveActiveScopeTab` both answer with `conn.tabId`), so a pin that merely
+ * names a RETIRED per-workflow route id but still reaches the same live socket is
+ * NOT a split — otherwise this would fire on every healthy single-tab session that
+ * has run a `panel_open_workflow` (#640).
+ *
+ * An AMBIGUOUS pin (`null` from the resolver, a mixed-origin batch) resolves to
+ * undefined here and is deliberately not reported as a split: routing is refused
+ * outright on that shape, which is a different reply with a different remedy.
+ */
+function turnPinRoutesElsewhereFor(
+  ctx: PanelToolCtx,
+): { routedTab: string; activeScopeTab: string } | undefined {
+  if (!isScopeAddress(ctx.tabId)) return undefined;
+  const routedTab = scopeRoutedTabId(ctx);
+  const activeScopeTab =
+    typeof ctx.bridge.resolveActiveScopeTab === "function"
+      ? ctx.bridge.resolveActiveScopeTab()
+      : undefined;
+  if (typeof routedTab !== "string" || typeof activeScopeTab !== "string") return undefined;
+  return routedTab === activeScopeTab ? undefined : { routedTab, activeScopeTab };
+}
+
+/** #1917 — the split verdict, MACHINE-READABLE, so an agent never has to read
+ *  "the two selectors disagree" out of prose. Shared by the tool that SETS the
+ *  target and the tool that REPORTS it, so the two can never drift apart. */
+function turnRoutingSplitFieldsFor(
+  split: { routedTab: string; activeScopeTab: string } | undefined,
+): Record<string, unknown> {
+  return split
+    ? {
+        turn_routing: "pinned_elsewhere" as const,
+        turn_routing_tab: split.routedTab,
+        current_would_route_to: split.activeScopeTab,
+      }
+    : {};
 }
 
 /** #704 — the CONVERSATION a ticket belongs to: the backend-qualified agent key
@@ -14274,7 +14319,38 @@ export function buildPanelToolDefs(): PanelToolDef[] {
       {},
       async (_args, ctx) => {
         const target = ctx.workflowTarget?.get(ctx.tabId) ?? { mode: "current" as const };
-        return ok(target);
+        // #1917 — this tool's whole job is to answer "which workflow will my
+        // panel_* edits affect?", and its own description answers `current` with
+        // "graph tools follow whatever tab the user is viewing". That is the SAME
+        // routing claim panel_set_workflow_target was making, so it is false in the
+        // same state: when this conversation's in-flight turn pin is holding every
+        // graph command on a different tab, the tab the user is viewing is NOT where
+        // the edits land. An agent that is unsure enough to call this is exactly the
+        // caller that must not be told the reassuring half.
+        //
+        // Only for `current`. A PIN makes no claim this could contradict — it travels
+        // on graph commands as a GUARD and a mismatch fails loudly (#1912), so a
+        // pinned session is left to that reply.
+        const split = target.mode === "pinned" ? undefined : turnPinRoutesElsewhereFor(ctx);
+        if (!split) return ok(target);
+        return ok({
+          ...target,
+          ...turnRoutingSplitFieldsFor(split),
+          note:
+            `mode:"current" is the workflow TARGET, but it is NOT where graph commands ` +
+            `are going right now. This conversation's IN-FLIGHT TURN is pinned to tab ` +
+            `${shortTabId(split.routedTab)}, so every graph command — READS AND ` +
+            `MUTATIONS ALIKE — is dispatched there, not to ` +
+            `${shortTabId(split.activeScopeTab)}, which is the tab "current" would ` +
+            `resolve to. TWO SELECTORS NAME DIFFERENT TABS. A pin that still reaches a ` +
+            `live tab of this conversation is never displaced, however explicit the ` +
+            `request (#884), so calling panel_set_workflow_target({mode:"current"}) ` +
+            `will NOT move it. Work on tab ${shortTabId(split.routedTab)} (read it ` +
+            `first with panel_graph_outline) if that is the workflow you mean; ` +
+            `otherwise ask the user to send a message from the tab they want — the ` +
+            `turn pin is released at the end of this turn and the next message's ` +
+            `origin establishes routing.`,
+        });
       },
     ),
     def(
@@ -14583,36 +14659,18 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         // would re-aim an in-flight conversation's mutations at a tab it never
         // addressed. What changes is the CLAIM: when two selectors name different
         // tabs, say so and name both, rather than silently reporting one of them.
-        const routedTab = scopeRoutedTabId(ctx);
-        const activeScopeTab =
-          typeof ctx.bridge.resolveActiveScopeTab === "function"
-            ? ctx.bridge.resolveActiveScopeTab()
-            : undefined;
-        // Compared as CANONICAL connection ids on both sides (resolveSharedTabId and
-        // resolveActiveScopeTab both answer with `conn.tabId`), so a pin that merely
-        // names a RETIRED per-workflow route id but still resolves onto the same live
-        // socket does not read as a split — only a genuinely different tab does.
+        // Compared as CANONICAL connection ids on both sides — see
+        // turnPinRoutesElsewhereFor. `turn_routing:"repinned"` and
+        // `"pinned_elsewhere"` are mutually exclusive by construction: this arm
+        // requires `!currentModeTurnRepinned`.
         const turnPinRoutesElsewhere =
-          mode === "current" &&
-          !currentModeTurnRepinned &&
-          isScopeAddress(ctx.tabId) &&
-          typeof routedTab === "string" &&
-          typeof activeScopeTab === "string" &&
-          routedTab !== activeScopeTab
-            ? { routedTab, activeScopeTab }
+          mode === "current" && !currentModeTurnRepinned
+            ? turnPinRoutesElsewhereFor(ctx)
             : undefined;
         // panel#1529's `pin_verified_active` rule, applied to the routing half: the
         // same verdict the note carries, MACHINE-READABLE, so an agent never has to
-        // read "the two selectors disagree" out of prose. `turn_routing:"repinned"`
-        // and `"pinned_elsewhere"` are mutually exclusive by construction — the
-        // predicate above requires `!currentModeTurnRepinned`.
-        const turnRoutingSplitFields = turnPinRoutesElsewhere
-          ? {
-              turn_routing: "pinned_elsewhere" as const,
-              turn_routing_tab: turnPinRoutesElsewhere.routedTab,
-              current_would_route_to: turnPinRoutesElsewhere.activeScopeTab,
-            }
-          : {};
+        // read "the two selectors disagree" out of prose.
+        const turnRoutingSplitFields = turnRoutingSplitFieldsFor(turnPinRoutesElsewhere);
         const hint =
           target.mode === "pinned"
             ? pinVerifiedActive

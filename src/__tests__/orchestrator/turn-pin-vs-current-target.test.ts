@@ -498,3 +498,77 @@ describe("mcp#1917 — mode:'current' may not claim a routing target the turn pi
     expect(body.turn_routing).toBeUndefined();
   });
 });
+
+// The SAME false claim, on the tool an unsure agent actually reaches for.
+// panel_get_workflow_target exists to answer "which workflow will my panel_* edits
+// affect?", and its own description answers `current` with "graph tools follow
+// whatever tab the user is viewing". In the split state that is untrue for exactly
+// the reason panel_set_workflow_target's sentence was: the in-flight turn pin is
+// holding every graph command on another tab. Fixing only the SET tool would leave
+// the READ tool quietly restating the belief that wedged the reporter.
+describe("mcp#1917 — panel_get_workflow_target discloses the same split", () => {
+  const getTarget = (ctx: PanelToolCtx): Promise<ToolResult> =>
+    tool("panel_get_workflow_target").handler({}, ctx);
+
+  it("names BOTH tabs instead of answering a bare mode:'current'", async () => {
+    const { tabA, tabB, ctx } = await twoTabsPinnedElsewhere();
+
+    const res = await getTarget(ctx);
+
+    expect(res.isError, textOf(res)).toBeFalsy();
+    const body = jsonOf(res);
+    // Still reports the target it was asked for — the disclosure is added, not swapped.
+    expect(body.mode).toBe("current");
+    const note = String(body.note ?? "");
+    expect(note).toContain("Basic_V37");
+    expect(note).toContain("PHOTO");
+    expect(note).toContain("READS AND MUTATIONS ALIKE");
+    // The call-site half: a helper that computes the split but is never spread into
+    // THIS reply passes every prose assertion above.
+    expect(body.turn_routing).toBe("pinned_elsewhere");
+    expect(body.turn_routing_tab).toBe(tabA.tabId);
+    expect(body.current_would_route_to).toBe(tabB.tabId);
+  });
+
+  it("does not move the pin — it is a READ (#884)", async () => {
+    const { tabA, ctx } = await twoTabsPinnedElsewhere();
+    const pinBefore = tracker.pinOf(SCOPE);
+
+    await getTarget(ctx);
+
+    expect(tracker.pinOf(SCOPE)).toBe(pinBefore);
+    expect(tracker.pinOf(SCOPE)).toBe(tabA.tabId);
+  });
+
+  it("says nothing when the two selectors AGREE — the boundary, on purpose", async () => {
+    const page = new FakePanel("wf:r1:workflows/PHOTO.json", "r1", [PHOTO], 0);
+    await page.connect();
+    tabStamp.set(page.tabId, PHOTO.uuid);
+    tracker.repinTo(SCOPE, page.tabId);
+
+    const body = jsonOf(await getTarget(ctxFor(SCOPE)));
+
+    expect(body.mode).toBe("current");
+    expect(body.note).toBeUndefined();
+    expect(body.turn_routing).toBeUndefined();
+    expect(body.turn_routing_tab).toBeUndefined();
+  });
+
+  it("leaves a PINNED target alone — its guard reply is a different claim (#1912)", async () => {
+    // A pin makes no "follows the tab you are viewing" claim for a split to
+    // contradict: it travels on graph commands as a GUARD and a mismatch fails
+    // loudly. Reporting a routing split on top of that would attach #1917's remedy
+    // to a state whose remedy is panel#1529's.
+    const { tabA, ctx } = await twoTabsPinnedElsewhere();
+    workflowTargets.set(SCOPE, { mode: "pinned", path: BASIC.path, filename: BASIC.filename });
+    // The precondition holds: the two selectors still name different tabs.
+    expect(bridge.resolveSharedTabId(SCOPE)).toBe(tabA.tabId);
+    expect(bridge.resolveSharedTabId(SCOPE)).not.toBe(bridge.resolveActiveScopeTab());
+
+    const body = jsonOf(await getTarget(ctx));
+
+    expect(body.mode).toBe("pinned");
+    expect(body.turn_routing).toBeUndefined();
+    expect(body.note).toBeUndefined();
+  });
+});
