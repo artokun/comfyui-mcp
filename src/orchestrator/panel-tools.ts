@@ -51,6 +51,7 @@ import { fileURLToPath } from "node:url";
 import { comfyuiFetch } from "../comfyui/fetch.js";
 import { assertPanelNotTargetedUnverifiable } from "../services/panel-pin-guard.js";
 import { nodesInstallCommandArgs } from "../services/node-management.js";
+import { sanitizePanelUpdateNodeResult } from "../services/manager-update-error.js";
 import {
   formatQueueStatusPartialNote,
   getManifestPartialLeftover,
@@ -14729,10 +14730,19 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
       },
       async (args: A, ctx) => {
         assertPanelNotTargetedUnverifiable("panel_update_node", args.id);
-        return ctx.call(
+        const res = await ctx.call(
           { cmd: "graph_update_node", id: args.id, version: args.version, channel: args.channel, mode: args.mode },
           30000,
         );
+        // #1870 — the panel attaches /internal/logs/raw as "Manager traceback"
+        // when do_update stores only the generic sentence. That log also holds
+        // the previous generation error, which names the same pack, so a zip
+        // update-git miss was reported as FalApiError. Keep Manager evidence
+        // (res.action=update-git) and drop execution history.
+        return sanitizePanelUpdateNodeResult(res, {
+          id: typeof args.id === "string" ? args.id : "",
+          version: typeof args.version === "string" ? args.version : undefined,
+        });
       },
     ),
     def(
