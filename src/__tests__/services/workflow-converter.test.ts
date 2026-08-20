@@ -3684,4 +3684,46 @@ describe("convertUiToApi — extras-skipping must never eat a legitimate value (
     } as never);
     expect(workflow["1"].inputs.width).toBe("1024");
   });
+
+  // The known-token list cannot cover every pack's buttons, so the type signal
+  // has to carry the ones it has never seen. It is the ONLY thing that can
+  // recover a button sitting mid-row on a numeric widget — a prefix rule cannot
+  // see it, and the vocabulary does not know it.
+  it("skips an UNKNOWN button token that lands on a numeric widget", () => {
+    const { workflow } = convertUiToApi(
+      oneNode("N", ["D:/x.mov", "recalculate_everything", 12]),
+      {
+        N: {
+          input: { required: { file_path: ["STRING", {}], frames: ["INT", {}] } },
+          output: [],
+        },
+      } as never,
+    );
+    expect(workflow["1"].inputs.file_path).toBe("D:/x.mov");
+    expect(workflow["1"].inputs.frames).toBe(12);
+  });
+
+  // Three BOOLEANs in a row refusing three STRINGs is what realigns the TAIL of
+  // a badly-shifted custom node (LTXDirector, above) even though its head is
+  // unrecoverable. Pin it directly rather than leaning on that test.
+  it("realigns a run of BOOLEANs that STRING values had shifted", () => {
+    const { workflow } = convertUiToApi(
+      oneNode("N", ["a", "b", "c", true, false, 7]),
+      {
+        N: {
+          input: {
+            required: {
+              flag_a: ["BOOLEAN", {}],
+              flag_b: ["BOOLEAN", {}],
+              count: ["INT", {}],
+            },
+          },
+          output: [],
+        },
+      } as never,
+    );
+    expect(workflow["1"].inputs.flag_a).toBe(true);
+    expect(workflow["1"].inputs.flag_b).toBe(false);
+    expect(workflow["1"].inputs.count).toBe(7);
+  });
 });
