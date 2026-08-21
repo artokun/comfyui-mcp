@@ -399,12 +399,33 @@ describe("#2010 r2 — accounting has to be about the batch that was sent", () =
     expect(showMediaReplyAccountsForItems({ count: 2, painted: 1, unrenderable: [] }, 2)).toBe(true);
   });
 
+  // gate r2, P1: non-negative is NOT enough. `{count:1, painted:0.5}` satisfies
+  // `0.5 <= 1` and would be relayed as a trustworthy account of one item. A
+  // fraction of a card was never painted.
   it.each([
     ["a negative count", { count: -1, painted: 0, unrenderable: [] }],
     ["a fractional count", { count: 1.5, painted: 0, unrenderable: [] }],
     ["a negative painted", { count: 1, painted: -1, unrenderable: [] }],
+    ["a FRACTIONAL painted", { count: 1, painted: 0.5, unconfirmed: 0, unrenderable: [] }],
+    ["a FRACTIONAL unconfirmed", { count: 1, painted: 0, unconfirmed: 0.5, unrenderable: [] }],
+    ["a negative unconfirmed", { count: 1, painted: 1, unconfirmed: -1, unrenderable: [] }],
+    ["NaN painted", { count: 1, painted: Number.NaN, unrenderable: [] }],
+    ["Infinity count", { count: Number.POSITIVE_INFINITY, painted: 0, unrenderable: [] }],
   ])("%s is not an account", (_l, reply) => {
     expect(showMediaReplyAccountsForItems(reply, 1)).toBe(false);
+  });
+
+  it("a fractional painted is reported as INCOHERENT, and the claim is corrected", () => {
+    // Kills: checking only `>= 0` on painted/unconfirmed (gate r2, P1). The
+    // dangerous half of that bug is that it returns accounted:TRUE — the reply
+    // is relayed verbatim and the safeguard never runs at all.
+    const FRACTION = { ok: true, count: 1, painted: 0.5, unconfirmed: 0, unrenderable: [] };
+    expect(readShowMediaAck(FRACTION, 1).accounted).toBe(false);
+    expect(readShowMediaAck(FRACTION, 1).reason).toBe("incoherent_accounting");
+    const out = annotateShowMediaAck(okResult(FRACTION), ITEM);
+    expect(doc(out).unaccounted_because).toBe("incoherent_accounting");
+    expect(doc(out).client_reply).toEqual(FRACTION);
+    expect(textOf(out)).toMatch(/did NOT establish/);
   });
 
   it("a mailbox receipt carrying counts is still MAILBOXED, not an account", () => {

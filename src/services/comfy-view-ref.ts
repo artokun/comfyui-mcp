@@ -911,11 +911,16 @@ export function readShowMediaAck(reply: unknown, dispatchedCount: number): ShowM
     return { accounted: false, reason: "no_accounting", covered: null };
   }
   const unconfirmed = typeof r.unconfirmed === "number" ? r.unconfirmed : 0;
+  // EVERY number here must be a whole non-negative one. Non-negative alone is
+  // not enough: `{count:1, painted:0.5}` satisfies `0.5 <= 1` and would be
+  // relayed as a trustworthy account of one item (gate r2, P1). A fraction of a
+  // card was never painted; a reply that says so is malformed, and malformed
+  // accounting is not accounting.
+  const whole = (n: number): boolean => Number.isInteger(n) && n >= 0;
   const coherent =
-    Number.isInteger(count) &&
-    count >= 0 &&
-    painted >= 0 &&
-    unconfirmed >= 0 &&
+    whole(count) &&
+    whole(painted) &&
+    whole(unconfirmed) &&
     // `dropped` is described in the panel's note but not carried as a field, so
     // the parts can be FEWER than the count. They can never be more.
     painted + unconfirmed + unrenderable.length <= count;
