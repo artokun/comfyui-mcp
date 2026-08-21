@@ -1451,6 +1451,9 @@ describe("panel-tools: panel_find_nodes (live-graph search)", () => {
   it("exposes the full filter schema", () => {
     const def = defByName("panel_find_nodes");
     expect(Object.keys(def.schema).sort()).toEqual([
+      // #1968 — the verbosity control this tool never had, named and spelled
+      // exactly as panel_query_graph's.
+      "fields",
       "input",
       "is_output",
       "is_subgraph",
