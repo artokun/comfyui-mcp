@@ -84,6 +84,12 @@ const CODEX_FORCE_KILL_GRACE_MS =
     : 500;
 const CODEX_CLIENT_CLOSE_BUDGET_MS =
   CODEX_CLOSE_TIMEOUT_MS * 2 + CODEX_FORCE_KILL_GRACE_MS + 100;
+const configuredHostSpawnRetryMs = Number(process.env.COMFYUI_MCP_CODEX_HOST_SPAWN_RETRY_MS);
+const CODEX_HOST_SPAWN_RETRY_MS =
+  Number.isFinite(configuredHostSpawnRetryMs) && configuredHostSpawnRetryMs >= 0
+    ? configuredHostSpawnRetryMs
+    : 150;
+const CODEX_HOST_SPAWN_RETRIES = 1;
 
 async function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
   let timer: NodeJS.Timeout | undefined;
@@ -628,6 +634,28 @@ export function resolveCodexSandbox(): string {
 }
 
 /**
+ * #1929 — Windows can refuse CreateProcess on the bundled
+ * `codex-code-mode-host.exe` with ERROR_SHARING_VIOLATION (os error 32) while
+ * Defender / a previous host still holds the image. Codex does not retry that
+ * spawn; the next identical call succeeds. Match the host-spawn failure, not
+ * every os-error-32, so a missing binary (os error 2) stays terminal.
+ */
+export function isWindowsCodeModeHostSharingViolation(message: string): boolean {
+  if (!message) return false;
+  const m = message.toLowerCase();
+  const isHost = m.includes("code-mode host") || m.includes("codex-code-mode-host");
+  if (!isHost) return false;
+  return (
+    /\bos error 32\b/.test(m) ||
+    m.includes("error_sharing_violation") ||
+    m.includes("sharing violation") ||
+    m.includes("being used by another process") ||
+    m.includes("utilise par un autre processus") ||
+    m.includes("utilizado por otro proceso")
+  );
+}
+
+/**
  * The Codex app-server adapter. One instance per PanelAgent; it holds the live
  * app-server client + current thread/turn ids and re-opens on each `run()`.
  */
@@ -1063,6 +1091,12 @@ export class CodexBackend implements AgentBackend {
     let activeTurnId: string | null = null;
     let turnIdKnown = false;
     const buffered: RpcMessage[] = [];
+    // #1929 — one bounded retry of turn/start after a Windows sharing-violation
+    // on the bundled code-mode host. While the retry is armed, drop notifications
+    // for the dead turn so a racing turn/completed cannot finish us first.
+    let hostSpawnRetries = 0;
+    let retryPending = false;
+    let retryTimer: NodeJS.Timeout | undefined;
     const belongsToTurn = (msg: RpcMessage): boolean => {
       const params = (msg.params ?? {}) as Record<string, unknown>;
       const msgThreadId = params.threadId as string | undefined;
@@ -1150,6 +1184,38 @@ export class CodexBackend implements AgentBackend {
     };
     this.abortActiveTurn = abortActiveTurn;
 
+    // Assigned after turn input is built — the retry timer only fires after a
+    // turn/start has already run, so this is never invoked while still a no-op.
+    let issueTurnStart: () => void = () => {};
+
+    const tryRetryCodeModeHostSpawn = (message: string): boolean => {
+      if (interrupted || finishedResult || retryPending) return false;
+      if (hostSpawnRetries >= CODEX_HOST_SPAWN_RETRIES) return false;
+      if (!isWindowsCodeModeHostSharingViolation(message)) return false;
+      hostSpawnRetries += 1;
+      retryPending = true;
+      logger.warn(
+        `[codex-backend] code-mode host spawn hit a Windows sharing violation; retrying once after ${CODEX_HOST_SPAWN_RETRY_MS}ms (#1929)`,
+      );
+      try {
+        onActivity?.();
+      } catch {
+        // a watchdog bump must never break the protocol reader
+      }
+      retryTimer = setTimeout(() => {
+        retryTimer = undefined;
+        if (interrupted || finishedResult || this.disposed) {
+          retryPending = false;
+          return;
+        }
+        turnIdKnown = false;
+        buffered.length = 0;
+        issueTurnStart();
+      }, CODEX_HOST_SPAWN_RETRY_MS);
+      retryTimer.unref?.();
+      return true;
+    };
+
     // Normalize ONE notification (already confirmed to belong to this turn) into
     // canonical AgentEvents. Pulled out so it can be applied to both live and
     // buffered (replayed) notifications.
@@ -1160,6 +1226,9 @@ export class CodexBackend implements AgentBackend {
       // (double-completing PanelAgent's gate) or enqueue deltas into a closing
       // iterator. This is the "exactly one result" invariant (P0-B).
       if (finishedResult) return;
+      // The previous turn died on a retryable host-spawn; wait for the replacement
+      // turn/start rather than treating its turn/completed as ours (#1929).
+      if (retryPending) return;
       const params = (msg.params ?? {}) as Record<string, unknown>;
       switch (msg.method) {
         case "turn/started": {
@@ -1247,10 +1316,14 @@ export class CodexBackend implements AgentBackend {
           // for either a later terminal error or turn/completed.
           const e = (params.error ?? {}) as { message?: string };
           if (params.willRetry === true) break;
+          const message = e.message ?? "Codex error";
+          // #1929 — a Windows sharing-violation on the bundled code-mode host is
+          // the same transient the user already proved by retrying the call.
+          if (tryRetryCodeModeHostSpawn(message)) break;
           // A non-retrying `error` ends the turn: emit it AND finish, so a turn that
           // errors out (no following turn/completed) doesn't hang (P0-2). Route it
           // through the idempotent helper to avoid racing another terminal path.
-          emitTerminalError(e.message ?? "Codex error");
+          emitTerminalError(message);
           break;
         }
         case "turn/completed": {
@@ -1363,7 +1436,7 @@ export class CodexBackend implements AgentBackend {
       );
     }
 
-    try {
+    issueTurnStart = () => {
       // turn/start delivers the user text plus any resolved image input items.
       const turnModel = this.resolveTurnModel();
       client
@@ -1384,6 +1457,7 @@ export class CodexBackend implements AgentBackend {
           outputSchema: null,
         })
         .then((res) => {
+          retryPending = false;
           // Set the active turn id, flush the buffer (replaying only this turn's
           // notifications), then switch the handler to live filtering.
           if (res.turn?.id) {
@@ -1411,13 +1485,21 @@ export class CodexBackend implements AgentBackend {
           // returns without one, hanging PanelAgent's gate forever. Route through
           // the idempotent helper so it always emits exactly one result.
           if (interrupted) {
+            retryPending = false;
             // Deliberate teardown (interrupt restored/closed the turn): still end
             // with a result so the gate advances, but no user-facing error.
             abortActiveTurn();
+          } else if (tryRetryCodeModeHostSpawn(msgOf(err))) {
+            // retryPending is now true; the dead turn's result is deferred.
           } else {
+            retryPending = false;
             emitTerminalError(msgOf(err));
           }
         });
+    };
+
+    try {
+      issueTurnStart();
 
       // Drain the bridged queue until the turn completes.
       while (true) {
@@ -1432,6 +1514,11 @@ export class CodexBackend implements AgentBackend {
       // Flush any trailing events queued between the last drain and done.
       while (queue.length) yield queue.shift()!;
     } finally {
+      if (retryTimer) {
+        clearTimeout(retryTimer);
+        retryTimer = undefined;
+      }
+      retryPending = false;
       // Mark interrupted so a late turn/start rejection / exit doesn't surface as
       // a spurious error after we've already torn the turn down.
       interrupted = true;
