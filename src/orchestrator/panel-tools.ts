@@ -74,7 +74,7 @@ import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { parse as parseYaml } from "yaml";
 import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { UiBridge, PanelVersionReading, UnsupportedShowMediaItem } from "../services/ui-bridge.js";
+import type { UiBridge, PanelVersionReading, UnsupportedShowMediaItem, TabWorkflowUuidRead } from "../services/ui-bridge.js";
 import {
   requiredPanelVersion,
   SEMVER_RE,
@@ -8242,10 +8242,11 @@ function responseWorkflowUuid(value: unknown): string | undefined {
  *  stamp, so a value inherited on a same-socket re-hello stops being treated as
  *  inherited. Never throws, and can never move a fence (see the bridge method). */
 function corroborateTabStamp(ctx: PanelToolCtx, workflowUuid: string): boolean {
-  const fn = (ctx.bridge as unknown as { corroborateTabStamp?: unknown }).corroborateTabStamp;
+  const bridge: BridgeProbe = ctx.bridge;
+  const fn = bridge.corroborateTabStamp;
   if (typeof fn !== "function") return false;
   try {
-    return (fn as (t: string, u: string) => boolean).call(ctx.bridge, ctx.tabId, workflowUuid) === true;
+    return fn.call(ctx.bridge, ctx.tabId, workflowUuid) === true;
   } catch {
     return false;
   }
@@ -8280,7 +8281,8 @@ function reconcileStampTarget(
 
 function refreshWorkflowUuid(ctx: PanelToolCtx, value: unknown): boolean {
   const uuid = responseWorkflowUuid(value);
-  const refresh = (ctx.bridge as unknown as { refreshWorkflowUuid?: unknown }).refreshWorkflowUuid;
+  const bridge: BridgeProbe = ctx.bridge;
+  const refresh = bridge.refreshWorkflowUuid;
   return uuid && typeof refresh === "function" ? refresh.call(ctx.bridge, ctx.tabId, uuid) : false;
 }
 
@@ -8342,7 +8344,8 @@ function refreshFenceFromOwnReply(ctx: PanelToolCtx, reply: ToolResult): Workflo
 type FenceRead = { known: true; uuid?: string } | { known: false };
 
 function currentWorkflowFence(ctx: PanelToolCtx): FenceRead {
-  const read = (ctx.bridge as unknown as { workflowUuidFor?: unknown }).workflowUuidFor;
+  const bridge: BridgeProbe = ctx.bridge;
+  const read = bridge.workflowUuidFor;
   if (typeof read !== "function") return { known: false };
   try {
     const out = read.call(ctx.bridge, ctx.tabId) as unknown;
@@ -9262,10 +9265,9 @@ async function rebindWorkflowFence(
     // "refused" will keep refreshing a tab that can never recover.
     const why = ((): string | undefined => {
       try {
-        const read = (ctx.bridge as unknown as { lastFenceRefusal?: unknown }).lastFenceRefusal;
-        return typeof read === "function"
-          ? (read.call(ctx.bridge, ctx.tabId) as string | undefined)
-          : undefined;
+        const bridge: BridgeProbe = ctx.bridge;
+        const read = bridge.lastFenceRefusal;
+        return typeof read === "function" ? read.call(ctx.bridge, ctx.tabId) : undefined;
       } catch {
         return undefined; // a diagnostic must never replace the outcome
       }
@@ -11030,8 +11032,10 @@ async function listUserdataWorkflowKeys(): Promise<string[] | null> {
 }
 
 /** Validate a parsed value is a UI/litegraph workflow (a top-level `nodes`
- *  array), throwing a source-labelled error otherwise. */
-function assertUiWorkflow(parsed: unknown, sourceLabel: string): Record<string, unknown> {
+ *  array), throwing a source-labelled error otherwise. The value is parsed JSON,
+ *  so it is returned as BOTH the graph shape the converters consume and the open
+ *  record the file/identity helpers read by key. */
+function assertUiWorkflow(parsed: unknown, sourceLabel: string): UiWorkflow & Record<string, unknown> {
   if (!parsed || typeof parsed !== "object") {
     throw new Error(`${sourceLabel} did not parse to a workflow object.`);
   }
@@ -11041,7 +11045,7 @@ function assertUiWorkflow(parsed: unknown, sourceLabel: string): Record<string, 
         `Provide a UI/litegraph workflow JSON, not API/prompt format.`,
     );
   }
-  return parsed as Record<string, unknown>;
+  return parsed as UiWorkflow & Record<string, unknown>;
 }
 
 /**
@@ -11726,6 +11730,28 @@ export interface ConfirmOptions {
  * handler is transport-agnostic — it only ever talks to the bridge via `call` /
  * `confirm` / `bridge` and never knows which server invoked it.
  */
+/**
+ * The bridge members the panel tools PROBE for rather than require. The real
+ * UiBridge implements every one of them; the lightweight and mock bridges that
+ * tests hand in as `ctx.bridge` do not, and each caller has its own documented
+ * answer for that case (a `known:false` fence read, an unreported incarnation,
+ * an unrouted ask). Every member is optional here so the probe is an ordinary
+ * typed read — `UiBridge` satisfies this shape structurally, so a ctx.bridge can
+ * be assigned to it without any assertion, and the signatures are the bridge's own.
+ */
+interface BridgeProbe {
+  corroborateTabStamp?: (tabId: string, workflowUuid: string) => boolean;
+  refreshWorkflowUuid?: (tabId: string, workflowUuid: string) => boolean;
+  workflowUuidFor?: (tabId: string) => TabWorkflowUuidRead;
+  lastFenceRefusal?: (tabId: string) => string | undefined;
+  isHeadless?: (tabId: string) => boolean;
+  canReach?: (tabId: string) => boolean;
+  tabs?: () => Array<{ tab_id: string }>;
+  resolveActiveTabId?: () => string;
+  resolveSharedTabId?: (scopeId?: string) => string | undefined;
+  takeLateAskReply?: (askId: string) => unknown;
+}
+
 export interface PanelToolCtx {
   /** Forward a command to the panel and wrap the reply as a tool result. An
    *  optional observer receives the bridge request id after the frame is written,
@@ -13283,7 +13309,7 @@ export function makePanelToolCtx(
  *   - a synthetic links array + per-input `link` ids from `connected_from`.
  * Returns null when the reply has no usable nodes.
  */
-function reconstructUiFromState(reply: unknown): Record<string, unknown> | null {
+function reconstructUiFromState(reply: unknown): UiWorkflow | null {
   const r = reply as { nodes?: unknown[]; truncated?: boolean; node_count?: number } | null;
   const nodesIn = r?.nodes;
   if (!Array.isArray(nodesIn) || nodesIn.length === 0) return null;
@@ -13326,10 +13352,7 @@ function reconstructUiFromState(reply: unknown): Record<string, unknown> | null 
         type: o.type ?? "*",
         links: [] as number[],
       })),
-      widgets_values:
-        n.widgets && typeof n.widgets === "object"
-          ? (n.widgets as unknown as unknown[])
-          : ([] as unknown[]),
+      widgets_values: n.widgets && typeof n.widgets === "object" ? n.widgets : [],
       properties: {} as Record<string, unknown>,
       ...(n.title ? { title: n.title } : {}),
     };
@@ -13356,7 +13379,11 @@ function reconstructUiFromState(reply: unknown): Record<string, unknown> | null 
     });
   });
 
-  return { nodes: uiNodes, links } as unknown as Record<string, unknown>;
+  // `widgets_values` holds the name→value OBJECT described above — the shape the
+  // converter's name-keyed branch reads, and the one VHS-style nodes serialize
+  // natively — while UiNode declares only the positional array. This is the one
+  // place that difference is asserted past.
+  return { nodes: uiNodes, links } as UiWorkflow;
 }
 
 /**
@@ -13443,7 +13470,7 @@ async function resolveWorkflowInput(
   // POSITION — the caller surfaces these alongside the converter's warnings so an
   // unverified widget mapping is never presented as a verified one.
   notes?: string[],
-): Promise<Record<string, unknown>> {
+): Promise<UiWorkflow> {
   // panel#775 — every caller here (strip / flatten / slice) needs a UI
   // /litegraph graph, and NONE of them validated the shape. A pack or file
   // holding API/prompt format therefore reached them raw:
@@ -13571,7 +13598,7 @@ async function resolveWorkflowInput(
       notes.push(...applyCapturedWidgetValues(wf, stateReply).notes);
     }
   }
-  return wf as Record<string, unknown>;
+  return wf as UiWorkflow;
 }
 
 // ---- panel_ask surface + late-answer resilience (#300/#486) ----------------
@@ -13696,11 +13723,7 @@ function isReplyTimeoutError(err: unknown): boolean {
  * null so the normal send path surfaces its own clear error instead.
  */
 function askSurfaceError(ctx: PanelToolCtx): string | null {
-  const b = ctx.bridge as unknown as {
-    isHeadless?: (id: string) => boolean;
-    canReach?: (id: string) => boolean;
-    resolveActiveTabId?: () => string;
-  };
+  const b: BridgeProbe = ctx.bridge;
   if (typeof b.isHeadless !== "function") return null; // lightweight/unknown bridge
   let targetId = ctx.tabId;
   if (typeof b.canReach === "function" && !b.canReach(targetId)) {
@@ -13747,12 +13770,7 @@ function desktopCanvasRedirect(
   ctx: PanelToolCtx,
   label: string,
 ): { tabId?: string; error?: string } | null {
-  const b = ctx.bridge as unknown as {
-    isHeadless?: (id: string) => boolean;
-    tabs?: () => Array<{ tab_id: string }>;
-    resolveActiveTabId?: () => string;
-    resolveSharedTabId?: (scopeId?: string) => string | undefined;
-  };
+  const b: BridgeProbe = ctx.bridge;
   // Older / lightweight bridges can't classify tabs — leave routing exactly as-is.
   if (typeof b.isHeadless !== "function" || typeof b.tabs !== "function") return null;
   // Only intervene when THIS session is bound to a canvas-less (mobile/remote) client.
@@ -14160,8 +14178,8 @@ async function pollLateAskReply(
   timing: AskTiming,
   hardDeadline?: number,
 ): Promise<unknown | undefined> {
-  const take = (bridge as unknown as { takeLateAskReply?: (id: string) => unknown })
-    .takeLateAskReply;
+  const probe: BridgeProbe = bridge;
+  const take = probe.takeLateAskReply;
   if (typeof take !== "function") return undefined;
   const deadline = Math.min(
     Date.now() + timing.graceMs,
@@ -14462,7 +14480,7 @@ async function askUserWithGrace(
       ridCorrelated: opts.ridCorrelated,
     });
   try {
-    const reply = await ctx.bridge.send(cmd as unknown as { cmd: string }, {
+    const reply = await ctx.bridge.send(cmd, {
       tabId,
       timeoutMs: Math.max(1, Math.min(timing.deadlineMs, budgetEnd - Date.now())),
     });
@@ -14502,12 +14520,19 @@ export const __panelAskTestHooks = {
 
 /** One shared tool definition: name, description, zod raw-shape schema, and a
  *  transport-agnostic handler that receives parsed args + the tab-bound context. */
+/** A zod raw shape (object map of zod schemas), as accepted by BOTH the Anthropic
+ *  SDK `tool()` and the MCP SDK `registerTool({ inputSchema })`. Declared over the
+ *  classic `z.ZodType` the defs actually build with, not zod's core `$ZodType`
+ *  that `z.ZodRawShape` names: the Agent SDK infers a tool's argument type by
+ *  reading `_output` off each field, which only the classic type declares — over
+ *  the core type every argument infers as `never`, and the handler can then never
+ *  be typed against the SDK's own tool-list element. */
+type PanelToolArgSchemas = Record<string, z.ZodType>;
+
 export interface PanelToolDef {
   name: string;
   description: string;
-  // A zod raw shape (object map of zod schemas), as accepted by BOTH the Anthropic
-  // SDK `tool()` and the MCP SDK `registerTool({ inputSchema })`.
-  schema: z.ZodRawShape;
+  schema: PanelToolArgSchemas;
   handler: (args: Record<string, unknown>, ctx: PanelToolCtx) => Promise<ToolResult>;
 }
 
@@ -14538,7 +14563,7 @@ export interface PanelToolDef {
  *
  * BOTH transports' registration functions accept this directly in place of the raw
  * shape (verified against each SDK's actual runtime behavior, not assumed from the
- * TypeScript types — see the cast note at the Anthropic SDK call site):
+ * TypeScript types — see the note at the Anthropic SDK call site):
  *   - `@modelcontextprotocol/sdk`'s `registerTool({ inputSchema })` types `inputSchema`
  *     as `AnySchema | ZodRawShapeCompat`, so a full ZodObject is accepted as-is by the
  *     TYPE, and at runtime `normalizeObjectSchema` detects an already-built schema
@@ -15065,7 +15090,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
   const def = (
     name: string,
     description: string,
-    schema: z.ZodRawShape,
+    schema: PanelToolArgSchemas,
     handler: (args: Record<string, unknown>, ctx: PanelToolCtx) => Promise<ToolResult>,
   ): PanelToolDef => ({ name, description, schema, handler });
 
@@ -15800,8 +15825,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         // which nodes' widget values are UNVERIFIED, so they belong with the
         // conversion notes rather than being dropped.
         const captureNotes: string[] = [];
-        const raw = await resolveWorkflowInput(args, ctx, true, captureNotes);
-        const ui = raw as unknown as UiWorkflow;
+        const ui = await resolveWorkflowInput(args, ctx, true, captureNotes);
         // #1421 / #1359 — EVERY source takes definitions from the connected panel.
         //
         // #1359 wired the live canvas through `graph_get_object_info` and left
@@ -15918,7 +15942,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
       },
       async (args: A, ctx) => {
         const raw = await resolveWorkflowInput(args, ctx);
-        const { graph, report } = flattenUiWorkflow(raw as never, {
+        const { graph, report } = flattenUiWorkflow(raw, {
           includeUe: args.include_ue !== false,
           includeGetSet: args.include_getset !== false,
         });
@@ -15999,7 +16023,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         const groupList = Array.isArray(args.groups)
           ? (args.groups as string[])
           : String(args.groups ?? "").split(",");
-        const { workflow, stats } = sliceWorkflow(raw as unknown as UiWorkflow, groupList);
+        const { workflow, stats } = sliceWorkflow(raw, groupList);
 
         const flags =
           stats.badLinks || stats.orphanGets
@@ -22236,28 +22260,28 @@ export function createPanelMcpServer(
     );
   }
   // The Anthropic SDK's tool() accepts (name, description, zodRawShape, cb). The
-  // shared handler is transport-agnostic — bind it to this tab's ctx. Each def's
-  // schema is a distinct zod shape, so the produced tool generics differ; widen
-  // to the SDK's tool-list element type so the heterogeneous array type-checks.
-  type SdkTool = ReturnType<typeof tool>;
-  const tools = defs.map((d) =>
-    tool(
+  // shared handler is transport-agnostic — bind it to this tab's ctx.
+  const tools = defs.map((d) => {
+    const def = tool(
       d.name,
       d.description,
-      // #754 — strict() so an unrecognized arg key is a loud validation error,
-      // not a silent drop. tool()'s TS signature requires a bare ZodRawShape
-      // (`Schema extends AnyZodRawShape`), which a strict ZodObject instance does
-      // NOT structurally satisfy (it has methods like `.parse`, not just field
-      // schemas) — but at RUNTIME the SDK stores whatever is passed as
-      // `inputSchema` verbatim (confirmed by constructing a tool this way and
-      // calling `.safeParse` on the returned definition: unknown keys are
-      // rejected). The cast documents that the type is being widened past what
-      // TS can express here, not past what the SDK actually accepts.
-      strictPanelSchema(d.schema) as unknown as typeof d.schema,
+      d.schema,
       async (args: Record<string, unknown>) =>
         toolActionPolicyError(d.name, args, policy) ?? (await d.handler(args, ctx)),
-    ),
-  ) as unknown as SdkTool[];
+    );
+    // #754 — strict() so an unrecognized arg key is a loud validation error,
+    // not a silent drop. tool()'s TS signature requires a bare ZodRawShape
+    // (`Schema extends AnyZodRawShape`), which a strict ZodObject instance does
+    // NOT structurally satisfy (it has methods like `.parse`, not just field
+    // schemas) — but at RUNTIME the SDK stores whatever is passed as
+    // `inputSchema` verbatim (confirmed by constructing a tool this way and
+    // calling `.safeParse` on the returned definition: unknown keys are
+    // rejected). So build the definition with the raw shape tool() is typed
+    // for, then swap the strict object in: the element type stays what tool()
+    // produced apart from `inputSchema`, which createSdkMcpServer's tool list
+    // types as `any` because the server normalizes a schema or a shape itself.
+    return { ...def, inputSchema: strictPanelSchema(d.schema) };
+  });
   const server = createSdkMcpServer({
     name: "comfyui-panel",
     version: "1.0.0",
