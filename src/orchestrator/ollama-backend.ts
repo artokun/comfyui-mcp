@@ -249,8 +249,8 @@ function toOllamaMessages(messages: ChatMessage[]): Array<Record<string, unknown
   return messages.map((m) => {
     const { audios, audioMimes, ...rest } = m;
     void audioMimes; // native wire infers the container from the bytes
-    if (!audios?.length) return rest as unknown as Record<string, unknown>;
-    return { ...rest, images: [...(m.images ?? []), ...audios] } as unknown as Record<string, unknown>;
+    if (!audios?.length) return rest;
+    return { ...rest, images: [...(m.images ?? []), ...audios] };
   });
 }
 
@@ -685,7 +685,10 @@ export class OllamaBackend implements AgentBackend {
                 env: comfyuiSpawnEnv(spec.env, process.env, this.model),
               }),
             );
-            this.comfy = client as unknown as McpToolClient;
+            // A single narrowing to the slice this backend uses: the SDK Client's
+            // callTool can also resolve to the legacy `{ toolResult }` shape, which
+            // is what keeps it from being assignable to McpToolClient outright.
+            this.comfy = client as McpToolClient;
             // Recorded ONLY once the child is really up. This catch swallows
             // connect failures, so setting it earlier would leave a decision
             // describing a surface that does not exist — and reconcile would
@@ -696,7 +699,7 @@ export class OllamaBackend implements AgentBackend {
               "@modelcontextprotocol/sdk/client/streamableHttp.js"
             );
             await client.connect(new StreamableHTTPClientTransport(new URL(spec.url)));
-            this.panel = client as unknown as McpToolClient;
+            this.panel = client as McpToolClient;
           }
         } catch (err) {
           logger.warn(`[ollama-backend] could not connect MCP server '${name}': ${msgOf(err)}`);
