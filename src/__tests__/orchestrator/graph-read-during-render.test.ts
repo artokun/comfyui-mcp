@@ -21,9 +21,13 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   buildPanelToolDefs,
   makePanelToolCtx,
+  panelToolForGraphCmd,
+  QUEUE_BUSY_READ_TOOLS,
+  RETRY_TOKEN_CMD_BY_TOOL,
   type PanelToolCtx,
   type ToolResult,
 } from "../../orchestrator/panel-tools.js";
+import { GRAPH_CMD_EFFECT } from "../../services/ui-bridge.js";
 import { QueueMonitor } from "../../services/queue-monitor.js";
 import {
   markDispatched,
@@ -195,6 +199,12 @@ describe("graph MUTATIONS still fail fast while a prompt is running (#1639)", ()
     expect(text).toMatch(/QUEUE BUSY/);
     expect(text).toMatch(/was NOT sent — nothing was applied/);
     expect(text).toMatch(/running prompt p-in-flight/);
+    // #1933 — it must name the TOOL the caller called, not the bridge command
+    // that tool dispatches. The reporter quoted the old wording back verbatim:
+    // "graph_set_widget was NOT sent", naming something they never called.
+    expect(text).toMatch(/panel_set_widget was NOT sent/);
+    expect(text).toMatch(/panel_set_widget MUTATES the workflow/);
+    expect(text).not.toMatch(/(?<![a-z_])graph_set_widget(?![a-z_])/);
     // A mutation that never left must not invite retry_of / unknown-outcome.
     expect(text).not.toMatch(/may have been applied/);
     expect(text).not.toMatch(/retry_of/);
@@ -212,10 +222,99 @@ describe("graph MUTATIONS still fail fast while a prompt is running (#1639)", ()
     const text = textOf(res);
 
     expect(text).toMatch(/currently at node 42/);
-    expect(text).toMatch(/graph_outline/);
     expect(text).toMatch(/NOT fenced/);
+    // #1933 — the reads are named by their REGISTERED tool names. The previous
+    // assertion was `toMatch(/graph_outline/)`, which `panel_graph_outline` and
+    // the wrong bare `graph_outline` both satisfy — so it stayed green for the
+    // whole life of the defect. Anchored on both sides, it cannot.
+    expect(text).toMatch(/panel_graph_outline \/ panel_query_graph \/ panel_get_errors/);
+    expect(text).not.toMatch(/\(graph_outline/);
     // The old text told every caller reads were unavailable too. Nothing may say so.
     expect(text).not.toMatch(/including read-only/);
+  });
+
+  // #1933 — the load-bearing property, and the one no assertion held before:
+  // every tool name this refusal utters must be a tool the caller can actually
+  // call. A recovery instruction naming a non-tool is worse than none — the
+  // agent following it gets "unknown tool" during an already-degraded state.
+  it("every tool name in the refusal is a REGISTERED tool", async () => {
+    startRender();
+
+    const { bridge } = makeBridge();
+    const ctx = makePanelToolCtx(bridge, TAB, new WorkflowTargetStore());
+    const res = await defByName("panel_set_widget").handler(
+      { node_id: 3, widget: "text", value: "a cat" } as never,
+      ctx,
+    );
+
+    const registered = new Set(buildPanelToolDefs().map((d) => d.name));
+    // Read from the MESSAGE, not from the constant — a test that re-reads the
+    // list the code built the string from would pass on a string built from a
+    // different list.
+    const mentioned = textOf(res).match(/panel_[a-z0-9_]+/g) ?? [];
+    expect(mentioned.length).toBeGreaterThan(0);
+    for (const name of new Set(mentioned)) expect([name, registered.has(name)]).toEqual([name, true]);
+
+    // And the inverse: no bare bridge command survives anywhere in the text.
+    // `graph_` never appears except as the tail of a `panel_graph_*` tool name.
+    expect(textOf(res)).not.toMatch(/(?<![a-z_])graph_[a-z_]+/);
+  });
+
+  it("the three advertised reads are registered AND are the ones the fence lets past", () => {
+    const registered = new Set(buildPanelToolDefs().map((d) => d.name));
+    for (const name of QUEUE_BUSY_READ_TOOLS) {
+      expect([name, registered.has(name)]).toEqual([name, true]);
+    }
+    // The claim "are NOT fenced" has to be true of the commands behind them, or
+    // the message is accurate about names and wrong about behaviour.
+    for (const cmd of ["graph_outline", "graph_query", "graph_get_errors"]) {
+      expect([cmd, GRAPH_CMD_EFFECT[cmd]]).toEqual([cmd, "inert"]);
+    }
+  });
+
+  // #1933 — the reverse index must resolve every command this fence can refuse,
+  // or a real refusal silently falls back to the anonymous subject.
+  it("every command the fence can refuse resolves to a tool, except ambiguous graph_load", () => {
+    const refusable = Object.entries(GRAPH_CMD_EFFECT)
+      .filter(([cmd, effect]) => cmd.startsWith("graph_") && cmd !== "graph_run" && effect === "targeted")
+      .map(([cmd]) => cmd);
+    expect(refusable.length).toBeGreaterThan(20);
+
+    const unresolved = refusable.filter((cmd) => panelToolForGraphCmd(cmd) === undefined);
+    // graph_load is dispatched by TWO tools (panel_load_workflow and
+    // panel_flatten_workflow), so the index declines to pick one. That is the
+    // designed behaviour, not a coverage hole — pinned here so a future
+    // "cleanup" that makes it guess fails.
+    expect(unresolved).toEqual(["graph_load"]);
+    expect(
+      Object.entries(RETRY_TOKEN_CMD_BY_TOOL).filter(([, cmd]) => cmd === "graph_load").length,
+    ).toBe(2);
+
+    // And a resolved one resolves to the RIGHT tool, not merely to some tool.
+    expect(panelToolForGraphCmd("graph_set_widget")).toBe("panel_set_widget");
+    expect(panelToolForGraphCmd("graph_auto_layout")).toBe("panel_auto_layout");
+  });
+
+  it("an ambiguous command falls back to a subject that names no tool", async () => {
+    startRender();
+
+    const { bridge, sent } = makeBridge();
+    const ctx = makePanelToolCtx(bridge, TAB, new WorkflowTargetStore());
+    // Dispatch graph_load through ctx.call directly: both tools that reach it
+    // read the live canvas first, so this is the only way to exercise the
+    // fallback branch at the point the fence actually runs.
+    const res = await ctx.call({ cmd: "graph_load", workflow: { nodes: [], links: [] } });
+    const text = textOf(res);
+
+    expect(sent).toEqual([]);
+    expect(res.isError).toBe(true);
+    expect(text).toMatch(/QUEUE BUSY/);
+    expect(text).toMatch(/This edit was NOT sent — nothing was applied/);
+    // It must not invent a tool: naming one of two possible callers would be a
+    // confidently wrong answer, which is the defect class, not a smaller one.
+    expect(text).not.toMatch(/panel_load_workflow/);
+    expect(text).not.toMatch(/panel_flatten_workflow/);
+    expect(text).not.toMatch(/(?<![a-z_])graph_load(?![a-z_])/);
   });
 
   it("a targeted command that is not a node edit is fenced as well", async () => {

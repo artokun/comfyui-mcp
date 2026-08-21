@@ -1113,6 +1113,34 @@ function graphCmdIsInertUnderQueueBusy(name: string): boolean {
   return GRAPH_CMD_EFFECT[name] === "inert";
 }
 
+/**
+ * #1933 — the READ TOOLS this refusal advertises, by their REGISTERED tool name.
+ *
+ * They must be tool names, not the `graph_outline` / `graph_query` /
+ * `graph_get_errors` bridge commands they dispatch: this string is the whole
+ * recovery contract for a fenced write, and an agent that follows it calls what
+ * it is told to call. A bridge command is not callable, so the advice returned
+ * "unknown tool" — a hard failure mid-degraded-state that the agent cannot
+ * diagnose, and from which it can only conclude that reads are unavailable
+ * during a render, which is precisely the state panel#1489 fixed and this
+ * sentence exists to advertise (reported from the field in
+ * artokun/comfyui-mcp-panel#1549).
+ *
+ * The mapping is NOT the `panel_` prefix mechanically applied — `graph_query`'s
+ * tool is `panel_query_graph`, not `panel_graph_query`. So these are written
+ * out, and `graph-read-during-render.test.ts` asserts every one of them is in
+ * `buildPanelToolDefs()` — the registry the caller actually dispatches against.
+ * That test is what stops this list from drifting again: the old literal was
+ * green for the whole of its life with all three names wrong, because the
+ * assertion matched `/graph_outline/`, which a wrong name and a right one both
+ * satisfy.
+ */
+export const QUEUE_BUSY_READ_TOOLS: readonly string[] = [
+  "panel_graph_outline",
+  "panel_query_graph",
+  "panel_get_errors",
+];
+
 function graphCmdBlockedByRunningPrompt(cmd: Record<string, unknown>): string | null {
   const name = typeof cmd.cmd === "string" ? cmd.cmd : "";
   if (!name.startsWith("graph_") || name === "graph_run") return null;
@@ -1121,13 +1149,23 @@ function graphCmdBlockedByRunningPrompt(cmd: Record<string, unknown>): string | 
   if (graphCmdIsInertUnderQueueBusy(name)) return null;
   const snap = QueueMonitor.snapshot();
   if (!snap.running) return null;
+  // #1933 — name what the CALLER called. `cmd.cmd` is the BRIDGE command
+  // (observed: a `panel_set_widget` call arrives here as `graph_set_widget`),
+  // and PanelToolCtx.call carries no tool identity, so the tool name is
+  // recovered from the retry map's reverse index. That index REFUSES to answer
+  // when two tools share one command (graph_load ← panel_load_workflow /
+  // panel_flatten_workflow), so an unresolvable command falls back to a subject
+  // naming no tool at all rather than picking the wrong one: the caller already
+  // knows which tool it called, and a confidently wrong name is the defect being
+  // fixed here, not a smaller version of it.
+  const subject = panelToolForGraphCmd(name) ?? "This edit";
   return (
-    `${name} was NOT sent — nothing was applied. QUEUE BUSY: a ComfyUI prompt is running` +
-    `${queueBusySnapshotNote()}. ${name} MUTATES the workflow, and the panel tab often ` +
+    `${subject} was NOT sent — nothing was applied. QUEUE BUSY: a ComfyUI prompt is running` +
+    `${queueBusySnapshotNote()}. ${subject} MUTATES the workflow, and the panel tab often ` +
     `cannot service a graph edit while a prompt is executing — delivering it would only ` +
     `surface a generic "tab may be backgrounded or frozen" timeout with an unknown ` +
     `outcome, leaving you unable to say whether the edit applied. Read-only graph calls ` +
-    `(graph_outline / graph_query / graph_get_errors) are NOT fenced and can be used right ` +
+    `(${QUEUE_BUSY_READ_TOOLS.join(" / ")}) are NOT fenced and can be used right ` +
     `now to inspect the graph. Retry this edit after queue (action:"list") shows running: 0.`
   );
 }
@@ -11540,6 +11578,47 @@ export const RETRY_TOKEN_CMD_BY_TOOL: Readonly<Record<string, string>> = {
 export const RETRY_TOKEN_CMDS: ReadonlySet<string> = new Set(
   Object.values(RETRY_TOKEN_CMD_BY_TOOL).concat(["workflow_save_as"]),
 );
+
+/**
+ * #1933 — the reverse of RETRY_TOKEN_CMD_BY_TOOL: which TOOL does a caller reach
+ * this bridge command through?
+ *
+ * An agent-facing message written below the tool layer can only see `cmd.cmd`;
+ * `PanelToolCtx.call` takes a command object and no tool identity, so by the
+ * time a pre-dispatch refusal is worded the tool name is genuinely gone. This
+ * recovers it from the map that already maintains the correspondence, rather
+ * than adding a second hand-written list that can drift out of step with the
+ * first.
+ *
+ * IT REFUSES TO GUESS. The forward map is not injective — `graph_load` is
+ * dispatched by both `panel_load_workflow` and `panel_flatten_workflow` — and
+ * naming one of two possible tools is a confidently wrong answer, which is worse
+ * than declining to name one. Ambiguous commands are therefore OMITTED, and
+ * callers must handle `undefined`.
+ *
+ * Coverage is not assumed either: every `targeted` GRAPH_CMD_EFFECT command
+ * except `graph_run` is a value of the forward map, so the queue-busy fence
+ * resolves a tool for everything it can refuse except `graph_load`.
+ * `graph-read-during-render.test.ts` pins both halves — the resolution and the
+ * refusal to guess.
+ */
+export const PANEL_TOOL_BY_GRAPH_CMD: ReadonlyMap<string, string> = (() => {
+  const claims = new Map<string, string[]>();
+  for (const [tool, cmd] of Object.entries(RETRY_TOKEN_CMD_BY_TOOL)) {
+    const prior = claims.get(cmd);
+    if (prior) prior.push(tool);
+    else claims.set(cmd, [tool]);
+  }
+  const unique = new Map<string, string>();
+  for (const [cmd, tools] of claims) if (tools.length === 1) unique.set(cmd, tools[0]!);
+  return unique;
+})();
+
+/** #1933 — the registered tool a bridge command is reached through, or
+ *  `undefined` when no tool, or more than one tool, claims it. */
+export function panelToolForGraphCmd(cmd: string): string | undefined {
+  return PANEL_TOOL_BY_GRAPH_CMD.get(cmd);
+}
 
 /** #694 — augment one MUTATING tool def: accept retry_of and attach it, UNTOUCHED,
  *  to every mutating command the handler dispatches (per-command gated so a read
