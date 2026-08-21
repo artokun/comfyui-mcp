@@ -123,6 +123,30 @@ function providedKeys(input: unknown): Set<string> {
   return new Set(Object.keys(input as Record<string, unknown>));
 }
 
+function valueAt(input: unknown, key: string): unknown {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
+  try {
+    return (input as Record<string, unknown>)[key];
+  } catch {
+    // A revoked proxy throws on read. No value is not a fit.
+    return undefined;
+  }
+}
+
+/**
+ * A paired unrecognized key, and how strong the claim behind the pairing is.
+ *
+ * `confident` separates a statement about the KEY ("these two names denote the
+ * same argument") from a statement about the SCHEMA ("one key is unknown and
+ * one required key is missing"). Both are worth telling the caller; only the
+ * first may be phrased as "did you mean".
+ */
+export type KeyPairing = { key: string; confident: boolean };
+
+/** Does the value supplied under the wrong key parse under a candidate key's
+ *  schema? Used only to promote a structural 1:1 join to a confident one. */
+export type FitsPredicate = (target: string, value: unknown) => boolean;
+
 /**
  * Pair each unrecognized key with at most one known key.
  *
@@ -131,14 +155,20 @@ function providedKeys(input: unknown): Set<string> {
  * 3. If exactly one unknown and exactly one required key remain, join them
  *    even when the names are not similar (`todos` vs `items`). That is the
  *    "information is present but the caller has to join it" case.
+ *
+ * Rules 1 and 2 are always confident — they matched on the NAME. Rule 3 is a
+ * structural coincidence of counts and is confident only when `fits` agrees
+ * the caller's value would also parse under the target. See the note at the
+ * rule-3 branch for the surface measurement behind that split.
  */
 export function pairUnrecognizedKeys(
   unknownKeys: readonly string[],
   knownKeys: readonly string[],
   requiredKeys: readonly string[],
   input: unknown,
-): Map<string, string> {
-  const suggestions = new Map<string, string>();
+  fits?: FitsPredicate,
+): Map<string, KeyPairing> {
+  const suggestions = new Map<string, KeyPairing>();
   const used = new Set<string>();
   const present = providedKeys(input);
   const missingRequired = requiredKeys.filter((k) => !present.has(k));
@@ -147,7 +177,7 @@ export function pairUnrecognizedKeys(
     const leftover = pool.filter((k) => !used.has(k) && k !== unknown);
     const match = suggestKnownKey(unknown, leftover);
     if (!match) return;
-    suggestions.set(unknown, match);
+    suggestions.set(unknown, { key: match, confident: true });
     used.add(match);
   };
 
@@ -159,7 +189,20 @@ export function pairUnrecognizedKeys(
   const leftoverUnknown = unknownKeys.filter((k) => !suggestions.has(k));
   const leftoverMissing = missingRequired.filter((k) => !used.has(k));
   if (leftoverUnknown.length === 1 && leftoverMissing.length === 1) {
-    suggestions.set(leftoverUnknown[0]!, leftoverMissing[0]!);
+    const unknown = leftoverUnknown[0]!;
+    const target = leftoverMissing[0]!;
+    // #1969 review — rule 3 holds because the COUNTS line up, not because the
+    // names mean the same thing, and 34 of the 95 live panel tools take exactly
+    // one required key. So without this split every one of them answered any
+    // stray key with a confident guess: `panel_remove_node {dry_run: true}`
+    // replied "did you mean 'node_id'?", phrased identically to the true
+    // `group` → `group_id` case and indistinguishable from it by the 2–4B
+    // models this whole change exists to serve. Promote to "did you mean" only
+    // when the VALUE the caller sent also parses under the target's schema —
+    // which still covers the reporter's `todos` → `items`, because the todo
+    // array they sent is a valid `items`.
+    const confident = fits ? fits(target, valueAt(input, unknown)) : false;
+    suggestions.set(unknown, { key: target, confident });
   }
   return suggestions;
 }
@@ -175,16 +218,21 @@ export function formatUnrecognizedKeyMessage(
   knownKeys: readonly string[],
   requiredKeys: readonly string[],
   input: unknown,
+  fits?: FitsPredicate,
 ): string {
   try {
     const unique = [...new Set(keys)];
-    const paired = pairUnrecognizedKeys(unique, knownKeys, requiredKeys, input);
+    const paired = pairUnrecognizedKeys(unique, knownKeys, requiredKeys, input, fits);
     return unique
       .map((k) => {
         const suggestion = paired.get(k);
-        return suggestion
-          ? `Unrecognized key ${quoteKey(k)} — did you mean ${quoteKey(suggestion)}?`
-          : `Unrecognized key ${quoteKey(k)}`;
+        if (!suggestion) return `Unrecognized key ${quoteKey(k)}`;
+        // An unconfident pairing still carries both halves of the join in one
+        // sentence — which is the whole ask — but states the schema fact it
+        // actually knows instead of guessing at intent.
+        return suggestion.confident
+          ? `Unrecognized key ${quoteKey(k)} — did you mean ${quoteKey(suggestion.key)}?`
+          : `Unrecognized key ${quoteKey(k)} — required key ${quoteKey(suggestion.key)} is missing`;
       })
       .join("; ");
   } catch {
@@ -214,8 +262,20 @@ function requiredKeysOf(shape: z.ZodRawShape): string[] {
 export function unrecognizedKeysError(shape: z.ZodRawShape): (iss: UnrecognizedKeysIssue) => string | undefined {
   const knownKeys = Object.keys(shape);
   const requiredKeys = requiredKeysOf(shape);
+  // Runs only on the validation-failure path, and only for the single leftover
+  // candidate — never across the whole shape.
+  const fits: FitsPredicate = (target, value) => {
+    const schema = shape[target];
+    if (!schema) return false;
+    try {
+      return safeParse(schema, value).success;
+    } catch {
+      // A throwing probe is not evidence the value fits.
+      return false;
+    }
+  };
   return (iss) => {
     if (iss.code !== "unrecognized_keys" || !iss.keys?.length) return undefined;
-    return formatUnrecognizedKeyMessage(iss.keys, knownKeys, requiredKeys, iss.input);
+    return formatUnrecognizedKeyMessage(iss.keys, knownKeys, requiredKeys, iss.input, fits);
   };
 }

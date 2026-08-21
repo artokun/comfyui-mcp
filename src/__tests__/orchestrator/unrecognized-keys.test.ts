@@ -128,7 +128,7 @@ describe("#1969 pairing is the join, not a thesaurus", () => {
   it("todos does NOT look like items — the 1:1 leftover is what joins them", () => {
     expect(suggestKnownKey("todos", ["items"])).toBeUndefined();
     const paired = pairUnrecognizedKeys(["todos"], ["items"], ["items"], { todos: [] });
-    expect(paired.get("todos")).toBe("items");
+    expect(paired.get("todos")?.key).toBe("items");
   });
 
   it("does not join an extra key onto a field that was already provided", () => {
@@ -180,5 +180,113 @@ describe("#1969 the schema-level error map is what strictPanelSchema installs", 
     expect(editDistance("group_id", "group_id")).toBe(0);
     expect(editDistance("", "abc")).toBe(3);
     expect(editDistance("abc", "")).toBe(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #1969 REVIEW of 90d9cf6 — the 1:1 leftover rule fires on COUNTS, not on
+// meaning. 34 of the 95 registered panel tools take exactly one required key,
+// so before this split every one of them answered any stray key with a
+// confident guess. `panel_remove_node {dry_run:true}` → "did you mean
+// 'node_id'?" reads exactly like the true `group` → `group_id` case, and the
+// 2–4B models this change exists to serve cannot tell them apart — so the
+// wrong repair ("move the value into node_id") is the one they act on.
+//
+// The split is by VALUE compatibility, which is the evidence already in hand:
+// the reporter's own `todos` → `items` survives as a "did you mean" because
+// the todo array they sent is a valid `items`.
+// ---------------------------------------------------------------------------
+describe("#1969 review — a structural join must not be phrased as a guess about intent", () => {
+  const fitsFor = (shape: Record<string, z.ZodType>) => (target: string, value: unknown) =>
+    shape[target] ? shape[target]!.safeParse(value).success : false;
+
+  it("a stray key whose value cannot fit the missing required key is NOT a 'did you mean'", () => {
+    const shape = { node_id: z.number() };
+    const msg = formatUnrecognizedKeyMessage(
+      ["dry_run"],
+      Object.keys(shape),
+      ["node_id"],
+      { dry_run: true },
+      fitsFor(shape),
+    );
+    expect(msg).toBe("Unrecognized key 'dry_run' — required key 'node_id' is missing");
+    // The join is still in ONE sentence — that is the ask — but it states the
+    // schema fact rather than asserting what the caller meant.
+    expect(msg).not.toMatch(/did you mean/);
+    expect(msg).toContain("node_id");
+  });
+
+  it("the reporter's todos → items SURVIVES as a 'did you mean' because the value fits", () => {
+    const shape = { items: z.array(z.object({ text: z.string() })) };
+    const msg = formatUnrecognizedKeyMessage(
+      ["todos"],
+      Object.keys(shape),
+      ["items"],
+      { todos: [{ text: "queue the first variant" }] },
+      fitsFor(shape),
+    );
+    expect(msg).toBe("Unrecognized key 'todos' — did you mean 'items'?");
+  });
+
+  it("a NAME match stays confident even when the value does not fit — the names still pair", () => {
+    // `group` → `group_id` is rule 1 (affix). A caller who sends the right key
+    // under the wrong name with a bad value should still be told the name.
+    const shape = { group_id: z.number() };
+    const msg = formatUnrecognizedKeyMessage(
+      ["group"],
+      Object.keys(shape),
+      ["group_id"],
+      { group: "not-a-number" },
+      fitsFor(shape),
+    );
+    expect(msg).toBe("Unrecognized key 'group' — did you mean 'group_id'?");
+  });
+
+  it("pairUnrecognizedKeys marks the rule-3 join unconfident without a fits predicate", () => {
+    const paired = pairUnrecognizedKeys(["dry_run"], ["node_id"], ["node_id"], { dry_run: true });
+    expect(paired.get("dry_run")).toEqual({ key: "node_id", confident: false });
+  });
+});
+
+describe("#1969 review — the live surface, not a hand-built shape", () => {
+  let client: Client;
+  let server: McpServer;
+
+  beforeAll(async () => {
+    server = new McpServer({ name: "unrecognized-keys-review", version: "1.0.0" });
+    registerPanelTools(server, makeFakeCtx());
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    client = new Client({ name: "unrecognized-keys-review-client", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  });
+
+  afterAll(async () => {
+    await client.close();
+    await server.close();
+  });
+
+  const errorText = async (name: string, args: Record<string, unknown>): Promise<string> => {
+    const r = await client.callTool({ name, arguments: args });
+    expect(r.isError, `${name} was expected to reject ${JSON.stringify(args)}`).toBe(true);
+    return (r.content as Array<{ text?: string }>)?.[0]?.text ?? "";
+  };
+
+  it("panel_remove_node {dry_run:true} names node_id WITHOUT claiming that is what was meant", async () => {
+    const text = await errorText("panel_remove_node", { dry_run: true });
+    expect(text).toMatch(/Unrecognized key 'dry_run'/);
+    expect(text).toMatch(/required key 'node_id' is missing/);
+    expect(text).not.toMatch(/did you mean/);
+  });
+
+  it("panel_set_todo {todos:[…]} still gets the confident suggestion over the real surface", async () => {
+    const text = await errorText("panel_set_todo", {
+      todos: [{ text: "queue the first variant", status: "pending" }],
+    });
+    expect(text).toMatch(/did you mean 'items'\?/);
+  });
+
+  it("panel_remove_group {group:2} still gets the confident suggestion over the real surface", async () => {
+    const text = await errorText("panel_remove_group", { group: 2 });
+    expect(text).toMatch(/did you mean 'group_id'\?/);
   });
 });
