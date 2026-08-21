@@ -29,17 +29,19 @@ vi.mock("@stable-canvas/comfyui-client", () => ({
   Client: class {
     // #385 — call sites moved to `comfyApiFetch`, which reuses the library's
     // own routing (apiURL/apiHeaders) and its injected `fetch`, so it can read a
-    // 4xx instead of having `fetchApi` throw it away. The double routes `fetch`
-    // back through its own `fetchApi`, so every existing impl and spy in this
-    // file keeps working and keeps asserting the same route.
+    // 4xx instead of having `fetchApi` throw it away. This double has no HTTP
+    // route at all — the tests stub the SDK method directly — so a comfyApiFetch
+    // call reaching it is a wiring mistake and is named as one, rather than
+    // failing as "this.fetchApi is not a function" through a cast that claimed
+    // the method existed.
     apiURL(p: string) {
       return p;
     }
     apiHeaders(init?: { headers?: unknown }) {
       return (init && init.headers) || {};
     }
-    async fetch(u: string, init?: unknown) {
-      return (this as unknown as { fetchApi: (u: string, i?: unknown) => unknown }).fetchApi(u, init);
+    async fetch(u: string): Promise<Response> {
+      throw new Error(`Client double has no HTTP route for ${u}; stub the SDK method instead`);
     }
     getNodeDefs = getNodeDefs;
     close() {}

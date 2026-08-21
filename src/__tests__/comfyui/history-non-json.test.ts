@@ -24,8 +24,8 @@ vi.mock("@stable-canvas/comfyui-client", () => ({
     apiHeaders(init?: { headers?: unknown }) {
       return (init && init.headers) || {};
     }
-    async fetch(u: string, init?: unknown) {
-      return (this as unknown as { fetchApi: (u: string, i?: unknown) => unknown }).fetchApi(u, init);
+    async fetch(u: string) {
+      return this.fetchApi(u);
     }
     async fetchApi(p: string) {
       return fetchApi.impl(p);
