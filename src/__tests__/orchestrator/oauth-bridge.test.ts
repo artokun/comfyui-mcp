@@ -175,5 +175,6 @@ describe("handleOAuthSignout", () => {
   });
 });
 
-// deps type sanity — keeps the injected-deps surface honest at compile time.
-void (null as unknown as OAuthBridgeDeps);
+// deps type sanity — keeps the injected-deps surface honest at compile time: the
+// exact object the tests above inject must satisfy the deps contract.
+({ providers: PROVIDERS, clearOAuth: vi.fn() }) satisfies OAuthBridgeDeps;
