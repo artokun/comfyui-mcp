@@ -103,7 +103,7 @@ export async function proposeModelCard(
       // environment entirely. Pass the agent env (process.env MINUS tool-only
       // secrets) so RunPod/HF/CivitAI tokens never reach the LLM subprocess.
       env: buildAgentSpawnEnv(),
-    } as unknown as Parameters<typeof query>[0]["options"],
+    },
   });
 
   let text = "";
