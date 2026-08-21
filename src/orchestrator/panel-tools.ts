@@ -3826,6 +3826,157 @@ function isLoraManagerAutocompleteRefusal(res: ToolResult): boolean {
   );
 }
 
+/**
+ * #1944 — the panel's add-node socket proof read "which datatypes does some
+ * installed node output?" off a single-class `/object_info/<class_type>`
+ * payload (or a whole-schema widen that did not land). Custom link types a
+ * SIBLING node produces — SeedVR2LoadDiTModel → SEEDVR2_DIT — then look
+ * unproven, and the refusal claims "no installed node outputs X" while that
+ * very node sits on the canvas. Retrying the add re-runs the same proof;
+ * panel_refresh_nodes re-registers the class, which is what arms the
+ * single-class path. The live graph is the authority the guard did not consult.
+ */
+function isMissingInstalledOutputsRefusal(res: ToolResult): boolean {
+  if (!res.isError) return false;
+  const text = textOfToolResult(res);
+  return (
+    /had no widget after .+ waiting for node extensions to register/i.test(text) &&
+    /no installed node outputs/i.test(text)
+  );
+}
+
+/** Types the panel named as unproven in a #1944-shaped refusal. */
+function parseUnprovenSocketTypes(text: string): string[] {
+  const types: string[] = [];
+  const add = (raw: string) => {
+    const v = raw.trim();
+    if (v && !types.includes(v)) types.push(v);
+  };
+  for (const re of [
+    /no installed node outputs "([^"]+)"/gi,
+    /declared type "([^"]+)": no installed node outputs/gi,
+  ]) {
+    re.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text))) add(m[1]);
+  }
+  return types;
+}
+
+function nodeOutputDeclaresType(node: Record<string, unknown>, socketType: string): boolean {
+  const outputs = node.outputs;
+  if (Array.isArray(outputs)) {
+    for (const out of outputs) {
+      if (!out || typeof out !== "object" || Array.isArray(out)) continue;
+      const t = (out as { type?: unknown }).type;
+      if (typeof t !== "string" || !t) continue;
+      if (t === socketType) return true;
+      if (t.split(",").map((part) => part.trim()).includes(socketType)) return true;
+    }
+  }
+  const matchedOn = node.matched_on;
+  if (!Array.isArray(matchedOn)) return false;
+  const needle = `(${socketType.toLowerCase()})`;
+  return matchedOn.some(
+    (entry) => typeof entry === "string" && entry.toLowerCase().includes(needle),
+  );
+}
+
+type LiveSocketProducer = { id: string; type: string };
+
+/**
+ * Ask the live canvas whether each unproven type is actually produced there.
+ * Returns null when a probe fails — an unreadable graph is not evidence the
+ * producers are present, so the original refusal stays the last word.
+ */
+async function findLiveSocketProducers(
+  ctx: PanelToolCtx,
+  types: string[],
+): Promise<Map<string, LiveSocketProducer[]> | null> {
+  const found = new Map<string, LiveSocketProducer[]>();
+  for (const socketType of types) {
+    const probe = await ctx.call(
+      { cmd: "graph_find_nodes", output: socketType, limit: 5 },
+      8000,
+    );
+    if (probe.isError) return null;
+    const payload = parseToolResultJson(probe);
+    const matches = Array.isArray(payload?.matches) ? payload.matches : [];
+    const producers: LiveSocketProducer[] = [];
+    for (const row of matches) {
+      if (!row || typeof row !== "object" || Array.isArray(row)) continue;
+      const rec = row as Record<string, unknown>;
+      if (!nodeOutputDeclaresType(rec, socketType)) continue;
+      const id = rec.id;
+      const type = rec.type ?? rec.class_type;
+      producers.push({
+        id: id == null ? "?" : String(id),
+        type: typeof type === "string" && type ? type : "unknown",
+      });
+    }
+    found.set(socketType, producers);
+  }
+  return found;
+}
+
+function liveSocketProducerNote(
+  classType: unknown,
+  found: Map<string, LiveSocketProducer[]>,
+): string {
+  const target = typeof classType === "string" && classType ? classType : "this node";
+  const lines = [...found.entries()].map(([socket, nodes]) => {
+    const who = nodes
+      .slice(0, 3)
+      .map((n) => `${n.type} #${n.id}`)
+      .join(", ");
+    return `  - ${socket}: ${who}`;
+  });
+  return (
+    `\n\nThis is NOT a missing pack and NOT a widget that is still loading. ` +
+    `The live canvas ALREADY has nodes that output every type the add-node guard ` +
+    `claimed was missing:\n` +
+    `${lines.join("\n")}\n` +
+    `The guard consulted a single-class /object_info payload (or a whole-schema ` +
+    `widen that did not land), not the live frontend graph, so it cannot see ` +
+    `sibling producers added earlier in this session. ` +
+    `Retrying panel_add_node will keep failing; panel_refresh_nodes will not ` +
+    `clear it (it re-registers the class, which is what arms the single-class path). ` +
+    `Workaround: copy an existing "${target}" from another open workflow and ` +
+    `paste it here (panel_copy_nodes / panel_paste_nodes), or reload the ComfyUI ` +
+    `browser tab so the page rebuilds its node registry. Do not retry this class_type ` +
+    `until then.`
+  );
+}
+
+async function withLiveSocketProducerNote(
+  res: ToolResult,
+  classType: unknown,
+  ctx: PanelToolCtx,
+): Promise<ToolResult> {
+  if (!isMissingInstalledOutputsRefusal(res)) return res;
+  // #1708 is a Vue-widget miss, not a sibling-producer miss. Querying the
+  // canvas for AUTOCOMPLETE_TEXT_* would only delay the named remedy.
+  if (isLoraManagerAutocompleteRefusal(res)) return res;
+  const missing = parseUnprovenSocketTypes(textOfToolResult(res));
+  if (!missing.length) return res;
+  const found = await findLiveSocketProducers(ctx, missing);
+  if (!found) return res;
+  if (!missing.every((t) => (found.get(t)?.length ?? 0) > 0)) return res;
+  return appendToolResultText(res, liveSocketProducerNote(classType, found));
+}
+
+async function annotateAddNodeRefusal(
+  res: ToolResult,
+  classType: unknown,
+  ctx: PanelToolCtx,
+): Promise<ToolResult> {
+  return withFrontendOnlyPanelSkewNote(
+    withLoraManagerAutocompleteNote(await withLiveSocketProducerNote(res, classType, ctx)),
+    classType,
+    ctx,
+  );
+}
+
 const LORA_MANAGER_AUTOCOMPLETE_NOTE =
   `\n\nThis is NOT a missing pack and NOT a widget that is still loading. ` +
   `ComfyUI-LoRA-Manager registers AUTOCOMPLETE_TEXT_* via getCustomWidgets() into ` +
@@ -12042,7 +12193,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_add_node",
-      "Add a node to the user's OPEN ComfyUI graph by class_type (e.g. 'KSampler', 'CheckpointLoaderSimple'). The user sees it appear live; Ctrl+Z undoes it. Returns the created node's id, slots, and default widget values. Frontend-only virtual types are addable too: 'Note' and 'MarkdownNote' — the supported way to ANNOTATE a workflow with on-canvas instructions (add the node, then put the text in its 'text' widget via panel_set_widget) — plus 'Reroute' and 'PrimitiveNode'. These are LiteGraph-native and never appear in the backend node registry, so they legitimately bypass the backend class_type check. ComfyUI-LoRA-Manager's 'Lora Loader (LoraManager)' (and other AUTOCOMPLETE_TEXT_* nodes) cannot be added: the pack is healthy, but the add-node guard cannot see its Vue autocomplete widget. Use 'LoRA Text Loader (LoraManager)' — same outputs, lora_syntax is a STRING — or core LoraLoader; reload/retry will not clear it. ADD NODES ONE AT A TIME, not as a parallel batch: each add carries a fresh /object_info payload and those register SERIALLY, so N concurrent adds become N sequential refresh cycles. On a large install that outruns the 30s per-command deadline and the later adds time out WHILE STILL QUEUED — they then apply when their turn arrives, leaving nodes you were told had failed (panel#767). Sequential adds each get the refresh to themselves and stay well inside the deadline.",
+      "Add a node to the user's OPEN ComfyUI graph by class_type (e.g. 'KSampler', 'CheckpointLoaderSimple'). The user sees it appear live; Ctrl+Z undoes it. Returns the created node's id, slots, and default widget values. Frontend-only virtual types are addable too: 'Note' and 'MarkdownNote' — the supported way to ANNOTATE a workflow with on-canvas instructions (add the node, then put the text in its 'text' widget via panel_set_widget) — plus 'Reroute' and 'PrimitiveNode'. These are LiteGraph-native and never appear in the backend node registry, so they legitimately bypass the backend class_type check. ComfyUI-LoRA-Manager's 'Lora Loader (LoraManager)' (and other AUTOCOMPLETE_TEXT_* nodes) cannot be added: the pack is healthy, but the add-node guard cannot see its Vue autocomplete widget. Use 'LoRA Text Loader (LoraManager)' — same outputs, lora_syntax is a STRING — or core LoraLoader; reload/retry will not clear it. A 'no installed node outputs' refusal for a custom link type (SEEDVR2_DIT, SEEDVR2_VAE, …) after sibling producer nodes were just added is the guard looking at a single-class /object_info, not the live graph; retry/refresh will not clear it — copy the node from another workflow (panel_copy_nodes / panel_paste_nodes) or reload the tab. ADD NODES ONE AT A TIME, not as a parallel batch: each add carries a fresh /object_info payload and those register SERIALLY, so N concurrent adds become N sequential refresh cycles. On a large install that outruns the 30s per-command deadline and the later adds time out WHILE STILL QUEUED — they then apply when their turn arrives, leaving nodes you were told had failed (panel#767). Sequential adds each get the refresh to themselves and stay well inside the deadline.",
       {
         class_type: z.string().describe("Exact ComfyUI node class_type to create."),
         pos: xy()
@@ -12062,11 +12213,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           );
         const first = await add();
         if (!isStaleNodeSchemaRefusal(first)) {
-          return withFrontendOnlyPanelSkewNote(
-            withLoraManagerAutocompleteNote(first),
-            args.class_type,
-            ctx,
-          );
+          return annotateAddNodeRefusal(first, args.class_type, ctx);
         }
 
         // #1329 — DO THE REFRESH THE REFUSAL ASKS FOR, instead of billing the caller.
@@ -12102,14 +12249,12 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           // the refresh failure alongside so the caller knows the automatic attempt
           // happened and why it did not help. No retry here, because the schema really is
           // unchanged and a second add really would refuse again.
-          return withFrontendOnlyPanelSkewNote(
-            withLoraManagerAutocompleteNote(
-              appendToolResultText(
-                first,
-                `\n\n(Tried to clear this automatically: panel_refresh_nodes was dispatched and FAILED, ` +
-                  `so the schema is unchanged and retrying the add will refuse again. ` +
-                  `${textOfToolResult(refreshed)})`,
-              ),
+          return annotateAddNodeRefusal(
+            appendToolResultText(
+              first,
+              `\n\n(Tried to clear this automatically: panel_refresh_nodes was dispatched and FAILED, ` +
+                `so the schema is unchanged and retrying the add will refuse again. ` +
+                `${textOfToolResult(refreshed)})`,
             ),
             args.class_type,
             ctx,
@@ -12138,23 +12283,21 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         // refresh left behind.
         const second = await add();
         if (!isStaleNodeSchemaRefusal(second)) {
-          return withFrontendOnlyPanelSkewNote(
-            withLoraManagerAutocompleteNote(
-              // An error from the RETRY, on the path where the caller never asked for a
-              // retry, must say which attempt it came from — otherwise a bare
-              // `graph_add_node` timeout reads as the first add's outcome and leaves the
-              // count of in-flight mutations ambiguous. Only on this path: after an acked
-              // success the retry is pre-existing behaviour that #1518 does not touch.
-              refreshOutranItsAck && second.isError
-                ? appendToolResultText(
-                    second,
-                    `\n\n(This add was an AUTOMATIC retry: the first attempt was refused for a stale ` +
-                      `node schema and created NOTHING, then panel_refresh_nodes was dispatched and did ` +
-                      `NOT answer within its window. The error above is from the second attempt, so at ` +
-                      `most ONE add is unaccounted for here.)`,
-                  )
-                : second,
-            ),
+          return annotateAddNodeRefusal(
+            // An error from the RETRY, on the path where the caller never asked for a
+            // retry, must say which attempt it came from — otherwise a bare
+            // `graph_add_node` timeout reads as the first add's outcome and leaves the
+            // count of in-flight mutations ambiguous. Only on this path: after an acked
+            // success the retry is pre-existing behaviour that #1518 does not touch.
+            refreshOutranItsAck && second.isError
+              ? appendToolResultText(
+                  second,
+                  `\n\n(This add was an AUTOMATIC retry: the first attempt was refused for a stale ` +
+                    `node schema and created NOTHING, then panel_refresh_nodes was dispatched and did ` +
+                    `NOT answer within its window. The error above is from the second attempt, so at ` +
+                    `most ONE add is unaccounted for here.)`,
+                )
+              : second,
             args.class_type,
             ctx,
           );
@@ -12162,28 +12305,26 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         // Still stale after the refresh: report THAT, because it means the remedy the
         // refusal prescribes does not fix this instance and a caller following it by hand
         // would loop.
-        return withFrontendOnlyPanelSkewNote(
-          withLoraManagerAutocompleteNote(
-            appendToolResultText(
-              second,
-              refreshOutranItsAck
-                ? // The refresh was never observed to finish, so "repeating it will not clear
-                  // it" and "reload the tab" would both overclaim. What IS known: it was not
-                  // cancelled, it is still registering the definitions this add needs, and the
-                  // retry simply landed before it did.
-                  `\n\n(Tried to clear this automatically: panel_refresh_nodes was dispatched and did ` +
-                  `NOT answer within its window, and the add was then retried ONCE anyway — a refresh ` +
-                  `that outruns its ack is NOT cancelled: it keeps running and registers what it ` +
-                  `fetched. On a large install it can take ~33s against a 30s window. The retry still ` +
-                  `refuses, which means that registration had not landed YET — not that the schema is ` +
-                  `stuck. Neither attempt added anything. RETRY the add in a few seconds; that is the ` +
-                  `action that clears this. Only if it keeps refusing is the page's registry actually ` +
-                  `stuck, and reloading the ComfyUI browser tab is the fallback. Nothing here observed ` +
-                  `the tab being frozen. ${textOfToolResult(refreshed)})`
-                : `\n\n(This was already retried ONCE automatically: panel_refresh_nodes reported success ` +
-                  `and the add still refuses, so repeating panel_refresh_nodes will not clear it. ` +
-                  `Reload the ComfyUI browser tab, which rebuilds the page's node registry from scratch.)`,
-            ),
+        return annotateAddNodeRefusal(
+          appendToolResultText(
+            second,
+            refreshOutranItsAck
+              ? // The refresh was never observed to finish, so "repeating it will not clear
+                // it" and "reload the tab" would both overclaim. What IS known: it was not
+                // cancelled, it is still registering the definitions this add needs, and the
+                // retry simply landed before it did.
+                `\n\n(Tried to clear this automatically: panel_refresh_nodes was dispatched and did ` +
+                `NOT answer within its window, and the add was then retried ONCE anyway — a refresh ` +
+                `that outruns its ack is NOT cancelled: it keeps running and registers what it ` +
+                `fetched. On a large install it can take ~33s against a 30s window. The retry still ` +
+                `refuses, which means that registration had not landed YET — not that the schema is ` +
+                `stuck. Neither attempt added anything. RETRY the add in a few seconds; that is the ` +
+                `action that clears this. Only if it keeps refusing is the page's registry actually ` +
+                `stuck, and reloading the ComfyUI browser tab is the fallback. Nothing here observed ` +
+                `the tab being frozen. ${textOfToolResult(refreshed)})`
+              : `\n\n(This was already retried ONCE automatically: panel_refresh_nodes reported success ` +
+                `and the add still refuses, so repeating panel_refresh_nodes will not clear it. ` +
+                `Reload the ComfyUI browser tab, which rebuilds the page's node registry from scratch.)`,
           ),
           args.class_type,
           ctx,
