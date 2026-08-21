@@ -6,7 +6,7 @@ when you need the full graph to build from.
 
 ## Contents
 
-- [Complete Workflow: Native FLF (Remix NSFW + Lightning)](#complete-workflow-native-flf-remix-nsfw--lightning) — the full dual Hi-Lo two-pass graph
+- [Complete Workflow: Native FLF (Remix NSFW + Lightning)](#complete-workflow-native-flf-remix-nsfw--lightning): the full dual Hi-Lo two-pass graph
 
 ## Complete Workflow: Native FLF (Remix NSFW + Lightning)
 

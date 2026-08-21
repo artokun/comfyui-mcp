@@ -1,112 +1,116 @@
 ---
 name: report-bug
-description: Self-heal and report bugs to make the ecosystem better. Use when you hit ANY defect in comfyui-mcp or the sidebar panel, or in a third-party custom node or ComfyUI core — diagnose it, and for OUR repos (comfyui-mcp, comfyui-mcp-panel, comfyui-mcp-issue-worker) fix it locally FIRST so the user is unblocked, then file a report that includes the diff, so reports arrive as near-PRs, not tickets. Attempt the fix exactly ONCE; if it is genuinely upstream-only, say so and include the precise change needed. Route it correctly — our intake Worker for our repos, the node's own GitHub for third-party. For OUR repos act autonomously (fix-then-file, then inform the user, no per-step permission); for THIRD-PARTY or ComfyUI-core it is offer-and-ask. Bias HARD toward fix-then-file on our repos — trigger on any error, crash, wrong or empty output, silent failure, confusing result, or limitation that forced an awkward workaround, EVEN IF you recovered. You do not need to be blocked. Also on "report this" and "fix this bug".
+description: Self-heal and report bugs to make the ecosystem better. Use when you hit ANY defect in comfyui-mcp or the sidebar panel, or in a third-party custom node or ComfyUI core. Diagnose it, and for OUR repos (comfyui-mcp, comfyui-mcp-panel, comfyui-mcp-issue-worker) fix it locally FIRST so the user is unblocked, then file a report that includes the diff, so reports arrive as near-PRs rather than tickets. Attempt the fix exactly ONCE; if it is upstream-only, say so and include the precise change needed. Route it correctly: our intake Worker for our repos, the node's own GitHub for third-party. For OUR repos act autonomously (fix-then-file, then inform the user, no per-step permission); for THIRD-PARTY or ComfyUI-core it is offer-and-ask. Bias HARD toward fix-then-file on our repos. Trigger on any error, crash, wrong or empty output, silent failure, confusing result, or limitation that forced an awkward workaround, EVEN IF you recovered. You do not need to be blocked. Also on "report this" and "fix this bug".
 ---
 
 # Self-heal & report bugs (make the ecosystem better)
 
-Goal: when something is broken, don't just stop — **diagnose it, try to fix it so
-the user keeps working, and get the fix/report to whoever can fix it upstream.**
+Goal: when something is broken, do not stop there. Diagnose it, try to fix it
+so the user keeps working, and get the fix or report to whoever can fix it
+upstream.
 
-**Scope of autonomy — read this first.** For defects in **OUR repos**
+**Scope of autonomy. Read this first.** For defects in OUR repos
 (`artokun/comfyui-mcp`, `comfyui-mcp-panel`, `comfyui-mcp-issue-worker`) act
-**autonomously**: fix-then-file, then **inform** the user with a short summary —
-don't pepper them with permission prompts. For **THIRD-PARTY / ComfyUI-core**
-defects it is **offer-and-ask** (Step 6): you propose the workaround and/or the
-report and act only once the user agrees — it's their call to patch someone
-else's node or post to someone else's tracker. (Even for our repos, DO pause for:
-a fix that touches the user's own workflow/data, anything large/risky, or
-anything you can't make safe — explain and ask.)
+autonomously. Fix, then file, then inform the user with a short summary. Do not
+pepper them with permission prompts. For THIRD-PARTY and ComfyUI-core defects
+it is offer-and-ask (Step 6). You propose the workaround and/or the report and
+act only once the user agrees, because patching someone else's node or posting
+to someone else's tracker is their call. Even for our repos, pause and ask for
+a fix that touches the user's own workflow or data, for anything large or
+risky, and for anything you cannot make safe.
 
-This is for **bugs in software**, not ordinary workflow/generation errors (OOM,
-missing model, bad params → use `troubleshooting`). First decide whose bug it is.
+This is for bugs in software, not ordinary workflow or generation errors (OOM,
+missing model, bad params: use `troubleshooting`). First decide whose bug it is.
 
 ## When to file — bias HARD toward reporting (we're in beta)
 
-While comfyui-mcp is in beta, **the default is to file.** You do NOT need to be
-blocked, and it does NOT need to be fatal. If you notice a defect in our software,
-report it — even after you've already recovered. File when any of these happen:
+While comfyui-mcp is in beta, the default is to file. You do NOT need to be
+blocked, and it does NOT need to be fatal. If you notice a defect in our
+software, report it, even after you have already recovered. File when any of
+these happen:
 
-- A tool/panel/orchestrator call **errors**, throws, or crashes ComfyUI.
-- A tool returns **wrong, misleading, empty, or malformed** output — or succeeds
-  but did the wrong thing.
-- A **silent failure**: something didn't happen that should have, with no error.
-- You had to **retry, work around, or take an awkward path** because a tool or the
-  panel misbehaved or lacked an obvious capability. (Report it even though you
-  recovered — the workaround is the signal.)
-- Behavior that is **confusing, inconsistent, or surprising** for our own surface
-  (a flag that didn't take, a stale/duplicate state, a race, a reconnect glitch).
+- A tool, panel, or orchestrator call errors, throws, or crashes ComfyUI.
+- A tool returns wrong, misleading, empty, or malformed output, or succeeds but
+  did the wrong thing.
+- A silent failure, where something that should have happened did not and no
+  error appeared.
+- You had to retry, work around, or take an awkward path because a tool or the
+  panel misbehaved or lacked an obvious capability. Report it even though you
+  recovered; the workaround is the signal.
+- Behavior that is confusing, inconsistent, or surprising in our own tools or
+  panel (a flag that did not take, a stale or duplicate state, a race, a
+  reconnect glitch).
 
-**Still NOT bug reports** (route elsewhere): ordinary generation/workflow failures —
-OOM, missing model/node, bad params, user mistakes — use `troubleshooting`; and
-third-party/custom-node bugs go to **their** GitHub (Step 6), where you still
-**offer and ask first** rather than auto-file.
+Still NOT bug reports (route elsewhere): ordinary generation and workflow
+failures such as OOM, a missing model or node, bad params, or user mistakes go
+to `troubleshooting`. Third-party and custom-node bugs go to their GitHub
+(Step 6), where you still offer and ask first rather than auto-file.
 
-Don't over-think dedup or "is it worth it" — the intake Worker dedupes server-side,
-so a duplicate is a no-op. **Under-reporting is the expensive failure mode.** When
-in doubt during beta, file it and move on.
+Do not over-think dedup or whether it is worth it. The intake Worker dedupes
+server-side, so a duplicate is a no-op. Under-reporting is the expensive
+failure mode. When in doubt during beta, file it and move on.
 
 ## Step 1 — Diagnose (root cause, not symptom)
 
-- Read the exact error + stack. For ComfyUI runs: `get_history(action="diagnose")`, `get_system_stats (action:"logs")`.
-- Follow the stack to the actual file/line. Read the code there.
-- Form a concrete root cause + a minimal fix you can defend.
+- Read the exact error and stack. For ComfyUI runs: `get_history(action="diagnose")`, `get_system_stats (action:"logs")`.
+- Follow the stack to the actual file and line. Read the code there.
+- Form a concrete root cause and a minimal fix you can defend.
 
 ## Step 2 — Classify whose bug it is
 
-- **OURS** — `comfyui-mcp` (server/tools/orchestrator/agent),
+- **Ours.** `comfyui-mcp` (server/tools/orchestrator/agent),
   `comfyui-mcp-panel` (the sidebar pack / panel JS / `__init__.py`), or
-  `comfyui-mcp-issue-worker` (the intake Worker). → Steps 3–5 (self-heal + Worker/PR).
-- **THIRD-PARTY** — a custom node pack, or **ComfyUI core** itself. → Step 6 (their GitHub; our Worker can't file there).
+  `comfyui-mcp-issue-worker` (the intake Worker). Go to Steps 3 to 5 (self-heal, then Worker or PR).
+- **Third-party.** A custom node pack, or ComfyUI core itself. Go to Step 6 (their GitHub; our Worker cannot file there).
 
 ## Step 3 — Fix it locally FIRST (this is the default, not "when you can")
 
-For any defect in **OUR** repos (`comfyui-mcp` / `comfyui-mcp-panel` /
-`comfyui-mcp-issue-worker`), the default is to **fix it before/alongside
-filing** — patch the code **where it actually runs** so the user is unblocked
-immediately and the report arrives as a near-PR (code + diff), not just a ticket.
-Do this every time; don't wait to be asked and don't downgrade it to optional.
+For any defect in OUR repos (`comfyui-mcp` / `comfyui-mcp-panel` /
+`comfyui-mcp-issue-worker`), the default is to fix it before or alongside
+filing. Patch the code where it actually runs so the user is unblocked at once
+and the report arrives as a near-PR (code plus diff) rather than a ticket. Do
+this every time; do not wait to be asked and do not downgrade it to optional.
 
 - `comfyui-mcp`: find the running install from the stack path. If a source
   checkout exists, fix the `.ts` source and `npm run build`; if only the built
-  package is present, patch the `dist/*.js` directly. Then it takes effect on
-  the next respawn that reloads it: `panel_reload` covers the agent and its
+  package is present, patch the `dist/*.js` directly. The patch takes effect on
+  the next respawn that reloads it. `panel_reload` covers the agent and its
   comfyui tool server, but the long-lived orchestrator process (which serves
-  the `panel_*` tools) only reloads code on a full process restart
-  (Disconnect→Connect does NOT restart it either — say so when the patch is in
-  that process).
+  the `panel_*` tools) only reloads code on a full process restart. Disconnect
+  followed by Connect does NOT restart it either; say so when the patch is in
+  that process.
 - `comfyui-mcp-panel`: patch the file under the pack (`web/js/…` for UI,
-  `__init__.py` for the pack) — UI changes need a hard-refresh.
+  `__init__.py` for the pack). UI changes need a hard refresh.
 
-**Exactly ONE attempt — don't spiral.** Make one focused, minimal, reversible
-patch. If that single attempt doesn't land — or the bug is genuinely
-**upstream-only** (in the SDK, ComfyUI, or it needs a release you can't make from
-here) — stop patching, mark it `upstream-only`, and include the **precise change
-needed** in the report instead. It's fine that a future update will overwrite a
-local patch — that's expected; the user runs the patched version in the meantime.
-Capture the diff (`git diff`, or diff the file you touched) — Step 5 attaches it.
+**Exactly ONE attempt. Do not spiral.** Make one focused, minimal, reversible
+patch. If that single attempt does not land, or the bug is upstream-only (in
+the SDK, in ComfyUI, or it needs a release you cannot make from here), stop
+patching, mark it `upstream-only`, and include the precise change needed in the
+report instead. A future update will overwrite a local patch. That is expected;
+the user runs the patched version in the meantime. Capture the diff
+(`git diff`, or diff the file you touched) so Step 5 can attach it.
 
-(THIRD-PARTY / ComfyUI-core defects are the exception: there you still **offer
-and ask first** before patching or filing — see Step 6.)
+THIRD-PARTY and ComfyUI-core defects are the exception. There you still offer
+and ask first before patching or filing (Step 6).
 
 ## Step 4 — Verify the fix
 
-- `comfyui-mcp`: run the safety gate — `npm run build` (exit 0), `npm test`,
-  `npm run test:agent`. Don't claim a fix that fails the gate.
+- `comfyui-mcp`: run the safety gate, which is `npm run build` (exit 0),
+  `npm test`, and `npm run test:agent`. Do not claim a fix that fails the gate.
 - Otherwise: re-run the operation that failed and confirm it now works.
 
 ## Step 5 — Report it to US (autonomous)
 
-**Always scrub secrets first** (you're sending this off-machine without a human
-reading it — this is non-negotiable): replace any `sk-…`, `ghp_…`,
+**Always scrub secrets first.** You are sending this off-machine without a
+human reading it, so this is non-negotiable. Replace any `sk-…`, `ghp_…`,
 `github_pat_…`, `Bearer …`, `ANTHROPIC_API_KEY`, `CIVITAI_API_TOKEN`, `HF_TOKEN`,
-`.env`/`.dev.vars` contents, `Authorization:` headers, `?token=`/`?key=` query
-params with `[REDACTED]`; shorten home paths to `~/…`. (The intake Worker runs a
-second secret-scrub server-side as a backstop, but treat that as a safety net you
-must never rely on — scrub here, every time.)
+`.env`/`.dev.vars` contents, `Authorization:` headers, and `?token=`/`?key=`
+query params with `[REDACTED]`; shorten home paths to `~/…`. The intake Worker
+runs a second secret-scrub server-side as a backstop, but never rely on it.
+Scrub here, every time.
 
-Build the body (reuse this shape) — and when you fixed it, **include the diff**
-so we can reproduce and merge:
+Build the body (reuse this shape). When you fixed it, include the diff so we
+can reproduce and merge:
 
 ```
 ### What happened / root cause
@@ -134,34 +138,36 @@ ENV line is missing them: mcp = its `package.json` `version` (or `install_comfyu
 panel = `PANEL_VERSION` near the top of the pack's `comfyui-mcp-panel.js`.
 ```
 
-Then file it. The report itself is autonomous **via the Worker** (below) — it
-files under the PROJECT's own server-side identity, so no user GitHub account is
+Then file it. The report itself is autonomous via the Worker (below). It files
+under the PROJECT's own server-side identity, so no user GitHub account is
 touched and nothing is done as the user. That is the default and needs no ask.
 
-- **Default path (everyone) — the Worker:** POST the report to our intake Worker.
-  No GitHub account needed; files/dedups under the project identity, never yours.
-  This is the autonomous path — use it for every our-repo bug REPORT.
-- **Engineer path — ONLY with the user's explicit go-ahead, and only if THEY want
-  to author a fix PR under THEIR GitHub account.** Running `gh` files/forks/PRs as
-  **whatever account is currently `gh`-authed on this machine** — that is acting as
-  the user's GitHub identity, so it is NOT autonomous and NOT a Worker fallback.
-  Before ever running `gh` to file/fork/PR: run `gh auth status`, tell the user
-  **which account** it would act as, and proceed only if they explicitly agree to
-  submit as that account. If they just want the bug reported (not to personally
-  author a PR), use the Worker — never fork/PR/`gh issue create` under an ambient
-  account they didn't choose. If the fix is clean and they agree: branch/`gh repo
-  fork`, apply the fix, run the gate (Step 4), push, `gh pr create --fill`.
-  **Never merge** — it's for our review. (A Worker 403/failure falls back to the
-  `report_issue` prefilled link below — NEVER to an unprompted `gh` command.)
+- **Default path for everyone is the Worker.** POST the report to our intake
+  Worker. No GitHub account needed; it files and dedups under the project
+  identity, never yours. This is the autonomous path. Use it for every our-repo
+  bug REPORT.
+- **Engineer path, ONLY with the user's explicit go-ahead, and only if THEY
+  want to author a fix PR under THEIR GitHub account.** Running `gh` files,
+  forks, and PRs as whatever account is currently `gh`-authed on this machine.
+  That is acting as the user's GitHub identity, so it is NOT autonomous and NOT
+  a Worker fallback. Before ever running `gh` to file, fork, or PR: run
+  `gh auth status`, tell the user which account it would act as, and proceed
+  only if they explicitly agree to submit as that account. If they only want
+  the bug reported (not to personally author a PR), use the Worker. Never fork,
+  PR, or `gh issue create` under an ambient account they did not choose. If the
+  fix is clean and they agree: branch or `gh repo fork`, apply the fix, run the
+  gate (Step 4), push, `gh pr create --fill`. **Never merge**; it is for our
+  review. A Worker 403 or failure falls back to the `report_issue` prefilled
+  link below, NEVER to an unprompted `gh` command.
 
-  The Worker POST — no GitHub account needed:
+  The Worker POST needs no GitHub account.
 
-  The Worker files the issue **synchronously**: on success the POST response
-  ALWAYS carries the issue `url` inline (`{ ok:true, url, number, deduped?,
-  job_id }`), so the manual path is **one POST — no polling needed**. This shell
-  snippet is the **manual / non-Claude fallback** and **requires `jq`** for safe
-  JSON parsing (Claude agents should use the `report_issue` tool, which already
-  implements this correctly).
+  The Worker files the issue synchronously. On success the POST response ALWAYS
+  carries the issue `url` inline (`{ ok:true, url, number, deduped?, job_id }`),
+  so the manual path is one POST with no polling. This shell snippet is the
+  manual, non-Claude fallback and requires `jq` for safe JSON parsing. Claude
+  agents should use the `report_issue` tool, which already implements this
+  correctly.
 
   ```bash
   # URL is baked in; override with $COMFYUI_MCP_ISSUE_WORKER_URL if set. The
@@ -205,7 +211,7 @@ touched and nothing is done as the user. That is the default and needs no ask.
     fi
   fi
   ```
-  **On Windows, use this instead — it needs no `jq` and no Python** (#937). The
+  **On Windows, use this instead. It needs no `jq` and no Python** (#937). The
   `jq` requirement above is what pushed Windows agents onto Python's
   `urllib.request` in the first place, and that client's default User-Agent is
   exactly the signature Cloudflare rejects. PowerShell parses JSON natively, so
@@ -237,56 +243,57 @@ touched and nothing is done as the user. That is the default and needs no ask.
   ```
 
   A real `url` from the POST is the only "filed" outcome. Any submit failure
-  (`401`/non-2xx/timeout/unreachable), `ok` not `true`, a `status:"error"` body,
-  a missing/invalid url, or invalid JSON → fall back to `report_issue` for a
-  prefilled link the user submits in one click; never tell the user it was
-  accepted without a real issue link. (A `GET /status/<job_id>` endpoint exists
-  to optionally re-fetch the link later, but it is NOT needed to file — don't
-  poll.) **Surface the link only if they want it** — the filing is autonomous,
+  (`401`, non-2xx, timeout, unreachable), `ok` not `true`, a `status:"error"`
+  body, a missing or invalid url, or invalid JSON means fall back to
+  `report_issue` for a prefilled link the user submits in one click. Never tell
+  the user it was accepted without a real issue link. A `GET /status/<job_id>`
+  endpoint exists to re-fetch the link later, but it is NOT needed to file, so
+  do not poll. Show the link only if they want it. The filing is autonomous,
   so a one-line "filed #123" is enough (Step 7).
-- **Fallback** (no `gh`, no Worker URL): use the `report_issue` tool → a prefilled
-  GitHub issue link the user can submit in one click.
+- **Fallback** (no `gh`, no Worker URL): use the `report_issue` tool for a
+  prefilled GitHub issue link the user can submit in one click.
 
 ## Step 6 — Third-party / ComfyUI-core bugs (offer + ASK first — not autonomous)
 
-Our Worker only files into OUR repos, so these go to **their** GitHub. Unlike
-our-repo defects (Steps 3–5, which you handle autonomously), third-party bugs
-are **offer-and-ask** at every step — patching someone else's node and posting
-to someone else's tracker are the user's calls, not yours:
+Our Worker only files into OUR repos, so these go to their GitHub. Unlike
+our-repo defects (Steps 3 to 5, which you handle autonomously), third-party
+bugs are offer-and-ask at every step. Patching someone else's node and posting
+to someone else's tracker are the user's calls, not yours.
 
-- **Ask before patching.** You may *offer* a local workaround (e.g. patch the
-  custom node so the user isn't blocked) — but apply it only once the user says
-  yes. Same keep-the-patch logic once approved.
-- **Ask before filing.** Identify the node/project's GitHub repo (from its
-  metadata / `install_custom_node` (`action: "list"`) / its folder), then — with the user's
-  go-ahead — use `report_issue` with that `owner/repo` (it returns a **prefilled
-  link the user reviews and submits**; it does not auto-file into third-party
-  repos), OR `gh issue create -R owner/repo` if `gh` is authed and they agree.
-- If the user has **no GitHub account**, briefly offer to walk them through
-  creating one (github.com/signup) so they can file it — that's how the bug
-  reaches the people who can fix it. We can't file it for them.
+- **Ask before patching.** You may offer a local workaround (for example, patch
+  the custom node so the user is not blocked), but apply it only once the user
+  says yes. Same keep-the-patch logic once approved.
+- **Ask before filing.** Identify the node or project's GitHub repo (from its
+  metadata, `install_custom_node` (`action: "list"`), or its folder). Then, with
+  the user's go-ahead, use `report_issue` with that `owner/repo` (it returns a
+  prefilled link the user reviews and submits; it does not auto-file into
+  third-party repos), OR `gh issue create -R owner/repo` if `gh` is authed and
+  they agree.
+- If the user has no GitHub account, offer to walk them through creating one
+  (github.com/signup) so they can file it. That is how the bug reaches the
+  people who can fix it. We cannot file it for them.
 
 ## Step 7 — Inform the user (the only message they need)
 
-A short, concrete summary — not a request. e.g.:
+A short, concrete summary, not a request. For example:
 
 > Hit a bug in `panel_set_widget` (it errored on subgraph inner nodes). I
 > patched it locally so it works now, and filed a bugfix report on your behalf
 > (#123). You're running the patched version; a future update will replace the
 > patch once we ship the fix upstream.
 
-If upstream-only: say it's logged with us (or the third-party project) and what
-the temporary workaround is, if any.
+If upstream-only, say it is logged with us (or the third-party project) and
+what the temporary workaround is, if any.
 
 ## Absolute rules
 
-- **Scrub secrets** before anything leaves the machine — every time.
-- **Never merge** a PR; humans review.
-- Patches stay **minimal and reversible**; never touch the user's workflow data
+- Scrub secrets before anything leaves the machine, every time.
+- Never merge a PR; humans review.
+- Patches stay minimal and reversible; never touch the user's workflow data
   without asking.
-- Don't claim a fix you didn't verify (Step 4).
+- Do not claim a fix you did not verify (Step 4).
 
 ## Sources
 
 - **Official:** comfyui-mcp intake Worker and this skill (this repo).
-- **Empirical:** none — product reporting policy, not reverse-engineered from a vendor graph.
+- **Empirical:** none. Product reporting policy, not reverse-engineered from a vendor graph.

@@ -1,23 +1,23 @@
 ---
 name: z-image-txt2img
-description: Build Z-Image txt2img workflows — RedCraft checkpoint, Z-Image Turbo/Base LoRAs, ControlNet, and sampler presets
+description: Build Z-Image txt2img workflows. RedCraft checkpoint, Z-Image Turbo/Base LoRAs, ControlNet, and sampler presets
 globs:
   - "**/*.json"
 ---
 
 # Z-Image Text-to-Image Workflows
 
-> ⚠️ **Launch flag:** Z-Image does **not** sample correctly under
+> **Launch flag.** Z-Image does not sample correctly under
 > `--use-sage-attention` (black / garbled output). Launch ComfyUI with
-> **`--use-pytorch-cross-attention`** for Z-Image. See
+> `--use-pytorch-cross-attention` for Z-Image. See
 > [`comfyui-launch-flags`](../comfyui-launch-flags/SKILL.md).
 
 ## Overview
 
-Z-Image is a 6B-parameter image generation model from Alibaba's Tongyi Lab using a Scalable Single-Stream DiT (S3-DiT) architecture. It uses a Qwen text encoder (not CLIP-L/T5). Its VAE shares the Flux VAE *architecture* (same tensor shapes, so the file is the same 320MB size) but ships **different weights** — it is NOT byte-identical to Flux's `ae.safetensors` and must be kept as a separate file (`z-image-ae.safetensors`) to avoid clobbering the Flux VAE. Two variants:
+Z-Image is a 6B-parameter image generation model from Alibaba's Tongyi Lab using a Scalable Single-Stream DiT (S3-DiT) architecture. It uses a Qwen text encoder (not CLIP-L/T5). Its VAE shares the Flux VAE architecture (same tensor shapes, so the file is the same 320MB size) but ships different weights. It is NOT byte-identical to Flux's `ae.safetensors` and must be kept as a separate file (`z-image-ae.safetensors`) to avoid clobbering the Flux VAE. Two variants:
 
-1. **Z-Image Base** (and RedCraft finetune) — Full model, supports negative prompts, LoRA training, ControlNet. 10-30 steps.
-2. **Z-Image Turbo** — DMD-distilled, 8-10 steps, no effective negative prompts (CFG baked in).
+1. Z-Image Base (and RedCraft finetune). Full model, supports negative prompts, LoRA training, ControlNet. 10-30 steps.
+2. Z-Image Turbo. DMD-distilled, 8-10 steps, no effective negative prompts (CFG baked in).
 
 ## Models
 
@@ -27,7 +27,7 @@ Z-Image is a 6B-parameter image generation model from Alibaba's Tongyi Lab using
 |-----------|------|-------|-------|
 | **Checkpoint** | `CheckpointLoaderSimple` | `redcraftRedzimageUpdatedJAN30_redzibDX1.safetensors` | 17GB, bundles UNET+CLIP+VAE |
 
-RedCraft is a Z-Image Base finetune by the RedCraft team. Designed for faster inference than stock Z-Image Base. Uses `CheckpointLoaderSimple` since it's a combined checkpoint — no need for separate loaders.
+RedCraft is a Z-Image Base finetune by the RedCraft team. Designed for faster inference than stock Z-Image Base. Uses `CheckpointLoaderSimple` since it's a combined checkpoint, so no separate loaders are needed.
 
 ### Z-Image Turbo (Separate Components — May Need Download)
 
@@ -96,7 +96,7 @@ When using `CheckpointLoaderSimple`, standard `CLIPTextEncode` works since the c
 
 ### Z-Image Base (Two-Stage)
 
-**Stage 1 — Primary generation:**
+Stage 1, primary generation:
 
 | Parameter | Value |
 |-----------|-------|
@@ -106,7 +106,7 @@ When using `CheckpointLoaderSimple`, standard `CLIPTextEncode` works since the c
 | Scheduler | beta |
 | Denoise | 1.0 |
 
-**Stage 2 — Detail refinement (optional img2img pass):**
+Stage 2, detail refinement (optional img2img pass):
 
 | Parameter | Value |
 |-----------|-------|
@@ -128,7 +128,7 @@ Supports negative prompts at CFG > 1.0:
 
 ### Z-Image Turbo
 
-Negative prompts are **not effective** — CFG is baked in via distillation. Use the positive prompt to guide away from unwanted elements instead.
+Negative prompts are not effective. CFG is baked in via distillation. Use the positive prompt to guide away from unwanted elements instead.
 
 Recommended positive-side avoidance template:
 ```
@@ -153,26 +153,26 @@ Dimensions must be divisible by 16.
 ### ZImageTurbo LoRAs
 
 Located in `loras/ZImageTurbo/` with subfolders:
-- `style/` — Style LoRAs (e.g., `TurboPussyZ_v2.safetensors`)
-- `concept/` — Concept LoRAs (e.g., `body from below.safetensors`, `ZITnsfwLoRA.safetensors`)
-- `character/` — Character LoRAs (e.g., `NSFW_master_ZIT_000008766.safetensors`)
-- `action/` — Action LoRAs
+- `style/`: style LoRAs (e.g., `TurboPussyZ_v2.safetensors`)
+- `concept/`: concept LoRAs (e.g., `body from below.safetensors`, `ZITnsfwLoRA.safetensors`)
+- `character/`: character LoRAs (e.g., `NSFW_master_ZIT_000008766.safetensors`)
+- `action/`: action LoRAs
 
-**Use with Z-Image Turbo base model.** Typical LoRA strength: 0.6–1.0.
+Use with Z-Image Turbo base model. Typical LoRA strength: 0.6 to 1.0.
 
 ### ZImageBase LoRAs
 
 Located in `loras/ZImageBase/` with subfolders:
-- `style/` — Style LoRAs (e.g., `NSGIRL-Z-Image-LoRA-By-MM744.safetensors`)
-- `concept/` — Concept LoRAs
+- `style/`: style LoRAs (e.g., `NSGIRL-Z-Image-LoRA-By-MM744.safetensors`)
+- `concept/`: concept LoRAs
 
-**Use with Z-Image Base or RedCraft.** Typical LoRA strength: 0.6–1.0.
+Use with Z-Image Base or RedCraft. Typical LoRA strength: 0.6 to 1.0.
 
 ### Z-Image-Aesthetic-Base v1
 
 General aesthetic improvement LoRA:
 - File: `Z-Image-Aesthetic-Base v1.safetensors` (352MB)
-- Settings: euler_ancestral + beta, 30 steps, CFG 4, strength 0.6–1.0
+- Settings: euler_ancestral + beta, 30 steps, CFG 4, strength 0.6 to 1.0
 
 ### Applying LoRAs
 
@@ -189,7 +189,7 @@ General aesthetic improvement LoRA:
 }
 ```
 
-**Note**: When using `CheckpointLoaderSimple` for RedCraft, model output is index 0 and CLIP output is index 1. When stacking multiple LoRAs, chain them sequentially.
+When using `CheckpointLoaderSimple` for RedCraft, model output is index 0 and CLIP output is index 1. When stacking multiple LoRAs, chain them sequentially.
 
 ## ControlNet
 
@@ -217,7 +217,7 @@ Outputs:
 
 A unified ControlNet supporting multiple condition types:
 - Canny, HED, Depth, Pose, MLSD
-- Strength: 0.65–0.80 (v2.1 recommended range)
+- Strength: 0.65 to 0.80 (v2.1 recommended range)
 - Best paired with `res_2s`, `res_5s`, or `res_2m` samplers + `beta57` scheduler
 
 ## Complete Workflow: RedCraft DX1 (Fast, 10-Step)
@@ -287,15 +287,15 @@ Bad: "masterpiece, best quality, 1girl, businesswoman, studio"
 | Z-Image Turbo separate | ~8GB UNET + CLIP | Very lightweight |
 | Z-Image Base separate | ~12GB | |
 
-- **Always `clear_vram`** before switching to Z-Image from another model family
+- Always `clear_vram` before switching to Z-Image from another model family
 - RedCraft is one of the most VRAM-efficient quality models available
 
 ## Tips
 
-1. RedCraft DX1 with 10 steps / CFG 1.0 is surprisingly fast and high quality for quick iteration
+1. RedCraft DX1 with 10 steps / CFG 1.0 is fast and high quality for quick iteration
 2. For maximum sharpness with Turbo LoRAs, use `dpmpp_sde` + `beta` scheduler
-3. The `Z-Image-Aesthetic-Base v1` LoRA at 0.6–0.8 strength noticeably improves output quality across all Z-Image Base variants
-4. Z-Image excels at photorealistic human generation — it's the go-to for portrait and fashion photography
+3. The `Z-Image-Aesthetic-Base v1` LoRA at 0.6 to 0.8 strength improves output quality across all Z-Image Base variants
+4. Z-Image is strong at photorealistic human generation and is the go-to for portrait and fashion photography
 5. When switching between Turbo and Base LoRAs, use the matching base model variant
 
 ## Sources
