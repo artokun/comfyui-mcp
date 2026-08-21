@@ -39,11 +39,32 @@
 // WHY A GRACE RATHER THAN IMMEDIATELY. The panel's frame is the better one — it
 // carries duration and metadata the history record does not. #1853 already
 // fills images from that record, so a dropped panel frame is not a missing
-// output. The normal path lands within a second or two; that is the only race
-// the grace has to win. Waiting past the panel's own 20 s recovery sweep
-// (#1789) left a successful run silent for 45 s when that sweep also missed
-// (#1556). A reconnect / missed-WS recovery does not wait at all: reconcile()
-// looks the still-owed prompt ids up in /history and synthesises immediately.
+// output. Waiting past the panel's own 20 s recovery sweep (#1789) left a
+// successful run silent for 45 s when that sweep also missed (#1556). A
+// reconnect / missed-WS recovery does not wait at all: reconcile() looks the
+// still-owed prompt ids up in /history and synthesises immediately.
+//
+// HOW LONG, AND WHY IT IS NOT A GUESS (#2001). #1556 replaced 45 s with 5 s on
+// the premise that the panel's frame "lands within a second or two; that is the
+// only race the grace has to win". It is not. The panel composes ONE
+// consolidated frame and does not send until every part of it resolves, and the
+// panel's OWN code bounds that work well past 5 s:
+//   • stills — per output it HEADs /view for Content-Length and loads the image
+//     to read its natural size, each bounded by an 8 s timeout
+//     (`fetchImageBytes` / `fetchImageDimensions` in comfyui-mcp-panel);
+//   • video — a storyboard contact sheet per segment, bounded at 25 s
+//     (`videoStoryboardTimeoutMs`).
+// So a 5 s grace pre-empts a panel that is merely still working, and the notice
+// it then writes says in so many words that the panel "never delivered its
+// completion event" — which #2001 reported as a panel bug, twice, five seconds
+// after two clean SaveImage renders. Back-to-back renders are exactly the shape
+// that stalls those probes: ComfyUI serves /view from the same process that is
+// already sampling the next job.
+//
+// The two defaults below are therefore READ OFF the panel's own bounds instead
+// of estimated, and the longer one is spent only on a run whose /history record
+// shows media the panel has to build a storyboard for. A stills run — #1556's
+// case and #2001's — is still answered in 10 s, not 45.
 // Past the grace there are exactly two shapes, and NEITHER loses anything —
 // stated precisely, because the coalescing one is the narrower case, not the
 // general one (gate finding):
@@ -77,6 +98,14 @@ interface ArmedCompletion {
   status: CompletionStatus;
   /** Monotonic-ish ms (the injected clock) when WE observed the finish. */
   observedAt: number;
+  /**
+   * This arm reached the stills grace and /history showed media the panel has
+   * to build a storyboard for, so it was re-armed ONCE against the longer
+   * bound. Set on the re-arm and never cleared: the extension is granted at
+   * most once per run, so a panel frame that is never coming still lands at
+   * `storyboardGraceMs` rather than being deferred again and again (#2001).
+   */
+  extended?: true;
 }
 
 export interface RunCompletionWatchdogDeps {
@@ -101,16 +130,35 @@ export interface RunCompletionWatchdogDeps {
   lookupStatus?: (promptId: string) => Promise<CompletionStatus | null>;
   /** How long to let the panel's own in-flight frame win before filling in. */
   graceMs?: number;
+  /** The extended bound for a run whose outputs the panel has to storyboard
+   *  before it can send (#2001). Never applies to reconcile(), which is a
+   *  missed-WS recovery and does not wait at all. */
+  storyboardGraceMs?: number;
   now?: () => number;
 }
 
 /**
- * Past the panel's normal 1–2 s `executed` frame, not past its 20 s recovery
- * sweep. #1853 already attaches history outputs, so waiting for that sweep
- * only prolonged the silence when the sweep itself was the thing that missed
- * (#1556). Reconnect skips this entirely (see reconcile()).
+ * Past the panel's own bounded STILLS compose — two 8 s probes per output, run
+ * in parallel (`fetchImageBytes` / `fetchImageDimensions`) — and not past its
+ * 20 s recovery sweep. #1853 already attaches history outputs, so waiting for
+ * that sweep only prolonged the silence when the sweep itself was the thing
+ * that missed (#1556). Reconnect skips this entirely (see reconcile()).
+ *
+ * #2001 — this was 5 s, which is SHORTER than the panel's own bound, so one
+ * stalled HEAD against a ComfyUI busy with the next render was enough for the
+ * orchestrator to declare the panel silent while it was still composing.
  */
-export const DEFAULT_SYNTHESIS_GRACE_MS = 5_000;
+export const DEFAULT_SYNTHESIS_GRACE_MS = 10_000;
+
+/**
+ * The longer bound, spent ONLY on a run whose /history record carries media
+ * that cannot be attached inline — i.e. exactly the runs for which the panel is
+ * building a video storyboard before it sends. Read off the panel's own
+ * `videoStoryboardTimeoutMs` (25 s), past which the panel abandons the
+ * storyboard and sends its note-only fallback, so beyond this "still composing"
+ * has stopped being a possible explanation for the silence (#2001).
+ */
+export const DEFAULT_STORYBOARD_GRACE_MS = 30_000;
 
 /** Cap on armed observations. A run's arm is dropped the moment it expires, so
  *  this only ever bounds a burst of self-queued renders finishing at once. */
@@ -336,9 +384,12 @@ export function synthesizeCompletionPayload(
     completion_source: "orchestrator-history-watchdog",
     run_status: armed.status,
     note:
-      `The render you queued (prompt ${armed.promptId}) ${outcome}, but the panel never delivered its ` +
-      `completion event, so this notice was synthesised by the orchestrator from ComfyUI itself — its ` +
-      `execution event or its history record — about ${waitedS}s after the run finished. ${next}`,
+      `The render you queued (prompt ${armed.promptId}) ${outcome}. No completion for it reached the ` +
+      `orchestrator in the ${waitedS}s after that finish was observed here, so this notice was ` +
+      `synthesised from ComfyUI itself — its execution event or its history record. That is all this ` +
+      `orchestrator observed: the panel may never have sent its own completion, or it may still be ` +
+      `composing one. If a completion for this same prompt id arrives later, flagged a possible repeat, ` +
+      `it is THIS run and not a second render — do not report it twice. ${next}`,
   };
 }
 
@@ -348,8 +399,13 @@ export function createRunCompletionWatchdog({
   resolveOutputs,
   lookupStatus,
   graceMs = DEFAULT_SYNTHESIS_GRACE_MS,
+  storyboardGraceMs = DEFAULT_STORYBOARD_GRACE_MS,
   now = () => Date.now(),
 }: RunCompletionWatchdogDeps): RunCompletionWatchdog {
+  /** The extended bound can only ever be LONGER than the ordinary one: a caller
+   *  that passes a shorter storyboard grace must not make an extended arm fire
+   *  sooner than an un-extended one (#2001). */
+  const extendedGraceMs = Math.max(graceMs, storyboardGraceMs);
   /** promptId → the observation we are holding. FIRST observation wins: a
    *  re-observation must not push the deadline out (that is how a repeatedly
    *  re-reported completion would never expire and the agent would wait
@@ -374,7 +430,8 @@ export function createRunCompletionWatchdog({
     if (armed.size === 0) return;
     const at = now();
     for (const entry of [...armed.values()]) {
-      if (!ignoreGrace && at - entry.observedAt < graceMs) continue;
+      const dueAfter = entry.extended ? extendedGraceMs : graceMs;
+      if (!ignoreGrace && at - entry.observedAt < dueAfter) continue;
       // Disarm FIRST and unconditionally: whatever happens below, this
       // observation is spent. Leaving it armed on a throwing deliver() would
       // re-fire it on every later tick.
@@ -416,6 +473,32 @@ export function createRunCompletionWatchdog({
             continue;
           }
           if (!ticket) continue;
+          // #2001 — DO NOT ANNOUNCE A SILENCE THE PANEL HAS NOT REACHED YET.
+          //
+          // Media that cannot be attached inline (a SaveVideo .mp4) is exactly
+          // the shape for which the panel is building a storyboard contact
+          // sheet before it sends its ONE consolidated frame, and the panel
+          // bounds that at 25 s — past our ordinary grace. Re-arm this
+          // observation ONCE against that bound rather than pre-empt it. The
+          // extension is granted at most once (`extended` is never cleared), so
+          // a frame that is genuinely never coming is still answered at
+          // `storyboardGraceMs`, never later.
+          //
+          // Deliberately NOT applied on reconcile(): that path is a missed-WS /
+          // hello recovery whose whole point is that it does not wait (#1556).
+          if (
+            !ignoreGrace &&
+            !entry.extended &&
+            partitionAttachableMedia(images).other.length > 0
+          ) {
+            armed.set(entry.promptId, { ...entry, extended: true });
+            logger.debug(
+              `[run-completion-watchdog] prompt ${entry.promptId} produced media the panel has to storyboard — holding the synthesis until ${Math.round(
+                extendedGraceMs / 1000,
+              )}s after the finish instead of ${Math.round(graceMs / 1000)}s (#2001)`,
+            );
+            continue;
+          }
         }
         // #1789 item 3 — the failure is OBSERVABLE from here on. Until now the
         // only detector of a lost completion was a human noticing the agent had
@@ -423,7 +506,7 @@ export function createRunCompletionWatchdog({
         logger.warn(
           `[run-completion-watchdog] prompt ${entry.promptId} finished (${entry.status}) ${Math.round(
             (at - entry.observedAt) / 1000,
-          )}s ago and the panel NEVER reported its completion — synthesising one from the orchestrator's own ComfyUI observation so the agent that was told to end its turn and wait is not left idle (#1789)`,
+          )}s ago and NO completion for it has reached the orchestrator — synthesising one from its own ComfyUI observation so the agent that was told to end its turn and wait is not left idle. The panel may never have sent one or may still be composing it; either way this run is answered now (#1789/#2001)`,
         );
         deliver(synthesizeCompletionPayload(entry, { deliveredAt: at, images }), ticket);
       } catch (err) {

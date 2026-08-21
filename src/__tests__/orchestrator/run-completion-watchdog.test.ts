@@ -26,6 +26,7 @@ import {
   completionStatusFromHistoryEntry,
   historyOutputRefsFromEntry,
   DEFAULT_SYNTHESIS_GRACE_MS,
+  DEFAULT_STORYBOARD_GRACE_MS,
 } from "../../orchestrator/run-completion-watchdog.js";
 import type { CompletionStatus } from "../../services/queue-monitor.js";
 import { RunCompletions, type CompletionPayload, type RunTicket } from "../../orchestrator/run-completion-journal.js";
@@ -227,8 +228,10 @@ describe("#1789: a completion the panel never reported is filled in from ComfyUI
 describe("#1789: awaitingCompletion answers 'is this run still owed its notification?'", () => {
   it("#1556: the grace no longer waits for a panel sweep that may never come", () => {
     // The panel's own recovery sweep is 20 s. Waiting past it is what left the
-    // reporter's successful SaveImage silent for 45 s. 5 s is past the normal
-    // 1–2 s frame; reconnect skips even that.
+    // reporter's successful SaveImage silent for 45 s, so the grace stays under
+    // it and reconnect skips even that (reconcile()). #2001 raised the number
+    // from 5 s to 10 s because 5 s was under the panel's OWN still-probe bound —
+    // see the #2001 block below for the behaviour that pins it.
     expect(DEFAULT_SYNTHESIS_GRACE_MS).toBeLessThan(20_000);
     expect(DEFAULT_SYNTHESIS_GRACE_MS).toBeGreaterThan(1_000);
   });
@@ -270,7 +273,17 @@ describe("#1789: the synthesised note claims only what was observed", () => {
     const note = String(payload.note);
     expect(note).toContain(PID);
     expect(note).toContain("46s");
-    expect(note).toContain("the panel never delivered its completion");
+    // #2001 — WHAT WAS OBSERVED, NOT WHAT THE PANEL DID. This used to read "the
+    // panel never delivered its completion event", which the orchestrator cannot
+    // know: all it saw is that no completion reached IT. A panel still composing
+    // its frame (bounded at 8 s per still probe, 25 s per video storyboard) was
+    // reported as a broken panel, and #2001 is that notice, filed as a bug.
+    expect(note).toContain("No completion for it reached the orchestrator");
+    expect(note).not.toContain("the panel never delivered");
+    // …and the agent is told what the late panel frame it may still get MEANS,
+    // so one render is not reported as two.
+    expect(note).toContain("possible repeat");
+    expect(note).toContain("not a second render");
     // It must NOT pretend to carry pixels it never fetched.
     expect(payload.images).toEqual([]);
     expect(note).toContain('get_image (action:"list_outputs")');
@@ -361,7 +374,14 @@ describe("#1853: a dropped panel frame still yields the completed prompt's histo
     expect(RunCompletions.openRun(PID, { tabId: TAB, conversation: CONV })).toBe(true);
 
     wd.observe([{ promptId: PID, status: "success" }]);
+    // #2001 — a SaveVideo run is one the panel has to storyboard before it can
+    // send, and it bounds that at 25 s. The ordinary grace must NOT pre-empt it.
     clock.t += DEFAULT_SYNTHESIS_GRACE_MS;
+    await wd.tick();
+    expect(delivered).toHaveLength(0);
+    expect(wd.armedCount()).toBe(1);
+
+    clock.t += DEFAULT_STORYBOARD_GRACE_MS - DEFAULT_SYNTHESIS_GRACE_MS;
     await wd.tick();
 
     expect(delivered).toHaveLength(1);
@@ -666,5 +686,174 @@ describe("#1556: completionStatusFromHistoryEntry is fail-closed", () => {
         },
       })),
     ).toBe("success");
+  });
+});
+
+// #2001 — THE ORCHESTRATOR MUST NOT ANNOUNCE A SILENCE THE PANEL HAS NOT REACHED.
+//
+// #1556 cut the grace to 5 s on the premise that the panel's frame "lands within
+// a second or two". The panel composes ONE consolidated frame and sends nothing
+// until every part of it resolves, and its own code bounds that work past 5 s:
+// 8 s per still probe (`fetchImageBytes` / `fetchImageDimensions`) and 25 s per
+// video storyboard (`videoStoryboardTimeoutMs`). At 5 s the orchestrator was
+// therefore pre-empting a working panel and telling the agent, in words, that
+// the panel "never delivered its completion event" — which is what #2001
+// reported, twice, five seconds after two clean SaveImage renders.
+//
+// Both halves are pinned by BEHAVIOUR with literal millisecond bounds, not by
+// re-reading the constants under test: put the old 5 s back, or drop the
+// storyboard extension, and these fail.
+describe("#2001: the grace is read off the panel's own send bounds", () => {
+  /** A completed stills-only run — nothing here needs a storyboard. */
+  const stillsHistory = (promptId: string): HistoryEntry =>
+    ({
+      prompt: {},
+      outputs: { "9": { images: [{ filename: "ComfyUI_00042_.png", type: "output" }] } },
+      status: {
+        status_str: "success",
+        completed: true,
+        messages: [["execution_success", { prompt_id: promptId, timestamp: 2_000 }]],
+      },
+    }) as HistoryEntry;
+
+  const stillsWatchdog = (clock: { t: number }) =>
+    makeWatchdog(clock, {
+      resolveOutputs: (id) =>
+        resolveHistoryCompletionImages(id, async (promptId) => ({ [promptId]: stillsHistory(promptId) })),
+    });
+
+  it("a stills run is still composing at 8 s — the panel's own probe bound — so nothing is synthesised", async () => {
+    const clock = { t: 30_000_000 };
+    const { wd, delivered } = stillsWatchdog(clock);
+    expect(RunCompletions.openRun(PID, { tabId: TAB, conversation: CONV })).toBe(true);
+    wd.observe([{ promptId: PID, status: "success" }]);
+
+    // 8 000 ms is the panel's OWN bound on each of the two per-output probes it
+    // awaits before it sends. A grace at or under this races a healthy panel.
+    clock.t += 8_000;
+    await wd.tick();
+    expect(delivered).toHaveLength(0);
+    expect(wd.armedCount()).toBe(1);
+
+    clock.t += DEFAULT_SYNTHESIS_GRACE_MS - 8_000;
+    await wd.tick();
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0].payload.prompt_id).toBe(PID);
+  });
+
+  it("a stills run is NOT given the storyboard extension — it lands on the ordinary grace", async () => {
+    const clock = { t: 31_000_000 };
+    const { wd, delivered } = stillsWatchdog(clock);
+    RunCompletions.openRun(PID, { tabId: TAB, conversation: CONV });
+    wd.observe([{ promptId: PID, status: "success" }]);
+
+    clock.t += DEFAULT_SYNTHESIS_GRACE_MS;
+    await wd.tick();
+    expect(delivered).toHaveLength(1);
+    expect(wd.armedCount()).toBe(0);
+  });
+
+  it("a run the panel must storyboard is held past 25 s, then answered — the extension is granted ONCE", async () => {
+    const clock = { t: 32_000_000 };
+    const entry = saveVideoHistoryEntry(PID);
+    const { wd, delivered } = makeWatchdog(clock, {
+      resolveOutputs: (id) =>
+        resolveHistoryCompletionImages(id, async (promptId) => ({ [promptId]: entry })),
+    });
+    RunCompletions.openRun(PID, { tabId: TAB, conversation: CONV });
+    wd.observe([{ promptId: PID, status: "success" }]);
+
+    clock.t += DEFAULT_SYNTHESIS_GRACE_MS;
+    await wd.tick();
+    expect(delivered).toHaveLength(0);
+
+    // 25 000 ms is the panel's own storyboard bound; still inside it.
+    clock.t += 25_000 - DEFAULT_SYNTHESIS_GRACE_MS;
+    await wd.tick();
+    expect(delivered).toHaveLength(0);
+    expect(wd.armedCount()).toBe(1);
+
+    // Past it — the panel has abandoned the storyboard and sent its note-only
+    // fallback by now, so silence is no longer explained by composing.
+    clock.t += DEFAULT_STORYBOARD_GRACE_MS - 25_000;
+    await wd.tick();
+    expect(delivered).toHaveLength(1);
+    // ONCE: nothing is left armed to be extended a second time.
+    expect(wd.armedCount()).toBe(0);
+
+    // …and a further tick long afterwards adds nothing.
+    clock.t += DEFAULT_STORYBOARD_GRACE_MS * 4;
+    await wd.tick();
+    expect(delivered).toHaveLength(1);
+  });
+
+  it("the panel's own frame landing during the extension wins — nothing is synthesised at all", async () => {
+    const clock = { t: 33_000_000 };
+    const entry = saveVideoHistoryEntry(PID);
+    const { wd, delivered } = makeWatchdog(clock, {
+      resolveOutputs: (id) =>
+        resolveHistoryCompletionImages(id, async (promptId) => ({ [promptId]: entry })),
+    });
+    RunCompletions.openRun(PID, { tabId: TAB, conversation: CONV });
+    wd.observe([{ promptId: PID, status: "success" }]);
+
+    clock.t += DEFAULT_SYNTHESIS_GRACE_MS;
+    await wd.tick();
+    expect(delivered).toHaveLength(0);
+
+    // The panel finishes its storyboard at 18 s and sends the real frame.
+    RunCompletions.record(TAB, { kind: "executed", prompt_id: PID }, { conversation: CONV });
+
+    clock.t += DEFAULT_STORYBOARD_GRACE_MS;
+    await wd.tick();
+    expect(delivered).toHaveLength(0);
+    expect(wd.armedCount()).toBe(0);
+  });
+
+  it("reconcile() does NOT wait for the storyboard bound — a missed-WS recovery answers now", async () => {
+    const clock = { t: 34_000_000 };
+    const entry = saveVideoHistoryEntry(PID);
+    const { wd, delivered } = makeWatchdog(clock, {
+      resolveOutputs: (id) =>
+        resolveHistoryCompletionImages(id, async (promptId) => ({ [promptId]: entry })),
+      lookupStatus: async (id) => resolveHistoryCompletionStatus(id, async (pid) => ({ [pid]: entry })),
+    });
+    RunCompletions.openRun(PID, { tabId: TAB, conversation: CONV });
+
+    await wd.reconcile(RunCompletions.owedCompletions().map((t) => t.promptId));
+
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0].payload.prompt_id).toBe(PID);
+    expect(wd.armedCount()).toBe(0);
+  });
+
+  it("a storyboard grace shorter than the ordinary one can never make an extended arm fire sooner", async () => {
+    const clock = { t: 35_000_000 };
+    const entry = saveVideoHistoryEntry(PID);
+    const delivered: Array<{ payload: CompletionPayload; ticket: RunTicket }> = [];
+    const wd = createRunCompletionWatchdog({
+      awaiting: (id) => RunCompletions.awaitingCompletion(id),
+      deliver: (payload, ticket) => {
+        delivered.push({ payload, ticket });
+        RunCompletions.record(ticket.tabId, payload, { conversation: ticket.conversation ?? CONV });
+      },
+      resolveOutputs: (id) =>
+        resolveHistoryCompletionImages(id, async (promptId) => ({ [promptId]: entry })),
+      graceMs: 10_000,
+      storyboardGraceMs: 1_000, // misconfigured: SHORTER than the ordinary grace
+      now: () => clock.t,
+    });
+    RunCompletions.openRun(PID, { tabId: TAB, conversation: CONV });
+    wd.observe([{ promptId: PID, status: "success" }]);
+
+    clock.t += 10_000;
+    await wd.tick();
+    // Extended, and the floor holds: it is due at max(grace, storyboardGrace),
+    // i.e. still 10 s from the observation — which has just passed, so the very
+    // next tick delivers rather than the arm being stranded or fired early.
+    expect(delivered).toHaveLength(0);
+    expect(wd.armedCount()).toBe(1);
+    await wd.tick();
+    expect(delivered).toHaveLength(1);
   });
 });
