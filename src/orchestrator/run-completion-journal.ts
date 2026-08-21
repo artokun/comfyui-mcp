@@ -388,7 +388,14 @@ export class RunCompletionJournalImpl {
 
   /** Re-arm an entry whose correlation just weakened, if its already-queued copy
    *  can still be pulled back. Once the carrying turn has started the text is in
-   *  the model's context and cannot be recalled — nothing to do but leave it. */
+   *  the model's context and cannot be recalled — nothing to do but leave it.
+   *
+   *  (#1948 — with one measured exception, an interrupted turn re-queued by
+   *  "send now": that copy becomes revocable again. Harmless here, and in the right
+   *  direction — this path only ever replaces a claim we can no longer prove with the
+   *  weaker honest one, so pulling the requeued copy back stops the agent re-reading
+   *  "this is the run YOU queued" about a run we can no longer attribute. See
+   *  `stillUnread` for the full reasoning.) */
   private reissueAfterDowngrade(entry: JournalEntry): void {
     if (entry.state !== "handed_off") return;
     if (!this.revoke?.(entry.key, entry.token)) return;
@@ -537,9 +544,42 @@ export class RunCompletionJournalImpl {
    * The honest question was never "was it handed over" but "has the agent READ it",
    * and this journal already owns the only thing that can answer it: the revoker
    * (#468). `revokeEvent` splices the injected item out of the agent's queue and
-   * returns false the moment that item has been dequeued into a running turn — i.e.
-   * once the text is in the model's context and can no longer be recalled. A
-   * successful revoke IS the proof that nobody has been told.
+   * returns false once that item has been dequeued into a running turn — i.e. once
+   * the text is in the model's context and can no longer be recalled.
+   *
+   * EXACTLY WHAT A SUCCESSFUL REVOKE PROVES (#1948), because the previous sentence
+   * used to overclaim and that overclaiming is this file's whole failure history. It
+   * proves the item is NOT INSIDE A LIVE TURN. That is "nobody has been told" in every
+   * case but one, and the exception is measured rather than assumed:
+   * `PanelAgent.interrupt({ requeueInFlight: true })` — the panel's "send now", and the
+   * run-error burst in `injectRunError` — restores the aborted turn with
+   * `queue.unshift(...interrupted.items)`. A `completionOnly` item that HAD been
+   * dequeued is therefore back on the queue and revocable again, so `stillUnread` can
+   * answer "unread" for text the backend has already been sent.
+   *
+   * THAT IS DELIBERATELY NOT SPECIAL-CASED, and refusing it would be the worse bug.
+   * Measured end to end (run-completion-requeued-in-flight.test.ts):
+   *   - refusing a requeued item leaves the entry `foreign`, so the requeued turn
+   *     re-reads "does NOT match any run you queued — its origin is UNDETERMINED"
+   *     about the agent's OWN render, in full, with no correction. That is precisely
+   *     the harm #1327 reports;
+   *   - allowing it re-attributes the entry to the run that produced it and re-queues
+   *     the corrected wording, and because the re-delivery has `attempts > 0` it is
+   *     flagged `replayed` — the agent is handed "(RE-DELIVERED — this completion could
+   *     not be handed to you when it arrived.)", i.e. told to read it as a late
+   *     re-delivery, not as a second render.
+   * So the window costs at most a partially-seen line in a turn that was ABORTED
+   * anyway, followed by a disclosed, correctly-attributed re-delivery — the duplicate
+   * side of this journal's standing duplicate-over-loss rule. It also cannot widen the
+   * claim: `claimRaced` only ever moves an entry foreign → matched, never the reverse,
+   * and every ownership and timing proof still has to pass first.
+   *
+   * The revoke also cannot take a bystander with it. Each queued item carries only its
+   * own token — the drain's batched `carriedTokens` are assigned to `inFlight`/
+   * `turnEventTokens`, and the requeue restores `interrupted.items`, not one merged
+   * item — so splicing the named token's item leaves every sibling completion and every
+   * user message on the queue. (Pinned by test, because a future change that DID put a
+   * multi-token array on a queue item would turn this splice into a silent loss.)
    *
    * Fail-closed in every direction that matters:
    *   - no revoker installed (a bare journal, a unit test) => a handed-off entry is
@@ -1485,8 +1525,11 @@ export class RunCompletionJournalImpl {
         // loop would then grow that queue without limit while the journal stayed
         // at 32 — and the whole backlog drains into ONE turn, which is how the
         // genuine completion gets starved. Revoking keeps the two bounded
-        // together. (No-op once the carrying turn has started; that copy is
-        // already committed and is bounded by the turn instead.)
+        // together. (No-op while the carrying turn is live; that copy is already
+        // committed and is bounded by the turn instead. It stops being a no-op if
+        // that turn is interrupted and re-queued — #1948 — which is the direction
+        // this cap wants anyway: the copy is back on the queue it exists to bound,
+        // and the drop is already counted and disclosed via `dropped_completions`.)
         this.revoke?.(victim.key, victim.token);
         // Its own loss PLUS any disclosure it was carrying for the tab — moved to
         // whatever survives, so an eviction can never drop the disclosure itself.

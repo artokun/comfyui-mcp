@@ -707,16 +707,34 @@ export class PanelAgent {
 
   /**
    * Pull a still-queued INJECTED COMPLETION back off the queue by its journal
-   * token (#468). Returns true only if it was found and removed — false once the
-   * turn carrying it has started, where the text is already in the model's
-   * context and cannot be recalled.
+   * token (#468). Returns true only if it was found and removed.
+   *
+   * WHAT A `true` ACTUALLY PROVES (#1948). It proves the item is ON THE QUEUE —
+   * i.e. not inside a LIVE turn. That is very nearly "the model has never been
+   * shown it", and it used to be documented as exactly that, but the two come
+   * apart in one measured window: `interrupt({ requeueInFlight: true })` restores
+   * the aborted turn with `queue.unshift(...interrupted.items)`, so a
+   * `completionOnly` item that HAD been dequeued is back on `queue` and revocable
+   * again even though its text already went to the backend. Nothing on the item
+   * records that it was carried, and `findIndex` cannot tell the two apart.
+   *
+   * That is left alone DELIBERATELY — see `stillUnread` in run-completion-journal.ts
+   * for the measurement and the reasoning, and
+   * `run-completion-requeued-in-flight.test.ts` for the tests that pin it. Short
+   * version: in that window every revoker moves the entry toward the HONEST
+   * wording and the re-delivery is flagged `replayed` ("RE-DELIVERED …"), so the
+   * agent reads it as a late re-delivery rather than a second render. Refusing
+   * instead would leave the stale verdict as the only thing the model ever reads.
    *
    * Needed because the event's wording is materialized when it is queued: if the
    * journal later has to WEAKEN that completion's correlation (a prompt id
    * reused, a conversation replaced), the already-queued copy would still claim
    * "this is the run YOU queued". Revoking lets the journal re-deliver the
    * downgraded, honest version instead. Only `completionOnly` items are eligible,
-   * so no user message is ever removed.
+   * so no user message is ever removed — and each queued item carries only its
+   * OWN token (the drain's batched `carriedTokens` go onto `inFlight`/
+   * `turnEventTokens`, never back onto an item), so a splice can never take a
+   * sibling completion's token with it.
    */
   revokeEvent(token: string): boolean {
     const i = this.queue.findIndex((item) => item.completionOnly && item.eventTokens?.includes(token));
