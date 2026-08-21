@@ -239,8 +239,26 @@ export async function getSystemStats(): Promise<SystemStats> {
     throw new ComfyUIError(
       `No reply from ComfyUI within ${SYSTEM_STATS_TIMEOUT_MS / 1000}s — while requesting ${url} (GET). ` +
         `Nothing was learned about the server from this — a timeout is not a refusal and not a "not found". ` +
-        `The connection was accepted but the body never finished, which is common while a long decode ` +
-        `occupies the server. The request was aborted; retry after the current job finishes.`,
+        // #1896 — this asserted "The connection was accepted but the body never
+        // finished". The budget covers connecting too, so an unroutable or
+        // filtered target expires here having established nothing, and the
+        // sentence immediately before already said nothing was learned.
+        //
+        // It matters more than the sibling in comfyui/fetch.ts, because #1896
+        // now sends callers HERE on purpose: a ComfyUI failure whose connected
+        // panel is on the same origin tells the reader to run this probe to
+        // find out whether the route from this process is dead or only this one
+        // request is stalling. If the route IS dead, the old text answered with
+        // the opposite conclusion — "a long decode occupies the server, retry
+        // after the current job" — which is the reading that discriminator
+        // exists to rule out. The decode case is still the common one, so it is
+        // kept as the likely reading rather than dropped.
+        `Whether a connection was ever established is NOT known from this: the budget covers ` +
+        `connecting, the request and the reply alike. The usual cause is a connection that WAS ` +
+        `accepted while a long decode occupied the server, in which case retrying after the ` +
+        `current job finishes is enough — but a target this process cannot route to expires here ` +
+        `identically, so a repeat failure while something else reaches that ComfyUI points at the ` +
+        `route rather than at a busy server.`,
       "COMFYUI_HTTP_TIMEOUT",
       { endpoint: "/system_stats", timeout_ms: SYSTEM_STATS_TIMEOUT_MS },
     );
