@@ -6,6 +6,24 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### Fixed
+
+- **`panel_get_errors` no longer presents a clean `errored_count: 0` while most of
+  the graph is unjudged (#1973).** On a 77-node workflow the panel's live combo scan
+  ran out of its shared server-call budget and abstained on 40 nodes — sampler,
+  decoders, assembler, final SaveVideo — yet the reply still led with
+  `errored_count: 0` and "no errors recorded since the last execution start", which
+  reads as a finished clean audit. The reply now LEADS with `audit_complete`,
+  `checked_count` and `unchecked_count`, and nodes the scan skipped for budget are
+  re-checked from one batched `graph_get_object_info` plus a targeted `graph_query`
+  rather than one server call per node. Completeness is judged from the abstention
+  LIST, not from the `unchecked_budget_exhausted` flag: the panel abstains for five
+  reasons and only two raise that flag, so a scan stopped by the file-probe cap
+  produced the same false-clean payload with no flag at all. The completion pass
+  abstains rather than guessing wherever the panel's own scanner would have —
+  notably on UPLOAD inputs, whose values ComfyUI's combo list structurally cannot
+  enumerate and which it has no `/view` probe to adjudicate.
+
 ## [0.52.46] - 2026-08-21
 
 ### Fixed
