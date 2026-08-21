@@ -20,6 +20,8 @@ import {
 } from "../services/panel-settings.js";
 import { activePanelPendingOps, reclaimAbandonedPanelLock } from "../services/panel-pin-guard.js";
 import { cancelPanelPendingOps } from "../services/panel-pending-cancel.js";
+import { getLatestPublishedPanelVersion } from "../services/panel-auto-update.js";
+import { logger } from "../utils/logger.js";
 
 function json(value: unknown) {
   return {
@@ -45,6 +47,46 @@ export const PANEL_ACTIONS = [
 export type PanelAction = (typeof PANEL_ACTIONS)[number];
 
 /**
+ * #1983 — the newest published panel, for the STATUS reply.
+ *
+ * Three outcomes, and the middle one is the whole point:
+ *  - `string`    → resolved.
+ *  - `null`      → the lookup ran and could not answer (offline, GitHub down,
+ *                  a body that is not this pack). The status call still
+ *                  succeeds and still reports the floor verdict; what it must
+ *                  NOT do is report "not behind", which would assert a negative
+ *                  nothing observed.
+ *  - `undefined` → no lookup was made, because none could mean anything here
+ *                  (remote / cloud / no local ComfyUI: there is no panel of
+ *                  ours on this machine for a published version to be newer
+ *                  than). Skipping it also keeps `action:"panel"` off the
+ *                  network entirely in remote mode.
+ *
+ * REPORTING ONLY. Nothing here installs, stages or applies anything — #1559
+ * calls auto-applying a non-goal and the staged-update-then-restart flow stays
+ * explicit.
+ */
+async function probeLatestPanelVersion(applicable: boolean): Promise<string | null | undefined> {
+  if (!applicable) return undefined;
+  try {
+    // Bounded by the probe itself (5s AbortSignal.timeout) and documented as
+    // never-throwing. The try/catch is belt-and-braces: a status call is how an
+    // operator diagnoses a broken panel, and it must not start failing because
+    // a version lookup did something unexpected.
+    return (await getLatestPublishedPanelVersion()) ?? null;
+  } catch (err) {
+    // NOT an unknown-collapse: `null` here IS the unknown state, and the
+    // assessment renders it as "could not be determined", never as "up to date".
+    logger.debug(
+      `[install_comfyui panel status] latest-version probe threw: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return null;
+  }
+}
+
+/**
  * `install_comfyui (action:"panel")` — everything the retired `install_comfyui(action:'panel')`
  * tool did, selected by `panel_action` (0.50.0 slice 13). Every panel-installer
  * / panel-sync / panel-settings call below, its arguments, its locking and its
@@ -63,10 +105,21 @@ export async function panelAction(
     // itself and no-ops when there is nothing to repair.
     const repaired = await repairInterruptedPanelSwap();
     const status = await panelStatus();
+    // #1983 — THE CALL SITE. `evaluatePanelSync` compares against the FLOOR, so
+    // on its own it reported a panel sixteen releases behind as `behind:false`.
+    // #1971 shipped the published-version probe but only the periodic
+    // background loop called it; the tool an operator actually invokes never
+    // reached it. Resolve latest HERE, in the async caller, and hand it to the
+    // (still synchronous, still pure) evaluator.
+    //
+    // `null` — not `undefined` — when the lookup ran and failed: that is the
+    // difference between "could not determine the latest" and "no lookup was
+    // made", and the assessment says which. Never `false`/"up to date".
+    const latestVersion = await probeLatestPanelVersion(status.applicable);
     return json({
       ...status,
       note: repaired ? `${status.note}${repaired}` : status.note,
-      sync: evaluatePanelSync(status),
+      sync: evaluatePanelSync(status, { latestVersion }),
     });
   }
 

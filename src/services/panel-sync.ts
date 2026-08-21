@@ -122,24 +122,35 @@ const PANEL_PYPROJECT_URL =
  * The sentence a floor check owes the reader (#806).
  *
  * Clearing the floor and being current are different claims, and the gap between
- * them is where a real user's bug lived for days. This orchestrator genuinely
- * cannot close that gap — nothing on this path knows the newest published panel;
- * `PANEL_VERSION` is the Manager channel name ("nightly"), not a version number,
- * and there is no registry lookup here. So the honest move is not to guess a
- * latest version, it is to STOP IMPLYING ONE: name what was compared, say the
- * comparison's limit out loud, and point at the two things that do move the user
- * (the update action, and the file where the real latest is published).
+ * them is where a real user's bug lived for days. `PANEL_VERSION` is the Manager
+ * channel name ("nightly"), not a version number, so this file cannot close that
+ * gap by itself: the honest move is not to guess a latest version, it is to STOP
+ * IMPLYING ONE — name what was compared, say the comparison's limit out loud, and
+ * point at the two things that do move the user (the update action, and the file
+ * where the real latest is published).
+ *
+ * #1983 — a caller CAN now close it, by resolving the published version and
+ * passing `latestVersion`. `latestKnown` then drops the "does not know the newest
+ * published panel" clause, because on that call it is no longer true. When no
+ * lookup was made this text is unchanged, which is still the state on the hello
+ * auto-sync path.
  *
  * A function, not a constant: the update instruction depends on whether
  * install_comfyui(action:'panel') can act in THIS session.
  */
-const FLOOR_IS_NOT_LATEST = (): string =>
+const FLOOR_IS_NOT_LATEST = (latestKnown = false): string =>
   ` NOTE — that is a FLOOR check, not a latest-version check. It compares your panel ` +
-  `against the MINIMUM this orchestrator requires; it does not know the newest published ` +
-  `panel, and most panel fixes ship WITHOUT raising the floor. So a newer panel carrying ` +
-  `fixes you are missing can exist while this still reads "meets the minimum". The newest ` +
-  `version is published in the pack's pyproject.toml (${PANEL_PYPROJECT_URL}); to pull it, ` +
-  `run ${describeInstallPanelAction("update", "the update on the ComfyUI host")}.`;
+  `against the MINIMUM this orchestrator requires; ` +
+  // #1983 — the caller can now resolve the newest published panel and hand it
+  // in. When it did, "it does not know the newest published panel" is no longer
+  // true and must not be said: the concrete comparison follows in LATEST CHECK.
+  (latestKnown ? `` : `it does not know the newest published panel, and `) +
+  `most panel fixes ship WITHOUT raising the floor. So a newer panel carrying ` +
+  `fixes you are missing can exist while this still reads "meets the minimum". ` +
+  (latestKnown
+    ? `That is what the LATEST CHECK below answers.`
+    : `The newest version is published in the pack's pyproject.toml (${PANEL_PYPROJECT_URL}); ` +
+      `to pull it, run ${describeInstallPanelAction("update", "the update on the ComfyUI host")}.`);
 
 /**
  * What a just-written persisted pin actually achieved. Writing the settings file
@@ -183,8 +194,8 @@ export type PanelSyncDecision =
    *
    * #806 — this was `up-to-date`, which answers a question nothing here asks.
    * The comparison is against `requiredPanelVersion()`, the MINIMUM this build
-   * needs; the newest published panel is not known to this process at all (there
-   * is no registry or pyproject lookup on this path — see the summary text). A
+   * needs. Whether a NEWER panel is published is a separate field (`behindLatest`,
+   * #1983) that only the callers which actually looked it up can fill in. A
    * user on 0.11.36 with 0.11.38 published, whose bug was fixed in 0.11.37, was
    * told "up-to-date" and stopped looking. Most panel fixes never raise the
    * floor, so the population this verdict most misleads is exactly the one that
@@ -217,8 +228,34 @@ export interface PanelSyncAssessment {
    * True only when we PROVED the panel is older than `requiredPanelVersion` (a
    * comparable installed version below it, or a confirmed absent pack). An
    * unreadable version is never "behind".
+   *
+   * #1983 — this is the FLOOR answer and nothing else. `false` means "not below
+   * the minimum this orchestrator needs", NOT "on the newest published panel".
+   * That second question is `behindLatest`.
    */
   behind: boolean;
+  /**
+   * #1983 — the newest PUBLISHED panel, when the caller resolved one. Absent
+   * when no lookup was made, when it failed, or when the answer was not a
+   * comparable version.
+   */
+  latestPublishedVersion?: string;
+  /**
+   * #1983 — is a newer panel PUBLISHED than the one installed? A different
+   * question from `behind`, and answered separately on purpose:
+   *
+   *  - `true`  → a newer published panel exists. STALE, not unsupported: this
+   *              is advisory and blocks nothing.
+   *  - `false` → we compared against the newest published panel and you are on
+   *              it. Only ever set when that comparison really happened.
+   *  - `null`  → UNKNOWN. No lookup was made, the lookup failed, or the versions
+   *              are not comparable. `null` and not `undefined` because this
+   *              object is JSON.stringify'd to the agent and `undefined` keys
+   *              are DROPPED — the can't-tell state would vanish off the wire
+   *              and read as "not behind", which is the exact lie #1983 is
+   *              about. Same reasoning as `PanelSyncResult.stillBehind`.
+   */
+  behindLatest: boolean | null;
   /** Plain-language explanation for the user. */
   summary: string;
 }
@@ -228,17 +265,141 @@ export interface EvaluateOptions {
   orchestratorVersion?: string;
   /** Override for tests; defaults to the derived requirement. */
   requiredVersion?: string;
+  /**
+   * #1983 — the newest PUBLISHED panel, resolved by the caller.
+   *
+   * This function stays synchronous and pure: the registry lookup lives in the
+   * already-async caller (`panelAction`), which hands the answer in. Three
+   * states, and they are NOT interchangeable:
+   *
+   *  - a version string → the probe resolved; compare against it.
+   *  - `null`           → the probe RAN and could not determine the latest. Say
+   *                       so; never report "not behind" on a failed lookup.
+   *  - `undefined`      → no probe was made on this path (hello auto-sync, the
+   *                       sync re-check). The floor note keeps saying the latest
+   *                       is not known here, which on those paths is true.
+   */
+  latestVersion?: string | null;
 }
 
 /**
  * Pure decision function over a `PanelStatus` snapshot. No I/O, no mutation —
  * every branch is directly testable, which is the point: this is the logic that
  * decides whether we are allowed to touch a user's install.
+ *
+ * #1983 — TWO comparisons, never folded into one. `behind` answers "is this
+ * panel below the FLOOR this orchestrator needs" (too old to work with);
+ * `behindLatest` answers "is a newer panel PUBLISHED" (merely stale). A
+ * below-floor panel is unsupported and gets a sync decision; a stale one is
+ * advisory and changes no decision at all. Collapsing them either way is the
+ * defect: reporting a 16-versions-behind panel as `behind:false` (#1983), or
+ * turning "a newer one exists" into a refusal.
  */
 export function evaluatePanelSync(
   status: PanelStatus,
   opts: EvaluateOptions = {},
 ): PanelSyncAssessment {
+  const latest = compareAgainstLatest(status, opts.latestVersion);
+  const floor = evaluateAgainstFloor(status, opts, latest.latestPublishedVersion !== undefined);
+  return {
+    ...floor,
+    latestPublishedVersion: latest.latestPublishedVersion,
+    behindLatest: latest.behindLatest,
+    summary: floor.summary + latestNote(status, latest, opts.latestVersion),
+  };
+}
+
+/**
+ * The LATEST comparison, kept away from the floor one on purpose.
+ *
+ * Every "can't tell" resolves to `null` — the module's own rule. `false` here
+ * is a claim ("I compared you against the newest published panel and you are on
+ * it") and may only be returned when that comparison actually happened.
+ */
+function compareAgainstLatest(
+  status: PanelStatus,
+  latestVersion: string | null | undefined,
+): { latestPublishedVersion?: string; behindLatest: boolean | null } {
+  const latest =
+    typeof latestVersion === "string" && isComparableVersion(latestVersion)
+      ? latestVersion.trim()
+      : undefined;
+  if (!latest) return { behindLatest: null };
+  // No panel of ours here at all (remote / cloud / no local ComfyUI): there is
+  // nothing on this machine for the published version to be newer THAN.
+  if (!status.applicable) return { latestPublishedVersion: latest, behindLatest: null };
+  if (!status.installed) {
+    // Same discipline as `behind`: a PROVEN absence is definitionally behind
+    // anything published; an unproven or unreliable one is a failed observation.
+    const provenAbsent = status.absenceProven !== false && status.scanReliable !== false;
+    return { latestPublishedVersion: latest, behindLatest: provenAbsent ? true : null };
+  }
+  if (!isComparableVersion(status.installedVersion)) {
+    return { latestPublishedVersion: latest, behindLatest: null };
+  }
+  return {
+    latestPublishedVersion: latest,
+    behindLatest: compareSemver(status.installedVersion, latest) < 0,
+  };
+}
+
+/**
+ * The sentence the latest comparison owes the reader — appended to every
+ * verdict, because the defect showed up on `dev-install` just as readily as on
+ * `meets-floor` (#1983's own reproduction landed on the dev branch).
+ *
+ * Deliberately ADVISORY in every wording: being behind the newest published
+ * panel blocks nothing, refuses nothing and changes no decision above it.
+ */
+function latestNote(
+  status: PanelStatus,
+  latest: { latestPublishedVersion?: string; behindLatest: boolean | null },
+  requested: string | null | undefined,
+): string {
+  // Nothing was asked on this path — FLOOR_IS_NOT_LATEST already says the
+  // latest is unknown here, and inventing a second sentence about a lookup that
+  // never ran would be noise.
+  if (requested === undefined) return "";
+  const published = latest.latestPublishedVersion;
+  if (!published) {
+    return (
+      ` LATEST CHECK: the newest published panel could not be determined just now ` +
+      `(the version lookup did not answer). Only the FLOOR comparison above was made — ` +
+      `this is NOT evidence that you are on the newest panel. Check by hand at ` +
+      `${PANEL_PYPROJECT_URL}, or re-run this once the network is back.`
+    );
+  }
+  if (latest.behindLatest === null) {
+    return (
+      ` LATEST CHECK: the newest published panel is ${published}, but the installed ` +
+      `version (${status.installedVersion ?? "unreadable"}) could not be compared against ` +
+      `it, so whether you are behind it is UNKNOWN.`
+    );
+  }
+  if (latest.behindLatest === false) {
+    return ` LATEST CHECK: ${published} is the newest published panel, and you are on it.`;
+  }
+  const from = status.installedVersion ? `${status.installedVersion} → ` : "";
+  const pinned = status.pin && typeof status.pin === "object" && status.pin.pinned;
+  return (
+    ` LATEST CHECK: a NEWER panel is published (${from}${published}). Nothing is blocked ` +
+    `by this and nothing has been changed — it is an advisory. ` +
+    (pinned
+      ? `You are pinned, so moving onto it means clearing the pin first (${UNPIN_INSTRUCTION()}).`
+      : `To pull it, run ${describeInstallPanelAction("update", "the update on the ComfyUI host")}.`)
+  );
+}
+
+/**
+ * The FLOOR half — the original decision body, unchanged in behaviour. It knows
+ * whether a latest version was resolved only so its own note stops claiming the
+ * newest panel is unknown when the caller just looked it up.
+ */
+function evaluateAgainstFloor(
+  status: PanelStatus,
+  opts: EvaluateOptions,
+  latestKnown: boolean,
+): Omit<PanelSyncAssessment, "behindLatest" | "latestPublishedVersion"> {
   const required = opts.requiredVersion ?? requiredBridgePanelVersion();
   const orchestratorVersion =
     opts.orchestratorVersion ?? detectInstallMode().currentVersion ?? undefined;
@@ -508,7 +669,7 @@ export function evaluatePanelSync(
       behind: false,
       summary:
         `Panel ${status.installedVersion} meets the minimum ${orch} needs ` +
-        `(${required}+), so nothing will be synced.${FLOOR_IS_NOT_LATEST()}${STALE_BUNDLE_HINT}`,
+        `(${required}+), so nothing will be synced.${FLOOR_IS_NOT_LATEST(latestKnown)}${STALE_BUNDLE_HINT}`,
     };
   }
 
