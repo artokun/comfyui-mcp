@@ -152,14 +152,14 @@ function classifyTargetDrift(target: string): { verdict: TargetDriftVerdict; tex
 /**
  * The "now go and check" tail, chosen by what the comparison established (#1896).
  *
- * On a SAME verdict the standing advice sends the caller back down the road that
- * just failed: `get_system_stats (action:"health")` runs in THIS process against
- * THIS address, so it reproduces the failure instead of diagnosing it — and
- * "confirm the server is up" invites precisely the conclusion the comparison has
- * just ruled out, since a browser is connected to that origin. The reporter of
- * #1896 was told a panel was connected and then handed two more calls down the
- * dead path; this is the half of that which is fixable without the panel
- * transport that does not exist.
+ * On a SAME verdict the standing advice asks a question that is already
+ * answered: "confirm the server is up" invites precisely the conclusion the
+ * comparison just ruled out, since a browser is connected to that origin right
+ * now. The reporter of #1896 was told a panel was connected and then sent to
+ * find out whether the server was running.
+ *
+ * The health check is therefore RE-AIMED rather than dropped — see the note at
+ * the SAME branch for why suppressing it would have been an overclaim.
  *
  * `install_comfyui (action:"environment")` survives in both branches and is NOT
  * described as failing: its `/system_stats` read sits inside a try (see
@@ -185,13 +185,23 @@ function nextStepsFor(
           `is up with get_system_stats (action:"health").`;
   }
   const want = originOf(target) ?? target;
+  // REPURPOSED, not suppressed. An earlier draft of this said the health check
+  // "will NOT add anything here: it runs in this same process against this same
+  // address, so it fails the same way". That is an overclaim: a SAME verdict
+  // compares ORIGINS, and an origin is not an endpoint. A ComfyUI that is up and
+  // answering the browser can still stall one route — `/object_info` mid-decode
+  // is the documented case (comfyui/client.ts) — in which case /system_stats
+  // answers perfectly well and is the single most informative call available.
+  // So the health check keeps its place; what changes is the QUESTION it is sent
+  // to settle. "Is the server up" is already answered, and answered yes.
   return (
-    ` get_system_stats (action:"health") will NOT add anything here: it runs in this same ` +
-    `process against this same address, so it fails the same way. ` +
-    (budget ? `Raise COMFYUI_MCP_HTTP_TIMEOUT_S if this server is simply slow; otherwise the ` : `The `) +
-    `route from this process to ${want} is what needs fixing, not the address` +
-    (budget ? `.` : ` — install_comfyui (action:"environment") reports the resolved target ` +
-      `without needing to reach it.`)
+    ` The address itself is not what is wrong — a browser is connected to that origin. Use ` +
+    `get_system_stats (action:"health") to tell the two remaining cases apart: if it fails from ` +
+    `here too, the route from this process to ${want} is what needs fixing; if it succeeds, the ` +
+    `problem is specific to this request rather than to the target` +
+    (budget
+      ? `, and COMFYUI_MCP_HTTP_TIMEOUT_S may simply be too low for it.`
+      : `. install_comfyui (action:"environment") reports the resolved target either way.`)
   );
 }
 

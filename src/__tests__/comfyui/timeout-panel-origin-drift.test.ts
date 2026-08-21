@@ -148,14 +148,30 @@ describe("#1896: the timeout message says only what a timeout proves", () => {
 });
 
 describe("#1896: the advice does not send the caller back down the road that just failed", () => {
-  it("stops offering get_system_stats as a check once drift is RULED OUT", async () => {
+  it("stops asking whether the server is up once drift is RULED OUT", async () => {
     publishConnectedPanelOrigins(dir, ["http://192.0.2.1:8188"]);
     const text = await timeoutText(DEAD);
     // The comparison has just established a browser is connected to this origin,
-    // so "confirm it is up" is both a repeat of the failure and the wrong lead.
+    // so "confirm it is up" sends the caller after a question already answered.
     expect(text).not.toContain("Confirm it is up with get_system_stats");
-    expect(text).toContain("will NOT add anything here");
-    expect(text).toContain("runs in this same process against this same address");
+    expect(text).toContain("The address itself is not what is wrong");
+    expect(text).toContain("a browser is connected to that origin");
+  });
+
+  // The health check is RE-AIMED, not suppressed. Dropping it would have been an
+  // overclaim: a SAME verdict compares ORIGINS, and a server that is up and
+  // answering the browser can still stall one route (/object_info mid-decode),
+  // in which case /system_stats answers fine and is the most informative call
+  // available. So it must still be offered, as a discriminator.
+  it("keeps the health check, as the thing that tells the remaining cases apart", async () => {
+    publishConnectedPanelOrigins(dir, ["http://192.0.2.1:8188"]);
+    const text = await timeoutText(DEAD);
+    expect(text).toContain('get_system_stats (action:"health")');
+    expect(text).toContain("if it fails from here too");
+    expect(text).toContain("if it succeeds");
+    // …and it must not assert the outcome of that call in advance.
+    expect(text).not.toContain("fails the same way");
+    expect(text).not.toContain("will NOT add anything");
   });
 
   // The overclaim deliberately NOT made: a connected browser proves something
@@ -190,12 +206,13 @@ describe("#1896: the REFUSAL path's advice follows the same verdict", () => {
     }
   }
 
-  it("drops the dead-end health check when the panel is on the same origin", async () => {
+  it("re-aims the health check when the panel is on the same origin", async () => {
     publishConnectedPanelOrigins(dir, ["http://192.0.2.1:8188"]);
     const text = await refusalText(DEAD);
     expect(text).toContain("NOT a wrong-address problem");
     expect(text).not.toContain("confirm the server is up with get_system_stats");
-    expect(text).toContain("will NOT add anything here");
+    expect(text).toContain("The address itself is not what is wrong");
+    expect(text).toContain("if it fails from here too");
     // install_comfyui (action:"environment") is NOT described as failing: its
     // /system_stats read is inside a try, so it still reports the resolved
     // target on an unreachable server.
