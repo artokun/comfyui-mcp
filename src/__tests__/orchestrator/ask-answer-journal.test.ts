@@ -1038,7 +1038,11 @@ describe("ask-answer journal — bounds may LABEL, never silently lose (#486)", 
     // setter, not an adder) would silently replace this one and un-ship #486.
     const takeoverAt = src.indexOf("bridge.setTabTakenOverListener(");
     expect(takeoverAt, "takeover listener not found").toBeGreaterThan(-1);
-    expect(src.slice(takeoverAt, takeoverAt + 300)).toContain("AskAnswers.closeAsks(tabId)");
+    // A STATEMENT, not a substring: `toContain` is satisfied by a COMMENTED-OUT call,
+    // so the guarantee would survive its own removal (review finding).
+    expect(src.slice(takeoverAt, takeoverAt + 300)).toMatch(
+      /^\s*AskAnswers\.closeAsks\(tabId\);\s*$/m,
+    );
     // …and exactly one is installed, which is what makes the body the whole story.
     expect(src.split("bridge.setTabTakenOverListener(").length - 1).toBe(1);
     expect(src).toContain("AskAnswers.setIncarnationResolver(");

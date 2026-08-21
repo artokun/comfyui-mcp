@@ -9482,15 +9482,29 @@ export function takeRecoveredConfirmAnswer(
 }
 
 /**
- * A DIFFERENT browser tab has taken this recurring route key over (#486’s takeover
- * event) — drop anything this key was holding.
+ * THE CARD IS NO LONGER IN FRONT OF THE USER on this tab — drop anything this key
+ * was holding.
  *
- * The key is the route key, not the browser tab, and `wf:` keys recur: close the tab,
- * open the same workflow somewhere else, and the newcomer inherits the address. It did
- * not answer the previous occupant’s card, so it must not inherit that answer either.
- * A RECONNECT is deliberately not this event — the same browser tab returns under the
- * same incarnation and no takeover fires — which is what keeps the reporter’s case
+ * Two kinds of event reach here, and the SECOND is the one a review caught:
+ *
+ *  1. A DIFFERENT browser tab has taken this recurring route key over (#486’s takeover
+ *     event). `wf:` keys recur: close the tab, open the same workflow somewhere else,
+ *     and the newcomer inherits the address without ever having seen the card.
+ *
+ *  2. THE FEED THE CARD WAS PAINTED INTO IS GONE — New chat (`new_session` → the panel’s
+ *     newChat() calls resetFeed()), a rewind (everything after the anchor is discarded),
+ *     or a switch to a historical chat (`resume_session` repaints the log from that
+ *     thread). The consent is not conversation CONTENT, so #486’s reasoning does not
+ *     apply — but acting on it would restart the server on a surface that shows nothing
+ *     the user can point at. VISIBILITY, not attribution, is what these three take away.
+ *
+ * A provider switch is deliberately NOT here: it leaves the card painted, so the consent
+ * is still on screen and still answerable.
+ *
+ * A RECONNECT is not any of these — the same browser tab returns under the same
+ * incarnation with its feed intact — which is what keeps the reporter’s case
  * (“do not lose it across agent/panel reconnect”) working.
+ *
  */
 export function forgetAbandonedConfirmCards(tabId: string): void {
   const prefix = `${tabId}\u0000`;
@@ -10826,7 +10840,7 @@ export function makePanelToolCtx(
     // state the orchestrator's own #952 wording has to apologise for ("the user may
     // see two — tell them which one to answer"). See AbandonedConfirmCard.
     if (opts?.recoverAbandonedAnswer) {
-      const recovered = takeRecoveredConfirmAnswer(bridge, ctx.tabId, header, question);
+      const recovered = takeRecoveredConfirmAnswer(bridge, journalTabFor(ctx), header, question);
       if (recovered) {
         toolPolicyLogger.info(
           `[panel-tools] confirm "${header}" answered on an earlier card ` +
@@ -10893,7 +10907,7 @@ export function makePanelToolCtx(
         // bridge will buffer whatever the user clicks. Remember the id so the next
         // attempt at this same confirmation drains it instead of asking again.
         if (opts?.recoverAbandonedAnswer) {
-          rememberAbandonedConfirmCard(ctx.tabId, header, question, askId);
+          rememberAbandonedConfirmCard(journalTabFor(ctx), header, question, askId);
         }
         return "timeout";
       }
@@ -16555,8 +16569,9 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
                   `ago (WHEN they clicked is not known here, only that it was after that). Their ` +
                   `answer landed ` +
                   `after this tool had stopped waiting for it, so it was claimed now instead of ` +
-                  `being discarded. Tell the user that is what you acted on, and check with them ` +
-                  `if anything has changed since.`,
+                  `being discarded. This call has ALREADY acted on it — do not ask the user to ` +
+                  `confirm again, and do not present this as a pending decision. Just tell them ` +
+                  `plainly which answer it went on.`,
               ),
           },
         );

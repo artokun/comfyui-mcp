@@ -5487,6 +5487,10 @@ export async function runPanelOrchestrator(): Promise<void> {
       for (const t of conversationMemberTabs(tabId)) {
         RunCompletions.closeRuns(t, key);
         AskAnswers.closeAsks(t);
+        // panel#1554 — this feed is being blanked/replaced, so the confirmation card
+        // goes with it. Acting on its answer afterwards would restart the server on a
+        // surface showing nothing the user can point at (see forgetAbandonedConfirmCards).
+        forgetAbandonedConfirmCards(t);
       }
       pushToConversation(key, { type: "session", session_id: null });
       // The write outcome is OBSERVABLE (codex confirming-gate P1: a swallowed
@@ -5541,7 +5545,12 @@ export async function runPanelOrchestrator(): Promise<void> {
       // kept and still reported — closeAsks downgrades, it does not delete.
       // #884: the boundary is conversation-wide (any participating tab's card).
       if (ok) {
-        for (const t of conversationMemberTabs(tabId)) AskAnswers.closeAsks(t);
+        // panel#1554 — the discarded branch takes the confirmation card off screen with
+        // it; its answer must not silently authorise a restart afterwards.
+        for (const t of conversationMemberTabs(tabId)) {
+          AskAnswers.closeAsks(t);
+          forgetAbandonedConfirmCards(t);
+        }
       }
       bridge.push({ type: "ack", ok, kind: "rewind" }, tabId);
       logger.info(`[panel-orchestrator] tab ${tabId.slice(0, 8)} rewind (anchor=${anchor ? anchor.slice(0, 8) : "fresh"}, ok=${ok})`);
@@ -5590,6 +5599,10 @@ export async function runPanelOrchestrator(): Promise<void> {
       for (const t of conversationMemberTabs(tabId)) {
         RunCompletions.closeRuns(t, key);
         AskAnswers.closeAsks(t);
+        // panel#1554 — this feed is being blanked/replaced, so the confirmation card
+        // goes with it. Acting on its answer afterwards would restart the server on a
+        // surface showing nothing the user can point at (see forgetAbandonedConfirmCards).
+        forgetAbandonedConfirmCards(t);
       }
       if (sid) manager.setResume(key, sid);
       // Persist the selection NOW (not at first onSession) so a restart inside

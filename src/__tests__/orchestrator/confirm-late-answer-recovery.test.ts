@@ -250,12 +250,46 @@ describe("panel#1554 a late confirmation is claimed, not discarded", () => {
     expect(await h.ctx.confirm(QUESTION, HEADER, 500, RECOVER)).toBe("yes");
   });
 
+  it("WIRING: every boundary that BLANKS THE FEED retires the confirmation too", () => {
+    // A review found the boundary I originally chose (takeover only) was too narrow, and
+    // for a reason my own argument had missed. The leak is not attribution — a restart
+    // consent is not conversation content — it is VISIBILITY. New chat blanks the feed
+    // (the panel's newChat() calls resetFeed()), a rewind discards everything after the
+    // anchor, and resume_session repaints the log from another thread. In all three the
+    // card is gone from the screen, so acting on its answer afterwards restarts the
+    // server on a surface showing nothing the user can point at.
+    //
+    // Behavioural tests cannot see WHICH handlers call it, and this is a set that is
+    // easy to silently shrink back to one, so the call sites are what is pinned.
+    const src = readFileSync(new URL("../../orchestrator/index.ts", import.meta.url), "utf8");
+    for (const event of ["new_session", "rewind", "resume_session"]) {
+      const at = src.indexOf(`event.type === "${event}"`);
+      expect(at, `${event} handler not found`).toBeGreaterThan(-1);
+      // Bounded to the handler: the next one starts at the following `event.type ===`.
+      const next = src.indexOf("event.type === ", at + 20);
+      const block = src.slice(at, next > at ? next : at + 4000);
+      expect(block, `${event} must retire the abandoned confirmation`).toMatch(
+        /^\s*forgetAbandonedConfirmCards\(t\);\s*$/m,
+      );
+      // …and it stays alongside #486's retirement, not instead of it.
+      expect(block, `${event} must still retire ask state`).toContain("AskAnswers.closeAsks(t)");
+    }
+    // A PROVIDER SWITCH is deliberately absent: it leaves the card painted, so the
+    // consent is still on screen and still answerable. Asserted so that adding it later
+    // is a deliberate act rather than a copy-paste.
+    const providerAt = src.indexOf("if (providerSwitched) AskAnswers.closeAsks(panelTab);");
+    expect(providerAt).toBeGreaterThan(-1);
+    expect(src.slice(providerAt, providerAt + 200)).not.toContain("forgetAbandonedConfirmCards");
+  });
+
   it("WIRING: the takeover listener retires confirmations as well as asks", () => {
     // The bridge takes ONE takeover listener (a setter, not an adder), so this fix had
     // to join the existing call rather than add a second one — a second
     // setTabTakenOverListener would have silently replaced #486's and un-shipped it.
     // Behavioural tests above cannot see that; this is the shape of the call site.
-    const src = readFileSync("src/orchestrator/index.ts", "utf8");
+    // Resolved from THIS module, not from the cwd — a cwd-relative read passes or fails
+    // on where vitest was launched rather than on what the source says.
+    const src = readFileSync(new URL("../../orchestrator/index.ts", import.meta.url), "utf8");
     const at = src.indexOf("bridge.setTabTakenOverListener(");
     expect(at).toBeGreaterThan(-1);
     const call = src.slice(at, at + 200);
