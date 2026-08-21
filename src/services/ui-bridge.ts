@@ -38,6 +38,20 @@ import {
 export const DEFAULT_BRIDGE_PORT = 9101;
 
 /**
+ * How long a BUFFERED late `ask_user` answer stays claimable via
+ * takeLateAskReply(). An answer given after its command's reply timer fired has
+ * nowhere else to go, so it is held here until something drains it or this
+ * elapses.
+ *
+ * EXPORTED because it is the real bound on how long a late answer can be
+ * recovered, and panel#1554 added a second reader that has to respect exactly
+ * that window (see confirmAnswerRecoveryWindowMs in panel-tools.ts). A private
+ * copy of "5 minutes" over there would be a bound deciding a correctness
+ * question in two places, free to drift apart.
+ */
+export const LATE_ASK_TTL_MS = 5 * 60 * 1000;
+
+/**
  * The subset of the `ws` WebSocket surface `handleConnection` actually needs.
  * A real `ws.WebSocket` satisfies this structurally. It also lets a non-network
  * pseudo-socket plug in — the relay client (see relay-client.ts) wraps each
@@ -1808,10 +1822,8 @@ export class UiBridge {
    *  caller via takeLateAskReply(). Bounded by a short TTL — a stale unclaimed
    *  answer is pruned rather than kept forever. */
   private lateAskReplies = new Map<string, { result: unknown; ts: number }>();
-  /** TTL for a BUFFERED late ask answer. Only an in-flight caller drains this
-   *  (its grace poll lives well under 5 minutes), and the durable copy is the
-   *  journal the sink feeds — so this stays short. */
-  private static readonly LATE_ASK_TTL_MS = 5 * 60 * 1000;
+  /** TTL for a BUFFERED late ask answer — see the exported LATE_ASK_TTL_MS. */
+  private static readonly LATE_ASK_TTL_MS = LATE_ASK_TTL_MS;
   /**
    * Mutations whose reply timer fired (rid -> what it was), so a reply arriving
    * afterwards can be RECOGNISED as the late completion of a known write rather

@@ -31,7 +31,7 @@ import {
   toolActionPolicyError,
   toolAllowed,
 } from "../tools/tool-surface-filter.js";
-import { logger as toolPolicyLogger } from "../utils/logger.js";
+import { logger, logger as toolPolicyLogger } from "../utils/logger.js";
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import type { Stats } from "node:fs";
 import {
@@ -64,7 +64,7 @@ import { parse as parseYaml } from "yaml";
 import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { UiBridge, PanelVersionReading } from "../services/ui-bridge.js";
-import { requiredPanelVersion, SEMVER_RE } from "../services/ui-bridge.js";
+import { requiredPanelVersion, SEMVER_RE, LATE_ASK_TTL_MS } from "../services/ui-bridge.js";
 import { compareSemver } from "../services/self-update.js";
 import { describeInstallPanelAction } from "../services/panel-recovery.js";
 import {
@@ -406,6 +406,52 @@ function ok(value: unknown): ToolResult {
 function fail(err: unknown): ToolResult {
   const msg = err instanceof Error ? err.message : String(err);
   return { content: [{ type: "text", text: `Error: ${msg}` }], isError: true };
+}
+
+/**
+ * Add a note to a reply the handler has already built — as its OWN content block,
+ * never spliced into the first one.
+ *
+ * The first block of a structured reply is a JSON document (`ok(object)`), and both
+ * the agent and this repo's tests read it as one. A note pasted into that string
+ * would corrupt it; a note pushed in FRONT of it would move the document to index 1
+ * and break every reader that takes index 0. So it goes last, additively.
+ */
+export function appendReplyNote(res: ToolResult, note: string): ToolResult {
+  if (!note) return res;
+  return { ...res, content: [...res.content, { type: "text", text: note }] };
+}
+
+/**
+ * panel#1554 — let a handler attach a note to WHICHEVER of its many replies it ends
+ * up returning.
+ *
+ * `panel_restart_comfyui` has ~25 return points after its confirmation card, and the
+ * disclosure that a decision was recovered from an EARLIER card (see
+ * AbandonedConfirmCard) has to ride all of them — a disclosure that only survives the
+ * happy path is the kind of half-honesty that reads as a fresh confirmation on every
+ * other branch. Threading a note through 25 returns is how one gets missed; a single
+ * wrapper around the handler cannot.
+ *
+ * Per CALL, not per ctx: the note lives in a local array created on entry. `ctx` is
+ * built once per panel MCP server and shared by every tool call it serves, so parking
+ * the note there would make mis-attribution possible for exactly the class of
+ * statement that must never be mis-attributed.
+ */
+function withReplyNote(
+  handler: (
+    args: Record<string, unknown>,
+    ctx: PanelToolCtx,
+    note: (text: string) => void,
+  ) => Promise<ToolResult>,
+): (args: Record<string, unknown>, ctx: PanelToolCtx) => Promise<ToolResult> {
+  return async (args, ctx) => {
+    const notes: string[] = [];
+    const res = await handler(args, ctx, (text) => {
+      if (text) notes.push(text);
+    });
+    return notes.length ? appendReplyNote(res, notes.join(" ")) : res;
+  };
 }
 
 /**
@@ -9193,6 +9239,142 @@ const nodeSize = () =>
 export type ConfirmOutcome = "yes" | "no" | "timeout" | "unreachable";
 
 /**
+ * panel#1554 — A CONFIRMATION THE USER GAVE, THROWN AWAY BY THE TOOL THAT ASKED FOR IT.
+ *
+ * `panel_restart_comfyui` bounds its confirmation-card wait at 90s (#404, so an
+ * undelivered card fails fast instead of reading as a 4-minute hang). What #404 did not
+ * account for is what happens to the ANSWER afterwards, and the answer is not gone:
+ *
+ *   • the card stays painted and stays clickable — the panel retires a card only when
+ *     the connection that painted it is REPLACED (#952), never on a caller's timeout;
+ *   • a click after the deadline still reaches the bridge, which buffers the validated
+ *     answer under its `ask_id` for LATE_ASK_TTL_MS (takeLateAskReply);
+ *   • but a CONFIRM card is not a `panel_ask` card. #486's durable journal accepts only
+ *     `pa-`-prefixed ids (PANEL_ASK_ID_PREFIX), and confirm's own grace poll is
+ *     ZERO-WIDTH here — with timeoutMs === 90s the whole budget is spent on the card
+ *     deadline, so `graceMs` computes to 0 and #360's late-honour poll takes one
+ *     immediate look and gives up.
+ *
+ * So nothing ever reads that buffered answer back. It is TTL-pruned unread while the
+ * tool reports "No confirmation received within 90s, so I did NOT restart ComfyUI" —
+ * to a user who clicked "Yes, go ahead" and watched the card collapse to "✓ Yes, go
+ * ahead". That is panel#1554: the reporter's confirmation was accepted by the panel,
+ * discarded by the orchestrator, and they had to go find the headless `restart_comfyui`
+ * to get the restart they had already authorised.
+ *
+ * THE FIX IS TO READ IT, NOT TO WAIT LONGER. #404's 90s stands exactly as it is: the
+ * abandoned card's `ask_id` is remembered, and the NEXT attempt at the SAME confirmation
+ * drains it BEFORE dispatching a second card. Costs no wall-clock, works across an agent
+ * respawn or a panel reconnect (this store is process-scoped, not session-scoped), and
+ * honours a late "No, cancel" exactly as it honours a late yes — a decline the user
+ * already gave is lost the same way today.
+ *
+ * WHAT MAKES IT ATTRIBUTABLE, and why each part is load-bearing:
+ *
+ *   • EXACT ASK-ID EQUALITY. The recovered value is whatever the bridge buffered for the
+ *     one card id we dispatched. Never "the most recent answer", never a fuzzy match.
+ *   • SAME TAB + IDENTICAL QUESTION AND HEADER as the key, so an answer given to the
+ *     restart card can only ever satisfy the restart card, on the tab it was shown on.
+ *   • ONE-SHOT. The entry is removed on the first look, answered or not, so a recovered
+ *     answer can satisfy exactly one call and a stale key cannot linger.
+ *   • THE BRIDGE'S OWN TTL IS THE ONLY STALENESS BOUND. Past LATE_ASK_TTL_MS
+ *     takeLateAskReply has already dropped the answer, so a fresh card is dispatched.
+ *     The prune below uses the SAME imported constant rather than a second copy of it.
+ *   • OPT-IN PER CALL SITE. Only `panel_restart_comfyui` asks for this. `panel_clear`
+ *     wipes the canvas and gets the full 285s card wait, so its loss window is far
+ *     narrower and the cost of resurrecting a stale yes is far higher — it stays out
+ *     until someone has a reported failure to point at.
+ *   • DISCLOSED, NEVER SILENT. A recovered decision rides its own line in the tool's
+ *     reply (see withReplyNote): acting on an answer from an earlier card is exactly
+ *     the kind of thing the agent must not present as a fresh confirmation.
+ */
+interface AbandonedConfirmCard {
+  askId: string;
+  at: number;
+}
+const abandonedConfirmCards = new Map<string, AbandonedConfirmCard>();
+
+/** The recovery window — the bridge's buffer TTL, imported so it cannot drift. */
+export function confirmAnswerRecoveryWindowMs(): number {
+  return LATE_ASK_TTL_MS;
+}
+
+/** Identity of a confirmation: the tab it is shown on plus the exact words asked.
+ *  A NUL separator cannot appear in either half, so no pair of inputs can collide. */
+function confirmRecoveryKey(tabId: string, header: string, question: string): string {
+  return `${tabId}\u0000${header}\u0000${question}`;
+}
+
+function pruneAbandonedConfirmCards(now: number): void {
+  for (const [key, entry] of abandonedConfirmCards) {
+    if (now - entry.at > LATE_ASK_TTL_MS) abandonedConfirmCards.delete(key);
+  }
+}
+
+/** Remember a card whose wait expired unanswered, so the next attempt can drain it. */
+export function rememberAbandonedConfirmCard(
+  tabId: string,
+  header: string,
+  question: string,
+  askId: string,
+  now: number = Date.now(),
+): void {
+  pruneAbandonedConfirmCards(now);
+  abandonedConfirmCards.set(confirmRecoveryKey(tabId, header, question), { askId, at: now });
+}
+
+/**
+ * Claim the answer left on a previous, abandoned card for this exact confirmation —
+ * or null when there was no such card, or nobody ever answered it.
+ *
+ * ONE-SHOT by construction: the remembered card is dropped on the way past whether or
+ * not it had an answer waiting, so a second call always dispatches a fresh card.
+ */
+export function takeRecoveredConfirmAnswer(
+  bridge: Pick<UiBridge, "takeLateAskReply"> | undefined,
+  tabId: string,
+  header: string,
+  question: string,
+  now: number = Date.now(),
+): { outcome: "yes" | "no"; ageMs: number; askId: string } | null {
+  pruneAbandonedConfirmCards(now);
+  const key = confirmRecoveryKey(tabId, header, question);
+  const entry = abandonedConfirmCards.get(key);
+  if (!entry) return null;
+  abandonedConfirmCards.delete(key);
+  const take = (bridge as { takeLateAskReply?: (id: string) => unknown } | undefined)
+    ?.takeLateAskReply;
+  if (typeof take !== "function") return null;
+  const late = take.call(bridge, entry.askId);
+  if (late === undefined) return null;
+  return {
+    outcome: isAffirmative(late) ? "yes" : "no",
+    ageMs: Math.max(0, now - entry.at),
+    askId: entry.askId,
+  };
+}
+
+/** Test seam: forget every remembered abandoned card. */
+export function resetAbandonedConfirmCards(): void {
+  abandonedConfirmCards.clear();
+}
+
+/** Per-call options for ctx.confirm — see AbandonedConfirmCard for the whole argument. */
+export interface ConfirmOptions {
+  /**
+   * Before dispatching a card, claim the answer to a PREVIOUS card for this exact
+   * confirmation whose wait expired unanswered (panel#1554), and remember this card
+   * the same way if its own wait expires. Opt-in: a caller that turns this on is
+   * saying an answer the user already gave for this question, on this tab, inside the
+   * bridge's late-answer window, is a decision it will act on.
+   */
+  recoverAbandonedAnswer?: boolean;
+  /** Called INSTEAD of dispatching a card, when the outcome came from a previous one.
+   *  The caller must disclose this — it is not a fresh confirmation. */
+  onRecoveredAnswer?: (info: { outcome: "yes" | "no"; ageMs: number }) => void;
+}
+
+/**
  * The execution context every tool handler receives. Both transports (Anthropic
  * SDK in-process, MCP-SDK over HTTP) build the SAME context bound to a tab, so a
  * handler is transport-agnostic — it only ever talks to the bridge via `call` /
@@ -9212,7 +9394,12 @@ export interface PanelToolCtx {
    *  user never answered in time. `timeoutMs` (optional, #536) caps the WHOLE confirm
    *  wait (card deadline + late-answer grace) for a caller with a tighter
    *  whole-handler budget (e.g. panel_restart) — always clamped under the ask ceiling. */
-  confirm: (question: string, header: string, timeoutMs?: number) => Promise<ConfirmOutcome>;
+  confirm: (
+    question: string,
+    header: string,
+    timeoutMs?: number,
+    opts?: ConfirmOptions,
+  ) => Promise<ConfirmOutcome>;
   /** The raw bridge + tab id, for the handful of tools that need bespoke wiring
    *  (image screenshots, secret collection). */
   bridge: UiBridge;
@@ -10487,7 +10674,23 @@ export function makePanelToolCtx(
     question: string,
     header: string,
     timeoutMs?: number,
+    opts?: ConfirmOptions,
   ): Promise<ConfirmOutcome> => {
+    // panel#1554 — FIRST, claim any answer left on this confirmation's PREVIOUS card.
+    // Before dispatching, because a second card painted over an answered one is the
+    // state the orchestrator's own #952 wording has to apologise for ("the user may
+    // see two — tell them which one to answer"). See AbandonedConfirmCard.
+    if (opts?.recoverAbandonedAnswer) {
+      const recovered = takeRecoveredConfirmAnswer(bridge, ctx.tabId, header, question);
+      if (recovered) {
+        toolPolicyLogger.info(
+          `[panel-tools] confirm "${header}" answered on an earlier card ` +
+            `(${Math.round(recovered.ageMs / 1000)}s ago) — honouring it instead of re-asking`,
+        );
+        opts.onRecoveredAnswer?.({ outcome: recovered.outcome, ageMs: recovered.ageMs });
+        return recovered.outcome;
+      }
+    }
     // #360: the enclosing MCP `tools/call` is killed at ~300s. A hardcoded 300s
     // card wait had ZERO margin below that budget — so an unanswered confirm blew
     // the whole tool call (a transport timeout) instead of returning cleanly, and
@@ -10540,6 +10743,13 @@ export function makePanelToolCtx(
       if (isReplyTimeoutError(err)) {
         const late = await pollLateAskReply(bridge, askId, timing, budgetEnd);
         if (late !== undefined) return isAffirmative(late) ? "yes" : "no";
+        // panel#1554 — the card is STILL on screen and still answerable (the panel
+        // retires a card on a replaced connection, never on our timeout), and the
+        // bridge will buffer whatever the user clicks. Remember the id so the next
+        // attempt at this same confirmation drains it instead of asking again.
+        if (opts?.recoverAbandonedAnswer) {
+          rememberAbandonedConfirmCard(ctx.tabId, header, question, askId);
+        }
         return "timeout";
       }
       return "unreachable";
@@ -16114,7 +16324,10 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
       "panel_restart_comfyui",
       "Restart the user's ComfyUI server via the built-in Manager — needed to load newly installed/updated custom nodes. CALL THIS DIRECTLY when a restart is needed: it pops a confirm card and only restarts on a yes (don't ask separately first). ComfyUI and this agent go down briefly, then the panel auto-reconnects and you resume. ⚠️ BUSY GUARD: a restart ABORTS any in-progress or queued generation — if ComfyUI is generating, this tool REFUSES and tells you (it does NOT restart). When that happens, tell the user a render is running and WAIT for it (poll panel_node_queue_status), or pass force:true ONLY if the user explicitly confirms they want to kill the running generation. Best practice: before restarting after an install, check the queue is idle first. Only call when a restart is actually needed. If a crash takes the panel bridge offline so the confirmation card cannot be shown, this tool falls back to a headless restart of the configured local process (or COMFYUI_RESTART_COMMAND) instead of depending on the dead bridge — it still refuses a readable busy queue without force:true, and still refuses when a relaunch cannot be proven. On an externally-managed install whose relaunch can't be proven from here (e.g. Pinokio), the restart is REFUSED before anything is stopped — restart from the launcher that owns the server instead, or set COMFYUI_RESTART_COMMAND to the exact command that restarts the instance (e.g. `docker restart <container>`): the restart then runs through that command (the busy guard above still applies) instead of needing the launch path.",
       { force: z.boolean().optional() },
-      async ({ force }, ctx) => {
+      // panel#1554 — `note` rides WHICHEVER reply this handler returns, so a decision
+      // recovered from an earlier confirmation card is disclosed on every branch, not
+      // just the one that restarts. See withReplyNote / AbandonedConfirmCard.
+      withReplyNote(async ({ force }, ctx, note) => {
         // Whole-handler budget (#536): confirm + dispatch + readiness — INCLUDING
         // the legacy path's UNPREEMPTIBLE synchronous execSync blocks — must ALL finish
         // under the outer ~300s tools/call limit. 255s + the legacy admission rule below
@@ -16175,10 +16388,25 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
           1,
           Math.min(RESTART_CONFIRM_TIMEOUT_MS, overallDeadline - Date.now()),
         );
+        // panel#1554 — recovery is opted into HERE, and only here. The card this
+        // dispatches is the one whose answer #404's 90s cap leaves behind; the next
+        // attempt at this same question, on this same tab, claims it rather than
+        // painting a second card over an answer the user already gave.
         const decision = await ctx.confirm(
           "Restart ComfyUI now? It (and this agent) will go down briefly, then reconnect and resume automatically.",
           "Restart ComfyUI",
           confirmBudget,
+          {
+            recoverAbandonedAnswer: true,
+            onRecoveredAnswer: ({ outcome, ageMs }) =>
+              note(
+                `[NOTE] This is NOT a fresh confirmation. You (the user) answered ` +
+                  `"${outcome === "yes" ? "Yes, go ahead" : "No, cancel"}" on the restart card ` +
+                  `from an earlier attempt — that answer arrived after I had stopped waiting for ` +
+                  `it, about ${Math.round(ageMs / 1000)}s ago, so no new card was shown and I ` +
+                  `acted on it now. If it no longer reflects what you want, say so.`,
+              ),
+          },
         );
         if (decision === "timeout") {
           // #851 — the fallback used to be recommended unconditionally, and
@@ -16203,8 +16431,16 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
           return ok(
             `No confirmation received within ${Math.round(confirmBudget / 1000)}s, so I did NOT ` +
               "restart ComfyUI. The panel tab may be backgrounded or still reconnecting after a " +
-              "previous restart, so the confirmation card wasn't answered. Tell me to restart it " +
-              `and I'll re-ask. ${fallback}`,
+              "previous restart, so the confirmation card wasn't answered. " +
+              // panel#1554 — the card is still on screen and still answerable, and this
+              // now MATTERS rather than being trivia: its answer is held for the next
+              // attempt (see AbandonedConfirmCard). The old wording ("tell me to restart
+              // it and I'll re-ask") described a card that was dead and a decision that
+              // had to be made again, which is what sent the reporter off to find the
+              // headless tool for a restart they had already authorised.
+              "That card is still live: if the user answers it now and then asks again, " +
+              "this tool takes that answer instead of showing a second card — so just call " +
+              `panel_restart_comfyui again when they say to. ${fallback}`,
           );
         }
         // #1671 — set when the confirmation card was UNREACHABLE and ComfyUI is
@@ -17492,7 +17728,7 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
                   "before issuing graph tools.") +
             ".") + argvNote + (preflightNote ? ` ${preflightNote}` : ""),
         });
-      },
+      }),
     ),
     def(
       "panel_free_vram",
