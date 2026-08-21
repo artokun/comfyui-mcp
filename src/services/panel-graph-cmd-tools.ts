@@ -136,6 +136,20 @@ export const QUEUE_BUSY_READ_TOOLS: readonly string[] = [
   "panel_graph_outline",
   "panel_query_graph",
   "panel_get_errors",
+  // #1968 — `graph_find_nodes` has been `inert` since #778, so the queue-busy
+  // fence has ALWAYS let it through; it was simply never advertised. A refusal
+  // that names three usable reads when there are four teaches the agent the
+  // surface is narrower than it is, and the field report drew exactly that
+  // conclusion ("find_nodes is not among them"). Under-advertising a working
+  // read is its own defect: the list IS the recovery contract, and a fenced
+  // write's only guidance about what still works.
+  //
+  // `panel_list_subgraphs`, `panel_screenshot` and `panel_canvas` are inert too
+  // and stay OUT: this sentence offers reads to "inspect the graph", and a
+  // blueprint listing, a picture and a viewport move do not answer that. The
+  // execute-branch `viewTools` list in ui-bridge already names all of them where
+  // the claim is the broader "reads and view-only commands still work".
+  "panel_find_nodes",
 ];
 
 /**
