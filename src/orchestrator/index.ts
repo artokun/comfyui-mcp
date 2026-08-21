@@ -261,7 +261,7 @@ import { resolveHttpLaneComfyToolMode } from "./http-backend-tools.js";
 import type { ToolMode } from "../transport/cli.js";
 import { dedupeAudioRefs, splitAudioAttachments } from "./audio-attachment.js";
 import { startPanelConsoleHttpServer, type PanelConsoleHttpServer } from "./panel-console-http.js";
-import type { AgentBackend } from "./agent-backend.js";
+import type { AgentBackend, BackendId } from "./agent-backend.js";
 import { readComfyuiCrashLog, formatCrashNote } from "../services/crash-log.js";
 import { QueueMonitor } from "../services/queue-monitor.js";
 import { formatQueueNote } from "./queue-note.js";
@@ -716,8 +716,16 @@ function getCallToolClient(): Promise<Client> {
  * so the epoch-stability test can build two frames without booting the
  * orchestrator.
  */
+/** One row of the panel's model picker. Claude's probe hands over the Agent
+ *  SDK's full ModelInfo; every other backend's probe produces only what the
+ *  panel's normalizeModels reads — the id, its label, and the effort control
+ *  (a plain string[] of levels, since the Codex scale is wider than Claude's). */
+type ModelRow = Pick<ModelInfo, "value" | "displayName" | "supportsEffort"> & {
+  supportedEffortLevels?: string[];
+};
+
 export function buildModelsPushFrame(
-  models: ModelInfo[],
+  models: ModelRow[],
   current: string | undefined,
   backend: string,
 ): Record<string, unknown> {
@@ -742,7 +750,7 @@ export function buildSessionEpochFrame(): Record<string, unknown> {
 export function pushModelsFrame(
   bridge: Pick<UiBridge, "push">,
   panelTabId: string,
-  models: ModelInfo[],
+  models: ModelRow[],
   current: string | undefined,
   backend: string,
 ): number {
@@ -2263,20 +2271,32 @@ export async function runPanelOrchestrator(): Promise<void> {
   // failure was: click the GLM chip keyless → uncaught ValidationError → FATAL
   // process exit. This stub satisfies AgentBackend and surfaces the original
   // error as a normal degraded probe / in-chat error instead.
-  const brokenBackend = (backend: string, msg: string): AgentBackend =>
-    ({
-      id: backend,
-      capabilities: { modelEnumeration: false },
-      async *run() {
-        yield { type: "assistant", text: `⚠️ ${msg}` };
-        yield { type: "result", ok: false, subtype: "backend_unavailable" };
-      },
-      interrupt: async () => {},
-      listModels: async () => {
-        throw new Error(msg);
-      },
-      close: async () => {},
-    }) as unknown as AgentBackend;
+  const brokenBackend = (backend: string, msg: string): AgentBackend => ({
+    // The id echoes the key segment the panel asked for — that is the only name
+    // the in-chat error can carry, whether or not it is a registered backend.
+    id: backend as BackendId,
+    // A backend that could not be built can do nothing: every capability is off.
+    capabilities: {
+      persistentChannel: false,
+      streamingDeltas: false,
+      interruptMidTurn: false,
+      forkAtAnchor: false,
+      inProcessMcp: false,
+      modelEnumeration: false,
+      slashCommands: false,
+      hooks: false,
+      vision: false,
+    },
+    async *run() {
+      yield { type: "assistant", text: `⚠️ ${msg}` };
+      yield { type: "result", ok: false, subtype: "backend_unavailable" };
+    },
+    interrupt: async () => {},
+    listModels: async () => {
+      throw new Error(msg);
+    },
+    close: async () => {},
+  });
 
   // ONE code path for the simple OpenAI-compatible api-key providers (glm,
   // moonshot, …): resolve the provider's key + base URL (throws if absent), then
@@ -3545,28 +3565,27 @@ export async function runPanelOrchestrator(): Promise<void> {
   // (Gemini's probe proves the CLI + ACP handshake but not Google sign-in, which
   // ACP only reports at session/new — so its "ready" is provisional; a signed-out
   // CLI surfaces a clear one-shot error on the first turn.)
-  const modelsByBackend = new Map<string, Promise<ModelInfo[]>>();
-  function ensureModels(backend: string): Promise<ModelInfo[]> {
+  const modelsByBackend = new Map<string, Promise<ModelRow[]>>();
+  function ensureModels(backend: string): Promise<ModelRow[]> {
     let p = modelsByBackend.get(backend);
     if (!p) {
       const pb = getProbeBackend(backend);
-      const probe: Promise<ModelInfo[]> = pb
+      const probe: Promise<ModelRow[]> = pb
         ? Promise.resolve(pb.prepare?.())
             .then(() => pb.listModels())
             .then((list) =>
               list.map(
-                (m) =>
-                  ({
-                    value: m.id,
-                    displayName: m.label ?? m.id,
-                    ...(m.supportsEffort != null ? { supportsEffort: m.supportsEffort } : {}),
-                    ...(m.supportedEffortLevels ? { supportedEffortLevels: m.supportedEffortLevels } : {}),
-                  }) as unknown as ModelInfo,
+                (m): ModelRow => ({
+                  value: m.id,
+                  displayName: m.label ?? m.id,
+                  ...(m.supportsEffort != null ? { supportsEffort: m.supportsEffort } : {}),
+                  ...(m.supportedEffortLevels ? { supportedEffortLevels: m.supportedEffortLevels } : {}),
+                }),
               ),
             )
             .catch((err) => {
               logger.warn(`[panel-orchestrator] ${backend} model probe failed: ${err instanceof Error ? err.message : String(err)}`);
-              return [] as ModelInfo[];
+              return [] as ModelRow[];
             })
         : fetchSupportedModels(model);
       p = probe.then((list) => {
@@ -3605,11 +3624,11 @@ export async function runPanelOrchestrator(): Promise<void> {
             const discovered = new Map(list.map((m) => [m.value, m] as const));
             list = [
               ...preferred.map(
-                (id) =>
-                  (discovered.get(id) ?? {
+                (id): ModelRow =>
+                  discovered.get(id) ?? {
                     value: id,
                     displayName: `${id} ★`,
-                  }) as unknown as ModelInfo,
+                  },
               ),
               ...list.filter((m) => !preferred.includes(m.value as string)),
             ];
@@ -5257,7 +5276,7 @@ export async function runPanelOrchestrator(): Promise<void> {
         // makes the SDK session hang on init. (Defense in depth; the panel only
         // sends ids from the live catalog.)
         if (nextModel) {
-          const known = await ensureModels(backendForTab(tabId)).catch(() => [] as ModelInfo[]);
+          const known = await ensureModels(backendForTab(tabId)).catch(() => [] as ModelRow[]);
           if (known.length && !known.some((m) => m.value === nextModel)) {
             logger.warn(`[panel-orchestrator] ignoring unknown model "${nextModel}" — keeping current`);
             nextModel = undefined;
