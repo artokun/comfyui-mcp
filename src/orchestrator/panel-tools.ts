@@ -9329,6 +9329,11 @@ export function rememberAbandonedConfirmCard(
  *
  * ONE-SHOT by construction: the remembered card is dropped on the way past whether or
  * not it had an answer waiting, so a second call always dispatches a fresh card.
+ *
+ * `ageMs` is the age of the CARD (how long ago its wait expired), NOT of the click. The
+ * bridge buffers the answer without handing back when it arrived, so the click time is
+ * genuinely unknown here — anything reported from this number has to say so, or the
+ * number gets quoted back as "the user answered N seconds ago", which nothing establishes.
  */
 export function takeRecoveredConfirmAnswer(
   bridge: Pick<UiBridge, "takeLateAskReply"> | undefined,
@@ -16420,7 +16425,9 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
               note(
                 `[NOTE] NO NEW CONFIRMATION CARD WAS SHOWN for this call. The user picked ` +
                   `"${outcome === "yes" ? "Yes, go ahead" : "No, cancel"}" on the restart card from ` +
-                  `an EARLIER attempt, about ${Math.round(ageMs / 1000)}s ago; that answer landed ` +
+                  `an EARLIER attempt — the one this tool put up about ${Math.round(ageMs / 1000)}s ` +
+                  `ago (WHEN they clicked is not known here, only that it was after that). Their ` +
+                  `answer landed ` +
                   `after this tool had stopped waiting for it, so it was claimed now instead of ` +
                   `being discarded. Tell the user that is what you acted on, and check with them ` +
                   `if anything has changed since.`,
