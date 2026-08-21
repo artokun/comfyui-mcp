@@ -3931,6 +3931,37 @@ function appendToolResultText(res: ToolResult, extra: string): ToolResult {
   return { ...res, content };
 }
 
+/**
+ * #1873 — Save-As onto an EXISTING name 409s on purpose. ComfyUI's userdata POST
+ * returns 409 when overwrite=false; the frontend's saveWorkflowAs then prompts
+ * and, on confirm, DELETES the occupant. The panel refuses that delete path and
+ * surfaces "choose a different name", which is what forced a third workflow file.
+ *
+ * Matched on the panel's relocating-save collision (`conflictError` in
+ * workflow-save.js), not a generic "409 Conflict" — an in-place save can 409
+ * over its OWN file (#442) and that remedy is not this one.
+ */
+function isSaveAsNameConflict(res: ToolResult): boolean {
+  if (!res.isError) return false;
+  const text = textOfToolResult(res);
+  return /already exists \(409 Conflict\)/i.test(text) && /choose a different name/i.test(text);
+}
+
+const SAVE_AS_NAME_CONFLICT_NOTE =
+  `\n\nDo NOT pick a third name. Save-As never overwrites an existing file — that 409 is ` +
+  `the copy contract, not a missing overwrite switch. To land the edited copy under the ` +
+  `intended original name while keeping a backup of the pre-edit original:\n` +
+  `1. panel_rename_workflow({path: "<original>", name: "<original>_pre_edit"}) — path can ` +
+  `target a CLOSED listed workflow, so this does not disturb the active tab.\n` +
+  `2. panel_rename_workflow({name: "<original>"}) — no path, so this renames the ACTIVE ` +
+  `copy onto the freed name; the tab follows the file.\n` +
+  `3. panel_save_workflow() — in-place save from then on.`;
+
+function withSaveAsNameConflictNote(res: ToolResult): ToolResult {
+  if (!isSaveAsNameConflict(res)) return res;
+  return appendToolResultText(res, SAVE_AS_NAME_CONFLICT_NOTE);
+}
+
 // ---- #1695: bound the panel_set_widget previous/new echo --------------------
 //
 // Code-mode clients (Codex `functions.exec`) batch several panel_set_widget
@@ -14398,8 +14429,8 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_save_workflow",
-      "Save the user's open workflow PROGRAMMATICALLY — no Save/Rename dialog ever pops. With no `name`: saves in place (or auto-names + persists a never-saved workflow). With `name`: if the workflow is ALREADY saved under a different name this is a SAVE-AS — it writes a NEW file and leaves the original untouched on disk (it NEVER renames/moves/destroys the original); for a never-saved workflow it is simply the first save. The result reports what happened: `saved_as`+`copied_from`+`original_on_disk` (a disk-verified check that the original file still exists) for a Save-As copy, or `first_save` for a brand-new workflow. Use this freely (e.g. after building a graph) — it won't interrupt the user.",
-      { name: z.string().optional().describe("Name for the workflow (no .json needed). If the workflow is already saved under a different name, this writes a NEW file (Save-As COPY) and leaves the original in place — it never renames/moves/destroys it. Omit to save in place / auto-name an unsaved workflow.") },
+      "Save the user's open workflow PROGRAMMATICALLY — no Save/Rename dialog ever pops. With no `name`: saves in place (or auto-names + persists a never-saved workflow). With `name`: if the workflow is ALREADY saved under a different name this is a SAVE-AS — it writes a NEW file and leaves the original untouched on disk (it NEVER renames/moves/destroys the original); for a never-saved workflow it is simply the first save. The result reports what happened: `saved_as`+`copied_from`+`original_on_disk` (a disk-verified check that the original file still exists) for a Save-As copy, or `first_save` for a brand-new workflow. A Save-As onto an EXISTING name is a 409 Conflict (the copy never overwrites) — do NOT pick a third name; panel_rename_workflow can target a closed listed original to free the name, then rename the active copy onto it, then panel_save_workflow() in place. Use this freely (e.g. after building a graph) — it won't interrupt the user.",
+      { name: z.string().optional().describe("Name for the workflow (no .json needed). If the workflow is already saved under a different name, this writes a NEW file (Save-As COPY) and leaves the original in place — it never renames/moves/destroys it. An existing target name 409s; do not invent a third name — use panel_rename_workflow to free the original then rename the active copy onto it. Omit to save in place / auto-name an unsaved workflow.") },
       async (args: A, ctx) => {
         // #402: await a stable tab binding before dispatching the (mutating) save, so
         // a save issued in the post-restart "Connected: none" window reaches a live
@@ -14427,7 +14458,11 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             }
           }
         }
-        if (res.isError) return res;
+        if (res.isError) {
+          // #1873 — named Save-As 409s by contract; the panel's "choose a different
+          // name" is what forced a third file. Keep the 409 and name the rename path.
+          return args.name ? withSaveAsNameConflictNote(res) : res;
+        }
         // #1045 — a SAVE-AS replaces the active workflow instance: the canvas is
         // now the NEW file, with its own identity, while this session's command
         // fence still names the pre-save one. Every graph call afterwards fails
@@ -15203,10 +15238,10 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
     ),
     def(
       "panel_rename_workflow",
-      "Rename a workflow (the active one, or the one matching `path`).",
+      "Rename a workflow (the active one, or the one matching `path`). `path` can name a CLOSED listed workflow — renaming it does not disturb the active tab. After a Save-As copy, this is how to land the edited graph under the original name without a third file: rename the closed original aside (`path` + new name), then rename the active copy onto the freed name (no `path`), then panel_save_workflow().",
       {
         name: z.string().describe("New name (no .json needed)."),
-        path: z.string().optional().describe("Which workflow to rename; omit for the active one."),
+        path: z.string().optional().describe("Which workflow to rename; omit for the active one. Can name a CLOSED listed workflow (does not disturb the active tab)."),
       },
       async (args: A, ctx) => ctx.call({ cmd: "workflow_rename", name: args.name, path: args.path }, 15000),
     ),
