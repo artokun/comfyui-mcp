@@ -40,7 +40,10 @@ import {
   resolveServableViewRef,
   stageFileIntoServedDir,
   stagedForDisplayNote,
+  showMediaReplyAccountsForItems,
+  unaccountedShowMediaNote,
   unverifiedViewRefNote,
+  type DispatchedMediaItem,
   type ForwardedByReference,
   type StagedForDisplay,
   type UnverifiedViewRef,
@@ -1040,6 +1043,10 @@ export const __panelToolsTestHooks = {
    *  tool-handler suite never reaches must still fail. */
   annotateFreeVramAck,
   deviceStillPinned,
+  /** #2010 — the show_media claim correction, driven directly so a mutation of
+   *  it fails even where the handler suite does not reach. The handler CALL SITE
+   *  is covered separately (deleting the wiring must also fail a named test). */
+  annotateShowMediaAck,
   /** Direct access to the #742 decline recheck loop so its hard-deadline
    *  guarantee (codex gate r2) can be unit-tested with a custom deadline. */
   probeDeclineRecovery,
@@ -3680,6 +3687,71 @@ async function annotateFreeVramAck(ctx: PanelToolCtx, res: ToolResult): Promise<
     });
   }
   return res;
+}
+
+/**
+ * #2010 — `panel_show_media` returns the CLIENT's reply. One of the two clients
+ * that answer it lies: the mobile / remote pseudo-panel replies `{shown: true}`
+ * to any show_media without reading the items, and it has no audio player, so
+ * an audio take is acknowledged as delivered while the user hears nothing and
+ * sees a broken image card. That false success is worse than the refusal it
+ * replaced — a user who cannot hear a take KNOWS they cannot; an agent told
+ * `shown: true` believes it played and stops trying.
+ *
+ * The correction is not a guard on the destination. Three attempts at that
+ * (spike/1572-headless-audio-guard) each drew a fresh P1 of one class: they
+ * asked a question about `ctx.tabId` — an ADDRESS — before dispatch, and had to
+ * PREDICT where the frame would land (#2012: scope addresses, live rebinds and
+ * sticky headlessness all defeat it; #2013: an unroutable command is BUFFERED,
+ * not refused). This asks nothing about the destination. It runs AFTER the
+ * reply, on the reply, so there is nothing left to predict — no address to
+ * resolve, no await to be stale across, no mailbox to mis-classify. A wrong
+ * answer here is not even possible in the dangerous direction: the only thing
+ * it can do is decline to repeat a claim the client did not support.
+ *
+ * Same family as annotateFreeVramAck (#1866): the panel's acknowledgement is
+ * not a receipt, and the honest reply is one that says which of the two it got.
+ * Nothing is refused, nothing is withheld, and the client's own words are kept
+ * verbatim under `client_reply`.
+ */
+function annotateShowMediaAck(
+  res: ToolResult,
+  dispatched: readonly DispatchedMediaItem[],
+): ToolResult {
+  // A dispatch that FAILED already says so, and has no claim to correct.
+  if (res.isError || dispatched.length === 0) return res;
+  const parsed = parseToolResultJson(res);
+  // The sidebar panel's #710 reply accounts for every item it was given. It is
+  // the honest one and is left EXACTLY as it arrived — including its own note.
+  if (showMediaReplyAccountsForItems(parsed)) return res;
+  return {
+    ...res,
+    content: [
+      {
+        type: "text",
+        // The claim the caller reads first must not be the one this call could
+        // not support. `shown: true` is preserved — it is what the client said
+        // and dropping it would be its own kind of dishonesty — but it is
+        // demoted to `client_reply`, where it reads as evidence rather than as
+        // the answer.
+        text: JSON.stringify(
+          {
+            dispatched: true,
+            count: dispatched.length,
+            /** Deliberately null, not 0: this call did not observe zero
+             *  renderings, it observed nothing either way. */
+            presented_confirmed: null,
+            unaccounted: dispatched.map((d) => ({ filename: d.filename, kind: d.kind })),
+            client_reply: parsed ?? toolResultText(res),
+          },
+          null,
+          2,
+        ),
+      },
+      { type: "text", text: unaccountedShowMediaNote(dispatched, parsed) },
+      ...res.content.slice(1),
+    ],
+  };
 }
 
 // ---- panel_install_node: accepted-but-never-enqueued (#1129) ---------------
@@ -18324,7 +18396,21 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
           }
         }
 
-        const res = await ctx.call({ cmd: "show_media", items: resolved }, 60000);
+        // #2010 — the reply below is the CLIENT's, and one of the two clients
+        // that answer show_media says `{shown:true}` without reading the items.
+        // Correct the claim against what the reply actually accounted for BEFORE
+        // any of the notes below are appended, so they annotate the honest
+        // document rather than the client's word for it.
+        const res = annotateShowMediaAck(
+          await ctx.call({ cmd: "show_media", items: resolved }, 60000),
+          resolved.map((r) => ({
+            filename: typeof r.filename === "string" ? r.filename : "(unnamed)",
+            // As SENT, never re-derived: "image"/"video" for inlined bytes,
+            // "viewRef" for a ComfyUI reference whose media kind only the
+            // client's own classifier decides.
+            kind: typeof r.kind === "string" ? r.kind : "(unknown)",
+          })) satisfies DispatchedMediaItem[],
+        );
         // Why an item the caller passed as a PATH came back described as a
         // reference — the panel cannot say, because it never saw the path or the
         // size. Appended as a separate block so the panel's own reply (which is

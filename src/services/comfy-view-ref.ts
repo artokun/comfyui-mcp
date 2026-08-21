@@ -792,3 +792,122 @@ export function unverifiedViewRefNote(
     `which is verified and inlined as bytes.`
   );
 }
+
+// ---------------------------------------------------------------------------
+// #2010 — what a `show_media` reply actually ESTABLISHED
+// ---------------------------------------------------------------------------
+//
+// `panel_show_media` dispatches items to whatever client the session is bound
+// to and returns that client's reply verbatim. Two clients answer it, and they
+// do not answer the same question:
+//
+//   • the sidebar panel replies with the #710 per-item contract —
+//     `{ok, count, painted, unconfirmed, unrenderable, previews, note}` — where
+//     `painted` counts only what the person can SEE or HEAR and a kind it has no
+//     player for is reported in `unrenderable` instead. That reply read the
+//     items and says what became of each one.
+//
+//   • the mobile / remote pseudo-panel replies `{'shown': true}` to ANY
+//     show_media, without reading the items at all
+//     (comfyui-mcp-mobile `bridge_client.dart`: `replyOk(frame.rid, {'shown':
+//     true})`). Its `MediaCard.build` is `if (item.isVideo) _video else _still`
+//     — two branches, no audio one — so an audio item becomes an `<Image>` that
+//     fails to decode. The reply says it was shown; nothing looked.
+//
+// Relaying the second one is this repo's own worst failure mode: a tool
+// reporting an outcome it did not observe. The rule below states the narrowest
+// true thing instead, and it asks NO question about the destination — no
+// "is this tab headless", no extension sniffing, no client guess. It reads the
+// reply that came back. A client earns the claim by accounting for the items;
+// one that does not account for them establishes acceptance and nothing more.
+//
+// That is deliberately kind-agnostic. Audio is what surfaced it, but "the
+// client did not say what it rendered" is exactly as true of an image, and a
+// rule that fired only for audio would be a guess about the other kinds wearing
+// a narrower coat. It also, without naming them, covers a panel older than #710
+// (whose reply predates `unrenderable` and which paints audio as a broken
+// `<img>` — the client in #2017) and any future client this bridge meets.
+
+/** One item `panel_show_media` actually dispatched, as it went on the wire. */
+export type DispatchedMediaItem = {
+  filename: string;
+  /** The `kind` field on the dispatched item — "image"/"video" for inlined
+   *  bytes, "viewRef" for a ComfyUI reference. Reported as sent, never
+   *  re-derived here: a guess about the media kind is the thing this module is
+   *  refusing to make. */
+  kind: string;
+};
+
+/**
+ * Does this `show_media` reply ACCOUNT FOR the items it was given?
+ *
+ * True only for the #710 contract: a numeric `count`, a numeric `painted`, and
+ * an `unrenderable` array. All three are required and each is load-bearing —
+ * `count`+`painted` are the arithmetic (`painted + unconfirmed +
+ * unrenderable.length + dropped === count`), and `unrenderable` is the field a
+ * client only has once it can tell "I presented this" from "I was handed a kind
+ * I have no player for". A reply missing any of them did not do the accounting,
+ * whatever else it says about itself.
+ *
+ * Note what is NOT accepted: `{shown: true}`, `{ok: true}`, `{mailboxed: true}`,
+ * a bare `true`, an array, a string. None of them names an item.
+ */
+export function showMediaReplyAccountsForItems(reply: unknown): boolean {
+  if (!reply || typeof reply !== "object" || Array.isArray(reply)) return false;
+  const r = reply as Record<string, unknown>;
+  return (
+    typeof r.count === "number" &&
+    typeof r.painted === "number" &&
+    Array.isArray(r.unrenderable)
+  );
+}
+
+/**
+ * The disclosure an unaccounted-for `show_media` reply has to carry.
+ *
+ * Written to be un-mistakable for a failure report, because it is not one: the
+ * items were dispatched and the client took them. What is missing is the part
+ * that would let this tool say the person perceived them — so the one thing the
+ * caller must not do is narrate the audio, or the picture, as though it landed.
+ *
+ * Re-sending is called out explicitly as the WRONG next step. The identical
+ * reply comes back the second time, and an agent that reads "unconfirmed" as
+ * "failed" will loop on a delivery that already happened.
+ */
+export function unaccountedShowMediaNote(
+  dispatched: readonly DispatchedMediaItem[],
+  reply: unknown,
+): string {
+  if (dispatched.length === 0) return "";
+  const one = dispatched.length === 1;
+  const lines = dispatched
+    .slice(0, 8)
+    .map((d) => `  - ${d.filename} (dispatched as ${d.kind})`)
+    .join("\n");
+  const more = dispatched.length > 8 ? `\n  - …and ${dispatched.length - 8} more` : "";
+
+  // #2013 — `show_media` is the ONE command the bridge buffers instead of
+  // refusing when it cannot route. `mailboxed: true` therefore means no client
+  // has seen this at all yet, which is a different (and weaker) fact than "a
+  // client took it and said nothing about it". Say which one happened.
+  const mailboxed =
+    reply && typeof reply === "object" && (reply as Record<string, unknown>).mailboxed === true;
+
+  const what = mailboxed
+    ? `${one ? "It was" : "They were"} QUEUED, not delivered: no client has this yet. It will be handed ` +
+      `to whichever client connects next, and nothing here says that client can present it.`
+    : `The client acknowledged the command but did not report what it rendered — its reply carries no ` +
+      `per-item accounting (\`count\`/\`painted\`/\`unrenderable\`), so it did not read the items. ` +
+      `The mobile / remote client answers \`{"shown": true}\` to any show_media without looking at them, ` +
+      `and it has no audio player at all.`;
+
+  return (
+    `NOTE — this call did NOT establish that ${one ? "this item was" : "these items were"} presented ` +
+    `to the user:\n${lines}${more}\n` +
+    `${what}\n` +
+    `So: do not tell the user what they saw or heard here, and do not describe the contents of a file ` +
+    `on the basis of this reply. Ask them whether ${one ? "it" : "they"} appeared, if you need to know.\n` +
+    `This is NOT a failure report and re-sending is the wrong next step — the same reply comes back. ` +
+    `A sidebar panel answers with a real per-item account; this client does not.`
+  );
+}

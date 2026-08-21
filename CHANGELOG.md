@@ -8,6 +8,23 @@ All notable changes to this project are documented here. This project adheres to
 
 ### Fixed
 
+- **`panel_show_media` no longer repeats a claim its client did not support (#2010).**
+  The tool returns the CLIENT's reply, and the two clients that answer it do not
+  answer the same question. The sidebar panel replies with the #710 per-item
+  contract (`count`/`painted`/`unrenderable`) — it read the items and says what
+  became of each. The mobile / remote pseudo-panel replies `{"shown": true}` to
+  any `show_media` without reading the items at all, and it has no audio player:
+  an audio take became a broken image card while the agent was told it played.
+  A reply that does not account for the items now establishes acceptance and
+  nothing more — the tool answers with what it dispatched, keeps the client's own
+  words under `client_reply`, and says plainly that the user must not be told
+  what they saw or heard. Nothing is refused and nothing is withheld; the items
+  are dispatched exactly as before. This asks no question about the destination
+  (no `isHeadless` guess, no extension sniffing) — it reads the reply that came
+  back, so there is no address to resolve, no await to be stale across and no
+  buffered `show_media` (#2013) to mis-classify. A panel older than #710 (#2017)
+  is covered by the same rule without being named in it.
+
 - **Ollama refuses audio unless the model is a verified listener (#1972).** Native
   `/api/chat` carries audio in `message.images[]`. Most models HTTP 400 (fail
   closed). `huihui_ai/gemma-4-abliterated:E4b-qat` accepts the payload and
