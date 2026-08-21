@@ -426,7 +426,18 @@ function latestNote(
     return ` LATEST CHECK: the newest published panel is ${published}, but ${why} — whether you are behind it is UNKNOWN.`;
   }
   if (latest.behindLatest === false) {
-    return ` LATEST CHECK: ${published} is the newest published panel, and you are on it.`;
+    // `false` was established as "NOT OLDER than the newest published panel",
+    // and that includes being AHEAD of it — which a dev checkout tracking the
+    // panel repo's main routinely is, and which is exactly the install shape
+    // #1983 reproduced on. Saying "you are on it" there asserts a version
+    // EQUALITY nothing here proved: it names a version the reader is not
+    // running. That is the same unearned claim, one size smaller, that this
+    // whole comparison exists to delete — so the two cases get two sentences.
+    return isComparableVersion(status.installedVersion) &&
+      compareSemver(status.installedVersion, published) > 0
+      ? ` LATEST CHECK: your panel (${status.installedVersion}) is NEWER than the newest ` +
+          `published one (${published}), so there is nothing to pull.`
+      : ` LATEST CHECK: ${published} is the newest published panel, and you are on it.`;
   }
   const from = status.installedVersion ? `${status.installedVersion} → ` : "";
   const pinned = resolvePin(status).pinned;

@@ -179,6 +179,25 @@ describe("#1983 — floor and latest are two answers, never one", () => {
 
     expect(sync.behindLatest).toBe(false);
     expect(sync.latestPublishedVersion).toBe(LATEST);
+    // Equality was really observed here, so the reply may claim it.
+    expect(sync.summary).toMatch(/and you are on it/);
+  });
+
+  it("AHEAD of the newest published panel is not 'you are on it' — that names a version the reader is not running", async () => {
+    // The dev-checkout shape: the panel repo's main is ahead of what is
+    // published. `behindLatest:false` is correct (not behind), but it was
+    // proved as "not OLDER", never as "equal" — so the prose must not assert an
+    // equality nothing established.
+    mocks.panelStatus.mockResolvedValue(status({ installedVersion: "0.99.0", isDevSymlink: true }));
+    stubFetch(() => new Response(pyproject(LATEST), { status: 200 }));
+
+    const sync = await statusCall();
+
+    expect(sync.behindLatest).toBe(false);
+    expect(sync.summary).not.toMatch(/and you are on it/);
+    expect(sync.summary).toMatch(/NEWER than the newest published one/);
+    // and it still must not invent work to do
+    expect(sync.summary).not.toMatch(/To pull it, run/);
   });
 
   it("BELOW the floor keeps its own verdict AND reports the latest gap", async () => {
