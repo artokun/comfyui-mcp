@@ -17888,10 +17888,17 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
               (recovery.sawDown
                 ? `Reboot was dispatched and ComfyUI went down, but it has not become healthy within ${waited}s — it may still be starting or the restart failed. Verify with get_system_stats (action:"health") / panel_node_queue_status before retrying; do NOT assume it is back.`
                 : `The reboot command was sent but I could NOT confirm ComfyUI actually cycled within ${waited}s (it never went down — the panel may have merely disconnected/inferred a reboot without one). Verify with get_system_stats (action:"health") / panel_node_queue_status; do NOT assume it restarted.`) +
+              // Careful with BOTH of these sentences (adversarial re-read of this very
+              // diff). The positive one must not claim a REBIND: `awaitPostRestartReachable`
+              // returns true on a newer hello from the same browser-tab session, which
+              // usually needed no rebinding at all — `ensureReachable()` only runs when the
+              // old tab id stopped resolving. And the negative one must not send the reader
+              // to a browser refresh first, which is the manual step #654 is about: the
+              // cheap rebind check comes before it.
               (unreadyTabReconnect === true
-                ? " Separately: the panel tab DID re-register and this session was rebound onto it, so panel_* calls should route again. That is a fact about the browser socket only — it does not say ComfyUI finished booting."
+                ? " Separately: the panel tab DID re-register (a newer hello from the same browser-tab session), so panel_* calls should route again. That is a fact about the panel's socket to this orchestrator, which never traverses ComfyUI — it does not say ComfyUI finished booting."
                 : unreadyTabReconnect === false
-                  ? " The panel tab was also watched for a re-register and did not come back in that time, so panel_* calls may still report \"Connected: none\"; retry once the server answers, or reload the ComfyUI browser tab."
+                  ? " The panel tab was also watched for a re-register and did not come back in that window, so panel_* calls may still report \"Connected: none\". Retry once the server answers, or rebind with panel_set_workflow_target({mode:\"current\"}); reload the ComfyUI browser tab only if that also fails."
                   : "") +
               (preflightNote ? ` ${preflightNote}` : ""),
           });
