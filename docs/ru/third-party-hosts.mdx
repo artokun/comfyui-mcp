@@ -177,7 +177,8 @@ Blender sidebar panel / a Chrome extension / a Neovim plugin>.
 
 CONNECTION
 - WebSocket to:  ws://<desktop-ip>:9197/?token=<PAIR_TOKEN>
-  (port = bridge port − 2; bridge default 9199. 9180-era URLs still pair: port = bridge + 2, default 9182. Token is provided by the user via
+  (port = bridge port − 2; bridge default 9199. 9180-era URLs still pair:
+  port = bridge + 2, default 9182. Token is provided by the user via
   their pairing flow — NEVER hardcode, embed, or auto-provision it.)
 - On open, send:  {"type":"hello","tab_id":"<your-unique-id>","headless":true}
 

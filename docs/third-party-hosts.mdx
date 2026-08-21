@@ -134,7 +134,7 @@ a client from hijacking a session it never paired to.
 
 ```js
 const token = "<PAIR_TOKEN>";            // obtained via the user's pair flow
-const ws = new WebSocket(`ws://192.168.1.50:9182/?token=${token}`);
+const ws = new WebSocket(`ws://192.168.1.50:9197/?token=${token}`);
 let cid = 0;
 
 ws.onopen = () => {
