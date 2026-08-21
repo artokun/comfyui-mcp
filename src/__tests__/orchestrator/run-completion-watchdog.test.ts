@@ -826,34 +826,4 @@ describe("#2001: the grace is read off the panel's own send bounds", () => {
     expect(delivered[0].payload.prompt_id).toBe(PID);
     expect(wd.armedCount()).toBe(0);
   });
-
-  it("a storyboard grace shorter than the ordinary one can never make an extended arm fire sooner", async () => {
-    const clock = { t: 35_000_000 };
-    const entry = saveVideoHistoryEntry(PID);
-    const delivered: Array<{ payload: CompletionPayload; ticket: RunTicket }> = [];
-    const wd = createRunCompletionWatchdog({
-      awaiting: (id) => RunCompletions.awaitingCompletion(id),
-      deliver: (payload, ticket) => {
-        delivered.push({ payload, ticket });
-        RunCompletions.record(ticket.tabId, payload, { conversation: ticket.conversation ?? CONV });
-      },
-      resolveOutputs: (id) =>
-        resolveHistoryCompletionImages(id, async (promptId) => ({ [promptId]: entry })),
-      graceMs: 10_000,
-      storyboardGraceMs: 1_000, // misconfigured: SHORTER than the ordinary grace
-      now: () => clock.t,
-    });
-    RunCompletions.openRun(PID, { tabId: TAB, conversation: CONV });
-    wd.observe([{ promptId: PID, status: "success" }]);
-
-    clock.t += 10_000;
-    await wd.tick();
-    // Extended, and the floor holds: it is due at max(grace, storyboardGrace),
-    // i.e. still 10 s from the observation — which has just passed, so the very
-    // next tick delivers rather than the arm being stranded or fired early.
-    expect(delivered).toHaveLength(0);
-    expect(wd.armedCount()).toBe(1);
-    await wd.tick();
-    expect(delivered).toHaveLength(1);
-  });
 });

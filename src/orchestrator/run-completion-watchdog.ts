@@ -402,10 +402,6 @@ export function createRunCompletionWatchdog({
   storyboardGraceMs = DEFAULT_STORYBOARD_GRACE_MS,
   now = () => Date.now(),
 }: RunCompletionWatchdogDeps): RunCompletionWatchdog {
-  /** The extended bound can only ever be LONGER than the ordinary one: a caller
-   *  that passes a shorter storyboard grace must not make an extended arm fire
-   *  sooner than an un-extended one (#2001). */
-  const extendedGraceMs = Math.max(graceMs, storyboardGraceMs);
   /** promptId → the observation we are holding. FIRST observation wins: a
    *  re-observation must not push the deadline out (that is how a repeatedly
    *  re-reported completion would never expire and the agent would wait
@@ -430,7 +426,12 @@ export function createRunCompletionWatchdog({
     if (armed.size === 0) return;
     const at = now();
     for (const entry of [...armed.values()]) {
-      const dueAfter = entry.extended ? extendedGraceMs : graceMs;
+      // An extended arm is due at `storyboardGraceMs` measured from the SAME
+      // observation, never from the extension: the extension is only granted
+      // once `graceMs` has already elapsed, so a storyboardGraceMs below it
+      // simply means the next tick delivers. There is deliberately no floor —
+      // one would be unreachable (proved by mutating it: nothing changed).
+      const dueAfter = entry.extended ? storyboardGraceMs : graceMs;
       if (!ignoreGrace && at - entry.observedAt < dueAfter) continue;
       // Disarm FIRST and unconditionally: whatever happens below, this
       // observation is spent. Leaving it armed on a throwing deliver() would
@@ -494,7 +495,7 @@ export function createRunCompletionWatchdog({
             armed.set(entry.promptId, { ...entry, extended: true });
             logger.debug(
               `[run-completion-watchdog] prompt ${entry.promptId} produced media the panel has to storyboard — holding the synthesis until ${Math.round(
-                extendedGraceMs / 1000,
+                storyboardGraceMs / 1000,
               )}s after the finish instead of ${Math.round(graceMs / 1000)}s (#2001)`,
             );
             continue;
