@@ -363,8 +363,12 @@ function latestNote(
   const published = latest.latestPublishedVersion;
   if (!published) {
     return (
+      // "did not answer USABLY" covers both shapes: no answer at all, and an
+      // answer that is not a version we can compare (a "nightly" pyproject, a
+      // body from the wrong pack). Saying "did not answer" would be wrong in the
+      // second case, which is the same species of small lie as the rest of this.
       ` LATEST CHECK: the newest published panel could not be determined just now ` +
-      `(the version lookup did not answer). Only the FLOOR comparison above was made — ` +
+      `(the version lookup did not answer usably). Only the FLOOR comparison above was made — ` +
       `this is NOT evidence that you are on the newest panel. Check by hand at ` +
       `${PANEL_PYPROJECT_URL}, or re-run this once the network is back.`
     );
