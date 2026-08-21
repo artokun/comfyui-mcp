@@ -36,10 +36,12 @@ This directory is neither compiled nor shipped: `tsconfig.json` includes only
   rule, and compares them with `scripts/anti-slop-baseline.json`. The baseline
   may shrink and never grow. It is part of `npm run lint` and a named CI step.
 - Waive a finding at the site, with a reason, on one line:
-  `// oxlint-disable-next-line anti-slop/<rule> -- <why>`. A directive with no
-  reason fails the gate. A `//` directive must not wrap — the continuation
-  comment becomes the "next line" and the directive misses the code; use a
-  `/* … */` block when the reason needs the room.
+  `// oxlint-disable-next-line anti-slop/<rule> -- <why>`. The reason must be
+  words (four or more), not a bare ticket number; a directive without one fails
+  the gate, and a blanket directive that names no rule is refused outright. A
+  `//` directive must not wrap — the continuation comment becomes the "next
+  line" and the directive misses the code; use a `/* … */` block when the
+  reason needs the room.
 
 ## Rules ON (`"error"`, gated by the baseline)
 

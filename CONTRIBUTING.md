@@ -67,9 +67,10 @@ Business logic lives in `src/services/<name>.ts`. The matching
   rules (`tools/oxlint/README.md`) against a per-file, per-rule baseline that may shrink and never
   grow. A new `x as unknown as Foo`, `(): unknown`, `Reflect.get`, and so on fails the build. Fix
   it, or justify it at the site on one line:
-  `// oxlint-disable-next-line anti-slop/<rule> -- <why>` (a bare directive is rejected). When a
-  change removes findings, run `node scripts/check-anti-slop.mjs --baseline` in the same PR so the
-  debt list pays down; never hand-edit a count upward.
+  `// oxlint-disable-next-line anti-slop/<rule> -- <why>` (the reason must be words, not a ticket
+  number; a blanket directive naming no rule is refused). When a change removes findings, run
+  `node scripts/check-anti-slop.mjs --baseline` in the same PR so the debt list pays down; never
+  hand-edit a count upward.
 - **Plugin skills.** Every skill (`plugin/skills/<name>/SKILL.md`) ends with a
   `## Sources` section that separates **Official** sources (vendor docs, node README,
   `/object_info`) from **Empirical** ones (working graphs, observed behaviour). A skill

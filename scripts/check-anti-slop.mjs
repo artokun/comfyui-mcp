@@ -34,11 +34,13 @@
  *     // oxlint-disable-next-line anti-slop/no-chained-type-assertions -- the test feeds a deliberately malformed event; the double cast is the point
  *     const ev = raw as unknown as PanelEvent;
  *
- * A directive naming an anti-slop rule with no `-- reason`, or a BLANKET
- * `oxlint-disable` / `eslint-disable` that names no rule at all (which switches
- * every rule off, this one included), is rejected here. The reason is the
- * deliverable: it is what a reviewer reads instead of re-deriving whether the
- * cast is safe, and writing it is where an author notices that it is not.
+ * A directive naming an anti-slop rule with no `-- reason` is rejected here, and
+ * the reason has to be words — four or more — not a bare ticket number. The
+ * reason is the deliverable: it is what a reviewer reads instead of re-deriving
+ * whether the cast is safe, and writing it is where an author notices that it
+ * is not. A BLANKET `oxlint-disable` / `eslint-disable` that names no rule is
+ * rejected whatever follows it: it switches every rule off for the line or the
+ * whole file, and that is not something a reason can cover. Name the rule.
  *
  * Keep a `//` directive on ONE line. A continuation comment underneath it is
  * the "next line" as far as oxlint is concerned, so the directive silently
@@ -195,13 +197,14 @@ function perRuleTotals(files) {
   return totals;
 }
 
+/** Symlinks are skipped rather than followed: a link back into the tree would
+ *  loop, and a link out of it points at files oxlint was not asked about. */
 function walk(dir, out = []) {
-  for (const name of readdirSync(dir)) {
-    if (SKIP_DIRS.has(name)) continue;
-    const p = join(dir, name);
-    const st = statSync(p);
-    if (st.isDirectory()) walk(p, out);
-    else if (SOURCE_EXT.test(name) && !/\.d\.ts$/.test(name)) out.push(p);
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (SKIP_DIRS.has(entry.name) || entry.isSymbolicLink()) continue;
+    const p = join(dir, entry.name);
+    if (entry.isDirectory()) walk(p, out);
+    else if (entry.isFile() && SOURCE_EXT.test(entry.name) && !/\.d\.ts$/.test(entry.name)) out.push(p);
   }
   return out;
 }
@@ -234,6 +237,10 @@ function bareWaivers() {
           const before = line.slice(0, m.index);
           const open = before.lastIndexOf("/*");
           const inBlock = open !== -1 && before.lastIndexOf("*/") < open;
+          // Only a directive inside a comment is a directive. The same words in
+          // a string literal — an error message quoting the syntax, this file's
+          // own usage text — are prose, and oxlint does not read them either.
+          if (!inBlock && !before.includes("//")) continue;
           let body = m[1];
           if (inBlock && !body.includes("*/")) {
             for (let j = i + 1; j < lines.length; j++) {
@@ -245,11 +252,14 @@ function bareWaivers() {
           const dash = body.indexOf("--");
           const ruleList = (dash === -1 ? body : body.slice(0, dash)).trim();
           const reason = dash === -1 ? "" : body.slice(dash + 2);
+          // A blanket directive is rejected whatever follows it: it switches
+          // every rule off for the line or the file, and "every rule" is not a
+          // thing anyone can write a reason for. Name the rule.
           const blanket = ruleList === "";
           if (!blanket && !ruleList.includes("anti-slop/")) continue;
           // A reason must be words — not punctuation, and not a ticket number alone.
           const words = reason.split(/\s+/).filter((w) => /[a-z]{3}/i.test(w));
-          if (words.length >= 4) continue;
+          if (!blanket && words.length >= 4) continue;
           bare.push({ rel: normalise(file), line: i + 1, blanket, text: line.trim() });
         }
       });
@@ -270,7 +280,8 @@ function readBaseline() {
     throw err;
   }
   const parsed = JSON.parse(raw);
-  if (parsed === null || typeof parsed.files !== "object") {
+  // `typeof null === "object"`, so the null check is not redundant.
+  if (parsed === null || parsed.files === null || typeof parsed.files !== "object" || Array.isArray(parsed.files)) {
     die(`anti-slop gate: ${relative(ROOT, BASELINE)} has no "files" object. Rewrite it with --baseline.`);
   }
   return { files: parsed.files, absent: false };
@@ -310,6 +321,15 @@ if (args.includes("--list")) {
 }
 
 if (args.includes("--baseline")) {
+  // A file oxlint could not parse contributes zero findings, so a baseline
+  // written over it would be an undercount that fails the moment the file is
+  // fixed. Refuse, rather than record a number that is not true.
+  if (unparsed.length || foreign.length) {
+    console.error("anti-slop — not writing a baseline over a tree oxlint could not fully lint:\n");
+    for (const u of unparsed) console.error(`  ${u.rel}:${u.line}:${u.column}  ${u.message}`);
+    for (const f of foreign) console.error(`  ${f.rel}:${f.line}:${f.column}  ${f.code} (not an anti-slop rule — check .oxlintrc.json)`);
+    process.exit(1);
+  }
   const before = perRuleTotals(readBaseline().files);
   writeBaseline(current);
   const after = perRuleTotals(current);
@@ -413,13 +433,14 @@ if (added.length) {
 
 if (bare.length) {
   failed = true;
-  console.error(`\nanti-slop — ${bare.length} disable directive(s) with no reason.\n`);
+  console.error(`\nanti-slop — ${bare.length} disable directive(s) this gate will not accept.\n`);
   console.error(
-    "A directive that names an anti-slop rule, or names no rule at all, switches\n" +
-      "this gate off for that line. The reason is the deliverable; a marker alone\n" +
-      "only hides the question. Write `-- <why>` after the rule list.\n",
+    "A directive naming an anti-slop rule needs a reason in words after `--`;\n" +
+      "a marker or a ticket number alone only hides the question. A directive\n" +
+      "naming NO rule switches everything off and is refused outright — name the\n" +
+      "rule you mean.\n",
   );
-  for (const b of bare) console.error(`  ${b.rel}:${b.line}${b.blanket ? "  (blanket — names no rule)" : ""}\n      ${b.text}`);
+  for (const b of bare) console.error(`  ${b.rel}:${b.line}${b.blanket ? "  (blanket — names no rule)" : "  (no reason)"}\n      ${b.text}`);
 }
 
 if (paid.length) {
