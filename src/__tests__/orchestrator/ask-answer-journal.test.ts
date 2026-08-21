@@ -1029,7 +1029,18 @@ describe("ask-answer journal — bounds may LABEL, never silently lose (#486)", 
     // A different browser tab taking over a recurring key is a conversation
     // boundary too — the ENTRIES are tab-keyed, so the newcomer must be shut out
     // of them at the hello, not merely kept from the debt.
-    expect(src).toMatch(/setTabTakenOverListener\(\(tabId\) => AskAnswers\.closeAsks\(tabId\)\)/);
+    // Asserted on the listener's BODY, not on a one-expression shape. panel#1554 gave
+    // this same boundary a second retirement (an abandoned confirmation card must not
+    // be claimable by the newcomer either) and the listener became a block. The
+    // guarantee under test is "the takeover retires ask state", and a regex that only
+    // matches one statement would fail the moment anything legitimately joins it —
+    // pressure to install a SECOND setTabTakenOverListener instead, which (it is a
+    // setter, not an adder) would silently replace this one and un-ship #486.
+    const takeoverAt = src.indexOf("bridge.setTabTakenOverListener(");
+    expect(takeoverAt, "takeover listener not found").toBeGreaterThan(-1);
+    expect(src.slice(takeoverAt, takeoverAt + 300)).toContain("AskAnswers.closeAsks(tabId)");
+    // …and exactly one is installed, which is what makes the body the whole story.
+    expect(src.split("bridge.setTabTakenOverListener(").length - 1).toBe(1);
     expect(src).toContain("AskAnswers.setIncarnationResolver(");
     // The ack must carry WHO is acking, or a switched provider can certify the
     // previous conversation's answer.
