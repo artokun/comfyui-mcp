@@ -88,10 +88,12 @@
     "cloudflared": "^0.7.3"
   },
   "devDependencies": {
+    "@oxlint/plugins": "1.79.0",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.13.4",
     "@types/ws": "^8.18.1",
     "cross-env": "^10.1.0",
+    "oxlint": "1.79.0",
     "tsx": "^4.23.12",
     "typescript": "^7.0.2",
     "vitest": "^4.1.11"
