@@ -232,6 +232,42 @@ describe("#1983 — floor and latest are two answers, never one", () => {
   });
 });
 
+describe("#1983 — an untrusted install cannot be laundered into a confident answer", () => {
+  it("an UNTRUSTED install (a shadow copy) refuses the latest claim rather than laundering it", async () => {
+    mocks.panelStatus.mockResolvedValue(
+      status({ shadows: [{ name: ".comfyui-agent-panel.bak-1", dir: "/x" }] } as Partial<PanelStatus>),
+    );
+    stubFetch(() => new Response(pyproject(LATEST), { status: 200 }));
+
+    const sync = await statusCall();
+
+    // The served panel may not be the one on disk, so `installedVersion` is not
+    // a number this reply is entitled to compare against anything.
+    expect(sync.decision).toBe("blocked");
+    expect(sync.behindLatest).toBeNull();
+    expect(sync.summary).toMatch(/UNKNOWN/);
+  });
+
+  it("an unreliable custom_nodes scan does not become a confident staleness claim", async () => {
+    mocks.panelStatus.mockResolvedValue(status({ scanReliable: false }));
+    stubFetch(() => new Response(pyproject(LATEST), { status: 200 }));
+
+    expect((await statusCall()).behindLatest).toBeNull();
+  });
+
+  it("a MISSING pin field is treated as pinned by the advisory too, not sent at an update", async () => {
+    // evaluatePanelSync reads an absent pin as indeterminate-PINNED; an advisory
+    // that read it as unpinned would name an update the pin guard will refuse.
+    mocks.panelStatus.mockResolvedValue(status({ pin: undefined } as Partial<PanelStatus>));
+    stubFetch(() => new Response(pyproject(LATEST), { status: 200 }));
+
+    const sync = await statusCall();
+
+    expect(sync.decision).toBe("blocked");
+    expect(sync.summary).not.toMatch(/To pull it, run/);
+  });
+});
+
 describe("#1983 — a failed probe degrades to the floor verdict, never to 'you are fine'", () => {
   it("network error → behindLatest is null (NOT false) and the reply says the latest is unknown", async () => {
     mocks.panelStatus.mockResolvedValue(status());

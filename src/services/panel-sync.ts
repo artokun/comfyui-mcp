@@ -316,31 +316,71 @@ export function evaluatePanelSync(
  * is a claim ("I compared you against the newest published panel and you are on
  * it") and may only be returned when that comparison actually happened.
  */
+interface LatestComparison {
+  latestPublishedVersion?: string;
+  behindLatest: boolean | null;
+  /** Why the answer is `null`, so the summary can say the true reason. */
+  unknownBecause?: "no-latest" | "untrusted-install" | "incomparable" | "not-applicable";
+}
+
 function compareAgainstLatest(
   status: PanelStatus,
   latestVersion: string | null | undefined,
-): { latestPublishedVersion?: string; behindLatest: boolean | null } {
+): LatestComparison {
   const latest =
     typeof latestVersion === "string" && isComparableVersion(latestVersion)
       ? latestVersion.trim()
       : undefined;
-  if (!latest) return { behindLatest: null };
+  if (!latest) return { behindLatest: null, unknownBecause: "no-latest" };
   // No panel of ours here at all (remote / cloud / no local ComfyUI): there is
   // nothing on this machine for the published version to be newer THAN.
-  if (!status.applicable) return { latestPublishedVersion: latest, behindLatest: null };
+  if (!status.applicable) {
+    return { latestPublishedVersion: latest, behindLatest: null, unknownBecause: "not-applicable" };
+  }
+  // The states where THIS FILE already refuses to make a version claim, because
+  // `installedVersion` does not describe what is really being served: an
+  // unreliable custom_nodes enumeration, a failed shadow scan, or a shadow copy
+  // that ComfyUI may be loading instead. Comparing an untrusted version against
+  // the newest published one would launder that same untrusted number into a
+  // fresh confident claim (`blocked` + "you are 16 behind"), which is the defect
+  // in a new costume. Can't tell → don't answer.
+  if (
+    status.scanReliable === false ||
+    status.shadowInspectFailed === true ||
+    (status.shadows?.length ?? 0) > 0
+  ) {
+    return {
+      latestPublishedVersion: latest,
+      behindLatest: null,
+      unknownBecause: "untrusted-install",
+    };
+  }
   if (!status.installed) {
     // Same discipline as `behind`: a PROVEN absence is definitionally behind
-    // anything published; an unproven or unreliable one is a failed observation.
-    const provenAbsent = status.absenceProven !== false && status.scanReliable !== false;
-    return { latestPublishedVersion: latest, behindLatest: provenAbsent ? true : null };
+    // anything published; an unproven one is a failed observation.
+    return status.absenceProven === false
+      ? { latestPublishedVersion: latest, behindLatest: null, unknownBecause: "untrusted-install" }
+      : { latestPublishedVersion: latest, behindLatest: true };
   }
   if (!isComparableVersion(status.installedVersion)) {
-    return { latestPublishedVersion: latest, behindLatest: null };
+    return { latestPublishedVersion: latest, behindLatest: null, unknownBecause: "incomparable" };
   }
   return {
     latestPublishedVersion: latest,
     behindLatest: compareSemver(status.installedVersion, latest) < 0,
   };
+}
+
+/**
+ * The pin as `evaluatePanelSync` reads it. Shared so the verdict and the latest
+ * advisory cannot disagree about whether a pin is in force — a MISSING pin field
+ * resolves to indeterminate-PINNED, and an advisory that read it as unpinned
+ * would send that user at an update the pin guard is going to refuse.
+ */
+function resolvePin(status: PanelStatus): PanelPinState {
+  return status.pin && typeof status.pin === "object"
+    ? status.pin
+    : { pinned: true, source: "settings", indeterminate: true };
 }
 
 /**
@@ -353,7 +393,7 @@ function compareAgainstLatest(
  */
 function latestNote(
   status: PanelStatus,
-  latest: { latestPublishedVersion?: string; behindLatest: boolean | null },
+  latest: LatestComparison,
   requested: string | null | undefined,
 ): string {
   // Nothing was asked on this path — FLOOR_IS_NOT_LATEST already says the
@@ -374,17 +414,22 @@ function latestNote(
     );
   }
   if (latest.behindLatest === null) {
-    return (
-      ` LATEST CHECK: the newest published panel is ${published}, but the installed ` +
-      `version (${status.installedVersion ?? "unreadable"}) could not be compared against ` +
-      `it, so whether you are behind it is UNKNOWN.`
-    );
+    const why =
+      latest.unknownBecause === "untrusted-install"
+        ? `what is actually installed here could not be established (see above), so it cannot ` +
+          `be compared against it`
+        : latest.unknownBecause === "not-applicable"
+          ? `no panel of this orchestrator's is managed on this machine, so there is nothing ` +
+            `here for it to be newer than`
+          : `the installed version (${status.installedVersion ?? "unreadable"}) is not a ` +
+            `comparable version number, so it cannot be compared against it`;
+    return ` LATEST CHECK: the newest published panel is ${published}, but ${why} — whether you are behind it is UNKNOWN.`;
   }
   if (latest.behindLatest === false) {
     return ` LATEST CHECK: ${published} is the newest published panel, and you are on it.`;
   }
   const from = status.installedVersion ? `${status.installedVersion} → ` : "";
-  const pinned = status.pin && typeof status.pin === "object" && status.pin.pinned;
+  const pinned = resolvePin(status).pinned;
   // WHICH remedy is not cosmetic. A dev symlink and a pin both make the update
   // action refuse, and sending a user at a tool that will say no is the dead-end
   // shape this cluster exists to remove (#771/#784) — so each state gets the
@@ -418,10 +463,7 @@ function evaluateAgainstFloor(
   // A PanelStatus without a `pin` is a caller that predates the pin (or built
   // the object by hand). Absence of the field is not evidence of absence of a
   // pin, so it resolves to indeterminate-pinned, not to unpinned.
-  const pin: PanelPinState =
-    status.pin && typeof status.pin === "object"
-      ? status.pin
-      : { pinned: true, source: "settings", indeterminate: true };
+  const pin: PanelPinState = resolvePin(status);
 
   const base = {
     requiredPanelVersion: required,
