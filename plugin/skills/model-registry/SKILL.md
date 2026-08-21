@@ -1,21 +1,21 @@
 ---
 name: model-registry
-description: Curated download URLs and target directories for every model the comfyui-mcp skills reference — checkpoints, VAEs, text encoders, LoRAs — organized by family (Flux, WAN, LTX, Qwen, Z-Image, SD15/SDXL). Use when downloading models with download_model (action:"download" / action:"download_civitai"), when a workflow fails with a missing-model error, or when setting up a new machine.
+description: Curated download URLs and target directories, organized by family (Flux, WAN, LTX, Qwen, Z-Image, SD15/SDXL), for every model the comfyui-mcp skills reference, covering checkpoints, VAEs, text encoders, and LoRAs. Use when downloading models with download_model (action:"download" / action:"download_civitai"), when a workflow fails with a missing-model error, or when setting up a new machine.
 ---
 
 # Model Registry
 
 One table per family: filename → source URL → target subdir under
 `<COMFYUI>/models/`. Use with `download_model({ action: "download", url, target_subfolder, filename })`.
-This registry grows with every release — if a model you need is missing, use
+This registry grows with every release. If a model you need is missing, use
 `action:"search"` (HuggingFace) or `action:"download_civitai"` and consider
 contributing the row.
 
 **Conventions**
 - HF "resolve" URLs download directly: `https://huggingface.co/<repo>/resolve/main/<path>`
-- 🔒 = gated repo — needs `HUGGINGFACE_TOKEN` (accept the license on the HF page first)
+- 🔒 = gated repo, needs `HUGGINGFACE_TOKEN` (accept the license on the HF page first)
 - CivitAI model-page URLs need `download_model` `action:"download_civitai"` (resolves version → file); raw `civitai.com/api/download/...` URLs work with `action:"download"` + `CIVITAI_API_TOKEN`
-- Always verify the exact filename a workflow's loader expects — `model-compatibility` skill covers which VAE/CLIP pairs with which architecture
+- Always verify the exact filename a workflow's loader expects. The `model-compatibility` skill covers which VAE/CLIP pairs with which architecture
 
 ## Shared VAEs & text encoders (download these once)
 
@@ -96,7 +96,7 @@ filenames the Comfy-Org templates already name.
 
 ## SDXL / SD1.5 community checkpoints (CivitAI)
 
-Use `download_model({ action: "download_civitai", model_id })` — it resolves the latest version and
+Use `download_model({ action: "download_civitai", model_id })`. It resolves the latest version and
 handles auth:
 
 | Model | CivitAI |
@@ -107,13 +107,13 @@ handles auth:
 
 ## Failure modes
 
-- **404 on an HF resolve URL** — the repo restructured. Open the repo page,
+- **404 on an HF resolve URL.** The repo restructured. Open the repo page,
   find the file under "Files", and rebuild the resolve URL.
-- **401/403** — gated repo: set `HUGGINGFACE_TOKEN` after accepting the
+- **401/403.** Gated repo. Set `HUGGINGFACE_TOKEN` after accepting the
   license, or `CIVITAI_API_TOKEN` for early-access CivitAI files.
-- **Wrong dropdown after download** — file landed in the wrong `models/`
+- **Wrong dropdown after download.** The file landed in the wrong `models/`
   subdir; check the Target column and `model-compatibility`.
-- Downloads resume automatically on retry (HTTP Range) — re-run the same
+- Downloads resume on retry (HTTP Range), so re-run the same
   `download_model` call after a network drop.
 
 ## Sources

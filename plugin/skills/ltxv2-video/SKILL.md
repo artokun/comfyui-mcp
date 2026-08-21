@@ -1,6 +1,6 @@
 ---
 name: ltxv2-video
-description: Build Lightricks LTX-2 / LTX-2.3 video workflows — text-to-video, image-to-video, GGUF and bundled checkpoints, distilled model, camera control LoRAs, synchronized audio, two-stage upscaling, and swapping alternate/GGUF base models
+description: Build Lightricks LTX-2 / LTX-2.3 video workflows covering text-to-video, image-to-video, GGUF and bundled checkpoints, distilled model, camera control LoRAs, synchronized audio, two-stage upscaling, and swapping alternate/GGUF base models
 globs:
   - "**/*.json"
 ---
@@ -9,11 +9,11 @@ globs:
 
 ## Version naming (read this first)
 
-There is no "LTX 3.2" or "LTX2.3" as separate products — the user's shorthand refers to **Lightricks LTX-2.3**, a point release of the LTX-2 family. The lineage is:
+There is no "LTX 3.2" or "LTX2.3" as separate products. The user's shorthand refers to **Lightricks LTX-2.3**, a point release of the LTX-2 family. The lineage is:
 
-- **LTX-Video** (2024) — first text-to-video model from Lightricks.
-- **LTX-2 / LTX-V2** (Oct 2025) — 19B-class DiT audio-video foundation model. Bundled checkpoint `ltx-2-19b-distilled.safetensors`, Gemma 3 12B text encoder.
-- **LTX-2.3** (released ~March 2026) — **22B**-parameter DiT update. Rebuilt VAE (sharper textures/faces/hair/text), ~4x larger text connector (text projection) for prompt adherence, native 9:16 portrait, LoRA support, HiFi-GAN vocoder for cleaner synchronized audio, up to 4K@50fps / ~20s clips. Apache 2.0. **Distributed primarily as GGUF UNets** (community quants) plus separate VAE / text-encoder / text-projection files — NOT a single bundled checkpoint like LTX-2.
+- **LTX-Video** (2024): first text-to-video model from Lightricks.
+- **LTX-2 / LTX-V2** (Oct 2025): 19B-class DiT audio-video foundation model. Bundled checkpoint `ltx-2-19b-distilled.safetensors`, Gemma 3 12B text encoder.
+- **LTX-2.3** (released ~March 2026): **22B**-parameter DiT update. Rebuilt VAE (sharper textures/faces/hair/text), ~4x larger text connector (text projection) for prompt adherence, native 9:16 portrait, LoRA support, HiFi-GAN vocoder for cleaner synchronized audio, up to 4K@50fps / ~20s clips. Apache 2.0. **Distributed primarily as GGUF UNets** (community quants) plus separate VAE / text-encoder / text-projection files, NOT a single bundled checkpoint like LTX-2.
 
 When the user says "LTX3.2" / "LTX2.3", treat it as **LTX-2.3**. This skill covers both LTX-2 (bundled checkpoint path) and LTX-2.3 (GGUF UNet path).
 
@@ -39,10 +39,10 @@ When the user says "LTX3.2" / "LTX2.3", treat it as **LTX-2.3**. This skill cove
 
 ### Node stack (the right one)
 
-- **`LTXAVTextEncoderLoader`** (CORE, `comfy_extras/nodes_lt_audio.py`) — loads gemma + the **full checkpoint** together via `comfy.sd.load_clip([gemma, ckpt], type=LTXV)`. This is the audio-video encoder driving **both video and audio/voice**. **Do NOT use `DualCLIPLoader(type=ltxv)` + a separate `ltx-2.3_text_projection` file** — that is the legacy video-only path and yields mush.
+- **`LTXAVTextEncoderLoader`** (CORE, `comfy_extras/nodes_lt_audio.py`) loads gemma + the **full checkpoint** together via `comfy.sd.load_clip([gemma, ckpt], type=LTXV)`. This is the audio-video encoder driving **both video and audio/voice**. **Do NOT use `DualCLIPLoader(type=ltxv)` + a separate `ltx-2.3_text_projection` file**. That is the legacy video-only path and yields mush.
 - **Gemma abliterated LoRA** via a `LoraLoader` (CLIP LoRA) on the encoder output → CLIPTextEncode.
 - **Two-stage**: base sample (~768×512) → **`LTXVLatentUpsampler`** (×2 spatial, uses the upscaler model + the checkpoint VAE) → refine sample → **1280×704** output. The upscale is the sharpness. A single-stage graph is visibly softer.
-- Guider: the Comfy-Org template uses plain **`CFGGuider` cfg=1** (distilled); the LTXVideo repo example uses **`MultimodalGuider` + `GuiderParameters`** (separate AUDIO/VIDEO) + **`ClownSampler_Beta`** (RES4LYF). Both produce sharp output — the LoRAs + two-stage matter more than the guider.
+- Guider: the Comfy-Org template uses plain **`CFGGuider` cfg=1** (distilled); the LTXVideo repo example uses **`MultimodalGuider` + `GuiderParameters`** (separate AUDIO/VIDEO) + **`ClownSampler_Beta`** (RES4LYF). Both produce sharp output. The LoRAs + two-stage matter more than the guider.
 - **ffmpeg is required** for the final mux: `<comfy-venv>/python -m pip install imageio-ffmpeg`, then reboot. `CreateVideo`/`SaveVideo`/`VHS_VideoCombine` fail with `ffmpeg ... could not be found` otherwise.
 
 ### Custom nodes
@@ -54,14 +54,14 @@ When the user says "LTX3.2" / "LTX2.3", treat it as **LTX-2.3**. This skill cove
 - **`status: success` but no video file / `outputs` only has a math or text node** → the output node (SaveVideo/VHS) failed validation and was *silently dropped*; the graph short-circuited. Check the ComfyUI log for `Failed to validate prompt for output N` and fix that node (missing ffmpeg, a broken connection, a model-not-in-list).
 - **`DualCLIPLoader` reshape `[15360,1920] invalid for input 27582328`** → wrong/truncated gemma → use `gemma_3_12B_it_fp8_scaled`.
 - **`LatentUpscaleModelLoader: ...x2-1.0 not in list`** → reference `...x2-1.1`.
-- **SaveVideo writes to a subfolder** (`video/<prefix>_NNNNN.mp4`) — its history `outputs` entry isn't under `images/videos/gifs`, so a naive "find the video" check misses it. Look on disk under `output/video/`.
+- **SaveVideo writes to a subfolder** (`video/<prefix>_NNNNN.mp4`). Its history `outputs` entry isn't under `images/videos/gifs`, so a naive "find the video" check misses it. Look on disk under `output/video/`.
 
 ### MCP UI→API converter gotchas (`src/services/workflow-converter.ts`)
-The official template exercised several `convertUiToApi` gaps (all now fixed — keep in mind if a template still mis-converts):
-- **V3 dynamic combos** (`COMFY_DYNAMICCOMBO_V3`, e.g. `ResizeImageMaskNode.resize_type`): each selected option's nested input must be keyed **`<combo>.<nested>`** (e.g. `resize_type.longer_size`, `resize_type.width`), NOT flat — ComfyUI rebuilds the nested dict via `dynamic_paths`/`finalize_prefix`. A flat key is rejected `required_input_missing`.
-- **`Reroute`** is virtual — its connections must be passed through (consumer resolves to the Reroute's input), else everything downstream dangles and the graph short-circuits.
+The official template exercised several `convertUiToApi` gaps, all now fixed. Keep them in mind if a template still mis-converts:
+- **V3 dynamic combos** (`COMFY_DYNAMICCOMBO_V3`, e.g. `ResizeImageMaskNode.resize_type`): each selected option's nested input must be keyed **`<combo>.<nested>`** (e.g. `resize_type.longer_size`, `resize_type.width`), NOT flat. ComfyUI rebuilds the nested dict via `dynamic_paths`/`finalize_prefix`. A flat key is rejected `required_input_missing`.
+- **`Reroute`** is virtual. Its connections must be passed through (consumer resolves to the Reroute's input), else everything downstream dangles and the graph short-circuits.
 - **`VHS_VideoCombine`** stores `widgets_values` as a name→value **object**, not a positional array.
-- **Typed `Primitive*` nodes** (`PrimitiveInt/Float/Boolean/StringMultiline`) are real executable nodes — keep them as **link sources**, don't bake their values into a consumer's `widgets_values` by index (mis-positions V3 nested inputs).
+- **Typed `Primitive*` nodes** (`PrimitiveInt/Float/Boolean/StringMultiline`) are real executable nodes. Keep them as **link sources**; don't bake their values into a consumer's `widgets_values` by index (mis-positions V3 nested inputs).
 
 ### Pack
 `packs/ltx-2.3-txt2vid` (and the i2v/flf/extender variants) should be built on this official two-stage template. For a no-input-file **T2V** pack, set the template's `bypass_i2v` / "Switch to Text to Video?" boolean true and feed the I2V `image` input a blank `EmptyImage` (discarded at runtime but still validates).
@@ -104,7 +104,7 @@ LTX-2.3 ships as a **separate GGUF UNet + standalone VAE + text encoder + text p
 | **Text projection** | loaded with the text encoder | `ltx-2.3_text_projection_bf16.safetensors` | `models/text_encoders/` | the enlarged text connector new in 2.3 |
 | **Spatial upscaler** | `LatentUpscaleModelLoader` | `ltx-2.3-spatial-upscaler-x2-1.1.safetensors` | `models/latent_upscale_models/` | replaces LTX-2's `...x2-1.0` |
 
-**Loading note (LTX-2.3)**: Because the UNet is a bare GGUF, the VAE no longer comes "for free" with a checkpoint — load `LTX23_video_vae_bf16.safetensors` explicitly with `VAELoader`. Place GGUF UNets in `models/unet/` and use the GGUF Unet loader. Some community 2.3 workflows pair `gemma_3_12B_it.safetensors` (full) instead of the FP4 mixed file; the installer uses the FP4 mixed one.
+**Loading note (LTX-2.3)**: Because the UNet is a bare GGUF, the VAE no longer comes "for free" with a checkpoint. Load `LTX23_video_vae_bf16.safetensors` explicitly with `VAELoader`. Place GGUF UNets in `models/unet/` and use the GGUF Unet loader. Some community 2.3 workflows pair `gemma_3_12B_it.safetensors` (full) instead of the FP4 mixed file; the installer uses the FP4 mixed one.
 
 ### Install scripts
 
@@ -189,7 +189,7 @@ Connect the optional `latent` input for latent-aware shift scaling.
 > **`upload_image (action:"stage")`** with its `{ filename, subfolder?, type? }` and drop
 > the returned input filename into `LoadImage`. (For a file already on local
 > disk, `upload_image (action:"image")`.) **NEVER copy the output file into, or guess, a
-> filesystem `input/` path** — ComfyUI's input/output dirs may be CUSTOM
+> filesystem `input/` path**. ComfyUI's input/output dirs may be CUSTOM
 > (`--input-directory` / `--output-directory`), so a guessed path makes
 > `LoadImage` reject the file (`Invalid image file`) and wastes the render.
 > `upload_image (action:"stage")` goes through the server API (`/view` → `/upload/image`)
@@ -197,11 +197,11 @@ Connect the optional `latent` input for latent-aware shift scaling.
 
 > **VERIFY A VIDEO RENDER VIA THE FILESYSTEM, NOT /history.** `VHS_VideoCombine`
 > (and similar video nodes) write the .mp4 but frequently do **NOT** register the
-> output in ComfyUI's `/history` — the prompt shows done with an empty outputs map
+> output in ComfyUI's `/history`. The prompt shows done with an empty outputs map
 > and no error. Do **NOT** conclude the render "silently dropped" from
 > `get_history` / `queue` (action:"status") alone. Confirm the file with
-> **`get_image (action:"list_outputs")`** (it now lists videos too, with `kind: "video"`) — match
-> the `filename_prefix` (e.g. `ltxv2_…​.mp4`) and check the mtime is fresh — then
+> **`get_image (action:"list_outputs")`** (it now lists videos too, with `kind: "video"`): match
+> the `filename_prefix` (e.g. `ltxv2_…​.mp4`), check the mtime is fresh, then
 > chain it into the next stage with `upload_image (action:"stage")`.
 
 ### LTXVImgToVideo (For I2V)
@@ -225,10 +225,10 @@ All-in-one node that encodes image, creates latent, and wraps conditioning:
 }
 ```
 
-> **Gotcha — `strength` controls motion; DON'T set it to 1.0.** `LTXVImgToVideo.strength`
+> **Gotcha: `strength` controls motion; DON'T set it to 1.0.** `LTXVImgToVideo.strength`
 > is how strongly the output adheres to the start image: **higher = more adherence = LESS
 > motion**. Setting it to **1.0 pins every frame to the start image → a FROZEN i2v with
-> ZERO motion** (the storyboard frames come out basically identical). Keep the verified
+> ZERO motion** (the storyboard frames come out nearly identical). Keep the verified
 > value **~0.6** (as in the example above) for proper motion. If a generated i2v clip
 > shows little/no motion, the FIRST thing to check is that `strength` wasn't bumped toward
 > 1.0.
@@ -325,7 +325,7 @@ VHS_VideoCombine (or CreateVideo + SaveVideo) → MP4
 
 ## Complete workflows (API JSON)
 
-Both end-to-end graphs — **T2V Distilled (8-Step)** and **LTX-2.3 GGUF (dev, T2V)** — are in [`references/workflows.md`](references/workflows.md).
+Both end-to-end graphs, **T2V Distilled (8-Step)** and **LTX-2.3 GGUF (dev, T2V)**, are in [`references/workflows.md`](references/workflows.md).
 
 ## Camera Control LoRAs
 
@@ -341,7 +341,7 @@ Seven official camera control LoRAs from Lightricks:
 | Jib Down | `ltx-2-19b-lora-camera-control-jib-down.safetensors` |
 | Static | `ltx-2-19b-lora-camera-control-static.safetensors` |
 
-**Usage**: Apply with `LoraLoaderModelOnly` at strength **1.0**. Do NOT describe camera movement in your prompt — the LoRA handles it.
+**Usage**: Apply with `LoraLoaderModelOnly` at strength **1.0**. Do NOT describe camera movement in your prompt. The LoRA handles it.
 
 ```json
 {
@@ -358,7 +358,7 @@ Seven official camera control LoRAs from Lightricks:
 
 ## Concept/Style LoRAs
 
-Apply with `LoraLoaderModelOnly`. Typical strength: 0.5–1.0.
+Apply with `LoraLoaderModelOnly`. Typical strength: 0.5 to 1.0.
 
 ```json
 {
@@ -388,7 +388,7 @@ Concept/style LoRAs CAN be stacked with camera control LoRAs.
 1. Use `VAEDecodeTiled` or `LTXVSpatioTemporalTiledVAEDecode` instead of standard `VAEDecode`
 2. Start at 768x512 resolution, upscale in Stage 2
 3. Use FP4 Gemma text encoder (installed)
-4. For LTX-2.3, pick the GGUF quant to match VRAM: **Q4_K_S** (<12GB), **Q5_K_S** (12–16GB), **Q8_0** (24GB+). The dev GGUF needs ~20+ steps; the distilled LoRA path runs ~8 steps
+4. For LTX-2.3, pick the GGUF quant to match VRAM: **Q4_K_S** (<12GB), **Q5_K_S** (12 to 16GB), **Q8_0** (24GB+). The dev GGUF needs ~20+ steps; the distilled LoRA path runs ~8 steps
 5. **Always `clear_vram`** before switching to LTX-V2 from another model family
 6. Reduce frame count to 81 or 49 if OOM persists
 
@@ -401,7 +401,7 @@ Good: "A woman with flowing auburn hair walks through a sun-dappled forest, leav
 Bad: "woman, forest, walking"
 ```
 
-Describe the **entire scene progression**, not just a single moment. Include lighting, mood, and motion cues.
+Describe the **entire scene progression**, not a single moment. Include lighting, mood, and motion cues.
 
 ## Two-Stage Upscale Pattern
 
@@ -416,25 +416,25 @@ This requires the spatial upscaler model in `models/latent_upscale_models/`: `lt
 
 ## Using alternate / GGUF base models (incl. the "sulphur" model)
 
-You can swap the LTX UNet for any LTX-2.3-compatible base model. The most-asked-about one is **Sulphur 2** (the user's "sulphur2Base_dev.safetensors" — see name note below).
+You can swap the LTX UNet for any LTX-2.3-compatible base model. The most-asked-about one is **Sulphur 2** (the user's "sulphur2Base_dev.safetensors"; see name note below).
 
 ### What Sulphur 2 actually is (verified June 2026)
 
-- **It exists and is real.** Sulphur 2 is an uncensored, realism-leaning **finetune/derivative of LTX-2.3** (22B DiT), marketed as a drop-in replacement inside existing LTX-2.3 ComfyUI graphs (T2V + I2V + the other 2.3 formats). It is NOT its own architecture and is **not LTX-2 (19B) compatible** — it targets the LTX-2.3 stack (2.3 VAE + Gemma 3 text encoder + 2.3 text projection).
+- **It exists and is real.** Sulphur 2 is an uncensored, realism-leaning **finetune/derivative of LTX-2.3** (22B DiT), marketed as a drop-in replacement inside existing LTX-2.3 ComfyUI graphs (T2V + I2V + the other 2.3 formats). It is NOT its own architecture and is **not LTX-2 (19B) compatible**. It targets the LTX-2.3 stack (2.3 VAE + Gemma 3 text encoder + 2.3 text projection).
 - **Filename caveat:** there is no file literally named `sulphur2Base_dev.safetensors`. The real base checkpoints are **`sulphur_dev_bf16.safetensors`** (~46 GB) and **`sulphur_dev_fp8mixed.safetensors`** (~29 GB). There is also a distilled variant (`sulphur_distil_bf16.safetensors`) and a LoRA (`sulphur_lora_rank_768.safetensors`). Treat "sulphur2Base_dev" as the user's shorthand for the Sulphur 2 base dev checkpoint.
-- **GGUF version: confirmed.** `vantagewithai/Sulphur-2-Base-GGUF` hosts `sulphur_dev-<quant>.gguf` for Q3_K_S/M, Q4_0/1/K_S/K_M, Q5_0/1/K_S/K_M, Q6_K, Q8_0 (~10–23 GB). There is also a `Civitai/Sulphur-2-distilled-fp8` and Civitai listings ("Sulphur 2 Base", "Rebels Sulphur 2 GGUF").
-- **Hosting:** HF `SulphurAI/Sulphur-2-base` (safetensors + a bundled Qwen-based prompt-enhancer GGUF), HF `vantagewithai/Sulphur-2-Base-GGUF` (the GGUF quants), and Civitai mirrors. Uncensored open weights — in scope to document; nothing here is fabricated, but verify the exact repo/license yourself before downloading.
+- **GGUF version: confirmed.** `vantagewithai/Sulphur-2-Base-GGUF` hosts `sulphur_dev-<quant>.gguf` for Q3_K_S/M, Q4_0/1/K_S/K_M, Q5_0/1/K_S/K_M, Q6_K, Q8_0 (~10 to 23 GB). There is also a `Civitai/Sulphur-2-distilled-fp8` and Civitai listings ("Sulphur 2 Base", "Rebels Sulphur 2 GGUF").
+- **Hosting:** HF `SulphurAI/Sulphur-2-base` (safetensors + a bundled Qwen-based prompt-enhancer GGUF), HF `vantagewithai/Sulphur-2-Base-GGUF` (the GGUF quants), and Civitai mirrors. Uncensored open weights are in scope to document. Nothing here is fabricated, but verify the exact repo/license yourself before downloading.
 
 ### How to load it (it slots straight into the LTX-2.3 GGUF workflow above)
 
-The GGUF quant is just a different UNet — load it with the **same `UnetLoaderGGUF` node**, keep the rest of the 2.3 graph identical:
+The GGUF quant is a different UNet and nothing more. Load it with the **same `UnetLoaderGGUF` node** and keep the rest of the 2.3 graph identical:
 
 1. Put `sulphur_dev-Q8_0.gguf` (or your chosen quant) in `models/unet/`.
 2. In the LTX-2.3 GGUF workflow above, change node `"1"`:
    ```json
    "1": { "class_type": "UnetLoaderGGUF", "inputs": { "unet_name": "sulphur_dev-Q8_0.gguf" }}
    ```
-3. Keep the **same LTX-2.3 companions**: `VAELoader` → `LTX23_video_vae_bf16.safetensors`, `CLIPLoader (type=ltxv)` → `gemma_3_12B_it_fp4_mixed.safetensors`, plus `ltx-2.3_text_projection_bf16.safetensors`. These must match the LTX-2.3 architecture — do not pair it with LTX-2 (19B) VAE/encoder.
+3. Keep the **same LTX-2.3 companions**: `VAELoader` → `LTX23_video_vae_bf16.safetensors`, `CLIPLoader (type=ltxv)` → `gemma_3_12B_it_fp4_mixed.safetensors`, plus `ltx-2.3_text_projection_bf16.safetensors`. These must match the LTX-2.3 architecture. Do not pair it with LTX-2 (19B) VAE/encoder.
 4. For the **bf16/fp8 safetensors** (non-GGUF) variants, load with the LTX checkpoint/diffusion-model loader the workflow uses for the safetensors path (Lightricks recommends the native LTX Video nodes documented at docs.ltx.video, not the auto-generated Diffusers snippet) rather than `UnetLoaderGGUF`.
 5. Obey the same constraints as any LTX-2.3 gen: frame count `8n+1`, resolution multiples of 32, `LTXVConditioning` frame_rate, dev model ~20+ steps / distilled ~8 steps.
 
@@ -450,7 +450,7 @@ To verify a third-party model is usable before wiring it up:
 
 ### LTXVideo "kornia" import error (`pad` ImportError)
 
-**Symptom:** ComfyUI-LTXVideo fails to load with an ImportError from `kornia.geometry.transform.pyramid` — `pad` can no longer be imported. This happens with **kornia 0.8.3+**, which stopped exporting `pad` from that module.
+**Symptom:** ComfyUI-LTXVideo fails to load with an ImportError from `kornia.geometry.transform.pyramid` because `pad` can no longer be imported. This happens with **kornia 0.8.3+**, which stopped exporting `pad` from that module.
 
 **What the fix does** (`FIX-LTXVIDEO-KORNIA.bat`, run from the `ComfyUI_windows_portable` folder): it patches `ComfyUI/custom_nodes/ComfyUI-LTXVideo/pyramid_blending.py`:
 1. Backs the file up to `pyramid_blending.py.bak_kornia_fix`.
@@ -462,7 +462,7 @@ To verify a third-party model is usable before wiring it up:
    ```
 4. Verifies `pad = F.pad` is present and the broken import is gone.
 
-**Manual equivalent** if you don't run the .bat — edit `pyramid_blending.py`: delete `pad,` from the kornia import list and add `pad = F.pad` after the `import torch.nn.functional as F` line, then restart ComfyUI. (Alternatively, pin kornia to a pre-0.8.3 release, but the patch is the lighter-touch fix and is what the install set ships.)
+**Manual equivalent** if you don't run the .bat: edit `pyramid_blending.py` to delete `pad,` from the kornia import list and add `pad = F.pad` after the `import torch.nn.functional as F` line, then restart ComfyUI. (Alternatively, pin kornia to a pre-0.8.3 release, but the patch is the lighter-touch fix and is what the install set ships.)
 
 ### LTXVideo version / workflow mismatch
 

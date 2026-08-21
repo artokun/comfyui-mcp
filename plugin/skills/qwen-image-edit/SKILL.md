@@ -1,6 +1,6 @@
 ---
 name: qwen-image-edit
-description: Build Qwen Image Edit workflows — model loading, conditioning, LoRAs, prompt patterns, and XY plot testing
+description: Build Qwen Image Edit workflows covering model loading, conditioning, LoRAs, prompt patterns, and XY plot testing
 globs:
   - "**/*.json"
 ---
@@ -68,13 +68,13 @@ Outputs (10):
   [9] pad_info: ANY — padding info for later unpadding
 ```
 
-**Key advantage**: Output [1] (latent) eliminates the need for a separate `EmptyLatentImage` or `VAEEncode` node — the Advanced node handles latent creation internally at the correct resolution.
+**Key advantage**: Output [1] (latent) eliminates the need for a separate `EmptyLatentImage` or `VAEEncode` node. The Advanced node handles latent creation internally at the correct resolution.
 
 ### Other Conditioning Variants
 
-- **TextEncodeQwenImageEditPlus** (Phr00t v2, built-in) — Simpler: 4 image inputs, outputs only CONDITIONING. Requires separate EmptyLatentImage. Good for quick edits.
-- **TextEncodeQwenImageEditPlus_lrzjason** — 5 image inputs, resize toggles, but less control than Advance
-- **TextEncodeQwenImageEditPlusPro_lrzjason** — Per-image VL resize selection via `vl_resize_indexs` string, `main_image_index` control
+- **TextEncodeQwenImageEditPlus** (Phr00t v2, built-in) is simpler: 4 image inputs, outputs only CONDITIONING. Requires separate EmptyLatentImage. Good for quick edits.
+- **TextEncodeQwenImageEditPlus_lrzjason**: 5 image inputs, resize toggles, but less control than Advance
+- **TextEncodeQwenImageEditPlusPro_lrzjason**: Per-image VL resize selection via `vl_resize_indexs` string, `main_image_index` control
 
 ## Lightning LoRAs (Fast Generation)
 
@@ -100,7 +100,7 @@ For non-edit models (txt2img, 2512):
 
 ### 8-Step Lightning
 
-- `Qwen-Image-Lightning-8steps-V1.0.safetensors` — Higher detail than 4-step
+- `Qwen-Image-Lightning-8steps-V1.0.safetensors`, higher detail than 4-step
 
 ## Sampler Settings
 
@@ -168,7 +168,7 @@ Always use `ConditioningZeroOut` for negative conditioning with Qwen edit:
 
 ## Complete Workflow: Lightning Edit (Advanced Node)
 
-Uses `TextEncodeQwenImageEditPlusAdvance_lrzjason` which outputs the latent directly — no EmptyLatentImage needed.
+Uses `TextEncodeQwenImageEditPlusAdvance_lrzjason`, which outputs the latent directly, so no EmptyLatentImage is needed.
 
 ```json
 {
@@ -197,9 +197,9 @@ Uses `TextEncodeQwenImageEditPlusAdvance_lrzjason` which outputs the latent dire
 ```
 
 **Key connections**:
-- `"latent_image": ["6", 1]` — KSampler gets its latent directly from the Advanced node's output [1]
-- `"positive": ["6", 0]` — conditioning_with_full_ref from output [0]
-- `"vl_resize_image1": ["5", 0]` — source image goes into VL-resize slot (downscaled for vision encoder)
+- `"latent_image": ["6", 1]`: KSampler gets its latent directly from the Advanced node's output [1]
+- `"positive": ["6", 0]`: conditioning_with_full_ref from output [0]
+- `"vl_resize_image1": ["5", 0]`: source image goes into VL-resize slot (downscaled for vision encoder)
 
 ### Simpler Alternative (Phr00t v2)
 
@@ -214,7 +214,7 @@ If `qweneditutils` custom node is unavailable, use the built-in `TextEncodeQwenI
 }
 ```
 
-Replace node 6 and add node 8 — KSampler latent_image connects to `["8", 0]` instead of `["6", 1]`.
+Replace node 6 and add node 8. KSampler latent_image connects to `["8", 0]` instead of `["6", 1]`.
 
 ### Basic Variant (Official ComfyUI Example)
 
@@ -222,11 +222,11 @@ The official "Qwen 2511 Edit Simple" example uses newer built-in nodes for model
 
 **Additional nodes in the official pipeline:**
 
-- **`ModelSamplingAuraFlow`** (shift=3.1) — Flow matching shift applied to the UNET. Used instead of `ModelSamplingSD3`.
-- **`CFGNorm`** (strength=1) — Normalizes CFG guidance for more stable generation. Applied after `ModelSamplingAuraFlow`.
-- **`FluxKontextImageScale`** — Auto-scales input images to the correct resolution for Qwen. No manual size parameters needed.
-- **`FluxKontextMultiReferenceLatentMethod`** (method=`index_timestep_zero`) — Applied to both positive and negative conditioning. Handles multi-reference latent indexing.
-- **`VAEEncode`** — Encodes the scaled image to latent (instead of `EmptyLatentImage`).
+- **`ModelSamplingAuraFlow`** (shift=3.1): Flow matching shift applied to the UNET. Used instead of `ModelSamplingSD3`.
+- **`CFGNorm`** (strength=1): Normalizes CFG guidance for more stable generation. Applied after `ModelSamplingAuraFlow`.
+- **`FluxKontextImageScale`**: Auto-scales input images to the correct resolution for Qwen. No manual size parameters needed.
+- **`FluxKontextMultiReferenceLatentMethod`** (method=`index_timestep_zero`): Applied to both positive and negative conditioning. Handles multi-reference latent indexing.
+- **`VAEEncode`**: Encodes the scaled image to latent (instead of `EmptyLatentImage`).
 
 **Official pipeline flow:**
 ```
@@ -262,24 +262,24 @@ For batch-testing multiple edit variations, use the Easy Nodes XY Plot system:
 5. **easy XYPlotAdvanced** + **easy XYInputs: PromptSR** drives the sweep
 6. **easy pipeIn** bundles model/clip/vae/latent into a pipeline
 
-This produces a grid image showing all combinations — useful for finding optimal angle/distance/style for a given subject.
+This produces a grid image showing all combinations, useful for finding the best angle/distance/style for a given subject.
 
 ## VRAM Considerations
 
 - Qwen 2511 edit bf16: ~10GB VRAM
 - CLIP (fp8): ~7GB VRAM
 - VAE: ~200MB
-- Total: ~17-18GB — fits comfortably on 24GB GPUs
+- Total: ~17-18GB, fits comfortably on 24GB GPUs
 - **Always `clear_vram` before loading** if switching from another model family
 
 ## Tips
 
 1. **Upload source images first** with `upload_image (action:"image")` before building the workflow
 2. **Match output resolution** to the next pipeline step (e.g., 832x480 for WAN FLF)
-3. **Lightning LoRA + denoise 1.0** works well — the model handles structure preservation through conditioning
+3. **Lightning LoRA + denoise 1.0** works well. The model handles structure preservation through conditioning
 4. For **img2img editing** (denoise < 1.0), use `VAEEncode` on the source image instead of `EmptyLatentImage`
 5. The **lrzjason Pro variant** is best for multi-image compositions where you need fine control over which images get VL-resized
-6. **Use `get_workflow (action:"analyze")`** to understand any saved Qwen edit workflow before modifying or executing it — returns a structured summary, not raw JSON. Only use `get_workflow` when you need the actual JSON for `enqueue_workflow` or `create_workflow (action:"modify")`.
+6. **Use `get_workflow (action:"analyze")`** to understand any saved Qwen edit workflow before modifying or executing it. It returns a structured summary, not raw JSON. Only use `get_workflow` when you need the actual JSON for `enqueue_workflow` or `create_workflow (action:"modify")`.
 
 ## Sources
 

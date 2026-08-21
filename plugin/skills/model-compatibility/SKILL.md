@@ -1,6 +1,6 @@
 ---
 name: model-compatibility
-description: Model family compatibility matrix — loaders, resolutions, samplers, CFG, VAE, ControlNet, and LoRA compatibility for SD 1.5, SDXL, Flux, SD3, and video models
+description: Model family compatibility matrix covering loaders, resolutions, samplers, CFG, VAE, ControlNet, and LoRA compatibility for SD 1.5, SDXL, Flux, SD3, and video models
 globs:
   - "**/*.json"
 ---
@@ -48,7 +48,7 @@ SaveImage
 - Most SD 1.5 checkpoints have a built-in VAE, but it's often mediocre
 - **Recommended**: Use external `vae-ft-mse-840000-ema-pruned.safetensors` for better color accuracy
 - Load via `VAELoader` node and connect to `VAEDecode`
-- FP16 VAE can produce NaN on some images — FP32 VAE is more stable
+- FP16 VAE can produce NaN on some images. FP32 VAE is more stable
 
 ### ControlNet Compatibility
 
@@ -72,7 +72,7 @@ SD 1.5 has the largest ControlNet ecosystem:
 
 - SD 1.5 LoRAs ONLY work with SD 1.5 base models
 - Format: `.safetensors` in `models/loras/`
-- Loader: `LoraLoader` node — connects between checkpoint and CLIPTextEncode
+- Loader: `LoraLoader` node, which connects between checkpoint and CLIPTextEncode
 - Strength range: 0.5-1.0 (higher can cause artifacts)
 
 ---
@@ -166,7 +166,7 @@ SDXL ControlNets are separate from SD 1.5 ControlNets:
 
 ### LoRA Compatibility
 
-- SDXL LoRAs ONLY work with SDXL base models — NOT with SD 1.5
+- SDXL LoRAs ONLY work with SDXL base models, NOT with SD 1.5
 - Same `LoraLoader` node as SD 1.5
 - Lightning LoRAs are SDXL LoRAs that enable few-step generation
 
@@ -222,10 +222,10 @@ VAELoader (vae_name="ae.safetensors") → VAE
 
 ### CRITICAL Rules
 
-- **CFG MUST be 1.0** — Flux uses guidance embedded in the model, not classifier-free guidance
-- **No negative prompt** — Empty string or don't connect the negative input at all
-- **Separate VAE required** — Flux uses its own VAE (`ae.safetensors`), not SD VAEs
-- **FP8 strongly recommended** for 24GB cards — FP16 Flux barely fits in 24GB VRAM
+- **CFG MUST be 1.0.** Flux uses guidance embedded in the model, not classifier-free guidance
+- **No negative prompt.** Empty string or don't connect the negative input at all
+- **Separate VAE required.** Flux uses its own VAE (`ae.safetensors`), not SD VAEs
+- **FP8 strongly recommended** for 24GB cards. FP16 Flux barely fits in 24GB VRAM
 - T5-XXL encoder can be loaded in FP8 to save additional VRAM
 
 ### Workflow Pattern
@@ -307,7 +307,7 @@ CLIPLoader (t5xxl) → CLIP
 
 - Much better text rendering capabilities
 - Handles spatial relationships better ("cat on the left, dog on the right")
-- T5-XXL enables very long, detailed prompts (no 77-token limit concern)
+- T5-XXL enables long, detailed prompts (no 77-token limit concern)
 - Lower CFG values (4-7 vs 7-12)
 - Minimal negative prompting needed
 - `shift` parameter in sampling affects noise schedule
@@ -324,7 +324,7 @@ CLIPLoader (t5xxl) → CLIP
 
 ### Overview
 
-Latent video diffusion models for text-to-video and image-to-video generation. Very VRAM-intensive.
+Latent video diffusion models for text-to-video and image-to-video generation. VRAM-intensive.
 
 ### Configuration
 
@@ -341,7 +341,7 @@ Latent video diffusion models for text-to-video and image-to-video generation. V
 
 - **Always use FP8 quantized models** on 24GB cards
 - Reduce frame count if OOM persists
-- Lower resolution helps significantly
+- Lower resolution helps a lot
 - Close other GPU-using applications
 - Consider `--lowvram` flag for ComfyUI
 

@@ -1,6 +1,6 @@
 ---
 name: qwen-txt2img
-description: Build Qwen Image 2512 text-to-image workflows — QwenImageIntegratedKSampler, separate component loading, lightning LoRAs, and fine-tuned model variants
+description: Build Qwen Image 2512 text-to-image workflows with QwenImageIntegratedKSampler, separate component loading, lightning LoRAs, and fine-tuned model variants
 globs:
   - "**/*.json"
 ---
@@ -11,8 +11,8 @@ globs:
 
 Qwen Image 2512 is the latest (December 2025) text-to-image model from the Qwen family. It uses a vision-language model (Qwen2.5-VL) as the text encoder and generates high-quality images from natural language prompts. Two workflow approaches:
 
-1. **QwenImageIntegratedKSampler** — All-in-one node (recommended for simplicity)
-2. **Separate component loading** — UNETLoader + CLIPLoader + VAELoader + standard KSampler (more flexible)
+1. **QwenImageIntegratedKSampler**: All-in-one node (recommended for simplicity)
+2. **Separate component loading**: UNETLoader + CLIPLoader + VAELoader + standard KSampler (more flexible)
 
 ## Models
 
@@ -109,7 +109,7 @@ Qwen operates at ~1.6 megapixels natively:
 
 ## Approach 1: QwenImageIntegratedKSampler (All-in-One)
 
-The `QwenImageIntegratedKSampler` custom node handles model patching, conditioning, sampling, and output in a single node. Simplest workflow — just 4 nodes for model loading + 1 integrated sampler + 1 save.
+The `QwenImageIntegratedKSampler` custom node handles model patching, conditioning, sampling, and output in a single node. Simplest workflow: 4 nodes for model loading + 1 integrated sampler + 1 save.
 
 ### Node Inputs
 
@@ -177,7 +177,7 @@ Outputs:
 
 ## Approach 2: Separate Component Loading (Standard Pipeline)
 
-More flexible — allows inserting additional processing nodes between stages.
+More flexible, since it allows inserting additional processing nodes between stages.
 
 ### Pipeline Flow
 
@@ -251,7 +251,7 @@ Always use `ConditioningZeroOut` for Qwen txt2img:
 }
 ```
 
-Or use an empty string in `CLIPTextEncode` — but ZeroOut is more explicit and reliable.
+Or use an empty string in `CLIPTextEncode`, but ZeroOut is more explicit and reliable.
 
 ## QwenImageDiffsynthControlnet
 
@@ -277,13 +277,13 @@ Outputs:
 ## Concept/Style LoRAs (Installed)
 
 Located in `loras/Qwen/`:
-- `style/` — Figure makers, reality transform, panel painter
-- `concept/` — Various concept LoRAs
-- `poses/` — Pose-specific LoRAs
-- `character/` — Character enhancement
-- `anime/` — Anime style LoRAs
-- `tool/` — Utility LoRAs (anything2real, gaussian splash)
-- `equirectangular projection/` — 360 panorama LoRA
+- `style/`: Figure makers, reality transform, panel painter
+- `concept/`: Various concept LoRAs
+- `poses/`: Pose-specific LoRAs
+- `character/`: Character enhancement
+- `anime/`: Anime style LoRAs
+- `tool/`: Utility LoRAs (anything2real, gaussian splash)
+- `equirectangular projection/`: 360 panorama LoRA
 
 Apply with `LoraLoaderModelOnly`:
 
@@ -300,7 +300,7 @@ Apply with `LoraLoaderModelOnly`:
 
 ## Prompt Style
 
-Natural language, 1–3 sentences. Be descriptive:
+Natural language, 1 to 3 sentences. Be descriptive:
 
 ```
 Good: "Professional portrait of an Asian woman in her late 20s, wearing a cream linen blazer at a Tokyo rooftop café during golden hour, holding a matcha latte, editorial fashion photography, shot on Sony A7III 85mm f/1.4"
@@ -310,7 +310,7 @@ Bad: "1girl, cafe, blazer, matcha"
 Tips:
 - Put text to render in quotes within the prompt
 - "photograph" works better than "photorealistic"
-- Negative prompts: use NLP-style descriptions, not keyword spam (or just use ZeroOut)
+- Negative prompts: use NLP-style descriptions, not keyword spam (or use ZeroOut)
 
 ## VRAM Considerations
 
@@ -320,16 +320,16 @@ Tips:
 | bf16 UNET (edit model) | ~10GB UNET + 7GB CLIP | Also fits well |
 
 - **Always `clear_vram`** before switching to Qwen from another model family
-- Lightning 4-step is extremely fast (~3-5s per image)
+- Lightning 4-step takes ~3-5s per image
 
 ## Tips
 
-1. **QwenImageIntegratedKSampler** is the simplest approach for basic txt2img — one node handles everything
+1. **QwenImageIntegratedKSampler** is the simplest approach for basic txt2img. One node handles everything
 2. For **LoRA stacking** or **ControlNet**, use the separate component pipeline instead
-3. The integrated sampler's `auraflow_shift` defaults to 3 (close to the recommended 3.1) — adjust only if needed
+3. The integrated sampler's `auraflow_shift` defaults to 3 (close to the recommended 3.1). Adjust only if needed
 4. For **video pipeline** output (feeding into WAN FLF), set resolution to 832x480
 5. **CopaxTimeless pick**: res_multistep + sgm_uniform at CFG 4.0 for ultra-realistic results
-6. Multiple concept LoRAs can stack — reduce individual strength to 0.5-0.7 when combining
+6. Multiple concept LoRAs can stack. Reduce individual strength to 0.5-0.7 when combining
 
 ## Sources
 

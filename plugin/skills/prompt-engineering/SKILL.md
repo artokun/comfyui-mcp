@@ -1,6 +1,6 @@
 ---
 name: prompt-engineering
-description: ComfyUI prompt engineering knowledge — CLIP text encoding syntax, weight modifiers, model-specific prompting strategies, and best practices
+description: ComfyUI prompt engineering knowledge covering CLIP text encoding syntax, weight modifiers, model-specific prompting strategies, and best practices
 globs:
   - "**/*.json"
 ---
@@ -37,7 +37,7 @@ Adjust how strongly the model attends to specific words or phrases:
 - **Default weight**: 1.0 for unmodified tokens
 - **Nesting stacks multiplicatively**: `((word))` = 1.1 * 1.1 = `(word:1.21)`
 - **Phrases**: `(red sports car:1.3)` applies weight to the entire phrase
-- **Mixing**: `(detailed face:1.4), (blurry background:0.6)` — combine in one prompt
+- **Mixing**: `(detailed face:1.4), (blurry background:0.6)`, combined in one prompt
 
 ### Examples
 
@@ -69,7 +69,7 @@ highly detailed, 8k uhd, photorealistic, volumetric lighting,
 depth of field, golden hour, award-winning photography
 ```
 
-Each chunk is encoded independently and then concatenated as conditioning, ensuring all tokens are processed.
+Each chunk is encoded independently and then concatenated as conditioning, so all tokens are processed.
 
 ## Embeddings / Textual Inversions
 
@@ -108,7 +108,7 @@ Negative: `embedding:easynegative, embedding:badhandv4, worst quality, low quali
 
 ### SD 1.5
 
-**Negative prompt: IMPORTANT — SD 1.5 is very sensitive to negatives.**
+**Negative prompt: IMPORTANT. SD 1.5 is sensitive to negatives.**
 
 Positive prompt structure:
 ```
@@ -123,14 +123,14 @@ missing fingers, extra limbs, deformed, disfigured, mutation, ugly
 ```
 
 Key notes:
-- Quality tags like `masterpiece, best quality` significantly affect output
+- Quality tags like `masterpiece, best quality` make a large difference to output
 - Responds well to danbooru-style tags: `1girl, long hair, blue eyes, school uniform`
-- Embedding-based negatives (`easynegative`) are very effective
-- Keep prompts concise — 77 token limit per chunk
+- Embedding-based negatives (`easynegative`) work well
+- Keep prompts concise, since each chunk is limited to 77 tokens
 
 ### SDXL (1.0 / Turbo / Lightning)
 
-**Negative prompt: Moderate importance — SDXL is less sensitive to negatives than SD 1.5.**
+**Negative prompt: Moderate importance. SDXL is less sensitive to negatives than SD 1.5.**
 
 Positive prompt structure:
 ```
@@ -145,7 +145,7 @@ mutation, mutated, extra limbs, watermark, text
 
 Key notes:
 - SDXL understands natural language better than tag-based prompts
-- Dual CLIP encoders (CLIP-L + CLIP-G) — use `CLIPTextEncodeSDXL` for separate control
+- Dual CLIP encoders (CLIP-L + CLIP-G). Use `CLIPTextEncodeSDXL` for separate control
 - `CLIPTextEncodeSDXL` has separate `text_g` (global description) and `text_l` (local details) fields
 - Supports longer prompts natively (two 77-token chunks via dual CLIP)
 - Quality tags are less critical but still helpful
@@ -154,7 +154,7 @@ Key notes:
 
 ### Flux (Flux.1 schnell / dev)
 
-**Negative prompt: NOT USED — Flux operates at CFG=1.0 with no negative conditioning.**
+**Negative prompt: NOT USED. Flux operates at CFG=1.0 with no negative conditioning.**
 
 Positive prompt structure:
 ```
@@ -163,8 +163,8 @@ rather than comma-separated tags. Describe the scene as if writing a paragraph.
 ```
 
 Key notes:
-- **CFG must be 1.0** — higher values cause artifacts
-- **No negative prompt** — connect nothing or empty string to negative conditioning
+- **CFG must be 1.0.** Higher values cause artifacts
+- **No negative prompt.** Connect nothing or empty string to negative conditioning
 - T5-XXL encoder understands complex sentences and spatial relationships
 - Flux handles compositional prompts better than SD models
 - Longer prompts (200+ tokens) work well thanks to T5 encoder
@@ -184,7 +184,7 @@ warm, natural lighting and shallow depth of field.
 
 ### SD3 / SD3.5
 
-**Negative prompt: Minimal — SD3 needs very little negative guidance.**
+**Negative prompt: Minimal. SD3 needs little negative guidance.**
 
 Positive prompt structure:
 ```
@@ -196,7 +196,7 @@ Key notes:
 - Supports much longer prompts than SD 1.5 or SDXL
 - Natural language works better than tag-based prompting
 - CFG 4-7 (lower than SD 1.5)
-- Minimal negatives needed — `low quality, blurry` is usually sufficient
+- Minimal negatives needed. `low quality, blurry` is usually sufficient
 - Use `CLIPTextEncodeSD3` node for model-specific encoding if available
 
 ## Prompt Structure Best Practices
@@ -240,11 +240,11 @@ LoRA (Low-Rank Adaptation) models are fine-tuned on specific concepts and requir
 
 ### Rules
 
-- Trigger words are **specific to each LoRA** — check the LoRA's model page for its triggers
+- Trigger words are **specific to each LoRA**. Check the LoRA's model page for its triggers
 - Place trigger words in the prompt naturally: `a photo of ohwx woman in a garden` (where `ohwx` is the trigger)
 - Some LoRAs use style triggers: `in the style of pixar3d`
 - Multiple LoRAs can be stacked, but each needs its own trigger word in the prompt
-- LoRA strength (in the `LoraLoader` node) interacts with prompt weight — usually keep one at default
+- LoRA strength (in the `LoraLoader` node) interacts with prompt weight. Usually keep one at default
 
 ### Common Patterns
 
@@ -301,7 +301,7 @@ Where `haircolor.txt`, `clothing.txt`, and `location.txt` are in the wildcards d
 5. **Conflicting terms**: `(bright:1.3) (dark:1.3)` confuses the model
 6. **Embedding without file**: Using `embedding:name` without the `.safetensors` file installed causes errors
 7. **Wrong LoRA trigger words**: The prompt must contain the exact trigger word(s) for the LoRA to activate
-8. **Quality tags in Flux prompts**: `masterpiece, best quality` are meaningless for Flux — describe quality naturally
+8. **Quality tags in Flux prompts**: `masterpiece, best quality` are meaningless for Flux. Describe quality naturally
 
 ## Sources
 

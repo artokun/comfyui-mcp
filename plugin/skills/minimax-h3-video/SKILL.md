@@ -1,6 +1,6 @@
 ---
 name: minimax-h3-video
-description: Build MiniMax H3 (Hailuo) local video workflows — native T2V/I2V/R2V nodes, Comfy-Org INT8 weights, turbo LoRAs for 8GB VRAM, 15-second stereo-audio clips, and the official MiniMax prompting guides (cite by link, do not copy).
+description: Build MiniMax H3 (Hailuo) local video workflows with native T2V/I2V/R2V nodes, Comfy-Org INT8 weights, turbo LoRAs for 8GB VRAM, 15-second stereo-audio clips, and the official MiniMax prompting guides (cite by link, do not copy).
 globs:
   - "**/*.json"
 ---
@@ -53,12 +53,12 @@ Video**, not installer packs and not custom-node `example_workflows`:
 
 `list_packs action:"list_templates"` will **not** list them.
 `enqueue_workflow action:"run_template"` will **not** resolve
-`video_minimax_h3_t2v` / `_i2v` / `_r2v` — that action only loads bundled
+`video_minimax_h3_t2v` / `_i2v` / `_r2v`. That action only loads bundled
 installer packs, and there is no `packs/minimax-h3-*` yet. Do not call it
 until a pack exists. `panel_load_workflow` needs `pack:`, a disk `path:`, or
-an inline UI `graph` — a Template Library basename is none of those.
+an inline UI `graph`. A Template Library basename is none of those.
 
-**Load path that actually works:**
+**Load path that works:**
 
 1. **Preferred.** Ask the user to open **Template Library → Video → MiniMax H3:
    Text to Video** (or Image to Video / Reference to Video). Pick the local
@@ -109,7 +109,7 @@ W4A8 at `Kijai/MiniMax-H3-experimental`. Same job (low-step / low-VRAM). Prefer
 the Comfy-Org / lightx2v filenames the template already names; only switch to a
 Kijai file if that is what is on disk.
 
-4-step is faster and softer; **6–8 steps** is the usual sharpness compromise.
+4-step is faster and softer; **6 to 8 steps** is the usual sharpness compromise.
 
 ## Output spec
 
@@ -168,7 +168,7 @@ R2V replaces the UNet with **ref2va** and the conditioner with
 | `MiniMaxH3SigmaShift` | Flow-matching shift on the local UNet |
 | `MiniMaxH3MemoryEfficientSageAttentionPatch` | Core Sage patch; or KJNodes `Patch Sage Attention KJ` (`sage_attention=auto`) between `UNETLoader` and `BasicGuider` |
 
-Sage roughly doubles speed. H3 has mixed dtypes — console lines about falling
+Sage roughly doubles speed. H3 has mixed dtypes, so console lines about falling
 back to pytorch attention on some layers are expected.
 
 ## Sampler defaults (Comfy-Org template)
@@ -178,7 +178,7 @@ back to pytorch attention on some layers are expected.
 | Base (no turbo) | `res_multistep` | `simple` | **20** |
 | Turbo on | `res_multistep` | `simple` | **4–8** (template default turbo steps widget) |
 
-Guider is `BasicGuider` (CFG-distilled checkpoint — do not crank CFG). Seed via
+Guider is `BasicGuider` (CFG-distilled checkpoint, so do not crank CFG). Seed via
 `RandomNoise`.
 
 ## Prompting — read the vendor guide, do not paste it here
@@ -192,7 +192,7 @@ system prompt dump):
   https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/docs/VIDEO_PROMPT_WRITING_GUIDE_base_en.md
 - Full-reference / R2V:
   https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/docs/VIDEO_PROMPT_WRITING_GUIDE_ref_en.md
-- Vendor skill (install separately if the user wants it — we do not bundle it):
+- Vendor skill (install separately if the user wants it; we do not bundle it):
   https://github.com/MiniMax-AI/MiniMax-H3 (`npx skills add … --skill h3-prompt-writing`)
 
 H3-Context-IR (the hosted prompt rewriter) is **not** in the open weights.
@@ -208,7 +208,7 @@ Comfy-Org's own template notes (safe to follow, not MiniMax docs):
 3. R2V: name each input in connection order (`<Picture 1>`, `<Video 1>`,
    `<Audio 1>`) and say what job each one does (identity, motion, voice).
 4. R2V caps (vendor model card, not a guess): ≤9 images, ≤3 videos, ≤3 audio
-   clips, ≤12 files mixed; each AV clip 2–15 s.
+   clips, ≤12 files mixed; each AV clip 2 to 15 s.
 
 ## 15-second clips and chaining
 
@@ -216,8 +216,8 @@ One H3 shot is **at most ~15 s**. Longer pieces are concatenated clips, not a
 bigger `length`.
 
 1. Generate clip N (up to 15 s).
-2. Confirm the file with `get_image` `action:"list_outputs"` (`kind:"video"`) —
-   video nodes often skip `/history`.
+2. Confirm the file with `get_image` `action:"list_outputs"` (`kind:"video"`).
+   Video nodes often skip `/history`.
 3. Stage the last frame (or the whole clip) with `upload_image` `action:"stage"`.
 4. Clip N+1: `MiniMaxH3ImageToVideo.first_frame` = last frame of N, **or** R2V
    with `<Video 1>` as a continuation reference.
@@ -246,19 +246,19 @@ Always `clear_vram` before switching to H3 from WAN / LTX / a checkpoint.
   steps without the LoRA is mush.
 - **API node in a local graph.** Costs money and ignores the UNet you downloaded.
 - **WAN frame math.** H3 is 24 fps and `17k+5`, not 16 fps `4n+1`.
-- **Verify video on disk**, then stage — never guess `input/` paths.
+- **Verify video on disk**, then stage. Never guess `input/` paths.
 - **ffmpeg** is required for `CreateVideo` / `SaveVideo` / `VHS_VideoCombine`.
 - Desktop/Cloud ComfyUI lags nightly. Missing `MiniMaxH3*` nodes → update to
   ≥0.30.0 (0.33 templates) before hunting custom packs.
 
 ## See also
 
-- `video-extend` — WAN Pusa temporal continuation (different family)
-- `director` — multi-clip concat after you have 15 s H3 shots
-- `prompt-engineering` — generic CLIP syntax; **H3 does not use it**
-- `triton-sageattention` — installing Sage on Windows
+- `video-extend`: WAN Pusa temporal continuation (different family)
+- `director`: multi-clip concat after you have 15 s H3 shots
+- `prompt-engineering`: generic CLIP syntax; **H3 does not use it**
+- `triton-sageattention`: installing Sage on Windows
 
-No bundled `packs/minimax-h3-*` installer yet — that is why
+There is no bundled `packs/minimax-h3-*` installer yet, which is why
 `enqueue_workflow action:"run_template"` cannot load these graphs. Use the
 Template Library (or the GitHub fetch → `save_workflow` →
 `panel_load_workflow path:` path above) + `download_model` against
@@ -266,5 +266,5 @@ Template Library (or the GitHub fetch → `save_workflow` →
 
 ## Sources
 
-- **Official:** MiniMax prompting guides https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/docs/VIDEO_PROMPT_WRITING_GUIDE_base_en.md (T2VA/I2VA/FL2VA/L2VA) and https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/docs/VIDEO_PROMPT_WRITING_GUIDE_ref_en.md (full-reference / R2V); vendor repo https://github.com/MiniMax-AI/MiniMax-H3; ComfyUI tutorial + templates https://docs.comfy.org/tutorials/video/minimax/minimax-h3 (wiring, duration grid, INT8 filenames). MiniMax's own `skills/h3-prompt-writing` is linked, not copied — Community License includes Documentation.
+- **Official:** MiniMax prompting guides https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/docs/VIDEO_PROMPT_WRITING_GUIDE_base_en.md (T2VA/I2VA/FL2VA/L2VA) and https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/docs/VIDEO_PROMPT_WRITING_GUIDE_ref_en.md (full-reference / R2V); vendor repo https://github.com/MiniMax-AI/MiniMax-H3; ComfyUI tutorial + templates https://docs.comfy.org/tutorials/video/minimax/minimax-h3 (wiring, duration grid, INT8 filenames). MiniMax's own `skills/h3-prompt-writing` is linked, not copied, because the Community License includes Documentation.
 - **Empirical:** local vs partner-API node split and 8 GB turbo-LoRA note from issue #1167 / the reporter's rig; Sage mixed-dtype fallback from the Comfy tutorial; chaining last-frame→next-clip from observed ComfyUI I/O (stage + list_outputs), not a vendor extender.

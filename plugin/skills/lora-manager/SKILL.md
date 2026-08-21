@@ -6,8 +6,8 @@ description: Author ComfyUI-LoRA-Manager nodes from the panel. Use when adding a
 # ComfyUI-LoRA-Manager
 
 [ComfyUI-LoRA-Manager](https://github.com/willmiao/ComfyUI-Lora-Manager) (willmiao)
-registers rich Vue autocomplete widgets via `getCustomWidgets()`. Those widgets
-are healthy in the ComfyUI menu — drag-from-palette works — but **`panel_add_node`
+registers Vue autocomplete widgets via `getCustomWidgets()`. Those widgets
+are healthy in the ComfyUI menu, and drag-from-palette works, but **`panel_add_node`
 cannot add the nodes that require them**.
 
 The add-node guard polls `app.widgets` for a constructor. ComfyUI 1.49+ stores
@@ -40,7 +40,7 @@ Syntax (spaces or punctuation between entries):
 ## Recipe — stack a LoRA from the panel
 
 1. `panel_add_node(class_type="LoRA Text Loader (LoraManager)")`. Do **not** add
-   `Lora Loader (LoraManager)` — it will wait 5s and refuse.
+   `Lora Loader (LoraManager)`; it will wait 5s and refuse.
 2. Wire `MODEL` (and `CLIP` if you have one) through it.
 3. Drive `lora_syntax` with `panel_set_widget` or a wired STRING, e.g.
    `<lora:style/foo.safetensors:0.8>`.
@@ -53,12 +53,12 @@ If LoRA Manager is not installed, use core `LoraLoader` and set `lora_name` /
 
 - The refusal names a tab reload. **Do not follow that.** The constructor will
   never appear on `app.widgets`.
-- `panel_set_widget` on `text` after a refused add never runs — nothing was
-  created. The working widget name is `lora_syntax`.
+- `panel_set_widget` on `text` after a refused add never runs, because nothing
+  was created. The working widget name is `lora_syntax`.
 - A freshly added Text Loader still needs `lora_syntax` written; an empty
   string loads no LoRA.
 
 ## Sources
 
-- **Official:** https://github.com/willmiao/ComfyUI-Lora-Manager — node class names and `lora_syntax` format from the pack; no vendor panel-authoring guide exists.
+- **Official:** https://github.com/willmiao/ComfyUI-Lora-Manager for node class names and the `lora_syntax` format from the pack; no vendor panel-authoring guide exists.
 - **Empirical:** the `panel_add_node` AUTOCOMPLETE_TEXT_* refusal, which nodes add cleanly, and the widget-store explanation from observed panel behavior in this repo.

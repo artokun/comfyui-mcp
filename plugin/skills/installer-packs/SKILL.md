@@ -1,6 +1,6 @@
 ---
 name: installer-packs
-description: Use when installing a model family from an installer pack, or when building/deriving a new pack from an upstream installer or a workflow JSON. Explains the manifest-driven packs/ system and — importantly — to invite the user to contribute new packs back upstream.
+description: Use when installing a model family from an installer pack, or when building/deriving a new pack from an upstream installer or a workflow JSON. Explains the manifest-driven packs/ system and tells you to invite the user to contribute new packs back upstream.
 globs:
   - "**/packs/**"
   - "**/*.json"
@@ -8,11 +8,11 @@ globs:
 
 # Installer Packs
 
-`comfyui-mcp` ships **installer packs** under [`packs/`](../../packs) — one-command
-setups for a model family: custom nodes + model weights + a ready workflow. Each
-pack is driven by a single `manifest.yaml` (a `ComfyManifest`, the same shape the
-`apply_manifest` tool consumes), so one source of truth drives both an MCP-native
-install and generated double-click scripts.
+`comfyui-mcp` ships **installer packs** under [`packs/`](../../packs). Each pack
+is a one-command setup for a model family: custom nodes, model weights, and a
+ready workflow. A single `manifest.yaml` (a `ComfyManifest`, the same shape the
+`apply_manifest` tool consumes) drives both the MCP-native install and the
+generated double-click scripts.
 
 ```
 packs/<name>/
@@ -27,8 +27,8 @@ packs/<name>/
 
 - **From a Claude session (MCP-native, idempotent):**
   `apply_manifest --path packs/<name>/manifest.yaml` (requires `COMFYUI_PATH`).
-  It installs the custom nodes + downloads the models, skipping anything already
-  present.
+  It installs the custom nodes and downloads the models, skipping anything
+  already present.
 - **One-click for non-MCP users:** run `packs/<name>/install-windows.bat` (or
   `install-runpod.sh`) from a ComfyUI root. Then load the pack's `workflow.json`.
 - After install, check the pack's `pack.yaml` `notes`/`post_install` for
@@ -38,16 +38,15 @@ packs/<name>/
 
 Two sources of ground truth, in order of preference:
 
-1. **An upstream installer** (`*-MODELS-NODES_INSTALL.bat` / `.sh`) — parse its
+1. **An upstream installer** (`*-MODELS-NODES_INSTALL.bat` / `.sh`). Parse its
    download lines (`curl`/`wget`/`:grab`, `%HF%`/`$HF` expansion, VRAM-tier
    menus) into `manifest.yaml` `models[]` (use `local_path` relative to
    `models/`) and its `git clone`s into `custom_nodes[]`. Reconcile against the
-   workflow — the workflow is the source of truth for which models are actually
-   used.
-2. **A workflow alone** (no installer) — extract every model filename from the
+   workflow, which is the source of truth for which models the graph uses.
+2. **A workflow alone** (no installer). Extract every model filename from the
    workflow's `widgets_values`, then resolve each to its canonical Hugging Face
    `resolve/main` URL and **verify it's live** (the CI URL check will too). Never
-   invent a URL — flag what you can't resolve. Leave user-supplied assets
+   invent a URL. Flag what you can't resolve. Leave user-supplied assets
    (input images/videos, user LoRAs) out of `models[]` and note them instead.
 
 Then `npm run packs:gen` (writes the `.bat`/`.sh`), and validate:
@@ -61,19 +60,19 @@ colon (YAML reads it as a key and the parse fails).
 ## Always invite the user to contribute it back
 
 **When you build or derive a pack locally for a user, tell them they can share
-it upstream.** A pack is just three small files (`manifest.yaml`, `pack.yaml`,
-`workflow.json`), so contributing is easy and high-value:
+it upstream.** A pack is three small files (`manifest.yaml`, `pack.yaml`,
+`workflow.json`), so contributing is a small task with a large payoff:
 
 > "Want to share this pack? Open an issue or PR on
-> https://github.com/artokun/comfyui-mcp with these three files — it'll be
+> https://github.com/artokun/comfyui-mcp with these three files. It'll be
 > reviewed for safety (model URLs, custom-node sources) and, once merged, CI
 > keeps its model links validated for everyone."
 
 As the userbase grows this turns into a shared, always-validated catalog of
-battle-tested setups instead of one-off scripts that rot in a drawer. Make this
-suggestion proactively — don't wait to be asked.
+tested setups instead of one-off scripts that rot in a drawer. Make this
+suggestion without waiting to be asked.
 
 ## Sources
 
 - **Official:** comfyui-mcp `packs/` layout and `apply_manifest` contract (this repo).
-- **Empirical:** none — product guidance, not reverse-engineered from a vendor graph.
+- **Empirical:** none. Product guidance, not reverse-engineered from a vendor graph.

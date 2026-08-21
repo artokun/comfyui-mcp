@@ -1,6 +1,6 @@
 ---
 name: ideogram-ultra
-description: Build Ideogram 4 (Ideogram Ultra) txt2img and img2img workflows — local open-weights model, dual conditional/unconditional models with DualModelGuider, Qwen3-VL text encoder, and structured JSON ("compositional deconstruction") prompts for strong text rendering and layout control
+description: Build Ideogram 4 (Ideogram Ultra) txt2img and img2img workflows with the local open-weights model, dual conditional/unconditional models with DualModelGuider, Qwen3-VL text encoder, and structured JSON ("compositional deconstruction") prompts for strong text rendering and layout control
 globs:
   - "**/*.json"
 ---
@@ -9,15 +9,15 @@ globs:
 
 ## Overview
 
-**This is a LOCAL open-weights pipeline — NOT the hosted Ideogram API.** There is no API key, no `IdeogramGenerate` API node, and no network call at generation time. Comfy-Org released the Ideogram 4 weights on Hugging Face and they run entirely on your GPU via standard `UNETLoader` / `CLIPLoader` / `VAELoader` nodes. (Note: ComfyUI *also* ships separate API/"partner" nodes that call the paid hosted Ideogram service — that is a different thing and is not what this workflow uses.)
+**This is a LOCAL open-weights pipeline, NOT the hosted Ideogram API.** There is no API key, no `IdeogramGenerate` API node, and no network call at generation time. Comfy-Org released the Ideogram 4 weights on Hugging Face and they run entirely on your GPU via standard `UNETLoader` / `CLIPLoader` / `VAELoader` nodes. (Note: ComfyUI *also* ships separate API/"partner" nodes that call the paid hosted Ideogram service. That is a different thing and is not what this workflow uses.)
 
-Ideogram 4 is best known for **text rendering / typography**, **poster and graphic-design layouts**, and **prompt adherence**. The hallmark of this workflow is a **structured JSON prompt** (a "compositional deconstruction" caption with bounding boxes) instead of a plain text prompt — this is what gives precise control over where text and objects land in the frame.
+Ideogram 4 is best known for **text rendering / typography**, **poster and graphic-design layouts**, and **prompt adherence**. The hallmark of this workflow is a **structured JSON prompt** (a "compositional deconstruction" caption with bounding boxes) instead of a plain text prompt. This is what gives precise control over where text and objects land in the frame.
 
 Source workflow this skill is derived from: `IDEOGRAM_ULTRA_WORKFLOW-V2.json` (UI format, 66 nodes, 4 subgraphs), by Aitrepreneur. It provides both a **TEXT TO IMAGE** path and an **IMAGE TO IMAGE** path.
 
 ### Two unusual things to know up front
 
-1. **Dual models.** Two UNETs are loaded: a conditional model (`ideogram4_fp8_scaled`) and an `..._unconditional_fp8_scaled` model. A `DualModelGuider` node uses both to perform asymmetric classifier-free guidance — the unconditional model provides the CFG baseline. There is **no negative text prompt**; negative conditioning is `ConditioningZeroOut`.
+1. **Dual models.** Two UNETs are loaded: a conditional model (`ideogram4_fp8_scaled`) and an `..._unconditional_fp8_scaled` model. A `DualModelGuider` node uses both to perform asymmetric classifier-free guidance; the unconditional model provides the CFG baseline. There is **no negative text prompt**; negative conditioning is `ConditioningZeroOut`.
 2. **Two text models, different jobs.**
    - `qwen3vl_8b_fp8_scaled` is the **actual diffusion text encoder** (loaded with `CLIPLoader`, type `ideogram4`).
    - `gemma4_e4b_it_fp8_scaled` is used **only inside an optional prompt-builder subgraph** (a `TextGenerate` node) that auto-writes the structured JSON from a plain idea. It is not the diffusion encoder.
@@ -35,10 +35,10 @@ git clone https://github.com/kijai/ComfyUI-KJNodes
 git clone https://github.com/cubiq/ComfyUI_essentials
 ```
 
-- **ComfyUI-KJNodes** (kijai) — provides `Ideogram4PromptBuilderKJ`, `ImageSharpenKJ`, `TextGenerate`, and the Ideogram 4 helper nodes. **Required.**
-- **rgthree-comfy** — `Power Lora Loader`, `Fast Groups Muter/Bypasser`, `Label`, `Any Switch`. (Used for UI/convenience; the core pipeline still works without them.)
-- **ComfyUI_essentials** (cubiq) — `ImageResize+` (used in the img2img path).
-- **ComfyUI-Manager** — node/model management; not required at run time.
+- **ComfyUI-KJNodes** (kijai) provides `Ideogram4PromptBuilderKJ`, `ImageSharpenKJ`, `TextGenerate`, and the Ideogram 4 helper nodes. **Required.**
+- **rgthree-comfy** provides `Power Lora Loader`, `Fast Groups Muter/Bypasser`, `Label`, `Any Switch`. (Used for UI/convenience; the core pipeline still works without them.)
+- **ComfyUI_essentials** (cubiq) provides `ImageResize+` (used in the img2img path).
+- **ComfyUI-Manager** handles node/model management; not required at run time.
 
 > The core nodes used in the simplified workflows below (`UNETLoader`, `CLIPLoader`, `VAELoader`, `DualModelGuider`, `SamplerCustomAdvanced`, `ModelSamplingAuraFlow`, `BasicScheduler`, `EmptyFlux2LatentImage`, `CLIPTextEncode`, `ConditioningZeroOut`, `VAEDecode`) are **built into ComfyUI** (recent versions). Only `Ideogram4PromptBuilderKJ` / `ImageSharpenKJ` require KJNodes.
 
@@ -56,7 +56,7 @@ Five files. Folder layout and download URLs are taken verbatim from `IDEOGRAM_UL
 
 Notes / things to verify:
 - The two **diffusion models** come from the official `Comfy-Org/Ideogram-4` HF repo. The **text encoders + VAE** are mirrored from the third-party `Aitrepreneur/FLX` repo in these scripts; the official ones also live on Comfy-Org / Comfy-Org-adjacent repos. Both should be identical files but the FLX mirror is what the provided installer pulls.
-- **File sizes are uncertain.** The official ComfyUI docs page lists each diffusion model at ~13.8 GB, qwen3vl at ~8 GB, gemma4 at ~2 GB, vae at ~335 MB (~38.9 GB total). A web search result claimed `ideogram4_fp8_scaled` is ~9.28 GB. Treat sizes as approximate — confirm against the HF file listing.
+- **File sizes are uncertain.** The official ComfyUI docs page lists each diffusion model at ~13.8 GB, qwen3vl at ~8 GB, gemma4 at ~2 GB, vae at ~335 MB (~38.9 GB total). A web search result claimed `ideogram4_fp8_scaled` is ~9.28 GB. Treat sizes as approximate and confirm against the HF file listing.
 - `flux2-vae.safetensors` is the same VAE used by Flux 2 / Klein workflows.
 
 ### Linux / RunPod note
@@ -122,7 +122,7 @@ The heart of the pipeline. Takes the (shifted) conditional model, the (shifted) 
 }
 ```
 
-> Input names for `DualModelGuider` (`model_negative`, `cfg`) are inferred from the subgraph wiring and KJNodes; verify against your installed KJNodes version — the exact widget/socket names may differ slightly.
+> Input names for `DualModelGuider` (`model_negative`, `cfg`) are inferred from the subgraph wiring and KJNodes; verify against your installed KJNodes version, since the exact widget/socket names may differ.
 
 ### EmptyFlux2LatentImage
 
@@ -155,19 +155,19 @@ A KJNodes node that outputs the structured caption JSON string (see "Prompt Styl
 
 #### ⚠️ Editing this node programmatically (panel_set_widget WILL NOT STICK)
 
-**This is the single most important thing to know about this node.** Its `elements_data` / `style_palette_data` widgets are **NOT the source of truth** — they are serialized *from* a live in-browser array (`node._boxes`) inside the KJNodes editor JS. Two mechanisms defeat any external widget edit:
+**This is the single most important thing to know about this node.** Its `elements_data` / `style_palette_data` widgets are **NOT the source of truth**. They are serialized *from* a live in-browser array (`node._boxes`) inside the KJNodes editor JS. Two mechanisms defeat any external widget edit:
 
 - **Queue-time re-serialization.** In `web/js/ideogram4_prompt_builder.js`, `elementsWidget.serializeValue()` regenerates the value from `node._boxes` *every time the graph is queued*. So `panel_set_widget(14, "elements_data", ...)` sets the value, but ComfyUI overwrites it with the stale editor boxes the instant you run. **The edit silently reverts on every run.**
-- **You can't reach `node._boxes`.** It lives in the browser tab; no panel/MCP tool can touch it. Editing `elements_data`, `ideo_editor`, or forcing `import_mode` alone does nothing durable. `node._boxes` is only ever re-seeded from `elements_data` on workflow *load* (`onConfigure`), and even then the saved `o.ideo.boxes` blob wins over the widget — so a stale saved workflow reloads stale.
+- **You can't reach `node._boxes`.** It lives in the browser tab; no panel/MCP tool can touch it. Editing `elements_data`, `ideo_editor`, or forcing `import_mode` alone does nothing durable. `node._boxes` is only ever re-seeded from `elements_data` on workflow *load* (`onConfigure`), and even then the saved `o.ideo.boxes` blob wins over the widget, so a stale saved workflow reloads stale.
 
-**The symptom:** you edit the JSON, the panel confirms the new value, but the render (and the visible builder JSON) still shows the OLD prompt — e.g. old subject/region text that "won't go away."
+**The symptom:** you edit the JSON, the panel confirms the new value, but the render (and the visible builder JSON) still shows the OLD prompt, e.g. old subject/region text that "won't go away."
 
-**The correct, node-designed fix — drive it via `import_json`:**
+**The correct, node-designed fix is to drive it via `import_json`:**
 1. Add a `PrimitiveStringMultiline` node containing the FULL caption JSON (the `high_level_description` + `style_description` + `compositional_deconstruction` shape from "Prompt Style" below).
 2. Wire it into node 14's **`import_json`** input.
 3. Set **`import_mode = "always"`**.
 
-The Python `execute()` then does `used_import = imported is not None and (import_mode == "always" or not boxes)` → the caption is built **entirely** from `import_json`; the poisoned `elements_data`/`node._boxes` are ignored. Bonus: running once in this mode pushes the caption back into the editor via `ui`, which re-seeds `node._boxes` and flushes the stale boxes for good. From then on, edit the prompt in the wired string node, **not** the builder's visual editor. (`import_mode = "when empty"` only seeds the editor when it has no regions, then the editor wins again — so for programmatic control it MUST be `"always"`.)
+The Python `execute()` then does `used_import = imported is not None and (import_mode == "always" or not boxes)` → the caption is built **entirely** from `import_json`; the poisoned `elements_data`/`node._boxes` are ignored. Bonus: running once in this mode pushes the caption back into the editor via `ui`, which re-seeds `node._boxes` and flushes the stale boxes for good. From then on, edit the prompt in the wired string node, **not** the builder's visual editor. (`import_mode = "when empty"` only seeds the editor when it has no regions, then the editor wins again, so for programmatic control it MUST be `"always"`.)
 
 ### ImageSharpenKJ (post-process)
 
@@ -190,7 +190,7 @@ Values below are exactly what the source `IDEOGRAM_ULTRA_WORKFLOW-V2.json` ships
 | sharpen | rcas, 0.55 | `ImageSharpenKJ` |
 | noise control | `RandomNoise`, fixed seed | seed sample value `1335735769456` |
 
-There is also a `CFGOverride` node in the sampler subgraph (widgets `3, 0.7, 1`); it is an optional override and is not the primary guidance path — the primary CFG is `DualModelGuider`'s `5`.
+There is also a `CFGOverride` node in the sampler subgraph (widgets `3, 0.7, 1`); it is an optional override and is not the primary guidance path. The primary CFG is `DualModelGuider`'s `5`.
 
 ## Resolutions / Aspect Ratios
 
@@ -236,18 +236,18 @@ An optional `style_description` object (`aesthetics`, `lighting`, `medium`, `art
 
 ### bbox rules (critical)
 
-- Format is **`[top, left, bottom, right]`**, values **0–1000** (NOT pixels, NOT x/y/w/h).
-- **One bbox per major subject** — do not split a person into face/hair/clothes boxes; put all detail in one `desc`.
-- Use extra boxes only for genuinely separate items (a product, a title, a second character).
+- Format is **`[top, left, bottom, right]`**, values **0 to 1000** (NOT pixels, NOT x/y/w/h).
+- **One bbox per major subject.** Do not split a person into face/hair/clothes boxes; put all detail in one `desc`.
+- Use extra boxes only for separate items (a product, a title, a second character).
 - For character groups in wide images, use **vertical columns** of non-overlapping boxes.
 - For posters: reserve a top zone for the title, middle for the subject, bottom for subtitle/CTA.
-- Overlapping text boxes cause garbled text — increase spacing or remove boxes.
+- Overlapping text boxes cause garbled text. Increase spacing or remove boxes.
 
 ### Text rendering tips
 
 - Keep rendered text **short and bold** ("ORDER NOW", "COMING THIS FALL"). Long/tiny text still fails sometimes.
 - Lock style explicitly when needed, e.g. `"rendered as an actual live-action photograph, not anime, not illustration"` or `"high-quality Japanese anime, cel shading, not photographic"`.
-- 3–6 strong elements beat 20 overlapping ones.
+- 3 to 6 strong elements beat 20 overlapping ones.
 
 ### Generating the JSON automatically
 
@@ -339,19 +339,18 @@ Optional upstream: Ideogram4PromptBuilderKJ  OR  TextGenerate(gemma4) ─► CLI
 - Both diffusion models plus the Qwen3-VL encoder are large. Loading **two** ~13.8 GB UNETs is the main cost; expect this to be heavy on 24 GB GPUs. The official docs cite a 16 GB minimum for the FP8 models, but that assumes ComfyUI swaps models in/out rather than holding both resident.
 - **Always `clear_vram`** before switching to Ideogram 4 from another model family.
 - If you OOM: rely on ComfyUI's automatic model offloading, run `--lowvram`, or reduce resolution.
-- Exact VRAM numbers for the dual-model setup are **not verified** in the source files — treat the above as guidance, not measured figures.
+- Exact VRAM numbers for the dual-model setup are **not verified** in the source files. Treat the above as guidance, not measured figures.
 
 ## Troubleshooting
 
-- **Prompt edits to `Ideogram4PromptBuilderKJ` won't stick / stale prompt keeps coming back** — `elements_data` is re-serialized from the browser editor's `node._boxes` at queue time, so `panel_set_widget` reverts on every run and you can't reach `node._boxes` externally. Fix: wire a `PrimitiveStringMultiline` (full caption JSON) into the node's `import_json` input and set `import_mode = "always"`. See "Editing this node programmatically" under Key Nodes. This is the ONLY reliable way to drive the prompt from outside the browser.
-- **"NOT A VALID IDEOGRAM 4 CAPTION JSON"** — JSON is malformed. Use double quotes, no trailing commas, exact key `compositional_deconstruction`, matched brackets. Validate in any JSON linter.
-- **Garbled / overlapping text in the image** — text bboxes overlap or text is too long. Increase spacing, shorten text, remove boxes.
-- **Style drift (anime when you wanted photo, etc.)** — add explicit style-lock language in the element/style description.
-- **Wrong element placement** — remember bbox is `[top, left, bottom, right]` 0–1000, not pixels and not x/y/w/h.
-- **Same seed, different image across machines** — expected; differs by GPU, drivers, PyTorch/CUDA/ComfyUI versions (per template README).
-- **CLIPLoader type missing `ideogram4`** — update ComfyUI; the `ideogram4` CLIP type and the Flux2/Ideogram nodes require a recent build (installer pins ComfyUI portable `v0.24.0`).
-- **`Ideogram4PromptBuilderKJ` / `DualModelGuider` not found** — update KJNodes (`git pull` in `custom_nodes/ComfyUI-KJNodes`); these are recent additions.
-```
+- **Prompt edits to `Ideogram4PromptBuilderKJ` won't stick / stale prompt keeps coming back.** `elements_data` is re-serialized from the browser editor's `node._boxes` at queue time, so `panel_set_widget` reverts on every run and you can't reach `node._boxes` externally. Fix: wire a `PrimitiveStringMultiline` (full caption JSON) into the node's `import_json` input and set `import_mode = "always"`. See "Editing this node programmatically" under Key Nodes. This is the ONLY reliable way to drive the prompt from outside the browser.
+- **"NOT A VALID IDEOGRAM 4 CAPTION JSON".** JSON is malformed. Use double quotes, no trailing commas, exact key `compositional_deconstruction`, matched brackets. Validate in any JSON linter.
+- **Garbled / overlapping text in the image.** Text bboxes overlap or text is too long. Increase spacing, shorten text, remove boxes.
+- **Style drift (anime when you wanted photo, etc.).** Add explicit style-lock language in the element/style description.
+- **Wrong element placement.** Remember bbox is `[top, left, bottom, right]` 0 to 1000, not pixels and not x/y/w/h.
+- **Same seed, different image across machines.** Expected; it differs by GPU, drivers, PyTorch/CUDA/ComfyUI versions (per template README).
+- **CLIPLoader type missing `ideogram4`.** Update ComfyUI; the `ideogram4` CLIP type and the Flux2/Ideogram nodes require a recent build (installer pins ComfyUI portable `v0.24.0`).
+- **`Ideogram4PromptBuilderKJ` / `DualModelGuider` not found.** Update KJNodes (`git pull` in `custom_nodes/ComfyUI-KJNodes`); these are recent additions.
 
 ## Sources
 

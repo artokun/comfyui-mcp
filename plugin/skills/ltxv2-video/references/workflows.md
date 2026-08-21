@@ -6,17 +6,17 @@ need the exact install commands or a full graph to build from.
 
 ## Contents
 
-- [Install scripts (step-by-step source of truth)](#install-scripts-step-by-step-source-of-truth) — LTX-2 and LTX-2.3 GGUF download commands
-- [Complete Workflow: T2V Distilled (8-Step)](#complete-workflow-t2v-distilled-8-step) — LTX-2 bundled-checkpoint graph
-- [Complete Workflow: LTX-2.3 GGUF (dev, T2V)](#complete-workflow-ltx-23-gguf-dev-t2v) — GGUF UNet + separate VAE graph
+- [Install scripts (step-by-step source of truth)](#install-scripts-step-by-step-source-of-truth): LTX-2 and LTX-2.3 GGUF download commands
+- [Complete Workflow: T2V Distilled (8-Step)](#complete-workflow-t2v-distilled-8-step): LTX-2 bundled-checkpoint graph
+- [Complete Workflow: LTX-2.3 GGUF (dev, T2V)](#complete-workflow-ltx-23-gguf-dev-t2v): GGUF UNet + separate VAE graph
 
 ## Install scripts (step-by-step source of truth)
 
 Three installers (by "Aitrepreneur") were used; they all download from `HF = https://huggingface.co/Aitrepreneur/FLX/resolve/main`:
 
-- `LTX-2-3-MODELS-NODES_INSTALL-V2.bat` — run from `...\ComfyUI_windows_portable\ComfyUI\`. Locks the current pip env into a constraints file, sanitizes each node's `requirements.txt` (strips torch/file-wheels/extra-index lines), clones nodes, downloads models. Flags: `/update`, `/force`, `/dryrun`, `/restore`.
-- `LTX-2-3-ULTRA-COMFYUI-MANAGER_AUTO_INSTALL-V2.bat` — full one-click: downloads ComfyUI portable `v0.22.0`, installs 7-Zip/Git if missing, clones the same nodes, downloads the same models, then launches ComfyUI.
-- `LTX-2-3-AUTO_INSTALL-RUNPOD-V2.sh` — Linux/RunPod. Recreates a clean venv, pins **torch 2.4.0 / torchvision 0.19.0 / torchaudio 2.4.0 / xformers 0.0.27.post2 on cu121**, transformers 4.51.3, tokenizers >=0.21,<0.22, timm 1.0.15. Pins **ComfyUI-LTXVideo to commit `cd5d371518afb07d6b3641be8012f644f25269fc`** for workflow compatibility, and verifies the LTXVideo import at the end.
+- `LTX-2-3-MODELS-NODES_INSTALL-V2.bat` runs from `...\ComfyUI_windows_portable\ComfyUI\`. It locks the current pip env into a constraints file, sanitizes each node's `requirements.txt` (strips torch/file-wheels/extra-index lines), clones nodes, downloads models. Flags: `/update`, `/force`, `/dryrun`, `/restore`.
+- `LTX-2-3-ULTRA-COMFYUI-MANAGER_AUTO_INSTALL-V2.bat` is the full one-click install: it downloads ComfyUI portable `v0.22.0`, installs 7-Zip/Git if missing, clones the same nodes, downloads the same models, then launches ComfyUI.
+- `LTX-2-3-AUTO_INSTALL-RUNPOD-V2.sh` is for Linux/RunPod. It recreates a clean venv, pins **torch 2.4.0 / torchvision 0.19.0 / torchaudio 2.4.0 / xformers 0.0.27.post2 on cu121**, transformers 4.51.3, tokenizers >=0.21,<0.22, timm 1.0.15. Pins **ComfyUI-LTXVideo to commit `cd5d371518afb07d6b3641be8012f644f25269fc`** for workflow compatibility, and verifies the LTXVideo import at the end.
 
 Exact model download URLs (all `?download=true` from the `FLX` mirror), grouped by target folder:
 
