@@ -248,6 +248,31 @@ describe("#1983 — an untrusted install cannot be laundered into a confident an
     expect(sync.summary).toMatch(/UNKNOWN/);
   });
 
+  it("a PROVEN absent pack is behind anything published", async () => {
+    mocks.panelStatus.mockResolvedValue(
+      status({ installed: false, installedVersion: undefined, absenceProven: true }),
+    );
+    stubFetch(() => new Response(pyproject(LATEST), { status: 200 }));
+
+    const sync = await statusCall();
+
+    expect(sync.behindLatest).toBe(true);
+    expect(sync.latestPublishedVersion).toBe(LATEST);
+  });
+
+  it("an UNPROVEN absence is not claimed as behind latest — a panel may be sitting in another tree", async () => {
+    mocks.panelStatus.mockResolvedValue(
+      status({ installed: false, installedVersion: undefined, absenceProven: false }),
+    );
+    stubFetch(() => new Response(pyproject(LATEST), { status: 200 }));
+
+    const sync = await statusCall();
+
+    expect(sync.decision).toBe("blocked");
+    expect(sync.behindLatest).toBeNull();
+    expect(sync.behindLatest).not.toBe(true);
+  });
+
   it("an unreliable custom_nodes scan does not become a confident staleness claim", async () => {
     mocks.panelStatus.mockResolvedValue(status({ scanReliable: false }));
     stubFetch(() => new Response(pyproject(LATEST), { status: 200 }));
