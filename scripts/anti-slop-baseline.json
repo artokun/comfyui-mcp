@@ -1,0 +1,792 @@
+{
+  "$comment": [
+    "anti-slop ratchet — known findings per file per rule, from the seven rules",
+    "enabled in .oxlintrc.json. See tools/oxlint/README.md for which rules and why.",
+    "",
+    "THIS IS A DEBT LIST. It may shrink and never grow. A count that rises fails",
+    "CI; clear the new site by fixing it, or waive it AT THE SITE with a reasoned",
+    "`// oxlint-disable-next-line anti-slop/<rule> -- <why>`. When counts fall,",
+    "rewrite this file so the payment is recorded:",
+    "",
+    "    node scripts/check-anti-slop.mjs --baseline"
+  ],
+  "files": {
+    "scripts/gen-tool-docs.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/comfyui/backfill-object-info.test.ts": {
+      "no-chained-type-assertions": 4
+    },
+    "src/__tests__/comfyui/client-fetch-json-guard.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/comfyui/client-ownership-race.test.ts": {
+      "no-chained-type-assertions": 5,
+      "no-unknown-returns": 3
+    },
+    "src/__tests__/comfyui/cloud-client.test.ts": {
+      "no-chained-type-assertions": 5
+    },
+    "src/__tests__/comfyui/enqueue-error-redaction.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/comfyui/enqueue-prompt-validation.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/comfyui/get-logs-retry.test.ts": {
+      "no-chained-type-assertions": 1,
+      "no-unknown-returns": 1
+    },
+    "src/__tests__/comfyui/history-non-json.test.ts": {
+      "no-chained-type-assertions": 1,
+      "no-unknown-returns": 1
+    },
+    "src/__tests__/comfyui/json-guard.test.ts": {
+      "no-chained-type-assertions": 8
+    },
+    "src/__tests__/comfyui/log-select-order.test.ts": {
+      "no-chained-type-assertions": 1,
+      "no-unknown-returns": 1
+    },
+    "src/__tests__/comfyui/object-info-cache.test.ts": {
+      "no-chained-type-assertions": 1,
+      "no-unknown-returns": 1
+    },
+    "src/__tests__/comfyui/object-info-non-json.test.ts": {
+      "no-chained-type-assertions": 4,
+      "no-unknown-returns": 1
+    },
+    "src/__tests__/comfyui/object-info-ttl.test.ts": {
+      "no-chained-type-assertions": 1,
+      "no-unknown-returns": 1
+    },
+    "src/__tests__/comfyui/settings-unreadable.test.ts": {
+      "no-chained-type-assertions": 1,
+      "no-unknown-returns": 1
+    },
+    "src/__tests__/comfyui/system-stats-non-json.test.ts": {
+      "no-chained-type-assertions": 6
+    },
+    "src/__tests__/comfyui/unreachable-status-branches.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/comfyui/upload-subfolder-wiring.test.ts": {
+      "no-chained-type-assertions": 1,
+      "no-unknown-returns": 1
+    },
+    "src/__tests__/comfyui/upload-too-large.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/config-own-host-address.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/config.test.ts": {
+      "no-unknown-returns": 1
+    },
+    "src/__tests__/experimental/chat-handler.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/ack-timeout-vs-applied.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/add-node-frontend-only-skew.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/add-node-lora-manager-autocomplete.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/orchestrator/add-node-stale-schema-retry.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/orchestrator/add-node-stale-socket-producers.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/orchestrator/ambiguous-pin-is-not-reconnecting.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/antigravity-backend.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/audio-attachment.test.ts": {
+      "no-chained-type-assertions": 10
+    },
+    "src/__tests__/orchestrator/carried-stamp-corroboration.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/chatgpt-oauth-backend.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/codex-interrupt-recovery.test.ts": {
+      "no-object-parameters": 1
+    },
+    "src/__tests__/orchestrator/codex-preview-byte-budget.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/orchestrator/confirm-unreachable-is-not-a-decline.test.ts": {
+      "no-chained-type-assertions": 3,
+      "no-object-parameters": 1
+    },
+    "src/__tests__/orchestrator/empty-outline-recheck.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/fence-lookalike-refusals.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/fence-matching-uuid.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/fence-mismatch-corroborates.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/fence-rebind-transient.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/fence-refusal-reason.test.ts": {
+      "no-chained-type-assertions": 3
+    },
+    "src/__tests__/orchestrator/fence-repair-vs-already-current.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/fence-trusts-own-reply.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/fenced-read-absent-stamp.test.ts": {
+      "no-chained-type-assertions": 4
+    },
+    "src/__tests__/orchestrator/free-vram-frozen-tab.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/free-vram-pinned-device.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/get-errors-ack-budget.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/graph-read-during-render.test.ts": {
+      "no-chained-type-assertions": 3
+    },
+    "src/__tests__/orchestrator/history-unreadable.test.ts": {
+      "no-unknown-returns": 1
+    },
+    "src/__tests__/orchestrator/inject-event-wiring.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/install-accepted-never-enqueued.test.ts": {
+      "no-chained-type-assertions": 4
+    },
+    "src/__tests__/orchestrator/install-node-ambiguous-name.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/install-node-git-expectation.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/orchestrator/load-claims-instance.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/load-refreshes-fence.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/new-workflow-fence.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/orchestrator/no-reachable-tab-remedy.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/orchestrator/no-trusted-identity-remedy.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/node-id-and-canvas-args.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/node-id-union-message.test.ts": {
+      "no-chained-type-assertions": 1,
+      "no-unknown-returns": 1
+    },
+    "src/__tests__/orchestrator/ollama-audio.test.ts": {
+      "no-chained-type-assertions": 12
+    },
+    "src/__tests__/orchestrator/ollama-backend.test.ts": {
+      "no-chained-type-assertions": 3
+    },
+    "src/__tests__/orchestrator/ollama-tool-mode-spawn.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/orchestrator/open-clears-fence-on-drift.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/open-content-mismatch-fence.test.ts": {
+      "no-chained-type-assertions": 3
+    },
+    "src/__tests__/orchestrator/open-definitions-rehydrate.test.ts": {
+      "no-chained-type-assertions": 3
+    },
+    "src/__tests__/orchestrator/open-identity-normalization.test.ts": {
+      "no-chained-type-assertions": 3
+    },
+    "src/__tests__/orchestrator/open-reports-silent-panel-channel.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/open-workflow-drift-surfaced.test.ts": {
+      "no-chained-type-assertions": 4
+    },
+    "src/__tests__/orchestrator/open-workflow-fence-unreadable.test.ts": {
+      "no-chained-type-assertions": 6
+    },
+    "src/__tests__/orchestrator/open-workflow-unsaved-refresh.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/outline-budget-enforced.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/panel-971-recovery-deadend.test.ts": {
+      "no-chained-type-assertions": 3
+    },
+    "src/__tests__/orchestrator/panel-load-workflow-userdata.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/panel-mcp-stale-session.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/panel-reboot-cache-invalidation.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/orchestrator/panel-request-secret-truth.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/panel-restart-bridge-offline.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/orchestrator/panel-restart-cancel-truth.test.ts": {
+      "no-chained-type-assertions": 3
+    },
+    "src/__tests__/orchestrator/panel-restart-configured-command.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/orchestrator/panel-restart-health-probe.test.ts": {
+      "no-chained-type-assertions": 1,
+      "no-unknown-returns": 1
+    },
+    "src/__tests__/orchestrator/panel-restart-health-readiness.test.ts": {
+      "no-chained-type-assertions": 4
+    },
+    "src/__tests__/orchestrator/panel-restart-identity-reason.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/orchestrator/panel-restart-legacy-fallback.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/orchestrator/panel-restart-readiness.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/orchestrator/panel-retry-identity.test.ts": {
+      "no-chained-type-assertions": 6,
+      "no-unknown-returns": 2
+    },
+    "src/__tests__/orchestrator/panel-run-backpressure.test.ts": {
+      "no-chained-type-assertions": 6,
+      "no-unknown-returns": 1
+    },
+    "src/__tests__/orchestrator/panel-run-reconnect-respell.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/orchestrator/panel-search-nodes-manager-500.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/orchestrator/panel-session-rebind-residuals.test.ts": {
+      "no-chained-type-assertions": 11
+    },
+    "src/__tests__/orchestrator/panel-show-media-oversized.test.ts": {
+      "no-chained-type-assertions": 1,
+      "no-unknown-returns": 2
+    },
+    "src/__tests__/orchestrator/panel-show-media-video-ext.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/panel-tools-strict-schema.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/panel-tools.test.ts": {
+      "no-chained-type-assertions": 118,
+      "no-unknown-returns": 3
+    },
+    "src/__tests__/orchestrator/pi-backend.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/pin-repin-uses-a-real-tab-id.test.ts": {
+      "no-chained-type-assertions": 3,
+      "no-unknown-returns": 1
+    },
+    "src/__tests__/orchestrator/promoted-widget.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/orchestrator/query-graph-budget.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/orchestrator/remote-restart-never-came-back.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/orchestrator/run-completion-continuation.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/run-completion-fallback-wiring.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/orchestrator/run-completion-race.test.ts": {
+      "no-chained-type-assertions": 3
+    },
+    "src/__tests__/orchestrator/run-completion-requeued-in-flight.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/orchestrator/save-as-fence.test.ts": {
+      "no-chained-type-assertions": 4,
+      "no-unknown-returns": 2
+    },
+    "src/__tests__/orchestrator/save-as-name-conflict.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/orchestrator/save-fence-corroborate.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/secret-card-timeout-truth.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/session-preview-budget.test.ts": {
+      "no-chained-type-assertions": 1,
+      "no-unknown-returns": 1
+    },
+    "src/__tests__/orchestrator/strip-object-info-host.test.ts": {
+      "no-chained-type-assertions": 1,
+      "no-object-parameters": 1
+    },
+    "src/__tests__/orchestrator/strip-workflow-parseable-reply.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/structured-user-text.test.ts": {
+      "no-chained-type-assertions": 3
+    },
+    "src/__tests__/orchestrator/switch-guard-retry.test.ts": {
+      "no-chained-type-assertions": 3
+    },
+    "src/__tests__/orchestrator/target-verify-no-tab.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/tmp-workflow-mismatch-remedy.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/orchestrator/todo-status-aliases.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/unconfirmed-matching-fence.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/workflow-input-ui-guard.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/scripts/knowledge-parity-mock-graph.test.ts": {
+      "no-unknown-returns": 1
+    },
+    "src/__tests__/services/agent-note-channel.test.ts": {
+      "no-chained-type-assertions": 9,
+      "no-unknown-returns": 2
+    },
+    "src/__tests__/services/api-nodes.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/services/apply-manifest-partial-queue-status.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/services/civitai-resolver.test.ts": {
+      "no-chained-type-assertions": 5
+    },
+    "src/__tests__/services/comfy-cli.test.ts": {
+      "no-unknown-returns": 1
+    },
+    "src/__tests__/services/comfy-view-ref.test.ts": {
+      "no-chained-type-assertions": 1,
+      "no-unknown-returns": 1
+    },
+    "src/__tests__/services/custom-nodes-unreadable.test.ts": {
+      "no-unknown-returns": 1
+    },
+    "src/__tests__/services/download-live-destination.test.ts": {
+      "no-unknown-returns": 1
+    },
+    "src/__tests__/services/download-persist-contention.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/services/env-capabilities-argv-contradiction.test.ts": {
+      "no-unknown-returns": 1
+    },
+    "src/__tests__/services/external-service-nodes-not-free.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/services/extra-paths-root-guard.test.ts": {
+      "no-chained-type-assertions": 1,
+      "no-unknown-returns": 2
+    },
+    "src/__tests__/services/graph-command-effect.test.ts": {
+      "no-chained-type-assertions": 2,
+      "no-unknown-returns": 2
+    },
+    "src/__tests__/services/job-history.test.ts": {
+      "no-chained-type-assertions": 5
+    },
+    "src/__tests__/services/job-watcher.test.ts": {
+      "no-chained-type-assertions": 3
+    },
+    "src/__tests__/services/list-local-models.test.ts": {
+      "no-unknown-returns": 1
+    },
+    "src/__tests__/services/lora-catalog.test.ts": {
+      "no-chained-type-assertions": 5,
+      "no-unknown-returns": 4
+    },
+    "src/__tests__/services/manager-config.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/services/model-listing-coverage.test.ts": {
+      "no-unknown-returns": 1
+    },
+    "src/__tests__/services/nested-linked-widget-arity.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/services/nested-seed-without-phantom.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/services/node-install-invalidates-object-info.test.ts": {
+      "no-chained-type-assertions": 1,
+      "no-unknown-returns": 1
+    },
+    "src/__tests__/services/node-management.test.ts": {
+      "no-chained-type-assertions": 1,
+      "no-unknown-returns": 3
+    },
+    "src/__tests__/services/node-snapshots.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/services/panel-answered-marker.test.ts": {
+      "no-chained-type-assertions": 4
+    },
+    "src/__tests__/services/panel-pin-cancel.test.ts": {
+      "no-unknown-returns": 1
+    },
+    "src/__tests__/services/panel-pin-guard.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/services/panel-recovery-cluster.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/services/panel-version-gap.test.ts": {
+      "no-unknown-returns": 2
+    },
+    "src/__tests__/services/pre-executor-refusal-retry.test.ts": {
+      "no-chained-type-assertions": 12,
+      "no-object-parameters": 1
+    },
+    "src/__tests__/services/registry-search.test.ts": {
+      "no-chained-type-assertions": 10
+    },
+    "src/__tests__/services/remote-model-landing.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/services/respawn-orphans-downloads.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/services/runpod-client.test.ts": {
+      "no-chained-type-assertions": 19,
+      "no-unknown-returns": 1
+    },
+    "src/__tests__/services/runtime-virtual-nodes.test.ts": {
+      "no-unknown-returns": 1
+    },
+    "src/__tests__/services/self-update.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/services/slice-miss-diagnostic.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/services/strip-workflow-preservation.test.ts": {
+      "no-chained-type-assertions": 15
+    },
+    "src/__tests__/services/ui-bridge-preboot-queue.test.ts": {
+      "no-chained-type-assertions": 22
+    },
+    "src/__tests__/services/ui-bridge.test.ts": {
+      "no-chained-type-assertions": 6
+    },
+    "src/__tests__/services/update-comfyui.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/services/workflow-autoload.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/services/workflow-deps.test.ts": {
+      "no-chained-type-assertions": 1,
+      "no-unknown-returns": 1
+    },
+    "src/__tests__/services/workflow-executor.test.ts": {
+      "no-chained-type-assertions": 4
+    },
+    "src/__tests__/services/workflow-health.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/services/workflow-url-unreachable.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/services/workflow-validator.test.ts": {
+      "no-chained-type-assertions": 3
+    },
+    "src/__tests__/services/workspace-env.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/tools/batches.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/tools/generate-image-tool.test.ts": {
+      "no-unknown-returns": 1
+    },
+    "src/__tests__/tools/history-text-outputs.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/tools/html-instead-of-json.test.ts": {
+      "no-chained-type-assertions": 10
+    },
+    "src/__tests__/tools/install-environment.test.ts": {
+      "no-unknown-returns": 1
+    },
+    "src/__tests__/tools/model-explorer-comfy-target.test.ts": {
+      "no-chained-type-assertions": 1,
+      "no-unknown-returns": 3
+    },
+    "src/__tests__/tools/model-explorer.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/tools/post-crash-502-not-misconfig.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/tools/report-issue-version.test.ts": {
+      "no-chained-type-assertions": 2,
+      "no-unknown-returns": 2
+    },
+    "src/__tests__/tools/retired-redirect.test.ts": {
+      "no-chained-type-assertions": 6
+    },
+    "src/__tests__/tools/runpod.test.ts": {
+      "no-chained-type-assertions": 3
+    },
+    "src/__tests__/tools/skills-access.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/tools/template-schema.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/tools/tool-surface-filter.test.ts": {
+      "no-unknown-returns": 1
+    },
+    "src/__tests__/tools/train-consolidation.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/tools/train.test.ts": {
+      "no-unknown-returns": 2
+    },
+    "src/__tests__/tools/truncation-remedies.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/tools/upload-image-too-large.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/tools/workflow-dsl-warnings.test.ts": {
+      "no-chained-type-assertions": 1,
+      "no-unknown-returns": 1
+    },
+    "src/__tests__/tools/workflow-execute.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/utils/unreachable-not-empty.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/comfyui/client.ts": {
+      "no-chained-type-assertions": 4,
+      "no-unknown-returns": 1
+    },
+    "src/comfyui/cloud-client.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/comfyui/fetch.ts": {
+      "no-unknown-returns": 1
+    },
+    "src/comfyui/json-guard.ts": {
+      "no-unknown-returns": 2
+    },
+    "src/orchestrator/ai-proposer.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/orchestrator/claude-backend.ts": {
+      "no-chained-type-assertions": 8,
+      "no-unknown-returns": 1
+    },
+    "src/orchestrator/error-text.test.ts": {
+      "no-unknown-returns": 2
+    },
+    "src/orchestrator/index.ts": {
+      "no-chained-type-assertions": 3
+    },
+    "src/orchestrator/oauth-bridge.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/orchestrator/ollama-backend.ts": {
+      "no-chained-type-assertions": 4
+    },
+    "src/orchestrator/panel-mcp-http.ts": {
+      "no-unknown-returns": 1
+    },
+    "src/orchestrator/panel-tools.ts": {
+      "no-chained-type-assertions": 14,
+      "no-unknown-returns": 5
+    },
+    "src/orchestrator/pi-credentials.ts": {
+      "no-unknown-returns": 1
+    },
+    "src/orchestrator/turn-registry.ts": {
+      "no-unknown-returns": 1
+    },
+    "src/services/api-nodes.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/services/code-provider-auth-redact.test.ts": {
+      "no-chained-type-assertions": 6
+    },
+    "src/services/comfy-cli.ts": {
+      "no-unknown-returns": 3
+    },
+    "src/services/defaults-manager.ts": {
+      "no-unknown-returns": 1
+    },
+    "src/services/download-failure-hint.ts": {
+      "no-unknown-returns": 1
+    },
+    "src/services/generate-audio.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/services/generate-conditioned.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/services/generate-image.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/services/generate-video.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/services/graph-query.ts": {
+      "no-unknown-returns": 1
+    },
+    "src/services/health-check.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/services/lora-catalog.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/services/manager-node-search.ts": {
+      "no-unknown-returns": 3
+    },
+    "src/services/manifest.ts": {
+      "no-unknown-returns": 1
+    },
+    "src/services/mermaid-parser.ts": {
+      "no-unknown-returns": 1
+    },
+    "src/services/node-management.ts": {
+      "no-chained-type-assertions": 1,
+      "no-unknown-returns": 1
+    },
+    "src/services/process-control.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/services/queue-monitor.poll.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/services/queue-monitor.self-attribution.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/services/queue-monitor.stall.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/services/queue-monitor.ts": {
+      "no-unknown-returns": 1
+    },
+    "src/services/queue-status-broadcast.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/services/remove-background.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/services/storage-upload.ts": {
+      "no-unknown-returns": 1
+    },
+    "src/services/storage/http.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/services/test-isolation-guard.ts": {
+      "no-chained-type-assertions": 3
+    },
+    "src/services/ui-bridge.ts": {
+      "no-unknown-returns": 2
+    },
+    "src/services/workflow-autoload.ts": {
+      "no-unknown-returns": 1
+    },
+    "src/services/workflow-converter.ts": {
+      "no-chained-type-assertions": 1,
+      "no-unknown-returns": 4,
+      "no-widen-then-assert": 1
+    },
+    "src/services/workflow-lock.ts": {
+      "no-chained-type-assertions": 3
+    },
+    "src/services/workflow-slicer.ts": {
+      "no-chained-type-assertions": 3
+    },
+    "src/tools/apps.ts": {
+      "no-unknown-returns": 2
+    },
+    "src/tools/catalog.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/tools/compact.ts": {
+      "no-chained-type-assertions": 2,
+      "no-unknown-returns": 1
+    },
+    "src/tools/index.ts": {
+      "no-chained-type-assertions": 1,
+      "no-reflect-get": 1,
+      "no-unknown-returns": 4
+    },
+    "src/tools/missing-models.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/tools/report-issue.test.ts": {
+      "no-chained-type-assertions": 17
+    },
+    "src/tools/retired-redirect.ts": {
+      "no-chained-type-assertions": 2,
+      "no-unknown-returns": 2
+    },
+    "src/tools/tool-surface-filter.ts": {
+      "no-chained-type-assertions": 1,
+      "no-reflect-get": 1,
+      "no-unknown-returns": 3
+    },
+    "src/tools/workflow-compose.ts": {
+      "no-unknown-returns": 1
+    },
+    "src/tools/workflow-url.ts": {
+      "no-unknown-returns": 1
+    },
+    "src/tools/workflow-visualize.ts": {
+      "no-unknown-returns": 1
+    },
+    "src/transport/http.ts": {
+      "no-unknown-returns": 1
+    }
+  }
+}
