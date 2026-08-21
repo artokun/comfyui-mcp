@@ -21,7 +21,7 @@ The user wants to find out why a ComfyUI workflow execution failed and get a sug
 
    If the execution succeeded (no error), tell the user it completed normally and show the output summary.
 
-3. **Get relevant logs.** Call `get_system_stats (action:"logs")` with a `keyword` filter matching the error — use the exception class name (e.g., "RuntimeError", "ValueError") or a distinctive phrase from the error message. Request up to 200 lines.
+3. **Get relevant logs.** Call `get_system_stats (action:"logs")` with a `keyword` filter matching the error. Use the exception class name (e.g., "RuntimeError", "ValueError") or a distinctive phrase from the error message. Request up to 200 lines.
 
 4. **Inspect the failing node.** Call `create_workflow (action:"node_info")` with the `node_type` of the failing node. Check:
    - What inputs does the node expect?
@@ -38,7 +38,7 @@ The user wants to find out why a ComfyUI workflow execution failed and get a sug
    - Call `search_custom_nodes` (`action: "search"`) with the node class name as `query` to find which pack provides it
    - Suggest installing the pack
 
-7. **Present the diagnosis.** Provide a clear summary:
+7. **Present the diagnosis.** Provide a summary:
    - **What failed**: node type, node ID, and a one-line description
    - **Why it failed**: root cause explanation in plain language
    - **Suggested fix**: concrete steps the user can take to resolve the issue
@@ -49,9 +49,9 @@ The user wants to find out why a ComfyUI workflow execution failed and get a sug
 - **OOM / CUDA out of memory**: Suggest reducing resolution, using FP8 models, or `clear_vram` before retrying
 - **Missing checkpoint/model file**: Show what's installed, offer to download the right one
 - **Missing custom node**: Identify the pack and suggest installation
-- **Shape mismatch**: Usually a resolution or latent size issue — check width/height are multiples of 8 (or 64 for some models)
-- **NaN/Inf in tensor**: Model corruption or extreme CFG values — suggest re-downloading the model or lowering CFG
-- **Connection type mismatch**: A node is receiving the wrong data type — check the workflow wiring
+- **Shape mismatch**: Usually a resolution or latent size issue; check that width/height are multiples of 8 (or 64 for some models)
+- **NaN/Inf in tensor**: Model corruption or extreme CFG values; suggest re-downloading the model or lowering CFG
+- **Connection type mismatch**: A node is receiving the wrong data type; check the workflow wiring
 
 ## Example
 
@@ -67,6 +67,6 @@ Steps:
 
 ## Notes
 
-- If multiple nodes errored, focus on the first failure in the execution chain — downstream errors are usually cascading
-- The traceback is Python-level; translate it into user-friendly language
-- If the error is ambiguous, suggest the user share their workflow JSON for deeper inspection
+- If multiple nodes errored, focus on the first failure in the execution chain; downstream errors usually cascade from it
+- The traceback is Python-level; translate it into plain language for the user
+- If the error is ambiguous, suggest the user share their workflow JSON for a closer look

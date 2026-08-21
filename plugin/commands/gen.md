@@ -15,17 +15,17 @@ The user wants to generate an image using ComfyUI. Their prompt is provided as t
 
 2. **Check available models.** Use the `list_local_models` tool with `model_type: "checkpoints"` to see what checkpoints are installed.
 
-3. **If no checkpoints are installed — acquire one automatically.**
+3. **If no checkpoints are installed, acquire one automatically.**
 
    Do NOT ask the user to download a model. Instead, find and download one yourself:
 
-   **Option A — CivitAI (preferred if CIVITAI_API_TOKEN is set):**
+   **Option A: CivitAI** (preferred if CIVITAI_API_TOKEN is set):
    - Use WebFetch to search CivitAI's REST API: `https://civitai.com/api/v1/models?query=SDXL&types=Checkpoint&sort=Most+Downloaded&limit=5`
    - Pick the top result that matches the user's needs (SDXL for general, Flux for quality, etc.)
    - Get the download URL from the model version: `https://civitai.com/api/download/models/{modelVersionId}?token={CIVITAI_API_TOKEN}`
    - Use `download_model` with `target_subfolder: "checkpoints"` to download it
 
-   **Option B — HuggingFace (default):**
+   **Option B: HuggingFace** (default):
    - Use `download_model` `action:"search"` to find a suitable checkpoint (e.g., query "SDXL" or "stable diffusion xl")
    - Find the direct `.safetensors` download URL from the model page (typically `https://huggingface.co/{repo}/resolve/main/{filename}`)
    - Use `download_model` with `target_subfolder: "checkpoints"` to download it
@@ -51,7 +51,7 @@ The user wants to generate an image using ComfyUI. Their prompt is provided as t
    node "${CLAUDE_PLUGIN_ROOT}/scripts/monitor-progress.mjs" <prompt_id>
    ```
 
-   This connects to ComfyUI's WebSocket and prints real-time step progress (e.g., `step 3/14 (21%)`), then reports completion with output filenames. You do NOT need to poll `queue` (action:"status") — the background task handles everything.
+   This connects to ComfyUI's WebSocket and prints real-time step progress (e.g., `step 3/14 (21%)`), then reports completion with output filenames. You do NOT need to poll `queue` (action:"status"); the background task handles it.
 
    Continue the conversation while waiting. Check the background task output when notified it completed.
 
@@ -61,7 +61,7 @@ The user wants to generate an image using ComfyUI. Their prompt is provided as t
 
 7. **Show the result.** Once the background monitor reports completion, use `get_image (action:"list_outputs")` (limit 1) to find the newest image. Read it with the Read tool to display it to the user.
 
-8. **Open the image.** Open the image so the user can see it immediately without navigating to the output folder. Use the Bash tool with the appropriate command for the OS:
+8. **Open the image.** Open the image so the user sees it right away without navigating to the output folder. Use the Bash tool with the appropriate command for the OS:
    - **macOS**: `open /path/to/image.png`
    - **Linux**: `xdg-open /path/to/image.png`
    - **Windows**: `start "" "/path/to/image.png"`
@@ -107,4 +107,4 @@ Steps:
 - If the user specifies dimensions, aspect ratio, steps, or other parameters, pass them through to `create_workflow`
 - For negative prompts, use a sensible default like "blurry, low quality, deformed" unless the user specifies one
 - If ComfyUI is not reachable, tell the user to check that it's running
-- After downloading a model, it's immediately available — no restart needed
+- A downloaded model is available right away; no restart needed

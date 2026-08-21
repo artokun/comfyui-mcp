@@ -10,11 +10,11 @@ The user wants to visualize a ComfyUI workflow as a mermaid flowchart diagram.
 ## Instructions
 
 1. **Get the workflow JSON.** The argument may be: $ARGUMENTS
-   - A file path to a workflow JSON file — read it with the Read tool
+   - A file path to a workflow JSON file; read it with the Read tool
    - Inline JSON pasted directly as the argument
-   - Nothing — ask the user to provide a workflow file path or paste the JSON
+   - Nothing, in which case ask the user to provide a workflow file path or paste the JSON
 
-2. **Validate the input.** The workflow must be in ComfyUI's API format: an object where keys are node IDs and values have `class_type` and `inputs`. If it looks like the web UI format (has `nodes` and `links` arrays), tell the user it needs to be in API format and suggest they export it via "Save (API Format)" in ComfyUI.
+2. **Validate the input.** The workflow must be in ComfyUI's API format, an object where keys are node IDs and values have `class_type` and `inputs`. If it looks like the web UI format (has `nodes` and `links` arrays), tell the user it needs to be in API format and suggest they export it via "Save (API Format)" in ComfyUI.
 
 3. **Visualize.** Use the `visualize_workflow` tool with:
    - `workflow`: the parsed workflow JSON

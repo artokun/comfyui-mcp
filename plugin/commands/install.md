@@ -14,9 +14,9 @@ The user wants to install a ComfyUI custom node pack from the registry or a GitH
    If no argument was provided, ask the user what node pack they want to install.
 
    Determine the source type:
-   - **GitHub URL**: starts with `https://github.com/` — use directly
-   - **Registry ID**: a slug like `comfyui-impact-pack` — search for it
-   - **Descriptive name**: like "Impact Pack" or "ControlNet" — search for it
+   - **GitHub URL**: starts with `https://github.com/`; use it directly
+   - **Registry ID**: a slug like `comfyui-impact-pack`; search for it
+   - **Descriptive name**: like "Impact Pack" or "ControlNet"; search for it
 
 2. **Find the pack.** If not a direct GitHub URL:
    - Call `search_custom_nodes` (`action: "search"`) with the argument as `query`
@@ -62,7 +62,7 @@ Steps:
 ## Notes
 
 - Always use the ComfyUI venv Python for dependency installation, never the system Python
-- Some packs have complex dependencies (e.g., GroundingDINO, SAM) — if pip install fails, show the error and suggest manual intervention
+- Some packs have complex dependencies (e.g., GroundingDINO, SAM). If pip install fails, show the error and suggest the user finish the install by hand
 - If `git clone` fails due to the directory already existing, offer `git pull` to update instead
-- Some packs require additional model downloads after installation — check the pack README for post-install steps
+- Some packs require additional model downloads after installation; check the pack README for post-install steps
 - After installation and restart, verify the nodes loaded by calling `create_workflow (action:"node_info")` with one of the pack's node names

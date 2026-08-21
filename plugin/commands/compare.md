@@ -5,7 +5,7 @@ argument-hint: "Two file paths or workflow names separated by 'vs' (e.g. workflo
 
 # /comfy-compare — Compare Two Workflows
 
-The user wants to see the differences between two ComfyUI workflows — what nodes were added, removed, or changed.
+The user wants to see which nodes were added, removed, or changed between two ComfyUI workflows.
 
 ## Instructions
 
@@ -14,10 +14,10 @@ The user wants to see the differences between two ComfyUI workflows — what nod
    If no argument was provided, ask the user for two workflow sources.
 
    Split the argument on `" vs "` or `" VS "` to get two sources. Each source can be:
-   - **File path**: a path to a workflow JSON file — read it with the Read tool
-   - **Saved workflow name**: a name from ComfyUI's library — load with `get_workflow`
-   - **`last`**: the most recent execution — load from `get_history(action="list")`
-   - **Prompt ID**: a specific execution ID — load from `get_history(action="list")` with that ID
+   - **File path**: a path to a workflow JSON file; read it with the Read tool
+   - **Saved workflow name**: a name from ComfyUI's library; load it with `get_workflow`
+   - **`last`**: the most recent execution; load it from `get_history(action="list")`
+   - **Prompt ID**: a specific execution ID; load it from `get_history(action="list")` with that ID
 
 2. **Load both workflows.** Read/fetch both workflow sources. Label them **Workflow A** (first) and **Workflow B** (second).
 
@@ -37,7 +37,7 @@ The user wants to see the differences between two ComfyUI workflows — what nod
    - **Added inputs**: input present in B but not in A
    - **Removed inputs**: input present in A but not in B
 
-5. **Present the diff.** Format the comparison clearly:
+5. **Present the diff.** Format the comparison in this shape:
 
    ```
    === Workflow Comparison ===
@@ -76,8 +76,8 @@ Steps:
 
 ## Notes
 
-- Node matching is done first by node ID, then by class_type as a fallback if IDs were renumbered
+- Match nodes first by node ID, then by class_type as a fallback if IDs were renumbered
 - If both workflows have completely different node IDs but similar structure, attempt to match by class_type and position in the graph
-- Connection changes are shown as "Node X slot Y" references for clarity
+- Show connection changes as "Node X slot Y" references
 - This is a structural diff, not a visual/pixel diff of outputs
 - For workflows from `get_history`, the workflow is embedded in the history response under the output data

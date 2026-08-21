@@ -22,11 +22,11 @@ The user wants to convert a ComfyUI workflow between the web UI format and the A
 3. **If converting UI format to API format:**
 
    a. Iterate over each node in the `"nodes"` array. Each node has:
-      - `id` (integer) — becomes the string key in API format
-      - `type` — becomes `class_type`
-      - `widgets_values` — ordered list of widget values
-      - `inputs` — array of input slots with `name`, `type`, and optional `link`
-      - `outputs` — array of output slots
+      - `id` (integer): becomes the string key in API format
+      - `type`: becomes `class_type`
+      - `widgets_values`: ordered list of widget values
+      - `inputs`: array of input slots with `name`, `type`, and optional `link`
+      - `outputs`: array of output slots
 
    b. For each node, call `create_workflow (action:"node_info")` with the node's `type` to get the input schema. This tells you:
       - The order and names of widget inputs (to map `widgets_values` correctly)
@@ -41,7 +41,7 @@ The user wants to convert a ComfyUI workflow between the web UI format and the A
 
 4. **If converting API format to UI format:**
 
-   Warn the user that API-to-UI conversion is lossy — layout positions, colors, groups, and notes will not be preserved. The converted workflow will load in ComfyUI but nodes will need to be manually arranged.
+   Warn the user that API-to-UI conversion is lossy. Layout positions, colors, groups, and notes are not preserved. The converted workflow will load in ComfyUI but the user will need to arrange the nodes by hand.
 
    a. For each API node, create a UI node object with:
       - `id`: integer version of the string key
@@ -72,7 +72,7 @@ Steps:
 ## Notes
 
 - UI-to-API conversion is the more common and reliable direction
-- Some widget values may be tricky to map if the node has dynamic inputs — flag these for the user
-- If `create_workflow (action:"node_info")` fails for a node type, it may be a custom node that isn't installed — warn the user
-- Large workflows (50+ nodes) may require many `create_workflow (action:"node_info")` calls; batch them efficiently
+- Some widget values may be tricky to map if the node has dynamic inputs; flag these for the user
+- If `create_workflow (action:"node_info")` fails for a node type, it may be a custom node that isn't installed; warn the user
+- Large workflows (50+ nodes) may require many `create_workflow (action:"node_info")` calls; batch them
 - The `"extra"` and `"config"` fields in UI format can be preserved but aren't needed for API format

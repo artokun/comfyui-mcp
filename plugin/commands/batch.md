@@ -5,7 +5,7 @@ argument-hint: "prompt, param:range (e.g. a cat, cfg:5-10, sampler:euler,dpmpp_2
 
 # /comfy-batch — Parameter Sweep Generation
 
-The user wants to generate multiple images while sweeping across different parameter values to compare results.
+The user wants to generate several images while sweeping parameter values, so they can compare the results.
 
 ## Instructions
 
@@ -18,20 +18,20 @@ The user wants to generate multiple images while sweeping across different param
    - **Parameter ranges**: identified by `param_name:values` syntax
 
 2. **Parse parameter range syntax.** Supported formats:
-   - `param:min-max` — integer range with step 1 (e.g., `cfg:5-10` produces 5, 6, 7, 8, 9, 10)
-   - `param:min-max:step` — range with explicit step (e.g., `cfg:4-12:2` produces 4, 6, 8, 10, 12)
-   - `param:val1,val2,val3` — explicit list (e.g., `sampler:euler,dpmpp_2m,dpmpp_sde`)
-   - `seed:N` — special: generate N different random seeds (e.g., `seed:4` produces 4 random seeds)
+   - `param:min-max`: integer range with step 1 (e.g., `cfg:5-10` produces 5, 6, 7, 8, 9, 10)
+   - `param:min-max:step`: range with explicit step (e.g., `cfg:4-12:2` produces 4, 6, 8, 10, 12)
+   - `param:val1,val2,val3`: explicit list (e.g., `sampler:euler,dpmpp_2m,dpmpp_sde`)
+   - `seed:N`: generate N different random seeds (e.g., `seed:4` produces 4 random seeds)
 
 3. **Supported sweep parameters:**
-   - `cfg` — CFG scale (float)
-   - `steps` — sampling steps (integer)
-   - `sampler` or `sampler_name` — sampler algorithm name
-   - `scheduler` — scheduler name
-   - `seed` — random seed count or explicit seeds
-   - `denoise` — denoising strength (float, 0.0-1.0)
-   - `width` — image width in pixels
-   - `height` — image height in pixels
+   - `cfg`: CFG scale (float)
+   - `steps`: sampling steps (integer)
+   - `sampler` or `sampler_name`: sampler algorithm name
+   - `scheduler`: scheduler name
+   - `seed`: random seed count or explicit seeds
+   - `denoise`: denoising strength (float, 0.0-1.0)
+   - `width`: image width in pixels
+   - `height`: image height in pixels
 
 4. **Calculate total combinations.** Multiply the count of values for each swept parameter. If the total exceeds 20, warn the user:
    - Show the total count and estimated time
@@ -54,7 +54,7 @@ The user wants to generate multiple images while sweeping across different param
    node "${CLAUDE_PLUGIN_ROOT}/scripts/monitor-progress.mjs" <prompt_id_1> <prompt_id_2> ... <prompt_id_N>
    ```
 
-   This monitors all jobs simultaneously via ComfyUI's WebSocket and reports step-by-step progress and completion for each. ComfyUI processes them sequentially from its queue. Continue the conversation while waiting.
+   This monitors all jobs at once via ComfyUI's WebSocket and reports step-by-step progress and completion for each. ComfyUI processes them sequentially from its queue. Continue the conversation while waiting.
 
    **Fallback**: If the script is unavailable, poll `queue` (action:"status") for each prompt_id until done.
 
@@ -85,6 +85,6 @@ Steps:
 
 - Always randomize seeds unless `seed` is explicitly specified in the sweep
 - Use sensible defaults for non-swept parameters (1024x1024 for SDXL, 20 steps, cfg 7)
-- Run workflows sequentially, not in parallel — ComfyUI processes one at a time anyway
-- If a single run fails, continue with the remaining combinations rather than stopping entirely
+- Run workflows sequentially, not in parallel. ComfyUI processes one at a time anyway
+- If a single run fails, continue with the remaining combinations rather than stopping
 - For large sweeps, suggest the user start with a smaller subset to test

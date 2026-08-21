@@ -12,7 +12,7 @@ The user wants to generate a Claude Code skill file for a ComfyUI custom node pa
 1. **Parse the argument.** The argument is: $ARGUMENTS
    - A ComfyUI Registry ID (e.g., `comfyui-impact-pack`)
    - A GitHub repository URL (e.g., `https://github.com/ltdrdata/ComfyUI-Impact-Pack`)
-   - Nothing — ask the user which node pack they want to generate a skill for
+   - Nothing, in which case ask the user which node pack they want to generate a skill for
 
 2. **Generate the skill.** Use the `list_packs` tool with:
    - `action`: `"generate_skill"`
