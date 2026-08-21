@@ -24,12 +24,15 @@
 // nothing: every stub returns whatever it was told to, so the one line that decides
 // whether a buffered answer is claimed was never executed.
 
+import { readFileSync } from "node:fs";
+
 import { beforeEach, describe, expect, it } from "vitest";
 
 import {
   appendReplyNote,
   buildPanelToolDefs,
   confirmAnswerRecoveryWindowMs,
+  forgetAbandonedConfirmCards,
   makePanelToolCtx,
   resetAbandonedConfirmCards,
   type ConfirmOptions,
@@ -215,6 +218,50 @@ describe("panel#1554 a late confirmation is claimed, not discarded", () => {
     const h = harness(TAB, { answerCards: true });
     expect(await h.ctx.confirm(QUESTION, HEADER, 500, RECOVER)).toBe("yes");
     expect(h.drained).toHaveLength(0);
+  });
+
+  it("a TAKEOVER of the route key drops it — the newcomer never answered that card", async () => {
+    // `wf:` keys recur: close the browser tab, open the same workflow elsewhere, and the
+    // newcomer inherits the address. #486 calls that a conversation boundary and retires
+    // the departing occupant's asks on it; a confirmation card is no different.
+    const h = harness();
+    const askId = await abandonOnce(h);
+    h.late.set(askId, "Yes, go ahead");
+
+    forgetAbandonedConfirmCards(TAB);
+
+    expect(await h.ctx.confirm(QUESTION, HEADER, 500, RECOVER)).toBe("timeout");
+    expect(h.cards).toHaveLength(2);
+    // The departed occupant's answer is left where it was — not served to the newcomer.
+    // (Asserted on the BUFFER, not on `drained`: confirm's own zero-width grace poll
+    // looks that id up once on the way to reporting the timeout, so a "never looked"
+    // assertion would be false for a reason that has nothing to do with this rule.)
+    expect(h.late.get(askId)).toBe("Yes, go ahead");
+  });
+
+  it("a takeover of ANOTHER key leaves this one alone", async () => {
+    const h = harness();
+    const askId = await abandonOnce(h);
+    h.late.set(askId, "Yes, go ahead");
+
+    forgetAbandonedConfirmCards(OTHER_TAB);
+
+    expect(await h.ctx.confirm(QUESTION, HEADER, 500, RECOVER)).toBe("yes");
+  });
+
+  it("WIRING: the takeover listener retires confirmations as well as asks", () => {
+    // The bridge takes ONE takeover listener (a setter, not an adder), so this fix had
+    // to join the existing call rather than add a second one — a second
+    // setTabTakenOverListener would have silently replaced #486's and un-shipped it.
+    // Behavioural tests above cannot see that; this is the shape of the call site.
+    const src = readFileSync("src/orchestrator/index.ts", "utf8");
+    const at = src.indexOf("bridge.setTabTakenOverListener(");
+    expect(at).toBeGreaterThan(-1);
+    const call = src.slice(at, at + 200);
+    expect(call).toContain("AskAnswers.closeAsks(tabId)");
+    expect(call).toContain("forgetAbandonedConfirmCards(tabId)");
+    // Exactly one listener is installed — the whole hazard.
+    expect(src.split("bridge.setTabTakenOverListener(").length - 1).toBe(1);
   });
 
   it("the staleness bound IS the bridge's buffer TTL, not a second copy of it", () => {

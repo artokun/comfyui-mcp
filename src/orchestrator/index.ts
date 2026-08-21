@@ -138,6 +138,7 @@ import {
   resolvePinTarget,
   secretSavedReply,
   setApplyMcpReload,
+  forgetAbandonedConfirmCards,
   RETRY_TOKEN_CMDS,
 } from "./panel-tools.js";
 import {
@@ -2863,7 +2864,14 @@ export async function runPanelOrchestrator(): Promise<void> {
   // newcomer never asked the previous occupant's questions, so its answers must
   // stop being recoverable and stop being pushed. closeAsks downgrades and
   // unsends; it never deletes, so those answers are still reported.
-  bridge.setTabTakenOverListener((tabId) => AskAnswers.closeAsks(tabId));
+  // panel#1554 — same boundary, same reason: a confirmation card the previous
+  // occupant abandoned must not be claimable by the newcomer. Both retirements ride
+  // THIS one listener because the bridge takes a single takeover listener, so a
+  // second setTabTakenOverListener call would silently replace the first.
+  bridge.setTabTakenOverListener((tabId) => {
+    AskAnswers.closeAsks(tabId);
+    forgetAbandonedConfirmCards(tabId);
+  });
   bridge.setTabGoneListener((tabId, incarnation) => AskAnswers.retireDebt(tabId, incarnation));
   // #694 — the bridge retains a late mutation only for commands that can come
   // back as a retry token, which is the retry-token layer's own set. Installed

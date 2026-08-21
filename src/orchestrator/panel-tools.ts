@@ -9354,6 +9354,24 @@ export function takeRecoveredConfirmAnswer(
   };
 }
 
+/**
+ * A DIFFERENT browser tab has taken this recurring route key over (#486’s takeover
+ * event) — drop anything this key was holding.
+ *
+ * The key is the route key, not the browser tab, and `wf:` keys recur: close the tab,
+ * open the same workflow somewhere else, and the newcomer inherits the address. It did
+ * not answer the previous occupant’s card, so it must not inherit that answer either.
+ * A RECONNECT is deliberately not this event — the same browser tab returns under the
+ * same incarnation and no takeover fires — which is what keeps the reporter’s case
+ * (“do not lose it across agent/panel reconnect”) working.
+ */
+export function forgetAbandonedConfirmCards(tabId: string): void {
+  const prefix = `${tabId}\u0000`;
+  for (const key of abandonedConfirmCards.keys()) {
+    if (key.startsWith(prefix)) abandonedConfirmCards.delete(key);
+  }
+}
+
 /** Test seam: forget every remembered abandoned card. */
 export function resetAbandonedConfirmCards(): void {
   abandonedConfirmCards.clear();
