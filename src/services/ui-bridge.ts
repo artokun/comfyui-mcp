@@ -30,6 +30,10 @@ import { primePanelBase, verifiedPanelDiskVersion } from "./panel-workspace.js";
 import { compareSemver, detectInstallMode } from "./self-update.js";
 import { SHARED_SESSION_SCOPE, isScopeAddress } from "./session-scope.js";
 import type { ScopeRepinOutcome } from "../orchestrator/turn-origins.js";
+import {
+  QUEUE_BUSY_READ_TOOLS,
+  panelToolForGraphCmd,
+} from "./panel-graph-cmd-tools.js";
 
 export const DEFAULT_BRIDGE_PORT = 9101;
 
@@ -4742,25 +4746,52 @@ export class UiBridge {
           `Try panel_list_workflows — the panel exempts that read from this fence (it is the ` +
           `recovery probe), though a build predating the exemption fences it too. Non-graph ` +
           `tools are unaffected.`;
+        // #1935 — name TOOLS, not the bridge commands they dispatch. An agent
+        // that follows this recovery advice calls what it is told to call, and
+        // none of graph_outline / graph_query / graph_get_state is registered.
+        // The mapping is not a mechanical `panel_` prefix (graph_query →
+        // panel_query_graph), so names come from panelToolForGraphCmd /
+        // QUEUE_BUSY_READ_TOOLS rather than a third hand-written list.
+        // graph_get_state is an internal pre-0.8.2 fallback with no callable
+        // tool — the reverse index omits it, so it drops out of the execute
+        // list rather than being advertised.
+        const readTools = QUEUE_BUSY_READ_TOOLS.join(" / ");
+        const viewTools = (
+          [
+            "graph_outline",
+            "graph_query",
+            "graph_get_state",
+            "graph_find_nodes",
+            "graph_list_subgraphs",
+            "graph_screenshot",
+            "graph_canvas",
+          ] as const
+        )
+          .map((c) => panelToolForGraphCmd(c))
+          .filter((n): n is string => n !== undefined)
+          .join(", ");
         const readsNote =
           readsVerdict === "refused"
             ? `GRAPH READS ARE REFUSED TOO, for this same missing stamp: this tab's panel ` +
               `enforces the per-command fence and refuses an UNSTAMPED command rather than ` +
-              `fail open, so graph_outline / graph_query answer "workflow instance mismatch: ` +
+              `fail open, so ${readTools} answer "workflow instance mismatch: ` +
               `this command carries no workflow-instance stamp" as well. ${PROBE}`
             : readsVerdict === "unknown"
               ? `WHETHER GRAPH READS STILL WORK IS NOT KNOWN FROM HERE, and is not claimed: a ` +
                 `read carries this session's stamp (${trustedStamp}), and this tab's panel runs ` +
                 `it only while that stamp still names the ACTIVE canvas — a comparison only the ` +
                 `panel can make. If the workflow was switched or replaced after this session ` +
-                `bound to it, graph_outline / graph_query are refused with "workflow instance ` +
+                `bound to it, ${readTools} are refused with "workflow instance ` +
                 `mismatch" as well; if it was not, they work. ${PROBE}`
-              : `Reads and view-only commands still work (graph_outline, graph_query, ` +
-                `graph_get_state, graph_find_nodes, graph_list_subgraphs, graph_screenshot, ` +
-                `graph_canvas).`;
+              : `Reads and view-only commands still work (${viewTools}).`;
+        // Same defect on the SUBJECT: `cmd.cmd` is the bridge command the tool
+        // dispatched (observed: panel_add_node arrives here as graph_add_node).
+        // Ambiguous commands fall back to a subject naming no tool at all.
+        const subject =
+          panelToolForGraphCmd(typeof cmd.cmd === "string" ? cmd.cmd : "") ?? "This command";
         const refusal = markDispatched(
           new Error(
-            `"${cmd.cmd}" cannot be safely targeted to the active workflow: ${why}. ${readsNote}`,
+            `"${subject}" cannot be safely targeted to the active workflow: ${why}. ${readsNote}`,
           ),
           false,
         );

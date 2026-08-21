@@ -40,7 +40,9 @@
 import { createServer } from "node:net";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
+import { buildPanelToolDefs } from "../../orchestrator/panel-tools.js";
 import { UiBridge } from "../../services/ui-bridge.js";
+import { panelToolForGraphCmd } from "../../services/panel-graph-cmd-tools.js";
 
 let bridge: UiBridge;
 const sockets: WebSocket[] = [];
@@ -326,5 +328,81 @@ describe("the #1519 correction moves no fence", () => {
     const frames = panel.received.filter((f) => f.cmd === "graph_outline");
     expect(frames.length).toBe(1);
     expect(frames[0]).not.toHaveProperty("workflow_uuid");
+  });
+});
+
+/** Bare `graph_*` bridge commands — `panel_graph_outline` must not trip this. */
+const BARE_GRAPH_CMD = /(?<![a-z_])graph_[a-z_]+/;
+
+function assertEveryPanelNameIsRegistered(msg: string): void {
+  const registered = new Set(buildPanelToolDefs().map((d) => d.name));
+  // Read from the MESSAGE, not from the constant the string was built from.
+  const mentioned = msg.match(/panel_[a-z0-9_]+/g) ?? [];
+  expect(mentioned.length).toBeGreaterThan(0);
+  for (const name of new Set(mentioned)) {
+    // `panel_action` is a parameter key of install_comfyui, not a tool.
+    if (name === "panel_action") continue;
+    expect([name, registered.has(name)]).toEqual([name, true]);
+  }
+  expect(msg).not.toMatch(BARE_GRAPH_CMD);
+}
+
+describe("#1935 — the instance-mismatch write refusal names TOOLS, not bridge commands", () => {
+  it("NO STAMP (refused): names registered reads, and the TOOL that was called", async () => {
+    await connectPanel("tmp:stampless-names", FENCING, LIVE);
+    const msg = await failureOf("graph_add_node");
+
+    expect(msg).toMatch(REFUSED_CLAIM);
+    expect(msg).toMatch(/"panel_add_node" cannot be safely targeted/);
+    expect(msg).not.toMatch(/"graph_add_node"/);
+    // Anchored on both sides so `graph_outline` and `panel_graph_outline` cannot
+    // both satisfy it — the #1933 lesson.
+    expect(msg).toMatch(/panel_graph_outline \/ panel_query_graph \/ panel_get_errors/);
+    expect(msg).not.toMatch(/\(graph_outline/);
+    assertEveryPanelNameIsRegistered(msg);
+  });
+
+  it("STALE STAMP (unknown): names registered reads, not graph_outline / graph_query", async () => {
+    await connectPanel("tmp:stale-names", FENCING_NO_AT_WRITE, LIVE);
+    bridge.setTabWorkflowUuidResolver(() => STALE);
+    const msg = await failureOf("graph_add_node");
+
+    expect(msg).toMatch(UNKNOWN_CLAIM);
+    expect(msg).toMatch(/"panel_add_node" cannot be safely targeted/);
+    expect(msg).toMatch(/panel_graph_outline \/ panel_query_graph \/ panel_get_errors/);
+    expect(msg).not.toMatch(/\(graph_outline/);
+    assertEveryPanelNameIsRegistered(msg);
+  });
+
+  it("NO FENCE (execute): names registered view tools and omits graph_get_state", async () => {
+    await connectPanel("tmp:oldpanel-names", {});
+    bridge.setTabWorkflowUuidResolver(() => STALE);
+    const msg = await failureOf("graph_add_node");
+
+    expect(msg).toMatch(OLD_CLAIM);
+    expect(msg).toMatch(/"panel_add_node" cannot be safely targeted/);
+    expect(msg).toMatch(/panel_graph_outline/);
+    expect(msg).toMatch(/panel_query_graph/);
+    expect(msg).toMatch(/panel_find_nodes/);
+    expect(msg).toMatch(/panel_list_subgraphs/);
+    expect(msg).toMatch(/panel_screenshot/);
+    expect(msg).toMatch(/panel_canvas/);
+    // Internal pre-0.8.2 fallback — no callable tool. Advertising it is the
+    // same defect as advertising graph_outline.
+    expect(msg).not.toMatch(/graph_get_state/);
+    expect(msg).not.toMatch(/panel_graph_query/);
+    assertEveryPanelNameIsRegistered(msg);
+  });
+
+  it("the reverse index resolves the advertised reads and declines graph_get_state", () => {
+    expect(panelToolForGraphCmd("graph_outline")).toBe("panel_graph_outline");
+    expect(panelToolForGraphCmd("graph_query")).toBe("panel_query_graph");
+    expect(panelToolForGraphCmd("graph_get_errors")).toBe("panel_get_errors");
+    expect(panelToolForGraphCmd("graph_find_nodes")).toBe("panel_find_nodes");
+    expect(panelToolForGraphCmd("graph_list_subgraphs")).toBe("panel_list_subgraphs");
+    expect(panelToolForGraphCmd("graph_screenshot")).toBe("panel_screenshot");
+    expect(panelToolForGraphCmd("graph_canvas")).toBe("panel_canvas");
+    expect(panelToolForGraphCmd("graph_get_state")).toBeUndefined();
+    expect(panelToolForGraphCmd("graph_add_node")).toBe("panel_add_node");
   });
 });

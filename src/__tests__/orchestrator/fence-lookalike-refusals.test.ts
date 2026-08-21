@@ -58,7 +58,7 @@ const capabilityRefusal = (): Error =>
   markCapabilityRefusal(
     markDispatched(
       new Error(
-        `"workflow_save" cannot be safely targeted to the active workflow: panel tab ` +
+        `"panel_save_workflow" cannot be safely targeted to the active workflow: panel tab ` +
           `${TAB} does not recheck workflow targeting at the graph write boundary after ` +
           `asynchronous work (detected panel 0.11.40; a graph WRITE needs panel 0.11.62+, ` +
           `the first build that rechecks the fence after an await). Update the panel and ` +
@@ -66,7 +66,8 @@ const capabilityRefusal = (): Error =>
           `HERE, and is not claimed: a read carries this session's stamp (${STAMP}), and ` +
           `this tab's panel runs it only while that stamp still names the ACTIVE canvas — ` +
           `a comparison only the panel can make. If the workflow was switched or replaced ` +
-          `after this session bound to it, graph_outline / graph_query are refused with ` +
+          `after this session bound to it, panel_graph_outline / panel_query_graph / ` +
+          `panel_get_errors are refused with ` +
           `"workflow instance mismatch" as well; if it was not, they work. Try ` +
           `panel_list_workflows — the panel exempts that read from this fence (it is the ` +
           `recovery probe), though a build predating the exemption fences it too. ` +
@@ -82,11 +83,11 @@ const capabilityRefusal = (): Error =>
 const noTrustedIdentityRefusal = (): Error =>
   markDispatched(
     new Error(
-      `"workflow_save" cannot be safely targeted to the active workflow: this workflow has ` +
+      `"panel_save_workflow" cannot be safely targeted to the active workflow: this workflow has ` +
         `no trusted identity for the panel to fence the command against. GRAPH READS ARE ` +
         `REFUSED TOO, for this same missing stamp: this tab's panel enforces the ` +
         `per-command fence and refuses an UNSTAMPED command rather than fail open, so ` +
-        `graph_outline / graph_query answer "workflow instance mismatch: this command ` +
+        `panel_graph_outline / panel_query_graph / panel_get_errors answer "workflow instance mismatch: this command ` +
         `carries no workflow-instance stamp" as well. Try panel_list_workflows — the panel ` +
         `exempts that read from this fence (it is the recovery probe), though a build ` +
         `predating the exemption fences it too. Non-graph tools are unaffected.`,
