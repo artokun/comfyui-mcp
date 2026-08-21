@@ -21,6 +21,7 @@ import {
   strictPanelSchema,
   type PanelToolCtx,
 } from "../../orchestrator/panel-tools.js";
+import { normalizeShowMediaItem } from "../../orchestrator/panel-arg-aliases.js";
 import { __resetTodoState, todoFor } from "../../orchestrator/todo-state.js";
 import { QUEUE_BUSY_READ_TOOLS } from "../../services/panel-graph-cmd-tools.js";
 import { GRAPH_CMD_EFFECT } from "../../services/ui-bridge.js";
@@ -323,29 +324,34 @@ describe("#1968 panel_show_media: the output ref is accepted where the docs put 
   // schema advertises it, so dropping it would be a parameter that is accepted and
   // does nothing — and the caller would get an oversized-file refusal for something
   // they believed they had handled.
-  it("folds a flat `stage` into a nested path source instead of dropping it", async () => {
+  // Asserted on the WIRE, not on the accepted args: the earlier version of this
+  // test checked only that the call succeeded, and SURVIVED deleting the fold —
+  // a ref missing its subfolder still resolves and still reaches the panel, it
+  // just points somewhere else.
+  it("folds flat modifiers into a nested source, all the way to the wire", async () => {
     const h = harness();
     const res = await callTool(
       "panel_show_media",
-      { items: [{ source: { path: "/tmp/huge.png" }, stage: true }] },
+      { items: [{ source: { filename: "a.png" }, subfolder: "runs", type: "temp" }] },
       h.ctx,
     );
-    // The path does not exist, so this refuses on the file — but it must refuse
-    // having SEEN the stage flag, not having silently discarded it.
-    expect(res.isError).toBe(true);
-    expect(res.content.map((c) => c.text).join(" ")).toContain("/tmp/huge.png");
+    expect(res.isError).toBeFalsy();
+    const sent = h.sent.find((c) => c.cmd === "show_media")!;
+    expect((sent.items as Cmd[])[0]).toMatchObject({
+      viewRef: { filename: "a.png", subfolder: "runs", type: "temp" },
+    });
+  });
 
-    // The same fold on the /view-ref member: modifiers supplied flat, ref nested,
-    // and the item still reaches the panel with a complete source.
-    const h2 = harness();
-    const res2 = await callTool(
-      "panel_show_media",
-      { items: [{ source: { filename: "a.png" }, subfolder: "runs", type: "temp" }] },
-      h2.ctx,
-    );
-    expect(res2.isError).toBeFalsy();
-    const sent = h2.sent.find((c) => c.cmd === "show_media");
-    expect(sent, "a fully-specified ref must still reach the panel").toBeDefined();
+  // `stage` is the same fold on the path member. It is the one that matters:
+  // it opts into a REAL disk write, so a caller who sets it and is ignored gets
+  // an oversized-file refusal for something they believed they had handled.
+  // Asserted on the normalizer directly — reaching the staging branch on the wire
+  // needs a real over-20MB file on disk, and a test that writes one to prove a
+  // key was copied is a worse trade than saying plainly where this is checked.
+  it("folds a flat `stage` onto the path member", () => {
+    const out = normalizeShowMediaItem({ source: { path: "/tmp/huge.png" }, stage: true }, 0);
+    expect(out.ok).toBe(true);
+    expect(out.ok && out.value.source).toEqual({ path: "/tmp/huge.png", stage: true });
   });
 
   it("REFUSES a modifier set both inside source and at item level", async () => {
