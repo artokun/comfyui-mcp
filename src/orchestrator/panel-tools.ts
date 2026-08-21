@@ -12731,92 +12731,6 @@ function projectFindNodesReply(res: ToolResult, requested: unknown): ToolResult 
 }
 
 /**
- * #1968 — apply `panel_create_subgraph`'s `title` to the node the conversion just
- * created, and NEVER claim it was applied when it was not.
- *
- * The panel's `graph_create_subgraph({ node_ids })` destructures exactly one key
- * and has no `title` parameter at all, so forwarding one would be accepted on the
- * wire and dropped on arrival — a schema that says ACCEPT while nothing DOES it,
- * which is worse than today's honest rejection. The title is therefore applied as
- * a SECOND command against the id the first one returned.
- *
- * This is the SAME shape `panel_create_group` already ships —
- * `includeRequestedCreateGroupMembers` follows a `graph_create_group` with a
- * `graph_edit_group` through the same `ctx.call` — so it inherits that pattern's
- * properties rather than introducing new ones. Including the uncomfortable one,
- * stated here because it is not provably absent: each dispatch is stamped with
- * `ctx.workflowUuid` resolved AT DISPATCH, so if the active workflow changed
- * between the two commands the rename carries the NEW workflow's stamp, the
- * panel's fence agrees with it, and it would retitle whatever node holds that id
- * on the new canvas. The window is the round trip between them and the exposure
- * is identical to the shipped create_group pair, so it is not widened here — but
- * it is not closed here either, and a reader should not infer that it is.
- *
- * That makes two mutations where the caller wrote one, so the failure mode has to
- * be stated rather than smoothed over: the subgraph is created FIRST and exists
- * whatever happens next. If the rename does not land, this returns the creation's
- * own successful reply — unaltered, with its node id, because that id is the thing
- * the caller needs — plus a note saying the node is on the canvas under ComfyUI's
- * default name and how to finish. A caller told "failed" would look for a subgraph
- * that is really there; a caller told "created and named" would trust a name that
- * is not. Neither is available, so it says exactly what happened.
- */
-async function titleCreatedSubgraph(
-  created: ToolResult,
-  title: string,
-  ctx: PanelToolCtx,
-): Promise<ToolResult> {
-  // Nothing landed — there is no node to name, and the creation's own error is
-  // the whole story. Adding a title note here would bury it.
-  if (created.isError) return created;
-
-  const payload = parseToolResultJson(created);
-  const subgraph = payload?.subgraph;
-  const nodeId =
-    subgraph && typeof subgraph === "object"
-      ? (subgraph as Record<string, unknown>).node_id
-      : undefined;
-  if (typeof nodeId !== "number" && typeof nodeId !== "string") {
-    // A reply this process cannot read is not a reply it may act on: renaming a
-    // guessed id would retitle a node the caller never mentioned.
-    return appendReplyNote(
-      created,
-      `NOTE — \`title\` was NOT applied: the subgraph was created, but this reply carries no ` +
-        `subgraph.node_id to rename, so there is no id to act on without guessing one. The node ` +
-        `is on the canvas under ComfyUI's default name. Read it back with panel_find_nodes ` +
-        `({is_subgraph:true}) and set the name with panel_edit_node({node_id, title:${JSON.stringify(title)}}).`,
-    );
-  }
-
-  const renamed = await ctx.call({ cmd: "graph_set_title", node_id: nodeId, title }, 15000);
-  if (renamed.isError) {
-    return appendReplyNote(
-      created,
-      `NOTE — the subgraph WAS created (node ${nodeId}) but \`title\` was NOT applied: the rename ` +
-        `that follows the conversion failed with — ${textOfToolResult(renamed)}. The node is on the ` +
-        `canvas under ComfyUI's default name; nothing was rolled back. Retry just the rename with ` +
-        `panel_edit_node({node_id:${JSON.stringify(nodeId)}, title:${JSON.stringify(title)}}).`,
-    );
-  }
-
-  // Applied. Report the name in the creation payload so the caller reads back the
-  // title it asked for rather than the default the conversion briefly used.
-  if (!payload) return created;
-  const idx = created.content.findIndex((c) => c.type === "text");
-  if (idx < 0) return created;
-  const merged = {
-    ...payload,
-    subgraph: { ...(subgraph as Record<string, unknown>), title },
-  };
-  return {
-    ...created,
-    content: created.content.map((c, i) =>
-      i === idx && c.type === "text" ? { ...c, text: JSON.stringify(merged, null, 2) } : c,
-    ),
-  };
-}
-
-/**
  * #1968 — one checklist schema, shared by `items` and its alias `todos`.
  *
  * `text` is OPTIONAL here and required by `normalizeTodoItemKeys` in the handler,
@@ -16787,24 +16701,24 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
     ),
     def(
       "panel_create_subgraph",
-      "Group the given nodes into a SUBGRAPH (ComfyUI 'Convert to Subgraph') on the user's canvas — collapses them into one subgraph node. Pass `title` to name it; without one ComfyUI names it 'New Subgraph'. Returns the new subgraph node id. Undoable with Ctrl+Z. To wrap an existing GROUP, prefer panel_subgraph_group (you don't have to list the node_ids yourself).",
-      {
-        node_ids: z.array(nodeId()).describe("Node ids to group into a subgraph."),
-        // #1968 — the first guess, and a well-founded one: the sibling
-        // panel_create_group takes `title`, and the thing being created gets a
-        // name either way. "New Subgraph" is strictly worse than what the caller
-        // asked for.
-        title: z
-          .string()
-          .min(1)
-          .optional()
-          .describe("Name for the new subgraph node. Defaults to ComfyUI's 'New Subgraph'."),
-      },
-      async (args: A, ctx) => {
-        const created = await ctx.call({ cmd: "graph_create_subgraph", node_ids: args.node_ids }, 15000);
-        if (typeof args.title !== "string") return created;
-        return titleCreatedSubgraph(created, args.title, ctx);
-      },
+      "Group the given nodes into a SUBGRAPH (ComfyUI 'Convert to Subgraph') on the user's canvas — collapses them into one subgraph node. Returns the new subgraph node id; rename it with panel_edit_node({node_id, title}). Undoable with Ctrl+Z. To wrap an existing GROUP, prefer panel_subgraph_group (you don't have to list the node_ids yourself).",
+      // #1968 asked for a `title` here, and the argument for it is good: the
+      // sibling panel_create_group takes one, and the node gets a name either
+      // way. It is NOT built, on purpose — see the note in the issue thread.
+      //
+      // The panel's graph_create_subgraph destructures only `{ node_ids }`, so
+      // honouring a title means a SECOND command (graph_set_title) against the id
+      // the first returned. That is a new capability rather than a rejected-valid-
+      // call fix, which the feature freeze parks; and it carries a window this
+      // side cannot close — each dispatch is stamped with ctx.workflowUuid
+      // resolved AT DISPATCH, so a workflow switch between the two commands would
+      // let the rename land on whatever node holds that id on the NEW canvas.
+      //
+      // The rest of #1968 is aliasing keys that already meant something, which
+      // adds no capability and is why it ships here. Naming a subgraph is one
+      // extra call away and always was.
+      { node_ids: z.array(nodeId()).describe("Node ids to group into a subgraph.") },
+      async (args: A, ctx) => ctx.call({ cmd: "graph_create_subgraph", node_ids: args.node_ids }, 15000),
     ),
     def(
       "panel_subgraph_group",

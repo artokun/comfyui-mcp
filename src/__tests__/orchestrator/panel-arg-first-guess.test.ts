@@ -409,88 +409,35 @@ describe("#1968 panel_show_media: the output ref is accepted where the docs put 
 });
 
 // ---------------------------------------------------------------------------
-// panel_create_subgraph — `title` accepted AND applied
+// panel_create_subgraph — `title` is PARKED, not built
 // ---------------------------------------------------------------------------
+//
+// #1968 asked for it and the argument is good: the sibling panel_create_group
+// takes `title`, and the node is named either way. It is deliberately absent.
+//
+// The panel's graph_create_subgraph destructures only `{ node_ids }`, so
+// honouring a title means a SECOND command (graph_set_title) against the id the
+// first returned. That is a new CAPABILITY rather than a rejected-valid-call
+// fix — which the feature freeze parks — and it carries a window this side
+// cannot close: each dispatch is stamped with ctx.workflowUuid resolved AT
+// DISPATCH, so a workflow switch between the two commands would let the rename
+// land on whatever node holds that id on the new canvas.
+//
+// Pinned so the parking is visible rather than looking like an oversight: the
+// tool must NOT advertise `title`, because advertising it and dropping it is the
+// exact "schema says ACCEPT, not DO" defect this file exists to remove.
 
-describe("#1968 panel_create_subgraph: `title` is accepted and actually applied", () => {
-  const created = { subgraph: { node_id: 31, name: "New Subgraph", from_nodes: [1, 2] } };
-
-  // The whole point. The panel's graph_create_subgraph destructures only
-  // { node_ids }, so a forwarded title would be dropped on arrival — accepted on
-  // the wire, done by nobody. It is applied as a second command instead.
-  it("issues graph_set_title against the id the conversion returned", async () => {
-    const h = harness({ graph_create_subgraph: created });
-    const res = await callTool(
-      "panel_create_subgraph",
-      { node_ids: [1, 2], title: "Upscale stage" },
-      h.ctx,
-    );
-    expect(res.isError).toBeFalsy();
-    expect(h.sent.map((c) => c.cmd)).toEqual(["graph_create_subgraph", "graph_set_title"]);
-    expect(h.sent[1]).toMatchObject({ node_id: 31, title: "Upscale stage" });
-    // …and the caller reads back the name it asked for, not the default.
-    expect(payloadOf(res)).toMatchObject({ subgraph: { node_id: 31, title: "Upscale stage" } });
+describe("#1968 panel_create_subgraph: `title` is parked, and not advertised", () => {
+  it("does not accept a `title` it would have to drop", () => {
+    expect(accepts("panel_create_subgraph", { node_ids: [1], title: "X" })).toBe(false);
+    expect(accepts("panel_create_subgraph", { node_ids: [1] })).toBe(true);
   });
 
-  // A title must never become a second mutation nobody asked for.
-  it("sends NO rename when no title was given", async () => {
-    const h = harness({ graph_create_subgraph: created });
+  it("sends exactly one command, with node_ids only", async () => {
+    const h = harness({ graph_create_subgraph: { subgraph: { node_id: 31 } } });
     await callTool("panel_create_subgraph", { node_ids: [1, 2] }, h.ctx);
     expect(h.sent.map((c) => c.cmd)).toEqual(["graph_create_subgraph"]);
-  });
-
-  it("does not forward `title` on the creation command itself", async () => {
-    const h = harness({ graph_create_subgraph: created });
-    await callTool("panel_create_subgraph", { node_ids: [1], title: "X" }, h.ctx);
     expect(h.sent[0].title).toBeUndefined();
-  });
-
-  // Two mutations where the caller wrote one. The subgraph exists whatever
-  // happens next, so a failed rename may report neither "created and named" nor
-  // "failed" — both would send the caller looking for the wrong thing.
-  it("reports the subgraph as CREATED but UNNAMED when the rename fails", async () => {
-    const h = harness({
-      graph_create_subgraph: created,
-      graph_set_title: () => {
-        throw new Error("workflow instance mismatch");
-      },
-    });
-    const res = await callTool(
-      "panel_create_subgraph",
-      { node_ids: [1, 2], title: "Upscale stage" },
-      h.ctx,
-    );
-    // NOT an error: the thing the caller asked to be created is on the canvas.
-    expect(res.isError).toBeFalsy();
-    const text = res.content.map((c) => c.text).join(" ");
-    expect(text).toContain("NOT applied");
-    expect(text).toContain("31");
-    // The creation payload survives intact — the node id is what the caller needs.
-    expect(payloadOf(res)).toMatchObject({ subgraph: { node_id: 31 } });
-    // …and it must NOT claim the title landed.
-    expect(payloadOf(res).subgraph).not.toMatchObject({ title: "Upscale stage" });
-  });
-
-  // Renaming a guessed id would retitle a node the caller never mentioned.
-  it("does not rename anything when the reply carries no node_id", async () => {
-    const h = harness({ graph_create_subgraph: { subgraph: { name: "New Subgraph" } } });
-    const res = await callTool("panel_create_subgraph", { node_ids: [1], title: "X" }, h.ctx);
-    expect(h.sent.map((c) => c.cmd)).toEqual(["graph_create_subgraph"]);
-    expect(res.content.map((c) => c.text).join(" ")).toContain("NOT applied");
-  });
-
-  // Nothing landed — there is no node to name, and the creation's own error is
-  // the whole story.
-  it("passes a failed creation straight through, with no title note", async () => {
-    const h = harness({
-      graph_create_subgraph: () => {
-        throw new Error("convertToSubgraph unavailable on this frontend");
-      },
-    });
-    const res = await callTool("panel_create_subgraph", { node_ids: [1], title: "X" }, h.ctx);
-    expect(res.isError).toBe(true);
-    expect(h.sent.map((c) => c.cmd)).toEqual(["graph_create_subgraph"]);
-    expect(res.content.map((c) => c.text).join(" ")).not.toContain("NOT applied");
   });
 });
 
