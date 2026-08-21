@@ -309,13 +309,6 @@ export function evaluatePanelSync(
   };
 }
 
-/**
- * The LATEST comparison, kept away from the floor one on purpose.
- *
- * Every "can't tell" resolves to `null` — the module's own rule. `false` here
- * is a claim ("I compared you against the newest published panel and you are on
- * it") and may only be returned when that comparison actually happened.
- */
 interface LatestComparison {
   latestPublishedVersion?: string;
   behindLatest: boolean | null;
@@ -323,6 +316,13 @@ interface LatestComparison {
   unknownBecause?: "no-latest" | "untrusted-install" | "incomparable" | "not-applicable";
 }
 
+/**
+ * The LATEST comparison, kept away from the floor one on purpose.
+ *
+ * Every "can't tell" resolves to `null` — the module's own rule. `false` here
+ * is a claim ("I compared you against the newest published panel and you are on
+ * it") and may only be returned when that comparison actually happened.
+ */
 function compareAgainstLatest(
   status: PanelStatus,
   latestVersion: string | null | undefined,
