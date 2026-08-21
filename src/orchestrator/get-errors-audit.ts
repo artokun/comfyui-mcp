@@ -56,7 +56,6 @@ export type GetErrorsCallCtx = Pick<PanelToolCtx, "call">;
  */
 const RETRYABLE_UNCHECKED_RE =
   /ran out of its shared server-call budget|lookup cap was reached/i;
-const UNENUMERABLE_VALUE_RE = /[\\/]|\s\[(input|output|temp)\]\s*$/i;
 const FILE_LIKE = /\.[A-Za-z0-9_]{2,12}$/;
 
 /**
@@ -309,7 +308,11 @@ function judgeLeftoverCombos(
       const options = comboOptions(spec);
       if (!options) continue;
       if (typeof value !== "string" || value === "") continue;
-      if (isUploadCombo(spec) && UNENUMERABLE_VALUE_RE.test(value)) {
+      // Upload inputs can accept a freshly uploaded root-level filename that
+      // never appears in /object_info's enumerated options. This pass has no
+      // /view probe, so every non-member on an upload combo is uncheckable —
+      // not a missing asset verdict.
+      if (isUploadCombo(spec) && !options.includes(value)) {
         stillUnchecked.push({
           id: node.id,
           type: className,

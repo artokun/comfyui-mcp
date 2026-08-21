@@ -259,10 +259,11 @@ describe("panel_get_errors completeness parity with the panel's scanner (#1973)"
 
   // ComfyUI serialises a V3 node's combo as ["COMBO", {…}] (add_to_dict_v1 writes
   // (io_type, as_dict)), and UploadType.model becomes `file_upload`
-  // (comfy_api/latest/_io.py:44). An [output]-annotated value resolves through
-  // get_annotated_filepath against a DIFFERENT root, so it can never be a member
-  // of the input-dir list — #1357. Calling that a missing asset is the exact
-  // "looked it up and it is not there" collapse the panel refuses to make.
+  // (comfy_api/latest/_io.py:44). A freshly uploaded root-level filename is not
+  // guaranteed to be in the /object_info list; an [output]-annotated value also
+  // resolves through get_annotated_filepath against a DIFFERENT root. Calling
+  // either a missing asset is the exact "looked it up and it is not there"
+  // collapse the panel refuses to make.
   it("does not manufacture a missing_asset on an upload input it has no probe for", async () => {
     const panel = {
       ...budgetExhaustedReply({ extraUnchecked: 0 }),
@@ -273,7 +274,7 @@ describe("panel_get_errors completeness parity with the panel's scanner (#1973)"
       if (cmd.cmd === "graph_query") {
         return {
           matched: 1, shown: 1,
-          text: JSON.stringify({ id: 9, type: "Load3D", widgets: { model_file: "hero.glb [output]" } }),
+          text: JSON.stringify({ id: 9, type: "Load3D", widgets: { model_file: "hero.glb" } }),
         };
       }
       if (cmd.cmd === "graph_get_object_info") {
