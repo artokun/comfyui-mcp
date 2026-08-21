@@ -16418,11 +16418,12 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
             recoverAbandonedAnswer: true,
             onRecoveredAnswer: ({ outcome, ageMs }) =>
               note(
-                `[NOTE] This is NOT a fresh confirmation. You (the user) answered ` +
-                  `"${outcome === "yes" ? "Yes, go ahead" : "No, cancel"}" on the restart card ` +
-                  `from an earlier attempt — that answer arrived after I had stopped waiting for ` +
-                  `it, about ${Math.round(ageMs / 1000)}s ago, so no new card was shown and I ` +
-                  `acted on it now. If it no longer reflects what you want, say so.`,
+                `[NOTE] NO NEW CONFIRMATION CARD WAS SHOWN for this call. The user picked ` +
+                  `"${outcome === "yes" ? "Yes, go ahead" : "No, cancel"}" on the restart card from ` +
+                  `an EARLIER attempt, about ${Math.round(ageMs / 1000)}s ago; that answer landed ` +
+                  `after this tool had stopped waiting for it, so it was claimed now instead of ` +
+                  `being discarded. Tell the user that is what you acted on, and check with them ` +
+                  `if anything has changed since.`,
               ),
           },
         );

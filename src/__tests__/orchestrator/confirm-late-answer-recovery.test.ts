@@ -312,7 +312,7 @@ describe("panel#1554 the recovered decision is disclosed, not slipped in", () =>
 
     const out = textOf(await restartDef().handler({} as never, h.ctx));
 
-    expect(out).toContain("This is NOT a fresh confirmation");
+    expect(out).toContain("NO NEW CONFIRMATION CARD WAS SHOWN");
     expect(out).toContain("Yes, go ahead");
     expect(out).toContain("132s ago");
   });
@@ -324,7 +324,7 @@ describe("panel#1554 the recovered decision is disclosed, not slipped in", () =>
     const res = await restartDef().handler({} as never, h.ctx);
 
     expect(res.content).toHaveLength(1);
-    expect(textOf(res)).not.toContain("This is NOT a fresh confirmation");
+    expect(textOf(res)).not.toContain("NO NEW CONFIRMATION CARD WAS SHOWN");
   });
 
   it("the timeout wording stops calling the live card dead", async () => {
