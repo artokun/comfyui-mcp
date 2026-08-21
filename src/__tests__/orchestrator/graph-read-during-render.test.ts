@@ -365,6 +365,135 @@ describe("graph MUTATIONS still fail fast while a prompt is running (#1639)", ()
   });
 });
 
+/**
+ * #1933 — the whole fence-reachable surface, driven end to end.
+ *
+ * The reverse index is built by inverting RETRY_TOKEN_CMD_BY_TOOL, a map
+ * maintained for a DIFFERENT question (#694: which tools mint a retry token).
+ * `panel-retry-identity.test.ts` (f) already proves every KEY of that map is a
+ * registered tool, so the index can never emit a name that does not exist. What
+ * nothing proved is the PAIRING — that the tool on the left is the tool a caller
+ * reaches the command on the right through. A forward entry that is simply wrong
+ * about that would leave the retry machinery working (it only ever asks whether a
+ * tool mints a token) while this message names a real but WRONG tool, which is
+ * strictly worse than the bug being fixed, because the name is plausible.
+ *
+ * #778 is the standing record of what reading one list for another question
+ * costs, so this does not argue the pairing from the map. It CALLS each tool with
+ * a prompt in flight and reads the tool name back out of the refusal the tool
+ * itself produced. The pairings are not uniform — `panel_set_property` dispatches
+ * `graph_set_node_property`, `panel_set_node_title` dispatches `graph_set_title`
+ * — so a prefix rule would pass a review and fail here.
+ */
+const FENCED_TOOL_ARGS: Readonly<Record<string, Record<string, unknown>>> = {
+  panel_add_node: { type: "KSampler" },
+  panel_remove_node: { node_id: 3 },
+  panel_connect: { from_node: 1, from_slot: 0, to_node: 2, to_slot: 0 },
+  panel_disconnect: { node_id: 2, input: 0 },
+  panel_configure_app_mode: { inputs: [] },
+  panel_set_widget: { node_id: 3, widget: "text", value: "x" },
+  panel_remove_widget: { node_id: 3, widget: "text" },
+  panel_set_property: { node_id: 3, property: "p", value: 1 },
+  panel_move_node: { node_id: 3, x: 1, y: 2 },
+  panel_resize_node: { node_id: 3, width: 100, height: 100 },
+  panel_auto_layout: {},
+  panel_create_subgraph: { node_ids: [1, 2] },
+  panel_subgraph_group: { group_id: 0 },
+  panel_paste_nodes: {},
+  panel_save_subgraph: { node_id: 3, name: "s" },
+  panel_add_subgraph: { name: "s" },
+  panel_create_group: { title: "g", node_ids: [1] },
+  panel_move_group: { group_id: 0, x: 1, y: 1 },
+  panel_edit_group: { group_id: 0, title: "g2" },
+  panel_remove_group: { group_id: 0 },
+  panel_set_node_title: { node_id: 3, title: "t" },
+  panel_set_node_collapsed: { node_id: 3, collapsed: true },
+  panel_set_node_mode: { node_id: 3, mode: "mute" },
+  panel_set_node_color: { node_id: 3, color: "red" },
+  panel_move_rail: { node_id: 3, slot: 0, direction: "up" },
+  panel_promote_widget: { node_id: 3, widget: "text" },
+  panel_expose_subgraph_output: { node_id: 3, name: "o" },
+  panel_expose_subgraph_input: { node_id: 3, name: "i" },
+  panel_unexpose_subgraph_output: { node_id: 3, name: "o" },
+  panel_unexpose_subgraph_input: { node_id: 3, name: "i" },
+  panel_unpack_subgraph: { node_id: 3 },
+  panel_update_node: { node_id: 3 },
+};
+
+/**
+ * Tools in the retry map that this probe deliberately does not drive, each for a
+ * stated reason. Pinned as a SET so a tool silently dropping out of coverage —
+ * by gaining a required argument, say — turns into a failure here rather than
+ * quietly shrinking what is checked.
+ */
+const NOT_DRIVEN: Readonly<Record<string, string>> = {
+  // Never fenced: GRAPH_CMD_EFFECT "inert" (selection / scope / clipboard). The
+  // map admits them for the retry question only (#694), not this one.
+  panel_select_nodes: "inert — the fence lets it past",
+  panel_copy_nodes: "inert — the fence lets it past",
+  panel_enter_subgraph: "inert — the fence lets it past",
+  panel_exit_subgraph: "inert — the fence lets it past",
+  // Both dispatch graph_load, which the index refuses to resolve; and both read
+  // the live canvas before dispatching, so neither reaches the fence with a
+  // constructible argument here. Covered by the ambiguity test above instead.
+  panel_load_workflow: "graph_load — ambiguous, covered separately",
+  panel_flatten_workflow: "graph_load — ambiguous, covered separately",
+  // Short-circuit BEFORE the fence: argument validation and a confirm card
+  // respectively, so no refusal is produced to read a name out of.
+  panel_edit_node: "rejects an empty edit before dispatch",
+  panel_clear: "confirm card resolves 'no' in this harness",
+  // workflow_* commands, not graph_* — outside this fence entirely.
+  panel_save_workflow: "workflow_save is not a graph_ command",
+  panel_rename_workflow: "workflow_rename is not a graph_ command",
+  panel_close_workflow: "workflow_close is not a graph_ command",
+  // Deliberately exempt: queuing behind an in-flight job is the sweep path.
+  panel_run: "graph_run is excluded from the fence by design",
+};
+
+describe("the refusal names the CALLING tool, across the whole fenced surface (#1933)", () => {
+  it("every tool in the retry map is either driven here or explicitly excused", () => {
+    const uncovered = Object.keys(RETRY_TOKEN_CMD_BY_TOOL).filter(
+      (t) => !(t in FENCED_TOOL_ARGS) && !(t in NOT_DRIVEN),
+    );
+    expect(uncovered).toEqual([]);
+    // And the excuses cannot rot into cover for a tool that no longer exists.
+    const registered = new Set(buildPanelToolDefs().map((d) => d.name));
+    for (const name of Object.keys(NOT_DRIVEN)) {
+      expect([name, registered.has(name)]).toEqual([name, true]);
+    }
+  });
+
+  it("names ITSELF, not the bridge command, for all of them", async () => {
+    const mismatches: string[] = [];
+    let checked = 0;
+
+    for (const [tool, args] of Object.entries(FENCED_TOOL_ARGS)) {
+      startRender();
+      const { bridge, sent } = makeBridge();
+      const ctx = makePanelToolCtx(bridge, TAB, new WorkflowTargetStore());
+      const text = textOf(await defByName(tool).handler(args as never, ctx));
+
+      if (!/QUEUE BUSY/.test(text)) {
+        // Not "skip": a tool listed here is expected to reach the fence, so
+        // falling short of it is a coverage regression, not a pass.
+        mismatches.push(`${tool}: never reached the fence — ${text.slice(0, 120)}`);
+        continue;
+      }
+      // Nothing may have been dispatched, or "was NOT sent" is a false claim.
+      expect([tool, sent]).toEqual([tool, []]);
+
+      const named = text.match(/(?:Error:\s*)?(\S+) was NOT sent/)?.[1];
+      if (named !== tool) mismatches.push(`${tool}: refusal named ${String(named)}`);
+      checked += 1;
+    }
+
+    expect(mismatches).toEqual([]);
+    // A guard against the whole loop silently becoming a no-op.
+    expect(checked).toBe(Object.keys(FENCED_TOOL_ARGS).length);
+    expect(checked).toBeGreaterThan(30);
+  });
+});
+
 describe("a graph_* timeout while a prompt is running is named QUEUE BUSY (#1639)", () => {
   it("a READ that times out mid-render still names the running prompt", async () => {
     startRender();
