@@ -260,6 +260,33 @@ describe("#1969 review — a structural join must not be phrased as a guess abou
     expect(suggestKnownKey("group", ["group_id", "pos", "title"])).toBe("group_id");
   });
 
+  it("a name tie that the VALUE can settle is still answered", () => {
+    // panel_edit_node carries both node_id and node_ids, so `node` ties on the
+    // name. A scalar 5 is not a node_ids, so the value decides. Refusing here
+    // would silence a case the original ranking got right.
+    const fits = (target: string, value: unknown) =>
+      target === "node_id" ? typeof value === "number" : Array.isArray(value);
+    expect(suggestKnownKey("node", ["node_id", "node_ids"], fits, 5)).toBe("node_id");
+    expect(suggestKnownKey("node", ["node_id", "node_ids"], fits, [1, 2])).toBe("node_ids");
+    // ...but a value that fits BOTH leaves it ambiguous, so it still refuses.
+    const fitsBoth = () => true;
+    expect(suggestKnownKey("node", ["node_id", "node_ids"], fitsBoth, 5)).toBeUndefined();
+  });
+
+  it("panel_edit_node {node:5} keeps the suggestion the original ranking got right", async () => {
+    const server = new McpServer({ name: "tiebreak-probe", version: "1.0.0" });
+    registerPanelTools(server, makeFakeCtx());
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const c = new Client({ name: "tiebreak-probe-client", version: "1.0.0" });
+    await Promise.all([server.connect(st), c.connect(ct)]);
+    const r = await c.callTool({ name: "panel_edit_node", arguments: { node: 5, title: "x" } });
+    const text = (r.content as Array<{ text?: string }>)?.[0]?.text ?? "";
+    expect(r.isError).toBe(true);
+    expect(text).toMatch(/did you mean 'node_id'\?/);
+    await c.close();
+    await server.close();
+  });
+
   it("panel_connect {id} over the real surface names neither endpoint", async () => {
     // The live shape is what made this reachable: panel_connect carries both
     // from_node_id and to_node_id, so `id` is genuinely ambiguous.

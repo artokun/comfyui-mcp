@@ -92,11 +92,15 @@ function distanceThreshold(a: string, b: string): number {
  * Prefer an affix match over a mere edit distance, so `group` → `group_id`
  * beats a coincidental neighbour of the same length.
  */
-export function suggestKnownKey(unknown: string, candidates: readonly string[]): string | undefined {
+export function suggestKnownKey(
+  unknown: string,
+  candidates: readonly string[],
+  fits?: FitsPredicate,
+  value?: unknown,
+): string | undefined {
   const folded = fold(unknown);
-  let best: string | undefined;
+  let tied: string[] = [];
   let bestScore = Infinity;
-  let bestCount = 0;
   for (const c of candidates) {
     if (c === unknown) continue;
     const fc = fold(c);
@@ -117,16 +121,24 @@ export function suggestKnownKey(unknown: string, candidates: readonly string[]):
       score = 1 + d;
     }
     if (score < bestScore) {
-      best = c;
       bestScore = score;
-      bestCount = 1;
+      tied = [c];
     } else if (score === bestScore) {
-      bestCount++;
+      tied.push(c);
     }
   }
-  // Two keys fit equally well: naming one of them is a guess wearing the same
-  // phrasing as a real match. Say nothing rather than pick.
-  return bestCount === 1 ? best : undefined;
+  if (tied.length === 1) return tied[0];
+  // The NAMES tie, so let the VALUE break it — but only when exactly one
+  // candidate would accept what the caller actually sent. `panel_edit_node`
+  // carries both `node_id` and `node_ids`, so `node: 5` ties on the name and
+  // is decided by the 5 (a scalar is not a `node_ids`). `panel_connect` called
+  // with `id: 5` stays ambiguous, because a number fits both endpoints — and
+  // there, naming one is a guess wearing the same phrasing as a real match.
+  if (tied.length > 1 && fits) {
+    const accepting = tied.filter((c) => fits(c, value));
+    if (accepting.length === 1) return accepting[0];
+  }
+  return undefined;
 }
 
 function providedKeys(input: unknown): Set<string> {
@@ -186,7 +198,7 @@ export function pairUnrecognizedKeys(
 
   const take = (unknown: string, pool: readonly string[]): void => {
     const leftover = pool.filter((k) => !used.has(k) && k !== unknown);
-    const match = suggestKnownKey(unknown, leftover);
+    const match = suggestKnownKey(unknown, leftover, fits, valueAt(input, unknown));
     if (!match) return;
     suggestions.set(unknown, { key: match, confident: true });
     used.add(match);
