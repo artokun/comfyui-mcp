@@ -88,6 +88,25 @@ function originOf(target: string): string | undefined {
  *                   a negative result.
  */
 export function describeTargetDrift(target: string): string {
+  return classifyTargetDrift(target).text;
+}
+
+/**
+ * What the comparison ESTABLISHED, alongside the sentence describing it (#1896).
+ *
+ * The sentence alone was enough while only one caller existed. It is not enough
+ * for the advice that follows it: "confirm the server is up" is sound guidance
+ * after a DIFFERENT or an UNKNOWN verdict and actively wrong after a SAME one,
+ * where a browser is connected to that very origin. Callers need the verdict to
+ * pick a tail, and re-deriving it by matching the prose would be a predicate on
+ * a message — the thing that breaks the moment the wording moves.
+ *
+ * Computed ONCE per failure and shared, so formatting an error costs a single
+ * channel read rather than one per consumer.
+ */
+export type TargetDriftVerdict = "different" | "same" | "unknown";
+
+function classifyTargetDrift(target: string): { verdict: TargetDriftVerdict; text: string } {
   const origins = (() => {
     try {
       return panelOrigins();
@@ -95,9 +114,9 @@ export function describeTargetDrift(target: string): string {
       return []; // a broken source must never replace the real network error
     }
   })();
-  if (origins.length === 0) return "";
+  if (origins.length === 0) return { verdict: "unknown", text: "" };
   const want = originOf(target);
-  if (!want) return "";
+  if (!want) return { verdict: "unknown", text: "" };
   const distinct = [...new Set(origins)];
   // #1175 — `includes` compares spellings, not servers. A panel on
   // http://127.0.0.1:8188 against a target of http://localhost:8188 is ONE
@@ -113,16 +132,66 @@ export function describeTargetDrift(target: string): string {
       match === want
         ? ""
         : ` (spelled ${match} there and ${want} here — the same host, so this is not a mismatch)`;
-    return (
-      ` A connected panel is on this same origin${alias}, so this is NOT a wrong-address problem: ` +
-      `the browser can reach ${want} and this process cannot (a firewall, a container ` +
-      `boundary, or a server bound to one interface).`
-    );
+    return {
+      verdict: "same",
+      text:
+        ` A connected panel is on this same origin${alias}, so this is NOT a wrong-address problem: ` +
+        `the browser can reach ${want} and this process cannot (a firewall, a container ` +
+        `boundary, or a server bound to one interface).`,
+    };
   }
+  return {
+    verdict: "different",
+    text:
+      ` A connected panel is on ${distinct.join(", ")} — a DIFFERENT address, which is why ` +
+      `the panel works while this call does not. Point COMFYUI_URL at that origin if it is the ` +
+      `server you meant.`,
+  };
+}
+
+/**
+ * The "now go and check" tail, chosen by what the comparison established (#1896).
+ *
+ * On a SAME verdict the standing advice sends the caller back down the road that
+ * just failed: `get_system_stats (action:"health")` runs in THIS process against
+ * THIS address, so it reproduces the failure instead of diagnosing it — and
+ * "confirm the server is up" invites precisely the conclusion the comparison has
+ * just ruled out, since a browser is connected to that origin. The reporter of
+ * #1896 was told a panel was connected and then handed two more calls down the
+ * dead path; this is the half of that which is fixable without the panel
+ * transport that does not exist.
+ *
+ * `install_comfyui (action:"environment")` survives in both branches and is NOT
+ * described as failing: its `/system_stats` read sits inside a try (see
+ * services/workspace-env.ts getEnvironment), so it still reports the resolved
+ * target on an unreachable server. Claiming otherwise would be the same
+ * overclaim pointed the other way.
+ *
+ * `budget` is the timeout path's extra option. It stays offered even on a SAME
+ * verdict: a connected browser proves something answers that origin, never that
+ * it would answer THIS process quickly, so "the server is simply slow" is still
+ * live and ruling it out here would be an overclaim.
+ */
+function nextStepsFor(
+  verdict: TargetDriftVerdict,
+  target: string,
+  budget: boolean,
+): string {
+  if (verdict !== "same") {
+    return budget
+      ? ` Confirm it is up with get_system_stats (action:"health"), and raise ` +
+          `COMFYUI_MCP_HTTP_TIMEOUT_S if this server is simply slow.`
+      : ` Check the target with install_comfyui (action:"environment"), and confirm the server ` +
+          `is up with get_system_stats (action:"health").`;
+  }
+  const want = originOf(target) ?? target;
   return (
-    ` A connected panel is on ${distinct.join(", ")} — a DIFFERENT address, which is why ` +
-    `the panel works while this call does not. Point COMFYUI_URL at that origin if it is the ` +
-    `server you meant.`
+    ` get_system_stats (action:"health") will NOT add anything here: it runs in this same ` +
+    `process against this same address, so it fails the same way. ` +
+    (budget ? `Raise COMFYUI_MCP_HTTP_TIMEOUT_S if this server is simply slow; otherwise the ` : `The `) +
+    `route from this process to ${want} is what needs fixing, not the address` +
+    (budget ? `.` : ` — install_comfyui (action:"environment") reports the resolved target ` +
+      `without needing to reach it.`)
   );
 }
 
@@ -202,14 +271,18 @@ export function deliveryDoubt(code: string | undefined, method: string): string 
 
 function describeComfyFetchFailure(err: unknown, target: string, method: string): Error {
   const { message, code } = describeFetchFailure(err);
+  // ONE classification, used for both the sentence and the tail it governs
+  // (#1896) — two calls would read the channel twice and could, across a
+  // republish, disagree with each other inside a single message.
+  const drift = classifyTargetDrift(target);
   const wrapped = new Error(
     `${message} — while requesting ${target} (${method}).` +
       deliveryDoubt(code, method) +
       ` ` +
       `That is the headless ComfyUI target (COMFYUI_URL); a CONNECTED sidebar panel does not imply this address is reachable, ` +
       `because the panel talks to whichever ComfyUI its browser tab is on.` +
-      describeTargetDrift(target) +
-      ` Check the target with install_comfyui (action:"environment"), and confirm the server is up with get_system_stats (action:"health").`,
+      drift.text +
+      nextStepsFor(drift.verdict, target, false),
     { cause: err },
   );
   if (code) (wrapped as { code?: string }).code = code;
@@ -318,6 +391,14 @@ function describeComfyTimeout(input: string | URL | Request, init: RequestInit):
   const method = methodOf(input, init);
   const seconds = comfyHttpTimeoutSeconds();
   const mutating = method !== "GET" && method !== "HEAD";
+  // #1896 — the comparison the TRANSPORT path has made since #1553, on the path
+  // that shares its cause. An unroutable COMFYUI_URL does not always REFUSE: a
+  // firewall or container boundary that DROPs the SYN black-holes it instead,
+  // and that lands here rather than in describeComfyFetchFailure. Same child,
+  // same readable channel, same connected panel — this path simply never asked,
+  // so `list_packs (action:"list_templates")` against a firewalled target said
+  // nothing at all about the panel that was working the whole time.
+  const drift = classifyTargetDrift(target);
   const err = new Error(
     `No reply from ComfyUI within ${seconds}s — while requesting ${target} (${method}). ` +
       (mutating
@@ -326,10 +407,17 @@ function describeComfyTimeout(input: string | URL | Request, init: RequestInit):
           `(action:"list") and get_history (action:"list")). `
         : `Nothing was learned about the server from this — a timeout is not a refusal and not a ` +
           `"not found". `) +
-      `The connection was accepted but no answer arrived in time, which points at the server or ` +
-      `something between it and here rather than at the request. Confirm it is up with ` +
-      `get_system_stats (action:"health"), and raise COMFYUI_MCP_HTTP_TIMEOUT_S if this server is ` +
-      `simply slow.`,
+      // #1896 — this asserted "The connection was accepted but no answer arrived
+      // in time". The ceiling covers the WHOLE exchange, connecting included, so
+      // a black-holed SYN times out here having established no connection at all
+      // — and on the read path the sentence immediately before already said
+      // nothing was learned. Say only what a timeout actually proves.
+      `Whether a connection was ever established is NOT known from this: the budget covers ` +
+      `connecting, the request and the reply alike, so a black-holed or filtered route expires ` +
+      `here exactly as a slow server does. That points at the server, or at something between it ` +
+      `and here, rather than at the request.` +
+      drift.text +
+      nextStepsFor(drift.verdict, target, true),
   );
   (err as { code?: string }).code = "COMFYUI_HTTP_TIMEOUT";
   return err;
