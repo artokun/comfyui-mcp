@@ -812,8 +812,9 @@ export class ClaudeBackend implements AgentBackend {
   /** Switch the model live (the SDK applies it to the next turn). */
   async setModel(model: string): Promise<void> {
     try {
-      // setModel is live: no session restart, the next turn uses it.
-      await (this.q as unknown as { setModel?: (m: string) => Promise<void> })?.setModel?.(model);
+      // setModel is live: no session restart, the next turn uses it. The optional
+      // call keeps an older SDK (or a test double) without setModel a silent no-op.
+      await this.q?.setModel?.(model);
     } catch (err) {
       logger.debug(`[claude-backend] setModel: ${msgOf(err)}`);
     }
@@ -998,7 +999,7 @@ export class ClaudeBackend implements AgentBackend {
         } else if (message.subtype === "thinking_tokens") {
           // Live extended-thinking token count → drives a "thinking… (N)" meter
           // so the user can see the agent reasoning (not stuck) before any text.
-          const t = (message as unknown as { estimated_tokens?: number }).estimated_tokens;
+          const t = message.estimated_tokens;
           if (typeof t === "number") {
             yield { type: "thinking", tokens: t };
           }
@@ -1012,9 +1013,11 @@ export class ClaudeBackend implements AgentBackend {
           // turn's result is classified as the failure it actually is, and
           // surface the reason now so the user never watches a turn silently
           // produce nothing.
+          // Older SDK builds spelled the flag in camelCase; the `in` probe reads
+          // it without claiming the typed message carries it.
           const prevent =
             message.prevent_continuation === true ||
-            (message as unknown as { preventContinuation?: unknown }).preventContinuation === true;
+            ("preventContinuation" in message && message.preventContinuation === true);
           const content = typeof message.content === "string" ? message.content.trim() : "";
           if (prevent) {
             const reason = content || "blocked by a hook";
@@ -1043,21 +1046,20 @@ export class ClaudeBackend implements AgentBackend {
         // Live partial output (includePartialMessages). Turn the raw Anthropic
         // stream events into thinking/reply deltas the panel renders token-by-
         // token. The authoritative text still commits via the `assistant` case.
-        const ev = (message as unknown as { event?: Record<string, unknown> }).event;
+        const ev = message.event;
         if (!ev) break;
-        const evType = ev.type as string | undefined;
-        if (evType === "message_start") {
-          const mid = (ev.message as { id?: string } | undefined)?.id;
+        if (ev.type === "message_start") {
+          const mid = ev.message?.id;
           yield { type: "stream_start", id: typeof mid === "string" ? mid : null };
-        } else if (evType === "content_block_delta") {
-          const d = ev.delta as { type?: string; text?: string; thinking?: string } | undefined;
+        } else if (ev.type === "content_block_delta") {
+          const d = ev.delta;
           if (!d) break;
           if (d.type === "thinking_delta" && typeof d.thinking === "string" && d.thinking) {
             yield { type: "assistant_delta", text: d.thinking, thinking: true };
           } else if (d.type === "text_delta" && typeof d.text === "string" && d.text) {
             yield { type: "assistant_delta", text: d.text };
           }
-        } else if (evType === "message_stop") {
+        } else if (ev.type === "message_stop") {
           yield { type: "stream_end" };
         }
         break;
@@ -1070,10 +1072,10 @@ export class ClaudeBackend implements AgentBackend {
         const turn = this.turns[this.turns.length - 1];
         if (turn) turn.hasContent = true;
         // Remember this message's UUID — it's the rewind anchor for the turn.
-        const auid = (message as unknown as { uuid?: string }).uuid;
+        const auid = message.uuid;
         // Each assistant API response carries the CURRENT context size — report
         // it live so the meter updates throughout the turn, not just at the end.
-        const u = (message.message as unknown as { usage?: Record<string, number> })?.usage;
+        const u = message.message?.usage;
         // Commit the authoritative reply text as ONE message. With streaming on,
         // the panel already showed a live preview (matched by this message id);
         // the commit replaces it with the final text. Without streaming (or for
@@ -1088,7 +1090,7 @@ export class ClaudeBackend implements AgentBackend {
           .map((b) => b.text as string)
           .join("\n\n")
           .trim();
-        const id = (message.message as unknown as { id?: string })?.id;
+        const id = message.message?.id;
         yield {
           type: "assistant",
           text,
@@ -1109,12 +1111,8 @@ export class ClaudeBackend implements AgentBackend {
       case "result": {
         // Cache the context window + cost from the result, then re-report using
         // the last assistant usage (the true current context).
-        const m = message as unknown as {
-          modelUsage?: Record<string, { contextWindow?: number }>;
-          total_cost_usd?: number;
-        };
         let contextWindow: number | undefined;
-        for (const mu of Object.values(m.modelUsage ?? {})) {
+        for (const mu of Object.values(message.modelUsage ?? {})) {
           if (mu?.contextWindow && (contextWindow === undefined || mu.contextWindow > contextWindow)) {
             contextWindow = mu.contextWindow;
           }
@@ -1323,7 +1321,7 @@ export class ClaudeBackend implements AgentBackend {
           ok,
           subtype: message.subtype,
           ...(contextWindow !== undefined ? { contextWindow } : {}),
-          ...(typeof m.total_cost_usd === "number" ? { costUsd: m.total_cost_usd } : {}),
+          ...(typeof message.total_cost_usd === "number" ? { costUsd: message.total_cost_usd } : {}),
           ...stamp,
         };
         break;

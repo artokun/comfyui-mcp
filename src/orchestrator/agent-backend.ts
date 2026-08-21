@@ -117,6 +117,20 @@ export interface AgentCapabilities {
  * meter, the result subtype/contextWindow/cost, live thinking-token counts). A
  * non-Claude backend simply omits the optional fields it can't supply.
  */
+/**
+ * The per-response token counts the live context meter reads (panel-agent's
+ * reportStatus). A backend hands over its provider's own usage object — the
+ * Claude SDK's BetaUsage reports the cache counters as `number | null`, the
+ * OpenAI-dialect backends build a plain number map — so every counter here is
+ * optional and nullable, and any extra provider fields simply ride along unread.
+ */
+export interface AssistantUsage {
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  cache_read_input_tokens?: number | null;
+  cache_creation_input_tokens?: number | null;
+}
+
 export type AgentEvent = (
   /** Session opened/continued; `model` is the SDK-reported active model, if any. */
   | { type: "session"; sessionId: string; model?: string }
@@ -130,7 +144,7 @@ export type AgentEvent = (
   | { type: "thinking"; tokens: number }
   /** A turn-ending assistant message; `uuid` (when present) is the rewind anchor.
    *  `id` matches the streamed preview; `usage` is that response's prompt usage. */
-  | { type: "assistant"; text: string; uuid?: string; id?: string; usage?: Record<string, number> }
+  | { type: "assistant"; text: string; uuid?: string; id?: string; usage?: AssistantUsage }
   | { type: "tool_call"; name: string; phase: "start" | "end"; detail?: unknown }
   /** A turn completed. `contextWindow`/`costUsd`/`subtype` are provider extras. */
   | {

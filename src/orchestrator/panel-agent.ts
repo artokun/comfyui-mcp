@@ -38,7 +38,7 @@ import {
   type PreviewLedger,
 } from "./preview-budget.js";
 import type { SessionStore } from "./session-store.js";
-import type { AgentBackend, AgentEvent, NeutralTurn } from "./agent-backend.js";
+import type { AgentBackend, AgentEvent, AssistantUsage, NeutralTurn } from "./agent-backend.js";
 import { type AudioRef, dedupeAudioRefs, noAudioPartText } from "./audio-attachment.js";
 import { runErrorNotice } from "./cli-remedy.js";
 import { runCompletionDirective } from "./todo-state.js";
@@ -565,7 +565,7 @@ export class PanelAgent {
   /** Usage from the most recent assistant API response — the CURRENT context
    *  size (input + cache), as opposed to result.usage which sums every internal
    *  call in the turn and wildly overstates context fill. */
-  private lastUsage: Record<string, number> | null = null;
+  private lastUsage: AssistantUsage | null = null;
   /** Context window for the active model, cached from result.modelUsage. */
   private contextWindow = 0;
   /** The model the IN-FLIGHT turn was dispatched with. A live setModel can change
@@ -2403,7 +2403,7 @@ export class PanelAgent {
   /** Push a context/usage snapshot derived from a single API response's usage.
    *  `used` is that response's PROMPT size (fresh + cached input) = the current
    *  context fill — NOT cumulative, and NOT including output tokens. */
-  private reportStatus(usage: Record<string, number>, costUsd?: number): void {
+  private reportStatus(usage: AssistantUsage, costUsd?: number): void {
     if (!this.deps.onStatus) return;
     try {
       const used =
