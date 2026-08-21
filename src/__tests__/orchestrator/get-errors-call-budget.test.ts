@@ -526,3 +526,98 @@ describe("get_errors completion follow-ups run on the elective budget (#1973/#58
     expect(primary! + Math.max(query!, objectInfo!)).toBeLessThanOrEqual(40_000);
   });
 });
+
+// #1973 — two properties of the completion pass that a reader cannot check by
+// reading, and that nothing else in this file pins.
+describe("what the completion pass is allowed to assert, and under whose name (#1973)", () => {
+  const objectInfoWith = (spec: unknown) => ({
+    Loader: { input: { required: { asset: spec } } },
+  });
+  const runWith = (spec: unknown, value: string, panelExtra: Record<string, unknown> = {}) =>
+    runGetErrors((cmd) => {
+      if (cmd.cmd === "graph_get_errors") {
+        return {
+          ...budgetExhaustedReply({ extraUnchecked: 0 }),
+          unchecked_nodes: [{ id: 5, type: "Loader", reason: BUDGET_REASON }],
+          ...panelExtra,
+        };
+      }
+      if (cmd.cmd === "graph_query") {
+        return {
+          matched: 1, shown: 1,
+          text: JSON.stringify({ id: 5, type: "Loader", widgets: { asset: value } }),
+        };
+      }
+      if (cmd.cmd === "graph_get_object_info") return { ok: true, object_info: objectInfoWith(spec) };
+      return { ok: false };
+    });
+
+  // ATTRIBUTION. Until this change every unavailable_widget_values entry came from
+  // the panel's own scanner, so the field name carried an implied provenance. This
+  // pass reads a schema form the panel cannot see and has no /view probe, so its
+  // verdicts must be distinguishable from the panel's — otherwise a wrong one is
+  // untraceable and a reader cannot weigh the answer.
+  it("stamps its own verdicts with a source, and does not restamp the panel's", async () => {
+    const panelEntry = {
+      id: 4, type: "CheckpointLoaderSimple", widget: "ckpt_name",
+      value: "gone.safetensors", kind: "missing_asset",
+    };
+    const { payload } = await runWith([["ok.safetensors"], {}], "absent.safetensors", {
+      unavailable_widget_values: [panelEntry],
+    });
+
+    const list = payload.unavailable_widget_values as Array<Record<string, unknown>>;
+    const mine = list.find((u) => String(u.id) === "5");
+    const theirs = list.find((u) => String(u.id) === "4");
+
+    expect(mine, "the completion pass's own finding must be present").toBeTruthy();
+    expect(mine?.source).toBe("orchestrator_completion");
+    expect(theirs, "the panel's finding must survive the merge").toBeTruthy();
+    expect(
+      theirs?.source,
+      "a panel verdict must not be re-attributed to the orchestrator",
+    ).toBeUndefined();
+  });
+
+  // DIRECTION. The upload-flag list here is ComfyUI's own `UploadType`, which is
+  // WIDER than the panel's (the panel omits `file_upload`). Being wider is only
+  // safe if every extra flag can add an ABSTENTION and never a verdict. That is
+  // the claim; this is the test of it, one flag at a time.
+  const UPLOAD_FLAGS = ["image_upload", "video_upload", "audio_upload", "model_upload", "file_upload"];
+  for (const flag of UPLOAD_FLAGS) {
+    it(`abstains rather than accusing on an unenumerable value behind ${flag}`, async () => {
+      const { payload } = await runWith(
+        ["COMBO", { options: ["catalogued.png"], [flag]: true }],
+        "nested/dir/real-file.png",
+      );
+
+      const list = (payload.unavailable_widget_values ?? []) as Array<Record<string, unknown>>;
+      expect(
+        list.find((u) => String(u.id) === "5"),
+        `${flag} must never produce a hard verdict without a /view probe`,
+      ).toBeUndefined();
+
+      const unchecked = (payload.unchecked_nodes ?? []) as Array<Record<string, unknown>>;
+      expect(unchecked.find((u) => String(u.id) === "5"), "it must be disclosed as unchecked").toBeTruthy();
+      expect(payload.audit_complete).toBe(false);
+    });
+  }
+
+  // The control that gives the five tests above their meaning: with NO upload flag,
+  // the very same value IS judged. Without this, a pass that abstained on
+  // everything would satisfy the whole block.
+  it("still judges the same value when no upload flag is set (the control)", async () => {
+    const { payload } = await runWith(
+      ["COMBO", { options: ["catalogued.png"] }],
+      "nested/dir/real-file.png",
+    );
+    const list = (payload.unavailable_widget_values ?? []) as Array<Record<string, unknown>>;
+    const hit = list.find((u) => String(u.id) === "5");
+    // Deliberately asserts ONLY that a verdict was produced. An earlier draft also
+    // checked `source` here, which made this fail whenever the provenance stamp was
+    // removed — a control that dies with the thing it controls is not a control.
+    // Provenance has its own test above.
+    expect(hit, "a non-upload combo is fully enumerable, so non-membership IS evidence").toBeTruthy();
+    expect(hit?.kind).toBe("missing_asset");
+  });
+});

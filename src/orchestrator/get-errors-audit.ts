@@ -323,6 +323,15 @@ function judgeLeftoverCombos(
         value,
         option_count: options.length,
         kind: options.length === 0 || optionsLookLikeFiles(options) ? "missing_asset" : "invalid_value",
+        // WHO JUDGED THIS. Until #1973 every entry in unavailable_widget_values came
+        // from the panel's own scanner, so the field name carried an implied
+        // provenance. Appending here silently invalidates that: this pass reads the
+        // V3 `["COMBO", {...}]` form the panel's parseClassCombos structurally cannot
+        // see, and it has no /view probe to fall back on. Merging an unvetted verdict
+        // into a vetted list under the same field is the attribution defect — a reader
+        // that cannot tell which scanner spoke cannot weigh the answer, and a wrong
+        // entry here would be untraceable in a bug report.
+        source: "orchestrator_completion",
       });
     }
   }
@@ -509,8 +518,9 @@ export async function completeGetErrorsAudit(
           payload.unavailable_widget_values_note =
             `LIVE SCAN + ORCHESTRATOR COMPLETION: ${merged.length} widget value(s) the server ` +
             `does not offer, ${added} of them judged after the panel's scan ran out of budget, ` +
-            `from one batched /object_info read. Values on an UPLOAD input that the combo list ` +
-            `cannot enumerate were NOT judged here — those stay in unchecked_nodes.`;
+            `from one batched /object_info read and marked source:"orchestrator_completion". ` +
+            `Values on an UPLOAD input that the combo list cannot enumerate were NOT judged ` +
+            `here — those stay in unchecked_nodes.`;
         }
       }
       payload.audit_completed_by = "orchestrator";
