@@ -318,6 +318,58 @@ describe("#1968 panel_show_media: the output ref is accepted where the docs put 
     expect(JSON.stringify(sent)).not.toContain("label");
   });
 
+  // `stage` is the opt-in for a REAL DISK WRITE (a copy into <output>/_panel_staged).
+  // Before the flat alias existed zod stripped it from the item silently; now the
+  // schema advertises it, so dropping it would be a parameter that is accepted and
+  // does nothing — and the caller would get an oversized-file refusal for something
+  // they believed they had handled.
+  it("folds a flat `stage` into a nested path source instead of dropping it", async () => {
+    const h = harness();
+    const res = await callTool(
+      "panel_show_media",
+      { items: [{ source: { path: "/tmp/huge.png" }, stage: true }] },
+      h.ctx,
+    );
+    // The path does not exist, so this refuses on the file — but it must refuse
+    // having SEEN the stage flag, not having silently discarded it.
+    expect(res.isError).toBe(true);
+    expect(res.content.map((c) => c.text).join(" ")).toContain("/tmp/huge.png");
+
+    // The same fold on the /view-ref member: modifiers supplied flat, ref nested,
+    // and the item still reaches the panel with a complete source.
+    const h2 = harness();
+    const res2 = await callTool(
+      "panel_show_media",
+      { items: [{ source: { filename: "a.png" }, subfolder: "runs", type: "temp" }] },
+      h2.ctx,
+    );
+    expect(res2.isError).toBeFalsy();
+    const sent = h2.sent.find((c) => c.cmd === "show_media");
+    expect(sent, "a fully-specified ref must still reach the panel").toBeDefined();
+  });
+
+  it("REFUSES a modifier set both inside source and at item level", async () => {
+    const h = harness();
+    const res = await callTool(
+      "panel_show_media",
+      { items: [{ source: { filename: "a.png", type: "output" }, type: "temp" }] },
+      h.ctx,
+    );
+    expect(res.isError).toBe(true);
+    expect(res.content.map((c) => c.text).join(" ")).toContain("type");
+    expect(h.sent.some((c) => c.cmd === "show_media")).toBe(false);
+  });
+
+  it("accepts a modifier repeated with the SAME value", async () => {
+    const h = harness();
+    const res = await callTool(
+      "panel_show_media",
+      { items: [{ source: { filename: "a.png", type: "output" }, type: "output" }] },
+      h.ctx,
+    );
+    expect(res.isError).toBeFalsy();
+  });
+
   it("REFUSES an item naming its media twice", async () => {
     const h = harness();
     const res = await callTool(

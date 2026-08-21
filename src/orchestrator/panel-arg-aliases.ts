@@ -138,7 +138,33 @@ export function normalizeShowMediaItem(
           `Nothing was displayed. Send the ref in ONE place.`,
       };
     }
-    out.source = source;
+    // The ref's MODIFIERS — subfolder/type/stage — can arrive flat while the ref
+    // itself is nested. Before this alias existed zod stripped them from the item
+    // silently; now the schema ADVERTISES them, so dropping one would be a
+    // parameter that is accepted and does nothing. `stage` is the one that
+    // matters: it is the opt-in for a real disk write, so a caller who sets it
+    // and is ignored gets a refusal for an oversized file they thought they had
+    // handled. Fold each into `source` where it is absent, and refuse rather
+    // than overwrite where the two disagree.
+    const merged: Record<string, unknown> = { ...(source as Record<string, unknown>) };
+    for (const [key, value] of [
+      ["subfolder", subfolder],
+      ["type", type],
+      ["stage", stage],
+    ] as const) {
+      if (value === undefined) continue;
+      if (merged[key] !== undefined && !sameValue(merged[key], value)) {
+        return {
+          ok: false,
+          error:
+            `${at} sets \`${key}\` both inside \`source\` (${describeReceived(merged[key])}) and at item ` +
+            `level (${describeReceived(value)}). The flat key is an alias for the nested one, so this ` +
+            `says two things about one ref. Nothing was displayed. Set it in ONE place.`,
+        };
+      }
+      merged[key] = value;
+    }
+    out.source = merged;
   } else if (path !== undefined) {
     // The disk-path member of the same union, flattened the same way.
     out.source = stage === undefined ? { path } : { path, stage };
