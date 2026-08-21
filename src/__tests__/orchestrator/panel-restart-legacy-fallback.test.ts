@@ -443,3 +443,117 @@ describe("#1996 an unconfirmed managed restart still watches for the tab", () =>
     expect(out.ready).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// #1996 review round 1 (codex P1) — the reserve did not follow to THIS path.
+//
+// The bound path's readiness deadline is clamped by
+// `readinessDeadlineWithReconnectReserve` so the observation cannot eat the tab
+// reconnect wait. The headless/legacy path computed its own deadline as
+//
+//   const proofDeadline = Math.min(Date.now() + legacyProofWindow, overallDeadline);
+//
+// with no reserve — so the identical starvation survives here. The arithmetic,
+// from the file's own constants: OVERALL_MAX_MS 255s, legacyProofWindow 140s
+// (LEGACY_SYNC_WORST_CASE_MS 40s + LEGACY_COLD_START_OBS_MS 100s), reconnect
+// wait 35s. A confirmation answered at ~90s leaves 165s, the admission gate
+// (>=140s) lets the restart run, the proof window claims 140 of those 165, and
+// the tab wait is handed the 25s residual — LESS than the 35s a tab is allowed.
+// A tab that re-registers at 30s is then reported `panel_tab_reconnected:false`.
+//
+// REACHABILITY is not hypothetical. Of the three callers of
+// runHeadlessManagedRestart, the #1671 crash-recovery one is entered precisely
+// BECAUSE the confirmation card went unanswered — which costs the full
+// RESTART_CONFIRM_TIMEOUT_MS (90s) plus the ~6s decline probe before this path
+// even starts. The 90s in this test is the cheap case, not the worst one.
+//
+// HOW THIS RUNS FAST. Only `Date` is faked; timers stay real. The confirmation
+// advances the clock 90s, and each health probe advances it 20s, so the 140s
+// proof window is consumed in ~7 probes and ~1.4s of wall clock. Nothing here
+// re-implements the production arithmetic — the handler computes its own
+// deadlines from its own constants, and the test only observes the budget the
+// reconnect wait is actually handed.
+describe("#1996 r1 (codex P1): the headless path must reserve the reconnect wait too", () => {
+  // The harness's virtual clock advances in discrete PROBE_STEP_MS jumps, so the
+  // observation always overshoots its deadline by up to one step before noticing.
+  // In production that overshoot is one real probe interval (200ms) and is
+  // invisible; here it is the resolution limit of the measurement, so it is named
+  // and subtracted rather than absorbed into a looser number. 5s keeps it well
+  // clear of the 10s that separates the fixed residual from the broken one.
+  const PROBE_STEP_MS = 5_000;
+
+  /** Drive the headless path with `elapsedBeforeMs` already burned on the card,
+   *  and report the budget the tab-reconnect wait was actually handed. */
+  async function runWithSlowConfirm(elapsedBeforeMs: number, tabReturnsAfterMs: number) {
+    const prevInterval = process.env.COMFYUI_PANEL_REBOOT_INTERVAL_S;
+    vi.useFakeTimers({ toFake: ["Date"] });
+    __panelToolsTestHooks.setPanelRebootTiming(null); // REAL 140s legacy proof window
+    // Shrink only the REAL sleep between probes (floored at 50ms by observeRecovery);
+    // the virtual clock still advances PROBE_STEP_MS per probe, so the full 140s
+    // window is consumed in ~28 probes and ~1.4s of wall clock.
+    process.env.COMFYUI_PANEL_REBOOT_INTERVAL_S = "0.01";
+    try {
+      // The endpoint never comes back, so the proof window runs to its deadline —
+      // the case where the residual handed to the tab wait is smallest.
+      __panelToolsTestHooks.setHealthProbe(async () => {
+        vi.setSystemTime(Date.now() + PROBE_STEP_MS);
+        return "down";
+      });
+      const { ctx } = makeCtx(NO_ENDPOINT_REPLY);
+      ctx.confirm = (async () => {
+        vi.setSystemTime(Date.now() + elapsedBeforeMs);
+        return "yes" as const;
+      }) as PanelToolCtx["confirm"];
+      ctx.panelConnectionIdentity = () => ({ generation: 1, tabSessionId: "browser-tab-a" });
+      let handedBudgetMs = -1;
+      // A perfectly ordinary tab: it re-registers `tabReturnsAfterMs` after being
+      // asked for, and comes back if — and only if — it is given that long.
+      ctx.awaitPostRestartReachable = async (_before, budgetMs?: number) => {
+        handedBudgetMs = budgetMs ?? 0;
+        return handedBudgetMs >= tabReturnsAfterMs;
+      };
+      ctx.tabCanMutateGraph = () => true;
+
+      const res = (await restartTool().handler({}, ctx)) as ToolResult;
+      const out = JSON.parse(res.content.find((c) => c.type === "text")!.text as string);
+      return { handedBudgetMs, out };
+    } finally {
+      vi.useRealTimers();
+      if (prevInterval === undefined) delete process.env.COMFYUI_PANEL_REBOOT_INTERVAL_S;
+      else process.env.COMFYUI_PANEL_REBOOT_INTERVAL_S = prevInterval;
+    }
+  }
+
+  it("a confirmation answered at ~90s must NOT starve the tab wait below its own budget", async () => {
+    // 255s overall − 90s on the card = 165s left. The admission gate (≥140s) lets the
+    // restart run, and pre-fix the 140s proof window claimed all but ~25 of those.
+    const allowed = __panelToolsTestHooks.getReconnectWaitTiming().budgetMs; // 35s
+    const { handedBudgetMs, out } = await runWithSlowConfirm(90_000, 28_000);
+
+    // THE DEFECT, as the observation rather than the arithmetic: the wait is handed
+    // less than a tab is allowed to take. Pre-fix ~20–25s here; the reserve makes it
+    // the full budget, less one step of the harness's own clock resolution.
+    expect(handedBudgetMs).toBeGreaterThanOrEqual(allowed - PROBE_STEP_MS);
+    // …and the consequence that makes it a P1 rather than a rounding error: a tab
+    // that came back normally, at 28s, is no longer reported as never having come
+    // back. 28s is outside the pre-fix residual and inside the post-fix one, so this
+    // separates the two behaviours rather than restating the number above.
+    expect(out.panel_tab_reconnected).toBe(true);
+    // The refusal is untouched — the endpoint genuinely never answered.
+    expect(out.server_ready).toBe(false);
+    expect(out.ready).toBe(false);
+  });
+
+  it("the #1671 caller's own timings — an UNANSWERED card — keep the tab wait whole too", async () => {
+    // Reachability is not hypothetical. runHeadlessManagedRestart's #1671 caller is
+    // entered BECAUSE the confirmation card went unanswered, which costs the full
+    // RESTART_CONFIRM_TIMEOUT_MS (90s) plus the ~6s decline probe. Modelling that
+    // 96s here (through the same no-endpoint route, which shares the code under
+    // test) leaves 159s — still admitted, and pre-fix the residual was ~19s.
+    const allowed = __panelToolsTestHooks.getReconnectWaitTiming().budgetMs;
+    const { handedBudgetMs, out } = await runWithSlowConfirm(96_000, 28_000);
+
+    expect(handedBudgetMs).toBeGreaterThanOrEqual(allowed - PROBE_STEP_MS);
+    expect(out.panel_tab_reconnected).toBe(true);
+  });
+});

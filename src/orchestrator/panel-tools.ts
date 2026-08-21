@@ -16920,7 +16920,31 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
           const legacyProofWindow = panelRebootTimingOverride
             ? headlessTiming.settleMs + headlessTiming.budgetMs
             : LEGACY_RESTART_MIN_BUDGET_MS;
-          const proofDeadline = Math.min(Date.now() + legacyProofWindow, overallDeadline);
+          // #1996 r1 (codex P1): the SAME reserve as the bound path, applied here rather
+          // than a second mechanism — one rule, two call sites. Without it this path
+          // reproduced the exact starvation this issue is about: a confirmation answered
+          // at ~90s leaves 165s, the 140s proof window claims all but 25 of them, and the
+          // tab wait below is handed less than the 35s a tab is allowed to take — so a tab
+          // that re-registers normally is reported `panel_tab_reconnected:false`. The
+          // #1671 caller makes that the COMMON case, not a corner: it is entered because
+          // the confirmation card went unanswered, which costs the full 90s
+          // RESTART_CONFIRM_TIMEOUT_MS plus the ~6s decline probe before this even starts.
+          //
+          // The ADMISSION gate above is deliberately NOT raised to 175s to match. Doing
+          // that would refuse the #1671 crash recovery outright at ~96s elapsed — telling
+          // a user whose ComfyUI just died to retry, instead of restarting it — which is
+          // strictly worse than the trade this clamp makes. What the clamp costs is
+          // cold-start observation time (140s → as little as 105s at the admission floor,
+          // i.e. the 40s unpreemptible sync plus 65s rather than 100s of watching). That
+          // is the same asymmetry the bound path turns on: a short observation returns an
+          // honest `did NOT become healthy within Ns` that the caller can retry, while a
+          // starved reconnect wait silently drops the rebind and cannot be retried into.
+          const proofDeadline = readinessDeadlineWithReconnectReserve({
+            now: Date.now(),
+            budgetMs: legacyProofWindow,
+            overallDeadline,
+            reserveMs: reconnectWaitTiming().budgetMs,
+          });
           const proofPromise = observeRecovery(headlessTiming, proofDeadline, { healthBase });
           const restartBudget = Math.max(1, overallDeadline - Date.now());
           let restart: Awaited<ReturnType<typeof restartComfyUI>> | undefined;

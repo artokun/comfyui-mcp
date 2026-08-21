@@ -280,13 +280,31 @@ describe("#1996 WIRING: the bound readiness deadline goes through the reserve", 
     // Reading the reserve from reconnectWaitTiming() is what keeps it correct when a
     // user raises COMFYUI_PANEL_RECONNECT_WAIT_S; a hard-coded 35_000 would silently
     // under-reserve for them.
-    expect((s.match(/reserveMs: reconnectWaitTiming\(\)\.budgetMs/g) ?? []).length).toBe(1);
     // Exactly ONE unreserved `gate.deadline` assignment survives: the REMOTE branch,
     // which returns without ever waiting for a tab, so it has nothing to reserve for.
     expect(
       (s.match(/gate\.deadline = Math\.min\(Date\.now\(\) \+ timing\.budgetMs, overallDeadline\);/g) ?? [])
         .length,
     ).toBe(1);
+  });
+
+  it("BOTH restart paths clamp their observation with the SAME reserve (r1 codex P1)", () => {
+    // The review finding was not that the reserve was wrong — it was that it did not
+    // FOLLOW to the legacy/headless path, whose `proofDeadline` computed its own
+    // unreserved `Math.min(Date.now() + legacyProofWindow, overallDeadline)` and
+    // reproduced the identical starvation. This is the per-call-site adoption gap that
+    // left #1971's version probe unreached for releases, so it is pinned as a COUNT of
+    // adopting call sites rather than as "the bound one is correct".
+    const s = src();
+    expect((s.match(/readinessDeadlineWithReconnectReserve\(\{/g) ?? []).length).toBe(2);
+    // Both read the LIVE reconnect budget rather than a hard-coded 35_000, so raising
+    // COMFYUI_PANEL_RECONNECT_WAIT_S reserves more on BOTH paths, not one.
+    expect((s.match(/reserveMs: reconnectWaitTiming\(\)\.budgetMs/g) ?? []).length).toBe(2);
+    // The exact pre-fix expression on the headless path must be gone entirely.
+    expect(
+      /const proofDeadline = Math\.min\(Date\.now\(\) \+ legacyProofWindow, overallDeadline\);/.test(s),
+      "the headless proof deadline is unreserved again",
+    ).toBe(false);
   });
 
   it("neither restart path gates the reconnect wait on the readiness verdict any more", () => {
