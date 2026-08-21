@@ -23,7 +23,7 @@ export async function uploadHttpFile(
     method: "PUT",
     redirect: "manual",
     headers: source.contentType ? { "Content-Type": source.contentType } : undefined,
-    body: (source.path ? createReadStream(source.path) : source.data) as unknown as RequestInit["body"],
+    body: source.path ? createReadStream(source.path) : source.data,
   };
   if (source.path) init.duplex = "half";
 

@@ -180,9 +180,9 @@ function parseCatalogRaw(raw: string): CatalogRead {
       // original before replacing it.
       const clean: Record<string, LoraCatalogEntry> = {};
       const dropped: string[] = [];
-      for (const [key, value] of Object.entries(entries)) {
+      for (const [key, value] of Object.entries<unknown>(entries)) {
         const v = value as LoraCatalogEntry | null;
-        const rec = v as unknown as Record<string, unknown> | null;
+        const rec = value as Record<string, unknown> | null;
         const stringArray = (f: string, required: boolean) => {
           const arr = rec?.[f];
           if (arr === undefined) return !required;
@@ -212,7 +212,7 @@ function parseCatalogRaw(raw: string): CatalogRead {
           // "missing": "false" is truthy — a present LoRA would list as missing.
           (rec!.missing === undefined || typeof rec!.missing === "boolean")
         ) {
-          clean[key] = value;
+          clean[key] = v;
         } else {
           dropped.push(key);
         }

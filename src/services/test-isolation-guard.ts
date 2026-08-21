@@ -48,9 +48,7 @@ import { join, resolve, sep } from "node:path";
  * check that the answer does not fall back to `VITEST` / `NODE_ENV`; passing a
  * bare object asks the question directly.
  */
-export function runningUnderTestRunner(
-  scope: Record<string, unknown> = globalThis as unknown as Record<string, unknown>,
-): boolean {
+export function runningUnderTestRunner(scope: Record<string, unknown> = globalThis): boolean {
   return (
     "__vitest_worker__" in scope ||
     "__vitest_index__" in scope ||
@@ -67,6 +65,13 @@ export function runningUnderTestRunner(
  */
 const REAL_HOME_GLOBAL = "__comfyui_mcp_test_real_home__";
 
+declare global {
+  /** Declared (as `var`, the one form that lands on globalThis) so the two
+   *  accessors below read and write it as the string it is, instead of going
+   *  through an untyped view of globalThis. */
+  var __comfyui_mcp_test_real_home__: string | undefined;
+}
+
 /**
  * Called ONCE by the vitest setup file, before it redirects HOME: remember
  * where the developer's real home directory is, so write-guards can still
@@ -74,14 +79,14 @@ const REAL_HOME_GLOBAL = "__comfyui_mcp_test_real_home__";
  * with the throwaway one.
  */
 export function recordRealHomeForTestIsolation(realHome: string): void {
-  (globalThis as unknown as Record<string, unknown>)[REAL_HOME_GLOBAL] = realHome;
+  globalThis[REAL_HOME_GLOBAL] = realHome;
 }
 
 /** The home the run started with, if the setup file recorded one. Exported so
  *  tests can assert the redirect is actually in force (a guard nobody wired
  *  up guards nothing). */
 export function realHomeRecordedForTestIsolation(): string | undefined {
-  const value = (globalThis as unknown as Record<string, unknown>)[REAL_HOME_GLOBAL];
+  const value = globalThis[REAL_HOME_GLOBAL];
   return typeof value === "string" && value !== "" ? value : undefined;
 }
 

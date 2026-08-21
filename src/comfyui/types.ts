@@ -60,6 +60,12 @@ export interface SystemStats {
     pytorch_version?: string;
     /** Working directory of the running server, when a build reports it. */
     cwd?: string;
+    ram_total?: number;
+    ram_free?: number;
+    /** The frontend version this ComfyUI asked for (panel#779). */
+    required_frontend_version?: string;
+    /** Installed Python packages ComfyUI reports on, e.g. comfyui-frontend-package. */
+    comfy_package_versions?: Array<{ name?: string; installed?: string }>;
   };
   devices: Array<{
     name: string;

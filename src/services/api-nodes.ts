@@ -548,11 +548,11 @@ function describeInputs(
   return Object.entries(specs).map(([name, spec]) => {
     // Spec shape: [type, config?] where type is a string (e.g. "STRING") or a
     // string[] of enum options (e.g. ["fast", "quality"]).
-    const type = Array.isArray(spec) ? spec[0] : (spec as unknown as string);
+    const type = Array.isArray(spec) ? spec[0] : spec;
     const config = (Array.isArray(spec) ? spec[1] : undefined) ?? {};
     return {
       name,
-      type: type as string | string[],
+      type,
       required,
       config: config as Record<string, unknown>,
     };

@@ -5428,7 +5428,7 @@ function execAsync(
   command: string,
   options: { timeout: number; windowsHide: boolean },
 ): Promise<{ stdout: string | Buffer; stderr: string | Buffer }> {
-  execAsyncImpl ??= promisify(exec) as unknown as ExecAsync;
+  execAsyncImpl ??= promisify(exec);
   return execAsyncImpl(command, options);
 }
 

@@ -113,7 +113,7 @@ async function requireLocalPackRoot(op: string): Promise<string> {
  * Mirrors the subgraph-aware walk in api-nodes.extractWorkflowClassTypes.
  */
 function collectUiNodes(workflow: WorkflowJSON): Array<Record<string, unknown>> {
-  const g = workflow as unknown as Record<string, unknown>;
+  const g: Record<string, unknown> = workflow;
   const defs = (g.definitions as { subgraphs?: unknown[] } | undefined)?.subgraphs;
   const defIds = new Set<string>();
   const defNodeLists: unknown[] = [];
@@ -269,8 +269,7 @@ interface ClassTypeOriginMap {
 
 function buildClassTypeOriginMap(objectInfo: ObjectInfo): ClassTypeOriginMap {
   const byClass = new Map<string, { pack: string | null; builtin: boolean }>();
-  const info = objectInfo as unknown as Record<string, { python_module?: string }>;
-  for (const [classType, def] of Object.entries(info ?? {})) {
+  for (const [classType, def] of Object.entries(objectInfo ?? {})) {
     const mod = def?.python_module ?? "";
     // `python_module` is e.g. "custom_nodes.ComfyUI-WanVideoWrapper.nodes" for
     // a custom pack, or "comfy_extras.nodes_*" / "nodes" for built-ins.
@@ -310,7 +309,7 @@ async function packsReferencedByWorkflow(
 
 export async function generateLock(workflow: WorkflowJSON): Promise<WorkflowLock> {
   const packRoot = await requireLocalPackRoot("generateLock");
-  const stats = (await getSystemStats()) as unknown as { system?: { comfyui_version?: string } };
+  const stats = await getSystemStats();
   const comfyuiVersion = stats.system?.comfyui_version ?? "unknown";
 
   // /object_info maps class_types to their originating packs. Model + pack

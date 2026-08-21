@@ -1848,7 +1848,9 @@ function expandSingleComponent(
   const proxyWidgets: [string, string][] = Array.isArray(compNode.properties?.proxyWidgets)
     ? (compNode.properties!.proxyWidgets as [string, string][])
     : [];
-  const rawWidgetValues = compNode.widgets_values ?? [];
+  // Typed `unknown` on purpose: `widgets_values` is declared as an array, but the
+  // name-keyed capture below arrives in the same field as a plain object.
+  const rawWidgetValues: unknown = compNode.widgets_values ?? [];
   // A subgraph instance normally serializes its promoted values POSITIONALLY,
   // parallel to proxyWidgets. Some captures key every widget BY NAME instead (the
   // shape the main converter already accepts). Read both, or a name-keyed capture
@@ -1856,7 +1858,7 @@ function expandSingleComponent(
   const widgetValues: unknown[] = Array.isArray(rawWidgetValues) ? rawWidgetValues : [];
   const wvByName: Record<string, unknown> | null =
     !Array.isArray(rawWidgetValues) && rawWidgetValues && typeof rawWidgetValues === "object"
-      ? (rawWidgetValues as unknown as Record<string, unknown>)
+      ? (rawWidgetValues as Record<string, unknown>)
       : null;
   // A flat name→value map can only be attributed when the promoted names are
   // UNIQUE. Two promotions of the same widget name (from different inner nodes)
@@ -3616,10 +3618,10 @@ export function convertUiToApi(
 
     // Preserve title metadata
     const title = node.title ?? node._meta?.title;
-    const meta: Record<string, unknown> = {};
+    const meta: { title?: string } = {};
     if (title && title !== classType) meta.title = title;
     if (Object.keys(meta).length > 0) {
-      workflow[nodeId]._meta = meta as { title?: string };
+      workflow[nodeId]._meta = meta;
     }
   }
 

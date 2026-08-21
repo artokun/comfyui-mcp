@@ -382,11 +382,13 @@ async function managerFetch<T>(
   // Some endpoints return empty bodies (e.g. queue ops). Parse defensively.
   const raw = await res.text();
   if (!raw) return undefined;
+  let parsed: unknown;
   try {
-    return JSON.parse(raw) as T;
+    parsed = JSON.parse(raw);
   } catch {
-    return raw as unknown as T;
+    parsed = raw;
   }
+  return parsed as T;
 }
 
 function sleep(ms: number): Promise<void> {

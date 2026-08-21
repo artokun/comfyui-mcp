@@ -7,6 +7,7 @@
 import { ConnectionError } from "../utils/errors.js";
 import { isCloudMode } from "../config.js";
 import { getQueue, getSystemStats, comfyApiFetch } from "../comfyui/client.js";
+import type { SystemStats } from "../comfyui/types.js";
 import { scrubLogLines } from "../comfyui/json-guard.js";
 
 const CRITICAL_MODEL_CATS = [
@@ -67,9 +68,9 @@ export async function runHealthCheck(
   const lines: string[] = ["## Health Check\n"];
 
   try {
-    const stats = (await getSystemStats({ diagnosticContext: "health" })) as unknown as Record<string, any>;
-    const sys = stats.system ?? {};
-    const dev = stats.devices?.[0] ?? {};
+    const stats = await getSystemStats({ diagnosticContext: "health" });
+    const sys: Partial<SystemStats["system"]> = stats.system ?? {};
+    const dev: Partial<SystemStats["devices"][number]> = stats.devices?.[0] ?? {};
     const vramTotalGB = dev.vram_total
       ? (dev.vram_total / 1024 ** 3).toFixed(1)
       : "?";

@@ -158,10 +158,9 @@ export async function generateVideo(
   // Sanitize file-ish inputs before they reach LoadImage / SaveVideo.
   if (args.image !== undefined) assertSafeInputFilename(args.image, "image");
 
-  const argsRecord = args as unknown as Record<string, unknown>;
   const seed: Record<string, unknown> = {};
   for (const key of DEFAULTABLE_KEYS) {
-    const v = argsRecord[key];
+    const v = args[key];
     if (v !== undefined) seed[key] = v;
   }
   const resolved = DefaultsManager.apply(seed);

@@ -55,7 +55,7 @@ const DEFAULTABLE_KEYS = [
   "checkpoint",
 ] as const;
 
-function withDefaults(args: Record<string, unknown>): Record<string, unknown> {
+function withDefaults(args: CommonArgs): Record<string, unknown> {
   const seed: Record<string, unknown> = {};
   for (const key of DEFAULTABLE_KEYS) {
     const v = args[key];
@@ -110,7 +110,7 @@ export async function generateWithControlNet(
   if (!args.control_image) {
     throw new ValidationError("control_image is required (upload it first with upload_image (action:\"image\"))");
   }
-  const resolved = withDefaults(args as unknown as Record<string, unknown>);
+  const resolved = withDefaults(args);
   const checkpoint = await resolveCheckpointOrThrow(args.checkpoint, resolved, deps.resolveCheckpoint);
 
   let controlnetModel = args.controlnet_model;
@@ -147,7 +147,7 @@ export async function generateWithIpAdapter(
   if (!args.reference_image) {
     throw new ValidationError("reference_image is required (upload it first with upload_image (action:\"image\"))");
   }
-  const resolved = withDefaults(args as unknown as Record<string, unknown>);
+  const resolved = withDefaults(args);
   const checkpoint = await resolveCheckpointOrThrow(args.checkpoint, resolved, deps.resolveCheckpoint);
 
   const workflow = createWorkflow("ip_adapter", {

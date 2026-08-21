@@ -63,7 +63,7 @@ export function sliceWorkflow(
   groupSubstrings: string[],
   opts: { keepBypassed?: string[] } = {},
 ): { workflow: UiWorkflow; stats: SliceStats } {
-  const g = wf as unknown as WGraph;
+  const g = wf as WGraph;
   const want = groupSubstrings.map((s) => s.trim().toLowerCase()).filter(Boolean);
   if (!want.length) throw new Error("Provide at least one group title substring to slice.");
   const keepBypassed = new Set(opts.keepBypassed ?? DEFAULT_KEEP_BYPASSED);
@@ -154,12 +154,12 @@ export function sliceWorkflow(
   for (const d of keptDefs) for (const nd of d.nodes ?? []) unbyp(nd);
 
   const newWf = {
-    ...(wf as unknown as WGraph),
+    ...g,
     nodes: newNodes,
     links: newLinks,
     groups: groups.filter((gr) => [...keep].some((id) => inBox(nodes.get(id)?.pos, gr.bounding))),
     definitions: { subgraphs: keptDefs },
-  } as unknown as UiWorkflow;
+  } as UiWorkflow;
 
   const badLinks = newLinks.filter((l) => !keep.has(l[1]) || !keep.has(l[3])).length;
   const orphanGets = newNodes.filter((n) => {
