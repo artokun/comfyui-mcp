@@ -368,6 +368,14 @@ describe("graph MUTATIONS still fail fast while a prompt is running (#1639)", ()
 /**
  * #1933 — the whole fence-reachable surface, driven end to end.
  *
+ * grok review (#1937 r1) found two tools wrongly excused below as unreachable:
+ * `panel_edit_node` (only the EMPTY edit is rejected) and `panel_clear` (reaches
+ * `graph_clear` once confirm says yes). Both excuses were statements about the
+ * CALL this file happened to make, not about what production can reach — and an
+ * undriven fenced tool is exactly where a wrong unique pairing goes unnoticed,
+ * the same shape as the `toMatch(/graph_outline/)` assertion that let #1933 ship.
+ * Both are driven now, and both mutations against them are asserted to bite.
+ *
  * The reverse index is built by inverting RETRY_TOKEN_CMD_BY_TOOL, a map
  * maintained for a DIFFERENT question (#694: which tools mint a retry token).
  * `panel-retry-identity.test.ts` (f) already proves every KEY of that map is a
@@ -379,7 +387,7 @@ describe("graph MUTATIONS still fail fast while a prompt is running (#1639)", ()
  * strictly worse than the bug being fixed, because the name is plausible.
  *
  * #778 is the standing record of what reading one list for another question
- * costs, so this does not argue the pairing from the map. It CALLS each tool with
+ * costs, so this does not argue the pairing from the map. It CALLS all 34 with
  * a prompt in flight and reads the tool name back out of the refusal the tool
  * itself produced. The pairings are not uniform — `panel_set_property` dispatches
  * `graph_set_node_property`, `panel_set_node_title` dispatches `graph_set_title`
@@ -387,6 +395,13 @@ describe("graph MUTATIONS still fail fast while a prompt is running (#1639)", ()
  */
 const FENCED_TOOL_ARGS: Readonly<Record<string, Record<string, unknown>>> = {
   panel_add_node: { type: "KSampler" },
+  // grok review (#1937 r1): reachable with any ONE editable field —
+  // validatePanelEditNodeArgs rejects only the EMPTY edit, so {node_id, title}
+  // sails through to ctx.call({ cmd: "graph_edit_node" }).
+  panel_edit_node: { node_id: 3, title: "t" },
+  // grok review (#1937 r1): reachable once confirm answers yes; the handler then
+  // does ctx.call({ cmd: "graph_clear" }). See CONFIRM_YES below.
+  panel_clear: {},
   panel_remove_node: { node_id: 3 },
   panel_connect: { from_node: 1, from_slot: 0, to_node: 2, to_slot: 0 },
   panel_disconnect: { node_id: 2, input: 0 },
@@ -438,10 +453,6 @@ const NOT_DRIVEN: Readonly<Record<string, string>> = {
   // constructible argument here. Covered by the ambiguity test above instead.
   panel_load_workflow: "graph_load — ambiguous, covered separately",
   panel_flatten_workflow: "graph_load — ambiguous, covered separately",
-  // Short-circuit BEFORE the fence: argument validation and a confirm card
-  // respectively, so no refusal is produced to read a name out of.
-  panel_edit_node: "rejects an empty edit before dispatch",
-  panel_clear: "confirm card resolves 'no' in this harness",
   // workflow_* commands, not graph_* — outside this fence entirely.
   panel_save_workflow: "workflow_save is not a graph_ command",
   panel_rename_workflow: "workflow_rename is not a graph_ command",
@@ -449,6 +460,14 @@ const NOT_DRIVEN: Readonly<Record<string, string>> = {
   // Deliberately exempt: queuing behind an in-flight job is the sweep path.
   panel_run: "graph_run is excluded from the fence by design",
 };
+
+/**
+ * Tools whose handler gates dispatch behind a confirm card. The harness answers
+ * YES so the call reaches the fence — without it `panel_clear` returns
+ * "Cancelled" and produces no refusal to read a name out of, which is exactly
+ * how it came to be mis-excused as unreachable.
+ */
+const CONFIRM_YES: ReadonlySet<string> = new Set(["panel_clear"]);
 
 describe("the refusal names the CALLING tool, across the whole fenced surface (#1933)", () => {
   it("every tool in the retry map is either driven here or explicitly excused", () => {
@@ -471,6 +490,7 @@ describe("the refusal names the CALLING tool, across the whole fenced surface (#
       startRender();
       const { bridge, sent } = makeBridge();
       const ctx = makePanelToolCtx(bridge, TAB, new WorkflowTargetStore());
+      if (CONFIRM_YES.has(tool)) ctx.confirm = async () => "yes";
       const text = textOf(await defByName(tool).handler(args as never, ctx));
 
       if (!/QUEUE BUSY/.test(text)) {
@@ -490,7 +510,7 @@ describe("the refusal names the CALLING tool, across the whole fenced surface (#
     expect(mismatches).toEqual([]);
     // A guard against the whole loop silently becoming a no-op.
     expect(checked).toBe(Object.keys(FENCED_TOOL_ARGS).length);
-    expect(checked).toBeGreaterThan(30);
+    expect(checked).toBeGreaterThan(33);
   });
 });
 
