@@ -6,6 +6,24 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### Fixed
+
+- **Bridge port 9180 collides with Logitech G HUB — default is now 9199 (#2030).**
+  `lghub_agent` already listens on `127.0.0.1:9180` on most gaming and creator
+  desktops, and the reclaim path offered to `taskkill /T /F` it as an "orphaned
+  session". A holder that does not speak the panel protocol is never prompted,
+  never killed, and never swept: the message names the process as not
+  comfyui-mcp and points at `COMFYUI_MCP_BRIDGE_PORT` (or the new default).
+  Fresh launches bind **9199** (panel HTTP-MCP 9198, pairing 9197, console 9196,
+  tunnel 9195 — counting *down* so 9200/Elasticsearch is never in the block).
+  A live 9180 session keeps 9180 across auto-update / self-restart: the child
+  inherits `COMFYUI_MCP_BRIDGE_PORT=<bound port>`, and an unpinned self-restart
+  from a pre-pin build stays on 9180 so the bind-retry still rides the parent's
+  release. A hand-set `COMFYUI_MCP_BRIDGE_PORT=9180` is a pin and is never
+  moved. 9180-era pairing on 9182 still answers. The orchestrator advertises
+  `ws://127.0.0.1:<bound-port>` on `advertise_bridge` so the panel can follow
+  (companion: [comfyui-mcp-panel#1596](https://github.com/artokun/comfyui-mcp-panel/issues/1596)).
+
 ## [0.52.47] - 2026-08-21
 
 ### Fixed

@@ -89,7 +89,7 @@ imagen si no hay conexión). También registra
 reinstala esos con Manager. En las imágenes `<= 1.5`, borra la carpeta del panel y
 reinicia: `rm -rf /workspace/custom_nodes/comfyui-mcp-panel`.
 
-## El panel dice “No hay ningún agente escuchando en el puente (ws://127.0.0.1:9180)”
+## El panel dice “No hay ningún agente escuchando en el puente (ws://127.0.0.1:9199)”
 
 Estás abriendo ComfyUI **en un navegador de una máquina distinta** de aquella
 donde se ejecuta el orquestador. El puente es solo de loopback por diseño, y
@@ -120,7 +120,7 @@ COMFYUI_MCP_BRIDGE_TOKEN=<pick-a-long-secret> \
 npx -y comfyui-mcp@latest --panel-orchestrator
 ```
 
-Imprime un `ws://<server-ip>:9180/?token=…` listo para pegar — ponlo en
+Imprime un `ws://<server-ip>:9199/?token=…` listo para pegar — ponlo en
 **Configuración → Avanzado → URL del puente** del panel, en cualquier máquina, y
 pulsa Conectar. Vincular el puente fuera de loopback **hace que se niegue a
 arrancar sin un token**, y cada conexión se comprueba en la actualización del

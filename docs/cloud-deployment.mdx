@@ -98,7 +98,7 @@ For a **remote HTTPS pod**, `connect` automatically opens a **secure encrypted
 `wss://` tunnel** (via Cloudflare) to the agent bridge on your machine and hands
 the pod's panel that URL for you — so the pod's HTTPS page reaches the agent with
 **no browser prompt, nothing to copy, in any browser**. For a **local** ComfyUI it
-uses the plain `ws://127.0.0.1:9180` loopback bridge. Either way the agent — and
+uses the plain `ws://127.0.0.1:9199` loopback bridge. Either way the agent — and
 your Claude/ChatGPT login — runs only on **your** machine; nothing is installed on
 the pod.
 
@@ -136,7 +136,7 @@ npx -y comfyui-mcp@latest connect http://localhost:3000
 
 Then open **http://localhost:3000**. Or connect at the pod's direct https URL but
 force the plain loopback bridge with **`--insecure-bridge`** (you then arrange your
-own path for the pod page to reach `ws://127.0.0.1:9180`).
+own path for the pod page to reach `ws://127.0.0.1:9199`).
 
 Want a **stable, self-hosted alternative** to the default Cloudflare quick tunnel
 — your own domain, no ephemeral hostname, full ownership of that hop — instead of

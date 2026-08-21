@@ -86,7 +86,7 @@ partir da seed da imagem). Ele também registra
 quebrados — reinstale esses pelo Manager. Nas imagens `<= 1.5`, apague a pasta
 do painel e reinicie: `rm -rf /workspace/custom_nodes/comfyui-mcp-panel`.
 
-## O painel diz "Nenhum agente está escutando na ponte (ws://127.0.0.1:9180)"
+## O painel diz "Nenhum agente está escutando na ponte (ws://127.0.0.1:9199)"
 
 Você está abrindo o ComfyUI **em um navegador de uma máquina diferente** daquela
 onde o orquestrador roda. A ponte é somente loopback por design, e `127.0.0.1`
@@ -117,7 +117,7 @@ COMFYUI_MCP_BRIDGE_TOKEN=<pick-a-long-secret> \
 npx -y comfyui-mcp@latest --panel-orchestrator
 ```
 
-Ele imprime um `ws://<server-ip>:9180/?token=…` pronto para colar — coloque isso
+Ele imprime um `ws://<server-ip>:9199/?token=…` pronto para colar — coloque isso
 em **Configurações → Avançado → URL da ponte** no painel, em qualquer máquina, e
 clique em Conectar. Um bind fora do loopback **se recusa a iniciar sem um
 token**, e toda conexão é verificada no upgrade do WebSocket (em tempo

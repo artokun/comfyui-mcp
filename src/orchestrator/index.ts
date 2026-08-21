@@ -3,7 +3,7 @@
 // Claude session stays free. Launch with `comfyui-mcp --panel-orchestrator`
 // (or COMFYUI_MCP_PANEL_ORCHESTRATOR=1).
 //
-// It owns the UI bridge (port 9180) directly — so it SEES panel messages instead
+// It owns the UI bridge (DEFAULT_PANEL_BRIDGE_PORT, currently 9199) directly — so it SEES panel messages instead
 // of relying on an idle interactive session to notice a channel push — and spawns
 // one Claude Agent SDK streaming session per panel tab (src/orchestrator/
 // panel-agent.ts). Each agent runs on the user's Claude SUBSCRIPTION with no API
@@ -25,7 +25,7 @@ import { tmpdir, homedir, networkInterfaces } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes, randomUUID } from "node:crypto";
-import readline from "node:readline";
+
 import {
   startUiBridge,
   isLoopbackBindHost,
@@ -40,7 +40,22 @@ import {
   publishFrontendVirtualTypes,
   type FrontendVirtualTypesEntry,
 } from "../services/frontend-virtual-types.js";
-import { setupSecureBridge, resolveComfyuiPathForTarget, type SecureBridge } from "../services/secure-bridge.js";
+import { setupSecureBridge, resolveComfyuiPathForTarget, advertiseBridge, type SecureBridge } from "../services/secure-bridge.js";
+import {
+  localBridgeUrl,
+  panelPortBlock,
+  pinBoundBridgePort,
+  resolveBridgePort,
+} from "../services/bridge-ports.js";
+import {
+  orchLockPath,
+  pidExists,
+  pidListeningOnPort,
+  portKillHint,
+  probeComfyUi,
+  startupDeadlineHolderAdvice,
+  tryReclaimBridgePort,
+} from "../services/bridge-port-reclaim.js";
 import { judgeHelloRetarget, canonComfyuiTargetUrl } from "../services/hello-retarget.js";
 import { startQuickTunnel } from "../services/tunnel.js";
 import { detectInstallMode } from "../services/self-update.js";
@@ -562,10 +577,6 @@ function formatQueueNote(rep: StallReport): string | null {
  * it, so the panel pack can reliably identify and replace a stale orchestrator
  * left over from a previous ComfyUI session (the "orphan on the port" trap).
  */
-function orchLockPath(port: number): string {
-  return join(tmpdir(), `comfyui-mcp-panel-orch-${port}.json`);
-}
-
 function readWindowsProcessStartedAtMs(pid: number): number | null {
   // Get-CimInstance already returns CreationDate as a .NET DateTime (CIM converts
   // the raw WMI DMTF string for us), so use it directly — feeding it back through
@@ -604,16 +615,6 @@ function readProcessStartedAtMs(pid: number): number | null {
   return null;
 }
 
-function pidExists(pid: number): boolean {
-  try {
-    process.kill(pid, 0); // signal 0 = existence probe, doesn't actually signal
-    return true;
-  } catch (err) {
-    // EPERM = exists but not ours to signal.
-    return (err as NodeJS.ErrnoException).code === "EPERM";
-  }
-}
-
 function parentIdentityMatches(pid: number, expectedStartedAtMs: number | null): boolean {
   if (!pidExists(pid)) return false;
   if (!expectedStartedAtMs) return true; // legacy/manual launch: PID liveness only.
@@ -623,263 +624,6 @@ function parentIdentityMatches(pid: number, expectedStartedAtMs: number | null):
   // to liveness. The pack's Connect-time orphan check is the backstop for reuse.
   if (!actualStartedAtMs) return true;
   return Math.abs(actualStartedAtMs - expectedStartedAtMs) <= 2000;
-}
-
-interface OrchestratorLock {
-  pid?: unknown;
-  startedAt?: unknown;
-  version?: unknown;
-  comfyuiUrl?: unknown;
-}
-
-/**
- * Kill a process AND ITS TREE. A bare signal to the holder's pid leaves its
- * children (cloudflared tunnel, spawned agent MCP subprocesses) alive — the
- * field report "it doesn't fully terminate" (2026-07-08): Ctrl+C/kill of the
- * node process orphaned cloudflared, and stale children kept state around.
- * Windows: taskkill /T /F (tree + force). POSIX: best-effort children sweep
- * (pkill -P) around the usual TERM → KILL escalation.
- */
-function killProcessTreeCrossPlatform(pid: number, mode: "term" | "kill"): void {
-  if (process.platform === "win32") {
-    // No graceful tree-signal exists on Windows; /T /F is the reliable path.
-    execFileSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore" });
-    return;
-  }
-  const sig = mode === "term" ? "SIGTERM" : "SIGKILL";
-  try {
-    execFileSync("pkill", [`-${sig.replace("SIG", "")}`, "-P", String(pid)], { stdio: "ignore" });
-  } catch {
-    // no children / pkill absent — the direct signal below still applies
-  }
-  process.kill(pid, sig);
-}
-
-/** Copy-paste "free this port" commands — LAST RESORT only (non-interactive
- *  shells where we cannot prompt, or a kill that failed): the interactive path
- *  resolves the owner from the port and kills it itself after consent. */
-function portKillHint(port: number): string {
-  const ps = `Get-NetTCPConnection -LocalPort ${port} -State Listen | % { taskkill /PID $_.OwningProcess /T /F }`;
-  const sh = `lsof -ti tcp:${port} -s tcp:listen | xargs -r kill -9`;
-  return process.platform === "win32"
-    ? `To free the port manually:\n  PowerShell:  ${ps}\n  bash/zsh:    ${sh}`
-    : `To free the port manually:\n  bash/zsh:    ${sh}\n  PowerShell:  ${ps}`;
-}
-
-
-/**
- * PROBE TIMEOUT. These four inspections run SYNCHRONOUSLY, so a command that
- * hangs blocks the whole event loop — no bridge traffic, no agent turns,
- * nothing — and they run on the startup/takeover path where being stuck is
- * indistinguishable from being broken. `lsof` is the known offender (it stalls
- * on unreachable network mounts), and `netstat` is slow on a busy host.
- *
- * 5s matches what the rest of the codebase already uses for these EXACT
- * commands — port-owner.ts times out its `lsof`/`netstat` and process-control.ts
- * its `tasklist`. These copies simply never got it.
- *
- * Timing out costs nothing in correctness: both callers already fail closed on
- * a throw (null / "unknown"), and both READ that as "could not determine" —
- * pidListeningOnPort's null makes the caller decline to claim a takeover rather
- * than assert the port is free.
- */
-const PORT_PROBE_TIMEOUT_MS = 5000;
-/** Resolve which pid is LISTENING on a local TCP port (null if none/unknown). */
-function pidListeningOnPort(port: number): number | null {
-  try {
-    if (process.platform === "win32") {
-      const out = execFileSync("netstat", ["-ano", "-p", "tcp"], {
-        encoding: "utf8",
-        timeout: PORT_PROBE_TIMEOUT_MS,
-      });
-      for (const line of out.split(/\r?\n/)) {
-        const m = line.match(/TCP\s+\S+:(\d+)\s+\S+\s+LISTENING\s+(\d+)\s*$/i);
-        if (m && Number(m[1]) === port) return Number(m[2]);
-      }
-      return null;
-    }
-    const out = execFileSync("lsof", ["-ti", `tcp:${port}`, "-s", "tcp:LISTEN"], {
-      encoding: "utf8",
-      timeout: PORT_PROBE_TIMEOUT_MS,
-    });
-    const pid = Number(out.trim().split(/\s+/)[0]);
-    return Number.isInteger(pid) && pid > 0 ? pid : null;
-  } catch {
-    return null;
-  }
-}
-
-/** Best-effort executable name for a pid ("unknown" when unreadable). */
-function processNameOf(pid: number): string {
-  try {
-    if (process.platform === "win32") {
-      const out = execFileSync("tasklist", ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"], {
-        encoding: "utf8",
-        timeout: PORT_PROBE_TIMEOUT_MS,
-      });
-      return /^"([^"]+)"/m.exec(out)?.[1] ?? "unknown";
-    }
-    return (
-      execFileSync("ps", ["-p", String(pid), "-o", "comm="], {
-        encoding: "utf8",
-        timeout: PORT_PROBE_TIMEOUT_MS,
-      }).trim() ||
-      "unknown"
-    );
-  } catch {
-    return "unknown";
-  }
-}
-
-/** Can the target ComfyUI answer /system_stats within timeoutMs? */
-async function probeComfyUi(url: string, timeoutMs = 3000): Promise<boolean> {
-  try {
-    const ctl = new AbortController();
-    const timer = setTimeout(() => ctl.abort(), timeoutMs);
-    const res = await fetch(new URL("system_stats", url.endsWith("/") ? url : `${url}/`), {
-      signal: ctl.signal,
-    });
-    clearTimeout(timer);
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
-
-function readOrchestratorLock(lockPath: string): OrchestratorLock | null {
-  try {
-    const raw = JSON.parse(readFileSync(lockPath, "utf8")) as unknown;
-    return raw && typeof raw === "object" ? (raw as OrchestratorLock) : null;
-  } catch {
-    return null; // missing / unreadable / not JSON — nothing to reclaim from.
-  }
-}
-
-/** A single y/n question on the real terminal. Resolves false on anything but
- *  an explicit y/yes (a closed stdin, EOF, or a stray keypress all count as no). */
-function promptYesNo(question: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    rl.question(question, (answer) => {
-      rl.close();
-      resolve(/^y(es)?$/i.test(answer.trim()));
-    });
-  });
-}
-
-/**
- * The bridge port is almost always held by a PREVIOUS comfyui-mcp orchestrator
- * that never exited — a stale panel session, one orphaned by a ComfyUI crash,
- * or simply an older version still running while the user upgraded — not some
- * unrelated process. Rather than leave the user to go hunt down and kill a PID
- * themselves (the old behavior: log a warning and stay degraded), read the
- * lockfile the holder wrote at its own startup (see below) and, ONLY when
- * stdin is a real terminal — `--panel-orchestrator` / `connect` run standalone
- * in the user's own shell and are mutually exclusive with the stdio MCP server,
- * so stdin is never claimed by the MCP JSON-RPC protocol here — interactively
- * offer to stop it and retry the bind.
- *
- * Returns false (falls back to the existing hard-fail message) whenever it
- * can't confidently identify a reclaimable holder, isn't running
- * interactively, or the user declines.
- */
-async function tryReclaimBridgePort(
-  bridge: UiBridge,
-  port: number,
-  lockPath: string,
-): Promise<boolean> {
-  if (!process.stdin.isTTY || !process.stdout.isTTY) return false;
-  const lock = readOrchestratorLock(lockPath);
-  const lockPid =
-    typeof lock?.pid === "number" && Number.isInteger(lock.pid) && lock.pid > 0 && pidExists(lock.pid)
-      ? lock.pid
-      : null;
-  // The lockfile can be stale/missing while SOMETHING still owns the port (a
-  // crashed session's orphaned child, an unrelated app). Resolve the actual
-  // listener from the port so a single consent can clear EVERYTHING.
-  const portPid = pidListeningOnPort(port);
-  const pid = lockPid ?? portPid;
-  if (!pid) return false;
-
-  const myUrl = process.env.COMFYUI_URL || "http://127.0.0.1:8188";
-  let holderNote: string;
-  let detailNote = "";
-  if (lockPid) {
-    const myVersion = detectInstallMode().currentVersion ?? "unknown";
-    const heldVersion = typeof lock?.version === "string" ? lock.version : "unknown";
-    const startedAt = typeof lock?.startedAt === "string" ? lock.startedAt : null;
-    holderNote =
-      heldVersion !== "unknown" && myVersion !== "unknown" && heldVersion !== myVersion
-        ? `an older comfyui-mcp v${heldVersion} (this is v${myVersion})`
-        : `another comfyui-mcp v${heldVersion} session`;
-    // Show WHICH ComfyUI each side is driving — the classic tangle is a stale
-    // session recalled from shell history still "driving" a terminated pod
-    // while the user tries to connect to the live one; without the URLs both
-    // sessions look identical and the takeover choice is a coin flip.
-    const heldUrl = typeof lock?.comfyuiUrl === "string" ? lock.comfyuiUrl : null;
-    if (startedAt) detailNote += `, started ${startedAt}`;
-    if (heldUrl) {
-      const alive = await probeComfyUi(heldUrl);
-      detailNote += `, driving ${heldUrl}${alive ? "" : " (NOT RESPONDING — likely a terminated pod / stale session)"}`;
-    }
-  } else {
-    holderNote = `an unidentified process ("${processNameOf(pid)}" — no comfyui-mcp lockfile; likely an orphaned session or another app)`;
-  }
-  logger.warn(
-    `[panel-orchestrator] port ${port} is already held by ${holderNote} — pid ${pid}${detailNote}.`,
-  );
-  const ok = await promptYesNo(
-    `Stop it (and its whole process tree) and take over port ${port} for ${myUrl}? [y/N] `,
-  );
-  if (!ok) {
-    logger.info(`[panel-orchestrator] leaving pid ${pid} alone.\n${portKillHint(port)}`);
-    return false;
-  }
-
-  // One Y = full authority to clear the port: kill the lockfile's holder AND
-  // whatever is actually listening (they can differ when the lockfile is
-  // stale), whole trees, escalating to a hard kill for anything that survives.
-  const targets = [...new Set([lockPid, portPid].filter((p): p is number => p != null))];
-  logger.info(
-    `[panel-orchestrator] stopping pid${targets.length > 1 ? "s" : ""} ${targets.join(", ")} (and their process trees) to reclaim port ${port}…`,
-  );
-  for (const t of targets) {
-    try {
-      killProcessTreeCrossPlatform(t, "term");
-    } catch (err) {
-      logger.warn(
-        `[panel-orchestrator] couldn't stop pid ${t}: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-  }
-  // Give them a moment to release the port; escalate to a hard tree-kill for
-  // survivors, sweep any NEW listener that appeared (a respawned child), then
-  // retry the bind once (bridge.start() runs its own EADDRINUSE backoff,
-  // covering the OS's brief port-release lag).
-  const deadline = Date.now() + 5000;
-  while (Date.now() < deadline && targets.some((t) => pidExists(t))) {
-    await new Promise((r) => setTimeout(r, 200));
-  }
-  for (const t of targets) {
-    if (!pidExists(t)) continue;
-    try {
-      killProcessTreeCrossPlatform(t, "kill");
-    } catch {
-      // already gone
-    }
-  }
-  const straggler = pidListeningOnPort(port);
-  if (straggler && !targets.includes(straggler)) {
-    logger.warn(`[panel-orchestrator] a new pid ${straggler} grabbed port ${port} — stopping it too.`);
-    try {
-      killProcessTreeCrossPlatform(straggler, "kill");
-    } catch {
-      // best-effort
-    }
-  }
-  await new Promise((r) => setTimeout(r, 300));
-  bridge.start();
-  return bridge.whenReady();
 }
 
 /**
@@ -1034,7 +778,7 @@ export class DownloadProgressSnapshots {
  * #1524 — a startup that never finishes must not become a silent resident.
  *
  * A respawn was observed alive for hours holding NO listening ports, while an
- * older instance owned 9180/9181/9183. That is not the bind-failure path: that
+ * older instance owned the bridge port block. That is not the bind-failure path: that
  * one is bounded (five attempts, then `whenReady()` resolves false), tries to
  * reclaim the port, and exits non-zero with a clear message. A process with no
  * ports at all never got that far — it hung EARLIER, so any guard wrapped around
@@ -1065,10 +809,17 @@ export class DownloadProgressSnapshots {
  */
 export function armStartupDeadline(
   port: number,
-  deps: { exit?: (code: number) => never; incumbent?: (p: number) => number | undefined } = {},
+  deps: {
+    exit?: (code: number) => never;
+    incumbent?: (p: number) => number | undefined;
+    holderAdvice?: (pid: number) => string;
+  } = {},
 ): () => void {
   const exit = deps.exit ?? ((code: number) => process.exit(code));
   const findIncumbent = deps.incumbent ?? pidListeningOnPort;
+  const holderAdvice =
+    deps.holderAdvice ??
+    ((pid: number) => startupDeadlineHolderAdvice({ port, pid }));
   // CLAMPED, not merely "positive and finite" (codex). Node coerces a
   // sub-millisecond delay AND anything past the 32-bit signed limit to 1ms — so
   // `0.5`, or a large number typed by someone trying to RAISE the deadline, would
@@ -1086,8 +837,7 @@ export function armStartupDeadline(
         `process holds no bridge port — exiting rather than lingering with no way to serve panel_* ` +
         `tools.` +
         (incumbent
-          ? ` Port ${port} is held by pid ${incumbent}; if that is an older comfyui-mcp, stop it ` +
-            `and start this one again.`
+          ? holderAdvice(incumbent)
           : ` Nothing is listening on ${port} either, so the hang is before the bind — please ` +
             `report this with the last lines above (#1524).`) +
         ` Raise COMFYUI_MCP_STARTUP_DEADLINE_MS if this machine is legitimately slower than that.`,
@@ -1113,11 +863,13 @@ export async function runPanelOrchestrator(): Promise<void> {
   });
 
   // #1524 — armed HERE, before anything that can block, and disarmed only once
-  // the bridge port is actually held. The port is re-derived rather than passed
-  // in because the deadline has to exist before the block that computes it.
-  const disarmStartupDeadline = armStartupDeadline(
-    Number(process.env.COMFYUI_MCP_BRIDGE_PORT) || 9180,
-  );
+  // the bridge port is actually held. Resolved once and pinned into this
+  // process env so a self-restart child inherits the *effective* port, never a
+  // new compiled default (#2030).
+  const lockPort = resolveBridgePort();
+  pinBoundBridgePort(lockPort);
+  const ports = panelPortBlock(lockPort);
+  const disarmStartupDeadline = armStartupDeadline(lockPort);
   process.on("uncaughtException", (err) => {
     // A synchronous uncaught throw leaves the process in an UNDEFINED state. The
     // old "log + continue" here was a zombie root cause — the orchestrator stayed
@@ -1220,8 +972,8 @@ export async function runPanelOrchestrator(): Promise<void> {
   let bridgeToken =
     envBridgeToken ?? (wantSecureBridge || lanBridge ? randomBytes(24).toString("hex") : null);
 
-  // Dedicated PANEL bridge port (default 9180). Token-gated in secure/LAN mode.
-  const lockPort = Number(process.env.COMFYUI_MCP_BRIDGE_PORT) || 9180;
+  // Dedicated PANEL bridge port. Token-gated in secure/LAN mode.
+  // lockPort / ports were resolved and pinned at the top of this function.
   const lockPath = orchLockPath(lockPort);
   const bridge = startUiBridge(lockPort, bridgeToken, bridgeHost);
   // Starts empty intentionally: a newly connected panel must be able to clear
@@ -1238,7 +990,7 @@ export async function runPanelOrchestrator(): Promise<void> {
   // interfaces (so a phone can reach it), while the primary loopback bridge stays
   // token-less. LAN mode returns a same-wifi ws:// URL; tunnel mode fronts the same
   // token-gated listener with a cloudflared wss:// for anywhere access.
-  const pairPort = lockPort + 2; // avoid the panel_* HTTP-MCP port (lockPort + 1)
+  const pairPort = ports.pairing;
   // A stable pairing token can be pinned via COMFYUI_MCP_PAIR_TOKEN. Without it,
   // the token is generated per session, so a phone's saved bridge URL dies on the
   // next orchestrator restart and the user must re-pair. With it pinned, the token
@@ -1317,14 +1069,20 @@ export async function runPanelOrchestrator(): Promise<void> {
   // holds it, fail loudly instead of running uselessly. (This also avoids the
   // case where a failed bind leaves the process with no live handles and it
   // exits silently.) First try to reclaim it interactively (see
-  // tryReclaimBridgePort) — almost always a stale/older comfyui-mcp session,
-  // not some unrelated process — before giving up.
+  // tryReclaimBridgePort) — only when the holder speaks the panel protocol.
+  // A foreign holder (Logitech G HUB on 9180) is named and left running.
   let bound = await bridge.whenReady();
-  if (!bound) bound = await tryReclaimBridgePort(bridge, lockPort, lockPath);
+  let reclaim: Awaited<ReturnType<typeof tryReclaimBridgePort>> | undefined;
   if (!bound) {
-    logger.error(
-      `[panel-orchestrator] could not bind the panel bridge port — another process owns it. Free that port and restart the orchestrator. Override the port with COMFYUI_MCP_BRIDGE_PORT.\n${portKillHint(lockPort)}`,
-    );
+    reclaim = await tryReclaimBridgePort(bridge, lockPort, lockPath);
+    bound = reclaim.bound;
+  }
+  if (!bound) {
+    if (reclaim?.ownership !== "not-ours") {
+      logger.error(
+        `[panel-orchestrator] could not bind the panel bridge port — another process owns it. Free that port and restart the orchestrator. Override the port with COMFYUI_MCP_BRIDGE_PORT.\n${portKillHint(lockPort)}`,
+      );
+    }
     process.exit(1);
   }
   // The port is ours — startup got where it needed to. Everything after this is
@@ -1501,11 +1259,11 @@ export async function runPanelOrchestrator(): Promise<void> {
   const model = process.env.COMFYUI_MCP_PANEL_MODEL ?? "claude-opus-5";
   const envEffort = process.env.COMFYUI_MCP_PANEL_EFFORT;
   const effort: Effort | undefined = isEffort(envEffort) ? envEffort : undefined;
-  // Single-port multi-provider: ONE orchestrator on ONE bridge port (default
-  // 9180) serves ALL providers — the panel picks a provider per tab via the
-  // hello/set_backend handshake (see "Per-tab backend" below). +1 is the panel_*
-  // HTTP-MCP port, +2 the phone-pairing listener. COMFYUI_MCP_BRIDGE_PORT overrides.
-  const bridgePort = Number(process.env.COMFYUI_MCP_BRIDGE_PORT) || 9180;
+  // Single-port multi-provider: ONE orchestrator on ONE bridge port serves ALL
+  // providers — the panel picks a provider per tab via the hello/set_backend
+  // handshake. Sibling ports come from panelPortBlock (count down from 9199;
+  // 9180-era sessions keep +1..+4 so pairing on 9182 still answers).
+  const bridgePort = lockPort;
 
   // Open the cloudflared tunnel and advertise the wss URL to the pod so its
   // browser panel connects automatically — the user never copies a URL. Best
@@ -1514,7 +1272,13 @@ export async function runPanelOrchestrator(): Promise<void> {
   let secureBridge: SecureBridge | null = null;
   if (wantSecureBridge && bridgeToken) {
     try {
-      secureBridge = await setupSecureBridge({ bridgePort, comfyuiUrl, token: bridgeToken, bridge });
+      secureBridge = await setupSecureBridge({
+        bridgePort,
+        comfyuiUrl,
+        token: bridgeToken,
+        bridge,
+        localUrl: localBridgeUrl(lockPort),
+      });
     } catch (err) {
       logger.error(
         `[panel-orchestrator] secure bridge (cloudflared) failed: ${err instanceof Error ? err.message : String(err)}. ` +
@@ -1522,6 +1286,14 @@ export async function runPanelOrchestrator(): Promise<void> {
           `SSH tunnel (ssh -L 3000:localhost:3000 …) at http://localhost:3000.`,
       );
     }
+  }
+
+  // Local sessions: tell the pack the loopback URL we actually bound, so a
+  // panel that still guesses 9180 can follow 9199 (and a migrated 9180 session
+  // stays discoverable). Same advertise_bridge POST the tunnel path uses.
+  if (isLoopbackUrl(comfyuiUrl)) {
+    const local = localBridgeUrl(lockPort);
+    void advertiseBridge(comfyuiUrl, local, undefined, local);
   }
 
   // Cross-process download-progress + control channel: each tab's comfyui MCP
@@ -1772,7 +1544,7 @@ export async function runPanelOrchestrator(): Promise<void> {
   // ── Per-tab backend (single-port multi-provider) ──────────────────────────
   // ONE orchestrator on ONE bridge port serves ALL providers; the panel picks a
   // provider per tab via the `hello`/`set_backend` handshake, instead of the node
-  // spawning one process per provider on its own port (9180/9181/9182).
+  // spawning one process per provider on its own port.
   //
   // SESSIONS ARE ORCHESTRATOR-SCOPED (#884, owner-stated invariant): one agent
   // session spans every panel, browser tab and open workflow — a workflow-scoped
@@ -2215,14 +1987,14 @@ export async function runPanelOrchestrator(): Promise<void> {
   // The orchestrator-hosted loopback HTTP MCP for panel_* tools. Started for the
   // non-Claude backends (Codex + Gemini), which can't host an in-process SDK MCP
   // server the way Claude does. Port: COMFYUI_MCP_PANEL_MCP_PORT, default
-  // bridgePort+1 (loopback only).
+  // panelPortBlock(bridge).panelMcp (loopback only).
   // Start the loopback HTTP panel-MCP ALWAYS: with single-port multi-provider any
   // tab may pick codex/gemini at runtime, and those backends drive the canvas
   // through this server (Claude tabs use the in-process SDK server instead). The
   // per-tab session routing (`urlFor(panelTabId)`) already isolates tabs.
   let panelMcpHttp: PanelMcpHttpServer | null = null;
   {
-    const panelMcpPort = Number(process.env.COMFYUI_MCP_PANEL_MCP_PORT) || bridgePort + 1;
+    const panelMcpPort = Number(process.env.COMFYUI_MCP_PANEL_MCP_PORT) || ports.panelMcp;
     try {
       panelMcpHttp = await startPanelMcpHttpServer(bridge, panelMcpPort, "127.0.0.1", workflowTargets);
     } catch (err) {
@@ -2233,14 +2005,14 @@ export async function runPanelOrchestrator(): Promise<void> {
   }
 
   // Loopback MCP console (control plane): OAuth, MCP mappings, service lifecycle.
-  // Default port bridge+3 (9180→9183). NOT +2: bridge+2 is the phone-pairing
-  // listener's port (see pairPort above), and the fork this console was ported
-  // from predates pairing — on Windows both binds accidentally coexist
-  // (specific 127.0.0.1 vs wildcard 0.0.0.0), on Linux whichever comes second
-  // dies with EADDRINUSE. The panel never hardcodes this port — it uses the
-  // console_url advertised on the `backends` frame.
+  // Default from panelPortBlock (9199→9196; 9180-era → 9183). NOT the pairing
+  // port: the fork this console was ported from predates pairing — on Windows
+  // both binds accidentally coexist (specific 127.0.0.1 vs wildcard 0.0.0.0),
+  // on Linux whichever comes second dies with EADDRINUSE. The panel never
+  // hardcodes this port — it uses the console_url advertised on the `backends`
+  // frame.
   let panelConsoleHttp: PanelConsoleHttpServer | null = null;
-  const consolePort = Number(process.env.COMFYUI_MCP_CONSOLE_PORT) || bridgePort + 3;
+  const consolePort = Number(process.env.COMFYUI_MCP_CONSOLE_PORT) || ports.console;
   const consoleToken = randomBytes(24).toString("hex");
   try {
     panelConsoleHttp = await startPanelConsoleHttpServer({
@@ -4061,6 +3833,10 @@ export async function runPanelOrchestrator(): Promise<void> {
       // every connect self-heals a missed advertise with no extra risk — the
       // POST is cheap and idempotent (see advertiseBridge's own docstring).
       if (secureBridge && isRemoteHttpsUrl(comfyuiUrl)) void secureBridge.advertise(comfyuiUrl);
+      else if (isLoopbackUrl(comfyuiUrl)) {
+        const local = localBridgeUrl(lockPort);
+        void advertiseBridge(comfyuiUrl, local, undefined, local);
+      }
       // Per-tab backend selection (single-port multi-provider). The panel names
       // its chosen provider on connect (and on a switch it re-sends hello / a
       // set_backend); absent or unknown → the default. The SAME shared
@@ -6697,7 +6473,7 @@ export async function runPanelOrchestrator(): Promise<void> {
   // MEMORY (the panel __init__'s advertise store). A restart — which the agent
   // does after every custom-node install — WIPES it: the browser reloads,
   // fetches an empty /bridge_url, falls back to the token-less
-  // ws://127.0.0.1:9180, and is rejected ("missing/invalid token"). It can't
+  // ws://127.0.0.1:<bridge>, and is rejected ("missing/invalid token"). It can't
   // send a hello to trigger the on-hello re-advertise (line ~1452) BECAUSE it
   // never gets a valid connection — a deadlock that only broke when something
   // eventually nudged it, stranding the agent mid-task for minutes. Re-POSTing
@@ -6718,9 +6494,9 @@ export async function runPanelOrchestrator(): Promise<void> {
   // its OWN token-gated listener (same addListener mechanism the phone-pair
   // flow uses) on a dedicated port — never retrofit auth onto the public path
   // and never open a tunnel in front of an unauthenticated one (codex P1).
-  // Port map: +0 bridge, +1 panel_* HTTP-MCP, +2 phone-pair, +3 console (line
-  // ~1427), +4 tunnel listener (codex finding: +3 was already taken).
-  const tunnelPort = lockPort + 4;
+  // Sibling ports: panelPortBlock (count down from 9199; 9180-era counts up so
+  // pairing on 9182 still answers). Tunnel is the last slot.
+  const tunnelPort = ports.tunnel;
   let tunnelToken: string | null = null;
   let tunnelListenerStarted = false;
   const ensureSecureBridge = async (url: string): Promise<void> => {
@@ -6752,6 +6528,7 @@ export async function runPanelOrchestrator(): Promise<void> {
             comfyuiUrl: url,
             token,
             bridge,
+            localUrl: localBridgeUrl(lockPort),
             // The setup itself advertises on completion — guard it too: a slow
             // tunnel must not hand the bridge URL to a pod the user already
             // left (codex finding: the post-await guard alone couldn't stop it).

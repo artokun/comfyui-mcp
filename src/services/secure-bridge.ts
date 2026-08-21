@@ -1,6 +1,6 @@
 // Secure bridge: when `connect` (or the panel orchestrator) drives a REMOTE
 // https ComfyUI (e.g. a RunPod pod), the pod's HTTPS panel page cannot open a
-// plain `ws://127.0.0.1:9180` to the local bridge — browsers block insecure
+// plain `ws://127.0.0.1:<bridge>` to the local bridge — browsers block insecure
 // (ws://) sockets from a secure (https://) page (mixed-content) and gate
 // public→loopback access (Private Network Access). This module makes it work
 // transparently, via one of two backends:
@@ -63,13 +63,20 @@ const ADVERTISE_TIMEOUT_MS = 10_000;
  * Retries a few times — the orchestrator may advertise before the pod route is
  * warm. Returns true on the first 2xx.
  */
-export async function advertiseBridge(comfyuiUrl: string, wssUrl: string, shouldAdvertise?: (target: string) => boolean): Promise<boolean> {
+export async function advertiseBridge(
+  comfyuiUrl: string,
+  wssUrl: string,
+  shouldAdvertise?: (target: string) => boolean,
+  localUrl?: string,
+): Promise<boolean> {
   let endpoint: string;
   try {
     endpoint = new URL("/comfyui_mcp_panel/advertise_bridge", comfyuiUrl).toString();
   } catch {
     return false;
   }
+  const body: { url: string; local_url?: string } = { url: wssUrl };
+  if (localUrl) body.local_url = localUrl;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     // Re-check per attempt: the target may have moved DURING the retry sequence
     // — a stale pod must never receive the bridge URL (codex finding).
@@ -78,7 +85,7 @@ export async function advertiseBridge(comfyuiUrl: string, wssUrl: string, should
       const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...getComfyUIAuthHeaders() },
-        body: JSON.stringify({ url: wssUrl }),
+        body: JSON.stringify(body),
         // Without this the retry loop could not retry: a pod behind a proxy that
         // accepts the connection and then answers nothing (the characteristic
         // RunPod-route failure this function's own comment describes as "not warm
@@ -197,6 +204,9 @@ export interface SetupSecureBridgeOpts {
    *  later retarget must not hand the bridge URL to a stale pod — codex).
    *  Receives each candidate target URL. */
   shouldAdvertise?: (target: string) => boolean;
+  /** Loopback `ws://127.0.0.1:<bound-port>` so the pack's `/bridge_url` can
+   *  follow the orchestrator off 9180 (#2030, panel#1596). */
+  localUrl?: string;
 }
 
 /**
@@ -288,7 +298,7 @@ async function setupRelayBridge(opts: SetupSecureBridgeOpts): Promise<SecureBrid
   logger.info(`[secure-bridge] bridge exposed via relay at ${maskToken(wssUrl)}`);
 
   const advertise = async (target: string): Promise<boolean> => {
-    const ok = await advertiseBridge(target, wssUrl, opts.shouldAdvertise);
+    const ok = await advertiseBridge(target, wssUrl, opts.shouldAdvertise, opts.localUrl);
     if (ok) {
       logger.info(`[secure-bridge] advertised the secure bridge URL to the pod panel`);
     } else {
@@ -334,7 +344,7 @@ async function setupCloudflaredBridge(opts: SetupSecureBridgeOpts): Promise<Secu
   logger.info(`[secure-bridge] bridge exposed securely at ${maskToken(wssUrl)}`);
 
   const advertise = async (target: string): Promise<boolean> => {
-    const ok = await advertiseBridge(target, wssUrl, opts.shouldAdvertise);
+    const ok = await advertiseBridge(target, wssUrl, opts.shouldAdvertise, opts.localUrl);
     if (ok) {
       logger.info(`[secure-bridge] advertised the secure bridge URL to the pod panel`);
     } else {

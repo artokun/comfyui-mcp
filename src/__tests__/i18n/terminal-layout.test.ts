@@ -79,12 +79,12 @@ describe("labelRows", () => {
   it("reproduces the hand-typed English alignment exactly", () => {
     expect(
       labelRows(" ", [
-        ["Agent bridge", "ws://127.0.0.1:9180"],
+        ["Agent bridge", "ws://127.0.0.1:9199"],
         ["Driving", "https://example.com"],
         ["Secure", "yes"],
       ]),
     ).toEqual([
-      " Agent bridge : ws://127.0.0.1:9180",
+      " Agent bridge : ws://127.0.0.1:9199",
       " Driving      : https://example.com",
       " Secure       : yes",
     ]);
@@ -95,7 +95,7 @@ describe("labelRows", () => {
     // above and fails this one, because here the two prefixes are the same number of cells
     // and a DIFFERENT number of characters.
     const rows = labelRows(" ", [
-      ["에이전트 브리지", "ws://127.0.0.1:9180"],
+      ["에이전트 브리지", "ws://127.0.0.1:9199"],
       ["Driving", "https://example.com"],
     ]);
     const prefixes = rows.map((r) => r.slice(0, r.indexOf(": ")));

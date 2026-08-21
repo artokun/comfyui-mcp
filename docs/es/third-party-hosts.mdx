@@ -50,18 +50,18 @@ hace «un agente, contexto compartido» en lugar de una segunda sesión.
 ## Endpoints
 
 El listener de emparejamiento se deriva del puerto del puente
-(`COMFYUI_MCP_BRIDGE_PORT`, por defecto **9180**):
+(`COMFYUI_MCP_BRIDGE_PORT`, por defecto **9199**):
 
 | Puerto | Propósito |
 |---|---|
-| `bridge` (9180) | El puente UI panel ⇄ orquestador (la propia conexión del escritorio). |
-| `bridge + 1` (9181) | La superficie HTTP-MCP `panel_*` — **no** este protocolo. |
-| **`bridge + 2` (9182)** | **El listener de emparejamiento / control remoto al que te conectas.** Filtrado por token, enlazado en `0.0.0.0` (alcanzable en la LAN). |
+| `bridge` (9199) | El puente UI panel ⇄ orquestador (la propia conexión del escritorio). |
+| `bridge − 1` (9198) | La superficie HTTP-MCP `panel_*` — **no** este protocolo. |
+| **`bridge − 2` (9197)** | **El listener de emparejamiento / control remoto al que te conectas.** Filtrado por token, enlazado en `0.0.0.0` (alcanzable en la LAN). |
 
 **URL de emparejamiento:**
 
 ```
-ws://<desktop-machine-ip>:9182/?token=<PAIR_TOKEN>
+ws://<desktop-machine-ip>:9197/?token=<PAIR_TOKEN>
 ```
 
 - El token o lo **fija** el usuario mediante `COMFYUI_MCP_PAIR_TOKEN`
@@ -145,7 +145,7 @@ Impiden que un cliente secuestre una sesión con la que nunca se emparejó.
 
 ```js
 const token = "<PAIR_TOKEN>";            // obtained via the user's pair flow
-const ws = new WebSocket(`ws://192.168.1.50:9182/?token=${token}`);
+const ws = new WebSocket(`ws://192.168.1.50:9197/?token=${token}`);
 let cid = 0;
 
 ws.onopen = () => {
@@ -183,8 +183,8 @@ session. Build the adapter for THIS platform: <describe your platform, e.g. a
 Blender sidebar panel / a Chrome extension / a Neovim plugin>.
 
 CONNECTION
-- WebSocket to:  ws://<desktop-ip>:9182/?token=<PAIR_TOKEN>
-  (port = bridge port + 2; bridge default 9180. Token is provided by the user via
+- WebSocket to:  ws://<desktop-ip>:9197/?token=<PAIR_TOKEN>
+  (port = bridge port − 2; bridge default 9199. 9180-era URLs still pair: port = bridge + 2, default 9182. Token is provided by the user via
   their pairing flow — NEVER hardcode, embed, or auto-provision it.)
 - On open, send:  {"type":"hello","tab_id":"<your-unique-id>","headless":true}
 

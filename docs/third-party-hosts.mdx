@@ -43,19 +43,23 @@ second session.
 ## Endpoints
 
 The pairing listener is derived from the bridge port (`COMFYUI_MCP_BRIDGE_PORT`,
-default **9180**):
+default **9199**):
 
 | Port | Purpose |
 |---|---|
-| `bridge` (9180) | The panel ⇄ orchestrator UI bridge (the desktop's own connection). |
-| `bridge + 1` (9181) | The `panel_*` HTTP-MCP surface — **not** this protocol. |
-| **`bridge + 2` (9182)** | **The pairing / remote-control listener you connect to.** Token-gated, bound on `0.0.0.0` (LAN-reachable). |
+| `bridge` (9199) | The panel ⇄ orchestrator UI bridge (the desktop's own connection). |
+| `bridge − 1` (9198) | The `panel_*` HTTP-MCP surface — **not** this protocol. |
+| **`bridge − 2` (9197)** | **The pairing / remote-control listener you connect to.** Token-gated, bound on `0.0.0.0` (LAN-reachable). |
 
 **Pairing URL:**
 
 ```
-ws://<desktop-machine-ip>:9182/?token=<PAIR_TOKEN>
+ws://<desktop-machine-ip>:9197/?token=<PAIR_TOKEN>
 ```
+
+9180-era URLs (bridge **+ 2**, default pairing **9182**) still pair: a session that
+was already on 9180 keeps that block across self-restart, so a phone that saved
+`ws://…:9182/?token=…` does not need to re-pair.
 
 - The token is either **pinned** by the user via `COMFYUI_MCP_PAIR_TOKEN`
   (always-on pairing) or **minted per session** and handed out through the
@@ -168,8 +172,9 @@ session. Build the adapter for THIS platform: <describe your platform, e.g. a
 Blender sidebar panel / a Chrome extension / a Neovim plugin>.
 
 CONNECTION
-- WebSocket to:  ws://<desktop-ip>:9182/?token=<PAIR_TOKEN>
-  (port = bridge port + 2; bridge default 9180. Token is provided by the user via
+- WebSocket to:  ws://<desktop-ip>:9197/?token=<PAIR_TOKEN>
+  (port = bridge port − 2; bridge default 9199. 9180-era URLs still pair:
+  port = bridge + 2, default 9182. Token is provided by the user via
   their pairing flow — NEVER hardcode, embed, or auto-provision it.)
 - On open, send:  {"type":"hello","tab_id":"<your-unique-id>","headless":true}
 

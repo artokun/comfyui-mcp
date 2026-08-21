@@ -26,7 +26,7 @@ you ⇄ panel (pick a provider) ⇄ loopback bridge ⇄ panel orchestrator ⇄ b
 **No API keys, no per-token billing** on the subscription providers — and fully
 free/offline on local models. The agent authenticates with your on-disk login
 (or, for Ollama, just talks to the local daemon). One orchestrator on one
-loopback bridge port (`ws://127.0.0.1:9180`) serves every provider; each panel
+loopback bridge port (`ws://127.0.0.1:9199`) serves every provider; each panel
 tab picks its provider in the handshake. The bridge is loopback-only, and the
 panel executes a **fixed allowlist** of graph commands (no arbitrary
 JavaScript).

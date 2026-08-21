@@ -49,18 +49,18 @@ agent, un contexte partagé » plutôt qu'une seconde session.
 ## Endpoints
 
 L'écouteur d'appairage est dérivé du port du pont (`COMFYUI_MCP_BRIDGE_PORT`,
-défaut **9180**) :
+défaut **9199**) :
 
 | Port | Rôle |
 |---|---|
-| `bridge` (9180) | Le pont UI panneau ⇄ orchestrateur (la propre connexion du bureau). |
-| `bridge + 1` (9181) | La surface HTTP-MCP `panel_*` — **pas** ce protocole. |
-| **`bridge + 2` (9182)** | **L'écouteur d'appairage / contrôle à distance auquel vous vous connectez.** Filtré par jeton, lié sur `0.0.0.0` (joignable sur le LAN). |
+| `bridge` (9199) | Le pont UI panneau ⇄ orchestrateur (la propre connexion du bureau). |
+| `bridge − 1` (9198) | La surface HTTP-MCP `panel_*` — **pas** ce protocole. |
+| **`bridge − 2` (9197)** | **L'écouteur d'appairage / contrôle à distance auquel vous vous connectez.** Filtré par jeton, lié sur `0.0.0.0` (joignable sur le LAN). |
 
 **URL d'appairage :**
 
 ```
-ws://<desktop-machine-ip>:9182/?token=<PAIR_TOKEN>
+ws://<desktop-machine-ip>:9197/?token=<PAIR_TOKEN>
 ```
 
 - Le jeton est soit **épinglé** par l'utilisateur via
@@ -145,7 +145,7 @@ laquelle il ne s'est jamais appairé.
 
 ```js
 const token = "<PAIR_TOKEN>";            // obtained via the user's pair flow
-const ws = new WebSocket(`ws://192.168.1.50:9182/?token=${token}`);
+const ws = new WebSocket(`ws://192.168.1.50:9197/?token=${token}`);
 let cid = 0;
 
 ws.onopen = () => {
@@ -183,8 +183,8 @@ session. Build the adapter for THIS platform: <describe your platform, e.g. a
 Blender sidebar panel / a Chrome extension / a Neovim plugin>.
 
 CONNECTION
-- WebSocket to:  ws://<desktop-ip>:9182/?token=<PAIR_TOKEN>
-  (port = bridge port + 2; bridge default 9180. Token is provided by the user via
+- WebSocket to:  ws://<desktop-ip>:9197/?token=<PAIR_TOKEN>
+  (port = bridge port − 2; bridge default 9199. 9180-era URLs still pair: port = bridge + 2, default 9182. Token is provided by the user via
   their pairing flow — NEVER hardcode, embed, or auto-provision it.)
 - On open, send:  {"type":"hello","tab_id":"<your-unique-id>","headless":true}
 

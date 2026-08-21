@@ -79,6 +79,25 @@ describe("advertiseBridge auth headers", () => {
     const [, init] = advertiseCall(fetchMock);
     expect(init.headers).toEqual({ "Content-Type": "application/json" });
   });
+
+  it("carries local_url so the pack can follow the bound loopback port (#2030)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { advertiseBridge } = await import("../../services/secure-bridge.js");
+    await advertiseBridge(
+      "http://127.0.0.1:8188",
+      "ws://127.0.0.1:9199",
+      undefined,
+      "ws://127.0.0.1:9199",
+    );
+
+    const [, init] = advertiseCall(fetchMock);
+    expect(JSON.parse(String(init.body))).toEqual({
+      url: "ws://127.0.0.1:9199",
+      local_url: "ws://127.0.0.1:9199",
+    });
+  });
 });
 
 // The retry loop could not retry. A pod behind a proxy that accepts the

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DEFAULT_PANEL_BRIDGE_PORT } from "../services/bridge-ports.js";
 
 // config.ts has top-level await (port auto-detect). Use vi.resetModules() so
 // each test re-evaluates it with a fresh process.env.
@@ -474,7 +475,7 @@ describe("rescopeLocalTargetFile (#1909 non-default loopback port)", () => {
     const mod = await import("../config.js");
     const configured = "http://127.0.0.1:18188";
     process.env.COMFYUI_URL = configured;
-    const scoped = join(fakeHome, "local-target-9180.json");
+    const scoped = join(fakeHome, `local-target-${DEFAULT_PANEL_BRIDGE_PORT}.json`);
     mod.rescopeLocalTargetFile(scoped);
     expect(writtenUrl(scoped)).toBe(configured);
     expect(mod.getLocalComfyuiUrl()).toBe(configured);
@@ -486,7 +487,7 @@ describe("rescopeLocalTargetFile (#1909 non-default loopback port)", () => {
 
   it("overwrites a stale scoped file that still says :8188", async () => {
     const configured = "http://127.0.0.1:18188";
-    const scoped = join(fakeHome, "local-target-9180.json");
+    const scoped = join(fakeHome, `local-target-${DEFAULT_PANEL_BRIDGE_PORT}.json`);
     writeFileSync(scoped, JSON.stringify({ url: "http://127.0.0.1:8188" }));
     const mod = await import("../config.js");
     process.env.COMFYUI_URL = configured;
@@ -498,7 +499,7 @@ describe("rescopeLocalTargetFile (#1909 non-default loopback port)", () => {
     const configured = "http://127.0.0.1:18188";
     process.env.COMFYUI_URL = configured;
     const mod = await import("../config.js");
-    const scoped = join(fakeHome, "local-target-9180.json");
+    const scoped = join(fakeHome, `local-target-${DEFAULT_PANEL_BRIDGE_PORT}.json`);
     mod.rescopeLocalTargetFile(scoped);
     expect(writtenUrl(scoped)).toBe(configured);
     expect(mod.getBootLocalComfyUIBaseUrl()).toBe(configured);
@@ -508,7 +509,7 @@ describe("rescopeLocalTargetFile (#1909 non-default loopback port)", () => {
     const configured = "http://127.0.0.1:8188";
     process.env.COMFYUI_URL = configured;
     const mod = await import("../config.js");
-    const scoped = join(fakeHome, "local-target-9180.json");
+    const scoped = join(fakeHome, `local-target-${DEFAULT_PANEL_BRIDGE_PORT}.json`);
     mod.rescopeLocalTargetFile(scoped);
     expect(writtenUrl(scoped)).toBe(configured);
   });

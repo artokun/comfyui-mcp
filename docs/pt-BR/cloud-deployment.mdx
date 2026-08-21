@@ -112,7 +112,7 @@ Para um **pod HTTPS remoto**, o `connect` abre automaticamente um **túnel
 na sua máquina e entrega essa URL ao painel do pod para você — então a
 página HTTPS do pod alcança o agente **sem prompt no navegador, nada para
 copiar, em qualquer navegador**. Para um ComfyUI **local** ele usa a ponte
-de loopback `ws://127.0.0.1:9180` simples. De qualquer jeito o agente — e
+de loopback `ws://127.0.0.1:9199` simples. De qualquer jeito o agente — e
 o seu login do Claude/ChatGPT — roda só na **sua** máquina; nada é
 instalado no pod.
 
@@ -154,7 +154,7 @@ npx -y comfyui-mcp@latest connect http://localhost:3000
 Depois abra **http://localhost:3000**. Ou conecte na URL https direta do
 pod mas force a ponte de loopback simples com **`--insecure-bridge`** (você
 então arranja o seu próprio caminho para a página do pod alcançar
-`ws://127.0.0.1:9180`).
+`ws://127.0.0.1:9199`).
 
 Quer uma **alternativa estável e auto-hospedada** ao túnel rápido padrão
 do Cloudflare — o seu próprio domínio, sem hostname efêmero, posse total

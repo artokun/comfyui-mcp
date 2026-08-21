@@ -26,7 +26,9 @@ import { fileURLToPath } from "node:url";
 export const PANEL_LAUNCHER_PROTOCOL = 1;
 export const PANEL_LAUNCHER_LABEL = "io.artokun.comfyui-mcp-launcher";
 export const PANEL_LAUNCHER_TASK = "ComfyUI MCP Launcher";
-export const DEFAULT_PANEL_BRIDGE_PORT = 9180;
+export const DEFAULT_PANEL_BRIDGE_PORT = 9199;
+/** Pre-#2030 default. Logitech G HUB (`lghub_agent`) occupies 9180 on many desktops. */
+export const LEGACY_PANEL_BRIDGE_PORT = 9180;
 
 export type PanelLauncherConfig = {
   protocol: 1;
@@ -510,7 +512,7 @@ function serverFrameTexts(buffer: Buffer): string[] {
 }
 
 /** Proves that the bridge speaks the ComfyUI MCP panel protocol, rather than
- *  treating any process occupying port 9180 as the orchestrator. */
+ *  treating any process occupying the port as the orchestrator. */
 export function probePanelOrchestrator(
   port: number = Number(process.env.COMFYUI_MCP_BRIDGE_PORT) || DEFAULT_PANEL_BRIDGE_PORT,
   timeoutMs = 1200,
@@ -570,6 +572,20 @@ export function probePanelOrchestrator(
       }
     });
   });
+}
+
+/**
+ * Probe the port this process is pinned to, or — with no pin — the new default
+ * and then the 9180-era default. A live 9180 session must not look "not
+ * running" to the launcher just because this build's compiled default moved.
+ */
+export async function probeAnyPanelOrchestrator(timeoutMs = 1200): Promise<boolean> {
+  const pinned = Number(process.env.COMFYUI_MCP_BRIDGE_PORT);
+  if (Number.isInteger(pinned) && pinned > 0) {
+    return probePanelOrchestrator(pinned, timeoutMs);
+  }
+  if (await probePanelOrchestrator(DEFAULT_PANEL_BRIDGE_PORT, timeoutMs)) return true;
+  return probePanelOrchestrator(LEGACY_PANEL_BRIDGE_PORT, timeoutMs);
 }
 
 export type TerminalLaunch = { process?: ChildProcess; pid?: number; platform: NodeJS.Platform };
@@ -655,7 +671,7 @@ export async function startPanelLauncherBroker(home: string = homedir()): Promis
   let starting: Promise<{ already_running: boolean; started: boolean }> | null = null;
   const ensureRunning = () => {
     if (!starting) {
-      starting = probePanelOrchestrator().then((running) => {
+      starting = probeAnyPanelOrchestrator().then((running) => {
         if (running) {
           lastLaunchAt = 0;
           return { already_running: true, started: false };
@@ -684,7 +700,7 @@ export async function startPanelLauncherBroker(home: string = homedir()): Promis
       jsonResponse(res, 200, {
         ok: true,
         protocol: PANEL_LAUNCHER_PROTOCOL,
-        orchestrator_running: await probePanelOrchestrator(),
+        orchestrator_running: await probeAnyPanelOrchestrator(),
       });
       return;
     }

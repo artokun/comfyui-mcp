@@ -81,7 +81,7 @@ from GitHub, or the image seed when offline). It also logs
 reinstall those via Manager. On images `<= 1.5`, delete the panel folder and
 restart: `rm -rf /workspace/custom_nodes/comfyui-mcp-panel`.
 
-## Panel says "No agent is listening on the bridge (ws://127.0.0.1:9180)"
+## Panel says "No agent is listening on the bridge (ws://127.0.0.1:9199)"
 
 You're opening ComfyUI **in a browser on a different machine** than where the
 orchestrator runs. The bridge is loopback-only by design, and `127.0.0.1` in
@@ -111,7 +111,7 @@ COMFYUI_MCP_BRIDGE_TOKEN=<pick-a-long-secret> \
 npx -y comfyui-mcp@latest --panel-orchestrator
 ```
 
-It prints a ready-to-paste `ws://<server-ip>:9180/?token=…` — put that in the
+It prints a ready-to-paste `ws://<server-ip>:9199/?token=…` — put that in the
 panel's **Settings → Advanced → Bridge URL** on any machine and click
 Connect. A non-loopback bind **refuses to start without a token**, and every
 connection is checked on the WebSocket upgrade (constant-time). Treat the URL

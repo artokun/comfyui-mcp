@@ -104,7 +104,7 @@ npx -y comfyui-mcp@latest connect https://<pod-id>-3000.proxy.runpod.net
 köprüsüne (Cloudflare üzerinden) **güvenli şifreli bir `wss://` tüneli** açar
 ve o URL'yi podun paneline sizin için verir — böylece podun HTTPS sayfası
 ajana **tarayıcı istemi olmadan, kopyalanacak bir şey olmadan, herhangi bir
-tarayıcıda** ulaşır. **Yerel** bir ComfyUI için düz `ws://127.0.0.1:9180`
+tarayıcıda** ulaşır. **Yerel** bir ComfyUI için düz `ws://127.0.0.1:9199`
 loopback köprüsünü kullanır. Her iki durumda da ajan — ve Claude/ChatGPT
 girişiniz — yalnızca **sizin** makinenizde çalışır; poda hiçbir şey kurulmaz.
 
@@ -144,7 +144,7 @@ npx -y comfyui-mcp@latest connect http://localhost:3000
 
 Sonra **http://localhost:3000** adresini açın. Ya da podun doğrudan https
 URL'sine bağlanın ama düz loopback köprüsünü **`--insecure-bridge`** ile
-zorlayın (o zaman pod sayfasının `ws://127.0.0.1:9180`'e ulaşması için kendi
+zorlayın (o zaman pod sayfasının `ws://127.0.0.1:9199`'e ulaşması için kendi
 yolunuzu siz düzenlersiniz).
 
 Yukarıdakilerin yerine varsayılan Cloudflare hızlı tüneline **kararlı, kendi

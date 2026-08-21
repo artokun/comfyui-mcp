@@ -35,6 +35,7 @@ vi.mock("../../i18n/index.js", async (importOriginal) => {
 });
 
 import { startPanelConsoleHttpServer } from "../../orchestrator/panel-console-http.js";
+import { DEFAULT_PANEL_BRIDGE_PORT, localBridgeUrl } from "../../services/bridge-ports.js";
 import { resetLoraCatalog } from "../../services/lora-catalog.js";
 
 let dir: string;
@@ -67,7 +68,7 @@ afterEach(() => {
 const serve = () =>
   startPanelConsoleHttpServer({
     port: 0,
-    bridgePort: 9180,
+    bridgePort: DEFAULT_PANEL_BRIDGE_PORT,
     comfyuiUrl: "http://127.0.0.1:9500",
     token: "tok-123",
   });
@@ -181,7 +182,7 @@ describe("console pages with a catalog installed", () => {
       const html = await get(srv.url, "/console", "ja");
       expect(html).not.toContain("接続情報");
       expect(html).toContain("http://127.0.0.1:9500");
-      expect(html).toContain("ws://127.0.0.1:9180");
+      expect(html).toContain(localBridgeUrl(DEFAULT_PANEL_BRIDGE_PORT));
     } finally {
       await srv.stop();
     }

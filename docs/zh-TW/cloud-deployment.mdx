@@ -81,7 +81,7 @@ npx -y comfyui-mcp@latest connect https://<pod-id>-3000.proxy.runpod.net
 對**遠端 HTTPS 執行個體**，`connect` 會自動開啟一條**安全加密的 `wss://` 通道**
 （經 Cloudflare）連到你機器上的代理橋接，並把那個 URL 交給執行個體的面板 —— 於是執行個體的
 HTTPS 頁面到達代理時**沒有瀏覽器提示、不用複製任何東西，任何瀏覽器都行**。對
-**本機** ComfyUI 它用普通的 `ws://127.0.0.1:9180` 回送橋接。無論哪種，代理 —— 以及
+**本機** ComfyUI 它用普通的 `ws://127.0.0.1:9199` 回送橋接。無論哪種，代理 —— 以及
 你的 Claude/ChatGPT 登入 —— 只跑在**你的**機器上；執行個體上什麼都不會安裝。
 
 收尾：讓 `connect` 繼續在你自己的機器上跑著，在瀏覽器裡開啟執行個體的 ComfyUI，開啟
@@ -115,7 +115,7 @@ npx -y comfyui-mcp@latest connect http://localhost:3000
 
 然後開啟 **http://localhost:3000**。或者連到執行個體的直接 https URL，但用
 **`--insecure-bridge`** 強制普通回送橋接（然後你自己安排執行個體頁面到達
-`ws://127.0.0.1:9180` 的路徑）。
+`ws://127.0.0.1:9199` 的路徑）。
 
 想要預設 Cloudflare 快速通道之外的**穩定、自建替代** —— 你自己的域名、沒有臨時主機名、
 完全擁有那一跳 —— 而不是上面兩種？請看[自架中繼](/docs/zh-TW/self-hosted-relay)。

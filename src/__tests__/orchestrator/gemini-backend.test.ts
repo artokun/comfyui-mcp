@@ -561,10 +561,10 @@ describe("buildAcpMcpServers", () => {
   it("maps http specs to the ACP SSE variant (live CLIs reject type 'http')", async () => {
     const { buildAcpMcpServers } = await import("../../orchestrator/gemini-backend.js");
     const out = buildAcpMcpServers({
-      panel: { transport: "http", url: "http://127.0.0.1:9181/tab1" },
+      panel: { transport: "http", url: "http://127.0.0.1:9198/tab1" },
       comfy: { transport: "stdio", command: "node", args: ["x.js"], env: { A: "1" } },
     });
-    expect(out).toContainEqual({ type: "sse", name: "panel", url: "http://127.0.0.1:9181/tab1", headers: [] });
+    expect(out).toContainEqual({ type: "sse", name: "panel", url: "http://127.0.0.1:9198/tab1", headers: [] });
     // stdio mapping unchanged
     expect(out).toContainEqual({ name: "comfy", command: "node", args: ["x.js"], env: [{ name: "A", value: "1" }] });
     // the rejected variant must NOT appear

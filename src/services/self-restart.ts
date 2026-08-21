@@ -49,6 +49,7 @@ import {
 import { releaseOwnedPanelLock } from "./panel-pin-guard.js";
 import { logger } from "../utils/logger.js";
 import { deferredAutoUpdateNote } from "./auto-update-gate.js";
+import { pinBoundBridgePort, resolveBridgePort } from "./bridge-ports.js";
 
 /** Registry re-check period. An hour keeps update latency low at ~24 tiny
  *  registry GETs a day; override for tuning/tests. */
@@ -121,6 +122,22 @@ function defaultEntryMtime(): number | undefined {
 }
 
 /**
+ * Env handed to a self-restart child. Pins `COMFYUI_MCP_BRIDGE_PORT` to the
+ * port the parent is actually bound to so a compiled-default change cannot
+ * silently move a live session (#2030).
+ */
+export function selfRestartChildEnv(
+  parentEnv: NodeJS.ProcessEnv = process.env,
+  boundPort: number = resolveBridgePort(parentEnv),
+): NodeJS.ProcessEnv {
+  const gen = Number(parentEnv.COMFYUI_MCP_RESTART_GEN ?? "0") + 1;
+  return pinBoundBridgePort(boundPort, {
+    ...parentEnv,
+    COMFYUI_MCP_RESTART_GEN: String(gen),
+  });
+}
+
+/**
  * Spawn the replacement orchestrator, detached, sharing our stdio so it keeps
  * logging into the same terminal. Same argv for dev/global/local (the on-disk
  * code is already new); npx respawns via `npx -y comfyui-mcp@<version>` because
@@ -130,8 +147,7 @@ function defaultEntryMtime(): number | undefined {
  */
 function defaultSpawnReplacement(opts: { npxVersion?: string }): boolean {
   try {
-    const gen = Number(process.env.COMFYUI_MCP_RESTART_GEN ?? "0") + 1;
-    const env = { ...process.env, COMFYUI_MCP_RESTART_GEN: String(gen) };
+    const env = selfRestartChildEnv();
     const isWin = process.platform === "win32";
     const child = opts.npxVersion
       ? spawn(

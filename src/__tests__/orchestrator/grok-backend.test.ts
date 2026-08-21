@@ -192,7 +192,7 @@ describe("buildAcpMcpServers", () => {
   it("serializes HTTP panel MCP as SSE with empty headers (Grok rejects type:http)", () => {
     const out = buildAcpMcpServers({
       comfyui: { transport: "stdio", command: "node", args: ["mcp.js"], env: { FOO: "bar" } },
-      panel: { transport: "http", url: "http://127.0.0.1:9181/tab-1" },
+      panel: { transport: "http", url: "http://127.0.0.1:9198/tab-1" },
     });
     expect(out).toEqual([
       {
@@ -201,7 +201,7 @@ describe("buildAcpMcpServers", () => {
         args: ["mcp.js"],
         env: [{ name: "FOO", value: "bar" }],
       },
-      { type: "sse", name: "panel", url: "http://127.0.0.1:9181/tab-1", headers: [] },
+      { type: "sse", name: "panel", url: "http://127.0.0.1:9198/tab-1", headers: [] },
     ]);
   });
 });

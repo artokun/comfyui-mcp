@@ -75,7 +75,7 @@ ComfyUI 有列出 `comfyui-mcp-panel`，但側邊欄分頁始終載入不出來�
 這些請透過 Manager 重新安裝。在 `<= 1.5` 的映像檔上，請刪除面板資料夾後重新啟動：
 `rm -rf /workspace/custom_nodes/comfyui-mcp-panel`。
 
-## 面板顯示「橋接（ws://127.0.0.1:9180）上沒有任何代理在監聽」
+## 面板顯示「橋接（ws://127.0.0.1:9199）上沒有任何代理在監聽」
 
 你是在**與協調器所在機器不同的另一台機器的瀏覽器上**開啟 ComfyUI。橋接在設計上
 只接受 loopback，而瀏覽器裡的 `127.0.0.1` 指的是瀏覽器那台機器 —— 不是伺服器。
@@ -102,7 +102,7 @@ COMFYUI_MCP_BRIDGE_TOKEN=<pick-a-long-secret> \
 npx -y comfyui-mcp@latest --panel-orchestrator
 ```
 
-它會印出一段可以直接貼上的 `ws://<server-ip>:9180/?token=…` —— 把它填進任何一台
+它會印出一段可以直接貼上的 `ws://<server-ip>:9199/?token=…` —— 把它填進任何一台
 機器上面板的**設定 → 進階 → 橋接網址**，然後按「連線」。非 loopback 的繫結
 **沒有權杖就拒絕啟動**，而且每一條連線都會在 WebSocket 升級時檢查（常數時間比對）。
 請把這個網址當成密碼看待：任何拿到它的人都能驅動這個代理。

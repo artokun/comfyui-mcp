@@ -39,18 +39,18 @@ icon: "plug"
 
 ## 端点
 
-配对监听器从桥接端口派生（`COMFYUI_MCP_BRIDGE_PORT`，默认 **9180**）：
+配对监听器从桥接端口派生（`COMFYUI_MCP_BRIDGE_PORT`，默认 **9199**）：
 
 | 端口 | 用途 |
 |---|---|
-| `bridge`（9180） | 面板 ⇄ 编排器 UI 桥接（桌面自己的连接）。 |
-| `bridge + 1`（9181） | `panel_*` HTTP-MCP 面 —— **不是**本协议。 |
-| **`bridge + 2`（9182）** | **你要连的配对 / 远程控制监听器。** 令牌把门，绑在 `0.0.0.0`（局域网可达）。 |
+| `bridge`（9199） | 面板 ⇄ 编排器 UI 桥接（桌面自己的连接）。 |
+| `bridge − 1`（9198） | `panel_*` HTTP-MCP 面 —— **不是**本协议。 |
+| **`bridge − 2`（9197）** | **你要连的配对 / 远程控制监听器。** 令牌把门，绑在 `0.0.0.0`（局域网可达）。 |
 
 **配对 URL：**
 
 ```
-ws://<desktop-machine-ip>:9182/?token=<PAIR_TOKEN>
+ws://<desktop-machine-ip>:9197/?token=<PAIR_TOKEN>
 ```
 
 - 令牌要么由用户通过 `COMFYUI_MCP_PAIR_TOKEN` **钉死**（始终开启配对），要么**按会话
@@ -116,7 +116,7 @@ ws://<desktop-machine-ip>:9182/?token=<PAIR_TOKEN>
 
 ```js
 const token = "<PAIR_TOKEN>";            // obtained via the user's pair flow
-const ws = new WebSocket(`ws://192.168.1.50:9182/?token=${token}`);
+const ws = new WebSocket(`ws://192.168.1.50:9197/?token=${token}`);
 let cid = 0;
 
 ws.onopen = () => {
@@ -153,8 +153,8 @@ session. Build the adapter for THIS platform: <describe your platform, e.g. a
 Blender sidebar panel / a Chrome extension / a Neovim plugin>.
 
 CONNECTION
-- WebSocket to:  ws://<desktop-ip>:9182/?token=<PAIR_TOKEN>
-  (port = bridge port + 2; bridge default 9180. Token is provided by the user via
+- WebSocket to:  ws://<desktop-ip>:9197/?token=<PAIR_TOKEN>
+  (port = bridge port − 2; bridge default 9199. 9180-era URLs still pair: port = bridge + 2, default 9182. Token is provided by the user via
   their pairing flow — NEVER hardcode, embed, or auto-provision it.)
 - On open, send:  {"type":"hello","tab_id":"<your-unique-id>","headless":true}
 

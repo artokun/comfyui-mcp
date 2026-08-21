@@ -618,7 +618,7 @@ the pod's panel that URL — so the HTTPS page reaches your local agent with **n
 browser prompt, in any browser** (a secure page can't open a plain `ws://` socket
 to your box). Then open the pod's ComfyUI, open the **Agent Panel**, enable the
 **external-orchestrator** toggle, and click **Connect**. (Add **`--insecure-bridge`**
-to force the plain `ws://127.0.0.1:9180` loopback instead — e.g. when you reach the
+to force the plain `ws://127.0.0.1:9199` loopback instead — e.g. when you reach the
 pod via an SSH port-forward.)
 
 If you're on a build that predates the `connect` subcommand, the equivalents are:

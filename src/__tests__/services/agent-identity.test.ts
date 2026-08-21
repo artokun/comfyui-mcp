@@ -13,6 +13,7 @@ import { describe, expect, it, afterEach } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DEFAULT_PANEL_BRIDGE_PORT } from "../../services/bridge-ports.js";
 import {
   AGENT_IDENTITY_ENV,
   agentIdentityPath,
@@ -43,9 +44,9 @@ afterEach(() => {
 describe("agentIdentityPath", () => {
   it("is keyed by BOTH the bridge port and the agent key", () => {
     process.env.COMFYUI_MCP_DATA_DIR = DIR;
-    const a = agentIdentityPath(9180, "orchestrator::claude");
+    const a = agentIdentityPath(DEFAULT_PANEL_BRIDGE_PORT, "orchestrator::claude");
     const b = agentIdentityPath(9190, "orchestrator::claude");
-    const c = agentIdentityPath(9180, "orchestrator::ollama");
+    const c = agentIdentityPath(DEFAULT_PANEL_BRIDGE_PORT, "orchestrator::ollama");
     // Two ComfyUI instances on one machine share the agent key (it carries no
     // port — see session-store.ts), so a port-less path would have one
     // instance's identity stamped onto the other instance's reports.
@@ -56,11 +57,11 @@ describe("agentIdentityPath", () => {
 
   it("reduces the agent key to a filename-safe token", () => {
     process.env.COMFYUI_MCP_DATA_DIR = DIR;
-    const p = agentIdentityPath(9180, "orchestrator::claude");
-    expect(p.endsWith("identity-9180-orchestrator_claude.json")).toBe(true);
+    const p = agentIdentityPath(DEFAULT_PANEL_BRIDGE_PORT, "orchestrator::claude");
+    expect(p.endsWith(`identity-${DEFAULT_PANEL_BRIDGE_PORT}-orchestrator_claude.json`)).toBe(true);
     // `::` is the ordinary separator, but nothing downstream validates a backend
     // id, so a path separator arriving in a key must not escape the directory.
-    const evil = agentIdentityPath(9180, "../../etc/passwd");
+    const evil = agentIdentityPath(DEFAULT_PANEL_BRIDGE_PORT, "../../etc/passwd");
     expect(evil.includes("..")).toBe(false);
   });
 });

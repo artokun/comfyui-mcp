@@ -75,7 +75,7 @@ ComfyUI 列出了 `comfyui-mcp-panel`，但侧边栏标签页始终加载不出�
 Manager 重新安装这些节点。在 `<= 1.5` 的镜像上，删除面板目录后重启：
 `rm -rf /workspace/custom_nodes/comfyui-mcp-panel`。
 
-## 面板提示“桥接（ws://127.0.0.1:9180）上没有智能体在监听”
+## 面板提示“桥接（ws://127.0.0.1:9199）上没有智能体在监听”
 
 你是在**与编排器所在机器不同的另一台机器的浏览器里**打开 ComfyUI 的。桥接
 在设计上仅限回环地址，而浏览器里的 `127.0.0.1` 指的是浏览器所在的那台机器
@@ -103,7 +103,7 @@ COMFYUI_MCP_BRIDGE_TOKEN=<pick-a-long-secret> \
 npx -y comfyui-mcp@latest --panel-orchestrator
 ```
 
-它会打印一个可直接粘贴的 `ws://<server-ip>:9180/?token=…`——把它填到任意
+它会打印一个可直接粘贴的 `ws://<server-ip>:9199/?token=…`——把它填到任意
 机器上面板的**设置 → 高级 → 桥接 URL**里，然后点击“连接”。非回环地址的绑定
 在**没有令牌时会拒绝启动**，并且每一个连接都会在 WebSocket 升级时校验
 （常数时间比较）。请像对待密码一样对待这个 URL：任何拿到它的人都能驱动

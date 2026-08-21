@@ -83,7 +83,7 @@ tohum kopyadan). Ayrıca bozuk başka düğümler varsa adlarını vererek
 üzerinden yeniden kurun. `<= 1.5` imajlarında panel klasörünü silip yeniden başlatın:
 `rm -rf /workspace/custom_nodes/comfyui-mcp-panel`.
 
-## Panel "Köprüde (ws://127.0.0.1:9180) dinleyen bir ajan yok" diyor
+## Panel "Köprüde (ws://127.0.0.1:9199) dinleyen bir ajan yok" diyor
 
 ComfyUI'yi, orkestratörün çalıştığı makineden **farklı bir makinedeki tarayıcıda**
 açıyorsunuz. Köprü tasarım gereği yalnızca loopback üzerinde çalışır ve
@@ -112,7 +112,7 @@ COMFYUI_MCP_BRIDGE_TOKEN=<pick-a-long-secret> \
 npx -y comfyui-mcp@latest --panel-orchestrator
 ```
 
-Yapıştırmaya hazır bir `ws://<server-ip>:9180/?token=…` yazdırır — bunu herhangi bir
+Yapıştırmaya hazır bir `ws://<server-ip>:9199/?token=…` yazdırır — bunu herhangi bir
 makinede panelin **Ayarlar → Gelişmiş → Köprü adresi** alanına koyup Bağlan'a
 tıklayın. Loopback olmayan bir bağlama, token olmadan **başlamayı reddeder** ve her
 bağlantı WebSocket yükseltmesi sırasında denetlenir (sabit zamanlı). Bu adresi bir

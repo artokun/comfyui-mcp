@@ -88,7 +88,7 @@ de l'image en cas de fonctionnement hors ligne). Il journalise également
 réinstallez ceux-ci via Manager. Sur les images `<= 1.5`, supprimez le dossier du
 panneau et redémarrez : `rm -rf /workspace/custom_nodes/comfyui-mcp-panel`.
 
-## Le panneau affiche « Aucun agent n'écoute sur le pont (ws://127.0.0.1:9180) »
+## Le panneau affiche « Aucun agent n'écoute sur le pont (ws://127.0.0.1:9199) »
 
 Vous ouvrez ComfyUI **dans un navigateur situé sur une autre machine** que celle où
 tourne l'orchestrateur. Le pont est volontairement limité au loopback, et
@@ -120,7 +120,7 @@ COMFYUI_MCP_BRIDGE_TOKEN=<pick-a-long-secret> \
 npx -y comfyui-mcp@latest --panel-orchestrator
 ```
 
-Il affiche un `ws://<server-ip>:9180/?token=…` prêt à coller — mettez-le dans
+Il affiche un `ws://<server-ip>:9199/?token=…` prêt à coller — mettez-le dans
 **Réglages → Avancé → URL du pont** du panneau, sur n'importe quelle machine, puis
 cliquez sur Connecter. Une liaison non-loopback **refuse de démarrer sans jeton**, et
 chaque connexion est vérifiée lors de la négociation WebSocket (en temps constant).

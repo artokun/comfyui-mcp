@@ -1,5 +1,5 @@
 // #1524 — a respawned orchestrator was observed alive for HOURS holding no
-// listening ports, while an older instance owned 9180/9181/9183. From the user's
+// listening ports, while an older instance owned the bridge port block. From the user's
 // side the sidebar kept working; the agent session had simply lost the panel.
 //
 // WHY THE EXISTING GUARD DOES NOT COVER IT, which is the whole reason this is a
@@ -17,6 +17,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { DEFAULT_PANEL_BRIDGE_PORT } from "../../services/bridge-ports.js";
+import { startupDeadlineHolderAdvice } from "../../services/bridge-port-reclaim.js";
+import { classifyBridgeHolder } from "../../services/listener-ownership.js";
 
 // Importing the orchestrator drags in `resolveLiveInterpreter`, which shells out
 // to find the python actually serving the port ON THIS MACHINE — so an unstubbed
@@ -33,7 +36,7 @@ vi.mock("../../services/live-interpreter.js", async () => ({
 
 const { armStartupDeadline } = await import("../../orchestrator/index.js");
 
-const PORT = 9180;
+const PORT = DEFAULT_PANEL_BRIDGE_PORT;
 
 let exits: number[];
 let errors: string[];
@@ -83,7 +86,7 @@ describe("the startup deadline (#1524)", () => {
   });
 
   it("names the incumbent pid when one holds the port", () => {
-    // The actionable case: an older comfyui-mcp still owns 9180. Telling the user
+    // The actionable case: an older comfyui-mcp still owns the bridge. Telling the user
     // WHICH pid is the difference between "something is wrong" and a fix.
     armStartupDeadline(PORT, { exit, incumbent: () => 3807 });
     vi.advanceTimersByTime(91_000);
@@ -91,6 +94,31 @@ describe("the startup deadline (#1524)", () => {
     const msg = errors.join("");
     expect(msg).toMatch(/pid 3807/);
     expect(msg).toMatch(/stop it/);
+  });
+
+  it("a foreign holder is named as not comfyui-mcp and is not a kill instruction (#2030)", () => {
+    armStartupDeadline(PORT, {
+      exit,
+      incumbent: () => 3807,
+      holderAdvice: (pid) =>
+        startupDeadlineHolderAdvice({
+          port: PORT,
+          pid,
+          ownership: classifyBridgeHolder({
+            speaksPanelProtocol: false,
+            lockfileOursOrStale: true,
+          }).ownership,
+          processName: "lghub_agent.exe",
+        }),
+    });
+    vi.advanceTimersByTime(91_000);
+
+    const msg = errors.join("");
+    expect(msg).toMatch(/pid 3807/);
+    expect(msg).toContain("lghub_agent.exe");
+    expect(msg).toMatch(/not comfyui-mcp/);
+    expect(msg).toMatch(/Leave it running/);
+    expect(msg).not.toMatch(/if that is an older comfyui-mcp, stop it/);
   });
 
   it("says the hang is BEFORE the bind when nothing holds the port", () => {

@@ -177,13 +177,13 @@ describe("parseAgyModels", () => {
 describe("mergeAgyMcpConfig", () => {
   const servers = {
     comfyui: { transport: "stdio" as const, command: "node", args: ["mcp.js"], env: { A: "1" } },
-    panel: { transport: "http" as const, url: "http://127.0.0.1:9181/tab" },
+    panel: { transport: "http" as const, url: "http://127.0.0.1:9198/tab" },
   };
 
   it("creates a fresh mcpServers wrapper", () => {
     const merged = JSON.parse(mergeAgyMcpConfig(null, servers));
     expect(merged.mcpServers.comfyui).toEqual({ command: "node", args: ["mcp.js"], env: { A: "1" } });
-    expect(merged.mcpServers.panel).toEqual({ serverUrl: "http://127.0.0.1:9181/tab" });
+    expect(merged.mcpServers.panel).toEqual({ serverUrl: "http://127.0.0.1:9198/tab" });
   });
 
   it("preserves the user's existing entries and unknown top-level keys", () => {
@@ -602,13 +602,13 @@ describe("AntigravityBackend MCP config", () => {
       mcpConfigPath: cfg,
       mcpServers: {
         comfyui: { transport: "stdio", command: "node", args: ["dist/index.js"], env: {} },
-        panel: { transport: "http", url: "http://127.0.0.1:9181/t1" },
+        panel: { transport: "http", url: "http://127.0.0.1:9198/t1" },
       },
     });
     await collect(backend.run({ channel: channelOf([{ text: "hi" }]) }));
     const written = JSON.parse(readFileSync(cfg, "utf8"));
     expect(written.mcpServers.comfyui.command).toBe("node");
-    expect(written.mcpServers.panel.serverUrl).toBe("http://127.0.0.1:9181/t1");
+    expect(written.mcpServers.panel.serverUrl).toBe("http://127.0.0.1:9198/t1");
   });
 
   it("defaults to ~/.gemini/config/mcp_config.json (the only path agy honors)", () => {

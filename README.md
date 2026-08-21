@@ -201,7 +201,7 @@ automatically opens a secure, token-gated **`wss://` tunnel** (via Cloudflare) t
 the local agent bridge and hands the pod's panel that URL — so the pod's HTTPS page
 reaches your machine with **no browser prompt, in any browser** (a secure page
 can't open a plain `ws://` socket to your box — mixed content / Private Network
-Access). A **local** ComfyUI uses the plain `ws://127.0.0.1:9180` loopback bridge;
+Access). A **local** ComfyUI uses the plain `ws://127.0.0.1:9199` loopback bridge;
 add **`--insecure-bridge`** to force that loopback for a remote pod (then arrange
 your own path to it, e.g. an SSH port-forward). Either way the panel JS runs in
 **your local browser** and the agent — and your login — run only on **your**

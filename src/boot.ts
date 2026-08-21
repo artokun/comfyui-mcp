@@ -21,6 +21,7 @@ import { ensurePanelInstalled } from "./services/panel-installer.js";
 import { adoptOrphanedDownloadJobs } from "./services/download-jobs.js";
 import { checkAndSelfUpdate } from "./services/self-update.js";
 import { tr } from "./i18n/index.js";
+import { resolveBridgePort } from "./services/bridge-ports.js";
 import { banner, labelRows, numberedSteps } from "./i18n/terminal-layout.js";
 import { STDIO_HANDSHAKE_INSTRUCTIONS } from "./handshake-instructions.js";
 
@@ -523,9 +524,9 @@ async function main() {
         process.exit(1);
       }
       process.env.COMFYUI_URL = cli.comfyuiUrl;
-      // Default panel bridge port is 9180 (one port shared by all providers);
-      // COMFYUI_MCP_BRIDGE_PORT overrides.
-      const bridgePort = Number(process.env.COMFYUI_MCP_BRIDGE_PORT) || 9180;
+      // One port shared by all providers; COMFYUI_MCP_BRIDGE_PORT is a pin.
+      // An unpinned self-restart stays on 9180 so a live session is not stranded.
+      const bridgePort = resolveBridgePort();
       // Remote https pod → secure wss:// tunnel (auto); local/http or
       // --insecure-bridge → plain loopback ws://. Informational only here.
       const secureBridge = !cli.insecureBridge && isRemoteHttpsPod(cli.comfyuiUrl);

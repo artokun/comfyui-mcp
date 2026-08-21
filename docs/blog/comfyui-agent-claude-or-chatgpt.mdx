@@ -47,7 +47,7 @@ extension: it attaches to the orchestrator's loopback bridge, it never spawns a
 process. **Disconnect** detaches.
 
 **One orchestrator serves every provider**, on one loopback bridge port —
-`ws://127.0.0.1:9180` by default, overridable with `COMFYUI_MCP_BRIDGE_PORT`. There
+`ws://127.0.0.1:9199` by default, overridable with `COMFYUI_MCP_BRIDGE_PORT`. There
 is no port per backend. The panel picks the provider **per tab**, over the
 `hello`/`set_backend` handshake on that single connection, which is why it can offer
 a provider chooser instead of asking you to think about ports — and why you can have

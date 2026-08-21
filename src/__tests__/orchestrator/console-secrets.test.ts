@@ -84,6 +84,7 @@ vi.mock("node:fs", async (importOriginal) => {
 });
 
 import { startPanelConsoleHttpServer, type PanelConsoleHttpServer } from "../../orchestrator/panel-console-http.js";
+import { DEFAULT_PANEL_BRIDGE_PORT } from "../../services/bridge-ports.js";
 
 const TOKEN = "test-console-token";
 let srv: PanelConsoleHttpServer;
@@ -108,7 +109,7 @@ describe("console /api/secrets", () => {
     // be able to damage the machine it runs on.
     envPath = join(tmpdir(), `env-${randomUUID()}.env`);
     process.env.COMFYUI_MCP_ENV_FILE = envPath;
-    srv = await startPanelConsoleHttpServer({ port: 0, bridgePort: 9180, comfyuiUrl: "http://127.0.0.1:8188", token: TOKEN });
+    srv = await startPanelConsoleHttpServer({ port: 0, bridgePort: DEFAULT_PANEL_BRIDGE_PORT, comfyuiUrl: "http://127.0.0.1:8188", token: TOKEN });
   });
   afterEach(async () => {
     await srv.stop();

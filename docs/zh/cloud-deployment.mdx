@@ -81,7 +81,7 @@ npx -y comfyui-mcp@latest connect https://<pod-id>-3000.proxy.runpod.net
 对**远程 HTTPS 实例**，`connect` 会自动打开一条**安全加密的 `wss://` 隧道**
 （经 Cloudflare）连到你机器上的智能体桥接，并把那个 URL 交给实例的面板 —— 于是实例的
 HTTPS 页面到达智能体时**没有浏览器提示、不用复制任何东西，任何浏览器都行**。对
-**本地** ComfyUI 它用普通的 `ws://127.0.0.1:9180` 回环桥接。无论哪种，智能体 —— 以及
+**本地** ComfyUI 它用普通的 `ws://127.0.0.1:9199` 回环桥接。无论哪种，智能体 —— 以及
 你的 Claude/ChatGPT 登录 —— 只跑在**你的**机器上；实例上什么都不会安装。
 
 收尾：让 `connect` 继续在你自己的机器上跑着，在浏览器里打开实例的 ComfyUI，打开
@@ -115,7 +115,7 @@ npx -y comfyui-mcp@latest connect http://localhost:3000
 
 然后打开 **http://localhost:3000**。或者连到实例的直接 https URL，但用
 **`--insecure-bridge`** 强制普通回环桥接（然后你自己安排实例页面到达
-`ws://127.0.0.1:9180` 的路径）。
+`ws://127.0.0.1:9199` 的路径）。
 
 想要默认 Cloudflare 快速隧道之外的**稳定、自建替代** —— 你自己的域名、没有临时主机名、
 完全拥有那一跳 —— 而不是上面两种？见 [自建中继](/docs/zh/self-hosted-relay)。

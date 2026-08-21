@@ -598,3 +598,68 @@ export function classifyListenerOwnership(
   if (byArgv() === "differ") return classified("not-ours");
   return classified("ours");
 }
+
+// ---------------------------------------------------------------------------
+// Bridge-port holder (#2030)
+// ---------------------------------------------------------------------------
+
+/**
+ * Evidence that a process occupying the panel bridge is (or is not) a
+ * comfyui-mcp orchestrator we may reclaim.
+ *
+ * Protocol is the load-bearing fact. Logitech G HUB (`lghub_agent`) accepts a
+ * TCP connect on 9180 and looks, to a port scan, like an orchestrator — it does
+ * not speak the panel WebSocket protocol. A leftover lockfile from a crashed
+ * session does not make that holder ours.
+ */
+export interface BridgeHolderEvidence {
+  /** `probePanelOrchestrator` got a panel protocol frame (`hello` → models/epoch). */
+  speaksPanelProtocol: boolean;
+  /**
+   * The orchestrator lockfile for this port is missing, names a dead pid, or
+   * names the pid that is actually listening. A live lockfile for a different
+   * pid is still "ours" in the lockfile sense (we wrote it); protocol decides
+   * whether the *listener* is.
+   */
+  lockfileOursOrStale: boolean;
+}
+
+export interface BridgeHolderClassification {
+  ownership: ListenerOwnership;
+  supervision: SupervisorRelaunch;
+  /** True only when a kill-and-retry is licensed — protocol speaker, ours. */
+  reclaimable: boolean;
+}
+
+/**
+ * Is the process holding the panel bridge ours to stop?
+ *
+ *   `not-ours`  — it does not speak the panel protocol. NEVER prompt, NEVER
+ *                 `taskkill`, NEVER sweep the port. Same shape as #814: do not
+ *                 stop a process we cannot prove is ours and cannot relaunch.
+ *   `ours`      — it answered the protocol. Today's reclaim flow (prompt, then
+ *                 tree-kill) applies; the lockfile being missing/stale is the
+ *                 orphaned-session case that reclaim exists for.
+ *
+ * Supervision is minted here for the same reason ownership is: a definite
+ * verdict has to come from this function. A protocol speaker is an abandoned
+ * orchestrator (nothing but the user will bring it back). A foreign holder is
+ * `unconfirmed` — we did not walk its ancestry, and we do not need to, because
+ * `not-ours` already refuses the stop.
+ */
+export function classifyBridgeHolder(
+  evidence: BridgeHolderEvidence,
+): BridgeHolderClassification {
+  if (!evidence.speaksPanelProtocol) {
+    return {
+      ownership: classified("not-ours"),
+      supervision: classifiedSupervision("unconfirmed"),
+      reclaimable: false,
+    };
+  }
+  return {
+    ownership: classified("ours"),
+    supervision: classifiedSupervision("abandoned"),
+    reclaimable: true,
+  };
+}

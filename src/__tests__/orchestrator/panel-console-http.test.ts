@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startPanelConsoleHttpServer } from "../../orchestrator/panel-console-http.js";
+import { DEFAULT_PANEL_BRIDGE_PORT } from "../../services/bridge-ports.js";
 
 vi.mock("../../config.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../config.js")>();
@@ -41,7 +42,7 @@ describe("panel-console-http", () => {
   it("serves /api/status and landing page on loopback", async () => {
     const srv = await startPanelConsoleHttpServer({
       port: 0,
-      bridgePort: 9180,
+      bridgePort: DEFAULT_PANEL_BRIDGE_PORT,
       comfyuiUrl: "http://127.0.0.1:9500",
     });
     try {
@@ -49,7 +50,7 @@ describe("panel-console-http", () => {
       expect(statusRes.ok).toBe(true);
       const body = (await statusRes.json()) as { ok: boolean; bridge_port: number; backends: unknown[] };
       expect(body.ok).toBe(true);
-      expect(body.bridge_port).toBe(9180);
+      expect(body.bridge_port).toBe(DEFAULT_PANEL_BRIDGE_PORT);
       expect(Array.isArray(body.backends)).toBe(true);
 
       const htmlRes = await fetch(srv.url);
@@ -75,7 +76,7 @@ describe("panel-console-http", () => {
 
     const srv = await startPanelConsoleHttpServer({
       port: 0,
-      bridgePort: 9180,
+      bridgePort: DEFAULT_PANEL_BRIDGE_PORT,
       comfyuiUrl: "http://127.0.0.1:9500",
     });
     try {
@@ -106,7 +107,7 @@ describe("panel-console-http", () => {
     const serve = async () =>
       startPanelConsoleHttpServer({
         port: 0,
-        bridgePort: 9180,
+        bridgePort: DEFAULT_PANEL_BRIDGE_PORT,
         comfyuiUrl: "http://127.0.0.1:9500",
         token: "tok-123",
       });
@@ -202,7 +203,7 @@ describe("panel-console-http", () => {
     it("escapes markup from the served ComfyUI URL rather than emitting it", async () => {
       const srv = await startPanelConsoleHttpServer({
         port: 0,
-        bridgePort: 9180,
+        bridgePort: DEFAULT_PANEL_BRIDGE_PORT,
         comfyuiUrl: "http://127.0.0.1:9500/<script>alert(1)</script>",
       });
       try {
@@ -218,7 +219,7 @@ describe("panel-console-http", () => {
   it("sends CORS headers for the ComfyUI origin (and its localhost twin) only", async () => {
     const srv = await startPanelConsoleHttpServer({
       port: 0,
-      bridgePort: 9180,
+      bridgePort: DEFAULT_PANEL_BRIDGE_PORT,
       comfyuiUrl: "http://127.0.0.1:9500",
     });
     try {

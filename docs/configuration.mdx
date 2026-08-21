@@ -230,9 +230,10 @@ npx -y comfyui-mcp@latest connect
 <ParamField path="COMFYUI_MCP_PANEL_MODEL" type="string" default="claude-opus-5">
   Model for the background panel agents.
 </ParamField>
-<ParamField path="COMFYUI_MCP_BRIDGE_PORT" type="number" default="9180">
+<ParamField path="COMFYUI_MCP_BRIDGE_PORT" type="number" default="9199">
   Loopback port for the panel WebSocket bridge that the **panel orchestrator**
-  owns (default **9180**).
+  owns (default **9199**; was 9180 — that port collides with Logitech G HUB on
+  many desktops. A live 9180 session is not moved; set this to pin).
 </ParamField>
 <ParamField path="COMFYUI_MCP_STALL_S" type="number" default="180">
   Render-stall threshold (seconds) for the orchestrator's queue/render watchdog: a
