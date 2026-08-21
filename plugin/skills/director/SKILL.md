@@ -1,6 +1,6 @@
 ---
 name: director
-description: Full production pipeline — story to scenes, Z-Image start frames, Qwen Edit end frames, WAN FLF video clips, ffmpeg concatenation
+description: Full production pipeline covering story to scenes, Z-Image start frames, Qwen Edit end frames, WAN FLF video clips, ffmpeg concatenation
 globs:
   - "**/*.json"
 ---
@@ -9,13 +9,13 @@ globs:
 
 ## Overview
 
-The Director skill orchestrates a complete short film production from a text story. It breaks the story into scenes, generates start/end frames for each, creates video clips from frame pairs, and concatenates everything into a final video.
+The Director skill runs a complete short film production from a text story. It breaks the story into scenes, generates start/end frames for each, creates video clips from frame pairs, and concatenates everything into a final video.
 
-**Pipeline**: Story Planning → Z-Image Hero + Character Refs → Qwen Edit Chain (all frames) → WAN 2.2 FLF Video Clips → ffmpeg Concatenation
+The pipeline runs Story Planning → Z-Image Hero + Character Refs → Qwen Edit Chain (all frames) → WAN 2.2 FLF Video Clips → ffmpeg Concatenation.
 
-**Key architectural decisions**:
-- **1 hero frame + edit chain** for character consistency (NEVER independent Z-Image per scene)
-- **Inter-scene frame continuity**: Scene N's end frame IS Scene N+1's start frame (same image file, no edit gap)
+Key architectural decisions:
+- 1 hero frame + edit chain for character consistency (NEVER independent Z-Image per scene)
+- Inter-scene frame continuity. Scene N's end frame IS Scene N+1's start frame (same image file, no edit gap)
 - Character reference images fed into Qwen Edit's extra image slots
 - State file persists to disk for context compaction survival
 - Each scene is independently retryable without affecting others
@@ -25,19 +25,19 @@ The Director skill orchestrates a complete short film production from a text sto
 
 This pipeline drives the user's live canvas across many stages, so two habits are non-negotiable:
 
-- **Inspect node modes before each render.** After loading any pack/template/subgraph and before `panel_run`, check each node's `mode` (`panel_graph_outline` marks [bypass]/[mute]; `panel_query_graph` detail rows carry it). A `bypass` node is skipped (passes input through); a `mute` node and everything downstream don't execute. If the path/branch/switch you need is bypassed or muted, enable it with `panel_set_node_mode` (set the wanted node `active`, the unwanted one `bypass`/`mute`). Never assume a switch or route is already active.
-- **Verify the output matches before moving on.** Every Phase-N render is a gate: actually LOOK at the produced frame/clip (view it) and confirm it matches the intent BEFORE advancing or reporting progress. If it's wrong, diagnose (wrong prompt path? a bypassed/muted builder or switch? wrong widget? wrong ref image?), fix, and rerun. Do NOT declare a phase done or report progress you haven't verified.
-- **Confirm VIDEO renders via the filesystem, not /history.** For a `VHS_VideoCombine` / LTX / WAN clip, do NOT rely on `get_history` / `queue` (action:"status") to confirm it exists — VHS-style video nodes write the .mp4 but frequently do NOT register an output in ComfyUI's `/history` (prompt shows done, empty outputs, no error). Confirm the file with `get_image (action:"list_outputs")` (now lists videos too, tagged `kind: "video"`) by `filename_prefix` + fresh mtime, then chain it forward with `upload_image (action:"stage")`.
-- **Bypass completed stages before queuing the next one.** If you build the multi-stage pipeline on ONE canvas (e.g. Krea2 → LTX → WAN) rather than running each phase in isolation, once a stage has run and its output is captured/staged, `panel_set_node_mode(mode:"bypass")` that stage's nodes BEFORE you `panel_run` the next stage — otherwise `panel_run` re-executes the whole graph and you pay for / wait on already-finished work (a real, costly failure mode). Keep only the active stage live; feed the prior output forward with `upload_image (action:"stage")` (bypass the producer, feed its captured output to the consumer's loader).
+- **Inspect node modes before each render.** After loading any pack/template/subgraph and before `panel_run`, check each node's `mode` (`panel_graph_outline` marks [bypass]/[mute]; `panel_query_graph` detail rows carry it). A `bypass` node is skipped (passes input through); a `mute` node and everything downstream don't execute. If the path, branch, or switch you need is bypassed or muted, enable it with `panel_set_node_mode` (set the wanted node `active`, the unwanted one `bypass`/`mute`). Never assume a switch or route is already active.
+- **Verify the output matches before moving on.** Every Phase-N render is a gate. Look at the produced frame or clip (view it) and confirm it matches the intent BEFORE advancing or reporting progress. If it's wrong, diagnose (wrong prompt path? a bypassed/muted builder or switch? wrong widget? wrong ref image?), fix, and rerun. Do NOT declare a phase done or report progress you haven't verified.
+- **Confirm VIDEO renders via the filesystem, not /history.** For a `VHS_VideoCombine` / LTX / WAN clip, do NOT rely on `get_history` / `queue` (action:"status") to confirm it exists. VHS-style video nodes write the .mp4 but frequently do NOT register an output in ComfyUI's `/history` (prompt shows done, empty outputs, no error). Confirm the file with `get_image (action:"list_outputs")` (now lists videos too, tagged `kind: "video"`) by `filename_prefix` + fresh mtime, then chain it forward with `upload_image (action:"stage")`.
+- **Bypass completed stages before queuing the next one.** If you build the multi-stage pipeline on ONE canvas (e.g. Krea2 → LTX → WAN) rather than running each phase in isolation, once a stage has run and its output is captured/staged, `panel_set_node_mode(mode:"bypass")` that stage's nodes BEFORE you `panel_run` the next stage. Otherwise `panel_run` re-executes the whole graph and you pay for and wait on already-finished work, a real and costly failure mode. Keep only the active stage live; feed the prior output forward with `upload_image (action:"stage")` (bypass the producer, feed its captured output to the consumer's loader).
 
 ## CRITICAL: Character Consistency
 
-**Independent Z-Image generations per scene produce different-looking characters.** This was the #1 problem discovered during testing. The solution:
+Independent Z-Image generations per scene produce different-looking characters. This was the #1 problem discovered during testing. The solution:
 
-1. Generate **ONE hero frame** with Z-Image — establishes the main character, setting, and lighting
-2. Generate **character reference images** — close-up portraits of each character, key props, and the background
-3. **ALL other scene frames** are created via Qwen Edit chain from the hero, with character refs in extra image slots
-4. This ensures the same face, clothing, and environment across every frame
+1. Generate ONE hero frame with Z-Image. It establishes the main character, setting, and lighting
+2. Generate character reference images: close-up portraits of each character, key props, and the background
+3. Create ALL other scene frames via the Qwen Edit chain from the hero, with character refs in extra image slots
+4. This keeps the same face, clothing, and environment across every frame
 
 ## 8-Phase Pipeline
 
@@ -103,23 +103,23 @@ Saved at `~/code/comfyui-mcp/workflows/director_state_{project_id}.json`. Update
 | 4: Edit Chain | Qwen Edit | `qwen_image_edit_2511_bf16.safetensors` + Lightning LoRA | ~17-18GB |
 | 6: Video Clips | WAN 2.2 I2V | Remix NSFW Hi+Lo (built-in lightning) | ~22-24GB |
 
-**CRITICAL**: `clear_vram` between every model family switch.
+CRITICAL: `clear_vram` between every model family switch.
 
 ## Phase 1: Story Planning
 
-Break the story into 2-6 scenes. For each scene, identify:
-- **description**: What happens (1-2 sentences)
-- **start frame**: What the opening frame looks like
-- **end frame**: What the closing frame looks like
-- **video_prompt**: Motion description for FLF transition
+Break the story into 2 to 6 scenes. For each scene, identify:
+- description: what happens (1 to 2 sentences)
+- start frame: what the opening frame looks like
+- end frame: what the closing frame looks like
+- video_prompt: motion description for FLF transition
 
-Identify a **hero frame** — the single most representative scene image that establishes the main character and setting. This hero will anchor all other frames via Qwen Edit.
+Identify a hero frame, the single most representative scene image that establishes the main character and setting. This hero will anchor all other frames via Qwen Edit.
 
-Also identify which **character reference images** are needed (portraits of each character, key props, background).
+Also identify which character reference images are needed (portraits of each character, key props, background).
 
 ### CRITICAL: Inter-Scene Frame Continuity
 
-**The end frame of Scene N must be the EXACT same image file as the start frame of Scene N+1.** Do NOT create separate Qwen-edited start frames for subsequent scenes — this causes visible jumps at scene boundaries when the videos are concatenated.
+The end frame of Scene N must be the EXACT same image file as the start frame of Scene N+1. Do NOT create separate Qwen-edited start frames for subsequent scenes. That causes visible jumps at scene boundaries when the videos are concatenated.
 
 The frame chain for video generation:
 ```
@@ -134,10 +134,10 @@ Only Scene 1 needs a unique start frame. All other scenes inherit their start fr
 
 ### Edit Chain Planning
 
-The edit chain produces **only end frames** (plus Scene 1's unique start frame). Map which end frame derives from which source:
+The edit chain produces only end frames (plus Scene 1's unique start frame). Map which end frame derives from which source:
 - Some end frames edit directly from the hero
 - Later end frames may chain from earlier end frames
-- Keep chains shallow (max 4-5 deep) to minimize drift
+- Keep chains shallow (max 4 to 5 deep) to minimize drift
 
 Example chain:
 ```
@@ -153,9 +153,9 @@ Hero (man+cat on bed)
 
 Generate with Z-Image RedCraft DX1 (10 steps, CFG 1, euler/simple):
 
-1. **Hero frame**: The establishing shot with main character + key elements
-2. **Character ref portraits**: Close-up of each character (man, woman, animal, etc.)
-3. **Background ref**: The setting without characters
+1. Hero frame: the establishing shot with main character + key elements
+2. Character ref portraits: close-up of each character (man, woman, animal, etc.)
+3. Background ref: the setting without characters
 
 Add to negative prompts for character refs to exclude wrong subjects (e.g., "woman, female" when generating man portrait).
 
@@ -186,11 +186,11 @@ Show hero frame and all character refs. User approves or requests regeneration w
 
 ### CRITICAL: Consistency Rules for Edit Prompts
 
-1. **Always explicitly anchor clothing**: "The man wears his grey t-shirt" in EVERY prompt
-2. **Always state what doesn't change**: "Same bedroom, same warm lighting, same clothing"
-3. **Use strong emotion words**: "extremely shocked and startled" >> "surprised"
-4. **Include proportionality**: "Her head and body should be proportional and natural looking"
-5. **Prevent head enlargement**: In embrace/close-up poses, Qwen Edit tends to enlarge heads. Add explicit: "do not enlarge her head, keep the same small natural size as in the original image"
+1. **Always explicitly anchor clothing.** "The man wears his grey t-shirt" in EVERY prompt
+2. **Always state what doesn't change.** "Same bedroom, same warm lighting, same clothing"
+3. **Use strong emotion words.** "extremely shocked and startled" >> "surprised"
+4. **Include proportionality.** "Her head and body should be proportional and natural looking"
+5. **Prevent head enlargement.** In embrace/close-up poses, Qwen Edit tends to enlarge heads. Add an explicit "do not enlarge her head, keep the same small natural size as in the original image"
 6. **Describe the transformation, not just the end state**
 
 ### Workflow Template (with Character Reference Slots)
@@ -222,13 +222,13 @@ Show hero frame and all character refs. User approves or requests regeneration w
 }
 ```
 
-**Key: slots 5b and 5c** — feed character reference and background reference into `vl_resize_image2` and `vl_resize_image3`. This helps the vision encoder maintain character appearance across edits.
+Slots 5b and 5c matter. Feed character reference and background reference into `vl_resize_image2` and `vl_resize_image3`. This helps the vision encoder maintain character appearance across edits.
 
 ### Chain Execution
 
-Edits are **sequential** — each depends on the previous output:
+Edits are sequential; each depends on the previous output:
 1. Run edit, wait for completion
-2. **Stage the output as the next stage's input with `upload_image (action:"stage")`** (pass the output's `{ filename, subfolder?, type? }`); it returns the registered input filename
+2. Stage the output as the next stage's input with `upload_image (action:"stage")` (pass the output's `{ filename, subfolder?, type? }`); it returns the registered input filename
 3. Use that returned filename as the `image` in the next edit's `LoadImage`
 4. Update state file after each edit
 
@@ -236,7 +236,7 @@ Independent edits (both from hero) can run in parallel.
 
 ### CRITICAL: feeding an output into the next loader (don't guess paths)
 
-To pipe ANY stage's output into the next stage's loader (`LoadImage` here, `VHS_LoadVideo` / `LoadAudio` in the video phases), call **`upload_image (action:"stage")`** with the output's `{ filename, subfolder?, type? }` and drop the returned input filename into the loader's `image`/`video`/`audio` widget. For a file already on local disk, use `upload_image` with action `"image"` / `"video"` / `"audio"`. **NEVER copy the output file into, or guess, a filesystem `input/` path** — ComfyUI's input and output directories may be CUSTOM (`--input-directory` / `--output-directory`), so a guessed path makes the loader reject the file (`Invalid image file`) and wastes the render. `upload_image (action:"stage")` goes through the server API (`/view` → `/upload/image`), which resolves the real dirs correctly.
+To pipe ANY stage's output into the next stage's loader (`LoadImage` here, `VHS_LoadVideo` / `LoadAudio` in the video phases), call `upload_image (action:"stage")` with the output's `{ filename, subfolder?, type? }` and drop the returned input filename into the loader's `image`/`video`/`audio` widget. For a file already on local disk, use `upload_image` with action `"image"` / `"video"` / `"audio"`. NEVER copy the output file into, or guess, a filesystem `input/` path. ComfyUI's input and output directories may be CUSTOM (`--input-directory` / `--output-directory`), so a guessed path makes the loader reject the file (`Invalid image file`) and wastes the render. `upload_image (action:"stage")` goes through the server API (`/view` → `/upload/image`), which resolves the real dirs correctly.
 
 ### Timing
 
@@ -251,7 +251,7 @@ For each frame, show via `Read` for visual inspection. User approves or provides
 
 ### Workflow Template
 
-(Same as wan-flf-video skill — Remix NSFW Hi+Lo, 4-stack LoRA, ImageResizeKJv2, dual KSamplerAdvanced)
+(Same as wan-flf-video skill: Remix NSFW Hi+Lo, 4-stack LoRA, ImageResizeKJv2, dual KSamplerAdvanced)
 
 Key settings:
 - Portrait: width=480, height=720
@@ -262,16 +262,16 @@ Key settings:
 ### Morph LoRA
 
 For transformation scenes (e.g., cat→woman), add morph LoRA to Hi/Lo Common stacks:
-- `wan2.2_i2v_magical_morph_highnoise.safetensors` → Hi Common slot 1 (strength **1.0**)
-- `wan2.2_i2v_magical_morph_lownoise.safetensors` → Lo Common slot 1 (strength **1.0**)
+- `wan2.2_i2v_magical_morph_highnoise.safetensors` → Hi Common slot 1 (strength 1.0)
+- `wan2.2_i2v_magical_morph_lownoise.safetensors` → Lo Common slot 1 (strength 1.0)
 
-Use **1.0 strength** — tested without sparkle issues. Lower values (0.7-0.85) produce weaker morph effects that may look like a dissolve rather than a true morph.
+Use 1.0 strength; it tested without sparkle issues. Lower values (0.7-0.85) produce weaker morph effects that may look like a dissolve rather than a true morph.
 
 ### Per-Scene Changes
 
 Swap per scene: start/end image filenames, positive prompt text, noise_seed, filename_prefix.
 
-All 5 clips can be queued at once — they run sequentially in ComfyUI, sharing loaded models.
+All 5 clips can be queued at once. They run sequentially in ComfyUI, sharing loaded models.
 
 ## Phase 7: Video Review
 
@@ -285,7 +285,7 @@ printf "file 'director_s1_00001.mp4'\nfile 'director_s2_00001.mp4'\n..." > conca
 ffmpeg -f concat -safe 0 -i concat_list.txt -c copy director_final_{project_id}.mp4
 ```
 
-All clips share resolution/codec/framerate — copy-concat works without re-encoding.
+All clips share resolution/codec/framerate, so copy-concat works without re-encoding.
 
 ## Resumption Protocol
 
@@ -325,7 +325,7 @@ Use distinctive visual elements that transfer between characters/forms to create
 - Assume clothing/setting will be preserved automatically
 - Use mild emotion words ("surprised" → use "extremely shocked" instead)
 - Chain more than 5-6 edits deep without branching back to hero
-- Assume head proportions stay correct in embrace/hug poses — always add explicit size anchoring
+- Assume head proportions stay correct in embrace/hug poses; always add explicit size anchoring
 
 ### WAN Video Prompts
 - Use motion verbs: "walks", "turns", "reaches", "sits up", "leans in"

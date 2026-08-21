@@ -1,6 +1,6 @@
 ---
 name: anima-base
-description: Anime/illustration text-to-image (ANIMA 1.0, ~2B Cosmos DiT) — use for anime, manga, illustrated characters; accepts Danbooru tags + natural language; runs/trains on <6GB VRAM; includes anime inpainting via Anima-LLLite ControlNet
+description: Anime/illustration text-to-image (ANIMA 1.0, ~2B Cosmos DiT). Use for anime, manga, illustrated characters; accepts Danbooru tags + natural language; runs/trains on <6GB VRAM; includes anime inpainting via Anima-LLLite ControlNet
 globs:
   - "**/*.json"
 ---
@@ -9,14 +9,14 @@ globs:
 
 ## Overview
 
-**Anima** is a ~2B-parameter anime / illustration text-to-image base model from **CircleStone Labs** (in collaboration with Comfy Org). It is **not** SDXL-lineage: the architecture is **NVIDIA Cosmos-Predict2-2B-Text2Image (a DiT / flow model)**, trained on several million anime images plus ~800k non-anime artistic images. It is **best for anime, manga, and illustrated characters/styles** (not realism).
+Anima is a ~2B-parameter anime / illustration text-to-image base model from CircleStone Labs, made in collaboration with Comfy Org. It is not SDXL-lineage. The architecture is NVIDIA Cosmos-Predict2-2B-Text2Image (a DiT / flow model), trained on several million anime images plus ~800k non-anime artistic images. It suits anime, manga, and illustrated characters and styles, not realism.
 
 Key traits:
-- Accepts **Danbooru-style tags AND/OR natural language** in the same prompt.
-- Very low VRAM — generates (and trains) on **<6GB VRAM**; runs on any PC that can run SDXL/Illustrious.
-- License: **CircleStone Labs Non-Commercial License** (with NVIDIA Open Model License terms on the weights/derivatives). Generated images are usable commercially per the model card — verify the current license text before relying on this.
+- Accepts Danbooru-style tags and/or natural language in the same prompt.
+- Very low VRAM. It generates and trains on <6GB VRAM and runs on any PC that can run SDXL/Illustrious.
+- License: CircleStone Labs Non-Commercial License, with NVIDIA Open Model License terms on the weights and derivatives. Generated images are usable commercially per the model card. Verify the current license text before relying on this.
 
-Loaded in ComfyUI with **standard split-file loaders** (not a single checkpoint):
+ComfyUI loads it with standard split-file loaders, not a single checkpoint:
 
 | Component | Node | Model file | Folder | Notes |
 |-----------|------|-----------|--------|-------|
@@ -24,11 +24,11 @@ Loaded in ComfyUI with **standard split-file loaders** (not a single checkpoint)
 | **Text encoder** | `CLIPLoader` | `qwen_3_06b_base.safetensors` | `models/text_encoders/` | Qwen3-0.6B base; **`type": "stable_diffusion"`** in this pack |
 | **VAE** | `VAELoader` | `qwen_image_vae.safetensors` | `models/vae/` | Qwen-Image VAE (~254MB) |
 
-> **Verified from the pack's workflow JSON:** `CLIPLoader` widget values are `["qwen_3_06b_base.safetensors", "stable_diffusion", "default"]`. (The HF model card describes standard loaders; the exact CLIP `type` string `stable_diffusion` is what the Aitrepreneur "Anima Base Ultra" workflow ships — use it as-is.)
+> Verified from the pack's workflow JSON: `CLIPLoader` widget values are `["qwen_3_06b_base.safetensors", "stable_diffusion", "default"]`. The HF model card describes standard loaders; the exact CLIP `type` string `stable_diffusion` is what the Aitrepreneur "Anima Base Ultra" workflow ships. Use it as-is.
 
 ## Installation
 
-The "Anima Base Ultra" pack (by Aitrepreneur) installs custom nodes and downloads all models. Models are mirrored on `https://huggingface.co/Aitrepreneur/FLX/resolve/main` (the official source is `https://huggingface.co/circlestone-labs/Anima`).
+The "Anima Base Ultra" pack (by Aitrepreneur) installs custom nodes and downloads all models. Models are mirrored on `https://huggingface.co/Aitrepreneur/FLX/resolve/main`; the official source is `https://huggingface.co/circlestone-labs/Anima`.
 
 ### Custom nodes (git clone into `ComfyUI/custom_nodes/`)
 
@@ -68,7 +68,7 @@ Base `$HF = https://huggingface.co/Aitrepreneur/FLX/resolve/main`, `$YOLO11 = ht
 | `ultralytics/segm/` | `yolo11m-seg.pt` | `$YOLO11` |
 | `sams/` | `sam_vit_b_01ec64.pth` | `$HF` |
 
-The DWPreprocessor/DepthAnythingV2 aux models (`dw-ll_ucoco_384_bs5.torchscript.pt`, `yolox_l.onnx`, `depth_anything_v2_vitl.pth`) are auto-fetched by `comfyui_controlnet_aux` on first use.
+`comfyui_controlnet_aux` fetches the DWPreprocessor/DepthAnythingV2 aux models (`dw-ll_ucoco_384_bs5.torchscript.pt`, `yolox_l.onnx`, `depth_anything_v2_vitl.pth`) on first use.
 
 ## Key Nodes
 
@@ -82,17 +82,17 @@ The DWPreprocessor/DepthAnythingV2 aux models (`dw-ll_ucoco_384_bs5.torchscript.
 ```
 
 ### Anima Turbo LoRA (the shipped default — 12-step fast mode)
-Applied with rgthree `Power Lora Loader`. The plain ComfyUI equivalent is `LoraLoaderModelOnly`:
+The pack applies it with rgthree `Power Lora Loader`. The plain ComfyUI equivalent is `LoraLoaderModelOnly`:
 ```json
 {
   "class_type": "LoraLoaderModelOnly",
   "inputs": { "model": ["1", 0], "lora_name": "anima-turbo-lora-v0.1.safetensors", "strength_model": 1.0 }
 }
 ```
-Other LoRAs the pack ships (toggle on/off in Power Lora Loader): `anima-highres-aesthetic-boost`, `anima-preview-3-masterpieces-v5`, `anima_p3_rdbt_v0.29.b.122`. In the **non-turbo** groups these three are enabled and the turbo LoRA is off; in the **turbo** groups only the turbo LoRA is on.
+The pack ships three other LoRAs you can toggle in Power Lora Loader: `anima-highres-aesthetic-boost`, `anima-preview-3-masterpieces-v5`, `anima_p3_rdbt_v0.29.b.122`. In the non-turbo groups these three are enabled and the turbo LoRA is off; in the turbo groups only the turbo LoRA is on.
 
 ### AnimaLLLiteApply (ControlNet + inpainting — from ComfyUI-Anima-LLLite)
-Patches the **MODEL** (Anima uses LLLite-style control, not standard `ControlNetApply` conditioning). Inputs: `model`, `image`, `mask`; widget order `[lllite_name, strength, start_percent, end_percent]`; output: patched `MODEL`.
+Patches the MODEL. Anima uses LLLite-style control, not standard `ControlNetApply` conditioning. Inputs: `model`, `image`, `mask`; widget order `[lllite_name, strength, start_percent, end_percent]`; output: patched `MODEL`.
 ```json
 {
   "class_type": "AnimaLLLiteApply",
@@ -108,7 +108,7 @@ Patches the **MODEL** (Anima uses LLLite-style control, not standard `ControlNet
 
 ## Settings
 
-The base model and the turbo-LoRA path want **different** settings:
+The base model and the turbo-LoRA path want different settings:
 
 | Mode | Steps | CFG | Sampler | Scheduler | Denoise | Notes |
 |------|-------|-----|---------|-----------|---------|-------|
@@ -116,11 +116,11 @@ The base model and the turbo-LoRA path want **different** settings:
 | **Turbo LoRA (shipped default)** | 12 | 1.0 | `er_sde` | `simple` | 1.0 | `anima-turbo-lora-v0.1` enabled |
 | Upscale pass (UltimateSDUpscale) | 12 | 1.0 | `er_sde` | `simple` | 0.28 | `4x_foolhardy_Remacri.pth`, scale 2x |
 
-**Sampler character (from model card):** `er_sde` = neutral style, flat colors, sharp lines; `euler_ancestral` = softer/thinner lines; `dpmpp_2m_sde_gpu` = similar with more variety. Optional `beta57` scheduler for painterly looks.
+Sampler character, from the model card: `er_sde` gives a neutral style, flat colors, sharp lines; `euler_ancestral` gives softer, thinner lines; `dpmpp_2m_sde_gpu` is similar with more variety. The optional `beta57` scheduler gives painterly looks.
 
 ## Resolutions
 
-The base model supports 512²–1536². The pack recommends these to avoid distortion:
+The base model supports 512² to 1536². The pack recommends these to avoid distortion:
 
 | Aspect | Resolution |
 |--------|-----------|
@@ -132,7 +132,7 @@ The base model supports 512²–1536². The pack recommends these to avoid disto
 
 ## Prompt Style
 
-Anima accepts **Danbooru tags + natural language together**. The pack's recommended formula:
+Anima accepts Danbooru tags and natural language together. The pack's recommended formula:
 
 ```
 masterpiece, best quality, score_7, safe, highres, official art,
@@ -145,15 +145,15 @@ She wears a black futuristic jacket with glowing blue details. Medium close-up, 
 reflections, soft background blur, cinematic lighting.
 ```
 
-Structure: **quality tags → subject/count tags → optional `@artist name` → anime style tags → 2–4 natural-language sentences** describing subject, outfit, pose, composition, background, lighting, mood. Use lowercase tags with spaces (not underscores), except score tags like `score_7`. Artist tags use `@artist name`; browse names at the community Anima Style Explorer (`https://thetacursed.github.io/Anima-Style-Explorer/`).
+The order is quality tags, then subject/count tags, then an optional `@artist name`, then anime style tags, then 2 to 4 natural-language sentences describing subject, outfit, pose, composition, background, lighting, and mood. Use lowercase tags with spaces (not underscores), except score tags like `score_7`. Artist tags use `@artist name`; browse names at the community Anima Style Explorer (`https://thetacursed.github.io/Anima-Style-Explorer/`).
 
-**Negative prompt (recommended):**
+Recommended negative prompt:
 ```
 worst quality, low quality, score_1, score_2, score_3, artist name, bad anatomy, bad hands,
 missing fingers, extra fingers, extra arms, extra legs, duplicate, twins, text, watermark,
 signature, simple background
 ```
-Unlike Flux/Qwen, Anima **does** use a real negative prompt via a second `CLIPTextEncode` (CFG > 1 in base mode).
+Unlike Flux/Qwen, Anima does use a real negative prompt via a second `CLIPTextEncode` (CFG > 1 in base mode).
 
 ## Complete Workflow: Text-to-Image (Turbo, 12-step)
 
@@ -178,11 +178,11 @@ Unlike Flux/Qwen, Anima **does** use a real negative prompt via a second `CLIPTe
 }
 ```
 
-**Base-quality variant (no turbo):** drop node 4 (feed `["1", 0]` into KSampler), set `steps: 30`, `cfg: 4.5`. Optionally enable the three quality LoRAs (`anima-highres-aesthetic-boost`, `anima-preview-3-masterpieces-v5`, `anima_p3_rdbt_v0.29.b.122`) by chaining `LoraLoaderModelOnly` nodes.
+For the base-quality variant (no turbo), drop node 4 (feed `["1", 0]` into KSampler), set `steps: 30`, `cfg: 4.5`. Optionally enable the three quality LoRAs (`anima-highres-aesthetic-boost`, `anima-preview-3-masterpieces-v5`, `anima_p3_rdbt_v0.29.b.122`) by chaining `LoraLoaderModelOnly` nodes.
 
 ## Complete Workflow: Anime Inpainting (Anima-LLLite ControlNet)
 
-The pack's "INPAINTING CONTROLNET" group: load an image with a painted mask, `VAEEncode` it, apply `SetLatentNoiseMask`, patch the model with the **inpainting LLLite** (fed the same image + mask), then sample. The mask region is regenerated from the prompt while the rest is preserved.
+The pack's "INPAINTING CONTROLNET" group loads an image with a painted mask, `VAEEncode`s it, applies `SetLatentNoiseMask`, patches the model with the inpainting LLLite (fed the same image and mask), then samples. The mask region is regenerated from the prompt and the rest is preserved.
 
 ```json
 {
@@ -212,34 +212,34 @@ The pack's "INPAINTING CONTROLNET" group: load an image with a painted mask, `VA
 }
 ```
 
-**Other LLLite ControlNets** (same `AnimaLLLiteApply` node, swap `lllite_name`, feed a preprocessed control image; mask can be a full-white/blank mask when not inpainting):
+The other LLLite ControlNets use the same `AnimaLLLiteApply` node. Swap `lllite_name` and feed a preprocessed control image; the mask can be a full-white/blank mask when not inpainting:
 - `anima-lllite-pose-1.safetensors` ← `DWPreprocessor` (OpenPose)
 - `anima-lllite-depth-1.safetensors` ← `DepthAnythingV2Preprocessor`
 - `anima-lllite-lineart-1.safetensors` / `anima-lllite-any-test-like-1-step2000.safetensors` ← lineart / generic control
 
 ## Upscaling (optional)
 
-The pack upscales with `UltimateSDUpscale` (`4x_foolhardy_Remacri.pth`, 2x, **denoise 0.28**, 12 steps, er_sde/simple) and refines faces/hands/eyes with Impact-Pack `FaceDetailer` driven by `UltralyticsDetectorProvider` (`face_yolov9c.pt`, `hand_yolov9c.pt`, `Eyeful_v2-Paired.pt`) + SAM (`sam_vit_b_01ec64.pth`).
+The pack upscales with `UltimateSDUpscale` (`4x_foolhardy_Remacri.pth`, 2x, denoise 0.28, 12 steps, er_sde/simple) and refines faces, hands, and eyes with Impact-Pack `FaceDetailer` driven by `UltralyticsDetectorProvider` (`face_yolov9c.pt`, `hand_yolov9c.pt`, `Eyeful_v2-Paired.pt`) + SAM (`sam_vit_b_01ec64.pth`).
 
 ## VRAM
 
-- Anima is ~2B params → generates in **<6GB VRAM** (runs anywhere SDXL/Illustrious runs).
-- Text encoder (Qwen3-0.6B) and VAE are both small.
-- A **GGUF** quantized build exists for even lower memory (`Abiray/Anima-base-v1.0-GGUF`) — would need a GGUF loader node (e.g. ComfyUI-GGUF), not included in this pack. *Unverified against this workflow.*
+- Anima is ~2B params, so it generates in <6GB VRAM and runs anywhere SDXL/Illustrious runs.
+- The text encoder (Qwen3-0.6B) and VAE are both small.
+- A GGUF quantized build exists for even lower memory (`Abiray/Anima-base-v1.0-GGUF`). It needs a GGUF loader node (e.g. ComfyUI-GGUF), which this pack does not include. *Unverified against this workflow.*
 
 ## Troubleshooting
 
-1. **Weird/distorted images** → use a recommended resolution (1024x1024, 896x1152, 832x1216, 768x1344, 640x1536).
-2. **Turbo result looks washed/flat** → that's turbo at CFG 1; for max quality switch to base mode (drop turbo LoRA, 30–50 steps, CFG 4–5).
-3. **`AnimaLLLiteApply` missing** → install `ComfyUI-Anima-LLLite`; it is **not** a standard ControlNet node.
-4. **CLIP loads but output is garbage** → confirm `CLIPLoader` `type` is `stable_diffusion` and the file is `qwen_3_06b_base.safetensors` (the Qwen3-0.6B *base*, not the chat/edit Qwen models).
-5. **Inpainting ignores the mask** → ensure both `SetLatentNoiseMask` AND the inpainting `AnimaLLLiteApply` receive the painted mask; encode the *source* image with `VAEEncode` (denoise 1.0 is fine because the noise mask preserves unmasked pixels).
+1. **Weird/distorted images.** Use a recommended resolution (1024x1024, 896x1152, 832x1216, 768x1344, 640x1536).
+2. **Turbo result looks washed/flat.** That's turbo at CFG 1. For max quality switch to base mode (drop turbo LoRA, 30 to 50 steps, CFG 4 to 5).
+3. **`AnimaLLLiteApply` missing.** Install `ComfyUI-Anima-LLLite`; it is not a standard ControlNet node.
+4. **CLIP loads but output is garbage.** Confirm `CLIPLoader` `type` is `stable_diffusion` and the file is `qwen_3_06b_base.safetensors` (the Qwen3-0.6B *base*, not the chat/edit Qwen models).
+5. **Inpainting ignores the mask.** Ensure both `SetLatentNoiseMask` and the inpainting `AnimaLLLiteApply` receive the painted mask, and encode the *source* image with `VAEEncode`. Denoise 1.0 is fine because the noise mask preserves unmasked pixels.
 
 ## Training custom LoRAs
 
-To train your own Anima LoRA (character/style) on <6GB VRAM, use the **Citron Anima LoRA Trainer** — see the `anima-lora-trainer` skill. Trained `.safetensors` LoRAs drop into `models/loras/` and load via `Power Lora Loader` / `LoraLoaderModelOnly` exactly like the bundled LoRAs above.
+To train your own Anima LoRA (character/style) on <6GB VRAM, use the Citron Anima LoRA Trainer; see the `anima-lora-trainer` skill. Trained `.safetensors` LoRAs drop into `models/loras/` and load via `Power Lora Loader` / `LoraLoaderModelOnly` exactly like the bundled LoRAs above.
 
 ## Sources
 
-- **Official:** model weights at https://huggingface.co/circlestone-labs/Anima — no vendor prompting guide cited.
+- **Official:** model weights at https://huggingface.co/circlestone-labs/Anima; no vendor prompting guide cited.
 - **Empirical:** tag-order / @artist prompting and sampler wiring from working graphs; Anima Style Explorer is community, not vendor docs.

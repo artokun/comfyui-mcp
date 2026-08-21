@@ -1,6 +1,6 @@
 ---
 name: anima-lora-trainer
-description: Train a custom anime LoRA on the ANIMA base model — Citron's local Gradio trainer (kohya sd-scripts), <6GB VRAM, character/style LoRAs; covers setup, dataset prep, training params, and using the result in the anima-base workflow
+description: Train a custom anime LoRA on the ANIMA base model with Citron's local Gradio trainer (kohya sd-scripts), <6GB VRAM, character/style LoRAs; covers setup, dataset prep, training params, and using the result in the anima-base workflow
 globs:
   - "**/*.py"
   - "**/*.toml"
@@ -11,27 +11,27 @@ globs:
 
 ## Overview
 
-**Citron's Anima LoRA Trainer** (`app.py` = "🍋 Citron's Anima LoRA Trainer") is a local **Gradio** UI for training LoRA adapters on the **Anima** diffusion model using **kohya-ss/sd-scripts**. It trains on **~6GB VRAM** with the default settings — same low-VRAM profile as Anima generation.
+Citron's Anima LoRA Trainer (`app.py`, titled "Citron's Anima LoRA Trainer" in the UI) is a local Gradio UI for training LoRA adapters on the Anima diffusion model using kohya-ss/sd-scripts. It trains on ~6GB VRAM with the default settings, the same low-VRAM profile as Anima generation.
 
-- Created by **Citron Legacy**; UI repo: `https://github.com/citronlegacy/citron-anima-lora-trainer-ui`. The Aitrepreneur adaptive installers clone the fork `https://github.com/aitrepreneur/citron-anima-lora-trainer-ui`.
+- Created by Citron Legacy; UI repo: `https://github.com/citronlegacy/citron-anima-lora-trainer-ui`. The Aitrepreneur adaptive installers clone the fork `https://github.com/aitrepreneur/citron-anima-lora-trainer-ui`.
 - Training backend: `kohya-ss/sd-scripts` (`https://github.com/kohya-ss/sd-scripts`), launched via `accelerate launch`.
-- Trains LoRAs for **Anima DiT** (Cosmos-2B). Uses Anima's own components: DiT weights + Qwen3-0.6B text encoder + Qwen-Image VAE.
-- Output: standard `.safetensors` LoRA usable directly in the **anima-base** ComfyUI workflow.
+- Trains LoRAs for Anima DiT (Cosmos-2B). Uses Anima's own components: DiT weights + Qwen3-0.6B text encoder + Qwen-Image VAE.
+- Output: a standard `.safetensors` LoRA usable directly in the anima-base ComfyUI workflow.
 
-> Network module is `networks.lora_anima` and the training script is `sd-scripts/anima_train_network.py` (an Anima-specific kohya script the installer expects). Confirm these exist after the installer's `git clone` of sd-scripts — they are referenced by `app.py` but pulled from the upstream repo at install time.
+> The network module is `networks.lora_anima` and the training script is `sd-scripts/anima_train_network.py` (an Anima-specific kohya script the installer expects). Confirm these exist after the installer's `git clone` of sd-scripts. `app.py` references them, but they are pulled from the upstream repo at install time.
 
 ## Setup
 
 ### Windows
 Run `CITRON_ANIMA_LORA_TRAINER-V2.bat`. It:
-1. Ensures **Git** and **Python 3.10** (via winget if missing).
-2. Detects the NVIDIA GPU/driver and picks a matching **PyTorch CUDA wheel** automatically:
+1. Ensures Git and Python 3.10 are present (via winget if missing).
+2. Detects the NVIDIA GPU/driver and picks a matching PyTorch CUDA wheel automatically:
    - Blackwell (RTX 50xx) → cu128, bf16
    - Modern (RTX 20/30/40, etc.) → cu128/cu126/cu118 by driver, bf16 (fp16 on Turing)
-   - Pascal/Maxwell (GTX 10/9xx) → cu126/cu118, **fp16**
+   - Pascal/Maxwell (GTX 10/9xx) → cu126/cu118, fp16
    - Kepler/older → unsupported
 3. Clones the UI repo, patches `app.py` defaults (`base_model` → `anima-preview3-base`, `mixed_precision` → detected value), writes `app_configs/accelerate_gpu.yaml`.
-4. Creates `.venv`, installs PyTorch, clones+installs `sd-scripts`, installs app `requirements.txt`.
+4. Creates `.venv`, installs PyTorch, clones and installs `sd-scripts`, installs app `requirements.txt`.
 5. Downloads models into `models/anima/{dit,text_encoder,vae}/` from `https://huggingface.co/circlestone-labs/Anima/resolve/main/split_files/...`:
    - `dit/anima-base-v1.0.safetensors` (~4GB)
    - `text_encoder/qwen_3_06b_base.safetensors` (~1.19GB)
@@ -39,14 +39,14 @@ Run `CITRON_ANIMA_LORA_TRAINER-V2.bat`. It:
 6. Writes and launches `run_anima_base_windows.bat`.
 
 ### RunPod / Linux
-Run `CITRON_ANIMA_LORA_TRAINER-RUNPOD-V2.sh`. Same flow into `/workspace/citron-anima-lora-trainer-ui`; patches `server_name` to `0.0.0.0`; expose **HTTP port 7860** and open `Connect → HTTP Service 7860` (or `https://${RUNPOD_POD_ID}-7860.proxy.runpod.net`).
+Run `CITRON_ANIMA_LORA_TRAINER-RUNPOD-V2.sh`. Same flow into `/workspace/citron-anima-lora-trainer-ui`; it patches `server_name` to `0.0.0.0`. Expose HTTP port 7860 and open `Connect → HTTP Service 7860` (or `https://${RUNPOD_POD_ID}-7860.proxy.runpod.net`).
 
 ### Launch
-`app.py` runs Gradio on **`0.0.0.0:7860`** → open **http://127.0.0.1:7860**. Re-launch later with `run_anima_base_windows.bat` (Win) or `./run_anima_base_runpod.sh` (RunPod). The DiT base model **auto-downloads on first "Start Training"** if not already present (uses `wget`).
+`app.py` runs Gradio on `0.0.0.0:7860`, so open http://127.0.0.1:7860. Re-launch later with `run_anima_base_windows.bat` (Win) or `./run_anima_base_runpod.sh` (RunPod). The DiT base model auto-downloads on the first "Start Training" if not already present (uses `wget`).
 
 ## Dataset preparation
 
-A **flat folder** of images, each with a matching `.txt` caption of the same basename (image-side captioning, kohya style):
+A flat folder of images, each with a matching `.txt` caption of the same basename (image-side captioning, kohya style):
 ```
 my_dataset/
   001.png      001.txt
@@ -57,7 +57,7 @@ my_dataset/
 - Captions are Danbooru-style tags / natural language (same prompt style as Anima generation). The trainer warns about any image missing a `.txt`.
 - `caption_extension = .txt`; `shuffle_caption = false`; `caption_dropout_rate` default `0.1` (set per dataset).
 
-The UI tab "Training" takes **Image Directory** (the flat folder above) and **Output Directory** (where the LoRA is saved). "Configure Training" validates the dataset, prints a **step estimate** (`steps_per_epoch = ceil(images × repeats / (batch × grad_accum))`, `total = spe × epochs`), then writes two TOMLs into `configs/`.
+The UI tab "Training" takes Image Directory (the flat folder above) and Output Directory (where the LoRA is saved). "Configure Training" validates the dataset, prints a step estimate (`steps_per_epoch = ceil(images × repeats / (batch × grad_accum))`, `total = spe × epochs`), then writes two TOMLs into `configs/`.
 
 ## Key training parameters (defaults from `app.py`)
 
@@ -103,7 +103,7 @@ Fixed in the generated training TOML (not exposed): `network_module = networks.l
 
 ## Generated config files
 
-`configs/<project>_training_<timestamp>.toml` — references the DiT (`pretrained_model_name_or_path`), `qwen3` text encoder, and `vae` paths from `models/anima/`, plus all params above.
+`configs/<project>_training_<timestamp>.toml` references the DiT (`pretrained_model_name_or_path`), `qwen3` text encoder, and `vae` paths from `models/anima/`, plus all params above.
 
 `configs/<project>_dataset_<timestamp>.toml`:
 ```toml
@@ -126,7 +126,7 @@ caption_dropout_rate = 0.1
 
 ## The sd-scripts command
 
-"Start Training" runs (streaming logs live to the UI and to `logs/<project>_<timestamp>.log`):
+"Start Training" runs the following and streams logs live to the UI and to `logs/<project>_<timestamp>.log`:
 ```bash
 accelerate launch \
   --config_file app_configs/accelerate_gpu.yaml \
@@ -140,26 +140,26 @@ accelerate launch \
 
 ## Output & using the LoRA
 
-- The trained LoRA is saved to your **Output Directory** as `<project_name>.safetensors` (plus per-epoch checkpoints, last `save_last_n_epochs` kept).
-- Copy it into ComfyUI `models/loras/` and load it in the **anima-base** workflow via `LoraLoaderModelOnly` (or rgthree `Power Lora Loader`):
+- The trained LoRA is saved to your Output Directory as `<project_name>.safetensors`, plus per-epoch checkpoints (the last `save_last_n_epochs` are kept).
+- Copy it into ComfyUI `models/loras/` and load it in the anima-base workflow via `LoraLoaderModelOnly` (or rgthree `Power Lora Loader`):
   ```json
   { "class_type": "LoraLoaderModelOnly",
     "inputs": { "model": ["<unet>", 0], "lora_name": "<project_name>.safetensors", "strength_model": 1.0 } }
   ```
-- Use the same prompt style you captioned with. Typical strength 0.7–1.0; stack with the turbo LoRA for fast 12-step generation.
+- Use the same prompt style you captioned with. Typical strength 0.7 to 1.0; stack with the turbo LoRA for fast 12-step generation.
 
 ## VRAM & tips
 
-- Defaults train on **~6GB VRAM** (network_dim 32, res 768, batch 1, gradient checkpointing + latent/TE caching).
-- **OOM?** The trainer suggests `network_dim=8` and/or `resolution=512`. Also keep batch 1 and use AdamW8bit.
-- GTX 1060 6GB works but is slow; 3GB cards are not realistic. Older-than-Pascal GPUs are unsupported.
+- Defaults train on ~6GB VRAM (network_dim 32, res 768, batch 1, gradient checkpointing + latent/TE caching).
+- On OOM, the trainer suggests `network_dim=8` and/or `resolution=512`. Also keep batch 1 and use AdamW8bit.
+- A GTX 1060 6GB works but is slow; 3GB cards are not realistic. GPUs older than Pascal are unsupported.
 - Step count rule of thumb: `images × repeats × epochs / (batch × grad_accum)`. The UI prints the exact estimate before you train.
-- Logs stream to the UI and `logs/`. Training config + last paths persist in `config.json` so you can re-run.
+- Logs stream to the UI and `logs/`. Training config and last paths persist in `config.json` so you can re-run.
 
 ## Unverified / verify before relying
 
-- `sd-scripts/anima_train_network.py` and `networks.lora_anima` come from the kohya fork pulled at install time — present per `app.py`'s expectations but not in the local downloaded files here.
-- Exact LoRA output filename is `<project_name>.safetensors` per `output_name`; confirm in your Output Directory after a run.
+- `sd-scripts/anima_train_network.py` and `networks.lora_anima` come from the kohya fork pulled at install time. `app.py` expects them, but they are not in the local downloaded files here.
+- The exact LoRA output filename is `<project_name>.safetensors` per `output_name`; confirm in your Output Directory after a run.
 
 ## Sources
 

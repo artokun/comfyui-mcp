@@ -1,6 +1,6 @@
 ---
 name: ernie-image
-description: Build Baidu ERNIE-Image / ERNIE-Image-Turbo workflows — primarily TEXT-TO-IMAGE. Pick ERNIE when you need precise multilingual text rendering, posters/signage, manga/anime multi-panel layouts, or strong instruction following for complex multi-object scenes. Also supports denoise-based image-to-image refine (NOT instruction-grounded editing — use Qwen-Image-Edit or Flux Kontext for "change X in this photo" edits).
+description: Build Baidu ERNIE-Image / ERNIE-Image-Turbo workflows, primarily TEXT-TO-IMAGE. Pick ERNIE when you need precise multilingual text rendering, posters/signage, manga/anime multi-panel layouts, or strong instruction following for complex multi-object scenes. Also supports denoise-based image-to-image refine (NOT instruction-grounded editing; use Qwen-Image-Edit or Flux Kontext for "change X in this photo" edits).
 globs:
   - "**/*.json"
 ---
@@ -9,19 +9,19 @@ globs:
 
 ## What this is (read first)
 
-**ERNIE-Image is Baidu's open-weight TEXT-TO-IMAGE model** — an ~8B single-stream Diffusion Transformer (DiT), Apache-2.0, released April 2026, repackaged for ComfyUI by Comfy-Org. It is **not** an instruction-based image editor.
+ERNIE-Image is Baidu's open-weight TEXT-TO-IMAGE model, an ~8B single-stream Diffusion Transformer (DiT), Apache-2.0, released April 2026 and repackaged for ComfyUI by Comfy-Org. It is not an instruction-based image editor.
 
-- **ERNIE-Image** (base): ~50 steps for peak quality.
-- **ERNIE-Image-Turbo**: distilled (Distribution Matching Distillation + RL), high-fidelity in **~8 steps, cfg 1**. The downloaded pack uses **Turbo** (`ernie-image-turbo-*.gguf`).
+- ERNIE-Image (base): ~50 steps for peak quality.
+- ERNIE-Image-Turbo: distilled (Distribution Matching Distillation + RL), high-fidelity in ~8 steps at cfg 1. The downloaded pack uses Turbo (`ernie-image-turbo-*.gguf`).
 
-**Pick ERNIE when** the job is: precise text/typography rendering (multilingual, including Chinese), posters/signage/UI mockups, manga/anime storyboards and multi-panel layouts, or structured multi-object scenes from a complex prompt.
-**Do NOT pick ERNIE for** "edit this photo / change the shirt / swap the background" — that is instruction-grounded editing, which ERNIE does **not** do. Use `qwen-image-edit` or Flux Kontext for those. ERNIE's "image-to-image" here is plain denoise-based refinement (style pass / detail pass), not reference-grounded editing.
+Pick ERNIE when the job is precise text/typography rendering (multilingual, including Chinese), posters/signage/UI mockups, manga/anime storyboards and multi-panel layouts, or structured multi-object scenes from a complex prompt.
+Do not pick ERNIE for "edit this photo / change the shirt / swap the background". That is instruction-grounded editing, which ERNIE does not do. Use `qwen-image-edit` or Flux Kontext for those. ERNIE's "image-to-image" here is plain denoise-based refinement (style pass / detail pass), not reference-grounded editing.
 
-> Niche vs siblings: ERNIE = best open-weight **text rendering + layout** T2I. Qwen-Image-Edit = instruction editing. Flux Kontext = reference editing. Z-Image Turbo = fast general T2I (and this same pack pairs the two — see Combo pipelines).
+> Niche vs siblings. ERNIE is the best open-weight text rendering + layout T2I. Qwen-Image-Edit does instruction editing. Flux Kontext does reference editing. Z-Image Turbo does fast general T2I, and this same pack pairs the two; see Combo pipelines.
 
 ## Separated packs (render-verified)
 
-The original `ernie` monolith was a single toggle-template graph (every pipeline shipped bypassed; you activated one via the rgthree group toggles). It's now split into standalone, single-purpose packs — each a clean activated graph that renders headlessly with no group-toggling:
+The original `ernie` monolith was a single toggle-template graph (every pipeline shipped bypassed; you activated one via the rgthree group toggles). It's now split into standalone, single-purpose packs, each a clean activated graph that renders headlessly with no group-toggling:
 
 | Pack | Use | Models | VRAM |
 |------|-----|--------|------|
@@ -29,21 +29,21 @@ The original `ernie` monolith was a single toggle-template graph (every pipeline
 | `ernie-img2img` | denoise refine of a source image | ERNIE only (4) | <8GB |
 | `ernie-combo` | ERNIE × Z-Image-Turbo combo pipelines | ERNIE + Z-Image (7, ~32GB) | 12GB+ |
 
-Working details verified live: the **prompt-enhancer LLM is OFF by default** (the `ENHANCE PROMPT` boolean is false; leave it off unless you want the 3B enhancer to rewrite the prompt). The grain/sharpen post-proc (`FastFilmGrain`/`FastLaplacianSharpen`, comfyui-vrgamedevgirl) needs **librosa** installed. In `ernie-combo` the Z-Image half's VAE is saved as **`z-image-ae.safetensors`** (its weights differ from Flux/ERNIE's `ae.safetensors` despite the same size — avoids a filename clash).
+Working details verified live: the prompt-enhancer LLM is OFF by default (the `ENHANCE PROMPT` boolean is false; leave it off unless you want the 3B enhancer to rewrite the prompt). The grain/sharpen post-proc (`FastFilmGrain`/`FastLaplacianSharpen`, comfyui-vrgamedevgirl) needs librosa installed. In `ernie-combo` the Z-Image half's VAE is saved as `z-image-ae.safetensors`; its weights differ from Flux/ERNIE's `ae.safetensors` despite the same size, and the rename avoids a filename clash.
 
 ## Source of truth & a provenance warning
 
 This skill is derived from the actual pack files in `C:\Users\Artokun\Downloads\`:
-- `ERNIE-IMAGE-ULTRA-WORKFLOW.json` (authoritative — the ComfyUI graph)
+- `ERNIE-IMAGE-ULTRA-WORKFLOW.json` (authoritative; the ComfyUI graph)
 - `ERNIE-IMAGE_ULTRA-MODELS-NODES_INSTALL.bat`, `...-COMFYUI-MANAGER_AUTO_INSTALL.bat`, `...-AUTO_INSTALL-RUNPOD.sh`
 
-> **Installer warning (verified):** the three install scripts are copy-pasted from a **Z-Image** pack. Their headers literally say "Z-IMAGE-BASE"/"Z-IMAGE Base", and they download **both** ERNIE *and* Z-Image files. The model URLs/folders below are taken from those scripts but mirror this confusion — they pull `z_image_turbo-*.gguf`, `Qwen3-4B-*.gguf`, and `ae.safetensors` which belong to the **Z-Image** half of the combo, not ERNIE. The ERNIE-only files are flagged below. All weights come from a third-party mirror `huggingface.co/Aitrepreneur/FLX`, **not** the official `huggingface.co/Comfy-Org/ERNIE-Image` (which hosts the same filenames — see Official sources).
+> Installer warning (verified). The three install scripts are copy-pasted from a Z-Image pack. Their headers literally say "Z-IMAGE-BASE"/"Z-IMAGE Base", and they download both ERNIE *and* Z-Image files. The model URLs/folders below are taken from those scripts but mirror this confusion. They pull `z_image_turbo-*.gguf`, `Qwen3-4B-*.gguf`, and `ae.safetensors`, which belong to the Z-Image half of the combo, not ERNIE. The ERNIE-only files are flagged below. All weights come from a third-party mirror `huggingface.co/Aitrepreneur/FLX`, not the official `huggingface.co/Comfy-Org/ERNIE-Image` (which hosts the same filenames; see Official sources).
 
 ## Models
 
 ### ERNIE-Image (the files ERNIE actually uses)
 
-Confirmed from the workflow's virtual wires (`Set_*`/`GetNode`): the nodes tagged **"ERNIE"** resolve to these exact files.
+Confirmed from the workflow's virtual wires (`Set_*`/`GetNode`): the nodes tagged "ERNIE" resolve to these exact files.
 
 | Component | Node (type) | File (in workflow) | Folder | Notes |
 |-----------|-------------|--------------------|--------|-------|
@@ -52,11 +52,11 @@ Confirmed from the workflow's virtual wires (`Set_*`/`GetNode`): the nodes tagge
 | **VAE** | `VAELoader` | `flux2-vae.safetensors` | `models/vae/` | ERNIE reuses the **Flux 2 VAE** |
 | **Prompt enhancer** | `CLIPLoader` (type=`flux2`) → `TextGenerate` | `ernie-image-prompt-enhancer.safetensors` | `models/text_encoders/` | 3B LLM that auto-expands a short prompt into a rich description (see Prompt enhancer). Optional, toggled per-pipeline |
 
-> Quant guidance from the installer: **Q5_K_S** GPUs <8 GB · **Q6_K** 8–12 GB · **Q8_0** 12–16 GB+.
+> Quant guidance from the installer: Q5_K_S for GPUs <8 GB · Q6_K for 8 to 12 GB · Q8_0 for 12 to 16 GB+.
 
 ### Z-Image Turbo (bundled in the same pack — the "ZIT" half)
 
-The workflow also wires a parallel Z-Image Turbo pipeline for ERNIE→ZIT / ZIT→ERNIE combos. These files are **Z-Image's, not ERNIE's** — do not confuse them:
+The workflow also wires a parallel Z-Image Turbo pipeline for ERNIE→ZIT / ZIT→ERNIE combos. These files are Z-Image's, not ERNIE's. Do not confuse them:
 
 | Component | Node | File | Folder |
 |-----------|------|------|--------|
@@ -66,7 +66,7 @@ The workflow also wires a parallel Z-Image Turbo pipeline for ERNIE→ZIT / ZIT�
 
 ### LoRAs (referenced in the Power Lora Loader, off by default)
 
-`hirohiko-araki-style-ERNIE_000001250.safetensors`, `ernie-anime-v1.safetensors` — community ERNIE style LoRAs, loaded via `Power Lora Loader (rgthree)` (both toggled **off** in the shipped graph). Not in the installer; user-supplied.
+`hirohiko-araki-style-ERNIE_000001250.safetensors` and `ernie-anime-v1.safetensors` are community ERNIE style LoRAs, loaded via `Power Lora Loader (rgthree)` (both toggled off in the shipped graph). Not in the installer; user-supplied.
 
 ### Upscalers / post (shared)
 
@@ -90,7 +90,7 @@ All three installers clone the same set:
 | comfyui-vrgamedevgirl | `https://github.com/vrgamegirl19/comfyui-vrgamedevgirl` | `FastFilmGrain`, `FastLaplacianSharpen` |
 | RES4LYF | `https://github.com/ClownsharkBatwing/RES4LYF` | advanced samplers |
 
-The graph also uses `TextGenerate`, `TextBox1`, `StringReplace`, `ComfySwitchNode`, `PreviewAny`, `SetNode`/`GetNode`, `PrimitiveBoolean`, `ModelSamplingAuraFlow`, `ConditioningZeroOut`, `EmptySD3LatentImage`, `EmptyFlux2LatentImage` — most are builtin or come from the packs above. `SetNode`/`GetNode` are from KJNodes. `TextGenerate` (runs the prompt-enhancer LLM) — verify which pack provides it via ComfyUI-Manager if it shows as missing (**unverified pack origin**).
+The graph also uses `TextGenerate`, `TextBox1`, `StringReplace`, `ComfySwitchNode`, `PreviewAny`, `SetNode`/`GetNode`, `PrimitiveBoolean`, `ModelSamplingAuraFlow`, `ConditioningZeroOut`, `EmptySD3LatentImage`, `EmptyFlux2LatentImage`. Most are builtin or come from the packs above. `SetNode`/`GetNode` are from KJNodes. `TextGenerate` (runs the prompt-enhancer LLM) has an unverified pack origin; verify which pack provides it via ComfyUI-Manager if it shows as missing.
 
 ### Model downloads (exact URLs from the installer)
 
@@ -115,7 +115,7 @@ upscale_models/RealESRGAN_x4plus_anime_6B.pth   <HF>/RealESRGAN_x4plus_anime_6B.
 
 ### Official sources (prefer these over the mirror)
 
-The same filenames are hosted officially at **`huggingface.co/Comfy-Org/ERNIE-Image`** (`unet|diffusion_models/`, `text_encoders/`, `vae/`). Apache-2.0. Original model: `github.com/baidu/ERNIE-Image`. Comfy day-0 docs: `docs.comfy.org/tutorials/image/ernie-image/ernie-image`. The official repo also ships non-GGUF `ernie-image.safetensors` / `ernie-image-turbo.safetensors` (load with `UNETLoader` instead of `UnetLoaderGGUF`).
+The same filenames are hosted officially at `huggingface.co/Comfy-Org/ERNIE-Image` (`unet|diffusion_models/`, `text_encoders/`, `vae/`). Apache-2.0. Original model: `github.com/baidu/ERNIE-Image`. Comfy day-0 docs: `docs.comfy.org/tutorials/image/ernie-image/ernie-image`. The official repo also ships non-GGUF `ernie-image.safetensors` / `ernie-image-turbo.safetensors` (load with `UNETLoader` instead of `UnetLoaderGGUF`).
 
 ## How the pipeline works (at a glance)
 
@@ -131,13 +131,13 @@ EmptySD3LatentImage (1920×1088) ──► LATENT
 KSampler (steps≈8–9, cfg=1, euler, simple, denoise=1) ──► VAEDecode ──► SaveImage / post
 ```
 
-**Prompt enhancer path (optional):** the short user prompt + `{width}`/`{height}` are templated into a Chinese system prompt, fed to `TextGenerate` (which runs `ernie-image-prompt-enhancer`), and a `ComfySwitchNode` chooses raw prompt (switch=false) vs. enhanced prompt (switch=true) before `CLIPTextEncode`.
+In the optional prompt enhancer path, the short user prompt + `{width}`/`{height}` are templated into a Chinese system prompt, fed to `TextGenerate` (which runs `ernie-image-prompt-enhancer`), and a `ComfySwitchNode` chooses raw prompt (switch=false) vs. enhanced prompt (switch=true) before `CLIPTextEncode`.
 
-**Image-to-image (refine) path — NOT editing:** the graph's "ERNIE IMAGE TO IMAGE" groups take a `LoadImage → ImageResize+ (1024, keep proportion, lanczos)` and `VAEEncode` it, then run KSampler at **low denoise (0.35–0.4)** to refine/restyle. This is a denoise pass over a single source image; it does not follow edit instructions.
+The image-to-image (refine) path is not editing. The graph's "ERNIE IMAGE TO IMAGE" groups take a `LoadImage → ImageResize+ (1024, keep proportion, lanczos)` and `VAEEncode` it, then run KSampler at low denoise (0.35 to 0.4) to refine or restyle. This is a denoise pass over a single source image; it does not follow edit instructions.
 
-**About the ~5 LoadImage + ~5 VAEEncode nodes:** they are **not** multi-reference compositing. Each LoadImage feeds a *separate* pipeline variant (single-image img2img, or the combo refine stages). One source image per pipeline. The extra VAEEncodes are the encode steps for those independent img2img / two-pass refine chains.
+About the ~5 LoadImage + ~5 VAEEncode nodes: they are not multi-reference compositing. Each LoadImage feeds a *separate* pipeline variant (single-image img2img, or the combo refine stages). One source image per pipeline. The extra VAEEncodes are the encode steps for those independent img2img / two-pass refine chains.
 
-**Combo pipelines (ERNIE↔ZIT):** group titles `ERNIE ---> ZIT COMBO`, `ZIT ---> ERNIE COMBO`, `TWO TIMES COMBO ...` chain ERNIE and Z-Image Turbo as a two-pass generate→refine, with optional film-grain (`FastFilmGrain`) or sharpening (`FastLaplacianSharpen`) finishing and `SIMPLE UPSCALE`.
+The combo pipelines (ERNIE↔ZIT), with group titles `ERNIE ---> ZIT COMBO`, `ZIT ---> ERNIE COMBO`, `TWO TIMES COMBO ...`, chain ERNIE and Z-Image Turbo as a two-pass generate→refine, with optional film-grain (`FastFilmGrain`) or sharpening (`FastLaplacianSharpen`) finishing and `SIMPLE UPSCALE`.
 
 ## Settings (extracted from the shipped KSamplers)
 
@@ -147,14 +147,14 @@ KSampler (steps≈8–9, cfg=1, euler, simple, denoise=1) ──► VAEDecode �
 | ERNIE image-to-image refine | 8 | 1 | euler | simple | **0.4** | 3.1 |
 | Combo refine pass (2nd stage) | 9 | 1 | euler | simple | **0.25–0.35** | 3.1 |
 
-- **`ModelSamplingAuraFlow` shift = 3.1** is applied to the ERNIE model before sampling (flow-matching shift). Keep it.
-- **CFG = 1** for Turbo → negative conditioning is effectively inert; the graph still wires a `ConditioningZeroOut` as the negative.
-- **Resolution:** shipped latent is **1920×1088** (`EmptySD3LatentImage`). ERNIE is a high-res-capable DiT; 1024–2048 on the long edge is reasonable. Use `EmptySD3LatentImage` for ERNIE latents.
-- Base (non-Turbo) `ernie-image`: bump steps to ~50 and raise cfg (e.g. 3.5–5) since it is not distilled.
+- `ModelSamplingAuraFlow` shift = 3.1 is applied to the ERNIE model before sampling (flow-matching shift). Keep it.
+- CFG = 1 for Turbo, so negative conditioning is effectively inert; the graph still wires a `ConditioningZeroOut` as the negative.
+- The shipped latent is 1920×1088 (`EmptySD3LatentImage`). ERNIE is a high-res-capable DiT; 1024 to 2048 on the long edge is reasonable. Use `EmptySD3LatentImage` for ERNIE latents.
+- For base (non-Turbo) `ernie-image`, bump steps to ~50 and raise cfg (e.g. 3.5 to 5) since it is not distilled.
 
 ## Prompt / instruction style
 
-ERNIE rewards **descriptive, structured natural-language prompts**, and is unusually strong at **literal text rendering**. Write the exact text you want to appear in quotes.
+ERNIE rewards descriptive, structured natural-language prompts, and is unusually strong at literal text rendering. Write the exact text you want to appear in quotes.
 
 ```
 A vintage travel poster of Kyoto in autumn, bold title text reading "KYOTO" at the top,
@@ -165,14 +165,14 @@ A 3-panel manga page: panel 1 a samurai drawing his sword, panel 2 close-up of h
 panel 3 a wide shot of cherry blossoms falling, black-and-white ink, speech bubble "参る"
 ```
 
-- For **typography/signage**: state the literal string ("a neon sign that says 'OPEN'"), placement, and font feel.
-- For **layout**: name the panel/grid structure and what goes in each region.
-- Multilingual prompts (incl. Chinese) work — the built-in enhancer's system prompt is Chinese.
-- This is **txt2img phrasing**, not edit phrasing. Do not write "change the…/remove the…" expecting grounded edits.
+- For typography/signage, state the literal string ("a neon sign that says 'OPEN'"), placement, and font feel.
+- For layout, name the panel/grid structure and what goes in each region.
+- Multilingual prompts (incl. Chinese) work; the built-in enhancer's system prompt is Chinese.
+- This is txt2img phrasing, not edit phrasing. Do not write "change the…/remove the…" expecting grounded edits.
 
 ## Complete API-format workflow (ERNIE-Image-Turbo text-to-image)
 
-Derived from the source graph, flattened to API format (no subgraphs/virtual wires). Enhancer omitted for clarity — `CLIPTextEncode` takes the prompt directly.
+Derived from the source graph, flattened to API format (no subgraphs/virtual wires). The enhancer is omitted for clarity; `CLIPTextEncode` takes the prompt directly.
 
 ```json
 {
@@ -194,7 +194,7 @@ Derived from the source graph, flattened to API format (no subgraphs/virtual wir
 
 ### Image-to-image (refine) variant
 
-Replace the empty latent with an encoded source image and lower denoise. **This restyles/refines a single image; it is not instruction editing.**
+Replace the empty latent with an encoded source image and lower denoise. This restyles or refines a single image; it is not instruction editing.
 
 ```json
 {
@@ -211,30 +211,29 @@ Insert a `Power Lora Loader (rgthree)` between the UNet loader and `ModelSamplin
 
 ## VRAM
 
-- ERNIE-Image-Turbo GGUF: **Q5_K_S** <8 GB · **Q6_K** 8–12 GB · **Q8_0** 12–16 GB+ (installer's own guidance).
-- Ministral-3-3B encoder + Flux2 VAE add a few GB. The graph includes `easy cleanGpuUsed` / `easy clearCacheAll` nodes between stages — keep them for the combo/two-pass pipelines so VRAM is freed before swapping models.
-- Running the ERNIE↔ZIT combos loads **two** UNets; budget for both or run the single-model ERNIE group only.
+- ERNIE-Image-Turbo GGUF: Q5_K_S for <8 GB · Q6_K for 8 to 12 GB · Q8_0 for 12 to 16 GB+ (installer's own guidance).
+- The Ministral-3-3B encoder + Flux2 VAE add a few GB. The graph includes `easy cleanGpuUsed` / `easy clearCacheAll` nodes between stages. Keep them for the combo/two-pass pipelines so VRAM is freed before swapping models.
+- Running the ERNIE↔ZIT combos loads two UNets; budget for both or run the single-model ERNIE group only.
 
 ## Troubleshooting
 
-- **`UnetLoaderGGUF` / `CLIPLoaderGGUF` missing** → install **ComfyUI-GGUF** (city96).
-- **`Power Lora Loader` / `Image Comparer` / `Label` missing** → install **rgthree-comfy**.
-- **`ImageResize+` missing** → install **ComfyUI_essentials**.
-- **`TextGenerate` missing** (prompt enhancer) → install via ComfyUI-Manager search; pack origin unverified. If unavailable, just set the `ComfySwitchNode` to use the raw prompt (switch=false) and skip enhancement.
-- **CLIP type error on ministral** → ensure `CLIPLoader` `type` is **`flux2`** (not `qwen_image`/`lumina2`). The `lumina2` type belongs to the Z-Image (Qwen3) encoder, not ERNIE.
-- **Wrong VAE artifacts** → ERNIE must use **`flux2-vae.safetensors`**; `ae.safetensors` is the Z-Image VAE.
-- **Blurry / undercooked output** → confirm `ModelSamplingAuraFlow shift=3.1` is wired and steps ≥8 for Turbo; for base `ernie-image` use ~50 steps + higher cfg.
-- **You wanted to EDIT a photo and it ignored the instruction** → expected. ERNIE is txt2img; use the `qwen-image-edit` skill or Flux Kontext for grounded edits.
-- **Installer pulled Z-Image files too** → expected (the scripts are Z-Image-derived). Harmless; those files only feed the combo pipelines.
+- **`UnetLoaderGGUF` / `CLIPLoaderGGUF` missing.** Install ComfyUI-GGUF (city96).
+- **`Power Lora Loader` / `Image Comparer` / `Label` missing.** Install rgthree-comfy.
+- **`ImageResize+` missing.** Install ComfyUI_essentials.
+- **`TextGenerate` missing** (prompt enhancer). Install via ComfyUI-Manager search; pack origin unverified. If unavailable, set the `ComfySwitchNode` to use the raw prompt (switch=false) and skip enhancement.
+- **CLIP type error on ministral.** Ensure `CLIPLoader` `type` is `flux2` (not `qwen_image`/`lumina2`). The `lumina2` type belongs to the Z-Image (Qwen3) encoder, not ERNIE.
+- **Wrong VAE artifacts.** ERNIE must use `flux2-vae.safetensors`; `ae.safetensors` is the Z-Image VAE.
+- **Blurry / undercooked output.** Confirm `ModelSamplingAuraFlow shift=3.1` is wired and steps ≥8 for Turbo; for base `ernie-image` use ~50 steps + higher cfg.
+- **You wanted to EDIT a photo and it ignored the instruction.** Expected. ERNIE is txt2img; use the `qwen-image-edit` skill or Flux Kontext for grounded edits.
+- **Installer pulled Z-Image files too.** Expected (the scripts are Z-Image-derived). Harmless; those files only feed the combo pipelines.
 
 ## Tips
 
-1. Lead with the **literal text** you want rendered, in quotes — that's ERNIE's headline strength.
-2. Use the **prompt enhancer** for short/lazy prompts; turn it off (`ComfySwitchNode` false) when you've written a detailed prompt yourself.
-3. Use **`get_workflow (action:"analyze")`** before executing the shipped graph — it has dozens of group-boxed variants gated by `Fast Groups Bypasser (rgthree)`; the analyzer summary is far easier than reading raw JSON.
-4. Most groups are **bypassed (mode 4)** by default in the source file — enable only the pipeline you want via the group bypasser, or build the clean API workflow above.
-5. To choose a model: **ERNIE = text/layout T2I**, **Z-Image Turbo = fast general T2I**, **Qwen-Image-Edit / Flux Kontext = actual editing**.
-```
+1. Lead with the literal text you want rendered, in quotes. That's ERNIE's headline strength.
+2. Use the prompt enhancer for short/lazy prompts; turn it off (`ComfySwitchNode` false) when you've written a detailed prompt yourself.
+3. Use `get_workflow (action:"analyze")` before executing the shipped graph. It has dozens of group-boxed variants gated by `Fast Groups Bypasser (rgthree)`; the analyzer summary is far easier than reading raw JSON.
+4. Most groups are bypassed (mode 4) by default in the source file. Enable only the pipeline you want via the group bypasser, or build the clean API workflow above.
+5. To choose a model: ERNIE for text/layout T2I, Z-Image Turbo for fast general T2I, Qwen-Image-Edit / Flux Kontext for actual editing.
 
 ## Sources
 

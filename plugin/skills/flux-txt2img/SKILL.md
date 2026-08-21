@@ -1,6 +1,6 @@
 ---
 name: flux-txt2img
-description: Build Flux txt2img workflows — Flux.1 Dev (SRPO), Flux 2 Klein 9B, Turbo LoRAs, FluxGuidance, and DualCLIPLoader patterns
+description: Build Flux txt2img workflows with Flux.1 Dev (SRPO), Flux 2 Klein 9B, Turbo LoRAs, FluxGuidance, and DualCLIPLoader patterns
 globs:
   - "**/*.json"
 ---
@@ -11,9 +11,9 @@ globs:
 
 Flux is a guidance-distilled diffusion model family from Black Forest Labs. It uses a separate `FluxGuidance` node instead of KSampler CFG (which must always be 1.0). Three variants are available locally:
 
-1. **Flux.1 Dev SRPO** — Fine-tuned Flux.1 Dev with SRPO alignment. Uses DualCLIPLoader (T5XXL + CLIP-L). BF16 only.
-2. **Flux 2 Klein 9B** — Distilled Flux 2 variant. Uses single CLIPLoader (Qwen3-8B) + `flux2-vae.safetensors`. Fast 4-step generation.
-3. **Flux 2 Turbo LoRA** — Applied to Flux.1 Dev for 4-step generation.
+1. **Flux.1 Dev SRPO.** Fine-tuned Flux.1 Dev with SRPO alignment. Uses DualCLIPLoader (T5XXL + CLIP-L). BF16 only.
+2. **Flux 2 Klein 9B.** Distilled Flux 2 variant. Uses single CLIPLoader (Qwen3-8B) + `flux2-vae.safetensors`. Fast 4-step generation.
+3. **Flux 2 Turbo LoRA.** Applied to Flux.1 Dev for 4-step generation.
 
 ## Models
 
@@ -33,7 +33,7 @@ Flux is a guidance-distilled diffusion model family from Black Forest Labs. It u
 | **CLIP** | `CLIPLoader` (type=`flux2`) | `qwen_3_8b_fp8mixed.safetensors` | Qwen3-8B in text_encoders/ (8.3GB). Use `flux2`, NOT `flux` — both exist in the enum and `flux` fails at the sampler |
 | **VAE** | `VAELoader` | `flux2-vae.safetensors` | Flux 2 specific VAE (321MB) |
 
-**Klein 9B vs Flux.1 Dev**: Klein uses Qwen3-8B text encoder (not T5XXL + CLIP-L). It has a different VAE (`flux2-vae.safetensors`). 9B distilled runs in 4 steps; 9B base needs ~50 steps at CFG 5.0. Fits in ~20GB VRAM with FP8.
+Klein 9B vs Flux.1 Dev: Klein uses the Qwen3-8B text encoder (not T5XXL + CLIP-L). It has a different VAE (`flux2-vae.safetensors`). 9B distilled runs in 4 steps; 9B base needs ~50 steps at CFG 5.0. Fits in ~20GB VRAM with FP8.
 
 ### Flux 2 Turbo LoRA (applied to Flux.1 Dev)
 
@@ -60,7 +60,7 @@ Provides separate prompt fields for each text encoder:
 }
 ```
 
-`clip_l` captures key semantic features. `t5xxl` expands and refines descriptions. For simple use, put the same prompt in both fields. **Guidance is built into this node** — no separate FluxGuidance needed.
+`clip_l` captures key semantic features. `t5xxl` expands and refines descriptions. For simple use, put the same prompt in both fields. Guidance is built into this node, so no separate FluxGuidance is needed.
 
 ### FluxGuidance (Alternative)
 
@@ -87,7 +87,7 @@ If using standard `CLIPTextEncode` instead of `CLIPTextEncodeFlux`, apply guidan
 
 ### Negative Conditioning
 
-Flux does NOT support traditional negative prompts (guidance-distilled, CFG=1.0). Use `ConditioningZeroOut`:
+Flux does not support traditional negative prompts (guidance-distilled, CFG=1.0). Use `ConditioningZeroOut`:
 
 ```json
 {
@@ -96,7 +96,7 @@ Flux does NOT support traditional negative prompts (guidance-distilled, CFG=1.0)
 }
 ```
 
-Or simply use an empty `CLIPTextEncode` for the negative input.
+Or use an empty `CLIPTextEncode` for the negative input.
 
 ## Sampler Settings
 
@@ -111,7 +111,7 @@ Or simply use an empty `CLIPTextEncode` for the negative input.
 | guidance | 3.5 | Via CLIPTextEncodeFlux or FluxGuidance |
 | denoise | 1.0 | |
 
-**SRPO note**: The ipndm/beta combo is specifically recommended by the SRPO author. Standard Flux settings (euler/simple) also work but ipndm/beta gives better results with this fine-tune.
+The SRPO author recommends the ipndm/beta combo. Standard Flux settings (euler/simple) also work, but ipndm/beta gives better results with this fine-tune.
 
 ### Flux 2 Klein 9B (Distilled)
 
@@ -212,12 +212,12 @@ Bad: "masterpiece, best quality, 1girl, cafe, paris"
 }
 ```
 
-**Klein note**: Uses single `CLIPLoader` (not DualCLIPLoader) with `type: "flux2"` and the Qwen3-8B text encoder from `text_encoders/`. The CLIP loader path resolves from `models/text_encoders/`.
+Klein uses a single `CLIPLoader` (not DualCLIPLoader) with `type: "flux2"` and the Qwen3-8B text encoder from `text_encoders/`. The CLIP loader path resolves from `models/text_encoders/`.
 
-**Two Flux-2-specific gotchas** (both fail at the KSampler, not at the loader, so the error points at the wrong node):
-- `type` must be **`flux2`**, not `flux`. Both values exist in the CLIPLoader enum, so `flux` loads without complaint and then dies during sampling.
-- Use **`EmptyFlux2LatentImage`**, not `EmptyLatentImage` — Flux 2 uses a different latent channel count.
-- Klein **9B** pairs with the **Qwen3-8B** encoder (`qwen_3_8b*` from `Comfy-Org/vae-text-encorder-for-flux-klein-9b`). The similarly-named `qwen_3_4b` ships in the klein-**4b** repo and is for the 4B model. Mismatching them raises `mat1 and mat2 shapes cannot be multiplied (512x7680 and 12288x4096)` — 7680 = 2560x3 (4B hidden size) vs 12288 = 4096x3 (8B) — which reads as a confusing CLIP error rather than a wrong-file error.
+Flux-2-specific gotchas, all of which fail at the KSampler rather than the loader, so the error points at the wrong node:
+- `type` must be `flux2`, not `flux`. Both values exist in the CLIPLoader enum, so `flux` loads without complaint and then dies during sampling.
+- Use `EmptyFlux2LatentImage`, not `EmptyLatentImage`. Flux 2 uses a different latent channel count.
+- Klein 9B pairs with the Qwen3-8B encoder (`qwen_3_8b*` from `Comfy-Org/vae-text-encorder-for-flux-klein-9b`). The similarly-named `qwen_3_4b` ships in the klein-4b repo and is for the 4B model. Mismatching them raises `mat1 and mat2 shapes cannot be multiplied (512x7680 and 12288x4096)`, where 7680 = 2560x3 (4B hidden size) and 12288 = 4096x3 (8B). It reads as a confusing CLIP error rather than a wrong-file error.
 
 ## Complete Workflow: Flux.1 Dev + Turbo LoRA (4-Step)
 
@@ -266,8 +266,8 @@ Apply Flux LoRAs with `LoraLoaderModelOnly` between UNET and KSampler:
 
 ### Klein LoRAs
 
-Klein 9B LoRAs go in `loras/Flux.2 Klein 9B/` subfolder:
-- `klein_slider_detail.safetensors` — Detail slider LoRA
+Klein 9B LoRAs go in the `loras/Flux.2 Klein 9B/` subfolder:
+- `klein_slider_detail.safetensors`, a detail slider LoRA
 
 ## VRAM Considerations
 
@@ -277,17 +277,17 @@ Klein 9B LoRAs go in `loras/Flux.2 Klein 9B/` subfolder:
 | Klein 9B FP8 + Qwen3-8B | ~20GB | Fits comfortably on 4090 |
 | SRPO + Turbo LoRA | ~24GB | Same as SRPO base |
 
-- **Always `clear_vram`** before switching to Flux from another model family
-- T5XXL is the main VRAM consumer alongside the UNET — both stay loaded during sampling
+- Always `clear_vram` before switching to Flux from another model family
+- T5XXL is the main VRAM consumer alongside the UNET; both stay loaded during sampling
 - CLIP-L is small (235MB) and negligible
 
 ## Tips
 
-1. **KSampler CFG must always be 1.0** — all guidance is through `CLIPTextEncodeFlux` or `FluxGuidance`
-2. **SRPO requires BF16** — the FP8 quantization is known to produce broken results with this fine-tune
-3. For **short prompts** (1-2 sentences), increase guidance to 3.5–4.0. For **long prompts** (paragraph), decrease to 1.0–1.5
-4. Flux generates excellent text in images — put text to render in quotes within your prompt
-5. Klein 9B is the fastest option at 4 steps — use it for rapid iteration, then switch to SRPO for final quality
+1. KSampler CFG must always be 1.0. All guidance is through `CLIPTextEncodeFlux` or `FluxGuidance`
+2. SRPO requires BF16. The FP8 quantization is known to produce broken results with this fine-tune
+3. For short prompts (1 to 2 sentences), increase guidance to 3.5 to 4.0. For long prompts (paragraph), decrease to 1.0 to 1.5
+4. Flux generates excellent text in images. Put text to render in quotes within your prompt
+5. Klein 9B is the fastest option at 4 steps. Use it for rapid iteration, then switch to SRPO for final quality
 
 ## Sources
 

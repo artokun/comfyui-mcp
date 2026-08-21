@@ -1,11 +1,11 @@
 ---
 name: comfyui-node-registry
-description: Authoring & publishing ComfyUI custom nodes to the Comfy Registry — node structure, pyproject.toml spec, comfy-cli publishing, and CI
+description: Authoring & publishing ComfyUI custom nodes to the Comfy Registry, covering node structure, pyproject.toml spec, comfy-cli publishing, and CI
 ---
 
 # Authoring & Publishing ComfyUI Custom Nodes
 
-This skill covers writing a ComfyUI custom node pack and publishing it to the **Comfy Registry** (registry.comfy.org), the public catalog that powers ComfyUI-Manager. For *using* existing nodes in workflows, see the `comfyui-core` skill instead.
+This skill covers writing a ComfyUI custom node pack and publishing it to the Comfy Registry (registry.comfy.org), the public catalog that powers ComfyUI-Manager. For *using* existing nodes in workflows, see the `comfyui-core` skill instead.
 
 ## Minimal Node Pack Structure
 
@@ -86,14 +86,14 @@ NODE_DISPLAY_NAME_MAPPINGS = {
 | `RETURN_NAMES` | no | Friendly names for outputs (defaults to lowercased types). |
 | `OUTPUT_NODE` | no | `True` marks a terminal node that produces a result (save/preview). |
 
-**Input type widgets** — the options dict drives the UI widget:
+The options dict drives the UI widget for each input type:
 - `("INT", {"default": 0, "min": 0, "max": 100, "step": 1})`
 - `("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.1})`
 - `("STRING", {"default": "", "multiline": True})`
-- `(["a", "b", "c"],)` — a literal list becomes a dropdown
-- `("IMAGE",)`, `("LATENT",)`, `("MODEL",)` etc. — typed connections (no widget)
+- `(["a", "b", "c"],)`, a literal list, becomes a dropdown
+- `("IMAGE",)`, `("LATENT",)`, `("MODEL",)` etc. are typed connections (no widget)
 
-The executing method **must return a tuple** matching `RETURN_TYPES`, even for a single output (`return (result,)`).
+The executing method must return a tuple matching `RETURN_TYPES`, even for a single output (`return (result,)`).
 
 ## `pyproject.toml` — Registry Metadata
 
@@ -145,14 +145,14 @@ requires-comfyui = ">=1.0.0"                   # optional ComfyUI version constr
 
 ### Controlling the published archive
 
-- **`.comfyignore`** — uses `.gitignore` syntax; files listed are **excluded** from the published archive. Use it to drop tests, examples, large assets, and dev files.
-- **`[tool.comfy].includes`** — the inverse: force-includes folders that would otherwise be skipped (e.g. a bundled `web/dist`).
+- `.comfyignore` uses `.gitignore` syntax; files listed are excluded from the published archive. Use it to drop tests, examples, large assets, and dev files.
+- `[tool.comfy].includes` is the inverse: it force-includes folders that would otherwise be skipped (e.g. a bundled `web/dist`).
 
 ## Registry Setup (one-time)
 
-1. Go to **registry.comfy.org** and create a **publisher**.
-2. Your **Publisher ID** is the value after the `@` on your profile page. It is **globally unique and cannot be changed** — use it for `PublisherId` in `pyproject.toml`.
-3. In the publisher's section, **create an API key**. Name it and **save it somewhere safe — if you lose it you must create a new one** (it is not recoverable).
+1. Go to registry.comfy.org and create a publisher.
+2. Your Publisher ID is the value after the `@` on your profile page. It is globally unique and cannot be changed. Use it for `PublisherId` in `pyproject.toml`.
+3. In the publisher's section, create an API key. Name it and save it somewhere safe. If you lose it you must create a new one; it is not recoverable.
 
 ## CLI Publishing Flow
 
@@ -167,11 +167,11 @@ pip install comfy-cli
 | `comfy node init` | Scaffolds `pyproject.toml` with registry metadata in the current node pack folder. Fill in the required fields (esp. `PublisherId` and `Repository`). |
 | `comfy node publish` | Validates and uploads the current version to the registry. **Prompts for your API key.** Prints the registry URL on success. |
 
-**Version immutability:** once a `version` is published it **cannot be modified or overwritten**. To ship changes, bump `version` and publish again. To pull a bad version, **deprecate it on the website** (More Actions > Deprecate), which prompts users to upgrade rather than deleting it.
+Versions are immutable. Once a `version` is published it cannot be modified or overwritten. To ship changes, bump `version` and publish again. To pull a bad version, deprecate it on the website (More Actions > Deprecate), which prompts users to upgrade rather than deleting it.
 
 ## CI Publishing (GitHub Actions)
 
-Automate publishing on every version bump. Add the API key as a repo secret named **`REGISTRY_ACCESS_TOKEN`** (Settings > Secrets and variables > Actions), then create `.github/workflows/publish_action.yml`:
+Automate publishing on every version bump. Add the API key as a repo secret named `REGISTRY_ACCESS_TOKEN` (Settings > Secrets and variables > Actions), then create `.github/workflows/publish_action.yml`:
 
 ```yaml
 name: Publish to Comfy registry
@@ -196,26 +196,26 @@ jobs:
           personal_access_token: ${{ secrets.REGISTRY_ACCESS_TOKEN }}
 ```
 
-- Triggers on **push to `main`** but only when **`pyproject.toml`** changes (i.e. when you bump `version`). `workflow_dispatch` allows manual runs.
+- Triggers on push to `main` but only when `pyproject.toml` changes (i.e. when you bump `version`). `workflow_dispatch` allows manual runs.
 - If your default branch isn't `main`, update the `branches:` list.
-- The action reads the version from `pyproject.toml` and publishes it — so the typical flow is: bump `version`, commit, push to `main`, done.
+- The action reads the version from `pyproject.toml` and publishes it, so the typical flow is bump `version`, commit, push to `main`, done.
 
 ## Optional Frontend Extension
 
-If your pack adds custom UI (widgets, sidebar tabs, menu items), set `WEB_DIRECTORY` in `__init__.py` and ship JS there. New frontend extensions should target the modern **`@comfyorg/extension-api`** rather than poking at legacy globals; pull in `@comfyorg/comfyui-frontend-types` for TypeScript types (`npm install -D @comfyorg/comfyui-frontend-types`). For the full frontend authoring workflow (`defineExtension`/`defineNode`/`defineWidget` and the `defineSidebarTab`/`defineCommand`/`defineSetting` shell APIs), see the sibling **`comfyui-frontend-extensions`** skill.
+If your pack adds custom UI (widgets, sidebar tabs, menu items), set `WEB_DIRECTORY` in `__init__.py` and ship JS there. New frontend extensions should target the modern `@comfyorg/extension-api` rather than poking at legacy globals; pull in `@comfyorg/comfyui-frontend-types` for TypeScript types (`npm install -D @comfyorg/comfyui-frontend-types`). For the full frontend authoring workflow (`defineExtension`/`defineNode`/`defineWidget` and the `defineSidebarTab`/`defineCommand`/`defineSetting` shell APIs), see the sibling `comfyui-frontend-extensions` skill.
 
 ## Common Mistakes
 
-1. **Forgetting the return tuple** — the `FUNCTION` method must `return (value,)`, not `return value`, even for one output.
-2. **Single-element `RETURN_TYPES` without a comma** — `("IMAGE")` is a string, not a tuple. Write `("IMAGE",)`.
-3. **`INPUT_TYPES` not a `@classmethod`** — ComfyUI calls it on the class; missing the decorator breaks node loading.
-4. **Trying to overwrite a published version** — versions are immutable. Bump `version` instead; deprecate bad ones on the website.
-5. **Renaming `name` after publishing** — it's immutable and globally unique. Pick a good name (no "ComfyUI" prefix) up front.
-6. **Missing `[project.urls].Repository`** — it's required; publishing fails without a valid repo URL.
-7. **Wrong `PublisherId`** — use the id after the `@` on your profile, not your display name.
-8. **Oversized icon** — must be square and ≤ 400×400px; larger images are rejected.
-9. **Renaming class keys in `NODE_CLASS_MAPPINGS`** — the key is the `class_type` stored in workflow JSON. Changing it breaks every saved workflow that used the node.
-10. **Committing the API key** — store it as the `REGISTRY_ACCESS_TOKEN` secret; never in `pyproject.toml` or the repo.
+1. **Forgetting the return tuple.** The `FUNCTION` method must `return (value,)`, not `return value`, even for one output.
+2. **Single-element `RETURN_TYPES` without a comma.** `("IMAGE")` is a string, not a tuple. Write `("IMAGE",)`.
+3. **`INPUT_TYPES` not a `@classmethod`.** ComfyUI calls it on the class; missing the decorator breaks node loading.
+4. **Trying to overwrite a published version.** Versions are immutable. Bump `version` instead; deprecate bad ones on the website.
+5. **Renaming `name` after publishing.** It's immutable and globally unique. Pick a good name (no "ComfyUI" prefix) up front.
+6. **Missing `[project.urls].Repository`.** It's required; publishing fails without a valid repo URL.
+7. **Wrong `PublisherId`.** Use the id after the `@` on your profile, not your display name.
+8. **Oversized icon.** Must be square and ≤ 400×400px; larger images are rejected.
+9. **Renaming class keys in `NODE_CLASS_MAPPINGS`.** The key is the `class_type` stored in workflow JSON. Changing it breaks every saved workflow that used the node.
+10. **Committing the API key.** Store it as the `REGISTRY_ACCESS_TOKEN` secret; never in `pyproject.toml` or the repo.
 
 ## Sources
 

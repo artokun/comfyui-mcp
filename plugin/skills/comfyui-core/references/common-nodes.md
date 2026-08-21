@@ -5,13 +5,13 @@ See [`../SKILL.md`](../SKILL.md) for how these wire together into a graph.
 
 ## Contents
 
-- [Checkpoint & Model Loading](#checkpoint--model-loading) — `CheckpointLoaderSimple`, `UNETLoader`, `CLIPLoader`, `DualCLIPLoader`, `VAELoader`, `LoraLoader`, `UpscaleModelLoader`
-- [Text Encoding](#text-encoding) — `CLIPTextEncode`, `CLIPSetLastLayer`
-- [Latent Space](#latent-space) — `EmptyLatentImage`, `VAEEncode`, `VAEDecode`, `SetLatentNoiseMask`, `LatentUpscale`
-- [Sampling](#sampling) — `KSampler`, `KSamplerAdvanced`
-- [Image Operations](#image-operations) — `LoadImage`, `SaveImage`, `PreviewImage`, `ImageUpscaleWithModel`, `ImageScale`, `ImageInvert`, `ImageBatch`
-- [ControlNet](#controlnet) — `ControlNetLoader`, `ControlNetApply`, `ControlNetApplyAdvanced`
-- [Conditioning](#conditioning) — `ConditioningCombine`, `ConditioningSetArea`
+- [Checkpoint & Model Loading](#checkpoint--model-loading): `CheckpointLoaderSimple`, `UNETLoader`, `CLIPLoader`, `DualCLIPLoader`, `VAELoader`, `LoraLoader`, `UpscaleModelLoader`
+- [Text Encoding](#text-encoding): `CLIPTextEncode`, `CLIPSetLastLayer`
+- [Latent Space](#latent-space): `EmptyLatentImage`, `VAEEncode`, `VAEDecode`, `SetLatentNoiseMask`, `LatentUpscale`
+- [Sampling](#sampling): `KSampler`, `KSamplerAdvanced`
+- [Image Operations](#image-operations): `LoadImage`, `SaveImage`, `PreviewImage`, `ImageUpscaleWithModel`, `ImageScale`, `ImageInvert`, `ImageBatch`
+- [ControlNet](#controlnet): `ControlNetLoader`, `ControlNetApply`, `ControlNetApplyAdvanced`
+- [Conditioning](#conditioning): `ConditioningCombine`, `ConditioningSetArea`
 
 ## Checkpoint & Model Loading
 

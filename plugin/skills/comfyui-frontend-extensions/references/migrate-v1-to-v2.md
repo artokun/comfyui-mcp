@@ -6,21 +6,21 @@ equivalents. See [`../SKILL.md`](../SKILL.md) for full authoring patterns.
 
 ## Contents
 
-- [The big picture](#the-big-picture) — what v2 split apart, and why
-- [Top-level registration](#top-level-registration) — `registerExtension` → `defineExtension`
-- [Lifecycle hooks](#lifecycle-hooks) — `setup`/`init` → `onLoad`/`onUnload`
+- [The big picture](#the-big-picture): what v2 split apart, and why
+- [Top-level registration](#top-level-registration): `registerExtension` → `defineExtension`
+- [Lifecycle hooks](#lifecycle-hooks): `setup`/`init` → `onLoad`/`onUnload`
 - [Node prototype patching → `NodeHandle` events](#node-prototype-patching--nodehandle-events)
-- [Widgets](#widgets) — `addWidget`/`widget.callback` → typed widget handles
+- [Widgets](#widgets): `addWidget`/`widget.callback` → typed widget handles
 - [Events: `api.addEventListener` → typed namespaces](#events-apiaddeventlistener--typed-namespaces)
-- [Shell UI](#shell-ui) — sidebar tabs, commands, keybindings, settings, toasts
-- [Cleanup / teardown](#cleanup--teardown) — disposers replace manual unpatching
-- [Migration checklist](#migration-checklist) — the ordered pass to run over an extension
+- [Shell UI](#shell-ui): sidebar tabs, commands, keybindings, settings, toasts
+- [Cleanup / teardown](#cleanup--teardown): disposers replace manual unpatching
+- [Migration checklist](#migration-checklist): the ordered pass to run over an extension
 
 ## The big picture
 
 v1 packed everything into a single `app.registerExtension({...})` mega-call with
 mixed concerns (node patching, commands, keybindings, settings, UI). v2 splits each
-concern into its own `defineX` — independently importable, testable, and disposable.
+concern into its own `defineX`, each independently importable, testable, and disposable.
 
 ```ts
 // ── v1 ──────────────────────────────────────────────────────────────────
@@ -222,7 +222,7 @@ defineAboutBadge({ label: 'GitHub', url: 'https://…', icon: 'pi-github' })
 ## Migration checklist
 
 1. Replace `import { app } from '../../scripts/app.js'` with named imports from `@comfyorg/extension-api`.
-2. Split the single `registerExtension` object: node concerns → `defineNode`; app lifecycle → `defineExtension`; each UI surface → its own `defineX`.
+2. Split the single `registerExtension` object: node concerns → `defineNode`; app lifecycle → `defineExtension`; each UI concern → its own `defineX`.
 3. Convert `beforeRegisterNodeDef` filtering to `defineNode({ nodeTypes: [...] })`.
 4. Replace every `nodeType.prototype.onX = ...` with `node.on('x', fn)` inside `nodeCreated` / `loadedGraphNode`.
 5. Replace `widget.value =` with `setValue`, `widget.callback =` with `on('valueChange')`, `widget.options.k =` with `setOption`.
@@ -230,5 +230,5 @@ defineAboutBadge({ label: 'GitHub', url: 'https://…', icon: 'pi-github' })
 7. Move all serialization logic to widget-level `on('beforeSerialize')`; drop `serialize: false` usages.
 8. Replace `api.addEventListener('...')` with the matching `execution` / `graph` / `server` / `workbench` namespace; augment payload interfaces for types.
 9. Move validation from `app.queuePrompt` patches to `widget.on('beforeQueue', e => e.reject(...))`.
-10. Ensure lifecycle hooks (`onMounted`, `onNodeMounted`, `onNodeRemoved`) are called **synchronously** — never after an `await`.
+10. Ensure lifecycle hooks (`onMounted`, `onNodeMounted`, `onNodeRemoved`) are called synchronously, never after an `await`.
 11. Track every `Unsubscribe` / `DisposableHandle` you create outside a `setup()` context and dispose them on teardown.

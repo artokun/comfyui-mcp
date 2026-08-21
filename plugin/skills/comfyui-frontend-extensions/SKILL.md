@@ -1,11 +1,11 @@
 ---
 name: comfyui-frontend-extensions
-description: Authoring ComfyUI v2 frontend extensions with @comfyorg/extension-api — defineNode/defineExtension/defineWidget, shell UI (sidebar tabs, commands, hotkeys), typed events, and handles. Use when writing or editing ComfyUI web-UI extension code (custom node JS, sidebar panels, widgets).
+description: Authoring ComfyUI v2 frontend extensions with @comfyorg/extension-api, covering defineNode/defineExtension/defineWidget, shell UI (sidebar tabs, commands, hotkeys), typed events, and handles. Use when writing or editing ComfyUI web-UI extension code (custom node JS, sidebar panels, widgets).
 ---
 
 # ComfyUI v2 Frontend Extension API
 
-The **v2 extension API** is the published npm package `@comfyorg/extension-api`. It
+The v2 extension API is the published npm package `@comfyorg/extension-api`. It
 replaces the legacy `app.registerExtension()` / `nodeType.prototype` monkey-patching
 model with a typed, tree-shakeable, import-based API.
 
@@ -28,7 +28,7 @@ Core principles baked into the API:
 
 - **Import, don't reach for globals.** `import { defineNode } from '@comfyorg/extension-api'`. No `window.app` dependency at module evaluation time.
 - **Read via getters, write via command-dispatch setters.** `getValue()` reads; `setValue()` dispatches an undo-able, serializable command. Read-only invariants (set at construction) are `readonly` accessors (`node.type`, `widget.name`).
-- **Observe via typed `on(...)` subscriptions.** Each returns an `Unsubscribe` cleanup function. No Vue refs/signals are ever exposed — Vue reactivity is the internal engine only.
+- **Observe via typed `on(...)` subscriptions.** Each returns an `Unsubscribe` cleanup function. No Vue refs/signals are ever exposed; Vue reactivity is the internal engine only.
 - **Everything is disposable.** Every `defineX` returns a `DisposableHandle` with an idempotent, synchronous `dispose()`.
 
 ## Registration entry points
@@ -48,18 +48,18 @@ All imported from `@comfyorg/extension-api`:
 | `defineSetting(opts)` | Add a settings-menu entry | `DisposableHandle` |
 | `defineAboutBadge(opts)` | Add a badge to the About page | `DisposableHandle` |
 
-Imperative carve-outs (fire-and-forget, NOT `defineX`, no handle): `toast`, `notify`.
+Imperative carve-outs (fire-and-forget, not `defineX`, no handle): `toast`, `notify`.
 
-A single extension file typically exports a **default** `defineExtension`/`defineNode`
-result and calls the shell-UI `defineX` functions inside `setup()` (or at module scope —
-they queue safely before the app boots).
+A single extension file typically exports a default `defineExtension`/`defineNode`
+result and calls the shell-UI `defineX` functions inside `setup()` or at module scope.
+They queue safely before the app boots.
 
 ## `defineNode` — the primary entry point
 
 Reacts to node lifecycle. `nodeCreated` fires once per node instance (typed in, pasted,
 duplicated, or loaded without an existing workflow). `loadedGraphNode` fires once when a
 node is restored from a saved workflow (widget values already populated). Exactly one of
-them fires per node entity — never both.
+them fires per node entity, never both.
 
 ```ts
 import { defineNode, onNodeMounted, onNodeRemoved } from '@comfyorg/extension-api'
@@ -110,9 +110,9 @@ export default defineNode({
 | `on('configured', fn)` | method | Loaded from saved workflow (after widget values restored). |
 | `on('beforeSerialize', fn)` | method | **Deprecated** — use widget-level `beforeSerialize` (ADR-0010). |
 
-> Position/size/title/mode getters and slot/connection events are **deferred in Phase A**. Do not rely on `getPosition`, `setSize`, `getMode`, `on('connected')`.
+> Position/size/title/mode getters and slot/connection events are deferred in Phase A. Do not rely on `getPosition`, `setSize`, `getMode`, `on('connected')`.
 >
-> Nodes **cannot enumerate or reference their widgets** (`node.getWidget(name)` was removed). Use `defineWidget` and the `mount` context's `ctx.widget` handle.
+> Nodes cannot enumerate or reference their widgets (`node.getWidget(name)` was removed). Use `defineWidget` and the `mount` context's `ctx.widget` handle.
 
 ## `defineExtension` — app lifecycle + shell UI
 
@@ -143,23 +143,23 @@ export default defineExtension({
 })
 ```
 
-> **`setup()` signature note.** The source-of-truth surface uses *implicit-context*
+> A note on the `setup()` signature. The source-of-truth API uses *implicit-context*
 > hooks: import `onMounted`/`onNodeMounted`/etc. and call them synchronously inside
 > `setup()` (mirrors Vue's Composition API). An early package draft showed a
 > `setup(ctx) { ctx.onNodeMounted(...) }` context-argument style; prefer the imported-hook
 > form above, which is what the current API exports.
 
-Context-scoped lifecycle hooks are imported and called **synchronously inside
-`defineExtension`'s `setup()`**: `onBeforeMount`, `onMounted`, `onUnmounted`,
-`onActivated`, `onDeactivated`. Note: `defineSidebarTab`/`defineBottomPanelTab` take **no
-`setup` field** — don't add one (it's a type error). `onActivated`/`onDeactivated` fire
-when the surrounding tab/panel is shown/hidden.
+Context-scoped lifecycle hooks are imported and called synchronously inside
+`defineExtension`'s `setup()`: `onBeforeMount`, `onMounted`, `onUnmounted`,
+`onActivated`, `onDeactivated`. `defineSidebarTab`/`defineBottomPanelTab` take no
+`setup` field; adding one is a type error. `onActivated`/`onDeactivated` fire
+when the surrounding tab or panel is shown or hidden.
 
 ## `defineWidget` — custom widget types with DOM
 
-Widgets are **declared in the Python node's `INPUT_TYPES`**, never created at runtime
+Widgets are declared in the Python node's `INPUT_TYPES`, never created at runtime
 (`node.addWidget` is forbidden). `defineWidget` registers a *type* and the DOM `mount`
-hook the runtime invokes against a host `<div>` it owns. `mount` is optional — omit it
+hook the runtime invokes against a host `<div>` it owns. `mount` is optional; omit it
 for value-only widgets that render through the native renderer.
 
 ```ts
@@ -191,7 +191,7 @@ export default defineWidget({
 
 `WidgetMountContext` also exposes `onUnmount(fn)`, `onBeforeRemount(fn)`, and
 `onAfterRemount(fn => ...)` for host-move scenarios (graph↔app mode, subgraph
-promotion). The `mount` body is **not** re-invoked across a remount — only the
+promotion). The `mount` body is not re-invoked across a remount; only the
 remount hooks fire.
 
 ### `WidgetHandle` surface
@@ -249,7 +249,7 @@ server.on('my-org.my-node.update', (e) => console.log(e))
 off()
 ```
 
-Payloads default to `unknown` today. Narrow them with **TS module augmentation**:
+Payloads default to `unknown` today. Narrow them with TS module augmentation:
 
 ```ts
 declare module '@comfyorg/extension-api' {
@@ -322,7 +322,7 @@ cmd.dispose() // idempotent + synchronous
 
 ## `defineSidebarTab` — embedded panels (e.g. a chat panel)
 
-A sidebar tab is the substrate for a rich embedded UI such as a chat panel. Two flavors:
+A sidebar tab hosts a rich embedded UI such as a chat panel. It comes in two flavors:
 `type: 'vue'` (mount a Vue component) or `type: 'custom'` (imperative `render(container)` /
 `destroy()`). Both share the base fields `id`, `title`, optional `icon`, `iconBadge`,
 `tooltip`, `label`.
@@ -432,13 +432,13 @@ toast.show({ severity: 'error', summary: 'Workflow failed', detail: err.message,
 toast.removeAll()
 ```
 
-`notify({ kind, message, detail, life })` is a deprecated 1:1 wrapper over `toast.show` —
-prefer `toast.show` directly.
+`notify({ kind, message, detail, life })` is a deprecated 1:1 wrapper over `toast.show`.
+Prefer `toast.show` directly.
 
 ## Node identity helpers
 
 For referencing nodes across subgraph boundaries or execution runs, use the branded
-identity primitives rather than raw integer node IDs:
+identity types rather than raw integer node IDs:
 
 ```ts
 import {
@@ -459,18 +459,18 @@ if (isNodeLocatorId(maybe)) {
 ```
 
 `NodeLocatorId` arrives from workflow JSON; `NodeExecutionId` arrives from websocket
-frames. You **receive** these from event payloads — that's why they're public (unlike the
+frames. You receive these from event payloads, which is why they're public (unlike the
 internal `*EntityId` brands, which are not exported).
 
 ## Disposal contract
 
 Every `defineX` returns `DisposableHandle { dispose(): void }`:
 
-- **Idempotent** — calling `dispose()` again is a safe no-op.
-- **Synchronous** — teardown happens synchronously inside `dispose()`.
-- **Independent** — disposing handle A does not affect B or C. Sequence calls
+- **Idempotent.** Calling `dispose()` again is a safe no-op.
+- **Synchronous.** Teardown happens synchronously inside `dispose()`.
+- **Independent.** Disposing handle A does not affect B or C. Sequence calls
   explicitly when teardown order matters (e.g. drop a hotkey before its command).
-- **Pre-mount safe** — disposing before the app boots removes the spec from the
+- **Pre-mount safe.** Disposing before the app boots removes the spec from the
   pending queue so it never mounts.
 
 ```ts
@@ -485,19 +485,19 @@ for (const h of handles.reverse()) h.dispose()
 
 ## Common mistakes
 
-1. **Calling lifecycle hooks after `await`.** `onNodeMounted` / `onMounted` / `onUnmounted` rely on implicit scope context and **must** be called synchronously inside the `setup()`/`nodeCreated` body. After an `await` the scope is gone — throws in dev, silent no-op in prod. Kick off async work in the body, but register hooks first.
+1. **Calling lifecycle hooks after `await`.** `onNodeMounted` / `onMounted` / `onUnmounted` rely on implicit scope context and must be called synchronously inside the `setup()`/`nodeCreated` body. After an `await` the scope is gone: it throws in dev and is a silent no-op in prod. Kick off async work in the body, but register hooks first.
 2. **Reaching for `window.app` or `app.*`.** v2 has no `window.app` dependency at module-eval time. Import everything from `@comfyorg/extension-api`.
 3. **Patching `nodeType.prototype`.** Replaced by `defineNode` + `node.on(...)`. Prototype patching does not interoperate with the v2 handle model.
-4. **Mutating reads.** `node.getInputs()`, `widget.options`, and `Point`/`Size` tuples are frozen/`Readonly` — assignment raises TS errors. Use the setter methods (`widget.setOption`, `widget.setValue`).
-5. **Assigning `widget.value` / `widget.callback` / `widget.serializeValue`.** Use `setValue()`, `on('valueChange')`, and `on('beforeSerialize')`. `serializeValue` is read-only on the v2 surface.
+4. **Mutating reads.** `node.getInputs()`, `widget.options`, and `Point`/`Size` tuples are frozen/`Readonly`; assignment raises TS errors. Use the setter methods (`widget.setOption`, `widget.setValue`).
+5. **Assigning `widget.value` / `widget.callback` / `widget.serializeValue`.** Use `setValue()`, `on('valueChange')`, and `on('beforeSerialize')`. `serializeValue` is read-only in v2.
 6. **Trying to disable widget serialization.** There is no `serialize: false` and no `skip()` in v2. If a widget should not contribute to the payload, it should not be a widget. The only serialization interface is `widget.on('beforeSerialize', fn)` + `e.setSerializedValue(v)`.
 7. **Creating widgets at runtime.** `node.addWidget(...)` / `node.addDOMWidget(...)` are removed. Declare widgets in the Python `INPUT_TYPES`; render custom DOM via `defineWidget({ mount })`.
 8. **Enumerating widgets from a node.** `node.getWidget(name)` / `node.getWidgets()` were removed (nodes cannot reference widgets). Use a `defineWidget` mount context's `ctx.widget`, or share state via the `server` event bus.
 9. **Using node-level `beforeSerialize`.** Deprecated (ADR-0010). Store extension state in a widget and use widget-level `beforeSerialize`.
 10. **Forgetting to dispose.** Long-lived subscriptions made outside a `setup()` context, and every `defineX` handle, leak unless you call the returned `Unsubscribe` / `dispose()`. Inside `setup()` they auto-dispose on unmount.
-11. **Relying on deferred Phase A surface.** Position/size/title/mode getters and slot/connection events are not yet exported. Don't write code against them.
+11. **Relying on deferred Phase A exports.** Position/size/title/mode getters and slot/connection events are not yet exported. Don't write code against them.
 
 ## Sources
 
 - **Official:** npm package `@comfyorg/extension-api` at https://www.npmjs.com/package/@comfyorg/extension-api
-- **Empirical:** none — API surface transcribed from the published package, not reverse-engineered from a working graph.
+- **Empirical:** none; the API was transcribed from the published package, not reverse-engineered from a working graph.
