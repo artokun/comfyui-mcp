@@ -12740,6 +12740,18 @@ function projectFindNodesReply(res: ToolResult, requested: unknown): ToolResult 
  * which is worse than today's honest rejection. The title is therefore applied as
  * a SECOND command against the id the first one returned.
  *
+ * This is the SAME shape `panel_create_group` already ships —
+ * `includeRequestedCreateGroupMembers` follows a `graph_create_group` with a
+ * `graph_edit_group` through the same `ctx.call` — so it inherits that pattern's
+ * properties rather than introducing new ones. Including the uncomfortable one,
+ * stated here because it is not provably absent: each dispatch is stamped with
+ * `ctx.workflowUuid` resolved AT DISPATCH, so if the active workflow changed
+ * between the two commands the rename carries the NEW workflow's stamp, the
+ * panel's fence agrees with it, and it would retitle whatever node holds that id
+ * on the new canvas. The window is the round trip between them and the exposure
+ * is identical to the shipped create_group pair, so it is not widened here — but
+ * it is not closed here either, and a reader should not infer that it is.
+ *
  * That makes two mutations where the caller wrote one, so the failure mode has to
  * be stated rather than smoothed over: the subgraph is created FIRST and exists
  * whatever happens next. If the rename does not land, this returns the creation's
