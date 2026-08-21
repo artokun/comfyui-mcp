@@ -1,6 +1,6 @@
 /**
  * #1973 — panel_get_errors must not present a clean `errored_count: 0` while
- * its live combo scan still has execution nodes unchecked.
+ * its live combo scan still has nodes unchecked.
  *
  * The panel's graph_get_errors shares one elective server-call budget and
  * gives the live combo scan only a 4 s STEP cap (GET_ERRORS_STEP_CAP_MS), so a
@@ -12,24 +12,68 @@
  * per-class round trip. If that completion cannot run, the reply still leads
  * with `audit_complete: false` and checked/unchecked counts rather than a
  * primary clean 0.
+ *
+ * TWO RULES THIS MODULE IS BUILT AROUND, both learned the expensive way:
+ *
+ * 1. ANY abstention makes the audit incomplete, not just a budget one. The
+ *    panel abstains for five different reasons (live-combo-availability.js) and
+ *    only two of them raise `unchecked_budget_exhausted`. The asset-probe cap,
+ *    a failed /object_info lookup and an unanswered file check produce the
+ *    SAME misread this issue reports — `errored_count: 0` first, "no errors
+ *    recorded" attached — so completeness is judged from the abstention LIST,
+ *    never from the budget flag alone.
+ *
+ * 2. This pass may retire an abstention; it may never manufacture a verdict the
+ *    panel's own scanner would have refused to give. It has no /view probe, so
+ *    on an UPLOAD input — the one option list ComfyUI structurally cannot
+ *    enumerate (#1357/#387) — non-membership is not evidence of absence and the
+ *    node stays unchecked. The upload-flag list here is ComfyUI's own
+ *    (comfy_api/latest/_io.py `UploadType`), which is WIDER than the panel's:
+ *    `UploadType.model` serialises as `file_upload`, and abstaining on a flag
+ *    the panel misses is the fail-closed direction.
  */
 
 import { LIMIT_CEILING, MAX_CHARS_CEILING } from "../services/graph-query.js";
+import type { PanelToolCtx, ToolResult } from "./panel-tools.js";
 
-export type GetErrorsToolResult = {
-  content: Array<{ type: string; text?: string; [k: string]: unknown }>;
-  isError?: boolean;
-};
+/**
+ * The panel reply this module rewrites. It must be the orchestrator's OWN
+ * `ToolResult`, not a structurally-similar local alias: the alias compiled here
+ * and then failed at the call site with TS2345, which is how #1981 reached CI
+ * with a tree that does not build.
+ */
+export type GetErrorsToolResult = ToolResult;
 
-export type GetErrorsCallCtx = {
-  call: (cmd: Record<string, unknown>, timeoutMs?: number) => Promise<GetErrorsToolResult>;
-};
+/** Only the call surface this module uses, so a test can drive it with a stub. */
+export type GetErrorsCallCtx = Pick<PanelToolCtx, "call">;
 
-const BUDGET_UNCHECKED_RE =
+/**
+ * The abstentions that a second, batched read can actually retire: the two the
+ * panel raises when it runs out of the shared budget or its per-call class cap.
+ * Everything else it abstains for (a failed lookup, an unanswered file probe,
+ * the probe cap) is NOT retried here — but it still counts as an incomplete
+ * audit. See `isGetErrorsAuditIncomplete`.
+ */
+const RETRYABLE_UNCHECKED_RE =
   /ran out of its shared server-call budget|lookup cap was reached/i;
-const CLEAN_NOTE_RE = /no errors recorded since the last execution/i;
 const UNENUMERABLE_VALUE_RE = /[\\/]|\s\[(input|output|temp)\]\s*$/i;
 const FILE_LIKE = /\.[A-Za-z0-9_]{2,12}$/;
+
+/**
+ * ComfyUI's own upload-input flags, from `UploadType` in
+ * comfy_api/latest/_io.py — image/audio/video plus `file_upload`, which is what
+ * `UploadType.model` (Load3D, Load3DAnimation) serialises to. The panel's list
+ * omits `file_upload`; matching ComfyUI rather than the panel is deliberate,
+ * because every flag added here only ever makes this pass ABSTAIN more.
+ * `model_upload` is kept for panels/packs that spell it that way.
+ */
+const UPLOAD_CONFIG_FLAGS = [
+  "image_upload",
+  "video_upload",
+  "audio_upload",
+  "model_upload",
+  "file_upload",
+] as const;
 
 type UncheckedEntry = {
   id?: unknown;
@@ -47,7 +91,8 @@ type QueryNode = {
 
 export function parseToolResultJson(res: GetErrorsToolResult): Record<string, unknown> | null {
   if (!res || res.isError) return null;
-  const text = res.content?.find((c) => c.type === "text")?.text;
+  const entry = res.content?.find((c) => c.type === "text");
+  const text = entry && entry.type === "text" ? entry.text : undefined;
   if (typeof text !== "string") return null;
   try {
     const parsed = JSON.parse(text) as unknown;
@@ -65,8 +110,9 @@ function asUncheckedList(payload: Record<string, unknown>): UncheckedEntry[] {
     : [];
 }
 
-function isBudgetUnchecked(entry: UncheckedEntry): boolean {
-  return typeof entry?.reason === "string" && BUDGET_UNCHECKED_RE.test(entry.reason);
+/** An abstention a second batched read has a chance of retiring. */
+function isRetryableUnchecked(entry: UncheckedEntry): boolean {
+  return typeof entry?.reason === "string" && RETRYABLE_UNCHECKED_RE.test(entry.reason);
 }
 
 /** Distinct node ids the scan abstained on — same counting rule as the panel. */
@@ -74,32 +120,61 @@ export function uncheckedNodeCount(unchecked: UncheckedEntry[]): number {
   return new Set(unchecked.map((u, i) => (u?.id == null ? `#${i}` : `id:${String(u.id)}`))).size;
 }
 
+/**
+ * Judged from the abstention LIST, not from the budget flag.
+ *
+ * `unchecked_budget_exhausted` covers only two of the panel's five abstention
+ * reasons. A scan stopped by the file-probe cap emits `unchecked_nodes` and
+ * `unchecked_asset_probe_limit` with NO budget flag, and the panel's own `clean`
+ * predicate does not consider abstentions at all — so that payload ships
+ * `errored_count: 0` plus "no errors recorded" next to a list of nodes nobody
+ * judged. That is the reported misread with a different cause, and the reporter
+ * asked for the completeness header "when ANY nodes are unchecked".
+ */
 export function isGetErrorsAuditIncomplete(payload: Record<string, unknown>): boolean {
   if (payload.unchecked_budget_exhausted === true) return true;
   if (payload.unchecked_class_limit != null) return true;
-  return asUncheckedList(payload).some(isBudgetUnchecked);
+  if (payload.unchecked_asset_probe_limit != null) return true;
+  return asUncheckedList(payload).length > 0;
 }
 
+/**
+ * The option list for an input spec, in either schema form, or null when this
+ * pass has no authority over it.
+ *
+ * ComfyUI serialises a V1 combo as `[[...allowed], {cfg}]` and a V3 one as
+ * `["COMBO", {options: [...], ...}]` (`add_to_dict_v1` writes
+ * `(io_type, as_dict())`). Both are read here. A MULTISELECT combo is refused:
+ * its stored value is a selection of several options, so membership in the list
+ * is the wrong question and asking it reports every such widget as invalid.
+ */
 function comboOptions(spec: unknown): string[] | null {
   if (!Array.isArray(spec) || spec.length === 0) return null;
-  const type = spec[0];
-  if (Array.isArray(type)) return type.filter((v): v is string => typeof v === "string");
-  if (typeof type !== "string" || !/COMBO/i.test(type) || /DYNAMIC/i.test(type)) return null;
   const cfg = spec[1] && typeof spec[1] === "object" && !Array.isArray(spec[1])
     ? (spec[1] as Record<string, unknown>)
     : null;
+  if (cfg?.multiselect) return null;
+  const type = spec[0];
+  if (Array.isArray(type)) return type.filter((v): v is string => typeof v === "string");
+  if (typeof type !== "string" || !/COMBO/i.test(type) || /DYNAMIC/i.test(type)) return null;
   const opts = cfg?.options;
   if (!Array.isArray(opts)) return null;
   const strings = opts.filter((v): v is string => typeof v === "string");
   return strings.length === opts.length ? strings : null;
 }
 
+/**
+ * An UPLOAD input, whose valid values live on DISK and not only in the combo
+ * snapshot. Any truthy flag counts — the panel reads these the same way
+ * (`UPLOAD_CONFIG_FLAGS.some((f) => config[f])`), and a pack that writes `1`
+ * rather than `true` must not fall through to a hard verdict.
+ */
 function isUploadCombo(spec: unknown): boolean {
   if (!Array.isArray(spec)) return false;
   const cfg = spec[1];
   if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) return false;
   const c = cfg as Record<string, unknown>;
-  return c.image_upload === true || c.audio_upload === true || c.video_upload === true;
+  return UPLOAD_CONFIG_FLAGS.some((f) => !!c[f]);
 }
 
 function optionsLookLikeFiles(options: string[]): boolean {
@@ -273,9 +348,34 @@ function mergeUnavailable(
 }
 
 /**
+ * Every surface in this payload that contradicts "no errors recorded".
+ *
+ * STRUCTURAL ON PURPOSE — the predicate this replaces matched the panel's note
+ * prose (`/no errors recorded since the last execution/`), and that note ships
+ * through `tr()`. It is translated in all twelve bundled locales, so on a
+ * Japanese or French panel the match failed and the clean note survived beside
+ * a populated `unavailable_widget_values`: exactly the #399/#984
+ * self-contradiction, invisible to any English test.
+ */
+function payloadHasDefects(payload: Record<string, unknown>): boolean {
+  const nonEmpty = (k: string) => Array.isArray(payload[k]) && (payload[k] as unknown[]).length > 0;
+  if (typeof payload.errored_count === "number" && payload.errored_count > 0) return true;
+  if (payload.node_errors != null && Object.keys(payload.node_errors as object).length > 0) return true;
+  if (payload.last_execution_error != null) return true;
+  if (typeof payload.missing_node_count === "number" && payload.missing_node_count > 0) return true;
+  return (
+    nonEmpty("unavailable_widget_values") ||
+    nonEmpty("missing_models") ||
+    nonEmpty("missing_media") ||
+    nonEmpty("missing_node_types") ||
+    nonEmpty("stale_placeholders")
+  );
+}
+
+/**
  * Put audit completeness FIRST so `errored_count: 0` cannot be read as a
- * finished clean scan. Drops the panel's "no errors recorded" note while the
- * audit is incomplete — that sentence is the misread this issue is about.
+ * finished clean scan, and never ship the panel's "no errors recorded" note
+ * beside something that contradicts it.
  */
 export function presentGetErrorsAudit(payload: Record<string, unknown>): Record<string, unknown> {
   const incomplete = isGetErrorsAuditIncomplete(payload);
@@ -319,7 +419,7 @@ export function presentGetErrorsAudit(payload: Record<string, unknown>): Record<
       `AUDIT INCOMPLETE: ${uncheckedCount} node(s) were not checked. ` +
       `errored_count (${shown}) counts only the nodes this scan judged — ` +
       `it is not a clean bill of health for the rest.`;
-  } else if (typeof note === "string") {
+  } else if (typeof note === "string" && !payloadHasDefects(payload)) {
     out.note = note;
   }
   return out;
@@ -352,7 +452,7 @@ export async function completeGetErrorsAudit(
   if (!payload) return res;
   if (!isGetErrorsAuditIncomplete(payload)) return res;
 
-  const leftover = asUncheckedList(payload).filter(isBudgetUnchecked);
+  const leftover = asUncheckedList(payload).filter(isRetryableUnchecked);
   const leftoverIds = [
     ...new Set(leftover.map((e) => e.id).filter((id) => id != null)),
   ];
@@ -376,11 +476,11 @@ export async function completeGetErrorsAudit(
     const nodes = query ? parseQueryNodes(query) : [];
     if (objectInfo && nodes.length > 0) {
       const judged = judgeLeftoverCombos(leftover, nodes, objectInfo);
-      // Non-budget abstentions (unenumerable paths the panel already disclosed)
-      // stay; budget leftovers are replaced by whatever this pass still could
-      // not judge.
+      // Non-retryable abstentions (the probe cap, a failed lookup, an unenumerable
+      // path the panel already disclosed) stay; retryable leftovers are replaced by
+      // whatever this pass still could not judge.
       const nextUnchecked = [
-        ...asUncheckedList(payload).filter((e) => !isBudgetUnchecked(e)),
+        ...asUncheckedList(payload).filter((e) => !isRetryableUnchecked(e)),
         ...judged.stillUnchecked,
       ];
       payload.unchecked_nodes = nextUnchecked;
@@ -390,21 +490,30 @@ export async function completeGetErrorsAudit(
       if (nextUnchecked.length === 0) {
         delete payload.unchecked_nodes;
       }
-      const stillBudget = nextUnchecked.some(isBudgetUnchecked);
-      if (!stillBudget) {
+      const stillRetryable = nextUnchecked.some(isRetryableUnchecked);
+      if (!stillRetryable) {
         delete payload.unchecked_budget_exhausted;
         delete payload.unchecked_class_limit;
       }
       if (judged.unavailable.length) {
-        payload.unavailable_widget_values = mergeUnavailable(
-          payload.unavailable_widget_values,
-          judged.unavailable,
-        );
+        const merged = mergeUnavailable(payload.unavailable_widget_values, judged.unavailable);
+        const added = merged.length - (Array.isArray(payload.unavailable_widget_values)
+          ? (payload.unavailable_widget_values as unknown[]).length
+          : 0);
+        payload.unavailable_widget_values = merged;
+        // The panel's note carries a COUNT of the pre-completion list
+        // (comboAvailabilityNote), so appending to the list without replacing it
+        // ships "1 widget value(s)" above two entries — the same stale-count
+        // defect the unchecked_nodes_note delete above exists to avoid.
+        if (added > 0) {
+          payload.unavailable_widget_values_note =
+            `LIVE SCAN + ORCHESTRATOR COMPLETION: ${merged.length} widget value(s) the server ` +
+            `does not offer, ${added} of them judged after the panel's scan ran out of budget, ` +
+            `from one batched /object_info read. Values on an UPLOAD input that the combo list ` +
+            `cannot enumerate were NOT judged here — those stay in unchecked_nodes.`;
+        }
       }
       payload.audit_completed_by = "orchestrator";
-      if (typeof payload.note === "string" && CLEAN_NOTE_RE.test(payload.note) && judged.unavailable.length) {
-        delete payload.note;
-      }
     }
   }
 

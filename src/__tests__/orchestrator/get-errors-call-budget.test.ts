@@ -210,3 +210,187 @@ describe("panel_get_errors leftover call-budget audit (#1973)", () => {
     expect(payload.note).toBe(CLEAN_NOTE);
   });
 });
+
+// #1973 follow-up — the first cut of this fix judged completeness from the
+// `unchecked_budget_exhausted` FLAG and re-judged combos with a scanner that
+// diverged from the panel's. Both directions are pinned here: an abstention the
+// flag does not cover must still suppress the clean 0, and this pass must never
+// invent a verdict the panel's own scanner would have refused to give.
+describe("panel_get_errors completeness parity with the panel's scanner (#1973)", () => {
+  // live-combo-availability.js abstains for five reasons; only two raise the
+  // budget flag. This is the file-probe cap — no flag, same misread.
+  const UNENUM = "not checked: this value names a file below the input root";
+  function probeCapReply(): Record<string, unknown> {
+    return {
+      viewing: { kind: "root", workflow: "wan.json" },
+      node_count: 77,
+      errored_count: 0,
+      nodes: [],
+      unchecked_nodes: [
+        { id: 51, type: "KSampler", reason: "node type could not be looked up (/object_info call failed)" },
+        {
+          id: 12, type: "LoadImage", widget: "image", value: "lib/a.png",
+          reason: `${UNENUM}, and this call's 24-file server-existence probe cap was reached`,
+        },
+      ],
+      unchecked_nodes_note: "NOT CHECKED: 2 node(s) this scan could not judge.",
+      unchecked_asset_probe_limit: 24,
+      last_execution_error: null,
+      node_errors: null,
+      note: CLEAN_NOTE,
+    };
+  }
+
+  it("treats a non-budget abstention as an incomplete audit, without spending a follow-up", async () => {
+    const { payload, keys, cmds } = await runGetErrors((cmd) => {
+      if (cmd.cmd === "graph_get_errors") return probeCapReply();
+      throw new Error(`unexpected follow-up ${cmd.cmd}`);
+    });
+
+    // Nothing here is retryable, so the pass must not buy a second round trip.
+    expect(cmds).toEqual(["graph_get_errors"]);
+    expect(payload.audit_complete).toBe(false);
+    expect(keys[0]).toBe("audit_complete");
+    expect(payload.unchecked_count).toBe(2);
+    expect(payload.checked_count).toBe(75);
+    expect(String(payload.note)).toMatch(/AUDIT INCOMPLETE/i);
+    expect(String(payload.note)).not.toMatch(/no errors recorded/i);
+  });
+
+  // ComfyUI serialises a V3 node's combo as ["COMBO", {…}] (add_to_dict_v1 writes
+  // (io_type, as_dict)), and UploadType.model becomes `file_upload`
+  // (comfy_api/latest/_io.py:44). An [output]-annotated value resolves through
+  // get_annotated_filepath against a DIFFERENT root, so it can never be a member
+  // of the input-dir list — #1357. Calling that a missing asset is the exact
+  // "looked it up and it is not there" collapse the panel refuses to make.
+  it("does not manufacture a missing_asset on an upload input it has no probe for", async () => {
+    const panel = {
+      ...budgetExhaustedReply({ extraUnchecked: 0 }),
+      unchecked_nodes: [{ id: 9, type: "Load3D", reason: BUDGET_REASON }],
+    };
+    const { payload } = await runGetErrors((cmd) => {
+      if (cmd.cmd === "graph_get_errors") return panel;
+      if (cmd.cmd === "graph_query") {
+        return {
+          matched: 1, shown: 1,
+          text: JSON.stringify({ id: 9, type: "Load3D", widgets: { model_file: "hero.glb [output]" } }),
+        };
+      }
+      if (cmd.cmd === "graph_get_object_info") {
+        return {
+          ok: true,
+          object_info: {
+            Load3D: {
+              input: {
+                required: {
+                  model_file: ["COMBO", { options: ["none", "3d/cube.glb"], file_upload: true }],
+                },
+              },
+            },
+          },
+        };
+      }
+      return { ok: false };
+    });
+
+    const unavailable = (payload.unavailable_widget_values ?? []) as Array<Record<string, unknown>>;
+    expect(
+      unavailable.find((u) => String(u.id) === "9"),
+      "an unenumerable upload value must not be reported as a missing asset",
+    ).toBeUndefined();
+    const still = (payload.unchecked_nodes ?? []) as Array<Record<string, unknown>>;
+    expect(still.find((u) => String(u.id) === "9")).toBeTruthy();
+    expect(payload.audit_complete).toBe(false);
+  });
+
+  // The panel's clean note ships through tr(); it is translated in all twelve
+  // bundled locales. A predicate that matches its ENGLISH prose passes this file
+  // and dies in production for eleven of them (#399/#984 self-contradiction).
+  it("drops a TRANSLATED clean note when the completion pass found a real miss", async () => {
+    const panel = {
+      ...budgetExhaustedReply({ extraUnchecked: 0 }),
+      unchecked_nodes: [{ id: 71, type: "SaveVideo", reason: BUDGET_REASON }],
+      note: "前回の実行開始以降、エラーは記録されていません",
+    };
+    const { payload } = await runGetErrors((cmd) => {
+      if (cmd.cmd === "graph_get_errors") return panel;
+      if (cmd.cmd === "graph_query") {
+        return {
+          matched: 1, shown: 1,
+          text: JSON.stringify({ id: 71, type: "SaveVideo", widgets: { codec: "h264" } }),
+        };
+      }
+      if (cmd.cmd === "graph_get_object_info") {
+        return { ok: true, object_info: { SaveVideo: { input: { required: { codec: [["prores", "vp9"], {}] } } } } };
+      }
+      return { ok: false };
+    });
+
+    expect(payload.audit_complete).toBe(true);
+    expect((payload.unavailable_widget_values as unknown[]).length).toBe(1);
+    expect(
+      payload.note,
+      "a localized clean note must not ship beside a populated unavailable list",
+    ).toBeUndefined();
+  });
+
+  it("refreshes the unavailable-count note when the pass appends to the list", async () => {
+    const panel = {
+      ...budgetExhaustedReply({ extraUnchecked: 0 }),
+      unchecked_nodes: [{ id: 71, type: "SaveVideo", reason: BUDGET_REASON }],
+      unavailable_widget_values: [
+        { id: 4, type: "CheckpointLoaderSimple", widget: "ckpt_name", value: "gone.safetensors", kind: "missing_asset" },
+      ],
+      unavailable_widget_values_note: "LIVE SCAN: 1 widget value(s) naming a file the server does not have.",
+    };
+    const { payload } = await runGetErrors((cmd) => {
+      if (cmd.cmd === "graph_get_errors") return panel;
+      if (cmd.cmd === "graph_query") {
+        return {
+          matched: 1, shown: 1,
+          text: JSON.stringify({ id: 71, type: "SaveVideo", widgets: { codec: "h264" } }),
+        };
+      }
+      if (cmd.cmd === "graph_get_object_info") {
+        return { ok: true, object_info: { SaveVideo: { input: { required: { codec: [["prores", "vp9"], {}] } } } } };
+      }
+      return { ok: false };
+    });
+
+    expect((payload.unavailable_widget_values as unknown[]).length).toBe(2);
+    const note = String(payload.unavailable_widget_values_note);
+    expect(note, "the note must not still claim 1 while the list holds 2").toContain("2 widget value(s)");
+    expect(note.startsWith("LIVE SCAN: 1 widget")).toBe(false);
+  });
+
+  // A MultiCombo (io_type "COMBO", multiselect: true) stores a SELECTION, so
+  // membership in the option list is the wrong question — asking it reports
+  // every such widget as invalid.
+  it("does not judge a multiselect combo against single-value membership", async () => {
+    const panel = {
+      ...budgetExhaustedReply({ extraUnchecked: 0 }),
+      unchecked_nodes: [{ id: 30, type: "MultiPicker", reason: BUDGET_REASON }],
+    };
+    const { payload } = await runGetErrors((cmd) => {
+      if (cmd.cmd === "graph_get_errors") return panel;
+      if (cmd.cmd === "graph_query") {
+        return {
+          matched: 1, shown: 1,
+          text: JSON.stringify({ id: 30, type: "MultiPicker", widgets: { picks: "a,b" } }),
+        };
+      }
+      if (cmd.cmd === "graph_get_object_info") {
+        return {
+          ok: true,
+          object_info: {
+            MultiPicker: { input: { required: { picks: ["COMBO", { options: ["a", "b"], multiselect: true }] } } },
+          },
+        };
+      }
+      return { ok: false };
+    });
+
+    expect(payload.unavailable_widget_values).toBeUndefined();
+    expect(payload.audit_complete).toBe(true);
+  });
+});
