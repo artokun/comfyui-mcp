@@ -471,3 +471,58 @@ describe("the clean note may survive only where the PANEL would have called it c
     });
   }
 });
+
+// #1973 — the completion follow-ups are ELECTIVE and run with the panel's reply
+// already in hand, so they must NOT get the same 30 s budget as the primary read.
+// Handing them the ack timeout makes the handler's worst case 30 s + 30 s and puts
+// a reply we already hold behind an optional improvement — which is #589 (an agent
+// left with NO error surface) re-introduced from the orchestrator side, on the one
+// tool a user staring at red nodes has nothing else to fall back on.
+//
+// This asserts the CALL SITE, not the helper: `completeGetErrorsAudit` takes the
+// budget as a parameter, so a helper-level test passes just as happily when the
+// wiring hands it the wrong constant. That is the one thing worth pinning here.
+describe("get_errors completion follow-ups run on the elective budget (#1973/#589)", () => {
+  async function budgetsFor(): Promise<Map<string, number | undefined>> {
+    const def = buildPanelToolDefs().find((d) => d.name === "panel_get_errors");
+    if (!def) throw new Error("panel_get_errors is not registered");
+    const seen = new Map<string, number | undefined>();
+    await def.handler(
+      {},
+      {
+        call: async (cmd: Record<string, unknown>, timeoutMs?: number) => {
+          seen.set(String(cmd.cmd), timeoutMs);
+          const body =
+            cmd.cmd === "graph_get_errors"
+              ? budgetExhaustedReply({ extraUnchecked: 0 })
+              : { ok: false };
+          return { content: [{ type: "text" as const, text: JSON.stringify(body) }] };
+        },
+      } as unknown as PanelToolCtx,
+    );
+    return seen;
+  }
+
+  it("gives the primary read the full ack budget and the follow-ups a strictly smaller one", async () => {
+    const seen = await budgetsFor();
+
+    const primary = seen.get("graph_get_errors");
+    const query = seen.get("graph_query");
+    const objectInfo = seen.get("graph_get_object_info");
+
+    // The harness is worthless unless the follow-ups actually fired.
+    expect(query, "graph_query follow-up did not run").toBeTypeOf("number");
+    expect(objectInfo, "graph_get_object_info follow-up did not run").toBeTypeOf("number");
+
+    expect(primary, "the primary read keeps the #1493 refresh-ack budget").toBe(30_000);
+    expect(
+      query!,
+      "an elective follow-up must not be able to double the handler's worst case",
+    ).toBeLessThan(primary!);
+    expect(objectInfo!).toBeLessThan(primary!);
+
+    // Worst case is the primary budget plus ONE follow-up budget: the two
+    // follow-ups are issued concurrently, so they overlap rather than sum.
+    expect(primary! + Math.max(query!, objectInfo!)).toBeLessThanOrEqual(40_000);
+  });
+});

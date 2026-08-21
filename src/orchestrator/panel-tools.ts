@@ -1150,6 +1150,22 @@ function sleep(ms: number): Promise<void> {
 // frozen/backgrounded tab fails in bounded time instead of hanging forever.
 const OBJECT_INFO_REFRESH_ACK_TIMEOUT_MS = 30_000;
 
+/** #1973 — the budget for get_errors' ELECTIVE completion follow-ups, deliberately a
+ *  fraction of the ack timeout above and NOT the same number.
+ *
+ *  By the time those follow-ups run, the panel's reply is already in hand. Spending
+ *  the full 30 s ack budget on them would make the handler's worst case 30 s + 30 s
+ *  and put a reply we ALREADY HAVE behind an elective completeness improvement — for
+ *  a tool whose entire reason for existing is that an agent staring at red nodes has
+ *  no other error surface. #589 is precisely that failure, and the shared panel-side
+ *  budget exists to prevent it; re-introducing it from the orchestrator side would be
+ *  a fix that costs more than the bug it closes.
+ *
+ *  So the completion fails toward "answer promptly and say the audit is incomplete"
+ *  rather than "wait longer for a chance at completeness". 8 s is the same elective
+ *  probe budget the graph_query / graph_serialize probes in this file already use. */
+const GET_ERRORS_COMPLETION_BUDGET_MS = 8_000;
+
 // #1639 — while a ComfyUI prompt is running the frontend main thread often
 // cannot service graph_* at all. Waiting out the 20/30 s ack bound only
 // surfaces "tab may be backgrounded or frozen" with an unknown mutation
@@ -14416,7 +14432,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           await completeGetErrorsAudit(
             ctx,
             await ctx.call({ cmd: "graph_get_errors" }, OBJECT_INFO_REFRESH_ACK_TIMEOUT_MS),
-            OBJECT_INFO_REFRESH_ACK_TIMEOUT_MS,
+            GET_ERRORS_COMPLETION_BUDGET_MS,
           ),
           [
           {
