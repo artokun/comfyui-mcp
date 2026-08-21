@@ -125,6 +125,12 @@ async function abandonOnce(h: Harness, question = QUESTION, header = HEADER): Pr
 const textOf = (res: ToolResult): string =>
   res.content.map((c) => (c as { text?: string }).text ?? "").join("\n");
 
+const restartDef = () => {
+  const def = buildPanelToolDefs().find((d) => d.name === "panel_restart_comfyui");
+  if (!def) throw new Error("panel_restart_comfyui is not registered");
+  return def;
+};
+
 describe("panel#1554 a late confirmation is claimed, not discarded", () => {
   beforeEach(() => resetAbandonedConfirmCards());
 
@@ -221,6 +227,34 @@ describe("panel#1554 a late confirmation is claimed, not discarded", () => {
     expect(h.drained).toHaveLength(0);
   });
 
+  it("NEW CHAT: the next restart on the same wf: tab paints a FRESH card", async () => {
+    // The pin the review asked for, by name and at the TOOL level rather than at
+    // confirm's: "next restart on the same `wf:` tab must paint a fresh card". New chat
+    // blanks the feed (`newChat()` → `resetFeed()`), so the card the answer belongs to is
+    // no longer on screen; claiming it would restart the server showing the user nothing.
+    const h = harness();
+
+    // A real first attempt: card dispatched, nobody answers inside the budget.
+    expect(textOf(await restartDef().handler({} as never, h.ctx))).toContain(
+      "No confirmation received within",
+    );
+    expect(h.cards).toHaveLength(1);
+    // …then they click it.
+    h.late.set(String(h.cards[0].ask_id), "Yes, go ahead");
+
+    // New chat: exactly what the `new_session` handler does for each member tab.
+    forgetAbandonedConfirmCards(TAB);
+
+    // A SECOND CARD, not a silent restart on the strength of the first one.
+    const second = textOf(await restartDef().handler({} as never, h.ctx));
+    expect(h.cards).toHaveLength(2);
+    expect(second).toContain("No confirmation received within");
+    expect(second).not.toContain("NO NEW CONFIRMATION CARD WAS SHOWN");
+    // The click is left where it was rather than consumed by a conversation that
+    // never showed it.
+    expect(h.late.get(String(h.cards[0].ask_id))).toBe("Yes, go ahead");
+  });
+
   it("a TAKEOVER of the route key drops it — the newcomer never answered that card", async () => {
     // `wf:` keys recur: close the browser tab, open the same workflow elsewhere, and the
     // newcomer inherits the address. #486 calls that a conversation boundary and retires
@@ -308,12 +342,6 @@ describe("panel#1554 a late confirmation is claimed, not discarded", () => {
 
 describe("panel#1554 the recovered decision is disclosed, not slipped in", () => {
   beforeEach(() => resetAbandonedConfirmCards());
-
-  const restartDef = () => {
-    const def = buildPanelToolDefs().find((d) => d.name === "panel_restart_comfyui");
-    if (!def) throw new Error("panel_restart_comfyui is not registered");
-    return def;
-  };
 
   it("THE CALL SITE opts in — the helper alone proves nothing about production", async () => {
     // Verified by mutation: dropping the options object from the ctx.confirm(...) call
