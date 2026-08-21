@@ -22,7 +22,7 @@ import { displayWidth, RULE_MAX } from "../../i18n/terminal-layout.js";
 
 afterEach(() => __resetI18nForTest());
 
-const ROOT = join(import.meta.dirname, "..", "..", "..");
+const ROOT = process.cwd();
 const TRANSLATED = LOCALES.filter((l) => l !== "en");
 
 function flatten(node: unknown, prefix = "", out: Record<string, string> = {}): Record<string, string> {

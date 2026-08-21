@@ -5,7 +5,9 @@ import { defineConfig } from "vitest/config";
 // by background agents), polluting the run.
 export default defineConfig({
   test: {
-    include: ["src/**/*.{test,spec}.ts"],
+    // Matched pair with tsconfig.json's `exclude: ["src/__tests__"]`: a test outside that tree would
+    // ship in dist/ yet never run here, so neither file admits one.
+    include: ["src/__tests__/**/*.{test,spec}.ts"],
     // Redirect the home directory to a throwaway temp dir in EVERY worker
     // before any module under test is imported (#879, #866). Without this the
     // full suite intermittently rewrites the developer's real

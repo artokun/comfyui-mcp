@@ -113,7 +113,7 @@ describe("packaging", () => {
     // Without this the whole feature works perfectly on a dev machine and ships DEAD to every
     // npm user: the catalogs simply are not in the package, so `trFor` finds no file and
     // every language silently renders English. Nothing else would catch it.
-    const pkg = JSON.parse(readFileSync(join(import.meta.dirname, "..", "..", "..", "package.json"), "utf8"));
+    const pkg = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8"));
     expect(pkg.files).toContain("locales");
   });
 

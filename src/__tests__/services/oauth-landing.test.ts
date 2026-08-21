@@ -1,13 +1,19 @@
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, readFileSync, existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { persistOAuthResult, readOAuthStatus, clearOAuth } from "../../services/code-provider-auth.js";
 
 let home: string;
+let savedSecretsPath: string | undefined;
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "oauth-land-"));
+  savedSecretsPath = process.env.COMFYUI_MCP_PANEL_SECRETS;
   process.env.COMFYUI_MCP_PANEL_SECRETS = join(home, "panel-secrets.json");
+});
+afterEach(() => {
+  if (savedSecretsPath === undefined) delete process.env.COMFYUI_MCP_PANEL_SECRETS;
+  else process.env.COMFYUI_MCP_PANEL_SECRETS = savedSecretsPath;
 });
 
 it("codex: writes ~/.codex/auth.json in tokens{} shape + a status mirror without token material", async () => {

@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import { pkcePair, assertAllowedTokenHost, runLoopbackPKCE, OAUTH_PROVIDERS } from "../../services/oauth-flow.js";
-import { beginDeviceCode, pollDeviceToken } from "../../services/oauth-flow.js";
+import {
+  pkcePair,
+  assertAllowedTokenHost,
+  runLoopbackPKCE,
+  OAUTH_PROVIDERS,
+  beginDeviceCode,
+  pollDeviceToken,
+} from "../../services/oauth-flow.js";
 import { createHash } from "node:crypto";
 
 describe("pkcePair", () => {
@@ -185,7 +191,6 @@ describe("device-code", () => {
   });
 
   it("copilot registry entry is experimental", async () => {
-    const { OAUTH_PROVIDERS } = await import("../../services/oauth-flow.js");
     expect(OAUTH_PROVIDERS.copilot.experimental).toBe(true);
     expect(OAUTH_PROVIDERS.copilot.clientId).toBe("Iv1.b507a08c87ecfe98");
   });
