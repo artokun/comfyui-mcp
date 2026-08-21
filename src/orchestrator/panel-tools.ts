@@ -881,7 +881,35 @@ let panelRebootTimingOverride: PanelRebootTiming | null = null;
 // ready:false in time instead of being killed as a bare 300s timeout — even if the
 // COMFYUI_PANEL_REBOOT_* env overrides are set absurdly high (coordinator codex P2).
 const MAX_REBOOT_SETTLE_MS = 10_000; // 10s
-const MAX_REBOOT_BUDGET_MS = 240_000; // 240s  → settle+budget ≤ 250s < 300s outer
+// #1996: this ceiling stays 240s as the ENV escape hatch for an install slower still,
+// but the comment it used to carry ("settle+budget ≤ 250s < 300s outer") did the
+// arithmetic against the outer tools/call limit ONLY. It never counted the tab-reconnect
+// wait that runs AFTER readiness inside the SAME 255s whole-handler budget — so 240s of
+// readiness leaves 15s, and the reconnect wait was handed `overallDeadline - now`
+// directly. The value the file called safe was exactly the one that silently zeroed the
+// reconnect wait. readinessDeadlineWithReconnectReserve is what makes it honest now:
+// readiness is clamped so the reconnect wait always keeps its own budget.
+const MAX_REBOOT_BUDGET_MS = 240_000; // 240s env ceiling; the reserve below protects the reconnect wait
+
+/** The readiness observation's deadline, clamped so it can NEVER consume the budget the
+ *  post-restart tab-reconnect wait needs (#1996).
+ *
+ *  Both waits live inside ONE `overallDeadline` (OVERALL_MAX_MS, 255s). Before this,
+ *  readiness took `min(now + budgetMs, overallDeadline)` and the reconnect wait took
+ *  whatever was left — which is zero whenever readiness ran to the cap. Reserving the
+ *  reconnect budget up front means a slow confirmation card costs readiness time (which
+ *  is recoverable: the caller retries) instead of silently deleting the reconnect wait
+ *  (which is not: it is the only thing that heals the session binding onto the returning
+ *  tab). Never returns a deadline in the past, and never EXTENDS a budget that fits. */
+function readinessDeadlineWithReconnectReserve(args: {
+  now: number;
+  budgetMs: number;
+  overallDeadline: number;
+  reserveMs: number;
+}): number {
+  const { now, budgetMs, overallDeadline, reserveMs } = args;
+  return Math.max(now, Math.min(now + budgetMs, overallDeadline - reserveMs));
+}
 
 // #404: hard ceiling on how long the panel_restart_comfyui CONFIRMATION card waits for
 // a yes/no answer. A restart is user-initiated, so a present user answers in seconds;
@@ -928,9 +956,21 @@ function computeRebootTimingFromEnv(): PanelRebootTiming {
       MAX_REBOOT_SETTLE_MS,
       Math.round(parsePositiveNumberEnv("COMFYUI_PANEL_REBOOT_SETTLE_S", 3) * 1000),
     ),
+    // #1996: 180s, not the old 120s. The reporter's install was STILL refusing
+    // connections at 127.25s (603 probes, ~11ms each — refusals, not timeouts) while
+    // 200+ packs imported, and came back healthy on its own; 120s could not have
+    // observed that boot however fast it finished afterwards. 180s is not a guess at
+    // that install's true boot time (nobody measured it) — it is the largest value the
+    // handler's own envelope allows while still preserving the things that share it:
+    // 180 readiness + 35 reconnect wait + a ≥30s allowance for the confirmation card,
+    // the reboot ack and the post-restart argv read = 245s ≤ OVERALL_MAX_MS (255s).
+    // THE COST, stated rather than slipped in: a server that is genuinely never coming
+    // back is now reported as unconfirmed ~60s later than before (plus the reconnect
+    // wait that is no longer skipped). That cost is bounded and it buys the far more
+    // common case — a big install that boots slowly and is then declared dead.
     budgetMs: Math.min(
       MAX_REBOOT_BUDGET_MS,
-      Math.round(parsePositiveNumberEnv("COMFYUI_PANEL_REBOOT_BUDGET_S", 120) * 1000),
+      Math.round(parsePositiveNumberEnv("COMFYUI_PANEL_REBOOT_BUDGET_S", 180) * 1000),
     ),
     intervalMs: Math.round(parsePositiveNumberEnv("COMFYUI_PANEL_REBOOT_INTERVAL_S", 0.2) * 1000),
     probeTimeoutMs: Math.round(parsePositiveNumberEnv("COMFYUI_PANEL_REBOOT_PROBE_S", 2) * 1000),
@@ -1029,6 +1069,9 @@ export const __panelToolsTestHooks = {
   loopbackProbeUrl,
   /** Compute reboot timing from env WITH the P2 hard caps (bypasses any override). */
   computeRebootTimingFromEnv,
+  /** #1996: the clamp that stops the readiness observation eating the tab-reconnect
+   *  wait's share of the whole-handler deadline. */
+  readinessDeadlineWithReconnectReserve,
   /** #404: the hard ceiling on the panel_restart_comfyui confirmation-card wait. */
   RESTART_CONFIRM_TIMEOUT_MS,
   /** Zero out the post-drop retry settle so retry-once tests don't sleep. */
@@ -2005,22 +2048,29 @@ async function probeDeclineRecovery(
  * distinction (`stale: true | "unknown"`), rather than inventing a second field
  * that a reader could miss while still acting on the misleading boolean.
  *
- * `serverReady:false` is undetermined too, and for the same reason: the tab is
- * only watched once the server is back, so nothing was observed about it.
+ * #1996 — this input used to be `serverReady`, and the reason given for it was
+ * "the tab is only watched once the server is back". That was a PROXY for the
+ * real question, and the proxy outlived its proof: an unconfirmed boot now runs
+ * the reconnect wait too, so `serverReady:false` no longer implies nothing was
+ * watched. The parameter says what it actually means — WAS THE TAB WATCHED —
+ * so that a future path which skips the wait still reports "unknown" and a path
+ * that runs it reports the observation it really made. Nothing else changes:
+ * `tabBack:true` still outranks everything, and a missing baseline is still
+ * "unknown" rather than a bare false.
  */
 export type TabReconnectReport = true | false | "unknown";
 
 export function classifyTabReconnect({
-  serverReady,
+  tabWatched,
   baselineCaptured,
   tabBack,
 }: {
-  serverReady: boolean;
+  tabWatched: boolean;
   baselineCaptured: boolean;
   tabBack: boolean;
 }): TabReconnectReport {
   if (tabBack === true) return true; // a newer hello from the same tab was seen
-  if (!serverReady) return "unknown"; // never watched — the server never came back
+  if (!tabWatched) return "unknown"; // nothing was watched, so nothing was observed
   return baselineCaptured ? false : "unknown";
 }
 
@@ -16937,22 +16987,31 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
           // the same workflow-stamp capability the bridge requires before it dispatches a
           // mutation. Without this, updating the panel pack followed by a headless restart can
           // falsely report ready while the browser is still running stale panel JS (#709).
-          const tabBack = recovery.ready
-            ? ctx.awaitPostRestartReachable
-              ? await ctx.awaitPostRestartReachable(
-                  preRestartPanelIdentity,
-                  Math.max(0, overallDeadline - Date.now()),
-                )
-              : ctx.awaitReachable
-                ? await ctx.awaitReachable(Math.max(0, overallDeadline - Date.now()))
-                : true
-            : false;
-          const graphToolsReady = tabBack && (ctx.tabCanMutateGraph ? ctx.tabCanMutateGraph() : true);
+          //
+          // #1996: watched on BOTH outcomes. This path carried the same coupling as the
+          // bound one — `recovery.ready ? … : false` — so a managed kill+relaunch whose
+          // cold start outran the observation window forfeited the reconnect wait too,
+          // and reported a bare `false` for a tab nobody had looked at.
+          const tabBack = ctx.awaitPostRestartReachable
+            ? await ctx.awaitPostRestartReachable(
+                preRestartPanelIdentity,
+                Math.max(0, overallDeadline - Date.now()),
+              )
+            : ctx.awaitReachable
+              ? await ctx.awaitReachable(Math.max(0, overallDeadline - Date.now()))
+              : true;
+          // #1996: `recovery.ready &&` is LOAD-BEARING now that the wait above runs on
+          // both outcomes. Without it a tab that re-registered while the server was still
+          // unproven would report ready:true — turning the honest refusal this path
+          // already gives into a false success, which is the one thing this fix must not
+          // do. A reconnected browser socket is not a booted ComfyUI.
+          const graphToolsReady =
+            recovery.ready && tabBack && (ctx.tabCanMutateGraph ? ctx.tabCanMutateGraph() : true);
           // #654 — `ready`/`graph_tools_ready` still come from the BOOLEAN, so an
           // undetermined reconnect withholds graph tools exactly as before. Only
           // the reported observation changes.
           const tabReconnect = classifyTabReconnect({
-            serverReady: recovery.ready,
+            tabWatched: true,
             baselineCaptured: preRestartPanelIdentity != null,
             tabBack,
           });
@@ -17758,29 +17817,22 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         // Both fired and dropped are AMBIGUOUS (the panel emits rebooting:true even when it
         // only INFERS a reboot from a dropped fetch), so certification requires an OBSERVED
         // down→up, which the observer has been (and continues) watching for.
-        gate.deadline = Math.min(Date.now() + timing.budgetMs, overallDeadline);
+        // #1996: RESERVE the reconnect wait's budget out of the whole-handler deadline
+        // before the readiness observation claims it. Without the reserve a readiness
+        // window that runs to `overallDeadline` leaves the wait below exactly 0ms, so
+        // raising the budget would have traded one silent forfeit for another.
+        gate.deadline = readinessDeadlineWithReconnectReserve({
+          now: Date.now(),
+          budgetMs: timing.budgetMs,
+          overallDeadline,
+          reserveMs: reconnectWaitTiming().budgetMs,
+        });
         const recovery = await recoveryPromise!;
         // #742 r4/r5/r15: the dispatched restart was observed back — clear the
         // record, CLEAR-IF-SAME: only when the session still holds the token
         // THIS dispatch stamped (a concurrent dispatch's newer record survives).
         if (recovery.ready && acceptedDispatchToken != null) {
           clearSessionRestartDispatchIfSame(ctx, acceptedDispatchToken);
-        }
-        if (!recovery.ready) {
-          const waited = Math.round(recovery.waited_ms / 1000);
-          return ok({
-            rebooting: true,
-            ready: false,
-            confirmed_cycle: false,
-            recovered_ms: recovery.waited_ms,
-            probes: recovery.attempts,
-            saw_down: recovery.sawDown,
-            note:
-              (recovery.sawDown
-                ? `Reboot was dispatched and ComfyUI went down, but it has not become healthy within ${waited}s — it may still be starting or the restart failed. Verify with get_system_stats (action:"health") / panel_node_queue_status before retrying; do NOT assume it is back.`
-                : `The reboot command was sent but I could NOT confirm ComfyUI actually cycled within ${waited}s (it never went down — the panel may have merely disconnected/inferred a reboot without one). Verify with get_system_stats (action:"health") / panel_node_queue_status; do NOT assume it restarted.`) +
-              (preflightNote ? ` ${preflightNote}` : ""),
-          });
         }
         // #400/#709: ComfyUI is healthy, but the panel's browser tab re-registers its own
         // socket a moment later. The old socket can still be reachable after dispatch, so
@@ -17792,6 +17844,14 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         // Connected:none window (codex). `server_ready` carries the certified cycle either
         // way. A production PanelToolCtx supplies the generation waiter; an explicitly
         // lightweight context retains the historical reachability-only test contract.
+        //
+        // #1996: this runs BEFORE the `!recovery.ready` return, not after it. The two
+        // questions are independent — "did THIS ComfyUI instance complete a down→up
+        // cycle" and "is the panel tab routable again" — and one budget expiring used to
+        // deny both. That is the reporter's shape: a 127s boot lost the readiness answer
+        // it honestly could not give AND the reconnect wait it could have given, which is
+        // the only thing on this path that calls `ensureReachable()` to heal the session
+        // binding onto the returning tab. An unconfirmed boot now still gets watched.
         const tabBack = ctx.awaitPostRestartReachable
           ? await ctx.awaitPostRestartReachable(
               preRestartPanelIdentity,
@@ -17800,6 +17860,42 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
           : ctx.awaitReachable
             ? await ctx.awaitReachable(Math.max(0, overallDeadline - Date.now()))
             : true;
+        if (!recovery.ready) {
+          const waited = Math.round(recovery.waited_ms / 1000);
+          // #1996: the refusal itself is NOT the defect and is left exactly as it was.
+          // A window that ended with the port closed is not evidence the server is back,
+          // and a tab that re-registered is not evidence either — the panel's bridge
+          // socket runs browser→orchestrator and never traverses ComfyUI, so it says the
+          // ROUTE is alive and nothing at all about the boot. `ready`, `server_ready` and
+          // `confirmed_cycle` therefore all stay false on every branch here, exactly as
+          // before. What is added is the observation that used to be thrown away.
+          const unreadyTabReconnect = classifyTabReconnect({
+            tabWatched: true,
+            baselineCaptured: preRestartPanelIdentity != null,
+            tabBack,
+          });
+          return ok({
+            rebooting: true,
+            ready: false,
+            graph_tools_ready: false,
+            server_ready: false,
+            confirmed_cycle: false,
+            recovered_ms: recovery.waited_ms,
+            probes: recovery.attempts,
+            saw_down: recovery.sawDown,
+            panel_tab_reconnected: unreadyTabReconnect,
+            note:
+              (recovery.sawDown
+                ? `Reboot was dispatched and ComfyUI went down, but it has not become healthy within ${waited}s — it may still be starting or the restart failed. Verify with get_system_stats (action:"health") / panel_node_queue_status before retrying; do NOT assume it is back.`
+                : `The reboot command was sent but I could NOT confirm ComfyUI actually cycled within ${waited}s (it never went down — the panel may have merely disconnected/inferred a reboot without one). Verify with get_system_stats (action:"health") / panel_node_queue_status; do NOT assume it restarted.`) +
+              (unreadyTabReconnect === true
+                ? " Separately: the panel tab DID re-register and this session was rebound onto it, so panel_* calls should route again. That is a fact about the browser socket only — it does not say ComfyUI finished booting."
+                : unreadyTabReconnect === false
+                  ? " The panel tab was also watched for a re-register and did not come back in that time, so panel_* calls may still report \"Connected: none\"; retry once the server answers, or reload the ComfyUI browser tab."
+                  : "") +
+              (preflightNote ? ` ${preflightNote}` : ""),
+          });
+        }
         // A recovered socket does NOT mean graph mutations are usable: an already-open
         // browser tab can reconnect after ComfyUI restarts while still serving stale panel
         // JS, which lacks the #570 workflow-stamp fence. Report the same capability the
@@ -17811,7 +17907,7 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         // `ready`/`graph_tools_ready` still key off the boolean, so an undetermined
         // reconnect still withholds graph tools. Only the reported observation changes.
         const tabReconnect = classifyTabReconnect({
-          serverReady: true, // this branch only runs on a confirmed healthy cycle
+          tabWatched: true, // the reconnect wait above ran on this path
           baselineCaptured: preRestartPanelIdentity != null,
           tabBack,
         });

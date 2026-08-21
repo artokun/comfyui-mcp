@@ -392,3 +392,54 @@ describe("#654 an unwatched reconnect is reported as unknown, and is still not r
     expect(String(out.note)).not.toMatch(/could NOT be determined/);
   });
 });
+
+// #1996 — the headless path carried the SAME coupling the bound path did:
+//
+//   const tabBack = recovery.ready ? await ctx.awaitPostRestartReachable(…) : false;
+//
+// so a kill+relaunch whose cold start outran the observation window never looked at
+// the tab, and then reported a bare `false` about it. The bound path's version of this
+// is covered behaviourally in panel-restart-slow-boot-reconnect.test.ts; this file owns
+// the scaffolding that reaches the HEADLESS reply, so its half lives here.
+describe("#1996 an unconfirmed managed restart still watches for the tab", () => {
+  it("watches the tab even when OUR observation never certified the cycle", async () => {
+    // The endpoint never goes down, so the managed restart is honestly
+    // couldn't-confirm — and the tab is watched anyway.
+    __panelToolsTestHooks.setHealthProbe(async () => "healthy");
+    const { ctx } = makeCtx(NO_ENDPOINT_REPLY);
+    let watched = 0;
+    ctx.panelConnectionIdentity = () => ({ generation: 1, tabSessionId: "browser-tab-a" });
+    ctx.awaitPostRestartReachable = async () => {
+      watched++;
+      return true;
+    };
+    ctx.tabCanMutateGraph = () => true;
+
+    const res = (await restartTool().handler({}, ctx)) as ToolResult;
+    const out = JSON.parse(res.content.find((c) => c.type === "text")!.text as string);
+
+    expect(watched).toBe(1); // 0 before the fix — the wait was never entered
+    expect(out.panel_tab_reconnected).toBe(true);
+    // AND THE REFUSAL IS INTACT. A reconnected browser socket is not a booted
+    // ComfyUI: `ready` must stay false or this fix has manufactured a success.
+    expect(out.server_ready).toBe(false);
+    expect(out.confirmed_cycle).toBe(false);
+    expect(out.ready).toBe(false);
+    expect(out.graph_tools_ready).toBe(false);
+    expect(String(out.note)).toMatch(/did NOT become healthy within/);
+  });
+
+  it("a watched tab that did not come back is a real false here too", async () => {
+    __panelToolsTestHooks.setHealthProbe(async () => "healthy");
+    const { ctx } = makeCtx(NO_ENDPOINT_REPLY);
+    ctx.panelConnectionIdentity = () => ({ generation: 1, tabSessionId: "browser-tab-a" });
+    ctx.awaitPostRestartReachable = async () => false;
+    ctx.tabCanMutateGraph = () => true;
+
+    const res = (await restartTool().handler({}, ctx)) as ToolResult;
+    const out = JSON.parse(res.content.find((c) => c.type === "text")!.text as string);
+
+    expect(out.panel_tab_reconnected).toBe(false);
+    expect(out.ready).toBe(false);
+  });
+});

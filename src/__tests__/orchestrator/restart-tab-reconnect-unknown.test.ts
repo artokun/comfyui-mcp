@@ -34,30 +34,44 @@ import { classifyTabReconnect } from "../../orchestrator/panel-tools.js";
 describe("#654 a reconnect that was never watched is not a failed reconnect", () => {
   it("no baseline captured ⇒ unknown, even though the server came back", () => {
     // The reporter's exact state.
-    expect(classifyTabReconnect({ serverReady: true, baselineCaptured: false, tabBack: false })).toBe("unknown");
+    expect(classifyTabReconnect({ tabWatched: true, baselineCaptured: false, tabBack: false })).toBe("unknown");
   });
 
   it("baseline captured and the tab did not return ⇒ a real false", () => {
     // The honest negative must survive: this is a genuine observation.
-    expect(classifyTabReconnect({ serverReady: true, baselineCaptured: true, tabBack: false })).toBe(false);
+    expect(classifyTabReconnect({ tabWatched: true, baselineCaptured: true, tabBack: false })).toBe(false);
   });
 
   it("the tab returned ⇒ true, however the baseline went", () => {
     for (const baselineCaptured of [true, false]) {
-      expect(classifyTabReconnect({ serverReady: true, baselineCaptured, tabBack: true })).toBe(true);
+      expect(classifyTabReconnect({ tabWatched: true, baselineCaptured, tabBack: true })).toBe(true);
     }
   });
 
-  it("server never came back ⇒ unknown, because the tab is only watched after it does", () => {
-    // Reporting `false` here would blame the tab for the server's failure.
+  it("a tab NOBODY watched ⇒ unknown, whatever the baseline says (#1996)", () => {
+    // Reporting `false` here would blame the tab for an observation never made.
+    //
+    // #1996 renamed this input. It was `serverReady`, justified as "the tab is only
+    // watched after the server comes back" — true when it was written, and false the
+    // moment the reconnect wait moved ahead of the readiness return. A parameter that
+    // is a PROXY for the real question keeps answering after its premise dies; this one
+    // now asks the question directly, so the honest "unknown" survives only where
+    // nothing was actually watched.
     for (const baselineCaptured of [true, false]) {
-      expect(classifyTabReconnect({ serverReady: false, baselineCaptured, tabBack: false })).toBe("unknown");
+      expect(classifyTabReconnect({ tabWatched: false, baselineCaptured, tabBack: false })).toBe("unknown");
     }
+  });
+
+  it("a WATCHED tab that did not come back is a real false, even on an unproven boot (#1996)", () => {
+    // The case the old `serverReady` input could not express: the readiness budget
+    // expired, the reconnect wait ran anyway, and the tab genuinely did not return.
+    // That is an observation, not an absence of one.
+    expect(classifyTabReconnect({ tabWatched: true, baselineCaptured: true, tabBack: false })).toBe(false);
   });
 
   it("a returned tab is never downgraded by an unhealthy server reading", () => {
     // Defensive: tabBack:true is a positive observation and outranks everything.
-    expect(classifyTabReconnect({ serverReady: false, baselineCaptured: true, tabBack: true })).toBe(true);
+    expect(classifyTabReconnect({ tabWatched: false, baselineCaptured: true, tabBack: true })).toBe(true);
   });
 });
 
@@ -71,7 +85,7 @@ describe("#654 the strictness of ready/graph_tools_ready is untouched", () => {
     // classification, so an unproven reconnect still withholds graph tools. If a
     // refactor ever routes the gate through the classification, "unknown" must
     // not become truthy — this is the assertion that would catch it.
-    const verdict = classifyTabReconnect({ serverReady: true, baselineCaptured: false, tabBack: false });
+    const verdict = classifyTabReconnect({ tabWatched: true, baselineCaptured: false, tabBack: false });
     expect(verdict).not.toBe(true);
     // …and it is explicitly not a bare false either, which is the whole fix.
     expect(verdict).toBe("unknown");
@@ -90,16 +104,21 @@ describe("#654 WIRING: both restart replies report the classification", () => {
     return readFileSync(new URL("../../orchestrator/panel-tools.ts", import.meta.url), "utf8");
   };
 
-  it("neither reply emits the bare boolean any more", () => {
+  it("no reply emits the bare boolean any more", () => {
     const s = src();
     expect(/panel_tab_reconnected: tabBack\b/.test(s), "a reply still emits the raw boolean").toBe(false);
-    expect((s.match(/panel_tab_reconnected: tabReconnect\b/g) ?? []).length).toBe(2);
+    // Two `tabReconnect` emitters (the headless reply and the confirmed-cycle reply) plus
+    // #1996's third one on the NOT-confirmed reply, which names its own local because it
+    // is computed in a different scope. Counted as "every emitter is a classification",
+    // not as a fixed number of replies.
+    expect((s.match(/panel_tab_reconnected: (?:tabReconnect|unreadyTabReconnect)\b/g) ?? []).length).toBe(3);
   });
 
-  it("both call sites derive baselineCaptured from the pre-restart identity", () => {
+  it("every call site derives baselineCaptured from the pre-restart identity", () => {
     // The mutation this catches is `baselineCaptured: true` — which type-checks,
     // reads plausibly, and restores the bug exactly.
-    expect((src().match(/baselineCaptured: preRestartPanelIdentity != null/g) ?? []).length).toBe(2);
+    // 3 since #1996: the unconfirmed-boot reply reports a reconnect too.
+    expect((src().match(/baselineCaptured: preRestartPanelIdentity != null/g) ?? []).length).toBe(3);
   });
 
   it("the undetermined note tells the reader what to do INSTEAD of refreshing", () => {
