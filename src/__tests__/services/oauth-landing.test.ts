@@ -2,7 +2,7 @@ import { describe, expect, it, beforeEach } from "vitest";
 import { mkdtempSync, readFileSync, existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { persistOAuthResult, readOAuthStatus, clearOAuth } from "./code-provider-auth.js";
+import { persistOAuthResult, readOAuthStatus, clearOAuth } from "../../services/code-provider-auth.js";
 
 let home: string;
 beforeEach(() => {

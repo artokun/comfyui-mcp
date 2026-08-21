@@ -9,9 +9,9 @@ import {
   handleOAuthStatus,
   handleOAuthSignout,
   type OAuthBridgeDeps,
-} from "./oauth-bridge.js";
-import type { OAuthProviderConfig, OAuthTokens } from "../services/oauth-flow.js";
-import type { OAuthStatusRecord } from "../services/panel-secrets.js";
+} from "../../orchestrator/oauth-bridge.js";
+import type { OAuthProviderConfig, OAuthTokens } from "../../services/oauth-flow.js";
+import type { OAuthStatusRecord } from "../../services/panel-secrets.js";
 
 const CODEX: OAuthProviderConfig = {
   id: "codex",

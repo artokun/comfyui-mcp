@@ -13,7 +13,7 @@
 // TrainLoraNode & co. emit no per-step progress frames for hours by design, so
 // the floor fired on every healthy long training run.
 import { beforeEach, describe, expect, it } from "vitest";
-import { QueueMonitor, type CompletionEvent, type StallReport } from "./queue-monitor.js";
+import { QueueMonitor, type CompletionEvent, type StallReport } from "../../services/queue-monitor.js";
 
 type Priv = {
   url: string | null;

@@ -11,7 +11,7 @@
 // job we did NOT queue drives the warning. Here we drive the singleton's state and
 // assert snapshot()/report() attribution.
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { QueueMonitor } from "./queue-monitor.js";
+import { QueueMonitor } from "../../services/queue-monitor.js";
 
 type Priv = {
   url: string | null;

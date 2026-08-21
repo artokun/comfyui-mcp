@@ -17,12 +17,12 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { trFor, LOCALES, __resetI18nForTest } from "./index.js";
-import { displayWidth, RULE_MAX } from "./terminal-layout.js";
+import { trFor, LOCALES, __resetI18nForTest } from "../../i18n/index.js";
+import { displayWidth, RULE_MAX } from "../../i18n/terminal-layout.js";
 
 afterEach(() => __resetI18nForTest());
 
-const ROOT = join(import.meta.dirname, "..", "..");
+const ROOT = join(import.meta.dirname, "..", "..", "..");
 const TRANSLATED = LOCALES.filter((l) => l !== "en");
 
 function flatten(node: unknown, prefix = "", out: Record<string, string> = {}): Record<string, string> {

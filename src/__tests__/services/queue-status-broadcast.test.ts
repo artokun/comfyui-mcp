@@ -7,12 +7,12 @@
 //   • current() always returns the live frame (the on-hello seed for a tab that
 //     connects mid-render).
 import { describe, expect, it } from "vitest";
-import type { QueueSnapshot } from "./queue-monitor.js";
+import type { QueueSnapshot } from "../../services/queue-monitor.js";
 import {
   buildQueueStatusFrame,
   createQueueStatusBroadcaster,
   type QueueStatusFrame,
-} from "./queue-status-broadcast.js";
+} from "../../services/queue-status-broadcast.js";
 
 const idle = (): QueueSnapshot => ({
   connected: true,
@@ -209,7 +209,7 @@ describe("QueueMonitor snapshot plumbing", () => {
   // ComfyUI frames, and assert the NEW snapshot fields carry node + progress —
   // the exact plumbing queue_status broadcasts to the phone.
   it("exposes currentNode + progress from live ComfyUI frames", async () => {
-    const { QueueMonitor } = await import("./queue-monitor.js");
+    const { QueueMonitor } = await import("../../services/queue-monitor.js");
     const onMessage = (
       QueueMonitor as unknown as { onMessage(text: string): void }
     ).onMessage.bind(QueueMonitor);
@@ -238,7 +238,7 @@ describe("QueueMonitor snapshot plumbing", () => {
   // watchdog sees just the broadcast frames: status / progress / progress_state.
   // The run state must be derivable from those alone.
   it("derives running state from broadcast-only frames (modern ComfyUI)", async () => {
-    const { QueueMonitor } = await import("./queue-monitor.js");
+    const { QueueMonitor } = await import("../../services/queue-monitor.js");
     const onMessage = (
       QueueMonitor as unknown as { onMessage(text: string): void }
     ).onMessage.bind(QueueMonitor);

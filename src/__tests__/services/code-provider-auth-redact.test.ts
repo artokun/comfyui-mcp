@@ -7,7 +7,7 @@
 // thrown message, for all three refresh paths (Grok, Codex/OpenAI, Kimi),
 // plus the adjacent "2xx but malformed JSON" path.
 import { describe, expect, it, vi } from "vitest";
-import { __testing } from "./code-provider-auth.js";
+import { __testing } from "../../services/code-provider-auth.js";
 
 const { refreshGrokTokens, refreshOpenAICodexTokens, refreshKimiCodeTokens } = __testing;
 

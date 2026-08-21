@@ -9,7 +9,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { tr, trFor, resolveLocale, processLocale, LOCALES, __resetI18nForTest } from "./index.js";
+import { tr, trFor, resolveLocale, processLocale, LOCALES, __resetI18nForTest } from "../../i18n/index.js";
 
 afterEach(() => __resetI18nForTest());
 
@@ -113,7 +113,7 @@ describe("packaging", () => {
     // Without this the whole feature works perfectly on a dev machine and ships DEAD to every
     // npm user: the catalogs simply are not in the package, so `trFor` finds no file and
     // every language silently renders English. Nothing else would catch it.
-    const pkg = JSON.parse(readFileSync(join(import.meta.dirname, "..", "..", "package.json"), "utf8"));
+    const pkg = JSON.parse(readFileSync(join(import.meta.dirname, "..", "..", "..", "package.json"), "utf8"));
     expect(pkg.files).toContain("locales");
   });
 

@@ -6,7 +6,7 @@
 // INSTANCE counting for both the 64-component cap and the 4-image cap, and the
 // chart x-array length cap).
 import { describe, expect, it } from "vitest";
-import { A2UI_CAPS, validateA2UISpecServer } from "./a2ui-spec.js";
+import { A2UI_CAPS, validateA2UISpecServer } from "../../services/a2ui-spec.js";
 
 const minimal = () => ({
   root: "c1",

@@ -10,8 +10,8 @@
 //   • GET /history tail diff → completions with success/error status, including
 //     runs that started AND finished entirely between polls (#259).
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { QueueMonitor, type CompletionEvent } from "./queue-monitor.js";
-import { logger } from "../utils/logger.js";
+import { QueueMonitor, type CompletionEvent } from "../../services/queue-monitor.js";
+import { logger } from "../../utils/logger.js";
 
 // Reach into the singleton the same way queue-status-broadcast.test.ts does —
 // no real WS is opened (start() is never called here).

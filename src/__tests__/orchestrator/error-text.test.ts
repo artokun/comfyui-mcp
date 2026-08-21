@@ -3,7 +3,7 @@
 // (issues #176, #175).
 
 import { describe, expect, it } from "vitest";
-import { errorText, messageText, promptText } from "./error-text.js";
+import { errorText, messageText, promptText } from "../../orchestrator/error-text.js";
 
 describe("errorText (#176)", () => {
   it("returns the message of an Error", () => {
