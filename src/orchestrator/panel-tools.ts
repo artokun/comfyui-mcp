@@ -14427,12 +14427,15 @@ export function buildPanelToolDefs(): PanelToolDef[] {
       // panel abstains for five reasons and only two raise unchecked_budget_exhausted;
       // the file-probe cap and a failed /object_info lookup produce the same
       // false-clean payload with no flag at all. See get-errors-audit.ts.
-      async (_args, ctx) =>
-        withTruncationHints(
+      async (_args, ctx) => {
+        const primaryTabId = ctx.tabId;
+        const primary = await ctx.call({ cmd: "graph_get_errors" }, OBJECT_INFO_REFRESH_ACK_TIMEOUT_MS);
+        return withTruncationHints(
           await completeGetErrorsAudit(
             ctx,
-            await ctx.call({ cmd: "graph_get_errors" }, OBJECT_INFO_REFRESH_ACK_TIMEOUT_MS),
+            primary,
             GET_ERRORS_COMPLETION_BUDGET_MS,
+            primaryTabId,
           ),
           [
           {
@@ -14460,7 +14463,8 @@ export function buildPanelToolDefs(): PanelToolDef[] {
                 "An unknown number more were cut (this panel build reports no total). They are cosmetic leftovers, not errors; the cap is fixed and there is no parameter to page it.",
               ),
           },
-        ]),
+        ]);
+      },
     ),
     def(
       "panel_refresh_nodes",

@@ -45,7 +45,7 @@ import type { PanelToolCtx, ToolResult } from "./panel-tools.js";
 export type GetErrorsToolResult = ToolResult;
 
 /** Only the call surface this module uses, so a test can drive it with a stub. */
-export type GetErrorsCallCtx = Pick<PanelToolCtx, "call">;
+export type GetErrorsCallCtx = Pick<PanelToolCtx, "call" | "tabId">;
 
 /**
  * The abstentions that a second, batched read can actually retire: the two the
@@ -86,6 +86,14 @@ type QueryNode = {
   id: unknown;
   type: string;
   widgets: Record<string, unknown>;
+  linkedInputs: Set<string>;
+};
+
+type ViewingIdentity = Record<string, unknown>;
+
+type FollowUpRead = {
+  payload: Record<string, unknown> | null;
+  stayedOnPrimaryTab: boolean;
 };
 
 export function parseToolResultJson(res: GetErrorsToolResult): Record<string, unknown> | null {
@@ -203,7 +211,19 @@ function parseQueryNodes(query: Record<string, unknown>): QueryNode[] {
       n.widgets && typeof n.widgets === "object" && !Array.isArray(n.widgets)
         ? (n.widgets as Record<string, unknown>)
         : {};
-    out.push({ id: n.id, type, widgets });
+    const linkedInputs = new Set<string>();
+    if (Array.isArray(n.inputs)) {
+      for (const rawInput of n.inputs) {
+        if (!rawInput || typeof rawInput !== "object" || Array.isArray(rawInput)) continue;
+        const input = rawInput as Record<string, unknown>;
+        if (typeof input.name !== "string") continue;
+        if (input.link != null || input.connected_from != null) linkedInputs.add(input.name);
+      }
+    }
+    if (n.driven_by_link && typeof n.driven_by_link === "object" && !Array.isArray(n.driven_by_link)) {
+      for (const name of Object.keys(n.driven_by_link)) linkedInputs.add(name);
+    }
+    out.push({ id: n.id, type, widgets, linkedInputs });
   };
   if (Array.isArray(query.nodes)) for (const n of query.nodes) take(n);
   if (typeof query.text === "string") {
@@ -298,8 +318,22 @@ function judgeLeftoverCombos(
     const comboNames = Object.entries(specs)
       .filter(([, spec]) => comboOptions(spec) !== null)
       .map(([name]) => name);
-    // A def with combo widgets but no widget values is an unread node, not a pass.
-    if (comboNames.length > 0 && Object.keys(node.widgets).length === 0) {
+    // A linked combo is driven by its upstream value, not by the stored widget
+    // value. This completion pass has no execution-value probe, so it must not
+    // judge the stale/absent stored value as if it were live.
+    const linkedCombos = comboNames.filter((name) => node.linkedInputs.has(name));
+    if (linkedCombos.length > 0) {
+      stillUnchecked.push({
+        ...entry,
+        reason: `not checked: combo widget(s) ${linkedCombos.join(", ")} are driven by a live link`,
+      });
+      continue;
+    }
+    // A def with a combo input whose widget value is absent is an unread node,
+    // even when another non-combo widget (for example seed) is present. The old
+    // empty-map check retired { widgets: { seed: 1 }, linked checkpoint }.
+    const unreadCombos = comboNames.filter((name) => !Object.hasOwn(node.widgets, name));
+    if (unreadCombos.length > 0) {
       stillUnchecked.push(entry);
       continue;
     }
@@ -446,13 +480,55 @@ async function followUpJson(
   ctx: GetErrorsCallCtx,
   cmd: Record<string, unknown>,
   timeoutMs: number,
-): Promise<Record<string, unknown> | null> {
+  primaryTabId?: string,
+): Promise<FollowUpRead> {
+  const tabBefore = ctx.tabId;
   try {
     const res = await ctx.call(cmd, timeoutMs);
-    return parseToolResultJson(res);
+    const tabAfter = ctx.tabId;
+    return {
+      payload: parseToolResultJson(res),
+      stayedOnPrimaryTab:
+        primaryTabId == null || (tabBefore === primaryTabId && tabAfter === primaryTabId),
+    };
   } catch {
-    return null;
+    return {
+      payload: null,
+      stayedOnPrimaryTab: primaryTabId == null || tabBefore === primaryTabId,
+    };
   }
+}
+
+function viewingIdentity(payload: Record<string, unknown> | null): ViewingIdentity | null {
+  const raw = payload?.viewing;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const v = raw as ViewingIdentity;
+  const keys = ["workflow_uuid", "workflow", "kind", "scope", "owner_node_id", "title"];
+  const identity = Object.fromEntries(keys.filter((key) => key in v).map((key) => [key, v[key]]));
+  return Object.keys(identity).length > 0 ? identity : null;
+}
+
+/**
+ * A follow-up may only retire leftovers when it identifies the same live graph
+ * as the primary read. Compare every stable identity field both replies expose;
+ * requiring a shared field makes an omitted/opaque identity fail closed.
+ */
+function sameViewingIdentity(
+  primary: Record<string, unknown> | null,
+  followUp: Record<string, unknown> | null,
+): boolean {
+  const a = viewingIdentity(primary);
+  const b = viewingIdentity(followUp);
+  if (!a || !b) return false;
+  // A UUID/path identity cannot be downgraded to a coincidentally equal root
+  // scope. If either side publishes one, both must publish the same value.
+  for (const key of ["workflow_uuid", "workflow"]) {
+    if (key in a || key in b) {
+      if (!(key in a) || !(key in b) || !Object.is(a[key], b[key])) return false;
+    }
+  }
+  const shared = Object.keys(a).filter((key) => key in b);
+  return shared.length > 0 && shared.every((key) => Object.is(a[key], b[key]));
 }
 
 /**
@@ -470,6 +546,7 @@ export async function completeGetErrorsAudit(
   ctx: GetErrorsCallCtx,
   res: GetErrorsToolResult,
   timeoutMs: number,
+  primaryTabId?: string,
 ): Promise<GetErrorsToolResult> {
   const payload = parseToolResultJson(res);
   if (!payload) return res;
@@ -483,7 +560,7 @@ export async function completeGetErrorsAudit(
   ];
 
   if (leftoverIds.length > 0) {
-    const [query, infoReply] = await Promise.all([
+    const [queryRead, infoRead] = await Promise.all([
       followUpJson(
         ctx,
         {
@@ -494,12 +571,19 @@ export async function completeGetErrorsAudit(
           max_chars: MAX_CHARS_CEILING,
         },
         timeoutMs,
+        primaryTabId,
       ),
-      followUpJson(ctx, { cmd: "graph_get_object_info" }, timeoutMs),
+      followUpJson(ctx, { cmd: "graph_get_object_info" }, timeoutMs, primaryTabId),
     ]);
+    const query = queryRead.payload;
+    const infoReply = infoRead.payload;
     const objectInfo = infoReply ? objectInfoFromReply(infoReply) : null;
     const nodes = query ? parseQueryNodes(query) : [];
-    if (objectInfo && nodes.length > 0) {
+    const sameGraph =
+      queryRead.stayedOnPrimaryTab &&
+      infoRead.stayedOnPrimaryTab &&
+      sameViewingIdentity(payload, query);
+    if (sameGraph && objectInfo && nodes.length > 0) {
       const judged = judgeLeftoverCombos(leftover, nodes, objectInfo);
       // Non-retryable abstentions (the probe cap, a failed lookup, an unenumerable
       // path the panel already disclosed) stay; retryable leftovers are replaced by

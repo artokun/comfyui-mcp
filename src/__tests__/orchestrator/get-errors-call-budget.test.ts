@@ -79,13 +79,24 @@ async function runGetErrors(
   const def = buildPanelToolDefs().find((d) => d.name === "panel_get_errors");
   if (!def) throw new Error("panel_get_errors is not registered");
   const cmds: string[] = [];
+  let primaryViewing: unknown;
   const res = (await def.handler(
     {},
     {
       call: async (cmd: Record<string, unknown>) => {
         cmds.push(String(cmd.cmd));
-        return { content: [{ type: "text" as const, text: JSON.stringify(replies(cmd), null, 2) }] };
+        const reply = replies(cmd);
+        if (cmd.cmd === "graph_get_errors" && reply.viewing != null) primaryViewing = reply.viewing;
+        // Current graph_query replies always carry viewing. Keep older fixture
+        // bodies compact while supplying the same root identity to the real
+        // completion path; mismatch tests provide an explicit different one.
+        const withViewing =
+          cmd.cmd === "graph_query" && !Object.hasOwn(reply, "viewing")
+            ? { viewing: primaryViewing ?? { kind: "root" }, ...reply }
+            : reply;
+        return { content: [{ type: "text" as const, text: JSON.stringify(withViewing, null, 2) }] };
       },
+      tabId: "test-tab",
     } as unknown as PanelToolCtx,
   )) as ToolResult;
   const text = res.content.find((c) => c.type === "text")?.text;
@@ -208,6 +219,69 @@ describe("panel_get_errors leftover call-budget audit (#1973)", () => {
     expect(payload.audit_complete).toBe(true);
     expect(payload.errored_count).toBe(0);
     expect(payload.note).toBe(CLEAN_NOTE);
+  });
+
+  it("does not splice a graph_query from a different workflow into the primary audit", async () => {
+    const panel = budgetExhaustedReply({ extraUnchecked: 0 });
+    const { payload } = await runGetErrors((cmd) => {
+      if (cmd.cmd === "graph_get_errors") return panel;
+      if (cmd.cmd === "graph_query") {
+        return {
+          viewing: { kind: "root", workflow: "different-workflow.json" },
+          matched: EXECUTION_NODES.length,
+          shown: EXECUTION_NODES.length,
+          text: detailText(EXECUTION_NODES),
+        };
+      }
+      if (cmd.cmd === "graph_get_object_info") return { ok: true, object_info: objectInfoFor(EXECUTION_NODES) };
+      return { ok: false };
+    });
+
+    expect(payload.audit_complete).toBe(false);
+    expect(payload.unchecked_count).toBe(EXECUTION_NODES.length);
+    expect(payload.unavailable_widget_values).toBeUndefined();
+  });
+
+  it("keeps a linked combo unchecked when another widget has a readable value", async () => {
+    const panel = {
+      ...budgetExhaustedReply({ extraUnchecked: 0 }),
+      unchecked_nodes: [{ id: 5, type: "LinkedLoader", reason: BUDGET_REASON }],
+    };
+    const { payload } = await runGetErrors((cmd) => {
+      if (cmd.cmd === "graph_get_errors") return panel;
+      if (cmd.cmd === "graph_query") {
+        return {
+          matched: 1,
+          shown: 1,
+          text: JSON.stringify({
+            id: 5,
+            type: "LinkedLoader",
+            widgets: { seed: 1 },
+            inputs: [{ name: "checkpoint", connected_from: { node_id: 2, output_slot: 0 } }],
+          }),
+        };
+      }
+      if (cmd.cmd === "graph_get_object_info") {
+        return {
+          ok: true,
+          object_info: {
+            LinkedLoader: {
+              input: {
+                required: {
+                  checkpoint: [["present.safetensors", "other.safetensors"], {}],
+                  seed: ["INT", {}],
+                },
+              },
+            },
+          },
+        };
+      }
+      return { ok: false };
+    });
+
+    expect(payload.audit_complete).toBe(false);
+    expect(payload.unavailable_widget_values).toBeUndefined();
+    expect((payload.unchecked_nodes as Array<Record<string, unknown>>).some((e) => String(e.id) === "5")).toBe(true);
   });
 });
 
