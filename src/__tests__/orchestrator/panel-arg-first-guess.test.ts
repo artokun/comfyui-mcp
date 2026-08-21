@@ -546,22 +546,22 @@ describe("#1968 panel_find_nodes: `fields` bounds what a lookup costs", () => {
     expect(description).not.toContain("Each match is the SAME rich summary");
   });
 
-  // findLiveSocketProducers (#599/add-node refusal annotation) probes the canvas
-  // with a RAW ctx.call — `{cmd:'graph_find_nodes', output, limit:5}` — and reads
-  // `outputs`, a key `compact` drops. It is unaffected because it never goes
-  // through this tool's handler, and that is the whole reason it is safe. Pin it:
-  // routing that probe through the tool later would silently blind it.
-  it("does not project a reply the orchestrator's own socket probe fetched", async () => {
-    const rows = [
-      { id: "4", type: "CheckpointLoaderSimple", outputs: [{ name: "MODEL", type: "MODEL" }] },
-    ];
-    const h = harness({ graph_find_nodes: { matches: rows, count: 1 } });
-    // The internal probe's shape, dispatched the way the probe dispatches it.
-    const probe = await h.ctx.call({ cmd: "graph_find_nodes", output: "MODEL", limit: 5 }, 8000);
-    const out = payloadOf(probe);
-    expect((out.matches as Cmd[])[0]).toHaveProperty("outputs");
-    expect(out.fields).toBeUndefined();
-  });
+  // NOTE — the orchestrator's OWN consumer of this payload is
+  // `findLiveSocketProducers`, which probes the canvas with a raw
+  // `ctx.call({cmd:'graph_find_nodes', output, limit:5})` and reads `outputs`, a
+  // key `compact` drops. It survives because it never goes through this tool's
+  // handler, so the projection never sees it.
+  //
+  // There is deliberately NO test for that here. The obvious one — dispatch the
+  // probe's command through `ctx.call` and assert `outputs` is still present —
+  // asserts something true by construction (`ctx.call` is the bridge, not the
+  // tool) and was MEASURED not to fail when the production probe was rewritten to
+  // route through `projectFindNodesReply`. A test that survives the mutation it
+  // claims to guard reads as coverage while providing none.
+  //
+  // The real guard already exists and was measured to fail under that same
+  // mutation: `add-node-stale-socket-producers.test.ts` → "the reporter's case:
+  // keeps the refusal and names the loaders already on the canvas".
 
   it("offers exactly the same three names as its sibling panel_query_graph", () => {
     const named = (tool: string) => {
