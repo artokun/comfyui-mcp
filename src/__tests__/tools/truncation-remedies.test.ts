@@ -771,7 +771,6 @@ describe("#809 truncation remedies name a lever that actually exists", () => {
           ],
         ],
       },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any);
     const tb = err?.traceback ?? "";
     expect(err?.traceback_truncated).toBe(true);

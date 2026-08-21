@@ -180,7 +180,6 @@ export function parsePiDurationMs(s: string): number | null {
  *  The ESC byte (\x1b) is part of the match — without it a colored token keeps
  *  its leading control char and fails id validation. */
 function stripAnsi(s: string): string {
-  // eslint-disable-next-line no-control-regex
   return s.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "");
 }
 

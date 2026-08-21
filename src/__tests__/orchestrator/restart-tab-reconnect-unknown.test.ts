@@ -99,7 +99,6 @@ describe("#654 the strictness of ready/graph_tools_ready is untouched", () => {
 
 describe("#654 WIRING: both restart replies report the classification", () => {
   const src = () => {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { readFileSync } = require("node:fs") as typeof import("node:fs");
     return readFileSync(new URL("../../orchestrator/panel-tools.ts", import.meta.url), "utf8");
   };

@@ -1112,7 +1112,6 @@ function withPlatform(platform: string, fn: () => void): void {
 
 function readdirSyncSafe(d: string): string[] {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
     return (require("node:fs") as typeof import("node:fs")).readdirSync(d);
   } catch {
     return [];

@@ -42,7 +42,6 @@ class Rejecting401Backend implements AgentBackend {
     throw new Error("endpoint https://api.moonshot.ai/v1 rejected the key (http 401)");
   }
 
-  // eslint-disable-next-line require-yield
   async *run(): AsyncGenerator<AgentEvent> {
     throw new Error("run() must never be reached when prepare() rejects");
   }
@@ -82,7 +81,6 @@ class InstantlyDroppingBackend implements AgentBackend {
   readonly capabilities = CLAUDE_CAPABILITIES;
   runCount = 0;
 
-  // eslint-disable-next-line require-yield
   async *run(): AsyncGenerator<AgentEvent> {
     this.runCount += 1;
     // Return immediately: "session ended" with zero events.

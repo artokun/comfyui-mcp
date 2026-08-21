@@ -49,7 +49,6 @@ class GatedPrepareBackend implements AgentBackend {
     this.release(new Error(message));
   }
 
-  // eslint-disable-next-line require-yield
   async *run(): AsyncGenerator<AgentEvent> {
     throw new Error("run() must never be reached when prepare() rejects");
   }

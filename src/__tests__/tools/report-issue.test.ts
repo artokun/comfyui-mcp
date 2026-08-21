@@ -19,7 +19,6 @@ function getReportIssueHandler(): ToolHandler {
       handler = h;
     },
   };
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   registerReportIssueTools(fakeServer as any);
   if (!handler) throw new Error("report_issue handler not registered");
   return handler;

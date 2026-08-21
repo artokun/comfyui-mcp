@@ -41,7 +41,6 @@ async function register(): Promise<Registered[]> {
       tools.push({ name, description, shape, handler });
       return { update() {}, remove() {}, enable() {}, disable() {} };
     },
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } as any;
   registerNodeBisectTools(server);
   return tools;

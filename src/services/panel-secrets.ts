@@ -915,7 +915,6 @@ function encodeEnvLine(key: string, value: string): string {
   //     gate, round 3, finding 4). A confirmed save that delivers something else
   //     is the worst outcome of all;
   //   - any other C0 control: same class of hazard, no credential contains one.
-  // eslint-disable-next-line no-control-regex
   // Written with \u escapes on purpose: a literal control byte in this
   // source would make the file read as a binary blob to git, unreviewable
   // in a diff.

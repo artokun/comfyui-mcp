@@ -51,7 +51,6 @@ async function loadRawFromSource(
   path: string | undefined,
   filename: string | undefined,
   graph: Record<string, unknown> | undefined,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): Promise<any> {
   const provided = [path, filename, graph].filter((v) => v != null).length;
   if (provided !== 1) {

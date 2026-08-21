@@ -341,7 +341,6 @@ describe("run completion across automatic goal continuation (#468)", () => {
       async prepare() {
         throw new Error("endpoint rejected the key (http 401)");
       },
-      // eslint-disable-next-line require-yield
       async *run(): AsyncGenerator<AgentEvent> {
         throw new Error("never runs");
       },
@@ -848,7 +847,6 @@ describe("run completion across automatic goal continuation (#468)", () => {
       async prepare() {
         throw new Error("endpoint rejected the key (http 401)");
       },
-      // eslint-disable-next-line require-yield
       async *run(): AsyncGenerator<AgentEvent> {
         throw new Error("never runs");
       },
@@ -885,7 +883,6 @@ describe("run completion across automatic goal continuation (#468)", () => {
       async prepare() {
         throw new Error("endpoint rejected the key (http 401)");
       },
-      // eslint-disable-next-line require-yield
       async *run(): AsyncGenerator<AgentEvent> {
         throw new Error("never runs");
       },
@@ -1096,7 +1093,6 @@ describe("run completion across automatic goal continuation (#468)", () => {
       async prepare() {
         throw new Error("endpoint rejected the key (http 401)");
       },
-      // eslint-disable-next-line require-yield
       async *run(): AsyncGenerator<AgentEvent> {
         throw new Error("never runs");
       },
@@ -1128,7 +1124,6 @@ describe("run completion across automatic goal continuation (#468)", () => {
       id: "claude" as const,
       capabilities: CLAUDE_CAPABILITIES,
       // A session that ends immediately, every time, without reading the channel.
-      // eslint-disable-next-line require-yield
       async *run(): AsyncGenerator<AgentEvent> {
         starts += 1;
         return;
