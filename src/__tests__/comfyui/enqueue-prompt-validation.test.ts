@@ -23,16 +23,12 @@ vi.mock("../../comfyui/fetch.js", () => ({
 
 const { enqueuePrompt } = await import("../../comfyui/client.js");
 
+// A real Response. A string body is sent verbatim (the empty and HTML cases);
+// anything else is serialised as JSON. readComfyJson trusts the body over the
+// content-type header, so the platform default of text/plain changes nothing.
 function res(status: number, body: unknown, statusText = "Bad Request"): Response {
   const text = typeof body === "string" ? body : JSON.stringify(body);
-  return {
-    ok: status >= 200 && status < 300,
-    status,
-    statusText,
-    text: async () => text,
-    json: async () => JSON.parse(text),
-    headers: new Map(),
-  } as unknown as Response;
+  return new Response(text, { status, statusText });
 }
 
 const validationBody = {

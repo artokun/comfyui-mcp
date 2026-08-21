@@ -31,15 +31,10 @@ vi.mock("../../comfyui/fetch.js", () => ({
 
 const { enqueuePrompt } = await import("../../comfyui/client.js");
 
+// A real Response: buildEnqueueError reads status, statusText and text() once,
+// which the platform constructor serves exactly.
 function res(status: number, body: string, statusText = "Bad Request"): Response {
-  return {
-    ok: status >= 200 && status < 300,
-    status,
-    statusText,
-    text: async () => body,
-    json: async () => JSON.parse(body),
-    headers: new Map(),
-  } as unknown as Response;
+  return new Response(body, { status, statusText });
 }
 
 beforeEach(() => comfyuiFetch.mockReset());

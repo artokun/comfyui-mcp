@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { jsonResponse, type JsonValue } from "../helpers/fake-fetch.js";
 
 // backfillObjectInfo honors the LIVE /object_info/<Type> registration key even
 // when it differs from the requested string in case, namespace, or
@@ -24,8 +25,8 @@ vi.mock("../../comfyui/fetch.js", () => ({
 
 const { backfillObjectInfo } = await import("../../comfyui/client.js");
 
-function okJson(body: unknown) {
-  return { ok: true, json: async () => body } as unknown as Response;
+function okJson(body: JsonValue): Response {
+  return jsonResponse(body);
 }
 
 describe("backfillObjectInfo (#404)", () => {
@@ -36,10 +37,7 @@ describe("backfillObjectInfo (#404)", () => {
     comfyuiFetch.mockResolvedValueOnce(
       okJson({ DetectorForNSFW: { input: {}, name: "DetectorForNSFW" } }),
     );
-    const merged = (await backfillObjectInfo(
-      {} as never,
-      ["DetectorForNSFW"],
-    )) as unknown as Record<string, unknown>;
+    const merged = await backfillObjectInfo({} as never, ["DetectorForNSFW"]);
     expect(merged.DetectorForNSFW).toBeDefined();
   });
 
@@ -52,10 +50,7 @@ describe("backfillObjectInfo (#404)", () => {
         "utils-nodes/DetectorForNSFW": { input: {}, name: "DetectorForNSFW" },
       }),
     );
-    const merged = (await backfillObjectInfo(
-      {} as never,
-      ["DetectorForNSFW"],
-    )) as unknown as Record<string, unknown>;
+    const merged = await backfillObjectInfo({} as never, ["DetectorForNSFW"]);
     expect(merged["utils-nodes/DetectorForNSFW"]).toBeDefined();
     // A case-insensitive substring filter (what create_workflow (action:"node_info") uses) now finds it.
     const hit = Object.keys(merged).some((k) =>
@@ -75,10 +70,7 @@ describe("backfillObjectInfo (#404)", () => {
 
   it("leaves the node missing when the endpoint returns an empty object", async () => {
     comfyuiFetch.mockResolvedValueOnce(okJson({}));
-    const merged = (await backfillObjectInfo(
-      {} as never,
-      ["Ghost"],
-    )) as unknown as Record<string, unknown>;
+    const merged = await backfillObjectInfo({} as never, ["Ghost"]);
     expect(Object.keys(merged)).toHaveLength(0);
   });
 });
