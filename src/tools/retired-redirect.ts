@@ -102,7 +102,9 @@ interface SdkShape {
 }
 
 function inspect(server: McpServer): SdkShape {
-  const inner = (server as unknown as { server?: unknown }).server;
+  // `unknown` on purpose, here and for the registration table below: the SDK's
+  // declared types are exactly what this function refuses to take on faith.
+  const inner: unknown = server.server;
   if (!inner || typeof inner !== "object") {
     throw new RetiredRedirectUnavailableError("server.server is missing or not an object");
   }
@@ -122,7 +124,9 @@ function inspect(server: McpServer): SdkShape {
         `(the SDK installs it on the first tool registration — install this AFTER registering tools)`,
     );
   }
-  const registered = (server as unknown as { _registeredTools?: unknown })._registeredTools;
+  // Bracket access is TypeScript's sanctioned way past a `private` member; the .d.ts
+  // gives it no type, so the annotation keeps `any` from leaking out of this line.
+  const registered: unknown = server["_registeredTools"];
   if (!registered || typeof registered !== "object" || Array.isArray(registered)) {
     throw new RetiredRedirectUnavailableError(
       `server._registeredTools is ${registered === undefined ? "missing" : "not a plain object"}`,

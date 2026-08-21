@@ -13,6 +13,19 @@ export interface CatalogedTool {
 }
 
 /**
+ * The one member of McpServer the registrar wrappers (asRegistrar below, the
+ * blind-image gate, the tool-surface filter) implement or forward: `tool()`,
+ * called with whatever argument list the SDK overload in use takes.
+ *
+ * Written as a METHOD signature on purpose. TypeScript relates method parameters
+ * bivariantly, so the SDK's overloaded `tool()` is assignable here as-is; a
+ * function-typed property would be checked contravariantly and need an assertion.
+ */
+export interface ToolRegistrar {
+  tool(...args: unknown[]): unknown;
+}
+
+/**
  * Captures server.tool(...) registrations into a plain map instead of a live
  * MCP server. This powers the compact tool mode (COMFYUI_MCP_TOOL_MODE=compact)
  * for small/local LLMs: the full ~200-schema surface overwhelms their context,
@@ -53,11 +66,13 @@ export class ToolCatalog {
    * function touches any other McpServer member.
    */
   asRegistrar(): McpServer {
-    const tool = (...args: unknown[]): Record<string, never> => {
-      this.capture(args);
-      return {};
+    const registrar: ToolRegistrar = {
+      tool: (...args: unknown[]): Record<string, never> => {
+        this.capture(args);
+        return {};
+      },
     };
-    return { tool } as unknown as McpServer;
+    return registrar as McpServer;
   }
 
   private capture(args: unknown[]): void {

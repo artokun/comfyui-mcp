@@ -205,16 +205,21 @@ export function registerCompactTools(
   // In every collision case the FIRST registration (the user's direct tool)
   // keeps the name; the rest of the facade still registers. (#616)
   const skip = opts.skip ?? new Set<string>();
-  const register: McpServer["tool"] = ((...args: Parameters<McpServer["tool"]>) => {
+  // Returns undefined where the SDK would return a handle: nothing here chains on the
+  // result, and the `as McpServer["tool"]` below is what lets the registrations read
+  // like ordinary server.tool() calls.
+  const register: McpServer["tool"] = ((
+    ...args: Parameters<McpServer["tool"]>
+  ): ReturnType<McpServer["tool"]> | undefined => {
     const name = args[0] as string;
-    if (skip.has(name)) return undefined as unknown as ReturnType<McpServer["tool"]>;
+    if (skip.has(name)) return undefined;
     try {
       return server.tool(...args);
     } catch (err) {
       logger.warn(
         `[compact] skipping facade meta-tool '${name}' — already registered (name collision): ${err instanceof Error ? err.message : String(err)}`,
       );
-      return undefined as unknown as ReturnType<McpServer["tool"]>;
+      return undefined;
     }
   }) as McpServer["tool"];
   const listToolsSchema = {

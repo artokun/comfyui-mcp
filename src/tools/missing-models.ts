@@ -130,7 +130,7 @@ export async function resolveMissingModelsAction(args: {
 }): Promise<CallToolResult> {
       try {
         const workflow = parseWorkflow(args.workflow);
-        const objectInfo = (await getObjectInfo()) as unknown as ObjectInfoLike;
+        const objectInfo: ObjectInfoLike = await getObjectInfo();
         const missing = findMissingModels(workflow as Record<string, unknown>, objectInfo);
 
         if (missing.length === 0) {

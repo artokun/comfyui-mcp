@@ -43,6 +43,8 @@
  * Per-action policy is the real answer and is deliberately not attempted here; it needs a
  * vocabulary these tools do not yet expose uniformly.
  */
+import type { ToolRegistrar } from "./catalog.js";
+
 export const MUTATING_TOOLS = [
   "apply_manifest",
   // action:"import" installs an app from the public registry and creates it locally.
@@ -507,13 +509,13 @@ const FACADE_TOOLS = new Set(["list_tools", "describe_tool", "call_tool"]);
  * the capability exists, which is what the reporter asked for and also the cheaper
  * outcome in tokens.
  */
-export function withToolSurfaceFilter<T extends object>(
+export function withToolSurfaceFilter<T extends ToolRegistrar>(
   server: T,
   policy: ToolSurfacePolicy,
   onFiltered?: (name: string) => void,
 ): T {
   if (!policy.active) return server;
-  const orig = (server as unknown as { tool: (...args: unknown[]) => unknown }).tool.bind(server);
+  const orig = server.tool.bind(server);
   const tool = (...args: unknown[]): unknown => {
     const name = typeof args[0] === "string" ? args[0] : undefined;
     if (name && !FACADE_TOOLS.has(name) && !toolAllowed(name, policy)) {
@@ -536,6 +538,7 @@ export function withToolSurfaceFilter<T extends object>(
   return new Proxy(server, {
     get(target, prop, receiver) {
       if (prop === "tool") return tool;
+      // oxlint-disable-next-line anti-slop/no-reflect-get -- Proxy get trap; Reflect.get forwards the receiver to getters, typed access cannot
       return Reflect.get(target, prop, receiver);
     },
   }) as T;

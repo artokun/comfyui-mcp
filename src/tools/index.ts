@@ -37,7 +37,7 @@ import { registerComfyCliTools } from "./comfy-cli.js";
 import { registerTrainTools } from "./train.js";
 import { registerAppsTools } from "./apps.js";
 import { DefaultsManager } from "../services/defaults-manager.js";
-import { ToolCatalog } from "./catalog.js";
+import { ToolCatalog, type ToolRegistrar } from "./catalog.js";
 import { registerCompactTools } from "./compact.js";
 import { logger } from "../utils/logger.js";
 import { resolveToolSurfacePolicy, withToolSurfaceFilter } from "./tool-surface-filter.js";
@@ -141,7 +141,7 @@ function scrubImageBlocks(result: unknown): unknown {
  *  Works for both the live McpServer and ToolCatalog.asRegistrar() (the compact
  *  call_tool router) — each captures/registers the wrapped handler. */
 function withBlindImageGate(server: McpServer): McpServer {
-  const orig = (server as unknown as { tool: (...args: unknown[]) => unknown }).tool.bind(server);
+  const orig: ToolRegistrar["tool"] = server.tool.bind(server);
   const tool = (...args: unknown[]): unknown => {
     const handler = args[args.length - 1];
     if (typeof handler === "function") {
@@ -156,6 +156,7 @@ function withBlindImageGate(server: McpServer): McpServer {
   return new Proxy(server, {
     get(target, prop, receiver) {
       if (prop === "tool") return tool;
+      // oxlint-disable-next-line anti-slop/no-reflect-get -- Proxy get trap; Reflect.get forwards the receiver to getters, typed access cannot
       return Reflect.get(target, prop, receiver);
     },
   }) as McpServer;
