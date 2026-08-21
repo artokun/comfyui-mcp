@@ -758,7 +758,6 @@ npm install
 | `npm run build` | Compile TypeScript to `dist/` |
 | `npm start` | Run compiled output |
 | `npm test` | Run unit tests (vitest) |
-| `npm run test:integration` | Run integration tests (requires running ComfyUI) |
 | `npm run lint` | Type-check without emitting |
 | `npm run generations:stats` | Show local generation tracking statistics |
 | `npm run sync-agents` | Sync Claude skills/commands/hooks to Google Antigravity, OpenCode, and other AI IDE formats that supports .agents files |
