@@ -402,6 +402,22 @@ export class RunCompletionJournalImpl {
   }
 
   /**
+   * Re-deliver the entries `stillUnread` pulled back off an agent's queue (#1327).
+   *
+   * Called only from `openRun`, and only AFTER `bindClaimed` — the entry is not fully
+   * this run's until it carries the ticket's generation, and re-queueing it at
+   * generation 0 would leave `ack()` unable to prove it, so a later resend of the same
+   * frame would arrive looking like a second render.
+   *
+   * A revoked entry left merely `pending` would sit there until some unrelated later
+   * flush, which for a run whose turn is ending right now means the agent simply never
+   * sees its own render — strictly worse than the wrong verdict this is correcting.
+   */
+  private reissueClaimed(keys: Set<string>): void {
+    for (const key of keys) this.reflush?.(key);
+  }
+
+  /**
    * A NEW run has taken over `promptId`, so every completion already journaled
    * under it belongs to an OLDER run. Retire them: superseded (so they can never
    * be merged into, settle a ticket, or memoize a delivery), downgraded from
@@ -466,31 +482,13 @@ export class RunCompletionJournalImpl {
   private claimRaced(
     promptId: string,
     meta: { tabId: string; conversation?: string; dispatchedAt?: number },
-  ): Set<JournalEntry> {
+  ): { claimed: Set<JournalEntry>; reissue: Set<string> } {
     const claimed = new Set<JournalEntry>();
+    /** Keys whose queued copy was pulled back and must now be re-delivered. */
+    const reissue = new Set<string>();
     // No dispatch time means no proof — do nothing rather than guess.
-    if (typeof meta.dispatchedAt !== "number") return claimed;
+    if (typeof meta.dispatchedAt !== "number") return { claimed, reissue };
     for (const entry of this.entries.values()) {
-      // NOBODY HAS BEEN TOLD YET is the real condition, and only `handoffs` says so.
-      //
-      // Not `state`: a released entry (handed to an agent whose turn ended without an
-      // ack) goes back to `pending`, so a state check would silently re-stamp a verdict
-      // an agent had already been given.
-      //
-      // And NOT `attempts`, which is what this guard used to read — the recurrence of
-      // #1327. The orchestrator flushes the journal the moment a completion arrives, so
-      // a render that beats its own /prompt reply is offered to an agent still sitting
-      // inside the `panel_run` call that queued it. That offer is REFUSED, which tells
-      // the agent nothing at all, but it still counted an attempt — so this guard fired
-      // on the exact race it exists to repair, and the reporter got their own render
-      // back as "RE-DELIVERED … origin is UNDETERMINED" a second time.
-      //
-      // A refused offer reached nobody; only a TAKEN one commits a verdict to an agent.
-      if (entry.handoffs > 0) continue;
-      // Subsumed by the line above today (every non-pending state is reached through a
-      // taken hand-off), and kept because it can only ever REFUSE a claim: a future
-      // state that arrives without one would otherwise be claimed by default.
-      if (entry.state !== "pending") continue;
       // An ID-LESS completion carries no run identity at all, so nothing can prove it
       // belongs here — it stays unidentified rather than being claimed on timing alone.
       if (entry.correlation.status === "unidentified") continue;
@@ -502,6 +500,11 @@ export class RunCompletionJournalImpl {
         entry.key === meta.tabId ||
         (meta.conversation !== undefined && entry.conversation === meta.conversation);
       if (!sameParty) continue;
+      // NOBODY HAS BEEN TOLD YET — see stillUnread. Asked LAST, deliberately: it is
+      // the only guard with a side effect (it un-queues the entry), and every check
+      // above is a cheap pure refusal. Nothing is ever pulled back off an agent for a
+      // claim that is then rejected on other grounds.
+      if (!this.stillUnread(entry, reissue)) continue;
       claimed.add(entry);
       if (entry.correlation.status === "matched") continue;
       entry.correlation = { status: "matched", promptId };
@@ -510,7 +513,60 @@ export class RunCompletionJournalImpl {
         `[run-completions] prompt ${promptId} completed before its ticket existed (a fast/cached run) — the journaled completion is re-attributed to the run that produced it instead of being reported as foreign`,
       );
     }
-    return claimed;
+    return { claimed, reissue };
+  }
+
+  /**
+   * Has this entry's verdict actually REACHED an agent yet? (#1327, second recurrence.)
+   *
+   * QUEUED IS NOT READ, and conflating the two is what let this defect come back.
+   * The guard here used to be `handoffs > 0` — "an agent TOOK this onto its queue" —
+   * resting on the stated premise that the arrival flush is REFUSED while the agent
+   * sits inside the `panel_run` call that queued the render. MEASURED against the
+   * real `PanelAgent`, that premise is false: `injectEvent` has no busy check at all.
+   * It refuses only for an agent that is missing, stopped, or handed a payload it
+   * cannot compose text for — so for the ordinary via-panel session (an agent that
+   * exists and is mid-turn) the flush TAKES the completion and returns true.
+   * `handoffs` was therefore already 1 when `openRun` ran, the claim was skipped on
+   * precisely the race it exists to repair, and the reporter got their own render
+   * back as "does NOT match any run you queued". The previous fix swapped `attempts`
+   * for `handoffs`, but on the real path BOTH are 1 at that instant, so the swap
+   * changed nothing production reaches — its tests passed by hard-coding a refusal
+   * (`deliverPending(TAB, () => false)`) that the live agent does not perform.
+   *
+   * The honest question was never "was it handed over" but "has the agent READ it",
+   * and this journal already owns the only thing that can answer it: the revoker
+   * (#468). `revokeEvent` splices the injected item out of the agent's queue and
+   * returns false the moment that item has been dequeued into a running turn — i.e.
+   * once the text is in the model's context and can no longer be recalled. A
+   * successful revoke IS the proof that nobody has been told.
+   *
+   * Fail-closed in every direction that matters:
+   *   - no revoker installed (a bare journal, a unit test) => a handed-off entry is
+   *     left exactly as it is today;
+   *   - the carrying turn already started, or the agent is gone => revoke returns
+   *     false, and a verdict an agent was actually given is never rewritten under it;
+   *   - nothing here widens WHICH completions may be claimed. Every ownership and
+   *     timing proof above is untouched, so a completion that is genuinely
+   *     unattributable is still reported UNDETERMINED.
+   *
+   * A revoked entry is off the agent's queue, so its key is recorded for the caller
+   * to re-deliver. That re-delivery is deliberately NOT done here: the claim is only
+   * half-applied until `bindClaimed` has given the entry the ticket's generation, and
+   * re-queueing at generation 0 would resurrect the ack/settle defect that made a
+   * later resend look like a second render.
+   */
+  private stillUnread(entry: JournalEntry, reissue: Set<string>): boolean {
+    // Never offered, or offered and refused: no agent ever took the text.
+    if (entry.handoffs === 0 && entry.state === "pending") return true;
+    // Taken onto a queue. Only the agent can say whether it has since been read.
+    if (!this.revoke?.(entry.key, entry.token)) return false;
+    entry.state = "pending";
+    reissue.add(entry.key);
+    logger.info(
+      `[run-completions] pulled a queued completion back off its agent before the carrying turn read it — it can be re-delivered as the run that produced it`,
+    );
+    return true;
   }
 
   /**
@@ -592,7 +648,7 @@ export class RunCompletionJournalImpl {
     // dispatch created it, so a completion carrying it that arrived at/after that
     // moment is necessarily this run's. Entries older than the dispatch are a genuinely
     // reused id and keep the existing ambiguity handling.
-    const claimed = this.claimRaced(promptId, meta);
+    const { claimed, reissue } = this.claimRaced(promptId, meta);
     // NOTE: no memo clearing is needed here. The delivered memo is keyed by
     // ticket GENERATION, and every path below either bumps the generation (a
     // reopen) or mints a fresh one (a new ticket), so a newly queued run's memo
@@ -619,6 +675,7 @@ export class RunCompletionJournalImpl {
       existing.reused = true;
       this.bindClaimed(claimed, existing.seq);
       this.retireOlderEntriesFor(promptId, claimed);
+      this.reissueClaimed(reissue);
       return true;
     }
     // A FRESH ticket is only a fresh IDENTITY if this tab has no history for the
@@ -656,6 +713,7 @@ export class RunCompletionJournalImpl {
     // this, an older `matched` entry survives untouched and goes on telling the
     // agent "this is the run YOU queued" for the id now outstanding.
     this.retireOlderEntriesFor(promptId, claimed);
+    this.reissueClaimed(reissue);
     this.trimTickets();
     return true;
   }
