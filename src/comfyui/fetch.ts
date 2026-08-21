@@ -402,12 +402,20 @@ function describeComfyTimeout(input: string | URL | Request, init: RequestInit):
   const seconds = comfyHttpTimeoutSeconds();
   const mutating = method !== "GET" && method !== "HEAD";
   // #1896 — the comparison the TRANSPORT path has made since #1553, on the path
-  // that shares its cause. An unroutable COMFYUI_URL does not always REFUSE: a
-  // firewall or container boundary that DROPs the SYN black-holes it instead,
-  // and that lands here rather than in describeComfyFetchFailure. Same child,
-  // same readable channel, same connected panel — this path simply never asked,
-  // so `list_packs (action:"list_templates")` against a firewalled target said
-  // nothing at all about the panel that was working the whole time.
+  // that shares its cause.
+  //
+  // The defect is simply that THIS FORMATTER NEVER ASKED. Same child, same
+  // readable channel, same connected panel as the refusal path, and it said
+  // nothing at all — `list_packs (action:"list_templates")` sits on this ceiling
+  // since #1795 removed its hard-coded 8s signal, so it is a first-class
+  // consumer of a message that was silent about a working panel.
+  //
+  // How a call GETS here is deliberately not overstated (review, finding 1). A
+  // target this process cannot route to may expire on the ceiling — a DROPped
+  // SYN black-holes it — or fail fast with EHOSTUNREACH/ENETUNREACH, which is a
+  // bare fetch failure and takes describeComfyFetchFailure instead. Both were
+  // measured; only the first reaches this line. The fix does not depend on which
+  // is more common, and a slow server that never answers lands here too.
   const drift = classifyTargetDrift(target);
   const err = new Error(
     `No reply from ComfyUI within ${seconds}s — while requesting ${target} (${method}). ` +
