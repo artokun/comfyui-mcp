@@ -205,7 +205,7 @@ describe("panel_get_errors leftover call-budget audit (#1973)", () => {
     });
 
     expect(cmds).toEqual(["graph_get_errors"]);
-    expect(payload.audit_complete).toBeUndefined();
+    expect(payload.audit_complete).toBe(true);
     expect(payload.errored_count).toBe(0);
     expect(payload.note).toBe(CLEAN_NOTE);
   });
@@ -619,5 +619,69 @@ describe("what the completion pass is allowed to assert, and under whose name (#
     // Provenance has its own test above.
     expect(hit, "a non-upload combo is fully enumerable, so non-membership IS evidence").toBeTruthy();
     expect(hit?.kind).toBe("missing_asset");
+  });
+});
+
+// Codex merge-gate P1s on the #1973 head: prototype lookup treated inherited
+// Object methods as node defs, and a completed payload skipped the sanitizer
+// that drops a contradictory clean note.
+describe("get_errors completion does not invent a found type or skip the sanitizer (#1973)", () => {
+  it("does not treat an inherited prototype property as a node definition", async () => {
+    const panel = {
+      ...budgetExhaustedReply({ extraUnchecked: 0 }),
+      unchecked_nodes: [{ id: 1, type: "toString", reason: BUDGET_REASON }],
+    };
+    const { payload, cmds } = await runGetErrors((cmd) => {
+      if (cmd.cmd === "graph_get_errors") return panel;
+      if (cmd.cmd === "graph_query") {
+        return {
+          matched: 1,
+          shown: 1,
+          text: JSON.stringify({ id: 1, type: "toString", widgets: { sampler_name: "euler" } }),
+        };
+      }
+      if (cmd.cmd === "graph_get_object_info") {
+        // Non-empty, and it does not define `toString`. The inherited Function
+        // on Object.prototype is exactly what a bracket lookup would accept.
+        return { ok: true, object_info: objectInfoFor(EXECUTION_NODES) };
+      }
+      return { ok: false };
+    });
+
+    expect(cmds.filter((c) => c === "graph_get_object_info")).toHaveLength(1);
+    expect(payload.audit_complete).toBe(false);
+    expect(payload.unchecked_count).toBe(1);
+    const still = (payload.unchecked_nodes ?? []) as Array<Record<string, unknown>>;
+    const hit = still.find((u) => String(u.id) === "1");
+    expect(hit, "a type that is not an own key of /object_info must stay unchecked").toBeTruthy();
+    expect(hit?.type).toBe("toString");
+    expect(String(hit?.reason ?? "")).toMatch(/not found in \/object_info/i);
+  });
+
+  it("routes a completed payload through the consistency sanitizer", async () => {
+    const { payload, cmds } = await runGetErrors((cmd) => {
+      if (cmd.cmd === "graph_get_errors") {
+        return {
+          node_count: 8,
+          errored_count: 0,
+          nodes: [],
+          last_execution_error: null,
+          node_errors: null,
+          unavailable_widget_values: [
+            { id: 4, widget: "ckpt_name", value: "gone.safetensors", kind: "missing_asset" },
+          ],
+          note: "前回の実行開始以降、エラーは記録されていません",
+        };
+      }
+      throw new Error(`unexpected follow-up ${cmd.cmd}`);
+    });
+
+    expect(cmds).toEqual(["graph_get_errors"]);
+    expect(payload.audit_complete).toBe(true);
+    expect((payload.unavailable_widget_values as unknown[]).length).toBe(1);
+    expect(
+      payload.note,
+      "a translated clean note must not survive beside unavailable_widget_values just because nobody was left unchecked",
+    ).toBeUndefined();
   });
 });

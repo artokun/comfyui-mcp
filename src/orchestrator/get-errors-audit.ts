@@ -281,7 +281,12 @@ function judgeLeftoverCombos(
       stillUnchecked.push(entry);
       continue;
     }
-    const def = objectInfo[className];
+    // Own properties only. `objectInfo[className]` walks the prototype, so a
+    // leftover type named `toString` (or `constructor`, `valueOf`, …) against
+    // any ordinary non-empty /object_info map would resolve to a Function,
+    // look "found", yield no combo specs, and retire the node — audit_complete
+    // with unchecked_count:0 for a class that is not in the schema at all.
+    const def = Object.hasOwn(objectInfo, className) ? objectInfo[className] : undefined;
     if (!def) {
       stillUnchecked.push({
         id: node.id,
@@ -451,6 +456,12 @@ async function followUpJson(
  * After a budget-exhausted graph_get_errors, finish leftover combo checks from
  * one batched object_info + a targeted graph_query, then present completeness
  * honestly. Never throws: a failed follow-up still returns the incomplete audit.
+ *
+ * A payload the panel already finished still goes through presentGetErrorsAudit.
+ * Completeness is not consistency: `errored_count: 0` plus a translated
+ * "no errors recorded" note beside `unavailable_widget_values` is a completed
+ * audit that still contradicts itself. Skipping the sanitizer because nobody
+ * was left unchecked is how that contradiction would ship.
  */
 export async function completeGetErrorsAudit(
   ctx: GetErrorsCallCtx,
@@ -459,7 +470,9 @@ export async function completeGetErrorsAudit(
 ): Promise<GetErrorsToolResult> {
   const payload = parseToolResultJson(res);
   if (!payload) return res;
-  if (!isGetErrorsAuditIncomplete(payload)) return res;
+  if (!isGetErrorsAuditIncomplete(payload)) {
+    return rewriteTextPayload(res, presentGetErrorsAudit(payload));
+  }
 
   const leftover = asUncheckedList(payload).filter(isRetryableUnchecked);
   const leftoverIds = [
