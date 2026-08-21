@@ -35,6 +35,7 @@ import {
   forgetAbandonedConfirmCards,
   makePanelToolCtx,
   resetAbandonedConfirmCards,
+  __panelToolsTestHooks,
   type ConfirmOptions,
   type PanelToolCtx,
   type ToolResult,
@@ -338,6 +339,48 @@ describe("panel#1554 the recovered decision is disclosed, not slipped in", () =>
 
     expect(out).toContain("That card is still live");
     expect(out).not.toContain("and I'll re-ask");
+  });
+
+  it("END TO END: two real tool calls, real confirm, and the second one claims the click", async () => {
+    // Everything above either drives `confirm` directly or stubs it. This drives NEITHER:
+    // the REAL handler, twice, through the REAL confirm, with the recovery reached the
+    // way production reaches it. Without it the chain call site → opts → confirm →
+    // recovery is only proven by composition.
+    //
+    // The recovered answer is the DECLINE, because it is the one post-confirm branch
+    // that settles deterministically without dispatching a reboot or waiting out a
+    // readiness budget — the probe is stubbed healthy and its recheck window shrunk.
+    __panelToolsTestHooks.setHealthProbe(async () => "healthy");
+    __panelToolsTestHooks.setDeclineProbeTiming({
+      windowMs: 20,
+      intervalMs: 5,
+      probeTimeoutMs: 5,
+    });
+    try {
+      const h = harness();
+
+      // Call 1: the card is dispatched and nobody answers inside the 90s budget.
+      const first = textOf(await restartDef().handler({} as never, h.ctx));
+      expect(first).toContain("No confirmation received within");
+      expect(h.cards).toHaveLength(1);
+
+      // The user answers it afterwards. The bridge buffers it under the card's own id.
+      h.late.set(String(h.cards[0].ask_id), "No, cancel");
+
+      // Call 2: no second card, and the reply carries the disclosure.
+      const second = textOf(await restartDef().handler({} as never, h.ctx));
+
+      expect(h.cards).toHaveLength(1);
+      expect(second).toContain("NO NEW CONFIRMATION CARD WAS SHOWN");
+      expect(second).toContain("No, cancel");
+      // …and it is the DECLINE branch's own reply, not the timeout's.
+      expect(second).not.toContain("No confirmation received within");
+      // Nothing was restarted on a decline — the safe path is untouched.
+      expect(h.cards.every((c) => c.cmd === "ask_user")).toBe(true);
+    } finally {
+      __panelToolsTestHooks.setHealthProbe(null);
+      __panelToolsTestHooks.setDeclineProbeTiming(null);
+    }
   });
 
   it("the note is its OWN block: a structured reply stays parseable at index 0", () => {
