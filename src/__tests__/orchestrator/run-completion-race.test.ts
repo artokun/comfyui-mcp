@@ -165,21 +165,34 @@ describe("a completion that beats its own ticket is still OURS (#1327)", () => {
 //
 // The fix above was real but only reachable in the ordering ITS OWN TESTS used. The
 // orchestrator flushes the journal the instant a completion arrives (index.ts:
-// `record(...)` then `flushRunCompletions(...)`), and at that instant the agent is
-// still inside the `panel_run` tool call that queued the render — so the offer is
-// REFUSED. Refused or not, it counted an `attempts`, and `claimRaced` skipped any
-// entry with attempts > 0. The guard therefore fired on precisely the race it was
+// `record(...)` then `flushRunCompletions(...)`), so the offer is made before the
+// ticket exists. Refused or not, it counted an `attempts`, and `claimRaced` skipped
+// any entry with attempts > 0. The guard therefore fired on precisely the race it was
 // written to repair:
 //
-//   record → flush REFUSED (attempts=1, nobody told) → openRun → claim SKIPPED
+//   record -> flush (attempts=1) -> openRun -> claim SKIPPED
 //
 // `attempts` counts OFFERS; only a taken hand-off tells an agent anything.
+//
+// READ THIS BEFORE TRUSTING THE `() => false` BELOW (#1327, third occurrence).
+// This block used to assert that the arrival offer is REFUSED because "the agent is
+// busy inside the very panel_run call whose reply has not come back yet", and the
+// tests in this describe hard-code that refusal. MEASURED against the real
+// PanelAgent, it is not true: `injectEvent` has no busy check, and refuses only for
+// an agent that is missing, stopped, or handed a payload it cannot compose text for.
+// For an ordinary via-panel session the offer is TAKEN, so `handoffs` was 1 before
+// openRun ran and this fix was dormant on the live path for thirteen releases.
+// The refusal below is still a REAL case (no agent, or a stopped one) and these tests
+// keep covering it -- it is simply not the common one. The taken-offer path, driven
+// against the real agent rather than a stub, lives in
+// run-completion-queued-not-read.test.ts.
 describe("the recurrence: a refused offer is not a verdict anyone was told (#1327)", () => {
   it("the production ordering — arrival flush cannot hand off, THEN openRun", () => {
     const dispatchedAt = Date.now();
     journal.record(TAB, { prompt_id: PID, duration_s: 0.1 }, { conversation: CONV });
-    // flushRunCompletions fires here, and injectEvent refuses: the agent is busy
-    // inside the very panel_run call whose reply has not come back yet.
+    // flushRunCompletions fires here and finds nobody able to take it -- an agent
+    // that is missing or stopped, which is what injectEvent actually refuses on. (The
+    // BUSY case does NOT refuse; see the note above this describe.)
     const refused = journal.deliverPending(TAB, () => false);
     expect(refused.delivered).toBe(0);
     expect(refused.blockedOn).not.toBeNull(); // it really was offered and refused
