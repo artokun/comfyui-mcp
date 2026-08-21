@@ -441,17 +441,54 @@ function latestNote(
   }
   const from = status.installedVersion ? `${status.installedVersion} → ` : "";
   const pinned = resolvePin(status).pinned;
-  // WHICH remedy is not cosmetic. A dev symlink and a pin both make the update
-  // action refuse, and sending a user at a tool that will say no is the dead-end
-  // shape this cluster exists to remove (#771/#784) — so each state gets the
-  // step that can actually move it.
+  /*
+   * THE REMEDY TABLE — exhaustive on purpose.
+   *
+   * WHICH remedy is named is not cosmetic: a remedy that cannot succeed from
+   * the state it is printed in is a bug (#771/#784, #1933), not a wording nit.
+   * Two dead-end remedies have now been found in this one sentence — dev
+   * symlinks and pins pointed at an update that refuses them, then an ABSENT
+   * pack pointed at the same one — so every state that can reach here is
+   * enumerated rather than falling through a default. Absence is the case
+   * where the VERB changes entirely rather than merely being inapplicable,
+   * which is exactly how it slipped past the first pass.
+   *
+   * Only `behindLatest === true` reaches this, which narrows it to:
+   *
+   *   dev symlink        → nothing here. The dev-install verdict above already
+   *                        says "update it through its own git checkout", and
+   *                        nothing in this process may touch that install.
+   *   NOT INSTALLED,     → SYNC, never update. `runPanelActionCore` rethrows
+   *   unpinned             the Manager's "not installed" for action:"update"
+   *                        once the on-disk scan agrees the pack is absent —
+   *                        there is genuinely nothing to update — while
+   *                        `performPanelSync` picks `install` when
+   *                        `before.installed` is false. The verdict above says
+   *                        "Syncing will install it", so naming the same verb
+   *                        keeps the reply speaking with one voice.
+   *   NOT INSTALLED,     → clear the pin. Installing the nightly channel would
+   *   pinned               land some version other than the pinned one, so the
+   *                        pin is genuinely the first step (the `pinned-warn`
+   *                        verdict says the same).
+   *   installed, pinned  → clear the pin.
+   *   installed, plain   → update. The one state that verb actually works in.
+   */
   const remedy = status.isDevSymlink
-    ? // The dev-install verdict already says "update it through its own git
-      // checkout"; repeating it here just makes the reply longer.
-      ``
+    ? ``
     : pinned
       ? ` You are pinned, so moving onto it means clearing the pin first (${UNPIN_INSTRUCTION()}).`
-      : ` To pull it, run ${describeInstallPanelAction("update", "the update on the ComfyUI host")}.`;
+      : status.installed
+        ? ` To pull it, run ${describeInstallPanelAction("update", "the update on the ComfyUI host")}.`
+        : ` To install it, run ${describeInstallPanelAction("sync", "the panel sync on the ComfyUI host")}.`;
+  // An absent pack has no version for a published one to be "newer" THAN, so
+  // the behind-latest framing is wrong here even though `behindLatest` is
+  // correctly true: say what an install would land instead.
+  if (!status.installed) {
+    return (
+      ` LATEST CHECK: the newest published panel is ${published} — that is what installing ` +
+      `here would land. Nothing is blocked by this and nothing has been changed.${remedy}`
+    );
+  }
   return (
     ` LATEST CHECK: a NEWER panel is published (${from}${published}). Nothing is blocked ` +
     `by this and nothing has been changed — it is an advisory.${remedy}`

@@ -449,3 +449,101 @@ describe("#1983 — boundaries of the ahead-of-published comparison", () => {
     expect(sync.summary).not.toMatch(/clearing the pin/);
   });
 });
+
+/*
+ * THE REMEDY TABLE (#1995 gate, P1).
+ *
+ * A remedy that cannot succeed from the state it is printed in is a bug, not a
+ * wording nit. Two have now been found in this one sentence — dev symlinks and
+ * pins pointed at an update that refuses them, then an ABSENT pack pointed at
+ * the same one. So every state that reaches the remedy gets a row here rather
+ * than the one cell the gate happened to name, and each row asserts BOTH that
+ * the working verb is present and that the broken one is absent.
+ *
+ * Established from the production code, not from the verb names:
+ *  - `runPanelActionCore` (panel-installer.ts, `action === "update"`) rethrows
+ *    the Manager's "not installed" once the on-disk scan agrees the pack is
+ *    absent — "there is genuinely nothing to update".
+ *  - `performPanelSync` (panel-sync.ts) runs `before.installed ? "update" :
+ *    "install"`, so sync is what installs an absent pack.
+ */
+const UPDATE_VERB = /panel_action:'update'/;
+const SYNC_VERB = /panel_action:'sync'/;
+
+describe("#1995 gate P1 — every remedy names an action that can succeed from that state", () => {
+  it("ABSENT + unpinned → sync (which installs), never update (which throws on an absent pack)", async () => {
+    mocks.panelStatus.mockResolvedValue(
+      status({ installed: false, installedVersion: undefined, absenceProven: true }),
+    );
+    stubFetch(() => new Response(pyproject(LATEST), { status: 200 }));
+
+    const sync = await statusCall();
+
+    expect(sync.behindLatest).toBe(true);
+    expect(sync.summary).not.toMatch(UPDATE_VERB);
+    expect(sync.summary).toMatch(SYNC_VERB);
+    // And it must not claim a version gap it has no installed version for.
+    expect(sync.summary).not.toMatch(/a NEWER panel is published/);
+    expect(sync.summary).toMatch(/newest published panel is 0\.15\.32/);
+  });
+
+  it("ABSENT + pinned → clear the pin, never update", async () => {
+    mocks.panelStatus.mockResolvedValue(
+      status({
+        installed: false,
+        installedVersion: undefined,
+        absenceProven: true,
+        pin: { pinned: true, source: "settings", version: "0.15.20" },
+      }),
+    );
+    stubFetch(() => new Response(pyproject(LATEST), { status: 200 }));
+
+    const sync = await statusCall();
+
+    expect(sync.decision).toBe("pinned-warn");
+    expect(sync.summary).not.toMatch(UPDATE_VERB);
+    expect(sync.summary).toMatch(/clearing the pin|clear the pin/i);
+  });
+
+  it("INSTALLED + unpinned + not dev → update, the one state that verb works in", async () => {
+    mocks.panelStatus.mockResolvedValue(status());
+    stubFetch(() => new Response(pyproject(LATEST), { status: 200 }));
+
+    const sync = await statusCall();
+
+    expect(sync.summary).toMatch(UPDATE_VERB);
+  });
+
+  it("INSTALLED + pinned → clear the pin, never update", async () => {
+    mocks.panelStatus.mockResolvedValue(
+      status({ pin: { pinned: true, source: "settings", version: INSTALLED } }),
+    );
+    stubFetch(() => new Response(pyproject(LATEST), { status: 200 }));
+
+    expect((await statusCall()).summary).not.toMatch(UPDATE_VERB);
+  });
+
+  it("dev symlink → no verb of its own; the verdict's git-checkout instruction stands alone", async () => {
+    mocks.panelStatus.mockResolvedValue(status({ isDevSymlink: true }));
+    stubFetch(() => new Response(pyproject(LATEST), { status: 200 }));
+
+    const sync = await statusCall();
+
+    expect(sync.summary).not.toMatch(UPDATE_VERB);
+    expect(sync.summary).not.toMatch(SYNC_VERB);
+    expect(sync.summary).toMatch(/git checkout/);
+  });
+
+  it("no state that reaches the remedy names update while the pack is absent", async () => {
+    // The table as a whole, driven rather than reasoned about: for every
+    // absent-pack shape that can reach the advisory, `update` must not appear.
+    for (const pin of [{ pinned: false }, { pinned: true, source: "settings" as const }]) {
+      mocks.panelStatus.mockResolvedValue(
+        status({ installed: false, installedVersion: undefined, absenceProven: true, pin }),
+      );
+      stubFetch(() => new Response(pyproject(LATEST), { status: 200 }));
+      const sync = await statusCall();
+      expect(sync.summary, `pinned=${pin.pinned}`).not.toMatch(UPDATE_VERB);
+    }
+  });
+});
