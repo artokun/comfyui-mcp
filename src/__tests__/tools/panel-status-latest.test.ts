@@ -201,6 +201,24 @@ describe("#1983 — floor and latest are two answers, never one", () => {
     expect(sync.decision).toBe("dev-install");
     expect(sync.behindLatest).toBe(true);
     expect(sync.latestPublishedVersion).toBe(LATEST);
+    // A dev symlink is never touched by the update action, so the advisory must
+    // not send the reader at a tool that will refuse them.
+    expect(sync.summary).toMatch(/git checkout/);
+    expect(sync.summary).not.toMatch(/To pull it, run/);
+  });
+
+  it("a PINNED stale panel is told to clear the pin, not to run an update that would refuse", async () => {
+    mocks.panelStatus.mockResolvedValue(
+      status({ pin: { pinned: true, source: "settings", version: INSTALLED } }),
+    );
+    stubFetch(() => new Response(pyproject(LATEST), { status: 200 }));
+
+    const sync = await statusCall();
+
+    expect(sync.behindLatest).toBe(true);
+    expect(sync.behind).toBe(false);
+    expect(sync.decision).toBe("meets-floor");
+    expect(sync.summary).toMatch(/clearing the pin|clear the pin/i);
   });
 
   it("an uncomparable installed version cannot be compared to latest either → null", async () => {

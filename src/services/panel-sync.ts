@@ -381,12 +381,20 @@ function latestNote(
   }
   const from = status.installedVersion ? `${status.installedVersion} → ` : "";
   const pinned = status.pin && typeof status.pin === "object" && status.pin.pinned;
+  // WHICH remedy is not cosmetic. A dev symlink and a pin both make the update
+  // action refuse, and sending a user at a tool that will say no is the dead-end
+  // shape this cluster exists to remove (#771/#784) — so each state gets the
+  // step that can actually move it.
+  const remedy = status.isDevSymlink
+    ? // The dev-install verdict already says "update it through its own git
+      // checkout"; repeating it here just makes the reply longer.
+      ``
+    : pinned
+      ? ` You are pinned, so moving onto it means clearing the pin first (${UNPIN_INSTRUCTION()}).`
+      : ` To pull it, run ${describeInstallPanelAction("update", "the update on the ComfyUI host")}.`;
   return (
     ` LATEST CHECK: a NEWER panel is published (${from}${published}). Nothing is blocked ` +
-    `by this and nothing has been changed — it is an advisory. ` +
-    (pinned
-      ? `You are pinned, so moving onto it means clearing the pin first (${UNPIN_INSTRUCTION()}).`
-      : `To pull it, run ${describeInstallPanelAction("update", "the update on the ComfyUI host")}.`)
+    `by this and nothing has been changed — it is an advisory.${remedy}`
   );
 }
 
