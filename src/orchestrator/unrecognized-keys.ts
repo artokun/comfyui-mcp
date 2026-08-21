@@ -86,7 +86,9 @@ function distanceThreshold(a: string, b: string): number {
 }
 
 /**
- * Closest known key, or undefined when nothing is close enough to recommend.
+ * Closest known key, or undefined when nothing is close enough to recommend
+ * OR when two candidates fit equally well.
+ *
  * Prefer an affix match over a mere edit distance, so `group` → `group_id`
  * beats a coincidental neighbour of the same length.
  */
@@ -94,28 +96,37 @@ export function suggestKnownKey(unknown: string, candidates: readonly string[]):
   const folded = fold(unknown);
   let best: string | undefined;
   let bestScore = Infinity;
+  let bestCount = 0;
   for (const c of candidates) {
     if (c === unknown) continue;
     const fc = fold(c);
     if (fc === folded) return c;
+    let score: number;
     if (isAffixMatch(unknown, c)) {
-      const score = Math.abs(c.length - unknown.length) / 100;
-      if (score < bestScore) {
-        best = c;
-        bestScore = score;
-      }
-      continue;
+      // #1969 review — every affix match is the SAME quality of evidence: the
+      // name is the other one plus a separator/suffix. Ranking them by length
+      // difference is not evidence, and it invented a winner — `panel_connect`
+      // called with `id` affix-matches both `from_node_id` and `to_node_id`,
+      // and the length tiebreak silently answered "did you mean 'to_node_id'?"
+      // on what is a coin flip.
+      score = 0;
+    } else {
+      const d = editDistance(folded, fc);
+      if (d > distanceThreshold(folded, fc)) continue;
+      // Affix scores are 0; offset typos so they cannot outrank an affix.
+      score = 1 + d;
     }
-    const d = editDistance(folded, fc);
-    if (d > distanceThreshold(folded, fc)) continue;
-    // Affix scores are < 1; offset typos so they cannot outrank an affix.
-    const score = 1 + d;
     if (score < bestScore) {
       best = c;
       bestScore = score;
+      bestCount = 1;
+    } else if (score === bestScore) {
+      bestCount++;
     }
   }
-  return best;
+  // Two keys fit equally well: naming one of them is a guess wearing the same
+  // phrasing as a real match. Say nothing rather than pick.
+  return bestCount === 1 ? best : undefined;
 }
 
 function providedKeys(input: unknown): Set<string> {

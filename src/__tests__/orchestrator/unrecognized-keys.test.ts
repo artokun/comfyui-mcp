@@ -246,6 +246,37 @@ describe("#1969 review — a structural join must not be phrased as a guess abou
     const paired = pairUnrecognizedKeys(["dry_run"], ["node_id"], ["node_id"], { dry_run: true });
     expect(paired.get("dry_run")).toEqual({ key: "node_id", confident: false });
   });
+
+  // Same principle one rule up: rules 1-2 match on the NAME, and when two names
+  // match equally well the old length tiebreak picked the shorter one and stated
+  // it as the answer.
+  it("two equally good affix matches REFUSE rather than pick one", () => {
+    expect(suggestKnownKey("id", ["from_node_id", "to_node_id"])).toBeUndefined();
+    expect(suggestKnownKey("name", ["from_slot_name", "to_slot_name"])).toBeUndefined();
+  });
+
+  it("but a SINGLE affix match is still named", () => {
+    expect(suggestKnownKey("id", ["to_node_id", "pos"])).toBe("to_node_id");
+    expect(suggestKnownKey("group", ["group_id", "pos", "title"])).toBe("group_id");
+  });
+
+  it("panel_connect {id} over the real surface names neither endpoint", async () => {
+    // The live shape is what made this reachable: panel_connect carries both
+    // from_node_id and to_node_id, so `id` is genuinely ambiguous.
+    const server = new McpServer({ name: "ambiguity-probe", version: "1.0.0" });
+    registerPanelTools(server, makeFakeCtx());
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const c = new Client({ name: "ambiguity-probe-client", version: "1.0.0" });
+    await Promise.all([server.connect(st), c.connect(ct)]);
+    const r = await c.callTool({ name: "panel_connect", arguments: { id: 5 } });
+    const text = (r.content as Array<{ text?: string }>)?.[0]?.text ?? "";
+    expect(r.isError).toBe(true);
+    expect(text).toMatch(/Unrecognized key 'id'/);
+    expect(text).not.toMatch(/did you mean 'to_node_id'/);
+    expect(text).not.toMatch(/did you mean 'from_node_id'/);
+    await c.close();
+    await server.close();
+  });
 });
 
 describe("#1969 review — the live surface, not a hand-built shape", () => {
