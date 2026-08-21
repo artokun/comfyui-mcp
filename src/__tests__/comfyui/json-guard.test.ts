@@ -14,6 +14,7 @@
 // instead of being handed on as data.
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { fakeFetch } from "../helpers/fake-fetch.js";
 
 // The body prefix is diagnostic, but a gateway that REFLECTS the request could
 // put our own ComfyUI credential in it — and the prefix goes into an error the
@@ -956,7 +957,7 @@ describe("rethrowWithJsonDiagnosis never asserts a cause it did not prove (#828)
             status: 200,
             headers: { "content-type": "text/html" },
           }),
-      ) as unknown as typeof fetch;
+      );
       const reflecting = new SyntaxError(
         `Unexpected token '<', "<html>Bearer echoed-secret-token-here</html>" is not valid JSON`,
       );
@@ -975,7 +976,7 @@ describe("rethrowWithJsonDiagnosis never asserts a cause it did not prove (#828)
           status: 200,
           headers: { "content-type": "text/html" },
         }),
-    ) as unknown as typeof fetch;
+    );
 
     await expect(rethrowWithJsonDiagnosis(ORIGINAL, PROBE_URL)).rejects.toSatisfy((e: unknown) => {
       if (!isNonJsonResponseError(e)) return false;
@@ -995,7 +996,7 @@ describe("rethrowWithJsonDiagnosis never asserts a cause it did not prove (#828)
           status: 200,
           headers: { "content-type": "application/json" },
         }),
-    ) as unknown as typeof fetch;
+    );
 
     await expect(rethrowWithJsonDiagnosis(ORIGINAL, PROBE_URL)).rejects.toBe(ORIGINAL);
   });
@@ -1011,7 +1012,7 @@ describe("rethrowWithJsonDiagnosis never asserts a cause it did not prove (#828)
             status: 200,
             headers: { "content-type": "application/json" },
           }),
-      ) as unknown as typeof fetch;
+      );
       const reflecting = new SyntaxError(
         `Unexpected token '<', "<html>Bearer echoed-secret-token-here</html>" is not valid JSON`,
       );
@@ -1033,7 +1034,7 @@ describe("rethrowWithJsonDiagnosis never asserts a cause it did not prove (#828)
     try {
       global.fetch = vi.fn(async () => {
         throw new Error("fetch failed");
-      }) as unknown as typeof fetch;
+      });
       const reflecting = new SyntaxError(
         `Unexpected token '<', "<html>Bearer echoed-secret-token-here</html>" is not valid JSON`,
       );
@@ -1054,7 +1055,7 @@ describe("rethrowWithJsonDiagnosis never asserts a cause it did not prove (#828)
     try {
       global.fetch = vi.fn(async () => {
         throw new Error("fetch failed");
-      }) as unknown as typeof fetch;
+      });
       const reflecting = new SyntaxError(
         `Unexpected token '<', "<html>Bearer echoed-secret-token-here</html>" is not valid JSON`,
       );
@@ -1069,13 +1070,17 @@ describe("rethrowWithJsonDiagnosis never asserts a cause it did not prove (#828)
   it("rethrows the ORIGINAL untouched when the probe itself fails", async () => {
     global.fetch = vi.fn(async () => {
       throw new Error("fetch failed");
-    }) as unknown as typeof fetch;
+    });
     await expect(rethrowWithJsonDiagnosis(ORIGINAL, PROBE_URL)).rejects.toBe(ORIGINAL);
   });
 
   it("does not probe at all for an error that is not markup-parsed-as-JSON", async () => {
-    const spy = vi.fn();
-    global.fetch = spy as unknown as typeof fetch;
+    // A fetch that must not run: named so that a regression fails on the call
+    // itself, not only on the count.
+    const spy = fakeFetch(async (url) => {
+      throw new Error(`unexpected fetch of ${url}`);
+    });
+    global.fetch = spy;
     const transport = new Error("fetch failed");
     await expect(rethrowWithJsonDiagnosis(transport, PROBE_URL)).rejects.toBe(transport);
     expect(spy).not.toHaveBeenCalled();

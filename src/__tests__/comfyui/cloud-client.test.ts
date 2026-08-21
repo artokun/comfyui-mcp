@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { fakeFetch } from "../helpers/fake-fetch.js";
 
 // Stub config helpers BEFORE importing the module under test.
 vi.mock("../../config.js", async () => {
@@ -32,14 +33,13 @@ describe("cloud-client", () => {
 
   beforeEach(() => {
     calls = [];
-    global.fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const url = typeof input === "string" ? input : (input as Request).url ?? String(input);
+    global.fetch = fakeFetch(async (url, init) => {
       calls.push({ url, init });
       return new Response("{}", {
         status: 200,
         headers: { "content-type": "application/json" },
       });
-    }) as unknown as typeof fetch;
+    });
   });
 
   afterEach(() => {
@@ -76,7 +76,7 @@ describe("cloud-client", () => {
       new Response(JSON.stringify({ outputs: { "9": { images: [] } } }), {
         status: 200,
       }),
-    ) as unknown as typeof fetch;
+    );
     const result = await getHistory("abc-123");
     expect(result["abc-123"]).toBeDefined();
     expect(result["abc-123"]).toMatchObject({ outputs: { "9": { images: [] } } });
@@ -115,7 +115,7 @@ describe("cloud-client", () => {
       new Response(JSON.stringify({ status: "in_progress", prompt_id: "x" }), {
         status: 200,
       }),
-    ) as unknown as typeof fetch;
+    );
     const s = await getJobStatus("x");
     expect(s.status).toBe("in_progress");
   });
@@ -127,7 +127,7 @@ describe("cloud-client", () => {
         status: 200,
         headers: { "content-type": "image/png" },
       }),
-    ) as unknown as typeof fetch;
+    );
     const r = await fetchImage("out.png");
     expect(r.mimeType).toBe("image/png");
     expect(r.base64).toBe(Buffer.from(bytes).toString("base64"));
@@ -136,7 +136,7 @@ describe("cloud-client", () => {
   it("wraps non-2xx responses in a ComfyUIError with status code", async () => {
     global.fetch = vi.fn(async () =>
       new Response("forbidden", { status: 403, statusText: "Forbidden" }),
-    ) as unknown as typeof fetch;
+    );
     await expect(getHistory("abc")).rejects.toMatchObject({
       code: "CLOUD_API_ERROR",
     });

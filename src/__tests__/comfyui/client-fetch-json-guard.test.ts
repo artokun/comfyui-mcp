@@ -51,7 +51,7 @@ function serve(...responses: Array<() => Response>): void {
     const make = responses[Math.min(i, responses.length - 1)];
     i += 1;
     return make();
-  }) as unknown as typeof fetch;
+  });
 }
 
 beforeEach(() => {
@@ -267,7 +267,7 @@ describe("a first-hand diagnosis still wins over a retry blip", () => {
         });
       }
       throw Object.assign(new TypeError("fetch failed"), { code: "ECONNREFUSED" });
-    }) as unknown as typeof fetch;
+    });
 
     const err = await getObjectInfo().then(
       () => null,

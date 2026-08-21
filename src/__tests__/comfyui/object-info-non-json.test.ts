@@ -6,23 +6,26 @@
 // user to check whether ComfyUI is running (codex gate, round 8, finding 2).
 
 import { describe, expect, it, beforeEach, vi } from "vitest";
+import { fakeFetch } from "../helpers/fake-fetch.js";
 
 const nodeDefs = vi.hoisted(() => ({ impl: async () => ({}) as unknown }));
 vi.mock("@stable-canvas/comfyui-client", () => ({
   Client: class {
     // #385 — call sites moved to `comfyApiFetch`, which reuses the library's
     // own routing (apiURL/apiHeaders) and its injected `fetch`, so it can read a
-    // 4xx instead of having `fetchApi` throw it away. The double routes `fetch`
-    // back through its own `fetchApi`, so every existing impl and spy in this
-    // file keeps working and keeps asserting the same route.
+    // 4xx instead of having `fetchApi` throw it away. This double has no HTTP
+    // route at all — the tests stub the SDK method directly — so a comfyApiFetch
+    // call reaching it is a wiring mistake and is named as one, rather than
+    // failing as "this.fetchApi is not a function" through a cast that claimed
+    // the method existed.
     apiURL(p: string) {
       return p;
     }
     apiHeaders(init?: { headers?: unknown }) {
       return (init && init.headers) || {};
     }
-    async fetch(u: string, init?: unknown) {
-      return (this as unknown as { fetchApi: (u: string, i?: unknown) => unknown }).fetchApi(u, init);
+    async fetch(u: string): Promise<Response> {
+      throw new Error(`Client double has no HTTP route for ${u}; stub the SDK method instead`);
     }
     async getNodeDefs() {
       return nodeDefs.impl();
@@ -70,7 +73,7 @@ describe("getObjectInfo reports the attempt that PROVED a non-JSON answer (#828)
           status: 200,
           headers: { "content-type": "text/html" },
         }),
-    ) as unknown as typeof fetch;
+    );
 
     await expect(getObjectInfo()).rejects.toSatisfy((e: unknown) => {
       if (!isNonJsonResponseError(e)) return false;
@@ -88,7 +91,7 @@ describe("getObjectInfo reports the attempt that PROVED a non-JSON answer (#828)
           status: 200,
           headers: { "content-type": "text/html" },
         }),
-    ) as unknown as typeof fetch;
+    );
     await expect(getObjectInfo()).rejects.toSatisfy((e: unknown) => isNonJsonResponseError(e));
   });
 
@@ -96,8 +99,10 @@ describe("getObjectInfo reports the attempt that PROVED a non-JSON answer (#828)
     nodeDefs.impl = async () => {
       throw new Error("fetch failed");
     };
-    const probe = vi.fn();
-    global.fetch = probe as unknown as typeof fetch;
+    const probe = fakeFetch(async (url) => {
+      throw new Error(`unexpected fetch of ${url}`);
+    });
+    global.fetch = probe;
     await expect(getObjectInfo()).rejects.toThrow(/fetch failed/);
     expect(probe).not.toHaveBeenCalled(); // no speculative re-probe
   });

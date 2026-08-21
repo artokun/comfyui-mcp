@@ -33,7 +33,7 @@ function answer(status: number, body: string, contentType: string, statusText?: 
       statusText: statusText ?? "",
       headers: { "content-type": contentType },
     });
-  }) as unknown as typeof fetch;
+  });
 }
 
 beforeEach(() => {

@@ -21,6 +21,7 @@
 // reverting a call site to `client.fetchApi` fails them.
 
 import { describe, expect, it, beforeEach, vi } from "vitest";
+import { fakeFetch } from "../helpers/fake-fetch.js";
 
 vi.mock("../../config.js", () => ({
   config: { comfyuiSsl: false, comfyuiPath: "", comfyuiBasePath: "" },
@@ -48,7 +49,7 @@ function answer(status: number, body: string | null, contentType?: string): void
     const headers: Record<string, string> = {};
     if (contentType) headers["content-type"] = contentType;
     return new Response(body, { status, headers });
-  }) as unknown as typeof fetch;
+  });
 }
 
 beforeEach(() => {
@@ -190,10 +191,10 @@ describe("comfyApiFetch keeps the library's routing", () => {
     // multi-user target resolves exactly as it did through fetchApi. Losing
     // this would be a silent routing change on someone else's deployment.
     const seen: string[] = [];
-    global.fetch = vi.fn(async (input: unknown) => {
-      seen.push(String(input));
+    global.fetch = fakeFetch(async (url) => {
+      seen.push(url);
       return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
-    }) as unknown as typeof fetch;
+    });
 
     await comfyApiFetch("/settings");
     expect(seen[0]).toContain("remote.example:8188");
