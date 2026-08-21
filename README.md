@@ -3,17 +3,17 @@
 <p align="center">
   <a href="https://comfyui-mcp.artokun.io/docs">
     <img src="docs/images/demo-poster.jpg" width="760"
-         alt="The Agent panel driving ComfyUI end to end — click to watch the demo">
+         alt="The Agent panel driving ComfyUI end to end. Click to watch the demo">
   </a>
 </p>
 
 <p align="center">
-  <em>The Agent panel driving ComfyUI end to end — reading what is installed locally,
-  wiring the graph, freeing VRAM, and running the render.<br>
+  <em>The Agent panel driving ComfyUI end to end. It reads what is installed locally,
+  wires the graph, frees VRAM, and runs the render.<br>
   <a href="https://comfyui-mcp.artokun.io/docs">Watch the 76s demo &rarr;</a></em>
 </p>
 
-**The local-first, agent-native control plane for [ComfyUI](https://github.com/comfyanonymous/ComfyUI)** — an MCP server + live sidebar agent that generates images, video and audio, authors and runs workflows, manages models and custom nodes, and **edits your live ComfyUI graph in natural language**. Bring whatever model you have: **Claude or ChatGPT on your subscription, Gemini on your Google login, a free local model via Ollama (fully offline), or any hosted model over one API key** (DeepSeek, GLM, MiMo, Kimi, GPT, Claude via OpenRouter). Same tools, same panel, every tier — and the built-in [LLM Arena](https://comfyui-mcp.artokun.io/docs/arena) scores them all on real ComfyUI tasks so you know exactly what your model can do. One config targets local installs, LAN, VPS, or Comfy Cloud.
+**The local-first, agent-native control plane for [ComfyUI](https://github.com/comfyanonymous/ComfyUI).** An MCP server plus a live sidebar agent that generates images, video and audio, authors and runs workflows, manages models and custom nodes, and **edits your live ComfyUI graph in natural language**. Bring whatever model you have: **Claude or ChatGPT on your subscription, Gemini on your Google login, a free local model via Ollama (fully offline), or any hosted model over one API key** (DeepSeek, GLM, MiMo, Kimi, GPT, Claude via OpenRouter). The tools and the panel are the same on every tier, and the built-in [LLM Arena](https://comfyui-mcp.artokun.io/docs/arena) scores each model on real ComfyUI tasks so you know what yours can do. One config targets local installs, LAN, VPS, or Comfy Cloud.
 
 [![npm version](https://img.shields.io/npm/v/comfyui-mcp)](https://www.npmjs.com/package/comfyui-mcp)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22.0.0-brightgreen)](https://nodejs.org)
@@ -23,21 +23,21 @@
 [![comfyui-mcp MCP server](https://glama.ai/mcp/servers/artokun/comfyui-mcp/badges/card.svg)](https://glama.ai/mcp/servers/artokun/comfyui-mcp)
 [![comfyui-mcp MCP server](https://glama.ai/mcp/servers/artokun/comfyui-mcp/badges/score.svg)](https://glama.ai/mcp/servers/artokun/comfyui-mcp)
 
-[![Deploy on RunPod](https://img.shields.io/badge/Deploy_on-RunPod-673AB7?style=for-the-badge)](https://console.runpod.io/deploy?template=bnqtkvcer3&ref=dkx71w9b) [![Join the Discord](https://img.shields.io/badge/Discord-Join_%26_get_help-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/cW9arBhzCu) &nbsp;**One-click GPU pod** — a ready-to-run ComfyUI with this project + [Agent Panel](https://github.com/artokun/comfyui-mcp-panel) + ComfyUI-Manager v2 preinstalled, on your own GPU. No setup.
+[![Deploy on RunPod](https://img.shields.io/badge/Deploy_on-RunPod-673AB7?style=for-the-badge)](https://console.runpod.io/deploy?template=bnqtkvcer3&ref=dkx71w9b) [![Join the Discord](https://img.shields.io/badge/Discord-Join_%26_get_help-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/cW9arBhzCu) &nbsp;**One-click GPU pod.** A ready-to-run ComfyUI with this project + [Agent Panel](https://github.com/artokun/comfyui-mcp-panel) + ComfyUI-Manager v2 preinstalled, on your own GPU. No setup.
 
-Works on **macOS**, **Linux**, and **Windows**. Auto-detects your ComfyUI installation and port.
+Works on macOS, Linux, and Windows. Auto-detects your ComfyUI installation and port.
 
-**Stuck or have a question? [Join the Discord](https://discord.gg/cW9arBhzCu)** — help, model tips, and release announcements.
+**Stuck or have a question? [Join the Discord](https://discord.gg/cW9arBhzCu)** for help, model tips, and release announcements.
 
 **38 MCP tools** | **41 AI skills** (Flux · WAN · LTX 2.3 video · MiniMax H3 · Qwen · Z-Image · Ideogram 4 · ERNIE · ANIMA · model registry · Civitai · node authoring · launch/perf flags) | **56 installer packs** | **11 slash commands** | **4 autonomous agents** | **3 hooks**
 
-The plugin ships **expert skills that grow with every release** — model-specific generation guides with curated download URLs, workflow recipes, troubleshooting, and custom-node authoring — so Claude knows the right sampler, CFG, resolution, and model files for each architecture without trial and error.
+The plugin ships skills that grow with every release: model-specific generation guides with curated download URLs, workflow recipes, troubleshooting, and custom-node authoring. With them, Claude knows the right sampler, CFG, resolution, and model files for each architecture without trial and error.
 
-> ### ✅ Now available: the [ComfyUI Agent Panel](https://registry.comfy.org/nodes/comfyui-agent-panel) on ComfyUI-Manager & the Comfy Registry
-> An autonomous AI agent in your ComfyUI sidebar — **on Claude, ChatGPT, Gemini, or ANY local/hosted LLM** (Ollama and every OpenAI-compatible endpoint). Subscriptions work with no API key; local models work with no account at all. Pick a provider and it drives your live graph: edits, spatial layout, one-shot workflow/pack loads, rewind/rollback, a pending-message tray, activity cards, multi-tab — and it asks before spending paid API credits.
-> Search **`comfyui-agent-panel`** in ComfyUI-Manager to install. [Read more →](https://comfyui-mcp.artokun.io/docs/panel)
+> ### Now available: the [ComfyUI Agent Panel](https://registry.comfy.org/nodes/comfyui-agent-panel) on ComfyUI-Manager & the Comfy Registry
+> An autonomous AI agent in your ComfyUI sidebar, running **on Claude, ChatGPT, Gemini, or ANY local/hosted LLM** (Ollama and every OpenAI-compatible endpoint). Subscriptions work with no API key; local models work with no account at all. Pick a provider and it drives your live graph: edits, spatial layout, one-shot workflow/pack loads, rewind/rollback, a pending-message tray, activity cards, multi-tab. It asks before spending paid API credits.
+> Search `comfyui-agent-panel` in ComfyUI-Manager to install. [Read more →](https://comfyui-mcp.artokun.io/docs/panel)
 
-📖 **Full documentation: [comfyui-mcp.artokun.io/docs](https://comfyui-mcp.artokun.io/docs)**
+**Full documentation: [comfyui-mcp.artokun.io/docs](https://comfyui-mcp.artokun.io/docs)**
 
 ---
 
@@ -69,25 +69,25 @@ The plugin ships **expert skills that grow with every release** — model-specif
 
 Claude will find (or download) a checkpoint, build a workflow, execute it, and return the image.
 
-> **Note**: This runs as a standalone MCP server — no need to clone this repo. `npx` will download and run it automatically.
+> **Note**: This runs as a standalone MCP server, so there is no need to clone this repo. `npx` downloads and runs it.
 
 ### Scope: local, remote, or Comfy Cloud
 
-`comfyui-mcp` is **local-first**: a self-hosted ComfyUI on Mac/Linux/Windows is the primary target, with the same agent reaching remote installs (RunPod, VPS, LAN, reverse-proxied) from one config. Local-first, not local-only.
+`comfyui-mcp` is **local-first**. A self-hosted ComfyUI on Mac/Linux/Windows is the primary target, and the same agent reaches remote installs (RunPod, VPS, LAN, reverse-proxied) from one config. Local-first, not local-only.
 
-**More than a bridge.** Most ComfyUI MCP servers are thin connectors — they forward a prompt and hand back an image. `comfyui-mcp` is a full control plane: it authors and edits the graph node-by-node, runs and iterates on workflows, manages models and custom nodes, and ships model-specific expertise (samplers, CFG, resolutions, curated model URLs) so the agent gets it right without trial and error. If you want a minimal local relay, a lightweight server is fine; if you want an agent that actually *operates* ComfyUI, that's this project.
+**More than a bridge.** Most ComfyUI MCP servers are thin connectors. They forward a prompt and hand back an image. `comfyui-mcp` is a full control plane. It authors and edits the graph node by node, runs and iterates on workflows, manages models and custom nodes, and ships model-specific expertise (samplers, CFG, resolutions, curated model URLs) so the agent gets it right without trial and error. If you want a minimal local relay, a lightweight server is fine. If you want an agent that *operates* ComfyUI, that's this project.
 
-For **Comfy Cloud** users, Comfy-Org ships its own [agent tooling](https://docs.comfy.org/agent-tools): **Comfy Cloud MCP** (public beta, hosted on Comfy Cloud GPUs), the **Comfy In-App Agent** (private alpha, inside Comfy Cloud), and a first-party **Comfy Local MCP** (private test, not publicly available yet) — all maintained by the Comfy team. If you don't have a GPU or you want zero setup, that's the better path; go use it.
+For Comfy Cloud users, Comfy-Org ships its own [agent tooling](https://docs.comfy.org/agent-tools): Comfy Cloud MCP (public beta, hosted on Comfy Cloud GPUs), the Comfy In-App Agent (private alpha, inside Comfy Cloud), and a first-party Comfy Local MCP (private test, not publicly available yet), all maintained by the Comfy team. If you don't have a GPU or you want zero setup, that's the better path; go use it.
 
-Where this project differs is that it runs on **your** install and **your** choice of model — including a free local one via Ollama with no account and no network at all. `comfyui-mcp` *also* includes a community cloud-mode (set `COMFYUI_API_KEY` — see [Deployment modes](#deployment-modes)) so a single MCP can target all three deployment shapes from one config.
+Where this project differs is that it runs on **your** install and **your** choice of model, including a free local one via Ollama with no account and no network at all. `comfyui-mcp` *also* includes a community cloud mode (set `COMFYUI_API_KEY`, see [Deployment modes](#deployment-modes)) so a single MCP can target all three deployment shapes from one config.
 
-📊 **[Local vs. Comfy Cloud agent](https://comfyui-mcp.artokun.io/docs/local-vs-comfy-cloud)** — an honest side-by-side, including when Comfy Cloud is the right answer. *(Statuses above are as of July 2026; Comfy-Org ships fast — check their docs for the current state.)*
+**[Local vs. Comfy Cloud agent](https://comfyui-mcp.artokun.io/docs/local-vs-comfy-cloud)** is a side-by-side comparison, including when Comfy Cloud is the right answer. *(Statuses above are as of July 2026. Comfy-Org ships fast, so check their docs for the current state.)*
 
 ### Remote / hosted connector (one command)
 
-Want to use `comfyui-mcp` from **Claude Desktop's Custom Connectors** or any remote
-client — like Comfy's own `cloud.comfy.org/mcp` connector? Run it as an
-authenticated, publicly-reachable Streamable-HTTP server with one flag:
+To use `comfyui-mcp` from Claude Desktop's Custom Connectors or any remote
+client, like Comfy's own `cloud.comfy.org/mcp` connector, run it as an
+authenticated, publicly reachable Streamable-HTTP server with one flag:
 
 ```bash
 npx -y comfyui-mcp@latest --tunnel
@@ -96,20 +96,20 @@ npx -y comfyui-mcp@latest --tunnel
 This forces the HTTP transport, generates an auth token, opens a
 [cloudflared](https://github.com/cloudflare/cloudflared) quick tunnel, and prints
 a ready-to-paste `https://…/mcp` URL + token + Claude Desktop connector snippet.
-Auth accepts `Authorization: Bearer <token>` **or** `X-API-Key: <token>` (matching
+Auth accepts `Authorization: Bearer <token>` or `X-API-Key: <token>` (matching
 Comfy Cloud's convention). See the
 [Remote / hosted connector guide](https://comfyui-mcp.artokun.io/docs/remote-connector)
 for the full walkthrough and headless usage.
 
-> Auth is opt-in: with no `COMFYUI_MCP_HTTP_TOKEN` set and no `--tunnel`, the
-> default stdio (and plain `--http` on loopback) behavior is unchanged — open and
+> Auth is opt-in. With no `COMFYUI_MCP_HTTP_TOKEN` set and no `--tunnel`, the
+> default stdio (and plain `--http` on loopback) behavior is unchanged. It stays open and
 > local. OAuth (Comfy's browser sign-in flow) is a planned follow-up.
 
 ---
 
 ## Claude Code Plugin
 
-This package also ships as a **Claude Code plugin**, providing slash commands, skills, agents, and hooks on top of the MCP tools.
+This package also ships as a Claude Code plugin that adds slash commands, skills, agents, and hooks on top of the MCP tools.
 
 ### Install as a plugin
 
@@ -136,9 +136,9 @@ This package also ships as a **Claude Code plugin**, providing slash commands, s
 
 ### Built-in skills
 
-41 skills total — model-family guides (Flux, WAN, LTX 2.3, MiniMax H3, Qwen, Z-Image, Ideogram 4, ERNIE, ANIMA + anime / WAN / Z-Image LoRA training), the **model-registry** (curated download URLs), the **civitai** pairing skill, node authoring, the **launch/performance-flags** matrix, and the core four below. Full list on the [plugin docs page](https://comfyui-mcp.artokun.io/docs/plugin).
+41 skills total: model-family guides (Flux, WAN, LTX 2.3, MiniMax H3, Qwen, Z-Image, Ideogram 4, ERNIE, ANIMA + anime / WAN / Z-Image LoRA training), the **model-registry** (curated download URLs), the **civitai** pairing skill, node authoring, the **launch/performance-flags** matrix, and the core four below. Full list on the [plugin docs page](https://comfyui-mcp.artokun.io/docs/plugin).
 
-> **Installer packs.** [`packs/`](packs/) bundles 13 one-command ComfyUI setups — ANIMA, Ideogram 4, LTX-2.3, ERNIE, WAN (animate / longer-videos / transparent), Qwen (image / image-edit), Z-Image (turbo / base / xy-plot) and artokun-flow (WAN Animate — replace / animate). Each is a manifest of custom nodes + model URLs + workflow that drives both `apply_manifest` and generated `install-windows.bat` / `install-runpod.sh`, with CI that validates every model link + payload size. See [`packs/README.md`](packs/README.md).
+> **Installer packs.** [`packs/`](packs/) bundles 13 one-command ComfyUI setups: ANIMA, Ideogram 4, LTX-2.3, ERNIE, WAN (animate / longer-videos / transparent), Qwen (image / image-edit), Z-Image (turbo / base / xy-plot) and artokun-flow (WAN Animate: replace / animate). Each is a manifest of custom nodes + model URLs + workflow that drives both `apply_manifest` and generated `install-windows.bat` / `install-runpod.sh`, with CI that validates every model link + payload size. See [`packs/README.md`](packs/README.md).
 
 | Skill | Description |
 |-------|-------------|
@@ -151,7 +151,7 @@ This package also ships as a **Claude Code plugin**, providing slash commands, s
 
 | Agent | Model | Description |
 |-------|-------|-------------|
-| **comfy-explorer** | Sonnet | Researches custom node packs — reads docs, queries `/object_info`, generates comprehensive skill files |
+| **comfy-explorer** | Sonnet | Researches custom node packs — reads docs, queries `/object_info`, generates skill files |
 | **comfy-debugger** | Sonnet | Autonomously diagnoses workflow failures — gathers logs + history, identifies failing node, checks models + custom nodes, proposes and optionally applies fixes |
 | **comfy-optimizer** | Sonnet | Analyzes workflows for performance — detects redundant nodes, VRAM waste, wrong CFG/steps for model family, precision issues, suggests optimizations |
 | **comfy-researcher** | Sonnet | Discovers and ranks ComfyUI custom node packs for a stated image-generation problem |
@@ -174,10 +174,10 @@ This package also ships as a **Claude Code plugin**, providing slash commands, s
 
 ## Panel agent (Claude · ChatGPT · Gemini · any local/hosted LLM)
 
-Beyond the headless MCP server, this package ships the **panel orchestrator** that
-powers the **[ComfyUI Agent Panel](https://github.com/artokun/comfyui-mcp-panel)** —
+Beyond the headless MCP server, this package ships the panel orchestrator that
+powers the [ComfyUI Agent Panel](https://github.com/artokun/comfyui-mcp-panel),
 an autonomous agent embedded in ComfyUI's sidebar that drives the live canvas. It
-runs in the background on **your own subscription** (Claude *or* ChatGPT), started
+runs in the background on your own subscription (Claude *or* ChatGPT), started
 on demand by the panel's **Connect** button:
 
 ```bash
@@ -186,61 +186,61 @@ npx -y comfyui-mcp@latest connect
 
 ### Drive a REMOTE ComfyUI from your own machine (`connect`)
 
-When ComfyUI runs somewhere with **no Node/agent** (a RunPod pod, a cloud box) you
-can still run the agent on **your** machine and drive that remote ComfyUI — no
-agent login on the box, nothing to install or configure remotely:
+When ComfyUI runs somewhere with no Node or agent (a RunPod pod, a cloud box) you
+can still run the agent on your machine and drive that remote ComfyUI. There is no
+agent login on the box and nothing to install or configure remotely:
 
 ```bash
 npx -y comfyui-mcp@latest connect https://abcd1234-3000.proxy.runpod.net
 ```
 
-This is sugar for `--panel-orchestrator` with `COMFYUI_URL` set from the URL: the
+This is sugar for `--panel-orchestrator` with `COMFYUI_URL` set from the URL. The
 orchestrator runs locally on your Claude/ChatGPT login and reaches the remote
-ComfyUI over its public proxy URL. For a **remote HTTPS pod**, `connect`
-automatically opens a secure, token-gated **`wss://` tunnel** (via Cloudflare) to
-the local agent bridge and hands the pod's panel that URL — so the pod's HTTPS page
-reaches your machine with **no browser prompt, in any browser** (a secure page
-can't open a plain `ws://` socket to your box — mixed content / Private Network
-Access). A **local** ComfyUI uses the plain `ws://127.0.0.1:9199` loopback bridge;
-add **`--insecure-bridge`** to force that loopback for a remote pod (then arrange
-your own path to it, e.g. an SSH port-forward). Either way the panel JS runs in
-**your local browser** and the agent — and your login — run only on **your**
+ComfyUI over its public proxy URL. For a remote HTTPS pod, `connect`
+opens a token-gated `wss://` tunnel (via Cloudflare) to
+the local agent bridge and hands the pod's panel that URL, so the pod's HTTPS page
+reaches your machine with no browser prompt, in any browser. A secure page
+can't open a plain `ws://` socket to your box because of mixed-content and Private Network
+Access rules. A local ComfyUI uses the plain `ws://127.0.0.1:9199` loopback bridge.
+Add `--insecure-bridge` to force that loopback for a remote pod, then arrange
+your own path to it, e.g. an SSH port-forward. Either way the panel JS runs in
+your local browser, and the agent and your login run only on your
 machine, so nothing is installed remotely.
 
-To finish: with `connect` still running on your machine, open the remote ComfyUI in
-your browser and click **Connect** in the Agent panel. (The panel is a pure-frontend
-extension — it links to the bridge your `connect` process is already serving, rather
-than asking the ComfyUI host to spawn an orchestrator it cannot run.)
+To finish, with `connect` still running on your machine, open the remote ComfyUI in
+your browser and click **Connect** in the Agent panel. The panel is a pure-frontend
+extension. It links to the bridge your `connect` process is already serving, rather
+than asking the ComfyUI host to spawn an orchestrator it cannot run.
 
 **Multi-provider, full parity.** The orchestrator depends on a provider-neutral
-**`AgentBackend`** port (dependency injection), with two adapters:
+`AgentBackend` port (dependency injection), with two adapters:
 
-- **`ClaudeBackend`** — the [Claude Agent SDK](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk)
+- `ClaudeBackend` wraps the [Claude Agent SDK](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk)
   (`@anthropic-ai/claude-agent-sdk`), a persistent streaming session over the
   claude.ai subscription (OAuth, no key).
-- **`CodexBackend`** — OpenAI Codex over the **`codex app-server`** JSON-RPC
+- `CodexBackend` wraps OpenAI Codex over the `codex app-server` JSON-RPC
   protocol (`@openai/codex`), on the ChatGPT subscription (`codex login`, no key).
 
-Further adapters follow the same port — Gemini CLI (ACP), **Antigravity
-(`agy`, the Google AI Pro/Ultra subscription path — install from
+Further adapters follow the same port: Gemini CLI (ACP), Antigravity
+(`agy`, the Google AI Pro/Ultra subscription path; install from
 [antigravity.google](https://antigravity.google) and run `agy` once to sign
-in)**, Grok, Kimi, GLM, Ollama/LM Studio/llama.cpp (local), OpenRouter, and
+in), Grok, Kimi, GLM, Ollama/LM Studio/llama.cpp (local), OpenRouter, and
 any OpenAI-compatible endpoint. See
 [docs/backends](https://comfyui-mcp.artokun.io/docs/backends) for the full
 matrix.
 
-Both are optional dependencies, and the panel picks a **provider, not a port** —
-each backend runs its own orchestrator on its own loopback bridge port. A
-capability matrix lets the panel degrade gracefully (e.g. conversation-rollback is
+Both are optional dependencies, and the panel picks a provider, not a port.
+Each backend runs its own orchestrator on its own loopback bridge port. A
+capability matrix tells the panel which features each backend supports (e.g. conversation-rollback is
 Claude-only today, since the Codex app-server resumes whole threads only).
 
 **The live-canvas tools and model knowledge are identical across providers.** The
-`panel_*` tool definitions live in **one shared list**, registered onto both the
+`panel_*` tool definitions live in one shared list, registered onto both the
 in-process Claude SDK MCP server *and* a `@modelcontextprotocol/sdk` server over a
-loopback **streamable-HTTP MCP** that the orchestrator hosts for Codex (which can
+loopback streamable-HTTP MCP that the orchestrator hosts for Codex (which can
 only host config-declared MCP servers). The headless `comfyui` MCP is likewise
-injected into both — in-process for Claude, declared via `codex app-server -c
-mcp_servers` for ChatGPT — so generation, models, and workflow tools are the same
+injected into both, in-process for Claude and declared via `codex app-server -c
+mcp_servers` for ChatGPT, so generation, models, and workflow tools are the same
 everywhere.
 
 New tools that give every backend the same expertise and a cost guardrail:
@@ -255,9 +255,9 @@ New tools that give every backend the same expertise and a cost guardrail:
 | `panel_load_workflow` | (panel tool) Load a full workflow onto the live canvas in one shot — by bundled `pack` name (read server-side, never shuttled through chat) or by graph JSON |
 | `panel_strip_workflow` / `panel_slice_workflow` | (panel tools) De-virtualize a tangled graph (Get/Set buses, Reroutes, subgraphs, bypass → real connections) or carve one rgthree-toggled pipeline out of a monolith — by `pack`, server-side `path`, or inline graph; for understanding/rebuilding expert workflows without hand-tracing |
 
-See the design doc — **[design/agent-backend-injection.md](design/agent-backend-injection.md)** —
+See the design doc, [design/agent-backend-injection.md](design/agent-backend-injection.md),
 for the port, the capability matrix, and the per-provider "clink" points, and the
-**[panel docs](https://comfyui-mcp.artokun.io/docs/panel)** for the full sidebar UX.
+[panel docs](https://comfyui-mcp.artokun.io/docs/panel) for the full sidebar UX.
 
 ---
 
@@ -359,7 +359,7 @@ for the port, the capability matrix, and the per-provider "clink" points, and th
 
 ### Official comfy-cli
 
-Install [comfy-cli](https://docs.comfy.org/comfy-cli/getting-started#install-cli) 1.11.1 or newer to enable the official JSON-backed tools. The MCP resolves `comfy` from `COMFY_CLI_PATH`, `PATH`, or the selected workspace's `.venv`/`venv`. Local custom-node operations prefer `comfy node` when a supported CLI is available and otherwise fall back to Manager HTTP; remote targets retain Manager HTTP.
+Install [comfy-cli](https://docs.comfy.org/comfy-cli/getting-started#install-cli) 1.11.1 or newer to enable the official JSON-backed tools. The MCP resolves `comfy` from `COMFY_CLI_PATH`, `PATH`, or the selected workspace's `.venv`/`venv`. Local custom-node operations prefer `comfy node` when a supported CLI is available and otherwise fall back to Manager HTTP; remote targets keep using Manager HTTP.
 
 | Tool | Description |
 |------|-------------|
@@ -389,7 +389,7 @@ Install [comfy-cli](https://docs.comfy.org/comfy-cli/getting-started#install-cli
 | `get_history` `action: "suggest"` | Suggest proven sampler/scheduler/steps/CFG settings from local generation history — query by model family, LoRA hash, or text search |
 | `get_history` `action: "stats"` | Show local generation tracking statistics — total runs, unique combos, breakdown by model family |
 
-Every `enqueue_workflow` call automatically logs settings to a local SQLite database (`generations.db`). Same settings combos get a `reuse_count` bump instead of duplicates, creating a natural popularity signal. Models and LoRAs are identified by content hash (AutoV2 / SHA256), not filenames — so renamed files still group together.
+Every `enqueue_workflow` call logs settings to a local SQLite database (`generations.db`). Repeated settings combos get a `reuse_count` bump instead of a duplicate row, so the count works as a popularity signal. The tracker identifies models and LoRAs by content hash (AutoV2 / SHA256), not filename, so renamed files still group together.
 
 ```bash
 # View local stats from the CLI
@@ -443,7 +443,7 @@ flowchart LR
 > /comfy:debug
 ```
 
-Automatically reads the last execution history and logs, identifies the failing node, checks for missing models or node packs, and suggests a fix.
+Reads the last execution history and logs, identifies the failing node, checks for missing models or node packs, and suggests a fix.
 
 ```
 > /comfy:debug abc123-def456
@@ -467,7 +467,7 @@ Supported sweep parameters: `cfg`, `steps`, `sampler`, `scheduler`, `seed`, `den
 > /comfy:recipe hires-fix a dramatic fantasy landscape with castles
 ```
 
-Runs a two-pass pipeline: txt2img at 512x768, then img2img upscale to 1024x1536 with detail enhancement.
+Runs two passes: txt2img at 512x768, then an img2img upscale to 1024x1536 that adds detail.
 
 Available recipes:
 
@@ -501,7 +501,7 @@ Searches the registry, shows details, clones the repo to `custom_nodes/`, instal
 > /comfy:gallery today
 ```
 
-Lists recent outputs with embedded metadata — shows checkpoint, prompt, seed, steps, CFG, sampler for each image.
+Lists recent outputs with their embedded metadata: checkpoint, prompt, seed, steps, CFG, and sampler for each image.
 
 ### Compare workflows
 
@@ -517,7 +517,7 @@ Shows added/removed nodes, changed parameters (old → new values), and optional
 > Validate this workflow before I run it
 ```
 
-Checks for missing node types, broken connections, invalid output indices, and missing model files — without executing.
+Checks for missing node types, broken connections, invalid output indices, and missing model files without executing the workflow.
 
 ### Manage models
 
@@ -548,7 +548,7 @@ Reads the PNG metadata chunks to recover the exact workflow and prompt used to g
 > /comfy:node-skill comfyui-impact-pack
 ```
 
-Generates a comprehensive skill file documenting every node, its inputs/outputs, and usage patterns.
+Generates a skill file documenting every node, its inputs/outputs, and usage patterns.
 
 ### Process control
 
@@ -566,9 +566,9 @@ The server auto-detects your ComfyUI installation and port. Override with enviro
 
 Where to put keys and overrides:
 
-- **Panel users**: the **API Keys** card (▾ menu next to "connected") — stored in `~/.comfyui-mcp/panel-secrets.json`, applied immediately, no restart.
-- **MCP-only setups** (Claude Desktop, Claude Code, etc.): the `env` block of your MCP client config, as shown in the setup examples above.
-- Real environment variables always take precedence over stored keys. (For development, `~/.comfyui-mcp/.env` is also loaded as an override file — regular installs shouldn't need it.)
+- **Panel users.** Use the **API Keys** card (▾ menu next to "connected"). Keys are stored in `~/.comfyui-mcp/panel-secrets.json` and take effect without a restart.
+- **MCP-only setups** (Claude Desktop, Claude Code, etc.). Use the `env` block of your MCP client config, as shown in the setup examples above.
+- Real environment variables always take precedence over stored keys. For development, the server also loads `~/.comfyui-mcp/.env` as an override file; regular installs shouldn't need it.
 
 ### Deployment modes
 
@@ -581,8 +581,8 @@ Where to put keys and overrides:
 | **Cloud** | `COMFYUI_API_KEY` is set (targets [Comfy Cloud](https://cloud.comfy.org)) | no — HTTP primitives route via `cloud.comfy.org` over `X-API-Key`; WebSocket and local-only tools throw `CLOUD_UNSUPPORTED` |
 
 Some setups (e.g. [dstack](https://dstack.ai) driving ComfyUI on RunPod) port-forward
-a remote ComfyUI back to `localhost:8188`, so the loopback check above gets it
-wrong — the install isn't actually local. Pass `--force-remote` (or set
+a remote ComfyUI back to `localhost:8188`, so the loopback check above reports a
+local install that isn't one. Pass `--force-remote` (or set
 `COMFYUI_MCP_FORCE_REMOTE=1`) alongside `--comfyui-url`/`COMFYUI_URL` to force
 remote mode regardless of hostname:
 
@@ -623,7 +623,7 @@ npx -y comfyui-mcp@latest --comfyui-url http://localhost:8188 --force-remote
 
 ### Transports
 
-The server speaks **stdio by default** (what Claude Code, Claude Desktop, and the MCP Inspector expect — no flags needed). For MCP gateways, remote/hosted setups, or `fetch`-based clients, opt into **streamable-HTTP**:
+The server speaks stdio by default, which is what Claude Code, Claude Desktop, and the MCP Inspector expect, so no flags are needed. For MCP gateways, remote/hosted setups, or `fetch`-based clients, opt into streamable-HTTP:
 
 ```bash
 # stdio (default)
@@ -644,9 +644,9 @@ npx -y comfyui-mcp@latest --http --host 0.0.0.0 --port 9100   # bind/port overri
 
 ### Other agents & local LLMs (Hermes, OpenClaw, Copilot CLI, Ollama)
 
-comfyui-mcp has **first-class support for non-Claude harnesses**. One command
-writes the server entry into the harness's own config (merging, not
-clobbering):
+comfyui-mcp supports non-Claude harnesses. One command
+writes the server entry into the harness's own config (it merges into an existing
+file rather than overwriting it):
 
 ```bash
 npx -y comfyui-mcp setup hermes     # → ~/.hermes/config.yaml      (compact by default)
@@ -655,41 +655,41 @@ npx -y comfyui-mcp setup copilot    # → ~/.copilot/mcp-config.json (full by de
 # flags: --compact | --full, --comfyui-url <url>, --dry-run
 ```
 
-**Model requirements**: tool calling is a hard requirement (no tool calling =
-doesn't work). Thinking and vision are strongly recommended — without
+**Model requirements.** Tool calling is a hard requirement; a model without tool calling
+doesn't work. Thinking and vision are recommended. Without
 thinking, multi-step tool chains degrade; without vision the agent can
 generate but can't see its own outputs.
 
-**Compact tool mode is one flag away**: `--compact` /
+**Compact tool mode.** `--compact` /
 `COMFYUI_MCP_TOOL_MODE=compact` registers 3 meta-tools (`list_tools` →
-`describe_tool` → `call_tool`) instead of the direct surface, pulling schemas
-into context one tool at a time — the right trade for small local models. The
-direct surface is the default and is what frontier-model harnesses want.
+`describe_tool` → `call_tool`) instead of the direct tool set, pulling schemas
+into context one tool at a time. That is the right trade for small local models. The
+direct tool set is the default and is what frontier-model harnesses want.
 **Run it locally
-for free with our fine-tuned models**: `ollama pull artokun/gemma4-comfyui-mcp:e4b`
-(also `:e2b` for ~2 GB VRAM, `:12b` for ~8 GB) — Gemma 4 QLoRA-trained on 1,055
-server-verified trajectories over the full comfyui-mcp tool surface, and the
-panel's Ollama default. Stock `gemma4:*`/`qwen3:4b` also validated end-to-end
+for free with our fine-tuned models.** `ollama pull artokun/gemma4-comfyui-mcp:e4b`
+(also `:e2b` for ~2 GB VRAM, `:12b` for ~8 GB) is Gemma 4, QLoRA-trained on 1,055
+server-verified trajectories over the full comfyui-mcp tool set, and is the
+panel's Ollama default. Stock `gemma4:*`/`qwen3:4b` are also validated end-to-end
 (`npm run test:local-llm`); gemma3 has no native tool calling and is
-unsupported. Full guide — hosted-model guidance (DeepSeek/MiMo/GLM class),
-per-harness setup, troubleshooting:
+unsupported. The full guide, covering hosted-model guidance (DeepSeek/MiMo/GLM class),
+per-harness setup, and troubleshooting, is
 **[Local LLMs & other agents](https://comfyui-mcp.artokun.io/docs/local-llms)**.
 
 | Flag | Env | Default | Description |
 |------|-----|---------|-------------|
 | `setup <agent>` | | | Write the comfyui entry into hermes / openclaw / copilot config, then exit |
-| `--compact` / `--tool-mode compact` | `COMFYUI_MCP_TOOL_MODE=compact` | `full` | Opt into the 3 meta-tools (`list_tools` / `describe_tool` / `call_tool`) instead of the direct surface — recommended for small local models. `--full` is still accepted and is now a no-op |
+| `--compact` / `--tool-mode compact` | `COMFYUI_MCP_TOOL_MODE=compact` | `full` | Opt into the 3 meta-tools (`list_tools` / `describe_tool` / `call_tool`) instead of the direct tool set — recommended for small local models. `--full` is still accepted and is now a no-op |
 
 ### Remote ComfyUI
 
-Point the server at a ComfyUI running anywhere — no local install required:
+Point the server at a ComfyUI running anywhere; no local install is required:
 
 ```bash
 npx -y comfyui-mcp@latest --comfyui-url http://192.168.1.50:8188
 npx -y comfyui-mcp@latest --http --comfyui-url https://comfy.example.com:8443
 ```
 
-**Behind a reverse proxy / API gateway** (path prefix + auth header) — for a
+**Behind a reverse proxy / API gateway** (path prefix + auth header). For a
 self-hosted ComfyUI exposed under a prefixed route with its own auth layer (this
 is *not* Comfy Cloud, which is `COMFYUI_API_KEY`):
 
@@ -726,12 +726,12 @@ Set `COMFYUI_PATH` to skip detection and use an explicit path.
 
 The server communicates with ComfyUI through its REST API and WebSocket interface:
 
-- **WebSocket** — enqueue workflows, receive real-time progress updates (step-by-step via background monitor script), get execution results
-- **REST API** — system stats, node definitions (`/object_info`), logs, history, queue management, workflow library, VRAM control (`/free`), embeddings
-- **File system** — read/write models directory, detect installation paths, upload images, extract PNG metadata, browse outputs
-- **External APIs** — HuggingFace (model search), ComfyUI Registry (custom node discovery), GitHub (skill generation), CivitAI (model downloads)
+- **WebSocket.** Enqueue workflows, receive real-time progress updates (step by step via the background monitor script), get execution results
+- **REST API.** System stats, node definitions (`/object_info`), logs, history, queue management, workflow library, VRAM control (`/free`), embeddings
+- **File system.** Read/write the models directory, detect installation paths, upload images, extract PNG metadata, browse outputs
+- **External APIs.** HuggingFace (model search), ComfyUI Registry (custom node discovery), GitHub (skill generation), CivitAI (model downloads)
 
-All communication with the MCP client (Claude Code) happens over **stdio** using the [Model Context Protocol](https://modelcontextprotocol.io). Logs go to stderr to avoid polluting the protocol stream.
+All communication with the MCP client (Claude Code) happens over stdio using the [Model Context Protocol](https://modelcontextprotocol.io). Logs go to stderr so they never mix into the protocol stream.
 
 ---
 
@@ -876,46 +876,46 @@ Make sure ComfyUI is running. The Desktop app uses port 8000 by default; the CLI
 The auto-detection couldn't find your ComfyUI data directory. Set `COMFYUI_PATH` to the directory containing your `models/` folder (e.g., `~/Documents/ComfyUI`).
 
 **"Multiple ComfyUI installations detected"**
-This is informational — the server uses the first one found. Set `COMFYUI_PATH` to pick a specific installation.
+This is informational. The server uses the first one found. Set `COMFYUI_PATH` to pick a specific installation.
 
 **Model downloads fail**
 For HuggingFace gated models, set `HUGGINGFACE_TOKEN`. For CivitAI, set `CIVITAI_API_TOKEN`.
 
 **Workflow execution errors**
-Use `/comfy:debug` to automatically diagnose failures. Or use `get_history` (`action: "diagnose"`) / `get_system_stats (action:"logs")` directly to see detailed error messages including Python tracebacks from ComfyUI.
+Use `/comfy:debug` to diagnose failures. Or call `get_history` (`action: "diagnose"`) / `get_system_stats (action:"logs")` directly to see the full error messages, including Python tracebacks from ComfyUI.
 
 **Out of memory (OOM)**
-Use `clear_vram` to free GPU memory before running large workflows. The VRAM watchdog hook will warn you automatically if memory is critically low. See the **troubleshooting** skill for model-specific VRAM estimates.
+Use `clear_vram` to free GPU memory before running large workflows. The VRAM watchdog hook warns you when less than 1GB is free before a workflow runs. See the **troubleshooting** skill for model-specific VRAM estimates.
 
 **Missing custom nodes**
-Use `/comfy:install <pack>` to install missing node packs from the registry. The debug command will detect and suggest missing packs automatically.
+Use `/comfy:install <pack>` to install missing node packs from the registry. The debug command detects missing packs and suggests them.
 
 ---
 
 ## Contributing
 
-Contributions are welcome! See **[CONTRIBUTING.md](./CONTRIBUTING.md)** for the dev setup, project
+Contributions are welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md) for the dev setup, project
 conventions, how to add an MCP tool, and the release process.
 
-Quick version: fork → branch (`feat/my-feature`) → make changes (ensure `npm run build` and
+Quick version: fork → branch (`feat/my-feature`) → make changes (make sure `npm run build` and
 `npm test` pass; run `npm run docs:gen` if you touched tools) → open a PR.
 
 ---
 
 ## Maintainer
 
-Built and maintained by [**@artokun**](https://github.com/artokun) — a regular contributor across the Comfy-Org ecosystem:
+Built and maintained by [**@artokun**](https://github.com/artokun), a regular contributor across the Comfy-Org ecosystem:
 
-- **[Comfy-Org/ComfyUI_frontend](https://github.com/Comfy-Org/ComfyUI_frontend/pulls?q=is%3Apr+author%3Aartokun)** — 10 merged PRs, mostly on the **v2 graph renderer**: subgraph rendering, promoted-widget plumbing, viewport persistence, with backports across `cloud/1.41`, `cloud/1.42`, `core/1.41`, and `core/1.42`.
-- **[Comfy-Org/ComfyUI](https://github.com/Comfy-Org/ComfyUI/pulls?q=is%3Apr+author%3Aartokun)** (core) — crash fixes in the Python backend's video/audio save path ([#12683](https://github.com/Comfy-Org/ComfyUI/pull/12683), [#12550](https://github.com/Comfy-Org/ComfyUI/pull/12550)).
+- **[Comfy-Org/ComfyUI_frontend](https://github.com/Comfy-Org/ComfyUI_frontend/pulls?q=is%3Apr+author%3Aartokun).** 10 merged PRs, mostly on the v2 graph renderer: subgraph rendering, promoted-widget plumbing, viewport persistence, with backports across `cloud/1.41`, `cloud/1.42`, `core/1.41`, and `core/1.42`.
+- **[Comfy-Org/ComfyUI](https://github.com/Comfy-Org/ComfyUI/pulls?q=is%3Apr+author%3Aartokun)** (core). Crash fixes in the Python backend's video/audio save path ([#12683](https://github.com/Comfy-Org/ComfyUI/pull/12683), [#12550](https://github.com/Comfy-Org/ComfyUI/pull/12550)).
 
-**Comfy-Org folks** (or anyone hiring around the ComfyUI ecosystem): I'd genuinely love to chat — **[art.longbottom.jr@gmail.com](mailto:art.longbottom.jr@gmail.com)**.
+If you're at Comfy-Org (or hiring around the ComfyUI ecosystem), I'd love to chat. Email me at **[art.longbottom.jr@gmail.com](mailto:art.longbottom.jr@gmail.com)**.
 
 ---
 
 ## License
 
-MIT — see [LICENSE](./LICENSE) for details.
+MIT. See [LICENSE](./LICENSE) for details.
 
 ---
 
