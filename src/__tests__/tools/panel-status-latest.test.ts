@@ -376,3 +376,76 @@ describe("#1983 — the probe is not made where it could not mean anything", () 
     expect(sync.behindLatest).toBeNull();
   });
 });
+
+// The ahead-of-published branch decides on ONE comparison:
+//   compareSemver(status.installedVersion, latestPublishedVersion) > 0
+// Taxonomy class 3 — a guard can be present and correct and still ask about the
+// wrong pair. These are the inputs where the two sides are equal-ish but the
+// thing that matters differs, driven through the real tool path rather than
+// asserted against compareSemver directly (which is what the guard already
+// believes).
+describe("#1983 — boundaries of the ahead-of-published comparison", () => {
+  const ON_IT = /and you are on it/;
+  const AHEAD = /NEWER than the newest published one/;
+
+  it("a 'v' prefix is the SAME version, not a newer one", async () => {
+    mocks.panelStatus.mockResolvedValue(status({ installedVersion: `v${LATEST}` }));
+    stubFetch(() => new Response(pyproject(LATEST), { status: 200 }));
+
+    const sync = await statusCall();
+
+    expect(sync.behindLatest).toBe(false);
+    expect(sync.summary).toMatch(ON_IT);
+    expect(sync.summary).not.toMatch(AHEAD);
+  });
+
+  it("build metadata is the SAME version — semver ignores it for precedence", async () => {
+    mocks.panelStatus.mockResolvedValue(status({ installedVersion: `${LATEST}+build.1` }));
+    stubFetch(() => new Response(pyproject(LATEST), { status: 200 }));
+
+    const sync = await statusCall();
+
+    expect(sync.behindLatest).toBe(false);
+    expect(sync.summary).toMatch(ON_IT);
+    expect(sync.summary).not.toMatch(AHEAD);
+  });
+
+  it("a higher patch with a prerelease tag IS ahead", async () => {
+    mocks.panelStatus.mockResolvedValue(status({ installedVersion: "0.15.33-rc1" }));
+    stubFetch(() => new Response(pyproject(LATEST), { status: 200 }));
+
+    const sync = await statusCall();
+
+    expect(sync.behindLatest).toBe(false);
+    expect(sync.summary).toMatch(AHEAD);
+    expect(sync.summary).not.toMatch(ON_IT);
+  });
+
+  it("a PRERELEASE of the published version is BEHIND it, never ahead and never 'on it'", async () => {
+    // Equal numeric core, different prerelease — the pair the guard compares
+    // looks identical on the part that is easy to read. An rc precedes its
+    // release, so this reader really is behind and must be told to update.
+    mocks.panelStatus.mockResolvedValue(status({ installedVersion: `${LATEST}-rc1` }));
+    stubFetch(() => new Response(pyproject(LATEST), { status: 200 }));
+
+    const sync = await statusCall();
+
+    expect(sync.behindLatest).toBe(true);
+    expect(sync.summary).not.toMatch(AHEAD);
+    expect(sync.summary).not.toMatch(ON_IT);
+    expect(sync.summary).toMatch(/a NEWER panel is published/);
+  });
+
+  it("being ahead never invents work to do, pinned or not", async () => {
+    mocks.panelStatus.mockResolvedValue(
+      status({ installedVersion: "0.99.0", pin: { pinned: true, source: "settings" } }),
+    );
+    stubFetch(() => new Response(pyproject(LATEST), { status: 200 }));
+
+    const sync = await statusCall();
+
+    expect(sync.summary).toMatch(AHEAD);
+    expect(sync.summary).not.toMatch(/To pull it, run/);
+    expect(sync.summary).not.toMatch(/clearing the pin/);
+  });
+});
