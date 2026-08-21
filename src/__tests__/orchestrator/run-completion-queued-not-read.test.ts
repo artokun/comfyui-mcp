@@ -135,6 +135,37 @@ describe("a completion that beat its ticket is claimed even once QUEUED (#1327)"
     expect(text.split("A run on the user's canvas just finished").length - 1).toBe(1);
     await agent.stop?.();
   });
+
+  it("a REOPENED ticket re-delivers the completion it pulled back, never swallows it", async () => {
+    // openRun has two branches and the claim runs on BOTH. This is the reopen one: a
+    // prompt id whose ticket still exists — ComfyUI reuses ids, and a `retry_of`
+    // dispatch that the panel dedupes returns the SAME id — hit by the same fast
+    // cached render, so the completion is queued to the agent before the reply comes
+    // back and opens the ticket again.
+    //
+    // The entry is already `matched` here, so nothing about the VERDICT changes. What
+    // changes is that the claim pulls the queued copy off the agent to rebind it to
+    // the new generation — and if the reopen branch forgets to re-deliver it, the
+    // agent is left with no completion at all. That is a silent LOSS, strictly worse
+    // than the wrong wording this whole file is about, and it is invisible to any
+    // assertion that only reads the journal.
+    const journal = new RunCompletionJournalImpl();
+    const { agent, backend } = startAgent(TAB);
+    const flush = wire(journal, agent);
+
+    // An earlier dispatch already ticketed this id.
+    journal.openRun(PID, { tabId: TAB, conversation: CONV, dispatchedAt: Date.now() - 60_000 });
+
+    // The re-dispatch, and its render beating the reply back.
+    const dispatchedAt = Date.now();
+    journal.record(TAB, FRAME as never, { conversation: CONV });
+    expect(flush(TAB).delivered).toBe(1);
+    journal.openRun(PID, { tabId: TAB, conversation: CONV, toNodeId: 149, dispatchedAt });
+
+    await vi.waitFor(() => expect(backend.allText()).toContain("ComfyUI_00149_.png"));
+    expect(backend.allText()).toContain("A run on the user's canvas just finished");
+    await agent.stop?.();
+  });
 });
 
 describe("…and UNDETERMINED still fires when it should (#1327)", () => {
