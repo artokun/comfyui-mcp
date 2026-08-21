@@ -81,6 +81,7 @@ import {
   PLAIN_NODE_ID_PATTERN,
   unionErrorFor,
 } from "./node-id.js";
+import { unrecognizedKeysError } from "./unrecognized-keys.js";
 import {
   addressedNodeMatchesPersistRemedy,
   parseContradictoryPromotedWidgetRefusal,
@@ -12123,6 +12124,14 @@ export interface PanelToolDef {
  * key: X") is something a model can read and fix on the next attempt; a silent no-op
  * is not distinguishable from "it worked but had no effect".
  *
+ * #1969 — the refusal used to name the unknown key AND, separately, the missing
+ * required one (`unrecognized_keys: ["group"]` plus `expected number, received
+ * undefined at group_id`). A frontier model joins those; a 2–4B fine-tune trained
+ * only on verified successes cannot. The schema-level `error` map names the
+ * intended key in the same sentence ("did you mean 'group_id'?") so a small
+ * model can recover without aliases (#1968) and without failed-then-corrected
+ * training pairs.
+ *
  * BOTH transports' registration functions accept this directly in place of the raw
  * shape (verified against each SDK's actual runtime behavior, not assumed from the
  * TypeScript types — see the cast note at the Anthropic SDK call site):
@@ -12136,7 +12145,7 @@ export interface PanelToolDef {
  *     an unrecognized key is rejected with `Unrecognized key: "..."`.
  */
 function strictPanelSchema(shape: z.ZodRawShape) {
-  return z.object(shape).strict();
+  return z.object(shape, { error: unrecognizedKeysError(shape) }).strict();
 }
 
 const PANEL_EDIT_NODE_FIELDS = ["pos", "size", "title", "preset", "color", "bgcolor", "shape", "collapsed", "pinned", "mode"] as const;
