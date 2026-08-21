@@ -838,28 +838,97 @@ export type DispatchedMediaItem = {
   kind: string;
 };
 
+/** Why a `show_media` reply did or did not establish that its items were
+ *  presented. Each value changes what the caller may honestly say. */
+export type ShowMediaAckReason =
+  /** The #710 per-item contract, covering the batch that was actually sent. */
+  | "accounted"
+  /** The reply DECLARES failure (`ok:false`). Nothing needs correcting: the
+   *  client is not claiming a success, it is reporting the opposite. */
+  | "declared_failure"
+  /** #2013 — buffered by the bridge because it could not route. No client has
+   *  seen it, so no client can have presented it. */
+  | "mailboxed"
+  /** No per-item accounting at all — `{shown:true}`, `{ok:true}`, a string. */
+  | "no_accounting"
+  /** Well-formed accounting about a DIFFERENT number of items than were sent. */
+  | "partial_accounting"
+  /** Accounting whose own numbers do not add up — `painted + unconfirmed +
+   *  unrenderable.length` exceeds the `count` it declares, or the count is not
+   *  a whole non-negative number. A reply that contradicts itself establishes
+   *  nothing, and it is a different thing to report than a short one. */
+  | "incoherent_accounting";
+
+export type ShowMediaAckVerdict = {
+  /** True only when the reply establishes presentation for the WHOLE batch. */
+  accounted: boolean;
+  reason: ShowMediaAckReason;
+  /** How many items the reply itself claims to be about, when it says at all;
+   *  null when it does not. A COUNT, never an identity — a reply covering 1 of
+   *  2 items does not say WHICH one, so nothing downstream can name it. */
+  covered: number | null;
+};
+
 /**
- * Does this `show_media` reply ACCOUNT FOR the items it was given?
+ * What a `show_media` reply established about the items it was given.
  *
- * True only for the #710 contract: a numeric `count`, a numeric `painted`, and
- * an `unrenderable` array. All three are required and each is load-bearing —
- * `count`+`painted` are the arithmetic (`painted + unconfirmed +
- * unrenderable.length + dropped === count`), and `unrenderable` is the field a
- * client only has once it can tell "I presented this" from "I was handed a kind
- * I have no player for". A reply missing any of them did not do the accounting,
- * whatever else it says about itself.
+ * `accounted` is true only for the #710 contract — a numeric `count`, a numeric
+ * `painted`, and an `unrenderable` array — AND only when that accounting is
+ * about the batch that was actually dispatched. Every clause is load-bearing:
+ *
+ *  - `count`+`painted` are the arithmetic the panel documents
+ *    (`painted + unconfirmed + unrenderable.length + dropped === count`);
+ *  - `unrenderable` is the field a client only has once it can tell "I presented
+ *    this" from "I was handed a kind I have no player for" — a panel older than
+ *    #710 has the first two and not this one (#2017);
+ *  - the COVERAGE check is the difference between an account and a coincidence.
+ *    `{count:1, painted:1, unrenderable:[]}` is a perfectly well-formed #710
+ *    reply and it establishes nothing whatever about the SECOND item of a
+ *    two-item batch. Without it the extra item is lost in silence — which is
+ *    the same defect this module exists to remove, one layer in (gate r1, P1).
  *
  * Note what is NOT accepted: `{shown: true}`, `{ok: true}`, `{mailboxed: true}`,
  * a bare `true`, an array, a string. None of them names an item.
  */
-export function showMediaReplyAccountsForItems(reply: unknown): boolean {
-  if (!reply || typeof reply !== "object" || Array.isArray(reply)) return false;
+export function readShowMediaAck(reply: unknown, dispatchedCount: number): ShowMediaAckVerdict {
+  if (!reply || typeof reply !== "object" || Array.isArray(reply)) {
+    return { accounted: false, reason: "no_accounting", covered: null };
+  }
   const r = reply as Record<string, unknown>;
-  return (
-    typeof r.count === "number" &&
-    typeof r.painted === "number" &&
-    Array.isArray(r.unrenderable)
-  );
+  // A reply that DECLARES failure is left alone. This exists to stop an
+  // unearned claim of SUCCESS; `ok:false` is the client claiming the opposite,
+  // and rewriting it as `dispatched:true` — telling the caller not to re-send —
+  // would manufacture the very over-claim it is here to remove (gate r1, P1).
+  if (r.ok === false) return { accounted: false, reason: "declared_failure", covered: null };
+  // #2013 — buffered rather than refused. Checked BEFORE the shape test so a
+  // mailbox receipt that happened to carry counts could not be read as an
+  // account of a presentation no client has had the chance to make.
+  if (r.mailboxed === true) return { accounted: false, reason: "mailboxed", covered: null };
+  const count = r.count;
+  const painted = r.painted;
+  const unrenderable = r.unrenderable;
+  if (typeof count !== "number" || typeof painted !== "number" || !Array.isArray(unrenderable)) {
+    return { accounted: false, reason: "no_accounting", covered: null };
+  }
+  const unconfirmed = typeof r.unconfirmed === "number" ? r.unconfirmed : 0;
+  const coherent =
+    Number.isInteger(count) &&
+    count >= 0 &&
+    painted >= 0 &&
+    unconfirmed >= 0 &&
+    // `dropped` is described in the panel's note but not carried as a field, so
+    // the parts can be FEWER than the count. They can never be more.
+    painted + unconfirmed + unrenderable.length <= count;
+  if (!coherent) return { accounted: false, reason: "incoherent_accounting", covered: count };
+  if (count !== dispatchedCount) {
+    return { accounted: false, reason: "partial_accounting", covered: count };
+  }
+  return { accounted: true, reason: "accounted", covered: count };
+}
+
+/** Thin boolean over {@link readShowMediaAck}, for a call site that only gates. */
+export function showMediaReplyAccountsForItems(reply: unknown, dispatchedCount: number): boolean {
+  return readShowMediaAck(reply, dispatchedCount).accounted;
 }
 
 /**
@@ -873,10 +942,17 @@ export function showMediaReplyAccountsForItems(reply: unknown): boolean {
  * Re-sending is called out explicitly as the WRONG next step. The identical
  * reply comes back the second time, and an agent that reads "unconfirmed" as
  * "failed" will loop on a delivery that already happened.
+ *
+ * The three unaccounted reasons are genuinely different diagnoses and are not
+ * given one wording. "The client took it and said nothing" is false of a
+ * mailboxed command that no client has seen (#2013), and false again of a reply
+ * that accounted for a DIFFERENT number of items than were sent — there the
+ * client did read items, just not all of these, and the shortfall is the thing
+ * the caller has to be told about (gate r1, P1).
  */
 export function unaccountedShowMediaNote(
   dispatched: readonly DispatchedMediaItem[],
-  reply: unknown,
+  verdict: ShowMediaAckVerdict,
 ): string {
   if (dispatched.length === 0) return "";
   const one = dispatched.length === 1;
@@ -886,20 +962,36 @@ export function unaccountedShowMediaNote(
     .join("\n");
   const more = dispatched.length > 8 ? `\n  - …and ${dispatched.length - 8} more` : "";
 
-  // #2013 — `show_media` is the ONE command the bridge buffers instead of
-  // refusing when it cannot route. `mailboxed: true` therefore means no client
-  // has seen this at all yet, which is a different (and weaker) fact than "a
-  // client took it and said nothing about it". Say which one happened.
-  const mailboxed =
-    reply && typeof reply === "object" && (reply as Record<string, unknown>).mailboxed === true;
-
-  const what = mailboxed
-    ? `${one ? "It was" : "They were"} QUEUED, not delivered: no client has this yet. It will be handed ` +
-      `to whichever client connects next, and nothing here says that client can present it.`
-    : `The client acknowledged the command but did not report what it rendered — its reply carries no ` +
+  let what: string;
+  if (verdict.reason === "mailboxed") {
+    // #2013 — `show_media` is the ONE command the bridge buffers instead of
+    // refusing when it cannot route. No client has seen this at all yet, which
+    // is a weaker fact than "a client took it and said nothing about it".
+    what =
+      `${one ? "It was" : "They were"} QUEUED, not delivered: no client has this yet. It will be handed ` +
+      `to whichever client connects next, and nothing here says that client can present it.`;
+  } else if (verdict.reason === "partial_accounting") {
+    // A count is not an identity: a reply about 1 of 2 items does not say WHICH
+    // one, so every item is listed and none can be marked settled.
+    what =
+      `The client's reply accounts for ${verdict.covered ?? "an unstated number of"} item(s), but ` +
+      `${dispatched.length} were sent — so it is not an account of this batch. It does not say WHICH ` +
+      `of them it was about, so none of them can be treated as settled.`;
+  } else if (verdict.reason === "incoherent_accounting") {
+    // Said apart from the short-count case on purpose: the numbers here are
+    // about the right batch and still cannot be true, and "it covered N of M"
+    // would be nonsense prose when N and M are equal.
+    what =
+      `The client's reply is shaped like a per-item account but its own numbers do not add up ` +
+      `(\`painted\` + \`unconfirmed\` + \`unrenderable\` exceeds the \`count\` it declares, or that ` +
+      `count is not a whole number). A reply that contradicts itself establishes nothing.`;
+  } else {
+    what =
+      `The client acknowledged the command but did not report what it rendered — its reply carries no ` +
       `per-item accounting (\`count\`/\`painted\`/\`unrenderable\`), so it did not read the items. ` +
       `The mobile / remote client answers \`{"shown": true}\` to any show_media without looking at them, ` +
       `and it has no audio player at all.`;
+  }
 
   return (
     `NOTE — this call did NOT establish that ${one ? "this item was" : "these items were"} presented ` +

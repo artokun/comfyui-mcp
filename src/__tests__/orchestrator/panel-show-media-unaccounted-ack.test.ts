@@ -35,6 +35,7 @@ import {
   type ToolResult,
 } from "../../orchestrator/panel-tools.js";
 import {
+  readShowMediaAck,
   showMediaReplyAccountsForItems,
   unaccountedShowMediaNote,
 } from "../../services/comfy-view-ref.js";
@@ -72,12 +73,12 @@ const ITEM = [{ filename: "voice.wav", kind: "viewRef" }];
 describe("#2010 which replies ACCOUNT for the items they were given", () => {
   it("the sidebar panel's #710 reply accounts for them", () => {
     // Kills: making showMediaReplyAccountsForItems always false.
-    expect(showMediaReplyAccountsForItems(PANEL_REPLY)).toBe(true);
+    expect(showMediaReplyAccountsForItems(PANEL_REPLY, 1)).toBe(true);
   });
 
   it("the mobile client's bare {shown:true} does not", () => {
     // Kills: making showMediaReplyAccountsForItems always true.
-    expect(showMediaReplyAccountsForItems(MOBILE_REPLY)).toBe(false);
+    expect(showMediaReplyAccountsForItems(MOBILE_REPLY, 1)).toBe(false);
   });
 
   it("count+painted with no `unrenderable` does NOT account — that is the pre-#710 panel (#2017)", () => {
@@ -86,9 +87,9 @@ describe("#2010 which replies ACCOUNT for the items they were given", () => {
     // from "I was handed a kind I have no player for" — it paints audio as a
     // broken <img> and counts it as painted. Its count+painted are therefore
     // exactly as unearned as {shown:true}.
-    expect(showMediaReplyAccountsForItems({ ok: true, count: 1, painted: 1, unconfirmed: 0 })).toBe(
-      false,
-    );
+    expect(
+      showMediaReplyAccountsForItems({ ok: true, count: 1, painted: 1, unconfirmed: 0 }, 1),
+    ).toBe(false);
   });
 
   it.each([
@@ -101,7 +102,7 @@ describe("#2010 which replies ACCOUNT for the items they were given", () => {
     ["painted as a string", { count: 1, painted: "1", unrenderable: [] }],
     ["count missing", { painted: 1, unrenderable: [] }],
   ])("%s does not account", (_label, reply) => {
-    expect(showMediaReplyAccountsForItems(reply)).toBe(false);
+    expect(showMediaReplyAccountsForItems(reply, 1)).toBe(false);
   });
 });
 
@@ -281,13 +282,161 @@ describe("#2010 panel_show_media's handler INSTALLS the correction", () => {
 
 describe("#2010 the note builder", () => {
   it("says nothing when nothing was dispatched", () => {
-    expect(unaccountedShowMediaNote([], MOBILE_REPLY)).toBe("");
+    expect(unaccountedShowMediaNote([], readShowMediaAck(MOBILE_REPLY, 0))).toBe("");
   });
 
   it("caps the item list and says how many it left out", () => {
     const many = Array.from({ length: 10 }, (_, i) => ({ filename: `t${i}.wav`, kind: "audio" }));
-    const t = unaccountedShowMediaNote(many, MOBILE_REPLY);
+    const t = unaccountedShowMediaNote(many, readShowMediaAck(MOBILE_REPLY, 10));
     expect(t).toMatch(/and 2 more/);
     expect(t).not.toMatch(/t9\.wav/);
+  });
+});
+
+// -- gate round 1, P1 #1: a reply that DECLARES failure ---------------------
+// `{ok:false, ...}` in the reply BODY (no transport isError) is the client
+// saying it did not do the thing. Rewriting that as `dispatched:true` and
+// "re-sending is the wrong next step" manufactures the exact over-claim this
+// correction exists to remove — with the sign flipped.
+describe("#2010 r2 — a client that declares failure is not rewritten as a dispatch", () => {
+  const REFUSAL = { ok: false, delivered: "unknown", error: "no open surface" };
+
+  it("the reply is returned byte-identical", () => {
+    // Kills: dropping the `ok === false` branch.
+    const original = okResult(REFUSAL);
+    const out = annotateShowMediaAck(original, ITEM);
+    expect(out).toBe(original);
+    expect(doc(out)).toEqual(REFUSAL);
+  });
+
+  it("it is never described as dispatched-and-do-not-re-send", () => {
+    const t = textOf(annotateShowMediaAck(okResult(REFUSAL), ITEM));
+    expect(t).not.toMatch(/re-sending is the wrong next step/);
+    expect(t).not.toMatch(/"dispatched": true/);
+  });
+
+  it("the verdict names it, so a caller can branch on it", () => {
+    expect(readShowMediaAck(REFUSAL, 1).reason).toBe("declared_failure");
+    expect(readShowMediaAck(REFUSAL, 1).accounted).toBe(false);
+  });
+
+  it("through the real handler too", async () => {
+    const { res } = await showMedia(
+      [{ source: { filename: "voice.wav", type: "output" } }],
+      REFUSAL,
+    );
+    expect(doc(res)).toEqual(REFUSAL);
+    expect(textOf(res)).not.toMatch(/did NOT establish/);
+  });
+});
+
+// -- gate round 1, P1 #2: accounting that does not COVER the batch ----------
+// `{ok:true,count:1,painted:1,unrenderable:[]}` is a well-formed #710 reply and
+// says nothing whatever about the second item of a two-item batch. Accepting it
+// loses that item in silence.
+describe("#2010 r2 — accounting has to be about the batch that was sent", () => {
+  const COVERS_ONE = { ok: true, count: 1, painted: 1, unconfirmed: 0, unrenderable: [] };
+  const TWO = [
+    { filename: "voice.wav", kind: "viewRef" },
+    { filename: "take2.wav", kind: "audio" },
+  ];
+
+  it("a reply about 1 item does not account for a 2-item batch", () => {
+    // Kills: dropping the `count !== dispatchedCount` clause.
+    expect(showMediaReplyAccountsForItems(COVERS_ONE, 2)).toBe(false);
+    expect(readShowMediaAck(COVERS_ONE, 2).reason).toBe("partial_accounting");
+    // …and still accounts for a 1-item batch, so the clause is a coverage
+    // check and not a blanket refusal.
+    expect(showMediaReplyAccountsForItems(COVERS_ONE, 1)).toBe(true);
+  });
+
+  it("the second item is NOT lost — every dispatched item is listed", () => {
+    const d = doc(annotateShowMediaAck(okResult(COVERS_ONE), TWO));
+    expect(d.unaccounted).toEqual([
+      { filename: "voice.wav", kind: "viewRef" },
+      { filename: "take2.wav", kind: "audio" },
+    ]);
+    expect(d.count).toBe(2);
+  });
+
+  it("the note says how many the reply covered, and that it cannot say which", () => {
+    // Kills: reusing the no_accounting wording. "It did not read the items" is
+    // false here — it read SOME. What the caller needs is the shortfall.
+    const t = textOf(annotateShowMediaAck(okResult(COVERS_ONE), TWO));
+    expect(t).toMatch(/accounts for 1 item\(s\), but 2 were sent/);
+    expect(t).toMatch(/does not say WHICH/);
+    expect(t).not.toMatch(/did not read the items/);
+  });
+
+  it("a reply whose numbers contradict themselves is reported as such, not as a short count", () => {
+    // Kills: folding incoherent_accounting into partial_accounting. When the
+    // reply's count EQUALS the dispatch, "it accounts for 2 but 2 were sent" is
+    // nonsense prose; the real fault is that its own parts exceed its count.
+    const CONTRADICTS = { ok: true, count: 2, painted: 3, unconfirmed: 0, unrenderable: [] };
+    const TWO2 = [
+      { filename: "a.png", kind: "image" },
+      { filename: "b.png", kind: "image" },
+    ];
+    expect(readShowMediaAck(CONTRADICTS, 2).reason).toBe("incoherent_accounting");
+    const out = annotateShowMediaAck(okResult(CONTRADICTS), TWO2);
+    expect(doc(out).unaccounted_because).toBe("incoherent_accounting");
+    const t = textOf(out);
+    expect(t).toMatch(/its own numbers do not add up/);
+    expect(t).not.toMatch(/accounts for 2 item\(s\), but 2 were sent/);
+  });
+
+  it("parts that exceed the reply's own count are incoherent, not an account", () => {
+    // Kills: dropping the arithmetic clause. painted+unconfirmed+unrenderable
+    // can be FEWER than count (the panel's `dropped` is not a field) — never more.
+    expect(showMediaReplyAccountsForItems({ count: 2, painted: 3, unrenderable: [] }, 2)).toBe(false);
+    expect(
+      showMediaReplyAccountsForItems({ count: 2, painted: 1, unconfirmed: 2, unrenderable: [] }, 2),
+    ).toBe(false);
+    expect(
+      showMediaReplyAccountsForItems({ count: 2, painted: 1, unrenderable: [{}, {}] }, 2),
+    ).toBe(false);
+    // Fewer is fine: the panel's `dropped` items live only in its note.
+    expect(showMediaReplyAccountsForItems({ count: 2, painted: 1, unrenderable: [] }, 2)).toBe(true);
+  });
+
+  it.each([
+    ["a negative count", { count: -1, painted: 0, unrenderable: [] }],
+    ["a fractional count", { count: 1.5, painted: 0, unrenderable: [] }],
+    ["a negative painted", { count: 1, painted: -1, unrenderable: [] }],
+  ])("%s is not an account", (_l, reply) => {
+    expect(showMediaReplyAccountsForItems(reply, 1)).toBe(false);
+  });
+
+  it("a mailbox receipt carrying counts is still MAILBOXED, not an account", () => {
+    // Order matters: #2013's buffered command has been seen by no client, so a
+    // count on it cannot be a record of a presentation.
+    const boxed = { ok: true, mailboxed: true, count: 1, painted: 1, unrenderable: [] };
+    expect(readShowMediaAck(boxed, 1).reason).toBe("mailboxed");
+    expect(showMediaReplyAccountsForItems(boxed, 1)).toBe(false);
+  });
+
+  it("the structured reason reaches the document", () => {
+    expect(doc(annotateShowMediaAck(okResult(COVERS_ONE), TWO)).unaccounted_because).toBe(
+      "partial_accounting",
+    );
+    expect(doc(annotateShowMediaAck(okResult(MOBILE_REPLY), ITEM)).unaccounted_because).toBe(
+      "no_accounting",
+    );
+    expect(
+      doc(annotateShowMediaAck(okResult({ ok: true, mailboxed: true }), ITEM)).unaccounted_because,
+    ).toBe("mailboxed");
+  });
+
+  it("through the real handler: two items, a reply about one", async () => {
+    // Kills: computing dispatched.length from the reply instead of the dispatch.
+    const { res } = await showMedia(
+      [
+        { source: { filename: "voice.wav", type: "output" } },
+        { source: { filename: "take2.wav", type: "output" } },
+      ],
+      COVERS_ONE,
+    );
+    expect(doc(res).count).toBe(2);
+    expect(doc(res).unaccounted_because).toBe("partial_accounting");
   });
 });

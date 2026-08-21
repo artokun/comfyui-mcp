@@ -40,7 +40,7 @@ import {
   resolveServableViewRef,
   stageFileIntoServedDir,
   stagedForDisplayNote,
-  showMediaReplyAccountsForItems,
+  readShowMediaAck,
   unaccountedShowMediaNote,
   unverifiedViewRefNote,
   type DispatchedMediaItem,
@@ -3721,9 +3721,13 @@ function annotateShowMediaAck(
   // A dispatch that FAILED already says so, and has no claim to correct.
   if (res.isError || dispatched.length === 0) return res;
   const parsed = parseToolResultJson(res);
-  // The sidebar panel's #710 reply accounts for every item it was given. It is
-  // the honest one and is left EXACTLY as it arrived — including its own note.
-  if (showMediaReplyAccountsForItems(parsed)) return res;
+  const verdict = readShowMediaAck(parsed, dispatched.length);
+  // Two replies are left EXACTLY as they arrived. The sidebar panel's #710 reply
+  // accounts for every item it was given — it is the honest one and nothing here
+  // improves on it. A reply that DECLARES failure (`ok:false`) is not claiming a
+  // success either, and rewriting it as `dispatched:true` with "do not re-send"
+  // would manufacture the over-claim this exists to remove (gate r1, P1).
+  if (verdict.accounted || verdict.reason === "declared_failure") return res;
   return {
     ...res,
     content: [
@@ -3741,6 +3745,12 @@ function annotateShowMediaAck(
             /** Deliberately null, not 0: this call did not observe zero
              *  renderings, it observed nothing either way. */
             presented_confirmed: null,
+            /** Why the reply could not settle it — "no_accounting",
+             *  "partial_accounting" or "mailboxed". Structured so a caller can
+             *  branch on it without reading the prose. */
+            unaccounted_because: verdict.reason,
+            /** EVERY dispatched item, even under partial accounting: a reply
+             *  that covers 1 of 2 does not say WHICH, so none can be settled. */
             unaccounted: dispatched.map((d) => ({ filename: d.filename, kind: d.kind })),
             client_reply: parsed ?? toolResultText(res),
           },
@@ -3748,7 +3758,7 @@ function annotateShowMediaAck(
           2,
         ),
       },
-      { type: "text", text: unaccountedShowMediaNote(dispatched, parsed) },
+      { type: "text", text: unaccountedShowMediaNote(dispatched, verdict) },
       ...res.content.slice(1),
     ],
   };

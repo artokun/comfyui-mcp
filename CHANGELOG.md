@@ -23,7 +23,14 @@ All notable changes to this project are documented here. This project adheres to
   (no `isHeadless` guess, no extension sniffing) — it reads the reply that came
   back, so there is no address to resolve, no await to be stale across and no
   buffered `show_media` (#2013) to mis-classify. A panel older than #710 (#2017)
-  is covered by the same rule without being named in it.
+  is covered by the same rule without being named in it. Two things the rule has
+  to get right, both found by review: a reply that DECLARES failure (`ok:false`)
+  is left exactly as it arrived — it is not claiming a success, and rewriting it
+  as a dispatch would be the same over-claim with the sign flipped — and an
+  account only counts when it covers the batch that was sent, so a well-formed
+  reply about one item can no longer stand in for a two-item call and lose the
+  second in silence. A reply whose own numbers contradict each other is reported
+  as that, rather than as a short count.
 
 - **Ollama refuses audio unless the model is a verified listener (#1972).** Native
   `/api/chat` carries audio in `message.images[]`. Most models HTTP 400 (fail
