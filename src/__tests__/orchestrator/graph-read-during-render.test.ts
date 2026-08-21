@@ -274,6 +274,13 @@ describe("graph MUTATIONS still fail fast while a prompt is running (#1639)", ()
 
   // #1933 — the reverse index must resolve every command this fence can refuse,
   // or a real refusal silently falls back to the anonymous subject.
+  //
+  // Enumerating from GRAPH_CMD_EFFECT is complete, not merely convenient: the
+  // ledger FAILS CLOSED, so an unlisted graph_* command is fenced too and would
+  // be invisible here — except that graph-command-effect.test.ts holds the
+  // COMPLETENESS half, scanning every "graph_..." literal in the orchestrator
+  // sources and requiring an entry. That test is what makes this enumeration
+  // exhaustive; without it this assertion would be narrower than it reads.
   it("every command the fence can refuse resolves to a tool, except ambiguous graph_load", () => {
     const refusable = Object.entries(GRAPH_CMD_EFFECT)
       .filter(([cmd, effect]) => cmd.startsWith("graph_") && cmd !== "graph_run" && effect === "targeted")
