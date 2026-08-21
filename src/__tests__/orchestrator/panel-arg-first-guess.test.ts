@@ -530,6 +530,39 @@ describe("#1968 panel_find_nodes: `fields` bounds what a lookup costs", () => {
     expect(h.sent[0].fields).toBeUndefined();
   });
 
+  // Changing the default reply shape without changing the sentence that
+  // describes it would leave the tool promising a payload it no longer sends —
+  // and an agent seeing no `widgets` key would conclude the node HAS no widgets.
+  // That is a worse failure than the context cost this projection removes: it is
+  // wrong rather than merely expensive, and nothing in the reply contradicts it.
+  it("says in its DESCRIPTION that compact is the default and where the detail went", () => {
+    const description = defOf("panel_find_nodes").description;
+    expect(description).toContain("fields");
+    expect(description).toContain("THE DEFAULT");
+    expect(description).toContain("detail");
+    // The specific misreading this sentence has to pre-empt.
+    expect(description).toContain("NOT that the node has no widgets");
+    // And it must no longer claim every match carries the rich summary.
+    expect(description).not.toContain("Each match is the SAME rich summary");
+  });
+
+  // findLiveSocketProducers (#599/add-node refusal annotation) probes the canvas
+  // with a RAW ctx.call — `{cmd:'graph_find_nodes', output, limit:5}` — and reads
+  // `outputs`, a key `compact` drops. It is unaffected because it never goes
+  // through this tool's handler, and that is the whole reason it is safe. Pin it:
+  // routing that probe through the tool later would silently blind it.
+  it("does not project a reply the orchestrator's own socket probe fetched", async () => {
+    const rows = [
+      { id: "4", type: "CheckpointLoaderSimple", outputs: [{ name: "MODEL", type: "MODEL" }] },
+    ];
+    const h = harness({ graph_find_nodes: { matches: rows, count: 1 } });
+    // The internal probe's shape, dispatched the way the probe dispatches it.
+    const probe = await h.ctx.call({ cmd: "graph_find_nodes", output: "MODEL", limit: 5 }, 8000);
+    const out = payloadOf(probe);
+    expect((out.matches as Cmd[])[0]).toHaveProperty("outputs");
+    expect(out.fields).toBeUndefined();
+  });
+
   it("offers exactly the same three names as its sibling panel_query_graph", () => {
     const named = (tool: string) => {
       const shape = defOf(tool).schema as Record<string, { safeParse: (v: unknown) => { success: boolean } }>;
