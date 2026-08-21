@@ -3,6 +3,9 @@
 // pinBoundBridgePort / selfRestartChildEnv — no second copy of the map.
 
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   DEFAULT_PANEL_BRIDGE_PORT,
   LEGACY_PANEL_BRIDGE_PORT,
@@ -11,7 +14,7 @@ import {
   pinBoundBridgePort,
   resolveBridgePort,
 } from "../../services/bridge-ports.js";
-import { selfRestartChildEnv } from "../../services/self-restart.js";
+import { defaultSpawnReplacement, selfRestartChildEnv } from "../../services/self-restart.js";
 
 describe("panelPortBlock (#2030)", () => {
   it("counts down from the new default: 9199 / 9198 / 9197 / 9196 / 9195", () => {
@@ -62,13 +65,37 @@ describe("resolveBridgePort (#2030)", () => {
 });
 
 describe("pinBoundBridgePort + selfRestartChildEnv (#2030)", () => {
-  it("a child restart inherits the parent's effective 9180", () => {
-    const parent = pinBoundBridgePort(9180, { PATH: "/usr/bin" });
-    expect(resolveBridgePort(parent)).toBe(9180);
-    const child = selfRestartChildEnv(parent);
+  it("selfRestartChildEnv(parent, 9180) pins 9180 even when the parent env has no port", () => {
+    const parent = { PATH: "/usr/bin" };
+    expect(resolveBridgePort(parent)).toBe(DEFAULT_PANEL_BRIDGE_PORT);
+    const child = selfRestartChildEnv(parent, 9180);
     expect(child.COMFYUI_MCP_BRIDGE_PORT).toBe("9180");
     expect(resolveBridgePort(child)).toBe(9180);
-    expect(Number(child.COMFYUI_MCP_RESTART_GEN)).toBeGreaterThan(0);
+  });
+
+  it("defaultSpawnReplacement passes the bound port into the child env", () => {
+    // Parent env has no pin — resolveBridgePort would pick 9199. The spawn
+    // helper must pass boundPort=9180 as a distinct argument; deleting it
+    // from the selfRestartChildEnv call site goes red.
+    const captured: NodeJS.ProcessEnv[] = [];
+    const ok = defaultSpawnReplacement({
+      env: { PATH: "/usr/bin" },
+      boundPort: 9180,
+      spawn: (_cmd, _args, opts) => {
+        captured.push(opts.env ?? {});
+        return { pid: 4321, unref() {} };
+      },
+    });
+    expect(ok).toBe(true);
+    expect(captured).toHaveLength(1);
+    expect(captured[0].COMFYUI_MCP_BRIDGE_PORT).toBe("9180");
+    expect(resolveBridgePort({ PATH: "/usr/bin" })).toBe(9199);
+
+    const src = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "..", "..", "services", "self-restart.ts"),
+      "utf8",
+    );
+    expect(src).toMatch(/selfRestartChildEnv\(parentEnv,\s*boundPort\)/);
   });
 
   it("a child of a 9199 parent stays on 9199", () => {

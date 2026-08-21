@@ -12,10 +12,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   assessBridgeHolder,
+  bindFailureAdvice,
   foreignBridgeHolderAdvice,
   tryReclaimBridgePort,
 } from "../../services/bridge-port-reclaim.js";
-import { classifyBridgeHolder } from "../../services/listener-ownership.js";
+import { classifyBridgeHolder, unclassifiedOwnership } from "../../services/listener-ownership.js";
 import { probePanelOrchestrator } from "../../services/panel-launcher.js";
 import { DEFAULT_PANEL_BRIDGE_PORT, LEGACY_PANEL_BRIDGE_PORT } from "../../services/bridge-ports.js";
 
@@ -122,6 +123,66 @@ describe("tryReclaimBridgePort against a foreign holder (#2030)", () => {
     }
   });
 
+  it("probe fail + no pid: still not-ours; bind-fail advice has no taskkill (#2030)", async () => {
+    // netstat/lsof miss (timeout, no lsof): bind already lost, protocol failed.
+    // Restoring `if (!pid) unclassifiedOwnership()` must go red — unclassified
+    // used to fall through to the taskkill one-liner.
+    const lockPath = join(mkdtempSync(join(tmpdir(), "cmcp-nopid-")), "missing.json");
+    const assessment = await assessBridgeHolder(9199, lockPath, {
+      probe: async () => false,
+      pidListeningOnPort: () => null,
+      processNameOf: () => "unknown",
+      readLock: () => null,
+      pidExists: () => false,
+    });
+    expect(assessment.pid).toBeNull();
+    expect(assessment.speaksPanelProtocol).toBe(false);
+    expect(assessment.ownership).toBe("not-ours");
+    expect(assessment.reclaimable).toBe(false);
+
+    const advice = bindFailureAdvice(9199, assessment);
+    expect(advice).not.toMatch(/taskkill/i);
+    expect(advice).not.toMatch(/kill -9/);
+    expect(advice).toMatch(/not comfyui-mcp/);
+    expect(advice).toContain("COMFYUI_MCP_BRIDGE_PORT");
+    expect(advice).toContain(String(DEFAULT_PANEL_BRIDGE_PORT));
+
+    const kills: number[] = [];
+    const prompts: string[] = [];
+    const logs: string[] = [];
+    const result = await tryReclaimBridgePort(
+      { start: () => undefined, whenReady: async () => false },
+      9199,
+      lockPath,
+      {
+        probe: async () => false,
+        pidListeningOnPort: () => null,
+        processNameOf: () => "unknown",
+        readLock: () => null,
+        pidExists: () => false,
+        isTty: () => true,
+        promptYesNo: async (q) => {
+          prompts.push(q);
+          return true;
+        },
+        killProcessTree: (pid) => {
+          kills.push(pid);
+        },
+        log: {
+          warn: (m) => logs.push(m),
+          info: (m) => logs.push(m),
+        },
+      },
+    );
+    expect(result.ownership).toBe("not-ours");
+    expect(result.prompted).toBe(false);
+    expect(result.killed).toEqual([]);
+    expect(kills).toEqual([]);
+    expect(prompts).toEqual([]);
+    expect(logs.join("\n")).not.toMatch(/taskkill/i);
+    expect(logs.join("\n")).not.toMatch(/kill -9/);
+  });
+
   it("assessBridgeHolder agrees: open TCP that is not the panel protocol is not-ours", async () => {
     const { port, close } = await listenHttp200();
     try {
@@ -181,5 +242,36 @@ describe("foreignBridgeHolderAdvice", () => {
     expect(msg).toContain("COMFYUI_MCP_BRIDGE_PORT");
     expect(msg).toContain(String(DEFAULT_PANEL_BRIDGE_PORT));
     expect(msg).toMatch(/Logitech G HUB/);
+  });
+});
+
+describe("bindFailureAdvice (#2030)", () => {
+  it("prints taskkill only for a definite ours", () => {
+    const ours = bindFailureAdvice(9199, {
+      ownership: classifyBridgeHolder({
+        speaksPanelProtocol: true,
+        lockfileOursOrStale: true,
+      }).ownership,
+      processName: "node.exe",
+    });
+    expect(ours).toMatch(/taskkill/i);
+
+    const foreign = bindFailureAdvice(9180, {
+      ownership: classifyBridgeHolder({
+        speaksPanelProtocol: false,
+        lockfileOursOrStale: true,
+      }).ownership,
+      processName: "lghub_agent.exe",
+    });
+    expect(foreign).not.toMatch(/taskkill/i);
+    expect(foreign).not.toMatch(/kill -9/);
+
+    const unconfirmed = bindFailureAdvice(9180, {
+      ownership: unclassifiedOwnership(),
+      processName: "unknown",
+    });
+    expect(unconfirmed).not.toMatch(/taskkill/i);
+    expect(unconfirmed).not.toMatch(/kill -9/);
+    expect(unconfirmed).toContain("COMFYUI_MCP_BRIDGE_PORT");
   });
 });

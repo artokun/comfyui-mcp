@@ -137,6 +137,26 @@ export function selfRestartChildEnv(
   });
 }
 
+export type SpawnReplacementFn = (
+  command: string,
+  args: readonly string[],
+  options: {
+    detached?: boolean;
+    stdio?: "inherit";
+    env?: NodeJS.ProcessEnv;
+    shell?: boolean;
+  },
+) => { pid?: number; unref: () => void };
+
+export type SpawnReplacementOpts = {
+  npxVersion?: string;
+  env?: NodeJS.ProcessEnv;
+  /** Port the parent is actually bound to. Passed through to selfRestartChildEnv
+   *  so a compiled-default change cannot silently move a live 9180 session. */
+  boundPort?: number;
+  spawn?: SpawnReplacementFn;
+};
+
 /**
  * Spawn the replacement orchestrator, detached, sharing our stdio so it keeps
  * logging into the same terminal. Same argv for dev/global/local (the on-disk
@@ -144,18 +164,25 @@ export function selfRestartChildEnv(
  * re-execing the cached entry would just re-run the OLD cached code. Args after
  * the version are our own argv tail — typed by the user at launch, not remote
  * input.
+ *
+ * The bound port is a distinct argument to `selfRestartChildEnv` — not re-derived
+ * from the parent env inside that helper — so a test that passes 9180 against an
+ * unpinned parent goes red if this call drops `boundPort`.
  */
-function defaultSpawnReplacement(opts: { npxVersion?: string }): boolean {
+export function defaultSpawnReplacement(opts: SpawnReplacementOpts = {}): boolean {
   try {
-    const env = selfRestartChildEnv();
+    const parentEnv = opts.env ?? process.env;
+    const boundPort = opts.boundPort ?? resolveBridgePort(parentEnv);
+    const env = selfRestartChildEnv(parentEnv, boundPort);
+    const spawnFn: SpawnReplacementFn = opts.spawn ?? (spawn as unknown as SpawnReplacementFn);
     const isWin = process.platform === "win32";
     const child = opts.npxVersion
-      ? spawn(
+      ? spawnFn(
           isWin ? "npx.cmd" : "npx",
           ["-y", `${PACKAGE_NAME}@${opts.npxVersion}`, ...process.argv.slice(2)],
           { detached: true, stdio: "inherit", env, shell: isWin },
         )
-      : spawn(process.execPath, process.argv.slice(1), {
+      : spawnFn(process.execPath, process.argv.slice(1), {
           detached: true,
           stdio: "inherit",
           env,

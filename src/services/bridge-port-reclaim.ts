@@ -17,8 +17,6 @@ import { join } from "node:path";
 import readline from "node:readline";
 import {
   classifyBridgeHolder,
-  unclassifiedOwnership,
-  unclassifiedSupervision,
   type BridgeHolderClassification,
   type ListenerOwnership,
 } from "./listener-ownership.js";
@@ -158,11 +156,40 @@ export function startupDeadlineHolderAdvice(opts: {
   if (ownership === "ours") {
     return ` Port ${port} is held by pid ${pid}; if that is an older comfyui-mcp, stop it and start this one again.`;
   }
+  // Unconfirmed: name the situation, never instruct a kill. Logitech G HUB is
+  // the known occupant of 9180; offering taskkill here is the bug this exists
+  // to close.
   return (
-    ` Port ${port} is held by pid ${pid}. If that is an older comfyui-mcp, stop it and start ` +
-    `this one again. If it is another application (Logitech G HUB's lghub_agent is a known ` +
-    `occupant of ${LEGACY_PANEL_BRIDGE_PORT}), leave it running and set COMFYUI_MCP_BRIDGE_PORT ` +
-    `— the default bridge is now ${DEFAULT_PANEL_BRIDGE_PORT}.`
+    ` Port ${port} is held by pid ${pid}. It could not be confirmed as comfyui-mcp ` +
+    `(Logitech G HUB's lghub_agent is a known occupant of ${LEGACY_PANEL_BRIDGE_PORT}). ` +
+    `Leave it running and set COMFYUI_MCP_BRIDGE_PORT — the default bridge is now ` +
+    `${DEFAULT_PANEL_BRIDGE_PORT}.`
+  );
+}
+
+/**
+ * Bind-failure text. `taskkill` / `kill -9` only when the holder is a definite
+ * `ours`. Foreign and unconfirmed name the situation and point at the override;
+ * they never offer to kill the process.
+ */
+export function bindFailureAdvice(
+  port: number,
+  assessment: { ownership: ListenerOwnership; processName: string },
+): string {
+  if (assessment.ownership === "ours") {
+    return (
+      `[panel-orchestrator] could not bind the panel bridge port — another comfyui-mcp owns it. ` +
+      `Free that port and restart the orchestrator. Override the port with COMFYUI_MCP_BRIDGE_PORT.\n` +
+      portKillHint(port)
+    );
+  }
+  if (assessment.ownership === "not-ours") {
+    return foreignBridgeHolderAdvice(port, assessment.processName);
+  }
+  return (
+    `[panel-orchestrator] could not bind the panel bridge port — another process appears to own ` +
+    `it, but it could not be confirmed as comfyui-mcp. Leave whatever is listening alone and set ` +
+    `COMFYUI_MCP_BRIDGE_PORT (default ${DEFAULT_PANEL_BRIDGE_PORT}).`
   );
 }
 
@@ -234,20 +261,12 @@ export async function assessBridgeHolder(
   const processName = portPid ? d.processNameOf(portPid) : pid ? d.processNameOf(pid) : "unknown";
   const speaksPanelProtocol = await d.probe(port);
   const lockfileOursOrStale = lockPid == null || lockPid === portPid || (portPid == null && !d.pidExists(lockPid));
+  // Protocol is the kill gate. A failed pid lookup (netstat/lsof timeout, no
+  // lsof) must not throw away a failed probe: bind already lost, so something
+  // holds the port, and a silent/foreign TCP is not-ours even when we cannot
+  // name the pid. Restoring an `if (!pid) unclassified` early return reopens
+  // the G HUB taskkill one-liner (#2030).
   const classified = classifyBridgeHolder({ speaksPanelProtocol, lockfileOursOrStale });
-  if (!pid) {
-    return {
-      ownership: unclassifiedOwnership(),
-      supervision: unclassifiedSupervision(),
-      reclaimable: false,
-      pid: null,
-      portPid,
-      lockPid,
-      processName,
-      lock,
-      speaksPanelProtocol,
-    };
-  }
   return {
     ...classified,
     pid,
@@ -310,12 +329,12 @@ export async function tryReclaimBridgePort(
     prompted: false,
     killed: [],
   };
-  if (!assessment.pid) return empty;
-
   if (!assessment.reclaimable || assessment.ownership === "not-ours") {
     d.log.warn(foreignBridgeHolderAdvice(port, assessment.processName));
     return empty;
   }
+
+  if (!assessment.pid) return empty;
 
   if (!d.isTty()) return empty;
 

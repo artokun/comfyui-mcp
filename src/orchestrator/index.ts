@@ -48,14 +48,16 @@ import {
   resolveBridgePort,
 } from "../services/bridge-ports.js";
 import {
+  assessBridgeHolder,
+  bindFailureAdvice,
   orchLockPath,
   pidExists,
   pidListeningOnPort,
-  portKillHint,
   probeComfyUi,
   startupDeadlineHolderAdvice,
   tryReclaimBridgePort,
 } from "../services/bridge-port-reclaim.js";
+import { unclassifiedOwnership, type ListenerOwnership } from "../services/listener-ownership.js";
 import { judgeHelloRetarget, canonComfyuiTargetUrl } from "../services/hello-retarget.js";
 import { startQuickTunnel } from "../services/tunnel.js";
 import { detectInstallMode } from "../services/self-update.js";
@@ -812,14 +814,34 @@ export function armStartupDeadline(
   deps: {
     exit?: (code: number) => never;
     incumbent?: (p: number) => number | undefined;
-    holderAdvice?: (pid: number) => string;
+    holderAdvice?: (pid: number) => string | Promise<string>;
+    /** Production default: probe the panel protocol. Tests inject a snapshot. */
+    assessHolder?: (
+      port: number,
+    ) =>
+      | { ownership: ListenerOwnership; processName: string }
+      | Promise<{ ownership: ListenerOwnership; processName: string }>;
   } = {},
 ): () => void {
   const exit = deps.exit ?? ((code: number) => process.exit(code));
   const findIncumbent = deps.incumbent ?? pidListeningOnPort;
+  const assessHolder =
+    deps.assessHolder ??
+    (async (p: number) => {
+      const a = await assessBridgeHolder(p, orchLockPath(p));
+      return { ownership: a.ownership, processName: a.processName };
+    });
   const holderAdvice =
     deps.holderAdvice ??
-    ((pid: number) => startupDeadlineHolderAdvice({ port, pid }));
+    (async (pid: number) => {
+      const a = await assessHolder(port);
+      return startupDeadlineHolderAdvice({
+        port,
+        pid,
+        ownership: a.ownership,
+        processName: a.processName,
+      });
+    });
   // CLAMPED, not merely "positive and finite" (codex). Node coerces a
   // sub-millisecond delay AND anything past the 32-bit signed limit to 1ms — so
   // `0.5`, or a large number typed by someone trying to RAISE the deadline, would
@@ -831,18 +853,21 @@ export function armStartupDeadline(
   const MAX_MS = 2_147_483_647; // Node's setTimeout ceiling
   const ms = Number.isFinite(raw) && raw >= MIN_MS && raw <= MAX_MS ? Math.floor(raw) : 90_000;
   const timer = setTimeout(() => {
-    const incumbent = findIncumbent(port);
-    logger.error(
-      `[panel-orchestrator] startup did not complete within ${Math.round(ms / 1000)}s and this ` +
-        `process holds no bridge port — exiting rather than lingering with no way to serve panel_* ` +
-        `tools.` +
-        (incumbent
-          ? holderAdvice(incumbent)
-          : ` Nothing is listening on ${port} either, so the hang is before the bind — please ` +
-            `report this with the last lines above (#1524).`) +
-        ` Raise COMFYUI_MCP_STARTUP_DEADLINE_MS if this machine is legitimately slower than that.`,
-    );
-    exit(1);
+    void (async () => {
+      const incumbent = findIncumbent(port);
+      const extra = incumbent
+        ? await holderAdvice(incumbent)
+        : ` Nothing is listening on ${port} either, so the hang is before the bind — please ` +
+          `report this with the last lines above (#1524).`;
+      logger.error(
+        `[panel-orchestrator] startup did not complete within ${Math.round(ms / 1000)}s and this ` +
+          `process holds no bridge port — exiting rather than lingering with no way to serve panel_* ` +
+          `tools.` +
+          extra +
+          ` Raise COMFYUI_MCP_STARTUP_DEADLINE_MS if this machine is legitimately slower than that.`,
+      );
+      exit(1);
+    })();
   }, ms);
   // Never hold the event loop open on this timer's account.
   timer.unref?.();
@@ -1078,11 +1103,12 @@ export async function runPanelOrchestrator(): Promise<void> {
     bound = reclaim.bound;
   }
   if (!bound) {
-    if (reclaim?.ownership !== "not-ours") {
-      logger.error(
-        `[panel-orchestrator] could not bind the panel bridge port — another process owns it. Free that port and restart the orchestrator. Override the port with COMFYUI_MCP_BRIDGE_PORT.\n${portKillHint(lockPort)}`,
-      );
-    }
+    logger.error(
+      bindFailureAdvice(
+        lockPort,
+        reclaim ?? { ownership: unclassifiedOwnership(), processName: "unknown" },
+      ),
+    );
     process.exit(1);
   }
   // The port is ours — startup got where it needed to. Everything after this is
