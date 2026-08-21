@@ -31,7 +31,7 @@ import {
   toolActionPolicyError,
   toolAllowed,
 } from "../tools/tool-surface-filter.js";
-import { logger, logger as toolPolicyLogger } from "../utils/logger.js";
+import { logger as toolPolicyLogger } from "../utils/logger.js";
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import type { Stats } from "node:fs";
 import {
