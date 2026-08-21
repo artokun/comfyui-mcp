@@ -173,7 +173,7 @@ const ENDPOINT_ABSENT_STATUSES = new Set([404, 405, 501]);
 export async function getSystemStats(): Promise<SystemStats> {
   try {
     const res = await cloudFetch("/system_stats");
-    return (await res.json()) as unknown as SystemStats;
+    return (await res.json()) as SystemStats;
   } catch (err) {
     const status =
       err instanceof ComfyUIError && err.details && typeof err.details === "object"

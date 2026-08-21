@@ -405,7 +405,7 @@ function validateExamples(byName: Map<string, CapturedTool>): void {
       continue;
     }
     const schema = z.object(tool.shape);
-    const json = z.toJSONSchema(schema, { reused: "inline", io: "input" }) as unknown as JsonSchema;
+    const json = z.toJSONSchema(schema, { reused: "inline", io: "input" }) as JsonSchema;
     const known = new Set(Object.keys(json.properties ?? {}));
 
     entry.examples.forEach((ex, i) => {
@@ -495,7 +495,7 @@ function renderTool(t: CapturedTool): string {
   const json = z.toJSONSchema(z.object(t.shape), {
     reused: "inline",
     io: "input",
-  }) as unknown as JsonSchema;
+  }) as JsonSchema;
   const props = json.properties ?? {};
   const required = new Set(json.required ?? []);
   const paramNames = Object.keys(props);

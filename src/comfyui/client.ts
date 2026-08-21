@@ -402,7 +402,7 @@ export async function getObjectInfo(): Promise<ObjectInfo> {
     // Capture the client this request runs on so the catch only resets THIS one.
     const startClient = getClient();
     try {
-      return commit((await startClient.getNodeDefs()) as unknown as ObjectInfo);
+      return commit((await startClient.getNodeDefs()) as ObjectInfo);
     } catch (err) {
       // A managed restart/reboot leaves the cached client bound to a socket that
       // was torn down, so the first call after it surfaces a bare "fetch failed"
@@ -419,7 +419,7 @@ export async function getObjectInfo(): Promise<ObjectInfo> {
       });
       resetClientIfCurrent(startClient);
       try {
-        return commit((await getClient().getNodeDefs()) as unknown as ObjectInfo);
+        return commit((await getClient().getNodeDefs()) as ObjectInfo);
       } catch (retryErr) {
         // The client library parses JSON itself, so an HTML body reaches us as a
         // bare "Unexpected token '<'" naming neither the URL nor the responder
@@ -482,18 +482,19 @@ export async function backfillObjectInfo(
   nodeTypes: string[],
 ): Promise<ObjectInfo> {
   if (isCloudMode()) return objectInfo;
-  const oi = objectInfo as unknown as Record<string, unknown>;
-  const missing = [...new Set(nodeTypes)].filter((t) => t && !(t in oi));
+  const missing = [...new Set(nodeTypes)].filter((t) => t && !(t in objectInfo));
   if (missing.length === 0) return objectInfo;
 
   const base = `${getComfyUIBaseUrl()}/object_info`;
-  const merged = { ...oi };
+  const merged: ObjectInfo = { ...objectInfo };
   await Promise.all(
     missing.map(async (t) => {
       try {
         const res = await comfyuiFetch(`${base}/${encodeURIComponent(t)}`);
         if (!res.ok) return;
-        const def = (await res.json()) as Record<string, unknown>;
+        // `/object_info/<Type>` answers with the same shape as the bulk endpoint,
+        // keyed by the node's live registration name.
+        const def = (await res.json()) as ObjectInfo;
         if (!def || typeof def !== "object") return;
         // `/object_info/<Type>` returns the schema keyed by the node's LIVE
         // registration name — which can differ from the string we asked for in
@@ -519,7 +520,7 @@ export async function backfillObjectInfo(
       }
     }),
   );
-  return merged as unknown as ObjectInfo;
+  return merged;
 }
 
 export async function getQueue(): Promise<QueueStatus> {
