@@ -394,3 +394,80 @@ describe("panel_get_errors completeness parity with the panel's scanner (#1973)"
     expect(payload.audit_complete).toBe(true);
   });
 });
+
+// #1973 — `payloadHasDefects()` decides when the panel's own "no errors recorded"
+// note may survive a completed audit. It is a HAND-LISTED enumeration, which makes
+// it the weakest link in this change: if the panel grows a defect surface and this
+// list does not, the note starts contradicting the payload again — the #399/#984
+// bug, re-introduced by omission rather than by logic.
+//
+// So pin the CORRESPONDENCE instead of trusting the list. Every entry below is one
+// term of the panel's own `clean` predicate in graph_get_errors:
+//
+//   const clean = !nodeErrors && !execFailure && !erroredNodes.length &&
+//     !missingModels.length && !missingMedia.length && !missingNodeTypes.length &&
+//     !missingNodeCount && !stalePlaceholders.length && !liveScan?.unavailable?.length;
+//
+// If someone adds a tenth term there, this table is where the omission shows up.
+describe("the clean note may survive only where the PANEL would have called it clean (#1973)", () => {
+  const PANEL_CLEAN_TERMS: Array<{ term: string; field: Record<string, unknown> }> = [
+    { term: "nodeErrors", field: { node_errors: { "12": { errors: [{ message: "bad" }] } } } },
+    { term: "execFailure", field: { last_execution_error: { node_id: 12, exception_type: "RuntimeError" } } },
+    { term: "erroredNodes.length", field: { errored_count: 3 } },
+    { term: "missingModels.length", field: { missing_models: [{ name: "sd_xl.safetensors" }] } },
+    { term: "missingMedia.length", field: { missing_media: [{ name: "clip.png" }] } },
+    { term: "missingNodeTypes.length", field: { missing_node_types: ["SomeMissingPack"] } },
+    { term: "missingNodeCount", field: { missing_node_count: 2 } },
+    { term: "stalePlaceholders.length", field: { stale_placeholders: [{ id: 7 }] } },
+    { term: "liveScan.unavailable", field: { unavailable_widget_values: [{ id: 4, widget: "ckpt_name", value: "gone" }] } },
+  ];
+
+  // A payload whose ONLY abstention is retryable, so the completion pass retires it
+  // and the audit finishes — the one path where the panel's note can be re-emitted.
+  const completable = (extra: Record<string, unknown>) => ({
+    viewing: { kind: "root" },
+    node_count: 12,
+    errored_count: 0,
+    nodes: [],
+    unchecked_nodes: [{ id: 71, type: "SaveVideo", reason: BUDGET_REASON }],
+    unchecked_budget_exhausted: true,
+    last_execution_error: null,
+    node_errors: null,
+    note: CLEAN_NOTE,
+    ...extra,
+  });
+
+  const runCompleted = (extra: Record<string, unknown>) =>
+    runGetErrors((cmd) => {
+      if (cmd.cmd === "graph_get_errors") return completable(extra);
+      if (cmd.cmd === "graph_query") {
+        return {
+          matched: 1, shown: 1,
+          // A value the server DOES offer, so the pass retires the node cleanly and
+          // adds no findings of its own — isolating the field under test.
+          text: JSON.stringify({ id: 71, type: "SaveVideo", widgets: { codec: "h264" } }),
+        };
+      }
+      if (cmd.cmd === "graph_get_object_info") {
+        return { ok: true, object_info: { SaveVideo: { input: { required: { codec: [["h264", "prores"], {}] } } } } };
+      }
+      return { ok: false };
+    });
+
+  it("re-emits the note when the completed audit really is clean (the control)", async () => {
+    const { payload } = await runCompleted({});
+    expect(payload.audit_complete, "this control is worthless unless the audit completed").toBe(true);
+    expect(payload.note).toBe(CLEAN_NOTE);
+  });
+
+  for (const { term, field } of PANEL_CLEAN_TERMS) {
+    it(`drops the note when the payload carries ${term}`, async () => {
+      const { payload } = await runCompleted(field);
+      expect(payload.audit_complete, "must reach the completed path to test the note").toBe(true);
+      expect(
+        payload.note,
+        `the panel's clean note must not ship beside ${term}`,
+      ).toBeUndefined();
+    });
+  }
+});
