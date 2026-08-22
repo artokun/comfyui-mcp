@@ -23,7 +23,7 @@ import type {
   McpSdkServerConfigWithInstance,
 } from "@anthropic-ai/claude-agent-sdk";
 import { logger } from "../utils/logger.js";
-import { COMPLETION_DISAGREEMENT_NOTE } from "./download-done-guard.js";
+import { COMPLETION_DISAGREEMENT_NOTE, FAILURE_DISAGREEMENT_NOTE } from "./download-done-guard.js";
 import { downloadsAtRiskOfRespawn } from "../services/download-jobs.js";
 import { orphanedByDeferredRespawnNote } from "../services/panel-secrets.js";
 import { errorText, promptText } from "./error-text.js";
@@ -1158,9 +1158,18 @@ export class PanelAgent {
       // download_model action:"status" showed streaming at 20% and 13% seconds
       // later. Naming them the same way as a real failure is what made the agent
       // report a false failure to the user.
-      const failedDead = dl.filter((d) => d.status !== "done" && !d.supersededByLive);
+      // #2057 — same headline, different store. The tray row is error, there is
+      // NO live tray row of that name, but the job RECORD status reads still
+      // says downloading. `recordDisagrees` is that check; it must not ride
+      // `failedDead` or the event says FAILED while status shows bytes moving.
+      const failedLiveRecord = dl.filter(
+        (d) => d.status !== "done" && d.recordDisagrees && !d.supersededByLive,
+      );
+      const failedDead = dl.filter(
+        (d) => d.status !== "done" && !d.supersededByLive && !d.recordDisagrees,
+      );
       const failedRetried = dl.filter((d) => d.status !== "done" && d.supersededByLive);
-      const failed = [...failedDead, ...failedRetried].map((d) => d.name);
+      const failed = [...failedDead, ...failedRetried, ...failedLiveRecord].map((d) => d.name);
       const parts: string[] = [];
       // This event is raised by the TRANSFER, which finishes BEFORE the placement
       // check against the connected ComfyUI does. Saying "finished" here would be a
@@ -1183,6 +1192,12 @@ export class PanelAgent {
             `NEWER download of that name is IN FLIGHT right now — do NOT report these as failed`,
         );
       }
+      if (failedLiveRecord.length) {
+        parts.push(
+          `the tray reported a failure for ${failedLiveRecord.map((d) => d.name).join(", ")}, but ` +
+            FAILURE_DISAGREEMENT_NOTE,
+        );
+      }
       const plural = dl.length > 1 ? "these downloads" : "it";
       text =
         `[panel event] Model download ${parts.join("; ")}. ` +
@@ -1202,11 +1217,17 @@ export class PanelAgent {
                 `but see the caveat above before relying on that; `
               : `The bytes finished transferring for the completed one${done.length > 1 ? "s" : ""}; `) +
             `whether the connected ComfyUI can actually LOAD ${plural} is confirmed separately. `
-          : `NOTHING is claimed to have transferred here. `) +
+          : // #2057 — "NOTHING is claimed to have transferred" was unconditional on
+            // !done.length, so a contradicted failure (status still streaming, bytes
+            // advancing) asserted zero bytes the process could have disproved. Only
+            // a genuinely-dead failure with no live counterpart may say this.
+            failedDead.length && !failedRetried.length && !failedLiveRecord.length
+              ? `NOTHING is claimed to have transferred here. `
+              : "") +
         `If you were waiting on ${plural} to continue a task, ` +
-        `call download_model action:"status" FIRST for the verified path and placement verdict${failed.length ? " or the error detail" : ""} — ` +
+        `call download_model action:"status" FIRST for the verified path and placement verdict${failedDead.length ? " or the error detail" : ""} — ` +
         `do not tell the user a model is ready until download_model action:"status" confirms it` +
-        (failedRetried.length
+        (failedRetried.length || failedLiveRecord.length
           ? `, and do not tell them one failed until status shows no live attempt for that name`
           : "") +
         `. Otherwise reply with ONE short sentence acknowledging it and no tool calls.`;

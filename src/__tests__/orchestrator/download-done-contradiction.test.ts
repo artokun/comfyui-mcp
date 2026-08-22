@@ -30,7 +30,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   COMPLETION_DISAGREEMENT_NOTE,
+  FAILURE_DISAGREEMENT_NOTE,
   completionDisagreesWithRecord,
+  failureDisagreesWithRecord,
 } from "../../orchestrator/download-done-guard.js";
 
 /** A progress row: identified by the PROGRESS/TRAY id, as written on disk. */
@@ -85,6 +87,15 @@ describe("a completion the record disagrees with is DISCLOSED (#1574)", () => {
     expect(completionDisagreesWithRecord(row({ status: "error" }), [job()])).toBe(false);
   });
 
+  it("does not let a completion check stand in for a failure check", () => {
+    // #2057 is the failure direction. If this started returning true, the formatter
+    // would treat a contradicted FAILED as a contradicted completion and talk about
+    // bytes finishing — the wrong hedge.
+    expect(completionDisagreesWithRecord(row({ status: "error" }), [job({ status: "downloading" })])).toBe(
+      false,
+    );
+  });
+
   it("a terminal record other than downloading does not disagree", () => {
     for (const status of ["error", "cancelled", "done"]) {
       expect(completionDisagreesWithRecord(row(), [job({ status })]), status).toBe(false);
@@ -133,6 +144,7 @@ describe("the disagreement actually reaches the user (#1574)", () => {
   it("the tick FLAGS the disagreeing entries", async () => {
     const src = await read("index.ts");
     expect(src).toMatch(/settled\.filter\(\(d\) => completionDisagreesWithRecord\(d, records\)\)/);
+    expect(src).toMatch(/settled\.filter\(\(d\) => failureDisagreesWithRecord\(d, records\)\)/);
     expect(src).toMatch(/\.recordDisagrees = true/);
   });
 
@@ -253,5 +265,129 @@ describe("an exact (id, target) record wins over a targetless one (#1574)", () =
         job({ target: undefined, status: "downloading" }),
       ]),
     ).toBe(true);
+  });
+});
+
+// #2057 — the tray announced FAILED (and claimed nothing transferred) while the transfer
+// was still streaming. Same two stores as #1574, opposite terminal.
+//
+// The reporter's handles: job `07d14bb0c73bc007`, tray `31bba4a9cdb04e28`. Status at
+// t+106s was downloading 0.14/19.53 GB; the panel then emitted FAILED + NOTHING
+// transferred; status at t+163s was downloading 0.22/19.53 GB. Bytes advanced across
+// the failure notification, so the job record is the authority — not the tray row.
+//
+// #1150 could not see this: it only flags a failure whose FILENAME is still a live
+// tray row, and here the tray row itself was the error.
+
+const errorRow = (over: Record<string, unknown> = {}) =>
+  row({ id: "31bba4a9cdb04e28", status: "error", ...over });
+const liveJob = (over: Record<string, unknown> = {}) =>
+  job({ id: "07d14bb0c73bc007", trayId: "31bba4a9cdb04e28", status: "downloading", ...over });
+
+describe("a failure the record disagrees with is DISCLOSED (#2057)", () => {
+  it("flags the reported case: row says error, the job record still says downloading", () => {
+    expect(failureDisagreesWithRecord(errorRow(), [liveJob()])).toBe(true);
+  });
+
+  it("matches on the PROGRESS identity, not the job's public id", () => {
+    expect(failureDisagreesWithRecord(errorRow({ id: "07d14bb0c73bc007" }), [liveJob()])).toBe(false);
+    expect(
+      failureDisagreesWithRecord(errorRow({ id: "prog-1" }), [liveJob({ progressId: "prog-1" })]),
+    ).toBe(true);
+    expect(
+      failureDisagreesWithRecord(errorRow({ id: "31bba4a9cdb04e28" }), [
+        liveJob({ progressId: "prog-1" }),
+      ]),
+    ).toBe(false);
+  });
+
+  it("says nothing when the record agrees the download failed", () => {
+    expect(failureDisagreesWithRecord(errorRow(), [liveJob({ status: "error" })])).toBe(false);
+  });
+
+  it("says nothing when the record has no opinion", () => {
+    expect(failureDisagreesWithRecord(errorRow(), [])).toBe(false);
+    expect(failureDisagreesWithRecord(errorRow(), [liveJob({ trayId: "someone-else" })])).toBe(false);
+  });
+
+  it("only looks at FAILURES — a completion row is untouched", () => {
+    expect(failureDisagreesWithRecord(errorRow({ status: "done" }), [liveJob()])).toBe(false);
+  });
+
+  it("a terminal record other than downloading does not disagree", () => {
+    for (const status of ["error", "cancelled", "done"]) {
+      expect(failureDisagreesWithRecord(errorRow(), [liveJob({ status })]), status).toBe(false);
+    }
+  });
+
+  it("junk never throws — this runs on the event path", () => {
+    for (const bad of [null, undefined, {}, { status: "error" }]) {
+      expect(() => failureDisagreesWithRecord(bad as never, [liveJob()])).not.toThrow();
+    }
+    expect(failureDisagreesWithRecord(errorRow(), null as never)).toBe(false);
+  });
+
+  it("the note tells the agent not to report a failure, and never says FAILED", () => {
+    expect(FAILURE_DISAGREEMENT_NOTE).toMatch(/still reports this transfer as downloading/i);
+    expect(FAILURE_DISAGREEMENT_NOTE).toMatch(/do NOT report it as failed/i);
+    expect(FAILURE_DISAGREEMENT_NOTE).not.toMatch(/FAILED/);
+  });
+
+  it("does not match a record for the same id at a DIFFERENT target", () => {
+    expect(
+      failureDisagreesWithRecord(errorRow({ target: "/local/models" }), [
+        liveJob({ target: "/pod/models" }),
+      ]),
+    ).toBe(false);
+  });
+
+  it("matches when the targets agree", () => {
+    expect(
+      failureDisagreesWithRecord(errorRow({ target: "/local/models" }), [
+        liveJob({ target: "/local/models" }),
+      ]),
+    ).toBe(true);
+  });
+
+  it("still matches when EITHER side has no target", () => {
+    expect(failureDisagreesWithRecord(errorRow(), [liveJob({ target: "/pod/models" })])).toBe(true);
+    expect(failureDisagreesWithRecord(errorRow({ target: "/local" }), [liveJob()])).toBe(true);
+  });
+
+  it("does not let a targetless DOWNLOADING shadow the exact ERROR", () => {
+    expect(
+      failureDisagreesWithRecord(errorRow({ target: "/local/models" }), [
+        liveJob({ target: undefined, status: "downloading" }),
+        liveJob({ target: "/local/models", status: "error" }),
+      ]),
+    ).toBe(false);
+  });
+
+  it("…and finds the exact DOWNLOADING behind a targetless ERROR", () => {
+    expect(
+      failureDisagreesWithRecord(errorRow({ target: "/local/models" }), [
+        liveJob({ target: undefined, status: "error" }),
+        liveJob({ target: "/local/models", status: "downloading" }),
+      ]),
+    ).toBe(true);
+  });
+});
+
+describe("the failure disagreement actually reaches the user (#2057)", () => {
+  const read = async (file: string): Promise<string> => {
+    const { readFileSync } = await import("node:fs");
+    return readFileSync(new URL(`../../orchestrator/${file}`, import.meta.url), "utf-8");
+  };
+
+  it("the formatter keeps a contradicted failure out of the FAILED list", async () => {
+    const src = await read("panel-agent.ts");
+    expect(src).toMatch(/failedLiveRecord/);
+    expect(src).toMatch(/FAILURE_DISAGREEMENT_NOTE/);
+    // The NOTHING sentence is gated on there being a genuinely-dead failure
+    // and no live counterpart — otherwise the reporter's 0.22 GB transfer is
+    // described as having transferred nothing.
+    expect(src).toMatch(
+      /failedDead\.length && !failedRetried\.length && !failedLiveRecord\.length/,
+    );
   });
 });

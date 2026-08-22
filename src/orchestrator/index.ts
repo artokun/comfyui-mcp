@@ -102,7 +102,7 @@ import { setConnectedPanelOrigins } from "../comfyui/fetch.js";
 import { publishConnectedPanelOrigins } from "../services/panel-origin-channel.js";
 import { logger } from "../utils/logger.js";
 import { listDownloadJobs } from "../services/download-jobs.js";
-import { completionDisagreesWithRecord } from "./download-done-guard.js";
+import { completionDisagreesWithRecord, failureDisagreesWithRecord } from "./download-done-guard.js";
 import { assembleVocabularyHash, describeVocabularySkew } from "../tools/vocabulary.js";
 import { buildPanelToolDefs } from "./panel-tools.js";
 
@@ -6115,6 +6115,20 @@ export async function runPanelOrchestrator(): Promise<void> {
         logger.warn(
           "[panel-orchestrator] a download completion disagrees with the job record; disclosing rather than suppressing (#1574)",
           { ids: disagreeing.map((d) => String((d as { id?: unknown }).id ?? "")) },
+        );
+      }
+      // #2057 — the SAME split in the other direction. A tray ERROR while the job record
+      // still says downloading is how "Model download FAILED" + "NOTHING transferred"
+      // fired for a 19.53 GB fetch whose status (same id) was still streaming and
+      // advancing. #1150 only sees a live TRAY row of that filename; here the tray
+      // row itself was the error, so that hedge never ran. Flag it so the formatter
+      // will not say FAILED.
+      const failedDisagreeing = settled.filter((d) => failureDisagreesWithRecord(d, records));
+      for (const d of failedDisagreeing) (d as { recordDisagrees?: boolean }).recordDisagrees = true;
+      if (failedDisagreeing.length) {
+        logger.warn(
+          "[panel-orchestrator] a download failure disagrees with the job record; disclosing rather than announcing FAILED (#2057)",
+          { ids: failedDisagreeing.map((d) => String((d as { id?: unknown }).id ?? "")) },
         );
       }
       // #884 — a download has no originating TAB (its row names the owning

@@ -230,3 +230,59 @@ describe("a failed attempt superseded by a live retry (#1150)", () => {
     expect(t).toMatch(/EARLIER attempt failed for retried\.safetensors/);
   });
 });
+
+// #2057 — the tray said FAILED (and claimed nothing transferred) while
+// download_model action:"status" still showed the SAME id as downloading with
+// advancing bytes. #1150's supersededByLive hedge never fired: there was no
+// live tray row of that name, because the tray row itself was the error.
+describe("a failed tray row whose job record is still downloading (#2057)", () => {
+  it("does NOT present the reported filename as FAILED, and does not claim NOTHING transferred", async () => {
+    const backend = new TurnRecordingBackend();
+    const manager = makeManager(backend);
+    manager.send("tab-2057", "hi");
+    await waitFor(() => backend.turns.length >= 1);
+
+    manager.injectEvent("tab-2057", {
+      kind: "download_done",
+      downloads: [
+        {
+          name: "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+          status: "error",
+          recordDisagrees: true,
+        },
+      ],
+    });
+
+    await waitFor(() => backend.turns.length >= 2);
+    const t = backend.turns[1];
+    expect(t).toContain("minimax_h3_fl2va_pruned_int8_convrot.safetensors");
+    expect(t).toMatch(/do NOT report it as failed/);
+    expect(t).toMatch(/still reports this transfer as downloading/);
+    expect(t).toContain('download_model action:"status"');
+    expect(t).not.toMatch(/FAILED: minimax_h3_fl2va_pruned_int8_convrot\.safetensors/);
+    expect(t).not.toMatch(/NOTHING is claimed to have transferred/);
+  });
+
+  it("still names a genuinely dead failure FAILED in the same batch", async () => {
+    const backend = new TurnRecordingBackend();
+    const manager = makeManager(backend);
+    manager.send("tab-2057-mix", "hi");
+    await waitFor(() => backend.turns.length >= 1);
+
+    manager.injectEvent("tab-2057-mix", {
+      kind: "download_done",
+      downloads: [
+        { name: "gone.safetensors", status: "error" },
+        { name: "live.safetensors", status: "error", recordDisagrees: true },
+      ],
+    });
+
+    await waitFor(() => backend.turns.length >= 2);
+    const t = backend.turns[1];
+    const failedList = /FAILED: ([^;]*)/.exec(t)?.[1] ?? "";
+    expect(failedList).toContain("gone.safetensors");
+    expect(failedList).not.toContain("live.safetensors");
+    expect(t).toMatch(/tray reported a failure for live\.safetensors/);
+    expect(t).not.toMatch(/NOTHING is claimed to have transferred/);
+  });
+});
