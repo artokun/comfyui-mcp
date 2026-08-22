@@ -354,6 +354,19 @@ describe("#1968 panel_show_media: the output ref is accepted where the docs put 
     expect(out.ok && out.value.source).toEqual({ path: "/tmp/huge.png", stage: true });
   });
 
+  it("folds a flat `stage` onto a filename output ref", () => {
+    const out = normalizeShowMediaItem({ filename: "huge.png", type: "output", stage: true }, 0);
+    expect(out.ok).toBe(true);
+    expect(out.ok && out.value.source).toEqual({ filename: "huge.png", type: "output", stage: true });
+  });
+
+  it("REFUSES conflicting flat filename and path refs instead of letting path win", () => {
+    const out = normalizeShowMediaItem({ filename: "a.png", path: "C:/other.png" }, 0);
+    expect(out.ok).toBe(false);
+    expect(out.ok ? "" : out.error).toContain("filename");
+    expect(out.ok ? "" : out.error).toContain("path");
+  });
+
   it("REFUSES a modifier set both inside source and at item level", async () => {
     const h = harness();
     const res = await callTool(

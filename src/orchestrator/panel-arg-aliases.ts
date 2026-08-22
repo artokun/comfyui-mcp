@@ -165,6 +165,14 @@ export function normalizeShowMediaItem(
       merged[key] = value;
     }
     out.source = merged;
+  } else if (path !== undefined && filename !== undefined) {
+    return {
+      ok: false,
+      error:
+        `${at} carries both flat \`filename\` and \`path\`. ` +
+        `Those are two different members of the media-source union, so the item does not say which media to display. ` +
+        `Nothing was displayed. Send exactly one of them.`,
+    };
   } else if (path !== undefined) {
     // The disk-path member of the same union, flattened the same way.
     out.source = stage === undefined ? { path } : { path, stage };
@@ -173,6 +181,7 @@ export function normalizeShowMediaItem(
       filename,
       ...(subfolder === undefined ? {} : { subfolder }),
       ...(type === undefined ? {} : { type }),
+      ...(stage === undefined ? {} : { stage }),
     };
   } else {
     return {
