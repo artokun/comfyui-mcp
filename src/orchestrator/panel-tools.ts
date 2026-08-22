@@ -1203,6 +1203,10 @@ export const __panelToolsTestHooks = {
   setRunLateAckGraceMs(ms: number | null): void {
     runLateAckGraceMsOverride = ms;
   },
+  /** Shrink the #2078 save-timeout settle grace so a still-dirty follow-up does not wait 5s. */
+  setSaveTimeoutSettleGraceMs(ms: number | null): void {
+    saveTimeoutSettleGraceMsOverride = ms;
+  },
   isRetrySafeCmd,
   isTransientReconnectError,
   // CivitAI sample-image gating (#623): the predicate that decides which results'
@@ -4546,28 +4550,54 @@ const SAVE_TIMEOUT_OUTCOME_UNKNOWN =
   `Confirm by reading the saved file (or panel_list_workflows) before retrying — a re-issue may write twice.`;
 
 /**
- * #2004 — the panel's 13s budget fired while userdata PUT was still running.
- * A follow-up list that now shows modified:false persisted:true is the save
- * completing; anything else stays outcome-unknown. persisted:true alone is
- * the timeout-time snapshot of a previously-saved dirty tab, not proof.
+ * #2078 — how long to keep reading tab state after the 13s save budget.
+ *
+ * #2004 already listed once. The reporter's PUT landed a moment later: that
+ * snapshot was still dirty, the next panel_list_workflows was already clean.
+ * Paid only on a path that has already spent its full bound. A canvas that
+ * is clean on the first list returns immediately.
+ */
+const SAVE_TIMEOUT_SETTLE_GRACE_MS = 5_000;
+const SAVE_TIMEOUT_SETTLE_POLL_MS = 200;
+let saveTimeoutSettleGraceMsOverride: number | null = null;
+function saveTimeoutSettleGraceMs(): number {
+  return saveTimeoutSettleGraceMsOverride ?? SAVE_TIMEOUT_SETTLE_GRACE_MS;
+}
+
+function saveAckAfterTimeout(list: Record<string, unknown> | null): ToolResult {
+  return ok({
+    saved: true,
+    late_ack: true,
+    acknowledged_after_timeout: true,
+    active: list?.active,
+  });
+}
+
+/**
+ * #2004 / #2078 — the panel's 13s budget fired while userdata PUT was still
+ * running. A list that shows modified:false persisted:true is the save
+ * completing. One snapshot is not enough: the timeout-time canvas is still
+ * dirty, and the PUT can land between that read and the caller's next list.
+ * Keep reading until the grace, then stay outcome-unknown. persisted:true
+ * alone is the timeout-time snapshot of a previously-saved dirty tab, not proof.
  */
 async function settleWorkflowSaveTimeout(
   res: ToolResult,
   ctx: PanelToolCtx,
 ): Promise<ToolResult> {
   if (!isWorkflowSaveBudgetTimeout(res)) return res;
-  try {
-    const listRes = await ctx.call({ cmd: "workflow_list" }, 6000);
-    const list = parseToolResultJson(listRes);
-    if (saveLandedAfterTimeout(list)) {
-      return ok({
-        saved: true,
-        acknowledged_after_timeout: true,
-        active: list?.active,
-      });
+  const deadline = Date.now() + saveTimeoutSettleGraceMs();
+  for (;;) {
+    try {
+      const listRes = await ctx.call({ cmd: "workflow_list" }, 6000);
+      const list = parseToolResultJson(listRes);
+      if (saveLandedAfterTimeout(list)) return saveAckAfterTimeout(list);
+    } catch {
+      /* keep polling until the grace; the note below is the honest remainder */
     }
-  } catch {
-    /* keep the timeout refusal; the note below is the honest remainder */
+    const left = deadline - Date.now();
+    if (left <= 0) break;
+    await sleep(Math.max(1, Math.min(SAVE_TIMEOUT_SETTLE_POLL_MS, left)));
   }
   return appendToolResultText(res, SAVE_TIMEOUT_OUTCOME_UNKNOWN);
 }

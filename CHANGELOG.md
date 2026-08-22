@@ -13,6 +13,16 @@ All notable changes to this project are documented here. This project adheres to
 #### Fixed
 - preserve reconnect recovery across MCP context loss
 
+### Fixed
+
+- **`panel_save_workflow` no longer reports OUTCOME UNKNOWN when the in-place save actually persisted (#2078).**
+  The panel's 13s save budget can fire while userdata PUT is still running.
+  #2004 already followed up with one `workflow_list`; if that snapshot was still
+  dirty, the tool returned unknown even though the next `panel_list_workflows`
+  showed `modified:false persisted:true`. After the budget fires it now keeps
+  reading tab state for a short grace and reports `saved:true` with `late_ack`
+  once the same canvas is clean and persisted. A canvas that stays dirty stays
+  outcome-unknown so a retry does not write twice.
 
 ## [0.52.61] - 2026-08-22
 
