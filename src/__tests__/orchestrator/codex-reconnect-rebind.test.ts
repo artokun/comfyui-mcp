@@ -41,8 +41,10 @@ import { WorkflowTargetStore } from "../../services/workflow-target-store.js";
 import { waitFor } from "../helpers/wait-for.js";
 
 const SCOPE_KEY = `${SHARED_SESSION_SCOPE}::codex`;
+const CHATGPT_SCOPE = `${SHARED_SESSION_SCOPE}::chatgpt`;
 const LIVE = "wf:tab-live:workflows/a.json";
 const GONE = "wf:tab-gone:workflows/a.json";
+const UNTITLED = "tmp:untitled-chatgpt";
 const PATH = "workflows/a.json";
 const UUID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
 
@@ -93,30 +95,34 @@ function connectPanel(port: number, tabId: string, title: string): Promise<WebSo
   });
 }
 
-function autoReply(sock: WebSocket): void {
+function autoReply(sock: WebSocket, opts?: { untitled?: boolean }): void {
   sock.on("message", (buf) => {
     const msg = JSON.parse(buf.toString());
     if (!msg.rid || !msg.cmd) return;
     if (msg.cmd === "workflow_list") {
+      const active = opts?.untitled
+        ? {
+            path: null,
+            filename: null,
+            title: "Unsaved Workflow",
+            key: UNTITLED,
+            routing_key: UNTITLED,
+            workflow_uuid: UUID,
+            active: true,
+          }
+        : {
+            path: PATH,
+            routing_key: `wf:${PATH}`,
+            workflow_uuid: UUID,
+            active: true,
+          };
       sock.send(
         JSON.stringify({
           rid: msg.rid,
           ok: true,
           result: {
-            active: {
-              path: PATH,
-              routing_key: `wf:${PATH}`,
-              workflow_uuid: UUID,
-              active: true,
-            },
-            workflows: [
-              {
-                path: PATH,
-                routing_key: `wf:${PATH}`,
-                workflow_uuid: UUID,
-                active: true,
-              },
-            ],
+            active,
+            workflows: [{ ...active, persisted: !opts?.untitled, modified: false }],
             active_confirmed: true,
           },
         }),
@@ -171,13 +177,14 @@ describe("panel#1557 Codex reconnect: mode:current binds the live canvas", () =>
     await bridge.stop();
   });
 
-  function tools() {
+  function tools(scopeKey = SCOPE_KEY) {
     const defs = buildPanelToolDefs();
-    const ctx = makePanelToolCtx(bridge, SCOPE_KEY, new WorkflowTargetStore());
+    const ctx = makePanelToolCtx(bridge, scopeKey, new WorkflowTargetStore());
     return {
       ctx,
       setTarget: defs.find((d) => d.name === "panel_set_workflow_target")!,
       outline: defs.find((d) => d.name === "panel_graph_outline")!,
+      list: defs.find((d) => d.name === "panel_list_workflows")!,
     };
   }
 
@@ -256,6 +263,80 @@ describe("panel#1557 Codex reconnect: mode:current binds the live canvas", () =>
     // conversation's backend or writing a turn pin onto it.
     expect(tracker.pinOf(SCOPE_KEY)).toBeUndefined();
     expect(tabBackends.get(LIVE)).toBe("claude");
+    sock.close();
+  });
+
+  // Recurrence (reopened 2026-08-22): during panel_save_workflow Save-As the
+  // tab disconnected mid-command. mode:"current" cleared the stale binding
+  // (DEFER), but the next workflow_list still targeted the dead
+  // wf:<id>:workflows/... pin while the catalog showed one connected
+  // untitled tab on the ChatGPT conversation.
+  it("after a Save-As disconnect DEFER, workflow_list binds the untitled canvas that reconnects (ChatGPT)", async () => {
+    tracker.repinTo(CHATGPT_SCOPE, GONE);
+    const { ctx, setTarget, list } = tools(CHATGPT_SCOPE);
+    const bindRes = await setTarget.handler({ mode: "current" }, ctx);
+    expect(bindRes.isError, textOf(bindRes as ToolResult)).toBeFalsy();
+    expect(JSON.parse(textOf(bindRes as ToolResult))).toMatchObject({ deferred: true });
+
+    const sock = await connectPanel(port, UNTITLED, "Unsaved Workflow");
+    autoReply(sock, { untitled: true });
+    await waitFor(() => expect(bridge.tabs()).toHaveLength(1));
+    tabBackends.set(UNTITLED, "claude");
+
+    const listRes = await list.handler({}, ctx);
+    const listText = textOf(listRes as ToolResult);
+    expect(listRes.isError, listText).toBeFalsy();
+    expect(listText).not.toMatch(GONE);
+    expect(listText).not.toMatch(/no connected tab with id/);
+    expect(tracker.resolvedPinOf(CHATGPT_SCOPE)).toBe(UNTITLED);
+    expect(tabBackends.get(UNTITLED)).toBe("chatgpt");
+    expect(bridge.canReach(CHATGPT_SCOPE)).toBe(true);
+    sock.close();
+  });
+
+  it("a dead ChatGPT pin plus one untitled canvas is adopted by mode:current even when hello joined the default backend", async () => {
+    const sock = await connectPanel(port, UNTITLED, "Unsaved Workflow");
+    autoReply(sock, { untitled: true });
+    await waitFor(() => expect(bridge.tabs()).toHaveLength(1));
+    tabBackends.set(UNTITLED, "claude");
+    tracker.repinTo(CHATGPT_SCOPE, GONE);
+    expect(bridge.canReach(CHATGPT_SCOPE)).toBe(false);
+
+    const { ctx, setTarget, list } = tools(CHATGPT_SCOPE);
+    const bindRes = await setTarget.handler({ mode: "current" }, ctx);
+    const bindText = textOf(bindRes as ToolResult);
+    expect(bindRes.isError, bindText).toBeFalsy();
+    expect(bindText).not.toMatch(/did NOT restore this session's graph binding/);
+    expect(bindText).not.toMatch(/no connected tab belongs to this conversation's backend/);
+    expect(tracker.resolvedPinOf(CHATGPT_SCOPE)).toBe(UNTITLED);
+    expect(tabBackends.get(UNTITLED)).toBe("chatgpt");
+
+    const listRes = await list.handler({}, ctx);
+    expect(listRes.isError, textOf(listRes as ToolResult)).toBeFalsy();
+    sock.close();
+  });
+
+  it("a later workflow_list on a NEW ctx still binds the untitled canvas after this conversation's DEFER", async () => {
+    // A ChatGPT/Codex HTTP MCP drop between the DEFER and the recovery list
+    // mints a fresh ctx. The dead pin is still on the tracker; the catalog
+    // already shows the untitled tab. Consent must survive the new ctx.
+    tracker.repinTo(CHATGPT_SCOPE, GONE);
+    const first = tools(CHATGPT_SCOPE);
+    const bindRes = await first.setTarget.handler({ mode: "current" }, first.ctx);
+    expect(JSON.parse(textOf(bindRes as ToolResult))).toMatchObject({ deferred: true });
+
+    const sock = await connectPanel(port, UNTITLED, "Unsaved Workflow");
+    autoReply(sock, { untitled: true });
+    await waitFor(() => expect(bridge.tabs()).toHaveLength(1));
+    tabBackends.set(UNTITLED, "claude");
+
+    const second = tools(CHATGPT_SCOPE);
+    const listRes = await second.list.handler({}, second.ctx);
+    const listText = textOf(listRes as ToolResult);
+    expect(listRes.isError, listText).toBeFalsy();
+    expect(listText).not.toMatch(GONE);
+    expect(listText).not.toMatch(/no connected tab with id/);
+    expect(tracker.resolvedPinOf(CHATGPT_SCOPE)).toBe(UNTITLED);
     sock.close();
   });
 });

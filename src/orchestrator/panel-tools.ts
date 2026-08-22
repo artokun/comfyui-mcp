@@ -10488,6 +10488,8 @@ export interface PanelToolCtx {
    * graph call's `ensureReachable` consumes this as the same explicit consent,
    * so a tab that reconnects a moment later is bound instead of staying fenced
    * to the previous (dead) workflow instance.
+   *
+   * Same-session only. The durable copy is `bridge.armScopeRecoveryConsent`.
    */
   pendingScopeRecoveryConsent?: boolean;
   /**
@@ -10625,11 +10627,20 @@ export function makePanelToolCtx(
     // here is the same recovery, just delayed until a canvas tab exists; it is
     // not a silent re-target.
     if (isScopeAddress(ctx.tabId)) {
-      if (ctx.pendingScopeRecoveryConsent) {
+      const deferredConsent =
+        ctx.pendingScopeRecoveryConsent === true ||
+        (typeof bridge.hasScopeRecoveryConsent === "function" &&
+          bridge.hasScopeRecoveryConsent(ctx.tabId));
+      if (deferredConsent) {
         try {
           const out = rebindToActiveTab({ scopeRecoveryConsent: true });
-          if (out.rebound) ctx.pendingScopeRecoveryConsent = false;
-          else if ((interactiveTabIds() ?? []).length > 0) ctx.pendingScopeRecoveryConsent = false;
+          if (out.rebound) {
+            ctx.pendingScopeRecoveryConsent = false;
+            bridge.clearScopeRecoveryConsent?.(ctx.tabId);
+          } else if ((interactiveTabIds() ?? []).length > 0) {
+            ctx.pendingScopeRecoveryConsent = false;
+            bridge.clearScopeRecoveryConsent?.(ctx.tabId);
+          }
         } catch {
           // still nothing bindable — keep the consent for the next attempt
         }
@@ -16671,9 +16682,12 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           } finally {
             if (recoveringScope) ctx.bridge.endScopeRecovery?.(before);
           }
-          // panel#1557 — the consent survives a zero-tab DEFER so a graph call
-          // after the canvas reconnects can finish the recovery.
-          if (deferredBind && recoveringScope) ctx.pendingScopeRecoveryConsent = true;
+          // panel#1557 — the consent survives a zero-tab DEFER so a later graph
+          // call (possibly on a fresh HTTP MCP ctx) can finish the recovery.
+          if (deferredBind && recoveringScope) {
+            ctx.pendingScopeRecoveryConsent = true;
+            ctx.bridge.armScopeRecoveryConsent?.(before);
+          }
           // Detect the rebind regardless of whether awaitReachable or rebindToActiveTab
           // performed it (either mutates ctx.tabId), so the note is never swallowed.
           if (!deferredBind && ctx.tabId !== before) {

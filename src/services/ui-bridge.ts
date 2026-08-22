@@ -1921,6 +1921,12 @@ export class UiBridge {
     string,
     { count: number; done: Promise<void>; finish: () => void }
   >();
+  /**
+   * panel#1557 — deferred mode:"current" consent, keyed by scope address.
+   * Lives here rather than on the tool ctx so an HTTP MCP session drop cannot
+   * drop it while the dead turn pin is still on the tracker.
+   */
+  private pendingScopeRecoveryConsent = new Set<string>();
   /** #884 — orchestrator-injected: normalize a hello's raw `backend` value the
    *  same way the orchestrator does (unknown/absent → the default backend), so
    *  the backend-qualified scope-buffer replay matches the conversation the
@@ -3799,6 +3805,19 @@ export class UiBridge {
     if (rec.count > 0) return;
     rec.finish();
     this.scopeRecovery.delete(scopeId);
+  }
+
+  /** panel#1557 — keep a deferred mode:"current" recovery across MCP sessions. */
+  armScopeRecoveryConsent(scopeId: string): void {
+    this.pendingScopeRecoveryConsent.add(scopeId);
+  }
+
+  hasScopeRecoveryConsent(scopeId: string): boolean {
+    return this.pendingScopeRecoveryConsent.has(scopeId);
+  }
+
+  clearScopeRecoveryConsent(scopeId: string): void {
+    this.pendingScopeRecoveryConsent.delete(scopeId);
   }
 
   /**
