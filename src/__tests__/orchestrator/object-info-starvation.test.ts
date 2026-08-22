@@ -73,6 +73,10 @@ const SAVE_TIMEOUT =
 const SAVE_TIMEOUT_2078 =
   `workflow_save did not finish within 13s. The save may still complete in the background. OUTCOME UNKNOWN.`;
 
+const FIRST_SAVE_TIMEOUT_2078 =
+  `workflow_save did not finish within 13s. The active workflow changed from "Untitled Workflow" ` +
+  `to "first-save" while the save was in flight, so which file the hung write targets cannot be determined from here.`;
+
 describe("restored uncollapse size (#2004)", () => {
   it("a stored [228, 0] is not sizeSane and restores keeping the width", () => {
     expect(needsUncollapseSizeRestore([228, 0])).toBe(true);
@@ -270,6 +274,7 @@ describe("panel_save_workflow acknowledges a save that landed after the budget (
           return jsonResult({
             active: {
               path: "workflows/graph.json",
+              routing_key: "wf:workflows/graph.json",
               filename: "graph",
               modified: false,
               persisted: true,
@@ -289,7 +294,7 @@ describe("panel_save_workflow acknowledges a save that landed after the budget (
     expect(text).toMatch(/"saved": true/);
     expect(text).toMatch(/"late_ack": true/);
     expect(text).toMatch(/"acknowledged_after_timeout": true/);
-    expect(calls[0]).toMatchObject({ cmd: "workflow_save" });
+    expect(calls.map((c) => c.cmd)).toContain("workflow_save");
     expect(calls.map((c) => c.cmd)).toContain("workflow_list");
   });
 
@@ -309,6 +314,7 @@ describe("panel_save_workflow acknowledges a save that landed after the budget (
           return jsonResult({
             active: {
               path: "workflows/graph.json",
+              routing_key: "wf:workflows/graph.json",
               filename: "graph",
               modified: lists === 1,
               persisted: true,
@@ -332,6 +338,142 @@ describe("panel_save_workflow acknowledges a save that landed after the budget (
     expect(calls.filter((c) => c.cmd === "workflow_save")).toHaveLength(1);
   });
 
+  it("a clean different workflow after the timeout does not acknowledge the save", async () => {
+    __panelToolsTestHooks.setSaveTimeoutSettleGraceMs(0);
+    let lists = 0;
+    const ctx: PanelToolCtx = {
+      call: async (cmd) => {
+        if (cmd.cmd === "workflow_save") return errorResult(SAVE_TIMEOUT_2078);
+        if (cmd.cmd === "workflow_list") {
+          lists += 1;
+          return jsonResult({
+            active:
+              lists === 1
+                ? {
+                    path: "workflows/a.json",
+                    routing_key: "wf:workflows/a.json",
+                    modified: true,
+                    persisted: true,
+                  }
+                : {
+                    path: "workflows/b.json",
+                    routing_key: "wf:workflows/b.json",
+                    modified: false,
+                    persisted: true,
+                  },
+          });
+        }
+        return jsonResult({ ok: true });
+      },
+      confirm: async () => "yes" as const,
+      bridge: {} as PanelToolCtx["bridge"],
+      tabId: "test-tab",
+    };
+
+    const res = await defByName("panel_save_workflow").handler({}, ctx);
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toMatch(/OUTCOME UNKNOWN/);
+    expect(lists).toBeGreaterThanOrEqual(2);
+  });
+
+  it("a first-save successor with the timed-out command's late receipt can be acknowledged", async () => {
+    __panelToolsTestHooks.setSaveTimeoutSettleGraceMs(0);
+    let lists = 0;
+    const ctx: PanelToolCtx = {
+      call: async (cmd, _timeoutMs, onDispatchedRid) => {
+        if (cmd.cmd === "workflow_save") onDispatchedRid?.("save-rid");
+        if (cmd.cmd === "workflow_save") return errorResult(FIRST_SAVE_TIMEOUT_2078);
+        if (cmd.cmd === "workflow_list") {
+          lists += 1;
+          return jsonResult({
+            active:
+              lists === 1
+                ? {
+                    path: null,
+                    key: "tmp:first-save-instance",
+                    routing_key: "tmp:first-save-instance",
+                    title: "Untitled Workflow",
+                    modified: true,
+                    persisted: false,
+                  }
+                : {
+                    path: "workflows/first-save.json",
+                    filename: "first-save",
+                    routing_key: "wf:workflows/first-save.json",
+                    modified: false,
+                    persisted: true,
+                  },
+            late_save_receipts: [
+              {
+                rid: "save-rid",
+                cmd: "workflow_save",
+                result: { saved: true, routing_key: "wf:workflows/first-save.json" },
+              },
+            ],
+          });
+        }
+        return jsonResult({ ok: true });
+      },
+      confirm: async () => "yes" as const,
+      bridge: {} as PanelToolCtx["bridge"],
+      tabId: "test-tab",
+    };
+
+    const res = await defByName("panel_save_workflow").handler({}, ctx);
+    expect(res.isError).toBeFalsy();
+    expect(textOf(res)).toMatch(/"late_ack": true/);
+    expect(lists).toBeGreaterThanOrEqual(2);
+  });
+
+  it("a first-save timeout cannot acknowledge an unrelated clean successor", async () => {
+    __panelToolsTestHooks.setSaveTimeoutSettleGraceMs(0);
+    let lists = 0;
+    const ctx: PanelToolCtx = {
+      call: async (cmd, _timeoutMs, onDispatchedRid) => {
+        if (cmd.cmd === "workflow_save") onDispatchedRid?.("save-rid");
+        if (cmd.cmd === "workflow_save") return errorResult(FIRST_SAVE_TIMEOUT_2078);
+        if (cmd.cmd === "workflow_list") {
+          lists += 1;
+          return jsonResult({
+            active:
+              lists === 1
+                ? {
+                    path: null,
+                    key: "tmp:first-save-instance",
+                    routing_key: "tmp:first-save-instance",
+                    title: "Untitled Workflow",
+                    modified: true,
+                    persisted: false,
+                  }
+                : {
+                    path: "workflows/other.json",
+                    filename: "other",
+                    routing_key: "wf:workflows/other.json",
+                    modified: false,
+                    persisted: true,
+                  },
+            late_save_receipts: [
+              {
+                rid: "save-rid",
+                cmd: "workflow_save",
+                result: { saved: true, routing_key: "wf:workflows/first-save.json" },
+              },
+            ],
+          });
+        }
+        return jsonResult({ ok: true });
+      },
+      confirm: async () => "yes" as const,
+      bridge: {} as PanelToolCtx["bridge"],
+      tabId: "test-tab",
+    };
+
+    const res = await defByName("panel_save_workflow").handler({}, ctx);
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toMatch(/OUTCOME UNKNOWN/);
+    expect(lists).toBe(2);
+  });
+
   it("modified:true persisted:true at follow-up is still outcome-unknown, not success", async () => {
     // The timeout snapshot itself. Treating persisted:true as proof would have
     // reported the reporter's still-dirty canvas as saved. Grace 0 = one list.
@@ -341,7 +483,12 @@ describe("panel_save_workflow acknowledges a save that landed after the budget (
         if (cmd.cmd === "workflow_save") return errorResult(SAVE_TIMEOUT);
         if (cmd.cmd === "workflow_list") {
           return jsonResult({
-            active: { path: "workflows/graph.json", modified: true, persisted: true },
+            active: {
+              path: "workflows/graph.json",
+              routing_key: "wf:workflows/graph.json",
+              modified: true,
+              persisted: true,
+            },
           });
         }
         return jsonResult({ ok: true });
