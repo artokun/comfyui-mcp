@@ -112,6 +112,93 @@ export function inspectMcpServers(
 }
 
 /**
+ * One row of Codex app-server `mcpServerStatus/list` (`McpServerStatus` in
+ * app-server-protocol v2, camelCase on the wire).
+ *
+ * Live fields: `name`, `runtimeStatus`, `authStatus`, `tools` (a map, not an
+ * array), `serverInfo`, `pluginId`. There is no `status` and no `enabled`.
+ * Official docs: the tools inventory may be cached and does **not** prove the
+ * thread is connected; omit `threadId` and `runtimeStatus` is null.
+ *
+ * Mapped into `ReportedMcpServer` so `inspectMcpServers` is the only comparison.
+ */
+export interface CodexMcpServerListing {
+  name?: unknown;
+  runtimeStatus?: unknown;
+  authStatus?: unknown;
+  tools?: unknown;
+}
+
+/**
+ * Translate a Codex `mcpServerStatus/list` page into the report
+ * `inspectMcpServers` already understands.
+ *
+ * Returns `undefined` when the listing is absent or empty — same silence as
+ * an unpopulated Claude init report: a harness that did not answer tells us
+ * nothing, and reading that as failure would fire on every healthy session.
+ *
+ * `runtimeStatus` is the connection signal. Cached `tools` never override it:
+ * `{ name: "panel", runtimeStatus: "failed", tools: { panel_set_todo: … } }`
+ * is a drop, which is the reporter's ALL_TOOLS gap after panel_restart_comfyui.
+ * Empty tools is only a fallback when `runtimeStatus` is omitted (older
+ * app-servers, or a poll that forgot `threadId`).
+ */
+export function reportedFromCodexMcpListing(
+  listed: readonly CodexMcpServerListing[] | undefined,
+): ReportedMcpServer[] | undefined {
+  if (!Array.isArray(listed) || listed.length === 0) return undefined;
+  const out: ReportedMcpServer[] = [];
+  for (const entry of listed) {
+    if (!entry || typeof entry.name !== "string" || !entry.name) continue;
+    out.push({ name: entry.name, status: statusOfCodexListing(entry) });
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+/**
+ * Codex `McpServerConnectionStatus`: notStarted | starting | connected |
+ * authenticationRequired | failed | cancelled | disabled.
+ */
+function statusOfCodexListing(entry: CodexMcpServerListing): string {
+  const runtime =
+    typeof entry.runtimeStatus === "string" ? entry.runtimeStatus.trim().toLowerCase() : "";
+  if (runtime) {
+    if (runtime === "connected") return "connected";
+    if (runtime === "starting") return "pending";
+    if (runtime === "authenticationrequired") return "needs-auth";
+    if (runtime === "disabled") return "disabled";
+    // notStarted / failed / cancelled — drop shapes a reload can speak to.
+    if (
+      runtime === "failed" ||
+      runtime === "cancelled" ||
+      runtime === "notstarted" ||
+      runtime === "error"
+    ) {
+      return "failed";
+    }
+    // Unrecognized runtimeStatus: closed list, same as inspectMcpServers —
+    // a new value must not become an alarm.
+    return "connected";
+  }
+  const auth =
+    typeof entry.authStatus === "string" ? entry.authStatus.trim().toLowerCase() : "";
+  if (auth === "notloggedin") return "needs-auth";
+  // Older listing with no runtimeStatus: empty inventory is a drop, a
+  // populated (possibly cached) map is not proof of connected either, but
+  // without a runtime field we cannot tell a healthy row from a stale cache
+  // — silence, matching "omit threadId → runtimeStatus is null".
+  if (toolsInventoryEmpty(entry.tools)) return "failed";
+  return "connected";
+}
+
+/** Codex serializes `tools` as a name→schema map; older stubs used an array. */
+function toolsInventoryEmpty(tools: unknown): boolean {
+  if (Array.isArray(tools)) return tools.length === 0;
+  if (tools && typeof tools === "object") return Object.keys(tools).length === 0;
+  return false;
+}
+
+/**
  * Statuses that mean the server is not usable. Taken from the SDK's own
  * `McpServerStatus` union (`connected | failed | needs-auth | pending |
  * disabled`), plus `error` for a host that words it that way.

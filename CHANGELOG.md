@@ -6,13 +6,32 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### Fixed
+
+- **Codex `panel_*` tools reappear after `panel_restart_comfyui` / a mid-session MCP drop (#1524).**
+  After a forced ComfyUI restart the Codex session resumed with the generic
+  comfyui gateway and no `mcp__panel__*` entries in `ALL_TOOLS`;
+  `tools.mcp__panel__panel_set_todo` then threw `TypeError: … is not a function`.
+  Codex does not auto-reconnect HTTP MCP (stdio `comfyui` is respawned by the
+  client; `panel` is not). The Codex lane now polls `mcpServerStatus/list` at
+  each turn end and reads `runtimeStatus` (cached `tools` do not prove the
+  thread is connected). When `panel` is down, one `config/mcpServer/reload`
+  is queued per down-episode — Codex's only reconnect verb, so a healthy
+  stdio `comfyui` child is bounced with it, between turns. Same bounded
+  recovery #1681 added for Claude. The drop's cause is still open; this is
+  the remaining user-visible half (re-register after the drop).
+
+### MCP
+
+#### Fixed
+- Codex panel_* tools reappear after panel_restart_comfyui (#1524)
+
 ## [0.52.57] - 2026-08-22
 
 ### MCP
 
 #### Fixed
 - an unroutable show_media names who it is queued for, not whoever hellos next (#2041)
-
 
 ## [0.52.56] - 2026-08-22
 

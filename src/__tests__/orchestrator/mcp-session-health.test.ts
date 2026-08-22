@@ -29,6 +29,7 @@ import {
   inspectMcpServers,
   reconnectableMcpStatus,
   recoveredMcpNotice,
+  reportedFromCodexMcpListing,
   unrecoveredMcpNotice,
 } from "../../orchestrator/mcp-session-health.js";
 
@@ -236,5 +237,102 @@ describe("recoveredMcpNotice — claims only what the status poll reported", () 
     const note = recoveredMcpNotice(["comfyui"], false);
     expect(note).toMatch(/connected again/);
     expect(note).not.toMatch(/reconnect brought/);
+  });
+});
+
+describe("reportedFromCodexMcpListing — live runtimeStatus, not cached tools (#1524)", () => {
+  const CACHED = { panel_graph_outline: {}, panel_set_todo: {} };
+
+  it("says nothing when the listing is absent or empty", () => {
+    expect(reportedFromCodexMcpListing(undefined)).toBeUndefined();
+    expect(reportedFromCodexMcpListing([])).toBeUndefined();
+  });
+
+  it("reads runtimeStatus=connected as connected", () => {
+    expect(
+      reportedFromCodexMcpListing([
+        { name: "comfyui", runtimeStatus: "connected", tools: { list_tools: {} } },
+        { name: "panel", runtimeStatus: "connected", tools: CACHED },
+      ]),
+    ).toEqual([
+      { name: "comfyui", status: "connected" },
+      { name: "panel", status: "connected" },
+    ]);
+  });
+
+  it("treats runtimeStatus=failed as a drop even when tools are still cached", () => {
+    // The live app-server row after a dropped HTTP session: panel is named,
+    // tools inventory is cached, runtimeStatus is failed. Cached tools must
+    // not look like connected — that is the ALL_TOOLS gap in the report.
+    const reported = reportedFromCodexMcpListing([
+      { name: "comfyui", runtimeStatus: "connected", tools: { list_tools: {} } },
+      { name: "panel", runtimeStatus: "failed", tools: CACHED },
+    ]);
+    expect(inspectMcpServers(CONFIGURED, reported)).toEqual({
+      degraded: [{ name: "panel", status: "failed" }],
+      pending: [],
+    });
+    expect(reconnectableMcpStatus("failed")).toBe(true);
+  });
+
+  it("treats runtimeStatus=failed with omitted tools as a drop", () => {
+    const reported = reportedFromCodexMcpListing([
+      { name: "comfyui", runtimeStatus: "connected" },
+      { name: "panel", runtimeStatus: "failed" },
+    ]);
+    expect(inspectMcpServers(CONFIGURED, reported).degraded).toEqual([
+      { name: "panel", status: "failed" },
+    ]);
+  });
+
+  it("maps the rest of the live runtimeStatus vocabulary", () => {
+    expect(reportedFromCodexMcpListing([{ name: "panel", runtimeStatus: "starting" }])).toEqual([
+      { name: "panel", status: "pending" },
+    ]);
+    expect(
+      reportedFromCodexMcpListing([{ name: "panel", runtimeStatus: "authenticationRequired" }]),
+    ).toEqual([{ name: "panel", status: "needs-auth" }]);
+    expect(reportedFromCodexMcpListing([{ name: "panel", runtimeStatus: "disabled" }])).toEqual([
+      { name: "panel", status: "disabled" },
+    ]);
+    expect(reportedFromCodexMcpListing([{ name: "panel", runtimeStatus: "notStarted" }])).toEqual([
+      { name: "panel", status: "failed" },
+    ]);
+    expect(reportedFromCodexMcpListing([{ name: "panel", runtimeStatus: "cancelled" }])).toEqual([
+      { name: "panel", status: "failed" },
+    ]);
+  });
+
+  it("starting with an empty tools map is pending, not a false drop", () => {
+    const reported = reportedFromCodexMcpListing([
+      { name: "panel", runtimeStatus: "starting", tools: {} },
+    ]);
+    expect(inspectMcpServers(["panel"], reported)).toEqual({ degraded: [], pending: ["panel"] });
+  });
+
+  it("treats a server MISSING from a populated listing as absent", () => {
+    const reported = reportedFromCodexMcpListing([
+      { name: "comfyui", runtimeStatus: "connected", tools: { list_tools: {} } },
+    ]);
+    expect(inspectMcpServers(CONFIGURED, reported)).toEqual({
+      degraded: [{ name: "panel", status: null }],
+      pending: [],
+    });
+  });
+
+  it("empty tools is a drop only when runtimeStatus is omitted", () => {
+    // Older app-servers, or a poll without threadId (runtimeStatus is null).
+    expect(reportedFromCodexMcpListing([{ name: "panel", tools: {} }])).toEqual([
+      { name: "panel", status: "failed" },
+    ]);
+    expect(reportedFromCodexMcpListing([{ name: "panel", tools: [] }])).toEqual([
+      { name: "panel", status: "failed" },
+    ]);
+  });
+
+  it("does not invent a failure from a listing that omits runtimeStatus and tools", () => {
+    expect(reportedFromCodexMcpListing([{ name: "panel" }])).toEqual([
+      { name: "panel", status: "connected" },
+    ]);
   });
 });

@@ -57,6 +57,15 @@ import {
 } from "./agent-backend.js";
 import type { ImageRef } from "./panel-agent.js";
 import { MAX_SESSION_PREVIEW_BYTES, previewByteBudgetLabel } from "./preview-budget.js";
+import {
+  inspectMcpServers,
+  reconnectableMcpStatus,
+  recoveredMcpNotice,
+  reportedFromCodexMcpListing,
+  unrecoveredMcpNotice,
+  type CodexMcpServerListing,
+  type DegradedMcpServer,
+} from "./mcp-session-health.js";
 
 function msgOf(err: unknown): string {
   return errorText(err);
@@ -851,6 +860,15 @@ export class CodexBackend implements AgentBackend {
   /** The live thread + turn ids — used for `turn/interrupt`. */
   private threadId: string | null = null;
   private turnId: string | null = null;
+  /** MCP servers this run currently knows are DOWN, name → reconnect attempted.
+   *  Codex does not auto-reconnect HTTP MCP (openai/codex#11489); we poll
+   *  `mcpServerStatus/list` at each turn end and queue one
+   *  `config/mcpServer/reload` per down-episode (#1524). */
+  private mcpDown = new Map<string, boolean>();
+  /** Names whose `config/mcpServer/reload` was queued this episode and has
+   *  not been judged yet. The app-server applies the refresh on the NEXT
+   *  turn, so the following poll is the verdict — not an immediate re-read. */
+  private mcpReloadPending = new Set<string>();
   /** The model requested for new turns (mutable for a future live setModel). */
   private model: string | undefined;
   /** The Codex reasoning effort for new turns, already mapped to a valid Codex
@@ -1116,6 +1134,8 @@ export class CodexBackend implements AgentBackend {
    * next batch (the channel async-iteration IS the turn-gate).
    */
   async *run(opts: BackendStartOptions): AsyncGenerator<AgentEvent> {
+    this.mcpDown.clear();
+    this.mcpReloadPending.clear();
     await this.prepare();
     const client = this.client;
     if (!client) throw new Error("codex app-server not initialized");
@@ -1200,6 +1220,155 @@ export class CodexBackend implements AgentBackend {
       liveClient = this.client;
       yield* stampTurn(this.runTurn(liveClient, turn, opts.onActivity), ++turnSeq);
       if (!this.client) return;
+      liveClient = this.client;
+      try {
+        for (const ev of await this.checkMcpServers(liveClient)) yield ev;
+      } catch (err) {
+        logger.debug(`[codex-backend] checkMcpServers: ${msgOf(err)}`);
+      }
+    }
+  }
+
+  /**
+   * Watch the Codex toolset for a MID-SESSION drop and queue one reconnect
+   * (#1524). Codex's MCP client is one-shot (openai/codex#11489): stdio
+   * `comfyui` is respawned by the client, HTTP `panel` is not. After
+   * `panel_restart_comfyui` the session resumes with ALL_TOOLS missing every
+   * `mcp__panel__*` entry while the generic comfyui gateway remains.
+   *
+   * Detection is one `mcpServerStatus/list` poll per turn end (with this
+   * thread's id, so `runtimeStatus` is filled) against the servers this
+   * session was given. Cached `tools` do not prove connected. Recovery is
+   * `config/mcpServer/reload`, which the app-server applies on the NEXT
+   * turn — so this turn does not claim a verdict from an immediate re-read.
+   * The next poll is the verdict.
+   * One attempt per down-episode; `needs-auth` / `disabled` are reported
+   * and not retried. A poll or reload that throws leaves the session as
+   * informed as before and never takes the turn stream down.
+   */
+  private async checkMcpServers(client: AppServerClient): Promise<AgentEvent[]> {
+    const names = Object.keys(this.deps.mcpServers ?? {});
+    if (names.length === 0) return [];
+    const reported = await this.pollMcpStatus(client);
+    if (!reported) return [];
+    const events: AgentEvent[] = [];
+    const degraded = inspectMcpServers(names, reported).degraded;
+    const downNow = new Set(degraded.map((d) => d.name));
+
+    // Verdict on a reload queued at the previous turn end. The refresh is
+    // applied when the next turn starts, so THIS poll is the first honest read.
+    const pendingVerdict = [...this.mcpReloadPending];
+    this.mcpReloadPending.clear();
+
+    const backByUs: string[] = [];
+    const backOnItsOwn: string[] = [];
+    for (const name of [...this.mcpDown.keys()]) {
+      if (downNow.has(name)) continue;
+      const weTried = this.mcpDown.get(name) === true || pendingVerdict.includes(name);
+      this.mcpDown.delete(name);
+      (weTried ? backByUs : backOnItsOwn).push(name);
+    }
+    if (backByUs.length) {
+      logger.info(`[codex-backend] MCP reload brought back: ${backByUs.join(", ")}`);
+      events.push({ type: "error", sessionNotice: true, message: recoveredMcpNotice(backByUs, true) });
+    }
+    if (backOnItsOwn.length) {
+      logger.info(`[codex-backend] MCP servers connected again on their own: ${backOnItsOwn.join(", ")}`);
+      events.push({ type: "error", sessionNotice: true, message: recoveredMcpNotice(backOnItsOwn, false) });
+    }
+
+    const stillDownAfterReload = degraded.filter((d) => pendingVerdict.includes(d.name));
+    if (stillDownAfterReload.length) {
+      this.reportDegradedMcp(stillDownAfterReload, "lost");
+      events.push({
+        type: "error",
+        sessionNotice: true,
+        message: unrecoveredMcpNotice(stillDownAfterReload, "reconnect-failed"),
+      });
+    }
+
+    const triable = degraded.filter(
+      (d) =>
+        !pendingVerdict.includes(d.name) &&
+        this.mcpDown.get(d.name) !== true &&
+        reconnectableMcpStatus(d.status),
+    );
+    if (triable.length > 0) {
+      for (const d of triable) this.mcpDown.set(d.name, true);
+      try {
+        await client.request("config/mcpServer/reload", {});
+        for (const d of triable) this.mcpReloadPending.add(d.name);
+      } catch (err) {
+        logger.debug(`[codex-backend] config/mcpServer/reload: ${msgOf(err)}`);
+        this.reportDegradedMcp(triable, "lost");
+        events.push({
+          type: "error",
+          sessionNotice: true,
+          message: unrecoveredMcpNotice(triable, "unverified"),
+        });
+      }
+    }
+
+    const unreported = degraded.filter(
+      (d) =>
+        !pendingVerdict.includes(d.name) &&
+        !triable.some((t) => t.name === d.name) &&
+        !this.mcpDown.has(d.name),
+    );
+    const notRetriable = unreported.filter((d) => !reconnectableMcpStatus(d.status));
+    const unsupported = unreported.filter((d) => reconnectableMcpStatus(d.status));
+    for (const d of unreported) this.mcpDown.set(d.name, true);
+    if (notRetriable.length) {
+      this.reportDegradedMcp(notRetriable, "lost");
+      events.push({
+        type: "error",
+        sessionNotice: true,
+        message: unrecoveredMcpNotice(notRetriable, "not-retriable"),
+      });
+    }
+    if (unsupported.length) {
+      this.reportDegradedMcp(unsupported, "lost");
+      events.push({
+        type: "error",
+        sessionNotice: true,
+        message: unrecoveredMcpNotice(unsupported, "unsupported"),
+      });
+    }
+    return events;
+  }
+
+  private reportDegradedMcp(degraded: readonly DegradedMcpServer[], when: string): void {
+    logger.error(
+      `[codex-backend] session ${this.threadId?.slice(0, 8) ?? "?"} ${when} WITHOUT ` +
+        `${degraded.map((d) => `${d.name}=${d.status ?? "absent"}`).join(" ")}`,
+    );
+  }
+
+  private async pollMcpStatus(client: AppServerClient): Promise<
+    Array<{ name: string; status: string }> | undefined
+  > {
+    try {
+      const listed: CodexMcpServerListing[] = [];
+      let cursor: string | undefined;
+      for (let page = 0; page < 8; page++) {
+        const res = await client.request<{
+          data?: CodexMcpServerListing[];
+          nextCursor?: string | null;
+        }>("mcpServerStatus/list", {
+          detail: "toolsAndAuthOnly",
+          limit: 50,
+          ...(this.threadId ? { threadId: this.threadId } : {}),
+          ...(cursor ? { cursor } : {}),
+        });
+        if (!Array.isArray(res?.data)) break;
+        listed.push(...res.data);
+        cursor = res.nextCursor ?? undefined;
+        if (!cursor) break;
+      }
+      return reportedFromCodexMcpListing(listed);
+    } catch (err) {
+      logger.debug(`[codex-backend] mcpServerStatus/list: ${msgOf(err)}`);
+      return undefined;
     }
   }
 
