@@ -4546,55 +4546,12 @@ function saveLandedAfterTimeout(list: Record<string, unknown> | null): boolean {
 }
 
 /**
- * Capture the active workflow BEFORE an in-place save is dispatched. The later
- * timeout probe is otherwise allowed to observe a different, clean workflow
- * after a tab switch and mistake that canvas for the save that timed out.
- */
-async function activeWorkflowBeforeSave(ctx: PanelToolCtx): Promise<Record<string, unknown> | null> {
-  try {
-    const list = parseToolResultJson(await ctx.call({ cmd: "workflow_list" }, 6000));
-    const active = list?.active;
-    if (active && typeof active === "object" && !Array.isArray(active)) {
-      return active as Record<string, unknown>;
-    }
-    const workflows = list?.workflows;
-    if (Array.isArray(workflows)) {
-      const flagged = workflows.find(
-        (record) =>
-          record &&
-          typeof record === "object" &&
-          !Array.isArray(record) &&
-          (record as Record<string, unknown>).active === true,
-      );
-      if (flagged && typeof flagged === "object" && !Array.isArray(flagged)) {
-        return flagged as Record<string, unknown>;
-      }
-    }
-  } catch {
-    // A missing pre-save identity makes a late success unprovable; the timeout
-    // path below will stay outcome-unknown rather than guess.
-  }
-  return null;
-}
-
-function saveProbeMatchesBeforeSave(
-  before: Record<string, unknown> | null,
-  list: Record<string, unknown> | null,
-): boolean {
-  if (!before || !list?.active || typeof list.active !== "object" || Array.isArray(list.active)) {
-    return false;
-  }
-  // identityVerdict compares every stable field it can observe and rejects
-  // contradictions, including a same-path record with a different UUID.
-  return identityVerdict(before as OpenWorkflowRecord, list.active) === true;
-}
-
-/**
- * A first save legitimately changes `tmp:<instance>` into `wf:<path>`. In that
- * one case the panel's timeout diagnostic is the transaction's only bridge: it
- * reports the successor label observed while the save was in flight. Accept a
- * clean probe only when it is still that reported successor, never merely any
- * clean saved workflow.
+ * A first save legitimately changes `tmp:<instance>` into `wf:<path>`. The
+ * updated panel publishes the save command's eventual success under its exact
+ * rid, so only that receipt can bridge the identity change. Older panels do not
+ * publish receipts; they retain the historical clean-state fallback below for
+ * compatibility, while updated panels fail closed when no matching receipt is
+ * present.
  */
 function saveProbeMatchesLateReceipt(
   saveRid: string | undefined,
@@ -4659,7 +4616,6 @@ function saveAckAfterTimeout(list: Record<string, unknown> | null): ToolResult {
 async function settleWorkflowSaveTimeout(
   res: ToolResult,
   ctx: PanelToolCtx,
-  before: Record<string, unknown> | null,
   saveRid: string | undefined,
 ): Promise<ToolResult> {
   if (!isWorkflowSaveBudgetTimeout(res)) return res;
@@ -4668,9 +4624,10 @@ async function settleWorkflowSaveTimeout(
     try {
       const listRes = await ctx.call({ cmd: "workflow_list" }, 6000);
       const list = parseToolResultJson(listRes);
+      const receiptsAdvertised = Array.isArray(list?.late_save_receipts);
       if (
         saveLandedAfterTimeout(list) &&
-        (saveProbeMatchesLateReceipt(saveRid, list) || saveProbeMatchesBeforeSave(before, list))
+        (saveProbeMatchesLateReceipt(saveRid, list) || !receiptsAdvertised)
       ) {
         return saveAckAfterTimeout(list);
       }
@@ -16573,10 +16530,6 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             : ctx.call({ cmd: "workflow_save" }, 15000, (rid) => {
                 saveRid = rid;
               });
-        // #2078 — retain the identity of the canvas the in-place save was sent
-        // to. A later clean workflow_list is only a late acknowledgement when
-        // it still names this same canvas; a clean tab after a switch is not.
-        const saveTargetBefore = args.name ? null : await activeWorkflowBeforeSave(ctx);
         let res = await saveOnce();
         // #1710 — dest tab + dest nodes, extra still stamped as the save-as SOURCE.
         // Rebind extra to the confirmed dest, then retry the same save once.
@@ -16590,7 +16543,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             }
           }
         }
-        if (res.isError && !args.name) res = await settleWorkflowSaveTimeout(res, ctx, saveTargetBefore, saveRid);
+        if (res.isError && !args.name) res = await settleWorkflowSaveTimeout(res, ctx, saveRid);
         if (res.isError) {
           // #1873 — named Save-As 409s by contract; the panel's "choose a different
           // name" is what forced a third file. Keep the 409 and name the rename path.

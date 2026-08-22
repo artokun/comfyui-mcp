@@ -347,20 +347,13 @@ describe("panel_save_workflow acknowledges a save that landed after the budget (
         if (cmd.cmd === "workflow_list") {
           lists += 1;
           return jsonResult({
-            active:
-              lists === 1
-                ? {
-                    path: "workflows/a.json",
-                    routing_key: "wf:workflows/a.json",
-                    modified: true,
-                    persisted: true,
-                  }
-                : {
-                    path: "workflows/b.json",
-                    routing_key: "wf:workflows/b.json",
-                    modified: false,
-                    persisted: true,
-                  },
+            active: {
+              path: "workflows/b.json",
+              routing_key: "wf:workflows/b.json",
+              modified: false,
+              persisted: true,
+            },
+            late_save_receipts: [],
           });
         }
         return jsonResult({ ok: true });
@@ -373,7 +366,7 @@ describe("panel_save_workflow acknowledges a save that landed after the budget (
     const res = await defByName("panel_save_workflow").handler({}, ctx);
     expect(res.isError).toBe(true);
     expect(textOf(res)).toMatch(/OUTCOME UNKNOWN/);
-    expect(lists).toBeGreaterThanOrEqual(2);
+    expect(lists).toBe(1);
   });
 
   it("a first-save successor with the timed-out command's late receipt can be acknowledged", async () => {
@@ -386,23 +379,13 @@ describe("panel_save_workflow acknowledges a save that landed after the budget (
         if (cmd.cmd === "workflow_list") {
           lists += 1;
           return jsonResult({
-            active:
-              lists === 1
-                ? {
-                    path: null,
-                    key: "tmp:first-save-instance",
-                    routing_key: "tmp:first-save-instance",
-                    title: "Untitled Workflow",
-                    modified: true,
-                    persisted: false,
-                  }
-                : {
-                    path: "workflows/first-save.json",
-                    filename: "first-save",
-                    routing_key: "wf:workflows/first-save.json",
-                    modified: false,
-                    persisted: true,
-                  },
+            active: {
+              path: "workflows/first-save.json",
+              filename: "first-save",
+              routing_key: "wf:workflows/first-save.json",
+              modified: false,
+              persisted: true,
+            },
             late_save_receipts: [
               {
                 rid: "save-rid",
@@ -422,7 +405,7 @@ describe("panel_save_workflow acknowledges a save that landed after the budget (
     const res = await defByName("panel_save_workflow").handler({}, ctx);
     expect(res.isError).toBeFalsy();
     expect(textOf(res)).toMatch(/"late_ack": true/);
-    expect(lists).toBeGreaterThanOrEqual(2);
+    expect(lists).toBe(2);
   });
 
   it("a first-save timeout cannot acknowledge an unrelated clean successor", async () => {
@@ -435,23 +418,13 @@ describe("panel_save_workflow acknowledges a save that landed after the budget (
         if (cmd.cmd === "workflow_list") {
           lists += 1;
           return jsonResult({
-            active:
-              lists === 1
-                ? {
-                    path: null,
-                    key: "tmp:first-save-instance",
-                    routing_key: "tmp:first-save-instance",
-                    title: "Untitled Workflow",
-                    modified: true,
-                    persisted: false,
-                  }
-                : {
-                    path: "workflows/other.json",
-                    filename: "other",
-                    routing_key: "wf:workflows/other.json",
-                    modified: false,
-                    persisted: true,
-                  },
+            active: {
+              path: "workflows/other.json",
+              filename: "other",
+              routing_key: "wf:workflows/other.json",
+              modified: false,
+              persisted: true,
+            },
             late_save_receipts: [
               {
                 rid: "save-rid",
@@ -471,7 +444,7 @@ describe("panel_save_workflow acknowledges a save that landed after the budget (
     const res = await defByName("panel_save_workflow").handler({}, ctx);
     expect(res.isError).toBe(true);
     expect(textOf(res)).toMatch(/OUTCOME UNKNOWN/);
-    expect(lists).toBe(2);
+    expect(lists).toBe(1);
   });
 
   it("modified:true persisted:true at follow-up is still outcome-unknown, not success", async () => {

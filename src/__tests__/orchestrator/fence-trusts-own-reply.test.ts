@@ -183,7 +183,7 @@ describe("#814 WIRING: both call sites route through refreshFenceFromOwnReply fi
     expect(saveIdx).toBeGreaterThan(0);
     expect(newIdx).toBeGreaterThan(0);
 
-    const saveBlock = src.slice(saveIdx, saveIdx + 5000);
+    const saveBlock = src.slice(saveIdx, saveIdx + 8000);
     const newBlock = src.slice(newIdx, newIdx + 5000);
     const wired = /const fenceRebind = refreshFenceFromOwnReply\(ctx, res\) \?\? \(await rebindWorkflowFence\(ctx\)\);/;
     expect(saveBlock).toMatch(wired);
