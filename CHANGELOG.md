@@ -6,6 +6,14 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.51] - 2026-08-21
+
+### MCP
+
+#### Fixed
+- the panel_* argument an agent guesses first is the one that works (#1985)
+
+
 ## [0.52.50] - 2026-08-21
 
 ### MCP
