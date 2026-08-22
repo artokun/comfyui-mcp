@@ -267,9 +267,12 @@ describe("panel_save_workflow acknowledges a save that landed after the budget (
   it("THE REPORTED CASE: modified:false persisted:true after the 13s budget is treated as saved", async () => {
     const calls: Forwarded[] = [];
     const ctx: PanelToolCtx = {
-      call: async (cmd) => {
+      call: async (cmd, _timeoutMs, onDispatchedRid) => {
         calls.push(cmd);
-        if (cmd.cmd === "workflow_save") return errorResult(SAVE_TIMEOUT);
+        if (cmd.cmd === "workflow_save") {
+          onDispatchedRid?.("save-rid");
+          return errorResult(SAVE_TIMEOUT);
+        }
         if (cmd.cmd === "workflow_list") {
           return jsonResult({
             active: {
@@ -279,6 +282,13 @@ describe("panel_save_workflow acknowledges a save that landed after the budget (
               modified: false,
               persisted: true,
             },
+            late_save_receipts: [
+              {
+                rid: "save-rid",
+                cmd: "workflow_save",
+                result: { saved: true, routing_key: "wf:workflows/graph.json" },
+              },
+            ],
           });
         }
         return jsonResult({ ok: true });
@@ -306,9 +316,12 @@ describe("panel_save_workflow acknowledges a save that landed after the budget (
     const calls: Forwarded[] = [];
     let lists = 0;
     const ctx: PanelToolCtx = {
-      call: async (cmd) => {
+      call: async (cmd, _timeoutMs, onDispatchedRid) => {
         calls.push(cmd);
-        if (cmd.cmd === "workflow_save") return errorResult(SAVE_TIMEOUT_2078);
+        if (cmd.cmd === "workflow_save") {
+          onDispatchedRid?.("save-rid");
+          return errorResult(SAVE_TIMEOUT_2078);
+        }
         if (cmd.cmd === "workflow_list") {
           lists += 1;
           return jsonResult({
@@ -319,6 +332,13 @@ describe("panel_save_workflow acknowledges a save that landed after the budget (
               modified: lists === 1,
               persisted: true,
             },
+            late_save_receipts: [
+              {
+                rid: "save-rid",
+                cmd: "workflow_save",
+                result: { saved: true, routing_key: "wf:workflows/graph.json" },
+              },
+            ],
           });
         }
         return jsonResult({ ok: true });

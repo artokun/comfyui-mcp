@@ -4548,10 +4548,9 @@ function saveLandedAfterTimeout(list: Record<string, unknown> | null): boolean {
 /**
  * A first save legitimately changes `tmp:<instance>` into `wf:<path>`. The
  * updated panel publishes the save command's eventual success under its exact
- * rid, so only that receipt can bridge the identity change. Older panels do not
- * publish receipts; they retain the historical clean-state fallback below for
- * compatibility, while updated panels fail closed when no matching receipt is
- * present.
+ * rid, so only that receipt can bridge the identity change. If the receipt field
+ * is absent or does not match, the outcome remains unknown rather than crediting
+ * a clean workflow that may belong to a tab the user switched to.
  */
 function saveProbeMatchesLateReceipt(
   saveRid: string | undefined,
@@ -4624,10 +4623,9 @@ async function settleWorkflowSaveTimeout(
     try {
       const listRes = await ctx.call({ cmd: "workflow_list" }, 6000);
       const list = parseToolResultJson(listRes);
-      const receiptsAdvertised = Array.isArray(list?.late_save_receipts);
       if (
         saveLandedAfterTimeout(list) &&
-        (saveProbeMatchesLateReceipt(saveRid, list) || !receiptsAdvertised)
+        saveProbeMatchesLateReceipt(saveRid, list)
       ) {
         return saveAckAfterTimeout(list);
       }
