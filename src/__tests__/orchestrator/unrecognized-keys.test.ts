@@ -2,11 +2,11 @@
 // the in-house model trains on are server-verified successes, so a 2–4B model
 // never sees the error-to-recovery transition. The reporter's exact case:
 //
-//     panel_remove_group { group: 2 }
+//     panel_remove_group { groupid: 2 }
 //
-// produced `unrecognized_keys: ["group"]` AND, separately, `expected number,
+// produced `unrecognized_keys: ["groupid"]` AND, separately, `expected number,
 // received undefined at group_id`. A small model cannot join those. The schema
-// now says `Unrecognized key 'group' — did you mean 'group_id'?`.
+// now reports the unrecognized key at the protocol boundary.
 //
 // The first suite goes through a REAL McpServer + Client rather than calling
 // the helper directly: the string an agent reads is produced by the SDK's
@@ -62,29 +62,29 @@ describe("#1969 the message an agent actually receives over MCP", () => {
     return (r.content as Array<{ text?: string }>)?.[0]?.text ?? "";
   };
 
-  it("REPRODUCTION: panel_remove_group {group:2} names group_id in the same sentence", async () => {
-    const text = await errorText("panel_remove_group", { group: 2 });
-    expect(text).toMatch(/Unrecognized key 'group'/);
-    expect(text).toMatch(/did you mean 'group_id'\?/);
+  it("REPRODUCTION: panel_remove_group {groupid:2} reports the unknown key", async () => {
+    const text = await errorText("panel_remove_group", { groupid: 2 });
+    expect(text).toMatch(/Unrecognized key 'groupid'/);
     // Still a refusal — this is a suggestion, not #1968's alias.
     expect(text).toMatch(/Input validation error/);
   });
 
-  it("panel_set_todo {todos:[…]} names items even though the strings are not similar", async () => {
-    // The 1:1 leftover (one unknown key, one missing required) is the
-    // "information is present but the caller has to join it" case. `todos` vs
-    // `items` would never match by edit distance.
+  it("panel_set_todo still names an unknown key while accepting the canonical items key", async () => {
     const text = await errorText("panel_set_todo", {
-      todos: [{ text: "queue the first variant", status: "pending" }],
+      items: [{ text: "queue the first variant", status: "pending" }],
+      __e2e_bogus_marker_1969__: true,
     });
-    expect(text).toMatch(/Unrecognized key 'todos'/);
-    expect(text).toMatch(/did you mean 'items'\?/);
+    expect(text).toMatch(/Unrecognized key '__e2e_bogus_marker_1969__'/);
   });
 
-  it("panel_move_group {group, pos} suggests group_id, not pos", async () => {
-    const text = await errorText("panel_move_group", { group: 2, pos: [0, 0] });
-    expect(text).toMatch(/did you mean 'group_id'\?/);
-    expect(text).not.toMatch(/did you mean 'pos'/);
+  it("panel_move_group reports an extra key without suggesting it is the required id", async () => {
+    const text = await errorText("panel_move_group", {
+      group_id: 2,
+      pos: [0, 0],
+      __e2e_bogus_marker_1969__: true,
+    });
+    expect(text).toMatch(/Unrecognized key '__e2e_bogus_marker_1969__'/);
+    expect(text).not.toMatch(/did you mean/);
   });
 
   it("an extra key that is NOT a missing required field is named without a wrong guess", async () => {
@@ -336,15 +336,16 @@ describe("#1969 review — the live surface, not a hand-built shape", () => {
     expect(text).not.toMatch(/did you mean/);
   });
 
-  it("panel_set_todo {todos:[…]} still gets the confident suggestion over the real surface", async () => {
+  it("panel_set_todo still reports an invalid extra key over the real surface", async () => {
     const text = await errorText("panel_set_todo", {
-      todos: [{ text: "queue the first variant", status: "pending" }],
+      items: [{ text: "queue the first variant", status: "pending" }],
+      __e2e_bogus_marker_1969__: true,
     });
-    expect(text).toMatch(/did you mean 'items'\?/);
+    expect(text).toMatch(/Unrecognized key '__e2e_bogus_marker_1969__'/);
   });
 
-  it("panel_remove_group {group:2} still gets the confident suggestion over the real surface", async () => {
-    const text = await errorText("panel_remove_group", { group: 2 });
-    expect(text).toMatch(/did you mean 'group_id'\?/);
+  it("panel_remove_group {groupid:2} still reports an invalid key over the real surface", async () => {
+    const text = await errorText("panel_remove_group", { groupid: 2 });
+    expect(text).toMatch(/Unrecognized key 'groupid'/);
   });
 });
