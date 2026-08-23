@@ -6,6 +6,14 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.79] - 2026-08-23
+
+### MCP
+
+#### Fixed
+- explain bare Codex `Bad Request` turns with scrubbed diagnostic context (#2112)
+
+
 ## [0.52.78] - 2026-08-23
 
 ### MCP
