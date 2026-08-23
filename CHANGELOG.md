@@ -6,6 +6,15 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.81] - 2026-08-23
+
+### MCP
+
+#### Changed
+- fix/2114 bad request diagnostics (#2159)
+- release-0.52.80 (#2158)
+
+
 ## [0.52.80] - 2026-08-23
 
 ### MCP
