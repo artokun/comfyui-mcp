@@ -54,6 +54,28 @@ describe("formatCodexTurnError (#2112)", () => {
     expect(text).not.toContain("secret prompt");
   });
 
+  it("keeps a numeric 400 marker when a nested provider code wins display precedence (#2114)", () => {
+    const text = formatCodexTurnError({
+      code: 400,
+      message: "Invalid request",
+      data: { code: "invalid_request_error" },
+    });
+
+    expect(text).toContain("HTTP 400 Bad Request");
+    expect(text).toContain("code=invalid_request_error");
+    expect(text).not.toContain("Invalid request");
+  });
+
+  it("does not treat a non-400 transport marker as an HTTP 400", () => {
+    expect(
+      formatCodexTurnError({
+        code: -32600,
+        message: "Invalid request",
+        data: { code: "invalid_request_error" },
+      }),
+    ).toBe("Invalid request");
+  });
+
   it("does not rewrite non-400 provider errors", () => {
     expect(formatCodexTurnError({ message: "provider unavailable", status: 503 })).toBe("provider unavailable");
     expect(formatCodexTurnError({ message: "" })).toBe("");

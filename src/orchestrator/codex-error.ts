@@ -115,19 +115,22 @@ export function formatCodexTurnError(error: unknown): string {
   const sources = [root, envelope, ...nestedSources];
   const status = firstNumber(sources, "status", "statusCode", "httpStatus");
   const codeCandidates = sources.map((source) => readValue(source, "code", "error_code", "errorCode"));
-  // A JSON-RPC transport code (for example -32600) can sit on the root error
-  // while the provider's actionable code is nested in `error.data`. Prefer a
-  // non-empty string diagnostic before falling back to a numeric marker.
-  const rawCode =
-    codeCandidates.find((value) => typeof value === "string" && value.trim()) ??
-    codeCandidates.find((value) => typeof value === "number" && Number.isFinite(value));
-  const code = safeLabel(typeof rawCode === "string" ? rawCode.trim() : undefined);
-  const numericCode =
-    typeof rawCode === "number" && Number.isFinite(rawCode)
-      ? rawCode
-      : typeof rawCode === "string" && /^\d{3}$/.test(rawCode.trim())
-        ? Number(rawCode.trim())
-        : undefined;
+  // Keep the two code roles independent: a provider's string code wins the
+  // displayed `code=...` field, while numeric transport/RPC markers still
+  // participate in HTTP-status classification. An exact numeric 400 wins over
+  // another numeric marker (for example JSON-RPC -32600).
+  const providerCode = codeCandidates.find(
+    (value): value is string => typeof value === "string" && Boolean(value.trim()),
+  );
+  const numericCodes = codeCandidates
+    .map((value) => {
+      if (typeof value === "number" && Number.isFinite(value)) return value;
+      if (typeof value === "string" && /^\d{3}$/.test(value.trim())) return Number(value.trim());
+      return undefined;
+    })
+    .filter((value): value is number => value !== undefined);
+  const numericCode = numericCodes.find((value) => value === 400) ?? numericCodes[0];
+  const code = safeLabel(providerCode?.trim());
   const type = safeLabel(firstString(sources, "type", "error_type", "errorType"));
   const requestId = safeLabel(firstString(sources, "request_id", "requestId"));
   const is400 =
