@@ -45,6 +45,7 @@ import path from "node:path";
 import readline from "node:readline";
 import { logger } from "../utils/logger.js";
 import { errorText, messageText, promptText } from "./error-text.js";
+import { formatCodexTurnError } from "./codex-error.js";
 import { buildAgentSpawnEnv } from "../services/panel-secrets.js";
 import {
   type AgentBackend,
@@ -1715,9 +1716,9 @@ export class CodexBackend implements AgentBackend {
           // "Reconnecting... 2/5" as the final failure. `error` is in the turn
           // liveness set, so this already re-armed the watchdog — keep waiting
           // for either a later terminal error or turn/completed.
-          const e = (params.error ?? {}) as { message?: string };
+          const e = params.error ?? {};
           if (params.willRetry === true) break;
-          const message = e.message ?? "Codex error";
+          const message = formatCodexTurnError(e);
           // #1929 / #2045 — a Windows sharing-violation or stale WinGet path on
           // the bundled code-mode host is the same transient /restart recovered.
           if (tryRetryCodeModeHostSpawn(message)) break;
