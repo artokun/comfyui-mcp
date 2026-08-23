@@ -1739,6 +1739,46 @@ describe("panel-tools: panel_find_nodes (live-graph search)", () => {
   });
 });
 
+describe("panel-tools: panel_query_graph detail widget budget (#1681)", () => {
+  it("advertises a bounded optional cap and accepts the Panel-side range", () => {
+    const def = defByName("panel_query_graph");
+    const schema = z.object(def.schema);
+    expect(Object.keys(def.schema)).toContain("widget_max_chars");
+    expect(schema.safeParse({ widget_max_chars: 2048 }).success).toBe(true);
+    expect(schema.safeParse({ widget_max_chars: 8192 }).success).toBe(true);
+    expect(schema.safeParse({ widget_max_chars: 32768 }).success).toBe(true);
+    expect(schema.safeParse({ widget_max_chars: 2047 }).success).toBe(false);
+    expect(schema.safeParse({ widget_max_chars: 32769 }).success).toBe(false);
+    expect(def.description).toContain("fields:'detail'");
+    expect(def.description).toContain("exactly one explicit `ids` entry");
+  });
+
+  it("forwards a valid detail-only opt-in without changing other graph args", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_query_graph").handler(
+      { ids: [42], fields: "detail", widget_max_chars: 8192 },
+      ctx,
+    );
+    expect(calls[0]).toMatchObject({
+      cmd: "graph_query",
+      ids: [42],
+      fields: "detail",
+      widget_max_chars: 8192,
+    });
+  });
+
+  it("preserves the default/no-argument graph query behavior", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    const parsed = z.object(defByName("panel_query_graph").schema).safeParse({});
+    expect(parsed.success).toBe(true);
+    await defByName("panel_query_graph").handler({}, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "graph_query" });
+    expect(calls[0].widget_max_chars).toBeUndefined();
+    expect(calls[0].fields).toBeUndefined();
+    expect(calls[0].ids).toBeUndefined();
+  });
+});
+
 describe("panel-tools: panel_graph_outline (compact text map)", () => {
   // #809: the outline gained ONE optional argument — `max_chars`, deliberately the same
   // name and clamp as panel_query_graph's, so there is one budget concept to learn. It

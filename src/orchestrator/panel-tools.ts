@@ -6019,6 +6019,8 @@ function fixedCapHint(
 const QUERY_GRAPH_MAX_CHARS_FLOOR = 500;
 const QUERY_GRAPH_MAX_CHARS_DEFAULT = 12000;
 const QUERY_GRAPH_MAX_CHARS_CEILING = 60000;
+const DETAIL_WIDGET_MAX_CHARS_DEFAULT = 2048;
+const DETAIL_WIDGET_MAX_CHARS_CEILING = 32768;
 
 /** The panel's own clamp for graph_query's budget, mirrored so the figure this module
  *  reports and enforces is the one the panel was actually working to. */
@@ -14126,7 +14128,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
   const defs: PanelToolDef[] = [
     def(
       "panel_query_graph",
-      "FILTER or TRAVERSE a SUBSET of the live canvas, for when you ALREADY KNOW what you're looking for. NOT for 'show me the canvas' or any whole-graph overview — call panel_graph_outline FIRST for that. NOT get_workflow's query action (that queries a saved file or JSON you provide, not the live canvas). Filters, traverses, projects and aggregates over the workflow the user is CURRENTLY VIEWING without dumping the whole graph (replaces the old panel_get_graph full-JSON dump; output is TOKEN-BOUNDED with an explicit truncation marker, so a big graph can never flood your context). Combine: `types` (node type contains any), `title` (contains), `where` widget predicates ANDed ('cfg>7', 'steps<=20', 'sampler_name=euler', 'text~sunset' — ops = != >= <= > < ~contains), `ids` (exact nodes — THE way to read ONE node's exact slot/widget detail: {ids:[42], fields:'detail'}), `upstream_of`/`downstream_of` + `depth` (dependency traversal: upstream = what FEEDS that node, downstream = what CONSUMES it; seed at depth 0), `fields` ('compact' one line per node [default], 'ids', 'detail' = the full node summary with slots + connections + mode), `group_by:'type'` (counts only), `limit` (default 40). detail rows include each node's MODE — a 'bypass' node is skipped and a 'mute' node kills everything downstream, so check modes on the path you care about before running (fix with panel_set_node_mode). Every result also carries `groups` (id, title, member node_ids — groups are geometric, trust this list) and, when viewing a SUBGRAPH (after panel_enter_subgraph), `rails` (boundary rail ids/slots). `max_chars` bounds the WHOLE result, those riders included, and the rows you asked for are spent first: on a big graph the riders lose their member ids, then drop out entirely, rather than starving your query — and each says in-band that it did, with the true counts. Typical flow: panel_graph_outline to orient → panel_query_graph to pinpoint/inspect → edit. Read-only.",
+      "FILTER or TRAVERSE a SUBSET of the live canvas, for when you ALREADY KNOW what you're looking for. NOT for 'show me the canvas' or any whole-graph overview — call panel_graph_outline FIRST for that. NOT get_workflow's query action (that queries a saved file or JSON you provide, not the live canvas). Filters, traverses, projects and aggregates over the workflow the user is CURRENTLY VIEWING without dumping the whole graph (replaces the old panel_get_graph full-JSON dump; output is TOKEN-BOUNDED with an explicit truncation marker, so a big graph can never flood your context). Combine: `types` (node type contains any), `title` (contains), `where` widget predicates ANDed ('cfg>7', 'steps<=20', 'sampler_name=euler', 'text~sunset' — ops = != >= <= > < ~contains), `ids` (exact nodes — THE way to read ONE node's exact slot/widget detail: {ids:[42], fields:'detail'}), `upstream_of`/`downstream_of` + `depth` (dependency traversal: upstream = what FEEDS that node, downstream = what CONSUMES it; seed at depth 0), `fields` ('compact' one line per node [default], 'ids', 'detail' = the full node summary with slots + connections + mode), `group_by:'type'` (counts only), `limit` (default 40). detail rows include each node's MODE — a 'bypass' node is skipped and a 'mute' node kills everything downstream, so check modes on the path you care about before running (fix with panel_set_node_mode). Every result also carries `groups` (id, title, member node_ids — groups are geometric, trust this list) and, when viewing a SUBGRAPH (after panel_enter_subgraph), `rails` (boundary rail ids/slots). `max_chars` bounds the WHOLE result, those riders included, and the rows you asked for are spent first: on a big graph the riders lose their member ids, then drop out entirely, rather than starving your query — and each says in-band when it did, with the true counts. `widget_max_chars` raises the per-widget cap only for `fields:'detail'`; use it only with exactly one explicit `ids` entry (for example `{ids:[42], fields:'detail', widget_max_chars:8192}`), with a default of 2048 and a maximum of 32768. It does not change compact, ids, or broad reads. Typical flow: panel_graph_outline to orient → panel_query_graph to pinpoint/inspect → edit. Read-only.",
       {
         types: z.array(z.string()).optional().describe("Node type contains ANY of these (case-insensitive)."),
         title: z.string().optional().describe("Node title contains this."),
@@ -14168,6 +14170,15 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             `Character bound for the WHOLE result, not just its rows (default ${QUERY_GRAPH_MAX_CHARS_DEFAULT}, max ${QUERY_GRAPH_MAX_CHARS_CEILING}). Raise only for deliberate full reads, e.g. layout passes needing every node's geometry. ` +
               "The rows answering your query are spent FIRST and are never dropped to fit the contextual groups/rails riders; those are spent from what is left and say in-band when they were reduced or omitted (#807).",
           ),
+        widget_max_chars: z
+          .number()
+          .int()
+          .min(DETAIL_WIDGET_MAX_CHARS_DEFAULT)
+          .max(DETAIL_WIDGET_MAX_CHARS_CEILING)
+          .optional()
+          .describe(
+            `Optional per-widget character cap for \`fields\`:'detail' only (default ${DETAIL_WIDGET_MAX_CHARS_DEFAULT}, max ${DETAIL_WIDGET_MAX_CHARS_CEILING}). Use only with exactly one explicit \`ids\` entry, such as {ids:[42], fields:'detail'}; compact, ids, and broad reads keep their normal cap.`,
+          ),
       },
       // #807: the reply is fitted to `max_chars` as a WHOLE here — see fitQueryGraphReply.
       // The panel bounds `text`; the `groups`/`rails` riders were never in that
@@ -14188,6 +14199,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             group_by: args.group_by,
             limit: args.limit,
             max_chars: args.max_chars,
+            widget_max_chars: args.widget_max_chars,
           }),
           args.max_chars,
         ),
