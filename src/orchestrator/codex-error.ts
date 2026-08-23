@@ -114,7 +114,13 @@ export function formatCodexTurnError(error: unknown): string {
   ];
   const sources = [root, envelope, ...nestedSources];
   const status = firstNumber(sources, "status", "statusCode", "httpStatus");
-  const rawCode = sources.map((source) => readValue(source, "code", "error_code", "errorCode")).find((value) => value !== undefined);
+  const codeCandidates = sources.map((source) => readValue(source, "code", "error_code", "errorCode"));
+  // A JSON-RPC transport code (for example -32600) can sit on the root error
+  // while the provider's actionable code is nested in `error.data`. Prefer a
+  // non-empty string diagnostic before falling back to a numeric marker.
+  const rawCode =
+    codeCandidates.find((value) => typeof value === "string" && value.trim()) ??
+    codeCandidates.find((value) => typeof value === "number" && Number.isFinite(value));
   const code = safeLabel(typeof rawCode === "string" ? rawCode.trim() : undefined);
   const numericCode =
     typeof rawCode === "number" && Number.isFinite(rawCode)

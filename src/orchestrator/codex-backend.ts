@@ -381,7 +381,16 @@ class AppServerClient {
       const p = this.pending.get(message.id);
       if (!p) return;
       this.pending.delete(message.id);
-      if (message.error) p.reject(new Error(message.error.message ?? `codex app-server ${p.method} failed.`));
+      if (message.error) {
+        // Keep the JSON-RPC error's structured data on the rejected value. A
+        // provider 400 can arrive as a rejected turn/start request rather than
+        // an `error` notification, and its request id/code may only be present
+        // in `error.data` (#2114). The user-facing formatter deliberately
+        // extracts only its safe diagnostic-shaped fields.
+        const error = new Error(message.error.message ?? `codex app-server ${p.method} failed.`);
+        Object.assign(error, message.error);
+        p.reject(error);
+      }
       else p.resolve(message.result ?? {});
       return;
     }
@@ -1887,11 +1896,14 @@ export class CodexBackend implements AgentBackend {
             // Deliberate teardown (interrupt restored/closed the turn): still end
             // with a result so the gate advances, but no user-facing error.
             abortActiveTurn();
-          } else if (tryRetryCodeModeHostSpawn(msgOf(err))) {
-            // retryPending is now true; the dead turn's result is deferred.
           } else {
-            retryPending = false;
-            emitTerminalError(msgOf(err));
+            const message = formatCodexTurnError(err);
+            if (tryRetryCodeModeHostSpawn(message)) {
+              // retryPending is now true; the dead turn's result is deferred.
+            } else {
+              retryPending = false;
+              emitTerminalError(message);
+            }
           }
         });
     };
