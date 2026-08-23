@@ -6,6 +6,17 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.80] - 2026-08-23
+
+### MCP
+
+#### Fixed
+- explain bare bad request turns (#2155)
+
+#### Changed
+- fix-mcp-panel-detail-widget-budget (#2157)
+
+
 ## [0.52.79] - 2026-08-23
 
 ### MCP
