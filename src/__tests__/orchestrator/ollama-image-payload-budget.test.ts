@@ -18,7 +18,7 @@
 // The reproduction below is the reported shape exactly: an image lands on one
 // turn, and a later PLAIN-TEXT turn is refused for size.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { OllamaBackend, type McpToolClient } from "../../orchestrator/ollama-backend.js";
+import { OllamaBackend, imagePayloadBudgetBytes, type McpToolClient } from "../../orchestrator/ollama-backend.js";
 import type { AgentEvent, NeutralTurn } from "../../orchestrator/agent-backend.js";
 
 type OpenAiMsg = {
@@ -186,13 +186,42 @@ describe("#2221 — inline image payload is bounded before the request is sent",
     expect(assistantTexts(events).some((t) => t.includes("dropped"))).toBe(false);
   });
 
-  it("ignores a non-numeric budget override rather than dropping every image", async () => {
-    // `=30MB` parses to NaN. Obeying it would compare against NaN, which is
-    // false for `<=`, and strip every image on every request forever.
+  // Every unusable override falls back to the default instead of being obeyed.
+  // The failure directions differ and both are silent, which is why each value
+  // is exercised rather than assumed to follow from its neighbour:
+  //   NaN   — `bytesBefore <= NaN` is false, so the trim fires on EVERY request
+  //           and strips every image forever. Inline vision just stops working.
+  //   0/-1  — a budget nothing can fit under: same total loss, by arithmetic
+  //           rather than by NaN.
+  //   ∞     — the opposite failure, and the one this whole fix exists to close:
+  //           an unbounded payload is how #2221 happened.
+  it.each([
+    ["30MB", "a unit suffix that parses to NaN"],
+    ["0", "a zero budget nothing could fit under"],
+    ["-1", "a negative budget"],
+    ["Infinity", "an unbounded budget — the pre-fix behaviour"],
+  ])("ignores the unusable override %j (%s) and keeps the default", async (value) => {
     viewImageRawBytes = 3000;
-    vi.stubEnv("COMFYUI_MCP_OLLAMA_MAX_IMAGE_BYTES", "30MB");
-    await collect(backend(), turnsOf(imageTurn("what is this?", "a.png")));
+    vi.stubEnv("COMFYUI_MCP_OLLAMA_MAX_IMAGE_BYTES", value);
+    const events = await collect(backend(), turnsOf(imageTurn("what is this?", "a.png")));
     expect(imagePartsOf(openaiChatRequests[0])).toHaveLength(1);
+    expect(assistantTexts(events).some((t) => t.includes("dropped"))).toBe(false);
+  });
+
+  // The wired assertions above cannot separate `Infinity` from the 30 MB
+  // default — both leave a small image alone, and telling them apart on the
+  // wire would need a >30 MB fixture. The parse is pinned directly instead.
+  // The 5000-byte case in the first test is what proves this value is the one
+  // the trim actually reads, so this is not a helper tested in isolation.
+  it("resolves the budget: usable overrides win, unusable ones fall back", () => {
+    vi.stubEnv("COMFYUI_MCP_OLLAMA_MAX_IMAGE_BYTES", "");
+    expect(imagePayloadBudgetBytes()).toBe(30 * 1024 * 1024);
+    vi.stubEnv("COMFYUI_MCP_OLLAMA_MAX_IMAGE_BYTES", "5000");
+    expect(imagePayloadBudgetBytes()).toBe(5000);
+    for (const bad of ["30MB", "0", "-1", "Infinity"]) {
+      vi.stubEnv("COMFYUI_MCP_OLLAMA_MAX_IMAGE_BYTES", bad);
+      expect(imagePayloadBudgetBytes()).toBe(30 * 1024 * 1024);
+    }
   });
 });
 

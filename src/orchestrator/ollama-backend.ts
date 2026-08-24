@@ -295,10 +295,15 @@ const MAX_TOOL_ROUNDS = 32;
 const DEFAULT_IMAGE_PAYLOAD_BUDGET_BYTES = 30 * 1024 * 1024;
 
 /** The per-request image budget in base64 bytes, honouring the env override.
- *  A non-numeric or non-positive override is ignored rather than obeyed: a
- *  typo'd `COMFYUI_MCP_OLLAMA_MAX_IMAGE_BYTES=30MB` parsing to NaN must not
- *  silently drop every image on every request. */
-function imagePayloadBudgetBytes(): number {
+ *  An unusable override is ignored rather than obeyed, and the ways it can be
+ *  unusable fail in opposite directions — all of them silently:
+ *    • NaN (`=30MB`): `total <= NaN` is false, so the trim fires on every
+ *      request and strips every image forever. Inline vision just stops.
+ *    • 0 or negative: the same total loss by arithmetic instead of by NaN.
+ *    • Infinity: no bound at all — the pre-fix behaviour this exists to close.
+ *  Exported for the unit test: `Infinity` and 30 MB are indistinguishable at
+ *  the wire level without a >30 MB fixture, so that clause is pinned there. */
+export function imagePayloadBudgetBytes(): number {
   const raw = Number(process.env.COMFYUI_MCP_OLLAMA_MAX_IMAGE_BYTES);
   return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_IMAGE_PAYLOAD_BUDGET_BYTES;
 }
