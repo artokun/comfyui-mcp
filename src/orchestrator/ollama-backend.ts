@@ -263,6 +263,54 @@ const DEFAULT_MODEL = "artokun/gemma4-comfyui-mcp:e4b";
 const MAX_TOOL_ROUNDS = 32;
 
 /**
+ * Ceiling on the inline image bytes ONE request may carry, summed across the
+ * WHOLE history (#2221).
+ *
+ * The bound that already existed is per-IMAGE and pre-encoding: fetchImageB64
+ * refuses a single ref over 12 MB of raw bytes. Neither half of that reaches the
+ * number a provider actually measures.
+ *
+ *   • Per-image is not per-request. A turn attaches up to 4 refs, and — the part
+ *     that made #2221 permanent — `this.history` is built ONCE per session and
+ *     never trimmed, so every image any turn ever attached is re-serialized onto
+ *     every later request. The total only grows.
+ *   • Raw bytes are not wire bytes. Both dialects ship base64, which is 4/3 the
+ *     size, so 12 MB of PNG leaves here as ~16 MB.
+ *
+ * So the existing cap permits ~64 MB on the first turn alone and is unbounded
+ * over a session. OpenRouter answers that with `http 413 {"error":{"message":
+ * "Downloaded image content cannot exceed 30MB"}}`, and because history is
+ * stable the next attempt rebuilds the identical payload — the session is
+ * bricked, which is exactly what #2221 reported (three identical failures in
+ * ~30s on a plain-text message that attached nothing).
+ *
+ * 30 MB is OpenRouter's documented ceiling and the default here. It is measured
+ * on the BASE64 length rather than the decoded bytes deliberately: base64 is the
+ * larger of the two, so a history under this budget is under the limit on either
+ * reading. Other openai-compatible endpoints differ, hence the override.
+ *
+ * This is a ceiling, not a target — a single-image turn is nowhere near it, so
+ * the trim only ever fires on a history that would otherwise be refused.
+ */
+const DEFAULT_IMAGE_PAYLOAD_BUDGET_BYTES = 30 * 1024 * 1024;
+
+/** The per-request image budget in base64 bytes, honouring the env override.
+ *  A non-numeric or non-positive override is ignored rather than obeyed: a
+ *  typo'd `COMFYUI_MCP_OLLAMA_MAX_IMAGE_BYTES=30MB` parsing to NaN must not
+ *  silently drop every image on every request. */
+function imagePayloadBudgetBytes(): number {
+  const raw = Number(process.env.COMFYUI_MCP_OLLAMA_MAX_IMAGE_BYTES);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_IMAGE_PAYLOAD_BUDGET_BYTES;
+}
+
+/** Render a byte budget for the note the MODEL reads. Sub-megabyte budgets stay
+ *  in bytes: `Math.round(5000 / 1MB)` is 0, and a note claiming an "0 MB image
+ *  limit" is worse than no number at all. */
+function formatByteBudget(bytes: number): string {
+  return bytes >= 1024 * 1024 ? `${Math.round(bytes / (1024 * 1024))} MB` : `${bytes} bytes`;
+}
+
+/**
  * The Ollama system prompt REPLACES the frontier panel prompt: that one is
  * thousands of tokens and instructs the agent to call dozens of tools BY NAME
  * (panel_query_graph, list_packs, …) that don't exist on this backend's 6-tool
@@ -1249,6 +1297,63 @@ export class OllamaBackend implements AgentBackend {
   }
 
   /**
+   * Bring the request's inline image bytes under the budget BEFORE sending, by
+   * dropping whole messages' images OLDEST-FIRST (#2221).
+   *
+   * Oldest-first is the direction that keeps the turn answerable: the image the
+   * user is asking about right now is the newest one, and a session dies of the
+   * images it accumulated, not the one it just took.
+   *
+   * Every drop is written into the message it came from, and the wording turns
+   * on `mediaDelivered` for the same reason stripImagesFromHistory does — a
+   * model told "you did not see this" about a picture it demonstrably described
+   * three turns ago will contradict its own transcript. Silence is not an option
+   * either: an image removed with no note leaves the model answering from a text
+   * reference to a file it can no longer see, as if it could.
+   *
+   * Audio is deliberately NOT trimmed here. It rides a different content part on
+   * the OpenAI wire, the reported limit is an IMAGE limit, and clips are small
+   * next to full-resolution frames — dropping one to fit an image budget would
+   * cost the user a sense for no measured gain.
+   *
+   * Returns what was removed so the caller can tell the user; `undeliveredImages`
+   * counts images that never survived a request, i.e. the ones whose loss the
+   * user has to hear about as "I did not see it" rather than "I forgot it".
+   */
+  private trimImagePayloadToBudget(): {
+    droppedImages: number;
+    undeliveredImages: number;
+    budget: number;
+    bytesBefore: number;
+  } {
+    const budget = imagePayloadBudgetBytes();
+    // base64 length IS the byte count on the wire (one ASCII char per byte).
+    const sizeOf = (m: ChatMessage) => (m.images ?? []).reduce((n, b64) => n + b64.length, 0);
+    let bytesBefore = 0;
+    for (const m of this.history) bytesBefore += sizeOf(m);
+    if (bytesBefore <= budget) return { droppedImages: 0, undeliveredImages: 0, budget, bytesBefore };
+
+    let remaining = bytesBefore;
+    let droppedImages = 0;
+    let undeliveredImages = 0;
+    for (const m of this.history) {
+      if (remaining <= budget) break;
+      const count = m.images?.length ?? 0;
+      if (!count) continue;
+      const delivered = m.mediaDelivered === true;
+      remaining -= sizeOf(m);
+      droppedImages += count;
+      if (!delivered) undeliveredImages += count;
+      delete m.images;
+      delete m.imageMimes;
+      m.content += delivered
+        ? `\n[note: the ${count} image(s) attached to this message were removed from your context to keep the request under the endpoint's image limit (${formatByteBudget(budget)}). You DID receive them earlier in this conversation - nothing was lost, but you can no longer see them.]`
+        : `\n[note: the ${count} image(s) attached to this message were removed BEFORE the request was sent - together with the rest of this conversation they exceeded the endpoint's image limit (${formatByteBudget(budget)}). You did NOT receive them: you did not see any image. Say so plainly rather than describing or guessing at the contents.]`;
+    }
+    return { droppedImages, undeliveredImages, budget, bytesBefore };
+  }
+
+  /**
    * Drop audio the ACTIVE model must not be handed (#1972).
    *
    * The attach-time allowlist only governs the turn the audio arrives on. Ollama
@@ -1465,6 +1570,27 @@ export class OllamaBackend implements AgentBackend {
       const notice = audioUserNotice(audioOutcomes, audioConfidence, this.model);
       if (notice) yield { type: "assistant", text: notice };
     }
+    // #2221 — bound the inline image bytes BEFORE the first request, not after a
+    // provider refuses them. Here rather than at attach time because the payload
+    // that goes over the limit is the accumulated HISTORY, which a turn that
+    // attaches nothing still re-sends in full.
+    //
+    // Before the turnSentImages capture below, so that capture describes what
+    // this request will ACTUALLY carry: an image trimmed away here was never
+    // sent, and counting it as "this turn attached an image" would arm the
+    // rejection path to apologise for media the endpoint never saw.
+    const trimmed = this.trimImagePayloadToBudget();
+    if (trimmed.droppedImages) {
+      logger.warn(
+        `[ollama-backend] inline images (${trimmed.bytesBefore} b64 bytes) exceeded the ${trimmed.budget}-byte request budget — dropped ${trimmed.droppedImages} oldest-first`,
+      );
+      yield {
+        type: "assistant",
+        text: trimmed.undeliveredImages
+          ? `📦 This conversation's images add up to more than the endpoint accepts in one request, so I dropped the oldest ${trimmed.droppedImages} image(s) to get under the limit — ${trimmed.undeliveredImages} of those I never got to see at all. Re-attach just the one you want me to look at, or start a fresh chat to clear what has built up.`
+          : `📦 This conversation's images add up to more than the endpoint accepts in one request, so I dropped the oldest ${trimmed.droppedImages} image(s) from my context to get under the limit. I saw them at the time and nothing you sent was lost, but I can't look at them again — re-attach one if you need me to.`,
+      };
+    }
     // What THIS turn attached, captured now: stripImagesFromHistory deletes the
     // fields, and the correction below must describe the sense the USER just
     // sent — not whatever happens to be left in the retained history.
@@ -1594,10 +1720,38 @@ export class OllamaBackend implements AgentBackend {
           // A NEW file is always judged on its own: an earlier clip landing is
           // not evidence about a different one (codec, length).
           const unprovenMedia = (turnSentImages || turnSentAudio) && !turnMediaAccepted;
-          if (!abort.signal.aborted && requestWasRejected && !attachmentsStripped && unprovenMedia) {
+          // #2221 — the ONE rejection that `unprovenMedia` must not gate.
+          //
+          // Everything above reasons about whether the MODEL can perceive what we
+          // sent, and for that question media the endpoint already accepted is
+          // rightly off the table. A 413 is not that question. It is the
+          // TRANSPORT saying the request is too big, and the bytes making it too
+          // big are exactly the ones history has been accumulating since the
+          // session started — media that IS proven-delivered, and that
+          // `unprovenMedia` therefore refuses to touch.
+          //
+          // That refusal is what made #2221 terminal rather than merely annoying:
+          // the user sent plain text, so `turnSentImages` was false, so the strip
+          // never armed, so the error rethrew — and because `this.history` is
+          // built once per session and never trimmed, the next attempt
+          // reassembled byte-for-byte the same oversized payload. Three
+          // identical 413s in 30 seconds, and every later turn in that session
+          // too. The recovery existed the whole time and was unreachable from
+          // the state that needed it.
+          //
+          // Still 4xx-only and still one-shot, and still conditioned on there
+          // BEING media to remove: a 413 on a conversation that is merely long
+          // is a real failure with no attachment to blame, and stripping nothing
+          // then retrying would just spend a second request to fail identically.
+          const oversizedPayload = status === 413;
+          const historyCarriesMedia = this.history.some((m) => m.images?.length || m.audios?.length);
+          const recoverable = unprovenMedia || (oversizedPayload && historyCarriesMedia);
+          if (!abort.signal.aborted && requestWasRejected && !attachmentsStripped && recoverable) {
             attachmentsStripped = true;
             logger.warn(
-              `[ollama-backend] media input rejected (${msgOf(err).slice(0, 200)}) — retrying without attachments`,
+              oversizedPayload
+                ? `[ollama-backend] request too large for the endpoint (${msgOf(err).slice(0, 200)}) — retrying without inline attachments`
+                : `[ollama-backend] media input rejected (${msgOf(err).slice(0, 200)}) — retrying without attachments`,
             );
             this.stripImagesFromHistory();
             // #790 — the correction for an attachment we had already told the
@@ -1617,10 +1771,24 @@ export class OllamaBackend implements AgentBackend {
             // and only an older turn's media was carried along, saying "I
             // couldn't hear your audio" would be about a file they did not
             // just send.
+            //
+            // A 413 takes its own wording, and the distinction is the whole
+            // point of #2221's third ask. "rejected image input … switch to a
+            // vision-capable model" would be a wrong diagnosis here — the model
+            // may see perfectly well; the request was simply too big — and it
+            // would send the user to change a setting that changes nothing.
+            // Size is also the one cause where "try again" is actively false, so
+            // the text says so rather than leaving the panel's generic retry
+            // advice as the only thing the user is told.
             yield {
               type: "assistant",
-              text:
-                turnSentAudio && turnSentImages
+              text: oversizedPayload
+                ? `📦 That request was too large for the endpoint (http 413) — this conversation's inline attachments pushed it over the provider's size limit. I dropped them and answered without them, so ${
+                    turnSentImages || turnSentAudio
+                      ? "I did NOT see what you just attached"
+                      : "I can no longer look at the earlier attachments (I did receive them at the time — nothing you sent was lost)"
+                  }. Sending the same message again will fail the same way; re-attach a single smaller image, or start a fresh chat to clear what has built up.`
+                : turnSentAudio && turnSentImages
                   ? `📎🔇 ${this.model} rejected the request carrying the attachments, so I'm continuing without them — I did NOT see the image and did NOT hear the audio, and the endpoint didn't say which one it objected to. Describe the image in words, and switch to a model that reports audio support (\`ollama pull gemma4:e4b\`) if you need me to listen.`
                   : turnSentAudio
                     ? `🔇 ${this.model} rejected the request carrying the audio attachment, so I'm continuing without it — I did NOT hear it and won't describe it. Switch to an audio-capable model (\`ollama pull gemma4:e4b\`), or ask me to run a ComfyUI audio-analysis node over the file instead.`
@@ -1761,9 +1929,19 @@ export class OllamaBackend implements AgentBackend {
         // panel silent (the turn just ends), which reads as a wedge.
         logger.warn(`[ollama-backend] turn failed: ${msgOf(err)}`);
         yield { type: "error", message: `ollama backend: ${msgOf(err)}` };
+        // #2221 — a 413 that got this far is one the strip could not rescue
+        // (nothing left to remove, or it had already fired once this turn). It
+        // still must not be handed to the user as an anonymous failure: the
+        // panel's fallback advice for a dead turn is "try again", and size is
+        // precisely the cause for which that is guaranteed wrong. Name it, and
+        // keep the raw body — the provider's own text ("Downloaded image content
+        // cannot exceed 30MB") is the most useful sentence available.
+        const tooLarge = (err as { httpStatus?: number } | null)?.httpStatus === 413;
         yield {
           type: "assistant",
-          text: `⚠️ The model request failed: ${msgOf(err).slice(0, 400)}`,
+          text: tooLarge
+            ? `📦 The request was too large for this endpoint to accept (http 413), so the turn could not run. Retrying the same message will not help — the payload is rebuilt identically each time. Start a fresh chat to clear what this conversation has accumulated, or re-send with a smaller attachment.\n\nEndpoint said: ${msgOf(err).slice(0, 400)}`
+            : `⚠️ The model request failed: ${msgOf(err).slice(0, 400)}`,
         };
       }
       if (!resultEmitted) {
