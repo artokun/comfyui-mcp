@@ -349,3 +349,153 @@ describe("#1969 review — the live surface, not a hand-built shape", () => {
     expect(text).toMatch(/Unrecognized key 'groupid'/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// #2217 — the arm where NOTHING pairs. #1969's suggester is live and correct:
+// `panel_restart_comfyui {forced:true}` is told 'force', because `forced` is an
+// edit-1 neighbour. `reason` is not near `force`, and `panel_restart_comfyui`
+// has no required keys, so every rule declines and the caller was told what is
+// wrong and nothing about what is right.
+//
+// The served JSON schema already carries `properties`, so this is not
+// information the client lacks — it is information the client did not JOIN,
+// which is the same gap #1969 was opened to close. The two suites below are
+// therefore the point: the reported call gains the list, and every call that
+// already had an answer must NOT gain it.
+// ---------------------------------------------------------------------------
+describe("#2217 a key with no near-miss names the keys that ARE accepted", () => {
+  let client: Client;
+  let server: McpServer;
+
+  beforeAll(async () => {
+    server = new McpServer({ name: "unrecognized-keys-2217", version: "1.0.0" });
+    registerPanelTools(server, makeFakeCtx());
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    client = new Client({ name: "unrecognized-keys-2217-client", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  });
+
+  afterAll(async () => {
+    await client.close();
+    await server.close();
+  });
+
+  const errorText = async (name: string, args: Record<string, unknown>): Promise<string> => {
+    const r = await client.callTool({ name, arguments: args });
+    expect(r.isError, `${name} was expected to reject ${JSON.stringify(args)}`).toBe(true);
+    return (r.content as Array<{ text?: string }>)?.[0]?.text ?? "";
+  };
+
+  /** The accepted keys as the CLIENT sees them — the served schema, not the
+   *  zod source. If those two ever diverge, the message names the wrong list. */
+  const servedKeys = async (name: string): Promise<string[]> => {
+    const tools = await client.listTools();
+    const schema = tools.tools.find((t) => t.name === name)?.inputSchema;
+    return Object.keys((schema?.properties ?? {}) as Record<string, unknown>);
+  };
+
+  it("REPRODUCTION: panel_restart_comfyui {reason} now names 'force'", async () => {
+    const text = await errorText("panel_restart_comfyui", { reason: "Load custom-node fix" });
+    expect(text).toContain("Unrecognized key 'reason' — accepted keys: 'force'");
+    // Still a refusal, and still no invented target: the tool does not accept
+    // a `reason`, and forwarding one is parked with #1968's `title`.
+    expect(text).toMatch(/Input validation error/);
+    expect(text).not.toMatch(/did you mean/);
+  });
+
+  it("CONTROL: the near-miss 'forced' keeps #1969's answer and does NOT gain the list", async () => {
+    const text = await errorText("panel_restart_comfyui", { forced: true });
+    expect(text).toMatch(/Unrecognized key 'forced' — did you mean 'force'\?/);
+    expect(text).not.toMatch(/accepted keys/);
+  });
+
+  it("CONTROL: the canonical key still reaches the handler", async () => {
+    const r = await client.callTool({ name: "panel_restart_comfyui", arguments: { force: true } });
+    const text = (r.content as Array<{ text?: string }>)?.[0]?.text ?? "";
+    expect(text).not.toMatch(/Input validation error|Unrecognized key/);
+  });
+
+  it("a tool that takes NO arguments says so instead of an empty list", async () => {
+    // Dies if panel_free_vram ever gains a key — at which point this pins the
+    // wrong tool, not the wrong behaviour.
+    expect(await servedKeys("panel_free_vram")).toEqual([]);
+    const text = await errorText("panel_free_vram", { reason: "cleanup" });
+    expect(text).toContain("Unrecognized key 'reason' — this tool takes no arguments");
+    expect(text).not.toMatch(/accepted keys/);
+  });
+
+  it("the WIDEST live shape is listed in full — no elision", async () => {
+    const keys = await servedKeys("panel_query_graph");
+    expect(keys.length).toBeGreaterThan(10);
+    const text = await errorText("panel_query_graph", { node_type: "KSampler" });
+    expect(text).toContain("Unrecognized key 'node_type' — accepted keys:");
+    // Every key the client was served is named. A cap would hide the one the
+    // caller wanted; measured, the full clause is 152 characters.
+    for (const k of keys) expect(text).toContain(`'${k}'`);
+    expect(text).not.toMatch(/…|\.\.\./);
+  });
+
+  it("a rule-3 tool keeps 'required key … is missing' and does NOT also get the list", async () => {
+    // The join was already made for this caller; 14 more names would bury it.
+    const text = await errorText("panel_remove_node", { dry_run: true });
+    expect(text).toMatch(/Unrecognized key 'dry_run' — required key 'node_id' is missing/);
+    expect(text).not.toMatch(/accepted keys/);
+  });
+
+  it("the ambiguous panel_connect {id} names BOTH endpoints without guessing one", async () => {
+    // #1969 refuses to pick between from_node_id and to_node_id. Listing the
+    // accepted keys hands the caller both candidates, which is the honest
+    // answer — and it is still not a "did you mean".
+    const text = await errorText("panel_connect", { id: 5 });
+    expect(text).toContain("Unrecognized key 'id' — accepted keys:");
+    expect(text).toContain("'from_node_id'");
+    expect(text).toContain("'to_node_id'");
+    expect(text).not.toMatch(/did you mean/);
+  });
+
+  it("two stray keys get ONE trailing clause, not one list each", async () => {
+    const text = await errorText("panel_restart_comfyui", { reason: "a", why: "b" });
+    expect(text).toContain(
+      "Unrecognized key 'reason'; Unrecognized key 'why'; accepted keys: 'force'",
+    );
+    expect(text.match(/accepted keys/g)).toHaveLength(1);
+  });
+});
+
+describe("#2217 the sentence, at the formatter", () => {
+  it("emits the reported string exactly", () => {
+    expect(formatUnrecognizedKeyMessage(["reason"], ["force"], [], { reason: "x" })).toBe(
+      "Unrecognized key 'reason' — accepted keys: 'force'",
+    );
+  });
+
+  it("an empty shape cannot produce a dangling 'accepted keys:'", () => {
+    expect(formatUnrecognizedKeyMessage(["reason"], [], [], { reason: "x" })).toBe(
+      "Unrecognized key 'reason' — this tool takes no arguments",
+    );
+  });
+
+  it("a paired key and an unpaired one keep their own answers, list stated once", () => {
+    const shape = { group_id: z.number(), pos: z.array(z.number()) };
+    const msg = formatUnrecognizedKeyMessage(["group", "reason"], Object.keys(shape), [], {
+      group: 2,
+      reason: "x",
+    });
+    expect(msg).toBe(
+      "Unrecognized key 'group' — did you mean 'group_id'?; Unrecognized key 'reason'; " +
+        "accepted keys: 'group_id', 'pos'",
+    );
+  });
+
+  it("the list is stated in the schema's own order", () => {
+    expect(formatUnrecognizedKeyMessage(["zzz"], ["b", "a", "c"], [], { zzz: 1 })).toBe(
+      "Unrecognized key 'zzz' — accepted keys: 'b', 'a', 'c'",
+    );
+  });
+
+  it("still never throws on a hostile input", () => {
+    const { proxy, revoke } = Proxy.revocable({}, {});
+    revoke();
+    expect(() => formatUnrecognizedKeyMessage(["reason"], ["force"], [], proxy)).not.toThrow();
+  });
+});

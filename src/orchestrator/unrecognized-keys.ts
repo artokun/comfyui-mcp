@@ -234,6 +234,29 @@ function quoteKey(k: string): string {
   return `'${k.replace(/'/g, "\\'")}'`;
 }
 
+/**
+ * #2217 — what a caller is told when NOTHING pairs.
+ *
+ * `panel_restart_comfyui {reason}` had no near-miss (`reason` is neither an
+ * affix nor an edit-neighbour of `force`) and no missing required key, so every
+ * rule declined and the caller was told what is wrong and nothing about what is
+ * right. The served JSON schema already lists `properties`, so this adds no
+ * information the caller lacks — it JOINs it into the refusal, which is what
+ * #1969 exists to do for the models that will not join it themselves.
+ *
+ * Stated in FULL, no cap: measured across the 96 live panel tools the widest
+ * shape is 14 keys (`panel_edit_node`) and the longest clause is 173
+ * characters, so eliding entries would risk hiding the very key the caller
+ * wanted to save a line that is already short.
+ */
+function acceptedKeysClause(knownKeys: readonly string[]): string {
+  // 15 of the 96 panel tools take no arguments at all (`panel_free_vram`,
+  // `panel_list_workflows`, …). "accepted keys:" followed by nothing would be
+  // a worse answer than the bare name it replaces.
+  if (!knownKeys.length) return "this tool takes no arguments";
+  return `accepted keys: ${knownKeys.map(quoteKey).join(", ")}`;
+}
+
 /** The sentence a caller reads. Never throws — a formatter that throws turns
  *  a clean validation refusal into a 500. */
 export function formatUnrecognizedKeyMessage(
@@ -246,18 +269,24 @@ export function formatUnrecognizedKeyMessage(
   try {
     const unique = [...new Set(keys)];
     const paired = pairUnrecognizedKeys(unique, knownKeys, requiredKeys, input, fits);
-    return unique
-      .map((k) => {
-        const suggestion = paired.get(k);
-        if (!suggestion) return `Unrecognized key ${quoteKey(k)}`;
-        // An unconfident pairing still carries both halves of the join in one
-        // sentence — which is the whole ask — but states the schema fact it
-        // actually knows instead of guessing at intent.
-        return suggestion.confident
-          ? `Unrecognized key ${quoteKey(k)} — did you mean ${quoteKey(suggestion.key)}?`
-          : `Unrecognized key ${quoteKey(k)} — required key ${quoteKey(suggestion.key)} is missing`;
-      })
-      .join("; ");
+    const messages = unique.map((k) => {
+      const suggestion = paired.get(k);
+      if (!suggestion) return `Unrecognized key ${quoteKey(k)}`;
+      // An unconfident pairing still carries both halves of the join in one
+      // sentence — which is the whole ask — but states the schema fact it
+      // actually knows instead of guessing at intent.
+      return suggestion.confident
+        ? `Unrecognized key ${quoteKey(k)} — did you mean ${quoteKey(suggestion.key)}?`
+        : `Unrecognized key ${quoteKey(k)} — required key ${quoteKey(suggestion.key)} is missing`;
+    });
+    // Only where nothing at all was said: a pairing — confident or not — has
+    // already named the one key that matters, and the list would bury it.
+    if (unique.every((k) => paired.has(k))) return messages.join("; ");
+    // The list is a property of the TOOL, not of any one stray key, so it is
+    // stated once. With a single message it reads as that key's remedy; with
+    // several it is its own trailing clause rather than one key's footnote.
+    const clause = acceptedKeysClause(knownKeys);
+    return messages.length === 1 ? `${messages[0]} — ${clause}` : `${messages.join("; ")}; ${clause}`;
   } catch {
     const listed = keys.map((k) => quoteKey(k)).join(", ");
     return `Unrecognized key${keys.length > 1 ? "s" : ""} ${listed}`;
