@@ -1316,10 +1316,15 @@ export class OllamaBackend implements AgentBackend {
    * either: an image removed with no note leaves the model answering from a text
    * reference to a file it can no longer see, as if it could.
    *
-   * Audio is deliberately NOT trimmed here. It rides a different content part on
-   * the OpenAI wire, the reported limit is an IMAGE limit, and clips are small
-   * next to full-resolution frames — dropping one to fit an image budget would
-   * cost the user a sense for no measured gain.
+   * Audio is deliberately neither trimmed NOR counted here, and the second half
+   * of that is the part worth knowing. On the OpenAI wire audio is a separate
+   * content part and the reported limit is an IMAGE limit, so leaving it out of
+   * the sum is right. On the NATIVE wire it is not: `toOllamaMessages` merges
+   * `audios` into `images[]`, so audio bytes do travel in the image slot and
+   * this budget does not see them. That is a knowingly incomplete accounting
+   * rather than an oversight — Ollama is local, no size limit was ever reported
+   * against it, and clips are small next to full-resolution frames. What this
+   * budget promises is a bound on IMAGE bytes, not on the whole request.
    *
    * Returns what was removed so the caller can tell the user; `undeliveredImages`
    * counts images that never survived a request, i.e. the ones whose loss the
