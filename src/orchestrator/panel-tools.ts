@@ -20662,10 +20662,14 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
               // description already tells callers to send. Wrapped into `source`
               // by normalizeShowMediaItem before anything reads it, so the rest of
               // this handler still sees exactly one shape.
-              filename: z.string().min(1).optional().describe("ComfyUI output ref, flat: accepted in place of source.{filename}."),
+              // Empty strings are emitted as unused placeholders by the Panel's
+              // producer when it sends the documented nested source shape. The
+              // normalizer rejects an empty flat-only ref but can ignore that
+              // placeholder when a valid nested source is present.
+              filename: z.string().optional().describe("ComfyUI output ref, flat: accepted in place of source.{filename}."),
               subfolder: z.string().optional().describe("Goes with a flat filename."),
               type: z.string().optional().describe("Goes with a flat filename (e.g. 'output', 'temp')."),
-              path: z.string().min(1).optional().describe("Absolute disk path, flat: accepted in place of source.{path}."),
+              path: z.string().optional().describe("Absolute disk path, flat: accepted in place of source.{path}."),
               stage: z.boolean().optional().describe("Goes with a flat path — see source.stage."),
               caption: z.string().optional(),
               // #1968 — accepted because a caller who guessed it once will guess

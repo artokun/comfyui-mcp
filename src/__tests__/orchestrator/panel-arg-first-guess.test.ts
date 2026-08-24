@@ -396,6 +396,40 @@ describe("#1968 panel_show_media: the output ref is accepted where the docs put 
     expect(h.sent.some((c) => c.cmd === "show_media")).toBe(true);
   });
 
+  it("accepts a nested source with the Panel's empty flat alias placeholders", async () => {
+    const h = harness();
+    const res = await callTool(
+      "panel_show_media",
+      { items: [{ source: REF, filename: "", path: "" }] },
+      h.ctx,
+    );
+    expect(res.isError).toBeFalsy();
+    expect(h.sent.find((c) => c.cmd === "show_media")?.items).toMatchObject([
+      { viewRef: REF, kind: "viewRef" },
+    ]);
+  });
+
+  it("accepts equivalent nested and flat output references", async () => {
+    const h = harness();
+    const res = await callTool(
+      "panel_show_media",
+      { items: [{ source: REF, ...REF }] },
+      h.ctx,
+    );
+    expect(res.isError).toBeFalsy();
+    expect(h.sent.find((c) => c.cmd === "show_media")?.items).toMatchObject([
+      { viewRef: REF, kind: "viewRef" },
+    ]);
+  });
+
+  it("still refuses a flat-only empty alias as missing media", async () => {
+    const h = harness();
+    const res = await callTool("panel_show_media", { items: [{ filename: "", path: "" }] }, h.ctx);
+    expect(res.isError).toBe(true);
+    expect(h.sent).toHaveLength(0);
+    expect(res.content.map((c) => c.text).join(" ")).toContain("no media");
+  });
+
   // `caption` was ALWAYS the key — the report's `label` row is the one that does
   // not reproduce. Accepted anyway: a caller who guessed it once will guess it
   // again, and zod STRIPS an unknown key from a nested object rather than

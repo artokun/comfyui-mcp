@@ -113,8 +113,10 @@ function sameValue(a: unknown, b: unknown): boolean {
  * the schema wants it nested under `source`. A doc that describes the payload and
  * a schema that wants it wrapped is a defect in the pair, not in the caller.
  *
- * Only ever ADDS the wrapper. An item that already carries `source` is returned
- * untouched, so the canonical shape cannot be reinterpreted by this function.
+ * Adds the wrapper for the flat form. An item that already carries `source`
+ * keeps that canonical source; an equivalent flat alias is checked and folded
+ * only when it names the same ref, so the canonical shape cannot be replaced by
+ * a conflicting outer value.
  *
  * An item carrying NEITHER shape is refused here rather than passed on. The
  * handler's first act on an item is `"path" in src`, which throws a TypeError on
@@ -130,16 +132,32 @@ export function normalizeShowMediaItem(
   const out: Record<string, unknown> = { ...rest };
 
   if (source !== undefined) {
-    // The canonical shape wins outright, but a flat ref sitting BESIDE it means
-    // the item names two different media and says which only by nesting depth.
-    if (filename !== undefined || path !== undefined) {
-      return {
-        ok: false,
-        error:
-          `${at} carries \`source\` AND a top-level ${filename !== undefined ? "`filename`" : "`path`"}. ` +
-          `The flat form is an accepted alias for \`source\`, so this item names its media twice. ` +
-          `Nothing was displayed. Send the ref in ONE place.`,
-      };
+    const nested = source as Record<string, unknown>;
+    const nestedIsPath = "path" in nested;
+    const flatFilename = typeof filename === "string" && filename.length > 0 ? filename : undefined;
+    const flatPath = typeof path === "string" && path.length > 0 ? path : undefined;
+
+    // The Panel's producer keeps the whole flat alias row in its payload and
+    // fills unused members with empty strings. Those placeholders are not a
+    // second source and must not reach the schema's `min(1)` gate. A populated
+    // alias beside `source` is also safe when it is the exact same ref: some
+    // producers send both representations while moving between the two
+    // documented shapes. Different members still name two media sources and
+    // remain a refusal.
+    if (flatFilename !== undefined || flatPath !== undefined) {
+      const equivalent = nestedIsPath
+        ? flatPath !== undefined && nested.path === flatPath && flatFilename === undefined
+        : flatFilename !== undefined && nested.filename === flatFilename && flatPath === undefined;
+      if (!equivalent) {
+        const flatName = flatFilename !== undefined ? "`filename`" : "`path`";
+        return {
+          ok: false,
+          error:
+            `${at} carries \`source\` AND a top-level ${flatName}. ` +
+            `The flat form is an accepted alias for \`source\`, so this item names its media twice. ` +
+            `Nothing was displayed. Send the ref in ONE place.`,
+        };
+      }
     }
     // The ref's MODIFIERS — subfolder/type/stage — can arrive flat while the ref
     // itself is nested. Before this alias existed zod stripped them from the item
@@ -149,7 +167,7 @@ export function normalizeShowMediaItem(
     // and is ignored gets a refusal for an oversized file they thought they had
     // handled. Fold each into `source` where it is absent, and refuse rather
     // than overwrite where the two disagree.
-    const merged: Record<string, unknown> = { ...(source as Record<string, unknown>) };
+    const merged: Record<string, unknown> = { ...nested };
     for (const [key, value] of [
       ["subfolder", subfolder],
       ["type", type],
@@ -168,31 +186,40 @@ export function normalizeShowMediaItem(
       merged[key] = value;
     }
     out.source = merged;
-  } else if (path !== undefined && filename !== undefined) {
-    return {
-      ok: false,
-      error:
-        `${at} carries both flat \`filename\` and \`path\`. ` +
-        `Those are two different members of the media-source union, so the item does not say which media to display. ` +
-        `Nothing was displayed. Send exactly one of them.`,
-    };
-  } else if (path !== undefined) {
-    // The disk-path member of the same union, flattened the same way.
-    out.source = stage === undefined ? { path } : { path, stage };
-  } else if (filename !== undefined) {
-    out.source = {
-      filename,
-      ...(subfolder === undefined ? {} : { subfolder }),
-      ...(type === undefined ? {} : { type }),
-      ...(stage === undefined ? {} : { stage }),
-    };
   } else {
-    return {
-      ok: false,
-      error:
-        `${at} has no media to show: it needs \`source\` — or, equivalently, a top-level \`filename\` ` +
-        `(a ComfyUI output ref: {filename, subfolder?, type?}) or \`path\` (an absolute disk path).`,
-    };
+    // Empty flat alias members are Panel producer placeholders, not media refs.
+    // Treat them as absent here, then keep the existing one-source union and
+    // the explicit no-media refusal below.
+    const flatFilename = typeof filename === "string" && filename.length > 0 ? filename : undefined;
+    const flatPath = typeof path === "string" && path.length > 0 ? path : undefined;
+
+    if (flatPath !== undefined && flatFilename !== undefined) {
+      return {
+        ok: false,
+        error:
+          `${at} carries both flat \`filename\` and \`path\`. ` +
+          `Those are two different members of the media-source union, so the item does not say which media to display. ` +
+          `Nothing was displayed. Send exactly one of them.`,
+      };
+    }
+    if (flatPath !== undefined) {
+      // The disk-path member of the same union, flattened the same way.
+      out.source = stage === undefined ? { path: flatPath } : { path: flatPath, stage };
+    } else if (flatFilename !== undefined) {
+      out.source = {
+        filename: flatFilename,
+        ...(subfolder === undefined ? {} : { subfolder }),
+        ...(type === undefined ? {} : { type }),
+        ...(stage === undefined ? {} : { stage }),
+      };
+    } else {
+      return {
+        ok: false,
+        error:
+          `${at} has no media to show: it needs \`source\` — or, equivalently, a top-level \`filename\` ` +
+          `(a ComfyUI output ref: {filename, subfolder?, type?}) or \`path\` (an absolute disk path).`,
+      };
+    }
   }
 
   // `caption` is and remains canonical (it has been the key since v0.19.0 — the
