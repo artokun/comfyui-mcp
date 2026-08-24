@@ -65,6 +65,7 @@ function htmlResponse(status = 200): Response {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  authHeaders.value = {};
 });
 
 describe('list_packs action:"list_templates" on an HTML-answering remote (#828)', () => {
@@ -88,6 +89,39 @@ describe('list_packs action:"list_templates" on an HTML-answering remote (#828)'
     // The old message guessed at an outdated server; the body says otherwise.
     expect(text).not.toMatch(/recent enough to expose workflow templates/);
     expect(text).toContain("502");
+  });
+
+  it("keeps an empty 401 as an auth failure instead of a JSON parse error", async () => {
+    global.fetch = vi.fn(
+      async () => new Response(null, { status: 401, headers: { "content-type": "application/json" } }),
+    ) as unknown as typeof fetch;
+    const out = await getHandler("list_packs")({ action: "list_templates" });
+    const text = out.content[0].text;
+
+    expect(out.isError).toBe(true);
+    expect(text).toContain("401");
+    expect(text).toContain("EMPTY body");
+    expect(text).toContain("Whichever layer rejected the request");
+    expect(text).not.toContain("Unexpected end of JSON input");
+    expect(text).not.toContain("No custom-node-contributed workflow template named");
+  });
+
+  it("identifies a non-JSON 401 sign-in page without claiming the template is missing", async () => {
+    global.fetch = vi.fn(
+      async () =>
+        new Response(
+          '<!doctype html><html><head><title>Sign in</title></head><body><form action="/login"><input type="password"></form></body></html>',
+          { status: 401, headers: { "content-type": "text/html" } },
+        ),
+    ) as unknown as typeof fetch;
+    const out = await getHandler("list_packs")({ action: "list_templates" });
+    const text = out.content[0].text;
+
+    expect(out.isError).toBe(true);
+    expect(text).toContain("401");
+    expect(text).toContain("SIGN-IN PAGE");
+    expect(text).toContain("COMFYUI_AUTH_TOKEN / COMFYUI_AUTH_HEADER");
+    expect(text).not.toContain("No custom-node-contributed workflow template named");
   });
 
   it("shows the JSON error body so the caller can tell ComfyUI from a gateway", async () => {

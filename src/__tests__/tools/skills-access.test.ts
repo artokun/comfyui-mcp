@@ -27,6 +27,11 @@ const mocks = vi.hoisted(() => ({
   checkWorkflowRuntime: vi.fn(),
 }));
 
+const comfyui = vi.hoisted(() => ({
+  baseUrl: "http://comfy.test:8188",
+  authHeaders: {} as Record<string, string>,
+}));
+
 vi.mock("../../services/workflow-deps.js", () => ({
   extractWorkflowDependencies: (...args: unknown[]) => mocks.extractWorkflowDependencies(...args),
   installWorkflowDependencies: (...args: unknown[]) => mocks.installWorkflowDependencies(...args),
@@ -46,8 +51,8 @@ vi.mock("../../services/api-nodes.js", async (importOriginal) => {
 });
 
 vi.mock("../../config.js", () => ({
-  getComfyUIBaseUrl: () => "http://comfy.test:8188",
-  getComfyUIAuthHeaders: () => ({}),
+  getComfyUIBaseUrl: () => comfyui.baseUrl,
+  getComfyUIAuthHeaders: () => comfyui.authHeaders,
 }));
 
 import { registerSkillsAccessTools, enumeratePacks } from "../../tools/skills-access.js";
@@ -102,6 +107,8 @@ const savedFetch = global.fetch;
 
 beforeEach(() => {
   for (const mock of Object.values(mocks)) mock.mockReset();
+  comfyui.baseUrl = "http://comfy.test:8188";
+  comfyui.authHeaders = {};
   // Every action that touches the network gets a healthy default so a test
   // about SOMETHING ELSE never accidentally exercises an error path.
   global.fetch = vi.fn(
@@ -272,6 +279,21 @@ describe("actions call the same services with the same arguments", () => {
     const parsed = JSON.parse(text(res));
     expect(parsed.source_count).toBe(1);
     expect(parsed.template_count).toBe(1);
+  });
+
+  it('action:"list_templates" uses the shared auth and proxy-prefix path', async () => {
+    comfyui.baseUrl = "https://remote.example/comfyapi";
+    comfyui.authHeaders = { "X-Proxy-Token": "Token proxy-secret" };
+
+    const res = await handler()({ action: "list_templates" });
+    expect(res.isError).toBeUndefined();
+
+    const fetchMock = global.fetch as unknown as {
+      mock: { calls: Array<[string, RequestInit?]> };
+    };
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://remote.example/comfyapi/api/workflow_templates");
+    expect(new Headers(init?.headers).get("X-Proxy-Token")).toBe("Token proxy-secret");
   });
 
   it('action:"check_runtime" classifies the given graph and adds the guidance line', async () => {
