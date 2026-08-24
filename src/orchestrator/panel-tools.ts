@@ -14302,7 +14302,7 @@ export interface PanelToolDef {
  *
  * `.strict()` turns that into a validation error the caller can see and correct,
  * which is the whole value for an LLM caller: a loud, specific failure ("Unrecognized
- * key: X") is something a model can read and fix on the next attempt; a silent no-op
+ * key 'X'") is something a model can read and fix on the next attempt; a silent no-op
  * is not distinguishable from "it worked but had no effect".
  *
  * #1969 — the refusal used to name the unknown key AND, separately, the missing
@@ -14312,6 +14312,11 @@ export interface PanelToolDef {
  * intended key in the same sentence ("did you mean 'group_id'?") so a small
  * model can recover without aliases (#1968) and without failed-then-corrected
  * training pairs.
+ *
+ * #2217 — and when nothing pairs (`panel_restart_comfyui {reason}`: not a
+ * near-miss of `force`, and no required key to join), the same sentence states
+ * the keys that ARE accepted rather than stopping at the name. Same principle,
+ * the arm where the suggester has nothing to say.
  *
  * BOTH transports' registration functions accept this directly in place of the raw
  * shape (verified against each SDK's actual runtime behavior, not assumed from the
