@@ -114,6 +114,17 @@ export class NodeManagementError extends ComfyUIError {
   }
 }
 
+class GitRefProbeError extends NodeManagementError {
+  constructor(operation: string, cause: unknown) {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    super(`Git ref probe failed during ${operation}: ${message}`, {
+      kind: "git-ref-probe",
+      operation,
+    });
+    this.name = "GitRefProbeError";
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -1982,10 +1993,9 @@ export function gitRefForInstall(opts: {
  * #1470 — does the cloned repository actually have this ref? Asked BEFORE the checkout so a
  * missing ref is distinguishable from a checkout that failed for any other reason.
  *
- * `--verify --quiet` with a `^{commit}` peel answers only "resolves to a commit", which is
- * the question. A THROW here is read as "cannot tell", and the caller then takes the normal
- * checkout path — so an unreadable repo produces git's own error from the checkout rather
- * than a fabricated "no such branch".
+ * A missing ref is proven with `show-ref`'s status 1. Any other failure is a probe error:
+ * a missing directory, unreadable/corrupt repository, or failed fetch must not be mistaken
+ * for a missing channel ref.
  */
 function gitFetchAllTags(nodeDir: string, cwd: string): void {
   // The SAME fetch runGitCheckout performs, hoisted so the existence probe below sees
@@ -1995,9 +2005,6 @@ function gitFetchAllTags(nodeDir: string, cwd: string): void {
   // succeeded. That is the silent-wrong-version failure this whole change exists to avoid,
   // reintroduced by the probe meant to prevent it.
   //
-  // Best-effort: a fetch that fails leaves the probe to answer from what is already local,
-  // and a genuinely missing ref then still reaches the checkout, which reports git's own
-  // error. runGitCheckout fetches again; a second fetch is a cheap no-op next to being wrong.
   try {
     execFileSync("git", ["-C", nodeDir, "fetch", "--all", "--tags"], {
       cwd,
@@ -2006,14 +2013,16 @@ function gitFetchAllTags(nodeDir: string, cwd: string): void {
       env: nonInteractiveGitEnv(),
       stdio: ["ignore", "pipe", "pipe"],
     });
-  } catch {
-    /* probe falls back to what is local */
+  } catch (err) {
+    throw new GitRefProbeError("git fetch --all --tags", err);
   }
 }
 
-function gitRefExists(nodeDir: string, ref: string, cwd: string): boolean {
+function gitShowRefExists(nodeDir: string, refPath: string, cwd: string): boolean {
   try {
-    execFileSync("git", ["-C", nodeDir, "rev-parse", "--verify", "--quiet", "--end-of-options", `${ref}^{commit}`], {
+    // refPath is always constructed with a refs/* prefix; no user string is
+    // passed as an option, and --verify requires an exact ref path.
+    execFileSync("git", ["-C", nodeDir, "show-ref", "--verify", "--quiet", refPath], {
       cwd,
       encoding: "utf-8",
       timeout: GIT_CLONE_TIMEOUT,
@@ -2021,9 +2030,51 @@ function gitRefExists(nodeDir: string, ref: string, cwd: string): boolean {
       stdio: ["ignore", "pipe", "pipe"],
     });
     return true;
-  } catch {
-    return false;
+  } catch (err) {
+    const status = (err as { status?: unknown })?.status;
+    if (status === 1) return false;
+    throw new GitRefProbeError(`git show-ref --verify ${refPath}`, err);
   }
+}
+
+function gitRemoteRefFor(nodeDir: string, ref: string, cwd: string): string | undefined {
+  let output: string;
+  try {
+    output = execFileSync(
+      "git",
+      ["-C", nodeDir, "for-each-ref", "--format=%(refname)", "refs/remotes"],
+      {
+        cwd,
+        encoding: "utf-8",
+        timeout: GIT_CLONE_TIMEOUT,
+        env: nonInteractiveGitEnv(),
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+  } catch (err) {
+    throw new GitRefProbeError("git for-each-ref refs/remotes", err);
+  }
+
+  const suffix = `/${ref}`;
+  const matches = output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("refs/remotes/") && line.endsWith(suffix));
+  matches.sort((a, b) => {
+    const aOrigin = a === `refs/remotes/origin${suffix}`;
+    const bOrigin = b === `refs/remotes/origin${suffix}`;
+    if (aOrigin !== bOrigin) return aOrigin ? -1 : 1;
+    return a.localeCompare(b);
+  });
+  return matches[0];
+}
+
+function resolveGitHeadRef(nodeDir: string, ref: string, cwd: string): string | undefined {
+  for (const prefix of ["refs/heads/", "refs/tags/"]) {
+    const refPath = `${prefix}${ref}`;
+    if (gitShowRefExists(nodeDir, refPath, cwd)) return refPath;
+  }
+  return gitRemoteRefFor(nodeDir, ref, cwd);
 }
 
 function validateGitRef(ref: string): string {
@@ -2154,12 +2205,11 @@ function runGitCheckout(
   // direct-clone fallback already used this probe; keep comfy-cli on the same
   // provenance-aware path so it does not unconditionally checkout a missing
   // channel word after `comfy node install`.
-  if (opts.refFromVersion === true) {
+  let checkoutRef = ref;
+  if (opts.refFromVersion === true && isGitHeadChannel(ref)) {
     gitFetchAllTags(nodeDir, comfyuiBase);
-    if (
-      !gitRefExists(nodeDir, ref, comfyuiBase) &&
-      checkoutPlanForMissingRef({ ref, fromVersion: true }) === "skip-at-head"
-    ) {
+    const resolved = resolveGitHeadRef(nodeDir, ref, comfyuiBase);
+    if (!resolved && checkoutPlanForMissingRef({ ref, fromVersion: true }) === "skip-at-head") {
       return (
         `"${ref}" is not a branch or tag in ${baseUrl}, so the clone was left at the ` +
         `repository's default HEAD — which is what "nightly" means as a channel here. ` +
@@ -2167,11 +2217,12 @@ function runGitCheckout(
         `ref:<branch-or-tag> for an exact checkout.`
       );
     }
+    checkoutRef = resolved ?? ref;
   }
 
   logger.info("Checking out custom-node git ref", {
     repository: baseUrl,
-    ref,
+    ref: checkoutRef,
     nodeDir,
   });
 
@@ -2182,7 +2233,7 @@ function runGitCheckout(
       timeout: GIT_CLONE_TIMEOUT,
       env: nonInteractiveGitEnv(),
     });
-    execFileSync("git", ["-C", nodeDir, "checkout", "--detach", "--end-of-options", ref], {
+    execFileSync("git", ["-C", nodeDir, "checkout", "--detach", "--end-of-options", checkoutRef], {
       cwd: comfyuiBase,
       encoding: "utf-8",
       timeout: GIT_CLONE_TIMEOUT,
@@ -2191,7 +2242,7 @@ function runGitCheckout(
   } catch (err) {
     const e = err as NodeJS.ErrnoException & { stdout?: Buffer | string; stderr?: Buffer | string };
     throw new NodeManagementError(
-      `Failed to check out git ref "${ref}" for custom node "${baseUrl}": ${e.message}`,
+      `Failed to check out git ref "${checkoutRef}" for custom node "${baseUrl}": ${e.message}`,
       {
         stdout: e.stdout ? e.stdout.toString() : "",
         stderr: e.stderr ? e.stderr.toString() : "",
@@ -3015,27 +3066,20 @@ async function cloneCustomNodeFallback(
       // install. A repository that HAS a `nightly` branch must get it; one that does not
       // is not a caller error, it is the other reading of the same word — and the clone
       // already sits at HEAD, which is what that reading asks for.
-      gitFetchAllTags(nodeDir, comfyuiBase);
-      const refMissing = !gitRefExists(nodeDir, gitRef, comfyuiBase);
-      if (refMissing && checkoutPlanForMissingRef({ ref: gitRef, fromVersion: opts?.refFromVersion === true }) === "skip-at-head") {
-        warnings.push(
-          `"${gitRef}" is not a branch or tag in ${gitId}, so the clone was left at the ` +
-            `repository's default HEAD — which is what "nightly" means as a channel here. ` +
-            `If you meant a ref by that name, this repository does not have one; pass ` +
-            `ref:<branch-or-tag> for an exact checkout.`,
-        );
-      } else {
-        // The checkout is part of producing the pack, so its failure leaves the
-        // same husk as a failed clone — and the clone directory is ours either way.
-        try {
-          runGitCheckout(gitId, gitRef, comfyuiBase);
-        } catch (err) {
-          const leftover = discardFailedClone(nodeDir, alreadyPresent);
-          throw new NodeManagementError(
-            `Cloned "${gitId}" but could not check out "${gitRef}": ` +
-              `${err instanceof Error ? err.message : String(err)}${leftover}`,
-          );
-        }
+      // The checkout is part of producing the pack, so its failure leaves the
+      // same husk as a failed clone — and the clone directory is ours either way.
+      try {
+        const checkoutWarning = runGitCheckout(gitId, gitRef, comfyuiBase, {
+          refFromVersion: opts?.refFromVersion === true,
+        });
+        if (checkoutWarning) warnings.push(checkoutWarning);
+      } catch (err) {
+        const leftover = discardFailedClone(nodeDir, alreadyPresent);
+        const detail = err instanceof GitRefProbeError
+          ? `Could not determine whether "${gitRef}" is available: ${err.message}`
+          : `Cloned "${gitId}" but could not check out "${gitRef}": ` +
+            `${err instanceof Error ? err.message : String(err)}`;
+        throw new NodeManagementError(`${detail}${leftover}`);
       }
     }
   }

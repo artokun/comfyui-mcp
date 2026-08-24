@@ -1066,6 +1066,43 @@ describe("node-management service", () => {
       ).toBe(true);
     });
 
+    it("cleans up a clone when the version-derived nightly probe is unknown", async () => {
+      stubFetch({ installedBody: {} });
+      let cloned = false;
+      mockedExists.mockImplementation((p: unknown) => {
+        const str = String(p);
+        if (str.includes("requirements.txt") || str.includes("install.py")) return false;
+        if (str.includes(".venv") || str.includes("cm-cli.py")) return false;
+        return str.includes(NODE_DIR_UTILS) ? cloned : false;
+      });
+      mockedExec.mockImplementation(((bin: string, args: string[]) => {
+        if (bin === "git" && args[0] === "clone") {
+          cloned = true;
+          return "";
+        }
+        if (bin === "git" && args[2] === "fetch") {
+          throw Object.assign(new Error("fatal: could not read from remote repository"), {
+            status: 128,
+          });
+        }
+        return "";
+      }) as never);
+
+      await expect(
+        installCustomNode({
+          id: "https://github.com/teskor-hub/comfyui-teskors-utils",
+          version: "nightly",
+        }),
+      ).rejects.toThrow(/Could not determine whether.*nightly/);
+
+      expect(fsCtl.removed).toContain(NODE_DIR_UTILS);
+      expect(
+        mockedExec.mock.calls.some(
+          (c) => c[0] === "git" && (c[1] as string[]).includes("checkout"),
+        ),
+      ).toBe(false);
+    });
+
     it("removes the directory a FAILED clone created, instead of leaving a husk", async () => {
       // #900, observed on a real machine: a clone that did not produce a pack left
       // a directory holding only `.git` in custom_nodes. ComfyUI loads
@@ -2051,12 +2088,16 @@ describe("node-management service", () => {
       expect(res.message).not.toMatch(/falling back|requested \(useCmCli\)/);
     });
 
+    const missingGitRef = () =>
+      Object.assign(new Error("fatal: reference is not a tree"), { status: 1 });
+
     it("#1470 leaves comfy-cli's clone at HEAD when version-derived nightly is absent", async () => {
       const gitCalls: string[][] = [];
       mockedExec.mockImplementation(((bin: string, args: string[]) => {
         if (bin === "git") {
           gitCalls.push(args);
-          if (args[2] === "rev-parse") throw new Error("fatal: ambiguous argument 'nightly'");
+          if (args[2] === "show-ref") throw missingGitRef();
+          if (args[2] === "for-each-ref") return "";
         }
         return cliEnvelope({ message: "ok" });
       }) as never);
@@ -2069,8 +2110,65 @@ describe("node-management service", () => {
 
       expect(res.mechanism).toBe("comfy-cli");
       expect(res.message).toMatch(/left at the repository's default HEAD/);
-      expect(gitCalls.some((args) => args[2] === "rev-parse")).toBe(true);
+      expect(gitCalls.some((args) => args[2] === "show-ref")).toBe(true);
+      expect(gitCalls.some((args) => args[2] === "for-each-ref")).toBe(true);
       expect(gitCalls.some((args) => args[2] === "checkout")).toBe(false);
+    });
+
+    it("#1470 rejects comfy-cli install when the nightly probe is unknown after fetch failure", async () => {
+      const gitCalls: string[][] = [];
+      mockedExec.mockImplementation(((bin: string, args: string[]) => {
+        if (bin === "git") {
+          gitCalls.push(args);
+          if (args[2] === "fetch") {
+            throw Object.assign(new Error("fatal: could not read from remote repository"), {
+              status: 128,
+            });
+          }
+        }
+        return cliEnvelope({ message: "ok" });
+      }) as never);
+
+      const err = await installCustomNode({
+        id: "https://github.com/foo/bar",
+        version: "nightly",
+        useCmCli: true,
+      }).catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(NodeManagementError);
+      expect((err as Error).message).toMatch(/Git ref probe failed/);
+      expect((err as Error).message).toMatch(/fetch/);
+      expect(gitCalls.some((args) => args[2] === "checkout")).toBe(false);
+    });
+
+    it("#1470 checks out a fetched remote-tracking nightly branch, not bare nightly", async () => {
+      const gitCalls: string[][] = [];
+      mockedExec.mockImplementation(((bin: string, args: string[]) => {
+        if (bin === "git") {
+          gitCalls.push(args);
+          if (args[2] === "show-ref") throw missingGitRef();
+          if (args[2] === "for-each-ref") return "refs/remotes/origin/nightly\n";
+          return "";
+        }
+        return cliEnvelope({ message: "ok" });
+      }) as never);
+
+      const res = await installCustomNode({
+        id: "https://github.com/foo/bar",
+        version: "nightly",
+        useCmCli: true,
+      });
+
+      expect(res.mechanism).toBe("comfy-cli");
+      const checkout = gitCalls.find((args) => args[2] === "checkout");
+      expect(checkout).toEqual([
+        "-C",
+        BAR_DIR,
+        "checkout",
+        "--detach",
+        "--end-of-options",
+        "refs/remotes/origin/nightly",
+      ]);
     });
 
   });
