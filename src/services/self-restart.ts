@@ -8,8 +8,9 @@
 //
 //   - PUBLISHED installs (global / local / npx): periodically re-check the npm
 //     registry. global/local self-update on disk (self-update.ts) and then
-//     restart into the new code; npx respawns pinned to the new version (npx
-//     fetches it on launch).
+//     restart into the new code; an UNPINNED npx launch respawns pinned to the
+//     new version (npx fetches it on launch). An exact npx version pin is a
+//     stability boundary and is never replaced by this process.
 //   - DEV installs (npm link / checkout): NEVER touch the disk — instead watch
 //     the running entry script's mtime and restart when a rebuild lands, so
 //     `npm run build` is all a developer needs.
@@ -64,6 +65,35 @@ const IDLE_POLL_MS = 5_000;
 /** Defense-in-depth against restart churn: never restart a process younger
  *  than this (change-driven triggers make a true loop impossible anyway). */
 const MIN_UPTIME_MS = 2 * 60 * 1000;
+
+/** npm's exec runner passes the package spec that selected this process. */
+const NPX_PACKAGE_SPEC_ENV = "npm_config_package";
+/** An exact version is a pin; tags and ranges retain the normal update policy. */
+const EXACT_VERSION_SPEC =
+  /^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+
+function envValue(env: NodeJS.ProcessEnv, name: string): string | undefined {
+  const key = Object.keys(env).find((candidate) => candidate.toLowerCase() === name);
+  return key === undefined ? undefined : env[key];
+}
+
+/**
+ * Return the exact version requested by the npx invocation, if one is known.
+ *
+ * `npm_config_package` is set by npm for both `comfyui-mcp` and
+ * `comfyui-mcp@0.52.66`. The package directory alone cannot carry this
+ * distinction because npx stores both forms under the same disposable cache
+ * layout. Treat only an exact semver as a pin: a bare package, `@latest`, and
+ * ranges/tags retain the existing auto-update behavior.
+ */
+export function npxVersionPin(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const raw = envValue(env, NPX_PACKAGE_SPEC_ENV)?.trim();
+  if (!raw) return undefined;
+  const prefix = `${PACKAGE_NAME}@`;
+  if (!raw.toLowerCase().startsWith(prefix)) return undefined;
+  const requested = raw.slice(prefix.length).trim();
+  return EXACT_VERSION_SPEC.test(requested) ? requested : undefined;
+}
 
 export interface SelfRestartDeps {
   env: () => NodeJS.ProcessEnv;
@@ -246,6 +276,8 @@ export class SelfRestarter {
   private restarting = false;
   /** Versions already announced when restart is disabled — once each. */
   private announced = new Set<string>();
+  /** Exact npx launch pins are intentional and must not trigger a replacement. */
+  private readonly npxPin: string | undefined;
   /** apply_updates_now: one tick (and its armed restart) may ignore the gate. */
   private forceApply = false;
   stopped = false;
@@ -253,6 +285,7 @@ export class SelfRestarter {
   constructor(deps: Partial<SelfRestartDeps> = {}) {
     this.deps = { ...defaultSelfRestartDeps, ...deps };
     this.info = this.deps.detectInstall();
+    this.npxPin = this.info.mode === "npx" ? npxVersionPin(this.deps.env()) : undefined;
   }
 
   /** Wire the periodic checks. No-op when the master switch is off. */
@@ -266,6 +299,11 @@ export class SelfRestarter {
     if (gen > 0) {
       logger.info(
         `[self-restart] running v${this.info.currentVersion ?? "?"} after self-restart (gen ${gen}, ${this.info.mode})`,
+      );
+    }
+    if (this.npxPin) {
+      logger.info(
+        `[self-restart] npx launch is pinned to ${this.npxPin} — automatic version replacement is disabled`,
       );
     }
 
@@ -353,7 +391,11 @@ export class SelfRestarter {
         return;
       }
       if (this.info.mode === "npx") {
-        // npx can't be updated on disk — respawn pinned to the new version.
+        // npx can't be updated on disk — an unpinned launch respawns pinned to
+        // the new version. An exact package spec is an explicit stability
+        // boundary; never turn `@0.52.66` into `@0.52.67` from inside the
+        // healthy process.
+        if (this.npxPin) return;
         const latest = await this.deps.latestVersion();
         const current = this.info.currentVersion;
         if (!latest || !current || !isNewer(latest, current)) {

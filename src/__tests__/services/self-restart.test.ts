@@ -175,12 +175,49 @@ describe("SelfRestarter — published installs", () => {
   });
 
   it("npx: respawns pinned to the newer version", async () => {
-    const h = makeHarness({ mode: "npx", currentVersion: "1.0.0", latest: "1.2.0" });
+    const h = makeHarness({
+      mode: "npx",
+      currentVersion: "1.0.0",
+      latest: "1.2.0",
+      env: { npm_config_package: "comfyui-mcp" },
+    });
     h.restarter.start();
     await h.restarter.updateTick();
     await Promise.resolve();
     expect(h.calls).toEqual(["spawn", "releasePanelLock", "teardown", "exit"]);
     expect(h.spawns[0]?.npxVersion).toBe("1.2.0");
+  });
+
+  it("npx: an exact launch pin does not update or tear down the healthy runtime", async () => {
+    const h = makeHarness({
+      mode: "npx",
+      currentVersion: "0.52.66",
+      latest: "0.52.67",
+      env: { npm_config_package: "comfyui-mcp@0.52.66" },
+    });
+    h.restarter.start();
+    await h.restarter.updateTick();
+    await Promise.resolve();
+
+    // The dangerous regression was not merely selecting the wrong child: the
+    // parent was torn down after spawning it. A pin must leave every handoff
+    // step untouched, so a stalled replacement cannot take down the service.
+    expect(h.calls).toEqual([]);
+    expect(h.spawns).toEqual([]);
+  });
+
+  it("npx: @latest remains unpinned and keeps the spawn-first handoff", async () => {
+    const h = makeHarness({
+      mode: "npx",
+      currentVersion: "0.52.66",
+      latest: "0.52.67",
+      env: { npm_config_package: "comfyui-mcp@latest" },
+    });
+    h.restarter.start();
+    await h.restarter.updateTick();
+    await Promise.resolve();
+    expect(h.calls).toEqual(["spawn", "releasePanelLock", "teardown", "exit"]);
+    expect(h.spawns[0]?.npxVersion).toBe("0.52.67");
   });
 
   it("npx: same version → no restart", async () => {
