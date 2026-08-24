@@ -2171,6 +2171,29 @@ describe("node-management service", () => {
       ]);
     });
 
+    it("#1470 does not match a nested remote branch to version-derived nightly", async () => {
+      const gitCalls: string[][] = [];
+      mockedExec.mockImplementation(((bin: string, args: string[]) => {
+        if (bin === "git") {
+          gitCalls.push(args);
+          if (args[2] === "show-ref") throw missingGitRef();
+          if (args[2] === "for-each-ref") return "refs/remotes/origin/feature/nightly\n";
+          return "";
+        }
+        return cliEnvelope({ message: "ok" });
+      }) as never);
+
+      const res = await installCustomNode({
+        id: "https://github.com/foo/bar",
+        version: "nightly",
+        useCmCli: true,
+      });
+
+      expect(res.mechanism).toBe("comfy-cli");
+      expect(res.message).toMatch(/left at the repository's default HEAD/);
+      expect(gitCalls.some((args) => args[2] === "checkout")).toBe(false);
+    });
+
   });
 
   // ---- disable / enable / uninstall (#775) ----------------------------------

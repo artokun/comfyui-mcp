@@ -2055,17 +2055,11 @@ function gitRemoteRefFor(nodeDir: string, ref: string, cwd: string): string | un
     throw new GitRefProbeError("git for-each-ref refs/remotes", err);
   }
 
-  const suffix = `/${ref}`;
+  const canonicalRemoteRef = `refs/remotes/origin/${ref}`;
   const matches = output
     .split(/\r?\n/)
     .map((line) => line.trim())
-    .filter((line) => line.startsWith("refs/remotes/") && line.endsWith(suffix));
-  matches.sort((a, b) => {
-    const aOrigin = a === `refs/remotes/origin${suffix}`;
-    const bOrigin = b === `refs/remotes/origin${suffix}`;
-    if (aOrigin !== bOrigin) return aOrigin ? -1 : 1;
-    return a.localeCompare(b);
-  });
+    .filter((line) => line === canonicalRemoteRef);
   return matches[0];
 }
 
