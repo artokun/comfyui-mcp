@@ -1331,8 +1331,8 @@ export async function fetchImage(
     const declined = describeDeclinedPanelFallback(choice);
     if (choice.kind !== "use") {
       // Production children have no bridge object. They use the bounded
-      // reference-only relay instead: the orchestrator resolves the requester
-      // and asks the authenticated panel to fetch same-origin /view. The old
+      // reference-only relay instead: the orchestrator resolves the child
+      // capability and asks the authenticated panel to fetch same-origin /view. The old
       // direct-origin seam remains injectable for focused fallback mechanics
       // tests, but it is never installed by production.
       try {

@@ -12,12 +12,14 @@ import {
   PANEL_IMAGE_RELAY_REQUEST_PREFIX,
   PANEL_IMAGE_RELAY_RESPONSE_PREFIX,
   PANEL_IMAGE_RELAY_STALE_MS,
+  makePanelImageRelayCapability,
   processPanelImageRequests,
   requestPanelImage,
   type PanelImageRelayRequest,
 } from "../../services/panel-image-relay.js";
 
 const dirs: string[] = [];
+const SECRET = "a".repeat(64);
 
 function tempChannel(): string {
   const dir = mkdtempSync(join(tmpdir(), "comfyui-mcp-image-relay-"));
@@ -27,19 +29,22 @@ function tempChannel(): string {
 
 function request(id: string, patch: Partial<PanelImageRelayRequest> = {}): PanelImageRelayRequest {
   const createdAt = Date.now();
+  const { capability: patchedCapability, ...restPatch } = patch;
   const value = {
     version: 1,
     requestId: id,
-    requester: "orchestrator::claude",
     filename: "render.png",
     subfolder: "shots",
     type: "output",
     createdAt,
     deadlineAt: createdAt + 8_000,
-    ...patch,
+    ...restPatch,
   };
   if (!("deadlineAt" in patch)) value.deadlineAt = value.createdAt + 8_000;
-  return value;
+  return {
+    ...value,
+    capability: patchedCapability ?? makePanelImageRelayCapability(SECRET, value),
+  };
 }
 
 function requestFile(dir: string, id: string): string {
@@ -58,6 +63,7 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
   delete process.env.COMFYUI_MCP_PROGRESS_DIR;
   delete process.env.COMFYUI_MCP_TAB;
+  delete process.env.COMFYUI_MCP_RELAY_SECRET;
   vi.restoreAllMocks();
 });
 
@@ -66,6 +72,7 @@ describe("panel image relay child channel", () => {
     const dir = tempChannel();
     process.env.COMFYUI_MCP_PROGRESS_DIR = dir;
     process.env.COMFYUI_MCP_TAB = "orchestrator::claude";
+    process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
     const pending = requestPanelImage("render.png", "output", "shots");
     let file = "";
     for (let i = 0; i < 100 && !file; i += 1) {
@@ -75,11 +82,11 @@ describe("panel image relay child channel", () => {
     expect(file).not.toBe("");
     const requestBody = JSON.parse(readFileSync(join(dir, file), "utf8")) as Record<string, unknown>;
     expect(Object.keys(requestBody).sort()).toEqual([
+      "capability",
       "createdAt",
       "deadlineAt",
       "filename",
       "requestId",
-      "requester",
       "subfolder",
       "type",
       "version",
@@ -107,7 +114,17 @@ describe("panel image relay child channel", () => {
     const dir = tempChannel();
     process.env.COMFYUI_MCP_PROGRESS_DIR = dir;
     process.env.COMFYUI_MCP_TAB = "orchestrator::claude";
+    process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
     await expect(requestPanelImage(filename, type as "output", subfolder)).rejects.toMatchObject({ code: "UNSAFE_REFERENCE" });
+    expect(readdirSync(dir)).toEqual([]);
+  });
+
+  it("does not authorize the relay from COMFYUI_MCP_TAB alone", async () => {
+    const dir = tempChannel();
+    process.env.COMFYUI_MCP_PROGRESS_DIR = dir;
+    process.env.COMFYUI_MCP_TAB = "orchestrator::victim";
+    delete process.env.COMFYUI_MCP_RELAY_SECRET;
+    await expect(requestPanelImage("render.png", "output", "shots")).resolves.toBeUndefined();
     expect(readdirSync(dir)).toEqual([]);
   });
 
@@ -115,6 +132,7 @@ describe("panel image relay child channel", () => {
     const dir = tempChannel();
     process.env.COMFYUI_MCP_PROGRESS_DIR = dir;
     process.env.COMFYUI_MCP_TAB = "orchestrator::claude";
+    process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
     const pending = requestPanelImage("render.png", "output", "shots");
     let file = "";
     for (let i = 0; i < 100 && !file; i += 1) {
@@ -135,10 +153,49 @@ describe("panel image relay child channel", () => {
     await expect(pending).rejects.toMatchObject({ code: "MALFORMED_REPLY" });
   });
 
+  it("moves a symlinked response into private staging without opening its target", async () => {
+    const dir = tempChannel();
+    process.env.COMFYUI_MCP_PROGRESS_DIR = dir;
+    process.env.COMFYUI_MCP_TAB = "orchestrator::claude";
+    process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
+    const pending = requestPanelImage("render.png", "output", "shots");
+    let file = "";
+    for (let i = 0; i < 100 && !file; i += 1) {
+      file = readdirSync(dir).find((name) => name.startsWith(PANEL_IMAGE_RELAY_REQUEST_PREFIX)) ?? "";
+      if (!file) await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const body = JSON.parse(readFileSync(join(dir, file), "utf8")) as Record<string, unknown>;
+    const id = String(body.requestId);
+    const target = join(dir, "response-target.json");
+    writeFileSync(target, JSON.stringify({
+      version: 1,
+      requestId: id,
+      ok: true,
+      base64: "AQID",
+      mimeType: "image/png",
+      bytes: 3,
+      updated: Date.now(),
+    }));
+    let symlinkSupported = true;
+    try {
+      symlinkSync(target, responseFile(dir, id), "file");
+    } catch {
+      symlinkSupported = false;
+      writeFileSync(responseFile(dir, id), readFileSync(target));
+    }
+    if (symlinkSupported) {
+      await expect(pending).rejects.toMatchObject({ code: "MALFORMED_REPLY" });
+      expect(readFileSync(target, "utf8")).toContain('"ok":true');
+    } else {
+      await expect(pending).resolves.toMatchObject({ base64: "AQID" });
+    }
+  });
+
   it("does not accept a response discovered after the single end-to-end deadline", async () => {
     const dir = tempChannel();
     process.env.COMFYUI_MCP_PROGRESS_DIR = dir;
     process.env.COMFYUI_MCP_TAB = "orchestrator::claude";
+    process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
     const pending = requestPanelImage("render.png", "output", "shots");
     let file = "";
     for (let i = 0; i < 100 && !file; i += 1) {
@@ -154,6 +211,29 @@ describe("panel image relay child channel", () => {
       base64: "AQID",
       mimeType: "image/png",
       bytes: 3,
+      updated: Number(body.deadlineAt) + 1,
+    }));
+    await expect(pending).rejects.toMatchObject({ code: "STALE_REPLY" });
+  });
+
+  it("validates failure freshness before preserving the panel failure code", async () => {
+    const dir = tempChannel();
+    process.env.COMFYUI_MCP_PROGRESS_DIR = dir;
+    process.env.COMFYUI_MCP_TAB = "orchestrator::claude";
+    process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
+    const pending = requestPanelImage("render.png", "output", "shots");
+    let file = "";
+    for (let i = 0; i < 100 && !file; i += 1) {
+      file = readdirSync(dir).find((name) => name.startsWith(PANEL_IMAGE_RELAY_REQUEST_PREFIX)) ?? "";
+      if (!file) await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const body = JSON.parse(readFileSync(join(dir, file), "utf8")) as Record<string, unknown>;
+    const id = String(body.requestId);
+    writeFileSync(responseFile(dir, id), JSON.stringify({
+      version: 1,
+      requestId: id,
+      ok: false,
+      error: "HTTP_404",
       updated: Number(body.deadlineAt) + 1,
     }));
     await expect(pending).rejects.toMatchObject({ code: "STALE_REPLY" });
@@ -175,6 +255,10 @@ describe("panel image relay orchestrator poll", () => {
     });
     await processPanelImageRequests({
       dir,
+      resolvePanelAgentKey: (value) => {
+        expect(value.capability).toBe(makePanelImageRelayCapability(SECRET, value));
+        return "orchestrator::claude";
+      },
       resolvePanelTab: (agentKey) => {
         expect(agentKey).toBe("orchestrator::claude");
         // This is the production scopeToRealTab result for the shared key:
@@ -196,6 +280,7 @@ describe("panel image relay orchestrator poll", () => {
       const send = vi.fn();
       await processPanelImageRequests({
         dir,
+        resolvePanelAgentKey: () => "orchestrator::claude",
         resolvePanelTab: () => failure === "NO_LIVE_PANEL" ? undefined : "panel-tab",
         bridge: {
           canReach: () => false,
@@ -222,6 +307,7 @@ describe("panel image relay orchestrator poll", () => {
       writeFileSync(requestFile(dir, id), JSON.stringify(request(id)));
       await processPanelImageRequests({
         dir,
+        resolvePanelAgentKey: () => "orchestrator::claude",
         resolvePanelTab: () => "panel-tab",
         bridge: { canReach: () => true, send: async () => testCase.reply },
       });
@@ -238,10 +324,28 @@ describe("panel image relay orchestrator poll", () => {
     const forgedId = "forged-url-1234567";
     writeFileSync(requestFile(dir, forgedId), JSON.stringify({ ...request(forgedId), url: "http://127.0.0.1:9/secret" }));
     const send = vi.fn();
-    await processPanelImageRequests({ dir, resolvePanelTab: () => "panel-tab", bridge: { canReach: () => true, send } });
+    await processPanelImageRequests({ dir, resolvePanelAgentKey: () => "orchestrator::claude", resolvePanelTab: () => "panel-tab", bridge: { canReach: () => true, send } });
     expect(readResponse(dir, staleId)).toMatchObject({ ok: false, error: "TIMEOUT" });
     expect(readResponse(dir, forgedId)).toMatchObject({ ok: false, error: "MALFORMED_REQUEST" });
     expect(send).not.toHaveBeenCalled();
+  });
+
+  it("does not accept a file-supplied requester or an unknown capability", async () => {
+    const dir = tempChannel();
+    const forgedId = "forged-requester-123456";
+    writeFileSync(requestFile(dir, forgedId), JSON.stringify({ ...request(forgedId), requester: "orchestrator::victim" }));
+    const unknownId = "unknown-capability-123456";
+    writeFileSync(requestFile(dir, unknownId), JSON.stringify(request(unknownId, { capability: "b".repeat(64) })));
+    const send = vi.fn();
+    await processPanelImageRequests({
+      dir,
+      resolvePanelAgentKey: (value) => value.capability === makePanelImageRelayCapability(SECRET, value) ? "orchestrator::claude" : undefined,
+      resolvePanelTab: () => "victim-panel",
+      bridge: { canReach: () => true, send },
+    });
+    expect(send).not.toHaveBeenCalled();
+    expect(readResponse(dir, forgedId)).toMatchObject({ ok: false, error: "MALFORMED_REQUEST" });
+    expect(readResponse(dir, unknownId)).toMatchObject({ ok: false, error: "NO_LIVE_PANEL" });
   });
 
   it("carries one deadline through the bridge and refuses a late panel result", async () => {
@@ -255,6 +359,7 @@ describe("panel image relay orchestrator poll", () => {
     let timeoutMs = 0;
     await processPanelImageRequests({
       dir,
+      resolvePanelAgentKey: () => "orchestrator::claude",
       resolvePanelTab: () => "panel-tab",
       bridge: {
         canReach: () => true,
@@ -281,6 +386,7 @@ describe("panel image relay orchestrator poll", () => {
     let sends = 0;
     await processPanelImageRequests({
       dir,
+      resolvePanelAgentKey: () => "orchestrator::claude",
       resolvePanelTab: () => "panel-tab",
       bridge: {
         canReach: () => true,
@@ -313,7 +419,7 @@ describe("panel image relay orchestrator poll", () => {
     const id = "response-cap-request-123456";
     writeFileSync(requestFile(dir, id), JSON.stringify(request(id)));
     const send = vi.fn();
-    await processPanelImageRequests({ dir, resolvePanelTab: () => "panel-tab", bridge: { canReach: () => true, send } });
+    await processPanelImageRequests({ dir, resolvePanelAgentKey: () => "orchestrator::claude", resolvePanelTab: () => "panel-tab", bridge: { canReach: () => true, send } });
     expect(send).not.toHaveBeenCalled();
     expect(readdirSync(dir)).toContain(`control-image-request-${id}.json`);
   });
@@ -337,7 +443,7 @@ describe("panel image relay orchestrator poll", () => {
     }
 
     const send = vi.fn();
-    await processPanelImageRequests({ dir, resolvePanelTab: () => "panel-tab", bridge: { canReach: () => true, send } });
+    await processPanelImageRequests({ dir, resolvePanelAgentKey: () => "orchestrator::claude", resolvePanelTab: () => "panel-tab", bridge: { canReach: () => true, send } });
     expect(send).not.toHaveBeenCalled();
     expect(readResponse(dir, oversizedId)).toMatchObject({ ok: false, error: "MALFORMED_REQUEST" });
     if (symlinksSupported) expect(readdirSync(dir)).not.toContain(`control-image-response-${symlinkId}.json`);
@@ -352,7 +458,7 @@ describe("panel image relay orchestrator poll", () => {
     const old = (Date.now() - PANEL_IMAGE_RELAY_STALE_MS - 1) / 1000;
     utimesSync(stale, old, old);
     truncateSync(oversized, 48 * 1024 * 1024 + 1);
-    await processPanelImageRequests({ dir, resolvePanelTab: () => "panel-tab", bridge: { canReach: () => false, send: vi.fn() } });
+    await processPanelImageRequests({ dir, resolvePanelAgentKey: () => "orchestrator::claude", resolvePanelTab: () => "panel-tab", bridge: { canReach: () => false, send: vi.fn() } });
     expect(readdirSync(dir)).not.toContain(stale.split("\\").at(-1));
     expect(readdirSync(dir)).not.toContain(oversized.split("\\").at(-1));
   });

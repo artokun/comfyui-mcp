@@ -5,16 +5,17 @@ import {
   writeFileSync,
 } from "node:fs";
 import { constants } from "node:fs";
-import { lstat, open, opendir, unlink } from "node:fs/promises";
-import { randomBytes } from "node:crypto";
+import { lstat, mkdtemp, open, opendir, rename, rmdir, unlink } from "node:fs/promises";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 /**
  * The only production path for a /view retry when the configured headless
  * ComfyUI target is unreachable. The child writes a reference-only request;
- * the orchestrator resolves the requester to a live panel and performs the
- * authenticated bridge command. No URL, origin, or server claim crosses this
- * channel.
+ * the orchestrator resolves an in-memory capability to a live panel and
+ * performs the authenticated bridge command. No URL, origin, or file-supplied
+ * tab identity crosses this channel.
  */
 export const PANEL_IMAGE_RELAY_VERSION = 1;
 export const PANEL_IMAGE_RELAY_MAX_BYTES = 32 * 1024 * 1024;
@@ -31,6 +32,8 @@ export const PANEL_IMAGE_RELAY_MAX_PENDING_RESPONSES = 4;
 export const PANEL_IMAGE_RELAY_REQUEST_PREFIX = "control-image-request-";
 export const PANEL_IMAGE_RELAY_RESPONSE_PREFIX = "control-image-response-";
 const RELAY_ID_RE = /^[A-Za-z0-9_-]{16,80}$/;
+const RELAY_CAPABILITY_RE = /^[a-f0-9]{64}$/;
+const RELAY_SECRET_RE = /^[a-f0-9]{64}$/;
 const IMAGE_TYPES = new Set<PanelImageType>(["output", "input", "temp"]);
 const MIME_RE = /^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,62}\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,62}$/;
 
@@ -39,13 +42,18 @@ export type PanelImageType = "output" | "input" | "temp";
 export interface PanelImageRelayRequest {
   version: typeof PANEL_IMAGE_RELAY_VERSION;
   requestId: string;
-  requester: string;
+  capability: string;
   filename: string;
   subfolder: string;
   type: PanelImageType;
   createdAt: number;
   deadlineAt: number;
 }
+
+export type PanelImageRelayAuthInput = Pick<
+  PanelImageRelayRequest,
+  "requestId" | "filename" | "subfolder" | "type" | "createdAt" | "deadlineAt"
+>;
 
 export interface PanelImageRelaySuccess {
   base64: string;
@@ -144,8 +152,39 @@ export function isSafePanelImageRef(
   return segments.every((segment) => segment !== "" && segment !== "." && segment !== "..");
 }
 
-function isSafeRequester(value: unknown): value is string {
-  return isSafeText(value, 1024) && value.trim() === value;
+function isSafeRelayCapability(value: unknown): value is string {
+  return typeof value === "string" && RELAY_CAPABILITY_RE.test(value);
+}
+
+function isSafeRelaySecret(value: unknown): value is string {
+  return typeof value === "string" && RELAY_SECRET_RE.test(value);
+}
+
+function relayAuthPayload(input: PanelImageRelayAuthInput): string {
+  return JSON.stringify([
+    input.requestId,
+    input.filename,
+    input.subfolder,
+    input.type,
+    input.createdAt,
+    input.deadlineAt,
+  ]);
+}
+
+export function makePanelImageRelayCapability(
+  secret: string,
+  input: PanelImageRelayAuthInput,
+): string {
+  return createHmac("sha256", secret).update(relayAuthPayload(input)).digest("hex");
+}
+
+export function verifyPanelImageRelayCapability(
+  secret: string,
+  request: PanelImageRelayRequest,
+): boolean {
+  if (!isSafeRelaySecret(secret) || !isSafeRelayCapability(request.capability)) return false;
+  const expected = makePanelImageRelayCapability(secret, request);
+  return timingSafeEqual(Buffer.from(request.capability, "hex"), Buffer.from(expected, "hex"));
 }
 
 function isSafeRelayId(value: unknown): value is string {
@@ -161,16 +200,26 @@ function responsePath(dir: string, requestId: string): string {
 }
 
 const noFollowFlag = (constants as unknown as Record<string, unknown>).O_NOFOLLOW;
-const safeReadFlags = constants.O_RDONLY | (typeof noFollowFlag === "number" ? noFollowFlag : 0);
+const nonBlockingFlag = (constants as unknown as Record<string, unknown>).O_NONBLOCK;
+const safeReadFlags =
+  constants.O_RDONLY |
+  (typeof noFollowFlag === "number" ? noFollowFlag : 0) |
+  (typeof nonBlockingFlag === "number" ? nonBlockingFlag : 0);
+
+function sameFileIdentity(left: { dev: number; ino: number }, right: { dev: number; ino: number }): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
 
 /** Read one bounded regular file through one descriptor; never stat then reopen. */
 async function readBoundedJson(path: string, maxBytes: number): Promise<unknown> {
   const linkStat = await lstat(path);
-  if (!linkStat.isFile()) throw new Error("relay input is not a regular file");
+  if (!linkStat.isFile() || linkStat.isSymbolicLink()) throw new Error("relay input is not a regular file");
   const handle = await open(path, safeReadFlags);
   try {
     const stat = await handle.stat();
-    if (!stat.isFile() || stat.size > maxBytes) throw new Error("file exceeds the relay safety limit");
+    if (!stat.isFile() || !sameFileIdentity(linkStat, stat) || stat.size > maxBytes) {
+      throw new Error("relay input is not the handed-off regular file");
+    }
     const data = Buffer.alloc(stat.size);
     let offset = 0;
     while (offset < data.byteLength) {
@@ -185,6 +234,51 @@ async function readBoundedJson(path: string, maxBytes: number): Promise<unknown>
     return JSON.parse(data.toString("utf8")) as unknown;
   } finally {
     await handle.close();
+  }
+}
+
+async function createPrivateStagingDir(): Promise<string | undefined> {
+  try {
+    return await mkdtemp(join(tmpdir(), "comfyui-mcp-image-relay-"));
+  } catch {
+    return undefined;
+  }
+}
+
+/** Move the untrusted directory entry without opening or following it. */
+async function handoffRequest(dir: string, file: string, stagingDir: string): Promise<string | undefined> {
+  const source = join(dir, file);
+  const destination = join(stagingDir, file);
+  try {
+    await rename(source, destination);
+    return destination;
+  } catch {
+    return undefined;
+  }
+}
+
+async function handoffResponse(dir: string, requestId: string, stagingDir: string): Promise<string | undefined> {
+  const file = `${PANEL_IMAGE_RELAY_RESPONSE_PREFIX}${requestId}.json`;
+  const source = join(dir, file);
+  const destination = join(stagingDir, file);
+  try {
+    await rename(source, destination);
+    return destination;
+  } catch {
+    return undefined;
+  }
+}
+
+async function removeStagedEntry(path: string): Promise<void> {
+  try {
+    const stat = await lstat(path);
+    if (stat.isDirectory() && !stat.isSymbolicLink()) {
+      await rmdir(path).catch(() => undefined);
+    } else {
+      await unlink(path).catch(() => undefined);
+    }
+  } catch {
+    // The entry may already have been removed during shutdown or cleanup.
   }
 }
 
@@ -233,13 +327,14 @@ function validateImagePayload(
 function validateRequest(value: unknown, requestId: string): PanelImageRelayRequest | undefined {
   if (!value || typeof value !== "object") return undefined;
   const record = value as Record<string, unknown>;
+  const capability = record.capability;
   const createdAt = record.createdAt;
   const deadlineAt = record.deadlineAt;
   if (
-    !hasOnlyKeys(record, ["version", "requestId", "requester", "filename", "subfolder", "type", "createdAt", "deadlineAt"]) ||
+    !hasOnlyKeys(record, ["version", "requestId", "capability", "filename", "subfolder", "type", "createdAt", "deadlineAt"]) ||
     record.version !== PANEL_IMAGE_RELAY_VERSION ||
     record.requestId !== requestId ||
-    !isSafeRequester(record.requester) ||
+    !isSafeRelayCapability(capability) ||
     !isSafePanelImageRef(record.filename, record.subfolder, record.type) ||
     typeof createdAt !== "number" ||
     typeof deadlineAt !== "number" ||
@@ -312,8 +407,8 @@ export async function requestPanelImage(
   subfolder: string,
 ): Promise<PanelImageRelaySuccess | undefined> {
   const dir = channelDir();
-  const requester = process.env.COMFYUI_MCP_TAB;
-  if (!dir || !isSafeRequester(requester)) return undefined;
+  const secret = process.env.COMFYUI_MCP_RELAY_SECRET;
+  if (!dir || !isSafeRelaySecret(secret)) return undefined;
   if (!isSafePanelImageRef(filename, subfolder, type)) {
     throw new PanelImageRelayError("The image reference is unsafe and was refused.", "UNSAFE_REFERENCE");
   }
@@ -330,66 +425,60 @@ export async function requestPanelImage(
   const request: PanelImageRelayRequest = {
     version: PANEL_IMAGE_RELAY_VERSION,
     requestId,
-    requester,
+    capability: "",
     filename,
     subfolder,
     type,
     createdAt,
     deadlineAt: createdAt + PANEL_IMAGE_RELAY_TIMEOUT_MS,
   };
+  request.capability = makePanelImageRelayCapability(secret, request);
   const requestFile = requestPath(dir, requestId);
-  const responseFile = responsePath(dir, requestId);
+  const responseStagingDir = await createPrivateStagingDir();
+  if (!responseStagingDir) {
+    throw new PanelImageRelayError("The connected panel relay is unavailable.", "REQUEST_WRITE_FAILED", true);
+  }
   try {
     writeJsonAtomically(requestFile, request, PANEL_IMAGE_RELAY_MAX_REQUEST_FILE_BYTES);
   } catch {
+    await removeStagedEntry(responseStagingDir);
     throw new PanelImageRelayError("The connected panel relay is unavailable.", "REQUEST_WRITE_FAILED", true);
   }
 
   const deadline = request.deadlineAt;
   try {
     while (Date.now() < deadline) {
-      let responsePresent = false;
-      try {
-        const responseStat = await lstat(responseFile);
-        if (!responseStat.isFile()) {
-          try { await unlink(responseFile); } catch { /* best effort */ }
-          throw new PanelImageRelayError("The panel returned a malformed image relay reply.", "MALFORMED_REPLY");
-        }
-        responsePresent = true;
-      } catch (error) {
-        if (error instanceof PanelImageRelayError) throw error;
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-          throw new PanelImageRelayError("The panel returned a malformed image relay reply.", "MALFORMED_REPLY");
-        }
-      }
-      if (responsePresent) {
+      const stagedResponsePath = await handoffResponse(dir, requestId, responseStagingDir);
+      if (stagedResponsePath) {
         if (Date.now() >= deadline) {
-          try { await unlink(responseFile); } catch { /* best effort */ }
+          await removeStagedEntry(stagedResponsePath);
           throw new PanelImageRelayError("The connected panel image relay timed out.", "TIMEOUT");
         }
         let response: PanelImageRelayResponse;
         try {
           response = validateResponse(
-            await readBoundedJson(responseFile, PANEL_IMAGE_RELAY_MAX_RESPONSE_FILE_BYTES),
+            await readBoundedJson(stagedResponsePath, PANEL_IMAGE_RELAY_MAX_RESPONSE_FILE_BYTES),
             requestId,
           );
         } catch (error) {
-          try { unlinkSync(responseFile); } catch { /* best effort */ }
+          await removeStagedEntry(stagedResponsePath);
           if (error instanceof PanelImageRelayError) throw error;
           throw new PanelImageRelayError("The panel returned a malformed image relay reply.", "MALFORMED_REPLY");
         }
-        try { unlinkSync(responseFile); } catch { /* best effort */ }
+        await removeStagedEntry(stagedResponsePath);
         if (Date.now() >= deadline) {
           throw new PanelImageRelayError("The connected panel image relay timed out.", "TIMEOUT");
         }
-        if (response.ok === false) responseFailureMessage(response);
+        const responseAge = Date.now() - response.updated;
         if (
           response.updated < request.createdAt ||
           response.updated > request.deadlineAt ||
-          Date.now() - response.updated > PANEL_IMAGE_RELAY_STALE_MS
+          responseAge < -5_000 ||
+          responseAge > PANEL_IMAGE_RELAY_STALE_MS
         ) {
           throw new PanelImageRelayError("The panel returned a stale image relay reply.", "STALE_REPLY");
         }
+        if (response.ok === false) responseFailureMessage(response);
         return { base64: response.base64, mimeType: response.mimeType, bytes: response.bytes };
       }
       await new Promise<void>((resolve) => setTimeout(resolve, 50));
@@ -397,6 +486,7 @@ export async function requestPanelImage(
     throw new PanelImageRelayError("The connected panel image relay timed out.", "TIMEOUT");
   } finally {
     try { unlinkSync(requestFile); } catch { /* orchestrator may already have consumed it */ }
+    await removeStagedEntry(responseStagingDir);
   }
 }
 
@@ -443,13 +533,16 @@ async function processOneRequest(
   dir: string,
   file: string,
   bridge: PanelImageRelayBridge,
+  stagingDir: string,
+  resolvePanelAgentKey: (request: PanelImageRelayRequest) => string | undefined,
   resolvePanelTab: (agentKey: string) => string | undefined,
 ): Promise<void> {
   const requestId = file.slice(PANEL_IMAGE_RELAY_REQUEST_PREFIX.length, -".json".length);
-  const fullPath = join(dir, file);
+  const stagedPath = await handoffRequest(dir, file, stagingDir);
+  if (!stagedPath) return;
   let request: PanelImageRelayRequest | undefined;
   try {
-    request = validateRequest(await readBoundedJson(fullPath, PANEL_IMAGE_RELAY_MAX_REQUEST_FILE_BYTES), requestId);
+    request = validateRequest(await readBoundedJson(stagedPath, PANEL_IMAGE_RELAY_MAX_REQUEST_FILE_BYTES), requestId);
   } catch {
     request = undefined;
   }
@@ -457,7 +550,7 @@ async function processOneRequest(
     try {
       writeJsonAtomically(responsePath(dir, requestId), failureResponse(requestId, "MALFORMED_REQUEST"), PANEL_IMAGE_RELAY_MAX_RESPONSE_FILE_BYTES);
     } catch { /* child will time out safely */ }
-    try { unlinkSync(fullPath); } catch { /* best effort */ }
+    await removeStagedEntry(stagedPath);
     return;
   }
   const now = Date.now();
@@ -466,14 +559,15 @@ async function processOneRequest(
     try {
       writeJsonAtomically(responsePath(dir, requestId), failureResponse(requestId, now >= request.deadlineAt ? "TIMEOUT" : "STALE_REQUEST"), PANEL_IMAGE_RELAY_MAX_RESPONSE_FILE_BYTES);
     } catch { /* best effort */ }
-    try { unlinkSync(fullPath); } catch { /* best effort */ }
+    await removeStagedEntry(stagedPath);
     return;
   }
 
   let response: PanelImageRelayResponse;
-  const panelTab = resolvePanelTab(request.requester);
+  const agentKey = resolvePanelAgentKey(request);
+  const panelTab = agentKey ? resolvePanelTab(agentKey) : undefined;
   if (!panelTab || !bridge.canReach(panelTab)) {
-    const failure = bridge.resolveFailure?.(panelTab ?? request.requester);
+    const failure = agentKey ? bridge.resolveFailure?.(agentKey) : undefined;
     response = failureResponse(
       requestId,
       failure === "ambiguous" ? "AMBIGUOUS_REQUESTER" : "NO_LIVE_PANEL",
@@ -532,12 +626,14 @@ async function processOneRequest(
     // A bounded response that cannot be written is a failed relay; never retry
     // the request with a different target or fall back to a child-supplied URL.
   }
-  try { unlinkSync(fullPath); } catch { /* best effort */ }
+  await removeStagedEntry(stagedPath);
 }
 
 export interface ProcessPanelImageRequestsOptions {
   dir: string;
   bridge: PanelImageRelayBridge;
+  /** Verify the request MAC and resolve it to the owning agent key. */
+  resolvePanelAgentKey: (request: PanelImageRelayRequest) => string | undefined;
   /** Resolve both shared agent keys and real-tab agent keys to a live panel tab. */
   resolvePanelTab: (agentKey: string) => string | undefined;
   inFlight?: Set<string>;
@@ -561,6 +657,7 @@ function rejectQueuedRequest(dir: string, file: string): void {
 export async function processPanelImageRequests({
   dir,
   bridge,
+  resolvePanelAgentKey,
   resolvePanelTab,
   inFlight = new Set<string>(),
 }: ProcessPanelImageRequestsOptions): Promise<void> {
@@ -593,13 +690,20 @@ export async function processPanelImageRequests({
     pendingCapacity,
     responseCapacity,
   );
-  const work = pending.slice(0, Math.max(0, available)).map(async (file) => {
-      inFlight.add(file);
-      try {
-        await processOneRequest(dir, file, bridge, resolvePanelTab);
-      } finally {
-        inFlight.delete(file);
-      }
-    });
-  await Promise.all(work);
+  if (available <= 0) return;
+  const stagingDir = await createPrivateStagingDir();
+  if (!stagingDir) return;
+  try {
+    const work = pending.slice(0, available).map(async (file) => {
+        inFlight.add(file);
+        try {
+          await processOneRequest(dir, file, bridge, stagingDir, resolvePanelAgentKey, resolvePanelTab);
+        } finally {
+          inFlight.delete(file);
+        }
+      });
+    await Promise.all(work);
+  } finally {
+    await removeStagedEntry(stagingDir);
+  }
 }

@@ -7,6 +7,8 @@ describe("panel image relay orchestrator wiring (#2149)", () => {
   it("uses the pinned shared-scope resolver, not panelTabOf on shared agent keys", () => {
     expect(SOURCE).toContain("const scopeToRealTab = (tabId: string): string | undefined =>");
     expect(SOURCE).toContain("isScopeAddress(tabId) ? bridge.resolveSharedTabId(tabId) : panelTabOf(tabId)");
+    expect(SOURCE).toContain("resolvePanelAgentKey: panelImageRelayAgentKeyFor");
     expect(SOURCE).toContain("resolvePanelTab: scopeToRealTab");
+    expect(SOURCE).toContain("COMFYUI_MCP_RELAY_SECRET: panelImageRelaySecretFor");
   });
 });

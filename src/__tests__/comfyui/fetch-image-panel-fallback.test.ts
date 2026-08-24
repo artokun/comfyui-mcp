@@ -52,6 +52,7 @@ afterEach(() => {
   setConnectedPanelOrigins(null);
   delete process.env.COMFYUI_MCP_PROGRESS_DIR;
   delete process.env.COMFYUI_MCP_TAB;
+  delete process.env.COMFYUI_MCP_RELAY_SECRET;
   vi.unstubAllGlobals();
 });
 
@@ -264,6 +265,7 @@ describe("fetchImage connected-panel fallback (#2149)", () => {
     const dir = mkdtempSync(join(tmpdir(), "comfyui-mcp-image-relay-client-"));
     process.env.COMFYUI_MCP_PROGRESS_DIR = dir;
     process.env.COMFYUI_MCP_TAB = "orchestrator::claude";
+    process.env.COMFYUI_MCP_RELAY_SECRET = "a".repeat(64);
     setConnectedPanelFallbackOrigins(null);
     vi.stubGlobal(
       "fetch",
@@ -281,7 +283,9 @@ describe("fetchImage connected-panel fallback (#2149)", () => {
     }
     expect(requestName).not.toBe("");
     const body = JSON.parse(readFileSync(join(dir, requestName), "utf8")) as Record<string, unknown>;
-    expect(body).toMatchObject({ filename: "render.png", subfolder: "shots", type: "output", requester: "orchestrator::claude" });
+    expect(body).toMatchObject({ filename: "render.png", subfolder: "shots", type: "output" });
+    expect(String(body.capability)).toMatch(/^[a-f0-9]{64}$/);
+    expect(body).not.toHaveProperty("requester");
     expect(body).not.toHaveProperty("url");
     const id = String(body.requestId);
     writeFileSync(join(dir, `${PANEL_IMAGE_RELAY_RESPONSE_PREFIX}${id}.json`), JSON.stringify({

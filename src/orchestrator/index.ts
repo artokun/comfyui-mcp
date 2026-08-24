@@ -103,7 +103,11 @@ import {
   setConnectedPanelOrigins,
 } from "../comfyui/fetch.js";
 import { publishConnectedPanelOrigins } from "../services/panel-origin-channel.js";
-import { processPanelImageRequests } from "../services/panel-image-relay.js";
+import {
+  processPanelImageRequests,
+  verifyPanelImageRelayCapability,
+  type PanelImageRelayRequest,
+} from "../services/panel-image-relay.js";
 import { logger } from "../utils/logger.js";
 import { listDownloadJobs } from "../services/download-jobs.js";
 import { completionDisagreesWithRecord, failureDisagreesWithRecord } from "./download-done-guard.js";
@@ -1657,6 +1661,23 @@ export async function runPanelOrchestrator(): Promise<void> {
   const agentKeyFor = (panelTabId: string): string =>
     SHARED_SESSION_SCOPE + AGENT_KEY_SEP + backendForTab(panelTabId);
   const sharedKeyFor = (backend: string): string => SHARED_SESSION_SCOPE + AGENT_KEY_SEP + backend;
+  // #2149 — a child may write to the shared progress directory, so its tab
+  // identity must never come from request JSON. Capabilities are minted here,
+  // injected into the child environment, and resolved only by this process.
+  const panelImageRelaySecrets = new Map<string, string>();
+  const panelImageRelaySecretFor = (agentKey: string): string => {
+    const existing = [...panelImageRelaySecrets.entries()].find(([, key]) => key === agentKey)?.[0];
+    if (existing) return existing;
+    const secret = randomBytes(32).toString("hex");
+    panelImageRelaySecrets.set(secret, agentKey);
+    return secret;
+  };
+  const panelImageRelayAgentKeyFor = (request: PanelImageRelayRequest): string | undefined => {
+    for (const [secret, agentKey] of panelImageRelaySecrets) {
+      if (verifyPanelImageRelayCapability(secret, request)) return agentKey;
+    }
+    return undefined;
+  };
   // The scope/backend halves of a composite key. Neither half contains "::", so
   // split on the LAST separator.
   const panelTabOf = (key: string): string => {
@@ -2106,6 +2127,7 @@ export async function runPanelOrchestrator(): Promise<void> {
         // downloads resolved to nobody and the owning conversation stalled).
         // `tabId` here IS the agent key (the scope address the lane binds).
         COMFYUI_MCP_TAB: tabId,
+        COMFYUI_MCP_RELAY_SECRET: panelImageRelaySecretFor(tabId),
         // …and the same key addresses this agent's published identity.
         ...agentIdentityEnv(tabId),
       }),
@@ -2422,6 +2444,7 @@ export async function runPanelOrchestrator(): Promise<void> {
         // child stamps its own COMFYUI_MCP_TAB into each progress row, and the
         // settle path resolves an agent-key-shaped stamp directly.
         ...(agentKey ? { COMFYUI_MCP_TAB: agentKey } : {}),
+        ...(agentKey ? { COMFYUI_MCP_RELAY_SECRET: panelImageRelaySecretFor(agentKey) } : {}),
         // Which LLM is driving this agent, for report_issue's stamp (see
         // agentIdentityEnv). Same key, same reason it is keyed by agent.
         ...agentIdentityEnv(agentKey),
@@ -5881,13 +5904,15 @@ export async function runPanelOrchestrator(): Promise<void> {
     // no saved state
   }
   // #2149 — image requests from spawned MCP children are reference-only. The
-  // poll worker below resolves the child agent key to a panel tab and uses the
-  // authenticated bridge command; it never reads or accepts a URL from disk.
+  // poll worker below resolves an in-memory child capability to an agent key,
+  // then to a panel tab, and uses the authenticated bridge command; it never
+  // reads or accepts a URL or tab identity from disk.
   const panelImageRelayInFlight = new Set<string>();
   const pollDownloads = () => {
     void processPanelImageRequests({
       dir: progressDir,
       bridge,
+      resolvePanelAgentKey: panelImageRelayAgentKeyFor,
       resolvePanelTab: scopeToRealTab,
       inFlight: panelImageRelayInFlight,
     }).catch(() => {
