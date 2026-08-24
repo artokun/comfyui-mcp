@@ -3,10 +3,14 @@
 // timers, registry, or process spawns).
 
 import { describe, expect, it } from "vitest";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SelfRestarter, type SelfRestartDeps } from "../../services/self-restart.js";
+import {
+  defaultSpawnReplacement,
+  SelfRestarter,
+  type SelfRestartDeps,
+} from "../../services/self-restart.js";
 import { releaseOwnedPanelLock } from "../../services/panel-pin-guard.js";
 import type { InstallInfo, SelfUpdateResult } from "../../services/self-update.js";
 
@@ -25,6 +29,8 @@ function makeHarness(opts: {
   latest?: string;
   updateResult?: SelfUpdateResult;
   env?: NodeJS.ProcessEnv;
+  packageDir?: string;
+  argv?: readonly string[];
   uptimeMs?: number;
   spawnOk?: boolean;
   mtime?: number;
@@ -40,9 +46,10 @@ function makeHarness(opts: {
   const mode = opts.mode ?? "linked";
   const deps: Partial<SelfRestartDeps> = {
     env: () => opts.env ?? {},
+    argv: () => opts.argv ?? process.argv,
     detectInstall: () => ({
       mode,
-      packageDir: "/pkg",
+      packageDir: opts.packageDir ?? "/pkg",
       currentVersion: opts.currentVersion ?? "1.0.0",
       isDevLink: mode === "linked",
     }),
@@ -179,7 +186,7 @@ describe("SelfRestarter — published installs", () => {
       mode: "npx",
       currentVersion: "1.0.0",
       latest: "1.2.0",
-      env: { npm_config_package: "comfyui-mcp" },
+      argv: ["npx.cmd", "-y", "comfyui-mcp", "connect"],
     });
     h.restarter.start();
     await h.restarter.updateTick();
@@ -188,22 +195,35 @@ describe("SelfRestarter — published installs", () => {
     expect(h.spawns[0]?.npxVersion).toBe("1.2.0");
   });
 
-  it("npx: an exact launch pin does not update or tear down the healthy runtime", async () => {
-    const h = makeHarness({
-      mode: "npx",
-      currentVersion: "0.52.66",
-      latest: "0.52.67",
-      env: { npm_config_package: "comfyui-mcp@0.52.66" },
-    });
-    h.restarter.start();
-    await h.restarter.updateTick();
-    await Promise.resolve();
+  it("npx: positional exact pin from the execution cache keeps the healthy runtime", async () => {
+    const cacheRoot = mkdtempSync(join(tmpdir(), "cmcp-npx-pin-"));
+    const packageDir = join(cacheRoot, "node_modules", "comfyui-mcp");
+    mkdirSync(packageDir, { recursive: true });
+    writeFileSync(
+      join(cacheRoot, "package.json"),
+      JSON.stringify({ _npx: { packages: ["comfyui-mcp@0.52.66"] } }),
+    );
+    try {
+      const h = makeHarness({
+        mode: "npx",
+        packageDir,
+        currentVersion: "0.52.66",
+        latest: "0.52.67",
+        env: {},
+        argv: ["C:\\npx.cmd", "-y", "comfyui-mcp", "connect"],
+      });
+      h.restarter.start();
+      await h.restarter.updateTick();
+      await Promise.resolve();
 
-    // The dangerous regression was not merely selecting the wrong child: the
-    // parent was torn down after spawning it. A pin must leave every handoff
-    // step untouched, so a stalled replacement cannot take down the service.
-    expect(h.calls).toEqual([]);
-    expect(h.spawns).toEqual([]);
+      // npm's positional npx child has no package spec in env or argv. The
+      // cache manifest is the production provenance that distinguishes this
+      // exact pin from the bare command above.
+      expect(h.calls).toEqual([]);
+      expect(h.spawns).toEqual([]);
+    } finally {
+      rmSync(cacheRoot, { recursive: true, force: true });
+    }
   });
 
   it("npx: @latest remains unpinned and keeps the spawn-first handoff", async () => {
@@ -225,6 +245,26 @@ describe("SelfRestarter — published installs", () => {
     h.restarter.start();
     await h.restarter.updateTick();
     expect(h.calls).toEqual([]);
+  });
+
+  it("production npx replacement passes the positional package version", () => {
+    let captured:
+      | { command: string; args: readonly string[]; options: { detached?: boolean; shell?: boolean } }
+      | undefined;
+    const ok = defaultSpawnReplacement({
+      npxVersion: "0.52.67",
+      env: { PATH: "/usr/bin" },
+      spawn: (command, args, options) => {
+        captured = { command, args, options };
+        return { pid: 4321, unref() {} };
+      },
+    });
+
+    expect(ok).toBe(true);
+    expect(captured?.command).toBe(process.platform === "win32" ? "npx.cmd" : "npx");
+    expect(captured?.args.slice(0, 2)).toEqual(["-y", "comfyui-mcp@0.52.67"]);
+    expect(captured?.args.slice(2)).toEqual(process.argv.slice(2));
+    expect(captured?.options.detached).toBe(true);
   });
 });
 
