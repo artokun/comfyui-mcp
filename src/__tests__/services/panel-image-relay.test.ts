@@ -1,9 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   PANEL_IMAGE_RELAY_MAX_BYTES,
+  PANEL_IMAGE_RELAY_MAX_CONCURRENT,
+  PANEL_IMAGE_RELAY_MAX_PENDING_REQUESTS,
+  PANEL_IMAGE_RELAY_MAX_PENDING_RESPONSES,
+  PANEL_IMAGE_RELAY_MAX_REQUEST_FILE_BYTES,
+  PANEL_IMAGE_RELAY_MAX_REQUESTS_PER_TICK,
   PANEL_IMAGE_RELAY_REQUEST_PREFIX,
   PANEL_IMAGE_RELAY_RESPONSE_PREFIX,
   PANEL_IMAGE_RELAY_STALE_MS,
@@ -21,16 +26,20 @@ function tempChannel(): string {
 }
 
 function request(id: string, patch: Partial<PanelImageRelayRequest> = {}): PanelImageRelayRequest {
-  return {
+  const createdAt = Date.now();
+  const value = {
     version: 1,
     requestId: id,
     requester: "orchestrator::claude",
     filename: "render.png",
     subfolder: "shots",
     type: "output",
-    createdAt: Date.now(),
+    createdAt,
+    deadlineAt: createdAt + 8_000,
     ...patch,
   };
+  if (!("deadlineAt" in patch)) value.deadlineAt = value.createdAt + 8_000;
+  return value;
 }
 
 function requestFile(dir: string, id: string): string {
@@ -67,6 +76,7 @@ describe("panel image relay child channel", () => {
     const requestBody = JSON.parse(readFileSync(join(dir, file), "utf8")) as Record<string, unknown>;
     expect(Object.keys(requestBody).sort()).toEqual([
       "createdAt",
+      "deadlineAt",
       "filename",
       "requestId",
       "requester",
@@ -124,6 +134,30 @@ describe("panel image relay child channel", () => {
     }));
     await expect(pending).rejects.toMatchObject({ code: "MALFORMED_REPLY" });
   });
+
+  it("does not accept a response discovered after the single end-to-end deadline", async () => {
+    const dir = tempChannel();
+    process.env.COMFYUI_MCP_PROGRESS_DIR = dir;
+    process.env.COMFYUI_MCP_TAB = "orchestrator::claude";
+    const pending = requestPanelImage("render.png", "output", "shots");
+    let file = "";
+    for (let i = 0; i < 100 && !file; i += 1) {
+      file = readdirSync(dir).find((name) => name.startsWith(PANEL_IMAGE_RELAY_REQUEST_PREFIX)) ?? "";
+      if (!file) await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const body = JSON.parse(readFileSync(join(dir, file), "utf8")) as Record<string, unknown>;
+    const id = String(body.requestId);
+    writeFileSync(responseFile(dir, id), JSON.stringify({
+      version: 1,
+      requestId: id,
+      ok: true,
+      base64: "AQID",
+      mimeType: "image/png",
+      bytes: 3,
+      updated: Number(body.deadlineAt) + 1,
+    }));
+    await expect(pending).rejects.toMatchObject({ code: "STALE_REPLY" });
+  });
 });
 
 describe("panel image relay orchestrator poll", () => {
@@ -134,7 +168,9 @@ describe("panel image relay orchestrator poll", () => {
     const send = vi.fn(async (command: unknown, options: unknown) => {
       expect(command).toEqual({ cmd: "fetch_image", filename: "render.png", subfolder: "shots", type: "output" });
       expect(command).not.toHaveProperty("url");
-      expect(options).toEqual({ tabId: "pinned-live-panel", timeoutMs: 8_000 });
+      expect(options).toMatchObject({ tabId: "pinned-live-panel" });
+      expect((options as { timeoutMs: number }).timeoutMs).toBeGreaterThan(0);
+      expect((options as { timeoutMs: number }).timeoutMs).toBeLessThanOrEqual(8_000);
       return { ok: true, base64: "AQID", mimeType: "image/png", bytes: 3 };
     });
     await processPanelImageRequests({
@@ -203,9 +239,108 @@ describe("panel image relay orchestrator poll", () => {
     writeFileSync(requestFile(dir, forgedId), JSON.stringify({ ...request(forgedId), url: "http://127.0.0.1:9/secret" }));
     const send = vi.fn();
     await processPanelImageRequests({ dir, resolvePanelTab: () => "panel-tab", bridge: { canReach: () => true, send } });
-    expect(readResponse(dir, staleId)).toMatchObject({ ok: false, error: "STALE_REQUEST" });
+    expect(readResponse(dir, staleId)).toMatchObject({ ok: false, error: "TIMEOUT" });
     expect(readResponse(dir, forgedId)).toMatchObject({ ok: false, error: "MALFORMED_REQUEST" });
     expect(send).not.toHaveBeenCalled();
+  });
+
+  it("carries one deadline through the bridge and refuses a late panel result", async () => {
+    const dir = tempChannel();
+    const id = "deadline-race-123456";
+    const createdAt = Date.now();
+    writeFileSync(requestFile(dir, id), JSON.stringify(request(id, {
+      createdAt,
+      deadlineAt: createdAt + 50,
+    })));
+    let timeoutMs = 0;
+    await processPanelImageRequests({
+      dir,
+      resolvePanelTab: () => "panel-tab",
+      bridge: {
+        canReach: () => true,
+        send: async (_command, options) => {
+          timeoutMs = options.timeoutMs;
+          await new Promise((resolve) => setTimeout(resolve, 75));
+          return { ok: true, base64: "AQID", mimeType: "image/png", bytes: 3 };
+        },
+      },
+    });
+    expect(timeoutMs).toBeGreaterThan(0);
+    expect(timeoutMs).toBeLessThanOrEqual(50);
+    expect(readResponse(dir, id)).toMatchObject({ ok: false, error: "TIMEOUT" });
+  });
+
+  it("bounds per-tick concurrency and fails closed when the request backlog is full", async () => {
+    const dir = tempChannel();
+    const ids = Array.from({ length: PANEL_IMAGE_RELAY_MAX_PENDING_REQUESTS + 8 }, (_, index) =>
+      `flood-${index}-1234567890`,
+    );
+    for (const id of ids) writeFileSync(requestFile(dir, id), JSON.stringify(request(id)));
+    let active = 0;
+    let maxActive = 0;
+    let sends = 0;
+    await processPanelImageRequests({
+      dir,
+      resolvePanelTab: () => "panel-tab",
+      bridge: {
+        canReach: () => true,
+        send: async () => {
+          active += 1;
+          sends += 1;
+          maxActive = Math.max(maxActive, active);
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          active -= 1;
+          return { ok: true, base64: "AQID", mimeType: "image/png", bytes: 3 };
+        },
+      },
+    });
+    expect(maxActive).toBeLessThanOrEqual(PANEL_IMAGE_RELAY_MAX_CONCURRENT);
+    expect(sends).toBe(PANEL_IMAGE_RELAY_MAX_REQUESTS_PER_TICK);
+    const remainingRequests = readdirSync(dir).filter((name) => name.startsWith(PANEL_IMAGE_RELAY_REQUEST_PREFIX));
+    expect(remainingRequests.length).toBe(PANEL_IMAGE_RELAY_MAX_PENDING_REQUESTS - PANEL_IMAGE_RELAY_MAX_REQUESTS_PER_TICK);
+    const backlogFailures = ids.filter((id) => {
+      try { return readResponse(dir, id).error === "BACKLOG_FULL"; } catch { return false; }
+    });
+    expect(backlogFailures.length).toBe(ids.length - PANEL_IMAGE_RELAY_MAX_PENDING_REQUESTS);
+  });
+
+  it("does not dispatch more panel fetches while bounded response slots are occupied", async () => {
+    const dir = tempChannel();
+    for (let index = 0; index < PANEL_IMAGE_RELAY_MAX_PENDING_RESPONSES; index += 1) {
+      const id = `held-response-${index}-123456`;
+      writeFileSync(responseFile(dir, id), JSON.stringify({ version: 1, requestId: id, ok: false, error: "PANEL_FETCH_FAILED", updated: Date.now() }));
+    }
+    const id = "response-cap-request-123456";
+    writeFileSync(requestFile(dir, id), JSON.stringify(request(id)));
+    const send = vi.fn();
+    await processPanelImageRequests({ dir, resolvePanelTab: () => "panel-tab", bridge: { canReach: () => true, send } });
+    expect(send).not.toHaveBeenCalled();
+    expect(readdirSync(dir)).toContain(`control-image-request-${id}.json`);
+  });
+
+  it("rejects oversized and symlinked request files before bridge dispatch", async () => {
+    const dir = tempChannel();
+    const oversizedId = "oversized-request-123456";
+    const oversizedPath = requestFile(dir, oversizedId);
+    writeFileSync(oversizedPath, "{}");
+    truncateSync(oversizedPath, PANEL_IMAGE_RELAY_MAX_REQUEST_FILE_BYTES + 1);
+
+    const targetPath = join(dir, "ordinary-target.json");
+    writeFileSync(targetPath, JSON.stringify(request("symlink-request-123456")));
+    const symlinkId = "symlink-request-123456";
+    const symlinkPath = requestFile(dir, symlinkId);
+    let symlinksSupported = true;
+    try {
+      symlinkSync(targetPath, symlinkPath, "file");
+    } catch {
+      symlinksSupported = false;
+    }
+
+    const send = vi.fn();
+    await processPanelImageRequests({ dir, resolvePanelTab: () => "panel-tab", bridge: { canReach: () => true, send } });
+    expect(send).not.toHaveBeenCalled();
+    expect(readResponse(dir, oversizedId)).toMatchObject({ ok: false, error: "MALFORMED_REQUEST" });
+    if (symlinksSupported) expect(readdirSync(dir)).not.toContain(`control-image-response-${symlinkId}.json`);
   });
 
   it("reaps stale and oversized response files without reading them", async () => {

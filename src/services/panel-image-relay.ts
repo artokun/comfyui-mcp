@@ -1,13 +1,11 @@
 import {
-  existsSync,
-  readFileSync,
-  readdirSync,
   renameSync,
   rmSync,
-  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
+import { constants } from "node:fs";
+import { lstat, open, opendir, unlink } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 
@@ -24,6 +22,11 @@ export const PANEL_IMAGE_RELAY_TIMEOUT_MS = 8_000;
 export const PANEL_IMAGE_RELAY_STALE_MS = 15_000;
 export const PANEL_IMAGE_RELAY_MAX_REQUEST_FILE_BYTES = 16 * 1024;
 export const PANEL_IMAGE_RELAY_MAX_RESPONSE_FILE_BYTES = 48 * 1024 * 1024;
+export const PANEL_IMAGE_RELAY_MAX_CONCURRENT = 4;
+export const PANEL_IMAGE_RELAY_MAX_REQUESTS_PER_TICK = 4;
+export const PANEL_IMAGE_RELAY_MAX_DIRECTORY_ENTRIES_PER_TICK = 128;
+export const PANEL_IMAGE_RELAY_MAX_PENDING_REQUESTS = 16;
+export const PANEL_IMAGE_RELAY_MAX_PENDING_RESPONSES = 4;
 
 export const PANEL_IMAGE_RELAY_REQUEST_PREFIX = "control-image-request-";
 export const PANEL_IMAGE_RELAY_RESPONSE_PREFIX = "control-image-response-";
@@ -41,6 +44,7 @@ export interface PanelImageRelayRequest {
   subfolder: string;
   type: PanelImageType;
   createdAt: number;
+  deadlineAt: number;
 }
 
 export interface PanelImageRelaySuccess {
@@ -156,10 +160,32 @@ function responsePath(dir: string, requestId: string): string {
   return join(dir, `${PANEL_IMAGE_RELAY_RESPONSE_PREFIX}${requestId}.json`);
 }
 
-function readBoundedJson(path: string, maxBytes: number): unknown {
-  const size = statSync(path).size;
-  if (size > maxBytes) throw new Error("file exceeds the relay safety limit");
-  return JSON.parse(readFileSync(path, "utf8")) as unknown;
+const noFollowFlag = (constants as unknown as Record<string, unknown>).O_NOFOLLOW;
+const safeReadFlags = constants.O_RDONLY | (typeof noFollowFlag === "number" ? noFollowFlag : 0);
+
+/** Read one bounded regular file through one descriptor; never stat then reopen. */
+async function readBoundedJson(path: string, maxBytes: number): Promise<unknown> {
+  const linkStat = await lstat(path);
+  if (!linkStat.isFile()) throw new Error("relay input is not a regular file");
+  const handle = await open(path, safeReadFlags);
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.size > maxBytes) throw new Error("file exceeds the relay safety limit");
+    const data = Buffer.alloc(stat.size);
+    let offset = 0;
+    while (offset < data.byteLength) {
+      const { bytesRead } = await handle.read(data, offset, data.byteLength - offset, null);
+      if (bytesRead === 0) throw new Error("relay input ended before its declared size");
+      offset += bytesRead;
+    }
+    const finalStat = await handle.stat();
+    if (!finalStat.isFile() || finalStat.size !== stat.size) {
+      throw new Error("relay input changed while it was being read");
+    }
+    return JSON.parse(data.toString("utf8")) as unknown;
+  } finally {
+    await handle.close();
+  }
 }
 
 function writeJsonAtomically(path: string, value: unknown, maxBytes: number): void {
@@ -207,13 +233,20 @@ function validateImagePayload(
 function validateRequest(value: unknown, requestId: string): PanelImageRelayRequest | undefined {
   if (!value || typeof value !== "object") return undefined;
   const record = value as Record<string, unknown>;
+  const createdAt = record.createdAt;
+  const deadlineAt = record.deadlineAt;
   if (
-    !hasOnlyKeys(record, ["version", "requestId", "requester", "filename", "subfolder", "type", "createdAt"]) ||
+    !hasOnlyKeys(record, ["version", "requestId", "requester", "filename", "subfolder", "type", "createdAt", "deadlineAt"]) ||
     record.version !== PANEL_IMAGE_RELAY_VERSION ||
     record.requestId !== requestId ||
     !isSafeRequester(record.requester) ||
     !isSafePanelImageRef(record.filename, record.subfolder, record.type) ||
-    !Number.isSafeInteger(record.createdAt)
+    typeof createdAt !== "number" ||
+    typeof deadlineAt !== "number" ||
+    !Number.isSafeInteger(createdAt) ||
+    !Number.isSafeInteger(deadlineAt) ||
+    deadlineAt < createdAt ||
+    deadlineAt - createdAt > PANEL_IMAGE_RELAY_TIMEOUT_MS
   ) return undefined;
   return record as unknown as PanelImageRelayRequest;
 }
@@ -284,9 +317,16 @@ export async function requestPanelImage(
   if (!isSafePanelImageRef(filename, subfolder, type)) {
     throw new PanelImageRelayError("The image reference is unsafe and was refused.", "UNSAFE_REFERENCE");
   }
-  if (!existsSync(dir) || !statSync(dir).isDirectory()) return undefined;
+  let dirStat;
+  try {
+    dirStat = await lstat(dir);
+  } catch {
+    return undefined;
+  }
+  if (!dirStat.isDirectory()) return undefined;
 
   const requestId = `${Date.now().toString(36)}-${process.pid.toString(36)}-${randomBytes(8).toString("hex")}`;
+  const createdAt = Date.now();
   const request: PanelImageRelayRequest = {
     version: PANEL_IMAGE_RELAY_VERSION,
     requestId,
@@ -294,7 +334,8 @@ export async function requestPanelImage(
     filename,
     subfolder,
     type,
-    createdAt: Date.now(),
+    createdAt,
+    deadlineAt: createdAt + PANEL_IMAGE_RELAY_TIMEOUT_MS,
   };
   const requestFile = requestPath(dir, requestId);
   const responseFile = responsePath(dir, requestId);
@@ -304,14 +345,32 @@ export async function requestPanelImage(
     throw new PanelImageRelayError("The connected panel relay is unavailable.", "REQUEST_WRITE_FAILED", true);
   }
 
-  const deadline = Date.now() + PANEL_IMAGE_RELAY_TIMEOUT_MS;
+  const deadline = request.deadlineAt;
   try {
     while (Date.now() < deadline) {
-      if (existsSync(responseFile)) {
+      let responsePresent = false;
+      try {
+        const responseStat = await lstat(responseFile);
+        if (!responseStat.isFile()) {
+          try { await unlink(responseFile); } catch { /* best effort */ }
+          throw new PanelImageRelayError("The panel returned a malformed image relay reply.", "MALFORMED_REPLY");
+        }
+        responsePresent = true;
+      } catch (error) {
+        if (error instanceof PanelImageRelayError) throw error;
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          throw new PanelImageRelayError("The panel returned a malformed image relay reply.", "MALFORMED_REPLY");
+        }
+      }
+      if (responsePresent) {
+        if (Date.now() >= deadline) {
+          try { await unlink(responseFile); } catch { /* best effort */ }
+          throw new PanelImageRelayError("The connected panel image relay timed out.", "TIMEOUT");
+        }
         let response: PanelImageRelayResponse;
         try {
           response = validateResponse(
-            readBoundedJson(responseFile, PANEL_IMAGE_RELAY_MAX_RESPONSE_FILE_BYTES),
+            await readBoundedJson(responseFile, PANEL_IMAGE_RELAY_MAX_RESPONSE_FILE_BYTES),
             requestId,
           );
         } catch (error) {
@@ -320,10 +379,13 @@ export async function requestPanelImage(
           throw new PanelImageRelayError("The panel returned a malformed image relay reply.", "MALFORMED_REPLY");
         }
         try { unlinkSync(responseFile); } catch { /* best effort */ }
+        if (Date.now() >= deadline) {
+          throw new PanelImageRelayError("The connected panel image relay timed out.", "TIMEOUT");
+        }
         if (response.ok === false) responseFailureMessage(response);
         if (
           response.updated < request.createdAt ||
-          response.updated > Date.now() + 5_000 ||
+          response.updated > request.deadlineAt ||
           Date.now() - response.updated > PANEL_IMAGE_RELAY_STALE_MS
         ) {
           throw new PanelImageRelayError("The panel returned a stale image relay reply.", "STALE_REPLY");
@@ -338,36 +400,42 @@ export async function requestPanelImage(
   }
 }
 
-function requestFiles(dir: string): string[] {
+async function matchingFiles(dir: string, prefix: string, limit: number): Promise<string[]> {
+  let handle;
   try {
-    return readdirSync(dir).filter((name) => {
-      if (!name.startsWith(PANEL_IMAGE_RELAY_REQUEST_PREFIX) || !name.endsWith(".json")) return false;
-      const id = name.slice(PANEL_IMAGE_RELAY_REQUEST_PREFIX.length, -".json".length);
-      return isSafeRelayId(id);
-    });
+    handle = await opendir(dir);
   } catch {
     return [];
   }
+  const files: string[] = [];
+  let scanned = 0;
+  try {
+    while (scanned < PANEL_IMAGE_RELAY_MAX_DIRECTORY_ENTRIES_PER_TICK && files.length < limit) {
+      const entry = await handle.read();
+      if (!entry) break;
+      scanned += 1;
+      if (!entry.isFile() || !entry.name.startsWith(prefix) || !entry.name.endsWith(".json")) continue;
+      const id = entry.name.slice(prefix.length, -".json".length);
+      if (isSafeRelayId(id)) files.push(entry.name);
+    }
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+  return files;
 }
 
-function reapStaleResponseFiles(dir: string, now: number): void {
-  try {
-    for (const name of readdirSync(dir)) {
-      if (!name.startsWith(PANEL_IMAGE_RELAY_RESPONSE_PREFIX) || !name.endsWith(".json")) continue;
-      const id = name.slice(PANEL_IMAGE_RELAY_RESPONSE_PREFIX.length, -".json".length);
-      if (!isSafeRelayId(id)) continue;
-      const path = join(dir, name);
-      try {
-        const stat = statSync(path);
-        if (stat.size > PANEL_IMAGE_RELAY_MAX_RESPONSE_FILE_BYTES || now - stat.mtimeMs > PANEL_IMAGE_RELAY_STALE_MS) {
-          unlinkSync(path);
-        }
-      } catch {
-        // A child may be atomically replacing or consuming the response.
+async function reapStaleResponseFiles(dir: string, now: number): Promise<void> {
+  const files = await matchingFiles(dir, PANEL_IMAGE_RELAY_RESPONSE_PREFIX, PANEL_IMAGE_RELAY_MAX_REQUESTS_PER_TICK);
+  for (const name of files) {
+    const path = join(dir, name);
+    try {
+      const stat = await lstat(path);
+      if (!stat.isFile() || stat.size > PANEL_IMAGE_RELAY_MAX_RESPONSE_FILE_BYTES || now - stat.mtimeMs > PANEL_IMAGE_RELAY_STALE_MS) {
+        await unlink(path);
       }
+    } catch {
+      // A child may be atomically replacing or consuming the response.
     }
-  } catch {
-    // The channel may disappear during orchestrator shutdown.
   }
 }
 
@@ -381,7 +449,7 @@ async function processOneRequest(
   const fullPath = join(dir, file);
   let request: PanelImageRelayRequest | undefined;
   try {
-    request = validateRequest(readBoundedJson(fullPath, PANEL_IMAGE_RELAY_MAX_REQUEST_FILE_BYTES), requestId);
+    request = validateRequest(await readBoundedJson(fullPath, PANEL_IMAGE_RELAY_MAX_REQUEST_FILE_BYTES), requestId);
   } catch {
     request = undefined;
   }
@@ -392,10 +460,11 @@ async function processOneRequest(
     try { unlinkSync(fullPath); } catch { /* best effort */ }
     return;
   }
-  const age = Date.now() - request.createdAt;
-  if (age < -5_000 || age > PANEL_IMAGE_RELAY_STALE_MS) {
+  const now = Date.now();
+  const age = now - request.createdAt;
+  if (age < -5_000 || age > PANEL_IMAGE_RELAY_STALE_MS || now >= request.deadlineAt) {
     try {
-      writeJsonAtomically(responsePath(dir, requestId), failureResponse(requestId, "STALE_REQUEST"), PANEL_IMAGE_RELAY_MAX_RESPONSE_FILE_BYTES);
+      writeJsonAtomically(responsePath(dir, requestId), failureResponse(requestId, now >= request.deadlineAt ? "TIMEOUT" : "STALE_REQUEST"), PANEL_IMAGE_RELAY_MAX_RESPONSE_FILE_BYTES);
     } catch { /* best effort */ }
     try { unlinkSync(fullPath); } catch { /* best effort */ }
     return;
@@ -410,44 +479,51 @@ async function processOneRequest(
       failure === "ambiguous" ? "AMBIGUOUS_REQUESTER" : "NO_LIVE_PANEL",
     );
   } else {
-    try {
-      const reply = await bridge.send(
-        { cmd: "fetch_image", filename: request.filename, subfolder: request.subfolder, type: request.type },
-        { tabId: panelTab, timeoutMs: PANEL_IMAGE_RELAY_TIMEOUT_MS },
-      );
-      const payload =
-        reply && typeof reply === "object"
-          ? validateImagePayload({
-              base64: (reply as Record<string, unknown>).base64,
-              mimeType: (reply as Record<string, unknown>).mimeType,
-              bytes: (reply as Record<string, unknown>).bytes,
-            })
-          : undefined;
-      const replyRecord = reply && typeof reply === "object" ? reply as Record<string, unknown> : undefined;
-      if (
-        replyRecord?.ok === false &&
-        hasOnlyKeys(replyRecord, ["ok", "error"]) &&
-        isSafeText(replyRecord.error, 160)
-      ) {
-        response = failureResponse(requestId, "PANEL_FETCH_FAILED");
-      } else if (
-        !replyRecord ||
-        replyRecord.ok !== true ||
-        !payload ||
-        !hasOnlyKeys(replyRecord, ["ok", "base64", "mimeType", "bytes"])
-      ) {
-        response = failureResponse(requestId, "MALFORMED_REPLY");
+    const remainingMs = request.deadlineAt - Date.now();
+    if (remainingMs <= 0) {
+      response = failureResponse(requestId, "TIMEOUT");
       } else {
-        response = {
-          version: PANEL_IMAGE_RELAY_VERSION,
-          requestId,
-          ok: true,
-          ...payload,
-          updated: Date.now(),
-        };
-      }
-    } catch {
-      response = failureResponse(requestId, "PANEL_FETCH_FAILED");
+        try {
+          const reply = await bridge.send(
+            { cmd: "fetch_image", filename: request.filename, subfolder: request.subfolder, type: request.type },
+            { tabId: panelTab, timeoutMs: Math.min(PANEL_IMAGE_RELAY_TIMEOUT_MS, remainingMs) },
+          );
+          const payload =
+            reply && typeof reply === "object"
+              ? validateImagePayload({
+                  base64: (reply as Record<string, unknown>).base64,
+                  mimeType: (reply as Record<string, unknown>).mimeType,
+                  bytes: (reply as Record<string, unknown>).bytes,
+                })
+              : undefined;
+          const replyRecord = reply && typeof reply === "object" ? reply as Record<string, unknown> : undefined;
+          if (Date.now() >= request.deadlineAt) {
+            response = failureResponse(requestId, "TIMEOUT");
+          } else if (
+            replyRecord?.ok === false &&
+            hasOnlyKeys(replyRecord, ["ok", "error"]) &&
+            isSafeText(replyRecord.error, 160)
+          ) {
+            response = failureResponse(requestId, "PANEL_FETCH_FAILED");
+          } else if (
+            !replyRecord ||
+            replyRecord.ok !== true ||
+            !payload ||
+            !hasOnlyKeys(replyRecord, ["ok", "base64", "mimeType", "bytes"])
+          ) {
+            response = failureResponse(requestId, "MALFORMED_REPLY");
+          } else {
+            response = {
+              version: PANEL_IMAGE_RELAY_VERSION,
+              requestId,
+              ok: true,
+              ...payload,
+              updated: Date.now(),
+            };
+          }
+        } catch {
+          response = failureResponse(requestId, Date.now() >= request.deadlineAt ? "TIMEOUT" : "PANEL_FETCH_FAILED");
+        }
     }
   }
   try {
@@ -467,6 +543,20 @@ export interface ProcessPanelImageRequestsOptions {
   inFlight?: Set<string>;
 }
 
+function rejectQueuedRequest(dir: string, file: string): void {
+  const requestId = file.slice(PANEL_IMAGE_RELAY_REQUEST_PREFIX.length, -".json".length);
+  try {
+    writeJsonAtomically(
+      responsePath(dir, requestId),
+      failureResponse(requestId, "BACKLOG_FULL"),
+      PANEL_IMAGE_RELAY_MAX_RESPONSE_FILE_BYTES,
+    );
+  } catch {
+    // The child will time out safely if the bounded failure cannot be published.
+  }
+  try { unlinkSync(join(dir, file)); } catch { /* best effort */ }
+}
+
 /** Orchestrator-side poll worker. Requests are consumed exactly once. */
 export async function processPanelImageRequests({
   dir,
@@ -474,11 +564,36 @@ export async function processPanelImageRequests({
   resolvePanelTab,
   inFlight = new Set<string>(),
 }: ProcessPanelImageRequestsOptions): Promise<void> {
-  if (!dir || !existsSync(dir)) return;
-  reapStaleResponseFiles(dir, Date.now());
-  const work = requestFiles(dir)
-    .filter((file) => !inFlight.has(file))
-    .map(async (file) => {
+  if (!dir) return;
+  let dirStat;
+  try {
+    dirStat = await lstat(dir);
+  } catch {
+    return;
+  }
+  if (!dirStat.isDirectory()) return;
+  await reapStaleResponseFiles(dir, Date.now());
+  const pendingResponseCount = (
+    await matchingFiles(dir, PANEL_IMAGE_RELAY_RESPONSE_PREFIX, PANEL_IMAGE_RELAY_MAX_PENDING_RESPONSES + 1)
+  ).length;
+  const responseCapacity = Math.max(0, PANEL_IMAGE_RELAY_MAX_PENDING_RESPONSES - pendingResponseCount);
+
+  const candidates = await matchingFiles(
+    dir,
+    PANEL_IMAGE_RELAY_REQUEST_PREFIX,
+    PANEL_IMAGE_RELAY_MAX_DIRECTORY_ENTRIES_PER_TICK,
+  );
+  const pending = candidates.filter((file) => !inFlight.has(file));
+  const pendingCapacity = Math.max(0, PANEL_IMAGE_RELAY_MAX_PENDING_REQUESTS - inFlight.size);
+  for (const file of pending.slice(pendingCapacity)) rejectQueuedRequest(dir, file);
+
+  const available = Math.min(
+    PANEL_IMAGE_RELAY_MAX_REQUESTS_PER_TICK,
+    PANEL_IMAGE_RELAY_MAX_CONCURRENT - inFlight.size,
+    pendingCapacity,
+    responseCapacity,
+  );
+  const work = pending.slice(0, Math.max(0, available)).map(async (file) => {
       inFlight.add(file);
       try {
         await processOneRequest(dir, file, bridge, resolvePanelTab);
