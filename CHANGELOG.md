@@ -6,6 +6,14 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.91] - 2026-08-24
+
+### MCP
+
+#### Changed
+- cover authenticated list_packs templates (#2151)
+
+
 ## [0.52.90] - 2026-08-24
 
 ### MCP
