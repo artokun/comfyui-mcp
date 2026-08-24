@@ -1104,6 +1104,9 @@ export const BRIDGE_READONLY_CMDS: ReadonlySet<string> = new Set<string>([
   "civitai_results",
   // #2145: Manager search reads registry data only; it does not touch the canvas.
   "nodes_search",
+  // #2181: Manager queue status only observes install progress; it is safe to
+  // re-dispatch after a reconnect and must not report mutation outcome warnings.
+  "nodes_queue_status",
   "get_todo",
   // #608: a forced /object_info re-register + combo refresh. It has NO effect on
   // graph content — it only re-registers node defs and rebuilds combo option lists

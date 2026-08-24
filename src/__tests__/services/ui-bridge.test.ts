@@ -924,6 +924,40 @@ describe("UiBridge (multi-tab)", () => {
     a2.close();
   });
 
+  it("resumes nodes_queue_status as a read with a fresh dispatch RID (#2181)", async () => {
+    expect(BRIDGE_READONLY_CMDS.has("nodes_queue_status")).toBe(true);
+    expect(defaultBridgeTimeoutMs("nodes_queue_status")).toBe(BRIDGE_READ_DEFAULT_TIMEOUT_MS);
+
+    const a1 = await connectPanel("tab-2181");
+    await waitFor(() => expect(bridge.tabs()).toHaveLength(1));
+    const frames: Array<Record<string, unknown>> = [];
+    a1.on("message", (buf) => {
+      const msg = JSON.parse(buf.toString()) as Record<string, unknown>;
+      if (msg.cmd === "nodes_queue_status") frames.push(msg);
+    });
+
+    const promise = bridge.send(
+      { cmd: "nodes_queue_status" },
+      { tabId: "tab-2181", timeoutMs: 5000 },
+    );
+    await waitFor(() => expect(frames).toHaveLength(1));
+    a1.close();
+
+    const a2 = await connectPanel("tab-2181");
+    a2.on("message", (buf) => {
+      const msg = JSON.parse(buf.toString()) as Record<string, unknown>;
+      if (msg.cmd === "nodes_queue_status") {
+        frames.push(msg);
+        a2.send(JSON.stringify({ rid: msg.rid, ok: true, result: { status: "idle" } }));
+      }
+    });
+    await expect(promise).resolves.toMatchObject({ status: "idle" });
+    expect(frames).toHaveLength(2);
+    expect(frames[1]?.rid).toEqual(expect.any(String));
+    expect(frames[1]?.rid).not.toBe(frames[0]?.rid);
+    a2.close();
+  });
+
   it("does NOT extend the caller's deadline when a read resumes (#450)", async () => {
     const a1 = await connectPanel("tab-aaaa-1111");
     await waitFor(() => expect(bridge.tabs()).toHaveLength(1));
