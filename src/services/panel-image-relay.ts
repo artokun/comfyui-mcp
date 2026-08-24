@@ -4,7 +4,6 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { constants } from "node:fs";
 import { lstat, mkdtemp, open, opendir, rename, rmdir, unlink } from "node:fs/promises";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -205,13 +204,6 @@ function responsePath(dir: string, requestId: string): string {
   return join(dir, `${PANEL_IMAGE_RELAY_RESPONSE_PREFIX}${requestId}.json`);
 }
 
-const noFollowFlag = (constants as unknown as Record<string, unknown>).O_NOFOLLOW;
-const nonBlockingFlag = (constants as unknown as Record<string, unknown>).O_NONBLOCK;
-const safeReadFlags =
-  constants.O_RDONLY |
-  (typeof noFollowFlag === "number" ? noFollowFlag : 0) |
-  (typeof nonBlockingFlag === "number" ? nonBlockingFlag : 0);
-
 function sameFileIdentity(left: { dev: number; ino: number }, right: { dev: number; ino: number }): boolean {
   return left.dev === right.dev && left.ino === right.ino;
 }
@@ -220,7 +212,7 @@ function sameFileIdentity(left: { dev: number; ino: number }, right: { dev: numb
 async function readBoundedJson(path: string, maxBytes: number): Promise<unknown> {
   const linkStat = await lstat(path);
   if (!linkStat.isFile() || linkStat.isSymbolicLink()) throw new Error("relay input is not a regular file");
-  const handle = await open(path, safeReadFlags);
+  const handle = await open(path, "r");
   try {
     const stat = await handle.stat();
     if (!stat.isFile() || !sameFileIdentity(linkStat, stat) || stat.size > maxBytes) {
