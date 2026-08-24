@@ -6,6 +6,15 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.95] - 2026-08-24
+
+### MCP
+
+#### Fixed
+- Respect pinned npx runtime versions (#1675)
+- Accept nested panel media references (#2182)
+
+
 ## [0.52.94] - 2026-08-24
 
 ### MCP
