@@ -53,7 +53,11 @@ import { extname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { comfyuiFetch } from "../comfyui/fetch.js";
 import { assertPanelNotTargetedUnverifiable } from "../services/panel-pin-guard.js";
-import { nodesInstallCommandArgs } from "../services/node-management.js";
+import {
+  findPackOnDisk,
+  looksLikeAPack,
+  nodesInstallCommandArgs,
+} from "../services/node-management.js";
 import { sanitizePanelUpdateNodeResult } from "../services/manager-update-error.js";
 import {
   formatQueueStatusPartialNote,
@@ -351,7 +355,10 @@ import { describeUnappliedFilters } from "./civitai-filter-guard.js";
 import { recordTodo, normalizeTodoItems, TODO_STATUS_INPUTS } from "./todo-state.js";
 import { applyCapturedWidgetValues } from "../services/live-widget-overlay.js";
 import { listWorkflowLibraryKeys, userdataFetch } from "../services/userdata-library.js";
-import { resolveEffectiveComfyUIBase } from "../services/workspace-env.js";
+import {
+  resolveCustomNodesScanBaseLive,
+  resolveEffectiveComfyUIBase,
+} from "../services/workspace-env.js";
 import { getNsfwConsent, setNsfwConsent } from "../services/panel-settings.js";
 import { QueueMonitor } from "../services/queue-monitor.js";
 import { RunCompletions } from "./run-completion-journal.js";
@@ -4115,6 +4122,100 @@ function queueNeverSawATask(reply: Record<string, unknown> | null): boolean {
 function panelIncarnation(ctx: PanelToolCtx, tabId: string): string | undefined {
   const b = ctx.bridge as { tabIncarnation?: (t: string) => string | undefined };
   return typeof b?.tabIncarnation === "function" ? b.tabIncarnation(tabId) : undefined;
+}
+
+/**
+ * #2180 — Panel v0.15.71 verifies Manager installs from the Manager's installed
+ * list. A registry zip can land in custom_nodes without being in that list, so
+ * the panel truthfully answers installed:false even though ComfyUI will load it
+ * after a restart.
+ *
+ * This is deliberately a narrow, local-only corroboration. The panel binding is
+ * proven against the boot ComfyUI before dispatch, the live scan root is resolved
+ * from that local ComfyUI (not the saved workspace), and the matched directory is
+ * both readable and pack-shaped. A path that cannot be read, a remote panel, an
+ * ambiguous target, or a non-registry spelling leaves the panel's failure intact.
+ */
+async function corroborateUntrackedRegistryInstall(
+  ctx: PanelToolCtx,
+  res: ToolResult,
+  args: Record<string, unknown>,
+  dispatch: { tab: string; incarnation: string | undefined },
+  panelBaseBeforeDispatch: string | null,
+): Promise<ToolResult> {
+  if (res.isError) return res;
+  const parsed = parseToolResultJson(res);
+  if (
+    !parsed ||
+    parsed.installed !== false ||
+    parsed.verified !== false ||
+    !claimsQueued(parsed)
+  ) {
+    return res;
+  }
+
+  // Only a registry id has an identity that can be checked safely here. A URL,
+  // owner/repo shorthand, or a caller-supplied repository may land under a
+  // renamed checkout; guessing its directory would turn unrelated disk state
+  // into a success claim.
+  const id = typeof args.id === "string" ? args.id.trim() : "";
+  if (!id || /[/\\\x00-\x1F\x7F]/.test(id) || /^[a-z][a-z0-9+.-]*:\/\//i.test(id)) return res;
+
+  // The follow-up must still be attributable to the panel that received the
+  // install. This mirrors settleDroppedEnqueue's takeover guard.
+  if (ctx.tabId !== dispatch.tab || dispatch.incarnation === undefined) return res;
+  if (panelIncarnation(ctx, ctx.tabId) !== dispatch.incarnation) return res;
+  if (!panelBaseBeforeDispatch || !sameHttpBase(getComfyUIBaseUrl(), panelBaseBeforeDispatch)) {
+    return res;
+  }
+
+  let scanBase: string | undefined;
+  try {
+    scanBase = await resolveCustomNodesScanBaseLive({ requireLive: true });
+  } catch {
+    return res;
+  }
+  if (!scanBase) return res;
+
+  const disk = findPackOnDisk(id, scanBase);
+  if (disk.state !== "found") return res;
+
+  // looksLikeAPack intentionally treats an unreadable directory as
+  // inconclusive for existing install workflows. Re-read the matched directory
+  // here so an EACCES/race cannot become positive verification.
+  let readable = false;
+  try {
+    readable = readdirSync(disk.dir).length > 0 && looksLikeAPack(disk.dir);
+  } catch {
+    return res;
+  }
+  if (!readable) return res;
+
+  const { installed: _installed, verified: _verified, pending: _pending, note, ...rest } = parsed;
+  const upgraded = {
+    ...rest,
+    installed: true,
+    verified: true,
+    restart_required: true,
+    verification_evidence: "on-disk",
+    note: [
+      typeof note === "string" ? note : undefined,
+      `The panel could not verify registry id "${id}", but a readable custom-node pack is present at ${disk.dir}.`,
+      "Restart ComfyUI before relying on newly installed nodes; restart_required is true because the running node registry was not verified.",
+    ]
+      .filter(Boolean)
+      .join(" "),
+  };
+  return {
+    ...res,
+    content: [
+      { type: "text", text: JSON.stringify(upgraded, null, 2) },
+      ...res.content.slice(1),
+    ],
+    ...(res.structuredContent
+      ? { structuredContent: { ...res.structuredContent, ...upgraded } }
+      : {}),
+  };
 }
 
 async function settleDroppedEnqueue(
@@ -18672,6 +18773,9 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         // #1129 — the panel identity is captured BEFORE dispatch, because a
         // takeover during the install is exactly what the follow-up read must not
         // be attributed to.
+        // #2180 — the local disk corroboration below uses the same server-authorized
+        // binding, captured before dispatch, so a reconnect cannot retarget it.
+        const panelBaseBeforeDispatch = captureRebootHealthBase(ctx);
         const dispatch = {
           tab: ctx.tabId,
           incarnation: panelIncarnation(ctx, ctx.tabId),
@@ -18686,7 +18790,14 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
         // and silently does nothing. Git notes describe v4 bare-name resolution, but
         // v4 Git requests now fail before this point and legacy 3.x receives files:[url]
         // directly; appending that v4 note to a legacy success would be false.
-        const settled = await settleDroppedEnqueue(ctx, res, dispatch);
+        const corroborated = await corroborateUntrackedRegistryInstall(
+          ctx,
+          res,
+          args,
+          dispatch,
+          panelBaseBeforeDispatch,
+        );
+        const settled = await settleDroppedEnqueue(ctx, corroborated, dispatch);
         if (note && !cmdArgs.repository) {
           const text = settled.content.find((c) => c.type === "text");
           if (text && text.type === "text") {
