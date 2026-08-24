@@ -7,6 +7,7 @@ import {
 import { constants } from "node:fs";
 import { lstat, mkdtemp, open, opendir, rename, rmdir, unlink } from "node:fs/promises";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -28,6 +29,9 @@ export const PANEL_IMAGE_RELAY_MAX_REQUESTS_PER_TICK = 4;
 export const PANEL_IMAGE_RELAY_MAX_DIRECTORY_ENTRIES_PER_TICK = 128;
 export const PANEL_IMAGE_RELAY_MAX_PENDING_REQUESTS = 16;
 export const PANEL_IMAGE_RELAY_MAX_PENDING_RESPONSES = 4;
+export const PANEL_IMAGE_RELAY_HTTP_PATH = "/__comfyui_mcp_panel_image_relay";
+export const PANEL_IMAGE_RELAY_MAX_HTTP_REQUEST_BYTES = 16 * 1024;
+export const PANEL_IMAGE_RELAY_MAX_HTTP_RESPONSE_BYTES = 48 * 1024 * 1024;
 
 export const PANEL_IMAGE_RELAY_REQUEST_PREFIX = "control-image-request-";
 export const PANEL_IMAGE_RELAY_RESPONSE_PREFIX = "control-image-response-";
@@ -79,6 +83,8 @@ interface PanelImageRelayResponseSuccess extends PanelImageRelaySuccess {
 type PanelImageRelayResponse =
   | PanelImageRelayResponseSuccess
   | PanelImageRelayResponseFailure;
+
+type PanelImageRelayTransportResponse = PanelImageRelayResponse & { responseMac: string };
 
 export interface PanelImageRelayBridge {
   canReach(tabId: string): boolean;
@@ -393,20 +399,445 @@ function failureResponse(requestId: string, error: string): PanelImageRelayRespo
 }
 
 function responseFailureMessage(response: PanelImageRelayResponseFailure): never {
-  throw new PanelImageRelayError("The connected panel could not fetch that image.", "PANEL_FETCH_FAILED");
+  const known = new Set([
+    "AMBIGUOUS_REQUESTER",
+    "BACKLOG_FULL",
+    "MALFORMED_REPLY",
+    "NO_LIVE_PANEL",
+    "PANEL_FETCH_FAILED",
+    "STALE_REQUEST",
+    "TIMEOUT",
+  ]);
+  const code = known.has(response.error) ? response.error : "PANEL_FETCH_FAILED";
+  throw new PanelImageRelayError(
+    code === "PANEL_FETCH_FAILED"
+      ? "The connected panel could not fetch that image."
+      : `The connected panel image relay failed (${code}).`,
+    code,
+  );
 }
 
-function channelDir(): string {
-  return process.env.COMFYUI_MCP_PROGRESS_DIR?.trim() ?? "";
+function responseMacPayload(response: PanelImageRelayResponse): string {
+  return response.ok
+    ? JSON.stringify([
+        response.version,
+        response.requestId,
+        true,
+        response.base64,
+        response.mimeType,
+        response.bytes,
+        response.updated,
+      ])
+    : JSON.stringify([response.version, response.requestId, false, response.error, response.updated]);
 }
 
-/** Child-side request writer and bounded response waiter. */
+function addResponseMac(secret: string, response: PanelImageRelayResponse): PanelImageRelayTransportResponse {
+  return {
+    ...response,
+    responseMac: createHmac("sha256", secret).update(responseMacPayload(response)).digest("hex"),
+  };
+}
+
+function validateTransportResponse(
+  value: unknown,
+  requestId: string,
+  secret: string,
+): PanelImageRelayResponse {
+  if (!value || typeof value !== "object") {
+    throw new PanelImageRelayError("The panel returned a malformed image relay reply.", "MALFORMED_REPLY");
+  }
+  const record = value as Record<string, unknown>;
+  const responseMac = record.responseMac;
+  if (!isSafeRelayCapability(responseMac) || !hasOwn(record, "responseMac")) {
+    throw new PanelImageRelayError("The panel returned an unauthenticated image relay reply.", "MALFORMED_REPLY");
+  }
+  const { responseMac: ignored, ...unsigned } = record;
+  const response = validateResponse(unsigned, requestId);
+  const expected = createHmac("sha256", secret).update(responseMacPayload(response)).digest("hex");
+  if (!timingSafeEqual(Buffer.from(responseMac, "hex"), Buffer.from(expected, "hex"))) {
+    throw new PanelImageRelayError("The panel returned an unauthenticated image relay reply.", "MALFORMED_REPLY");
+  }
+  return response;
+}
+
+function relayEndpoint(): URL | undefined {
+  const raw = process.env.COMFYUI_MCP_RELAY_URL?.trim();
+  if (!raw) return undefined;
+  try {
+    const url = new URL(raw);
+    if (
+      url.protocol !== "http:" ||
+      url.hostname !== "127.0.0.1" ||
+      !url.port ||
+      Number(url.port) < 1 ||
+      Number(url.port) > 65535 ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash ||
+      url.pathname !== PANEL_IMAGE_RELAY_HTTP_PATH
+    ) return undefined;
+    return url;
+  } catch {
+    return undefined;
+  }
+}
+
+async function readHttpResponseBounded(response: Response, maxBytes: number): Promise<unknown> {
+  const declared = response.headers.get("content-length");
+  if (declared !== null) {
+    const length = Number(declared);
+    if (!Number.isSafeInteger(length) || length < 0 || length > maxBytes) {
+      throw new PanelImageRelayError("The panel relay response exceeded its safety limit.", "RESPONSE_TOO_LARGE");
+    }
+  }
+  if (!response.body) {
+    const text = await response.text();
+    if (Buffer.byteLength(text, "utf8") > maxBytes) {
+      throw new PanelImageRelayError("The panel relay response exceeded its safety limit.", "RESPONSE_TOO_LARGE");
+    }
+    return JSON.parse(text) as unknown;
+  }
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        throw new PanelImageRelayError("The panel relay response exceeded its safety limit.", "RESPONSE_TOO_LARGE");
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return JSON.parse(Buffer.concat(chunks, total).toString("utf8")) as unknown;
+}
+
+function requestDeadline(request: PanelImageRelayRequest): number {
+  return Math.min(request.deadlineAt, request.createdAt + PANEL_IMAGE_RELAY_TIMEOUT_MS);
+}
+
+function errorCodeFromHttpBody(value: unknown, status: number): string {
+  if (value && typeof value === "object" && typeof (value as Record<string, unknown>).error === "string") {
+    const error = (value as Record<string, unknown>).error as string;
+    if (/^[A-Z_]{3,40}$/.test(error)) return error;
+  }
+  if (status === 400) return "MALFORMED_REQUEST";
+  if (status === 401) return "UNAUTHORIZED";
+  if (status === 429) return "BACKLOG_FULL";
+  return "RELAY_UNAVAILABLE";
+}
+
+function readRequestBody(req: IncomingMessage, maxBytes: number): Promise<Buffer> {
+  const declared = req.headers["content-length"];
+  if (declared !== undefined) {
+    const length = Number(declared);
+    if (!Number.isSafeInteger(length) || length < 0 || length > maxBytes) {
+      return Promise.reject(new PanelImageRelayError("The relay request exceeded its safety limit.", "REQUEST_TOO_LARGE"));
+    }
+  }
+  return new Promise<Buffer>((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    let settled = false;
+    const finish = (error: Error | undefined, value?: Buffer) => {
+      if (settled) return;
+      settled = true;
+      req.removeListener("data", onData);
+      req.removeListener("end", onEnd);
+      req.removeListener("error", onError);
+      req.removeListener("aborted", onAborted);
+      req.setTimeout(0);
+      if (error) reject(error);
+      else resolve(value ?? Buffer.alloc(0));
+    };
+    const onData = (chunk: Buffer | string) => {
+      const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      total += data.byteLength;
+      if (total > maxBytes) {
+        req.destroy();
+        finish(new PanelImageRelayError("The relay request exceeded its safety limit.", "REQUEST_TOO_LARGE"));
+        return;
+      }
+      chunks.push(data);
+    };
+    const onEnd = () => finish(undefined, Buffer.concat(chunks, total));
+    const onError = () => finish(new PanelImageRelayError("The relay request was interrupted.", "RELAY_UNAVAILABLE", true));
+    const onAborted = () => finish(new PanelImageRelayError("The relay request was interrupted.", "RELAY_UNAVAILABLE", true));
+    req.on("data", onData);
+    req.once("end", onEnd);
+    req.once("error", onError);
+    req.once("aborted", onAborted);
+    req.setTimeout(PANEL_IMAGE_RELAY_TIMEOUT_MS + 1_000, () => {
+      req.destroy();
+      finish(new PanelImageRelayError("The relay request timed out.", "TIMEOUT"));
+    });
+  });
+}
+
+function writeHttpJson(res: ServerResponse, status: number, value: unknown): void {
+  const body = Buffer.from(JSON.stringify(value), "utf8");
+  if (body.byteLength > PANEL_IMAGE_RELAY_MAX_HTTP_RESPONSE_BYTES) {
+    res.writeHead(500, { "content-type": "application/json", "content-length": "0" });
+    res.end();
+    return;
+  }
+  res.writeHead(status, {
+    "content-type": "application/json",
+    "content-length": String(body.byteLength),
+    connection: "close",
+  });
+  res.end(body);
+}
+
+async function withinDeadline<T>(promise: Promise<T>, deadlineAt: number): Promise<T> {
+  const remaining = deadlineAt - Date.now();
+  if (remaining <= 0) throw new PanelImageRelayError("The panel image relay timed out.", "TIMEOUT");
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new PanelImageRelayError("The panel image relay timed out.", "TIMEOUT")), remaining);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+export interface PanelImageRelayResolvedAgent {
+  agentKey: string;
+  secret: string;
+}
+
+export interface PanelImageRelayServerOptions {
+  bridge: PanelImageRelayBridge;
+  resolvePanelAgent: (request: PanelImageRelayRequest) => PanelImageRelayResolvedAgent | undefined;
+  resolvePanelTab: (agentKey: string) => string | undefined;
+}
+
+export interface PanelImageRelayServer {
+  endpointUrl: string;
+  close(): Promise<void>;
+}
+
+/**
+ * The production child/orchestrator channel. It binds only to IPv4 loopback,
+ * authenticates the reference before resolving an agent, and never reads the
+ * shared progress directory. The file poller below is retained solely for
+ * legacy/unit coverage and is not wired into the orchestrator.
+ */
+export async function startPanelImageRelayServer(
+  options: PanelImageRelayServerOptions,
+): Promise<PanelImageRelayServer> {
+  let active = 0;
+  const server: Server = createServer((req, res) => {
+    void (async () => {
+      if (req.method !== "POST" || req.url !== PANEL_IMAGE_RELAY_HTTP_PATH) {
+        writeHttpJson(res, 404, { ok: false, error: "NOT_FOUND" });
+        return;
+      }
+      if (active >= PANEL_IMAGE_RELAY_MAX_CONCURRENT) {
+        writeHttpJson(res, 429, { ok: false, error: "BACKLOG_FULL" });
+        return;
+      }
+      active += 1;
+      try {
+        let body: Buffer;
+        try {
+          body = await readRequestBody(req, PANEL_IMAGE_RELAY_MAX_HTTP_REQUEST_BYTES);
+        } catch (error) {
+          const status = error instanceof PanelImageRelayError && error.code === "REQUEST_TOO_LARGE" ? 413 : 408;
+          writeHttpJson(res, status, { ok: false, error: error instanceof PanelImageRelayError ? error.code : "MALFORMED_REQUEST" });
+          return;
+        }
+        let raw: unknown;
+        try {
+          raw = JSON.parse(body.toString("utf8")) as unknown;
+        } catch {
+          writeHttpJson(res, 400, { ok: false, error: "MALFORMED_REQUEST" });
+          return;
+        }
+        const rawRecord = raw && typeof raw === "object" ? raw as Record<string, unknown> : undefined;
+        const requestId = rawRecord?.requestId;
+        const request = isSafeRelayId(requestId) ? validateRequest(raw, requestId) : undefined;
+        if (!request) {
+          writeHttpJson(res, 400, { ok: false, error: "MALFORMED_REQUEST" });
+          return;
+        }
+        const auth = options.resolvePanelAgent(request);
+        if (!auth || !isSafeRelaySecret(auth.secret)) {
+          writeHttpJson(res, 401, { ok: false, error: "UNAUTHORIZED" });
+          return;
+        }
+        const now = Date.now();
+        const age = now - request.createdAt;
+        let response: PanelImageRelayResponse;
+        if (age < -5_000 || age > PANEL_IMAGE_RELAY_STALE_MS || now >= requestDeadline(request)) {
+          response = failureResponse(request.requestId, now >= requestDeadline(request) ? "TIMEOUT" : "STALE_REQUEST");
+        } else {
+          const panelTab = options.resolvePanelTab(auth.agentKey);
+          if (!panelTab || !options.bridge.canReach(panelTab)) {
+            response = failureResponse(
+              request.requestId,
+              options.bridge.resolveFailure?.(auth.agentKey) === "ambiguous" ? "AMBIGUOUS_REQUESTER" : "NO_LIVE_PANEL",
+            );
+          } else {
+            const remainingMs = requestDeadline(request) - Date.now();
+            if (remainingMs <= 0) {
+              response = failureResponse(request.requestId, "TIMEOUT");
+            } else {
+              try {
+                const reply = await withinDeadline(
+                  options.bridge.send(
+                    { cmd: "fetch_image", filename: request.filename, subfolder: request.subfolder, type: request.type },
+                    { tabId: panelTab, timeoutMs: Math.min(PANEL_IMAGE_RELAY_TIMEOUT_MS, remainingMs) },
+                  ),
+                  requestDeadline(request),
+                );
+                const replyRecord = reply && typeof reply === "object" ? reply as Record<string, unknown> : undefined;
+                const payload = replyRecord
+                  ? validateImagePayload({ base64: replyRecord.base64, mimeType: replyRecord.mimeType, bytes: replyRecord.bytes })
+                  : undefined;
+                if (Date.now() >= requestDeadline(request)) {
+                  response = failureResponse(request.requestId, "TIMEOUT");
+                } else if (replyRecord?.ok === false && hasOnlyKeys(replyRecord, ["ok", "error"]) && isSafeText(replyRecord.error, 160)) {
+                  response = failureResponse(request.requestId, "PANEL_FETCH_FAILED");
+                } else if (!replyRecord || replyRecord.ok !== true || !payload || !hasOnlyKeys(replyRecord, ["ok", "base64", "mimeType", "bytes"])) {
+                  response = failureResponse(request.requestId, "MALFORMED_REPLY");
+                } else {
+                  response = { version: PANEL_IMAGE_RELAY_VERSION, requestId: request.requestId, ok: true, ...payload, updated: Date.now() };
+                }
+              } catch (error) {
+                response = failureResponse(request.requestId, error instanceof PanelImageRelayError && error.code === "TIMEOUT" ? "TIMEOUT" : "PANEL_FETCH_FAILED");
+              }
+            }
+          }
+        }
+        writeHttpJson(res, 200, addResponseMac(auth.secret, response));
+      } catch {
+        if (!res.headersSent) writeHttpJson(res, 503, { ok: false, error: "RELAY_UNAVAILABLE" });
+      } finally {
+        active -= 1;
+      }
+    })();
+  });
+  server.headersTimeout = 2_000;
+  server.requestTimeout = PANEL_IMAGE_RELAY_TIMEOUT_MS + 1_000;
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: Error) => {
+      server.removeListener("listening", onListening);
+      reject(error);
+    };
+    const onListening = () => {
+      server.removeListener("error", onError);
+      resolve();
+    };
+    server.once("error", onError);
+    server.once("listening", onListening);
+    server.listen({ host: "127.0.0.1", port: 0 });
+  });
+  const address = server.address();
+  if (!address || typeof address === "string" || address.address !== "127.0.0.1" || !address.port) {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    throw new Error("panel image relay did not bind to IPv4 loopback");
+  }
+  return {
+    endpointUrl: `http://127.0.0.1:${address.port}${PANEL_IMAGE_RELAY_HTTP_PATH}`,
+    close: () => new Promise<void>((resolve) => {
+      server.close(() => resolve());
+      server.closeIdleConnections?.();
+    }),
+  };
+}
+
+/** Child-side production request over the authenticated loopback HTTP channel. */
 export async function requestPanelImage(
   filename: string,
   type: PanelImageType,
   subfolder: string,
 ): Promise<PanelImageRelaySuccess | undefined> {
-  const dir = channelDir();
+  if (!isSafePanelImageRef(filename, subfolder, type)) {
+    throw new PanelImageRelayError("The image reference is unsafe and was refused.", "UNSAFE_REFERENCE");
+  }
+  const endpoint = relayEndpoint();
+  const secret = process.env.COMFYUI_MCP_RELAY_SECRET;
+  if (!endpoint || !isSafeRelaySecret(secret)) return undefined;
+  const createdAt = Date.now();
+  const request: PanelImageRelayRequest = {
+    version: PANEL_IMAGE_RELAY_VERSION,
+    requestId: `${Date.now().toString(36)}-${process.pid.toString(36)}-${randomBytes(8).toString("hex")}`,
+    capability: "",
+    filename,
+    subfolder,
+    type,
+    createdAt,
+    deadlineAt: createdAt + PANEL_IMAGE_RELAY_TIMEOUT_MS,
+  };
+  request.capability = makePanelImageRelayCapability(secret, request);
+  const body = Buffer.from(JSON.stringify(request), "utf8");
+  if (body.byteLength > PANEL_IMAGE_RELAY_MAX_HTTP_REQUEST_BYTES) {
+    throw new PanelImageRelayError("The relay request exceeded its safety limit.", "REQUEST_TOO_LARGE");
+  }
+  let httpResponse: Response;
+  try {
+    httpResponse = await fetch(endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/json", "content-length": String(body.byteLength) },
+      body,
+      redirect: "error",
+      signal: AbortSignal.timeout(PANEL_IMAGE_RELAY_TIMEOUT_MS),
+    });
+  } catch (error) {
+    if (error instanceof PanelImageRelayError) throw error;
+    if (error instanceof DOMException && error.name === "TimeoutError") {
+      throw new PanelImageRelayError("The connected panel image relay timed out.", "TIMEOUT");
+    }
+    throw new PanelImageRelayError("The connected panel relay is unavailable.", "RELAY_UNAVAILABLE", true);
+  }
+  let decoded: unknown;
+  try {
+    decoded = await readHttpResponseBounded(httpResponse, PANEL_IMAGE_RELAY_MAX_HTTP_RESPONSE_BYTES);
+  } catch (error) {
+    if (error instanceof PanelImageRelayError) throw error;
+    throw new PanelImageRelayError("The panel returned a malformed image relay reply.", "MALFORMED_REPLY");
+  }
+  if (!httpResponse.ok) {
+    const code = errorCodeFromHttpBody(decoded, httpResponse.status);
+    throw new PanelImageRelayError(
+      code === "RELAY_UNAVAILABLE" ? "The connected panel relay is unavailable." : `The connected panel image relay failed (${code}).`,
+      code,
+      httpResponse.status >= 500,
+    );
+  }
+  const response = validateTransportResponse(decoded, request.requestId, secret);
+  const responseAge = Date.now() - response.updated;
+  if (
+    response.updated < request.createdAt ||
+    response.updated > request.deadlineAt ||
+    responseAge < -5_000 ||
+    responseAge > PANEL_IMAGE_RELAY_STALE_MS
+  ) {
+    throw new PanelImageRelayError("The panel returned a stale image relay reply.", "STALE_REPLY");
+  }
+  if (response.ok === false) responseFailureMessage(response);
+  return { base64: response.base64, mimeType: response.mimeType, bytes: response.bytes };
+}
+
+/** Legacy file-channel request writer, retained for focused/unit coverage only. */
+export async function requestPanelImageFromFileChannel(
+  filename: string,
+  type: PanelImageType,
+  subfolder: string,
+): Promise<PanelImageRelaySuccess | undefined> {
+  const dir = process.env.COMFYUI_MCP_PROGRESS_DIR?.trim() ?? "";
   const secret = process.env.COMFYUI_MCP_RELAY_SECRET;
   if (!dir || !isSafeRelaySecret(secret)) return undefined;
   if (!isSafePanelImageRef(filename, subfolder, type)) {

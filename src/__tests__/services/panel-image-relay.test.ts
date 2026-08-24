@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createServer } from "node:http";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,12 +10,16 @@ import {
   PANEL_IMAGE_RELAY_MAX_PENDING_RESPONSES,
   PANEL_IMAGE_RELAY_MAX_REQUEST_FILE_BYTES,
   PANEL_IMAGE_RELAY_MAX_REQUESTS_PER_TICK,
+  PANEL_IMAGE_RELAY_HTTP_PATH,
   PANEL_IMAGE_RELAY_REQUEST_PREFIX,
   PANEL_IMAGE_RELAY_RESPONSE_PREFIX,
   PANEL_IMAGE_RELAY_STALE_MS,
   makePanelImageRelayCapability,
   processPanelImageRequests,
+  requestPanelImageFromFileChannel,
   requestPanelImage,
+  startPanelImageRelayServer,
+  verifyPanelImageRelayCapability,
   type PanelImageRelayRequest,
 } from "../../services/panel-image-relay.js";
 
@@ -64,6 +69,7 @@ afterEach(() => {
   delete process.env.COMFYUI_MCP_PROGRESS_DIR;
   delete process.env.COMFYUI_MCP_TAB;
   delete process.env.COMFYUI_MCP_RELAY_SECRET;
+  delete process.env.COMFYUI_MCP_RELAY_URL;
   vi.restoreAllMocks();
 });
 
@@ -73,7 +79,7 @@ describe("panel image relay child channel", () => {
     process.env.COMFYUI_MCP_PROGRESS_DIR = dir;
     process.env.COMFYUI_MCP_TAB = "orchestrator::claude";
     process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
-    const pending = requestPanelImage("render.png", "output", "shots");
+    const pending = requestPanelImageFromFileChannel("render.png", "output", "shots");
     let file = "";
     for (let i = 0; i < 100 && !file; i += 1) {
       file = readdirSync(dir).find((name) => name.startsWith(PANEL_IMAGE_RELAY_REQUEST_PREFIX)) ?? "";
@@ -115,7 +121,7 @@ describe("panel image relay child channel", () => {
     process.env.COMFYUI_MCP_PROGRESS_DIR = dir;
     process.env.COMFYUI_MCP_TAB = "orchestrator::claude";
     process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
-    await expect(requestPanelImage(filename, type as "output", subfolder)).rejects.toMatchObject({ code: "UNSAFE_REFERENCE" });
+    await expect(requestPanelImageFromFileChannel(filename, type as "output", subfolder)).rejects.toMatchObject({ code: "UNSAFE_REFERENCE" });
     expect(readdirSync(dir)).toEqual([]);
   });
 
@@ -124,7 +130,7 @@ describe("panel image relay child channel", () => {
     process.env.COMFYUI_MCP_PROGRESS_DIR = dir;
     process.env.COMFYUI_MCP_TAB = "orchestrator::victim";
     delete process.env.COMFYUI_MCP_RELAY_SECRET;
-    await expect(requestPanelImage("render.png", "output", "shots")).resolves.toBeUndefined();
+    await expect(requestPanelImageFromFileChannel("render.png", "output", "shots")).resolves.toBeUndefined();
     expect(readdirSync(dir)).toEqual([]);
   });
 
@@ -133,7 +139,7 @@ describe("panel image relay child channel", () => {
     process.env.COMFYUI_MCP_PROGRESS_DIR = dir;
     process.env.COMFYUI_MCP_TAB = "orchestrator::claude";
     process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
-    const pending = requestPanelImage("render.png", "output", "shots");
+    const pending = requestPanelImageFromFileChannel("render.png", "output", "shots");
     let file = "";
     for (let i = 0; i < 100 && !file; i += 1) {
       file = readdirSync(dir).find((name) => name.startsWith(PANEL_IMAGE_RELAY_REQUEST_PREFIX)) ?? "";
@@ -158,7 +164,7 @@ describe("panel image relay child channel", () => {
     process.env.COMFYUI_MCP_PROGRESS_DIR = dir;
     process.env.COMFYUI_MCP_TAB = "orchestrator::claude";
     process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
-    const pending = requestPanelImage("render.png", "output", "shots");
+    const pending = requestPanelImageFromFileChannel("render.png", "output", "shots");
     let file = "";
     for (let i = 0; i < 100 && !file; i += 1) {
       file = readdirSync(dir).find((name) => name.startsWith(PANEL_IMAGE_RELAY_REQUEST_PREFIX)) ?? "";
@@ -196,7 +202,7 @@ describe("panel image relay child channel", () => {
     process.env.COMFYUI_MCP_PROGRESS_DIR = dir;
     process.env.COMFYUI_MCP_TAB = "orchestrator::claude";
     process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
-    const pending = requestPanelImage("render.png", "output", "shots");
+    const pending = requestPanelImageFromFileChannel("render.png", "output", "shots");
     let file = "";
     for (let i = 0; i < 100 && !file; i += 1) {
       file = readdirSync(dir).find((name) => name.startsWith(PANEL_IMAGE_RELAY_REQUEST_PREFIX)) ?? "";
@@ -221,7 +227,7 @@ describe("panel image relay child channel", () => {
     process.env.COMFYUI_MCP_PROGRESS_DIR = dir;
     process.env.COMFYUI_MCP_TAB = "orchestrator::claude";
     process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
-    const pending = requestPanelImage("render.png", "output", "shots");
+    const pending = requestPanelImageFromFileChannel("render.png", "output", "shots");
     let file = "";
     for (let i = 0; i < 100 && !file; i += 1) {
       file = readdirSync(dir).find((name) => name.startsWith(PANEL_IMAGE_RELAY_REQUEST_PREFIX)) ?? "";
@@ -461,5 +467,166 @@ describe("panel image relay orchestrator poll", () => {
     await processPanelImageRequests({ dir, resolvePanelAgentKey: () => "orchestrator::claude", resolvePanelTab: () => "panel-tab", bridge: { canReach: () => false, send: vi.fn() } });
     expect(readdirSync(dir)).not.toContain(stale.split("\\").at(-1));
     expect(readdirSync(dir)).not.toContain(oversized.split("\\").at(-1));
+  });
+});
+
+describe("authenticated loopback panel image relay", () => {
+  it("uses only the explicit IPv4 loopback endpoint and reaches the pinned shared panel", async () => {
+    const send = vi.fn(async (command: unknown, options: unknown) => {
+      expect(command).toEqual({ cmd: "fetch_image", filename: "render.png", subfolder: "shots", type: "output" });
+      expect(options).toMatchObject({ tabId: "pinned-live-panel" });
+      return { ok: true, base64: "AQID", mimeType: "image/png", bytes: 3 };
+    });
+    const server = await startPanelImageRelayServer({
+      resolvePanelAgent: (value) => verifyPanelImageRelayCapability(SECRET, value) ? { agentKey: "orchestrator::claude", secret: SECRET } : undefined,
+      resolvePanelTab: (agentKey) => agentKey === "orchestrator::claude" ? "pinned-live-panel" : undefined,
+      bridge: { canReach: () => true, send },
+    });
+    try {
+      expect(new URL(server.endpointUrl).hostname).toBe("127.0.0.1");
+      expect(new URL(server.endpointUrl).pathname).toBe(PANEL_IMAGE_RELAY_HTTP_PATH);
+      process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
+      process.env.COMFYUI_MCP_RELAY_URL = server.endpointUrl;
+      process.env.COMFYUI_MCP_PROGRESS_DIR = join(tmpdir(), "this-file-channel-must-not-be-read");
+      await expect(requestPanelImage("render.png", "output", "shots")).resolves.toEqual({
+        base64: "AQID",
+        mimeType: "image/png",
+        bytes: 3,
+      });
+      expect(send).toHaveBeenCalledOnce();
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("rejects forged HMACs before resolving or dispatching a panel tab", async () => {
+    const send = vi.fn();
+    const server = await startPanelImageRelayServer({
+      resolvePanelAgent: (value) => verifyPanelImageRelayCapability(SECRET, value) ? { agentKey: "orchestrator::claude", secret: SECRET } : undefined,
+      resolvePanelTab: () => "victim-panel",
+      bridge: { canReach: () => true, send },
+    });
+    try {
+      const forged = request("forged-hmac-123456789", { capability: "b".repeat(64) });
+      const response = await fetch(server.endpointUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(forged),
+      });
+      expect(response.status).toBe(401);
+      expect(await response.json()).toMatchObject({ ok: false, error: "UNAUTHORIZED" });
+      expect(send).not.toHaveBeenCalled();
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("binds the child result to the request id and response MAC", async () => {
+    const fake = createServer((_req, res) => {
+      const body = JSON.stringify({
+        version: 1,
+        requestId: "different-request-123456",
+        ok: true,
+        base64: "AQID",
+        mimeType: "image/png",
+        bytes: 3,
+        updated: Date.now(),
+        responseMac: "a".repeat(64),
+      });
+      res.writeHead(200, { "content-type": "application/json", "content-length": String(Buffer.byteLength(body)) });
+      res.end(body);
+    });
+    await new Promise<void>((resolve) => fake.listen(0, "127.0.0.1", resolve));
+    const address = fake.address();
+    if (!address || typeof address === "string") throw new Error("fake relay did not bind");
+    try {
+      process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
+      process.env.COMFYUI_MCP_RELAY_URL = `http://127.0.0.1:${address.port}${PANEL_IMAGE_RELAY_HTTP_PATH}`;
+      await expect(requestPanelImage("render.png", "output", "shots")).rejects.toMatchObject({ code: "MALFORMED_REPLY" });
+    } finally {
+      await new Promise<void>((resolve) => fake.close(() => resolve()));
+    }
+  });
+
+  it("rejects a response with the right request id but a forged response MAC", async () => {
+    const fake = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => chunks.push(chunk));
+      req.on("end", () => {
+        const input = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { requestId: string };
+        const body = JSON.stringify({
+          version: 1,
+          requestId: input.requestId,
+          ok: true,
+          base64: "AQID",
+          mimeType: "image/png",
+          bytes: 3,
+          updated: Date.now(),
+          responseMac: "b".repeat(64),
+        });
+        res.writeHead(200, { "content-type": "application/json", "content-length": String(Buffer.byteLength(body)) });
+        res.end(body);
+      });
+    });
+    await new Promise<void>((resolve) => fake.listen(0, "127.0.0.1", resolve));
+    const address = fake.address();
+    if (!address || typeof address === "string") throw new Error("fake relay did not bind");
+    try {
+      process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
+      process.env.COMFYUI_MCP_RELAY_URL = `http://127.0.0.1:${address.port}${PANEL_IMAGE_RELAY_HTTP_PATH}`;
+      await expect(requestPanelImage("render.png", "output", "shots")).rejects.toMatchObject({ code: "MALFORMED_REPLY" });
+    } finally {
+      await new Promise<void>((resolve) => fake.close(() => resolve()));
+    }
+  });
+
+  it("enforces the single request deadline around bridge.send", async () => {
+    let timeoutMs = 0;
+    const server = await startPanelImageRelayServer({
+      resolvePanelAgent: (value) => verifyPanelImageRelayCapability(SECRET, value) ? { agentKey: "orchestrator::claude", secret: SECRET } : undefined,
+      resolvePanelTab: () => "panel-tab",
+      bridge: {
+        canReach: () => true,
+        send: async (_command, options) => {
+          timeoutMs = options.timeoutMs;
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          return { ok: true, base64: "AQID", mimeType: "image/png", bytes: 3 };
+        },
+      },
+    });
+    try {
+      const createdAt = Date.now();
+      const short = request("short-deadline-123456", { createdAt, deadlineAt: createdAt + 30 });
+      const response = await fetch(server.endpointUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(short),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ ok: false, error: "TIMEOUT", requestId: short.requestId });
+      expect(timeoutMs).toBeGreaterThan(0);
+      expect(timeoutMs).toBeLessThanOrEqual(30);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("rejects oversized HTTP requests and overloads without unbounded work", async () => {
+    const server = await startPanelImageRelayServer({
+      resolvePanelAgent: () => ({ agentKey: "orchestrator::claude", secret: SECRET }),
+      resolvePanelTab: () => "panel-tab",
+      bridge: { canReach: () => true, send: vi.fn() },
+    });
+    try {
+      const oversized = await fetch(server.endpointUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json", "content-length": String(20 * 1024) },
+        body: "x".repeat(20 * 1024),
+      });
+      expect(oversized.status).toBe(413);
+      expect(await oversized.json()).toMatchObject({ error: "REQUEST_TOO_LARGE" });
+    } finally {
+      await server.close();
+    }
   });
 });
