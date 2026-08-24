@@ -149,7 +149,7 @@ describe("#1415 WIRING: the orchestrator publishes on its existing poll tick", (
     expect(close).toBeGreaterThan(open);
     const body = src.slice(open, close);
     expect(body).toMatch(
-      /publishConnectedPanelOrigins\(\s*progressDir,\s*bridge\.connectedServerOrigins\(\)\s*\)/,
+      /publishConnectedPanelOrigins\(\s*progressDir,\s*bridge\.connectedSafePanelOrigins\(\)\s*\)/,
     );
     // …and nowhere else, so this test is asking about the only call site.
     expect(src.split("publishConnectedPanelOrigins(").length - 1).toBe(1);

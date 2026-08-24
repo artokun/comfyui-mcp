@@ -75,9 +75,14 @@ describe("panel-origin channel", () => {
     // this would pass while proving nothing about the string filter.
     writeFileSync(
       join(dir, PANEL_ORIGINS_FILE),
-      JSON.stringify({ origins: [1, null, "", "http://a:1"], updated: Date.now(), pid: process.pid }),
+      JSON.stringify({
+        origins: [1, null, "", "http://a:1"],
+        updated: Date.now(),
+        pid: process.pid,
+        trustedLocalPanelOrigins: true,
+      }),
     );
-    expect(readPublishedPanelOrigins()).toEqual(["http://a:1"]);
+    expect(readPublishedPanelOrigins()).toEqual([]);
   });
 
   it("survives an unwritable directory instead of throwing into the poll tick", () => {
@@ -166,15 +171,25 @@ describe("panel-origin channel — staleness", () => {
   it("accepts a live, fresh record", () => {
     // The direction that must keep working: everything above rejects, so a test
     // that only asserted rejection could pass with the reader hard-wired to [].
-    writeRecord({ origins, updated: Date.now(), pid: process.pid });
+    writeRecord({ origins, updated: Date.now(), pid: process.pid, trustedLocalPanelOrigins: true });
     expect(readPublishedPanelOrigins()).toEqual(origins);
   });
 
   it("accepts a record right up to the age limit, and not past it", () => {
     const now = Date.now();
-    writeRecord({ origins, updated: now - PANEL_ORIGINS_MAX_AGE_MS + 1_000, pid: process.pid });
+    writeRecord({
+      origins,
+      updated: now - PANEL_ORIGINS_MAX_AGE_MS + 1_000,
+      pid: process.pid,
+      trustedLocalPanelOrigins: true,
+    });
     expect(readPublishedPanelOrigins(now)).toEqual(origins);
-    writeRecord({ origins, updated: now - PANEL_ORIGINS_MAX_AGE_MS - 1_000, pid: process.pid });
+    writeRecord({
+      origins,
+      updated: now - PANEL_ORIGINS_MAX_AGE_MS - 1_000,
+      pid: process.pid,
+      trustedLocalPanelOrigins: true,
+    });
     expect(readPublishedPanelOrigins(now)).toEqual([]);
   });
 
@@ -186,6 +201,7 @@ describe("panel-origin channel — staleness", () => {
     expect(readPublishedPanelOrigins()).toEqual(origins);
     const raw = JSON.parse(readFileSync(join(dir, PANEL_ORIGINS_FILE), "utf-8"));
     expect(raw.pid).toBe(process.pid);
+    expect(raw.trustedLocalPanelOrigins).toBe(true);
   });
 });
 
@@ -338,7 +354,12 @@ describe("panel-origin channel — bounded read (review, finding 3)", () => {
   it("still reads a normal-sized record", () => {
     writeFileSync(
       join(dir, PANEL_ORIGINS_FILE),
-      JSON.stringify({ origins: ["http://127.0.0.1:8188"], updated: Date.now(), pid: process.pid }),
+      JSON.stringify({
+        origins: ["http://127.0.0.1:8188"],
+        updated: Date.now(),
+        pid: process.pid,
+        trustedLocalPanelOrigins: true,
+      }),
     );
     expect(readPublishedPanelOrigins()).toEqual(["http://127.0.0.1:8188"]);
   });

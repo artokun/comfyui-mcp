@@ -59,6 +59,28 @@ export function setConnectedPanelOrigins(fn: (() => string[]) | null): void {
   connectedPanelOrigins = fn;
 }
 
+/** Read the current panel origins without allowing a stale channel read to abort a request. */
+export function connectedPanelOriginsNow(): string[] {
+  try {
+    return panelOrigins();
+  } catch {
+    return [];
+  }
+}
+
+/** True when the request failed at the network layer, rather than returning an HTTP status. */
+export function isComfyTransportFailure(err: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current: unknown = err;
+  while (current instanceof Error && !seen.has(current)) {
+    if (isTimeoutAbort(current)) return false;
+    if (isBareFetchFailure(current)) return true;
+    seen.add(current);
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
 /** Origin (scheme://host:port) of a request target, or undefined if unparsable. */
 function originOf(target: string): string | undefined {
   try {

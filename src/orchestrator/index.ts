@@ -3007,12 +3007,12 @@ export async function runPanelOrchestrator(): Promise<void> {
   // `null` (ambiguous origin) makes the bridge refuse loudly; no entry lets
   // the bridge fall back to active-tab resolution (idle-time probes).
   bridge.setScopeTargetResolver(makeScopeTargetResolver({ tracker: turnOrigins, scopeAgentKeyOf }));
-  // #952 — let a headless `fetch failed` say whether the connected panel is on a
-  // DIFFERENT ComfyUI than COMFYUI_URL. The reporter's readonly tools failed
-  // while every panel tool worked, and nothing in the error connected the two.
-  // SERVER-OBSERVED origins only (tabServerOrigin): the browser sets the
-  // handshake Origin and page JS cannot forge it, unlike hello.comfyui_url.
-  setConnectedPanelOrigins(() => bridge.connectedServerOrigins());
+  // #2149 — the direct /view fallback is narrower than the diagnostic origin
+  // list: only a server-proven local panel whose hello claim matches its
+  // observed origin and whose origin is loopback may be contacted by MCP.
+  // Remote/tunnel/LAN origins remain diagnostic-only and never become SSRF
+  // targets for a headless tool.
+  setConnectedPanelOrigins(() => bridge.connectedSafePanelOrigins());
   // #884 P1 (confirming gate 2) — EXPLICIT recovery from a DEAD or AMBIGUOUS
   // pin, and from those only. The bridge's refusal names
   // panel_set_workflow_target as the way out; this is the ONLY path that
@@ -5883,7 +5883,7 @@ export async function runPanelOrchestrator(): Promise<void> {
     // connect/disconnect events) so a tab that goes away blanks it within 700ms —
     // the child must never quote a panel that has since disconnected. Writes only
     // when the set changed.
-    publishConnectedPanelOrigins(progressDir, bridge.connectedServerOrigins());
+    publishConnectedPanelOrigins(progressDir, bridge.connectedSafePanelOrigins());
     // #1400 — the same level-triggered discipline for the frontend-virtual
     // registry: republish the CURRENT map, scoped to origins a connected tab
     // actually fronts, so a disconnected tab's entry drops out of the channel

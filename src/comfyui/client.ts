@@ -12,8 +12,21 @@ import {
   ComfyUIError,
   ConnectionError,
   WorkflowExecutionError,
+  describeFetchFailure,
 } from "../utils/errors.js";
-import { comfyuiFetch, isTimeoutAbort, raceAbort } from "./fetch.js";
+import {
+  comfyuiFetch,
+  connectedPanelOriginsNow,
+  comfyHttpTimeoutSeconds,
+  isComfyTransportFailure,
+  isTimeoutAbort,
+  raceAbort,
+} from "./fetch.js";
+import {
+  choosePanelFallbackOrigin,
+  describeDeclinedPanelFallback,
+  httpOriginOf,
+} from "../services/panel-fallback-target.js";
 import {
   bodyPrefixOf,
   classifyNonJson,
@@ -1166,6 +1179,121 @@ export async function getHistory(
   return readComfyJson<Record<string, HistoryEntry>>(res, { url: path });
 }
 
+/** A /view response is saved and may later be previewed, so bound the first read too. */
+export const MAX_VIEW_RESPONSE_BYTES = 32 * 1024 * 1024;
+
+function validateViewResponseOrigin(res: Response, expectedOrigin: string, label: string): void {
+  if (res.url) {
+    const actualOrigin = httpOriginOf(res.url);
+    if (actualOrigin !== expectedOrigin) {
+      throw new ComfyUIError(
+        `ComfyUI /view response from ${label} changed origin unexpectedly; the response was refused.`,
+        "VIEW_RESPONSE_ORIGIN",
+        { expectedOrigin, actualOrigin: actualOrigin ?? "invalid" },
+      );
+    }
+  }
+  if (res.status >= 300 && res.status < 400) {
+    // The caller must not follow a redirect from a panel-origin fallback. A
+    // same-origin redirect is refused too: without a validated final URL it
+    // would be easy to reintroduce cross-origin leakage in a later edit.
+    throw new ComfyUIError(
+      `ComfyUI /view returned an unsafe redirect from ${label}; the response was refused.`,
+      "VIEW_REDIRECT_UNSAFE",
+      { status: res.status },
+    );
+  }
+}
+
+function viewTooLarge(filename: string): ComfyUIError {
+  return new ComfyUIError(
+    `ComfyUI /view response for "${filename}" exceeds the ${MAX_VIEW_RESPONSE_BYTES / 1024 ** 2} MB safety limit.`,
+    "VIEW_TOO_LARGE",
+    { filename, maxBytes: MAX_VIEW_RESPONSE_BYTES },
+  );
+}
+
+function readChunkWithAbort(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  signal: AbortSignal,
+): Promise<Awaited<ReturnType<ReadableStreamDefaultReader<Uint8Array>["read"]>>> {
+  if (signal.aborted) {
+    return Promise.reject(signal.reason ?? new Error("The response read timed out"));
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => signal.removeEventListener("abort", onAbort);
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      void reader.cancel(signal.reason).catch(() => undefined);
+      reject(signal.reason ?? new Error("The response read timed out"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    reader.read().then(
+      (result) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(result);
+      },
+      (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      },
+    );
+  });
+}
+
+async function readViewResponseBounded(
+  res: Response,
+  filename: string,
+  timeoutMs: number,
+): Promise<Buffer> {
+  const declared = Number(res.headers.get("content-length") ?? "");
+  if (Number.isFinite(declared) && declared > MAX_VIEW_RESPONSE_BYTES) {
+    throw viewTooLarge(filename);
+  }
+  if (!res.body) return Buffer.alloc(0);
+
+  const reader = res.body.getReader();
+  const signal = AbortSignal.timeout(timeoutMs);
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await readChunkWithAbort(reader, signal);
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > MAX_VIEW_RESPONSE_BYTES) {
+        try {
+          await reader.cancel("ComfyUI /view response exceeded the safety limit");
+        } catch {
+          // The size refusal is the useful error even if the producer is already gone.
+        }
+        throw viewTooLarge(filename);
+      }
+      chunks.push(value);
+    }
+  } catch (error) {
+    if (signal.aborted) {
+      throw new ComfyUIError(
+        `ComfyUI /view did not finish sending "${filename}" within ${timeoutMs / 1000}s; the response was aborted.`,
+        "VIEW_READ_TIMEOUT",
+        { filename, timeout_ms: timeoutMs },
+      );
+    }
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks, total);
+}
+
 /**
  * Fetch an image from ComfyUI's /view endpoint as a base64 string.
  * Works over HTTP — no local filesystem access needed.
@@ -1178,11 +1306,64 @@ export async function fetchImage(
   if (isCloudMode()) return cloudClient.fetchImage(filename, type, subfolder);
   const client = getClient();
   const params = new URLSearchParams({ filename, type, subfolder });
-  const res = await comfyApiFetch(`/view?${params.toString()}`);
+  const viewRoute = `/view?${params.toString()}`;
+  const configuredTarget = `${getComfyUIBaseUrl().replace(/\/+$/, "")}${viewRoute}`;
+  const configuredOrigin = httpOriginOf(configuredTarget);
+  const fallbackPath = `${getComfyUIBasePath().replace(/\/+$/, "")}${viewRoute}`;
+  let res: Response;
+  let answeredByPanelOrigin: string | undefined;
+  let responseReadTimeoutMs = Math.round(comfyHttpTimeoutSeconds() * 1000);
+  try {
+    res = await comfyApiFetch(viewRoute, { redirect: "manual" });
+    if (configuredOrigin === undefined) {
+      throw new ComfyUIError("The configured ComfyUI target is not a valid HTTP(S) origin.", "VIEW_ERROR");
+    }
+    validateViewResponseOrigin(res, configuredOrigin, "the configured ComfyUI target");
+  } catch (primaryError) {
+    if (!isComfyTransportFailure(primaryError)) throw primaryError;
+
+    const choice = choosePanelFallbackOrigin(configuredTarget, connectedPanelOriginsNow());
+    const declined = describeDeclinedPanelFallback(choice);
+    if (choice.kind !== "use") {
+      if (declined) {
+        const primary = primaryError instanceof Error ? primaryError.message : String(primaryError);
+        throw new Error(`${primary}${declined}`, { cause: primaryError });
+      }
+      throw primaryError;
+    }
+
+    const fallbackUrl = `${choice.origin}${fallbackPath}`;
+    try {
+      // The configured auth headers are for the headless target, not an origin
+      // selected from a browser handshake. Never send them to the fallback.
+      // A browser-only/tunnel origin can be unreachable from this process; do
+      // not add the full headless timeout on top of the failed primary request.
+      res = await fetch(fallbackUrl, {
+        redirect: "manual",
+        signal: AbortSignal.timeout(8_000),
+      });
+      responseReadTimeoutMs = 8_000;
+    } catch (fallbackError) {
+      const primary = primaryError instanceof Error ? primaryError.message : String(primaryError);
+      const secondary = describeFetchFailure(fallbackError).message;
+      throw new Error(
+        `${primary} I then tried the ComfyUI a connected sidebar panel is on ` +
+          `(${fallbackUrl}), and that failed too: ${secondary}. The browser can reach ` +
+          `that origin — this process cannot — so something between them (a tunnel, a ` +
+          `container boundary, or a server bound to one interface) is in the way.`,
+        { cause: fallbackError },
+      );
+    }
+    validateViewResponseOrigin(res, choice.origin, "the connected panel's ComfyUI");
+    answeredByPanelOrigin = choice.origin;
+  }
   if (!res.ok) {
     const where = subfolder ? `${type}/${subfolder}` : type;
+    const responder = answeredByPanelOrigin
+      ? `The connected panel's ComfyUI at ${answeredByPanelOrigin}`
+      : "ComfyUI";
     throw new ComfyUIError(
-      `ComfyUI /view returned ${res.status} for "${filename}" (${where}). ` +
+      `${responder} /view returned ${res.status} for "${filename}" (${where}). ` +
         (res.status === 404
           ? `No such file in the ComfyUI ${type} directory` +
             (subfolder ? ` under subfolder "${subfolder}"` : "") +
@@ -1194,8 +1375,8 @@ export async function fetchImage(
   }
   const contentType = res.headers.get("content-type") ?? "image/png";
   const mimeType = contentType.split(";")[0].trim();
-  const arrayBuffer = await res.arrayBuffer();
-  const base64 = Buffer.from(arrayBuffer).toString("base64");
+  const bytes = await readViewResponseBounded(res, filename, responseReadTimeoutMs);
+  const base64 = bytes.toString("base64");
   return { base64, mimeType };
 }
 

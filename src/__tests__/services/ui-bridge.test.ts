@@ -5425,11 +5425,22 @@ describe("UiBridge (late MUTATION outcome — #694)", () => {
 // callback the orchestrator installs, and this is what it asks for.
 describe("UiBridge.connectedServerOrigins (#952)", () => {
   /** A panel socket carrying a SERVER-OBSERVED handshake Origin, like a browser. */
-  function connectWithOrigin(tabId: string, origin?: string): Promise<WebSocket> {
+  function connectWithOrigin(
+    tabId: string,
+    origin?: string,
+    claimedOrigin: string | undefined = origin,
+  ): Promise<WebSocket> {
     return new Promise((resolve, reject) => {
       const sock = new WebSocket(`ws://127.0.0.1:${port}`, origin ? { origin } : {});
       sock.on("open", () => {
-        sock.send(JSON.stringify({ type: "hello", tab_id: tabId, title: tabId }));
+        sock.send(
+          JSON.stringify({
+            type: "hello",
+            tab_id: tabId,
+            title: tabId,
+            ...(claimedOrigin ? { comfyui_url: claimedOrigin } : {}),
+          }),
+        );
         resolve(sock);
       });
       sock.on("error", reject);
@@ -5475,6 +5486,22 @@ describe("UiBridge.connectedServerOrigins (#952)", () => {
 
   it("is empty with nothing connected, and never throws", () => {
     expect(bridge.connectedServerOrigins()).toEqual([]);
+  });
+
+  it("only exposes a corroborated local loopback panel to direct MCP fallback", async () => {
+    const local = await connectWithOrigin("safe-local", "http://127.0.0.1:8188");
+    const remote = await connectWithOrigin("unsafe-remote", "http://192.168.1.50:8188");
+    const mismatch = await connectWithOrigin(
+      "unsafe-claim",
+      "http://127.0.0.1:8189",
+      "http://127.0.0.1:8188",
+    );
+    await waitFor(() => expect(bridge.tabs()).toHaveLength(3));
+
+    expect(bridge.connectedSafePanelOrigins()).toEqual(["http://127.0.0.1:8188"]);
+    local.close();
+    remote.close();
+    mismatch.close();
   });
 });
 

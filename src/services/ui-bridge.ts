@@ -34,6 +34,12 @@ import {
   QUEUE_BUSY_READ_TOOLS,
   panelToolForGraphCmd,
 } from "./panel-graph-cmd-tools.js";
+import {
+  httpOriginOf,
+  isLoopbackPanelOrigin,
+  normalizePanelOrigin,
+} from "./panel-fallback-target.js";
+import { canonicalOrigin } from "../utils/origin.js";
 
 export const DEFAULT_BRIDGE_PORT = 9101;
 
@@ -3969,6 +3975,34 @@ export class UiBridge {
     for (const conn of this.conns.values()) {
       const origin = conn.serverOrigin;
       if (typeof origin === "string" && origin !== "" && !out.includes(origin)) out.push(origin);
+    }
+    return out;
+  }
+
+  /**
+   * Origins eligible for a direct MCP fallback request (#2149).
+   *
+   * `connectedServerOrigins()` is intentionally broader because it powers
+   * diagnostics. Direct contact needs a stronger boundary: the socket must be
+   * server-proven local, the panel's claimed URL must corroborate the observed
+   * handshake origin, and the resulting origin must be a loopback HTTP(S)
+   * origin. Relay/tunnel/LAN/remote origins are never exported here.
+   */
+  connectedSafePanelOrigins(): string[] {
+    const out: string[] = [];
+    for (const conn of this.conns.values()) {
+      if (conn.local !== true) continue;
+      const observed = normalizePanelOrigin(conn.serverOrigin);
+      const claimed = httpOriginOf(conn.originUrl, true, false);
+      if (
+        observed === undefined ||
+        claimed === undefined ||
+        canonicalOrigin(observed) !== canonicalOrigin(claimed) ||
+        !isLoopbackPanelOrigin(observed)
+      ) {
+        continue;
+      }
+      if (!out.includes(observed)) out.push(observed);
     }
     return out;
   }

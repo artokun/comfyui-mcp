@@ -321,6 +321,9 @@ export function publishConnectedPanelOrigins(
     origins: published,
     updated: now,
     pid: process.pid,
+    // The child may use this channel for direct HTTP contact, so an old or
+    // hand-written broad diagnostic record must never become a trust source.
+    trustedLocalPanelOrigins: true,
   });
   // The atomic write lives in writeChannelPayload (shared with the sibling
   // frontend-virtual-types channel, #1400); a false return means the PRIOR
@@ -359,8 +362,12 @@ export function readPublishedPanelOrigins(now: number = Date.now()): string[] {
       origins?: unknown;
       updated?: unknown;
       pid?: unknown;
+      trustedLocalPanelOrigins?: unknown;
     };
     if (!Array.isArray(raw?.origins)) return [];
+    // Old records carried every server-observed origin, including relay/tunnel
+    // targets. They are diagnostic data, not permission to make a new request.
+    if (raw.trustedLocalPanelOrigins !== true) return [];
     // A record whose publisher is gone describes panels that are gone with it.
     // Both checks, for the reasons in the header: liveness catches the death,
     // freshness catches a reused pid.
@@ -375,7 +382,12 @@ export function readPublishedPanelOrigins(now: number = Date.now()): string[] {
     // `updated > now` (a clock step, or a future-dated write) is NOT freshness
     // evidence — without this it would read as maximally fresh, forever.
     if (updated > now || now - updated > PANEL_ORIGINS_MAX_AGE_MS) return [];
-    return raw.origins.filter((o): o is string => typeof o === "string" && o !== "");
+    // Preserve malformed strings for panel-fallback-target.ts to reject as a
+    // mixed set. Filtering one invalid entry here would silently select the
+    // remaining valid origin, which is exactly the fail-open bug this channel
+    // boundary is meant to prevent.
+    if (!raw.origins.every((o): o is string => typeof o === "string" && o !== "")) return [];
+    return raw.origins;
   } catch {
     return [];
   }
