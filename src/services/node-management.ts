@@ -2116,7 +2116,12 @@ function gitCheckoutDir(baseUrl: string): string {
   return basename(clean).replace(/\.git$/i, "");
 }
 
-function runGitCheckout(baseUrl: string, ref: string, basePath?: string): void {
+function runGitCheckout(
+  baseUrl: string,
+  ref: string,
+  basePath?: string,
+  opts: { refFromVersion?: boolean } = {},
+): string | undefined {
   // basePath is the CALL-SCOPED local ComfyUI root (apply_manifest threads an
   // adopted saved-default/live root WITHOUT mutating global config); fall back to
   // the shared data/base resolver. Either may be unset in remote mode → clear error.
@@ -2143,6 +2148,27 @@ function runGitCheckout(baseUrl: string, ref: string, basePath?: string): void {
       `Refusing to check out: resolved path "${nodeDir}" escapes ${customNodesRoot}.`,
     );
   }
+
+  // #1470 — `nightly` is overloaded: a version-derived value can mean the
+  // repository's default HEAD, while an explicit ref must remain literal. The
+  // direct-clone fallback already used this probe; keep comfy-cli on the same
+  // provenance-aware path so it does not unconditionally checkout a missing
+  // channel word after `comfy node install`.
+  if (opts.refFromVersion === true) {
+    gitFetchAllTags(nodeDir, comfyuiBase);
+    if (
+      !gitRefExists(nodeDir, ref, comfyuiBase) &&
+      checkoutPlanForMissingRef({ ref, fromVersion: true }) === "skip-at-head"
+    ) {
+      return (
+        `"${ref}" is not a branch or tag in ${baseUrl}, so the clone was left at the ` +
+        `repository's default HEAD — which is what "nightly" means as a channel here. ` +
+        `If you meant a ref by that name, this repository does not have one; pass ` +
+        `ref:<branch-or-tag> for an exact checkout.`
+      );
+    }
+  }
+
   logger.info("Checking out custom-node git ref", {
     repository: baseUrl,
     ref,
@@ -2172,6 +2198,7 @@ function runGitCheckout(baseUrl: string, ref: string, basePath?: string): void {
       },
     );
   }
+  return undefined;
 }
 
 /**
@@ -3328,12 +3355,13 @@ async function installCustomNodeImpl(
       // cm-cli install accepts registry ids and git urls alike.
       const installId = source === "git" ? gitId : id;
       const out = runCmCli(["install", installId, "--mode", mode, "--channel", channel], cliWorkspace);
+      let checkoutWarning: string | undefined;
       if (source === "git" && gitRef) {
-        runGitCheckout(gitId, gitRef, cliWorkspace);
+        checkoutWarning = runGitCheckout(gitId, gitRef, cliWorkspace, { refFromVersion });
       }
       return {
         mechanism: "comfy-cli",
-        message: `Installed "${id}" via official comfy-cli.`,
+        message: `Installed "${id}" via official comfy-cli.${checkoutWarning ? ` ${checkoutWarning}` : ""}`,
         details: out.trim(),
       };
     }

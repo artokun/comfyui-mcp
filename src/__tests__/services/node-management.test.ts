@@ -2050,6 +2050,29 @@ describe("node-management service", () => {
       expect(res.mechanism).toBe("comfy-cli");
       expect(res.message).not.toMatch(/falling back|requested \(useCmCli\)/);
     });
+
+    it("#1470 leaves comfy-cli's clone at HEAD when version-derived nightly is absent", async () => {
+      const gitCalls: string[][] = [];
+      mockedExec.mockImplementation(((bin: string, args: string[]) => {
+        if (bin === "git") {
+          gitCalls.push(args);
+          if (args[2] === "rev-parse") throw new Error("fatal: ambiguous argument 'nightly'");
+        }
+        return cliEnvelope({ message: "ok" });
+      }) as never);
+
+      const res = await installCustomNode({
+        id: "https://github.com/foo/bar",
+        version: "nightly",
+        useCmCli: true,
+      });
+
+      expect(res.mechanism).toBe("comfy-cli");
+      expect(res.message).toMatch(/left at the repository's default HEAD/);
+      expect(gitCalls.some((args) => args[2] === "rev-parse")).toBe(true);
+      expect(gitCalls.some((args) => args[2] === "checkout")).toBe(false);
+    });
+
   });
 
   // ---- disable / enable / uninstall (#775) ----------------------------------
