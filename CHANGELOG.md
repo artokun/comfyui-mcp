@@ -6,6 +6,14 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.94] - 2026-08-24
+
+### MCP
+
+#### Fixed
+- Classify queue status as read-only (#2181)
+
+
 ## [0.52.93] - 2026-08-24
 
 ### MCP
