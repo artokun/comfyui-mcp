@@ -7820,9 +7820,17 @@ async function clearFenceOnIdentityProvenOpen(
   let repaired = false;
   try {
     const rebind = await rebindWorkflowFence(ctx);
-    repaired = rebind.status === "refreshed" || rebind.status === "already_current";
+    // #2209 — `reconciled` belongs with these: the fence names the live canvas AND the
+    // routed tab's advertisement now agrees with it, so graph commands dispatch. Leaving
+    // it out would report a CLEARED fence as "not cleared (reconciled)".
+    repaired =
+      rebind.status === "refreshed" ||
+      rebind.status === "already_current" ||
+      rebind.status === "reconciled";
     note =
-      rebind.status === "refreshed" || rebind.status === "already_current"
+      rebind.status === "refreshed" ||
+      rebind.status === "already_current" ||
+      rebind.status === "reconciled"
         ? `\n\nFENCE: CLEARED. This reply published no workflow_uuid, so the fence was re-derived ` +
           `from the panel's own fence-EXEMPT workflow_list read instead — the active identity is ` +
           `${rebind.uuid}, and graph commands from this session are stamped with it again. You do ` +
@@ -8063,6 +8071,33 @@ function corroborateTabStamp(ctx: PanelToolCtx, workflowUuid: string): boolean {
   }
 }
 
+/** #2209 — reconcile the ROUTED TAB's stale advertisement onto an identity the panel
+ *  just reported for it, so the recovery the agreement gate's own refusal prescribes can
+ *  clear it. The bridge owns every gate (see `reconcileStampTarget`); this is only the
+ *  accessor, and it never throws — a repair that cannot be attempted must leave the
+ *  outcome it was trying to improve exactly as it was. */
+function reconcileStampTarget(
+  ctx: PanelToolCtx,
+  workflowUuid: string,
+):
+  | { ok: true; routedTabId: string; replaced: string }
+  | { ok: false; why: string; landedOn?: string; reason?: string } {
+  const fn = (ctx.bridge as unknown as { reconcileStampTarget?: unknown }).reconcileStampTarget;
+  if (typeof fn !== "function") return { ok: false, why: "unavailable" };
+  try {
+    return (
+      fn as (
+        t: string,
+        u: string,
+      ) =>
+        | { ok: true; routedTabId: string; replaced: string }
+        | { ok: false; why: string; landedOn?: string; reason?: string }
+    ).call(ctx.bridge, ctx.tabId, workflowUuid);
+  } catch (err) {
+    return { ok: false, why: "threw", reason: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 function refreshWorkflowUuid(ctx: PanelToolCtx, value: unknown): boolean {
   const uuid = responseWorkflowUuid(value);
   const refresh = (ctx.bridge as unknown as { refreshWorkflowUuid?: unknown }).refreshWorkflowUuid;
@@ -8196,8 +8231,37 @@ export type WorkflowFenceRebind =
    *  from the fence and deliberately did NOT adopt it: a mismatch diagnosis
    *  must never re-point mutation routing on its own authority. */
   | { status: "diverged"; uuid: string; before: FenceRead; active?: Record<string, unknown> }
-  /** Read the live identity; the stamp already named it. Nothing to repair. */
-  | { status: "already_current"; uuid: string; before: FenceRead; active?: Record<string, unknown> }
+  /** Read the live identity; the stamp already named it. Nothing to repair.
+   *
+   *  #2209 — `targetDisagreement` is set when there WAS something to repair on the
+   *  other axis and the repair did not happen: the routed tab was still advertising a
+   *  different identity (the comparison the dispatch-time gate refuses on), and
+   *  reconciling that advertisement was attempted and did not go through. Kept on THIS
+   *  status rather than given its own, because the fence outcome it names is unchanged —
+   *  the session's stamp already matched the live canvas — and a caller must not read a
+   *  failed second repair as a failed first one. */
+  | {
+      status: "already_current";
+      uuid: string;
+      before: FenceRead;
+      active?: Record<string, unknown>;
+      targetDisagreement?: { landedOn?: string; why: string; reason?: string };
+    }
+  /** #2209 — the stamp already named the live canvas AND the routed tab's stale
+   *  advertisement, the value the dispatch-time agreement gate was refusing on, has been
+   *  reconciled onto that same identity. Its own status because something WAS written and
+   *  a refusal WAS cleared: `already_current` means "nothing needed doing", which is the
+   *  claim #1494 exists to stop this path making while graph commands were refused. */
+  | {
+      status: "reconciled";
+      uuid: string;
+      before: FenceRead;
+      active?: Record<string, unknown>;
+      /** The stale identity the routed tab had been advertising until this call. */
+      replaced: string;
+      /** The canonical id of the tab whose advertisement was reconciled. */
+      routedTabId: string;
+    }
   /** The panel did not answer, or its reply was not readable. Unknown, not "fine". */
   | { status: "unreadable"; before: FenceRead; detail: string }
   /** The panel answered, but no usable identity could be adopted from it. TWO
@@ -8919,6 +8983,55 @@ async function rebindWorkflowFence(
     // off parsed prose, and the result is ignored: this is corroboration, and a diagnostic
     // must never replace the outcome it is describing.
     corroborateTabStamp(ctx, uuid);
+    // #2209 — AND THE OTHER AXIS, which #1494 could only report.
+    //
+    // Reaching here with the agreement gate still refusing means the ROUTED TAB is
+    // advertising a different identity than the one the panel just told us is live on it.
+    // That advertisement is the value the gate compares against, so every graph command —
+    // reads included — is refused before dispatch, and this call, the recovery the
+    // refusal itself prescribes, had nothing to offer: the fence it CAN move already
+    // named the right canvas. Only the panel's own drift re-hello ever cleared it, and
+    // that repair is capped at three attempts per identity, after which the session is
+    // wedged.
+    //
+    // So reconcile the stale advertisement onto the identity the panel reported a moment
+    // ago — the same write its drift re-hello performs, from an observation already in
+    // hand. The bridge holds every gate: only a genuine `disagrees`, only when the
+    // observation still EQUALS this session's own stamp (so no session can be re-pointed
+    // by it), and only through the orchestrator's validator addressed to the routed tab.
+    //
+    // A READ-ONLY probe never comes here (`adopt:false` is the mismatch diagnosis, and a
+    // diagnosis that repairs its own subject is the #1646 corruption in a friendlier
+    // costume) — reconciling is a deliberate rebind's business.
+    if (opts?.adopt !== false) {
+      const rec = reconcileStampTarget(ctx, uuid);
+      if (rec.ok) {
+        return {
+          status: "reconciled",
+          uuid,
+          before,
+          active,
+          replaced: rec.replaced,
+          routedTabId: rec.routedTabId,
+        };
+      }
+      // `no_disagreement` is the healthy case and says nothing worth reporting. Anything
+      // else is an attempted repair that did not happen, and the reply must not go on
+      // implying the comparison was never made.
+      if (rec.why !== "no_disagreement") {
+        return {
+          status: "already_current",
+          uuid,
+          before,
+          active,
+          targetDisagreement: {
+            why: rec.why,
+            ...(rec.landedOn ? { landedOn: rec.landedOn } : {}),
+            ...(rec.reason ? { reason: rec.reason } : {}),
+          },
+        };
+      }
+    }
     return { status: "already_current", uuid, before, active };
   }
   // #1646 — a READ-ONLY probe never moves the fence: the live canvas naming a
@@ -8972,6 +9085,7 @@ function liveActiveFromProbe(probe: WorkflowFenceRebind): Record<string, unknown
   if (
     probe.status === "diverged" ||
     probe.status === "already_current" ||
+    probe.status === "reconciled" ||
     probe.status === "refreshed"
   ) {
     return probe.active;
@@ -9106,11 +9220,13 @@ function describeFenceRebind(
     : mutationsRefused && refusalCause === "target_disagreement"
     ? `\n\nBUT THIS DID NOT CLEAR THE REFUSAL, and saying otherwise is the bug this ` +
       `wording exists to stop (#1494). Graph commands are refused BEFORE they are ` +
-      `dispatched, by a comparison this call does not perform: the session's stamp against ` +
-      `the identity the ROUTED TAB last advertised in its handshake. This call compared the ` +
-      `stamp against the LIVE canvas instead, and those are different facts — the live ` +
-      `canvas agreeing is exactly why nothing above says "rebound". Graph READS are refused ` +
-      `by the same gate, so this is not a reads-only session.` +
+      `dispatched, by a comparison that is NOT the one this call's rebind reports on: the ` +
+      `session's stamp against the identity the ROUTED TAB last advertised in its ` +
+      `handshake, rather than against the LIVE canvas. Those are different facts, and the ` +
+      `live canvas agreeing is why nothing above says "rebound". Reconciling that stale ` +
+      `advertisement IS attempted here (#2209) and it did not go through on this call — ` +
+      `the line above says what was found. Graph READS are refused by the same gate, so ` +
+      `this is not a reads-only session.` +
       `\n\nWHAT TO DO: re-open the workflow you mean with panel_open_workflow(<path>) — an ` +
       `open proves an identity for the tab under its current id, which is what the gate is ` +
       `missing; for a never-saved canvas use its routing_key from panel_list_workflows. The ` +
@@ -9162,12 +9278,45 @@ function describeFenceRebind(
           `next graph command fails closed with a fresh instance mismatch — safe, and cleared by ` +
           `calling this again.)${mutationCaveat}${unknownCaveat}`,
       };
+    case "reconciled":
+      // #2209 — BOTH halves of what happened, and neither one overstated. The fence did
+      // not move (it already named the live canvas), and the routed tab's stale
+      // advertisement — the value the dispatch-time gate was refusing every graph command
+      // against, reads included — did. Reported through `okBinding` like the others: the
+      // capability probe is re-read after this rebind, so if anything ELSE still refuses
+      // writes on this tab the caveat below states it instead.
+      return {
+        binding: okBinding,
+        note:
+          ` The graph command fence already named the canvas the panel reported as active a ` +
+          `moment ago (workflow instance ${r.uuid}) — but the ROUTED TAB was still ` +
+          `advertising ${r.replaced}, and THAT is the comparison the pre-dispatch agreement ` +
+          `gate refuses on, so graph commands were being rejected before they were sent. ` +
+          `That advertisement has been RECONCILED onto the identity the panel just reported ` +
+          `for this tab, which is the same write the panel's own drift re-hello performs. ` +
+          `Nothing was re-targeted: this session stays fenced to the instance it already ` +
+          `held, and the only value that changed is the stale advertisement.` +
+          ` (If the user switched tabs again in that instant, the next graph command fails ` +
+          `closed with a fresh instance mismatch — safe, and cleared by calling this ` +
+          `again.)${mutationCaveat}${unknownCaveat}`,
+      };
     case "already_current":
       return {
         binding: okBinding,
         note:
           ` The graph command fence already named the canvas the panel reported as active a ` +
           `moment ago (workflow instance ${r.uuid}), so nothing needed rebinding.` +
+          // #2209 — an attempted repair that did not happen is REPORTED. Without this the
+          // reply reads as a settled session while the agreement gate goes on refusing
+          // every graph command, which is the #1494 false-negative in a new place.
+          (r.targetDisagreement
+            ? ` The ROUTED TAB is nevertheless still advertising ` +
+              `${r.targetDisagreement.landedOn ?? "a different identity"}, which is what the ` +
+              `pre-dispatch agreement gate compares against — reconciling it onto the live ` +
+              `identity was ATTEMPTED and did not go through (${r.targetDisagreement.why}` +
+              `${r.targetDisagreement.reason ? `: ${r.targetDisagreement.reason}` : ""}), so ` +
+              `graph commands stay refused and this call did not fix that.`
+            : "") +
           // The SAME post-probe window as `refreshed` (codex gate). This branch used
           // to jump straight to "the mismatch is coming from the panel" and send the
           // caller to a browser reload — but a switch after workflow_list replied
@@ -12269,12 +12418,14 @@ export function makePanelToolCtx(
                   `(${stamped}), and the refusal above is not about the live canvas — it is ` +
                   `the pre-dispatch check on the identity the ROUTED TAB last advertised, ` +
                   `which is the stale side here. So a bare retry is compared against that ` +
-                  `same unchanged value and is refused the same way; ` +
-                  `panel_set_workflow_target({mode:"current"}) reports "already current" for ` +
-                  `the same reason and does not clear it either. Nothing was applied. WHAT TO ` +
-                  `DO: re-open the workflow you mean with panel_open_workflow(<path>) — that ` +
-                  `proves an identity for the tab under its CURRENT id, which is what is ` +
-                  `missing; for a never-saved canvas use its routing_key from ` +
+                  `same unchanged value and is refused the same way. Nothing was applied. ` +
+                  `WHAT TO DO: call panel_set_workflow_target({mode:"current"}) — it ` +
+                  `RECONCILES that stale advertisement onto the identity the panel reports ` +
+                  `as live (#2209), which is exactly this state, and its reply says whether ` +
+                  `it went through; then re-issue this call. If it reports that the ` +
+                  `reconciliation did NOT go through, re-open the workflow you mean with ` +
+                  `panel_open_workflow(<path>) instead — that proves an identity for the tab ` +
+                  `under its CURRENT id; for a never-saved canvas use its routing_key from ` +
                   `panel_list_workflows. The panel also re-advertises on its own once it ` +
                   `notices the drift, so a retry may start working shortly — that is the ` +
                   `panel repairing it, not this call.`
@@ -18077,7 +18228,12 @@ export function buildPanelToolDefs(): PanelToolDef[] {
                   ? `The graph command fence WAS refreshed onto this tab's live canvas (workflow instance ${fenceRebind.uuid}), which is correct for it either way.`
                   : fenceRebind.status === "already_current"
                     ? `The graph command fence already named this tab's live canvas, so it needed no change.`
-                    : `The graph command fence was NOT established on this tab (${fenceRebind.status}) — so graph tools may also fail here with a workflow-instance mismatch, independently of the pin below.`;
+                    : // #2209 — a RECONCILED target is an established fence, not a missing one.
+                      // Falling through to the "NOT established" arm would report the repair as
+                      // the failure it just cleared.
+                      fenceRebind.status === "reconciled"
+                      ? `The graph command fence already named this tab's live canvas, and the routed tab's stale advertisement (${fenceRebind.replaced}) was reconciled onto it, so graph commands are no longer refused before dispatch.`
+                      : `The graph command fence was NOT established on this tab (${fenceRebind.status}) — so graph tools may also fail here with a workflow-instance mismatch, independently of the pin below.`;
               return fail(
                 `panel_set_workflow_target({mode:"current"}) did NOT take effect on the tab this ` +
                   `session is now bound to.\n\nWHAT HAPPENED: the panel dropped mid-call, so this ` +

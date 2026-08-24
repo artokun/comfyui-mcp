@@ -5782,6 +5782,82 @@ export class UiBridge {
   }
 
   /**
+   * #2209 — RECONCILE the routed tab's stale advertisement with an identity the panel
+   * has just reported for that same tab, so the recovery the gate's own refusal
+   * prescribes can actually clear it.
+   *
+   * #1494 made the disagreement VISIBLE: `panel_set_workflow_target({mode:"current"})`
+   * stopped claiming `bound` while the gate refused, because the two sides compare
+   * different facts — the gate compares the session's stamp against the identity the
+   * ROUTED TAB last advertised, the rebind compares it against the LIVE canvas. When the
+   * advertisement is the stale side the rebind short-circuits (`already_current`) and
+   * repairs nothing, so the only thing that ever cleared it was the panel noticing its
+   * own drift and re-advertising — capped at MISMATCH_REHELLO_MAX_PER_IDENTITY (3), after
+   * which the session is wedged for good. The reporter's workaround was to issue the
+   * identical read twice and let the race settle it.
+   *
+   * This writes the advertisement the panel's own drift re-hello would write, from an
+   * observation already in hand. THREE gates, and the middle one is the safety argument:
+   *
+   *  - only the `disagrees` arm. `carried` is an equal pair whose PROVENANCE is doubted,
+   *    and it has its own non-writing remedy ({@link corroborateTabStamp}); the
+   *    non-refusing kinds have nothing to reconcile.
+   *  - the observation must EQUAL what the session already holds. So this can never
+   *    re-point a session at another canvas: the value written is the one the session is
+   *    already fenced to, and the only thing that changes is the routed tab's stale
+   *    advertisement. Re-read HERE rather than trusted from the caller — the session's
+   *    stamp can move between the caller's read and this write, and a stamp that moved
+   *    makes the observation stale rather than reconcilable.
+   *  - the write goes through the orchestrator's validator ({@link refreshWorkflowUuid}),
+   *    addressed to the ROUTED tab's canonical id — the exact key the gate reads — so the
+   *    uuid is re-checked for shape and origin binding and is never adopted off parsed
+   *    prose, and a tab id that is not a scope address cannot touch any conversation's
+   *    issue-time stamp.
+   *
+   * Being wrong is bounded: the panel authorizes a fenced command IFF the stamp equals
+   * its LIVE active workflow, so a reconciliation the canvas has already moved past is
+   * refused by the panel itself — exactly as it is for any session whose stamp equals the
+   * last identity the panel reported. It cannot land a command on the wrong canvas.
+   */
+  reconcileStampTarget(
+    tabId: string,
+    observedWorkflowUuid: string,
+  ):
+    | { ok: true; routedTabId: string; replaced: string }
+    | {
+        ok: false;
+        why: "unroutable" | "no_disagreement" | "stamp_moved" | "refused";
+        /** The stale identity the routed tab is advertising — present only on the arms
+         *  that FOUND a disagreement and could not reconcile it. */
+        landedOn?: string;
+        reason?: string;
+      } {
+    let routedTabId: string;
+    try {
+      routedTabId = this.resolveTarget(tabId).tabId;
+    } catch {
+      return { ok: false, why: "unroutable" };
+    }
+    const verdict = this.stampTargetVerdict(tabId, routedTabId);
+    if (!verdict.refuses || verdict.kind !== "disagrees") {
+      return { ok: false, why: "no_disagreement" };
+    }
+    if (verdict.issuedFor !== observedWorkflowUuid) {
+      return {
+        ok: false,
+        why: "stamp_moved",
+        landedOn: verdict.landedOn,
+        reason: verdict.issuedFor,
+      };
+    }
+    if (!this.refreshWorkflowUuid(routedTabId, observedWorkflowUuid)) {
+      const reason = this.lastFenceRefusal(routedTabId);
+      return { ok: false, why: "refused", landedOn: verdict.landedOn, ...(reason ? { reason } : {}) };
+    }
+    return { ok: true, routedTabId, replaced: verdict.landedOn };
+  }
+
+  /**
    * #1077 — WHY the last adoption for this tab was refused, if it was.
    *
    * The validator has three independent gates (the tab is unreachable, it does
