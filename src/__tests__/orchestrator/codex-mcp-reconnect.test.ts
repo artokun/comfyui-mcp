@@ -33,12 +33,12 @@ afterAll(() => vi.unstubAllEnvs());
 /** Live `mcpServerStatus/list` tools field is a name→schema map, not an array. */
 const CACHED_PANEL_TOOLS = { panel_graph_outline: {}, panel_set_todo: {} };
 const PANEL_UP = [
-  { name: "comfyui", runtimeStatus: "connected", tools: { list_tools: {} } },
+  { name: "comfyui", runtimeStatus: "connected", tools: { list_tools: {}, call_tool: {} } },
   { name: "panel", runtimeStatus: "connected", tools: CACHED_PANEL_TOOLS },
 ];
 /** Dropped HTTP panel: runtimeStatus failed, tools inventory still cached. */
 const PANEL_GONE = [
-  { name: "comfyui", runtimeStatus: "connected", tools: { list_tools: {} } },
+  { name: "comfyui", runtimeStatus: "connected", tools: { list_tools: {}, call_tool: {} } },
   { name: "panel", runtimeStatus: "failed", tools: CACHED_PANEL_TOOLS },
 ];
 const MCP_SERVERS = {
@@ -81,6 +81,7 @@ interface Drive {
 function startDrive(opts: {
   listings: Listing[];
   reloadThrows?: boolean;
+  requiredMcpTools?: Readonly<Record<string, readonly string[]>>;
 }): Drive {
   const listings = [...opts.listings];
   const events: AgentEvent[] = [];
@@ -144,6 +145,7 @@ function startDrive(opts: {
   const backend: Backend = new CodexBackend({
     model: "gpt-5.6-sol",
     mcpServers: MCP_SERVERS,
+    requiredMcpTools: opts.requiredMcpTools,
   });
   Object.assign(backend, { client, liveCatalog: [{ id: "gpt-5.6-sol", supportsEffort: true }] });
 
@@ -222,7 +224,90 @@ describe("Codex mid-session MCP drop reconnects panel tools (#1524)", () => {
   });
 
   it("a healthy listing never reloads", async () => {
-    const drive = startDrive({ listings: [PANEL_UP] });
+    const drive = startDrive({ listings: [PANEL_UP], requiredMcpTools: { comfyui: ["call_tool"] } });
+    await drive.endTurn();
+    await drive.endTurn();
+    await drive.finish();
+    expect(drive.reloadCalls).toBe(0);
+    expect(noticesOf(drive.events)).toHaveLength(0);
+  });
+
+  it("reloads a connected server whose status inventory is a partial catalog", async () => {
+    const drive = startDrive({
+      listings: [
+        [
+          // Codex can keep the server runtime marked connected while its
+          // independently-built aggregate omits the stable facade wrapper.
+          { name: "comfyui", runtimeStatus: "connected", tools: { list_tools: {}, describe_tool: {} } },
+          { name: "panel", runtimeStatus: "connected", tools: CACHED_PANEL_TOOLS },
+        ],
+        PANEL_UP,
+      ],
+      requiredMcpTools: { comfyui: ["call_tool"] },
+    });
+    await drive.endTurn();
+    expect(drive.reloadCalls).toBe(1);
+    expect(noticesOf(drive.events)).toHaveLength(0);
+
+    await drive.endTurn();
+    await drive.finish();
+    expect(drive.reloadCalls).toBe(1);
+    expect(noticesOf(drive.events)).toHaveLength(1);
+    expect(noticesOf(drive.events)[0].message).toMatch(/reconnect brought it back/);
+  });
+
+  it("does not report partial-catalog recovery when reload omits the inventory", async () => {
+    const drive = startDrive({
+      listings: [
+        [
+          { name: "comfyui", runtimeStatus: "connected", tools: { list_tools: {}, describe_tool: {} } },
+          { name: "panel", runtimeStatus: "connected", tools: CACHED_PANEL_TOOLS },
+        ],
+        [
+          { name: "comfyui", runtimeStatus: "connected" },
+          { name: "panel", runtimeStatus: "connected", tools: CACHED_PANEL_TOOLS },
+        ],
+        [
+          { name: "comfyui", runtimeStatus: "connected", tools: {} },
+          { name: "panel", runtimeStatus: "connected", tools: CACHED_PANEL_TOOLS },
+        ],
+        PANEL_UP,
+      ],
+      requiredMcpTools: { comfyui: ["call_tool"] },
+    });
+    await drive.endTurn();
+    expect(drive.reloadCalls).toBe(1);
+    expect(noticesOf(drive.events)).toHaveLength(0);
+
+    await drive.endTurn();
+    expect(drive.reloadCalls).toBe(1);
+    expect(noticesOf(drive.events)).toHaveLength(0);
+
+    await drive.endTurn();
+    expect(drive.reloadCalls).toBe(1);
+    expect(noticesOf(drive.events)).toHaveLength(0);
+
+    await drive.endTurn();
+    await drive.finish();
+    expect(drive.reloadCalls).toBe(1);
+    expect(noticesOf(drive.events)).toHaveLength(1);
+    expect(noticesOf(drive.events)[0].message).toMatch(/reconnect brought it back/);
+  });
+
+  it("keeps connected absent or empty inventories from triggering a reload", async () => {
+    const drive = startDrive({
+      listings: [
+        [
+          { name: "comfyui", runtimeStatus: "connected" },
+          { name: "panel", runtimeStatus: "connected", tools: CACHED_PANEL_TOOLS },
+        ],
+        [
+          { name: "comfyui", runtimeStatus: "connected", tools: {} },
+          { name: "panel", runtimeStatus: "connected", tools: CACHED_PANEL_TOOLS },
+        ],
+      ],
+      requiredMcpTools: { comfyui: ["call_tool"] },
+    });
     await drive.endTurn();
     await drive.endTurn();
     await drive.finish();

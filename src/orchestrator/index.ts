@@ -2225,6 +2225,11 @@ export async function runPanelOrchestrator(): Promise<void> {
         systemAppend: sysAppend,
         comfyuiUrl,
         mcpServers: makeHttpBackendMcpServers(key),
+        // The headless MCP registration always layers the stable facade. If
+        // Codex publishes a partial aggregate during a ComfyUI reconnect,
+        // this exact invariant gives the bounded status watch something safe
+        // to repair without guessing about arbitrary MCP servers.
+        requiredMcpTools: { comfyui: ["call_tool"] },
       });
     }
     if (backend === "gemini") {

@@ -591,11 +591,94 @@ export interface CodexBackendDeps {
    */
   mcpServers?: Record<string, CodexMcpServerSpec>;
   /**
+   * Tool names that this orchestrator-owned MCP server must expose. This is
+   * deliberately supplied by the owner of the registration rather than
+   * inferred from a server name or from a cached catalog. It lets the bounded
+   * reconnect watch distinguish a connected-but-partial catalog from a healthy
+   * server without changing reload behavior for arbitrary MCP servers.
+   */
+  requiredMcpTools?: Readonly<Record<string, readonly string[]>>;
+  /**
    * Panel system prompt (persona). The app-server's thread/start has no
    * instructions field, so this is PREPENDED to the first turn's input as a
    * clearly-marked system/context preamble; later turns send plain text.
    */
   systemAppend?: string;
+}
+
+interface MissingMcpToolCatalog {
+  name: string;
+  missing: string[];
+}
+
+/**
+ * Read the current app-server status inventory without treating an absent
+ * inventory as evidence. The current protocol uses a name -> schema map; the
+ * array form is retained for older app-server test/runtime stubs.
+ */
+function mcpToolNames(tools: unknown): Set<string> | undefined {
+  if (Array.isArray(tools)) {
+    const names = new Set<string>();
+    for (const entry of tools) {
+      if (typeof entry === "string") {
+        names.add(entry);
+      } else if (entry && typeof entry === "object") {
+        const name = (entry as { name?: unknown }).name;
+        if (typeof name === "string") names.add(name);
+      }
+    }
+    return names;
+  }
+  if (tools && typeof tools === "object") return new Set(Object.keys(tools));
+  return undefined;
+}
+
+/**
+ * Find the one safe partial-catalog shape this backend knows how to repair:
+ * the app-server says the explicitly-owned server is connected, but its
+ * present, non-empty status inventory omits a tool the orchestrator explicitly
+ * guarantees. An absent or empty inventory is not enough to create this signal
+ * because the caller must provide the guarantee and the row must say
+ * `connected`.
+ */
+function missingRequiredMcpTools(
+  listed: readonly CodexMcpServerListing[],
+  required: Readonly<Record<string, readonly string[]>> | undefined,
+): MissingMcpToolCatalog[] {
+  if (!required) return [];
+  const gaps: MissingMcpToolCatalog[] = [];
+  for (const entry of listed) {
+    if (!entry || typeof entry.name !== "string" || !entry.name) continue;
+    const expected = Object.prototype.hasOwnProperty.call(required, entry.name) ? required[entry.name] : undefined;
+    if (!Array.isArray(expected) || expected.length === 0) continue;
+    const runtime = typeof entry.runtimeStatus === "string" ? entry.runtimeStatus.trim().toLowerCase() : "";
+    if (runtime !== "connected") continue;
+    const actual = mcpToolNames(entry.tools);
+    if (!actual || actual.size === 0) continue;
+    const missing = expected.filter((name) => typeof name === "string" && !actual.has(name));
+    if (missing.length) gaps.push({ name: entry.name, missing });
+  }
+  return gaps;
+}
+
+/** Return only servers whose present, non-empty connected inventory proves all
+ * explicitly-owned required wrappers are available. */
+function presentRequiredMcpTools(
+  listed: readonly CodexMcpServerListing[],
+  required: Readonly<Record<string, readonly string[]>> | undefined,
+): Set<string> {
+  const present = new Set<string>();
+  if (!required) return present;
+  for (const entry of listed) {
+    if (!entry || typeof entry.name !== "string" || !entry.name) continue;
+    const expected = Object.prototype.hasOwnProperty.call(required, entry.name) ? required[entry.name] : undefined;
+    if (!Array.isArray(expected) || expected.length === 0) continue;
+    const runtime = typeof entry.runtimeStatus === "string" ? entry.runtimeStatus.trim().toLowerCase() : "";
+    if (runtime !== "connected") continue;
+    const actual = mcpToolNames(entry.tools);
+    if (actual && actual.size > 0 && expected.every((name) => actual.has(name))) present.add(entry.name);
+  }
+  return present;
 }
 
 /**
@@ -875,10 +958,12 @@ export class CodexBackend implements AgentBackend {
    *  `mcpServerStatus/list` at each turn end and queue one
    *  `config/mcpServer/reload` per down-episode (#1524). */
   private mcpDown = new Map<string, boolean>();
-  /** Names whose `config/mcpServer/reload` was queued this episode and has
+  /** Names whose `config/mcpServer/reload` was queued this down/partial episode and has
    *  not been judged yet. The app-server applies the refresh on the NEXT
    *  turn, so the following poll is the verdict — not an immediate re-read. */
   private mcpReloadPending = new Set<string>();
+  /** Partial-catalog episodes cannot be closed by a connected row alone. */
+  private mcpCatalogRecovery = new Set<string>();
   /** The model requested for new turns (mutable for a future live setModel). */
   private model: string | undefined;
   /** The Codex reasoning effort for new turns, already mapped to a valid Codex
@@ -1146,6 +1231,7 @@ export class CodexBackend implements AgentBackend {
   async *run(opts: BackendStartOptions): AsyncGenerator<AgentEvent> {
     this.mcpDown.clear();
     this.mcpReloadPending.clear();
+    this.mcpCatalogRecovery.clear();
     await this.prepare();
     const client = this.client;
     if (!client) throw new Error("codex app-server not initialized");
@@ -1248,7 +1334,9 @@ export class CodexBackend implements AgentBackend {
    *
    * Detection is one `mcpServerStatus/list` poll per turn end (with this
    * thread's id, so `runtimeStatus` is filled) against the servers this
-   * session was given. Cached `tools` do not prove connected. Recovery is
+   * session was given. Cached `tools` do not prove connected; an explicitly
+   * configured required wrapper missing from a non-absent connected inventory
+   * is the only partial-catalog case this watch repairs. Recovery is
    * `config/mcpServer/reload`, which the app-server applies on the NEXT
    * turn — so this turn does not claim a verdict from an immediate re-read.
    * The next poll is the verdict.
@@ -1259,10 +1347,23 @@ export class CodexBackend implements AgentBackend {
   private async checkMcpServers(client: AppServerClient): Promise<AgentEvent[]> {
     const names = Object.keys(this.deps.mcpServers ?? {});
     if (names.length === 0) return [];
-    const reported = await this.pollMcpStatus(client);
-    if (!reported) return [];
+    const polled = await this.pollMcpStatus(client);
+    if (!polled) return [];
+    const { reported, listed } = polled;
     const events: AgentEvent[] = [];
-    const degraded = inspectMcpServers(names, reported).degraded;
+    const health = inspectMcpServers(names, reported);
+    const catalogGaps = missingRequiredMcpTools(listed, this.deps.requiredMcpTools);
+    const catalogRecovered = presentRequiredMcpTools(listed, this.deps.requiredMcpTools);
+    for (const gap of catalogGaps) this.mcpCatalogRecovery.add(gap.name);
+    // A server reported as failed already has the authoritative failure status;
+    // do not replace it with the partial-catalog diagnosis if both observations
+    // arrive in one poll.
+    const degradedByName = new Map(health.degraded.map((d) => [d.name, d]));
+    for (const gap of catalogGaps) {
+      if (!degradedByName.has(gap.name)) degradedByName.set(gap.name, { name: gap.name, status: "partial" });
+    }
+    const degraded: DegradedMcpServer[] = [...degradedByName.values()];
+    const catalogGapNames = new Set(catalogGaps.map((gap) => gap.name));
     const downNow = new Set(degraded.map((d) => d.name));
 
     // Verdict on a reload queued at the previous turn end. The refresh is
@@ -1274,8 +1375,10 @@ export class CodexBackend implements AgentBackend {
     const backOnItsOwn: string[] = [];
     for (const name of [...this.mcpDown.keys()]) {
       if (downNow.has(name)) continue;
+      if (this.mcpCatalogRecovery.has(name) && !catalogRecovered.has(name)) continue;
       const weTried = this.mcpDown.get(name) === true || pendingVerdict.includes(name);
       this.mcpDown.delete(name);
+      this.mcpCatalogRecovery.delete(name);
       (weTried ? backByUs : backOnItsOwn).push(name);
     }
     if (backByUs.length) {
@@ -1301,7 +1404,7 @@ export class CodexBackend implements AgentBackend {
       (d) =>
         !pendingVerdict.includes(d.name) &&
         this.mcpDown.get(d.name) !== true &&
-        reconnectableMcpStatus(d.status),
+        (reconnectableMcpStatus(d.status) || catalogGapNames.has(d.name)),
     );
     if (triable.length > 0) {
       for (const d of triable) this.mcpDown.set(d.name, true);
@@ -1355,7 +1458,8 @@ export class CodexBackend implements AgentBackend {
   }
 
   private async pollMcpStatus(client: AppServerClient): Promise<
-    Array<{ name: string; status: string }> | undefined
+    | { reported: Array<{ name: string; status: string }>; listed: CodexMcpServerListing[] }
+    | undefined
   > {
     try {
       const listed: CodexMcpServerListing[] = [];
@@ -1375,7 +1479,8 @@ export class CodexBackend implements AgentBackend {
         cursor = res.nextCursor ?? undefined;
         if (!cursor) break;
       }
-      return reportedFromCodexMcpListing(listed);
+      const reported = reportedFromCodexMcpListing(listed);
+      return reported ? { reported, listed } : undefined;
     } catch (err) {
       logger.debug(`[codex-backend] mcpServerStatus/list: ${msgOf(err)}`);
       return undefined;
