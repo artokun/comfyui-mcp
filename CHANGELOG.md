@@ -6,6 +6,14 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.92] - 2026-08-24
+
+### MCP
+
+#### Fixed
+- Resolve version-derived nightly refs during comfy-cli installs (#1470)
+
+
 ## [0.52.91] - 2026-08-24
 
 ### MCP
