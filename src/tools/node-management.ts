@@ -162,7 +162,8 @@ function preferLocalComfyCli(explicit: boolean | undefined): boolean {
  *
  * - install/update/reinstall/fix took `mode: "remote"|"local"|"cache"` — the
  *   ComfyUI-Manager DATA SOURCE.
- * - list took `mode: "default"|"imported"` — WHICH installed packs to report.
+ * - list took `mode: "default"|"imported"` — WHICH installed packs to report: the
+ *   live custom_nodes/ scan, or that same scan frozen at server startup.
  *
  * A flat schema has one `mode`, so the enum is the union and the handler
  * refuses a value the chosen action cannot honour, naming the ones it can. That
@@ -185,7 +186,7 @@ const modeSchema = z
   .enum([...MANAGER_MODES, ...LIST_MODES])
   .optional()
   .describe(
-    'Two distinct meanings, one per action group. For actions "install"/"update"/"reinstall"/"fix": the ComfyUI-Manager data source (default \'remote\'); \'remote\' fetches the live node list, \'local\'/\'cache\' use bundled/cached data. For action:"list": \'default\' lists all installed packs, \'imported\' lists only those successfully imported this session. Passing a value from the wrong group is refused, naming the ones the action accepts.',
+    'Two distinct meanings, one per action group. For actions "install"/"update"/"reinstall"/"fix": the ComfyUI-Manager data source (default \'remote\'); \'remote\' fetches the live node list, \'local\'/\'cache\' use bundled/cached data. For action:"list": \'default\' lists the installed packs as they are on disk NOW; \'imported\' returns that SAME custom_nodes/ scan frozen at ComfyUI startup, so the only difference is packs installed or removed since the server booted. \'imported\' is NOT an import-success filter: it includes DISABLED packs and cannot tell you whether the Python of a pack actually loaded — for that use node_pack action:"verify", which checks the node class_types of the pack against /object_info on the running server. Passing a value from the wrong group is refused, naming the ones the action accepts.',
   );
 
 const useCmCliSchema = z
@@ -199,6 +200,47 @@ const channelSchema = z
   .string()
   .optional()
   .describe("ComfyUI-Manager channel name (default 'default').");
+
+/**
+ * #2215: mode:"imported" reads as an import-success filter and is not one.
+ *
+ * ComfyUI-Manager (3.41, 4.2.x; both the `glob` and `legacy` server modules)
+ * answers /customnode/installed?mode=imported out of a module-scope binding:
+ *
+ *     # freeze imported version
+ *     startup_time_installed_node_packs = core.get_installed_node_packs()
+ *
+ * "imported" there means the MANAGER MODULE was imported — i.e. server startup.
+ * It is the identical get_installed_node_packs() filesystem scan of custom_nodes/
+ * that mode:"default" runs live, and that scan deliberately keeps disabled packs
+ * (`is_disabled = not y.endswith('.disabled')`, stored with enabled: False). So
+ * the ONLY difference between the two modes is staleness, and on a server nobody
+ * has installed into since boot the two lists are byte-identical — disabled
+ * entries and all.
+ *
+ * Reported as a broken filter because our own description promised one. The
+ * filter is not repairable here: an ENABLED pack that dies on a torch/CUDA
+ * mismatch is exactly the case the reporter cares about, and it sits in the scan
+ * either way, because the scan never opens the Python. Dropping the disabled
+ * entries would return a MORE plausible list that is just as unable to answer the
+ * question — so disclose instead, and name the tool that can.
+ */
+const IMPORTED_MODE_DISCLOSURE =
+  'NOTE — mode:"imported" is NOT an import-success list. ComfyUI-Manager answers it with ' +
+  'the same custom_nodes/ scan as mode:"default", frozen at server startup; disabled packs ' +
+  'are included, and nothing here reflects whether the Python of a pack imported cleanly. ' +
+  'The only difference from mode:"default" is packs installed or removed since the server ' +
+  'booted. To find out whether a pack actually loaded, use node_pack {action:"verify", ' +
+  'name:"<pack>", restart:false} — it checks the node class_types of that pack against ' +
+  '/object_info on the running server.';
+
+/** cm-cli `show installed` takes no mode parameter, so useCmCli drops `mode`
+ *  entirely rather than degrading it. Silently returning the live on-disk list
+ *  under a mode that was never sent is the same misreport in a second costume. */
+const CM_CLI_MODE_DROPPED =
+  'NOTE — `mode` was NOT applied: useCmCli:true reads `cm-cli show installed`, which has ' +
+  'no mode parameter, so this is the current on-disk pack list regardless of the mode ' +
+  'requested.';
 
 function formatInstalledNodes(nodes: InstalledNode[]): string {
   if (nodes.length === 0) return "No custom nodes installed.";
@@ -512,13 +554,20 @@ export function registerNodeManagementTools(server: McpServer): void {
             );
           }
           case "list": {
+            const mode = listMode();
             const nodes = await listInstalledNodes({
-              mode: listMode(),
+              mode,
               useCmCli: args.useCmCli,
             });
-            return {
-              content: [{ type: "text" as const, text: formatInstalledNodes(nodes) }],
-            };
+            // The disclosure rides on the RESULT, not only on the schema: the
+            // caller who has already been misled is the one reading this text.
+            // See IMPORTED_MODE_DISCLOSURE.
+            const notes = [
+              mode === "imported" ? IMPORTED_MODE_DISCLOSURE : undefined,
+              mode !== undefined && args.useCmCli ? CM_CLI_MODE_DROPPED : undefined,
+            ].filter((n): n is string => n !== undefined);
+            const text = [formatInstalledNodes(nodes), ...notes].join("\n\n");
+            return { content: [{ type: "text" as const, text }] };
           }
           case "sync_deps":
             return json(await syncNodeDependencies());

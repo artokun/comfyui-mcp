@@ -523,3 +523,104 @@ describe("the retired custom-node lifecycle names", () => {
     );
   });
 });
+
+/**
+ * #2215 — mode:"imported" is a STALENESS window, not an import-success filter.
+ *
+ * ComfyUI-Manager answers /customnode/installed?mode=imported from
+ * `startup_time_installed_node_packs`, a module-scope freeze of the very same
+ * `core.get_installed_node_packs()` filesystem scan mode:"default" runs live —
+ * disabled packs and all. Our schema said it "lists only those successfully
+ * imported this session", which no version of the Manager has ever done, so the
+ * reporter read an unfiltered 98-pack list as a confident yes.
+ *
+ * These pin the DISCLOSURE, not a filter. The distinction is the whole fix: an
+ * ENABLED pack that fails on a torch/CUDA mismatch is the case that matters and
+ * it survives any filter we could write here, because the scan never opens the
+ * Python. So the disabled-pack assertion below is deliberate — it exists to make
+ * a future 'helpful' filter argue with a test instead of shipping a prettier
+ * wrong answer.
+ */
+describe("install_custom_node action:\"list\" discloses what mode:\"imported\" cannot answer (#2215)", () => {
+  const PACKS = [
+    { module: "was-node-suite-comfyui", version: "1.0", enabled: true },
+    { module: "ComfyUI-Impact-Pack.disabled", version: "8.2", enabled: false },
+  ];
+
+  it('mode:"imported" carries the disclosure, and still carries the list', async () => {
+    mocks.listInstalledNodes.mockResolvedValueOnce(PACKS);
+    const out = text(await handler()({ action: "list", mode: "imported" }));
+
+    // The note names what the mode is NOT ...
+    expect(out).toContain('mode:"imported" is NOT an import-success list');
+    expect(out).toContain("frozen at server startup");
+    // ... why the reporter saw two identical lists ...
+    expect(out).toContain("installed or removed since the server booted");
+    // ... and the tool that DOES answer the question, by name and arguments,
+    // because an undiscoverable remedy is why /object_info was hand-grepped.
+    expect(out).toContain('node_pack {action:"verify"');
+    expect(out).toContain("/object_info");
+
+    // The disclosure is APPENDED. A note that replaced the payload would trade
+    // one silent failure for another.
+    expect(out).toContain("1. was-node-suite-comfyui");
+    expect(out).toContain("2. ComfyUI-Impact-Pack.disabled");
+  });
+
+  it('does not filter the disabled packs out of mode:"imported"', async () => {
+    mocks.listInstalledNodes.mockResolvedValueOnce(PACKS);
+    const out = text(await handler()({ action: "list", mode: "imported" }));
+    // Present, and reported as disabled — the honest shape. Dropping it would
+    // read as "everything left imported fine", which is the bug in a costume.
+    expect(out).toContain("ComfyUI-Impact-Pack.disabled");
+    expect(out).toContain("version: 8.2 | disabled");
+    expect(mocks.listInstalledNodes).toHaveBeenCalledWith(
+      expect.objectContaining({ mode: "imported" }),
+    );
+  });
+
+  // The controls. A note that fires unconditionally discloses nothing: it would
+  // survive every mutation of the `mode === "imported"` guard.
+  it('mode:"default" and an omitted mode say nothing about imports', async () => {
+    for (const args of [
+      { action: "list", mode: "default" },
+      { action: "list" },
+    ]) {
+      mocks.listInstalledNodes.mockResolvedValueOnce(PACKS);
+      const out = text(await handler()(args));
+      expect(out, JSON.stringify(args)).not.toContain("import-success");
+      expect(out, JSON.stringify(args)).not.toContain("node_pack");
+      expect(out, JSON.stringify(args)).toContain("1. was-node-suite-comfyui");
+    }
+  });
+
+  // cm-cli `show installed` has no mode parameter, so useCmCli does not degrade
+  // `mode` — it drops it. Reporting the live on-disk list under a mode that was
+  // never sent is the same misreport wearing a second costume.
+  it("discloses that useCmCli dropped `mode` entirely", async () => {
+    mocks.listInstalledNodes.mockResolvedValueOnce(PACKS);
+    const out = text(
+      await handler()({ action: "list", mode: "default", useCmCli: true }),
+    );
+    expect(out).toContain("`mode` was NOT applied");
+    expect(out).toContain("cm-cli show installed");
+  });
+
+  it("says nothing about `mode` when none was asked for", async () => {
+    mocks.listInstalledNodes.mockResolvedValueOnce(PACKS);
+    const out = text(await handler()({ action: "list", useCmCli: true }));
+    expect(out).not.toContain("was NOT applied");
+  });
+
+  // The schema is the other half. The result note only reaches a caller who
+  // already ran the tool; the description is what stops the call being made on a
+  // false premise in the first place.
+  it("the `mode` description no longer promises an import-success filter", () => {
+    const desc = (registered()[0].shape.mode as z.ZodTypeAny).description ?? "";
+    expect(desc).not.toContain("successfully imported this session");
+    expect(desc).toContain("NOT an import-success filter");
+    expect(desc).toContain("frozen at ComfyUI startup");
+    expect(desc).toContain("DISABLED packs");
+    expect(desc).toContain('node_pack action:"verify"');
+  });
+});

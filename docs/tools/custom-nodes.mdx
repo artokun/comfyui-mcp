@@ -103,7 +103,7 @@ Install, repair, enable/disable and remove ComfyUI custom node packs on this Com
   action:"install" — git ref (commit SHA, branch, or tag) to pin when installing a git URL. Overrides any ref parsed from the URL and any `version` value. Ignored for registry-id installs.
 </ParamField>
 <ParamField path="mode" type="enum">
-  Two distinct meanings, one per action group. For actions "install"/"update"/"reinstall"/"fix": the ComfyUI-Manager data source (default 'remote'); 'remote' fetches the live node list, 'local'/'cache' use bundled/cached data. For action:"list": 'default' lists all installed packs, 'imported' lists only those successfully imported this session. Passing a value from the wrong group is refused, naming the ones the action accepts.
+  Two distinct meanings, one per action group. For actions "install"/"update"/"reinstall"/"fix": the ComfyUI-Manager data source (default 'remote'); 'remote' fetches the live node list, 'local'/'cache' use bundled/cached data. For action:"list": 'default' lists the installed packs as they are on disk NOW; 'imported' returns that SAME custom_nodes/ scan frozen at ComfyUI startup, so the only difference is packs installed or removed since the server booted. 'imported' is NOT an import-success filter: it includes DISABLED packs and cannot tell you whether the Python of a pack actually loaded — for that use node_pack action:"verify", which checks the node class_types of the pack against /object_info on the running server. Passing a value from the wrong group is refused, naming the ones the action accepts.
   Options: `remote`, `local`, `cache`, `default`, `imported`.
 </ParamField>
 <ParamField path="channel" type="string">
