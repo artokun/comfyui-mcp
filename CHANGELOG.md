@@ -6,6 +6,13 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.96] - 2026-08-24
+
+### MCP
+
+#### Fixed
+- Recover partial Codex MCP catalogs only after explicit `call_tool` availability (#2139)
+
 ## [0.52.95] - 2026-08-24
 
 ### MCP
