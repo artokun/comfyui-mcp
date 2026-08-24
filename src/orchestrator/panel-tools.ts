@@ -4234,10 +4234,15 @@ async function captureRegistryInstallSnapshot(
 }
 
 function queueStatusRecord(reply: Record<string, unknown> | null): Record<string, unknown> | null {
-  const status = reply?.status ?? reply;
-  return status && typeof status === "object" && !Array.isArray(status)
-    ? (status as Record<string, unknown>)
-    : null;
+  if (!reply) return null;
+  const nested = reply.status;
+  if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+    // Manager responses can put queue counters under `status` while leaving
+    // failure metadata (for example recent_failures) on the outer envelope.
+    // Flatten both records so the settlement gate cannot discard that evidence.
+    return { ...reply, ...(nested as Record<string, unknown>) };
+  }
+  return reply;
 }
 
 function explicitQueueFailure(value: unknown): boolean {
@@ -4279,8 +4284,14 @@ function queueReportsFailure(status: Record<string, unknown>): boolean {
   return state === "failed" || state === "failure" || state === "error";
 }
 
-function queueSettledForDiskCorroboration(status: Record<string, unknown> | null): boolean {
-  if (!status || queueReportsFailure(status) || status.is_processing !== false) return false;
+function queueSettledForDiskCorroboration(
+  status: Record<string, unknown> | null,
+  outerReply?: Record<string, unknown> | null,
+): boolean {
+  if (!status || queueReportsFailure(status) || (outerReply && queueReportsFailure(outerReply))) {
+    return false;
+  }
+  if (status.is_processing !== false) return false;
   for (const key of ["pending_count", "in_progress_count"]) {
     if (typeof status[key] === "number" && status[key] !== 0) return false;
   }
@@ -4428,7 +4439,7 @@ async function settleDroppedEnqueue(
   if (!queueNeverSawATask(queueReply)) {
     return {
       result: res,
-      mayCorroborateDisk: queueSettledForDiskCorroboration(status),
+      mayCorroborateDisk: queueSettledForDiskCorroboration(status, queueReply),
     };
   }
 

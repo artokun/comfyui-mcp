@@ -11,6 +11,7 @@ const state = vi.hoisted(() => ({
   scanBase: undefined as string | undefined,
   afterDispatch: undefined as (() => void) | undefined,
   queueStatus: { pending_count: 0, is_processing: false } as Record<string, unknown>,
+  queueTopLevel: {} as Record<string, unknown>,
   calls: [] as string[],
 }));
 
@@ -69,7 +70,7 @@ function bridge() {
         };
       }
       if (cmd.cmd === "nodes_queue_status") {
-        return { status: state.queueStatus };
+        return { status: state.queueStatus, ...state.queueTopLevel };
       }
       return { ok: true };
     },
@@ -101,6 +102,7 @@ beforeEach(() => {
   state.scanBase = undefined;
   state.afterDispatch = undefined;
   state.queueStatus = { pending_count: 0, is_processing: false };
+  state.queueTopLevel = {};
   state.calls = [];
 });
 
@@ -289,6 +291,31 @@ describe("panel_install_node registry verification (#2180)", () => {
       } finally {
         rmSync(root, { recursive: true, force: true });
       }
+    }
+  });
+
+  it("blocks promotion when failure metadata is on the queue envelope beside nested status", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cmcp-2180-mixed-failure-"));
+    try {
+      mkdirSync(join(root, "custom_nodes"), { recursive: true });
+      state.scanBase = root;
+      state.queueStatus = { pending_count: 0, is_processing: false };
+      state.queueTopLevel = { recent_failures: [{ id: "comfyui-reactor" }] };
+      state.afterDispatch = () => {
+        const pack = join(root, "custom_nodes", "comfyui-reactor");
+        mkdirSync(pack, { recursive: true });
+        writeFileSync(join(pack, ".tracking"), "{}\n");
+        writeFileSync(join(pack, "__init__.py"), "NODE_CLASS_MAPPINGS = {}\n");
+      };
+
+      const result = await install("comfyui-reactor");
+
+      expect(state.calls).toEqual(["nodes_install", "nodes_queue_status"]);
+      expect(result.installed).toBe(false);
+      expect(result.verified).toBe(false);
+      expect(result.verification_evidence).toBeUndefined();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });
