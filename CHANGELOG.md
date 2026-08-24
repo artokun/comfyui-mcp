@@ -6,6 +6,14 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.90] - 2026-08-24
+
+### MCP
+
+#### Fixed
+- relay get_image through authenticated panel transport (#2189)
+
+
 ## [0.52.89] - 2026-08-23
 
 ### MCP
