@@ -2591,7 +2591,7 @@ function isLoadablePackFileName(name: string): boolean {
  * `custom_nodes/`): fall through to the two files every loadable pack has.
  * Unreadable is not a finding either way.
  */
-export function looksLikeAPack(dir: string): boolean {
+function looksLikeAPack(dir: string): boolean {
   try {
     const names = readdirSync(dir).map((entry) =>
       readdirEntryName(entry as string | { name: string }),

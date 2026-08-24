@@ -1,7 +1,7 @@
 // #2180 — Panel 0.15.71 can report a registry install as unverified when the
 // zip landed in custom_nodes but Manager did not add it to its installed list.
 // The MCP fallback is allowed only with same-target local, readable pack evidence.
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -9,6 +9,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const state = vi.hoisted(() => ({
   remote: false,
   scanBase: undefined as string | undefined,
+  afterDispatch: undefined as (() => void) | undefined,
+  queueStatus: { pending_count: 0, is_processing: false } as Record<string, unknown>,
+  calls: [] as string[],
 }));
 
 vi.mock("../../comfyui/client.js", () => ({
@@ -52,7 +55,9 @@ function installDef() {
 function bridge() {
   return {
     send: async (cmd: Record<string, unknown>) => {
+      state.calls.push(String(cmd.cmd));
       if (cmd.cmd === "nodes_install") {
+        state.afterDispatch?.();
         return {
           queued: true,
           installed: false,
@@ -64,7 +69,7 @@ function bridge() {
         };
       }
       if (cmd.cmd === "nodes_queue_status") {
-        return { status: { pending_count: 0, is_processing: true } };
+        return { status: state.queueStatus };
       }
       return { ok: true };
     },
@@ -94,24 +99,33 @@ async function install(id: string): Promise<Record<string, unknown>> {
 beforeEach(() => {
   state.remote = false;
   state.scanBase = undefined;
+  state.afterDispatch = undefined;
+  state.queueStatus = { pending_count: 0, is_processing: false };
+  state.calls = [];
 });
 
 describe("panel_install_node registry verification (#2180)", () => {
   it("accepts a readable pack on the live target and reports restart_required", async () => {
     const root = mkdtempSync(join(tmpdir(), "cmcp-2180-"));
     try {
-      const pack = join(root, "custom_nodes", "comfyui-reactor");
-      mkdirSync(pack, { recursive: true });
-      writeFileSync(join(pack, "__init__.py"), "NODE_CLASS_MAPPINGS = {}\n");
+      mkdirSync(join(root, "custom_nodes"), { recursive: true });
       state.scanBase = root;
+      state.afterDispatch = () => {
+        const pack = join(root, "custom_nodes", "comfyui-reactor");
+        mkdirSync(pack, { recursive: true });
+        writeFileSync(join(pack, ".tracking"), "{}\n");
+        writeFileSync(join(pack, "__init__.py"), "NODE_CLASS_MAPPINGS = {}\n");
+      };
 
       const result = await install("comfyui-reactor");
 
+      expect(state.calls).toEqual(["nodes_install", "nodes_queue_status"]);
       expect(result.installed).toBe(true);
       expect(result.verified).toBe(true);
       expect(result.restart_required).toBe(true);
-      expect(result.verification_evidence).toBe("on-disk");
-      expect(String(result.note)).toMatch(/readable custom-node pack/i);
+      expect(result.verification_evidence).toBe("new-on-disk-registry-pack");
+      expect(String(result.note)).toMatch(/pre-install snapshot/i);
+      expect(String(result.note)).toMatch(/version or channel/i);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -157,6 +171,74 @@ describe("panel_install_node registry verification (#2180)", () => {
       expect(result.installed).toBe(false);
       expect(result.verified).toBe(false);
       expect(result.restart_required).toBeUndefined();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not promote an old, arbitrary same-name, disabled, or symlink directory", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cmcp-2180-"));
+    const external = mkdtempSync(join(tmpdir(), "cmcp-2180-link-"));
+    try {
+      state.scanBase = root;
+      const oldPack = join(root, "custom_nodes", "comfyui-reactor");
+      mkdirSync(oldPack, { recursive: true });
+      writeFileSync(join(oldPack, ".tracking"), "{}\n");
+      writeFileSync(join(oldPack, "__init__.py"), "NODE_CLASS_MAPPINGS = {}\n");
+      expect((await install("comfyui-reactor")).installed).toBe(false);
+
+      rmSync(oldPack, { recursive: true, force: true });
+      state.afterDispatch = () => {
+        const arbitrary = join(root, "custom_nodes", "comfyui-reactor");
+        mkdirSync(arbitrary, { recursive: true });
+        writeFileSync(join(arbitrary, "__init__.py"), "NODE_CLASS_MAPPINGS = {}\n");
+      };
+      expect((await install("comfyui-reactor")).installed).toBe(false);
+
+      rmSync(join(root, "custom_nodes", "comfyui-reactor"), { recursive: true, force: true });
+      state.afterDispatch = () => {
+        const disabled = join(root, "custom_nodes", "comfyui-reactor.disabled");
+        mkdirSync(disabled, { recursive: true });
+        writeFileSync(join(disabled, ".tracking"), "{}\n");
+        writeFileSync(join(disabled, "__init__.py"), "NODE_CLASS_MAPPINGS = {}\n");
+      };
+      expect((await install("comfyui-reactor")).installed).toBe(false);
+
+      rmSync(join(root, "custom_nodes", "comfyui-reactor.disabled"), { recursive: true, force: true });
+      state.afterDispatch = undefined;
+      mkdirSync(external, { recursive: true });
+      try {
+        symlinkSync(external, join(root, "custom_nodes", "comfyui-reactor"), "junction");
+      } catch {
+        // Directory junction creation can be denied on Windows CI; the other
+        // three cases remain fully exercised on that host.
+        return;
+      }
+      expect((await install("comfyui-reactor")).installed).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(external, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps installed:false while the settled queue is still processing", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cmcp-2180-"));
+    try {
+      mkdirSync(join(root, "custom_nodes"), { recursive: true });
+      state.scanBase = root;
+      state.queueStatus = { pending_count: 1, is_processing: true };
+      state.afterDispatch = () => {
+        const pack = join(root, "custom_nodes", "comfyui-reactor");
+        mkdirSync(pack, { recursive: true });
+        writeFileSync(join(pack, ".tracking"), "{}\n");
+        writeFileSync(join(pack, "__init__.py"), "NODE_CLASS_MAPPINGS = {}\n");
+      };
+
+      const result = await install("comfyui-reactor");
+
+      expect(state.calls).toEqual(["nodes_install", "nodes_queue_status"]);
+      expect(result.installed).toBe(false);
+      expect(result.verified).toBe(false);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

@@ -32,7 +32,7 @@ import {
   toolAllowed,
 } from "../tools/tool-surface-filter.js";
 import { logger as toolPolicyLogger } from "../utils/logger.js";
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import type { Stats } from "node:fs";
 import {
   forwardedByReferenceNote,
@@ -55,7 +55,6 @@ import { comfyuiFetch } from "../comfyui/fetch.js";
 import { assertPanelNotTargetedUnverifiable } from "../services/panel-pin-guard.js";
 import {
   findPackOnDisk,
-  looksLikeAPack,
   nodesInstallCommandArgs,
 } from "../services/node-management.js";
 import { sanitizePanelUpdateNodeResult } from "../services/manager-update-error.js";
@@ -4124,84 +4123,232 @@ function panelIncarnation(ctx: PanelToolCtx, tabId: string): string | undefined 
   return typeof b?.tabIncarnation === "function" ? b.tabIncarnation(tabId) : undefined;
 }
 
+type RegistryInstallSnapshot = {
+  id: string;
+  scanBase: string;
+  before: ReturnType<typeof findPackOnDisk>;
+};
+
+type QueueSettlement = {
+  result: ToolResult;
+  /** True only after the queued response has gone through a same-panel queue read. */
+  mayCorroborateDisk: boolean;
+};
+
+function registryInstallId(args: Record<string, unknown>): string | null {
+  // The normalized command is the authority here. In particular, a repository
+  // URL that arrived in `id` has already been rerouted to `repository` and must
+  // not enter this local registry-only fallback.
+  if (args.repository !== undefined || typeof args.id !== "string") return null;
+  const id = args.id.trim();
+  if (!id || /[/\\\x00-\x1F\x7F]/.test(id) || /^[a-z][a-z0-9+.-]*:\/\//i.test(id)) {
+    return null;
+  }
+  return id;
+}
+
+/** A path comparison that does not let case or slash spelling retarget evidence on Windows. */
+function sameFilesystemPath(a: string, b: string): boolean {
+  try {
+    const normalize = (value: string) => resolve(value).replace(/[\\/]+$/, "");
+    const left = normalize(a);
+    const right = normalize(b);
+    return process.platform === "win32"
+      ? left.toLowerCase() === right.toLowerCase()
+      : left === right;
+  } catch {
+    return false;
+  }
+}
+
 /**
- * #2180 — Panel v0.15.71 verifies Manager installs from the Manager's installed
- * list. A registry zip can land in custom_nodes without being in that list, so
- * the panel truthfully answers installed:false even though ComfyUI will load it
- * after a restart.
+ * Strict post-install evidence for the registry-only fallback.
  *
- * This is deliberately a narrow, local-only corroboration. The panel binding is
- * proven against the boot ComfyUI before dispatch, the live scan root is resolved
- * from that local ComfyUI (not the saved workspace), and the matched directory is
- * both readable and pack-shaped. A path that cannot be read, a remote panel, an
- * ambiguous target, or a non-registry spelling leaves the panel's failure intact.
+ * `findPackOnDisk` is intentionally broader because other node-management
+ * operations must recognize renamed and disabled packs. This fallback needs a
+ * narrower answer: the exact, newly-created, enabled directory, with Manager's
+ * tracking marker and readable Python/package metadata. A symlink, marker-only
+ * husk, arbitrary same-name folder, or any read error is inconclusive.
+ */
+function inspectNewRegistryPack(
+  id: string,
+  scanBase: string,
+): { state: "found"; dir: string } | { state: "not-found"; scanned: string } | { state: "unreadable"; reason: string } {
+  const customNodes = join(scanBase, "custom_nodes");
+  try {
+    const entries = readdirSync(customNodes, { withFileTypes: true });
+    const wanted = id.toLowerCase();
+    const entry = entries.find((candidate) => candidate.name.toLowerCase() === wanted);
+    if (!entry || entry.isSymbolicLink() || !entry.isDirectory()) {
+      return { state: "not-found", scanned: customNodes };
+    }
+
+    const dir = join(customNodes, entry.name);
+    const lstat = lstatSync(dir);
+    if (!lstat.isDirectory() || lstat.isSymbolicLink()) {
+      return { state: "not-found", scanned: customNodes };
+    }
+    // Reject junctions and other directory indirections too. The panel's local
+    // proof must describe the directory Manager just populated, not another tree.
+    if (!sameFilesystemPath(realpathSync(dir), dir)) {
+      return { state: "not-found", scanned: customNodes };
+    }
+
+    const files = readdirSync(dir, { withFileTypes: true });
+    const tracking = files.find((file) => file.name === ".tracking" && file.isFile());
+    const code = files.find(
+      (file) =>
+        file.isFile() &&
+        (file.name.toLowerCase() === "__init__.py" ||
+          file.name.toLowerCase() === "pyproject.toml" ||
+          file.name.toLowerCase().endsWith(".py")),
+    );
+    if (!tracking || !code) return { state: "not-found", scanned: customNodes };
+
+    // Reading both the Manager marker and the loadable file makes an access
+    // failure a refusal, never a truthy `looksLikeAPack` fallback.
+    readFileSync(join(dir, tracking.name));
+    readFileSync(join(dir, code.name));
+    return { state: "found", dir };
+  } catch (err) {
+    return {
+      state: "unreadable",
+      reason: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+async function captureRegistryInstallSnapshot(
+  args: Record<string, unknown>,
+  panelBaseBeforeDispatch: string | null,
+): Promise<RegistryInstallSnapshot | null> {
+  const id = registryInstallId(args);
+  if (!id || !panelBaseBeforeDispatch) return null;
+  try {
+    const scanBase = await resolveCustomNodesScanBaseLive({ requireLive: true });
+    if (!scanBase) return null;
+    return { id, scanBase, before: findPackOnDisk(id, scanBase) };
+  } catch {
+    return null;
+  }
+}
+
+function queueStatusRecord(reply: Record<string, unknown> | null): Record<string, unknown> | null {
+  const status = reply?.status ?? reply;
+  return status && typeof status === "object" && !Array.isArray(status)
+    ? (status as Record<string, unknown>)
+    : null;
+}
+
+function queueReportsFailure(status: Record<string, unknown>): boolean {
+  for (const key of ["failed", "error", "failure"]) {
+    if (status[key] === true) return true;
+  }
+  for (const key of ["failed_count", "failure_count"]) {
+    if (typeof status[key] === "number" && status[key] > 0) return true;
+  }
+  for (const key of ["failures", "recent_failures", "errors"]) {
+    const value = status[key];
+    if (Array.isArray(value) && value.length > 0) return true;
+    if (typeof value === "string" && value.trim() !== "") return true;
+    if (value && typeof value === "object" && !Array.isArray(value)) return true;
+  }
+  return status.status === "failed" || status.status === "error";
+}
+
+function queueSettledForDiskCorroboration(status: Record<string, unknown> | null): boolean {
+  if (!status || queueReportsFailure(status) || status.is_processing !== false) return false;
+  for (const key of ["pending_count", "in_progress_count"]) {
+    if (typeof status[key] === "number" && status[key] !== 0) return false;
+  }
+  // A legacy zero-total idle snapshot is the known dropped-enqueue signature;
+  // settleDroppedEnqueue turns that into a warning and blocks this path. A v4
+  // idle snapshot has no total_count, so the strict disk delta remains the
+  // available post-install evidence.
+  if (status.total_count === 0) return false;
+  if (
+    typeof status.total_count === "number" &&
+    (typeof status.done_count !== "number" || status.done_count <= 0)
+  ) {
+    return false;
+  }
+  return typeof status.pending_count === "number" ||
+    (typeof status.total_count === "number" && status.total_count > 0) ||
+    (typeof status.done_count === "number" && status.done_count > 0);
+}
+
+/**
+ * #2180 — Panel 0.15.71 can report a registry install as unverified when a
+ * registry zip lands in custom_nodes without entering the installed list.
+ *
+ * The fallback is deliberately narrower than the normal node-management disk
+ * scan: it can only corroborate a registry id whose target was absent in a
+ * pre-dispatch snapshot, after the queued response has passed queue settlement,
+ * and only when a strict new-pack read succeeds on the same live target.
  */
 async function corroborateUntrackedRegistryInstall(
   ctx: PanelToolCtx,
   res: ToolResult,
-  args: Record<string, unknown>,
+  snapshot: RegistryInstallSnapshot | null,
   dispatch: { tab: string; incarnation: string | undefined },
   panelBaseBeforeDispatch: string | null,
+  mayCorroborateDisk: boolean,
 ): Promise<ToolResult> {
-  if (res.isError) return res;
+  if (!mayCorroborateDisk || res.isError || !snapshot || snapshot.before.state !== "not-found") {
+    return res;
+  }
   const parsed = parseToolResultJson(res);
   if (
     !parsed ||
     parsed.installed !== false ||
     parsed.verified !== false ||
-    !claimsQueued(parsed)
+    !claimsQueued(parsed) ||
+    parsed.failed === true ||
+    parsed.error === true
   ) {
     return res;
   }
 
-  // Only a registry id has an identity that can be checked safely here. A URL,
-  // owner/repo shorthand, or a caller-supplied repository may land under a
-  // renamed checkout; guessing its directory would turn unrelated disk state
-  // into a success claim.
-  const id = typeof args.id === "string" ? args.id.trim() : "";
-  if (!id || /[/\\\x00-\x1F\x7F]/.test(id) || /^[a-z][a-z0-9+.-]*:\/\//i.test(id)) return res;
+  // Require the panel response to echo the same registry identity. A fresh
+  // directory with only a caller-supplied same-name id is not proof that the
+  // Manager installed that id.
+  if (
+    typeof parsed.id !== "string" ||
+    parsed.id.trim().toLowerCase() !== snapshot.id.toLowerCase()
+  ) {
+    return res;
+  }
 
-  // The follow-up must still be attributable to the panel that received the
-  // install. This mirrors settleDroppedEnqueue's takeover guard.
+  // The follow-up must still be attributable to the panel and server that were
+  // captured before dispatch. This mirrors settleDroppedEnqueue's takeover guard
+  // and keeps local disk evidence inside the requireLive/security scope.
   if (ctx.tabId !== dispatch.tab || dispatch.incarnation === undefined) return res;
   if (panelIncarnation(ctx, ctx.tabId) !== dispatch.incarnation) return res;
   if (!panelBaseBeforeDispatch || !sameHttpBase(getComfyUIBaseUrl(), panelBaseBeforeDispatch)) {
     return res;
   }
 
-  let scanBase: string | undefined;
+  let liveScanBase: string | undefined;
   try {
-    scanBase = await resolveCustomNodesScanBaseLive({ requireLive: true });
+    liveScanBase = await resolveCustomNodesScanBaseLive({ requireLive: true });
   } catch {
     return res;
   }
-  if (!scanBase) return res;
+  if (!liveScanBase || !sameFilesystemPath(liveScanBase, snapshot.scanBase)) return res;
 
-  const disk = findPackOnDisk(id, scanBase);
+  const disk = inspectNewRegistryPack(snapshot.id, snapshot.scanBase);
   if (disk.state !== "found") return res;
 
-  // looksLikeAPack intentionally treats an unreadable directory as
-  // inconclusive for existing install workflows. Re-read the matched directory
-  // here so an EACCES/race cannot become positive verification.
-  let readable = false;
-  try {
-    readable = readdirSync(disk.dir).length > 0 && looksLikeAPack(disk.dir);
-  } catch {
-    return res;
-  }
-  if (!readable) return res;
-
-  const { installed: _installed, verified: _verified, pending: _pending, note, ...rest } = parsed;
   const upgraded = {
-    ...rest,
+    ...parsed,
     installed: true,
     verified: true,
     restart_required: true,
-    verification_evidence: "on-disk",
+    verification_evidence: "new-on-disk-registry-pack",
     note: [
-      typeof note === "string" ? note : undefined,
-      `The panel could not verify registry id "${id}", but a readable custom-node pack is present at ${disk.dir}.`,
-      "Restart ComfyUI before relying on newly installed nodes; restart_required is true because the running node registry was not verified.",
+      typeof parsed.note === "string" ? parsed.note : undefined,
+      `The pre-install snapshot found no matching pack, and after queue settlement a readable enabled registry pack with Manager tracking metadata appeared at ${disk.dir}.`,
+      "The disk evidence does not establish the requested version or channel; those response fields were preserved unchanged. Restart ComfyUI before relying on the new nodes.",
     ]
       .filter(Boolean)
       .join(" "),
@@ -4222,9 +4369,11 @@ async function settleDroppedEnqueue(
   ctx: PanelToolCtx,
   res: ToolResult,
   dispatch: { tab: string; incarnation: string | undefined },
-): Promise<ToolResult> {
-  if (res.isError) return res;
-  if (!claimsQueued(parseToolResultJson(res))) return res;
+): Promise<QueueSettlement> {
+  if (res.isError) return { result: res, mayCorroborateDisk: false };
+  if (!claimsQueued(parseToolResultJson(res))) {
+    return { result: res, mayCorroborateDisk: false };
+  }
 
   // The queue is only evidence about the panel the install was DISPATCHED to
   // (codex P1 — and the same guard #1468 needed, which I did not carry across).
@@ -4238,7 +4387,7 @@ async function settleDroppedEnqueue(
   // draws exactly this distinction and exposes `tabIncarnation` for it (#486), so
   // both are captured: the key AND the incarnation currently holding it.
   const queue = await ctx.call({ cmd: "nodes_queue_status" }, 15000);
-  if (ctx.tabId !== dispatch.tab) return res;
+  if (ctx.tabId !== dispatch.tab) return { result: res, mayCorroborateDisk: false };
   // Both captured BEFORE the install was dispatched, not here — a takeover that
   // happens DURING the install is already baked in by the time this function
   // runs, so comparing two post-install readings would always agree and the guard
@@ -4246,9 +4395,19 @@ async function settleDroppedEnqueue(
   // UNKNOWN is not "unchanged": a bridge that cannot report an incarnation cannot
   // rule out a same-key takeover, so it does not get to make a claim about which
   // panel answered.
-  if (dispatch.incarnation === undefined) return res;
-  if (panelIncarnation(ctx, ctx.tabId) !== dispatch.incarnation) return res;
-  if (queue.isError || !queueNeverSawATask(parseToolResultJson(queue))) return res;
+  if (dispatch.incarnation === undefined) return { result: res, mayCorroborateDisk: false };
+  if (panelIncarnation(ctx, ctx.tabId) !== dispatch.incarnation) {
+    return { result: res, mayCorroborateDisk: false };
+  }
+  if (queue.isError) return { result: res, mayCorroborateDisk: false };
+  const queueReply = parseToolResultJson(queue);
+  const status = queueStatusRecord(queueReply);
+  if (!queueNeverSawATask(queueReply)) {
+    return {
+      result: res,
+      mayCorroborateDisk: queueSettledForDiskCorroboration(status),
+    };
+  }
 
   // NO PROVENANCE CLAIM AT ALL — deliberately, after five review rounds.
   //
@@ -4263,9 +4422,10 @@ async function settleDroppedEnqueue(
   // saying, needs no provenance, and cannot be wrong. The cause belongs to
   // whoever can see the install — so the message asks for the ONE check that
   // settles it and stops there. Less useful in the common case; never false.
-  return appendNote(
-    res,
-    `WARNING — THE QUEUE DOES NOT HAVE THIS TASK. The Manager accepted the install above, but a ` +
+  return {
+    result: appendNote(
+      res,
+      `WARNING — THE QUEUE DOES NOT HAVE THIS TASK. The Manager accepted the install above, but a ` +
       `read taken immediately afterwards, on that same panel, reports an IDLE queue holding no ` +
       `tasks at all (total_count, done, in_progress all 0). "queued" is its acknowledgement, not ` +
       `a receipt.\n\n` +
@@ -4278,7 +4438,9 @@ async function settleDroppedEnqueue(
       `pack really landed instead of trusting the queue, and can clone a repository URL directly ` +
       `when the Manager will not take it. This tool cannot clone for you — it drives whatever ` +
       `ComfyUI the panel is bound to, which need not be this machine.`,
-  );
+    ),
+    mayCorroborateDisk: false,
+  };
 }
 
 /**
@@ -18780,24 +18942,30 @@ CHECKED FOR YOU: the graph read this message prescribes was just run, and it ` +
           tab: ctx.tabId,
           incarnation: panelIncarnation(ctx, ctx.tabId),
         };
+        // #2180 — this snapshot must happen BEFORE Manager dispatch. A post-only
+        // scan cannot distinguish a newly landed registry zip from an old pack,
+        // a concurrent writer, or a directory that merely shares the id.
+        const registrySnapshot = await captureRegistryInstallSnapshot(
+          cmdArgs,
+          panelBaseBeforeDispatch,
+        );
         const res = await ctx.call(
           { cmd: "nodes_install", ...cmdArgs },
           30000,
         );
-        // #1129 — settle BEFORE any supplemental note is appended. The note is glued on
-        // after the JSON body, which makes the payload unparseable as JSON, so a probe
-        // running afterwards reads `null`, concludes the panel never claimed a queue,
-        // and silently does nothing. Git notes describe v4 bare-name resolution, but
-        // v4 Git requests now fail before this point and legacy 3.x receives files:[url]
-        // directly; appending that v4 note to a legacy success would be false.
+        // #1129 / #2180 — settle EVERY queued/pending response before any disk
+        // corroboration. An early rewrite would bypass the queue read and could
+        // turn a still-running or failed request into installed:true.
+        const settlement = await settleDroppedEnqueue(ctx, res, dispatch);
         const corroborated = await corroborateUntrackedRegistryInstall(
           ctx,
-          res,
-          args,
+          settlement.result,
+          registrySnapshot,
           dispatch,
           panelBaseBeforeDispatch,
+          settlement.mayCorroborateDisk,
         );
-        const settled = await settleDroppedEnqueue(ctx, corroborated, dispatch);
+        const settled = corroborated;
         if (note && !cmdArgs.repository) {
           const text = settled.content.find((c) => c.type === "text");
           if (text && text.type === "text") {
