@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createHmac } from "node:crypto";
 import { createServer } from "node:http";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -11,6 +12,7 @@ import {
   PANEL_IMAGE_RELAY_MAX_REQUEST_FILE_BYTES,
   PANEL_IMAGE_RELAY_MAX_REQUESTS_PER_TICK,
   PANEL_IMAGE_RELAY_HTTP_PATH,
+  PANEL_IMAGE_RELAY_TIMEOUT_MS,
   PANEL_IMAGE_RELAY_REQUEST_PREFIX,
   PANEL_IMAGE_RELAY_RESPONSE_PREFIX,
   PANEL_IMAGE_RELAY_STALE_MS,
@@ -575,6 +577,40 @@ describe("authenticated loopback panel image relay", () => {
       process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
       process.env.COMFYUI_MCP_RELAY_URL = `http://127.0.0.1:${address.port}${PANEL_IMAGE_RELAY_HTTP_PATH}`;
       await expect(requestPanelImage("render.png", "output", "shots")).rejects.toMatchObject({ code: "MALFORMED_REPLY" });
+    } finally {
+      await new Promise<void>((resolve) => fake.close(() => resolve()));
+    }
+  });
+
+  it("classifies an authenticated server TIMEOUT before deadline freshness", async () => {
+    const fake = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => chunks.push(chunk));
+      req.on("end", () => {
+        const input = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { requestId: string };
+        const updated = Date.now() + PANEL_IMAGE_RELAY_TIMEOUT_MS * 2;
+        const unsigned = {
+          version: 1,
+          requestId: input.requestId,
+          ok: false,
+          error: "TIMEOUT",
+          updated,
+        } as const;
+        const responseMac = createHmac("sha256", SECRET)
+          .update(JSON.stringify([unsigned.version, unsigned.requestId, false, unsigned.error, unsigned.updated]))
+          .digest("hex");
+        const body = JSON.stringify({ ...unsigned, responseMac });
+        res.writeHead(200, { "content-type": "application/json", "content-length": String(Buffer.byteLength(body)) });
+        res.end(body);
+      });
+    });
+    await new Promise<void>((resolve) => fake.listen(0, "127.0.0.1", resolve));
+    const address = fake.address();
+    if (!address || typeof address === "string") throw new Error("fake relay did not bind");
+    try {
+      process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
+      process.env.COMFYUI_MCP_RELAY_URL = `http://127.0.0.1:${address.port}${PANEL_IMAGE_RELAY_HTTP_PATH}`;
+      await expect(requestPanelImage("render.png", "output", "shots")).rejects.toMatchObject({ code: "TIMEOUT" });
     } finally {
       await new Promise<void>((resolve) => fake.close(() => resolve()));
     }

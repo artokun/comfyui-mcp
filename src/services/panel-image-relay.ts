@@ -388,13 +388,13 @@ function validateResponse(value: unknown, requestId: string): PanelImageRelayRes
   throw new PanelImageRelayError("The panel returned a malformed image relay reply.", "MALFORMED_REPLY");
 }
 
-function failureResponse(requestId: string, error: string): PanelImageRelayResponseFailure {
+function failureResponse(requestId: string, error: string, updated = Date.now()): PanelImageRelayResponseFailure {
   return {
     version: PANEL_IMAGE_RELAY_VERSION,
     requestId,
     ok: false,
     error,
-    updated: Date.now(),
+    updated,
   };
 }
 
@@ -681,7 +681,11 @@ export async function startPanelImageRelayServer(
         const age = now - request.createdAt;
         let response: PanelImageRelayResponse;
         if (age < -5_000 || age > PANEL_IMAGE_RELAY_STALE_MS || now >= requestDeadline(request)) {
-          response = failureResponse(request.requestId, now >= requestDeadline(request) ? "TIMEOUT" : "STALE_REQUEST");
+          response = failureResponse(
+            request.requestId,
+            now >= requestDeadline(request) ? "TIMEOUT" : "STALE_REQUEST",
+            now >= requestDeadline(request) ? requestDeadline(request) : now,
+          );
         } else {
           const panelTab = options.resolvePanelTab(auth.agentKey);
           if (!panelTab || !options.bridge.canReach(panelTab)) {
@@ -692,7 +696,7 @@ export async function startPanelImageRelayServer(
           } else {
             const remainingMs = requestDeadline(request) - Date.now();
             if (remainingMs <= 0) {
-              response = failureResponse(request.requestId, "TIMEOUT");
+              response = failureResponse(request.requestId, "TIMEOUT", requestDeadline(request));
             } else {
               try {
                 const reply = await withinDeadline(
@@ -707,7 +711,7 @@ export async function startPanelImageRelayServer(
                   ? validateImagePayload({ base64: replyRecord.base64, mimeType: replyRecord.mimeType, bytes: replyRecord.bytes })
                   : undefined;
                 if (Date.now() >= requestDeadline(request)) {
-                  response = failureResponse(request.requestId, "TIMEOUT");
+                  response = failureResponse(request.requestId, "TIMEOUT", requestDeadline(request));
                 } else if (replyRecord?.ok === false && hasOnlyKeys(replyRecord, ["ok", "error"]) && isSafeText(replyRecord.error, 160)) {
                   response = failureResponse(request.requestId, "PANEL_FETCH_FAILED");
                 } else if (!replyRecord || replyRecord.ok !== true || !payload || !hasOnlyKeys(replyRecord, ["ok", "base64", "mimeType", "bytes"])) {
@@ -716,7 +720,12 @@ export async function startPanelImageRelayServer(
                   response = { version: PANEL_IMAGE_RELAY_VERSION, requestId: request.requestId, ok: true, ...payload, updated: Date.now() };
                 }
               } catch (error) {
-                response = failureResponse(request.requestId, error instanceof PanelImageRelayError && error.code === "TIMEOUT" ? "TIMEOUT" : "PANEL_FETCH_FAILED");
+                const timedOut = error instanceof PanelImageRelayError && error.code === "TIMEOUT";
+                response = failureResponse(
+                  request.requestId,
+                  timedOut ? "TIMEOUT" : "PANEL_FETCH_FAILED",
+                  timedOut ? requestDeadline(request) : Date.now(),
+                );
               }
             }
           }
@@ -819,11 +828,13 @@ export async function requestPanelImage(
   }
   const response = validateTransportResponse(decoded, request.requestId, secret);
   const responseAge = Date.now() - response.updated;
+  const authenticatedTimeout = response.ok === false && response.error === "TIMEOUT";
   if (
-    response.updated < request.createdAt ||
-    response.updated > request.deadlineAt ||
-    responseAge < -5_000 ||
-    responseAge > PANEL_IMAGE_RELAY_STALE_MS
+    !authenticatedTimeout &&
+    (response.updated < request.createdAt ||
+      response.updated > request.deadlineAt ||
+      responseAge < -5_000 ||
+      responseAge > PANEL_IMAGE_RELAY_STALE_MS)
   ) {
     throw new PanelImageRelayError("The panel returned a stale image relay reply.", "STALE_REPLY");
   }
