@@ -103,6 +103,7 @@ import {
   setConnectedPanelOrigins,
 } from "../comfyui/fetch.js";
 import { publishConnectedPanelOrigins } from "../services/panel-origin-channel.js";
+import { processPanelImageRequests } from "../services/panel-image-relay.js";
 import { logger } from "../utils/logger.js";
 import { listDownloadJobs } from "../services/download-jobs.js";
 import { completionDisagreesWithRecord, failureDisagreesWithRecord } from "./download-done-guard.js";
@@ -5879,7 +5880,20 @@ export async function runPanelOrchestrator(): Promise<void> {
   } catch {
     // no saved state
   }
+  // #2149 — image requests from spawned MCP children are reference-only. The
+  // poll worker below resolves the child agent key to a panel tab and uses the
+  // authenticated bridge command; it never reads or accepts a URL from disk.
+  const panelImageRelayInFlight = new Set<string>();
   const pollDownloads = () => {
+    void processPanelImageRequests({
+      dir: progressDir,
+      bridge,
+      resolvePanelTab: scopeToRealTab,
+      inFlight: panelImageRelayInFlight,
+    }).catch(() => {
+      // A failed poll is fail-closed for this request; the child times out or
+      // receives a bounded safe error, and the next tick can process new work.
+    });
     // #1415 — the OTHER half of the #952 drift comparison installed above. That
     // source only serves THIS process, and the tools that fail with `fetch
     // failed` run in the spawned comfyui children, which have no bridge. Publish

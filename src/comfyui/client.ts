@@ -28,6 +28,11 @@ import {
   httpOriginOf,
 } from "../services/panel-fallback-target.js";
 import {
+  PANEL_IMAGE_RELAY_MAX_BYTES,
+  PanelImageRelayError,
+  requestPanelImage,
+} from "../services/panel-image-relay.js";
+import {
   bodyPrefixOf,
   classifyNonJson,
   describeStatus,
@@ -1180,7 +1185,7 @@ export async function getHistory(
 }
 
 /** A /view response is saved and may later be previewed, so bound the first read too. */
-export const MAX_VIEW_RESPONSE_BYTES = 32 * 1024 * 1024;
+export const MAX_VIEW_RESPONSE_BYTES = PANEL_IMAGE_RELAY_MAX_BYTES;
 
 function validateViewResponseOrigin(res: Response, expectedOrigin: string, label: string): void {
   if (res.url) {
@@ -1325,6 +1330,23 @@ export async function fetchImage(
     const choice = choosePanelFallbackOrigin(configuredTarget, connectedPanelFallbackOriginsNow());
     const declined = describeDeclinedPanelFallback(choice);
     if (choice.kind !== "use") {
+      // Production children have no bridge object. They use the bounded
+      // reference-only relay instead: the orchestrator resolves the requester
+      // and asks the authenticated panel to fetch same-origin /view. The old
+      // direct-origin seam remains injectable for focused fallback mechanics
+      // tests, but it is never installed by production.
+      try {
+        const relayed = await requestPanelImage(filename, type, subfolder);
+        if (relayed) return { base64: relayed.base64, mimeType: relayed.mimeType };
+      } catch (relayError) {
+        if (relayError instanceof PanelImageRelayError && !relayError.unavailable) {
+          const primary = primaryError instanceof Error ? primaryError.message : String(primaryError);
+          throw new Error(
+            `${primary} The connected panel image relay failed safely (${relayError.code}).`,
+            { cause: relayError },
+          );
+        }
+      }
       if (declined) {
         const primary = primaryError instanceof Error ? primaryError.message : String(primaryError);
         throw new Error(`${primary}${declined}`, { cause: primaryError });

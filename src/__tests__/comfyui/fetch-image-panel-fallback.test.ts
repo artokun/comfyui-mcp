@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 vi.mock("../../config.js", () => ({
   config: { comfyuiSsl: false, comfyuiPath: "", comfyuiBasePath: "/comfyapi" },
@@ -16,6 +19,7 @@ import {
   setConnectedPanelFallbackOrigins,
   setConnectedPanelOrigins,
 } from "../../comfyui/fetch.js";
+import { PANEL_IMAGE_RELAY_REQUEST_PREFIX, PANEL_IMAGE_RELAY_RESPONSE_PREFIX } from "../../services/panel-image-relay.js";
 
 const HEADLESS = "http://127.0.0.1:8000";
 const PANEL = "http://localhost:8188";
@@ -46,6 +50,8 @@ beforeEach(() => {
 afterEach(() => {
   setConnectedPanelFallbackOrigins(null);
   setConnectedPanelOrigins(null);
+  delete process.env.COMFYUI_MCP_PROGRESS_DIR;
+  delete process.env.COMFYUI_MCP_TAB;
   vi.unstubAllGlobals();
 });
 
@@ -252,5 +258,44 @@ describe("fetchImage connected-panel fallback (#2149)", () => {
     await expect(fetchImage("forged.png")).rejects.toThrow(/fetch failed/);
     expect(calls).toHaveLength(1);
     expect(String(calls[0].input)).toContain(`${HEADLESS}/comfyapi/view?`);
+  });
+
+  it("uses the authenticated relay in production and never reconstructs a panel URL", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "comfyui-mcp-image-relay-client-"));
+    process.env.COMFYUI_MCP_PROGRESS_DIR = dir;
+    process.env.COMFYUI_MCP_TAB = "orchestrator::claude";
+    setConnectedPanelFallbackOrigins(null);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({ input, init });
+        throw transportFailure();
+      }),
+    );
+
+    const pending = fetchImage("render.png", "output", "shots");
+    let requestName = "";
+    for (let i = 0; i < 100 && !requestName; i += 1) {
+      requestName = readdirSync(dir).find((name) => name.startsWith(PANEL_IMAGE_RELAY_REQUEST_PREFIX)) ?? "";
+      if (!requestName) await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(requestName).not.toBe("");
+    const body = JSON.parse(readFileSync(join(dir, requestName), "utf8")) as Record<string, unknown>;
+    expect(body).toMatchObject({ filename: "render.png", subfolder: "shots", type: "output", requester: "orchestrator::claude" });
+    expect(body).not.toHaveProperty("url");
+    const id = String(body.requestId);
+    writeFileSync(join(dir, `${PANEL_IMAGE_RELAY_RESPONSE_PREFIX}${id}.json`), JSON.stringify({
+      version: 1,
+      requestId: id,
+      ok: true,
+      base64: "AQID",
+      mimeType: "image/png",
+      bytes: 3,
+      updated: Date.now(),
+    }));
+    await expect(pending).resolves.toEqual({ base64: "AQID", mimeType: "image/png" });
+    expect(calls).toHaveLength(1);
+    expect(String(calls[0].input)).toContain(`${HEADLESS}/comfyapi/view?`);
+    rmSync(dir, { recursive: true, force: true });
   });
 });
