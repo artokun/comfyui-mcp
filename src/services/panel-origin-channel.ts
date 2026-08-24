@@ -321,9 +321,9 @@ export function publishConnectedPanelOrigins(
     origins: published,
     updated: now,
     pid: process.pid,
-    // The child may use this channel for direct HTTP contact, so an old or
-    // hand-written broad diagnostic record must never become a trust source.
-    trustedLocalPanelOrigins: true,
+    // This channel is diagnostic-only. Its records must never become an
+    // authorization source for a new outbound request.
+    diagnosticPanelOrigins: true,
   });
   // The atomic write lives in writeChannelPayload (shared with the sibling
   // frontend-virtual-types channel, #1400); a false return means the PRIOR
@@ -362,12 +362,12 @@ export function readPublishedPanelOrigins(now: number = Date.now()): string[] {
       origins?: unknown;
       updated?: unknown;
       pid?: unknown;
-      trustedLocalPanelOrigins?: unknown;
+      diagnosticPanelOrigins?: unknown;
     };
     if (!Array.isArray(raw?.origins)) return [];
     // Old records carried every server-observed origin, including relay/tunnel
     // targets. They are diagnostic data, not permission to make a new request.
-    if (raw.trustedLocalPanelOrigins !== true) return [];
+    if (raw.diagnosticPanelOrigins !== true) return [];
     // A record whose publisher is gone describes panels that are gone with it.
     // Both checks, for the reasons in the header: liveness catches the death,
     // freshness catches a reused pid.

@@ -28,12 +28,24 @@ function methodOf(input: string | URL | Request, init: RequestInit): string {
  * MCP server, tests, any process with no bridge) simply means the comparison is
  * skipped — never that there is no drift.
  *
- * Origins here must be the SERVER-OBSERVED handshake Origin (UiBridge's
- * `tabServerOrigin`), not the client-supplied `hello.comfyui_url`: the browser
- * sets the former and blocks page JS from forging it, so it is the trustworthy
- * answer to "which ComfyUI is this tab actually on".
+ * Origins here are diagnostic data. They must be the SERVER-OBSERVED handshake
+ * Origin (UiBridge's `tabServerOrigin`), not the client-supplied
+ * `hello.comfyui_url`, because the latter is page-controlled. This source is
+ * deliberately separate from the direct /view fallback authorization below:
+ * a tokenless local WebSocket client can forge HTTP headers, so neither this
+ * source nor the published channel is permission to contact an origin.
  */
 let connectedPanelOrigins: (() => string[]) | null = null;
+
+/**
+ * Direct /view fallback authorization. This is intentionally a separate,
+ * fail-closed seam from the diagnostic origin source and the published channel.
+ * Production installs no source: a tokenless loopback WebSocket has no
+ * browser-only provenance that could authorize MCP to make a new HTTP request.
+ * Keep this injectable only for an explicitly authenticated integration in the
+ * future and for focused tests of the already-hardened fallback mechanics.
+ */
+let connectedPanelFallbackOrigins: (() => string[]) | null = null;
 
 /**
  * #1415 — WHERE THESE CALLS ACTUALLY RUN.
@@ -59,10 +71,24 @@ export function setConnectedPanelOrigins(fn: (() => string[]) | null): void {
   connectedPanelOrigins = fn;
 }
 
+/** Install the direct-fallback source. Null is the production-safe default. */
+export function setConnectedPanelFallbackOrigins(fn: (() => string[]) | null): void {
+  connectedPanelFallbackOrigins = fn;
+}
+
 /** Read the current panel origins without allowing a stale channel read to abort a request. */
 export function connectedPanelOriginsNow(): string[] {
   try {
     return panelOrigins();
+  } catch {
+    return [];
+  }
+}
+
+/** Read direct-fallback candidates. Never falls back to diagnostic/channel data. */
+export function connectedPanelFallbackOriginsNow(): string[] {
+  try {
+    return connectedPanelFallbackOrigins ? connectedPanelFallbackOrigins() : [];
   } catch {
     return [];
   }

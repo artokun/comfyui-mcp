@@ -98,7 +98,10 @@ import {
 } from "./turn-origins.js";
 import { listSessions, loadTranscript } from "./history.js";
 import { uploadImageHttp, resetClient } from "../comfyui/client.js";
-import { setConnectedPanelOrigins } from "../comfyui/fetch.js";
+import {
+  setConnectedPanelFallbackOrigins,
+  setConnectedPanelOrigins,
+} from "../comfyui/fetch.js";
 import { publishConnectedPanelOrigins } from "../services/panel-origin-channel.js";
 import { logger } from "../utils/logger.js";
 import { listDownloadJobs } from "../services/download-jobs.js";
@@ -3007,12 +3010,14 @@ export async function runPanelOrchestrator(): Promise<void> {
   // `null` (ambiguous origin) makes the bridge refuse loudly; no entry lets
   // the bridge fall back to active-tab resolution (idle-time probes).
   bridge.setScopeTargetResolver(makeScopeTargetResolver({ tracker: turnOrigins, scopeAgentKeyOf }));
-  // #2149 — the direct /view fallback is narrower than the diagnostic origin
-  // list: only a server-proven local panel whose hello claim matches its
-  // observed origin and whose origin is loopback may be contacted by MCP.
-  // Remote/tunnel/LAN origins remain diagnostic-only and never become SSRF
-  // targets for a headless tool.
-  setConnectedPanelOrigins(() => bridge.connectedSafePanelOrigins());
+  // #2149 — observed tokenless WebSocket origins are diagnostic only. A local
+  // non-browser client can forge both the Origin header and hello claim, so
+  // there is no browser-proven authorization for MCP to make a new /view
+  // request. Keep diagnostics live, but leave the direct-fallback source at
+  // its fail-closed production default until an authenticated panel signal
+  // exists.
+  setConnectedPanelOrigins(() => bridge.connectedServerOrigins());
+  setConnectedPanelFallbackOrigins(null);
   // #884 P1 (confirming gate 2) — EXPLICIT recovery from a DEAD or AMBIGUOUS
   // pin, and from those only. The bridge's refusal names
   // panel_set_workflow_target as the way out; this is the ONLY path that
@@ -5883,7 +5888,7 @@ export async function runPanelOrchestrator(): Promise<void> {
     // connect/disconnect events) so a tab that goes away blanks it within 700ms —
     // the child must never quote a panel that has since disconnected. Writes only
     // when the set changed.
-    publishConnectedPanelOrigins(progressDir, bridge.connectedSafePanelOrigins());
+    publishConnectedPanelOrigins(progressDir, bridge.connectedServerOrigins());
     // #1400 — the same level-triggered discipline for the frontend-virtual
     // registry: republish the CURRENT map, scoped to origins a connected tab
     // actually fronts, so a disconnected tab's entry drops out of the channel

@@ -34,12 +34,6 @@ import {
   QUEUE_BUSY_READ_TOOLS,
   panelToolForGraphCmd,
 } from "./panel-graph-cmd-tools.js";
-import {
-  httpOriginOf,
-  isLoopbackPanelOrigin,
-  normalizePanelOrigin,
-} from "./panel-fallback-target.js";
-import { canonicalOrigin } from "../utils/origin.js";
 
 export const DEFAULT_BRIDGE_PORT = 9101;
 
@@ -263,25 +257,17 @@ interface Conn {
    *  gate — checked BEFORE the version gate — wins. So a wrongly-inherited entry costs at
    *  most one honest round-trip, never a fabricated success. */
   provenSupportedCmds: Set<string>;
-  /** The ComfyUI origin this tab's browser was served from (`comfyui_url` =
-   *  window.location in its `hello`), if sent. Lets a tool bind an HTTP probe to the
-   *  EXACT instance THIS tab fronts — not the process-global target, which a
-   *  different instance's hello may have retargeted (#509). */
+  /** The ComfyUI origin this tab claims in `hello` (`comfyui_url`), if sent.
+   *  This is page/client-controlled metadata and is never an authorization signal. */
   originUrl?: string;
-  /** SERVER-OBSERVED: the browser `Origin` header from THIS socket's WebSocket upgrade
-   *  handshake (scheme://host:port of the page the panel runs in). Unlike `originUrl`
-   *  (client-supplied `hello.comfyui_url`, spoofable by page JS), the browser sets Origin
-   *  and forbids page scripts from overriding it — so it is the TRUSTED proof of which
-   *  ComfyUI a real browser tab actually fronts. Undefined when the handshake carried no
-   *  Origin (a non-browser / relay client). Used to gate the reboot self-probe (#509): a
-   *  socket can CLAIM any comfyui_url, but only a page genuinely SERVED FROM the boot
-   *  origin gets a matching handshake Origin, so we never certify a same-instance cycle
-   *  from a spoofed origin. */
+  /** SERVER-OBSERVED, syntactically validated metadata from THIS socket's WebSocket
+   *  upgrade (scheme://host:port). It is distinct from `originUrl`, but HTTP headers
+   *  are forgeable by a non-browser client on a tokenless listener, so this is not
+   *  authentication and must not authorize outbound requests. */
   serverOrigin?: string;
-  /** SERVER-TRUSTED: the socket arrived on the token-less loopback primary listener
-   *  (a browser on the orchestrator's OWN host). False for relay/tunnel/LAN/pairing
-   *  connections, whose advertised loopback origin is NOT the orchestrator's host
-   *  and must not be directly health-probed (#509). */
+  /** The socket arrived on the token-less loopback primary listener. This is a
+   *  transport/bind fact, not browser provenance; a local non-browser client can
+   *  still connect and forge request headers. */
   local: boolean;
   /** The panel language THIS tab resolved for itself (`locale` in its `hello`), already
    *  narrowed to a locale we ship. Undefined when the panel sent none (an older build) or
@@ -1536,17 +1522,32 @@ function expectedNodeTypeFenceRefusal(tabId: string): Error {
   );
 }
 
-/** Normalize a WebSocket handshake `Origin` header into a canonical scheme://host:port
- *  string, or undefined when it is absent, the opaque literal `"null"` (a sandboxed /
- *  file:// / data: origin, which proves nothing), or unparseable. The browser sets this
- *  header on the upgrade and forbids page JS from overriding it, so a value here is
- *  server-trusted provenance of the page the socket runs in. Host case is lowercased and
- *  the default port made explicit so it compares cleanly against a probe base. */
+/** Normalize a syntactically valid HTTP(S) WebSocket handshake `Origin` into a
+ *  canonical scheme://host:port string. This is metadata for diagnostics and
+ *  workflow identity, not authentication: an arbitrary client can write the
+ *  header when the listener is tokenless. Reject paths, queries, userinfo,
+ *  unsupported schemes, and other values rather than stripping them into a
+ *  value that looks trustworthy. */
 function normalizeHandshakeOrigin(raw: string | string[] | undefined): string | undefined {
+  if (Array.isArray(raw) && raw.length !== 1) return undefined;
   const val = Array.isArray(raw) ? raw[0] : raw;
   if (typeof val !== "string" || val === "" || val.toLowerCase() === "null") return undefined;
   try {
     const u = new URL(val);
+    if (
+      (u.protocol !== "http:" && u.protocol !== "https:") ||
+      u.username !== "" ||
+      u.password !== "" ||
+      u.pathname !== "/" ||
+      u.search !== "" ||
+      u.hash !== ""
+    ) {
+      return undefined;
+    }
+    // Origin serializes as scheme://host with no trailing slash. Requiring the
+    // exact serialization prevents a client from smuggling a path-like spelling
+    // that this boundary would otherwise normalize away.
+    if (val !== `${u.protocol}//${u.host}`) return undefined;
     const port = u.port || (u.protocol === "https:" ? "443" : "80");
     return `${u.protocol}//${u.hostname.toLowerCase()}:${port}`;
   } catch {
@@ -2617,9 +2618,9 @@ export class UiBridge {
       // relay-client.ts / the relay README for why that's believed low-risk).
       this.missedPongs.set(sock, 0);
       sock.on("pong", () => this.missedPongs.set(sock, 0));
-      // SERVER-OBSERVED handshake Origin (the browser sets it and forbids page JS from
-      // overriding it) — the trusted proof of which page this socket runs in, distinct
-      // from the spoofable hello.comfyui_url (#509 self-probe gate).
+      // SERVER-OBSERVED handshake Origin, kept as syntactically validated metadata.
+      // On this tokenless local listener a non-browser client can forge the header,
+      // so it is never an authorization signal for outbound MCP requests.
       const handshakeOrigin = normalizeHandshakeOrigin(req?.headers?.origin);
       // Trusted-local ONLY when the primary listener is a token-less loopback bind
       // (no LAN bind, no tunnel/secure token in front) — see handleConnection's doc.
@@ -2701,20 +2702,15 @@ export class UiBridge {
   }
 
   /**
-   * @param local SERVER-TRUSTED provenance: true only when the socket arrived on
-   *   the token-less loopback primary listener, i.e. a browser genuinely on the
-   *   orchestrator's own host. A token-gated/tunnel-fronted primary, a relay shim,
-   *   and any LAN/pairing listener are all `false` — a browser reaching those can
-   *   sit on a DIFFERENT machine yet advertise its OWN 127.0.0.1 ComfyUI, which
-   *   must never be treated as the orchestrator's local host (#509).
+   * @param local True only when the socket arrived on the token-less loopback
+   *   primary listener. This is a bind/transport fact, not browser provenance:
+   *   an arbitrary local client can still connect and forge HTTP headers.
+   *   Token-gated/tunnel-fronted, relay, and LAN/pairing connections are `false`.
    * @param serverOrigin The origin (scheme://host:port) this connection's workflow
-   *   identity is scoped to, and which the reboot self-probe trusts to know which page
-   *   it fronts. NEVER client-supplied. Normally SERVER-OBSERVED, captured from the
-   *   WebSocket upgrade's `Origin` header. A relay socket has no upgrade to observe, so
-   *   `attachRelayConnection` passes the one the orchestrator DERIVES from its own
-   *   COMFYUI_URL (#1077) — the panel page is served by that ComfyUI, so it is the same
-   *   origin a browser would send. Undefined only when neither is available, which
-   *   leaves the connection unable to adopt a workflow fence.
+   *   identity is scoped to. Normally it is captured from the WebSocket upgrade's
+   *   syntactically validated `Origin` header; a relay socket has no upgrade, so
+   *   `attachRelayConnection` supplies an orchestrator-derived value. Neither path
+   *   is an authorization signal for outbound requests.
    */
   private handleConnection(sock: BridgeSocket, local = false, serverOrigin?: string): void {
     // Track from ACCEPT, not from hello: an anonymous socket is still a socket,
@@ -3928,13 +3924,11 @@ export class UiBridge {
     }
   }
 
-  /** SERVER-OBSERVED origin (scheme://host:port) of the given tab's WebSocket handshake —
-   *  the page the browser was actually serving when it opened this socket. Unlike
-   *  {@link tabOrigin} (client-supplied `hello.comfyui_url`, spoofable), the browser sets
-   *  the handshake `Origin` and blocks page JS from forging it, so this is the TRUSTED
-   *  proof of which ComfyUI a real tab fronts — the origin the reboot self-probe binds to
-   *  (#509). Undefined when the handshake carried no usable Origin. Resolves migration
-   *  aliases like tabOrigin; never throws. */
+  /** SERVER-OBSERVED, syntactically validated origin (scheme://host:port) of the given
+   *  tab's WebSocket handshake. Unlike {@link tabOrigin}, it is independent of the
+   *  hello claim, but it is not authentication on a tokenless listener: a local
+   *  non-browser client can forge the HTTP header. Undefined when unusable. Resolves
+   *  migration aliases like tabOrigin; never throws. */
   tabServerOrigin(tabId: string): string | undefined {
     try {
       return this.resolveTarget(tabId).serverOrigin;
@@ -3975,34 +3969,6 @@ export class UiBridge {
     for (const conn of this.conns.values()) {
       const origin = conn.serverOrigin;
       if (typeof origin === "string" && origin !== "" && !out.includes(origin)) out.push(origin);
-    }
-    return out;
-  }
-
-  /**
-   * Origins eligible for a direct MCP fallback request (#2149).
-   *
-   * `connectedServerOrigins()` is intentionally broader because it powers
-   * diagnostics. Direct contact needs a stronger boundary: the socket must be
-   * server-proven local, the panel's claimed URL must corroborate the observed
-   * handshake origin, and the resulting origin must be a loopback HTTP(S)
-   * origin. Relay/tunnel/LAN/remote origins are never exported here.
-   */
-  connectedSafePanelOrigins(): string[] {
-    const out: string[] = [];
-    for (const conn of this.conns.values()) {
-      if (conn.local !== true) continue;
-      const observed = normalizePanelOrigin(conn.serverOrigin);
-      const claimed = httpOriginOf(conn.originUrl, true, false);
-      if (
-        observed === undefined ||
-        claimed === undefined ||
-        canonicalOrigin(observed) !== canonicalOrigin(claimed) ||
-        !isLoopbackPanelOrigin(observed)
-      ) {
-        continue;
-      }
-      if (!out.includes(observed)) out.push(observed);
     }
     return out;
   }
@@ -4056,11 +4022,11 @@ export class UiBridge {
     }
   }
 
-  /** SERVER-TRUSTED: true only when this tab's socket arrived on the token-less
-   *  loopback primary listener (a browser on the orchestrator's OWN host), so its
-   *  advertised loopback ComfyUI origin really is the orchestrator's local host and
-   *  may be directly health-probed (#509). Relay/tunnel/LAN/pairing tabs → false.
-   *  Resolves migration aliases like tabOrigin; unknown → false. */
+  /** True when this tab's socket arrived on the token-less loopback primary
+   *  listener. This reports local transport placement only; it is not browser
+   *  provenance and must not authorize a new outbound request. Relay/tunnel/
+   *  LAN/pairing tabs → false. Resolves migration aliases like tabOrigin;
+   *  unknown → false. */
   tabIsLocal(tabId: string): boolean {
     try {
       return this.resolveTarget(tabId).local === true;

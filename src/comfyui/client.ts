@@ -16,7 +16,7 @@ import {
 } from "../utils/errors.js";
 import {
   comfyuiFetch,
-  connectedPanelOriginsNow,
+  connectedPanelFallbackOriginsNow,
   comfyHttpTimeoutSeconds,
   isComfyTransportFailure,
   isTimeoutAbort,
@@ -1322,7 +1322,7 @@ export async function fetchImage(
   } catch (primaryError) {
     if (!isComfyTransportFailure(primaryError)) throw primaryError;
 
-    const choice = choosePanelFallbackOrigin(configuredTarget, connectedPanelOriginsNow());
+    const choice = choosePanelFallbackOrigin(configuredTarget, connectedPanelFallbackOriginsNow());
     const declined = describeDeclinedPanelFallback(choice);
     if (choice.kind !== "use") {
       if (declined) {

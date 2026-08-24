@@ -11,7 +11,11 @@ vi.mock("../../config.js", () => ({
 }));
 
 import { fetchImage, MAX_VIEW_RESPONSE_BYTES, resetClient } from "../../comfyui/client.js";
-import { setConnectedPanelOrigins } from "../../comfyui/fetch.js";
+import {
+  connectedPanelFallbackOriginsNow,
+  setConnectedPanelFallbackOrigins,
+  setConnectedPanelOrigins,
+} from "../../comfyui/fetch.js";
 
 const HEADLESS = "http://127.0.0.1:8000";
 const PANEL = "http://localhost:8188";
@@ -36,17 +40,18 @@ let calls: FetchCall[];
 beforeEach(() => {
   calls = [];
   resetClient();
-  setConnectedPanelOrigins(() => []);
+  setConnectedPanelFallbackOrigins(() => []);
 });
 
 afterEach(() => {
+  setConnectedPanelFallbackOrigins(null);
   setConnectedPanelOrigins(null);
   vi.unstubAllGlobals();
 });
 
 describe("fetchImage connected-panel fallback (#2149)", () => {
   it("retries an unreachable headless target at the one different panel origin", async () => {
-    setConnectedPanelOrigins(() => [PANEL]);
+    setConnectedPanelFallbackOrigins(() => [PANEL]);
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -69,7 +74,7 @@ describe("fetchImage connected-panel fallback (#2149)", () => {
   });
 
   it("does not guess when multiple different panel origins are connected", async () => {
-    setConnectedPanelOrigins(() => ["http://127.0.0.1:8188", "http://localhost:8189"]);
+    setConnectedPanelFallbackOrigins(() => ["http://127.0.0.1:8188", "http://localhost:8189"]);
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
@@ -86,7 +91,7 @@ describe("fetchImage connected-panel fallback (#2149)", () => {
   });
 
   it("does not retry a loopback alias of the failed target", async () => {
-    setConnectedPanelOrigins(() => ["http://localhost:8000"]);
+    setConnectedPanelFallbackOrigins(() => ["http://localhost:8000"]);
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
@@ -100,7 +105,7 @@ describe("fetchImage connected-panel fallback (#2149)", () => {
   });
 
   it("keeps a panel response's HTTP error classified as an image error", async () => {
-    setConnectedPanelOrigins(() => [PANEL]);
+    setConnectedPanelFallbackOrigins(() => [PANEL]);
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
@@ -119,7 +124,7 @@ describe("fetchImage connected-panel fallback (#2149)", () => {
   });
 
   it("does not retry a timeout as if it were a dead target", async () => {
-    setConnectedPanelOrigins(() => [PANEL]);
+    setConnectedPanelFallbackOrigins(() => [PANEL]);
     const timeout = new Error("request timed out");
     timeout.name = "TimeoutError";
     vi.stubGlobal(
@@ -141,7 +146,7 @@ describe("fetchImage connected-panel fallback (#2149)", () => {
     "http://localhost:8188?token=leak",
     "http://user:pass@localhost:8188",
   ])("rejects unsafe panel origin %s without contacting it", async (unsafeOrigin) => {
-    setConnectedPanelOrigins(() => [PANEL, unsafeOrigin]);
+    setConnectedPanelFallbackOrigins(() => [PANEL, unsafeOrigin]);
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
@@ -155,7 +160,7 @@ describe("fetchImage connected-panel fallback (#2149)", () => {
   });
 
   it("does not follow a cross-origin redirect from the panel", async () => {
-    setConnectedPanelOrigins(() => [PANEL]);
+    setConnectedPanelFallbackOrigins(() => [PANEL]);
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -175,7 +180,7 @@ describe("fetchImage connected-panel fallback (#2149)", () => {
   });
 
   it("uses manual redirects for the configured target too", async () => {
-    setConnectedPanelOrigins(() => [PANEL]);
+    setConnectedPanelFallbackOrigins(() => [PANEL]);
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -193,7 +198,7 @@ describe("fetchImage connected-panel fallback (#2149)", () => {
   });
 
   it("refuses a response whose final URL is a different origin", async () => {
-    setConnectedPanelOrigins(() => [PANEL]);
+    setConnectedPanelFallbackOrigins(() => [PANEL]);
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
@@ -210,7 +215,7 @@ describe("fetchImage connected-panel fallback (#2149)", () => {
   });
 
   it("refuses an oversized streamed response before buffering it", async () => {
-    setConnectedPanelOrigins(() => [PANEL]);
+    setConnectedPanelFallbackOrigins(() => [PANEL]);
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
@@ -228,5 +233,24 @@ describe("fetchImage connected-panel fallback (#2149)", () => {
 
     await expect(fetchImage("huge.png")).rejects.toMatchObject({ code: "VIEW_TOO_LARGE" });
     expect(calls).toHaveLength(2);
+  });
+
+  it("does not promote diagnostic origins into direct fallback targets", async () => {
+    // This models the forged Origin + hello pair from a local non-browser socket.
+    // The diagnostic source may report it, but it is not an authorization source.
+    setConnectedPanelOrigins(() => [PANEL]);
+    setConnectedPanelFallbackOrigins(null);
+    expect(connectedPanelFallbackOriginsNow()).toEqual([]);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        calls.push({ input });
+        throw transportFailure();
+      }),
+    );
+
+    await expect(fetchImage("forged.png")).rejects.toThrow(/fetch failed/);
+    expect(calls).toHaveLength(1);
+    expect(String(calls[0].input)).toContain(`${HEADLESS}/comfyapi/view?`);
   });
 });

@@ -79,7 +79,7 @@ describe("panel-origin channel", () => {
         origins: [1, null, "", "http://a:1"],
         updated: Date.now(),
         pid: process.pid,
-        trustedLocalPanelOrigins: true,
+        diagnosticPanelOrigins: true,
       }),
     );
     expect(readPublishedPanelOrigins()).toEqual([]);
@@ -171,7 +171,7 @@ describe("panel-origin channel — staleness", () => {
   it("accepts a live, fresh record", () => {
     // The direction that must keep working: everything above rejects, so a test
     // that only asserted rejection could pass with the reader hard-wired to [].
-    writeRecord({ origins, updated: Date.now(), pid: process.pid, trustedLocalPanelOrigins: true });
+    writeRecord({ origins, updated: Date.now(), pid: process.pid, diagnosticPanelOrigins: true });
     expect(readPublishedPanelOrigins()).toEqual(origins);
   });
 
@@ -181,14 +181,14 @@ describe("panel-origin channel — staleness", () => {
       origins,
       updated: now - PANEL_ORIGINS_MAX_AGE_MS + 1_000,
       pid: process.pid,
-      trustedLocalPanelOrigins: true,
+      diagnosticPanelOrigins: true,
     });
     expect(readPublishedPanelOrigins(now)).toEqual(origins);
     writeRecord({
       origins,
       updated: now - PANEL_ORIGINS_MAX_AGE_MS - 1_000,
       pid: process.pid,
-      trustedLocalPanelOrigins: true,
+      diagnosticPanelOrigins: true,
     });
     expect(readPublishedPanelOrigins(now)).toEqual([]);
   });
@@ -201,7 +201,7 @@ describe("panel-origin channel — staleness", () => {
     expect(readPublishedPanelOrigins()).toEqual(origins);
     const raw = JSON.parse(readFileSync(join(dir, PANEL_ORIGINS_FILE), "utf-8"));
     expect(raw.pid).toBe(process.pid);
-    expect(raw.trustedLocalPanelOrigins).toBe(true);
+    expect(raw.diagnosticPanelOrigins).toBe(true);
   });
 });
 
@@ -358,7 +358,7 @@ describe("panel-origin channel — bounded read (review, finding 3)", () => {
         origins: ["http://127.0.0.1:8188"],
         updated: Date.now(),
         pid: process.pid,
-        trustedLocalPanelOrigins: true,
+        diagnosticPanelOrigins: true,
       }),
     );
     expect(readPublishedPanelOrigins()).toEqual(["http://127.0.0.1:8188"]);

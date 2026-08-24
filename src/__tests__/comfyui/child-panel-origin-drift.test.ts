@@ -141,7 +141,7 @@ describe("#1415 WIRING: the orchestrator publishes on its existing poll tick", (
     );
   });
 
-  it("publishes the BRIDGE's server-observed origins, inside pollDownloads", () => {
+  it("publishes the BRIDGE's diagnostic server-observed origins, inside pollDownloads", () => {
     const open = src.indexOf("const pollDownloads = () => {");
     // pollDownloads' body ends exactly where the timer that drives it is created.
     const close = src.indexOf("const downloadTimer = setInterval(pollDownloads, 700);");
@@ -149,7 +149,7 @@ describe("#1415 WIRING: the orchestrator publishes on its existing poll tick", (
     expect(close).toBeGreaterThan(open);
     const body = src.slice(open, close);
     expect(body).toMatch(
-      /publishConnectedPanelOrigins\(\s*progressDir,\s*bridge\.connectedSafePanelOrigins\(\)\s*\)/,
+      /publishConnectedPanelOrigins\(\s*progressDir,\s*bridge\.connectedServerOrigins\(\)\s*\)/,
     );
     // …and nowhere else, so this test is asking about the only call site.
     expect(src.split("publishConnectedPanelOrigins(").length - 1).toBe(1);
