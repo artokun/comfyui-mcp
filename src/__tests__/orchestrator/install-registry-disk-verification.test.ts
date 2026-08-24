@@ -243,4 +243,52 @@ describe("panel_install_node registry verification (#2180)", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("keeps installed:false and blocks disk promotion for every explicit queue failure shape", async () => {
+    const failureShapes: Array<{ name: string; fields: Record<string, unknown> }> = [
+      { name: "failed flag", fields: { failed: true } },
+      { name: "failed array", fields: { failed: [{ id: "comfyui-reactor" }] } },
+      { name: "error flag", fields: { error: true } },
+      { name: "failure flag", fields: { failure: true } },
+      { name: "failures array", fields: { failures: [{ message: "install failed" }] } },
+      { name: "recent failures array", fields: { recent_failures: [{ id: "comfyui-reactor" }] } },
+      { name: "errors array", fields: { errors: [{ message: "install failed" }] } },
+      { name: "failed_count", fields: { failed_count: 1 } },
+      { name: "failure_count", fields: { failure_count: 1 } },
+      { name: "error_count", fields: { error_count: 1 } },
+      { name: "fail_count", fields: { fail_count: 1 } },
+      { name: "failure_reporting", fields: { failure_reporting: "failed" } },
+      { name: "status failed", fields: { status: "failed" } },
+      { name: "status failure", fields: { status: "failure" } },
+      { name: "status error", fields: { status: "error" } },
+    ];
+
+    for (const shape of failureShapes) {
+      const root = mkdtempSync(join(tmpdir(), "cmcp-2180-failure-"));
+      try {
+        mkdirSync(join(root, "custom_nodes"), { recursive: true });
+        state.scanBase = root;
+        state.queueStatus = {
+          pending_count: 0,
+          is_processing: false,
+          ...shape.fields,
+        };
+        state.afterDispatch = () => {
+          const pack = join(root, "custom_nodes", "comfyui-reactor");
+          mkdirSync(pack, { recursive: true });
+          writeFileSync(join(pack, ".tracking"), "{}\n");
+          writeFileSync(join(pack, "__init__.py"), "NODE_CLASS_MAPPINGS = {}\n");
+        };
+
+        const result = await install("comfyui-reactor");
+
+        expect(result.installed, shape.name).toBe(false);
+        expect(result.verified, shape.name).toBe(false);
+        expect(result.verification_evidence, shape.name).toBeUndefined();
+        expect(state.calls).toContain("nodes_queue_status");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  });
 });

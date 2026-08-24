@@ -4240,20 +4240,43 @@ function queueStatusRecord(reply: Record<string, unknown> | null): Record<string
     : null;
 }
 
+function explicitQueueFailure(value: unknown): boolean {
+  if (value === true) return true;
+  if (typeof value === "number") return Number.isFinite(value) && value > 0;
+  if (typeof value === "string") return value.trim() !== "";
+  if (Array.isArray(value)) return value.length > 0;
+  return value !== null && typeof value === "object";
+}
+
 function queueReportsFailure(status: Record<string, unknown>): boolean {
-  for (const key of ["failed", "error", "failure"]) {
-    if (status[key] === true) return true;
+  // These are the protocol's explicit failure payloads. Empty lists/strings and
+  // false flags are not failures; every non-empty/error-shaped value is.
+  for (const key of [
+    "failed",
+    "error",
+    "failure",
+    "failures",
+    "recent_failures",
+    "errors",
+  ]) {
+    if (explicitQueueFailure(status[key])) return true;
   }
-  for (const key of ["failed_count", "failure_count"]) {
+  for (const key of [
+    "failed_count",
+    "failure_count",
+    "error_count",
+    "fail_count",
+  ]) {
     if (typeof status[key] === "number" && status[key] > 0) return true;
   }
-  for (const key of ["failures", "recent_failures", "errors"]) {
-    const value = status[key];
-    if (Array.isArray(value) && value.length > 0) return true;
-    if (typeof value === "string" && value.trim() !== "") return true;
-    if (value && typeof value === "object" && !Array.isArray(value)) return true;
+  if (typeof status.failure_reporting === "string") {
+    const reporting = status.failure_reporting.trim().toLowerCase();
+    if (reporting === "failed" || reporting === "failure" || reporting === "error") {
+      return true;
+    }
   }
-  return status.status === "failed" || status.status === "error";
+  const state = typeof status.status === "string" ? status.status.toLowerCase() : "";
+  return state === "failed" || state === "failure" || state === "error";
 }
 
 function queueSettledForDiskCorroboration(status: Record<string, unknown> | null): boolean {
