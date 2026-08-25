@@ -23,6 +23,13 @@ const EXECUTION_NODES = [
   { id: 73, type: "ImpactSwitch", widget: "select", value: "prompt_a" },
 ] as const;
 
+const FIFTY_NODE_WORKFLOW = Array.from({ length: 50 }, (_, i) => ({
+  id: i + 1,
+  type: "Loader",
+  widget: "asset",
+  value: `asset-${i + 1}.safetensors`,
+}));
+
 function budgetExhaustedReply(opts?: { extraUnchecked?: number }): Record<string, unknown> {
   const extra = opts?.extraUnchecked ?? 35;
   const extras = Array.from({ length: extra }, (_, i) => ({
@@ -165,6 +172,66 @@ describe("panel_get_errors leftover call-budget audit (#1973)", () => {
     }
     expect(payload.errored_count).toBe(0);
     expect(payload.unavailable_widget_values).toBeUndefined();
+  });
+
+  it("pages a 50-node detail audit so graph_query's character cap cannot strand leftovers (#2199)", async () => {
+    const panel = {
+      viewing: { kind: "root", workflow: "fifty.json", workflow_uuid: "workflow-50" },
+      node_count: FIFTY_NODE_WORKFLOW.length,
+      errored_count: 0,
+      nodes: [],
+      unchecked_nodes: FIFTY_NODE_WORKFLOW.map((n) => ({
+        id: n.id,
+        type: n.type,
+        reason: BUDGET_REASON,
+      })),
+      unchecked_budget_exhausted: true,
+      last_execution_error: null,
+      node_errors: null,
+      note: CLEAN_NOTE,
+    };
+    const pages: number[][] = [];
+    const { payload, cmds } = await runGetErrors((cmd) => {
+      if (cmd.cmd === "graph_get_errors") return panel;
+      if (cmd.cmd === "graph_query") {
+        const ids = (cmd.ids as unknown[]).map(Number);
+        pages.push(ids);
+        const rows = FIFTY_NODE_WORKFLOW.filter((n) => ids.includes(n.id));
+        // Model graph_query's max_chars truncation if the completion regresses
+        // to one oversized detail request. The fixed-size pages below fit.
+        if (ids.length > 10) {
+          const shown = rows.slice(0, 10);
+          return {
+            matched: rows.length,
+            shown: shown.length,
+            truncated: true,
+            truncated_by: "max_chars",
+            text: detailText(shown),
+          };
+        }
+        return {
+          matched: rows.length,
+          shown: rows.length,
+          truncated: false,
+          truncated_by: null,
+          text: detailText(rows),
+        };
+      }
+      if (cmd.cmd === "graph_get_object_info") {
+        return { ok: true, object_info: objectInfoFor(FIFTY_NODE_WORKFLOW) };
+      }
+      return { ok: false };
+    });
+
+    expect(cmds.filter((c) => c === "graph_get_object_info")).toHaveLength(1);
+    expect(pages).toHaveLength(5);
+    expect(pages.every((ids) => ids.length <= 10)).toBe(true);
+    expect(new Set(pages.flat())).toEqual(new Set(FIFTY_NODE_WORKFLOW.map((n) => n.id)));
+    expect(payload.audit_complete).toBe(true);
+    expect(payload.node_count).toBe(50);
+    expect(payload.checked_count).toBe(50);
+    expect(payload.unchecked_count).toBe(0);
+    expect(payload.unchecked_nodes).toBeUndefined();
   });
 
   it("keeps the completion pass on the live route after a primary reconnect rebind", async () => {

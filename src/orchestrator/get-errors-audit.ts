@@ -8,8 +8,8 @@
  * sampler / decoder / assembler / SaveVideo still in `unchecked_nodes`, plus
  * the clean-scan note. The orchestrator already waits 30 s for that reply, so
  * after a budget-exhausted payload it finishes the leftover nodes from ONE
- * batched `graph_get_object_info` plus a targeted `graph_query` — not another
- * per-class round trip. If that completion cannot run, the reply still leads
+ * batched `graph_get_object_info` plus bounded explicit-ID `graph_query` pages —
+ * not another per-class round trip. If that completion cannot run, the reply still leads
  * with `audit_complete: false` and checked/unchecked counts rather than a
  * primary clean 0.
  *
@@ -57,6 +57,15 @@ export type GetErrorsCallCtx = Pick<PanelToolCtx, "call" | "tabId">;
 const RETRYABLE_UNCHECKED_RE =
   /ran out of its shared server-call budget|lookup cap was reached/i;
 const FILE_LIKE = /\.[A-Za-z0-9_]{2,12}$/;
+
+/**
+ * `graph_query` has no cursor/offset. Explicit-ID pages are therefore the only
+ * pagination available to this completion pass, and keeping each detail page
+ * small leaves room under its 60,000-character ceiling for ordinary workflows.
+ * Pages are issued concurrently under the existing single elective timeout; the
+ * graph-query ceiling also bounds the pass at 200 leftover ids.
+ */
+const GET_ERRORS_QUERY_PAGE_SIZE = 10;
 
 /**
  * ComfyUI's own upload-input flags, from `UploadType` in
@@ -120,6 +129,12 @@ function asUncheckedList(payload: Record<string, unknown>): UncheckedEntry[] {
 /** An abstention a second batched read has a chance of retiring. */
 function isRetryableUnchecked(entry: UncheckedEntry): boolean {
   return typeof entry?.reason === "string" && RETRYABLE_UNCHECKED_RE.test(entry.reason);
+}
+
+function chunks<T>(values: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < values.length; i += size) out.push(values.slice(i, i + size));
+  return out;
 }
 
 /** Distinct node ids the scan abstained on — same counting rule as the panel. */
@@ -508,6 +523,16 @@ function viewingIdentity(payload: Record<string, unknown> | null): ViewingIdenti
   return Object.keys(identity).length > 0 ? identity : null;
 }
 
+function queryReplyWasTruncated(payload: Record<string, unknown> | null): boolean {
+  if (!payload) return true;
+  if (payload.truncated === true) return true;
+  return (
+    typeof payload.matched === "number" &&
+    typeof payload.shown === "number" &&
+    payload.shown < payload.matched
+  );
+}
+
 /**
  * A follow-up may only retire leftovers when it identifies the same live graph
  * as the primary read. Compare every stable identity field both replies expose;
@@ -538,7 +563,7 @@ function sameViewingIdentity(
 
 /**
  * After a budget-exhausted graph_get_errors, finish leftover combo checks from
- * one batched object_info + a targeted graph_query, then present completeness
+ * one batched object_info + bounded targeted graph_query pages, then present completeness
  * honestly. Never throws: a failed follow-up still returns the incomplete audit.
  *
  * A payload the panel already finished still goes through presentGetErrorsAudit.
@@ -565,36 +590,63 @@ export async function completeGetErrorsAudit(
   ];
 
   if (leftoverIds.length > 0) {
-    const [queryRead, infoRead] = await Promise.all([
-      followUpJson(
-        ctx,
-        {
-          cmd: "graph_query",
-          ids: leftoverIds,
-          fields: "detail",
-          limit: LIMIT_CEILING,
-          max_chars: MAX_CHARS_CEILING,
-        },
-        timeoutMs,
-        primaryTabId,
+    // graph_query has no cursor/offset, and a single detail reply can be cut by
+    // max_chars even when its limit is high. Page by explicit ids so every normal
+    // 50-node workflow gets a complete detail read within one bounded follow-up
+    // wave. A truncated page stays wholly unchecked below; it must never silently
+    // retire only the rows that happened to fit in the reply.
+    const queryIds = leftoverIds.slice(0, LIMIT_CEILING);
+    const queryReadsPromise = Promise.all(
+      chunks(queryIds, GET_ERRORS_QUERY_PAGE_SIZE).map((ids) =>
+        followUpJson(
+          ctx,
+          {
+            cmd: "graph_query",
+            ids,
+            fields: "detail",
+            limit: Math.min(LIMIT_CEILING, ids.length),
+            max_chars: MAX_CHARS_CEILING,
+          },
+          timeoutMs,
+          primaryTabId,
+        ),
       ),
+    );
+    const [queryReads, infoRead] = await Promise.all([
+      queryReadsPromise,
       followUpJson(ctx, { cmd: "graph_get_object_info" }, timeoutMs, primaryTabId),
     ]);
-    const query = queryRead.payload;
     const infoReply = infoRead.payload;
     const objectInfo = infoReply ? objectInfoFromReply(infoReply) : null;
-    const nodes = query ? parseQueryNodes(query) : [];
+    const incompletePageIds = new Set(
+      leftoverIds.slice(LIMIT_CEILING).map((id) => String(id)),
+    );
+    const nodes = queryReads.flatMap((queryRead, pageIndex) => {
+      const query = queryRead.payload;
+      if (queryReplyWasTruncated(query)) {
+        for (const id of queryIds.slice(
+          pageIndex * GET_ERRORS_QUERY_PAGE_SIZE,
+          (pageIndex + 1) * GET_ERRORS_QUERY_PAGE_SIZE,
+        )) incompletePageIds.add(String(id));
+      }
+      return query ? parseQueryNodes(query) : [];
+    });
     const sameGraph =
-      queryRead.stayedOnPrimaryTab &&
+      queryReads.every(
+        (queryRead) =>
+          queryRead.stayedOnPrimaryTab && sameViewingIdentity(payload, queryRead.payload),
+      ) &&
       infoRead.stayedOnPrimaryTab &&
-      sameViewingIdentity(payload, query);
+      queryReads.length > 0;
     if (sameGraph && objectInfo && nodes.length > 0) {
-      const judged = judgeLeftoverCombos(leftover, nodes, objectInfo);
+      const judgeable = leftover.filter((entry) => !incompletePageIds.has(String(entry.id)));
+      const judged = judgeLeftoverCombos(judgeable, nodes, objectInfo);
       // Non-retryable abstentions (the probe cap, a failed lookup, an unenumerable
       // path the panel already disclosed) stay; retryable leftovers are replaced by
       // whatever this pass still could not judge.
       const nextUnchecked = [
         ...asUncheckedList(payload).filter((e) => !isRetryableUnchecked(e)),
+        ...leftover.filter((entry) => incompletePageIds.has(String(entry.id))),
         ...judged.stillUnchecked,
       ];
       payload.unchecked_nodes = nextUnchecked;

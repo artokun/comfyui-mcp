@@ -17054,8 +17054,9 @@ export function buildPanelToolDefs(): PanelToolDef[] {
       // panel gives the live combo scan only the 4 s STEP cap, so a ~77-node graph
       // returns unchecked_budget_exhausted with the sampler / decoder / SaveVideo
       // still unjudged. After the panel returns we finish those leftover nodes from
-      // one batched graph_get_object_info (not another per-class wait) and never
-      // lead with errored_count:0 while the audit is incomplete.
+      // one batched graph_get_object_info plus bounded explicit-ID graph_query pages
+      // (not another per-class wait) and never lead with errored_count:0 while the
+      // audit is incomplete.
       //
       // COMPLETENESS IS JUDGED FROM THE ABSTENTION LIST, NOT THE BUDGET FLAG. The
       // panel abstains for five reasons and only two raise unchecked_budget_exhausted;
