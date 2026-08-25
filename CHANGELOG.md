@@ -6,6 +6,13 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.99] - 2026-08-25
+
+### MCP
+
+#### Fixed
+- Accept local input video filenames with repeated periods while preserving live input resolution, containment, and bounded reads (#2194)
+
 ## [0.52.98] - 2026-08-24
 
 ### MCP
