@@ -10,7 +10,7 @@ import {
 import { collectToolCatalog, registerFullTools } from "./tools/index.js";
 import { registerCompactTools } from "./tools/compact.js";
 import { tryInstallRetiredNameRedirect } from "./tools/retired-redirect.js";
-import { logger } from "./utils/logger.js";
+import { configurePersistentLogFile, logger } from "./utils/logger.js";
 import { readPackageVersion } from "./utils/package-version.js";
 import { JobWatcher } from "./services/job-watcher.js";
 import { parseCliArgs, validateConnectUrl, exportExplicitToolMode, type ToolMode } from "./transport/cli.js";
@@ -28,6 +28,7 @@ import {
 } from "./services/advertised-origin.js";
 import { banner, labelRows, numberedSteps } from "./i18n/terminal-layout.js";
 import { STDIO_HANDSHAKE_INSTRUCTIONS } from "./handshake-instructions.js";
+import { orchestratorLogPath } from "./services/orchestrator-log.js";
 
 /** A RunPod proxy can only reach a listener exposed beyond loopback. */
 function advertisedOriginForBind(host: string, port: number): string | undefined {
@@ -499,6 +500,19 @@ async function main() {
         })}\n`,
       );
       process.exit(1);
+    }
+  }
+
+  // The panel orchestrator is commonly launched from a disposable terminal (and
+  // the panel broker intentionally detaches that terminal). Mirror its existing
+  // stderr logger to a bounded file before policy validation or dynamic imports,
+  // so startup failures and every later exit path leave evidence on disk.
+  if (cli.panelOrchestrator) {
+    const logPath = orchestratorLogPath();
+    if (configurePersistentLogFile(logPath)) {
+      logger.info(`[panel-orchestrator] persistent log enabled at ${logPath}`);
+    } else {
+      logger.warn(`[panel-orchestrator] could not open persistent log at ${logPath}`);
     }
   }
 
