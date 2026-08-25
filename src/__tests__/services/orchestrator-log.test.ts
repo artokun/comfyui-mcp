@@ -90,10 +90,21 @@ describe("persistent orchestrator logger", () => {
     expect(() => logger.warn("stderr remains available")).not.toThrow();
   });
 
-  it("is wired before the orchestrator branch can fail during startup", () => {
+  it("keeps policy validation first and logs connect failures before orchestration", () => {
     const boot = readFileSync(new URL("../../boot.ts", import.meta.url), "utf8");
-    expect(boot).toContain("if (cli.panelOrchestrator)");
-    expect(boot).toContain("const logPath = orchestratorLogPath();");
+    const policy = boot.indexOf("resolveToolSurfacePolicy();");
+    const orchestrator = boot.indexOf("if (cli.panelOrchestrator)");
+    const logging = boot.indexOf("const logPath = orchestratorLogPath();", orchestrator);
+    const http = boot.indexOf('if (cli.transport === "http")', orchestrator);
+    const urlValidation = boot.indexOf("const urlError = validateConnectUrl(cli.comfyuiUrl);", logging);
+    const dynamicImport = boot.indexOf('await import("./orchestrator/index.js")', logging);
+
+    expect(policy).toBeGreaterThan(-1);
+    expect(orchestrator).toBeGreaterThan(policy);
+    expect(logging).toBeGreaterThan(orchestrator);
+    expect(orchestrator).toBeLessThan(http);
+    expect(urlValidation).toBeGreaterThan(logging);
+    expect(dynamicImport).toBeGreaterThan(logging);
     expect(boot).toContain("configurePersistentLogFile(logPath)");
   });
 });

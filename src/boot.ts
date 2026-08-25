@@ -503,19 +503,6 @@ async function main() {
     }
   }
 
-  // The panel orchestrator is commonly launched from a disposable terminal (and
-  // the panel broker intentionally detaches that terminal). Mirror its existing
-  // stderr logger to a bounded file before policy validation or dynamic imports,
-  // so startup failures and every later exit path leave evidence on disk.
-  if (cli.panelOrchestrator) {
-    const logPath = orchestratorLogPath();
-    if (configurePersistentLogFile(logPath)) {
-      logger.info(`[panel-orchestrator] persistent log enabled at ${logPath}`);
-    } else {
-      logger.warn(`[panel-orchestrator] could not open persistent log at ${logPath}`);
-    }
-  }
-
   // #873 — VALIDATE THE OPERATOR'S TOOL POLICY BEFORE ANY SERVER STARTS, of any kind.
   //
   // resolveToolSurfacePolicy() throws on a misconfiguration (an unknown preset, a variable
@@ -538,6 +525,17 @@ async function main() {
   // Standalone background orchestrator: owns the UI bridge and drives the panel
   // with autonomous Agent SDK sessions. Not an MCP server — it never returns.
   if (cli.panelOrchestrator) {
+    // The panel orchestrator is commonly launched from a disposable terminal (and
+    // the panel broker intentionally detaches that terminal). Mirror its existing
+    // stderr logger to a bounded file before URL validation or dynamic imports, so
+    // every connect-mode lifecycle and exit path leaves evidence on disk.
+    const logPath = orchestratorLogPath();
+    if (configurePersistentLogFile(logPath)) {
+      logger.info(`[panel-orchestrator] persistent log enabled at ${logPath}`);
+    } else {
+      logger.warn(`[panel-orchestrator] could not open persistent log at ${logPath}`);
+    }
+
     // `connect <comfyui-url>`: drive a (possibly REMOTE) ComfyUI from an agent on
     // THIS machine. Export the URL as COMFYUI_URL so the orchestrator and the
     // comfyui MCP it spawns target that server — the same remote-URL mechanism the
