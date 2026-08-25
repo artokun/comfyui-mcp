@@ -308,6 +308,28 @@ describe("idempotent panel reads retry a transient orchestrator send error (#223
     }
   });
 
+  it("does not retry panel_run after the HTTP handoff reports a WorkerTransport failure", async () => {
+    let graphRunAttempts = 0;
+    const mutationBridge = {
+      ...bridge,
+      send: async (cmd: { cmd: string }) => {
+        if (cmd.cmd === "graph_run") graphRunAttempts += 1;
+        throw new Error(TRANSIENT_ORCHESTRATOR_SEND_ERROR);
+      },
+    } as unknown as UiBridge;
+    const s = await startPanelMcpHttpServer(mutationBridge, 0);
+    try {
+      const sessionId = await openRawMcpSession(s, "test-1777-panel-run");
+      const result = await rawMcpToolCall(s, sessionId, 2, "panel_run", { allow_duplicate: true });
+
+      expect(result.status).toBe(200);
+      expect(result.payload.result?.isError).toBe(true);
+      expect(graphRunAttempts).toBe(1);
+    } finally {
+      await s.stop();
+    }
+  });
+
   it("does not retry redirected set_todo on the same transport error", async () => {
     let attempts = 0;
     const mutationBridge = {

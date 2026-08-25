@@ -61,6 +61,25 @@ function noticeThenTurnErrorBackend(): AgentBackend {
   };
 }
 
+function outcomeUnknownBackend(): AgentBackend {
+  return {
+    id: "codex" as AgentBackend["id"],
+    capabilities: CAPS,
+    async *run(opts: BackendStartOptions): AsyncIterable<AgentEvent> {
+      yield { type: "session", sessionId: "s-unknown" };
+      for await (const _turn of opts.channel) {
+        void _turn;
+        yield { type: "error", outcomeUnknown: true, message: "MCP reconnect is pending; inspect before retrying." };
+        yield { type: "result", ok: false, subtype: "error_during_execution", turn: 1 };
+      }
+    },
+    async interrupt() {},
+    async listModels() {
+      return [];
+    },
+  };
+}
+
 const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 20));
 
 describe("a session notice renders on its own terms (#1524)", () => {
@@ -83,6 +102,23 @@ describe("a session notice renders on its own terms (#1524)", () => {
     // that re-runs nothing.
     expect(line).not.toMatch(/turn failed/);
     expect(line).not.toMatch(/Nothing was lost/);
+  });
+
+  it("shows an outcome-unknown transport error without generic retry framing (#1777)", async () => {
+    const said: string[] = [];
+    const agent = new PanelAgent(
+      "tab-unknown",
+      { mcpServers: undefined, systemAppend: "", model: "codex-test-1", onSay: (_t, m) => said.push(m) } as never,
+      outcomeUnknownBackend(),
+    );
+    void agent.start();
+    agent.send("queue a render");
+    await settle();
+    await agent.stop().catch(() => {});
+
+    const line = said.find((m) => m.includes("MCP reconnect is pending"));
+    expect(line).toBe("⚠️ MCP reconnect is pending; inspect before retrying.");
+    expect(line).not.toMatch(/turn failed|Nothing was lost/i);
   });
 
   it("does not spend the turn's one error line", async () => {

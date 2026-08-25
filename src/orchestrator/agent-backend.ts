@@ -159,6 +159,10 @@ export type AgentEvent = (
        *  once-per-turn error slot, or a session notice would silence the first
        *  REAL turn error that follows it. */
       sessionNotice?: boolean;
+      /** The provider/transport did not establish a mutation outcome. Renderers
+       *  must show the backend's self-contained recovery guidance rather than
+       *  adding the generic "Nothing was lost — try again" prompt. */
+      outcomeUnknown?: boolean;
     }
 ) & {
   /** Backend-minted TURN MARKER (#728): a monotonically increasing id (1 = the

@@ -45,6 +45,9 @@ const MCP_SERVERS = {
   comfyui: { transport: "stdio" as const, command: "node", args: ["mcp.js"] },
   panel: { transport: "http" as const, url: "http://127.0.0.1:9198/tab" },
 };
+const WORKER_TRANSPORT_FAILURE =
+  "Transport send error: WorkerTransport<StreamableHttpClientWorker<...>> error: " +
+  "HTTP request failed sending request to http://127.0.0.1:9198/orchestrator%3A%3Acodex";
 
 const noticesOf = (events: AgentEvent[]) =>
   events.filter(
@@ -74,7 +77,8 @@ interface Drive {
   reloadCalls: number;
   polls: number;
   pollParams: unknown[];
-  endTurn(): Promise<void>;
+  turnStarts: number;
+  endTurn(kind?: "completed" | "worker-transport"): Promise<void>;
   finish(): Promise<void>;
 }
 
@@ -102,6 +106,7 @@ function startDrive(opts: {
       if (method === "model/list") return { data: [{ id: "gpt-5.6-sol", hidden: false }] };
       if (method === "turn/start") {
         starts += 1;
+        drive.turnStarts = starts;
         waitingForTurn = true;
         for (const w of turnWaiters.splice(0)) w();
         return { turn: { id: `turn-${starts}` } };
@@ -158,7 +163,8 @@ function startDrive(opts: {
     reloadCalls: 0,
     polls: 0,
     pollParams: [],
-    async endTurn() {
+    turnStarts: 0,
+    async endTurn(kind = "completed") {
       await waitFor(() => expect(events.some((e) => e.type === "session")).toBe(true));
       idle = false;
       turns.push({ text: "continue" });
@@ -170,10 +176,22 @@ function startDrive(opts: {
       await waitUntil(() => waitingForTurn && starts > 0);
       waitingForTurn = false;
       const turnId = `turn-${starts}`;
-      client.notificationHandler?.({
-        method: "turn/completed",
-        params: { threadId: "thread-1", turn: { id: turnId, status: "completed" } },
-      });
+      if (kind === "worker-transport") {
+        client.notificationHandler?.({
+          method: "error",
+          params: {
+            threadId: "thread-1",
+            turnId,
+            error: { message: WORKER_TRANSPORT_FAILURE },
+            willRetry: false,
+          },
+        });
+      } else {
+        client.notificationHandler?.({
+          method: "turn/completed",
+          params: { threadId: "thread-1", turn: { id: turnId, status: "completed" } },
+        });
+      }
       // The MCP watch runs AFTER the turn result, before the run loop waits
       // for the next channel item. Idle is the barrier that it finished.
       await waitFor(() => expect(idle).toBe(true));
@@ -188,6 +206,32 @@ function startDrive(opts: {
 }
 
 describe("Codex mid-session MCP drop reconnects panel tools (#1524)", () => {
+  it("a WorkerTransport send failure forces one panel reload without retrying the turn (#1777)", async () => {
+    // Codex can report the HTTP send failure while its status inventory still
+    // says `panel` is connected. The observed error is the recovery trigger;
+    // the reload is control-plane only and must not re-run panel_run.
+    const drive = startDrive({ listings: [PANEL_UP] });
+    await drive.endTurn("worker-transport");
+
+    expect(drive.reloadCalls).toBe(1);
+    expect(drive.turnStarts).toBe(1);
+    const failure = drive.events.find(
+      (e): e is Extract<AgentEvent, { type: "error" }> =>
+        e.type === "error" && !(e as { sessionNotice?: boolean }).sessionNotice,
+    );
+    expect(failure?.outcomeUnknown).toBe(true);
+    expect(failure?.message).toMatch(/did not retry/i);
+    expect(failure?.message).toMatch(/outcome as UNKNOWN/i);
+    expect(noticesOf(drive.events)).toHaveLength(0);
+
+    await drive.endTurn();
+    await drive.finish();
+    expect(drive.reloadCalls).toBe(1);
+    expect(drive.turnStarts).toBe(2);
+    expect(noticesOf(drive.events)).toHaveLength(1);
+    expect(noticesOf(drive.events)[0].message).toMatch(/reconnect brought it back/);
+  });
+
   it("a drop the reload fixes is narrated once, as fixed, on the next turn", async () => {
     // Reload is queued for the NEXT turn. Same-turn is silent; the following
     // poll is the verdict, and that is the only line the user gets.

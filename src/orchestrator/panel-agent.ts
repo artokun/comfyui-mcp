@@ -2282,7 +2282,7 @@ export class PanelAgent {
           // DONE) and would invite a destructive duplicate retry.
           this.deps.onSay(
             this.tabId,
-            ev.unverifiedCompletion
+            ev.unverifiedCompletion || ev.outcomeUnknown
               ? `⚠️ ${detail}`
               : `⚠️ The ${this.model} turn failed: ${detail}\n\nNothing was lost — try again, switch models from the composer picker, or check the terminal running the orchestrator for more detail.`,
           );

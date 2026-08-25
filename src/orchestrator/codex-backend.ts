@@ -72,6 +72,33 @@ function msgOf(err: unknown): string {
   return errorText(err);
 }
 
+/**
+ * Codex wraps a failed request to the orchestrator-hosted HTTP MCP in its
+ * WorkerTransport error. This is narrower than matching every HTTP/provider
+ * error: the Codex lane has one HTTP MCP (`panel`) and the stdio `comfyui`
+ * server cannot produce this transport shape.
+ */
+export function isCodexPanelMcpTransportFailure(message: string): boolean {
+  return (
+    /Transport send error:\s*WorkerTransport\b/i.test(message) &&
+    /HTTP request failed sending request to\s+https?:\/\//i.test(message)
+  );
+}
+
+/** Keep a WorkerTransport failure self-contained: PanelAgent's generic turn
+ * failure text says "Nothing was lost — try again", which is unsafe when a
+ * mutation's dispatch/outcome was not established at this boundary. */
+function panelMcpTransportFailureNotice(message: string): string {
+  return (
+    `The local panel MCP connection failed before a tool result was returned. ` +
+    `The orchestrator did not retry the request. For a render or other mutation, ` +
+    `treat the first attempt's outcome as UNKNOWN until you inspect queue ` +
+    `(action:"list") or get_history; do not re-run panel_run blindly. The panel MCP ` +
+    `connection is being reloaded for the next turn. If it remains unavailable, ` +
+    `reconnect the orchestrator (Disconnect → Connect) before retrying. (${message})`
+  );
+}
+
 const configuredInterruptTimeoutMs = Number(process.env.COMFYUI_MCP_CODEX_INTERRUPT_TIMEOUT_MS);
 const CODEX_INTERRUPT_TIMEOUT_MS =
   Number.isFinite(configuredInterruptTimeoutMs) && configuredInterruptTimeoutMs > 0
@@ -964,6 +991,10 @@ export class CodexBackend implements AgentBackend {
   private mcpReloadPending = new Set<string>();
   /** Partial-catalog episodes cannot be closed by a connected row alone. */
   private mcpCatalogRecovery = new Set<string>();
+  /** A WorkerTransport send failure is stronger evidence than a cached
+   * `runtimeStatus: connected` row, but it still opens only one recovery episode.
+   * The control-plane reload below never replays the failed tool call. */
+  private mcpTransportRecovery = new Set<string>();
   /** The model requested for new turns (mutable for a future live setModel). */
   private model: string | undefined;
   /** The Codex reasoning effort for new turns, already mapped to a valid Codex
@@ -1232,6 +1263,7 @@ export class CodexBackend implements AgentBackend {
     this.mcpDown.clear();
     this.mcpReloadPending.clear();
     this.mcpCatalogRecovery.clear();
+    this.mcpTransportRecovery.clear();
     await this.prepare();
     const client = this.client;
     if (!client) throw new Error("codex app-server not initialized");
@@ -1347,9 +1379,17 @@ export class CodexBackend implements AgentBackend {
   private async checkMcpServers(client: AppServerClient): Promise<AgentEvent[]> {
     const names = Object.keys(this.deps.mcpServers ?? {});
     if (names.length === 0) return [];
+    // A WorkerTransport failure can leave Codex's status inventory cached as
+    // connected. Preserve the observation as a bounded, panel-only recovery
+    // episode so a status poll cannot erase the evidence before reload.
+    const transportRecovery = new Set(
+      [...this.mcpTransportRecovery].filter(
+        (name) => !this.mcpDown.has(name) && !this.mcpReloadPending.has(name),
+      ),
+    );
     const polled = await this.pollMcpStatus(client);
-    if (!polled) return [];
-    const { reported, listed } = polled;
+    if (!polled && transportRecovery.size === 0) return [];
+    const { reported, listed } = polled ?? { reported: [], listed: [] };
     const events: AgentEvent[] = [];
     const health = inspectMcpServers(names, reported);
     const catalogGaps = missingRequiredMcpTools(listed, this.deps.requiredMcpTools);
@@ -1361,6 +1401,9 @@ export class CodexBackend implements AgentBackend {
     const degradedByName = new Map(health.degraded.map((d) => [d.name, d]));
     for (const gap of catalogGaps) {
       if (!degradedByName.has(gap.name)) degradedByName.set(gap.name, { name: gap.name, status: "partial" });
+    }
+    for (const name of transportRecovery) {
+      if (!degradedByName.has(name)) degradedByName.set(name, { name, status: "transport-error" });
     }
     const degraded: DegradedMcpServer[] = [...degradedByName.values()];
     const catalogGapNames = new Set(catalogGaps.map((gap) => gap.name));
@@ -1404,10 +1447,13 @@ export class CodexBackend implements AgentBackend {
       (d) =>
         !pendingVerdict.includes(d.name) &&
         this.mcpDown.get(d.name) !== true &&
-        (reconnectableMcpStatus(d.status) || catalogGapNames.has(d.name)),
+        (reconnectableMcpStatus(d.status) || catalogGapNames.has(d.name) || transportRecovery.has(d.name)),
     );
     if (triable.length > 0) {
-      for (const d of triable) this.mcpDown.set(d.name, true);
+      for (const d of triable) {
+        this.mcpDown.set(d.name, true);
+        this.mcpTransportRecovery.delete(d.name);
+      }
       try {
         await client.request("config/mcpServer/reload", {});
         for (const d of triable) this.mcpReloadPending.add(d.name);
@@ -1448,6 +1494,18 @@ export class CodexBackend implements AgentBackend {
       });
     }
     return events;
+  }
+
+  /** Record the specific HTTP MCP failure observed by the Codex app-server.
+   * Do not open a second episode while an existing status/reload episode is
+   * still unresolved; the next turn's status poll is its verdict. */
+  private noteMcpTransportFailure(message: string): boolean {
+    const panel = this.deps.mcpServers?.panel;
+    if (panel?.transport !== "http" || !isCodexPanelMcpTransportFailure(message)) return false;
+    if (!this.mcpDown.has("panel") && !this.mcpReloadPending.has("panel")) {
+      this.mcpTransportRecovery.add("panel");
+    }
+    return true;
   }
 
   private reportDegradedMcp(degraded: readonly DegradedMcpServer[], when: string): void {
@@ -1522,11 +1580,11 @@ export class CodexBackend implements AgentBackend {
     // already emitted (so the error notification, the exit watcher, and the
     // turn/start rejection can all call it without double-finishing) (P0-B).
     let finishedResult = false;
-    const emitTerminalError = (message: string) => {
+    const emitTerminalError = (message: string, flags?: { outcomeUnknown?: boolean }) => {
       if (finishedResult) return;
       finishedResult = true;
       closeStream();
-      push({ type: "error", message });
+      push({ type: "error", message, ...flags });
       push({ type: "result", ok: false, subtype: "error" });
       finish();
     };
@@ -1831,8 +1889,17 @@ export class CodexBackend implements AgentBackend {
           // liveness set, so this already re-armed the watchdog — keep waiting
           // for either a later terminal error or turn/completed.
           const e = params.error ?? {};
-          if (params.willRetry === true) break;
           const message = formatCodexTurnError(e);
+          // The app-server's normal willRetry path is useful for provider
+          // failures, but it is unsafe to allow a WorkerTransport MCP error to
+          // silently replay a panel mutation. Stop this turn, remember the
+          // panel transport failure for the turn-boundary reload, and make the
+          // outcome/reconnect boundary explicit to the caller.
+          if (this.noteMcpTransportFailure(message)) {
+            emitTerminalError(panelMcpTransportFailureNotice(message), { outcomeUnknown: true });
+            break;
+          }
+          if (params.willRetry === true) break;
           // #1929 / #2045 — a Windows sharing-violation or stale WinGet path on
           // the bundled code-mode host is the same transient /restart recovered.
           if (tryRetryCodeModeHostSpawn(message)) break;
