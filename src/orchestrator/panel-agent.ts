@@ -1867,23 +1867,29 @@ export class PanelAgent {
         if (this.closed) break;
         const emsg = msgOf(err);
         logger.error(`[panel-agent ${this.short()}] stream error: ${emsg}`);
-        // A resume whose target session no longer exists — e.g. the orchestrator was
-        // relaunched from a different cwd, or the session transcript was pruned —
-        // fails with "No conversation found with session ID: <id>". Current Codex
-        // can instead report "no rollout found for thread id <uuid>" for the same
-        // pruned/missing-target condition (#277). Retrying the SAME resume just
-        // loops until the give-up threshold trips and self-exits the whole
-        // orchestrator (a live bridge left serving a permanently-dead agent). Drop
-        // the dead resume target so the NEXT iteration starts a FRESH session and
-        // self-heals; queued messages (this.queue) survive and replay.
+        // A resume whose target session is unavailable — e.g. the orchestrator was
+        // relaunched from a different cwd, the session transcript was pruned, or
+        // another Codex client currently owns its writer — fails with "No
+        // conversation found with session ID: <id>", "no rollout found for
+        // thread id <uuid>", or "already has an active writer". Retrying the
+        // SAME resume just loops until the give-up threshold trips and self-exits
+        // the whole orchestrator (a live bridge left serving a permanently-dead
+        // agent). Drop the unavailable resume target so the NEXT iteration starts
+        // a FRESH session and self-heals; queued messages (this.queue) survive and
+        // replay.
         // GUARD (#278): only treat this as a recoverable resume-MISS when this
         // start actually RESUMED something. A FRESH start (no resume) that emits
         // the same text is a real, non-recoverable failure and MUST count toward
         // the rapid-restart give-up bound below — otherwise resumeMiss would reset
         // the counter forever and spin an infinite restart loop.
-        if (resume && /(?:No conversation found with session ID|no rollout found for thread id)/i.test(emsg)) {
+        if (
+          resume &&
+          /(?:No conversation found with session ID|no rollout found for thread id|already has an active writer)/i.test(
+            emsg,
+          )
+        ) {
           logger.warn(
-            `[panel-agent ${this.short()}] resume target is gone — starting a fresh session`,
+            `[panel-agent ${this.short()}] resume target is unavailable — starting a fresh session`,
           );
           this.sessionId = null;
           resumeSessionId = undefined;

@@ -1,9 +1,10 @@
 // #277 — PanelAgent self-heals a missing resume target. Current Codex reports a
 // pruned/missing resume session as EITHER "No conversation found with session
-// ID: <id>" OR "no rollout found for thread id <uuid>". Both must clear the dead
-// resume target, start a FRESH session, and replay the queued message — instead
-// of retrying the same dead resume until the give-up threshold self-exits the
-// orchestrator.
+// ID: <id>" OR "no rollout found for thread id <uuid>", while Codex can report
+// "already has an active writer" when another client owns the resumed thread.
+// All must clear the unavailable resume target, start a FRESH session, and replay
+// the queued message — instead of retrying the same resume until the give-up
+// threshold self-exits the orchestrator.
 
 import { describe, expect, it, beforeAll } from "vitest";
 import type {
@@ -12,7 +13,10 @@ import type {
   BackendStartOptions,
   ModelChoice,
 } from "../../orchestrator/agent-backend.js";
-import { CLAUDE_CAPABILITIES } from "../../orchestrator/agent-backend.js";
+import {
+  CLAUDE_CAPABILITIES,
+  CODEX_CAPABILITIES,
+} from "../../orchestrator/agent-backend.js";
 
 let PanelAgentManager: typeof import("../../orchestrator/panel-agent.js").PanelAgentManager;
 
@@ -25,15 +29,19 @@ beforeAll(async () => {
  *  throws the error on EVERY run (even fresh) — to prove a fresh-start failure
  *  still counts toward the rapid-restart give-up bound. */
 class ResumeMissBackend implements AgentBackend {
-  readonly id = "claude" as const;
-  readonly capabilities = CLAUDE_CAPABILITIES;
+  readonly id: "claude" | "codex";
+  readonly capabilities: typeof CLAUDE_CAPABILITIES | typeof CODEX_CAPABILITIES;
   runCount = 0;
   resumes: Array<string | undefined> = [];
   turnTexts: string[] = [];
   constructor(
     private readonly errorText: string,
     private readonly alwaysThrow = false,
-  ) {}
+    backend: "claude" | "codex" = "claude",
+  ) {
+    this.id = backend;
+    this.capabilities = backend === "codex" ? CODEX_CAPABILITIES : CLAUDE_CAPABILITIES;
+  }
 
   async *run(opts: BackendStartOptions): AsyncGenerator<AgentEvent> {
     this.runCount += 1;
@@ -56,14 +64,17 @@ class ResumeMissBackend implements AgentBackend {
 }
 
 function makeManager(backend: AgentBackend) {
-  return new PanelAgentManager({
+  const fatals: string[] = [];
+  const manager = new PanelAgentManager({
     mcpServers: {},
     systemAppend: "",
     model: "claude-test",
     onSay: () => {},
     onTurn: () => {},
     makeBackend: () => backend,
+    onAgentFatal: (_tab, reason) => fatals.push(reason),
   } as never);
+  return { manager, fatals };
 }
 
 async function waitFor(cond: () => boolean, timeoutMs = 4000): Promise<void> {
@@ -81,7 +92,7 @@ describe("resume-miss self-heal (#277)", () => {
   ]) {
     it(`clears the dead resume + replays the queued message: "${errorText.slice(0, 24)}…"`, async () => {
       const backend = new ResumeMissBackend(errorText);
-      const manager = makeManager(backend);
+      const { manager } = makeManager(backend);
       const tab = "tab-resume-miss";
       // Seed a resume target so the FIRST run resumes (and fails).
       manager.setResume(tab, "dead-sess");
@@ -96,12 +107,35 @@ describe("resume-miss self-heal (#277)", () => {
     });
   }
 
+  it("Codex active-writer resume conflict drops the resume and starts fresh without a fatal exit", async () => {
+    const backend = new ResumeMissBackend(
+      "stream error: thread dead-sess already has an active writer",
+      false,
+      "codex",
+    );
+    const { manager, fatals } = makeManager(backend);
+    const tab = "tab-codex-active-writer";
+
+    manager.setResume(tab, "dead-sess");
+    manager.send(tab, "retry after conflict");
+
+    await waitFor(() => backend.turnTexts.includes("retry after conflict"));
+    expect(backend.id).toBe("codex");
+    expect(backend.resumes[0]).toBe("dead-sess");
+    expect(backend.resumes[1]).toBeUndefined();
+    expect(backend.runCount).toBeLessThanOrEqual(3);
+    expect(manager.hasLiveAgent(tab)).toBe(true);
+    expect(fatals).toHaveLength(0);
+
+    await manager.stopAll();
+  });
+
   it("a FRESH start that keeps emitting the rollout error still hits the give-up bound (#278)", async () => {
     // No resume seeded → every run is a fresh start that throws the same text.
     // resumeMiss must NOT be set for a fresh start, so the rapid-restart counter
     // is NOT reset and the loop terminates (gives up) instead of spinning forever.
     const backend = new ResumeMissBackend("no rollout found for thread id deadbeef", true);
-    const manager = makeManager(backend);
+    const { manager } = makeManager(backend);
     const tab = "tab-fresh-fail";
     manager.send(tab, "hello");
     // The agent should GIVE UP (drop itself from the live map) within the bound.
