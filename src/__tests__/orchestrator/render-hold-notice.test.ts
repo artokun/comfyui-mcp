@@ -42,6 +42,28 @@ function holdBranch(): string {
   return src.slice(start, end);
 }
 
+/**
+ * The BODY of `if (heldNotice.claim(...)) { … }`, matched by braces rather than by line order.
+ *
+ * Order alone is not enough: a spinner clear moved INSIDE this block still comes after the
+ * claim, and that mutation is the dangerous one — held messages 2 and 3 would get no bubble
+ * AND no "done" frame, so their spinner would run to the 120s safety timeout (issue #257).
+ */
+function claimBlock(): string {
+  const branch = holdBranch();
+  const head = "if (heldNotice.claim(event.tab_id)) {";
+  const at = branch.indexOf(head);
+  expect(at).toBeGreaterThan(-1);
+  let depth = 0;
+  let i = at + head.length - 1; // sits on the opening brace
+  for (; i < branch.length; i++) {
+    if (branch[i] === "{") depth++;
+    else if (branch[i] === "}" && --depth === 0) break;
+  }
+  expect(depth, "the claim block never closes — unbalanced braces").toBe(0);
+  return branch.slice(at, i + 1);
+}
+
 describe("#2290 — RenderHoldNotice: one signal per hold, not per message", () => {
   it("tells a recipient once, however many messages they send into the same hold", () => {
     const notice = new RenderHoldNotice();
@@ -80,22 +102,25 @@ describe("#2290 — the orchestrator consults it at the hold and resets it at ev
   });
 
   it("SOURCE: the opt-out rides the same bubble, so one hold is still one signal", () => {
-    const branch = holdBranch();
-    const claimAt = branch.indexOf("if (heldNotice.claim(event.tab_id)) {");
-    const optOutAt = branch.indexOf('"say.message_queued_opt_out"');
-    expect(optOutAt).toBeGreaterThan(claimAt);
+    const block = claimBlock();
+    // One push, carrying both halves — a second bridge.push would be a second bubble.
+    expect(block.match(/bridge\.push\(/g) ?? []).toHaveLength(1);
+    expect(block).toContain('"say.message_queued_opt_out"');
     // Both halves are rendered for the SAME tab's language — one bubble, one locale.
-    expect(branch).toContain("const locale = bridge.tabLocale(event.tab_id);");
+    expect(block).toContain("const locale = bridge.tabLocale(event.tab_id);");
   });
 
   it("SOURCE: the spinner clear stays PER MESSAGE — deduping the notice must not strand it", () => {
+    const block = claimBlock();
+    // The bubble is what the claim gates…
+    expect(block).toContain("say.message_queued_during_render");
+    // …and the spinner clear is emphatically not: every held message must stop its own.
+    expect(block).not.toContain('state: "done"');
+    expect(block).not.toContain("manager.isTurnActive(");
+    // It is still emitted by the hold branch — just outside the dedupe.
     const branch = holdBranch();
-    const claimAt = branch.indexOf("if (heldNotice.claim(event.tab_id)) {");
-    const spinnerAt = branch.indexOf("if (!manager.isTurnActive(key)) {");
-    expect(spinnerAt).toBeGreaterThan(claimAt);
-    // Nothing between the claim and the spinner check may be the "done" frame: held
-    // messages 2 and 3 get no bubble, but they must still stop their own spinner.
-    expect(branch.slice(claimAt, spinnerAt)).not.toContain('state: "done"');
+    expect(branch).toContain("if (!manager.isTurnActive(key)) {");
+    expect(branch).toContain('bridge.push({ type: "turn", state: "done" }, event.tab_id);');
   });
 
   it("SOURCE: every hold-episode boundary resets it", () => {
