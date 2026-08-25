@@ -1614,6 +1614,14 @@ export class CodexBackend implements AgentBackend {
       return activeTurnId === null || msgTurnId === null || msgTurnId === activeTurnId;
     };
 
+    // A WorkerTransport error can arrive with willRetry:true, which means the
+    // app-server still owns the turn and may emit a retry/completion after the
+    // notification. Local recovery must fence that turn before exposing a
+    // terminal outcome to PanelAgent; otherwise a new turn could start while
+    // the original panel mutation is still being retried.
+    let mcpTransportFencePending = false;
+    let turnFenced = false;
+
     // LIVENESS (watchdog re-arm): re-arm PanelAgent's idle watchdog ONLY for
     // notifications that represent work or an outcome for THIS active turn. A
     // long tool call streams item/* and turn/* notifications that carry no
@@ -1642,7 +1650,7 @@ export class CodexBackend implements AgentBackend {
     const TURN_LIVENESS = (m: string) =>
       m.startsWith("item/") || m.startsWith("turn/") || m === "error" || MODEL_TURN_EVENTS.has(m);
     const bumpTurnActivity = (msg: RpcMessage): void => {
-      if (!belongsToTurn(msg) || !TURN_LIVENESS(msg.method ?? "")) return;
+      if (turnFenced || !belongsToTurn(msg) || !TURN_LIVENESS(msg.method ?? "")) return;
       try {
         onActivity?.();
       } catch {
@@ -1696,7 +1704,7 @@ export class CodexBackend implements AgentBackend {
     let hostRecycleInFlight = false;
     const watchExit = (watched: AppServerClient) => {
       void watched.exitPromise.then(() => {
-        if (done) return;
+        if (done || turnFenced) return;
         if (watched !== liveClient) return;
         // Closing the old app-server is the point of a stale-host recycle;
         // its exit must not finish the replacement turn (#2045).
@@ -1705,6 +1713,69 @@ export class CodexBackend implements AgentBackend {
           watched.exitError ? msgOf(watched.exitError) : "codex app-server connection closed.",
         );
       });
+    };
+
+    const closeFencedClient = async (fencedClient: AppServerClient): Promise<void> => {
+      if (this.client === fencedClient) {
+        this.client = null;
+        this.threadId = null;
+        this.turnId = null;
+      }
+      await this.beginClientClose(fencedClient, "panel MCP transport recovery fence teardown failed");
+    };
+
+    const finishMcpTransportFailure = (message: string, willRetry: boolean): void => {
+      if (mcpTransportFencePending || finishedResult) return;
+      mcpTransportFencePending = true;
+
+      // willRetry:false is already terminal at the app-server boundary. Keep
+      // the existing bounded recovery path and its single local error/result.
+      if (!willRetry) {
+        emitTerminalError(panelMcpTransportFailureNotice(message), { outcomeUnknown: true });
+        return;
+      }
+
+      // willRetry:true is different: Codex may still retry the failed MCP call.
+      // Fence notification handling immediately, then wait for the app-server
+      // to accept turn/interrupt before emitting the local terminal error. If
+      // the interrupt cannot be confirmed, close the client so the old turn
+      // cannot continue while reload/reconnect/new-turn processing starts.
+      turnFenced = true;
+      const fencedClient = liveClient;
+      const fencedTurnId = activeTurnId ?? this.turnId;
+      void (async () => {
+        let interruptError: unknown;
+        if (fencedTurnId) {
+          let timer: NodeJS.Timeout | undefined;
+          try {
+            await Promise.race([
+              fencedClient.request("turn/interrupt", { threadId, turnId: fencedTurnId }),
+              new Promise<never>((_, reject) => {
+                timer = setTimeout(
+                  () => reject(new Error(`turn/interrupt timed out after ${CODEX_INTERRUPT_TIMEOUT_MS}ms`)),
+                  CODEX_INTERRUPT_TIMEOUT_MS,
+                );
+              }),
+            ]);
+          } catch (err) {
+            interruptError = err;
+          } finally {
+            if (timer) clearTimeout(timer);
+          }
+        } else {
+          interruptError = new Error("the active Codex turn had no interruptible turn id");
+        }
+
+        if (interruptError) {
+          logger.warn(`[codex-backend] panel MCP transport fence failed: ${msgOf(interruptError)}`);
+          await closeFencedClient(fencedClient);
+        }
+        if (finishedResult) return;
+        const fenceNote = interruptError
+          ? " The active app-server turn could not be interrupted; its connection was closed before recovery."
+          : " The active app-server turn was interrupted before recovery.";
+        emitTerminalError(panelMcpTransportFailureNotice(message) + fenceNote, { outcomeUnknown: true });
+      })();
     };
 
     const tryRetryCodeModeHostSpawn = (message: string): boolean => {
@@ -1800,6 +1871,7 @@ export class CodexBackend implements AgentBackend {
       // (double-completing PanelAgent's gate) or enqueue deltas into a closing
       // iterator. This is the "exactly one result" invariant (P0-B).
       if (finishedResult) return;
+      if (turnFenced) return;
       // The previous turn died on a retryable host-spawn; wait for the replacement
       // turn/start rather than treating its turn/completed as ours (#1929).
       if (retryPending) return;
@@ -1896,7 +1968,7 @@ export class CodexBackend implements AgentBackend {
           // panel transport failure for the turn-boundary reload, and make the
           // outcome/reconnect boundary explicit to the caller.
           if (this.noteMcpTransportFailure(message)) {
-            emitTerminalError(panelMcpTransportFailureNotice(message), { outcomeUnknown: true });
+            finishMcpTransportFailure(message, params.willRetry === true);
             break;
           }
           if (params.willRetry === true) break;
@@ -2068,6 +2140,10 @@ export class CodexBackend implements AgentBackend {
             // Deliberate teardown (interrupt restored/closed the turn): still end
             // with a result so the gate advances, but no user-facing error.
             abortActiveTurn();
+          } else if (turnFenced) {
+            // The fenced MCP recovery owns terminalization. A late
+            // turn/start rejection must not race it with a generic error.
+            return;
           } else {
             const message = formatCodexTurnError(err);
             if (tryRetryCodeModeHostSpawn(message)) {

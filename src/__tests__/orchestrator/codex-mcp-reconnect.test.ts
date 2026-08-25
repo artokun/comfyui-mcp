@@ -75,25 +75,31 @@ async function waitUntil(pred: () => boolean, timeoutMs = 500): Promise<void> {
 interface Drive {
   events: AgentEvent[];
   reloadCalls: number;
+  interruptCalls: number;
   polls: number;
   pollParams: unknown[];
   turnStarts: number;
-  endTurn(kind?: "completed" | "worker-transport"): Promise<void>;
+  endTurn(kind?: "completed" | "worker-transport" | "worker-transport-retry"): Promise<void>;
+  releaseInterrupt(): void;
+  waitForIdle(): Promise<void>;
   finish(): Promise<void>;
 }
 
 function startDrive(opts: {
   listings: Listing[];
   reloadThrows?: boolean;
+  holdInterrupt?: boolean;
   requiredMcpTools?: Readonly<Record<string, readonly string[]>>;
 }): Drive {
   const listings = [...opts.listings];
   const events: AgentEvent[] = [];
   let polls = 0;
   let reloadCalls = 0;
+  let interruptCalls = 0;
   let starts = 0;
   const turnWaiters: Array<() => void> = [];
   let waitingForTurn = false;
+  let releaseInterrupt: (() => void) | null = null;
 
   const client = {
     notificationHandler: null as ((msg: unknown) => void) | null,
@@ -124,6 +130,16 @@ function startDrive(opts: {
         reloadCalls += 1;
         drive.reloadCalls = reloadCalls;
         if (opts.reloadThrows) throw new Error("unknown method config/mcpServer/reload");
+        return {};
+      }
+      if (method === "turn/interrupt") {
+        interruptCalls += 1;
+        drive.interruptCalls = interruptCalls;
+        if (opts.holdInterrupt) {
+          await new Promise<void>((resolve) => {
+            releaseInterrupt = resolve;
+          });
+        }
         return {};
       }
       throw new Error(`unexpected request: ${method}`);
@@ -161,6 +177,7 @@ function startDrive(opts: {
   const drive: Drive = {
     events,
     reloadCalls: 0,
+    interruptCalls: 0,
     polls: 0,
     pollParams: [],
     turnStarts: 0,
@@ -176,16 +193,26 @@ function startDrive(opts: {
       await waitUntil(() => waitingForTurn && starts > 0);
       waitingForTurn = false;
       const turnId = `turn-${starts}`;
-      if (kind === "worker-transport") {
+      if (kind === "worker-transport" || kind === "worker-transport-retry") {
         client.notificationHandler?.({
           method: "error",
           params: {
             threadId: "thread-1",
             turnId,
             error: { message: WORKER_TRANSPORT_FAILURE },
-            willRetry: false,
+            willRetry: kind === "worker-transport-retry",
           },
         });
+        if (kind === "worker-transport-retry") {
+          // Codex may still complete/retry the original turn after a
+          // willRetry:true notification. The backend must fence this late
+          // completion before it emits the local terminal error.
+          client.notificationHandler?.({
+            method: "turn/completed",
+            params: { threadId: "thread-1", turn: { id: turnId, status: "completed" } },
+          });
+          return;
+        }
       } else {
         client.notificationHandler?.({
           method: "turn/completed",
@@ -194,6 +221,13 @@ function startDrive(opts: {
       }
       // The MCP watch runs AFTER the turn result, before the run loop waits
       // for the next channel item. Idle is the barrier that it finished.
+      await waitFor(() => expect(idle).toBe(true));
+    },
+    releaseInterrupt() {
+      releaseInterrupt?.();
+      releaseInterrupt = null;
+    },
+    async waitForIdle() {
       await waitFor(() => expect(idle).toBe(true));
     },
     async finish() {
@@ -228,6 +262,37 @@ describe("Codex mid-session MCP drop reconnects panel tools (#1524)", () => {
     await drive.finish();
     expect(drive.reloadCalls).toBe(1);
     expect(drive.turnStarts).toBe(2);
+    expect(noticesOf(drive.events)).toHaveLength(1);
+    expect(noticesOf(drive.events)[0].message).toMatch(/reconnect brought it back/);
+  });
+
+  it("fences a willRetry WorkerTransport turn before local recovery (#1777)", async () => {
+    const drive = startDrive({ listings: [PANEL_UP], holdInterrupt: true });
+    await drive.endTurn("worker-transport-retry");
+
+    await waitUntil(() => drive.interruptCalls === 1);
+    expect(drive.turnStarts).toBe(1);
+    expect(drive.events.filter((e) => e.type === "error")).toHaveLength(0);
+
+    // The app-server's late completion was delivered above, but the fenced
+    // turn must remain open locally until turn/interrupt is accepted.
+    drive.releaseInterrupt();
+    await drive.waitForIdle();
+
+    const failure = drive.events.find(
+      (e): e is Extract<AgentEvent, { type: "error" }> =>
+        e.type === "error" && !(e as { sessionNotice?: boolean }).sessionNotice,
+    );
+    expect(failure?.outcomeUnknown).toBe(true);
+    expect(failure?.message).toMatch(/active app-server turn was interrupted/i);
+    expect(failure?.message).toMatch(/did not retry/i);
+    expect(drive.reloadCalls).toBe(1);
+    expect(drive.interruptCalls).toBe(1);
+
+    await drive.endTurn();
+    await drive.finish();
+    expect(drive.turnStarts).toBe(2);
+    expect(drive.reloadCalls).toBe(1);
     expect(noticesOf(drive.events)).toHaveLength(1);
     expect(noticesOf(drive.events)[0].message).toMatch(/reconnect brought it back/);
   });
