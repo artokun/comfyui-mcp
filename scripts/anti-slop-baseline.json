@@ -14,6 +14,9 @@
     "src/__tests__/comfyui/client-ownership-race.test.ts": {
       "no-unknown-returns": 2
     },
+    "src/__tests__/comfyui/panel-read-fallback.test.ts": {
+      "no-unknown-returns": 2
+    },
     "src/__tests__/config-own-host-address.test.ts": {
       "no-chained-type-assertions": 1
     },
@@ -24,6 +27,12 @@
       "no-chained-type-assertions": 1
     },
     "src/__tests__/orchestrator/ack-timeout-vs-applied.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/add-node-ack-timeout.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/add-node-dictgetnode-sibling.test.ts": {
       "no-chained-type-assertions": 1
     },
     "src/__tests__/orchestrator/add-node-frontend-only-skew.test.ts": {
@@ -59,6 +68,9 @@
     "src/__tests__/orchestrator/codex-preview-byte-budget.test.ts": {
       "no-chained-type-assertions": 2
     },
+    "src/__tests__/orchestrator/confirm-late-answer-recovery.test.ts": {
+      "no-chained-type-assertions": 1
+    },
     "src/__tests__/orchestrator/confirm-unreachable-is-not-a-decline.test.ts": {
       "no-chained-type-assertions": 3,
       "no-object-parameters": 1
@@ -79,7 +91,7 @@
       "no-chained-type-assertions": 1
     },
     "src/__tests__/orchestrator/fence-rebind-transient.test.ts": {
-      "no-chained-type-assertions": 1
+      "no-chained-type-assertions": 2
     },
     "src/__tests__/orchestrator/fence-refusal-reason.test.ts": {
       "no-chained-type-assertions": 3
@@ -102,6 +114,9 @@
     "src/__tests__/orchestrator/get-errors-ack-budget.test.ts": {
       "no-chained-type-assertions": 1
     },
+    "src/__tests__/orchestrator/get-errors-call-budget.test.ts": {
+      "no-chained-type-assertions": 2
+    },
     "src/__tests__/orchestrator/graph-read-during-render.test.ts": {
       "no-chained-type-assertions": 3
     },
@@ -119,6 +134,9 @@
     },
     "src/__tests__/orchestrator/install-node-git-expectation.test.ts": {
       "no-chained-type-assertions": 2
+    },
+    "src/__tests__/orchestrator/install-registry-disk-verification.test.ts": {
+      "no-chained-type-assertions": 1
     },
     "src/__tests__/orchestrator/load-claims-instance.test.ts": {
       "no-chained-type-assertions": 1
@@ -142,11 +160,18 @@
       "no-chained-type-assertions": 1,
       "no-unknown-returns": 1
     },
+    "src/__tests__/orchestrator/object-info-budget-mutations.test.ts": {
+      "no-chained-type-assertions": 2,
+      "no-unknown-returns": 2
+    },
     "src/__tests__/orchestrator/ollama-audio.test.ts": {
       "no-chained-type-assertions": 12
     },
     "src/__tests__/orchestrator/ollama-backend.test.ts": {
       "no-chained-type-assertions": 3
+    },
+    "src/__tests__/orchestrator/ollama-image-payload-budget.test.ts": {
+      "no-chained-type-assertions": 1
     },
     "src/__tests__/orchestrator/ollama-tool-mode-spawn.test.ts": {
       "no-chained-type-assertions": 2
@@ -161,6 +186,9 @@
       "no-chained-type-assertions": 3
     },
     "src/__tests__/orchestrator/open-identity-normalization.test.ts": {
+      "no-chained-type-assertions": 3
+    },
+    "src/__tests__/orchestrator/open-reconnect-false-mismatch.test.ts": {
       "no-chained-type-assertions": 3
     },
     "src/__tests__/orchestrator/open-reports-silent-panel-channel.test.ts": {
@@ -181,11 +209,24 @@
     "src/__tests__/orchestrator/panel-971-recovery-deadend.test.ts": {
       "no-chained-type-assertions": 3
     },
+    "src/__tests__/orchestrator/panel-arg-first-guess.test.ts": {
+      "no-chained-type-assertions": 1,
+      "no-unknown-returns": 2
+    },
+    "src/__tests__/orchestrator/panel-kitchen-launch-flag.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/panel-kitchen.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/orchestrator/panel-load-workflow-outcome.test.ts": {
+      "no-chained-type-assertions": 1
+    },
     "src/__tests__/orchestrator/panel-load-workflow-userdata.test.ts": {
       "no-chained-type-assertions": 1
     },
     "src/__tests__/orchestrator/panel-mcp-stale-session.test.ts": {
-      "no-chained-type-assertions": 1
+      "no-chained-type-assertions": 5
     },
     "src/__tests__/orchestrator/panel-reboot-cache-invalidation.test.ts": {
       "no-chained-type-assertions": 2
@@ -200,6 +241,9 @@
       "no-chained-type-assertions": 3
     },
     "src/__tests__/orchestrator/panel-restart-configured-command.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/orchestrator/panel-restart-ezi-wrapper.test.ts": {
       "no-chained-type-assertions": 2
     },
     "src/__tests__/orchestrator/panel-restart-health-probe.test.ts": {
@@ -218,9 +262,18 @@
     "src/__tests__/orchestrator/panel-restart-readiness.test.ts": {
       "no-chained-type-assertions": 2
     },
+    "src/__tests__/orchestrator/panel-restart-slow-boot-reconnect.test.ts": {
+      "no-chained-type-assertions": 2
+    },
+    "src/__tests__/orchestrator/panel-restart-stable-reconnect.test.ts": {
+      "no-chained-type-assertions": 2
+    },
     "src/__tests__/orchestrator/panel-retry-identity.test.ts": {
-      "no-chained-type-assertions": 6,
+      "no-chained-type-assertions": 7,
       "no-unknown-returns": 2
+    },
+    "src/__tests__/orchestrator/panel-run-1728-late-prompt.test.ts": {
+      "no-chained-type-assertions": 9
     },
     "src/__tests__/orchestrator/panel-run-backpressure.test.ts": {
       "no-chained-type-assertions": 6,
@@ -235,18 +288,36 @@
     "src/__tests__/orchestrator/panel-session-rebind-residuals.test.ts": {
       "no-chained-type-assertions": 11
     },
+    "src/__tests__/orchestrator/panel-show-media-animated.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/panel-show-media-audio-ext.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/panel-show-media-client-kind.test.ts": {
+      "no-chained-type-assertions": 12
+    },
+    "src/__tests__/orchestrator/panel-show-media-kind-compat.test.ts": {
+      "no-chained-type-assertions": 1
+    },
     "src/__tests__/orchestrator/panel-show-media-oversized.test.ts": {
       "no-chained-type-assertions": 1,
       "no-unknown-returns": 2
     },
+    "src/__tests__/orchestrator/panel-show-media-unaccounted-ack.test.ts": {
+      "no-chained-type-assertions": 1
+    },
     "src/__tests__/orchestrator/panel-show-media-video-ext.test.ts": {
       "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/panel-show-media-view-probe.test.ts": {
+      "no-chained-type-assertions": 2
     },
     "src/__tests__/orchestrator/panel-tools-strict-schema.test.ts": {
       "no-chained-type-assertions": 1
     },
     "src/__tests__/orchestrator/panel-tools.test.ts": {
-      "no-chained-type-assertions": 118,
+      "no-chained-type-assertions": 121,
       "no-unknown-returns": 3
     },
     "src/__tests__/orchestrator/pi-backend.test.ts": {
@@ -256,11 +327,17 @@
       "no-chained-type-assertions": 3,
       "no-unknown-returns": 1
     },
+    "src/__tests__/orchestrator/promoted-control-persist.test.ts": {
+      "no-chained-type-assertions": 1
+    },
     "src/__tests__/orchestrator/promoted-widget.test.ts": {
       "no-chained-type-assertions": 2
     },
     "src/__tests__/orchestrator/query-graph-budget.test.ts": {
       "no-chained-type-assertions": 2
+    },
+    "src/__tests__/orchestrator/queue-note.test.ts": {
+      "no-chained-type-assertions": 1
     },
     "src/__tests__/orchestrator/remote-restart-never-came-back.test.ts": {
       "no-chained-type-assertions": 2
@@ -294,9 +371,13 @@
       "no-chained-type-assertions": 1,
       "no-unknown-returns": 1
     },
+    "src/__tests__/orchestrator/set-widget-last-observed-schema.test.ts": {
+      "no-chained-type-assertions": 1,
+      "no-unknown-returns": 2
+    },
     "src/__tests__/orchestrator/strip-object-info-host.test.ts": {
       "no-chained-type-assertions": 1,
-      "no-object-parameters": 1
+      "no-object-parameters": 2
     },
     "src/__tests__/orchestrator/strip-workflow-parseable-reply.test.ts": {
       "no-chained-type-assertions": 1
@@ -317,6 +398,9 @@
       "no-chained-type-assertions": 1
     },
     "src/__tests__/orchestrator/unconfirmed-matching-fence.test.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/__tests__/orchestrator/unrecognized-keys.test.ts": {
       "no-chained-type-assertions": 1
     },
     "src/__tests__/orchestrator/workflow-input-ui-guard.test.ts": {
@@ -356,6 +440,12 @@
     },
     "src/__tests__/services/download-persist-contention.test.ts": {
       "no-chained-type-assertions": 1
+    },
+    "src/__tests__/services/download-proxy.test.ts": {
+      "no-unknown-returns": 1
+    },
+    "src/__tests__/services/download-segments.test.ts": {
+      "no-chained-type-assertions": 2
     },
     "src/__tests__/services/env-capabilities-argv-contradiction.test.ts": {
       "no-unknown-returns": 1
@@ -402,13 +492,16 @@
     },
     "src/__tests__/services/node-management.test.ts": {
       "no-chained-type-assertions": 1,
-      "no-unknown-returns": 3
+      "no-unknown-returns": 5
     },
     "src/__tests__/services/node-snapshots.test.ts": {
       "no-chained-type-assertions": 1
     },
     "src/__tests__/services/panel-answered-marker.test.ts": {
       "no-chained-type-assertions": 4
+    },
+    "src/__tests__/services/panel-auto-update.test.ts": {
+      "no-chained-type-assertions": 3
     },
     "src/__tests__/services/panel-pin-cancel.test.ts": {
       "no-unknown-returns": 1
@@ -504,7 +597,7 @@
       "no-chained-type-assertions": 1
     },
     "src/__tests__/tools/html-instead-of-json.test.ts": {
-      "no-chained-type-assertions": 10
+      "no-chained-type-assertions": 12
     },
     "src/__tests__/tools/install-environment.test.ts": {
       "no-unknown-returns": 1
@@ -516,8 +609,11 @@
     "src/__tests__/tools/model-explorer.test.ts": {
       "no-chained-type-assertions": 1
     },
+    "src/__tests__/tools/panel-status-latest.test.ts": {
+      "no-unknown-returns": 1
+    },
     "src/__tests__/tools/post-crash-502-not-misconfig.test.ts": {
-      "no-chained-type-assertions": 1
+      "no-chained-type-assertions": 3
     },
     "src/__tests__/tools/report-issue-version.test.ts": {
       "no-chained-type-assertions": 2,
@@ -529,11 +625,14 @@
     "src/__tests__/tools/retired-redirect.test.ts": {
       "no-chained-type-assertions": 6
     },
+    "src/__tests__/tools/run-template.test.ts": {
+      "no-chained-type-assertions": 1
+    },
     "src/__tests__/tools/runpod.test.ts": {
-      "no-chained-type-assertions": 3
+      "no-chained-type-assertions": 5
     },
     "src/__tests__/tools/skills-access.test.ts": {
-      "no-chained-type-assertions": 2
+      "no-chained-type-assertions": 5
     },
     "src/__tests__/tools/template-schema.test.ts": {
       "no-chained-type-assertions": 2
@@ -560,6 +659,9 @@
     "src/__tests__/tools/workflow-execute.test.ts": {
       "no-chained-type-assertions": 1
     },
+    "src/__tests__/tools/workflow-library-conversion.test.ts": {
+      "no-unknown-returns": 1
+    },
     "src/__tests__/utils/unreachable-not-empty.test.ts": {
       "no-chained-type-assertions": 1
     },
@@ -575,16 +677,23 @@
     "src/orchestrator/claude-backend.ts": {
       "no-unknown-returns": 1
     },
+    "src/orchestrator/codex-error.ts": {
+      "no-unknown-returns": 1
+    },
     "src/orchestrator/panel-mcp-http.ts": {
       "no-unknown-returns": 1
     },
     "src/orchestrator/panel-tools.ts": {
-      "no-unknown-returns": 5
+      "no-chained-type-assertions": 2,
+      "no-unknown-returns": 7
     },
     "src/orchestrator/pi-credentials.ts": {
       "no-unknown-returns": 1
     },
     "src/orchestrator/turn-registry.ts": {
+      "no-unknown-returns": 1
+    },
+    "src/orchestrator/unrecognized-keys.ts": {
       "no-unknown-returns": 1
     },
     "src/services/comfy-cli.ts": {
@@ -599,6 +708,10 @@
     "src/services/graph-query.ts": {
       "no-unknown-returns": 1
     },
+    "src/services/kitchen.ts": {
+      "no-chained-type-assertions": 1,
+      "no-unknown-returns": 2
+    },
     "src/services/manager-node-search.ts": {
       "no-unknown-returns": 3
     },
@@ -611,14 +724,30 @@
     "src/services/node-management.ts": {
       "no-unknown-returns": 1
     },
+    "src/services/panel-image-relay.ts": {
+      "no-chained-type-assertions": 4,
+      "no-object-parameters": 2,
+      "no-unknown-returns": 3
+    },
+    "src/services/panel-launcher.ts": {
+      "no-chained-type-assertions": 1
+    },
+    "src/services/panel-template-relay.ts": {
+      "no-chained-type-assertions": 2,
+      "no-object-parameters": 1,
+      "no-unknown-returns": 1
+    },
     "src/services/queue-monitor.ts": {
       "no-unknown-returns": 1
+    },
+    "src/services/self-restart.ts": {
+      "no-chained-type-assertions": 1
     },
     "src/services/storage-upload.ts": {
       "no-unknown-returns": 1
     },
     "src/services/ui-bridge.ts": {
-      "no-unknown-returns": 2
+      "no-unknown-returns": 3
     },
     "src/services/workflow-autoload.ts": {
       "no-unknown-returns": 1
@@ -637,6 +766,9 @@
     },
     "src/tools/index.ts": {
       "no-unknown-returns": 3
+    },
+    "src/tools/kitchen.ts": {
+      "no-unknown-returns": 2
     },
     "src/tools/retired-redirect.ts": {
       "no-unknown-returns": 2
