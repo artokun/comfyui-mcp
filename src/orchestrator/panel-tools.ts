@@ -1558,9 +1558,13 @@ function isTransientReconnectError(err: unknown): boolean {
   // next single-origin message can.
   if (isRoutingAmbiguity(err)) return false;
   const msg = err instanceof Error ? err.message : String(err ?? "");
+  // #2233 — the Codex/rmcp loopback client wraps a transient pre-response
+  // orchestrator HTTP failure as `Transport send error: WorkerTransport…` instead
+  // of preserving the lower-level socket phrase. This remains retryable only for
+  // commands admitted by RETRY_SAFE_CMDS at the caller below.
   return /no connected tab|genuinely gone|is not open|Failed to fetch|Panel not reachable|ECONNRESET|socket hang up|premature close|other side closed|ECONNABORTED|EPIPE/i.test(
     msg,
-  );
+  ) || /Transport send error:\s*WorkerTransport\b/i.test(msg);
 }
 
 /**

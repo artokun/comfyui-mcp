@@ -29,11 +29,17 @@
 // These tests drive the REAL server over a real socket. A fake would only prove
 // the shape I already believe.
 import { afterEach, describe, expect, it } from "vitest";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 import { startPanelMcpHttpServer, type PanelMcpHttpServer } from "../../orchestrator/panel-mcp-http.js";
 import type { UiBridge } from "../../services/ui-bridge.js";
 
 const TAB = "tmp:1524";
+
+const TRANSIENT_ORCHESTRATOR_SEND_ERROR =
+  "Transport send error: WorkerTransport<StreamableHttpClientWorker<...>> error: " +
+  "HTTP request failed sending request to http://127.0.0.1:9198/orchestrator::codex";
 
 /** A bridge that is never actually reached — these tests stop at the transport. */
 const bridge = {
@@ -171,5 +177,67 @@ describe("a stale panel MCP session is reported as a SESSION problem (#1524)", (
       method: "notifications/initialized",
     });
     expect(r.status, "a live session must not be told it is gone").not.toBe(404);
+  });
+});
+
+describe("idempotent panel reads retry a transient orchestrator send error (#2233)", () => {
+  it("retries panel_query_graph and panel_graph_outline once through the real HTTP MCP path", async () => {
+    const attempts = new Map<string, number>();
+    const readBridge = {
+      ...bridge,
+      send: async (cmd: { cmd: string }) => {
+        const attempt = (attempts.get(cmd.cmd) ?? 0) + 1;
+        attempts.set(cmd.cmd, attempt);
+        if (attempt === 1) throw new Error(TRANSIENT_ORCHESTRATOR_SEND_ERROR);
+        return cmd.cmd === "graph_query"
+          ? { text: "1 KSampler", nodes: [{ id: 1, type: "KSampler" }], node_count: 1 }
+          : { outline: "1 KSampler", node_count: 1, group_count: 0 };
+      },
+    } as unknown as UiBridge;
+    const s = await startPanelMcpHttpServer(readBridge, 0);
+    let client: Client | undefined;
+    try {
+      client = new Client({ name: "test-2233", version: "1" });
+      await client.connect(new StreamableHTTPClientTransport(new URL(s.urlFor(TAB))));
+
+      const query = await client.callTool({ name: "panel_query_graph", arguments: {} });
+      const outline = await client.callTool({ name: "panel_graph_outline", arguments: {} });
+
+      expect(query.isError).not.toBe(true);
+      expect(outline.isError).not.toBe(true);
+      expect(attempts.get("graph_query")).toBe(2);
+      expect(attempts.get("graph_outline")).toBe(2);
+    } finally {
+      await client?.close();
+      await s.stop();
+    }
+  });
+
+  it("does not retry a mutation on the same transport error", async () => {
+    let attempts = 0;
+    const mutationBridge = {
+      ...bridge,
+      send: async () => {
+        attempts += 1;
+        throw new Error(TRANSIENT_ORCHESTRATOR_SEND_ERROR);
+      },
+    } as unknown as UiBridge;
+    const s = await startPanelMcpHttpServer(mutationBridge, 0);
+    let client: Client | undefined;
+    try {
+      client = new Client({ name: "test-2233-mutation", version: "1" });
+      await client.connect(new StreamableHTTPClientTransport(new URL(s.urlFor(TAB))));
+
+      const result = await client.callTool({
+        name: "panel_set_widget",
+        arguments: { node_id: 1, widget: "steps", value: 20 },
+      });
+
+      expect(result.isError).toBe(true);
+      expect(attempts).toBe(1);
+    } finally {
+      await client?.close();
+      await s.stop();
+    }
   });
 });
