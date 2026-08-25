@@ -120,7 +120,9 @@
         "library": "LoRA 庫、影像收藏、Photomap 風格工具",
         "lifecycle": "啟動 / 停止 / 重新啟動編排器",
         "mcp": "MCP 伺服器對應與繼承而來的 {file} 工具",
-        "oauth": "OAuth 與 API 供應商登入"
+        "oauth": "OAuth 與 API 供應商登入",
+        "prompts": "可編輯的系統提示詞 —— {link}",
+        "prompts_link": "開啟編輯器"
       },
       "panel": {
         "connect": "連線 / 中斷這個橋接",
@@ -139,6 +141,26 @@
       },
       "subtitle": "面板編排器的控制台 —— 管理 MCP 伺服器、OAuth 與服務設定。ComfyUI 側邊欄面板則專注於聊天、供應商與即時畫布。",
       "title": "ComfyUI MCP 控制台"
+    },
+    "prompts": {
+      "advanced": "進階 ↗",
+      "badge_custom": "已自訂",
+      "badge_default": "內建預設",
+      "close": "關閉",
+      "copy_default": "複製到編輯器",
+      "empty": "尚未註冊可編輯的提示詞。請啟動編排器後重新載入本頁。",
+      "intro": "編排器管理的每一條系統提示詞，與代理實際收到的內容一致。你寫的內容會儲存在 {file}，內建提示詞不會被更動，所以重設隨時都能把它找回來。",
+      "load_failed": "無法載入提示詞 —— 請重新連線面板。",
+      "placeholder": "正在使用內建預設 —— 在此輸入即可覆寫。",
+      "reset": "重設為內建",
+      "reset_failed": "重設失敗",
+      "resetting": "正在重設…",
+      "save": "儲存",
+      "save_failed": "儲存失敗",
+      "saved": "已儲存 ✓",
+      "saving": "正在儲存…",
+      "title": "系統提示詞",
+      "view_default": "查看內建預設"
     },
     "unauthorized": "未經授權 —— 請重新連線面板。"
   },

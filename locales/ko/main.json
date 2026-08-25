@@ -120,7 +120,9 @@
         "library": "LoRA 라이브러리, 이미지 컬렉션, Photomap 스타일 도구",
         "lifecycle": "오케스트레이터 시작 / 중지 / 재시작",
         "mcp": "MCP 서버 매핑 및 상속된 {file} 도구",
-        "oauth": "OAuth 및 API 제공자 로그인"
+        "oauth": "OAuth 및 API 제공자 로그인",
+        "prompts": "편집할 수 있는 시스템 프롬프트 — {link}",
+        "prompts_link": "편집기 열기"
       },
       "panel": {
         "connect": "이 브리지에 연결 / 연결 해제",
@@ -139,6 +141,26 @@
       },
       "subtitle": "패널 오케스트레이터의 관리 화면 — MCP 서버, OAuth, 서비스 설정을 다룹니다. ComfyUI 사이드바 패널은 대화, 제공자, 실시간 캔버스에 집중합니다.",
       "title": "ComfyUI MCP 콘솔"
+    },
+    "prompts": {
+      "advanced": "고급 ↗",
+      "badge_custom": "사용자 지정됨",
+      "badge_default": "기본 제공 프롬프트",
+      "close": "닫기",
+      "copy_default": "편집기로 복사",
+      "empty": "편집할 수 있는 프롬프트가 아직 등록되지 않았습니다. 오케스트레이터를 시작한 뒤 이 페이지를 새로고침하세요.",
+      "intro": "오케스트레이터가 관리하는 모든 시스템 프롬프트를 에이전트가 실제로 받는 그대로 보여줍니다. 입력한 내용은 {file}에 저장되고 기본 프롬프트는 그대로 남아 있으므로, 되돌리면 언제든 원래대로 돌아갑니다.",
+      "load_failed": "프롬프트를 불러오지 못했습니다 — 패널을 다시 연결하세요.",
+      "placeholder": "기본 제공 프롬프트를 사용 중입니다 — 여기에 입력하면 대체됩니다.",
+      "reset": "기본값으로 되돌리기",
+      "reset_failed": "되돌리기 실패",
+      "resetting": "되돌리는 중…",
+      "save": "저장",
+      "save_failed": "저장 실패",
+      "saved": "저장됨 ✓",
+      "saving": "저장 중…",
+      "title": "시스템 프롬프트",
+      "view_default": "기본 제공 프롬프트 보기"
     },
     "unauthorized": "권한이 없습니다 — 패널을 다시 연결하세요."
   },

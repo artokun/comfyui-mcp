@@ -26,6 +26,13 @@ import {
   unconfirmedSlotKeys,
   CREDENTIAL_SLOTS,
 } from "../services/panel-secrets.js";
+import {
+  clearPromptOverride,
+  isKnownPrompt,
+  listPrompts,
+  panelPromptsPath,
+  setPromptOverride,
+} from "../services/prompt-overrides.js";
 import { OPENAI_KEY_PROVIDER_IDS } from "../services/openai-provider-registry.js";
 import { processLocale, resolveLocale, trFor, type Locale } from "../i18n/index.js";
 import { logger } from "../utils/logger.js";
@@ -367,6 +374,9 @@ function consoleLandingHtml(opts: {
           file: ltrCode(locale, "~/.claude.json"),
         })}</li>
         <li>${t("console.landing.here.oauth", "OAuth & API provider sign-in")}</li>
+        <li>${t("console.landing.here.prompts", "Editable system prompts — {link}", {
+          link: `<a href="/prompts" id="prompts-link">${t("console.landing.here.prompts_link", "open the editor")}</a>`,
+        })}</li>
         <li>${t("console.landing.here.library", "LoRA library, image collections, Photomap-style tooling")}</li>
         <li>${t("console.landing.here.a2ui", "A2UI-rich tool surfaces")}</li>
       </ul>
@@ -383,11 +393,19 @@ function consoleLandingHtml(opts: {
 
     <section>
       <h2>${t("console.landing.api.heading", "API")}</h2>
-      <pre>GET /api/status</pre>
+      <pre>GET  /api/status
+GET  /api/prompts
+POST /api/prompts</pre>
     </section>
   </main>
   <script>
     const T = ${T};
+    // This page is open; the editor behind it is token-gated. If the console was opened
+    // WITH a token (the panel's "Advanced ↗" does not, a hand-typed URL may), hand the
+    // same one to the link so the editor is one click away instead of a 401 the reader
+    // has to fix by pasting a secret they cannot see from here.
+    const carried = new URLSearchParams(location.search).get('token');
+    if (carried) document.getElementById('prompts-link').search = '?token=' + encodeURIComponent(carried);
     fetch('/api/status').then(r => r.json()).then(d => {
       const el = document.getElementById('status');
       const rows = (d.backends || []).map(b =>
@@ -530,6 +548,220 @@ ${rows}
         }
       });
     });
+    document.querySelector("[data-close]").addEventListener("click", () => { try { parent.postMessage({ type: "close" }, "*"); } catch {} });
+    document.querySelector("[data-advanced]").addEventListener("click", () => { window.open(CFG.consoleUrl + "/console", "_blank", "noopener"); });
+    window.addEventListener("load", load);
+    new ResizeObserver(postHeight).observe(document.body);
+  </script>
+</body>
+</html>`;
+}
+
+/** English source for the prompts editor's intro — also that page's translation probe.
+ *  It is the one full sentence on the page; every other string is a button or a badge. */
+const PROMPTS_INTRO_EN =
+  "Every system prompt the orchestrator controls, as the agent actually receives it. Your text is stored in {file} — the built-in stays untouched, so Reset always brings it back.";
+
+/**
+ * The system-prompt editor.
+ *
+ * Rows are built in the BROWSER from /api/prompts rather than baked in here, for two
+ * reasons: the registry is populated at orchestrator startup (a page rendered before a
+ * backend registered its prompt would be permanently stale), and a prompt is thousands of
+ * characters — serializing every default into the document AND into the editor's state
+ * would send each one twice. The client builds nodes with textContent, never innerHTML,
+ * so prompt text that contains markup stays text.
+ */
+function promptsHtml(consoleUrl: string, token: string, negotiatedLocale: Locale): string {
+  const locale = renderedLocale(negotiatedLocale, "console.prompts.intro", PROMPTS_INTRO_EN);
+  const t = pageT(locale);
+  const cfg = scriptJson({ consoleUrl, token });
+  // Every one of these reaches the page as `textContent` or as a DOM property, never as
+  // innerHTML, so they are NOT HTML-escaped (`&` would otherwise show up as "&amp;" on
+  // screen) — scriptJson alone keeps a translation from escaping the <script> element.
+  const T = scriptJson({
+    loadFailed: trFor(locale, "console.prompts.load_failed", "Could not load the prompts — reconnect the panel."),
+    empty: trFor(locale, "console.prompts.empty", "No editable prompts are registered yet. Start the orchestrator, then reload this page."),
+    custom: trFor(locale, "console.prompts.badge_custom", "customised"),
+    builtin: trFor(locale, "console.prompts.badge_default", "built-in default"),
+    placeholder: trFor(locale, "console.prompts.placeholder", "Using the built-in default — type here to override it."),
+    save: trFor(locale, "console.prompts.save", "Save"),
+    saving: trFor(locale, "console.prompts.saving", "Saving…"),
+    saved: trFor(locale, "console.prompts.saved", "Saved ✓"),
+    saveFailed: trFor(locale, "console.prompts.save_failed", "save failed"),
+    reset: trFor(locale, "console.prompts.reset", "Reset to built-in"),
+    resetting: trFor(locale, "console.prompts.resetting", "Resetting…"),
+    resetFailed: trFor(locale, "console.prompts.reset_failed", "reset failed"),
+    viewDefault: trFor(locale, "console.prompts.view_default", "View the built-in default"),
+    copyDefault: trFor(locale, "console.prompts.copy_default", "Copy it into the editor"),
+  });
+  return `<!DOCTYPE html>
+<html ${htmlAttrs(locale)}>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${t("console.prompts.title", "System Prompts")}</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, -apple-system, Segoe UI, sans-serif; }
+    body { margin: 0; background: #0f1115; color: #e8eaed; line-height: 1.5; }
+    main { max-width: 60rem; margin: 0 auto; padding: 0.9rem 1rem 1.2rem; }
+    header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.35rem; }
+    h1 { font-size: 1.05rem; font-weight: 600; margin: 0; }
+    .close { background: none; border: none; color: #9aa0a6; font-size: 1.1rem; cursor: pointer; }
+    .intro { font-size: 0.78rem; color: #9aa0a6; margin: 0 0 0.9rem; }
+    .row { padding: 0.75rem 0; border-bottom: 1px solid #23272f; }
+    .head { display: flex; align-items: baseline; justify-content: space-between; gap: 0.6rem; }
+    .label { font-size: 0.9rem; font-weight: 500; }
+    .help { font-size: 0.72rem; color: #9aa0a6; }
+    .badge { font-size: 0.72rem; color: #9aa0a6; white-space: nowrap; }
+    .badge.custom { color: #fdd663; }
+    textarea { display: block; width: 100%; box-sizing: border-box; margin: 0.45rem 0 0.4rem;
+      min-height: 6.5rem; resize: vertical; background: #0b0d11; border: 1px solid #2a2f3a;
+      border-radius: 7px; color: #e8eaed; padding: 0.5rem 0.6rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.78rem; line-height: 1.45; }
+    /* The editor is code-shaped text in every language, so it stays left-to-right even when
+       the page around it is mirrored — an RTL textarea reorders a prompt's punctuation. */
+    textarea { direction: ltr; text-align: start; }
+    .actions { display: flex; gap: 0.4rem; align-items: center; }
+    button { background: #2a3140; border: 1px solid #3a4150; color: #e8eaed; border-radius: 7px;
+      padding: 0.35rem 0.7rem; font-size: 0.8rem; cursor: pointer; }
+    button:hover:not(:disabled) { background: #333c4d; }
+    button:disabled { opacity: 0.55; cursor: default; }
+    button.ok { color: #81c995; border-color: #2f6b41; }
+    button.ghost { background: none; border-color: #2a2f3a; color: #9aa0a6; }
+    details { margin-top: 0.35rem; }
+    summary { font-size: 0.72rem; color: #8ab4f8; cursor: pointer; }
+    details button { margin-top: 0.4rem; }
+    details pre { margin: 0.35rem 0 0; background: #0b0d11; border: 1px solid #2a2f3a; border-radius: 7px;
+      padding: 0.5rem 0.6rem; overflow-x: auto; white-space: pre-wrap; word-break: break-word;
+      direction: ltr; text-align: start;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.74rem; color: #c4c7ce; }
+    .err { color: #f28b82; font-size: 0.75rem; min-height: 1rem; }
+    footer { margin-top: 0.9rem; display: flex; justify-content: flex-end; }
+    .advanced { background: none; border: 1px solid #2a2f3a; color: #8ab4f8; }
+  </style>
+</head>
+<body>
+  <main>
+    <header><h1>${t("console.prompts.title", "System Prompts")}</h1><button class="close" data-close title="${t("console.prompts.close", "Close")}">✕</button></header>
+    <p class="intro">${t("console.prompts.intro", PROMPTS_INTRO_EN, {
+      file: ltrCode(locale, escapeHtml(panelPromptsPath())),
+    })}</p>
+    <div id="rows"></div>
+    <p class="err" id="err"></p>
+    <footer><button class="advanced" data-advanced>${t("console.prompts.advanced", "Advanced ↗")}</button></footer>
+  </main>
+  <script>
+    const CFG = ${cfg};
+    const T = ${T};
+    const q = (t) => "?token=" + encodeURIComponent(t);
+    const err = document.getElementById("err");
+    function postHeight() {
+      try { parent.postMessage({ type: "resize", height: document.body.scrollHeight }, "*"); } catch {}
+    }
+    function el(tag, cls, text) {
+      const n = document.createElement(tag);
+      if (cls) n.className = cls;
+      if (text !== undefined) n.textContent = text;
+      return n;
+    }
+    /** Paint a row's badge and its Reset button from the server's view of that prompt. */
+    function mark(row, item) {
+      const badge = row.querySelector("[data-badge]");
+      badge.textContent = item.overridden ? T.custom : T.builtin;
+      badge.classList.toggle("custom", !!item.overridden);
+      row.querySelector("[data-reset]").disabled = !item.overridden;
+    }
+    function build(items) {
+      const host = document.getElementById("rows");
+      host.textContent = "";
+      if (!items.length) { host.appendChild(el("p", "help", T.empty)); postHeight(); return; }
+      for (const item of items) {
+        const row = el("div", "row");
+        const head = el("div", "head");
+        const meta = el("div", "meta");
+        meta.appendChild(el("div", "label", item.label || item.id));
+        if (item.help) meta.appendChild(el("div", "help", item.help));
+        head.appendChild(meta);
+        const badge = el("span", "badge", "");
+        badge.setAttribute("data-badge", "");
+        head.appendChild(badge);
+        row.appendChild(head);
+
+        const ta = el("textarea");
+        ta.setAttribute("spellcheck", "false");
+        ta.placeholder = T.placeholder;
+        // The DEFAULT is shown greyed via placeholder-only when unset; the editor itself
+        // carries the override so saving an untouched row cannot silently promote a
+        // built-in into a stored override.
+        ta.value = item.override || "";
+        row.appendChild(ta);
+
+        const actions = el("div", "actions");
+        const save = el("button", "", T.save);
+        save.setAttribute("data-save", "");
+        const reset = el("button", "ghost", T.reset);
+        reset.setAttribute("data-reset", "");
+        actions.appendChild(save);
+        actions.appendChild(reset);
+        row.appendChild(actions);
+
+        const det = el("details");
+        det.appendChild(el("summary", "", T.viewDefault));
+        det.appendChild(el("pre", "", item.default || ""));
+        // Editing usually means "the built-in, but with one paragraph changed", and the
+        // editor starts EMPTY on purpose (see above) — so the default is one click away
+        // rather than a selection drag across a few thousand characters.
+        const copy = el("button", "ghost", T.copyDefault);
+        copy.addEventListener("click", () => { ta.value = item.default || ""; ta.focus(); postHeight(); });
+        det.appendChild(copy);
+        row.appendChild(det);
+
+        save.addEventListener("click", () => send(row, { id: item.id, value: ta.value }, save, T.saving, T.saved, T.save, T.saveFailed));
+        reset.addEventListener("click", () => {
+          ta.value = "";
+          send(row, { id: item.id, reset: true }, reset, T.resetting, T.saved, T.reset, T.resetFailed);
+        });
+        host.appendChild(row);
+        mark(row, item);
+      }
+      postHeight();
+    }
+    async function send(row, body, btn, busyLabel, doneLabel, idleLabel, failLabel) {
+      err.textContent = "";
+      const wasDisabled = btn.disabled;
+      btn.disabled = true; btn.textContent = busyLabel;
+      try {
+        const r = await fetch("/api/prompts" + q(CFG.token), {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const d = await r.json();
+        if (!r.ok || !d.ok) throw new Error(d.error || failLabel);
+        mark(row, d.prompt);
+        btn.textContent = doneLabel; btn.classList.add("ok");
+        setTimeout(() => {
+          btn.textContent = idleLabel; btn.classList.remove("ok");
+          // Re-read the CURRENT disabled state rather than restoring the old one: Reset
+          // disables itself the moment the override is gone, and restoring the captured
+          // flag would hand it back enabled against a prompt that has no override now.
+          btn.disabled = btn.hasAttribute("data-reset") ? !row.querySelector("[data-badge]").classList.contains("custom") : false;
+        }, 1500);
+      } catch (e) {
+        err.textContent = String(e.message || e);
+        btn.textContent = idleLabel; btn.disabled = wasDisabled;
+      }
+      postHeight();
+    }
+    async function load() {
+      try {
+        const r = await fetch("/api/prompts" + q(CFG.token));
+        const d = await r.json();
+        if (!r.ok || !d.ok) throw new Error(d.error || T.loadFailed);
+        build(d.prompts || []);
+      } catch (e) { err.textContent = T.loadFailed; }
+      postHeight();
+    }
     document.querySelector("[data-close]").addEventListener("click", () => { try { parent.postMessage({ type: "close" }, "*"); } catch {} });
     document.querySelector("[data-advanced]").addEventListener("click", () => { window.open(CFG.consoleUrl + "/console", "_blank", "noopener"); });
     window.addEventListener("load", load);
@@ -846,6 +1078,39 @@ export function startPanelConsoleHttpServer(opts: {
       sendJson(res, 405, { ok: false, error: "method not allowed" });
       return;
     }
+    if (path === "/api/prompts") {
+      if (!tokenOk(req, opts.token)) { sendJson(res, 401, { ok: false, error: "unauthorized" }); return; }
+      if (req.method === "GET") { sendJson(res, 200, { ok: true, prompts: listPrompts() }); return; }
+      if (req.method === "POST") {
+        let body: any;
+        try { body = await readJsonBody(req); } catch { sendJson(res, 400, { ok: false, error: "bad json" }); return; }
+        const id = String(body?.id ?? "");
+        if (!id) { sendJson(res, 400, { ok: false, error: "id required" }); return; }
+        // Only prompts the orchestrator REGISTERED may be written. Without this an
+        // arbitrary key lands in panel-prompts.json, where nothing ever reads it and
+        // nothing ever offers to remove it — a typo'd id would look saved forever.
+        if (!isKnownPrompt(id)) { sendJson(res, 400, { ok: false, error: `unknown prompt "${id}"` }); return; }
+        try {
+          // `reset` and an empty/whitespace `value` mean the same thing to the store —
+          // drop the override — but they are kept distinct on the wire because a UI that
+          // sends an accidentally-empty textarea should not be indistinguishable from one
+          // whose user pressed Reset.
+          if (body?.reset === true) clearPromptOverride(id);
+          else setPromptOverride(id, String(body?.value ?? ""));
+        } catch (err) {
+          // setPromptOverride refuses rather than clobber an unreadable overrides file.
+          sendJson(res, 500, { ok: false, error: err instanceof Error ? err.message : String(err) });
+          return;
+        }
+        // Echo the stored state rather than the request: whitespace-only text clears the
+        // override, so what the caller sent is not always what the row now is.
+        const prompt = listPrompts().find((entry) => entry.id === id);
+        sendJson(res, 200, { ok: true, prompt });
+        return;
+      }
+      sendJson(res, 405, { ok: false, error: "method not allowed" });
+      return;
+    }
     if (req.method === "GET" && path === "/api/status") {
       const { backends, any_ready } = allBackendReadiness(KNOWN_BACKENDS);
       const bound = server.address();
@@ -890,6 +1155,23 @@ export function startPanelConsoleHttpServer(opts: {
         200,
         credentialsHtml(CREDENTIAL_SLOTS, `http://${host}:${boundPort}`, opts.token ?? "", locale),
       );
+      return;
+    }
+    if (req.method === "GET" && path === "/prompts") {
+      // Same language as the page it guards — see /credentials.
+      const locale = pageLocale(req);
+      if (!tokenOk(req, opts.token)) {
+        const shown = renderedLocale(locale, "console.unauthorized", UNAUTHORIZED_EN);
+        sendHtml(
+          res,
+          401,
+          `<p ${htmlAttrs(shown)}>${trHtml(shown, "console.unauthorized", UNAUTHORIZED_EN)}</p>`,
+        );
+        return;
+      }
+      const bound = server.address();
+      const boundPort = bound && typeof bound === "object" ? bound.port : opts.port;
+      sendFramedHtml(res, 200, promptsHtml(`http://${host}:${boundPort}`, opts.token ?? "", locale));
       return;
     }
     if (req.method === "GET" && (path === "/" || path === "/console")) {

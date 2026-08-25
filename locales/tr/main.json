@@ -120,7 +120,9 @@
         "library": "LoRA kitaplığı, görsel koleksiyonları, Photomap tarzı araçlar",
         "lifecycle": "Orkestratörü başlat / durdur / yeniden başlat",
         "mcp": "MCP sunucu eşlemeleri ve devralınan {file} araçları",
-        "oauth": "OAuth ve API sağlayıcı girişi"
+        "oauth": "OAuth ve API sağlayıcı girişi",
+        "prompts": "Düzenlenebilir sistem istemleri — {link}",
+        "prompts_link": "düzenleyiciyi aç"
       },
       "panel": {
         "connect": "Bu köprüye bağlan / bağlantıyı kes",
@@ -139,6 +141,26 @@
       },
       "subtitle": "Panel orkestratörünün kontrol düzlemi — MCP sunucuları, OAuth ve servis ayarları. ComfyUI kenar çubuğu paneli sohbete, sağlayıcılara ve canlı tuvale odaklı kalır.",
       "title": "ComfyUI MCP Konsolu"
+    },
+    "prompts": {
+      "advanced": "Gelişmiş ↗",
+      "badge_custom": "özelleştirildi",
+      "badge_default": "yerleşik istem",
+      "close": "Kapat",
+      "copy_default": "Düzenleyiciye kopyala",
+      "empty": "Henüz düzenlenebilir istem kaydedilmedi. Orkestratörü başlatıp bu sayfayı yeniden yükleyin.",
+      "intro": "Orkestratörün yönettiği her sistem istemi, ajanın gerçekte aldığı hâliyle. Yazdığınız metin {file} içinde saklanır; yerleşik istem olduğu gibi kalır, bu yüzden sıfırlamak onu her zaman geri getirir.",
+      "load_failed": "İstemler yüklenemedi — paneli yeniden bağlayın.",
+      "placeholder": "Yerleşik istem kullanılıyor — geçersiz kılmak için buraya yazın.",
+      "reset": "Yerleşik isteme sıfırla",
+      "reset_failed": "sıfırlanamadı",
+      "resetting": "Sıfırlanıyor…",
+      "save": "Kaydet",
+      "save_failed": "kaydedilemedi",
+      "saved": "Kaydedildi ✓",
+      "saving": "Kaydediliyor…",
+      "title": "Sistem İstemleri",
+      "view_default": "Yerleşik istemi göster"
     },
     "unauthorized": "Yetkisiz — paneli yeniden bağlayın."
   },

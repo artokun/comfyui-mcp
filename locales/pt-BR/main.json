@@ -120,7 +120,9 @@
         "library": "Biblioteca de LoRA, coleções de imagens, ferramentas no estilo Photomap",
         "lifecycle": "Iniciar / parar / reiniciar o orquestrador",
         "mcp": "Mapeamentos de servidores MCP e ferramentas {file} herdadas",
-        "oauth": "OAuth e login em provedores de API"
+        "oauth": "OAuth e login em provedores de API",
+        "prompts": "Prompts de sistema editáveis — {link}",
+        "prompts_link": "abrir o editor"
       },
       "panel": {
         "connect": "Conectar / desconectar desta ponte",
@@ -139,6 +141,26 @@
       },
       "subtitle": "Plano de controle do orquestrador do painel — servidores MCP, OAuth e ajustes de serviço. O painel lateral do ComfyUI segue focado em conversa, provedores e no canvas ao vivo.",
       "title": "Console do ComfyUI MCP"
+    },
+    "prompts": {
+      "advanced": "Avançado ↗",
+      "badge_custom": "personalizado",
+      "badge_default": "prompt original",
+      "close": "Fechar",
+      "copy_default": "Copiar para o editor",
+      "empty": "Nenhum prompt editável foi registrado ainda. Inicie o orquestrador e recarregue esta página.",
+      "intro": "Todos os prompts de sistema que o orquestrador controla, exatamente como o agente os recebe. Seu texto fica salvo em {file} — o prompt original continua intacto, então Restaurar sempre o traz de volta.",
+      "load_failed": "Não foi possível carregar os prompts — reconecte o painel.",
+      "placeholder": "Usando o prompt original — digite aqui para substituí-lo.",
+      "reset": "Restaurar o original",
+      "reset_failed": "falha ao restaurar",
+      "resetting": "Restaurando…",
+      "save": "Salvar",
+      "save_failed": "falha ao salvar",
+      "saved": "Salvo ✓",
+      "saving": "Salvando…",
+      "title": "Prompts de sistema",
+      "view_default": "Ver o prompt original"
     },
     "unauthorized": "Não autorizado — reconecte o painel."
   },

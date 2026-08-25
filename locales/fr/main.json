@@ -120,7 +120,9 @@
         "library": "Bibliothèque LoRA, collections d'images, outils façon Photomap",
         "lifecycle": "Démarrer / arrêter / redémarrer l'orchestrateur",
         "mcp": "Mappages de serveurs MCP et outils {file} hérités",
-        "oauth": "OAuth et connexion aux fournisseurs d'API"
+        "oauth": "OAuth et connexion aux fournisseurs d'API",
+        "prompts": "Prompts système modifiables — {link}",
+        "prompts_link": "ouvrir l'éditeur"
       },
       "panel": {
         "connect": "Connexion / déconnexion à ce pont",
@@ -139,6 +141,26 @@
       },
       "subtitle": "Plan de contrôle de l'orchestrateur du panneau — serveurs MCP, OAuth et réglages de service. Le panneau latéral ComfyUI reste centré sur le chat, les fournisseurs et le canevas en direct.",
       "title": "Console ComfyUI MCP"
+    },
+    "prompts": {
+      "advanced": "Avancé ↗",
+      "badge_custom": "personnalisé",
+      "badge_default": "prompt intégré",
+      "close": "Fermer",
+      "copy_default": "Le copier dans l'éditeur",
+      "empty": "Aucun prompt modifiable n'est encore enregistré. Démarrez l'orchestrateur, puis rechargez cette page.",
+      "intro": "Tous les prompts système que l'orchestrateur contrôle, tels que l'agent les reçoit réellement. Votre texte est enregistré dans {file} — le prompt intégré reste intact, donc Réinitialiser le rétablit toujours.",
+      "load_failed": "Impossible de charger les prompts — reconnectez le panneau.",
+      "placeholder": "Le prompt intégré est utilisé — écrivez ici pour le remplacer.",
+      "reset": "Rétablir le prompt intégré",
+      "reset_failed": "échec de la réinitialisation",
+      "resetting": "Réinitialisation…",
+      "save": "Enregistrer",
+      "save_failed": "échec de l'enregistrement",
+      "saved": "Enregistré ✓",
+      "saving": "Enregistrement…",
+      "title": "Prompts système",
+      "view_default": "Voir le prompt intégré"
     },
     "unauthorized": "Non autorisé — reconnectez le panneau."
   },

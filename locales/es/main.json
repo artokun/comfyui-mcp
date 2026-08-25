@@ -120,7 +120,9 @@
         "library": "Biblioteca de LoRA, colecciones de imágenes, herramientas al estilo Photomap",
         "lifecycle": "Iniciar / detener / reiniciar el orquestador",
         "mcp": "Asignaciones de servidores MCP y herramientas {file} heredadas",
-        "oauth": "OAuth e inicio de sesión con proveedores de API"
+        "oauth": "OAuth e inicio de sesión con proveedores de API",
+        "prompts": "Prompts del sistema editables — {link}",
+        "prompts_link": "abrir el editor"
       },
       "panel": {
         "connect": "Conectar / desconectar de este puente",
@@ -139,6 +141,26 @@
       },
       "subtitle": "Plano de control del orquestador del panel: servidores MCP, OAuth y ajustes de servicio. El panel lateral de ComfyUI sigue centrado en el chat, los proveedores y el lienzo en vivo.",
       "title": "Consola de ComfyUI MCP"
+    },
+    "prompts": {
+      "advanced": "Avanzado ↗",
+      "badge_custom": "personalizado",
+      "badge_default": "prompt integrado",
+      "close": "Cerrar",
+      "copy_default": "Copiarlo en el editor",
+      "empty": "Todavía no hay prompts editables registrados. Inicia el orquestador y recarga esta página.",
+      "intro": "Todos los prompts del sistema que controla el orquestador, tal como los recibe el agente. Tu texto se guarda en {file}: el prompt integrado queda intacto, así que Restablecer siempre lo devuelve.",
+      "load_failed": "No se pudieron cargar los prompts — vuelve a conectar el panel.",
+      "placeholder": "Se está usando el prompt integrado: escribe aquí para sustituirlo.",
+      "reset": "Restablecer el integrado",
+      "reset_failed": "error al restablecer",
+      "resetting": "Restableciendo…",
+      "save": "Guardar",
+      "save_failed": "error al guardar",
+      "saved": "Guardado ✓",
+      "saving": "Guardando…",
+      "title": "Prompts del sistema",
+      "view_default": "Ver el prompt integrado"
     },
     "unauthorized": "No autorizado — vuelve a conectar el panel."
   },

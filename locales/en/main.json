@@ -120,7 +120,9 @@
         "library": "LoRA library, image collections, Photomap-style tooling",
         "lifecycle": "Start / stop / restart orchestrator",
         "mcp": "MCP server mappings & inherited {file} tools",
-        "oauth": "OAuth & API provider sign-in"
+        "oauth": "OAuth & API provider sign-in",
+        "prompts": "Editable system prompts — {link}",
+        "prompts_link": "open the editor"
       },
       "panel": {
         "connect": "Connect / Disconnect to this bridge",
@@ -139,6 +141,26 @@
       },
       "subtitle": "Control plane for the panel orchestrator — MCP servers, OAuth, and service settings. The ComfyUI sidebar panel stays focused on chat, providers, and the live canvas.",
       "title": "ComfyUI MCP Console"
+    },
+    "prompts": {
+      "advanced": "Advanced ↗",
+      "badge_custom": "customised",
+      "badge_default": "built-in default",
+      "close": "Close",
+      "copy_default": "Copy it into the editor",
+      "empty": "No editable prompts are registered yet. Start the orchestrator, then reload this page.",
+      "intro": "Every system prompt the orchestrator controls, as the agent actually receives it. Your text is stored in {file} — the built-in stays untouched, so Reset always brings it back.",
+      "load_failed": "Could not load the prompts — reconnect the panel.",
+      "placeholder": "Using the built-in default — type here to override it.",
+      "reset": "Reset to built-in",
+      "reset_failed": "reset failed",
+      "resetting": "Resetting…",
+      "save": "Save",
+      "save_failed": "save failed",
+      "saved": "Saved ✓",
+      "saving": "Saving…",
+      "title": "System Prompts",
+      "view_default": "View the built-in default"
     },
     "unauthorized": "Unauthorized — reconnect the panel."
   },

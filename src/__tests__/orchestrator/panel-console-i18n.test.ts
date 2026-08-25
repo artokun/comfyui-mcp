@@ -96,6 +96,18 @@ describe("console pages with a catalog installed", () => {
       expect(creds).toContain("«ko:console.credentials.privacy»");
       expect(creds).toContain(`<html lang="ko">`);
 
+      const prompts = await get(srv.url, "/prompts?token=tok-123", "fr");
+      expect(prompts).toContain("«fr:console.prompts.title»");
+      // The row labels the editor paints live in the script block, not the body — the
+      // page is empty markup until /api/prompts answers, so a catalog that never
+      // reached the script would render a working page in silent English.
+      expect(prompts).toContain("«fr:console.prompts.reset»");
+      expect(prompts).toContain("«fr:console.prompts.badge_custom»");
+      expect(prompts).toContain(`<html lang="fr">`);
+
+      const promptsDenied = await get(srv.url, "/prompts?token=wrong", "ru");
+      expect(promptsDenied).toBe(`<p lang="ru">«ru:console.unauthorized»</p>`);
+
       const denied = await get(srv.url, "/credentials?token=wrong", "ru");
       expect(denied).toBe(`<p lang="ru">«ru:console.unauthorized»</p>`);
     } finally {
@@ -157,7 +169,7 @@ describe("console pages with a catalog installed", () => {
     translate = () => hostile;
     const srv = await serve();
     try {
-      for (const path of ["/console", "/credentials?token=tok-123"]) {
+      for (const path of ["/console", "/credentials?token=tok-123", "/prompts?token=tok-123"]) {
         const html = await get(srv.url, path);
         const scripts = scriptsOf(html);
         expect(scripts.length).toBeGreaterThan(0);
@@ -182,6 +194,26 @@ describe("console pages with a catalog installed", () => {
       expect(html).not.toContain("接続情報");
       expect(html).toContain("http://127.0.0.1:9500");
       expect(html).toContain("ws://127.0.0.1:9180");
+    } finally {
+      await srv.stop();
+    }
+  });
+
+  it("keeps the overrides path when a translation drops its placeholder", async () => {
+    const srv = await serve();
+    try {
+      // With the slot intact, the catalog's sentence is what the reader gets.
+      translate = (locale, key) => (key === "console.prompts.intro" ? `«${locale}» {file}` : undefined);
+      const kept = await get(srv.url, "/prompts?token=tok-123", "ja");
+      expect(kept).toContain("«ja»");
+      expect(kept).toContain("panel-prompts.json");
+
+      // Drop the slot and the SENTENCE is dropped, never the path inside it — that path
+      // is the one fact the sentence exists to state: where the edited text is kept.
+      translate = (_locale, key) => (key === "console.prompts.intro" ? "«dropped»" : undefined);
+      const lost = await get(srv.url, "/prompts?token=tok-123", "ja");
+      expect(lost).not.toContain("«dropped»");
+      expect(lost).toContain("panel-prompts.json");
     } finally {
       await srv.stop();
     }
