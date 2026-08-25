@@ -578,13 +578,24 @@ async function readLocalViewFallback(
   type: "output" | "input" | "temp",
   subfolder: string,
 ): Promise<{ base64: string; mimeType: string } | undefined> {
-  if (isRemoteMode() || isCloudMode() || !config.comfyuiPath) return undefined;
-
-  const root = resolve(config.comfyuiPath, type);
-  const candidate = resolve(root, subfolder, filename);
-  if (!isStrictlyInside(root, candidate)) return undefined;
+  if (isRemoteMode() || isCloudMode()) return undefined;
 
   try {
+    // Use the same live/argv-aware roots as local filesystem tools. In
+    // particular, input may be redirected with --input-directory and the
+    // configured COMFYUI_PATH may belong to a different installed copy.
+    const root =
+      type === "input"
+        ? await resolveInputDir()
+        : type === "output"
+          ? await resolveOutputDir()
+          : config.comfyuiPath
+            ? resolve(config.comfyuiPath, "temp")
+            : undefined;
+    if (!root) return undefined;
+    const candidate = resolve(root, subfolder, filename);
+    if (!isStrictlyInside(root, candidate)) return undefined;
+
     // Check the canonical paths too: an input-side symlink must not turn this
     // compatibility path into an arbitrary local file read.
     const [realRoot, realCandidate] = await Promise.all([
