@@ -6,6 +6,16 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.101] - 2026-08-24
+
+### MCP
+
+#### Fixed
+- allow safe deferred widget edits through queue fence (#1716)
+- retry idempotent reads after transport errors (#2233)
+- recover Codex resume active-writer conflicts (#2232)
+
+
 ## [0.52.100] - 2026-08-24
 
 ### MCP
