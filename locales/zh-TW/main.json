@@ -193,6 +193,7 @@
     "llamacpp_small_context": "你的 llama-server 上下文為 {tokens} 個 token（啟動旗標 -c）。代理程式的工具內容需要至少 16384，低於這個值時較長的回合會被無聲截斷。建議用 `-c 16384` 或更高重新啟動。",
     "local_agent_resumed": "算圖完成，本機代理程式回來了。現在回覆你排隊中的訊息。",
     "message_queued_during_render": "正在算圖，為了把 GPU 留給它，我先把你的訊息排進佇列。一結束我就回覆。",
+    "message_queued_opt_out": "如果想在算圖期間繼續聊天，請在 ~/.comfyui-mcp/.env 中設定 COMFYUI_MCP_PAUSE_LOCAL_ON_GEN=0 並重新啟動 —— 本機模型會和 ComfyUI 共用同一張 GPU，可能拖慢算圖，甚至耗盡 VRAM。",
     "new_chat_durable_clear_failed": "新對話已開始，但上一段對話儲存在磁碟上的工作階段沒能刪除（寫入失敗 —— 可能磁碟已滿或檔案被鎖住）。如果在這段對話完成第一輪往返之前編排器重新啟動，舊對話可能會被復原；真的發生時請再開一次新對話。",
     "oauth_signin_failed": "{provider} 登入失敗：{message}",
     "openrouter_no_key": "OpenRouter 還沒有 API 金鑰 —— 這樣連線會在你的第一則訊息時失敗。請在設定 → OpenRouter →「設定 API 金鑰…」中填寫（會遮罩，由編排器儲存 —— 立即生效，不需重新連線），或設定 OPENROUTER_API_KEY 環境變數並重新啟動編排器。金鑰取得：https://openrouter.ai/keys",

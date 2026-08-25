@@ -55,3 +55,34 @@ export function backendSharesRenderGpu(backend: string, local: LocalVramLocality
 export function pauseLocalOnGenEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return (env.COMFYUI_MCP_PAUSE_LOCAL_ON_GEN ?? env.COMFYUI_MCP_OLLAMA_PAUSE_ON_GEN) !== "0";
 }
+
+/**
+ * ONE hold notice per render, per recipient — not one per held message (#2290).
+ *
+ * The hold itself is announced at the moment a chat is withheld, but a person who types
+ * three lines in a row during one render triggers that code path three times, and three
+ * identical "a render is running" bubbles read worse than the silence they replaced. This
+ * tracks which recipients have already been told about the render currently in flight.
+ *
+ * Scoped to the RECIPIENT (the tab the notice is pushed to), not to the shared conversation:
+ * a second tab that sends its own message during the same render has been told nothing yet,
+ * and "I've queued your message" is only true for whoever sent one.
+ *
+ * `reset()` marks a hold-episode boundary — the render ended (or a new one began), so the
+ * next held message is a new wait and announces again.
+ */
+export class RenderHoldNotice {
+  private readonly told = new Set<string>();
+
+  /** True exactly once per recipient per hold episode: this caller should announce. */
+  claim(recipient: string): boolean {
+    if (this.told.has(recipient)) return false;
+    this.told.add(recipient);
+    return true;
+  }
+
+  /** A new hold episode starts (or the current one ended) — everyone is untold again. */
+  reset(): void {
+    this.told.clear();
+  }
+}

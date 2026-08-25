@@ -297,6 +297,7 @@ import {
   backendSharesRenderGpu,
   isLocalLlamacpp,
   pauseLocalOnGenEnabled,
+  RenderHoldNotice,
 } from "../services/local-vram.js";
 import { getAgentSettings, setAgentSettings, normalizePreferredModels } from "../services/panel-settings.js";
 import {
@@ -3335,6 +3336,10 @@ export async function runPanelOrchestrator(): Promise<void> {
     (defaultBackend === "llamacpp" || [...tabBackends.values()].includes("llamacpp"));
   // agentKey -> messages held while a render runs (flushed on render end).
   const heldDuringGen = new Map<string, Array<{ text: string; opts: Record<string, unknown> }>>();
+  // #2290 — the hold is announced ONCE per render per tab. The bubble below fires from the
+  // per-message send path, so without this a user who types three lines during one render is
+  // told three times; the report asks for one signal per hold, not one per message.
+  const heldNotice = new RenderHoldNotice();
   let genPauseActive = false;
   if (pauseLocalDuringGen) {
     QueueMonitor.setTransitionHandlers({
@@ -3344,6 +3349,8 @@ export async function runPanelOrchestrator(): Promise<void> {
         const lc = anyLocalLlamacpp();
         if (!ol && !ls && !lc) return;
         genPauseActive = true;
+        // A NEW render is a new wait: whoever was told about the last one is untold again.
+        heldNotice.reset();
         // Free the local model's VRAM for the render (best-effort, fire-and-forget).
         if (ol) void unloadAllOllama(resolveOllamaHost());
         if (ls) void unloadAllLmstudio(LMSTUDIO_BASE_URL);
@@ -3378,6 +3385,7 @@ export async function runPanelOrchestrator(): Promise<void> {
           }
         }
         heldDuringGen.clear();
+        heldNotice.reset();
       },
     });
   }
@@ -5873,18 +5881,39 @@ export async function runPanelOrchestrator(): Promise<void> {
       const arr = heldDuringGen.get(key) ?? [];
       arr.push({ text: outText, opts: sendOpts });
       heldDuringGen.set(key, arr);
-      genPauseActive = true; // ensure the end transition flushes even if start was missed
-      bridge.push(
-        {
-          type: "say",
-          text: `⏸ ${trFor(
-            bridge.tabLocale(event.tab_id),
-            "say.message_queued_during_render",
-            "A render is running, so I've queued your message to keep the GPU free for it. I'll answer the moment it finishes.",
-          )}`,
-        },
-        event.tab_id,
-      );
+      if (!genPauseActive) {
+        // The start transition was missed (QueueMonitor saw the run only as "busy").
+        // Arm the end transition so the queue still flushes, and treat this as the
+        // beginning of a hold episode so the notice below is not suppressed by a
+        // stale "already told" mark from the previous render (#2290).
+        genPauseActive = true;
+        heldNotice.reset();
+      }
+      // ONE bubble per render per tab (#2290): three lines typed in a row are one wait,
+      // and repeating the notice for each of them reads worse than the silence it
+      // replaced. The echo + ack this handler already pushed still show every message
+      // landing, so the later ones are acknowledged without being re-explained.
+      if (heldNotice.claim(event.tab_id)) {
+        const locale = bridge.tabLocale(event.tab_id);
+        bridge.push(
+          {
+            type: "say",
+            // The opt-out rides the SAME bubble rather than its own: this is the one
+            // moment the user is asking "why is nothing happening", which is when the
+            // setting is worth knowing and the only time it is cheap to mention.
+            text: `⏸ ${trFor(
+              locale,
+              "say.message_queued_during_render",
+              "A render is running, so I've queued your message to keep the GPU free for it. I'll answer the moment it finishes.",
+            )} ${trFor(
+              locale,
+              "say.message_queued_opt_out",
+              "To chat during renders instead, set COMFYUI_MCP_PAUSE_LOCAL_ON_GEN=0 in ~/.comfyui-mcp/.env and restart — the local model and ComfyUI will then share the GPU, which can slow a render down or run it out of VRAM.",
+            )}`,
+          },
+          event.tab_id,
+        );
+      }
       // Clear the working spinner — the panel's turn handler only recognizes
       // "working" and "done", so the old "idle" frame never cleared it and the
       // spinner ran until the 120s safety timeout (issue #257). But ONLY when no

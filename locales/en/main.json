@@ -193,6 +193,7 @@
     "llamacpp_small_context": "Your llama-server context is {tokens} tokens (launch flag -c). The agent's tool payload wants ≥16384 — below that, long turns silently truncate. Consider restarting with `-c 16384` or higher.",
     "local_agent_resumed": "Render finished — the local agent is back. Answering your queued message now.",
     "message_queued_during_render": "A render is running, so I've queued your message to keep the GPU free for it. I'll answer the moment it finishes.",
+    "message_queued_opt_out": "To chat during renders instead, set COMFYUI_MCP_PAUSE_LOCAL_ON_GEN=0 in ~/.comfyui-mcp/.env and restart — the local model and ComfyUI will then share the GPU, which can slow a render down or run it out of VRAM.",
     "new_chat_durable_clear_failed": "New chat started, but the previous conversation's stored session could not be removed from disk (the write failed — a full or locked filesystem?). If the orchestrator restarts before this conversation's first exchange completes, the OLD conversation may resume; start a New chat again if that happens.",
     "oauth_signin_failed": "{provider} sign-in failed: {message}",
     "openrouter_no_key": "OpenRouter has no API key — the connection would fail on your first message. Set it in Settings → OpenRouter → “Set API key…” (masked, stored by the orchestrator — takes effect immediately, no reconnect needed), or set the OPENROUTER_API_KEY environment variable and restart the orchestrator. Keys: https://openrouter.ai/keys",
