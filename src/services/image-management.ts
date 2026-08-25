@@ -1,4 +1,4 @@
-import { readFile, copyFile, readdir, realpath, stat } from "node:fs/promises";
+import { readFile, copyFile, open, readdir, realpath, stat } from "node:fs/promises";
 import { join, basename, extname, isAbsolute, relative, resolve, sep } from "node:path";
 import { config, isCloudMode, isRemoteMode } from "../config.js";
 import {
@@ -571,6 +571,28 @@ function localViewMimeType(filename: string): string {
   );
 }
 
+/** Read at most the shared /view limit, including when the file grows after stat(). */
+async function readLocalViewFileBounded(path: string): Promise<Buffer | undefined> {
+  const handle = await open(path, "r");
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      // Read one byte beyond the limit so growth after the initial stat is
+      // refused rather than silently truncated into a valid-looking payload.
+      const capacity = Math.min(64 * 1024, MAX_VIEW_RESPONSE_BYTES - total + 1);
+      const chunk = Buffer.allocUnsafe(capacity);
+      const { bytesRead } = await handle.read(chunk, 0, capacity, null);
+      if (bytesRead === 0) return Buffer.concat(chunks, total);
+      total += bytesRead;
+      if (total > MAX_VIEW_RESPONSE_BYTES) return undefined;
+      chunks.push(chunk.subarray(0, bytesRead));
+    }
+  } finally {
+    await handle.close();
+  }
+}
+
 /**
  * Recover a local file when ComfyUI rejects an otherwise valid /view reference
  * with HTTP 400. Some ComfyUI builds reject basenames containing repeated
@@ -610,7 +632,8 @@ async function readLocalViewFallback(
     if (!isStrictlyInside(realRoot, realCandidate)) return undefined;
     const candidateStat = await stat(realCandidate);
     if (!candidateStat.isFile() || candidateStat.size > MAX_VIEW_RESPONSE_BYTES) return undefined;
-    const data = await readFile(realCandidate);
+    const data = await readLocalViewFileBounded(realCandidate);
+    if (!data) return undefined;
     return { base64: data.toString("base64"), mimeType: localViewMimeType(filename) };
   } catch {
     // Preserve the original /view 400 when the local path cannot be resolved

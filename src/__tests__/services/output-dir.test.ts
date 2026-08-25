@@ -326,6 +326,13 @@ describe("parseInputDirFromArgv", () => {
     expect(parseInputDirFromArgv(["main.py", `--input-directory=${abs}`])).toBe(abs);
   });
 
+  it("resolves a relative --input-directory against the server cwd", () => {
+    const serverCwd = resolve("/srv/live-comfyui");
+    expect(
+      parseInputDirFromArgv(["main.py", "--input-directory", "custom-input"], serverCwd),
+    ).toBe(join(serverCwd, "custom-input"));
+  });
+
   it("derives <base>/input from --base-directory", () => {
     const base = resolve("/srv/comfy-base");
     expect(parseInputDirFromArgv(["main.py", "--base-directory", base])).toBe(
@@ -802,6 +809,17 @@ describe("resolveInputDir", () => {
     expect(got).toBe(redirected);
     expect(got).not.toBe(resolve("/comfy", "input"));
     expect(isAbsolute(got)).toBe(true);
+  });
+
+  it("resolves a relative redirected dir against the live server cwd", async () => {
+    const serverCwd = resolve("/srv/live-comfyui");
+    getSystemStats.mockResolvedValue({
+      system: {
+        argv: ["python", "main.py", "--input-directory", "custom-input"],
+        cwd: serverCwd,
+      },
+    });
+    expect(await resolveInputDir()).toBe(join(serverCwd, "custom-input"));
   });
 
   it("falls back to <COMFYUI_PATH>/input when argv has no override", async () => {

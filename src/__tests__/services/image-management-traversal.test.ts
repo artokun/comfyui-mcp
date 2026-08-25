@@ -14,12 +14,14 @@ vi.mock("../../config.js", () => ({
 
 const readdirMock = vi.fn();
 const readFileMock = vi.fn();
+const openMock = vi.fn();
 const realpathMock = vi.fn();
 const statMock = vi.fn();
 const resolveInputDirMock = vi.fn();
 const resolveOutputDirMock = vi.fn();
 vi.mock("node:fs/promises", () => ({
   readFile: (...a: unknown[]) => readFileMock(...a),
+  open: (...a: unknown[]) => openMock(...a),
   copyFile: vi.fn(),
   readdir: (...a: unknown[]) => readdirMock(...a),
   realpath: (...a: unknown[]) => realpathMock(...a),
@@ -49,6 +51,21 @@ beforeEach(() => {
   mockConfig.remote = false;
   readdirMock.mockReset();
   getHistoryMock.mockReset().mockResolvedValue({});
+  const bytes = Buffer.from([
+    0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70,
+    0x69, 0x73, 0x6f, 0x6d, 0x00, 0x00, 0x02, 0x00,
+    0x69, 0x73, 0x6f, 0x6d, 0x69, 0x73, 0x6f, 0x32,
+  ]);
+  let position = 0;
+  openMock.mockReset().mockResolvedValue({
+    read: async (buffer: Buffer, offset: number, length: number) => {
+      const slice = bytes.subarray(position, position + length);
+      slice.copy(buffer, offset);
+      position += slice.length;
+      return { bytesRead: slice.length, buffer };
+    },
+    close: async () => undefined,
+  });
   resolveInputDirMock.mockReset().mockResolvedValue(resolve("/comfy", "input"));
   resolveOutputDirMock.mockReset().mockResolvedValue(resolve("/comfy", "output"));
 });
@@ -118,7 +135,7 @@ describe("getOutputImage — local fallback for ComfyUI's 400 rejection (#2194)"
     });
     expect(realpathMock).toHaveBeenCalledWith(root);
     expect(realpathMock).toHaveBeenCalledWith(localPath);
-    expect(readFileMock).toHaveBeenCalledWith(localPath);
+    expect(openMock).toHaveBeenCalledWith(localPath, "r");
   });
 
   it.each([

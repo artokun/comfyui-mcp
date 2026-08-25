@@ -1222,7 +1222,10 @@ export function localOutputDirFallback(): string {
  * --input-directory wins; otherwise --base-directory implies <base>/input.
  * Returns undefined when neither flag is present.
  */
-export function parseInputDirFromArgv(argv: string[] | undefined): string | undefined {
+export function parseInputDirFromArgv(
+  argv: string[] | undefined,
+  serverCwd?: string,
+): string | undefined {
   if (!argv || argv.length === 0) return undefined;
 
   let inputDir: string | undefined;
@@ -1232,8 +1235,12 @@ export function parseInputDirFromArgv(argv: string[] | undefined): string | unde
     baseDir = flagValue(argv, i, "--base-directory") ?? baseDir;
   }
 
-  const resolvedBase = baseDir ? resolveDir(baseDir) : undefined;
-  if (inputDir) return resolveDir(inputDir, resolvedBase);
+  // ComfyUI resolves these command-line paths with os.path.abspath(), which
+  // anchors relative values at the SERVER process cwd, not COMFYUI_PATH or
+  // the MCP process cwd. Without an absolute server cwd, fail closed rather
+  // than silently selecting a different local install.
+  if (inputDir) return resolveServerLaunchPath(inputDir, serverCwd);
+  const resolvedBase = baseDir ? resolveServerLaunchPath(baseDir, serverCwd) : undefined;
   if (resolvedBase) return join(resolvedBase, "input");
   return undefined;
 }
@@ -1291,7 +1298,8 @@ async function liveIoDirFallback(kind: "input" | "output"): Promise<string | und
 export async function resolveInputDir(): Promise<string> {
   try {
     const stats = await getSystemStats();
-    const fromArgv = parseInputDirFromArgv(stats.system?.argv);
+    const serverCwd = (stats.system as { cwd?: string } | undefined)?.cwd;
+    const fromArgv = parseInputDirFromArgv(stats.system?.argv, serverCwd);
     if (fromArgv) {
       logger.debug("Resolved ComfyUI input directory from launch argv", {
         inputDir: fromArgv,

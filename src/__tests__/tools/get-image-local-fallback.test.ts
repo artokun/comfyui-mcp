@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   readFile: vi.fn(),
   realpath: vi.fn(),
   stat: vi.fn(),
+  open: vi.fn(),
   mkdir: vi.fn(),
   writeFile: vi.fn(),
 }));
@@ -54,6 +55,7 @@ vi.mock("node:fs/promises", async () => {
     readFile: (...args: unknown[]) => mocks.readFile(...args),
     realpath: (...args: unknown[]) => mocks.realpath(...args),
     stat: (...args: unknown[]) => mocks.stat(...args),
+    open: (...args: unknown[]) => mocks.open(...args),
     mkdir: (...args: unknown[]) => mocks.mkdir(...args),
     writeFile: (...args: unknown[]) => mocks.writeFile(...args),
   };
@@ -94,6 +96,19 @@ function view400(): ComfyUIError {
   );
 }
 
+function fileHandleFor(bytes: Buffer) {
+  let position = 0;
+  return {
+    read: vi.fn(async (buffer: Buffer, offset: number, length: number) => {
+      const slice = bytes.subarray(position, position + length);
+      slice.copy(buffer, offset);
+      position += slice.length;
+      return { bytesRead: slice.length, buffer };
+    }),
+    close: vi.fn(async () => undefined),
+  };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.config.comfyuiPath = resolve("test-fixtures", "configured-comfyui");
@@ -104,17 +119,22 @@ beforeEach(() => {
   mocks.readFile.mockResolvedValue(mp4);
   mocks.realpath.mockImplementation(async (path: string) => path);
   mocks.stat.mockResolvedValue({ isFile: () => true });
+  mocks.open.mockResolvedValue(fileHandleFor(mp4));
   mocks.mkdir.mockResolvedValue(undefined);
   mocks.writeFile.mockResolvedValue(undefined);
 });
 
 describe("get_image — canonical local input fallback (#2194)", () => {
-  it("reads a repeated-period video from the connected custom --input-directory", async () => {
-    const customInput = resolve("test-fixtures", "connected-comfyui", "custom-input");
+  it("resolves a relative --input-directory against the live cwd, not stale config", async () => {
+    const serverCwd = resolve("test-fixtures", "connected-comfyui");
+    const customInput = join(serverCwd, "custom-input");
     const staleConfigured = resolve(mocks.config.comfyuiPath, "input", filename);
     const localPath = join(customInput, filename);
     mocks.getSystemStats.mockResolvedValue({
-      system: { argv: ["python", "main.py", "--input-directory", customInput] },
+      system: {
+        argv: ["python", "main.py", "--input-directory", "custom-input"],
+        cwd: serverCwd,
+      },
     });
 
     const out = await getHandler("get_image")({
@@ -127,8 +147,8 @@ describe("get_image — canonical local input fallback (#2194)", () => {
     expect(out.isError).toBeUndefined();
     expect(mocks.getSystemStats).toHaveBeenCalled();
     expect(mocks.fetchImage).toHaveBeenCalledWith(filename, "input", "");
-    expect(mocks.readFile).toHaveBeenCalledWith(localPath);
-    expect(mocks.readFile).not.toHaveBeenCalledWith(staleConfigured);
+    expect(mocks.open).toHaveBeenCalledWith(localPath, "r");
+    expect(mocks.open).not.toHaveBeenCalledWith(staleConfigured, "r");
     expect(mocks.writeFile).toHaveBeenCalledWith(
       join(resolve("test-fixtures", "saved-images"), filename),
       mp4,
@@ -150,17 +170,27 @@ describe("get_image — canonical local input fallback (#2194)", () => {
 
     expect(out.isError).toBeUndefined();
     expect(mocks.liveRoot).toHaveBeenCalled();
-    expect(mocks.readFile).toHaveBeenCalledWith(localPath);
-    expect(mocks.readFile).not.toHaveBeenCalledWith(
+    expect(mocks.open).toHaveBeenCalledWith(localPath, "r");
+    expect(mocks.open).not.toHaveBeenCalledWith(
       join(resolve(mocks.config.comfyuiPath), "input", filename),
+      "r",
     );
   });
 
   it("refuses an oversized local fallback before loading or saving it", async () => {
+    const localPath = join(resolve(mocks.config.comfyuiPath), "input", filename);
+    const grownHandle = {
+      read: vi.fn(async (_buffer: Buffer, _offset: number, length: number) => ({
+        bytesRead: length,
+      })),
+      close: vi.fn(async () => undefined),
+    };
     mocks.stat.mockResolvedValue({
       isFile: () => true,
-      size: 32 * 1024 * 1024 + 1,
+      // The file is at the limit when checked, then grows while it is read.
+      size: 32 * 1024 * 1024,
     });
+    mocks.open.mockResolvedValue(grownHandle);
 
     const out = await getHandler("get_image")({
       action: "get",
@@ -173,6 +203,9 @@ describe("get_image — canonical local input fallback (#2194)", () => {
     expect(out.content.map((block) => block.text ?? "").join(" ")).toContain("VIEW_ERROR");
     expect(mocks.realpath).toHaveBeenCalled();
     expect(mocks.stat).toHaveBeenCalled();
+    expect(mocks.open).toHaveBeenCalledWith(localPath, "r");
+    expect(grownHandle.read).toHaveBeenCalled();
+    expect(grownHandle.close).toHaveBeenCalled();
     expect(mocks.readFile).not.toHaveBeenCalled();
     expect(mocks.writeFile).not.toHaveBeenCalled();
   });
