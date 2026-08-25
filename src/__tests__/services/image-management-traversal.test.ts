@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import { resolve } from "node:path";
 
 const mockConfig = vi.hoisted(() => ({
   comfyuiPath: "/comfy" as string | undefined,
@@ -7,15 +8,20 @@ const mockConfig = vi.hoisted(() => ({
 
 vi.mock("../../config.js", () => ({
   config: mockConfig,
+  isCloudMode: () => false,
   isRemoteMode: () => mockConfig.remote,
 }));
 
 const readdirMock = vi.fn();
+const readFileMock = vi.fn();
+const realpathMock = vi.fn();
+const statMock = vi.fn();
 vi.mock("node:fs/promises", () => ({
-  readFile: vi.fn(),
+  readFile: (...a: unknown[]) => readFileMock(...a),
   copyFile: vi.fn(),
   readdir: (...a: unknown[]) => readdirMock(...a),
-  stat: vi.fn(),
+  realpath: (...a: unknown[]) => realpathMock(...a),
+  stat: (...a: unknown[]) => statMock(...a),
 }));
 
 const fetchImageMock = vi.fn();
@@ -68,6 +74,67 @@ describe("getOutputImage — happy path (legitimate ComfyUI references)", () => 
     await expect(
       getOutputImage("a.png", "temp", ""),
     ).resolves.toBeDefined();
+  });
+});
+
+describe("getOutputImage — local fallback for ComfyUI's 400 rejection (#2194)", () => {
+  const filename = "dreamina-2026-08-12-1653-Locked-off camera, static 16_9 frame.smo....mp4";
+  const mp4 = Buffer.from([
+    0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70,
+    0x69, 0x73, 0x6f, 0x6d, 0x00, 0x00, 0x02, 0x00,
+    0x69, 0x73, 0x6f, 0x6d, 0x69, 0x73, 0x6f, 0x32,
+  ]);
+
+  function view400(): ComfyUIError {
+    return new ComfyUIError(
+      `ComfyUI /view returned 400 for "${filename}" (input).`,
+      "VIEW_ERROR",
+      { status: 400, filename, type: "input", subfolder: "" },
+    );
+  }
+
+  it("reads a valid repeated-period input video from the local ComfyUI directory", async () => {
+    const root = resolve("/comfy", "input");
+    const localPath = resolve(root, filename);
+    fetchImageMock.mockRejectedValue(view400());
+    realpathMock.mockImplementation(async (path: string) => path);
+    statMock.mockResolvedValue({ isFile: () => true });
+    readFileMock.mockResolvedValue(mp4);
+
+    await expect(getOutputImage(filename, "input", "", { allowMedia: true })).resolves.toMatchObject({
+      base64: mp4.toString("base64"),
+      mimeType: "video/mp4",
+      filename,
+    });
+    expect(realpathMock).toHaveBeenCalledWith(root);
+    expect(realpathMock).toHaveBeenCalledWith(localPath);
+    expect(readFileMock).toHaveBeenCalledWith(localPath);
+  });
+
+  it.each([
+    ["a filename traversal", "../outside.mp4", ""],
+    ["a subfolder traversal", "safe.mp4", "../outside"],
+  ])("rejects %s before the local fallback can read it", async (_label, name, subfolder) => {
+    fetchImageMock.mockRejectedValue(view400());
+
+    await expect(getOutputImage(name, "input", subfolder, { allowMedia: true })).rejects.toBeInstanceOf(
+      ValidationError,
+    );
+    expect(realpathMock).not.toHaveBeenCalled();
+    expect(readFileMock).not.toHaveBeenCalled();
+  });
+
+  it("preserves the 400 when canonical containment detects an escaping symlink", async () => {
+    const error = view400();
+    const root = resolve("/comfy", "input");
+    fetchImageMock.mockRejectedValue(error);
+    realpathMock.mockImplementation(async (path: string) =>
+      path === root ? root : resolve("/outside", filename),
+    );
+    statMock.mockResolvedValue({ isFile: () => true });
+
+    await expect(getOutputImage(filename, "input", "", { allowMedia: true })).rejects.toBe(error);
+    expect(readFileMock).not.toHaveBeenCalled();
   });
 });
 

@@ -1392,15 +1392,30 @@ export async function fetchImage(
     const responder = answeredByPanelOrigin
       ? `The connected panel's ComfyUI at ${answeredByPanelOrigin}`
       : "ComfyUI";
+    let rejectionReason = "";
+    if (res.status === 400) {
+      try {
+        const body = await readViewResponseBounded(res, filename, responseReadTimeoutMs);
+        rejectionReason = bodyPrefixOf(body.toString("utf8"));
+      } catch {
+        // The status is still actionable when a diagnostic body cannot be read.
+      }
+    }
     throw new ComfyUIError(
       `${responder} /view returned ${res.status} for "${filename}" (${where}). ` +
         (res.status === 404
           ? `No such file in the ComfyUI ${type} directory` +
             (subfolder ? ` under subfolder "${subfolder}"` : "") +
             `. Check the filename/subfolder (e.g. via get_image (action:"list_outputs") or get_history).`
-          : `The ComfyUI server rejected the request.`),
+          : `The ComfyUI server rejected the request${rejectionReason ? `: ${rejectionReason}` : "."}`),
       res.status === 404 ? "IMAGE_NOT_FOUND" : "VIEW_ERROR",
-      { status: res.status, filename, type, subfolder },
+      {
+        status: res.status,
+        filename,
+        type,
+        subfolder,
+        ...(rejectionReason ? { reason: rejectionReason } : {}),
+      },
     );
   }
   const contentType = res.headers.get("content-type") ?? "image/png";

@@ -86,6 +86,20 @@ describe("status branches after a ComfyUI API call are reachable (#385)", () => 
     expect((err as { code?: string }).code).toBe("VIEW_ERROR");
   });
 
+  it("includes a scrubbed /view rejection reason for a 400", async () => {
+    answer(400, '{"error":"filename rejected: repeated periods"}', "application/json");
+    const err = await fetchImage("clip....mp4", "input").then(
+      () => null,
+      (e: unknown) => e,
+    );
+
+    expect((err as { code?: string }).code).toBe("VIEW_ERROR");
+    expect((err as Error).message).toContain("filename rejected: repeated periods");
+    expect((err as { details?: { reason?: string } }).details?.reason).toContain(
+      "filename rejected: repeated periods",
+    );
+  });
+
   it("getSetting treats a 404 as unset rather than throwing", async () => {
     // Documented behaviour that could never happen: "some builds 404 the per-id
     // route, so empty / null / 404 are treated uniformly as unset".
