@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
   installWorkflowDependencies: vi.fn(),
   generateSkillCached: vi.fn(),
   checkWorkflowRuntime: vi.fn(),
+  requestPanelTemplateIndex: vi.fn(),
 }));
 
 const comfyui = vi.hoisted(() => ({
@@ -53,6 +54,10 @@ vi.mock("../../services/api-nodes.js", async (importOriginal) => {
 vi.mock("../../config.js", () => ({
   getComfyUIBaseUrl: () => comfyui.baseUrl,
   getComfyUIAuthHeaders: () => comfyui.authHeaders,
+}));
+
+vi.mock("../../services/panel-template-relay.js", () => ({
+  requestPanelTemplateIndex: (...args: unknown[]) => mocks.requestPanelTemplateIndex(...args),
 }));
 
 import { registerSkillsAccessTools, enumeratePacks } from "../../tools/skills-access.js";
@@ -279,6 +284,39 @@ describe("actions call the same services with the same arguments", () => {
     const parsed = JSON.parse(text(res));
     expect(parsed.source_count).toBe(1);
     expect(parsed.template_count).toBe(1);
+  });
+
+  it('action:"list_templates" uses the connected panel route before an unreachable COMFYUI_URL (#2196)', async () => {
+    mocks.requestPanelTemplateIndex.mockResolvedValueOnce({
+      "panel-pack": [{ name: "live-template" }],
+    });
+    global.fetch = vi.fn(async () => {
+      throw new TypeError("fetch failed", {
+        cause: Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }),
+      });
+    }) as unknown as typeof fetch;
+
+    const res = await handler()({ action: "list_templates" });
+    expect(res.isError).toBeUndefined();
+    expect(JSON.parse(text(res))).toMatchObject({
+      source_count: 1,
+      template_count: 1,
+      templates: { "panel-pack": [{ name: "live-template" }] },
+    });
+    expect(mocks.requestPanelTemplateIndex).toHaveBeenCalledOnce();
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it('action:"list_templates" does not fall back to COMFYUI_URL after a panel route fails (#2196)', async () => {
+    mocks.requestPanelTemplateIndex.mockRejectedValueOnce(new Error("panel template relay failed"));
+    global.fetch = vi.fn(async () => {
+      throw new Error("headless target must not be tried");
+    }) as unknown as typeof fetch;
+
+    const res = await handler()({ action: "list_templates" });
+    expect(res.isError).toBe(true);
+    expect(text(res)).toContain("panel template relay failed");
+    expect(global.fetch).not.toHaveBeenCalled();
   });
 
   it('action:"list_templates" uses the shared auth and proxy-prefix path', async () => {

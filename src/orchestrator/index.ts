@@ -110,6 +110,13 @@ import {
   type PanelImageRelayServer,
   type PanelImageRelayRequest,
 } from "../services/panel-image-relay.js";
+import {
+  startPanelTemplateRelayServer,
+  verifyPanelTemplateRelayCapability,
+  type PanelTemplateRelayResolvedAgent,
+  type PanelTemplateRelayServer,
+  type PanelTemplateRelayRequest,
+} from "../services/panel-template-relay.js";
 import { logger } from "../utils/logger.js";
 import { listDownloadJobs } from "../services/download-jobs.js";
 import { completionDisagreesWithRecord, failureDisagreesWithRecord } from "./download-done-guard.js";
@@ -1680,6 +1687,14 @@ export async function runPanelOrchestrator(): Promise<void> {
     }
     return undefined;
   };
+  const panelTemplateRelayAgentFor = (
+    request: PanelTemplateRelayRequest,
+  ): PanelTemplateRelayResolvedAgent | undefined => {
+    for (const [secret, agentKey] of panelImageRelaySecrets) {
+      if (verifyPanelTemplateRelayCapability(secret, request)) return { agentKey, secret };
+    }
+    return undefined;
+  };
   // The scope/backend halves of a composite key. Neither half contains "::", so
   // split on the LAST separator.
   const panelTabOf = (key: string): string => {
@@ -1708,6 +1723,32 @@ export async function runPanelOrchestrator(): Promise<void> {
     // normal headless error path rather than exposing an unsafe channel.
     logger.warn(
       `[panel-orchestrator] authenticated panel image relay unavailable: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  const panelTemplateRelayUrlFor = (tabId: string): string | undefined => {
+    const origin = bridge.tabServerOrigin(tabId);
+    if (!origin) return undefined;
+    try {
+      const configured = new URL(getComfyUIBaseUrl());
+      const basePath = configured.pathname.replace(/\/+$/, "");
+      return `${origin}${basePath}/api/workflow_templates`;
+    } catch {
+      return undefined;
+    }
+  };
+  let panelTemplateRelayServer: PanelTemplateRelayServer | undefined;
+  let panelTemplateRelayEndpoint: string | undefined;
+  try {
+    panelTemplateRelayServer = await startPanelTemplateRelayServer({
+      bridge,
+      resolvePanelAgent: panelTemplateRelayAgentFor,
+      resolvePanelTab: scopeToRealTab,
+      resolvePanelUrl: panelTemplateRelayUrlFor,
+    });
+    panelTemplateRelayEndpoint = panelTemplateRelayServer.endpointUrl;
+  } catch (error) {
+    logger.warn(
+      `[panel-orchestrator] authenticated panel template relay unavailable: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
   // #884 — PER-CONVERSATION TURN ORIGINS: the issue-time workflow stamp
@@ -2151,6 +2192,9 @@ export async function runPanelOrchestrator(): Promise<void> {
         COMFYUI_MCP_TAB: tabId,
         COMFYUI_MCP_RELAY_SECRET: panelImageRelaySecretFor(tabId),
         ...(panelImageRelayEndpoint ? { COMFYUI_MCP_RELAY_URL: panelImageRelayEndpoint } : {}),
+        ...(panelTemplateRelayEndpoint
+          ? { COMFYUI_MCP_TEMPLATE_RELAY_URL: panelTemplateRelayEndpoint }
+          : {}),
         // …and the same key addresses this agent's published identity.
         ...agentIdentityEnv(tabId),
       }),
@@ -2474,6 +2518,9 @@ export async function runPanelOrchestrator(): Promise<void> {
         ...(agentKey ? { COMFYUI_MCP_TAB: agentKey } : {}),
         ...(agentKey ? { COMFYUI_MCP_RELAY_SECRET: panelImageRelaySecretFor(agentKey) } : {}),
         ...(agentKey && panelImageRelayEndpoint ? { COMFYUI_MCP_RELAY_URL: panelImageRelayEndpoint } : {}),
+        ...(agentKey && panelTemplateRelayEndpoint
+          ? { COMFYUI_MCP_TEMPLATE_RELAY_URL: panelTemplateRelayEndpoint }
+          : {}),
         // Which LLM is driving this agent, for report_issue's stamp (see
         // agentIdentityEnv). Same key, same reason it is keyed by agent.
         ...agentIdentityEnv(agentKey),
@@ -6738,6 +6785,7 @@ export async function runPanelOrchestrator(): Promise<void> {
     if (panelMcpHttp) await panelMcpHttp.stop().catch(() => {});
     if (panelConsoleHttp) await panelConsoleHttp.stop().catch(() => {});
     if (panelImageRelayServer) await panelImageRelayServer.close().catch(() => {});
+    if (panelTemplateRelayServer) await panelTemplateRelayServer.close().catch(() => {});
     secureBridge?.stop();
     await bridge.stop();
     // Only remove the lockfile if it still names us — avoid clobbering a fresh

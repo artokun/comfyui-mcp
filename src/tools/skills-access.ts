@@ -8,6 +8,7 @@ import { parse as parseYaml } from "yaml";
 import { errorToToolResult, ValidationError } from "../utils/errors.js";
 import { getComfyUIBaseUrl } from "../config.js";
 import { comfyuiFetch } from "../comfyui/fetch.js";
+import { requestPanelTemplateIndex } from "../services/panel-template-relay.js";
 import { checkWorkflowRuntime, extractWorkflowClassTypes } from "../services/api-nodes.js";
 import {
   extractWorkflowDependencies,
@@ -575,6 +576,14 @@ function readPackManifestAction(rawName: string): ToolText {
 /** action:"list_templates" */
 async function listWorkflowTemplatesAction(): Promise<ToolText> {
   traceToolCall("list_packs", { action: "list_templates" });
+  // A sidebar-backed child has an authenticated loopback route to the live
+  // panel's ComfyUI origin. Prefer it: the browser may be connected to the
+  // actual server while COMFYUI_URL is stale or unreachable. Standalone MCP
+  // children return undefined here and keep the established headless path.
+  // Once a panel route exists, relay failures stay fail-closed: falling back
+  // to COMFYUI_URL could silently list a different server's templates.
+  const panelIndex = await requestPanelTemplateIndex();
+  if (panelIndex !== undefined) return renderWorkflowTemplateIndex(panelIndex);
   // Canonical base URL + auth headers — same connected-ComfyUI path
   // enqueue_workflow (action:"template_schema") uses, so a proxied/authed
   // remote resolves
@@ -633,6 +642,10 @@ async function listWorkflowTemplatesAction(): Promise<ToolText> {
     expectShape: (v) => !!v && typeof v === "object" && !Array.isArray(v),
     shapeHint: "the /api/workflow_templates index (an object keyed by source)",
   });
+  return renderWorkflowTemplateIndex(index);
+}
+
+function renderWorkflowTemplateIndex(index: Record<string, unknown>): ToolText {
   const groups = Object.keys(index);
   const total = Object.values(index).reduce<number>(
     (n, v) => n + (Array.isArray(v) ? v.length : 0),
