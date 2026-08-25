@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatCodexTurnError } from "./codex-error.js";
+import { formatCodexTurnError } from "../../orchestrator/codex-error.js";
 
 describe("formatCodexTurnError (#2112)", () => {
   it("turns the reported JSON-string Bad Request into an actionable unknown-400 diagnosis", () => {

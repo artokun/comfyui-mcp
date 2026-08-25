@@ -8,8 +8,8 @@
 // in-flight id is actually foreign.
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { QueueMonitor } from "../services/queue-monitor.js";
-import { formatQueueNote } from "./queue-note.js";
+import { QueueMonitor } from "../../services/queue-monitor.js";
+import { formatQueueNote } from "../../orchestrator/queue-note.js";
 
 type Priv = {
   url: string | null;
