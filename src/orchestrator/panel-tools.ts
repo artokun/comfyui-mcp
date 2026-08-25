@@ -1372,12 +1372,41 @@ function graphCmdIsInertUnderQueueBusy(name: string): boolean {
   return GRAPH_CMD_EFFECT[name] === "inert";
 }
 
+function isDeferredWidgetScalar(value: unknown): boolean {
+  return (
+    typeof value === "string" ||
+    typeof value === "boolean" ||
+    (typeof value === "number" && Number.isFinite(value))
+  );
+}
+
+/**
+ * #1716 — the only queue-busy exception is an explicit, optimistic-concurrency
+ * guarded primitive widget deferral. The Panel still classifies the live widget
+ * and rejects callbacks/derived/composite routes; this gate only permits the
+ * request to reach that production classifier instead of refusing it unsent.
+ */
+function graphCmdRequestsDeferredWidget(cmd: Record<string, unknown>): boolean {
+  return (
+    cmd.cmd === "graph_set_widget" &&
+    cmd.defer_until_idle === true &&
+    typeof cmd.widget === "string" &&
+    isDeferredWidgetScalar(cmd.value) &&
+    Object.prototype.hasOwnProperty.call(cmd, "expected_value") &&
+    isDeferredWidgetScalar(cmd.expected_value)
+  );
+}
+
 function graphCmdBlockedByRunningPrompt(cmd: Record<string, unknown>): string | null {
   const name = typeof cmd.cmd === "string" ? cmd.cmd : "";
   if (!name.startsWith("graph_") || name === "graph_run") return null;
   // panel#1489 — reads and view/selection changes go through. Only a command
   // that could leave the workflow half-changed is worth refusing unsent.
   if (graphCmdIsInertUnderQueueBusy(name)) return null;
+  // #1716 — this is not a general mutation exemption. The exact protocol
+  // shape is required so the Panel can perform its live-node safety check and
+  // park only a scalar edit with an observed expected value.
+  if (graphCmdRequestsDeferredWidget(cmd)) return null;
   const snap = QueueMonitor.snapshot();
   if (!snap.running) return null;
   // #1933 — name what the CALLER called. `cmd.cmd` is the BRIDGE command
@@ -15925,6 +15954,18 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           .describe(
             "How to echo the previous/new values back. 'summary' (default) replaces a string longer than 1000 chars with {chars, sha256, preview} — the mutation is applied either way. 'full' returns the verbatim strings.",
           ),
+        defer_until_idle: z
+          .boolean()
+          .optional()
+          .describe(
+            "Explicitly park a safe scalar widget edit until ComfyUI's queue is fully idle. Requires expected_value from the live graph; callback-driven, linked, dynamic, and derived widgets remain refused. The default is false, so ordinary edits keep the queue-busy safety fence.",
+          ),
+        expected_value: z
+          .union([z.string(), z.number(), z.boolean()])
+          .optional()
+          .describe(
+            "The scalar widget value observed before requesting defer_until_idle. The Panel re-checks this value immediately before replay and refuses if the user or another command changed it.",
+          ),
       },
       async (args: A, ctx) => {
         // Distinguish "value present but empty" from "value absent" by key
@@ -15990,6 +16031,9 @@ export function buildPanelToolDefs(): PanelToolDef[] {
                   // and supplies that node's own type.
                   ...(targetExpectedNodeType
                     ? { expected_node_type: targetExpectedNodeType }
+                    : {}),
+                  ...(args.defer_until_idle === true
+                    ? { defer_until_idle: true, expected_value: args.expected_value }
                     : {}),
                 },
                 OBJECT_INFO_REFRESH_ACK_TIMEOUT_MS,

@@ -210,6 +210,41 @@ describe("graph MUTATIONS still fail fast while a prompt is running (#1639)", ()
     expect(text).not.toMatch(/retry_of/);
   });
 
+  it("an explicit expected-value guarded widget deferral reaches the Panel", async () => {
+    startRender();
+
+    const { bridge, sent } = makeBridge();
+    const ctx = makePanelToolCtx(bridge, TAB, new WorkflowTargetStore());
+    const res = await defByName("panel_set_widget").handler(
+      {
+        node_id: 3,
+        widget: "text",
+        value: "a cat",
+        defer_until_idle: true,
+        expected_value: "old prompt",
+      } as never,
+      ctx,
+    );
+
+    expect(sent).toEqual(["graph_set_widget"]);
+    expect(res.isError).not.toBe(true);
+  });
+
+  it("a deferred widget request without an expected value stays fenced", async () => {
+    startRender();
+
+    const { bridge, sent } = makeBridge();
+    const ctx = makePanelToolCtx(bridge, TAB, new WorkflowTargetStore());
+    const res = await defByName("panel_set_widget").handler(
+      { node_id: 3, widget: "text", value: "a cat", defer_until_idle: true } as never,
+      ctx,
+    );
+
+    expect(sent).toEqual([]);
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toMatch(/QUEUE BUSY/);
+  });
+
   it("the refusal names the reads that ARE available instead of sending the agent to poll", async () => {
     startRender("p-in-flight", "42");
 
