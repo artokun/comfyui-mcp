@@ -400,10 +400,14 @@ POST /api/prompts</pre>
   </main>
   <script>
     const T = ${T};
-    // This page is open; the editor behind it is token-gated. If the console was opened
-    // WITH a token (the panel's "Advanced ↗" does not, a hand-typed URL may), hand the
-    // same one to the link so the editor is one click away instead of a 401 the reader
-    // has to fix by pasting a secret they cannot see from here.
+    // This page is open; the editor behind it is token-gated. So the token is NEVER
+    // rendered into this HTML — an unauthenticated visitor reaching /console would read it
+    // straight out of the source. It arrives in the query string instead, put there by the
+    // "Advanced ↗" buttons on /credentials and /prompts, which are themselves gated and
+    // already hold it. Carrying it onto the link is what makes the editor one click away
+    // rather than a 401 the reader has to fix by pasting a secret they cannot see from here.
+    // A hand-typed /console has no token, gets the ungated link, and lands on the 401 that
+    // tells it so — which is correct: this page has no secret to give it.
     const carried = new URLSearchParams(location.search).get('token');
     if (carried) document.getElementById('prompts-link').search = '?token=' + encodeURIComponent(carried);
     fetch('/api/status').then(r => r.json()).then(d => {
@@ -549,7 +553,7 @@ ${rows}
       });
     });
     document.querySelector("[data-close]").addEventListener("click", () => { try { parent.postMessage({ type: "close" }, "*"); } catch {} });
-    document.querySelector("[data-advanced]").addEventListener("click", () => { window.open(CFG.consoleUrl + "/console", "_blank", "noopener"); });
+    document.querySelector("[data-advanced]").addEventListener("click", () => { window.open(CFG.consoleUrl + "/console" + (CFG.token ? q(CFG.token) : ""), "_blank", "noopener"); });
     window.addEventListener("load", load);
     new ResizeObserver(postHeight).observe(document.body);
   </script>
@@ -763,7 +767,7 @@ function promptsHtml(consoleUrl: string, token: string, negotiatedLocale: Locale
       postHeight();
     }
     document.querySelector("[data-close]").addEventListener("click", () => { try { parent.postMessage({ type: "close" }, "*"); } catch {} });
-    document.querySelector("[data-advanced]").addEventListener("click", () => { window.open(CFG.consoleUrl + "/console", "_blank", "noopener"); });
+    document.querySelector("[data-advanced]").addEventListener("click", () => { window.open(CFG.consoleUrl + "/console" + (CFG.token ? q(CFG.token) : ""), "_blank", "noopener"); });
     window.addEventListener("load", load);
     new ResizeObserver(postHeight).observe(document.body);
   </script>

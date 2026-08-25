@@ -179,11 +179,32 @@ describe("the console serves the system prompts", () => {
     });
   });
 
-  it("links the editor from the console landing page, carrying the token through", async () => {
+  it("links the editor from the console landing page and never inlines the token", async () => {
     await withServer(async (url) => {
       const html = await (await fetch(`${url}/console`)).text();
       expect(html).toContain('href="/prompts"');
       expect(html).toContain("prompts-link");
+      // /console is NOT token-gated. Rendering the token into it would hand the secret to
+      // exactly the unauthenticated reader the gate on /prompts exists to stop, so the link
+      // ships bare and the token reaches it through the query string instead.
+      expect(html).not.toContain(TOKEN);
     });
   });
+
+  // The landing page reads ?token= off its own URL and copies it onto the editor link.
+  // That consumer is only worth anything if something PUTS a token there: every in-product
+  // route to /console is an "Advanced" button on a page that is itself gated and already
+  // holds the token. When those buttons opened a bare /console, the carry could not fire on
+  // any real path and the advertised link answered 401 — green tests over a dead mechanism.
+  it.each([["/credentials"], ["/prompts"]])(
+    "%s hands its own token to /console, so the landing page has one to carry",
+    async (path) => {
+      await withServer(async (url) => {
+        const html = await (await fetch(`${url}${path}?token=${TOKEN}`)).text();
+        expect(html).toContain('"/console" + (CFG.token ? q(CFG.token) : "")');
+        // q() is the shared builder both pages already use for their own fetches.
+        expect(html).toContain('const q = (t) => "?token=" + encodeURIComponent(t);');
+      });
+    },
+  );
 });
