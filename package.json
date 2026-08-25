@@ -68,7 +68,7 @@
     "@comfyorg/sdk": "^0.1.7",
     "@modelcontextprotocol/sdk": "~1.30.0",
     "@stable-canvas/comfyui-client": "^1.5.9",
-    "better-sqlite3": "^12.6.2",
+    "better-sqlite3": "^13.0.3",
     "dotenv": "^17.4.2",
     "sharp": "^0.35.3",
     "undici": "7.29.0",
