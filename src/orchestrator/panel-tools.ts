@@ -5049,6 +5049,24 @@ function isObjectInfoBudgetRefusal(res: ToolResult): boolean {
 }
 
 /**
+ * #2202 — the panel's stale-combo recovery can time out after it has retired the
+ * usable whole-schema snapshot. That refusal is safe to repair here: the panel
+ * explicitly says the write was not attempted, and `refresh_nodes` is
+ * non-destructive. Keep this narrower than the generic combo/value refusals — a
+ * value that was actually checked must not trigger an unsolicited refresh.
+ */
+function isStaleComboRefreshTimeoutRefusal(res: ToolResult): boolean {
+  if (!res.isError) return false;
+  const text = textOfToolResult(res);
+  return (
+    /panel_set_widget refused/i.test(text) &&
+    /authoritative refresh[\s\S]{0,600}(?:still running|never started)/i.test(text) &&
+    /revalidation did NOT complete/i.test(text) &&
+    /NOTHING WAS WRITTEN/i.test(text)
+  );
+}
+
+/**
  * Per-tab: the last schema-guarded panel mutation we observed could not obtain
  * /object_info. Socket-up is not the same fact — that is why panel_graph_outline
  * reported mutations_ready:true while panel_add_node(LoadImage) then refused.
@@ -15990,6 +16008,55 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         if (isObjectInfoStarvationRefusal(first)) {
           markPanelSchemaBlocked(panelSchemaKey(ctx));
           return appendToolResultText(first, objectInfoStarvationNote());
+        }
+
+        // #2202 — stale-combo recovery may have retired the panel's last usable
+        // whole-schema snapshot before its bounded refresh wait abandoned. The
+        // panel refused before writing, so dispatching its idempotent,
+        // non-destructive refresh is safe and repairs the state for the next
+        // unrelated widget write. Do not do this for an ordinary invalid-combo
+        // refusal, and do not retry the rejected value: it was never validated
+        // against the refreshed option list.
+        if (isStaleComboRefreshTimeoutRefusal(first)) {
+          const schemaKey = panelSchemaKey(ctx);
+          markPanelSchemaBlocked(schemaKey);
+          const refreshed = await ctx.call(
+            { cmd: "refresh_nodes" },
+            OBJECT_INFO_REFRESH_ACK_TIMEOUT_MS,
+          );
+          const refreshPayload = parseToolResultJson(refreshed);
+          const refreshReportedFailure =
+            refreshPayload?.refreshed === false || isObjectInfoBudgetRefusal(refreshed);
+          if (!refreshed.isError && refreshPayload?.refreshed === true) {
+            markPanelSchemaReady(schemaKey);
+          }
+          if (isReplyTimeoutResult(refreshed)) {
+            return appendToolResultText(
+              first,
+              `\n\n(#2202 recovery: the combo refresh timeout was a before-write refusal, ` +
+                `so the requested value was not written. panel_refresh_nodes was ` +
+                `dispatched automatically but did NOT answer within its window; the ` +
+                `refresh is not cancelled and may still register the schema. Retry ` +
+                `the intended widget write after it settles.)`,
+            );
+          }
+          if (refreshed.isError || refreshReportedFailure) {
+            return appendToolResultText(
+              first,
+              `\n\n(#2202 recovery: the combo refresh timeout was a before-write refusal, ` +
+                `so the requested value was not written. panel_refresh_nodes was ` +
+                `dispatched automatically but did not establish a fresh schema; ` +
+                `retry the intended widget write after the refresh issue is resolved. ` +
+                `${textOfToolResult(refreshed)})`,
+            );
+          }
+          return appendToolResultText(
+            first,
+            `\n\n(#2202 recovery: the combo refresh timeout was a before-write refusal, ` +
+              `so the requested value was not written. panel_refresh_nodes was ` +
+              `dispatched automatically and completed; retry the intended widget ` +
+              `write. This refresh is non-destructive.)`,
+          );
         }
 
         // #2015 — a panel pre-executor can reject an inner node because the

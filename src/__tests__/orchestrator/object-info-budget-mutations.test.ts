@@ -6,12 +6,16 @@
 // and panel_set_widget all fail because /object_info did not answer inside the
 // panel's fixed 10s/5s shares. The canvas is readable; schema-guarded edits are
 // not. refresh_nodes also CLEARS the last-known schema, so calling it as the
-// recovery makes the next widget write worse.
+// recovery makes the next widget write worse — except for #2202's stale-combo
+// timeout, where the panel has already retired that snapshot and a refresh is
+// the safe way to restore it for later unrelated writes.
 //
 // These drive the real tool defs. The panel's 5s/10s shares live in the other
 // repo; this process can still (1) retry a before-create/before-write refusal
 // without dispatching refresh_nodes, (2) stop advertising mutations_ready:true
-// once that refusal has been observed, (3) say not to refresh_nodes.
+// once that refusal has been observed, and (3) reserve refresh_nodes for the
+// acknowledged #2202 stale-combo timeout where the panel has already retired
+// its schema snapshot.
 
 import { beforeEach, describe, expect, it } from "vitest";
 
@@ -45,6 +49,16 @@ const SET_WIDGET_STARVATION =
   `GET /object_info did not answer within its 5000ms share of the 20000ms budget. ` +
   `Refusing to write rather than trust a possibly-stale node cache (#458). ` +
   `Reconnect ComfyUI and retry.`;
+
+const STALE_COMBO_REFRESH_TIMEOUT =
+  `panel_set_widget refused "image" on node 12 (LoadImage): the value is not in this ` +
+  `combo's current option list, and the authoritative refresh that would have re-read ` +
+  `the list — a node-def refresh started by another tool call — was still running ` +
+  `when this command's time budget ran out waiting for it, so the revalidation did NOT ` +
+  `complete. That refresh is still running and is registering exactly the list this ` +
+  `write needs, so RETRY in a few seconds. This refusal cannot tell a genuinely-invalid ` +
+  `value from one the refresh would have accepted. NOTHING WAS WRITTEN. Call ` +
+  `panel_refresh_nodes if retrying keeps failing.`;
 
 const STALE_SCHEMA =
   `"LoadImage" required input "image" was added or retyped since this page loaded its node ` +
@@ -223,6 +237,56 @@ describe("panel_set_widget retries a schema-budget refusal (#2007)", () => {
     expect(calls.filter((c) => c === "graph_set_widget")).toHaveLength(2);
     expect(text).toMatch(/already retried ONCE/);
     expect(text).toMatch(/Do NOT call panel_refresh_nodes/);
+  });
+
+  it("#2202 restores schema after a stale-combo refresh timeout before an unrelated write", async () => {
+    let writes = 0;
+    const { b, calls } = bridge(async (cmd) => {
+      if (cmd.cmd === "graph_set_widget") {
+        writes += 1;
+        if (writes === 1) throw new Error(STALE_COMBO_REFRESH_TIMEOUT);
+        return { ok: true, node_id: 20, widget: "text", previous: "", value: "hello" };
+      }
+      if (cmd.cmd === "refresh_nodes") return { refreshed: true };
+      return { ok: true };
+    });
+    const ctx = makePanelToolCtx(b, TAB, new WorkflowTargetStore());
+    const setWidget = buildPanelToolDefs().find((d) => d.name === "panel_set_widget");
+    if (!setWidget) throw new Error("panel_set_widget is not registered");
+
+    const combo = await setWidget.handler(
+      { node_id: 12, widget: "image", value: "new.png" } as never,
+      ctx,
+    );
+    expect(combo.isError).toBe(true);
+    expect(textOf(combo)).toMatch(/#2202 recovery/);
+
+    const unrelated = await setWidget.handler(
+      { node_id: 20, widget: "text", value: "hello" } as never,
+      ctx,
+    );
+    expect(unrelated.isError).toBeFalsy();
+    expect(calls).toEqual(["graph_set_widget", "refresh_nodes", "graph_set_widget"]);
+  });
+
+  it("does not refresh for an ordinary combo-value refusal", async () => {
+    const ordinaryRefusal =
+      `panel_set_widget refused "image" on node 12 (LoadImage): after refreshing combo ` +
+      `options: "new.png" is not a valid option`;
+    const { b, calls } = bridge(async (cmd) => {
+      if (cmd.cmd === "graph_set_widget") throw new Error(ordinaryRefusal);
+      return { refreshed: true };
+    });
+    const ctx = makePanelToolCtx(b, TAB, new WorkflowTargetStore());
+    const setWidget = buildPanelToolDefs().find((d) => d.name === "panel_set_widget");
+    if (!setWidget) throw new Error("panel_set_widget is not registered");
+
+    const refused = await setWidget.handler(
+      { node_id: 12, widget: "image", value: "new.png" } as never,
+      ctx,
+    );
+    expect(refused.isError).toBe(true);
+    expect(calls).toEqual(["graph_set_widget"]);
   });
 
   it("records a starvation refusal so the next outline does not advertise readiness", async () => {
