@@ -62,8 +62,8 @@ const FILE_LIKE = /\.[A-Za-z0-9_]{2,12}$/;
  * `graph_query` has no cursor/offset. Explicit-ID pages are therefore the only
  * pagination available to this completion pass, and keeping each detail page
  * small leaves room under its 60,000-character ceiling for ordinary workflows.
- * Pages are issued concurrently under the existing single elective timeout; the
- * graph-query ceiling also bounds the pass at 200 leftover ids.
+ * Pages are issued in graph order under one aggregate deadline; the graph-query
+ * ceiling also bounds the pass at 200 leftover ids.
  */
 const GET_ERRORS_QUERY_PAGE_SIZE = 10;
 
@@ -104,6 +104,8 @@ type FollowUpRead = {
   payload: Record<string, unknown> | null;
   stayedOnPrimaryTab: boolean;
 };
+
+const GET_ERRORS_DEADLINE = Symbol("get-errors-completion-deadline");
 
 export function parseToolResultJson(res: GetErrorsToolResult): Record<string, unknown> | null {
   if (!res || res.isError) return null;
@@ -495,11 +497,29 @@ async function followUpJson(
   ctx: GetErrorsCallCtx,
   cmd: Record<string, unknown>,
   timeoutMs: number,
+  deadlineAt: number,
   primaryTabId?: string,
 ): Promise<FollowUpRead> {
   const tabBefore = ctx.tabId;
+  const remaining = Math.min(timeoutMs, deadlineAt - Date.now());
+  if (!(remaining > 0)) {
+    return {
+      payload: null,
+      stayedOnPrimaryTab: primaryTabId == null || tabBefore === primaryTabId,
+    };
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const res = await ctx.call(cmd, timeoutMs);
+    const timeout = new Promise<typeof GET_ERRORS_DEADLINE>((resolve) => {
+      timer = setTimeout(() => resolve(GET_ERRORS_DEADLINE), remaining);
+    });
+    const res = await Promise.race([ctx.call(cmd, remaining), timeout]);
+    if (res === GET_ERRORS_DEADLINE) {
+      return {
+        payload: null,
+        stayedOnPrimaryTab: primaryTabId == null || tabBefore === primaryTabId,
+      };
+    }
     const tabAfter = ctx.tabId;
     return {
       payload: parseToolResultJson(res),
@@ -511,6 +531,8 @@ async function followUpJson(
       payload: null,
       stayedOnPrimaryTab: primaryTabId == null || tabBefore === primaryTabId,
     };
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -593,12 +615,23 @@ export async function completeGetErrorsAudit(
     // graph_query has no cursor/offset, and a single detail reply can be cut by
     // max_chars even when its limit is high. Page by explicit ids so every normal
     // 50-node workflow gets a complete detail read within one bounded follow-up
-    // wave. A truncated page stays wholly unchecked below; it must never silently
+    // pass. A truncated page stays wholly unchecked below; it must never silently
     // retire only the rows that happened to fit in the reply.
+    const deadlineAt = Date.now() + Math.max(0, timeoutMs);
     const queryIds = leftoverIds.slice(0, LIMIT_CEILING);
-    const queryReadsPromise = Promise.all(
-      chunks(queryIds, GET_ERRORS_QUERY_PAGE_SIZE).map((ids) =>
-        followUpJson(
+    const infoRead = await followUpJson(
+      ctx,
+      { cmd: "graph_get_object_info" },
+      timeoutMs,
+      deadlineAt,
+      primaryTabId,
+    );
+    const infoReply = infoRead.payload;
+    const objectInfo = infoReply ? objectInfoFromReply(infoReply) : null;
+    const queryReads: Array<{ ids: unknown[]; read: FollowUpRead }> = [];
+    if (objectInfo && infoRead.stayedOnPrimaryTab) {
+      for (const ids of chunks(queryIds, GET_ERRORS_QUERY_PAGE_SIZE)) {
+        const read = await followUpJson(
           ctx,
           {
             cmd: "graph_query",
@@ -608,33 +641,25 @@ export async function completeGetErrorsAudit(
             max_chars: MAX_CHARS_CEILING,
           },
           timeoutMs,
+          deadlineAt,
           primaryTabId,
-        ),
-      ),
-    );
-    const [queryReads, infoRead] = await Promise.all([
-      queryReadsPromise,
-      followUpJson(ctx, { cmd: "graph_get_object_info" }, timeoutMs, primaryTabId),
-    ]);
-    const infoReply = infoRead.payload;
-    const objectInfo = infoReply ? objectInfoFromReply(infoReply) : null;
+        );
+        queryReads.push({ ids, read });
+        if (Date.now() >= deadlineAt) break;
+      }
+    }
     const incompletePageIds = new Set(
       leftoverIds.slice(LIMIT_CEILING).map((id) => String(id)),
     );
-    const nodes = queryReads.flatMap((queryRead, pageIndex) => {
-      const query = queryRead.payload;
-      if (queryReplyWasTruncated(query)) {
-        for (const id of queryIds.slice(
-          pageIndex * GET_ERRORS_QUERY_PAGE_SIZE,
-          (pageIndex + 1) * GET_ERRORS_QUERY_PAGE_SIZE,
-        )) incompletePageIds.add(String(id));
+    const nodes = queryReads.flatMap(({ ids, read }) => {
+      if (queryReplyWasTruncated(read.payload)) {
+        for (const id of ids) incompletePageIds.add(String(id));
       }
-      return query ? parseQueryNodes(query) : [];
+      return read.payload ? parseQueryNodes(read.payload) : [];
     });
     const sameGraph =
       queryReads.every(
-        (queryRead) =>
-          queryRead.stayedOnPrimaryTab && sameViewingIdentity(payload, queryRead.payload),
+        ({ read }) => read.stayedOnPrimaryTab && sameViewingIdentity(payload, read.payload),
       ) &&
       infoRead.stayedOnPrimaryTab &&
       queryReads.length > 0;
