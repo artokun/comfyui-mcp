@@ -156,6 +156,27 @@ describe("get_image — canonical local input fallback (#2194)", () => {
     );
   });
 
+  it("refuses an oversized local fallback before loading or saving it", async () => {
+    mocks.stat.mockResolvedValue({
+      isFile: () => true,
+      size: 32 * 1024 * 1024 + 1,
+    });
+
+    const out = await getHandler("get_image")({
+      action: "get",
+      filename,
+      type: "input",
+      save_dir: resolve("test-fixtures", "saved-images"),
+    });
+
+    expect(out.isError).toBe(true);
+    expect(out.content.map((block) => block.text ?? "").join(" ")).toContain("VIEW_ERROR");
+    expect(mocks.realpath).toHaveBeenCalled();
+    expect(mocks.stat).toHaveBeenCalled();
+    expect(mocks.readFile).not.toHaveBeenCalled();
+    expect(mocks.writeFile).not.toHaveBeenCalled();
+  });
+
   it("rejects traversal through the actual get_image handler before fallback I/O", async () => {
     const out = await getHandler("get_image")({
       action: "get",

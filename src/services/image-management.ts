@@ -1,7 +1,12 @@
 import { readFile, copyFile, readdir, realpath, stat } from "node:fs/promises";
 import { join, basename, extname, isAbsolute, relative, resolve, sep } from "node:path";
 import { config, isCloudMode, isRemoteMode } from "../config.js";
-import { getHistory, getObjectInfo, resetObjectInfoCache } from "../comfyui/client.js";
+import {
+  getHistory,
+  getObjectInfo,
+  resetObjectInfoCache,
+  MAX_VIEW_RESPONSE_BYTES,
+} from "../comfyui/client.js";
 import type { ObjectInfo } from "../comfyui/types.js";
 import { ValidationError, ModelError, ComfyUIError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
@@ -603,7 +608,8 @@ async function readLocalViewFallback(
       realpath(candidate),
     ]);
     if (!isStrictlyInside(realRoot, realCandidate)) return undefined;
-    if (!(await stat(realCandidate)).isFile()) return undefined;
+    const candidateStat = await stat(realCandidate);
+    if (!candidateStat.isFile() || candidateStat.size > MAX_VIEW_RESPONSE_BYTES) return undefined;
     const data = await readFile(realCandidate);
     return { base64: data.toString("base64"), mimeType: localViewMimeType(filename) };
   } catch {

@@ -35,6 +35,7 @@ const fetchImageMock = vi.fn();
 const uploadImageHttpMock = vi.fn();
 const getHistoryMock = vi.fn();
 vi.mock("../../comfyui/client.js", () => ({
+  MAX_VIEW_RESPONSE_BYTES: 32 * 1024 * 1024,
   fetchImage: (...a: unknown[]) => fetchImageMock(...a),
   uploadImageHttp: (...a: unknown[]) => uploadImageHttpMock(...a),
   getHistory: (...a: unknown[]) => getHistoryMock(...a),
