@@ -6,6 +6,17 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.100] - 2026-08-24
+
+### MCP
+
+#### Fixed
+- persist connect orchestrator logs (#2198) (#2228)
+- recover widget schema after combo timeout (#2229)
+- complete large panel_get_errors audits (#2227)
+- route list_templates through connected panel relay (#2196) (#2230)
+
+
 ## [0.52.99] - 2026-08-25
 
 ### MCP
