@@ -28,6 +28,7 @@
     "test": "vitest run --passWithNoTests && npm run i18n:check && npm run check:docs-links && npm run check:docs-locale && npm run check:docs-mdx && npm run check:blog && npm run check:blog-packs && npm run check:blog-stale && npm run check:blog-structure",
     "smoke": "npm run build && node scripts/smoke-install.mjs",
     "test:watch": "vitest",
+    "test:integration": "cross-env COMFYUI_INTEGRATION=true vitest run",
     "test:agent": "npm run build && node scripts/test-agent.mjs",
     "test:local-llm": "npm run build && node scripts/test-local-llm.mjs",
     "arena": "npm run build && node scripts/llm-arena.mjs",
