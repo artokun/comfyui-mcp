@@ -29,8 +29,6 @@
 // These tests drive the REAL server over a real socket. A fake would only prove
 // the shape I already believe.
 import { afterEach, describe, expect, it } from "vitest";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 import { startPanelMcpHttpServer, type PanelMcpHttpServer } from "../../orchestrator/panel-mcp-http.js";
 import type { UiBridge } from "../../services/ui-bridge.js";
@@ -40,6 +38,79 @@ const TAB = "tmp:1524";
 const TRANSIENT_ORCHESTRATOR_SEND_ERROR =
   "Transport send error: WorkerTransport<StreamableHttpClientWorker<...>> error: " +
   "HTTP request failed sending request to http://127.0.0.1:9198/orchestrator::codex";
+
+const RAW_MCP_HEADERS = {
+  "content-type": "application/json",
+  accept: "application/json, text/event-stream",
+};
+
+interface RawMcpPayload {
+  result?: { isError?: boolean };
+  error?: unknown;
+}
+
+function parseRawMcpPayload(body: string): RawMcpPayload {
+  const trimmed = body.trim();
+  const json = trimmed.startsWith("{")
+    ? trimmed
+    : trimmed
+        .split(/\r?\n/)
+        .find((line) => line.startsWith("data:"))
+        ?.slice("data:".length)
+        .trim();
+  if (!json) throw new Error(`MCP response was not JSON or SSE: ${body}`);
+  return JSON.parse(json) as RawMcpPayload;
+}
+
+async function openRawMcpSession(s: PanelMcpHttpServer, clientName: string): Promise<string> {
+  const init = await fetch(s.urlFor(TAB), {
+    method: "POST",
+    headers: RAW_MCP_HEADERS,
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: clientName, version: "1" },
+      },
+    }),
+  });
+  expect(init.status).toBe(200);
+  const sessionId = init.headers.get("mcp-session-id");
+  expect(sessionId).toBeTruthy();
+  await init.text();
+
+  const initialized = await fetch(s.urlFor(TAB), {
+    method: "POST",
+    headers: { ...RAW_MCP_HEADERS, "mcp-session-id": sessionId! },
+    body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
+  });
+  expect([200, 202]).toContain(initialized.status);
+  await initialized.text();
+  return sessionId!;
+}
+
+async function rawMcpToolCall(
+  s: PanelMcpHttpServer,
+  sessionId: string,
+  id: number,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<{ status: number; payload: RawMcpPayload }> {
+  const response = await fetch(s.urlFor(TAB), {
+    method: "POST",
+    headers: { ...RAW_MCP_HEADERS, "mcp-session-id": sessionId },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id,
+      method: "tools/call",
+      params: { name, arguments: args },
+    }),
+  });
+  return { status: response.status, payload: parseRawMcpPayload(await response.text()) };
+}
 
 /** A bridge that is never actually reached — these tests stop at the transport. */
 const bridge = {
@@ -181,7 +252,7 @@ describe("a stale panel MCP session is reported as a SESSION problem (#1524)", (
 });
 
 describe("idempotent panel reads retry a transient orchestrator send error (#2233)", () => {
-  it("retries panel_query_graph and panel_graph_outline once through the real HTTP MCP path", async () => {
+  it("retries panel_query_graph and panel_graph_outline once through the raw HTTP MCP handoff", async () => {
     const attempts = new Map<string, number>();
     const readBridge = {
       ...bridge,
@@ -195,25 +266,25 @@ describe("idempotent panel reads retry a transient orchestrator send error (#223
       },
     } as unknown as UiBridge;
     const s = await startPanelMcpHttpServer(readBridge, 0);
-    let client: Client | undefined;
     try {
-      client = new Client({ name: "test-2233", version: "1" });
-      await client.connect(new StreamableHTTPClientTransport(new URL(s.urlFor(TAB))));
+      const sessionId = await openRawMcpSession(s, "test-2233");
+      const query = await rawMcpToolCall(s, sessionId, 2, "panel_query_graph", {});
+      const outline = await rawMcpToolCall(s, sessionId, 3, "panel_graph_outline", {});
 
-      const query = await client.callTool({ name: "panel_query_graph", arguments: {} });
-      const outline = await client.callTool({ name: "panel_graph_outline", arguments: {} });
-
-      expect(query.isError).not.toBe(true);
-      expect(outline.isError).not.toBe(true);
+      expect(query.status).toBe(200);
+      expect(query.payload.error).toBeUndefined();
+      expect(query.payload.result?.isError).not.toBe(true);
+      expect(outline.status).toBe(200);
+      expect(outline.payload.error).toBeUndefined();
+      expect(outline.payload.result?.isError).not.toBe(true);
       expect(attempts.get("graph_query")).toBe(2);
       expect(attempts.get("graph_outline")).toBe(2);
     } finally {
-      await client?.close();
       await s.stop();
     }
   });
 
-  it("does not retry a mutation on the same transport error", async () => {
+  it("does not retry set_todo on the same transport error", async () => {
     let attempts = 0;
     const mutationBridge = {
       ...bridge,
@@ -223,20 +294,45 @@ describe("idempotent panel reads retry a transient orchestrator send error (#223
       },
     } as unknown as UiBridge;
     const s = await startPanelMcpHttpServer(mutationBridge, 0);
-    let client: Client | undefined;
     try {
-      client = new Client({ name: "test-2233-mutation", version: "1" });
-      await client.connect(new StreamableHTTPClientTransport(new URL(s.urlFor(TAB))));
-
-      const result = await client.callTool({
-        name: "panel_set_widget",
-        arguments: { node_id: 1, widget: "steps", value: 20 },
+      const sessionId = await openRawMcpSession(s, "test-2233-set-todo");
+      const result = await rawMcpToolCall(s, sessionId, 2, "panel_set_todo", {
+        items: [{ text: "read", status: "active" }],
       });
 
-      expect(result.isError).toBe(true);
+      expect(result.status).toBe(200);
+      expect(result.payload.result?.isError).toBe(true);
       expect(attempts).toBe(1);
     } finally {
-      await client?.close();
+      await s.stop();
+    }
+  });
+
+  it("does not retry redirected set_todo on the same transport error", async () => {
+    let attempts = 0;
+    const mutationBridge = {
+      ...bridge,
+      isHeadless: (tabId: string) => tabId === TAB,
+      tabs: () => [
+        { tab_id: TAB, title: "headless", connected_at: 0 },
+        { tab_id: "desktop-2233", title: "desktop", connected_at: 0 },
+      ],
+      send: async () => {
+        attempts += 1;
+        throw new Error(TRANSIENT_ORCHESTRATOR_SEND_ERROR);
+      },
+    } as unknown as UiBridge;
+    const s = await startPanelMcpHttpServer(mutationBridge, 0);
+    try {
+      const sessionId = await openRawMcpSession(s, "test-2233-set-todo-redirect");
+      const result = await rawMcpToolCall(s, sessionId, 2, "panel_set_todo", {
+        items: [{ text: "read", status: "active" }],
+      });
+
+      expect(result.status).toBe(200);
+      expect(result.payload.result?.isError).toBe(true);
+      expect(attempts).toBe(1);
+    } finally {
       await s.stop();
     }
   });

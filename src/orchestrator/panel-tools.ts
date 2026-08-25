@@ -1233,6 +1233,8 @@ export const __panelToolsTestHooks = {
   },
   isRetrySafeCmd,
   isTransientReconnectError,
+  isWorkerTransportSendError,
+  isWorkerTransportRetrySafeCmd,
   // CivitAI sample-image gating (#623): the predicate that decides which results'
   // pixels may be shown to the agent, and the bounded thumbnail fetcher.
   civitaiSampleEligible,
@@ -1433,11 +1435,23 @@ const RETRY_SAFE_CMDS = new Set<string>([
   "refresh_nodes",
 ]);
 
+// #2233 — this is deliberately narrower than RETRY_SAFE_CMDS. That existing
+// set also contains idempotent UI-state writes such as set_todo, which may keep
+// their established retry behavior for the panel's own reconnect errors but
+// must not inherit retries for a new outer HTTP transport failure. Only the two
+// affected live-canvas reads may retry this wrapper error.
+const WORKER_TRANSPORT_RETRY_SAFE_CMDS = new Set<string>(["graph_query", "graph_outline"]);
+
 /** A command whose result is unchanged by being re-issued after a reconnect —
  *  so it is safe to transparently retry once when the transport dropped. */
 function isRetrySafeCmd(cmd: Record<string, unknown>): boolean {
   const name = typeof cmd.cmd === "string" ? cmd.cmd : "";
   return RETRY_SAFE_CMDS.has(name);
+}
+
+function isWorkerTransportRetrySafeCmd(cmd: Record<string, unknown>): boolean {
+  const name = typeof cmd.cmd === "string" ? cmd.cmd : "";
+  return WORKER_TRANSPORT_RETRY_SAFE_CMDS.has(name);
 }
 
 // Graph-EDIT mutations that CHANGE the user's canvas (undoable edits). These are
@@ -1558,13 +1572,19 @@ function isTransientReconnectError(err: unknown): boolean {
   // next single-origin message can.
   if (isRoutingAmbiguity(err)) return false;
   const msg = err instanceof Error ? err.message : String(err ?? "");
-  // #2233 — the Codex/rmcp loopback client wraps a transient pre-response
-  // orchestrator HTTP failure as `Transport send error: WorkerTransport…` instead
-  // of preserving the lower-level socket phrase. This remains retryable only for
-  // commands admitted by RETRY_SAFE_CMDS at the caller below.
   return /no connected tab|genuinely gone|is not open|Failed to fetch|Panel not reachable|ECONNRESET|socket hang up|premature close|other side closed|ECONNABORTED|EPIPE/i.test(
     msg,
-  ) || /Transport send error:\s*WorkerTransport\b/i.test(msg);
+  );
+}
+
+/** #2233 — the Codex/rmcp loopback client wraps a transient pre-response
+ * orchestrator HTTP failure as `Transport send error: WorkerTransport…` instead
+ * of preserving the lower-level socket phrase. Its retry gate is intentionally
+ * separate from isTransientReconnectError so existing allowlisted UI writes do
+ * not inherit this new retry class. */
+function isWorkerTransportSendError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  return /Transport send error:\s*WorkerTransport\b/i.test(msg);
 }
 
 /**
@@ -11990,9 +12010,14 @@ export function makePanelToolCtx(
       // arrival; an older panel sends no field, `preExecutorRefusal` is null, and
       // this branch simply never fires.
       const preExecutorRefusal = isPreExecutorRefusal(err);
+      const workerTransportRetry =
+        isWorkerTransportSendError(err) && isWorkerTransportRetrySafeCmd(cmd);
       if (
         preExecutorRefusal ||
-        (isRetrySafeCmd(cmd) && (isTransientReconnectError(err) || isWorkflowSwitchGuardRefusal(err)))
+        (isRetrySafeCmd(cmd) &&
+          (isTransientReconnectError(err) ||
+            isWorkflowSwitchGuardRefusal(err) ||
+            workerTransportRetry))
       ) {
         // panel#1097 — declared out here so the refusal branch below can see it,
         // and REASSIGNED after ensureReachable so it names the tab the command is
@@ -13629,7 +13654,11 @@ async function dispatchToTab(
   try {
     return ok(await ctx.bridge.send(cmd as { cmd: string }, { tabId, timeoutMs }));
   } catch (err) {
-    if (isRetrySafeCmd(cmd) && isTransientReconnectError(err)) {
+    if (
+      isRetrySafeCmd(cmd) &&
+      (isTransientReconnectError(err) ||
+        (isWorkerTransportSendError(err) && isWorkerTransportRetrySafeCmd(cmd)))
+    ) {
       try {
         await sleep(retrySettleMs());
         const fresh = reResolve?.() ?? tabId;
