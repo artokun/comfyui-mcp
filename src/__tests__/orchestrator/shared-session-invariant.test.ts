@@ -220,8 +220,13 @@ describe("sessions are orchestrator-scoped, never workflow-scoped (#884)", () =>
       new URL("../../orchestrator/panel-mcp-http.ts", import.meta.url),
       "utf8",
     );
+    // The trailing lane options (#2311's `inheritsUserMcpServers: false`) are
+    // matched loosely on purpose: what this pin exists to hold is the first four
+    // arguments — the tab-bound ctx built from the backend-QUALIFIED address with
+    // the run-ticket callback. A lane fact appended after them is a different
+    // question, and it has its own pin in inherited-mcp-not-in-session.test.ts.
     expect(panelHttpSrc).toMatch(
-      /registerPanelTools\(\s*server,\s*makePanelToolCtx\(\s*bridge,\s*tabId,\s*workflowTargets,\s*onRunTicketOpened\s*\)\s*\)/s,
+      /registerPanelTools\(\s*server,\s*makePanelToolCtx\(\s*bridge,\s*tabId,\s*workflowTargets,\s*onRunTicketOpened\s*(?:,[\s\S]*?)?\)\s*,?\s*\)/s,
     );
 
     const panelToolsSrc = readFileSync(
@@ -229,7 +234,7 @@ describe("sessions are orchestrator-scoped, never workflow-scoped (#884)", () =>
       "utf8",
     );
     expect(panelToolsSrc).toMatch(
-      /const ctx = makePanelToolCtx\(bridge, tabId, workflowTargets, onRunTicketOpened\);/s,
+      /const ctx = makePanelToolCtx\(bridge, tabId, workflowTargets, onRunTicketOpened(?:,[\s\S]*?)?\);/s,
     );
     expect(panelToolsSrc).toMatch(
       /if \(ticketedPromptIds\.length\) ctx\.onRunTicketOpened\?\.\(ticketedPromptIds\);/s,

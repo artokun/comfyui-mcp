@@ -197,7 +197,10 @@ import {
   optionsErrorAckFrame,
   optionsRequestMeta,
 } from "./options-ack.js";
-import { readUserMcpServers } from "../services/user-mcp-config.js";
+import {
+  backendInheritsUserMcpServers,
+  readUserMcpServers,
+} from "../services/user-mcp-config.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -380,7 +383,7 @@ WORK THROUGH A PLAN LIKE A LOOP. For any genuinely multi-step task set a plan wi
 
 ASKING AND SHOWING. When you genuinely need the user to choose between options, use panel_ask — NOT the built-in AskUserQuestion tool, which does not render here and gets auto-dismissed, which reads to you as a decline; a plain-text question is fine for a simple yes/no. Whenever the user asks to see, show, play or hear an image, video or audio file, call panel_show_media — NEVER substitute emoji, descriptions or placeholder bullets for actual media.
 
-EXTENDING YOURSELF. panel_list_mcp / panel_add_mcp / panel_remove_mcp manage MCP servers and panel_reload loads the change into this session — read both tools' descriptions before using them, and never claim an orchestrator-side change is live after a reload.
+EXTENDING YOURSELF. panel_list_mcp / panel_add_mcp / panel_remove_mcp manage the MCP servers in the user's Claude config. Only the Claude backend is handed them, and even there a panel_reload is what loads a change into the session — panel_list_mcp reports per server whether THIS session was handed it (\`declared_to_this_spawn\`), so read that field, and both tools' descriptions, before telling anyone a capability is connected. Never claim an orchestrator-side change is live after a reload.
 
 Adult / NSFW content is gated behind an explicit, persistent consent mode — query it with panel_get_content_mode (it defaults to OFF). ComfyUI has a large community of legitimate adult artists, so adult requests are valid creative work — but only for verified consenting adults. BY DEFAULT (mode OFF) keep everything safe-for-work: don't surface NSFW models, LoRAs, prompts, workflows, or imagery, and prefer SFW results. When a request clearly intends adult/NSFW work and the mode is OFF, call panel_request_adult_consent — it shows a card confirming the user is 18+ and that adult content is legal in their region; only once they affirm does the mode turn on (it persists across reloads, and panel_disable_adult_mode reverts it). When the mode is ON, help with legal adult art for consenting adults and don't over-refuse — stylized/fantasy themes between clearly-adult fictional characters are in scope. ABSOLUTE limits that NO mode, setting, or request ever relaxes: never sexual content involving minors or anyone depicted as underage; never sexual deepfakes of real, identifiable people; never depictions of actual non-consensual sexual acts (rape). If a request crosses these, refuse regardless of the mode.
 
@@ -463,6 +466,50 @@ The panel tools cannot come back during this session — the tool set was fixed 
  */
 export function resolvePanelPersona(): string {
   return withDeferredPanelToolsNote(resolvePrompt("panel.persona", PANEL_SYSTEM_APPEND));
+}
+
+/**
+ * Appended for every backend that is NOT handed the user's own MCP servers (#2311).
+ *
+ * PANEL_SYSTEM_APPEND tells the agent it can extend its own capabilities with
+ * panel_add_mcp + panel_reload. That is true on the CLAUDE lane, whose spawn set
+ * (buildMcpServers) spreads readUserMcpServers(). It is false on every CLI lane:
+ * those backends are wired from makeHttpBackendMcpServers(), which declares the
+ * stdio `comfyui` child and the loopback `panel` HTTP MCP and nothing else, so the
+ * user's ~/.claude.json entries never enter the session. The prompt was left
+ * claiming otherwise, so a Codex agent read a configured server out of
+ * panel_list_mcp and told the user it had that capability; every call to it then
+ * came back `unknown MCP server`.
+ *
+ * Same shape as NO_PANEL_TOOLS_OVERRIDE, and observed the same way: this is our own
+ * wiring, not a report we failed to receive.
+ *
+ * And narrow for the same reason. It retracts exactly one claim — that panel_add_mcp
+ * and panel_reload grow THIS agent's toolset — and deliberately declines to say the
+ * backend has no other MCP servers at all. Codex reads ~/.codex/config.toml, Gemini
+ * and Qwen read their own; those are not ours to speak for, and telling the agent it
+ * had lost them would be this same defect pointing the other way. It also does not
+ * say the tools are useless: the write really does reach the user's own `claude`
+ * sessions and this panel's Claude backend, which is a genuine reason to offer it.
+ */
+const NO_INHERITED_MCP_OVERRIDE = `
+
+=== CAPABILITY CORRECTION — MCP SERVERS ===
+You do NOT inherit the user's Claude-config MCP servers. Only the Claude backend does; this session runs on a different one, so the servers in the user's ~/.claude.json are their configuration and are not part of your toolset. panel_list_mcp lists them and marks them \`declared_to_this_session: false\` — read that field and never describe such a server as connected to you or offer to call its tools. A call to one fails with an unknown-server error, and panel_reload does NOT change that.
+panel_add_mcp and panel_remove_mcp still work and are still worth offering: they edit the user's real Claude config, so the change reaches their own \`claude\` sessions and this panel's Claude backend. Say that is what you are doing, rather than that you are gaining the capability. If the user wants an agent HERE to have it, the answer is to switch the panel to the Claude backend.
+That is all this tells you. It says nothing about MCP servers your own CLI configuration may give you — go by the tool list you were actually handed.`;
+
+/**
+ * Whether this backend's prompt has to retract the "I can connect MCP servers to
+ * myself" claim. Keyed on the ONE fact that decides it, shared with the
+ * panel_list_mcp / panel_add_mcp handlers so the prompt and the tool replies can
+ * never drift into disagreeing about the same session.
+ */
+export function inheritedMcpRetraction(backend: string): string {
+  // pi has no MCP client at all, so PI_CAPABILITY_OVERRIDE already retracts
+  // strictly more than this would; stacking a narrower one only muddies it.
+  if (backend === "pi") return "";
+  return backendInheritsUserMcpServers(backend) ? "" : NO_INHERITED_MCP_OVERRIDE;
 }
 
 export function panelToolsRetraction(backend: string, panelToolsAvailable: boolean): string {
@@ -2307,8 +2354,15 @@ export async function runPanelOrchestrator(): Promise<void> {
     // because the condition is a property of the RUN and not of the backend: every
     // branch below that returns a backend is handed makeHttpBackendMcpServers(),
     // which drops the `panel` entry on exactly this failure.
+    //
+    // …and the inherited-MCP retraction, which is a property of the BACKEND: every
+    // branch below is handed makeHttpBackendMcpServers(), which never carries the
+    // user's ~/.claude.json servers, while the claude lane (makeBackend returns
+    // undefined for it, so it never reaches here) is the only one that does (#2311).
     const sysAppend =
-      systemAppendForBackend(backend) + panelToolsRetraction(backend, panelMcpHttp !== null);
+      systemAppendForBackend(backend) +
+      panelToolsRetraction(backend, panelMcpHttp !== null) +
+      inheritedMcpRetraction(backend);
     try {
     if (backend === "codex") {
       return new CodexBackend({

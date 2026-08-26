@@ -90,7 +90,12 @@ import {
   primePanelBase,
   verifiedPanelDiskVersion,
 } from "../services/panel-workspace.js";
-import { conversationOfScopeAddress, isScopeAddress, shortTabId } from "../services/session-scope.js";
+import {
+  backendOfAgentKey,
+  conversationOfScopeAddress,
+  isScopeAddress,
+  shortTabId,
+} from "../services/session-scope.js";
 import type { ScopeRepinOutcome } from "./turn-origins.js";
 import {
   NODE_ID_MESSAGE,
@@ -342,6 +347,7 @@ import {
 } from "../services/workflow-target-store.js";
 import {
   addUserMcpServer,
+  backendInheritsUserMcpServers,
   readUserMcpServers,
   removeUserMcpServer,
   setUserMcpServerSecret,
@@ -12073,6 +12079,27 @@ export interface PanelToolCtx {
         because: "unroutable" | "disconnected" | "no_identity" | "capability" | "target_disagreement";
       }
     | { known: false; reason: string };
+  /**
+   * Was the agent this tool session serves HANDED the user's own MCP servers
+   * (`~/.claude.json`, {@link readUserMcpServers})? (#2311)
+   *
+   * TRI-STATE on purpose. `undefined` means we never established the backend —
+   * a lightweight test ctx, or an agent key with no `::backend` half — and the
+   * only honest report for that is "unknown". It must never collapse to `false`
+   * (that states an absence we did not observe) nor to `true` (the bug this
+   * exists to fix). Captured at CONSTRUCTION from the agent key, not read per
+   * call: an agent's backend is fixed for its lifetime — switching provider
+   * builds a new agent — whereas `ctx.tabId` is a routing address that a tab-id
+   * migration rewrites into a bare panel tab id.
+   */
+  inheritsUserMcpServers?: boolean;
+}
+
+/** Options a LANE sets on the ctx it builds — facts about the agent this tool
+ *  session serves that no handler can observe on its own. */
+export interface PanelToolCtxLane {
+  /** See {@link PanelToolCtx.inheritsUserMcpServers}. Omit for "unknown". */
+  inheritsUserMcpServers?: boolean;
 }
 
 /** Build a tab-bound execution context shared by both transports. */
@@ -12081,6 +12108,7 @@ export function makePanelToolCtx(
   tabId: string,
   workflowTargets?: WorkflowTargetStore,
   onRunTicketOpened?: (promptIds: readonly string[]) => void,
+  lane?: PanelToolCtxLane,
 ): PanelToolCtx {
   // The routing tab id is held on the returned ctx object (NOT captured by
   // value) so an explicit rebind can re-point this session in place: call/
@@ -12090,6 +12118,13 @@ export function makePanelToolCtx(
     tabId,
     workflowTarget: workflowTargets,
     onRunTicketOpened,
+    // Spread, not assigned: an absent lane must leave the field UNDEFINED
+    // (= unknown), and `inheritsUserMcpServers: lane?.inheritsUserMcpServers`
+    // would write an explicit undefined that reads the same but hides that the
+    // caller said nothing. See PanelToolCtx.inheritsUserMcpServers.
+    ...(lane?.inheritsUserMcpServers === undefined
+      ? {}
+      : { inheritsUserMcpServers: lane.inheritsUserMcpServers }),
   } as PanelToolCtx;
 
   // AUTO-HEAL an orphaned session in place. When THIS session's captured tabId no
@@ -17874,15 +17909,37 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_list_mcp",
-      "List the MCP servers available to you. Returns the user's inherited servers (from their Claude config) plus your always-present built-ins (comfyui, the live-graph panel server). Use this to check whether a capability (e.g. CivitAI model search) is already connected before offering to add it.",
+      "List the MCP servers configured in the user's Claude config (~/.claude.json) and say whether THIS session's agent was actually handed them. Only the Claude backend inherits them; on codex/gemini/grok/antigravity/qwen/... they are the user's configuration and NOT part of your toolset, so the reply reports them as not declared rather than as available. Read `declared_to_this_session` before telling the user (or yourself) that a capability is connected - and note that even `true` means DECLARED, not verified-connected. Your own built-ins (comfyui, the live-graph panel server) are listed separately.",
       {},
-      async () => {
+      async (_args: A, ctx) => {
         try {
-          const inherited = Object.keys(readUserMcpServers());
+          const configured = Object.keys(readUserMcpServers());
+          // TRI-STATE, never collapsed (#2311, and the #796 unknown-collapse rule):
+          // a backend we never established is reported as "unknown", not as `false`.
+          const inherits = ctx?.inheritsUserMcpServers;
+          const declared: boolean | "unknown" = inherits === undefined ? "unknown" : inherits;
+          const note =
+            declared === true
+              ? "These servers were DECLARED to this session (the Claude lane inherits the user's config). " +
+                "Declared is not the same as connected - a declared server can still come up failed - so if a " +
+                "call to one returns an unknown-server error, that is why. panel_add_mcp / panel_remove_mcp " +
+                "followed by panel_reload changes this set."
+              : declared === false
+                ? "These servers were NOT declared to this session: this agent's backend is not the Claude one, " +
+                  "and only the Claude lane is handed the user's ~/.claude.json servers. Calling one of their " +
+                  "tools will fail with an unknown-server error, and panel_reload will NOT add them - do not " +
+                  "tell the user you have that capability. They DO apply to the user's own claude sessions and " +
+                  "to this panel's Claude backend, so panel_add_mcp is still worth offering for those. This " +
+                  "says nothing about MCP servers your own CLI config may give you: go by the tool list you " +
+                  "were actually given."
+                : "Whether this session was handed these servers could not be established here (the agent's " +
+                  "backend is not recorded on this tool session). Treat it as unknown: do not claim the " +
+                  "capability until you have actually called one of its tools and it worked.";
           return ok({
-            inherited,
+            user_config_servers: configured,
+            declared_to_this_session: declared,
             builtin: ["comfyui", "panel"],
-            note: "After panel_add_mcp / panel_remove_mcp, call panel_reload to apply the change to this session.",
+            note,
           });
         } catch (err) {
           return fail(err);
@@ -17891,7 +17948,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_add_mcp",
-      "Connect a new MCP server by writing it to the user's Claude config (~/.claude.json) — it then loads into THIS session after you call panel_reload, and also becomes available to the user's normal Claude session. Use for capabilities you don't have yet, e.g. the official CivitAI MCP: name 'civitai', transport 'http', url 'https://mcp.civitai.com/mcp'. ALWAYS ask the user before connecting a remote (http/sse) MCP — it's an external service connection. Some servers need an auth token: pass it via headers (http/sse) or env (stdio).",
+      "Write a new MCP server into the user's Claude config (~/.claude.json), where their normal `claude` session and this panel's Claude backend pick it up. On the CLAUDE backend it also loads into THIS session after you call panel_reload; on every other backend (codex/gemini/grok/antigravity/qwen/...) it does NOT - that lane is never handed the user's Claude config, so panel_reload will not give you its tools. The reply says which of the two happened; do not promise the capability before reading it. Use for capabilities you don't have yet, e.g. the official CivitAI MCP: name 'civitai', transport 'http', url 'https://mcp.civitai.com/mcp'. ALWAYS ask the user before connecting a remote (http/sse) MCP - it's an external service connection. Some servers need an auth token: pass it via headers (http/sse) or env (stdio).",
       {
         name: z.string().describe("Server name/key, e.g. 'civitai'. Letters, digits, dot, dash, underscore."),
         transport: z.enum(["http", "sse", "stdio"]).describe("'http'/'sse' for a hosted URL server; 'stdio' for a local command."),
@@ -17901,7 +17958,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         headers: z.record(z.string(), z.string()).optional().describe("HTTP headers for http/sse (e.g. an Authorization token)."),
         env: z.record(z.string(), z.string()).optional().describe("Environment variables for a stdio server."),
       },
-      async (args: A) => {
+      async (args: A, ctx) => {
         try {
           const transport = args.transport as string;
           let config: Record<string, unknown>;
@@ -17922,8 +17979,23 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             };
           }
           addUserMcpServer(args.name as string, config);
+          // #2311 - the write ALWAYS lands in ~/.claude.json; whether it reaches
+          // THIS agent depends on the lane, and the old wording promised the
+          // Claude-lane outcome to every backend.
+          const inherits = ctx?.inheritsUserMcpServers;
+          const written = `Added MCP server "${args.name}" to the user's Claude config (~/.claude.json).`;
           return ok(
-            `Connected MCP server "${args.name}" (written to your Claude config). Call panel_reload to load it into this session — then its tools become available.`,
+            inherits === true
+              ? `${written} Call panel_reload to load it into this session - its tools then become available ` +
+                `if the server starts (a declared server can still fail to come up).`
+              : inherits === false
+                ? `${written} It is now available to the user's own claude sessions and to this panel's Claude ` +
+                  `backend. It is NOT available to you: this session's backend is not handed the user's Claude ` +
+                  `config, so panel_reload will not add its tools. Say that plainly rather than offering to use ` +
+                  `it - switching the panel to the Claude backend is what would give it to an agent here.`
+                : `${written} Whether it reaches THIS session could not be established here (the agent's backend ` +
+                  `is not recorded on this tool session) - after a panel_reload, verify by actually calling one ` +
+                  `of its tools before telling the user the capability is connected.`,
           );
         } catch (err) {
           return fail(err);
@@ -17932,14 +18004,18 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_remove_mcp",
-      "Remove an MCP server from the user's Claude config by name. Call panel_reload afterward to drop it from this session. Cannot remove the built-in comfyui/panel servers.",
+      "Remove an MCP server from the user's Claude config by name. On the Claude backend, call panel_reload afterward to drop it from this session; other backends were never handed it in the first place (see panel_list_mcp). Cannot remove the built-in comfyui/panel servers.",
       { name: z.string().describe("Server name to remove (from panel_list_mcp).") },
-      async (args: A) => {
+      async (args: A, ctx) => {
         try {
           const removed = removeUserMcpServer(args.name as string);
+          const applies =
+            ctx?.inheritsUserMcpServers === false
+              ? " It was not part of THIS session either way - this backend is not handed the user's Claude config."
+              : " Call panel_reload to apply it to this session.";
           return ok(
             removed
-              ? `Removed MCP server "${args.name}". Call panel_reload to apply.`
+              ? `Removed MCP server "${args.name}" from the user's Claude config.${applies}`
               : `No MCP server named "${args.name}" in the user config.`,
           );
         } catch (err) {
@@ -22520,7 +22596,24 @@ export function createPanelMcpServer(
   workflowTargets?: WorkflowTargetStore,
   onRunTicketOpened?: (promptIds: readonly string[]) => void,
 ): McpSdkServerConfigWithInstance {
-  const ctx = makePanelToolCtx(bridge, tabId, workflowTargets, onRunTicketOpened);
+  // #2311 — record whether this agent was handed the user's own MCP servers, so
+  // panel_list_mcp / panel_add_mcp report the session and not the config file.
+  // Derived from the agent key rather than hardcoded to `true`: this function is
+  // called only for the Claude backend today, and it must be right on its own
+  // terms and not only in the one place it happens to be called from (the same
+  // reason panelToolsRetraction lists `claude` explicitly). A key with no
+  // `::backend` half yields undefined = UNKNOWN, which the handler reports as
+  // unknown rather than collapsing to an absence it never observed.
+  //
+  // Captured HERE, at construction, not read per call: the backend is fixed for an
+  // agent's lifetime (switching provider builds a new agent), whereas `ctx.tabId`
+  // is a routing address that server.rebindTab() below rewrites into a bare panel
+  // tab id — which carries no backend half at all.
+  const keyBackend = backendOfAgentKey(tabId);
+  const ctx = makePanelToolCtx(bridge, tabId, workflowTargets, onRunTicketOpened, {
+    inheritsUserMcpServers:
+      keyBackend === undefined ? undefined : backendInheritsUserMcpServers(keyBackend),
+  });
   // #873 — THE SECOND PANEL REGISTRATION PATH. This one serves the Anthropic Agent SDK
   // (Claude backend, in-process transport); registerPanelTools serves the MCP SDK. They
   // build from the SAME buildPanelToolDefs(), so filtering only the other one left

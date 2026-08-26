@@ -104,7 +104,26 @@ export function startPanelMcpHttpServer(
     );
     // Tab-bound context: every tool forwards to the bridge for THIS tab — the
     // same surface the Claude in-process server exposes (shared defs).
-    registerPanelTools(server, makePanelToolCtx(bridge, tabId, workflowTargets, onRunTicketOpened));
+    //
+    // `inheritsUserMcpServers: false` is a statement about THIS LANE, not a guess
+    // about the backend behind it (#2311). This server exists only for the
+    // CLI-driven backends, and every one of them is spawned from
+    // makeHttpBackendMcpServers(), which declares exactly two MCP servers — the
+    // stdio `comfyui` child and this loopback `panel` HTTP MCP. The user's
+    // ~/.claude.json entries are never among them. Without this the shared
+    // panel_list_mcp handler reported them as inherited on every lane, which is
+    // how a Codex session was told it had `story-mixer-comfy` and then got
+    // `unknown MCP server` from every call to it.
+    //
+    // It says nothing about MCP servers the CLI's OWN config (~/.codex/config.toml
+    // and friends) may add — we only know what we declared, and the handler's
+    // wording is careful to claim no more than that.
+    registerPanelTools(
+      server,
+      makePanelToolCtx(bridge, tabId, workflowTargets, onRunTicketOpened, {
+        inheritsUserMcpServers: false,
+      }),
+    );
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
       // Defense in depth against DNS rebinding (a malicious page resolving its own

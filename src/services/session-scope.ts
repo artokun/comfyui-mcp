@@ -71,6 +71,25 @@ export function conversationOfScopeAddress(id: string | undefined | null): strin
 }
 
 /**
+ * The BACKEND half of an agent key (`orchestrator::codex` -> `"codex"`,
+ * and the legacy per-tab form `wf:x::claude` -> `"claude"`).
+ *
+ * `undefined` when the id carries no backend half at all — the bare scope, or a
+ * real panel tab id (`wf:…`/`tmp:…`), which is what `PanelToolCtx.tabId` becomes
+ * after a tab-id migration rebind (PanelAgent.rebindTabId strips `::backend`).
+ * That case is UNKNOWN and callers must treat it as such: substituting the
+ * default backend here would let a caller state a per-backend fact about an
+ * agent whose backend it never established (#2311).
+ */
+export function backendOfAgentKey(id: string | undefined | null): string | undefined {
+  if (typeof id !== "string") return undefined;
+  const i = id.lastIndexOf("::");
+  if (i < 0) return undefined;
+  const backend = id.slice(i + 2);
+  return backend.length ? backend : undefined;
+}
+
+/**
  * The connected panel tabs participating in a backend's shared conversation —
  * every tab whose selected backend matches. Agent output (say/stream/turn/…)
  * fans out to ALL of them: the same conversation is visible from every tab.
