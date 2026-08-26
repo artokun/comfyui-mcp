@@ -4778,17 +4778,12 @@ async function looksLikeSpaCatchall(res: Response): Promise<boolean> {
 }
 
 /**
- * @param base the ALREADY-PINNED target. Not re-read from config here (codex
- * gate P0): the caller resolved which instance it is restarting before its own
- * awaits, and re-reading the mutable base at dispatch time is how a reboot
- * meant for A gets posted to B.
- */
-/**
  * Total budget for the report-time version read (#2320). Generous for a bare
  * version string on a reachable server, and short enough that an unreachable one
  * costs the caller a clause rather than minutes.
  */
 const REPORT_VERSION_PROBE_BUDGET_MS = 3_000;
+
 /**
  * Read the Manager MAJOR version straight from the Manager, for the REPORT only.
  *
@@ -4837,6 +4832,12 @@ async function probeManagerMajorForReport(base: string): Promise<number | undefi
   return undefined;
 }
 
+/**
+ * @param base the ALREADY-PINNED target. Not re-read from config here (codex
+ * gate P0): the caller resolved which instance it is restarting before its own
+ * awaits, and re-reading the mutable base at dispatch time is how a reboot
+ * meant for A gets posted to B.
+ */
 async function rebootViaManager(base: string): Promise<RebootResult> {
   const failures: string[] = [];
   // Candidates that answered 200 but looked like the frontend catchall. They are
