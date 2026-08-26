@@ -3,7 +3,7 @@
 import { spawnSync } from "node:child_process";
 
 const checks = [
-  { name: "vitest", cmd: "vitest", args: ["run", "--passWithNoTests"] },
+  { name: "vitest", cmd: "npx", args: ["vitest", "run", "--passWithNoTests"] },
   { name: "i18n:check", cmd: "npm", args: ["run", "i18n:check"] },
   { name: "check:docs-links", cmd: "npm", args: ["run", "check:docs-links"] },
   { name: "check:docs-locale", cmd: "npm", args: ["run", "check:docs-locale"] },
@@ -19,18 +19,19 @@ const checks = [
 ];
 
 const results = [];
+let hasFailures = false;
 
 for (const check of checks) {
   console.log(`\n$ ${check.cmd} ${check.args.join(" ")}`);
   const result = spawnSync(check.cmd, check.args, {
     stdio: "inherit",
-    shell: true,
   });
 
   const passed = result.status === 0;
   results.push({ name: check.name, passed });
 
   if (!passed) {
+    hasFailures = true;
     console.error(`❌ ${check.name} failed with exit code ${result.status}`);
   } else {
     console.log(`✅ ${check.name} passed`);
