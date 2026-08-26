@@ -52,6 +52,10 @@ export type PromotedTerminalWitness = {
 export type PromotedParentRailWitness = {
   authoritative: true;
   widget: string;
+  /** Per-instance host-input identity when the panel exposes it. The final
+   * dispatch still re-resolves the live object, but this catches a relink to
+   * another promoted store entry with the same display name. */
+  widgetId?: string;
 };
 
 type PromotedTerminalEntry = {
@@ -364,7 +368,18 @@ function parsePromotedTerminalEntries(value: unknown): PromotedTerminalEntry[] |
       ) {
         return null;
       }
-      parentRail = { authoritative: true, widget: parentRailRaw.widget };
+      const parentRailWidgetId = parentRailRaw.widget_id;
+      if (
+        parentRailWidgetId !== undefined &&
+        (typeof parentRailWidgetId !== "string" || parentRailWidgetId.length === 0)
+      ) {
+        return null;
+      }
+      parentRail = {
+        authoritative: true,
+        widget: parentRailRaw.widget,
+        ...(parentRailWidgetId !== undefined ? { widgetId: parentRailWidgetId } : {}),
+      };
       if (!isNodeId(terminalRaw.terminal_node_id)) return null;
       if (typeof terminalRaw.terminal_node_type !== "string" || terminalRaw.terminal_node_type.length === 0) {
         return null;

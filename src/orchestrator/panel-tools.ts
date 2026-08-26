@@ -6271,7 +6271,12 @@ function samePromotedParentRail(
   right: PromotedParentRailWitness | undefined,
 ): boolean {
   if (!left || !right) return left === right;
-  return left.authoritative === true && right.authoritative === true && left.widget === right.widget;
+  return (
+    left.authoritative === true &&
+    right.authoritative === true &&
+    left.widget === right.widget &&
+    left.widgetId === right.widgetId
+  );
 }
 
 /** Run the known-bad set against the node id that is about to be written, then
@@ -6321,6 +6326,8 @@ type PromotedWritePlan = {
 
 type PromotedExpectedScope = PromotedScopeWitness & {
   terminal?: PromotedTerminalWitness;
+  promotedWidget?: string;
+  parentRail?: PromotedParentRailWitness;
 };
 
 type PromotedWritePreflight = PromotedWritePlan | ToolResult | null;
@@ -6750,6 +6757,16 @@ async function preparePromotedWidgetWrite(
     return promotedWriteRefusal(
       widget,
       "the receiving panel lacks the atomic promoted graph-identity write fence",
+    );
+  }
+  // Legacy panels do not publish a parent-rail witness and retain the
+  // established same-name recovery contract. A current witness-capable panel
+  // must advertise the synchronous final rail re-resolution before MCP sends
+  // the inner/shared-subgraph write.
+  if (publishesCompleteTerminalWitness && ctx.tabPromotedParentRailFenceCapability?.() !== true) {
+    return promotedWriteRefusal(
+      widget,
+      "the receiving panel lacks the atomic promoted parent-rail write fence",
     );
   }
 
@@ -12695,6 +12712,7 @@ interface BridgeProbe {
   promotedScopeFor?: (tabId: string) => TabPromotedScopeRead;
   readPromotedScope?: (tabId: string, innerNodeId: number | string) => Promise<TabPromotedScopeRead>;
   tabPromotedTerminalWitnessCapability?: (tabId: string) => boolean;
+  tabPromotedParentRailFenceCapability?: (tabId: string) => boolean;
   lastFenceRefusal?: (tabId: string) => string | undefined;
   isHeadless?: (tabId: string) => boolean;
   canReach?: (tabId: string) => boolean;
@@ -12831,6 +12849,9 @@ export interface PanelToolCtx {
   /** Whether the currently bound panel publishes the complete renamed-promotion
    * alias -> terminal witness needed for alias-independent preflight (#2314 P1). */
   tabPromotedTerminalWitnessCapability?: () => boolean;
+  /** Whether the currently bound panel re-resolves the promoted parent rail
+   * synchronously at the final graph_set_widget mutation boundary. */
+  tabPromotedParentRailFenceCapability?: () => boolean;
   /**
    * The same question TRI-STATE, for code that must REPORT the answer rather than
    * gate on it. `tabCanMutateGraph` fails closed (an unreadable probe becomes
@@ -14256,6 +14277,9 @@ export function makePanelToolCtx(
   ctx.tabPromotedTerminalWitnessCapability = () =>
     typeof bridge.tabPromotedTerminalWitnessCapability === "function" &&
     bridge.tabPromotedTerminalWitnessCapability(ctx.tabId);
+  ctx.tabPromotedParentRailFenceCapability = () =>
+    typeof bridge.tabPromotedParentRailFenceCapability === "function" &&
+    bridge.tabPromotedParentRailFenceCapability(ctx.tabId);
   ctx.tabGraphMutationCapability = () => bridge.tabGraphMutationCapability(ctx.tabId);
   return ctx;
 }
@@ -17274,6 +17298,18 @@ export function buildPanelToolDefs(): PanelToolDef[] {
                           scope: "subgraph",
                           owner_node_id: targetExpectedScope.ownerNodeId,
                           graph_identity: targetExpectedScope.graphIdentity,
+                          ...(targetExpectedScope.promotedWidget && targetExpectedScope.parentRail
+                            ? {
+                                promoted_widget: targetExpectedScope.promotedWidget,
+                                parent_rail: {
+                                  authoritative: true,
+                                  widget: targetExpectedScope.parentRail.widget,
+                                  ...(targetExpectedScope.parentRail.widgetId !== undefined
+                                    ? { widget_id: targetExpectedScope.parentRail.widgetId }
+                                    : {}),
+                                },
+                              }
+                            : {}),
                           ...(targetExpectedScope.workflowUuid !== undefined
                             ? { workflow_uuid: targetExpectedScope.workflowUuid }
                             : {}),
@@ -17508,6 +17544,8 @@ export function buildPanelToolDefs(): PanelToolDef[] {
               },
               {
                 ...plan.scope,
+                promotedWidget: args.widget as string,
+                parentRail: plan.inner.parentRail,
                 ...(plan.terminal ? { terminal: plan.terminal } : {}),
               },
             );

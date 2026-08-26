@@ -165,6 +165,7 @@ function connectPanel(
             enforces_expected_node_type_at_write: true,
             enforces_expected_scope_at_write: true,
             enforces_expected_scope_graph_identity_at_write: true,
+            enforces_promoted_parent_rail_at_write: true,
             // The panel's sessionStorage-backed browser-tab identity: unique per
             // browser tab, stable across a reload (#486/#709).
             ...(opts.tabSessionId ? { tab_session_id: opts.tabSessionId } : {}),
@@ -3320,6 +3321,60 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
       );
     expect(caught).toBeInstanceOf(Error);
     expect((caught as Error).message).toMatch(/graph-identity write fence.*0\.15\.97/i);
+    expect(isCapabilityRefusal(caught)).toBe(true);
+    expect(dispatchOutcomeOf(caught)).toBe(false);
+    old.close();
+  });
+
+  it("FAILS CLOSED when a witness-capable panel lacks the final parent-rail fence", async () => {
+    const old = new WebSocket(`ws://127.0.0.1:${port}`);
+    await new Promise<void>((res, rej) => {
+      old.on("open", () => {
+        old.send(
+          JSON.stringify({
+            type: "hello",
+            tab_id: "tmp:old-promoted-parent-rail",
+            title: "old promoted parent rail fence",
+            enforces_workflow_stamp: true,
+            enforces_workflow_stamp_at_write: true,
+            enforces_expected_node_type_at_write: true,
+            enforces_expected_scope_at_write: true,
+            enforces_expected_scope_graph_identity_at_write: true,
+            // Deliberately omit the final parent-rail capability while keeping
+            // the older witness/scope capabilities present.
+          }),
+        );
+        res();
+      });
+      old.on("error", rej);
+    });
+    await waitFor(() =>
+      expect(bridge.tabs().some((t) => t.tab_id === "tmp:old-promoted-parent-rail")).toBe(true),
+    );
+    expect(bridge.tabPromotedParentRailFenceCapability("tmp:old-promoted-parent-rail")).toBe(false);
+    const caught = await bridge
+      .send(
+        {
+          cmd: "graph_set_widget",
+          node_id: 76,
+          widget: "quality_prompt",
+          value: "NEW",
+          expected_scope: {
+            scope: "subgraph",
+            owner_node_id: "78",
+            graph_identity: "graph:scope-a",
+            promoted_widget: "quality_prompt",
+            parent_rail: { authoritative: true, widget: "quality_prompt" },
+          },
+        },
+        { tabId: "tmp:old-promoted-parent-rail" },
+      )
+      .then(
+        () => null,
+        (err) => err,
+      );
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toMatch(/atomic promoted parent-rail write fence.*0\.15\.97/i);
     expect(isCapabilityRefusal(caught)).toBe(true);
     expect(dispatchOutcomeOf(caught)).toBe(false);
     old.close();

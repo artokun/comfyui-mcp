@@ -111,6 +111,11 @@ function bridge(opts: {
   /** #2314 P1: emulate a current receiver that publishes the recursive
    * renamed-promotion terminal witness. */
   promotedTerminalWitnesses?: boolean;
+  /** #2314 final-rail race: relink the parent input after MCP's last
+   * synchronous callback but before the receiver applies graph_set_widget. */
+  parentRailRelinkAfterMcpFence?: boolean;
+  /** Whether the fake receiver enforces the final parent-rail witness. */
+  promotedParentRailFence?: boolean;
   /** Receiver navigation to another graph with the SAME owner/workflow and
    * colliding inner ids. Only graph_identity may distinguish this target. */
   receiverGraphIdentityCollisionAfterMcpFence?: boolean;
@@ -240,6 +245,12 @@ function bridge(opts: {
           mutation?.();
           sendOpts.beforeDispatch();
         }
+        if (opts.parentRailRelinkAfterMcpFence) {
+          // The final MCP callback has already returned. A live panel relation
+          // can change in this window; the expected_scope parent_rail must be
+          // the thing that makes the receiver refuse before mutation.
+          (b as { liveParentRailWidget?: string }).liveParentRailWidget = "relinked_quality_prompt";
+        }
       }
       calls.push({ ...cmd });
       if (cmd.cmd === "graph_set_widget") {
@@ -257,6 +268,18 @@ function bridge(opts: {
             expected.graph_identity !== currentGraphIdentity
           ) {
             throw new Error("graph_set_widget promoted receiver changed before dispatch: Nothing was applied.");
+          }
+          if (
+            expectedScope &&
+            typeof expectedScope === "object" &&
+            !Array.isArray(expectedScope) &&
+            Object.prototype.hasOwnProperty.call(expectedScope, "parent_rail") &&
+            opts.promotedParentRailFence !== false &&
+            (b as { liveParentRailWidget?: string }).liveParentRailWidget !== undefined &&
+            ((expectedScope.parent_rail as Record<string, unknown>)?.widget !==
+              (b as { liveParentRailWidget?: string }).liveParentRailWidget)
+          ) {
+            throw new Error("graph_set_widget promoted parent rail changed before dispatch: Nothing was applied.");
           }
         }
         writes += 1;
@@ -406,6 +429,8 @@ function bridge(opts: {
     tabExpectedNodeTypeFenceCapability: () => true,
     tabExpectedScopeGraphIdentityFenceCapability: () => opts.scopeGraphIdentityFence !== false,
     tabPromotedTerminalWitnessCapability: () => opts.promotedTerminalWitnesses === true,
+    tabPromotedParentRailFenceCapability: () =>
+      opts.promotedParentRailFence ?? opts.promotedTerminalWitnesses === true,
     tabGraphMutationCapability: () => ({ known: true, canMutate: true }),
     workflowUuidFor: () => ({ known: true, uuid: workflowUuid }),
   } as unknown as PanelToolCtx["bridge"];
@@ -1345,6 +1370,33 @@ describe("panel_set_widget promoted container success guards (#2314)", () => {
     expect(calls.filter((call) => call.cmd === "graph_set_widget")).toHaveLength(0);
   });
 
+  it("binds parent-rail authority into final graph_set_widget after graph_enter_subgraph", async () => {
+    const { text, isError, calls, mutations } = await setWidget(
+      { node_id: 78, widget: "quality_prompt", value: "new" },
+      {
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        parentRailRelinkAfterMcpFence: true,
+        subgraph: CURRENT_SAFE_PROMOTED_SUBGRAPH,
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(text).toMatch(/parent rail changed before dispatch/);
+    expect(mutations).toBe(0);
+    expect(calls.map((call) => call.cmd)).toContain("graph_enter_subgraph");
+    expect(calls.filter((call) => call.cmd === "graph_set_widget")).toEqual([
+      expect.objectContaining({
+        node_id: 76,
+        widget: "quality_prompt",
+        expected_scope: expect.objectContaining({
+          promoted_widget: "quality_prompt",
+          parent_rail: { authoritative: true, widget: "quality_prompt" },
+        }),
+      }),
+    ]);
+  });
+
   it("refuses a promoted mapping for an old receiver without the graph-identity fence", async () => {
     const { text, isError, calls } = await setWidget(
       { node_id: 78, widget: "quality_prompt", value: "masterpiece" },
@@ -1358,6 +1410,23 @@ describe("panel_set_widget promoted container success guards (#2314)", () => {
 
     expect(isError).toBe(true);
     expect(text).toMatch(/lacks the atomic promoted graph-identity write fence/);
+    expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
+    expect(calls.map((c) => c.cmd)).not.toContain("graph_enter_subgraph");
+  });
+
+  it("refuses a promoted mapping for a receiver without the final parent-rail fence", async () => {
+    const { text, isError, calls } = await setWidget(
+      { node_id: 78, widget: "quality_prompt", value: "masterpiece" },
+      {
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        promotedParentRailFence: false,
+        subgraph: CURRENT_SAFE_PROMOTED_SUBGRAPH,
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(text).toMatch(/lacks the atomic promoted parent-rail write fence/);
     expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
     expect(calls.map((c) => c.cmd)).not.toContain("graph_enter_subgraph");
   });

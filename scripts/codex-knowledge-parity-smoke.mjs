@@ -124,6 +124,7 @@ function runScenario(task) {
           enforces_expected_node_type_at_write: true,
           enforces_expected_scope_at_write: true,
           enforces_expected_scope_graph_identity_at_write: true,
+          enforces_promoted_parent_rail_at_write: true,
           workflow_uuid: MOCK_WORKFLOW_UUID,
         }),
       );

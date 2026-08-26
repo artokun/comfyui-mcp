@@ -236,6 +236,9 @@ interface Conn {
    * the complete renamed-promotion alias -> terminal witness consumed by the
    * orchestrator before a promoted write. */
   publishesPromotedTerminalWitnesses: boolean;
+  /** True only when THIS hello advertises that graph_set_widget re-resolves the
+   * promoted parent rail through the live owner/input relation at mutation time. */
+  enforcesPromotedParentRailAtWrite: boolean;
   /** True when THIS hello advertises that the panel understands `agent_note` — a frame
    *  delivered to the AGENT ONLY and never rendered as a chat bubble.
    *
@@ -376,6 +379,9 @@ export const BRIDGE_CAPABILITY_MIN_PANEL_VERSION: Readonly<Record<string, string
   // #2314 P1 — the promoted fence additionally validates the object-keyed live
   // graph identity, which is distinct from graph-local owner/node ids.
   enforces_expected_scope_graph_identity_at_write: "0.15.97",
+  // #2314 final-rail race — the promoted inner write re-resolves its live
+  // authoritative parent rail at the synchronous mutation boundary.
+  enforces_promoted_parent_rail_at_write: "0.15.97",
 };
 
 /**
@@ -1583,10 +1589,24 @@ function expectedScopeGraphIdentityFenceRefusal(tabId: string): Error {
   );
 }
 
+function promotedParentRailFenceRefusal(tabId: string): Error {
+  return new Error(
+    `graph_set_widget was refused before dispatch because panel tab ${tabId} ` +
+      `does not advertise the atomic promoted parent-rail write fence. Update the ` +
+      `panel to 0.15.97+ and hard-refresh the browser tab.`,
+  );
+}
+
 function commandCarriesExpectedGraphIdentity(cmd: BridgeCommand): boolean {
   const scope = cmd.expected_scope;
   return !!scope && typeof scope === "object" && !Array.isArray(scope) &&
     Object.prototype.hasOwnProperty.call(scope, "graph_identity");
+}
+
+function commandCarriesPromotedParentRail(cmd: BridgeCommand): boolean {
+  const scope = cmd.expected_scope;
+  return !!scope && typeof scope === "object" && !Array.isArray(scope) &&
+    Object.prototype.hasOwnProperty.call(scope, "parent_rail");
 }
 
 /** Normalize a syntactically valid HTTP(S) WebSocket handshake `Origin` into a
@@ -3050,6 +3070,9 @@ export class UiBridge {
           publishesPromotedTerminalWitnesses:
             (msg as { publishes_promoted_terminal_witnesses?: unknown })
               .publishes_promoted_terminal_witnesses === true,
+          enforcesPromotedParentRailAtWrite:
+            (msg as { enforces_promoted_parent_rail_at_write?: unknown })
+              .enforces_promoted_parent_rail_at_write === true,
           // Re-read per hello like the stamps above: a reconnect can be a different build.
           acceptsAgentNotes:
             (msg as { accepts_agent_notes?: unknown }).accepts_agent_notes === true,
@@ -3635,6 +3658,16 @@ export class UiBridge {
   tabPromotedTerminalWitnessCapability(tabId: string): boolean {
     try {
       return this.resolveTarget(tabId).publishesPromotedTerminalWitnesses === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Whether THIS connected panel re-resolves the promoted parent rail at the
+   * final graph_set_widget mutation boundary. */
+  tabPromotedParentRailFenceCapability(tabId: string): boolean {
+    try {
+      return this.resolveTarget(tabId).enforcesPromotedParentRailAtWrite === true;
     } catch {
       return false;
     }
@@ -5329,6 +5362,17 @@ export class UiBridge {
       );
       return Promise.reject(markCapabilityRefusal(refusal));
     }
+    if (
+      cmd.cmd === "graph_set_widget" &&
+      commandCarriesPromotedParentRail(cmd) &&
+      !conn.enforcesPromotedParentRailAtWrite
+    ) {
+      const refusal = markDispatched(
+        promotedParentRailFenceRefusal(conn.tabId),
+        false,
+      );
+      return Promise.reject(markCapabilityRefusal(refusal));
+    }
     // #570 P0c — FAIL CLOSED for a command that mutates the ACTIVE workflow/canvas (every
     // graph_* mutator, plus path-less workflow_save/save_as/rename/close) when the resolved
     // panel does NOT enforce the per-command workflow-instance stamp. Such a panel would
@@ -5745,6 +5789,17 @@ export class UiBridge {
         return Promise.reject(
           markCapabilityRefusal(
             markDispatched(expectedScopeGraphIdentityFenceRefusal(live.tabId), false),
+          ),
+        );
+      }
+      if (
+        cmd.cmd === "graph_set_widget" &&
+        commandCarriesPromotedParentRail(cmd) &&
+        !live.enforcesPromotedParentRailAtWrite
+      ) {
+        return Promise.reject(
+          markCapabilityRefusal(
+            markDispatched(promotedParentRailFenceRefusal(live.tabId), false),
           ),
         );
       }
