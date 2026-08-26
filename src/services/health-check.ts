@@ -209,16 +209,17 @@ export async function runHealthCheck(
         const bodyOf = (line: string): string => {
           // Strip timestamp prefix
           let body = line.replace(/^\S+ - /, "");
-          // Check if ANSI escape sequences are present
-          const hasAnsi = ANSI_RE.test(body);
-          // Reset regex state for next use
-          ANSI_RE.lastIndex = 0;
-          // Strip ANSI escape sequences (ColoredFormatter wraps [LEVEL] in these)
+          // Check if ANSI escape sequences are AT THE START (ColoredFormatter case)
+          // ColoredFormatter outputs: \x1b[1m\x1b[31m[ERROR]\x1b[0m message
+          const startsWithAnsi = /^\x1b\[/.test(body);
+          // Strip ANSI escape sequences
           body = stripAnsi(body);
-          // If ANSI was present, the [LEVEL] tag that was wrapped in escapes is now
-          // exposed. Strip it so patterns like /^Traceback/ and /^!!!/ can match at
-          // the true start of the message.
-          if (hasAnsi && /^\[(?:ERROR|WARNING|INFO|DEBUG|CRITICAL|EXCEPTION)\]\s/.test(body)) {
+          // If ANSI was at the start, the [LEVEL] tag that was wrapped in escapes
+          // is now exposed and adjacent to the message. Strip it so patterns like
+          // /^Traceback/ and /^!!!/ can match at the true start. This only happens
+          // for ColoredFormatter output, not for lines with ANSI elsewhere or [ERROR]
+          // markers from file handlers.
+          if (startsWithAnsi && /^\[(?:ERROR|WARNING|INFO|DEBUG|CRITICAL|EXCEPTION)\]\s/.test(body)) {
             body = body.replace(/^\[(?:ERROR|WARNING|INFO|DEBUG|CRITICAL|EXCEPTION)\]\s*/, "");
           }
           return body;
