@@ -446,6 +446,79 @@ describe("#2319: list_local_models uses the target-aware listing service", () =>
     expect(coverage.usedFilesystem).toBe(false);
   });
 
+  it("#2350: generation round-trip with path recovery pins generation clause", async () => {
+    // A→B→A round trip changes generation even though final URL/remote match start.
+    // Even if comfyuiPath is recovered mid-listing, the generation change means
+    // the answer is stale. Without the generation clause, this would incorrectly
+    // be classified as localPathRecovered.
+    target.remote = false;
+    target.generation = 10;
+    target.baseUrl = "http://127.0.0.1:8188";
+    config.comfyuiPath = undefined;
+    const response = deferred<Response>();
+    getClient.mockReturnValue({ fetchApi });
+    fetchApi.mockReturnValue(response.promise);
+
+    const pending = listLocalModelsWithCoverage("checkpoints");
+    await Promise.resolve();
+
+    // A→B transition changes generation to 11
+    advanceTarget(true, "https://remote.example/comfy");
+    // B→A transition changes generation to 12, back to original URL/remote
+    advanceTarget(false, "http://127.0.0.1:8188");
+    // And path gets recovered mid-listing
+    config.comfyuiPath = "/recovered-comfy";
+    response.resolve(
+      new Response(JSON.stringify(["model-during-roundtrip.safetensors"]), { status: 200 }),
+    );
+
+    const { models, coverage } = await pending;
+
+    expect(models).toEqual([]);
+    // Generation clause is load-bearing: without it, this would be localPathRecovered
+    expect(coverage.targetChanged).toEqual({
+      startedBaseUrl: "http://127.0.0.1:8188",
+      currentBaseUrl: "http://127.0.0.1:8188",
+    });
+    expect(coverage.localPathRecovered).toBeUndefined();
+    expect(coverage.usedFilesystem).toBe(false);
+  });
+
+  it("#2350: witness.localPath clause pins that path was unknown at capture time", async () => {
+    // When witness.localPath is already set (path was known at capture), recovery
+    // in mid-listing is not the explanation. Without the witness.localPath===undefined
+    // clause, a path change could be misclassified as recovery. This existing case
+    // was already pinned; this test documents the invariant.
+    target.remote = false;
+    target.generation = 50;
+    target.baseUrl = "http://127.0.0.1:8188";
+    config.comfyuiPath = "/original-comfy";
+    const response = deferred<Response>();
+    getClient.mockReturnValue({ fetchApi });
+    fetchApi.mockReturnValue(response.promise);
+
+    const pending = listLocalModelsWithCoverage("checkpoints");
+    await Promise.resolve();
+
+    // Change the path mid-listing
+    config.comfyuiPath = "/new-comfy";
+    response.resolve(
+      new Response(JSON.stringify(["model-path-changed.safetensors"]), { status: 200 }),
+    );
+
+    const { models, coverage } = await pending;
+
+    expect(models).toEqual([]);
+    // witness.localPath=/original-comfy, so even though comfyuiPath changed,
+    // this is not "recovery" (it was known) — it's a target change
+    expect(coverage.targetChanged).toEqual({
+      startedBaseUrl: "http://127.0.0.1:8188",
+      currentBaseUrl: "http://127.0.0.1:8188",
+    });
+    expect(coverage.localPathRecovered).toBeUndefined();
+    expect(coverage.usedFilesystem).toBe(false);
+  });
+
   it("does not expose host files through the registered tool for a remote target", async () => {
     config.comfyuiPath = "/comfy";
     target.remote = true;
