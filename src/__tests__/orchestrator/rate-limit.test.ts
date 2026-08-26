@@ -267,7 +267,25 @@ describe("sanitizeDetail", () => {
     }
   });
 
+  it("does not let prose exceptions exempt explicit identifier shapes", () => {
+    const proseLookingId = "counterrevolutionary";
+    const cases = [
+      [`account_id=${proseLookingId}`, "account_id=<redacted>"],
+      [`user_id ${proseLookingId} is limited`, "user_id <redacted> is limited"],
+      [`account_${proseLookingId}`, "account_<redacted>"],
+      [`acct-${proseLookingId}`, "acct-<redacted>"],
+      [`wrapper_${proseLookingId}_suffix`, "wrapper_<redacted>"],
+      [`account-[${proseLookingId}]`, "account-[<redacted>]"],
+      [`account (${proseLookingId})`, "account (<redacted>)"],
+    ] as const;
+
+    for (const [input, expected] of cases) {
+      expect(sanitizeDetail(input)).toBe(expected);
+    }
+  });
+
   it("leaves long ordinary prose words readable", () => {
+    expect(sanitizeDetail("compartmentalization_v2")).toBe("compartmentalization_v2");
     expect(sanitizeDetail("account compartmentalization policy")).toBe("account compartmentalization policy");
     expect(sanitizeDetail("the user uncharacteristically exceeded the limit")).toBe(
       "the user uncharacteristically exceeded the limit",

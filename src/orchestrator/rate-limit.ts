@@ -193,23 +193,23 @@ const DIRECT_PUNCTUATED_LABEL =
   /(?:^|[.!?;]\s*|(?:your|the)[\s-]+)(?:account|user)\s*(?:[,;.!?:=]\s*[\[({]?|[-_]+\s*[\[({]?|[\[({])\s*$/i;
 const IDENTIFIER_STATUS = /^\s+(?:is|was|has|had|reached|exceeded|exhausted|limited|invalid|expired|blocked|disabled)\b/i;
 type AlphaRunClassification = "identifier" | "prose";
+type AlphaRunBoundary = "bare-prose" | "lexical-label-prose";
 
 // There is no reliable morphology or vowel heuristic that can distinguish a
 // minted all-alpha id from an English word. Keep the small prose exception
-// explicit and table-driven; every unlisted long alpha run is classified as an
-// identifier, then bare alpha runs still require an explicit label/status
-// boundary before they are masked.
-const ALPHA_RUN_CLASSIFICATION: ReadonlyMap<string, AlphaRunClassification> = new Map([
-  ["compartmentalization", "prose"],
-  ["counterrevolutionary", "prose"],
-  ["internationalization", "prose"],
-  ["nondeterministically", "prose"],
-  ["uncharacteristically", "prose"],
+// explicit and table-driven. The boundary column keeps those exceptions from
+// exempting an explicitly labeled or wrapped identifier.
+const ALPHA_RUN_CLASSIFICATION: ReadonlyMap<string, ReadonlySet<AlphaRunBoundary>> = new Map([
+  ["compartmentalization", new Set(["bare-prose", "lexical-label-prose"])],
+  ["counterrevolutionary", new Set(["bare-prose"])],
+  ["internationalization", new Set(["bare-prose"])],
+  ["nondeterministically", new Set(["bare-prose"])],
+  ["uncharacteristically", new Set(["bare-prose", "lexical-label-prose"])],
 ]);
 
-function classifyAlphaRun(run: string): AlphaRunClassification {
+function classifyAlphaRun(run: string, boundary: AlphaRunBoundary = "bare-prose"): AlphaRunClassification {
   const base = run.split(/[-_]+/)[0].toLowerCase();
-  return ALPHA_RUN_CLASSIFICATION.get(base) ?? "identifier";
+  return ALPHA_RUN_CLASSIFICATION.get(base)?.has(boundary) ? "prose" : "identifier";
 }
 
 function hasAlphaIdentifierContext(input: string, offset: number, run: string): boolean {
@@ -229,9 +229,18 @@ function hasAlphaIdentifierContext(input: string, offset: number, run: string): 
   );
 }
 
+function hasExplicitAlphaIdentifierBoundary(input: string, offset: number): boolean {
+  const before = input.slice(Math.max(0, offset - 64), offset);
+  return (
+    ALPHA_IDENTIFIER_LABEL.test(before) ||
+    (DIRECT_PUNCTUATED_LABEL.test(before) && /(?:=|[\[({])\s*$/.test(before))
+  );
+}
+
 function preserveNaturalLanguagePrefixedRun(run: string, prefix: string): boolean {
   const tail = run.slice(prefix.length).split(/[-_]+/)[0];
-  return classifyAlphaRun(tail) === "prose";
+  const label = prefix.replace(/[-_]+$/, "").toLowerCase();
+  return /^(?:account|user)$/.test(label) && classifyAlphaRun(tail, "lexical-label-prose") === "prose";
 }
 
 export function sanitizeDetail(raw: string, max = 200): string {
@@ -251,8 +260,8 @@ export function sanitizeDetail(raw: string, max = 200): string {
       /\b(?:([A-Za-z][A-Za-z0-9]{1,12})[-_])?[A-Za-z0-9]{0,32}[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}[A-Za-z0-9]{0,32}\b/g,
       (_m, prefix: string | undefined) => (prefix ? `${prefix}-<redacted>` : "<redacted>"),
     )
-    // prefixed opaque identifiers: org-…, cak-…, key_…, acct-…. Natural
-    // language tails listed in ALPHA_RUN_CLASSIFICATION remain readable.
+    // Prefixed opaque identifiers: org-…, cak-…, key_…, acct-…. Only the
+    // explicit account/user lexical-label prose cases remain readable.
     .replace(
       /\b(?!(?:(?:account|acct|user|workspace|token|key)[_-](?:id|identifier)(?=$|[:=\s])))((?:[A-Za-z][A-Za-z0-9]{0,12}[-_]+)+)[A-Za-z0-9]{10,}(?:[-_]+[A-Za-z0-9]+)*\b/gi,
       (run, prefix: string) =>
@@ -264,10 +273,9 @@ export function sanitizeDetail(raw: string, max = 200): string {
     .replace(
       /\b[A-Za-z0-9]{20,}(?:[-_]+[A-Za-z0-9]+)*\b/g,
       (run, offset, input: string) => {
-        return classifyAlphaRun(run) === "identifier" &&
-          (/\d/.test(run) || hasAlphaIdentifierContext(input, offset, run))
-          ? "<redacted>"
-          : run;
+        const explicitIdentifier = hasExplicitAlphaIdentifierBoundary(input, offset);
+        if (!explicitIdentifier && classifyAlphaRun(run) === "prose") return run;
+        return /\d/.test(run) || hasAlphaIdentifierContext(input, offset, run) ? "<redacted>" : run;
       },
     );
   return masked.replace(/\s+/g, " ").trim().slice(0, max);
