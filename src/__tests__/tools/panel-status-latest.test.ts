@@ -44,9 +44,9 @@ import { requiredPanelVersion } from "../../services/panel-sync.js";
 import { compareSemver } from "../../services/self-update.js";
 import { panelAction } from "../../tools/install-panel.js";
 
-/** A panel above the 0.15.58 capability floor, with a newer published release. */
-const INSTALLED = "0.15.60";
-const LATEST = "0.15.76";
+/** A panel above the 0.15.97 capability floor, with a newer published release. */
+const INSTALLED = "0.15.97";
+const LATEST = "0.16.13";
 
 function status(over: Partial<PanelStatus> = {}): PanelStatus {
   return {
@@ -135,7 +135,7 @@ describe("#1983 — the status tool REACHES the latest-version probe", () => {
 
 describe("#1983 — floor and latest are two answers, never one", () => {
   it("the fixture is still above the floor (input precondition, not an expectation)", () => {
-    // If the derived floor ever rises past 0.15.60 these fixtures stop testing
+    // If the derived floor ever rises past 0.15.97 these fixtures stop testing
     // the reported state. Fail here with a clear reason rather than three tests
     // failing obscurely.
     expect(compareSemver(INSTALLED, requiredPanelVersion())).toBeGreaterThanOrEqual(0);
@@ -147,7 +147,7 @@ describe("#1983 — floor and latest are two answers, never one", () => {
 
     const sync = await statusCall();
 
-    // The floor answer is UNCHANGED — 0.15.60 is not too old to work.
+    // The floor answer is UNCHANGED — 0.15.97 is not too old to work.
     expect(sync.behind).toBe(false);
     expect(sync.decision).toBe("meets-floor");
     // The latest answer is the one that was missing.
@@ -411,7 +411,7 @@ describe("#1983 — boundaries of the ahead-of-published comparison", () => {
   });
 
   it("a higher patch with a prerelease tag IS ahead", async () => {
-    mocks.panelStatus.mockResolvedValue(status({ installedVersion: "0.15.77-rc1" }));
+    mocks.panelStatus.mockResolvedValue(status({ installedVersion: "0.16.14-rc1" }));
     stubFetch(() => new Response(pyproject(LATEST), { status: 200 }));
 
     const sync = await statusCall();
@@ -484,7 +484,7 @@ describe("#1995 gate P1 — every remedy names an action that can succeed from t
     expect(sync.summary).toMatch(SYNC_VERB);
     // And it must not claim a version gap it has no installed version for.
     expect(sync.summary).not.toMatch(/a NEWER panel is published/);
-    expect(sync.summary).toMatch(/newest published panel is 0\.15\.76/);
+    expect(sync.summary).toContain(`newest published panel is ${LATEST}`);
   });
 
   it("ABSENT + pinned → clear the pin, never update", async () => {

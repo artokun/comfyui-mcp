@@ -22,6 +22,8 @@ const hoisted = vi.hoisted(() => ({
   // The onLanded callback threaded into downloadModel (#515) — captured so a test can
   // prove the job commits done synchronously at the destination rename.
   lastOnLanded: undefined as ((targetPath: string) => void) | undefined,
+  // The exact staged partial path selected by the production cache identity.
+  lastOnStagedPartialPath: undefined as ((partialPath: string) => void) | undefined,
 }));
 
 // isRemoteMode gates the identity branch in startDownloadJob. Keep every other
@@ -64,12 +66,14 @@ vi.mock("../../services/model-resolver.js", () => ({
       onTrayId?: (trayId: string) => void,
       onLanded?: (targetPath: string) => void,
       _onDownloadRoute?: (route: "direct" | "proxied") => void,
+      onStagedPartialPath?: (partialPath: string) => void,
     ) => {
       hoisted.calls += 1;
       hoisted.lastDispatchArg = dispatchToManager;
       hoisted.lastSignal = signal;
       hoisted.lastOnTrayId = onTrayId;
       hoisted.lastOnLanded = onLanded;
+      hoisted.lastOnStagedPartialPath = onStagedPartialPath;
       // Model the writer reporting the physical tray id (a hash of the post-auth/HF
       // request URL). Keyed by URL so same-URL jobs to different destinations share one
       // progressId (they coalesce onto one physical stream/row), as in production.
@@ -206,6 +210,7 @@ describe("download job registry", () => {
     hoisted.lastSignal = undefined;
     hoisted.lastOnTrayId = undefined;
     hoisted.lastOnLanded = undefined;
+    hoisted.lastOnStagedPartialPath = undefined;
     resetDownloadJobs();
     // #1148 — THE PERSISTED STORE IS NOW ON BY DEFAULT, so it needs isolating
     // like every other on-disk state this suite touches. Without this, records
@@ -1199,6 +1204,23 @@ describe("download job registry", () => {
       // …but trayId stays the STABLE original-URL hash so URL adoption still resolves.
       expect(job.trayId).toBe(downloadIdFor(URL_A));
       expect(findDownloadJob({ url: URL_A })?.id).toBe(job.id);
+    });
+
+    it("persists the writer-selected partial path without exposing auth inputs", async () => {
+      const { job } = await startDownloadJob(URL_A, "checkpoints");
+      expect(hoisted.lastOnStagedPartialPath).toBeInstanceOf(Function);
+      const partialPath = "C:\\cache\\.writer-identity.safetensors.partial";
+      hoisted.lastOnStagedPartialPath!(partialPath);
+
+      expect(job.partialPath).toBe(partialPath);
+      const persisted = JSON.parse(
+        await readFile(
+          pathJoin(storeDir, "download-records", `control-job-${job.id}-${PERSIST_OWNER}.json`),
+          "utf8",
+        ),
+      ) as Record<string, unknown>;
+      expect(persisted.partialPath).toBe(partialPath);
+      expect(JSON.stringify(persisted)).not.toContain("Authorization");
     });
 
     it("a cancel DURING the onComplete post-download hook reports done — the model file already MATERIALIZED", async () => {

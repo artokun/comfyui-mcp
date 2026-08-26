@@ -9,11 +9,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // It cannot simply follow `comfyuiPath`, because with no path the resolver falls through
 // to the saved default workspace, which is read with the UNMOCKED node:fs and would pick
 // up the developer's real one.
-const mode = vi.hoisted(() => ({ remote: false }));
+const mode = vi.hoisted(() => ({
+  remote: false,
+  generation: 0,
+  baseUrl: "http://127.0.0.1:8188",
+}));
 vi.mock("../../config.js", () => ({
   config: {
     comfyuiPath: "/comfy" as string | undefined,
   },
+  getComfyUIBaseUrl: () => mode.baseUrl,
+  getComfyuiTargetGeneration: () => mode.generation,
   isRemoteMode: () => mode.remote,
 }));
 
@@ -60,6 +66,8 @@ beforeEach(() => {
   readFile.mockRejectedValue(new Error("ENOENT"));
   config.comfyuiPath = "/comfy";
   mode.remote = false;
+  mode.generation = 0;
+  mode.baseUrl = "http://127.0.0.1:8188";
 });
 
 afterEach(() => {

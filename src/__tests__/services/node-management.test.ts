@@ -57,6 +57,12 @@ const liveRoot = vi.hoisted(() => ({ value: undefined as string | undefined }));
  *  Controlled here so "no local path" tests never read the real user config. */
 const savedDefault = vi.hoisted(() => ({ value: undefined as string | undefined }));
 
+/** Control whether the live server is reachable when resolveInstallLocalWorkspace needs to detect it.
+ *  Tests that exercise the cm-cli unavailable path must set this to { reachable: false }. */
+const liveServerSnapshot = vi.hoisted(() => ({
+  value: { reachable: true, argv: undefined as string[] | undefined } as { reachable: boolean; argv?: string[] },
+}));
+
 vi.mock("../../services/workspace-env.js", async () => {
   const actual = await vi.importActual<
     typeof import("../../services/workspace-env.js")
@@ -69,6 +75,7 @@ vi.mock("../../services/workspace-env.js", async () => {
     resolveEffectiveComfyUIBase: () => config.comfyuiPath ?? savedDefault.value,
     resolveEffectiveComfyUICodeBase: () =>
       config.comfyuiCodePath ?? config.comfyuiPath ?? savedDefault.value,
+    getLiveServerSnapshot: async () => liveServerSnapshot.value,
   };
 });
 
@@ -366,6 +373,10 @@ describe("node-management service", () => {
     // and never touches the checkout. It exists so the suite can prove that even the
     // most local-looking configuration is refused, not to model permission.
     liveRoot.value = "/fake/comfy";
+    // Default: live server is reachable. Tests that exercise the cm-cli unavailable
+    // path (no COMFYUI_PATH) must set this to { reachable: false } to avoid the actual
+    // dev machine's ComfyUI from interfering.
+    liveServerSnapshot.value = { reachable: true, argv: undefined };
     // Each test re-detects the Manager API generation against its own stub
     // (the v2 stubs answer /v2/manager/queue/status → detect "v2").
     resetManagerApiCacheForTests();
@@ -1501,10 +1512,21 @@ describe("node-management service", () => {
     it("does not use a SAVED DEFAULT workspace for cm-cli when COMFYUI_PATH is unset", async () => {
       // A saved default is not proof of the panel-connected target. Without
       // live root evidence, cm-cli must fall back to Manager rather than run
-      // against that potentially different local install.
+      // against that potentially different local install. The live server must
+      // be unreachable to force this refusal, otherwise the dev box's ComfyUI
+      // would allow cm-cli to proceed. The test controls this via the
+      // liveServerSnapshot mock to ensure it works on both CI (no ComfyUI)
+      // and dev boxes (with ComfyUI running on :8188).
       config.comfyuiPath = undefined;
       delete process.env.COMFYUI_PATH;
       savedDefault.value = "/saved/ws";
+      liveServerSnapshot.value = { reachable: false };
+      // Stub fetch to prevent connecting to the real ComfyUI on the dev box.
+      // With live server unreachable, the code will fall back to Manager HTTP,
+      // which will fail with ECONNREFUSED, triggering NodeManagementError.
+      vi.stubGlobal("fetch", vi.fn(async () => {
+        throw new Error("ECONNREFUSED");
+      }));
 
       await expect(
         installCustomNode({

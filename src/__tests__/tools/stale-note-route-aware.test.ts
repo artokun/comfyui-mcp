@@ -19,15 +19,16 @@
 // These tests drive the REAL registered handler, because the description pin in
 // download-status-promise.test.ts cannot see the runtime string at all.
 
-import { mkdtemp, rm as fsRm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm as fsRm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join as pathJoin } from "node:path";
+import { dirname, join as pathJoin } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { registerModelManagementTools } from "../../tools/model-management.js";
 import { resetDownloadJobs } from "../../services/download-jobs.js";
 import { setProgressDir } from "../../services/download-progress.js";
+import { downloadCacheIdentity } from "../../services/download-cache.js";
 
 type Handler = (args: Record<string, unknown>) => Promise<{
   content: Array<{ type: string; text: string }>;
@@ -59,15 +60,29 @@ async function writeStaleRecord(
       : viaManager
         ? "managerstale0001"
         : "localstalexxx001";
+  const url = "https://example.invalid/model.safetensors";
+  let partialPath: string | undefined;
+  let partialIdentity: { version: 1; cache_key: string; auth_mode: "none" } | undefined;
+  if (viaManager === false) {
+    // Use the same exact identity the current writer would use, while keeping the
+    // test cache isolated from any developer machine cache.
+    process.env.COMFYUI_DOWNLOAD_CACHE_DIR = dir;
+    const identity = downloadCacheIdentity(url);
+    partialPath = identity.partialPath;
+    partialIdentity = { version: 1, cache_key: identity.cacheKey, auth_mode: "none" };
+    await mkdir(dirname(partialPath), { recursive: true });
+    await writeFile(partialPath, "positive partial");
+  }
   const body = {
     id,
     trayId: `tray-${id}`,
     progressId: `prog-${id}`,
-    url: "https://example.invalid/model.safetensors",
+    url,
     target_subfolder: "loras",
     status: "downloading",
     started_at: Date.now() - 600_000,
     owner: "a-session-that-went-away",
+    ...(viaManager === false ? { partialPath, partial_identity: partialIdentity } : {}),
     // "omitted" writes NO via_manager key at all — a record from before the
     // field existed, which is what a real legacy record looks like on disk.
     ...(viaManager === "omitted" ? {} : { via_manager: viaManager }),
@@ -79,13 +94,17 @@ async function writeStaleRecord(
 }
 
 let dir: string;
+let previousCacheDir: string | undefined;
 
 beforeEach(async () => {
+  previousCacheDir = process.env.COMFYUI_DOWNLOAD_CACHE_DIR;
   dir = await mkdtemp(pathJoin(tmpdir(), "stale-route-"));
   setProgressDir(dir);
 });
 
 afterEach(async () => {
+  if (previousCacheDir === undefined) delete process.env.COMFYUI_DOWNLOAD_CACHE_DIR;
+  else process.env.COMFYUI_DOWNLOAD_CACHE_DIR = previousCacheDir;
   setProgressDir("");
   resetDownloadJobs();
   await fsRm(dir, { recursive: true, force: true });
@@ -127,7 +146,8 @@ describe("the stale-heartbeat note is ROUTE-AWARE (#1148)", () => {
     const text = await statusText();
 
     expect(text).toMatch(/heartbeat stale/);
-    expect(text).toMatch(/resumes any \.partial/);
+    expect(text).toContain("re-issuing the same download can resume it");
+    expect(text).toContain("matching unauthenticated identity proof");
     // ...and the local reason names the local writer, which is the true one here.
     expect(text).toMatch(/original owner may still be writing/);
     expect(text).not.toMatch(/ComfyUI host may still be fetching/);
@@ -197,9 +217,9 @@ describe("an UNKNOWN route is its own answer, not 'local' (#1148)", () => {
     await writeStaleRecord(dir, "omitted");
     const text = await statusText();
 
-    expect(text).toMatch(/predates the route being recorded/);
+    expect(text).toMatch(/route is UNKNOWN|legacy or incomplete/);
     expect(text).toMatch(/list_local_models/);
-    expect(text, "the destructive outcome must still be named").toMatch(/CORRUPTS/);
+    expect(text, "the destructive outcome must still be named").toMatch(/CORRUPT/);
   });
 
   it("hedges the still-writing reason too, rather than asserting a local writer", async () => {

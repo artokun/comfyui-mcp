@@ -79,9 +79,17 @@ function textOf(res: ToolResult): string {
 
 function panelKitchenHarness(onGraphQuery?: () => void, onGraphRun?: () => void) {
   const sent: Array<Record<string, unknown>> = [];
+  const beforeDispatch = { count: 0 };
   let widgetReachabilityRetargeted = false;
   const bridge = {
-    send: async (cmd: Record<string, unknown>) => {
+    send: async (
+      cmd: Record<string, unknown>,
+      sendOpts?: { beforeDispatch?: () => void },
+    ) => {
+      if (cmd.cmd === "graph_set_widget") {
+        beforeDispatch.count += 1;
+        sendOpts?.beforeDispatch?.();
+      }
       sent.push(cmd);
       if (cmd.cmd === "graph_query") {
         onGraphQuery?.();
@@ -112,7 +120,7 @@ function panelKitchenHarness(onGraphQuery?: () => void, onGraphRun?: () => void)
   } as unknown as PanelToolCtx["bridge"];
   const ctx = makePanelToolCtx(bridge, TAB, new WorkflowTargetStore());
   const def = buildPanelToolDefs().find((d) => d.name === "panel_kitchen")!;
-  return { ctx, def, sent };
+  return { ctx, def, sent, beforeDispatch };
 }
 
 beforeEach(() => {
@@ -266,7 +274,7 @@ describe("panel_kitchen flag apply (#2277)", () => {
   it("refuses widget dispatch when retargeting occurs during reachability wait", async () => {
     kitchenFixture.rec = widgetRecommendation as any;
     kitchenFixture.raceWidgetDispatch = true;
-    const { ctx, def, sent } = panelKitchenHarness();
+    const { ctx, def, sent, beforeDispatch } = panelKitchenHarness();
 
     const res = await def.handler(
       { action: "apply", recommendation_id: widgetRecommendation.id, skip_proof: true } as never,
@@ -279,6 +287,7 @@ describe("panel_kitchen flag apply (#2277)", () => {
     expect(textOf(res)).toMatch(/target changed/i);
     expect(sent.some((cmd) => cmd.cmd === "graph_query")).toBe(true);
     expect(sent.some((cmd) => cmd.cmd === "graph_set_widget")).toBe(false);
+    expect(beforeDispatch.count).toBe(1);
   });
 
   it("returns applied:false/stale when retargeting occurs during post-apply graph_run", async () => {

@@ -189,8 +189,158 @@ function makeHarness(backend: AgentBackend) {
     journal.record(tab, payload);
     flush(tab);
   };
-  return { journal, manager, flush, arrive };
+  /** Mirrors index.ts's keyed executed ingress, including the ACK gate. */
+  const arriveProduction = (tab: string, payload: CompletionPayload, conversation: string) => {
+    const completionKey =
+      typeof payload.completion_key === "string" && payload.completion_key.length > 0
+        ? payload.completion_key
+        : null;
+    const promptId = typeof payload.prompt_id === "string" ? payload.prompt_id : null;
+    const alreadyKnown =
+      completionKey !== null &&
+      promptId !== null &&
+      journal.hasCompletionReceipt(completionKey, { promptId, key: tab, conversation });
+    const entry =
+      alreadyKnown || promptId === null
+        ? alreadyKnown
+          ? null
+          : journal.record(tab, payload, { conversation })
+        : journal.record(tab, payload, { conversation });
+    const acked =
+      completionKey !== null &&
+      promptId !== null &&
+      journal.acceptsCompletionReceipt(completionKey, promptId, tab, conversation);
+    flush(tab);
+    return { entry, acked };
+  };
+  return { journal, manager, flush, arrive, arriveProduction };
 }
+
+describe("#1824 production keyed completion ingress", () => {
+  it("ACKs a keyed completion only for the current ticket generation", () => {
+    const backend = new ContinuationBackend();
+    const { journal, arriveProduction } = makeHarness(backend);
+    const tab = "tab-production-1824";
+    const conversation = "orchestrator::claude";
+    const keyA = JSON.stringify([tab, conversation, PROMPT_A, "generation-a"]);
+    const keyB = JSON.stringify([tab, conversation, PROMPT_A, "generation-b"]);
+
+    journal.openRun(PROMPT_A, { tabId: tab, conversation, completionKey: keyA });
+    const first = arriveProduction(
+      tab,
+      { kind: "executed", prompt_id: PROMPT_A, completion_key: keyA },
+      conversation,
+    );
+    expect(first.acked).toBe(true);
+    const firstEntry = journal.outstanding(tab)[0];
+    expect(firstEntry).toBeDefined();
+    journal.ack(firstEntry!.token);
+
+    // ComfyUI reused the prompt id. A late frame from generation A must be
+    // journaled as foreign and must not be mistaken for B's receipt.
+    journal.openRun(PROMPT_A, { tabId: tab, conversation, completionKey: keyB });
+    const stale = arriveProduction(
+      tab,
+      { kind: "executed", prompt_id: PROMPT_A, completion_key: keyA, note: "stale A" },
+      conversation,
+    );
+    expect(stale.acked).toBe(false);
+    expect(stale.entry?.correlation.status).toBe("foreign");
+    expect(journal.outstanding(tab)).toHaveLength(1);
+  });
+
+  it("fences a watchdog handoff against the panel's keyed completion", () => {
+    const backend = new ContinuationBackend();
+    const { journal, arriveProduction } = makeHarness(backend);
+    const tab = "tab-watchdog-1824";
+    const conversation = "orchestrator::claude";
+    const key = JSON.stringify([tab, conversation, PROMPT_B, "generation-watchdog"]);
+
+    // The history watchdog wins just before the panel frame reaches the
+    // executed ingress. Both observations are the same current ticket.
+    journal.openRun(PROMPT_B, { tabId: tab, conversation, completionKey: key });
+    const watchdog = journal.record(
+      tab,
+      {
+        kind: "executed",
+        prompt_id: PROMPT_B,
+        completion_source: "orchestrator-history-watchdog",
+        images: [{ filename: "watchdog.png" }],
+      },
+      { conversation },
+    );
+    const panel = arriveProduction(
+      tab,
+      { kind: "executed", prompt_id: PROMPT_B, completion_key: key, images: [{ filename: "panel.png" }] },
+      conversation,
+    );
+
+    expect(journal.ticketFor(PROMPT_B)).toMatchObject({ completionKey: key });
+    expect(journal.ticketFor(PROMPT_B)?.reused).toBeUndefined();
+    expect(panel.entry?.token).toBe(watchdog.token);
+    expect(panel.entry?.payload.completion_key).toBe(key);
+    expect(panel.entry).toMatchObject({
+      ticketSeq: journal.ticketFor(PROMPT_B)?.seq,
+      correlation: { status: "matched", promptId: PROMPT_B },
+    });
+    expect(panel.acked).toBe(true);
+    expect(journal.outstanding(tab)).toHaveLength(1);
+    expect(journal.outstanding(tab)[0].payload.completion_key).toBe(key);
+  });
+
+  it("keeps a delivered watchdog fallback fenced until the keyed frame arrives", () => {
+    const backend = new ContinuationBackend();
+    const { journal, arriveProduction } = makeHarness(backend);
+    const tab = "tab-watchdog-delivered-1824";
+    const conversation = "orchestrator::claude";
+    const key = JSON.stringify([tab, conversation, PROMPT_C, "generation-watchdog"]);
+
+    journal.openRun(PROMPT_C, { tabId: tab, conversation, completionKey: key });
+    const watchdog = journal.record(
+      tab,
+      { kind: "executed", prompt_id: PROMPT_C, completion_source: "orchestrator-history-watchdog" },
+      { conversation },
+    );
+    journal.deliverPending(tab, () => true);
+    journal.ack(watchdog.token);
+
+    const panel = arriveProduction(
+      tab,
+      { kind: "executed", prompt_id: PROMPT_C, completion_key: key },
+      conversation,
+    );
+    expect(panel.entry).toBeNull();
+    expect(panel.acked).toBe(true);
+    expect(journal.outstanding(tab)).toHaveLength(0);
+  });
+
+  it("lets a late receipt bind a settled watchdog ticket without reopening it", () => {
+    const backend = new ContinuationBackend();
+    const { journal, arriveProduction } = makeHarness(backend);
+    const tab = "tab-watchdog-receipt-1824";
+    const conversation = "orchestrator::claude";
+    const key = JSON.stringify([tab, conversation, PROMPT_D, "generation-watchdog"]);
+
+    journal.openRun(PROMPT_D, { tabId: tab, conversation });
+    const watchdog = journal.record(
+      tab,
+      { kind: "executed", prompt_id: PROMPT_D, completion_source: "orchestrator-history-watchdog" },
+      { conversation },
+    );
+    journal.deliverPending(tab, () => true);
+    journal.ack(watchdog.token);
+
+    expect(journal.bindCompletionKey(PROMPT_D, key)).toBe(true);
+    const panel = arriveProduction(
+      tab,
+      { kind: "executed", prompt_id: PROMPT_D, completion_key: key },
+      conversation,
+    );
+    expect(panel.entry).toBeNull();
+    expect(panel.acked).toBe(true);
+    expect(journal.outstanding(tab)).toHaveLength(0);
+  });
+});
 
 describe("run completion across automatic goal continuation (#468)", () => {
   it("delivers the completion into the next turn while the agent is busy continuing a goal", async () => {

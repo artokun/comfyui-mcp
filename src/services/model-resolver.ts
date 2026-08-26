@@ -3,7 +3,12 @@ import { existsSync, type Stats } from "node:fs";
 import { platform } from "node:os";
 import { readdir, stat, mkdir, readFile, lstat, realpath } from "node:fs/promises";
 import { dirname, join, basename, normalize, resolve, relative, sep, isAbsolute, extname } from "node:path";
-import { config, getComfyUIBaseUrl, isRemoteMode } from "../config.js";
+import {
+  config,
+  getComfyUIBaseUrl,
+  getComfyuiTargetGeneration,
+  isRemoteMode,
+} from "../config.js";
 import { getClient, getLogs, getSystemStats, comfyApiFetch } from "../comfyui/client.js";
 import { getExtraModelRoots, getLiveExtraModelRoots } from "./extra-paths.js";
 import {
@@ -14,9 +19,19 @@ import {
 import { installModelViaManager } from "./node-management.js";
 import { ModelError, ValidationError, unreachableHostMessage } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
-import { downloadWithCache, findResumablePartial, probeRemoteModelPayload } from "./download-cache.js";
+import {
+  downloadCacheIdentity,
+  downloadWithCache,
+  findResumablePartial,
+  probeRemoteModelPayload,
+} from "./download-cache.js";
+import { supportsCloudDownload, type CloudStorageAuth } from "./storage/index.js";
 import type { DownloadRoute } from "./download-proxy.js";
 import { reportDownloadProgress } from "./download-progress.js";
+import type {
+  DownloadPartialAuthMode,
+  PersistedPartialIdentity,
+} from "./download-progress.js";
 import type { ResumeReporter } from "./download-resume-diag.js";
 import { modelNotFoundMessage } from "./model-root-scope.js";
 import {
@@ -458,6 +473,15 @@ export type ModelListingCoverage = {
   /** Set when neither path could run: no HTTP answer AND no local install path
    *  to scan, which is the exact shape that produced the false "no models". */
   noSourceAvailable?: boolean;
+  /** Set when the URL, mode, and generation stayed fixed while an initially
+   *  unknown local install path was filled in by orchestrator recovery (#2338). */
+  localPathRecovered?: true;
+  /** Set when the ComfyUI target changed while this listing was in flight. Any
+   *  names/paths collected before that change have been discarded. */
+  targetChanged?: {
+    startedBaseUrl: string;
+    currentBaseUrl: string;
+  };
   /**
    * Other categories THIS server registers, collected only when a FILTERED call
    * came back empty (#962).
@@ -527,22 +551,98 @@ export function describeUnparsableBody(status: number, body: string): string {
   );
 }
 
+type ModelListingTargetWitness = Readonly<{
+  generation: number;
+  baseUrl: string;
+  remote: boolean;
+  localPath: string | undefined;
+}>;
+
+function captureModelListingTarget(): ModelListingTargetWitness {
+  return {
+    generation: getComfyuiTargetGeneration(),
+    baseUrl: getComfyUIBaseUrl(),
+    remote: isRemoteMode(),
+    localPath: config.comfyuiPath,
+  };
+}
+
+function targetMatchesWitness(witness: ModelListingTargetWitness): boolean {
+  return (
+    getComfyuiTargetGeneration() === witness.generation &&
+    getComfyUIBaseUrl() === witness.baseUrl &&
+    isRemoteMode() === witness.remote &&
+    config.comfyuiPath === witness.localPath
+  );
+}
+
+/**
+ * A model listing is one answer about one ComfyUI target. If that target is
+ * retargeted while an HTTP/filesystem await is in flight, none of the names or
+ * paths collected so far can be attributed to the target the caller asked
+ * about. Clear every source-derived field and make the caller retry instead of
+ * returning a mixed or stale inventory. The generation check is intentional:
+ * an A -> B -> A round trip has the same final URL and mode but is still stale.
+ */
+function refuseStaleModelListing(
+  witness: ModelListingTargetWitness,
+  coverage: ModelListingCoverage,
+): boolean {
+  if (targetMatchesWitness(witness)) return false;
+
+  if (!coverage.localPathRecovered && !coverage.targetChanged) {
+    const currentBaseUrl = getComfyUIBaseUrl();
+    const localPathRecovered =
+      getComfyuiTargetGeneration() === witness.generation &&
+      currentBaseUrl === witness.baseUrl &&
+      isRemoteMode() === witness.remote &&
+      witness.localPath === undefined &&
+      config.comfyuiPath !== undefined;
+    if (localPathRecovered) {
+      coverage.localPathRecovered = true;
+    } else {
+      coverage.targetChanged = {
+        startedBaseUrl: witness.baseUrl,
+        currentBaseUrl,
+      };
+    }
+  }
+  coverage.answered.length = 0;
+  coverage.unanswered.length = 0;
+  coverage.absent = [];
+  coverage.httpUnavailable = undefined;
+  coverage.otherRegisteredCategories = undefined;
+  coverage.usedFilesystem = false;
+  coverage.noSourceAvailable = true;
+  return true;
+}
+
 /** Model listing plus the provenance needed to describe it honestly. */
 export async function listLocalModelsWithCoverage(
   modelType?: string,
 ): Promise<{ models: LocalModel[]; coverage: ModelListingCoverage }> {
+  const target = captureModelListingTarget();
   const coverage: ModelListingCoverage = {
     answered: [],
     unanswered: [],
     absent: [],
     usedFilesystem: false,
   };
-  const models = await collectLocalModels(modelType, coverage);
+  const models = await collectLocalModels(modelType, coverage, target);
+  if (refuseStaleModelListing(target, coverage)) {
+    return { models: [], coverage };
+  }
   // #962 — a filtered call that found nothing is about to say "none". Before it
   // does, ask the server what it actually registers. Bounded to this one case,
   // so the common paths pay nothing.
   if (models.length === 0 && modelType !== undefined && coverage.answered.includes(modelType)) {
     coverage.otherRegisteredCategories = await otherRegisteredCategories(modelType);
+    if (refuseStaleModelListing(target, coverage)) {
+      return { models: [], coverage };
+    }
+  }
+  if (refuseStaleModelListing(target, coverage)) {
+    return { models: [], coverage };
   }
   return { models, coverage };
 }
@@ -583,6 +683,7 @@ export async function listLocalModels(
 async function collectLocalModels(
   modelType: string | undefined,
   coverage: ModelListingCoverage,
+  target: ModelListingTargetWitness,
 ): Promise<LocalModel[]> {
   const dirsToScan: string[] = modelType ? [modelType] : [...MODEL_SUBDIRS];
   const results: LocalModel[] = [];
@@ -607,7 +708,9 @@ async function collectLocalModels(
     //
     // A FILTERED call already names its exact category, so it needs no discovery.
     if (!modelType) {
-      for (const cat of await discoverExtraCategories(client)) dirsToScan.push(cat);
+      const extraCategories = await discoverExtraCategories(client);
+      if (refuseStaleModelListing(target, coverage)) return [];
+      for (const cat of extraCategories) dirsToScan.push(cat);
     }
     // A `*_gguf` view aliases real folders, so the same file can be reported both
     // via the view and via a core category (e.g. a custom node that re-registers
@@ -617,6 +720,7 @@ async function collectLocalModels(
     for (const dir of dirsToScan) {
       try {
         const res = await comfyApiFetch(`/models/${dir}`);
+        if (refuseStaleModelListing(target, coverage)) return [];
         // A non-OK status or a non-array body means we did NOT learn what this
         // category holds. Recording the reason is the whole point: continuing
         // silently is what let a warming-up server look like an empty install.
@@ -654,6 +758,7 @@ async function collectLocalModels(
         // nothing about what actually happened. #918 called that out on the sibling
         // tool; classify it here instead of leaking it.
         const body = await res.text();
+        if (refuseStaleModelListing(target, coverage)) return [];
         let files: unknown;
         try {
           files = JSON.parse(body);
@@ -705,9 +810,11 @@ async function collectLocalModels(
     }
     if (httpReturnedAny) {
       await enrichWithCivitaiMetadata(results);
+      if (refuseStaleModelListing(target, coverage)) return [];
       return results;
     }
   } catch (err) {
+    if (refuseStaleModelListing(target, coverage)) return [];
     logger.debug("HTTP model listing unavailable, trying filesystem", { err });
     coverage.httpUnavailable = err instanceof Error ? err.message : String(err);
     // The outer throw (no client / cloud mode / GGUF discovery) aborts before any
@@ -726,9 +833,21 @@ async function collectLocalModels(
   }
 
   // Path 2 — filesystem fallback. Only useful in pure local mode without
-  // extra_model_paths.yaml. Returning empty here is only the RIGHT answer when
-  // HTTP actually answered; when it didn't, this is the false-empty path from
-  // #918 and the caller has to be told the difference (coverage.noSourceAvailable).
+  // extra_model_paths.yaml. A configured COMFYUI_PATH may deliberately coexist
+  // with a remote URL, so the path itself is not permission to scan it: doing so
+  // would answer a remote inventory question with this MCP host's models (#2319).
+  // Remote callers already have the connected server's HTTP result above; when
+  // that result is unavailable, return an explicitly source-less answer instead
+  // of consulting a local tree that belongs to another target.
+  if (refuseStaleModelListing(target, coverage)) return [];
+  if (isRemoteMode()) {
+    coverage.noSourceAvailable = coverage.unanswered.length > 0;
+    return results;
+  }
+
+  // Returning empty here is only the RIGHT answer when HTTP actually answered;
+  // when it didn't, this is the false-empty path from #918 and the caller has to
+  // be told the difference (coverage.noSourceAvailable).
   if (!config.comfyuiPath) {
     coverage.noSourceAvailable = coverage.unanswered.length > 0;
     return results;
@@ -742,8 +861,10 @@ async function collectLocalModels(
     try {
       entries = await readdir(dirPath, { recursive: true });
     } catch {
+      if (refuseStaleModelListing(target, coverage)) return [];
       continue;
     }
+    if (refuseStaleModelListing(target, coverage)) return [];
     for (const entry of entries) {
       // Same `.gguf`-only guard as the HTTP path for `*_gguf` categories (e.g. an
       // explicit `listLocalModels("unet_gguf")`): never list non-gguf files here.
@@ -751,6 +872,7 @@ async function collectLocalModels(
       const filePath = join(dirPath, entry);
       try {
         const info = await stat(filePath);
+        if (refuseStaleModelListing(target, coverage)) return [];
         if (!info.isFile()) continue;
         if (!dedup.add(dir, entry)) continue; // same file already surfaced elsewhere
         results.push({
@@ -761,12 +883,14 @@ async function collectLocalModels(
           type: dir,
         });
       } catch {
+        if (refuseStaleModelListing(target, coverage)) return [];
         // Skip files we can't stat
       }
     }
   }
 
   await enrichWithCivitaiMetadata(results);
+  if (refuseStaleModelListing(target, coverage)) return [];
   return results;
 }
 
@@ -2700,9 +2824,11 @@ function localAuthHeadersFor(
    *  streaming path; without it a rewritten url would parse to the mirror host and drop the
    *  token → a false-negative). */
   wasHfUrl: boolean,
+  requestHeaders?: Record<string, string>,
 ): Record<string, string> {
-  const request = applyDownloadAuth(url, auth);
-  const headers: Record<string, string> = { ...request.headers };
+  const headers: Record<string, string> = {
+    ...(requestHeaders ?? applyDownloadAuth(url, auth).headers),
+  };
   // HF token: attach ONLY when the url's PARSED hostname is huggingface.co (or a subdomain),
   // or the ORIGINAL url was a HF url that HF_ENDPOINT rewrote to a trusted mirror. NEVER a
   // substring match (see isHuggingFaceHost). isCivitaiUrl is likewise hostname-parsed, so
@@ -2715,6 +2841,75 @@ function localAuthHeadersFor(
     headers["Authorization"] = `Bearer ${civitaiToken}`;
   }
   return headers;
+}
+
+/**
+ * The local writer's complete request/cache identity, derived once and reused by
+ * both the writer and status/recovery plumbing. `url` is the caller's original URL;
+ * the returned `rewrittenUrl` is the endpoint-normalized URL before query auth is
+ * applied, while `requestUrl` includes query auth and `headers` includes all
+ * representation-affecting auth headers.
+ */
+export interface LocalDownloadCacheIdentity {
+  wasHfUrl: boolean;
+  rewrittenUrl: string;
+  requestUrl: string;
+  headers: Record<string, string>;
+  storageAuth?: CloudStorageAuth;
+  progressId: string;
+  partialIdentity: PersistedPartialIdentity;
+  cachePath: string;
+  partialPath: string;
+}
+
+function localPartialAuthMode(
+  rewrittenUrl: string,
+  auth: DownloadAuth | undefined,
+  headers: Record<string, string>,
+  storageAuth: CloudStorageAuth | undefined,
+): DownloadPartialAuthMode {
+  if (auth !== undefined) return "explicit";
+  // Configured host tokens and cloud credentials are reapplied by a restart, but
+  // their values are intentionally not persisted. The cache digest proves whether
+  // the current configuration is the same representation; it does not grant a
+  // restart permission to guess a missing credential.
+  if (Object.keys(headers).length > 0 || storageAuth !== undefined || supportsCloudDownload(rewrittenUrl)) {
+    return "configured";
+  }
+  return "none";
+}
+
+export function localDownloadCacheIdentity(
+  url: string,
+  auth?: DownloadAuth,
+): LocalDownloadCacheIdentity {
+  const wasHfUrl = /^https?:\/\/huggingface\.co([/?#]|$)/i.test(url);
+  const rewrittenUrl = applyHfEndpoint(url);
+  const request = applyDownloadAuth(rewrittenUrl, auth);
+  const headers = localAuthHeadersFor(
+    rewrittenUrl,
+    auth,
+    wasHfUrl,
+    request.headers,
+  );
+  const storageAuth = auth?.type === "s3" ? { s3: auth } : undefined;
+  const cache = downloadCacheIdentity(request.url, headers, storageAuth);
+  const partialIdentity: PersistedPartialIdentity = {
+    version: 1,
+    cache_key: cache.cacheKey,
+    auth_mode: localPartialAuthMode(rewrittenUrl, auth, headers, storageAuth),
+  };
+  return {
+    wasHfUrl,
+    rewrittenUrl,
+    requestUrl: request.url,
+    headers,
+    storageAuth,
+    progressId: createHash("sha256").update(request.url).digest("hex").slice(0, 16),
+    partialIdentity,
+    cachePath: cache.cachePath,
+    partialPath: cache.partialPath,
+  };
 }
 
 /**
@@ -2740,9 +2935,8 @@ function localAuthHeadersFor(
 export async function findResumablePartialForLocalDownload(
   url: string,
 ): Promise<{ path: string; bytes: number } | null> {
-  const wasHfUrl = /^https?:\/\/huggingface\.co([/?#]|$)/i.test(url);
-  const rewritten = applyHfEndpoint(url);
-  return findResumablePartial(rewritten, localAuthHeadersFor(rewritten, undefined, wasHfUrl));
+  const identity = localDownloadCacheIdentity(url);
+  return findResumablePartial(identity.requestUrl, identity.headers, identity.storageAuth);
 }
 
 /**
@@ -3407,14 +3601,16 @@ export async function downloadModel(
   onLanded?: (targetPath: string) => void,
   /** Reports the effective local model-download network route to the job status record. */
   onDownloadRoute?: (route: DownloadRoute) => void,
+  /** Reports the exact cache partial selected by the local writer. */
+  onStagedPartialPath?: (partialPath: string) => void,
 ): Promise<string> {
   // Cancelled before we did anything — never start a transfer (local OR server-side).
   if (signal?.aborted) throw new DOMException("The download was cancelled.", "AbortError");
-  // Region flags (issue #127) applied at THE choke point every download path
-  // funnels through (local disk AND the remote Manager dispatch below).
-  const wasHfUrl = /^https?:\/\/huggingface\.co([/?#]|$)/i.test(url);
-  url = applyHfEndpoint(url);
-  if (isCivitaiUrl(url) && civitaiDisabled()) {
+  // Resolve the effective local request/cache identity once. This is also the
+  // source of truth for the staged partial path published to status; it includes
+  // HF endpoint rewriting, query auth, representation headers, and cloud auth.
+  const localIdentity = localDownloadCacheIdentity(url, auth);
+  if (isCivitaiUrl(localIdentity.rewrittenUrl) && civitaiDisabled()) {
     throw new ModelError(CIVITAI_DISABLED_MESSAGE);
   }
   // REMOTE mode: the MCP has no local filesystem, so a local-disk download is
@@ -3439,7 +3635,14 @@ export async function downloadModel(
     // where a flag records whether Manager was actually contacted. Matching on error text
     // from out here could not tell a Manager failure from a preflight refusal that happens
     // to mention Manager.
-    return await downloadModelViaManagerRemote(url, targetSubfolder, filename, auth, signal, wasHfUrl);
+    return await downloadModelViaManagerRemote(
+      localIdentity.rewrittenUrl,
+      targetSubfolder,
+      filename,
+      auth,
+      signal,
+      localIdentity.wasHfUrl,
+    );
   }
 
   // Root the destination at the LIVE server's models dir (its --base-directory),
@@ -3474,7 +3677,7 @@ export async function downloadModel(
     // must be live-authoritative to compare; when either is unknown there is nothing
     // to bind, and the (already never-confirmed) non-authoritative path applies.
     liveRootAtResolve: rootAtResolve,
-  } = await resolveDownloadTarget(url, targetSubfolder, filename);
+  } = await resolveDownloadTarget(localIdentity.rewrittenUrl, targetSubfolder, filename);
 
   // Ensure target directory exists
   await mkdir(targetDir, { recursive: true });
@@ -3489,32 +3692,14 @@ export async function downloadModel(
     );
   }
 
-  const request = applyDownloadAuth(url, auth);
-  const headers: Record<string, string> = { ...request.headers };
-  // HF token: attach ONLY when the url's PARSED hostname is huggingface.co (or a subdomain),
-  // or the ORIGINAL url was a HF url that HF_ENDPOINT rewrote to a trusted mirror (wasHfUrl).
-  // NEVER a substring match — `https://evil.example/m.safetensors?ref=huggingface.co` parses
-  // to evil.example and must get NO token (a credential-leak; the same parsed-host authority
-  // the remote flip probe uses).
-  const hfToken = config.huggingfaceToken;
-  const civitaiToken = config.civitaiApiToken;
-  if (!auth && hfToken && (wasHfUrl || isHuggingFaceHost(url))) {
-    headers["Authorization"] = `Bearer ${hfToken}`;
-  } else if (!auth && civitaiToken && isCivitaiUrl(url)) {
-    // CivitAI auth travels as a request header (never in the URL/query) so the
-    // token can't leak into logs, errors, or redirect URLs. fetch drops the
-    // header on the cross-origin redirect to the already-signed download host.
-    headers["Authorization"] = `Bearer ${civitaiToken}`;
-  }
-
   const sensitiveParams =
     auth?.type === "query" ? [auth.query_param] : undefined;
-  const logUrl = redactUrlForLogs(request.url, sensitiveParams);
+  const logUrl = redactUrlForLogs(localIdentity.requestUrl, sensitiveParams);
   logger.info(`Downloading model to ${targetPath}`, { url: logUrl });
 
   // Stable id for the panel tray, keyed on the (pre-redirect) URL so resumes and
   // retries map to the same row. Name is the friendly file name.
-  const progressId = createHash("sha256").update(request.url).digest("hex").slice(0, 16);
+  const progressId = localIdentity.progressId;
   // Attempt generation/epoch (panel#489): the id is URL-derived (deterministic), so a
   // retry of the SAME URL reuses it — attempt N and attempt N+1 are otherwise
   // indistinguishable. Stamp this attempt's start epoch on every row it writes so the
@@ -3527,14 +3712,17 @@ export async function downloadModel(
   // Tell the job the id the tray rows actually use, so status display + cancel
   // cleanup key on the SAME id even when auth/HF-endpoint rewrote the request URL.
   onTrayId?.(progressId);
+  // Publish the exact cache identity selected above. Status/restart recovery must
+  // inspect this path, not approximate it from the persisted original URL.
+  onStagedPartialPath?.(localIdentity.partialPath);
 
   try {
     await downloadWithCache({
-      url: request.url,
-      headers,
+      url: localIdentity.requestUrl,
+      headers: localIdentity.headers,
       targetPath,
       logUrl,
-      storageAuth: auth?.type === "s3" ? { s3: auth } : undefined,
+      storageAuth: localIdentity.storageAuth,
       progress,
       onResume,
       signal,

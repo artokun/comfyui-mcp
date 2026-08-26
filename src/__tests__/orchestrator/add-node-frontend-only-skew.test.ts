@@ -155,7 +155,7 @@ const UNAVAILABLE_REFUSAL =
 
 describe("#2000 frontend-only type refused for an unavailable /object_info", () => {
   it("THE REPORTED CASE: names the fact that /object_info never lists this type, and says not to reinstall", async () => {
-    const r = await addNode("MarkdownNote", UNAVAILABLE_REFUSAL, "0.15.60");
+    const r = await addNode("MarkdownNote", UNAVAILABLE_REFUSAL, "0.15.97");
     expect(r.isError).toBe(true);
     // The panel's own refusal is KEPT — the note is appended, never a replacement.
     expect(r.text).toContain("object_info is unavailable");
@@ -188,11 +188,11 @@ describe("#2000 frontend-only type refused for an unavailable /object_info", () 
 
   it("THE REPORTER'S OWN VERSION is ABOVE the floor — so the note must not depend on skew", async () => {
     // Measured, and it is the reason this note is not gated on the version floor at
-    // all: the reporter ran panel 0.15.60 while the floor is lower, because the floor
+    // all: the reporter ran panel 0.15.98 while the floor is lower, because the floor
     // tracks BRIDGE CAPABILITY requirements, not "the version with the latest fixes".
     // Gating on it would have made this hint fire for almost nobody — and it is also
     // why #1828's skew note could never have fired for this reporter.
-    const REPORTER_VERSION = "0.15.60";
+    const REPORTER_VERSION = "0.15.98";
     expect(compareSemver(REPORTER_VERSION, requiredPanelVersion())).toBeGreaterThan(0);
     const r = await addNode("MarkdownNote", UNAVAILABLE_REFUSAL, REPORTER_VERSION);
     expect(r.text).toContain("FRONTEND-ONLY");
@@ -207,7 +207,7 @@ describe("#2000 frontend-only type refused for an unavailable /object_info", () 
     const r = await addNode(
       "KSampler",
       UNAVAILABLE_REFUSAL.replace("MarkdownNote", "KSampler"),
-      "0.15.60",
+      "0.15.97",
     );
     expect(r.isError).toBe(true);
     expect(r.text).toContain("object_info is unavailable");

@@ -110,21 +110,29 @@ vi.mock("../../config.js", () => ({
   isRemoteMode: () => mockConfig.remote ?? !mockConfig.comfyuiPath,
 }));
 
-vi.mock("node:fs/promises", () => ({
-  lstat: (...a: unknown[]) => lstatMock(...a),
-  mkdir: (...a: unknown[]) => mkdirMock(...a),
-  readFile: (...a: unknown[]) => readFileMock(...a),
-  realpath: (...a: unknown[]) => realpathMock(...a),
-  stat: (...a: unknown[]) => statMock(...a),
-}));
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    lstat: (...a: unknown[]) => lstatMock(...a),
+    mkdir: (...a: unknown[]) => mkdirMock(...a),
+    readFile: (...a: unknown[]) => readFileMock(...a),
+    realpath: (...a: unknown[]) => realpathMock(...a),
+    stat: (...a: unknown[]) => statMock(...a),
+  };
+});
 
 vi.mock("node:fs", () => ({
   existsSync: (...a: unknown[]) => existsSyncMock(...a),
 }));
 
-vi.mock("node:child_process", () => ({
-  execFileSync: (...a: unknown[]) => execFileSyncMock(...a),
-}));
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return {
+    ...actual,
+    execFileSync: (...a: unknown[]) => execFileSyncMock(...a),
+  };
+});
 
 vi.mock("../../services/node-management.js", () => ({
   installCustomNode: (...a: unknown[]) => installCustomNodeMock(...a),
@@ -407,6 +415,7 @@ describe("applyManifest", () => {
       expect.any(Function), // onTrayId callback — aligns the job trayId with the tray row id (#515)
       expect.any(Function), // onLanded callback — commits done synchronously at the destination rename (#515)
       expect.any(Function), // onDownloadRoute callback — records the download-only network route
+      expect.any(Function), // onStagedPartialPath callback — persists the writer's cache identity (#2356)
     );
   });
 
@@ -879,6 +888,7 @@ describe("applyManifest", () => {
       expect.any(Function), // onTrayId callback — aligns the job trayId with the tray row id (#515)
       expect.any(Function), // onLanded callback — commits done synchronously at the destination rename (#515)
       expect.any(Function), // onDownloadRoute callback — records the download-only network route
+      expect.any(Function), // onStagedPartialPath callback — persists the writer's cache identity (#2356)
     );
     expect(String(downloadModelMock.mock.calls[0]?.[1]).replaceAll("\\", "/")).toBe(
       "checkpoints/foo",
@@ -912,6 +922,7 @@ describe("applyManifest", () => {
       expect.any(Function), // onTrayId callback — aligns the job trayId with the tray row id (#515)
       expect.any(Function), // onLanded callback — commits done synchronously at the destination rename (#515)
       expect.any(Function), // onDownloadRoute callback — records the download-only network route
+      expect.any(Function), // onStagedPartialPath callback — persists the writer's cache identity (#2356)
     );
   });
 

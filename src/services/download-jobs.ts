@@ -19,9 +19,9 @@ import { realpath } from "node:fs/promises";
 import { extname, basename, dirname, join } from "node:path";
 import {
   downloadModel,
-  findResumablePartialForLocalDownload,
   liveListingHasEntry,
   managerJobFilename,
+  localDownloadCacheIdentity,
   resolveDownloadTarget,
   shouldDispatchDownloadToManager,
   verifyLandedModel,
@@ -30,6 +30,7 @@ import {
 import type { ListedBeforeBaseline } from "./model-resolver.js";
 import type { DownloadAuth } from "./download-auth.js";
 import type { ResumeDiagnostic } from "./download-resume-diag.js";
+import type { PersistedPartialIdentity } from "./download-progress.js";
 import type { DownloadRoute } from "./download-proxy.js";
 import { ModelError } from "../utils/errors.js";
 import {
@@ -47,6 +48,7 @@ import {
   type PersistedDownloadJob,
 } from "./download-progress.js";
 import { logger } from "../utils/logger.js";
+import { observeStagedPartialAtPath } from "./download-cache.js";
 
 export interface DownloadJob {
   /** DISTINCT public id, derived from URL AND destination, so the same URL
@@ -65,6 +67,12 @@ export interface DownloadJob {
    *  (falling back to trayId when unset). Never used for URL adoption (that needs the
    *  stable original-URL trayId). */
   progressId?: string;
+  /** Exact staged partial selected by the physical writer's cache identity. It is
+   *  persisted because the original URL alone cannot reproduce auth headers,
+   *  query auth, cloud credentials, or an HF endpoint rewrite after a restart. */
+  partialPath?: string;
+  /** Non-secret proof of the exact local cache representation used by the writer. */
+  partialIdentity?: PersistedPartialIdentity;
   /** Credential-free ComfyUI endpoint this job serves; absent only on legacy records. */
   target?: string;
   /** Persisted record owner, retained so reconciliation updates that same file. */
@@ -528,17 +536,14 @@ export async function startDownloadJob(
   // tool then reports it as in-flight and the caller polls download_model action:"status" (which reads
   // the live persisted record) for the resolved state.
   //
-  // SCOPE: this dedup is BEST-EFFORT and covers the reported case — a SEQUENTIAL reconnect
-  // that reissues after another session already published its record. It is a
-  // filesystem-level read-then-start, NOT an atomic cross-process claim, so two DISTINCT
-  // processes reissuing the SAME download at the SAME instant (both reading before either
-  // publishes) can still both start writers. That is not a regression (it is the
-  // pre-existing behavior the adoption improves for the common case) and is NON-CORRUPTING:
-  // the #467 machinery materializes each writer through its OWN O_EXCL temp + atomic rename
-  // (last-writer-wins on the destination only, never a shared cache inode) and validates
-  // the payload (#473), so the only cost of that rare race is a duplicate download — never
-  // a corrupt file. A full distributed lease is deliberately out of scope (its stale-claim
-  // / crash-cleanup failure modes would be worse than a rare duplicate transfer).
+  // SCOPE: the persisted-record scan is still BEST-EFFORT and covers the reported case — a
+  // SEQUENTIAL reconnect that reissues after another session published its record. The
+  // physical cache writer now has a separate O_EXCL claim on its deterministic shared
+  // `.partial`; two DISTINCT processes that pass this read-before-start scan cannot both
+  // mutate that staged identity. The loser receives a refusal/retry error before it can
+  // observe, truncate, append, or rename the shared partial. Requests with different cache
+  // identities may still use independent temporary files, and each remains payload-validated
+  // before its atomic destination rename (#467/#473).
   // Scan ROUTE-INDEPENDENTLY (#420): match a foreign fresh in-flight record by the public
   // `id` OR the route-independent request key `reqKey`, so a reconnect whose route flipped
   // local↔Manager (which changes the id from a destination hash to a request hash) still
@@ -730,6 +735,34 @@ export async function startDownloadJob(
           const effective = route === "proxied" ? "proxied" : (job.downloadRoute ?? "direct");
           if (effective !== job.downloadRoute) {
             job.downloadRoute = effective;
+            persistJobRecord(job);
+          }
+        },
+        (partialPath) => {
+          // The writer has already resolved the effective URL, auth headers, and
+          // cloud principal here. Persist only its resulting path, never secrets;
+          // status must inspect this exact identity rather than approximate it
+          // from the redacted original URL.
+          if (partialPath && partialPath !== job.partialPath) {
+            job.partialPath = partialPath;
+            // The callback's path comes from the physical writer. Recompute the
+            // proof through that same identity builder only to verify the callback
+            // and retain a non-secret recovery witness. A mismatch is fail-closed:
+            // status may still show the exact path, but boot recovery cannot guess.
+            try {
+              const identity = localDownloadCacheIdentity(url, auth);
+              if (identity.partialPath === partialPath) {
+                job.partialIdentity = identity.partialIdentity;
+              } else {
+                job.partialIdentity = undefined;
+                logger.warn(
+                  `[download] writer partial identity mismatch for ${job.id}; ` +
+                    `automatic recovery is disabled for this record.`,
+                );
+              }
+            } catch {
+              job.partialIdentity = undefined;
+            }
             persistJobRecord(job);
           }
         },
@@ -976,6 +1009,8 @@ function persistJobRecord(job: DownloadJob, owner = PERSIST_OWNER): boolean {
     id: job.id,
     trayId: job.trayId,
     progressId: job.progressId,
+    partialPath: job.partialPath,
+    partial_identity: job.partialIdentity,
     target: job.target,
     url: job.url,
     target_subfolder: job.target_subfolder,
@@ -1034,6 +1069,8 @@ function jobFromPersisted(rec: PersistedDownloadJob): DownloadJob {
     id: rec.id,
     trayId: rec.trayId,
     progressId: rec.progressId,
+    partialPath: rec.partialPath,
+    partialIdentity: rec.partial_identity,
     target: rec.target,
     owner: rec.owner,
     url: rec.url,
@@ -1715,8 +1752,10 @@ function writerProcessGone(rec: PersistedDownloadJob): boolean | undefined {
  * the recovery the jammed cancel in #858 needed: the record is rewritten as a
  * terminal "cancelled" owned by THIS session, the dead owner's record file is
  * removed, and the dead writer's panel tray row is cleared unless a live job
- * still shares it. The download can then be safely re-issued (it resumes from
- * whatever .partial the dead writer left, or restarts cleanly).
+ * still shares it. A later caller may inspect whether a re-issue is authorized:
+ * the exact staged path, identity proof, route, and any required credential still
+ * have to match. A dead writer alone never proves that a partial survived or that
+ * a re-issue can resume it.
  *
  * Order is deliberate (report before you destroy): the replacement terminal
  * record is made durable FIRST, so a transient persistence failure leaves the
@@ -1809,14 +1848,14 @@ export interface OrphanedDownloadAdoption {
  * between them already contained everything a resume needs. The reporter did that
  * dance for nine transfers and ~48 GB.
  *
- * This is the recovery the record was always rich enough to perform: run once when
- * a new session boots, it finds each in-flight record whose writer is PROVEN dead
- * and whose staged `.partial` a re-issue would resume from, closes the dead record
- * through the same reviewed reclaim the cancel path uses (#858 — terminal state
- * durable BEFORE anything is destroyed, dead tray row cleared unless something
- * live shares it), and re-issues the download. The new writer's own resume
- * handshake (If-Range against the staged bytes) decides how much of the partial
- * still counts — adoption never asserts a resume the server did not honour.
+ * This is the recovery a record may authorize: run once when a new session boots, it
+ * considers each in-flight record whose writer is PROVEN dead, whose route is positively
+ * local, and whose exact staged path plus identity proof match the current request. It
+ * observes that persisted path before reclaiming the dead record through the same reviewed
+ * cancel path (#858 — terminal state durable BEFORE anything is destroyed), then re-issues
+ * only that proven local identity. The new writer's own resume handshake (If-Range against
+ * the staged bytes) still decides how much counts — adoption never asserts a resume the
+ * server did not honour.
  *
  * Every guard below REFUSES rather than guesses, and each refusal leaves the record
  * on the manual cancel + re-issue path exactly as before:
@@ -1837,11 +1876,13 @@ export interface OrphanedDownloadAdoption {
  *    partial is keyed under a credential this session no longer holds, which #1378
  *    makes deliberately unreachable. Either way the record is left for the user.
  *  - Never twice. A FRESH in-flight record for the same id means another session
- *    already adopted the orphan; stand down. (Two sessions scanning in the same
- *    instant can still both pass this check — startDownloadJob's own fresh-foreign
- *    adoption then makes the loser a read-only observer, and the #467 O_EXCL
- *    staging bounds the residue to a duplicate transfer, never a corrupt file.
- *    Best-effort, same contract as #529.)
+ *    already adopted the orphan; stand down. The staged-writer O_EXCL claim also
+ *    refuses any same-identity overlap that passes this snapshot scan, without
+ *    claiming safe resume for the loser.
+ *  - Never without the writer's identity witness. The exact partial path and the
+ *    cache-key/auth-mode proof are persisted by the local writer. A missing witness,
+ *    a changed HF endpoint/token/header/cloud principal, or an explicit credential
+ *    that this process does not possess is left for the manual path.
  *  - Never on the Manager route: if THIS session would dispatch to the remote
  *    Manager, "resuming" a local orphan would be a fresh server-side fetch, not a
  *    resume — so the whole pass stands down when the route (or the server needed
@@ -1883,9 +1924,37 @@ export async function adoptOrphanedDownloadJobs(): Promise<OrphanedDownloadAdopt
     // and a targetful record must never be adopted by a targetless process.
     if (rec.target !== target) continue;
     if (!rec.owner || rec.owner === PERSIST_OWNER) continue;
-    if (rec.via_manager) continue;
+    // `false` is the only affirmative local-route value. Missing is a legacy /
+    // unknown route and `true` is a Manager dispatch; neither may be reissued.
+    if (rec.via_manager !== false) continue;
+    if (rec.download_route !== "direct" && rec.download_route !== "proxied") continue;
     if (writerProcessGone(rec) !== true) continue;
     if (!rec.url || downloadIdFor(rec.url) !== rec.trayId) continue;
+    const persistedIdentity = rec.partial_identity;
+    if (
+      !rec.partialPath ||
+      !persistedIdentity ||
+      persistedIdentity.version !== 1 ||
+      persistedIdentity.auth_mode === "explicit"
+    ) {
+      continue;
+    }
+    // Compute a candidate only for a POSITIVE identity comparison. The persisted
+    // partialPath remains authoritative; a current environment is never allowed to
+    // choose a different path or turn a redacted record into a recovery request.
+    let currentIdentity: ReturnType<typeof localDownloadCacheIdentity>;
+    try {
+      currentIdentity = localDownloadCacheIdentity(rec.url);
+    } catch {
+      continue;
+    }
+    if (
+      currentIdentity.partialPath !== rec.partialPath ||
+      currentIdentity.partialIdentity.cache_key !== persistedIdentity.cache_key ||
+      currentIdentity.partialIdentity.auth_mode !== persistedIdentity.auth_mode
+    ) {
+      continue;
+    }
     const identity = `${rec.id}\n${rec.trayId}\n${rec.target ?? ""}`;
     if (adoptedIds.has(identity)) continue;
     const alreadyAdopted = records.some(
@@ -1898,20 +1967,27 @@ export async function adoptOrphanedDownloadJobs(): Promise<OrphanedDownloadAdopt
         now - (other.updated ?? 0) < PERSISTED_INFLIGHT_STALE_MS,
     );
     if (alreadyAdopted) continue;
-    // unknown-ok: adoption only ever ACTS on a positive answer. "The lookup
-    // failed" and "nothing is staged" both lead to `continue` — the record is
-    // left untouched on the manual cancel + re-issue path, nothing is reclaimed,
-    // destroyed, or re-issued — so collapsing a failed observation into "none
-    // found" can only decline a convenience, never assert a wrong one.
-    const partial = await findResumablePartialForLocalDownload(rec.url).catch(() => null);
-    if (!partial) continue;
+    // Observe ONLY the writer's persisted exact path. Unknown/unreadable/zero-byte
+    // state is not a resume proof and leaves the record untouched.
+    const observed = await observeStagedPartialAtPath(rec.partialPath).catch(() => ({
+      state: "unavailable" as const,
+      path: rec.partialPath,
+    }));
+    if (observed.state !== "present" || observed.bytes <= 0) continue;
 
     const reclaim = reclaimDeadPersistedDownload(rec);
     // Lost a race with the probe or the persist — fail closed, touch nothing more.
     if (!reclaim.reclaimed) continue;
 
     try {
-      const entry = await startDownloadJob(rec.url, rec.target_subfolder, rec.filename);
+      const entry = await startDownloadJob(
+        rec.url,
+        rec.target_subfolder,
+        rec.filename,
+        undefined,
+        undefined,
+        false,
+      );
       // A keys-less entry is the READ-ONLY view of another session's fresh writer
       // (#529): the orphan is adopted, but not by us — let that session's boot log
       // claim it rather than reporting a writer we do not own.
@@ -1929,7 +2005,7 @@ export async function adoptOrphanedDownloadJobs(): Promise<OrphanedDownloadAdopt
       id: rec.id,
       trayId: rec.trayId,
       filename: rec.filename,
-      resumedBytes: partial.bytes,
+      resumedBytes: observed.bytes,
       staleRecordLeft: reclaim.staleRecordLeft || undefined,
     });
     adoptedIds.add(identity);

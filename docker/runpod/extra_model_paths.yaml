@@ -59,3 +59,19 @@ comfyui_mcp_volume:
     geometry_estimation: models/geometry_estimation/
     optical_flow: models/optical_flow/
     detection: models/detection/
+
+    # Impact Pack / Impact Subpack register these categories THEMSELVES at import
+    # time (Subpack: ultralytics, ultralytics_bbox, ultralytics_segm — Pack: sams),
+    # so without the entries below the categories exist only as the in-image
+    # /opt/ComfyUI/models/<cat> and a FaceDetailer user's YOLO/SAM weights land on
+    # the ephemeral layer and vanish on the next rebuild (#2302).
+    #
+    # Order is safe either way round: both packs register via a helper that calls
+    # folder_paths.add_model_folder_path WITHOUT is_default, i.e. it APPENDS. So if
+    # this file loads first the volume path is already index 0 and the pack appends
+    # behind it; if the pack loads first, `is_default: true` above inserts the
+    # volume path at the FRONT. Either way /workspace stays the download target.
+    ultralytics: models/ultralytics/
+    ultralytics_bbox: models/ultralytics/bbox/
+    ultralytics_segm: models/ultralytics/segm/
+    sams: models/sams/

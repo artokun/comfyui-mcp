@@ -21,6 +21,10 @@ type ResponsesBody = {
 
 let responsesRequests: ResponsesBody[] = [];
 let rejectNextWith: string | null = null;
+/** Answer the next Responses call with a 429 carrying this body. */
+let rateLimitNextWith: { body: string; headers?: Record<string, string> } | null = null;
+/** Runs as that 429 goes out — stands in for the user switching model during the backoff. */
+let onRateLimited: (() => void) | null = null;
 
 function sse(blocks: Array<{ event: string; data: Record<string, unknown> }>): ReadableStream<Uint8Array> {
   const enc = new TextEncoder();
@@ -34,7 +38,12 @@ function sse(blocks: Array<{ event: string; data: Record<string, unknown> }>): R
   });
 }
 
-const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+// Named so beforeEach can REINSTALL it. One case below calls
+// fetchMock.mockImplementation() to make every request fail, and mockClear() does
+// not undo that — it only forgets the calls. So every test declared after that one
+// silently ran against a 400-always endpoint. The two that follow were written
+// against a 429 and saw a 400 instead, which is how this was found.
+const defaultFetchImpl = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
   const url = String(input);
   if (url.includes("/view?")) {
     return new Response(new Uint8Array([0x89, 0x50, 0x4e, 0x47]), {
@@ -44,6 +53,12 @@ const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Pr
   }
   if (url.includes("/backend-api/codex/responses")) {
     responsesRequests.push(JSON.parse(String(init?.body)) as ResponsesBody);
+    if (rateLimitNextWith) {
+      const { body, headers } = rateLimitNextWith;
+      rateLimitNextWith = null;
+      onRateLimited?.();
+      return new Response(body, { status: 429, headers: headers ?? {} });
+    }
     if (rejectNextWith) {
       const msg = rejectNextWith;
       rejectNextWith = null;
@@ -54,7 +69,9 @@ const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Pr
     });
   }
   return new Response("not found", { status: 404 });
-});
+};
+
+const fetchMock = vi.fn(defaultFetchImpl);
 
 function fakeMcpClient(): McpToolClient {
   return {
@@ -97,8 +114,11 @@ function userContent(req: ResponsesBody): Array<Record<string, unknown>> {
 beforeEach(() => {
   responsesRequests = [];
   rejectNextWith = null;
+  rateLimitNextWith = null;
+  onRateLimited = null;
   vi.stubGlobal("fetch", fetchMock);
   fetchMock.mockClear();
+  fetchMock.mockImplementation(defaultFetchImpl);
 });
 
 afterEach(() => {
@@ -244,5 +264,56 @@ describe("GPT-5.6-only model policy (issue #241 + 2026-07-20 deprecation)", () =
       if (prev === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = prev;
       rmSync(home, { recursive: true, force: true });
     }
+  });
+});
+
+// Both cases below came from the merge gate on this PR, not from the report.
+describe("ChatGptOAuthBackend — a 429 is neither an image rejection nor a model switch", () => {
+  it("a rate limit on a turn carrying an image does NOT strip the image", async () => {
+    // The catch that handles image rejection fires on ANY error once the history holds an
+    // image. A RateLimitError landing there tells the user this endpoint refused image
+    // input — which is false — and then answers WITHOUT the image they attached. A 429
+    // with no parseable window classifies as `unknown` and is never retried, so with the
+    // guard absent the strip-and-retry path is the only thing that can run.
+    rateLimitNextWith = { body: JSON.stringify({ error: { message: "slow down" } }) };
+    const events = await collect(makeBackend(), turnsOf(IMG_TURN));
+
+    // The image survives on EVERY request that went out — nothing silently dropped it.
+    for (const req of responsesRequests) {
+      expect(userContent(req).some((c) => c.type === "input_image")).toBe(true);
+    }
+
+    // And the user is never told this endpoint refused images, because it did not.
+    const said = events
+      .filter((e) => e.type === "assistant")
+      .map((e) => (e as { text: string }).text)
+      .join(" ");
+    expect(said).not.toContain("rejected image input");
+    // The note the strip path writes into history must be absent too.
+    const historyNotes = responsesRequests.flatMap((r) =>
+      userContent(r).map((c) => String(c.text ?? "")),
+    );
+    expect(historyNotes.some((t) => t.includes("were removed"))).toBe(false);
+  });
+
+  it("a retried request keeps the model the notice named, not one chosen mid-backoff", async () => {
+    // The retry thunk re-read `this.model`, so a switch during the wait sent the SAME turn
+    // to a different model while the notice the user had already read named the old one.
+    const backend = makeBackend();
+    onRateLimited = () => {
+      void backend.setModel("gpt-5.4");
+    };
+    rateLimitNextWith = {
+      body: JSON.stringify({ error: { message: "rate limited" } }),
+      headers: { "retry-after": "1" },
+    };
+
+    await collect(backend, turnsOf({ text: "hello" }));
+
+    expect(responsesRequests.length).toBeGreaterThanOrEqual(2);
+    expect(responsesRequests[0].model).toBe("gpt-5.4-mini");
+    // The switch DID land on the instance — this pins the capture, not inertia.
+    expect(backend.model).toBe("gpt-5.4");
+    expect(responsesRequests[1].model).toBe("gpt-5.4-mini");
   });
 });

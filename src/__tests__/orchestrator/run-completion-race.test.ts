@@ -159,6 +159,45 @@ describe("a completion that beats its own ticket is still OURS (#1327)", () => {
   });
 });
 
+describe("#1824 panel completion receipt keys", () => {
+  it("coalesces a replay while the first completion is still outstanding", () => {
+    const completionKey = JSON.stringify([TAB, CONV, PID, "generation-a"]);
+    journal.openRun(PID, { tabId: TAB, conversation: CONV, completionKey });
+    const first = journal.record(
+      TAB,
+      { prompt_id: PID, completion_key: completionKey },
+      { conversation: CONV },
+    );
+
+    const replay = journal.record(
+      TAB,
+      { prompt_id: PID, completion_key: completionKey, note: "same completion replay" },
+      { conversation: CONV },
+    );
+
+    expect(replay.token).toBe(first.token);
+    expect(journal.allOutstanding()).toHaveLength(1);
+  });
+
+  it("remembers an acknowledged key so a lost panel ack cannot create a second turn", () => {
+    const completionKey = JSON.stringify([TAB, CONV, PID, "generation-a"]);
+    journal.openRun(PID, { tabId: TAB, conversation: CONV, completionKey });
+    journal.record(TAB, { prompt_id: PID, completion_key: completionKey }, { conversation: CONV });
+    const [entry] = journal.allOutstanding();
+    expect(entry).toBeDefined();
+    journal.deliverPending(TAB, () => true);
+    journal.ack(entry.token);
+
+    expect(journal.hasCompletionReceipt(completionKey, { promptId: PID, key: TAB, conversation: CONV })).toBe(true);
+    // This is the guard used by the agent_event ingress: a retry sends the ack
+    // again, but does not record another agent-facing completion.
+    if (!journal.hasCompletionReceipt(completionKey, { promptId: PID, key: TAB, conversation: CONV })) {
+      journal.record(TAB, { prompt_id: PID, completion_key: completionKey }, { conversation: CONV });
+    }
+    expect(journal.allOutstanding()).toHaveLength(0);
+  });
+});
+
 // #1327 RECURRENCE — reported 2026-08-15 on comfyui-mcp 0.51.56, five releases after
 // the fix above shipped (v0.50.100). Same symptom, exact prompt-id match, same tool:
 // `panel_run({to_node_id: 19})` came back RE-DELIVERED with origin UNDETERMINED.

@@ -1211,10 +1211,7 @@ function cachePathForUrl(
   headers: Record<string, string> = {},
   storageAuth?: CloudStorageAuth,
 ): string {
-  const hash = createHash("sha256")
-    .update(cacheIdentity(url, headers, storageAuth))
-    .digest("hex")
-    .slice(0, HASH_CHARS);
+  const hash = cacheIdentityKey(url, headers, storageAuth);
   let extension = "";
   try {
     extension = extname(basename(new URL(url).pathname));
@@ -1223,6 +1220,200 @@ function cachePathForUrl(
     // defensive so fallback direct downloads can still surface the real error.
   }
   return join(cacheDir(), `${hash}${extension}`);
+}
+
+interface StagedWriterLock {
+  release: () => Promise<void>;
+}
+
+/**
+ * Claim the deterministic cache identity before reading, truncating, appending,
+ * or renaming its staged files. The persisted-job scan is intentionally only a
+ * liveness/adoption hint; it is not atomic. This O_EXCL claim closes the remaining
+ * cross-process overlap window for the shared `.partial` and refuses on any
+ * unclassified/live owner rather than guessing that an observed snapshot is safe.
+ */
+async function acquireStagedWriterLock(
+  partialPath: string,
+  logUrl: string,
+): Promise<StagedWriterLock> {
+  const lockPath = `${partialPath}.lock`;
+  const token = randomBytes(16).toString("hex");
+  const body = JSON.stringify({ pid: process.pid, token, updated: Date.now() });
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await writeFile(lockPath, body, { flag: "wx", mode: 0o600 });
+      return {
+        release: async () => {
+          try {
+            const current = JSON.parse(await readFile(lockPath, "utf8")) as { token?: unknown };
+            // Never remove a successor's claim if a cleanup race replaced this one.
+            if (current.token === token) await rm(lockPath, { force: true });
+          } catch {
+            // Best effort. A failed cleanup leaves a visible claim; the next caller
+            // will probe its pid and either reclaim a dead owner or refuse safely.
+          }
+        },
+      };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") throw err;
+      let observedRaw: Buffer;
+      let owner: { pid?: unknown };
+      try {
+        observedRaw = await readFile(lockPath);
+        owner = JSON.parse(observedRaw.toString("utf8")) as { pid?: unknown };
+      } catch {
+        throw interferenceError(
+          "the staged writer lock exists but its owner identity could not be read",
+          "before starting",
+          logUrl,
+        );
+      }
+      const pid = owner.pid;
+      // Keep this in the range Node accepts for process.kill. A positive integer
+      // outside signed 32-bit range is still an invalid syscall argument (for
+      // example 999999999999 produces ERR_INVALID_ARG_TYPE), not proof of a dead
+      // owner. Treat every such shape as an ownership refusal.
+      if (
+        typeof pid !== "number" ||
+        !Number.isSafeInteger(pid) ||
+        pid <= 0 ||
+        pid > 0x7fff_ffff
+      ) {
+        throw interferenceError(
+          "the staged writer lock has no valid owner identity",
+          "before starting",
+          logUrl,
+        );
+      }
+      let ownerGone = false;
+      try {
+        process.kill(pid, 0);
+      } catch (probeErr) {
+        // An existing process, including this process, means a live claim. Only
+        // ESRCH is proof that the lock owner is gone; EPERM/other errors are
+        // inconclusive and must remain ModelError refusals so callers cannot
+        // fall through to an unlocked direct download.
+        const code = (probeErr as NodeJS.ErrnoException)?.code;
+        if (code !== "ESRCH") {
+          throw interferenceError(
+            `the staged writer owner's process could not be verified (PID probe failed with ${code ?? "an unknown error"})`,
+            "before starting",
+            logUrl,
+          );
+        }
+        ownerGone = true;
+      }
+      if (!ownerGone) {
+        throw interferenceError(
+          `the staged writer lock is held by process ${pid}`,
+          "before starting",
+          logUrl,
+        );
+      }
+      // The recorded owner is proven gone. Move the exact path aside atomically,
+      // then compare the moved bytes with the observation. A contender that got
+      // here after another contender installed a replacement will move THAT live
+      // claim instead; the comparison catches it before anything is deleted.
+      //
+      // Restore a changed claim with an O_EXCL hard link, never rename: rename can
+      // overwrite a successor that landed while the aside copy was being checked.
+      // `link` is supported on the local filesystems supported by this cache and
+      // fails with EEXIST if another contender already restored/replaced the path.
+      const claimPath = `${lockPath}.stale-${randomBytes(16).toString("hex")}`;
+      try {
+        await downloadCacheFs.rename(lockPath, claimPath);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException)?.code === "ENOENT") continue;
+        throw interferenceError(
+          "the staged writer lock changed before its stale claim could be moved",
+          "before starting",
+          logUrl,
+        );
+      }
+
+      let movedRaw: Buffer | undefined;
+      try {
+        movedRaw = await readFile(claimPath);
+      } catch {
+        try {
+          await downloadCacheFs.link(claimPath, lockPath);
+          await downloadCacheFs.rm(claimPath, { force: true });
+        } catch {
+          // Preserve the aside copy when restoration loses to a successor or
+          // the filesystem refuses the non-overwriting restore operation.
+        }
+        throw interferenceError(
+          "the stale writer claim could not be re-read after its atomic move",
+          "before starting",
+          logUrl,
+        );
+      }
+
+      if (!movedRaw.equals(observedRaw)) {
+        try {
+          await downloadCacheFs.link(claimPath, lockPath);
+          await downloadCacheFs.rm(claimPath, { force: true });
+        } catch {
+          // EEXIST means a successor already occupies the canonical path; any
+          // other failure leaves the aside copy intact for diagnosis. In neither
+          // case may this contender remove bytes it did not create.
+        }
+        throw interferenceError(
+          "the staged writer lock changed while its stale claim was being reclaimed",
+          "before starting",
+          logUrl,
+        );
+      }
+
+      // The exact dead claim was moved, so removing only its private aside copy
+      // cannot affect a successor that may already have claimed lockPath.
+      await downloadCacheFs.rm(claimPath, { force: true }).catch(() => undefined);
+    }
+  }
+  throw interferenceError(
+    "another writer won the staged identity claim",
+    "before starting",
+    logUrl,
+  );
+}
+
+function cacheIdentityKey(
+  url: string,
+  headers: Record<string, string>,
+  storageAuth?: CloudStorageAuth,
+): string {
+  return createHash("sha256")
+    .update(cacheIdentity(url, headers, storageAuth))
+    .digest("hex")
+    .slice(0, HASH_CHARS);
+}
+
+/**
+ * The complete cache identity used by the physical writer.
+ *
+ * Keep the cache payload, resumable partial, and their callers on one derivation:
+ * the URL is already effective (HF endpoint and query auth applied), headers carry
+ * representation-affecting auth, and storageAuth carries the cloud principal.
+ * A status reader must use the resulting path, never rebuild a partial name from a
+ * job's redacted/original URL.
+ */
+export interface DownloadCacheIdentity {
+  /** The complete representation digest used to name cachePath/partialPath. */
+  cacheKey: string;
+  cachePath: string;
+  partialPath: string;
+}
+
+export function downloadCacheIdentity(
+  url: string,
+  headers: Record<string, string> = {},
+  storageAuth?: CloudStorageAuth,
+): DownloadCacheIdentity {
+  const cacheKey = cacheIdentityKey(url, headers, storageAuth);
+  const cachePath = cachePathForUrl(url, headers, storageAuth);
+  return { cacheKey, cachePath, partialPath: stagedPartialPathForTarget(cachePath) };
 }
 
 async function touch(path: string): Promise<void> {
@@ -2482,7 +2673,9 @@ async function downloadIntoCache(
   // Representation-aware identity (#467): a same-URL download with different HTTP
   // auth headers OR different cloud (S3/Azure) credentials gets its OWN cache file,
   // partial and in-flight slot — never coalesced onto another caller's stream.
-  const target = cachePathForUrl(url, headers, storageAuth);
+  const identity = downloadCacheIdentity(url, headers, storageAuth);
+  const target = identity.cachePath;
+  const partial = stagedPartialPathForTarget(target);
   const key = target;
 
   const existing = inflight.get(key);
@@ -2507,9 +2700,15 @@ async function downloadIntoCache(
   // can ever false-complete or be corrupted by another's cancel.
   if (existing) return existing;
 
+  // `inflight` deduplicates callers in THIS process. The atomic staged claim is
+  // the cross-process gate: a second session must refuse before it can observe,
+  // truncate, append, or rename the shared partial. The claim is acquired inside
+  // the promise, after that promise is published, so same-process callers coalesce
+  // before either one reaches the filesystem.
+  let stagedLock: StagedWriterLock | undefined;
   const promise = (async () => {
     await downloadCacheFs.mkdir(cacheDir(), { recursive: true });
-
+    stagedLock = await acquireStagedWriterLock(partial, logUrl ?? redactUrlForLogs(url));
     try {
       const info = await downloadCacheFs.stat(target);
       if (info.isFile()) {
@@ -2536,7 +2735,6 @@ async function downloadIntoCache(
     // resumes from the byte it left off on the next call, rather than
     // restarting from zero. (See streamUrlToFile for the Range + flags
     // handshake.) Cleanup on terminal failure stays unchanged.
-    const partial = stagedPartialPathForTarget(target);
     const rejectedMarker = `${partial}.rejected`;
 
     /**
@@ -3079,6 +3277,7 @@ async function downloadIntoCache(
     return await promise;
   } finally {
     inflight.delete(key);
+    await stagedLock?.release();
   }
 }
 
@@ -3592,7 +3791,67 @@ export function stagedPartialPathForTarget(target: string): string {
  * name", never "none exists" — and the caller must not upgrade it to the latter.
  */
 export function stagedPartialPathForUrl(url: string): string {
-  return stagedPartialPathForTarget(cachePathForUrl(url));
+  return downloadCacheIdentity(url).partialPath;
+}
+
+/**
+ * The status reader needs to distinguish an absent partial from one it could
+ * not read. A null result loses that distinction, and turning either case into
+ * a byte count would let an in-memory progress row overstate what is durable
+ * on disk (#2356).
+ */
+export type StagedPartialObservation =
+  | { state: "present"; path: string; bytes: number; modifiedMs: number }
+  | { state: "absent"; path: string }
+  | { state: "unavailable"; path: string };
+
+/** Read a staged partial at the exact path selected by the local writer. */
+export async function observeStagedPartialAtPath(
+  path: string | undefined,
+): Promise<StagedPartialObservation> {
+  if (typeof path !== "string" || !path.trim()) {
+    return { state: "unavailable", path: "" };
+  }
+
+  // Preserve the writer's exact path. The cache root may legitimately contain
+  // whitespace, and trimming here would silently inspect a different identity.
+  const candidate = path;
+  try {
+    const st = await stat(candidate);
+    if (!st.isFile()) return { state: "unavailable", path: candidate };
+    // A real zero-byte staged file carries no bytes that a re-issued download
+    // can resume. Preserve the prior bytes > 0 contract by treating it as
+    // non-resumable/absent rather than a present durable partial.
+    if (st.size <= 0) return { state: "absent", path: candidate };
+    return { state: "present", path: candidate, bytes: st.size, modifiedMs: st.mtimeMs };
+  } catch (err) {
+    // ENOENT is a useful observation: no resumable file exists yet. Permission,
+    // sharing, and other stat failures are deliberately kept distinct so status
+    // cannot turn an unreadable file into "0 bytes" or "absent".
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") {
+      return { state: "absent", path: candidate };
+    }
+    return { state: "unavailable", path: candidate };
+  }
+}
+
+/** Read the staged partial that the local downloader would use for `url`. */
+export async function observeStagedPartial(
+  url: string | undefined,
+  headers: Record<string, string> = {},
+  storageAuth?: CloudStorageAuth,
+): Promise<StagedPartialObservation> {
+  if (typeof url !== "string" || !url.trim()) {
+    return { state: "unavailable", path: "" };
+  }
+
+  let partialPath: string;
+  try {
+    partialPath = downloadCacheIdentity(url.trim(), headers, storageAuth).partialPath;
+  } catch {
+    return { state: "unavailable", path: "" };
+  }
+  return observeStagedPartialAtPath(partialPath);
 }
 
 /**
@@ -3614,19 +3873,11 @@ export function stagedPartialPathForUrl(url: string): string {
 export async function findResumablePartial(
   url: string | undefined,
   headers: Record<string, string> = {},
+  storageAuth?: CloudStorageAuth,
 ): Promise<{ path: string; bytes: number } | null> {
-  if (typeof url !== "string" || !url.trim()) return null;
-  let candidate: string;
-  try {
-    candidate = stagedPartialPathForTarget(cachePathForUrl(url.trim(), headers));
-  } catch {
-    return null;
-  }
-  try {
-    const st = await stat(candidate);
-    if (st.isFile() && st.size > 0) return { path: candidate, bytes: st.size };
-  } catch {
-    // ENOENT is the common, expected answer.
+  const observed = await observeStagedPartial(url, headers, storageAuth);
+  if (observed.state === "present" && observed.bytes > 0) {
+    return { path: observed.path, bytes: observed.bytes };
   }
   return null;
 }

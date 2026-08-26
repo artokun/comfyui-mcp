@@ -93,6 +93,66 @@ O ComfyUI MCP é publicado no npm como `comfyui-mcp` e roda via `npx` — sem pr
       **Só na nuvem?** O [Comfy Cloud MCP da Comfy-Org](https://docs.comfy.org/agent-tools) (beta público) é a escolha canônica — veja [Local vs. Comfy Cloud](/docs/local-vs-comfy-cloud). Use o modo cloud do `comfyui-mcp` se você quiser um único MCP para local / remoto / nuvem, ou se precisar de suporte à nuvem hoje.
     </Note>
   </Tab>
+  <Tab title="Claude Code gerenciado / corporativo">
+    Num Claude Code gerenciado por uma organização não existe a CLI `claude` para rodar
+    `claude mcp add`, e a lista **Servidores MCP gerenciados**, controlada pelo administrador,
+    testa o servidor com sucesso e depois se recusa a salvá-lo. **Configurações do
+    desenvolvedor → Editar configuração** abre um `claude_desktop_config.json` que a aba do
+    Code nunca lê. Dois caminhos funcionam.
+
+    **Opção A — HTTP.** Rode o servidor você mesmo e adicione-o como conector *remoto*:
+
+    ```bash
+    npx -y comfyui-mcp@latest --http
+    ```
+
+    Isso serve streamable-HTTP em `http://127.0.0.1:9100/mcp` — mude o endereço com `--host` /
+    `--port`. Adicione essa URL como conector remoto, transporte HTTP, sem autenticação. O
+    processo precisa continuar rodando enquanto você usar as ferramentas, e uma lista de
+    organização gerenciada ainda pode se recusar a manter a entrada — se isso acontecer, use a
+    opção B.
+
+    **Opção B — stdio pela sua configuração de usuário.** O próprio Claude sobe o servidor,
+    então nada precisa ficar rodando. Instale globalmente **com o Claude Code totalmente
+    fechado**, ou o Windows segura os arquivos abertos e deixa um pacote pela metade que o
+    `npm ls -g` mostra sem versão:
+
+    ```bash
+    npm install -g comfyui-mcp
+    npm root -g
+    ```
+
+    Depois adicione um bloco `mcpServers` **no nível raiz** do `~/.claude.json` — no Windows,
+    `C:\Users\SEU_USUARIO\.claude.json` — apontando o `node` para o caminho que o `npm root -g`
+    imprimiu:
+
+    ```json
+    {
+      "mcpServers": {
+        "comfyui": {
+          "command": "node",
+          "args": ["C:/Users/YOUR_NAME/AppData/Roaming/npm/node_modules/comfyui-mcp/dist/index.js"]
+        }
+      }
+    }
+    ```
+
+    Em seguida reinicie o Claude Code **por completo, incluindo o ícone da bandeja do sistema**
+    — caso contrário a configuração nunca é lida de novo.
+
+    <Note>
+      **Confirme perguntando ao agente quais ferramentas ele tem.** Numa instalação gerenciada
+      nenhuma parte da interface reflete de forma confiável um servidor MCP funcionando, então o
+      teste funcional é o único que não mente.
+    </Note>
+    <Note>
+      Os nomes de menu e os caminhos do lado do Claude acima foram observados em uma única
+      instalação gerenciada — tome-os como pistas do que procurar, não como rótulos exatos.
+      Mantenha o endpoint HTTP em loopback: se você o vincular a um host que não seja loopback,
+      o servidor se recusa a iniciar enquanto você não definir um segredo compartilhado com
+      `--token`. Veja [Conector remoto](/docs/remote-connector).
+    </Note>
+  </Tab>
 </Tabs>
 
 Depois rode `/mcp` no Claude Code para conectar.

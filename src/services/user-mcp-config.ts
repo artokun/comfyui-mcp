@@ -111,6 +111,34 @@ export function readUserMcpServers(): Record<string, McpServerConfig> {
   return out;
 }
 
+/**
+ * Does an agent running on `backend` actually RECEIVE the servers
+ * {@link readUserMcpServers} returns? (#2311)
+ *
+ * Only the CLAUDE lane does, and that is a property of our own wiring, not a
+ * guess: `startPanelOrchestrator`'s `buildMcpServers()` spreads
+ * `readUserMcpServers()` into the set handed to `PanelAgent`, and `PanelAgent`'s
+ * constructor forwards `deps.mcpServers` to the default `ClaudeBackend` ONLY —
+ * an injected backend (codex, gemini, grok, antigravity, qwen, …) ignores that
+ * field entirely and is wired from `makeHttpBackendMcpServers()`, which declares
+ * exactly two servers: the stdio `comfyui` child and the loopback `panel` HTTP MCP.
+ *
+ * So on every non-Claude lane the user's `~/.claude.json` entries are configured
+ * state, never session state. `panel_list_mcp` used to print them under
+ * `inherited` on all lanes, which is how a Codex session came to be told it had a
+ * server whose every call then failed with `unknown MCP server`.
+ *
+ * What this deliberately does NOT say: that a non-Claude backend has no other MCP
+ * servers. Codex reads `~/.codex/config.toml`, Gemini/Qwen read their own configs,
+ * and those are none of our business — we only know what WE declared. And on the
+ * Claude lane it says DECLARED, not connected: a declared server can still come up
+ * `failed` (see mcp-session-health.ts), so no caller may upgrade a `true` here into
+ * "the tools are there".
+ */
+export function backendInheritsUserMcpServers(backend: string | undefined | null): boolean {
+  return typeof backend === "string" && backend.toLowerCase() === "claude";
+}
+
 const NAME_RE = /^[\w.-]+$/;
 
 /**

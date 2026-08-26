@@ -31,7 +31,7 @@ import {
   isRemoteMode,
   targetIsOnThisMachine,
 } from "../config.js";
-import { comfyuiFetch, describeTargetDrift } from "../comfyui/fetch.js";
+import { comfyuiFetch, describeTargetDrift, raceAbort } from "../comfyui/fetch.js";
 import { scrubLogLines } from "../comfyui/json-guard.js";
 import { errorText } from "../orchestrator/error-text.js";
 import {
@@ -64,6 +64,7 @@ import {
 } from "./listener-ownership.js";
 import { isLoopbackServerUrl } from "./local-vram.js";
 import { resetManagerApiCache } from "./manager-api-cache.js";
+import { MANAGER_VERSION_ROUTES, parseManagerMajor } from "./manager-version.js";
 import {
   parseListenerPidFromNetstat,
   findPidByPort,
@@ -4720,6 +4721,7 @@ interface RebootResult {
 //     surfaces as 404/405 and we fall through to the next candidate.
 const REBOOT_ROUTES: ReadonlyArray<{ path: string; method: "POST" | "GET" }> = [
   { path: "/v2/manager/reboot", method: "POST" },
+  { path: "/v2/manager/reboot", method: "GET" },
   { path: "/manager/reboot", method: "GET" },
   { path: "/manager/reboot", method: "POST" },
 ];
@@ -4776,6 +4778,61 @@ async function looksLikeSpaCatchall(res: Response): Promise<boolean> {
 }
 
 /**
+ * Total budget for the report-time version read (#2320). Generous for a bare
+ * version string on a reachable server, and short enough that an unreachable one
+ * costs the caller a clause rather than minutes.
+ */
+const REPORT_VERSION_PROBE_BUDGET_MS = 3_000;
+
+/**
+ * Read the Manager MAJOR version straight from the Manager, for the REPORT only.
+ *
+ * Called on one path: after every reboot candidate has failed, to decide whether
+ * the report may say "legacy Manager 3.x". It never influences `rebooting` — the
+ * reboot has already been given up on by the time this runs — so it cannot
+ * manufacture the phantom-reboot failure mode that sank the earlier attempt at
+ * #2320. Its only job is to stop the report ASSERTING a Manager generation the
+ * probe never established, against a server that answers the question directly.
+ *
+ * Soft in every direction: any throw, any non-2xx, any unparseable body yields
+ * `undefined`, and `undefined` means the report keeps its version-agnostic
+ * wording. A server that went down (because an ambiguous 200 DID reboot it) lands
+ * here too — correctly, since it can no longer answer for itself.
+ *
+ * `parseManagerMajor` is shared with node-management.ts on purpose: its strictness
+ * is what stops the SPA catchall's HTML being read as a version string, and this
+ * caller is behind exactly the proxy that serves such a catchall.
+ */
+async function probeManagerMajorForReport(base: string): Promise<number | undefined> {
+  // ONE budget for the whole read, shared by both routes. comfyuiFetch otherwise
+  // applies its deliberately generous 120s default ceiling, and that ceiling exists
+  // for exactly the host this runs against: "a stalled reverse proxy … that accepts
+  // the connection and then never answers". Two of those would add four minutes to a
+  // restart call that has ALREADY given up — a worse symptom than the wording this
+  // is here to improve. Losing the read costs only the version clause.
+  const signal = AbortSignal.timeout(REPORT_VERSION_PROBE_BUDGET_MS);
+  for (const path of MANAGER_VERSION_ROUTES) {
+    try {
+      // raceAbort covers the BODY too (codex gate r2, P1). AbortSignal.timeout only
+      // cancels the exchange up to headers — once they arrive, `res.text()` keeps the
+      // caller pending for as long as the body takes, which is the #1672 failure mode
+      // this helper exists for. A host that answers headers and then stalls the body
+      // is the same stalled proxy the budget is here to survive.
+      const major = await raceAbort(signal, async () => {
+        const res = await comfyuiFetch(`${base}${path}`, { method: "GET", signal });
+        if (!res.ok) return undefined;
+        return parseManagerMajor(await res.text());
+      });
+      if (major !== undefined) return major;
+    } catch {
+      // Unreachable/aborted: no version claim. Never fatal — this runs only to
+      // word an already-decided failure.
+    }
+  }
+  return undefined;
+}
+
+/**
  * @param base the ALREADY-PINNED target. Not re-read from config here (codex
  * gate P0): the caller resolved which instance it is restarting before its own
  * awaits, and re-reading the mutable base at dispatch time is how a reboot
@@ -4783,6 +4840,12 @@ async function looksLikeSpaCatchall(res: Response): Promise<boolean> {
  */
 async function rebootViaManager(base: string): Promise<RebootResult> {
   const failures: string[] = [];
+  // Candidates that answered 200 but looked like the frontend catchall. They are
+  // NOT evidence a reboot fired — that question is unanswerable from response
+  // shape (#2320, three review rounds) and this path still concludes `rebooting:
+  // false`. They ARE evidence a request reached the server, which is the one
+  // thing the old report denied while telling the caller to restart by hand.
+  const ambiguous: string[] = [];
 
   for (const { path, method } of REBOOT_ROUTES) {
     const url = `${base}${path}`;
@@ -4798,7 +4861,7 @@ async function rebootViaManager(base: string): Promise<RebootResult> {
         // reporting a reboot that never fired (which readiness — a still-up
         // server — would then rubber-stamp as success).
         if (await looksLikeSpaCatchall(res)) {
-          failures.push(`${method} ${path} → HTTP 200 (frontend catchall, not a reboot route)`);
+          ambiguous.push(`${method} ${path}`);
           continue;
         }
         // The one path with a real acknowledgement from the Manager itself.
@@ -4827,8 +4890,13 @@ async function rebootViaManager(base: string): Promise<RebootResult> {
           note: `the request returned HTTP ${res.status}`,
         };
       }
-      // 404 / other non-OK: wrong route for this Manager build — try the next.
-      failures.push(`${method} ${path} → HTTP ${res.status}`);
+      // 405 Method Not Allowed: the route EXISTS but does not accept this verb —
+      // try a different verb on the same path, not a different path. Do not
+      // report it as route-absent (issue #2320). 404 / other non-OK: wrong route
+      // for this Manager build — try the next.
+      if (res.status !== 405) {
+        failures.push(`${method} ${path} → HTTP ${res.status}`);
+      }
     } catch (err) {
       if (isConnectionDrop(err)) {
         return {
@@ -4845,15 +4913,49 @@ async function rebootViaManager(base: string): Promise<RebootResult> {
     }
   }
 
+  // The generation claim is now READ from the Manager instead of inferred from
+  // which probes failed. The old sentence asserted "likely runs the LEGACY Manager
+  // 3.x" unconditionally — a cause no probe here establishes, and one a V4.2.2
+  // server contradicts on request (#2320). Same discipline the notes above already
+  // follow: state what was observed, not a cause chosen for it.
+  const major = await probeManagerMajorForReport(base);
+  const generation =
+    major !== undefined && major >= 4
+      ? ` ComfyUI-Manager reports V${major}.x, so the legacy-3.x explanation (no HTTP ` +
+        `reboot route at all) does not apply here. Check the Manager security level, ` +
+        `or an access proxy in front of ComfyUI, before assuming the route is absent.`
+      : major !== undefined
+        ? ` ComfyUI-Manager reports V${major}.x; some builds of that generation expose ` +
+          `no HTTP reboot route, and upgrading to Manager v4+ adds one.`
+        : ` The Manager version could not be read, so the build is unknown; a legacy ` +
+          `Manager 3.x without an HTTP reboot route is one possibility, and upgrading ` +
+          `to Manager v4+ would add one.`;
+  // An ambiguous 200 is reported as what it is. It does NOT promote `rebooting`,
+  // because a catchall and an instant reboot are indistinguishable from the
+  // response alone — but the request DID reach the server, so the caller is warned
+  // off the blind re-issue (a double restart mid-render) the old flat-failure
+  // wording invited.
+  const maybeLanded = ambiguous.length
+    ? ` ${ambiguous.join(", ")} answered HTTP 200 with what looks like the ComfyUI ` +
+      `frontend catchall rather than a reboot acknowledgement. That is not proof a ` +
+      `reboot fired, but the request did reach the server and MAY have taken effect — ` +
+      `confirm with get_system_stats (action:"health") before re-issuing a restart.`
+    : "";
   return {
     rebooting: false,
     reason: "no-endpoint",
     note:
-      `No reachable ComfyUI-Manager reboot endpoint (this ComfyUI likely runs the ` +
-      `LEGACY Manager 3.x, which does not expose an HTTP reboot route).${
+      // "No REACHABLE endpoint" is itself a claim, and an ambiguous 200 refutes it:
+      // something answered. Say what was established — nothing could be CONFIRMED —
+      // rather than asserting unreachability over the top of a reply we received.
+      `${
+        ambiguous.length
+          ? "No ComfyUI-Manager reboot endpoint could be confirmed."
+          : "No reachable ComfyUI-Manager reboot endpoint."
+      }${generation}${
         failures.length ? ` Tried: ${failures.join("; ")}.` : ""
-      } For a LOCAL install, use the headless restart_comfyui tool (kill + relaunch); ` +
-      `otherwise restart ComfyUI on the host, or upgrade to Manager v4+.`,
+      }${maybeLanded} For a LOCAL install, use the headless restart_comfyui tool ` +
+      `(kill + relaunch); otherwise restart ComfyUI on the host.`,
   };
 }
 
@@ -5061,7 +5163,11 @@ async function restartViaManagerRebootDispatch(
     return {
       stopped: false,
       started: false,
-      // Nothing was dispatched — this is a refusal, not an uncertain outcome.
+      // No reboot was CONFIRMED dispatched, so there is no restart to wait on and
+      // `not-attempted` stays the honest machine-readable verdict — promoting it on
+      // an ambiguous 200 is the phantom-reboot regression #2320 round 1 reproduced.
+      // Note this is not the same as "no request was sent": when a candidate answered
+      // a catchall-shaped 200, `reboot.note` says so and warns against re-issuing.
       startup: "not-attempted",
       message: reboot.note ?? "ComfyUI-Manager reboot could not be triggered.",
       // The Manager reboot path never spawns a process of ours, so ownership of

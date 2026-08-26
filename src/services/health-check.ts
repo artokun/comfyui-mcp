@@ -169,17 +169,155 @@ export async function runHealthCheck(
     try {
       const res = await comfyApiFetch("/internal/logs");
       if (res.ok) {
-        const text = await res.text();
+        const rawText = await res.text();
+        // /internal/logs returns a JSON-wrapped string. Parse it to get the actual logs.
+        let text: string;
+        try {
+          const parsed = JSON.parse(rawText);
+          // Ensure the parsed value is a string, not an object or other type
+          text = typeof parsed === "string" ? parsed : rawText;
+        } catch {
+          // If not JSON, use the raw text
+          text = rawText;
+        }
+
         // #1206 — these lines go straight into the health report, which is a
         // DIAGNOSTIC users paste into bug reports. A custom node logging the URL
         // it fetched can put a CivitAI/HF token in one, so scrub before emitting.
         // Per line, and fail-closed VISIBLY, for the same reasons as getLogs.
-        const errLines = scrubLogLines(
-          text
-            .split("\n")
-            .filter((l) => /traceback|error|exception/i.test(l))
-            .slice(-recentErrors),
+        //
+        // #2329 — match severity on the line itself, not a bare substring. A log
+        // line containing "error" in a message like "0 errors found" is not an
+        // actual error. Only lines with [ERROR]/[EXCEPTION] markers or starting
+        // with "Traceback" are errors. Keep traceback continuation lines (indented).
+        // #2347 — severity is matched on the entry BODY, after the timestamp prefix.
+        // /internal/logs joins each record as `l["t"] + " - " + l["m"]`
+        // (api_server/routes/internal/internal_routes.py), so every line begins with a
+        // timestamp. #2329 matched `^Traceback` against the raw line, which therefore
+        // could never fire: measured on a live 105-line log, 0 lines start with
+        // "Traceback".
+        //
+        // #2355 — and something STILL sits between the prefix and the anchor.
+        // ColoredFormatter (app/logger.py:35-45) prepends its own tag before it
+        // delegates, so ColoredFormatter("%(message)s") does NOT mean message-only:
+        //
+        //     level_tag = f"{bold}{color}[{record.levelname}]{ANSI_RESET} "
+        //     return level_tag + super().format(record)
+        //
+        // and setup_logger swaps sys.stdout/sys.stderr for LogInterceptor BEFORE it
+        // builds the handlers (app/logger.py:107-108 vs :120), so what reaches the
+        // in-memory deque — and therefore /internal/logs — is
+        //
+        //     2026-... - ESC[1mESC[31m[ERROR]ESC[0m !!! Exception during processing !!! ...
+        //
+        // Measured on ComfyUI 0.34.0 by driving its own app/logger.py, NOT by
+        // reconstructing the format from its description — that reconstruction is
+        // exactly how #2347 shipped two anchors that could never fire.
+        //
+        // ANSI is stripped. The `[LEVEL]` tag deliberately is NOT: discarding it
+        // would disarm the `[ERROR]`/`[EXCEPTION]` clause below, which is the only
+        // cover for the Manager and file-handler shapes. The anchors tolerate the
+        // tag instead of the body losing it.
+        const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
+        const bodyOf = (line: string): string => stripAnsi(line.replace(/^\S+ - /, ""));
+
+        // The tag is `[` + record.levelname + `]`, so it is one of Python's level
+        // names plus DETAIL, which ComfyUI adds (comfy/internal_logging.py). Spelled
+        // once: four copies of this alternation is four places for it to drift.
+        const LEVEL = String.raw`(?:\[(?:CRITICAL|ERROR|EXCEPTION|WARNING|INFO|DETAIL|DEBUG)\]\s*)?`;
+
+        // A traceback's last line is `Name: message` — or, when the exception was
+        // raised with no argument, just `Name`. #2347 required the colon, so a real
+        // KeyboardInterrupt and a bare `raise RuntimeError` (rows D and E of #2355,
+        // both measured against the live formatter) produced a group whose exception
+        // was never named. Accepting `:` OR end-of-line takes those without matching
+        // prose like "Exit code 0". Case-sensitive, as before, so that it cannot fire
+        // on "0 errors found".
+        const EXCEPTION_TAIL = new RegExp(
+          `^${LEVEL}[A-Za-z0-9_.]*(?:Error|Exception|Interrupt|Exit)\\s*(?::|$)`,
         );
+
+        // What stock ComfyUI actually emits. #2329 keyed on `[ERROR]`/`[EXCEPTION]`,
+        // which its in-memory handler never writes — app/logger.py formats the memory
+        // handler with ColoredFormatter("%(message)s"), message only. The bracketed
+        // forms come from ComfyUI-Manager printing its own prefix, which is why a live
+        // test appeared to pass: it was reading Manager lines, not ComfyUI ones.
+        //
+        // The consequence was worse than the blob it replaced: execution.py's
+        // "!!! Exception during processing !!!", the traceback that follows it, and
+        // "Got an OOM, unloading all loaded models." were all invisible, so a crashed
+        // render reported byte-identically to a healthy server in the diagnostic users
+        // paste into bug reports.
+        //
+        // #2355 — the body reaching these begins `[ERROR] !!! Exception...`, not
+        // `!!! Exception...`, so the two anchored patterns take the optional tag.
+        // WARNING is what makes this reachable rather than cosmetic: a custom-node
+        // import failure is logged at WARNING (nodes.py:2335-2336), and the
+        // `[ERROR]` clause below gives that no cover at all.
+        const ERROR_HEADERS: readonly RegExp[] = [
+          new RegExp(`^${LEVEL}!!!\\s*Exception during processing`, "i"), // execution.py:637
+          new RegExp(`^${LEVEL}Traceback\\s*\\(`, "i"),                     // a Python traceback header
+          /\[ERROR\]|\[EXCEPTION\]/i,               // ComfyUI-Manager / file handler
+        ];
+        const ERROR_SIGNALS: readonly RegExp[] = [
+          ...ERROR_HEADERS,
+          EXCEPTION_TAIL,                           // a bare exception tail
+          /\bGot an OOM\b/i,                        // model_management OOM notice
+          /\bAllocation on device\b/i,              // torch allocator OOM
+          /\bCUDA out of memory\b/i,
+          /\b(ERROR|EXCEPTION)\s*:/,                // an explicit level prefix
+        ];
+        const isHeader = (body: string): boolean => ERROR_HEADERS.some((re) => re.test(body));
+        const isSignal = (body: string): boolean => ERROR_SIGNALS.some((re) => re.test(body));
+
+        const allLines = text.split("\n");
+        const bodies = allLines.map(bodyOf);
+        const errorGroups: string[][] = [];
+        const processed = new Set<number>();
+
+        for (let i = 0; i < allLines.length; i++) {
+          if (processed.has(i) || !isSignal(bodies[i])) continue;
+
+          // Walk BACKWARDS to the header this line belongs to. #2329 only extended
+          // forwards, so matching an exception TAIL ("RuntimeError: ...") dropped every
+          // frame above it and the "!!! Exception during processing !!!" header with
+          // them — the caller saw the exception name and nothing that located it.
+          let first = i;
+          if (!isHeader(bodies[i])) {
+            for (let j = i - 1; j >= 0 && i - j <= 200; j--) {
+              if (processed.has(j)) break;
+              const b = bodies[j];
+              if (isHeader(b)) { first = j; break; }
+              // Frames are indented; anything else ends the traceback above us.
+              if (!/^[ \t]/.test(b) && b.trim() !== "") break;
+            }
+          }
+
+          const group: string[] = [];
+          for (let k = first; k <= i; k++) { group.push(allLines[k]); processed.add(k); }
+
+          // Then forwards through the frames and the exception tail below.
+          for (let j = i + 1; j < allLines.length; j++) {
+            const b = bodies[j];
+            if (isHeader(b)) break;
+            if (/^[ \t]/.test(b) || b.trim() === "") { group.push(allLines[j]); processed.add(j); continue; }
+            // A bare exception tail closes the traceback it belongs to; take it and
+            // stop. The SAME regex as the signal list — a second copy of it is how
+            // the two drift apart and the tail silently stops being taken.
+            if (EXCEPTION_TAIL.test(b)) {
+              group.push(allLines[j]); processed.add(j);
+            }
+            break;
+          }
+          errorGroups.push(group);
+        }
+        // Take the last N error groups, then flatten them into lines for scrubbing
+        const recentErrorGroups = errorGroups.slice(-recentErrors);
+        const errorLines = recentErrorGroups.flat();
+        // #2355 — strip ANSI on the way OUT too. These lines land in a diagnostic
+        // the user pastes into a bug report, where raw escape bytes are noise, and
+        // they would otherwise be what scrubSecretShapedText reasons about.
+        const errLines = scrubLogLines(errorLines.map(stripAnsi));
         if (errLines.length > 0) {
           lines.push(`\n**Recent errors** (last ${errLines.length}):`);
           for (const e of errLines) lines.push(`  ${e.trim()}`);

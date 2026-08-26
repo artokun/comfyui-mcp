@@ -83,6 +83,7 @@ import {
 } from "../services/code-provider-auth.js";
 import { OAUTH_PROVIDERS, assertAllowedTokenHost, grokTokenFile, redactTokens } from "../services/oauth-flow.js";
 import { OllamaBackend } from "./ollama-backend.js";
+import { asRateLimitError, sendWithRateLimitRetry } from "./rate-limit.js";
 
 function msgOf(err: unknown): string {
   return errorText(err);
@@ -1411,27 +1412,39 @@ export class GrokDirectBackend extends OllamaBackend {
     const keepalive = onActivity ? setInterval(onActivity, 5000) : null;
     let res: Response;
     try {
-      res = await fetch(GROK_XAI_RESPONSES_URL, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          accept: "text/event-stream",
-          authorization: `Bearer ${this.accessToken}`,
-        },
-        body: JSON.stringify({
-          model: this.model,
-          instructions,
-          input,
-          tools: grokToolsToResponses(tools),
-          stream: true,
-          store: false,
-        }),
-        signal,
-      });
+      // Capture the model BEFORE the async boundary. The thunk below is re-invoked
+      // after a rate-limit backoff, and re-reading `this.model` there sends the retried
+      // request to whatever the user switched to during the wait — while the notice they
+      // already saw names the old one. One turn, two models, no way to tell from the log.
+      const model = this.model;
+      // 429s are waited out when xAI names a bounded window; every other status
+      // falls through to the error below unchanged (orchestrator/rate-limit.ts).
+      res = yield* sendWithRateLimitRetry(
+        () =>
+          fetch(GROK_XAI_RESPONSES_URL, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              accept: "text/event-stream",
+              authorization: `Bearer ${this.accessToken}`,
+            },
+            body: JSON.stringify({
+              model,
+              instructions,
+              input,
+              tools: grokToolsToResponses(tools),
+              stream: true,
+              store: false,
+            }),
+            signal,
+          }),
+        { model, label: "grok-backend", signal, onActivity },
+      );
     } finally {
       if (keepalive) clearInterval(keepalive);
     }
     if (!res.ok || !res.body) {
+      // Never a 429 — sendWithRateLimitRetry owns that status.
       // unknown-ok: "" is interpolated into an ERROR MESSAGE and nothing else — the
       // HTTP status is reported either way, so an unreadable body costs detail in the
       // text, never a wrong conclusion. Verified there is no branch on this value.
@@ -1610,16 +1623,28 @@ export class GrokDirectBackend extends OllamaBackend {
       resultEmitted = true;
     } catch (err) {
       const interrupted = abort.signal.aborted;
+      const rateLimited = asRateLimitError(err);
       if (!interrupted) {
         logger.warn(`[grok-backend] direct-token turn failed: ${msgOf(err)}`);
-        yield { type: "error", message: `grok backend: ${msgOf(err)}` };
-        yield {
-          type: "assistant",
-          text: `⚠️ The model request failed: ${msgOf(err).slice(0, 400)}`,
-        };
+        if (rateLimited) {
+          // Already a finished sentence naming the model, the reason and the
+          // remedy — it travels alone rather than under a "grok backend:" prefix
+          // that would blame this adapter for the provider's limit.
+          yield { type: "error", message: rateLimited.message, rateLimit: true };
+        } else {
+          yield { type: "error", message: `grok backend: ${msgOf(err)}` };
+          yield {
+            type: "assistant",
+            text: `⚠️ The model request failed: ${msgOf(err).slice(0, 400)}`,
+          };
+        }
       }
       if (!resultEmitted) {
-        yield { type: "result", ok: false, subtype: interrupted ? "interrupted" : "error" };
+        yield {
+          type: "result",
+          ok: false,
+          subtype: interrupted ? "interrupted" : rateLimited ? "rate_limit" : "error",
+        };
       }
     } finally {
       if (this.turnAbort === abort) this.turnAbort = null;

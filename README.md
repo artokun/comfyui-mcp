@@ -29,7 +29,7 @@ Works on macOS, Linux, and Windows. Auto-detects your ComfyUI installation and p
 
 **Stuck or have a question? [Join the Discord](https://discord.gg/cW9arBhzCu)** for help, model tips, and release announcements.
 
-**38 MCP tools** | **41 AI skills** (Flux · WAN · LTX 2.3 video · MiniMax H3 · Qwen · Z-Image · Ideogram 4 · ERNIE · ANIMA · model registry · Civitai · node authoring · launch/perf flags) | **56 installer packs** | **11 slash commands** | **4 autonomous agents** | **3 hooks**
+**38 MCP tools** | **42 AI skills** (Flux · WAN · LTX 2.3 video · MiniMax H3 · Qwen · Z-Image · Ideogram 4 · ERNIE · ANIMA · model registry · Civitai · node authoring · launch/perf flags) | **56 installer packs** | **11 slash commands** | **4 autonomous agents** | **3 hooks**
 
 The plugin ships skills that grow with every release: model-specific generation guides with curated download URLs, workflow recipes, troubleshooting, and custom-node authoring. With them, Claude knows the right sampler, CFG, resolution, and model files for each architecture without trial and error.
 
@@ -136,7 +136,7 @@ This package also ships as a Claude Code plugin that adds slash commands, skills
 
 ### Built-in skills
 
-41 skills total: model-family guides (Flux, WAN, LTX 2.3, MiniMax H3, Qwen, Z-Image, Ideogram 4, ERNIE, ANIMA + anime / WAN / Z-Image LoRA training), the **model-registry** (curated download URLs), the **civitai** pairing skill, node authoring, the **launch/performance-flags** matrix, and the core four below. Full list on the [plugin docs page](https://comfyui-mcp.artokun.io/docs/plugin).
+42 skills total: model-family guides (Flux, WAN, LTX 2.3, MiniMax H3, Qwen, Z-Image, Ideogram 4, ERNIE, ANIMA + anime / WAN / Z-Image LoRA training), the **model-registry** (curated download URLs), the **civitai** pairing skill, node authoring, the **launch/performance-flags** matrix, and the core four below. Full list on the [plugin docs page](https://comfyui-mcp.artokun.io/docs/plugin).
 
 > **Installer packs.** [`packs/`](packs/) bundles 13 one-command ComfyUI setups: ANIMA, Ideogram 4, LTX-2.3, ERNIE, WAN (animate / longer-videos / transparent), Qwen (image / image-edit), Z-Image (turbo / base / xy-plot) and artokun-flow (WAN Animate: replace / animate). Each is a manifest of custom nodes + model URLs + workflow that drives both `apply_manifest` and generated `install-windows.bat` / `install-runpod.sh`, with CI that validates every model link + payload size. See [`packs/README.md`](packs/README.md).
 
@@ -862,7 +862,8 @@ plugin/
     job-complete-notify.mjs # Job completion notification via temp files
   scripts/                 # Background scripts
     monitor-progress.mjs   # Real-time WebSocket progress monitor
-    launch-server.mjs      # MCP server launcher — prefers a global install over cold `npx` (#1447)
+    launch-server.mjs      # MCP server launcher — global install if present, else npx with a
+                           #   cold-start handshake rescue so a first run cannot time out (#1447)
 ```
 
 ---

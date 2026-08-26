@@ -57,6 +57,7 @@ import {
 import { ComfyUIError, ProcessControlError, ValidationError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 import { managerBodyClause } from "./manager-error-body.js";
+import { parseManagerMajor } from "./manager-version.js";
 
 // ---------------------------------------------------------------------------
 // Custom-node management — ports `comfy-cli node install|update|reinstall|fix|
@@ -570,29 +571,6 @@ export async function probeManagerQueueAvailability(
   return statuses.length === 2 && statuses.every((status) => status === 404)
     ? "absent"
     : "unreadable";
-}
-
-/**
- * Authoritative Manager MAJOR-version probe (issue #555). The two Manager
- * generations expose their version string on DISJOINT paths and nowhere else:
- *   • v4 (pip comfyui-manager) → GET /v2/manager/version   → text "V4.2.2"
- *   • released 3.x             → GET /manager/version      → text "V3.41"
- * (v4 registers NO bare /manager/version; 3.x registers NO /v2/* — verified
- * against both upstream sources.) Both return a BARE version string, so this is
- * an authoritative version signal that a 405/route-shape is NOT: a 405 means
- * "wrong method for THIS endpoint", never "old Manager". Returns the major int,
- * or undefined when neither answers with a plausible version string.
- *
- * The parse is deliberately strict (short, `V?<digits>.<digits>…`) so ComfyUI's
- * SPA catchall — which 200s unknown GETs with a page of HTML — can never be
- * mistaken for a version string.
- */
-function parseManagerMajor(raw: unknown): number | undefined {
-  if (typeof raw !== "string") return undefined;
-  const t = raw.trim();
-  if (t.length === 0 || t.length > 16) return undefined; // reject HTML/SPA bodies
-  const m = t.match(/^v?(\d+)(?:\.\d+)*$/i);
-  return m ? Number(m[1]) : undefined;
 }
 
 async function probeManagerMajor(base: string): Promise<number | undefined> {

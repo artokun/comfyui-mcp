@@ -764,6 +764,87 @@ describe('action:"list_outputs" keeps the mobile dataset picker\'s contract', ()
     });
   });
 
+  // #2370 — a panel LTX render finished and named
+  // LTX_NATIVE_CONTEXT_TEST_00001-audio.mp4; get_image (action:"list_outputs",
+  // format:"json") for that prefix returned {"source":"local-scan",…,"images":[]}
+  // and the reporter concluded the scan was dropping VHS videos. It was not — the
+  // scan returns `-audio.mp4` fine (pinned in list-output-images.test.ts). What it
+  // never said is what it could NOT see: VHS_VideoCombine with `save_output`
+  // unchecked writes to ComfyUI's temp/, which this scan does not read. So an
+  // empty answer looked dispositive when it was not.
+  describe("#2370: an EMPTY local listing discloses the temp/ blind spot", () => {
+    const remote = () => {
+      listSourceMock = { basis: "server-history" };
+    };
+    const local = () => {
+      listSourceMock = { directory: "C:\\Comfy\\output", basis: "local-scan" };
+    };
+    afterEach(local);
+
+    it("markdown: names temp/, save_output, and a CALLABLE remedy", async () => {
+      listOutputImagesMock.mockResolvedValue([]);
+      const t = text(
+        await getImage()({ action: "list_outputs", pattern: "LTX_NATIVE_CONTEXT_TEST_00001" }),
+      );
+      // It still says where it DID look (#899) …
+      expect(t).toContain("C:\\Comfy\\output");
+      // … and now also where it did not.
+      expect(t).toMatch(/temp\//);
+      expect(t).toMatch(/save_output/);
+      expect(t).toMatch(/VHS_VideoCombine/);
+      // The remedy must be one that actually exists: both get_image action:"get"
+      // and upload_image action:"stage" accept type:"temp".
+      expect(t).toMatch(/type:"temp"/);
+    });
+
+    it("json: the EMPTY payload carries the same caveat as a `note`", async () => {
+      listOutputImagesMock.mockResolvedValue([]);
+      const t = text(
+        await getImage()({
+          action: "list_outputs",
+          pattern: "LTX_NATIVE_CONTEXT_TEST_00001",
+          format: "json",
+        }),
+      );
+      const parsed = JSON.parse(t) as { images: unknown[]; note?: string };
+      expect(parsed.images).toEqual([]);
+      expect(typeof parsed.note).toBe("string");
+      expect(parsed.note).toMatch(/temp\//);
+      expect(parsed.note).toMatch(/type:"temp"/);
+    });
+
+    // The app clients (mobile dataset picker) parse the populated payload. Adding
+    // a field to it is the kind of quiet shape change that breaks a consumer, and
+    // a listing that DID return files never misled anyone — so the note is empty-only.
+    it("json: a POPULATED payload gains no note", async () => {
+      listOutputImagesMock.mockResolvedValue(sample);
+      const t = text(await getImage()({ action: "list_outputs", format: "json" }));
+      expect(JSON.parse(t)).not.toHaveProperty("note");
+    });
+
+    // Same reason the #953 block guards its hedge: a scan that found the files is
+    // trustworthy, and hanging "we might not have looked everywhere" on it makes a
+    // good answer read as a doubtful one.
+    it("markdown: a POPULATED local listing gains no caveat", async () => {
+      listOutputImagesMock.mockResolvedValue(sample);
+      const t = text(await getImage()({ action: "list_outputs", limit: 5 }));
+      expect(t).toContain("Found 2 media file(s)");
+      expect(t).not.toMatch(/save_output/);
+    });
+
+    // The remote branch has its OWN blind spot and already states it in markdown;
+    // #953 never reached the json shape. An empty remote json payload said nothing
+    // at all, which is the exact fold #953 was filed about.
+    it("json: an EMPTY remote payload carries the history caveat, not the temp one", async () => {
+      remote();
+      listOutputImagesMock.mockResolvedValue([]);
+      const t = text(await getImage()({ action: "list_outputs", format: "json" }));
+      const parsed = JSON.parse(t) as { note?: string };
+      expect(parsed.note).toMatch(/NOT evidence the file is missing/);
+      expect(parsed.note).not.toMatch(/save_output/);
+    });
+  });
+
   it("format:json returns a machine-readable array (no prose)", async () => {
     listOutputImagesMock.mockResolvedValue(sample);
     const t = text(await getImage()({ action: "list_outputs", limit: 5, format: "json" }));
@@ -785,7 +866,13 @@ describe('action:"list_outputs" keeps the mobile dataset picker\'s contract', ()
     // The fixture path is properly escaped now: "C:\Comfy\output" in a JS string
     // is `C:Comfyoutput` (\C and \o are not escapes), so the old fixture asserted
     // a Windows path that contained no separators at all.
-    expect(JSON.parse(t)).toEqual({ images: [], source: "local-scan", directory: "C:\\Comfy\\output" });
+    // #2370 added a `note` to the EMPTY payload (and only the empty one) — the
+    // shape the reporter used carried no caveat at all. Entries/source/directory
+    // are unchanged; the note is asserted on its own in the #2370 block below.
+    const parsedEmpty = JSON.parse(t) as Record<string, unknown>;
+    expect(parsedEmpty.images).toEqual([]);
+    expect(parsedEmpty.source).toBe("local-scan");
+    expect(parsedEmpty.directory).toBe("C:\\Comfy\\output");
   });
 
   it("format:json omits size/modified when the scan can't provide them (remote/history path)", async () => {

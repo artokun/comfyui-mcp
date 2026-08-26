@@ -141,7 +141,8 @@ for sub in checkpoints configs loras vae text_encoders clip diffusion_models \
            controlnet t2i_adapter gligen upscale_models latent_upscale_models \
            hypernetworks photomaker classifiers model_patches audio_encoders \
            background_removal frame_interpolation geometry_estimation \
-           optical_flow detection; do
+           optical_flow detection \
+           sams ultralytics ultralytics/bbox ultralytics/segm; do
   mkdir -p "${MODELS_DIR}/${sub}"
 done
 
@@ -442,6 +443,17 @@ CN_VOL="${WORKSPACE}/custom_nodes"
 CN_LINK="${COMFY_HOME}/custom_nodes"
 CN_SEED="${COMFY_HOME}/custom_nodes_seed"
 export PIP_CACHE_DIR="${WORKSPACE}/.cache/pip"
+# Pack install scripts resolve their OWN download dir from $COMFYUI_MODEL_PATH and
+# fall back to the IMAGE's models dir when it is unset. extra_model_paths.yaml cannot
+# reach them: it adds SEARCH paths, it does not move folder_paths.models_dir. So
+# Impact Subpack's installer drops face_yolov8m.pt into
+# /opt/ComfyUI/models/ultralytics/bbox (it has no folder_paths fallback at all) and
+# Impact Pack's drops sam_vit_b_01ec64.pth into /opt/ComfyUI/models/sams - both on the
+# ephemeral layer, both gone on the next rebuild (#2302). ComfyUI core never reads this
+# variable (models_dir comes from --models-directory or base_path), so setting it
+# redirects ONLY the node packs' own installers, and onto the same dirs
+# extra_model_paths.yaml already maps.
+export COMFYUI_MODEL_PATH="${MODELS_DIR}"
 mkdir -p "${CN_VOL}" "${PIP_CACHE_DIR}"
 
 # (a) Point the image's custom_nodes at the volume. Replace whatever is there — a
@@ -569,10 +581,12 @@ fi
 # -----------------------------------------------------------------------------
 # 5. Launch ComfyUI from the BAKED venv (image), pointed at the volume dirs.
 #    Invoke the venv python by ABSOLUTE PATH (no `activate` needed).
-#    Per-directory flags keep user/input/output on /workspace; models come from
-#    extra_model_paths.yaml (is_default → volume is primary). custom_nodes are
-#    symlinked onto the volume in §4.5 above (so runtime installs persist); we do
-#    NOT use --base-directory (it would relocate the whole tree, incl. the venv).
+#    Per-directory flags keep user/input/output on /workspace. --models-directory
+#    makes ComfyUI's folder_paths.models_dir the persistent volume root, which is
+#    required for Manager's explicit relative save_path values; the extra path map
+#    still puts every category's volume subfolder first. custom_nodes are symlinked
+#    onto the volume in §4.5 above (so runtime installs persist); we do NOT use
+#    --base-directory (it would relocate the whole tree, incl. the venv).
 # -----------------------------------------------------------------------------
 VPY="${COMFY_HOME}/venv/bin/python"
 if [ ! -x "${VPY}" ]; then
@@ -612,12 +626,38 @@ ARGS=(--listen 0.0.0.0 --port "${COMFY_PORT}"
       --enable-manager --enable-cors-header
       "${ATTN_ARGS[@]}"
       --user-directory  "${USER_DIR}"
+      --models-directory "${MODELS_DIR}"
       --input-directory "${INPUT_DIR}"
       --output-directory "${OUTPUT_DIR}")
 # Load the volume model map only if the file exists (it's baked, but be defensive).
 [ -f "${EXTRA_MODEL_PATHS}" ] && ARGS+=(--extra-model-paths-config "${EXTRA_MODEL_PATHS}")
 # shellcheck disable=SC2206
 [ -n "${COMFY_EXTRA_ARGS}" ] && ARGS+=(${COMFY_EXTRA_ARGS})
+
+# ---- The one line a user needs to drive this pod's Agent Panel ---------------
+#
+# The panel already builds this command itself (its connectCommand() appends the
+# page's own origin whenever the page is served over https), but only INSIDE the
+# sidebar's setup card. A user who has not opened that card - or who is looking at
+# the "starting" page because ComfyUI is still booting - never sees it, and the
+# panel's Bridge URL field reads ws://127.0.0.1:9199, which looks like the pod is
+# misconfigured. It is not: the orchestrator runs on the USER's machine and tunnels
+# back to the panel, so this proxy URL is the only part they cannot guess.
+POD_URL=""
+[ -n "${RUNPOD_POD_ID:-}" ] && POD_URL="https://${RUNPOD_POD_ID}-3000.proxy.runpod.net"
+POD_URL_LOG="${POD_URL:-https://<pod-id>-3000.proxy.runpod.net}"
+
+# Stamp it into the "ComfyUI is starting…" page (nginx serves that whenever :3001
+# is not reachable yet) - the FIRST thing anyone sees on a cold pod. Best-effort:
+# a missing or already-substituted page must never keep the pod from booting.
+STARTING_PAGE="${STARTING_PAGE:-/usr/share/nginx/html/readme.html}"
+if [ -f "${STARTING_PAGE}" ]; then
+  if sed -i "s|__POD_URL__|${POD_URL:-https://&lt;pod-id&gt;-3000.proxy.runpod.net}|g" "${STARTING_PAGE}" 2>/dev/null; then
+    log "starting page stamped with the connect command (${STARTING_PAGE})"
+  else
+    log "WARN: could not stamp ${STARTING_PAGE} — the starting page keeps its placeholder"
+  fi
+fi
 
 cd "${COMFY_HOME}"
 log "launching ComfyUI: ${VPY} main.py ${ARGS[*]}"
@@ -626,10 +666,23 @@ log "  user dir   : ${USER_DIR}          (volume; workflows + settings)"
 log "  models     : ${MODELS_DIR}        (volume; downloads persist here)"
 log "  input/out  : ${INPUT_DIR} / ${OUTPUT_DIR}  (volume)"
 log "  HTTP (nginx): :3000  ->  ComfyUI :${COMFY_PORT}"
-log "  RunPod proxy: https://<pod-id>-3000.proxy.runpod.net"
+log "  RunPod proxy: ${POD_URL_LOG}"
 nohup "${VPY}" main.py "${ARGS[@]}" >>"${COMFY_LOG}" 2>&1 &
 COMFY_PID=$!
 log "ComfyUI started (pid=${COMFY_PID}); streaming ${COMFY_LOG}"
+
+# Printed AFTER the launch line so it is the last thing in the boot log before the
+# ComfyUI stream takes over - i.e. what a user actually sees in the RunPod console.
+log ""
+log "──────────────────────────────────────────────────────────────────────"
+log " Agent Panel — run this on YOUR machine to connect it to this pod:"
+log ""
+log "   npx -y comfyui-mcp@latest connect ${POD_URL_LOG}"
+log ""
+log " The agent runs on your own Claude / ChatGPT / Gemini login. Nothing"
+log " extra is installed here. Then click Connect in the Agent sidebar."
+log "──────────────────────────────────────────────────────────────────────"
+log ""
 
 # Stream ComfyUI's log to the pod console and hold the pod open. If tail is ever
 # killed, the base's `sleep infinity` still keeps the pod alive.

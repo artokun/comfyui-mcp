@@ -6,6 +6,120 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.131] - 2026-08-26
+
+### MCP
+
+#### Fixed
+- a promoted write blocked by canvas/root divergence relays the panel's own diagnosis (#2374)
+- an empty local output listing states the temp/ blind spot it has (#2372)
+- condition CONTINUE instruction for replayed completions (#2371)
+- guard promoted widget capability and name the version requirement (#2365)
+
+
+## [0.52.130] - 2026-08-26
+
+### MCP
+
+#### Changed
+- fix-2356-reconcile-download-status-with-durable-partial (#2358)
+
+
+## [0.52.129] - 2026-08-26
+
+### MCP
+
+#### Fixed
+- separate wording for identified vs id-less POSSIBLE REPEAT cases (#2362)
+- guard promoted container widget writes (#2323)
+- name the exception when the traceback tail has no colon (rows D and E) (#2359)
+- handle ANSI escape sequences in log pattern matching (#2357)
+
+#### Changed
+- pin generation and witness.localPath clauses in localPathRecovered (#2354)
+
+
+## [0.52.128] - 2026-08-26
+
+### MCP
+
+#### Fixed
+- cover ChatGPT image-history recovery and bounded retry behavior (#2224)
+- recognize ComfyUI health errors and OOMs from the actual log format (#2352)
+
+## [0.52.127] - 2026-08-25
+
+### MCP
+
+#### Fixed
+- prevent recovered completion replays from duplicating agent turns (#2341)
+
+## [0.52.126] - 2026-08-25
+
+### MCP
+
+#### Fixed
+- explain local model-listing refusal when a first-time comfyuiPath recovery occurs (#2338)
+
+## [0.52.125] - 2026-08-25
+
+### MCP
+
+#### Fixed
+- redact all-alphabetic and structured identifier details without over-redacting provider prose (#2313)
+
+## [0.52.124] - 2026-08-25
+
+### MCP
+
+#### Fixed
+- fence local model listings against local/remote target retargets (#2319)
+
+## [0.52.123] - 2026-08-25
+
+### MCP
+
+#### Fixed
+- persist ComfyUI-Manager model downloads on RunPod volumes (#2302)
+
+## [0.52.122] - 2026-08-25
+
+### MCP
+
+#### Fixed
+- preserve panel_run completion receipts across delayed prompts, teardown, and restart (#1824)
+
+## [0.52.121] - 2026-08-25
+
+### MCP
+
+#### Fixed
+- the plugin's first run no longer fails silently: on the cold `npx` path the launcher
+  answers the MCP handshake itself while the ~818 MB install is still running, holds the
+  session with an empty tool list, then announces the real tools via `tools/list_changed`
+  (#1447). Measured cold, a first `initialize` took 21.6 s against a 10 s budget - so the
+  server never registered, ~40 skills still loaded and told the model to call tools that
+  were not there, and the failure read as "the agent is bad" rather than as an install
+  problem. The warm global path is untouched. A rescued handshake reports `serverInfo.version`
+  as `0.0.0-installing` and carries a stand-in `instructions` string until the real server
+  takes over.
+- the merge gate's own probe reads at pinpoint budget rather than the survey cap (#2304)
+
+
+## [0.52.120] - 2026-08-25
+
+### MCP
+
+#### Fixed
+- refuse only proven dynamic-combo STRING sub-widget writes that can revert after verification (#2299)
+
+## [0.52.119] - 2026-08-25
+
+### MCP
+
+#### Fixed
+- forward validated workflow-save subfolders through panel save and Save-As commands (#1794)
+
 ## [0.52.118] - 2026-08-25
 
 ### MCP

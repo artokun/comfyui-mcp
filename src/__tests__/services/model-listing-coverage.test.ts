@@ -11,11 +11,18 @@
 // to claim "none" when nothing answered.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { join } from "node:path";
 
-const mode = vi.hoisted(() => ({ remote: false }));
+const target = vi.hoisted(() => ({
+  remote: false,
+  generation: 0,
+  baseUrl: "http://127.0.0.1:8188",
+}));
 vi.mock("../../config.js", () => ({
   config: { comfyuiPath: "/comfy" as string | undefined },
-  isRemoteMode: () => mode.remote,
+  getComfyUIBaseUrl: () => target.baseUrl,
+  getComfyuiTargetGeneration: () => target.generation,
+  isRemoteMode: () => target.remote,
 }));
 
 const fetchApi = vi.fn();
@@ -48,7 +55,41 @@ const { config } = await import("../../config.js");
 const { listLocalModelsWithCoverage, describeUnparsableBody } = await import(
   "../../services/model-resolver.js"
 );
-const { describeEmptyModelListing } = await import("../../tools/model-management.js");
+const { describeEmptyModelListing, registerModelManagementTools } = await import(
+  "../../tools/model-management.js"
+);
+
+type ToolHandler = (args: Record<string, unknown>) => Promise<{
+  isError?: boolean;
+  content: Array<{ type: string; text: string }>;
+}>;
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+function registeredListLocalModelsTool(): ToolHandler {
+  let handler: ToolHandler | undefined;
+  const server = {
+    tool: (_name: string, _description: string, _schema: unknown, ...rest: unknown[]) => {
+      const candidate = rest.find((arg) => typeof arg === "function");
+      if (typeof candidate === "function") handler = candidate as ToolHandler;
+    },
+  };
+  registerModelManagementTools(server as never);
+  if (!handler) throw new Error("list_local_models was not registered");
+  return handler;
+}
 
 beforeEach(() => {
   getClient.mockReset();
@@ -58,10 +99,18 @@ beforeEach(() => {
   readFile.mockReset();
   readFile.mockRejectedValue(new Error("ENOENT"));
   config.comfyuiPath = "/comfy";
-  mode.remote = false;
+  target.remote = false;
+  target.generation = 0;
+  target.baseUrl = "http://127.0.0.1:8188";
 });
 
 afterEach(() => vi.clearAllMocks());
+
+function advanceTarget(remote: boolean, baseUrl: string): void {
+  target.remote = remote;
+  target.baseUrl = baseUrl;
+  target.generation += 1;
+}
 
 describe("#918: the listing records whether ComfyUI actually answered", () => {
   it("an OK empty array is an ANSWER — emptiness here is a verified fact", async () => {
@@ -119,7 +168,7 @@ describe("#918: the listing records whether ComfyUI actually answered", () => {
   // to consult, and the empty array carries no information whatsoever.
   it("remote + no answer sets noSourceAvailable — nothing was learned at all", async () => {
     config.comfyuiPath = undefined;
-    mode.remote = true;
+    target.remote = true;
     getClient.mockReturnValue({ fetchApi });
     fetchApi.mockRejectedValue(new Error("fetch failed"));
     const { models, coverage } = await listLocalModelsWithCoverage("checkpoints");
@@ -140,11 +189,103 @@ describe("#918: the listing records whether ComfyUI actually answered", () => {
     expect(coverage.unanswered).toHaveLength(1);
   });
 
+  it("a remote target never scans a stale local COMFYUI_PATH", async () => {
+    config.comfyuiPath = "/comfy";
+    target.remote = true;
+    getClient.mockReturnValue({ fetchApi });
+    fetchApi.mockRejectedValue(new Error("remote fetch failed"));
+    readdir.mockResolvedValue(["host-only.safetensors"]);
+    stat.mockResolvedValue({ isFile: () => true, size: 1024, mtime: new Date(0) });
+
+    const { models, coverage } = await listLocalModelsWithCoverage("checkpoints");
+
+    expect(models).toEqual([]);
+    expect(coverage.usedFilesystem).toBe(false);
+    expect(coverage.noSourceAvailable).toBe(true);
+    expect(readdir).not.toHaveBeenCalled();
+    expect(stat).not.toHaveBeenCalled();
+  });
+
+  it("discards local names and paths when local becomes remote during stat", async () => {
+    getClient.mockReturnValue({ fetchApi });
+    fetchApi.mockRejectedValue(new Error("local server fetch failed"));
+    readdir.mockResolvedValue(["stale-local.safetensors"]);
+    stat.mockImplementation(async () => {
+      advanceTarget(true, "https://remote.example/comfy");
+      return { isFile: () => true, size: 1024, mtime: new Date(0) };
+    });
+
+    const { models, coverage } = await listLocalModelsWithCoverage("checkpoints");
+
+    expect(models).toEqual([]);
+    expect(coverage.targetChanged).toEqual({
+      startedBaseUrl: "http://127.0.0.1:8188",
+      currentBaseUrl: "https://remote.example/comfy",
+    });
+    expect(coverage.usedFilesystem).toBe(false);
+    expect(coverage.answered).toEqual([]);
+    expect(coverage.unanswered).toEqual([]);
+    expect(readdir).toHaveBeenCalledWith(join("/comfy", "models", "checkpoints"), { recursive: true });
+    expect(stat).toHaveBeenCalledWith(
+      join("/comfy", "models", "checkpoints", "stale-local.safetensors"),
+    );
+  });
+
+  it("refuses remote results when the target becomes local before HTTP failure falls back", async () => {
+    config.comfyuiPath = "/comfy";
+    target.remote = true;
+    target.baseUrl = "https://remote.example/comfy";
+    target.generation = 10;
+    getClient.mockReturnValue({ fetchApi });
+    let rejectFetch!: (reason: unknown) => void;
+    fetchApi.mockReturnValue(
+      new Promise<Response>((_resolve, reject) => {
+        rejectFetch = reject;
+      }),
+    );
+
+    const pending = listLocalModelsWithCoverage("checkpoints");
+    expect(fetchApi).toHaveBeenCalledWith("/models/checkpoints");
+    advanceTarget(false, "http://127.0.0.1:8188");
+    rejectFetch(new Error("remote server disconnected"));
+
+    const { models, coverage } = await pending;
+
+    expect(models).toEqual([]);
+    expect(coverage.targetChanged).toEqual({
+      startedBaseUrl: "https://remote.example/comfy",
+      currentBaseUrl: "http://127.0.0.1:8188",
+    });
+    expect(readdir).not.toHaveBeenCalled();
+    expect(stat).not.toHaveBeenCalled();
+  });
+
+  it("uses generation, not final identity, to reject a local-to-remote-to-local round trip", async () => {
+    getClient.mockReturnValue({ fetchApi });
+    fetchApi.mockRejectedValue(new Error("local server fetch failed"));
+    readdir.mockResolvedValue(["round-trip-stale.safetensors"]);
+    stat.mockImplementation(async () => {
+      advanceTarget(true, "https://remote.example/comfy");
+      advanceTarget(false, "http://127.0.0.1:8188");
+      return { isFile: () => true, size: 1024, mtime: new Date(0) };
+    });
+
+    const { models, coverage } = await listLocalModelsWithCoverage("checkpoints");
+
+    expect(models).toEqual([]);
+    expect(coverage.targetChanged).toEqual({
+      startedBaseUrl: "http://127.0.0.1:8188",
+      currentBaseUrl: "http://127.0.0.1:8188",
+    });
+    expect(coverage.usedFilesystem).toBe(false);
+    expect(stat).toHaveBeenCalled();
+  });
+
   // getClient throws in cloud mode, before any per-category read runs. Every
   // requested category is then unanswered — not answered-and-empty.
   it("an outright unavailable client marks EVERY requested category unanswered", async () => {
     config.comfyuiPath = undefined;
-    mode.remote = true;
+    target.remote = true;
     getClient.mockImplementation(() => {
       throw new Error("CLOUD_UNSUPPORTED");
     });
@@ -153,6 +294,301 @@ describe("#918: the listing records whether ComfyUI actually answered", () => {
     expect(coverage.answered).toEqual([]);
     expect(coverage.unanswered.length).toBeGreaterThan(10); // all of MODEL_SUBDIRS
     expect(coverage.noSourceAvailable).toBe(true);
+  });
+});
+
+describe("#2319: list_local_models uses the target-aware listing service", () => {
+  it("refuses a local listing when the target becomes remote during HTTP fallback", async () => {
+    target.remote = false;
+    target.generation = 41;
+    target.baseUrl = "http://127.0.0.1:8188";
+    config.comfyuiPath = "/local-comfy";
+    const response = deferred<never>();
+    getClient.mockReturnValue({ fetchApi });
+    fetchApi.mockReturnValue(response.promise);
+    readdir.mockResolvedValue(["host-only.safetensors"]);
+    stat.mockResolvedValue({ isFile: () => true, size: 1024, mtime: new Date(0) });
+
+    const pending = listLocalModelsWithCoverage("checkpoints");
+    await Promise.resolve();
+
+    target.remote = true;
+    target.generation = 42;
+    target.baseUrl = "https://remote.example";
+    // The stale local path intentionally remains configured. Mode and generation
+    // must fence it before the filesystem fallback can inspect the host.
+    response.reject(new Error("local target disappeared"));
+
+    const { models, coverage } = await pending;
+
+    expect(models).toEqual([]);
+    expect(coverage.targetChanged).toEqual({
+      startedBaseUrl: "http://127.0.0.1:8188",
+      currentBaseUrl: "https://remote.example",
+    });
+    expect(coverage.usedFilesystem).toBe(false);
+    expect(readdir).not.toHaveBeenCalled();
+    expect(stat).not.toHaveBeenCalled();
+  });
+
+  it("refuses a remote listing when the target becomes local before HTTP answers", async () => {
+    target.remote = true;
+    target.generation = 51;
+    target.baseUrl = "https://remote.example";
+    config.comfyuiPath = "/stale-local-comfy";
+    const response = deferred<Response>();
+    getClient.mockReturnValue({ fetchApi });
+    fetchApi.mockReturnValue(response.promise);
+    readdir.mockResolvedValue(["local-only.safetensors"]);
+    stat.mockResolvedValue({ isFile: () => true, size: 1024, mtime: new Date(0) });
+
+    const pending = listLocalModelsWithCoverage("checkpoints");
+    await Promise.resolve();
+
+    target.remote = false;
+    target.generation = 52;
+    target.baseUrl = "http://127.0.0.1:8188";
+    config.comfyuiPath = "/new-local-comfy";
+    response.resolve(new Response(JSON.stringify(["remote-only.safetensors"]), { status: 200 }));
+
+    const { models, coverage } = await pending;
+
+    expect(models).toEqual([]);
+    expect(coverage.targetChanged).toEqual({
+      startedBaseUrl: "https://remote.example",
+      currentBaseUrl: "http://127.0.0.1:8188",
+    });
+    expect(coverage.usedFilesystem).toBe(false);
+    expect(readdir).not.toHaveBeenCalled();
+    expect(stat).not.toHaveBeenCalled();
+  });
+
+  it("refuses an A-to-B-to-A listing even when the final URL and mode match", async () => {
+    target.remote = false;
+    target.generation = 61;
+    target.baseUrl = "http://127.0.0.1:8188";
+    config.comfyuiPath = "/local-comfy";
+    const response = deferred<Response>();
+    getClient.mockReturnValue({ fetchApi });
+    fetchApi.mockReturnValue(response.promise);
+
+    const pending = listLocalModelsWithCoverage("checkpoints");
+    await Promise.resolve();
+
+    target.remote = true;
+    target.generation = 62;
+    target.baseUrl = "https://remote.example";
+    target.remote = false;
+    target.generation = 63;
+    target.baseUrl = "http://127.0.0.1:8188";
+    response.resolve(new Response(JSON.stringify(["stale-after-round-trip.safetensors"]), { status: 200 }));
+
+    const { models, coverage } = await pending;
+
+    expect(models).toEqual([]);
+    expect(coverage.targetChanged).toEqual({
+      startedBaseUrl: "http://127.0.0.1:8188",
+      currentBaseUrl: "http://127.0.0.1:8188",
+    });
+    expect(coverage.usedFilesystem).toBe(false);
+  });
+
+  it("refuses a listing when the explicit local path changes under the same URL", async () => {
+    target.remote = false;
+    target.generation = 71;
+    target.baseUrl = "http://127.0.0.1:8188";
+    config.comfyuiPath = "/local-comfy-a";
+    const response = deferred<Response>();
+    getClient.mockReturnValue({ fetchApi });
+    fetchApi.mockReturnValue(response.promise);
+
+    const pending = listLocalModelsWithCoverage("checkpoints");
+    await Promise.resolve();
+
+    // A direct path retarget is independently fenced even if the URL, mode, and
+    // generation source remain unchanged: returned absolute paths must belong to
+    // the exact local install that was sampled at the start.
+    config.comfyuiPath = "/local-comfy-b";
+    response.resolve(new Response(JSON.stringify(["stale-path-model.safetensors"]), { status: 200 }));
+
+    const { models, coverage } = await pending;
+
+    expect(models).toEqual([]);
+    expect(coverage.targetChanged).toEqual({
+      startedBaseUrl: "http://127.0.0.1:8188",
+      currentBaseUrl: "http://127.0.0.1:8188",
+    });
+    expect(coverage.usedFilesystem).toBe(false);
+  });
+
+  it("#2338: records local path recovery without inventing a target change", async () => {
+    target.remote = false;
+    target.generation = 81;
+    target.baseUrl = "http://127.0.0.1:8188";
+    config.comfyuiPath = undefined;
+    const response = deferred<Response>();
+    getClient.mockReturnValue({ fetchApi });
+    fetchApi.mockReturnValue(response.promise);
+
+    const pending = listLocalModelsWithCoverage("checkpoints");
+    await Promise.resolve();
+
+    config.comfyuiPath = "/recovered-comfy";
+    response.resolve(
+      new Response(JSON.stringify(["stale-before-recovery.safetensors"]), { status: 200 }),
+    );
+
+    const { models, coverage } = await pending;
+
+    expect(models).toEqual([]);
+    expect(coverage.localPathRecovered).toBe(true);
+    expect(coverage.targetChanged).toBeUndefined();
+    expect(coverage.usedFilesystem).toBe(false);
+  });
+
+  it("#2350: generation round-trip with path recovery pins generation clause", async () => {
+    // A→B→A round trip changes generation even though final URL/remote match start.
+    // Even if comfyuiPath is recovered mid-listing, the generation change means
+    // the answer is stale. Without the generation clause, this would incorrectly
+    // be classified as localPathRecovered.
+    target.remote = false;
+    target.generation = 10;
+    target.baseUrl = "http://127.0.0.1:8188";
+    config.comfyuiPath = undefined;
+    const response = deferred<Response>();
+    getClient.mockReturnValue({ fetchApi });
+    fetchApi.mockReturnValue(response.promise);
+
+    const pending = listLocalModelsWithCoverage("checkpoints");
+    await Promise.resolve();
+
+    // A→B transition changes generation to 11
+    advanceTarget(true, "https://remote.example/comfy");
+    // B→A transition changes generation to 12, back to original URL/remote
+    advanceTarget(false, "http://127.0.0.1:8188");
+    // And path gets recovered mid-listing
+    config.comfyuiPath = "/recovered-comfy";
+    response.resolve(
+      new Response(JSON.stringify(["model-during-roundtrip.safetensors"]), { status: 200 }),
+    );
+
+    const { models, coverage } = await pending;
+
+    expect(models).toEqual([]);
+    // Generation clause is load-bearing: without it, this would be localPathRecovered
+    expect(coverage.targetChanged).toEqual({
+      startedBaseUrl: "http://127.0.0.1:8188",
+      currentBaseUrl: "http://127.0.0.1:8188",
+    });
+    expect(coverage.localPathRecovered).toBeUndefined();
+    expect(coverage.usedFilesystem).toBe(false);
+  });
+
+  it("#2350: witness.localPath clause pins that path was unknown at capture time", async () => {
+    // When witness.localPath is already set (path was known at capture), recovery
+    // in mid-listing is not the explanation. Without the witness.localPath===undefined
+    // clause, a path change could be misclassified as recovery. This existing case
+    // was already pinned; this test documents the invariant.
+    target.remote = false;
+    target.generation = 50;
+    target.baseUrl = "http://127.0.0.1:8188";
+    config.comfyuiPath = "/original-comfy";
+    const response = deferred<Response>();
+    getClient.mockReturnValue({ fetchApi });
+    fetchApi.mockReturnValue(response.promise);
+
+    const pending = listLocalModelsWithCoverage("checkpoints");
+    await Promise.resolve();
+
+    // Change the path mid-listing
+    config.comfyuiPath = "/new-comfy";
+    response.resolve(
+      new Response(JSON.stringify(["model-path-changed.safetensors"]), { status: 200 }),
+    );
+
+    const { models, coverage } = await pending;
+
+    expect(models).toEqual([]);
+    // witness.localPath=/original-comfy, so even though comfyuiPath changed,
+    // this is not "recovery" (it was known) — it's a target change
+    expect(coverage.targetChanged).toEqual({
+      startedBaseUrl: "http://127.0.0.1:8188",
+      currentBaseUrl: "http://127.0.0.1:8188",
+    });
+    expect(coverage.localPathRecovered).toBeUndefined();
+    expect(coverage.usedFilesystem).toBe(false);
+  });
+
+  it("does not expose host files through the registered tool for a remote target", async () => {
+    config.comfyuiPath = "/comfy";
+    target.remote = true;
+    getClient.mockReturnValue({ fetchApi });
+    fetchApi.mockRejectedValue(new Error("remote fetch failed"));
+    readdir.mockResolvedValue(["host-only.safetensors"]);
+    stat.mockResolvedValue({ isFile: () => true, size: 1024, mtime: new Date(0) });
+
+    const result = await registeredListLocalModelsTool()({ action: "list", model_type: "checkpoints" });
+    const text = result.content[0].text;
+
+    expect(text).toMatch(/Could not determine/);
+    expect(text).toContain("no local ComfyUI path to scan");
+    expect(text).not.toContain("host-only.safetensors");
+    expect(readdir).not.toHaveBeenCalled();
+  });
+
+  it("keeps the local filesystem fallback through the registered tool", async () => {
+    getClient.mockReturnValue({ fetchApi });
+    fetchApi.mockRejectedValue(new Error("local server fetch failed"));
+    readdir.mockResolvedValue(["local-only.safetensors"]);
+    stat.mockResolvedValue({ isFile: () => true, size: 1024, mtime: new Date(0) });
+
+    const result = await registeredListLocalModelsTool()({ action: "list", model_type: "checkpoints" });
+
+    expect(result.content[0].text).toContain("local-only.safetensors");
+    expect(readdir).toHaveBeenCalled();
+  });
+
+  it("returns a stale-target refusal through the registered tool", async () => {
+    getClient.mockReturnValue({ fetchApi });
+    fetchApi.mockRejectedValue(new Error("local server fetch failed"));
+    readdir.mockResolvedValue(["stale-tool-model.safetensors"]);
+    stat.mockImplementation(async () => {
+      advanceTarget(true, "https://remote.example/comfy");
+      return { isFile: () => true, size: 1024, mtime: new Date(0) };
+    });
+
+    const result = await registeredListLocalModelsTool()({ action: "list", model_type: "checkpoints" });
+    const text = result.content[0].text;
+
+    expect(text).toContain("target changed while this listing was in progress");
+    expect(text).toContain("No model names or paths from the stale target were returned");
+    expect(text).not.toContain("stale-tool-model.safetensors");
+    expect(text).not.toContain("/comfy/models/checkpoints/stale-tool-model.safetensors");
+    expect(text).not.toContain("install path was resolved");
+  });
+
+  it("#2338: explains path recovery through the registered tool without stale data", async () => {
+    config.comfyuiPath = undefined;
+    const response = deferred<Response>();
+    getClient.mockReturnValue({ fetchApi });
+    fetchApi.mockReturnValue(response.promise);
+
+    const pending = registeredListLocalModelsTool()({ action: "list", model_type: "checkpoints" });
+    await Promise.resolve();
+
+    config.comfyuiPath = "/recovered-comfy";
+    response.resolve(
+      new Response(JSON.stringify(["stale-recovery-model.safetensors"]), { status: 200 }),
+    );
+
+    const result = await pending;
+    const text = result.content[0].text;
+
+    expect(text).toContain("local ComfyUI install path was resolved while this listing was in progress");
+    expect(text).toContain("No model names or paths collected before the path was resolved were returned");
+    expect(text).not.toContain("target changed");
+    expect(text).not.toContain("stale-recovery-model.safetensors");
+    expect(text).not.toContain("/recovered-comfy/models/checkpoints/stale-recovery-model.safetensors");
   });
 });
 

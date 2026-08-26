@@ -1,6 +1,6 @@
 ---
 name: wan-t2v-video
-description: Build WAN 2.2 Text-to-Video workflows — dual hi-lo models, lightning LoRAs, VACE modules, and KSamplerAdvanced two-pass
+description: Build WAN 2.2 Text-to-Video workflows. Dual hi-lo models, lightning LoRAs, VACE modules, and KSamplerAdvanced two-pass
 globs:
   - "**/*.json"
 ---
@@ -11,12 +11,12 @@ globs:
 
 WAN 2.2 T2V generates videos from text prompts using a 14B parameter MoE (Mixture of Experts) architecture split across two specialized models:
 
-- **HighNoise model**: Handles early denoising — establishes structure, motion, composition
-- **LowNoise model**: Handles late denoising — refines details, sharpens output
+- HighNoise model handles early denoising. It establishes structure, motion, composition
+- LowNoise model handles late denoising. It refines details, sharpens output
 
 This dual-model technique is the same as FLF/I2V (see wan-flf-video skill) but without image conditioning nodes.
 
-**Key difference from I2V/FLF**: T2V does NOT use `CLIPVisionEncode`, `WanFirstLastFrameToVideo`, or any image input. It uses `EmptyHunyuanLatentVideo` for latent initialization and text-only conditioning.
+Key difference from I2V/FLF: T2V does NOT use `CLIPVisionEncode`, `WanFirstLastFrameToVideo`, or any image input. It uses `EmptyHunyuanLatentVideo` for latent initialization and text-only conditioning.
 
 ## Models
 
@@ -111,10 +111,10 @@ Required for WAN 2.2 flow matching. Apply to BOTH models:
 }
 ```
 
-**T2V shift values**:
-- Standard: **shift=8** (good balance of motion and detail)
-- Lightning: **shift=5** (lower shift for distilled models)
-- Range 6–9: Higher shift = more detail, lower shift = stronger motion
+T2V shift values:
+- Standard: shift=8 (good balance of motion and detail)
+- Lightning: shift=5 (lower shift for distilled models)
+- Range 6 to 9: higher shift = more detail, lower shift = stronger motion
 
 ## EmptyHunyuanLatentVideo
 
@@ -217,8 +217,8 @@ VAEDecode → IMAGE → VHS_VideoCombine → MP4
 
 Same structure as above but replace the LoRA and sampler settings:
 
-- Remove LoRA nodes (5 and 6) — connect ModelSamplingSD3 outputs directly to KSamplerAdvanced
-- Change `shift` to **8** in ModelSamplingSD3 nodes
+- Remove LoRA nodes (5 and 6). Connect ModelSamplingSD3 outputs directly to KSamplerAdvanced
+- Change `shift` to 8 in ModelSamplingSD3 nodes
 - Change KSamplerAdvanced settings:
   - `steps`: 20, `cfg`: 3.5
   - Pass 1: `start_at_step`: 0, `end_at_step`: 10
@@ -235,11 +235,11 @@ For more control, use the WanVideoWrapper custom node pack. Key differences from
 ### ⚠️ CRITICAL: `merge_loras=false` with fp8-scaled models
 
 When a LoRA (e.g. the `lightx2v` 4-step lightning hi/lo LoRAs) is loaded onto an
-**fp8-quantized** model (`quantization=fp8_e4m3fn_scaled`) via `WanVideoLoraSelect`,
+fp8-quantized model (`quantization=fp8_e4m3fn_scaled`) via `WanVideoLoraSelect`,
 **set the node's `merge_loras` widget to `false`.** The default `merge_loras=true`
-tries to bake the LoRA into the already-quantized fp8 weights and **hard-crashes
-ComfyUI during LoRA loading with no Python traceback** (process dies — looks like
-an unexplained restart/OOM). `merge_loras=false` applies the LoRA as a runtime
+tries to bake the LoRA into the already-quantized fp8 weights and hard-crashes
+ComfyUI during LoRA loading with no Python traceback (the process dies, which looks
+like an unexplained restart/OOM). `merge_loras=false` applies the LoRA as a runtime
 patch instead, which is fp8-safe. Use `merge_loras=true` only on non-quantized
 bf16/fp16 models. Pairs cleanly with `WanVideoBlockSwap` for fp8 14B on 24GB cards.
 
@@ -273,7 +273,7 @@ WanVideoDecode → IMAGE → VHS_VideoCombine → MP4
 Located in `loras/Wan Video 2.2 T2V-A14B/`:
 - `concept/PussyLoRA_HighNoise_Wan2.2_HearmemanAI.safetensors` + LowNoise pair
 
-Apply concept LoRAs the same way as lightning LoRAs — match hi/lo to the correct model pass. Use `LoraLoaderModelOnly` with strength 0.5–1.0.
+Apply concept LoRAs the same way as lightning LoRAs. Match hi/lo to the correct model pass. Use `LoraLoaderModelOnly` with strength 0.5 to 1.0.
 
 ## Resolution & Frame Count
 
@@ -286,17 +286,17 @@ Apply concept LoRAs the same way as lightning LoRAs — match hi/lo to the corre
 | 720p landscape | 1280x720 | Higher quality, more VRAM |
 | 720p portrait | 720x1280 | |
 
-Width and height must be **divisible by 16**.
+Width and height must be divisible by 16.
 
 ### Frame Count (`4n + 1`)
 
-- **81 frames** at 16fps = ~5 seconds (default, recommended)
-- **49 frames** at 16fps = ~3 seconds (faster)
-- **121 frames** at 16fps = ~7.5 seconds (longer, more VRAM)
+- 81 frames at 16fps = ~5 seconds (default, recommended)
+- 49 frames at 16fps = ~3 seconds (faster)
+- 121 frames at 16fps = ~7.5 seconds (longer, more VRAM)
 
 ### Frame Rate
 
-Standard: **16 fps** for WAN 2.2 output.
+Standard: 16 fps for WAN 2.2 output.
 
 ## VRAM Considerations
 
@@ -306,13 +306,13 @@ Standard: **16 fps** for WAN 2.2 output.
 | Single FP8 model (no dual) | ~14-16GB | Lower quality but safer |
 | With VACE modules | +5.8GB per module | Very tight, may need block swap |
 
-- **Always `clear_vram`** before switching to WAN T2V from another model family
-- Lightning (4 steps) dramatically reduces generation time: ~70s vs ~5-10 min for 20 steps
-- Only one UNET is active during each pass — they swap in/out
+- Always `clear_vram` before switching to WAN T2V from another model family
+- Lightning (4 steps) cuts generation time to ~70s vs ~5-10 min for 20 steps
+- Only one UNET is active during each pass. They swap in/out
 
 ## Prompt Tips
 
-Describe **motion and temporal progression**, not just a scene:
+Describe motion and temporal progression in addition to the scene:
 
 ```
 Good: "A beautiful young woman slowly walks through a blooming cherry blossom garden, petals drifting in the breeze, soft sunlight filtering through branches, cinematic slow motion, 4K quality"

@@ -375,6 +375,12 @@ describe("panel-tools: panel_set_widget Anima regional textarea (#1658)", () => 
             }
             return { content: [{ type: "text" as const, text: JSON.stringify(queryReply, null, 2) }] };
           }
+          if (cmd.cmd === "graph_get_subgraph") {
+            return {
+              isError: true,
+              content: [{ type: "text" as const, text: "Error: Node 2768 (KSampler) is not a subgraph" }],
+            };
+          }
           return { content: [{ type: "text" as const, text: JSON.stringify(SET_OK, null, 2) }] };
         },
       } as unknown as PanelToolCtx,
@@ -465,6 +471,288 @@ describe("panel-tools: panel_set_widget Anima regional textarea (#1658)", () => 
   });
 });
 
+describe("panel-tools: panel_set_widget V3 dynamic-combo sub-widgets (#2299)", () => {
+  const SET_OK = {
+    set: { node_id: 23, widget: "model.prompt", previous: "", value: "NEW" },
+  };
+
+  const dynamicDetail = {
+    nodes: [
+      {
+        id: 23,
+        type: "MinimaxHailuo03TextToVideoNode",
+        widgets: { model: "text-to-video", "model.prompt": "" },
+        inputs: [
+          { name: "model", type: "COMFY_DYNAMICCOMBO_V3" },
+          { name: "model.prompt", type: "STRING" },
+        ],
+      },
+    ],
+  };
+
+  async function run(
+    detail: unknown,
+    args: Record<string, unknown> = { node_id: 23, widget: "model.prompt", value: "NEW" },
+  ): Promise<{ res: ToolResult; cmds: string[] }> {
+    const cmds: string[] = [];
+    const res = (await defByName("panel_set_widget").handler(args, {
+      call: async (cmd: Record<string, unknown>) => {
+        cmds.push(String(cmd.cmd));
+        if (cmd.cmd === "graph_query") {
+          return { content: [{ type: "text" as const, text: JSON.stringify(detail, null, 2) }] };
+        }
+        if (cmd.cmd === "graph_get_subgraph") {
+          return {
+            isError: true,
+            content: [{ type: "text" as const, text: "Error: Node 23 (OrdinaryNode) is not a subgraph" }],
+          };
+        }
+        return { content: [{ type: "text" as const, text: JSON.stringify(SET_OK, null, 2) }] };
+      },
+    } as unknown as PanelToolCtx)) as ToolResult;
+    return { res, cmds };
+  }
+
+  it("refuses the exact live parent/type/path shape before graph_set_widget", async () => {
+    const { res, cmds } = await run(dynamicDetail);
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/dynamic-combo sub-widget "model\.prompt"/);
+    expect(res.content[0].text).toMatch(/parent input "model" is COMFY_DYNAMICCOMBO_V3/);
+    expect(res.content[0].text).toMatch(/PrimitiveStringMultiline/);
+    expect(res.content[0].text).toMatch(/STRING output/);
+    expect(res.content[0].text).toMatch(/No graph_set_widget was dispatched/);
+    expect(cmds).toEqual(["graph_query"]);
+  });
+
+  it("recognizes the production JSON-lines detail shape", async () => {
+    const detailLine = JSON.stringify(dynamicDetail.nodes[0]);
+    const { res, cmds } = await run({
+      text: `1 match(es) of 1 in scope (graph: 1 nodes)\n${detailLine}`,
+    });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toContain("COMFY_DYNAMICCOMBO_V3");
+    expect(cmds).toEqual(["graph_query"]);
+  });
+
+  it("keeps an ordinary dotted composite widget writable", async () => {
+    const { res, cmds } = await run(
+      {
+        nodes: [
+          {
+            id: 3,
+            type: "PowerLoraLoader",
+            widgets: { lora_1: { lora: "old", on: true } },
+            inputs: [{ name: "lora_1", type: "COMBO" }, { name: "lora_1.on", type: "BOOLEAN" }],
+          },
+        ],
+      },
+      { node_id: 3, widget: "lora_1.on", value: false },
+    );
+    expect(res.isError).toBeUndefined();
+    expect(cmds).toEqual(["graph_query", "graph_set_widget"]);
+  });
+
+  it("keeps an ordinary dotted STRING widget writable", async () => {
+    const { res, cmds } = await run(
+      {
+        nodes: [
+          {
+            id: 4,
+            type: "OrdinaryNode",
+            widgets: { "prompt.foo": "old" },
+            inputs: [{ name: "prompt", type: "STRING" }, { name: "prompt.foo", type: "STRING" }],
+          },
+        ],
+      },
+      { node_id: 4, widget: "prompt.foo", value: "safe" },
+    );
+    expect(res.isError).toBeUndefined();
+    expect(cmds).toEqual(["graph_query", "graph_set_widget"]);
+  });
+
+  it("keeps the V3 parent selector writable", async () => {
+    const { res, cmds } = await run(dynamicDetail, {
+      node_id: 23,
+      widget: "model",
+      value: "text-to-video",
+    });
+    expect(res.isError).toBeUndefined();
+    expect(cmds).toEqual(["graph_set_widget"]);
+  });
+
+  it("does not classify an unresolved dotted path as the known failure", async () => {
+    const { res, cmds } = await run(dynamicDetail, {
+      node_id: 23,
+      widget: "model.typo",
+      value: "safe",
+    });
+    expect(res.isError).toBeUndefined();
+    expect(cmds).toEqual(["graph_query", "graph_set_widget"]);
+  });
+
+  // ---- the over-refusal controls -------------------------------------------
+  //
+  // Every control above varies the PARENT type, so none of them can see a
+  // refusal that fires on the parent alone. These vary the CHILD under a proven
+  // COMFY_DYNAMICCOMBO_V3 parent — the Nano Banana 2 shape already fixtured in
+  // src/__tests__/services/api-nodes.test.ts, whose model.aspect_ratio /
+  // model.resolution / model.thinking_level children are COMBO and REQUIRED
+  // (api-nodes.ts: the server 400s with required_input_missing without them).
+  // Refusing those would strand a required input behind a remedy that does not
+  // exist for it — a STRING output does not reach a COMBO input.
+
+  const nanoBanana2Detail = {
+    nodes: [
+      {
+        id: 31,
+        type: "GeminiNanoBanana2V2",
+        widgets: {
+          model: "Nano Banana 2 (Gemini 3.1 Flash Image)",
+          "model.aspect_ratio": "auto",
+          "model.resolution": "1K",
+          "model.thinking_level": "MINIMAL",
+        },
+        inputs: [
+          { name: "model", type: "COMFY_DYNAMICCOMBO_V3" },
+          { name: "model.aspect_ratio", type: "COMBO" },
+          { name: "model.resolution", type: "COMBO" },
+          { name: "model.thinking_level", type: "COMBO" },
+        ],
+      },
+    ],
+  };
+
+  it("keeps a COMBO child of a V3 dynamic combo writable (Nano Banana 2 model.resolution)", async () => {
+    const { res, cmds } = await run(nanoBanana2Detail, {
+      node_id: 31,
+      widget: "model.resolution",
+      value: "4K",
+    });
+    expect(res.isError).toBeUndefined();
+    expect(cmds).toEqual(["graph_query", "graph_set_widget"]);
+  });
+
+  it("keeps every non-STRING child of the same V3 parent writable", async () => {
+    for (const [widget, value] of [
+      ["model.aspect_ratio", "16:9"],
+      ["model.thinking_level", "HIGH"],
+    ] as Array<[string, string]>) {
+      const { res, cmds } = await run(nanoBanana2Detail, { node_id: 31, widget, value });
+      expect(res.isError, `${widget} must stay writable`).toBeUndefined();
+      expect(cmds).toEqual(["graph_query", "graph_set_widget"]);
+    }
+  });
+
+  it("keeps INT / FLOAT / BOOLEAN children of a V3 parent writable", async () => {
+    const detail = {
+      nodes: [
+        {
+          id: 32,
+          type: "SomeV3ApiNode",
+          widgets: { model: "opt", "model.steps": 20, "model.cfg": 3.5, "model.fast": false },
+          inputs: [
+            { name: "model", type: "COMFY_DYNAMICCOMBO_V3" },
+            { name: "model.steps", type: "INT" },
+            { name: "model.cfg", type: "FLOAT" },
+            { name: "model.fast", type: "BOOLEAN" },
+          ],
+        },
+      ],
+    };
+    for (const [widget, value] of [
+      ["model.steps", 30],
+      ["model.cfg", 7.5],
+      ["model.fast", true],
+    ] as Array<[string, unknown]>) {
+      const { res, cmds } = await run(detail, { node_id: 32, widget, value });
+      expect(res.isError, `${widget} must stay writable`).toBeUndefined();
+      expect(cmds).toEqual(["graph_query", "graph_set_widget"]);
+    }
+  });
+
+  it("falls open when the detail row carries no declared type for the child", async () => {
+    // Present in the widgets map but absent from inputs: the probe cannot PROVE
+    // STRING, so this keeps the setter path rather than broadening the refusal.
+    const { res, cmds } = await run(
+      {
+        nodes: [
+          {
+            id: 33,
+            type: "MinimaxHailuo03TextToVideoNode",
+            widgets: { model: "text-to-video", "model.prompt": "" },
+            inputs: [{ name: "model", type: "COMFY_DYNAMICCOMBO_V3" }],
+          },
+        ],
+      },
+      { node_id: 33, widget: "model.prompt", value: "NEW" },
+    );
+    expect(res.isError).toBeUndefined();
+    expect(cmds).toEqual(["graph_query", "graph_set_widget"]);
+  });
+
+  it("names the proven child type in the refusal, so the STRING remedy always fits", async () => {
+    const { res } = await run(dynamicDetail);
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/is a STRING child/);
+  });
+
+  it("probes with a pinpoint budget, so a long-prompt row is not degraded to a stub", async () => {
+    // The panel degrades an oversized detail line to an {id, type, title} stub.
+    // That stub has no `inputs`, so the shape becomes unprovable and the write
+    // falls open — on exactly the node #2299 reported, the one holding a long
+    // prompt. The survey cap has nothing to protect on a single-id, limit-1 read.
+    const sent: Array<Record<string, unknown>> = [];
+    await defByName("panel_set_widget").handler(
+      { node_id: 23, widget: "model.prompt", value: "NEW" },
+      {
+        call: async (cmd: Record<string, unknown>) => {
+          sent.push({ ...cmd });
+          if (cmd.cmd === "graph_query") {
+            return {
+              content: [{ type: "text" as const, text: JSON.stringify(dynamicDetail, null, 2) }],
+            };
+          }
+          return { content: [{ type: "text" as const, text: JSON.stringify(SET_OK, null, 2) }] };
+        },
+      } as unknown as PanelToolCtx,
+    );
+    const probe = sent.find((c) => c.cmd === "graph_query");
+    expect(probe).toBeDefined();
+    expect(probe?.fields).toBe("detail");
+    expect(probe?.limit).toBe(1);
+    expect(probe?.max_chars).toBe(60000);
+  });
+
+  it("falls open on a degraded/truncated detail row rather than refusing every dotted write", async () => {
+    // The documented residual: an unprovable shape keeps the setter path. Failing
+    // CLOSED here would refuse every dotted widget on every node whenever a probe
+    // hiccups. Pinned so that changing it is a deliberate decision, not a drift.
+    // A row the panel degraded to its {id, type, title} stub: no `inputs`, so
+    // neither half of the shape is provable.
+    const { res, cmds } = await run({
+      nodes: [{ id: 23, type: "MinimaxHailuo03TextToVideoNode", title: "MiniMax" }],
+    });
+    expect(res.isError).toBeUndefined();
+    expect(cmds).toEqual(["graph_query", "graph_set_widget"]);
+  });
+
+  it("documents that only a STRING child is refused", () => {
+    const description = defByName("panel_set_widget").description;
+    expect(description).toContain("COMFY_DYNAMICCOMBO_V3");
+    expect(description).toContain("PrimitiveStringMultiline");
+    expect(description).toContain("model.prompt");
+    expect(description).toMatch(/STRING child/);
+    expect(description).toContain("model.resolution");
+  });
+
+  it("documents the refusal and socket workaround", () => {
+    const description = defByName("panel_set_widget").description;
+    expect(description).toContain("COMFY_DYNAMICCOMBO_V3");
+    expect(description).toContain("PrimitiveStringMultiline");
+    expect(description).toContain("model.prompt");
+  });
+});
+
 describe("panel-tools: panel_set_widget DaSiWa stack_data (#2107)", () => {
   const SET_OK = {
     set: { node_id: 2571, widget: "stack_data", previous: "old", value: "NEW" },
@@ -522,6 +810,12 @@ describe("panel-tools: panel_set_widget DaSiWa stack_data (#2107)", () => {
             return reply as ToolResult;
           }
           return { content: [{ type: "text" as const, text: JSON.stringify(reply, null, 2) }] };
+        }
+        if (cmd.cmd === "graph_get_subgraph") {
+          return {
+            isError: true,
+            content: [{ type: "text" as const, text: "Error: Node 2571 (OtherLoraLoader) is not a subgraph" }],
+          };
         }
         return {
           content: [

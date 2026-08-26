@@ -64,17 +64,30 @@ describe("panel_run late prompt reconciliation (#1728)", () => {
   it("turns an id-less queued_unknown receipt into one ticket without redispatch", async () => {
     let calls = 0;
     let receiptTaken = false;
+    const completionKey = JSON.stringify(["panel-1728", "orchestrator::claude", "prompt-1728", "generation-a"]);
     const bridge = {
       send: async () => ({}),
       canReach: () => true,
       peekLateRunReceipt: (runRid: string) =>
         runRid === "run-rid-1728"
-          ? { runRid, tabId: "panel-1728", promptIds: ["prompt-1728"], lateByMs: 25 }
+          ? {
+              runRid,
+              tabId: "panel-1728",
+              promptIds: ["prompt-1728"],
+              completionKeys: [{ promptId: "prompt-1728", completionKey }],
+              lateByMs: 25,
+            }
           : undefined,
       takeLateRunReceipt: (runRid: string) => {
         if (runRid !== "run-rid-1728" || receiptTaken) return undefined;
         receiptTaken = true;
-        return { runRid, tabId: "panel-1728", promptIds: ["prompt-1728"], lateByMs: 25 };
+        return {
+          runRid,
+          tabId: "panel-1728",
+          promptIds: ["prompt-1728"],
+          completionKeys: [{ promptId: "prompt-1728", completionKey }],
+          lateByMs: 25,
+        };
       },
     } as unknown as PanelToolCtx["bridge"];
     const ctx = makePanelToolCtx(bridge, "panel-1728");
@@ -106,7 +119,10 @@ describe("panel_run late prompt reconciliation (#1728)", () => {
     expect(text).toMatch(/"prompt_id"\s*:\s*"prompt-1728"/);
     expect(text).toContain("[RECOVERED]");
     expect(text).toContain("completion ticket");
-    expect(RunCompletions.ticketFor("prompt-1728")?.promptId).toBe("prompt-1728");
+    expect(RunCompletions.ticketFor("prompt-1728")).toMatchObject({
+      promptId: "prompt-1728",
+      completionKey,
+    });
     expect(receiptTaken).toBe(true);
 
     // The real journal path now correlates the later bridge executed frame to

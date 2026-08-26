@@ -27,6 +27,17 @@ export const PERSIST_OWNER = randomBytes(8).toString("hex");
  *  Must exceed the writer's heartbeat interval by a generous margin. */
 export const PERSISTED_INFLIGHT_STALE_MS = 60_000;
 
+/** Non-secret proof carried with a local writer's exact staged partial. */
+export type DownloadPartialAuthMode = "none" | "configured" | "explicit";
+
+export interface PersistedPartialIdentity {
+  version: 1;
+  /** Cache identity digest; includes effective URL, headers, and cloud principal. */
+  cache_key: string;
+  /** Whether a restart would need an auth value that is not persisted here. */
+  auth_mode: DownloadPartialAuthMode;
+}
+
 export interface DownloadProgress {
   /** Stable id for this download (a hash of the source URL). */
   id: string;
@@ -256,8 +267,20 @@ export function migrateInFlightJobs(fromDir: string, toDir: string): number {
         download_route: downloadRoute,
         // Real keys that were also being dropped. `resume` is what a re-issue
         // needs to continue a partial rather than restart it, and `progressId`
-        // links the record back to its tray row.
+        // links the record back to its tray row. `partialPath` keeps status and
+        // recovery on the writer's exact authenticated/HF-rewritten cache key.
         progressId: str("progressId"),
+        partialPath: str("partialPath"),
+        partial_identity:
+          raw.partial_identity &&
+          typeof raw.partial_identity === "object" &&
+          (raw.partial_identity as Record<string, unknown>).version === 1 &&
+          typeof (raw.partial_identity as Record<string, unknown>).cache_key === "string" &&
+          ((raw.partial_identity as Record<string, unknown>).auth_mode === "none" ||
+            (raw.partial_identity as Record<string, unknown>).auth_mode === "configured" ||
+            (raw.partial_identity as Record<string, unknown>).auth_mode === "explicit")
+            ? (raw.partial_identity as PersistedPartialIdentity)
+            : undefined,
         resume: raw.resume,
         updated: Date.now(),
         interrupted_by_restart: true,
@@ -276,10 +299,12 @@ export function migrateInFlightJobs(fromDir: string, toDir: string): number {
             `nothing and a timer is not a test — check the ComfyUI host's own logs or ` +
             `disk if you need to know where it is.`
           : `This download is no longer being WATCHED: the orchestrator process that ` +
-            `was streaming it exited, so nothing here is writing those bytes and no ` +
-            `further progress will be reported. Any partial file may have been ` +
-            `discarded. Re-issue the download — it picks up a resumable .partial where ` +
-            `one survives, and otherwise restarts from zero.`,
+              `was streaming it exited, so nothing here is writing those bytes and no ` +
+              `further progress will be reported. Any partial file may have been ` +
+              `discarded. The old record is not evidence that a partial survived or that ` +
+              `a re-issue can resume it: check the persisted exact partial path and route/` +
+              `identity proof first. If that evidence is unavailable, treat a re-issue as ` +
+              `a fresh download and do not infer that it resumes.`,
       };
       writeFileSync(
         join(toDir, `${JOB_PREFIX}${sanitizeIdPart(raw.id)}-${PERSIST_OWNER}.json`),
@@ -334,9 +359,10 @@ function fileFor(id: string, target?: string, attempt?: number): string {
   // processes write distinct files (barring a ~2^-64 owner-nonce collision), so a
   // clobber is effectively impossible regardless of any epoch tie. (Supersession
   // ordering for a genuinely simultaneous same-ms cross-process
-  // double-start is inherently undefined, but it is non-corrupting: #467/#473 O_EXCL temp
-  // + atomic rename + payload validation, and #529 in-flight adoption normally prevents a
-  // second writer in the first place.)
+  // double-start is bounded by the physical cache layer's deterministic staged-writer
+  // claim: a same-identity overlap is refused before it can observe or mutate a shared
+  // partial, rather than being treated as safe resume. Independent identities still use
+  // their own O_EXCL temp + atomic rename + payload validation.)
   return join(
     PROGRESS_DIR,
     `${id.replace(/[^a-zA-Z0-9_.-]/g, "_")}-${disc}${attemptSeg}-o${PERSIST_OWNER}.json`,
@@ -802,6 +828,11 @@ export interface PersistedDownloadJob {
   /** The id the physical progress rows are written under (post-auth/HF-rewrite);
    *  differs from trayId only for query-auth / mirror URLs. Optional/back-compat. */
   progressId?: string;
+  /** Exact staged partial selected by the writer's effective cache identity.
+   *  Optional for records written before status began persisting this path. */
+  partialPath?: string;
+  /** Non-secret proof that identifies the writer's effective cache representation. */
+  partial_identity?: PersistedPartialIdentity;
   /** Credential-free ComfyUI endpoint this job serves; legacy records may omit it. */
   target?: string;
   url: string;

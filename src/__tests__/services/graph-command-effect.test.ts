@@ -77,7 +77,11 @@ function graphCommandLiteralsInSource(): Set<string> {
       }
       if (!full.endsWith(".ts")) continue;
       const src = stripComments(readFileSync(full, "utf8"));
-      for (const m of src.matchAll(/"(graph_[a-z0-9_]+)"/g)) found.add(m[1]);
+      for (const m of src.matchAll(/"(graph_[a-z0-9_]+)"/g)) {
+        // graph_identity is promoted-scope metadata, not a graph command. Keep
+        // the broad literal scan while excluding this protocol field explicitly.
+        if (m[1] !== "graph_identity") found.add(m[1]);
+      }
     }
   };
   walk(SRC);

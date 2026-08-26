@@ -10,6 +10,7 @@ import { errorText } from "./error-text.js";
 import type { AgentEvent, BackendStartOptions, ModelChoice, NeutralTurn } from "./agent-backend.js";
 import { CHATGPT_CAPABILITIES, stampTurn } from "./agent-backend.js";
 import { resolveOpenAICodexOAuth } from "../services/code-provider-auth.js";
+import { asRateLimitError, sanitizeDetail, sendWithRateLimitRetry } from "./rate-limit.js";
 import { OllamaBackend, type OllamaBackendDeps } from "./ollama-backend.js";
 
 const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
@@ -198,32 +199,47 @@ export class ChatGptOAuthBackend extends OllamaBackend {
     const keepalive = onActivity ? setInterval(onActivity, 5000) : null;
     let res: Response;
     try {
-      res = await fetch(CODEX_RESPONSES_URL, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          accept: "text/event-stream",
-          ...this.codexAuthHeaders(),
-        },
-        body: JSON.stringify({
-          model: this.model,
-          instructions,
-          input,
-          tools: toResponsesTools(tools),
-          stream: true,
-          store: false,
-        }),
-        signal,
-      });
+      // Capture the model BEFORE the async boundary. The thunk below is re-invoked
+      // after a rate-limit backoff, and re-reading `this.model` there sends the retried
+      // request to whatever the user switched to during the wait — while the notice they
+      // already saw names the old one. One turn, two models, no way to tell from the log.
+      const model = this.model;
+      // 429s are waited out when the window is bounded and named; every other
+      // status falls through unchanged (orchestrator/rate-limit.ts).
+      res = yield* sendWithRateLimitRetry(
+        () =>
+          fetch(CODEX_RESPONSES_URL, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              accept: "text/event-stream",
+              ...this.codexAuthHeaders(),
+            },
+            body: JSON.stringify({
+              model,
+              instructions,
+              input,
+              tools: toResponsesTools(tools),
+              stream: true,
+              store: false,
+            }),
+            signal,
+          }),
+        { model, label: "chatgpt-oauth-backend", signal, onActivity },
+      );
     } finally {
       if (keepalive) clearInterval(keepalive);
     }
     if (!res.ok || !res.body) {
+      // Never a 429 — sendWithRateLimitRetry owns that status.
       throw new Error(
         // unknown-ok: "" is interpolated into an ERROR MESSAGE and nothing else — the
         // HTTP status is reported either way, so an unreadable body costs detail in the
         // text, never a wrong conclusion. Verified there is no branch on this value.
-        `Codex Responses http ${res.status}: ${(await res.text().catch(() => "")).slice(0, 400)}`,
+        // Redacted like grok's sibling path: a provider error body can carry an
+        // account id or a credential-shaped token, and this string is rendered
+        // into the panel chat verbatim.
+        `Codex Responses http ${res.status}: ${sanitizeDetail(await res.text().catch(() => ""), 400)}`,
       );
     }
 
@@ -378,7 +394,17 @@ export class ChatGptOAuthBackend extends OllamaBackend {
             yield r.value;
           }
         } catch (err) {
-          if (!abort.signal.aborted && !imagesStripped && this.turnHistory.some((m) => m.images?.length)) {
+          // A RateLimitError is NOT an image rejection. Without this clause a 429 on any
+          // history carrying an image lands here, strips the images, tells the user this
+          // endpoint rejected image input, and then answers WITHOUT the image — a false
+          // explanation and a silently degraded answer, both from a rate limit the retry
+          // above already knows how to wait out. Let it through to the 429 handling.
+          if (
+            !abort.signal.aborted &&
+            !asRateLimitError(err) &&
+            !imagesStripped &&
+            this.turnHistory.some((m) => m.images?.length)
+          ) {
             imagesStripped = true;
             logger.warn(
               `[chatgpt-oauth-backend] image input rejected (${msgOf(err).slice(0, 200)}) — retrying without images`,
@@ -431,16 +457,28 @@ export class ChatGptOAuthBackend extends OllamaBackend {
       resultEmitted = true;
     } catch (err) {
       const interrupted = abort.signal.aborted;
+      const rateLimited = asRateLimitError(err);
       if (!interrupted) {
         logger.warn(`[chatgpt-oauth-backend] turn failed: ${msgOf(err)}`);
-        yield { type: "error", message: `chatgpt backend: ${msgOf(err)}` };
-        yield {
-          type: "assistant",
-          text: `⚠️ The model request failed: ${msgOf(err).slice(0, 400)}`,
-        };
+        if (rateLimited) {
+          // Already a finished sentence naming the model, the reason and the
+          // remedy — it travels alone rather than under a "chatgpt backend:" prefix
+          // that would blame this adapter for the provider's limit.
+          yield { type: "error", message: rateLimited.message, rateLimit: true };
+        } else {
+          yield { type: "error", message: `chatgpt backend: ${msgOf(err)}` };
+          yield {
+            type: "assistant",
+            text: `⚠️ The model request failed: ${msgOf(err).slice(0, 400)}`,
+          };
+        }
       }
       if (!resultEmitted) {
-        yield { type: "result", ok: false, subtype: interrupted ? "interrupted" : "error" };
+        yield {
+          type: "result",
+          ok: false,
+          subtype: interrupted ? "interrupted" : rateLimited ? "rate_limit" : "error",
+        };
       }
     } finally {
       if (this.turnAbort === abort) this.turnAbort = null;

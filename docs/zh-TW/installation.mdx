@@ -85,6 +85,56 @@ ComfyUI MCP 以 `comfyui-mcp` 之名發布在 npm 上，透過 `npx` 執行 —�
       **只用雲端嗎？** [Comfy-Org 的 Comfy Cloud MCP](https://docs.comfy.org/agent-tools)（公開測試版）才是標準的選擇 —— 請看[本機 vs. Comfy Cloud](/docs/local-vs-comfy-cloud)。如果你想用單一個 MCP 涵蓋本機／遠端／雲端，或是現在就需要雲端支援，那就用 `comfyui-mcp` 的雲端模式。
     </Note>
   </Tab>
+  <Tab title="受組織管理 / 企業版 Claude Code">
+    在由組織統一管理的 Claude Code 上，沒有可以執行 `claude mcp add` 的 `claude` CLI，而由管理者
+    掌控的**受管 MCP 伺服器**清單會把伺服器測試成功、然後拒絕儲存。**開發者設定 → 編輯設定**打開的
+    是 Code 分頁從來不讀的 `claude_desktop_config.json`。真正走得通的有兩條路。
+
+    **方案 A —— HTTP。** 自己把伺服器跑起來，再當成**遠端**連接器加入：
+
+    ```bash
+    npx -y comfyui-mcp@latest --http
+    ```
+
+    這會在 `http://127.0.0.1:9100/mcp` 上提供 streamable-HTTP —— 監聽位址可用 `--host` /
+    `--port` 覆寫。把這個網址加成遠端連接器，傳輸方式選 HTTP，驗證選無。只要你還在用這些工具，
+    這個行程就得一直執行；而且受管的組織清單仍可能拒絕保留這一筆 —— 真碰上了就改走方案 B。
+
+    **方案 B —— 透過使用者設定走 stdio。** 伺服器由 Claude 自己拉起，不需要讓任何東西一直開著。
+    請在 **Claude Code 完全關閉的情況下**做全域安裝，否則 Windows 會占住檔案，留下一個被刪了一半、
+    `npm ls -g` 顯示不出版本號的套件：
+
+    ```bash
+    npm install -g comfyui-mcp
+    npm root -g
+    ```
+
+    接著在 `~/.claude.json`（Windows 上是 `C:\Users\你的使用者名稱\.claude.json`）的**最上層**加一個
+    `mcpServers` 區塊，把 `node` 指向 `npm root -g` 印出的路徑：
+
+    ```json
+    {
+      "mcpServers": {
+        "comfyui": {
+          "command": "node",
+          "args": ["C:/Users/YOUR_NAME/AppData/Roaming/npm/node_modules/comfyui-mcp/dist/index.js"]
+        }
+      }
+    }
+    ```
+
+    最後**徹底**重新啟動 Claude Code，**包含系統匣圖示** —— 否則設定不會被重新讀取。
+
+    <Note>
+      **直接問代理它有哪些工具來驗證。** 在受管版本上，沒有哪個介面能可靠地反映 MCP 伺服器是否
+      真的在運作，只有實際呼叫這項測試不會騙人。
+    </Note>
+    <Note>
+      上面這些 Claude 這一側的選單名稱與路徑只在一台受管機器上驗證過 —— 請把它們當成「該往哪裡找」
+      的線索，而不是精確的字面標籤。HTTP 端點請保持在回送位址上：一旦繫結到非回送主機，除非你用
+      `--token` 設定共用密鑰，否則伺服器會拒絕啟動。參見[遠端連接器](/docs/remote-connector)。
+    </Note>
+  </Tab>
 </Tabs>
 
 接著在 Claude Code 中執行 `/mcp` 進行連線。

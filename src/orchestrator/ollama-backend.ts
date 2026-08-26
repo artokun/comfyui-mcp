@@ -48,6 +48,7 @@ import {
 import { OLLAMA_CAPABILITIES, stampTurn } from "./agent-backend.js";
 import type { GeminiMcpServerSpec } from "./gemini-backend.js";
 import { resolvePrompt } from "../services/prompt-overrides.js";
+import { asRateLimitError, sanitizeDetail, sendWithRateLimitRetry } from "./rate-limit.js";
 import { retiredToolMessage } from "../tools/vocabulary.js";
 import { PANEL_TOOL_MCP_TIMEOUT_MS } from "./panel-tools.js";
 
@@ -967,13 +968,25 @@ export class OllamaBackend implements AgentBackend {
     const keepalive = onActivity ? setInterval(onActivity, 5000) : null;
     let res: Response;
     try {
-      res =
-        this.api === "openai"
-          ? await fetch(`${this.host}/chat/completions`, {
+      // Capture the model BEFORE the async boundary. The thunk below is re-invoked
+      // after a rate-limit backoff, and re-reading `this.model` there sends the retried
+      // request to whatever the user switched to during the wait — while the notice they
+      // already saw names the old one. One turn, two models, no way to tell from the log.
+      const model = this.model;
+      // A 429 that names a bounded wait is waited out here rather than ending the
+      // turn: this endpoint serves every OpenAI-compatible provider (moonshot,
+      // glm, minimax, openrouter, …), several of which limit by requests-per-
+      // minute, and a mid-tool-loop 429 asking for one second used to throw away
+      // every round the turn had already completed. Only 429 is intercepted —
+      // every other status reaches the error below exactly as before.
+      res = yield* sendWithRateLimitRetry(
+        () =>
+          this.api === "openai"
+          ? fetch(`${this.host}/chat/completions`, {
               method: "POST",
               headers: { "content-type": "application/json", ...this.authHeaders() },
               body: JSON.stringify({
-                model: this.model,
+                model,
                 messages: toOpenAiMessages(messages),
                 tools,
                 tool_choice: "auto",
@@ -995,11 +1008,11 @@ export class OllamaBackend implements AgentBackend {
               }),
               signal,
             })
-          : await fetch(`${this.host}/api/chat`, {
+          : fetch(`${this.host}/api/chat`, {
               method: "POST",
               headers: { "content-type": "application/json" },
               body: JSON.stringify({
-                model: this.model,
+                model,
                 messages: toOllamaMessages(messages),
                 tools,
                 stream: true,
@@ -1012,11 +1025,15 @@ export class OllamaBackend implements AgentBackend {
                 },
               }),
               signal,
-            });
+            }),
+        { model, label: "ollama-backend", signal, onActivity },
+      );
     } finally {
       if (keepalive) clearInterval(keepalive);
     }
     if (!res.ok || !res.body) {
+      // Never a 429: sendWithRateLimitRetry either waited that out or threw a
+      // RateLimitError with a finished sentence (see runTurn's catch).
       // Stamp the HTTP status on the error. The media strip-and-retry (#790)
       // must fire ONLY on a request the endpoint actually rejected: a connection
       // reset or a truncated stream is not evidence that the model refused the
@@ -1027,7 +1044,12 @@ export class OllamaBackend implements AgentBackend {
           // unknown-ok: "" is interpolated into an ERROR MESSAGE and nothing else — the
           // HTTP status is reported either way, so an unreadable body costs detail in the
           // text, never a wrong conclusion. Verified there is no branch on this value.
-          `${this.api === "openai" ? `${this.host}/chat/completions` : "ollama /api/chat"} http ${res.status}: ${(await res.text().catch(() => "")).slice(0, 300)}`,
+          // Sanitized, not raw: a hosted endpoint's error body carries account
+          // ids and credential-shaped tokens (moonshot's 429 carried both), and
+          // this string is rendered into the panel chat verbatim. The 429 that
+          // exposed it is handled above; every OTHER status reaches this line
+          // and can carry exactly the same envelope.
+          `${this.api === "openai" ? `${this.host}/chat/completions` : "ollama /api/chat"} http ${res.status}: ${sanitizeDetail(await res.text().catch(() => ""), 300)}`,
         ),
         { httpStatus: res.status },
       );
@@ -1937,28 +1959,41 @@ export class OllamaBackend implements AgentBackend {
       resultEmitted = true;
     } catch (err) {
       const interrupted = abort.signal.aborted;
+      const rateLimited = asRateLimitError(err);
       if (!interrupted) {
         // Surface the failure IN the chat too — an error event alone leaves the
         // panel silent (the turn just ends), which reads as a wedge.
         logger.warn(`[ollama-backend] turn failed: ${msgOf(err)}`);
-        yield { type: "error", message: `ollama backend: ${msgOf(err)}` };
-        // #2221 — a 413 that got this far is one the strip could not rescue
-        // (nothing left to remove, or it had already fired once this turn). It
-        // still must not be handed to the user as an anonymous failure: the
-        // panel's fallback advice for a dead turn is "try again", and size is
-        // precisely the cause for which that is guaranteed wrong. Name it, and
-        // keep the raw body — the provider's own text ("Downloaded image content
-        // cannot exceed 30MB") is the most useful sentence available.
-        const tooLarge = (err as { httpStatus?: number } | null)?.httpStatus === 413;
-        yield {
-          type: "assistant",
-          text: tooLarge
-            ? `📦 The request was too large for this endpoint to accept (http 413), so the turn could not run. Retrying the same message will not help — the payload is rebuilt identically each time. Start a fresh chat to clear what this conversation has accumulated, or re-send with a smaller attachment.\n\nEndpoint said: ${msgOf(err).slice(0, 400)}`
-            : `⚠️ The model request failed: ${msgOf(err).slice(0, 400)}`,
-        };
+        if (rateLimited) {
+          // The rate-limit message is already a finished sentence naming the
+          // model, the reason and the remedy, so it travels alone: prefixing it
+          // with "ollama backend:" would attribute the provider's limit to this
+          // adapter, and the second bubble below would repeat it verbatim.
+          yield { type: "error", message: rateLimited.message, rateLimit: true };
+        } else {
+          yield { type: "error", message: `ollama backend: ${msgOf(err)}` };
+          // #2221 — a 413 that got this far is one the strip could not rescue
+          // (nothing left to remove, or it had already fired once this turn). It
+          // still must not be handed to the user as an anonymous failure: the
+          // panel's fallback advice for a dead turn is "try again", and size is
+          // precisely the cause for which that is guaranteed wrong. Name it, and
+          // keep the raw body — the provider's own text ("Downloaded image content
+          // cannot exceed 30MB") is the most useful sentence available.
+          const tooLarge = (err as { httpStatus?: number } | null)?.httpStatus === 413;
+          yield {
+            type: "assistant",
+            text: tooLarge
+              ? `📦 The request was too large for this endpoint to accept (http 413), so the turn could not run. Retrying the same message will not help — the payload is rebuilt identically each time. Start a fresh chat to clear what this conversation has accumulated, or re-send with a smaller attachment.\n\nEndpoint said: ${msgOf(err).slice(0, 400)}`
+              : `⚠️ The model request failed: ${msgOf(err).slice(0, 400)}`,
+          };
+        }
       }
       if (!resultEmitted) {
-        yield { type: "result", ok: false, subtype: interrupted ? "interrupted" : "error" };
+        yield {
+          type: "result",
+          ok: false,
+          subtype: interrupted ? "interrupted" : rateLimited ? "rate_limit" : "error",
+        };
       }
     } finally {
       if (this.turnAbort === abort) this.turnAbort = null;

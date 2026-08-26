@@ -28,7 +28,63 @@ import { registerQueueManagementTools } from "../../tools/queue-management.js";
 const indexSrc = (): string =>
   readFileSync(new URL("../../orchestrator/index.ts", import.meta.url), "utf8");
 
+/**
+ * The BODY of a function, brace-matched from its opening `{`.
+ *
+ * A fixed-size `slice(at, at + N)` window is not scope: it reads past the
+ * closing brace, so a guard that MOVED out of the function still satisfies a
+ * `toContain` against the window. Match the braces instead.
+ */
+const functionBody = (src: string, signature: string): string => {
+  const at = src.indexOf(signature);
+  if (at < 0) throw new Error(`orchestrator source no longer contains ${signature}`);
+  const open = src.indexOf("{", at);
+  if (open < 0) throw new Error(`no body found for ${signature}`);
+  let depth = 0;
+  for (let i = open; i < src.length; i++) {
+    if (src[i] === "{") depth++;
+    else if (src[i] === "}" && --depth === 0) return src.slice(open, i + 1);
+  }
+  throw new Error(`unbalanced body for ${signature}`);
+};
+
 describe("#1789 — the history fallback is WIRED into the orchestrator, not merely available", () => {
+  it("SOURCE: completion fences remain reclaimable until the real turn ack", () => {
+    const src = indexSrc();
+    expect(src).toContain("onAccepted: (identity) => completionFenceTokens.set(token, identity)");
+    expect(src).not.toContain("replay: payload.replayed === true");
+    const ackAt = src.indexOf("function ackEventToken(");
+    expect(ackAt).toBeGreaterThan(-1);
+    const ackBlock = src.slice(ackAt, ackAt + 1500);
+    expect(ackBlock).toContain("completionFence.markDelivered(identity)");
+    expect(ackBlock).toContain("RunCompletions.ack(token)");
+    expect(ackBlock).toContain("completionFence.release(identity)");
+  });
+
+  // #2341 — THE CALL SITE, not the helper.
+  //
+  // scheduleRunCompletion() can be a perfect idempotency gate and never run.
+  // flushRunCompletions is the ONE place a journaled panel_run completion turns
+  // into an agent turn, so if its deliverPending callback stops routing through
+  // the gate, the recovered-completion replay storm comes straight back while
+  // every unit test of the gate stays green — the helper is still correct, just
+  // unreachable. Bypassing the gate here left 4257/4258 tests passing before
+  // this pin existed.
+  it("SOURCE: #2341 — flushRunCompletions schedules through the durable fence, never straight into injectEvent", () => {
+    const body = functionBody(indexSrc(), "function flushRunCompletions(");
+    // The journal's delivery callback hands every offer to the one gate…
+    expect(body).toContain("scheduleRunCompletion({");
+    // …against the DURABLE process-wide fence, not a fresh per-call one that
+    // would forget the completion across the reconnect it exists to survive.
+    expect(body).toContain("fence: completionFence,");
+    // …and the injection is reachable ONLY as that gate's `inject` option, so an
+    // edit cannot route around the fence while leaving the call in place.
+    const gateAt = body.indexOf("scheduleRunCompletion({");
+    const injectAt = body.indexOf("manager.injectEvent(");
+    expect(injectAt).toBeGreaterThan(gateAt);
+    expect(body.slice(gateAt, injectAt)).toContain("inject: () =>");
+  });
+
   it("SOURCE: the orchestrator constructs the watchdog against the real journal", () => {
     const src = indexSrc();
     expect(src).toContain("createRunCompletionWatchdog({");

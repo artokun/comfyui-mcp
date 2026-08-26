@@ -479,6 +479,8 @@ export class PanelAgent {
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   /** Guards against a trip firing twice / racing a real result for one turn. */
   private idleTripped = false;
+  /** One "waiting out a rate limit" line per turn (see the rate_limit case). */
+  private rateLimitSurfaced = false;
   /** A provider-native, non-user-cancel recovery is attempted at most once per turn. */
   private stallRecoverySteered = false;
   /** Tool calls started (item/started) but not yet ended (item/completed). A tool
@@ -1020,11 +1022,14 @@ export class PanelAgent {
         (typeof ev.dropped_completions === "number" && ev.dropped_completions > 0
           ? `⚠️ ${ev.dropped_completions} EARLIER completion(s) for this tab could not be delivered and were dropped — treat the outcome of those runs as UNDETERMINED and check get_history (action:"list") if you were waiting on one. `
           : ``) +
-        // An id-less completion whose content matches one already reported. We
-        // will NOT swallow it (identical content is not proof of identity, and a
-        // swallowed render is a silent loss), so hand the judgement to the agent.
+        // A completion whose outputs match one already reported. We will NOT
+        // swallow it (identical content is not proof of identity, and a swallowed
+        // render is a silent loss), so hand the judgement to the agent. The
+        // wording depends on whether an id is available to distinguish them.
         (ev.possible_repeat
-          ? `⚠️ POSSIBLE REPEAT: a completion with identical outputs was already reported to you recently, and this one carries no prompt id to tell them apart. It may be the same event re-sent, or a second render that produced identical filenames — do NOT count it twice without checking with get_history (action:"list"). `
+          ? ev.run_correlation === "unidentified"
+            ? `⚠️ POSSIBLE REPEAT: a completion with identical outputs was already reported to you recently, and this one carries no prompt id to tell them apart. It may be the same event re-sent, or a second render that produced identical filenames — do NOT count it twice without checking with get_history (action:"list"). `
+            : `⚠️ POSSIBLE REPEAT: a completion for this run (prompt ${ev.prompt_id}) was already reported to you recently. This may be the same render re-sent by the panel. Verify the outcome with get_history (action:"list") before acting on it. `
           : ``) +
         runIdentityPreamble(ev) +
         (note
@@ -1089,7 +1094,9 @@ export class PanelAgent {
         // entries remain, this render is a STEP, not an ending. Positive
         // evidence only — no checklist, or one that is finished, keeps the
         // acknowledge-and-stop wording, so nothing changes for a single render.
-        runCompletionDirective(this.tabId);
+        // #2369 — replayed completions carry no plan context, so they always get
+        // the acknowledge-and-stop wording to avoid an unbounded reply loop.
+        runCompletionDirective(this.tabId, { replayed: ev.replayed });
       // Attach the outputs inline so the agent SEES the render without a fetch —
       // up to the bound above. Past it (or for an UNDETERMINED origin) the text
       // says so and points at get_image, so a fetch is needed but never a guess.
@@ -1771,6 +1778,7 @@ export class PanelAgent {
       // it's meant to catch, so onTurnStalled() would no-op. (handleEvent's later
       // `busy = true` becomes a harmless no-op.) Also shows "working" immediately.
       this.errorSurfaced = false; // fresh turn → its failure (if any) is unreported
+      this.rateLimitSurfaced = false; // …and its first rate-limit wait is unannounced
       this.interruptRequested = false; // a stale interrupt can't mute THIS turn's failure
       this.busy = true;
       // Snapshot the model this turn runs on, so a live setModel mid-turn can't let
@@ -2266,6 +2274,26 @@ export class PanelAgent {
         }
         break;
       }
+      case "rate_limit": {
+        // The provider asked us to slow down and the backend is waiting the
+        // window out. NOT a failure: the turn is still in flight and its result
+        // will arrive normally, so this neither ends the turn nor spends the
+        // once-per-turn error slot — a rate limit that swallowed the slot would
+        // silence the first genuine error after it.
+        this.busy = true;
+        this.deps.onTurn?.(this.tabId, "working");
+        // ONE line per turn. A 3-req/min limiter can 429 several rounds of the
+        // same turn, and a bubble per retry would bury the conversation under
+        // status about itself. The first one already says what is happening.
+        if (ev.message && !this.rateLimitSurfaced) {
+          this.rateLimitSurfaced = true;
+          this.deps.onSay(this.tabId, ev.message);
+        }
+        logger.info(
+          `[panel-agent ${this.short()}] rate limited${ev.retryInMs ? ` — waiting ${Math.round(ev.retryInMs / 1000)}s` : ""}`,
+        );
+        break;
+      }
       case "error": {
         // A backend-reported turn error (codex/gemini/grok emit these before
         // their error result). Without this case the message fell through
@@ -2294,10 +2322,16 @@ export class PanelAgent {
           // self-contained. Framing it as "turn failed … nothing was lost, try
           // again" would be two lies (it didn't fail; something may have been
           // DONE) and would invite a destructive duplicate retry.
+          // A RATE LIMIT is a turn failure — it takes the slot — but its message
+          // is already a finished sentence that names the model, the reason and
+          // the remedy. Wrapping it in "The <model> turn failed: …" would say the
+          // model twice and bury the one actionable fact behind two prefixes, and
+          // the generic tail would offer "check the terminal" for a condition the
+          // terminal has nothing to add to.
           this.deps.onSay(
             this.tabId,
-            ev.unverifiedCompletion || ev.outcomeUnknown
-              ? `⚠️ ${detail}`
+            ev.unverifiedCompletion || ev.outcomeUnknown || ev.rateLimit
+              ? `⚠️ ${detail.replace(/^⚠️\s*/, "")}`
               : `⚠️ The ${this.model} turn failed: ${detail}\n\nNothing was lost — try again, switch models from the composer picker, or check the terminal running the orchestrator for more detail.`,
           );
         }

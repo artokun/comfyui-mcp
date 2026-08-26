@@ -91,6 +91,64 @@ ComfyUI MCP は npm に `comfyui-mcp` として公開されており、`npx` で
       **クラウドだけをお使いですか？** [Comfy-Org の Comfy Cloud MCP](https://docs.comfy.org/agent-tools)（パブリックベータ）が本来の選択肢です — [ローカル vs. Comfy Cloud](/docs/local-vs-comfy-cloud) を参照してください。ローカル / リモート / クラウドを 1 つの MCP でまとめたい場合や、今すぐクラウド対応が必要な場合は、`comfyui-mcp` のクラウドモードを使ってください。
     </Note>
   </Tab>
+  <Tab title="組織管理 / 企業向けの Claude Code">
+    組織が管理する Claude Code には `claude mcp add` を実行するための `claude` CLI がありません。
+    管理者が管理する **管理対象 MCP サーバー** の一覧はサーバーの接続テストには成功するのに、
+    保存だけは拒否します。**開発者設定 → 設定を編集** で開くのは Code タブが一切読み込まない
+    `claude_desktop_config.json` です。動く道筋は 2 つあります。
+
+    **方法 A — HTTP。** 自分でサーバーを起動し、*リモート* コネクタとして追加します。
+
+    ```bash
+    npx -y comfyui-mcp@latest --http
+    ```
+
+    これで `http://127.0.0.1:9100/mcp` に streamable-HTTP が公開されます（待ち受け先は
+    `--host` / `--port` で変更できます）。この URL をリモートコネクタとして、トランスポートは
+    HTTP、認証なしで追加してください。ツールを使っている間はプロセスを起動したままにする必要が
+    あり、それでも組織の管理対象一覧が登録の保存を拒否することがあります — その場合は方法 B に
+    切り替えてください。
+
+    **方法 B — ユーザー設定からの stdio。** Claude 自身がサーバーを起動するので、何かを起動した
+    ままにしておく必要はありません。**Claude Code を完全に終了した状態で** グローバルインストール
+    してください。そうしないと Windows がファイルを掴んだままになり、`npm ls -g` がバージョンなしで
+    表示する中途半端に消えたパッケージが残ります。
+
+    ```bash
+    npm install -g comfyui-mcp
+    npm root -g
+    ```
+
+    次に `~/.claude.json`（Windows では `C:\Users\ユーザー名\.claude.json`）の **トップレベル** に
+    `mcpServers` ブロックを追加し、`npm root -g` が出力したパスを `node` に渡します。
+
+    ```json
+    {
+      "mcpServers": {
+        "comfyui": {
+          "command": "node",
+          "args": ["C:/Users/YOUR_NAME/AppData/Roaming/npm/node_modules/comfyui-mcp/dist/index.js"]
+        }
+      }
+    }
+    ```
+
+    最後に Claude Code を **タスクトレイのアイコンも含めて完全に** 再起動してください。そうしないと
+    設定は読み直されません。
+
+    <Note>
+      **確認はエージェントに「どんなツールを持っているか」を尋ねて行ってください。** 組織管理下の
+      ビルドでは、MCP サーバーが動いているかどうかを確実に反映する UI はありません。嘘をつかない
+      のは実際に動かしてみるテストだけです。
+    </Note>
+    <Note>
+      上に挙げた Claude 側のメニュー名やパスは、ある 1 つの管理対象ビルドで確認したものです —
+      正確なラベルではなく、何を探せばよいかの手がかりとして扱ってください。HTTP エンドポイントは
+      ループバックのままにしておくこと。ループバック以外のホストにバインドすると、`--token` で
+      共有シークレットを設定しない限りサーバーは起動を拒否します。
+      [リモートコネクタ](/docs/remote-connector) を参照してください。
+    </Note>
+  </Tab>
 </Tabs>
 
 あとは Claude Code で `/mcp` を実行して接続してください。

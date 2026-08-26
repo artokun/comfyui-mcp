@@ -97,8 +97,21 @@ export function __resetTodoState(): void {
  * reads as "stop now", and an agent three renders into a sweep it announced will
  * obey the most recent, most specific instruction over the system prompt telling
  * it to keep going.
+ *
+ * #2369 — a replayed (re-delivered after journal replay) completion has no plan
+ * context to continue. A completion-only replay that includes "CONTINUE your plan"
+ * turns a single late handoff into an unbounded loop: each replay becomes a new
+ * user turn, the agent replies, and the next replay cycles it again. Replayed
+ * completions always get the acknowledge-and-stop wording, even if a plan remains
+ * in flight.
  */
-export function runCompletionDirective(tabId: string | undefined): string {
+export function runCompletionDirective(tabId: string | undefined, opts?: { replayed?: boolean }): string {
+  // Replayed completions carry no plan context — they are ancient messages
+  // re-delivered from the journal after an MCP reconnect. Instruct the agent to
+  // acknowledge and stop, not continue, even if a plan remains.
+  if (opts?.replayed) {
+    return `Reply with ONE short sentence acknowledging the result and suggesting a sensible next step — you do NOT need to call any tools. Don't repeat an earlier comment.`;
+  }
   return planInFlight(tabId)
     ? `Acknowledge the result in ONE short sentence, then CONTINUE your plan — you have unfinished items on your todo list, so do NOT stop here or wait for the user. Carry straight on with the next step (queue it now if that is what the plan says). Don't repeat an earlier comment.`
     : `Reply with ONE short sentence acknowledging the result and suggesting a sensible next step — you do NOT need to call any tools. Don't repeat an earlier comment.`;

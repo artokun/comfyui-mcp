@@ -31,6 +31,14 @@
     }
     @keyframes s { to { transform: rotate(360deg); } }
     code { background:#0b0e14; padding:.1rem .4rem; border-radius:6px; color:#c8d2e6; }
+    .sep { border: 0; border-top: 1px solid #222838; margin: 1.6rem 0 1.1rem; }
+    .lead { color: #d7dce5; }
+    .cmd {
+      margin: .6rem 0; padding: .7rem .9rem; overflow-x: auto; text-align: left;
+      background: #0b0e14; border: 1px solid #222838; border-radius: 8px;
+      font: 13px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; color: #c8d2e6;
+    }
+    .fine { font-size: .85rem; }
   </style>
 </head>
 <body>
@@ -42,6 +50,19 @@
        fast — no install or sync. ComfyUI initialization typically takes
        <strong>~30-60s</strong>.</p>
     <p>This page refreshes automatically.</p>
+
+    <!--
+      __POD_URL__ is substituted by post_start.sh at boot, which is the only place
+      that knows RUNPOD_POD_ID. The Agent Panel renders this same command inside its
+      setup card, but a user landing on a cold pod has no panel yet - and this URL is
+      the one thing they cannot guess.
+    -->
+    <hr class="sep" />
+    <p class="lead">To drive this pod with the Agent Panel, run this on <strong>your own machine</strong>:</p>
+    <pre class="cmd">npx -y comfyui-mcp@latest connect __POD_URL__</pre>
+    <p class="fine">The agent runs on your own Claude / ChatGPT / Gemini login &mdash; nothing
+       extra is installed on this pod. Then open ComfyUI and click <strong>Connect</strong>
+       in the Agent sidebar.</p>
   </div>
 </body>
 </html>

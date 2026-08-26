@@ -29,7 +29,7 @@ import { WebSocket } from "ws";
 /** Panel version the mock advertises (#1384). Kept in step with the product's own derived
  *  fence minimum by src/__tests__/scripts/knowledge-parity-mock-version.test.ts — a raised
  *  floor fails that test instead of silently refusing every graph write in the smoke. */
-const MOCK_PANEL_VERSION = "0.15.58";
+const MOCK_PANEL_VERSION = "0.15.97";
 /** A well-formed workflow uuid, so the per-command stamp fence has something to fence on. */
 // MOCK_WORKFLOW_UUID is imported above — it belongs with the executors that answer with it.
 
@@ -122,6 +122,9 @@ function runScenario(task) {
           enforces_workflow_stamp: true,
           enforces_workflow_stamp_at_write: true,
           enforces_expected_node_type_at_write: true,
+          enforces_expected_scope_at_write: true,
+          enforces_expected_scope_graph_identity_at_write: true,
+          enforces_promoted_parent_rail_at_write: true,
           workflow_uuid: MOCK_WORKFLOW_UUID,
         }),
       );

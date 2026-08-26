@@ -155,7 +155,13 @@ export type AgentEvent = (
       contextWindow?: number;
       costUsd?: number;
     }
-  | { type: "rate_limit"; resetsAt?: number; kind?: string }
+  /** The provider asked us to slow down and the request is being waited out
+   *  (see orchestrator/rate-limit.ts). NOT a failure: the turn is still running,
+   *  and a `result` will follow normally once the retry lands. `message`, when
+   *  present, is a finished user-facing line — renderers show it as-is rather
+   *  than composing their own, because only the emitter knows whether the wait
+   *  came from a header, a reset counter, or the provider's prose. */
+  | { type: "rate_limit"; resetsAt?: number; kind?: string; retryInMs?: number; message?: string }
   | {
       type: "error";
       message: string;
@@ -177,6 +183,13 @@ export type AgentEvent = (
        *  must show the backend's self-contained recovery guidance rather than
        *  adding the generic "Nothing was lost — try again" prompt. */
       outcomeUnknown?: boolean;
+      /** The turn ended on a provider RATE LIMIT that could not be waited out.
+       *  `message` is already the finished sentence — it names the model, the
+       *  reason, and the remedy — so renderers must not wrap it in the generic
+       *  "the <model> turn failed: <backend>: …" framing, which would bury the
+       *  one actionable fact under a stack of prefixes. It IS a turn failure,
+       *  so it still consumes the once-per-turn error slot. */
+      rateLimit?: boolean;
     }
 ) & {
   /** Backend-minted TURN MARKER (#728): a monotonically increasing id (1 = the

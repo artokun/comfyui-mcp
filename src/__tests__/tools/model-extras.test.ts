@@ -253,6 +253,7 @@ describe('download_model action:"download_civitai"', () => {
       expect.any(Function), // onTrayId callback — aligns the job trayId with the tray row id (#515)
       expect.any(Function), // onLanded callback — commits done synchronously at the destination rename (#515)
       expect.any(Function), // onDownloadRoute callback — records the download-only network route
+      expect.any(Function), // onStagedPartialPath callback — persists the writer's cache identity (#2356)
     );
     expect(res.isError).toBeFalsy();
     expect(res.content[0].text).toContain("Cool Model");
@@ -282,6 +283,7 @@ describe('download_model action:"download_civitai"', () => {
       expect.any(Function), // onTrayId callback — aligns the job trayId with the tray row id (#515)
       expect.any(Function), // onLanded callback — commits done synchronously at the destination rename (#515)
       expect.any(Function), // onDownloadRoute callback — records the download-only network route
+      expect.any(Function), // onStagedPartialPath callback — persists the writer's cache identity (#2356)
     );
     expect(res.isError).toBeFalsy();
   });
@@ -325,6 +327,7 @@ describe('download_model action:"download_civitai"', () => {
       expect.any(Function), // onTrayId callback — aligns the job trayId with the tray row id (#515)
       expect.any(Function), // onLanded callback — commits done synchronously at the destination rename (#515)
       expect.any(Function), // onDownloadRoute callback — records the download-only network route
+      expect.any(Function), // onStagedPartialPath callback — persists the writer's cache identity (#2356)
     );
   });
 
@@ -353,6 +356,7 @@ describe('download_model action:"download_civitai"', () => {
       expect.any(Function), // onTrayId callback — aligns the job trayId with the tray row id (#515)
       expect.any(Function), // onLanded callback — commits done synchronously at the destination rename (#515)
       expect.any(Function), // onDownloadRoute callback — records the download-only network route
+      expect.any(Function), // onStagedPartialPath callback — persists the writer's cache identity (#2356)
     );
   });
 

@@ -221,6 +221,24 @@ interface Conn {
    * Re-read per hello and fail closed when absent: an older panel would silently
    * ignore the field and leave the node-replacement fence unenforced. */
   enforcesExpectedNodeTypeAtWrite: boolean;
+  /** True only when THIS hello advertises that the panel validates an optional
+   * expected_scope (promoted owner/workflow witness) at the synchronous
+   * graph_set_widget write boundary. Re-read per hello and fail closed when
+   * absent: an older panel would silently ignore receiver identity and could
+   * write a same-id node after navigation. */
+  enforcesExpectedScopeAtWrite: boolean;
+  /** True only when THIS hello advertises that expected_scope also carries and
+   * validates the stable live graph identity. Owner and wrapper ids are local
+   * to a graph, so the older owner/workflow-only fence is insufficient for a
+   * same-id cross-graph navigation. */
+  enforcesExpectedScopeGraphIdentityAtWrite: boolean;
+  /** True only when THIS hello advertises that graph_get_subgraph publishes
+   * the complete renamed-promotion alias -> terminal witness consumed by the
+   * orchestrator before a promoted write. */
+  publishesPromotedTerminalWitnesses: boolean;
+  /** True only when THIS hello advertises that graph_set_widget re-resolves the
+   * promoted parent rail through the live owner/input relation at mutation time. */
+  enforcesPromotedParentRailAtWrite: boolean;
   /** True when THIS hello advertises that the panel understands `agent_note` — a frame
    *  delivered to the AGENT ONLY and never rendered as a chat bubble.
    *
@@ -355,6 +373,15 @@ export const BRIDGE_CAPABILITY_MIN_PANEL_VERSION: Readonly<Record<string, string
   // #2107 — graph_set_widget's optional expected_node_type fence shipped with
   // the panel-side write-boundary check.
   enforces_expected_node_type_at_write: "0.15.58",
+  // #2314 — promoted inner writes carry an expected owner/workflow witness that
+  // the panel validates immediately before mutating the current graph.
+  enforces_expected_scope_at_write: "0.15.97",
+  // #2314 P1 — the promoted fence additionally validates the object-keyed live
+  // graph identity, which is distinct from graph-local owner/node ids.
+  enforces_expected_scope_graph_identity_at_write: "0.15.97",
+  // #2314 final-rail race — the promoted inner write re-resolves its live
+  // authoritative parent rail at the synchronous mutation boundary.
+  enforces_promoted_parent_rail_at_write: "0.15.97",
 };
 
 /**
@@ -1080,6 +1107,19 @@ export type TabWorkflowUuidRead =
   | { known: true; uuid?: string }
   | { known: false; reason: string };
 
+/** #2314 — the latest structured current-view identity observed from a panel
+ * reply. This is deliberately separate from the workflow stamp: two subgraphs
+ * in one workflow may reuse the same inner node ids and types. */
+export type TabPromotedScopeRead =
+  | {
+      known: true;
+      scope: "root" | "subgraph";
+      ownerNodeId: string | null;
+      workflowUuid?: string;
+      graphIdentity?: string;
+    }
+  | { known: false; reason: string };
+
 /**
  * What the orchestrator's fence-adoption validator answers (#1077).
  *
@@ -1533,6 +1573,42 @@ function expectedNodeTypeFenceRefusal(tabId: string): Error {
   );
 }
 
+function expectedScopeFenceRefusal(tabId: string): Error {
+  return new Error(
+    `graph_set_widget was refused before dispatch because panel tab ${tabId} ` +
+      `does not advertise the atomic promoted-scope write fence. Update the ` +
+      `panel to 0.15.97+ and hard-refresh the browser tab.`,
+  );
+}
+
+function expectedScopeGraphIdentityFenceRefusal(tabId: string): Error {
+  return new Error(
+    `graph_set_widget was refused before dispatch because panel tab ${tabId} ` +
+      `does not advertise the atomic promoted graph-identity write fence. Update the ` +
+      `panel to 0.15.97+ and hard-refresh the browser tab.`,
+  );
+}
+
+function promotedParentRailFenceRefusal(tabId: string): Error {
+  return new Error(
+    `graph_set_widget was refused before dispatch because panel tab ${tabId} ` +
+      `does not advertise the atomic promoted parent-rail write fence. Update the ` +
+      `panel to 0.15.97+ and hard-refresh the browser tab.`,
+  );
+}
+
+function commandCarriesExpectedGraphIdentity(cmd: BridgeCommand): boolean {
+  const scope = cmd.expected_scope;
+  return !!scope && typeof scope === "object" && !Array.isArray(scope) &&
+    Object.prototype.hasOwnProperty.call(scope, "graph_identity");
+}
+
+function commandCarriesPromotedParentRail(cmd: BridgeCommand): boolean {
+  const scope = cmd.expected_scope;
+  return !!scope && typeof scope === "object" && !Array.isArray(scope) &&
+    Object.prototype.hasOwnProperty.call(scope, "parent_rail");
+}
+
 /** Normalize a syntactically valid HTTP(S) WebSocket handshake `Origin` into a
  *  canonical scheme://host:port string. This is metadata for diagnostics and
  *  workflow identity, not authentication: an arbitrary client can write the
@@ -1739,6 +1815,7 @@ export type LateRunReceipt = {
   runRid: string;
   tabId: string;
   promptIds: string[];
+  completionKeys: Array<{ promptId: string; completionKey: string }>;
   lateByMs: number;
 };
 
@@ -1930,6 +2007,9 @@ export class UiBridge {
    *  to (the generation-bound-command leak: the server can't retract a frame already
    *  delivered to the browser, but the browser can decline to APPLY a stale one). */
   private resolveTabWorkflowUuid: ((tabId: string) => string | undefined) | null = null;
+  /** #2314 — latest structured current-view witness per routing tab. Cleared on
+   * hello/rebind boundaries; populated only from successful panel replies. */
+  private readonly promotedScopes = new Map<string, TabPromotedScopeRead>();
   /** #1656 — orchestrator-injected: is this tab's CURRENT stamp one that was CARRIED
    *  from a tab id the same socket retired (carryWorkflowCommandStamp), rather than one
    *  the tab itself has proven under this id?
@@ -2166,7 +2246,10 @@ export class UiBridge {
     { ok: true; cmd: string; tabId: string; ts: number; lateByMs: number; result?: unknown }
   >();
   /** Exact prompt receipts sent by the Panel after its graph_run command returned. */
-  private lateRunReceipts = new Map<string, { tabId: string; promptIds: string[]; ts: number }>();
+  private lateRunReceipts = new Map<
+    string,
+    { tabId: string; promptIds: string[]; completionKeys: Map<string, string>; ts: number }
+  >();
   /** Bounded post-reconcile owners for exact receipts that arrive after panel_run returned. */
   private lateRunReceiptHandoffs = new Map<
     string,
@@ -2948,6 +3031,10 @@ export class UiBridge {
           }
         }
         this.cancelTabGone(tabId, incarnationId);
+        // A hello can keep the route id while replacing the viewed workflow or
+        // subgraph. Do not let a scope witness from the prior canvas authorize
+        // a later promoted write.
+        this.promotedScopes.delete(tabId);
         this.conns.set(tabId, {
           sock,
           tabId,
@@ -2979,6 +3066,17 @@ export class UiBridge {
             (msg as { enforces_workflow_stamp_at_write?: unknown }).enforces_workflow_stamp_at_write === true,
           enforcesExpectedNodeTypeAtWrite:
             (msg as { enforces_expected_node_type_at_write?: unknown }).enforces_expected_node_type_at_write === true,
+          enforcesExpectedScopeAtWrite:
+            (msg as { enforces_expected_scope_at_write?: unknown }).enforces_expected_scope_at_write === true,
+          enforcesExpectedScopeGraphIdentityAtWrite:
+            (msg as { enforces_expected_scope_graph_identity_at_write?: unknown })
+              .enforces_expected_scope_graph_identity_at_write === true,
+          publishesPromotedTerminalWitnesses:
+            (msg as { publishes_promoted_terminal_witnesses?: unknown })
+              .publishes_promoted_terminal_witnesses === true,
+          enforcesPromotedParentRailAtWrite:
+            (msg as { enforces_promoted_parent_rail_at_write?: unknown })
+              .enforces_promoted_parent_rail_at_write === true,
           // Re-read per hello like the stamps above: a reconnect can be a different build.
           acceptsAgentNotes:
             (msg as { accepts_agent_notes?: unknown }).accepts_agent_notes === true,
@@ -3211,6 +3309,7 @@ export class UiBridge {
           // an unrelated tab reusing the id can never be granted the veto.
           const served = this.liveConnForTab(p.ctx.tabId, sock);
           served?.provenSupportedCmds.add(p.cmd);
+          this.notePromotedScope(p.ctx.tabId, msg.result);
           this.noteSiblingSuccess(p.ctx, rid);
           p.resolve(msg.result);
         } else {
@@ -3558,6 +3657,26 @@ export class UiBridge {
     }
   }
 
+  /** Whether THIS connected panel publishes the complete renamed-promotion
+   * terminal witness required for alias-independent promoted-write preflight. */
+  tabPromotedTerminalWitnessCapability(tabId: string): boolean {
+    try {
+      return this.resolveTarget(tabId).publishesPromotedTerminalWitnesses === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Whether THIS connected panel re-resolves the promoted parent rail at the
+   * final graph_set_widget mutation boundary. */
+  tabPromotedParentRailFenceCapability(tabId: string): boolean {
+    try {
+      return this.resolveTarget(tabId).enforcesPromotedParentRailAtWrite === true;
+    } catch {
+      return false;
+    }
+  }
+
   /**
    * The version THIS connection advertised in its own hello (#1828).
    *
@@ -3826,6 +3945,69 @@ export class UiBridge {
       return { generation: conn.helloGeneration, tabSessionId: conn.tabSessionId };
     } catch {
       return undefined;
+    }
+  }
+
+  /** Whether THIS connected panel enforces graph_set_widget's optional
+   * expected promoted owner/workflow witness at the actual mutation boundary
+   * (#2314). */
+  tabExpectedScopeFenceCapability(tabId: string): boolean {
+    try {
+      return this.resolveTarget(tabId).enforcesExpectedScopeAtWrite === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Whether THIS connected panel also enforces the stable graph identity in
+   * an expected promoted scope at the actual mutation boundary (#2314 P1). */
+  tabExpectedScopeGraphIdentityFenceCapability(tabId: string): boolean {
+    try {
+      return this.resolveTarget(tabId).enforcesExpectedScopeGraphIdentityAtWrite === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Return the latest structured current-view owner observed for this tab.
+   * Reads which carry no `viewing` field do not overwrite it; a malformed
+   * structured identity is retained as unknown so a promoted write cannot use
+   * an earlier owner proof after the current-view witness became unreadable. */
+  promotedScopeFor(tabId: string): TabPromotedScopeRead {
+    return (
+      this.promotedScopes.get(tabId) ?? {
+        known: false,
+        reason: "no current panel graph-scope witness has been observed",
+      }
+    );
+  }
+
+  /** Read the current panel view from the live graph immediately before a
+   *  promoted write. `promotedScopeFor` is intentionally only a cached witness
+   *  for synchronous dispatch fences; this method performs the authoritative
+   *  current-view probe and never treats that cache as a substitute. */
+  async readPromotedScope(tabId: string, innerNodeId: number | string): Promise<TabPromotedScopeRead> {
+    try {
+      const result = await this.send(
+        {
+          cmd: "graph_query",
+          ids: [innerNodeId],
+          fields: "compact",
+          limit: 1,
+        },
+        { tabId },
+      );
+      return (
+        this.parsePromotedScopeResult(result) ?? {
+          known: false,
+          reason: "the panel current-view query returned no structured scope identity",
+        }
+      );
+    } catch (err) {
+      return {
+        known: false,
+        reason: err instanceof Error ? err.message : String(err ?? "unknown error"),
+      };
     }
   }
 
@@ -4265,12 +4447,17 @@ export class UiBridge {
   private recordLateRunReceipt(msg: Record<string, unknown>, tabId: string | null): void {
     const runRid = typeof msg.run_rid === "string" ? msg.run_rid.trim() : "";
     const promptId = typeof msg.prompt_id === "string" ? msg.prompt_id.trim() : "";
+    const completionKey =
+      typeof msg.completion_key === "string" && msg.completion_key.length > 0 && msg.completion_key.length <= 512
+        ? msg.completion_key
+        : "";
     if (!runRid || !promptId || !tabId) return;
     this.pruneLateMutations();
     const prior = this.lateRunReceipts.get(runRid);
     if (prior && prior.tabId !== tabId) return;
     const handoff = this.lateRunReceiptHandoffs.get(runRid);
     const promptIds = prior?.promptIds ?? [];
+    const completionKeys = prior?.completionKeys ?? new Map<string, string>();
     const isNewPromptId = !promptIds.includes(promptId);
     if (
       handoff &&
@@ -4288,7 +4475,8 @@ export class UiBridge {
       if (promptIds.length >= UiBridge.MAX_LATE_MUTATIONS) return;
       promptIds.push(promptId);
     }
-    this.lateRunReceipts.set(runRid, { tabId, promptIds, ts: prior?.ts ?? Date.now() });
+    if (completionKey) completionKeys.set(promptId, completionKey);
+    this.lateRunReceipts.set(runRid, { tabId, promptIds, completionKeys, ts: prior?.ts ?? Date.now() });
     if (
       handoff &&
       handoff.expiresAt > Date.now() &&
@@ -4362,6 +4550,7 @@ export class UiBridge {
       runRid,
       tabId: hit.tabId,
       promptIds: [...hit.promptIds],
+      completionKeys: [...hit.completionKeys.entries()].map(([promptId, completionKey]) => ({ promptId, completionKey })),
       lateByMs: Math.max(0, Date.now() - hit.ts),
     };
   }
@@ -4375,6 +4564,7 @@ export class UiBridge {
       runRid,
       tabId: hit.tabId,
       promptIds: [...hit.promptIds],
+      completionKeys: [...hit.completionKeys.entries()].map(([promptId, completionKey]) => ({ promptId, completionKey })),
       lateByMs: Math.max(0, Date.now() - hit.ts),
     };
   }
@@ -4962,6 +5152,7 @@ export class UiBridge {
    *  the switch retire branch (with the retired id), and the bridge defers its on-hello
    *  replay/flush/resume until AFTER onPanelMessage so this purge lands first. */
   dropQueuedDeliveries(tabId: string): void {
+    this.promotedScopes.delete(tabId);
     this.missedFrames.delete(tabId);
     this.mailbox.delete(tabId);
     // MIRROR teardown (see above): a viewer must not auto-follow an unproven workflow switch.
@@ -5060,7 +5251,16 @@ export class UiBridge {
     }
   }
 
-  async send(cmd: BridgeCommand, opts: { tabId?: string; timeoutMs?: number; onDispatchedRid?: (rid: string) => void } = {}): Promise<unknown> {
+  async send(
+    cmd: BridgeCommand,
+    opts: {
+      tabId?: string;
+      timeoutMs?: number;
+      onDispatchedRid?: (rid: string) => void;
+      /** Synchronous fence at the final live-connection dispatch boundary. */
+      beforeDispatch?: () => void;
+    } = {},
+  ): Promise<unknown> {
     // #357: read (idempotent) ops get a more tolerant default so a busy-but-alive
     // panel main thread (e.g. Preview3D loading a large FBX) isn't declared frozen;
     // mutating ops keep the tight default. An explicit opts.timeoutMs always wins.
@@ -5143,6 +5343,44 @@ export class UiBridge {
     ) {
       const refusal = markDispatched(
         expectedNodeTypeFenceRefusal(conn.tabId),
+        false,
+      );
+      return Promise.reject(markCapabilityRefusal(refusal));
+    }
+    // #2314 — an expected_scope is meaningful only when the receiving panel
+    // compares it against its LIVE current graph at the synchronous mutation
+    // boundary. An older panel silently ignoring this optional field could
+    // write a colliding inner node after receiver navigation, so refuse before
+    // dispatch.
+    if (
+      cmd.cmd === "graph_set_widget" &&
+      Object.prototype.hasOwnProperty.call(cmd, "expected_scope") &&
+      !conn.enforcesExpectedScopeAtWrite
+    ) {
+      const refusal = markDispatched(
+        expectedScopeFenceRefusal(conn.tabId),
+        false,
+      );
+      return Promise.reject(markCapabilityRefusal(refusal));
+    }
+    if (
+      cmd.cmd === "graph_set_widget" &&
+      commandCarriesExpectedGraphIdentity(cmd) &&
+      !conn.enforcesExpectedScopeGraphIdentityAtWrite
+    ) {
+      const refusal = markDispatched(
+        expectedScopeGraphIdentityFenceRefusal(conn.tabId),
+        false,
+      );
+      return Promise.reject(markCapabilityRefusal(refusal));
+    }
+    if (
+      cmd.cmd === "graph_set_widget" &&
+      commandCarriesPromotedParentRail(cmd) &&
+      !conn.enforcesPromotedParentRailAtWrite
+    ) {
+      const refusal = markDispatched(
+        promotedParentRailFenceRefusal(conn.tabId),
         false,
       );
       return Promise.reject(markCapabilityRefusal(refusal));
@@ -5546,6 +5784,37 @@ export class UiBridge {
           markCapabilityRefusal(markDispatched(expectedNodeTypeFenceRefusal(live.tabId), false)),
         );
       }
+      if (
+        cmd.cmd === "graph_set_widget" &&
+        Object.prototype.hasOwnProperty.call(cmd, "expected_scope") &&
+        !live.enforcesExpectedScopeAtWrite
+      ) {
+        return Promise.reject(
+          markCapabilityRefusal(markDispatched(expectedScopeFenceRefusal(live.tabId), false)),
+        );
+      }
+      if (
+        cmd.cmd === "graph_set_widget" &&
+        commandCarriesExpectedGraphIdentity(cmd) &&
+        !live.enforcesExpectedScopeGraphIdentityAtWrite
+      ) {
+        return Promise.reject(
+          markCapabilityRefusal(
+            markDispatched(expectedScopeGraphIdentityFenceRefusal(live.tabId), false),
+          ),
+        );
+      }
+      if (
+        cmd.cmd === "graph_set_widget" &&
+        commandCarriesPromotedParentRail(cmd) &&
+        !live.enforcesPromotedParentRailAtWrite
+      ) {
+        return Promise.reject(
+          markCapabilityRefusal(
+            markDispatched(promotedParentRailFenceRefusal(live.tabId), false),
+          ),
+        );
+      }
       if (live.sock.readyState !== WebSocket.OPEN) {
         if (opts.tabId && UiBridge.isMailboxable(cmd)) {
           this.storeMailbox(opts.tabId, cmd);
@@ -5553,6 +5822,18 @@ export class UiBridge {
         }
         return Promise.reject(
           markDispatched(new Error(`Panel tab ${live.tabId.slice(0, 8)} is not open`), false),
+        );
+      }
+      // This is the last synchronous point after the graph lane has waited and
+      // the receiver has been re-resolved. A handler-side callback run before
+      // bridge.send() cannot fence a reconnect or same-workflow tab rebind in
+      // that interval. A throwing callback is a pre-dispatch refusal: no frame
+      // has been written and no mutation can have landed.
+      try {
+        opts.beforeDispatch?.();
+      } catch (err) {
+        return Promise.reject(
+          markDispatched(err instanceof Error ? err : new Error(String(err)), false),
         );
       }
       return new Promise((resolve, reject) => {
@@ -5619,6 +5900,78 @@ export class UiBridge {
       if (p.ctx.tabId !== ctx.tabId) continue;
       p.ctx.siblingReply ??= ctx.command.cmd;
     }
+  }
+
+  /** Record only the panel's structured current-view witness. This is a cache
+   * of an authenticated panel reply, not caller-supplied command metadata. */
+  private notePromotedScope(tabId: string, result: unknown): void {
+    const parsed = this.parsePromotedScopeResult(result);
+    if (parsed) this.promotedScopes.set(tabId, parsed);
+  }
+
+  /** Parse only structured `viewing` metadata. `undefined` means the command
+   * did not publish a scope witness and must not overwrite the cache. */
+  private parsePromotedScopeResult(result: unknown): TabPromotedScopeRead | undefined {
+    if (!result || typeof result !== "object" || Array.isArray(result)) return undefined;
+    const payload = result as Record<string, unknown>;
+    if (!Object.prototype.hasOwnProperty.call(payload, "viewing")) return undefined;
+    const viewing = payload.viewing;
+    if (!viewing || typeof viewing !== "object" || Array.isArray(viewing)) {
+      return {
+        known: false,
+        reason: "the panel returned malformed current-view metadata",
+      };
+    }
+    const identity = viewing as Record<string, unknown>;
+    if (identity.scope !== "root" && identity.scope !== "subgraph") {
+      return {
+        known: false,
+        reason: "the panel returned an unknown current-view scope",
+      };
+    }
+    const rawOwner = identity.owner_node_id;
+    let ownerNodeId: string | null = null;
+    if (rawOwner !== undefined && rawOwner !== null) {
+      if (
+        (typeof rawOwner !== "number" || !Number.isSafeInteger(rawOwner)) &&
+        (typeof rawOwner !== "string" || rawOwner.length === 0)
+      ) {
+        return {
+          known: false,
+          reason: "the panel returned a malformed current-view owner",
+        };
+      }
+      ownerNodeId = String(rawOwner);
+    }
+    const rawWorkflowUuid = identity.workflow_uuid;
+    if (
+      rawWorkflowUuid !== undefined &&
+      (typeof rawWorkflowUuid !== "string" || rawWorkflowUuid.length === 0)
+    ) {
+      return {
+        known: false,
+        reason: "the panel returned a malformed current-view workflow identity",
+      };
+    }
+    const rawGraphIdentity = identity.graph_identity;
+    if (
+      rawGraphIdentity !== undefined &&
+      (typeof rawGraphIdentity !== "string" ||
+        rawGraphIdentity.length === 0 ||
+        rawGraphIdentity.length > 256)
+    ) {
+      return {
+        known: false,
+        reason: "the panel returned a malformed current-view graph identity",
+      };
+    }
+    return {
+      known: true,
+      scope: identity.scope,
+      ownerNodeId,
+      ...(rawWorkflowUuid !== undefined ? { workflowUuid: rawWorkflowUuid } : {}),
+      ...(rawGraphIdentity !== undefined ? { graphIdentity: rawGraphIdentity } : {}),
+    };
   }
 
   /** Write one attempt of a command to a live socket and arm its reply timer.
