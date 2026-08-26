@@ -185,13 +185,8 @@ function parseWaitFromProse(text: string): number | null {
  */
 const ALPHA_IDENTIFIER_LABEL =
   /\b(?:account|acct|user|workspace|token|key)(?:[_-](?:id|identifier)|\s+(?:id|identifier))\s*(?:[,;.!?:=]\s*[\[({]?|[-_]+\s*[\[({]?|[\[({])?\s*$/i;
-const DIRECT_ACCOUNT_LABEL =
-  /(?:^|[.!?;]\s*|(?:your|the)[\s-]+)account\s*(?:[,;.!?:=]\s*[\[({]?|[-_]+\s*[\[({]?|[\[({]|\s+)$/i;
-const DIRECT_USER_LABEL =
-  /(?:^|[.!?;]\s*|(?:your|the)[\s-]+)user\s*(?:[,;.!?:=]\s*[\[({]?|[-_]+\s*[\[({]?|[\[({]|\s+)$/i;
 const DIRECT_PUNCTUATED_LABEL =
   /(?:^|[.!?;]\s*|(?:your|the)[\s-]+)(?:account|user)\s*(?:[,;.!?:=]\s*[\[({]?|[-_]+\s*[\[({]?|[\[({])\s*$/i;
-const IDENTIFIER_STATUS = /^\s+(?:is|was|has|had|reached|exceeded|exhausted|limited|invalid|expired|blocked|disabled)\b/i;
 type AlphaRunClassification = "identifier" | "prose";
 type AlphaRunBoundary = "bare-prose" | "lexical-label-prose";
 
@@ -210,23 +205,6 @@ const ALPHA_RUN_CLASSIFICATION: ReadonlyMap<string, ReadonlySet<AlphaRunBoundary
 function classifyAlphaRun(run: string, boundary: AlphaRunBoundary = "bare-prose"): AlphaRunClassification {
   const base = run.split(/[-_]+/)[0].toLowerCase();
   return ALPHA_RUN_CLASSIFICATION.get(base)?.has(boundary) ? "prose" : "identifier";
-}
-
-function hasAlphaIdentifierContext(input: string, offset: number, run: string): boolean {
-  const before = input.slice(Math.max(0, offset - 64), offset);
-  if (ALPHA_IDENTIFIER_LABEL.test(before)) return true;
-  const explicitWrapper = DIRECT_PUNCTUATED_LABEL.test(before) && /(?:=|[\[({])\s*$/.test(before);
-  if (explicitWrapper) return true;
-  if (!DIRECT_ACCOUNT_LABEL.test(before) && !DIRECT_USER_LABEL.test(before)) return false;
-
-  const after = input.slice(offset + run.length);
-  const afterClosingPunctuation = after.replace(/^\s*[\])}]+/, "");
-  return (
-    run.includes("-") ||
-    !afterClosingPunctuation.trim() ||
-    /^[\s]*[.,;!?)]/.test(after) ||
-    IDENTIFIER_STATUS.test(afterClosingPunctuation)
-  );
 }
 
 function hasExplicitAlphaIdentifierBoundary(input: string, offset: number): boolean {
@@ -267,15 +245,14 @@ export function sanitizeDetail(raw: string, max = 200): string {
       (run, prefix: string) =>
         preserveNaturalLanguagePrefixedRun(run, prefix) ? run : `${prefix}<redacted>`,
     )
-    // bare long hex / base62 runs (an id that came without a prefix). Digits
-    // remain a strong shape signal. Alpha-only runs are ambiguous with prose,
-    // so require explicit label syntax or an account-status boundary.
+    // Bare long runs are identifiers unless the explicit prose table recognizes
+    // a bare prose boundary. Structured labels and wrappers override that table.
     .replace(
       /\b[A-Za-z0-9]{20,}(?:[-_]+[A-Za-z0-9]+)*\b/g,
       (run, offset, input: string) => {
         const explicitIdentifier = hasExplicitAlphaIdentifierBoundary(input, offset);
         if (!explicitIdentifier && classifyAlphaRun(run) === "prose") return run;
-        return /\d/.test(run) || hasAlphaIdentifierContext(input, offset, run) ? "<redacted>" : run;
+        return "<redacted>";
       },
     );
   return masked.replace(/\s+/g, " ").trim().slice(0, max);
