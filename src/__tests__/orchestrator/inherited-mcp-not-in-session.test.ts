@@ -434,8 +434,13 @@ describe("the system prompt's MCP-extension claim is retracted off the Claude la
     // per-session qualifier, the correction silently stops matching what it
     // corrects and a Claude-lane agent is back to reading the old claim.
     expect(PANEL_SYSTEM_APPEND).toMatch(/declared_to_this_spawn/);
-    expect(PANEL_SYSTEM_APPEND).toMatch(/only the Claude backend inherits them/);
-    expect(PANEL_SYSTEM_APPEND).not.toMatch(/panel_list_mcp shows what's connected/);
+    expect(PANEL_SYSTEM_APPEND).toMatch(/Only the Claude backend is handed them/);
+    // The clause this replaces, verbatim from #2309's shrunk preamble. It is
+    // false on every CLI lane, and it is what a reworded persona would drift
+    // back toward — so pin its ABSENCE, not just the correction's presence.
+    expect(PANEL_SYSTEM_APPEND).not.toMatch(
+      /panel_remove_mcp manage MCP servers and panel_reload loads the change into this session/,
+    );
   });
 });
 
