@@ -1660,6 +1660,9 @@ describe("restart truthfulness + Pinokio-shaped refusal (#742)", () => {
     // blind re-issue, and is given the authoritative way to settle it.
     expect(result.message).toMatch(/MAY have taken effect/);
     expect(result.message).toMatch(/get_system_stats/);
+    // And the report stops asserting unreachability over the top of a 200 it got.
+    expect(result.message).not.toMatch(/No reachable/);
+    expect(result.message).toMatch(/reboot endpoint could be confirmed/);
     expect(result.message).toMatch(/GET \/v2\/manager\/reboot/);
   });
 

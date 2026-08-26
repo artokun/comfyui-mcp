@@ -4924,7 +4924,14 @@ async function rebootViaManager(base: string): Promise<RebootResult> {
     rebooting: false,
     reason: "no-endpoint",
     note:
-      `No reachable ComfyUI-Manager reboot endpoint.${generation}${
+      // "No REACHABLE endpoint" is itself a claim, and an ambiguous 200 refutes it:
+      // something answered. Say what was established — nothing could be CONFIRMED —
+      // rather than asserting unreachability over the top of a reply we received.
+      `${
+        ambiguous.length
+          ? "No ComfyUI-Manager reboot endpoint could be confirmed."
+          : "No reachable ComfyUI-Manager reboot endpoint."
+      }${generation}${
         failures.length ? ` Tried: ${failures.join("; ")}.` : ""
       }${maybeLanded} For a LOCAL install, use the headless restart_comfyui tool ` +
       `(kill + relaunch); otherwise restart ComfyUI on the host.`,
