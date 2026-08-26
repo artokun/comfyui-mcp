@@ -196,10 +196,12 @@ export async function runHealthCheck(
           if (processed.has(i)) continue;
 
           const line = allLines[i];
-          // Match lines with [ERROR], [EXCEPTION] markers or Traceback/Exception starts
-          const isErrorLine = /\[ERROR\]|\[EXCEPTION\]/i.test(line) ||
-                             /^Traceback\s*\(/i.test(line) ||
-                             /^Exception\s*:/i.test(line);
+          // Match actual error lines, not substrings. Accept:
+          // - [ERROR] or [EXCEPTION] markers (with brackets)
+          // - (ERROR|Exception): pattern (with colon, not substring "errors")
+          // - Traceback at start of line (Python exceptions)
+          const isErrorLine = /\[ERROR\]|\[EXCEPTION\]|(ERROR|Exception)\s*:/i.test(line) ||
+                             /^Traceback\s*\(/i.test(line);
 
           if (isErrorLine) {
             errorLines.push(line);

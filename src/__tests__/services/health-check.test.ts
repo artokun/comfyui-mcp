@@ -224,4 +224,29 @@ describe("recent_errors as a limit (#1146)", () => {
     expect(text).not.toMatch(/0 errors/);
     expect(text).not.toMatch(/Some warning/);
   });
+
+  it("matches ERROR: prefix format without brackets", async () => {
+    // Python logging format: ERROR:root:message or ERROR:module:message
+    fetchApi.mockImplementation(async (path: string) =>
+      path === "/internal/logs"
+        ? new Response(
+            [
+              "2026-08-25T20:00:00 [INFO] startup",
+              "2026-08-25T20:00:01 DEBUG: Some debug info, 0 errors found",
+              "2026-08-25T20:00:02 ERROR:root:Failed to load model weights",
+              "2026-08-25T20:00:03 INFO: Model cached, 0 errors so far",
+              "2026-08-25T20:00:04 ERROR:comfyui.loader:Checkpoint not found",
+            ].join("\n"),
+            { status: 200 }
+          )
+        : new Response(JSON.stringify([]), { status: 200 }),
+    );
+    const text = await runHealthCheck({ modelCategories: [], recentErrors: 10 });
+    // Should only have 2 ERROR: lines, not the 0 errors or debug lines
+    expect(text).toMatch(/Recent errors\*\* \(last 2\)/);
+    expect(text).toMatch(/Failed to load model/);
+    expect(text).toMatch(/Checkpoint not found/);
+    expect(text).not.toMatch(/0 errors/);
+    expect(text).not.toMatch(/DEBUG/);
+  });
 });
