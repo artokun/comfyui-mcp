@@ -184,17 +184,24 @@ function parseWaitFromProse(text: string): number | null {
  * screenshotted.
  */
 const ALPHA_IDENTIFIER_LABEL =
-  /\b(?:account|acct|user|workspace|token|key)(?:[_-](?:id|identifier)|\s+(?:id|identifier))\s*(?:[:=]\s*)?$/i;
-const DIRECT_ACCOUNT_LABEL = /(?:^|[.!?;]\s*|(?:your|the)\s+)account\s*$/i;
-const ACCOUNT_STATUS = /^\s+(?:is|was|has|had|reached|exceeded|exhausted|limited|invalid|expired|blocked|disabled)\b/i;
+  /\b(?:account|acct|user|workspace|token|key)(?:[_-](?:id|identifier)|\s+(?:id|identifier))\s*(?:[:=]\s*[\[({]?\s*|[\[({]\s*)?$/i;
+const DIRECT_ACCOUNT_LABEL = /(?:^|[.!?;]\s*|(?:your|the)\s+)account\s*(?:[:=]\s*|[\[({]\s*|\s+)$/i;
+const DIRECT_USER_LABEL = /(?:^|[.!?;]\s*)user\s*(?:[:=]\s*|[\[({]\s*|\s+)$/i;
+const IDENTIFIER_STATUS = /^\s+(?:is|was|has|had|reached|exceeded|exhausted|limited|invalid|expired|blocked|disabled)\b/i;
 
 function hasAlphaIdentifierContext(input: string, offset: number, run: string): boolean {
   const before = input.slice(Math.max(0, offset - 64), offset);
   if (ALPHA_IDENTIFIER_LABEL.test(before)) return true;
-  if (!DIRECT_ACCOUNT_LABEL.test(before)) return false;
+  if (!DIRECT_ACCOUNT_LABEL.test(before) && !DIRECT_USER_LABEL.test(before)) return false;
 
   const after = input.slice(offset + run.length);
-  return run.includes("-") || !after.trim() || /^[\s]*[.,;!?)]/.test(after) || ACCOUNT_STATUS.test(after);
+  const afterClosingPunctuation = after.replace(/^\s*[\])}]+/, "");
+  return (
+    run.includes("-") ||
+    !after.trim() ||
+    /^[\s]*[.,;!?)]/.test(after) ||
+    IDENTIFIER_STATUS.test(afterClosingPunctuation)
+  );
 }
 
 export function sanitizeDetail(raw: string, max = 200): string {
@@ -214,8 +221,9 @@ export function sanitizeDetail(raw: string, max = 200): string {
       /\b(?:([A-Za-z][A-Za-z0-9]{1,12})[-_])?[A-Za-z0-9]{0,32}[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}[A-Za-z0-9]{0,32}\b/g,
       (_m, prefix: string | undefined) => (prefix ? `${prefix}-<redacted>` : "<redacted>"),
     )
-    // prefixed opaque identifiers: org-…, cak-…, key_…, acct-…
-    .replace(/\b([A-Za-z][A-Za-z0-9]{1,12}[-_])[A-Za-z0-9]{10,}\b/g, "$1<redacted>")
+    // prefixed opaque identifiers: org-…, cak-…, key_…, acct-…. Common
+    // label words followed by a hyphen are prose, not vendor prefixes.
+    .replace(/\b(?!(?:account|user)-)([A-Za-z][A-Za-z0-9]{1,12}[-_])[A-Za-z0-9]{10,}\b/gi, "$1<redacted>")
     // bare long hex / base62 runs (an id that came without a prefix). Digits
     // remain a strong shape signal. Alpha-only runs are ambiguous with prose,
     // so require explicit label syntax or an account-status boundary.

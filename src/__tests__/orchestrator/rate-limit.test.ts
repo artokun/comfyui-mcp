@@ -168,6 +168,24 @@ describe("sanitizeDetail", () => {
     expect(sanitizeDetail("user_id qavexidopulnertiskym is limited")).toBe("user_id <redacted> is limited");
   });
 
+  it("redacts user-labeled identifiers for terminal statuses", () => {
+    for (const status of ["disabled", "blocked", "expired"]) {
+      expect(sanitizeDetail(`user abcdefghijklmnopqrstuv is ${status}`)).toBe(
+        `user <redacted> is ${status}`,
+      );
+    }
+  });
+
+  it("redacts punctuation-wrapped and bracketed labels", () => {
+    expect(sanitizeDetail("account: abcdefghijklmnopqrstuv is limited")).toBe(
+      "account: <redacted> is limited",
+    );
+    expect(sanitizeDetail("account (abcdefghijklmnopqrstuv) is limited")).toBe(
+      "account (<redacted>) is limited",
+    );
+    expect(sanitizeDetail("account_id=[abcdefghijklmnopqrstuv]")).toBe("account_id=[<redacted>]");
+  });
+
   it("redacts a hyphen-attached identifier atomically", () => {
     expect(sanitizeDetail("account qavexidopulnertiskym-extra is limited")).toBe(
       "account <redacted> is limited",
@@ -179,6 +197,8 @@ describe("sanitizeDetail", () => {
     expect(sanitizeDetail("the user uncharacteristically exceeded the limit")).toBe(
       "the user uncharacteristically exceeded the limit",
     );
+    expect(sanitizeDetail("user-uncharacteristically")).toBe("user-uncharacteristically");
+    expect(sanitizeDetail("account-compartmentalization")).toBe("account-compartmentalization");
   });
 
   it("leaves an ordinary sentence readable", () => {
