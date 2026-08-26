@@ -60,7 +60,7 @@ describe("authenticated panel template relay (#2196)", () => {
     expect(authorization).toBe("");
   });
 
-  it("uses a non-loopback panel origin when it exactly matches the current target", async () => {
+  it("refuses a non-loopback panel origin even when it exactly matches the current target", async () => {
     const realFetch = globalThis.fetch;
     const panelOrigin = "https://remote.example";
     const remoteCalls: string[] = [];
@@ -83,10 +83,10 @@ describe("authenticated panel template relay (#2196)", () => {
     process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
     process.env.COMFYUI_MCP_TEMPLATE_RELAY_URL = relay.endpointUrl;
 
-    await expect(requestPanelTemplateIndex()).resolves.toEqual({
-      "remote-pack": [{ name: "remote-template" }],
+    await expect(requestPanelTemplateIndex()).rejects.toMatchObject<PanelTemplateRelayError>({
+      code: "NO_PANEL_ORIGIN",
     });
-    expect(remoteCalls).toEqual([`${panelOrigin}/api/workflow_templates`]);
+    expect(remoteCalls).toEqual([]);
   });
 
   it("fails closed when the panel origin does not match the current target", async () => {
@@ -184,8 +184,9 @@ describe("authenticated panel template relay (#2196)", () => {
 
   it("rejects a successful response whose response.url is a different origin", async () => {
     const realFetch = globalThis.fetch;
+    let relayEndpoint = "";
     vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
-      if (String(input).startsWith("http://127.0.0.1:")) return realFetch(input, init);
+      if (String(input) === relayEndpoint) return realFetch(input, init);
       const response = new Response(JSON.stringify({ "panel-pack": [{ name: "unexpected" }] }), { status: 200 });
       Object.defineProperty(response, "url", {
         value: "https://redirected.example/api/workflow_templates",
@@ -197,11 +198,12 @@ describe("authenticated panel template relay (#2196)", () => {
       bridge: { canReach: () => true },
       resolvePanelAgent: () => ({ agentKey: "shared::codex", secret: SECRET }),
       resolvePanelTab: () => "tab-1",
-      resolveCurrentTarget: () => ({ url: "https://panel.example/comfyapi", generation: 0 }),
-      resolvePanelUrl: () => "https://panel.example/api/workflow_templates",
-      resolveAllowedPanelOrigin: () => currentPanelTemplateOrigin("https://panel.example", "https://panel.example/comfyapi"),
+      resolveCurrentTarget: () => ({ url: "http://127.0.0.1:8188/comfyapi", generation: 0 }),
+      resolvePanelUrl: () => "http://127.0.0.1:8188/api/workflow_templates",
+      resolveAllowedPanelOrigin: () => currentPanelTemplateOrigin("http://127.0.0.1:8188", "http://127.0.0.1:8188/comfyapi"),
     });
     servers.push(relay);
+    relayEndpoint = relay.endpointUrl;
     process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
     process.env.COMFYUI_MCP_TEMPLATE_RELAY_URL = relay.endpointUrl;
 
@@ -214,11 +216,13 @@ describe("authenticated panel template relay (#2196)", () => {
     await expect(requestPanelTemplateIndex()).resolves.toBeUndefined();
   });
 
-  it("only authorizes an origin corroborated by the current target", () => {
-    expect(currentPanelTemplateOrigin("https://remote.example:443", "https://remote.example/comfyapi")).toBe("https://remote.example");
+  it("only authorizes a loopback origin corroborated by the current target", () => {
+    expect(currentPanelTemplateOrigin("https://remote.example:443", "https://remote.example/comfyapi")).toBeUndefined();
     expect(currentPanelTemplateOrigin("http://localhost:8188", "http://127.0.0.1:8188/comfyapi")).toBe("http://localhost:8188");
     expect(currentPanelTemplateOrigin("http://localhost:8189", "http://127.0.0.1:8188/comfyapi")).toBeUndefined();
     expect(currentPanelTemplateOrigin("https://remote.example", "https://other.example/comfyapi")).toBeUndefined();
+    expect(currentPanelTemplateOrigin("https://remote.example", "https://remote.example/comfyapi")).toBeUndefined();
+    expect(currentPanelTemplateOrigin("https://forged.example", "http://127.0.0.1:8188/comfyapi")).toBeUndefined();
     expect(currentPanelTemplateOrigin(undefined, "https://remote.example/comfyapi")).toBeUndefined();
     expect(currentPanelTemplateOrigin("https://user:secret@remote.example", "https://remote.example/comfyapi")).toBeUndefined();
   });

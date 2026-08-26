@@ -413,10 +413,12 @@ function httpOrigin(raw: string | undefined): string | undefined {
 }
 
 /**
- * A panel origin is usable only when it corroborates the current target. The
- * target is selected by the orchestrator's hello/probe flow, not by the child
- * request, so this comparison does not turn the relay into an arbitrary URL
- * fetcher. URL.origin also canonicalizes default ports and host casing.
+ * A panel origin is usable only when it is a loopback listener and corroborates
+ * the current target. The server-observed Origin is metadata, not authentication:
+ * a native client can forge it on the tokenless loopback bridge. Keeping the
+ * fetch destination loopback-only prevents that metadata, or the client-steerable
+ * active target, from authorizing a remote fetch. URL.origin also canonicalizes
+ * default ports and host casing.
  */
 export function currentPanelTemplateOrigin(
   panelOrigin: string | undefined,
@@ -425,13 +427,12 @@ export function currentPanelTemplateOrigin(
   const observed = parsedHttpOrigin(panelOrigin);
   const target = parsedHttpOrigin(currentTarget);
   if (!observed || !target) return undefined;
-  const exact = observed.origin === target.origin;
   const sameLoopbackListener =
     LOOPBACK_HOSTS.has(observed.host) &&
     LOOPBACK_HOSTS.has(target.host) &&
     observed.protocol === target.protocol &&
     observed.port === target.port;
-  return exact || sameLoopbackListener ? observed.origin : undefined;
+  return sameLoopbackListener ? observed.origin : undefined;
 }
 
 function safePanelTemplateUrl(raw: string | undefined, allowedOrigin: string | undefined): URL | undefined {

@@ -82,6 +82,37 @@ describe("orchestrator panel template relay wiring (#2196)", () => {
     expect(panelRequests).toBe(1);
   });
 
+  it("rejects forged and non-loopback origins through the production wiring", async () => {
+    let target = "http://127.0.0.1:8188/comfyapi";
+    let observedOrigin = "https://forged.example";
+    const bridge = {
+      canReach: () => true,
+      resolveFailure: () => undefined,
+      resolveSharedTabId: () => "tab-1",
+      tabServerOrigin: () => observedOrigin,
+    };
+    const wiring = createPanelTemplateRelayWiring({
+      bridge,
+      currentTarget: () => target,
+      currentTargetGeneration: () => 0,
+      secrets: new Map([[SECRET, "orchestrator::codex"]]),
+    });
+
+    expect(wiring.resolveAllowedPanelOrigin("tab-1", target)).toBeUndefined();
+    expect(wiring.resolvePanelUrl("tab-1", target)).toBeUndefined();
+
+    target = "https://remote.example/comfyapi";
+    observedOrigin = "https://remote.example";
+    expect(wiring.resolveAllowedPanelOrigin("tab-1", target)).toBeUndefined();
+    expect(wiring.resolvePanelUrl("tab-1", target)).toBeUndefined();
+
+    const relay = await startPanelTemplateRelayServer({ bridge, ...wiring });
+    servers.push(relay);
+    process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
+    process.env.COMFYUI_MCP_TEMPLATE_RELAY_URL = relay.endpointUrl;
+    await expect(requestPanelTemplateIndex()).rejects.toMatchObject({ code: "NO_PANEL_ORIGIN" });
+  });
+
   it("rejects a stale in-flight response after retargeting and still serves the current target", async () => {
     let target = "";
     let generation = 0;
