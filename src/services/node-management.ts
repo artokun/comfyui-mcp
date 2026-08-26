@@ -29,6 +29,7 @@ import {
   type LocalWriteTargetMismatch,
   detectLocalWriteTargetMismatch,
   resolveEffectiveComfyUIBase,
+  resolveEffectiveComfyUIBaseLive,
   resolveEffectiveComfyUICodeBase,
   resolveCustomNodesScanBaseLiveStrict,
   resolveInstallInterpreter,
@@ -3197,10 +3198,18 @@ async function cloneCustomNodeFallback(
     opts?.managerRefusalNote ?? `"${repoName}" is not in the ComfyUI-Manager registry`;
   // basePath is the CALL-SCOPED local ComfyUI root. When the caller has already
   // established that no safe root exists, do not re-read the saved-default
-  // resolver and recreate the wrong-machine clone hazard.
-  const comfyuiBase =
-    basePath ??
-    (opts?.allowSharedWorkspaceFallback === false ? undefined : resolveEffectiveComfyUIBase());
+  // resolver and recreate the wrong-machine clone hazard. But we CAN consult the
+  // live server's root before refusing — that is a separate, authoritative answer.
+  let comfyuiBase = basePath;
+  if (!comfyuiBase && opts?.allowSharedWorkspaceFallback !== false) {
+    // Shared fallback allowed: use the sync resolver (configuration + saved default)
+    comfyuiBase = resolveEffectiveComfyUIBase();
+  } else if (!comfyuiBase && !isRemoteMode()) {
+    // No shared fallback, but local target: consult the live server's root before refusing.
+    // A separately-started portable ComfyUI running with COMFYUI_PATH unset and no saved
+    // default still has a knowable root via its argv or detected process.
+    comfyuiBase = await resolveEffectiveComfyUIBaseLive();
+  }
   // Same hazard as the CLI paths (codex gate P0): the guard below catches "no
   // path", but the dangerous case is HAVING one while connected elsewhere. A
   // clone into a stale local tree would report a successful install of a pack the
