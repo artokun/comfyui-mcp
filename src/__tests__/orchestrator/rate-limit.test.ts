@@ -125,10 +125,55 @@ describe("sanitizeDetail", () => {
     expect(out).not.toContain("abcdefghijklmnop");
   });
 
+  it("redacts an identifier that has no digit in it at all", () => {
+    // The reported case. 22 alphabetic characters, no separator, no digit.
+    const alpha = sanitizeDetail("account abcdefghijklmnopqrstuv is limited");
+    expect(alpha).not.toContain("abcdefghijklmnopqrstuv");
+    expect(alpha).toContain("is limited");
+
+    // The control that made the hole visible: the SAME string with its last
+    // character changed to a digit was already redacted. Both must behave alike —
+    // whether a vendor happened to mint an id with a digit in it is not a
+    // property of how secret the id is.
+    const digit = sanitizeDetail("account abcdefghijklmnopqrstu9 is limited");
+    expect(digit).not.toContain("abcdefghijklmnopqrstu9");
+
+    // …and it must not depend on a label sitting in front of the id, either. An
+    // id is redacted for its shape, not for the word that happens to precede it.
+    for (const sentence of [
+      "rate limit reached for abcdefghijklmnopqrstuv",
+      "the tenant abcdefghijklmnopqrstuv exceeded its quota",
+      "your plan abcdefghijklmnopqrstuv has no credits",
+      "rate limited (abcdefghijklmnopqrstuv)",
+    ]) {
+      expect(sanitizeDetail(sentence)).not.toContain("abcdefghijklmnopqrstuv");
+    }
+  });
+
   it("leaves an ordinary sentence readable", () => {
     const out = sanitizeDetail("Rate limit reached for gpt-4o in organization on requests per min (RPM): Limit 500");
     expect(out).toContain("requests per min");
     expect(out).toContain("Limit 500");
+
+    // The other half of #2313. Dropping the digit requirement widened the bare-run
+    // rule, and the whole point of showing a 429 is the explanation — so the
+    // explanations have to keep arriving intact. None of these contains an
+    // unbroken 20-character run, because sentences have spaces in them.
+    for (const sentence of [
+      "organization requests per minute exceeded",
+      "You exceeded your current quota, please check your plan and billing details.",
+      "Your credit balance is too low to access the API.",
+      "request reached organization max RPM: 3, please try again after 1 seconds",
+      "Too many concurrent requests. Reduce concurrency and retry.",
+      "Free tier limit reached. Upgrade your plan at the billing dashboard to continue.",
+    ]) {
+      expect(sanitizeDetail(sentence)).not.toContain("<redacted>");
+    }
+
+    // The threshold is bracketed from BOTH sides on purpose. The case above pins
+    // it at or below 22 characters (a 22-character id must vanish); this pins it
+    // above 18, so nobody "hardens" the rule down into ordinary long words.
+    expect(sanitizeDetail("this request was disproportionately large")).toContain("disproportionately");
   });
 
   it("redacts an email address", () => {

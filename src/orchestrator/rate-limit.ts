@@ -174,9 +174,11 @@ function parseWaitFromProse(text: string): number | null {
  * first — but it knows nothing about `org-7df23a26037240f88f967fb1c64d8e3f` or
  * `cak-fc91zq3o4h0b111bug391`, which is exactly what leaked. The rule here is
  * SHAPE, not a list of known prefixes: a prefixed opaque run, or a long bare
- * hex/base62 run, is an identifier whatever the vendor calls it, and no
- * rate-limit explanation needs one to be useful. A vendor inventing a new prefix
- * tomorrow is covered without a code change.
+ * run, is an identifier whatever the vendor calls it, and no rate-limit
+ * explanation needs one to be useful. A vendor inventing a new prefix tomorrow is
+ * covered without a code change, and so is one that mints ids with no digit in
+ * them (#2313) — shape here means LENGTH and the absence of a space, never a
+ * character class, and never a guess at whether a run reads like English.
  *
  * Deliberately aggressive. Over-redaction costs a few characters of an error
  * message; under-redaction publishes an account id into a chat log that gets
@@ -197,8 +199,21 @@ export function sanitizeDetail(raw: string, max = 200): string {
     )
     // prefixed opaque identifiers: org-…, cak-…, key_…, acct-…
     .replace(/\b([A-Za-z][A-Za-z0-9]{1,12}[-_])[A-Za-z0-9]{10,}\b/g, "$1<redacted>")
-    // bare long hex / base62 runs (an id that came without a prefix)
-    .replace(/\b(?=[A-Za-z0-9]*\d)[A-Za-z0-9]{20,}\b/g, "<redacted>")
+    // bare long runs (an id that came without a prefix). LENGTH is the whole
+    // test: there is deliberately no `(?=[A-Za-z0-9]*\d)` lookahead requiring
+    // a digit. That lookahead was here until #2313, and it meant an all-alphabetic
+    // id — `account abcdefghijklmnopqrstuv is limited` — passed through untouched
+    // while the same string ending in a digit was redacted. Neither other rule
+    // caught it: the prefixed rule needs a `-`/`_`, and the UUID rule needs the
+    // UUID shape.
+    //
+    // Do NOT put it back to protect prose — it does not buy what it looks like it
+    // buys. Measured over 1.19M word tokens of this repo's comments, docs and
+    // user-facing strings, exactly ONE all-lowercase run of 20+ characters is an
+    // English word (`nondeterministically`, once), and it has never appeared in a
+    // 429. An unbroken 20-character alphanumeric run is an identifier; an
+    // explanatory sentence has spaces in it, and every space ends a run.
+    .replace(/\b[A-Za-z0-9]{20,}\b/g, "<redacted>")
     // e-mail addresses occasionally appear in quota messages
     .replace(/\b[\w.+-]+@[\w-]+\.[\w.]+\b/g, "<redacted>");
   return masked.replace(/\s+/g, " ").trim().slice(0, max);
