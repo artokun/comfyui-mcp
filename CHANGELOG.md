@@ -6,6 +6,17 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.131] - 2026-08-26
+
+### MCP
+
+#### Fixed
+- a promoted write blocked by canvas/root divergence relays the panel's own diagnosis (#2374)
+- an empty local output listing states the temp/ blind spot it has (#2372)
+- condition CONTINUE instruction for replayed completions (#2371)
+- guard promoted widget capability and name the version requirement (#2365)
+
+
 ## [0.52.130] - 2026-08-26
 
 ### MCP
