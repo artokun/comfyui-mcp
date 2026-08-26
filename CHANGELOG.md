@@ -10,8 +10,8 @@ All notable changes to this project are documented here. This project adheres to
 
 ### MCP
 
-#### Fixed
-- classify only panel-scoped transport failures for bounded recovery without mutation replay (#2378)
+#### Changed
+- no code changes: this release is identical to 0.52.133. The transport-failure classification listed here originally shipped in 0.52.133 (#2378)
 
 ## [0.52.133] - 2026-08-26
 
@@ -19,6 +19,7 @@ All notable changes to this project are documented here. This project adheres to
 
 #### Fixed
 - authorize panel template relays only for the exact canonical loopback origin and current target (#2196)
+- classify EventNotificationTransport-wrapped panel send failures and route them through the bounded MCP recovery path (#2378)
 
 ## [0.52.132] - 2026-08-26
 
