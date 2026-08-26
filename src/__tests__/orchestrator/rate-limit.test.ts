@@ -159,6 +159,21 @@ describe("sanitizeDetail", () => {
     }
   });
 
+  it("redacts low-diversity all-alphabetic account identifiers", () => {
+    expect(sanitizeDetail("account aeiouaeiouaeiouaeiou is limited")).toBe("account <redacted> is limited");
+  });
+
+  it("redacts all-alphabetic identifiers with structured labels", () => {
+    expect(sanitizeDetail("account_id=abcdefghijklmnopqrstuv")).toBe("account_id=<redacted>");
+    expect(sanitizeDetail("user_id qavexidopulnertiskym is limited")).toBe("user_id <redacted> is limited");
+  });
+
+  it("redacts a hyphen-attached identifier atomically", () => {
+    expect(sanitizeDetail("account qavexidopulnertiskym-extra is limited")).toBe(
+      "account <redacted> is limited",
+    );
+  });
+
   it("leaves long ordinary prose words readable", () => {
     expect(sanitizeDetail("account compartmentalization policy")).toBe("account compartmentalization policy");
     expect(sanitizeDetail("the user uncharacteristically exceeded the limit")).toBe(

@@ -175,26 +175,26 @@ function parseWaitFromProse(text: string): number | null {
  * `cak-fc91zq3o4h0b111bug391`, which is exactly what leaked. The rule here is
  * SHAPE plus minimal CONTEXT, not a list of known prefixes: a prefixed opaque
  * run, or a long digit-bearing bare run, is an identifier whatever the vendor
- * calls it. A digit-free run is only an identifier when it has opaque character
- * diversity and a generic label such as `account` or `token` immediately
- * identifies it; otherwise it may be prose. A vendor inventing a new prefix
- * tomorrow is covered without a code change.
+ * calls it. A digit-free run is only an identifier when explicit label syntax
+ * or an account-status context identifies it; otherwise it may be prose. A
+ * vendor inventing a new prefix tomorrow is covered without a code change.
  *
  * Deliberately aggressive. Over-redaction costs a few characters of an error
  * message; under-redaction publishes an account id into a chat log that gets
  * screenshotted.
  */
 const ALPHA_IDENTIFIER_LABEL =
-  /\b(?:account|acct|id|identifier|token|key|workspace|user)\b(?:\s+(?:id|identifier))?\s*(?:[:=]\s*)?$/i;
+  /\b(?:account|acct|user|workspace|token|key)(?:[_-](?:id|identifier)|\s+(?:id|identifier))\s*(?:[:=]\s*)?$/i;
+const DIRECT_ACCOUNT_LABEL = /(?:^|[.!?;]\s*|(?:your|the)\s+)account\s*$/i;
+const ACCOUNT_STATUS = /^\s+(?:is|was|has|had|reached|exceeded|exhausted|limited|invalid|expired|blocked|disabled)\b/i;
 
-function hasAlphaIdentifierContext(input: string, offset: number): boolean {
-  return ALPHA_IDENTIFIER_LABEL.test(input.slice(Math.max(0, offset - 64), offset));
-}
+function hasAlphaIdentifierContext(input: string, offset: number, run: string): boolean {
+  const before = input.slice(Math.max(0, offset - 64), offset);
+  if (ALPHA_IDENTIFIER_LABEL.test(before)) return true;
+  if (!DIRECT_ACCOUNT_LABEL.test(before)) return false;
 
-function looksLikeOpaqueAlphaRun(value: string): boolean {
-  const uniqueCharacters = new Set(value.toLowerCase()).size;
-  // Ordinary words reuse letters; opaque tokens tend to have high diversity.
-  return uniqueCharacters * 5 >= value.length * 4;
+  const after = input.slice(offset + run.length);
+  return run.includes("-") || !after.trim() || /^[\s]*[.,;!?)]/.test(after) || ACCOUNT_STATUS.test(after);
 }
 
 export function sanitizeDetail(raw: string, max = 200): string {
@@ -218,12 +218,12 @@ export function sanitizeDetail(raw: string, max = 200): string {
     .replace(/\b([A-Za-z][A-Za-z0-9]{1,12}[-_])[A-Za-z0-9]{10,}\b/g, "$1<redacted>")
     // bare long hex / base62 runs (an id that came without a prefix). Digits
     // remain a strong shape signal. Alpha-only runs are ambiguous with prose,
-    // so require both high character diversity and nearby identifier context.
+    // so require explicit label syntax or an account-status boundary.
     .replace(
-      /\b[A-Za-z0-9]{20,}\b/g,
+      /\b[A-Za-z0-9]{20,}(?:-[A-Za-z0-9]+)?\b/g,
       (run, offset, input: string) =>
         /\d/.test(run) ||
-        (looksLikeOpaqueAlphaRun(run) && hasAlphaIdentifierContext(input, offset))
+        hasAlphaIdentifierContext(input, offset, run)
           ? "<redacted>"
           : run,
     );
