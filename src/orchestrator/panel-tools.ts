@@ -88,6 +88,7 @@ import {
   tabIncarnationSlot,
   SHOW_MEDIA_KIND_MIN_PANEL_VERSION,
   showMediaItemsPanelCannotPaint,
+  BRIDGE_CAPABILITY_MIN_PANEL_VERSION,
 } from "../services/ui-bridge.js";
 import { compareSemver } from "../services/self-update.js";
 import { describeInstallPanelAction } from "../services/panel-recovery.js";
@@ -6566,11 +6567,18 @@ async function authoritativePromotedScopeError(
   return { error, observed };
 }
 
-function promotedWriteRefusal(widget: string, reason: string): ToolResult {
+function promotedWriteRefusal(
+  widget: string,
+  reason: string,
+  options?: { capabilityName?: string },
+): ToolResult {
+  const guidance =
+    options?.capabilityName === "enforces_expected_scope_graph_identity_at_write"
+      ? `This session requires panel >= ${BRIDGE_CAPABILITY_MIN_PANEL_VERSION.enforces_expected_scope_graph_identity_at_write} for promoted widget writes. ` +
+        `Update your panel, then retry.`
+      : `No graph_set_widget was dispatched; retry only after the panel binding and subgraph mapping are stable.`;
   return fail(
-    `panel_set_widget refused the promoted "${widget}" write because ${reason}. ` +
-      `No graph_set_widget was dispatched; retry only after the panel binding and ` +
-      `subgraph mapping are stable.`,
+    `panel_set_widget refused the promoted "${widget}" write because ${reason}. ${guidance}`,
   );
 }
 
@@ -6691,6 +6699,7 @@ async function preparePromotedWidgetWrite(
     return promotedWriteRefusal(
       widget,
       "the receiving panel lacks the atomic promoted graph-identity write fence",
+      { capabilityName: "enforces_expected_scope_graph_identity_at_write" },
     );
   }
   const scope = promotedScopeWitnessFromEnvelope(envelope);
@@ -6770,10 +6779,8 @@ async function preparePromotedWidgetWrite(
   if (ctx.tabExpectedNodeTypeFenceCapability?.() !== true) {
     return promotedWriteRefusal(widget, "the receiving panel lacks the atomic inner-node write fence");
   }
-  // Scope graph-identity fence was already verified before extracting the scope witness,
-  // so this check is logically redundant but kept for clarity and defensive coding.
-  // If we reach this point, the capability was confirmed present.
-  // Legacy panels do not publish a parent-rail witness and retain the
+  // Scope graph-identity fence capability was checked earlier (before scope extraction).
+  // If we reach this point, the capability was confirmed present. Legacy panels do not publish a parent-rail witness and retain the
   // established same-name recovery contract. A current witness-capable panel
   // must advertise the synchronous final rail re-resolution before MCP sends
   // the inner/shared-subgraph write.

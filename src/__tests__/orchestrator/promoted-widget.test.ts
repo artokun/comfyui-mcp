@@ -1414,13 +1414,12 @@ describe("panel_set_widget promoted container success guards (#2314)", () => {
     expect(calls.map((c) => c.cmd)).not.toContain("graph_enter_subgraph");
   });
 
-  it("checks the scope-identity fence capability EARLY — before attempting scope extraction", async () => {
-    // #1859: The early check ensures that when a panel is too old to support
-    // promoted widget writes (< 0.15.97), users get a clear "panel is too old"
-    // message rather than a misleading "viewing field is missing" message that
-    // suggests retrying might help. This test verifies the early check triggers
-    // before scope extraction when the capability is missing, so no subgraph
-    // enter/exit is attempted.
+  it("checks the scope-identity fence capability EARLY and names the version requirement", async () => {
+    // #1859: When a panel is too old to support promoted widget writes (< 0.15.97),
+    // users get a clear error naming the version requirement instead of misleading
+    // "retry after binding stabilizes" advice that cannot work for a version shortfall.
+    // This test verifies (a) the early check catches it before scope extraction, and
+    // (b) the guidance names the version and tells users to update, not retry endlessly.
     const { text, isError, calls } = await setWidget(
       { node_id: 78, widget: "quality_prompt", value: "masterpiece" },
       {
@@ -1432,11 +1431,16 @@ describe("panel_set_widget promoted container success guards (#2314)", () => {
     );
 
     expect(isError).toBe(true);
-    // The error should name the missing capability, not the missing viewing field
+    // The error should name the missing capability
     expect(text).toMatch(/lacks the atomic promoted graph-identity write fence/);
+    // Guidance must name the version requirement, not suggest retrying for binding stability
+    expect(text).toMatch(/This session requires panel >= 0\.15\.97/);
+    expect(text).toMatch(/Update your panel/);
+    // The original misleading "retry after binding/mapping settle" guidance must NOT appear
+    expect(text).not.toMatch(/binding and subgraph mapping are stable/);
     // No graph_set_widget should be sent because we reject early
     expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
-    // No subgraph enter/exit should happen because we reject before attempting to access subgraph
+    // No subgraph enter/exit should happen
     expect(calls.map((c) => c.cmd)).not.toContain("graph_enter_subgraph");
     expect(calls.map((c) => c.cmd)).not.toContain("graph_exit_subgraph");
   });
