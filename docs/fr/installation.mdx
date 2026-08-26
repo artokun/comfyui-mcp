@@ -93,6 +93,66 @@ ComfyUI MCP est publié sur npm sous le nom `comfyui-mcp` et s'exécute via `npx
       **Uniquement dans le cloud ?** [Le Comfy Cloud MCP de Comfy-Org](https://docs.comfy.org/agent-tools) (bêta publique) est le choix canonique — voir [Local vs. Comfy Cloud](/docs/local-vs-comfy-cloud). Utilisez le mode cloud de `comfyui-mcp` si vous voulez un seul MCP pour le local / le distant / le cloud, ou s'il vous faut la prise en charge du cloud dès aujourd'hui.
     </Note>
   </Tab>
+  <Tab title="Claude Code géré / entreprise">
+    Sur un Claude Code géré par une organisation, il n'y a pas de CLI `claude` pour lancer
+    `claude mcp add`, et la liste **Serveurs MCP gérés**, contrôlée par l'administrateur,
+    testera le serveur avec succès puis refusera de l'enregistrer. **Paramètres développeur →
+    Modifier la configuration** ouvre un `claude_desktop_config.json` que l'onglet Code ne lit
+    jamais. Deux voies fonctionnent.
+
+    **Option A — HTTP.** Lancez le serveur vous-même et ajoutez-le comme connecteur *distant* :
+
+    ```bash
+    npx -y comfyui-mcp@latest --http
+    ```
+
+    Cela expose le streamable-HTTP sur `http://127.0.0.1:9100/mcp` — modifiez l'écoute avec
+    `--host` / `--port`. Ajoutez cette URL comme connecteur distant, transport HTTP, sans
+    authentification. Le processus doit rester en cours d'exécution tant que vous utilisez les
+    outils, et une liste d'organisation gérée peut malgré tout refuser de conserver l'entrée —
+    si c'est le cas, passez à l'option B.
+
+    **Option B — stdio depuis votre configuration utilisateur.** Claude démarre le serveur
+    lui-même, donc rien n'a besoin de rester ouvert. Installez-le globalement **avec Claude Code
+    entièrement fermé**, sinon Windows garde les fichiers ouverts et laisse un paquet à moitié
+    supprimé que `npm ls -g` affiche sans version :
+
+    ```bash
+    npm install -g comfyui-mcp
+    npm root -g
+    ```
+
+    Ajoutez ensuite un bloc `mcpServers` **au premier niveau** de `~/.claude.json` — sous
+    Windows, `C:\Users\VOTRE_NOM\.claude.json` — en pointant `node` vers le chemin affiché par
+    `npm root -g` :
+
+    ```json
+    {
+      "mcpServers": {
+        "comfyui": {
+          "command": "node",
+          "args": ["C:/Users/YOUR_NAME/AppData/Roaming/npm/node_modules/comfyui-mcp/dist/index.js"]
+        }
+      }
+    }
+    ```
+
+    Redémarrez enfin Claude Code **complètement, icône de la zone de notification comprise** —
+    sans cela, la configuration n'est jamais relue.
+
+    <Note>
+      **Vérifiez en demandant à l'agent de quels outils il dispose.** Sur une installation
+      gérée, aucune surface de l'interface ne reflète de façon fiable un serveur MCP
+      fonctionnel : le test fonctionnel est le seul qui ne mente pas.
+    </Note>
+    <Note>
+      Les noms de menus et les chemins côté Claude ci-dessus ont été observés sur une seule
+      installation gérée — voyez-les comme des indices, pas comme des libellés exacts. Gardez le
+      point d'accès HTTP en loopback : si vous l'attachez à un hôte non-loopback, le serveur
+      refuse de démarrer tant que vous n'avez pas défini un secret partagé avec `--token`. Voir
+      [Connecteur distant](/docs/remote-connector).
+    </Note>
+  </Tab>
 </Tabs>
 
 Lancez ensuite `/mcp` dans Claude Code pour vous connecter.

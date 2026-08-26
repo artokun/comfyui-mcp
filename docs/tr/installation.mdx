@@ -91,6 +91,66 @@ ComfyUI MCP, npm'de `comfyui-mcp` olarak yayımlanır ve `npx` ile çalışır �
       **Yalnızca bulut mu?** [Comfy-Org'un Comfy Cloud MCP'si](https://docs.comfy.org/agent-tools) (herkese açık beta) buradaki asıl seçenektir — bkz. [Yerel ile Comfy Cloud karşılaştırması](/docs/local-vs-comfy-cloud). Yerel / uzak / bulut için tek bir MCP istiyorsanız ya da bugün bulut desteğine ihtiyacınız varsa `comfyui-mcp`'nin bulut kipini kullanın.
     </Note>
   </Tab>
+  <Tab title="Yönetilen / kurumsal Claude Code">
+    Bir kuruluş tarafından yönetilen Claude Code'da `claude mcp add` çalıştırabileceğiniz
+    `claude` CLI'si yoktur ve yönetici denetimindeki **Yönetilen MCP sunucuları** listesi
+    sunucuyu başarıyla test edip ardından kaydetmeyi reddeder. **Geliştirici ayarları →
+    Yapılandırmayı düzenle**, Code sekmesinin hiç okumadığı bir `claude_desktop_config.json`
+    dosyasını açar. İşe yarayan iki yol var.
+
+    **A seçeneği — HTTP.** Sunucuyu kendiniz çalıştırıp *uzak* bir bağlayıcı olarak ekleyin:
+
+    ```bash
+    npx -y comfyui-mcp@latest --http
+    ```
+
+    Bu, `http://127.0.0.1:9100/mcp` adresinde streamable-HTTP sunar — bağlanacağı adresi
+    `--host` / `--port` ile değiştirebilirsiniz. Bu URL'yi uzak bağlayıcı olarak, taşıma HTTP ve
+    kimlik doğrulama yok biçiminde ekleyin. Araçları kullandığınız sürece sürecin çalışır
+    kalması gerekir; yönetilen bir kuruluş listesi yine de kaydı saklamayı reddedebilir — öyle
+    olursa B seçeneğine geçin.
+
+    **B seçeneği — kullanıcı yapılandırmanızdan stdio.** Sunucuyu Claude'un kendisi başlatır, bu
+    yüzden hiçbir şeyin açık kalması gerekmez. **Claude Code tümüyle kapalıyken** global olarak
+    kurun; yoksa Windows dosyaları açık tutar ve `npm ls -g` çıktısında sürümsüz görünen, yarı
+    silinmiş bir paket bırakır:
+
+    ```bash
+    npm install -g comfyui-mcp
+    npm root -g
+    ```
+
+    Ardından `~/.claude.json` dosyasına — Windows'ta `C:\Users\KULLANICI_ADINIZ\.claude.json` —
+    **en üst düzeyde** bir `mcpServers` bloğu ekleyin ve `node`'u `npm root -g` çıktısındaki
+    yola yönlendirin:
+
+    ```json
+    {
+      "mcpServers": {
+        "comfyui": {
+          "command": "node",
+          "args": ["C:/Users/YOUR_NAME/AppData/Roaming/npm/node_modules/comfyui-mcp/dist/index.js"]
+        }
+      }
+    }
+    ```
+
+    Sonra Claude Code'u **sistem tepsisi simgesi dahil olmak üzere tümüyle** yeniden başlatın —
+    aksi hâlde yapılandırma bir daha okunmaz.
+
+    <Note>
+      **Doğrulamak için ajana hangi araçlara sahip olduğunu sorun.** Yönetilen bir yapıda
+      arayüzün hiçbir bölümü çalışan bir MCP sunucusunu güvenilir biçimde yansıtmaz; yalan
+      söylemeyen tek sınama işlevsel olanıdır.
+    </Note>
+    <Note>
+      Yukarıdaki Claude tarafı menü adları ve yolları tek bir yönetilen yapıda gözlemlendi —
+      bunları kesin etiketler değil, neye bakacağınıza dair ipuçları sayın. HTTP uç noktasını
+      loopback üzerinde tutun: loopback dışı bir ana makineye bağlarsanız, `--token` ile bir
+      paylaşılan gizli anahtar tanımlamadıkça sunucu başlamayı reddeder. Bkz.
+      [Uzak bağlayıcı](/docs/remote-connector).
+    </Note>
+  </Tab>
 </Tabs>
 
 Sonra bağlanmak için Claude Code'da `/mcp` çalıştırın.
