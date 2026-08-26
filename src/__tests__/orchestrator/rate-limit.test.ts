@@ -169,10 +169,12 @@ describe("sanitizeDetail", () => {
   });
 
   it("redacts user-labeled identifiers for terminal statuses", () => {
-    for (const status of ["disabled", "blocked", "expired"]) {
-      expect(sanitizeDetail(`user abcdefghijklmnopqrstuv is ${status}`)).toBe(
-        `user <redacted> is ${status}`,
-      );
+    for (const label of ["user", "the user", "your user"]) {
+      for (const status of ["disabled", "blocked", "expired"]) {
+        expect(sanitizeDetail(`${label} abcdefghijklmnopqrstuv is ${status}`)).toBe(
+          `${label} <redacted> is ${status}`,
+        );
+      }
     }
   });
 
@@ -183,11 +185,18 @@ describe("sanitizeDetail", () => {
     expect(sanitizeDetail("account (abcdefghijklmnopqrstuv) is limited")).toBe(
       "account (<redacted>) is limited",
     );
+    expect(sanitizeDetail("account: [abcdefghijklmnopqrstuv] is limited")).toBe(
+      "account: [<redacted>] is limited",
+    );
+    expect(sanitizeDetail("account=[abcdefghijklmnopqrstuv]")).toBe("account=[<redacted>]");
+    expect(sanitizeDetail("user: [abcdefghijklmnopqrstuv] is disabled")).toBe(
+      "user: [<redacted>] is disabled",
+    );
     expect(sanitizeDetail("account_id=[abcdefghijklmnopqrstuv]")).toBe("account_id=[<redacted>]");
   });
 
   it("redacts a hyphen-attached identifier atomically", () => {
-    expect(sanitizeDetail("account qavexidopulnertiskym-extra is limited")).toBe(
+    expect(sanitizeDetail("account qavexidopulnertiskym-extra-more is limited")).toBe(
       "account <redacted> is limited",
     );
   });
@@ -196,6 +205,9 @@ describe("sanitizeDetail", () => {
     expect(sanitizeDetail("account compartmentalization policy")).toBe("account compartmentalization policy");
     expect(sanitizeDetail("the user uncharacteristically exceeded the limit")).toBe(
       "the user uncharacteristically exceeded the limit",
+    );
+    expect(sanitizeDetail("account compartmentalization is limited")).toBe(
+      "account compartmentalization is limited",
     );
     expect(sanitizeDetail("user-uncharacteristically")).toBe("user-uncharacteristically");
     expect(sanitizeDetail("account-compartmentalization")).toBe("account-compartmentalization");

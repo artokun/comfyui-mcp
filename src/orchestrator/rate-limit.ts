@@ -186,19 +186,29 @@ function parseWaitFromProse(text: string): number | null {
 const ALPHA_IDENTIFIER_LABEL =
   /\b(?:account|acct|user|workspace|token|key)(?:[_-](?:id|identifier)|\s+(?:id|identifier))\s*(?:[:=]\s*[\[({]?\s*|[\[({]\s*)?$/i;
 const DIRECT_ACCOUNT_LABEL = /(?:^|[.!?;]\s*|(?:your|the)\s+)account\s*(?:[:=]\s*|[\[({]\s*|\s+)$/i;
-const DIRECT_USER_LABEL = /(?:^|[.!?;]\s*)user\s*(?:[:=]\s*|[\[({]\s*|\s+)$/i;
+const DIRECT_USER_LABEL = /(?:^|[.!?;]\s*|(?:your|the)\s+)user\s*(?:[:=]\s*|[\[({]\s*|\s+)$/i;
+const DIRECT_PUNCTUATED_LABEL =
+  /(?:^|[.!?;]\s*|(?:your|the)\s+)(?:account|user)\s*(?:[:=]\s*[\[({]?|[\[({])\s*$/i;
 const IDENTIFIER_STATUS = /^\s+(?:is|was|has|had|reached|exceeded|exhausted|limited|invalid|expired|blocked|disabled)\b/i;
+const NATURAL_LANGUAGE_SUFFIX =
+  /(?:istically|ization|isation|tion|sion|ment|ness|ity|ically|ingly|edly|ful|less|able|ible|ive|ous|ance|ence)$/i;
+
+function looksLikeNaturalLanguageWord(value: string): boolean {
+  return NATURAL_LANGUAGE_SUFFIX.test(value);
+}
 
 function hasAlphaIdentifierContext(input: string, offset: number, run: string): boolean {
   const before = input.slice(Math.max(0, offset - 64), offset);
   if (ALPHA_IDENTIFIER_LABEL.test(before)) return true;
+  if (DIRECT_PUNCTUATED_LABEL.test(before)) return true;
   if (!DIRECT_ACCOUNT_LABEL.test(before) && !DIRECT_USER_LABEL.test(before)) return false;
 
   const after = input.slice(offset + run.length);
   const afterClosingPunctuation = after.replace(/^\s*[\])}]+/, "");
+  if (looksLikeNaturalLanguageWord(run.split("-")[0])) return false;
   return (
     run.includes("-") ||
-    !after.trim() ||
+    !afterClosingPunctuation.trim() ||
     /^[\s]*[.,;!?)]/.test(after) ||
     IDENTIFIER_STATUS.test(afterClosingPunctuation)
   );
@@ -228,7 +238,7 @@ export function sanitizeDetail(raw: string, max = 200): string {
     // remain a strong shape signal. Alpha-only runs are ambiguous with prose,
     // so require explicit label syntax or an account-status boundary.
     .replace(
-      /\b[A-Za-z0-9]{20,}(?:-[A-Za-z0-9]+)?\b/g,
+      /\b[A-Za-z0-9]{20,}(?:-[A-Za-z0-9]+)*\b/g,
       (run, offset, input: string) =>
         /\d/.test(run) ||
         hasAlphaIdentifierContext(input, offset, run)
