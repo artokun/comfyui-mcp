@@ -1258,11 +1258,11 @@ async function acquireStagedWriterLock(
       };
     } catch (err) {
       if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") throw err;
-      let observedRaw: string;
+      let observedRaw: Buffer;
       let owner: { pid?: unknown };
       try {
-        observedRaw = await readFile(lockPath, "utf8");
-        owner = JSON.parse(observedRaw) as { pid?: unknown };
+        observedRaw = await readFile(lockPath);
+        owner = JSON.parse(observedRaw.toString("utf8")) as { pid?: unknown };
       } catch {
         throw interferenceError(
           "the staged writer lock exists but its owner identity could not be read",
@@ -1271,24 +1271,46 @@ async function acquireStagedWriterLock(
         );
       }
       const pid = owner.pid;
-      if (!Number.isInteger(pid) || (pid as number) <= 0) {
+      // Keep this in the range Node accepts for process.kill. A positive integer
+      // outside signed 32-bit range is still an invalid syscall argument (for
+      // example 999999999999 produces ERR_INVALID_ARG_TYPE), not proof of a dead
+      // owner. Treat every such shape as an ownership refusal.
+      if (
+        typeof pid !== "number" ||
+        !Number.isSafeInteger(pid) ||
+        pid <= 0 ||
+        pid > 0x7fff_ffff
+      ) {
         throw interferenceError(
           "the staged writer lock has no valid owner identity",
           "before starting",
           logUrl,
         );
       }
+      let ownerGone = false;
       try {
-        process.kill(pid as number, 0);
+        process.kill(pid, 0);
+      } catch (probeErr) {
+        // An existing process, including this process, means a live claim. Only
+        // ESRCH is proof that the lock owner is gone; EPERM/other errors are
+        // inconclusive and must remain ModelError refusals so callers cannot
+        // fall through to an unlocked direct download.
+        const code = (probeErr as NodeJS.ErrnoException)?.code;
+        if (code !== "ESRCH") {
+          throw interferenceError(
+            `the staged writer owner's process could not be verified (PID probe failed with ${code ?? "an unknown error"})`,
+            "before starting",
+            logUrl,
+          );
+        }
+        ownerGone = true;
+      }
+      if (!ownerGone) {
         throw interferenceError(
           `the staged writer lock is held by process ${pid}`,
           "before starting",
           logUrl,
         );
-      } catch (probeErr) {
-        // An existing process, including this process, means a live claim. Only
-        // ESRCH is proof that the lock owner is gone; EPERM/other errors refuse.
-        if ((probeErr as NodeJS.ErrnoException)?.code !== "ESRCH") throw probeErr;
       }
       // The recorded owner is proven gone. Move the exact path aside atomically,
       // then compare the moved bytes with the observation. A contender that got
@@ -1311,9 +1333,9 @@ async function acquireStagedWriterLock(
         );
       }
 
-      let movedRaw: string | undefined;
+      let movedRaw: Buffer | undefined;
       try {
-        movedRaw = await readFile(claimPath, "utf8");
+        movedRaw = await readFile(claimPath);
       } catch {
         try {
           await downloadCacheFs.link(claimPath, lockPath);
@@ -1329,7 +1351,7 @@ async function acquireStagedWriterLock(
         );
       }
 
-      if (movedRaw !== observedRaw) {
+      if (!movedRaw.equals(observedRaw)) {
         try {
           await downloadCacheFs.link(claimPath, lockPath);
           await downloadCacheFs.rm(claimPath, { force: true });

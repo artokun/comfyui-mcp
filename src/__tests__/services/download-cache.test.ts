@@ -182,6 +182,49 @@ describe("downloadModel cache", () => {
     await expect(readFile(lock, "utf8")).resolves.toContain("other-writer");
   });
 
+  it("fails closed on an invalid staged-lock PID (#2356)", async () => {
+    const url = "https://example.com/models/invalid-pid.safetensors";
+    const target = join(comfyDir, "models", "checkpoints", "invalid-pid.safetensors");
+    const partial = downloadCacheIdentity(url).partialPath;
+    const lock = `${partial}.lock`;
+    await mkdir(dirname(partial), { recursive: true });
+    await writeFile(lock, JSON.stringify({ pid: 999999999999, token: "invalid-pid" }));
+    fetchMock.mockResolvedValueOnce(okResponse("must not be fetched"));
+
+    await expect(
+      downloadModel(url, "checkpoints", "invalid-pid.safetensors"),
+    ).rejects.toMatchObject({
+      code: "MODEL_ERROR",
+      message: expect.stringMatching(/no valid owner identity/i),
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+    await expect(readFile(lock, "utf8")).resolves.toContain("invalid-pid");
+    await expect(stat(target)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("fails closed when staged-lock PID ownership probing is denied (#2356)", async () => {
+    const url = "https://example.com/models/eperm-pid.safetensors";
+    const target = join(comfyDir, "models", "checkpoints", "eperm-pid.safetensors");
+    const partial = downloadCacheIdentity(url).partialPath;
+    const lock = `${partial}.lock`;
+    await mkdir(dirname(partial), { recursive: true });
+    await writeFile(lock, JSON.stringify({ pid: process.pid, token: "eperm-pid" }));
+    fetchMock.mockResolvedValueOnce(okResponse("must not be fetched"));
+    vi.spyOn(process, "kill").mockImplementation(() => {
+      throw Object.assign(new Error("permission denied"), { code: "EPERM" });
+    });
+
+    await expect(
+      downloadModel(url, "checkpoints", "eperm-pid.safetensors"),
+    ).rejects.toMatchObject({
+      code: "MODEL_ERROR",
+      message: expect.stringMatching(/PID probe failed with EPERM/i),
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+    await expect(readFile(lock, "utf8")).resolves.toContain("eperm-pid");
+    await expect(stat(target)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("atomically hands off a stale claim when two processes contend (#2356)", async () => {
     const url = "https://example.com/models/stale-race.bin";
     const target = join(comfyDir, "stale-race.bin");
