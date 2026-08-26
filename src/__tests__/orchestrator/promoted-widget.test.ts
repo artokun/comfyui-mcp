@@ -1451,10 +1451,10 @@ describe("panel_set_widget promoted container success guards (#2314)", () => {
   it("always states no write was dispatched — property of every promoted-write refusal", async () => {
     // SAFETY CRITICAL: every promoted-write refusal must guarantee that no graph_set_widget
     // reached the graph, so the caller knows nothing partial or wrong-target happened.
-    // This property must hold for both transient reasons (binding staleness) and
-    // permanent reasons (capability/version shortfall). Test both branches.
+    // This property must hold for both capability-shortfall remedies AND non-capability
+    // reasons (like missing parent-rail witness). Test both remedy branches.
 
-    // Branch 1: capability shortfall (permanent reason)
+    // Branch 1: capability shortfall (enforces_expected_scope_graph_identity_at_write missing)
     const capabilityShortfall = await setWidget(
       { node_id: 78, widget: "quality_prompt", value: "masterpiece" },
       {
@@ -1466,21 +1466,48 @@ describe("panel_set_widget promoted container success guards (#2314)", () => {
     );
     expect(capabilityShortfall.isError).toBe(true);
     expect(capabilityShortfall.text).toMatch(/No graph_set_widget was dispatched/);
+    expect(capabilityShortfall.text).toMatch(/This session requires panel >= 0\.15\.97/);
 
-    // Branch 2: transient reason (binding staleness) — old receiver without graph-identity fence
-    // is also a transient reason in the sense that the remedy is to wait for the panel to
-    // finish reconciling its tabs.
-    const transientRefusal = await setWidget(
+    // Branch 2: non-capability reason (missing parent-rail witness, non-version remedy)
+    const nonCapabilityRefusal = await setWidget(
       { node_id: 78, widget: "quality_prompt", value: "masterpiece" },
       {
         firstWrite: "ok",
-        subgraph: SAFE_ANIMA_SUBGRAPH,
-        detailById: SAFE_ANIMA_IDENTITY_BY_ID,
-        scopeGraphIdentityFence: false,
+        promotedTerminalWitnesses: true,
+        promotedParentRailFence: false,
+        subgraph: CURRENT_SAFE_PROMOTED_SUBGRAPH,
       },
     );
-    expect(transientRefusal.isError).toBe(true);
-    expect(transientRefusal.text).toMatch(/No graph_set_widget was dispatched/);
+    expect(nonCapabilityRefusal.isError).toBe(true);
+    expect(nonCapabilityRefusal.text).toMatch(/No graph_set_widget was dispatched/);
+    expect(nonCapabilityRefusal.text).toMatch(/binding and subgraph mapping are stable/);
+  });
+
+  it("MUTATION: moving dispatch clause into capability remedy only breaks the transient path", async () => {
+    // This test proves that the dispatch guarantee is PROPERTY of promotedWriteRefusal,
+    // not a side effect of being in the capability branch. If the dispatch clause were
+    // moved into the capability remedy ternary:
+    //
+    //   const remedy = opts?.capabilityName === "enforces_expected_scope_graph_identity_at_write"
+    //     ? `No graph_set_widget was dispatched; This session requires panel >= ...`
+    //     : `No graph_set_widget was dispatched; Retry only after binding and subgraph mapping are stable.`
+    //
+    // Then the transient branch (non-capability refusals) would LOSE the dispatch guarantee,
+    // and this assertion would go RED, proving the test catches it. Currently the clause is
+    // outside the ternary, so BOTH branches get it, and the test is GREEN. A later refactor
+    // that naturally moves per-reason text into per-reason branches would break the guarantee
+    // unless this test is passing — which means the transient path really does have it.
+
+    const { text } = await setWidget(
+      { node_id: 78, widget: "quality_prompt", value: "masterpiece" },
+      {
+        firstWrite: "ok",
+        promotedTerminalWitnesses: true,
+        promotedParentRailFence: false,
+        subgraph: CURRENT_SAFE_PROMOTED_SUBGRAPH,
+      },
+    );
+    expect(text).toMatch(/No graph_set_widget was dispatched/);
   });
 
   it("refuses a promoted mapping for a receiver without the final parent-rail fence", async () => {
