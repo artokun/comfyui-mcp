@@ -82,6 +82,7 @@ import type {
   TabWorkflowUuidRead,
 } from "../services/ui-bridge.js";
 import {
+  panelVersionForCapability,
   requiredPanelVersion,
   SEMVER_RE,
   LATE_ASK_TTL_MS,
@@ -6635,6 +6636,59 @@ function promotedWriteRefusal(
 }
 
 /**
+ * panel#1859 — the same refusal, for the one cause a retry can never reach.
+ *
+ * MCP 0.52.129 shipped the #2314 promoted-write fence; the panel build that
+ * satisfies it shipped twenty minutes later in 0.15.101. Every user in between
+ * got {@link promotedWriteRefusal}'s "retry only after the panel binding and
+ * subgraph mapping are stable" for a condition that is a JS bundle on disk. The
+ * reporter retried five times, re-issued panel_set_workflow_target (which
+ * answered `already_current`), and hard-refreshed the tab; none of that
+ * replaces the bundle, so the loop had no exit.
+ *
+ * So this says what is actually wrong, rules out the three things a caller
+ * would otherwise try next, and names a route to the value that works today.
+ * The refusal itself is unchanged — a pre-0.15.101 panel genuinely cannot
+ * enforce the fence, and loosening it would reopen #2314.
+ */
+function promotedPanelBuildRefusal(
+  ctx: PanelToolCtx,
+  nodeId: unknown,
+  widget: string,
+  reason: string,
+  capability: string,
+): ToolResult {
+  const floor = panelVersionForCapability(capability);
+  const advertised = tabAdvertisedPanelVersion(ctx);
+  const update = describeInstallPanelAction(
+    "update",
+    "update the ComfyUI-MCP panel via ComfyUI Manager",
+  );
+  // Never interpolate the caller's raw node_id: it is untrusted argument shape.
+  // A container id that will not canonicalize is dropped from the sentence
+  // rather than echoed, which leaves the route stated but unparameterized.
+  const canonicalId = canonicalQueriedNodeId(nodeId);
+  const enterArg = canonicalId ? `node_id: ${canonicalId}` : "the container's node_id";
+  return fail(
+    `panel_set_widget refused the promoted "${widget}" write because the connected ` +
+      `panel build ${reason}. No graph_set_widget was dispatched.\n` +
+      `This is a panel BUILD skew, not a transient binding state. Retrying, ` +
+      `panel_set_workflow_target, and reloading the ComfyUI tab all leave the same ` +
+      `bundle running, so none of them can clear it.` +
+      (advertised ? ` This tab announced panel ${advertised}.` : "") +
+      ` A promoted-container write needs ${floor ? `panel ≥${floor}` : "a newer panel build"}. ` +
+      `${update}, then HARD-REFRESH the browser tab (Ctrl+Shift+R, or Cmd+Shift+R on ` +
+      `macOS); a restart alone leaves the tab running cached old JS.\n` +
+      `Until then the value is still reachable by hand: ` +
+      `panel_enter_subgraph(${enterArg}), then panel_set_widget on the ` +
+      `inner node that owns "${widget}". If the write does not stick because the ` +
+      `container's promoted rail holds the value, un-promote it first ` +
+      `(panel_promote_widget with demote:true), write the inner node, and re-promote — ` +
+      `that is the sequence panel#1859 reported as clearing it.`,
+  );
+}
+
+/**
  * #2314 — inspect a promoted target before the first write. A valid mapping is
  * not permission to write the wrapper: the plan carries the receiver identity,
  * inner node id, and inner type to an inner write whose final dispatch fence
@@ -6757,6 +6811,22 @@ async function preparePromotedWidgetWrite(
   }
   const scope = promotedScopeWitnessFromEnvelope(envelope);
   if (!scope) {
+    // panel#1859 — separate "the panel cannot say this" from "the panel said
+    // something wrong". A malformed `viewing` or `subgraph_of.graph_identity`
+    // is already rejected by validatePromotedSubgraphEnvelope above, so an
+    // ABSENT one here is a pre-0.15.101 bundle that never writes the field at
+    // all (v0.15.85 replies with a bare `subgraph_of: { node_id, title }`).
+    // No amount of retrying adds a key the JS on disk does not emit.
+    if (envelope.targetGraphIdentity === undefined || envelope.viewing === undefined) {
+      return promotedPanelBuildRefusal(
+        ctx,
+        nodeId,
+        widget,
+        "does not publish the target graph identity that graph_get_subgraph must " +
+          "carry before a promoted write can be fenced to the right graph",
+        "enforces_expected_scope_graph_identity_at_write",
+      );
+    }
     return promotedWriteRefusal(
       widget,
       "graph_get_subgraph did not publish a verifiable workflow and viewing-scope identity",
@@ -6829,18 +6899,31 @@ async function preparePromotedWidgetWrite(
     const terminalBlocked = refuseKnownBadPromotedTerminal(inner.terminal);
     if (terminalBlocked) return terminalBlocked;
   }
+  // panel#1859 — these three are capability skew, exactly like the missing
+  // graph identity above: the hello either advertises the fence or it does not,
+  // and a caller cannot change that by trying again.
   if (ctx.tabExpectedNodeTypeFenceCapability?.() !== true) {
-    return promotedWriteRefusal(widget, "the receiving panel lacks the atomic inner-node write fence");
+    return promotedPanelBuildRefusal(
+      ctx,
+      nodeId,
+      widget,
+      "does not advertise the atomic inner-node write fence",
+      "enforces_expected_node_type_at_write",
+    );
   }
-  // Scope graph-identity fence capability was checked earlier (before scope extraction).
-  // If we reach this point, the capability was confirmed present. Legacy panels do not publish a parent-rail witness and retain the
+  // The graph-identity fence is checked before the scope witness above (#2365),
+  // so reaching here means the hello advertised it.
+  // Legacy panels do not publish a parent-rail witness and retain the
   // established same-name recovery contract. A current witness-capable panel
   // must advertise the synchronous final rail re-resolution before MCP sends
   // the inner/shared-subgraph write.
   if (publishesCompleteTerminalWitness && ctx.tabPromotedParentRailFenceCapability?.() !== true) {
-    return promotedWriteRefusal(
+    return promotedPanelBuildRefusal(
+      ctx,
+      nodeId,
       widget,
-      "the receiving panel lacks the atomic promoted parent-rail write fence",
+      "does not advertise the atomic promoted parent-rail write fence",
+      "enforces_promoted_parent_rail_at_write",
     );
   }
 

@@ -130,6 +130,12 @@ function bridge(opts: {
   };
   omitWorkflowUuid?: boolean;
   workflowUuid?: string;
+  /** panel#1859 — a real pre-0.15.101 panel build. It publishes no
+   * `graph_identity` anywhere (neither on `viewing` nor on `subgraph_of`) and
+   * its hello advertises `enforces_expected_node_type_at_write` but none of the
+   * #2314 scope capabilities. Verified against `v0.15.85:web/js/…`, where the
+   * reply is literally `subgraph_of: { node_id, title }`. */
+  legacyPanelBuild?: { version?: string };
 }) {
   const calls: Array<Record<string, unknown>> = [];
   let writes = 0;
@@ -154,10 +160,11 @@ function bridge(opts: {
     reason: "no current panel graph-scope witness has been observed",
   };
   const beforeWrite = { mutate: undefined as (() => void) | undefined };
+  const legacyBuild = opts.legacyPanelBuild !== undefined;
   const currentViewing = () => ({
     scope: inSubgraph ? "subgraph" : "root",
     ...(inSubgraph ? { owner_node_id: currentOwnerNodeId } : {}),
-    graph_identity: currentGraphIdentity,
+    ...(legacyBuild ? {} : { graph_identity: currentGraphIdentity }),
     ...(opts.omitWorkflowUuid ? {} : { workflow_uuid: workflowUuid }),
   });
   const withCurrentViewing = (value: Record<string, unknown>): Record<string, unknown> => {
@@ -167,14 +174,14 @@ function bridge(opts: {
     const rawOwnerEnvelope = result.subgraph_of;
     if (rawOwnerEnvelope && typeof rawOwnerEnvelope === "object" && !Array.isArray(rawOwnerEnvelope)) {
       const owner = rawOwnerEnvelope as Record<string, unknown>;
-      if (!Object.prototype.hasOwnProperty.call(owner, "graph_identity")) {
+      if (!legacyBuild && !Object.prototype.hasOwnProperty.call(owner, "graph_identity")) {
         result = { ...result, subgraph_of: { ...owner, graph_identity: targetGraphIdentity } };
       }
     }
     const rawViewing = result.viewing;
     if (rawViewing && typeof rawViewing === "object" && !Array.isArray(rawViewing)) {
       const viewingValue = rawViewing as Record<string, unknown>;
-      if (!Object.prototype.hasOwnProperty.call(viewingValue, "graph_identity")) {
+      if (!legacyBuild && !Object.prototype.hasOwnProperty.call(viewingValue, "graph_identity")) {
         result = { ...result, viewing: { ...viewingValue, graph_identity: currentGraphIdentity } };
       }
     }
@@ -426,11 +433,17 @@ function bridge(opts: {
           },
         }
       : {}),
+    // v0.15.85's hello DOES advertise this one, which is why a legacy build
+    // reaches the scope checks at all instead of stopping at the node-type fence.
     tabExpectedNodeTypeFenceCapability: () => true,
-    tabExpectedScopeGraphIdentityFenceCapability: () => opts.scopeGraphIdentityFence !== false,
-    tabPromotedTerminalWitnessCapability: () => opts.promotedTerminalWitnesses === true,
+    tabExpectedScopeGraphIdentityFenceCapability: () =>
+      !legacyBuild && opts.scopeGraphIdentityFence !== false,
+    tabPromotedTerminalWitnessCapability: () =>
+      !legacyBuild && opts.promotedTerminalWitnesses === true,
     tabPromotedParentRailFenceCapability: () =>
-      opts.promotedParentRailFence ?? opts.promotedTerminalWitnesses === true,
+      legacyBuild ? false : (opts.promotedParentRailFence ?? opts.promotedTerminalWitnesses === true),
+    advertisedPanelVersion: () =>
+      opts.legacyPanelBuild?.version !== undefined ? { version: opts.legacyPanelBuild.version } : {},
     tabGraphMutationCapability: () => ({ known: true, canMutate: true }),
     workflowUuidFor: () => ({ known: true, uuid: workflowUuid }),
   } as unknown as PanelToolCtx["bridge"];
@@ -1492,7 +1505,11 @@ describe("panel_set_widget promoted container success guards (#2314)", () => {
     );
 
     expect(isError).toBe(true);
-    expect(text).toMatch(/lacks the atomic promoted graph-identity write fence/);
+    expect(text).toMatch(/does not advertise the atomic promoted graph-identity write fence/);
+    // panel#1859 — a capability the hello did not advertise is a build fact, so
+    // the refusal names the floor and the update rather than asking for a retry.
+    expect(text).toContain("0.15.101");
+    expect(text).not.toMatch(/retry only after the panel binding and subgraph mapping are stable/);
     expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
     expect(calls.map((c) => c.cmd)).not.toContain("graph_enter_subgraph");
   });
@@ -1605,7 +1622,9 @@ describe("panel_set_widget promoted container success guards (#2314)", () => {
     );
 
     expect(isError).toBe(true);
-    expect(text).toMatch(/lacks the atomic promoted parent-rail write fence/);
+    expect(text).toMatch(/does not advertise the atomic promoted parent-rail write fence/);
+    expect(text).toContain("0.15.101");
+    expect(text).not.toMatch(/retry only after the panel binding and subgraph mapping are stable/);
     expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
     expect(calls.map((c) => c.cmd)).not.toContain("graph_enter_subgraph");
   });
@@ -2689,5 +2708,85 @@ describe("panel_set_widget promoted-subgraph recovery (#1655)", () => {
     expect(writes[0]).toMatchObject({ widget: "Width" });
     expect(writes[1]).toMatchObject({ node_id: 76, widget: "width", value: 1024 });
     expect(text).not.toMatch(/is not a promoted widget/);
+  });
+});
+
+/**
+ * panel#1859 — mcp 0.52.129 shipped the #2314 promoted-write fence twenty
+ * minutes BEFORE panel 0.15.101 shipped the `graph_identity` the fence reads.
+ * Anyone on an older panel therefore hit a permanent refusal whose own advice
+ * ("retry only after the panel binding and subgraph mapping are stable") can
+ * never reach the condition: the reporter retried five times, re-issued
+ * panel_set_workflow_target, and hard-refreshed the tab, and the bundle stayed
+ * at 0.15.85 through all of it.
+ *
+ * The refusal is CORRECT — a pre-0.15.101 panel cannot enforce the fence, so
+ * loosening it would reopen #2314. What these tests pin is that the message
+ * names the build skew, the version floor, and a remedy that exists.
+ */
+describe("panel_set_widget promoted write against a pre-#2314 panel build (panel#1859)", () => {
+  const LEGACY = { version: "0.15.85" } as const;
+
+  it("names the build skew, the floor, and the update instead of prescribing a retry", async () => {
+    const { text, isError, calls } = await setWidget(
+      { node_id: 78, widget: "quality_prompt", value: "masterpiece" },
+      {
+        firstWrite: "ok",
+        subgraph: SAFE_ANIMA_SUBGRAPH,
+        detailById: SAFE_ANIMA_IDENTITY_BY_ID,
+        legacyPanelBuild: LEGACY,
+      },
+    );
+
+    expect(isError).toBe(true);
+    // Nothing was written, and the subgraph was never entered.
+    expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
+    expect(calls.map((c) => c.cmd)).not.toContain("graph_enter_subgraph");
+
+    // The cause is the panel build, stated as such.
+    expect(text).toMatch(/panel build/i);
+    // The advertised version and the floor that fixes it are both named.
+    expect(text).toContain("0.15.85");
+    expect(text).toContain("0.15.101");
+    // The remedy that actually clears it.
+    expect(text).toMatch(/hard-refresh/i);
+    // …and the three things the reporter already tried are ruled OUT, rather
+    // than being what the message asks for.
+    expect(text).toMatch(/panel_enter_subgraph/);
+    expect(text).not.toMatch(/retry only after the panel binding and subgraph mapping are stable/);
+  });
+
+  it("still names the floor when the panel never advertised its version", async () => {
+    const { text, isError } = await setWidget(
+      { node_id: 78, widget: "quality_prompt", value: "masterpiece" },
+      {
+        firstWrite: "ok",
+        subgraph: SAFE_ANIMA_SUBGRAPH,
+        detailById: SAFE_ANIMA_IDENTITY_BY_ID,
+        legacyPanelBuild: {},
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(text).toContain("0.15.101");
+    expect(text).not.toMatch(/retry only after the panel binding and subgraph mapping are stable/);
+  });
+
+  it("leaves the transient refusals on a CURRENT panel saying retry", async () => {
+    // Same handler, same fixture, current build: a malformed envelope is a
+    // genuine transient and must keep the retry advice it has always had.
+    const { text, isError, calls } = await setWidget(
+      { node_id: 78, widget: "quality_prompt", value: "masterpiece" },
+      {
+        firstWrite: "ok",
+        subgraph: { ...SAFE_ANIMA_SUBGRAPH, node_count: 2 },
+        detailById: SAFE_ANIMA_IDENTITY_BY_ID,
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(text).toMatch(/retry only after the panel binding and subgraph mapping are stable/);
+    expect(text).not.toContain("0.15.101");
+    expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
   });
 });

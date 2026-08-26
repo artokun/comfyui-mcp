@@ -372,17 +372,50 @@ export const BRIDGE_CAPABILITY_MIN_PANEL_VERSION: Readonly<Record<string, string
   enforces_workflow_stamp_at_write: "0.11.35",
   // #2107 — graph_set_widget's optional expected_node_type fence shipped with
   // the panel-side write-boundary check.
-  enforces_expected_node_type_at_write: "0.15.58",
+  //
+  // panel#1859: read off the published tags rather than the merge commit. The
+  // key is absent from v0.15.58:web/js/lib/session-rebind.js and first present
+  // in v0.15.59 — the fix merged after the 0.15.58 release cut, so a 0.15.58
+  // floor authorized a published build that does not advertise it.
+  enforces_expected_node_type_at_write: "0.15.59",
   // #2314 — promoted inner writes carry an expected owner/workflow witness that
   // the panel validates immediately before mutating the current graph.
-  enforces_expected_scope_at_write: "0.15.97",
+  //
+  // panel#1859: these three said 0.15.97, which the panel NEVER RELEASED (its
+  // tags go 0.15.96 → 0.15.98). All three keys are absent from every tag up to
+  // and including v0.15.100 and first appear in v0.15.101 — the same release
+  // that added the `subgraph_of.graph_identity` the fence reads. The old number
+  // called 0.15.98/0.15.99/0.15.100 new enough for a promoted write when none
+  // of them can perform one, so `install_comfyui(action:'panel')` reported those
+  // installs current while every promoted write kept being refused — #708 in a
+  // second costume, and the reason panel#1859's remedy had no exit.
+  enforces_expected_scope_at_write: "0.15.101",
   // #2314 P1 — the promoted fence additionally validates the object-keyed live
   // graph identity, which is distinct from graph-local owner/node ids.
-  enforces_expected_scope_graph_identity_at_write: "0.15.97",
+  enforces_expected_scope_graph_identity_at_write: "0.15.101",
   // #2314 final-rail race — the promoted inner write re-resolves its live
   // authoritative parent rail at the synchronous mutation boundary.
-  enforces_promoted_parent_rail_at_write: "0.15.97",
+  enforces_promoted_parent_rail_at_write: "0.15.101",
 };
+
+/**
+ * The panel version ONE handshake capability first shipped in — the only number
+ * a refusal about THAT capability is entitled to quote.
+ *
+ * `undefined` when the table has no parseable entry, so a message degrades to
+ * naming the capability rather than fabricating a floor. Callers must not fall
+ * back to {@link requiredPanelVersion}: that is the aggregate sync answer and
+ * quoting it as one capability's requirement is the #352/#619 defect.
+ *
+ * panel#1859 added this because the four fence refusals below each hard-coded
+ * their number by hand, and three of them had copied a version that was never
+ * released. A hand-copied floor drifts silently from the table the gate
+ * actually reads; a derived one cannot.
+ */
+export function panelVersionForCapability(capability: string): string | undefined {
+  const min = BRIDGE_CAPABILITY_MIN_PANEL_VERSION[capability];
+  return typeof min === "string" && SEMVER_RE.test(min.trim()) ? min.trim() : undefined;
+}
 
 /**
  * The panel version each `show_media` *painter kind* was actually introduced in.
@@ -1565,36 +1598,37 @@ export interface BridgeCommand {
   [key: string]: unknown;
 }
 
-function expectedNodeTypeFenceRefusal(tabId: string): Error {
+/** panel#1859 — the floor comes from the table the gate itself reads, so the
+ * two can never disagree. With no parseable entry the sentence still names a
+ * remedy; it just cannot name a number, which beats naming a wrong one. */
+function fenceRefusal(tabId: string, fence: string, capability: string): Error {
+  const floor = panelVersionForCapability(capability);
   return new Error(
     `graph_set_widget was refused before dispatch because panel tab ${tabId} ` +
-      `does not advertise the atomic expected-node-type write fence. Update the ` +
-      `panel to 0.15.58+ and hard-refresh the browser tab.`,
+      `does not advertise the atomic ${fence} write fence. Update the ` +
+      `panel ${floor ? `to ${floor}+` : "to a build that advertises it"} and ` +
+      `hard-refresh the browser tab.`,
   );
+}
+
+function expectedNodeTypeFenceRefusal(tabId: string): Error {
+  return fenceRefusal(tabId, "expected-node-type", "enforces_expected_node_type_at_write");
 }
 
 function expectedScopeFenceRefusal(tabId: string): Error {
-  return new Error(
-    `graph_set_widget was refused before dispatch because panel tab ${tabId} ` +
-      `does not advertise the atomic promoted-scope write fence. Update the ` +
-      `panel to 0.15.97+ and hard-refresh the browser tab.`,
-  );
+  return fenceRefusal(tabId, "promoted-scope", "enforces_expected_scope_at_write");
 }
 
 function expectedScopeGraphIdentityFenceRefusal(tabId: string): Error {
-  return new Error(
-    `graph_set_widget was refused before dispatch because panel tab ${tabId} ` +
-      `does not advertise the atomic promoted graph-identity write fence. Update the ` +
-      `panel to 0.15.97+ and hard-refresh the browser tab.`,
+  return fenceRefusal(
+    tabId,
+    "promoted graph-identity",
+    "enforces_expected_scope_graph_identity_at_write",
   );
 }
 
 function promotedParentRailFenceRefusal(tabId: string): Error {
-  return new Error(
-    `graph_set_widget was refused before dispatch because panel tab ${tabId} ` +
-      `does not advertise the atomic promoted parent-rail write fence. Update the ` +
-      `panel to 0.15.97+ and hard-refresh the browser tab.`,
-  );
+  return fenceRefusal(tabId, "promoted parent-rail", "enforces_promoted_parent_rail_at_write");
 }
 
 function commandCarriesExpectedGraphIdentity(cmd: BridgeCommand): boolean {

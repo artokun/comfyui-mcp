@@ -19,6 +19,7 @@ import {
   isMutatingGraphCommand,
   requiresWorkflowStampEnforcement,
   BRIDGE_CAPABILITY_MIN_PANEL_VERSION,
+  panelVersionForCapability,
   unclassifiedGraphCommandsSeen,
   __resetUnclassifiedGraphCommands,
 } from "../../services/ui-bridge.js";
@@ -69,6 +70,21 @@ afterEach(() => {
 });
 
 // #570 P0c — classifier that decides which commands must pass the enforcement+stamp gate.
+
+/** panel#1859 — a fence refusal must quote the floor from the capability table
+ * the gate itself reads, not a number someone typed beside it. Three of these
+ * messages had drifted onto a version the panel never released, so a user who
+ * followed them landed on a build that was still refused. Assert the LINK here;
+ * the numbers themselves are pinned in panel-capability-floor.test.ts. */
+function fenceFloorRe(fence: string, capability: string): RegExp {
+  const floor = panelVersionForCapability(capability);
+  expect(floor, `no parseable floor for ${capability}`).toBeTruthy();
+  // panelVersionForCapability only ever returns a SEMVER_RE-screened string, so
+  // the only regex metacharacter it can contain is the dot.
+  const escaped = String(floor).replace(/\./g, "\\.");
+  return new RegExp(`${fence} write fence.*to ${escaped}\\+`, "i");
+}
+
 describe("requiresWorkflowStampEnforcement (#570 P0c)", () => {
   it("gates every graph_* mutator, never a read", () => {
     expect(requiresWorkflowStampEnforcement({ cmd: "graph_add_node" })).toBe(true);
@@ -3160,7 +3176,7 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
         (err) => err,
       );
     expect(caught).toBeInstanceOf(Error);
-    expect((caught as Error).message).toMatch(/atomic expected-node-type write fence.*0\.15\.58/i);
+    expect((caught as Error).message).toMatch(fenceFloorRe("atomic expected-node-type", "enforces_expected_node_type_at_write"));
     expect(isCapabilityRefusal(caught)).toBe(true);
     expect(dispatchOutcomeOf(caught)).toBe(false);
     old.close();
@@ -3269,7 +3285,7 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
         (err) => err,
       );
     expect(caught).toBeInstanceOf(Error);
-    expect((caught as Error).message).toMatch(/atomic promoted-scope write fence.*0\.15\.97/i);
+    expect((caught as Error).message).toMatch(fenceFloorRe("atomic promoted-scope", "enforces_expected_scope_at_write"));
     expect(isCapabilityRefusal(caught)).toBe(true);
     expect(dispatchOutcomeOf(caught)).toBe(false);
     old.close();
@@ -3320,7 +3336,7 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
         (err) => err,
       );
     expect(caught).toBeInstanceOf(Error);
-    expect((caught as Error).message).toMatch(/graph-identity write fence.*0\.15\.97/i);
+    expect((caught as Error).message).toMatch(fenceFloorRe("graph-identity", "enforces_expected_scope_graph_identity_at_write"));
     expect(isCapabilityRefusal(caught)).toBe(true);
     expect(dispatchOutcomeOf(caught)).toBe(false);
     old.close();
@@ -3374,7 +3390,7 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
         (err) => err,
       );
     expect(caught).toBeInstanceOf(Error);
-    expect((caught as Error).message).toMatch(/atomic promoted parent-rail write fence.*0\.15\.97/i);
+    expect((caught as Error).message).toMatch(fenceFloorRe("atomic promoted parent-rail", "enforces_promoted_parent_rail_at_write"));
     expect(isCapabilityRefusal(caught)).toBe(true);
     expect(dispatchOutcomeOf(caught)).toBe(false);
     old.close();

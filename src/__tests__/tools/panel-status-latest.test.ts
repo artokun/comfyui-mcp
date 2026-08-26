@@ -44,8 +44,11 @@ import { requiredPanelVersion } from "../../services/panel-sync.js";
 import { compareSemver } from "../../services/self-update.js";
 import { panelAction } from "../../tools/install-panel.js";
 
-/** A panel above the 0.15.97 capability floor, with a newer published release. */
-const INSTALLED = "0.15.97";
+/** A panel at the capability floor, with a newer published release.
+ *  Raised from 0.15.97 by panel#1859: the #2314 floor was corrected to the
+ *  0.15.101 that actually ships those capabilities, so 0.15.97 stopped being
+ *  above the line — and the canary below said so. */
+const INSTALLED = "0.15.101";
 const LATEST = "0.16.13";
 
 function status(over: Partial<PanelStatus> = {}): PanelStatus {
@@ -135,19 +138,19 @@ describe("#1983 — the status tool REACHES the latest-version probe", () => {
 
 describe("#1983 — floor and latest are two answers, never one", () => {
   it("the fixture is still above the floor (input precondition, not an expectation)", () => {
-    // If the derived floor ever rises past 0.15.97 these fixtures stop testing
+    // If the derived floor ever rises past INSTALLED these fixtures stop testing
     // the reported state. Fail here with a clear reason rather than three tests
-    // failing obscurely.
+    // failing obscurely. (It did rise, in panel#1859 — this canary is what said so.)
     expect(compareSemver(INSTALLED, requiredPanelVersion())).toBeGreaterThanOrEqual(0);
   });
 
-  it("16 versions behind latest, above the floor → behind:false AND behindLatest:true with the pair", async () => {
+  it("behind latest, above the floor → behind:false AND behindLatest:true with the pair", async () => {
     mocks.panelStatus.mockResolvedValue(status());
     stubFetch(() => new Response(pyproject(LATEST), { status: 200 }));
 
     const sync = await statusCall();
 
-    // The floor answer is UNCHANGED — 0.15.97 is not too old to work.
+    // The floor answer is UNCHANGED — the installed panel is not too old to work.
     expect(sync.behind).toBe(false);
     expect(sync.decision).toBe("meets-floor");
     // The latest answer is the one that was missing.
