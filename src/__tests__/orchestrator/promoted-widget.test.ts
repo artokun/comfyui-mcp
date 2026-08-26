@@ -437,7 +437,7 @@ function bridge(opts: {
     // reaches the scope checks at all instead of stopping at the node-type fence.
     tabExpectedNodeTypeFenceCapability: () => true,
     tabExpectedScopeGraphIdentityFenceCapability: () =>
-      !legacyBuild && opts.scopeGraphIdentityFence !== false,
+      opts.scopeGraphIdentityFence === true || (!legacyBuild && opts.scopeGraphIdentityFence !== false),
     tabPromotedTerminalWitnessCapability: () =>
       !legacyBuild && opts.promotedTerminalWitnesses === true,
     tabPromotedParentRailFenceCapability: () =>
@@ -1510,51 +1510,25 @@ describe("panel_set_widget promoted container success guards (#2314)", () => {
     // the refusal names the floor and the update rather than asking for a retry.
     expect(text).toContain("0.15.101");
     expect(text).not.toMatch(/retry only after the panel binding and subgraph mapping are stable/);
-    expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
-    expect(calls.map((c) => c.cmd)).not.toContain("graph_enter_subgraph");
-  });
-
-  it("checks the scope-identity fence capability EARLY and names the version requirement", async () => {
-    // #1859: When a panel is too old to support promoted widget writes (< 0.15.97),
-    // users get a clear error naming the version requirement instead of misleading
-    // "retry after binding stabilizes" advice that cannot work for a version shortfall.
-    // This test verifies (a) the early check catches it before scope extraction, and
-    // (b) the guidance names the version and tells users to update, not retry endlessly.
-    const { text, isError, calls } = await setWidget(
-      { node_id: 78, widget: "quality_prompt", value: "masterpiece" },
-      {
-        firstWrite: "ok",
-        subgraph: SAFE_ANIMA_SUBGRAPH,
-        detailById: SAFE_ANIMA_IDENTITY_BY_ID,
-        scopeGraphIdentityFence: false,
-      },
-    );
-
-    expect(isError).toBe(true);
-    // The error should name the missing capability
-    expect(text).toMatch(/lacks the atomic promoted graph-identity write fence/);
-    // Guidance must name the version requirement, not suggest retrying for binding stability
-    expect(text).toMatch(/This session requires panel >= 0\.15\.97/);
-    expect(text).toMatch(/Update your panel/);
-    // The original misleading "retry after binding/mapping settle" guidance must NOT appear
-    expect(text).not.toMatch(/binding and subgraph mapping are stable/);
-    // CRITICAL: the safety guarantee "No graph_set_widget was dispatched" must be present
-    // so the caller knows nothing partial or wrong-target happened
+    // #2365 — the safety guarantee stays on every promoted refusal, so the caller
+    // knows nothing partial or wrong-target happened.
     expect(text).toMatch(/No graph_set_widget was dispatched/);
-    // No graph_set_widget should be sent because we reject early
     expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
-    // No subgraph enter/exit should happen
     expect(calls.map((c) => c.cmd)).not.toContain("graph_enter_subgraph");
     expect(calls.map((c) => c.cmd)).not.toContain("graph_exit_subgraph");
   });
 
   it("always states no write was dispatched — property of every promoted-write refusal", async () => {
-    // SAFETY CRITICAL: every promoted-write refusal must guarantee that no graph_set_widget
-    // reached the graph, so the caller knows nothing partial or wrong-target happened.
-    // This property must hold for both capability-shortfall remedies AND non-capability
-    // reasons (like missing parent-rail witness). Test both remedy branches.
+    // #2365's SAFETY-CRITICAL property, kept: every promoted-write refusal must
+    // guarantee that no graph_set_widget reached the graph, whichever remedy the
+    // message carries. What changed is the second branch. #2365 labelled the
+    // parent-rail refusal "non-capability" and pinned it to the retry wording,
+    // but it is a capability shortfall in exactly the same sense as the first —
+    // a hello either advertises the fence or it does not — so pinning the retry
+    // advice there regression-locked the defect panel#1859 is about. The genuine
+    // transient is a third case, and it is covered below.
 
-    // Branch 1: capability shortfall (enforces_expected_scope_graph_identity_at_write missing)
+    // Branch 1: capability shortfall (enforces_expected_scope_graph_identity_at_write)
     const capabilityShortfall = await setWidget(
       { node_id: 78, widget: "quality_prompt", value: "masterpiece" },
       {
@@ -1566,10 +1540,11 @@ describe("panel_set_widget promoted container success guards (#2314)", () => {
     );
     expect(capabilityShortfall.isError).toBe(true);
     expect(capabilityShortfall.text).toMatch(/No graph_set_widget was dispatched/);
-    expect(capabilityShortfall.text).toMatch(/This session requires panel >= 0\.15\.97/);
+    expect(capabilityShortfall.text).toContain("0.15.101");
 
-    // Branch 2: non-capability reason (missing parent-rail witness, non-version remedy)
-    const nonCapabilityRefusal = await setWidget(
+    // Branch 2: a DIFFERENT capability shortfall (the final parent-rail fence).
+    // Same guarantee, and the same build-skew remedy rather than a retry.
+    const parentRailShortfall = await setWidget(
       { node_id: 78, widget: "quality_prompt", value: "masterpiece" },
       {
         firstWrite: "ok",
@@ -1578,36 +1553,25 @@ describe("panel_set_widget promoted container success guards (#2314)", () => {
         subgraph: CURRENT_SAFE_PROMOTED_SUBGRAPH,
       },
     );
-    expect(nonCapabilityRefusal.isError).toBe(true);
-    expect(nonCapabilityRefusal.text).toMatch(/No graph_set_widget was dispatched/);
-    expect(nonCapabilityRefusal.text).toMatch(/binding and subgraph mapping are stable/);
-  });
+    expect(parentRailShortfall.isError).toBe(true);
+    expect(parentRailShortfall.text).toMatch(/No graph_set_widget was dispatched/);
+    expect(parentRailShortfall.text).toContain("0.15.101");
+    expect(parentRailShortfall.text).not.toMatch(/binding and subgraph mapping are stable/);
 
-  it("MUTATION: moving dispatch clause into capability remedy only breaks the transient path", async () => {
-    // This test proves that the dispatch guarantee is PROPERTY of promotedWriteRefusal,
-    // not a side effect of being in the capability branch. If the dispatch clause were
-    // moved into the capability remedy ternary:
-    //
-    //   const remedy = opts?.capabilityName === "enforces_expected_scope_graph_identity_at_write"
-    //     ? `No graph_set_widget was dispatched; This session requires panel >= ...`
-    //     : `No graph_set_widget was dispatched; Retry only after binding and subgraph mapping are stable.`
-    //
-    // Then the transient branch (non-capability refusals) would LOSE the dispatch guarantee,
-    // and this assertion would go RED, proving the test catches it. Currently the clause is
-    // outside the ternary, so BOTH branches get it, and the test is GREEN. A later refactor
-    // that naturally moves per-reason text into per-reason branches would break the guarantee
-    // unless this test is passing — which means the transient path really does have it.
-
-    const { text } = await setWidget(
+    // Branch 3: a genuinely TRANSIENT refusal — a malformed envelope from a
+    // current panel. Same guarantee, and this is the one a retry can clear.
+    const transient = await setWidget(
       { node_id: 78, widget: "quality_prompt", value: "masterpiece" },
       {
         firstWrite: "ok",
-        promotedTerminalWitnesses: true,
-        promotedParentRailFence: false,
-        subgraph: CURRENT_SAFE_PROMOTED_SUBGRAPH,
+        subgraph: { ...SAFE_ANIMA_SUBGRAPH, node_count: 2 },
+        detailById: SAFE_ANIMA_IDENTITY_BY_ID,
       },
     );
-    expect(text).toMatch(/No graph_set_widget was dispatched/);
+    expect(transient.isError).toBe(true);
+    expect(transient.text).toMatch(/No graph_set_widget was dispatched/);
+    expect(transient.text).toMatch(/binding and subgraph mapping are stable/);
+    expect(transient.text).not.toContain("0.15.101");
   });
 
   it("refuses a promoted mapping for a receiver without the final parent-rail fence", async () => {
@@ -2770,6 +2734,30 @@ describe("panel_set_widget promoted write against a pre-#2314 panel build (panel
     expect(isError).toBe(true);
     expect(text).toContain("0.15.101");
     expect(text).not.toMatch(/retry only after the panel binding and subgraph mapping are stable/);
+  });
+
+  it("a receiver that DID advertise the fence but omits the identity keeps the retry advice", async () => {
+    // The narrow case the build-skew message must not swallow: the hello claims
+    // the fence, so an absent identity is an inconsistent reply rather than an
+    // old bundle, and retrying is a legitimate thing to ask for.
+    const { text, isError, calls } = await setWidget(
+      { node_id: 78, widget: "quality_prompt", value: "masterpiece" },
+      {
+        firstWrite: "ok",
+        subgraph: SAFE_ANIMA_SUBGRAPH,
+        detailById: SAFE_ANIMA_IDENTITY_BY_ID,
+        // Everything a legacy build implies EXCEPT the capability: the hello
+        // advertises the fence while the payload still omits graph_identity.
+        legacyPanelBuild: { version: "0.15.85" },
+        scopeGraphIdentityFence: true,
+      },
+    );
+
+    expect(isError).toBe(true);
+    expect(text).toMatch(/did not publish a verifiable workflow and viewing-scope identity/);
+    expect(text).toMatch(/retry only after the panel binding and subgraph mapping are stable/);
+    expect(text).not.toContain("0.15.101");
+    expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
   });
 
   it("leaves the transient refusals on a CURRENT panel saying retry", async () => {

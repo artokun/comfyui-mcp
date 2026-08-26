@@ -89,7 +89,6 @@ import {
   tabIncarnationSlot,
   SHOW_MEDIA_KIND_MIN_PANEL_VERSION,
   showMediaItemsPanelCannotPaint,
-  BRIDGE_CAPABILITY_MIN_PANEL_VERSION,
 } from "../services/ui-bridge.js";
 import { compareSemver } from "../services/self-update.js";
 import { describeInstallPanelAction } from "../services/panel-recovery.js";
@@ -6620,18 +6619,16 @@ async function authoritativePromotedScopeError(
   return { error, observed };
 }
 
-function promotedWriteRefusal(
-  widget: string,
-  reason: string,
-  options?: { capabilityName?: string },
-): ToolResult {
-  const remedy =
-    options?.capabilityName === "enforces_expected_scope_graph_identity_at_write"
-      ? `This session requires panel >= ${BRIDGE_CAPABILITY_MIN_PANEL_VERSION.enforces_expected_scope_graph_identity_at_write} for promoted widget writes. Update your panel, then retry.`
-      : `Retry only after the panel binding and subgraph mapping are stable.`;
+/** A refusal a retry can legitimately clear. Anything caused by the panel BUILD
+ * goes through {@link promotedPanelBuildRefusal} instead — #2365 carved the
+ * first of those out with a `capabilityName` option on this function, and that
+ * option is gone because every capability call site now uses the dedicated
+ * path, which also names the advertised version and a route that works. */
+function promotedWriteRefusal(widget: string, reason: string): ToolResult {
   return fail(
     `panel_set_widget refused the promoted "${widget}" write because ${reason}. ` +
-      `No graph_set_widget was dispatched; ${remedy}`,
+      `No graph_set_widget was dispatched; retry only after the panel binding and ` +
+      `subgraph mapping are stable.`,
   );
 }
 
@@ -6797,36 +6794,28 @@ async function preparePromotedWidgetWrite(
       "graph_get_subgraph returned a malformed, stale, or incomplete ownership envelope",
     );
   }
-  // Check for required scope-identity fence capability early: if the panel doesn't
-  // support it, the scope witness cannot be extracted, and the real issue is the panel
-  // version, not a transient staleness. This guard comes before scope extraction so the
-  // error message correctly names the constraint (missing capability) rather than the
-  // symptom (missing viewing field).
+  // panel#1859 — ask the HELLO before reading the witness out of the envelope.
+  // A build that never advertised this fence also never writes
+  // `subgraph_of.graph_identity` (both landed in panel 0.15.101; v0.15.85
+  // replies with a bare `subgraph_of: { node_id, title }`), so diagnosing it as
+  // a missing field describes the symptom while the cause is the bundle on
+  // disk. This ordering is #2365's idea, kept.
+  //
+  // It also narrows the branch below to its true meaning: a receiver that DID
+  // advertise the fence and still failed to publish the identity is an
+  // inconsistent reply, which a retry can legitimately clear.
   if (ctx.tabExpectedScopeGraphIdentityFenceCapability?.() !== true) {
-    return promotedWriteRefusal(
+    return promotedPanelBuildRefusal(
+      ctx,
+      nodeId,
       widget,
-      "the receiving panel lacks the atomic promoted graph-identity write fence",
-      { capabilityName: "enforces_expected_scope_graph_identity_at_write" },
+      "does not advertise the atomic promoted graph-identity write fence, so it " +
+        "cannot publish the target graph identity a promoted write is fenced on",
+      "enforces_expected_scope_graph_identity_at_write",
     );
   }
   const scope = promotedScopeWitnessFromEnvelope(envelope);
   if (!scope) {
-    // panel#1859 — separate "the panel cannot say this" from "the panel said
-    // something wrong". A malformed `viewing` or `subgraph_of.graph_identity`
-    // is already rejected by validatePromotedSubgraphEnvelope above, so an
-    // ABSENT one here is a pre-0.15.101 bundle that never writes the field at
-    // all (v0.15.85 replies with a bare `subgraph_of: { node_id, title }`).
-    // No amount of retrying adds a key the JS on disk does not emit.
-    if (envelope.targetGraphIdentity === undefined || envelope.viewing === undefined) {
-      return promotedPanelBuildRefusal(
-        ctx,
-        nodeId,
-        widget,
-        "does not publish the target graph identity that graph_get_subgraph must " +
-          "carry before a promoted write can be fenced to the right graph",
-        "enforces_expected_scope_graph_identity_at_write",
-      );
-    }
     return promotedWriteRefusal(
       widget,
       "graph_get_subgraph did not publish a verifiable workflow and viewing-scope identity",
