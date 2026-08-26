@@ -1147,7 +1147,7 @@ describe("panel_set_widget promoted container success guards (#2314)", () => {
     // Unchanged from before panel#1869: a transport failure IS transient, so
     // "retry once stable" is honest advice there and must survive.
     expect(text).toContain("could not determine whether the addressed node is a promoted container");
-    expect(text).toContain("Retry only after the panel binding and subgraph mapping are stable");
+    expect(text).toContain("retry only after the panel binding and subgraph mapping are stable");
     expect(text).not.toContain("[canvas-root-divergence]");
   });
 
