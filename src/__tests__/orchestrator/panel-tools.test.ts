@@ -684,6 +684,46 @@ describe("panel-tools: panel_set_widget V3 dynamic-combo sub-widgets (#2299)", (
     expect(res.content[0].text).toMatch(/is a STRING child/);
   });
 
+  it("probes with a pinpoint budget, so a long-prompt row is not degraded to a stub", async () => {
+    // The panel degrades an oversized detail line to an {id, type, title} stub.
+    // That stub has no `inputs`, so the shape becomes unprovable and the write
+    // falls open — on exactly the node #2299 reported, the one holding a long
+    // prompt. The survey cap has nothing to protect on a single-id, limit-1 read.
+    const sent: Array<Record<string, unknown>> = [];
+    await defByName("panel_set_widget").handler(
+      { node_id: 23, widget: "model.prompt", value: "NEW" },
+      {
+        call: async (cmd: Record<string, unknown>) => {
+          sent.push({ ...cmd });
+          if (cmd.cmd === "graph_query") {
+            return {
+              content: [{ type: "text" as const, text: JSON.stringify(dynamicDetail, null, 2) }],
+            };
+          }
+          return { content: [{ type: "text" as const, text: JSON.stringify(SET_OK, null, 2) }] };
+        },
+      } as unknown as PanelToolCtx,
+    );
+    const probe = sent.find((c) => c.cmd === "graph_query");
+    expect(probe).toBeDefined();
+    expect(probe?.fields).toBe("detail");
+    expect(probe?.limit).toBe(1);
+    expect(probe?.max_chars).toBe(60000);
+  });
+
+  it("falls open on a degraded/truncated detail row rather than refusing every dotted write", async () => {
+    // The documented residual: an unprovable shape keeps the setter path. Failing
+    // CLOSED here would refuse every dotted widget on every node whenever a probe
+    // hiccups. Pinned so that changing it is a deliberate decision, not a drift.
+    // A row the panel degraded to its {id, type, title} stub: no `inputs`, so
+    // neither half of the shape is provable.
+    const { res, cmds } = await run({
+      nodes: [{ id: 23, type: "MinimaxHailuo03TextToVideoNode", title: "MiniMax" }],
+    });
+    expect(res.isError).toBeUndefined();
+    expect(cmds).toEqual(["graph_query", "graph_set_widget"]);
+  });
+
   it("documents that only a STRING child is refused", () => {
     const description = defByName("panel_set_widget").description;
     expect(description).toContain("COMFY_DYNAMICCOMBO_V3");

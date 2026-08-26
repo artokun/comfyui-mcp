@@ -6056,6 +6056,18 @@ function parseVerifiedQueriedNodeDetail(
  * So: prove STRING, or keep the normal setter path. */
 const DYNAMIC_COMBO_REFUSED_CHILD_TYPE = "STRING";
 
+/** Budget for the gate's own detail probe — the panel_query_graph `max_chars`
+ *  ceiling, not the default.
+ *
+ * This is a PINPOINT read: one id, `limit: 1`, one row. The survey cap exists to
+ *  keep a 200-node listing small and has nothing to protect here. Leaving it at the
+ *  default is what makes the gate miss the case it was written for: the panel caps a
+ *  detail row and, past a point, degrades it to an `{id, type, title}` stub — which
+ *  drops `inputs`, so the parse cannot prove the shape and the write falls open.
+ *  The node most likely to overflow that budget is the node already holding a long
+ *  prompt, i.e. exactly the #2299 report ("<any long prompt>"). */
+const DYNAMIC_COMBO_PROBE_MAX_CHARS = 60000;
+
 function dynamicComboSubWidgetRefusal(
   nodeType: string,
   parentInput: string,
@@ -6096,9 +6108,20 @@ async function refuseDynamicComboSubWidgetWrite(
     ids: [nodeId],
     fields: "detail",
     limit: 1,
+    max_chars: DYNAMIC_COMBO_PROBE_MAX_CHARS,
   });
   if (probe.isError) return null;
 
+  // An unreadable or truncated probe is NOT evidence of a dynamic combo, so it
+  // falls open — the same discipline as refuseAnimaRegionalPromptWrite. Failing
+  // CLOSED here would refuse every dotted widget on every node whenever a probe
+  // hiccups (rgthree `lora_N.*`, promoted subgraph paths, JSON composite fields),
+  // which is a far larger blast radius than the residual it would close. The
+  // residual is a slice of the PRE-EXISTING bug, not one this gate introduces:
+  // without the gate every one of these writes is a false success. Shrinking that
+  // slice is what the generous probe budget above is for. Closing it entirely
+  // needs #2299's option 2 — an honest "written, not confirmed persistent" receipt
+  // — which changes the success contract of the tool and is not this guard's call.
   const detail = parseVerifiedQueriedNodeDetail(parseToolResultJson(probe));
   const requestedId = canonicalQueriedNodeId(nodeId);
   if (!detail || !requestedId || detail.id !== requestedId) return null;
