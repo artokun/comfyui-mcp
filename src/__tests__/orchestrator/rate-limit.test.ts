@@ -246,6 +246,27 @@ describe("sanitizeDetail", () => {
     );
   });
 
+  it("uses the explicit alpha-run table across identifier boundaries", () => {
+    const alphaId = "aeiouaeiouaeiouaeiotion";
+    const cases = [
+      [`account ${alphaId} is limited`, "account <redacted> is limited"],
+      [`user ${alphaId} is blocked`, "user <redacted> is blocked"],
+      [`account_id=${alphaId}`, "account_id=<redacted>"],
+      [`user_id ${alphaId} is limited`, "user_id <redacted> is limited"],
+      [`account_${alphaId}`, "account_<redacted>"],
+      [`acct_${alphaId}`, "acct_<redacted>"],
+      [`org-${alphaId}`, "org-<redacted>"],
+      [`wrapper_${alphaId}_suffix`, "wrapper_<redacted>"],
+      [`account-[${alphaId}]`, "account-[<redacted>]"],
+      ["account counterrevolutionary is limited", "account counterrevolutionary is limited"],
+      ["account compartmentalization_v2 is limited", "account compartmentalization_v2 is limited"],
+    ] as const;
+
+    for (const [input, expected] of cases) {
+      expect(sanitizeDetail(input)).toBe(expected);
+    }
+  });
+
   it("leaves long ordinary prose words readable", () => {
     expect(sanitizeDetail("account compartmentalization policy")).toBe("account compartmentalization policy");
     expect(sanitizeDetail("the user uncharacteristically exceeded the limit")).toBe(
@@ -264,6 +285,12 @@ describe("sanitizeDetail", () => {
     expect(sanitizeDetail("account_compartmentalization")).toBe("account_compartmentalization");
     expect(sanitizeDetail("account compartmentalization_v2 is limited")).toBe(
       "account compartmentalization_v2 is limited",
+    );
+    expect(sanitizeDetail("account internationalization is limited")).toBe(
+      "account internationalization is limited",
+    );
+    expect(sanitizeDetail("account nondeterministically is limited")).toBe(
+      "account nondeterministically is limited",
     );
   });
 

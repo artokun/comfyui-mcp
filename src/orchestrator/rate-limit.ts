@@ -192,17 +192,24 @@ const DIRECT_USER_LABEL =
 const DIRECT_PUNCTUATED_LABEL =
   /(?:^|[.!?;]\s*|(?:your|the)[\s-]+)(?:account|user)\s*(?:[,;.!?:=]\s*[\[({]?|[-_]+\s*[\[({]?|[\[({])\s*$/i;
 const IDENTIFIER_STATUS = /^\s+(?:is|was|has|had|reached|exceeded|exhausted|limited|invalid|expired|blocked|disabled)\b/i;
-const NATURAL_LANGUAGE_SUFFIX =
-  /(?:istically|ization|isation|tion|sion|ment|ness|ity|ically|ingly|edly|ful|less|able|ible|ive|ous|ance|ence)$/i;
+type AlphaRunClassification = "identifier" | "prose";
 
-function looksLikeNaturalLanguageWord(value: string): boolean {
-  const suffix = value.match(NATURAL_LANGUAGE_SUFFIX)?.[0];
-  if (suffix === undefined) return false;
+// There is no reliable morphology or vowel heuristic that can distinguish a
+// minted all-alpha id from an English word. Keep the small prose exception
+// explicit and table-driven; every unlisted long alpha run is classified as an
+// identifier, then bare alpha runs still require an explicit label/status
+// boundary before they are masked.
+const ALPHA_RUN_CLASSIFICATION: ReadonlyMap<string, AlphaRunClassification> = new Map([
+  ["compartmentalization", "prose"],
+  ["counterrevolutionary", "prose"],
+  ["internationalization", "prose"],
+  ["nondeterministically", "prose"],
+  ["uncharacteristically", "prose"],
+]);
 
-  const stem = value.slice(0, -suffix.length);
-  // A short stem with a non-English q-shape is an opaque id plus a prose-like
-  // suffix (for example, qavexidopulnertisktion), not ordinary prose.
-  return stem.length < 20 && !/q(?!u)/i.test(stem);
+function classifyAlphaRun(run: string): AlphaRunClassification {
+  const base = run.split(/[-_]+/)[0].toLowerCase();
+  return ALPHA_RUN_CLASSIFICATION.get(base) ?? "identifier";
 }
 
 function hasAlphaIdentifierContext(input: string, offset: number, run: string): boolean {
@@ -214,7 +221,6 @@ function hasAlphaIdentifierContext(input: string, offset: number, run: string): 
 
   const after = input.slice(offset + run.length);
   const afterClosingPunctuation = after.replace(/^\s*[\])}]+/, "");
-  if (looksLikeNaturalLanguageWord(run.split(/[-_]+/)[0])) return false;
   return (
     run.includes("-") ||
     !afterClosingPunctuation.trim() ||
@@ -225,7 +231,7 @@ function hasAlphaIdentifierContext(input: string, offset: number, run: string): 
 
 function preserveNaturalLanguagePrefixedRun(run: string, prefix: string): boolean {
   const tail = run.slice(prefix.length).split(/[-_]+/)[0];
-  return looksLikeNaturalLanguageWord(tail);
+  return classifyAlphaRun(tail) === "prose";
 }
 
 export function sanitizeDetail(raw: string, max = 200): string {
@@ -246,7 +252,7 @@ export function sanitizeDetail(raw: string, max = 200): string {
       (_m, prefix: string | undefined) => (prefix ? `${prefix}-<redacted>` : "<redacted>"),
     )
     // prefixed opaque identifiers: org-…, cak-…, key_…, acct-…. Natural
-    // language tails such as compartmentalization_v2 remain readable.
+    // language tails listed in ALPHA_RUN_CLASSIFICATION remain readable.
     .replace(
       /\b(?!(?:(?:account|acct|user|workspace|token|key)[_-](?:id|identifier)(?=$|[:=\s])))((?:[A-Za-z][A-Za-z0-9]{0,12}[-_]+)+)[A-Za-z0-9]{10,}(?:[-_]+[A-Za-z0-9]+)*\b/gi,
       (run, prefix: string) =>
@@ -258,8 +264,8 @@ export function sanitizeDetail(raw: string, max = 200): string {
     .replace(
       /\b[A-Za-z0-9]{20,}(?:[-_]+[A-Za-z0-9]+)*\b/g,
       (run, offset, input: string) => {
-        const naturalLanguage = looksLikeNaturalLanguageWord(run.split(/[-_]+/)[0]);
-        return !naturalLanguage && (/\d/.test(run) || hasAlphaIdentifierContext(input, offset, run))
+        return classifyAlphaRun(run) === "identifier" &&
+          (/\d/.test(run) || hasAlphaIdentifierContext(input, offset, run))
           ? "<redacted>"
           : run;
       },
