@@ -101,6 +101,20 @@ describe("orchestrator panel template relay wiring (#2196)", () => {
     expect(wiring.resolveAllowedPanelOrigin("tab-1", target)).toBeUndefined();
     expect(wiring.resolvePanelUrl("tab-1", target)).toBeUndefined();
 
+    observedOrigin = "http://[::1]:8188";
+    expect(wiring.resolveAllowedPanelOrigin("tab-1", target)).toBeUndefined();
+    expect(wiring.resolvePanelUrl("tab-1", target)).toBeUndefined();
+    observedOrigin = "http://localhost:8188";
+    expect(wiring.resolveAllowedPanelOrigin("tab-1", target)).toBeUndefined();
+    expect(wiring.resolvePanelUrl("tab-1", target)).toBeUndefined();
+
+    for (const origin of ["http://127.0.0.1:8188", "http://[::1]:8188", "http://localhost:8188"]) {
+      target = `${origin}/comfyapi`;
+      observedOrigin = origin;
+      expect(wiring.resolveAllowedPanelOrigin("tab-1", target)).toBe(origin);
+      expect(wiring.resolvePanelUrl("tab-1", target)).toBe(`${origin}/comfyapi/api/workflow_templates`);
+    }
+
     target = "https://remote.example/comfyapi";
     observedOrigin = "https://remote.example";
     expect(wiring.resolveAllowedPanelOrigin("tab-1", target)).toBeUndefined();

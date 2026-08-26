@@ -218,7 +218,12 @@ describe("authenticated panel template relay (#2196)", () => {
 
   it("only authorizes a loopback origin corroborated by the current target", () => {
     expect(currentPanelTemplateOrigin("https://remote.example:443", "https://remote.example/comfyapi")).toBeUndefined();
-    expect(currentPanelTemplateOrigin("http://localhost:8188", "http://127.0.0.1:8188/comfyapi")).toBe("http://localhost:8188");
+    expect(currentPanelTemplateOrigin("http://127.0.0.1:8188", "http://127.0.0.1:8188/comfyapi")).toBe("http://127.0.0.1:8188");
+    expect(currentPanelTemplateOrigin("http://[::1]:8188", "http://[::1]:8188/comfyapi")).toBe("http://[::1]:8188");
+    expect(currentPanelTemplateOrigin("http://localhost:8188", "http://localhost:8188/comfyapi")).toBe("http://localhost:8188");
+    expect(currentPanelTemplateOrigin("http://localhost:8188", "http://127.0.0.1:8188/comfyapi")).toBeUndefined();
+    expect(currentPanelTemplateOrigin("http://[::1]:8188", "http://127.0.0.1:8188/comfyapi")).toBeUndefined();
+    expect(currentPanelTemplateOrigin("http://localhost:8188", "http://[::1]:8188/comfyapi")).toBeUndefined();
     expect(currentPanelTemplateOrigin("http://localhost:8189", "http://127.0.0.1:8188/comfyapi")).toBeUndefined();
     expect(currentPanelTemplateOrigin("https://remote.example", "https://other.example/comfyapi")).toBeUndefined();
     expect(currentPanelTemplateOrigin("https://remote.example", "https://remote.example/comfyapi")).toBeUndefined();

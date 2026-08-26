@@ -427,12 +427,13 @@ export function currentPanelTemplateOrigin(
   const observed = parsedHttpOrigin(panelOrigin);
   const target = parsedHttpOrigin(currentTarget);
   if (!observed || !target) return undefined;
-  const sameLoopbackListener =
+  const exactLoopbackOrigin =
     LOOPBACK_HOSTS.has(observed.host) &&
     LOOPBACK_HOSTS.has(target.host) &&
     observed.protocol === target.protocol &&
-    observed.port === target.port;
-  return sameLoopbackListener ? observed.origin : undefined;
+    observed.port === target.port &&
+    observed.origin === target.origin;
+  return exactLoopbackOrigin ? observed.origin : undefined;
 }
 
 function safePanelTemplateUrl(raw: string | undefined, allowedOrigin: string | undefined): URL | undefined {
