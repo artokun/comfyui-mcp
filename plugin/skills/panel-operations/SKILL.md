@@ -335,15 +335,35 @@ failure mode: explicitly bypass each finished stage and keep only the ACTIVE sta
 
 ## Connecting MCP servers
 
-You can extend your own capabilities by connecting MCP servers: `panel_list_mcp` shows
-what is connected, `panel_add_mcp` writes a new server to the user's Claude config, and
-`panel_remove_mcp` removes one — then call `panel_reload` to load the change into this
-session (it restarts you and resumes automatically).
+`panel_list_mcp` lists the MCP servers in the user's Claude config, `panel_add_mcp`
+writes a new one there, and `panel_remove_mcp` removes one.
+
+**Only the Claude backend is handed those servers.** Every other backend
+(codex, gemini, grok, antigravity, qwen, the ollama family) is spawned with exactly two
+MCP servers — the headless `comfyui` one and the live-canvas `panel` one — so on those,
+the user's Claude config is their configuration and not your toolset. `panel_reload`
+does not change that; switching the panel to the Claude backend is what would.
+
+So `panel_list_mcp` answers PER SERVER with `declared_to_this_spawn`, and that field is
+what you read before saying a capability is connected. Two things to know about it:
+
+- A `false` on a non-Claude backend is settled — we handed you nothing. (Your own CLI
+  config may separately provide a server of the same name; that one is not this one.)
+- A `true` means we handed it to this session at spawn. It is **not** proof you have the
+  tools: a session that RESUMED after a restart keeps the MCP set recorded with it
+  rather than the one we just read, and a declared server can still fail to start. The
+  only proof is calling one of its tools and having it work.
+
+`panel_add_mcp` and `panel_remove_mcp` are still worth offering on any backend — they
+edit the user's real Claude config, so the change reaches their own `claude` sessions
+and this panel's Claude backend. Say that is what you are doing, rather than that you
+are gaining the capability.
 
 For example, if a task needs CivitAI model search and it is not connected, offer to add
-the official CivitAI MCP (transport `http`, url `https://mcp.civitai.com/mcp`), then
-reload. ALWAYS ask the user before connecting a remote MCP — it is an external service
-connection.
+the official CivitAI MCP (transport `http`, url `https://mcp.civitai.com/mcp`). ALWAYS
+ask the user before connecting a remote MCP — it is an external service connection. On
+the Claude backend, `panel_reload` then loads it into this session (it restarts you and
+resumes automatically).
 
 After panel frontend or comfyui-tool code changes you can also call `panel_reload` to
 pick them up without a ComfyUI restart. But changes to the orchestrator process itself

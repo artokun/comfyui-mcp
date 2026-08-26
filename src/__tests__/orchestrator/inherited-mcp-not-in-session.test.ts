@@ -434,13 +434,51 @@ describe("the system prompt's MCP-extension claim is retracted off the Claude la
     // per-session qualifier, the correction silently stops matching what it
     // corrects and a Claude-lane agent is back to reading the old claim.
     expect(PANEL_SYSTEM_APPEND).toMatch(/declared_to_this_spawn/);
-    expect(PANEL_SYSTEM_APPEND).toMatch(/Only the Claude backend is handed them/);
+    expect(PANEL_SYSTEM_APPEND).toMatch(/only the Claude backend is handed them/i);
     // The clause this replaces, verbatim from #2309's shrunk preamble. It is
     // false on every CLI lane, and it is what a reworded persona would drift
     // back toward — so pin its ABSENCE, not just the correction's presence.
     expect(PANEL_SYSTEM_APPEND).not.toMatch(
       /panel_remove_mcp manage MCP servers and panel_reload loads the change into this session/,
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The CARRIER. #2234 moved this guidance OUT of the preamble and into the
+// panel-operations skill, and #2309 carried the false claim across with it
+// verbatim. Correcting the preamble and leaving the skill would ship a half fix
+// that reads as a whole one — the skill is what the agent is told to go read.
+// ---------------------------------------------------------------------------
+
+describe("the carrier skill does not still teach the retracted claim", () => {
+  const SKILL = readFileSync(
+    new URL("../../../plugin/skills/panel-operations/SKILL.md", import.meta.url),
+    "utf-8",
+  );
+
+  it("no longer says panel_reload loads the change into this session, unqualified", () => {
+    // The exact sentences #2309 moved here, matched across the file's own line
+    // wrapping so a re-wrap cannot silently disarm the pin.
+    expect(SKILL).not.toMatch(
+      /then call `panel_reload` to load the change into this\s+session/,
+    );
+    expect(SKILL).not.toMatch(/`panel_list_mcp` shows\s+what is connected/);
+  });
+
+  it("names the lane, the field, and what a true does NOT prove", () => {
+    expect(SKILL).toMatch(
+      /\*\*Only the Claude backend is handed those servers\.\*\*/,
+    );
+    expect(SKILL).toMatch(/declared_to_this_spawn/);
+    expect(SKILL).toMatch(/not\*\* proof you have the\s+tools/);
+    expect(SKILL).toMatch(/RESUMED after a restart/);
+    expect(SKILL).toMatch(/can still fail to start/);
+  });
+
+  it("does not over-retract — the write still reaches the user's own sessions", () => {
+    expect(SKILL).toMatch(/still worth offering on any backend/);
+    expect(SKILL).toMatch(/that one is not this one/);
   });
 });
 
