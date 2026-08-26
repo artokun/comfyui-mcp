@@ -17,14 +17,22 @@
 //                                stdio `comfyui` child and the loopback `panel`
 //                                HTTP MCP
 //
-// So the Claude lane inherits and no other lane does. These tests drive the two
-// REAL lane constructors — the loopback HTTP server over a real socket, and the
-// in-process Anthropic SDK server over a linked transport pair — because a unit
-// test on the shared handler proves the mechanism and says nothing about whether
-// either lane reaches it. That gap is the whole bug: the handler was always
-// capable of telling the truth, and neither lane ever told it which one it was.
+// So the Claude lane inherits and no other lane does. But the LANE is only half
+// the question, as the first review round found: even on the Claude lane the
+// session was spawned with a snapshot, while panel_list_mcp reads the file LIVE.
+// panel_add_mcp writes immediately, so between that write and the panel_reload
+// that respawns the agent, a lane-only answer reports a brand-new server as
+// declared to a session that has never heard of it — the same bug one layer down.
+// So the reply answers PER SERVER, from the spawn snapshot.
+//
+// These tests drive the two REAL lane constructors — the loopback HTTP server
+// over a real socket, and the in-process Anthropic SDK server over a linked
+// transport pair — because a unit test on the shared handler proves the mechanism
+// and says nothing about whether either lane reaches it. That gap is the whole
+// bug: the handler was always capable of telling the truth, and neither lane ever
+// told it which one it was.
 
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -37,12 +45,13 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 const CONFIG_DIR = mkdtempSync(join(tmpdir(), "mcp-2311-"));
 const CONFIG = join(CONFIG_DIR, ".claude.json");
 const SERVER = "story-mixer-comfy";
-writeFileSync(
-  CONFIG,
-  JSON.stringify({
-    mcpServers: { [SERVER]: { type: "stdio", command: "python", args: ["-m", "story_mixer"] } },
-  }),
-);
+
+function writeConfig(...names: string[]): void {
+  const mcpServers: Record<string, unknown> = {};
+  for (const n of names) mcpServers[n] = { type: "stdio", command: "python", args: ["-m", n] };
+  writeFileSync(CONFIG, JSON.stringify({ mcpServers }));
+}
+writeConfig(SERVER);
 process.env.COMFYUI_MCP_CLAUDE_JSON = CONFIG;
 
 import { startPanelMcpHttpServer, type PanelMcpHttpServer } from "../../orchestrator/panel-mcp-http.js";
@@ -64,8 +73,7 @@ const bridge = {
 } as unknown as UiBridge;
 
 interface ListMcpReply {
-  user_config_servers: string[];
-  declared_to_this_session: boolean | "unknown";
+  servers: Record<string, { in_user_config: boolean; declared_to_this_session: boolean | "unknown" }>;
   builtin: string[];
   note: string;
 }
@@ -101,6 +109,7 @@ let httpServer: PanelMcpHttpServer | undefined;
 afterEach(async () => {
   await httpServer?.stop();
   httpServer = undefined;
+  writeConfig(SERVER);
 });
 
 async function callListMcpOverHttp(): Promise<ListMcpReply> {
@@ -152,20 +161,20 @@ describe("a CLI-lane session is not told it has the user's Claude-config MCP ser
     const reply = await callListMcpOverHttp();
     // The server is still reported — the user has it configured, and hiding it
     // would answer a different question than the one asked.
-    expect(reply.user_config_servers).toContain(SERVER);
+    expect(reply.servers[SERVER].in_user_config).toBe(true);
     // …but the availability verdict is the fix. `true` here is the bug.
-    expect(reply.declared_to_this_session).toBe(false);
+    expect(reply.servers[SERVER].declared_to_this_session).toBe(false);
   });
 
   it("tells the agent the consequence, not just the flag", async () => {
     const { note } = await callListMcpOverHttp();
-    expect(note).toMatch(/NOT declared to this session/);
+    expect(note).toMatch(/none of these are yours/);
     // The exact symptom the reporter hit, so the agent recognizes it rather than
     // treating it as a transient fault and retrying.
     expect(note).toMatch(/unknown-server error/);
     // panel_reload is what the prompt tells the agent to reach for; it does not help.
     expect(note).toMatch(/panel_reload will NOT add them/);
-    expect(note).toMatch(/do not\s+tell the user you have that capability/);
+    expect(note).toMatch(/do not tell the user you\s+have that capability/);
   });
 
   it("retracts ONLY our own claim, and does not speak for the CLI's own config", async () => {
@@ -174,10 +183,19 @@ describe("a CLI-lane session is not told it has the user's Claude-config MCP ser
     // hold servers from them. We know what WE declared and nothing more.
     const { note } = await callListMcpOverHttp();
     expect(note).toMatch(/says nothing about MCP servers your own CLI config may give you/);
-    expect(note).toMatch(/go by the tool list you\s+were actually given/);
+    expect(note).toMatch(/go by the tool list you were actually given/);
     // Nor does it write the tools off as useless — the write really does reach the
     // user's own sessions, which is a genuine reason to still offer it.
     expect(note).toMatch(/panel_add_mcp is still worth offering/);
+  });
+
+  it("does not invent a spawn-snapshot story for a lane that inherits nothing", async () => {
+    // On this lane a server added mid-session is not "pending a reload" — it is
+    // never coming. Saying otherwise would replace one false promise with another.
+    writeConfig(SERVER, "added-later");
+    const { note, servers } = await callListMcpOverHttp();
+    expect(servers["added-later"].declared_to_this_session).toBe(false);
+    expect(note).not.toMatch(/panel_reload respawns this session and picks them up/);
   });
 
   it("still reports the servers this lane genuinely was handed", async () => {
@@ -190,28 +208,39 @@ describe("a CLI-lane session is not told it has the user's Claude-config MCP ser
 // The Claude lane — must keep saying yes, or the fix is a false negative.
 // ---------------------------------------------------------------------------
 
-async function callListMcpOnClaudeLane(agentKey: string): Promise<ListMcpReply> {
+async function openClaudeLane(agentKey: string): Promise<{
+  list: () => Promise<ListMcpReply>;
+  close: () => Promise<void>;
+}> {
+  // Built ONCE, like a spawn: the snapshot it takes is what this session got.
   const config = createPanelMcpServer(bridge, agentKey) as unknown as { instance: McpServer };
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "test-2311-claude", version: "1" });
-  await Promise.all([
-    config.instance.connect(serverTransport),
-    client.connect(clientTransport),
-  ]);
+  await Promise.all([config.instance.connect(serverTransport), client.connect(clientTransport)]);
+  return {
+    list: async () => {
+      const res = await client.callTool({ name: "panel_list_mcp", arguments: {} });
+      expect(res.isError ?? false).toBe(false);
+      return replyOf(res.content);
+    },
+    close: () => client.close(),
+  };
+}
+
+async function callListMcpOnClaudeLane(agentKey: string): Promise<ListMcpReply> {
+  const lane = await openClaudeLane(agentKey);
   try {
-    const res = await client.callTool({ name: "panel_list_mcp", arguments: {} });
-    expect(res.isError ?? false).toBe(false);
-    return replyOf(res.content);
+    return await lane.list();
   } finally {
-    await client.close();
+    await lane.close();
   }
 }
 
 describe("the Claude lane keeps reporting the servers it really does inherit", () => {
   it("reports the configured server as declared to this session", async () => {
     const reply = await callListMcpOnClaudeLane("orchestrator::claude");
-    expect(reply.user_config_servers).toContain(SERVER);
-    expect(reply.declared_to_this_session).toBe(true);
+    expect(reply.servers[SERVER].in_user_config).toBe(true);
+    expect(reply.servers[SERVER].declared_to_this_session).toBe(true);
   });
 
   it("says DECLARED, not connected — a declared server can still come up failed", async () => {
@@ -219,9 +248,69 @@ describe("the Claude lane keeps reporting the servers it really does inherit", (
     // absent from the session's own `init` report. Upgrading `true` into "your
     // tools are there" would re-introduce this bug one layer down.
     const { note } = await callListMcpOnClaudeLane("orchestrator::claude");
-    expect(note).toMatch(/DECLARED to this session/);
     expect(note).toMatch(/Declared is not the same as connected/);
     expect(note).not.toMatch(/available to you/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Codex gate round 1, P1: the lane is only half the question.
+// ---------------------------------------------------------------------------
+
+describe("a server added AFTER the session spawned is not reported as declared to it", () => {
+  it("answers per server, from the spawn snapshot, not from the live config file", async () => {
+    // The reviewer's exact scenario: start Claude without `foo`, panel_add_mcp it,
+    // then panel_list_mcp BEFORE the panel_reload that would respawn the agent.
+    const lane = await openClaudeLane("orchestrator::claude");
+    try {
+      expect((await lane.list()).servers[SERVER].declared_to_this_session).toBe(true);
+      // panel_add_mcp writes to ~/.claude.json immediately.
+      writeConfig(SERVER, "foo");
+      const after = await lane.list();
+      // The pre-existing server is unaffected...
+      expect(after.servers[SERVER].declared_to_this_session).toBe(true);
+      // ...and the new one is honestly reported as not (yet) this session's.
+      expect(after.servers.foo.in_user_config).toBe(true);
+      expect(after.servers.foo.declared_to_this_session).toBe(false);
+      expect(after.note).toMatch(/Added to the config after this session started/);
+      expect(after.note).toMatch(/panel_reload respawns this session and picks them up/);
+    } finally {
+      await lane.close();
+    }
+  });
+
+  it("does not imply a REMOVED server is gone while the session still runs it", async () => {
+    // The same divergence mirrored. Dropping it from the reply entirely would say
+    // it had gone; it has not, until a panel_reload respawns the agent.
+    const lane = await openClaudeLane("orchestrator::claude");
+    try {
+      writeConfig(); // panel_remove_mcp(SERVER)
+      const after = await lane.list();
+      expect(after.servers[SERVER].in_user_config).toBe(false);
+      expect(after.servers[SERVER].declared_to_this_session).toBe(true);
+      expect(after.note).toMatch(/still running in this session until a panel_reload/);
+    } finally {
+      await lane.close();
+    }
+  });
+
+  it("says by-NAME, because that is all the snapshot can establish", async () => {
+    // A server removed and re-added under the same name is a DIFFERENT server the
+    // session cannot see. Claiming the definitions match would be a fresh
+    // over-claim wearing the fix's clothes.
+    const lane = await openClaudeLane("orchestrator::claude");
+    try {
+      writeConfig(SERVER, "foo");
+      expect((await lane.list()).note).toMatch(/Matching is by NAME only/);
+    } finally {
+      await lane.close();
+    }
+  });
+
+  it("says nothing about a snapshot when there is no divergence to report", async () => {
+    const { note } = await callListMcpOnClaudeLane("orchestrator::claude");
+    expect(note).not.toMatch(/Added to the config after this session started/);
+    expect(note).not.toMatch(/Matching is by NAME only/);
   });
 });
 
@@ -235,7 +324,7 @@ describe("a session whose backend was never established says so", () => {
     // id, which carries no backend half. A ctx built from one of those has not
     // observed an absence — and answering `false` would state one.
     const reply = await callListMcpOnClaudeLane("wf:workflows/a.json");
-    expect(reply.declared_to_this_session).toBe("unknown");
+    expect(reply.servers[SERVER].declared_to_this_session).toBe("unknown");
     expect(reply.note).toMatch(/could not be established here/);
     expect(reply.note).toMatch(/until you have actually called one of its tools/);
   });
@@ -294,7 +383,7 @@ describe("the system prompt's MCP-extension claim is retracted off the Claude la
     const note = inheritedMcpRetraction("codex");
     expect(note).not.toBe("");
     expect(note).toMatch(/You do NOT inherit the user's Claude-config MCP servers/);
-    expect(note).toMatch(/declared_to_this_session: false/);
+    expect(note).toMatch(/declared_to_this_session/);
     expect(note).toMatch(/panel_reload does NOT change that/);
   });
 
@@ -319,7 +408,7 @@ describe("the system prompt's MCP-extension claim is retracted off the Claude la
 
 // ---------------------------------------------------------------------------
 // The install lines. Each is one expression in a function no test can construct,
-// and a helper-level test is blind to all three.
+// and a helper-level test is blind to all of them.
 // ---------------------------------------------------------------------------
 
 describe("the wiring that makes the above reachable in production", () => {
@@ -336,7 +425,16 @@ describe("the wiring that makes the above reachable in production", () => {
     const src = read("../../orchestrator/panel-tools.ts");
     expect(src).toMatch(/const keyBackend = backendOfAgentKey\(tabId\);/);
     expect(src).toMatch(
-      /inheritsUserMcpServers:\s*keyBackend === undefined \? undefined : backendInheritsUserMcpServers\(keyBackend\),/,
+      /const inheritsUserMcpServers =\s*keyBackend === undefined \? undefined : backendInheritsUserMcpServers\(keyBackend\);/,
+    );
+  });
+
+  it("the Claude lane snapshots the spawn's server names, not the live file", () => {
+    // Without this the per-server answer degrades back to "whatever the config
+    // says right now", which is the round-1 P1 finding.
+    const src = read("../../orchestrator/panel-tools.ts");
+    expect(src).toMatch(
+      /inheritsUserMcpServers === true\s*\?\s*\{ userMcpServersAtSpawn: Object\.keys\(readUserMcpServers\(\)\) \}\s*:\s*\{\}/,
     );
   });
 

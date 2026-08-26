@@ -12093,6 +12093,29 @@ export interface PanelToolCtx {
    * migration rewrites into a bare panel tab id.
    */
   inheritsUserMcpServers?: boolean;
+  /**
+   * The user MCP server NAMES this session was actually spawned with — the
+   * snapshot `readUserMcpServers()` returned at the moment the agent was built
+   * (codex gate, #2311 round 1).
+   *
+   * `inheritsUserMcpServers` alone is a statement about the LANE, and reading the
+   * config file live then labelling the result with it re-creates the same bug one
+   * layer down: `panel_add_mcp("foo")` writes to ~/.claude.json immediately, so on
+   * the Claude lane the very next `panel_list_mcp` — still BEFORE the panel_reload
+   * that would respawn the agent — would report `foo` as declared to a session that
+   * has never heard of it, and every call to it fails `unknown MCP server`.
+   *
+   * The snapshot makes that answerable instead of guessed: PanelAgentManager's
+   * makeAgent() builds `mcpServers` and `panelServer` as two properties of ONE
+   * synchronous object literal, so the set this captures is precisely the set that
+   * spawn declared. It is by NAME only — a server removed and re-added under the
+   * same name keeps running with whatever config the session started with, and the
+   * reply says so rather than implying we compared the definitions.
+   *
+   * Undefined when the lane does not inherit (the answer is "none" regardless) or
+   * when the backend was never established (the answer is unknown).
+   */
+  userMcpServersAtSpawn?: readonly string[];
 }
 
 /** Options a LANE sets on the ctx it builds — facts about the agent this tool
@@ -12100,6 +12123,8 @@ export interface PanelToolCtx {
 export interface PanelToolCtxLane {
   /** See {@link PanelToolCtx.inheritsUserMcpServers}. Omit for "unknown". */
   inheritsUserMcpServers?: boolean;
+  /** See {@link PanelToolCtx.userMcpServersAtSpawn}. */
+  userMcpServersAtSpawn?: readonly string[];
 }
 
 /** Build a tab-bound execution context shared by both transports. */
@@ -12125,6 +12150,9 @@ export function makePanelToolCtx(
     ...(lane?.inheritsUserMcpServers === undefined
       ? {}
       : { inheritsUserMcpServers: lane.inheritsUserMcpServers }),
+    ...(lane?.userMcpServersAtSpawn === undefined
+      ? {}
+      : { userMcpServersAtSpawn: lane.userMcpServersAtSpawn }),
   } as PanelToolCtx;
 
   // AUTO-HEAL an orphaned session in place. When THIS session's captured tabId no
@@ -17909,37 +17937,76 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_list_mcp",
-      "List the MCP servers configured in the user's Claude config (~/.claude.json) and say whether THIS session's agent was actually handed them. Only the Claude backend inherits them; on codex/gemini/grok/antigravity/qwen/... they are the user's configuration and NOT part of your toolset, so the reply reports them as not declared rather than as available. Read `declared_to_this_session` before telling the user (or yourself) that a capability is connected - and note that even `true` means DECLARED, not verified-connected. Your own built-ins (comfyui, the live-graph panel server) are listed separately.",
+      "List the MCP servers configured in the user's Claude config (~/.claude.json) and say whether THIS session's agent was actually handed them. Only the Claude backend inherits them; on codex/gemini/grok/antigravity/qwen/... they are the user's configuration and NOT part of your toolset, so the reply reports them as not declared rather than as available. The reply answers PER SERVER: read each one's `declared_to_this_session` before telling the user (or yourself) that a capability is connected - it is false for a server the user added after this session started (panel_reload picks those up), and even `true` means DECLARED, not verified-connected. Your own built-ins (comfyui, the live-graph panel server) are listed separately.",
       {},
       async (_args: A, ctx) => {
         try {
-          const configured = Object.keys(readUserMcpServers());
+          const inConfig = new Set(Object.keys(readUserMcpServers()));
           // TRI-STATE, never collapsed (#2311, and the #796 unknown-collapse rule):
           // a backend we never established is reported as "unknown", not as `false`.
           const inherits = ctx?.inheritsUserMcpServers;
-          const declared: boolean | "unknown" = inherits === undefined ? "unknown" : inherits;
-          const note =
-            declared === true
-              ? "These servers were DECLARED to this session (the Claude lane inherits the user's config). " +
-                "Declared is not the same as connected - a declared server can still come up failed - so if a " +
-                "call to one returns an unknown-server error, that is why. panel_add_mcp / panel_remove_mcp " +
-                "followed by panel_reload changes this set."
-              : declared === false
-                ? "These servers were NOT declared to this session: this agent's backend is not the Claude one, " +
-                  "and only the Claude lane is handed the user's ~/.claude.json servers. Calling one of their " +
-                  "tools will fail with an unknown-server error, and panel_reload will NOT add them - do not " +
-                  "tell the user you have that capability. They DO apply to the user's own claude sessions and " +
-                  "to this panel's Claude backend, so panel_add_mcp is still worth offering for those. This " +
-                  "says nothing about MCP servers your own CLI config may give you: go by the tool list you " +
-                  "were actually given."
+          // The set this SESSION was spawned with, which is a different question
+          // from what the config file says right now (codex gate, round 1). On the
+          // inheriting lane the two diverge the moment panel_add_mcp writes, and
+          // stay diverged until panel_reload respawns the agent.
+          const atSpawn = ctx?.userMcpServersAtSpawn;
+          const declaredFor = (name: string): boolean | "unknown" => {
+            if (inherits === undefined) return "unknown";
+            if (inherits === false) return false;
+            // Inheriting, but nobody recorded what the spawn actually got: the
+            // honest answer is unknown, not "everything in the file".
+            return atSpawn === undefined ? "unknown" : atSpawn.includes(name);
+          };
+          // Union, so a server REMOVED from the config but still live in this
+          // session is visible too — omitting it would imply it had gone.
+          const names = [...new Set([...inConfig, ...(atSpawn ?? [])])].sort();
+          const servers: Record<string, { in_user_config: boolean; declared_to_this_session: boolean | "unknown" }> =
+            {};
+          for (const name of names) {
+            servers[name] = {
+              in_user_config: inConfig.has(name),
+              declared_to_this_session: declaredFor(name),
+            };
+          }
+          const pendingAdd = names.filter(
+            (n) => inConfig.has(n) && declaredFor(n) === false && inherits === true,
+          );
+          const pendingRemove = names.filter((n) => !inConfig.has(n));
+          const lane =
+            inherits === true
+              ? "This is the Claude lane, which IS handed the user's ~/.claude.json servers - but only the ones " +
+                "that existed when this session was spawned. Declared is not the same as connected: a declared " +
+                "server can still come up failed, so if a call to one returns an unknown-server error, that is why."
+              : inherits === false
+                ? "This agent's backend is not the Claude one, and only the Claude lane is handed the user's " +
+                  "~/.claude.json servers - so none of these are yours. Calling one of their tools will fail " +
+                  "with an unknown-server error, and panel_reload will NOT add them: do not tell the user you " +
+                  "have that capability. They DO apply to the user's own claude sessions and to this panel's " +
+                  "Claude backend, so panel_add_mcp is still worth offering for those. This says nothing about " +
+                  "MCP servers your own CLI config may give you: go by the tool list you were actually given."
                 : "Whether this session was handed these servers could not be established here (the agent's " +
                   "backend is not recorded on this tool session). Treat it as unknown: do not claim the " +
                   "capability until you have actually called one of its tools and it worked.";
+          const pending = [
+            pendingAdd.length
+              ? `Added to the config after this session started, so NOT yours yet: ${pendingAdd.join(", ")} - ` +
+                "panel_reload respawns this session and picks them up."
+              : "",
+            pendingRemove.length
+              ? `Removed from the config but still running in this session until a panel_reload: ${pendingRemove.join(", ")}.`
+              : "",
+          ]
+            .filter(Boolean)
+            .join(" ");
+          const byName =
+            pendingAdd.length || pendingRemove.length
+              ? " Matching is by NAME only: a server removed and re-added under the same name keeps whatever " +
+                "settings this session started with until a panel_reload."
+              : "";
           return ok({
-            user_config_servers: configured,
-            declared_to_this_session: declared,
+            servers,
             builtin: ["comfyui", "panel"],
-            note,
+            note: [lane, pending].filter(Boolean).join(" ") + byName,
           });
         } catch (err) {
           return fail(err);
@@ -22610,9 +22677,19 @@ export function createPanelMcpServer(
   // is a routing address that server.rebindTab() below rewrites into a bare panel
   // tab id — which carries no backend half at all.
   const keyBackend = backendOfAgentKey(tabId);
+  const inheritsUserMcpServers =
+    keyBackend === undefined ? undefined : backendInheritsUserMcpServers(keyBackend);
   const ctx = makePanelToolCtx(bridge, tabId, workflowTargets, onRunTicketOpened, {
-    inheritsUserMcpServers:
-      keyBackend === undefined ? undefined : backendInheritsUserMcpServers(keyBackend),
+    inheritsUserMcpServers,
+    // Snapshot the names THIS spawn was given, not the file. makeAgent() builds
+    // `mcpServers` (which re-reads ~/.claude.json) and `panelServer` (this call)
+    // as two properties of one synchronous object literal, so these are the same
+    // set — and a panel_add_mcp later in the session cannot retroactively appear
+    // in it. Only meaningful on the inheriting lane; elsewhere the answer does
+    // not depend on it.
+    ...(inheritsUserMcpServers === true
+      ? { userMcpServersAtSpawn: Object.keys(readUserMcpServers()) }
+      : {}),
   });
   // #873 — THE SECOND PANEL REGISTRATION PATH. This one serves the Anthropic Agent SDK
   // (Claude backend, in-process transport); registerPanelTools serves the MCP SDK. They
