@@ -64,7 +64,7 @@ writeConfig(SERVER);
 process.env.COMFYUI_MCP_CLAUDE_JSON = CONFIG;
 
 import { startPanelMcpHttpServer, type PanelMcpHttpServer } from "../../orchestrator/panel-mcp-http.js";
-import { createPanelMcpServer } from "../../orchestrator/panel-tools.js";
+import { buildPanelToolDefs, createPanelMcpServer } from "../../orchestrator/panel-tools.js";
 import { inheritedMcpRetraction, PANEL_SYSTEM_APPEND } from "../../orchestrator/index.js";
 import { backendInheritsUserMcpServers } from "../../services/user-mcp-config.js";
 import { backendOfAgentKey } from "../../services/session-scope.js";
@@ -450,6 +450,61 @@ describe("the system prompt's MCP-extension claim is retracted off the Claude la
 // verbatim. Correcting the preamble and leaving the skill would ship a half fix
 // that reads as a whole one — the skill is what the agent is told to go read.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// THE PROMPT IS THE WEAK CHANNEL, and this is the one that has to hold without it.
+//
+// CodexBackend sets `needsSystemPreamble` only in its `thread/start` branch
+// (codex-backend.ts) — a RESUMED thread carries whatever persona text is already
+// in its transcript, which for a thread started before this change is the old,
+// false one. That is pre-existing and shared by every prompt-level retraction
+// here (panelToolsRetraction, PI_CAPABILITY_OVERRIDE); re-delivering a 16KB
+// preamble on every resume is a separate decision, and #2234 had just spent a
+// whole change halving it.
+//
+// What DOES reach such a session is the tool surface: the MCP servers are
+// re-declared per spawn, so `tools/list` returns THIS build's descriptions and
+// every call returns THIS build's reply. So the correction must be complete in
+// the description alone — an agent that never sees the corrected prompt still
+// reads the rule before it can call the tool.
+// ---------------------------------------------------------------------------
+
+describe("the correction survives an agent that never sees the corrected prompt", () => {
+  const describedBy = (name: string): string => {
+    const def = (buildPanelToolDefs() as Array<{ name: string; description?: string }>).find(
+      (d) => d.name === name,
+    );
+    expect(def, `${name} is no longer registered`).toBeDefined();
+    return def!.description ?? "";
+  };
+
+  it("panel_list_mcp's own description states the lane rule", () => {
+    const d = describedBy("panel_list_mcp");
+    expect(d).toMatch(/Only the Claude backend inherits them/);
+    expect(d).toMatch(/NOT part of your toolset/);
+    expect(d).toMatch(/declared_to_this_spawn/);
+  });
+
+  it("...and that a true is not proof, which is the round-2 correction", () => {
+    const d = describedBy("panel_list_mcp");
+    expect(d).toMatch(/is NOT proof you have the tools/);
+    expect(d).toMatch(/a resumed session keeps the set recorded with it/);
+  });
+
+  it("panel_add_mcp's description no longer promises the tools to every backend", () => {
+    const d = describedBy("panel_add_mcp");
+    // The original sentence, which promised the Claude-lane outcome to everyone.
+    expect(d).not.toMatch(/it then loads into THIS session after you call panel_reload/);
+    expect(d).toMatch(/on every other backend .* it does NOT/);
+    expect(d).toMatch(/do not promise the capability before reading it/i);
+  });
+
+  it("panel_remove_mcp's description no longer addresses every backend as if it had the server", () => {
+    const d = describedBy("panel_remove_mcp");
+    expect(d).not.toMatch(/^Remove an MCP server from the user's Claude config by name\. Call panel_reload/);
+    expect(d).toMatch(/other backends were never handed it in the first place/);
+  });
+});
 
 describe("the carrier skill does not still teach the retracted claim", () => {
   const SKILL = readFileSync(
