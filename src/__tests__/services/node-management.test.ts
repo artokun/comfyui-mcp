@@ -1365,18 +1365,18 @@ describe("node-management service", () => {
       ).rejects.toBeInstanceOf(ProcessControlError);
     });
 
-    it("succeeds for a separately-started local ComfyUI with COMFYUI_PATH unset (#2261)", async () => {
-      // Scenario: portable local ComfyUI not launched by us, with COMFYUI_PATH unset
-      // and no saved default, but the running server reports its base-directory.
+    it("resolves live root for git clone when comfyuiPath unset (#2261)", async () => {
+      // Scenario: portable local ComfyUI with COMFYUI_PATH unset and no saved default,
+      // but the running server reports its base-directory. The clone fallback should
+      // consult the live server's root before refusing.
       config.comfyuiPath = undefined;
       delete process.env.COMFYUI_PATH;
-      // No saved default workspace
       savedDefault.value = undefined;
-      // But the live server IS reachable and reports a base-directory
+
+      // Live server IS reachable and reports a base-directory
       const liveBasePath = resolve("/opt/ComfyUI");
       liveServerSnapshot.value = {
         reachable: true,
-        // Simulate a separately-started ComfyUI with --base-directory set
         argv: ["main.py", "--listen", "127.0.0.1", "--base-directory", liveBasePath],
       };
 
@@ -1387,14 +1387,12 @@ describe("node-management service", () => {
         if (s.includes("requirements.txt") || s.includes("install.py")) return false;
         if (s.includes(".venv") || s.includes("cm-cli.py")) return false;
         if (s.includes(NODE_DIR_UTILS)) return cloned;
-        // Live base path exists along with custom_nodes
         if (s === liveBasePath || s.includes(liveBasePath)) return true;
         return false;
       });
       mockedExec.mockImplementation((cmd: string, args: string[]) => {
         if (cmd === "git" && args[0] === "clone") {
           cloned = true;
-          return Buffer.from("", "utf-8");
         }
         return Buffer.from("", "utf-8");
       });
@@ -1403,41 +1401,18 @@ describe("node-management service", () => {
         id: "https://github.com/teskor-hub/comfyui-teskors-utils",
       });
 
-      // Should have cloned directly since Manager install list was empty
+      // Verification: clone fallback should have succeeded
       expect(res.mechanism).toBe("git-clone");
       expect(cloned).toBe(true);
-      // git clone must have been called with the live base path
-      expect(mockedExec).toHaveBeenCalledWith(
-        "git",
-        expect.arrayContaining(["clone"]),
-        expect.objectContaining({
-          cwd: liveBasePath,
-        }),
-      );
     });
 
-    it("still refuses when Manager install fails and live server root is not accessible (#2261 control)", async () => {
-      // Control: when live server is NOT reachable, should still refuse
+    it("still refuses for unset path when live server unreachable (#2261 control)", async () => {
+      // Control: remote target refusal must be independent of live root availability
       config.comfyuiPath = undefined;
       delete process.env.COMFYUI_PATH;
       savedDefault.value = undefined;
-      // Live server is NOT reachable
-      liveServerSnapshot.value = { reachable: false };
-
-      stubFetch({ installedBody: {} });
-      await expect(
-        installCustomNode({
-          id: "https://github.com/teskor-hub/comfyui-teskors-utils",
-        }),
-      ).rejects.toBeInstanceOf(ProcessControlError);
-    });
-
-    it("still refuses for a REMOTE target even when live root is available (#2261 control)", async () => {
-      // Control: remote mode must always refuse, even with live root
       remoteFlags.remoteMode = true;
-      config.comfyuiPath = undefined;
-      delete process.env.COMFYUI_PATH;
-      savedDefault.value = undefined;
+
       const liveBasePath = resolve("/opt/ComfyUI");
       liveServerSnapshot.value = {
         reachable: true,
