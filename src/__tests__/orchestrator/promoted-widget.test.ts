@@ -77,6 +77,10 @@ function bridge(opts: {
    *  probe (which cannot prove the dynamic-combo shape) and the post-enter inner
    *  probe (which can) return different rows. */
   detailById?: Record<string, unknown>;
+  /** #2305: the contradictory refusal the FIRST write throws, for a promoted
+   *  widget that is not #2299's `model.prompt`. Wins over the default above so
+   *  the recovery resolves the name under test. */
+  firstWriteError?: string;
 }) {
   const calls: Array<Record<string, unknown>> = [];
   let writes = 0;
@@ -89,6 +93,7 @@ function bridge(opts: {
         if (writes === 1 && opts.ambiguous) throw new Error(AMBIGUOUS);
         if (writes === 1 && opts.scopeLost) throw new Error(SCOPE_REFUSAL);
         if (writes === 1 && opts.stackDataIdentity) throw new Error(STACK_DATA_CONTRADICTORY);
+        if (writes === 1 && opts.firstWriteError) throw new Error(opts.firstWriteError);
         if (writes === 1 && opts.detailById) throw new Error(DYNAMIC_CHILD_CONTRADICTORY);
         const which =
           writes === 1
@@ -253,6 +258,94 @@ describe("panel_set_widget promoted inner dynamic-combo child (#2299)", () => {
               },
             ],
           },
+        },
+      },
+    );
+    expect(isError).toBe(false);
+    const writes = calls.filter((c) => c.cmd === "graph_set_widget");
+    expect(writes.some((c) => String(c.node_id) === "76")).toBe(true);
+  });
+});
+
+// #2305 — an LC123 regional-canvas prompt widget promoted out of a subgraph. The
+// outer #1658 guard probed the CONTAINER, which is never one of the regional-canvas
+// types, so it fell open; the write is refused as "not promoted", and recovery
+// retries on the INNER node — the node whose custom JS owns the prompt.
+const ANIMA_CONTRADICTORY =
+  `Cannot set widget on subgraph node 78: "quality_prompt" is not a promoted widget on this ` +
+  `subgraph (promoted: quality_prompt, scene_prompt).`;
+
+const ANIMA_SUBGRAPH = {
+  subgraph_of: { node_id: 78, title: "Regional" },
+  instance_widgets: { quality_prompt: "", scene_prompt: "" },
+  node_count: 1,
+  nodes: [
+    {
+      id: 76,
+      type: "AnimaRegionalCanvasInline",
+      widgets: { quality_prompt: "", scene_prompt: "" },
+    },
+  ],
+};
+
+/** The outer probe sees the container's own type and must fall open; only the
+ *  inner row names a regional-canvas node. */
+const ANIMA_IDENTITY_BY_ID = {
+  "78": { nodes: [{ id: 78, type: "SubgraphNode" }] },
+  "76": { nodes: [{ id: 76, type: "AnimaRegionalCanvasInline" }] },
+};
+
+describe("panel_set_widget promoted inner LC123 regional prompt (#2305)", () => {
+  it("refuses the inner write instead of reporting a false success", async () => {
+    const { text, isError, calls } = await setWidget(
+      { node_id: 78, widget: "quality_prompt", value: "masterpiece, best quality" },
+      {
+        firstWrite: "contradict",
+        firstWriteError: ANIMA_CONTRADICTORY,
+        subgraph: ANIMA_SUBGRAPH,
+        detailById: ANIMA_IDENTITY_BY_ID,
+      },
+    );
+    expect(isError).toBe(true);
+    expect(text).toContain("LC123 regional-canvas prompt");
+    // The real #1658 refusal body, not a lookalike message.
+    expect(text).toContain("AnimaRegionalCanvasInline");
+    expect(text).toContain("animaPrompts");
+    expect(text).toContain("No inner graph_set_widget was dispatched");
+    // The recovery entered the subgraph and left it again...
+    expect(calls.some((c) => c.cmd === "graph_enter_subgraph")).toBe(true);
+    expect(calls.some((c) => c.cmd === "graph_exit_subgraph")).toBe(true);
+    // ...the guard was re-probed against the INNER id, not the container...
+    expect(
+      calls.some(
+        (c) =>
+          c.cmd === "graph_query" &&
+          Array.isArray(c.ids) &&
+          String((c.ids as unknown[])[0]) === "76",
+      ),
+    ).toBe(true);
+    // ...and the INNER node was never written. Only the outer attempt happened.
+    const writes = calls.filter((c) => c.cmd === "graph_set_widget");
+    expect(writes.every((c) => String(c.node_id) !== "76")).toBe(true);
+  });
+
+  it("still applies a promoted inner write when the inner node is NOT a regional canvas", async () => {
+    const { isError, calls } = await setWidget(
+      { node_id: 78, widget: "quality_prompt", value: "masterpiece, best quality" },
+      {
+        firstWrite: "contradict",
+        firstWriteError: ANIMA_CONTRADICTORY,
+        innerWrite: "ok",
+        subgraph: {
+          ...ANIMA_SUBGRAPH,
+          nodes: [
+            { id: 76, type: "PrimitiveStringMultiline", widgets: { quality_prompt: "" } },
+          ],
+        },
+        detailById: {
+          "78": ANIMA_IDENTITY_BY_ID["78"],
+          // Same widget name, ordinary node — not the #1658 shape.
+          "76": { nodes: [{ id: 76, type: "PrimitiveStringMultiline" }] },
         },
       },
     );

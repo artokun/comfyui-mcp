@@ -16740,6 +16740,41 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           innerExpectedNodeType = innerIdentity.type;
         }
 
+        // #2305 — the same omission as #2299, in the neighbouring guard. The #1658
+        // LC123 regional-canvas refusal also ran against the OUTER node id, and the
+        // subgraph container is never one of ANIMA_REGIONAL_CANVAS_TYPES, so it
+        // correctly fell open. The node this retry actually writes is the INNER one,
+        // and that is the node whose custom JS copies its hidden textarea back over
+        // widget.value — a success echo from the write below is exactly the lie the
+        // refusal exists to stop.
+        //
+        // The post-enter identity probe above cannot cover it either: it is gated on
+        // `expectedNodeType`, which is set only when the addressed widget IS
+        // `stack_data`, so it never runs for a prompt widget. This re-probes the inner
+        // node for the six regional-prompt names — the canvas is already inside the
+        // subgraph here, so `inner.innerNodeId` resolves — and exits before returning
+        // so the caller's scope is unchanged.
+        const innerAnimaBlocked = await refuseAnimaRegionalPromptWrite(
+          ctx,
+          inner.innerNodeId,
+          inner.widget,
+        );
+        if (innerAnimaBlocked) {
+          const exitedEarly = await ctx.call({ cmd: "graph_exit_subgraph" }, 15000);
+          return appendToolResultText(
+            first,
+            `
+
+(The promoted inner node ${inner.innerNodeId} owns "${inner.widget}" as an ` +
+              `LC123 regional-canvas prompt; ${textOfToolResult(innerAnimaBlocked)} ` +
+              `No inner graph_set_widget was dispatched.${
+                exitedEarly.isError
+                  ? ` panel_exit_subgraph also FAILED: ${textOfToolResult(exitedEarly)}`
+                  : ""
+              })`,
+          );
+        }
+
         // #2299 — every pre-write guard above probed the OUTER scope, but this retry
         // writes a DIFFERENT node: the promoted inner one. For a dynamic-combo child
         // that is exactly the false success the guard exists to stop. The outer probe
