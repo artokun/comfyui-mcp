@@ -72,16 +72,42 @@ function msgOf(err: unknown): string {
   return errorText(err);
 }
 
+function normalizedHttpMcpEndpoint(value: string): { origin: string; pathname: string; search: string } | undefined {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
+    return {
+      origin: url.origin,
+      pathname: decodeURIComponent(url.pathname),
+      search: url.search,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Codex wraps a failed request to the orchestrator-hosted HTTP MCP in its
- * WorkerTransport error. This is narrower than matching every HTTP/provider
- * error: the Codex lane has one HTTP MCP (`panel`) and the stdio `comfyui`
- * server cannot produce this transport shape.
+ * WorkerTransport error. The URL is part of the trusted panel registration;
+ * without this association, an unrelated configured HTTP MCP failure could be
+ * mistaken for the panel and cause a panel reload.
  */
-export function isCodexPanelMcpTransportFailure(message: string): boolean {
+export function isCodexPanelMcpTransportFailure(message: string, panelUrl: string): boolean {
+  if (
+    !/Transport send error\s*(?::\s*(?:EventNotificationTransport\s+)?WorkerTransport\b|;\s*)/i.test(message)
+  ) {
+    return false;
+  }
+  const failedUrl = message.match(/HTTP request failed sending request to\s+(https?:\/\/\S+)/i)?.[1];
+  if (!failedUrl) return false;
+  const observed = normalizedHttpMcpEndpoint(failedUrl);
+  const configured = normalizedHttpMcpEndpoint(panelUrl);
   return (
-    /Transport send error\s*(?::\s*(?:EventNotificationTransport\s+)?WorkerTransport\b|;\s*)/i.test(message) &&
-    /HTTP request failed sending request to\s+https?:\/\//i.test(message)
+    observed !== undefined &&
+    configured !== undefined &&
+    observed.origin === configured.origin &&
+    observed.pathname === configured.pathname &&
+    observed.search === configured.search
   );
 }
 
@@ -1501,7 +1527,7 @@ export class CodexBackend implements AgentBackend {
    * still unresolved; the next turn's status poll is its verdict. */
   private noteMcpTransportFailure(message: string): boolean {
     const panel = this.deps.mcpServers?.panel;
-    if (panel?.transport !== "http" || !isCodexPanelMcpTransportFailure(message)) return false;
+    if (panel?.transport !== "http" || !isCodexPanelMcpTransportFailure(message, panel.url)) return false;
     if (!this.mcpDown.has("panel") && !this.mcpReloadPending.has("panel")) {
       this.mcpTransportRecovery.add("panel");
     }
