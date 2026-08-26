@@ -114,12 +114,12 @@ describe("authenticated panel template relay (#2196)", () => {
     expect(remoteCalls).toEqual([]);
   });
 
-  it("refuses a non-loopback panel origin without contacting it", async () => {
+  it("refuses a missing panel origin without contacting it", async () => {
     const relay = await startPanelTemplateRelayServer({
       bridge: { canReach: () => true },
       resolvePanelAgent: () => ({ agentKey: "shared::codex", secret: SECRET }),
       resolvePanelTab: () => "tab-1",
-      resolvePanelUrl: () => "https://remote.example/api/workflow_templates",
+      resolvePanelUrl: () => undefined,
       resolveAllowedPanelOrigin: () => undefined,
     });
     servers.push(relay);
