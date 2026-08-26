@@ -173,28 +173,32 @@ function parseWaitFromProse(text: string): number | null {
  * `redactTokens` covers credentials in the shapes OAuth uses, and it is applied
  * first — but it knows nothing about `org-7df23a26037240f88f967fb1c64d8e3f` or
  * `cak-fc91zq3o4h0b111bug391`, which is exactly what leaked. The rule here is
- * SHAPE, not a list of known prefixes: a prefixed opaque run, or a long bare
- * run, is an identifier whatever the vendor calls it, and no rate-limit
- * explanation needs one to be useful. A vendor inventing a new prefix tomorrow is
- * covered without a code change, and so is one that mints ids with no digit in
- * them (#2313) — shape here means LENGTH and the absence of a space, never a
- * character class, and never a guess at whether a run reads like English.
+ * SHAPE plus minimal CONTEXT, not a list of known prefixes: a prefixed opaque
+ * run, or a long digit-bearing bare run, is an identifier whatever the vendor
+ * calls it. A digit-free run is only an identifier when a generic label such as
+ * `account` or `token` immediately identifies it; otherwise it may be prose.
+ * A vendor inventing a new prefix tomorrow is covered without a code change.
  *
  * Deliberately aggressive. Over-redaction costs a few characters of an error
  * message; under-redaction publishes an account id into a chat log that gets
  * screenshotted.
  */
-export function sanitizeDetail(raw: string, max = 200): string {
-  const looksLikeOpaqueAlphaRun = (value: string): boolean => {
-    const vowelCount = value.match(/[aeiou]/gi)?.length ?? 0;
-    // Natural-language words need more vowels than opaque base62-like ids.
-    return vowelCount * 3 < value.length;
-  };
+const ALPHA_IDENTIFIER_LABEL =
+  /\b(?:account|acct|id|identifier|token|key|workspace|user)\b(?:\s+(?:id|identifier))?\s*(?:[:=]\s*)?$/i;
 
+function hasAlphaIdentifierContext(input: string, offset: number): boolean {
+  return ALPHA_IDENTIFIER_LABEL.test(input.slice(Math.max(0, offset - 64), offset));
+}
+
+export function sanitizeDetail(raw: string, max = 200): string {
   const masked = redactTokens(raw)
-    // UUID-shaped ids FIRST, with any prefix attached. Their hyphens defeat both
-    // rules below: the longest unbroken run inside a UUID is 12 characters, so the
-    // bare-run rule never fires, and the prefixed rule matches only the TAIL —
+    // E-mail addresses FIRST: the local part may itself look like a bare id,
+    // but #2294's contract is to mask the whole address atomically.
+    .replace(/\b[\w.+-]+@[\w-]+\.[\w.]+\b/g, "<redacted>")
+    // UUID-shaped ids next, before the other identifier rules, with any prefix
+    // attached. Their hyphens defeat both rules below: the longest unbroken run
+    // inside a UUID is 12 characters, so the bare-run rule never fires, and the
+    // prefixed rule matches only the TAIL —
     // which is worse than missing it outright, because
     // `550e8400-e29b-41d4-a716-<redacted>` reads as sanitized while 24 of its 36
     // characters shipped. A partial redaction nobody re-checks is the dangerous
@@ -205,24 +209,14 @@ export function sanitizeDetail(raw: string, max = 200): string {
     )
     // prefixed opaque identifiers: org-…, cak-…, key_…, acct-…
     .replace(/\b([A-Za-z][A-Za-z0-9]{1,12}[-_])[A-Za-z0-9]{10,}\b/g, "$1<redacted>")
-<<<<<<< HEAD
-    // bare long runs (an id that came without a prefix). LENGTH is the whole
-    // test: there is deliberately no `(?=[A-Za-z0-9]*\d)` lookahead requiring
-    // a digit. That lookahead was here until #2313, and it meant an all-alphabetic
-    // id — `account abcdefghijklmnopqrstuv is limited` — passed through untouched
-    // while the same string ending in a digit was redacted. Neither other rule
-    // caught it: the prefixed rule needs a `-`/`_`, and the UUID rule needs the
-    // UUID shape.
-    //
-    // Do NOT put it back to protect prose — it does not buy what it looks like it
-    // buys. Measured over 1.19M word tokens of this repo's comments, docs and
-    // user-facing strings, exactly ONE all-lowercase run of 20+ characters is an
-    // English word (`nondeterministically`, once), and it has never appeared in a
-    // 429. An unbroken 20-character alphanumeric run is an identifier; an
-    // explanatory sentence has spaces in it, and every space ends a run.
-    .replace(/\b[A-Za-z0-9]{20,}\b/g, "<redacted>")
-    // e-mail addresses occasionally appear in quota messages
-    .replace(/\b[\w.+-]+@[\w-]+\.[\w.]+\b/g, "<redacted>");
+    // bare long hex / base62 runs (an id that came without a prefix). Digits
+    // remain a strong shape signal. Alpha-only runs are ambiguous with prose,
+    // so require nearby identifier context before masking them.
+    .replace(
+      /\b[A-Za-z0-9]{20,}\b/g,
+      (run, offset, input: string) =>
+        /\d/.test(run) || hasAlphaIdentifierContext(input, offset) ? "<redacted>" : run,
+    );
   return masked.replace(/\s+/g, " ").trim().slice(0, max);
 }
 

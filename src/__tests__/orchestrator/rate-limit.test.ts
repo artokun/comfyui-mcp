@@ -46,6 +46,15 @@ describe("classifyRateLimit", () => {
     expect(v?.retryAfterMs).toBe(1000);
   });
 
+  it("sanitizes a high-vowel labeled bare id in fallback detail", () => {
+    const v = classifyRateLimit(
+      429,
+      h(),
+      JSON.stringify({ error: { message: "account qavexidopulnertiskym is limited" } }),
+    );
+    expect(v?.detail).toBe("account <redacted> is limited");
+  });
+
   it("prefers Retry-After over the prose, in seconds or as a date", () => {
     expect(classifyRateLimit(429, h({ "retry-after": "20" }), KIMI_429)?.retryAfterMs).toBe(20_000);
     const soon = new Date(Date.now() + 30_000).toUTCString();
@@ -184,6 +193,12 @@ describe("sanitizeDetail", () => {
 
   it("redacts an email address", () => {
     expect(sanitizeDetail("quota for art@example.com exhausted")).not.toContain("art@example.com");
+  });
+
+  it("masks a long email local part as one address", () => {
+    expect(sanitizeDetail("quota for abcdefghijklmnopqrstuv@example.com exhausted")).toBe(
+      "quota for <redacted> exhausted",
+    );
   });
 
   // Hyphens defeated both shape rules: the longest unbroken run inside a UUID is 12
