@@ -3596,6 +3596,48 @@ export function stagedPartialPathForUrl(url: string): string {
 }
 
 /**
+ * The status reader needs to distinguish an absent partial from one it could
+ * not read. A null result loses that distinction, and turning either case into
+ * a byte count would let an in-memory progress row overstate what is durable
+ * on disk (#2356).
+ */
+export type StagedPartialObservation =
+  | { state: "present"; path: string; bytes: number; modifiedMs: number }
+  | { state: "absent"; path: string }
+  | { state: "unavailable"; path: string };
+
+/** Read the staged partial that the local downloader would use for `url`. */
+export async function observeStagedPartial(
+  url: string | undefined,
+  headers: Record<string, string> = {},
+): Promise<StagedPartialObservation> {
+  if (typeof url !== "string" || !url.trim()) {
+    return { state: "unavailable", path: "" };
+  }
+
+  let candidate: string;
+  try {
+    candidate = stagedPartialPathForTarget(cachePathForUrl(url.trim(), headers));
+  } catch {
+    return { state: "unavailable", path: "" };
+  }
+
+  try {
+    const st = await stat(candidate);
+    if (!st.isFile()) return { state: "unavailable", path: candidate };
+    return { state: "present", path: candidate, bytes: st.size, modifiedMs: st.mtimeMs };
+  } catch (err) {
+    // ENOENT is a useful observation: no resumable file exists yet. Permission,
+    // sharing, and other stat failures are deliberately kept distinct so status
+    // cannot turn an unreadable file into "0 bytes".
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") {
+      return { state: "absent", path: candidate };
+    }
+    return { state: "unavailable", path: candidate };
+  }
+}
+
+/**
  * Stat the staged `.partial` for a URL. Returns null when there is nothing usable there.
  *
  * A zero-byte partial reports as absent: resuming from it saves nothing, and calling it
@@ -3615,18 +3657,9 @@ export async function findResumablePartial(
   url: string | undefined,
   headers: Record<string, string> = {},
 ): Promise<{ path: string; bytes: number } | null> {
-  if (typeof url !== "string" || !url.trim()) return null;
-  let candidate: string;
-  try {
-    candidate = stagedPartialPathForTarget(cachePathForUrl(url.trim(), headers));
-  } catch {
-    return null;
-  }
-  try {
-    const st = await stat(candidate);
-    if (st.isFile() && st.size > 0) return { path: candidate, bytes: st.size };
-  } catch {
-    // ENOENT is the common, expected answer.
+  const observed = await observeStagedPartial(url, headers);
+  if (observed.state === "present" && observed.bytes > 0) {
+    return { path: observed.path, bytes: observed.bytes };
   }
   return null;
 }

@@ -1,6 +1,10 @@
 import { z } from "zod";
 import { emptyDownloadListingNote } from "../services/empty-download-listing.js";
-import { describeRecordStore } from "../services/download-progress.js";
+import {
+  describeRecordStore,
+  readDownloadProgress,
+  type DownloadProgress,
+} from "../services/download-progress.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
@@ -26,8 +30,12 @@ import {
   describePlacement,
   type DownloadJob,
 } from "../services/download-jobs.js";
-import { readDownloadProgress } from "../services/download-progress.js";
-import { findResumablePartial } from "../services/download-cache.js";
+import {
+  findResumablePartial,
+  observeStagedPartial,
+  type StagedPartialObservation,
+} from "../services/download-cache.js";
+import { downloadRetryPolicy } from "../services/download-retry.js";
 import { errorToToolResult, ModelError } from "../utils/errors.js";
 import {
   downloadCivitaiModelAction,
@@ -259,6 +267,108 @@ function describePartial(partial: { path: string; bytes: number } | null): strin
     `a partial of ${size} is on disk (${partial.path}) and re-issuing the same download ` +
     `resumes from it.`
   );
+}
+
+interface ProgressView {
+  bytes: string;
+  note: string;
+}
+
+function formatProgressBytes(p: DownloadProgress | null): string {
+  return p && p.total > 0
+    ? `  ${(p.downloaded / 1024 ** 3).toFixed(2)}/${(p.total / 1024 ** 3).toFixed(2)} GB (${Math.floor((p.downloaded / p.total) * 100)}%)`
+    : p && p.downloaded > 0
+      ? `  ${(p.downloaded / 1024 ** 3).toFixed(2)} GB so far`
+      : "";
+}
+
+function formatBytes(bytes: number): string {
+  const gb = bytes / 1024 ** 3;
+  return gb >= 1 ? `${gb.toFixed(2)} GB` : `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+}
+
+function progressAgeMs(p: DownloadProgress | null, partial: StagedPartialObservation): number {
+  const lastEvidence = Math.max(
+    p?.updated ?? 0,
+    partial.state === "present" ? partial.modifiedMs : 0,
+  );
+  return lastEvidence > 0 ? Math.max(0, Date.now() - lastEvidence) : Number.POSITIVE_INFINITY;
+}
+
+/**
+ * Progress rows are arrival-based and segmented downloads stage into `.seg`,
+ * not the resumable `.partial`. The status surface therefore uses the partial
+ * as its byte authority and withholds an in-memory count it cannot reconcile
+ * (#2356). This is reporting only: it never cancels or otherwise changes the
+ * downloader's existing stall/retry ownership.
+ */
+function reconcileProgress(
+  p: DownloadProgress | null,
+  partial: StagedPartialObservation,
+): ProgressView {
+  if (partial.state !== "present") {
+    const staleMs = progressAgeMs(p, partial);
+    const stale = Number.isFinite(staleMs) && staleMs >= downloadRetryPolicy().stallTimeoutMs;
+    const reason =
+      partial.state === "absent"
+        ? "no readable durable .partial is present yet"
+        : "the durable .partial could not be read";
+    if (stale) {
+      return {
+        bytes: "",
+        note:
+          `\n    PROGRESS STALLED/UNAVAILABLE — ${reason}; the last byte snapshot is ` +
+          `${Math.round(staleMs / 1000)}s old. This status call does not cancel the download; ` +
+          `confirm the writer before using action:"cancel".`,
+      };
+    }
+    return {
+      bytes: "",
+      note:
+        `\n    PROGRESS UNAVAILABLE — ${reason}; live-stream byte counts are withheld until ` +
+        `they can be reconciled to durable disk bytes.`,
+    };
+  }
+
+  const durableBytes = Math.max(0, partial.bytes);
+  const displayedBytes = p?.total && p.total > 0 ? Math.min(durableBytes, p.total) : durableBytes;
+  const bytes =
+    p?.total && p.total > 0
+      ? `  ${(displayedBytes / 1024 ** 3).toFixed(2)}/${(p.total / 1024 ** 3).toFixed(2)} GB (${Math.floor((displayedBytes / p.total) * 100)}%)`
+      : displayedBytes > 0
+        ? `  ${formatBytes(displayedBytes)} durable`
+        : "  0 bytes durable";
+  const ahead = p !== null && p.downloaded > durableBytes;
+  const ageMs = progressAgeMs(p, partial);
+  const stallTimeoutMs = downloadRetryPolicy().stallTimeoutMs;
+  const notes = ahead
+    ? `\n    progress reconciled to the durable .partial (${formatBytes(durableBytes)} on disk); ` +
+      `the live snapshot was ahead and is not reported`
+    : "";
+  if (stallTimeoutMs > 0 && ageMs >= stallTimeoutMs) {
+    return {
+      bytes,
+      note:
+        notes +
+        `\n    PROGRESS STALLED — no new byte snapshot or durable partial growth for ` +
+        `${Math.round(ageMs / 1000)}s. The existing downloader stall watchdog may retry a ` +
+        `wedged HTTP attempt; this status call does not cancel it.`,
+    };
+  }
+  return { bytes, note: notes };
+}
+
+async function progressViewForJob(
+  job: DownloadJob,
+  p: DownloadProgress | null,
+): Promise<ProgressView> {
+  // A Manager fetch has no local .partial, and a completed local job has already
+  // renamed its partial into the destination. Neither should be downgraded by a
+  // local staging probe.
+  if (job.status === "done" || job.viaManager === true) {
+    return { bytes: formatProgressBytes(p), note: "" };
+  }
+  return reconcileProgress(p, await observeStagedPartial(job.url));
 }
 
 function afterCancelAdvice(route: DownloadRoute): string {
@@ -911,14 +1021,14 @@ async function downloadAction(args: {
         }
 
         const p = readDownloadProgress(job.progressId ?? job.trayId);
-        const pct =
-          p && p.total > 0 ? ` (${Math.floor((p.downloaded / p.total) * 100)}%)` : "";
+        const progress = await progressViewForJob(job, p);
         return {
           content: [
             {
               type: "text",
               text:
-                `Download STARTED and is still running${pct} — id \`${job.id}\`.\n\n` +
+                `Download STARTED and is still running${progress.bytes} — id \`${job.id}\`.` +
+                `${progress.note}\n\n` +
                 `This is NOT a failure and you must not describe it as one. The file is ` +
                 `streaming to disk in the background and will land on its own.\n\n` +
                 `Tell the user it is downloading, then check download_model \`action:"status"\` with this id ` +
@@ -1042,15 +1152,21 @@ async function statusAction(args: {
         );
         const partialFor = (j: DownloadJob): { path: string; bytes: number } | null =>
           partials.get(`${j.id}\n${j.trayId}\n${j.target ?? ""}`) ?? null;
+        const progressViews = new Map<string, ProgressView>();
+        await Promise.all(
+          list.map(async (j) => {
+            const p = readDownloadProgress(j.progressId ?? j.trayId);
+            progressViews.set(
+              `${j.id}\n${j.trayId}\n${j.target ?? ""}`,
+              await progressViewForJob(j, p),
+            );
+          }),
+        );
         const collidingIds = [...idCounts.entries()].filter(([, n]) => n > 1).map(([k]) => k);
         const lines = list.map((j) => {
-          const p = readDownloadProgress(j.progressId ?? j.trayId);
-          const bytes =
-            p && p.total > 0
-              ? `  ${(p.downloaded / 1024 ** 3).toFixed(2)}/${(p.total / 1024 ** 3).toFixed(2)} GB (${Math.floor((p.downloaded / p.total) * 100)}%)`
-              : p && p.downloaded > 0
-                ? `  ${(p.downloaded / 1024 ** 3).toFixed(2)} GB so far`
-                : "";
+          const progress =
+            progressViews.get(`${j.id}\n${j.trayId}\n${j.target ?? ""}`) ??
+            ({ bytes: "", note: "" } satisfies ProgressView);
           // #1197 — the STATUS TOKEN is the first thing read, and for a Manager
           // dispatch carried across a restart `error` is the wrong word: the
           // ComfyUI host may still be fetching. Printing "error" here and "very
@@ -1062,7 +1178,7 @@ async function statusAction(args: {
               ? "unwatched (host may still be fetching)"
               : j.status;
           const targetLabel = j.target ? `  target: \`${j.target}\`` : "";
-          const head = `- \`${j.id}\` (tray \`${j.trayId}\`) **${statusToken}**${bytes}${targetLabel}`;
+          const head = `- \`${j.id}\` (tray \`${j.trayId}\`) **${statusToken}**${progress.bytes}${targetLabel}`;
           const collisionNote = idCounts.get(j.id)! > 1
             ? `\n    AMBIGUOUS id: another row in this listing shares \`${j.id}\` — these are DIFFERENT source URLs writing the SAME destination file, so the last writer wins and the result may be a mix. Select this one with \`tray_id\`: \`${j.trayId}\`. Pass that same tray_id to \`action:"cancel"\` to stop THIS one specifically.`
             : "";
@@ -1170,7 +1286,7 @@ async function statusAction(args: {
             !j.viaManager && j.downloadRoute
               ? `\n    network: ${j.downloadRoute} (download-only route; ComfyUI API calls are not affected)`
               : "";
-          return `${head}${detail}${collisionNote}${staleNote}${resumeNote}${networkRouteNote}\n    from: ${j.url}`;
+          return `${head}${progress.note}${detail}${collisionNote}${staleNote}${resumeNote}${networkRouteNote}\n    from: ${j.url}`;
         });
 
         const header =

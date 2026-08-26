@@ -54,10 +54,11 @@ import { registerModelManagementTools } from "../../tools/model-management.js";
 import { setProgressDir } from "../../services/download-progress.js";
 import * as progressModule from "../../services/download-progress.js";
 import { resetDownloadJobs, startDownloadJob } from "../../services/download-jobs.js";
+import { stagedPartialPathForUrl } from "../../services/download-cache.js";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 type ToolHandler = (args: Record<string, unknown>) => Promise<{
   isError?: boolean;
@@ -238,6 +239,117 @@ describe("download_model tool", () => {
 });
 
 describe('download_model action:"status"', () => {
+  it("never reports live bytes ahead of the durable partial (#2356)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "model-management-2356-durable-"));
+    const cache = await mkdtemp(join(tmpdir(), "model-management-2356-cache-"));
+    const savedCache = process.env.COMFYUI_DOWNLOAD_CACHE_DIR;
+    const url = "https://huggingface.co/Comfy-Org/test/resolve/main/model.safetensors";
+    const id = "status-2356-durable";
+    const progressId = "progress-2356-durable";
+    process.env.COMFYUI_DOWNLOAD_CACHE_DIR = cache;
+    setProgressDir(dir);
+    try {
+      const partial = stagedPartialPathForUrl(url);
+      await mkdir(dirname(partial), { recursive: true });
+      await writeFile(partial, Buffer.alloc(100));
+      await writeFile(
+        join(dir, `control-job-${id}-session.json`),
+        JSON.stringify({
+          id,
+          trayId: "tray-2356-durable",
+          progressId,
+          url,
+          target_subfolder: "text_encoders",
+          status: "downloading",
+          via_manager: false,
+          started_at: Date.now() - 60_000,
+          updated: Date.now(),
+        }),
+      );
+      await writeFile(
+        join(dir, `${progressId}-snapshot.json`),
+        JSON.stringify({
+          id: progressId,
+          name: "model.safetensors",
+          downloaded: 900,
+          total: 1_000,
+          bytes_per_sec: 10,
+          status: "downloading",
+          updated: Date.now(),
+        }),
+      );
+
+      const { downloadStatus } = makeServer();
+      const text = (await downloadStatus({ id })).content[0].text;
+      expect(text).toContain("**downloading**");
+      expect(text).toContain("(10%)");
+      expect(text).not.toContain("(90%)");
+      expect(text).toContain("reconciled to the durable .partial");
+    } finally {
+      setProgressDir("");
+      if (savedCache === undefined) delete process.env.COMFYUI_DOWNLOAD_CACHE_DIR;
+      else process.env.COMFYUI_DOWNLOAD_CACHE_DIR = savedCache;
+      await rm(dir, { recursive: true, force: true });
+      await rm(cache, { recursive: true, force: true });
+    }
+  });
+
+  it("labels byte progress stalled or unavailable instead of presenting a healthy row (#2356)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "model-management-2356-stall-"));
+    const cache = await mkdtemp(join(tmpdir(), "model-management-2356-stall-cache-"));
+    const savedCache = process.env.COMFYUI_DOWNLOAD_CACHE_DIR;
+    const savedStall = process.env.COMFYUI_DOWNLOAD_STALL_TIMEOUT_S;
+    const url = "https://huggingface.co/Comfy-Org/test/resolve/main/stalled.safetensors";
+    const id = "status-2356-stalled";
+    const progressId = "progress-2356-stalled";
+    process.env.COMFYUI_DOWNLOAD_CACHE_DIR = cache;
+    process.env.COMFYUI_DOWNLOAD_STALL_TIMEOUT_S = "1";
+    setProgressDir(dir);
+    try {
+      await writeFile(
+        join(dir, `control-job-${id}-session.json`),
+        JSON.stringify({
+          id,
+          trayId: "tray-2356-stalled",
+          progressId,
+          url,
+          target_subfolder: "text_encoders",
+          status: "downloading",
+          via_manager: false,
+          started_at: Date.now() - 600_000,
+          updated: Date.now() - 600_000,
+        }),
+      );
+      await writeFile(
+        join(dir, `${progressId}-snapshot.json`),
+        JSON.stringify({
+          id: progressId,
+          name: "stalled.safetensors",
+          downloaded: 100,
+          total: 1_000,
+          bytes_per_sec: 0,
+          status: "downloading",
+          updated: Date.now() - 120_000,
+        }),
+      );
+
+      const { downloadStatus } = makeServer();
+      const text = (await downloadStatus({ id })).content[0].text;
+      expect(text).toContain("PROGRESS STALLED/UNAVAILABLE");
+      expect(text).toContain("no readable durable .partial is present yet");
+      expect(text).toContain("does not cancel the download");
+      expect(text).not.toContain("(10%)");
+    } finally {
+      setProgressDir("");
+      if (savedCache === undefined) delete process.env.COMFYUI_DOWNLOAD_CACHE_DIR;
+      else process.env.COMFYUI_DOWNLOAD_CACHE_DIR = savedCache;
+      if (savedStall === undefined) delete process.env.COMFYUI_DOWNLOAD_STALL_TIMEOUT_S;
+      else process.env.COMFYUI_DOWNLOAD_STALL_TIMEOUT_S = savedStall;
+      await rm(dir, { recursive: true, force: true });
+      await rm(cache, { recursive: true, force: true });
+    }
+  });
+
   it("status selects the current target when local and pod records share id and tray", async () => {
     const dir = await mkdtemp(join(tmpdir(), "model-management-target-select-"));
     const savedTarget = process.env.COMFYUI_URL;
