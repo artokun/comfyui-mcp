@@ -21,10 +21,43 @@ export const PANEL_TEMPLATE_RELAY_HTTP_PATH = "/__comfyui_mcp_panel_template_rel
 
 const ID_RE = /^[A-Za-z0-9_-]{16,80}$/;
 const HEX_RE = /^[a-f0-9]{64}$/;
-// A hostname does not identify which loopback listener a browser reached. Keep
-// relay destinations pinned to literal addresses so fetch cannot independently
-// resolve `localhost` to a different process or address family.
-const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1"]);
+// `localhost` is a NAME, not a listener identity, so an exact origin match does
+// not prove the later fetch reaches the socket the browser is on (#2382). It is
+// accepted anyway, because every alternative costs more than it buys.
+//
+// WHAT REFUSING IT COST. Dropping it (#2385, shipped in 0.52.135) took
+// `list_packs action:"list_templates"` from working to erroring for every user
+// whose ComfyUI is served at `http://localhost:<port>` — an ordinary setup, and
+// the panel Origin is the browser's. The relay declines, and the caller is
+// fail-closed once a panel route exists, so the action has no path left.
+//
+// WHY THE HAZARD IS NARROWER THAN IT LOOKS. The non-adversarial case does not
+// occur on a supported runtime: Node >=20 connects with Happy Eyeballs
+// (`autoSelectFamily`), so `fetch("http://localhost:<port>")` reaches a
+// 127.0.0.1-only OR a ::1-only listener — measured on Node 24.16.0 against both
+// single-family binds. What remains is a second local process squatting the
+// other loopback family, which one-machine/one-trust-domain puts out of scope.
+//
+// WHY NEITHER HARDENING WORKS HERE — recorded so they are not re-attempted:
+//
+//   - Pinning the fetch to a literal address needs the family the browser
+//     reached, and the Origin header does not carry it. Probing cannot recover
+//     it either: a dual-stack ComfyUI bound to `::` answers on BOTH 127.0.0.1
+//     and ::1 and is byte-indistinguishable from two separate processes, so
+//     "both families answer" cannot be read as ambiguity without refusing an
+//     ordinary working setup. The only place the question is answerable is the
+//     browser, which knows its own origin — a panel-side fetch, i.e. a
+//     cross-repo change, not a bug fix.
+//   - Letting the refusal fall through to the headless COMFYUI_URL path is
+//     unsafe for the reason #2387 documents below: a mid-turn child keeps the
+//     PREVIOUS target across a retarget (#1429, retargetAllForMcpEnv), so it
+//     can list a stale server's index. The relay fetching the current target
+//     under its own generation fence is what prevents that — and is why
+//     authorizing the origin here, rather than declining it, is the safe half.
+//
+// A mixed pair (`localhost` observed vs `127.0.0.1` configured, or the reverse)
+// is still refused by the exact-origin equality below.
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
 
 export interface PanelTemplateRelayRequest {
   version: typeof PANEL_TEMPLATE_RELAY_VERSION;

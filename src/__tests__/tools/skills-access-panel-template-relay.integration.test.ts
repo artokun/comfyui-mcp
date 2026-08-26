@@ -155,4 +155,58 @@ describe("list_packs -> panel template relay production boundary (#2196)", () =>
     expect(panelRequests).toBe(0);
     expect(state.headlessCalls).toBe(0);
   });
+  // #2382/#2385 REGRESSION PIN — the user-visible surface, still red on main.
+  //
+  // 0.52.135 dropped "localhost" from the relay's loopback set, so this exact
+  // call returns isError with "NO_PANEL_ORIGIN" instead of the index for every
+  // user whose ComfyUI is served at http://localhost:<port>. #2387 documented
+  // the fail-closed rule but changed no behaviour, so the regression survived it.
+  //
+  // The sibling test above pins the OTHER direction — a genuine post-retarget
+  // mismatch must still refuse. Both must hold at once: this one would pass if
+  // someone made the refusal fall through, and that one would then fail.
+  it("serves list_templates through the relay when the panel is served at localhost", async () => {
+    const panel = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ "panel-pack": [{ name: "localhost-template" }] }));
+    });
+    const boundOrigin = await listen(panel);
+    servers.push({ close: () => closeServer(panel) });
+    const port = new URL(boundOrigin).port;
+    const localhostOrigin = `http://localhost:${port}`;
+    state.baseUrl = `${localhostOrigin}/comfyapi`;
+
+    const bridge = {
+      canReach: () => true,
+      resolveFailure: () => undefined,
+      resolveSharedTabId: () => "tab-1",
+      tabServerOrigin: () => localhostOrigin,
+    };
+    const relay = await startPanelTemplateRelayServer({
+      bridge,
+      ...createPanelTemplateRelayWiring({
+        bridge,
+        currentTarget: () => state.baseUrl,
+        currentTargetGeneration: () => 0,
+        secrets: new Map([[SECRET, "orchestrator::codex"]]),
+      }),
+    });
+    servers.push(relay);
+    process.env.COMFYUI_MCP_RELAY_SECRET = SECRET;
+    process.env.COMFYUI_MCP_TEMPLATE_RELAY_URL = relay.endpointUrl;
+
+    const result = await listPacksHandler()({ action: "list_templates" });
+    const text = result.content.map((block) => block.text).join(" ");
+    // The 0.52.135 symptom, verbatim, must not be what the user gets.
+    expect(result.isError ?? false).toBe(false);
+    expect(text).not.toContain("NO_PANEL_ORIGIN");
+    expect(JSON.parse(text)).toMatchObject({
+      source_count: 1,
+      template_count: 1,
+      templates: { "panel-pack": [{ name: "localhost-template" }] },
+    });
+    // Served BY THE RELAY, under its generation fence — not by a child-side
+    // COMFYUI_URL fetch that a retarget could leave stale.
+    expect(state.headlessCalls).toBe(0);
+  });
 });
