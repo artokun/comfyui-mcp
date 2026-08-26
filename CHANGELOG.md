@@ -6,6 +6,13 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.133] - 2026-08-26
+
+### MCP
+
+#### Fixed
+- authorize panel template relays only for the exact canonical loopback origin and current target (#2196)
+
 ## [0.52.132] - 2026-08-26
 
 ### MCP
