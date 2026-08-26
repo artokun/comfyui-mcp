@@ -150,6 +150,12 @@ describe("sanitizeDetail", () => {
     }
   });
 
+  it("leaves long ordinary prose words readable", () => {
+    for (const word of ["uncharacteristically", "compartmentalization"]) {
+      expect(sanitizeDetail(word)).toBe(word);
+    }
+  });
+
   it("leaves an ordinary sentence readable", () => {
     const out = sanitizeDetail("Rate limit reached for gpt-4o in organization on requests per min (RPM): Limit 500");
     expect(out).toContain("requests per min");

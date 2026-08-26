@@ -185,6 +185,12 @@ function parseWaitFromProse(text: string): number | null {
  * screenshotted.
  */
 export function sanitizeDetail(raw: string, max = 200): string {
+  const looksLikeOpaqueAlphaRun = (value: string): boolean => {
+    const vowelCount = value.match(/[aeiou]/gi)?.length ?? 0;
+    // Natural-language words need more vowels than opaque base62-like ids.
+    return vowelCount * 3 < value.length;
+  };
+
   const masked = redactTokens(raw)
     // UUID-shaped ids FIRST, with any prefix attached. Their hyphens defeat both
     // rules below: the longest unbroken run inside a UUID is 12 characters, so the
@@ -199,6 +205,7 @@ export function sanitizeDetail(raw: string, max = 200): string {
     )
     // prefixed opaque identifiers: org-…, cak-…, key_…, acct-…
     .replace(/\b([A-Za-z][A-Za-z0-9]{1,12}[-_])[A-Za-z0-9]{10,}\b/g, "$1<redacted>")
+<<<<<<< HEAD
     // bare long runs (an id that came without a prefix). LENGTH is the whole
     // test: there is deliberately no `(?=[A-Za-z0-9]*\d)` lookahead requiring
     // a digit. That lookahead was here until #2313, and it meant an all-alphabetic
