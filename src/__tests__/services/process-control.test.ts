@@ -1666,6 +1666,43 @@ describe("restart truthfulness + Pinokio-shaped refusal (#742)", () => {
     expect(result.message).toMatch(/GET \/v2\/manager\/reboot/);
   });
 
+  it("bounds the report-time version read against a stalled host (#2320)", async () => {
+    // The host this runs against is the one comfyuiFetch's 120s default ceiling was
+    // written for: a proxy that accepts the connection and never answers. Without a
+    // budget of its own, the version read would add minutes to a restart call that
+    // has already given up. The version route here settles ONLY on abort, so a probe
+    // that passed no signal would hang this test rather than fall back.
+    installRemoteRebootFixture();
+    let sawSignal = false;
+    const fetchMock = vi.fn(async (url: unknown, opts?: unknown) => {
+      const u = String(url);
+      if (u.includes("/manager/version")) {
+        const signal = (opts as { signal?: AbortSignal } | undefined)?.signal;
+        if (signal) sawSignal = true;
+        // Model real fetch: an ALREADY-aborted signal rejects immediately rather
+        // than waiting for an "abort" event that has already fired. The second
+        // route reuses the one shared budget, so it arrives pre-aborted.
+        if (signal?.aborted) return Promise.reject(new Error("aborted"));
+        return new Promise<Response>((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(new Error("aborted")), {
+            once: true,
+          });
+        });
+      }
+      if (u.includes("/manager/reboot")) return new Response(null, { status: 404 });
+      if (u.includes("system_stats")) return new Response("{}", { status: 200 });
+      return new Response(null, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await restartComfyUI();
+
+    expect(sawSignal).toBe(true);
+    expect(result.stopped).toBe(false);
+    // The stall costs a clause, not the call.
+    expect(result.message).toMatch(/version could not be read/);
+  });
+
   it("never reads the SPA catchall as a Manager version string (#2320)", async () => {
     // The strict parse shared with node-management.ts is the only thing standing
     // between a 200 page of HTML and a fabricated version claim. Pinned at THIS

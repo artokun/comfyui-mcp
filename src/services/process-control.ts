@@ -4784,6 +4784,12 @@ async function looksLikeSpaCatchall(res: Response): Promise<boolean> {
  * meant for A gets posted to B.
  */
 /**
+ * Total budget for the report-time version read (#2320). Generous for a bare
+ * version string on a reachable server, and short enough that an unreachable one
+ * costs the caller a clause rather than minutes.
+ */
+const REPORT_VERSION_PROBE_BUDGET_MS = 3_000;
+/**
  * Read the Manager MAJOR version straight from the Manager, for the REPORT only.
  *
  * Called on one path: after every reboot candidate has failed, to decide whether
@@ -4803,9 +4809,16 @@ async function looksLikeSpaCatchall(res: Response): Promise<boolean> {
  * caller is behind exactly the proxy that serves such a catchall.
  */
 async function probeManagerMajorForReport(base: string): Promise<number | undefined> {
+  // ONE budget for the whole read, shared by both routes. comfyuiFetch otherwise
+  // applies its deliberately generous 120s default ceiling, and that ceiling exists
+  // for exactly the host this runs against: "a stalled reverse proxy … that accepts
+  // the connection and then never answers". Two of those would add four minutes to a
+  // restart call that has ALREADY given up — a worse symptom than the wording this
+  // is here to improve. Losing the read costs only the version clause.
+  const signal = AbortSignal.timeout(REPORT_VERSION_PROBE_BUDGET_MS);
   for (const path of MANAGER_VERSION_ROUTES) {
     try {
-      const res = await comfyuiFetch(`${base}${path}`, { method: "GET" });
+      const res = await comfyuiFetch(`${base}${path}`, { method: "GET", signal });
       if (!res.ok) continue;
       const major = parseManagerMajor(await res.text());
       if (major !== undefined) return major;
