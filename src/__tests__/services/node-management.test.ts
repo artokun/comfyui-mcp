@@ -76,23 +76,10 @@ vi.mock("../../services/workspace-env.js", async () => {
     resolveEffectiveComfyUICodeBase: () =>
       config.comfyuiCodePath ?? config.comfyuiPath ?? savedDefault.value,
     getLiveServerSnapshot: async () => liveServerSnapshot.value,
-    // For #2261: mock the async resolver that consults the live server's base-directory
-    resolveEffectiveComfyUIBaseLive: async () => {
-      if (liveServerSnapshot.value.reachable && liveServerSnapshot.value.argv) {
-        // Simulate parsing --base-directory from argv
-        const argv = liveServerSnapshot.value.argv;
-        for (let i = 0; i < argv.length - 1; i++) {
-          if (argv[i] === "--base-directory") {
-            return argv[i + 1];
-          }
-        }
-      }
-      // Fall back to configured path
-      return config.comfyuiPath ?? savedDefault.value;
-    },
     // For #2261: mock resolveCustomNodesScanBaseLiveStrict for use in resolveInstallLocalWorkspace
-    resolveCustomNodesScanBaseLiveStrict: async () => {
-      // Use the same logic as resolveEffectiveComfyUIBaseLive
+    // and cloneCustomNodeFallback. When requireLive:true, never fall back to config — only
+    // return live root if reachable, else undefined (fail-closed).
+    resolveCustomNodesScanBaseLiveStrict: async (options?: { requireLive?: boolean }) => {
       if (liveServerSnapshot.value.reachable && liveServerSnapshot.value.argv) {
         const argv = liveServerSnapshot.value.argv;
         for (let i = 0; i < argv.length - 1; i++) {
@@ -101,7 +88,8 @@ vi.mock("../../services/workspace-env.js", async () => {
           }
         }
       }
-      // When no live evidence and requireLive is true, return undefined
+      // When no live evidence found, return undefined — no fallback to config even if available.
+      // This is the requireLive:true behavior needed for safety against wrong-tree clones.
       return undefined;
     },
   };

@@ -29,7 +29,6 @@ import {
   type LocalWriteTargetMismatch,
   detectLocalWriteTargetMismatch,
   resolveEffectiveComfyUIBase,
-  resolveEffectiveComfyUIBaseLive,
   resolveEffectiveComfyUICodeBase,
   resolveCustomNodesScanBaseLiveStrict,
   resolveInstallInterpreter,
@@ -3208,7 +3207,14 @@ async function cloneCustomNodeFallback(
     // No shared fallback, but local target: consult the live server's root before refusing.
     // A separately-started portable ComfyUI running with COMFYUI_PATH unset and no saved
     // default still has a knowable root via its argv or detected process.
-    comfyuiBase = await resolveEffectiveComfyUIBaseLive();
+    // Use requireLive:true to NEVER fall back to config — we would be reporting success
+    // for cloning into the wrong tree if config points elsewhere than the live server.
+    try {
+      comfyuiBase = await resolveCustomNodesScanBaseLiveStrict({ requireLive: true });
+    } catch {
+      // Live root unavailable; remain undefined to trigger the refusal below.
+      comfyuiBase = undefined;
+    }
   }
   // Same hazard as the CLI paths (codex gate P0): the guard below catches "no
   // path", but the dangerous case is HAVING one while connected elsewhere. A
