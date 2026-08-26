@@ -1414,6 +1414,33 @@ describe("panel_set_widget promoted container success guards (#2314)", () => {
     expect(calls.map((c) => c.cmd)).not.toContain("graph_enter_subgraph");
   });
 
+  it("checks the scope-identity fence capability EARLY — before attempting scope extraction", async () => {
+    // #1859: The early check ensures that when a panel is too old to support
+    // promoted widget writes (< 0.15.97), users get a clear "panel is too old"
+    // message rather than a misleading "viewing field is missing" message that
+    // suggests retrying might help. This test verifies the early check triggers
+    // before scope extraction when the capability is missing, so no subgraph
+    // enter/exit is attempted.
+    const { text, isError, calls } = await setWidget(
+      { node_id: 78, widget: "quality_prompt", value: "masterpiece" },
+      {
+        firstWrite: "ok",
+        subgraph: SAFE_ANIMA_SUBGRAPH,
+        detailById: SAFE_ANIMA_IDENTITY_BY_ID,
+        scopeGraphIdentityFence: false,
+      },
+    );
+
+    expect(isError).toBe(true);
+    // The error should name the missing capability, not the missing viewing field
+    expect(text).toMatch(/lacks the atomic promoted graph-identity write fence/);
+    // No graph_set_widget should be sent because we reject early
+    expect(calls.filter((c) => c.cmd === "graph_set_widget")).toHaveLength(0);
+    // No subgraph enter/exit should happen because we reject before attempting to access subgraph
+    expect(calls.map((c) => c.cmd)).not.toContain("graph_enter_subgraph");
+    expect(calls.map((c) => c.cmd)).not.toContain("graph_exit_subgraph");
+  });
+
   it("refuses a promoted mapping for a receiver without the final parent-rail fence", async () => {
     const { text, isError, calls } = await setWidget(
       { node_id: 78, widget: "quality_prompt", value: "masterpiece" },

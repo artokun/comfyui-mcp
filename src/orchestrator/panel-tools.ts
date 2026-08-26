@@ -6682,6 +6682,17 @@ async function preparePromotedWidgetWrite(
       "graph_get_subgraph returned a malformed, stale, or incomplete ownership envelope",
     );
   }
+  // Check for required scope-identity fence capability early: if the panel doesn't
+  // support it, the scope witness cannot be extracted, and the real issue is the panel
+  // version, not a transient staleness. This guard comes before scope extraction so the
+  // error message correctly names the constraint (missing capability) rather than the
+  // symptom (missing viewing field).
+  if (ctx.tabExpectedScopeGraphIdentityFenceCapability?.() !== true) {
+    return promotedWriteRefusal(
+      widget,
+      "the receiving panel lacks the atomic promoted graph-identity write fence",
+    );
+  }
   const scope = promotedScopeWitnessFromEnvelope(envelope);
   if (!scope) {
     return promotedWriteRefusal(
@@ -6759,12 +6770,9 @@ async function preparePromotedWidgetWrite(
   if (ctx.tabExpectedNodeTypeFenceCapability?.() !== true) {
     return promotedWriteRefusal(widget, "the receiving panel lacks the atomic inner-node write fence");
   }
-  if (ctx.tabExpectedScopeGraphIdentityFenceCapability?.() !== true) {
-    return promotedWriteRefusal(
-      widget,
-      "the receiving panel lacks the atomic promoted graph-identity write fence",
-    );
-  }
+  // Scope graph-identity fence was already verified before extracting the scope witness,
+  // so this check is logically redundant but kept for clarity and defensive coding.
+  // If we reach this point, the capability was confirmed present.
   // Legacy panels do not publish a parent-rail witness and retain the
   // established same-name recovery contract. A current witness-capable panel
   // must advertise the synchronous final rail re-resolution before MCP sends
