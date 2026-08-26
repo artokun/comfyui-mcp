@@ -12094,26 +12094,39 @@ export interface PanelToolCtx {
    */
   inheritsUserMcpServers?: boolean;
   /**
-   * The user MCP server NAMES this session was actually spawned with — the
-   * snapshot `readUserMcpServers()` returned at the moment the agent was built
-   * (codex gate, #2311 round 1).
+   * The user MCP server NAMES handed to THIS SPAWN — the snapshot
+   * `readUserMcpServers()` returned at the moment the agent was built.
    *
    * `inheritsUserMcpServers` alone is a statement about the LANE, and reading the
    * config file live then labelling the result with it re-creates the same bug one
-   * layer down: `panel_add_mcp("foo")` writes to ~/.claude.json immediately, so on
-   * the Claude lane the very next `panel_list_mcp` — still BEFORE the panel_reload
-   * that would respawn the agent — would report `foo` as declared to a session that
-   * has never heard of it, and every call to it fails `unknown MCP server`.
+   * layer down (codex gate round 1): `panel_add_mcp("foo")` writes to
+   * ~/.claude.json immediately, so on the Claude lane the very next
+   * `panel_list_mcp` — still BEFORE the panel_reload that would respawn the agent
+   * — would report `foo` as this session's, and every call to it fails
+   * `unknown MCP server`.
    *
-   * The snapshot makes that answerable instead of guessed: PanelAgentManager's
-   * makeAgent() builds `mcpServers` and `panelServer` as two properties of ONE
-   * synchronous object literal, so the set this captures is precisely the set that
-   * spawn declared. It is by NAME only — a server removed and re-added under the
-   * same name keeps running with whatever config the session started with, and the
-   * reply says so rather than implying we compared the definitions.
+   * The snapshot makes THAT question answerable: PanelAgentManager's makeAgent()
+   * builds `mcpServers` and `panelServer` as two properties of ONE synchronous
+   * object literal, so the set this captures is precisely the set that spawn
+   * declared.
    *
-   * Undefined when the lane does not inherit (the answer is "none" regardless) or
-   * when the backend was never established (the answer is unknown).
+   * IT IS NOT PROOF THE SESSION HAS THEM, and the handler must not report it as
+   * such (codex gate round 2). Two documented gaps sit between our declaration
+   * and the session's actual toolset:
+   *   - a spawn that RESUMES a stored session restores the MCP set recorded WITH
+   *     that session and ignores the freshly-read config (#1700 — which is why
+   *     restartForMcpConfig also FORKS), so after an orchestrator restart the
+   *     session can hold a set that differs from this snapshot in EITHER
+   *     direction;
+   *   - a declared server can simply fail to start (#1524 / mcp-session-health).
+   * So this answers "what did we hand this spawn", never "what do you have". The
+   * only proof of the latter is calling one of its tools.
+   *
+   * By NAME only: a server removed and re-added under the same name is a
+   * different server this cannot distinguish, and the reply says so.
+   *
+   * Undefined when the lane does not inherit (nothing was handed over regardless)
+   * or when the backend was never established (the answer is unknown).
    */
   userMcpServersAtSpawn?: readonly string[];
 }
@@ -17937,7 +17950,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
     ),
     def(
       "panel_list_mcp",
-      "List the MCP servers configured in the user's Claude config (~/.claude.json) and say whether THIS session's agent was actually handed them. Only the Claude backend inherits them; on codex/gemini/grok/antigravity/qwen/... they are the user's configuration and NOT part of your toolset, so the reply reports them as not declared rather than as available. The reply answers PER SERVER: read each one's `declared_to_this_session` before telling the user (or yourself) that a capability is connected - it is false for a server the user added after this session started (panel_reload picks those up), and even `true` means DECLARED, not verified-connected. Your own built-ins (comfyui, the live-graph panel server) are listed separately.",
+      "List the MCP servers configured in the user's Claude config (~/.claude.json) and say whether THIS session's agent was actually handed them. Only the Claude backend inherits them; on codex/gemini/grok/antigravity/qwen/... they are the user's configuration and NOT part of your toolset, so the reply reports them as not declared rather than as available. The reply answers PER SERVER with `declared_to_this_spawn` - what we handed the agent when it started. Read it before telling the user (or yourself) that a capability is connected: it is false for a server the user added after this session started (panel_reload picks those up), and a `true` is NOT proof you have the tools (a resumed session keeps the set recorded with it, and a declared server can fail to start) - the only proof is calling one and having it work. Your own built-ins (comfyui, the live-graph panel server) are listed separately.",
       {},
       async (_args: A, ctx) => {
         try {
@@ -17952,6 +17965,8 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           const atSpawn = ctx?.userMcpServersAtSpawn;
           const declaredFor = (name: string): boolean | "unknown" => {
             if (inherits === undefined) return "unknown";
+            // Nothing was handed to a non-inheriting lane, so this is established
+            // for every name on it.
             if (inherits === false) return false;
             // Inheriting, but nobody recorded what the spawn actually got: the
             // honest answer is unknown, not "everything in the file".
@@ -17960,12 +17975,16 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           // Union, so a server REMOVED from the config but still live in this
           // session is visible too — omitting it would imply it had gone.
           const names = [...new Set([...inConfig, ...(atSpawn ?? [])])].sort();
-          const servers: Record<string, { in_user_config: boolean; declared_to_this_session: boolean | "unknown" }> =
-            {};
+          const servers: Record<
+            string,
+            { in_user_config: boolean; declared_to_this_spawn: boolean | "unknown" }
+          > = {};
           for (const name of names) {
             servers[name] = {
               in_user_config: inConfig.has(name),
-              declared_to_this_session: declaredFor(name),
+              // NOT "you have this" — see PanelToolCtx.userMcpServersAtSpawn. It
+              // is what WE handed the spawn, which is all we can establish.
+              declared_to_this_spawn: declaredFor(name),
             };
           }
           const pendingAdd = names.filter(
@@ -17974,26 +17993,32 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           const pendingRemove = names.filter((n) => !inConfig.has(n));
           const lane =
             inherits === true
-              ? "This is the Claude lane, which IS handed the user's ~/.claude.json servers - but only the ones " +
-                "that existed when this session was spawned. Declared is not the same as connected: a declared " +
-                "server can still come up failed, so if a call to one returns an unknown-server error, that is why."
+              ? "This is the Claude lane, which IS handed the user's ~/.claude.json servers. " +
+                "`declared_to_this_spawn` is what we handed the agent when it started - it is NOT proof you " +
+                "have those tools, and you must not report it as one. Two things sit in between: a spawn that " +
+                "RESUMED a stored session gets the MCP set recorded with THAT session rather than the one we " +
+                "just read, and a freshly declared server can still fail to start. The only proof is calling " +
+                "one of its tools and having it work. panel_reload respawns this session and re-declares the set."
               : inherits === false
                 ? "This agent's backend is not the Claude one, and only the Claude lane is handed the user's " +
-                  "~/.claude.json servers - so none of these are yours. Calling one of their tools will fail " +
-                  "with an unknown-server error, and panel_reload will NOT add them: do not tell the user you " +
-                  "have that capability. They DO apply to the user's own claude sessions and to this panel's " +
-                  "Claude backend, so panel_add_mcp is still worth offering for those. This says nothing about " +
-                  "MCP servers your own CLI config may give you: go by the tool list you were actually given."
+                  "~/.claude.json servers - so we handed you none of these, and panel_reload will not change " +
+                  "that. Calling one comes back as an unknown-server error unless your OWN CLI config happens " +
+                  "to provide a server by that name; either way it is not this one, so do not tell the user " +
+                  "you have that capability. They DO apply to the user's own claude sessions and to this " +
+                  "panel's Claude backend, so panel_add_mcp is still worth offering for those. This says " +
+                  "nothing about MCP servers your own CLI config may give you: go by the tool list you were " +
+                  "actually given."
                 : "Whether this session was handed these servers could not be established here (the agent's " +
                   "backend is not recorded on this tool session). Treat it as unknown: do not claim the " +
                   "capability until you have actually called one of its tools and it worked.";
           const pending = [
             pendingAdd.length
-              ? `Added to the config after this session started, so NOT yours yet: ${pendingAdd.join(", ")} - ` +
+              ? `Added to the config after this session started, so NOT handed to it: ${pendingAdd.join(", ")} - ` +
                 "panel_reload respawns this session and picks them up."
               : "",
             pendingRemove.length
-              ? `Removed from the config but still running in this session until a panel_reload: ${pendingRemove.join(", ")}.`
+              ? `Removed from the config but handed to this session at spawn, so likely still running in it ` +
+                `until a panel_reload: ${pendingRemove.join(", ")}.`
               : "",
           ]
             .filter(Boolean)

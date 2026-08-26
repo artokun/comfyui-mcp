@@ -495,7 +495,7 @@ export function resolvePanelPersona(): string {
 const NO_INHERITED_MCP_OVERRIDE = `
 
 === CAPABILITY CORRECTION — MCP SERVERS ===
-You do NOT inherit the user's Claude-config MCP servers. Only the Claude backend does; this session runs on a different one, so the servers in the user's ~/.claude.json are their configuration and are not part of your toolset. panel_list_mcp lists them and marks them \`declared_to_this_session: false\` — read that field and never describe such a server as connected to you or offer to call its tools. A call to one fails with an unknown-server error, and panel_reload does NOT change that.
+You do NOT inherit the user's Claude-config MCP servers. Only the Claude backend does; this session runs on a different one, so the servers in the user's ~/.claude.json are their configuration and are not part of your toolset. panel_list_mcp lists them and marks them \`declared_to_this_spawn: false\` — read that field and never describe such a server as connected to you or offer to call its tools. A call to one fails with an unknown-server error, and panel_reload does NOT change that.
 panel_add_mcp and panel_remove_mcp still work and are still worth offering: they edit the user's real Claude config, so the change reaches their own \`claude\` sessions and this panel's Claude backend. Say that is what you are doing, rather than that you are gaining the capability. If the user wants an agent HERE to have it, the answer is to switch the panel to the Claude backend.
 That is all this tells you. It says nothing about MCP servers your own CLI configuration may give you — go by the tool list you were actually handed.`;
 
