@@ -540,13 +540,14 @@ describe("migrateInFlightJobs (#1148)", () => {
       expect(rec.pid).toBe(4242);
     });
 
-    it("a LOCAL record still gets its affirmative next step", () => {
-      // The other half must not regress: #1148's original harm was an agent
-      // that would not act, so the local case keeps a clear instruction.
+    it("a LOCAL record carries no unconditional resume claim", () => {
+      // Migration has no exact staged path or writer identity proof. It must
+      // leave the caller with a clear verification gate, not manufacture one.
       writeJob(oldDir, { id: "local-1", status: "downloading", updated: Date.now() });
       mod.migrateInFlightJobs(oldDir, dir);
       const msg = mod.readPersistedDownloadJob("local-1")!.error ?? "";
-      expect(msg).toMatch(/picks up a resumable \.partial where one survives, and otherwise restarts/);
+      expect(msg).toMatch(/persisted exact partial path and route\/identity proof/);
+      expect(msg).toMatch(/do not infer that it resumes/);
       expect(msg).not.toMatch(/STILL RUNNING/);
       expect(mod.readPersistedDownloadJob("local-1")!.via_manager).toBe(false);
     });
@@ -594,7 +595,8 @@ describe("migrateInFlightJobs (#1148)", () => {
     const msg = mod.readPersistedDownloadJob("abc")!.error ?? "";
     expect(msg).toMatch(/no longer being WATCHED/);
     expect(msg).toMatch(/nothing here is writing those bytes/);
-    expect(msg).toMatch(/picks up a resumable \.partial where one survives, and otherwise restarts/);
+    expect(msg).toMatch(/persisted exact partial path and route\/identity proof/);
+    expect(msg).toMatch(/do not infer that it resumes/);
     expect(msg).not.toMatch(/will not resume on its own/);
   });
 

@@ -95,6 +95,7 @@ import {
   stagedPartialPathForUrl,
   __downloadCacheTestHooks,
 } from "../../services/download-cache.js";
+import { localDownloadCacheIdentity } from "../../services/model-resolver.js";
 import { config } from "../../config.js";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -126,6 +127,9 @@ function writeForeignJobRecord(
     owner: string;
     filename?: string;
     viaManager?: boolean;
+    downloadRoute?: "direct" | "proxied";
+    partialPath?: string;
+    partialIdentity?: unknown;
     status?: "downloading" | "done" | "error" | "cancelled";
     ageMs?: number;
     pid?: number;
@@ -143,6 +147,9 @@ function writeForeignJobRecord(
       target_subfolder: "loras",
       filename: rec.filename,
       via_manager: rec.viaManager,
+      download_route: rec.downloadRoute,
+      partialPath: rec.partialPath,
+      partial_identity: rec.partialIdentity,
       status,
       started_at: Date.now(),
       finished_at: status === "downloading" ? undefined : Date.now(),
@@ -195,15 +202,21 @@ describe("adoptOrphanedDownloadJobs (#1567 item 3)", () => {
   });
 
   /** Stage a non-zero `.partial` the way the writer names it, for a bare-identity URL. */
-  function stagePartial(url: string, bytes: number): void {
+function stagePartial(url: string, bytes: number): void {
     const p = stagedPartialPathForUrl(url);
     mkdirSync(dirname(p), { recursive: true });
     writeFileSync(p, Buffer.alloc(bytes, 1));
   }
 
+  function localProof(url: string): { partialPath: string; partialIdentity: unknown } {
+    const identity = localDownloadCacheIdentity(url);
+    return { partialPath: identity.partialPath, partialIdentity: identity.partialIdentity };
+  }
+
   it("adopts a proven-dead orphan whose partial is staged — cancel + re-issue collapse into the new session", async () => {
     const id = "orphan1567x0000001";
     const owner = "dead-session";
+    const proof = localProof(URL_X);
     writeForeignJobRecord(recordDir, {
       id,
       trayId: downloadIdFor(URL_X),
@@ -211,6 +224,9 @@ describe("adoptOrphanedDownloadJobs (#1567 item 3)", () => {
       url: URL_X,
       owner,
       filename: "big.safetensors",
+      viaManager: false,
+      downloadRoute: "direct",
+      ...proof,
       ageMs: 10 * 60 * 1000,
       pid: deadPid(),
     });
@@ -455,12 +471,16 @@ describe("adoptOrphanedDownloadJobs (#1567 item 3)", () => {
 
   it("a failed re-issue does not throw and leaves the orphan CLOSED, not wedged", async () => {
     const id = "orphan1567x0000011";
+    const proof = localProof(URL_X);
     writeForeignJobRecord(recordDir, {
       id,
       trayId: downloadIdFor(URL_X),
       progressId: "prog-dead-11",
       url: URL_X,
       owner: "dead-session",
+      viaManager: false,
+      downloadRoute: "direct",
+      ...proof,
       ageMs: 10 * 60 * 1000,
       pid: deadPid(),
     });
@@ -487,6 +507,7 @@ describe("adoptOrphanedDownloadJobs (#1567 item 3)", () => {
     // the bare lookup misses it, and the adoption lookup — which rebuilds the
     // headers a re-issue would send now — finds it and resumes.
     config.huggingfaceToken = "hf-test-token";
+    const proof = localProof(URL_HF);
     const authedTarget = __downloadCacheTestHooks.cachePathForUrl(URL_HF, {
       Authorization: "Bearer hf-test-token",
     });
@@ -504,6 +525,9 @@ describe("adoptOrphanedDownloadJobs (#1567 item 3)", () => {
       url: URL_HF,
       owner: "dead-session",
       filename: "gated.safetensors",
+      viaManager: false,
+      downloadRoute: "direct",
+      ...proof,
       ageMs: 10 * 60 * 1000,
       pid: deadPid(),
     });
@@ -517,6 +541,34 @@ describe("adoptOrphanedDownloadJobs (#1567 item 3)", () => {
     ]);
   });
 
+  it("refuses an authed orphan when the current configured identity no longer matches", async () => {
+    config.huggingfaceToken = "hf-test-token";
+    const proof = localProof(URL_HF);
+    const staged = proof.partialPath;
+    mkdirSync(dirname(staged), { recursive: true });
+    writeFileSync(staged, Buffer.alloc(4096, 1));
+    config.huggingfaceToken = "hf-different-token";
+    const id = "orphan1567x0000012-mismatch";
+    writeForeignJobRecord(recordDir, {
+      id,
+      trayId: downloadIdFor(URL_HF),
+      progressId: "prog-dead-12-mismatch",
+      url: URL_HF,
+      owner: "dead-session",
+      filename: "gated.safetensors",
+      viaManager: false,
+      downloadRoute: "direct",
+      ...proof,
+      ageMs: 10 * 60 * 1000,
+      pid: deadPid(),
+    });
+
+    expect(await adoptOrphanedDownloadJobs()).toEqual([]);
+    expect(hoisted.calls).toEqual([]);
+    expect(() => readFileSync(pathJoin(recordDir, `control-job-${id}-dead-session.json`), "utf8"))
+      .not.toThrow();
+  });
+
   it("adopts ONE of two dead records sharing an id — the second reclaim must not clobber the live replacement's record", async () => {
     // Two dead sessions each left an in-flight record for the SAME download (same
     // id). The record snapshot is taken before the loop, so without an explicit
@@ -524,12 +576,16 @@ describe("adoptOrphanedDownloadJobs (#1567 item 3)", () => {
     // cancel over the replacement job's fresh owner-scoped file.
     const id = "orphan1567x0000013";
     for (const owner of ["dead-session-a", "dead-session-b"]) {
+      const proof = localProof(URL_X);
       writeForeignJobRecord(recordDir, {
         id,
         trayId: downloadIdFor(URL_X),
         progressId: "prog-dead-13",
         url: URL_X,
         owner,
+        viaManager: false,
+        downloadRoute: "direct",
+        ...proof,
         ageMs: 10 * 60 * 1000,
         pid: deadPid(),
       });

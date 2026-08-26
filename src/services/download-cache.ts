@@ -1211,10 +1211,7 @@ function cachePathForUrl(
   headers: Record<string, string> = {},
   storageAuth?: CloudStorageAuth,
 ): string {
-  const hash = createHash("sha256")
-    .update(cacheIdentity(url, headers, storageAuth))
-    .digest("hex")
-    .slice(0, HASH_CHARS);
+  const hash = cacheIdentityKey(url, headers, storageAuth);
   let extension = "";
   try {
     extension = extname(basename(new URL(url).pathname));
@@ -1223,6 +1220,95 @@ function cachePathForUrl(
     // defensive so fallback direct downloads can still surface the real error.
   }
   return join(cacheDir(), `${hash}${extension}`);
+}
+
+interface StagedWriterLock {
+  release: () => Promise<void>;
+}
+
+/**
+ * Claim the deterministic cache identity before reading, truncating, appending,
+ * or renaming its staged files. The persisted-job scan is intentionally only a
+ * liveness/adoption hint; it is not atomic. This O_EXCL claim closes the remaining
+ * cross-process overlap window for the shared `.partial` and refuses on any
+ * unclassified/live owner rather than guessing that an observed snapshot is safe.
+ */
+async function acquireStagedWriterLock(
+  partialPath: string,
+  logUrl: string,
+): Promise<StagedWriterLock> {
+  const lockPath = `${partialPath}.lock`;
+  const token = randomBytes(16).toString("hex");
+  const body = JSON.stringify({ pid: process.pid, token, updated: Date.now() });
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await writeFile(lockPath, body, { flag: "wx", mode: 0o600 });
+      return {
+        release: async () => {
+          try {
+            const current = JSON.parse(await readFile(lockPath, "utf8")) as { token?: unknown };
+            // Never remove a successor's claim if a cleanup race replaced this one.
+            if (current.token === token) await rm(lockPath, { force: true });
+          } catch {
+            // Best effort. A failed cleanup leaves a visible claim; the next caller
+            // will probe its pid and either reclaim a dead owner or refuse safely.
+          }
+        },
+      };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") throw err;
+      let owner: { pid?: unknown };
+      try {
+        owner = JSON.parse(await readFile(lockPath, "utf8")) as { pid?: unknown };
+      } catch {
+        throw interferenceError(
+          "the staged writer lock exists but its owner identity could not be read",
+          "before starting",
+          logUrl,
+        );
+      }
+      const pid = owner.pid;
+      if (!Number.isInteger(pid) || (pid as number) <= 0) {
+        throw interferenceError(
+          "the staged writer lock has no valid owner identity",
+          "before starting",
+          logUrl,
+        );
+      }
+      try {
+        process.kill(pid as number, 0);
+        throw interferenceError(
+          `the staged writer lock is held by process ${pid}`,
+          "before starting",
+          logUrl,
+        );
+      } catch (probeErr) {
+        // An existing process, including this process, means a live claim. Only
+        // ESRCH is proof that the lock owner is gone; EPERM/other errors refuse.
+        if ((probeErr as NodeJS.ErrnoException)?.code !== "ESRCH") throw probeErr;
+      }
+      // The recorded owner is proven gone. Remove only that stale claim, then let
+      // O_EXCL decide which simultaneous recovery attempt wins the new claim.
+      await rm(lockPath, { force: true });
+    }
+  }
+  throw interferenceError(
+    "another writer won the staged identity claim",
+    "before starting",
+    logUrl,
+  );
+}
+
+function cacheIdentityKey(
+  url: string,
+  headers: Record<string, string>,
+  storageAuth?: CloudStorageAuth,
+): string {
+  return createHash("sha256")
+    .update(cacheIdentity(url, headers, storageAuth))
+    .digest("hex")
+    .slice(0, HASH_CHARS);
 }
 
 /**
@@ -1235,6 +1321,8 @@ function cachePathForUrl(
  * job's redacted/original URL.
  */
 export interface DownloadCacheIdentity {
+  /** The complete representation digest used to name cachePath/partialPath. */
+  cacheKey: string;
   cachePath: string;
   partialPath: string;
 }
@@ -1244,8 +1332,9 @@ export function downloadCacheIdentity(
   headers: Record<string, string> = {},
   storageAuth?: CloudStorageAuth,
 ): DownloadCacheIdentity {
+  const cacheKey = cacheIdentityKey(url, headers, storageAuth);
   const cachePath = cachePathForUrl(url, headers, storageAuth);
-  return { cachePath, partialPath: stagedPartialPathForTarget(cachePath) };
+  return { cacheKey, cachePath, partialPath: stagedPartialPathForTarget(cachePath) };
 }
 
 async function touch(path: string): Promise<void> {
@@ -2532,9 +2621,15 @@ async function downloadIntoCache(
   // can ever false-complete or be corrupted by another's cancel.
   if (existing) return existing;
 
+  // `inflight` deduplicates callers in THIS process. The atomic staged claim is
+  // the cross-process gate: a second session must refuse before it can observe,
+  // truncate, append, or rename the shared partial. The claim is acquired inside
+  // the promise, after that promise is published, so same-process callers coalesce
+  // before either one reaches the filesystem.
+  let stagedLock: StagedWriterLock | undefined;
   const promise = (async () => {
     await downloadCacheFs.mkdir(cacheDir(), { recursive: true });
-
+    stagedLock = await acquireStagedWriterLock(partial, logUrl ?? redactUrlForLogs(url));
     try {
       const info = await downloadCacheFs.stat(target);
       if (info.isFile()) {
@@ -3103,6 +3198,7 @@ async function downloadIntoCache(
     return await promise;
   } finally {
     inflight.delete(key);
+    await stagedLock?.release();
   }
 }
 

@@ -91,9 +91,9 @@ describe("download_model action:\"status\" claims only what the code delivers (#
     // #529's adoption contract is real, and a caller who stops trusting it
     // starts duplicating live transfers.
     const d = statusParagraph();
-    expect(d).toMatch(/AGENT\/sidebar session reconnect/);
-    expect(d).toMatch(/keeps running/);
-    expect(d).toMatch(/normally resolvable by `id` or by `url`/);
+    expect(d).toMatch(/AGENT\/sidebar reconnect/);
+    expect(d).toMatch(/local stream normally remains resolvable/);
+    expect(d).toMatch(/normally remains resolvable by `id` or `url`/);
   });
 
   it("says an INTERRUPTED note means WE stopped watching, not that the bytes stopped", () => {
@@ -108,7 +108,7 @@ describe("download_model action:\"status\" claims only what the code delivers (#
     // time — the fold this whole issue is about.
     expect(d).toMatch(/STOPPED WATCHING/);
     expect(d).not.toMatch(/an INTERRUPTED note/);
-    expect(d).toMatch(/not that the bytes stopped, which it does not check/i);
+    expect(d).toMatch(/not that the bytes stopped/i);
   });
 
   it("warns that re-issuing a Manager dispatch CORRUPTS, rather than exempting it", () => {
@@ -119,8 +119,8 @@ describe("download_model action:\"status\" claims only what the code delivers (#
     // the same destination and corrupts the model.
     const d = statusParagraph();
     expect(d).toMatch(/ComfyUI-Manager/);
-    expect(d).toMatch(/runs on the ComfyUI host/i);
-    expect(d).toMatch(/corrupts the model/i);
+    expect(d).toMatch(/run on the ComfyUI host/i);
+    expect(d).toMatch(/CORRUPT the destination/i);
     expect(d).not.toMatch(/produces no interrupted record/i);
     expect(d).not.toMatch(/committed done the moment the dispatch is ACCEPTED/i);
   });
@@ -133,7 +133,7 @@ describe("download_model action:\"status\" claims only what the code delivers (#
     // DANGEROUS — an in-progress file is never listed, so that check can only
     // terminate the wrong way. The description now points at the record.
     const d = statusParagraph();
-    expect(d).toMatch(/READ THE NOTE ON THAT RECORD/);
+    expect(d).toMatch(/READ THE ROUTE-AWARE NOTE ON THAT RECORD/);
     expect(d).not.toMatch(/until the file appears and its size stops changing/i);
   });
 
@@ -200,6 +200,6 @@ describe("download_model action:\"status\" claims only what the code delivers (#
       "The action:\"status\" description changed. That is fine — but every claim in it " +
         "has been wrong at least once (see the header). Re-verify each against " +
         "download-jobs.ts / download-progress.ts / node-management.ts, then update this hash.",
-    ).toBe("e830e08d28a9dde0");
+    ).toBe("b2f48732b6cfea59");
   });
 });

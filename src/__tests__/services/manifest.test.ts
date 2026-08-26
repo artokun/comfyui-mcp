@@ -110,21 +110,29 @@ vi.mock("../../config.js", () => ({
   isRemoteMode: () => mockConfig.remote ?? !mockConfig.comfyuiPath,
 }));
 
-vi.mock("node:fs/promises", () => ({
-  lstat: (...a: unknown[]) => lstatMock(...a),
-  mkdir: (...a: unknown[]) => mkdirMock(...a),
-  readFile: (...a: unknown[]) => readFileMock(...a),
-  realpath: (...a: unknown[]) => realpathMock(...a),
-  stat: (...a: unknown[]) => statMock(...a),
-}));
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    lstat: (...a: unknown[]) => lstatMock(...a),
+    mkdir: (...a: unknown[]) => mkdirMock(...a),
+    readFile: (...a: unknown[]) => readFileMock(...a),
+    realpath: (...a: unknown[]) => realpathMock(...a),
+    stat: (...a: unknown[]) => statMock(...a),
+  };
+});
 
 vi.mock("node:fs", () => ({
   existsSync: (...a: unknown[]) => existsSyncMock(...a),
 }));
 
-vi.mock("node:child_process", () => ({
-  execFileSync: (...a: unknown[]) => execFileSyncMock(...a),
-}));
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return {
+    ...actual,
+    execFileSync: (...a: unknown[]) => execFileSyncMock(...a),
+  };
+});
 
 vi.mock("../../services/node-management.js", () => ({
   installCustomNode: (...a: unknown[]) => installCustomNodeMock(...a),

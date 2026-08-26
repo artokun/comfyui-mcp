@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
 import * as fsPromises from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -138,6 +138,21 @@ describe("downloadModel cache", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     await expect(readFile(onePath, "utf-8")).resolves.toBe("one network body");
     await expect(readFile(twoPath, "utf-8")).resolves.toBe("one network body");
+  });
+
+  it("refuses an overlapping writer's live staged identity claim (#2356)", async () => {
+    const url = "https://example.com/models/overlap.safetensors";
+    const partial = join(cacheDir, `.${cacheHashFor(url)}.safetensors.partial`);
+    const lock = `${partial}.lock`;
+    await mkdir(dirname(partial), { recursive: true });
+    await writeFile(lock, JSON.stringify({ pid: process.pid, token: "other-writer" }));
+    fetchMock.mockResolvedValueOnce(okResponse("must not be fetched"));
+
+    await expect(
+      downloadModel(url, "checkpoints", "overlap.safetensors"),
+    ).rejects.toThrow(/another download is writing the same staged file/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+    await expect(readFile(lock, "utf8")).resolves.toContain("other-writer");
   });
 
   it("#515: a cancelled COALESCED caller never materializes its destination", async () => {

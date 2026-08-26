@@ -327,6 +327,7 @@ describe('download_model action:"status"', () => {
           target_subfolder: "text_encoders",
           status: "cancelled",
           via_manager: false,
+          partial_identity: { version: 1, cache_key: "empty-partial-test", auth_mode: "none" },
           started_at: Date.now() - 60_000,
           updated: Date.now(),
         }),
@@ -347,7 +348,7 @@ describe('download_model action:"status"', () => {
       const { downloadStatus } = makeServer();
       const text = (await downloadStatus({ id })).content[0].text;
       expect(text).toContain("PROGRESS UNAVAILABLE");
-      expect(text).toContain("no resumable partial was found");
+      expect(text).toContain("exact staged .partial is absent or zero-byte");
       expect(text).toContain("starts from the beginning");
       expect(text).not.toContain("0 bytes durable");
       expect(text).not.toContain("resumes from it");
@@ -540,7 +541,9 @@ describe('download_model action:"status"', () => {
 
   it("action:cancel during the grace window does not promise resume from a zero-byte partial (#2358)", async () => {
     const dir = await mkdtemp(join(tmpdir(), "model-management-2358-cancel-empty-"));
-    const partial = join(dir, "cancel-empty.partial");
+    const savedCache = process.env.COMFYUI_DOWNLOAD_CACHE_DIR;
+    process.env.COMFYUI_DOWNLOAD_CACHE_DIR = dir;
+    const partial = downloadCacheIdentity("https://example.com/cancel-empty.safetensors").partialPath;
     setProgressDir(dir);
     resetDownloadJobs();
     downloadModelMock.mockImplementationOnce(async (...args: unknown[]) => {
@@ -566,12 +569,14 @@ describe('download_model action:"status"', () => {
       const cancelled = await cancelDownload({ id: job.id, tray_id: job.trayId });
       expect(cancelled.content[0].text).toContain("being aborted");
       const text = (await downloading).content[0].text;
-      expect(text).toContain("no resumable partial was found");
+      expect(text).toContain("exact staged .partial is absent or zero-byte");
       expect(text).toContain("starts from the beginning");
       expect(text).not.toContain("resumes from it");
     } finally {
       resetDownloadJobs();
       setProgressDir("");
+      if (savedCache === undefined) delete process.env.COMFYUI_DOWNLOAD_CACHE_DIR;
+      else process.env.COMFYUI_DOWNLOAD_CACHE_DIR = savedCache;
       await rm(dir, { recursive: true, force: true });
     }
   });
@@ -900,8 +905,10 @@ describe('download_model action:"status"', () => {
         const text = res.content[0].text;
         expect(text).toContain("confirmed GONE");
         expect(text).toContain("closed as **cancelled**");
-        // The remedy is actionable from here: re-issue.
-        expect(text).toContain('re-issue the same download_model `action:"download"` request');
+        // A dead writer alone is not resume authorization, especially for a
+        // legacy record whose route and exact staged identity are absent.
+        expect(text).toContain("route is UNKNOWN");
+        expect(text).not.toContain("re-issue the same download_model");
         // And it must NOT claim a live transfer was aborted.
         expect(text).not.toMatch(/being aborted/);
 
@@ -928,12 +935,13 @@ describe('download_model action:"status"', () => {
           pid: deadPid(),
           via_manager: false,
           partialPath: partial,
+          partial_identity: { version: 1, cache_key: "reclaim-empty-test", auth_mode: "none" },
         });
 
         const { cancelDownload } = makeServer();
         const text = (await cancelDownload({ id, tray_id: "staletray8580000" })).content[0].text;
         expect(text).toContain("confirmed GONE");
-        expect(text).toContain("no resumable partial was found");
+        expect(text).toContain("exact staged .partial is absent or zero-byte");
         expect(text).toContain("starts from the beginning");
         expect(text).not.toContain("resumes from it");
       } finally {
@@ -1080,10 +1088,11 @@ describe('download_model action:"status"', () => {
         expect(text).not.toContain("live heartbeat");
         expect(text).not.toContain("actively writing");
         expect(text).toContain("could not be established from here");
-        // The remedy is the recovery that actually works for a dead writer:
-        // status decides, and re-issuing adopts the record and resumes.
+        // Status can prove liveness, but it cannot authorize a resume without
+        // the exact persisted path/identity proof and required credentials.
         expect(text).toContain('action:"status"');
-        expect(text).toContain("adopts the record and resumes from the .partial");
+        expect(text).toContain("exact persisted partial path and matching identity proof");
+        expect(text).not.toContain("adopts the record and resumes from the .partial");
       } finally {
         setProgressDir("");
         await rm(dir, { recursive: true, force: true });

@@ -13,6 +13,7 @@ import {
   listLocalModelsWithCoverage,
   describeManagerDestination,
   managerJobFilename,
+  localDownloadCacheIdentity,
   currentLiveModelsRoot,
   MODEL_SUBDIRS,
 } from "../services/model-resolver.js";
@@ -194,15 +195,16 @@ function requireLimitInRange(tool: string, action: string, limit: number | undef
  * How a download's bytes are being fetched — THREE states, not two (#1148).
  *
  * The recovery advice for an interrupted download is opposite for the two real
- * routes: a local stream leaves a `.partial` that a re-issue resumes, while a
+ * routes: a local stream may leave a `.partial`, but it is resumable only when
+ * the writer persisted the exact path and matching identity proof. A
  * ComfyUI-Manager dispatch leaves nothing locally, may still be running on the
  * HOST, and cannot be recalled — so a re-issue is a duplicate write to the same
  * destination that CORRUPTS the model (#1197).
  *
  * `via_manager` is OPTIONAL in the persisted record, so a record written before
  * that field existed restores as `undefined`. A boolean split sends it down the
- * `local` path and tells the reader to re-issue — which is the corrupting move
- * for exactly the records whose route we cannot confirm. That is this codebase's
+ * `local` path and authorizes a re-issue — which is the corrupting move for
+ * exactly the records whose route or writer identity we cannot confirm. That is this codebase's
  * recurring defect (#796) reappearing inside its own fix: "could not determine
  * the route" folded into "determined it is not Manager". Found by codex review.
  *
@@ -226,46 +228,6 @@ function stillWritingClause(route: DownloadRoute): string {
     default:
       return "something may still be writing it — either the original owner's .partial or, if this was a Manager dispatch, the ComfyUI host server-side";
   }
-}
-
-/**
- * What is ACTUALLY on disk for a cancelled download (#1370).
- *
- * The row this replaces said "the partial was left on disk and can be resumed by
- * re-issuing the download (it picks up where it left off)" on the strength of
- * `status === "cancelled"` alone. A reporter paused a 33 GB download because of that
- * sentence, found nothing on disk, and restarted from zero. The sentence was not stale —
- * it was never checked.
- *
- * Both answers are useful and neither is a failure: a partial means "re-issue and you keep
- * these bytes", and no partial means "re-issue and you start over" — which is exactly the
- * fact someone needs BEFORE spending the bandwidth, not after. The size is included
- * because "resumable" without a number is not something you can weigh against restarting.
- */
-function describePartial(partial: StagedPartialObservation): string {
-  if (partial.state === "unavailable") {
-    return (
-      `the exact staged .partial could not be read${partial.path ? ` (${partial.path})` : ""}, ` +
-      `so status cannot determine whether bytes are resumable. Do not infer that it is ` +
-      `absent; re-issue only after the writer and cache path are checked.`
-    );
-  }
-  if (partial.state === "absent") {
-    return (
-      `no resumable partial was found for this URL, so re-issuing very likely starts from ` +
-      `the beginning. That is not an error — but it is worth knowing before you re-spend ` +
-      `the bandwidth on a large file. (The staged file is keyed by the download's cache ` +
-      `identity, which folds in auth headers this record deliberately does not keep, so ` +
-      `for an AUTHENTICATED download this means "none found under the unauthenticated ` +
-      `key", not "none exists".)`
-    );
-  }
-  const gb = partial.bytes / 1024 ** 3;
-  const size = gb >= 1 ? `${gb.toFixed(2)} GB` : `${(partial.bytes / 1024 ** 2).toFixed(1)} MB`;
-  return (
-    `a partial of ${size} is on disk (${partial.path}) and re-issuing the same download ` +
-    `resumes from it.`
-  );
 }
 
 interface ProgressView {
@@ -384,10 +346,59 @@ async function progressViewForJob(
  * conservative (#2358).
  */
 async function exactPartialRecoveryAdvice(
-  job: Pick<DownloadJob, "partialPath">,
+  job: {
+    url?: string;
+    partialPath?: string;
+    partialIdentity?: DownloadJob["partialIdentity"];
+  },
 ): Promise<string> {
+  if (!job.url || !job.partialPath || !job.partialIdentity) {
+    return (
+      `the local route was recorded, but the source URL, writer's exact staged partial, and identity ` +
+      `proof are not both present. Do not infer that any bytes are resumable or re-issue ` +
+      `until the original writer/cache identity is verified.`
+    );
+  }
   const partial = await observeStagedPartialAtPath(job.partialPath);
-  return `To get the file, re-issue the same download_model \`action:"download"\` request: ${describePartial(partial)}`;
+  if (partial.state === "unavailable") {
+    return (
+      `the exact staged .partial could not be read (${job.partialPath}), so status cannot ` +
+      `determine whether bytes are resumable. Do not re-issue on an unreadable identity.`
+    );
+  }
+  if (partial.state === "absent") {
+    return `the exact staged .partial is absent or zero-byte (${job.partialPath}); no resumable bytes were observed, so a re-issue starts from the beginning.`;
+  }
+  let currentIdentity: ReturnType<typeof localDownloadCacheIdentity>;
+  try {
+    currentIdentity = localDownloadCacheIdentity(job.url);
+  } catch {
+    return `the exact staged ${formatBytes(partial.bytes)} partial is observed at ${partial.path}, but the current local request identity could not be established; do not re-issue it.`;
+  }
+  if (
+    currentIdentity.partialPath !== job.partialPath ||
+    currentIdentity.partialIdentity.cache_key !== job.partialIdentity.cache_key ||
+    currentIdentity.partialIdentity.auth_mode !== job.partialIdentity.auth_mode
+  ) {
+    return (
+      `an exact ${formatBytes(partial.bytes)} partial is observed at ${partial.path}, but its ` +
+      `persisted route/identity proof does not match the current local request identity. ` +
+      `Do not re-issue it or infer that those bytes are resumable.`
+    );
+  }
+  const size = formatBytes(partial.bytes);
+  if (job.partialIdentity.auth_mode === "explicit") {
+    return (
+      `an exact ${size} partial is observed at ${partial.path}, but the persisted identity ` +
+      `requires a per-request credential that is not stored here. Do not re-issue without it ` +
+      `and a matching identity check; the path alone is not a resume authorization.`
+    );
+  }
+  const identityLabel =
+    job.partialIdentity.auth_mode === "configured"
+      ? "matching configured identity proof"
+      : "matching unauthenticated identity proof";
+  return `the exact ${size} partial is observed at ${partial.path} with the writer's ${identityLabel}; re-issuing the same download can resume it, subject to the normal upstream validator check.`;
 }
 
 /**
@@ -395,7 +406,12 @@ async function exactPartialRecoveryAdvice(
  * cancellation reply so route and exact-partial observations cannot drift.
  */
 async function afterCancelAdvice(
-  job: Pick<DownloadJob, "viaManager" | "partialPath">,
+  job: {
+    url?: string;
+    viaManager?: boolean;
+    partialPath?: string;
+    partialIdentity?: DownloadJob["partialIdentity"];
+  },
 ): Promise<string> {
   const route = downloadRoute(job);
   switch (route) {
@@ -404,7 +420,7 @@ async function afterCancelAdvice(
     case "local":
       return exactPartialRecoveryAdvice(job);
     default:
-      return `This record predates the route being recorded, so whether it was a local stream or a ComfyUI-Manager dispatch is NOT known — and the two need opposite handling. Treat it as possibly Manager: check list_local_models, or the destination on disk, BEFORE re-issuing. If it was local a re-issue would simply resume the .partial, but if it was a Manager dispatch a re-issue is a duplicate that CORRUPTS the file, so the check comes first.`;
+      return `This record's route is UNKNOWN (legacy or incomplete), so whether it was a local stream or a ComfyUI-Manager dispatch is NOT known. Do NOT re-issue: check list_local_models or the destination on disk first; a Manager re-issue is a duplicate dispatch that can CORRUPT the file, while a local partial cannot be authorized from this record.`;
   }
 }
 
@@ -413,8 +429,8 @@ export function registerModelManagementTools(server: McpServer): void {
     "download_model",
     "Find model weights and get them onto the connected ComfyUI, and track the transfers. Driven by the `action` parameter:\n" +
       '- action:"download" — Download a model file to the connected ComfyUI\'s models directory from a URL (HuggingFace, direct HTTP(S), s3://, or Azure Blob). Requires `url` + `target_subfolder`. PREFER this over a raw shell download (curl/wget) for model weights: it lands the file in the right models/ subfolder. LOCAL ComfyUI: streams to disk and surfaces live progress in the panel download tray. REMOTE ComfyUI: dispatches the fetch to the ComfyUI host via the ComfyUI-Manager install-model HTTP API (downloaded server-side; a per-request `auth` header can\'t be forwarded). This requires the host\'s Manager to run with network_mode=personal_cloud (or loopback) and a permissive security level — a stricter gate silently rejects the download, and Manager reports the queue task \'done\' even on failure, so a remote dispatch does not guarantee the file landed. target_subfolder accepts any relative subfolder (incl. nested, e.g. \'loras/<subdir>\').\n' +
-      '- action:"status" — Check on downloads started by action:"download" / action:"download_civitai". Reports each download\'s state (downloading / done / error / cancelled), its destination path once it lands, and byte progress when the panel progress channel is enabled. Use this after a download reports it is still running — that means the transfer is in flight, NOT that it failed. Across an AGENT/sidebar session reconnect a download this MCP streams locally keeps running and is normally resolvable by `id` or by `url`. An ORCHESTRATOR RESTART is different: a record carried across one reports only that this MCP STOPPED WATCHING — not that the bytes stopped, which it does not check. READ THE NOTE ON THAT RECORD before acting: it distinguishes a local stream (nothing is writing it; re-issue) from a ComfyUI-Manager dispatch (the fetch runs on the ComfyUI host, which a restart here does not touch, so re-issuing writes a second copy to the same destination and CORRUPTS the model). And NOT FOUND NEVER MEANS STOPPED: both the cross-session record and the carry-over are written best-effort, so their absence is evidence of nothing. Omit `id` and `url` to list every tracked download. A previous session\'s download whose heartbeat has gone stale is reported with a stale-heartbeat NOTE: action:"cancel" can close it once the writer is proven gone. WHAT COMES AFTER THAT CANCEL DEPENDS ON THE ROUTE, and the note says which — for a local stream re-issuing resumes the .partial or restarts cleanly, but for a ComfyUI-Manager dispatch there is no local .partial and the host may still be fetching, so re-issuing is a duplicate dispatch that CORRUPTS the file. An older record that predates the route being stored says the route is UNKNOWN and tells you to verify the file before re-issuing, rather than guessing either way. Read-only.\n' +
-      '- action:"cancel" — Cancel ONE in-flight download by its `id` (from action:"status" or from the download that started it) — REQUIRED, and it must be the id of the download you mean, since a wrong id stops someone else\'s transfer. Aborts only that download\'s transfer; other downloads keep running. An id that names no tracked download is reported as such, not silently treated as success. The partially-downloaded bytes are left on disk as a resumable .partial and are NEVER reported as a completed file, so nothing corrupt lands in your models directory; re-issuing the same download later resumes where it left off. Idempotent: cancelling an already-finished, failed, or already-cancelled download just reports its current state. A download whose AbortController lives in ANOTHER live session cannot be aborted from here (stop it from the panel download tray) — but a download left \'downloading\' by a session that is PROVEN gone (heartbeat stale AND its process no longer exists) CAN be cancelled from here: the stale record is closed as cancelled, after which re-issuing action:"download" resumes the leftover .partial or restarts cleanly. While the writer cannot be proven gone, the cancel refuses rather than risk two writers on one file. NOTE: for a download dispatched to a REMOTE ComfyUI via ComfyUI-Manager (server-side fetch), the local job is marked cancelled but the host may keep fetching — there is no Manager API to stop it.\n' +
+      '- action:"status" — Check downloads started by action:"download" / action:"download_civitai". Reports each state, destination, and byte progress when available. Use this after a download reports it is still running — that means the transfer is in flight, NOT that it failed. Across an AGENT/sidebar reconnect, a local stream normally remains resolvable by `id` or `url`; an ORCHESTRATOR RESTART instead reports only that this MCP STOPPED WATCHING, not that the bytes stopped. READ THE ROUTE-AWARE NOTE ON THAT RECORD before acting: a local re-issue is authorized only when the writer persisted the exact staged partial path and matching identity proof, the observed partial state permits it, and any required credential is available. ComfyUI-Manager/host dispatches run on the ComfyUI host and have no local partial; re-issuing one can duplicate the server-side write and CORRUPT the destination. Manager, unknown/legacy, missing-proof, mismatched-proof, and unreadable/absent partial records are not resume authorization. NOT FOUND NEVER MEANS STOPPED: records and carry-over are best-effort. Omit `id` and `url` to list every tracked download. A stale-heartbeat NOTE explains how to cancel after the writer is proven gone; cancellation alone never proves resumability. Read-only.\n' +
+      '- action:"cancel" — Cancel ONE in-flight download by its `id` (from action:"status" or from the download that started it) — REQUIRED, and it must be the id of the download you mean, since a wrong id stops someone else\'s transfer. Aborts only that download\'s transfer; other downloads keep running. An id that names no tracked download is reported as such, not silently treated as success. Cancellation reports the exact route, persisted writer identity, and observed partial state when those facts are available; it never infers that bytes are resumable from `status === "cancelled"` alone. Idempotent: cancelling an already-finished, failed, or already-cancelled download just reports its current state. A download whose AbortController lives in ANOTHER live session cannot be aborted from here (stop it from the panel download tray) — but a download left \'downloading\' by a session that is PROVEN gone (heartbeat stale AND its process no longer exists) CAN be closed as cancelled from here. Read the route-aware recovery note before any re-issue: Manager/unknown routes and missing or mismatched identity proof are not resume authorization, and a Manager host may still be fetching with no recall API. While the writer cannot be proven gone, the cancel refuses rather than risk two writers on one file.\n' +
       '- action:"search" — Search HuggingFace Hub for models usable in ComfyUI (checkpoints, LoRAs, VAEs, ControlNets, etc.); `query` is required. Read-only and network-only: queries HuggingFace over HTTP, does NOT require a running ComfyUI or COMFYUI_PATH and does not download anything. Returns a ranked list with modelId, author, downloads, likes, and tags. Pick a result\'s download URL and pass it to action:"download". For CIVITAI searches (\'find a Flux LoRA on Civitai\') use action:"search_civitai" instead — it filters by type + base model and returns ids for action:"download_civitai". For packs of custom nodes (not models) use search_custom_nodes.\n' +
       '- action:"search_civitai" — Search CivitAI by keyword for checkpoints, LoRAs, embeddings, VAEs, and ControlNets — THE action for \'find me a <base model> LoRA on Civitai\'. Read-only and network-only (public CivitAI REST API; no token or running ComfyUI required; CIVITAI_API_TOKEN unlocks gated results). Filter by `types` (LORA, Checkpoint, TextualInversion, VAE, Controlnet, …) and `base_models` (CivitAI labels: \'Flux.1 D\', \'SDXL 1.0\', \'SD 1.5\', \'Pony\', \'Illustrious\', \'Wan Video\') — ALWAYS pass base_models when the user\'s checkpoint family is known, so results actually fit their setup. Each hit returns the model_id and version_id that action:"download_civitai" takes directly, plus trigger words to use in the prompt after installing. Flow: action:"search_civitai" → pick a hit → action:"download_civitai" {model_version_id, target_subfolder} → wire/prompt with the trained words. Pass `creator` (exact username, e.g. from action:"search_creators") to list ONE creator\'s models — with or without a `query`; at least one of the two is required. SFW-only by default. For HuggingFace search use action:"search".\n' +
       '- action:"search_creators" — Find CivitAI CREATORS — THE action for \'who are the top creators on Civitai\' and \'find creator <name>\'. Read-only and network-only (no token or running ComfyUI required). Two modes: with NO `query` it returns the site\'s creator LEADERBOARD (civitai.com/leaderboard — rank, score, downloads, likes; pick a `board`: \'overall\' [default], \'overall_90\' [last 90 days], \'overall_nsfw\' [mature], \'new_creators\' [first model <30 days ago]); with a `query` it searches usernames (public /api/v1/creators; partial match, returns model counts, NOT ranked). Each hit\'s username feeds action:"search_civitai" {creator: <username>} directly. SCOPE CAVEAT: the /api/v1/creators index only lists creators who have published MODELS. A creator who posts only images/videos (no models) legitimately returns 0 hits here — that is a gap in this endpoint, NOT proof the creator doesn\'t exist. For a media-only creator, browse their images via the panel CivitAI browser (panel_open_civitai {creator}) or the logged-in browser session instead.\n' +
@@ -1038,9 +1054,7 @@ async function downloadAction(args: {
             content: [
               {
                 type: "text",
-                text: job.viaManager
-                  ? `Download \`${job.id}\` was cancelled. It was a remote ComfyUI-Manager dispatch, so there is no local partial to resume; the host MAY still be fetching server-side (no Manager recall API). Check list_local_models to see if it landed; re-issuing starts a NEW dispatch, not a resume.`
-                  : `Download \`${job.id}\` was cancelled. ${await exactPartialRecoveryAdvice(job)}`,
+                  text: `Download \`${job.id}\` was cancelled. ${await afterCancelAdvice(job)}`,
               },
             ],
           };
@@ -1153,33 +1167,20 @@ async function statusAction(args: {
         // listing actually contains a collision (two writers, one file).
         const idCounts = new Map<string, number>();
         for (const j of list) idCounts.set(j.id, (idCounts.get(j.id) ?? 0) + 1);
-        // #1370 — LOOK, then say. The cancelled row claimed "the partial was left on disk
-        // and can be resumed by re-issuing the download" purely from `status === "cancelled"`;
-        // nothing stat'd the file. A reporter paused a 33 GB download BECAUSE of that
-        // sentence, found no partial anywhere, and restarted from zero.
-        //
-        // Stat'd up front because the row builder below is synchronous, and only for rows
-        // that could have one: a Manager dispatch never writes a local partial and already
-        // says so.
-        //
-        // The writer persists the exact staged path after applying HF endpoint rewriting,
-        // query auth, representation headers, and cloud credentials. A legacy record has
-        // no path and is deliberately treated as unavailable; rebuilding from its original
-        // URL could inspect a different authenticated cache identity.
-        const partials = new Map<string, StagedPartialObservation>();
+        // Recovery wording is computed from the exact persisted path, proof, and
+        // positively classified route. There is no URL-based fallback here: legacy,
+        // redacted, and unknown-identity records stay conservative.
+        const recoveryAdvices = new Map<string, string>();
         await Promise.all(
           list
-            .filter((j) => j.status === "cancelled" && !j.viaManager)
+            .filter((j) => j.status === "cancelled" || (j.status === "downloading" && j.staleInflight))
             .map(async (j) => {
-              partials.set(
+              recoveryAdvices.set(
                 `${j.id}\n${j.trayId}\n${j.target ?? ""}`,
-                await observeStagedPartialAtPath(j.partialPath),
+                await afterCancelAdvice(j),
               );
             }),
         );
-        const partialFor = (j: DownloadJob): StagedPartialObservation =>
-          partials.get(`${j.id}\n${j.trayId}\n${j.target ?? ""}`) ??
-          ({ state: "unavailable", path: "" } satisfies StagedPartialObservation);
         const progressViews = new Map<string, ProgressView>();
         await Promise.all(
           list.map(async (j) => {
@@ -1188,17 +1189,6 @@ async function statusAction(args: {
               `${j.id}\n${j.trayId}\n${j.target ?? ""}`,
               await progressViewForJob(j, p),
             );
-            }),
-        );
-        const afterCancelAdvices = new Map<string, string>();
-        await Promise.all(
-          list
-            .filter((j) => j.status === "downloading" && j.staleInflight)
-            .map(async (j) => {
-              afterCancelAdvices.set(
-                `${j.id}\n${j.trayId}\n${j.target ?? ""}`,
-                await afterCancelAdvice(j),
-              );
             }),
         );
         const collidingIds = [...idCounts.entries()].filter(([, n]) => n > 1).map(([k]) => k);
@@ -1255,12 +1245,10 @@ async function statusAction(args: {
                       ? // #858: NO live transfer was aborted — the writer was already
                         // dead — so this must not claim a partial was deliberately
                         // left by a cancel (none may exist).
-                        (j.viaManager
-                          ? `\n    cancelled — the previous session's writer was confirmed GONE (its process no longer exists), so a later session closed its stale record; no live transfer was aborted. This was a remote ComfyUI-Manager dispatch: the host MAY still be fetching server-side (no Manager recall API) and there is NO local partial to resume — check list_local_models to see whether the file landed; re-issuing starts a NEW dispatch.`
-                          : `\n    cancelled — the previous session's writer was confirmed GONE (its process no longer exists), so a later session closed its stale record; no live transfer was aborted. ${describePartial(partialFor(j))}`)
+                        `\n    cancelled — the previous session's writer was confirmed GONE (its process no longer exists), so a later session closed its stale record; no live transfer was aborted. ${recoveryAdvices.get(`${j.id}\n${j.trayId}\n${j.target ?? ""}`) ?? "the exact route and partial identity were not observed; do not infer resumability."}`
                       : j.viaManager
-                        ? `\n    cancelled — this was a remote ComfyUI-Manager dispatch, so there is NO local partial to resume, and the host MAY still be fetching server-side (there's no Manager recall API). Re-issuing starts a NEW server-side dispatch (a duplicate, not a resume). Check list_local_models to see whether the file landed before deciding.`
-                        : `\n    cancelled — ${describePartial(partialFor(j))}`) +
+                        ? `\n    cancelled — ${recoveryAdvices.get(`${j.id}\n${j.trayId}\n${j.target ?? ""}`) ?? "this Manager route has no local resume state; check list_local_models before any new dispatch."}`
+                        : `\n    cancelled — ${recoveryAdvices.get(`${j.id}\n${j.trayId}\n${j.target ?? ""}`) ?? "the exact route and partial identity were not observed; do not infer resumability."}`) +
                     // A recovery-critical note from cancellation cleanup (e.g. a previous
                     // destination file preserved under a .bak path because it couldn't be
                     // restored) — surface it so the user can recover, not mask it.
@@ -1289,7 +1277,7 @@ async function statusAction(args: {
             noteKind === "proven-dead"
               ? provenDeadStatusNote({ staleForMs: j.staleForMs, viaManager: j.viaManager })
               : noteKind === "stale"
-              ? `\n    NOTE: heartbeat stale for ${Math.round((j.staleForMs ?? 0) / 1000)}s. The owning session may have reconnected, and the transfer may still be running. Do NOT re-issue download_model action:"download" while this warning remains: ${stillWritingClause(route)}. To recover, call download_model \`action:"cancel"\` with this id and tray_id — it closes the stale record once the writer is PROVEN gone (its process no longer exists) and refuses while that cannot be proven. ONCE THAT CANCEL SUCCEEDS: ${afterCancelAdvices.get(`${j.id}\n${j.trayId}\n${j.target ?? ""}`) ?? "the exact staged partial was not observed, so do not infer that any bytes are resumable before checking it."} Do not report this download as failed or missing.`
+              ? `\n    NOTE: heartbeat stale for ${Math.round((j.staleForMs ?? 0) / 1000)}s. The owning session may have reconnected, and the transfer may still be running. Do NOT re-issue download_model action:"download" while this warning remains: ${stillWritingClause(route)}. To recover, call download_model \`action:"cancel"\` with this id and tray_id — it closes the stale record once the writer is PROVEN gone (its process no longer exists) and refuses while that cannot be proven. ONCE THAT CANCEL SUCCEEDS: ${recoveryAdvices.get(`${j.id}\n${j.trayId}\n${j.target ?? ""}`) ?? "the exact route and partial identity were not observed; do not infer resumability."} Do not report this download as failed or missing.`
               : "";
           // Surface a declined resume so the agent/user knows a pre-existing
           // .partial was discarded and why — instead of it being silent (#467).
@@ -1399,8 +1387,8 @@ async function cancelAction(args: { id: string; tray_id?: string }): Promise<Cal
         }
         if (res.reclaimed) {
           // #858: the record said "downloading" but its writer is PROVEN gone — no
-          // live transfer existed to abort, so say exactly what happened and give
-          // the one remedy that now works: re-issue.
+          // live transfer existed to abort. Recovery still requires the exact
+          // persisted partial identity and route-aware evidence.
           return {
             content: [
               {
@@ -1412,9 +1400,7 @@ async function cancelAction(args: { id: string; tray_id?: string }): Promise<Cal
                     ? ` The dead session's original record file could not be deleted (a transient filesystem error), so action:"status" may keep showing its stale row for a while — it no longer blocks cancelling or re-issuing, and it expires on its own.`
                     : "") +
                   `\n\n` +
-                  (res.job?.viaManager
-                    ? `It was a remote ComfyUI-Manager dispatch, so the host MAY still be fetching server-side (there is no Manager recall API) — check list_local_models to see whether the file landed. Re-issuing starts a NEW dispatch, not a resume.`
-                    : await exactPartialRecoveryAdvice(res.job ?? {})),
+                  await afterCancelAdvice(res.job ?? {}),
               },
             ],
           };
@@ -1477,14 +1463,11 @@ async function cancelAction(args: { id: string; tray_id?: string }): Promise<Cal
               ? `Retry download_model \`action:"cancel"\`.`
               : res.reclaimDenied
                 ? `Stop it from the panel download tray instead.`
-                // #1644 — with no reclaim verdict the old remedy ("stop it from
-                // the panel download tray") was a guess: the tray cannot close a
-                // record whose writer is already dead, which is exactly the case
-                // this branch cannot rule out. Point at the path that actually
-                // resolves it: action:"status" probes the writer's pid, and when
-                // it proves the writer gone, re-issuing action:"download" adopts
-                // the record and resumes from the leftover .partial.
-                : `Check download_model \`action:"status"\` for this id — it probes the writer's process directly. If status reports the owning process is gone, the transfer is NOT running and re-issuing download_model \`action:"download"\` for the same URL adopts the record and resumes from the .partial. Only if status shows it genuinely still writing, stop it from the panel download tray.`;
+                // #1644 — with no reclaim verdict, status is the only safe next
+                // probe. A dead writer is not resume authorization: the exact
+                // persisted partial path, route, identity proof, and credentials
+                // must still be present and match before any re-issue.
+                : `Check download_model \`action:"status"\` for this id — it probes the writer's process directly. If status proves the writer gone, read its route-aware recovery note: do not re-issue unless the exact persisted partial path and matching identity proof are present and any required credential is available. Unknown or Manager routes must be checked on disk instead; if the writer is still alive, stop it from the panel download tray.`;
           return {
             content: [
               {

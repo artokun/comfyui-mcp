@@ -25,9 +25,13 @@ import {
   findResumablePartial,
   probeRemoteModelPayload,
 } from "./download-cache.js";
-import type { CloudStorageAuth } from "./storage/index.js";
+import { supportsCloudDownload, type CloudStorageAuth } from "./storage/index.js";
 import type { DownloadRoute } from "./download-proxy.js";
 import { reportDownloadProgress } from "./download-progress.js";
+import type {
+  DownloadPartialAuthMode,
+  PersistedPartialIdentity,
+} from "./download-progress.js";
 import type { ResumeReporter } from "./download-resume-diag.js";
 import { modelNotFoundMessage } from "./model-root-scope.js";
 import {
@@ -2853,8 +2857,26 @@ export interface LocalDownloadCacheIdentity {
   headers: Record<string, string>;
   storageAuth?: CloudStorageAuth;
   progressId: string;
+  partialIdentity: PersistedPartialIdentity;
   cachePath: string;
   partialPath: string;
+}
+
+function localPartialAuthMode(
+  rewrittenUrl: string,
+  auth: DownloadAuth | undefined,
+  headers: Record<string, string>,
+  storageAuth: CloudStorageAuth | undefined,
+): DownloadPartialAuthMode {
+  if (auth !== undefined) return "explicit";
+  // Configured host tokens and cloud credentials are reapplied by a restart, but
+  // their values are intentionally not persisted. The cache digest proves whether
+  // the current configuration is the same representation; it does not grant a
+  // restart permission to guess a missing credential.
+  if (Object.keys(headers).length > 0 || storageAuth !== undefined || supportsCloudDownload(rewrittenUrl)) {
+    return "configured";
+  }
+  return "none";
 }
 
 export function localDownloadCacheIdentity(
@@ -2872,6 +2894,11 @@ export function localDownloadCacheIdentity(
   );
   const storageAuth = auth?.type === "s3" ? { s3: auth } : undefined;
   const cache = downloadCacheIdentity(request.url, headers, storageAuth);
+  const partialIdentity: PersistedPartialIdentity = {
+    version: 1,
+    cache_key: cache.cacheKey,
+    auth_mode: localPartialAuthMode(rewrittenUrl, auth, headers, storageAuth),
+  };
   return {
     wasHfUrl,
     rewrittenUrl,
@@ -2879,6 +2906,7 @@ export function localDownloadCacheIdentity(
     headers,
     storageAuth,
     progressId: createHash("sha256").update(request.url).digest("hex").slice(0, 16),
+    partialIdentity,
     cachePath: cache.cachePath,
     partialPath: cache.partialPath,
   };
