@@ -229,13 +229,6 @@ function stillWritingClause(route: DownloadRoute): string {
 }
 
 /**
- * What to do once the writer is proven gone. Shared by the stale-record note and
- * the cancellation reply because they gave CONTRADICTORY advice for the same job
- * — the cancel reply asserted a resumable partial and told the reader to
- * re-issue, while the stale note said doing that corrupts the file (codex
- * review). One function, so they cannot drift again.
- */
-/**
  * What is ACTUALLY on disk for a cancelled download (#1370).
  *
  * The row this replaces said "the partial was left on disk and can be resumed by
@@ -384,12 +377,32 @@ async function progressViewForJob(
   );
 }
 
-function afterCancelAdvice(route: DownloadRoute): string {
+/**
+ * Recovery advice after a local writer is gone. The path is the exact identity
+ * published by the writer, so a positive observation is the only evidence that
+ * permits resume wording; zero-byte, absent, and unreadable observations stay
+ * conservative (#2358).
+ */
+async function exactPartialRecoveryAdvice(
+  job: Pick<DownloadJob, "partialPath">,
+): Promise<string> {
+  const partial = await observeStagedPartialAtPath(job.partialPath);
+  return `To get the file, re-issue the same download_model \`action:"download"\` request: ${describePartial(partial)}`;
+}
+
+/**
+ * What to do once the writer is proven gone. Shared by the stale-record note and
+ * cancellation reply so route and exact-partial observations cannot drift.
+ */
+async function afterCancelAdvice(
+  job: Pick<DownloadJob, "viaManager" | "partialPath">,
+): Promise<string> {
+  const route = downloadRoute(job);
   switch (route) {
     case "manager":
       return `Do NOT re-issue: this is a ComfyUI-Manager dispatch, so there is no local .partial to resume and the HOST may still be fetching it server-side (a restart here does not touch that, and Manager has no recall API). A re-issue is a duplicate dispatch to the same destination, not a resume, and it CORRUPTS the file. Check list_local_models — or the destination on disk — to see whether it landed before deciding anything.`;
     case "local":
-      return `Re-issuing action:"download" resumes any .partial the dead writer left, or restarts cleanly.`;
+      return exactPartialRecoveryAdvice(job);
     default:
       return `This record predates the route being recorded, so whether it was a local stream or a ComfyUI-Manager dispatch is NOT known — and the two need opposite handling. Treat it as possibly Manager: check list_local_models, or the destination on disk, BEFORE re-issuing. If it was local a re-issue would simply resume the .partial, but if it was a Manager dispatch a re-issue is a duplicate that CORRUPTS the file, so the check comes first.`;
   }
@@ -1027,7 +1040,7 @@ async function downloadAction(args: {
                 type: "text",
                 text: job.viaManager
                   ? `Download \`${job.id}\` was cancelled. It was a remote ComfyUI-Manager dispatch, so there is no local partial to resume; the host MAY still be fetching server-side (no Manager recall API). Check list_local_models to see if it landed; re-issuing starts a NEW dispatch, not a resume.`
-                  : `Download \`${job.id}\` was cancelled. A resumable partial may remain on disk — re-issue the same download to resume it (it picks up where it left off).`,
+                  : `Download \`${job.id}\` was cancelled. ${await exactPartialRecoveryAdvice(job)}`,
               },
             ],
           };
@@ -1175,7 +1188,18 @@ async function statusAction(args: {
               `${j.id}\n${j.trayId}\n${j.target ?? ""}`,
               await progressViewForJob(j, p),
             );
-          }),
+            }),
+        );
+        const afterCancelAdvices = new Map<string, string>();
+        await Promise.all(
+          list
+            .filter((j) => j.status === "downloading" && j.staleInflight)
+            .map(async (j) => {
+              afterCancelAdvices.set(
+                `${j.id}\n${j.trayId}\n${j.target ?? ""}`,
+                await afterCancelAdvice(j),
+              );
+            }),
         );
         const collidingIds = [...idCounts.entries()].filter(([, n]) => n > 1).map(([k]) => k);
         const lines = list.map((j) => {
@@ -1265,7 +1289,7 @@ async function statusAction(args: {
             noteKind === "proven-dead"
               ? provenDeadStatusNote({ staleForMs: j.staleForMs, viaManager: j.viaManager })
               : noteKind === "stale"
-              ? `\n    NOTE: heartbeat stale for ${Math.round((j.staleForMs ?? 0) / 1000)}s. The owning session may have reconnected, and the transfer may still be running. Do NOT re-issue download_model action:"download" while this warning remains: ${stillWritingClause(route)}. To recover, call download_model \`action:"cancel"\` with this id and tray_id — it closes the stale record once the writer is PROVEN gone (its process no longer exists) and refuses while that cannot be proven. ONCE THAT CANCEL SUCCEEDS: ${afterCancelAdvice(route)} Do not report this download as failed or missing.`
+              ? `\n    NOTE: heartbeat stale for ${Math.round((j.staleForMs ?? 0) / 1000)}s. The owning session may have reconnected, and the transfer may still be running. Do NOT re-issue download_model action:"download" while this warning remains: ${stillWritingClause(route)}. To recover, call download_model \`action:"cancel"\` with this id and tray_id — it closes the stale record once the writer is PROVEN gone (its process no longer exists) and refuses while that cannot be proven. ONCE THAT CANCEL SUCCEEDS: ${afterCancelAdvices.get(`${j.id}\n${j.trayId}\n${j.target ?? ""}`) ?? "the exact staged partial was not observed, so do not infer that any bytes are resumable before checking it."} Do not report this download as failed or missing.`
               : "";
           // Surface a declined resume so the agent/user knows a pre-existing
           // .partial was discarded and why — instead of it being silent (#467).
@@ -1368,7 +1392,7 @@ async function cancelAction(args: { id: string; tray_id?: string }): Promise<Cal
                   `Cancellation requested for \`${args.id}\` — the transfer is being aborted. ` +
                   `If it had ALREADY completed at the moment you cancelled, the finished file is present and the download reports as done — that's expected (cancel lost the race), not a bug. ` +
                   `Check download_model \`action:"status"\` with this id to see the final state. ` +
-                  `${afterCancelAdvice(downloadRoute(res.job ?? {}))}`,
+                  `${await afterCancelAdvice(res.job ?? {})}`,
               },
             ],
           };
@@ -1390,7 +1414,7 @@ async function cancelAction(args: { id: string; tray_id?: string }): Promise<Cal
                   `\n\n` +
                   (res.job?.viaManager
                     ? `It was a remote ComfyUI-Manager dispatch, so the host MAY still be fetching server-side (there is no Manager recall API) — check list_local_models to see whether the file landed. Re-issuing starts a NEW dispatch, not a resume.`
-                    : `To get the file, re-issue the same download_model \`action:"download"\` request: it resumes from any .partial the dead session left on disk, or restarts cleanly if there is none.`),
+                    : await exactPartialRecoveryAdvice(res.job ?? {})),
               },
             ],
           };

@@ -53,7 +53,7 @@ vi.mock("../../services/model-resolver.js", async () => {
 import { registerModelManagementTools } from "../../tools/model-management.js";
 import { setProgressDir } from "../../services/download-progress.js";
 import * as progressModule from "../../services/download-progress.js";
-import { resetDownloadJobs, startDownloadJob } from "../../services/download-jobs.js";
+import { listDownloadJobs, resetDownloadJobs, startDownloadJob } from "../../services/download-jobs.js";
 import { downloadCacheIdentity } from "../../services/download-cache.js";
 import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -538,6 +538,44 @@ describe('download_model action:"status"', () => {
     }
   });
 
+  it("action:cancel during the grace window does not promise resume from a zero-byte partial (#2358)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "model-management-2358-cancel-empty-"));
+    const partial = join(dir, "cancel-empty.partial");
+    setProgressDir(dir);
+    resetDownloadJobs();
+    downloadModelMock.mockImplementationOnce(async (...args: unknown[]) => {
+      (args[10] as (path: string) => void)(partial);
+      const signal = args[6] as AbortSignal;
+      return await new Promise<string>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(new DOMException("cancelled", "AbortError")), {
+          once: true,
+        });
+      });
+    });
+    try {
+      await writeFile(partial, Buffer.alloc(0));
+      const { downloadModel, cancelDownload } = makeServer();
+      const downloading = downloadModel({
+        url: "https://example.com/cancel-empty.safetensors",
+        target_subfolder: "checkpoints",
+      });
+      await vi.waitFor(() => expect(downloadModelMock).toHaveBeenCalled());
+      const [job] = listDownloadJobs();
+      expect(job).toBeTruthy();
+
+      const cancelled = await cancelDownload({ id: job.id, tray_id: job.trayId });
+      expect(cancelled.content[0].text).toContain("being aborted");
+      const text = (await downloading).content[0].text;
+      expect(text).toContain("no resumable partial was found");
+      expect(text).toContain("starts from the beginning");
+      expect(text).not.toContain("resumes from it");
+    } finally {
+      resetDownloadJobs();
+      setProgressDir("");
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("status selects the current target when local and pod records share id and tray", async () => {
     const dir = await mkdtemp(join(tmpdir(), "model-management-target-select-"));
     const savedTarget = process.env.COMFYUI_URL;
@@ -873,6 +911,31 @@ describe('download_model action:"status"', () => {
         expect(status).toContain("cancelled");
         expect(status).toContain("confirmed GONE");
         expect(status).not.toContain("the partial was left on disk");
+      } finally {
+        setProgressDir("");
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("action:cancel reclaim does not promise resume from a zero-byte partial (#2358)", async () => {
+      const dir = await mkdtemp(join(tmpdir(), "model-management-2358-reclaim-empty-"));
+      const partial = join(dir, "reclaim-empty.partial");
+      setProgressDir(dir);
+      try {
+        const id = "stale-empty-partial-2358";
+        await writeFile(partial, Buffer.alloc(0));
+        await seedStaleRecord(dir, id, {
+          pid: deadPid(),
+          via_manager: false,
+          partialPath: partial,
+        });
+
+        const { cancelDownload } = makeServer();
+        const text = (await cancelDownload({ id, tray_id: "staletray8580000" })).content[0].text;
+        expect(text).toContain("confirmed GONE");
+        expect(text).toContain("no resumable partial was found");
+        expect(text).toContain("starts from the beginning");
+        expect(text).not.toContain("resumes from it");
       } finally {
         setProgressDir("");
         await rm(dir, { recursive: true, force: true });

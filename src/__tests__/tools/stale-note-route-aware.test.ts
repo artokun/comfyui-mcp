@@ -59,6 +59,8 @@ async function writeStaleRecord(
       : viaManager
         ? "managerstale0001"
         : "localstalexxx001";
+  const partialPath = pathJoin(dir, `${id}.partial`);
+  if (viaManager === false) await writeFile(partialPath, "positive partial");
   const body = {
     id,
     trayId: `tray-${id}`,
@@ -68,6 +70,7 @@ async function writeStaleRecord(
     status: "downloading",
     started_at: Date.now() - 600_000,
     owner: "a-session-that-went-away",
+    ...(viaManager === false ? { partialPath } : {}),
     // "omitted" writes NO via_manager key at all — a record from before the
     // field existed, which is what a real legacy record looks like on disk.
     ...(viaManager === "omitted" ? {} : { via_manager: viaManager }),
@@ -127,7 +130,8 @@ describe("the stale-heartbeat note is ROUTE-AWARE (#1148)", () => {
     const text = await statusText();
 
     expect(text).toMatch(/heartbeat stale/);
-    expect(text).toMatch(/resumes any \.partial/);
+    expect(text).toContain("re-issue the same download_model");
+    expect(text).toContain("resumes from it");
     // ...and the local reason names the local writer, which is the true one here.
     expect(text).toMatch(/original owner may still be writing/);
     expect(text).not.toMatch(/ComfyUI host may still be fetching/);
